@@ -24,19 +24,23 @@ const originalRmSync = fs.rmSync;
 const originalWriteFileSync = fs.writeFileSync;
 const originalCreateConnection = net.createConnection;
 
-const createSocket = (isRunning) => ({
-  setTimeout: vi.fn(),
-  destroy: vi.fn(),
-  on(event, handler) {
-    if (isRunning && event === "connect") {
-      setImmediate(handler);
-    }
-    if (!isRunning && event === "error") {
-      setImmediate(handler);
-    }
-    return this;
-  },
-});
+const createSocket = (isRunning) => {
+  const running =
+    typeof isRunning === "function" ? isRunning() : isRunning;
+  return {
+    setTimeout: vi.fn(),
+    destroy: vi.fn(),
+    on(event, handler) {
+      if (running && event === "connect") {
+        setImmediate(handler);
+      }
+      if (!running && event === "error") {
+        setImmediate(handler);
+      }
+      return this;
+    },
+  };
+};
 
 const createChild = () => ({
   pid: 1234,
@@ -62,13 +66,15 @@ describe("server/gateway restart behavior", () => {
     delete require.cache[modulePath];
   });
 
-  it("uses force restart when a managed child exists", async () => {
-    const spawnMock = vi.fn(() => createChild());
+  it("uses in-process restart when the gateway port is listening", async () => {
+    const managedChild = createChild();
+    const spawnMock = vi.fn().mockReturnValueOnce(managedChild);
     const execSyncMock = vi.fn(() => "");
     childProcess.spawn = spawnMock;
     childProcess.execSync = execSyncMock;
     fs.existsSync = vi.fn(() => true);
-    net.createConnection = vi.fn(() => createSocket(false));
+    let gatewayPortOpen = false;
+    net.createConnection = vi.fn(() => createSocket(() => gatewayPortOpen));
     delete require.cache[modulePath];
     const gateway = require(modulePath);
     fs.readFileSync = vi.fn(() =>
@@ -86,19 +92,72 @@ describe("server/gateway restart behavior", () => {
     await gateway.startGateway();
     expect(spawnMock).toHaveBeenCalledTimes(1);
 
+    gatewayPortOpen = true;
     const reloadEnv = vi.fn();
-    gateway.restartGateway(reloadEnv);
+    await gateway.restartGateway(reloadEnv);
 
     expect(reloadEnv).toHaveBeenCalledTimes(1);
-    expect(execSyncMock).toHaveBeenCalledTimes(1);
-    expect(execSyncMock).toHaveBeenCalledWith("openclaw gateway --force", {
+    expect(spawnMock).toHaveBeenCalledTimes(1);
+    expect(execSyncMock).toHaveBeenCalledWith("openclaw gateway restart", {
       env: expect.any(Object),
-      timeout: 15000,
+      timeout: 90_000,
       encoding: "utf8",
     });
-    expect(spawnMock).toHaveBeenCalledTimes(1);
-    const firstChild = spawnMock.mock.results[0].value;
-    expect(firstChild.kill).not.toHaveBeenCalled();
+    expect(managedChild.kill).not.toHaveBeenCalled();
+  });
+
+  it("falls back to force cold start when in-process restart fails", async () => {
+    const managedChild = createChild();
+    const restartSupervisor = createChild();
+    const spawnMock = vi
+      .fn()
+      .mockReturnValueOnce(managedChild)
+      .mockReturnValueOnce(restartSupervisor);
+    const execSyncMock = vi.fn((cmd) => {
+      if (String(cmd) === "openclaw gateway restart") {
+        throw new Error("restart failed");
+      }
+      return "";
+    });
+    childProcess.spawn = spawnMock;
+    childProcess.execSync = execSyncMock;
+    fs.existsSync = vi.fn(() => true);
+    let gatewayPortOpen = false;
+    net.createConnection = vi.fn(() => createSocket(() => gatewayPortOpen));
+    delete require.cache[modulePath];
+    const gateway = require(modulePath);
+    fs.readFileSync = vi.fn(() =>
+      JSON.stringify({
+        agents: {
+          defaults: {
+            model: {
+              primary: "openai/gpt-5.1-codex",
+            },
+          },
+        },
+      }),
+    );
+
+    await gateway.startGateway();
+    gatewayPortOpen = true;
+
+    const reloadEnv = vi.fn();
+    const restartPromise = gateway.restartGateway(reloadEnv);
+    await restartPromise;
+
+    expect(reloadEnv).toHaveBeenCalledTimes(1);
+    expect(execSyncMock).toHaveBeenCalledWith(
+      "openclaw gateway restart",
+      expect.objectContaining({ encoding: "utf8" }),
+    );
+    expect(spawnMock).toHaveBeenCalledTimes(2);
+    expect(spawnMock).toHaveBeenNthCalledWith(
+      2,
+      "openclaw",
+      ["gateway", "--force"],
+      expect.objectContaining({ env: expect.any(Object) }),
+    );
+    expect(managedChild.kill).toHaveBeenCalledWith("SIGTERM");
   });
 
   it("exports the durable OpenClaw state dir in gateway env", () => {
@@ -136,13 +195,15 @@ describe("server/gateway restart behavior", () => {
     }
   });
 
-  it("uses force restart when no managed child exists", () => {
-    const spawnMock = vi.fn(() => createChild());
+  it("uses force cold start when the gateway port is not listening", async () => {
+    const restartSupervisor = createChild();
+    const spawnMock = vi.fn(() => restartSupervisor);
     const execSyncMock = vi.fn(() => "");
     childProcess.spawn = spawnMock;
     childProcess.execSync = execSyncMock;
     fs.existsSync = vi.fn(() => true);
-    net.createConnection = vi.fn(() => createSocket(false));
+    let gatewayPortOpen = false;
+    net.createConnection = vi.fn(() => createSocket(() => gatewayPortOpen));
     delete require.cache[modulePath];
     const gateway = require(modulePath);
     fs.readFileSync = vi.fn(() =>
@@ -158,16 +219,25 @@ describe("server/gateway restart behavior", () => {
     );
 
     const reloadEnv = vi.fn();
-    gateway.restartGateway(reloadEnv);
+    const restartPromise = gateway.restartGateway(reloadEnv);
+    gatewayPortOpen = true;
+    await restartPromise;
 
     expect(reloadEnv).toHaveBeenCalledTimes(1);
-    expect(execSyncMock).toHaveBeenCalledTimes(1);
-    expect(execSyncMock).toHaveBeenCalledWith("openclaw gateway --force", {
-      env: expect.any(Object),
-      timeout: 15000,
-      encoding: "utf8",
-    });
-    expect(spawnMock).not.toHaveBeenCalled();
+    expect(execSyncMock).not.toHaveBeenCalledWith(
+      "openclaw gateway restart",
+      expect.anything(),
+    );
+    expect(spawnMock).toHaveBeenCalledTimes(1);
+    expect(spawnMock).toHaveBeenCalledWith(
+      "openclaw",
+      ["gateway", "--force"],
+      expect.objectContaining({ env: expect.any(Object) }),
+    );
+    expect(execSyncMock).not.toHaveBeenCalledWith(
+      "openclaw gateway --force",
+      expect.anything(),
+    );
   });
 
   it("retries channel plugin preflight after cleaning stale install stages", () => {
@@ -240,7 +310,8 @@ describe("server/gateway restart behavior", () => {
     childProcess.spawn = spawnMock;
     childProcess.execSync = execSyncMock;
     fs.existsSync = vi.fn(() => true);
-    net.createConnection = vi.fn(() => createSocket(false));
+    let gatewayPortOpen = false;
+    net.createConnection = vi.fn(() => createSocket(() => gatewayPortOpen));
     delete require.cache[modulePath];
     const gateway = require(modulePath);
     gateway.setGatewayExitHandler(exitHandler);
@@ -257,7 +328,9 @@ describe("server/gateway restart behavior", () => {
     );
 
     await gateway.startGateway();
-    gateway.restartGateway(vi.fn());
+    const restartPromise = gateway.restartGateway(vi.fn());
+    gatewayPortOpen = true;
+    await restartPromise;
 
     const exitRegistration = child.on.mock.calls.find((call) => call[0] === "exit");
     expect(exitRegistration).toBeTruthy();
