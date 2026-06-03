@@ -12,6 +12,23 @@ if [[ -f "$REPO/.env" ]]; then
   set +a
 fi
 
+if [[ -f "$REPO/cron/system-sync.json" ]]; then
+  if node - "$REPO/cron/system-sync.json" <<'NODE'
+const fs = require('fs');
+const file = process.argv[2];
+try {
+  const config = JSON.parse(fs.readFileSync(file, 'utf8'));
+  process.exit(config && config.enabled === false ? 0 : 1);
+} catch {
+  process.exit(1);
+}
+NODE
+  then
+    echo "hourly-git-sync: disabled by cron/system-sync.json"
+    exit 0
+  fi
+fi
+
 # Drop cron scheduler runtime-only churn when it is metadata/timestamp-only.
 maybe_restore_if_runtime_only() {
   local file="$1"

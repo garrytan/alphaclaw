@@ -470,6 +470,41 @@ describe("server/routes/onboarding", () => {
     });
   });
 
+  it("keeps cron config but skips system cron writes when disabled by runtime env", async () => {
+    const previousValue = process.env.ALPHACLAW_SKIP_SYSTEM_CRON_INSTALL;
+    process.env.ALPHACLAW_SKIP_SYSTEM_CRON_INSTALL = "true";
+    try {
+      const deps = createBaseDeps();
+      deps.fs.readFileSync.mockImplementation((p) => {
+        if (p === "/tmp/openclaw/openclaw.json") return "{}";
+        if (p === path.join(kSetupDir, "core-prompts", "TOOLS.md")) return "Setup: {{SETUP_UI_URL}}";
+        if (p === path.join(kSetupDir, "hourly-git-sync.sh")) return "echo Auto-commit hourly sync";
+        return "{}";
+      });
+      const app = createApp(deps);
+      mockGithubVerifyAndCreate();
+
+      const res = await request(app).post("/api/onboard").send(makeValidBody());
+
+      expect(res.status).toBe(200);
+      expect(deps.fs.writeFileSync).toHaveBeenCalledWith(
+        "/tmp/openclaw/cron/system-sync.json",
+        expect.stringContaining('"enabled": true'),
+      );
+      expect(deps.fs.writeFileSync).not.toHaveBeenCalledWith(
+        "/etc/cron.d/openclaw-hourly-sync",
+        expect.anything(),
+        expect.anything(),
+      );
+    } finally {
+      if (previousValue === undefined) {
+        delete process.env.ALPHACLAW_SKIP_SYSTEM_CRON_INSTALL;
+      } else {
+        process.env.ALPHACLAW_SKIP_SYSTEM_CRON_INSTALL = previousValue;
+      }
+    }
+  });
+
   it("rejects onboarding when workspace repo already exists", async () => {
     const deps = createBaseDeps();
     deps.fs.readFileSync.mockImplementation((p) => {

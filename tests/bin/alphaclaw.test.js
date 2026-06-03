@@ -171,6 +171,7 @@ Module._load = function patchedLoad(request, parent, isMain) {
         OPENCLAW_HOME: process.env.OPENCLAW_HOME,
         OPENCLAW_CONFIG_PATH: process.env.OPENCLAW_CONFIG_PATH,
         OPENCLAW_STATE_DIR: process.env.OPENCLAW_STATE_DIR,
+        PATH: process.env.PATH,
         XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME,
       }),
     );
@@ -188,6 +189,7 @@ Module._load = function patchedLoad(request, parent, isMain) {
         ...process.env,
         SETUP_PASSWORD: "test-password",
         ALPHACLAW_ROOT_DIR: tmpDir,
+        ALPHACLAW_GIT_SHIM_PATH: path.join(tmpDir, "bin", "git"),
         ALPHACLAW_TEST_HOME: tmpHome,
         ALPHACLAW_CAPTURE_ENV_PATH: capturePath,
         NODE_OPTIONS: `--require=${preloadPath}`,
@@ -195,13 +197,14 @@ Module._load = function patchedLoad(request, parent, isMain) {
     });
 
     const reportedEnv = JSON.parse(fs.readFileSync(capturePath, "utf8"));
-    expect(reportedEnv).toEqual({
+    expect(reportedEnv).toEqual(expect.objectContaining({
       HOME: tmpDir,
       OPENCLAW_HOME: tmpDir,
       OPENCLAW_CONFIG_PATH: path.join(tmpDir, ".openclaw", "openclaw.json"),
       OPENCLAW_STATE_DIR: path.join(tmpDir, ".openclaw"),
       XDG_CONFIG_HOME: path.join(tmpDir, ".openclaw"),
-    });
+    }));
+    expect(reportedEnv.PATH.split(path.delimiter)[0]).toBe(path.join(tmpDir, "bin"));
 
   });
 

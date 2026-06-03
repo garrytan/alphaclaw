@@ -640,6 +640,44 @@ describe("server/routes/system", () => {
     expect(res.body.ok).toBe(true);
   });
 
+  it("updates sync cron config without touching system cron when disabled by runtime env", async () => {
+    const previousValue = process.env.ALPHACLAW_SKIP_SYSTEM_CRON_INSTALL;
+    process.env.ALPHACLAW_SKIP_SYSTEM_CRON_INSTALL = "true";
+    try {
+      const deps = createSystemDeps();
+      deps.fs.readFileSync.mockReturnValueOnce(
+        JSON.stringify({ enabled: true, schedule: "0 * * * *" }),
+      );
+      const app = createApp(deps);
+
+      const res = await request(app).put("/api/sync-cron").send({
+        enabled: true,
+        schedule: "*/15 * * * *",
+      });
+
+      expect(res.status).toBe(200);
+      expect(deps.fs.writeFileSync).toHaveBeenCalledWith(
+        "/tmp/openclaw/cron/system-sync.json",
+        expect.stringContaining('"schedule": "*/15 * * * *"'),
+      );
+      expect(deps.fs.writeFileSync).not.toHaveBeenCalledWith(
+        "/etc/cron.d/openclaw-hourly-sync",
+        expect.anything(),
+        expect.anything(),
+      );
+      expect(deps.fs.rmSync).not.toHaveBeenCalledWith(
+        "/etc/cron.d/openclaw-hourly-sync",
+        expect.anything(),
+      );
+    } finally {
+      if (previousValue === undefined) {
+        delete process.env.ALPHACLAW_SKIP_SYSTEM_CRON_INSTALL;
+      } else {
+        process.env.ALPHACLAW_SKIP_SYSTEM_CRON_INSTALL = previousValue;
+      }
+    }
+  });
+
   it("returns AlphaClaw config on GET /api/alphaclaw/config", async () => {
     const deps = createSystemDeps();
     deps.fs.readFileSync.mockImplementation((targetPath) => {

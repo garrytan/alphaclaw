@@ -45,7 +45,7 @@ const createBehaviorHarness = ({ repoRoot }) => {
   const shimContent = shimTemplate
     .replace('REAL_GIT_HINT="@@REAL_GIT@@"', `REAL_GIT_HINT="${realGitPath}"`)
     .replace('OPENCLAW_REPO_ROOT="@@OPENCLAW_REPO_ROOT@@"', `OPENCLAW_REPO_ROOT="${repoRoot}"`)
-    .replace('ASKPASS_PATH="/tmp/alphaclaw-git-askpass.sh"', `ASKPASS_PATH="${askPassPath}"`);
+    .replace('ASKPASS_PATH="@@ASKPASS_PATH@@"', `ASKPASS_PATH="${askPassPath}"`);
   fs.writeFileSync(shimPath, shimContent, { mode: 0o755 });
 
   return { tempRoot, logPath, shimPath };
@@ -56,6 +56,7 @@ describe("server git shim scripts", () => {
     const content = fs.readFileSync(kGitShimPath, "utf8");
     expect(content).toContain('REAL_GIT_HINT="@@REAL_GIT@@"');
     expect(content).toContain('OPENCLAW_REPO_ROOT="@@OPENCLAW_REPO_ROOT@@"');
+    expect(content).toContain('ASKPASS_PATH="@@ASKPASS_PATH@@"');
   });
 
   it("passes auth through for git -C repo push commands", () => {

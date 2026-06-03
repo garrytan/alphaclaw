@@ -4,7 +4,7 @@
 
 REAL_GIT_HINT="@@REAL_GIT@@"
 OPENCLAW_REPO_ROOT="@@OPENCLAW_REPO_ROOT@@"
-ASKPASS_PATH="/tmp/alphaclaw-git-askpass.sh"
+ASKPASS_PATH="@@ASKPASS_PATH@@"
 
 same_path() {
   local left_path right_path
