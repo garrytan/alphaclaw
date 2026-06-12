@@ -28,7 +28,8 @@
     "test:watch": "vitest",
     "test:watchdog": "vitest run tests/server/watchdog.test.js tests/server/watchdog-db.test.js tests/server/routes-watchdog.test.js",
     "test:coverage": "vitest run --coverage",
-    "prepack": "npm run build:ui"
+    "prepack": "npm run build:ui",
+    "prepare": "npm run build:ui"
   },
   "dependencies": {
     "express": "^4.21.0",
