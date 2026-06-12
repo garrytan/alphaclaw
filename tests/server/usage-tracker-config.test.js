@@ -5,6 +5,7 @@ const path = require("path");
 const {
   ensureUsageTrackerPluginConfig,
   ensureUsageTrackerPluginEntry,
+  pruneStaleUsageTrackerPaths,
   kUsageTrackerPluginPath,
 } = require("../../lib/server/usage-tracker-config");
 
@@ -96,5 +97,59 @@ describe("server/usage-tracker-config", () => {
     expect(next.plugins.entries["usage-tracker"].hooks).toEqual({
       allowConversationAccess: true,
     });
+  });
+
+  it("prunes a usage-tracker path left by a previous install location", () => {
+    const cfg = {
+      plugins: {
+        allow: [],
+        load: {
+          paths: [
+            "/app/node_modules/@chrysb/alphaclaw/lib/plugin/usage-tracker",
+            kUsageTrackerPluginPath,
+            "/app/node_modules/some-other-plugin",
+          ],
+        },
+        entries: {},
+      },
+    };
+
+    const changed = pruneStaleUsageTrackerPaths(cfg);
+
+    expect(changed).toBe(true);
+    expect(cfg.plugins.load.paths).toEqual([
+      kUsageTrackerPluginPath,
+      "/app/node_modules/some-other-plugin",
+    ]);
+  });
+
+  it("migrates a stale @chrysb usage-tracker path to the canonical path on boot", () => {
+    const openclawDir = createTempOpenclawDir();
+    const configPath = path.join(openclawDir, "openclaw.json");
+    fs.writeFileSync(
+      configPath,
+      JSON.stringify(
+        {
+          plugins: {
+            allow: ["usage-tracker"],
+            load: {
+              paths: [
+                "/app/node_modules/@chrysb/alphaclaw/lib/plugin/usage-tracker",
+              ],
+            },
+            entries: { "usage-tracker": { enabled: true } },
+          },
+        },
+        null,
+        2,
+      ),
+      "utf8",
+    );
+
+    const changed = ensureUsageTrackerPluginConfig({ fsModule: fs, openclawDir });
+
+    expect(changed).toBe(true);
+    const next = JSON.parse(fs.readFileSync(configPath, "utf8"));
+    expect(next.plugins.load.paths).toEqual([kUsageTrackerPluginPath]);
   });
 });
