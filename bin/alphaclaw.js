@@ -771,6 +771,22 @@ if (fs.existsSync(configPath)) {
       console.log("[alphaclaw] Discord added");
       changed = true;
     }
+    // Drop usage-tracker plugin paths left by a previous install location (e.g. a
+    // prior @chrysb/alphaclaw npm install at /app/node_modules/@chrysb/alphaclaw/...
+    // after switching to a git dependency at /app/node_modules/alphaclaw/...). The
+    // dead path makes OpenClaw reject the whole config. This block runs on every
+    // boot whenever a config exists — onboarded or not — so it is the migration's
+    // load-bearing prune; the onboarded reconcile prune is a backstop.
+    const usageTrackerPathPattern = /[\\/]plugin[\\/]usage-tracker[\\/]?$/;
+    const prunedPaths = cfg.plugins.load.paths.filter(
+      (entry) =>
+        entry === kUsageTrackerPluginPath ||
+        !usageTrackerPathPattern.test(String(entry || "")),
+    );
+    if (prunedPaths.length !== cfg.plugins.load.paths.length) {
+      cfg.plugins.load.paths = prunedPaths;
+      changed = true;
+    }
     if (!cfg.plugins.load.paths.includes(kUsageTrackerPluginPath)) {
       cfg.plugins.load.paths.push(kUsageTrackerPluginPath);
       changed = true;
