@@ -97,6 +97,58 @@ describe("server/alphaclaw-version", () => {
     );
   });
 
+  it("returns git-source instructions and skips the npm registry for git installs", async () => {
+    const fetchMock = vi.fn();
+    const gitPkg = JSON.stringify({
+      dependencies: {
+        alphaclaw: "git+https://github.com/garrytan/alphaclaw.git#main",
+      },
+    });
+    const { service } = createService({
+      env: {},
+      fetchMock,
+      fsImpl: {
+        ...fs,
+        // /.dockerenv absent (so we reach the self-hosted fallback) but the
+        // consumer package.json is found by resolveSelfDependency.
+        existsSync: vi.fn((p) => String(p).endsWith("package.json")),
+        readFileSync: vi.fn(() => gitPkg),
+      },
+    });
+
+    const status = await service.getVersionStatus(false);
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(status.hasUpdate).toBe(false);
+    expect(status.updateStrategy).toEqual(
+      expect.objectContaining({ action: "instructions", provider: "git" }),
+    );
+  });
+
+  it("refuses an in-place update for git installs", async () => {
+    const gitPkg = JSON.stringify({
+      dependencies: {
+        alphaclaw: "git+https://github.com/garrytan/alphaclaw.git#main",
+      },
+    });
+    const execMock = vi.fn();
+    const { service } = createService({
+      env: {},
+      execMock,
+      fsImpl: {
+        ...fs,
+        existsSync: vi.fn((p) => String(p).endsWith("package.json")),
+        readFileSync: vi.fn(() => gitPkg),
+      },
+    });
+
+    const result = await service.updateAlphaclaw();
+
+    expect(result.status).toBe(409);
+    expect(result.body.ok).toBe(false);
+    expect(execMock).not.toHaveBeenCalled();
+  });
+
   it("returns template-managed status for railway deployments", async () => {
     const fetchMock = vi.fn(async (url) => {
       expect(url).toContain(

@@ -20,6 +20,7 @@ const {
   restoreMissingOpenclawConfigFromRemote,
 } = require("../lib/cli/openclaw-config-restore");
 const { buildSecretReplacements } = require("../lib/server/helpers");
+const { resolveSelfDependency } = require("../lib/server/self-dependency");
 const {
   migrateManagedInternalFiles,
 } = require("../lib/server/internal-files-migration");
@@ -170,29 +171,34 @@ console.log(`[alphaclaw] Root directory: ${rootDir}`);
 // from the fresh container using the persistent volume marker.
 const pendingUpdateMarker = path.join(rootDir, ".alphaclaw-update-pending");
 if (fs.existsSync(pendingUpdateMarker)) {
-  console.log(
-    "[alphaclaw] Pending update detected, installing @chrysb/alphaclaw@latest...",
-  );
-  const alphaPkgRoot = path.resolve(__dirname, "..");
-  const nmIndex = alphaPkgRoot.lastIndexOf(
-    `${path.sep}node_modules${path.sep}`,
-  );
-  const installDir =
-    nmIndex >= 0 ? alphaPkgRoot.slice(0, nmIndex) : alphaPkgRoot;
-  try {
-    execSync(
-      "npm install @chrysb/alphaclaw@latest --omit=dev --prefer-online",
-      {
-        cwd: installDir,
-        stdio: "inherit",
-        timeout: 180000,
-      },
+  const selfDep = resolveSelfDependency({ fsImpl: fs });
+  if (selfDep.isGit) {
+    // Git-based installs update by redeploying (which reinstalls from the pinned
+    // ref), not by `npm install <pkg>@latest`. Clear the marker and move on.
+    console.log(
+      "[alphaclaw] Pending update marker found, but this install is git-based; updates apply on redeploy. Skipping npm install.",
     );
     fs.unlinkSync(pendingUpdateMarker);
-    console.log("[alphaclaw] Update applied successfully");
-  } catch (e) {
-    console.log(`[alphaclaw] Update install failed: ${e.message}`);
-    fs.unlinkSync(pendingUpdateMarker);
+  } else {
+    const selfUpdatePackageName = selfDep.key || "alphaclaw";
+    console.log(
+      `[alphaclaw] Pending update detected, installing ${selfUpdatePackageName}@latest...`,
+    );
+    try {
+      execSync(
+        `npm install ${selfUpdatePackageName}@latest --omit=dev --prefer-online`,
+        {
+          cwd: selfDep.installDir,
+          stdio: "inherit",
+          timeout: 180000,
+        },
+      );
+      fs.unlinkSync(pendingUpdateMarker);
+      console.log("[alphaclaw] Update applied successfully");
+    } catch (e) {
+      console.log(`[alphaclaw] Update install failed: ${e.message}`);
+      fs.unlinkSync(pendingUpdateMarker);
+    }
   }
 }
 
