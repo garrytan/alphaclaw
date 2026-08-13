@@ -17,11 +17,13 @@ const kAlphaclawConfigPath = path.join(OPENCLAW_DIR, "alphaclaw.json");
 
 const modulePath = require.resolve("../../lib/server/gateway");
 const originalSpawn = childProcess.spawn;
+const originalExecFileSync = childProcess.execFileSync;
 const originalExecSync = childProcess.execSync;
 const originalExistsSync = fs.existsSync;
 const originalMkdirSync = fs.mkdirSync;
 const originalReaddirSync = fs.readdirSync;
 const originalReadFileSync = fs.readFileSync;
+const originalStatSync = fs.statSync;
 const originalRmSync = fs.rmSync;
 const originalWriteFileSync = fs.writeFileSync;
 const originalCreateConnection = net.createConnection;
@@ -55,17 +57,59 @@ const createChild = () => ({
 });
 
 describe("server/gateway restart behavior", () => {
+  beforeEach(() => {
+    childProcess.execFileSync = vi.fn();
+    fs.statSync = vi.fn(() => ({ isFile: () => true, mode: 0o100755 }));
+  });
+
   afterEach(() => {
     childProcess.spawn = originalSpawn;
+    childProcess.execFileSync = originalExecFileSync;
     childProcess.execSync = originalExecSync;
     fs.existsSync = originalExistsSync;
     fs.mkdirSync = originalMkdirSync;
     fs.readdirSync = originalReaddirSync;
     fs.readFileSync = originalReadFileSync;
+    fs.statSync = originalStatSync;
     fs.rmSync = originalRmSync;
     fs.writeFileSync = originalWriteFileSync;
     net.createConnection = originalCreateConnection;
     delete require.cache[modulePath];
+  });
+
+  it("runs an executable persistent prelaunch hook with the gateway environment", () => {
+    const gateway = require(modulePath);
+    const execFile = vi.fn();
+    const hookPath = path.join(OPENCLAW_DIR, "hooks", "pre-gateway-launch");
+
+    expect(
+      gateway.runGatewayPrelaunchHook({
+        hookPath,
+        existsSync: () => true,
+        statSync: () => ({ isFile: () => true, mode: 0o100755 }),
+        execFile,
+      }),
+    ).toBe(true);
+    expect(execFile).toHaveBeenCalledWith(
+      hookPath,
+      [],
+      expect.objectContaining({
+        env: expect.objectContaining({ OPENCLAW_STATE_DIR: OPENCLAW_DIR }),
+        stdio: "inherit",
+        timeout: 120_000,
+      }),
+    );
+  });
+
+  it("refuses a non-executable prelaunch hook", () => {
+    const gateway = require(modulePath);
+    expect(() =>
+      gateway.runGatewayPrelaunchHook({
+        hookPath: "/tmp/not-executable",
+        existsSync: () => true,
+        statSync: () => ({ isFile: () => true, mode: 0o100644 }),
+      }),
+    ).toThrow("must be an executable regular file");
   });
 
   it("always cold-starts when the gateway port is listening", async () => {
