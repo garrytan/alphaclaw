@@ -65,3 +65,6 @@ Six components, each detailed in the implementation plan:
 | T3 | Background sendChatAction probes REVERSED → lazy stale-marking on real send failure + on-demand verify-now in UI. Probe revival = TODO pending live verification. |
 | T4 | E3+E4+E5 kept as accepted. |
 | T5 | Six hardening amendments accepted (fail-closed reads, agentId/accountId propagation, openclaw.json atomic writes, restart-required marking, lastSeenAt in registry, sanitize-all-strings + doc reconciliation). |
+
+## Eng-Review Revisions (2026-08-24)
+5 section findings (account reverse-lookup, cron-store opener reuse, shared session-key parser, 7 test gaps, sweep watermark) + outside-voice: 3 CRITICALS (tombstones for operator deletions; fail-closed openclaw.json reads — JSON5 wipe class; discovered topics never write routing pins) + 18-item hardening bundle (incl. persisted restart flag, name-cache namespace byte-parity + diagnostic, notification digests with silent first sweep, render always includes operator-registered topics, full agent-naming guidance restored). All folded into the implementation plan (~/.claude/plans/ok-lets-take-a-calm-globe.md).
