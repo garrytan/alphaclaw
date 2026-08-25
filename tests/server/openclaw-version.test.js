@@ -247,6 +247,40 @@ describe("server/openclaw-version", () => {
     expect(fs.existsSync(result.tmpDir)).toBe(false);
   });
 
+  it("keeps gateway secrets out of the candidate install's environment", async () => {
+    nodeRuntime.assertSupportedNodeVersion = () => {};
+    const previousApiKey = process.env.ANTHROPIC_API_KEY;
+    const previousKeyring = process.env.GOG_KEYRING_PASSWORD;
+    process.env.ANTHROPIC_API_KEY = "sk-test-secret";
+    process.env.GOG_KEYRING_PASSWORD = "keyring-secret";
+    try {
+      const execMock = vi.fn((cmd, opts, callback) => callback(null, "added", ""));
+      const { installOpenclawVersionToTempDir } = loadVersionModule({
+        execMock,
+        execSyncMock: vi.fn(),
+      });
+
+      const result = await installOpenclawVersionToTempDir({
+        versionSpec: "1.0.0",
+        execImpl: execMock,
+      });
+
+      // npm install runs the candidate package's install scripts BEFORE
+      // verification accepts it — they must never see the gateway's secrets.
+      const env = execMock.mock.calls[0][1].env;
+      expect(env.ANTHROPIC_API_KEY).toBeUndefined();
+      expect(env.GOG_KEYRING_PASSWORD).toBeUndefined();
+      expect(env.PATH).toBe(process.env.PATH);
+      expect(env.npm_config_cache).toContain("cache");
+      result.cleanup();
+    } finally {
+      if (previousApiKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+      else process.env.ANTHROPIC_API_KEY = previousApiKey;
+      if (previousKeyring === undefined) delete process.env.GOG_KEYRING_PASSWORD;
+      else process.env.GOG_KEYRING_PASSWORD = previousKeyring;
+    }
+  });
+
   it("rejects temp installs when the Node.js runtime is unsupported", async () => {
     nodeRuntime.assertSupportedNodeVersion = () => {
       throw new Error("Node.js 18.0.0 is not supported.");

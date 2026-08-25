@@ -347,6 +347,58 @@ describe("frontend/upgrade-helpers verdict banner (U4)", () => {
     expect(verdict.ok).toBe(true);
   });
 
+  it("leads with the dev commit, not the dormant pin, after a dev activation", async () => {
+    const { buildVerdictBannerModel } = await loadUpgradeHelpers();
+
+    // Realistic dev fixture: installedVersion stays the DORMANT package pin
+    // ("2026.7.1-2") while appliedId carries the running commit sha.
+    const fullSha = "abc1234def5678abc1234def5678abc1234def56";
+    const channel = {
+      installedVersion: "2026.7.1-2",
+      appliedId: fullSha,
+      isPin: false,
+    };
+
+    const bySha = buildVerdictBannerModel({
+      expected: { sha: "abc1234" },
+      channel,
+    });
+    expect(bySha.ok).toBe(true);
+    expect(bySha.message).toBe(
+      "Now on OpenClaw dev abc1234 — activation verified",
+    );
+    expect(bySha.message).not.toContain("2026.7.1-2");
+
+    const byDevHead = buildVerdictBannerModel({
+      expected: { devHead: true, previousId: "2026.7.1-2" },
+      channel,
+    });
+    expect(byDevHead.ok).toBe(true);
+    expect(byDevHead.message).toBe(
+      "Now on OpenClaw dev abc1234 — activation verified",
+    );
+
+    // No expected payload, but a sha-shaped applied id on a non-pin install
+    // still identifies the running build by commit (mirrors the status card).
+    const noExpected = buildVerdictBannerModel({ expected: null, channel });
+    expect(noExpected.message).toBe(
+      "Now on OpenClaw dev abc1234 — activation verified",
+    );
+
+    // A pin install keeps leading with the package version.
+    const pinned = buildVerdictBannerModel({
+      expected: { version: "2026.7.1-2" },
+      channel: {
+        installedVersion: "2026.7.1-2",
+        appliedId: "2026.7.1-2",
+        isPin: true,
+      },
+    });
+    expect(pinned.message).toBe(
+      "Now on OpenClaw 2026.7.1-2 — activation verified",
+    );
+  });
+
   it("treats a fresh non-pin applied id as a dev-head activation", async () => {
     const { buildVerdictBannerModel } = await loadUpgradeHelpers();
 
@@ -392,6 +444,7 @@ describe("frontend/upgrade-helpers status card", () => {
       "auto-rollback armed → last known good: 2026.7.2",
     );
     expect(model.stabilization.caption).toContain("first 24h");
+    expect(model.showStabilizationActions).toBe(true);
     expect(model.autoAcceptedNote).toBeNull();
     expect(model.bootCostNote).toBe(
       "Channel-applied versions add ~10-30s to restarts (the built-in version boots fastest).",
@@ -427,6 +480,9 @@ describe("frontend/upgrade-helpers status card", () => {
 
     // Auto-acceptance keeps the window armed but drops the STABILIZING block.
     expect(model.stabilization).toBeNull();
+    // The window is still armed, so the actions the note references
+    // ("Mark as good now" / "Roll back now") must stay available.
+    expect(model.showStabilizationActions).toBe(true);
     expect(model.autoAcceptedNote).toBe(kAutoAcceptedNote);
     expect(kAutoAcceptedNote).toBe(
       "Auto-rollback stays armed for 24h after activation — 'Mark as good now' disarms it.",
@@ -447,6 +503,7 @@ describe("frontend/upgrade-helpers status card", () => {
     });
 
     expect(model.stabilization).toBeNull();
+    expect(model.showStabilizationActions).toBe(false);
     expect(model.bootCostNote).toBeNull();
     expect(model.runningLabel).toBe("2026.7.1-2");
   });
@@ -466,7 +523,9 @@ describe("frontend/upgrade-helpers status card", () => {
       lastBoot: { action: "drift_reverted", warnings: [] },
     });
 
-    expect(model.runningLabel).toBe("dev abc1234 (pin 2026.7.1-2 dormant)");
+    // "package … dormant", not "pin … dormant" — the adjacent "Pinned
+    // fallback" row shows a different value, so "pin" here would collide.
+    expect(model.runningLabel).toBe("dev abc1234 (package 2026.7.1-2 dormant)");
     expect(model.runningLabel).toContain("abc1234");
     expect(model.driftNotice).toBe(kDriftNotice);
     expect(kDriftNotice).toContain("possibly by your agent");
@@ -675,5 +734,36 @@ describe("frontend/upgrade-helpers misc models", () => {
     const line = buildAvailabilityLine({ catalog, releaseChannel: "stable" });
     expect(line).toContain("2026.7.1-2");
     expect(line).not.toContain("2026.6.34");
+  });
+
+  it("treats numerically-equal hotfix suffixes as equal in both directions", async () => {
+    const { compareVersions } = await loadUpgradeHelpers();
+    // "-2" vs "-02" parse to the same hotfix number; returning -1 both ways
+    // (the old behavior) made the comparator non-antisymmetric.
+    expect(compareVersions("2026.7.1-2", "2026.7.1-02")).toBe(0);
+    expect(compareVersions("2026.7.1-02", "2026.7.1-2")).toBe(0);
+  });
+
+  it("agrees with the server comparator's sign over a shared corpus", async () => {
+    const { compareVersions } = await loadUpgradeHelpers();
+    const { compareVersionParts } = require("../../lib/server/helpers");
+    const corpus = [
+      ["2026.7.1-2", "2026.7.1"],
+      ["2026.8.1-beta.10", "2026.8.1-beta.9"],
+      ["v2026.7.1", "2026.7.1"],
+      ["2026.8.1-beta.3", "2026.7.1-2"],
+      ["2026.7.1-2", "2026.7.1-02"],
+      ["2026.8.0-beta.1", "2026.8.0-rc.1"],
+    ];
+    for (const [a, b] of corpus) {
+      expect(
+        Math.sign(compareVersions(a, b)),
+        `compareVersions(${a}, ${b}) must match the server`,
+      ).toBe(Math.sign(compareVersionParts(a, b)));
+      expect(
+        Math.sign(compareVersions(b, a)),
+        `compareVersions(${b}, ${a}) must match the server`,
+      ).toBe(Math.sign(compareVersionParts(b, a)));
+    }
   });
 });

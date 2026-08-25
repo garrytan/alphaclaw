@@ -148,6 +148,22 @@ describe("server/helpers", () => {
     expect(compareVersionParts("2026.8.1-beta.3", "2026.7.1-2")).toBe(1);
   });
 
+  it("strips a leading v before comparing versions", () => {
+    // GitHub tags arrive v-prefixed; without the strip "v2026.7.1" would parse
+    // as 0.7.1 and flip the downgrade/backup gate.
+    expect(compareVersionParts("v2026.7.1", "2026.7.1")).toBe(0);
+    expect(compareVersionParts("v2026.7.2", "2026.7.1")).toBe(1);
+    expect(compareVersionParts("2026.7.1", "v2026.7.2")).toBe(-1);
+    expect(compareVersionParts("v2026.7.1-2", "v2026.7.1")).toBe(1);
+  });
+
+  it("treats zero-padded hotfix suffixes as numerically equal in both directions", () => {
+    // "-02" and "-2" name the same out-of-band hotfix; a lexicographic suffix
+    // compare would rank them unequal and misfire the downgrade/backup gate.
+    expect(compareVersionParts("2026.7.1-2", "2026.7.1-02")).toBe(0);
+    expect(compareVersionParts("2026.7.1-02", "2026.7.1-2")).toBe(0);
+  });
+
   it("reads debug mode from environment flags", () => {
     const previousAlphaclawDebug = process.env.ALPHACLAW_DEBUG;
     const previousDebug = process.env.DEBUG;

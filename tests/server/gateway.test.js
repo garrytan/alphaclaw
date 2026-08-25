@@ -161,6 +161,47 @@ describe("server/gateway restart behavior", () => {
     expect(gateway.gatewayEnv().OPENCLAW_NO_AUTO_UPDATE).toBe("1");
   });
 
+  it("stopGatewayChild reaps a live managed gateway and is a safe no-op otherwise", async () => {
+    // VPS restarts respawn detached + exit(0), skipping the SIGTERM handlers
+    // that normally reap the managed child; server.js calls stopGatewayChild()
+    // before restartProcess() so the OLD OpenClaw cannot stay alive on the port.
+    const managedChild = createChild();
+    const spawnMock = vi.fn().mockReturnValue(managedChild);
+    childProcess.spawn = spawnMock;
+    childProcess.execSync = vi.fn(() => "");
+    fs.existsSync = vi.fn(() => true);
+    net.createConnection = vi.fn(() => createSocket(false));
+    delete require.cache[modulePath];
+    const gateway = require(modulePath);
+
+    // No child launched yet: nothing to stop.
+    expect(gateway.stopGatewayChild()).toBe(false);
+
+    fs.readFileSync = vi.fn(() =>
+      JSON.stringify({
+        agents: { defaults: { model: { primary: "openai/gpt-5.1-codex" } } },
+      }),
+    );
+    await gateway.startGateway();
+    expect(spawnMock).toHaveBeenCalledTimes(1);
+
+    expect(gateway.stopGatewayChild()).toBe(true);
+    expect(managedChild.kill).toHaveBeenCalledWith("SIGTERM");
+
+    // A child that already exited must not be signalled again.
+    managedChild.exitCode = 0;
+    managedChild.kill.mockClear();
+    expect(gateway.stopGatewayChild()).toBe(false);
+    expect(managedChild.kill).not.toHaveBeenCalled();
+
+    // A kill() that throws (e.g. the pid is gone) is swallowed, not fatal.
+    managedChild.exitCode = null;
+    managedChild.kill = vi.fn(() => {
+      throw new Error("ESRCH");
+    });
+    expect(gateway.stopGatewayChild()).toBe(false);
+  });
+
   it("uses force cold start when the gateway port is not listening", async () => {
     const restartSupervisor = createChild();
     const spawnMock = vi.fn(() => restartSupervisor);

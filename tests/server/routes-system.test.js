@@ -1033,6 +1033,26 @@ describe("server/routes/system", () => {
     });
   });
 
+  it("degrades openclawChannel to null on GET /api/status when getChannelInfo throws", async () => {
+    // The status endpoint feeds the whole dashboard shell (and its 2s SSE
+    // mirror): a broken channel store must degrade the summary, never take
+    // down /api/status with it.
+    const deps = createSystemDeps();
+    deps.openclawChannelService = {
+      getChannelInfo: vi.fn(() => {
+        throw new Error("channel state unreadable");
+      }),
+      isApplyInProgress: vi.fn(() => false),
+    };
+    const app = createApp(deps);
+
+    const res = await request(app).get("/api/status");
+
+    expect(res.status).toBe(200);
+    expect(res.body.openclawChannel).toBeNull();
+    expect(deps.openclawChannelService.getChannelInfo).toHaveBeenCalled();
+  });
+
   it("returns raw session metadata on GET /api/agent/sessions", async () => {
     const deps = createSystemDeps();
     deps.fs.readFileSync.mockImplementation((targetPath) => {

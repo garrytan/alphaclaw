@@ -380,6 +380,119 @@ describe("server/watchdog release-channel rollback hooks", () => {
     ).toBe(true);
   });
 
+  it("treats rollback_marker_write_failed as handled, but falls crash loops through on other failures", async () => {
+    // Marker write failed (e.g. disk full): the sync already latched manual
+    // intervention itself, so the watchdog must NOT pile the legacy crash-loop
+    // notification/repair on top — restarting without a marker would re-apply
+    // the broken build in a loop.
+    const handledHooks = createReleaseChannelHooks({
+      isPin: false,
+      inStabilizationWindow: true,
+    });
+    handledHooks.requestRollback = vi.fn(() => ({
+      ok: false,
+      code: "rollback_marker_write_failed",
+    }));
+    const handled = createHarness({
+      autoRepair: false,
+      releaseChannelHooks: handledHooks,
+    });
+
+    handled.watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    handled.watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    handled.watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    await flushMicrotasks();
+
+    expect(handledHooks.requestRollback).toHaveBeenCalledTimes(1);
+    expect(crashLoopNotices(handled.notifier)).toHaveLength(0);
+
+    // Any OTHER non-ok result (state race) must fall through to the legacy
+    // crash-loop handling instead of leaving the gateway dead and silent.
+    const fellThroughHooks = createReleaseChannelHooks({
+      isPin: false,
+      inStabilizationWindow: true,
+    });
+    fellThroughHooks.requestRollback = vi.fn(() => ({
+      ok: false,
+      code: "nothing_to_roll_back",
+    }));
+    const fellThrough = createHarness({
+      autoRepair: false,
+      releaseChannelHooks: fellThroughHooks,
+    });
+
+    fellThrough.watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    fellThrough.watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    fellThrough.watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    await flushMicrotasks();
+
+    expect(fellThroughHooks.requestRollback).toHaveBeenCalledTimes(1);
+    const notices = crashLoopNotices(fellThrough.notifier);
+    expect(notices).toHaveLength(1);
+    expect(String(notices[0][0])).toContain(
+      "Auto-restart paused; manual action required.",
+    );
+  });
+
+  it("delivers health transitions to the hooks and re-arms the one-shot latch after recovery", async () => {
+    vi.useFakeTimers();
+    const hooks = createReleaseChannelHooks({
+      isPin: false,
+      inStabilizationWindow: true,
+    });
+    let gatewayUp = false;
+    const { watchdog } = createHarness({
+      autoRepair: false,
+      releaseChannelHooks: hooks,
+      fetchImpl: async () => {
+        if (!gatewayUp) throw new Error("gateway down");
+        return {
+          ok: true,
+          status: 200,
+          text: async () => JSON.stringify({ ok: true, status: "live" }),
+        };
+      },
+    });
+
+    // Three consecutive startup probe failures flip health to degraded — the
+    // sync's acceptance clock must hear about it (onUnhealthy resets the hold).
+    watchdog.onGatewayLaunch({ startedAt: Date.now() - 60_000 });
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(watchdog.getStatus().health).toBe("degraded");
+    expect(hooks.onUnhealthy).toHaveBeenCalled();
+    expect(hooks.onHealthy).not.toHaveBeenCalled();
+
+    // Recovery: the healthy tick reaches onHealthy (acceptance hold starts).
+    gatewayUp = true;
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(watchdog.getStatus().health).toBe("healthy");
+    expect(hooks.onHealthy).toHaveBeenCalled();
+
+    // First incident: a crash loop requests exactly one rollback. (Under fake
+    // timers setImmediate is faked too, so flush via the timer clock.)
+    watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(hooks.requestRollback).toHaveBeenCalledTimes(1);
+    watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(hooks.requestRollback).toHaveBeenCalledTimes(1);
+
+    // The gateway relaunches healthy: a healthy build may legitimately need a
+    // rollback for a LATER incident, so the one-shot latch re-arms.
+    watchdog.onGatewayLaunch({ startedAt: Date.now() - 60_000 });
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(watchdog.getStatus().health).toBe("healthy");
+
+    watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(hooks.requestRollback).toHaveBeenCalledTimes(2);
+    watchdog.stop();
+  });
+
   it("keeps legacy degraded auto-repair when out of the stabilization window [REG]", async () => {
     vi.useFakeTimers();
     const hooks = createReleaseChannelHooks({

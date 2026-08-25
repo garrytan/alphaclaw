@@ -270,6 +270,37 @@ describe("server/openclaw-release-channel", () => {
       expect(store.hasOverlay("3.0.0")).toBe(true);
     });
 
+    it("pruneOverlaysAsync mirrors pruneOverlays: keep-list honored, removals reported, missing dir tolerated", async () => {
+      const { store } = createStore();
+
+      // Fresh store, overlay dir never created: a clean no-op, not a throw —
+      // the live apply path calls this unconditionally after every download.
+      await expect(
+        store.pruneOverlaysAsync({ keep: ["1.0.0"] }),
+      ).resolves.toEqual({ removed: [] });
+
+      for (const version of ["1.0.0", "2.0.0", "3.0.0"]) {
+        store.saveOverlayFromTempInstall({
+          openclawPackageDir: writeOpenclawPackageFixture(
+            path.join(createTempRoot(), "openclaw"),
+            { version },
+          ),
+          version,
+        });
+      }
+
+      const result = await store.pruneOverlaysAsync({ keep: ["2.0.0", "3.0.0"] });
+
+      expect(result.removed).toEqual(["1.0.0"]);
+      expect(fs.readdirSync(store.overlayStoreDir).sort()).toEqual([
+        "2.0.0",
+        "3.0.0",
+      ]);
+      expect(store.hasOverlay("1.0.0")).toBe(false);
+      expect(store.hasOverlay("2.0.0")).toBe(true);
+      expect(store.hasOverlay("3.0.0")).toBe(true);
+    });
+
     it("rejects traversal-shaped overlay names", () => {
       const { store } = createStore();
       const packageDir = writeOpenclawPackageFixture(
@@ -548,6 +579,41 @@ describe("server/openclaw-release-channel", () => {
       );
 
       expect(store.resolvePackageBin(createTempRoot())).toBeNull();
+    });
+
+    it("resolvePackageBin refuses bin entries that escape their own package", () => {
+      const { store } = createStore();
+
+      // A hostile package.json must not be able to point the PATH shim at a
+      // file outside the overlay tree ("../" escapes get no shim).
+      const stringEscapeDir = writeOpenclawPackageFixture(
+        path.join(createTempRoot(), "openclaw"),
+        { version: "1.0.0", bin: "../../evil.js" },
+      );
+      expect(store.resolvePackageBin(stringEscapeDir)).toBeNull();
+
+      const objectEscapeDir = writeOpenclawPackageFixture(
+        path.join(createTempRoot(), "openclaw"),
+        { version: "1.0.0", bin: { openclaw: "../outside/entry.js" } },
+      );
+      expect(store.resolvePackageBin(objectEscapeDir)).toBeNull();
+
+      // An absolute path outside the package is refused too.
+      const absoluteEscapeDir = writeOpenclawPackageFixture(
+        path.join(createTempRoot(), "openclaw"),
+        { version: "1.0.0", bin: { openclaw: "/etc/passwd" } },
+      );
+      expect(store.resolvePackageBin(absoluteEscapeDir)).toBeNull();
+
+      // The package dir itself (empty relative resolving to the dir) is not a
+      // valid bin either — only paths strictly inside the package pass.
+      const insideDir = writeOpenclawPackageFixture(
+        path.join(createTempRoot(), "openclaw"),
+        { version: "1.0.0", bin: { openclaw: "dist/entry.js" } },
+      );
+      expect(store.resolvePackageBin(insideDir)).toBe(
+        path.join(insideDir, "dist/entry.js"),
+      );
     });
   });
 });

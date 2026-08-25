@@ -112,6 +112,9 @@ const createHarness = ({
   storeWrap = (store) => store,
   stabilizationWindowMs = undefined,
   acceptanceHoldMs = undefined,
+  // Escape hatch for DI seams the named options above don't cover
+  // (isSelfUpdateInProgress, watchdogManagedOperation, notify: null, ...).
+  extraSyncOptions = {},
 } = {}) => {
   delete process.env.OPENCLAW_GIT_DIR;
   const rootDir = mkTemp("alphaclaw-channel-sync-root-");
@@ -186,6 +189,7 @@ const createHarness = ({
     backupsDir: path.join(rootDir, "backups", "openclaw"),
     ...(stabilizationWindowMs !== undefined ? { stabilizationWindowMs } : {}),
     ...(acceptanceHoldMs !== undefined ? { acceptanceHoldMs } : {}),
+    ...extraSyncOptions,
   });
 
   return {
@@ -374,6 +378,83 @@ describe("server/openclaw-channel-sync", () => {
       ).toBe(true);
     });
 
+    it("delivers bin-process boot notifications once via flushBootNotifications", async () => {
+      // "Bin process": notify is not wired there, so the boot outcome persists
+      // in state.lastBoot instead of being delivered directly.
+      const binHarness = createHarness({
+        pin: "1.0.0",
+        channel: "beta",
+        installedVersion: "1.0.0",
+        extraSyncOptions: { notify: null },
+      });
+      binHarness.store.updateState((s) => {
+        s.pinVersion = "1.0.0";
+        s.applied = { channel: "beta", version: "1.1.0", at: 1, acceptedAt: 2 };
+        return s;
+      });
+      expect(saveOverlayFixture(binHarness.store, "1.0.0")).toEqual({ ok: true });
+
+      const boot = binHarness.sync.syncAtBoot();
+      expect(boot.action).toBe("overlay_missing");
+      const persisted = binHarness.store.readState().lastBoot;
+      expect(
+        persisted.notifications.some((message) =>
+          message.includes("missing from disk"),
+        ),
+      ).toBe(true);
+      expect(persisted.notifiedAt).toBeFalsy();
+
+      // "Server process": a fresh sync over the same store delivers the full
+      // wording exactly once — a second flush must dedup via notifiedAt.
+      const serverNotify = vi.fn(async () => {});
+      const serverInsertEvent = vi.fn();
+      const server = createOpenclawChannelSync({
+        rootDir: binHarness.rootDir,
+        openclawDir: binHarness.openclawDir,
+        packageRoot: binHarness.packageRoot,
+        store: binHarness.store,
+        runStream: binHarness.runner,
+        resolveInstallDir: () => binHarness.installDir,
+        readReleaseChannel: () => "beta",
+        isOnboarded: () => true,
+        notify: serverNotify,
+        insertEvent: serverInsertEvent,
+        nowFn: () => binHarness.nowRef.now,
+        logger: kSilentLogger,
+      });
+
+      await server.flushBootNotifications();
+      expect(serverNotify).toHaveBeenCalledTimes(1);
+      expect(String(serverNotify.mock.calls[0][0])).toContain("missing from disk");
+      expect(binHarness.store.readState().lastBoot.notifiedAt).toBeTruthy();
+
+      await server.flushBootNotifications();
+      expect(serverNotify).toHaveBeenCalledTimes(1);
+
+      // Warning-only rollback boots get the digest wording plus the
+      // incident-timeline backfill (the bin process has no events DB wired).
+      binHarness.store.updateState((s) => {
+        s.lastBoot = {
+          at: 7,
+          action: "rollback",
+          warnings: ["rolled back to 1.0.0"],
+          notifications: [],
+        };
+        return s;
+      });
+      await server.flushBootNotifications();
+      expect(serverNotify).toHaveBeenCalledTimes(2);
+      const digest = String(serverNotify.mock.calls[1][0]);
+      expect(digest).toContain("version notes from startup");
+      expect(digest).toContain("• rolled back to 1.0.0");
+      expect(serverInsertEvent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          eventType: "channel_rollback_boot",
+          status: "completed",
+        }),
+      );
+    });
+
     it("writes the dev bin shim when HEAD matches, and falls back on mismatch", () => {
       const harness = createHarness({
         pin: "1.0.0",
@@ -557,6 +638,64 @@ describe("server/openclaw-channel-sync", () => {
       expect(result).toEqual(
         expect.objectContaining({ ok: false, action: "failed" }),
       );
+    });
+
+    it("closes an update run interrupted by a restart and leaves finished runs alone", () => {
+      // A process death mid-apply leaves lastUpdateRun.finishedAt = null
+      // forever; without the boot close the UI resurrects it as a phantom
+      // in-flight operation and locks every action.
+      const interrupted = createHarness({
+        pin: "1.0.0",
+        installedVersion: "1.0.0",
+        sentinelVersion: "1.0.0",
+      });
+      interrupted.store.updateState((s) => {
+        s.lastUpdateRun = { startedAt: 1, finishedAt: null, ok: null, steps: [] };
+        return s;
+      });
+
+      const result = interrupted.sync.syncAtBoot();
+
+      expect(result.ok).toBe(true);
+      expect(result.warnings).toContain(
+        "closed an update run interrupted by a restart",
+      );
+      const run = interrupted.store.readState().lastUpdateRun;
+      expect(run.finishedAt).toBe(interrupted.nowRef.now);
+      expect(run.ok).toBe(false);
+      expect(run.result).toEqual(
+        expect.objectContaining({ ok: false, code: "interrupted" }),
+      );
+      expect(interrupted.store.readState().lastBoot.warnings).toContain(
+        "closed an update run interrupted by a restart",
+      );
+
+      // A FINISHED run is history, not a phantom — boot must not rewrite it.
+      const finished = createHarness({
+        pin: "1.0.0",
+        installedVersion: "1.0.0",
+        sentinelVersion: "1.0.0",
+      });
+      const finishedRun = {
+        target: { channel: "beta", version: "1.1.0", sha: null, devHead: false },
+        startedAt: 1,
+        finishedAt: 5,
+        ok: true,
+        result: { ok: true },
+        steps: [],
+      };
+      finished.store.updateState((s) => {
+        s.lastUpdateRun = JSON.parse(JSON.stringify(finishedRun));
+        return s;
+      });
+
+      const finishedResult = finished.sync.syncAtBoot();
+
+      expect(finishedResult.ok).toBe(true);
+      expect(finishedResult.warnings).not.toContain(
+        "closed an update run interrupted by a restart",
+      );
+      expect(finished.store.readState().lastUpdateRun).toEqual(finishedRun);
     });
 
     it("mirrors the channel into openclaw.json with auto-updates disabled", () => {
@@ -1018,6 +1157,148 @@ describe("server/openclaw-channel-sync", () => {
       expect(first.status).toBe(202);
       expect(sync.isApplyInProgress()).toBe(false);
     });
+
+    it("rejects applies during a self-update and brackets applies in a managed operation", async () => {
+      const begin = vi.fn();
+      const end = vi.fn();
+      let selfUpdate = true;
+      const { sync, store, installToTempDir } = createHarness({
+        pin: "1.0.0",
+        installedVersion: "1.0.0",
+        sentinelVersion: "1.0.0",
+        extraSyncOptions: {
+          isSelfUpdateInProgress: () => selfUpdate,
+          watchdogManagedOperation: { begin, end },
+        },
+      });
+
+      // A restartProcess() from the AlphaClaw self-updater mid-overlay-write
+      // would corrupt the store: the apply must not even start.
+      const rejected = await sync.applyUpdate({ channel: "beta", version: "1.1.0" });
+      expect(rejected.status).toBe(409);
+      expect(rejected.body.code).toBe("self_update_in_progress");
+      expect(begin).not.toHaveBeenCalled();
+      expect(installToTempDir).not.toHaveBeenCalled();
+
+      // Gateway exits during a version swap must not feed crash accounting:
+      // begin() brackets the run and end() fires when it settles.
+      selfUpdate = false;
+      const applied = await sync.applyUpdate({ channel: "beta", version: "1.1.0" });
+      expect(applied.status).toBe(202);
+      expect(begin).toHaveBeenCalledTimes(1);
+      expect(end).toHaveBeenCalledTimes(1);
+
+      // end() must also fire on FAILED applies, or crash accounting would stay
+      // suspended forever after the first rejection.
+      store.addBlocklist({ id: "1.3.0", reason: "crash_loop", exitCode: 1 });
+      const failed = await sync.applyUpdate({ channel: "beta", version: "1.3.0" });
+      expect(failed.status).toBe(409);
+      expect(failed.body.code).toBe("version_blocklisted");
+      expect(begin).toHaveBeenCalledTimes(2);
+      expect(end).toHaveBeenCalledTimes(2);
+    });
+
+    it("self-update gate: blocks with a hint, fails open on probe errors, defaults open", async () => {
+      // Gate closed: full actionable envelope, no side effects, no latch.
+      const gated = createHarness({
+        pin: "1.0.0",
+        installedVersion: "1.0.0",
+        sentinelVersion: "1.0.0",
+        extraSyncOptions: { isSelfUpdateInProgress: () => true },
+      });
+      const rejected = await gated.sync.applyUpdate({
+        channel: "beta",
+        version: "1.1.0",
+      });
+      expect(rejected.status).toBe(409);
+      expect(rejected.body.code).toBe("self_update_in_progress");
+      // The envelope must tell the operator what to do, not just what broke.
+      expect(typeof rejected.body.hint).toBe("string");
+      expect(rejected.body.hint.length).toBeGreaterThan(0);
+      // The gate fires before the apply latch and before any work starts.
+      expect(gated.sync.isApplyInProgress()).toBe(false);
+      expect(gated.runner.runStreamed).not.toHaveBeenCalled();
+      expect(gated.installToTempDir).not.toHaveBeenCalled();
+      expect(gated.store.readState().lastUpdateRun).toBeNull();
+
+      // A THROWING probe fails open: a broken self-update service must not
+      // permanently lock OpenClaw version changes.
+      const throwing = createHarness({
+        pin: "1.0.0",
+        installedVersion: "1.0.0",
+        sentinelVersion: "1.0.0",
+        extraSyncOptions: {
+          isSelfUpdateInProgress: () => {
+            throw new Error("self-update probe exploded");
+          },
+        },
+      });
+      const throwingResult = await throwing.sync.applyUpdate({
+        channel: "beta",
+        version: "1.1.0",
+      });
+      expect(throwingResult.status).toBe(202);
+      expect(throwingResult.body.restarting).toBe(true);
+
+      // Default wiring (option omitted): applies proceed normally.
+      const defaulted = createHarness({
+        pin: "1.0.0",
+        installedVersion: "1.0.0",
+        sentinelVersion: "1.0.0",
+      });
+      const defaultedResult = await defaulted.sync.applyUpdate({
+        channel: "beta",
+        version: "1.1.0",
+      });
+      expect(defaultedResult.status).toBe(202);
+      expect(defaultedResult.body.restarting).toBe(true);
+    });
+
+    it("brackets the managed operation exactly once around success AND a mid-run failure", async () => {
+      // Success: one begin, one end.
+      const okBegin = vi.fn();
+      const okEnd = vi.fn();
+      const ok = createHarness({
+        pin: "1.0.0",
+        installedVersion: "1.0.0",
+        sentinelVersion: "1.0.0",
+        extraSyncOptions: {
+          watchdogManagedOperation: { begin: okBegin, end: okEnd },
+        },
+      });
+      const applied = await ok.sync.applyUpdate({ channel: "beta", version: "1.1.0" });
+      expect(applied.status).toBe(202);
+      expect(okBegin).toHaveBeenCalledTimes(1);
+      expect(okEnd).toHaveBeenCalledTimes(1);
+
+      // Mid-run failure (verify rejects a bad --version): end() must STILL
+      // fire exactly once, or crash accounting stays suspended forever.
+      const failBegin = vi.fn();
+      const failEnd = vi.fn();
+      const failing = createHarness({
+        pin: "1.0.0",
+        installedVersion: "1.0.0",
+        sentinelVersion: "1.0.0",
+        runnerImpl: async (opts, fallback) => {
+          if (opts.command === "node" && opts.args?.[1] === "--version") {
+            return { ok: true, code: 0, tail: "9.9.9\n", timedOut: false };
+          }
+          return fallback(opts);
+        },
+        extraSyncOptions: {
+          watchdogManagedOperation: { begin: failBegin, end: failEnd },
+        },
+      });
+      const failed = await failing.sync.applyUpdate({
+        channel: "beta",
+        version: "1.1.0",
+      });
+      expect(failed.status).toBe(409);
+      expect(failed.body.code).toBe("verify_failed");
+      expect(failBegin).toHaveBeenCalledTimes(1);
+      expect(failEnd).toHaveBeenCalledTimes(1);
+      expect(failing.sync.isApplyInProgress()).toBe(false);
+    });
   });
 
   describe("rollback and acceptance", () => {
@@ -1108,6 +1389,68 @@ describe("server/openclaw-channel-sync", () => {
         version: "1.1.0",
       });
       expect(beta.store.isBlocklisted("1.2.0")).toBe(true);
+    });
+
+    it("rescues a rollback to last-known-good when the pin tree is unrecoverable", () => {
+      vi.useFakeTimers();
+      // VPS case: the pin was bumped by a self-update while a dev build was
+      // active — no pin overlay exists and the installed tree is not the pin.
+      // A pin rollback could never materialize; prefer the usable LKG overlay.
+      const harness = createHarness({
+        pin: "1.0.0",
+        channel: "dev",
+        installedVersion: "1.2.0",
+      });
+      harness.store.updateState((s) => {
+        s.pinVersion = "1.0.0";
+        s.applied = { channel: "dev", sha: kDevSha, at: 1, acceptedAt: null };
+        s.lastKnownGood.package = "1.1.0";
+        return s;
+      });
+      expect(saveOverlayFixture(harness.store, "1.1.0")).toEqual({ ok: true });
+
+      const result = harness.sync.requestChannelRollback({
+        reason: "crash_loop",
+        exitCode: 1,
+      });
+
+      expect(result.ok).toBe(true);
+      expect(result.target).toEqual({
+        kind: "package",
+        channel: "stable",
+        version: "1.1.0",
+      });
+      expect(harness.store.readMarker().target).toEqual({
+        kind: "package",
+        channel: "stable",
+        version: "1.1.0",
+      });
+      expect(harness.store.isBlocklisted(kDevSha)).toBe(true);
+      vi.advanceTimersByTime(1000);
+      expect(harness.restartProcess).toHaveBeenCalledTimes(1);
+
+      // A blocklisted LKG is NOT usable — the target stays the pin
+      // (best-effort) instead of re-applying another known-bad build.
+      const blocked = createHarness({
+        pin: "1.0.0",
+        channel: "dev",
+        installedVersion: "1.2.0",
+      });
+      blocked.store.updateState((s) => {
+        s.pinVersion = "1.0.0";
+        s.applied = { channel: "dev", sha: kDevSha, at: 1, acceptedAt: null };
+        s.lastKnownGood.package = "1.1.0";
+        return s;
+      });
+      expect(saveOverlayFixture(blocked.store, "1.1.0")).toEqual({ ok: true });
+      blocked.store.addBlocklist({ id: "1.1.0", reason: "crash_loop", exitCode: 1 });
+
+      const blockedResult = blocked.sync.requestChannelRollback({
+        reason: "crash_loop",
+        exitCode: 1,
+      });
+      expect(blockedResult.ok).toBe(true);
+      expect(blockedResult.target).toEqual({ kind: "pin" });
     });
 
     it("defers the rollback restart until an in-flight apply settles", async () => {

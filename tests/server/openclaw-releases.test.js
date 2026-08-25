@@ -706,5 +706,51 @@ describe("server/openclaw-releases", () => {
       expect(service.isKnownCommit(buildSha(1))).toBe(false);
       expect(service.getReleaseNotes("2026.7.1-2")).toBe(null);
     });
+
+    it("answers membership and notes from the disk cache after a restart, with zero fetches", async () => {
+      // Every apply restarts the server, so the first POST /api/openclaw/apply
+      // afterwards hits a fresh service whose in-memory state is empty. It must
+      // answer from the disk cache instead of 400-ing on a valid target.
+      const warm = createHarness({
+        handlers: standardHandlers({ compare: buildCompareResponse(12) }),
+      });
+      await warm.service.getCatalog();
+
+      const offlineFetch = vi.fn(async (url) => {
+        throw new Error(`network must not be touched: ${url}`);
+      });
+      const restarted = createOpenclawReleasesService({
+        fetchImpl: offlineFetch,
+        cacheDir: warm.cacheDir,
+        cacheTtlMs: kTtlMs,
+        nowFn: () => kNow,
+        logger: { warn: vi.fn(), error: vi.fn(), log: vi.fn() },
+      });
+
+      expect(restarted.isKnownVersion("2026.7.1-2")).toBe(true);
+      expect(restarted.isKnownVersion("2026.7.2-beta.1", "beta")).toBe(true);
+      expect(restarted.isKnownVersion("9999.0.0")).toBe(false);
+      expect(restarted.isKnownCommit(buildSha(11))).toBe(true);
+      expect(restarted.isKnownCommit(buildSha(11).slice(0, 7))).toBe(true);
+      expect(restarted.getReleaseNotes("2026.7.1-2")).toBe(
+        "Notes for 2026.7.1-2",
+      );
+      expect(offlineFetch).not.toHaveBeenCalled();
+    });
+
+    it("pins the classification when the membership check is channel-scoped", async () => {
+      const { service } = createHarness();
+      await service.getCatalog();
+
+      // A published beta must not be recordable as a "stable" apply and vice
+      // versa — the recorded channel has to match the artifact.
+      expect(service.isKnownVersion("2026.7.2-beta.1", "beta")).toBe(true);
+      expect(service.isKnownVersion("2026.7.2-beta.1", "stable")).toBe(false);
+      // Numeric hotfix suffixes are stable releases, not prereleases.
+      expect(service.isKnownVersion("2026.7.1-2", "stable")).toBe(true);
+      expect(service.isKnownVersion("2026.7.1-2", "beta")).toBe(false);
+      // Unscoped checks keep the channel-agnostic behavior.
+      expect(service.isKnownVersion("2026.7.2-beta.1")).toBe(true);
+    });
   });
 });

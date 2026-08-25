@@ -260,6 +260,97 @@ describe("server/routes/openclaw-channel", () => {
     });
   });
 
+  it("terminates the operation stream when the apply settles as an error", async () => {
+    // Every response that advertised an operationId must reach a terminal
+    // event, or an SSE subscriber hangs forever. An applyUpdate rejection goes
+    // through the .catch -> apply_failed envelope AND the termination backstop.
+    const deps = createDeps();
+    deps.openclawChannelService.applyUpdate.mockRejectedValue(
+      new Error("exploded mid-apply"),
+    );
+    deps.operationEvents.getOperation = vi.fn(() => ({ status: "pending" }));
+    const app = createApp(deps);
+
+    const res = await request(app)
+      .post("/api/openclaw/apply")
+      .send({ channel: "beta", version: "1.1.0" });
+
+    expect(res.status).toBe(500);
+    expect(res.body).toEqual(
+      expect.objectContaining({
+        ok: false,
+        code: "apply_failed",
+        message: "exploded mid-apply",
+        operationId: "op-1",
+      }),
+    );
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(deps.operationEvents.fail).toHaveBeenCalledTimes(1);
+    const [failedId, failedError] = deps.operationEvents.fail.mock.calls[0];
+    expect(failedId).toBe("op-1");
+    expect(failedError.message).toBe("exploded mid-apply");
+    expect(failedError.code).toBe("apply_failed");
+
+    // Operations that already reached a terminal state are left alone.
+    const settledDeps = createDeps();
+    settledDeps.openclawChannelService.applyUpdate.mockResolvedValue({
+      status: 409,
+      body: { ok: false, code: "operation_in_progress", message: "busy" },
+    });
+    settledDeps.operationEvents.getOperation = vi.fn(() => ({
+      status: "failed",
+    }));
+    const settledApp = createApp(settledDeps);
+    const settledRes = await request(settledApp)
+      .post("/api/openclaw/apply")
+      .send({ channel: "beta", version: "1.1.0" });
+    expect(settledRes.status).toBe(409);
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(settledDeps.operationEvents.fail).not.toHaveBeenCalled();
+  });
+
+  it("drives a quick 409 self-update rejection to a terminal error on the real operation stream", async () => {
+    // End-to-end with the REAL operation-events service: even a sub-400ms
+    // gate rejection (applyUpdate returns its envelope without ever calling
+    // operationEvents.fail itself) must leave the advertised operation in a
+    // terminal state, or an SSE subscriber would hang forever.
+    const { createOperationEventsService } = require("../../lib/server/operation-events");
+    const deps = createDeps();
+    deps.operationEvents = createOperationEventsService();
+    deps.openclawChannelService.applyUpdate.mockResolvedValue({
+      status: 409,
+      body: {
+        ok: false,
+        code: "self_update_in_progress",
+        message: "An AlphaClaw update is currently installing.",
+        hint: "Wait for it to finish (AlphaClaw will restart), then change OpenClaw versions.",
+      },
+    });
+    const app = createApp(deps);
+
+    const res = await request(app)
+      .post("/api/openclaw/apply")
+      .send({ channel: "beta", version: "1.1.0" });
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe("self_update_in_progress");
+    expect(res.body.hint).toBeTruthy();
+    expect(res.body.operationId).toBeTruthy();
+
+    // ensureOperationTerminated runs off the apply promise continuation.
+    await new Promise((resolve) => setImmediate(resolve));
+    const operation = deps.operationEvents.getOperation(res.body.operationId);
+    expect(operation.status).toBe("failed");
+    const terminal = operation.events[operation.events.length - 1];
+    expect(terminal.event).toBe("error");
+    expect(terminal.data).toEqual(
+      expect.objectContaining({
+        code: "self_update_in_progress",
+        error: "An AlphaClaw update is currently installing.",
+      }),
+    );
+  });
+
   it("maps rollback and mark-good service failures to 409 and successes to 200", async () => {
     const deps = createDeps();
     const app = createApp(deps);
@@ -297,6 +388,23 @@ describe("server/routes/openclaw-channel", () => {
     expect(deps.openclawChannelService.markGoodNow).toHaveBeenCalledWith({
       source: "manual",
     });
+  });
+
+  it("maps a rollback marker-write failure to 500, not 409", async () => {
+    // A failed marker WRITE is a server/disk failure (ENOSPC class), not a
+    // conflict — it must match the sibling routes' 500 semantics.
+    const deps = createDeps();
+    deps.openclawChannelService.requestChannelRollback.mockReturnValueOnce({
+      ok: false,
+      code: "rollback_marker_write_failed",
+      message: "Could not write the rollback marker: ENOSPC",
+    });
+    const app = createApp(deps);
+
+    const res = await request(app).post("/api/openclaw/rollback").send({});
+
+    expect(res.status).toBe(500);
+    expect(res.body.code).toBe("rollback_marker_write_failed");
   });
 
   it("clears one blocklist entry, or all, and validates the id", async () => {
