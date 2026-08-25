@@ -50,38 +50,21 @@ const {
 const {
   kLiveEnabled,
   kSilentLogger,
+  kFixturePin,
+  writePinFixture,
+  createBackupStubRunner,
   mkTemp,
   waitFor,
 } = liveHelpers;
 
 const describeLive = kLiveEnabled ? describe : describe.skip;
 
-const kFixturePin = "0.0.1";
 const kInstallTimeoutMs = 8 * 60 * 1000;
 // The apply also runs verify probes and a multi-hundred-MB overlay copy after
 // the download — the wait needs headroom past the install's own budget.
 const kApplySettleTimeoutMs = kInstallTimeoutMs + 2 * 60 * 1000;
 const kApplyTestTimeoutMs = 12 * 60 * 1000;
 
-// Minimal plausible pin tree so drift checks and the pin-floor snapshot have
-// something local to work with (in production this is the shipped image tree).
-const writePinFixture = (installDir) => {
-  const packageDir = path.join(installDir, "node_modules", "openclaw");
-  fs.mkdirSync(path.join(packageDir, "dist", "extensions"), { recursive: true });
-  fs.writeFileSync(
-    path.join(packageDir, "package.json"),
-    `${JSON.stringify({ name: "openclaw", version: kFixturePin, bin: { openclaw: "bin/entry.js" } })}\n`,
-  );
-  fs.mkdirSync(path.join(packageDir, "bin"), { recursive: true });
-  fs.writeFileSync(
-    path.join(packageDir, "bin", "entry.js"),
-    `#!/usr/bin/env node\nconsole.log("${kFixturePin}");\n`,
-  );
-  fs.writeFileSync(
-    path.join(packageDir, "dist", "thinking-levels.js"),
-    "exports.listThinkingLevelOptions = () => [];\n",
-  );
-};
 
 const createLiveHarness = () => {
   const rootDir = mkTemp("alphaclaw-live-apply-e2e-");
@@ -105,17 +88,7 @@ const createLiveHarness = () => {
     return s;
   });
 
-  // REAL spawn-based runner; only `openclaw backup` is intercepted (a real
-  // backup needs a configured live gateway, which a test sandbox lacks).
-  const realRunner = createRunStream({});
-  const runner = {
-    runStreamed: (opts) => {
-      if (opts.command === "openclaw" && opts.args?.[0] === "backup") {
-        return Promise.resolve({ ok: true, code: 0, tail: "", timedOut: false });
-      }
-      return realRunner.runStreamed(opts);
-    },
-  };
+  const runner = createBackupStubRunner(createRunStream({}));
 
   const releases = createOpenclawReleasesService({
     cacheDir: path.join(rootDir, "cache", "openclaw-catalog"),

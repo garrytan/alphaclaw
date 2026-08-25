@@ -15,6 +15,8 @@ on:
     # Nightly: catalog + real stable/beta package applies (~5 min).
     - cron: "17 9 * * *"
     # Weekly (Sunday): additionally the full dev source build (10-30 min).
+    # NOTE: this exact string is byte-matched by live-dev-build's `if:` gate
+    # below — change BOTH together or the dev tier silently never runs.
     - cron: "47 9 * * 0"
   workflow_dispatch:
     inputs:
@@ -22,6 +24,11 @@ on:
         description: "Also run the full dev-channel source build (10-30 min)"
         type: boolean
         default: false
+
+# Read-only token: these jobs execute third-party code (npm lifecycle
+# scripts, a from-source build) with GITHUB_TOKEN in the step env.
+permissions:
+  contents: read
 
 jobs:
   live-catalog-and-apply:
@@ -49,6 +56,7 @@ jobs:
   live-dev-build:
     # Weekly schedule or explicit dispatch opt-in only: a real git clone +
     # pnpm install + from-source build of openclaw main (~5 GB, build RAM).
+    # The cron literal must byte-match the weekly entry in on.schedule above.
     if: >-
       (github.event_name == 'schedule' && github.event.schedule == '47 9 * * 0') ||
       (github.event_name == 'workflow_dispatch' && inputs.run_dev_build)

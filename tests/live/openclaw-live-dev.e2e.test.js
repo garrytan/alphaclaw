@@ -40,6 +40,9 @@ const {
   kSilentLogger,
   kFullShaShape,
   mkTemp,
+  kFixturePin,
+  writePinFixture,
+  createBackupStubRunner,
   repoBinDir,
   repoOpenclawBin,
   waitFor,
@@ -48,26 +51,8 @@ const {
 const describeLive = kLiveEnabled ? describe : describe.skip;
 const describeLiveDev = kLiveEnabled && kLiveDevEnabled ? describe : describe.skip;
 
-const kFixturePin = "0.0.1";
 const kDevBuildTimeoutMs = 35 * 60 * 1000;
 
-const writePinFixture = (installDir) => {
-  const packageDir = path.join(installDir, "node_modules", "openclaw");
-  fs.mkdirSync(path.join(packageDir, "dist", "extensions"), { recursive: true });
-  fs.writeFileSync(
-    path.join(packageDir, "package.json"),
-    `${JSON.stringify({ name: "openclaw", version: kFixturePin, bin: { openclaw: "bin/entry.js" } })}\n`,
-  );
-  fs.mkdirSync(path.join(packageDir, "bin"), { recursive: true });
-  fs.writeFileSync(
-    path.join(packageDir, "bin", "entry.js"),
-    `#!/usr/bin/env node\nconsole.log("${kFixturePin}");\n`,
-  );
-  fs.writeFileSync(
-    path.join(packageDir, "dist", "thinking-levels.js"),
-    "exports.listThinkingLevelOptions = () => [];\n",
-  );
-};
 
 describeLive("LIVE openclaw updater JSON contract (real pinned CLI)", () => {
   it(
@@ -142,15 +127,7 @@ describeLiveDev("LIVE openclaw dev-head build (real from-source pipeline)", () =
         return s;
       });
 
-      const realRunner = createRunStream({});
-      const runner = {
-        runStreamed: (opts) => {
-          if (opts.command === "openclaw" && opts.args?.[0] === "backup") {
-            return Promise.resolve({ ok: true, code: 0, tail: "", timedOut: false });
-          }
-          return realRunner.runStreamed(opts);
-        },
-      };
+      const runner = createBackupStubRunner(createRunStream({}));
 
       const restartProcess = vi.fn();
       const buildSync = () =>
@@ -180,8 +157,15 @@ describeLiveDev("LIVE openclaw dev-head build (real from-source pipeline)", () =
 
       const sync = buildSync();
       const applyPromise = sync.applyUpdate({ channel: "dev", devHead: true });
+      // Interim handler: an early rejection must surface as this test's own
+      // failure, not an unhandledRejection while waitFor burns the budget.
+      let applyRejection = null;
+      applyPromise.catch((error) => {
+        applyRejection = error;
+      });
       await waitFor(
         () => {
+          if (applyRejection) throw applyRejection;
           const run = store.readState().lastUpdateRun;
           return run && run.finishedAt !== null;
         },

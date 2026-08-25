@@ -69,12 +69,49 @@ const waitFor = async (predicate, timeoutMs, label = "condition") => {
 const kVersionShape = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?$/;
 const kFullShaShape = /^[0-9a-f]{40}$/;
 
+// Shared pin fixture + backup stub used by the apply and dev tiers: a
+// minimal plausible pin tree (production ships the real image tree) and a
+// runner that intercepts ONLY `openclaw backup` (needs a live gateway).
+const kFixturePin = "0.0.1";
+
+const writePinFixture = (installDir) => {
+  const packageDir = path.join(installDir, "node_modules", "openclaw");
+  fs.mkdirSync(path.join(packageDir, "dist", "extensions"), {
+    recursive: true,
+  });
+  fs.writeFileSync(
+    path.join(packageDir, "package.json"),
+    `${JSON.stringify({ name: "openclaw", version: kFixturePin, bin: { openclaw: "bin/entry.js" } })}\n`,
+  );
+  fs.mkdirSync(path.join(packageDir, "bin"), { recursive: true });
+  fs.writeFileSync(
+    path.join(packageDir, "bin", "entry.js"),
+    `#!/usr/bin/env node\nconsole.log("${kFixturePin}");\n`,
+  );
+  fs.writeFileSync(
+    path.join(packageDir, "dist", "thinking-levels.js"),
+    "exports.listThinkingLevelOptions = () => [];\n",
+  );
+};
+
+const createBackupStubRunner = (realRunner) => ({
+  runStreamed: (opts) => {
+    if (opts.command === "openclaw" && opts.args?.[0] === "backup") {
+      return Promise.resolve({ ok: true, code: 0, tail: "", timedOut: false });
+    }
+    return realRunner.runStreamed(opts);
+  },
+});
+
 module.exports = {
   kLiveEnabled,
   kLiveDevEnabled,
   kSilentLogger,
   kVersionShape,
   kFullShaShape,
+  kFixturePin,
+  writePinFixture,
+  createBackupStubRunner,
   mkTemp,
   createCountingFetch,
   repoOpenclawBin,
