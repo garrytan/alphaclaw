@@ -445,8 +445,11 @@ describe("server/openclaw-release-channel", () => {
   });
 
   describe("bin shim", () => {
-    const createTargetBin = () => {
-      const dir = createTempRoot();
+    // Shim targets must live inside the managed roots (overlay store or the
+    // dev checkout) — validateBinShim rejects anything else.
+    const createTargetBin = (store) => {
+      const dir = path.join(store.overlayStoreDir, "1.2.3", "openclaw", "bin");
+      fs.mkdirSync(dir, { recursive: true });
       const targetBin = path.join(dir, "openclaw.js");
       fs.writeFileSync(targetBin, "#!/usr/bin/env node\n");
       return targetBin;
@@ -454,7 +457,7 @@ describe("server/openclaw-release-channel", () => {
 
     it("writes an executable shim atomically with no leftover temp files", () => {
       const { store } = createStore();
-      const targetBin = createTargetBin();
+      const targetBin = createTargetBin(store);
 
       expect(store.writeBinShim({ targetBin, label: "overlay 2.0.0" })).toEqual({
         ok: true,
@@ -472,8 +475,8 @@ describe("server/openclaw-release-channel", () => {
 
     it("round-trips the target through readBinShimTarget and overwrites in place", () => {
       const { store } = createStore();
-      const firstTarget = createTargetBin();
-      const secondTarget = createTargetBin();
+      const firstTarget = createTargetBin(store);
+      const secondTarget = createTargetBin(store);
 
       store.writeBinShim({ targetBin: firstTarget });
       expect(store.readBinShimTarget()).toBe(firstTarget);
@@ -485,7 +488,7 @@ describe("server/openclaw-release-channel", () => {
 
     it("validateBinShim removes a dangling shim and reports state transitions", () => {
       const { store } = createStore();
-      const targetBin = createTargetBin();
+      const targetBin = createTargetBin(store);
 
       expect(store.validateBinShim()).toEqual({
         present: false,
@@ -526,7 +529,7 @@ describe("server/openclaw-release-channel", () => {
 
     it("validateBinShim sweeps unexpected files out of the shim dir, keeping the shim", () => {
       const { store } = createStore();
-      const targetBin = createTargetBin();
+      const targetBin = createTargetBin(store);
       expect(store.writeBinShim({ targetBin })).toEqual({ ok: true });
       // shimDir sits on the agent-writable data volume and is prepended to
       // PATH — a planted "git" impostor would be a PATH hijack.
@@ -537,11 +540,24 @@ describe("server/openclaw-release-channel", () => {
       expect(result).toEqual({ present: true, valid: true, removed: false });
       expect(fs.readdirSync(store.shimDir)).toEqual(["openclaw"]);
       expect(store.readBinShimTarget()).toBe(targetBin);
+
+      // Containment: a shim pointing at an EXISTING file outside the managed
+      // roots (overlay store / dev checkout) is invalid — shape alone must
+      // not validate a planted shim.
+      const outsideDir = createTempRoot();
+      const outsideBin = path.join(outsideDir, "evil.js");
+      fs.writeFileSync(outsideBin, "#!/usr/bin/env node\n");
+      expect(store.writeBinShim({ targetBin: outsideBin })).toEqual({ ok: true });
+      expect(store.validateBinShim()).toEqual({
+        present: true,
+        valid: false,
+        removed: true,
+      });
     });
 
     it("removeBinShim is idempotent", () => {
       const { store } = createStore();
-      store.writeBinShim({ targetBin: createTargetBin() });
+      store.writeBinShim({ targetBin: createTargetBin(store) });
 
       expect(store.removeBinShim()).toEqual({ removed: true });
       expect(store.removeBinShim()).toEqual({ removed: false });

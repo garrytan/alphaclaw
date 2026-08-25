@@ -376,6 +376,49 @@ describe("server/openclaw-channel-sync", () => {
           message.includes("missing from disk"),
         ),
       ).toBe(true);
+      // The PIN is what actually runs after the fallback: `applied` must not
+      // keep claiming the pick, or the watchdog would blocklist (and
+      // acceptance would "verify") a build that never ran.
+      expect(state.applied).toBeNull();
+    });
+
+    it("skips the destructive boot sync while another alphaclaw server is live", async () => {
+      const { spawn } = require("child_process");
+      const { sync, store, installDir } = createHarness({
+        pin: "1.0.0",
+        channel: "beta",
+        installedVersion: "1.0.0",
+      });
+      store.updateState((s) => {
+        s.pinVersion = "1.0.0";
+        s.applied = { channel: "beta", version: "1.1.0", at: 1, acceptedAt: 2 };
+        return s;
+      });
+      // A live foreign pid in the server pidfile = another instance is
+      // serving from this tree; the sync must no-op (fail open), not mutate.
+      const child = spawn(process.execPath, ["-e", "setTimeout(() => {}, 30000)"], {
+        stdio: "ignore",
+      });
+      try {
+        fs.writeFileSync(
+          store.serverPidPath,
+          JSON.stringify({ pid: child.pid, at: 1 }),
+        );
+        const skipped = sync.syncAtBoot();
+        expect(skipped.ok).toBe(false);
+        expect(skipped.action).toBe("skipped_concurrent");
+        expect(skipped.livePid).toBe(child.pid);
+        // Nothing was mutated: applied still recorded, no lastBoot rewrite.
+        expect(store.readState().applied).toEqual(
+          expect.objectContaining({ version: "1.1.0" }),
+        );
+      } finally {
+        child.kill("SIGKILL");
+      }
+      // A DEAD pid (or our own) clears the guard and the sync proceeds.
+      await new Promise((resolve) => child.once("exit", resolve));
+      const proceeded = sync.syncAtBoot();
+      expect(proceeded.ok).toBe(true);
     });
 
     it("delivers bin-process boot notifications once via flushBootNotifications", async () => {
@@ -1181,12 +1224,14 @@ describe("server/openclaw-channel-sync", () => {
       expect(installToTempDir).not.toHaveBeenCalled();
 
       // Gateway exits during a version swap must not feed crash accounting:
-      // begin() brackets the run and end() fires when it settles.
+      // begin() brackets the run. On a RESTARTING success the latch stays held
+      // (end() skipped) — the swap ends at the process restart, and releasing
+      // early would let an old-gateway exit blocklist the never-run version.
       selfUpdate = false;
       const applied = await sync.applyUpdate({ channel: "beta", version: "1.1.0" });
       expect(applied.status).toBe(202);
       expect(begin).toHaveBeenCalledTimes(1);
-      expect(end).toHaveBeenCalledTimes(1);
+      expect(end).not.toHaveBeenCalled();
 
       // end() must also fire on FAILED applies, or crash accounting would stay
       // suspended forever after the first rejection.
@@ -1195,7 +1240,9 @@ describe("server/openclaw-channel-sync", () => {
       expect(failed.status).toBe(409);
       expect(failed.body.code).toBe("version_blocklisted");
       expect(begin).toHaveBeenCalledTimes(2);
-      expect(end).toHaveBeenCalledTimes(2);
+      // Only the FAILED apply releases the latch; the restarting success
+      // above holds it until the process restart.
+      expect(end).toHaveBeenCalledTimes(1);
     });
 
     it("self-update gate: blocks with a hint, fails open on probe errors, defaults open", async () => {
@@ -1254,7 +1301,7 @@ describe("server/openclaw-channel-sync", () => {
       expect(defaultedResult.body.restarting).toBe(true);
     });
 
-    it("brackets the managed operation exactly once around success AND a mid-run failure", async () => {
+    it("holds the managed latch through a restarting success; releases it on failure", async () => {
       // Success: one begin, one end.
       const okBegin = vi.fn();
       const okEnd = vi.fn();
@@ -1269,7 +1316,10 @@ describe("server/openclaw-channel-sync", () => {
       const applied = await ok.sync.applyUpdate({ channel: "beta", version: "1.1.0" });
       expect(applied.status).toBe(202);
       expect(okBegin).toHaveBeenCalledTimes(1);
-      expect(okEnd).toHaveBeenCalledTimes(1);
+      // Restarting success: the latch is HELD until the process restart lands
+      // (the latch dies with the process; releasing early re-arms rollback
+      // against a version that never ran).
+      expect(okEnd).not.toHaveBeenCalled();
 
       // Mid-run failure (verify rejects a bad --version): end() must STILL
       // fire exactly once, or crash accounting stays suspended forever.
