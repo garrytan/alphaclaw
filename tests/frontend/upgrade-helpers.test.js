@@ -596,7 +596,7 @@ describe("frontend/upgrade-helpers confirm models (U1/U3/U9)", () => {
     });
 
     expect(model.lines[0]).toBe(
-      "Impact: compiles from source, 10-30 minutes; your agent stays up until the final restart.",
+      "Impact: compiles from source, 20-35 minutes; your agent stays up until the final restart.",
     );
     expect(model.lines.join(" ")).toContain("untested snapshot");
   });
@@ -632,7 +632,7 @@ describe("frontend/upgrade-helpers confirm models (U1/U3/U9)", () => {
     expect(model.browseCaption).toContain("installs nothing until you press Apply");
 
     const devModel = buildChannelSwitchModel({ nextChannel: "dev" });
-    expect(devModel.applyCaption).toContain("10-30 minutes");
+    expect(devModel.applyCaption).toContain("20-35 minutes");
   });
 });
 
