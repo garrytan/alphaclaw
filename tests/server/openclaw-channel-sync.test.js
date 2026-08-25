@@ -382,6 +382,38 @@ describe("server/openclaw-channel-sync", () => {
       expect(state.applied).toBeNull();
     });
 
+    it("treats installed-lags-new-pin after a self-update as lag, not agent drift", async () => {
+      // AlphaClaw self-update bumped the declared pin, but node_modules still
+      // holds the old pin at first boot. That is expected reinstall lag — the
+      // "changed outside this dashboard (possibly by your agent)" accusation
+      // must NOT fire.
+      const { sync, store, notify } = createHarness({
+        pin: "1.0.1",
+        channel: "stable",
+        installedVersion: "1.0.0",
+        sentinelVersion: "1.0.0",
+      });
+      store.updateState((s) => {
+        s.pinVersion = "1.0.0";
+        return s;
+      });
+
+      const result = sync.syncAtBoot();
+      await flushAsync();
+
+      expect(result.ok).toBe(true);
+      expect(result.action).toBe("pin_reconciled");
+      expect(store.readState().pinVersion).toBe("1.0.1");
+      expect(
+        result.warnings.some((warning) => warning.includes("lags the new pin")),
+      ).toBe(true);
+      expect(
+        notifyMessages(notify).some((message) =>
+          message.includes("changed outside this dashboard"),
+        ),
+      ).toBe(false);
+    });
+
     it("skips the destructive boot sync while another alphaclaw server is live", async () => {
       const { spawn } = require("child_process");
       const { sync, store, installDir } = createHarness({
