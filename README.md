@@ -104,9 +104,29 @@ CMD ["alphaclaw", "start"]
 | **Cron**      | Cron job management, interactive rolling calendar, run-history drilldowns, trend analytics, and per-run usage breakdowns |
 | **Nodes**     | Guided local-node setup for VPS deployments, per-node browser attach, reconnect commands, and routing/pairing controls   |
 | **Watchdog**  | Health monitoring, crash-loop status, auto-repair toggle, notifications, event log, live log tail, interactive terminal  |
+| **Upgrade**   | OpenClaw versions & release channels — stable/beta/dev catalog, release notes, one-click switch with backup + auto-rollback |
 | **Providers** | AI provider credentials (Anthropic, OpenAI, Gemini, Mistral, Voyage, Groq, Deepgram) and model selection                 |
 | **Envars**    | Environment variables — view, edit, add — with gateway restart prompts                                                   |
 | **Webhooks**  | Webhook endpoints, transform modules, request history, payload inspection, OAuth callbacks, Gmail watch delivery flows   |
+
+## OpenClaw Release Channels
+
+The **Upgrade** page pins your OpenClaw to a release channel and lets you switch, upgrade, or downgrade between specific builds — entirely from the browser.
+
+| Channel    | What runs                                                                 | Risk                                     |
+| ---------- | ------------------------------------------------------------------------- | ---------------------------------------- |
+| **Stable** | The exact OpenClaw version AlphaClaw ships and tests against (the default) | Safest — vetted with every AlphaClaw release |
+| **Beta**   | Upstream's pre-release train (npm `beta` builds, published every few days) | New features sooner, occasional bugs     |
+| **Dev**    | Built from source off OpenClaw's `main` branch, the way its creator runs it | Newest possible; protected by auto-rollback |
+
+How it works:
+
+- **Explicit updates only.** Nothing installs on its own. Pick a version (last 5 stable, last 5 beta, or recent `main` commits), review its release notes, click once. Every restart deterministically re-loads the version you chose — offline, from a persisted copy on your data volume.
+- **Backed up before every switch.** AlphaClaw runs `openclaw backup create --verify` first; downgrades are blocked unless the backup verifies (older versions may not read migrated state).
+- **Auto-rollback.** A freshly switched version gets a 24-hour stabilization window. If it crash-loops, exits with a config error, or stays degraded, AlphaClaw blocklists it, restarts, and boots the last known-good build — then tells you on Telegram/Discord/Slack what happened and why. "Mark as good now" ends the window early once you're satisfied.
+- **Dev builds are honest about cost.** The first dev build compiles OpenClaw from source (10-30 minutes, ~5 GB on the data volume, 8 GB RAM recommended) with live build output streamed to the page. Your agent stays up until the final restart.
+
+The stable pin in `package.json` remains the recovery floor: whatever happens, a container restart can always fall back to it.
 
 ## CLI
 
@@ -213,11 +233,23 @@ If you need OpenClaw's full security posture (manual pairing codes, no query-str
 ```bash
 npm install
 npm run build:ui        # Generate Setup UI bundle, Tailwind CSS, and vendor CSS (required for local runs from a git checkout)
-npm test                # Full suite (440 tests)
-npm run test:watchdog   # Watchdog-focused suite (14 tests)
+npm test                # Full suite (hermetic — no network)
+npm run test:watchdog   # Watchdog-focused suite
 npm run test:watch      # Watch mode
 npm run test:coverage   # Coverage report
+
+# Live e2e tiers (opt-in; hit the REAL npm registry / GitHub API and install
+# real OpenClaw releases — catch upstream drift the hermetic suite can't):
+npm run test:live       # catalog + real stable/beta package applies (~5 min, network)
+npm run test:live:dev   # + full dev-channel source build (10-30 min, ~5 GB disk)
 ```
+
+The live tiers also run in CI on a schedule (`.github/workflows/live-e2e.yml`):
+nightly for catalog + package applies, weekly (or manually via
+`workflow_dispatch`) for the dev source build. A live-tier failure usually
+means upstream OpenClaw changed something the channel feature depends on
+(dist-tags, prerelease naming, engines, updater JSON, dist layout) — not that
+this repo regressed.
 
 **Requirements:** Node.js ≥ 22.22.3 on Node 22, ≥ 24.15.0 on Node 24, or ≥ 25.9.0
 

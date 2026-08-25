@@ -40,6 +40,7 @@ Runtime model:
 - Reuse existing server route and state patterns before introducing new abstractions.
 - Update tests when behavior changes in routes, watchdog flows, or setup state.
 - Before running tests in a fresh checkout, run `npm install` so `vitest` (devDependency) is available for `npm test`.
+- `npm test` is hermetic by design — `tests/live/**` (real npm/GitHub/OpenClaw-updater e2e) is excluded unless `OPENCLAW_LIVE_E2E=1`. Use `npm run test:live` (network, ~5 min) or `npm run test:live:dev` (adds the real dev source build, 10-30 min). When a live tier fails but the hermetic suite is green, suspect upstream OpenClaw drift first and update the encoded assumption, not the guard.
 
 ### Code Structure
 
@@ -91,6 +92,25 @@ Use this release flow when promoting tested beta builds to production:
 5. Return templates to production channel:
    - `@chrysb/alphaclaw: "latest"`
 6. Optionally keep beta branch/tag flows active for next release cycle.
+
+### OpenClaw Release Channels (runtime version pinning)
+
+The `openclaw` pin in `package.json` remains authoritative for the **stable** channel and for every fallback path — do not weaken the pin policy above. On top of it, the release-channel system (`lib/server/openclaw-channel-sync.js`, `openclaw-release-channel.js`, `openclaw-releases.js`, `openclaw-run-stream.js`, routes in `routes/openclaw-channel.js`, Upgrade tab UI) lets an operator explicitly run a different published version (beta/stable catalog via npm+GitHub) or a source build of upstream `main` (dev channel, via OpenClaw's own `openclaw update --channel dev`).
+
+Design invariants (do not regress):
+- **Activation happens ONLY at boot** (`bin/alphaclaw.js` section 7b → `runOpenclawChannelBootSync`), from local state: the overlay store at `<root>/openclaw-overlay/` (self-contained `--install-strategy=nested` trees incl. a snapshot of the pin) or the dev checkout at `$OPENCLAW_HOME/openclaw` behind the PATH bin shim at `<root>/.openclaw/.alphaclaw/bin/openclaw`. Boot never fetches. An apply prepares + verifies + records, then restarts the AlphaClaw process.
+- The activation sentinel (`node_modules/.openclaw-activation.json`), not a version compare, decides re-activation (mid-copy crashes leave a plausible package.json).
+- Boot sync is fail-open: any error falls back to the pin and never blocks the Setup UI.
+- The channel state file (`<root>/.openclaw/.alphaclaw/openclaw-channel-state.json`) is the single authority; `openclaw.json`'s `update.channel` is a mirror rewritten every boot, and `OPENCLAW_NO_AUTO_UPDATE=1` is set in the gateway env so neither OpenClaw nor the agent can self-update out from under it.
+- Rollback triggers (crash loop, exit 78, degraded >10 min, failed acceptance) fire only on non-pin builds inside their 24h stabilization window; dev rollback always targets the pin snapshot — never an in-crash rebuild. Unattended `doctor --fix` is suppressed inside that window (the 2026.7.1 plugins.allow bug is why).
+- Accepted supply-chain risk: the dev channel executes upstream build scripts (pnpm postinstalls). Mitigations: pre-switch verified backups, acceptance gating, blocklist, pin floor.
+
+Runbook — "a dev/beta build broke":
+1. If it crash-looped inside the window, auto-rollback already ran: check the Upgrade page incident card + the chat notification; the bad build is blocklisted.
+2. Gateway up but misbehaving: Upgrade page → Roll back (targets last known-good, else the pin), or "Mark as good now" if the degradation is expected/self-inflicted.
+3. Dev checkout stuck (interrupted build / dirty worktree): run `openclaw update repair` from the Watchdog terminal; it finishes a half-completed update and does not touch user state.
+4. Downgrade landed on migrated state (gateway exits 78 after a downgrade): restore the pre-switch backup from `<root>/backups/openclaw` (`openclaw backup` docs; sqlite-only: `openclaw doctor --session-sqlite restore`).
+5. Blocklist entries are permanent per version until cleared in the UI ("Clear" → "Try again").
 
 ### Runtime Dependency Guardrails (Express 4 vs 5)
 
