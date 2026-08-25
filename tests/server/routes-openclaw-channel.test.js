@@ -1,0 +1,365 @@
+const fs = require("fs");
+const os = require("os");
+const path = require("path");
+const express = require("express");
+const request = require("supertest");
+
+const {
+  registerOpenclawChannelRoutes,
+} = require("../../lib/server/routes/openclaw-channel");
+const { registerAuthRoutes } = require("../../lib/server/routes/auth");
+
+const kDevSha = "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0";
+
+const createChannelInfo = (overrides = {}) => ({
+  releaseChannel: "stable",
+  installedVersion: "1.0.0",
+  pinVersion: "1.0.0",
+  applied: null,
+  appliedId: null,
+  isPin: true,
+  acceptedAt: null,
+  inStabilizationWindow: false,
+  lastKnownGood: { package: "0.9.0", dev: null },
+  blocklist: [{ id: "0.8.0", reason: "crash_loop", exitCode: 1, at: 1 }],
+  lastUpdateRun: null,
+  lastBoot: null,
+  ...overrides,
+});
+
+const createDeps = (overrides = {}) => ({
+  fs,
+  OPENCLAW_DIR: fs.mkdtempSync(path.join(os.tmpdir(), "alphaclaw-routes-channel-")),
+  isOnboarded: () => true,
+  openclawChannelService: {
+    getChannelInfo: vi.fn(() => createChannelInfo()),
+    applyUpdate: vi.fn(async () => ({
+      status: 200,
+      body: { ok: true, noop: true },
+    })),
+    requestChannelRollback: vi.fn(() => ({
+      ok: true,
+      target: { kind: "pin" },
+      blockedId: "1.1.0",
+    })),
+    markGoodNow: vi.fn(() => ({ ok: true, acceptedAt: 123 })),
+    store: {
+      clearBlocklist: vi.fn(),
+      readState: vi.fn(() => ({ blocklist: [] })),
+    },
+  },
+  openclawReleasesService: {
+    getCatalog: vi.fn(async () => ({ ok: true, stable: [], beta: [], dev: {} })),
+    annotateCatalog: vi.fn((catalog) => ({ ...catalog, annotated: true })),
+    isKnownVersion: vi.fn(() => true),
+    isKnownCommit: vi.fn(() => true),
+  },
+  operationEvents: {
+    createOperation: vi.fn(() => ({ operationId: "op-1" })),
+    complete: vi.fn(),
+    fail: vi.fn(),
+    publish: vi.fn(),
+  },
+  restartRequiredState: {
+    markRequired: vi.fn(),
+    getSnapshot: vi.fn(async () => ({ restartRequired: true })),
+  },
+  ...overrides,
+});
+
+const createApp = (deps) => {
+  const app = express();
+  app.use(express.json());
+  registerOpenclawChannelRoutes({ app, ...deps });
+  return app;
+};
+
+// These routes are mounted behind `app.use("/api", requireAuth)` in
+// production server.js; this builds that slice with the REAL auth middleware.
+const createAuthedApp = (deps) => {
+  process.env.SETUP_PASSWORD = "channel-test-secret";
+  const app = express();
+  app.use(express.json());
+  registerAuthRoutes({
+    app,
+    loginThrottle: {
+      getClientKey: vi.fn(() => "client-key"),
+      getOrCreateLoginAttemptState: vi.fn(() => ({ attempts: 0 })),
+      evaluateLoginThrottle: vi.fn(() => ({ blocked: false, retryAfterSec: 0 })),
+      recordLoginFailure: vi.fn(() => ({ lockMs: 0, locked: false })),
+      recordLoginSuccess: vi.fn(),
+      cleanupLoginAttemptStates: vi.fn(),
+    },
+  });
+  registerOpenclawChannelRoutes({ app, ...deps });
+  return app;
+};
+
+const kRoutes = [
+  {
+    method: "put",
+    path: "/api/alphaclaw/config/updates/openclaw-release-channel",
+    body: { releaseChannel: "beta" },
+  },
+  { method: "get", path: "/api/openclaw/channel" },
+  { method: "get", path: "/api/openclaw/catalog" },
+  { method: "post", path: "/api/openclaw/apply", body: { channel: "beta", version: "1.1.0" } },
+  { method: "post", path: "/api/openclaw/rollback", body: {} },
+  { method: "post", path: "/api/openclaw/mark-good", body: {} },
+  { method: "post", path: "/api/openclaw/blocklist/clear", body: {} },
+];
+
+describe("server/routes/openclaw-channel", () => {
+  afterEach(() => {
+    delete process.env.SETUP_PASSWORD;
+  });
+
+  it("rejects every channel route without a session cookie, and allows them after login", async () => {
+    const deps = createDeps();
+    const app = createAuthedApp(deps);
+
+    for (const route of kRoutes) {
+      const res = await request(app)[route.method](route.path).send(route.body || {});
+      expect(res.status, `${route.method.toUpperCase()} ${route.path}`).toBe(401);
+      expect(res.body).toEqual({ error: "Unauthorized" });
+    }
+    expect(deps.openclawChannelService.applyUpdate).not.toHaveBeenCalled();
+    expect(deps.openclawChannelService.markGoodNow).not.toHaveBeenCalled();
+
+    const login = await request(app)
+      .post("/api/auth/login")
+      .send({ password: "channel-test-secret" });
+    expect(login.status).toBe(200);
+    const cookie = String(login.headers["set-cookie"]?.[0] || "").split(";")[0];
+    expect(cookie).toContain("setup_token=");
+
+    const channelRes = await request(app)
+      .get("/api/openclaw/channel")
+      .set("Cookie", cookie);
+    expect(channelRes.status).toBe(200);
+    expect(channelRes.body.ok).toBe(true);
+
+    const markGood = await request(app)
+      .post("/api/openclaw/mark-good")
+      .set("Cookie", cookie)
+      .send({});
+    expect(markGood.status).toBe(200);
+    expect(markGood.body).toEqual({ ok: true, acceptedAt: 123 });
+  });
+
+  it("PUT release-channel validates the enum and persists valid changes", async () => {
+    const deps = createDeps();
+    const app = createApp(deps);
+
+    const invalid = await request(app)
+      .put("/api/alphaclaw/config/updates/openclaw-release-channel")
+      .send({ releaseChannel: "nightly" });
+    expect(invalid.status).toBe(400);
+    expect(invalid.body.code).toBe("invalid_channel");
+
+    const valid = await request(app)
+      .put("/api/alphaclaw/config/updates/openclaw-release-channel")
+      .send({ releaseChannel: "beta" });
+    expect(valid.status).toBe(200);
+    expect(valid.body).toEqual(
+      expect.objectContaining({ ok: true, changed: true, restartRequired: true }),
+    );
+    expect(deps.restartRequiredState.markRequired).toHaveBeenCalledWith(
+      "openclaw_release_channel_changed",
+    );
+    const onDisk = JSON.parse(
+      fs.readFileSync(path.join(deps.OPENCLAW_DIR, "alphaclaw.json"), "utf8"),
+    );
+    expect(onDisk.updates.openclaw.releaseChannel).toBe("beta");
+  });
+
+  it("rejects malformed and unknown apply targets before touching the service", async () => {
+    const deps = createDeps();
+    deps.openclawReleasesService.isKnownCommit.mockReturnValue(false);
+    deps.openclawReleasesService.isKnownVersion.mockReturnValue(false);
+    const app = createApp(deps);
+
+    const badChannel = await request(app)
+      .post("/api/openclaw/apply")
+      .send({ channel: "nightly", version: "1.1.0" });
+    expect(badChannel.status).toBe(400);
+    expect(badChannel.body.code).toBe("invalid_channel");
+
+    const badSha = await request(app)
+      .post("/api/openclaw/apply")
+      .send({ channel: "dev", sha: "XYZ" });
+    expect(badSha.status).toBe(400);
+    expect(badSha.body.code).toBe("invalid_target");
+
+    const unknownSha = await request(app)
+      .post("/api/openclaw/apply")
+      .send({ channel: "dev", sha: kDevSha });
+    expect(unknownSha.status).toBe(400);
+    expect(unknownSha.body.code).toBe("unknown_commit");
+
+    const injections = [
+      "1.1.0;rm -rf",
+      "`touch /tmp/pwned`",
+      "$(touch /tmp/pwned)",
+      "1.1.0\n2.0.0",
+    ];
+    for (const version of injections) {
+      const res = await request(app)
+        .post("/api/openclaw/apply")
+        .send({ channel: "stable", version });
+      expect(res.status, `injection payload: ${JSON.stringify(version)}`).toBe(400);
+      expect(res.body.code).toBe("invalid_target");
+    }
+
+    const unknownVersion = await request(app)
+      .post("/api/openclaw/apply")
+      .send({ channel: "stable", version: "1.9.9" });
+    expect(unknownVersion.status).toBe(400);
+    expect(unknownVersion.body.code).toBe("unknown_version");
+
+    expect(deps.openclawChannelService.applyUpdate).not.toHaveBeenCalled();
+  });
+
+  it("returns quick apply results inline and hands off long runs to the operation stream", async () => {
+    const quickDeps = createDeps();
+    quickDeps.openclawChannelService.applyUpdate.mockResolvedValue({
+      status: 200,
+      body: { ok: true, noop: true },
+    });
+    const quickApp = createApp(quickDeps);
+
+    const quick = await request(quickApp)
+      .post("/api/openclaw/apply")
+      .send({ channel: "beta", version: "1.1.0" });
+    expect(quick.status).toBe(200);
+    expect(quick.body).toEqual({ ok: true, noop: true, operationId: "op-1" });
+    expect(quickDeps.openclawChannelService.applyUpdate).toHaveBeenCalledWith({
+      channel: "beta",
+      version: "1.1.0",
+      sha: null,
+      devHead: false,
+      operationId: "op-1",
+    });
+
+    const slowDeps = createDeps();
+    slowDeps.openclawChannelService.applyUpdate.mockReturnValue(
+      new Promise(() => {}),
+    );
+    const slowApp = createApp(slowDeps);
+
+    const slow = await request(slowApp)
+      .post("/api/openclaw/apply")
+      .send({ channel: "beta", version: "1.1.0" });
+    expect(slow.status).toBe(202);
+    expect(slow.body).toEqual({
+      ok: true,
+      operationId: "op-1",
+      events: "/api/operations/op-1/events",
+      // Alias matching the field name pre-existing 202 endpoints use.
+      streamUrl: "/api/operations/op-1/events",
+    });
+  });
+
+  it("maps rollback and mark-good service failures to 409 and successes to 200", async () => {
+    const deps = createDeps();
+    const app = createApp(deps);
+
+    deps.openclawChannelService.requestChannelRollback.mockReturnValueOnce({
+      ok: false,
+      code: "nothing_to_roll_back",
+      message: "Already running the built-in stable version.",
+    });
+    const rollbackFailure = await request(app).post("/api/openclaw/rollback").send({});
+    expect(rollbackFailure.status).toBe(409);
+    expect(rollbackFailure.body.code).toBe("nothing_to_roll_back");
+
+    const rollbackSuccess = await request(app).post("/api/openclaw/rollback").send({});
+    expect(rollbackSuccess.status).toBe(200);
+    expect(rollbackSuccess.body).toEqual(
+      expect.objectContaining({ ok: true, target: { kind: "pin" } }),
+    );
+    expect(deps.openclawChannelService.requestChannelRollback).toHaveBeenCalledWith({
+      reason: "manual",
+    });
+
+    deps.openclawChannelService.markGoodNow.mockReturnValueOnce({
+      ok: false,
+      code: "nothing_to_accept",
+      message: "No pending version.",
+    });
+    const markGoodFailure = await request(app).post("/api/openclaw/mark-good").send({});
+    expect(markGoodFailure.status).toBe(409);
+    expect(markGoodFailure.body.code).toBe("nothing_to_accept");
+
+    const markGoodSuccess = await request(app).post("/api/openclaw/mark-good").send({});
+    expect(markGoodSuccess.status).toBe(200);
+    expect(markGoodSuccess.body).toEqual({ ok: true, acceptedAt: 123 });
+    expect(deps.openclawChannelService.markGoodNow).toHaveBeenCalledWith({
+      source: "manual",
+    });
+  });
+
+  it("clears one blocklist entry, or all, and validates the id", async () => {
+    const deps = createDeps();
+    const app = createApp(deps);
+
+    const single = await request(app)
+      .post("/api/openclaw/blocklist/clear")
+      .send({ id: "x" });
+    expect(single.status).toBe(200);
+    expect(single.body).toEqual({ ok: true, blocklist: [] });
+    expect(deps.openclawChannelService.store.clearBlocklist).toHaveBeenCalledWith("x");
+
+    const all = await request(app).post("/api/openclaw/blocklist/clear").send({});
+    expect(all.status).toBe(200);
+    expect(deps.openclawChannelService.store.clearBlocklist).toHaveBeenLastCalledWith(
+      undefined,
+    );
+
+    const invalid = await request(app)
+      .post("/api/openclaw/blocklist/clear")
+      .send({ id: 42 });
+    expect(invalid.status).toBe(400);
+    expect(invalid.body.code).toBe("invalid_target");
+    expect(deps.openclawChannelService.store.clearBlocklist).toHaveBeenCalledTimes(2);
+  });
+
+  it("passes catalog failures through as 503 and annotates successful catalogs", async () => {
+    const deps = createDeps();
+    deps.openclawReleasesService.getCatalog.mockResolvedValueOnce({
+      ok: false,
+      code: "catalog_unavailable",
+      message: "npm registry unreachable",
+    });
+    const app = createApp(deps);
+
+    const unavailable = await request(app).get("/api/openclaw/catalog");
+    expect(unavailable.status).toBe(503);
+    expect(unavailable.body).toEqual({
+      ok: false,
+      code: "catalog_unavailable",
+      message: "npm registry unreachable",
+    });
+    expect(deps.openclawReleasesService.annotateCatalog).not.toHaveBeenCalled();
+
+    const okRes = await request(app).get("/api/openclaw/catalog");
+    expect(okRes.status).toBe(200);
+    expect(okRes.body.ok).toBe(true);
+    expect(okRes.body.catalog.annotated).toBe(true);
+    expect(okRes.body.channel).toEqual({
+      releaseChannel: "stable",
+      installedVersion: "1.0.0",
+      pinVersion: "1.0.0",
+      appliedId: null,
+    });
+    const info = createChannelInfo();
+    expect(deps.openclawReleasesService.annotateCatalog).toHaveBeenCalledWith(
+      expect.objectContaining({ ok: true }),
+      {
+        currentId: "1.0.0",
+        lastKnownGood: info.lastKnownGood,
+        blocklist: info.blocklist,
+      },
+    );
+  });
+});
