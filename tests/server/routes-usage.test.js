@@ -224,6 +224,77 @@ describe("server/routes/usage", () => {
     ]);
   });
 
+  it("resolves the same labels for suffixed telegram session keys", async () => {
+    // openclaw emits suffixed keys like `…:topic:182:heartbeat`; they must
+    // resolve to the SAME group/topic labels as the plain key.
+    const deps = createDeps();
+    deps.getSessionsList = vi.fn(() => [
+      {
+        sessionId: "agent:main:telegram:group:-1003832123427:topic:182:heartbeat",
+        sessionKey: "agent:main:telegram:group:-1003832123427:topic:182:heartbeat",
+      },
+      {
+        sessionId: "agent:main:telegram:group:-1003832123427:heartbeat",
+        sessionKey: "agent:main:telegram:group:-1003832123427:heartbeat",
+      },
+      {
+        sessionId: "agent:main:telegram:direct:1050628644:heartbeat",
+        sessionKey: "agent:main:telegram:direct:1050628644:heartbeat",
+      },
+    ]);
+    vi.spyOn(topicRegistry, "getGroup").mockImplementation((groupId) =>
+      groupId === "-1003832123427"
+        ? {
+            name: "Workspace Name",
+            topics: { "182": { name: "Topic Name" } },
+          }
+        : null,
+    );
+    const app = createApp(deps);
+
+    const response = await request(app).get("/api/usage/sessions");
+
+    expect(response.status).toBe(200);
+    expect(response.body.sessions[0].labels).toEqual([
+      { label: "Main", tone: "cyan" },
+      { label: "Workspace Name", tone: "purple" },
+      { label: "Topic Name", tone: "gray" },
+    ]);
+    expect(response.body.sessions[1].labels).toEqual([
+      { label: "Main", tone: "cyan" },
+      { label: "Workspace Name", tone: "purple" },
+    ]);
+    expect(response.body.sessions[2].labels).toEqual([
+      { label: "Main", tone: "cyan" },
+      { label: "Telegram Direct", tone: "blue" },
+    ]);
+  });
+
+  it("feeds topic session keys to the injected discovery hook", async () => {
+    const deps = createDeps();
+    deps.getSessionsList = vi.fn(() => [
+      {
+        sessionId: "agent:main:telegram:group:-42:topic:7:heartbeat",
+        sessionKey: "agent:main:telegram:group:-42:topic:7:heartbeat",
+      },
+      {
+        sessionId: "agent:main:telegram:direct:9",
+        sessionKey: "agent:main:telegram:direct:9",
+      },
+    ]);
+    vi.spyOn(topicRegistry, "getGroup").mockReturnValue(null);
+    const topicDiscovery = { noteSessionSeen: vi.fn() };
+    const app = createApp({ ...deps, topicDiscovery });
+
+    const response = await request(app).get("/api/usage/sessions");
+
+    expect(response.status).toBe(200);
+    expect(topicDiscovery.noteSessionSeen).toHaveBeenCalledTimes(1);
+    expect(topicDiscovery.noteSessionSeen).toHaveBeenCalledWith(
+      "agent:main:telegram:group:-42:topic:7:heartbeat",
+    );
+  });
+
   it("returns 500 with the error message when summary generation fails", async () => {
     const deps = createDeps();
     deps.getDailySummary = vi.fn(() => {

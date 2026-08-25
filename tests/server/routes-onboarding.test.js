@@ -9,23 +9,32 @@ const { kSetupDir } = require("../../lib/server/constants");
 
 const createBaseDeps = ({ onboarded = false, hasCodexOauth = false } = {}) => {
   const kOnboardingMarkerPath = "/tmp/alphaclaw/onboarded.json";
+  const fsMock = {
+    mkdirSync: vi.fn(),
+    existsSync: vi.fn((targetPath) =>
+      onboarded ? targetPath === kOnboardingMarkerPath : false,
+    ),
+    statSync: vi.fn(() => {
+      throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+    }),
+    readdirSync: vi.fn(() => []),
+    copyFileSync: vi.fn(),
+    rmSync: vi.fn(),
+    readFileSync: vi.fn(() => "{}"),
+    writeFileSync: vi.fn(),
+    appendFileSync: vi.fn(),
+  };
+  // writeFileAtomic writes `<path>.<pid>.tmp` then renames; replay the most
+  // recent write at the rename target so assertions (and per-test content
+  // maps) keyed by the final path keep working.
+  fsMock.renameSync = vi.fn((sourcePath, targetPath) => {
+    const sourceWrite = [...fsMock.writeFileSync.mock.calls]
+      .reverse()
+      .find(([writtenPath]) => writtenPath === sourcePath);
+    if (sourceWrite) fsMock.writeFileSync(targetPath, ...sourceWrite.slice(1));
+  });
   return {
-    fs: {
-      mkdirSync: vi.fn(),
-      existsSync: vi.fn((targetPath) =>
-        onboarded ? targetPath === kOnboardingMarkerPath : false,
-      ),
-      statSync: vi.fn(() => {
-        throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
-      }),
-      readdirSync: vi.fn(() => []),
-      copyFileSync: vi.fn(),
-      rmSync: vi.fn(),
-      renameSync: vi.fn(),
-      readFileSync: vi.fn(() => "{}"),
-      writeFileSync: vi.fn(),
-      appendFileSync: vi.fn(),
-    },
+    fs: fsMock,
     constants: {
       OPENCLAW_DIR: "/tmp/openclaw",
       WORKSPACE_DIR: "/tmp/openclaw/workspace",
@@ -445,9 +454,15 @@ describe("server/routes/onboarding", () => {
       "sk-test-123456789",
     );
     expect(deps.authProfiles.syncConfigAuthReferencesForAgent).toHaveBeenCalledTimes(1);
-    expect(deps.fs.copyFileSync).toHaveBeenCalledWith(
+    // AGENTS.md is now written atomically (readFileSync + writeFileAtomic),
+    // not copied with copyFileSync.
+    const agentsWriteCall = deps.fs.writeFileSync.mock.calls.find(
+      ([target]) => target === "/tmp/openclaw/workspace/hooks/bootstrap/AGENTS.md",
+    );
+    expect(agentsWriteCall).toBeTruthy();
+    expect(deps.fs.copyFileSync).not.toHaveBeenCalledWith(
       path.join(kSetupDir, "core-prompts", "AGENTS.md"),
-      "/tmp/openclaw/workspace/hooks/bootstrap/AGENTS.md",
+      expect.anything(),
     );
     const toolsWriteCall = deps.fs.writeFileSync.mock.calls.find(
       ([path]) => path === "/tmp/openclaw/workspace/hooks/bootstrap/TOOLS.md",
