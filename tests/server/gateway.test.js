@@ -152,6 +152,15 @@ describe("server/gateway restart behavior", () => {
     }
   });
 
+  it("pins OPENCLAW_NO_AUTO_UPDATE=1 in gateway env so builds never self-update", () => {
+    delete require.cache[modulePath];
+    const gateway = require(modulePath);
+
+    // Versions are managed by the release-channel system; the gateway (or the
+    // agent inside it) must never self-update out from under the channel state.
+    expect(gateway.gatewayEnv().OPENCLAW_NO_AUTO_UPDATE).toBe("1");
+  });
+
   it("uses force cold start when the gateway port is not listening", async () => {
     const restartSupervisor = createChild();
     const spawnMock = vi.fn(() => restartSupervisor);
