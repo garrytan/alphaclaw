@@ -14,14 +14,14 @@ on:
   schedule:
     # Nightly: catalog + real stable/beta package applies (~5 min).
     - cron: "17 9 * * *"
-    # Weekly (Sunday): additionally the full dev source build (10-30 min).
+    # Weekly (Sunday): additionally the full dev source build (20-35 min).
     # NOTE: this exact string is byte-matched by live-dev-build's `if:` gate
     # below — change BOTH together or the dev tier silently never runs.
     - cron: "47 9 * * 0"
   workflow_dispatch:
     inputs:
       run_dev_build:
-        description: "Also run the full dev-channel source build (10-30 min)"
+        description: "Also run the full dev-channel source build (20-35 min)"
         type: boolean
         default: false
 
@@ -61,7 +61,7 @@ jobs:
       (github.event_name == 'schedule' && github.event.schedule == '47 9 * * 0') ||
       (github.event_name == 'workflow_dispatch' && inputs.run_dev_build)
     runs-on: ubuntu-latest
-    # Dry-run contract (5 min) + full build (40 min budget) + setup. The
+    # Dry-run contract (5 min) + full build (35-min test timeout) + setup. The
     # script runs ONLY the dev file — the same weekly cron already triggers
     # the nightly job for catalog/apply, and stacking their ~3 GB of temp
     # trees under the dev build's 5 GB disk preflight would starve it.

@@ -596,7 +596,7 @@ describe("frontend/upgrade-tab view", () => {
 
     const collapsedText = treeText(collapsed);
     expect(collapsedText).toContain(
-      "≈5 GB free on the data volume · 8 GB RAM recommended · first build takes 10-30 minutes",
+      "≈5 GB free on the data volume · 8 GB RAM recommended · first build takes 20-35 minutes",
     );
     expect(collapsedText).toContain("Latest dev (main HEAD)");
     expect(collapsedText).toContain("Advanced: pin a specific commit");

@@ -7,7 +7,7 @@
 //      `openclaw update --channel dev` — git clone of openclaw/openclaw main,
 //      pnpm install, from-source build, doctor — driven through the real
 //      channel-sync apply flow, then boot-activated (bin shim) and EXECUTED.
-//      10-30 minutes, ~5 GB disk, build-grade RAM. Nightly/manual tier only.
+//      20-35 minutes, ~5 GB disk, build-grade RAM. Nightly/manual tier only.
 //
 // Requires: network, git, pnpm, a supported Node, the repo's pinned openclaw
 // CLI in node_modules.
