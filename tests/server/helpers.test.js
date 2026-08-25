@@ -134,6 +134,20 @@ describe("server/helpers", () => {
     expect(compareVersionParts("1.2.3", "1.10.0")).toBe(-1);
   });
 
+  it("orders OpenClaw out-of-band hotfix suffixes above the base release", () => {
+    expect(compareVersionParts("2026.7.1-2", "2026.7.1")).toBe(1);
+    expect(compareVersionParts("2026.7.1", "2026.7.1-2")).toBe(-1);
+    expect(compareVersionParts("2026.7.1-2", "2026.7.1-1")).toBe(1);
+    expect(compareVersionParts("2026.7.1-2", "2026.7.1-2")).toBe(0);
+    expect(compareVersionParts("2026.7.2", "2026.7.1-2")).toBe(1);
+    // Prerelease labels rank below their base release (semver), aligned with
+    // the frontend comparator — a beta→release move is an upgrade.
+    expect(compareVersionParts("2026.8.1-beta", "2026.8.1")).toBe(-1);
+    expect(compareVersionParts("2026.8.1", "2026.8.1-beta.3")).toBe(1);
+    expect(compareVersionParts("2026.8.1-beta.10", "2026.8.1-beta.9")).toBe(1);
+    expect(compareVersionParts("2026.8.1-beta.3", "2026.7.1-2")).toBe(1);
+  });
+
   it("reads debug mode from environment flags", () => {
     const previousAlphaclawDebug = process.env.ALPHACLAW_DEBUG;
     const previousDebug = process.env.DEBUG;

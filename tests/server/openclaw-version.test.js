@@ -1,9 +1,5 @@
 const childProcess = require("child_process");
 
-const {
-  kNpmPackageRoot,
-  kOpenclawUpdateCopyTimeoutMs,
-} = require("../../lib/server/constants");
 const modulePath = require.resolve("../../lib/server/openclaw-version");
 const nodeRuntime = require("../../lib/node-runtime");
 const originalExec = childProcess.exec;
@@ -128,95 +124,36 @@ describe("server/openclaw-version", () => {
     expect(status.error).toContain("status check failed");
   });
 
-  it("updates openclaw and restarts gateway when onboarded", async () => {
-    const { service, restartGateway, execMock, execSyncMock } = createService({
+  it("repoints the legacy updater at the release-channel system", async () => {
+    const { service, execMock, restartGateway } = createService({
       isOnboarded: true,
-    });
-    execSyncMock
-      .mockReturnValueOnce("openclaw 1.0.0")
-      .mockReturnValueOnce("openclaw 1.1.0")
-      .mockReturnValueOnce(
-        JSON.stringify({
-          availability: { available: false, latestVersion: "1.1.0" },
-        }),
-      );
-    execMock.mockImplementation((cmd, opts, callback) => {
-      callback(null, "installed", "");
     });
 
     const result = await service.updateOpenclaw();
 
-    expect(result.status).toBe(200);
+    expect(result.status).toBe(410);
     expect(result.body).toEqual(
       expect.objectContaining({
-        ok: true,
-        previousVersion: "1.0.0",
-        currentVersion: "1.1.0",
-        latestVersion: "1.1.0",
-        hasUpdate: false,
-        restarted: true,
-        updated: true,
+        ok: false,
+        code: "use_release_channel",
       }),
     );
-    expect(execMock).toHaveBeenCalledTimes(2);
-    expect(execMock).toHaveBeenNthCalledWith(
-      1,
-      "npm install --omit=dev --prefer-online --package-lock=false",
-      expect.objectContaining({
-        env: expect.objectContaining({
-          npm_config_update_notifier: "false",
-          npm_config_fund: "false",
-          npm_config_audit: "false",
-        }),
-        timeout: 180000,
-      }),
-      expect.any(Function),
-    );
-    expect(execMock).toHaveBeenNthCalledWith(
-      2,
-      expect.stringMatching(/^cp -af /),
-      expect.objectContaining({ timeout: kOpenclawUpdateCopyTimeoutMs }),
-      expect.any(Function),
-    );
-    expect(restartGateway).toHaveBeenCalledTimes(1);
+    // No second installer may mutate node_modules or bounce the gateway.
+    expect(execMock).not.toHaveBeenCalled();
+    expect(restartGateway).not.toHaveBeenCalled();
   });
 
-  it("returns 409 while another update is in progress", async () => {
-    const { service, execMock, execSyncMock } = createService();
-    execSyncMock.mockImplementation((command) => {
-      if (command === "openclaw --version") {
-        return "openclaw 1.0.0";
-      }
-      if (command === "openclaw update status --json") {
-        return JSON.stringify({
-          availability: { available: true, latestVersion: "1.1.0" },
-        });
-      }
-      throw new Error(`Unexpected command: ${command}`);
-    });
-    const callbacks = [];
-    execMock.mockImplementation((cmd, opts, callback) => {
-      callbacks.push(callback);
-    });
+  it("clears the version cache on demand", () => {
+    const { service, execSyncMock } = createService();
+    execSyncMock.mockReturnValue("openclaw 1.2.3\n");
 
-    const firstUpdatePromise = service.updateOpenclaw();
-    await new Promise((resolve) => {
-      setImmediate(resolve);
-    });
-    const secondUpdate = await service.updateOpenclaw();
+    expect(service.readOpenclawVersion()).toBe("1.2.3");
+    expect(execSyncMock).toHaveBeenCalledTimes(1);
 
-    expect(secondUpdate.status).toBe(409);
-    expect(secondUpdate.body).toEqual({
-      ok: false,
-      error: "OpenClaw update already in progress",
-    });
-
-    callbacks[0](null, "installed", "");
-    await new Promise((resolve) => {
-      setImmediate(resolve);
-    });
-    callbacks[1](null, "", "");
-    await firstUpdatePromise;
+    service.clearVersionCache();
+    execSyncMock.mockReturnValue("openclaw 1.3.0\n");
+    expect(service.readOpenclawVersion()).toBe("1.3.0");
+    expect(execSyncMock).toHaveBeenCalledTimes(2);
   });
 
   it("returns the cached version when openclaw --version fails", () => {
@@ -271,51 +208,75 @@ describe("server/openclaw-version", () => {
     );
   });
 
-  it("rejects updates when the Node.js runtime is unsupported", async () => {
+  it("installs an exact version into a temp dir with the nested strategy", async () => {
+    nodeRuntime.assertSupportedNodeVersion = () => {};
+    const execMock = vi.fn((cmd, opts, callback) => callback(null, "added", ""));
+    const execSyncMock = vi.fn();
+    const { installOpenclawVersionToTempDir } = loadVersionModule({
+      execMock,
+      execSyncMock,
+    });
+
+    const result = await installOpenclawVersionToTempDir({
+      versionSpec: "2026.8.1-beta.3",
+      execImpl: execMock,
+    });
+
+    expect(result.tmpDir).toBeTruthy();
+    expect(result.openclawPackageDir).toContain("node_modules");
+    const fs = require("fs");
+    const manifest = JSON.parse(
+      fs.readFileSync(require("path").join(result.tmpDir, "package.json"), "utf8"),
+    );
+    expect(manifest.dependencies.openclaw).toBe("2026.8.1-beta.3");
+    expect(execMock).toHaveBeenCalledWith(
+      "npm install --omit=dev --prefer-online --package-lock=false --install-strategy=nested",
+      expect.objectContaining({
+        cwd: result.tmpDir,
+        env: expect.objectContaining({
+          npm_config_update_notifier: "false",
+          npm_config_fund: "false",
+          npm_config_audit: "false",
+          npm_config_cache: expect.stringContaining("cache"),
+        }),
+        timeout: 180000,
+      }),
+      expect.any(Function),
+    );
+    result.cleanup();
+    expect(fs.existsSync(result.tmpDir)).toBe(false);
+  });
+
+  it("rejects temp installs when the Node.js runtime is unsupported", async () => {
     nodeRuntime.assertSupportedNodeVersion = () => {
       throw new Error("Node.js 18.0.0 is not supported.");
     };
-    const { service, execMock, execSyncMock } = createService();
-    execSyncMock.mockReturnValue("openclaw 1.0.0");
+    const execMock = vi.fn();
+    const execSyncMock = vi.fn();
+    const { installOpenclawVersionToTempDir } = loadVersionModule({
+      execMock,
+      execSyncMock,
+    });
 
-    const result = await service.updateOpenclaw();
-
-    expect(result.status).toBe(500);
-    expect(result.body.error).toContain("is not supported");
+    await expect(
+      installOpenclawVersionToTempDir({ versionSpec: "1.0.0", execImpl: execMock }),
+    ).rejects.toThrow("is not supported");
     expect(execMock).not.toHaveBeenCalled();
   });
 
-  it("returns 500 with stderr details when npm install fails", async () => {
-    const { service, execMock, execSyncMock } = createService();
-    execSyncMock.mockReturnValue("openclaw 1.0.0");
-    execMock.mockImplementation((cmd, opts, callback) => {
-      callback(new Error("exec failed"), "", "npm ERR! EACCES\n");
+  it("rejects with stderr details and cleans up when npm install fails", async () => {
+    nodeRuntime.assertSupportedNodeVersion = () => {};
+    const execMock = vi.fn((cmd, opts, callback) =>
+      callback(new Error("exec failed"), "", "npm ERR! EACCES\n"),
+    );
+    const execSyncMock = vi.fn();
+    const { installOpenclawVersionToTempDir } = loadVersionModule({
+      execMock,
+      execSyncMock,
     });
 
-    const result = await service.updateOpenclaw();
-
-    expect(result.status).toBe(500);
-    expect(result.body).toEqual({ ok: false, error: "npm ERR! EACCES" });
-    expect(execMock).toHaveBeenCalledTimes(1);
-  });
-
-  it("returns 500 when copying updated openclaw files fails", async () => {
-    const { service, execMock, execSyncMock } = createService();
-    execSyncMock.mockReturnValue("openclaw 1.0.0");
-    execMock
-      .mockImplementationOnce((cmd, opts, callback) => {
-        callback(null, "added 1 package", "");
-      })
-      .mockImplementationOnce((cmd, opts, callback) => {
-        callback(new Error("cp exploded"));
-      });
-
-    const result = await service.updateOpenclaw();
-
-    expect(result.status).toBe(500);
-    expect(result.body.error).toBe(
-      "Failed to copy updated openclaw files: cp exploded",
-    );
-    expect(execMock).toHaveBeenCalledTimes(2);
+    await expect(
+      installOpenclawVersionToTempDir({ versionSpec: "1.0.0", execImpl: execMock }),
+    ).rejects.toThrow("npm ERR! EACCES");
   });
 });

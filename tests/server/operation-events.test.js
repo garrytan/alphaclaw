@@ -162,6 +162,9 @@ describe("server/operation-events", () => {
     try {
       const service = createOperationEventsService({ ttlMs: 50 });
       const { operationId: expiredId } = service.createOperation();
+      // Pending operations get a long grace window past TTL (a quiet build
+      // must not lose its terminal event), so only a TERMINAL op sweeps at TTL.
+      service.complete(expiredId, {});
       // A second createOperation exercises the sweeper early-return guard.
       const { operationId: subscribedId } = service.createOperation();
 
@@ -180,6 +183,15 @@ describe("server/operation-events", () => {
       // Expired but still-subscribed operations survive the sweep.
       expect(service.getOperation(subscribedId)).toBeTruthy();
 
+      // A pending (never-terminal) operation survives TTL expiry within its
+      // grace window, then is reaped once the grace window lapses too.
+      const graceService = createOperationEventsService({ ttlMs: 50 });
+      const { operationId: pendingId } = graceService.createOperation();
+      vi.advanceTimersByTime(30_000);
+      expect(graceService.getOperation(pendingId)).toBeTruthy();
+      vi.advanceTimersByTime(2 * 60 * 60 * 1000 + 30_000);
+      expect(graceService.getOperation(pendingId)).toBeNull();
+
       // Closing before expiry leaves the operation for the sweeper.
       const fresh = createOperationEventsService({ ttlMs: 120_000 });
       const { operationId: activeId } = fresh.createOperation();
@@ -190,6 +202,56 @@ describe("server/operation-events", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("keeps a pending operation alive across TTL windows while publishing, then sweeps after the grace", () => {
+    vi.useFakeTimers();
+    try {
+      const service = createOperationEventsService({ ttlMs: 50 });
+      const { operationId } = service.createOperation({ type: "channel-apply" });
+
+      // Publish every 30ms across several 50ms TTL windows: every publish
+      // re-arms the expiry, so a long chatty operation is never swept mid-run.
+      for (let idx = 0; idx < 10; idx += 1) {
+        vi.advanceTimersByTime(30);
+        expect(
+          service.publish(operationId, { event: "phase", data: { idx } }),
+        ).toBe(true);
+      }
+      expect(service.getOperation(operationId)).toBeTruthy();
+
+      // A sweep tick right after the last publish: still inside the grace.
+      vi.advanceTimersByTime(30_000);
+      expect(service.getOperation(operationId)).toBeTruthy();
+
+      // Publishing stops: the pending op is reaped once TTL + the 2h pending
+      // grace window lapse.
+      vi.advanceTimersByTime(2 * 60 * 60 * 1000 + 30_000);
+      expect(service.getOperation(operationId)).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("carries code/hint/docsUrl from the failure error into the error event", () => {
+    const service = createOperationEventsService();
+    const { operationId } = service.createOperation();
+
+    const failed = service.fail(
+      operationId,
+      Object.assign(new Error("boom"), { code: "x", hint: "h", docsUrl: "d" }),
+    );
+
+    expect(failed).toBe(true);
+    const operation = service.getOperation(operationId);
+    expect(operation.status).toBe("failed");
+    expect(operation.events[0].event).toBe("error");
+    expect(operation.events[0].data).toEqual({
+      error: "boom",
+      code: "x",
+      hint: "h",
+      docsUrl: "d",
+    });
   });
 
   it("marks operations completed with a done event payload", () => {
