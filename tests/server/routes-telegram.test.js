@@ -59,11 +59,18 @@ const makeTelegramApi = (overrides = {}) => ({
   })),
   deleteForumTopic: vi.fn(async () => ({})),
   editForumTopic: vi.fn(async () => ({})),
+  sendChatAction: vi.fn(async () => true),
   sendMessage: vi.fn(async () => ({})),
   ...overrides,
 });
 
-const createApp = ({ telegramApi, syncPromptFiles, shellCmd, omitShellCmd } = {}) => {
+const createApp = ({
+  telegramApi,
+  syncPromptFiles,
+  shellCmd,
+  omitShellCmd,
+  topicDiscovery,
+} = {}) => {
   const app = express();
   app.use(express.json());
   const deps = {
@@ -71,6 +78,7 @@ const createApp = ({ telegramApi, syncPromptFiles, shellCmd, omitShellCmd } = {}
     telegramApi: telegramApi || makeTelegramApi(),
     syncPromptFiles: syncPromptFiles || vi.fn(),
     shellCmd: shellCmd || vi.fn(async () => ({ ok: true })),
+    ...(topicDiscovery ? { topicDiscovery } : {}),
   };
   if (omitShellCmd) delete deps.shellCmd;
   registerTelegramRoutes(deps);
@@ -317,6 +325,7 @@ describe("server/routes/telegram", () => {
         iconColor: 7322096,
         systemInstructions: "Be helpful",
         agentId: "scout",
+        discovered: false,
       });
       const cfg = readOpenclawJson();
       expect(cfg.channels.telegram.groups["-100"]).toEqual({
@@ -353,6 +362,7 @@ describe("server/routes/telegram", () => {
         name: "Ops",
         iconColor: 7322096,
         agentId: undefined,
+        discovered: false,
       });
     });
 
@@ -450,6 +460,7 @@ describe("server/routes/telegram", () => {
         iconColor: 1,
         systemInstructions: "sys",
         agentId: "scout",
+        discovered: false,
       });
       expect(syncPromptFiles).toHaveBeenCalled();
       expect(shellCmd).toHaveBeenCalledWith(
@@ -460,7 +471,7 @@ describe("server/routes/telegram", () => {
   });
 
   describe("DELETE /api/telegram/groups/:groupId/topics/:topicId", () => {
-    it("deletes a topic from telegram and the registry", async () => {
+    it("deletes a topic from telegram and tombstones the registry entry", async () => {
       writeRegistryFile({
         groups: { "-100": { name: "G", topics: { 5: { name: "Ops" } } } },
       });
@@ -470,7 +481,12 @@ describe("server/routes/telegram", () => {
 
       expect(res.body).toEqual({ ok: true, syncWarning: null });
       expect(telegramApi.deleteForumTopic).toHaveBeenCalledWith("-100", 5);
-      expect(readRegistryFile().groups["-100"].topics).toEqual({});
+      expect(readRegistryFile().groups["-100"].topics["5"]).toEqual({
+        name: "Ops",
+        deleted: true,
+        deletedAt: expect.any(Number),
+        stale: false,
+      });
       expect(syncPromptFiles).toHaveBeenCalled();
     });
 
@@ -486,7 +502,7 @@ describe("server/routes/telegram", () => {
       expect(syncPromptFiles).not.toHaveBeenCalled();
     });
 
-    it("removes stale registry entries when the topic is already gone", async () => {
+    it("tombstones stale registry entries when the topic is already gone", async () => {
       writeRegistryFile({
         groups: { "-100": { name: "G", topics: { 5: { name: "Ops" } } } },
       });
@@ -506,11 +522,143 @@ describe("server/routes/telegram", () => {
           "Topic no longer exists in Telegram; removed stale registry entry.",
         syncWarning: null,
       });
-      expect(readRegistryFile().groups["-100"].topics).toEqual({});
+      expect(readRegistryFile().groups["-100"].topics["5"]).toEqual({
+        name: "Ops",
+        deleted: true,
+        deletedAt: expect.any(Number),
+        stale: false,
+      });
       expect(shellCmd).toHaveBeenCalledWith(
         "alphaclaw git-sync -m 'telegram workspace: delete-stale-topic 5'",
         { timeout: 30000 },
       );
+    });
+  });
+
+  describe("POST /api/telegram/groups/:groupId/topics/:topicId/restore", () => {
+    it("clears the tombstone and re-syncs prompt files", async () => {
+      writeRegistryFile({
+        groups: {
+          "-100": {
+            name: "G",
+            topics: { 5: { name: "Ops", deleted: true, deletedAt: 123 } },
+          },
+        },
+      });
+      const { app, syncPromptFiles } = createApp();
+
+      const res = await request(app).post(
+        "/api/telegram/groups/-100/topics/5/restore",
+      );
+
+      expect(res.body).toEqual({ ok: true });
+      expect(readRegistryFile().groups["-100"].topics["5"]).toEqual({
+        name: "Ops",
+      });
+      expect(syncPromptFiles).toHaveBeenCalled();
+    });
+
+    it("fails closed with a 503 when the registry file is corrupt", async () => {
+      fs.mkdirSync(WORKSPACE_DIR, { recursive: true });
+      fs.writeFileSync(topicRegistry.kRegistryPath, "{not json");
+      const { app, syncPromptFiles } = createApp();
+
+      const res = await request(app).post(
+        "/api/telegram/groups/-100/topics/5/restore",
+      );
+
+      expect(res.status).toBe(503);
+      expect(res.body.ok).toBe(false);
+      expect(res.body.code).toBe("TOPIC_REGISTRY_UNREADABLE");
+      expect(res.body.error).toContain("not valid JSON");
+      // Fail closed: the corrupt file must never be rewritten.
+      expect(fs.readFileSync(topicRegistry.kRegistryPath, "utf8")).toBe(
+        "{not json",
+      );
+      expect(syncPromptFiles).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("POST /api/telegram/groups/:groupId/topics/:topicId/verify", () => {
+    it("requires a numeric topic id", async () => {
+      const { app } = createApp();
+      const res = await request(app).post(
+        "/api/telegram/groups/-100/topics/abc/verify",
+      );
+      expect(res.status).toBe(400);
+      expect(res.body).toEqual({ ok: false, error: "topicId must be numeric" });
+    });
+
+    it("marks the topic live and updates lastSeenAt when the probe succeeds", async () => {
+      writeRegistryFile({
+        groups: {
+          "-100": { name: "G", topics: { 5: { name: "Ops", stale: true } } },
+        },
+      });
+      const { app, telegramApi } = createApp();
+
+      const res = await request(app).post(
+        "/api/telegram/groups/-100/topics/5/verify",
+      );
+
+      expect(res.body).toEqual({ ok: true, status: "ok" });
+      expect(telegramApi.sendChatAction).toHaveBeenCalledWith("-100", "typing", {
+        messageThreadId: 5,
+      });
+      expect(readRegistryFile().groups["-100"].topics["5"]).toEqual({
+        name: "Ops",
+        stale: false,
+        lastSeenAt: expect.any(Number),
+      });
+    });
+
+    it("marks the topic stale when telegram reports the thread missing", async () => {
+      writeRegistryFile({
+        groups: { "-100": { name: "G", topics: { 5: { name: "Ops" } } } },
+      });
+      const telegramApi = makeTelegramApi({
+        sendChatAction: vi.fn(async () => {
+          throw new Error("Bad Request: message thread not found");
+        }),
+      });
+      const { app, syncPromptFiles } = createApp({ telegramApi });
+
+      const res = await request(app).post(
+        "/api/telegram/groups/-100/topics/5/verify",
+      );
+
+      expect(res.body).toEqual({ ok: true, status: "stale" });
+      expect(readRegistryFile().groups["-100"].topics["5"]).toEqual({
+        name: "Ops",
+        stale: true,
+      });
+      expect(syncPromptFiles).toHaveBeenCalled();
+    });
+
+    it("returns 502 without marking stale on other telegram failures", async () => {
+      writeRegistryFile({
+        groups: { "-100": { name: "G", topics: { 5: { name: "Ops" } } } },
+      });
+      const telegramApi = makeTelegramApi({
+        sendChatAction: vi.fn(async () => {
+          throw new Error("Too Many Requests: retry after 5");
+        }),
+      });
+      const { app, syncPromptFiles } = createApp({ telegramApi });
+
+      const res = await request(app).post(
+        "/api/telegram/groups/-100/topics/5/verify",
+      );
+
+      expect(res.status).toBe(502);
+      expect(res.body).toEqual({
+        ok: false,
+        error: "Too Many Requests: retry after 5",
+      });
+      expect(readRegistryFile().groups["-100"].topics["5"]).toEqual({
+        name: "Ops",
+      });
+      expect(syncPromptFiles).not.toHaveBeenCalled();
     });
   });
 
@@ -560,6 +708,7 @@ describe("server/routes/telegram", () => {
         name: "New",
         systemInstructions: "sys",
         agentId: "scout",
+        discovered: false,
       });
       expect(shellCmd).toHaveBeenCalledWith(
         "alphaclaw git-sync -m 'telegram workspace: update-topic New'",
@@ -612,6 +761,31 @@ describe("server/routes/telegram", () => {
 
       expect(res.body).toEqual({ ok: false, error: "TOPIC_EDIT_FORBIDDEN" });
     });
+
+    it("lazily marks the topic stale when renaming into a missing thread", async () => {
+      writeRegistryFile({
+        groups: { "-100": { name: "G", topics: { 5: { name: "Old" } } } },
+      });
+      const telegramApi = makeTelegramApi({
+        editForumTopic: vi.fn(async () => {
+          throw new Error("Bad Request: message thread not found");
+        }),
+      });
+      const { app } = createApp({ telegramApi });
+
+      const res = await request(app)
+        .put("/api/telegram/groups/-100/topics/5")
+        .send({ name: "New" });
+
+      expect(res.body).toEqual({
+        ok: false,
+        error: "Bad Request: message thread not found",
+      });
+      expect(readRegistryFile().groups["-100"].topics["5"]).toEqual({
+        name: "Old",
+        stale: true,
+      });
+    });
   });
 
   describe("POST /api/telegram/groups/:groupId/configure", () => {
@@ -643,6 +817,7 @@ describe("server/routes/telegram", () => {
       });
       expect(cfg.channels.telegram.groupAllowFrom).toEqual(["99"]);
       expect(readRegistryFile().groups["-100"]).toEqual({
+        channel: "telegram",
         name: "My Group",
         topics: {},
         accountId: "work",
@@ -667,6 +842,7 @@ describe("server/routes/telegram", () => {
       const cfg = readOpenclawJson();
       expect(cfg.channels.telegram.groupAllowFrom).toEqual(["7"]);
       expect(readRegistryFile().groups["-100"]).toEqual({
+        channel: "telegram",
         name: "-100",
         topics: {},
         accountId: "default",
@@ -688,6 +864,7 @@ describe("server/routes/telegram", () => {
 
       expect(res.body).toEqual({ ok: true, userId: null, syncWarning: null });
       expect(readRegistryFile().groups["-100"]).toEqual({
+        channel: "telegram",
         name: "-100",
         topics: {},
         accountId: "work",
@@ -711,13 +888,185 @@ describe("server/routes/telegram", () => {
   });
 
   describe("GET /api/telegram/topic-registry", () => {
-    it("returns the raw registry", async () => {
+    it("returns the normalized registry", async () => {
       writeRegistryFile({ groups: { "-100": { name: "G", topics: {} } } });
       const { app } = createApp();
       const res = await request(app).get("/api/telegram/topic-registry");
       expect(res.body).toEqual({
         ok: true,
-        registry: { groups: { "-100": { name: "G", topics: {} } } },
+        registry: {
+          version: 2,
+          meta: { sweepWatermark: 0 },
+          groups: { "-100": { name: "G", topics: {} } },
+        },
+      });
+    });
+  });
+
+  describe("GET /api/telegram/topics", () => {
+    it("returns flat topic rows and a null discovery status without the service", async () => {
+      writeRegistryFile({
+        groups: {
+          "-100": {
+            name: "G",
+            accountId: "work",
+            agentId: "alpha",
+            topics: {
+              5: { name: "Ops", agentId: "scout", lastSeenAt: 111 },
+              6: { name: "", discovered: true, seenAgentId: "scout" },
+              7: { name: "Old", stale: true, deleted: true, deletedAt: 999 },
+            },
+          },
+        },
+      });
+      const { app } = createApp();
+
+      const res = await request(app).get("/api/telegram/topics");
+
+      expect(res.body).toEqual({
+        ok: true,
+        discovery: null,
+        topics: [
+          {
+            groupId: "-100",
+            groupName: "G",
+            accountId: "work",
+            groupAgentId: "alpha",
+            threadId: "5",
+            name: "Ops",
+            nameSource: "",
+            agentId: "scout",
+            discovered: false,
+            stale: false,
+            deleted: false,
+            deletedAt: 0,
+            lastSeenAt: 111,
+            seenAgentId: "",
+          },
+          {
+            groupId: "-100",
+            groupName: "G",
+            accountId: "work",
+            groupAgentId: "alpha",
+            threadId: "6",
+            name: "",
+            nameSource: "",
+            agentId: "",
+            discovered: true,
+            stale: false,
+            deleted: false,
+            deletedAt: 0,
+            lastSeenAt: 0,
+            seenAgentId: "scout",
+          },
+          {
+            groupId: "-100",
+            groupName: "G",
+            accountId: "work",
+            groupAgentId: "alpha",
+            threadId: "7",
+            name: "Old",
+            nameSource: "",
+            agentId: "",
+            discovered: false,
+            stale: true,
+            deleted: true,
+            deletedAt: 999,
+            lastSeenAt: 0,
+            seenAgentId: "",
+          },
+        ],
+      });
+    });
+
+    it("includes the discovery status when the service is available", async () => {
+      const topicDiscovery = {
+        sweep: vi.fn(),
+        getStatus: vi.fn(() => ({
+          enabled: true,
+          running: true,
+          lastSweepAt: 42,
+          lastResult: { discovered: 1 },
+        })),
+      };
+      const { app } = createApp({ topicDiscovery });
+
+      const res = await request(app).get("/api/telegram/topics");
+
+      expect(res.body).toEqual({
+        ok: true,
+        topics: [],
+        discovery: {
+          enabled: true,
+          running: true,
+          lastSweepAt: 42,
+          lastResult: { discovered: 1 },
+        },
+      });
+    });
+  });
+
+  describe("telegram discovery endpoints", () => {
+    it("runs a sweep on demand", async () => {
+      const topicDiscovery = {
+        sweep: vi.fn(async () => ({ firstSweep: false, discovered: 2, named: 1 })),
+        getStatus: vi.fn(),
+      };
+      const { app } = createApp({ topicDiscovery });
+
+      const res = await request(app).post("/api/telegram/discovery/sweep");
+
+      expect(res.body).toEqual({
+        ok: true,
+        result: { firstSweep: false, discovered: 2, named: 1 },
+      });
+      expect(topicDiscovery.sweep).toHaveBeenCalled();
+    });
+
+    it("reports sweep failures", async () => {
+      const topicDiscovery = {
+        sweep: vi.fn(async () => {
+          throw new Error("usage db exploded");
+        }),
+        getStatus: vi.fn(),
+      };
+      const { app } = createApp({ topicDiscovery });
+
+      const res = await request(app).post("/api/telegram/discovery/sweep");
+
+      expect(res.body).toEqual({ ok: false, error: "usage db exploded" });
+    });
+
+    it("returns the discovery status", async () => {
+      const topicDiscovery = {
+        sweep: vi.fn(),
+        getStatus: vi.fn(() => ({ enabled: false, running: false })),
+      };
+      const { app } = createApp({ topicDiscovery });
+
+      const res = await request(app).get("/api/telegram/discovery/status");
+
+      expect(res.body).toEqual({
+        ok: true,
+        status: { enabled: false, running: false },
+      });
+    });
+
+    it("responds 503 for sweep and status when the service is absent", async () => {
+      const { app } = createApp();
+
+      const sweep = await request(app).post("/api/telegram/discovery/sweep");
+      expect(sweep.status).toBe(503);
+      expect(sweep.body).toEqual({
+        ok: false,
+        error: "topic discovery service unavailable",
+      });
+
+      const status = await request(app).get("/api/telegram/discovery/status");
+      expect(status.status).toBe(503);
+      expect(status.body).toEqual({
+        ok: false,
+        error: "topic discovery service unavailable",
       });
     });
   });
@@ -980,7 +1329,7 @@ describe("server/routes/telegram", () => {
       });
     });
 
-    it("skips registry pruning when the registry has no groups container", async () => {
+    it("normalizes a registry that has no groups container", async () => {
       writeOpenclawJson({
         channels: { telegram: { groups: { "-100": {} } } },
       });
@@ -990,7 +1339,63 @@ describe("server/routes/telegram", () => {
       const res = await request(app).post("/api/telegram/workspace/reset");
 
       expect(res.body).toEqual({ ok: true, syncWarning: null });
-      expect(readRegistryFile().groups).toBeNull();
+      // The write path normalizes the shape: groups is always an object.
+      expect(readRegistryFile().groups).toEqual({});
+    });
+
+    it("keeps tombstones by default so discovery cannot resurrect them", async () => {
+      writeOpenclawJson({
+        channels: { telegram: { groups: { "-100": {} } } },
+      });
+      writeRegistryFile({
+        groups: {
+          "-999": {
+            name: "Keep Me",
+            topics: {
+              9: { name: "Gone", deleted: true, deletedAt: 123 },
+              10: { name: "Live" },
+            },
+          },
+        },
+      });
+      const { app } = createApp();
+
+      const res = await request(app)
+        .post("/api/telegram/workspace/reset")
+        .send({ mode: "keep" });
+
+      expect(res.body).toEqual({ ok: true, syncWarning: null });
+      expect(readRegistryFile().groups["-999"].topics).toEqual({
+        9: { name: "Gone", deleted: true, deletedAt: 123 },
+        10: { name: "Live" },
+      });
+    });
+
+    it("clears tombstones in rediscover mode", async () => {
+      writeOpenclawJson({
+        channels: { telegram: { groups: { "-100": {} } } },
+      });
+      writeRegistryFile({
+        groups: {
+          "-999": {
+            name: "Keep Me",
+            topics: {
+              9: { name: "Gone", deleted: true, deletedAt: 123 },
+              10: { name: "Live" },
+            },
+          },
+        },
+      });
+      const { app } = createApp();
+
+      const res = await request(app)
+        .post("/api/telegram/workspace/reset")
+        .send({ mode: "rediscover" });
+
+      expect(res.body).toEqual({ ok: true, syncWarning: null });
+      expect(readRegistryFile().groups["-999"].topics).toEqual({
+        10: { name: "Live" },
+      });
     });
 
     it("reports reset failures", async () => {

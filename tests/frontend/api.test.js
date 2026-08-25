@@ -905,6 +905,21 @@ describe("frontend/api endpoint wrapper coverage", () => {
     ["upsertAuthProfile", ["p1", { apiKey: "sk" }], "/api/models/auth/p1", "PUT"],
     ["deleteAuthProfile", ["p1"], "/api/models/auth/p1", "DELETE"],
     ["fetchAgents", [], "/api/agents", undefined],
+    ["getTelegramTopics", [], "/api/telegram/topics", undefined],
+    [
+      "restoreTelegramTopic",
+      ["-100123", "42"],
+      "/api/telegram/groups/-100123/topics/42/restore",
+      "POST",
+    ],
+    [
+      "verifyTelegramTopic",
+      ["-100123", "42"],
+      "/api/telegram/groups/-100123/topics/42/verify",
+      "POST",
+    ],
+    ["sweepTopicDiscovery", [], "/api/telegram/discovery/sweep", "POST"],
+    ["getTopicDiscoveryStatus", [], "/api/telegram/discovery/status", undefined],
     ["fetchChannelAccounts", [], "/api/channels/accounts", undefined],
     [
       "fetchChannelAccountToken",
@@ -1153,6 +1168,39 @@ describe("frontend/api behaviors", () => {
     expect(messages).toEqual([{ event: "phase", data: { phase: "start" } }]);
     unsubscribe();
     expect(source.closed).toBe(true);
+  });
+
+  it("getTelegramTopics returns degraded payloads with their code instead of throwing", async () => {
+    global.fetch.mockResolvedValue(
+      mockJsonResponse(503, {
+        ok: false,
+        error: "registry file is corrupt",
+        code: "TOPIC_REGISTRY_UNREADABLE",
+      }),
+    );
+    const api = await loadApiModule();
+
+    const result = await api.getTelegramTopics();
+
+    expect(result).toEqual({
+      ok: false,
+      error: "registry file is corrupt",
+      code: "TOPIC_REGISTRY_UNREADABLE",
+    });
+  });
+
+  it("verifyTelegramTopic returns the verify status payload", async () => {
+    global.fetch.mockResolvedValue(
+      mockJsonResponse(200, { ok: true, status: "stale" }),
+    );
+    const api = await loadApiModule();
+
+    const result = await api.verifyTelegramTopic("-100123", 42);
+
+    expect(global.fetch.mock.calls[0][0]).toBe(
+      "/api/telegram/groups/-100123/topics/42/verify",
+    );
+    expect(result).toEqual({ ok: true, status: "stale" });
   });
 
   it("parseJsonOrThrow rejects when the payload marks ok false", async () => {

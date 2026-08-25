@@ -143,18 +143,21 @@ describe("server/onboarding/workspace bootstrap prompt sync", () => {
     const mockFs = {
       readFileSync: vi.fn((target) => {
         if (target === kToolsTemplatePath) return "Setup: {{SETUP_UI_URL}}";
+        if (target === kAgentsSourcePath) return "AGENTS TEMPLATE";
         if (target === kConfigPath) return config;
         if (target === kGoogleStatePath) return googleState;
         throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
       }),
       existsSync: vi.fn((target) => target === kGoogleStatePath),
-      writeFileSync: vi.fn(),
-      mkdirSync: vi.fn(),
-      copyFileSync: vi.fn((src, dest) => {
-        if (String(dest).startsWith(brokenWorkspace)) {
+      // No renameSync on this mock: writeFileAtomic degrades to a plain
+      // writeFileSync at the final path.
+      writeFileSync: vi.fn((target) => {
+        if (String(target).startsWith(brokenWorkspace)) {
           throw new Error("read-only workspace");
         }
       }),
+      mkdirSync: vi.fn(),
+      copyFileSync: vi.fn(),
     };
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
@@ -186,13 +189,21 @@ describe("server/onboarding/workspace bootstrap prompt sync", () => {
         target === path.join(otherWorkspace, "hooks", "bootstrap", "TOOLS.md"),
     );
     expect(otherToolsWrite).toBeTruthy();
-    expect(mockFs.copyFileSync).toHaveBeenCalledWith(
-      kAgentsSourcePath,
-      path.join(otherWorkspace, "hooks", "bootstrap", "AGENTS.md"),
+    // AGENTS.md is copied via readFileSync + writeFileAtomic now, never
+    // copyFileSync.
+    const otherAgentsWrite = mockFs.writeFileSync.mock.calls.find(
+      ([target]) =>
+        target === path.join(otherWorkspace, "hooks", "bootstrap", "AGENTS.md"),
     );
+    expect(otherAgentsWrite).toBeTruthy();
+    expect(otherAgentsWrite[1]).toBe("AGENTS TEMPLATE");
+    expect(mockFs.copyFileSync).not.toHaveBeenCalled();
+    // The broken workspace failed on its first write, so its TOOLS.md was
+    // never written and the sync moved on.
     expect(
-      mockFs.writeFileSync.mock.calls.some(([target]) =>
-        String(target).startsWith(brokenWorkspace),
+      mockFs.writeFileSync.mock.calls.some(
+        ([target]) =>
+          target === path.join(brokenWorkspace, "hooks", "bootstrap", "TOOLS.md"),
       ),
     ).toBe(false);
     expect(errorSpy).toHaveBeenCalledWith(
@@ -202,11 +213,76 @@ describe("server/onboarding/workspace bootstrap prompt sync", () => {
     );
   });
 
+  it("advertises the native topic-create action only when enabled with no pending restart", () => {
+    const {
+      kRestartRequiredFlagPath,
+    } = require("../../lib/server/restart-required-flag");
+    const config = JSON.stringify({
+      channels: {
+        telegram: {
+          actions: { createForumTopic: true, editForumTopic: true },
+          groups: { "-100123": { enabled: true } },
+        },
+      },
+    });
+    const makeFs = ({ restartFlagPending }) => ({
+      readFileSync: vi.fn((target) => {
+        if (target === kToolsTemplatePath) return "Setup: {{SETUP_UI_URL}}";
+        if (target === kAgentsSourcePath) return "AGENTS TEMPLATE";
+        if (target === kConfigPath) return config;
+        if (target === kRestartRequiredFlagPath) {
+          if (restartFlagPending) {
+            return JSON.stringify({ reason: "telegram_actions_enabled" });
+          }
+          throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+        }
+        throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+      }),
+      existsSync: vi.fn(() => false),
+      writeFileSync: vi.fn(),
+      mkdirSync: vi.fn(),
+      copyFileSync: vi.fn(),
+    });
+    const toolsContent = (mockFs) =>
+      mockFs.writeFileSync.mock.calls.find(([target]) =>
+        String(target).endsWith("TOOLS.md"),
+      )[1];
+
+    stubRegistryRead({
+      version: 2,
+      meta: { sweepWatermark: 0 },
+      groups: { "-100123": { name: "Ops", topics: { 42: { name: "Deploys" } } } },
+    });
+
+    // Actions enabled + no pending restart flag → the native action line.
+    const activeFs = makeFs({ restartFlagPending: false });
+    syncBootstrapPromptFiles({
+      fs: activeFs,
+      workspaceDir: WORKSPACE_DIR,
+      baseUrl: "https://setup.example.com",
+    });
+    expect(toolsContent(activeFs)).toContain(
+      "The native `createForumTopic` action is enabled",
+    );
+
+    // Same config with a pending restart flag → the line is gated off.
+    const pendingFs = makeFs({ restartFlagPending: true });
+    syncBootstrapPromptFiles({
+      fs: pendingFs,
+      workspaceDir: WORKSPACE_DIR,
+      baseUrl: "https://setup.example.com",
+    });
+    const pendingContent = toolsContent(pendingFs);
+    expect(pendingContent).toContain("## Topic Registry");
+    expect(pendingContent).not.toContain("The native `createForumTopic` action");
+  });
+
   it("degrades gracefully when config and google state are unreadable", () => {
     stubRegistryRead(null);
     const mockFs = {
       readFileSync: vi.fn((target) => {
         if (target === kToolsTemplatePath) return "Setup: {{SETUP_UI_URL}}";
+        if (target === kAgentsSourcePath) return "AGENTS TEMPLATE";
         throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
       }),
       existsSync: vi.fn((target) => {
