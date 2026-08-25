@@ -102,10 +102,11 @@ CMD ["alphaclaw", "start"]
 | **Browse**    | File explorer for workspace visibility, inline edits, diff review, and Git-backed sync                                   |
 | **Usage**     | Token summaries, per-session and per-agent cost and token breakdown with source/agent dimension comparisons              |
 | **Cron**      | Cron job management, interactive rolling calendar, run-history drilldowns, trend analytics, and per-run usage breakdowns |
+| **Doctor**    | Drift Doctor workspace health review — scans for guidance drift, misplaced instructions, redundant docs, and queued fixes |
 | **Nodes**     | Guided local-node setup for VPS deployments, per-node browser attach, reconnect commands, and routing/pairing controls   |
 | **Watchdog**  | Health monitoring, crash-loop status, auto-repair toggle, notifications, event log, live log tail, interactive terminal  |
 | **Upgrade**   | OpenClaw versions & release channels — stable/beta/dev catalog, release notes, one-click switch with backup + auto-rollback |
-| **Providers** | AI provider credentials (Anthropic, OpenAI, Gemini, Mistral, Voyage, Groq, Deepgram) and model selection                 |
+| **Models**    | AI provider credentials (Anthropic, OpenAI, Gemini, Mistral, Voyage, Groq, Deepgram) and model selection                 |
 | **Envars**    | Environment variables — view, edit, add — with gateway restart prompts                                                   |
 | **Webhooks**  | Webhook endpoints, transform modules, request history, payload inspection, OAuth callbacks, Gmail watch delivery flows   |
 
@@ -124,7 +125,7 @@ How it works:
 - **Explicit updates only.** Nothing installs on its own. Pick a version (last 5 stable, last 5 beta, or recent `main` commits), review its release notes, click once. Every restart deterministically re-loads the version you chose — offline, from a persisted copy on your data volume.
 - **Backed up before every switch.** AlphaClaw runs `openclaw backup create --verify` first; downgrades are blocked unless the backup verifies (older versions may not read migrated state).
 - **Auto-rollback.** A freshly switched version gets a 24-hour stabilization window. If it crash-loops, exits with a config error, or stays degraded, AlphaClaw blocklists it, restarts, and boots the last known-good build — then tells you on Telegram/Discord/Slack what happened and why. "Mark as good now" ends the window early once you're satisfied.
-- **Dev builds are honest about cost.** The first dev build compiles OpenClaw from source (10-30 minutes, ~5 GB on the data volume, 8 GB RAM recommended) with live build output streamed to the page. Your agent stays up until the final restart.
+- **Dev builds are honest about cost.** The first dev build compiles OpenClaw from source (20-35 minutes measured, 45-minute ceiling, ~5 GB on the data volume, 8 GB RAM recommended) with live build output streamed to the page. Your agent stays up until the final restart.
 
 The stable pin in `package.json` remains the recovery floor: whatever happens, a container restart can always fall back to it.
 
@@ -135,6 +136,8 @@ The stable pin in `package.json` remains the recovery floor: whatever happens, a
 | `alphaclaw start`                                          | Start the server (Setup UI + gateway manager) |
 | `alphaclaw git-sync -m "message"`                          | Commit and push the OpenClaw workspace        |
 | `alphaclaw telegram topic add --thread <id> --name <text>` | Register a Telegram topic mapping             |
+| `alphaclaw telegram topic create --group <id> --name <text>` | Create a Telegram forum topic and register it |
+| `alphaclaw telegram topics list`                           | List registered, discovered, and stale topics |
 | `alphaclaw version`                                        | Print version                                 |
 | `alphaclaw help`                                           | Show help                                     |
 
@@ -175,7 +178,7 @@ The built-in watchdog monitors gateway health and recovers from failures automat
 | --------------------------------- | -------- | -------------------------------------------------- |
 | `SETUP_PASSWORD`                  | Yes      | Password for the Setup UI                          |
 | `OPENCLAW_GATEWAY_TOKEN`          | Auto     | Gateway auth token (auto-generated if unset)       |
-| `GITHUB_TOKEN`                    | Yes      | GitHub PAT for workspace repo                      |
+| `GITHUB_TOKEN`                    | Yes      | GitHub PAT for workspace repo; also authenticates Upgrade-page release-catalog reads (avoids anonymous GitHub API rate limits) |
 | `GITHUB_WORKSPACE_REPO`           | Yes      | GitHub repo for workspace sync (e.g. `owner/repo`) |
 | `TELEGRAM_BOT_TOKEN`              | Optional | Telegram bot token                                 |
 | `DISCORD_BOT_TOKEN`               | Optional | Discord bot token                                  |
@@ -241,7 +244,8 @@ npm run test:coverage   # Coverage report
 # Live e2e tiers (opt-in; hit the REAL npm registry / GitHub API and install
 # real OpenClaw releases — catch upstream drift the hermetic suite can't):
 npm run test:live       # catalog + real stable/beta package applies (~5 min, network)
-npm run test:live:dev   # + full dev-channel source build (10-30 min, ~5 GB disk)
+npm run test:live:dev   # dev-channel source build only (20-35 min, ~5 GB disk);
+                        # does not re-run the catalog/apply tiers above
 ```
 
 The live tiers also run in CI on a schedule (`.github/workflows/live-e2e.yml`):

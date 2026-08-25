@@ -40,7 +40,7 @@ Runtime model:
 - Reuse existing server route and state patterns before introducing new abstractions.
 - Update tests when behavior changes in routes, watchdog flows, or setup state.
 - Before running tests in a fresh checkout, run `npm install` so `vitest` (devDependency) is available for `npm test`.
-- `npm test` is hermetic by design — `tests/live/**` (real npm/GitHub/OpenClaw-updater e2e) is excluded unless `OPENCLAW_LIVE_E2E=1`. Use `npm run test:live` (network, ~5 min) or `npm run test:live:dev` (adds the real dev source build, 10-30 min). When a live tier fails but the hermetic suite is green, suspect upstream OpenClaw drift first and update the encoded assumption, not the guard.
+- `npm test` is hermetic by design — `tests/live/**` (real npm/GitHub/OpenClaw-updater e2e) is excluded unless `OPENCLAW_LIVE_E2E=1`. Use `npm run test:live` (network, ~5 min) or `npm run test:live:dev` (the real dev source build ONLY — 20-35 min measured, 35-min build timeout; it does not re-run the catalog/apply tiers). When a live tier fails but the hermetic suite is green, suspect upstream OpenClaw drift first and update the encoded assumption, not the guard.
 
 ### Code Structure
 
@@ -101,7 +101,7 @@ Design invariants (do not regress):
 - **Activation happens ONLY at boot** (`bin/alphaclaw.js` section 7b → `runOpenclawChannelBootSync`), from local state: the overlay store at `<root>/openclaw-overlay/` (self-contained `--install-strategy=nested` trees incl. a snapshot of the pin) or the dev checkout at `$OPENCLAW_HOME/openclaw` behind the PATH bin shim at `<root>/.openclaw/.alphaclaw/bin/openclaw`. Boot never fetches. An apply prepares + verifies + records, then restarts the AlphaClaw process.
 - The activation sentinel (`node_modules/.openclaw-activation.json`), not a version compare, decides re-activation (mid-copy crashes leave a plausible package.json).
 - Boot sync is fail-open: any error falls back to the pin and never blocks the Setup UI.
-- The channel state file (`<root>/.openclaw/.alphaclaw/openclaw-channel-state.json`) is the single authority; `openclaw.json`'s `update.channel` is a mirror rewritten every boot, and `OPENCLAW_NO_AUTO_UPDATE=1` is set in the gateway env so neither OpenClaw nor the agent can self-update out from under it.
+- The channel state file (`<root>/.openclaw/.alphaclaw/openclaw-channel-state.json`) is the single authority for applied build state (active build, blocklist, last-known-good); the operator's channel *selection* lives in `alphaclaw.json` under `updates.openclaw.releaseChannel` (git-synced); `openclaw.json`'s `update.channel` is a mirror rewritten every boot, and `OPENCLAW_NO_AUTO_UPDATE=1` is set in the gateway env so neither OpenClaw nor the agent can self-update out from under it.
 - Rollback triggers (crash loop, exit 78, degraded >10 min, failed acceptance) fire only on non-pin builds inside their 24h stabilization window; dev rollback always targets the pin snapshot — never an in-crash rebuild. Unattended `doctor --fix` is suppressed inside that window (the 2026.7.1 plugins.allow bug is why).
 - Accepted supply-chain risk: the dev channel executes upstream build scripts (pnpm postinstalls). Mitigations: pre-switch verified backups, acceptance gating, blocklist, pin floor.
 
