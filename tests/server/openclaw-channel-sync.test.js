@@ -885,7 +885,10 @@ describe("server/openclaw-channel-sync", () => {
       expect(restartProcess).not.toHaveBeenCalled();
       vi.advanceTimersByTime(1500);
       expect(restartProcess).toHaveBeenCalledTimes(1);
-      expect(sync.isApplyInProgress()).toBe(false);
+      // The latch stays HELD after a restarting success: the process dies in
+      // ~1.5s, and releasing it would let a second apply start only to be
+      // killed mid-overlay-write by the pending restart.
+      expect(sync.isApplyInProgress()).toBe(true);
     });
 
     it("blocks downgrades when the backup fails, but only warns on upgrades", async () => {
@@ -1230,7 +1233,12 @@ describe("server/openclaw-channel-sync", () => {
       releaseBackup();
       const first = await firstApply;
       expect(first.status).toBe(202);
-      expect(sync.isApplyInProgress()).toBe(false);
+      // Restart is imminent — the latch stays held so nothing can start work
+      // that the restart would kill mid-write.
+      expect(sync.isApplyInProgress()).toBe(true);
+      const third = await sync.applyUpdate({ channel: "beta", version: "1.1.0" });
+      expect(third.status).toBe(409);
+      expect(third.body.code).toBe("operation_in_progress");
     });
 
     it("rejects applies during a self-update and brackets applies in a managed operation", async () => {
@@ -1265,16 +1273,34 @@ describe("server/openclaw-channel-sync", () => {
       expect(begin).toHaveBeenCalledTimes(1);
       expect(end).not.toHaveBeenCalled();
 
-      // end() must also fire on FAILED applies, or crash accounting would stay
-      // suspended forever after the first rejection.
-      store.addBlocklist({ id: "1.3.0", reason: "crash_loop", exitCode: 1 });
-      const failed = await sync.applyUpdate({ channel: "beta", version: "1.3.0" });
+      // The restarting success holds the apply latch too — a follow-up apply
+      // in the pre-restart window is refused outright.
+      const inWindow = await sync.applyUpdate({ channel: "beta", version: "1.3.0" });
+      expect(inWindow.status).toBe(409);
+      expect(inWindow.body.code).toBe("operation_in_progress");
+      expect(begin).toHaveBeenCalledTimes(1);
+
+      // end() must also fire on FAILED applies (fresh harness — no held
+      // latch), or crash accounting would stay suspended forever.
+      const failBegin = vi.fn();
+      const failEnd = vi.fn();
+      const failing = createHarness({
+        pin: "1.0.0",
+        installedVersion: "1.0.0",
+        sentinelVersion: "1.0.0",
+        extraSyncOptions: {
+          watchdogManagedOperation: { begin: failBegin, end: failEnd },
+        },
+      });
+      failing.store.addBlocklist({ id: "1.3.0", reason: "crash_loop", exitCode: 1 });
+      const failed = await failing.sync.applyUpdate({
+        channel: "beta",
+        version: "1.3.0",
+      });
       expect(failed.status).toBe(409);
       expect(failed.body.code).toBe("version_blocklisted");
-      expect(begin).toHaveBeenCalledTimes(2);
-      // Only the FAILED apply releases the latch; the restarting success
-      // above holds it until the process restart.
-      expect(end).toHaveBeenCalledTimes(1);
+      expect(failBegin).toHaveBeenCalledTimes(1);
+      expect(failEnd).toHaveBeenCalledTimes(1);
     });
 
     it("self-update gate: blocks with a hint, fails open on probe errors, defaults open", async () => {
@@ -1380,6 +1406,121 @@ describe("server/openclaw-channel-sync", () => {
       expect(failBegin).toHaveBeenCalledTimes(1);
       expect(failEnd).toHaveBeenCalledTimes(1);
       expect(failing.sync.isApplyInProgress()).toBe(false);
+    });
+  });
+
+  describe("codex-round hardening", () => {
+    it("re-applies a blocklisted sha via dev-head only after Clear (post-build recheck)", async () => {
+      const { sync, store, rootDir } = createHarness({
+        pin: "1.0.0",
+        installedVersion: "1.0.0",
+        sentinelVersion: "1.0.0",
+      });
+      writeCheckoutFixture(rootDir, { sha: kDevSha });
+      // "Latest dev" carries no sha, so the pre-build blocklist gate cannot
+      // fire — the RESOLVED sha must be rechecked after the build.
+      store.addBlocklist({ id: kDevSha, reason: "crash_loop", exitCode: 1 });
+      const result = await sync.applyUpdate({ channel: "dev", devHead: true });
+      expect(result.status).toBe(409);
+      expect(result.body.code).toBe("version_blocklisted");
+      expect(store.readState().applied).toBeNull();
+    });
+
+    it("hard-gates dev applies on a verified backup like downgrades", async () => {
+      const { sync, rootDir, store } = createHarness({
+        pin: "1.0.0",
+        installedVersion: "1.0.0",
+        sentinelVersion: "1.0.0",
+        runnerImpl: async (opts, fallback) => {
+          if (opts.command === "openclaw" && opts.args?.[0] === "backup") {
+            return { ok: false, code: 1, tail: "boom", timedOut: false };
+          }
+          return fallback(opts);
+        },
+      });
+      writeCheckoutFixture(rootDir, { sha: kDevSha });
+      const result = await sync.applyUpdate({ channel: "dev", devHead: true });
+      expect(result.status).toBe(409);
+      expect(result.body.code).toBe("backup_failed");
+      expect(store.readState().applied).toBeNull();
+    });
+
+    it("aborts the apply when the pin rollback floor cannot be persisted", async () => {
+      const { sync, rootDir, store } = createHarness({
+        pin: "1.0.0",
+        installedVersion: "1.0.0",
+        sentinelVersion: "1.0.0",
+      });
+      store.updateState((s) => {
+        s.pinVersion = "1.0.0";
+        return s;
+      });
+      // Poison the overlay store: a FILE where the store dir belongs makes
+      // the pin snapshot fail while everything else would proceed.
+      fs.writeFileSync(path.join(rootDir, "openclaw-overlay"), "not a dir");
+      const result = await sync.applyUpdate({ channel: "beta", version: "1.1.0" });
+      expect(result.status).toBe(507);
+      expect(result.body.code).toBe("pin_snapshot_failed");
+    });
+
+    it("re-activates a gutted pin tree from its overlay instead of blessing it", async () => {
+      const { sync, store, installDir } = createHarness({
+        pin: "1.0.0",
+        installedVersion: "1.0.0",
+        sentinelVersion: null,
+      });
+      store.updateState((s) => {
+        s.pinVersion = "1.0.0";
+        return s;
+      });
+      expect(saveOverlayFixture(store, "1.0.0")).toEqual({ ok: true });
+      // Gut the live tree: plausible package.json, no bin/dist (mid-copy crash).
+      const packageDir = path.join(installDir, "node_modules", "openclaw");
+      fs.rmSync(path.join(packageDir, "bin"), { recursive: true, force: true });
+      fs.rmSync(path.join(packageDir, "dist"), { recursive: true, force: true });
+
+      const result = sync.syncAtBoot();
+      expect(result.ok).toBe(true);
+      // The overlay copy restored the full tree; the sentinel certifies a
+      // COMPLETE tree, never the gutted one.
+      expect(fs.existsSync(path.join(packageDir, "dist"))).toBe(true);
+      expect(store.readSentinel({ installDir })?.version).toBe("1.0.0");
+    });
+
+    it("keeps OPENCLAW secret-shaped vars out of the dev build env", async () => {
+      const seen = [];
+      const { sync, rootDir } = createHarness({
+        pin: "1.0.0",
+        installedVersion: "1.0.0",
+        sentinelVersion: "1.0.0",
+        extraSyncOptions: {
+          gatewayEnv: () => ({
+            ...process.env,
+            OPENCLAW_HOME: "/data",
+            OPENCLAW_GATEWAY_TOKEN: "gw-secret",
+            OPENCLAW_TWITCH_ACCESS_TOKEN: "twitch-secret",
+          }),
+        },
+        runnerImpl: async (opts, fallback) => {
+          if (opts.command === "openclaw" && opts.args?.[0] === "update") {
+            seen.push(opts.env);
+            return {
+              ok: true,
+              code: 0,
+              tail: '{"status":"ok"}',
+              timedOut: false,
+            };
+          }
+          return fallback(opts);
+        },
+      });
+      writeCheckoutFixture(rootDir, { sha: kDevSha });
+      const result = await sync.applyUpdate({ channel: "dev", devHead: true });
+      expect(result.status).toBe(202);
+      expect(seen).toHaveLength(1);
+      expect(seen[0].OPENCLAW_HOME).toBe("/data");
+      expect(seen[0].OPENCLAW_GATEWAY_TOKEN).toBeUndefined();
+      expect(seen[0].OPENCLAW_TWITCH_ACCESS_TOKEN).toBeUndefined();
     });
   });
 

@@ -766,4 +766,21 @@ describe("frontend/upgrade-helpers misc models", () => {
       ).toBe(Math.sign(compareVersionParts(b, a)));
     }
   });
+  it("verdict: a dev-head rebuild resolving to the SAME sha is a success", async () => {
+    const { buildVerdictBannerModel } = await loadUpgradeHelpers();
+    const sha = "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0";
+    const verdict = buildVerdictBannerModel({
+      expected: { devHead: true, previousId: sha },
+      channel: {
+        isPin: false,
+        appliedId: sha,
+        installedVersion: "2026.7.1-2",
+        pinVersion: "2026.7.1-2",
+      },
+    });
+    // main was unchanged — the update completed on the same commit; requiring
+    // a DIFFERENT sha made the UI report failure for a successful update.
+    expect(verdict.ok).toBe(true);
+  });
+
 });

@@ -272,6 +272,13 @@ describe("server/openclaw-version", () => {
       expect(env.GOG_KEYRING_PASSWORD).toBeUndefined();
       expect(env.PATH).toBe(process.env.PATH);
       expect(env.npm_config_cache).toContain("cache");
+      // HOME is the temp install dir, not the data volume: lifecycle scripts
+      // must not get $HOME-relative reads into .openclaw state or .env.
+      expect(env.HOME).toBeTruthy();
+      expect(env.HOME).not.toBe(process.env.HOME);
+      expect(env.HOME).toContain("openclaw-prepare-");
+      // Registry/config pinned away from agent-writable dotfiles.
+      expect(env.npm_config_registry).toBe("https://registry.npmjs.org");
       result.cleanup();
     } finally {
       if (previousApiKey === undefined) delete process.env.ANTHROPIC_API_KEY;

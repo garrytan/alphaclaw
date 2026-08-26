@@ -438,7 +438,8 @@ describe("server/openclaw-channel apply flow (e2e)", { retry: 1 }, () => {
         acceptedAt: null,
       }),
     );
-    expect(sync.isApplyInProgress()).toBe(false);
+    // Held until the process restart lands — see the latch-window fix.
+    expect(sync.isApplyInProgress()).toBe(true);
 
     expect(restartProcess).not.toHaveBeenCalled();
     vi.advanceTimersByTime(1500);
@@ -550,14 +551,20 @@ describe("server/openclaw-channel apply flow (e2e)", { retry: 1 }, () => {
     expect(guardedRes.body.error).toMatch(/version change is in progress/);
 
     backupGate.resolve();
-    await waitFor(() => !sync.isApplyInProgress());
+    await waitFor(
+      () => harness.store.readState().lastUpdateRun?.finishedAt != null,
+    );
     expect(harness.store.readState().applied).toEqual(
       expect.objectContaining({ channel: "beta", version: "1.1.0" }),
     );
     expect(harness.store.readState().lastUpdateRun.ok).toBe(true);
 
+    // The latch stays HELD after a restarting success — the process restart
+    // is imminent, so the legacy self-update route stays gated too instead of
+    // starting an install the restart would kill.
+    expect(sync.isApplyInProgress()).toBe(true);
     const releasedRes = await request(guardApp).post("/api/alphaclaw/update");
-    expect(releasedRes.status).toBe(200);
+    expect(releasedRes.status).toBe(409);
   });
 
   it("streams multi-MB dev-build output over SSE and records the checkout sha", async () => {

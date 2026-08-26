@@ -444,6 +444,34 @@ describe("server/openclaw-release-channel", () => {
     });
   });
 
+  describe("server pid guard", () => {
+    it("never clobbers a live foreign owner and clears only its own claim", () => {
+      const { spawn } = require("child_process");
+      const { store } = createStore();
+      const child = spawn(process.execPath, ["-e", "setTimeout(() => {}, 30000)"], {
+        stdio: "ignore",
+      });
+      try {
+        fs.mkdirSync(path.dirname(store.serverPidPath), { recursive: true });
+        fs.writeFileSync(
+          store.serverPidPath,
+          JSON.stringify({ pid: child.pid, at: 1 }),
+        );
+        // A live foreign owner is sacred — a second start must not replace it
+        // (it would clear the claim on exit, leaving the live server unguarded).
+        store.writeServerPid();
+        expect(JSON.parse(fs.readFileSync(store.serverPidPath, "utf8")).pid).toBe(
+          child.pid,
+        );
+        // clearServerPid only removes its OWN claim.
+        store.clearServerPid();
+        expect(fs.existsSync(store.serverPidPath)).toBe(true);
+      } finally {
+        child.kill("SIGKILL");
+      }
+    });
+  });
+
   describe("bin shim", () => {
     // Shim targets must live inside the managed roots (overlay store or the
     // dev checkout) — validateBinShim rejects anything else.
