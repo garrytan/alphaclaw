@@ -277,8 +277,12 @@ describe("server/openclaw-version", () => {
       expect(env.HOME).toBeTruthy();
       expect(env.HOME).not.toBe(process.env.HOME);
       expect(env.HOME).toContain("openclaw-prepare-");
-      // Registry/config pinned away from agent-writable dotfiles.
+      // Registry/config pinned away from agent-writable dotfiles — with
+      // DISTINCT user/global paths (npm hard-errors on double-loading the
+      // same file; caught by the live tier).
       expect(env.npm_config_registry).toBe("https://registry.npmjs.org");
+      expect(env.npm_config_userconfig).not.toBe(env.npm_config_globalconfig);
+      expect(env.npm_config_userconfig).toContain("openclaw-prepare-");
       result.cleanup();
     } finally {
       if (previousApiKey === undefined) delete process.env.ANTHROPIC_API_KEY;
