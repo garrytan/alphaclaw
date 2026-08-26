@@ -123,7 +123,7 @@ The **Upgrade** page pins your OpenClaw to a release channel and lets you switch
 How it works:
 
 - **Explicit updates only.** Nothing installs on its own. Pick a version (last 5 stable, last 5 beta, or recent `main` commits), review its release notes, click once. Every restart deterministically re-loads the version you chose — offline, from a persisted copy on your data volume.
-- **Backed up before every switch.** AlphaClaw runs `openclaw backup create --verify` first; downgrades are blocked unless the backup verifies (older versions may not read migrated state).
+- **Backed up before every switch.** AlphaClaw runs `openclaw backup create --verify` first; downgrades and dev builds are blocked unless the backup verifies (older versions — and the pin you'd roll back to — may not read migrated state).
 - **Auto-rollback.** A freshly switched version gets a 24-hour stabilization window. If it crash-loops, exits with a config error, or stays degraded, AlphaClaw blocklists it, restarts, and boots the last known-good build — then tells you on Telegram/Discord/Slack what happened and why. "Mark as good now" ends the window early once you're satisfied.
 - **Dev builds are honest about cost.** The first dev build compiles OpenClaw from source (20-35 minutes measured, 45-minute ceiling, ~5 GB on the data volume, 8 GB RAM recommended) with live build output streamed to the page. Your agent stays up until the final restart.
 
@@ -232,6 +232,10 @@ AlphaClaw is a convenience wrapper — it intentionally trades some of OpenClaw'
 If you need OpenClaw's full security posture (manual pairing codes, no query-string tokens, no auto-approval), use OpenClaw directly without AlphaClaw.
 
 ## Development
+
+Release history lives in [CHANGELOG.md](CHANGELOG.md); contributor setup and
+test tiers are in [CONTRIBUTING.md](CONTRIBUTING.md); open work is tracked in
+[TODOS.md](TODOS.md).
 
 ```bash
 npm install
