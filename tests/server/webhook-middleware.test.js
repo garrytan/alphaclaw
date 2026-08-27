@@ -181,4 +181,57 @@ describe("server/webhook-middleware", () => {
       await new Promise((resolve) => server.close(resolve));
     }
   });
+
+  it("flags a 200 that drops the durable-ingress header after a hook proved durable", async () => {
+    // Spy gateway: return the durable header on the first request, then omit it.
+    let requestCount = 0;
+    const server = http.createServer((req, res) => {
+      const chunks = [];
+      req.on("data", (chunk) => chunks.push(chunk));
+      req.on("end", () => {
+        requestCount += 1;
+        res.statusCode = 200;
+        if (requestCount === 1) {
+          res.setHeader("x-openclaw-delivery-accepted", "durable");
+        }
+        res.end("");
+      });
+    });
+    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const gatewayUrl = `http://127.0.0.1:${server.address().port}`;
+
+    const logged = [];
+    const app = createHookApp({
+      gatewayUrl,
+      insertRequest: (entry) => logged.push(entry),
+    });
+
+    try {
+      await request(app).post("/hooks/telegram").send({ update_id: 1 });
+      await request(app).post("/hooks/telegram").send({ update_id: 2 });
+
+      expect(logged).toHaveLength(2);
+      // First request proved durable ingress — no annotation.
+      expect(logged[0].gatewayBody).not.toContain("[NOT DURABLY ACCEPTED]");
+      // Second dropped the header on a 200 — flagged.
+      expect(logged[1].gatewayBody).toContain("[NOT DURABLY ACCEPTED]");
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+
+  it("does not flag hooks that never used durable ingress", async () => {
+    const { server, gatewayUrl } = await createGatewaySpyServer();
+    const logged = [];
+    const app = createHookApp({
+      gatewayUrl,
+      insertRequest: (entry) => logged.push(entry),
+    });
+    try {
+      await request(app).post("/hooks/discord").send({ x: 1 });
+      expect(logged[0].gatewayBody).not.toContain("[NOT DURABLY ACCEPTED]");
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
 });
