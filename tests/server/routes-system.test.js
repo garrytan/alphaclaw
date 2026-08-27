@@ -424,6 +424,9 @@ describe("server/routes/system", () => {
               overseer: { enabled: false },
             },
           },
+          team: {
+            enabled: false,
+          },
         },
         openclawChannel: null,
         syncCron: expect.objectContaining({
@@ -752,6 +755,9 @@ describe("server/routes/system", () => {
             overseer: { enabled: false },
           },
         },
+        team: {
+          enabled: false,
+        },
       },
     });
   });
@@ -781,6 +787,9 @@ describe("server/routes/system", () => {
               releaseChannel: "stable",
               overseer: { enabled: false },
             },
+          },
+          team: {
+            enabled: false,
           },
         },
       }),

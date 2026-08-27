@@ -52,6 +52,9 @@ describe("server/alphaclaw-config", () => {
           overseer: { enabled: false },
         },
       },
+      team: {
+        enabled: false,
+      },
     });
   });
 
@@ -83,6 +86,9 @@ describe("server/alphaclaw-config", () => {
           releaseChannel: "stable",
           overseer: { enabled: false },
         },
+      },
+      team: {
+        enabled: false,
       },
     });
   });
