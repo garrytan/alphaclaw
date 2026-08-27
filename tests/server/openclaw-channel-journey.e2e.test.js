@@ -345,6 +345,79 @@ describe("FULL JOURNEY: stable → beta → restart → stays beta", () => {
     expect(logRes.text).toContain("ok=false");
   });
 
+  it("rollback journey: activated beta crash-loops → marker → boot rolls back → blocklisted → notified", async () => {
+    const journey = createJourney();
+
+    // Apply + activate the beta (condensed from the happy path above).
+    const p1 = journey.bootInstance({ withHttp: true });
+    expect(p1.sync.syncAtBoot().ok).toBe(true);
+    await request(p1.app)
+      .put("/api/alphaclaw/config/updates/openclaw-release-channel")
+      .send({ releaseChannel: "beta" });
+    await request(p1.app)
+      .post("/api/openclaw/apply")
+      .send({ channel: "beta", version: kBetaVersion });
+    await waitFor(() => {
+      const run = p1.sync.getChannelInfo().lastUpdateRun;
+      return run && run.finishedAt != null && run.ok === true;
+    });
+    journey.nowRef.now += 5_000;
+    const p2 = journey.bootInstance();
+    expect(p2.sync.syncAtBoot().action).toBe("activated");
+    expect(installedVersionAt(journey.installDir)).toBe(kBetaVersion);
+
+    // The watchdog detects a crash loop on the fresh build and requests a
+    // channel rollback — marker written, build blocklisted immediately.
+    const rollback = p2.sync.requestChannelRollback({
+      reason: "crash_loop",
+      exitCode: 1,
+    });
+    expect(rollback.ok).toBe(true);
+    expect(
+      p2.sync
+        .getChannelInfo()
+        .blocklist.some((entry) => entry.id === kBetaVersion),
+    ).toBe(true);
+
+    // The rollback restart: boot consumes the marker and lands on a safe
+    // version (the pin — no last-known-good beta overlay exists yet).
+    journey.nowRef.now += 5_000;
+    const p3 = journey.bootInstance();
+    const boot3 = p3.sync.syncAtBoot();
+    expect(boot3.ok).toBe(true);
+    expect(boot3.action).toBe("rollback");
+    expect(installedVersionAt(journey.installDir)).toBe("1.0.0");
+    const info = p3.sync.getChannelInfo();
+    expect(info.installedVersion).toBe("1.0.0");
+    expect(info.blocklist.some((entry) => entry.id === kBetaVersion)).toBe(true);
+
+    // A FOURTH boot stays put: marker consumed, no rollback loop.
+    journey.nowRef.now += 5_000;
+    const p4 = journey.bootInstance();
+    expect(["already_active", "none"]).toContain(p4.sync.syncAtBoot().action);
+    expect(installedVersionAt(journey.installDir)).toBe("1.0.0");
+
+    // The admin heard about it: a rollback notification was emitted.
+    // (queueNotify delivers on a microtask — yield once before asserting.)
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(
+      journey.notifications.some((n) => /rolled back/i.test(n.message)),
+    ).toBe(true);
+
+    // The blocklisted beta cannot be re-applied without an explicit clear.
+    // (A fresh instance: p1's apply latch is intentionally still held after
+    // its restarting success — the real process would have died.)
+    journey.nowRef.now += 5_000;
+    const p5 = journey.bootInstance({ withHttp: true });
+    expect(p5.sync.syncAtBoot().ok).toBe(true);
+    const reapply = await request(p5.app)
+      .post("/api/openclaw/apply")
+      .send({ channel: "beta", version: kBetaVersion });
+    expect(reapply.status).toBe(409);
+    expect(reapply.body.code).toBe("version_blocklisted");
+    expect(installedVersionAt(journey.installDir)).toBe("1.0.0");
+  });
+
   it("hard backup gate: a prerelease apply with a failing backup installs nothing", async () => {
     const journey = createJourney({
       runnerImpl: async (opts, fallback) => {
