@@ -157,6 +157,33 @@ describe("server/upgrade-notifier routing", () => {
     expect(sendToTarget.mock.calls[1][1]).toBe("(fallback) upgrade failed");
   });
 
+  it("upgrade-lifecycle messages deep-link to the hash route (the SPA 404s on /upgrade)", async () => {
+    const { outbox } = makeOutbox();
+    const sendToTarget = vi.fn(async () => ({ ok: true }));
+    const notifier = createUpgradeNotifier({
+      notifier: { notify: vi.fn(async () => ({ ok: true })), sendToTarget },
+      outbox,
+      operatorsStore: {
+        read: () => ({
+          notifications: {
+            preferredChannel: null,
+            adminTargets: [{ channel: "telegram", target: "111" }],
+          },
+        }),
+      },
+      getBaseUrl: () => "https://claw.example.com/",
+      logger: kSilentLogger,
+    });
+    await notifier.notify("update finished", {
+      id: "e1",
+      operationId: "op-1",
+    });
+    await notifier.flush();
+    expect(sendToTarget.mock.calls[0][1]).toBe(
+      "update finished\n🔗 https://claw.example.com/#/upgrade",
+    );
+  });
+
   it("all admin targets failing leaves the event unacked for retry", async () => {
     const { notifier, outbox } = makeNotifier({
       prefs: {
