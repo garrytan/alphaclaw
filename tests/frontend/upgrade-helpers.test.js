@@ -783,4 +783,66 @@ describe("frontend/upgrade-helpers misc models", () => {
     expect(verdict.ok).toBe(true);
   });
 
+  describe("releases-behind indicator", () => {
+    const catalog = {
+      beta: [
+        { version: "2026.8.1-beta.3" },
+        { version: "2026.8.1-beta.2" },
+        { version: "2026.8.1-beta.1" },
+      ],
+      stable: [{ version: "2026.7.1-2", isDistTagLatest: true }],
+    };
+
+    it("counts newer releases only when installed is on the selected channel", async () => {
+      const { computeReleasesBehind, formatReleasesBehind } =
+        await loadUpgradeHelpers();
+      const result = computeReleasesBehind({
+        catalog,
+        releaseChannel: "beta",
+        installedVersion: "2026.8.1-beta.1",
+      });
+      expect(result).toEqual({ status: "behind", count: 2 });
+      expect(formatReleasesBehind(result, "beta")).toBe("2 beta releases behind");
+    });
+
+    it("reports up-to-date on the newest release", async () => {
+      const { computeReleasesBehind, formatReleasesBehind } =
+        await loadUpgradeHelpers();
+      const result = computeReleasesBehind({
+        catalog,
+        releaseChannel: "beta",
+        installedVersion: "2026.8.1-beta.3",
+      });
+      expect(result.status).toBe("current");
+      expect(formatReleasesBehind(result)).toBe("Up to date");
+    });
+
+    it("says not-on-channel when installed belongs to a different channel", async () => {
+      const { computeReleasesBehind, formatReleasesBehind } =
+        await loadUpgradeHelpers();
+      const result = computeReleasesBehind({
+        catalog,
+        releaseChannel: "beta",
+        installedVersion: "2026.7.1-2", // a stable version, browsing beta
+      });
+      expect(result.status).toBe("not-on-channel");
+      expect(formatReleasesBehind(result)).toBe(
+        "Not running the selected channel",
+      );
+    });
+
+    it("returns unknown for dev, empty catalog, or missing version", async () => {
+      const { computeReleasesBehind, formatReleasesBehind } =
+        await loadUpgradeHelpers();
+      expect(
+        computeReleasesBehind({ catalog, releaseChannel: "dev", installedVersion: "x" })
+          .status,
+      ).toBe("unknown");
+      expect(
+        computeReleasesBehind({ catalog: null, releaseChannel: "beta", installedVersion: "x" })
+          .status,
+      ).toBe("unknown");
+      expect(formatReleasesBehind({ status: "unknown" })).toBeNull();
+    });
+  });
 });
