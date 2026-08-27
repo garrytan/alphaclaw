@@ -51,6 +51,9 @@ vi.mock("../../lib/public/js/lib/api.js", () => ({
   clearOpenclawBlocklist: vi.fn(),
   fetchOpenclawCatalog: vi.fn(),
   fetchOpenclawChannel: vi.fn(),
+  fetchOpenclawRun: vi.fn(),
+  fetchOpenclawRunLogText: vi.fn(),
+  fetchOpenclawRuns: vi.fn(),
   fetchStatus: vi.fn(),
   markOpenclawGood: vi.fn(),
   rollbackOpenclaw: vi.fn(),
@@ -65,7 +68,6 @@ vi.mock("../../lib/public/js/components/toast.js", () => ({
 
 import * as preactHooks from "preact/hooks";
 import { UpgradeTabView } from "../../lib/public/js/components/upgrade-tab/index.js";
-import { buildChannelSwitchModel } from "../../lib/public/js/components/upgrade-tab/helpers.js";
 import { ActionButton } from "../../lib/public/js/components/action-button.js";
 import { Tooltip } from "../../lib/public/js/components/tooltip.js";
 import { InfoTooltip } from "../../lib/public/js/components/info-tooltip.js";
@@ -431,26 +433,5 @@ describe("frontend/upgrade-tab ship fixes", () => {
     // actionsDisabled window (which includes savingChannel) covers it.
     expect(cta.props.loading).toBeFalsy();
     expect(cta.props.loadingLabel).toBeUndefined();
-  });
-
-  it("styles the channel-switch dialog Cancel like ConfirmDialog's cancel", () => {
-    const tree = renderView({
-      channelInfo: makeChannelInfo(),
-      catalog: makeCatalog(),
-      channelSwitchPrompt: {
-        nextChannel: "beta",
-        latestLabel: "2026.7.3-beta.1",
-        model: buildChannelSwitchModel({
-          nextChannel: "beta",
-          latestLabel: "2026.7.3-beta.1",
-        }),
-      },
-    });
-
-    const cancel = findActionButtonByLabel(tree, "Cancel");
-    expect(cancel).toBeTruthy();
-    expect(cancel.props.tone).toBe("secondary");
-    expect(cancel.props.size).toBe("md");
-    expect(cancel.props.className).toContain("px-4 py-2 rounded-lg");
   });
 });

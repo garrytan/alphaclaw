@@ -46,6 +46,9 @@ vi.mock("../../lib/public/js/lib/api.js", () => ({
   clearOpenclawBlocklist: vi.fn(),
   fetchOpenclawCatalog: vi.fn(),
   fetchOpenclawChannel: vi.fn(),
+  fetchOpenclawRun: vi.fn(),
+  fetchOpenclawRunLogText: vi.fn(),
+  fetchOpenclawRuns: vi.fn(),
   fetchStatus: vi.fn(),
   markOpenclawGood: vi.fn(),
   rollbackOpenclaw: vi.fn(),
@@ -63,7 +66,7 @@ import * as api from "../../lib/public/js/lib/api.js";
 import { showToast } from "../../lib/public/js/components/toast.js";
 import { UpgradeTabView } from "../../lib/public/js/components/upgrade-tab/index.js";
 import { useUpgradeTab } from "../../lib/public/js/components/upgrade-tab/use-upgrade-tab.js";
-import { buildChannelSwitchModel } from "../../lib/public/js/components/upgrade-tab/helpers.js";
+import { buildChannelSaveErrorModel } from "../../lib/public/js/components/upgrade-tab/helpers.js";
 import { ActionButton } from "../../lib/public/js/components/action-button.js";
 import { SegmentedControl } from "../../lib/public/js/components/segmented-control.js";
 import { Tooltip } from "../../lib/public/js/components/tooltip.js";
@@ -549,24 +552,12 @@ describe("frontend/upgrade-tab view", () => {
     expect(onCancelRollback).toHaveBeenCalledTimes(1);
   });
 
-  it("routes segment changes through the guided flow — the dialog offers Apply now vs browse (U1)", () => {
+  it("a segment change goes straight to onSelectChannel — no dialog in between (U1)", () => {
     const onSelectChannel = vi.fn();
-    const onConfirmSwitchApply = vi.fn();
-    const onConfirmSwitchBrowse = vi.fn();
     const tree = renderView({
       channelInfo: makeChannelInfo(),
       catalog: makeCatalog(),
       onSelectChannel,
-      onConfirmSwitchApply,
-      onConfirmSwitchBrowse,
-      channelSwitchPrompt: {
-        nextChannel: "beta",
-        latestLabel: "2026.7.3-beta.1",
-        model: buildChannelSwitchModel({
-          nextChannel: "beta",
-          latestLabel: "2026.7.3-beta.1",
-        }),
-      },
     });
 
     const segmented = findAllByType(tree, SegmentedControl)[0];
@@ -574,15 +565,255 @@ describe("frontend/upgrade-tab view", () => {
     expect(onSelectChannel).toHaveBeenCalledWith("beta");
 
     const text = treeText(tree);
-    expect(text).toContain("Switch to latest beta?");
-    expect(text).toContain("~2 min, backup included");
-    expect(text).toContain("Just browse the catalog");
-    expect(text).toContain("installs nothing until you press Apply");
+    expect(text).not.toContain("Switch to latest beta?");
+    expect(text).not.toContain("Just browse the catalog");
+  });
 
-    findButtonByText(tree, "Apply now").props.onclick();
-    expect(onConfirmSwitchApply).toHaveBeenCalledTimes(1);
-    findButtonByText(tree, "Just browse the catalog").props.onclick();
-    expect(onConfirmSwitchBrowse).toHaveBeenCalledTimes(1);
+  it("renders the persistent channel-save error chip next to the control (U1 regression)", () => {
+    const onDismissChannelSaveError = vi.fn();
+    const tree = renderView({
+      channelInfo: makeChannelInfo(),
+      catalog: makeCatalog(),
+      activeChannel: "stable",
+      channelSaveError: buildChannelSaveErrorModel({
+        attempted: "beta",
+        activeChannel: "stable",
+        error: Object.assign(new Error("disk full"), {
+          hint: "Check disk space on the data volume.",
+        }),
+      }),
+      onDismissChannelSaveError,
+    });
+
+    const text = treeText(tree);
+    expect(text).toContain("Couldn't switch to beta — still on stable.");
+    expect(text).toContain("disk full");
+    expect(text).toContain("Check disk space on the data volume.");
+
+    const dismiss = findAllByType(tree, "button").find(
+      (vnode) =>
+        collectText(vnode).join(" ").includes("Dismiss") &&
+        vnode.props.onclick === onDismissChannelSaveError,
+    );
+    expect(dismiss).toBeTruthy();
+  });
+
+  it("shows a saving spinner state on the segmented control while the channel persists", () => {
+    const tree = renderView({
+      channelInfo: makeChannelInfo(),
+      catalog: makeCatalog(),
+      savingChannel: true,
+    });
+
+    const segmented = findAllByType(tree, SegmentedControl)[0];
+    expect(segmented.props.disabled).toBe(true);
+  });
+
+  it("renders the channel-intent mismatch banner with Apply, notes, and Back actions", () => {
+    const onRequestApply = vi.fn();
+    const onToggleNotes = vi.fn();
+    const onSelectChannel = vi.fn();
+    const tree = renderView({
+      channelInfo: makeChannelInfo(),
+      activeChannel: "beta",
+      catalog: makeCatalog(),
+      onRequestApply,
+      onToggleNotes,
+      onSelectChannel,
+    });
+
+    const text = treeText(tree);
+    expect(text).toContain(
+      "Channel set to beta — still running stable 2026.7.1-2.",
+    );
+
+    const update = findActionButtonByLabel(tree, "Update to 2026.7.3-beta.1");
+    expect(update).toBeTruthy();
+    update.props.onClick();
+    expect(onRequestApply).toHaveBeenCalledWith({
+      payload: { channel: "beta", version: "2026.7.3-beta.1" },
+      label: "2026.7.3-beta.1",
+      isDowngrade: false,
+    });
+
+    findButtonByText(tree, "Release notes").props.onclick();
+    expect(onToggleNotes).toHaveBeenCalledWith("2026.7.3-beta.1");
+
+    const back = findActionButtonByLabel(tree, "Back to stable");
+    expect(back).toBeTruthy();
+    back.props.onClick();
+    expect(onSelectChannel).toHaveBeenCalledWith("stable");
+  });
+
+  it("mismatch banner has no Apply button when no newer target is published", () => {
+    const catalog = makeCatalog({ beta: [] });
+    const tree = renderView({
+      channelInfo: makeChannelInfo(),
+      activeChannel: "beta",
+      catalog,
+    });
+
+    const text = treeText(tree);
+    expect(text).toContain(
+      "No newer beta is published — stable 2026.7.1-2 is current.",
+    );
+    expect(
+      findAllByType(tree, ActionButton).filter((vnode) =>
+        String(vnode.props.idleLabel || "").startsWith("Update to 2026"),
+      ),
+    ).toEqual([]);
+    expect(findActionButtonByLabel(tree, "Back to stable")).toBeTruthy();
+  });
+
+  it("hides the mismatch banner while an operation is in flight", () => {
+    const tree = renderView({
+      channelInfo: makeChannelInfo(),
+      activeChannel: "beta",
+      catalog: makeCatalog(),
+      operation: {
+        label: "2026.7.3-beta.1",
+        startedAt: kNow,
+        steps: [],
+        output: "",
+        lastOutputAt: null,
+        phase: "running",
+      },
+    });
+
+    expect(treeText(tree)).not.toContain("Channel set to beta");
+  });
+
+  it("gates Apply on npm degradation with an explanation chip, keeping GitHub-only degradation apply-enabled", () => {
+    const npmDegraded = renderView({
+      channelInfo: makeChannelInfo(),
+      catalog: makeCatalog({ degraded: { github: false, npm: true } }),
+    });
+    expect(treeText(npmDegraded)).toContain(
+      "npm registry unreachable — installs are gated on npm",
+    );
+    const applyButtons = findAllByType(npmDegraded, ActionButton).filter(
+      (vnode) =>
+        ["Upgrade", "Downgrade", "Switch", "Latest dev (main HEAD)"].includes(
+          vnode.props.idleLabel,
+        ),
+    );
+    expect(applyButtons.length).toBeGreaterThan(0);
+    for (const button of applyButtons) {
+      expect(button.props.disabled).toBe(true);
+    }
+
+    const githubDegraded = renderView({
+      channelInfo: makeChannelInfo(),
+      catalog: makeCatalog({ degraded: { github: true, npm: false } }),
+    });
+    expect(treeText(githubDegraded)).toContain(
+      "GitHub unreachable — release notes may be unavailable",
+    );
+    const enabledApply = findAllByType(githubDegraded, ActionButton).find(
+      (vnode) => vnode.props.idleLabel === "Upgrade",
+    );
+    expect(enabledApply.props.disabled).toBe(false);
+  });
+
+  it("renders the update timeline with state, target, relative time, and a view-log link", () => {
+    const onViewRunLog = vi.fn();
+    const tree = renderView({
+      channelInfo: makeChannelInfo(),
+      catalog: makeCatalog(),
+      runs: [
+        {
+          operationId: "0b1c2d3e-0000-4000-8000-000000000001",
+          target: { channel: "stable", version: "2026.7.2" },
+          state: "activated",
+          startedAt: kNow - 3_700_000,
+          finishedAt: kNow - 3_600_000,
+          ok: true,
+          hasLog: true,
+        },
+        {
+          operationId: "0b1c2d3e-0000-4000-8000-000000000002",
+          target: { channel: "beta", version: "2026.7.3-beta.1" },
+          state: "activation_failed",
+          startedAt: kNow - 86_400_000,
+          finishedAt: kNow - 86_300_000,
+          ok: false,
+          hasLog: false,
+        },
+      ],
+      onViewRunLog,
+    });
+
+    const text = treeText(tree);
+    expect(text).toContain("Update history");
+    expect(text).toContain("2026.7.2");
+    expect(text).toContain("activated");
+    expect(text).toContain("1 hour ago");
+    expect(text).toContain("activation failed");
+
+    const viewLogs = findAllByType(tree, "button").filter((vnode) =>
+      collectText(vnode).join(" ").includes("View log"),
+    );
+    // Only the run that recorded a log offers the link.
+    expect(viewLogs.length).toBe(1);
+    viewLogs[0].props.onclick();
+    expect(onViewRunLog).toHaveBeenCalledWith(
+      "0b1c2d3e-0000-4000-8000-000000000001",
+    );
+  });
+
+  it("renders the run-failure card with the result envelope and a View full log action", () => {
+    const onViewRunLog = vi.fn();
+    const tree = renderView({
+      channelInfo: makeChannelInfo(),
+      catalog: makeCatalog(),
+      runFailure: {
+        operationId: "0b1c2d3e-0000-4000-8000-00000000000f",
+        state: "activation_failed",
+        title: "Update to 2026.7.3-beta.1 did not activate",
+        error: {
+          message: "health check failed after restart",
+          hint: "The previous version was restored.",
+          code: "activation_failed",
+          docsUrl: null,
+        },
+        hasLog: true,
+      },
+      onViewRunLog,
+    });
+
+    const text = treeText(tree);
+    expect(text).toContain("Update to 2026.7.3-beta.1 did not activate");
+    expect(text).toContain("health check failed after restart");
+
+    findButtonByText(tree, "View full log").props.onclick();
+    expect(onViewRunLog).toHaveBeenCalledWith(
+      "0b1c2d3e-0000-4000-8000-00000000000f",
+    );
+  });
+
+  it("shows the fetched run log text in the durable log viewer", () => {
+    const tree = renderView({
+      channelInfo: makeChannelInfo(),
+      catalog: makeCatalog(),
+      runs: [
+        {
+          operationId: "0b1c2d3e-0000-4000-8000-000000000001",
+          target: { channel: "stable", version: "2026.7.2" },
+          state: "activated",
+          startedAt: kNow - 3_700_000,
+          finishedAt: kNow - 3_600_000,
+          hasLog: true,
+        },
+      ],
+      runLog: {
+        operationId: "0b1c2d3e-0000-4000-8000-000000000001",
+        loading: false,
+        text: "npm install openclaw@2026.7.2\nverified\n",
+        error: null,
+      },
+    });
+
+    expect(treeText(tree)).toContain("npm install openclaw@2026.7.2");
   });
 
   it("keeps the dev commit list collapsed behind Advanced with requirements shown first (U13/U3)", () => {
@@ -731,60 +962,6 @@ describe("frontend/upgrade-tab view", () => {
     expect(segmented.props.disabled).toBe(false);
   });
 
-  it("Escape closes the channel-switch dialog, guarded while saving", () => {
-    const onCancelSwitch = vi.fn();
-    const listeners = [];
-    const priorWindow = globalThis.window;
-    globalThis.window = {
-      addEventListener: (type, handler) => listeners.push([type, handler]),
-      removeEventListener: () => {},
-    };
-    try {
-      const prompt = {
-        nextChannel: "beta",
-        latestLabel: "2026.7.3-beta.1",
-        model: buildChannelSwitchModel({
-          nextChannel: "beta",
-          latestLabel: "2026.7.3-beta.1",
-        }),
-      };
-      renderView({
-        channelInfo: makeChannelInfo(),
-        catalog: makeCatalog(),
-        channelSwitchPrompt: prompt,
-        onCancelSwitch,
-      });
-      for (const effect of harness.effects) effect?.();
-      const keydownHandlers = listeners
-        .filter(([type]) => type === "keydown")
-        .map(([, handler]) => handler);
-      expect(keydownHandlers.length).toBe(1);
-
-      keydownHandlers[0]({ key: "Enter" });
-      expect(onCancelSwitch).not.toHaveBeenCalled();
-      keydownHandlers[0]({ key: "Escape" });
-      expect(onCancelSwitch).toHaveBeenCalledTimes(1);
-
-      // While saving, Escape must not dismiss the dialog mid-request.
-      listeners.length = 0;
-      renderView({
-        channelInfo: makeChannelInfo(),
-        catalog: makeCatalog(),
-        channelSwitchPrompt: prompt,
-        savingChannel: true,
-        onCancelSwitch,
-      });
-      for (const effect of harness.effects) effect?.();
-      const savingHandlers = listeners
-        .filter(([type]) => type === "keydown")
-        .map(([, handler]) => handler);
-      savingHandlers[0]({ key: "Escape" });
-      expect(onCancelSwitch).toHaveBeenCalledTimes(1);
-    } finally {
-      globalThis.window = priorWindow;
-    }
-  });
-
   it("keeps last loaded data visible with an amber notice when a refresh fails", () => {
     const tree = renderView({
       channelInfo: makeChannelInfo(),
@@ -857,6 +1034,7 @@ describe("frontend/upgrade-tab hook", () => {
       catalog: makeCatalog(),
       channel: { releaseChannel: "stable" },
     });
+    api.fetchOpenclawRuns.mockResolvedValue({ ok: true, runs: [] });
     api.updateOpenclawReleaseChannel.mockResolvedValue({
       ok: true,
       changed: true,
@@ -870,67 +1048,65 @@ describe("frontend/upgrade-tab hook", () => {
     vi.clearAllMocks();
   });
 
-  it("a segment change opens the guided prompt and never PUTs silently (U1)", async () => {
+  it("a segment change persists IMMEDIATELY via PUT — no dialog, nothing installs (U1)", async () => {
     let state = await hydrate();
 
-    state.onSelectChannel("beta");
+    await state.onSelectChannel("beta");
+
+    expect(api.updateOpenclawReleaseChannel).toHaveBeenCalledWith("beta");
+    expect(api.applyOpenclawVersion).not.toHaveBeenCalled();
+    state = renderHook({});
+    expect(state.activeChannel).toBe("beta");
+    expect(state.channelSaveError).toBeNull();
+    expect(state.savingChannel).toBe(false);
+  });
+
+  it("selecting the already-active channel does not PUT", async () => {
+    let state = await hydrate();
+
+    await state.onSelectChannel("stable");
 
     expect(api.updateOpenclawReleaseChannel).not.toHaveBeenCalled();
-    expect(api.applyOpenclawVersion).not.toHaveBeenCalled();
-    state = renderHook({});
-    expect(state.channelSwitchPrompt).toEqual(
-      expect.objectContaining({ nextChannel: "beta" }),
+  });
+
+  // REGRESSION: a failed persist must revert the selection LOUDLY — the
+  // persistent inline error chip state is set and the segment snaps back with
+  // an explanation, never silently.
+  it("a failed channel save reverts the selection and raises the error-chip state", async () => {
+    api.updateOpenclawReleaseChannel.mockRejectedValue(
+      Object.assign(new Error("disk full"), {
+        code: "config_write_failed",
+        hint: "Check disk space on the data volume.",
+      }),
     );
-    expect(state.channelSwitchPrompt.model.title).toBe("Switch to latest beta?");
-  });
-
-  it("selecting the already-active channel does not open the prompt", async () => {
     let state = await hydrate();
 
-    state.onSelectChannel("stable");
+    await state.onSelectChannel("beta");
 
     state = renderHook({});
-    expect(state.channelSwitchPrompt).toBeNull();
-  });
+    expect(state.activeChannel).toBe("stable");
+    expect(state.savingChannel).toBe(false);
+    expect(state.channelSaveError).toEqual(
+      expect.objectContaining({
+        attempted: "beta",
+        activeChannel: "stable",
+        message: "Couldn't switch to beta — still on stable.",
+        detail: "disk full",
+        hint: "Check disk space on the data volume.",
+      }),
+    );
 
-  it("browse-only persists the channel via PUT without applying", async () => {
-    let state = await hydrate();
-    state.onSelectChannel("beta");
+    // The chip is persistent until dismissed (not a toast).
+    state.onDismissChannelSaveError();
     state = renderHook({});
+    expect(state.channelSaveError).toBeNull();
 
-    await state.onConfirmSwitchBrowse();
-
-    expect(api.updateOpenclawReleaseChannel).toHaveBeenCalledWith("beta");
-    expect(api.applyOpenclawVersion).not.toHaveBeenCalled();
+    // A later successful save clears the error state on its own.
+    api.updateOpenclawReleaseChannel.mockResolvedValue({ ok: true });
+    await state.onSelectChannel("beta");
     state = renderHook({});
-    expect(state.channelSwitchPrompt).toBeNull();
     expect(state.activeChannel).toBe("beta");
-  });
-
-  it("Apply now persists the channel, then applies the newest target of that channel (U1/U2)", async () => {
-    api.applyOpenclawVersion.mockResolvedValue({
-      ok: true,
-      operationId: "op-1",
-      events: "/api/operations/op-1/events",
-    });
-    let state = await hydrate();
-    state.onSelectChannel("beta");
-    state = renderHook({});
-
-    await state.onConfirmSwitchApply();
-
-    expect(api.updateOpenclawReleaseChannel).toHaveBeenCalledWith("beta");
-    expect(api.applyOpenclawVersion).toHaveBeenCalledWith({
-      channel: "beta",
-      version: "2026.7.3-beta.1",
-    });
-    expect(api.subscribeOpenclawApplyEvents).toHaveBeenCalledWith(
-      expect.objectContaining({ operationId: "op-1" }),
-    );
-    state = renderHook({});
-    expect(state.operation).toEqual(
-      expect.objectContaining({ operationId: "op-1", phase: "running" }),
-    );
+    expect(state.channelSaveError).toBeNull();
   });
 
   it("apply requests go through a confirm dialog before anything runs (U3)", async () => {
@@ -1228,6 +1404,72 @@ describe("frontend/upgrade-tab hook", () => {
         code: "build_failed",
         hint: "Check the raw log for the first TypeScript error.",
         docsUrl: "https://docs.openclaw.ai/updates#build-failures",
+      }),
+    );
+  });
+
+  it("loads the recent-runs timeline on mount", async () => {
+    api.fetchOpenclawRuns.mockResolvedValue({
+      ok: true,
+      runs: [
+        {
+          operationId: "0b1c2d3e-0000-4000-8000-000000000001",
+          target: { channel: "stable", version: "2026.7.2" },
+          state: "activated",
+          startedAt: kNow - 3_700_000,
+          finishedAt: kNow - 3_600_000,
+          hasLog: true,
+        },
+      ],
+    });
+    const state = await hydrate();
+
+    expect(api.fetchOpenclawRuns).toHaveBeenCalledTimes(1);
+    expect(state.runs).toEqual([
+      expect.objectContaining({
+        operationId: "0b1c2d3e-0000-4000-8000-000000000001",
+        state: "activated",
+      }),
+    ]);
+  });
+
+  it("fetches the durable run log — works for finished runs, not just live SSE", async () => {
+    api.fetchOpenclawRunLogText.mockResolvedValue("npm install\nverified\n");
+    let state = await hydrate();
+
+    await state.onViewRunLog("0b1c2d3e-0000-4000-8000-000000000001");
+
+    expect(api.fetchOpenclawRunLogText).toHaveBeenCalledWith(
+      "0b1c2d3e-0000-4000-8000-000000000001",
+    );
+    state = renderHook({});
+    expect(state.runLog).toEqual({
+      operationId: "0b1c2d3e-0000-4000-8000-000000000001",
+      loading: false,
+      text: "npm install\nverified\n",
+      error: null,
+    });
+
+    state.onCloseRunLog();
+    state = renderHook({});
+    expect(state.runLog).toBeNull();
+  });
+
+  it("keeps the envelope when the run log is missing (404)", async () => {
+    api.fetchOpenclawRunLogText.mockRejectedValue(
+      Object.assign(new Error("No log recorded for this run."), {
+        code: "log_not_found",
+      }),
+    );
+    let state = await hydrate();
+
+    await state.onViewRunLog("0b1c2d3e-0000-4000-8000-000000000002");
+
+    state = renderHook({});
+    expect(state.runLog.error).toEqual(
+      expect.objectContaining({
+        message: "No log recorded for this run.",
+        code: "log_not_found",
       }),
     );
   });
