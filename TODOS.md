@@ -1,5 +1,23 @@
 # TODOS
 
+## P2 — Migrate ensureGatewayProxyConfig to the locked config writer (with Phase 4 team mode)
+- **What:** Replace `ensureGatewayProxyConfig`'s raw `JSON.parse`/`writeFileSync` (lib/server/gateway.js) with `updateOpenclawConfig` (file lock + fail-closed read + agents-shape preservation), writing the `${REMOTE_MCP_API_TOKEN}` placeholder directly (no post-serialize string substitution).
+- **Why:** It is the last unlocked openclaw.json write path; it can race Phase 4's team-mode config writes. A `skipWrite: true` return from the mutate closure preserves the current change-gating.
+- **Context:** Deferred from OpenClaw-beta Phase 1.6 because the 66 gateway tests assert on raw `fs.writeFileSync(configPath, content)` and must be rewritten to the atomic temp+rename pattern. Do it alongside Phase 4's `lib/server/team/gateway-config.js` so both land against the locked pattern with tests written for it.
+- **Effort:** M.
+
+## P3 — Wire restart-handoff consume into the watchdog exit classifier
+- **What:** In gateway.js's child exit handler, when the target supports the restart-handoff contract (capabilities probe) and the exit is unexpected, consume the handoff (`lib/server/openclaw-restart-handoff.js`) before classifying, and add a watchdog `onGatewayExit` branch that relaunches without crash accounting. Serialize exit classification per child pid.
+- **Why:** Correctly classify an OpenClaw-initiated fresh-process restart as intentional, not a crash.
+- **Context:** Deferred from Phase 1.7 — low value in practice because AlphaClaw sets `OPENCLAW_NO_RESPAWN=1`, so routine restarts stay in-process (no child exit to misclassify); a fresh-process handoff restart is rare. The module + tests exist; only the exit-handler wiring remains. Cooldown tolerance (window 15s->50s) already shipped.
+- **Effort:** M.
+
+## P3 — OpenClaw-beta follow-ups (deferred from the beta-support plan)
+- **What:** Invite QR codes on the Team page; a "move this key to the shared secret store" CTA on the Models page; per-agent access mapping built on the members roster; an auto-canary channel (apply beta to a shadow gateway, promote on health). The Watchdog degraded-state badge (eventLoopDegraded/readyzFailing are already exposed in getStatus) is folded into the Phase 2/3 UI work.
+- **Why:** Recorded scope decisions from the CEO review; each is a platform follow-up after core beta support ships.
+- **Context:** See the CEO plan and the implementation plan's "Explicitly out of scope" + expansion decisions.
+- **Effort:** S–L (per item).
+
 ## P3 — Verify sendChatAction deleted-topic semantics; optional opt-in liveness probe
 - **What:** On wintermute, call `sendChatAction` with a `message_thread_id` of a deleted forum topic and record whether Telegram returns a distinct thread-not-found error (reports exist of `ok: true` regardless). If it errors distinctly, consider an opt-in, low-frequency background probe for topics that never receive sends (default off — probes show "bot is typing…" to group members).
 - **Why:** Lazy stale-marking (shipped) only fires on real send failures; never-posted-to topics stay unverified.
