@@ -161,12 +161,13 @@ describe("server/routes/openclaw-channel", () => {
       .put("/api/alphaclaw/config/updates/openclaw-release-channel")
       .send({ releaseChannel: "beta" });
     expect(valid.status).toBe(200);
+    // Channel selection is a catalog preference: it installs nothing, so it
+    // must NOT flag the app restart-required (the global banner would
+    // contradict the Upgrade page's "still running stable — press Apply").
     expect(valid.body).toEqual(
-      expect.objectContaining({ ok: true, changed: true, restartRequired: true }),
+      expect.objectContaining({ ok: true, changed: true, restartRequired: false }),
     );
-    expect(deps.restartRequiredState.markRequired).toHaveBeenCalledWith(
-      "openclaw_release_channel_changed",
-    );
+    expect(deps.restartRequiredState.markRequired).not.toHaveBeenCalled();
     const onDisk = JSON.parse(
       fs.readFileSync(path.join(deps.OPENCLAW_DIR, "alphaclaw.json"), "utf8"),
     );

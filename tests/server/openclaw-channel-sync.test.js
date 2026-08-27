@@ -472,9 +472,11 @@ describe("server/openclaw-channel-sync", () => {
       const boot = binHarness.sync.syncAtBoot();
       expect(boot.action).toBe("overlay_missing");
       const persisted = binHarness.store.readState().lastBoot;
+      // Entries are envelopes ({message, eventType, ...}) since the outbox
+      // landed; the flush path still accepts bare-string legacy entries.
       expect(
-        persisted.notifications.some((message) =>
-          message.includes("missing from disk"),
+        persisted.notifications.some((entry) =>
+          String(entry?.message ?? entry).includes("missing from disk"),
         ),
       ).toBe(true);
       expect(persisted.notifiedAt).toBeFalsy();
