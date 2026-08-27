@@ -409,7 +409,9 @@ describe("server/watchdog", () => {
     });
 
     watchdog.onExpectedRestart();
-    await vi.advanceTimersByTimeAsync(15_000);
+    // Advance past the expected-restart suppression window (widened to 50s for the
+    // beta control-plane restart cooldown).
+    await vi.advanceTimersByTimeAsync(55_000);
 
     expect(watchdog.getStatus()).toEqual(
       expect.objectContaining({
