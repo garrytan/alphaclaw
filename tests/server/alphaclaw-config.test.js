@@ -51,6 +51,9 @@ describe("server/alphaclaw-config", () => {
           releaseChannel: "stable",
         },
       },
+      team: {
+        enabled: false,
+      },
     });
   });
 
@@ -81,6 +84,9 @@ describe("server/alphaclaw-config", () => {
         openclaw: {
           releaseChannel: "stable",
         },
+      },
+      team: {
+        enabled: false,
       },
     });
   });

@@ -41,6 +41,12 @@
         id="login-form"
         class="bg-surface border border-border rounded-xl p-4 space-y-3"
       >
+        <select
+          id="operator"
+          class="w-full bg-field border border-border rounded-lg px-3 py-2 text-sm outline-none focus:border-fg-muted hidden"
+          style="color: var(--text)"
+          aria-label="Operator"
+        ></select>
         <input
           id="password"
           type="password"
@@ -64,6 +70,31 @@
       const formEl = document.getElementById("login-form");
       const passwordEl = document.getElementById("password");
       const submitButtonEl = document.getElementById("submit-btn");
+      const operatorEl = document.getElementById("operator");
+
+      // Team mode: show an operator picker above the password. Identity only —
+      // the shared password stays the single credential.
+      (async () => {
+        try {
+          const res = await fetch("/api/team/login-info");
+          if (!res.ok) return;
+          const info = await res.json();
+          const operators = Array.isArray(info.operators) ? info.operators : [];
+          if (!info.teamEnabled || operators.length === 0) return;
+          const placeholder = document.createElement("option");
+          placeholder.value = "";
+          placeholder.textContent = "Who are you?";
+          operatorEl.appendChild(placeholder);
+          for (const operator of operators) {
+            if (!operator || !operator.id) continue;
+            const option = document.createElement("option");
+            option.value = operator.id;
+            option.textContent = operator.name || operator.id;
+            operatorEl.appendChild(option);
+          }
+          operatorEl.classList.remove("hidden");
+        } catch {}
+      })();
 
       const syncButtonState = () => {
         const hasValue = passwordEl.value.length > 0;
@@ -85,10 +116,13 @@
         errorEl.classList.add("hidden");
         setPendingState(true);
         try {
+          const operatorId = operatorEl.value || "";
           const res = await fetch("/api/auth/login", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ password }),
+            body: JSON.stringify(
+              operatorId ? { password, operatorId } : { password },
+            ),
           });
           const data = await res.json();
           if (data.ok) {
