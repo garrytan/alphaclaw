@@ -49,6 +49,7 @@ describe("server/alphaclaw-config", () => {
       updates: {
         openclaw: {
           releaseChannel: "stable",
+          overseer: { enabled: false },
         },
       },
     });
@@ -80,6 +81,7 @@ describe("server/alphaclaw-config", () => {
       updates: {
         openclaw: {
           releaseChannel: "stable",
+          overseer: { enabled: false },
         },
       },
     });
