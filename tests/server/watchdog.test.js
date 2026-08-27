@@ -1601,4 +1601,49 @@ describe("server/watchdog", () => {
     expect(global.fetch.mock.calls.length).toBe(fetchCalls);
     watchdog.stop();
   });
+
+  describe("readyz degraded surfaces (OpenClaw 2026.8)", () => {
+    it("parses eventLoop.degraded and failing[] from /readyz", async () => {
+      const { watchdog } = createHarness({
+        resolveGatewayReadyzUrl: () => "http://127.0.0.1:18789/readyz",
+        fetchImpl: async () => ({
+          ok: true,
+          status: 200,
+          text: async () =>
+            JSON.stringify({
+              ready: true,
+              failing: ["telegram"],
+              eventLoop: { degraded: true },
+            }),
+        }),
+      });
+      const readiness = await watchdog.probeGatewayReadiness();
+      expect(readiness.ok).toBe(true);
+      expect(readiness.eventLoopDegraded).toBe(true);
+      expect(readiness.failing).toEqual(["telegram"]);
+    });
+
+    it("defaults eventLoopDegraded to false on gateways without the block", async () => {
+      const { watchdog } = createHarness({
+        resolveGatewayReadyzUrl: () => "http://127.0.0.1:18789/readyz",
+        fetchImpl: async () => ({
+          ok: true,
+          status: 200,
+          text: async () => JSON.stringify({ ready: true }),
+        }),
+      });
+      const readiness = await watchdog.probeGatewayReadiness();
+      expect(readiness.eventLoopDegraded).toBe(false);
+    });
+
+    it("exposes the degraded fields in getStatus with safe defaults", () => {
+      const { watchdog } = createHarness();
+      expect(watchdog.getStatus()).toEqual(
+        expect.objectContaining({
+          eventLoopDegraded: false,
+          readyzFailing: [],
+        }),
+      );
+    });
+  });
 });
