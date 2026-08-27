@@ -421,6 +421,7 @@ describe("server/routes/system", () => {
           updates: {
             openclaw: {
               releaseChannel: "stable",
+              overseer: { enabled: false },
             },
           },
         },
@@ -748,6 +749,7 @@ describe("server/routes/system", () => {
         updates: {
           openclaw: {
             releaseChannel: "stable",
+            overseer: { enabled: false },
           },
         },
       },
@@ -777,6 +779,7 @@ describe("server/routes/system", () => {
           updates: {
             openclaw: {
               releaseChannel: "stable",
+              overseer: { enabled: false },
             },
           },
         },

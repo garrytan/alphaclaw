@@ -5,6 +5,44 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [Unreleased]
+
+### Added
+- **Durable update run ledger.** Every OpenClaw update gets a per-operation
+  run record and a redacted, size-capped log (10 MB/run, 200 MB total) that
+  survive the activation restart — new `GET /api/openclaw/runs`,
+  `/runs/:id`, and `/runs/:id/log` endpoints power a post-restart "what
+  happened" view on the Upgrade page.
+- **Notification outbox with admin routing.** Upgrade and watchdog
+  notifications are persisted before delivery (retried on failure,
+  re-drained after restarts) and can be routed to explicit admin targets
+  with a preferred channel and error-only fallback
+  (`GET/PUT /api/openclaw/notifications`).
+- **Upgrade overseer (recommend-only, default off).** An optional Claude
+  Code review of each settled update run: it reads the run record, the
+  redacted log tail, and `openclaw doctor` output in an isolated,
+  secret-free environment and posts an advisory verdict
+  (healthy / suspect / broken) with a suggestion to Mark as good or Roll
+  back. The deterministic watchdog remains the only enforcement layer.
+  Requires the `claude` CLI and `ANTHROPIC_API_KEY`; availability is shown,
+  never silently degraded. When enabled, redacted upgrade logs and doctor
+  output are sent to the Anthropic API. Toggle:
+  `updates.openclaw.overseer.enabled` / the Upgrade page's Overseer card.
+- **Version-gated OpenClaw beta features** (fail-closed on stable and dev
+  shas, via `GET /api/openclaw/features`): external supervisor mode
+  (`OPENCLAW_SUPERVISOR_MODE=external` in the gateway env on
+  2026.8.1-beta.1+), a "Create verified SQLite backup" button on the
+  Watchdog tab (`POST /api/openclaw/backup-sqlite`, 503 when unsupported),
+  a gated session Dashboards sidebar link with a focus-mode deep-link
+  helper, and a secret-egress-binding note on the Envars page.
+- **Models:** added `openai/gpt-5.6-ultra` to the always-available model
+  catalog next to the other GPT-5.6 entries.
+
+### Changed
+- Nothing observable changes with the flags off and stable OpenClaw
+  installed: the overseer is default-off, and every beta feature hides
+  behind a version gate.
+
 ## [0.9.34] - 2026-08-26
 
 ### Added
