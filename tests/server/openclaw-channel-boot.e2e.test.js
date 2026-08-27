@@ -99,6 +99,7 @@ const createHarness = ({
   installedVersion = null,
   sentinelVersion = null,
   storeWrap = (store) => store,
+  execFileSyncImpl = undefined,
 } = {}) => {
   delete process.env.OPENCLAW_GIT_DIR;
   const rootDir = mkTemp("alphaclaw-boot-e2e-root-");
@@ -153,6 +154,7 @@ const createHarness = ({
     nowFn,
     logger: kSilentLogger,
     backupsDir: path.join(rootDir, "backups", "openclaw"),
+    ...(execFileSyncImpl ? { execFileSyncImpl } : {}),
   });
 
   return {
@@ -466,5 +468,102 @@ describe("server/openclaw-channel boot sync (e2e)", () => {
       ),
     ).toBe(true);
     assertOffline(harness);
+  });
+
+  describe("boot config migration (doctor --fix)", () => {
+    const writeConfig = (openclawDir, obj) => {
+      fs.mkdirSync(openclawDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(openclawDir, "openclaw.json"),
+        JSON.stringify(obj, null, 2),
+      );
+    };
+
+    it("runs doctor --fix once per version and records success", () => {
+      const doctorCalls = [];
+      const execFileSyncImpl = vi.fn((cmd, args) => {
+        doctorCalls.push(args);
+        return "";
+      });
+      const harness = createHarness({
+        installedVersion: "2026.8.1",
+        sentinelVersion: "2026.8.1",
+        execFileSyncImpl,
+      });
+      writeConfig(harness.openclawDir, { audit: { enabled: true } });
+
+      harness.sync.syncAtBoot();
+
+      // doctor --fix --yes was invoked exactly once against the activated bin.
+      expect(doctorCalls).toHaveLength(1);
+      expect(doctorCalls[0]).toEqual(
+        expect.arrayContaining(["doctor", "--fix", "--yes"]),
+      );
+      expect(doctorCalls[0]).not.toContain("--json");
+      const migration = harness.store.readState().configMigration;
+      expect(migration.completedForVersion).toBe("2026.8.1");
+      expect(migration.lastAttempt.ok).toBe(true);
+      // A pre-fix backup of the from-version config was kept.
+      const backups = fs
+        .readdirSync(harness.openclawDir)
+        .filter((n) => n.startsWith("openclaw.json.pre-fix-"));
+      expect(backups.length).toBeGreaterThanOrEqual(1);
+
+      // A second boot on the same version does NOT re-run doctor.
+      execFileSyncImpl.mockClear();
+      harness.sync.syncAtBoot();
+      expect(execFileSyncImpl).not.toHaveBeenCalled();
+    });
+
+    it("keeps the trigger armed to retry after a failed migration", () => {
+      const execFileSyncImpl = vi.fn(() => {
+        throw new Error("doctor exit 1");
+      });
+      const harness = createHarness({
+        installedVersion: "2026.8.1",
+        sentinelVersion: "2026.8.1",
+        execFileSyncImpl,
+      });
+      writeConfig(harness.openclawDir, { bridge: { legacy: true } });
+
+      harness.sync.syncAtBoot();
+      const migration = harness.store.readState().configMigration;
+      expect(migration.completedForVersion).toBe(null);
+      expect(migration.lastAttempt.ok).toBe(false);
+
+      // Next boot retries (trigger still armed).
+      harness.sync.syncAtBoot();
+      expect(execFileSyncImpl).toHaveBeenCalledTimes(2);
+    });
+
+    it("restores a pre-fix backup on downgrade instead of running doctor", () => {
+      const execFileSyncImpl = vi.fn(() => "");
+      const harness = createHarness({
+        installedVersion: "2026.7.1-2",
+        sentinelVersion: "2026.7.1-2",
+        execFileSyncImpl,
+      });
+      // A backup saved before we migrated away from 2026.7.1-2.
+      fs.mkdirSync(harness.openclawDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(harness.openclawDir, "openclaw.json.pre-fix-2026.7.1-2.bak"),
+        JSON.stringify({ restored: true }, null, 2),
+      );
+      writeConfig(harness.openclawDir, { migrated: "beta-shape" });
+
+      harness.sync.syncAtBoot();
+
+      // The backup was restored (migrated shape gone, restored key present);
+      // doctor was NOT run. (reconcileOpenclawJsonMirror later adds update.* keys.)
+      expect(execFileSyncImpl).not.toHaveBeenCalled();
+      const onDisk = JSON.parse(
+        fs.readFileSync(path.join(harness.openclawDir, "openclaw.json"), "utf8"),
+      );
+      expect(onDisk.restored).toBe(true);
+      expect("migrated" in onDisk).toBe(false);
+      expect(harness.store.readState().configMigration.completedForVersion).toBe(
+        "2026.7.1-2",
+      );
+    });
   });
 });
