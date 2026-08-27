@@ -22,6 +22,7 @@ describe("server/operators-store", () => {
       version: 1,
       operators: [],
       operatorsVersion: 1,
+      notifications: { preferredChannel: null, adminTargets: [] },
     });
   });
 

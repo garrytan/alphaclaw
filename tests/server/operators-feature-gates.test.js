@@ -27,8 +27,10 @@ describe("server/operators-store", () => {
       { id: "ok-2", name: "" },
     ]);
     const { operators } = store.read();
-    expect(operators.map((op) => op.id)).toEqual(["garry", "ok-2"]);
-    expect(operators[1].name).toBe("ok-2");
+    // Ids preserve case (they double as gateway allowUsers entries) and
+    // path-shaped ids are rejected before touching the filesystem.
+    expect(operators.map((op) => op.id)).toEqual(["Garry", "ok-2"]);
+    expect(operators[1].name).toBe("");
   });
 
   it("bumps operatorsVersion on removal only (cookie revocation hook)", () => {
