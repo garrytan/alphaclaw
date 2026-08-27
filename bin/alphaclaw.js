@@ -855,6 +855,28 @@ process.env.GOG_KEYRING_PASSWORD =
 
 process.env.XDG_CONFIG_HOME = openclawDir;
 
+// ---------------------------------------------------------------------------
+// 7b. OpenClaw release-channel boot sync (offline, synchronous, fail-open)
+// ---------------------------------------------------------------------------
+// Re-applies the explicitly selected OpenClaw version (overlay store / dev
+// checkout shim) BEFORE anything below shells `openclaw`. Runs only in the
+// `start` path — CLI subcommands (git-sync, doctor, telegram) exited earlier,
+// so hourly cron processes can never race an activation. Any failure must fall
+// back to the image's pinned install; startup itself is never blocked.
+try {
+  const { kOpenclawBinShimDir } = require("../lib/server/constants");
+  const shimPathPrefix = `${kOpenclawBinShimDir}${path.delimiter}`;
+  if (!String(process.env.PATH || "").startsWith(shimPathPrefix)) {
+    process.env.PATH = `${shimPathPrefix}${process.env.PATH || ""}`;
+  }
+  const {
+    runOpenclawChannelBootSync,
+  } = require("../lib/server/openclaw-channel-sync");
+  runOpenclawChannelBootSync({});
+} catch (e) {
+  console.log(`[openclaw-channel] boot sync failed (fail-open): ${e.message}`);
+}
+
 const ensureGogCliCompatConfigPath = () => {
   const configDir = path.join(rootDir, ".config");
   const compatPath = path.join(configDir, "gogcli");

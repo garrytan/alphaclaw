@@ -57,12 +57,14 @@ npm install
 ### Running Tests
 
 ```bash
-npm test              # Run all tests
+npm test              # Run all tests (hermetic — no network)
 npm run test:watch    # Watch mode
 npm run test:coverage # With coverage report
+npm run test:live     # Live e2e: real npm/GitHub catalog + package applies (~5 min, network)
+npm run test:live:dev # Live e2e: real dev-channel source build only (20-35 min, ~5 GB disk)
 ```
 
-AlphaClaw uses [Vitest](https://vitest.dev/) for testing.
+AlphaClaw uses [Vitest](https://vitest.dev/) for testing. `npm test` is hermetic by design: the live tiers under `tests/live/` run only with `OPENCLAW_LIVE_E2E=1` (the `test:live` scripts set it for you), so a green `npm test` does not exercise the real npm registry, GitHub API, or OpenClaw updater.
 
 ### Project Structure
 

@@ -471,6 +471,46 @@ describe("server/alphaclaw-version", () => {
     await firstPromise;
   });
 
+  it("isUpdateInProgress tracks the self-update latch across the lifecycle", async () => {
+    // The OpenClaw channel apply gate (isSelfUpdateInProgress) is wired to
+    // this accessor: it must be false at rest, true while an update is in
+    // flight, and release after a FAILED update so a recoverable error never
+    // blocks version changes forever.
+    const callbacks = [];
+    const execMock = vi.fn().mockImplementation((cmd, opts, callback) => {
+      callbacks.push(callback);
+    });
+    const { service } = createService({
+      fetchMock: vi.fn(),
+      execMock,
+      fsImpl: createFsMock({ existsSync: vi.fn(() => false) }),
+    });
+
+    expect(service.isUpdateInProgress()).toBe(false);
+
+    const pending = service.updateAlphaclaw();
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(service.isUpdateInProgress()).toBe(true);
+
+    callbacks[0](new Error("npm ERR! network down"), "", "npm ERR! network down");
+    const failed = await pending;
+    expect(failed.status).toBe(500);
+    expect(service.isUpdateInProgress()).toBe(false);
+
+    // After a SUCCESSFUL update the latch intentionally stays held: the
+    // process is about to restart, and a second concurrent update mid-restart
+    // must stay blocked until the new process comes up with a fresh latch.
+    const secondPending = service.updateAlphaclaw();
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(service.isUpdateInProgress()).toBe(true);
+    callbacks[1](null, "installed", "");
+    await new Promise((resolve) => setImmediate(resolve));
+    callbacks[2](null, "", "");
+    const succeeded = await secondPending;
+    expect(succeeded.status).toBe(200);
+    expect(service.isUpdateInProgress()).toBe(true);
+  });
+
   it("returns successful self-update result with restarting flag", async () => {
     const execMock = vi.fn().mockImplementation((cmd, opts, callback) => {
       callback(null, "added 1 package", "");

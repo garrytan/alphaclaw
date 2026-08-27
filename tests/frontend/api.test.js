@@ -1408,3 +1408,301 @@ describe("frontend/api behaviors", () => {
     await expect(api.saveEnvVars([])).rejects.toThrow("garbage");
   });
 });
+
+describe("frontend/api openclaw channel endpoints", () => {
+  beforeEach(() => {
+    global.fetch = vi.fn();
+    global.window = { location: { href: "http://localhost/" } };
+    FakeEventSource.instances = [];
+  });
+
+  afterEach(() => {
+    delete global.fetch;
+    delete global.window;
+  });
+
+  it("fetchOpenclawChannel gets the channel state", async () => {
+    const payload = {
+      ok: true,
+      releaseChannel: "beta",
+      installedVersion: "2026.7.3-beta.1",
+      pinVersion: "2026.7.1-2",
+      blocklist: [],
+    };
+    global.fetch.mockResolvedValue(mockJsonResponse(200, payload));
+    const api = await loadApiModule();
+
+    const result = await api.fetchOpenclawChannel();
+
+    expect(global.fetch).toHaveBeenCalledWith(
+      "/api/openclaw/channel",
+      expect.objectContaining({ headers: expect.any(Headers) }),
+    );
+    expect(result).toEqual(payload);
+  });
+
+  it("fetchOpenclawCatalog omits the refresh flag by default", async () => {
+    global.fetch.mockResolvedValue(
+      mockJsonResponse(200, { ok: true, catalog: { stable: [] }, channel: {} }),
+    );
+    const api = await loadApiModule();
+
+    const result = await api.fetchOpenclawCatalog();
+
+    expect(global.fetch.mock.calls[0][0]).toBe("/api/openclaw/catalog");
+    expect(result).toEqual({ ok: true, catalog: { stable: [] }, channel: {} });
+  });
+
+  it("fetchOpenclawCatalog passes refresh=1 for Check now", async () => {
+    global.fetch.mockResolvedValue(
+      mockJsonResponse(200, { ok: true, catalog: {}, channel: {} }),
+    );
+    const api = await loadApiModule();
+
+    await api.fetchOpenclawCatalog({ refresh: true });
+
+    expect(global.fetch.mock.calls[0][0]).toBe("/api/openclaw/catalog?refresh=1");
+  });
+
+  it("fetchOpenclawCatalog surfaces the 503 catalog_unavailable envelope", async () => {
+    global.fetch.mockResolvedValue(
+      mockJsonResponse(503, {
+        ok: false,
+        code: "catalog_unavailable",
+        message: "Could not load the OpenClaw release catalog from GitHub or npm.",
+        hint: "Check the server's network access, then refresh the catalog.",
+      }),
+    );
+    const api = await loadApiModule();
+
+    const error = await api.fetchOpenclawCatalog().catch((err) => err);
+
+    expect(error.message).toBe(
+      "Could not load the OpenClaw release catalog from GitHub or npm.",
+    );
+    expect(error.code).toBe("catalog_unavailable");
+    expect(error.hint).toBe(
+      "Check the server's network access, then refresh the catalog.",
+    );
+  });
+
+  it("updateOpenclawReleaseChannel puts the release channel", async () => {
+    global.fetch.mockResolvedValue(
+      mockJsonResponse(200, {
+        ok: true,
+        changed: true,
+        config: {},
+        restartRequired: true,
+      }),
+    );
+    const api = await loadApiModule();
+
+    const result = await api.updateOpenclawReleaseChannel("beta");
+
+    expect(global.fetch).toHaveBeenCalledWith(
+      "/api/alphaclaw/config/updates/openclaw-release-channel",
+      expect.objectContaining({
+        method: "PUT",
+        body: JSON.stringify({ releaseChannel: "beta" }),
+        headers: expect.any(Headers),
+      }),
+    );
+    expect(result).toEqual({
+      ok: true,
+      changed: true,
+      config: {},
+      restartRequired: true,
+    });
+  });
+
+  it("applyOpenclawVersion posts the payload and returns operation info", async () => {
+    global.fetch.mockResolvedValue(
+      mockJsonResponse(202, {
+        ok: true,
+        operationId: "op-1",
+        events: "/api/operations/op-1/events",
+      }),
+    );
+    const api = await loadApiModule();
+
+    const result = await api.applyOpenclawVersion({
+      channel: "stable",
+      version: "2026.7.2",
+    });
+
+    expect(global.fetch).toHaveBeenCalledWith(
+      "/api/openclaw/apply",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ channel: "stable", version: "2026.7.2" }),
+        headers: expect.any(Headers),
+      }),
+    );
+    expect(result).toEqual({
+      ok: true,
+      operationId: "op-1",
+      events: "/api/operations/op-1/events",
+    });
+  });
+
+  it("applyOpenclawVersion returns quick noop outcomes", async () => {
+    global.fetch.mockResolvedValue(
+      mockJsonResponse(200, { ok: true, noop: true, operationId: "op-2" }),
+    );
+    const api = await loadApiModule();
+
+    const result = await api.applyOpenclawVersion({
+      channel: "dev",
+      devHead: true,
+    });
+
+    expect(result).toEqual({ ok: true, noop: true, operationId: "op-2" });
+  });
+
+  it("applyOpenclawVersion preserves the error envelope (message, hint, code)", async () => {
+    global.fetch.mockResolvedValue(
+      mockJsonResponse(400, {
+        ok: false,
+        code: "unknown_version",
+        message: "2020.1.0 is not a published OpenClaw version in the catalog.",
+        hint: 'Refresh the catalog ("Check now") and pick a listed version.',
+        docsUrl: null,
+      }),
+    );
+    const api = await loadApiModule();
+
+    const error = await api
+      .applyOpenclawVersion({ channel: "stable", version: "2020.1.0" })
+      .catch((err) => err);
+
+    expect(error.message).toBe(
+      "2020.1.0 is not a published OpenClaw version in the catalog.",
+    );
+    expect(error.code).toBe("unknown_version");
+    expect(error.hint).toBe(
+      'Refresh the catalog ("Check now") and pick a listed version.',
+    );
+  });
+
+  it("rollbackOpenclaw posts to the rollback endpoint", async () => {
+    global.fetch.mockResolvedValue(
+      mockJsonResponse(200, { ok: true, target: { kind: "pin" }, blockedId: "x" }),
+    );
+    const api = await loadApiModule();
+
+    const result = await api.rollbackOpenclaw();
+
+    const [url, options] = global.fetch.mock.calls.at(-1);
+    expect(url).toBe("/api/openclaw/rollback");
+    expect(options.method).toBe("POST");
+    expect(result).toEqual({ ok: true, target: { kind: "pin" }, blockedId: "x" });
+  });
+
+  it("rollbackOpenclaw surfaces 409 envelopes", async () => {
+    global.fetch.mockResolvedValue(
+      mockJsonResponse(409, {
+        ok: false,
+        code: "nothing_to_rollback",
+        message: "You're already on the built-in pin.",
+        hint: null,
+      }),
+    );
+    const api = await loadApiModule();
+
+    await expect(api.rollbackOpenclaw()).rejects.toThrow(
+      "You're already on the built-in pin.",
+    );
+  });
+
+  it("markOpenclawGood posts to the mark-good endpoint", async () => {
+    global.fetch.mockResolvedValue(
+      mockJsonResponse(200, { ok: true, acceptedAt: 1770000000000 }),
+    );
+    const api = await loadApiModule();
+
+    const result = await api.markOpenclawGood();
+
+    const [url, options] = global.fetch.mock.calls.at(-1);
+    expect(url).toBe("/api/openclaw/mark-good");
+    expect(options.method).toBe("POST");
+    expect(result).toEqual({ ok: true, acceptedAt: 1770000000000 });
+  });
+
+  it("clearOpenclawBlocklist posts the id when given", async () => {
+    global.fetch.mockResolvedValue(
+      mockJsonResponse(200, { ok: true, blocklist: [] }),
+    );
+    const api = await loadApiModule();
+
+    const result = await api.clearOpenclawBlocklist("2026.7.3");
+
+    expect(global.fetch).toHaveBeenCalledWith(
+      "/api/openclaw/blocklist/clear",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ id: "2026.7.3" }),
+        headers: expect.any(Headers),
+      }),
+    );
+    expect(result).toEqual({ ok: true, blocklist: [] });
+  });
+
+  it("clearOpenclawBlocklist posts an empty body without an id", async () => {
+    global.fetch.mockResolvedValue(
+      mockJsonResponse(200, { ok: true, blocklist: [] }),
+    );
+    const api = await loadApiModule();
+
+    await api.clearOpenclawBlocklist();
+
+    const [, options] = global.fetch.mock.calls.at(-1);
+    expect(options.body).toBe(JSON.stringify({}));
+  });
+
+  it("subscribeOpenclawApplyEvents streams step/output/done and routes drops to onError", async () => {
+    global.window.EventSource = FakeEventSource;
+    const api = await loadApiModule();
+    const messages = [];
+    const errors = [];
+
+    const unsubscribe = api.subscribeOpenclawApplyEvents({
+      operationId: "op 1",
+      onMessage: (message) => messages.push(message),
+      onError: (event) => errors.push(event),
+    });
+
+    const source = FakeEventSource.instances[0];
+    expect(source.url).toBe("/api/operations/op%201/events");
+    expect(source.options).toEqual({ withCredentials: true });
+
+    source.emit("step", {
+      data: JSON.stringify({ name: "preflight", status: "running", at: 1 }),
+    });
+    source.emit("output", { data: JSON.stringify({ chunk: "npm install\n" }) });
+    // A connection drop is an "error"-typed event with no data payload.
+    source.emit("error", {});
+    source.emit("error", { data: JSON.stringify({ error: "build failed" }) });
+    source.emit("done", { data: JSON.stringify({ ok: true }) });
+
+    expect(messages).toEqual([
+      { event: "step", data: { name: "preflight", status: "running", at: 1 } },
+      { event: "output", data: { chunk: "npm install\n" } },
+      { event: "error", data: { error: "build failed" } },
+      { event: "done", data: { ok: true } },
+    ]);
+    expect(errors).toHaveLength(1);
+
+    unsubscribe();
+    expect(source.closed).toBe(true);
+    source.emit("step", { data: "{}" });
+    expect(messages).toHaveLength(4);
+  });
+
+  it("subscribeOpenclawApplyEvents throws when EventSource is unavailable", async () => {
+    const api = await loadApiModule();
+
+    expect(() => api.subscribeOpenclawApplyEvents({ operationId: "op" })).toThrow(
+      "Server events are not supported in this browser",
+    );
+  });
+});

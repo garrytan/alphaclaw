@@ -5,7 +5,9 @@ const path = require("path");
 const {
   isOpenAiCompatApiEnabled,
   readAlphaclawConfig,
+  readOpenclawReleaseChannel,
   updateOpenAiCompatApiFeature,
+  updateOpenclawReleaseChannel,
 } = require("../../lib/server/alphaclaw-config");
 
 const createTempOpenclawDir = () =>
@@ -44,6 +46,11 @@ describe("server/alphaclaw-config", () => {
           enabled: true,
         },
       },
+      updates: {
+        openclaw: {
+          releaseChannel: "stable",
+        },
+      },
     });
   });
 
@@ -70,6 +77,51 @@ describe("server/alphaclaw-config", () => {
         futureFeature: { enabled: true },
         openaiCompatApi: { enabled: false, note: "keep" },
       },
+      updates: {
+        openclaw: {
+          releaseChannel: "stable",
+        },
+      },
     });
+  });
+
+  it("defaults the OpenClaw release channel to stable", () => {
+    const openclawDir = createTempOpenclawDir();
+
+    expect(readOpenclawReleaseChannel({ openclawDir })).toBe("stable");
+  });
+
+  it("normalizes an invalid release channel back to stable", () => {
+    const openclawDir = createTempOpenclawDir();
+    fs.writeFileSync(
+      path.join(openclawDir, "alphaclaw.json"),
+      JSON.stringify({ updates: { openclaw: { releaseChannel: "nightly" } } }),
+      "utf8",
+    );
+
+    expect(readOpenclawReleaseChannel({ openclawDir })).toBe("stable");
+  });
+
+  it("persists a release-channel change and reports changed", () => {
+    const openclawDir = createTempOpenclawDir();
+
+    const first = updateOpenclawReleaseChannel({
+      openclawDir,
+      releaseChannel: "dev",
+    });
+    expect(first.changed).toBe(true);
+    expect(readOpenclawReleaseChannel({ openclawDir })).toBe("dev");
+
+    const second = updateOpenclawReleaseChannel({
+      openclawDir,
+      releaseChannel: "dev",
+    });
+    expect(second.changed).toBe(false);
+
+    const invalid = updateOpenclawReleaseChannel({
+      openclawDir,
+      releaseChannel: "nightly",
+    });
+    expect(invalid.config.updates.openclaw.releaseChannel).toBe("stable");
   });
 });

@@ -1,6 +1,6 @@
 {
   "name": "alphaclaw",
-  "version": "0.9.33",
+  "version": "0.9.34",
   "publishConfig": {
     "access": "public"
   },
@@ -25,6 +25,8 @@
     "start": "node bin/alphaclaw.js start",
     "build:ui": "node scripts/build-ui.mjs",
     "test": "vitest run",
+    "test:live": "OPENCLAW_LIVE_E2E=1 vitest run tests/live --no-file-parallelism",
+    "test:live:dev": "OPENCLAW_LIVE_E2E=1 OPENCLAW_LIVE_E2E_DEV=1 vitest run tests/live/openclaw-live-dev.e2e.test.js --no-file-parallelism",
     "test:watch": "vitest",
     "test:watchdog": "vitest run tests/server/watchdog.test.js tests/server/watchdog-db.test.js tests/server/routes-watchdog.test.js",
     "test:coverage": "vitest run --coverage",

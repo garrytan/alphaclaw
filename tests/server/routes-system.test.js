@@ -418,7 +418,13 @@ describe("server/routes/system", () => {
               enabled: false,
             },
           },
+          updates: {
+            openclaw: {
+              releaseChannel: "stable",
+            },
+          },
         },
+        openclawChannel: null,
         syncCron: expect.objectContaining({
           enabled: true,
           schedule: "0 * * * *",
@@ -739,6 +745,11 @@ describe("server/routes/system", () => {
             enabled: true,
           },
         },
+        updates: {
+          openclaw: {
+            releaseChannel: "stable",
+          },
+        },
       },
     });
   });
@@ -761,6 +772,11 @@ describe("server/routes/system", () => {
           features: {
             openaiCompatApi: {
               enabled: true,
+            },
+          },
+          updates: {
+            openclaw: {
+              releaseChannel: "stable",
             },
           },
         },
@@ -924,6 +940,117 @@ describe("server/routes/system", () => {
       ok: false,
       error: "AlphaClaw update already in progress",
     });
+  });
+
+  it("returns 409 on POST /api/alphaclaw/update while an OpenClaw channel apply is in flight", async () => {
+    const deps = createSystemDeps();
+    deps.openclawChannelService = {
+      isApplyInProgress: vi.fn(() => true),
+      getChannelInfo: vi.fn(() => null),
+    };
+    const app = createApp(deps);
+
+    const res = await request(app).post("/api/alphaclaw/update");
+
+    expect(res.status).toBe(409);
+    expect(res.body.ok).toBe(false);
+    expect(res.body.error).toContain("OpenClaw version change is in progress");
+    // A restartProcess() mid-overlay-write would corrupt the channel store:
+    // the update must not even start.
+    expect(deps.alphaclawVersionService.updateAlphaclaw).not.toHaveBeenCalled();
+    expect(deps.alphaclawVersionService.restartProcess).not.toHaveBeenCalled();
+  });
+
+  it("runs the alphaclaw update normally when no OpenClaw channel apply is in flight", async () => {
+    vi.useFakeTimers();
+    try {
+      const deps = createSystemDeps();
+      deps.openclawChannelService = {
+        isApplyInProgress: vi.fn(() => false),
+        getChannelInfo: vi.fn(() => null),
+      };
+      const app = createApp(deps);
+
+      const res = await request(app).post("/api/alphaclaw/update");
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({
+        ok: true,
+        previousVersion: "0.1.5",
+        restarting: true,
+      });
+      expect(deps.openclawChannelService.isApplyInProgress).toHaveBeenCalled();
+      expect(deps.alphaclawVersionService.updateAlphaclaw).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(deps.alphaclawVersionService.restartProcess).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("includes a populated openclawChannel summary on GET /api/status", async () => {
+    const deps = createSystemDeps();
+    deps.openclawChannelService = {
+      getChannelInfo: vi.fn(() => ({
+        releaseChannel: "beta",
+        installedVersion: "2026.8.1",
+        pinVersion: "2026.7.1-2",
+        applied: {
+          channel: "beta",
+          version: "2026.8.1",
+          sha: null,
+          at: 1,
+          acceptedAt: null,
+          acceptedSource: null,
+        },
+        appliedId: "2026.8.1",
+        isPin: false,
+        acceptedAt: null,
+        inStabilizationWindow: true,
+        lastKnownGood: { package: null, dev: null },
+        blocklist: [],
+        lastUpdateRun: null,
+        lastBoot: null,
+      })),
+      isApplyInProgress: vi.fn(() => true),
+    };
+    const app = createApp(deps);
+
+    const res = await request(app).get("/api/status");
+
+    expect(res.status).toBe(200);
+    // The summary is a fixed projection of getChannelInfo() plus the live
+    // apply flag — exact equality locks the shape.
+    expect(res.body.openclawChannel).toEqual({
+      releaseChannel: "beta",
+      installedVersion: "2026.8.1",
+      pinVersion: "2026.7.1-2",
+      appliedId: "2026.8.1",
+      isPin: false,
+      acceptedAt: null,
+      inStabilizationWindow: true,
+      applyInProgress: true,
+    });
+  });
+
+  it("degrades openclawChannel to null on GET /api/status when getChannelInfo throws", async () => {
+    // The status endpoint feeds the whole dashboard shell (and its 2s SSE
+    // mirror): a broken channel store must degrade the summary, never take
+    // down /api/status with it.
+    const deps = createSystemDeps();
+    deps.openclawChannelService = {
+      getChannelInfo: vi.fn(() => {
+        throw new Error("channel state unreadable");
+      }),
+      isApplyInProgress: vi.fn(() => false),
+    };
+    const app = createApp(deps);
+
+    const res = await request(app).get("/api/status");
+
+    expect(res.status).toBe(200);
+    expect(res.body.openclawChannel).toBeNull();
+    expect(deps.openclawChannelService.getChannelInfo).toHaveBeenCalled();
   });
 
   it("returns raw session metadata on GET /api/agent/sessions", async () => {
