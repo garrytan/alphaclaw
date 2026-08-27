@@ -5,6 +5,7 @@ const path = require("path");
 const {
   applyGatewayAuthEnv,
   getGatewayCredential,
+  resolveConfigSecret,
 } = require("../../lib/server/gateway-credential");
 
 const createTempOpenclawDir = () =>
@@ -80,6 +81,52 @@ describe("server/gateway-credential", () => {
       mode: "password",
       value: "literal-pass",
     });
+  });
+
+  describe("resolveConfigSecret", () => {
+    it("resolves an object env SecretRef to the env value, not '[object Object]'", () => {
+      const resolved = resolveConfigSecret(
+        { source: "env", provider: "default", id: "MY_TOK" },
+        { MY_TOK: "secret-value" },
+      );
+      expect(resolved).toBe("secret-value");
+      expect(resolved).not.toBe("[object Object]");
+    });
+
+    it("returns empty string for a non-env object ref", () => {
+      expect(resolveConfigSecret({ source: "file", id: "x" }, {})).toBe("");
+      expect(
+        resolveConfigSecret({ source: "file", id: "x" }, { x: "value" }),
+      ).toBe("");
+    });
+
+    it("resolves a string env-ref via ${VAR} substitution", () => {
+      expect(resolveConfigSecret("${MY_TOK}", { MY_TOK: "env-secret" })).toBe(
+        "env-secret",
+      );
+    });
+
+    it("passes a plain literal string through unchanged", () => {
+      expect(resolveConfigSecret("literal-secret", {})).toBe("literal-secret");
+    });
+  });
+
+  it("resolves an object password ref in trusted-proxy mode to the real value", () => {
+    const openclawDir = createTempOpenclawDir();
+    writeConfig(openclawDir, {
+      gateway: {
+        auth: {
+          mode: "trusted-proxy",
+          password: { source: "env", provider: "default", id: "MY_TOK" },
+        },
+      },
+    });
+    expect(
+      getGatewayCredential({
+        openclawDir,
+        env: { MY_TOK: "secret-value" },
+      }),
+    ).toEqual({ mode: "password", value: "secret-value" });
   });
 
   describe("applyGatewayAuthEnv", () => {

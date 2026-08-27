@@ -126,6 +126,26 @@ describe("server/openclaw-run-ledger", () => {
       expect(ledger.readRun(kOpA).hasLog).toBe(true);
     });
 
+    it("scrubs extraSecretEnv secret-keyed values but keeps benign paths like HOME", async () => {
+      const { ledger } = makeLedger();
+      ledger.createRun({ operationId: kOpA, target: {} });
+      const sink = ledger.createLogSink({
+        operationId: kOpA,
+        extraSecretEnv: { HOME: "/Users/x", MY_API_KEY: "longsecret1" },
+      });
+      sink.writeLine("npm cache at /Users/x/.npm using key longsecret1");
+      await sink.close();
+
+      const content = fs.readFileSync(
+        ledger.openLogStream(kOpA).filePath,
+        "utf8",
+      );
+      expect(content).not.toContain("longsecret1");
+      expect(content).toContain("[redacted]");
+      // Benign env values (HOME) must survive so npm output stays legible.
+      expect(content).toContain("/Users/x/.npm");
+    });
+
     it("caps the per-run log with a single truncation marker", async () => {
       const { ledger } = makeLedger({ maxLogBytesPerRun: 200 });
       ledger.createRun({ operationId: kOpA, target: {} });
@@ -199,6 +219,15 @@ describe("server/openclaw-run-ledger", () => {
       expect(values).toContain("abcdefgh");
       expect(values).not.toContain("abc");
       expect(values).not.toContain("not-a-secret-shape");
+    });
+
+    it("filters extraEnv by secret-shaped key, leaving benign keys unredacted", () => {
+      const values = collectSecretValues({
+        env: {},
+        extraEnv: { HOME: "/Users/x", MY_API_KEY: "longsecret1" },
+      });
+      expect(values).toEqual(["longsecret1"]);
+      expect(values).not.toContain("/Users/x");
     });
 
     it("push/flush round-trips partial lines", () => {

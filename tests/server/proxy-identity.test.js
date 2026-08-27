@@ -1,6 +1,7 @@
 const {
   applyProxyIdentity,
   buildIdentityHeaders,
+  kForwardedEvidenceHeaders,
   kIdentityUserHeader,
   sanitizeProxyHeaders,
   stripSessionCookie,
@@ -67,6 +68,34 @@ describe("server/proxy-identity", () => {
     it("tolerates missing/invalid input", () => {
       expect(sanitizeProxyHeaders()).toEqual({});
       expect(sanitizeProxyHeaders(null)).toEqual({});
+    });
+
+    it("is identity-only: leaves forwarded-evidence and other headers intact", () => {
+      const sanitized = sanitizeProxyHeaders({
+        "x-alphaclaw-user": "spoofed",
+        "x-openclaw-scopes": "operator.admin",
+        "x-forwarded-for": "203.0.113.7",
+        forwarded: "for=203.0.113.7",
+        "x-real-ip": "203.0.113.7",
+        "user-agent": "test-agent",
+        accept: "application/json",
+      });
+      expect(sanitized).toEqual({
+        "x-forwarded-for": "203.0.113.7",
+        forwarded: "for=203.0.113.7",
+        "x-real-ip": "203.0.113.7",
+        "user-agent": "test-agent",
+        accept: "application/json",
+      });
+    });
+  });
+
+  describe("kForwardedEvidenceHeaders", () => {
+    it("is exported and includes the forwarded-evidence header names", () => {
+      expect(Array.isArray(kForwardedEvidenceHeaders)).toBe(true);
+      expect(kForwardedEvidenceHeaders).toContain("x-forwarded-for");
+      expect(kForwardedEvidenceHeaders).toContain("forwarded");
+      expect(kForwardedEvidenceHeaders).toContain("x-real-ip");
     });
   });
 

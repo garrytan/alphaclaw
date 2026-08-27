@@ -1703,8 +1703,16 @@ describe("frontend/api openclaw channel endpoints", () => {
 
     const text = await api.fetchOpenclawRunLogText("op-1");
 
-    expect(global.fetch.mock.calls[0][0]).toBe("/api/openclaw/runs/op-1/log");
+    // Defaults to a 256KB tail so a 10MB dev log never lands in one string.
+    expect(global.fetch.mock.calls[0][0]).toBe(
+      "/api/openclaw/runs/op-1/log?tail=262144",
+    );
     expect(text).toBe("npm install openclaw@2026.7.2\nverified\n");
+
+    // Full-file mode for download flows.
+    const full = await api.fetchOpenclawRunLogText("op-1", { tailBytes: null });
+    expect(full).toBe("npm install openclaw@2026.7.2\nverified\n");
+    expect(global.fetch.mock.calls[1][0]).toBe("/api/openclaw/runs/op-1/log");
   });
 
   it("fetchOpenclawRunLogText surfaces the 404 log_not_found envelope", async () => {

@@ -166,6 +166,41 @@ describe("server/team-auth-transition", () => {
     expect(readConfig(openclawDir).gateway.auth).toEqual({ token: "abc" });
   });
 
+  it("treats a rejecting restartGateway like a failed probe and restores the snapshot", async () => {
+    const openclawDir = createTempOpenclawDir();
+    writeConfig(openclawDir, {
+      gateway: { auth: { token: "${OPENCLAW_GATEWAY_TOKEN}" } },
+    });
+    // First restart (apply) throws; second restart (restore) succeeds.
+    const restartGateway = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("spawn EAGAIN"))
+      .mockResolvedValue(undefined);
+    const request = createProbeRequest({ acceptInvoke: () => true });
+
+    const result = await enableTeamMode({
+      openclawDir,
+      env,
+      operators: kOperators,
+      restartGateway,
+      getGatewayUrl: () => kGatewayUrl,
+      request,
+      probeOptions: kFastProbe,
+      logger: { warn: vi.fn() },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.restored).toBe(true);
+    expect(result.error).toMatch(/restart failed/i);
+    // Restart happened twice: the throwing apply + the restore.
+    expect(restartGateway).toHaveBeenCalledTimes(2);
+    // openclaw.json is back to token auth — the trusted-proxy flip did not
+    // strand on disk.
+    expect(readConfig(openclawDir).gateway.auth).toEqual({
+      token: "${OPENCLAW_GATEWAY_TOKEN}",
+    });
+  });
+
   it("disable restores the snapshot, probes the token path, and removes the snapshot", async () => {
     const openclawDir = createTempOpenclawDir();
     writeConfig(openclawDir, {

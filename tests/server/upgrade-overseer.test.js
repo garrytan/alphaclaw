@@ -81,6 +81,7 @@ const makeOverseer = ({
   enabled = true,
   channelInfo = () => ({ appliedId: "2026.8.1-beta.3", acceptedAt: 111 }),
   notify = vi.fn(async () => ({ ok: true })),
+  getDoctorJson = async () => '{"ok":true}',
 } = {}) => {
   const overseer = createUpgradeOverseer({
     ledger,
@@ -89,7 +90,7 @@ const makeOverseer = ({
     isEnabled: () => enabled,
     getChannelInfo: channelInfo,
     notify,
-    getDoctorJson: async () => '{"ok":true}',
+    getDoctorJson,
     logger: { log: () => {} },
   });
   return { overseer, notify };
@@ -169,7 +170,7 @@ describe("server/upgrade-overseer", () => {
     expect(mainCall.args).toContain("--output-format");
     expect(mainCall.args).toContain("--disallowedTools");
     // The untrusted-log warning made it into the prompt.
-    expect(mainCall.args[1]).toContain("UNTRUSTED");
+    expect(mainCall.input).toContain("UNTRUSTED");
   });
 
   it("stores an unparseable verdict honestly and does not notify", async () => {
@@ -333,7 +334,90 @@ describe("server/upgrade-overseer", () => {
     const mainCall = runner.calls.find((c) => c.args?.[0] === "-p");
     expect(mainCall.args).not.toContain("--disallowedTools");
     // The system-prompt restriction is always present regardless.
-    expect(mainCall.args[1]).toContain("read-only release overseer");
+    expect(mainCall.input).toContain("read-only release overseer");
+  });
+
+  it("delivers the prompt to claude via stdin (opts.input), never argv", async () => {
+    const { ledger } = makeLedger();
+    seedFailedRun(ledger);
+    const runner = makeRunner();
+    const { overseer } = makeOverseer({ ledger, runner });
+
+    await overseer.maybeRunForLatest();
+
+    const mainCall = runner.calls.find((c) => c.args?.[0] === "-p");
+    expect(mainCall).toBeTruthy();
+    // argv carries only short flags — the prompt body (run record, log,
+    // doctor evidence) must never appear as an argument (E2BIG / `ps` leak).
+    for (const arg of mainCall.args) {
+      expect(String(arg).length).toBeLessThan(200);
+      expect(String(arg)).not.toContain("RUN RECORD");
+      expect(String(arg)).not.toContain(kOpId);
+    }
+    // The full prompt, including the run record, went over stdin instead.
+    expect(mainCall.input).toContain("=== RUN RECORD");
+    expect(mainCall.input).toContain(kOpId);
+    expect(mainCall.input).toContain("verify_failed");
+  });
+
+  it("stamps appliesToCurrent=true when the reviewed target is the applied build", async () => {
+    const { ledger } = makeLedger();
+    seedFailedRun(ledger); // target version matches the harness appliedId
+    const runner = makeRunner();
+    const { overseer } = makeOverseer({ ledger, runner });
+
+    await overseer.maybeRunForLatest();
+
+    const record = ledger.readRun(kOpId);
+    expect(record.overseer.state).toBe("done");
+    expect(record.overseer.verdict).toBe("healthy");
+    expect(record.overseer.appliesToCurrent).toBe(true);
+  });
+
+  it("does not stamp appliesToCurrent on a failed run whose target is not the applied build, even when healthy", async () => {
+    const { ledger } = makeLedger();
+    seedFailedRun(ledger); // reviewed target: 2026.8.1-beta.3 (never activated)
+    const runner = makeRunner();
+    const { overseer } = makeOverseer({
+      ledger,
+      runner,
+      // A different, older build is still live — Mark-good/Roll-back act on
+      // it, so a verdict about the failed build must not be actionable.
+      channelInfo: () => ({ appliedId: "2026.7.1-2", acceptedAt: 111 }),
+    });
+
+    await overseer.maybeRunForLatest();
+
+    const record = ledger.readRun(kOpId);
+    expect(record.overseer.state).toBe("done");
+    expect(record.overseer.verdict).toBe("healthy");
+    expect(record.overseer.appliesToCurrent).not.toBe(true);
+  });
+
+  it("redacts host secret values from the doctor output before it reaches the claude prompt", async () => {
+    const { ledger } = makeLedger();
+    seedFailedRun(ledger);
+    const runner = makeRunner();
+    const gatewaySecret = "gateway-secret-token-value";
+    const { overseer } = makeOverseer({
+      ledger,
+      runner,
+      env: {
+        PATH: "/usr/bin",
+        ANTHROPIC_API_KEY: "sk-ant-test-key",
+        OPENCLAW_GATEWAY_TOKEN: gatewaySecret,
+      },
+      // doctor --json runs under gatewayEnv and can echo provider secrets.
+      getDoctorJson: async () =>
+        JSON.stringify({ ok: false, gateway: { token: gatewaySecret } }),
+    });
+
+    await overseer.maybeRunForLatest();
+
+    const mainCall = runner.calls.find((c) => c.args?.[0] === "-p");
+    expect(mainCall).toBeTruthy();
+    expect(mainCall.input).not.toContain(gatewaySecret);
+    expect(mainCall.input).toContain("[redacted]");
   });
 
   it("appends the claude transcript tail to the run log", async () => {

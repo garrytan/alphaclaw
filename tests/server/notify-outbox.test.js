@@ -74,6 +74,84 @@ describe("server/notify-outbox", () => {
     expect(outbox.listEvents()[0].lastError).toBe("socket reset");
   });
 
+  it("evicts delivered events before undelivered ones on overflow", async () => {
+    const { outbox } = makeOutbox({ keepCount: 3 });
+    outbox.enqueue({ id: "e1", message: "first" });
+    outbox.enqueue({ id: "e2", message: "second" });
+    await outbox.flush({ deliver: async () => ({ ok: true }) });
+    // e1/e2 delivered; e3 undelivered fills the cap.
+    outbox.enqueue({ id: "e3", message: "third" });
+    // e4 overflows: the oldest DELIVERED event ages out, never the
+    // undelivered one.
+    outbox.enqueue({ id: "e4", message: "fourth" });
+
+    const events = outbox.listEvents();
+    expect(events.map((entry) => entry.id)).toEqual(["e2", "e3", "e4"]);
+    expect(events.find((entry) => entry.id === "e3").deliveredAt).toBeNull();
+    expect(events.find((entry) => entry.id === "e4").deliveredAt).toBeNull();
+  });
+
+  it("keeps the newest undelivered events when undelivered alone exceed keepCount", async () => {
+    const { outbox } = makeOutbox({ keepCount: 3 });
+    outbox.enqueue({ id: "e1", message: "first" });
+    outbox.enqueue({ id: "e2", message: "second" });
+    outbox.enqueue({ id: "e3", message: "third" });
+    outbox.enqueue({ id: "e4", message: "fourth" });
+    expect(outbox.listEvents().map((entry) => entry.id)).toEqual([
+      "e2",
+      "e3",
+      "e4",
+    ]);
+
+    outbox.enqueue({ id: "e5", message: "fifth" });
+    // Order preserved, newest kept.
+    expect(outbox.listEvents().map((entry) => entry.id)).toEqual([
+      "e3",
+      "e4",
+      "e5",
+    ]);
+  });
+
+  it("does not lose an event enqueued concurrently during a flush", async () => {
+    const { outbox } = makeOutbox();
+    outbox.enqueue({ id: "e1", message: "first" });
+    let enqueuedDuringFlush = false;
+    const deliver = vi.fn(async () => {
+      if (!enqueuedDuringFlush) {
+        enqueuedDuringFlush = true;
+        // A live enqueue racing the in-flight flush writes a newer file; the
+        // flush's write-back must merge onto a fresh read, not clobber it.
+        outbox.enqueue({ id: "e-new", message: "queued mid-flush" });
+      }
+      return { ok: true };
+    });
+    await outbox.flush({ deliver });
+    const ids = outbox.listEvents().map((entry) => entry.id);
+    expect(ids).toContain("e-new");
+    expect(
+      outbox.listEvents().find((entry) => entry.id === "e-new").deliveredAt,
+    ).toBeNull();
+    // The original event's delivery ack still persisted through the merge.
+    expect(
+      outbox.listEvents().find((entry) => entry.id === "e1").deliveredAt,
+    ).toBeTruthy();
+  });
+
+  it("logs via logger.error when an event crosses maxAttempts (giving up)", async () => {
+    const logger = { log: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    const { outbox } = makeOutbox({ maxAttempts: 2, logger });
+    outbox.enqueue({ id: "e1", message: "critical upgrade failure" });
+    const failing = vi.fn(async () => ({ ok: false, reason: "api down" }));
+    await outbox.flush({ deliver: failing });
+    expect(logger.error).not.toHaveBeenCalled();
+    await outbox.flush({ deliver: failing });
+    expect(logger.error).toHaveBeenCalledTimes(1);
+    const message = logger.error.mock.calls[0][0];
+    expect(message).toContain("GIVING UP");
+    expect(message).toContain('"e1"');
+    expect(message).toContain("critical upgrade failure");
+  });
+
   it("persists across instances (restart survival)", async () => {
     const { outbox, openclawDir } = makeOutbox();
     outbox.enqueue({ id: "e1", message: "queued just before restart" });
@@ -182,6 +260,39 @@ describe("server/upgrade-notifier routing", () => {
     expect(sendToTarget.mock.calls[0][1]).toBe(
       "update finished\n🔗 https://claw.example.com/#/upgrade",
     );
+  });
+
+  it("degrades to a single direct delivery when the outbox is unavailable", async () => {
+    // enqueue() returning null (e.g. disk full) must not drop the message —
+    // and must not pretend it was queued either.
+    const outboxStub = {
+      enqueue: vi.fn(() => null),
+      flush: vi.fn(async () => ({ delivered: 0, failed: 0, pending: 0 })),
+      listEvents: () => [],
+    };
+    const sendToTarget = vi.fn(async () => ({ ok: true }));
+    const notifier = createUpgradeNotifier({
+      notifier: { notify: vi.fn(async () => ({ ok: true })), sendToTarget },
+      outbox: outboxStub,
+      operatorsStore: {
+        read: () => ({
+          notifications: {
+            preferredChannel: null,
+            adminTargets: [{ channel: "telegram", target: "111" }],
+          },
+        }),
+      },
+      logger: kSilentLogger,
+    });
+
+    const result = await notifier.notify("disk is full", { id: "e1" });
+
+    expect(sendToTarget).toHaveBeenCalledTimes(1);
+    expect(sendToTarget.mock.calls[0][1]).toBe("disk is full");
+    expect(result.ok).toBe(true);
+    expect(result.queued).toBeUndefined();
+    // The degrade path never schedules a flush of the broken outbox.
+    expect(outboxStub.flush).not.toHaveBeenCalled();
   });
 
   it("all admin targets failing leaves the event unacked for retry", async () => {
