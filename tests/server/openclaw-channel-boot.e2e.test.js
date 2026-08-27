@@ -536,6 +536,69 @@ describe("server/openclaw-channel boot sync (e2e)", () => {
       expect(execFileSyncImpl).toHaveBeenCalledTimes(2);
     });
 
+    it("writes a BETA environment stripe on beta and removes it on stable", () => {
+      const harness = createHarness({
+        channel: "beta",
+        installedVersion: "2026.8.1",
+        sentinelVersion: "2026.8.1",
+        execFileSyncImpl: vi.fn(() => ""),
+      });
+      writeConfig(harness.openclawDir, { gateway: {} });
+
+      harness.sync.syncAtBoot();
+      let cfg = JSON.parse(
+        fs.readFileSync(path.join(harness.openclawDir, "openclaw.json"), "utf8"),
+      );
+      expect(cfg.gateway.controlUi.environment).toEqual({
+        label: "BETA",
+        color: "amber",
+        _alphaclawManaged: true,
+      });
+
+      // Switching to stable removes the managed stripe.
+      const stableHarness = createHarness({
+        channel: "stable",
+        installedVersion: "2026.8.1",
+        sentinelVersion: "2026.8.1",
+        execFileSyncImpl: vi.fn(() => ""),
+      });
+      writeConfig(stableHarness.openclawDir, {
+        gateway: {
+          controlUi: {
+            environment: { label: "BETA", color: "amber", _alphaclawManaged: true },
+          },
+        },
+      });
+      stableHarness.sync.syncAtBoot();
+      cfg = JSON.parse(
+        fs.readFileSync(
+          path.join(stableHarness.openclawDir, "openclaw.json"),
+          "utf8",
+        ),
+      );
+      expect(cfg.gateway?.controlUi?.environment).toBeUndefined();
+    });
+
+    it("leaves a hand-set (unmanaged) environment stripe untouched", () => {
+      const harness = createHarness({
+        channel: "stable",
+        installedVersion: "2026.8.1",
+        sentinelVersion: "2026.8.1",
+        execFileSyncImpl: vi.fn(() => ""),
+      });
+      writeConfig(harness.openclawDir, {
+        gateway: { controlUi: { environment: { label: "PROD", color: "red" } } },
+      });
+      harness.sync.syncAtBoot();
+      const cfg = JSON.parse(
+        fs.readFileSync(path.join(harness.openclawDir, "openclaw.json"), "utf8"),
+      );
+      expect(cfg.gateway.controlUi.environment).toEqual({
+        label: "PROD",
+        color: "red",
+      });
+    });
+
     it("restores a pre-fix backup on downgrade instead of running doctor", () => {
       const execFileSyncImpl = vi.fn(() => "");
       const harness = createHarness({
