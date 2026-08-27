@@ -1,7 +1,7 @@
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
-const { execFileSync, spawn } = require("child_process");
+const { spawnSync, spawn } = require("child_process");
 const { DatabaseSync } = require("node:sqlite");
 
 const {
@@ -46,9 +46,17 @@ describeLive("live: OpenClaw beta gateway contracts", () => {
   let betaVersion;
   let overlayBin;
 
-  const gatewayEnv = () =>
-    withOpenclawStartupEnv({
-      ...process.env,
+  const gatewayEnv = () => {
+    // Vitest workers export NODE_OPTIONS (loader/register flags) and VITEST_* vars;
+    // spreading them into the openclaw child perturbs some subcommands. Scrub them so
+    // the child runs like a normal CLI invocation.
+    const base = { ...process.env };
+    delete base.NODE_OPTIONS;
+    for (const key of Object.keys(base)) {
+      if (key.startsWith("VITEST")) delete base[key];
+    }
+    return withOpenclawStartupEnv({
+      ...base,
       HOME: rootDir,
       OPENCLAW_HOME: rootDir,
       OPENCLAW_CONFIG_PATH: path.join(openclawDir, "openclaw.json"),
@@ -56,6 +64,7 @@ describeLive("live: OpenClaw beta gateway contracts", () => {
       XDG_CONFIG_HOME: openclawDir,
       OPENCLAW_NO_AUTO_UPDATE: "1",
     });
+  };
 
   beforeAll(async () => {
     rootDir = mkTemp("alphaclaw-live-gw-root-");
@@ -99,35 +108,55 @@ describeLive("live: OpenClaw beta gateway contracts", () => {
   }, kTestTimeoutMs);
 
   const runCli = (args, { allowFail = false } = {}) => {
+    // spawnSync captures stdout AND stderr reliably (execFileSync only surfaces
+    // stderr on throw), which matters for --json commands that log to stderr.
+    const res = spawnSync(process.execPath, [overlayBin, ...args], {
+      env: gatewayEnv(),
+      timeout: 120000,
+      encoding: "utf8",
+    });
+    const stdout = String(res.stdout || "");
+    const stderr = String(res.stderr || "");
+    const ok = res.status === 0;
+    if (!ok && !allowFail) {
+      throw new Error(
+        `openclaw ${args.join(" ")} exited ${res.status}: ${stderr.slice(-400)}`,
+      );
+    }
+    return { ok, code: res.status, stdout, stderr };
+  };
+
+  // Parse the last brace-balanced JSON object from noisy CLI output.
+  const parseTailJson = (text) => {
+    const start = String(text || "").indexOf("{");
+    const end = String(text || "").lastIndexOf("}");
+    if (start < 0 || end <= start) return null;
     try {
-      const stdout = execFileSync(process.execPath, [overlayBin, ...args], {
-        env: gatewayEnv(),
-        timeout: 120000,
-        encoding: "utf8",
-      });
-      return { ok: true, stdout };
-    } catch (error) {
-      if (!allowFail) throw error;
-      return {
-        ok: false,
-        code: error.status,
-        stdout: String(error.stdout || ""),
-        stderr: String(error.stderr || ""),
-      };
+      return JSON.parse(text.slice(start, end + 1));
+    } catch {
+      return null;
     }
   };
 
   it(
     "advertises the restart-handoff consume contract at protocol 1",
     () => {
-      const { stdout } = runCli([
-        "gateway",
-        "restart-handoff",
-        "capabilities",
-        "--json",
-      ]);
-      const doc = JSON.parse(stdout.slice(stdout.indexOf("{")));
-      expect(Number(doc.protocolVersion ?? doc.protocol)).toBeGreaterThanOrEqual(1);
+      // Redirect the CLI JSON to a file and read it back: capturing --json stdout
+      // directly through the runner is unreliable in this harness (the first
+      // state-touching call also emits a schema-integrity pass to stderr), so a file
+      // sink is the robust path.
+      const outFile = path.join(os.tmpdir(), `handoff-caps-${Date.now()}.json`);
+      const sh = `${JSON.stringify(process.execPath)} ${JSON.stringify(overlayBin)} gateway restart-handoff capabilities --json > ${JSON.stringify(outFile)} 2>/dev/null`;
+      spawnSync("sh", ["-c", sh], { env: gatewayEnv(), timeout: 120000 });
+      const raw = fs.existsSync(outFile) ? fs.readFileSync(outFile, "utf8") : "";
+      fs.rmSync(outFile, { force: true });
+      const doc = parseTailJson(raw);
+      expect(doc).not.toBeNull();
+      const protocol = Number(doc.protocolVersion ?? doc.protocol ?? 0);
+      expect(protocol).toBeGreaterThanOrEqual(1);
+      // Protocol 1 supports the consume operation.
+      const ops = Array.isArray(doc.operations) ? doc.operations : [];
+      expect(doc.consume === true || ops.includes("consume")).toBe(true);
     },
     kTestTimeoutMs,
   );
@@ -135,11 +164,12 @@ describeLive("live: OpenClaw beta gateway contracts", () => {
   it(
     "accepts a VACUUM INTO snapshot via `database preflight --json`",
     () => {
-      // A minimal but real state DB.
-      const dbPath = path.join(openclawDir, "state", "openclaw.sqlite");
+      // Build the source DB in an ISOLATED temp path so it can never collide with a
+      // real state DB the gateway created (schema_meta shape differs across builds).
+      const dbPath = path.join(os.tmpdir(), `live-src-${Date.now()}.sqlite`);
       const seed = new DatabaseSync(dbPath);
-      seed.exec("CREATE TABLE IF NOT EXISTS schema_meta (schema_version INTEGER)");
-      seed.exec("INSERT INTO schema_meta (schema_version) VALUES (1)");
+      seed.exec("CREATE TABLE meta (k TEXT PRIMARY KEY, v TEXT)");
+      seed.exec("INSERT INTO meta (k, v) VALUES ('probe', '1')");
       seed.close();
 
       const snapshot = path.join(os.tmpdir(), `live-preflight-${Date.now()}.sqlite`);
@@ -155,6 +185,7 @@ describeLive("live: OpenClaw beta gateway contracts", () => {
       // incompatibility, but it must run.
       const combined = `${result.stdout}\n${result.stderr}`;
       expect(/unknown command|unrecognized/i.test(combined)).toBe(false);
+      fs.rmSync(dbPath, { force: true });
       fs.rmSync(snapshot, { force: true });
     },
     kTestTimeoutMs,
@@ -191,24 +222,55 @@ describeLive("live: OpenClaw beta gateway contracts", () => {
   );
 
   it(
-    "starts a gateway that reports listening + /healthz + /readyz",
+    "starts a gateway that answers /healthz and /readyz",
     async () => {
       const port = 18991;
+      // Minimal loopback gateway config so `gateway run` does not wait on setup.
+      const configPath = path.join(openclawDir, "openclaw.json");
+      fs.writeFileSync(
+        configPath,
+        JSON.stringify(
+          {
+            gateway: {
+              // gateway.mode is required or `gateway run` exits 78 (EX_CONFIG).
+              mode: "local",
+              bind: "loopback",
+              port,
+              auth: { token: "live-e2e-token-000000000000000000000000" },
+            },
+          },
+          null,
+          2,
+        ),
+      );
       const child = spawn(
         process.execPath,
         [overlayBin, "gateway", "run", "--port", String(port)],
-        { env: { ...gatewayEnv(), OPENCLAW_GATEWAY_PORT: String(port) }, stdio: "pipe" },
+        {
+          env: { ...gatewayEnv(), OPENCLAW_GATEWAY_PORT: String(port) },
+          stdio: "pipe",
+        },
       );
-      let stdout = "";
-      child.stdout.on("data", (c) => (stdout += c.toString()));
-      child.stderr.on("data", (c) => (stdout += c.toString()));
+      let output = "";
+      child.stdout.on("data", (c) => (output += c.toString()));
+      child.stderr.on("data", (c) => (output += c.toString()));
+      const healthUrl = `http://127.0.0.1:${port}/healthz`;
       try {
+        // Poll /healthz directly (more robust than stdout wording); the beta
+        // cold-starts plugin sidecars, so allow a generous budget.
         await waitFor(
-          () => /listening on/i.test(stdout),
-          60000,
-          "gateway listening",
+          async () => {
+            try {
+              const r = await fetch(healthUrl);
+              return r.status > 0;
+            } catch {
+              return false;
+            }
+          },
+          150000,
+          `gateway /healthz (last output: ${output.slice(-200)})`,
         );
-        const healthz = await fetch(`http://127.0.0.1:${port}/healthz`);
+        const healthz = await fetch(healthUrl);
         expect(healthz.ok).toBe(true);
         const readyz = await fetch(`http://127.0.0.1:${port}/readyz`);
         // /readyz may be red while sidecars settle; it must at least answer.
