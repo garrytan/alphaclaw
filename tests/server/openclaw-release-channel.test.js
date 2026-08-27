@@ -247,6 +247,32 @@ describe("server/openclaw-release-channel", () => {
       expect(store.hasOverlay("3.0.0")).toBe(false);
     });
 
+    it("refuses to activate an overlay that still carries the install guard", () => {
+      const { store, rootDir } = createStore();
+      const installDir = path.join(rootDir, "install");
+      writeInstallFixture(installDir, { version: "1.0.0" });
+      const packageDir = writeOpenclawPackageFixture(
+        path.join(createTempRoot(), "openclaw"),
+        { version: "2026.8.1-beta.3" },
+      );
+      // A staged tree that never completed its lifecycle still has the guard.
+      fs.writeFileSync(
+        path.join(packageDir, "dist", "openclaw-install-guard"),
+        "OpenClaw package preinstall has not completed.",
+      );
+      store.saveOverlayFromTempInstall({
+        openclawPackageDir: packageDir,
+        version: "2026.8.1-beta.3",
+      });
+
+      const result = store.activateOverlay({
+        installDir,
+        version: "2026.8.1-beta.3",
+      });
+      expect(result.ok).toBe(false);
+      expect(result.error).toMatch(/incomplete \(install guard present\)/);
+    });
+
     it("prunes every overlay entry not in the keep set", () => {
       const { store } = createStore();
       for (const version of ["1.0.0", "2.0.0", "3.0.0"]) {

@@ -13,6 +13,65 @@ const loadVersionModule = ({ execMock, execSyncMock }) => {
   return require(modulePath);
 };
 
+describe("server/openclaw-version verifyStagedLifecycle", () => {
+  const { verifyStagedLifecycle } = require("../../lib/server/openclaw-version");
+  const pkgDir = "/staged/node_modules/openclaw";
+  const guardPath = `${pkgDir}/dist/openclaw-install-guard`;
+
+  const makeFs = (present) => {
+    const files = new Set(present);
+    return {
+      existsSync: (p) => files.has(p),
+      _delete: (p) => files.delete(p),
+      _files: files,
+    };
+  };
+
+  it("is a no-op when the guard is already gone (scripts ran, or stable)", async () => {
+    const execImpl = vi.fn();
+    const fsModule = makeFs([]); // no guard
+    await verifyStagedLifecycle({ openclawPackageDir: pkgDir, execImpl, fsModule });
+    expect(execImpl).not.toHaveBeenCalled();
+  });
+
+  it("runs the lifecycle scripts manually when the guard remains, then passes", async () => {
+    const fsModule = makeFs([
+      guardPath,
+      `${pkgDir}/scripts/preinstall-package-manager-warning.mjs`,
+      `${pkgDir}/scripts/postinstall-bundled-plugins.mjs`,
+    ]);
+    const execImpl = vi.fn((cmd, opts, cb) => {
+      // The preinstall script deletes the guard on success.
+      if (cmd.includes("preinstall")) fsModule._delete(guardPath);
+      cb(null, "", "");
+    });
+    await verifyStagedLifecycle({ openclawPackageDir: pkgDir, execImpl, fsModule });
+    expect(execImpl).toHaveBeenCalledTimes(2);
+  });
+
+  it("rejects when the guard survives even after running the scripts", async () => {
+    const fsModule = makeFs([
+      guardPath,
+      `${pkgDir}/scripts/preinstall-package-manager-warning.mjs`,
+    ]);
+    const execImpl = vi.fn((cmd, opts, cb) => cb(null, "", "")); // never deletes guard
+    await expect(
+      verifyStagedLifecycle({ openclawPackageDir: pkgDir, execImpl, fsModule }),
+    ).rejects.toThrow(/install incomplete/i);
+  });
+
+  it("propagates a lifecycle-script failure", async () => {
+    const fsModule = makeFs([
+      guardPath,
+      `${pkgDir}/scripts/preinstall-package-manager-warning.mjs`,
+    ]);
+    const execImpl = vi.fn((cmd, opts, cb) => cb(new Error("script crashed")));
+    await expect(
+      verifyStagedLifecycle({ openclawPackageDir: pkgDir, execImpl, fsModule }),
+    ).rejects.toThrow(/script crashed/);
+  });
+});
+
 const createService = ({ isOnboarded = false } = {}) => {
   const execMock = vi.fn();
   const execSyncMock = vi.fn();
