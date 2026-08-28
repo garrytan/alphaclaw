@@ -52,3 +52,114 @@ describe("server/utils/forwarded-headers", () => {
     expect(() => stripForwardedHeadersFromProxyReq({})).not.toThrow();
   });
 });
+
+describe("server/utils/forwarded-headers identity injection (4.3)", () => {
+  const {
+    resolveWsClientIp,
+    applyIdentityProxyHeaders,
+  } = require("../../lib/server/utils/forwarded-headers");
+
+  const makeProxyReq = () => {
+    const headers = {};
+    return {
+      headers,
+      setHeader: (name, value) => {
+        headers[String(name).toLowerCase()] = value;
+      },
+      removeHeader: (name) => {
+        delete headers[String(name).toLowerCase()];
+      },
+    };
+  };
+
+  it("resolves the WS client IP with Express trust-proxy hop semantics (C5)", () => {
+    // No trusted hops: the socket peer is the client; XFF is untrusted noise.
+    expect(
+      resolveWsClientIp({
+        remoteAddress: "10.0.0.9",
+        xForwardedFor: "6.6.6.6",
+        trustProxyHops: 0,
+      }),
+    ).toBe("10.0.0.9");
+    // One trusted hop (Render/Railway ingress): rightmost XFF entry is real.
+    expect(
+      resolveWsClientIp({
+        remoteAddress: "10.0.0.9",
+        xForwardedFor: "203.0.113.7",
+        trustProxyHops: 1,
+      }),
+    ).toBe("203.0.113.7");
+    // Attacker-prepended entries beyond the trusted hops are never read.
+    expect(
+      resolveWsClientIp({
+        remoteAddress: "10.0.0.9",
+        xForwardedFor: "6.6.6.6, 203.0.113.7",
+        trustProxyHops: 1,
+      }),
+    ).toBe("203.0.113.7");
+    expect(
+      resolveWsClientIp({
+        remoteAddress: "10.0.0.9",
+        xForwardedFor: "6.6.6.6, 198.51.100.4, 203.0.113.7",
+        trustProxyHops: 2,
+      }),
+    ).toBe("198.51.100.4");
+    // More trusted hops than entries → leftmost available; empty XFF → socket.
+    expect(
+      resolveWsClientIp({
+        remoteAddress: "10.0.0.9",
+        xForwardedFor: "203.0.113.7",
+        trustProxyHops: 5,
+      }),
+    ).toBe("203.0.113.7");
+    expect(
+      resolveWsClientIp({
+        remoteAddress: "10.0.0.9",
+        xForwardedFor: "",
+        trustProxyHops: 2,
+      }),
+    ).toBe("10.0.0.9");
+  });
+
+  it("injects the identity header + rebuilt XFF for member identities only", () => {
+    const proxyReq = makeProxyReq();
+    const injected = applyIdentityProxyHeaders({
+      proxyReq,
+      identity: { kind: "member", email: "m@example.com", role: "member" },
+      clientIp: "203.0.113.7",
+    });
+    expect(injected).toBe(true);
+    expect(proxyReq.headers["x-alphaclaw-user"]).toBe("m@example.com");
+    expect(proxyReq.headers["x-forwarded-for"]).toBe("203.0.113.7");
+
+    // Legacy sessions inject nothing — pre-team behavior exactly.
+    const legacyReq = makeProxyReq();
+    expect(
+      applyIdentityProxyHeaders({
+        proxyReq: legacyReq,
+        identity: { kind: "legacy", role: "admin", email: null },
+        clientIp: "203.0.113.7",
+      }),
+    ).toBe(false);
+    expect(legacyReq.headers).toEqual({});
+
+    expect(
+      applyIdentityProxyHeaders({ proxyReq: makeProxyReq(), identity: null }),
+    ).toBe(false);
+  });
+
+  it("tolerates a proxyReq whose headers were already flushed", () => {
+    const proxyReq = {
+      setHeader: () => {
+        throw new Error("Cannot set headers after they are sent");
+      },
+    };
+    expect(
+      applyIdentityProxyHeaders({
+        proxyReq,
+        identity: { kind: "member", email: "m@example.com" },
+        clientIp: "1.2.3.4",
+      }),
+    ).toBe(false);
+  });
+});
