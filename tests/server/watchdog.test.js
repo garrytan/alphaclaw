@@ -1469,6 +1469,35 @@ describe("server/watchdog", () => {
     );
   });
 
+  it("settling an expected restart closes the suppression window and resyncs immediately", async () => {
+    vi.useFakeTimers();
+    const { watchdog } = createHarness({
+      autoRepair: false,
+      fetchImpl: async () => {
+        throw new Error("gateway down");
+      },
+    });
+    watchdog.start();
+    await vi.advanceTimersByTimeAsync(10);
+
+    // A route restart opens a lease-length window (worst case 10 minutes).
+    watchdog.onExpectedRestart({ expiresAt: Date.now() + 10 * 60 * 1000 });
+    expect(watchdog.getStatus().lifecycle).toBe("restarting");
+
+    // While the window is open, failing checks are suppressed as expected.
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(watchdog.getStatus().health).not.toBe("degraded");
+    expect(watchdog.getStatus().health).not.toBe("unhealthy");
+
+    // The operation settles (failed — the gateway never came up). Detection
+    // must resume NOW, not at lease expiry.
+    watchdog.onExpectedRestartSettled();
+    await vi.advanceTimersByTimeAsync(10);
+    const health = watchdog.getStatus().health;
+    expect(["degraded", "unhealthy"]).toContain(health);
+    watchdog.stop();
+  });
+
   it("records external operation events in the incident ledger", () => {
     const { watchdog, insertWatchdogEvent } = createHarness({});
 

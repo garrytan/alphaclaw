@@ -1238,7 +1238,23 @@ describe("server/routes/system", () => {
     try {
       const deps = createSystemDeps();
       deps.watchdog = { getStatus: vi.fn(() => ({ lifecycle: "running" })) };
-      deps.doctorService = { buildStatus: vi.fn(() => ({ ok: true, checks: [] })) };
+      deps.doctorService = {
+        buildStatus: vi.fn(() => ({
+          ok: true,
+          checks: [],
+          bootstrapContext: {
+            // Heavy per-file listings stay on /api/doctor/status; frames only
+            // carry what the shell's truncation warnings read.
+            files: [{ path: "a.md", rawChars: 999999 }],
+            activeFiles: [{ path: "a.md", rawChars: 999999 }],
+            inactiveTruncatedFiles: [{ path: "b.md" }],
+            truncationGuidance: "very long guidance text",
+            hasActiveTruncation: true,
+            activeTruncatedFiles: [{ path: "a.md", rawChars: 10, injectedChars: 5 }],
+            activeNearLimitFiles: [],
+          },
+        })),
+      };
       const routes = captureRoutes(deps);
       const handler = routes.get.get("/api/events/status");
       const req = new EventEmitter();
@@ -1261,7 +1277,14 @@ describe("server/routes/system", () => {
         .find((chunk) => chunk.startsWith("data: "));
       const parsed = JSON.parse(firstData.slice("data: ".length));
       expect(parsed.watchdogStatus).toEqual({ lifecycle: "running" });
-      expect(parsed.doctorStatus).toEqual({ ok: true, checks: [] });
+      expect(parsed.doctorStatus).toEqual(
+        expect.objectContaining({ ok: true, checks: [] }),
+      );
+      expect(parsed.doctorStatus.bootstrapContext).toEqual({
+        hasActiveTruncation: true,
+        activeTruncatedFiles: [{ path: "a.md", rawChars: 10, injectedChars: 5 }],
+        activeNearLimitFiles: [],
+      });
       expect(parsed.status.gateway).toBe("running");
 
       // Identical payloads are deduplicated by the shared snapshot: the next
@@ -2020,6 +2043,7 @@ describe("server/routes/system", () => {
     deps.watchdog = {
       getStatus: vi.fn(() => ({ lifecycle: "running" })),
       onExpectedRestart: vi.fn(),
+      onExpectedRestartSettled: vi.fn(),
     };
     let releaseCalled = false;
     deps.gatewayLifecycleLock = {
@@ -2055,6 +2079,7 @@ describe("server/routes/system", () => {
       }),
     });
     expect(deps.watchdog.onExpectedRestart).toHaveBeenCalled();
+    expect(deps.watchdog.onExpectedRestartSettled).not.toHaveBeenCalled();
 
     resolveRestart();
     await new Promise((resolve) => setImmediate(resolve));
@@ -2073,6 +2098,9 @@ describe("server/routes/system", () => {
       }),
     );
     expect(releaseCalled).toBe(true);
+    // The watchdog's expected-restart window closes the moment the operation
+    // settles — a dead gateway must not sit suppressed until lease expiry.
+    expect(deps.watchdog.onExpectedRestartSettled).toHaveBeenCalledTimes(1);
   });
 
   it("attaches concurrent restart requests to the active operation", async () => {
