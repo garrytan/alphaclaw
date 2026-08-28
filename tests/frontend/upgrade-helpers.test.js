@@ -1197,9 +1197,18 @@ describe("frontend/upgrade-helpers misc models", () => {
       dev: { commits: [{ sha: "abc1234def", shortSha: "abc1234", current: true }] },
     };
 
+    // No installedVersion → the distance is unknown, so D13 states that
+    // explicitly rather than silently implying "up to date".
     expect(buildAvailabilityLine({ catalog, releaseChannel: "stable" })).toBe(
-      "Latest stable: 2026.7.2",
+      "Latest stable: 2026.7.2 — update status unavailable",
     );
+    expect(
+      buildAvailabilityLine({
+        catalog,
+        releaseChannel: "stable",
+        installedVersion: "2026.7.2",
+      }),
+    ).toBe("Latest stable: 2026.7.2");
     expect(buildAvailabilityLine({ catalog, releaseChannel: "beta" })).toBe(
       "No beta releases listed.",
     );
@@ -1411,6 +1420,19 @@ describe("frontend/upgrade-helpers misc models", () => {
           installedVersion: "2026.7.1-2",
         }),
       ).toBe("Latest beta: 2026.8.1-beta.3 — not running this channel yet");
+    });
+
+    it("says update status unavailable when the distance is unknown (D13)", async () => {
+      const { buildAvailabilityLine } = await loadUpgradeHelpers();
+      // We know the latest beta but not what's installed — the distance can't
+      // be computed, so D13 says so instead of silently dropping the claim.
+      expect(
+        buildAvailabilityLine({
+          catalog,
+          releaseChannel: "beta",
+          installedVersion: null,
+        }),
+      ).toBe("Latest beta: 2026.8.1-beta.3 — update status unavailable");
     });
 
     it("returns unknown for dev, empty catalog, or missing version", async () => {

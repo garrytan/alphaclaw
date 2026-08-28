@@ -79,10 +79,24 @@ describe("server/buzz-setup (5.2)", () => {
     expect(result.ok).toBe(true);
     expect(runCalls).toHaveLength(1);
     expect(runCalls[0].args).toEqual(["plugins", "install", "@openclaw/buzz"]);
-    // External package code never sees credentials; OpenClaw paths survive.
+    // External package code never sees credentials; OpenClaw state path
+    // survives so the plugin actually lands on the data volume.
     expect(runCalls[0].env.OPENCLAW_GATEWAY_TOKEN).toBeUndefined();
     expect(runCalls[0].env.ANTHROPIC_API_KEY).toBeUndefined();
     expect(runCalls[0].env.OPENCLAW_STATE_DIR).toBe("/data/.openclaw");
+    // HOME is an ISOLATED tmp dir — not the gateway HOME and not the openclaw
+    // data dir — so a compromised postinstall can't do $HOME-relative reads
+    // into the data volume (E-C12, mirrors overlay-staging probeEnv).
+    const installHome = runCalls[0].env.HOME;
+    expect(typeof installHome).toBe("string");
+    expect(installHome).not.toBe("/home/qa");
+    expect(installHome).not.toBe("/data/.openclaw");
+    expect(installHome).not.toBe(openclawDir);
+    expect(installHome.startsWith(os.tmpdir())).toBe(true);
+    // Belt-and-suspenders: no secret-shaped var leaks into the install env.
+    for (const key of Object.keys(runCalls[0].env)) {
+      expect(key).not.toMatch(/TOKEN|SECRET|PASSWORD|API_KEY|PRIVATE/i);
+    }
     expect(service.getState().status).toBe("installed");
     expect(restartReasons).toContain("buzz_plugin_installed");
     expect(invalidated).toBe(1);
@@ -147,7 +161,7 @@ describe("server/buzz-setup (5.2)", () => {
     expect(service.getState().status).toBe("done");
   });
 
-  it("is resumable across service instances; cancel keeps identity + relay", async () => {
+  it("is resumable across service instances; pause preserves the step + identity + relay", async () => {
     const service = makeService();
     service.configure({ relayUrl: "wss://relay.buzz.example" });
     clawOutput = "buzz public key: BZresume1234567890";
@@ -164,9 +178,24 @@ describe("server/buzz-setup (5.2)", () => {
     );
 
     resumed.cancel();
-    expect(resumed.getState().status).toBe("idle");
-    // What stays after cancel is explicit: plugin, relay URL, identity.
+    // Pause must NOT snap the wizard back to idle (which would restart at step
+    // 0 and reinstall the plugin) — the step is preserved so Resume continues.
+    expect(resumed.getState().status).toBe("awaiting-approval");
     expect(resumed.getState().relayUrl).toBe("wss://relay.buzz.example");
     expect(resumed.getState().publicKey).toBe("BZresume1234567890");
+  });
+
+  it("pause after install keeps the installed step so resume never reinstalls (5.2)", async () => {
+    const service = makeService();
+    await service.install();
+    expect(service.getState().status).toBe("installed");
+
+    // The user pauses right after the plugin installed but before the relay.
+    service.cancel();
+    expect(service.getState().status).toBe("installed");
+
+    // A fresh instance (page reload) resumes at the install step, not step 0.
+    const resumed = makeService();
+    expect(resumed.getState().status).toBe("installed");
   });
 });

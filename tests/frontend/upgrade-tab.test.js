@@ -1176,6 +1176,45 @@ describe("frontend/upgrade-tab hook", () => {
     expect(state.savingChannel).toBe(false);
   });
 
+  // REGRESSION (2.1): whatsNew is channel-scoped and rides the catalog
+  // payload — a same-session switch must reload it so the WhatsNewCard and the
+  // apply dialog's security-flips block reflect the NEW channel, not the old.
+  it("reloads the whats-new catalog after a channel switch so flips refresh", async () => {
+    api.fetchOpenclawCatalog
+      .mockResolvedValueOnce({
+        ok: true,
+        catalog: makeCatalog(),
+        channel: { releaseChannel: "stable" },
+        whatsNew: { channel: "stable", securityFlips: [] },
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        catalog: makeCatalog(),
+        channel: { releaseChannel: "beta" },
+        whatsNew: {
+          channel: "beta",
+          securityFlips: [{ key: "gateway.terminal.enabled" }],
+        },
+      });
+
+    let state = await hydrate();
+    expect(api.fetchOpenclawCatalog).toHaveBeenCalledTimes(1);
+
+    await state.onSelectChannel("beta");
+
+    // The switch triggered a second catalog read (no forced refresh).
+    expect(api.fetchOpenclawCatalog).toHaveBeenCalledTimes(2);
+    expect(api.fetchOpenclawCatalog).toHaveBeenLastCalledWith({
+      refresh: false,
+    });
+
+    state = renderHook({});
+    expect(state.whatsNew).toEqual({
+      channel: "beta",
+      securityFlips: [{ key: "gateway.terminal.enabled" }],
+    });
+  });
+
   it("selecting the already-active channel does not PUT", async () => {
     let state = await hydrate();
 

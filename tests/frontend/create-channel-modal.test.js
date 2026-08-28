@@ -251,3 +251,57 @@ describe("frontend/create-channel-modal clickclack (5.1/5.3/D15)", () => {
     expect(payload.setupValue).toBeUndefined();
   });
 });
+
+describe("frontend/create-channel-modal option toggles reset per session (3.1)", () => {
+  beforeEach(() => {
+    harness.reset();
+    kCapsState.payload = { capabilities: { clickclackGuidedSetup: true } };
+  });
+  afterEach(() => {
+    vi.clearAllMocks();
+  });
+
+  const findSelectByOptionText = (tree, fragment) =>
+    collectNodes(tree).find(
+      (vnode) =>
+        vnode.type === "select" &&
+        collectText(vnode.props.children).join(" ").includes(fragment),
+    );
+
+  it("does not leak the previous account's Slack toggle into the next edit session", async () => {
+    const onSubmit = vi.fn(async () => {});
+    const accountA = {
+      provider: "slack",
+      id: "default",
+      name: "Slack A",
+      ownerAgentId: "main",
+      token: "",
+    };
+    const propsA = {
+      ...kProps,
+      mode: "edit",
+      account: accountA,
+      initialProvider: "slack",
+      onSubmit,
+    };
+
+    let tree = mount(propsA);
+    const select = findSelectByOptionText(tree, "Emoji status reactions");
+    expect(select).toBeTruthy();
+    // Plain-DOM vnodes carry the lowercased attribute name.
+    (select.props.oninput || select.props.onInput)({ target: { value: "on" } });
+    tree = render(propsA);
+
+    await findActionButtonByLabel(tree, "Save Changes").props.onClick();
+    expect(onSubmit.mock.calls[0][0].statusReactions).toBe("on");
+
+    // Reopen for a DIFFERENT account — the modal stays mounted, so the toggle
+    // MUST reset to default and never ride account B's submit.
+    const accountB = { ...accountA, name: "Slack B" };
+    const propsB = { ...propsA, account: accountB };
+    mount(propsB);
+    tree = render(propsB);
+    await findActionButtonByLabel(tree, "Save Changes").props.onClick();
+    expect(onSubmit.mock.calls[1][0].statusReactions).toBeUndefined();
+  });
+});

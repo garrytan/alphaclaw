@@ -1544,6 +1544,120 @@ describe("server/openclaw-channel-sync", () => {
       const firstResult = await first;
       expect(firstResult.status).toBe(200);
     });
+
+    // Repairs are update runs too (merge resolution): they get a durable
+    // ledger record and a redacting log sink, completed on BOTH outcomes.
+    const makeLedgerSpy = () => {
+      const sink = {
+        writeLine: vi.fn(),
+        write: vi.fn(),
+        close: vi.fn(async () => {}),
+      };
+      return {
+        sink,
+        ledger: {
+          createRun: vi.fn(),
+          createLogSink: vi.fn(() => sink),
+          updateRun: vi.fn(),
+          completeRun: vi.fn(),
+        },
+      };
+    };
+
+    it("records the repair in the run ledger and completes it as activated on success", async () => {
+      const { sink, ledger } = makeLedgerSpy();
+      const { sync } = createHarness({
+        channel: "dev",
+        pin: "1.0.0",
+        installedVersion: "1.0.0",
+        sentinelVersion: "1.0.0",
+        extraSyncOptions: { runLedger: ledger },
+      });
+
+      const result = await sync.runUpdateRepair({ operationId: "op-r" });
+
+      expect(result.status).toBe(200);
+      expect(ledger.createRun).toHaveBeenCalledWith({
+        operationId: "op-r",
+        target: { channel: "dev", repair: true },
+      });
+      expect(ledger.createLogSink).toHaveBeenCalledWith(
+        expect.objectContaining({ operationId: "op-r" }),
+      );
+      expect(ledger.completeRun).toHaveBeenCalledTimes(1);
+      expect(ledger.completeRun).toHaveBeenCalledWith(
+        "op-r",
+        expect.objectContaining({ state: "activated", ok: true }),
+      );
+      // The durable sink is detached and closed after the run.
+      expect(sink.close).toHaveBeenCalled();
+    });
+
+    it("completes the ledger run as FAILED when the repair CLI refuses", async () => {
+      const { sink, ledger } = makeLedgerSpy();
+      const { sync } = createHarness({
+        channel: "dev",
+        pin: "1.0.0",
+        installedVersion: "1.0.0",
+        sentinelVersion: "1.0.0",
+        runnerImpl: async (opts, fallback) => {
+          if (opts.command === "openclaw" && opts.args?.[0] === "update") {
+            return { ok: false, code: 1, tail: "repair refused", timedOut: false };
+          }
+          return fallback(opts);
+        },
+        extraSyncOptions: { runLedger: ledger },
+      });
+
+      const result = await sync.runUpdateRepair({ operationId: "op-r" });
+
+      expect(result.status).toBe(500);
+      expect(ledger.completeRun).toHaveBeenCalledTimes(1);
+      expect(ledger.completeRun).toHaveBeenCalledWith(
+        "op-r",
+        expect.objectContaining({
+          state: "failed",
+          ok: false,
+          result: expect.objectContaining({ code: "repair_failed" }),
+        }),
+      );
+      expect(sink.close).toHaveBeenCalled();
+    });
+
+    it("terminates the ledger run + SSE when the repair stream REJECTS (no hang)", async () => {
+      const operationEvents = makeOperationEvents();
+      const { sink, ledger } = makeLedgerSpy();
+      const { sync } = createHarness({
+        channel: "dev",
+        pin: "1.0.0",
+        installedVersion: "1.0.0",
+        sentinelVersion: "1.0.0",
+        runnerImpl: async (opts, fallback) => {
+          if (opts.command === "openclaw" && opts.args?.[0] === "update") {
+            // A crash (spawn error, sink write throw) — runStreamed rejects.
+            throw new Error("spawn ENOMEM");
+          }
+          return fallback(opts);
+        },
+        extraSyncOptions: { runLedger: ledger, operationEvents },
+      });
+
+      const result = await sync.runUpdateRepair({ operationId: "op-r" });
+
+      // The route resolves (does not hang or throw) with a failure envelope.
+      expect(result.status).toBe(500);
+      expect(result.body.code).toBe("repair_failed");
+      // The ledger run is completed as failed (not left "running"), the SSE
+      // subscriber gets an error (not a hang), the sink closes, latch released.
+      expect(ledger.completeRun).toHaveBeenCalledWith(
+        "op-r",
+        expect.objectContaining({ state: "failed", ok: false }),
+      );
+      expect(operationEvents.fail).toHaveBeenCalledTimes(1);
+      expect(operationEvents.complete).not.toHaveBeenCalled();
+      expect(sink.close).toHaveBeenCalled();
+      expect(sync.isApplyInProgress()).toBe(false);
+    });
   });
 
   describe("codex-round hardening", () => {

@@ -189,6 +189,58 @@ describe("server/agents clickclack channel (5.1)", () => {
     expect(account.token).toBe("${CLICKCLACK_BOT_TOKEN}");
     expect(account.dmPolicy).toBe("pairing");
   });
+
+  it("rolls the just-created account back when a post-add step fails (single-use code)", async () => {
+    const clawCalls = [];
+    const fsMock = buildFsMock(kBaseConfig);
+    // `channels add` (argv runner) succeeds; the bind fails afterward.
+    const clawCmd = vi.fn(async (cmd) => {
+      clawCalls.push(cmd);
+      if (cmd.includes("agents bind")) {
+        return { ok: false, stdout: "", stderr: "gateway refused the bind" };
+      }
+      return { ok: true, stdout: "", stderr: "" };
+    });
+    const restartGateway = vi.fn(async () => {});
+    const service = createAgentsService({
+      fs: fsMock,
+      OPENCLAW_DIR: "/tmp/openclaw",
+      readEnvFile: () => [],
+      writeEnvFile: () => {},
+      reloadEnv: () => true,
+      restartGateway,
+      clawCmd,
+      gatewayEnv: () => ({}),
+      runStream: {
+        runStreamed: vi.fn(async () => ({
+          ok: true,
+          code: 0,
+          tail: "",
+          timedOut: false,
+        })),
+      },
+    });
+
+    await expect(
+      service.createChannelAccount({
+        provider: "clickclack",
+        setupValue: "single-use-code",
+        agentId: "main",
+        name: "ClickClack",
+      }),
+    ).rejects.toThrow(/gateway refused the bind/);
+
+    // The account that `channels add` created is torn back down: a spent
+    // single-use code must not leave an orphan account blocking retry.
+    const removeCall = clawCalls.find((cmd) =>
+      cmd.startsWith("channels remove"),
+    );
+    expect(removeCall).toBeTruthy();
+    expect(removeCall).toContain("--channel clickclack");
+    expect(removeCall).toContain("--delete");
+    // A failed setup never claims a successful restart.
+    expect(restartGateway).not.toHaveBeenCalled();
+  });
 });
 
 describe("server/agents clickclack beta toggles (5.1)", () => {
