@@ -284,6 +284,62 @@ describe("server/openclaw-channel boot sync (e2e)", () => {
     assertOffline(harness);
   });
 
+  it("boot rollback warns (never blocks) when the target cannot verify current state (C1)", () => {
+    const { DatabaseSync } = require("node:sqlite");
+    // The rollback target's `database preflight` rejects the snapshot with an
+    // unknown-command error — the stable-target case. Boot must activate
+    // anyway and surface the honest warning naming the backup as recovery.
+    const execFileSyncImpl = vi.fn((cmd, args) => {
+      if (Array.isArray(args) && args.includes("preflight")) {
+        const err = new Error("exit 1");
+        err.stderr = "error: unknown command 'database'";
+        throw err;
+      }
+      return "";
+    });
+    const harness = createHarness({
+      pin: "1.0.0",
+      channel: "beta",
+      installedVersion: "1.2.0",
+      execFileSyncImpl,
+    });
+    // A real state DB so enumerateStateDbs has something to snapshot.
+    const stateDir = path.join(harness.openclawDir, "state");
+    fs.mkdirSync(stateDir, { recursive: true });
+    const db = new DatabaseSync(path.join(stateDir, "openclaw.sqlite"));
+    db.exec("CREATE TABLE t(x INTEGER)");
+    db.close();
+    harness.store.updateState((s) => {
+      s.pinVersion = "1.0.0";
+      s.applied = { channel: "beta", version: "1.2.0", at: 1, acceptedAt: null };
+      return s;
+    });
+    expect(saveOverlayFixture(harness.store, "1.1.0")).toEqual({ ok: true });
+    harness.store.writeMarker({
+      target: { kind: "package", channel: "beta", version: "1.1.0" },
+      blockedId: "1.2.0",
+      reason: "crash_loop",
+    });
+
+    const result = harness.sync.syncAtBoot();
+
+    expect(result.ok).toBe(true);
+    expect(result.action).toBe("rollback");
+    // Warned, not blocked: the rollback still activated.
+    expect(installedPackageJsonVersion(harness.installDir)).toBe("1.1.0");
+    const lastBoot = harness.store.readState().lastBoot;
+    expect(
+      lastBoot.warnings.some((warning) =>
+        /cannot verify state written by the newer version/.test(warning),
+      ),
+    ).toBe(true);
+    expect(
+      lastBoot.warnings.some((warning) =>
+        /backup taken before the update/.test(warning),
+      ),
+    ).toBe(true);
+  });
+
   it("consumes rollback markers: container pin reset and VPS package rollback", async () => {
     // (a) Container variant: marker targets the pin and the image reset has
     // already restored the pin tree.

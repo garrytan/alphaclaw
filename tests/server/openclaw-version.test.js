@@ -70,6 +70,52 @@ describe("server/openclaw-version verifyStagedLifecycle", () => {
       verifyStagedLifecycle({ openclawPackageDir: pkgDir, execImpl, fsModule }),
     ).rejects.toThrow(/script crashed/);
   });
+
+  it("fails staging when the guard is removed but POSTINSTALL fails (E-C5)", async () => {
+    // Guard absence proves only preinstall ran — a postinstall failure after
+    // the guard is gone must still fail staging, never save to the overlay.
+    const fsModule = makeFs([
+      guardPath,
+      `${pkgDir}/scripts/preinstall-package-manager-warning.mjs`,
+      `${pkgDir}/scripts/postinstall-bundled-plugins.mjs`,
+    ]);
+    const execImpl = vi.fn((cmd, opts, cb) => {
+      if (cmd.includes("preinstall")) {
+        fsModule._delete(guardPath); // preinstall succeeded
+        return cb(null, "", "");
+      }
+      cb(new Error("postinstall: bundled plugin prune failed"));
+    });
+    await expect(
+      verifyStagedLifecycle({ openclawPackageDir: pkgDir, execImpl, fsModule }),
+    ).rejects.toThrow(/postinstall/);
+    // Both scripts were attempted, in order.
+    expect(execImpl.mock.calls[0][0]).toContain("preinstall");
+    expect(execImpl.mock.calls[1][0]).toContain("postinstall");
+  });
+});
+
+describe("server/openclaw-version resolveNpmAllowScriptsFlag (1.4)", () => {
+  const { resolveNpmAllowScriptsFlag } = require("../../lib/server/openclaw-version");
+
+  it("emits the flag only for npm >= 11.16", () => {
+    expect(
+      resolveNpmAllowScriptsFlag({ getNpmVersion: () => "11.16.0" }),
+    ).toBe(" --allow-scripts=openclaw");
+    expect(
+      resolveNpmAllowScriptsFlag({ getNpmVersion: () => "12.0.1" }),
+    ).toBe(" --allow-scripts=openclaw");
+    expect(resolveNpmAllowScriptsFlag({ getNpmVersion: () => "11.15.9" })).toBe("");
+    expect(resolveNpmAllowScriptsFlag({ getNpmVersion: () => "10.9.0" })).toBe("");
+    // Unknown npm → no flag (older npm rejects it).
+    expect(
+      resolveNpmAllowScriptsFlag({
+        getNpmVersion: () => {
+          throw new Error("npm missing");
+        },
+      }),
+    ).toBe("");
+  });
 });
 
 const createService = ({ isOnboarded = false } = {}) => {
@@ -289,7 +335,11 @@ describe("server/openclaw-version", () => {
     );
     expect(manifest.dependencies.openclaw).toBe("2026.8.1-beta.3");
     expect(execMock).toHaveBeenCalledWith(
-      "npm install --omit=dev --prefer-online --package-lock=false --install-strategy=nested",
+      // The allow-scripts suffix is npm-version-conditional (>= 11.16); match
+      // the base command with or without it.
+      expect.stringMatching(
+        /^npm install --omit=dev --prefer-online --package-lock=false --install-strategy=nested( --allow-scripts=openclaw)?$/,
+      ),
       expect.objectContaining({
         cwd: result.tmpDir,
         env: expect.objectContaining({

@@ -518,7 +518,8 @@ describe("frontend/upgrade-tab view", () => {
     expect(findActionButtonByLabel(tree, "Clear blocklist entry")).toBeTruthy();
     const rollback = findActionButtonByLabel(tree, "Roll back");
     expect(rollback).toBeTruthy();
-    expect(rollback.props.tone).toBe("warning");
+    // D3: rolling back is destructive (blocklists the running version) — red.
+    expect(rollback.props.tone).toBe("danger");
     rollback.props.onClick();
     expect(onRequestRollback).toHaveBeenCalledTimes(1);
   });
@@ -534,12 +535,16 @@ describe("frontend/upgrade-tab view", () => {
       onCancelRollback,
     });
 
-    expect(treeText(tree)).toContain(
+    const text = treeText(tree);
+    expect(text).toContain(
       "Roll back to the last known good version now? The current version will be blocklisted.",
     );
+    // 1.3(c): honest asymmetric-rollback copy — the older version can't
+    // verify newer-written state; the pre-update backup is the recovery path.
+    expect(text).toContain("cannot verify state written by this one");
+    expect(text).toContain("backup taken before the update");
 
-    // The dialog's confirm — the only "Roll back" ActionButton in this render.
-    const confirmButton = findActionButtonByLabel(tree, "Roll back");
+    const confirmButton = findActionButtonByLabel(tree, "Roll back anyway");
     expect(confirmButton).toBeTruthy();
     confirmButton.props.onClick();
     expect(onRollback).toHaveBeenCalledTimes(1);

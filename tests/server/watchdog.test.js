@@ -1604,6 +1604,72 @@ describe("server/watchdog", () => {
     watchdog.stop();
   });
 
+  it("marks health degraded on green /health + degraded /readyz, with one advisory doctor (1.8)", async () => {
+    vi.useFakeTimers();
+    const readyzState = { degraded: true };
+    const clawCmdImpl = vi.fn(async (cmd) => ({
+      ok: true,
+      stdout: cmd.startsWith("doctor")
+        ? JSON.stringify({
+            ok: false,
+            findings: [{ checkId: "secrets.runtime", detail: "secret load failed" }],
+          })
+        : JSON.stringify({ ok: true }),
+    }));
+    const { watchdog, insertWatchdogEvent } = createHarness({
+      clawCmdImpl,
+      resolveGatewayReadyzUrl: () => "http://127.0.0.1:18789/readyz",
+      fetchImpl: async (url) => ({
+        ok: true,
+        status: 200,
+        text: async () =>
+          String(url).includes("readyz")
+            ? JSON.stringify({
+                ready: !readyzState.degraded,
+                failing: readyzState.degraded ? ["secrets"] : [],
+                eventLoop: { degraded: readyzState.degraded },
+              })
+            : JSON.stringify({ ok: true, status: "live" }),
+      }),
+    });
+
+    watchdog.start();
+    watchdog.onGatewayLaunch({ startedAt: Date.now() });
+    await vi.advanceTimersByTimeAsync(5_000);
+
+    // /health is green but readiness is degraded — never show a plain green dot.
+    const status = watchdog.getStatus();
+    expect(status.health).toBe("degraded");
+    expect(status.eventLoopDegraded).toBe(true);
+    expect(status.readyzFailing).toEqual(["secrets"]);
+    // The transition logged once and ran ONE advisory doctor --json (warn-only).
+    const doctorCalls = clawCmdImpl.mock.calls.filter(([cmd]) =>
+      cmd.startsWith("doctor --json"),
+    );
+    expect(doctorCalls).toHaveLength(1);
+    expect(
+      insertWatchdogEvent.mock.calls.some(
+        ([event]) => event.eventType === "readiness_degraded",
+      ),
+    ).toBe(true);
+    // No restart/repair was driven by readiness degradation.
+    expect(status.repairAttempts).toBe(0);
+
+    // A second tick with the SAME degradation does not re-run the doctor.
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(
+      clawCmdImpl.mock.calls.filter(([cmd]) => cmd.startsWith("doctor --json")),
+    ).toHaveLength(1);
+
+    // Recovery: readiness clears → health returns to healthy on the next check.
+    readyzState.degraded = false;
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(watchdog.getStatus().health).toBe("healthy");
+    expect(watchdog.getStatus().eventLoopDegraded).toBe(false);
+    watchdog.stop();
+    vi.useRealTimers();
+  });
+
   describe("readyz degraded surfaces (OpenClaw 2026.8)", () => {
     it("parses eventLoop.degraded and failing[] from /readyz", async () => {
       const { watchdog } = createHarness({

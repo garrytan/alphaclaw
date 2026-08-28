@@ -71,6 +71,13 @@ describe("server/routes/team (4.5)", () => {
       loginThrottle: createLoginThrottleMock(),
       membersStore,
       readTeamSettings: () => teamSettings,
+      // Mirrors lib/server.js wiring: invite acceptance reconciles the
+      // gateway roster when team mode is on (E-C8).
+      onMemberRosterChanged: async () => {
+        if (!teamSettings.enabled) return;
+        await teamGatewayConfig.applyTeamGatewayConfig();
+        restartReasons.push("team_member_accepted");
+      },
     });
     registerTeamRoutes({
       app,
@@ -180,6 +187,15 @@ describe("server/routes/team (4.5)", () => {
       password: "member password",
     });
     expect(accept.status).toBe(200);
+    // E-C8: acceptance itself reconciles — the new member holds gateway
+    // authority immediately, not after the next admin mutation.
+    expect(configDoc.gateway.auth.trustedProxy.allowUsers).toContain(
+      "member@example.com",
+    );
+    expect(
+      configDoc.gateway.auth.identityScopes["member@example.com"],
+    ).toEqual(["operator.read", "operator.write", "operator.approvals"]);
+    expect(restartReasons).toContain("team_member_accepted");
 
     // Roster mutation → gateway config rebuilt from the current roster.
     const memberRow = membersStore.getMemberByEmail("member@example.com");
