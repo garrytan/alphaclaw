@@ -404,4 +404,116 @@ describe("server/openclaw-version", () => {
       installOpenclawVersionToTempDir({ versionSpec: "1.0.0", execImpl: execMock }),
     ).rejects.toThrow("npm ERR! EACCES");
   });
+
+  // Streamed installs (the release-channel apply path) run through an injected
+  // runStreamImpl instead of exec so a hang or OOM kill still leaves output in
+  // the durable update log.
+  describe("streamed installs via runStreamImpl", () => {
+    const fs = require("fs");
+
+    const loadStreamedInstaller = () => {
+      nodeRuntime.assertSupportedNodeVersion = () => {};
+      const { installOpenclawVersionToTempDir } = loadVersionModule({
+        execMock: vi.fn(),
+        execSyncMock: vi.fn(),
+      });
+      return installOpenclawVersionToTempDir;
+    };
+
+    it("resolves the temp install dirs with the streamed tail as stdout", async () => {
+      const installOpenclawVersionToTempDir = loadStreamedInstaller();
+      const runStreamed = vi.fn(async () => ({
+        ok: true,
+        tail: "added 42 packages\n",
+      }));
+
+      const result = await installOpenclawVersionToTempDir({
+        versionSpec: "2026.8.1",
+        runStreamImpl: { runStreamed },
+      });
+
+      expect(result.tmpDir).toContain("openclaw-prepare-");
+      expect(result.openclawPackageDir).toBe(
+        require("path").join(result.tmpDir, "node_modules", "openclaw"),
+      );
+      expect(result.stdout).toBe("added 42 packages");
+      expect(runStreamed).toHaveBeenCalledWith(
+        expect.objectContaining({
+          command: "npm",
+          args: expect.arrayContaining(["install", "--install-strategy=nested"]),
+          cwd: result.tmpDir,
+          timeoutMs: 180000,
+        }),
+      );
+      expect(fs.existsSync(result.tmpDir)).toBe(true);
+      result.cleanup();
+      expect(fs.existsSync(result.tmpDir)).toBe(false);
+    });
+
+    it("rejects with a timeout message and removes the temp dir when the install times out", async () => {
+      const installOpenclawVersionToTempDir = loadStreamedInstaller();
+      const runStreamed = vi.fn(async ({ cwd }) => {
+        runStreamed.tmpDir = cwd;
+        return { ok: false, timedOut: true, tail: "still compiling..." };
+      });
+
+      await expect(
+        installOpenclawVersionToTempDir({
+          versionSpec: "1.0.0",
+          timeoutMs: 5000,
+          runStreamImpl: { runStreamed },
+        }),
+      ).rejects.toThrow("npm install timed out after 5s");
+      expect(runStreamed.tmpDir).toContain("openclaw-prepare-");
+      expect(fs.existsSync(runStreamed.tmpDir)).toBe(false);
+    });
+
+    it("rejects with the streamed tail and cleans up when the install fails", async () => {
+      const installOpenclawVersionToTempDir = loadStreamedInstaller();
+      const runStreamed = vi.fn(async ({ cwd }) => {
+        runStreamed.tmpDir = cwd;
+        return { ok: false, tail: "npm ERR! E404 openclaw@9.9.9 not found\n" };
+      });
+
+      await expect(
+        installOpenclawVersionToTempDir({
+          versionSpec: "9.9.9",
+          runStreamImpl: { runStreamed },
+        }),
+      ).rejects.toThrow("npm ERR! E404 openclaw@9.9.9 not found");
+      expect(fs.existsSync(runStreamed.tmpDir)).toBe(false);
+    });
+
+    it("falls back to a generic failure message when the runner reports no details", async () => {
+      const installOpenclawVersionToTempDir = loadStreamedInstaller();
+      const runStreamed = vi.fn(async ({ cwd }) => {
+        runStreamed.tmpDir = cwd;
+        return { ok: false, error: "", tail: "   " };
+      });
+
+      await expect(
+        installOpenclawVersionToTempDir({
+          versionSpec: "3.2.1",
+          runStreamImpl: { runStreamed },
+        }),
+      ).rejects.toThrow("Failed to install openclaw@3.2.1");
+      expect(fs.existsSync(runStreamed.tmpDir)).toBe(false);
+    });
+
+    it("propagates runner rejections and cleans up the temp dir", async () => {
+      const installOpenclawVersionToTempDir = loadStreamedInstaller();
+      const runStreamed = vi.fn(async ({ cwd }) => {
+        runStreamed.tmpDir = cwd;
+        throw new Error("spawn npm ENOENT");
+      });
+
+      await expect(
+        installOpenclawVersionToTempDir({
+          versionSpec: "1.0.0",
+          runStreamImpl: { runStreamed },
+        }),
+      ).rejects.toThrow("spawn npm ENOENT");
+      expect(fs.existsSync(runStreamed.tmpDir)).toBe(false);
+    });
+  });
 });

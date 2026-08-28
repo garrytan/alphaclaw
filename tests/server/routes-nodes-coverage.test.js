@@ -67,7 +67,13 @@ const createMemoryFs = (initialFiles = {}) => {
 const openclawDir = "/tmp/openclaw-nodes";
 const approvalsPath = path.join(openclawDir, "exec-approvals.json");
 
-const createApp = ({ clawCmd, fsModule, gatewayToken = "" } = {}) => {
+const createApp = ({
+  clawCmd,
+  fsModule,
+  gatewayToken = "",
+  getGatewayToken = null,
+  getGatewayAuthMode = null,
+} = {}) => {
   const app = express();
   app.use(express.json());
   registerNodeRoutes({
@@ -75,6 +81,8 @@ const createApp = ({ clawCmd, fsModule, gatewayToken = "" } = {}) => {
     clawCmd: clawCmd || vi.fn(async () => ({ ok: true, stdout: "{}", stderr: "" })),
     openclawDir,
     gatewayToken,
+    getGatewayToken,
+    getGatewayAuthMode,
     fsModule: fsModule || createMemoryFs(),
   });
   return app;
@@ -336,14 +344,18 @@ describe("server/routes/nodes coverage", { retry: 1 }, () => {
         async () => {
           const app = createApp();
           const res = await request(app).get("/api/nodes/connect-info");
-          expect(res.body).toEqual({
-            ok: true,
-            baseUrl: "http://localhost:3000",
-            gatewayHost: "localhost",
-            gatewayPort: 3000,
-            gatewayToken: "",
-            tls: false,
-          });
+          // An empty token also carries token-unavailability metadata, so
+          // this asserts the URL-derived fields rather than the exact shape.
+          expect(res.body).toEqual(
+            expect.objectContaining({
+              ok: true,
+              baseUrl: "http://localhost:3000",
+              gatewayHost: "localhost",
+              gatewayPort: 3000,
+              gatewayToken: "",
+              tls: false,
+            }),
+          );
         },
       );
     });
@@ -393,6 +405,86 @@ describe("server/routes/nodes coverage", { retry: 1 }, () => {
         expect(res.body.baseUrl).toBe("http://req-host.example.com:4567");
         expect(res.body.gatewayPort).toBe(4567);
       });
+    });
+
+    it("returns an empty gatewayToken when the lazy resolver reports trusted-proxy mode", async () => {
+      await withEnv(
+        { ...clearBaseUrlEnv, ALPHACLAW_SETUP_URL: "https://setup.example.com" },
+        async () => {
+          // Team mode: the resolver sees trusted-proxy auth and returns "";
+          // the static boot-time token must NOT be resurrected — the gateway
+          // would reject it.
+          const getGatewayToken = vi.fn(() => "");
+          const app = createApp({ gatewayToken: "static-tok", getGatewayToken });
+          const res = await request(app).get("/api/nodes/connect-info");
+          expect(res.status).toBe(200);
+          expect(res.body.ok).toBe(true);
+          expect(getGatewayToken).toHaveBeenCalled();
+          expect(res.body.gatewayToken).toBe("");
+          expect(JSON.stringify(res.body)).not.toContain("static-tok");
+        },
+      );
+    });
+
+    it("degrades to an empty gatewayToken when the lazy resolver throws", async () => {
+      await withEnv(
+        { ...clearBaseUrlEnv, ALPHACLAW_SETUP_URL: "https://setup.example.com" },
+        async () => {
+          const getGatewayToken = vi.fn(() => {
+            throw new Error("credential store unreadable");
+          });
+          const app = createApp({ gatewayToken: "static-tok", getGatewayToken });
+          const res = await request(app).get("/api/nodes/connect-info");
+          // A throwing resolver must never 500 the route.
+          expect(res.status).toBe(200);
+          expect(res.body.ok).toBe(true);
+          expect(res.body.gatewayToken).toBe("");
+        },
+      );
+    });
+
+    it("omits authMode metadata for an unconfigured token on a token-mode gateway", async () => {
+      await withEnv(
+        { ...clearBaseUrlEnv, ALPHACLAW_SETUP_URL: "https://setup.example.com" },
+        async () => {
+          // Plain token mode with no token yet configured is NOT team mode:
+          // the response must not claim token onboarding is unavailable.
+          const getGatewayAuthMode = vi.fn(() => "token");
+          const app = createApp({
+            gatewayToken: "",
+            getGatewayToken: vi.fn(() => ""),
+            getGatewayAuthMode,
+          });
+          const res = await request(app).get("/api/nodes/connect-info");
+          expect(res.status).toBe(200);
+          expect(res.body.ok).toBe(true);
+          expect(getGatewayAuthMode).toHaveBeenCalled();
+          expect(res.body.gatewayToken).toBe("");
+          expect(res.body).not.toHaveProperty("authMode");
+          expect(res.body).not.toHaveProperty("tokenUnavailableReason");
+        },
+      );
+    });
+
+    it("includes authMode and tokenUnavailableReason when a non-token gateway has no token", async () => {
+      await withEnv(
+        { ...clearBaseUrlEnv, ALPHACLAW_SETUP_URL: "https://setup.example.com" },
+        async () => {
+          const getGatewayAuthMode = vi.fn(() => "password");
+          const app = createApp({
+            gatewayToken: "",
+            getGatewayToken: vi.fn(() => ""),
+            getGatewayAuthMode,
+          });
+          const res = await request(app).get("/api/nodes/connect-info");
+          expect(res.status).toBe(200);
+          expect(res.body.ok).toBe(true);
+          expect(res.body.gatewayToken).toBe("");
+          expect(res.body.authMode).toBe("password");
+          expect(typeof res.body.tokenUnavailableReason).toBe("string");
+          expect(res.body.tokenUnavailableReason.length).toBeGreaterThan(0);
+        },
+      );
     });
 
     it("falls back to localhost when no host header is present", async () => {
