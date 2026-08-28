@@ -1219,8 +1219,10 @@ describe("server/routes/system", () => {
     expect(startingRes.body.gateway).toBe("starting");
     expect(startingRes.body.alphaclawVersion).toBeNull();
 
+    // Status payloads are memoized (~1.5s) per registration; use a fresh app
+    // so the not_onboarded state is not served from the previous memo.
     deps.fs.existsSync.mockReturnValue(false);
-    const notOnboardedRes = await request(app).get("/api/status");
+    const notOnboardedRes = await request(createApp(deps)).get("/api/status");
     expect(notOnboardedRes.body.gateway).toBe("not_onboarded");
     expect(notOnboardedRes.body.configExists).toBe(false);
   });
@@ -1237,7 +1239,11 @@ describe("server/routes/system", () => {
       const res = {
         setHeader: vi.fn(),
         flushHeaders: vi.fn(),
-        write: vi.fn(),
+        // A healthy client socket: write() returns true, otherwise the SSE
+        // backpressure guard would count every write as backed up and
+        // destroy the connection after 5 writes.
+        write: vi.fn(() => true),
+        destroy: vi.fn(),
         end: vi.fn(),
       };
 
@@ -1248,10 +1254,12 @@ describe("server/routes/system", () => {
         "text/event-stream",
       );
       expect(res.flushHeaders).toHaveBeenCalled();
-      const firstData = res.write.mock.calls
+      const firstEvent = res.write.mock.calls
         .map((call) => String(call[0]))
-        .find((chunk) => chunk.startsWith("data: "));
-      const parsed = JSON.parse(firstData.slice("data: ".length));
+        .find((chunk) => chunk.startsWith("event: status\ndata: "));
+      const parsed = JSON.parse(
+        firstEvent.slice("event: status\ndata: ".length).trimEnd(),
+      );
       expect(parsed.watchdogStatus).toEqual({ lifecycle: "running" });
       expect(parsed.doctorStatus).toEqual({ ok: true, checks: [] });
       expect(parsed.status.gateway).toBe("running");
@@ -1259,7 +1267,11 @@ describe("server/routes/system", () => {
       // The 2s interval emits another status event.
       res.write.mockClear();
       await vi.advanceTimersByTimeAsync(2000);
-      expect(res.write).toHaveBeenCalledWith("event: status\n");
+      expect(
+        res.write.mock.calls.some((call) =>
+          String(call[0]).startsWith("event: status\ndata: "),
+        ),
+      ).toBe(true);
 
       // Payload build failures are swallowed without writing.
       deps.isGatewayRunning.mockRejectedValue(new Error("gateway probe failed"));
@@ -1290,14 +1302,20 @@ describe("server/routes/system", () => {
     const routes = captureRoutes(deps);
     const handler = routes.get.get("/api/events/status");
     const req = new EventEmitter();
-    const res = { setHeader: vi.fn(), write: vi.fn(), end: vi.fn() };
+    const res = {
+      setHeader: vi.fn(),
+      write: vi.fn(() => true),
+      destroy: vi.fn(),
+      end: vi.fn(),
+    };
 
     await handler(req, res);
     req.emit("close");
 
     const firstData = res.write.mock.calls
       .map((call) => String(call[0]))
-      .find((chunk) => chunk.startsWith("data: "));
+      .find((chunk) => chunk.startsWith("event: status\ndata: "))
+      ?.replace(/^event: status\n/, "");
     const parsed = JSON.parse(firstData.slice("data: ".length));
     expect(parsed.watchdogStatus).toBeNull();
     expect(parsed.doctorStatus).toBeNull();

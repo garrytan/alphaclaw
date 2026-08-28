@@ -51,6 +51,9 @@ const createHarness = ({
     resolveSetupUrl,
     resolveGatewayHealthUrl,
     resolveGatewayReadyzUrl,
+    // Crash-restart backoff resolves instantly in tests; backoff timing has
+    // its own dedicated fake-timer coverage.
+    sleepImpl: () => Promise.resolve(),
   });
 
   return {
@@ -139,7 +142,10 @@ describe("server/watchdog", () => {
 
     await vi.advanceTimersByTimeAsync(5_000);
 
-    expect(clawCmd).not.toHaveBeenCalledWith("doctor --fix --yes", { quiet: true });
+    expect(clawCmd).not.toHaveBeenCalledWith(
+      "doctor --fix --yes",
+      expect.objectContaining({ quiet: true }),
+    );
     expect(watchdog.getStatus()).toEqual(
       expect.objectContaining({
         lifecycle: "running",
@@ -212,12 +218,19 @@ describe("server/watchdog", () => {
     });
 
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    // Real crash exits arrive on separate event-loop turns; crash 1's async
+    // relaunch must settle (releasing operationInProgress) before the later
+    // crashes, or the crash-loop repair would be skipped as "in progress".
+    await flushMicrotasks();
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
     await flushMicrotasks();
     await flushMicrotasks();
 
-    expect(clawCmd).toHaveBeenCalledWith("doctor --fix --yes", { quiet: true });
+    expect(clawCmd).toHaveBeenCalledWith(
+      "doctor --fix --yes",
+      expect.objectContaining({ quiet: true, timeoutMs: 600000 }),
+    );
   });
 
   it("clears crash-loop lifecycle after a healthy check recovery", async () => {
@@ -308,7 +321,10 @@ describe("server/watchdog", () => {
     watchdog.onExpectedRestart();
     await flushMicrotasks();
 
-    expect(clawCmd).not.toHaveBeenCalledWith("doctor --fix --yes", { quiet: true });
+    expect(clawCmd).not.toHaveBeenCalledWith(
+      "doctor --fix --yes",
+      expect.objectContaining({ quiet: true }),
+    );
     expect(insertWatchdogEvent).toHaveBeenCalledWith(
       expect.objectContaining({
         eventType: "health_check",
@@ -449,6 +465,9 @@ describe("server/watchdog", () => {
     });
 
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    // Space crash 1 from the rest: its async relaunch must release
+    // operationInProgress before the crash loop opens, as real exits do.
+    await flushMicrotasks();
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
     await flushMicrotasks();
@@ -492,7 +511,10 @@ describe("server/watchdog", () => {
     await vi.advanceTimersByTimeAsync(10_000);
 
     expect(clawCmd).toHaveBeenCalledTimes(1);
-    expect(clawCmd).toHaveBeenCalledWith("doctor --fix --yes", { quiet: true });
+    expect(clawCmd).toHaveBeenCalledWith(
+      "doctor --fix --yes",
+      expect.objectContaining({ quiet: true, timeoutMs: 600000 }),
+    );
     expect(
       notifier.notify.mock.calls.filter((call) =>
         String(call?.[0] || "").includes("awaiting health check"),
@@ -740,7 +762,10 @@ describe("server/watchdog", () => {
       }),
     );
     expect(launchGatewayProcess).not.toHaveBeenCalled();
-    expect(clawCmd).not.toHaveBeenCalledWith("doctor --fix --yes", { quiet: true });
+    expect(clawCmd).not.toHaveBeenCalledWith(
+      "doctor --fix --yes",
+      expect.objectContaining({ quiet: true }),
+    );
     expect(insertWatchdogEvent).toHaveBeenCalledWith(
       expect.objectContaining({
         eventType: "config_error",
@@ -1291,9 +1316,10 @@ describe("server/watchdog", () => {
     await flushMicrotasks();
     await flushMicrotasks();
 
-    expect(clawCmd).not.toHaveBeenCalledWith("doctor --fix --yes", {
-      quiet: true,
-    });
+    expect(clawCmd).not.toHaveBeenCalledWith(
+      "doctor --fix --yes",
+      expect.objectContaining({ quiet: true }),
+    );
   });
 
   it("skips crash-loop auto-repair while awaiting recovery from a prior repair", async () => {
@@ -1379,12 +1405,16 @@ describe("server/watchdog", () => {
     });
 
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    // Crash exits arrive on separate event-loop turns; let crash 1's relaunch
+    // settle before crashes 2 and 3 land.
+    await flushMicrotasks();
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
     await flushMicrotasks();
-    // Crashes 1-2 relaunched the gateway; the third opened a crash loop and
-    // started an auto-repair whose doctor run is still in flight.
-    expect(launchGatewayProcess).toHaveBeenCalledTimes(2);
+    // Crash 1 relaunched immediately; crash 2's relaunch entered backoff and
+    // was superseded when crash 3 opened the crash loop and started an
+    // auto-repair (whose doctor run is still in flight) — no futile relaunch.
+    expect(launchGatewayProcess).toHaveBeenCalledTimes(1);
 
     watchdog.onGatewayExit({ code: 78, expectedExit: false });
     await flushMicrotasks();
@@ -1394,7 +1424,7 @@ describe("server/watchdog", () => {
     await flushMicrotasks();
 
     // The completed doctor run must not relaunch a misconfigured gateway.
-    expect(launchGatewayProcess).toHaveBeenCalledTimes(2);
+    expect(launchGatewayProcess).toHaveBeenCalledTimes(1);
     expect(watchdog.getStatus().lifecycle).toBe("configuration_error");
   });
 
@@ -1488,6 +1518,9 @@ describe("server/watchdog", () => {
     });
 
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    // Space crash 1 from the rest so its relaunch releases the operation lock
+    // before the crash loop opens (real exits never share a tick).
+    await flushMicrotasks();
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
     await flushMicrotasks();

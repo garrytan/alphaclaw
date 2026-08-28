@@ -301,6 +301,15 @@ describe("server/routes/watchdog", () => {
         }),
       }),
     );
+    // Event-loop lag telemetry ships with every resources payload; the values
+    // may be null until the first 5s sampling window completes.
+    const { eventLoop } = res.body.resources;
+    expect(eventLoop).toBeDefined();
+    expect(Object.keys(eventLoop).sort()).toEqual(["maxMs", "p50Ms", "p99Ms"]);
+    for (const key of ["p50Ms", "p99Ms", "maxMs"]) {
+      const value = eventLoop[key];
+      expect(value === null || typeof value === "number").toBe(true);
+    }
   });
 
   it("returns 500 when resource lookup fails", async () => {

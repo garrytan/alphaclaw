@@ -1,6 +1,21 @@
 #!/usr/bin/env node
 "use strict";
 
+// Primitive boot-time crash guards: before the server loads, an unhandled
+// rejection must not kill boot silently (Node 22 default) and an uncaught
+// exception must exit LOUDLY. The server lifecycle orchestrator
+// (lib/server/init/server-lifecycle.js) replaces these with the full guarded
+// versions once it installs.
+process.on("unhandledRejection", (reason) => {
+  console.error(
+    `[alphaclaw] Unhandled rejection during boot (continuing): ${reason?.stack || reason}`,
+  );
+});
+process.on("uncaughtException", (error) => {
+  console.error(`[alphaclaw] Uncaught exception during boot: ${error?.stack || error}`);
+  process.exit(1);
+});
+
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
@@ -839,6 +854,63 @@ if (!kSetupPassword) {
 }
 
 // ---------------------------------------------------------------------------
+// 6b. Boot placeholder server
+// ---------------------------------------------------------------------------
+// The heavy pre-listen work below (pending-update npm install up to 3min,
+// gog CLI download, git fetches, migrations) used to leave the port silently
+// closed — users saw connection-refused and platform health checks failed.
+// This placeholder answers immediately:
+//   /health           → 200 {status:"updating"}  (same 200-always semantics
+//                        as the real server, so platforms don't restart-loop
+//                        a container mid-update)
+//   browser requests  → 503 + human "AlphaClaw is updating" page, auto-refresh
+//   everything else   → 503 JSON + Retry-After
+// If boot hangs past kMaxUpdatingWindowMs, /health flips to 503 so the
+// platform restarts a genuinely stuck bootstrap instead of trusting
+// "updating" forever. Closed (connections destroyed) right before the real
+// server starts; its EADDRINUSE retry covers the close/rebind race.
+const kMaxUpdatingWindowMs = 15 * 60 * 1000;
+const bootPlaceholder = (() => {
+  try {
+    const http = require("http");
+    const startedAt = Date.now();
+    const updatingPage = [
+      "<!doctype html><html><head><meta charset=\"utf-8\">",
+      "<meta http-equiv=\"refresh\" content=\"5\">",
+      "<title>AlphaClaw is updating</title>",
+      "<style>body{font-family:system-ui,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;background:#0b0e14;color:#e6e6e6}main{text-align:center;max-width:28rem;padding:2rem}h1{font-size:1.4rem;margin-bottom:.5rem}p{color:#9aa4b2;line-height:1.5}</style>",
+      "</head><body><main><h1>AlphaClaw is updating&hellip;</h1>",
+      "<p>The server is finishing an update or restart. This page refreshes automatically &mdash; you&rsquo;ll be back in a couple of minutes.</p>",
+      "</main></body></html>",
+    ].join("");
+    const server = http.createServer((req, res) => {
+      const stuck = Date.now() - startedAt > kMaxUpdatingWindowMs;
+      if (String(req.url || "").split("?")[0] === "/health") {
+        res.writeHead(stuck ? 503 : 200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ status: "updating", gateway: "starting" }));
+        return;
+      }
+      const accept = String(req.headers.accept || "");
+      if (accept.includes("text/html")) {
+        res.writeHead(503, { "Content-Type": "text/html; charset=utf-8", "Retry-After": "5" });
+        res.end(updatingPage);
+        return;
+      }
+      res.writeHead(503, { "Content-Type": "application/json", "Retry-After": "5" });
+      res.end(JSON.stringify({ ok: false, error: "AlphaClaw is updating", status: "updating" }));
+    });
+    server.on("error", () => {
+      // Port already taken (old process still draining) — skip the
+      // placeholder; the real server's listen retry will handle the port.
+    });
+    server.listen(Number.parseInt(kPort, 10) || 3000, "0.0.0.0");
+    return server;
+  } catch {
+    return null;
+  }
+})();
+
+// ---------------------------------------------------------------------------
 // 7. Set OPENCLAW_HOME globally so all child processes inherit it
 // ---------------------------------------------------------------------------
 
@@ -929,7 +1001,9 @@ if (!gogInstalled) {
     const url = `https://github.com/steipete/gogcli/releases/download/v${gogVersion}/${tarball}`;
     execSync(
       `curl -fsSL "${url}" -o /tmp/gog.tar.gz && tar -xzf /tmp/gog.tar.gz -C /tmp/ && mv /tmp/gog /usr/local/bin/gog && chmod +x /usr/local/bin/gog && rm -f /tmp/gog.tar.gz`,
-      { stdio: "inherit" },
+      // A hung download must not stall boot forever (the placeholder page is
+      // covering the port, but /health flips to 503 after 15min).
+      { stdio: "inherit", timeout: 120000 },
     );
     console.log("[alphaclaw] gog CLI installed");
   } catch (e) {
@@ -1288,4 +1362,10 @@ try {
 // ---------------------------------------------------------------------------
 
 console.log("[alphaclaw] Setup complete -- starting server");
+if (bootPlaceholder) {
+  try {
+    bootPlaceholder.closeAllConnections?.();
+    bootPlaceholder.close();
+  } catch {}
+}
 require("../lib/server.js");

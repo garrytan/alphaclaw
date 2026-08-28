@@ -37,6 +37,7 @@ const createService = ({
   fetchMock = vi.fn(),
   execMock = vi.fn(),
   fsImpl = fs,
+  drain,
 } = {}) => {
   const { createAlphaclawVersionService } = loadVersionModule({ execMock });
   const service = createAlphaclawVersionService({
@@ -44,6 +45,7 @@ const createService = ({
     readOpenclawVersion,
     fetchImpl: fetchMock,
     fsImpl,
+    ...(drain ? { drain } : {}),
   });
   return { service, fetchMock, execMock };
 };
@@ -911,30 +913,35 @@ describe("server/alphaclaw-version", () => {
     ).toBe(true);
   });
 
-  it("restarts via a container exit when running on a managed platform", () => {
+  it("restarts via a container exit when running on a managed platform, draining first", async () => {
     const exitSpy = vi.spyOn(process, "exit").mockImplementation((code) => {
       throw new Error(`exit ${code}`);
     });
-    const { service } = createService({ env: { RENDER: "true" } });
+    const drain = vi.fn(async () => {});
+    const { service } = createService({ env: { RENDER: "true" }, drain });
 
-    expect(() => service.restartProcess()).toThrow("exit 1");
+    await expect(service.restartProcess()).rejects.toThrow("exit 1");
+    expect(drain).toHaveBeenCalledTimes(1);
     expect(exitSpy).toHaveBeenCalledWith(1);
   });
 
-  it("spawns a detached replacement process outside containers", () => {
+  it("spawns a detached replacement process outside containers, draining first", async () => {
     const exitSpy = vi.spyOn(process, "exit").mockImplementation((code) => {
       throw new Error(`exit ${code}`);
     });
     const originalSpawn = childProcess.spawn;
     const unref = vi.fn();
     childProcess.spawn = vi.fn(() => ({ unref }));
+    const drain = vi.fn(async () => {});
     try {
       const { service } = createService({
         env: {},
         fsImpl: { ...fs, existsSync: vi.fn(() => false) },
+        drain,
       });
 
-      expect(() => service.restartProcess()).toThrow("exit 0");
+      await expect(service.restartProcess()).rejects.toThrow("exit 0");
+      expect(drain).toHaveBeenCalledTimes(1);
       expect(childProcess.spawn).toHaveBeenCalledWith(
         process.argv[0],
         process.argv.slice(1),
@@ -945,6 +952,19 @@ describe("server/alphaclaw-version", () => {
     } finally {
       childProcess.spawn = originalSpawn;
     }
+  });
+
+  it("exits even when drain rejects (bounded restart path)", async () => {
+    const exitSpy = vi.spyOn(process, "exit").mockImplementation((code) => {
+      throw new Error(`exit ${code}`);
+    });
+    const drain = vi.fn(async () => {
+      throw new Error("drain failed");
+    });
+    const { service } = createService({ env: { RENDER: "true" }, drain });
+
+    await expect(service.restartProcess()).rejects.toThrow("exit 1");
+    expect(exitSpy).toHaveBeenCalledWith(1);
   });
 
   it("writes update marker to kRootDir on successful self-update", async () => {
