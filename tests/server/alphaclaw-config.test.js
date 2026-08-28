@@ -23,6 +23,26 @@ describe("server/alphaclaw-config", () => {
     });
   });
 
+  it("keys the read cache on the READER identity, not just mtime/size (merge resolution)", () => {
+    const openclawDir = createTempOpenclawDir();
+    updateOpenAiCompatApiFeature({ openclawDir, enabled: true });
+    // Warm the cache through the real fs reader.
+    expect(isOpenAiCompatApiEnabled({ openclawDir })).toBe(true);
+
+    // Same path, same on-disk stat — but a swapped reader (a per-test fs
+    // mock) must never be served the previous reader's parse.
+    const mockFs = {
+      statSync: fs.statSync,
+      readFileSync: () =>
+        JSON.stringify({ features: { openaiCompatApi: { enabled: false } } }),
+    };
+    expect(isOpenAiCompatApiEnabled({ fsModule: mockFs, openclawDir })).toBe(
+      false,
+    );
+    // And switching back re-reads through the real fs again.
+    expect(isOpenAiCompatApiEnabled({ openclawDir })).toBe(true);
+  });
+
   it("defaults to disabled when alphaclaw.json is malformed", () => {
     const openclawDir = createTempOpenclawDir();
     fs.writeFileSync(path.join(openclawDir, "alphaclaw.json"), "{broken", "utf8");

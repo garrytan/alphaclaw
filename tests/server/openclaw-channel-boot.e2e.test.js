@@ -185,6 +185,11 @@ const installedBinPath = (installDir) =>
 const notifyMessages = (notify) =>
   notify.mock.calls.map((call) => String(call?.[0] || ""));
 
+// Recurring boot notifications must carry STABLE outbox ids (merge
+// resolution): the notify outbox dedupes repeats by id across boots.
+const notifyIds = (notify) =>
+  notify.mock.calls.map((call) => call?.[1]?.id).filter(Boolean);
+
 const assertOffline = (harness) => {
   expect(harness.runner.runStreamed).not.toHaveBeenCalled();
   expect(harness.installToTempDir).not.toHaveBeenCalled();
@@ -284,7 +289,7 @@ describe("server/openclaw-channel boot sync (e2e)", () => {
     assertOffline(harness);
   });
 
-  it("boot rollback warns (never blocks) when the target cannot verify current state (C1)", () => {
+  it("boot rollback warns (never blocks) when the target cannot verify current state (C1)", async () => {
     const { DatabaseSync } = require("node:sqlite");
     // The rollback target's `database preflight` rejects the snapshot with an
     // unknown-command error — the stable-target case. Boot must activate
@@ -338,6 +343,11 @@ describe("server/openclaw-channel boot sync (e2e)", () => {
         /backup taken before the update/.test(warning),
       ),
     ).toBe(true);
+    // The warning notification carries its stable outbox id.
+    await flushAsync();
+    expect(notifyIds(harness.notify)).toContain(
+      "boot-rollback-preflight-1.1.0",
+    );
   });
 
   it("consumes rollback markers: container pin reset and VPS package rollback", async () => {
@@ -571,7 +581,7 @@ describe("server/openclaw-channel boot sync (e2e)", () => {
       expect(execFileSyncImpl).not.toHaveBeenCalled();
     });
 
-    it("keeps the trigger armed to retry after a failed migration", () => {
+    it("keeps the trigger armed to retry after a failed migration", async () => {
       const execFileSyncImpl = vi.fn(() => {
         throw new Error("doctor exit 1");
       });
@@ -590,6 +600,18 @@ describe("server/openclaw-channel boot sync (e2e)", () => {
       // Next boot retries (trigger still armed).
       harness.sync.syncAtBoot();
       expect(execFileSyncImpl).toHaveBeenCalledTimes(2);
+
+      // Both boots emit the SAME stable outbox id — the dedupe key across
+      // repeats of the recurring failure notification.
+      await flushAsync();
+      expect(
+        notifyIds(harness.notify).filter((id) =>
+          id.startsWith("config-migration-failed-"),
+        ),
+      ).toEqual([
+        "config-migration-failed-2026.8.1",
+        "config-migration-failed-2026.8.1",
+      ]);
     });
 
     it("writes a BETA environment stripe on beta and removes it on stable", () => {
@@ -663,7 +685,7 @@ describe("server/openclaw-channel boot sync (e2e)", () => {
       });
     });
 
-    it("restores a pre-fix backup on downgrade instead of running doctor", () => {
+    it("restores a pre-fix backup on downgrade instead of running doctor", async () => {
       const execFileSyncImpl = vi.fn(() => "");
       const harness = createHarness({
         installedVersion: "2026.7.1-2",
@@ -690,6 +712,11 @@ describe("server/openclaw-channel boot sync (e2e)", () => {
       expect("migrated" in onDisk).toBe(false);
       expect(harness.store.readState().configMigration.completedForVersion).toBe(
         "2026.7.1-2",
+      );
+      // The restore notification carries its stable outbox id.
+      await flushAsync();
+      expect(notifyIds(harness.notify)).toContain(
+        "config-restore-2026.7.1-2",
       );
     });
   });

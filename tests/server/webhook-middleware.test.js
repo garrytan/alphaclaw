@@ -232,6 +232,9 @@ describe("server/webhook-middleware", () => {
         .set("x-openclaw-scopes", "operator.admin")
         .set("x-forwarded-for", "203.0.113.7")
         .set("forwarded", "for=203.0.113.7")
+        .set("x-forwarded-server", "edge.example.com")
+        .set("x-forwarded-port", "443")
+        .set("x-real-ip", "203.0.113.7")
         .set("cookie", "theme=dark; setup_token=abc.def")
         .set("x-hook-custom", "kept")
         .send(JSON.stringify({ hello: "world" }));
@@ -242,9 +245,13 @@ describe("server/webhook-middleware", () => {
       // Identity headers must never reach a trusted-proxy gateway.
       expect(forwarded["x-alphaclaw-user"]).toBeUndefined();
       expect(forwarded["x-openclaw-scopes"]).toBeUndefined();
-      // Client-controlled forwarded evidence must be stripped too.
+      // Client-controlled forwarded evidence must be stripped too — including
+      // x-forwarded-server, added to the evidence list by the merge resolution.
       expect(forwarded["x-forwarded-for"]).toBeUndefined();
       expect(forwarded.forwarded).toBeUndefined();
+      expect(forwarded["x-forwarded-server"]).toBeUndefined();
+      expect(forwarded["x-forwarded-port"]).toBeUndefined();
+      expect(forwarded["x-real-ip"]).toBeUndefined();
       // The AlphaClaw session cookie is removed; other cookies survive.
       expect(forwarded.cookie).toBe("theme=dark");
       // Benign headers still pass through.
