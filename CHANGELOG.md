@@ -51,6 +51,26 @@ and proxied API writes no longer hang.
 - SQLite contention: WAL mode with correct pragma ordering (no boot crash
   when a draining predecessor holds a lock), bounded busy timeouts, and a
   stale-result fallback for usage stats during gateway write bursts.
+- **OpenClaw update backups no longer fail forever at the backup step**
+  (#7, #9). AlphaClaw passed the fixed path `<root>/backups/openclaw` to
+  `openclaw backup create --output` without creating the directory, so the
+  CLI wrote the archive as a file at that exact path: the first
+  cross-channel/hard-gated run produced a verified multi-GB archive that
+  the artifact check couldn't see and falsely reported as "produced no
+  backup file" (#9, orphaning the archive), and every later run hit the
+  CLI's refuse-to-overwrite error (#7). Backups now go to unique per-run
+  archives (`openclaw-backup-<timestamp>-<opid>.tar.gz`) inside that
+  directory — a legacy archive file blocking the path is migrated into the
+  directory automatically — keep-3 retention actually prunes old archives,
+  and verify-failed archives are quarantined as `*.unverified`. Backup
+  errors now state the real cause and the offending path (overwrite
+  refusal, timeout, out of disk space, verify failure) instead of a
+  misleading "failed to verify" / "not trustworthy" message, the
+  "openclaw update repair" advice appears only when repair actually
+  applies, and the failed-update card's elapsed timer freezes at failure
+  instead of counting up forever. Revert-safe: after this fix the path is
+  a directory of archives, which older AlphaClaw versions and the CLI's
+  directory contract both handle correctly.
 
 ### Added
 - **"AlphaClaw is updating" page during restarts and updates.** The port
