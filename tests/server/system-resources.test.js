@@ -19,7 +19,10 @@ const mockPsFailure = () =>
     cb(new Error("ps failed"), "", "");
   });
 
-const { getSystemResources } = require("../../lib/server/system-resources");
+const {
+  getSystemResources,
+  readEventLoopLag,
+} = require("../../lib/server/system-resources");
 
 // system-resources reads cgroup/proc files through the shared fs singleton and
 // shells out via child_process.execFile. We intercept those boundaries with
@@ -280,13 +283,28 @@ describe("server/system-resources", () => {
 
     const resources = getSystemResources();
 
-    // Real histogram values — assert shape, not magnitudes.
+    // The resources payload carries the fixed-window telemetry (values are
+    // null until the first 5s sampling window completes) — assert shape,
+    // not magnitudes.
     expect(Object.keys(resources.eventLoop).sort()).toEqual([
       "maxMs",
-      "meanMs",
+      "p50Ms",
       "p99Ms",
     ]);
     for (const value of Object.values(resources.eventLoop)) {
+      expect(value === null || typeof value === "number").toBe(true);
+    }
+
+    // The poll-window reader keeps its own shape (meanMs plus the grafted
+    // p50Ms) on a live histogram — real values here, so numbers, not nulls.
+    const lag = readEventLoopLag({ warn: () => {} });
+    expect(Object.keys(lag).sort()).toEqual([
+      "maxMs",
+      "meanMs",
+      "p50Ms",
+      "p99Ms",
+    ]);
+    for (const value of Object.values(lag)) {
       expect(value === null || typeof value === "number").toBe(true);
     }
   });

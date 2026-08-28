@@ -8,6 +8,7 @@ const {
   readLogTail,
   getLogGeneration,
   readLogDelta,
+  flushLogWriter,
   __flushForTests,
   __flushSyncForTests,
 } = require("../../lib/server/log-writer");
@@ -47,6 +48,11 @@ describe("server/log-writer", () => {
     fs.rmSync(rootDir, { recursive: true, force: true });
   });
 
+  // Must run before any initLogWriter call in this file: module state persists.
+  it("returns an empty tail before init", () => {
+    expect(readLogTail(65536)).toBe("");
+  });
+
   it("writes patched stdout/stderr lines with ISO prefix and readLogTail returns them", async () => {
     initLogWriter({ rootDir, maxBytes: 1024 * 1024 });
     process.stdout.write("hello from stdout\n");
@@ -67,6 +73,15 @@ describe("server/log-writer", () => {
     expect(tail).toContain("hello from stderr");
   });
 
+  it("queued lines become visible in the tail without a manual flush", async () => {
+    initLogWriter({ rootDir, maxBytes: 1024 * 1024 });
+
+    process.stdout.write("queued-line-alpha\n");
+    // No manual flush: the self-scheduling drain persists the queue on its
+    // own; poll until the bytes land.
+    await waitFor(() => readLogTail(65536).includes("queued-line-alpha"));
+  });
+
   it("readLogTail(smallN) returns only the tail", async () => {
     initLogWriter({ rootDir, maxBytes: 10 * 1024 * 1024 });
     for (let i = 0; i < 100; i++) {
@@ -78,6 +93,30 @@ describe("server/log-writer", () => {
     expect(Buffer.byteLength(tail)).toBeLessThanOrEqual(1024);
     expect(tail).toContain("line-0099");
     expect(tail).not.toContain("line-0000");
+  });
+
+  it("clamps readLogTail to the 4MB absolute maximum", () => {
+    initLogWriter({ rootDir, maxBytes: 32 * 1024 * 1024 });
+    fs.writeFileSync(getLogPath(), Buffer.alloc(5 * 1024 * 1024, 0x61));
+
+    const text = readLogTail(999_999_999_999);
+
+    expect(text.length).toBe(4 * 1024 * 1024);
+  });
+
+  it("truncates a single pathological ~100KB line to the 64KB per-entry cap", async () => {
+    initLogWriter({ rootDir, maxBytes: 32 * 1024 * 1024 });
+
+    // One 100KB line: the per-entry byte bound (64KB + "[truncated]\n")
+    // must apply — a multi-MB line cannot monopolize the queue.
+    process.stdout.write(`${"B".repeat(100 * 1024)}\n`);
+    await __flushForTests();
+
+    const content = fs.readFileSync(getLogPath(), "utf8");
+    expect(content.endsWith("[truncated]\n")).toBe(true);
+    // Entry = ISO timestamp + " " + line, sliced to 64KB, plus marker.
+    expect(content.length).toBe(64 * 1024 + "[truncated]\n".length);
+    expect(content).toContain("B".repeat(1000));
   });
 
   it("rotates past maxBytes: shrinks to ~half, line-aligned, keeps newest lines", async () => {
@@ -141,6 +180,9 @@ describe("server/log-writer", () => {
     const content = fs.readFileSync(getLogPath(), "utf8");
     expect(content).toMatch(/\[alphaclaw\] log-writer dropped \d+ lines \(write failure\)/);
     expect(content).not.toContain("doomed line");
+    // No recursion: the degradation warning flows through the guarded
+    // internal logger to the raw console path and never re-enters the file.
+    expect(content).not.toContain("log-writer error, file logging paused");
 
     process.stdout.write("back alive\n");
     await __flushForTests();
@@ -341,13 +383,15 @@ describe("server/log-writer", () => {
     expect(getLogGeneration()).toBeGreaterThan(gen);
   });
 
-  it("sync flush (exit path) writes queued lines synchronously", () => {
+  it("sync flush (exit path / flushLogWriter) writes queued lines synchronously", () => {
     initLogWriter({ rootDir, maxBytes: 1024 * 1024 });
     process.stdout.write("exit line one\n");
     process.stdout.write("exit line two\n");
     // The drain is deferred via setImmediate, so nothing has hit disk yet;
-    // the exit-path flush must persist the queue with blocking writes.
-    __flushSyncForTests();
+    // the exit-path flush must persist the queue with blocking writes. The
+    // public flushLogWriter export IS the exit-hook flush.
+    expect(flushLogWriter).toBe(__flushSyncForTests);
+    flushLogWriter();
     const content = fs.readFileSync(getLogPath(), "utf8");
     expect(content).toContain("exit line one");
     expect(content).toContain("exit line two");

@@ -527,7 +527,7 @@ describe("server/watchdog release-channel rollback hooks", () => {
     watchdog.onGatewayLaunch({ startedAt: Date.now() - 60_000 });
     await vi.advanceTimersByTimeAsync(10_000);
 
-    expect(clawCmd).toHaveBeenCalledWith("doctor --fix --yes", { quiet: true });
+    expect(clawCmd).toHaveBeenCalledWith("doctor --fix --yes", { quiet: true, timeoutMs: 600000 });
     expect(hooks.requestRollback).not.toHaveBeenCalled();
     watchdog.stop();
   });
@@ -569,6 +569,9 @@ describe("server/watchdog release-channel rollback hooks", () => {
     });
 
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    // Real crash exits arrive on separate event-loop turns; crash 1's async
+    // relaunch must settle before later crashes or the crash-loop repair is
+    // skipped as operation_in_progress.
     await flushMicrotasks();
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
     await flushMicrotasks();
@@ -576,7 +579,7 @@ describe("server/watchdog release-channel rollback hooks", () => {
     await flushMicrotasks();
     await flushMicrotasks();
 
-    expect(clawCmd).toHaveBeenCalledWith("doctor --fix --yes", { quiet: true });
+    expect(clawCmd).toHaveBeenCalledWith("doctor --fix --yes", { quiet: true, timeoutMs: 600000 });
   });
 
   it("[REG] treats exit code 78 as a fatal config error when hooks are omitted", async () => {
@@ -602,7 +605,10 @@ describe("server/watchdog release-channel rollback hooks", () => {
       }),
     );
     expect(launchGatewayProcess).not.toHaveBeenCalled();
-    expect(clawCmd).not.toHaveBeenCalledWith("doctor --fix --yes", { quiet: true });
+    expect(clawCmd).not.toHaveBeenCalledWith(
+      "doctor --fix --yes",
+      expect.objectContaining({ quiet: true }),
+    );
     expect(insertWatchdogEvent).toHaveBeenCalledWith(
       expect.objectContaining({
         eventType: "config_error",

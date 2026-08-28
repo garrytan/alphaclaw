@@ -1,6 +1,12 @@
+const fs = require("fs");
+const os = require("os");
+const path = require("path");
+
 const {
   calculateWorkspaceDelta,
   computeWorkspaceFingerprintFromManifest,
+  computeWorkspaceSnapshot,
+  computeWorkspaceSnapshotBounded,
   isContentFile,
 } = require("../../lib/server/doctor/workspace-fingerprint");
 
@@ -92,5 +98,102 @@ describe("server/doctor/workspace-fingerprint", () => {
 
     expect(delta.addedFilesCount).toBe(2);
     expect(delta.deltaScore).toBe(7);
+  });
+
+  describe("computeWorkspaceSnapshotBounded", () => {
+    const createWorkspace = (files) => {
+      const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), "bounded-snapshot-"));
+      for (const [relativePath, content] of Object.entries(files)) {
+        const fullPath = path.join(rootDir, relativePath);
+        fs.mkdirSync(path.dirname(fullPath), { recursive: true });
+        fs.writeFileSync(fullPath, content);
+      }
+      return rootDir;
+    };
+
+    it("reuses previous hashes for files with unchanged size and mtime", async () => {
+      const rootDir = createWorkspace({
+        "a.md": "alpha content\n",
+        "b.md": "beta content\n",
+        "c.md": "gamma content\n",
+      });
+
+      const first = await computeWorkspaceSnapshotBounded(rootDir, {
+        batchPauseMs: 0,
+      });
+      expect(first.stats.hashedCount).toBe(3);
+      expect(first.stats.reusedCount).toBe(0);
+
+      // Touch ONE file with new content of a different size: only that file
+      // is rehashed, the rest reuse their previous manifest hashes.
+      fs.writeFileSync(path.join(rootDir, "b.md"), "beta content grew significantly\n");
+      const second = await computeWorkspaceSnapshotBounded(rootDir, {
+        previousManifest: first.manifest,
+        batchPauseMs: 0,
+      });
+
+      expect(second.stats.hashedCount).toBe(1);
+      expect(second.stats.reusedCount).toBe(2);
+      expect(second.fingerprint).not.toBe(first.fingerprint);
+      expect(second.manifest["a.md"].hash).toBe(first.manifest["a.md"].hash);
+      expect(second.manifest["c.md"].hash).toBe(first.manifest["c.md"].hash);
+      expect(second.manifest["b.md"].hash).not.toBe(first.manifest["b.md"].hash);
+    });
+
+    it("caps the scanned files at maxFiles and flags the snapshot as limited", async () => {
+      const rootDir = createWorkspace({
+        "a.md": "a\n",
+        "b.md": "b\n",
+        "c.md": "c\n",
+        "d.md": "d\n",
+        "e.md": "e\n",
+      });
+
+      const snapshot = await computeWorkspaceSnapshotBounded(rootDir, {
+        maxFiles: 3,
+        batchPauseMs: 0,
+      });
+
+      expect(snapshot.limited).toBe(true);
+      expect(Object.keys(snapshot.manifest)).toHaveLength(3);
+      expect(snapshot.stats.totalFiles).toBe(5);
+    });
+
+    it("skips files above maxFileBytes and counts them", async () => {
+      const rootDir = createWorkspace({
+        "small.md": "small file\n",
+        "big.md": "B".repeat(2048),
+      });
+
+      const snapshot = await computeWorkspaceSnapshotBounded(rootDir, {
+        maxFileBytes: 1024,
+        batchPauseMs: 0,
+      });
+
+      expect(snapshot.manifest["big.md"]).toBeUndefined();
+      expect(snapshot.manifest["small.md"]).toBeDefined();
+      expect(snapshot.stats.skippedLargeCount).toBe(1);
+      expect(snapshot.stats.hashedCount).toBe(1);
+      // A skipped-for-size file is EXCLUDED from the fingerprint, so drift
+      // detection is limited — the doctor must say so.
+      expect(snapshot.limited).toBe(true);
+    });
+
+    it("matches the sync fingerprint when no bounds are hit", async () => {
+      const rootDir = createWorkspace({
+        "AGENTS.md": "# Guidance\n",
+        "docs/notes.md": "notes\n",
+        "data.bin": Buffer.from([9, 8, 7]),
+      });
+
+      const bounded = await computeWorkspaceSnapshotBounded(rootDir, {
+        batchPauseMs: 0,
+      });
+      const sync = computeWorkspaceSnapshot(rootDir);
+
+      expect(bounded.limited).toBe(false);
+      expect(bounded.fingerprint).toBe(sync.fingerprint);
+      expect(bounded.manifest).toEqual(sync.manifest);
+    });
   });
 });

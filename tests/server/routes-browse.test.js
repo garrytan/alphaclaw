@@ -17,38 +17,11 @@ const createApp = (kRootDir) => {
   return app;
 };
 
-// Environment capability probes. Some sandboxes cannot express the failure a
-// test needs: containers grant DAC-override so chmod 000 never yields EACCES,
-// and some hosts shim `git` with a wrapper that swallows network-command exit
-// codes (a failed push exits 0). Probing beats asserting the impossible —
-// same spirit as the uid-0 guards these tests already carry.
-let kCanDenyFileAccessCache = null;
-const canDenyFileAccess = () => {
-  if (kCanDenyFileAccessCache !== null) return kCanDenyFileAccessCache;
-  if (typeof process.getuid === "function" && process.getuid() === 0) {
-    kCanDenyFileAccessCache = false;
-    return false;
-  }
-  const probeDir = fs.mkdtempSync(path.join(os.tmpdir(), "alphaclaw-perm-probe-"));
-  const probeFile = path.join(probeDir, "probe.txt");
-  try {
-    fs.writeFileSync(probeFile, "x", "utf8");
-    fs.chmodSync(probeFile, 0o000);
-    try {
-      fs.readFileSync(probeFile);
-      kCanDenyFileAccessCache = false; // read succeeded — modes are not enforced
-    } catch {
-      kCanDenyFileAccessCache = true;
-    }
-  } finally {
-    try {
-      fs.chmodSync(probeFile, 0o600);
-      fs.rmSync(probeDir, { recursive: true, force: true });
-    } catch {}
-  }
-  return kCanDenyFileAccessCache;
-};
-
+// Environment capability probe. Some hosts shim `git` with a wrapper that
+// swallows network-command exit codes (a failed push exits 0). Probing beats
+// asserting the impossible — same spirit as the uid-0 guards these tests
+// already carry. (The EACCES tests no longer need a chmod capability probe:
+// they inject the denial deterministically at the fs seam instead.)
 let kGitReportsPushFailuresCache = null;
 const gitReportsPushFailures = () => {
   if (kGitReportsPushFailuresCache !== null) return kGitReportsPushFailuresCache;
@@ -750,14 +723,34 @@ describe("server/routes/browse download edge cases", () => {
   });
 
   it("returns 500 when the file cannot be streamed", async () => {
-    if (!canDenyFileAccess()) {
-      return; // environment cannot express EACCES (root or DAC-override sandbox)
-    }
     const rootDir = createTestRoot();
     const filePath = path.join(rootDir, "secret.txt");
     fs.writeFileSync(filePath, "shh\n", "utf8");
-    fs.chmodSync(filePath, 0o000);
     const app = createApp(rootDir);
+
+    // chmod-based denial cannot produce EACCES under root or under
+    // CAP_DAC_OVERRIDE sandboxes (permission bits are simply ignored), so
+    // deny the open deterministically at the fs seam express's send() uses.
+    const realCreateReadStream = fs.createReadStream;
+    const streamSpy = vi
+      .spyOn(fs, "createReadStream")
+      .mockImplementation((target, opts) => {
+        if (String(target) === filePath) {
+          const { PassThrough } = require("stream");
+          const stream = new PassThrough();
+          process.nextTick(() =>
+            stream.emit(
+              "error",
+              Object.assign(
+                new Error(`EACCES: permission denied, open '${filePath}'`),
+                { code: "EACCES" },
+              ),
+            ),
+          );
+          return stream;
+        }
+        return realCreateReadStream(target, opts);
+      });
 
     try {
       const res = await request(app)
@@ -772,7 +765,7 @@ describe("server/routes/browse download edge cases", () => {
         error: expect.stringContaining("EACCES"),
       });
     } finally {
-      fs.chmodSync(filePath, 0o644);
+      streamSpy.mockRestore();
     }
   });
 });
@@ -1654,15 +1647,21 @@ describe("server/routes/browse delete edge cases", () => {
   });
 
   it("returns 500 when deletion fails", async () => {
-    if (!canDenyFileAccess()) {
-      return; // environment cannot express EACCES (root or DAC-override sandbox)
-    }
     const rootDir = createTestRoot();
     const lockedDir = path.join(rootDir, "ro");
     fs.mkdirSync(lockedDir);
     fs.writeFileSync(path.join(lockedDir, "child.txt"), "hi\n", "utf8");
-    fs.chmodSync(lockedDir, 0o555);
     const app = createApp(rootDir);
+
+    // A read-only parent directory cannot deny the unlink under root or
+    // CAP_DAC_OVERRIDE sandboxes — inject the EACCES at the injected-fs
+    // seam the route deletes through instead.
+    const rmSpy = vi.spyOn(fs, "rmSync").mockImplementation(() => {
+      throw Object.assign(
+        new Error("EACCES: permission denied, unlink 'ro/child.txt'"),
+        { code: "EACCES" },
+      );
+    });
 
     try {
       const res = await request(app)
@@ -1672,7 +1671,7 @@ describe("server/routes/browse delete edge cases", () => {
       expect(res.status).toBe(500);
       expect(res.body.ok).toBe(false);
     } finally {
-      fs.chmodSync(lockedDir, 0o755);
+      rmSpy.mockRestore();
     }
   });
 });
@@ -1807,5 +1806,72 @@ describe("server/routes/browse git helpers", () => {
     expect(result.ok).toBe(false);
     expect(result.exitCode).toBe(1);
     expect(result.error).toBeTruthy();
+  });
+});
+
+// Preview size gates on /api/browse/read: oversized files get 413 instead of
+// being base64/utf8-inlined into a JSON response (an OOM vector on small
+// instances). Sparse files via ftruncateSync make the >5MB/>20MB fixtures
+// instant and permission-independent.
+describe("server/routes/browse preview size gates", () => {
+  const kMaxTextPreviewBytes = 5 * 1024 * 1024;
+  const kMaxMediaPreviewBytes = 20 * 1024 * 1024;
+
+  const createSparseFile = (rootDir, name, sizeBytes, leadingContent = "") => {
+    const filePath = path.join(rootDir, name);
+    fs.writeFileSync(filePath, leadingContent, "utf8");
+    const fd = fs.openSync(filePath, "r+");
+    try {
+      fs.ftruncateSync(fd, sizeBytes);
+    } finally {
+      fs.closeSync(fd);
+    }
+    expect(fs.statSync(filePath).size).toBe(sizeBytes);
+    return filePath;
+  };
+
+  it("returns 413 for a text file just over the 5MB preview limit", async () => {
+    const rootDir = createTestRoot();
+    // Leading non-NUL text keeps the binary sniffer (first 512 bytes) from
+    // classifying the sparse file as binary — it must reach the TEXT gate.
+    createSparseFile(rootDir, "big.txt", kMaxTextPreviewBytes + 1, "a".repeat(512));
+    const app = createApp(rootDir);
+
+    const res = await request(app)
+      .get("/api/browse/read")
+      .query({ path: "big.txt" });
+
+    expect(res.status).toBe(413);
+    expect(res.body).toEqual({ ok: false, error: "File too large to preview" });
+  });
+
+  it("returns 413 for an image just over the 20MB media preview limit", async () => {
+    const rootDir = createTestRoot();
+    // All-sparse (NUL) leading bytes: classified binary, .png maps to an
+    // image mime type, so this exercises the MEDIA gate.
+    createSparseFile(rootDir, "big.png", kMaxMediaPreviewBytes + 1);
+    const app = createApp(rootDir);
+
+    const res = await request(app)
+      .get("/api/browse/read")
+      .query({ path: "big.png" });
+
+    expect(res.status).toBe(413);
+    expect(res.body).toEqual({ ok: false, error: "File too large to preview" });
+  });
+
+  it("previews a text file at exactly the 5MB limit", async () => {
+    const rootDir = createTestRoot();
+    createSparseFile(rootDir, "fits.txt", kMaxTextPreviewBytes, "a".repeat(512));
+    const app = createApp(rootDir);
+
+    const res = await request(app)
+      .get("/api/browse/read")
+      .query({ path: "fits.txt" });
+
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+    expect(res.body.kind).toBe("text");
+    expect(res.body.content.startsWith("a".repeat(512))).toBe(true);
   });
 });
