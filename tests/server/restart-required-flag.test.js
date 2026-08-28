@@ -15,6 +15,8 @@ const {
 } = require("../../lib/server/restart-required-flag");
 const {
   createRestartRequiredState,
+  kRestartReasonsFilePath,
+  kRestartOperationFilePath,
 } = require("../../lib/server/restart-required-state");
 
 describe("server/restart-required-flag", () => {
@@ -73,6 +75,11 @@ describe("server/restart-required-flag", () => {
 describe("server/restart-required-state (persisted flag adoption)", () => {
   afterEach(() => {
     clearRestartRequiredFlag();
+    // The store persists reasons/operation sibling files at default paths;
+    // remove them so tests stay order-independent.
+    for (const statePath of [kRestartReasonsFilePath, kRestartOperationFilePath]) {
+      fs.rmSync(statePath, { force: true });
+    }
   });
 
   it("adopts a flag written by another process and surfaces its reason", async () => {
