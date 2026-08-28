@@ -17,7 +17,7 @@ If you need to understand the internals of OpenClaw, you can inspect the code at
 
 Runtime model:
 
-1. At boot, `bin/alphaclaw.js` first spawns a boot-placeholder child process (`lib/boot-placeholder.js` + `lib/boot-placeholder-child.js`) that holds the port — serving an auto-refreshing "updating" page to browsers and `200 {status:"updating"}` health checks to platforms — until the real server is ready to take over.
+1. At boot, `bin/alphaclaw.js` first spawns a boot-placeholder child process (`lib/boot-placeholder.js` + `lib/boot-placeholder-child.js`) that holds the port — serving an auto-refreshing "updating" page to browsers and `200 {status:"updating"}` health checks to platforms (flipping `/health` to 503 if boot hangs past 15 minutes) — until the real server is ready to take over.
 2. AlphaClaw server starts and manages OpenClaw as a child process.
 3. Setup UI calls AlphaClaw APIs for configuration and operations.
 4. AlphaClaw proxies gateway traffic and handles watchdog monitoring/repair.
