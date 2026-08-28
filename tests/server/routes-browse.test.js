@@ -690,14 +690,34 @@ describe("server/routes/browse download edge cases", () => {
   });
 
   it("returns 500 when the file cannot be streamed", async () => {
-    if (typeof process.getuid === "function" && process.getuid() === 0) {
-      return;
-    }
     const rootDir = createTestRoot();
     const filePath = path.join(rootDir, "secret.txt");
     fs.writeFileSync(filePath, "shh\n", "utf8");
-    fs.chmodSync(filePath, 0o000);
     const app = createApp(rootDir);
+
+    // chmod-based denial cannot produce EACCES under root or under
+    // CAP_DAC_OVERRIDE sandboxes (permission bits are simply ignored), so
+    // deny the open deterministically at the fs seam express's send() uses.
+    const realCreateReadStream = fs.createReadStream;
+    const streamSpy = vi
+      .spyOn(fs, "createReadStream")
+      .mockImplementation((target, opts) => {
+        if (String(target) === filePath) {
+          const { PassThrough } = require("stream");
+          const stream = new PassThrough();
+          process.nextTick(() =>
+            stream.emit(
+              "error",
+              Object.assign(
+                new Error(`EACCES: permission denied, open '${filePath}'`),
+                { code: "EACCES" },
+              ),
+            ),
+          );
+          return stream;
+        }
+        return realCreateReadStream(target, opts);
+      });
 
     try {
       const res = await request(app)
@@ -712,7 +732,7 @@ describe("server/routes/browse download edge cases", () => {
         error: expect.stringContaining("EACCES"),
       });
     } finally {
-      fs.chmodSync(filePath, 0o644);
+      streamSpy.mockRestore();
     }
   });
 });
@@ -1588,15 +1608,21 @@ describe("server/routes/browse delete edge cases", () => {
   });
 
   it("returns 500 when deletion fails", async () => {
-    if (typeof process.getuid === "function" && process.getuid() === 0) {
-      return;
-    }
     const rootDir = createTestRoot();
     const lockedDir = path.join(rootDir, "ro");
     fs.mkdirSync(lockedDir);
     fs.writeFileSync(path.join(lockedDir, "child.txt"), "hi\n", "utf8");
-    fs.chmodSync(lockedDir, 0o555);
     const app = createApp(rootDir);
+
+    // A read-only parent directory cannot deny the unlink under root or
+    // CAP_DAC_OVERRIDE sandboxes — inject the EACCES at the injected-fs
+    // seam the route deletes through instead.
+    const rmSpy = vi.spyOn(fs, "rmSync").mockImplementation(() => {
+      throw Object.assign(
+        new Error("EACCES: permission denied, unlink 'ro/child.txt'"),
+        { code: "EACCES" },
+      );
+    });
 
     try {
       const res = await request(app)
@@ -1606,7 +1632,7 @@ describe("server/routes/browse delete edge cases", () => {
       expect(res.status).toBe(500);
       expect(res.body.ok).toBe(false);
     } finally {
-      fs.chmodSync(lockedDir, 0o755);
+      rmSpy.mockRestore();
     }
   });
 });
