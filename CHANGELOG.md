@@ -5,7 +5,7 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
-## [Unreleased]
+## [0.9.37] - 2026-08-28
 
 ### Added
 - **One honest gateway status.** The Gateway card now shows a single unified
@@ -63,6 +63,27 @@ Versions follow this repository's `package.json` release counter.
   gateway restarts; interrupted or failed restarts leave the rollback
   window and its incident reporting exactly as before — with clearer
   attribution in the incident feed ("automatic repair" vs manual restart).
+
+### Fixed
+- **Operations can no longer collide.** Channel updates, gateway restarts,
+  channel saves, and the watchdog's own recovery all serialize through one
+  lifecycle lock in both directions — an update can't kill a live restart,
+  a save can't interleave with a boot, and team-mode transitions hold the
+  same lock. A failed restart can no longer leave the card stuck on
+  "Starting" with no way out, and a gateway that crash-loops relaunches
+  with exponential backoff instead of hot-looping.
+- **Failure evidence stays readable and safe.** Restart evidence no longer
+  masks harmless values like file paths into `***` (only secret-named
+  values are redacted, longest-first so partial matches can't leak), and
+  failure messages get the same masking as stderr.
+- **Light theme and accessibility:** status dots now meet contrast minimums
+  in light mode, the reduced-motion setting actually stops every pulsing
+  animation, and small controls meet the 44px touch-target minimum on both
+  axes.
+- Charts recover after a failed load instead of staying blank for the whole
+  session; a stuck status-stream client is disconnected instead of
+  buffering frames without bound; port or channel changes written to
+  openclaw.json by any writer are picked up immediately.
 
 ### Removed
 - `GET /api/gateway-status` (unused; it spawned a blocking 15s CLI status
