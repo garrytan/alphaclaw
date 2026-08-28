@@ -266,7 +266,7 @@ const channelNotifyMessages = (channel) =>
 
 const crashLoopNotices = (notifier) =>
   notifierMessages(notifier).filter((message) =>
-    message.includes("Crash loop detected"),
+    message.includes("crash loop detected"),
   );
 
 describe("server/watchdog gateway + release channel (e2e)", { retry: 1 }, () => {
@@ -399,7 +399,7 @@ describe("server/watchdog gateway + release channel (e2e)", { retry: 1 }, () => 
     expect(channel.notify).not.toHaveBeenCalled();
     const notices = crashLoopNotices(stack.notifier);
     expect(notices).toHaveLength(1);
-    expect(notices[0]).toContain("Auto-restart paused; manual action required.");
+    expect(notices[0]).toContain("Automatic gateway restart paused; manual action required.");
     expect(stack.watchdog.getStatus().lifecycle).toBe("crash_loop");
   });
 
@@ -512,8 +512,8 @@ describe("server/watchdog gateway + release channel (e2e)", { retry: 1 }, () => 
     expect(
       notifierMessages(latchStack.notifier).some(
         (message) =>
-          message.includes("Gateway configuration invalid") &&
-          message.includes("automatic restart is paused"),
+          message.includes("Gateway configuration error") &&
+          message.includes("automatic gateway restart is paused"),
       ),
     ).toBe(true);
 
@@ -546,6 +546,6 @@ describe("server/watchdog gateway + release channel (e2e)", { retry: 1 }, () => 
     });
     const notices = crashLoopNotices(loopStack.notifier);
     expect(notices).toHaveLength(1);
-    expect(notices[0]).toContain("Auto-restart paused; manual action required.");
+    expect(notices[0]).toContain("Automatic gateway restart paused; manual action required.");
   });
 });

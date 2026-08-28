@@ -278,7 +278,7 @@ describe("server/watchdog", () => {
     );
     expect(
       notifier.notify.mock.calls.some((call) =>
-        String(call?.[0] || "").includes("🟢 Gateway healthy again"),
+        String(call?.[0] || "").includes("🟢 Gateway running again"),
       ),
     ).toBe(true);
     watchdog.stop();
@@ -441,9 +441,13 @@ describe("server/watchdog", () => {
         if (command === "doctor --fix --yes") return { ok: true, stdout: "fixed" };
         return { ok: true, stdout: "" };
       },
+      // Probe order: crash-1 resync (#1), crash-2 resync (#2), the repair's
+      // own verify (#3) and its operation-end resync (#4) — all while the
+      // gateway is still coming up. Only the launch-triggered probe (#5)
+      // finds it healthy, which is what makes the recovery "deferred".
       fetchImpl: async () => {
         healthChecks += 1;
-        if (healthChecks === 1) {
+        if (healthChecks <= 4) {
           throw new Error("not healthy yet");
         }
         return {
@@ -468,7 +472,13 @@ describe("server/watchdog", () => {
 
     expect(
       notifier.notify.mock.calls.some((call) =>
-        String(call?.[0] || "").includes("🟢 Gateway healthy again"),
+        String(call?.[0] || "").includes("🟢 Gateway running again"),
+      ),
+    ).toBe(true);
+    // Recovery copy names the resolving action so the alert thread closes.
+    expect(
+      notifier.notify.mock.calls.some((call) =>
+        String(call?.[0] || "").includes("Recovered after automatic repair."),
       ),
     ).toBe(true);
     expect(watchdog.getStatus()).toEqual(
@@ -580,7 +590,7 @@ describe("server/watchdog", () => {
     expect(launchGatewayProcess).not.toHaveBeenCalled();
     expect(
       notifier.notify.mock.calls.some((call) =>
-        String(call?.[0] || "").includes("Gateway configuration invalid"),
+        String(call?.[0] || "").includes("Gateway configuration error"),
       ),
     ).toBe(true);
   });
@@ -760,8 +770,8 @@ describe("server/watchdog", () => {
     expect(
       notifier.notify.mock.calls.some(
         (call) =>
-          String(call?.[0] || "").includes("Gateway configuration invalid") &&
-          String(call?.[0] || "").includes("automatic restart is paused"),
+          String(call?.[0] || "").includes("Gateway configuration error") &&
+          String(call?.[0] || "").includes("automatic gateway restart is paused"),
       ),
     ).toBe(true);
   });
@@ -849,7 +859,7 @@ describe("server/watchdog", () => {
     );
     const safeModeNotices = () =>
       notifier.notify.mock.calls.filter((call) =>
-        String(call?.[0] || "").includes("safe mode"),
+        String(call?.[0] || "").includes("channels paused"),
       );
     expect(safeModeNotices()).toHaveLength(1);
 
@@ -887,7 +897,7 @@ describe("server/watchdog", () => {
     );
     expect(
       notifier.notify.mock.calls.some((call) =>
-        String(call?.[0] || "").includes("safe mode cleared"),
+        String(call?.[0] || "").includes("channels resumed"),
       ),
     ).toBe(true);
     watchdog.stop();
@@ -1060,7 +1070,7 @@ describe("server/watchdog", () => {
 
     const crashLoopNotice = notifier.notify.mock.calls
       .map((call) => String(call?.[0] || ""))
-      .find((message) => message.includes("Crash loop detected"));
+      .find((message) => message.includes("crash loop detected"));
     expect(crashLoopNotice).toBeTruthy();
     expect(crashLoopNotice).not.toContain("View logs");
   });
@@ -1080,7 +1090,7 @@ describe("server/watchdog", () => {
     await flushMicrotasks();
 
     const crashLoopNotices = notifier.notify.mock.calls.filter((call) =>
-      String(call?.[0] || "").includes("Crash loop detected"),
+      String(call?.[0] || "").includes("crash loop detected"),
     );
     expect(crashLoopNotices).toHaveLength(1);
     const crashLoopEvents = insertWatchdogEvent.mock.calls.filter(
@@ -1459,6 +1469,29 @@ describe("server/watchdog", () => {
     );
   });
 
+  it("records external operation events in the incident ledger", () => {
+    const { watchdog, insertWatchdogEvent } = createHarness({});
+
+    watchdog.recordOperationEvent({
+      kind: "gateway_restart",
+      status: "ok",
+      details: { operationId: "op-1", trigger: "manual", downtimeMs: 4200 },
+    });
+
+    expect(insertWatchdogEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        eventType: "operation",
+        source: "gateway_restart",
+        status: "ok",
+        details: expect.objectContaining({
+          operationId: "op-1",
+          downtimeMs: 4200,
+        }),
+        correlationId: expect.any(String),
+      }),
+    );
+  });
+
   it("pauses manual repair after repeated doctor failures", async () => {
     const { watchdog, notifier, insertWatchdogEvent } = createHarness({
       autoRepair: false,
@@ -1468,12 +1501,21 @@ describe("server/watchdog", () => {
         }
         return { ok: true, stdout: "" };
       },
+      // The gateway stays down throughout — otherwise the operation-end
+      // resync probe would (correctly) see a healthy gateway and reset the
+      // repair-attempt counter between the two failed repairs.
+      fetchImpl: async () => {
+        throw new Error("gateway down");
+      },
     });
 
     const firstResult = await watchdog.triggerRepair();
     expect(firstResult.ok).toBe(false);
+    // The repair marks health unhealthy; the operation-end resync probe then
+    // fails against the down gateway and records its own first-failure
+    // "degraded" observation. Either way: not healthy, attempts preserved.
     expect(watchdog.getStatus()).toEqual(
-      expect.objectContaining({ repairAttempts: 1, health: "unhealthy" }),
+      expect.objectContaining({ repairAttempts: 1, health: "degraded" }),
     );
     expect(insertWatchdogEvent).toHaveBeenCalledWith(
       expect.objectContaining({

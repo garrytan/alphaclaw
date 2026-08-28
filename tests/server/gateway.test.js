@@ -111,9 +111,13 @@ describe("server/gateway restart behavior", () => {
 
     gatewayPortOpen = true;
     const reloadEnv = vi.fn();
-    await gateway.restartGateway(reloadEnv);
+    const restartResult = await gateway.restartGateway(reloadEnv);
 
     expect(reloadEnv).toHaveBeenCalledTimes(1);
+    // Measured downtime (stop initiated → ready) rides on the result so the
+    // route can surface it in the success line and the operation record.
+    expect(restartResult.downtimeMs).toEqual(expect.any(Number));
+    expect(restartResult.downtimeMs).toBeGreaterThanOrEqual(0);
     expect(execSyncMock).not.toHaveBeenCalledWith(
       "openclaw gateway restart",
       expect.anything(),

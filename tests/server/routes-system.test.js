@@ -2058,14 +2058,20 @@ describe("server/routes/system", () => {
 
     resolveRestart();
     await new Promise((resolve) => setImmediate(resolve));
-    expect(deps.restartRequiredState.completeRestart).toHaveBeenCalledWith({
-      operationId: "op-1",
-      ok: true,
-    });
-    expect(deps.operationEvents.complete).toHaveBeenCalledWith("op-1", {
-      ok: true,
-      durationMs: 1234,
-    });
+    expect(deps.restartRequiredState.completeRestart).toHaveBeenCalledWith(
+      expect.objectContaining({
+        operationId: "op-1",
+        ok: true,
+        durationMs: 1234,
+      }),
+    );
+    expect(deps.operationEvents.complete).toHaveBeenCalledWith(
+      "op-1",
+      expect.objectContaining({
+        ok: true,
+        durationMs: 1234,
+      }),
+    );
     expect(releaseCalled).toBe(true);
   });
 

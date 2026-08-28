@@ -257,6 +257,29 @@ describe("server/system-resources", () => {
     expect(resources.cpu.percent).toBe(25);
   });
 
+  it("reports event-loop lag alongside resources", () => {
+    createFileSystem({});
+    vi.spyOn(os, "cpus").mockReturnValue(new Array(2).fill({ model: "x" }));
+    vi.spyOn(os, "loadavg").mockReturnValue([0, 0, 0]);
+    vi.spyOn(fs, "statfsSync").mockReturnValue({
+      bsize: 4096,
+      blocks: 10,
+      bfree: 5,
+    });
+
+    const resources = getSystemResources();
+
+    // Real histogram values — assert shape, not magnitudes.
+    expect(Object.keys(resources.eventLoop).sort()).toEqual([
+      "maxMs",
+      "meanMs",
+      "p99Ms",
+    ]);
+    for (const value of Object.values(resources.eventLoop)) {
+      expect(value === null || typeof value === "number").toBe(true);
+    }
+  });
+
   it("handles empty ps output fields", () => {
     createFileSystem({});
     vi.spyOn(os, "cpus").mockReturnValue(new Array(2).fill({ model: "x" }));

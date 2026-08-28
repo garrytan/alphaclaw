@@ -83,7 +83,7 @@ const createHarness = ({
 
 const crashLoopNotices = (notifier) =>
   notifier.notify.mock.calls.filter((call) =>
-    String(call?.[0] || "").includes("Crash loop detected"),
+    String(call?.[0] || "").includes("crash loop detected"),
   );
 
 describe("server/watchdog release-channel rollback hooks", () => {
@@ -166,7 +166,7 @@ describe("server/watchdog release-channel rollback hooks", () => {
     const notices = crashLoopNotices(notifier);
     expect(notices).toHaveLength(1);
     expect(String(notices[0][0])).toContain(
-      "Auto-restart paused; manual action required.",
+      "Automatic gateway restart paused; manual action required.",
     );
   });
 
@@ -219,7 +219,7 @@ describe("server/watchdog release-channel rollback hooks", () => {
     );
     expect(
       out.notifier.notify.mock.calls.some((call) =>
-        String(call?.[0] || "").includes("Gateway configuration invalid"),
+        String(call?.[0] || "").includes("Gateway configuration error"),
       ),
     ).toBe(true);
 
@@ -384,7 +384,7 @@ describe("server/watchdog release-channel rollback hooks", () => {
     );
     expect(
       notifier.notify.mock.calls.some((call) =>
-        String(call?.[0] || "").includes("Gateway configuration invalid"),
+        String(call?.[0] || "").includes("Gateway configuration error"),
       ),
     ).toBe(true);
   });
@@ -439,7 +439,7 @@ describe("server/watchdog release-channel rollback hooks", () => {
     const notices = crashLoopNotices(fellThrough.notifier);
     expect(notices).toHaveLength(1);
     expect(String(notices[0][0])).toContain(
-      "Auto-restart paused; manual action required.",
+      "Automatic gateway restart paused; manual action required.",
     );
   });
 
@@ -614,8 +614,8 @@ describe("server/watchdog release-channel rollback hooks", () => {
     expect(
       notifier.notify.mock.calls.some(
         (call) =>
-          String(call?.[0] || "").includes("Gateway configuration invalid") &&
-          String(call?.[0] || "").includes("automatic restart is paused"),
+          String(call?.[0] || "").includes("Gateway configuration error") &&
+          String(call?.[0] || "").includes("automatic gateway restart is paused"),
       ),
     ).toBe(true);
   });
