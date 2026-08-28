@@ -607,6 +607,64 @@ textarea:focus {
   animation-delay: 0.95s;
 }
 
+/* Gateway state dot: color/motion are server-sent ({color, motion}); these
+   classes only translate them. Pulse means "operation in progress" — settled
+   states (including healthy/running) stay steady. */
+.ac-gateway-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  flex: none;
+}
+
+.ac-gateway-dot--gray {
+  background: #6b7280;
+}
+
+.ac-gateway-dot--green {
+  background: #22c55e;
+}
+
+.ac-gateway-dot--cyan {
+  background: #22d3ee;
+}
+
+.ac-gateway-dot--yellow {
+  background: #eab308;
+}
+
+.ac-gateway-dot--red {
+  background: #ef4444;
+}
+
+@keyframes acGatewayDotPulse {
+  0%,
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+  50% {
+    transform: scale(1.15);
+    opacity: 0.72;
+  }
+}
+
+.ac-gateway-dot--pulse {
+  animation: acGatewayDotPulse 2.6s ease-in-out infinite;
+}
+
+/* "Status unavailable": hollow gray ring — visually distinct from every
+   filled state. */
+.ac-gateway-dot--hollow {
+  background: transparent;
+  border: 2px solid #6b7280;
+}
+
+/* Minimum touch target for small operational controls (WCAG 2.5.8). */
+.ac-touch {
+  min-height: 44px;
+}
+
 .ac-btn-green {
   border: 1px solid rgba(34, 197, 94, 0.45);
   background: linear-gradient(
@@ -656,10 +714,20 @@ textarea:focus {
   will-change: transform;
 }
 
+/* One global reduced-motion block: every pulse keyframe in the app settles
+   to steady; spinners slow to a linear crawl (they still convey progress). */
 @media (prefers-reduced-motion: reduce) {
   .ac-spinner {
     animation-duration: 1.8s;
     animation-timing-function: linear;
+  }
+
+  .ac-status-dot--healthy,
+  .ac-status-dot--info,
+  .ac-step-pill-pulse,
+  .ac-gateway-dot--pulse,
+  .animate-pulse {
+    animation: none;
   }
 }
 
