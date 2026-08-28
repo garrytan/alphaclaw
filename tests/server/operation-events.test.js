@@ -265,4 +265,26 @@ describe("server/operation-events", () => {
     expect(operation.events[0].event).toBe("done");
     expect(operation.events[0].data).toEqual({ result: 42 });
   });
+
+  it("falls back to a random UUID for blank or non-string preset operation ids", () => {
+    const service = createOperationEventsService();
+    const uuidPattern =
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+    // Two blank presets must yield DISTINCT operations — a shared fallback id
+    // would silently merge unrelated operations' event streams.
+    const first = service.createOperation({ operationId: "" });
+    const second = service.createOperation({ operationId: "" });
+    expect(first.operationId).toMatch(uuidPattern);
+    expect(second.operationId).toMatch(uuidPattern);
+    expect(first.operationId).not.toBe(second.operationId);
+    expect(service.getOperation(first.operationId)).toBeTruthy();
+    expect(service.getOperation(second.operationId)).toBeTruthy();
+
+    // Whitespace-only and non-string presets fall back the same way.
+    const blank = service.createOperation({ operationId: "   " });
+    const numeric = service.createOperation({ operationId: 42 });
+    expect(blank.operationId).toMatch(uuidPattern);
+    expect(numeric.operationId).toMatch(uuidPattern);
+  });
 });

@@ -310,6 +310,70 @@ describe("server/gateway-state reducer", () => {
     expect(result.supervision).toBe("detached");
     expect(result.detail).toContain("estimated");
   });
+
+  it("offers roll_back only while flapping inside the stabilization window", () => {
+    const flapping = {
+      watchdog: {
+        lifecycle: "running",
+        health: "healthy",
+        safeMode: false,
+        crashCountInWindow: 2,
+        gatewayPid: 123,
+      },
+    };
+    const inWindow = reduceGatewayState(
+      inputs({ ...flapping, inStabilizationWindow: true }),
+    );
+    expect(inWindow.state).toBe("flapping");
+    expect(inWindow.actions).toContainEqual(
+      expect.objectContaining({
+        id: "roll_back",
+        label: "Roll back",
+        kind: "danger",
+        needsConfirm: true,
+      }),
+    );
+
+    const outsideWindow = reduceGatewayState(inputs(flapping));
+    expect(outsideWindow.state).toBe("flapping");
+    expect(outsideWindow.actions.some((a) => a.id === "roll_back")).toBe(false);
+  });
+
+  it("keeps evidence honest: no estimate under managed supervision, estimate when detached and down", () => {
+    // Managed (gatewayPid set): crash counts come from real exit events, so
+    // flapping must NOT carry the "estimated" hedge.
+    const managed = reduceGatewayState(
+      inputs({
+        watchdog: {
+          lifecycle: "running",
+          health: "healthy",
+          safeMode: false,
+          crashCountInWindow: 2,
+          gatewayPid: 123,
+        },
+      }),
+    );
+    expect(managed.state).toBe("flapping");
+    expect(managed.supervision).toBe("managed");
+    expect(managed.detail).toBeNull();
+
+    // Detached and down with probe-inferred crashes: the hedge is required.
+    const detachedDown = reduceGatewayState(
+      inputs({
+        tcp: { running: false, observedAt: kNow },
+        watchdog: {
+          lifecycle: "crash_loop",
+          health: "unhealthy",
+          safeMode: false,
+          crashCountInWindow: 3,
+          gatewayPid: null,
+        },
+      }),
+    );
+    expect(detachedDown.state).toBe("down");
+    expect(detachedDown.supervision).toBe("detached");
+    expect(detachedDown.detail).toContain("estimated");
+  });
 });
 
 describe("server/gateway-state tracker (temporal truth)", () => {
@@ -391,5 +455,54 @@ describe("server/gateway-state tracker (temporal truth)", () => {
       bootId: "boot-1",
     });
     expect(tracker.track(reduceGatewayState(inputs())).state).toBe("running");
+  });
+
+  it("starts a fresh since when the persisted JSON has the wrong shape", () => {
+    const persistPath = path.join(makeTmp(), "state.json");
+    // Valid JSON, wrong types: state must be a string and since a finite number.
+    fs.writeFileSync(persistPath, JSON.stringify({ state: 5, since: "x" }), "utf8");
+    const tracker = createGatewayStateTracker({
+      persistPath,
+      now: () => kNow,
+      bootId: "boot-1",
+    });
+
+    const result = tracker.track(reduceGatewayState(inputs()));
+
+    expect(result.state).toBe("running");
+    expect(result.since).toBe(kNow);
+  });
+
+  it("still returns the reduced state when persisting fails", () => {
+    const persistPath = path.join(makeTmp(), "state.json");
+    const writeSpy = vi.spyOn(fs, "writeFileSync").mockImplementation(() => {
+      throw new Error("ENOSPC: no space left on device");
+    });
+    const tracker = createGatewayStateTracker({
+      persistPath,
+      now: () => kNow,
+      bootId: "boot-1",
+    });
+
+    const result = tracker.track(reduceGatewayState(inputs()));
+    expect(result.state).toBe("running");
+    expect(result.since).toBe(kNow);
+    expect(writeSpy).toHaveBeenCalled();
+    expect(fs.existsSync(persistPath)).toBe(false);
+    writeSpy.mockRestore();
+
+    // Atomic-rename failure is swallowed the same way.
+    const renameSpy = vi.spyOn(fs, "renameSync").mockImplementation(() => {
+      throw new Error("EPERM: operation not permitted");
+    });
+    const trackerB = createGatewayStateTracker({
+      persistPath,
+      now: () => kNow,
+      bootId: "boot-2",
+    });
+    const resultB = trackerB.track(reduceGatewayState(inputs()));
+    expect(resultB.state).toBe("running");
+    expect(resultB.since).toBe(kNow);
+    expect(fs.existsSync(persistPath)).toBe(false);
   });
 });

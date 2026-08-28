@@ -1,6 +1,13 @@
 const { runOnboardedBootSequence } = require("../../lib/server/startup");
+const { setBootPhase, getBootPhase } = require("../../lib/server/boot-phase");
 
 describe("server/startup", () => {
+  // runOnboardedBootSequence mutates the boot-phase module singleton; leave
+  // every test on a settled boot so nothing leaks across tests.
+  afterEach(() => {
+    setBootPhase("ready");
+  });
+
   it("syncs gateway proxy config with the resolved setup URL before startup", async () => {
     const callOrder = [];
     const ensureManagedExecDefaults = vi.fn(() =>
@@ -126,5 +133,79 @@ describe("server/startup", () => {
     expect(logSpy).toHaveBeenCalledWith(
       "[alphaclaw] Added IDs to webhook mappings: gmail, stripe",
     );
+  });
+
+  it("resolves with a failed boot phase and releases the lock when startGateway rejects", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const release = vi.fn();
+    const acquireLifecycleLock = vi.fn(async () => release);
+    const deps = createBootDeps({
+      acquireLifecycleLock,
+      startGateway: vi.fn(async () => {
+        throw new Error("gateway refused to launch");
+      }),
+    });
+
+    // Boot failures are reported via boot-phase, never thrown at the caller
+    // (callers fire-and-forget; a rejection here would be unhandled).
+    await expect(runOnboardedBootSequence(deps)).resolves.toBeUndefined();
+
+    expect(getBootPhase()).toEqual({
+      phase: "failed",
+      error: expect.stringContaining("gateway refused to launch"),
+    });
+    expect(errorSpy).toHaveBeenCalledWith(
+      "[alphaclaw] Boot sequence failed: gateway refused to launch",
+    );
+    // The lifecycle lock must not stay held after a failed boot.
+    expect(release).toHaveBeenCalledTimes(1);
+    // Services downstream of the failure point never start.
+    expect(deps.watchdog.start).not.toHaveBeenCalled();
+    expect(deps.gmailWatchService.start).not.toHaveBeenCalled();
+  });
+
+  it("reaches the ready boot phase and releases the lock on a successful boot", async () => {
+    const release = vi.fn();
+    const acquireLifecycleLock = vi.fn(async () => release);
+    const deps = createBootDeps({ acquireLifecycleLock });
+
+    await runOnboardedBootSequence(deps);
+
+    expect(acquireLifecycleLock).toHaveBeenCalledWith("boot");
+    expect(getBootPhase()).toEqual({ phase: "ready", error: null });
+    expect(release).toHaveBeenCalledTimes(1);
+    expect(deps.startGateway).toHaveBeenCalledTimes(1);
+    expect(deps.watchdog.start).toHaveBeenCalledTimes(1);
+  });
+
+  it("awaits the lifecycle lock before running any gateway-mutating step", async () => {
+    let resolveLock;
+    const release = vi.fn();
+    const acquireLifecycleLock = vi.fn(
+      () =>
+        new Promise((resolve) => {
+          resolveLock = () => resolve(release);
+        }),
+    );
+    const deps = createBootDeps({ acquireLifecycleLock });
+
+    const bootPromise = runOnboardedBootSequence(deps);
+    await new Promise((resolve) => setImmediate(resolve));
+
+    // Boot is parked on acquire("boot"): nothing that mutates gateway or
+    // channel state may run while another operation holds the lock.
+    expect(acquireLifecycleLock).toHaveBeenCalledWith("boot");
+    expect(deps.ensureManagedExecDefaults).not.toHaveBeenCalled();
+    expect(deps.syncChannelConfig).not.toHaveBeenCalled();
+    expect(deps.startGateway).not.toHaveBeenCalled();
+    // The phase already reports "starting" while waiting, though.
+    expect(getBootPhase()).toEqual({ phase: "starting_gateway", error: null });
+
+    resolveLock();
+    await bootPromise;
+
+    expect(deps.startGateway).toHaveBeenCalledTimes(1);
+    expect(getBootPhase()).toEqual({ phase: "ready", error: null });
+    expect(release).toHaveBeenCalledTimes(1);
   });
 });

@@ -74,6 +74,22 @@ describe("server/routes/watchdog", () => {
     expect(deps.watchdog.getStatus).toHaveBeenCalledTimes(1);
   });
 
+  it("carries the notifier's last delivery timestamp on GET /api/watchdog/status", async () => {
+    const deps = createDeps();
+    deps.watchdogNotifier.getLastDeliveredAt = vi.fn(
+      () => "2026-08-28T10:15:30.000Z",
+    );
+    const app = createApp(deps);
+
+    const res = await request(app).get("/api/watchdog/status");
+
+    expect(res.status).toBe(200);
+    expect(res.body.status.lastNotificationDeliveredAt).toBe(
+      "2026-08-28T10:15:30.000Z",
+    );
+    expect(deps.watchdogNotifier.getLastDeliveredAt).toHaveBeenCalledTimes(1);
+  });
+
   it("parses query params and returns events on GET /api/watchdog/events", async () => {
     const deps = createDeps();
     const app = createApp(deps);

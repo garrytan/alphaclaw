@@ -694,6 +694,54 @@ describe("frontend/api", () => {
       "no_suppressed_channels",
     );
   });
+
+  it("restartGatewayAsync resolves the 202 {operationId} envelope from the async endpoint", async () => {
+    global.fetch.mockResolvedValue(
+      mockJsonResponse(202, { ok: true, operationId: "op-1", events: true }),
+    );
+    const api = await loadApiModule();
+
+    const result = await api.restartGatewayAsync();
+
+    expect(global.fetch).toHaveBeenCalledWith(
+      "/api/gateway/restart?async=1",
+      expect.objectContaining({ method: "POST" }),
+    );
+    expect(result).toEqual({ ok: true, operationId: "op-1", events: true });
+  });
+
+  it("restartGatewayAsync rejects 409 apply_in_progress with code+status, and unparseable bodies with the fallback message", async () => {
+    // 409 envelope: the controller branches on err.code, so the code and
+    // HTTP status must ride on the rejection.
+    global.fetch.mockResolvedValue(
+      mockJsonResponse(409, {
+        ok: false,
+        error: "A channel update is in progress",
+        code: "apply_in_progress",
+      }),
+    );
+    const api = await loadApiModule();
+    await expect(api.restartGatewayAsync()).rejects.toMatchObject({
+      message: "A channel update is in progress",
+      code: "apply_in_progress",
+      status: 409,
+    });
+
+    // Unparseable body on a failed response: fallback message, status kept,
+    // no code invented.
+    global.fetch.mockResolvedValue({
+      status: 500,
+      ok: false,
+      json: async () => {
+        throw new Error("bad json");
+      },
+    });
+    const rejection = await api.restartGatewayAsync().catch((err) => err);
+    expect(rejection).toBeInstanceOf(Error);
+    expect(rejection.message).toBe("Could not restart gateway");
+    expect(rejection.status).toBe(500);
+    expect(rejection.code).toBeUndefined();
+  });
 });
 
 const mockTextResponse = (status, text) => ({

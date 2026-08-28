@@ -46,13 +46,14 @@ import * as preactHooks from "preact/hooks";
 import { Gateway, buildReasonsSummary, dotClassFor } from "../../lib/public/js/components/gateway.js";
 import { gatewayShellStore } from "../../lib/public/js/components/restart-progress-card.js";
 import { ActionButton } from "../../lib/public/js/components/action-button.js";
+import { ConfirmDialog } from "../../lib/public/js/components/confirm-dialog.js";
 import { Tooltip } from "../../lib/public/js/components/tooltip.js";
 import { InfoTooltip } from "../../lib/public/js/components/info-tooltip.js";
 
 // The card renders the SERVER's state verbatim, so the fixtures come from the
 // server's own reducer — the test matrix can never drift from the contract.
 const require = createRequire(import.meta.url);
-const { reduceGatewayState } = require("../../lib/server/gateway-state.js");
+const { reduceGatewayState, kGatewayStateCatalog } = require("../../lib/server/gateway-state.js");
 
 const harness = preactHooks.__harness;
 
@@ -458,5 +459,67 @@ describe("frontend/gateway card (server-state matrix)", () => {
   it("dotClassFor never renders undefined for malformed dots", () => {
     expect(dotClassFor(null)).toContain("ac-gateway-dot--gray");
     expect(dotClassFor({})).toContain("ac-gateway-dot--gray");
+  });
+
+  it("flapping in the stabilization window: Roll back is a danger action behind a confirm — confirm dispatches, cancel does not", () => {
+    const state = makeServerState({
+      watchdog: { ...kHealthyWatchdog, crashCountInWindow: 2 },
+      inStabilizationWindow: true,
+    });
+    expect(state.state).toBe("flapping");
+    const rollBackAction = state.actions.find((action) => action.id === "roll_back");
+    expect(rollBackAction).toMatchObject({ kind: "danger", needsConfirm: true });
+
+    publishShell({ statusState: state });
+    const rollBack = gatewayShellStore.get().actions.rollBack;
+
+    let tree = renderGateway({});
+    const button = findAllByType(tree, ActionButton).find(
+      (vnode) => vnode.props.idleLabel === "Roll back",
+    );
+    expect(button).toBeTruthy();
+    expect(button.props.tone).toBe("danger");
+    let dialog = findAllByType(tree, ConfirmDialog)[0];
+    expect(dialog.props.visible).toBe(false);
+
+    // needsConfirm: the click opens the dialog and dispatches NOTHING yet.
+    button.props.onClick();
+    expect(rollBack).not.toHaveBeenCalled();
+    tree = renderGateway({});
+    dialog = findAllByType(tree, ConfirmDialog)[0];
+    expect(dialog.props.visible).toBe(true);
+    expect(dialog.props.title).toBe("Roll back?");
+    expect(dialog.props.message).toBe(rollBackAction.description);
+    expect(dialog.props.confirmTone).toBe("warning");
+
+    // Confirming dispatches the shell rollBack action and closes the dialog.
+    dialog.props.onConfirm();
+    expect(rollBack).toHaveBeenCalledTimes(1);
+    tree = renderGateway({});
+    expect(findAllByType(tree, ConfirmDialog)[0].props.visible).toBe(false);
+
+    // Canceling a fresh confirm never dispatches.
+    findAllByType(tree, ActionButton)
+      .find((vnode) => vnode.props.idleLabel === "Roll back")
+      .props.onClick();
+    tree = renderGateway({});
+    dialog = findAllByType(tree, ConfirmDialog)[0];
+    expect(dialog.props.visible).toBe(true);
+    dialog.props.onCancel();
+    tree = renderGateway({});
+    expect(findAllByType(tree, ConfirmDialog)[0].props.visible).toBe(false);
+    expect(rollBack).toHaveBeenCalledTimes(1);
+  });
+
+  it("the fixture matrix covers every state in the server catalog (a new state cannot ship unrendered)", () => {
+    const fixtureNames = new Set(kStateFixtures.map((fixture) => fixture.name));
+    const catalogStates = Object.keys(kGatewayStateCatalog);
+    expect(catalogStates.length).toBeGreaterThan(0);
+    for (const stateName of catalogStates) {
+      expect(
+        fixtureNames.has(stateName),
+        `server state "${stateName}" has no rendering fixture in kStateFixtures`,
+      ).toBe(true);
+    }
   });
 });

@@ -111,7 +111,11 @@ vi.mock("preact/hooks", () => {
 
 import * as preactHooks from "preact/hooks";
 import { usePolling } from "../../lib/public/js/hooks/usePolling.js";
-import { setCached, invalidateCache } from "../../lib/public/js/lib/api-cache.js";
+import {
+  getCached,
+  setCached,
+  invalidateCache,
+} from "../../lib/public/js/lib/api-cache.js";
 
 const harness = preactHooks.__harness;
 
@@ -244,6 +248,67 @@ describe("frontend/use-polling visibility", () => {
     try {
       const result = renderPolling({ pauseWhenHidden: true, cacheKey });
       expect(result.data).toEqual({ events: ["cached"] });
+    } finally {
+      invalidateCache(cacheKey);
+    }
+  });
+
+  it("dedupeInFlight shares one in-flight fetch across overlapping refreshes; force bypasses; the freshest write wins the cache", async () => {
+    const cacheKey = "use-polling-test-dedupe";
+    invalidateCache(cacheKey);
+    const resolvers = [];
+    fetcher = vi.fn(
+      () => new Promise((resolve) => resolvers.push(resolve)),
+    );
+    try {
+      renderPolling({ pauseWhenHidden: false, dedupeInFlight: true, cacheKey });
+      await flushMicrotasks();
+      // The mount refresh is in flight...
+      expect(fetcher).toHaveBeenCalledTimes(1);
+
+      // ...so overlapping refreshes piggyback on it instead of stacking
+      // duplicate requests.
+      const shared1 = hookResult.refresh();
+      const shared2 = hookResult.refresh();
+      await flushMicrotasks();
+      expect(fetcher).toHaveBeenCalledTimes(1);
+
+      // force bypasses the dedupe and dispatches its own fetch.
+      const forced = hookResult.refresh({ force: true });
+      await flushMicrotasks();
+      expect(fetcher).toHaveBeenCalledTimes(2);
+
+      resolvers[0]({ seq: "shared" });
+      resolvers[1]({ seq: "forced" });
+      await flushMicrotasks();
+
+      // The deduped callers all resolve with the shared fetch's result.
+      await expect(shared1).resolves.toEqual({ seq: "shared" });
+      await expect(shared2).resolves.toEqual({ seq: "shared" });
+      await expect(forced).resolves.toEqual({ seq: "forced" });
+
+      // The forced refresh is the LATEST — it wins both state and cache; the
+      // older shared result must not clobber it.
+      renderPolling({ pauseWhenHidden: false, dedupeInFlight: true, cacheKey });
+      expect(hookResult.data).toEqual({ seq: "forced" });
+      expect(getCached(cacheKey)).toEqual({ seq: "forced" });
+    } finally {
+      invalidateCache(cacheKey);
+    }
+  });
+
+  it("a successful poll writes through to the api cache (warm paint for the next mount)", async () => {
+    const cacheKey = "use-polling-test-write-through";
+    invalidateCache(cacheKey);
+    fetcher = vi.fn(async () => ({ events: ["fresh"] }));
+    try {
+      expect(getCached(cacheKey)).toBeNull();
+      renderPolling({ pauseWhenHidden: false, cacheKey });
+      await flushMicrotasks();
+
+      expect(getCached(cacheKey)).toEqual({ events: ["fresh"] });
+      renderPolling({ pauseWhenHidden: false, cacheKey });
+      expect(hookResult.data).toEqual({ events: ["fresh"] });
     } finally {
       invalidateCache(cacheKey);
     }

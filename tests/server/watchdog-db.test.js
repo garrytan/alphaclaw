@@ -155,7 +155,48 @@ describe("server/watchdog-db", () => {
         (event) => !(event.eventType === "health_check" && event.status === "ok"),
       ),
     ).toBe(true);
-    expect(elapsedMs).toBeLessThan(250);
+    // The EXPLAIN QUERY PLAN test above is the real regression guard for the
+    // notable-events index; this wall-clock bound only catches a catastrophic
+    // regression (e.g. a full scan of 30k rows) without flaking under
+    // parallel-worker CPU contention.
+    expect(elapsedMs).toBeLessThan(5000);
+  });
+
+  it("re-init on the same module instance leaves no stale prepared statements", () => {
+    const first = createWatchdogDbContext("watchdog-db-reinit-");
+    first.insertWatchdogEvent({
+      eventType: "crash",
+      source: "exit_event",
+      status: "failed",
+      details: { code: 1 },
+    });
+    expect(first.getRecentEvents({ limit: 5 })).toHaveLength(1);
+
+    currentWatchdogDb.closeWatchdogDb();
+
+    // Re-open against a new directory WITHOUT reloading the module: the
+    // statement cache must be invalidated with the old connection, or these
+    // calls would throw on closed handles.
+    const secondRoot = fs.mkdtempSync(path.join(os.tmpdir(), "watchdog-db-reinit2-"));
+    try {
+      const reinit = currentWatchdogDb.initWatchdogDb({
+        rootDir: secondRoot,
+        pruneDays: 30,
+      });
+      expect(reinit.path).toBe(path.join(secondRoot, "db", "watchdog.db"));
+      currentWatchdogDb.insertWatchdogEvent({
+        eventType: "repair",
+        source: "manual",
+        status: "ok",
+        details: null,
+      });
+      const events = currentWatchdogDb.getRecentEvents({ limit: 5 });
+      expect(events).toHaveLength(1);
+      expect(events[0].eventType).toBe("repair");
+    } finally {
+      currentWatchdogDb.closeWatchdogDb();
+      fs.rmSync(secondRoot, { recursive: true, force: true });
+    }
   });
 
   it("prunes old events based on retention days", () => {

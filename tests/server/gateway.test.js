@@ -369,6 +369,115 @@ describe("server/gateway restart behavior", () => {
     );
   });
 
+  it("memoizes only successful plugin preflights by desired plugin state", async () => {
+    let configRaw = JSON.stringify({ channels: { telegram: { enabled: true } } });
+    const execFileMock = vi
+      .fn()
+      // First preflight fails for a non-install-stage reason.
+      .mockImplementationOnce((file, args, opts, cb) =>
+        cb(new Error("EAI_AGAIN registry.npmjs.org"), "", ""),
+      )
+      .mockImplementation((file, args, opts, cb) => cb(null, "{}", ""));
+    childProcess.execFile = execFileMock;
+    fs.existsSync = vi.fn(
+      (targetPath) => targetPath === `${OPENCLAW_DIR}/openclaw.json`,
+    );
+    fs.readFileSync = vi.fn((targetPath, ...args) => {
+      if (targetPath === `${OPENCLAW_DIR}/openclaw.json`) return configRaw;
+      return originalReadFileSync(targetPath, ...args);
+    });
+    fs.readdirSync = vi.fn(() => []);
+    delete require.cache[modulePath];
+    const gateway = require(modulePath);
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    // A FAILED preflight is reported and must NOT seed the success memo.
+    expect(await gateway.prepareOpenclawChannelPlugins()).toEqual({
+      skipped: false,
+      failed: true,
+    });
+    expect(execFileMock).toHaveBeenCalledTimes(1);
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining("OpenClaw plugin preflight failed"),
+    );
+
+    // Same desired state after a failure: the preflight re-runs (and succeeds).
+    expect(await gateway.prepareOpenclawChannelPlugins()).toEqual({
+      skipped: false,
+    });
+    expect(execFileMock).toHaveBeenCalledTimes(2);
+
+    // Unchanged desired state after a success: the hash memo skips the whole
+    // CLI boot — the seconds-vs-minutes restart-downtime path.
+    expect(await gateway.prepareOpenclawChannelPlugins()).toEqual({
+      skipped: true,
+    });
+    expect(execFileMock).toHaveBeenCalledTimes(2);
+
+    // Changing the enabled-channel set invalidates the memo.
+    configRaw = JSON.stringify({
+      channels: { telegram: { enabled: true }, discord: { enabled: true } },
+    });
+    expect(await gateway.prepareOpenclawChannelPlugins()).toEqual({
+      skipped: false,
+    });
+    expect(execFileMock).toHaveBeenCalledTimes(3);
+  });
+
+  it("streams a warning (not done) for preparing_plugins when the preflight fails", async () => {
+    const supervisor = createChild();
+    let gatewayPortOpen = false;
+    childProcess.spawn = vi.fn((file, args) => {
+      if (args?.[0] === "gateway" && args?.[1] === "--force") {
+        queueMicrotask(() => {
+          gatewayPortOpen = true;
+        });
+      }
+      return supervisor;
+    });
+    childProcess.execFile = vi.fn((file, args, opts, cb) => {
+      if (args?.[0] === "plugins") {
+        cb(new Error("EAI_AGAIN registry.npmjs.org"), "", "network down");
+        return;
+      }
+      cb(null, "", "");
+    });
+    fs.existsSync = vi.fn(
+      (targetPath) => targetPath === `${OPENCLAW_DIR}/openclaw.json`,
+    );
+    fs.readFileSync = vi.fn((targetPath, ...args) => {
+      if (targetPath === `${OPENCLAW_DIR}/openclaw.json`) {
+        return JSON.stringify({ channels: { telegram: { enabled: true } } });
+      }
+      return originalReadFileSync(targetPath, ...args);
+    });
+    fs.readdirSync = vi.fn(() => []);
+    net.createConnection = vi.fn(() => createSocket(() => gatewayPortOpen));
+    delete require.cache[modulePath];
+    const gateway = require(modulePath);
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const onStep = vi.fn();
+
+    const result = await gateway.restartGateway(vi.fn(), { onStep });
+
+    // A failed preflight continues (the gateway may still boot) but must not
+    // stream as a clean "done" — the client renders this status verbatim.
+    const prepSteps = onStep.mock.calls
+      .map(([step]) => step)
+      .filter((step) => step.step === "preparing_plugins");
+    expect(prepSteps).toEqual([
+      { step: "preparing_plugins", status: "running" },
+      { step: "preparing_plugins", status: "warning" },
+    ]);
+    // The restart still proceeds through stop + force launch to ready.
+    expect(result.downtimeMs).toEqual(expect.any(Number));
+    expect(childProcess.spawn).toHaveBeenCalledWith(
+      "openclaw",
+      ["gateway", "--force"],
+      expect.objectContaining({ env: expect.any(Object) }),
+    );
+  });
+
   it("marks managed child exit as expected before force restart", async () => {
     const child = createChild();
     const spawnMock = vi.fn(() => child);
@@ -1596,6 +1705,42 @@ describe("server/gateway restart behavior", () => {
       }
     });
 
+    it("fails a restart fast with evidence when the supervisor cannot spawn", async () => {
+      const supervisor = createChild();
+      childProcess.spawn = vi.fn(() => supervisor);
+      childProcess.execFile = execFileOk("");
+      fs.existsSync = vi.fn(() => false);
+      net.createConnection = vi.fn(() => ({
+        setTimeout: vi.fn(),
+        destroy: vi.fn(),
+        on(event, handler) {
+          if (event === "error") handler();
+          return this;
+        },
+      }));
+      delete require.cache[modulePath];
+      const gateway = require(modulePath);
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+      vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+
+      const pending = gateway.runGatewayCmd("--force");
+      pending.catch(() => {});
+      // The openclaw binary is missing/non-executable (e.g. mid-apply): spawn
+      // emits 'error'. Without a listener this is process death; with it the
+      // restart fails within the poll cadence, not the 120s budget.
+      const errorHandler = supervisor.on.mock.calls.find(
+        (call) => call[0] === "error",
+      )?.[1];
+      expect(typeof errorHandler).toBe("function");
+      errorHandler(new Error("spawn openclaw ENOENT"));
+
+      const rejection = await pending.catch((err) => err);
+      expect(rejection.name).toBe("GatewayRestartError");
+      expect(rejection.evidence.stderrTail.join("\n")).toContain(
+        "spawn openclaw ENOENT",
+      );
+    });
+
     it("resets the stderr evidence tail per restart attempt", async () => {
       vi.useFakeTimers();
       try {
@@ -1644,6 +1789,92 @@ describe("server/gateway restart behavior", () => {
         // Regression: the tail used to accumulate across attempts, so a
         // failure's evidence included stderr from previous launches.
         expect(tailText).not.toContain("old-noise");
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("warns and still force-restarts when the old gateway never releases the port", async () => {
+      vi.useFakeTimers();
+      try {
+        const supervisor = createChild();
+        const spawnMock = vi.fn(() => supervisor);
+        childProcess.spawn = spawnMock;
+        childProcess.execFile = execFileOk("");
+        fs.existsSync = vi.fn(() => false);
+        // The port answers before AND after `stop`: a wedged old process.
+        net.createConnection = vi.fn(() => ({
+          setTimeout: vi.fn(),
+          destroy: vi.fn(),
+          on(event, handler) {
+            if (event === "connect") handler();
+            return this;
+          },
+        }));
+        delete require.cache[modulePath];
+        const gateway = require(modulePath);
+        const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+        const pending = gateway.restartGateway(vi.fn());
+        await vi.advanceTimersByTimeAsync(16000);
+        const result = await pending;
+
+        // The bounded stop-settle wait gave up loudly instead of declaring a
+        // false instant success against the old process...
+        expect(warnSpy).toHaveBeenCalledWith(
+          expect.stringContaining("still holds the port"),
+        );
+        // ...and --force still ran to replace the wedged gateway.
+        expect(spawnMock).toHaveBeenCalledWith(
+          "openclaw",
+          ["gateway", "--force"],
+          expect.objectContaining({ env: expect.any(Object) }),
+        );
+        // Downtime measurement includes the full 15s stop-settle wait.
+        expect(result.downtimeMs).toBeGreaterThanOrEqual(15000);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("joins a secret split across stderr chunk boundaries into one tail line", async () => {
+      vi.useFakeTimers();
+      try {
+        const supervisor = createChild();
+        childProcess.spawn = vi.fn(() => supervisor);
+        childProcess.execFile = execFileOk("");
+        fs.existsSync = vi.fn(() => false);
+        net.createConnection = vi.fn(() => ({
+          setTimeout: vi.fn(),
+          destroy: vi.fn(),
+          on(event, handler) {
+            if (event === "timeout") handler();
+            return this;
+          },
+        }));
+        delete require.cache[modulePath];
+        const gateway = require(modulePath);
+        vi.spyOn(console, "warn").mockImplementation(() => {});
+        vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+
+        const attempt = gateway.runGatewayCmd("--force");
+        attempt.catch(() => {});
+        const emitStderr = supervisor.stderr.on.mock.calls.find(
+          (call) => call[0] === "data",
+        )[1];
+        // A secret value split across two data events must land in the tail
+        // as ONE joined line — redaction matches whole values, and two
+        // unmatchable halves would leak it through the mask.
+        emitStderr("token super");
+        emitStderr("secret123\n");
+        await vi.advanceTimersByTimeAsync(121000);
+        const rejection = await attempt.catch((err) => err);
+
+        expect(rejection.name).toBe("GatewayRestartError");
+        expect(rejection.evidence.stderrTail).toContain("token supersecret123");
+        // Neither half appears as its own (unredactable) tail entry.
+        expect(rejection.evidence.stderrTail).not.toContain("token super");
+        expect(rejection.evidence.stderrTail).not.toContain("secret123");
       } finally {
         vi.useRealTimers();
       }

@@ -2353,4 +2353,252 @@ describe("server/routes/system", () => {
     }),
     );
   });
+
+  it("returns the failure as a 500 to a synchronous request attached to an in-flight restart", async () => {
+    const deps = createSystemDeps();
+    deps.restartRequiredState.beginRestart = vi.fn(() => ({
+      operationId: "op-attach-fail",
+      reasonsSnapshot: [],
+    }));
+    deps.restartRequiredState.completeRestart = vi.fn();
+    let rejectRestart;
+    deps.restartGateway = vi.fn(
+      () =>
+        new Promise((_, reject) => {
+          rejectRestart = () => reject(new Error("gateway never came back"));
+        }),
+    );
+    // Raw handlers (not supertest) so the second request deterministically
+    // attaches BEFORE the in-flight operation fails.
+    const routes = captureRoutes(deps);
+    const handler = routes.post.get("/api/gateway/restart");
+    const createRes = () => {
+      const res = {
+        statusCode: 200,
+        body: undefined,
+        status(code) {
+          res.statusCode = code;
+          return res;
+        },
+        json(payload) {
+          res.body = payload;
+          return res;
+        },
+      };
+      return res;
+    };
+
+    const firstRes = createRes();
+    await handler({ query: { async: "1" } }, firstRes);
+    expect(firstRes.statusCode).toBe(202);
+
+    // A second synchronous click joins the active restart (never a competing
+    // one) and must surface that operation's failure as its own 500.
+    const secondRes = createRes();
+    const secondPending = handler({ query: {} }, secondRes);
+    rejectRestart();
+    await secondPending;
+
+    expect(secondRes.statusCode).toBe(500);
+    expect(secondRes.body).toEqual({
+      ok: false,
+      attached: true,
+      operationId: "op-attach-fail",
+      error: "gateway never came back",
+    });
+    expect(deps.restartGateway).toHaveBeenCalledTimes(1);
+  });
+
+  it("pins the legacy gateway field as a pure projection of the reduced state", async () => {
+    const { setBootPhase } = require("../../lib/server/boot-phase");
+    // The documented compat contract: port-up states -> "running",
+    // pre-onboarding -> "not_onboarded", everything else -> "starting".
+    const project = (state) => {
+      if (state === "not_onboarded") return "not_onboarded";
+      return ["running", "degraded", "safe_mode", "flapping"].includes(state)
+        ? "running"
+        : "starting";
+    };
+    const cases = [
+      {
+        expectState: "not_onboarded",
+        mutate: (deps) => deps.fs.existsSync.mockReturnValue(false),
+      },
+      { expectState: "running", mutate: () => {} },
+      {
+        expectState: "degraded",
+        mutate: (deps) => {
+          deps.watchdog = { getStatus: () => ({ health: "degraded" }) };
+        },
+      },
+      {
+        expectState: "safe_mode",
+        mutate: (deps) => {
+          deps.watchdog = {
+            getStatus: () => ({ health: "healthy", safeMode: true }),
+          };
+        },
+      },
+      {
+        expectState: "flapping",
+        mutate: (deps) => {
+          deps.watchdog = { getStatus: () => ({ crashCountInWindow: 2 }) };
+        },
+      },
+      {
+        expectState: "down",
+        mutate: (deps) => deps.isGatewayRunning.mockResolvedValue(false),
+      },
+      {
+        expectState: "starting",
+        mutate: (deps) => {
+          deps.isGatewayRunning.mockResolvedValue(false);
+          deps.watchdog = { getStatus: () => ({ lifecycle: "restarting" }) };
+        },
+      },
+      { expectState: "boot_failed", boot: ["failed", { error: "boom" }] },
+      { expectState: "booting", boot: ["starting_gateway"] },
+      {
+        expectState: "unknown",
+        mutate: (deps) =>
+          deps.isGatewayRunning.mockRejectedValue(new Error("probe broke")),
+      },
+    ];
+
+    for (const testCase of cases) {
+      setBootPhase(...(testCase.boot || ["ready"]));
+      // Fresh deps + app per case: /api/status serves a shared snapshot with
+      // a freshness window, so state changes need a fresh service.
+      const deps = createSystemDeps();
+      testCase.mutate?.(deps);
+      const app = createApp(deps);
+
+      const res = await request(app).get("/api/status");
+
+      expect(res.status).toBe(200);
+      expect(res.body.state.state).toBe(testCase.expectState);
+      // The legacy field must ALWAYS equal the projection of the reduced
+      // state — never an independent computation that can disagree.
+      expect(res.body.gateway).toBe(project(testCase.expectState));
+    }
+    setBootPhase("ready");
+  });
+
+  it("maps the lifecycle-lock active operation onto the status badge", async () => {
+    const badgeFor = async (active) => {
+      const deps = createSystemDeps();
+      deps.gatewayLifecycleLock = {
+        acquire: vi.fn(),
+        getActiveOperation: vi.fn(() => active),
+      };
+      const app = createApp(deps);
+      const res = await request(app).get("/api/status");
+      expect(res.status).toBe(200);
+      return res.body.state.operation;
+    };
+
+    // Boot is expressed through bootPhase, never through the badge.
+    expect(await badgeFor({ kind: "boot", startedAt: 111 })).toBeNull();
+    expect(await badgeFor({ kind: "repair", startedAt: 222 })).toEqual({
+      kind: "repair",
+      label: "Repairing",
+      startedAt: 222,
+    });
+    // Unknown kinds still render a generic badge, never a bare internal id.
+    expect(await badgeFor({ kind: "compact", startedAt: 333 })).toEqual({
+      kind: "compact",
+      label: "Working…",
+      startedAt: 333,
+    });
+  });
+
+  it("records watchdog operation events for both restart outcomes", async () => {
+    const deps = createSystemDeps();
+    deps.restartRequiredState.beginRestart = vi.fn(() => ({
+      operationId: "op-ok",
+      reasonsSnapshot: [],
+    }));
+    deps.restartRequiredState.completeRestart = vi.fn();
+    deps.watchdog = {
+      getStatus: vi.fn(() => ({})),
+      onExpectedRestart: vi.fn(),
+      onExpectedRestartSettled: vi.fn(),
+      recordOperationEvent: vi.fn(),
+    };
+    deps.restartGateway = vi.fn(async () => ({ durationMs: 900, downtimeMs: 350 }));
+    const app = createApp(deps);
+
+    const okRes = await request(app).post("/api/gateway/restart");
+    expect(okRes.status).toBe(200);
+    expect(deps.watchdog.recordOperationEvent).toHaveBeenCalledWith({
+      kind: "gateway_restart",
+      status: "ok",
+      details: {
+        operationId: "op-ok",
+        trigger: "manual",
+        durationMs: 900,
+        downtimeMs: 350,
+      },
+    });
+
+    const previousSecret = process.env.TEST_RESTART_EVENT_SECRET;
+    process.env.TEST_RESTART_EVENT_SECRET = "hush-hush-value";
+    try {
+      deps.restartRequiredState.beginRestart.mockReturnValue({
+        operationId: "op-bad",
+        reasonsSnapshot: [],
+      });
+      deps.restartGateway.mockRejectedValueOnce(
+        new Error("bind failed for token hush-hush-value"),
+      );
+
+      const failRes = await request(app).post("/api/gateway/restart");
+      expect(failRes.status).toBe(500);
+      // The failure event carries the REDACTED message, never the secret.
+      expect(deps.watchdog.recordOperationEvent).toHaveBeenCalledWith({
+        kind: "gateway_restart",
+        status: "failed",
+        details: {
+          operationId: "op-bad",
+          trigger: "manual",
+          error: "bind failed for token ***",
+        },
+      });
+    } finally {
+      if (previousSecret === undefined) {
+        delete process.env.TEST_RESTART_EVENT_SECRET;
+      } else {
+        process.env.TEST_RESTART_EVENT_SECRET = previousSecret;
+      }
+    }
+  });
+
+  it("forwards the active restart operation's real expiresAt to the watchdog", async () => {
+    const deps = createSystemDeps();
+    deps.restartRequiredState.beginRestart = vi.fn(() => ({
+      operationId: "op-lease",
+      reasonsSnapshot: [],
+    }));
+    deps.restartRequiredState.completeRestart = vi.fn();
+    const expiresAt = Date.now() + 123456;
+    deps.restartRequiredState.getActiveRestartOperation = vi.fn(() => ({
+      operationId: "op-lease",
+      expiresAt,
+    }));
+    deps.watchdog = {
+      getStatus: vi.fn(() => ({})),
+      onExpectedRestart: vi.fn(),
+      onExpectedRestartSettled: vi.fn(),
+    };
+    deps.restartGateway = vi.fn(async () => ({ durationMs: 1 }));
+    const app = createApp(deps);
+
+    const res = await request(app).post("/api/gateway/restart");
+
+    expect(res.status).toBe(200);
+    // The suppression window forwarded to the watchdog is the operation
+    // record's OWN lease, not a value invented by the route.
+    expect(deps.watchdog.onExpectedRestart).toHaveBeenCalledWith({ expiresAt });
+    expect(deps.watchdog.onExpectedRestartSettled).toHaveBeenCalledTimes(1);
+  });
 });

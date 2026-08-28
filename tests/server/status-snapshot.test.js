@@ -185,4 +185,87 @@ describe("server/status-snapshot", () => {
     resolvers[0]();
     await connecting;
   });
+
+  it("clears the stale marker once compute recovers", async () => {
+    vi.useFakeTimers();
+    let mode = "running";
+    const compute = vi.fn(async () => {
+      if (mode === "fail") throw new Error("probe failed");
+      return { status: { gateway: mode } };
+    });
+    const service = createStatusSnapshotService({
+      compute,
+      logger: { warn: vi.fn() },
+    });
+
+    expect((await service.getSnapshotPayload()).status.gateway).toBe("running");
+
+    mode = "fail";
+    await vi.advanceTimersByTimeAsync(3000); // cache goes stale (2.5s freshness)
+    const stale = await service.getSnapshotPayload();
+    expect(stale.snapshotStale).toBe(true);
+    expect(stale.status.gateway).toBe("running");
+
+    // Recovery resets the error count: fresh data, no stale markers.
+    mode = "recovered";
+    await vi.advanceTimersByTimeAsync(3000);
+    const fresh = await service.getSnapshotPayload();
+    expect(fresh.status.gateway).toBe("recovered");
+    expect(fresh.snapshotStale).toBeUndefined();
+    expect(fresh.snapshotErrorCount).toBeUndefined();
+  });
+
+  it("a later joiner's catch-up frame does not swallow a pending change for earlier clients", async () => {
+    vi.useFakeTimers();
+    let gateway = "running";
+    const compute = vi.fn(async () => ({ status: { gateway } }));
+    // Short freshness so B's join recomputes; the change lands before any
+    // shared tick has run.
+    const service = createStatusSnapshotService({ compute, freshnessMs: 100 });
+    const a = createClient();
+    const b = createClient();
+
+    await service.addClient(a);
+    expect(statusFramesOf(a)).toHaveLength(1);
+
+    gateway = "starting";
+    await vi.advanceTimersByTimeAsync(150); // cache stale, still before the 2s tick
+    await service.addClient(b);
+    // B's catch-up frame already shows the new payload...
+    expect(statusFramesOf(b)[0].status.gateway).toBe("starting");
+    // ...which A has not heard about yet.
+    expect(statusFramesOf(a)).toHaveLength(1);
+
+    // The next tick must still deliver the change to A — B's join must not
+    // have seeded the shared change-detection state.
+    await vi.advanceTimersByTimeAsync(2000);
+    const aFrames = statusFramesOf(a);
+    expect(aFrames).toHaveLength(2);
+    expect(aFrames[1].status.gateway).toBe("starting");
+  });
+
+  it("addClient survives a failing first compute and delivers the next tick's frame", async () => {
+    vi.useFakeTimers();
+    let fail = true;
+    const compute = vi.fn(async () => {
+      if (fail) throw new Error("cold failure");
+      return { status: { gateway: "recovered" } };
+    });
+    const service = createStatusSnapshotService({
+      compute,
+      logger: { warn: vi.fn() },
+    });
+    const client = createClient();
+
+    await expect(service.addClient(client)).resolves.toBeUndefined();
+    expect(statusFramesOf(client)).toHaveLength(0);
+
+    fail = false;
+    await vi.advanceTimersByTimeAsync(2000);
+
+    const frames = statusFramesOf(client);
+    expect(frames).toHaveLength(1);
+    expect(frames[0].status.gateway).toBe("recovered");
+    expect(frames[0].snapshotStale).toBeUndefined();
+  });
 });

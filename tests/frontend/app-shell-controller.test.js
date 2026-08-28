@@ -135,6 +135,7 @@ import * as preactHooks from "preact/hooks";
 import * as api from "../../lib/public/js/lib/api.js";
 import { invalidateCache } from "../../lib/public/js/lib/api-cache.js";
 import { gatewayShellStore } from "../../lib/public/js/components/restart-progress-card.js";
+import { showToast } from "../../lib/public/js/components/toast.js";
 import { useAppShellController } from "../../lib/public/js/hooks/use-app-shell-controller.js";
 
 const harness = preactHooks.__harness;
@@ -322,5 +323,288 @@ describe("frontend/app-shell controller (shared status feed)", () => {
     openSetup();
     state = renderController({});
     expect(state.state.onboarded).toBe(false);
+  });
+
+  // -----------------------------------------------------------------------
+  // Restart operation pipeline (M3): optimistic start, SSE step stream,
+  // honest terminal outcomes, restart-safe rehydration.
+  // -----------------------------------------------------------------------
+
+  it("restart click: optimistic __requesting frame → SSE attach → real steps replace the placeholder → done lands the success outcome", async () => {
+    let restartHandlers = null;
+    api.subscribeGatewayRestartEvents.mockImplementation((options) => {
+      restartHandlers = options;
+      return vi.fn();
+    });
+    let resolveRestart = null;
+    api.restartGatewayAsync.mockImplementation(
+      () => new Promise((resolve) => (resolveRestart = resolve)),
+    );
+
+    let state = await settle();
+    expect(api.subscribeGatewayRestartEvents).not.toHaveBeenCalled();
+
+    // The optimistic frame renders BEFORE the 202 lands (no await).
+    state.actions.handleGatewayRestart();
+    state = renderController({});
+    expect(state.state.restartOperation.phase).toBe("running");
+    expect(state.state.restartOperation.steps).toEqual([
+      expect.objectContaining({ name: "__requesting", status: "running" }),
+    ]);
+    expect(api.subscribeGatewayRestartEvents).not.toHaveBeenCalled();
+
+    // 202 {operationId} → the SSE subscription attaches to that operation,
+    // keeping the placeholder until the first real step lands.
+    resolveRestart({ ok: true, operationId: "op-1" });
+    await flushMicrotasks();
+    expect(api.subscribeGatewayRestartEvents).toHaveBeenCalledTimes(1);
+    expect(api.subscribeGatewayRestartEvents).toHaveBeenCalledWith(
+      expect.objectContaining({ operationId: "op-1" }),
+    );
+    state = renderController({});
+    expect(state.state.restartOperation.operationId).toBe("op-1");
+    expect(state.state.restartOperation.steps).toEqual([
+      expect.objectContaining({ name: "__requesting" }),
+    ]);
+
+    // First real step REPLACES the optimistic placeholder.
+    restartHandlers.onMessage({
+      event: "step",
+      data: { name: "stopping", label: "Stopping gateway", status: "running" },
+    });
+    state = renderController({});
+    expect(state.state.restartOperation.steps).toEqual([
+      { name: "stopping", label: "Stopping gateway", status: "running" },
+    ]);
+    restartHandlers.onMessage({
+      event: "step",
+      data: { name: "launching", label: "Starting gateway", status: "running" },
+    });
+
+    // Terminal `done` with the measured downtime → success outcome.
+    restartHandlers.onMessage({
+      event: "done",
+      data: { ok: true, durationMs: 4200, downtimeMs: 1800 },
+    });
+    state = await settle();
+    expect(state.state.restartOperation.phase).toBe("succeeded");
+    expect(state.state.restartOperation.downtimeMs).toBe(1800);
+    expect(gatewayShellStore.get().restartOperation.phase).toBe("succeeded");
+    // Off the Gateway surfaces (location "") the outcome also toasts.
+    expect(showToast).toHaveBeenCalledWith(
+      "Gateway restarted — ready in 2s",
+      "success",
+    );
+
+    // The success outcome auto-collapses after the grace window.
+    await vi.advanceTimersByTimeAsync(8000);
+    state = renderController({});
+    expect(state.state.restartOperation).toBeNull();
+  });
+
+  it("apply_in_progress rejection clears the operation (no permanently spinning card) and toasts", async () => {
+    api.restartGatewayAsync.mockRejectedValue(
+      Object.assign(new Error("A channel update is in progress"), {
+        code: "apply_in_progress",
+        status: 409,
+      }),
+    );
+
+    let state = await settle();
+    await state.actions.handleGatewayRestart();
+    state = renderController({});
+
+    expect(state.state.restartOperation).toBeNull();
+    expect(gatewayShellStore.get().restartOperation).toBeNull();
+    expect(api.subscribeGatewayRestartEvents).not.toHaveBeenCalled();
+    expect(showToast).toHaveBeenCalledWith(
+      "A channel update is in progress",
+      "error",
+    );
+  });
+
+  it("version skew: a 200 without operationId is treated as a synchronous success — no SSE attach", async () => {
+    api.restartGatewayAsync.mockResolvedValue({ ok: true });
+
+    let state = await settle();
+    await state.actions.handleGatewayRestart();
+    await flushMicrotasks();
+    state = renderController({});
+
+    expect(api.subscribeGatewayRestartEvents).not.toHaveBeenCalled();
+    expect(state.state.restartOperation.phase).toBe("succeeded");
+    expect(state.state.restartOperation.durationMs).toBeNull();
+    expect(showToast).toHaveBeenCalledWith("Gateway restarted", "success");
+  });
+
+  it("SSE drop mid-operation resolves from the server: still-running re-attaches, a terminal record lands the outcome", async () => {
+    let restartHandlers = null;
+    api.subscribeGatewayRestartEvents.mockImplementation((options) => {
+      restartHandlers = options;
+      return vi.fn();
+    });
+    api.restartGatewayAsync.mockResolvedValue({ ok: true, operationId: "op-2" });
+
+    let state = await settle();
+    await state.actions.handleGatewayRestart();
+    await flushMicrotasks();
+    state = await settle();
+    expect(api.subscribeGatewayRestartEvents).toHaveBeenCalledTimes(1);
+
+    // Drop #1: the persisted record says the operation is STILL running →
+    // a re-attach is scheduled (SSE replay restores the step list).
+    api.fetchRestartStatus.mockResolvedValue({
+      restartRequired: false,
+      restartInProgress: true,
+      reasons: [],
+      activeOperation: { operationId: "op-2", status: "running" },
+    });
+    restartHandlers.onError();
+    await flushMicrotasks();
+    expect(api.subscribeGatewayRestartEvents).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(api.subscribeGatewayRestartEvents).toHaveBeenCalledTimes(2);
+    expect(api.subscribeGatewayRestartEvents).toHaveBeenLastCalledWith(
+      expect.objectContaining({ operationId: "op-2" }),
+    );
+    state = renderController({});
+    expect(state.state.restartOperation.phase).toBe("running");
+
+    // Drop #2: the record reached a terminal state while the stream was
+    // down → the outcome resolves from the record, never spins forever.
+    api.fetchRestartStatus.mockResolvedValue({
+      restartRequired: false,
+      restartInProgress: false,
+      reasons: [],
+      lastOperation: {
+        operationId: "op-2",
+        status: "succeeded",
+        durationMs: 5000,
+        downtimeMs: 2500,
+      },
+    });
+    restartHandlers.onError();
+    await flushMicrotasks();
+    state = renderController({});
+    expect(state.state.restartOperation.phase).toBe("succeeded");
+    expect(state.state.restartOperation.downtimeMs).toBe(2500);
+  });
+
+  it("reload mid-restart: mount sees the persisted activeOperation and attaches to it", async () => {
+    api.subscribeGatewayRestartEvents.mockImplementation(() => vi.fn());
+    api.fetchRestartStatus.mockResolvedValue({
+      restartRequired: false,
+      restartInProgress: true,
+      reasons: [],
+      activeOperation: { operationId: "op-9", status: "running" },
+    });
+
+    const state = await settle();
+
+    expect(api.subscribeGatewayRestartEvents).toHaveBeenCalledTimes(1);
+    expect(api.subscribeGatewayRestartEvents).toHaveBeenCalledWith(
+      expect.objectContaining({ operationId: "op-9" }),
+    );
+    expect(state.state.restartOperation).toEqual(
+      expect.objectContaining({
+        operationId: "op-9",
+        phase: "running",
+        resumed: true,
+      }),
+    );
+  });
+
+  it("an unacknowledged failed lastOperation survives the reload; dismissing acknowledges it for good", async () => {
+    api.fetchRestartStatus.mockResolvedValue({
+      restartRequired: false,
+      restartInProgress: false,
+      reasons: [],
+      lastOperation: {
+        operationId: "op-8",
+        status: "failed",
+        errorSummary: "gateway exited with code 1",
+        startedAt: 1000,
+        durationMs: 9000,
+      },
+    });
+
+    let state = await settle();
+    expect(state.state.restartOperation.phase).toBe("failed");
+    expect(state.state.restartOperation.error.message).toBe(
+      "gateway exited with code 1",
+    );
+
+    // Dismiss acknowledges op-8; the next server refresh reports the SAME
+    // lastOperation but it must not resurface.
+    state.actions.dismissRestartOutcome();
+    state = renderController({});
+    expect(state.state.restartOperation).toBeNull();
+    await state.actions.dismissRestartBanner();
+    state = await settle();
+    expect(state.state.restartOperation).toBeNull();
+  });
+
+  it("rollback: a rejected rollback only toasts; a successful one begins the reconnect with its grace window", async () => {
+    let state = await settle();
+    const rollBack = gatewayShellStore.get().actions.rollBack;
+
+    api.rollbackOpenclaw.mockRejectedValue(new Error("no known-good build"));
+    await rollBack();
+    state = renderController({});
+    expect(showToast).toHaveBeenCalledWith("no known-good build", "error");
+    expect(state.state.connectivityMode).toBe("online");
+    expect(globalThis.window.location.reload).not.toHaveBeenCalled();
+
+    api.rollbackOpenclaw.mockResolvedValue({ ok: true });
+    await rollBack();
+    state = renderController({});
+    expect(state.state.connectivityMode).toBe("alphaclaw_restarting");
+
+    // Grace window: no probe (and no reload) before the 3s grace elapses;
+    // the first successful poll after it reloads exactly once.
+    await vi.advanceTimersByTimeAsync(2999);
+    expect(globalThis.window.location.reload).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(globalThis.window.location.reload).toHaveBeenCalledTimes(1);
+  });
+
+  it("Retry after a managed update reuses the SAME isReady discriminator — never reloads against the old process", async () => {
+    api.updateAlphaclaw.mockResolvedValue({
+      ok: true,
+      managedUpdate: true,
+      previousVersion: "0.9.34",
+    });
+    api.fetchStatus.mockResolvedValue({
+      gateway: "running",
+      alphaclawVersion: "0.9.34",
+    });
+
+    let state = await settle();
+    await state.actions.handleAcUpdate();
+    await flushMicrotasks();
+    state = renderController({});
+    expect(state.state.connectivityMode).toBe("alphaclaw_restarting");
+
+    // Manual Retry while the deploy is still swapping: the remembered poller
+    // options (minus the grace) restart the poll.
+    state.actions.handleRetryConnect();
+
+    // The old process keeps answering with the OLD version: reachable but
+    // NOT ready — the retry must not reload against it.
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(globalThis.window.location.reload).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(globalThis.window.location.reload).not.toHaveBeenCalled();
+
+    // The platform swaps the deploy in: the next poll reports the new
+    // version and the reload fires exactly once.
+    api.fetchStatus.mockResolvedValue({
+      gateway: "running",
+      alphaclawVersion: "0.9.35",
+    });
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(globalThis.window.location.reload).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(30000);
+    expect(globalThis.window.location.reload).toHaveBeenCalledTimes(1);
   });
 });

@@ -1,4 +1,9 @@
 const { createWatchdog } = require("../../lib/server/watchdog");
+const {
+  kGatewayTcpWatchIntervalMs,
+  kWatchdogConnectedHealthCadenceMs,
+  kGatewayTcpTransitionDebounceMs,
+} = require("../../lib/server/constants");
 
 const flushMicrotasks = async () =>
   new Promise((resolve) => {
@@ -13,6 +18,7 @@ const createHarness = ({
   autoRepair = true,
   notificationsDisabled = false,
   gatewayLifecycleLock = null,
+  probeGatewayTcp = null,
   clawCmdImpl,
   resolveSetupUrl = () => "https://setup.example.com",
   resolveGatewayHealthUrl = () => "http://127.0.0.1:18789/health",
@@ -44,6 +50,7 @@ const createHarness = ({
   const watchdog = createWatchdog({
     clawCmd,
     launchGatewayProcess,
+    probeGatewayTcp,
     gatewayLifecycleLock,
     insertWatchdogEvent,
     notifier,
@@ -1588,6 +1595,27 @@ describe("server/watchdog", () => {
     watchdog.stop();
   });
 
+  it("demotes a stuck 'restarting' lifecycle when the settle probe fails", async () => {
+    const { watchdog } = createHarness({
+      autoRepair: false,
+      fetchImpl: async () => {
+        throw new Error("gateway down");
+      },
+    });
+
+    // Route restart begins; the gateway never comes back.
+    watchdog.onExpectedRestart({ expiresAt: Date.now() + 10 * 60 * 1000 });
+    expect(watchdog.getStatus().lifecycle).toBe("restarting");
+
+    watchdog.onExpectedRestartSettled();
+    await flushMicrotasks();
+    await flushMicrotasks();
+
+    // Left as "restarting" the reducer would report launch-in-progress
+    // ("Starting", no Retry) forever over a dead gateway.
+    expect(watchdog.getStatus().lifecycle).toBe("stopped");
+  });
+
   it("records external operation events in the incident ledger", () => {
     const { watchdog, insertWatchdogEvent } = createHarness({});
 
@@ -1782,6 +1810,125 @@ describe("server/watchdog", () => {
     const fetchCalls = global.fetch.mock.calls.length;
     await vi.advanceTimersByTimeAsync(1_000);
     expect(global.fetch.mock.calls.length).toBe(fetchCalls);
+    watchdog.stop();
+  });
+
+  it("runs the TCP liveness watcher on the 10s interval and stop() clears it", async () => {
+    vi.useFakeTimers();
+    const probeGatewayTcp = vi.fn(async () => {});
+    const { watchdog } = createHarness({ autoRepair: false, probeGatewayTcp });
+
+    watchdog.start();
+    await vi.advanceTimersByTimeAsync(0);
+    // The watcher is an interval, not an immediate probe.
+    expect(probeGatewayTcp).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(kGatewayTcpWatchIntervalMs);
+    expect(probeGatewayTcp).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(2 * kGatewayTcpWatchIntervalMs);
+    expect(probeGatewayTcp).toHaveBeenCalledTimes(3);
+
+    watchdog.stop();
+    await vi.advanceTimersByTimeAsync(3 * kGatewayTcpWatchIntervalMs);
+    expect(probeGatewayTcp).toHaveBeenCalledTimes(3);
+  });
+
+  it("tightens health cadence to ~30s only while status clients are connected", async () => {
+    vi.useFakeTimers();
+    const probeGatewayTcp = vi.fn(async () => {});
+    const { watchdog, insertWatchdogEvent } = createHarness({
+      autoRepair: false,
+      probeGatewayTcp,
+    });
+    const fastCadenceChecks = () =>
+      insertWatchdogEvent.mock.calls.filter(
+        (call) =>
+          call?.[0]?.eventType === "health_check" &&
+          call?.[0]?.source === "fast_cadence",
+      );
+
+    watchdog.start();
+    await vi.advanceTimersByTimeAsync(0); // bootstrap check at t=0 stamps lastHealthCheckAtMs
+
+    // Disconnected: three watcher ticks pass the 30s staleness mark with no
+    // fast-cadence check.
+    await vi.advanceTimersByTimeAsync(kWatchdogConnectedHealthCadenceMs);
+    expect(fastCadenceChecks()).toHaveLength(0);
+
+    watchdog.setStatusClientsConnected(true);
+    // t=40s: last check is 40s old (>= 30s) → one fast-cadence check.
+    await vi.advanceTimersByTimeAsync(kGatewayTcpWatchIntervalMs);
+    expect(fastCadenceChecks()).toHaveLength(1);
+    // t=50s/60s: last check only 10s/20s old → never more often than 30s.
+    await vi.advanceTimersByTimeAsync(2 * kGatewayTcpWatchIntervalMs);
+    expect(fastCadenceChecks()).toHaveLength(1);
+    // t=70s: 30s elapsed again → second fast-cadence check.
+    await vi.advanceTimersByTimeAsync(kGatewayTcpWatchIntervalMs);
+    expect(fastCadenceChecks()).toHaveLength(2);
+    watchdog.stop();
+  });
+
+  it("coalesces TCP transitions inside the debounce into one health check", async () => {
+    vi.useFakeTimers();
+    const { watchdog, insertWatchdogEvent } = createHarness({ autoRepair: false });
+
+    watchdog.onGatewayTcpTransition();
+    await vi.advanceTimersByTimeAsync(400);
+    watchdog.onGatewayTcpTransition();
+    watchdog.onGatewayTcpTransition();
+    expect(global.fetch).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(kGatewayTcpTransitionDebounceMs);
+
+    const transitionChecks = insertWatchdogEvent.mock.calls.filter(
+      (call) =>
+        call?.[0]?.eventType === "health_check" &&
+        call?.[0]?.source === "tcp_transition",
+    );
+    expect(transitionChecks).toHaveLength(1);
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("degrades on failures inside the boot grace once this launch confirmed healthy", async () => {
+    vi.useFakeTimers();
+    let healthChecks = 0;
+    const { watchdog, insertWatchdogEvent } = createHarness({
+      autoRepair: false,
+      fetchImpl: async () => {
+        healthChecks += 1;
+        if (healthChecks === 1) {
+          return {
+            ok: true,
+            status: 200,
+            text: async () => JSON.stringify({ ok: true, status: "live" }),
+          };
+        }
+        throw new Error("gateway went away");
+      },
+    });
+
+    // Cold launch: the 30s startup grace window is open.
+    watchdog.onGatewayLaunch({ startedAt: Date.now() });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(watchdog.getStatus().health).toBe("healthy");
+
+    // A TCP transition re-probes ~1s later — still well inside the grace
+    // window, but this launch has provably booted, so the failure is real.
+    watchdog.onGatewayTcpTransition();
+    await vi.advanceTimersByTimeAsync(kGatewayTcpTransitionDebounceMs);
+
+    expect(watchdog.getStatus().health).toBe("degraded");
+    expect(insertWatchdogEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        eventType: "health_check",
+        status: "failed",
+        details: expect.objectContaining({ reason: "gateway went away" }),
+      }),
+    );
+    const graceSkips = insertWatchdogEvent.mock.calls.filter(
+      (call) => call?.[0]?.details?.startupGraceActive,
+    );
+    expect(graceSkips).toHaveLength(0);
     watchdog.stop();
   });
 });

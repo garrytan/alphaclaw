@@ -706,5 +706,71 @@ describe("server/watchdog-notify", () => {
       );
       expect(result).toEqual({ ok: false, reason: "discord down" });
     });
+
+    it("stamps getLastDeliveredAt on every channel's successful delivery", async () => {
+      process.env.TELEGRAM_BOT_TOKEN = "tg-token";
+      process.env.DISCORD_BOT_TOKEN = "dc-token";
+      process.env.SLACK_BOT_TOKEN = "xoxb-default";
+      const buildNotifier = () =>
+        createWatchdogNotifier({
+          telegramApi: { sendMessage: vi.fn(async () => ({ ok: true })) },
+          discordApi: { sendDirectMessage: vi.fn(async () => ({ ok: true })) },
+          slackApi: { postMessage: vi.fn(async () => ({ ts: "1" })) },
+          clawCmd: vi.fn(async () => ({ ok: true, stdout: "sent" })),
+          readEnvFile: () => [{ key: "SLACK_BOT_TOKEN", value: "xoxb-default" }],
+          fsImpl: kEmptyFsMock,
+          openclawDir: "/tmp/openclaw",
+        });
+
+      const kTargets = [
+        { channel: "telegram", target: "12345" },
+        { channel: "discord", target: "999" },
+        { channel: "slack", target: "U_ADMIN" },
+        { channel: "whatsapp", target: "+15550001111" },
+      ];
+      for (const target of kTargets) {
+        const notifier = buildNotifier();
+        expect(notifier.getLastDeliveredAt(), target.channel).toBeNull();
+        const result = await notifier.sendToTarget(target, "Upgrade failed");
+        expect(result, target.channel).toEqual({ ok: true });
+        const deliveredAt = notifier.getLastDeliveredAt();
+        expect(typeof deliveredAt, target.channel).toBe("string");
+        expect(Number.isNaN(Date.parse(deliveredAt)), target.channel).toBe(false);
+      }
+    });
+
+    it("leaves getLastDeliveredAt unchanged on failed or unconfigured sends", async () => {
+      process.env.TELEGRAM_BOT_TOKEN = "tg-token";
+      delete process.env.DISCORD_BOT_TOKEN;
+      const telegramApi = { sendMessage: vi.fn(async () => ({ ok: true })) };
+      const clawCmd = vi.fn(async () => ({ ok: false, stderr: "no session" }));
+      const notifier = createWatchdogNotifier({
+        telegramApi,
+        clawCmd,
+        fsImpl: kEmptyFsMock,
+        openclawDir: "/tmp/openclaw",
+      });
+
+      // Failures before any success leave the stamp null.
+      await notifier.sendToTarget({ channel: "discord", target: "999" }, "m");
+      await notifier.sendToTarget(
+        { channel: "whatsapp", target: "+15550001111" },
+        "m",
+      );
+      expect(notifier.getLastDeliveredAt()).toBeNull();
+
+      await notifier.sendToTarget({ channel: "telegram", target: "1" }, "m");
+      const stamped = notifier.getLastDeliveredAt();
+      expect(Number.isNaN(Date.parse(stamped))).toBe(false);
+
+      // A later thrown provider error must not move the stamp.
+      telegramApi.sendMessage.mockRejectedValueOnce(new Error("blocked by user"));
+      const failed = await notifier.sendToTarget(
+        { channel: "telegram", target: "1" },
+        "m",
+      );
+      expect(failed).toEqual({ ok: false, reason: "blocked by user" });
+      expect(notifier.getLastDeliveredAt()).toBe(stamped);
+    });
   });
 });

@@ -69,6 +69,7 @@ import {
   setCached,
 } from "../../lib/public/js/lib/api-cache.js";
 import { showToast } from "../../lib/public/js/components/toast.js";
+import { gatewayShellStore } from "../../lib/public/js/components/restart-progress-card.js";
 import { UpgradeTabView } from "../../lib/public/js/components/upgrade-tab/index.js";
 import { useUpgradeTab } from "../../lib/public/js/components/upgrade-tab/use-upgrade-tab.js";
 import { buildChannelSaveErrorModel } from "../../lib/public/js/components/upgrade-tab/helpers.js";
@@ -1650,5 +1651,38 @@ describe("frontend/upgrade-tab hook", () => {
         code: "log_not_found",
       }),
     );
+  });
+
+  it("the restart handoff publishes upgradeRestartActive to the shell store; cleanup clears it (M3.4 global banner)", async () => {
+    gatewayShellStore.reset();
+    try {
+      // No operationId/events in the apply result: the quick synchronous
+      // success path hands off to the restart phase immediately.
+      api.applyOpenclawVersion.mockResolvedValue({ ok: true });
+      let state = await hydrate();
+      expect(gatewayShellStore.get().upgradeRestartActive).toBe(false);
+
+      state.onRequestApply({
+        payload: { channel: "stable", version: "2026.7.2" },
+        label: "2026.7.2",
+        isDowngrade: false,
+      });
+      state = renderHook({});
+      await state.onConfirmApply();
+      state = renderHook({});
+      expect(state.operation?.phase).toBe("restarting");
+
+      // Effect #3 in hook declaration order is the upgradeRestartActive
+      // publish (mount load, rehydration, and the elapsed tick precede it).
+      const cleanup = harness.effects[3]();
+      expect(gatewayShellStore.get().upgradeRestartActive).toBe(true);
+
+      // Unmount (or leaving the restarting phase) clears the announcement —
+      // the global banner must never stick after the handoff ends.
+      cleanup();
+      expect(gatewayShellStore.get().upgradeRestartActive).toBe(false);
+    } finally {
+      gatewayShellStore.reset();
+    }
   });
 });
