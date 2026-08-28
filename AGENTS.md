@@ -17,15 +17,16 @@ If you need to understand the internals of OpenClaw, you can inspect the code at
 
 Runtime model:
 
-1. AlphaClaw server starts and manages OpenClaw as a child process.
-2. Setup UI calls AlphaClaw APIs for configuration and operations.
-3. AlphaClaw proxies gateway traffic and handles watchdog monitoring/repair.
+1. At boot, `bin/alphaclaw.js` first spawns a boot-placeholder child process (`lib/boot-placeholder.js` + `lib/boot-placeholder-child.js`) that holds the port — serving an auto-refreshing "updating" page to browsers and `200 {status:"updating"}` health checks to platforms — until the real server is ready to take over.
+2. AlphaClaw server starts and manages OpenClaw as a child process.
+3. Setup UI calls AlphaClaw APIs for configuration and operations.
+4. AlphaClaw proxies gateway traffic and handles watchdog monitoring/repair.
 
 ### Key Technologies
 
 - Node.js 22.22.3+ runtime (or a supported Node 24.15+/25.9+ release).
 - Express-based HTTP API server.
-- `http-proxy` for gateway proxy behavior.
+- `http-proxy-3` (pinned in `package.json`) for gateway proxy behavior, with `lil-http-terminator` for graceful HTTP drain on shutdown.
 - OpenClaw CLI/gateway process orchestration.
 - Preact + `htm` frontend patterns for Setup UI components.
 - Vitest + Supertest for server and route testing.
