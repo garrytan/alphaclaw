@@ -463,7 +463,8 @@ const createServerJsProxyErrorHandler = () => (err, req, res) => {
     } catch {}
     return;
   }
-  const status = err?.code === "ETIMEDOUT" ? 504 : 502;
+  const status =
+    err?.code === "ETIMEDOUT" || req?.__gatewayTimedOut ? 504 : 502;
   try {
     res.writeHead(status, { "Content-Type": "application/json" });
     res.end(
@@ -647,7 +648,6 @@ describe("server/routes/proxy gateway passthrough body handling", () => {
       return req;
     };
 
-    const { EventEmitter } = require("events");
     const createFakeRes = () => {
       const res = new EventEmitter();
       res.headersSent = false;
@@ -761,6 +761,31 @@ describe("server/routes/proxy gateway passthrough body handling", () => {
         JSON.stringify({ error: "Gateway timed out" }),
       );
       expect(res.destroy).not.toHaveBeenCalled();
+    });
+
+    it("maps a proxyTimeout destroy (no error code) to 504 via the request marker", () => {
+      // http-proxy-3's timeout handler destroys proxyReq with NO error, so
+      // the handler sees a bare ECONNRESET-ish error — the __gatewayTimedOut
+      // marker set by the proxyReq timeout listener is what preserves 504.
+      const handler = createServerJsProxyErrorHandler();
+      const res = {
+        headersSent: false,
+        writableEnded: false,
+        writeHead: vi.fn(),
+        end: vi.fn(),
+        destroy: vi.fn(),
+      };
+
+      const resetError = new Error("socket hang up");
+      resetError.code = "ECONNRESET";
+      handler(resetError, { __gatewayTimedOut: true }, res);
+
+      expect(res.writeHead).toHaveBeenCalledWith(504, {
+        "Content-Type": "application/json",
+      });
+      expect(res.end).toHaveBeenCalledWith(
+        JSON.stringify({ error: "Gateway timed out" }),
+      );
     });
 
     it("destroys a socket-shaped res (failed WS upgrade) without throwing", () => {

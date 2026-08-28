@@ -2,6 +2,7 @@ const express = require("express");
 const request = require("supertest");
 
 const { registerWatchdogRoutes } = require("../../lib/server/routes/watchdog");
+const { kTailAbsoluteMaxBytes } = require("../../lib/server/utils/tail-bytes");
 
 const createDeps = () => {
   const requireAuth = (req, res, next) => next();
@@ -221,6 +222,29 @@ describe("server/routes/watchdog", () => {
 
     expect(res.status).toBe(500);
     expect(res.body).toEqual({ ok: false, error: "db is closed" });
+  });
+
+  it("clamps ?tail to the shared 4MB absolute maximum", async () => {
+    const deps = createDeps();
+    const app = createApp(deps);
+
+    const res = await request(app).get("/api/watchdog/logs?tail=999999999999");
+
+    expect(res.status).toBe(200);
+    // Same ceiling tail-bytes enforces internally (kTailAbsoluteMaxBytes):
+    // an arbitrary ?tail can no longer force an unbounded synchronous read.
+    expect(deps.readLogTail).toHaveBeenCalledWith(kTailAbsoluteMaxBytes);
+    expect(deps.readLogTail).toHaveBeenCalledWith(4 * 1024 * 1024);
+  });
+
+  it("clamps ?tail up to the 1024-byte floor", async () => {
+    const deps = createDeps();
+    const app = createApp(deps);
+
+    const res = await request(app).get("/api/watchdog/logs?tail=1");
+
+    expect(res.status).toBe(200);
+    expect(deps.readLogTail).toHaveBeenCalledWith(1024);
   });
 
   it("uses the default tail size and returns 500 on log read failure", async () => {

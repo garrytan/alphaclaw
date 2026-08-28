@@ -127,4 +127,82 @@ describe("server/startup", () => {
       "[alphaclaw] Added IDs to webhook mappings: gmail, stripe",
     );
   });
+
+  const flushMicrotasks = () => new Promise((resolve) => setImmediate(resolve));
+
+  it("logs a rejected channel sync without aborting the boot sequence", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const deps = createBootDeps({
+      syncChannelConfig: vi.fn(() =>
+        Promise.reject(new Error("channel sync exploded")),
+      ),
+    });
+
+    runOnboardedBootSequence(deps);
+    await flushMicrotasks();
+
+    expect(errorSpy).toHaveBeenCalledWith(
+      "[alphaclaw] Boot channel sync failed: channel sync exploded",
+    );
+    // The rejection never blocked the rest of the boot tick.
+    expect(deps.startGateway).toHaveBeenCalled();
+    expect(deps.watchdog.start).toHaveBeenCalled();
+    expect(deps.gmailWatchService.start).toHaveBeenCalled();
+  });
+
+  it("logs a rejected gateway start without aborting the boot sequence", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const deps = createBootDeps({
+      startGateway: vi.fn(() => Promise.reject(new Error("gateway exploded"))),
+    });
+
+    runOnboardedBootSequence(deps);
+    await flushMicrotasks();
+
+    expect(errorSpy).toHaveBeenCalledWith(
+      "[alphaclaw] Boot gateway start failed: gateway exploded",
+    );
+    expect(deps.watchdog.start).toHaveBeenCalled();
+    expect(deps.gmailWatchService.start).toHaveBeenCalled();
+  });
+
+  it("logs a synchronous readEnvFile throw as a channel sync failure and keeps booting", () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const deps = createBootDeps({
+      readEnvFile: vi.fn(() => {
+        throw new Error("env file unreadable");
+      }),
+    });
+
+    runOnboardedBootSequence(deps);
+
+    // readEnvFile throws during argument evaluation — synchronously, before
+    // syncChannelConfig can even be invoked.
+    expect(deps.syncChannelConfig).not.toHaveBeenCalled();
+    expect(errorSpy).toHaveBeenCalledWith(
+      "[alphaclaw] Boot channel sync failed: env file unreadable",
+    );
+    expect(deps.ensureGatewayProxyConfig).toHaveBeenCalled();
+    expect(deps.startGateway).toHaveBeenCalled();
+    expect(deps.watchdog.start).toHaveBeenCalled();
+    expect(deps.gmailWatchService.start).toHaveBeenCalled();
+  });
+
+  it("logs a primeStatusCaches throw after the watchdog has already started", () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const deps = createBootDeps({
+      primeStatusCaches: vi.fn(() => {
+        throw new Error("caches broke");
+      }),
+    });
+
+    runOnboardedBootSequence(deps);
+
+    expect(errorSpy).toHaveBeenCalledWith(
+      "[alphaclaw] Failed to prime status caches on boot: caches broke",
+    );
+    expect(deps.primeStatusCaches).toHaveBeenCalled();
+    expect(deps.watchdog.start).toHaveBeenCalled();
+    expect(deps.gmailWatchService.start).toHaveBeenCalled();
+  });
 });

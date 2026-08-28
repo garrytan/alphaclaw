@@ -59,17 +59,25 @@ describe("server/doctor-service", () => {
         cards: [],
       }),
     }));
+    // Spies wrap the real db fns: with the lean summary readers injected, the
+    // reuse path must fetch the source run's rawResult through getDoctorRun
+    // (summaries no longer carry it).
+    const getDoctorRunSpy = vi.fn(doctorDb.getDoctorRun);
+    const completeDoctorRunSpy = vi.fn(doctorDb.completeDoctorRun);
     const { createDoctorService } = loadDoctorService();
     const doctorService = createDoctorService({
       clawCmd,
       listDoctorRuns: doctorDb.listDoctorRuns,
+      listDoctorRunSummaries: doctorDb.listDoctorRunSummaries,
+      getDoctorRunManifest: doctorDb.getDoctorRunManifest,
+      getLatestCompletedRunSummary: doctorDb.getLatestCompletedRunSummary,
       listDoctorCards: doctorDb.listDoctorCards,
       getInitialWorkspaceBaseline: doctorDb.getInitialWorkspaceBaseline,
       setInitialWorkspaceBaseline: doctorDb.setInitialWorkspaceBaseline,
       createDoctorRun: doctorDb.createDoctorRun,
-      completeDoctorRun: doctorDb.completeDoctorRun,
+      completeDoctorRun: completeDoctorRunSpy,
       insertDoctorCards: doctorDb.insertDoctorCards,
-      getDoctorRun: doctorDb.getDoctorRun,
+      getDoctorRun: getDoctorRunSpy,
       getDoctorCardsByRunId: doctorDb.getDoctorCardsByRunId,
       getDoctorCard: doctorDb.getDoctorCard,
       updateDoctorCardStatus: doctorDb.updateDoctorCardStatus,
@@ -117,6 +125,86 @@ describe("server/doctor-service", () => {
     expect(doctorDb.getDoctorCardsByRunId(rerun.runId)).toEqual([
       expect.objectContaining({ status: "open" }),
     ]);
+    // rawResult propagation: the lean baseline summary has no rawResult, so
+    // the reuse path fetched the FULL source run and passed its rawResult to
+    // completeDoctorRun.
+    const sourceRawResult = doctorDb.getDoctorRun(imported.runId).rawResult;
+    expect(sourceRawResult).toBeTruthy();
+    expect(getDoctorRunSpy).toHaveBeenCalledWith(imported.runId);
+    expect(completeDoctorRunSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: rerun.runId,
+        status: "completed",
+        rawResult: sourceRawResult,
+      }),
+    );
+    expect(latestRun.rawResult).toEqual(sourceRawResult);
+  });
+
+  it("buildStatus reads lean run summaries and caches the baseline manifest per run id", async () => {
+    const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-summaries-workspace-"));
+    const dbRoot = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-summaries-db-"));
+    fs.writeFileSync(path.join(workspaceRoot, "AGENTS.md"), "# Guidance\n", "utf8");
+
+    const doctorDb = loadManagedDoctorDb();
+    doctorDb.initDoctorDb({ rootDir: dbRoot });
+
+    const listRunsSpy = vi.fn(doctorDb.listDoctorRuns);
+    const listSummariesSpy = vi.fn(doctorDb.listDoctorRunSummaries);
+    const manifestSpy = vi.fn(doctorDb.getDoctorRunManifest);
+    const { createDoctorService } = loadDoctorService();
+    const doctorService = createDoctorService({
+      clawCmd: vi.fn(),
+      listDoctorRuns: listRunsSpy,
+      listDoctorRunSummaries: listSummariesSpy,
+      getDoctorRunManifest: manifestSpy,
+      getLatestCompletedRunSummary: doctorDb.getLatestCompletedRunSummary,
+      listDoctorCards: doctorDb.listDoctorCards,
+      getInitialWorkspaceBaseline: doctorDb.getInitialWorkspaceBaseline,
+      setInitialWorkspaceBaseline: doctorDb.setInitialWorkspaceBaseline,
+      createDoctorRun: doctorDb.createDoctorRun,
+      completeDoctorRun: doctorDb.completeDoctorRun,
+      insertDoctorCards: doctorDb.insertDoctorCards,
+      getDoctorRun: doctorDb.getDoctorRun,
+      getDoctorCardsByRunId: doctorDb.getDoctorCardsByRunId,
+      getDoctorCard: doctorDb.getDoctorCard,
+      updateDoctorCardStatus: doctorDb.updateDoctorCardStatus,
+      workspaceRoot,
+      managedRoot: workspaceRoot,
+      computeSnapshotAsync: fastComputeSnapshotAsync,
+    });
+
+    const firstImport = await doctorService.importDoctorResult({
+      rawOutput: JSON.stringify({ summary: "Baseline", cards: [] }),
+    });
+
+    const statusA = doctorService.buildStatus();
+    const statusB = doctorService.buildStatus();
+
+    // The status hot path lists lean summaries, never the heavy full runs.
+    expect(listSummariesSpy).toHaveBeenCalled();
+    expect(listRunsSpy).not.toHaveBeenCalled();
+    expect(statusA.latestRun.id).toBe(firstImport.runId);
+    expect(statusA.latestRun).not.toHaveProperty("workspaceManifest");
+    expect(statusA.latestRun).not.toHaveProperty("rawResult");
+    expect(statusB.changeSummary.hasBaseline).toBe(true);
+    expect(statusB.changeSummary.baselineSource).toBe("last_run");
+
+    // The baseline manifest is fetched ONCE for the same completed run across
+    // consecutive buildStatus calls.
+    expect(manifestSpy).toHaveBeenCalledTimes(1);
+    expect(manifestSpy).toHaveBeenCalledWith(firstImport.runId);
+
+    // A NEWER completed run becomes the baseline: exactly one more fetch.
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const secondImport = await doctorService.importDoctorResult({
+      rawOutput: JSON.stringify({ summary: "Newer baseline", cards: [] }),
+    });
+    doctorService.buildStatus();
+    doctorService.buildStatus();
+
+    expect(manifestSpy).toHaveBeenCalledTimes(2);
+    expect(manifestSpy).toHaveBeenLastCalledWith(secondImport.runId);
   });
 
   it("runs Doctor analysis in a dedicated doctor session", async () => {

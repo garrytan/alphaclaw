@@ -1559,6 +1559,33 @@ describe("server/gateway restart behavior", () => {
       );
     });
 
+    it("escalates to SIGKILL when the gateway child ignores SIGTERM", async () => {
+      // Node sets child.killed=true the moment a signal is SENT — the
+      // escalation must not be gated on it, or a SIGTERM-ignoring gateway
+      // survives every shutdown holding the port (regression: adversarial
+      // review H1).
+      const signals = [];
+      const child = createChild();
+      child.kill = vi.fn((sig) => {
+        signals.push(sig);
+        child.killed = true;
+        if (sig === "SIGKILL") child.exitCode = 137;
+        return true;
+      });
+      childProcess.spawn = vi.fn(() => child);
+      childProcess.execFile = createExecFileMock();
+      fs.existsSync = vi.fn(() => false);
+      net.createConnection = vi.fn(() => createSocket(false));
+      delete require.cache[modulePath];
+      const gateway = require(modulePath);
+
+      await gateway.launchGatewayProcess();
+      const reaped = await gateway.stopGatewayChildAndWait({ graceMs: 50 });
+
+      expect(signals).toEqual(["SIGTERM", "SIGKILL"]);
+      expect(reaped).toBe(true);
+    });
+
     it("uses lifecycle restart for light restarts while the gateway is up", async () => {
       const behaviors = [
         (cb) => cb(null, "restarted ok\n", ""),
@@ -1976,6 +2003,72 @@ describe("server/gateway restart behavior", () => {
       );
 
       expect(execFileMock).not.toHaveBeenCalled();
+    });
+
+    it("scrubs secret argv values from a failing channels add error message before logging", async () => {
+      setupConfig(JSON.stringify({ channels: {} }));
+      // execFile failures embed the full argv in error.message — exactly the
+      // shape Node produces for a non-zero exit.
+      const execFileMock = createExecFileMock((file, args, opts, cb) => {
+        cb(
+          new Error(
+            "Command failed: openclaw channels add --channel slack --bot-token xoxb-SECRET --app-token xapp-SECRET",
+          ),
+          "",
+          "",
+        );
+      });
+      childProcess.execFile = execFileMock;
+      delete require.cache[modulePath];
+      const gateway = require(modulePath);
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+      await gateway.syncChannelConfig(
+        [
+          { key: "SLACK_BOT_TOKEN", value: "xoxb-SECRET" },
+          { key: "SLACK_APP_TOKEN", value: "xapp-SECRET" },
+        ],
+        "add",
+      );
+
+      const logged = errorSpy.mock.calls
+        .map((call) => String(call[0]))
+        .find((line) => line.includes("channels add slack"));
+      // The values following --bot-token/--app-token were redacted before the
+      // message could reach process.log (served by /api/watchdog/logs).
+      expect(logged).toContain("[redacted]");
+      expect(logged).not.toContain("xoxb-SECRET");
+      expect(logged).not.toContain("xapp-SECRET");
+    });
+
+    it("scrubs token values echoed on stderr before logging channel add failures", async () => {
+      setupConfig(JSON.stringify({ channels: {} }));
+      const execFileMock = createExecFileMock((file, args, opts, cb) => {
+        cb(
+          new Error("add failed"),
+          "",
+          "invalid token tg-secret-value rejected by API",
+        );
+      });
+      childProcess.execFile = execFileMock;
+      delete require.cache[modulePath];
+      const gateway = require(modulePath);
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+      await gateway.syncChannelConfig(
+        [{ key: "TELEGRAM_BOT_TOKEN", value: "tg-secret-value" }],
+        "add",
+      );
+
+      expect(errorSpy).toHaveBeenCalledWith(
+        expect.stringContaining(
+          "channels add telegram: invalid token [redacted] rejected by API",
+        ),
+      );
+      const allLogged = errorSpy.mock.calls
+        .map((call) => String(call[0]))
+        .join("\n");
+      expect(allLogged).not.toContain("tg-secret-value");
     });
 
     it("logs channel add failures", async () => {

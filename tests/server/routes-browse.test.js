@@ -1743,3 +1743,70 @@ describe("server/routes/browse git helpers", () => {
     expect(result.error).toBeTruthy();
   });
 });
+
+// Preview size gates on /api/browse/read: oversized files get 413 instead of
+// being base64/utf8-inlined into a JSON response (an OOM vector on small
+// instances). Sparse files via ftruncateSync make the >5MB/>20MB fixtures
+// instant and permission-independent.
+describe("server/routes/browse preview size gates", () => {
+  const kMaxTextPreviewBytes = 5 * 1024 * 1024;
+  const kMaxMediaPreviewBytes = 20 * 1024 * 1024;
+
+  const createSparseFile = (rootDir, name, sizeBytes, leadingContent = "") => {
+    const filePath = path.join(rootDir, name);
+    fs.writeFileSync(filePath, leadingContent, "utf8");
+    const fd = fs.openSync(filePath, "r+");
+    try {
+      fs.ftruncateSync(fd, sizeBytes);
+    } finally {
+      fs.closeSync(fd);
+    }
+    expect(fs.statSync(filePath).size).toBe(sizeBytes);
+    return filePath;
+  };
+
+  it("returns 413 for a text file just over the 5MB preview limit", async () => {
+    const rootDir = createTestRoot();
+    // Leading non-NUL text keeps the binary sniffer (first 512 bytes) from
+    // classifying the sparse file as binary — it must reach the TEXT gate.
+    createSparseFile(rootDir, "big.txt", kMaxTextPreviewBytes + 1, "a".repeat(512));
+    const app = createApp(rootDir);
+
+    const res = await request(app)
+      .get("/api/browse/read")
+      .query({ path: "big.txt" });
+
+    expect(res.status).toBe(413);
+    expect(res.body).toEqual({ ok: false, error: "File too large to preview" });
+  });
+
+  it("returns 413 for an image just over the 20MB media preview limit", async () => {
+    const rootDir = createTestRoot();
+    // All-sparse (NUL) leading bytes: classified binary, .png maps to an
+    // image mime type, so this exercises the MEDIA gate.
+    createSparseFile(rootDir, "big.png", kMaxMediaPreviewBytes + 1);
+    const app = createApp(rootDir);
+
+    const res = await request(app)
+      .get("/api/browse/read")
+      .query({ path: "big.png" });
+
+    expect(res.status).toBe(413);
+    expect(res.body).toEqual({ ok: false, error: "File too large to preview" });
+  });
+
+  it("previews a text file at exactly the 5MB limit", async () => {
+    const rootDir = createTestRoot();
+    createSparseFile(rootDir, "fits.txt", kMaxTextPreviewBytes, "a".repeat(512));
+    const app = createApp(rootDir);
+
+    const res = await request(app)
+      .get("/api/browse/read")
+      .query({ path: "fits.txt" });
+
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+    expect(res.body.kind).toBe("text");
+    expect(res.body.content.startsWith("a".repeat(512))).toBe(true);
+  });
+});

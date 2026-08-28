@@ -52,6 +52,9 @@ describe("server/init/server-lifecycle", () => {
       stopGateway: vi.fn(async () => {
         order.push("gateway");
       }),
+      stopWatchdog: vi.fn(() => {
+        order.push("watchdog");
+      }),
       gmailWatchService: {
         stop: vi.fn(async () => {
           order.push("gmail");
@@ -62,6 +65,9 @@ describe("server/init/server-lifecycle", () => {
           order.push("terminal");
         }),
       },
+      disposeServices: vi.fn(() => {
+        order.push("dispose");
+      }),
       flushLogs: vi.fn(() => {
         order.push("flush");
       }),
@@ -87,12 +93,62 @@ describe("server/init/server-lifecycle", () => {
 
     await lifecycle.gracefulExit(0, "test shutdown");
 
-    // gateway stop → gmail watch stop → terminal dispose → log flush, then
-    // exit with the requested code. The http terminator ran first and closed
-    // the real server.
-    expect(order).toEqual(["gateway", "gmail", "terminal", "flush"]);
+    // watchdog stop (before gateway stop, so probes don't react to the
+    // expected exit) → gateway stop → gmail watch stop → terminal dispose →
+    // service dispose → log flush, then exit with the requested code. The
+    // http terminator ran between watchdog and gateway and closed the server.
+    expect(order).toEqual(["watchdog", "gateway", "gmail", "terminal", "dispose", "flush"]);
     expect(exitCalls).toEqual([0]);
     expect(server.listening).toBe(false);
+  });
+
+  it("pins keep-alive, headers, and request timeouts on the server", () => {
+    const server = trackServer(http.createServer(() => {}));
+    createServerLifecycle({
+      server,
+      PORT: 0,
+      exitImpl: vi.fn(),
+      logger: createSilentLogger(),
+      listenRetryDelayMs: 1,
+      shutdownDeadlineMs: 200,
+    });
+
+    // keepAliveTimeout must outlive a platform LB's ~60s idle timeout,
+    // headersTimeout must exceed keepAliveTimeout, and requestTimeout pins
+    // Node's default explicitly.
+    expect(server.keepAliveTimeout).toBe(65000);
+    expect(server.headersTimeout).toBe(66000);
+    expect(server.requestTimeout).toBe(300000);
+  });
+
+  it("a throwing disposeServices step is logged and does not prevent the log flush", async () => {
+    const order = [];
+    const logger = createSilentLogger();
+    const lifecycle = createServerLifecycle({
+      server: new EventEmitter(),
+      PORT: 3999,
+      stopGateway: vi.fn(async () => {
+        order.push("gateway");
+      }),
+      disposeServices: vi.fn(() => {
+        order.push("dispose");
+        throw new Error("dispose exploded");
+      }),
+      flushLogs: vi.fn(() => {
+        order.push("flush");
+      }),
+      exitImpl: vi.fn(),
+      logger,
+      listenRetryDelayMs: 1,
+      shutdownDeadlineMs: 200,
+    });
+
+    await lifecycle.drain();
+
+    expect(order).toEqual(["gateway", "dispose", "flush"]);
+    expect(logger.error).toHaveBeenCalledWith(
+      "[alphaclaw] shutdown step failed (service dispose): dispose exploded",
+    );
   });
 
   it("runs the onboarded boot sequence on listen when onboarded", async () => {

@@ -187,4 +187,56 @@ describe("server/log-writer", () => {
       "log writer degraded",
     );
   });
+
+  it("truncates a single pathological ~100KB line to the 64KB per-entry cap", () => {
+    initLogWriter({ rootDir: tmpDir, maxBytes: 32 * 1024 * 1024 });
+
+    // One 100KB line: the per-entry byte bound (64KB + "[truncated]\n")
+    // must apply — a multi-MB line cannot bypass the line-count caps.
+    process.stdout.write(`${"B".repeat(100 * 1024)}\n`);
+    flushLogWriter();
+
+    const content = fs.readFileSync(getLogPath(), "utf8");
+    expect(content.endsWith("[truncated]\n")).toBe(true);
+    // Entry = 24-char ISO timestamp + " " + line, sliced to 64KB, plus marker.
+    expect(content.length).toBe(64 * 1024 + "[truncated]\n".length);
+    expect(content).toContain("B".repeat(1000));
+  });
+
+  it("drops the queued window with a warning when the stream is backpressured", () => {
+    // A stream whose internal buffer already reports past the 4MB cap (disk
+    // stalled): the flush must DROP the window — never write, never grow the
+    // buffer without bound.
+    const fakeStream = {
+      writableLength: 4 * 1024 * 1024 + 1,
+      on: vi.fn(),
+      write: vi.fn(),
+      end: vi.fn(),
+      destroy: vi.fn(),
+    };
+    vi.spyOn(fs, "createWriteStream").mockReturnValue(fakeStream);
+    // Spy on raw stderr BEFORE init so the writer's saved rawStderrWrite is
+    // this spy — the backpressure warning must arrive here, not in the log.
+    const stderrChunks = [];
+    vi.spyOn(process.stderr, "write").mockImplementation((chunk) => {
+      stderrChunks.push(String(chunk));
+      return true;
+    });
+    initLogWriter({ rootDir: tmpDir, maxBytes: 32 * 1024 * 1024 });
+
+    process.stdout.write("dropped-under-backpressure\n");
+    // readLogTail flushes the queue first — that flush hits the guard.
+    const tail = readLogTail(65536);
+
+    expect(fakeStream.write).not.toHaveBeenCalled();
+    expect(stderrChunks.join("")).toContain(
+      "log stream backpressured — dropping buffered lines",
+    );
+    expect(tail).not.toContain("dropped-under-backpressure");
+    // The window is gone, not deferred: a later sync flush has nothing left.
+    flushLogWriter();
+    expect(fs.readFileSync(getLogPath(), "utf8")).not.toContain(
+      "dropped-under-backpressure",
+    );
+  });
 });

@@ -217,4 +217,26 @@ describe("server/utils/lifecycle-lock", () => {
       /rejected \(shutting down\)/,
     );
   });
+
+  it("rejects queued work beyond the queue-depth cap (joins still allowed)", async () => {
+    const { createLifecycleLock } = require("../../lib/server/utils/lifecycle-lock");
+    const lock = createLifecycleLock({ maxQueueDepth: 2 });
+    let release;
+    const gate = new Promise((resolve) => {
+      release = resolve;
+    });
+    const running = lock.run("op-0", () => gate);
+    const q1 = lock.run("op-1", async () => "q1");
+    const q2 = lock.run("op-2", async () => "q2");
+
+    // Queue is full: a NEW op is rejected, but joining a queued op is not.
+    await expect(lock.run("op-3", async () => {})).rejects.toThrow(/queue full/i);
+    const joined = lock.run("op-1", async () => "never-runs");
+
+    release();
+    await expect(running).resolves.toBeUndefined();
+    await expect(q1).resolves.toBe("q1");
+    await expect(q2).resolves.toBe("q2");
+    await expect(joined).resolves.toBe("q1");
+  });
 });

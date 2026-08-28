@@ -233,6 +233,85 @@ describe("server/watchdog", () => {
     );
   });
 
+  it("retries a crash-loop repair skipped by an in-flight relaunch until the operation settles", async () => {
+    vi.useFakeTimers();
+    let releaseLaunch;
+    const launchGate = new Promise((resolve) => {
+      releaseLaunch = resolve;
+    });
+    const { watchdog, clawCmd, launchGatewayProcess } = createHarness({
+      autoRepair: true,
+      clawCmdImpl: async (command) => {
+        if (command === "doctor --fix --yes") return { ok: true, stdout: "fixed" };
+        return { ok: true, stdout: "" };
+      },
+      fetchImpl: async () => {
+        throw new Error("still unhealthy");
+      },
+    });
+    try {
+      // Crash 1's relaunch parks on this gate, holding operationInProgress.
+      launchGatewayProcess.mockImplementation(() => launchGate);
+
+      watchdog.onGatewayExit({ code: 1, expectedExit: false });
+      await vi.advanceTimersByTimeAsync(0); // relaunch reaches the launch await
+      watchdog.onGatewayExit({ code: 1, expectedExit: false });
+      watchdog.onGatewayExit({ code: 1, expectedExit: false }); // crash loop
+      await vi.advanceTimersByTimeAsync(0);
+
+      // Initial crash-loop repair was skipped (operation_in_progress) and the
+      // retry cadence is running; still skipped while the relaunch is parked.
+      const doctorCalls = () =>
+        clawCmd.mock.calls.filter((call) => call[0] === "doctor --fix --yes").length;
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(doctorCalls()).toBe(0);
+
+      // Relaunch settles → operationInProgress releases → next retry repairs.
+      releaseLaunch({ pid: 4242 });
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(doctorCalls()).toBe(1);
+    } finally {
+      watchdog.stop();
+      vi.useRealTimers();
+    }
+  });
+
+  it("stops crash-loop repair retries after the bounded attempt count", async () => {
+    vi.useFakeTimers();
+    const launchGate = new Promise(() => {}); // never settles
+    const { watchdog, clawCmd, launchGatewayProcess } = createHarness({
+      autoRepair: true,
+      fetchImpl: async () => {
+        throw new Error("still unhealthy");
+      },
+    });
+    try {
+      launchGatewayProcess.mockImplementation(() => launchGate);
+
+      watchdog.onGatewayExit({ code: 1, expectedExit: false });
+      await vi.advanceTimersByTimeAsync(0);
+      watchdog.onGatewayExit({ code: 1, expectedExit: false });
+      watchdog.onGatewayExit({ code: 1, expectedExit: false });
+      await vi.advanceTimersByTimeAsync(0);
+
+      // 5 bounded retries all skip while the operation never settles; the
+      // chain must then STOP — no repair attempts fire on later ticks even
+      // though the doctor command would now be reachable.
+      const doctorCalls = () =>
+        clawCmd.mock.calls.filter((call) => call[0] === "doctor --fix --yes").length;
+      for (let i = 0; i < 7; i += 1) {
+        await vi.advanceTimersByTimeAsync(2000);
+      }
+      expect(doctorCalls()).toBe(0);
+      await vi.advanceTimersByTimeAsync(20000);
+      expect(doctorCalls()).toBe(0);
+    } finally {
+      watchdog.stop();
+      vi.useRealTimers();
+    }
+  });
+
   it("clears crash-loop lifecycle after a healthy check recovery", async () => {
     vi.useFakeTimers();
     let healthChecks = 0;
