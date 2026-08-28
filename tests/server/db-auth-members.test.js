@@ -86,6 +86,8 @@ describe("server/db/auth members store (4.1)", () => {
       `${"x".repeat(250)}@example.com`, // over length cap
       "\u{1F600}@example.com", // emoji local — Node rejects it in a header
       "näme@example.com", // non-ASCII byte — header-unsafe
+      "K@example.com", // Kelvin sign folds to ASCII "k" under toLowerCase
+      "ſ@example.com", // Latin small long s folds to "s"
     ];
     for (const email of nasty) {
       expect(() =>
