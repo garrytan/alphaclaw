@@ -423,6 +423,10 @@ describe("server/routes/system", () => {
               releaseChannel: "stable",
             },
           },
+          team: {
+            enabled: false,
+            disableLegacyLogin: false,
+          },
         },
         openclawChannel: null,
         syncCron: expect.objectContaining({
@@ -750,6 +754,10 @@ describe("server/routes/system", () => {
             releaseChannel: "stable",
           },
         },
+        team: {
+          enabled: false,
+          disableLegacyLogin: false,
+        },
       },
     });
   });
@@ -778,6 +786,10 @@ describe("server/routes/system", () => {
             openclaw: {
               releaseChannel: "stable",
             },
+          },
+          team: {
+            enabled: false,
+            disableLegacyLogin: false,
           },
         },
       }),
