@@ -343,7 +343,9 @@ describe("server/watchdog gateway + release channel (e2e)", { retry: 1 }, () => 
     const stack = createStack({ autoRepair: false, channel });
 
     stack.watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    await flushMicrotasks();
     stack.watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    await flushMicrotasks();
     stack.watchdog.onGatewayExit({ code: 1, expectedExit: false });
     await flushMicrotasks();
 
@@ -386,7 +388,9 @@ describe("server/watchdog gateway + release channel (e2e)", { retry: 1 }, () => 
     const stack = createStack({ autoRepair: false, channel });
 
     stack.watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    await flushMicrotasks();
     stack.watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    await flushMicrotasks();
     stack.watchdog.onGatewayExit({ code: 1, expectedExit: false });
     await flushMicrotasks();
 
@@ -421,7 +425,9 @@ describe("server/watchdog gateway + release channel (e2e)", { retry: 1 }, () => 
     expect(channel.service.getChannelInfo().inStabilizationWindow).toBe(false);
 
     stack.watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    await flushMicrotasks();
     stack.watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    await flushMicrotasks();
     stack.watchdog.onGatewayExit({ code: 1, expectedExit: false });
     await flushMicrotasks();
 
@@ -441,7 +447,9 @@ describe("server/watchdog gateway + release channel (e2e)", { retry: 1 }, () => 
     expect(channel.store.readState().applied.acceptedAt).toBeNull();
 
     stack.watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    await flushMicrotasks();
     stack.watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    await flushMicrotasks();
     stack.watchdog.onGatewayExit({ code: 1, expectedExit: false });
     await flushMicrotasks();
 
@@ -518,7 +526,9 @@ describe("server/watchdog gateway + release channel (e2e)", { retry: 1 }, () => 
     const loopStack = createStack({ autoRepair: false, channel: loopChannel });
 
     loopStack.watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    await flushMicrotasks();
     loopStack.watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    await flushMicrotasks();
     loopStack.watchdog.onGatewayExit({ code: 1, expectedExit: false });
     await flushMicrotasks();
 

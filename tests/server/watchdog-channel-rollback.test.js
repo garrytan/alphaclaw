@@ -265,7 +265,10 @@ describe("server/watchdog release-channel rollback hooks", () => {
     await flushMicrotasks();
 
     expect(watchdog.getStatus().crashCountInWindow).toBe(1);
-    expect(watchdog.getStatus().lifecycle).toBe("crashed");
+    // The relaunch's operation-end probe finds the gateway healthy and heals
+    // the lifecycle immediately (previously "crashed" lingered until the next
+    // 120s timer tick). The crash evidence stays in crashCountInWindow.
+    expect(watchdog.getStatus().lifecycle).toBe("running");
   });
 
   it("escalates a long degraded state to rollback and suppresses auto-repair in-window [REG]", async () => {
