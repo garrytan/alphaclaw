@@ -151,3 +151,33 @@ describe("server/openclaw-capabilities", () => {
     expect(clawCmd).toHaveBeenCalledTimes(2);
   });
 });
+
+describe("server/openclaw-capabilities buzz probe (5.2)", () => {
+  const {
+    createOpenclawCapabilities,
+  } = require("../../lib/server/openclaw-capabilities");
+  const ok = (stdout = "", stderr = "") => ({ ok: true, stdout, stderr });
+
+  it("keys on the supported-channel enum, not --help exit status", async () => {
+    // Stable: --help succeeds but the enum lacks buzz — must be FALSE.
+    const stableHelp = ok(
+      "Usage: openclaw channels add [options]\n--channel <name> Channel\n(telegram|whatsapp|discord|slack|\nclickclack|twitch)",
+    );
+    const stable = createOpenclawCapabilities({
+      clawCmd: vi.fn(async () => stableHelp),
+      getInstalledVersion: () => "2026.7.1-2",
+    });
+    expect(await stable.get("buzzChannel")).toBe(false);
+
+    // Beta with the plugin: buzz appears in the enum — TRUE (even wrapped
+    // across help-text lines).
+    const betaHelp = ok(
+      "Usage: openclaw channels add [options]\n--channel <name> Channel\n(telegram|whatsapp|discord|slack|\nbuzz|clickclack|twitch)",
+    );
+    const beta = createOpenclawCapabilities({
+      clawCmd: vi.fn(async () => betaHelp),
+      getInstalledVersion: () => "2026.8.1-beta.3",
+    });
+    expect(await beta.get("buzzChannel")).toBe(true);
+  });
+});
