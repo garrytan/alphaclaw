@@ -1513,8 +1513,14 @@ describe("server/gateway restart behavior", () => {
         const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
 
         const pending = gateway.runGatewayCmd("--force");
+        pending.catch(() => {});
         await vi.advanceTimersByTimeAsync(121000);
-        await pending;
+        // A restart that never becomes ready is now an explicit failure with
+        // evidence attached (previously a silent success).
+        await expect(pending).rejects.toMatchObject({
+          name: "GatewayRestartError",
+          evidence: expect.objectContaining({ timeoutMs: 120000 }),
+        });
 
         expect(supervisor.kill).toHaveBeenCalledWith("SIGTERM");
         expect(childProcess.execFile).toHaveBeenCalledWith(

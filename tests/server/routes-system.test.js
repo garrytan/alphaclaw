@@ -380,7 +380,9 @@ describe("server/routes/system", () => {
 
     const restart = await request(app).post("/api/gateway/restart");
     expect(restart.status).toBe(200);
-    expect(restart.body).toEqual({ ok: true, restartRequired: false });
+    expect(restart.body).toEqual(
+      expect.objectContaining({ ok: true, restartRequired: false }),
+    );
     expect(deps.restartGateway).toHaveBeenCalledTimes(1);
 
     const envAfterRestart = await request(app).get("/api/env");
@@ -2001,6 +2003,170 @@ describe("server/routes/system", () => {
     }
   }, 30000);
 
+  it("runs an async restart as a streamed operation with human step labels", async () => {
+    const deps = createSystemDeps();
+    deps.restartRequiredState.beginRestart = vi.fn(() => ({
+      operationId: "op-1",
+      reasonsSnapshot: [],
+    }));
+    deps.restartRequiredState.updateRestartOperation = vi.fn();
+    deps.restartRequiredState.completeRestart = vi.fn();
+    deps.operationEvents = {
+      createOperation: vi.fn(() => ({ operationId: "op-1" })),
+      publish: vi.fn(),
+      complete: vi.fn(),
+      fail: vi.fn(),
+    };
+    deps.watchdog = {
+      getStatus: vi.fn(() => ({ lifecycle: "running" })),
+      onExpectedRestart: vi.fn(),
+    };
+    let releaseCalled = false;
+    deps.gatewayLifecycleLock = {
+      acquire: vi.fn(async () => () => {
+        releaseCalled = true;
+      }),
+      getActiveOperation: vi.fn(() => null),
+    };
+    let resolveRestart;
+    deps.restartGateway = vi.fn(({ onStep }) => {
+      onStep({ step: "preparing_plugins", status: "skipped" });
+      onStep({ step: "stopping", status: "running" });
+      return new Promise((resolve) => {
+        resolveRestart = () => resolve({ durationMs: 1234 });
+      });
+    });
+    const app = createApp(deps);
+
+    const res = await request(app).post("/api/gateway/restart?async=1");
+    expect(res.status).toBe(202);
+    expect(res.body).toEqual({ ok: true, operationId: "op-1" });
+    expect(deps.operationEvents.createOperation).toHaveBeenCalledWith({
+      type: "gateway_restart",
+      operationId: "op-1",
+    });
+    // Steps stream with public labels, never bare internal ids.
+    expect(deps.operationEvents.publish).toHaveBeenCalledWith("op-1", {
+      event: "step",
+      data: expect.objectContaining({
+        name: "stopping",
+        label: "Stopping gateway",
+        status: "running",
+      }),
+    });
+    expect(deps.watchdog.onExpectedRestart).toHaveBeenCalled();
+
+    resolveRestart();
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(deps.restartRequiredState.completeRestart).toHaveBeenCalledWith({
+      operationId: "op-1",
+      ok: true,
+    });
+    expect(deps.operationEvents.complete).toHaveBeenCalledWith("op-1", {
+      ok: true,
+      durationMs: 1234,
+    });
+    expect(releaseCalled).toBe(true);
+  });
+
+  it("attaches concurrent restart requests to the active operation", async () => {
+    const deps = createSystemDeps();
+    deps.restartRequiredState.beginRestart = vi.fn(() => ({
+      operationId: "op-2",
+      reasonsSnapshot: [],
+    }));
+    deps.restartRequiredState.completeRestart = vi.fn();
+    let resolveRestart;
+    deps.restartGateway = vi.fn(
+      () =>
+        new Promise((resolve) => {
+          resolveRestart = () => resolve({ durationMs: 5 });
+        }),
+    );
+    const app = createApp(deps);
+
+    const first = request(app).post("/api/gateway/restart?async=1");
+    const firstRes = await first;
+    expect(firstRes.status).toBe(202);
+
+    const second = await request(app).post("/api/gateway/restart?async=1");
+    expect(second.status).toBe(202);
+    expect(second.body).toEqual({
+      ok: true,
+      attached: true,
+      operationId: "op-2",
+    });
+    expect(deps.restartGateway).toHaveBeenCalledTimes(1);
+    resolveRestart();
+  });
+
+  it("rejects a restart while a channel apply is in progress", async () => {
+    const deps = createSystemDeps();
+    deps.openclawChannelService = {
+      getChannelInfo: vi.fn(() => null),
+      isApplyInProgress: vi.fn(() => true),
+    };
+    const app = createApp(deps);
+
+    const res = await request(app).post("/api/gateway/restart");
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe("apply_in_progress");
+    expect(deps.restartGateway).not.toHaveBeenCalled();
+  });
+
+  it("surfaces redacted failure evidence when a restart never becomes ready", async () => {
+    const deps = createSystemDeps();
+    deps.restartRequiredState.beginRestart = vi.fn(() => ({
+      operationId: "op-3",
+      reasonsSnapshot: [],
+    }));
+    deps.restartRequiredState.completeRestart = vi.fn();
+    deps.operationEvents = {
+      createOperation: vi.fn(),
+      publish: vi.fn(),
+      complete: vi.fn(),
+      fail: vi.fn(),
+    };
+    const previousSecret = process.env.TEST_RESTART_SECRET;
+    process.env.TEST_RESTART_SECRET = "super-secret-token";
+    try {
+      const failure = Object.assign(
+        new Error("Gateway did not become ready within 120s"),
+        {
+          evidence: {
+            stderrTail: ["boom with super-secret-token inside", "second line"],
+            timeoutMs: 120000,
+          },
+        },
+      );
+      deps.restartGateway = vi.fn(async () => {
+        throw failure;
+      });
+      const app = createApp(deps);
+
+      const res = await request(app).post("/api/gateway/restart");
+      expect(res.status).toBe(500);
+      expect(res.body.error).toContain("did not become ready");
+      expect(res.body.evidence).toContain("boom with *** inside");
+      expect(res.body.evidence).not.toContain("super-secret-token");
+      expect(deps.restartRequiredState.completeRestart).toHaveBeenCalledWith(
+        expect.objectContaining({ operationId: "op-3", ok: false }),
+      );
+      expect(deps.operationEvents.fail).toHaveBeenCalled();
+
+      // The evidence stays retrievable by reference on /api/restart-status.
+      deps.restartRequiredState.getLastRestartOperation = vi.fn(() => ({
+        operationId: "op-3",
+        status: "failed",
+      }));
+      const statusRes = await request(app).get("/api/restart-status");
+      expect(statusRes.body.lastOperation.evidence).toContain("boom with ***");
+    } finally {
+      if (previousSecret === undefined) delete process.env.TEST_RESTART_SECRET;
+      else process.env.TEST_RESTART_SECRET = previousSecret;
+    }
+  });
+
   it("reports restart status and surfaces snapshot failures", async () => {
     const deps = createSystemDeps();
     const app = createApp(deps);
@@ -2012,6 +2178,9 @@ describe("server/routes/system", () => {
       restartRequired: false,
       restartInProgress: false,
       gatewayRunning: true,
+      reasons: [],
+      activeOperation: null,
+      lastOperation: null,
     });
 
     deps.restartRequiredState.getSnapshot.mockRejectedValueOnce(
@@ -2058,7 +2227,9 @@ describe("server/routes/system", () => {
     deps.restartGateway.mockRejectedValueOnce(new Error("restart blew up"));
     const failRes = await request(app).post("/api/gateway/restart");
     expect(failRes.status).toBe(500);
-    expect(failRes.body).toEqual({ ok: false, error: "restart blew up" });
+    expect(failRes.body).toEqual(
+      expect.objectContaining({ ok: false, error: "restart blew up" }),
+    );
     expect(deps.restartRequiredState.markRestartInProgress).toHaveBeenCalled();
     expect(deps.restartRequiredState.markRestartComplete).toHaveBeenCalled();
 
@@ -2068,9 +2239,11 @@ describe("server/routes/system", () => {
     );
     const snapshotFailRes = await request(app).post("/api/gateway/restart");
     expect(snapshotFailRes.status).toBe(500);
-    expect(snapshotFailRes.body).toEqual({
+    expect(snapshotFailRes.body).toEqual(
+      expect.objectContaining({
       ok: false,
       error: "snapshot store offline",
-    });
+    }),
+    );
   });
 });
