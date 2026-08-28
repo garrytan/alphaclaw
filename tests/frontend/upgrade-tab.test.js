@@ -407,9 +407,7 @@ describe("frontend/upgrade-tab view", () => {
     expect(text).toContain("STABILIZING");
     expect(text).toContain("auto-rollback armed → last known good: 2026.7.2");
     expect(text).toContain("first 24h");
-    expect(text).toContain(
-      "Channel-applied versions add ~10-30s to restarts (the built-in version boots fastest).",
-    );
+    expect(text).toContain("Channel-applied versions add ~10-60s");
 
     const markGood = findActionButtonByLabel(tree, "Mark as good now");
     expect(markGood).toBeTruthy();

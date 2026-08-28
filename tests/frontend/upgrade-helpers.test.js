@@ -447,15 +447,41 @@ describe("frontend/upgrade-helpers status card", () => {
     expect(model.showStabilizationActions).toBe(true);
     expect(model.autoAcceptedNote).toBeNull();
     expect(model.bootCostNote).toBe(
-      "Channel-applied versions add ~10-30s to restarts (the built-in version boots fastest).",
+      "Channel-applied versions add ~10-60s to the first restart after a version change (settings migration and install checks run once; later restarts are fast).",
     );
   });
 
   it("names channel-applied versions (not 'non-stable') in the boot-cost note", async () => {
     const { kBootCostNote } = await loadUpgradeHelpers();
-    expect(kBootCostNote).toBe(
-      "Channel-applied versions add ~10-30s to restarts (the built-in version boots fastest).",
-    );
+    expect(kBootCostNote).toContain("Channel-applied versions add ~10-60s");
+    expect(kBootCostNote).toContain("settings migration");
+  });
+
+  it("surfaces the settings-migration result in admin language (2.1/D1)", async () => {
+    const { buildSettingsMigrationRow } = await loadUpgradeHelpers();
+
+    expect(buildSettingsMigrationRow(null)).toBeNull();
+    expect(buildSettingsMigrationRow({})).toBeNull();
+
+    expect(
+      buildSettingsMigrationRow({
+        completedForVersion: "2026.8.1-beta.3",
+        lastAttempt: { version: "2026.8.1-beta.3", at: 1, ok: true },
+      }),
+    ).toEqual({ ok: true, text: "Settings updated for 2026.8.1-beta.3" });
+
+    const failed = buildSettingsMigrationRow({
+      completedForVersion: "2026.7.1-2",
+      lastAttempt: {
+        version: "2026.8.1-beta.3",
+        at: 2,
+        ok: false,
+        error: "doctor exited 1",
+      },
+    });
+    expect(failed.ok).toBe(false);
+    expect(failed.text).toContain("Settings update for 2026.8.1-beta.3 failed");
+    expect(failed.text).toContain("retries at the next restart");
   });
 
   it("keeps the auto-accepted 24h note while the window stays armed (two-tier window)", async () => {
