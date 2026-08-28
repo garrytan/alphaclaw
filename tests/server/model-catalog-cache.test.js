@@ -47,7 +47,10 @@ describe("server/model-catalog-cache", () => {
   });
 
   it("ships a full bootstrap model catalog for cold starts", () => {
-    expect(kFallbackOnboardingModels.length).toBeGreaterThan(100);
+    // 2026.7's CLI curates `models list --all` down to ~86 entries (the
+    // 2026.4-era list enumerated every Bedrock variant) — assert a healthy
+    // floor, not the old inflated count.
+    expect(kFallbackOnboardingModels.length).toBeGreaterThan(50);
     expect(kFallbackOnboardingModels).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
