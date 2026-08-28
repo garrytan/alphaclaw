@@ -10,8 +10,10 @@ const createDoctorService = () => ({
     needsInitialRun: true,
     latestRun: null,
   })),
-  runDoctor: vi.fn(() => ({ ok: true, runId: 42, status: { runInProgress: true } })),
-  importDoctorResult: vi.fn(({ rawOutput }) => ({
+  // runDoctor/importDoctorResult are async on the real service (they await a
+  // fresh workspace snapshot); the mocks resolve promises to match.
+  runDoctor: vi.fn(async () => ({ ok: true, runId: 42, status: { runInProgress: true } })),
+  importDoctorResult: vi.fn(async ({ rawOutput }) => ({
     ok: true,
     runId: 43,
     run: { id: 43, summary: rawOutput ? "Imported" : "" },
@@ -86,7 +88,7 @@ describe("server/routes/doctor", () => {
 
   it("returns 200 when a Doctor run reuses previous findings", async () => {
     const doctorService = createDoctorService();
-    doctorService.runDoctor.mockReturnValue({
+    doctorService.runDoctor.mockResolvedValue({
       ok: true,
       runId: 44,
       reusedPreviousRun: true,
@@ -104,7 +106,7 @@ describe("server/routes/doctor", () => {
 
   it("returns 409 when a Doctor run is already in progress", async () => {
     const doctorService = createDoctorService();
-    doctorService.runDoctor.mockReturnValue({
+    doctorService.runDoctor.mockResolvedValue({
       ok: false,
       alreadyRunning: true,
       runId: 42,
@@ -292,12 +294,10 @@ describe("server/routes/doctor", () => {
     doctorService.buildStatus.mockImplementation(() => {
       throw new Error("status failed");
     });
-    doctorService.runDoctor.mockImplementation(() => {
-      throw new Error("run failed");
-    });
-    doctorService.importDoctorResult.mockImplementation(() => {
-      throw new Error("Doctor import requires raw output");
-    });
+    doctorService.runDoctor.mockRejectedValue(new Error("run failed"));
+    doctorService.importDoctorResult.mockRejectedValue(
+      new Error("Doctor import requires raw output"),
+    );
     doctorService.listDoctorRuns.mockImplementation(() => {
       throw new Error("runs failed");
     });

@@ -1275,8 +1275,10 @@ describe("server/routes/system", () => {
     expect(startingRes.body.gateway).toBe("starting");
     expect(startingRes.body.alphaclawVersion).toBeNull();
 
+    // Status payloads are memoized (~1.5s) per registration; use a fresh app
+    // so the not_onboarded state is not served from the previous memo.
     deps.fs.existsSync.mockReturnValue(false);
-    const notOnboardedRes = await request(app).get("/api/status");
+    const notOnboardedRes = await request(createApp(deps)).get("/api/status");
     expect(notOnboardedRes.body.gateway).toBe("not_onboarded");
     expect(notOnboardedRes.body.configExists).toBe(false);
   });
@@ -1293,7 +1295,11 @@ describe("server/routes/system", () => {
       const res = {
         setHeader: vi.fn(),
         flushHeaders: vi.fn(),
-        write: vi.fn(),
+        // A healthy client socket: write() returns true, otherwise the SSE
+        // backpressure guard would count every write as backed up and
+        // destroy the connection after 5 writes.
+        write: vi.fn(() => true),
+        destroy: vi.fn(),
         end: vi.fn(),
       };
 
@@ -1304,10 +1310,12 @@ describe("server/routes/system", () => {
         "text/event-stream",
       );
       expect(res.flushHeaders).toHaveBeenCalled();
-      const firstData = res.write.mock.calls
+      const firstEvent = res.write.mock.calls
         .map((call) => String(call[0]))
-        .find((chunk) => chunk.startsWith("data: "));
-      const parsed = JSON.parse(firstData.slice("data: ".length));
+        .find((chunk) => chunk.startsWith("event: status\ndata: "));
+      const parsed = JSON.parse(
+        firstEvent.slice("event: status\ndata: ".length).trimEnd(),
+      );
       expect(parsed.watchdogStatus).toEqual({ lifecycle: "running" });
       expect(parsed.doctorStatus).toEqual({ ok: true, checks: [] });
       expect(parsed.status.gateway).toBe("running");
@@ -1315,7 +1323,11 @@ describe("server/routes/system", () => {
       // The 2s interval emits another status event.
       res.write.mockClear();
       await vi.advanceTimersByTimeAsync(2000);
-      expect(res.write).toHaveBeenCalledWith("event: status\n");
+      expect(
+        res.write.mock.calls.some((call) =>
+          String(call[0]).startsWith("event: status\ndata: "),
+        ),
+      ).toBe(true);
 
       // Payload build failures are swallowed without writing.
       deps.isGatewayRunning.mockRejectedValue(new Error("gateway probe failed"));
@@ -1346,18 +1358,155 @@ describe("server/routes/system", () => {
     const routes = captureRoutes(deps);
     const handler = routes.get.get("/api/events/status");
     const req = new EventEmitter();
-    const res = { setHeader: vi.fn(), write: vi.fn(), end: vi.fn() };
+    const res = {
+      setHeader: vi.fn(),
+      write: vi.fn(() => true),
+      destroy: vi.fn(),
+      end: vi.fn(),
+    };
 
     await handler(req, res);
     req.emit("close");
 
     const firstData = res.write.mock.calls
       .map((call) => String(call[0]))
-      .find((chunk) => chunk.startsWith("data: "));
+      .find((chunk) => chunk.startsWith("event: status\ndata: "))
+      ?.replace(/^event: status\n/, "");
     const parsed = JSON.parse(firstData.slice("data: ".length));
     expect(parsed.watchdogStatus).toBeNull();
     expect(parsed.doctorStatus).toBeNull();
     expect(res.end).toHaveBeenCalled();
+  });
+
+  const createSseClient = () => {
+    const req = new EventEmitter();
+    const res = {
+      setHeader: vi.fn(),
+      flushHeaders: vi.fn(),
+      write: vi.fn(() => true),
+      destroy: vi.fn(),
+      end: vi.fn(),
+    };
+    return { req, res };
+  };
+
+  const firstStatusPayload = (res) => {
+    const firstEvent = res.write.mock.calls
+      .map((call) => String(call[0]))
+      .find((chunk) => chunk.startsWith("event: status\ndata: "));
+    return JSON.parse(firstEvent.slice("event: status\ndata: ".length).trimEnd());
+  };
+
+  it("shares the doctor-status throttle across SSE connections", async () => {
+    vi.useFakeTimers();
+    try {
+      const deps = createSystemDeps();
+      deps.doctorService = { buildStatus: vi.fn(() => ({ ok: true, checks: [] })) };
+      const routes = captureRoutes(deps);
+      const handler = routes.get.get("/api/events/status");
+      const first = createSseClient();
+      const second = createSseClient();
+
+      await handler(first.req, first.res);
+      await handler(second.req, second.res);
+
+      // Both connections opened inside one 30s window: ONE buildStatus
+      // computation served both initial events (the throttle is shared, not
+      // per-connection).
+      expect(deps.doctorService.buildStatus).toHaveBeenCalledTimes(1);
+      expect(firstStatusPayload(first.res).doctorStatus).toEqual({
+        ok: true,
+        checks: [],
+      });
+      expect(firstStatusPayload(second.res).doctorStatus).toEqual({
+        ok: true,
+        checks: [],
+      });
+
+      // 2s ticks inside the window keep serving the shared cached value.
+      await vi.advanceTimersByTimeAsync(4000);
+      expect(deps.doctorService.buildStatus).toHaveBeenCalledTimes(1);
+
+      // Once the 30s window elapses, the next tick recomputes exactly once.
+      await vi.advanceTimersByTimeAsync(28000);
+      expect(deps.doctorService.buildStatus).toHaveBeenCalledTimes(2);
+
+      first.req.emit("close");
+      second.req.emit("close");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("destroys an SSE connection after five consecutive backpressured writes", async () => {
+    vi.useFakeTimers();
+    try {
+      const deps = createSystemDeps();
+      const routes = captureRoutes(deps);
+      const handler = routes.get.get("/api/events/status");
+      const req = new EventEmitter();
+      const res = {
+        setHeader: vi.fn(),
+        flushHeaders: vi.fn(),
+        // A permanently backed-up client socket: every write reports
+        // backpressure.
+        write: vi.fn(() => false),
+        end: vi.fn(),
+      };
+      res.destroy = vi.fn(() => {
+        res.destroyed = true;
+      });
+
+      await handler(req, res); // initial write: backpressured tick 1
+
+      await vi.advanceTimersByTimeAsync(6000); // ticks 2-4
+      expect(res.destroy).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(2000); // tick 5 → destroyed
+      expect(res.destroy).toHaveBeenCalledTimes(1);
+
+      req.emit("close");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("resets the SSE backpressure counter after a successful write", async () => {
+    vi.useFakeTimers();
+    try {
+      const deps = createSystemDeps();
+      const routes = captureRoutes(deps);
+      const handler = routes.get.get("/api/events/status");
+      const req = new EventEmitter();
+      // Four backpressured writes, then the socket drains: the counter must
+      // reset instead of counting toward the destroy threshold of 5.
+      const writeResults = [false, false, false, false, true];
+      let writeCalls = 0;
+      const res = {
+        setHeader: vi.fn(),
+        flushHeaders: vi.fn(),
+        write: vi.fn(() => {
+          const flushed = writeCalls < writeResults.length ? writeResults[writeCalls] : true;
+          writeCalls += 1;
+          return flushed;
+        }),
+        destroy: vi.fn(),
+        end: vi.fn(),
+      };
+
+      await handler(req, res); // false #1
+      await vi.advanceTimersByTimeAsync(8000); // false #2-#4, then true → reset
+      expect(res.destroy).not.toHaveBeenCalled();
+
+      // The connection keeps streaming after the recovery.
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(res.destroy).not.toHaveBeenCalled();
+      expect(res.write.mock.calls.length).toBeGreaterThan(5);
+
+      req.emit("close");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("falls back to the default schedule when the cron config is invalid", async () => {

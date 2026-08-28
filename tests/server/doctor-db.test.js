@@ -204,4 +204,147 @@ describe("server/doctor-db", () => {
       }),
     ).toBeNull();
   });
+
+  it("serves lean run summaries, the latest completed summary, and run manifests", async () => {
+    const {
+      createDoctorRun,
+      insertDoctorCards,
+      completeDoctorRun,
+      listDoctorRuns,
+      listDoctorRunSummaries,
+      getLatestCompletedRunSummary,
+      getDoctorRunManifest,
+    } = createDoctorDbContext("doctor-db-summaries-");
+
+    // started_at has millisecond precision; the sleeps keep the three runs on
+    // distinct timestamps so started_at DESC ordering is deterministic.
+    const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    const firstManifest = { "AGENTS.md": { hash: "hash-1", size: 10 } };
+
+    const firstRunId = createDoctorRun({
+      engine: "gateway_agent",
+      workspaceRoot: "/tmp/workspace",
+      workspaceFingerprint: "fp-1",
+      workspaceManifest: firstManifest,
+      promptVersion: "doctor-v1",
+    });
+    insertDoctorCards({
+      runId: firstRunId,
+      cards: [
+        {
+          priority: kDoctorPriority.P0,
+          category: "guidance",
+          title: "First finding",
+          summary: "First finding",
+          recommendation: "Fix it",
+          targetPaths: ["AGENTS.md"],
+          fixPrompt: "Fix it safely",
+          status: kDoctorCardStatus.open,
+        },
+        {
+          priority: kDoctorPriority.P2,
+          category: "cleanup",
+          title: "Second finding",
+          summary: "Second finding",
+          recommendation: "Tidy it",
+          targetPaths: ["docs/notes.md"],
+          fixPrompt: "Tidy it safely",
+          status: kDoctorCardStatus.dismissed,
+        },
+      ],
+    });
+    completeDoctorRun({
+      id: firstRunId,
+      status: kDoctorRunStatus.completed,
+      summary: "First run",
+      rawResult: { cards: ["heavy"] },
+    });
+    await sleep(5);
+
+    const secondRunId = createDoctorRun({
+      engine: "gateway_agent",
+      workspaceRoot: "/tmp/workspace",
+      workspaceFingerprint: "fp-2",
+      workspaceManifest: { "README.md": { hash: "hash-2", size: 20 } },
+      promptVersion: "doctor-v1",
+    });
+    insertDoctorCards({
+      runId: secondRunId,
+      cards: [
+        {
+          priority: kDoctorPriority.P1,
+          category: "guidance",
+          title: "Third finding",
+          summary: "Third finding",
+          recommendation: "Fix it",
+          targetPaths: ["README.md"],
+          fixPrompt: "Fix it safely",
+          status: kDoctorCardStatus.open,
+        },
+      ],
+    });
+    completeDoctorRun({
+      id: secondRunId,
+      status: kDoctorRunStatus.completed,
+      summary: "Second run",
+      rawResult: { cards: [] },
+    });
+    await sleep(5);
+
+    const failedRunId = createDoctorRun({
+      engine: "gateway_agent",
+      workspaceRoot: "/tmp/workspace",
+      workspaceFingerprint: "fp-3",
+      workspaceManifest: null,
+      promptVersion: "doctor-v1",
+    });
+    completeDoctorRun({
+      id: failedRunId,
+      status: kDoctorRunStatus.failed,
+      error: "gateway exploded",
+    });
+
+    const fullRuns = listDoctorRuns({ limit: 10 });
+    const summaries = listDoctorRunSummaries({ limit: 10 });
+
+    // Summaries mirror the full listing (same runs, same counts) minus the
+    // heavy JSON columns.
+    expect(summaries.map((run) => run.id)).toEqual(fullRuns.map((run) => run.id));
+    expect(summaries.map((run) => run.id)).toEqual([
+      failedRunId,
+      secondRunId,
+      firstRunId,
+    ]);
+    summaries.forEach((summary, index) => {
+      const fullRun = fullRuns[index];
+      expect(summary.status).toBe(fullRun.status);
+      expect(summary.cardCount).toBe(fullRun.cardCount);
+      expect(summary.priorityCounts).toEqual(fullRun.priorityCounts);
+      expect(summary.statusCounts).toEqual(fullRun.statusCounts);
+      expect(summary).not.toHaveProperty("workspaceManifest");
+      expect(summary).not.toHaveProperty("rawResult");
+    });
+    expect(summaries[2].cardCount).toBe(2);
+    expect(summaries[2].priorityCounts).toEqual({ P0: 1, P1: 0, P2: 1 });
+    expect(summaries[2].statusCounts).toEqual({
+      open: 1,
+      working: 0,
+      dismissed: 1,
+      fixed: 0,
+    });
+
+    // The latest COMPLETED summary skips the newer failed run.
+    const latestCompleted = getLatestCompletedRunSummary();
+    expect(latestCompleted.id).toBe(secondRunId);
+    expect(latestCompleted.status).toBe(kDoctorRunStatus.completed);
+    expect(latestCompleted.workspaceFingerprint).toBe("fp-2");
+    expect(latestCompleted.cardCount).toBe(1);
+    expect(latestCompleted).not.toHaveProperty("workspaceManifest");
+    expect(latestCompleted).not.toHaveProperty("rawResult");
+
+    // Manifests are fetched lazily per run, and a missing run yields null.
+    expect(getDoctorRunManifest(firstRunId)).toEqual(firstManifest);
+    expect(getDoctorRunManifest(failedRunId)).toBeNull();
+    expect(getDoctorRunManifest(999999)).toBeNull();
+  });
 });

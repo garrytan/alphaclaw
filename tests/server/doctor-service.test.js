@@ -2,6 +2,10 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 
+const {
+  computeWorkspaceSnapshotBounded,
+} = require("../../lib/server/doctor/workspace-fingerprint");
+
 const loadDoctorDb = () => {
   const modulePath = require.resolve("../../lib/server/db/doctor");
   delete require.cache[modulePath];
@@ -15,6 +19,11 @@ const loadDoctorService = () => {
 };
 
 const repeatText = (length, character = "A") => character.repeat(length);
+
+// Fast fake worker: computes snapshots in-process without batch pauses so no
+// real worker thread is ever spawned by these tests.
+const fastComputeSnapshotAsync = (root, opts) =>
+  computeWorkspaceSnapshotBounded(root, { ...(opts || {}), batchPauseMs: 0 });
 
 let currentDoctorDb = null;
 
@@ -31,7 +40,7 @@ describe("server/doctor-service", () => {
     }
   });
 
-  it("reuses the previous completed run when the workspace fingerprint is unchanged", () => {
+  it("reuses the previous completed run when the workspace fingerprint is unchanged", async () => {
     const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-workspace-"));
     const dbRoot = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-service-db-"));
     fs.writeFileSync(
@@ -50,25 +59,34 @@ describe("server/doctor-service", () => {
         cards: [],
       }),
     }));
+    // Spies wrap the real db fns: with the lean summary readers injected, the
+    // reuse path must fetch the source run's rawResult through getDoctorRun
+    // (summaries no longer carry it).
+    const getDoctorRunSpy = vi.fn(doctorDb.getDoctorRun);
+    const completeDoctorRunSpy = vi.fn(doctorDb.completeDoctorRun);
     const { createDoctorService } = loadDoctorService();
     const doctorService = createDoctorService({
       clawCmd,
       listDoctorRuns: doctorDb.listDoctorRuns,
+      listDoctorRunSummaries: doctorDb.listDoctorRunSummaries,
+      getDoctorRunManifest: doctorDb.getDoctorRunManifest,
+      getLatestCompletedRunSummary: doctorDb.getLatestCompletedRunSummary,
       listDoctorCards: doctorDb.listDoctorCards,
       getInitialWorkspaceBaseline: doctorDb.getInitialWorkspaceBaseline,
       setInitialWorkspaceBaseline: doctorDb.setInitialWorkspaceBaseline,
       createDoctorRun: doctorDb.createDoctorRun,
-      completeDoctorRun: doctorDb.completeDoctorRun,
+      completeDoctorRun: completeDoctorRunSpy,
       insertDoctorCards: doctorDb.insertDoctorCards,
-      getDoctorRun: doctorDb.getDoctorRun,
+      getDoctorRun: getDoctorRunSpy,
       getDoctorCardsByRunId: doctorDb.getDoctorCardsByRunId,
       getDoctorCard: doctorDb.getDoctorCard,
       updateDoctorCardStatus: doctorDb.updateDoctorCardStatus,
       workspaceRoot,
       managedRoot: workspaceRoot,
+      computeSnapshotAsync: fastComputeSnapshotAsync,
     });
 
-    const imported = doctorService.importDoctorResult({
+    const imported = await doctorService.importDoctorResult({
       rawOutput: JSON.stringify({
         summary: "Initial findings",
         cards: [
@@ -93,7 +111,7 @@ describe("server/doctor-service", () => {
       tokenHash: "active-token-hash",
     });
 
-    const rerun = doctorService.runDoctor();
+    const rerun = await doctorService.runDoctor();
     const latestRun = doctorDb.getDoctorRun(rerun.runId);
 
     expect(imported.ok).toBe(true);
@@ -107,6 +125,86 @@ describe("server/doctor-service", () => {
     expect(doctorDb.getDoctorCardsByRunId(rerun.runId)).toEqual([
       expect.objectContaining({ status: "open" }),
     ]);
+    // rawResult propagation: the lean baseline summary has no rawResult, so
+    // the reuse path fetched the FULL source run and passed its rawResult to
+    // completeDoctorRun.
+    const sourceRawResult = doctorDb.getDoctorRun(imported.runId).rawResult;
+    expect(sourceRawResult).toBeTruthy();
+    expect(getDoctorRunSpy).toHaveBeenCalledWith(imported.runId);
+    expect(completeDoctorRunSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: rerun.runId,
+        status: "completed",
+        rawResult: sourceRawResult,
+      }),
+    );
+    expect(latestRun.rawResult).toEqual(sourceRawResult);
+  });
+
+  it("buildStatus reads lean run summaries and caches the baseline manifest per run id", async () => {
+    const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-summaries-workspace-"));
+    const dbRoot = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-summaries-db-"));
+    fs.writeFileSync(path.join(workspaceRoot, "AGENTS.md"), "# Guidance\n", "utf8");
+
+    const doctorDb = loadManagedDoctorDb();
+    doctorDb.initDoctorDb({ rootDir: dbRoot });
+
+    const listRunsSpy = vi.fn(doctorDb.listDoctorRuns);
+    const listSummariesSpy = vi.fn(doctorDb.listDoctorRunSummaries);
+    const manifestSpy = vi.fn(doctorDb.getDoctorRunManifest);
+    const { createDoctorService } = loadDoctorService();
+    const doctorService = createDoctorService({
+      clawCmd: vi.fn(),
+      listDoctorRuns: listRunsSpy,
+      listDoctorRunSummaries: listSummariesSpy,
+      getDoctorRunManifest: manifestSpy,
+      getLatestCompletedRunSummary: doctorDb.getLatestCompletedRunSummary,
+      listDoctorCards: doctorDb.listDoctorCards,
+      getInitialWorkspaceBaseline: doctorDb.getInitialWorkspaceBaseline,
+      setInitialWorkspaceBaseline: doctorDb.setInitialWorkspaceBaseline,
+      createDoctorRun: doctorDb.createDoctorRun,
+      completeDoctorRun: doctorDb.completeDoctorRun,
+      insertDoctorCards: doctorDb.insertDoctorCards,
+      getDoctorRun: doctorDb.getDoctorRun,
+      getDoctorCardsByRunId: doctorDb.getDoctorCardsByRunId,
+      getDoctorCard: doctorDb.getDoctorCard,
+      updateDoctorCardStatus: doctorDb.updateDoctorCardStatus,
+      workspaceRoot,
+      managedRoot: workspaceRoot,
+      computeSnapshotAsync: fastComputeSnapshotAsync,
+    });
+
+    const firstImport = await doctorService.importDoctorResult({
+      rawOutput: JSON.stringify({ summary: "Baseline", cards: [] }),
+    });
+
+    const statusA = doctorService.buildStatus();
+    const statusB = doctorService.buildStatus();
+
+    // The status hot path lists lean summaries, never the heavy full runs.
+    expect(listSummariesSpy).toHaveBeenCalled();
+    expect(listRunsSpy).not.toHaveBeenCalled();
+    expect(statusA.latestRun.id).toBe(firstImport.runId);
+    expect(statusA.latestRun).not.toHaveProperty("workspaceManifest");
+    expect(statusA.latestRun).not.toHaveProperty("rawResult");
+    expect(statusB.changeSummary.hasBaseline).toBe(true);
+    expect(statusB.changeSummary.baselineSource).toBe("last_run");
+
+    // The baseline manifest is fetched ONCE for the same completed run across
+    // consecutive buildStatus calls.
+    expect(manifestSpy).toHaveBeenCalledTimes(1);
+    expect(manifestSpy).toHaveBeenCalledWith(firstImport.runId);
+
+    // A NEWER completed run becomes the baseline: exactly one more fetch.
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const secondImport = await doctorService.importDoctorResult({
+      rawOutput: JSON.stringify({ summary: "Newer baseline", cards: [] }),
+    });
+    doctorService.buildStatus();
+    doctorService.buildStatus();
+
+    expect(manifestSpy).toHaveBeenCalledTimes(2);
+    expect(manifestSpy).toHaveBeenLastCalledWith(secondImport.runId);
   });
 
   it("runs Doctor analysis in a dedicated doctor session", async () => {
@@ -143,9 +241,10 @@ describe("server/doctor-service", () => {
       updateDoctorCardStatus: doctorDb.updateDoctorCardStatus,
       workspaceRoot,
       managedRoot: workspaceRoot,
+      computeSnapshotAsync: fastComputeSnapshotAsync,
     });
 
-    const result = doctorService.runDoctor();
+    const result = await doctorService.runDoctor();
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     expect(result.ok).toBe(true);
@@ -190,8 +289,9 @@ describe("server/doctor-service", () => {
       workspaceRoot,
       managedRoot: workspaceRoot,
       alphaclawRootDir: "/data",
+      computeSnapshotAsync: fastComputeSnapshotAsync,
     });
-    const imported = doctorService.importDoctorResult({
+    const imported = await doctorService.importDoctorResult({
       rawOutput: JSON.stringify({
         summary: "One finding",
         cards: [
@@ -342,10 +442,11 @@ describe("server/doctor-service", () => {
         updateDoctorCardStatus: doctorDb.updateDoctorCardStatus,
         workspaceRoot,
         managedRoot: workspaceRoot,
+        computeSnapshotAsync: fastComputeSnapshotAsync,
       });
     const doctorService = buildDoctorService();
 
-    const firstRun = doctorService.runDoctor();
+    const firstRun = await doctorService.runDoctor();
     await new Promise((resolve) => setTimeout(resolve, 0));
     const firstRunCards = doctorDb.getDoctorCardsByRunId(firstRun.runId);
     doctorService.setCardStatus({
@@ -353,9 +454,9 @@ describe("server/doctor-service", () => {
       status: "fixed",
     });
 
-    fs.writeFileSync(path.join(workspaceRoot, "README.md"), "# Updated docs\n", "utf8");
+    fs.writeFileSync(path.join(workspaceRoot, "README.md"), "# Updated docs, longer\n", "utf8");
 
-    const secondRun = buildDoctorService().runDoctor();
+    const secondRun = await buildDoctorService().runDoctor();
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     expect(clawCmd).toHaveBeenCalledTimes(2);
@@ -374,7 +475,7 @@ describe("server/doctor-service", () => {
     );
   });
 
-  it("reports meaningful workspace drift only after a stale completed run", () => {
+  it("reports meaningful workspace drift only after a stale completed run", async () => {
     const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-drift-workspace-"));
     const dbRoot = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-drift-db-"));
     fs.writeFileSync(path.join(workspaceRoot, "AGENTS.md"), "# Guidance\n", "utf8");
@@ -406,11 +507,12 @@ describe("server/doctor-service", () => {
         updateDoctorCardStatus: doctorDb.updateDoctorCardStatus,
         workspaceRoot,
         managedRoot: workspaceRoot,
+        computeSnapshotAsync: fastComputeSnapshotAsync,
       });
 
     const doctorService = buildDoctorService();
 
-    doctorService.importDoctorResult({
+    await doctorService.importDoctorResult({
       rawOutput: JSON.stringify({
         summary: "Baseline findings",
         cards: [],
@@ -422,6 +524,7 @@ describe("server/doctor-service", () => {
     fs.writeFileSync(path.join(workspaceRoot, "skills", "note.md"), "extra guidance\n", "utf8");
 
     const refreshedDoctorService = buildDoctorService();
+    await refreshedDoctorService.refreshWorkspaceSnapshot();
     const status = refreshedDoctorService.buildStatus();
 
     expect(status.needsInitialRun).toBe(false);
@@ -430,9 +533,11 @@ describe("server/doctor-service", () => {
     expect(status.changeSummary.changedFilesCount).toBe(2);
     expect(status.changeSummary.hasMeaningfulChanges).toBe(true);
     expect(status.changeSummary.deltaScore).toBeGreaterThanOrEqual(4);
+    expect(status.changeSummary.snapshotAgeMs).toBeGreaterThanOrEqual(0);
+    expect(status.changeSummary.workspaceLimited).toBe(false);
   });
 
-  it("uses the persisted initial baseline before the first completed run", () => {
+  it("uses the persisted initial baseline before the first completed run", async () => {
     const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-initial-baseline-"));
     const dbRoot = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-initial-baseline-db-"));
     fs.writeFileSync(path.join(workspaceRoot, "AGENTS.md"), "# Guidance\n", "utf8");
@@ -457,13 +562,17 @@ describe("server/doctor-service", () => {
         updateDoctorCardStatus: doctorDb.updateDoctorCardStatus,
         workspaceRoot,
         managedRoot: workspaceRoot,
+        computeSnapshotAsync: fastComputeSnapshotAsync,
       });
 
     const doctorService = buildDoctorService();
 
+    await doctorService.refreshWorkspaceSnapshot();
     const initialStatus = doctorService.buildStatus();
     fs.writeFileSync(path.join(workspaceRoot, "README.md"), "# Added after baseline\n", "utf8");
-    const nextStatus = buildDoctorService().buildStatus();
+    const nextDoctorService = buildDoctorService();
+    await nextDoctorService.refreshWorkspaceSnapshot();
+    const nextStatus = nextDoctorService.buildStatus();
 
     expect(initialStatus.needsInitialRun).toBe(true);
     expect(initialStatus.changeSummary.hasBaseline).toBe(true);
@@ -496,6 +605,7 @@ describe("server/doctor-service", () => {
       updateDoctorCardStatus: doctorDb.updateDoctorCardStatus,
       workspaceRoot,
       managedRoot: workspaceRoot,
+      computeSnapshotAsync: fastComputeSnapshotAsync,
     });
 
     const status = doctorService.buildStatus();
@@ -528,6 +638,7 @@ describe("server/doctor-service", () => {
       updateDoctorCardStatus: doctorDb.updateDoctorCardStatus,
       workspaceRoot,
       managedRoot: workspaceRoot,
+      computeSnapshotAsync: fastComputeSnapshotAsync,
     });
 
     const status = doctorService.buildStatus();
@@ -584,6 +695,7 @@ describe("server/doctor-service", () => {
       updateDoctorCardStatus: doctorDb.updateDoctorCardStatus,
       workspaceRoot,
       managedRoot: workspaceRoot,
+      computeSnapshotAsync: fastComputeSnapshotAsync,
     });
 
     const status = doctorService.buildStatus();
@@ -610,7 +722,7 @@ describe("server/doctor-service", () => {
     const fingerprint = computeWorkspaceSnapshot(workspaceRoot).fingerprint;
     const { createDoctorService } = loadDoctorService();
 
-    const runReuseWithCompletedAt = (completedAt) => {
+    const runReuseWithCompletedAt = async (completedAt) => {
       const summaries = [];
       const doctorService = createDoctorService({
         clawCmd: vi.fn(),
@@ -636,16 +748,17 @@ describe("server/doctor-service", () => {
         updateDoctorCardStatus: () => null,
         workspaceRoot,
         managedRoot: workspaceRoot,
+        computeSnapshotAsync: fastComputeSnapshotAsync,
       });
-      const result = doctorService.runDoctor();
+      const result = await doctorService.runDoctor();
       expect(result.reusedPreviousRun).toBe(true);
       return summaries.find((summary) => /No workspace changes/.test(summary || ""));
     };
 
-    const hoursSummary = runReuseWithCompletedAt(
+    const hoursSummary = await runReuseWithCompletedAt(
       new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString(),
     );
-    const daysSummary = runReuseWithCompletedAt(
+    const daysSummary = await runReuseWithCompletedAt(
       new Date(Date.now() - 3 * 24 * 60 * 60 * 1000).toISOString(),
     );
 
@@ -653,7 +766,7 @@ describe("server/doctor-service", () => {
     expect(daysSummary).toMatch(/3 days ago/);
   });
 
-  it("captures evidence snippets for path evidence with line ranges", () => {
+  it("captures evidence snippets for path evidence with line ranges", async () => {
     const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-snippet-workspace-"));
     const dbRoot = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-snippet-db-"));
     const lines = Array.from({ length: 30 }, (_, index) => `line ${index + 1}`);
@@ -678,9 +791,10 @@ describe("server/doctor-service", () => {
       updateDoctorCardStatus: doctorDb.updateDoctorCardStatus,
       workspaceRoot,
       managedRoot: workspaceRoot,
+      computeSnapshotAsync: fastComputeSnapshotAsync,
     });
 
-    const imported = doctorService.importDoctorResult({
+    const imported = await doctorService.importDoctorResult({
       rawOutput: JSON.stringify({
         summary: "Snippet findings",
         cards: [
@@ -752,9 +866,10 @@ describe("server/doctor-service", () => {
       updateDoctorCardStatus: doctorDb.updateDoctorCardStatus,
       workspaceRoot,
       managedRoot: workspaceRoot,
+      computeSnapshotAsync: fastComputeSnapshotAsync,
     });
 
-    const result = doctorService.runDoctor();
+    const result = await doctorService.runDoctor();
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     const run = doctorDb.getDoctorRun(result.runId);
@@ -792,9 +907,10 @@ describe("server/doctor-service", () => {
       updateDoctorCardStatus: doctorDb.updateDoctorCardStatus,
       workspaceRoot,
       managedRoot: workspaceRoot,
+      computeSnapshotAsync: fastComputeSnapshotAsync,
     });
 
-    const result = doctorService.runDoctor();
+    const result = await doctorService.runDoctor();
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     const run = doctorDb.getDoctorRun(result.runId);
@@ -837,10 +953,11 @@ describe("server/doctor-service", () => {
       updateDoctorCardStatus: doctorDb.updateDoctorCardStatus,
       workspaceRoot,
       managedRoot: workspaceRoot,
+      computeSnapshotAsync: fastComputeSnapshotAsync,
     });
 
-    const firstRun = doctorService.runDoctor();
-    const secondRun = doctorService.runDoctor();
+    const firstRun = await doctorService.runDoctor();
+    const secondRun = await doctorService.runDoctor();
     releaseGateway();
     await new Promise((resolve) => setTimeout(resolve, 0));
 
@@ -878,13 +995,14 @@ describe("server/doctor-service", () => {
       cancelDoctorCardFix: doctorDb.cancelDoctorCardFix,
       workspaceRoot,
       managedRoot: workspaceRoot,
+      computeSnapshotAsync: fastComputeSnapshotAsync,
     });
 
-    expect(() => doctorService.importDoctorResult({ rawOutput: "   " })).toThrow(
+    await expect(doctorService.importDoctorResult({ rawOutput: "   " })).rejects.toThrow(
       "Doctor import requires raw output",
     );
 
-    const imported = doctorService.importDoctorResult({
+    const imported = await doctorService.importDoctorResult({
       rawOutput: JSON.stringify({
         summary: "One finding",
         cards: [
@@ -924,7 +1042,7 @@ describe("server/doctor-service", () => {
     expect(doctorDb.getDoctorCard(card.id).status).toBe("open");
   });
 
-  it("adds deterministic truncation cards alongside imported Doctor findings", () => {
+  it("adds deterministic truncation cards alongside imported Doctor findings", async () => {
     const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-bootstrap-import-"));
     const dbRoot = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-bootstrap-import-db-"));
     fs.writeFileSync(path.join(workspaceRoot, "AGENTS.md"), repeatText(20001), "utf8");
@@ -948,9 +1066,10 @@ describe("server/doctor-service", () => {
       updateDoctorCardStatus: doctorDb.updateDoctorCardStatus,
       workspaceRoot,
       managedRoot: workspaceRoot,
+      computeSnapshotAsync: fastComputeSnapshotAsync,
     });
 
-    const imported = doctorService.importDoctorResult({
+    const imported = await doctorService.importDoctorResult({
       rawOutput: JSON.stringify({
         summary: "Imported findings",
         cards: [
@@ -984,5 +1103,110 @@ describe("server/doctor-service", () => {
         }),
       ]),
     );
+  });
+
+  describe("cached snapshot behavior", () => {
+    it("buildStatus never computes a snapshot synchronously", async () => {
+      const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-nonblocking-workspace-"));
+      const dbRoot = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-nonblocking-db-"));
+      fs.writeFileSync(path.join(workspaceRoot, "AGENTS.md"), "# Guidance\n", "utf8");
+
+      const doctorDb = loadManagedDoctorDb();
+      doctorDb.initDoctorDb({ rootDir: dbRoot });
+
+      // Never-resolving compute: if buildStatus ever awaited/blocked on it,
+      // this test would hang instead of returning a degraded status.
+      const computeSpy = vi.fn(() => new Promise(() => {}));
+      const { createDoctorService } = loadDoctorService();
+      const doctorService = createDoctorService({
+        clawCmd: vi.fn(),
+        listDoctorRuns: doctorDb.listDoctorRuns,
+        listDoctorCards: doctorDb.listDoctorCards,
+        getInitialWorkspaceBaseline: doctorDb.getInitialWorkspaceBaseline,
+        setInitialWorkspaceBaseline: doctorDb.setInitialWorkspaceBaseline,
+        createDoctorRun: doctorDb.createDoctorRun,
+        completeDoctorRun: doctorDb.completeDoctorRun,
+        insertDoctorCards: doctorDb.insertDoctorCards,
+        getDoctorRun: doctorDb.getDoctorRun,
+        getDoctorCardsByRunId: doctorDb.getDoctorCardsByRunId,
+        getDoctorCard: doctorDb.getDoctorCard,
+        updateDoctorCardStatus: doctorDb.updateDoctorCardStatus,
+        workspaceRoot,
+        managedRoot: workspaceRoot,
+        computeSnapshotAsync: computeSpy,
+      });
+
+      const status = doctorService.buildStatus();
+
+      // buildStatus returned synchronously with a degraded (no-snapshot) view.
+      expect(status.changeSummary.hasBaseline).toBe(false);
+      expect(status.changeSummary.baselineSource).toBe("none");
+      expect(status.changeSummary.changedFilesCount).toBe(0);
+      expect(status.changeSummary.deltaScore).toBe(0);
+      expect(status.changeSummary.snapshotAgeMs).toBe(null);
+      expect(status.changeSummary.workspaceLimited).toBe(false);
+      // The compute was not invoked synchronously during buildStatus; the
+      // demand-driven refresh only kicks it on a later tick.
+      expect(computeSpy).not.toHaveBeenCalled();
+
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(computeSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it("serves the stale snapshot when the worker fails", async () => {
+      const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-stale-workspace-"));
+      const dbRoot = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-stale-db-"));
+      fs.writeFileSync(path.join(workspaceRoot, "AGENTS.md"), "# Guidance\n", "utf8");
+
+      const doctorDb = loadManagedDoctorDb();
+      doctorDb.initDoctorDb({ rootDir: dbRoot });
+
+      const computeSpy = vi.fn(fastComputeSnapshotAsync);
+      const { createDoctorService } = loadDoctorService();
+      const doctorService = createDoctorService({
+        clawCmd: vi.fn(),
+        listDoctorRuns: doctorDb.listDoctorRuns,
+        listDoctorCards: doctorDb.listDoctorCards,
+        getInitialWorkspaceBaseline: doctorDb.getInitialWorkspaceBaseline,
+        setInitialWorkspaceBaseline: doctorDb.setInitialWorkspaceBaseline,
+        createDoctorRun: doctorDb.createDoctorRun,
+        completeDoctorRun: doctorDb.completeDoctorRun,
+        insertDoctorCards: doctorDb.insertDoctorCards,
+        getDoctorRun: doctorDb.getDoctorRun,
+        getDoctorCardsByRunId: doctorDb.getDoctorCardsByRunId,
+        getDoctorCard: doctorDb.getDoctorCard,
+        updateDoctorCardStatus: doctorDb.updateDoctorCardStatus,
+        workspaceRoot,
+        managedRoot: workspaceRoot,
+        computeSnapshotAsync: computeSpy,
+      });
+
+      // Establish a run baseline, then drift the workspace and seed the cache.
+      await doctorService.importDoctorResult({
+        rawOutput: JSON.stringify({ summary: "Baseline", cards: [] }),
+      });
+      fs.writeFileSync(path.join(workspaceRoot, "README.md"), "# New file\n", "utf8");
+      const seeded = await doctorService.refreshWorkspaceSnapshot();
+
+      const statusBefore = doctorService.buildStatus();
+      expect(statusBefore.changeSummary.hasBaseline).toBe(true);
+      expect(statusBefore.changeSummary.changedFilesCount).toBe(1);
+
+      // Worker starts failing: refresh must resolve to the stale snapshot.
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      computeSpy.mockRejectedValue(new Error("worker exploded"));
+      const stale = await doctorService.refreshWorkspaceSnapshot({ incremental: false });
+
+      expect(stale).toBeTruthy();
+      expect(stale.fingerprint).toBe(seeded.fingerprint);
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining("workspace snapshot refresh failed"),
+      );
+
+      // buildStatus still reports the old delta from the stale snapshot.
+      const statusAfter = doctorService.buildStatus();
+      expect(statusAfter.changeSummary.hasBaseline).toBe(true);
+      expect(statusAfter.changeSummary.changedFilesCount).toBe(1);
+    });
   });
 });
