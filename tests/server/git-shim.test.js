@@ -3,6 +3,20 @@ const os = require("os");
 const path = require("path");
 const { execFileSync } = require("child_process");
 
+// Hosts that drive git through their own credential helper (e.g. Conductor
+// exports GIT_ASKPASS/ASKPASS_*) leak those vars into every child env. These
+// tests assert what the SHIM injects, so ambient auth vars must be scrubbed
+// before spreading — otherwise "does not inject auth" sees the host's
+// credentials and fails on a machine that never touched the shim.
+const cleanProcessEnv = () => {
+  const env = { ...process.env };
+  delete env.GIT_ASKPASS;
+  delete env.ASKPASS_USER;
+  delete env.ASKPASS_PASS;
+  delete env.GIT_TERMINAL_PROMPT;
+  return env;
+};
+
 const kGitShimPath = path.join(__dirname, "../../lib/scripts/git");
 const kGitAskPassPath = path.join(__dirname, "../../lib/scripts/git-askpass");
 
@@ -70,7 +84,7 @@ describe("server git shim scripts", () => {
     execFileSync(harness.shimPath, ["-C", repoRoot, "push", "origin", "main"], {
       cwd: outsideDir,
       env: {
-        ...process.env,
+        ...cleanProcessEnv(),
         GITHUB_TOKEN: "ghp_test_token",
       },
       stdio: "pipe",
@@ -96,7 +110,7 @@ describe("server git shim scripts", () => {
     execFileSync(harness.shimPath, ["-c", "http.extraHeader=test", "-C", repoRoot, "push", "origin", "main"], {
       cwd: outsideDir,
       env: {
-        ...process.env,
+        ...cleanProcessEnv(),
         GITHUB_TOKEN: "ghp_test_token",
       },
       stdio: "pipe",
@@ -151,7 +165,7 @@ describe("server git shim scripts", () => {
       {
         cwd: outsideDir,
         env: {
-          ...process.env,
+          ...cleanProcessEnv(),
           GITHUB_TOKEN: "ghp_test_token",
         },
         stdio: "pipe",
@@ -182,7 +196,7 @@ describe("server git shim scripts", () => {
     execFileSync(harness.shimPath, ["push", "origin", "main"], {
       cwd: symlinkWorkspaceDir,
       env: {
-        ...process.env,
+        ...cleanProcessEnv(),
         GITHUB_TOKEN: "ghp_test_token",
       },
       stdio: "pipe",
@@ -205,7 +219,7 @@ describe("server git shim scripts", () => {
     execFileSync(harness.shimPath, ["push", "origin", "main"], {
       cwd: outsideDir,
       env: {
-        ...process.env,
+        ...cleanProcessEnv(),
         GITHUB_TOKEN: "ghp_test_token",
       },
       stdio: "pipe",
