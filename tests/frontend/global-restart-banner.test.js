@@ -284,13 +284,53 @@ describe("frontend/global-restart-banner (demoted)", () => {
         ],
       }),
     ).toEqual({ step: 3, of: 5 });
-    // The optimistic placeholder never counts.
+    // The optimistic placeholder never counts — with no real step yet there
+    // is no plan to count against (the banner shows plain "Restart in
+    // progress" instead of a denominator that would jump 4→5 mid-op).
     expect(
       buildRestartBannerProgress({
         ...kRunningOperation,
         steps: [{ name: "__requesting", label: "Contacting AlphaClaw…", status: "running" }],
       }),
-    ).toEqual({ step: 1, of: 4 });
+    ).toBeNull();
     expect(buildRestartBannerProgress(null)).toBeNull();
+  });
+
+  it("tracks the started step across the REAL server sequence ('skipped' prepare, no launching terminal) instead of sticking at 2/5", () => {
+    // The exact emission order locked in by tests/server/gateway-restart
+    // .e2e.test.js: preparing_plugins running→skipped, stopping running→done,
+    // launching running (never gets a terminal status), waiting_ready
+    // running, ready done. done_count+1 arithmetic sat at "step 2/5" through
+    // launch and the entire (up to 120s) health-check wait.
+    const emitted = [];
+    const progressAfter = (event) => {
+      emitted.push(event);
+      return buildRestartBannerProgress({
+        ...kRunningOperation,
+        steps: [...emitted],
+      });
+    };
+
+    expect(
+      progressAfter({ name: "preparing_plugins", label: "Checking plugins", status: "running" }),
+    ).toEqual({ step: 1, of: 5 });
+    expect(
+      progressAfter({ name: "preparing_plugins", label: "Checking plugins", status: "skipped" }),
+    ).toEqual({ step: 1, of: 5 });
+    expect(
+      progressAfter({ name: "stopping", label: "Stopping gateway", status: "running" }),
+    ).toEqual({ step: 2, of: 5 });
+    expect(
+      progressAfter({ name: "stopping", label: "Stopping gateway", status: "done" }),
+    ).toEqual({ step: 2, of: 5 });
+    expect(
+      progressAfter({ name: "launching", label: "Starting gateway", status: "running" }),
+    ).toEqual({ step: 3, of: 5 });
+    expect(
+      progressAfter({ name: "waiting_ready", label: "Waiting for health check", status: "running" }),
+    ).toEqual({ step: 4, of: 5 });
+    expect(
+      progressAfter({ name: "ready", label: "Ready", status: "done" }),
+    ).toEqual({ step: 5, of: 5 });
   });
 });

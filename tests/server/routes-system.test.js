@@ -1236,6 +1236,9 @@ describe("server/routes/system", () => {
   it("streams status events with watchdog and doctor payloads", async () => {
     vi.useFakeTimers();
     try {
+      // The boot-phase singleton defaults to "starting_gateway"; this test
+      // asserts post-boot reducer states, so mark the boot settled first.
+      require("../../lib/server/boot-phase").setBootPhase("ready");
       const deps = createSystemDeps();
       deps.watchdog = { getStatus: vi.fn(() => ({ lifecycle: "running" })) };
       deps.doctorService = {
@@ -1309,16 +1312,19 @@ describe("server/routes/system", () => {
         { lifecycle: "restarting" },
       );
 
-      // Payload build failures are swallowed: the last good snapshot is kept
-      // and no new frame is written.
+      // A gateway-probe failure degrades to "no observation": the reducer
+      // reports unknown honestly (and streams the change) instead of failing
+      // the whole compute and freezing the last-good payload forever.
       deps.isGatewayRunning.mockRejectedValue(new Error("gateway probe failed"));
       res.write.mockClear();
       await vi.advanceTimersByTimeAsync(2000);
+      const probeFailData = res.write.mock.calls
+        .map((call) => String(call[0]))
+        .find((chunk) => chunk.startsWith("data: "));
+      expect(probeFailData).toBeTruthy();
       expect(
-        res.write.mock.calls.some((call) =>
-          String(call[0]).startsWith("event: status"),
-        ),
-      ).toBe(false);
+        JSON.parse(probeFailData.slice("data: ".length)).status.state.state,
+      ).toBe("unknown");
 
       // Keepalives flow every 15s, and the ≥1-frame/10s heartbeat re-sends
       // the (unchanged) snapshot as a liveness signal.
@@ -2027,6 +2033,9 @@ describe("server/routes/system", () => {
   }, 30000);
 
   it("runs an async restart as a streamed operation with human step labels", async () => {
+    const { setBootPhase, getBootPhase } = require("../../lib/server/boot-phase");
+    // A stale failed boot phase must be cleared by a verified restart.
+    setBootPhase("failed", { error: new Error("boot exploded") });
     const deps = createSystemDeps();
     deps.restartRequiredState.beginRestart = vi.fn(() => ({
       operationId: "op-1",
@@ -2101,6 +2110,9 @@ describe("server/routes/system", () => {
     // The watchdog's expected-restart window closes the moment the operation
     // settles — a dead gateway must not sit suppressed until lease expiry.
     expect(deps.watchdog.onExpectedRestartSettled).toHaveBeenCalledTimes(1);
+    // A verified-ready gateway supersedes a failed boot: the boot_failed
+    // headline's own Retry action must be able to clear it.
+    expect(getBootPhase().phase).toBe("ready");
   });
 
   it("attaches concurrent restart requests to the active operation", async () => {

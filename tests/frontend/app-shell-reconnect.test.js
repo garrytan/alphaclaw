@@ -119,6 +119,65 @@ describe("frontend/app-shell reconnect flow (M3.4)", () => {
     expect(onExhausted).not.toHaveBeenCalled();
   });
 
+  it("isReady gates the reload: a reachable poll still reporting the OLD process keeps polling (managed updates)", async () => {
+    // Managed updates only trigger an external deploy — the old process keeps
+    // serving /api/status, so "reachable" must not mean "ready": the poller
+    // reloads only once the polled payload reports a different version.
+    const responses = [
+      { alphaclawVersion: "0.9.34" },
+      { alphaclawVersion: "0.9.34" },
+      { alphaclawVersion: "0.9.35" },
+    ];
+    const poll = vi.fn(async () => responses.shift() || { alphaclawVersion: "0.9.35" });
+    const onSuccess = vi.fn();
+    const onExhausted = vi.fn();
+    createReachabilityPoller({
+      poll,
+      intervalMs: 3000,
+      graceMs: 8000,
+      maxAttempts: 40,
+      isReady: (payload) => payload?.alphaclawVersion !== "0.9.34",
+      onSuccess,
+      onExhausted,
+    });
+
+    // First poll succeeds against the still-running old process: no reload.
+    await vi.advanceTimersByTimeAsync(8000);
+    expect(poll).toHaveBeenCalledTimes(1);
+    expect(onSuccess).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(poll).toHaveBeenCalledTimes(2);
+    expect(onSuccess).not.toHaveBeenCalled();
+
+    // The platform swapped the deploy in: NOW the reload fires.
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(poll).toHaveBeenCalledTimes(3);
+    expect(onSuccess).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(30000);
+    expect(poll).toHaveBeenCalledTimes(3);
+    expect(onExhausted).not.toHaveBeenCalled();
+  });
+
+  it("not-ready polls consume the attempt budget and exhaust into the escape hatch", async () => {
+    const poll = vi.fn(async () => ({ alphaclawVersion: "0.9.34" }));
+    const onSuccess = vi.fn();
+    const onExhausted = vi.fn();
+    createReachabilityPoller({
+      poll,
+      intervalMs: 3000,
+      maxAttempts: 5,
+      isReady: () => false,
+      onSuccess,
+      onExhausted,
+    });
+    await vi.advanceTimersByTimeAsync(3000 * 10);
+    expect(poll).toHaveBeenCalledTimes(5);
+    expect(onExhausted).toHaveBeenCalledTimes(1);
+    expect(onSuccess).not.toHaveBeenCalled();
+  });
+
   it("reachability poller gives up after the attempt budget", async () => {
     const poll = vi.fn().mockRejectedValue(new Error("down"));
     const onSuccess = vi.fn();

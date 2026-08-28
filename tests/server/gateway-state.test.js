@@ -92,12 +92,28 @@ describe("server/gateway-state reducer", () => {
       "down",
     ],
     [
-      "down: crashed lifecycle",
+      // A crash immediately kicks the watchdog's relaunch — that IS a launch
+      // in progress; "Down + Retry" would invite a competing route restart.
+      "starting: crashed lifecycle (auto-relaunch imminent)",
       {
         tcp: { running: false, observedAt: kNow },
         watchdog: { lifecycle: "crashed", health: "unhealthy", safeMode: false, crashCountInWindow: 1 },
       },
-      "down",
+      "starting",
+    ],
+    [
+      "starting: watchdog repair in flight with gateway down",
+      {
+        tcp: { running: false, observedAt: kNow },
+        watchdog: {
+          lifecycle: "running",
+          health: "unhealthy",
+          safeMode: false,
+          crashCountInWindow: 0,
+          operationInProgress: true,
+        },
+      },
+      "starting",
     ],
     [
       "down: crash loop with auto-restart paused",

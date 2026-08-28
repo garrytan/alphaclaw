@@ -260,6 +260,51 @@ describe("frontend/restart-progress-card", () => {
     expect(onPrimaryAction).toHaveBeenCalledWith(primaryAction);
   });
 
+  it("a terminal failure stops in-flight steps: current step renders failed, other in-flight steps interrupted, nothing keeps pulsing", () => {
+    // The server never emits terminal step statuses on failure, and
+    // "launching" never receives one at all — a waiting_ready timeout leaves
+    // BOTH "Starting gateway" and "Waiting for health check" latched as
+    // "running". The failed card must not keep them pulsing as if in
+    // progress.
+    const tree = renderCard({
+      operation: {
+        ...kRunningOperation,
+        steps: [
+          ...kRunningOperation.steps,
+          {
+            name: "waiting_ready",
+            label: "Waiting for health check",
+            status: "running",
+          },
+        ],
+        phase: "failed",
+        error: {
+          message: "gateway did not become ready within 120s",
+          hint: null,
+          code: "restart_failed",
+        },
+      },
+    });
+    const rows = findAllByType(tree, "li");
+    expect(rows.length).toBe(4);
+    const dotClassFor = (row) =>
+      String(
+        findAllByType(row, "span").find((s) =>
+          String(s.props.class || "").includes("rounded-full"),
+        )?.props.class || "",
+      );
+    for (const row of rows) {
+      expect(dotClassFor(row)).not.toContain("animate-pulse");
+      expect(row.props["aria-current"]).toBeFalsy();
+    }
+    // Completed steps stay green; the step that was current is failed (red);
+    // the other in-flight step renders as interrupted (gray, no motion).
+    expect(dotClassFor(rows[0])).toContain("bg-green-500/90");
+    expect(dotClassFor(rows[1])).toContain("bg-green-500/90");
+    expect(dotClassFor(rows[2])).toContain("bg-gray-500/60");
+    expect(dotClassFor(rows[3])).toContain("bg-red-500/90");
+  });
+
   it("evidence disclosure: loading → collapsed 2-line summary → show more → full tail", async () => {
     const evidenceLines = Array.from(
       { length: 20 },

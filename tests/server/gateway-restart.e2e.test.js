@@ -100,8 +100,18 @@ const createFakeGateway = ({ portOpen = true } = {}) => {
   };
 
   childProcess.execFile = vi.fn((file, args, opts, cb) => {
-    if (fake.holdStop && args?.[0] === "gateway" && args?.[1] === "stop") {
-      fake.releaseStop = () => cb(null, "", "");
+    if (args?.[0] === "gateway" && args?.[1] === "stop") {
+      // A real `openclaw gateway stop` releases the port; the restart
+      // pipeline now waits for that release before launching.
+      if (fake.holdStop) {
+        fake.releaseStop = () => {
+          fake.portOpen = false;
+          cb(null, "", "");
+        };
+        return;
+      }
+      fake.portOpen = false;
+      cb(null, "", "");
       return;
     }
     cb(null, "", "");
@@ -117,6 +127,13 @@ const createFakeGateway = ({ portOpen = true } = {}) => {
     child.kill = vi.fn();
     fake.spawnCalls.push({ file, args });
     fake.supervisors.push(child);
+    // `gateway --force` brings the port back up unless the drill is
+    // simulating a gateway that never becomes ready.
+    if (args?.[0] === "gateway" && !fake.neverReady) {
+      queueMicrotask(() => {
+        fake.portOpen = true;
+      });
+    }
     if (fake.stderrLines.length) {
       // The restart supervisor attaches its stderr handler synchronously right
       // after spawn(), so a microtask emission is always observed (and stays
@@ -410,6 +427,7 @@ describe("server/gateway restart drills (e2e)", () => {
   it("fails with restart_failed + hint and serves redacted evidence when the gateway never becomes ready (NEVER-READY DRILL)", async () => {
     const kSecret = "supersecrettoken123";
     const fake = createFakeGateway({ portOpen: false });
+    fake.neverReady = true;
     fake.stderrLines = [
       `gateway boot: auth failed for token ${kSecret}`,
       "bind: address already in use",

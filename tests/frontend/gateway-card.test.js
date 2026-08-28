@@ -178,9 +178,12 @@ const kStateFixtures = [
   },
   {
     name: "down",
+    // lifecycle "crashed" now reduces to "starting" (the watchdog's own
+    // crash relaunch IS a launch in progress) — "stopped" is the honest
+    // no-recovery-in-flight down state.
     state: makeServerState({
       tcp: kFreshDown,
-      watchdog: { ...kHealthyWatchdog, lifecycle: "crashed", health: "unhealthy" },
+      watchdog: { ...kHealthyWatchdog, lifecycle: "stopped", health: "unhealthy" },
     }),
     dot: { color: "red", motion: "steady" },
   },
@@ -339,6 +342,25 @@ describe("frontend/gateway card (server-state matrix)", () => {
     );
     restartButton.props.onClick();
     expect(restart).toHaveBeenCalledTimes(1);
+  });
+
+  it("not_onboarded's Set up action dispatches to the shell onboarding surface (never a silent no-op)", () => {
+    const openSetup = vi.fn();
+    // Reachable in-app: the client's onboarded flag reads the onboarding
+    // marker while the reducer checks openclaw.json — with the marker present
+    // but the config missing, the card renders 'Not set up yet' whose only
+    // action is 'Set up'.
+    publishShell({ statusState: makeServerState({ configExists: false }) });
+    gatewayShellStore.publish({
+      actions: { ...gatewayShellStore.get().actions, openSetup },
+    });
+    const tree = renderGateway({});
+    const setupButton = findAllByType(tree, ActionButton).find(
+      (vnode) => vnode.props.idleLabel === "Set up",
+    );
+    expect(setupButton).toBeTruthy();
+    setupButton.props.onClick();
+    expect(openSetup).toHaveBeenCalledTimes(1);
   });
 
   it("shows the reasons banner capped at two labels plus a count", () => {

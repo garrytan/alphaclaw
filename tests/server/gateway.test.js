@@ -82,16 +82,28 @@ describe("server/gateway restart behavior", () => {
   it("always cold-starts when the gateway port is listening", async () => {
     const managedChild = createChild();
     const restartSupervisor = createChild();
-    const spawnMock = vi
-      .fn()
-      .mockReturnValueOnce(managedChild)
-      .mockReturnValueOnce(restartSupervisor);
+    // Model the real port lifecycle BEFORE requiring the module (it binds
+    // execFile/spawn at load): `stop` releases the port, `--force` reopens
+    // it — the restart pipeline now waits for the release before launching.
+    let gatewayPortOpen = false;
+    const spawnMock = vi.fn((file, args) => {
+      if (args?.[0] === "gateway" && args?.[1] === "--force") {
+        queueMicrotask(() => {
+          gatewayPortOpen = true;
+        });
+        return restartSupervisor;
+      }
+      return managedChild;
+    });
     const execSyncMock = vi.fn(() => "");
     childProcess.spawn = spawnMock;
     childProcess.execSync = execSyncMock;
     fs.existsSync = vi.fn(() => true);
-    let gatewayPortOpen = false;
     net.createConnection = vi.fn(() => createSocket(() => gatewayPortOpen));
+    childProcess.execFile = vi.fn((file, args, opts, cb) => {
+      if (args?.[0] === "gateway" && args?.[1] === "stop") gatewayPortOpen = false;
+      cb(null, "", "");
+    });
     delete require.cache[modulePath];
     const gateway = require(modulePath);
     fs.readFileSync = vi.fn(() =>
@@ -240,9 +252,16 @@ describe("server/gateway restart behavior", () => {
       }),
     );
 
+    spawnMock.mockImplementation((file, args) => {
+      if (args?.[0] === "gateway" && args?.[1] === "--force") {
+        queueMicrotask(() => {
+          gatewayPortOpen = true;
+        });
+      }
+      return restartSupervisor;
+    });
     const reloadEnv = vi.fn();
     const restartPromise = gateway.restartGateway(reloadEnv);
-    gatewayPortOpen = true;
     await restartPromise;
 
     expect(reloadEnv).toHaveBeenCalledTimes(1);
@@ -347,8 +366,15 @@ describe("server/gateway restart behavior", () => {
     );
 
     await gateway.startGateway();
+    spawnMock.mockImplementation((file, args) => {
+      if (args?.[0] === "gateway" && args?.[1] === "--force") {
+        queueMicrotask(() => {
+          gatewayPortOpen = true;
+        });
+      }
+      return child;
+    });
     const restartPromise = gateway.restartGateway(vi.fn());
-    gatewayPortOpen = true;
     await restartPromise;
 
     const exitRegistration = child.on.mock.calls.find((call) => call[0] === "exit");

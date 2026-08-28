@@ -375,7 +375,7 @@ describe("server/doctor-service", () => {
     );
   });
 
-  it("reports meaningful workspace drift only after a stale completed run", () => {
+  it("reports meaningful workspace drift only after a stale completed run", async () => {
     const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-drift-workspace-"));
     const dbRoot = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-drift-db-"));
     fs.writeFileSync(path.join(workspaceRoot, "AGENTS.md"), "# Guidance\n", "utf8");
@@ -430,6 +430,11 @@ describe("server/doctor-service", () => {
     fs.writeFileSync(path.join(workspaceRoot, "skills", "note.md"), "extra guidance\n", "utf8");
 
     const refreshedDoctorService = buildDoctorService();
+    // Cold cache: the first status must NOT hash the workspace on the event
+    // loop — it kicks the background worker and reports drift as unknown.
+    const coldStatus = refreshedDoctorService.buildStatus();
+    expect(coldStatus.changeSummary.hasBaseline).toBe(false);
+    await refreshedDoctorService.awaitWorkspaceSnapshotRefresh();
     const status = refreshedDoctorService.buildStatus();
 
     expect(status.needsInitialRun).toBe(false);
@@ -440,7 +445,7 @@ describe("server/doctor-service", () => {
     expect(status.changeSummary.deltaScore).toBeGreaterThanOrEqual(4);
   });
 
-  it("uses the persisted initial baseline before the first completed run", () => {
+  it("uses the persisted initial baseline before the first completed run", async () => {
     const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-initial-baseline-"));
     const dbRoot = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-initial-baseline-db-"));
     fs.writeFileSync(path.join(workspaceRoot, "AGENTS.md"), "# Guidance\n", "utf8");
@@ -469,9 +474,16 @@ describe("server/doctor-service", () => {
 
     const doctorService = buildDoctorService();
 
+    // Cold cache: status kicks the background snapshot worker; the initial
+    // baseline is created (and drift computed) once it lands.
+    doctorService.buildStatus();
+    await doctorService.awaitWorkspaceSnapshotRefresh();
     const initialStatus = doctorService.buildStatus();
     fs.writeFileSync(path.join(workspaceRoot, "README.md"), "# Added after baseline\n", "utf8");
-    const nextStatus = buildDoctorService().buildStatus();
+    const nextService = buildDoctorService();
+    nextService.buildStatus();
+    await nextService.awaitWorkspaceSnapshotRefresh();
+    const nextStatus = nextService.buildStatus();
 
     expect(initialStatus.needsInitialRun).toBe(true);
     expect(initialStatus.changeSummary.hasBaseline).toBe(true);
@@ -1108,10 +1120,15 @@ describe("server/doctor-service", () => {
         for (let i = 0; i < 10; i += 1) await Promise.resolve();
       };
 
-      // Cold boot computes the first snapshot synchronously.
+      // Cold boot never hashes on the event loop: the first status kicks the
+      // background worker and reports drift as unknown until it lands.
       const initialStatus = doctorService.buildStatus();
-      expect(initialStatus.changeSummary.changedFilesCount).toBe(0);
-      expect(computeSnapshotAsync).not.toHaveBeenCalled();
+      expect(initialStatus.changeSummary.hasBaseline).toBe(false);
+      expect(computeSnapshotAsync).toHaveBeenCalledTimes(1);
+      resolveRefresh(computeWorkspaceSnapshot(workspaceRoot));
+      await flushMicrotasks();
+      const warmStatus = doctorService.buildStatus();
+      expect(warmStatus.changeSummary.changedFilesCount).toBe(0);
 
       fs.writeFileSync(path.join(workspaceRoot, "README.md"), "# Added later\n", "utf8");
       vi.advanceTimersByTime(61_000);
@@ -1120,15 +1137,15 @@ describe("server/doctor-service", () => {
       // background recompute is kicked.
       const staleStatus = doctorService.buildStatus();
       expect(staleStatus.changeSummary.changedFilesCount).toBe(0);
-      expect(computeSnapshotAsync).toHaveBeenCalledTimes(1);
-      expect(computeSnapshotAsync).toHaveBeenCalledWith(workspaceRoot, {
+      expect(computeSnapshotAsync).toHaveBeenCalledTimes(2);
+      expect(computeSnapshotAsync).toHaveBeenLastCalledWith(workspaceRoot, {
         previousManifest: expect.any(Object),
       });
 
       // Refreshes coalesce while one is already in flight.
       vi.advanceTimersByTime(6_000);
       doctorService.buildStatus();
-      expect(computeSnapshotAsync).toHaveBeenCalledTimes(1);
+      expect(computeSnapshotAsync).toHaveBeenCalledTimes(2);
 
       resolveRefresh(computeWorkspaceSnapshot(workspaceRoot));
       await flushMicrotasks();

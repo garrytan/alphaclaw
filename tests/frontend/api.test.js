@@ -47,6 +47,18 @@ describe("frontend/api", () => {
     expect(window.location.href).toBe("/setup");
   });
 
+  it("fetchStatus rejects on a 500 {error} envelope — a failed poll, never a status frame", async () => {
+    // The /api/status error path answers 500 {error}; consuming it as data
+    // kept connectivity "online" (truthy poll data) and rendered the legacy
+    // version-skew card ({error} has no .state) against a broken new server.
+    global.fetch.mockResolvedValue(
+      mockJsonResponse(500, { error: "status unavailable" }),
+    );
+    const api = await loadApiModule();
+
+    await expect(api.fetchStatus()).rejects.toThrow("status unavailable");
+  });
+
   it("runOnboard sends vars and modelKey payload", async () => {
     global.fetch.mockResolvedValue(mockJsonResponse(200, { ok: true }));
     const api = await loadApiModule();

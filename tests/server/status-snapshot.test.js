@@ -114,9 +114,17 @@ describe("server/status-snapshot", () => {
 
     // Failures keep the last good snapshot; no bogus frames are emitted.
     expect(statusFramesOf(client)).toHaveLength(1);
-    expect(await service.getSnapshotPayload()).toEqual({
-      status: { gateway: "running" },
-    });
+    // The re-served payload is honestly marked stale, stamped with the last
+    // COMPUTE time — never presented as fresh.
+    const payload = await service.getSnapshotPayload();
+    expect(payload).toEqual(
+      expect.objectContaining({
+        status: { gateway: "running" },
+        snapshotStale: true,
+        snapshotErrorCount: expect.any(Number),
+        timestamp: expect.any(String),
+      }),
+    );
   });
 
   it("getSnapshotPayload computes on demand with zero clients and coalesces", async () => {

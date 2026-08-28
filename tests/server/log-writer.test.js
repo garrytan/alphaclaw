@@ -220,6 +220,86 @@ describe("server/log-writer", () => {
     expect(collected).toBe(fs.readFileSync(getLogPath(), "utf8"));
   });
 
+  it("readLogDelta holds back a multibyte character split by the maxBytes cap", async () => {
+    initLogWriter({ rootDir, maxBytes: 1024 * 1024 });
+    // A line already starting with an ISO timestamp is kept verbatim, so byte
+    // positions are exact: the 4-byte 🚀 occupies bytes 1023-1026 and the
+    // minimum 1024-byte cap cuts it one byte in.
+    const head = "2026-01-01T00:00:00.000Z ";
+    const line = `${head}${"a".repeat(1023 - head.length)}🚀XTAIL-MARKER 日本語\n`;
+    process.stdout.write(line);
+    await __flushForTests();
+    expect(fs.readFileSync(getLogPath())[1023]).toBe(0xf0); // emoji lead byte at the cap
+
+    const gen = getLogGeneration();
+    const first = readLogDelta({ gen, offset: 0, maxBytes: 1024 });
+    expect(first.reset).toBe(false);
+    // Advances only to the last complete character boundary, never past it.
+    expect(first.offset).toBe(1023);
+    expect(first.data).toBe(line.slice(0, 1023));
+
+    const second = readLogDelta({ gen: first.gen, offset: first.offset, maxBytes: 1024 });
+    expect(second.reset).toBe(false);
+    expect(second.offset).toBe(first.offset + Buffer.byteLength(second.data));
+    const reassembled = first.data + second.data;
+    expect(reassembled).toBe(line);
+    expect(reassembled).toContain("🚀XTAIL-MARKER");
+    expect(reassembled).not.toContain("�");
+  });
+
+  it("readLogDelta reassembles multibyte content byte-for-byte across capped reads", async () => {
+    initLogWriter({ rootDir, maxBytes: 1024 * 1024 });
+    // 999 ASCII bytes then a long emoji+CJK body: the first 1024-byte cap
+    // lands 25 bytes into the 4-byte-emoji run (25 % 4 !== 0), guaranteeing
+    // at least one mid-character split.
+    const head = "2026-01-01T00:00:00.000Z ";
+    const line = `${head}${"x".repeat(999 - head.length)}${"🔴".repeat(600)}${"日本語ログ".repeat(40)}END\n`;
+    process.stdout.write(line);
+    await __flushForTests();
+    const fileBytes = fs.readFileSync(getLogPath());
+
+    const gen = getLogGeneration();
+    let cursor = { gen, offset: 0 };
+    let collected = "";
+    let sawHoldBack = false;
+    for (;;) {
+      const delta = readLogDelta({ ...cursor, maxBytes: 1024 });
+      expect(delta.reset).toBe(false);
+      // The cursor advances by exactly the bytes consumed.
+      expect(delta.offset - cursor.offset).toBe(Buffer.byteLength(delta.data));
+      expect(delta.data).not.toContain("�");
+      if (!delta.data) break;
+      const window = Math.min(1024, fileBytes.length - cursor.offset);
+      if (Buffer.byteLength(delta.data) < window) sawHoldBack = true;
+      collected += delta.data;
+      cursor = { gen: delta.gen, offset: delta.offset };
+    }
+    expect(sawHoldBack).toBe(true);
+    expect(Buffer.from(collected, "utf8").equals(fileBytes)).toBe(true);
+  });
+
+  it("readLogDelta returns an empty delta without advancing on a partial trailing character", async () => {
+    initLogWriter({ rootDir, maxBytes: 1024 * 1024 });
+    process.stdout.write("prefix line\n");
+    await __flushForTests();
+    const gen = getLogGeneration();
+    const base = readLogDelta({ gen, offset: 0 });
+    expect(base.reset).toBe(false);
+
+    // Simulate an append caught mid-character: only 2 of the emoji's 4 bytes
+    // are on disk when the poll lands.
+    const emoji = Buffer.from("🚀");
+    fs.appendFileSync(getLogPath(), emoji.subarray(0, 2));
+    const torn = readLogDelta({ gen: base.gen, offset: base.offset });
+    expect(torn).toEqual({ gen: base.gen, offset: base.offset, data: "", reset: false });
+
+    fs.appendFileSync(getLogPath(), emoji.subarray(2));
+    const whole = readLogDelta({ gen: torn.gen, offset: torn.offset });
+    expect(whole.reset).toBe(false);
+    expect(whole.data).toBe("🚀");
+    expect(whole.offset).toBe(base.offset + emoji.length);
+  });
+
   it("rotation bumps the generation and stale cursors reset with a fresh tail", async () => {
     const maxBytes = 4096;
     initLogWriter({ rootDir, maxBytes });

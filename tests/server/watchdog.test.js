@@ -12,6 +12,7 @@ const kOriginalFetch = global.fetch;
 const createHarness = ({
   autoRepair = true,
   notificationsDisabled = false,
+  gatewayLifecycleLock = null,
   clawCmdImpl,
   resolveSetupUrl = () => "https://setup.example.com",
   resolveGatewayHealthUrl = () => "http://127.0.0.1:18789/health",
@@ -43,6 +44,7 @@ const createHarness = ({
   const watchdog = createWatchdog({
     clawCmd,
     launchGatewayProcess,
+    gatewayLifecycleLock,
     insertWatchdogEvent,
     notifier,
     readEnvFile,
@@ -1467,6 +1469,94 @@ describe("server/watchdog", () => {
         details: { error: "spawn failure" },
       }),
     );
+  });
+
+  it("keeps the expected-restart window through mid-restart healthy probes and expected exits", async () => {
+    vi.useFakeTimers();
+    let gatewayUp = true;
+    let doctorCalls = 0;
+    const { watchdog, launchGatewayProcess } = createHarness({
+      autoRepair: true,
+      clawCmdImpl: async (command) => {
+        if (command === "doctor --fix --yes") {
+          doctorCalls += 1;
+          return { ok: true, stdout: "fixed" };
+        }
+        return { ok: true, stdout: "" };
+      },
+      fetchImpl: async () => {
+        if (!gatewayUp) throw new Error("gateway down");
+        return {
+          ok: true,
+          status: 200,
+          text: async () => JSON.stringify({ ok: true, status: "live" }),
+        };
+      },
+    });
+    watchdog.start();
+    await vi.advanceTimersByTimeAsync(10);
+
+    // A route restart opens a lease-length window; prepare-before-stop means
+    // the OLD gateway still answers probes at this point.
+    watchdog.onExpectedRestart({ expiresAt: Date.now() + 10 * 60 * 1000 });
+    await vi.advanceTimersByTimeAsync(6_000);
+    // The mid-restart healthy probe must not clear the window or flip the
+    // lifecycle back to running.
+    expect(watchdog.getStatus().lifecycle).toBe("restarting");
+
+    // The stop lands: the expected exit's 15s default must not SHRINK the
+    // lease-length window.
+    gatewayUp = false;
+    watchdog.onGatewayExit({ code: 0, expectedExit: true });
+    // 20s into the restart — inside the 120s ready budget, past the old 15s
+    // window — failing probes stay suppressed: no degradation, no doctor
+    // repair, no competing launch under the live restart.
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(doctorCalls).toBe(0);
+    expect(launchGatewayProcess).not.toHaveBeenCalled();
+    expect(watchdog.getStatus().lifecycle).toBe("restarting");
+    watchdog.stop();
+  });
+
+  it("skips background recovery while another lifecycle operation holds the lock", async () => {
+    const {
+      createGatewayLifecycleLock,
+    } = require("../../lib/server/gateway-lifecycle-lock");
+    const lock = createGatewayLifecycleLock();
+    const { watchdog, launchGatewayProcess, insertWatchdogEvent } = createHarness({
+      autoRepair: true,
+      gatewayLifecycleLock: lock,
+      fetchImpl: async () => {
+        throw new Error("gateway down");
+      },
+    });
+
+    const release = await lock.acquire("restart");
+    const result = await watchdog.triggerRepair();
+    expect(result).toEqual({
+      ok: false,
+      skipped: true,
+      reason: "operation_in_progress",
+    });
+    expect(insertWatchdogEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        eventType: "repair",
+        status: "skipped",
+        details: expect.objectContaining({
+          reason: "lifecycle_operation_in_progress",
+        }),
+      }),
+    );
+
+    // A crash exit during the held lock must not relaunch a competing gateway.
+    watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    await flushMicrotasks();
+    expect(launchGatewayProcess).not.toHaveBeenCalled();
+
+    release();
+    // With the lock free again, recovery proceeds.
+    const repaired = await watchdog.triggerRepair();
+    expect(repaired.ok).toBe(true);
   });
 
   it("settling an expected restart closes the suppression window and resyncs immediately", async () => {

@@ -1287,6 +1287,81 @@ describe("frontend/upgrade-tab hook", () => {
     expect(state.channelInfo.installedVersion).toBe("2026.7.1-2");
   });
 
+  it("a late SWR revalidation never clobbers a fresher mutation result (mutation-stamp guard)", async () => {
+    const staleChannel = makeChannelInfo({
+      blocklist: [{ id: "stable:2026.7.2", reason: "crash loop" }],
+    });
+    const freshChannel = makeChannelInfo({ blocklist: [] });
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(kNow);
+    setCached("/api/openclaw/channel", staleChannel);
+    setCached("/api/openclaw/catalog", { ok: true, catalog: makeCatalog() });
+    nowSpy.mockReturnValue(kNow + 61_000); // past the 60s maxAge → SWR path
+
+    // The mount revalidation stalls in flight; the mutation reload resolves
+    // before it.
+    let resolveRevalidation;
+    api.fetchOpenclawChannel
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveRevalidation = resolve;
+          }),
+      )
+      .mockResolvedValueOnce(freshChannel);
+    api.markOpenclawGood.mockResolvedValue({ ok: true });
+
+    let state = await hydrate();
+    expect(state.channelInfo.blocklist).toHaveLength(1);
+
+    // A mutation completes while the revalidation is still in flight.
+    await state.onMarkGood();
+    state = renderHook({});
+    expect(state.channelInfo.blocklist).toEqual([]);
+
+    // The pre-mutation revalidation resolves late: it must neither overwrite
+    // the fresher state nor leave its stale payload re-stamped as "fresh" in
+    // the shared cache (which would resurrect it for the next mount).
+    resolveRevalidation(staleChannel);
+    await flushAsync();
+    state = renderHook({});
+    expect(state.channelInfo.blocklist).toEqual([]);
+    expect(getCached("/api/openclaw/channel")).not.toEqual(staleChannel);
+  });
+
+  it("clearing a blocklist entry supersedes an in-flight revalidation and drops the cached channel payload", async () => {
+    const staleChannel = makeChannelInfo({
+      blocklist: [{ id: "stable:2026.7.2", reason: "crash loop" }],
+    });
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(kNow);
+    setCached("/api/openclaw/channel", staleChannel);
+    setCached("/api/openclaw/catalog", { ok: true, catalog: makeCatalog() });
+    nowSpy.mockReturnValue(kNow + 61_000);
+
+    let resolveRevalidation;
+    api.fetchOpenclawChannel.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveRevalidation = resolve;
+        }),
+    );
+    api.clearOpenclawBlocklist.mockResolvedValue({ ok: true, blocklist: [] });
+
+    let state = await hydrate();
+    expect(state.channelInfo.blocklist).toHaveLength(1);
+
+    await state.onClearBlocklist("stable:2026.7.2");
+    state = renderHook({});
+    expect(state.channelInfo.blocklist).toEqual([]);
+
+    // The pre-clear revalidation resolves late: the cleared row must not be
+    // resurrected — not in state, and not via the cache on the next mount.
+    resolveRevalidation(staleChannel);
+    await flushAsync();
+    state = renderHook({});
+    expect(state.channelInfo.blocklist).toEqual([]);
+    expect(getCached("/api/openclaw/channel")).not.toEqual(staleChannel);
+  });
+
   it("serves a stale-cached catalog instantly, then applies the revalidated result (M4)", async () => {
     const staleCatalog = makeCatalog({ distTags: { latest: "2026.7.1-2" } });
     const freshCatalog = makeCatalog({ distTags: { latest: "2026.7.2" } });
