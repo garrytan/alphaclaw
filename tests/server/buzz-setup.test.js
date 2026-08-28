@@ -102,6 +102,15 @@ describe("server/buzz-setup (5.2)", () => {
     expect(invalidated).toBe(1);
   });
 
+  it("removes the isolated install HOME after the run (no scratch left on disk)", async () => {
+    const service = makeService();
+    await service.install();
+    const installHome = runCalls[0].env.HOME;
+    expect(installHome.startsWith(os.tmpdir())).toBe(true);
+    // The isolated HOME is scratch — it must not survive the install.
+    expect(fs.existsSync(installHome)).toBe(false);
+  });
+
   it("surfaces install failures with the CLI tail as the hint", async () => {
     runResult = { ok: false, code: 1, tail: "npm ERR! network timeout", timedOut: false };
     const service = makeService();

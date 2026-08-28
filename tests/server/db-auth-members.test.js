@@ -84,6 +84,8 @@ describe("server/db/auth members store (4.1)", () => {
       "@no-local.co", // empty local
       "a@bco", // no dotted domain
       `${"x".repeat(250)}@example.com`, // over length cap
+      "\u{1F600}@example.com", // emoji local — Node rejects it in a header
+      "näme@example.com", // non-ASCII byte — header-unsafe
     ];
     for (const email of nasty) {
       expect(() =>

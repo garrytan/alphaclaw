@@ -377,6 +377,8 @@ describe("server/routes/team (4.5)", () => {
       .send({ disabled: true });
     expect(patch.status).toBe(200);
     expect(configDoc().gateway.auth).toEqual({ mode: "token", token: "t" });
+    // Nothing was written to the gateway, so no restart is claimed.
+    expect(patch.body.restartRequired).toBe(false);
   });
 
   it("guards the last admin through the member routes (D9)", async () => {

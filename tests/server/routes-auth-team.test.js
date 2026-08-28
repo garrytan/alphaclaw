@@ -306,8 +306,14 @@ describe("server/routes/auth team mode (4.2/4.6)", () => {
     const memberCookie = cookieOf(
       await loginMember("m@example.com", "member password"),
     );
-    // The two subpaths that return raw provider API keys / OAuth tokens.
-    for (const url of ["/api/models/config", "/api/models/auth"]) {
+    // The two subpaths that return raw provider API keys / OAuth tokens —
+    // including case variants, since Express matches routes case-insensitively.
+    for (const url of [
+      "/api/models/config",
+      "/api/models/auth",
+      "/api/models/Config",
+      "/api/models/AUTH",
+    ]) {
       const res = await request(app).get(url).set("Cookie", memberCookie);
       expect(res.status, url).toBe(403);
       expect(res.body.code).toBe("admin_required");
