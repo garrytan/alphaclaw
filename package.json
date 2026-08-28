@@ -34,6 +34,7 @@
     "prepare": "npm run build:ui"
   },
   "dependencies": {
+    "compression": "^1.8.1",
     "express": "^4.21.0",
     "http-proxy": "^1.18.1",
     "openclaw": "2026.7.1-2",

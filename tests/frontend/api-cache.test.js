@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   cachedFetch,
   getCached,
+  getCachedAt,
   invalidateCache,
   setCached,
 } from "../../lib/public/js/lib/api-cache.js";
@@ -23,6 +24,45 @@ describe("frontend/api-cache", () => {
     invalidateCache("basic-key");
     expect(getCached("basic-key")).toBe(null);
     expect(invalidateCache("")).toBeUndefined();
+  });
+
+  it("persists whitelisted keys to sessionStorage with an as-of stamp", () => {
+    const store = new Map();
+    const fakeStorage = {
+      get length() {
+        return store.size;
+      },
+      key: (i) => [...store.keys()][i] ?? null,
+      getItem: (k) => (store.has(k) ? store.get(k) : null),
+      setItem: (k, v) => store.set(k, String(v)),
+      removeItem: (k) => store.delete(k),
+    };
+    vi.stubGlobal("sessionStorage", fakeStorage);
+    try {
+      // Catalog keys persist; live-status keys never do.
+      setCached("/api/openclaw/catalog?channel=stable", { versions: [1] });
+      setCached("/api/watchdog/events?limit=20", { events: [] });
+      expect(store.has("acApiCache:/api/openclaw/catalog?channel=stable")).toBe(
+        true,
+      );
+      expect(store.has("acApiCache:/api/watchdog/events?limit=20")).toBe(false);
+
+      const persisted = JSON.parse(
+        store.get("acApiCache:/api/openclaw/catalog?channel=stable"),
+      );
+      expect(persisted.data).toEqual({ versions: [1] });
+      expect(typeof persisted.fetchedAt).toBe("number");
+      expect(getCachedAt("/api/openclaw/catalog?channel=stable")).toBe(
+        persisted.fetchedAt,
+      );
+
+      invalidateCache("/api/openclaw/catalog?channel=stable");
+      expect(store.has("acApiCache:/api/openclaw/catalog?channel=stable")).toBe(
+        false,
+      );
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it("bypasses caching for empty keys or non-function fetchers", async () => {

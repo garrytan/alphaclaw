@@ -2,16 +2,27 @@ const fs = require("fs");
 const os = require("os");
 const childProcess = require("child_process");
 
-// system-resources destructures execSync from child_process at load time, so
+// system-resources destructures execFile from child_process at load time, so
 // the replacement must be installed before the module is required.
-const kRealExecSync = childProcess.execSync;
-const execSyncMock = vi.fn(kRealExecSync);
-childProcess.execSync = execSyncMock;
+const kRealExecFile = childProcess.execFile;
+const execFileMock = vi.fn(kRealExecFile);
+childProcess.execFile = execFileMock;
+
+// The ps fallback is async with a per-pid memo: mocks invoke the callback
+// synchronously so the memo is populated before readPsStats returns.
+const mockPsOutput = (stdout) =>
+  execFileMock.mockImplementation((cmd, args, opts, cb) => {
+    cb(null, stdout, "");
+  });
+const mockPsFailure = () =>
+  execFileMock.mockImplementation((cmd, args, opts, cb) => {
+    cb(new Error("ps failed"), "", "");
+  });
 
 const { getSystemResources } = require("../../lib/server/system-resources");
 
 // system-resources reads cgroup/proc files through the shared fs singleton and
-// shells out via child_process.execSync. We intercept those boundaries with
+// shells out via child_process.execFile. We intercept those boundaries with
 // spies that fall through to the real fs for unrelated paths.
 //
 // NOTE: the module keeps a private CPU snapshot (prevCpuSnapshot) between
@@ -40,11 +51,11 @@ const createFileSystem = (files = {}) => {
 
 describe("server/system-resources", () => {
   afterEach(() => {
-    execSyncMock.mockReset();
+    execFileMock.mockReset();
   });
 
   afterAll(() => {
-    childProcess.execSync = kRealExecSync;
+    childProcess.execFile = kRealExecFile;
   });
 
   it("reports cgroup v2 memory, cpu quota, disk, and process usage", () => {
@@ -105,7 +116,7 @@ describe("server/system-resources", () => {
       }
       throw new Error("statfs unavailable");
     });
-    execSyncMock.mockReturnValue("1024  2.5\n");
+    mockPsOutput("1024  2.5\n");
 
     const first = getSystemResources({ gatewayPid: 987 });
     expect(first.memory).toEqual({
@@ -124,9 +135,11 @@ describe("server/system-resources", () => {
     // /proc read failed, so gateway usage came from ps.
     expect(first.processes.gateway).toEqual({ rssBytes: 1024 * 1024, pid: 987 });
     expect(statfsSpy).toHaveBeenCalled();
-    expect(execSyncMock).toHaveBeenCalledWith(
-      "ps -o rss=,pcpu= -p 987",
+    expect(execFileMock).toHaveBeenCalledWith(
+      "ps",
+      ["-o", "rss=,pcpu=", "-p", "987"],
       expect.objectContaining({ encoding: "utf8", timeout: 2000 }),
+      expect.any(Function),
     );
 
     // Zero elapsed time between snapshots leaves the percent unknown.
@@ -179,9 +192,7 @@ describe("server/system-resources", () => {
       blocks: 10,
       bfree: 10,
     });
-    execSyncMock.mockImplementation(() => {
-      throw new Error("ps failed");
-    });
+    mockPsFailure();
 
     const resources = getSystemResources({ gatewayPid: 12345 });
 
@@ -198,7 +209,7 @@ describe("server/system-resources", () => {
       blocks: 10,
       bfree: 5,
     });
-    const execSpy = execSyncMock;
+    const execSpy = execFileMock;
 
     const resources = getSystemResources();
 
@@ -289,7 +300,7 @@ describe("server/system-resources", () => {
       blocks: 10,
       bfree: 5,
     });
-    execSyncMock.mockReturnValue("   ");
+    mockPsOutput("   ");
 
     const resources = getSystemResources({ gatewayPid: 777 });
 
