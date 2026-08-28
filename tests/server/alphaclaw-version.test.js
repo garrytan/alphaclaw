@@ -942,11 +942,21 @@ describe("server/alphaclaw-version", () => {
 
       await expect(service.restartProcess()).rejects.toThrow("exit 0");
       expect(drain).toHaveBeenCalledTimes(1);
+      // NOT stdio:"inherit": an inherited pipe loses its reader when this
+      // process exits and the child dies on EPIPE at its first log line —
+      // output goes to the respawn log (fd array) or "ignore" as fallback.
       expect(childProcess.spawn).toHaveBeenCalledWith(
         process.argv[0],
         process.argv.slice(1),
-        { detached: true, stdio: "inherit" },
+        expect.objectContaining({ detached: true }),
       );
+      const spawnOptions = childProcess.spawn.mock.calls[0][2];
+      expect(
+        spawnOptions.stdio === "ignore" ||
+          (Array.isArray(spawnOptions.stdio) &&
+            spawnOptions.stdio[0] === "ignore"),
+      ).toBe(true);
+      expect(spawnOptions.stdio).not.toBe("inherit");
       expect(unref).toHaveBeenCalledTimes(1);
       expect(exitSpy).toHaveBeenCalledWith(0);
     } finally {

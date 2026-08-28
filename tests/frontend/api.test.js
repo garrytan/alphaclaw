@@ -1659,6 +1659,155 @@ describe("frontend/api openclaw channel endpoints", () => {
     expect(options.body).toBe(JSON.stringify({}));
   });
 
+  it("fetchOpenclawRuns lists the run ledger", async () => {
+    const payload = {
+      ok: true,
+      runs: [
+        {
+          operationId: "0b1c2d3e-0000-4000-8000-000000000001",
+          state: "activated",
+          stepCount: 6,
+          hasLog: true,
+        },
+      ],
+    };
+    global.fetch.mockResolvedValue(mockJsonResponse(200, payload));
+    const api = await loadApiModule();
+
+    const result = await api.fetchOpenclawRuns();
+
+    expect(global.fetch).toHaveBeenCalledWith(
+      "/api/openclaw/runs",
+      expect.objectContaining({ headers: expect.any(Headers) }),
+    );
+    expect(result).toEqual(payload);
+  });
+
+  it("fetchOpenclawRun gets a single run by encoded operation id", async () => {
+    global.fetch.mockResolvedValue(
+      mockJsonResponse(200, { ok: true, run: { operationId: "abc", steps: [] } }),
+    );
+    const api = await loadApiModule();
+
+    const result = await api.fetchOpenclawRun("abc def");
+
+    expect(global.fetch.mock.calls[0][0]).toBe("/api/openclaw/runs/abc%20def");
+    expect(result.run.operationId).toBe("abc");
+  });
+
+  it("fetchOpenclawRunLogText returns the plain-text log body", async () => {
+    global.fetch.mockResolvedValue(
+      mockTextResponse(200, "npm install openclaw@2026.7.2\nverified\n"),
+    );
+    const api = await loadApiModule();
+
+    const text = await api.fetchOpenclawRunLogText("op-1");
+
+    // Defaults to a 256KB tail so a 10MB dev log never lands in one string.
+    expect(global.fetch.mock.calls[0][0]).toBe(
+      "/api/openclaw/runs/op-1/log?tail=262144",
+    );
+    expect(text).toBe("npm install openclaw@2026.7.2\nverified\n");
+
+    // Full-file mode for download flows.
+    const full = await api.fetchOpenclawRunLogText("op-1", { tailBytes: null });
+    expect(full).toBe("npm install openclaw@2026.7.2\nverified\n");
+    expect(global.fetch.mock.calls[1][0]).toBe("/api/openclaw/runs/op-1/log");
+  });
+
+  it("fetchOpenclawRunLogText surfaces the 404 log_not_found envelope", async () => {
+    global.fetch.mockResolvedValue(
+      mockJsonResponse(404, {
+        ok: false,
+        code: "log_not_found",
+        message: "No log recorded for this run.",
+      }),
+    );
+    const api = await loadApiModule();
+
+    const error = await api.fetchOpenclawRunLogText("op-1").catch((err) => err);
+
+    expect(error.message).toBe("No log recorded for this run.");
+    expect(error.code).toBe("log_not_found");
+  });
+
+  it("fetchOpenclawFeatures gets the fail-closed feature map", async () => {
+    const payload = {
+      ok: true,
+      version: "2026.8.1-beta.3",
+      features: { multiUser: true, sqliteBackup: true },
+    };
+    global.fetch.mockResolvedValue(mockJsonResponse(200, payload));
+    const api = await loadApiModule();
+
+    const result = await api.fetchOpenclawFeatures();
+
+    expect(global.fetch.mock.calls[0][0]).toBe("/api/openclaw/features");
+    expect(result).toEqual(payload);
+  });
+
+  it("fetchOpenclawNotifications gets the routing preferences", async () => {
+    const payload = {
+      ok: true,
+      notifications: { preferredChannel: "telegram", adminTargets: [] },
+    };
+    global.fetch.mockResolvedValue(mockJsonResponse(200, payload));
+    const api = await loadApiModule();
+
+    const result = await api.fetchOpenclawNotifications();
+
+    expect(global.fetch.mock.calls[0][0]).toBe("/api/openclaw/notifications");
+    expect(result).toEqual(payload);
+  });
+
+  it("updateOpenclawNotifications puts the preferences and keeps envelope errors", async () => {
+    global.fetch.mockResolvedValue(
+      mockJsonResponse(200, {
+        ok: true,
+        notifications: {
+          preferredChannel: "slack",
+          adminTargets: [
+            { channel: "slack", target: "U123", accountId: "work" },
+          ],
+        },
+      }),
+    );
+    const api = await loadApiModule();
+
+    const result = await api.updateOpenclawNotifications({
+      preferredChannel: "slack",
+      adminTargets: [{ channel: "slack", target: "U123", accountId: "work" }],
+    });
+
+    expect(global.fetch).toHaveBeenCalledWith(
+      "/api/openclaw/notifications",
+      expect.objectContaining({
+        method: "PUT",
+        body: JSON.stringify({
+          preferredChannel: "slack",
+          adminTargets: [
+            { channel: "slack", target: "U123", accountId: "work" },
+          ],
+        }),
+        headers: expect.any(Headers),
+      }),
+    );
+    expect(result.notifications.preferredChannel).toBe("slack");
+
+    global.fetch.mockResolvedValue(
+      mockJsonResponse(503, {
+        ok: false,
+        code: "notifications_unavailable",
+        message: "Store not available",
+      }),
+    );
+    const error = await api
+      .updateOpenclawNotifications({ preferredChannel: null })
+      .catch((err) => err);
+    expect(error.message).toBe("Store not available");
+    expect(error.code).toBe("notifications_unavailable");
+  });
+
   it("subscribeOpenclawApplyEvents streams step/output/done and routes drops to onError", async () => {
     global.window.EventSource = FakeEventSource;
     const api = await loadApiModule();
