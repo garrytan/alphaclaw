@@ -1583,7 +1583,7 @@ describe("server/openclaw-channel-sync", () => {
     });
 
     it("fails a hard-gated apply with backup_failed when backup exits ok but writes no artifact", async () => {
-      const { sync, rootDir, store, installToTempDir } = createHarness({
+      const { sync, rootDir, store, openclawDir, installToTempDir } = createHarness({
         pin: "1.0.0",
         installedVersion: "1.0.0",
         sentinelVersion: "1.0.0",
@@ -1597,6 +1597,9 @@ describe("server/openclaw-channel-sync", () => {
         },
       });
       writeCheckoutFixture(rootDir, { sha: kDevSha });
+      // State exists → a silent no-op backup is a real integrity failure.
+      fs.mkdirSync(path.join(openclawDir, "state"), { recursive: true });
+      fs.writeFileSync(path.join(openclawDir, "state", "openclaw.sqlite"), "db");
 
       const result = await sync.applyUpdate({ channel: "dev", devHead: true });
 
@@ -1607,6 +1610,31 @@ describe("server/openclaw-channel-sync", () => {
       // The apply stopped at the gate — nothing was downloaded or built.
       expect(installToTempDir).not.toHaveBeenCalled();
       // The phantom backup was never recorded as a usable artifact.
+      expect(store.readState().backups || []).toHaveLength(0);
+    });
+
+    it("soft-passes the artifact check on a fresh install with no state to back up", async () => {
+      // Live-verified: the real stable binary exits 0 without writing a file
+      // when there is nothing to back up — a fresh install's first channel
+      // switch must not be bricked by the phantom-backup guard.
+      const { sync, rootDir, store } = createHarness({
+        pin: "1.0.0",
+        installedVersion: "1.0.0",
+        sentinelVersion: "1.0.0",
+        runnerImpl: async (opts, fallback) => {
+          if (opts.command === "openclaw" && opts.args?.[0] === "backup") {
+            return { ok: true, code: 0, tail: "nothing to back up\n", timedOut: false };
+          }
+          return fallback(opts);
+        },
+      });
+      writeCheckoutFixture(rootDir, { sha: kDevSha });
+
+      const result = await sync.applyUpdate({ channel: "dev", devHead: true });
+
+      // The gate let the apply proceed (dev build continues past backup).
+      expect(result.body.code).not.toBe("backup_failed");
+      // No phantom artifact was recorded.
       expect(store.readState().backups || []).toHaveLength(0);
     });
 
