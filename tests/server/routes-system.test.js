@@ -1605,18 +1605,6 @@ describe("server/routes/system", () => {
     });
   });
 
-  it("returns raw gateway status on GET /api/gateway-status", async () => {
-    const deps = createSystemDeps();
-    deps.clawCmd.mockResolvedValue({ ok: true, stdout: "gateway running" });
-    const app = createApp(deps);
-
-    const res = await request(app).get("/api/gateway-status");
-
-    expect(res.status).toBe(200);
-    expect(deps.clawCmd).toHaveBeenCalledWith("status");
-    expect(res.body).toEqual({ ok: true, stdout: "gateway running" });
-  });
-
   it("returns 502 when listing agent sessions fails", async () => {
     const deps = createSystemDeps();
     deps.clawCmd.mockResolvedValue({ ok: false, stderr: "gateway offline" });

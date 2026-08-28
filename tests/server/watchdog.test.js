@@ -212,7 +212,9 @@ describe("server/watchdog", () => {
     });
 
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    await flushMicrotasks();
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    await flushMicrotasks();
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
     await flushMicrotasks();
     await flushMicrotasks();
@@ -243,7 +245,9 @@ describe("server/watchdog", () => {
 
     watchdog.onGatewayLaunch({ startedAt: Date.now() - 60_000 });
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    await vi.advanceTimersByTimeAsync(0);
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    await vi.advanceTimersByTimeAsync(0);
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
 
     expect(watchdog.getStatus()).toEqual(
@@ -287,7 +291,9 @@ describe("server/watchdog", () => {
     });
 
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    await flushMicrotasks();
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    await flushMicrotasks();
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
     await flushMicrotasks();
 
@@ -449,7 +455,9 @@ describe("server/watchdog", () => {
     });
 
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    await flushMicrotasks();
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    await flushMicrotasks();
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
     await flushMicrotasks();
     await flushMicrotasks();
@@ -986,7 +994,9 @@ describe("server/watchdog", () => {
     // Crash-loop notifications degrade to no-ops without a notifier, and the
     // watchdog link falls back to localhost when no setup URL resolver exists.
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    await flushMicrotasks();
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    await flushMicrotasks();
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
     await flushMicrotasks();
 
@@ -1042,7 +1052,9 @@ describe("server/watchdog", () => {
     });
 
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    await flushMicrotasks();
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    await flushMicrotasks();
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
     await flushMicrotasks();
 
@@ -1059,7 +1071,9 @@ describe("server/watchdog", () => {
     });
 
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    await flushMicrotasks();
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    await flushMicrotasks();
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
     await flushMicrotasks();
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
@@ -1286,7 +1300,9 @@ describe("server/watchdog", () => {
     watchdog.onGatewayExit({ code: 78, expectedExit: false });
     await flushMicrotasks();
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    await flushMicrotasks();
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    await flushMicrotasks();
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
     await flushMicrotasks();
     await flushMicrotasks();
@@ -1318,7 +1334,9 @@ describe("server/watchdog", () => {
     expect(doctorCalls).toHaveLength(1);
 
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    await vi.advanceTimersByTimeAsync(0);
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    await vi.advanceTimersByTimeAsync(0);
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
     await vi.advanceTimersByTimeAsync(0);
 
@@ -1379,7 +1397,9 @@ describe("server/watchdog", () => {
     });
 
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    await flushMicrotasks();
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    await flushMicrotasks();
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
     await flushMicrotasks();
     // Crashes 1-2 relaunched the gateway; the third opened a crash loop and
@@ -1488,7 +1508,9 @@ describe("server/watchdog", () => {
     });
 
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    await flushMicrotasks();
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    await flushMicrotasks();
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
     await flushMicrotasks();
     await flushMicrotasks();

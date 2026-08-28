@@ -118,7 +118,9 @@ describe("server/watchdog release-channel rollback hooks", () => {
     });
 
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    await flushMicrotasks();
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    await flushMicrotasks();
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
     await flushMicrotasks();
 
@@ -141,7 +143,9 @@ describe("server/watchdog release-channel rollback hooks", () => {
     });
 
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    await flushMicrotasks();
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    await flushMicrotasks();
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
     await flushMicrotasks();
 
@@ -246,7 +250,9 @@ describe("server/watchdog release-channel rollback hooks", () => {
 
     watchdog.beginManagedOperation();
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    await flushMicrotasks();
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    await flushMicrotasks();
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
     await flushMicrotasks();
 
@@ -471,7 +477,9 @@ describe("server/watchdog release-channel rollback hooks", () => {
     // First incident: a crash loop requests exactly one rollback. (Under fake
     // timers setImmediate is faked too, so flush via the timer clock.)
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    await vi.advanceTimersByTimeAsync(0);
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    await vi.advanceTimersByTimeAsync(0);
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
     await vi.advanceTimersByTimeAsync(0);
     expect(hooks.requestRollback).toHaveBeenCalledTimes(1);
@@ -486,7 +494,9 @@ describe("server/watchdog release-channel rollback hooks", () => {
     expect(watchdog.getStatus().health).toBe("healthy");
 
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    await vi.advanceTimersByTimeAsync(0);
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    await vi.advanceTimersByTimeAsync(0);
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
     await vi.advanceTimersByTimeAsync(0);
     expect(hooks.requestRollback).toHaveBeenCalledTimes(2);
@@ -556,7 +566,9 @@ describe("server/watchdog release-channel rollback hooks", () => {
     });
 
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    await flushMicrotasks();
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    await flushMicrotasks();
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
     await flushMicrotasks();
     await flushMicrotasks();

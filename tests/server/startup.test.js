@@ -1,7 +1,7 @@
 const { runOnboardedBootSequence } = require("../../lib/server/startup");
 
 describe("server/startup", () => {
-  it("syncs gateway proxy config with the resolved setup URL before startup", () => {
+  it("syncs gateway proxy config with the resolved setup URL before startup", async () => {
     const callOrder = [];
     const ensureManagedExecDefaults = vi.fn(() =>
       callOrder.push("ensureManagedExecDefaults"),
@@ -33,7 +33,7 @@ describe("server/startup", () => {
       start: vi.fn(() => callOrder.push("gmailWatchService.start")),
     };
 
-    runOnboardedBootSequence({
+    await runOnboardedBootSequence({
       ensureManagedExecDefaults,
       ensureUsageTrackerPluginConfig,
       ensureWebhookMappingIds,
@@ -81,7 +81,7 @@ describe("server/startup", () => {
     ...overrides,
   });
 
-  it("logs and continues when the ensure steps fail", () => {
+  it("logs and continues when the ensure steps fail", async () => {
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     const deps = createBootDeps({
       ensureManagedExecDefaults: vi.fn(() => {
@@ -95,7 +95,7 @@ describe("server/startup", () => {
       }),
     });
 
-    runOnboardedBootSequence(deps);
+    await runOnboardedBootSequence(deps);
 
     expect(errorSpy).toHaveBeenCalledWith(
       "[alphaclaw] Failed to ensure managed exec defaults on boot: exec defaults broke",
@@ -112,7 +112,7 @@ describe("server/startup", () => {
     expect(deps.gmailWatchService.start).toHaveBeenCalled();
   });
 
-  it("logs the updated webhook mapping ids when the mapping changed", () => {
+  it("logs the updated webhook mapping ids when the mapping changed", async () => {
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
     const deps = createBootDeps({
       ensureWebhookMappingIds: vi.fn(() => ({
@@ -121,7 +121,7 @@ describe("server/startup", () => {
       })),
     });
 
-    runOnboardedBootSequence(deps);
+    await runOnboardedBootSequence(deps);
 
     expect(logSpy).toHaveBeenCalledWith(
       "[alphaclaw] Added IDs to webhook mappings: gmail, stripe",
