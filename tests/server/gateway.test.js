@@ -1541,6 +1541,59 @@ describe("server/gateway restart behavior", () => {
       }
     });
 
+    it("resets the stderr evidence tail per restart attempt", async () => {
+      vi.useFakeTimers();
+      try {
+        const firstSupervisor = createChild();
+        const secondSupervisor = createChild();
+        const supervisors = [firstSupervisor, secondSupervisor];
+        childProcess.spawn = vi.fn(() => supervisors.shift());
+        childProcess.execFile = execFileOk("");
+        fs.existsSync = vi.fn(() => false);
+        net.createConnection = vi.fn(() => ({
+          setTimeout: vi.fn(),
+          destroy: vi.fn(),
+          on(event, handler) {
+            if (event === "timeout") handler();
+            return this;
+          },
+        }));
+        delete require.cache[modulePath];
+        const gateway = require(modulePath);
+        vi.spyOn(console, "warn").mockImplementation(() => {});
+        vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+
+        const emitStderr = (child, text) => {
+          const handler = child.stderr.on.mock.calls.find(
+            (call) => call[0] === "data",
+          )?.[1];
+          handler?.(text);
+        };
+
+        const firstAttempt = gateway.runGatewayCmd("--force");
+        firstAttempt.catch(() => {});
+        emitStderr(firstSupervisor, "old-noise from a previous attempt\n");
+        await vi.advanceTimersByTimeAsync(121000);
+        await expect(firstAttempt).rejects.toMatchObject({
+          name: "GatewayRestartError",
+        });
+
+        const secondAttempt = gateway.runGatewayCmd("--force");
+        secondAttempt.catch(() => {});
+        emitStderr(secondSupervisor, "fresh failure line\n");
+        await vi.advanceTimersByTimeAsync(121000);
+        const rejection = await secondAttempt.catch((err) => err);
+        expect(rejection.name).toBe("GatewayRestartError");
+        const tailText = rejection.evidence.stderrTail.join("\n");
+        expect(tailText).toContain("fresh failure line");
+        // Regression: the tail used to accumulate across attempts, so a
+        // failure's evidence included stderr from previous launches.
+        expect(tailText).not.toContain("old-noise");
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it("notifies the launch handler when the gateway is already running", async () => {
       const child = createChild();
       childProcess.spawn = vi.fn(() => child);
