@@ -1739,18 +1739,17 @@ describe("server/gateway restart behavior", () => {
       fs.existsSync = vi.fn(() => true);
       delete require.cache[modulePath];
       const gateway = require(modulePath);
-      fs.readFileSync = vi
-        .fn()
-        .mockImplementationOnce(() => {
-          throw new Error("EIO");
-        })
-        .mockImplementationOnce(() =>
-          JSON.stringify({ gateway: { port: 23456 } }),
-        )
-        .mockImplementationOnce(() => JSON.stringify({ gateway: {} }));
-
+      // The parsed config is memoized keyed on the fs function identities, so
+      // each variant installs a fresh mock to observe a re-read.
+      fs.readFileSync = vi.fn(() => {
+        throw new Error("EIO");
+      });
       expect(gateway.getGatewayPort()).toBe(kDefaultGatewayPort);
+      fs.readFileSync = vi.fn(() =>
+        JSON.stringify({ gateway: { port: 23456 } }),
+      );
       expect(gateway.getGatewayPort()).toBe(23456);
+      fs.readFileSync = vi.fn(() => JSON.stringify({ gateway: {} }));
       expect(gateway.getGatewayPort()).toBe(kDefaultGatewayPort);
     });
 

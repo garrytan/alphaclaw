@@ -1219,8 +1219,14 @@ describe("server/routes/system", () => {
     expect(startingRes.body.gateway).toBe("starting");
     expect(startingRes.body.alphaclawVersion).toBeNull();
 
-    deps.fs.existsSync.mockReturnValue(false);
-    const notOnboardedRes = await request(app).get("/api/status");
+    // /api/status serves a shared snapshot with a short freshness window, so
+    // a config change is observed by a fresh service, not the same instance.
+    const notOnboardedDeps = createSystemDeps();
+    notOnboardedDeps.isGatewayRunning.mockResolvedValue(false);
+    notOnboardedDeps.alphaclawVersionService = {};
+    notOnboardedDeps.fs.existsSync.mockReturnValue(false);
+    const notOnboardedApp = createApp(notOnboardedDeps);
+    const notOnboardedRes = await request(notOnboardedApp).get("/api/status");
     expect(notOnboardedRes.body.gateway).toBe("not_onboarded");
     expect(notOnboardedRes.body.configExists).toBe(false);
   });
@@ -1256,12 +1262,30 @@ describe("server/routes/system", () => {
       expect(parsed.doctorStatus).toEqual({ ok: true, checks: [] });
       expect(parsed.status.gateway).toBe("running");
 
-      // The 2s interval emits another status event.
+      // Identical payloads are deduplicated by the shared snapshot: the next
+      // 2s tick sends nothing new.
+      res.write.mockClear();
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(
+        res.write.mock.calls.some((call) =>
+          String(call[0]).startsWith("event: status"),
+        ),
+      ).toBe(false);
+
+      // A real change is streamed on the next tick.
+      deps.watchdog.getStatus.mockReturnValue({ lifecycle: "restarting" });
       res.write.mockClear();
       await vi.advanceTimersByTimeAsync(2000);
       expect(res.write).toHaveBeenCalledWith("event: status\n");
+      const changedData = res.write.mock.calls
+        .map((call) => String(call[0]))
+        .find((chunk) => chunk.startsWith("data: "));
+      expect(JSON.parse(changedData.slice("data: ".length)).watchdogStatus).toEqual(
+        { lifecycle: "restarting" },
+      );
 
-      // Payload build failures are swallowed without writing.
+      // Payload build failures are swallowed: the last good snapshot is kept
+      // and no new frame is written.
       deps.isGatewayRunning.mockRejectedValue(new Error("gateway probe failed"));
       res.write.mockClear();
       await vi.advanceTimersByTimeAsync(2000);
@@ -1271,9 +1295,12 @@ describe("server/routes/system", () => {
         ),
       ).toBe(false);
 
-      // Keepalives flow every 15s.
+      // Keepalives flow every 15s, and the ≥1-frame/10s heartbeat re-sends
+      // the (unchanged) snapshot as a liveness signal.
+      deps.isGatewayRunning.mockResolvedValue(true);
       await vi.advanceTimersByTimeAsync(11000);
       expect(res.write).toHaveBeenCalledWith(": keepalive\n\n");
+      expect(res.write).toHaveBeenCalledWith("event: status\n");
 
       req.emit("close");
       expect(res.end).toHaveBeenCalled();
