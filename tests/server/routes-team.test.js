@@ -55,8 +55,9 @@ describe("server/routes/team (4.5)", () => {
     const teamStateStore = createTeamStateStore({ rootDir });
     const teamGatewayConfig = createTeamGatewayConfig({
       openclawDir: rootDir,
+      // Real contract: mutate in place; the writer persists the same object.
       updateOpenclawConfig: ({ mutate }) => {
-        configDoc = mutate(configDoc);
+        mutate(configDoc);
         return { config: configDoc };
       },
       teamStateStore,

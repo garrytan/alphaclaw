@@ -72,8 +72,10 @@ describe("server/team/gateway-config (4.4)", () => {
     let configDoc;
     let updateCalls;
 
+    // Matches the REAL updateOpenclawConfig contract: the config object is
+    // mutated IN PLACE and then persisted; mutate's return value is metadata.
     const updateOpenclawConfig = ({ mutate }) => {
-      configDoc = mutate(configDoc);
+      mutate(configDoc);
       updateCalls += 1;
       return { config: configDoc };
     };

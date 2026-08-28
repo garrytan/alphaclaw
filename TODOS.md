@@ -1,9 +1,9 @@
 # TODOS
 
-## P2 — Migrate ensureGatewayProxyConfig to the locked config writer (with Phase 4 team mode)
-- **What:** Replace `ensureGatewayProxyConfig`'s raw `JSON.parse`/`writeFileSync` (lib/server/gateway.js) with `updateOpenclawConfig` (file lock + fail-closed read + agents-shape preservation), writing the `${REMOTE_MCP_API_TOKEN}` placeholder directly (no post-serialize string substitution).
-- **Why:** It is the last unlocked openclaw.json write path; it can race Phase 4's team-mode config writes. A `skipWrite: true` return from the mutate closure preserves the current change-gating.
-- **Context:** Deferred from OpenClaw-beta Phase 1.6 because the 66 gateway tests assert on raw `fs.writeFileSync(configPath, content)` and must be rewritten to the atomic temp+rename pattern. Do it alongside Phase 4's `lib/server/team/gateway-config.js` so both land against the locked pattern with tests written for it.
+## P3 — Finish ensureGatewayProxyConfig migration onto updateOpenclawConfig
+- **What:** ensureGatewayProxyConfig (lib/server/gateway.js) now holds the shared file lock (`withFileLockSync`) around its read-modify-write, so it can no longer race the team-mode/channel-sync writers. Remaining nicety: replace its raw `JSON.parse`/`writeFileSync` body with `updateOpenclawConfig` itself (fail-closed read + agents-shape preservation + atomic temp+rename), writing the `${REMOTE_MCP_API_TOKEN}` placeholder directly instead of post-serialize string substitution.
+- **Why:** Consistency and beta agents-shape preservation on this one writer; the correctness-critical race is already closed by the lock.
+- **Context:** The full rewrite needs the 66 gateway tests moved off raw `fs.writeFileSync(configPath, content)` assertions.
 - **Effort:** M.
 
 ## P3 — Wire restart-handoff consume into the watchdog exit classifier
