@@ -831,6 +831,24 @@ describe("frontend/upgrade-helpers misc models", () => {
       );
     });
 
+    it("appends distance/not-on-channel detail to the availability line", async () => {
+      const { buildAvailabilityLine } = await loadUpgradeHelpers();
+      expect(
+        buildAvailabilityLine({
+          catalog,
+          releaseChannel: "beta",
+          installedVersion: "2026.8.1-beta.1",
+        }),
+      ).toBe("Latest beta: 2026.8.1-beta.3 — 2 beta releases behind");
+      expect(
+        buildAvailabilityLine({
+          catalog,
+          releaseChannel: "beta",
+          installedVersion: "2026.7.1-2",
+        }),
+      ).toBe("Latest beta: 2026.8.1-beta.3 — not running this channel yet");
+    });
+
     it("returns unknown for dev, empty catalog, or missing version", async () => {
       const { computeReleasesBehind, formatReleasesBehind } =
         await loadUpgradeHelpers();
