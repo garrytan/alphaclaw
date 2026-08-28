@@ -1231,4 +1231,92 @@ describe("frontend/upgrade-tab hook", () => {
       }),
     );
   });
+
+  describe("WhatsNewCard (2.1)", () => {
+    const kWhatsNew = {
+      minor: "2026.8",
+      channel: "beta",
+      lastVerifiedVersion: "2026.8.1-beta.3",
+      channelLatest: "2026.8.1-beta.3",
+      newerThanVerified: false,
+      highlights: [
+        { title: "Team access", body: "Profiles and per-member permissions.", tone: "info" },
+      ],
+      securityFlips: [
+        {
+          key: "gateway.terminal.enabled",
+          from: "off",
+          to: "on",
+          warning: "The dashboard gains a host terminal by default.",
+        },
+      ],
+    };
+
+    it("renders security flips ABOVE highlights for the active channel", () => {
+      const tree = renderView({
+        channelInfo: makeChannelInfo({ releaseChannel: "beta" }),
+        activeChannel: "beta",
+        whatsNew: kWhatsNew,
+      });
+      const text = treeText(tree);
+      expect(text.replace(/\s+/g, " ")).toContain("What's new in 2026.8 ( beta )");
+      expect(text).toContain("Security changes to review");
+      expect(text).toContain("gateway.terminal.enabled");
+      expect(text).toContain("Team access");
+      // Hierarchy: the security section precedes the highlights (D5).
+      expect(text.indexOf("Security changes to review")).toBeLessThan(
+        text.indexOf("Team access"),
+      );
+    });
+
+    it("hides the card when browsing a different channel or with no entry", () => {
+      const stableText = treeText(
+        renderView({
+          channelInfo: makeChannelInfo(),
+          activeChannel: "stable",
+          whatsNew: kWhatsNew, // beta entry, stable view
+        }),
+      );
+      expect(stableText.replace(/\s+/g, " ")).not.toContain("What's new in 2026.8");
+      const noneText = treeText(
+        renderView({ channelInfo: makeChannelInfo(), whatsNew: null }),
+      );
+      expect(noneText).not.toContain("Security changes to review");
+    });
+
+    it("notes when the channel has moved past the verified version", () => {
+      const text = treeText(
+        renderView({
+          channelInfo: makeChannelInfo({ releaseChannel: "beta" }),
+          activeChannel: "beta",
+          whatsNew: {
+            ...kWhatsNew,
+            channelLatest: "2026.8.1-beta.9",
+            newerThanVerified: true,
+          },
+        }),
+      );
+      expect(text.replace(/\s+/g, " ")).toContain("tested with 2026.8.1-beta.3");
+    });
+
+    it("shows the flips inside the channel-switch dialog model", () => {
+      const tree = renderView({
+        channelInfo: makeChannelInfo(),
+        channelSwitchPrompt: {
+          nextChannel: "beta",
+          model: {
+            title: "Switch to latest beta?",
+            applyLabel: "Apply now",
+            applyCaption: "Installs now.",
+            browseLabel: "Just browse the catalog",
+            browseCaption: "Saves beta.",
+            securityFlips: kWhatsNew.securityFlips,
+          },
+        },
+      });
+      const text = treeText(tree);
+      expect(text).toContain("Security defaults that change on this channel");
+      expect(text).toContain("gateway.terminal.enabled");
+    });
+  });
 });
