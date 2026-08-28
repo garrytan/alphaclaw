@@ -45,6 +45,17 @@ describe("server/team/gateway-config (4.4)", () => {
       "operator.admin",
     );
     expect(auth.trustedProxy.deviceAutoApprove.enabled).toBe(true);
+    // Without a derived internal-caller password the key is OMITTED entirely
+    // (merge resolution: the beta's strict schema rejects null/empty).
+    expect("password" in auth).toBe(false);
+  });
+
+  it("writes the internal-caller password into the auth subtree when provided", () => {
+    const auth = buildTrustedProxyAuth({
+      members: kMembers,
+      password: "${OPENCLAW_GATEWAY_PASSWORD}",
+    });
+    expect(auth.password).toBe("${OPENCLAW_GATEWAY_PASSWORD}");
   });
 
   it("intersects scope names against the advertised set (CEO finding 8)", () => {
@@ -153,6 +164,13 @@ describe("server/team/gateway-config (4.4)", () => {
       expect(stateStore.read().previousGatewayAuth).toBeNull();
       service.revertTeamGatewayConfig();
       expect(configDoc.gateway.auth).toBeUndefined();
+    });
+
+    it("persists team-state.json owner-only (0600) — it can hold the prior gateway secret (H6)", async () => {
+      const service = makeService(kMembers);
+      await service.applyTeamGatewayConfig();
+      const mode = fs.statSync(stateStore.path).mode & 0o777;
+      expect(mode).toBe(0o600);
     });
   });
 });

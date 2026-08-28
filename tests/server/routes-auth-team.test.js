@@ -36,19 +36,27 @@ describe("server/routes/auth team mode (4.2/4.6)", () => {
   let rootDir;
   let membersStore;
   let teamSettings;
+  let teamSettingsThrow;
   let throttle;
   let app;
+  let authApi;
+  let onMemberActivity;
 
   const buildApp = () => {
     const { registerAuthRoutes } = loadAuthRoutes();
     const built = express();
     built.use(express.json());
     throttle = createLoginThrottleMock();
-    registerAuthRoutes({
+    onMemberActivity = vi.fn();
+    authApi = registerAuthRoutes({
       app: built,
       loginThrottle: throttle,
       membersStore,
-      readTeamSettings: () => teamSettings,
+      readTeamSettings: () => {
+        if (teamSettingsThrow) throw new Error("settings unreadable");
+        return teamSettings;
+      },
+      onMemberActivity,
     });
     // Representative surfaces for the 4.6 matrix.
     built.get("/api/status", (req, res) =>
@@ -68,6 +76,7 @@ describe("server/routes/auth team mode (4.2/4.6)", () => {
     initAuthDb({ rootDir });
     membersStore = createMembersStore({ getDb: getAuthDb });
     teamSettings = { enabled: true, disableLegacyLogin: false };
+    teamSettingsThrow = false;
     app = buildApp();
   });
 
@@ -288,6 +297,74 @@ describe("server/routes/auth team mode (4.2/4.6)", () => {
     expect(deniedCronWrite.status).toBe(403);
   });
 
+  it("denies members the credential-returning model endpoints even under the allowed prefix (F1)", async () => {
+    createAdmin();
+    membersStore.createMember({
+      email: "m@example.com",
+      password: "member password",
+    });
+    const memberCookie = cookieOf(
+      await loginMember("m@example.com", "member password"),
+    );
+    // The two subpaths that return raw provider API keys / OAuth tokens.
+    for (const url of ["/api/models/config", "/api/models/auth"]) {
+      const res = await request(app).get(url).set("Cookie", memberCookie);
+      expect(res.status, url).toBe(403);
+      expect(res.body.code).toBe("admin_required");
+    }
+  });
+
+  it("makes a member session inert the moment team mode is turned off (F3)", async () => {
+    createAdmin();
+    membersStore.createMember({
+      email: "m@example.com",
+      password: "member password",
+    });
+    const memberCookie = cookieOf(
+      await loginMember("m@example.com", "member password"),
+    );
+    // Works while team is on.
+    expect(
+      (await request(app).get("/api/status").set("Cookie", memberCookie)).status,
+    ).toBe(200);
+
+    // Admin disables team mode: the retained member's existing cookie dies
+    // (401), and a fresh member login is refused (403) — no re-entry, no
+    // silent escalation to the local-direct gateway caller.
+    teamSettings = { enabled: false, disableLegacyLogin: false };
+    const afterDisable = await request(app)
+      .get("/api/status")
+      .set("Cookie", memberCookie);
+    expect(afterDisable.status).toBe(401);
+    const reLogin = await loginMember("m@example.com", "member password");
+    expect(reLogin.status).toBe(403);
+    expect(reLogin.body.code).toBe("team_disabled");
+  });
+
+  it("kills EXISTING legacy sessions when shared-password login is locked down (F4)", async () => {
+    const legacyCookie = cookieOf(
+      await request(app)
+        .post("/api/auth/login")
+        .send({ password: "owner-secret" }),
+    );
+    expect(
+      (await request(app).get("/api/status").set("Cookie", legacyCookie)).status,
+    ).toBe(200);
+
+    // Arm the lockdown: the already-issued legacy cookie must stop working,
+    // not just new logins.
+    teamSettings = { enabled: true, disableLegacyLogin: true };
+    expect(
+      (await request(app).get("/api/status").set("Cookie", legacyCookie)).status,
+    ).toBe(401);
+
+    // Break-glass env restores the existing session.
+    process.env.ALPHACLAW_ALLOW_LEGACY_LOGIN = "1";
+    expect(
+      (await request(app).get("/api/status").set("Cookie", legacyCookie)).status,
+    ).toBe(200);
+  });
+
   it("legacy and member-admin sessions pass the matrix untouched (zero change for single-user)", async () => {
     // Legacy shared-password session = owner = admin.
     const legacy = await request(app)
@@ -343,5 +420,92 @@ describe("server/routes/auth team mode (4.2/4.6)", () => {
     const forged = `setup_token=${parts.join(".")}`;
     const res = await request(app).get("/api/status").set("Cookie", forged);
     expect(res.status).toBe(401);
+  });
+
+  describe("resolveProxyIdentity (4.3 proxy-boundary identity)", () => {
+    // Raw upgrade-style request: only a cookie header, no Express middleware.
+    const rawRequest = (cookie) => ({ headers: { cookie } });
+
+    it("resolves a member session from the raw cookie header and heartbeats presence", async () => {
+      createAdmin();
+      membersStore.createMember({
+        email: "member@example.com",
+        displayName: "Member",
+        password: "member password",
+      });
+      const cookie = cookieOf(
+        await loginMember("member@example.com", "member password"),
+      );
+
+      onMemberActivity.mockClear();
+      const identity = authApi.resolveProxyIdentity(rawRequest(cookie));
+      expect(identity).toEqual(
+        expect.objectContaining({
+          kind: "member",
+          email: "member@example.com",
+          role: "member",
+        }),
+      );
+      // WS upgrades bypass requireAuth (and its heartbeat), so the resolver
+      // itself must record presence for gateway-bound traffic.
+      expect(onMemberActivity).toHaveBeenCalledTimes(1);
+      expect(onMemberActivity).toHaveBeenCalledWith(
+        expect.objectContaining({ email: "member@example.com" }),
+      );
+
+      // An identity already resolved by requireAuth is reused untouched.
+      const preResolved = {
+        kind: "member",
+        memberId: "m1",
+        email: "pre@example.com",
+        role: "member",
+      };
+      expect(
+        authApi.resolveProxyIdentity({
+          alphaclawIdentity: preResolved,
+          headers: {},
+        }),
+      ).toBe(preResolved);
+    });
+
+    it("returns null for a legacy shared-password session — the gateway sees the local-direct caller", async () => {
+      const login = await request(app)
+        .post("/api/auth/login")
+        .send({ password: "owner-secret" });
+      const cookie = cookieOf(login);
+      // Sanity: the legacy session is fully authorized on the HTTP surface.
+      expect(
+        (await request(app).get("/api/status").set("Cookie", cookie)).status,
+      ).toBe(200);
+
+      onMemberActivity.mockClear();
+      expect(authApi.resolveProxyIdentity(rawRequest(cookie))).toBeNull();
+      // No member, no heartbeat.
+      expect(onMemberActivity).not.toHaveBeenCalled();
+    });
+
+    it("returns null when team mode is off, even for a valid member session", async () => {
+      createAdmin();
+      const cookie = cookieOf(
+        await loginMember("admin@example.com", "admin password"),
+      );
+      teamSettings = { enabled: false, disableLegacyLogin: false };
+      expect(authApi.resolveProxyIdentity(rawRequest(cookie))).toBeNull();
+    });
+
+    it("returns null instead of throwing when the settings read fails", async () => {
+      createAdmin();
+      const cookie = cookieOf(
+        await loginMember("admin@example.com", "admin password"),
+      );
+      teamSettingsThrow = true;
+      expect(authApi.resolveProxyIdentity(rawRequest(cookie))).toBeNull();
+    });
+
+    it("returns null for anonymous requests and never throws on malformed input", () => {
+      expect(authApi.resolveProxyIdentity(rawRequest(""))).toBeNull();
+      expect(authApi.resolveProxyIdentity({ headers: {} })).toBeNull();
+      expect(authApi.resolveProxyIdentity(undefined)).toBeNull();
+    });
   });
 });

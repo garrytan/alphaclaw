@@ -44,6 +44,8 @@ describe("server/routes/team (4.5)", () => {
   let restartGateway;
   let auditEvents;
   let capability;
+  let probeIdentityOk;
+  let probeTokenOk;
 
   // The merged stack end to end over REAL files: routes -> teamService
   // (transition: snapshot -> write -> restart -> probe -> restore) ->
@@ -67,6 +69,8 @@ describe("server/routes/team (4.5)", () => {
     restartGateway = vi.fn(async () => {});
     auditEvents = [];
     capability = true;
+    probeIdentityOk = true;
+    probeTokenOk = true;
 
     const teamStateStore = createTeamStateStore({ rootDir });
     const teamGatewayConfig = createTeamGatewayConfig({
@@ -81,10 +85,13 @@ describe("server/routes/team (4.5)", () => {
     // token.
     const probeRequest = vi.fn(async ({ url, headers = {} }) => {
       if (String(url).endsWith("/health")) return { status: 200, error: null };
-      const authed =
-        Boolean(headers["x-alphaclaw-user"]) ||
-        headers.authorization === "Bearer t";
-      return { status: authed ? 400 : 401, error: null };
+      if (headers["x-alphaclaw-user"]) {
+        return { status: probeIdentityOk ? 400 : 401, error: null };
+      }
+      if (headers.authorization === "Bearer t") {
+        return { status: probeTokenOk ? 400 : 401, error: null };
+      }
+      return { status: 401, error: null };
     });
     const teamService = createTeamService({
       fsModule: fs,
@@ -342,6 +349,36 @@ describe("server/routes/team (4.5)", () => {
     ).toBe(200);
   });
 
+  it("does not flip the gateway to trusted-proxy when a member is mutated while team is OFF (H1)", async () => {
+    // Team was enabled then disabled; the roster keeps its accounts.
+    const adminCookie = await legacyCookie();
+    await enableTeam(adminCookie);
+    const invite = await request(app)
+      .post("/api/team/invites")
+      .set("Cookie", adminCookie)
+      .send({});
+    await request(app).post("/api/auth/accept-invite").send({
+      token: invite.body.token,
+      email: "leftover@example.com",
+      password: "member password",
+    });
+    await request(app).post("/api/team/disable").set("Cookie", adminCookie).send({});
+    expect(teamSettings().enabled).toBe(false);
+    expect(configDoc().gateway.auth).toEqual({ mode: "token", token: "t" });
+
+    // Now, with team OFF, an admin disables that leftover member. The gateway
+    // auth on disk MUST stay single-user token auth — reconcile must not
+    // rewrite it to trusted-proxy (which would 401 every request on the next
+    // restart with no identity injection).
+    const leftover = membersStore.getMemberByEmail("leftover@example.com");
+    const patch = await request(app)
+      .patch(`/api/team/members/${leftover.id}`)
+      .set("Cookie", adminCookie)
+      .send({ disabled: true });
+    expect(patch.status).toBe(200);
+    expect(configDoc().gateway.auth).toEqual({ mode: "token", token: "t" });
+  });
+
   it("guards the last admin through the member routes (D9)", async () => {
     const adminCookie = await legacyCookie();
     await enableTeam(adminCookie);
@@ -357,5 +394,167 @@ describe("server/routes/team (4.5)", () => {
       .set("Cookie", adminCookie)
       .send();
     expect(remove.status).toBe(409);
+  });
+
+  it("a failed identity probe rolls enable back: 502 restored, flag off, lockdown never armed (D11)", async () => {
+    probeIdentityOk = false;
+    const cookie = await legacyCookie();
+    const res = await enableTeam(cookie, { disableLegacyLogin: true });
+    expect(res.status).toBe(502);
+    expect(res.body.ok).toBe(false);
+    expect(res.body.code).toBe("team_enable_failed");
+    expect(res.body.restored).toBe(true);
+    // The flag never flipped and the legacy-login lockdown never armed.
+    expect(teamSettings()).toEqual({ enabled: false, disableLegacyLogin: false });
+    // The snapshot was restored verbatim, via a second restart.
+    expect(configDoc().gateway.auth).toEqual({ mode: "token", token: "t" });
+    expect(restartGateway).toHaveBeenCalledTimes(2);
+    expect(auditEvents.map((event) => event.eventType)).not.toContain(
+      "team_enabled",
+    );
+  });
+
+  it("reports restored:false when the probe fails AND the restore restart also fails", async () => {
+    const cookie = await legacyCookie();
+    // Both restarts reject: the post-write restart counts as a failed probe,
+    // and the restore restart failing must surface restored:false so the
+    // admin knows the gateway needs manual attention.
+    restartGateway.mockRejectedValue(new Error("systemd said no"));
+    const res = await enableTeam(cookie);
+    expect(res.status).toBe(502);
+    expect(res.body.restored).toBe(false);
+    expect(teamSettings().enabled).toBe(false);
+    // The restore CONFIG write still landed before the restart threw.
+    expect(configDoc().gateway.auth).toEqual({ mode: "token", token: "t" });
+  });
+
+  it("a concurrent enable is rejected 409 transition_in_flight without a second transition", async () => {
+    const cookie = await legacyCookie();
+    let releaseRestart;
+    restartGateway.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          releaseRestart = resolve;
+        }),
+    );
+    const first = enableTeam(cookie).then((res) => res);
+    await vi.waitFor(() => expect(restartGateway).toHaveBeenCalledTimes(1));
+
+    const second = await enableTeam(cookie);
+    expect(second.status).toBe(409);
+    expect(second.body.code).toBe("transition_in_flight");
+
+    releaseRestart();
+    const firstRes = await first;
+    expect(firstRes.status).toBe(200);
+    expect(teamSettings().enabled).toBe(true);
+    // The rejected call never drove a second restart.
+    expect(restartGateway).toHaveBeenCalledTimes(1);
+  });
+
+  it("a concurrent disable is rejected 409 transition_in_flight and leaves the flag untouched", async () => {
+    const cookie = await legacyCookie();
+    await enableTeam(cookie);
+    let releaseRestart;
+    restartGateway.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          releaseRestart = resolve;
+        }),
+    );
+    const disable = () =>
+      request(app).post("/api/team/disable").set("Cookie", cookie).send({});
+    const first = disable().then((res) => res);
+    await vi.waitFor(() => expect(restartGateway).toHaveBeenCalledTimes(2));
+
+    const second = await disable();
+    expect(second.status).toBe(409);
+    expect(second.body.code).toBe("transition_in_flight");
+    // The early return skipped updateTeamSettings — the flag is still on
+    // while the first transition finishes.
+    expect(teamSettings().enabled).toBe(true);
+
+    releaseRestart();
+    const firstRes = await first;
+    expect(firstRes.status).toBe(200);
+    expect(teamSettings()).toEqual({ enabled: false, disableLegacyLogin: false });
+  });
+
+  it("a failed post-disable probe is 502 gateway_probe_failed but team still lands off", async () => {
+    const adminCookie = await legacyCookie();
+    await enableTeam(adminCookie);
+    const invite = await request(app)
+      .post("/api/team/invites")
+      .set("Cookie", adminCookie)
+      .send({});
+    const accept = await request(app).post("/api/auth/accept-invite").send({
+      token: invite.body.token,
+      email: "member@example.com",
+      password: "member password",
+    });
+    const memberCookie = cookieOf(accept);
+
+    probeTokenOk = false;
+    const res = await request(app)
+      .post("/api/team/disable")
+      .set("Cookie", adminCookie)
+      .send({});
+    expect(res.status).toBe(502);
+    expect(res.body.code).toBe("gateway_probe_failed");
+    expect(res.body.disabled).toBe(true);
+    // Disabling always lands on off — a failed probe is reported, not stuck.
+    expect(teamSettings()).toEqual({ enabled: false, disableLegacyLogin: false });
+    expect(configDoc().gateway.auth).toEqual({ mode: "token", token: "t" });
+    // Member sessions still die on the failure path.
+    expect(
+      (await request(app).get("/api/team").set("Cookie", memberCookie)).status,
+    ).toBe(401);
+    expect(auditEvents.map((event) => event.eventType)).toContain(
+      "team_disabled",
+    );
+  });
+
+  it("GET /api/team identityProbe: admin-only, null while off, re-probed after roster invalidation", async () => {
+    const adminCookie = await legacyCookie();
+    // Team off: admins get an explicit null (nothing to probe yet).
+    const off = await request(app).get("/api/team").set("Cookie", adminCookie);
+    expect(off.body.identityProbe).toBeNull();
+
+    await enableTeam(adminCookie);
+    const on = await request(app).get("/api/team").set("Cookie", adminCookie);
+    expect(on.body.identityProbe).toEqual(
+      expect.objectContaining({ ok: true, error: null }),
+    );
+    expect(typeof on.body.identityProbe.checkedAt).toBe("string");
+
+    // Members never see the probe (or invites/account states).
+    const invite = await request(app)
+      .post("/api/team/invites")
+      .set("Cookie", adminCookie)
+      .send({});
+    const accept = await request(app).post("/api/auth/accept-invite").send({
+      token: invite.body.token,
+      email: "member@example.com",
+      password: "member password",
+    });
+    const memberView = await request(app)
+      .get("/api/team")
+      .set("Cookie", cookieOf(accept));
+    expect(memberView.status).toBe(200);
+    expect(memberView.body.identityProbe).toBeUndefined();
+
+    // A roster mutation invalidates the cached probe; the next admin read
+    // re-probes and surfaces the failure the Team page banner renders.
+    probeIdentityOk = false;
+    const memberRow = membersStore.getMemberByEmail("member@example.com");
+    await request(app)
+      .patch(`/api/team/members/${memberRow.id}`)
+      .set("Cookie", adminCookie)
+      .send({ disabled: true });
+    const failing = await request(app)
+      .get("/api/team")
+      .set("Cookie", adminCookie);
+    expect(failing.body.identityProbe.ok).toBe(false);
+    expect(failing.body.identityProbe.error).toContain("rejected the credential");
   });
 });

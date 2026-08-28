@@ -262,7 +262,7 @@ describe("server/team-auth-transition", () => {
 
     expect(result.ok).toBe(false);
     expect(result.restored).toBe(true);
-    expect(result.error).toMatch(/restart failed/i);
+    expect(result.error).toMatch(/enable failed/i);
     // Restart happened twice: the throwing apply + the restore.
     expect(restartGateway).toHaveBeenCalledTimes(2);
     // openclaw.json is back to token auth — the trusted-proxy flip did not

@@ -75,6 +75,83 @@ describe("server/db/auth members store (4.1)", () => {
     ).toThrow(expect.objectContaining({ code: "weak_password" }));
   });
 
+  it("rejects header/config-injection emails at createMember and createInvite (H2)", () => {
+    const owner = createOwner();
+    const nasty = [
+      "a@b.co\r\nx-alphaclaw-user: admin@evil", // CRLF header injection
+      "a b@c.co", // whitespace
+      "no-domain@", // empty domain
+      "@no-local.co", // empty local
+      "a@bco", // no dotted domain
+      `${"x".repeat(250)}@example.com`, // over length cap
+    ];
+    for (const email of nasty) {
+      expect(() =>
+        store.createMember({ email, password: "long enough pw" }),
+      ).toThrow(expect.objectContaining({ code: "invalid_email" }));
+      expect(() =>
+        store.createInvite({ email, createdBy: owner.id }),
+      ).toThrow(expect.objectContaining({ code: "invalid_email" }));
+    }
+  });
+
+  it("acceptInvite validates the token before any email check (no enumeration oracle, H3)", () => {
+    createOwner();
+    // A bad token returns invite_invalid even when the email is already taken —
+    // an unauthenticated caller cannot distinguish taken vs free emails.
+    const res = store.acceptInvite({
+      token: "no-such-token",
+      providedEmail: "owner@example.com",
+      password: "long enough pw",
+    });
+    expect(res).toEqual({ ok: false, code: "invite_invalid" });
+  });
+
+  it("acceptInvite does not burn the single-use invite when member creation fails (F9/H4)", () => {
+    const owner = createOwner();
+    // Pin the invite to an email that is already taken → create must fail, and
+    // the invite must remain usable.
+    const invite = store.createInvite({
+      email: "owner@example.com",
+      createdBy: owner.id,
+    });
+    const first = store.acceptInvite({
+      token: invite.token,
+      password: "long enough pw",
+    });
+    expect(first).toEqual(expect.objectContaining({ ok: false, code: "email_taken" }));
+    // The token is NOT consumed — a later accept with a free email still works.
+    const second = store.acceptInvite({
+      token: invite.token,
+      providedEmail: "new@example.com",
+      password: "long enough pw",
+    });
+    // Pinned email is authoritative, so the still-taken pin wins again — the
+    // point is the token survived the first failure (not consumed).
+    expect(second.code).toBe("email_taken");
+    expect(store.getMemberByEmail("new@example.com")).toBeNull();
+  });
+
+  it("acceptInvite consumes the invite and creates the member on success (F9)", () => {
+    const owner = createOwner();
+    const invite = store.createInvite({ role: "member", createdBy: owner.id });
+    const res = store.acceptInvite({
+      token: invite.token,
+      providedEmail: "teammate@example.com",
+      password: "long enough pw",
+    });
+    expect(res.ok).toBe(true);
+    expect(res.member.email).toBe("teammate@example.com");
+    expect(res.member.role).toBe("member");
+    // Single-use: a second accept with the same token is rejected.
+    const again = store.acceptInvite({
+      token: invite.token,
+      providedEmail: "other@example.com",
+      password: "long enough pw",
+    });
+    expect(again).toEqual({ ok: false, code: "invite_invalid" });
+  });
+
   it("rotating the token secret revokes sessions (secret changes)", () => {
     const owner = createOwner();
     const before = store.getTokenSecret(owner.id);

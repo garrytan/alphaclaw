@@ -186,5 +186,38 @@ describe("server/team-service", () => {
       expect(countHealthProbes(request)).toBe(2);
       expect(refreshed).toEqual(expect.objectContaining({ ok: true }));
     });
+
+    it("probes with an ACTIVE ADMIN's email first, regardless of roster order", async () => {
+      const openclawDir = createTempOpenclawDir();
+      updateTeamConfig({ openclawDir, enabled: true });
+      const request = createProbeRequest();
+      const members = [
+        { id: "m1", email: "member@example.com", role: "member", disabled: 0 },
+        { id: "m2", email: "gone@example.com", role: "admin", disabled: 1 },
+        { id: "m3", email: "admin@example.com", role: "admin", disabled: 0 },
+      ];
+      const writerDeps = createWriterDeps(openclawDir);
+      const teamService = createTeamService({
+        fsModule: fs,
+        openclawDir,
+        env: {},
+        getGatewayUrl: () => kGatewayUrl,
+        request,
+        probeOptions: { healthRetryDelayMs: 0 },
+        logger: kSilentLogger,
+        applyTeamGatewayConfig: writerDeps.applyTeamGatewayConfig,
+        membersStore: { listMembers: () => members },
+      });
+
+      await teamService.getIdentityProbe();
+      const invokeCall = request.mock.calls.find(
+        (call) => !String(call[0]?.url || "").endsWith("/health"),
+      );
+      // The disabled admin is filtered; the active admin wins over the
+      // roster-first member.
+      expect(invokeCall[0].headers["x-alphaclaw-user"]).toBe(
+        "admin@example.com",
+      );
+    });
   });
 });
