@@ -38,8 +38,9 @@ Versions follow this repository's `package.json` release counter.
   immediate re-checks after every restart/repair replace the old
   up-to-2-minutes wait; stale verdicts like a lingering "crash loop" clear
   the moment reality changes.
-- **Send test notification** button and last-delivered timestamp, so you can
-  verify alerting before you need it.
+- **Last-delivered timestamp for watchdog alerts** (next to the existing
+  Send test notification button), so you can verify alerting is actually
+  reaching you before you need it.
 
 ### Changed
 - **Nearly everything is faster.** The server no longer freezes itself:
@@ -62,6 +63,11 @@ Versions follow this repository's `package.json` release counter.
   gateway restarts; interrupted or failed restarts leave the rollback
   window and its incident reporting exactly as before — with clearer
   attribution in the incident feed ("automatic repair" vs manual restart).
+
+### Removed
+- `GET /api/gateway-status` (unused; it spawned a blocking 15s CLI status
+  call if ever hit). Use `GET /api/status` — the unified `state` object
+  carries everything it reported and more.
 
 ## [0.9.35] - 2026-08-27
 

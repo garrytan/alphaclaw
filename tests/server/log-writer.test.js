@@ -331,11 +331,14 @@ describe("server/log-writer", () => {
     expect(overshoot.offset).toBe(fs.statSync(getLogPath()).size);
   });
 
-  it("re-init bumps the public log generation", () => {
+  it("re-init advances the public log generation and epoch-seeds it", () => {
     initLogWriter({ rootDir, maxBytes: 1024 * 1024 });
     const gen = getLogGeneration();
+    // Epoch seeding: a fresh process can never collide with a cursor issued
+    // by a previous one (generations are wall-clock-scale, not small ints).
+    expect(gen).toBeGreaterThanOrEqual(1_000_000_000_000);
     initLogWriter({ rootDir, maxBytes: 1024 * 1024 });
-    expect(getLogGeneration()).toBe(gen + 1);
+    expect(getLogGeneration()).toBeGreaterThan(gen);
   });
 
   it("sync flush (exit path) writes queued lines synchronously", () => {

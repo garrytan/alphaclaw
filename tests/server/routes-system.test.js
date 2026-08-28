@@ -157,6 +157,14 @@ const mockHttpsGetResponse = ({ statusCode = 200, body = "" } = {}) =>
   });
 
 describe("server/routes/system", () => {
+  // boot-phase is a module singleton whose process default is
+  // "starting_gateway"; the reducer (and the legacy projection derived from
+  // it) gate on it, so every test starts from a settled boot. Tests that
+  // need a failed boot set it explicitly and this reset un-leaks it.
+  beforeEach(() => {
+    require("../../lib/server/boot-phase").setBootPhase("ready");
+  });
+
   it("merges known vars and custom vars on GET /api/env", async () => {
     const deps = createSystemDeps();
     deps.readEnvFile.mockReturnValue([
@@ -1292,9 +1300,6 @@ describe("server/routes/system", () => {
   it("streams status events with watchdog and doctor payloads", async () => {
     vi.useFakeTimers();
     try {
-      // The boot-phase singleton defaults to "starting_gateway"; this test
-      // asserts post-boot reducer states, so mark the boot settled first.
-      require("../../lib/server/boot-phase").setBootPhase("ready");
       const deps = createSystemDeps();
       deps.watchdog = { getStatus: vi.fn(() => ({ lifecycle: "running" })) };
       deps.doctorService = {

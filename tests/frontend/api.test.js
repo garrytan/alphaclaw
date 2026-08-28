@@ -790,7 +790,6 @@ describe("frontend/api endpoint wrapper coverage", () => {
     ["sendAgentMessage", [{ message: "hi", sessionKey: "k" }], "/api/agent/message", "POST"],
     ["sendAgentMessage", [], "/api/agent/message", "POST"],
     ["sendDoctorCardFix", [], "/api/doctor/findings//fix", "POST"],
-    ["restartGateway", [], "/api/gateway/restart", "POST"],
     ["fetchRestartStatus", [], "/api/restart-status", undefined],
     ["dismissRestartStatus", [], "/api/restart-status/dismiss", "POST"],
     ["fetchWatchdogStatus", [], "/api/watchdog/status", undefined],
