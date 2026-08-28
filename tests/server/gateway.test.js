@@ -52,6 +52,9 @@ const createChild = () => ({
   on: vi.fn(),
   kill: vi.fn(),
   exitCode: null,
+  // Real Node semantics: a live child has signalCode null; a SIGNAL-killed
+  // child sets signalCode and leaves exitCode null.
+  signalCode: null,
   killed: false,
 });
 
@@ -1569,7 +1572,10 @@ describe("server/gateway restart behavior", () => {
       child.kill = vi.fn((sig) => {
         signals.push(sig);
         child.killed = true;
-        if (sig === "SIGKILL") child.exitCode = 137;
+        // Signal deaths set signalCode and leave exitCode null (real Node
+        // semantics — modeling exitCode here is exactly the mock error that
+        // hid the reap-wait bug from the unit suite).
+        if (sig === "SIGKILL") child.signalCode = "SIGKILL";
         return true;
       });
       childProcess.spawn = vi.fn(() => child);
