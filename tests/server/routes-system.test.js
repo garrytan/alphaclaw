@@ -5,12 +5,21 @@ const { EventEmitter } = require("events");
 
 const { registerSystemRoutes } = require("../../lib/server/routes/system");
 
+// readAlphaclawConfig serves identical re-reads from a module-level
+// mtime/size cache; a strictly increasing mtime per stat keeps every test
+// reading through its own readFileSync mock instead of a stale cached copy.
+let statMtimeCounter = 0;
+
 const createSystemDeps = () => {
   const deps = {
     fs: {
       existsSync: vi.fn(() => true),
       readFileSync: vi.fn(() => {
         throw new Error("no config");
+      }),
+      statSync: vi.fn(() => {
+        statMtimeCounter += 1;
+        return { mtimeMs: statMtimeCounter, size: statMtimeCounter };
       }),
       writeFileSync: vi.fn(),
       mkdirSync: vi.fn(),
@@ -421,7 +430,11 @@ describe("server/routes/system", () => {
           updates: {
             openclaw: {
               releaseChannel: "stable",
+              overseer: { enabled: false },
             },
+          },
+          team: {
+            enabled: false,
           },
         },
         openclawChannel: null,
@@ -637,6 +650,41 @@ describe("server/routes/system", () => {
     }
   });
 
+  it("never emits a token fragment in trusted-proxy mode, even with a configured token", async () => {
+    const previousEnvToken = process.env.OPENCLAW_GATEWAY_TOKEN;
+    process.env.OPENCLAW_GATEWAY_TOKEN = "env-token-should-not-leak";
+    try {
+      const deps = createSystemDeps();
+      deps.clawCmd.mockResolvedValueOnce({
+        ok: true,
+        stdout: "Dashboard URL: http://127.0.0.1:18789/",
+      });
+      // Team mode: the gateway rejects shared tokens under trusted-proxy
+      // auth, so a stale gateway.auth.token must not be resurrected into a
+      // #token= URL — it would carry a dead credential.
+      deps.fs.readFileSync.mockImplementation((filePath) => {
+        if (String(filePath).endsWith("openclaw.json")) {
+          return JSON.stringify({
+            gateway: {
+              auth: { mode: "trusted-proxy", token: "stale-config-token" },
+            },
+          });
+        }
+        throw new Error("unexpected file");
+      });
+      const app = createApp(deps);
+
+      const res = await request(app).get("/api/gateway/dashboard");
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ ok: true, url: "/openclaw", needsAuth: true });
+      expect(res.body.url).not.toContain("token=");
+    } finally {
+      if (previousEnvToken === undefined) delete process.env.OPENCLAW_GATEWAY_TOKEN;
+      else process.env.OPENCLAW_GATEWAY_TOKEN = previousEnvToken;
+    }
+  });
+
   it("returns sync cron status on GET /api/sync-cron", async () => {
     const deps = createSystemDeps();
     deps.fs.readFileSync.mockReturnValueOnce(
@@ -748,7 +796,11 @@ describe("server/routes/system", () => {
         updates: {
           openclaw: {
             releaseChannel: "stable",
+            overseer: { enabled: false },
           },
+        },
+        team: {
+          enabled: false,
         },
       },
     });
@@ -777,7 +829,11 @@ describe("server/routes/system", () => {
           updates: {
             openclaw: {
               releaseChannel: "stable",
+              overseer: { enabled: false },
             },
+          },
+          team: {
+            enabled: false,
           },
         },
       }),
