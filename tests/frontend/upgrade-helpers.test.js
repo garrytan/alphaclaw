@@ -441,7 +441,7 @@ describe("frontend/upgrade-helpers status card", () => {
 
     expect(model.stabilization.badge).toBe("STABILIZING");
     expect(model.stabilization.line).toBe(
-      "auto-rollback armed → last known good: 2026.7.2",
+      "Post-upgrade monitoring period — auto-rollback armed → last known good: 2026.7.2",
     );
     expect(model.stabilization.caption).toContain("first 24h");
     expect(model.showStabilizationActions).toBe(true);
@@ -510,6 +510,29 @@ describe("frontend/upgrade-helpers status card", () => {
     // ("Mark as good now" / "Roll back now") must stay available.
     expect(model.showStabilizationActions).toBe(true);
     expect(model.autoAcceptedNote).toBe(kAutoAcceptedNote);
+
+    // D1: with the server-computed window end, the note shows remaining time.
+    const timed = buildStatusCardModel(
+      {
+        releaseChannel: "beta",
+        installedVersion: "2026.7.3-beta.1",
+        pinVersion: "2026.7.1-2",
+        applied: {
+          channel: "beta",
+          version: "2026.7.3-beta.1",
+          acceptedSource: "acceptance",
+        },
+        appliedId: "2026.7.3-beta.1",
+        isPin: false,
+        acceptedAt: kNow - 3_600_000,
+        inStabilizationWindow: true,
+        stabilizationEndsAt: kNow + 23 * 3_600_000,
+        lastKnownGood: { package: "2026.7.2", dev: null },
+        lastBoot: null,
+      },
+      kNow,
+    );
+    expect(timed.autoAcceptedNote).toBe(`${kAutoAcceptedNote} ~23h left`);
     expect(kAutoAcceptedNote).toBe(
       "Auto-rollback stays armed for 24h after activation — 'Mark as good now' disarms it.",
     );
@@ -829,6 +852,18 @@ describe("frontend/upgrade-helpers misc models", () => {
       });
       expect(result).toEqual({ status: "behind", count: 2 });
       expect(formatReleasesBehind(result, "beta")).toBe("2 beta releases behind");
+    });
+
+    it("uses the singular noun exactly one release behind (E2)", async () => {
+      const { computeReleasesBehind, formatReleasesBehind } =
+        await loadUpgradeHelpers();
+      const result = computeReleasesBehind({
+        catalog,
+        releaseChannel: "beta",
+        installedVersion: "2026.8.1-beta.2",
+      });
+      expect(result).toEqual({ status: "behind", count: 1 });
+      expect(formatReleasesBehind(result, "beta")).toBe("1 beta release behind");
     });
 
     it("reports up-to-date on the newest release", async () => {

@@ -314,7 +314,8 @@ describe("frontend/upgrade-tab view", () => {
     expect(text).toContain("last output 5s ago");
     expect(text).toContain("Preflight checks");
     expect(text).toContain("Download");
-    expect(text).toContain("Show raw log");
+    // D2: raw CLI output lives behind a "Technical details" disclosure.
+    expect(text).toContain("Technical details");
 
     const actionButtons = findAllByType(tree, ActionButton);
     expect(actionButtons.length).toBeGreaterThan(0);
@@ -405,7 +406,7 @@ describe("frontend/upgrade-tab view", () => {
 
     const text = treeText(tree);
     expect(text).toContain("STABILIZING");
-    expect(text).toContain("auto-rollback armed → last known good: 2026.7.2");
+    expect(text).toContain("Post-upgrade monitoring period — auto-rollback armed → last known good: 2026.7.2");
     expect(text).toContain("first 24h");
     expect(text).toContain("Channel-applied versions add ~10-60s");
 

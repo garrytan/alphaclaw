@@ -39,6 +39,34 @@ describe("server/openclaw-whats-new", () => {
     }
   });
 
+  it("shows only flips that affect THIS installation (D5)", () => {
+    // gateway.terminal.enabled is set explicitly → its default flip is noise
+    // for this install; the other flips (unset keys) stay.
+    const withExplicitKey = resolveWhatsNew({
+      catalog: kBetaCatalog,
+      releaseChannel: "beta",
+      installedConfig: { gateway: { terminal: { enabled: false } } },
+    });
+    expect(
+      withExplicitKey.securityFlips.some(
+        (flip) => flip.key === "gateway.terminal.enabled",
+      ),
+    ).toBe(false);
+    expect(withExplicitKey.securityFlips.length).toBeGreaterThan(0);
+
+    // Unknown config (unreadable) keeps every flip — fail-open toward warning.
+    const unknownConfig = resolveWhatsNew({
+      catalog: kBetaCatalog,
+      releaseChannel: "beta",
+      installedConfig: null,
+    });
+    expect(
+      unknownConfig.securityFlips.some(
+        (flip) => flip.key === "gateway.terminal.enabled",
+      ),
+    ).toBe(true);
+  });
+
   it("flags when the channel latest moved past the verified version", () => {
     const resolved = resolveWhatsNew({
       catalog: {

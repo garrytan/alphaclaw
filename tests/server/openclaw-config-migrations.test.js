@@ -58,6 +58,28 @@ describe("server/openclaw-config-migrations agents shape adapters", () => {
     expect(cfg.agents.defaults).toEqual({ model: {} });
   });
 
+  it("MIXED file (both agents.list and agents.entries): entries wins, stale list dropped", () => {
+    // A half-migrated config can carry both keys — the keyed entries are the
+    // beta's source of truth; the stale list must not resurrect old agents.
+    const cfg = normalizeAgentsShapeForRead({
+      agents: {
+        list: [{ id: "stale-agent", name: "Stale" }],
+        entries: {
+          main: { name: "Main" },
+          ops: { name: "Ops" },
+        },
+      },
+    });
+    expect(cfg.agents.entries).toBeUndefined();
+    expect(cfg.agents.list.map((agent) => agent.id).sort()).toEqual([
+      "main",
+      "ops",
+    ]);
+    expect(cfg.agents.list.some((agent) => agent.id === "stale-agent")).toBe(
+      false,
+    );
+  });
+
   it("leaves a list-shaped config untouched on read", () => {
     const cfg = normalizeAgentsShapeForRead({ agents: { list: [{ id: "main" }] } });
     expect(cfg.agents.list).toEqual([{ id: "main" }]);

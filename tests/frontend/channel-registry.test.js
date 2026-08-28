@@ -77,3 +77,89 @@ describe("frontend/buzz pending card (5.2/D15)", () => {
     expect(text).toContain("last checked");
   });
 });
+
+describe("frontend/buzz wizard resume mapping (5.2/5.3)", () => {
+  it("resumes at the step the server state machine paused on", async () => {
+    vi.resetModules();
+    vi.doMock("preact/hooks", () => {
+      const slots = [];
+      let cursor = 0;
+      const effects = [];
+      return {
+        useState: (v) => {
+          const i = cursor++;
+          if (!(i in slots)) slots[i] = typeof v === "function" ? v() : v;
+          return [
+            slots[i],
+            (n) => {
+              slots[i] = typeof n === "function" ? n(slots[i]) : n;
+            },
+          ];
+        },
+        useRef: (v = null) => {
+          const i = cursor++;
+          if (!(i in slots)) slots[i] = { current: v };
+          return slots[i];
+        },
+        useMemo: (fn) => fn(),
+        useCallback: (fn) => fn,
+        useEffect: (effect) => effects.push(effect),
+        __run: async () => {
+          for (const effect of effects.splice(0)) {
+            try {
+              await effect();
+            } catch {}
+          }
+        },
+        __reset: () => {
+          cursor = 0;
+          effects.length = 0;
+        },
+      };
+    });
+    vi.doMock("../../lib/public/js/lib/api.js", () => ({
+      fetchBuzzSetup: vi.fn(async () => ({
+        ok: true,
+        state: {
+          status: "awaiting-approval",
+          relayUrl: "wss://relay.example",
+          publicKey: "BZresumeKey",
+          lastProbeAt: Date.parse("2026-08-28T00:00:00Z"),
+          lastProbeDetail: "Waiting for a room owner to approve the bot.",
+        },
+      })),
+      runBuzzSetupAction: vi.fn(),
+    }));
+    vi.doMock("../../lib/public/js/components/toast.js", () => ({
+      showToast: vi.fn(),
+    }));
+    vi.doMock("../../lib/public/js/lib/clipboard.js", () => ({
+      copyTextToClipboard: vi.fn(async () => true),
+    }));
+
+    const hooks = await import("preact/hooks");
+    const { BuzzWizard } = await import(
+      "../../lib/public/js/components/channels/buzz-wizard.js"
+    );
+    const props = { visible: true, onClose: () => {}, onFinished: () => {} };
+    hooks.__reset();
+    BuzzWizard(props); // collect the load effect
+    await hooks.__run(); // fetchBuzzSetup resolves → step = awaiting-approval
+    hooks.__reset();
+    const vnode = BuzzWizard(props);
+    // Template interpolation splits numbers into separate text nodes —
+    // normalize whitespace before matching.
+    const text = collectText(vnode).join(" ").replace(/\s+/g, " ");
+    // Reload landed on the approval step — never back at "Before you start",
+    // with the SAME identity (public key) and last-checked stamp.
+    expect(text).toContain("Step 4 of 5");
+    expect(text).toContain("BZresumeKey");
+    expect(text).toContain("last checked");
+    expect(text).not.toContain("Install the plugin. AlphaClaw runs");
+    vi.doUnmock("preact/hooks");
+    vi.doUnmock("../../lib/public/js/lib/api.js");
+    vi.doUnmock("../../lib/public/js/components/toast.js");
+    vi.doUnmock("../../lib/public/js/lib/clipboard.js");
+    vi.resetModules();
+  });
+});

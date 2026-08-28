@@ -605,13 +605,21 @@ describe("server/openclaw-channel boot sync (e2e)", () => {
       let cfg = JSON.parse(
         fs.readFileSync(path.join(harness.openclawDir, "openclaw.json"), "utf8"),
       );
+      // Strict-schema shape: exactly {label, color} (an extra marker key would
+      // exit-78 the beta gateway); label carries the version (D17), managed-
+      // ness is tracked in AlphaClaw state instead.
       expect(cfg.gateway.controlUi.environment).toEqual({
-        label: "BETA",
+        label: "BETA · 2026.8.1",
         color: "amber",
-        _alphaclawManaged: true,
+      });
+      expect(cfg.gateway.controlUi.environment.label.length).toBeLessThanOrEqual(24);
+      expect(harness.store.readState().managedStripe).toEqual({
+        label: "BETA · 2026.8.1",
+        color: "amber",
       });
 
-      // Switching to stable removes the managed stripe.
+      // Switching to stable removes the managed stripe (recognized via the
+      // recorded managedStripe, or the legacy marker for older installs).
       const stableHarness = createHarness({
         channel: "stable",
         installedVersion: "2026.8.1",

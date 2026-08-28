@@ -95,29 +95,6 @@ describe("server/openclaw-version verifyStagedLifecycle", () => {
   });
 });
 
-describe("server/openclaw-version resolveNpmAllowScriptsFlag (1.4)", () => {
-  const { resolveNpmAllowScriptsFlag } = require("../../lib/server/openclaw-version");
-
-  it("emits the flag only for npm >= 11.16", () => {
-    expect(
-      resolveNpmAllowScriptsFlag({ getNpmVersion: () => "11.16.0" }),
-    ).toBe(" --allow-scripts=openclaw");
-    expect(
-      resolveNpmAllowScriptsFlag({ getNpmVersion: () => "12.0.1" }),
-    ).toBe(" --allow-scripts=openclaw");
-    expect(resolveNpmAllowScriptsFlag({ getNpmVersion: () => "11.15.9" })).toBe("");
-    expect(resolveNpmAllowScriptsFlag({ getNpmVersion: () => "10.9.0" })).toBe("");
-    // Unknown npm → no flag (older npm rejects it).
-    expect(
-      resolveNpmAllowScriptsFlag({
-        getNpmVersion: () => {
-          throw new Error("npm missing");
-        },
-      }),
-    ).toBe("");
-  });
-});
-
 const createService = ({ isOnboarded = false } = {}) => {
   const execMock = vi.fn();
   const execSyncMock = vi.fn();
@@ -334,12 +311,11 @@ describe("server/openclaw-version", () => {
       fs.readFileSync(require("path").join(result.tmpDir, "package.json"), "utf8"),
     );
     expect(manifest.dependencies.openclaw).toBe("2026.8.1-beta.3");
+    // npm >= 11.16 script allowlist — MANIFEST field, not the --allow-scripts
+    // flag (npm 11.19 rejects the flag in project-scoped installs; live-tested).
+    expect(manifest.allowScripts).toEqual(["openclaw"]);
     expect(execMock).toHaveBeenCalledWith(
-      // The allow-scripts suffix is npm-version-conditional (>= 11.16); match
-      // the base command with or without it.
-      expect.stringMatching(
-        /^npm install --omit=dev --prefer-online --package-lock=false --install-strategy=nested( --allow-scripts=openclaw)?$/,
-      ),
+      "npm install --omit=dev --prefer-online --package-lock=false --install-strategy=nested",
       expect.objectContaining({
         cwd: result.tmpDir,
         env: expect.objectContaining({

@@ -18,6 +18,12 @@
 - **Context:** See the CEO plan and the implementation plan's "Explicitly out of scope" + expansion decisions.
 - **Effort:** S–L (per item).
 
+## P3 — Post-audit polish deferrals (beta-support plan, audited 2026-08-28)
+- **What:** (a) Team enable wizard's apply step could run restart + health re-check + first-invite inline instead of deferring to the restart banner and the Team page; (b) a shared admin-copy-constants module (D1 strings are currently inline per component); (c) `getAdvertisedScopes` is not wired in production — scope-name intersection is a no-op (mitigated: the operator.* names are live-verified against the beta's OperatorScopeSchema by the e2e suite); (d) the server-side channel maps (constants.kChannelDefs, agents/shared.js) are CJS and cannot import the ESM channel registry — they stay cross-referenced counterparts, extended together (the registry header documents this).
+- **Why:** Each is polish or a structural nicety; the shipped behavior is correct and tested.
+- **Context:** Findings from the 7-agent plan-completion audit; everything else the audit flagged was fixed in the audit-batch commits.
+- **Effort:** S–M (per item).
+
 ## P3 — Verify sendChatAction deleted-topic semantics; optional opt-in liveness probe
 - **What:** On wintermute, call `sendChatAction` with a `message_thread_id` of a deleted forum topic and record whether Telegram returns a distinct thread-not-found error (reports exist of `ok: true` regardless). If it errors distinctly, consider an opt-in, low-frequency background probe for topics that never receive sends (default off — probes show "bot is typing…" to group members).
 - **Why:** Lazy stale-marking (shipped) only fires on real send failures; never-posted-to topics stay unverified.

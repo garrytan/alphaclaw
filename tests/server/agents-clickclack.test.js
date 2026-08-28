@@ -190,3 +190,59 @@ describe("server/agents clickclack channel (5.1)", () => {
     expect(account.dmPolicy).toBe("pairing");
   });
 });
+
+describe("server/agents clickclack beta toggles (5.1)", () => {
+  it("writes commandMenu/allowBots ONLY on an explicit choice", async () => {
+    const fsMock = buildFsMock({
+      agents: { list: [{ id: "main", name: "Main", default: true }] },
+      channels: {
+        clickclack: {
+          enabled: true,
+          accounts: { default: { name: "ClickClack", token: "${CLICKCLACK_BOT_TOKEN}" } },
+        },
+      },
+    });
+    const service = createAgentsService({
+      fs: fsMock,
+      OPENCLAW_DIR: "/tmp/openclaw",
+      readEnvFile: () => [{ key: "CLICKCLACK_BOT_TOKEN", value: "ccb_x" }],
+      writeEnvFile: () => {},
+      reloadEnv: () => true,
+      restartGateway: async () => {},
+      clawCmd: async () => ({ ok: true, stdout: "", stderr: "" }),
+    });
+
+    // Default choices never write the keys.
+    await service.updateChannelAccount({
+      provider: "clickclack",
+      accountId: "default",
+      name: "ClickClack",
+      agentId: "main",
+    });
+    expect(fsMock.readConfig().channels.clickclack.commandMenu).toBeUndefined();
+    expect(fsMock.readConfig().channels.clickclack.allowBots).toBeUndefined();
+
+    // Explicit choices write the schema-verified keys.
+    await service.updateChannelAccount({
+      provider: "clickclack",
+      accountId: "default",
+      name: "ClickClack",
+      agentId: "main",
+      commandMenu: "off",
+      allowBots: "mentions",
+    });
+    expect(fsMock.readConfig().channels.clickclack.commandMenu).toBe(false);
+    expect(fsMock.readConfig().channels.clickclack.allowBots).toBe("mentions");
+
+    await service.updateChannelAccount({
+      provider: "clickclack",
+      accountId: "default",
+      name: "ClickClack",
+      agentId: "main",
+      commandMenu: "on",
+      allowBots: "off",
+    });
+    expect(fsMock.readConfig().channels.clickclack.commandMenu).toBe(true);
+    expect(fsMock.readConfig().channels.clickclack.allowBots).toBe(false);
+  });
+});
