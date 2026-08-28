@@ -1248,6 +1248,58 @@ describe("frontend/api behaviors", () => {
     );
   });
 
+  it("fetchWatchdogLogsDelta polls with the since=<gen>:<offset> cursor", async () => {
+    const payload = { ok: true, gen: 3, offset: 2048, data: "new line\n", reset: false };
+    global.fetch.mockResolvedValue(mockJsonResponse(200, payload));
+    const api = await loadApiModule();
+
+    const result = await api.fetchWatchdogLogsDelta({ gen: 3, offset: 1024 });
+
+    expect(global.fetch.mock.calls[0][0]).toBe(
+      "/api/watchdog/logs?since=3%3A1024",
+    );
+    expect(result).toEqual(payload);
+  });
+
+  it("fetchWatchdogLogsDelta sends an invalid cursor when none is known", async () => {
+    const payload = { ok: true, gen: 1, offset: 512, data: "fresh tail", reset: true };
+    global.fetch.mockResolvedValue(mockJsonResponse(200, payload));
+    const api = await loadApiModule();
+
+    const result = await api.fetchWatchdogLogsDelta();
+
+    // -1:-1 is never a valid cursor, so the server bootstraps the client
+    // with reset:true plus the fresh tail and the current cursor.
+    expect(global.fetch.mock.calls[0][0]).toBe(
+      "/api/watchdog/logs?since=-1%3A-1",
+    );
+    expect(result).toEqual(payload);
+  });
+
+  it("fetchWatchdogLogsDelta normalizes non-numeric cursor parts to -1", async () => {
+    global.fetch.mockResolvedValue(
+      mockJsonResponse(200, { ok: true, gen: 1, offset: 0, data: "", reset: true }),
+    );
+    const api = await loadApiModule();
+
+    await api.fetchWatchdogLogsDelta({ gen: "junk", offset: null });
+
+    expect(global.fetch.mock.calls[0][0]).toBe(
+      "/api/watchdog/logs?since=-1%3A-1",
+    );
+  });
+
+  it("fetchWatchdogLogsDelta throws on error responses", async () => {
+    global.fetch.mockResolvedValue(
+      mockJsonResponse(500, { ok: false, error: "log reader unavailable" }),
+    );
+    const api = await loadApiModule();
+
+    await expect(api.fetchWatchdogLogsDelta({ gen: 1, offset: 0 })).rejects.toThrow(
+      "log reader unavailable",
+    );
+  });
+
   it("routeExecToNode maps AbortError to a timeout message", async () => {
     global.fetch.mockRejectedValue(
       Object.assign(new Error("aborted"), { name: "AbortError" }),

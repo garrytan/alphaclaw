@@ -6,6 +6,8 @@ const {
   initLogWriter,
   getLogPath,
   readLogTail,
+  getLogGeneration,
+  readLogDelta,
   __flushForTests,
   __flushSyncForTests,
 } = require("../../lib/server/log-writer");
@@ -161,6 +163,99 @@ describe("server/log-writer", () => {
     expect(markers).toHaveLength(1);
     expect(content).toContain("ovf-00");
     expect(content).not.toContain("ovf-69");
+  });
+
+  it("readLogDelta advances the offset and returns only new bytes", async () => {
+    initLogWriter({ rootDir, maxBytes: 1024 * 1024 });
+    process.stdout.write("delta line one\n");
+    await __flushForTests();
+
+    const gen = getLogGeneration();
+    const first = readLogDelta({ gen, offset: 0 });
+    expect(first.reset).toBe(false);
+    expect(first.gen).toBe(gen);
+    expect(first.data).toContain("delta line one");
+    expect(first.offset).toBe(fs.statSync(getLogPath()).size);
+
+    // No new bytes → empty delta at the same offset.
+    const idle = readLogDelta({ gen: first.gen, offset: first.offset });
+    expect(idle).toEqual({
+      gen: first.gen,
+      offset: first.offset,
+      data: "",
+      reset: false,
+    });
+
+    process.stdout.write("delta line two\n");
+    await __flushForTests();
+    const second = readLogDelta({ gen: first.gen, offset: first.offset });
+    expect(second.reset).toBe(false);
+    expect(second.data).toContain("delta line two");
+    expect(second.data).not.toContain("delta line one");
+    expect(second.offset).toBe(first.offset + Buffer.byteLength(second.data));
+  });
+
+  it("caps delta reads at maxBytes and resumes from the advanced offset", async () => {
+    initLogWriter({ rootDir, maxBytes: 1024 * 1024 });
+    // ~40 x ~115 bytes ≈ 4.6KB — several 1KB (the minimum cap) chunks.
+    for (let i = 0; i < 40; i++) {
+      process.stdout.write(`cap-${String(i).padStart(2, "0")} ${"x".repeat(80)}\n`);
+    }
+    await __flushForTests();
+
+    const gen = getLogGeneration();
+    let cursor = { gen, offset: 0 };
+    let collected = "";
+    let chunks = 0;
+    for (;;) {
+      const delta = readLogDelta({ ...cursor, maxBytes: 1024 });
+      expect(delta.reset).toBe(false);
+      expect(Buffer.byteLength(delta.data)).toBeLessThanOrEqual(1024);
+      if (!delta.data) break;
+      collected += delta.data;
+      cursor = { gen: delta.gen, offset: delta.offset };
+      chunks += 1;
+    }
+    expect(chunks).toBeGreaterThan(2);
+    expect(collected).toBe(fs.readFileSync(getLogPath(), "utf8"));
+  });
+
+  it("rotation bumps the generation and stale cursors reset with a fresh tail", async () => {
+    const maxBytes = 4096;
+    initLogWriter({ rootDir, maxBytes });
+    process.stdout.write("pre-rotation line\n");
+    await __flushForTests();
+    const genBefore = getLogGeneration();
+    const cursorBefore = readLogDelta({ gen: genBefore, offset: 0 });
+
+    // Same recipe as the rotation test above: one oversized batch → one rotate.
+    for (let i = 0; i < 30; i++) {
+      process.stdout.write(`rotgen-${String(i).padStart(3, "0")} ${"y".repeat(150)}\n`);
+    }
+    await __flushForTests();
+
+    expect(getLogGeneration()).toBe(genBefore + 1);
+    const stale = readLogDelta({ gen: genBefore, offset: cursorBefore.offset });
+    expect(stale.reset).toBe(true);
+    expect(stale.gen).toBe(getLogGeneration());
+    expect(stale.offset).toBe(fs.statSync(getLogPath()).size);
+    expect(stale.data).toContain("rotgen-029");
+    expect(stale.data).not.toContain("rotgen-000");
+
+    // An offset beyond the file also resets, even with the current gen.
+    const overshoot = readLogDelta({
+      gen: getLogGeneration(),
+      offset: fs.statSync(getLogPath()).size + 1,
+    });
+    expect(overshoot.reset).toBe(true);
+    expect(overshoot.offset).toBe(fs.statSync(getLogPath()).size);
+  });
+
+  it("re-init bumps the public log generation", () => {
+    initLogWriter({ rootDir, maxBytes: 1024 * 1024 });
+    const gen = getLogGeneration();
+    initLogWriter({ rootDir, maxBytes: 1024 * 1024 });
+    expect(getLogGeneration()).toBe(gen + 1);
   });
 
   it("sync flush (exit path) writes queued lines synchronously", () => {

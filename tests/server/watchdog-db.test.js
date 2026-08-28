@@ -97,6 +97,67 @@ describe("server/watchdog-db", () => {
     ).toBe(true);
   });
 
+  it("uses the partial notable-events index for the filtered query", () => {
+    const { path: dbPath, kNotableEventsPredicateSql } = createWatchdogDbContext(
+      "watchdog-db-index-",
+    );
+    currentDatabase = new DatabaseSync(dbPath);
+
+    // Same predicate constant getRecentEvents interpolates — SQLite only uses
+    // a partial index when the query's WHERE text matches its predicate.
+    const plan = currentDatabase
+      .prepare(`
+        EXPLAIN QUERY PLAN
+        SELECT id, event_type, source, status, details, correlation_id, created_at
+        FROM watchdog_events
+        WHERE ${kNotableEventsPredicateSql}
+        ORDER BY created_at DESC
+        LIMIT 20
+      `)
+      .all();
+
+    const details = plan.map((row) => row.detail).join("\n");
+    expect(details).toContain("idx_watchdog_events_notable");
+  });
+
+  it("returns notable events fast from a table dominated by routine rows", () => {
+    const { path: dbPath, getRecentEvents } = createWatchdogDbContext(
+      "watchdog-db-timing-",
+    );
+    currentDatabase = new DatabaseSync(dbPath);
+    const insert = currentDatabase.prepare(`
+      INSERT INTO watchdog_events (
+        event_type, source, status, details, correlation_id, created_at
+      ) VALUES ($event_type, $source, $status, '{}', '', $created_at)
+    `);
+    const baseTs = Date.parse("2026-08-01T00:00:00Z");
+    const routineRows = 30000;
+    // One transaction: 30k auto-committed inserts would fsync 30k times.
+    currentDatabase.exec("BEGIN");
+    for (let i = 0; i < routineRows; i += 1) {
+      const notable = i % 6000 === 0; // 5 notable rows spread through the table
+      insert.run({
+        $event_type: notable ? "crash" : "health_check",
+        $source: notable ? "exit_event" : "health_timer",
+        $status: notable ? "failed" : "ok",
+        $created_at: new Date(baseTs + i).toISOString(),
+      });
+    }
+    currentDatabase.exec("COMMIT");
+
+    const startedAt = performance.now();
+    const events = getRecentEvents({ limit: 20 });
+    const elapsedMs = performance.now() - startedAt;
+
+    expect(events).toHaveLength(5);
+    expect(
+      events.every(
+        (event) => !(event.eventType === "health_check" && event.status === "ok"),
+      ),
+    ).toBe(true);
+    expect(elapsedMs).toBeLessThan(250);
+  });
+
   it("prunes old events based on retention days", () => {
     const { path: dbPath, pruneWatchdogEvents } = createWatchdogDbContext(
       "watchdog-db-prune-",

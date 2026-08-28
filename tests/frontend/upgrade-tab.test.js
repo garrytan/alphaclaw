@@ -60,6 +60,11 @@ vi.mock("../../lib/public/js/components/toast.js", () => ({
 
 import * as preactHooks from "preact/hooks";
 import * as api from "../../lib/public/js/lib/api.js";
+import {
+  getCached,
+  invalidateCache,
+  setCached,
+} from "../../lib/public/js/lib/api-cache.js";
 import { showToast } from "../../lib/public/js/components/toast.js";
 import { UpgradeTabView } from "../../lib/public/js/components/upgrade-tab/index.js";
 import { useUpgradeTab } from "../../lib/public/js/components/upgrade-tab/use-upgrade-tab.js";
@@ -851,6 +856,10 @@ describe("frontend/upgrade-tab hook", () => {
 
   beforeEach(() => {
     harness.reset();
+    // The mount loads go through the module-level SWR cache — drop entries a
+    // previous test seeded so every test observes its own mocked responses.
+    invalidateCache("/api/openclaw/channel");
+    invalidateCache("/api/openclaw/catalog");
     api.fetchOpenclawChannel.mockResolvedValue(makeChannelInfo());
     api.fetchOpenclawCatalog.mockResolvedValue({
       ok: true,
@@ -1230,5 +1239,99 @@ describe("frontend/upgrade-tab hook", () => {
         docsUrl: "https://docs.openclaw.ai/updates#build-failures",
       }),
     );
+  });
+
+  it("paints a fresh-cached channel + catalog instantly without refetching (M4)", async () => {
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(kNow);
+    setCached("/api/openclaw/channel", makeChannelInfo({ releaseChannel: "beta" }));
+    setCached("/api/openclaw/catalog", { ok: true, catalog: makeCatalog() });
+    nowSpy.mockReturnValue(kNow + 1_000);
+
+    const state = await hydrate();
+
+    // Back-navigation inside the cache window: no network calls at all.
+    expect(api.fetchOpenclawChannel).not.toHaveBeenCalled();
+    expect(api.fetchOpenclawCatalog).not.toHaveBeenCalled();
+    expect(state.channelInfo.releaseChannel).toBe("beta");
+    expect(state.catalog).toEqual(makeCatalog());
+    expect(state.loadingChannel).toBe(false);
+    expect(state.loadingCatalog).toBe(false);
+  });
+
+  it("serves a stale-cached channel instantly, then applies the revalidated result (M4)", async () => {
+    const staleChannel = makeChannelInfo({ installedVersion: "2026.7.0" });
+    const freshChannel = makeChannelInfo({ installedVersion: "2026.7.1-2" });
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(kNow);
+    setCached("/api/openclaw/channel", staleChannel);
+    setCached("/api/openclaw/catalog", { ok: true, catalog: makeCatalog() });
+    nowSpy.mockReturnValue(kNow + 61_000); // past the 60s maxAge → SWR path
+
+    let resolveFreshChannel;
+    api.fetchOpenclawChannel.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveFreshChannel = resolve;
+        }),
+    );
+
+    let state = await hydrate();
+
+    // Instant paint from the stale entry while the revalidation is in flight.
+    expect(state.channelInfo.installedVersion).toBe("2026.7.0");
+    expect(state.loadingChannel).toBe(false);
+    expect(api.fetchOpenclawChannel).toHaveBeenCalledTimes(1);
+
+    resolveFreshChannel(freshChannel);
+    await flushAsync();
+    state = renderHook({});
+    expect(state.channelInfo.installedVersion).toBe("2026.7.1-2");
+  });
+
+  it("serves a stale-cached catalog instantly, then applies the revalidated result (M4)", async () => {
+    const staleCatalog = makeCatalog({ distTags: { latest: "2026.7.1-2" } });
+    const freshCatalog = makeCatalog({ distTags: { latest: "2026.7.2" } });
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(kNow);
+    setCached("/api/openclaw/channel", makeChannelInfo());
+    setCached("/api/openclaw/catalog", { ok: true, catalog: staleCatalog });
+    nowSpy.mockReturnValue(kNow + 61_000);
+
+    let resolveFreshCatalog;
+    api.fetchOpenclawCatalog.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveFreshCatalog = resolve;
+        }),
+    );
+
+    let state = await hydrate();
+
+    expect(state.catalog.distTags.latest).toBe("2026.7.1-2");
+    expect(state.loadingCatalog).toBe(false);
+    expect(api.fetchOpenclawCatalog).toHaveBeenCalledTimes(1);
+    // Mount revalidation never force-bypasses the server catalog cache.
+    expect(api.fetchOpenclawCatalog).toHaveBeenCalledWith({ refresh: false });
+
+    resolveFreshCatalog({ ok: true, catalog: freshCatalog });
+    await flushAsync();
+    state = renderHook({});
+    expect(state.catalog.distTags.latest).toBe("2026.7.2");
+  });
+
+  it("Check now bypasses the client cache and re-seeds it (M4)", async () => {
+    let state = await hydrate();
+    expect(api.fetchOpenclawCatalog).toHaveBeenCalledTimes(1);
+
+    state.onCheckNow();
+    await flushAsync();
+
+    // refresh:true always hits the network, never the SWR cache.
+    expect(api.fetchOpenclawCatalog).toHaveBeenCalledTimes(2);
+    expect(api.fetchOpenclawCatalog).toHaveBeenLastCalledWith({ refresh: true });
+    // ...and the result re-seeds the cache for the next mount.
+    expect(getCached("/api/openclaw/catalog")).toEqual({
+      ok: true,
+      catalog: makeCatalog(),
+      channel: { releaseChannel: "stable" },
+    });
   });
 });

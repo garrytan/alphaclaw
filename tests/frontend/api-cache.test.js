@@ -71,6 +71,31 @@ describe("frontend/api-cache", () => {
     expect(getCached("swr-key")).toBe("fresh-value");
   });
 
+  it("keeps serving stale data when a background revalidation fails", async () => {
+    setCached("swr-fail-key", "stale-value");
+    const fetcher = vi.fn(async () => {
+      throw new Error("upstream down");
+    });
+    const onRevalidate = vi.fn();
+
+    // A failed background revalidation must neither reject this call nor
+    // surface as an unhandled rejection — the stale entry stays.
+    await expect(
+      cachedFetch("swr-fail-key", fetcher, { maxAgeMs: 0, onRevalidate }),
+    ).resolves.toBe("stale-value");
+    await vi.waitFor(() => expect(fetcher).toHaveBeenCalledTimes(1));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(onRevalidate).not.toHaveBeenCalled();
+    expect(getCached("swr-fail-key")).toBe("stale-value");
+
+    // The in-flight slot was released: a later stale read retries the fetch.
+    await expect(
+      cachedFetch("swr-fail-key", fetcher, { maxAgeMs: 0 }),
+    ).resolves.toBe("stale-value");
+    await vi.waitFor(() => expect(fetcher).toHaveBeenCalledTimes(2));
+  });
+
   it("revalidates stale data without an onRevalidate callback", async () => {
     setCached("swr-silent-key", "old");
     const fetcher = vi.fn(async () => "new");
