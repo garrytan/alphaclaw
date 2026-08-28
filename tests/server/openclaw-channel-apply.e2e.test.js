@@ -112,6 +112,23 @@ const writeCheckoutFixture = (rootDir, { sha, bin = true } = {}) => {
 };
 
 const defaultRunnerImpl = async (opts) => {
+  // A real `backup create --output <dir> --verify` writes a file; the apply
+  // flow's hard-gate now checks an artifact actually appeared, so the fake
+  // must be faithful and write one.
+  if (opts.command === "openclaw" && opts.args?.[0] === "backup") {
+    try {
+      const outIdx = opts.args.indexOf("--output");
+      const outDir = outIdx >= 0 ? opts.args[outIdx + 1] : null;
+      if (outDir) {
+        fs.mkdirSync(outDir, { recursive: true });
+        fs.writeFileSync(
+          path.join(outDir, `backup-${Date.now()}.tar`),
+          "stub backup\n",
+        );
+      }
+    } catch {}
+    return { ok: true, code: 0, tail: "backup verified\n", timedOut: false };
+  }
   if (
     opts.command === "node" &&
     Array.isArray(opts.args) &&

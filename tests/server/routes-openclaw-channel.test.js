@@ -166,12 +166,13 @@ describe("server/routes/openclaw-channel", () => {
       .put("/api/alphaclaw/config/updates/openclaw-release-channel")
       .send({ releaseChannel: "beta" });
     expect(valid.status).toBe(200);
+    // Channel selection is a catalog preference: it installs nothing, so it
+    // must NOT flag the app restart-required (the global banner would
+    // contradict the Upgrade page's "still running stable — press Apply").
     expect(valid.body).toEqual(
-      expect.objectContaining({ ok: true, changed: true, restartRequired: true }),
+      expect.objectContaining({ ok: true, changed: true, restartRequired: false }),
     );
-    expect(deps.restartRequiredState.markRequired).toHaveBeenCalledWith(
-      "openclaw_release_channel_changed",
-    );
+    expect(deps.restartRequiredState.markRequired).not.toHaveBeenCalled();
     const onDisk = JSON.parse(
       fs.readFileSync(path.join(deps.OPENCLAW_DIR, "alphaclaw.json"), "utf8"),
     );
@@ -547,5 +548,89 @@ describe("server/routes/openclaw-channel", () => {
         blocklist: info.blocklist,
       },
     );
+  });
+
+  describe("notifications routes", () => {
+    const kSupportedChannels = ["telegram", "slack", "discord", "whatsapp"];
+
+    const createOperatorsStore = (overrides = {}) => {
+      const state = {
+        notifications: { preferredChannel: null, adminTargets: [] },
+      };
+      return {
+        kSupportedChannels,
+        read: vi.fn(() => state),
+        setNotificationPrefs: vi.fn(({ preferredChannel, adminTargets }) => {
+          state.notifications = { preferredChannel, adminTargets };
+          return state;
+        }),
+        ...overrides,
+      };
+    };
+
+    it("PUT rejects an unsupported preferredChannel with invalid_setting", async () => {
+      const operatorsStore = createOperatorsStore();
+      const app = createApp(createDeps({ operatorsStore }));
+
+      const res = await request(app)
+        .put("/api/openclaw/notifications")
+        .send({ preferredChannel: "carrier-pigeon", adminTargets: [] });
+      expect(res.status).toBe(400);
+      expect(res.body.ok).toBe(false);
+      expect(res.body.code).toBe("invalid_setting");
+      expect(operatorsStore.setNotificationPrefs).not.toHaveBeenCalled();
+    });
+
+    it("PUT rejects an adminTargets entry missing its target field", async () => {
+      const operatorsStore = createOperatorsStore();
+      const app = createApp(createDeps({ operatorsStore }));
+
+      const res = await request(app)
+        .put("/api/openclaw/notifications")
+        .send({
+          preferredChannel: "telegram",
+          adminTargets: [{ channel: "telegram" }],
+        });
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe("invalid_setting");
+      expect(operatorsStore.setNotificationPrefs).not.toHaveBeenCalled();
+    });
+
+    it("PUT persists a valid notification preference", async () => {
+      const operatorsStore = createOperatorsStore();
+      const app = createApp(createDeps({ operatorsStore }));
+
+      const res = await request(app)
+        .put("/api/openclaw/notifications")
+        .send({
+          preferredChannel: "telegram",
+          adminTargets: [{ channel: "telegram", target: "@ops-admin" }],
+        });
+      expect(res.status).toBe(200);
+      expect(res.body.ok).toBe(true);
+      expect(res.body.notifications).toEqual({
+        preferredChannel: "telegram",
+        adminTargets: [{ channel: "telegram", target: "@ops-admin" }],
+      });
+      expect(operatorsStore.setNotificationPrefs).toHaveBeenCalledWith({
+        preferredChannel: "telegram",
+        adminTargets: [{ channel: "telegram", target: "@ops-admin" }],
+      });
+    });
+
+    it("GET returns the supportedChannels array alongside stored prefs", async () => {
+      const operatorsStore = createOperatorsStore();
+      const app = createApp(createDeps({ operatorsStore }));
+
+      const res = await request(app).get("/api/openclaw/notifications");
+      expect(res.status).toBe(200);
+      expect(res.body.ok).toBe(true);
+      expect(Array.isArray(res.body.supportedChannels)).toBe(true);
+      expect(res.body.supportedChannels).toEqual(kSupportedChannels);
+      expect(res.body.notifications).toEqual({
+        preferredChannel: null,
+        adminTargets: [],
+      });
+    });
   });
 });

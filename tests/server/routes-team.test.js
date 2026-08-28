@@ -16,7 +16,13 @@ const { createTeamStateStore } = require("../../lib/server/team/state");
 const {
   createTeamGatewayConfig,
 } = require("../../lib/server/team/gateway-config");
+const { createTeamService } = require("../../lib/server/team-service");
 const { createTeamPresence } = require("../../lib/server/team/presence");
+const { updateOpenclawConfig } = require("../../lib/server/openclaw-config");
+const {
+  readTeamSettings: readTeamSettingsFromConfig,
+  updateTeamSettings: updateTeamSettingsInConfig,
+} = require("../../lib/server/alphaclaw-config");
 
 const createLoginThrottleMock = () => ({
   getClientKey: vi.fn(() => "client-key"),
@@ -32,36 +38,65 @@ const cookieOf = (res) => (res.headers["set-cookie"]?.[0] || "").split(";")[0];
 describe("server/routes/team (4.5)", () => {
   let rootDir;
   let membersStore;
-  let teamSettings;
-  let configDoc;
   let app;
   let presence;
   let restartReasons;
+  let restartGateway;
   let auditEvents;
   let capability;
+
+  // The merged stack end to end over REAL files: routes -> teamService
+  // (transition: snapshot -> write -> restart -> probe -> restore) ->
+  // team/gateway-config writer -> openclaw.json + alphaclaw.json in rootDir.
+  // Only the gateway itself is faked (restart + loopback probe).
+  const teamSettings = () => readTeamSettingsFromConfig({ openclawDir: rootDir });
+  const configDoc = () =>
+    JSON.parse(fs.readFileSync(path.join(rootDir, "openclaw.json"), "utf8"));
 
   beforeEach(() => {
     process.env.SETUP_PASSWORD = "owner-secret";
     rootDir = fs.mkdtempSync(path.join(os.tmpdir(), "alphaclaw-team-routes-"));
     initAuthDb({ rootDir });
     membersStore = createMembersStore({ getDb: getAuthDb });
-    teamSettings = { enabled: false, disableLegacyLogin: false };
-    configDoc = { gateway: { auth: { mode: "token", token: "t" } } };
+    fs.writeFileSync(
+      path.join(rootDir, "openclaw.json"),
+      JSON.stringify({ gateway: { auth: { mode: "token", token: "t" } } }, null, 2),
+    );
     presence = createTeamPresence();
     restartReasons = [];
+    restartGateway = vi.fn(async () => {});
     auditEvents = [];
     capability = true;
 
     const teamStateStore = createTeamStateStore({ rootDir });
     const teamGatewayConfig = createTeamGatewayConfig({
       openclawDir: rootDir,
-      // Real contract: mutate in place; the writer persists the same object.
-      updateOpenclawConfig: ({ mutate }) => {
-        mutate(configDoc);
-        return { config: configDoc };
-      },
+      updateOpenclawConfig,
       teamStateStore,
       membersStore,
+      env: {},
+    });
+    // Loopback probe fake: identity handshake passes for the injected owner
+    // header; the post-disable shared-secret probe passes for the restored
+    // token.
+    const probeRequest = vi.fn(async ({ url, headers = {} }) => {
+      if (String(url).endsWith("/health")) return { status: 200, error: null };
+      const authed =
+        Boolean(headers["x-alphaclaw-user"]) ||
+        headers.authorization === "Bearer t";
+      return { status: authed ? 400 : 401, error: null };
+    });
+    const teamService = createTeamService({
+      fsModule: fs,
+      openclawDir: rootDir,
+      env: {},
+      restartGateway,
+      getGatewayUrl: () => "http://127.0.0.1:18789",
+      membersStore,
+      applyTeamGatewayConfig: () => teamGatewayConfig.applyTeamGatewayConfig(),
+      request: probeRequest,
+      probeOptions: { healthAttempts: 1, healthRetryDelayMs: 0 },
+      logger: { warn() {} },
     });
 
     app = express();
@@ -70,11 +105,11 @@ describe("server/routes/team (4.5)", () => {
       app,
       loginThrottle: createLoginThrottleMock(),
       membersStore,
-      readTeamSettings: () => teamSettings,
+      readTeamSettings: () => teamSettings(),
       // Mirrors lib/server.js wiring: invite acceptance reconciles the
       // gateway roster when team mode is on (E-C8).
       onMemberRosterChanged: async () => {
-        if (!teamSettings.enabled) return;
+        if (!teamSettings().enabled) return;
         await teamGatewayConfig.applyTeamGatewayConfig();
         restartReasons.push("team_member_accepted");
       },
@@ -85,15 +120,15 @@ describe("server/routes/team (4.5)", () => {
       membersStore,
       teamGatewayConfig,
       teamStateStore,
+      teamService,
       presence,
-      readTeamSettings: () => teamSettings,
-      updateTeamSettings: ({ enabled, disableLegacyLogin }) => {
-        if (enabled !== undefined) teamSettings.enabled = enabled === true;
-        if (disableLegacyLogin !== undefined) {
-          teamSettings.disableLegacyLogin = disableLegacyLogin === true;
-        }
-        return { changed: true };
-      },
+      readTeamSettings: () => teamSettings(),
+      updateTeamSettings: ({ enabled, disableLegacyLogin }) =>
+        updateTeamSettingsInConfig({
+          openclawDir: rootDir,
+          enabled,
+          disableLegacyLogin,
+        }),
       restartRequiredState: {
         markRequired: (reason) => restartReasons.push(reason),
       },
@@ -135,8 +170,8 @@ describe("server/routes/team (4.5)", () => {
     const res = await enableTeam(cookie, { confirmHostIsolation: false });
     expect(res.status).toBe(400);
     expect(res.body.code).toBe("host_isolation_unconfirmed");
-    expect(teamSettings.enabled).toBe(false);
-    expect(configDoc.gateway.auth.mode).toBe("token");
+    expect(teamSettings().enabled).toBe(false);
+    expect(configDoc().gateway.auth.mode).toBe("token");
   });
 
   it("blocks enable when the gateway lacks trusted-proxy team support", async () => {
@@ -148,18 +183,23 @@ describe("server/routes/team (4.5)", () => {
     expect(res.body.error).toContain("beta channel");
   });
 
-  it("enable creates the owner admin, writes trusted-proxy auth, flags restart", async () => {
+  it("enable creates the owner admin, writes trusted-proxy auth, restarts + probes inline", async () => {
     const cookie = await legacyCookie();
     const res = await enableTeam(cookie, { disableLegacyLogin: true });
     expect(res.status).toBe(200);
     expect(res.body.owner).toEqual({ email: "owner@example.com", role: "admin" });
-    expect(res.body.restartRequired).toBe(true);
-    expect(teamSettings).toEqual({ enabled: true, disableLegacyLogin: true });
-    expect(configDoc.gateway.auth.mode).toBe("trusted-proxy");
-    expect(configDoc.gateway.auth.trustedProxy.allowUsers).toEqual([
+    // The transition restarted the gateway and verified the handshake — no
+    // restart-required banner.
+    expect(res.body.restartRequired).toBe(false);
+    expect(restartGateway).toHaveBeenCalledTimes(1);
+    expect(teamSettings()).toEqual({ enabled: true, disableLegacyLogin: true });
+    expect(configDoc().gateway.auth.mode).toBe("trusted-proxy");
+    expect(configDoc().gateway.auth.trustedProxy.allowUsers).toEqual([
       "owner@example.com",
     ]);
-    expect(restartReasons).toContain("team_enabled");
+    // Internal-caller password derived from the previous shared token; the
+    // harness has no env-backed secret, so the literal lands in the config.
+    expect(configDoc().gateway.auth.password).toBe("t");
     expect(auditEvents.map((event) => event.eventType)).toContain("team_enabled");
   });
 
@@ -189,11 +229,11 @@ describe("server/routes/team (4.5)", () => {
     expect(accept.status).toBe(200);
     // E-C8: acceptance itself reconciles — the new member holds gateway
     // authority immediately, not after the next admin mutation.
-    expect(configDoc.gateway.auth.trustedProxy.allowUsers).toContain(
+    expect(configDoc().gateway.auth.trustedProxy.allowUsers).toContain(
       "member@example.com",
     );
     expect(
-      configDoc.gateway.auth.identityScopes["member@example.com"],
+      configDoc().gateway.auth.identityScopes["member@example.com"],
     ).toEqual(["operator.read", "operator.write", "operator.approvals"]);
     expect(restartReasons).toContain("team_member_accepted");
 
@@ -204,7 +244,7 @@ describe("server/routes/team (4.5)", () => {
       .set("Cookie", cookie)
       .send({ disabled: true });
     expect(patch.status).toBe(200);
-    expect(configDoc.gateway.auth.trustedProxy.allowUsers).toEqual([
+    expect(configDoc().gateway.auth.trustedProxy.allowUsers).toEqual([
       "owner@example.com",
     ]);
     expect(restartReasons).toContain("team_member_changed");
@@ -290,8 +330,9 @@ describe("server/routes/team (4.5)", () => {
       .set("Cookie", adminCookie)
       .send({});
     expect(disable.status).toBe(200);
-    expect(teamSettings).toEqual({ enabled: false, disableLegacyLogin: false });
-    expect(configDoc.gateway.auth).toEqual({ mode: "token", token: "t" });
+    expect(teamSettings()).toEqual({ enabled: false, disableLegacyLogin: false });
+    // The transition restored the snapshotted pre-team auth verbatim.
+    expect(configDoc().gateway.auth).toEqual({ mode: "token", token: "t" });
     expect(
       (await request(app).get("/api/team").set("Cookie", memberCookie)).status,
     ).toBe(401);

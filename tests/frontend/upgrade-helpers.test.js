@@ -665,23 +665,526 @@ describe("frontend/upgrade-helpers confirm models (U1/U3/U9)", () => {
     expect(model.lines.join(" ")).toContain("Downgrading can leave newer state formats behind");
   });
 
-  it("builds the guided channel-switch prompt (U1)", async () => {
-    const { buildChannelSwitchModel } = await loadUpgradeHelpers();
+  it("adds the breaking-change framing when crossing stable→beta or applying a prerelease", async () => {
+    const { buildApplyConfirmModel, kApplyStepPreview } =
+      await loadUpgradeHelpers();
 
-    const model = buildChannelSwitchModel({
-      nextChannel: "beta",
-      latestLabel: "2026.7.3-beta.1",
+    const model = buildApplyConfirmModel({
+      payload: { channel: "beta", version: "2026.8.1-beta.3" },
+      label: "2026.8.1-beta.3",
+      currentChannel: "stable",
+      notesAvailable: true,
     });
 
-    expect(model.title).toBe("Switch to latest beta?");
-    expect(model.applyCaption).toBe(
-      "Installs 2026.7.3-beta.1 now (~2 min, backup included).",
+    expect(model.isBreaking).toBe(true);
+    const joined = model.lines.join(" ");
+    expect(joined).toContain(
+      "Release notes for 2026.8.1-beta.3 are on its catalog row.",
     );
-    expect(model.browseLabel).toBe("Just browse the catalog");
-    expect(model.browseCaption).toContain("installs nothing until you press Apply");
+    // The safety net, in plain words.
+    expect(joined).toContain("Verified backup required and taken first");
+    expect(joined).toContain("120s health check");
+    expect(joined).toContain("auto-rollback stays armed for 24h");
+    expect(joined).toContain("a failing version gets blocklisted");
+    // The backend HARD-blocks cross-channel/prerelease applies on backup
+    // failure — say so.
+    expect(joined).toContain("If the backup fails, nothing is installed.");
+    // The what-happens-next step list.
+    expect(model.steps).toEqual(kApplyStepPreview);
+    expect(model.steps.join(" → ")).toContain("Backup → Download → Verify");
+  });
 
-    const devModel = buildChannelSwitchModel({ nextChannel: "dev" });
-    expect(devModel.applyCaption).toContain("20-35 minutes");
+  it("marks degraded release-notes availability in the breaking confirm", async () => {
+    const { buildApplyConfirmModel } = await loadUpgradeHelpers();
+
+    const model = buildApplyConfirmModel({
+      payload: { channel: "beta", version: "2026.8.1-beta.3" },
+      label: "2026.8.1-beta.3",
+      currentChannel: "stable",
+      notesAvailable: false,
+    });
+
+    expect(model.lines.join(" ")).toContain(
+      "Release notes are unavailable right now (source degraded).",
+    );
+  });
+
+  it("treats a prerelease as breaking even within the beta channel", async () => {
+    const { buildApplyConfirmModel } = await loadUpgradeHelpers();
+
+    const model = buildApplyConfirmModel({
+      payload: { channel: "beta", version: "2026.8.1-beta.4" },
+      label: "2026.8.1-beta.4",
+      currentChannel: "beta",
+    });
+
+    expect(model.isBreaking).toBe(true);
+    expect(model.steps).not.toBeNull();
+  });
+
+  it("keeps stable→stable applies free of the breaking framing", async () => {
+    const { buildApplyConfirmModel } = await loadUpgradeHelpers();
+
+    const model = buildApplyConfirmModel({
+      payload: { channel: "stable", version: "2026.7.2" },
+      label: "2026.7.2",
+      currentChannel: "stable",
+      notesAvailable: true,
+    });
+
+    expect(model.isBreaking).toBe(false);
+    expect(model.steps).toBeNull();
+    expect(model.lines.join(" ")).not.toContain("Safety net");
+  });
+
+  it("carries curated security flips into the confirm model (D5)", async () => {
+    const { buildApplyConfirmModel } = await loadUpgradeHelpers();
+
+    const flips = [
+      {
+        key: "gateway.terminal.enabled",
+        from: "off",
+        to: "on",
+        warning: "The dashboard gains a host terminal by default.",
+      },
+    ];
+    const model = buildApplyConfirmModel({
+      payload: { channel: "beta", version: "2026.8.1-beta.3" },
+      label: "2026.8.1-beta.3",
+      currentChannel: "stable",
+      securityFlips: flips,
+    });
+    expect(model.securityFlips).toEqual(flips);
+
+    // Defaults and malformed inputs collapse to an empty list.
+    expect(
+      buildApplyConfirmModel({
+        payload: { channel: "stable", version: "2026.7.2" },
+        label: "2026.7.2",
+      }).securityFlips,
+    ).toEqual([]);
+    expect(
+      buildApplyConfirmModel({
+        payload: { channel: "beta", version: "2026.8.1-beta.3" },
+        label: "2026.8.1-beta.3",
+        securityFlips: "not-an-array",
+      }).securityFlips,
+    ).toEqual([]);
+  });
+});
+
+describe("frontend/upgrade-helpers channel mismatch banner", () => {
+  const makeInfo = (overrides = {}) => ({
+    releaseChannel: "stable",
+    installedVersion: "2026.7.1-2",
+    pinVersion: "2026.7.1-2",
+    applied: null,
+    appliedId: null,
+    isPin: true,
+    ...overrides,
+  });
+
+  const makeCatalog = (overrides = {}) => ({
+    degraded: { github: false, npm: false },
+    stable: [
+      { version: "2026.7.1-2", current: true, isDistTagLatest: false },
+    ],
+    beta: [
+      {
+        version: "2026.8.1-beta.3",
+        prerelease: true,
+        notes: "notes body",
+        notesUnavailable: false,
+        applyPayload: { channel: "beta", version: "2026.8.1-beta.3" },
+        current: false,
+        blocklisted: null,
+      },
+    ],
+    dev: { commits: [] },
+    ...overrides,
+  });
+
+  it("is null when the configured channel matches the running build", async () => {
+    const { buildChannelMismatchModel } = await loadUpgradeHelpers();
+    expect(
+      buildChannelMismatchModel({
+        catalog: makeCatalog({ beta: [] }),
+        channelInfo: makeInfo(),
+        releaseChannel: "stable",
+      }),
+    ).toBeNull();
+    expect(buildChannelMismatchModel({ catalog: null, channelInfo: makeInfo() })).toBeNull();
+    expect(buildChannelMismatchModel({ catalog: makeCatalog(), channelInfo: null })).toBeNull();
+  });
+
+  it("offers the Update/notes/back actions when the channel has a newer target", async () => {
+    const { buildChannelMismatchModel } = await loadUpgradeHelpers();
+
+    const model = buildChannelMismatchModel({
+      catalog: makeCatalog(),
+      channelInfo: makeInfo({ releaseChannel: "beta" }),
+      releaseChannel: "beta",
+    });
+
+    expect(model.kind).toBe("update-available");
+    expect(model.message).toBe(
+      "Channel set to beta — still running stable 2026.7.1-2.",
+    );
+    expect(model.applyLabel).toBe("Update to 2026.8.1-beta.3");
+    expect(model.applyTarget.applyPayload).toEqual({
+      channel: "beta",
+      version: "2026.8.1-beta.3",
+    });
+    expect(model.notesRowId).toBe("2026.8.1-beta.3");
+    expect(model.backChannel).toBe("stable");
+    expect(model.backLabel).toBe("Back to stable");
+    expect(model.applyDisabled).toBe(false);
+  });
+
+  it("says 'No newer beta is published' when the beta dist-tag is older than stable", async () => {
+    const { buildChannelMismatchModel } = await loadUpgradeHelpers();
+
+    const model = buildChannelMismatchModel({
+      catalog: makeCatalog({
+        beta: [
+          {
+            version: "2026.6.9-beta.1",
+            applyPayload: { channel: "beta", version: "2026.6.9-beta.1" },
+            current: false,
+            blocklisted: null,
+          },
+        ],
+      }),
+      channelInfo: makeInfo({ releaseChannel: "beta" }),
+      releaseChannel: "beta",
+    });
+
+    expect(model.kind).toBe("no-newer");
+    expect(model.message).toBe(
+      "No newer beta is published — stable 2026.7.1-2 is current.",
+    );
+    expect(model.applyTarget).toBeNull();
+    expect(model.applyLabel).toBeNull();
+    expect(model.backChannel).toBe("stable");
+  });
+
+  it("distinguishes empty-because-degraded from genuinely current", async () => {
+    const { buildChannelMismatchModel } = await loadUpgradeHelpers();
+
+    const degraded = buildChannelMismatchModel({
+      catalog: makeCatalog({ beta: [], degraded: { github: false, npm: true } }),
+      channelInfo: makeInfo({ releaseChannel: "beta" }),
+      releaseChannel: "beta",
+    });
+    expect(degraded.kind).toBe("degraded-unknown");
+    expect(degraded.message).toContain("the catalog is degraded");
+    expect(degraded.applyTarget).toBeNull();
+
+    const genuinelyEmpty = buildChannelMismatchModel({
+      catalog: makeCatalog({ beta: [] }),
+      channelInfo: makeInfo({ releaseChannel: "beta" }),
+      releaseChannel: "beta",
+    });
+    expect(genuinelyEmpty.kind).toBe("no-newer");
+  });
+
+  it("gates the banner's Apply on npm degradation but not GitHub-only degradation", async () => {
+    const { buildChannelMismatchModel, kNpmDegradedApplyNote } =
+      await loadUpgradeHelpers();
+
+    const npmDown = buildChannelMismatchModel({
+      catalog: makeCatalog({ degraded: { github: false, npm: true } }),
+      channelInfo: makeInfo({ releaseChannel: "beta" }),
+      releaseChannel: "beta",
+    });
+    expect(npmDown.kind).toBe("update-available");
+    expect(npmDown.applyDisabled).toBe(true);
+    expect(npmDown.applyDisabledReason).toBe(kNpmDegradedApplyNote);
+
+    const githubDown = buildChannelMismatchModel({
+      catalog: makeCatalog({ degraded: { github: true, npm: false } }),
+      channelInfo: makeInfo({ releaseChannel: "beta" }),
+      releaseChannel: "beta",
+    });
+    expect(githubDown.applyDisabled).toBe(false);
+    expect(githubDown.applyDisabledReason).toBeNull();
+  });
+
+  it("skips the Release-notes action when the target row's notes are unavailable", async () => {
+    const { buildChannelMismatchModel } = await loadUpgradeHelpers();
+
+    const model = buildChannelMismatchModel({
+      catalog: makeCatalog({
+        beta: [
+          {
+            version: "2026.8.1-beta.3",
+            notes: null,
+            notesUnavailable: true,
+            applyPayload: { channel: "beta", version: "2026.8.1-beta.3" },
+            current: false,
+            blocklisted: null,
+          },
+        ],
+      }),
+      channelInfo: makeInfo({ releaseChannel: "beta" }),
+      releaseChannel: "beta",
+    });
+
+    expect(model.notesRowId).toBeNull();
+  });
+
+  it("announces a same-channel update without a back action", async () => {
+    const { buildChannelMismatchModel } = await loadUpgradeHelpers();
+
+    const model = buildChannelMismatchModel({
+      catalog: makeCatalog({
+        stable: [
+          { version: "2026.7.1-2", current: true, isDistTagLatest: false },
+          {
+            version: "2026.7.2",
+            isDistTagLatest: true,
+            notes: "n",
+            applyPayload: { channel: "stable", version: "2026.7.2" },
+            current: false,
+            blocklisted: null,
+          },
+        ],
+      }),
+      channelInfo: makeInfo(),
+      releaseChannel: "stable",
+    });
+
+    expect(model.kind).toBe("update-available");
+    expect(model.message).toBe(
+      "A newer stable is available — still running 2026.7.1-2.",
+    );
+    expect(model.backChannel).toBeNull();
+  });
+
+  it("flags a dev channel preference while a package build runs, and never for a running dev build", async () => {
+    const { buildChannelMismatchModel } = await loadUpgradeHelpers();
+
+    const mismatch = buildChannelMismatchModel({
+      catalog: makeCatalog(),
+      channelInfo: makeInfo({ releaseChannel: "dev" }),
+      releaseChannel: "dev",
+    });
+    expect(mismatch.kind).toBe("update-available");
+    expect(mismatch.message).toBe(
+      "Channel set to dev — still running stable 2026.7.1-2.",
+    );
+    expect(mismatch.applyTarget.applyPayload).toEqual({
+      channel: "dev",
+      devHead: true,
+    });
+
+    const runningDev = buildChannelMismatchModel({
+      catalog: makeCatalog(),
+      channelInfo: makeInfo({
+        releaseChannel: "dev",
+        applied: { channel: "dev", sha: "abc1234def5678" },
+        appliedId: "abc1234def5678",
+        isPin: false,
+      }),
+      releaseChannel: "dev",
+    });
+    expect(runningDev).toBeNull();
+  });
+});
+
+describe("frontend/upgrade-helpers channel-save error chip", () => {
+  it("names the attempted channel and where the selection reverted to", async () => {
+    const { buildChannelSaveErrorModel } = await loadUpgradeHelpers();
+
+    const model = buildChannelSaveErrorModel({
+      attempted: "beta",
+      activeChannel: "stable",
+      error: Object.assign(new Error("disk full"), {
+        code: "config_write_failed",
+        hint: "Check disk space on the data volume.",
+      }),
+    });
+
+    expect(model.message).toBe("Couldn't switch to beta — still on stable.");
+    expect(model.detail).toBe("disk full");
+    expect(model.hint).toBe("Check disk space on the data volume.");
+  });
+});
+
+describe("frontend/upgrade-helpers degraded catalog gating", () => {
+  it("gates installs on npm and notes on GitHub, independently", async () => {
+    const {
+      buildCatalogGatingModel,
+      kNpmDegradedApplyNote,
+      kGithubDegradedNotesNote,
+    } = await loadUpgradeHelpers();
+
+    const npmDown = buildCatalogGatingModel({
+      degraded: { github: false, npm: true },
+    });
+    expect(npmDown.applyDisabled).toBe(true);
+    expect(npmDown.applyDisabledReason).toBe(kNpmDegradedApplyNote);
+    expect(npmDown.notesNote).toBeNull();
+
+    const githubDown = buildCatalogGatingModel({
+      degraded: { github: true, npm: false },
+    });
+    expect(githubDown.applyDisabled).toBe(false);
+    expect(githubDown.notesNote).toBe(kGithubDegradedNotesNote);
+
+    expect(buildCatalogGatingModel(null).applyDisabled).toBe(false);
+  });
+
+  it("tells empty-because-degraded apart from genuinely current in the availability line", async () => {
+    const { buildAvailabilityLine, buildNoTargetNotice } =
+      await loadUpgradeHelpers();
+
+    const degradedEmpty = {
+      degraded: { github: false, npm: true },
+      stable: [],
+      beta: [],
+      dev: { commits: [] },
+    };
+    expect(
+      buildAvailabilityLine({ catalog: degradedEmpty, releaseChannel: "beta" }),
+    ).toBe("Catalog degraded — can't confirm the latest beta right now.");
+    expect(
+      buildNoTargetNotice({ catalog: degradedEmpty, releaseChannel: "beta" }),
+    ).toBe("Catalog degraded — can't confirm the latest beta right now.");
+
+    const healthyEmpty = {
+      degraded: { github: false, npm: false },
+      stable: [],
+      beta: [],
+      dev: { commits: [] },
+    };
+    expect(
+      buildAvailabilityLine({ catalog: healthyEmpty, releaseChannel: "beta" }),
+    ).toBe("No beta releases listed.");
+    expect(
+      buildNoTargetNotice({ catalog: healthyEmpty, releaseChannel: "beta" }),
+    ).toBe("You're already on the latest beta.");
+
+    const githubDegradedDev = {
+      degraded: { github: true, npm: false },
+      stable: [],
+      beta: [],
+      dev: { commits: [] },
+    };
+    expect(
+      buildAvailabilityLine({ catalog: githubDegradedDev, releaseChannel: "dev" }),
+    ).toBe("Catalog degraded — can't confirm the latest dev commit.");
+  });
+});
+
+describe("frontend/upgrade-helpers run ledger models", () => {
+  it("maps runs to compact timeline entries", async () => {
+    const { buildRunTimelineModel } = await loadUpgradeHelpers();
+
+    const entries = buildRunTimelineModel(
+      [
+        {
+          operationId: "0b1c2d3e-0000-4000-8000-000000000001",
+          target: { channel: "stable", version: "2026.7.2" },
+          state: "activated",
+          startedAt: kNow - 3_700_000,
+          finishedAt: kNow - 3_600_000,
+          hasLog: true,
+        },
+        {
+          operationId: "0b1c2d3e-0000-4000-8000-000000000002",
+          target: { channel: "dev", devHead: true },
+          state: "interrupted",
+          startedAt: kNow - 86_400_000,
+          finishedAt: null,
+          hasLog: false,
+        },
+        null,
+        { state: "running" }, // no operationId → dropped
+      ],
+      kNow,
+    );
+
+    expect(entries).toEqual([
+      {
+        operationId: "0b1c2d3e-0000-4000-8000-000000000001",
+        stateLabel: "activated",
+        tone: "success",
+        targetLabel: "2026.7.2",
+        when: "1 hour ago",
+        hasLog: true,
+      },
+      {
+        operationId: "0b1c2d3e-0000-4000-8000-000000000002",
+        stateLabel: "interrupted",
+        tone: "danger",
+        targetLabel: "latest dev (main HEAD)",
+        when: "1 day ago",
+        hasLog: false,
+      },
+    ]);
+  });
+
+  it("labels every ledger state", async () => {
+    const { buildRunTimelineModel } = await loadUpgradeHelpers();
+    const states = [
+      ["running", "running", "info"],
+      ["failed", "failed", "danger"],
+      ["noop", "no change", "neutral"],
+      ["restart_expected", "restarting", "info"],
+      ["activated", "activated", "success"],
+      ["activation_failed", "activation failed", "danger"],
+      ["interrupted", "interrupted", "danger"],
+    ];
+    for (const [state, label, tone] of states) {
+      const [entry] = buildRunTimelineModel(
+        [{ operationId: "0b1c2d3e-0000-4000-8000-00000000000a", state }],
+        kNow,
+      );
+      expect(entry.stateLabel).toBe(label);
+      expect(entry.tone).toBe(tone);
+    }
+  });
+
+  it("builds a failure model only for activation_failed and interrupted runs", async () => {
+    const { buildRunFailureModel } = await loadUpgradeHelpers();
+
+    const failed = buildRunFailureModel({
+      operationId: "0b1c2d3e-0000-4000-8000-000000000001",
+      state: "activation_failed",
+      target: { channel: "beta", version: "2026.8.1-beta.3" },
+      result: {
+        ok: false,
+        code: "activation_failed",
+        message: "health check failed after restart",
+        hint: "The previous version was restored.",
+      },
+      hasLog: true,
+    });
+    expect(failed.title).toBe(
+      "Update to 2026.8.1-beta.3 did not activate",
+    );
+    expect(failed.error).toEqual(
+      expect.objectContaining({
+        message: "health check failed after restart",
+        hint: "The previous version was restored.",
+      }),
+    );
+    expect(failed.hasLog).toBe(true);
+
+    const interrupted = buildRunFailureModel({
+      operationId: "0b1c2d3e-0000-4000-8000-000000000002",
+      state: "interrupted",
+      target: { channel: "stable", version: "2026.7.2" },
+      result: null,
+      hasLog: false,
+    });
+    expect(interrupted.title).toBe("Update to 2026.7.2 was interrupted");
+    expect(interrupted.error.message).toContain("interrupted");
+
+    expect(buildRunFailureModel({ state: "activated" })).toBeNull();
+    expect(buildRunFailureModel({ state: "failed" })).toBeNull();
+    expect(buildRunFailureModel(null)).toBeNull();
   });
 });
 

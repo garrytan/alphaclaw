@@ -80,6 +80,23 @@ const writeCheckoutFixture = (rootDir, { sha, bin = true } = {}) => {
 // Default runner: everything succeeds; `node <bin> --version` reports the
 // version of the package.json two levels above the bin, like the real CLI.
 const defaultRunnerImpl = async (opts) => {
+  // A real `backup create --output <dir> --verify` writes a file; the apply
+  // flow's hard-gate now checks an artifact actually appeared, so the fake
+  // must be faithful and write one.
+  if (opts.command === "openclaw" && opts.args?.[0] === "backup") {
+    try {
+      const outIdx = opts.args.indexOf("--output");
+      const outDir = outIdx >= 0 ? opts.args[outIdx + 1] : null;
+      if (outDir) {
+        fs.mkdirSync(outDir, { recursive: true });
+        fs.writeFileSync(
+          path.join(outDir, `backup-${Date.now()}.tar`),
+          "stub backup\n",
+        );
+      }
+    } catch {}
+    return { ok: true, code: 0, tail: "backup verified\n", timedOut: false };
+  }
   if (
     opts.command === "node" &&
     Array.isArray(opts.args) &&
@@ -472,9 +489,11 @@ describe("server/openclaw-channel-sync", () => {
       const boot = binHarness.sync.syncAtBoot();
       expect(boot.action).toBe("overlay_missing");
       const persisted = binHarness.store.readState().lastBoot;
+      // Entries are envelopes ({message, eventType, ...}) since the outbox
+      // landed; the flush path still accepts bare-string legacy entries.
       expect(
-        persisted.notifications.some((message) =>
-          message.includes("missing from disk"),
+        persisted.notifications.some((entry) =>
+          String(entry?.message ?? entry).includes("missing from disk"),
         ),
       ).toBe(true);
       expect(persisted.notifiedAt).toBeFalsy();
@@ -1561,6 +1580,34 @@ describe("server/openclaw-channel-sync", () => {
       expect(result.status).toBe(409);
       expect(result.body.code).toBe("backup_failed");
       expect(store.readState().applied).toBeNull();
+    });
+
+    it("fails a hard-gated apply with backup_failed when backup exits ok but writes no artifact", async () => {
+      const { sync, rootDir, store, installToTempDir } = createHarness({
+        pin: "1.0.0",
+        installedVersion: "1.0.0",
+        sentinelVersion: "1.0.0",
+        runnerImpl: async (opts, fallback) => {
+          if (opts.command === "openclaw" && opts.args?.[0] === "backup") {
+            // A defective/compromised build claiming success: exit 0 and a
+            // clean tail, but NO backup file appears in --output.
+            return { ok: true, code: 0, tail: "backup verified\n", timedOut: false };
+          }
+          return fallback(opts);
+        },
+      });
+      writeCheckoutFixture(rootDir, { sha: kDevSha });
+
+      const result = await sync.applyUpdate({ channel: "dev", devHead: true });
+
+      expect(result.status).toBe(409);
+      expect(result.body.code).toBe("backup_failed");
+      expect(result.body.message).toMatch(/produced no backup file/i);
+      expect(store.readState().applied).toBeNull();
+      // The apply stopped at the gate — nothing was downloaded or built.
+      expect(installToTempDir).not.toHaveBeenCalled();
+      // The phantom backup was never recorded as a usable artifact.
+      expect(store.readState().backups || []).toHaveLength(0);
     });
 
     it("aborts the apply when the pin rollback floor cannot be persisted", async () => {

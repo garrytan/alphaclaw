@@ -220,6 +220,40 @@ describe("server/webhook-middleware", () => {
     }
   });
 
+  it("strips identity, forwarded-evidence, and setup_token cookie from gateway-bound headers", async () => {
+    const { server, calls, gatewayUrl } = await createGatewaySpyServer();
+    const app = createHookApp({ gatewayUrl });
+
+    try {
+      const response = await request(app)
+        .post("/hooks/schwab-oauth")
+        .set("content-type", "application/json")
+        .set("x-alphaclaw-user", "spoofed-operator")
+        .set("x-openclaw-scopes", "operator.admin")
+        .set("x-forwarded-for", "203.0.113.7")
+        .set("forwarded", "for=203.0.113.7")
+        .set("cookie", "theme=dark; setup_token=abc.def")
+        .set("x-hook-custom", "kept")
+        .send(JSON.stringify({ hello: "world" }));
+      expect(response.status).toBe(200);
+      expect(calls).toHaveLength(1);
+
+      const forwarded = calls[0].headers;
+      // Identity headers must never reach a trusted-proxy gateway.
+      expect(forwarded["x-alphaclaw-user"]).toBeUndefined();
+      expect(forwarded["x-openclaw-scopes"]).toBeUndefined();
+      // Client-controlled forwarded evidence must be stripped too.
+      expect(forwarded["x-forwarded-for"]).toBeUndefined();
+      expect(forwarded.forwarded).toBeUndefined();
+      // The AlphaClaw session cookie is removed; other cookies survive.
+      expect(forwarded.cookie).toBe("theme=dark");
+      // Benign headers still pass through.
+      expect(forwarded["x-hook-custom"]).toBe("kept");
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+
   it("does not flag hooks that never used durable ingress", async () => {
     const { server, gatewayUrl } = await createGatewaySpyServer();
     const logged = [];
@@ -230,6 +264,24 @@ describe("server/webhook-middleware", () => {
     try {
       await request(app).post("/hooks/discord").send({ x: 1 });
       expect(logged[0].gatewayBody).not.toContain("[NOT DURABLY ACCEPTED]");
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+
+  it("drops the cookie header entirely when setup_token is the only cookie", async () => {
+    const { server, calls, gatewayUrl } = await createGatewaySpyServer();
+    const app = createHookApp({ gatewayUrl });
+
+    try {
+      const response = await request(app)
+        .post("/hooks/schwab-oauth")
+        .set("content-type", "application/json")
+        .set("cookie", "setup_token=abc.def")
+        .send(JSON.stringify({ hello: "world" }));
+      expect(response.status).toBe(200);
+      expect(calls).toHaveLength(1);
+      expect(calls[0].headers.cookie).toBeUndefined();
     } finally {
       await new Promise((resolve) => server.close(resolve));
     }

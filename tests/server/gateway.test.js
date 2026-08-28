@@ -161,6 +161,36 @@ describe("server/gateway restart behavior", () => {
     expect(gateway.gatewayEnv().OPENCLAW_NO_AUTO_UPDATE).toBe("1");
   });
 
+  it("defaults OPENCLAW_SUPERVISOR_MODE=external and honors the off|none escape hatch", () => {
+    const previousMode = process.env.OPENCLAW_SUPERVISOR_MODE;
+    const previousPolicy = process.env.OPENCLAW_SERVICE_REPAIR_POLICY;
+    try {
+      delete process.env.OPENCLAW_SUPERVISOR_MODE;
+      delete process.env.OPENCLAW_SERVICE_REPAIR_POLICY;
+      delete require.cache[modulePath];
+      const gateway = require(modulePath);
+
+      // Default ON: harmless no-op on stable, load-bearing on 2026.8.1+ (the
+      // gateway skips its internal supervisor and defers restarts to us).
+      expect(gateway.gatewayEnv().OPENCLAW_SUPERVISOR_MODE).toBe("external");
+      expect(gateway.gatewayEnv().OPENCLAW_SERVICE_REPAIR_POLICY).toBe("external");
+
+      // Escape hatch: off|none neutralizes BOTH variables and the sentinel
+      // itself never reaches the child env.
+      process.env.OPENCLAW_SUPERVISOR_MODE = "off";
+      expect(gateway.gatewayEnv().OPENCLAW_SUPERVISOR_MODE).toBeUndefined();
+      expect(gateway.gatewayEnv().OPENCLAW_SERVICE_REPAIR_POLICY).toBeUndefined();
+    } finally {
+      if (previousMode === undefined) delete process.env.OPENCLAW_SUPERVISOR_MODE;
+      else process.env.OPENCLAW_SUPERVISOR_MODE = previousMode;
+      if (previousPolicy === undefined) {
+        delete process.env.OPENCLAW_SERVICE_REPAIR_POLICY;
+      } else {
+        process.env.OPENCLAW_SERVICE_REPAIR_POLICY = previousPolicy;
+      }
+    }
+  });
+
   it("stopGatewayChild reaps a live managed gateway and is a safe no-op otherwise", async () => {
     // VPS restarts respawn detached + exit(0), skipping the SIGTERM handlers
     // that normally reap the managed child; server.js calls stopGatewayChild()
