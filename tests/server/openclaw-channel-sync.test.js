@@ -1,3 +1,4 @@
+const crypto = require("crypto");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
@@ -80,21 +81,49 @@ const writeCheckoutFixture = (rootDir, { sha, bin = true } = {}) => {
 // Default runner: everything succeeds; `node <bin> --version` reports the
 // version of the package.json two levels above the bin, like the real CLI.
 const defaultRunnerImpl = async (opts) => {
-  // A real `backup create --output <dir> --verify` writes a file; the apply
-  // flow's hard-gate now checks an artifact actually appeared, so the fake
-  // must be faithful and write one.
+  // Faithful model of the real CLI's --output contract (verified against the
+  // pinned openclaw 2026.7.1-2 source, dist/backup-create resolveOutputPath):
+  // an existing directory (or trailing separator) gets a timestamped archive
+  // INSIDE it; any other path IS the archive file, refused if it already
+  // exists; the parent is mkdir -p'd. The old stub only modeled the
+  // directory branch — which is exactly why issues #7/#9 were invisible.
   if (opts.command === "openclaw" && opts.args?.[0] === "backup") {
-    try {
-      const outIdx = opts.args.indexOf("--output");
-      const outDir = outIdx >= 0 ? opts.args[outIdx + 1] : null;
-      if (outDir) {
-        fs.mkdirSync(outDir, { recursive: true });
-        fs.writeFileSync(
-          path.join(outDir, `backup-${Date.now()}.tar`),
-          "stub backup\n",
-        );
+    const outIdx = opts.args.indexOf("--output");
+    const out = outIdx >= 0 ? opts.args[outIdx + 1] : null;
+    if (out) {
+      try {
+        const isDirTarget =
+          out.endsWith(path.sep) ||
+          (fs.existsSync(out) && fs.statSync(out).isDirectory());
+        const outFile = isDirTarget
+          ? path.join(out, `${crypto.randomUUID()}-openclaw-backup.tar.gz`)
+          : out;
+        if (fs.existsSync(outFile)) {
+          return {
+            ok: false,
+            code: 1,
+            tail: `Error: Refusing to overwrite existing backup archive: ${outFile}\n`,
+            timedOut: false,
+          };
+        }
+        fs.mkdirSync(path.dirname(outFile), { recursive: true });
+        fs.writeFileSync(outFile, "stub backup archive\n");
+        return {
+          ok: true,
+          code: 0,
+          tail: `Backup archive: ${outFile}\nCreated ${outFile}\nArchive verification: passed\n`,
+          timedOut: false,
+        };
+      } catch (error) {
+        // e.g. ENOTDIR when a legacy archive file blocks the parent path.
+        return {
+          ok: false,
+          code: 1,
+          tail: `Error: ${error.message}\n`,
+          timedOut: false,
+        };
       }
-    } catch {}
+    }
     return { ok: true, code: 0, tail: "backup verified\n", timedOut: false };
   }
   if (
@@ -931,6 +960,10 @@ describe("server/openclaw-channel-sync", () => {
       });
       expect(downgradeResult.status).toBe(409);
       expect(downgradeResult.body.code).toBe("backup_failed");
+      // The CLI's actual last output line reaches the user-facing message —
+      // the old catch-all claimed every failure "failed to verify" (#7).
+      expect(downgradeResult.body.message).toMatch(/boom/);
+      expect(downgradeResult.body.message).not.toMatch(/failed to verify/i);
       expect(downgrade.store.readState().applied).toBeNull();
       expect(downgrade.store.hasOverlay("1.1.0")).toBe(false);
       expect(downgrade.installToTempDir).not.toHaveBeenCalled();
@@ -953,6 +986,348 @@ describe("server/openclaw-channel-sync", () => {
           /backup failed/i.test(message),
         ),
       ).toBe(true);
+    });
+
+    // Issues #7/#9: the backup step passed a fixed path as --output without
+    // creating the directory — the CLI wrote the archive AS that path (#9's
+    // false "no backup artifact produced"), then refused to overwrite it on
+    // every later run (#7's permanent backup_failed).
+    describe("backup step (issues #7/#9)", () => {
+      const kArchiveClass = /openclaw-backup.*\.tar\.gz$/;
+      const backupsDirOf = (harness) =>
+        path.join(harness.rootDir, "backups", "openclaw");
+      const archiveNames = (dir) =>
+        fs.readdirSync(dir).filter((name) => kArchiveClass.test(name));
+      const hardGateTarget = { channel: "beta", version: "1.1.0-beta.1" };
+      const mkHarness = (options = {}) =>
+        createHarness({
+          pin: "1.0.0",
+          installedVersion: "1.0.0",
+          sentinelVersion: "1.0.0",
+          ...options,
+        });
+
+      it("#9: first hard-gated apply writes a unique archive and records it", async () => {
+        const harness = mkHarness();
+        const backupsDir = backupsDirOf(harness);
+
+        const result = await harness.sync.applyUpdate(hardGateTarget);
+
+        expect(result.status).toBe(202);
+        expect(result.body.restarting).toBe(true);
+        const dirStat = fs.statSync(backupsDir);
+        expect(dirStat.isDirectory()).toBe(true);
+        // Archives carry credentials — the directory is owner-only.
+        expect(dirStat.mode & 0o777).toBe(0o700);
+        const archives = archiveNames(backupsDir);
+        expect(archives).toHaveLength(1);
+        const recorded = harness.store.readState().backups[0];
+        expect(recorded).toEqual(
+          expect.objectContaining({ dir: backupsDir, verified: true }),
+        );
+        expect(recorded.file).toBe(path.join(backupsDir, archives[0]));
+        expect(fs.statSync(recorded.file).size).toBeGreaterThan(0);
+      });
+
+      it("#7: a legacy archive FILE at the backups path is migrated in and the update succeeds", async () => {
+        const harness = mkHarness();
+        const backupsDir = backupsDirOf(harness);
+        fs.mkdirSync(path.dirname(backupsDir), { recursive: true });
+        fs.writeFileSync(backupsDir, "legacy 7GiB archive (stand-in)\n");
+
+        const result = await harness.sync.applyUpdate(hardGateTarget);
+
+        expect(result.status).toBe(202);
+        expect(fs.statSync(backupsDir).isDirectory()).toBe(true);
+        const names = archiveNames(backupsDir);
+        const legacy = names.find((name) =>
+          name.startsWith("openclaw-backup-legacy-"),
+        );
+        expect(legacy).toBeTruthy();
+        expect(names).toHaveLength(2); // migrated legacy + this run's archive
+        // The archive's contents survived the move byte-for-byte.
+        expect(
+          fs.readFileSync(path.join(backupsDir, legacy), "utf8"),
+        ).toContain("legacy 7GiB");
+      });
+
+      it("keeps the legacy archive and fails honestly when migration cannot run", async () => {
+        const failingFs = {
+          ...fs,
+          promises: fs.promises,
+          renameSync: (src, dest) => {
+            if (String(src).endsWith(path.join("backups", "openclaw"))) {
+              throw new Error("EACCES: permission denied");
+            }
+            return fs.renameSync(src, dest);
+          },
+        };
+        const harness = mkHarness({ extraSyncOptions: { fsModule: failingFs } });
+        const backupsDir = backupsDirOf(harness);
+        fs.mkdirSync(path.dirname(backupsDir), { recursive: true });
+        fs.writeFileSync(backupsDir, "legacy archive\n");
+
+        const result = await harness.sync.applyUpdate(hardGateTarget);
+
+        expect(result.status).toBe(409);
+        expect(result.body.code).toBe("backup_failed");
+        // The CLI's own error (parent path blocked by the file) surfaces
+        // verbatim instead of a misleading "failed to verify".
+        expect(result.body.message).toMatch(/EEXIST|ENOTDIR|not a directory/i);
+        expect(result.body.message).not.toMatch(/failed to verify/i);
+        // A failed migration never deletes the user's only backup.
+        expect(fs.statSync(backupsDir).isFile()).toBe(true);
+        expect(fs.readFileSync(backupsDir, "utf8")).toContain("legacy archive");
+      });
+
+      it("recovers an interrupted legacy migration on the next run", async () => {
+        const harness = mkHarness();
+        const backupsDir = backupsDirOf(harness);
+        fs.mkdirSync(backupsDir, { recursive: true });
+        const stranded = `${backupsDir}.migrating-999-abcdef`;
+        fs.writeFileSync(stranded, "stranded legacy archive\n");
+
+        const result = await harness.sync.applyUpdate(hardGateTarget);
+
+        expect(result.status).toBe(202);
+        expect(fs.existsSync(stranded)).toBe(false);
+        const legacy = archiveNames(backupsDir).find((name) =>
+          name.startsWith("openclaw-backup-legacy-"),
+        );
+        expect(legacy).toBeTruthy();
+        expect(
+          fs.readFileSync(path.join(backupsDir, legacy), "utf8"),
+        ).toContain("stranded");
+      });
+
+      it("refuses to write backups through a symlink", async () => {
+        const harness = mkHarness();
+        const backupsDir = backupsDirOf(harness);
+        const realTarget = mkTemp("alphaclaw-symlink-target-");
+        fs.mkdirSync(path.dirname(backupsDir), { recursive: true });
+        fs.symlinkSync(realTarget, backupsDir);
+
+        const result = await harness.sync.applyUpdate(hardGateTarget);
+
+        expect(result.status).toBe(409);
+        expect(result.body.code).toBe("backup_failed");
+        expect(result.body.message).toMatch(/symlink/i);
+        // Nothing was written through the redirect, and no backup CLI ran.
+        expect(fs.readdirSync(realTarget)).toHaveLength(0);
+        const backupCalls = harness.runner.runStreamed.mock.calls.filter(
+          (call) => call?.[0]?.args?.[0] === "backup",
+        );
+        expect(backupCalls).toHaveLength(0);
+      });
+
+      it("quarantines a published-but-unverified archive on verify failure (hard gate)", async () => {
+        const publishThenFailVerify = async (opts, fallback) => {
+          if (opts.command === "openclaw" && opts.args?.[0] === "backup") {
+            // The real CLI publishes the archive at the final path BEFORE
+            // --verify runs, so a verify failure leaves the file behind.
+            const out = opts.args[opts.args.indexOf("--output") + 1];
+            fs.mkdirSync(path.dirname(out), { recursive: true });
+            fs.writeFileSync(out, "published archive, checksum bad\n");
+            return {
+              ok: false,
+              code: 1,
+              tail: "Archive verification failed: checksum mismatch\n",
+              timedOut: false,
+            };
+          }
+          return fallback(opts);
+        };
+        const harness = mkHarness({ runnerImpl: publishThenFailVerify });
+        const backupsDir = backupsDirOf(harness);
+        fs.mkdirSync(backupsDir, { recursive: true, mode: 0o700 });
+        fs.writeFileSync(
+          path.join(backupsDir, "openclaw-backup-old.tar.gz"),
+          "good old backup\n",
+        );
+
+        const result = await harness.sync.applyUpdate(hardGateTarget);
+
+        expect(result.status).toBe(409);
+        expect(result.body.message).toMatch(/failed to verify/i);
+        const names = fs.readdirSync(backupsDir);
+        // The unproven archive can't pose as the newest restore candidate —
+        // and the pre-existing verified backup survives untouched.
+        expect(names).toContain("openclaw-backup-old.tar.gz");
+        expect(names.some((name) => name.endsWith(".unverified"))).toBe(true);
+        expect(names.filter((name) => kArchiveClass.test(name))).toEqual([
+          "openclaw-backup-old.tar.gz",
+        ]);
+      });
+
+      it("quarantines on the soft gate too and continues with a warning", async () => {
+        const publishThenFailVerify = async (opts, fallback) => {
+          if (opts.command === "openclaw" && opts.args?.[0] === "backup") {
+            const out = opts.args[opts.args.indexOf("--output") + 1];
+            fs.mkdirSync(path.dirname(out), { recursive: true });
+            fs.writeFileSync(out, "published archive, checksum bad\n");
+            return {
+              ok: false,
+              code: 1,
+              tail: "Archive verification failed: checksum mismatch\n",
+              timedOut: false,
+            };
+          }
+          return fallback(opts);
+        };
+        const harness = mkHarness({ runnerImpl: publishThenFailVerify });
+        const backupsDir = backupsDirOf(harness);
+
+        // Non-prerelease upgrade → soft gate: warn and continue.
+        const result = await harness.sync.applyUpdate({
+          channel: "beta",
+          version: "1.1.0",
+        });
+        await flushAsync();
+
+        expect(result.status).toBe(202);
+        expect(
+          notifyMessages(harness.notify).some((message) =>
+            /failed to verify/i.test(message),
+          ),
+        ).toBe(true);
+        expect(
+          fs.readdirSync(backupsDir).some((name) => name.endsWith(".unverified")),
+        ).toBe(true);
+      });
+
+      it("removes an empty partial archive after a failed backup and spares older backups", async () => {
+        const emptyThenFail = async (opts, fallback) => {
+          if (opts.command === "openclaw" && opts.args?.[0] === "backup") {
+            const out = opts.args[opts.args.indexOf("--output") + 1];
+            fs.mkdirSync(path.dirname(out), { recursive: true });
+            fs.writeFileSync(out, "");
+            return { ok: false, code: 1, tail: "boom", timedOut: false };
+          }
+          return fallback(opts);
+        };
+        const harness = mkHarness({ runnerImpl: emptyThenFail });
+        const backupsDir = backupsDirOf(harness);
+        fs.mkdirSync(backupsDir, { recursive: true, mode: 0o700 });
+        fs.writeFileSync(
+          path.join(backupsDir, "openclaw-backup-old.tar.gz"),
+          "good old backup\n",
+        );
+
+        const result = await harness.sync.applyUpdate(hardGateTarget);
+
+        expect(result.status).toBe(409);
+        // Own empty stub removed; nothing else touched (no global prune on
+        // failure — it could evict the last verified backup).
+        expect(fs.readdirSync(backupsDir)).toEqual([
+          "openclaw-backup-old.tar.gz",
+        ]);
+      });
+
+      it("maps timeout, disk-full, and refusal to honest messages", async () => {
+        const withTail = (response) => async (opts, fallback) => {
+          if (opts.command === "openclaw" && opts.args?.[0] === "backup") {
+            return response;
+          }
+          return fallback(opts);
+        };
+
+        const timedOut = mkHarness({
+          runnerImpl: withTail({ ok: false, code: null, tail: "", timedOut: true }),
+        });
+        const timeoutResult = await timedOut.sync.applyUpdate(hardGateTarget);
+        expect(timeoutResult.status).toBe(409);
+        expect(timeoutResult.body.message).toMatch(/timed out after 10 minutes/i);
+
+        const diskFull = mkHarness({
+          runnerImpl: withTail({
+            ok: false,
+            code: 1,
+            tail: "Error: ENOSPC: no space left on device, write\n",
+            timedOut: false,
+          }),
+        });
+        const diskResult = await diskFull.sync.applyUpdate(hardGateTarget);
+        expect(diskResult.status).toBe(409);
+        expect(diskResult.body.message).toMatch(/disk space/i);
+        expect(diskResult.body.hint).toMatch(/free up space/i);
+
+        const refused = mkHarness({
+          runnerImpl: withTail({
+            ok: false,
+            code: 1,
+            tail: "Error: Refusing to overwrite existing backup archive: /data/backups/openclaw\n",
+            timedOut: false,
+          }),
+        });
+        const refusedResult = await refused.sync.applyUpdate(hardGateTarget);
+        expect(refusedResult.status).toBe(409);
+        expect(refusedResult.body.message).toMatch(/already exists at/i);
+        expect(refusedResult.body.message).not.toMatch(/failed to verify/i);
+        expect(refusedResult.body.hint).toMatch(/remove or relocate/i);
+      });
+
+      it("releases the apply latch after a backup failure so a retry succeeds", async () => {
+        let failFirst = true;
+        const failOnce = async (opts, fallback) => {
+          if (
+            opts.command === "openclaw" &&
+            opts.args?.[0] === "backup" &&
+            failFirst
+          ) {
+            failFirst = false;
+            return { ok: false, code: 1, tail: "boom", timedOut: false };
+          }
+          return fallback(opts);
+        };
+        const harness = mkHarness({ runnerImpl: failOnce });
+        const backupsDir = backupsDirOf(harness);
+
+        const first = await harness.sync.applyUpdate(hardGateTarget);
+        expect(first.status).toBe(409);
+        expect(harness.sync.isApplyInProgress()).toBe(false);
+
+        const second = await harness.sync.applyUpdate(hardGateTarget);
+        expect(second.status).toBe(202);
+        expect(archiveNames(backupsDir)).toHaveLength(1);
+      });
+
+      it("prunes only archive-class files: keep-3, drop debris, spare operator files", async () => {
+        const harness = mkHarness();
+        const backupsDir = backupsDirOf(harness);
+        fs.mkdirSync(backupsDir, { recursive: true, mode: 0o700 });
+        const seed = (name, mtimeSec) => {
+          const full = path.join(backupsDir, name);
+          fs.writeFileSync(full, `seed ${name}\n`);
+          fs.utimesSync(full, mtimeSec, mtimeSec);
+        };
+        seed("openclaw-backup-a.tar.gz", 1000);
+        seed("openclaw-backup-b.tar.gz", 2000);
+        seed("openclaw-backup-c.tar.gz", 3000);
+        seed("openclaw-backup-d.tar.gz", 4000);
+        seed("openclaw-backup-x.tar.gz.unverified", 1500);
+        seed("openclaw-backup-y.tar.gz.unverified", 2500);
+        seed("openclaw-backup-z.tar.gz.old.tmp", 500);
+        seed("unrelated.txt", 100);
+        seed("openclaw-backup-notes.txt", 100);
+
+        const result = await harness.sync.applyUpdate(hardGateTarget);
+        expect(result.status).toBe(202);
+
+        const names = fs.readdirSync(backupsDir).sort();
+        const archives = names.filter((name) => kArchiveClass.test(name));
+        // keep-3 by mtime: this run's fresh archive + the two newest seeds.
+        expect(archives).toHaveLength(3);
+        expect(archives).toContain("openclaw-backup-c.tar.gz");
+        expect(archives).toContain("openclaw-backup-d.tar.gz");
+        // Debris: temps always go; only the newest quarantined archive stays.
+        expect(names.filter((name) => name.endsWith(".tmp"))).toHaveLength(0);
+        expect(names.filter((name) => name.endsWith(".unverified"))).toEqual([
+          "openclaw-backup-y.tar.gz.unverified",
+        ]);
+        // Operator files are never retention's business.
+        expect(names).toContain("unrelated.txt");
+        expect(names).toContain("openclaw-backup-notes.txt");
+      });
     });
 
     it("rejects and cleans up artifacts that fail dist-shape verification", async () => {
@@ -1485,6 +1860,11 @@ describe("server/openclaw-channel-sync", () => {
       expect(result.status).toBe(409);
       expect(result.body.code).toBe("backup_failed");
       expect(result.body.message).toMatch(/produced no backup file/i);
+      // The message names the exact path alphaclaw probed (#9 asked for
+      // "artifact missing at expected path <X>", not "subsystem untrustworthy").
+      expect(result.body.message).toMatch(/openclaw-backup-.*\.tar\.gz/);
+      expect(result.body.expectedFile).toMatch(/openclaw-backup-.*\.tar\.gz$/);
+      expect(result.body.hint).not.toMatch(/not trustworthy/i);
       expect(store.readState().applied).toBeNull();
       // The apply stopped at the gate — nothing was downloaded or built.
       expect(installToTempDir).not.toHaveBeenCalled();
