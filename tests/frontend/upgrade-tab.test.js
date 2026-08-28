@@ -996,6 +996,8 @@ describe("frontend/upgrade-tab view", () => {
           hint: "Check the raw log for the first TypeScript error.",
           code: "build_failed",
           docsUrl: null,
+          // The server flags dev-build failures as repair-applicable.
+          repairApplicable: true,
         },
       },
     });
@@ -1003,6 +1005,59 @@ describe("frontend/upgrade-tab view", () => {
     const text = treeText(tree);
     expect(text).toContain("build failed: tsc exited 2");
     expect(text).toContain("Check the raw log for the first TypeScript error.");
+    expect(text).toContain("Repair (run");
+  });
+
+  it("hides the repair caption when the failure is not repair-applicable", () => {
+    const tree = renderView({
+      channelInfo: makeChannelInfo(),
+      catalog: makeCatalog(),
+      operation: {
+        label: "2026.7.2",
+        startedAt: kNow - 60_000,
+        steps: [{ name: "backup", status: "failed", at: kNow - 5_000 }],
+        output: "",
+        lastOutputAt: null,
+        phase: "failed",
+        error: {
+          message: "backup failed: disk full",
+          hint: null,
+          code: "backup_failed",
+          docsUrl: null,
+        },
+      },
+    });
+
+    const text = treeText(tree);
+    expect(text).toContain("backup failed: disk full");
+    expect(text).not.toContain("Repair (run");
+  });
+
+  it("freezes the elapsed counter at finishedAt once the operation fails (#9)", () => {
+    const tree = renderView({
+      channelInfo: makeChannelInfo(),
+      catalog: makeCatalog(),
+      operation: {
+        label: "latest dev (main HEAD)",
+        startedAt: kNow - 100_000,
+        finishedAt: kNow - 63_000,
+        steps: [{ name: "build", status: "failed", at: kNow - 63_000 }],
+        output: "",
+        lastOutputAt: null,
+        phase: "failed",
+        error: {
+          message: "build failed: tsc exited 2",
+          hint: null,
+          code: "build_failed",
+          docsUrl: null,
+          repairApplicable: true,
+        },
+      },
+    });
+
+    const text = treeText(tree);
+    expect(text).toContain("37s");
+    expect(text).not.toContain("1m 40s");
   });
 });
 
@@ -1193,12 +1248,50 @@ describe("frontend/upgrade-tab hook", () => {
 
     captured.onMessage({
       event: "error",
-      data: { error: "build failed: tsc exited 2" },
+      data: {
+        error: "build failed: tsc exited 2",
+        finishedAt: kNow - 1_000,
+        repairApplicable: true,
+      },
     });
 
     state = renderHook({});
     expect(state.operation.phase).toBe("failed");
     expect(state.operation.error.message).toBe("build failed: tsc exited 2");
+    // The server stamps failure time; the elapsed counter freezes on it (#9).
+    expect(typeof state.operation.finishedAt).toBe("number");
+    expect(state.operation.finishedAt).toBe(kNow - 1_000);
+    expect(state.operation.error.repairApplicable).toBe(true);
+  });
+
+  it("stamps a local finishedAt when the error event omits one", async () => {
+    let captured = null;
+    api.subscribeOpenclawApplyEvents.mockImplementation((options) => {
+      captured = options;
+      return () => {};
+    });
+    api.applyOpenclawVersion.mockResolvedValue({
+      ok: true,
+      operationId: "op-4b",
+      events: "/api/operations/op-4b/events",
+    });
+    let state = await hydrate();
+    state.onRequestApply({
+      payload: { channel: "stable", version: "2026.7.2" },
+      label: "2026.7.2",
+    });
+    state = renderHook({});
+    await state.onConfirmApply();
+
+    captured.onMessage({
+      event: "error",
+      data: { error: "backup failed: disk full" },
+    });
+
+    state = renderHook({});
+    expect(state.operation.phase).toBe("failed");
+    expect(typeof state.operation.finishedAt).toBe("number");
+    expect(state.operation.error.repairApplicable).toBe(false);
   });
 
   it("clears the progress view on a noop apply", async () => {
