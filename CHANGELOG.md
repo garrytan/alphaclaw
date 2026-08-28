@@ -7,6 +7,82 @@ Versions follow this repository's `package.json` release counter.
 
 ## [Unreleased]
 
+## [0.9.36] - 2026-08-28
+
+Fix the chronic admin-UI downtime: the dashboard stays responsive while the
+gateway restarts, updates install, or the workspace grows. Verified on a
+15,000-file workspace: `/health` p99 dropped from 150–430ms to under 2ms,
+and proxied API writes no longer hang.
+
+### Fixed
+- **Proxied JSON writes no longer hang.** The admin server consumed request
+  bodies before proxying, so every JSON POST/PUT to gateway APIs stalled
+  until timeout. Proxied paths now stream bodies through untouched, with a
+  50 MB cap — oversized or chunked-encoding uploads get a fast 413 instead
+  of becoming an out-of-memory risk.
+- **Status polling no longer freezes the dashboard.** Workspace drift
+  fingerprinting (a full re-hash of every workspace file, previously re-run
+  every few seconds) moved to a background worker thread with incremental,
+  demand-driven refresh and bounded manifests (50k files / 10 MB per file);
+  channel, cron, and doctor status are served from short-lived caches; the
+  doctor run history no longer re-parses multi-megabyte manifests per
+  status request, and status responses stop embedding full manifests.
+- **Crashes no longer kill the dashboard silently.** Unhandled rejections
+  are logged and survived (a storm brake restarts cleanly if a subsystem
+  fails continuously), uncaught exceptions exit through a bounded graceful
+  shutdown, and a port conflict at startup retries loudly instead of dying.
+- **Gateway controls no longer freeze everything.** "Restart gateway",
+  channel saves, and watchdog recovery ran blocking CLI commands (up to
+  120s) on the request path. They are now async and serialized through a
+  single-flight lifecycle lock: double-clicking Restart coalesces, a save
+  during a restart queues, and shutdown cancels an in-flight restart
+  (including its 120s ready-wait) instead of waiting it out.
+- **Channel tokens can no longer leak into logs** when a channel add fails:
+  CLI failures are scrubbed of secret-bearing argument values before
+  logging, and unexpected 5xx responses return a generic message instead of
+  internal error details.
+- **The watchdog repair no longer parks itself.** `doctor --fix` runs
+  through a streaming runner with a 10-minute ceiling (previously killed at
+  15s), crash restarts back off exponentially, and a repair skipped during
+  an in-flight relaunch retries on a bounded cadence instead of dropping.
+- Log writing is buffered with size-capped rotation (no more per-line
+  synchronous writes on the hot path); the watchdog log endpoint clamps
+  unbounded tail reads to 4 MB.
+- SQLite contention: WAL mode with correct pragma ordering (no boot crash
+  when a draining predecessor holds a lock), bounded busy timeouts, and a
+  stale-result fallback for usage stats during gateway write bursts.
+
+### Added
+- **"AlphaClaw is updating" page during restarts and updates.** The port
+  answers immediately at boot — browsers get a human auto-refreshing page,
+  platforms get 200 `{status:"updating"}` health checks so they don't
+  restart-loop a container mid-update, and a boot stuck past 15 minutes
+  flips to 503 so the platform recovers it. The placeholder runs as its own
+  small process (so it keeps answering even while the boot installs block),
+  and retries its bind while a previous instance finishes draining.
+- **Three-state `/health`** (healthy / degraded with `gatewayDownSince` /
+  updating — always 200) and an opt-in strict `/health/ready` (503 while
+  the gateway is down; configure it only after onboarding).
+- **Event-loop and rejection telemetry** in `/api/watchdog/resources` (loop
+  lag percentiles, RSS, unhandled-rejection counts) with a sustained-lag
+  warning in the logs, plus a responsiveness harness under `scripts/dev/`.
+- README deployment sizing guidance (≥2 GB / 1 CPU recommended; per-process
+  heap budgets — the gateway no longer inherits the admin server's memory
+  flags).
+
+### Changed
+- Proxy engine swapped from the unmaintained `http-proxy` to `http-proxy-3`
+  (pinned 1.20.10), with a 30s fail-fast timeout for hung gateways that
+  disarms once a response starts streaming.
+- `/v1` JSON request bodies are capped at 20 MB (was 50 MB) to remove an
+  out-of-memory vector on small instances.
+- SSE status stream: doctor status recomputes on a 30s cadence shared
+  across tabs instead of per-tab, and clients that stop reading are
+  disconnected instead of buffering without bound.
+- Graceful shutdown drains in order (watchdog → HTTP → gateway → gmail →
+  terminal → service disposal → log flush) within a 10s deadline; SIGTERM,
+  self-update restarts, and crash exits all route through the same path.
+
 ## [0.9.35] - 2026-08-27
 
 Adopt the OpenClaw 2026.8.1 beta line and rebuild the upgrade experience:
