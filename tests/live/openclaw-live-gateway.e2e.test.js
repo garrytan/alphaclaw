@@ -283,4 +283,95 @@ describeLive("live: OpenClaw beta gateway contracts", () => {
     },
     kTestTimeoutMs,
   );
+
+  it(
+    "accepts AlphaClaw's trusted-proxy team auth config (no EX_CONFIG)",
+    async () => {
+      // Phase 4 writes this exact subtree — the strict beta root config must
+      // accept every key (mode/trustedProxy/userHeader/allowLoopback/
+      // deviceAutoApprove/allowUsers/identityScopes and the scope names), or
+      // enabling team access would put the gateway into exit-78 churn.
+      const {
+        buildTrustedProxyAuth,
+      } = require("../../lib/server/team/gateway-config");
+      const auth = buildTrustedProxyAuth({
+        members: [
+          { email: "owner@example.com", role: "admin", disabled: false },
+          { email: "member@example.com", role: "member", disabled: false },
+        ],
+      });
+      const port = 18992;
+      const configPath = path.join(openclawDir, "openclaw.json");
+      fs.writeFileSync(
+        configPath,
+        JSON.stringify(
+          {
+            gateway: {
+              mode: "local",
+              bind: "loopback",
+              port,
+              // trusted-proxy refuses to start without a proxy IP; AlphaClaw
+              // guarantees this both in ensureGatewayProxyConfig and in
+              // applyTeamGatewayConfig.
+              trustedProxies: ["127.0.0.1"],
+              auth,
+            },
+          },
+          null,
+          2,
+        ),
+      );
+      const child = spawn(
+        process.execPath,
+        [overlayBin, "gateway", "run", "--port", String(port)],
+        {
+          env: { ...gatewayEnv(), OPENCLAW_GATEWAY_PORT: String(port) },
+          stdio: "pipe",
+        },
+      );
+      let output = "";
+      let exited = null;
+      child.stdout.on("data", (c) => (output += c.toString()));
+      child.stderr.on("data", (c) => (output += c.toString()));
+      child.on("exit", (code) => (exited = code));
+      try {
+        await waitFor(
+          async () => {
+            if (exited !== null) return true;
+            try {
+              const r = await fetch(`http://127.0.0.1:${port}/healthz`);
+              return r.status > 0;
+            } catch {
+              return false;
+            }
+          },
+          150000,
+          `trusted-proxy gateway start (last output: ${output.slice(-200)})`,
+        );
+        // EX_CONFIG (78) means the beta rejected a key we write — the exact
+        // failure mode this test exists to catch.
+        expect(exited).not.toBe(78);
+        expect(exited).toBeNull();
+        const healthz = await fetch(`http://127.0.0.1:${port}/healthz`);
+        expect(healthz.ok).toBe(true);
+      } finally {
+        child.kill("SIGTERM");
+        await new Promise((r) => setTimeout(r, 500));
+        if (!child.killed) child.kill("SIGKILL");
+      }
+    },
+    kTestTimeoutMs,
+  );
+
+  it(
+    "lists clickclack in the channels-add enum (Phase 5 capability probes)",
+    () => {
+      const r = runCli(["channels", "add", "--help"]);
+      const flat = `${r.stdout}\n${r.stderr}`.replace(/\s+/g, "");
+      // The capability probes key on this enum: clickclack ships built in;
+      // buzz only appears once its external plugin is installed.
+      expect(flat).toMatch(/[(|]clickclack[|)]/);
+    },
+    kTestTimeoutMs,
+  );
 });

@@ -17,7 +17,7 @@ const kMembers = [
 ];
 
 describe("server/team/gateway-config (4.4)", () => {
-  it("builds trusted-proxy auth from the ACTIVE roster only", () => {
+  it("builds trusted-proxy auth from the ACTIVE roster only (beta schema shape)", () => {
     const auth = buildTrustedProxyAuth({ members: kMembers });
     expect(auth.mode).toBe("trusted-proxy");
     expect(auth.trustedProxy.userHeader).toBe(kIdentityHeaderName);
@@ -27,13 +27,19 @@ describe("server/team/gateway-config (4.4)", () => {
       "owner@example.com",
       "member@example.com",
     ]);
-    expect(auth.trustedProxy.identityScopes["owner@example.com"]).toContain(
+    // identityScopes lives at gateway.auth level — the beta's strict
+    // trustedProxy object rejects it (verified live).
+    expect(auth.trustedProxy.identityScopes).toBeUndefined();
+    expect(auth.identityScopes["owner@example.com"]).toEqual([
+      "operator.read",
+      "operator.write",
+      "operator.approvals",
+      "operator.admin",
+    ]);
+    expect(auth.identityScopes["member@example.com"]).not.toContain(
       "operator.admin",
     );
-    expect(
-      auth.trustedProxy.identityScopes["member@example.com"],
-    ).not.toContain("operator.admin");
-    expect(auth.trustedProxy.identityScopes["gone@example.com"]).toBeUndefined();
+    expect(auth.identityScopes["gone@example.com"]).toBeUndefined();
     // Upstream CRITICAL finding: device auto-approve never grants admin.
     expect(auth.trustedProxy.deviceAutoApprove.scopes).not.toContain(
       "operator.admin",
@@ -44,25 +50,27 @@ describe("server/team/gateway-config (4.4)", () => {
   it("intersects scope names against the advertised set (CEO finding 8)", () => {
     const auth = buildTrustedProxyAuth({
       members: kMembers,
-      advertisedScopes: ["read", "operator.admin"],
+      advertisedScopes: ["operator.read", "operator.admin"],
     });
-    expect(auth.trustedProxy.identityScopes["owner@example.com"]).toEqual([
-      "read",
+    expect(auth.identityScopes["owner@example.com"]).toEqual([
+      "operator.read",
       "operator.admin",
     ]);
-    expect(auth.trustedProxy.identityScopes["member@example.com"]).toEqual([
-      "read",
+    expect(auth.identityScopes["member@example.com"]).toEqual([
+      "operator.read",
     ]);
-    expect(auth.trustedProxy.deviceAutoApprove.scopes).toEqual(["read"]);
+    expect(auth.trustedProxy.deviceAutoApprove.scopes).toEqual([
+      "operator.read",
+    ]);
     // Unknown advertised set → defaults written unchanged.
     const unknown = buildTrustedProxyAuth({
       members: kMembers,
       advertisedScopes: null,
     });
-    expect(unknown.trustedProxy.identityScopes["member@example.com"]).toEqual([
-      "read",
-      "write",
-      "approvals",
+    expect(unknown.identityScopes["member@example.com"]).toEqual([
+      "operator.read",
+      "operator.write",
+      "operator.approvals",
     ]);
   });
 
