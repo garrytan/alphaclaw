@@ -49,6 +49,7 @@ vi.mock("../../lib/public/js/lib/api.js", () => ({
   fetchStatus: vi.fn(),
   markOpenclawGood: vi.fn(),
   rollbackOpenclaw: vi.fn(),
+  runOpenclawRepair: vi.fn(),
   subscribeOpenclawApplyEvents: vi.fn(() => () => {}),
   updateOpenclawReleaseChannel: vi.fn(),
 }));
@@ -1318,5 +1319,286 @@ describe("frontend/upgrade-tab hook", () => {
       expect(text).toContain("Security defaults that change on this channel");
       expect(text).toContain("gateway.terminal.enabled");
     });
+  });
+});
+
+describe("frontend/upgrade-tab repair (2.3)", () => {
+  const flushAsync = async () => {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  };
+
+  const renderHook = (props = {}) => {
+    harness.beginRender();
+    return useUpgradeTab(props);
+  };
+
+  const hydrate = async (props = {}) => {
+    let state = renderHook(props);
+    harness.effects[0]();
+    await flushAsync();
+    state = renderHook(props);
+    return state;
+  };
+
+  const makeFailedOperation = (overrides = {}) => ({
+    operationId: "op-9",
+    resumed: false,
+    target: { channel: "beta", version: "2026.8.1-beta.3" },
+    label: "2026.8.1-beta.3",
+    startedAt: kNow - 60_000,
+    steps: [{ name: "activate", status: "failed", at: kNow - 5_000 }],
+    output: "raw log",
+    lastOutputAt: null,
+    phase: "failed",
+    error: {
+      message: "activation failed",
+      hint: null,
+      code: "activate_failed",
+      docsUrl: null,
+    },
+    ...overrides,
+  });
+
+  beforeEach(() => {
+    harness.reset();
+    api.fetchOpenclawChannel.mockResolvedValue(makeChannelInfo());
+    api.fetchOpenclawCatalog.mockResolvedValue({
+      ok: true,
+      catalog: makeCatalog(),
+      channel: { releaseChannel: "stable" },
+    });
+    api.subscribeOpenclawApplyEvents.mockImplementation(() => () => {});
+  });
+
+  afterEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("offers Run repair on a failed operation when the dev checkout is active (D3)", () => {
+    const onRunRepair = vi.fn();
+    const tree = renderView({
+      channelInfo: makeChannelInfo({ releaseChannel: "dev" }),
+      catalog: makeCatalog(),
+      repairAvailable: true,
+      onRunRepair,
+      operation: makeFailedOperation({
+        target: { channel: "dev", devHead: true },
+        label: "latest dev (main HEAD)",
+      }),
+    });
+    const button = findActionButtonByLabel(tree, "Run repair");
+    expect(button).toBeTruthy();
+    button.props.onClick();
+    expect(onRunRepair).toHaveBeenCalledTimes(1);
+    // D3: one primary recovery action per failure state.
+    expect(findActionButtonByLabel(tree, "Re-stage version")).toBeFalsy();
+    expect(treeText(tree)).toContain("Repair:");
+  });
+
+  it("offers Re-stage version instead on package channels (D3/E-C7)", () => {
+    const onRetryApply = vi.fn();
+    const tree = renderView({
+      channelInfo: makeChannelInfo(),
+      catalog: makeCatalog(),
+      repairAvailable: false,
+      onRetryApply,
+      operation: makeFailedOperation(),
+    });
+    const button = findActionButtonByLabel(tree, "Re-stage version");
+    expect(button).toBeTruthy();
+    button.props.onClick();
+    expect(onRetryApply).toHaveBeenCalledTimes(1);
+    expect(findActionButtonByLabel(tree, "Run repair")).toBeFalsy();
+    expect(treeText(tree)).toContain("Re-staging downloads and installs");
+  });
+
+  it("a failed operation card can be dismissed", () => {
+    const onDismissOperation = vi.fn();
+    const tree = renderView({
+      channelInfo: makeChannelInfo(),
+      catalog: makeCatalog(),
+      onDismissOperation,
+      operation: makeFailedOperation(),
+    });
+    const button = findButtonByText(tree, "Dismiss");
+    expect(button).toBeTruthy();
+    button.props.onclick();
+    expect(onDismissOperation).toHaveBeenCalledTimes(1);
+  });
+
+  it("labels a repair operation as a repair, not an update", () => {
+    const running = renderView({
+      channelInfo: makeChannelInfo({ releaseChannel: "dev" }),
+      catalog: makeCatalog(),
+      operation: makeFailedOperation({
+        target: { repair: true },
+        label: "repair",
+        phase: "running",
+        error: null,
+      }),
+    });
+    expect(treeText(running)).toContain("Repairing the dev build");
+
+    const failed = renderView({
+      channelInfo: makeChannelInfo({ releaseChannel: "dev" }),
+      catalog: makeCatalog(),
+      repairAvailable: true,
+      operation: makeFailedOperation({ target: { repair: true }, label: "repair" }),
+    });
+    expect(treeText(failed)).toContain("Repair failed");
+  });
+
+  it("onRunRepair streams the repair and clears the card on done (no restart poll)", async () => {
+    let captured = null;
+    api.subscribeOpenclawApplyEvents.mockImplementation((options) => {
+      captured = options;
+      return () => {};
+    });
+    api.runOpenclawRepair.mockResolvedValue({
+      ok: true,
+      operationId: "op-r1",
+      events: "/api/operations/op-r1/events",
+    });
+    let state = await hydrate();
+
+    await state.onRunRepair();
+    state = renderHook({});
+    expect(state.operation).toEqual(
+      expect.objectContaining({ operationId: "op-r1", phase: "running" }),
+    );
+    expect(state.operation.target).toEqual({ repair: true });
+
+    captured.onMessage({ event: "done", data: {} });
+    state = renderHook({});
+    expect(state.operation).toBeNull();
+    expect(showToast).toHaveBeenCalledWith("Repair completed", "success");
+  });
+
+  it("surfaces the repair_not_applicable envelope as an apply error (E-C7)", async () => {
+    api.runOpenclawRepair.mockRejectedValue(
+      Object.assign(new Error("Repair only applies to dev builds from source."), {
+        code: "repair_not_applicable",
+        hint: "For stable or beta, re-apply the version from the catalog instead.",
+      }),
+    );
+    let state = await hydrate();
+
+    await state.onRunRepair();
+    state = renderHook({});
+    expect(state.operation).toBeNull();
+    expect(state.applyError).toEqual(
+      expect.objectContaining({
+        message: "Repair only applies to dev builds from source.",
+        hint: "For stable or beta, re-apply the version from the catalog instead.",
+      }),
+    );
+  });
+
+  it("marks the repair operation failed on a streamed error event", async () => {
+    let captured = null;
+    api.subscribeOpenclawApplyEvents.mockImplementation((options) => {
+      captured = options;
+      return () => {};
+    });
+    api.runOpenclawRepair.mockResolvedValue({
+      ok: true,
+      operationId: "op-r2",
+      events: "/api/operations/op-r2/events",
+    });
+    let state = await hydrate();
+    await state.onRunRepair();
+
+    captured.onMessage({
+      event: "error",
+      data: { error: "OpenClaw repair did not complete.", code: "repair_failed" },
+    });
+    state = renderHook({});
+    expect(state.operation.phase).toBe("failed");
+    expect(state.operation.error.message).toBe("OpenClaw repair did not complete.");
+  });
+
+  it("onRetryApply re-applies the failed operation's own target", async () => {
+    let captured = null;
+    api.subscribeOpenclawApplyEvents.mockImplementation((options) => {
+      captured = options;
+      return () => {};
+    });
+    api.applyOpenclawVersion.mockResolvedValue({
+      ok: true,
+      operationId: "op-a1",
+      events: "/api/operations/op-a1/events",
+    });
+    let state = await hydrate();
+    state.onRequestApply({
+      payload: { channel: "beta", version: "2026.7.3-beta.1" },
+      label: "2026.7.3-beta.1",
+    });
+    state = renderHook({});
+    await state.onConfirmApply();
+    captured.onMessage({
+      event: "error",
+      data: { error: "activation failed" },
+    });
+    state = renderHook({});
+    expect(state.operation.phase).toBe("failed");
+
+    api.applyOpenclawVersion.mockClear();
+    await state.onRetryApply();
+    expect(api.applyOpenclawVersion).toHaveBeenCalledWith({
+      channel: "beta",
+      version: "2026.7.3-beta.1",
+    });
+  });
+
+  it("onDismissOperation clears only a FAILED operation", async () => {
+    let captured = null;
+    api.subscribeOpenclawApplyEvents.mockImplementation((options) => {
+      captured = options;
+      return () => {};
+    });
+    api.applyOpenclawVersion.mockResolvedValue({
+      ok: true,
+      operationId: "op-a2",
+      events: "/api/operations/op-a2/events",
+    });
+    let state = await hydrate();
+    state.onRequestApply({
+      payload: { channel: "stable", version: "2026.7.2" },
+      label: "2026.7.2",
+    });
+    state = renderHook({});
+    await state.onConfirmApply();
+
+    // Running: dismiss is a no-op.
+    state = renderHook({});
+    state.onDismissOperation();
+    state = renderHook({});
+    expect(state.operation).not.toBeNull();
+
+    captured.onMessage({ event: "error", data: { error: "boom" } });
+    state = renderHook({});
+    state.onDismissOperation();
+    state = renderHook({});
+    expect(state.operation).toBeNull();
+  });
+
+  it("repairAvailable follows the dev channel/applied state", async () => {
+    api.fetchOpenclawChannel.mockResolvedValue(
+      makeChannelInfo({ releaseChannel: "dev" }),
+    );
+    let state = await hydrate();
+    expect(state.repairAvailable).toBe(true);
+
+    harness.reset();
+    api.fetchOpenclawChannel.mockResolvedValue(makeChannelInfo());
+    state = await hydrate();
+    expect(state.repairAvailable).toBe(false);
+
+    harness.reset();
+    api.fetchOpenclawChannel.mockResolvedValue(
+      makeChannelInfo({ applied: { channel: "dev", sha: "abc1234" } }),
+    );
+    state = await hydrate();
+    expect(state.repairAvailable).toBe(true);
   });
 });

@@ -1409,6 +1409,124 @@ describe("server/openclaw-channel-sync", () => {
     });
   });
 
+  describe("runUpdateRepair (2.3)", () => {
+    const makeOperationEvents = () => ({
+      publish: vi.fn(),
+      complete: vi.fn(),
+      fail: vi.fn(),
+    });
+
+    it("refuses repair on package channels (overlay ownership, E-C7)", async () => {
+      const { sync, runner } = createHarness({
+        pin: "1.0.0",
+        installedVersion: "1.0.0",
+        sentinelVersion: "1.0.0",
+      });
+
+      const result = await sync.runUpdateRepair({ operationId: "op-r" });
+
+      expect(result.status).toBe(409);
+      expect(result.body.code).toBe("repair_not_applicable");
+      expect(result.body.hint).toContain("re-apply the version from the catalog");
+      expect(runner.runStreamed).not.toHaveBeenCalled();
+    });
+
+    it("runs `openclaw update repair` on the dev checkout and completes the stream", async () => {
+      const operationEvents = makeOperationEvents();
+      const { sync, runner } = createHarness({
+        channel: "dev",
+        pin: "1.0.0",
+        installedVersion: "1.0.0",
+        sentinelVersion: "1.0.0",
+        extraSyncOptions: { operationEvents },
+      });
+
+      const result = await sync.runUpdateRepair({ operationId: "op-r" });
+
+      expect(result.status).toBe(200);
+      expect(result.body.ok).toBe(true);
+      const repairCall = runner.runStreamed.mock.calls.find(
+        ([opts]) => opts.command === "openclaw" && opts.args?.[0] === "update",
+      );
+      expect(repairCall).toBeTruthy();
+      expect(repairCall[0].args).toEqual(["update", "repair"]);
+      expect(operationEvents.complete).toHaveBeenCalledWith(
+        "op-r",
+        expect.objectContaining({ ok: true }),
+      );
+      expect(operationEvents.fail).not.toHaveBeenCalled();
+      expect(sync.isApplyInProgress()).toBe(false);
+    });
+
+    it("surfaces a repair refusal verbatim and FAILS the stream (not complete)", async () => {
+      const operationEvents = makeOperationEvents();
+      const { sync } = createHarness({
+        channel: "dev",
+        pin: "1.0.0",
+        installedVersion: "1.0.0",
+        sentinelVersion: "1.0.0",
+        runnerImpl: async (opts, fallback) => {
+          if (opts.command === "openclaw" && opts.args?.[0] === "update") {
+            return {
+              ok: false,
+              code: 1,
+              tail: "refused: supervisor mode is external",
+              timedOut: false,
+            };
+          }
+          return fallback(opts);
+        },
+        extraSyncOptions: { operationEvents },
+      });
+
+      const result = await sync.runUpdateRepair({ operationId: "op-r" });
+
+      expect(result.status).toBe(500);
+      expect(result.body.code).toBe("repair_failed");
+      expect(result.body.hint).toContain(
+        "refused: supervisor mode is external",
+      );
+      // Subscribers key success/failure off the SSE event name — a failed
+      // repair must emit "error", never "done".
+      expect(operationEvents.complete).not.toHaveBeenCalled();
+      expect(operationEvents.fail).toHaveBeenCalledTimes(1);
+      const [failedId, failedError] = operationEvents.fail.mock.calls[0];
+      expect(failedId).toBe("op-r");
+      expect(failedError.code).toBe("repair_failed");
+      expect(sync.isApplyInProgress()).toBe(false);
+    });
+
+    it("409s while another update operation holds the latch", async () => {
+      let releaseRepair;
+      const gate = new Promise((resolve) => {
+        releaseRepair = resolve;
+      });
+      const { sync } = createHarness({
+        channel: "dev",
+        pin: "1.0.0",
+        installedVersion: "1.0.0",
+        sentinelVersion: "1.0.0",
+        runnerImpl: async (opts, fallback) => {
+          if (opts.command === "openclaw" && opts.args?.[0] === "update") {
+            await gate;
+            return { ok: true, code: 0, tail: "", timedOut: false };
+          }
+          return fallback(opts);
+        },
+      });
+
+      const first = sync.runUpdateRepair({ operationId: "op-a" });
+      // The latch is taken synchronously before the runner is awaited.
+      const second = await sync.runUpdateRepair({ operationId: "op-b" });
+      expect(second.status).toBe(409);
+      expect(second.body.code).toBe("operation_in_progress");
+
+      releaseRepair();
+      const firstResult = await first;
+      expect(firstResult.status).toBe(200);
+    });
+  });
+
   describe("codex-round hardening", () => {
     it("re-applies a blocklisted sha via dev-head only after Clear (post-build recheck)", async () => {
       const { sync, store, rootDir } = createHarness({
