@@ -1,3 +1,4 @@
+const crypto = require("crypto");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
@@ -388,12 +389,19 @@ describe("server/doctor-service", () => {
         startedAt: "2000-01-01T00:00:00.000Z",
         completedAt: "2000-01-01T00:00:00.000Z",
       }));
+    const listDoctorRunSummaries = ({ limit } = {}) =>
+      doctorDb.listDoctorRunSummaries({ limit }).map((run) => ({
+        ...run,
+        startedAt: "2000-01-01T00:00:00.000Z",
+        completedAt: "2000-01-01T00:00:00.000Z",
+      }));
 
     const { createDoctorService } = loadDoctorService();
     const buildDoctorService = () =>
       createDoctorService({
         clawCmd: vi.fn(),
         listDoctorRuns,
+        listDoctorRunSummaries,
         listDoctorCards: doctorDb.listDoctorCards,
         getInitialWorkspaceBaseline: doctorDb.getInitialWorkspaceBaseline,
         setInitialWorkspaceBaseline: doctorDb.setInitialWorkspaceBaseline,
@@ -624,6 +632,16 @@ describe("server/doctor-service", () => {
             rawResult: {},
           },
         ],
+        listDoctorRunSummaries: () => [
+          {
+            id: 1,
+            status: "completed",
+            workspaceFingerprint: fingerprint,
+            completedAt,
+            startedAt: completedAt,
+          },
+        ],
+        getDoctorRunWorkspaceManifest: () => null,
         listDoctorCards: () => [],
         createDoctorRun: () => 2,
         completeDoctorRun: ({ summary }) => {
@@ -984,5 +1002,247 @@ describe("server/doctor-service", () => {
         }),
       ]),
     );
+  });
+
+  it("returns a slim latestRun without workspaceManifest or rawResult", () => {
+    const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-slim-status-"));
+    const dbRoot = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-slim-status-db-"));
+    fs.writeFileSync(path.join(workspaceRoot, "AGENTS.md"), "# Guidance\n", "utf8");
+
+    const doctorDb = loadManagedDoctorDb();
+    doctorDb.initDoctorDb({ rootDir: dbRoot });
+
+    const { computeWorkspaceSnapshot } = require("../../lib/server/doctor/workspace-fingerprint");
+    const { createDoctorService } = loadDoctorService();
+    const doctorService = createDoctorService({
+      clawCmd: vi.fn(),
+      listDoctorRuns: doctorDb.listDoctorRuns,
+      listDoctorCards: doctorDb.listDoctorCards,
+      getInitialWorkspaceBaseline: doctorDb.getInitialWorkspaceBaseline,
+      setInitialWorkspaceBaseline: doctorDb.setInitialWorkspaceBaseline,
+      createDoctorRun: doctorDb.createDoctorRun,
+      completeDoctorRun: doctorDb.completeDoctorRun,
+      insertDoctorCards: doctorDb.insertDoctorCards,
+      getDoctorRun: doctorDb.getDoctorRun,
+      getDoctorCardsByRunId: doctorDb.getDoctorCardsByRunId,
+      getDoctorCard: doctorDb.getDoctorCard,
+      updateDoctorCardStatus: doctorDb.updateDoctorCardStatus,
+      computeSnapshotAsync: async () => computeWorkspaceSnapshot(workspaceRoot),
+      workspaceRoot,
+      managedRoot: workspaceRoot,
+    });
+
+    const imported = doctorService.importDoctorResult({
+      rawOutput: JSON.stringify({
+        summary: "One finding",
+        cards: [
+          {
+            priority: "P1",
+            category: "workspace",
+            title: "Slim status check",
+            summary: "Slim status check",
+            recommendation: "Keep status payloads small",
+            targetPaths: ["AGENTS.md"],
+            fixPrompt: "Fix safely.",
+            status: "open",
+          },
+        ],
+      }),
+    });
+
+    const status = doctorService.buildStatus();
+
+    expect(status.latestRun).toEqual({
+      id: imported.runId,
+      status: "completed",
+      startedAt: expect.any(String),
+      completedAt: expect.any(String),
+      summary: "One finding",
+      counts: {
+        cardCount: 1,
+        priorityCounts: { P0: 0, P1: 1, P2: 0 },
+        statusCounts: { open: 1, working: 0, dismissed: 0, fixed: 0 },
+      },
+    });
+    expect(status.latestRun).not.toHaveProperty("workspaceManifest");
+    expect(status.latestRun).not.toHaveProperty("rawResult");
+  });
+
+  it("serves the stale snapshot and recomputes it in the background", async () => {
+    vi.useFakeTimers();
+    try {
+      const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-bg-refresh-"));
+      const dbRoot = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-bg-refresh-db-"));
+      fs.writeFileSync(path.join(workspaceRoot, "AGENTS.md"), "# Guidance\n", "utf8");
+
+      const doctorDb = loadManagedDoctorDb();
+      doctorDb.initDoctorDb({ rootDir: dbRoot });
+
+      const { computeWorkspaceSnapshot } = require("../../lib/server/doctor/workspace-fingerprint");
+      let resolveRefresh;
+      const computeSnapshotAsync = vi.fn(
+        () =>
+          new Promise((resolve) => {
+            resolveRefresh = resolve;
+          }),
+      );
+      const { createDoctorService } = loadDoctorService();
+      const doctorService = createDoctorService({
+        clawCmd: vi.fn(),
+        listDoctorRuns: doctorDb.listDoctorRuns,
+        listDoctorCards: doctorDb.listDoctorCards,
+        getInitialWorkspaceBaseline: doctorDb.getInitialWorkspaceBaseline,
+        setInitialWorkspaceBaseline: doctorDb.setInitialWorkspaceBaseline,
+        createDoctorRun: doctorDb.createDoctorRun,
+        completeDoctorRun: doctorDb.completeDoctorRun,
+        insertDoctorCards: doctorDb.insertDoctorCards,
+        getDoctorRun: doctorDb.getDoctorRun,
+        getDoctorCardsByRunId: doctorDb.getDoctorCardsByRunId,
+        getDoctorCard: doctorDb.getDoctorCard,
+        updateDoctorCardStatus: doctorDb.updateDoctorCardStatus,
+        computeSnapshotAsync,
+        workspaceRoot,
+        managedRoot: workspaceRoot,
+      });
+      const flushMicrotasks = async () => {
+        for (let i = 0; i < 10; i += 1) await Promise.resolve();
+      };
+
+      // Cold boot computes the first snapshot synchronously.
+      const initialStatus = doctorService.buildStatus();
+      expect(initialStatus.changeSummary.changedFilesCount).toBe(0);
+      expect(computeSnapshotAsync).not.toHaveBeenCalled();
+
+      fs.writeFileSync(path.join(workspaceRoot, "README.md"), "# Added later\n", "utf8");
+      vi.advanceTimersByTime(61_000);
+
+      // Stale memo: the stale snapshot is served immediately and one
+      // background recompute is kicked.
+      const staleStatus = doctorService.buildStatus();
+      expect(staleStatus.changeSummary.changedFilesCount).toBe(0);
+      expect(computeSnapshotAsync).toHaveBeenCalledTimes(1);
+      expect(computeSnapshotAsync).toHaveBeenCalledWith(workspaceRoot, {
+        previousManifest: expect.any(Object),
+      });
+
+      // Refreshes coalesce while one is already in flight.
+      vi.advanceTimersByTime(6_000);
+      doctorService.buildStatus();
+      expect(computeSnapshotAsync).toHaveBeenCalledTimes(1);
+
+      resolveRefresh(computeWorkspaceSnapshot(workspaceRoot));
+      await flushMicrotasks();
+      vi.advanceTimersByTime(6_000);
+
+      const freshStatus = doctorService.buildStatus();
+      expect(freshStatus.changeSummary.changedFilesCount).toBe(1);
+      expect(freshStatus.changeSummary.changedPaths).toEqual(["README.md"]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps serving the stale snapshot and logs once when the worker crashes", async () => {
+    vi.useFakeTimers();
+    try {
+      const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-worker-crash-"));
+      const dbRoot = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-worker-crash-db-"));
+      fs.writeFileSync(path.join(workspaceRoot, "AGENTS.md"), "# Guidance\n", "utf8");
+
+      const doctorDb = loadManagedDoctorDb();
+      doctorDb.initDoctorDb({ rootDir: dbRoot });
+
+      const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      const computeSnapshotAsync = vi.fn(async () => {
+        throw new Error("worker exploded");
+      });
+      const { createDoctorService } = loadDoctorService();
+      const doctorService = createDoctorService({
+        clawCmd: vi.fn(),
+        listDoctorRuns: doctorDb.listDoctorRuns,
+        listDoctorCards: doctorDb.listDoctorCards,
+        getInitialWorkspaceBaseline: doctorDb.getInitialWorkspaceBaseline,
+        setInitialWorkspaceBaseline: doctorDb.setInitialWorkspaceBaseline,
+        createDoctorRun: doctorDb.createDoctorRun,
+        completeDoctorRun: doctorDb.completeDoctorRun,
+        insertDoctorCards: doctorDb.insertDoctorCards,
+        getDoctorRun: doctorDb.getDoctorRun,
+        getDoctorCardsByRunId: doctorDb.getDoctorCardsByRunId,
+        getDoctorCard: doctorDb.getDoctorCard,
+        updateDoctorCardStatus: doctorDb.updateDoctorCardStatus,
+        computeSnapshotAsync,
+        workspaceRoot,
+        managedRoot: workspaceRoot,
+      });
+      const flushMicrotasks = async () => {
+        for (let i = 0; i < 10; i += 1) await Promise.resolve();
+      };
+
+      doctorService.buildStatus();
+      fs.writeFileSync(path.join(workspaceRoot, "README.md"), "# Added later\n", "utf8");
+
+      vi.advanceTimersByTime(61_000);
+      const staleStatus = doctorService.buildStatus();
+      await flushMicrotasks();
+
+      vi.advanceTimersByTime(6_000);
+      const retryStatus = doctorService.buildStatus();
+      await flushMicrotasks();
+
+      // Refresh failed both times: the stale manifest keeps serving status.
+      expect(computeSnapshotAsync).toHaveBeenCalledTimes(2);
+      expect(staleStatus.changeSummary.changedFilesCount).toBe(0);
+      expect(retryStatus.changeSummary.changedFilesCount).toBe(0);
+      const refreshFailureLogs = consoleErrorSpy.mock.calls.filter((call) =>
+        /workspace snapshot refresh failed/.test(String(call[0])),
+      );
+      expect(refreshFailureLogs).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("computes snapshots in the fingerprint worker with incremental re-hashing", async () => {
+    const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-worker-smoke-"));
+    fs.writeFileSync(path.join(workspaceRoot, "a.md"), "alpha\n", "utf8");
+    fs.writeFileSync(path.join(workspaceRoot, "b.md"), "beta\n", "utf8");
+    const {
+      computeWorkspaceSnapshot,
+      createWorkspaceSnapshotWorkerClient,
+    } = require("../../lib/server/doctor/workspace-fingerprint");
+
+    const baseline = computeWorkspaceSnapshot(workspaceRoot);
+    const updatedContent = "beta with more content\n";
+    fs.writeFileSync(path.join(workspaceRoot, "b.md"), updatedContent, "utf8");
+    // Sentinel hash: it can only survive into the next manifest if the
+    // unchanged file was NOT re-hashed (mtime+size short-circuit).
+    const tamperedManifest = {
+      ...baseline.manifest,
+      "a.md": { ...baseline.manifest["a.md"], hash: "sentinel-not-rehashed" },
+    };
+
+    const client = createWorkspaceSnapshotWorkerClient();
+    try {
+      const snapshot = await client.computeWorkspaceSnapshotAsync(workspaceRoot, {
+        previousManifest: tamperedManifest,
+      });
+      expect(snapshot.manifest["a.md"].hash).toBe("sentinel-not-rehashed");
+      expect(snapshot.manifest["b.md"].hash).toBe(
+        crypto.createHash("sha256").update(updatedContent).digest("hex"),
+      );
+      expect(snapshot.manifest["a.md"].mtimeMs).toEqual(expect.any(Number));
+      expect(snapshot.manifest["a.md"].size).toBe(baseline.manifest["a.md"].size);
+      expect(snapshot.fingerprint).not.toBe(baseline.fingerprint);
+
+      // Persisted manifests without mtime metadata are always re-hashed.
+      const legacySnapshot = await client.computeWorkspaceSnapshotAsync(workspaceRoot, {
+        previousManifest: {
+          "a.md": { hash: "sentinel-not-rehashed", size: baseline.manifest["a.md"].size },
+        },
+      });
+      expect(legacySnapshot.manifest["a.md"].hash).toBe(baseline.manifest["a.md"].hash);
+    } finally {
+      await client.terminate();
+    }
   });
 });
