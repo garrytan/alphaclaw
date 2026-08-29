@@ -1,15 +1,30 @@
 const path = require("path");
 
-const { createWatchdogNotifier } = require("../../lib/server/watchdog-notify");
+const {
+  createWatchdogNotifier,
+  resolveTelegramBotToken,
+} = require("../../lib/server/watchdog-notify");
 
-const buildCredentialsFsMock = (entries = {}) => {
-  const credentialsDir = "/tmp/openclaw/credentials";
+// `entries` = pairing files under <openclawDir>/credentials; `openclawJson`
+// (object or raw string, for unparseable-config cases) is served as
+// <openclawDir>/openclaw.json for the allowFrom/token fallback reads.
+const buildCredentialsFsMock = (entries = {}, { openclawJson } = {}) => {
+  const openclawDir = "/tmp/openclaw";
+  const credentialsDir = path.join(openclawDir, "credentials");
   const files = new Map(
     Object.entries(entries).map(([fileName, allowFrom]) => [
       path.join(credentialsDir, fileName),
       JSON.stringify({ allowFrom }),
     ]),
   );
+  if (openclawJson !== undefined) {
+    files.set(
+      path.join(openclawDir, "openclaw.json"),
+      typeof openclawJson === "string"
+        ? openclawJson
+        : JSON.stringify(openclawJson),
+    );
+  }
 
   return {
     existsSync: vi.fn((targetPath) => {
@@ -18,7 +33,9 @@ const buildCredentialsFsMock = (entries = {}) => {
     }),
     readdirSync: vi.fn((targetPath) => {
       if (String(targetPath || "") !== credentialsDir) return [];
-      return Array.from(files.keys()).map((filePath) => path.basename(filePath));
+      return Array.from(files.keys())
+        .filter((filePath) => path.dirname(filePath) === credentialsDir)
+        .map((filePath) => path.basename(filePath));
     }),
     readFileSync: vi.fn((targetPath) => {
       const normalizedTargetPath = String(targetPath || "");
@@ -67,6 +84,7 @@ describe("server/watchdog-notify", () => {
     "DISCORD_BOT_TOKEN",
     "SLACK_BOT_TOKEN",
     "WHATSAPP_OWNER_NUMBER",
+    "ALPHACLAW_NOTIFY_WEBHOOK_URL",
   ];
   const kOriginalEnv = new Map(
     kManagedEnvKeys.map((key) => [key, process.env[key]]),
@@ -74,6 +92,7 @@ describe("server/watchdog-notify", () => {
 
   beforeEach(() => {
     consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    delete process.env.ALPHACLAW_NOTIFY_WEBHOOK_URL;
   });
 
   afterEach(() => {
@@ -477,6 +496,7 @@ describe("server/watchdog-notify", () => {
         discord: { sent: 0, failed: 0, skipped: true, targets: 0 },
         slack: { sent: 0, failed: 0, skipped: true, targets: 0 },
         whatsapp: { sent: 0, failed: 0, skipped: true, targets: 0 },
+        webhook: { sent: 0, failed: 0, skipped: true, targets: 0 },
       },
     });
   });
@@ -509,6 +529,256 @@ describe("server/watchdog-notify", () => {
       expect.stringContaining('--target "+15550001111"'),
       expect.any(Object),
     );
+  });
+
+  // Deliverability fallbacks (#21 Bug 7): the box whose only channel config
+  // lives in openclaw.json must still receive "your upgrade failed".
+  describe("telegram allowFrom + token fallback", () => {
+    it("falls back to openclaw.json channels.telegram.allowFrom when no pairing files exist, numeric chat IDs only", async () => {
+      process.env.TELEGRAM_BOT_TOKEN = "tg-token";
+      const fsMock = buildCredentialsFsMock(
+        {},
+        {
+          openclawJson: {
+            channels: {
+              telegram: {
+                allowFrom: ["123456", -100987, "@someuser", "*", "nick", "123456"],
+              },
+            },
+          },
+        },
+      );
+      const telegramApi = { sendMessage: vi.fn(async () => ({ ok: true })) };
+      const notifier = createWatchdogNotifier({
+        telegramApi,
+        fsImpl: fsMock,
+        openclawDir: "/tmp/openclaw",
+      });
+
+      const result = await notifier.notify("Upgrade failed");
+
+      // Usernames and "*" are authorization identities, not chat_ids: skipped.
+      expect(result.channels.telegram).toEqual({
+        sent: 2,
+        failed: 0,
+        skipped: false,
+        targets: 2,
+      });
+      expect(telegramApi.sendMessage.mock.calls.map((call) => call[0])).toEqual(
+        ["123456", "-100987"],
+      );
+    });
+
+    it("prefers pairing files over the allowFrom fallback when both exist", async () => {
+      process.env.TELEGRAM_BOT_TOKEN = "tg-token";
+      const fsMock = buildCredentialsFsMock(
+        { "telegram-default-allowFrom.json": ["111"] },
+        {
+          openclawJson: {
+            channels: { telegram: { allowFrom: ["999999"] } },
+          },
+        },
+      );
+      const telegramApi = { sendMessage: vi.fn(async () => ({ ok: true })) };
+      const notifier = createWatchdogNotifier({
+        telegramApi,
+        fsImpl: fsMock,
+        openclawDir: "/tmp/openclaw",
+      });
+
+      await notifier.notify("hello");
+
+      expect(telegramApi.sendMessage).toHaveBeenCalledTimes(1);
+      expect(telegramApi.sendMessage.mock.calls[0][0]).toBe("111");
+    });
+
+    it("resolves the bot token from openclaw.json when the env token is missing", async () => {
+      const fsMock = buildCredentialsFsMock(
+        { "telegram-default-allowFrom.json": ["111"] },
+        {
+          openclawJson: {
+            channels: { telegram: { botToken: "123:from-config" } },
+          },
+        },
+      );
+
+      // Shared resolver (what lib/server.js wires into both createTelegramApi
+      // and the notifier): env wins, then the literal config token; the
+      // "${TELEGRAM_BOT_TOKEN}" placeholder written by config imports is an
+      // env reference, not a token.
+      expect(
+        resolveTelegramBotToken({
+          env: {},
+          fsImpl: fsMock,
+          openclawDir: "/tmp/openclaw",
+        }),
+      ).toBe("123:from-config");
+      expect(
+        resolveTelegramBotToken({
+          env: { TELEGRAM_BOT_TOKEN: "env-token" },
+          fsImpl: fsMock,
+          openclawDir: "/tmp/openclaw",
+        }),
+      ).toBe("env-token");
+      const placeholderFsMock = buildCredentialsFsMock(
+        {},
+        {
+          openclawJson: {
+            channels: { telegram: { botToken: "${TELEGRAM_BOT_TOKEN}" } },
+          },
+        },
+      );
+      expect(
+        resolveTelegramBotToken({
+          env: {},
+          fsImpl: placeholderFsMock,
+          openclawDir: "/tmp/openclaw",
+        }),
+      ).toBe("");
+
+      // Wired into the notifier, delivery works with NO env token at all.
+      delete process.env.TELEGRAM_BOT_TOKEN;
+      const telegramApi = { sendMessage: vi.fn(async () => ({ ok: true })) };
+      const notifier = createWatchdogNotifier({
+        telegramApi,
+        fsImpl: fsMock,
+        openclawDir: "/tmp/openclaw",
+        getTelegramToken: () =>
+          resolveTelegramBotToken({
+            env: {},
+            fsImpl: fsMock,
+            openclawDir: "/tmp/openclaw",
+          }),
+      });
+      const result = await notifier.notify("Upgrade failed");
+      expect(result.channels.telegram.sent).toBe(1);
+      expect(telegramApi.sendMessage).toHaveBeenCalledWith(
+        "111",
+        "Upgrade failed",
+        { parseMode: "Markdown" },
+      );
+    });
+
+    it("an unparseable openclaw.json degrades gracefully — env/pairing delivery still runs", async () => {
+      process.env.TELEGRAM_BOT_TOKEN = "tg-token";
+      const fsMock = buildCredentialsFsMock(
+        { "telegram-default-allowFrom.json": ["111"] },
+        { openclawJson: "{ this is not JSON !!!" },
+      );
+      const telegramApi = { sendMessage: vi.fn(async () => ({ ok: true })) };
+      const notifier = createWatchdogNotifier({
+        telegramApi,
+        fsImpl: fsMock,
+        openclawDir: "/tmp/openclaw",
+      });
+
+      const result = await notifier.notify("Upgrade failed");
+
+      expect(result.ok).toBe(true);
+      expect(result.channels.telegram.sent).toBe(1);
+      expect(
+        resolveTelegramBotToken({
+          env: {},
+          fsImpl: fsMock,
+          openclawDir: "/tmp/openclaw",
+        }),
+      ).toBe("");
+    });
+
+    it("a broken config read with no pairing files yields zero fallback targets, not a crash", async () => {
+      process.env.TELEGRAM_BOT_TOKEN = "tg-token";
+      const fsMock = buildCredentialsFsMock(
+        {},
+        { openclawJson: "{ this is not JSON !!!" },
+      );
+      const telegramApi = { sendMessage: vi.fn(async () => ({ ok: true })) };
+      const notifier = createWatchdogNotifier({
+        telegramApi,
+        fsImpl: fsMock,
+        openclawDir: "/tmp/openclaw",
+      });
+
+      const result = await notifier.notify("hello");
+
+      expect(result.channels.telegram).toEqual({
+        sent: 0,
+        failed: 0,
+        skipped: true,
+        targets: 0,
+      });
+      expect(telegramApi.sendMessage).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("webhook fan-out channel (ALPHACLAW_NOTIFY_WEBHOOK_URL)", () => {
+    it("POSTs {text: message} JSON to the configured webhook URL", async () => {
+      process.env.ALPHACLAW_NOTIFY_WEBHOOK_URL = "https://hooks.example/notify";
+      const fetchImpl = vi.fn(async () => ({ ok: true }));
+      const notifier = createWatchdogNotifier({
+        fsImpl: buildCredentialsFsMock(),
+        openclawDir: "/tmp/openclaw",
+        fetchImpl,
+      });
+
+      const result = await notifier.notify("🔴 Upgrade failed");
+
+      expect(fetchImpl).toHaveBeenCalledTimes(1);
+      const [url, init] = fetchImpl.mock.calls[0];
+      expect(url).toBe("https://hooks.example/notify");
+      expect(init.method).toBe("POST");
+      expect(init.headers["Content-Type"]).toBe("application/json");
+      expect(JSON.parse(init.body)).toEqual({ text: "🔴 Upgrade failed" });
+      expect(result.ok).toBe(true);
+      expect(result.channels.webhook).toEqual({
+        sent: 1,
+        failed: 0,
+        skipped: false,
+        targets: 1,
+      });
+    });
+
+    it("a webhook failure never breaks the other channels", async () => {
+      process.env.ALPHACLAW_NOTIFY_WEBHOOK_URL = "https://hooks.example/notify";
+      process.env.TELEGRAM_BOT_TOKEN = "tg-token";
+      const fetchImpl = vi.fn(async () => {
+        throw new Error("connection refused");
+      });
+      const telegramApi = { sendMessage: vi.fn(async () => ({ ok: true })) };
+      const notifier = createWatchdogNotifier({
+        telegramApi,
+        fsImpl: buildCredentialsFsMock({
+          "telegram-default-allowFrom.json": ["111"],
+        }),
+        openclawDir: "/tmp/openclaw",
+        fetchImpl,
+      });
+
+      const result = await notifier.notify("Upgrade failed");
+
+      expect(result.ok).toBe(true);
+      expect(result.channels.telegram.sent).toBe(1);
+      expect(result.channels.webhook).toEqual({
+        sent: 0,
+        failed: 1,
+        skipped: false,
+        targets: 1,
+      });
+    });
+
+    it("counts a non-2xx webhook response as a per-channel failure", async () => {
+      process.env.ALPHACLAW_NOTIFY_WEBHOOK_URL = "https://hooks.example/notify";
+      const fetchImpl = vi.fn(async () => ({ ok: false, status: 500 }));
+      const notifier = createWatchdogNotifier({
+        fsImpl: buildCredentialsFsMock(),
+        openclawDir: "/tmp/openclaw",
+        fetchImpl,
+      });
+
+      const result = await notifier.notify("hello");
+
+      expect(result.channels.webhook.failed).toBe(1);
+      expect(result.ok).toBe(false);
+    });
   });
 
   // sendToTarget is the real delivery layer under the upgrade-notifier's

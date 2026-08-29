@@ -1,10 +1,56 @@
 # TODOS
 
-## P3 — Serialize alphaclaw.json writers under a file lock
-- **What:** Route every `writeAlphaclawConfig` read-modify-write (release channel, overseer/medic toggles, team settings, openai-compat flag, doctor scheduled-scans toggle `updateDoctorAutoRunEnabled`) through `withFileLockSync`, the way `updateOpenclawConfig` already serializes openclaw.json writers.
-- **Why:** Two concurrent toggles (e.g. a medic PUT racing a team-settings PUT) can drop one write. Pre-existing pattern across all alphaclaw.json writers, not specific to the medic — flagged by the ship adversarial pass.
-- **Context:** `lib/server/alphaclaw-config.js` writeAlphaclawConfig + the update* helpers; the lock helper lives in `lib/server/utils/safe-file.js`. Mind the read cache (kConfigReadCache) when adding the lock.
-- **Effort:** S → CC: S.
+## P1 — Narrow gatewayEnv secret spread
+- **What:** `gatewayEnv()` (lib/server/gateway.js) spreads the full `process.env` into the OpenClaw gateway child, so the agent's shell inherits `SETUP_PASSWORD` and every provider key. Replace the spread with an explicit allowlist of what the gateway/agent actually needs.
+- **Why:** This is the reason Agent Administration is "not a security boundary against the agent" — the agent can bypass every tier by curl-logging in with the inherited password. Narrowing this env is the single change that would turn the agent-admin tiers into a real boundary.
+- **Context:** Documented in the agent-admin design doc's threat model (docs/designs/agent-admin.md). Large blast radius — every gateway child-process contract changes; needs its own review.
+- **Effort:** M. **Depends on:** an inventory of which env keys the gateway/agent tools actually read.
+
+## P2 — Agent-admin: manifest → MCP tool export (E1)
+- **What:** Emit the agent-admin operation manifest as MCP tool definitions so other assistants can drive AlphaClaw with the same tiers/redaction.
+- **Why:** The manifest is already the single source of truth; an MCP projection makes AlphaClaw administrable by any MCP client, not just the bundled skill.
+- **Context:** lib/server/admin-manifest/ (serializeOp is the projection point). Deferred from the agent-admin CEO review.
+- **Effort:** M.
+
+## P2 — Agent-admin: server-side dry-run for admin ops (E3)
+- **What:** A `?dryRun=1` (or `X-AlphaClaw-Dry-Run`) mode that validates + reports the effect of a write without applying it. The prompt-level preview rule (read-state-then-apply) ships now; this is the server-enforced version.
+- **Context:** Needs per-handler cooperation; would slot into the enforcement middleware + each mutating route. Deferred from CEO review.
+- **Effort:** M.
+
+## P2 — Agent-admin: scoped undo (E6/U4.7)
+- **What:** `POST /api/admin/undo-last` + `GET /api/admin/undo-candidate` with single-slot pre-write snapshots of `.env`/`alphaclaw.json`, replayed THROUGH the server write paths (never raw file copies) with a content-hash guard against undoing a later change.
+- **Why:** "Undo that" is the highest-trust conversational admin flow. Deferred at implementation time: a correct replay requires extracting the inline `PUT /api/env` write logic (system.js:557-593, incl. reserved-key pre-strip and managed-key preservation) into a callable service — flagged by both the spec and eng reviews as the riskiest sub-feature.
+- **Context:** The admin route handlers already exist, dormant behind `if (undoService)` in lib/server/routes/admin.js; the manifest ops were removed to avoid a manifest/route mismatch. Re-add the two ops + `undoable: true` on env.update when the service lands.
+- **Effort:** M.
+
+## P3 — Agent-admin: scheduled restarts (E5)
+- **What:** "apply now, restart at 3am" for restart-tier changes. Deferred from CEO review — new scheduler semantics.
+- **Effort:** M.
+
+## P3 — Agent-admin: dedicated activity UI panel (E7)
+- **What:** A richer operator view of the agent_admin audit trail than the shared Watchdog events tab (which covers it today). `GET /api/admin/audit?summary=1` already provides the error-rate metric.
+- **Effort:** M.
+
+## P3 — Agent-admin: per-domain CLI sugar verbs
+- **What:** Task-shaped wrappers (e.g. `alphaclaw admin rotate-key`) over the generic `alphaclaw admin <METHOD> <path>` verb, IF observed agent error rates warrant. Gate the decision on `GET /api/admin/audit?summary=1` (A34).
+- **Why:** Kept the generic verb over Approach-C-style per-domain duplication; sugar is only worth it if the data shows the agent fumbling the generic form.
+- **Effort:** S.
+
+## P3 — Backport confirm-token expiry to the Doctor fix flow
+- **What:** The Doctor one-time fix token (lib/server/doctor/) has no expiry column; the agent-admin confirm store added 10-min expiry + attempt caps. Backport the same hardening to Doctor.
+- **Effort:** S.
+
+## P3 — Multi-operator / multi-tab settings freshness
+- **What:** Push-refresh (SSE settings events) or ETag/If-Match concurrency for persisted settings so a second operator/tab sees changes without a remount.
+- **Why:** The toggle/status/error overhaul's generation guards fix single-client races only; concurrent editors remain last-write-wins with no live refresh of settings cards.
+- **Context:** `useSavedSetting` (lib/public/js/hooks/use-saved-setting.js) is the standard write path (a few deliberate bespoke loops remain: cron's job-enable converge, General's SSE-proof API toggle) — a settings SSE channel could feed its `retryLoad()`/cache seam. Surfaced by the plan's CEO review + outside voice.
+- **Effort:** M. **Depends on:** deciding a settings-events transport (piggyback /api/events/status vs a new stream).
+
+## P3 — Cron run-history: cap-aware pagination merge + bounded optimistic converge
+- **What:** (a) The runs poll skips replacing entries while paginated past page 1; with >200 entries loaded (server clamps limit to kMaxRunsLimit=200, lib/server/cron-service.js), every snapshot is truncated and live updates stay frozen until a job/filter switch — make the merge cap-aware (offset paging or merge-first-200). (b) The job-enable toggle's hold-until-confirm converge can pin the optimistic value if an external actor flips the job back between our commit and the confirming poll — add a timeout or generation-stamped converge.
+- **Why:** Both are narrow edges of the accepted optimistic/merge design, flagged by the slice verifier; neither is user-visible in normal operation.
+- **Context:** lib/public/js/components/cron-tab/use-cron-tab.js (truncated-snapshot guard ~line 213, converge effect ~line 244).
+- **Effort:** S.
 
 ## P3 — Plumb an AbortSignal through the startup medic
 - **What:** Pass a real cancellation signal from the watchdog's run-budget race into `configMedic.run` → `llmClient.complete` (fetch already takes one) and `runDoctorFix` (kill the spawned doctor), so a budget expiry cancels the in-flight work instead of orphaning it.
@@ -178,6 +224,11 @@
 - **Why:** All flagged by the /ship specialist review; deferred as churn-vs-risk at ship time, none user-visible today.
 - **Effort:** S each. **Depends on:** nothing.
 
+## P3 — Adversarial-review UI cache follow-ups (2026-08-29, grouped)
+- **What:** (1) `cachedFetch` SWR dedupe: when a reusable in-flight request exists, the second consumer's `onRevalidate` is never attached, so two components sharing a key (`/api/env` in Envars + Features, `/api/channels/accounts`) can render different vintages until their next refresh/poll/remount — attach a generation-gated `.then(onRevalidate)` (+`.catch(() => {})`) to the reused in-flight promise; (2) `useCachedFetch`: if `setCached()` supersedes an in-flight forced refresh, the cache correctly refuses the stale write but the awaiting hook still `setData(next)` with the pre-mutation result — re-check the key generation after the await before applying locally; (3) `models-tab/use-models.js` refresh and `providers.js` compute merges inside side-effecting `setState` updaters and synchronously read the result for cache writes — correct under Preact's eager updaters but fragile; compute merges from refs instead.
+- **Why:** Claude adversarial ship-review findings (2026-08-29); all are small self-healing windows or latent fragility, none user-visible as a deterministic bug today.
+- **Effort:** S each. **Depends on:** nothing.
+
 ## P2 — Node onboarding under team mode (trusted-proxy)
 - **What:** `openclaw node run` authenticates with `OPENCLAW_GATEWAY_TOKEN`, which trusted-proxy mode rejects; `/api/nodes/connect-info` currently returns an empty token with a logged warning while team mode is on. Provide a working node path (gateway password credential, or a pairing flow) before recommending team mode to node users.
 - **Context:** lib/server/gateway-credential.js, lib/server/routes/nodes.js; degradation documented in the team-auth milestone report.
@@ -219,25 +270,130 @@
 - **Context:** lib/server/db/doctor/; precedent in `pruneBackups` (lib/server/openclaw-channel-sync.js); companion to the SQLite snapshot retention entry above.
 - **Effort:** S-M.
 
+## P3 — Extract shared overseer-core + retrofit the upgrade overseer card to live updates
+- **What:** Pull the generic ~40% shared by `lib/server/upgrade-overseer.js` and `lib/server/watchdog-overseer.js` (env isolation, availability probe w/ SWR, `--help` flag discovery, envelope/verdict parsing, start/stop) into one module; then give the upgrade overseer card the watchdog card's freshness model (verdicts riding an existing poll instead of load-once).
+- **Why:** Two deliberate copies exist today (copy-the-skeleton won the eng review over premature extraction for exactly two consumers); the trigger for extraction is a third consumer or this retrofit.
+- **Context:** The watchdog copy already hardened several shared paths (fail-closed tool flags, output + tail-truncation redaction, credential-scoped spawns, fail-closed redaction sources, temp-HOME cleanup/sweep) that the upgrade copy lacks — the extraction should level the upgrade overseer UP to those, not average them down. Known upgrade-copy gaps to close then: its `alphaclaw-overseer-home-*` temp dir is never removed/swept (its probes already strip the API key as of v0.9.40). See the watchdog wave plan's cross-model notes.
+- **Effort:** M (→S with CC). **Depends on:** watchdog wave shipped.
+
+## P3 — Async manual overseer review (fire-and-return + pending polling)
+- **What:** `POST /api/watchdog/overseer/review` currently awaits the whole review in the handler (availability probe + help + doctor + up to the 5-min claude deadline). Flip to fire-and-return: respond `{ok:true, started:true}` immediately and let the existing pending-state UI (15s incidents poll renders "review in progress") carry progress; keep the mutex/rate-limit semantics.
+- **Why:** A proxy/browser timeout during a long review surfaces as a spurious failure toast while the review continues server-side; the operator's retry then hits `busy`. Flagged by the ship adversarial review; sync was the deliberate v1 choice (operator watching the card), so this is UX hardening, not a bug fix.
+- **Context:** lib/server/routes/watchdog.js review handler; lib/server/watchdog-overseer.js requestReview (rate limit now stamps only when a review actually spawns, which async must preserve).
+- **Effort:** S.
+
+## P3 — Provisional overseer reviews of stuck-open incidents
+- **What:** Behind the same `watchdog.overseer.enabled` flag: one interim review when an incident stays open past ~10 min or hits a material event (crash_loop, config_error), superseded later by the final review; ≤2 reviews/incident total.
+- **Why:** The deterministic narrator covers "right now"; an LLM read of a stuck incident ("this looks like the 2026.7.1 plugins.allow bug — fix openclaw.json") is the one live moment it could add value. Deferred from the wave: final-only first, validate incident boundaries before spending on open ones.
+- **Context:** `runReviewFor` in lib/server/watchdog-overseer.js already takes an incident id; the healthy-steady-state gate is the line to carve an exception through — carefully (mid-storm reviews were deliberately killed).
+- **Effort:** M. **Depends on:** the wave's e2e boundary gate holding in production.
+
+## P3 — Overseer model pin + cost telemetry (both overseers together)
+- **What:** Pin the claude model (config key), count reviews/tokens/duration per overseer, surface in the UI cards.
+- **Why:** Neither overseer pins a model today (whatever the installed CLI defaults to) and cost is invisible; do both at once to avoid asymmetry.
+- **Effort:** S–M. **Depends on:** nothing.
+
+## P3 — Migrate WATCHDOG_AUTO_REPAIR / WATCHDOG_NOTIFICATIONS_DISABLED from env to alphaclaw.json
+- **What:** Move the two legacy watchdog toggles into alphaclaw.json with env fallback + one-release deprecation note.
+- **Why:** New settings already live in alphaclaw.json (`watchdog.overseer.enabled`); the split store means `PUT /api/watchdog/settings` writes env while the overseer toggle writes config — two backends for one card.
+- **Context:** `updateSettings` in lib/server/watchdog.js (writeEnvFile/reloadEnv path); never write env and config simultaneously.
+- **Effort:** M. **Depends on:** nothing.
+
+## P3 — StatusHero card absorbing the shared Gateway card on the Watchdog tab
+- **What:** Merge the Gateway card + status details + narrative card into one hero for the Watchdog tab (the shared Gateway card stays for other tabs).
+- **Why:** Three stacked cards carry one mental model; a hero reads faster. Deferred from the wave because forking a shared component was extra surface for equal information.
+- **Effort:** M. **Depends on:** watchdog wave shipped.
+
+## P3 — Resource telemetry follow-ups: configurable thresholds, sparklines/history
+- **What:** Optional alphaclaw.json keys for the (currently hardcoded 80/90%) resource warn/crit display thresholds; small ring buffer + sparklines for memory/CPU/event-loop lag.
+- **Why:** Deferred as expert knobs / width-hungry UI; revisit on demand. Display-only either way.
+- **Effort:** M. **Depends on:** nothing.
+
+## P3 — Resource-based alerting/enforcement (design needed — invariant territory)
+- **What:** Any watchdog *action* on resource signals (e.g., restart on sustained event-loop starvation or OOM pressure).
+- **Why:** Today resources are report-only by design ("the deterministic watchdog is the ONLY enforcement layer" covers gateway health, not host resources). Changing that is a policy design, not a feature toggle.
+- **Effort:** L. **Depends on:** explicit design review.
+
+## P3 — Capture the incident log window at close time
+- **What:** Persist the timestamp-filtered gateway log excerpt when an incident closes (per-incident file or capped blob) instead of re-reading the tail at review time.
+- **Why:** A late overseer review (stale-pending retry) on a busy log can lose the incident window; the wave ships a widened 256KB read + an explicit "may be partial" prompt label as the honest fallback. Capture-at-close removes the limitation at the cost of per-incident storage.
+- **Context:** `filterLogWindow` + the `isLate` branch in lib/server/watchdog-overseer.js; the cross-model disagreement is recorded in the wave plan (U5 known limitation).
+- **Effort:** M. **Depends on:** nothing.
+
+## P3 — Watchdog wave minor polish (deferred by scope decision)
+- **What:** Per-event-type filter pills on the All-events tab; a spot-check "explain current status" overseer mode with no incident; any new SSE event streams for the watchdog surfaces.
+- **Why:** Each was reviewed and deferred: three tabs cover the filtering need, the deterministic narrator explains live status for free, and the 2s status SSE + 15s polls already carry everything ("new event streams are the expensive path").
+- **Effort:** S each. **Depends on:** demand.
+## P2 — Claude Code launcher: fire with custom instruction text
+- **What:** An input UI on the launcher that passes `{"text": ...}` in the routine-fire body so a click can carry task instructions.
+- **Why:** Turns "open a session" into "open a session already working on X" — the highest-leverage extension of the launcher.
+- **Context:** The fire payload arrives wrapped in an untrusted `<routine-fire-payload>` block, so the routine's saved prompt must explicitly opt in to reading it (e.g. "act on the routine-fire-payload block"); needs UX design (input modal) and README prompt guidance. `lib/server/claude-code-service.js` is the extension point (currently posts no body by design).
+- **Effort:** M. **Depends on:** the launcher shipping.
+
+## P2 — Watchdog incident → Claude Code routine escalation
+- **What:** Reuse `claude-code-service` to fire the routine with a settled incident's narrative as the `text` payload ("escalate this incident to Claude Code").
+- **Why:** Platform potential: incidents debug themselves in a cloud session with context attached, instead of an operator copy-pasting log excerpts.
+- **Context:** Deferred from the launcher's CEO review; needs overseer-integration design (which incidents qualify, redaction of the narrative, notification links) and its own review. Blocked on the fire-with-text TODO above for the payload path.
+- **Effort:** M. **Depends on:** fire-with-custom-text.
+
+## P3 — Doctor check for Claude Code routine config shape
+- **What:** Surface the launcher service's `invalid_config` reason (bad host, wrong token prefix, half-configured pair) as a Doctor finding.
+- **Why:** Misconfiguration is currently visible only in the sidebar tooltip and the fire-time error toast; Doctor is where operators look for config drift.
+- **Context:** `createClaudeCodeService().getAvailability()` already returns the exact reason/message — the check is a thin adapter in lib/server/doctor/.
+- **Effort:** S. **Depends on:** nothing.
+
+## P3 — Mobile drawer doesn't close on external nav items
+- **What:** The generic `item.href` branch in `renderNavItem` (lib/public/js/components/sidebar.js) — used by the gated Dashboards link — never closes the mobile drawer, leaving the drawer and overlay covering the app while the new tab opens.
+- **Why:** The Claude Code launcher fixed this for itself via its `onBeforeOpen` callback (design-review finding); the same fix should backport to the generic external-item branch.
+- **Context:** `use-browse-navigation.js` `handleSelectNavItem` closes the drawer for internal items only; external anchors bypass it.
+- **Effort:** S. **Depends on:** nothing.
+
+## P3 — Claude Code launcher: durable cross-process fire lease
+- **What:** The launcher's single-flight (`inFlight`) and cooldown (`cooldownUntil`) live in memory on one `claudeCodeService` instance (lib/server/claude-code-service.js). A crash between Anthropic accepting a fire and AlphaClaw replying, or multiple server processes, or multiple team admins, each bypass the duplicate-billing guard; `busy`/`cooldown` are also shared across all admins (one admin's fire blocks another's).
+- **Why:** The fire endpoint has no upstream idempotency key, so every gap in the in-memory guard is a real (if narrow) double-billing window. Adversarial review (Claude + Codex) flagged it; accepted as out-of-scope for the initial launcher because the practical exposure is small (single-process deploy, one operator, rare crash-timing).
+- **Context:** Would need an atomic durable lease (file lock or the existing SQLite state dir) keyed per routine, plus persisting uncertain outcomes across boot. Design it alongside the P1 gatewayEnv allowlist work.
+- **Effort:** M. **Depends on:** nothing.
+
+## P3 — Sidebar nav a11y debt
+- **What:** Internal sidebar nav items are `<a>` elements without `href` (not keyboard-focusable), and rows are under the 44px touch-target minimum on mobile.
+- **Why:** Keyboard users cannot tab to most nav items; touch targets fall below platform guidelines. The Claude Code launcher item carries a real href (and aria-busy while launching) — the rest of the nav should catch up.
+- **Context:** `renderNavItem` in lib/public/js/components/sidebar.js and the `.sidebar-nav a` metrics in lib/public/css/shell.css:215-246. Repo-wide pass; keep visual density on desktop while adding focus/touch affordances.
+- **Effort:** M. **Depends on:** nothing.
+
 ## Completed
+
+## Serialize alphaclaw.json writers under a file lock
+- **What:** Route every writeAlphaclawConfig read-modify-write through the shared file lock.
+- **Completed:** v0.9.45 merge (2026-08-29) — upstream v0.9.42 wave added updateAlphaclawConfig (withFileLockSync around every update* helper); our doctor scheduled-scans updater was re-layered onto the same locked path during the merge.
 
 ## Gateway close-event stale-generation guard
 - **What:** Exit classification listens on child "close" (chosen so post-exit stderr flushes are captured); if a grandchild inherits the stdio fds and outlives the gateway, "close" fires late — or never. Per-child stderr tails cover the fires-late half; the remaining scope was the bounded exit-vs-close race for the never-fires case: race "exit" with a short bounded drain so a close that never arrives cannot leave the exit unclassified.
 - **Why:** A close that never fires meant the watchdog never saw the exit — no restart-handoff consume, no relaunch — until the descendant died; the health/TCP path was the slower backstop.
-- **Completed:** v0.9.40 (2026-08-29) — both halves shipped in lib/server/gateway.js. Per-child stderr tails: each launch closure owns its tail, so a late close is always classified against its OWN child's stderr, never a successor's. Bounded exit-vs-close drain: "exit" arms a 400ms unref'd drain timer (`kGatewayCloseDrainMs`) that runs the same finalize with the tail-so-far if close hasn't fired; first of {close, drain timeout} wins via a per-child settled flag and a late close after the timeout is a no-op (exactly-once classification). The restart-supervisor path (`runGatewayRestartCmd`) already records its exit on "exit" directly and needed no guard.
+- **Completed:** v0.9.45 (2026-08-29) — both halves shipped in lib/server/gateway.js. Per-child stderr tails: each launch closure owns its tail, so a late close is always classified against its OWN child's stderr, never a successor's. Bounded exit-vs-close drain: "exit" arms a 400ms unref'd drain timer (`kGatewayCloseDrainMs`) that runs the same finalize with the tail-so-far if close hasn't fired; first of {close, drain timeout} wins via a per-child settled flag and a late close after the timeout is a no-op (exactly-once classification). The restart-supervisor path (`runGatewayRestartCmd`) already records its exit on "exit" directly and needed no guard.
 
 ## Gate runHealthCheck during pending exit classification
 - **What:** While the watchdog's async exit resolver runs (handoff consume ≤5s + step-aside probes), lifecycle/health still read running/healthy and armed health timers can independently mark degraded or start rollback/auto-repair paths racing the resolver (serialized only by the lifecycle lock). Early-return from runHealthCheck while state.pendingExitClassification is true, mirroring the configurationErrorActive guard.
 - **Why:** Duplicate restart attempts / notification noise for one exit.
-- **Completed:** v0.9.40 (2026-08-29) — runHealthCheck early-returns while `state.pendingExitClassification` is truthy (lib/server/watchdog.js), right after the configurationErrorActive guard; the resolver owns the next transition, and the flag clears on settle or any newer lifecycle event.
+- **Completed:** v0.9.45 (2026-08-29) — runHealthCheck early-returns while `state.pendingExitClassification` is truthy (lib/server/watchdog.js), right after the configurationErrorActive guard; the resolver owns the next transition, and the flag clears on settle or any newer lifecycle event.
 
 ## Wire restart-handoff consume into the watchdog exit classifier
 - **What:** In gateway.js's child exit handler, when the target supports the restart-handoff contract and the exit is unexpected, consume the handoff before classifying, and add a watchdog `onGatewayExit` branch that relaunches without crash accounting. Serialize exit classification per child pid.
 - **Why:** Correctly classify an OpenClaw-initiated fresh-process restart as intentional, not a crash.
-- **Completed:** v0.9.40 (2026-08-29) — implemented against the tarball-verified protocol in `lib/server/gateway-restart-handoff.js` (per-PID exactly-once consume, 60s TTL cache) with the watchdog's `resolveSupervisedCleanExit` handling accepted/none/rejected on every clean unmanaged exit; gated on the supervisor-mode env rather than a capabilities probe (that gating refinement is tracked in "Retire the unwired upstream restart-handoff stub").
+- **Completed:** v0.9.45 (2026-08-29) — implemented against the tarball-verified protocol in `lib/server/gateway-restart-handoff.js` (per-PID exactly-once consume, 60s TTL cache) with the watchdog's `resolveSupervisedCleanExit` handling accepted/none/rejected on every clean unmanaged exit; gated on the supervisor-mode env rather than a capabilities probe (that gating refinement is tracked in "Retire the unwired upstream restart-handoff stub").
 
 ## Make env-save channel sync one atomic lifecycle-lock op
 - **What:** `PUT /api/env` runs remove-channels → write env → add-channels as two separately queued lock ops (lib/server/routes/system.js + gateway.js `syncChannelConfig`). A gateway restart queued between them launches with channels removed-but-not-yet-re-added (final config state self-corrects when the add runs, but the running gateway may need another restart to pick it up). Wrap remove+write+add in a single uniquely-keyed lock op (expose a narrow `withGatewayLifecycleLock` from gateway.js or a dedicated `syncChannelConfigForEnvSave`).
 - **Why:** Adversarial review M4 on the ship pass (2026-08-28). Rare (requires an operator restart racing an env save) and bounded, but the invariant "env save is atomic against lifecycle ops" held under execSync and silently weakened in the async conversion.
 - **Effort:** M (test updates across routes-system + coalescing suites). **Depends on:** nothing.
 - **Completed:** v0.9.37 (2026-08-28) — `PUT /api/env` acquires the shared gateway lifecycle lock once around the full remove → write → add sequence (lib/server/routes/system.js `env_sync` op); `syncChannelConfig` itself stays lock-free, so the whole save is one atomic lifecycle operation.
+
+## P3 — Guided state-DB restore when a rollback is refused
+- **What:** When boot refuses a rollback ("no OpenClaw version on this box can read the migrated state", `rollbackRefused` latch, issue #21), the notification names the newest `openclaw-backup-*.tar.gz` and points at the runbook — but restoring it is still a manual CLI dance. Build a guided flow (Upgrade page CTA → staged extract → `openclaw backup` restore steps → restart) that walks the operator through it.
+- **Why:** Auto-restore was deliberately rejected in the #21 fix plan (multi-GB extraction at boot, 2× disk requirement, silently discards state written since the backup). A guided flow keeps the human decision while removing the error-prone shell steps.
+- **Context:** Refusal path in lib/server/openclaw-channel-sync.js (`chooseBootRollbackTarget` → `rollback_refused` branch); recovery archive named via `newestArchiveName()`; runbook step 6 in AGENTS.md.
+- **Effort:** M. **Depends on:** nothing.
+
+## P3 — Slack allowFrom fallback for watchdog notifier targets
+- **What:** The Bug-7 fix (issue #21) falls back to `channels.telegram.allowFrom` numeric IDs when no pairing files exist. Slack was deliberately excluded: its allowFrom entries need per-account token derivation (`slack-<account>-allowFrom.json` naming), and Slack user IDs require a `conversations.open` call before posting. Add the Slack equivalent if a real box hits `no_channels_delivered` with only Slack configured.
+- **Context:** lib/server/watchdog-notify.js (`readChannelAllowFrom`, fan-out fallback block with the exclusion comment).
+- **Effort:** S. **Depends on:** nothing.

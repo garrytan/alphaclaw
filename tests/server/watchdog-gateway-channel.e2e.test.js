@@ -218,6 +218,8 @@ const createStack = ({ autoRepair = false, channel, fakeGateway } = {}) => {
       getInfo: () => channel.service.getChannelInfo(),
       requestRollback: (payload) =>
         channel.service.requestChannelRollback(payload),
+      requestForwardRecovery: (payload) =>
+        channel.service.requestForwardRecovery(payload),
       onHealthy: () => channel.service.onGatewayHealthy(),
       onUnhealthy: () => channel.service.onGatewayUnhealthy(),
     },
@@ -482,12 +484,15 @@ describe("server/watchdog gateway + release channel (e2e)", { retry: 1 }, () => 
   });
 
   it("[REG] preserves legacy latch and crash-loop behavior on the pin", async () => {
-    // Exit 78 on the pin (state.applied null): the classic EX_CONFIG latch.
+    // Exit 78 on the pin (state.applied null) with an EMPTY blocklist —
+    // forward recovery has no candidate, so the classic EX_CONFIG latch
+    // behavior is preserved verbatim.
     const pinChannel = createChannelHarness({
       applied: null,
       installedVersion: "1.0.0",
       sentinelVersion: "1.0.0",
     });
+    expect(pinChannel.store.readState().blocklist).toHaveLength(0);
     expect(pinChannel.service.getChannelInfo().isPin).toBe(true);
     const latchStack = createStack({ autoRepair: false, channel: pinChannel });
     latchStack.gateway.healthy = false;
@@ -547,5 +552,116 @@ describe("server/watchdog gateway + release channel (e2e)", { retry: 1 }, () => 
     const notices = crashLoopNotices(loopStack.notifier);
     expect(notices).toHaveLength(1);
     expect(notices[0]).toContain("Automatic gateway restart paused; manual action required.");
+  });
+
+  it("forward-recovers a pin exit 78 to a blocklisted newer overlay exactly once (issue #21 bug 10)", async () => {
+    // The #21 end state: the pin is running (applied null), the beta that
+    // one-way migrated the state sits on the blocklist WITH a local overlay.
+    const channel = createChannelHarness({
+      applied: null,
+      installedVersion: "1.0.0",
+      sentinelVersion: "1.0.0",
+      overlays: ["1.0.0", "2.0.0"],
+    });
+    channel.store.addBlocklist({
+      id: "2.0.0",
+      reason: "config_error",
+      exitCode: 78,
+    });
+    const stack = createStack({ autoRepair: false, channel });
+    stack.gateway.healthy = false;
+
+    stack.watchdog.onGatewayLaunch({ startedAt: Date.now(), pid: 1234 });
+    stack.watchdog.onGatewayExit({
+      code: 78,
+      expectedExit: false,
+      stderrTail: ["state database uses newer schema version 12"],
+    });
+    await flushMicrotasks();
+
+    // Forward, not latched: the marker points AT the newer build, its
+    // blocklist entry is cleared for the one-shot attempt, and the attempt
+    // is persisted so it can never ping-pong.
+    const marker = channel.store.readMarker();
+    expect(marker).toEqual(
+      expect.objectContaining({
+        reason: "forward_recovery",
+        target: expect.objectContaining({ kind: "package", version: "2.0.0" }),
+      }),
+    );
+    let state = channel.store.readState();
+    expect(state.blocklist).toHaveLength(0);
+    expect(state.forwardRecovery).toEqual(
+      expect.objectContaining({ attemptedId: "2.0.0" }),
+    );
+    expect(stack.watchdog.getStatus().lifecycle).toBe("restarting");
+    expect(
+      channelNotifyMessages(channel).some((message) =>
+        message.includes("moving forward to 2.0.0"),
+      ),
+    ).toBe(true);
+
+    // Second cycle: the forward build failed too (re-blocklisted, rolled
+    // back to the pin), and the pin exits 78 again — no bootable version.
+    channel.store.clearMarker();
+    channel.store.addBlocklist({
+      id: "2.0.0",
+      reason: "config_error",
+      exitCode: 78,
+    });
+    stack.watchdog.onGatewayExit({
+      code: 78,
+      expectedExit: false,
+      stderrTail: ["state database uses newer schema version 12"],
+    });
+    await flushMicrotasks();
+
+    expect(stack.watchdog.getStatus().lifecycle).toBe("configuration_error");
+    expect(channel.store.readMarker()).toBeNull();
+    state = channel.store.readState();
+    expect(state.noBootableVersion).toEqual(
+      expect.objectContaining({ attemptedId: "2.0.0" }),
+    );
+    expect(channel.service.getChannelInfo().noBootableVersion).toBeTruthy();
+    expect(
+      channel.notify.mock.calls.some((call) =>
+        String(call?.[1]?.id || "").startsWith("no-bootable-version-"),
+      ),
+    ).toBe(true);
+  });
+
+  it("OPENCLAW_FORWARD_RECOVERY=off falls through to the legacy latch", async () => {
+    process.env.OPENCLAW_FORWARD_RECOVERY = "off";
+    try {
+      const channel = createChannelHarness({
+        applied: null,
+        installedVersion: "1.0.0",
+        sentinelVersion: "1.0.0",
+        overlays: ["1.0.0", "2.0.0"],
+      });
+      channel.store.addBlocklist({
+        id: "2.0.0",
+        reason: "config_error",
+        exitCode: 78,
+      });
+      const stack = createStack({ autoRepair: false, channel });
+      stack.gateway.healthy = false;
+
+      stack.watchdog.onGatewayLaunch({ startedAt: Date.now(), pid: 1234 });
+      stack.watchdog.onGatewayExit({
+        code: 78,
+        expectedExit: false,
+        stderrTail: ["fatal configuration error"],
+      });
+      await flushMicrotasks();
+
+      expect(stack.watchdog.getStatus().lifecycle).toBe(
+        "configuration_error",
+      );
+      expect(channel.store.readMarker()).toBeNull();
+      expect(channel.store.readState().blocklist).toHaveLength(1);
+    } finally {
+      delete process.env.OPENCLAW_FORWARD_RECOVERY;
+    }
   });
 });

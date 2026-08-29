@@ -230,4 +230,48 @@ describe("server git shim scripts", () => {
     expect(content).toContain("*Username*)");
     expect(content).toContain("*Password*)");
   });
+
+  // H9: the askpass must answer with the token only for github.com, parsing the
+  // host as the authority after the last '@' — a substring check leaks the token
+  // to https://github.com@attacker.example/repo.
+  describe("git-askpass host binding (H9)", () => {
+    const askForPassword = (prompt) =>
+      String(
+        execFileSync("sh", [kGitAskPassPath, prompt], {
+          env: { ...cleanProcessEnv(), GITHUB_TOKEN: "ghp_secret" },
+          stdio: "pipe",
+        }),
+      );
+
+    it("answers the token for a genuine github.com password prompt", () => {
+      expect(
+        askForPassword("Password for 'https://x-access-token@github.com': "),
+      ).toBe("ghp_secret");
+    });
+
+    it("does NOT leak the token to an attacker host after github.com@", () => {
+      expect(
+        askForPassword(
+          "Password for 'https://github.com@attacker.example/repo': ",
+        ),
+      ).toBe("");
+    });
+
+    it("does NOT leak the token to a non-github host", () => {
+      expect(
+        askForPassword("Password for 'https://gitlab.com/a/b': "),
+      ).toBe("");
+    });
+
+    it("still answers the username prompt for github", () => {
+      expect(
+        String(
+          execFileSync("sh", [kGitAskPassPath, "Username for 'https://github.com': "], {
+            env: { ...cleanProcessEnv(), GITHUB_TOKEN: "ghp_secret" },
+            stdio: "pipe",
+          }),
+        ),
+      ).toBe("x-access-token");
+    });
+  });
 });

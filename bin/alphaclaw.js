@@ -54,6 +54,7 @@ const {
   ensureMainUpstream,
   restoreMissingOpenclawConfigFromRemote,
 } = require("../lib/cli/openclaw-config-restore");
+const { writeGitAskpassScript } = require("../lib/git-askpass-script");
 const { buildSecretReplacements } = require("../lib/server/helpers");
 const { resolveSelfDependency } = require("../lib/server/self-dependency");
 const {
@@ -140,6 +141,8 @@ Commands:
   telegram topic add  Add/update Telegram topic mapping by thread ID
   telegram topic create  Create a Telegram forum topic and register it
   telegram topics list  List registered, discovered, and stale Telegram topics
+  admin <METHOD> <path>  Administer AlphaClaw via the local API (requires features.agentAdmin)
+  admin manifest  Print the agent-admin operation catalog
   version   Print version
 
 Global options:
@@ -377,10 +380,9 @@ const runGitSync = () => {
         }),
       ).trim() || "main";
   } catch {}
-  const askPassPath = path.join(
-    os.tmpdir(),
-    `alphaclaw-git-askpass-${process.pid}.sh`,
-  );
+  // Shared hardened askpass (H9 host-parse) in a private mkdtemp dir (H14 —
+  // no predictable ${pid} path a symlink can hijack, since git executes it).
+  const { scriptPath: askPassPath } = writeGitAskpassScript();
   const runGit = (gitCommand, { withAuth = false } = {}) => {
     const cmd = withAuth
       ? `GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=${quoteArg(askPassPath)} ${quoteArg(realGitPath)} ${gitCommand}`
@@ -397,20 +399,6 @@ const runGitSync = () => {
   };
 
   try {
-    fs.writeFileSync(
-      askPassPath,
-      [
-        "#!/usr/bin/env sh",
-        'case "$1" in',
-        '  *Username*) echo "x-access-token" ;;',
-        '  *Password*) echo "${GITHUB_TOKEN:-}" ;;',
-        '  *) echo "" ;;',
-        "esac",
-        "",
-      ].join("\n"),
-      { mode: 0o700 },
-    );
-
     runGit(`remote set-url origin ${quoteArg(originUrl)}`);
     runGit(`config user.name ${quoteArg("AlphaClaw Agent")}`);
     runGit(`config user.email ${quoteArg("agent@alphaclaw.md")}`);
@@ -456,7 +444,8 @@ const runGitSync = () => {
     return 1;
   } finally {
     try {
-      fs.rmSync(askPassPath, { force: true });
+      // Remove the private mkdtemp dir, not just the script (H14).
+      fs.rmSync(path.dirname(askPassPath), { recursive: true, force: true });
     } catch {}
   }
 };
@@ -847,6 +836,22 @@ if (
   commandAction === "list"
 ) {
   process.exit(runTelegramTopicsList());
+}
+
+// `alphaclaw admin ...` — an out-of-process HTTP client for the running
+// server's /api surface. Early-exit BEFORE the release-channel boot sync so it
+// can never race an activation (same contract as the telegram/doctor verbs).
+if (command === "admin") {
+  const { runAdminCommand } = require("../lib/cli/admin");
+  runAdminCommand({ argv: commandArgs.slice(1), rootDir })
+    .then((code) => process.exit(code))
+    .catch((error) => {
+      process.stdout.write(
+        `${JSON.stringify({ ok: false, code: "cli_error", message: error.message })}\n`,
+      );
+      process.exit(1);
+    });
+  return;
 }
 
 const kPort = String(process.env.PORT || "3000").trim();

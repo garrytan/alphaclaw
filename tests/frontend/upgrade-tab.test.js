@@ -245,6 +245,75 @@ describe("frontend/upgrade-tab view", () => {
     expect(text).toContain("Loading version catalog...");
   });
 
+  it("renders the channel picker (disabled) inside the loading skeleton — the card is never a hostage", () => {
+    const tree = renderView({ loadingChannel: true, loadingCatalog: true });
+    // The segmented control's static options render even before the channel
+    // GET resolves; only the data region shows the loading line.
+    const text = treeText(tree);
+    expect(text).toContain("Release channel");
+    expect(text).toContain("Stable");
+    expect(text).toContain("Beta");
+  });
+
+  it("renders a Dismiss affordance on a failed operation so the page is never dead", () => {
+    const onDismissOperation = vi.fn();
+    const tree = renderView({
+      channelInfo: makeChannelInfo(),
+      operation: {
+        operationId: "op-9",
+        phase: "failed",
+        label: "2026.8.1-beta.3",
+        startedAt: kNow - 60_000,
+        steps: [],
+        output: "",
+        lastOutputAt: null,
+        error: { message: "activation failed" },
+      },
+      onDismissOperation,
+    });
+    const text = treeText(tree);
+    expect(text).toContain("Dismiss to re-enable the page");
+    const dismiss = findButtonByText(tree, "Dismiss");
+    expect(dismiss).toBeTruthy();
+    dismiss.props.onclick();
+    expect(onDismissOperation).toHaveBeenCalled();
+  });
+
+  it("warns inline when a catalog refresh fails but stale data is shown", () => {
+    const tree = renderView({
+      channelInfo: makeChannelInfo(),
+      catalog: makeCatalog({ staleAsOf: kNow - 3_600_000 }),
+      catalogError: { message: "npm registry timeout", hint: null },
+    });
+    const text = treeText(tree);
+    expect(text).toContain(
+      "Could not refresh the catalog — showing the last loaded data",
+    );
+    expect(text).toContain("npm registry timeout");
+  });
+
+  it("renders the persistent action-error chip with a Dismiss button", () => {
+    const onDismissActionError = vi.fn();
+    const tree = renderView({
+      channelInfo: makeChannelInfo(),
+      actionError: {
+        headline: "Couldn't roll back OpenClaw.",
+        error: Object.assign(new Error("no rollback target"), {
+          hint: "Clear the blocklist first.",
+        }),
+      },
+      onDismissActionError,
+    });
+    const text = treeText(tree);
+    expect(text).toContain("Couldn't roll back OpenClaw.");
+    expect(text).toContain("no rollback target");
+    expect(text).toContain("Clear the blocklist first.");
+    const dismiss = findButtonByText(tree, "Dismiss");
+    expect(dismiss).toBeTruthy();
+    dismiss.props.onclick();
+    expect(onDismissActionError).toHaveBeenCalled();
+  });
+
   it("renders the EMPTY-OFFLINE state for a degraded catalog", () => {
     const tree = renderView({
       channelInfo: makeChannelInfo(),
@@ -499,7 +568,7 @@ describe("frontend/upgrade-tab view", () => {
 
     const text = treeText(tree);
     expect(text).toContain("2026.7.2 rolled back at");
-    expect(text).toContain("Trigger: crash_loop, exit code 1");
+    expect(text).toContain("Trigger: crash loop, exit code 1");
 
     const clearButton = findActionButtonByLabel(tree, "Clear blocklist entry");
     clearButton.props.onClick();
@@ -893,7 +962,7 @@ describe("frontend/upgrade-tab view", () => {
 
     const text = treeText(tree);
     expect(text).toContain("blocklisted");
-    expect(text).toContain("trigger: crash_loop");
+    expect(text).toContain("trigger: crash loop");
     expect(text).toContain("exit code 1");
 
     const clearButton = findAllByType(tree, ActionButton).find(
@@ -1291,6 +1360,90 @@ describe("frontend/upgrade-tab hook", () => {
     expect(api.updateOpenclawReleaseChannel).not.toHaveBeenCalled();
   });
 
+  it("a successful channel save refreshes the shared /api/status consumers; a failed one does not", async () => {
+    const onRefreshStatuses = vi.fn();
+    let state = await hydrate({ onRefreshStatuses });
+
+    await state.onSelectChannel("beta");
+    // The sidebar footer reads the shared status channel — it must update
+    // immediately, not on the next poll tick.
+    expect(onRefreshStatuses).toHaveBeenCalled();
+
+    onRefreshStatuses.mockClear();
+    api.updateOpenclawReleaseChannel.mockRejectedValue(new Error("nope"));
+    state = renderHook({ onRefreshStatuses });
+    await state.onSelectChannel("stable");
+    expect(onRefreshStatuses).not.toHaveBeenCalled();
+  });
+
+  it("onDismissOperation revives a dead page: operation cleared, stream stopped, data reloaded", async () => {
+    const unsubscribe = vi.fn();
+    let captured = null;
+    api.subscribeOpenclawApplyEvents.mockImplementation((options) => {
+      captured = options;
+      return unsubscribe;
+    });
+    api.applyOpenclawVersion.mockResolvedValue({
+      ok: true,
+      operationId: "op-dead",
+      events: "/api/operations/op-dead/events",
+    });
+    let state = await hydrate();
+    state.onRequestApply({ payload: { version: "x" }, label: "x" });
+    state = renderHook({});
+    await state.onConfirmApply();
+    state = renderHook({});
+    expect(state.operation).toBeTruthy();
+    expect(state.actionsDisabled).toBe(true);
+
+    // Dismiss clears only FAILED operations (a running apply must never be
+    // cleared out from under the user) — fail it via the stream first.
+    captured.onMessage({ event: "error", data: { error: "boom" } });
+    state = renderHook({});
+    expect(state.operation.phase).toBe("failed");
+
+    api.fetchOpenclawChannel.mockClear();
+    api.fetchOpenclawRuns.mockClear();
+    state.onDismissOperation();
+    await flushAsync();
+    state = renderHook({});
+    expect(state.operation).toBeNull();
+    expect(state.logOpen).toBe(false);
+    expect(state.actionsDisabled).toBe(false); // every control re-enables
+    expect(unsubscribe).toHaveBeenCalled();
+    expect(api.fetchOpenclawChannel).toHaveBeenCalled();
+    expect(api.fetchOpenclawRuns).toHaveBeenCalled();
+  });
+
+  it("actionsDisabled covers blocklist clears and catalog refreshes in flight", async () => {
+    let resolveClear;
+    api.clearOpenclawBlocklist.mockImplementation(
+      () => new Promise((resolve) => (resolveClear = resolve)),
+    );
+    let state = await hydrate();
+    expect(state.actionsDisabled).toBe(false);
+
+    const clearing = state.onClearBlocklist("v1");
+    state = renderHook({});
+    expect(state.actionsDisabled).toBe(true); // a reload race window is open
+    resolveClear({ ok: true, blocklist: [] });
+    await clearing;
+    state = renderHook({});
+    expect(state.actionsDisabled).toBe(false);
+
+    let resolveCatalog;
+    api.fetchOpenclawCatalog.mockImplementation(
+      () => new Promise((resolve) => (resolveCatalog = resolve)),
+    );
+    state.onCheckNow();
+    state = renderHook({});
+    expect(state.actionsDisabled).toBe(true);
+    resolveCatalog({ ok: true, catalog: makeCatalog() });
+    await flushAsync();
+    state = renderHook({});
+    expect(state.actionsDisabled).toBe(false);
+  });
+
   // REGRESSION: a failed persist must revert the selection LOUDLY — the
   // persistent inline error chip state is set and the segment snaps back with
   // an explanation, never silently.
@@ -1669,7 +1822,7 @@ describe("frontend/upgrade-tab hook", () => {
     expect(api.rollbackOpenclaw).not.toHaveBeenCalled();
   });
 
-  it("shows an error toast when the rollback is rejected with an envelope", async () => {
+  it("surfaces a rejected rollback as a persistent inline action error (never toast-only)", async () => {
     const envelopeError = Object.assign(
       new Error("no rollback target available"),
       { code: "rollback_unavailable", hint: "Clear the blocklist first." },
@@ -1681,10 +1834,21 @@ describe("frontend/upgrade-tab hook", () => {
 
     await state.onRollback();
 
-    expect(showToast).toHaveBeenCalledWith("no rollback target available", "error");
     state = renderHook({});
+    expect(state.actionError).toEqual({
+      headline: "Couldn't roll back OpenClaw.",
+      error: envelopeError,
+    });
+    expect(showToast).not.toHaveBeenCalledWith(
+      "no rollback target available",
+      "error",
+    );
     expect(state.operation).toBeNull();
     expect(state.rollingBack).toBe(false);
+
+    state.onDismissActionError();
+    state = renderHook({});
+    expect(state.actionError).toBeNull();
   });
 
   it("feeds streamed error envelopes (code/hint/docsUrl) into the failure model (U12)", async () => {

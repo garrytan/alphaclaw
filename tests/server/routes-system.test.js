@@ -1,6 +1,9 @@
 const express = require("express");
 const request = require("supertest");
 const https = require("https");
+const nodeFs = require("fs");
+const os = require("os");
+const nodePath = require("path");
 const { EventEmitter } = require("events");
 
 const { registerSystemRoutes } = require("../../lib/server/routes/system");
@@ -436,6 +439,9 @@ describe("server/routes/system", () => {
             openaiCompatApi: {
               enabled: false,
             },
+            agentAdmin: {
+              enabled: false,
+            },
           },
           updates: {
             openclaw: {
@@ -450,6 +456,9 @@ describe("server/routes/system", () => {
           },
           doctor: {
             autoRun: { enabled: false },
+          },
+          watchdog: {
+            overseer: { enabled: false },
           },
         },
         openclawChannel: null,
@@ -807,6 +816,9 @@ describe("server/routes/system", () => {
           openaiCompatApi: {
             enabled: true,
           },
+          agentAdmin: {
+            enabled: false,
+          },
         },
         updates: {
           openclaw: {
@@ -821,6 +833,9 @@ describe("server/routes/system", () => {
         },
         doctor: {
           autoRun: { enabled: false },
+        },
+        watchdog: {
+          overseer: { enabled: false },
         },
       },
     });
@@ -845,6 +860,9 @@ describe("server/routes/system", () => {
             openaiCompatApi: {
               enabled: true,
             },
+            agentAdmin: {
+              enabled: false,
+            },
           },
           updates: {
             openclaw: {
@@ -859,6 +877,9 @@ describe("server/routes/system", () => {
           },
           doctor: {
             autoRun: { enabled: false },
+          },
+          watchdog: {
+            overseer: { enabled: false },
           },
         },
       }),
@@ -2759,5 +2780,163 @@ describe("server/routes/system", () => {
     // record's OWN lease, not a value invented by the route.
     expect(deps.watchdog.onExpectedRestart).toHaveBeenCalledWith({ expiresAt });
     expect(deps.watchdog.onExpectedRestartSettled).toHaveBeenCalledTimes(1);
+  });
+});
+
+// The agent-admin feature toggle mints/removes the bearer token via the REAL
+// token-store (it does not take an fsModule), and buildAgentAdminStatus reads
+// config + token through the REAL fs — so these tests point OPENCLAW_DIR at a
+// throwaway tmpdir and drive real files there, while the mocked deps.fs still
+// serves the config-projection write path exactly as the openai-compat test does.
+describe("server/routes/system agent-admin feature", () => {
+  let tmpDir;
+
+  beforeEach(() => {
+    require("../../lib/server/boot-phase").setBootPhase("ready");
+    tmpDir = nodeFs.mkdtempSync(nodePath.join(os.tmpdir(), "alphaclaw-agent-admin-"));
+  });
+
+  afterEach(() => {
+    nodeFs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  const tokenFilePath = () =>
+    nodePath.join(tmpDir, ".alphaclaw", "agent-admin-token");
+
+  const writeRealToken = (token = "agent-tok") => {
+    nodeFs.mkdirSync(nodePath.dirname(tokenFilePath()), { recursive: true });
+    nodeFs.writeFileSync(tokenFilePath(), `${token}\n`);
+  };
+
+  it("rejects non-boolean agent-admin feature updates with 400", async () => {
+    const deps = createSystemDeps();
+    deps.OPENCLAW_DIR = tmpDir;
+    deps.doSyncPromptFiles = vi.fn();
+    const app = createApp(deps);
+
+    const res = await request(app)
+      .put("/api/alphaclaw/config/features/agent-admin")
+      .send({ enabled: "yes" });
+
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({ ok: false, error: "enabled must be a boolean" });
+    expect(deps.fs.writeFileSync).not.toHaveBeenCalledWith(
+      nodePath.join(tmpDir, "alphaclaw.json"),
+      expect.any(String),
+    );
+    expect(deps.doSyncPromptFiles).not.toHaveBeenCalled();
+    expect(nodeFs.existsSync(tokenFilePath())).toBe(false);
+  });
+
+  it("enables agent-admin, mints a token, and syncs prompt files", async () => {
+    const deps = createSystemDeps();
+    deps.OPENCLAW_DIR = tmpDir;
+    deps.doSyncPromptFiles = vi.fn();
+    const app = createApp(deps);
+
+    const res = await request(app)
+      .put("/api/alphaclaw/config/features/agent-admin")
+      .send({ enabled: true });
+
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+    expect(res.body.config.features.agentAdmin.enabled).toBe(true);
+    // A writable tmpdir mints the token → pending artifacts; unavailable only
+    // if the mint itself fails.
+    expect(["enabled_pending_artifacts", "unavailable"]).toContain(
+      res.body.agentAdmin.state,
+    );
+    // B2 regression: doSyncPromptFiles is now a real route param — before the
+    // fix it was an undefined reference whose ReferenceError was swallowed, so
+    // the sync never ran. It must be invoked exactly once now.
+    expect(deps.doSyncPromptFiles).toHaveBeenCalledTimes(1);
+    // Token really landed in the managed state dir (real fs, not the mock).
+    expect(nodeFs.existsSync(tokenFilePath())).toBe(true);
+  });
+
+  it("disables agent-admin and removes the token", async () => {
+    writeRealToken(); // a pre-existing credential the toggle must revoke
+    const deps = createSystemDeps();
+    deps.OPENCLAW_DIR = tmpDir;
+    deps.doSyncPromptFiles = vi.fn();
+    const app = createApp(deps);
+
+    const res = await request(app)
+      .put("/api/alphaclaw/config/features/agent-admin")
+      .send({ enabled: false });
+
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+    expect(res.body.config.features.agentAdmin.enabled).toBe(false);
+    expect(res.body.agentAdmin.state).toBe("disabled");
+    expect(deps.doSyncPromptFiles).toHaveBeenCalledTimes(1);
+    expect(nodeFs.existsSync(tokenFilePath())).toBe(false);
+  });
+});
+
+// buildAgentAdminStatus is the observable tri-state (A39): the server attests
+// only artifact readiness (flag + token file). It reads through the REAL fs, so
+// these tests seed real config/token files under a tmpdir OPENCLAW_DIR.
+describe("server/routes/system agentAdmin tri-state on GET /api/status", () => {
+  let tmpDir;
+
+  beforeEach(() => {
+    require("../../lib/server/boot-phase").setBootPhase("ready");
+    tmpDir = nodeFs.mkdtempSync(nodePath.join(os.tmpdir(), "alphaclaw-agent-status-"));
+  });
+
+  afterEach(() => {
+    nodeFs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  const writeRealConfig = (config) =>
+    nodeFs.writeFileSync(
+      nodePath.join(tmpDir, "alphaclaw.json"),
+      JSON.stringify(config),
+    );
+
+  const writeRealToken = (token = "agent-tok") => {
+    nodeFs.mkdirSync(nodePath.join(tmpDir, ".alphaclaw"), { recursive: true });
+    nodeFs.writeFileSync(
+      nodePath.join(tmpDir, ".alphaclaw", "agent-admin-token"),
+      `${token}\n`,
+    );
+  };
+
+  it("reports disabled when the feature flag is off", async () => {
+    const deps = createSystemDeps();
+    deps.OPENCLAW_DIR = tmpDir; // fresh tmpdir, no config → default off
+    const app = createApp(deps);
+
+    const res = await request(app).get("/api/status");
+
+    expect(res.status).toBe(200);
+    expect(res.body.agentAdmin).toEqual({ state: "disabled" });
+  });
+
+  it("reports unavailable (token_missing) when the flag is on but no token exists", async () => {
+    writeRealConfig({ features: { agentAdmin: { enabled: true } } });
+    const deps = createSystemDeps();
+    deps.OPENCLAW_DIR = tmpDir;
+    const app = createApp(deps);
+
+    const res = await request(app).get("/api/status");
+
+    expect(res.status).toBe(200);
+    expect(res.body.agentAdmin.state).toBe("unavailable");
+    expect(res.body.agentAdmin.reason).toBe("token_missing");
+  });
+
+  it("reports enabled when the flag is on and a token exists", async () => {
+    writeRealConfig({ features: { agentAdmin: { enabled: true } } });
+    writeRealToken();
+    const deps = createSystemDeps();
+    deps.OPENCLAW_DIR = tmpDir;
+    const app = createApp(deps);
+
+    const res = await request(app).get("/api/status");
+
+    expect(res.status).toBe(200);
+    expect(res.body.agentAdmin).toEqual({ state: "enabled" });
   });
 });

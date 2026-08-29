@@ -1,5 +1,13 @@
 # Gateway State Model
 
+> **Status (2026-08-29):** M2/M3 shipped in v0.9.37. The normative sections
+> (§3–§10) describe what now runs; §2's "as-implemented, pre-M2" survey is
+> historical. Known deviation from the §5 repair-lock matrix: manual repairs
+> currently skip with HTTP 200 `{skipped:true}` instead of queueing — tracked
+> in TODOS.md ("Manual repair should queue on the lifecycle lock, not skip").
+> The plan file referenced below was a working artifact and does not ship in
+> this repo.
+
 Canonical reference for the AlphaClaw gateway state model: the as-implemented state sources (pre-M2), the target unified model (M2), and the restart pipeline (M3). Implementers of M2.2–M3.x and reviewers of those PRs read this file; the plan (`system-instruction-you-are-working-modular-turing.md`) is the approved source — where current code disagrees with the plan, the plan wins and the code is marked "current code:".
 
 **Reading guide.** §2 is descriptive (what exists today, with file:line refs). §3–§10 are normative (what M2/M3 build). The State × UI matrix (§5) is the single source for UI labels, popovers, and notification copy. The precedence table (§4) is the reducer's contract; the reducer test matrix (M2.2) is generated from it.
@@ -42,6 +50,8 @@ stateDiagram-v2
     crash_loop --> running: repair ok forces lifecycle running + health unknown (643-644), or later healthy probe (728, 737-738)
     crash_loop --> crash_loop: repair failed, attempts capped at 2 then paused
     configuration_error --> running: onGatewayLaunch clears the latch (watchdog.js 1143)
+    configuration_error --> restarting: openclaw.json mtime changed — auto-retry, one relaunch per distinct edit (v0.9.43, issue 21 bug 9)
+    configuration_error --> restarting: forward recovery — pin cannot boot, marker written for the blocklisted newer build that owns the migrated state (v0.9.43, issue 21 bug 10, one-shot)
     restarting --> running: onGatewayLaunch or healthy probe
     running --> stopped: stop()
     restarting --> stopped: stop()
@@ -51,6 +61,8 @@ stateDiagram-v2
 ```
 
 Current code (v0.9.39): the exit-78 branch consults the **gateway startup medic** (`gateway-medic.js`, default on via `updates.openclaw.medic.enabled`) after the rollback-eligibility check and before the incident settles. The watchdog enters `configuration_error`, then runs the medic under the gateway lifecycle lock (at most 2 attempts per incident, 5 runs per rolling hour across incidents); a successful repair transitions `configuration_error → restarting` and relaunches, and only when the medic is disabled, rate-limited, lock-contended, or out of remedies does the restart-paused latch notification fire. The diagram above predates the medic and shows only the direct latch path.
+
+Current code (v0.9.43, issue #21): two more ways out of `configuration_error`. (1) **Auto-retry on config change** — every latch site records openclaw.json's mtime (`latchConfigError`); the latched health tick no longer bails blind but watches for a distinct new mtime (operator edit, medic fix, boot restore) and re-arms exactly one relaunch per edit (`maybeRetryAfterConfigChange`); another exit 78 re-latches with the new baseline, so it can never loop. (2) **Forward recovery** — when the PIN itself exits 78 (rollback-ineligible) and a NEWER blocklisted build with a local overlay exists whose blocklist reason implies it owns the migrated state (`config_error`/`config_migration_failed`), the ladder's last resort before the latch asks the channel layer to move FORWARD to it (`requestForwardRecovery`, one-shot via the persisted `forwardRecovery.attemptedId`; a second pin failure sets `noBootableVersion` and latches for good). The gateway card in `config_error` also surfaces the Repair action directly. Kill switches: `OPENCLAW_MIGRATION_GATE=off`, `OPENCLAW_FORWARD_RECOVERY=off`.
 
 Health axis setters:
 

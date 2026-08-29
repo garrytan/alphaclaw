@@ -44,6 +44,7 @@
 - **Prompt Hardening:** Ships anti-drift bootstrap rules as a single merged `hooks/bootstrap/AGENTS.md` injected into your agent's system prompt on every message — enforcing safe practices, commit discipline, and change summaries out of the box on every supported OpenClaw version (existing installs migrate automatically, and a General-tab badge shows whether the rules are actually reaching the agent).
 - **Git Sync:** Automatic hourly commits of your OpenClaw workspace to GitHub with configurable cron schedule. Combined with prompt hardening, every agent action is version-controlled and auditable.
 - **Version Management:** In-place updates for both AlphaClaw and OpenClaw with in-app release notes, changelog review, and one-click apply.
+- **Agent Administration:** Optional (off by default) mode that lets the OpenClaw agent drive the same dashboard API the web UI uses through an `alphaclaw admin` CLI, with tiered guardrails, confirm codes for dangerous operations, a rotatable bearer token, and full Watchdog audit logging.
 - **Codex OAuth:** Built-in PKCE flow for OpenAI Codex CLI model access.
 
 ## Why AlphaClaw
@@ -112,11 +113,30 @@ CMD ["alphaclaw", "start"]
 | **Doctor**    | Drift Doctor workspace health review — LLM scan plus deterministic environment checks and bridged `openclaw doctor` findings, a context-budget meter against OpenClaw's real injection budget, opt-in scheduled scans, and queued fixes |
 | **Nodes**     | Guided local-node setup for VPS deployments, per-node browser attach, reconnect commands, and routing/pairing controls   |
 | **Team**      | Member accounts, invites, roles, and a who's-online roster (beta) — enable wizard applies the gateway change and verifies login end to end |
-| **Watchdog**  | Health monitoring, crash-loop status, auto-repair toggle, notifications, event log, live log tail, interactive terminal  |
+| **Watchdog**  | Health monitoring, live status narrative, incident history, optional AI incident overseer, auto-repair toggle, notifications, event log, live log tail, interactive terminal |
 | **Upgrade**   | OpenClaw versions & release channels — stable/beta/dev catalog, release notes, one-click switch with backup + auto-rollback |
 | **Models**    | AI provider credentials (Anthropic, OpenAI, Gemini, Mistral, Voyage, Groq, Deepgram) and model selection                 |
 | **Envars**    | Environment variables — view, edit, add — with gateway restart prompts                                                   |
 | **Webhooks**  | Webhook endpoints, transform modules, request history, payload inspection, OAuth callbacks, Gmail watch delivery flows   |
+
+## Open Claude Code Launcher
+
+The Monitoring section of the sidebar has an **Open Claude Code** item. Out of the box it opens [claude.ai/code](https://claude.ai/code) in a new tab. Configure it and one click starts a fresh Claude Code cloud session and lands you directly in it.
+
+Setup (one time, on your claude.ai account — requires a Pro/Max/Team/Enterprise plan):
+
+1. Create a routine at [claude.ai/code/routines](https://claude.ai/code/routines). Keep its prompt minimal — something like "Await instructions." — because every fire runs the routine's saved prompt as an **autonomous session** (shell access, no approval prompts) that consumes your claude.ai subscription usage.
+2. Edit the routine → **Add another trigger** → **API** → **Generate token**, then copy the fire URL and the token (shown once).
+3. Paste them into Envars as `CLAUDE_CODE_ROUTINE_URL` (the full URL or just the `trig_…` id) and `CLAUDE_CODE_ROUTINE_TOKEN`. Changes apply immediately — no restart.
+
+Behavior and guardrails:
+
+- The first fire asks for a one-time confirmation; after that it's one click. Cmd/ctrl-click always opens plain claude.ai/code without firing (the escape hatch).
+- A small accent dot on the sidebar item shows when the launcher is armed to fire rather than just link out.
+- The server enforces the confirmation, a single-flight guard, and a short cooldown (longer after a timeout: the fire API has **no idempotency key**, so a timed-out fire may still have created a billed session — check claude.ai/code before retrying).
+- The launcher never sends the token to the browser (status checks are presence-only), the token is excluded from the OpenClaw gateway's child environment, and the fire endpoint is denied to the agent-admin actor. Like every secret in `~/.alphaclaw/.env`, admins can view it in the Envars editor, and a same-host process that can read that file can read it too — the P1 "narrow gatewayEnv secret spread" TODO tracks tightening that class further.
+- Routines belong to one claude.ai account: in multi-admin installs, every admin's click fires (and bills) the token owner's account, and the session URL only opens for someone logged into that account.
+- `CLAUDE_CODE_ROUTINE_TOKEN` is **not** the same as `ANTHROPIC_TOKEN` (the `claude setup-token`), despite the shared `sk-ant-oat01-` prefix — it is a per-routine trigger credential from the claude.ai UI.
 
 ## OpenClaw Release Channels
 
@@ -147,6 +167,26 @@ How it works:
 
 The stable pin in `package.json` remains the recovery floor: whatever happens, a container restart can always fall back to it.
 
+## Agent Administration
+
+Off by default. When you enable `features.agentAdmin` (Setup UI -> General tab, "Agent Administration" panel, or `PUT /api/alphaclaw/config/features/agent-admin`), the OpenClaw agent can administer the deployment on behalf of admin users. It works through an `alphaclaw admin <METHOD> /api/path` CLI that drives the same dashboard HTTP API the web UI uses, so the server owns all validation and side effects. With the flag off, nothing observable changes.
+
+Enabling it regenerates an `alphaclaw-admin` skill into the agent's workspace (rebuilt at boot, effective on the agent's next session) and adds a pointer stanza to the agent's `TOOLS.md`. Operations are tiered: **safe** reads run freely, **write** operations mutate immediately, **restart** operations apply but need a gateway restart, **dangerous** operations require a one-time confirm code delivered to a configured admin channel, and **denied** operations stay operator-only. Every agent mutation is written to the Watchdog event log, and admins are notified of restart-level and dangerous changes. A bearer token (mode `0600`, kept in the managed state dir, never git-synced) authenticates the CLI; rotate it from the panel.
+
+The CLI takes the request body inline or from stdin, plus optional flags for confirm codes, a compact summary, and JSON output:
+
+```bash
+# safe: reads run freely
+alphaclaw admin GET /api/openclaw/runs --json
+
+# write: applies immediately, body from stdin
+echo '{"autoRepair":true}' | alphaclaw admin PUT /api/watchdog/settings --data-stdin
+
+# dangerous: one-time confirm code, delivered to your admin channel
+alphaclaw admin DELETE /api/agents/legacy-bot --confirm ABCD-EFGH
+```
+
+**Honest framing (same convention as team mode).** This is not a security boundary against the agent. The agent already holds these credentials through its gateway environment. Agent Administration exists to keep secrets out of chat transcripts, attribute actions for audit, enable revocation, and add tiered guardrails and structured errors.
 ## Team Access (beta)
 
 The **Team** tab turns a single-password AlphaClaw into a multi-member workspace. It needs the OpenClaw 2026.8.1-beta line (the tab shows "switch to the beta channel to try it" on older builds).
@@ -171,6 +211,8 @@ Team endpoints live under `/api/team` (`enable`, `disable`, `invites`, `members`
 | `alphaclaw telegram topic add --thread <id> --name <text>` | Register a Telegram topic mapping             |
 | `alphaclaw telegram topic create --group <id> --name <text>` | Create a Telegram forum topic and register it |
 | `alphaclaw telegram topics list`                           | List registered, discovered, and stale topics |
+| `alphaclaw admin <METHOD> /api/path`                       | Agent-admin CLI: drive the dashboard API (needs `features.agentAdmin`) |
+| `alphaclaw admin manifest`                                 | Print the agent-admin operation catalog       |
 | `alphaclaw version`                                        | Print version                                 |
 | `alphaclaw help`                                           | Show help                                     |
 
@@ -198,13 +240,16 @@ The built-in watchdog monitors gateway health and recovers from failures automat
 
 | Capability               | Details                                                                |
 | ------------------------ | ---------------------------------------------------------------------- |
-| **Health checks**        | Periodic `openclaw health` with configurable interval                  |
+| **Health checks**        | Periodic HTTP probes of the gateway's `/health` and `/readyz` (120s cadence, 5s while degraded) |
 | **Crash detection**      | Gateway exit events plus an always-on 10s TCP port watcher, with immediate re-checks after every restart/repair |
 | **Crash-loop detection** | Threshold-based (default: 3 crashes in 300s)                           |
 | **Auto-repair**          | Runs `openclaw doctor --fix --yes`, relaunches gateway                 |
 | **Restart handoff**      | OpenClaw-requested restarts (config writes, `/restart`, plugin changes) are consumed as a verified handoff and relaunched promptly without crash accounting — rate-braked at 5 handoff relaunches per hour, after which the normal crash flow takes over (OpenClaw 2026.8.1-beta) |
-| **Notifications**        | Telegram, Discord, Slack, and WhatsApp alerts for crashes, repairs, and recovery |
-| **Event log**            | SQLite-backed incident history with API and UI access                  |
+| **Live narration**       | Plain-language "what is happening / why / what happens next" with live countdowns (backoff, grace windows, the 10-min rollback clock) and honest suppression chips |
+| **Incident history**     | Persisted, grouped incidents (open → resolved/abandoned) with humanized event timelines, plus the raw SQLite event feed |
+| **Incident overseer**    | Optional (default off): a local Claude Code review of each settled incident — advisory verdict + suggested next action; deterministic recovery stays in charge. When enabled, redacted incident evidence is sent to the Anthropic API |
+| **Notifications**        | Telegram, Discord, Slack, and WhatsApp alerts for crashes, repairs, and recovery, with links to the Watchdog page (the optional overseer's verdict notification deep-links to the exact incident) |
+| **Event log**            | SQLite-backed incident + event history with API and UI access          |
 
 ## Environment Variables
 
@@ -218,6 +263,8 @@ The built-in watchdog monitors gateway health and recovers from failures automat
 | `DISCORD_BOT_TOKEN`               | Optional | Discord bot token                                  |
 | `SLACK_BOT_TOKEN`                 | Optional | Slack bot token (Socket Mode)                      |
 | `WATCHDOG_AUTO_REPAIR`            | Optional | Enable auto-repair on crash (`true`/`false`)       |
+| `CLAUDE_CODE_ROUTINE_URL`         | Optional | Claude Code routine fire URL (or `trig_…` id) from claude.ai/code/routines — powers the sidebar launcher |
+| `CLAUDE_CODE_ROUTINE_TOKEN`       | Optional | Per-routine API-trigger token (`sk-ant-oat01-…`); the launcher keeps it server-side and out of the gateway child env |
 | `WATCHDOG_NOTIFICATIONS_DISABLED` | Optional | Disable watchdog notifications (`true`/`false`)    |
 | `PORT`                            | Optional | Server port (default `3000`)                       |
 | `ALPHACLAW_ROOT_DIR`              | Optional | Data directory (default `/data`)                   |
@@ -269,8 +316,8 @@ If you need OpenClaw's full security posture (manual pairing codes, no query-str
 
 Release history lives in [CHANGELOG.md](CHANGELOG.md); contributor setup and
 test tiers are in [CONTRIBUTING.md](CONTRIBUTING.md); open work is tracked in
-[TODOS.md](TODOS.md); design documents (gateway state model, the OpenClaw
-context contract, Telegram topics discovery) live in
+[TODOS.md](TODOS.md); design documents (Agent Administration, gateway state
+model, the OpenClaw context contract, Telegram topics discovery) live in
 [docs/designs/](docs/designs/); architecture notes and conventions for coding
 agents are in [AGENTS.md](AGENTS.md).
 
@@ -287,6 +334,15 @@ npm run test:coverage   # Coverage report
 npm run test:live       # catalog + real stable/beta package applies (~5 min, network)
 npm run test:live:dev   # dev-channel source build only (20-35 min, ~5 GB disk);
                         # does not re-run the catalog/apply tiers above
+npm run test:ui         # Browser UI smoke of the Upgrade page: real server +
+                        # headless Chromium asserting the rendered DOM (opt-in;
+                        # needs network for the version catalog; self-skips
+                        # unless a browse CLI is present — set BROWSE_BIN)
+npm run test:ui:claude-code   # Browser smoke of the Open Claude Code launcher
+                        # (opt-in; same real-server + Chromium harness)
+npm run test:live:claude-code # Fires the REAL configured routine end-to-end —
+                        # BILLS one claude.ai session; needs CLAUDE_CODE_ROUTINE_URL
+                        # / CLAUDE_CODE_ROUTINE_TOKEN + CLAUDE_CODE_LIVE_FIRE=1
 ```
 
 The live tiers also run in CI on a schedule (`.github/workflows/live-e2e.yml`):

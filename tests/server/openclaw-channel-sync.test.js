@@ -1029,6 +1029,99 @@ describe("server/openclaw-channel-sync", () => {
         expect(fs.statSync(recorded.file).size).toBeGreaterThan(0);
       });
 
+      // Issue #21 bug 6: a config-broken box cannot discover workspaces, so
+      // `backup create` fails and the one action that could move the box to a
+      // build that understands the migrated config was blocked. The CLI names
+      // the escape hatch — pass it.
+      const kWorkspaceFailTail =
+        "Error: Config invalid at $OPENCLAW_HOME/.openclaw/openclaw.json.\n" +
+        "OpenClaw cannot reliably discover custom workspaces for backup.\n" +
+        "Fix the config or rerun with --no-include-workspace for a partial backup.\n";
+      const workspaceFailRunner = async (opts, fallback) => {
+        if (
+          opts.command === "openclaw" &&
+          opts.args?.[0] === "backup" &&
+          !opts.args.includes("--no-include-workspace")
+        ) {
+          return { ok: false, code: 1, tail: kWorkspaceFailTail, timedOut: false };
+        }
+        return fallback(opts);
+      };
+      const backupInvocations = (harness) =>
+        harness.runner.runStreamed.mock.calls
+          .map((call) => call[0])
+          .filter((opts) => opts.command === "openclaw" && opts.args?.[0] === "backup");
+
+      it("retries a workspace-discovery backup failure with --no-include-workspace and records backup.partial", async () => {
+        const harness = mkHarness({ runnerImpl: workspaceFailRunner });
+
+        const result = await harness.sync.applyUpdate(hardGateTarget);
+        await flushAsync();
+
+        expect(result.status).toBe(202);
+        const backups = backupInvocations(harness);
+        expect(backups).toHaveLength(2);
+        expect(backups[0].args).not.toContain("--no-include-workspace");
+        expect(backups[1].args).toContain("--no-include-workspace");
+        // Fresh output filename on the retry — the CLI refuses to overwrite.
+        const outOf = (opts) => opts.args[opts.args.indexOf("--output") + 1];
+        expect(outOf(backups[1])).not.toBe(outOf(backups[0]));
+        const recorded = harness.store.readState().backups[0];
+        expect(recorded).toEqual(
+          expect.objectContaining({ partial: true, verified: true }),
+        );
+        expect(fs.statSync(recorded.file).size).toBeGreaterThan(0);
+        expect(
+          harness.notify.mock.calls.some(
+            (call) =>
+              String(call[1]?.id || "").startsWith("backup-partial-") &&
+              /WITHOUT workspace files/.test(String(call[0])),
+          ),
+        ).toBe(true);
+      });
+
+      it("hard-gates still pass on a partial backup for downgrades (honestly marked)", async () => {
+        const harness = createHarness({
+          pin: "1.2.0",
+          installedVersion: "1.2.0",
+          sentinelVersion: "1.2.0",
+          runnerImpl: workspaceFailRunner,
+        });
+        const result = await harness.sync.applyUpdate({
+          channel: "stable",
+          version: "1.1.0",
+        });
+        expect(result.status).toBe(202);
+        expect(harness.store.readState().backups[0].partial).toBe(true);
+      });
+
+      it("does not retry when the backup failure is unrelated (ENOSPC)", async () => {
+        const enospcRunner = async (opts, fallback) => {
+          if (opts.command === "openclaw" && opts.args?.[0] === "backup") {
+            return {
+              ok: false,
+              code: 1,
+              tail: "Error: ENOSPC: no space left on device\n",
+              timedOut: false,
+            };
+          }
+          return fallback(opts);
+        };
+        const harness = createHarness({
+          pin: "1.2.0",
+          installedVersion: "1.2.0",
+          sentinelVersion: "1.2.0",
+          runnerImpl: enospcRunner,
+        });
+        const result = await harness.sync.applyUpdate({
+          channel: "stable",
+          version: "1.1.0",
+        });
+        expect(result.status).toBe(409);
+        expect(result.body.code).toBe("backup_failed");
+        expect(backupInvocations(harness)).toHaveLength(1);
+      });
+
       it("#7: a legacy archive FILE at the backups path is migrated in and the update succeeds", async () => {
         const harness = mkHarness();
         const backupsDir = backupsDirOf(harness);

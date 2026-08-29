@@ -5,7 +5,7 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
-## [0.9.40] - 2026-08-29
+## [0.9.45] - 2026-08-29
 
 Drift Doctor now understands how the installed OpenClaw actually injects
 workspace context — verified against the real 2026.7 stable and 2026.8.1 beta
@@ -83,6 +83,294 @@ you to click Run.
   as the real gateway behaves — each cited to the package source.
 - **The upgrade overseer reads doctor output correctly on stable**
   (`doctor --lint --json`, honoring the exit-code contract).
+
+## [0.9.44] - 2026-08-29
+
+The sidebar gains an "Open Claude Code" launcher: one click starts a fresh
+Claude Code cloud session on claude.ai and opens it in a new tab — or, until
+you configure it, simply takes you to claude.ai/code.
+
+### Added
+- **Open Claude Code launcher** (Monitoring section of the sidebar): when a
+  Claude Code routine fire URL and per-routine token are configured in Envars
+  (`CLAUDE_CODE_ROUTINE_URL`, `CLAUDE_CODE_ROUTINE_TOKEN`), clicking the item
+  fires your routine through Anthropic's experimental routine-fire API and
+  opens the returned `claude.ai/code/session_…` in a new tab, with a live
+  interstitial while the session starts. Unconfigured, the item is a plain
+  link to claude.ai/code — always useful, never a dead click. Because a fire
+  starts an autonomous run that consumes your claude.ai subscription usage,
+  the first fire asks for a one-time confirmation (remembered per browser),
+  the server enforces that consent plus a single-flight guard and a short
+  cooldown, and cmd/ctrl-click always opens plain claude.ai/code without
+  firing. The launcher never sends the token to the browser (its status
+  endpoint is presence-only; like every Envars secret, admins can still view
+  it in the Envars editor), the token is excluded from the OpenClaw gateway's
+  child environment, and the fire endpoint is denied to the agent-admin
+  actor; config changes apply live without a restart.
+
+## [0.9.43] - 2026-08-29
+
+A beta upgrade can no longer brick a box (issues #21, #22, #23). The root
+incident: a config-migration timeout let the new build boot anyway, one-way
+migrate the config and state DB, then roll back to a pin that could read
+neither — with every notification about it dropped. Every link in that chain
+is now fixed, plus the exec-approvals regression that took down all channels
+on sqlite-era OpenClaw.
+
+### Fixed
+- **Migration hard gate (#21 bug 2, the critical one)**: a failed boot-time
+  `doctor --fix` on a freshly applied build now aborts BEFORE that build ever
+  runs — the previous version is re-activated, its pre-migration settings are
+  restored, and the new build is blocklisted (`config_migration_failed`) with
+  a Clear-to-retry path. The gate preflights its own revert target and stays
+  forward when a part-migrated state DB makes reverting the more dangerous
+  move. Kill switch: `OPENCLAW_MIGRATION_GATE=off`.
+- **Migration timeout (#21 bug 1)**: the hard 120s `doctor --fix` timeout is
+  now tunable (`OPENCLAW_DOCTOR_MIGRATION_TIMEOUT`, default 10 min), scales
+  with state-DB size, and is capped at 12 min — under the boot placeholder's
+  15-minute health ceiling so the platform can never kill a migration
+  mid-flight. Doctor output is captured (secret-redacted) into the warning,
+  the notification, and `configMigration.lastAttempt.error`; timeouts kill
+  with SIGKILL so a lingering doctor can't hold locks.
+- **Rollback compatibility (#21 bug 3)**: boot rollback markers now preflight
+  EVERY candidate target — package targets AND the pin — against a snapshot
+  of the state DBs (copy-per-probe), plus an `agents.entries` config-shape
+  guard. A blocked target reroutes to the next compatible candidate; when
+  nothing can read the migrated state the rollback is REFUSED (the
+  blocked-but-compatible build keeps running under the watchdog latch) with
+  the newest backup archive named as the manual recovery path.
+- **Crash-rollback config restore (#21 bug 4)**: rolling back to a version
+  now restores its `openclaw.json.pre-fix-<version>.bak` even when the
+  migration bookkeeping already points at that version — the exact blind
+  spot that kept the #21 box unbootable. Pre-fix backup write failures are
+  surfaced instead of swallowed, and the backup is never named after the
+  version being migrated to.
+- **Pin last-known-good (#21 bug 5)**: a pin-only box now promotes the
+  healthy pin to `lastKnownGood.package` after the 120s health hold (with a
+  disk-checked overlay snapshot), so later rollbacks have a real target.
+- **Backup escape hatch (#21 bug 6)**: when `backup create` fails because a
+  broken config prevents workspace discovery, the backup retries once with
+  `--no-include-workspace` into a fresh archive, recorded and announced as
+  `partial` — config and state databases are still included.
+- **Deliverable notifications (#21 bug 7)**: the Telegram bot token now also
+  resolves from `openclaw.json` (fresh onboardings store it there, not in
+  `.env`), and fan-out falls back to numeric `channels.telegram.allowFrom`
+  chat IDs when no pairing files exist — the two gaps behind
+  `no_channels_delivered`. The outbox retries with exponential backoff for
+  48 hours instead of giving up after 5 attempts, and an abandoned event is
+  persisted as a `notification_abandoned` watchdog event. New out-of-band
+  webhook channel (`ALPHACLAW_NOTIFY_WEBHOOK_URL`) posts critical events
+  directly — including straight from the boot process for gate reverts,
+  refused rollbacks, and forward recovery, when no server is up to drain the
+  outbox.
+- **Intentional restarts (#21 bug 8 / #22)**: container restarts now exit
+  with the dedicated code 75 (EX_TEMPFAIL) so supervising wrappers can
+  relaunch immediately instead of falling to a failure page, and the
+  lifecycle latches its exiting state before the restart drain (a SIGTERM in
+  that window no longer races a second drain). Companion template-repo
+  change supervises `alphaclaw start` instead of `exec`-ing the failure
+  server.
+- **EX_CONFIG latch (#21 bug 9)**: while latched, the watchdog now watches
+  `openclaw.json` and re-arms exactly one relaunch per distinct config edit
+  (operator fix, medic repair, boot restore) instead of staying inert until
+  a container restart; the gateway card in `config_error` now surfaces the
+  Repair action that force-clears the latch.
+- **No bootable version (#21 bug 10)**: when the pin itself cannot boot and
+  a newer blocklisted build with a local overlay owns the migrated state,
+  the watchdog performs a one-shot FORWARD recovery to that build (audited,
+  never ping-pongs; kill switch `OPENCLAW_FORWARD_RECOVERY=off`). If that
+  also fails, a persisted `noBootableVersion` flag drives an unmissable
+  banner and notification instead of a silent dead box.
+- **Legacy exec-approvals (#23)**: AlphaClaw no longer recreates
+  `exec-approvals.json` on OpenClaw ≥ 2026.9.1-beta.1 (where its mere
+  existence fails all channels, cron, and heartbeat closed) — the managed
+  seeding is skipped when the SQLite `exec_approvals_config` backend is
+  detected, a stray legacy file is renamed aside at boot, and the
+  exec-approvals dashboard routes go through `openclaw approvals get/set`
+  on CLI-capable builds.
+
+## [0.9.42] - 2026-08-29
+
+The Watchdog tab now explains itself: a live narrative of what the watchdog
+is doing and why, a persisted incident history that groups raw events into
+readable stories, and an optional AI overseer that reviews each settled
+incident and tells you whether anything still needs your attention.
+
+### Added
+- **Live status narrative**: a card under the Gateway card that says in plain
+  language what is happening right now — "Degraded for 6m — probe returned
+  HTTP 503. Repair attempt 1 of 2 running. Auto-rollback in 3m 48s if not
+  recovered." — with live countdowns for backoff, grace, and rollback
+  deadlines, and an amber chip when auto-repair is paused by a stabilization
+  window (the toggle keeps showing what you configured; the chip shows what
+  is actually in effect).
+- **Incident history**: gateway trouble is now recorded as incidents —
+  opened on the first crash, failed probe, config error, release rollback,
+  or safe-mode entry, and closed on recovery — instead of a flat event log. Incident cards carry
+  a severity badge, a deterministic title ("Crash loop → rolled back ·
+  resolved in 8m"), and an expandable event timeline; the active incident is
+  pinned and pulsing. Older incidents page in with "Load more"; an "All
+  events" tab keeps the raw feed with a routine-probe filter. Incidents
+  survive restarts (an interrupted one is marked abandoned honestly) and
+  the overseer's verdict notifications deep-link straight to the incident
+  card.
+- **Incident overseer** (optional, off by default): after an incident
+  settles and the gateway is healthy again, a local Claude Code review is
+  recorded on the incident — a verdict (resolved / monitoring / action
+  needed), a plain-language summary, and a recommended action that surfaces
+  as the matching button (repair, restart, resume channels) only while it is
+  still applicable. Includes a "Review now" button, verdict chips on
+  incident cards, and one deduplicated notification per incident with a
+  "View incident" link. Advisory only: the deterministic watchdog remains
+  the sole recovery authority. When enabled, redacted gateway logs, incident
+  records, and doctor output are sent to the Anthropic API; the review runs
+  with secrets redacted from both the prompt and the model's output, in an
+  isolated environment with tools disabled (and is skipped entirely if that
+  restriction can't be verified or the secret-redaction sources can't be
+  read).
+- **Status detail rows**: last probe time and failure reason, degraded
+  duration, crash count against the crash-loop window, repair attempts,
+  gateway PID, and last-exit details — all from data the server already had.
+- **Resource telemetry**: event-loop lag percentiles (with a help tooltip)
+  and unhandled-rejection counts now render alongside the memory/disk/CPU
+  bars, with warning colors at sustained thresholds.
+
+### Changed
+- Watchdog cards reordered by usefulness: status → narrative → overseer →
+  incidents → backup → console → resources → settings.
+- The auto-repair toggle now tracks the live status stream, so a change made
+  elsewhere (another tab, environment) converges without a reload — and a
+  just-saved value never snaps back under a stale frame.
+- Incident list responses slimmed for the 15s poll; full evidence snapshots
+  stay on the incident detail read.
+- Failed API errors surface the server's human-readable message instead of a
+  bare code.
+
+### Fixed
+- Relative times and countdowns pause while the tab is hidden and stay
+  correct under clock skew in either direction.
+- Skipped health probes during grace/restart windows can no longer close an
+  incident early; planned restarts never open one.
+- Incident review requests return honest statuses (404 unknown incident,
+  429 rate-limited, 503 reviewer infrastructure unavailable) with
+  human-readable messages.
+## [0.9.41] - 2026-08-29
+
+### Added
+- **Agent Administration (`features.agentAdmin`, default OFF).** The OpenClaw
+  agent can now administer this AlphaClaw deployment on behalf of admin users —
+  env vars, channels, agents, cron, webhooks, models, updates, watchdog, team —
+  through an `alphaclaw admin <METHOD> /api/path` CLI backed by a manifest-
+  described, tier-enforced view of the existing dashboard API. When enabled, a
+  bearer token is minted (0600, state-dir, never git-synced), an
+  `alphaclaw-admin` skill is generated into the workspace, and a pointer stanza
+  is added to the agent's `TOOLS.md`. Operations are classified `safe` /
+  `write` / `restart` / `dangerous` / `denied`; dangerous operations require a
+  one-time confirm code delivered to a configured admin channel; every
+  agent-driven mutation is audited to `watchdog.db` and admins are notified of
+  restart-level and dangerous changes. **No observable change to existing
+  functionality with the flag off** (no token, no skill, no `TOOLS.md` stanza;
+  `/api/admin/*` returns 404). Enable it in Setup UI → General.
+- **Config write hardening.** `alphaclaw.json` writes now go through a locked,
+  atomic read-modify-write helper (`updateAlphaclawConfig`); `.env` writes are
+  atomic (temp+rename) with a locked `updateEnvFile` helper available for
+  callers; and `alphaclaw.json` is git-synced (README parity).
+
+### Security
+- The Agent Administration bearer path is opt-in per call site: it authorizes
+  only Express `/api` requests, never WebSocket upgrades (watchdog terminal,
+  chat) or the human-only cookie surfaces. It uses a separate rate-limit scope
+  from the dashboard login, so agent-bearer failures can never lock an operator
+  out. Documented honestly: this is not a security boundary against the agent
+  (which already holds these credentials via the gateway env) — it exists for
+  audit attribution, revocation, transcript hygiene, and tiered guardrails.
+
+## [0.9.40] - 2026-08-29
+
+Best-of-breed toggles, status, and errors across the entire Setup UI: a
+22-agent audit confirmed 119 instances (~112 unique sites) of one defect
+class — pessimistic toggles that visually snap back, silent or toast-only
+failures, stale responses clobbering user actions, fetch-hostage cards, and
+loading/error/empty states conflated — and every instance is fixed on shared
+primitives.
+
+### Added
+- **`useSavedSetting`** (`lib/public/js/hooks/use-saved-setting.js`): the one
+  persisted-setting loop — optimistic apply with loud inline revert,
+  generation-guarded hydration (an in-flight GET can never clobber a user
+  action, even landing after the save), synchronous save lock, entity `key`
+  scoping with render-gated resets, load-failure state with Retry (a failed
+  GET never presents the default as fact), reconcile-on-ambiguous-failure
+  (a rejected fetch doesn't prove the PUT failed — the UI converges to server
+  truth), canonical response adoption via `selectSaved`, cache seeding via
+  `cacheKey` (instant remounts, no background revalidation of user-mutable
+  state), functional commits, and a `{ ok, error, value }` outcome contract.
+- **`SavedToggle`**, **`InlineErrorChip`**, **`AsyncSection`** shared
+  components: house labels ("Saving...", "Loading...") with `aria-busy`,
+  persistent inline error chips (`role=status aria-live=polite`) for anything
+  that reverts, and standard loading / error(+Retry) / empty region states.
+- AGENTS.md "Persisted settings and mutation feedback" conventions section.
+- Browser smoke coverage for the founding bug: the Overseer toggle must flip
+  instantly, never snap back, and persist across reload
+  (`tests/browser/upgrade-ui-smoke.sh`).
+
+### Fixed
+- **Overseer toggle** (the founding bug): flips instantly with a "Saving..."
+  state and reverts loudly inline on failure; stale settings responses can no
+  longer overwrite the operator's choice; the card renders immediately instead
+  of waiting for the availability probe, which is now warmed at server boot
+  (`upgrade-overseer.start()`), and the dead `runs` fallback that refetched
+  settings on every runs refresh is gone.
+- **`api-cache.js` force/in-flight bug** (hit channels, gmail watch, envars,
+  nodes): a forced post-mutation refresh could be satisfied by — or
+  overwritten by — a request dispatched before the mutation. Reads and writes
+  are now generation-guarded; a superseded request can neither be deduped
+  onto nor overwrite newer cache state, and `invalidateCache` makes in-flight
+  requests unusable for dedupe.
+- **`useCachedFetch`**: inline-lambda fetchers no longer re-trigger the mount
+  fetch every render (fetcher held in a ref), and hook-local state is
+  latest-request-wins so an older refresh resolving late cannot overwrite
+  newer data.
+- **Upgrade page**: a failed apply no longer leaves the entire page dead —
+  the failed progress card has a Dismiss affordance that re-enables all
+  controls; channel/catalog loads are latest-request-wins (a just-cleared
+  blocklist entry can no longer flash back); a failed "Check now" shows an
+  inline warning instead of silently keeping stale data; mark-good/rollback/
+  blocklist failures render persistent inline chips instead of transient
+  toasts; the channel card renders immediately with the picker visible
+  (cache-backed remounts) instead of a page-blanking loading shell; channel
+  saves refresh the shared /api/status so the sidebar footer updates
+  immediately.
+- **All remaining audited sites** across watchdog, agents, cron, google,
+  general, team, channels, telegram-workspace, providers, models, envars,
+  nodes, webhooks, file-viewer, onboarding, usage, doctor, pairings, and the
+  sidebar git panel: persisted toggles/selects are optimistic with inline
+  reverts, per-row actions show per-row pending states, list panes distinguish
+  loading from failed from empty, fetch errors never masquerade as confident
+  defaults, background refreshes never overwrite unsaved drafts, and
+  mutations invalidate the caches their consumers read. Disabled toggles and
+  subtle/neutral/warning buttons now look disabled (`cursor: not-allowed`,
+  reduced opacity). The unreferenced legacy `components/models.js` is deleted.
+- **Models tab can no longer be blanked by a transient server error:** an
+  HTTP error response is treated as an error instead of being adopted as
+  empty configuration — your configured models, profiles, and provider order
+  stay put (and the error is shown) until a refresh succeeds. The same guard
+  keeps a failed Codex status check from fabricating "not connected" and a
+  failed thinking-options fetch from leaving the previous model's levels
+  selectable.
+- **Watchdog settings saves are narrower:** each toggle now writes only its
+  own setting, so flipping notifications can no longer overwrite an
+  auto-repair change made meanwhile from another tab or the CLI.
+
+### Security
+- Error-envelope documentation links only render as clickable anchors for
+  http(s) URLs — a hostile `docsUrl` in an upstream error can no longer
+  inject `javascript:` links into the UI.
+- The overseer's boot-time `claude --version` availability probe (and
+  `--help` flag discovery) no longer receive `ANTHROPIC_API_KEY`; only real
+  overseer runs get the credential. Concurrent cold probes are also
+  single-flighted.
+
 
 ## [0.9.39] - 2026-08-29
 
@@ -399,6 +687,7 @@ and proxied API writes no longer hang.
 - Graceful shutdown drains in order (watchdog → HTTP → gateway → gmail →
   terminal → service disposal → log flush) within a 10s deadline; SIGTERM,
   self-update restarts, and crash exits all route through the same path.
+
 
 ## [0.9.35] - 2026-08-27
 

@@ -1,0 +1,3 @@
+Team mode turns on named operators and manages the operator roster so actions get attributed to a person instead of a single shared login. Treat this as attribution only — it is NOT a security boundary; anyone reaching the gateway can still claim an operator identity.
+
+Toggling team mode on or off is the dangerous operation: it transitions the gateway auth mode (snapshot -> trusted-proxy config -> restart -> identity probe, with auto-restore on failure), so the gateway restarts and in-flight requests drop. Editing operators replaces the whole roster in one PUT, and you cannot leave zero operators while team mode is enabled — disable team mode first.

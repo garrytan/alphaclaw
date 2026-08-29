@@ -17,6 +17,7 @@ const createCacheStub = () => ({
 
 const createModelDeps = () => ({
   shellCmd: vi.fn(async () => ""),
+  execFileCmd: vi.fn(async () => ""),
   gatewayEnv: vi.fn(() => ({ OPENCLAW_GATEWAY_TOKEN: "token" })),
   parseJsonFromNoisyOutput: vi.fn(() => ({})),
   normalizeOnboardingModels: vi.fn(() => []),
@@ -180,7 +181,7 @@ describe("server/routes/models coverage", () => {
 
   it("returns 400 when openclaw models set fails", async () => {
     const deps = createModelDeps();
-    deps.shellCmd.mockRejectedValue(new Error("set failed"));
+    deps.execFileCmd.mockRejectedValue(new Error("set failed"));
     const app = createApp(deps);
 
     const res = await request(app)
