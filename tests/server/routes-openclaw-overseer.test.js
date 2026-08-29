@@ -239,37 +239,65 @@ describe("server/routes/openclaw-channel overseer + sqlite backup", () => {
 
 describe("server/routes/openclaw-channel createSqliteBackupRunner", () => {
   const kRepoDir = "/data/backups/openclaw-sqlite";
+  const kOpenclawDir = "/data/.openclaw";
   const kSnapshotPath = `${kRepoDir}/global-2026-08-29T00-00-00`;
   // Real beta create --json report shape: pretty-printed, no envelope.
-  const kCreateReportTail = JSON.stringify(
-    { ok: true, snapshotPath: kSnapshotPath, manifest: { artifact: {} } },
-    null,
-    2,
-  );
+  const makeCreateReportTail = (snapshotPath) =>
+    JSON.stringify(
+      { ok: true, snapshotPath, manifest: { artifact: {} } },
+      null,
+      2,
+    );
+  const kCreateReportTail = makeCreateReportTail(kSnapshotPath);
+  // Explicit empty roster: the runner targets ONLY the global DB — the
+  // single-database scenarios below use it to stay single-database.
+  const kGlobalOnlyConfig = { agents: { entries: {} } };
 
-  const makeRunner = ({ results, timeoutMs = 10_000 }) => {
+  // `config` is the parsed openclaw.json the runner reads for the agent
+  // roster; leaving it undefined simulates a missing/unreadable config
+  // (→ global + implicit "main").
+  const makeRunner = ({ results, timeoutMs = 10_000, config }) => {
     const calls = [];
     const runStreamed = vi.fn(async (opts) => {
       calls.push(opts);
       return results[calls.length - 1];
     });
-    const fsModule = { mkdirSync: vi.fn() };
+    const fsModule = {
+      mkdirSync: vi.fn(),
+      readFileSync: vi.fn((filePath) => {
+        expect(filePath).toBe(path.join(kOpenclawDir, "openclaw.json"));
+        if (config === undefined) throw new Error("ENOENT");
+        return JSON.stringify(config);
+      }),
+    };
     const getEnv = vi.fn(() => ({ OPENCLAW_TEST: "1" }));
     const run = createSqliteBackupRunner({
       runStreamed,
       getEnv,
       fsModule,
+      openclawDir: kOpenclawDir,
       repositoryDir: kRepoDir,
       timeoutMs,
     });
     return { run, calls, runStreamed, fsModule, getEnv };
   };
 
-  it("creates into the repository dir, then verifies the parsed snapshotPath", async () => {
+  // One passing create+verify result pair for the given create report tail.
+  const okPair = (createTail) => [
+    { ok: true, code: 0, timedOut: false, tail: createTail },
+    { ok: true, code: 0, timedOut: false, tail: '{\n  "ok": true\n}' },
+  ];
+
+  it("creates+verifies every database: global first, then each entries-map agent", async () => {
+    const snapMain = `${kRepoDir}/agent-main-2026-08-29T00-00-01`;
+    const snapResearch = `${kRepoDir}/agent-research-2026-08-29T00-00-02`;
     const { run, calls, fsModule, getEnv } = makeRunner({
+      config: { agents: { entries: { main: {}, research: {} } } },
+      timeoutMs: 30_000,
       results: [
-        { ok: true, code: 0, timedOut: false, tail: kCreateReportTail },
-        { ok: true, code: 0, timedOut: false, tail: '{\n  "ok": true\n}' },
+        ...okPair(kCreateReportTail),
+        ...okPair(makeCreateReportTail(snapMain)),
+        ...okPair(makeCreateReportTail(snapResearch)),
       ],
     });
     const result = await run();
@@ -277,35 +305,137 @@ describe("server/routes/openclaw-channel createSqliteBackupRunner", () => {
     expect(fsModule.mkdirSync).toHaveBeenCalledWith(kRepoDir, {
       recursive: true,
     });
-    expect(calls[0].command).toBe("openclaw");
-    expect(calls[0].args).toEqual([
+    expect(calls).toHaveLength(6);
+    for (const call of calls) expect(call.command).toBe("openclaw");
+    const createArgs = (scopeArgs) => [
       "backup",
       "sqlite",
       "create",
-      "--global",
+      ...scopeArgs,
       "--repository",
       kRepoDir,
       "--json",
-    ]);
-    expect(calls[1].command).toBe("openclaw");
-    expect(calls[1].args).toEqual([
+    ];
+    const verifyArgs = (snapshotPath) => [
       "backup",
       "sqlite",
       "verify",
-      kSnapshotPath,
+      snapshotPath,
       "--json",
+    ];
+    expect(calls.map((call) => call.args)).toEqual([
+      createArgs(["--global"]),
+      verifyArgs(kSnapshotPath),
+      createArgs(["--agent", "main"]),
+      verifyArgs(snapMain),
+      createArgs(["--agent", "research"]),
+      verifyArgs(snapResearch),
     ]);
-    // Both steps stay inside the single backup budget: 80% create, remainder
-    // verify.
-    expect(calls[0].timeoutMs).toBe(8000);
-    expect(calls[1].timeoutMs).toBe(2000);
-    expect(getEnv).toHaveBeenCalledTimes(2);
+    // The single backup budget is split fairly across the 3 databases
+    // (30s / 3 = 10s each), then 80% create / remainder verify within each.
+    expect(calls.map((call) => call.timeoutMs)).toEqual([
+      8000, 2000, 8000, 2000, 8000, 2000,
+    ]);
+    expect(getEnv).toHaveBeenCalledTimes(6);
     expect(result.ok).toBe(true);
-    expect(result.snapshotPath).toBe(kSnapshotPath);
+    // Top-level snapshotPath keeps the pre-existing shape: the last success.
+    expect(result.snapshotPath).toBe(snapResearch);
+    expect(result.databases).toEqual([
+      { target: "global", ok: true, step: "verify", snapshotPath: kSnapshotPath, code: 0, timedOut: false },
+      { target: "agent:main", ok: true, step: "verify", snapshotPath: snapMain, code: 0, timedOut: false },
+      { target: "agent:research", ok: true, step: "verify", snapshotPath: snapResearch, code: 0, timedOut: false },
+    ]);
+    expect(result.tail).toContain(
+      "Verified 3/3 databases: global, agent:main, agent:research.",
+    );
+  });
+
+  it("an agent verify failure fails the whole backup, naming the agent and the unattempted targets", async () => {
+    const snapMain = `${kRepoDir}/agent-main-2026-08-29T00-00-01`;
+    const { run, calls } = makeRunner({
+      config: { agents: { entries: { main: {}, aux: {} } } },
+      results: [
+        ...okPair(kCreateReportTail),
+        { ok: true, code: 0, timedOut: false, tail: makeCreateReportTail(snapMain) },
+        { ok: false, code: 1, timedOut: false, tail: "artifact hash mismatch" },
+      ],
+    });
+    const result = await run();
+
+    // Stops at the first failure: agent:aux is never attempted.
+    expect(calls).toHaveLength(4);
+    expect(result.ok).toBe(false);
+    expect(result.step).toBe("verify");
+    expect(result.snapshotPath).toBe(snapMain);
+    expect(result.tail).toContain("database agent:main");
+    expect(result.tail).toContain("verify FAILED");
+    expect(result.tail).toContain("artifact hash mismatch");
+    expect(result.tail).toContain(
+      "Databases not attempted after this failure: agent:aux.",
+    );
+    expect(result.databases).toEqual([
+      { target: "global", ok: true, step: "verify", snapshotPath: kSnapshotPath, code: 0, timedOut: false },
+      { target: "agent:main", ok: false, step: "verify", snapshotPath: snapMain, code: 1, timedOut: false },
+      { target: "agent:aux", ok: false, step: "skipped", snapshotPath: null, code: null, timedOut: false },
+    ]);
+  });
+
+  it("a roster-less config backs up global + the implicit sole agent 'main'", async () => {
+    const snapMain = `${kRepoDir}/agent-main-2026-08-29T00-00-01`;
+    const { run, calls } = makeRunner({
+      config: {},
+      results: [...okPair(kCreateReportTail), ...okPair(makeCreateReportTail(snapMain))],
+    });
+    const result = await run();
+
+    expect(calls).toHaveLength(4);
+    expect(calls[2].args).toContain("--agent");
+    expect(calls[2].args).toContain("main");
+    // 10s budget over 2 databases: 5s each, 80/20 within each.
+    expect(calls.map((call) => call.timeoutMs)).toEqual([4000, 1000, 4000, 1000]);
+    expect(result.ok).toBe(true);
+    expect(result.databases.map((db) => db.target)).toEqual([
+      "global",
+      "agent:main",
+    ]);
+  });
+
+  it("an unreadable openclaw.json falls back to global + 'main'", async () => {
+    const snapMain = `${kRepoDir}/agent-main-2026-08-29T00-00-01`;
+    const { run, calls } = makeRunner({
+      // config undefined → readFileSync throws.
+      results: [...okPair(kCreateReportTail), ...okPair(makeCreateReportTail(snapMain))],
+    });
+    const result = await run();
+
+    expect(calls).toHaveLength(4);
+    expect(result.ok).toBe(true);
+    expect(result.databases.map((db) => db.target)).toEqual([
+      "global",
+      "agent:main",
+    ]);
+  });
+
+  it("reads agent ids from an agents.list roster, trimming and dropping blanks", async () => {
+    const snapAlpha = `${kRepoDir}/agent-alpha-2026-08-29T00-00-01`;
+    const { run, calls } = makeRunner({
+      config: { agents: { list: [{ id: " alpha " }, { id: "" }, null] } },
+      results: [...okPair(kCreateReportTail), ...okPair(makeCreateReportTail(snapAlpha))],
+    });
+    const result = await run();
+
+    expect(calls).toHaveLength(4);
+    expect(calls[2].args).toContain("alpha");
+    expect(result.ok).toBe(true);
+    expect(result.databases.map((db) => db.target)).toEqual([
+      "global",
+      "agent:alpha",
+    ]);
   });
 
   it("parses the snapshotPath out of interleaved CLI log noise", async () => {
     const { run, calls } = makeRunner({
+      config: kGlobalOnlyConfig,
       results: [
         {
           ok: true,
@@ -322,8 +452,9 @@ describe("server/routes/openclaw-channel createSqliteBackupRunner", () => {
     expect(result.ok).toBe(true);
   });
 
-  it("reports a create failure without running verify", async () => {
+  it("reports a create failure without running verify, naming the database and skipped targets", async () => {
     const { run, runStreamed } = makeRunner({
+      // Unreadable config → global + main; the global create fails first.
       results: [
         { ok: false, code: 1, timedOut: false, tail: "disk full" },
       ],
@@ -333,11 +464,20 @@ describe("server/routes/openclaw-channel createSqliteBackupRunner", () => {
     expect(runStreamed).toHaveBeenCalledTimes(1);
     expect(result.ok).toBe(false);
     expect(result.step).toBe("create");
-    expect(result.tail).toBe("disk full");
+    expect(result.tail).toContain("Create FAILED for database global");
+    expect(result.tail).toContain("disk full");
+    expect(result.tail).toContain(
+      "Databases not attempted after this failure: agent:main.",
+    );
+    expect(result.databases).toEqual([
+      { target: "global", ok: false, step: "create", snapshotPath: null, code: 1, timedOut: false },
+      { target: "agent:main", ok: false, step: "skipped", snapshotPath: null, code: null, timedOut: false },
+    ]);
   });
 
   it("reports unparseable create output as a failure and does not verify", async () => {
     const { run, runStreamed } = makeRunner({
+      config: kGlobalOnlyConfig,
       results: [
         { ok: true, code: 0, timedOut: false, tail: "Snapshot created." },
       ],
@@ -366,6 +506,7 @@ describe("server/routes/openclaw-channel createSqliteBackupRunner", () => {
     ];
     for (const forged of forgedPaths) {
       const { run, runStreamed } = makeRunner({
+        config: kGlobalOnlyConfig,
         results: [
           {
             ok: true,
@@ -389,6 +530,7 @@ describe("server/routes/openclaw-channel createSqliteBackupRunner", () => {
 
   it("reports create-ok-verify-failed as a failure with the verify tail", async () => {
     const { run } = makeRunner({
+      config: kGlobalOnlyConfig,
       results: [
         { ok: true, code: 0, timedOut: false, tail: kCreateReportTail },
         { ok: false, code: 1, timedOut: false, tail: "artifact hash mismatch" },
@@ -405,6 +547,7 @@ describe("server/routes/openclaw-channel createSqliteBackupRunner", () => {
 
   it("route + runner: a verify failure reaches the client as backup_failed with the tail", async () => {
     const runner = makeRunner({
+      config: kGlobalOnlyConfig,
       results: [
         { ok: true, code: 0, timedOut: false, tail: kCreateReportTail },
         { ok: false, code: 1, timedOut: false, tail: "artifact hash mismatch" },

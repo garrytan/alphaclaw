@@ -1,4 +1,5 @@
 const {
+  formatDoctorMissingFileMarker,
   getProfilePathChangeWeight,
   kBeta81Profile,
   kDoctorBootstrapMaxChars,
@@ -22,6 +23,14 @@ describe("server/doctor/context-profiles", () => {
     expect(kDoctorBootstrapNearLimitRatio).toBe(0.85);
     expect(kDoctorUserBootstrapMaxChars).toBe(4000);
     expect(kDoctorBootstrapMinFileBudgetChars).toBe(64);
+  });
+
+  it("encodes the missing-root-file marker template verbatim", () => {
+    // buildBootstrapContextFiles (stable dist/embedded-agent-helpers-*.js,
+    // beta dist/bootstrap-*.js): `[MISSING] Expected at: ${pathValue}`.
+    expect(formatDoctorMissingFileMarker("/work/SOUL.md")).toBe(
+      "[MISSING] Expected at: /work/SOUL.md",
+    );
   });
 
   it("encodes the stable 2026.7 injection contract", () => {
@@ -48,6 +57,16 @@ describe("server/doctor/context-profiles", () => {
       "MEMORY.md",
     ]);
     expect(kStableProfile.userFileCapChars).toBeNull();
+    // Only MEMORY.md is omitted entirely when absent on stable — every other
+    // missing root file renders a budget-charged [MISSING] marker.
+    expect(kStableProfile.omittedWhenAbsentRootFiles).toEqual(["MEMORY.md"]);
+    // Stable has NO group/channel session filtering (root-MEMORY.md stripping
+    // is beta-only: filterRootMemoryBootstrapFiles) — the profile must not
+    // hand the doctor prompt beta-only placement advice.
+    expect(kStableProfile.sessionScopeNotes).toEqual([
+      "Sub-agent sessions inject only AGENTS.md and TOOLS.md.",
+      "Cron sessions inject AGENTS.md, TOOLS.md, SOUL.md, IDENTITY.md, and USER.md only (not HEARTBEAT.md).",
+    ]);
   });
 
   it("encodes the beta 2026.8.1 injection contract", () => {
@@ -70,6 +89,16 @@ describe("server/doctor/context-profiles", () => {
       "MEMORY.md",
     ]);
     expect(kBeta81Profile.userFileCapChars).toBe(4000);
+    // Beta omits USER.md as well as MEMORY.md when absent (case-exact
+    // exactWorkspaceEntryExists) — no [MISSING] marker for either.
+    expect(kBeta81Profile.omittedWhenAbsentRootFiles).toEqual([
+      "MEMORY.md",
+      "USER.md",
+    ]);
+    // The group/channel MEMORY.md stripping IS real on beta.
+    expect(kBeta81Profile.sessionScopeNotes).toContain(
+      "Group and channel sessions never receive the root MEMORY.md.",
+    );
   });
 
   describe("selectDoctorContextProfile", () => {

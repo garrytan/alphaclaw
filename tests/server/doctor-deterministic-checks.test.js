@@ -121,10 +121,14 @@ describe("server/doctor/deterministic-checks", () => {
   });
 
   it("gives the per-file-cap advice when the hardening file hits both caps", () => {
-    // AGENTS.md (90) spends most of the 160 total budget; the hardening extra
-    // (raw 200 > 100 per-file cap) then hits BOTH caps → reason
-    // "file_and_total_limit" must still produce the per-file-cap copy.
+    // Root files (90 + 10 + 10) spend most of the 180 total budget — SOUL.md
+    // and IDENTITY.md exist so no [MISSING] markers eat into it; the
+    // hardening extra (raw 200 > 100 per-file cap) then hits BOTH caps
+    // (70 remaining) → reason "file_and_total_limit" must still produce the
+    // per-file-cap copy.
     write(workspaceRoot, "AGENTS.md", "A".repeat(90));
+    write(workspaceRoot, "SOUL.md", "S".repeat(10));
+    write(workspaceRoot, "IDENTITY.md", "I".repeat(10));
     write(workspaceRoot, "hooks/bootstrap/AGENTS.md", "H".repeat(200));
     const cards = build({
       profile: kBeta81Profile,
@@ -132,7 +136,7 @@ describe("server/doctor/deterministic-checks", () => {
         extraFilePaths: ["hooks/bootstrap/AGENTS.md"],
         hooksEnabled: true,
         bootstrapMaxChars: 100,
-        bootstrapTotalMaxChars: 160,
+        bootstrapTotalMaxChars: 180,
       },
     });
     const hardening = findCard(cards, "det:hardening:starved");

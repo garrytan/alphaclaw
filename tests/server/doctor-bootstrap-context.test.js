@@ -127,6 +127,164 @@ describe("server/doctor/bootstrap-context", () => {
     expect(stableUser.truncatedByFileLimit).toBe(false);
   });
 
+  it("applies the USER.md cap by basename to hook extras on beta", () => {
+    // Upstream caps by basename (effectiveBootstrapFileLimit:
+    // name.toLowerCase() === "user.md") — an extra configured as
+    // hooks/bootstrap/USER.md gets the same fixed 4k cap, and modeling it
+    // uncapped would overstate injection and miss truncation/starvation.
+    write("hooks/bootstrap/USER.md", "U".repeat(5000));
+
+    const beta = analyzeBootstrapContext({
+      workspaceRoot,
+      profile: kBeta81Profile,
+      extraFilePaths: ["hooks/bootstrap/USER.md"],
+      hooksEnabled: true,
+    });
+    const betaExtra = beta.files.find(
+      (file) => file.path === "hooks/bootstrap/USER.md",
+    );
+    expect(betaExtra.capChars).toBe(4000);
+    expect(betaExtra.truncatedByFileLimit).toBe(true);
+    expect(betaExtra.injectedChars).toBe(4000);
+
+    const stable = analyzeBootstrapContext({
+      workspaceRoot,
+      profile: kStableProfile,
+      extraFilePaths: ["hooks/bootstrap/USER.md"],
+      hooksEnabled: true,
+    });
+    const stableExtra = stable.files.find(
+      (file) => file.path === "hooks/bootstrap/USER.md",
+    );
+    expect(stableExtra.capChars).toBe(20000);
+    expect(stableExtra.truncatedByFileLimit).toBe(false);
+  });
+
+  describe("missing-root-file markers", () => {
+    // The verified upstream template, rendered with the file's expected
+    // absolute path (buildBootstrapContextFiles, both versions).
+    const markerLenFor = (name) =>
+      `[MISSING] Expected at: ${path.join(workspaceRoot, name)}`.length;
+
+    it("charges [MISSING] markers for absent root files to the total budget (stable)", () => {
+      write("AGENTS.md", "A".repeat(100));
+      const context = analyzeBootstrapContext({
+        workspaceRoot,
+        profile: kStableProfile,
+        onboarded: false,
+      });
+      const byPath = (filePath) =>
+        context.files.find((file) => file.path === filePath);
+      expect(byPath("SOUL.md").missingMarkerChars).toBe(markerLenFor("SOUL.md"));
+      // Not onboarded: a missing BOOTSTRAP.md is active and charges too.
+      expect(byPath("BOOTSTRAP.md").missingMarkerChars).toBe(
+        markerLenFor("BOOTSTRAP.md"),
+      );
+      // MEMORY.md is omitted entirely when absent on stable: no marker.
+      expect(byPath("MEMORY.md").missingMarkerChars).toBe(0);
+      const expectedTotal = [
+        "SOUL.md",
+        "TOOLS.md",
+        "IDENTITY.md",
+        "USER.md",
+        "HEARTBEAT.md",
+        "BOOTSTRAP.md",
+      ].reduce((sum, name) => sum + markerLenFor(name), 0);
+      expect(context.missingMarkerChars).toBe(expectedTotal);
+      // Markers count in the context total but never in per-file content.
+      expect(context.activeInjectedChars).toBe(100 + expectedTotal);
+      expect(byPath("SOUL.md").injectedChars).toBe(0);
+    });
+
+    it("gates the BOOTSTRAP.md marker on onboarding like the file itself", () => {
+      write("AGENTS.md", "A".repeat(100));
+      const context = analyzeBootstrapContext({
+        workspaceRoot,
+        profile: kStableProfile,
+        onboarded: true,
+      });
+      expect(
+        context.files.find((file) => file.path === "BOOTSTRAP.md")
+          .missingMarkerChars,
+      ).toBe(0);
+    });
+
+    it("omits USER.md and MEMORY.md markers on beta", () => {
+      write("AGENTS.md", "A".repeat(100));
+      const context = analyzeBootstrapContext({
+        workspaceRoot,
+        profile: kBeta81Profile,
+      });
+      const byPath = (filePath) =>
+        context.files.find((file) => file.path === filePath);
+      expect(byPath("USER.md").missingMarkerChars).toBe(0);
+      expect(byPath("MEMORY.md").missingMarkerChars).toBe(0);
+      expect(byPath("SOUL.md").missingMarkerChars).toBe(markerLenFor("SOUL.md"));
+      expect(byPath("IDENTITY.md").missingMarkerChars).toBe(
+        markerLenFor("IDENTITY.md"),
+      );
+      expect(context.missingMarkerChars).toBe(
+        markerLenFor("SOUL.md") + markerLenFor("IDENTITY.md"),
+      );
+    });
+
+    it("clamps markers to the remaining budget and flips the total-limit flags", () => {
+      write("AGENTS.md", "A".repeat(150));
+      const context = analyzeBootstrapContext({
+        workspaceRoot,
+        profile: kStableProfile,
+        bootstrapMaxChars: 200,
+        bootstrapTotalMaxChars: 200,
+      });
+      const byPath = (filePath) =>
+        context.files.find((file) => file.path === filePath);
+      // SOUL.md's marker is longer than the 50 remaining chars: clamped like
+      // upstream's clampToBudget — and it exhausts the budget, so TOOLS.md's
+      // marker never renders. Without marker accounting the totals would sit
+      // at 150/200 and under-report the near-total-limit pressure.
+      expect(markerLenFor("SOUL.md")).toBeGreaterThan(50);
+      expect(byPath("SOUL.md").missingMarkerChars).toBe(50);
+      expect(byPath("TOOLS.md").missingMarkerChars).toBe(0);
+      expect(context.activeInjectedChars).toBe(200);
+      expect(context.totalLimitReached).toBe(true);
+      expect(context.nearTotalLimit).toBe(true);
+    });
+
+    it("stops rendering markers once a content file starves (upstream breaks)", () => {
+      write("AGENTS.md", "A".repeat(150));
+      write("SOUL.md", "B".repeat(100));
+      const context = analyzeBootstrapContext({
+        workspaceRoot,
+        profile: kStableProfile,
+        bootstrapMaxChars: 200,
+        bootstrapTotalMaxChars: 200,
+      });
+      const byPath = (filePath) =>
+        context.files.find((file) => file.path === filePath);
+      // 50 chars remain (<64): SOUL.md starves and the allocator STOPS —
+      // TOOLS.md's marker would still fit but upstream never renders it.
+      expect(byPath("SOUL.md").reason).toBe("starved");
+      expect(byPath("TOOLS.md").missingMarkerChars).toBe(0);
+      expect(context.missingMarkerChars).toBe(0);
+      expect(context.activeInjectedChars).toBe(150);
+    });
+
+    it("never charges markers for missing extras (the hook only appends loaded files)", () => {
+      write("AGENTS.md", "A".repeat(100));
+      const context = analyzeBootstrapContext({
+        workspaceRoot,
+        profile: kStableProfile,
+        extraFilePaths: ["hooks/bootstrap/AGENTS.md"],
+        hooksEnabled: true,
+      });
+      const extra = context.files.find(
+        (file) => file.path === "hooks/bootstrap/AGENTS.md",
+      );
+      expect(extra.exists).toBe(false);
+      expect(extra.missingMarkerChars).toBe(0);
+    });
+  });
+
   it("gates BOOTSTRAP.md on onboarding state instead of an injectMode flag", () => {
     write("BOOTSTRAP.md", "setup ritual");
 

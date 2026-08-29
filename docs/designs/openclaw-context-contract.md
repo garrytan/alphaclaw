@@ -40,9 +40,19 @@ Cited: stable `dist/workspace-DkQ7irPD.js` `loadWorkspaceBootstrapFiles` (lines 
 beta `dist/workspace-D59tUhZX.js` `loadWorkspaceBootstrapFiles` +
 `WORKSPACE_BOOTSTRAP_FILENAMES` (line 252).
 
-Absent-file handling: stable skips only `MEMORY.md` when absent (other missing files inject a
-`[MISSING]` marker line); beta skips both `MEMORY.md` and `USER.md` when absent
+Absent-file handling: a missing root file still injects a visible marker rendered as
+`[MISSING] Expected at: <absolute path>`, and the marker's length is **charged to the total
+budget**. The allocator's missing branch runs BEFORE the 64-char minimum-budget check, so the
+marker is exempt from both the per-file cap and that floor — it is only clamped to the
+remaining total budget (`clampToBudget(`` `[MISSING] Expected at: ${pathValue}` ``,
+remainingTotalChars)`; once the allocator breaks — total exhausted or the <64 floor hit by a
+content file — later markers are not rendered either). Omitted entirely instead (no entry, no
+marker): stable skips only `MEMORY.md` when absent; beta skips both `MEMORY.md` and `USER.md`
 (case-exact `exactWorkspaceEntryExists` check — a lowercase `memory.md` does not count).
+Extras never produce markers: `loadWorkspacePatternFilesWithDiagnostics` only appends files it
+actually read (a missing extra becomes a diagnostic, not a bootstrap entry).
+Cited: stable `dist/embedded-agent-helpers-DZZ4Y-Tw.js` `buildBootstrapContextFiles`; beta
+`dist/bootstrap-CaqLzAOR.js` (same symbol, identical marker template).
 
 `BOOTSTRAP.md` is gated by workspace-setup-completed state on BOTH lines — there is no
 `injectMode` / `first_run_only` concept and there never was
@@ -55,7 +65,7 @@ Absent-file handling: stable skips only `MEMORY.md` when absent (other missing f
 |----------|-------|-------|--------------|
 | Per-file cap | 20,000 chars | both | `DEFAULT_BOOTSTRAP_MAX_CHARS = 2e4` |
 | Total cap | 60,000 chars | both | `DEFAULT_BOOTSTRAP_TOTAL_MAX_CHARS = 6e4` |
-| USER.md hard cap | 4,000 chars | beta only | `USER_BOOTSTRAP_MAX_CHARS = 4e3`, applied as `Math.min(maxChars, USER_BOOTSTRAP_MAX_CHARS)` |
+| USER.md hard cap | 4,000 chars | beta only | `USER_BOOTSTRAP_MAX_CHARS = 4e3`, applied as `Math.min(maxChars, USER_BOOTSTRAP_MAX_CHARS)` — by BASENAME, case-insensitively (`effectiveBootstrapFileLimit` / `isUserBootstrapFile`: `name.toLowerCase() === "user.md"` where `name` is the basename), so an extras entry like `hooks/bootstrap/USER.md` gets the same cap |
 | Near-limit ratio | 0.85 | both | `DEFAULT_BOOTSTRAP_NEAR_LIMIT_RATIO = .85` / `NEAR_LIMIT_RATIO = .85` |
 | Min file budget | 64 chars | both | `MIN_BOOTSTRAP_FILE_BUDGET_CHARS = 64` — remaining total budget below this skips all further files |
 | Raw read cap | 2 MiB | both | `MAX_WORKSPACE_BOOTSTRAP_FILE_BYTES = 2 * 1024 * 1024` |

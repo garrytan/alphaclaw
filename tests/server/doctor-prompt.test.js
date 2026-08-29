@@ -37,6 +37,32 @@ describe("server/doctor-prompt", () => {
     expect(prompt).not.toContain("150000");
   });
 
+  it("keeps beta-only session-scope advice off the stable prompt", () => {
+    // Group/channel MEMORY.md stripping does not exist on the pinned stable
+    // (filterBootstrapFilesForSession filters subagent/cron keys only) —
+    // giving stable installs that placement advice would be wrong.
+    const stablePrompt = buildDoctorPrompt({
+      workspaceRoot: "/tmp/workspace",
+      managedRoot: "/tmp/managed",
+      profile: kStableProfile,
+    });
+    expect(stablePrompt).not.toContain(
+      "Group and channel sessions never receive the root MEMORY.md.",
+    );
+    expect(stablePrompt).toContain(
+      "Session scope: Sub-agent sessions inject only AGENTS.md and TOOLS.md.",
+    );
+
+    const betaPrompt = buildDoctorPrompt({
+      workspaceRoot: "/tmp/workspace",
+      managedRoot: "/tmp/managed",
+      profile: kBeta81Profile,
+    });
+    expect(betaPrompt).toContain(
+      "Session scope: Group and channel sessions never receive the root MEMORY.md.",
+    );
+  });
+
   it("states beta-only facts on the beta profile", () => {
     const prompt = buildDoctorPrompt({
       workspaceRoot: "/tmp/workspace",

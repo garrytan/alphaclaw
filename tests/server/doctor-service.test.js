@@ -2805,6 +2805,54 @@ describe("server/doctor-service", () => {
       }
     });
 
+    it("holds the failure backoff on an unchanged fingerprint and lifts it when the workspace changes", async () => {
+      vi.useFakeTimers();
+      try {
+        const meta = new Map();
+        const { service } = makeService({
+          readAutoRunEnabled: () => true,
+          autoRunTickMs: 1000,
+          meta,
+        });
+        // Tick 1 (fresh install → needsInitialRun): runs and records the
+        // marker WITH the workspace fingerprint the run consumed.
+        await vi.advanceTimersByTimeAsync(1100 + 60000);
+        await vi.runOnlyPendingTimersAsync();
+        const recorded = meta.get("last_auto_run");
+        expect(recorded?.outcome).toBe("ran");
+        expect(recorded?.workspaceFingerprint).toBeTruthy();
+
+        // Rewrite history: failed 7h ago (6h throttle passed, 24h backoff
+        // not), SAME signature and SAME fingerprint → the backoff holds even
+        // though the envChanged trigger is armed.
+        meta.set("last_env_signature", "different-signature");
+        const failedMarker = {
+          at: new Date(Date.now() - 7 * 60 * 60 * 1000).toISOString(),
+          outcome: "failed",
+          envSignature: recorded.envSignature,
+          workspaceFingerprint: recorded.workspaceFingerprint,
+        };
+        meta.set("last_auto_run", failedMarker);
+        await vi.advanceTimersByTimeAsync(1100 + 60000);
+        expect(service.buildStatus().autoRun.lastSkipReason).toBe("backoff");
+        // The backoff skip never rewrites the marker.
+        expect(meta.get("last_auto_run")).toEqual(failedMarker);
+
+        // The workspace no longer matches what the failed run saw: the
+        // backoff lifts and the tick proceeds (subject to the other guards).
+        meta.set("last_auto_run", {
+          ...failedMarker,
+          workspaceFingerprint: "fingerprint-before-the-workspace-edit",
+        });
+        await vi.advanceTimersByTimeAsync(1100 + 60000);
+        await vi.runOnlyPendingTimersAsync();
+        expect(meta.get("last_auto_run")?.outcome).toBe("ran");
+        service.dispose();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it("skips the tick as busy while a manual run is in flight, without touching the throttle", async () => {
       vi.useFakeTimers();
       try {
