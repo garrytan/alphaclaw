@@ -337,6 +337,11 @@ npm run test:ui         # Browser UI smoke of the Upgrade page: real server +
                         # headless Chromium asserting the rendered DOM (opt-in;
                         # needs network for the version catalog; self-skips
                         # unless a browse CLI is present — set BROWSE_BIN)
+npm run test:ui:claude-code   # Browser smoke of the Open Claude Code launcher
+                        # (opt-in; same real-server + Chromium harness)
+npm run test:live:claude-code # Fires the REAL configured routine end-to-end —
+                        # BILLS one claude.ai session; needs CLAUDE_CODE_ROUTINE_URL
+                        # / CLAUDE_CODE_ROUTINE_TOKEN + CLAUDE_CODE_LIVE_FIRE=1
 ```
 
 The live tiers also run in CI on a schedule (`.github/workflows/live-e2e.yml`):
