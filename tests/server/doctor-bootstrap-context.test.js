@@ -7,6 +7,7 @@ const {
   buildBootstrapTruncationCards,
   createBootstrapContextAnalyzer,
   formatChars,
+  kDoctorBootstrapReadMaxBytes,
 } = require("../../lib/server/doctor/bootstrap-context");
 const {
   kBeta81Profile,
@@ -557,6 +558,78 @@ describe("server/doctor/bootstrap-context", () => {
     fs.rmSync(outsideDir, { recursive: true, force: true });
   });
 
+  it("rejects an in-workspace symlink extra whose target escapes the workspace", () => {
+    write("AGENTS.md", "root guidance");
+    const outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-symlink-escape-"));
+    fs.writeFileSync(path.join(outsideDir, "AGENTS.md"), "outside hardening", "utf8");
+    fs.mkdirSync(path.join(workspaceRoot, "hooks", "bootstrap"), { recursive: true });
+    fs.symlinkSync(
+      path.join(outsideDir, "AGENTS.md"),
+      path.join(workspaceRoot, "hooks", "bootstrap", "AGENTS.md"),
+    );
+
+    const context = analyzeBootstrapContext({
+      workspaceRoot,
+      profile: kStableProfile,
+      extraFilePaths: ["hooks/bootstrap/AGENTS.md"],
+      hooksEnabled: true,
+    });
+
+    // The lexical escape check passes (the entry stays under the root) —
+    // only the realpath guard sees the link leaving the workspace. Upstream's
+    // guarded open rejects the read, so the file models exactly like a
+    // lexically escaping extra: never injected.
+    const extra = context.files.find(
+      (file) => file.path === "hooks/bootstrap/AGENTS.md",
+    );
+    expect(extra.active).toBe(false);
+    expect(extra.activeReason).toBe("escapes_workspace");
+    expect(extra.injectable).toBe(false);
+    expect(extra.exists).toBe(false);
+    expect(extra.rawChars).toBe(0);
+    // Hardening must not report healthy for a file the agent never receives.
+    expect(context.hardening.state).toBe("blocked");
+
+    fs.rmSync(outsideDir, { recursive: true, force: true });
+  });
+
+  it("models files above upstream's 2 MiB read cap as rejected, not injected", () => {
+    write("AGENTS.md", "root guidance");
+    // Upstream REJECTS (never truncates) any bootstrap read above 2 MiB —
+    // extras are omitted with a security diagnostic, root files model as
+    // missing on stable — so the analyzer must not report them injected.
+    write("SOUL.md", "S".repeat(kDoctorBootstrapReadMaxBytes + 1));
+    write("hooks/bootstrap/AGENTS.md", "H".repeat(kDoctorBootstrapReadMaxBytes + 1));
+
+    const context = analyzeBootstrapContext({
+      workspaceRoot,
+      profile: kStableProfile,
+      extraFilePaths: ["hooks/bootstrap/AGENTS.md"],
+      hooksEnabled: true,
+    });
+
+    const root = context.files.find((file) => file.path === "AGENTS.md");
+    const soul = context.files.find((file) => file.path === "SOUL.md");
+    const extra = context.files.find(
+      (file) => file.path === "hooks/bootstrap/AGENTS.md",
+    );
+    // Normal files keep their exact semantics.
+    expect(root.exists).toBe(true);
+    expect(root.rawChars).toBe("root guidance".length);
+    // An over-cap ROOT file is rejected like a missing one (stable models it
+    // missing:true): a budget-charged [MISSING] marker, no content injected.
+    expect(soul.exists).toBe(false);
+    expect(soul.injectedChars).toBe(0);
+    expect(soul.missingMarkerChars).toBeGreaterThan(0);
+    // An over-cap EXTRA is omitted entirely — and hardening must say so.
+    expect(extra.active).toBe(false);
+    expect(extra.activeReason).toBe("file_too_large");
+    expect(extra.injectable).toBe(false);
+    expect(extra.exists).toBe(false);
+    expect(extra.rawChars).toBe(0);
+    expect(context.hardening.state).toBe("blocked");
+  });
+
   it("flags on-disk hardening with a lost config entry as blocked, not unknown", () => {
     write("AGENTS.md", "root guidance");
     write("hooks/bootstrap/AGENTS.md", "safety rules on disk");
@@ -677,7 +750,7 @@ describe("server/doctor/bootstrap-context", () => {
       fs.rmSync(managedRoot, { recursive: true, force: true });
     });
 
-    const makeAnalyzer = ({ profile = kStableProfile } = {}) =>
+    const makeAnalyzer = ({ profile = kStableProfile, fsModule } = {}) =>
       createBootstrapContextAnalyzer({
         workspaceRoot,
         managedRoot,
@@ -692,6 +765,7 @@ describe("server/doctor/bootstrap-context", () => {
           }
         },
         isOnboarded: () => true,
+        ...(fsModule ? { fsModule } : {}),
       });
 
     it("reads the extras list and budgets from openclaw.json", () => {
@@ -811,6 +885,48 @@ describe("server/doctor/bootstrap-context", () => {
       expect(
         second.files.find((file) => file.path === "AGENTS.md").rawChars,
       ).toBe(25);
+    });
+
+    it("never buffers more than the 2 MiB cap on the status hot path", () => {
+      write("AGENTS.md", "small root rules");
+      write(
+        "hooks/bootstrap/AGENTS.md",
+        "H".repeat(kDoctorBootstrapReadMaxBytes + 1),
+      );
+      writeConfig(managedRoot, {
+        hooks: {
+          internal: {
+            enabled: true,
+            entries: {
+              "bootstrap-extra-files": {
+                enabled: true,
+                paths: ["hooks/bootstrap/AGENTS.md"],
+              },
+            },
+          },
+        },
+      });
+      let bytesRead = 0;
+      const countingFs = {
+        ...fs,
+        readSync: (...args) => {
+          const read = fs.readSync(...args);
+          bytesRead += read;
+          return read;
+        },
+      };
+
+      const context = makeAnalyzer({ fsModule: countingFs }).analyze();
+
+      const extra = context.files.find(
+        (file) => file.path === "hooks/bootstrap/AGENTS.md",
+      );
+      expect(extra.activeReason).toBe("file_too_large");
+      expect(extra.exists).toBe(false);
+      expect(context.hardening.state).toBe("blocked");
+      // The over-cap file is rejected at fstat time — only the small root
+      // files are ever buffered, never anything above upstream's cap.
+      expect(bytesRead).toBeLessThanOrEqual(kDoctorBootstrapReadMaxBytes);
     });
 
     it("re-reads config inputs when openclaw.json changes", () => {

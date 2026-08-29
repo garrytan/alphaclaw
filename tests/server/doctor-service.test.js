@@ -1000,8 +1000,8 @@ describe("server/doctor-service", () => {
     // The lexical containment check passes for "sneaky.md" — only the
     // realpath check can catch the link escaping the workspace.
     fs.symlinkSync(path.join(outsideDir, "host-secret.md"), path.join(workspaceRoot, "sneaky.md"));
-    // A >512KB file: the read is capped, so the snippet comes from the head
-    // window and reports truncated even for an in-window range.
+    // A >512KB file: the reader scans in bounded chunks, so an in-window
+    // range is fully served (not truncated) without buffering the whole file.
     const hugeLines = ["head line one", "head line two"];
     for (let index = 0; index < 40; index += 1) hugeLines.push(repeatText(20000, "x"));
     fs.writeFileSync(path.join(workspaceRoot, "HUGE.md"), hugeLines.join("\n"), "utf8");
@@ -1057,15 +1057,92 @@ describe("server/doctor-service", () => {
     // The symlink resolves outside the workspace: no snippet, no host bytes.
     expect(symlinkItem.snippet).toBeUndefined();
     expect(JSON.stringify(card)).not.toContain("host file contents");
-    // The huge file serves a head-window snippet with truncated semantics.
+    // The huge file's in-range citation is fully served: not truncated, and
+    // the whole file (< 8 MiB) was countable within the scan bound.
     expect(hugeItem.snippet).toMatchObject({
       text: "head line one\nhead line two",
       startLine: 1,
       endLine: 2,
-      truncated: true,
+      truncated: false,
+      totalFileLines: 42,
     });
 
     fs.rmSync(outsideDir, { recursive: true, force: true });
+  });
+
+  it("serves citations past the 512KB chunk window and nulls past the 8MiB scan bound", async () => {
+    const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-snippet-deep-"));
+    const dbRoot = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-snippet-deep-db-"));
+    // ~9.4MB of ~1KB lines: line 700 sits past the 512KB chunk size (the old
+    // head-read returned an empty snippet for it) and line 9000 sits past the
+    // 8 MiB scan bound (no snippet at all rather than an unbounded read).
+    const deepLines = [];
+    for (let index = 1; index <= 9500; index += 1) {
+      deepLines.push(`line-${index} ${repeatText(980, "x")}`);
+    }
+    fs.writeFileSync(path.join(workspaceRoot, "DEEP.md"), deepLines.join("\n"), "utf8");
+    fs.writeFileSync(path.join(workspaceRoot, "AGENTS.md"), "# Guidance\n", "utf8");
+
+    const doctorDb = loadManagedDoctorDb();
+    doctorDb.initDoctorDb({ rootDir: dbRoot });
+
+    const { createDoctorService } = loadDoctorService();
+    const doctorService = createDoctorService({
+      clawCmd: vi.fn(),
+      listDoctorRuns: doctorDb.listDoctorRuns,
+      listDoctorCards: doctorDb.listDoctorCards,
+      getInitialWorkspaceBaseline: doctorDb.getInitialWorkspaceBaseline,
+      setInitialWorkspaceBaseline: doctorDb.setInitialWorkspaceBaseline,
+      createDoctorRun: doctorDb.createDoctorRun,
+      completeDoctorRun: doctorDb.completeDoctorRun,
+      insertDoctorCards: doctorDb.insertDoctorCards,
+      getDoctorRun: doctorDb.getDoctorRun,
+      getDoctorCardsByRunId: doctorDb.getDoctorCardsByRunId,
+      getDoctorCard: doctorDb.getDoctorCard,
+      updateDoctorCardStatus: doctorDb.updateDoctorCardStatus,
+      workspaceRoot,
+      managedRoot: workspaceRoot,
+      computeSnapshotAsync: fastComputeSnapshotAsync,
+    });
+
+    const imported = await doctorService.importDoctorResult({
+      rawOutput: JSON.stringify({
+        summary: "Deep citation",
+        cards: [
+          {
+            priority: "P1",
+            category: "workspace",
+            title: "Deep citation",
+            summary: "s",
+            recommendation: "r",
+            evidence: [
+              { type: "path", path: "DEEP.md", startLine: 700, endLine: 701 },
+              { type: "path", path: "DEEP.md", startLine: 9000, endLine: 9001 },
+            ],
+            targetPaths: ["AGENTS.md"],
+            fixPrompt: "Fix safely.",
+            status: "open",
+          },
+        ],
+      }),
+    });
+
+    const [card] = doctorDb.getDoctorCardsByRunId(imported.runId);
+    const [deepItem, pastBoundItem] = card.evidence;
+
+    // The cited lines past the first 512KB come back with correct content and
+    // metadata — but the file is larger than the 8 MiB scan bound, so
+    // totalFileLines is dropped instead of scanning to EOF to count lines.
+    expect(deepItem.snippet.startLine).toBe(700);
+    expect(deepItem.snippet.endLine).toBe(701);
+    expect(deepItem.snippet.truncated).toBe(false);
+    expect(deepItem.snippet.totalFileLines).toBeUndefined();
+    const deepSnippetLines = deepItem.snippet.text.split("\n");
+    expect(deepSnippetLines).toHaveLength(2);
+    expect(deepSnippetLines[0].startsWith("line-700 ")).toBe(true);
+    expect(deepSnippetLines[1].startsWith("line-701 ")).toBe(true);
+    // Reaching line 9000 needs more than 8 MiB of scanning: no snippet.
+    expect(pastBoundItem.snippet).toBeUndefined();
   });
 
   it("marks the run failed when the gateway command reports an error", async () => {

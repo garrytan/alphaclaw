@@ -78,6 +78,22 @@ beta `dist/bootstrap-CaqLzAOR.js` (per-file/total/min/USER cap at line 252),
 Config overrides: `agents.defaults.bootstrapMaxChars` / `agents.defaults.bootstrapTotalMaxChars`
 (beta `docs/concepts/agent-workspace.md`); the USER 4k cap is NOT configurable.
 
+The 2 MiB raw read cap REJECTS the whole read — it never truncates (unlike the char budgets
+above): stable's guarded open fails validation outright on `stat.size > maxBytes`
+(`dist/pinned-open-CED4V9Dl.js` via `dist/root-file-9jkyxRTl.js` `openRootFile`); beta's bounded
+descriptor read throws `too-large` → `RangeError` past the cap
+(`dist/bounded-read-pTKvsUkY.js`, `dist/boundary-file-read-DV113rom.js`
+`preserveOpenClawOverflowError`). The same guarded open also rejects paths whose resolved real
+path escapes the workspace (symlinks included; `rejectSymlinks` defaults true — beta follows
+contained PARENT symlinks only, `openRootFileFollowingParents`). Downstream treatment of a
+rejected read: extras are OMITTED with a `security` diagnostic (both lines,
+`loadExtraBootstrapFilesWithDiagnostics`); core root files model `missing: true` on stable
+(`dist/workspace-DkQ7irPD.js`) while beta injects a short `[UNREADABLE: <reason>]` marker
+instead of the content (`dist/workspace-D59tUhZX.js` `loadWorkspaceBootstrapFiles`). Drift
+Doctor mirrors this in `lib/server/doctor/bootstrap-context.js`
+(`kDoctorBootstrapReadMaxBytes`): rejected files model as not injected — extras carry
+`escapes_workspace` / `file_too_large`, root files fall back to the missing-marker path.
+
 Per-agent precedence (both lines): `resolveBootstrapMaxChars(cfg, agentId)` /
 `resolveBootstrapTotalMaxChars(cfg, agentId)` read
 `resolveAgentConfig(cfg, agentId)?.bootstrap[Total]MaxChars ?? cfg.agents?.defaults?.…`, then a

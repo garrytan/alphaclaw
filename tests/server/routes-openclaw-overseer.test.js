@@ -253,10 +253,12 @@ describe("server/routes/openclaw-channel createSqliteBackupRunner", () => {
   // single-database scenarios below use it to stay single-database.
   const kGlobalOnlyConfig = { agents: { entries: {} } };
 
-  // `config` is the parsed openclaw.json the runner reads for the agent
-  // roster; leaving it undefined simulates a missing/unreadable config
-  // (→ global + implicit "main").
-  const makeRunner = ({ results, timeoutMs = 10_000, config }) => {
+  // `config` is the on-disk openclaw.json the runner's DEFAULT reader (the
+  // shared readOpenclawConfig, including its keyed-roster normalization)
+  // parses through the mocked fsModule for the agent roster; leaving it
+  // undefined simulates a missing/unreadable config (→ global + implicit
+  // "main"). Pass `readConfig` to bypass the default reader entirely.
+  const makeRunner = ({ results, timeoutMs = 10_000, config, readConfig }) => {
     const calls = [];
     const runStreamed = vi.fn(async (opts) => {
       calls.push(opts);
@@ -276,6 +278,7 @@ describe("server/routes/openclaw-channel createSqliteBackupRunner", () => {
       getEnv,
       fsModule,
       openclawDir: kOpenclawDir,
+      ...(readConfig ? { readConfig } : {}),
       repositoryDir: kRepoDir,
       timeoutMs,
     });
@@ -430,6 +433,59 @@ describe("server/routes/openclaw-channel createSqliteBackupRunner", () => {
     expect(result.databases.map((db) => db.target)).toEqual([
       "global",
       "agent:alpha",
+    ]);
+  });
+
+  it("resolves a keyed entry's explicit inner id like the shared config reader", async () => {
+    const snapRenamed = `${kRepoDir}/agent-renamed-2026-08-29T00-00-01`;
+    const { run, calls } = makeRunner({
+      // readOpenclawConfig's normalizeAgentsShapeForRead injects the entry
+      // key as the id but lets an explicit inner `id` win — the roster must
+      // match that interpretation, not a hand-parsed Object.keys() read.
+      config: { agents: { entries: { alpha: { id: "renamed" } } } },
+      results: [...okPair(kCreateReportTail), ...okPair(makeCreateReportTail(snapRenamed))],
+    });
+    const result = await run();
+
+    expect(calls).toHaveLength(4);
+    expect(calls[2].args).toContain("renamed");
+    expect(calls[2].args).not.toContain("alpha");
+    expect(result.ok).toBe(true);
+    expect(result.databases.map((db) => db.target)).toEqual([
+      "global",
+      "agent:renamed",
+    ]);
+  });
+
+  it("treats a present-but-malformed roster property as an empty roster (global only)", async () => {
+    // Property presence short-circuits (dist readAgentRosterProperty): a
+    // malformed roster is "no entries", NOT the implicit sole agent "main".
+    const { run, calls } = makeRunner({
+      config: { agents: { entries: "bogus" } },
+      results: okPair(kCreateReportTail),
+    });
+    const result = await run();
+
+    expect(calls).toHaveLength(2);
+    expect(result.ok).toBe(true);
+    expect(result.databases.map((db) => db.target)).toEqual(["global"]);
+  });
+
+  it("routes the roster read through an injected readConfig without touching the filesystem", async () => {
+    const snapCustom = `${kRepoDir}/agent-custom-2026-08-29T00-00-01`;
+    const readConfig = vi.fn(() => ({ agents: { list: [{ id: "custom" }] } }));
+    const { run, fsModule } = makeRunner({
+      readConfig,
+      results: [...okPair(kCreateReportTail), ...okPair(makeCreateReportTail(snapCustom))],
+    });
+    const result = await run();
+
+    expect(readConfig).toHaveBeenCalledTimes(1);
+    expect(fsModule.readFileSync).not.toHaveBeenCalled();
+    expect(result.ok).toBe(true);
+    expect(result.databases.map((db) => db.target)).toEqual([
+      "global",
+      "agent:custom",
     ]);
   });
 
