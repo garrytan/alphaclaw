@@ -102,7 +102,11 @@ describe("server/gateway-medic", () => {
     ).toEqual(original);
   });
 
-  it("never removes an unmanaged key without the AI tier's concurrence", async () => {
+  // Issue #20 policy change: a gateway-blamed unmanaged key IS removable as
+  // the last resort (backed up, protected prefixes and hand-set stripes still
+  // excluded) — a crash-looped gateway is worse than a reversible strip of
+  // keys the gateway itself rejected. Smarter tiers still get first crack.
+  it("strips a gateway-blamed unmanaged key as the last resort, with a backup", async () => {
     const openclawDir = mkOpenclawDir();
     writeConfig(openclawDir, { audit: { legacy: true } });
     const medic = createMedic(openclawDir); // no llmClient, no runDoctorFix
@@ -112,9 +116,9 @@ describe("server/gateway-medic", () => {
       stderrTail: ['Unrecognized key: "audit"'],
     });
 
-    expect(outcome.fixed).toBe(false);
-    expect(readConfig(openclawDir).audit).toEqual({ legacy: true });
-    expect(listMedicBackups(openclawDir)).toHaveLength(0);
+    expect(outcome).toMatchObject({ fixed: true, tier: "blamed_key_strip" });
+    expect(readConfig(openclawDir).audit).toBeUndefined();
+    expect(listMedicBackups(openclawDir)).toHaveLength(1);
   });
 
   it("falls back to doctor --fix when no frontier key is configured", async () => {
@@ -147,7 +151,9 @@ describe("server/gateway-medic", () => {
     });
 
     expect(runDoctorFix).not.toHaveBeenCalled();
-    expect(outcome.fixed).toBe(false);
+    // Doctor stays suppressed; the deterministic last-resort strip still
+    // recovers the box (issue #20 policy).
+    expect(outcome).toMatchObject({ fixed: true, tier: "blamed_key_strip" });
   });
 
   describe("AI tier", () => {
@@ -219,9 +225,12 @@ describe("server/gateway-medic", () => {
         stderrTail: ['Unrecognized key: "audit"'],
       });
 
-      expect(outcome.fixed).toBe(false);
-      expect(outcome.error).toMatch(/whitelist/);
+      // The model's off-whitelist proposal is rejected; the last-resort strip
+      // then removes only the gateway-blamed key. The protected subtree the
+      // model asked for is untouched.
+      expect(outcome).toMatchObject({ fixed: true, tier: "blamed_key_strip" });
       expect(readConfig(openclawDir).gateway.auth).toEqual({ mode: "token" });
+      expect(readConfig(openclawDir).audit).toBeUndefined();
     });
 
     it("treats low confidence as remedy none and surfaces the diagnosis", async () => {
@@ -245,9 +254,11 @@ describe("server/gateway-medic", () => {
         stderrTail: ['Unrecognized key: "audit"'],
       });
 
-      expect(outcome.fixed).toBe(false);
+      // The model's deliberate none suppresses doctor, but the deterministic
+      // last-resort strip still runs (issue #20 policy); the diagnosis rides
+      // along for the operator.
+      expect(outcome).toMatchObject({ fixed: true, tier: "blamed_key_strip" });
       expect(outcome.diagnosis).toMatch(/Cannot tell/);
-      // An explicit model decision is final — no doctor fallback behind it.
       expect(runDoctorFix).not.toHaveBeenCalled();
     });
 
@@ -525,11 +536,9 @@ describe("server/gateway-medic", () => {
     });
 
     expect(runDoctorFix).toHaveBeenCalledTimes(1);
-    expect(outcome).toMatchObject({
-      fixed: false,
-      tier: "doctor_fix",
-      error: "doctor --fix failed",
-    });
+    // Doctor failed; the last-resort strip recovers the box afterwards.
+    expect(outcome).toMatchObject({ fixed: true, tier: "blamed_key_strip" });
+    expect(readConfig(openclawDir).audit).toBeUndefined();
   });
 
   it("caps the doctor --fix timeout to the remaining run budget", async () => {
@@ -845,8 +854,9 @@ describe("server/gateway-medic", () => {
     });
 
     expect(runDoctorFix).not.toHaveBeenCalled();
-    expect(outcome.fixed).toBe(false);
-    expect(outcome.error).toMatch(/budget exhausted/);
+    // Doctor has no runway, but the quick deterministic strip still fits the
+    // remaining budget and recovers the box.
+    expect(outcome).toMatchObject({ fixed: true, tier: "blamed_key_strip" });
   });
 
   it("treats an unknown remedy string as unusable and falls to doctor", async () => {

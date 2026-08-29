@@ -2181,7 +2181,7 @@ describe("server/openclaw-channel-sync", () => {
         installedVersion: "1.0.0",
         sentinelVersion: "1.0.0",
         extraSyncOptions: {
-          gatewayEnv: () => ({
+          openclawSpawnEnv: () => ({
             ...process.env,
             OPENCLAW_HOME: "/data",
             OPENCLAW_GATEWAY_TOKEN: "gw-secret",

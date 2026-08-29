@@ -86,6 +86,7 @@ describe("server/openclaw-release-channel", () => {
         lastUpdateRun: null,
         lastBoot: null,
         configMigration: null,
+        gatewayHold: null,
         backups: [],
       };
       expect(store.readState()).toEqual(expectedEmpty);

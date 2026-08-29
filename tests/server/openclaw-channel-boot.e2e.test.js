@@ -101,6 +101,10 @@ const createHarness = ({
   storeWrap = (store) => store,
   execFileSyncImpl = undefined,
   fsModule = undefined,
+  // reconcileBootConfig (the server-phase migration) legitimately spawns; the
+  // default poison below still guards syncAtBoot itself, which must stay
+  // offline and spawn-free.
+  runnerImpl = null,
 } = {}) => {
   delete process.env.OPENCLAW_GIT_DIR;
   const rootDir = mkTemp("alphaclaw-boot-e2e-root-");
@@ -128,9 +132,12 @@ const createHarness = ({
   }
 
   const runner = {
-    runStreamed: vi.fn(() => {
-      throw new Error("runStreamed must never be called during boot sync");
-    }),
+    runStreamed: vi.fn(
+      runnerImpl ||
+        (() => {
+          throw new Error("runStreamed must never be called during boot sync");
+        }),
+    ),
   };
   const installToTempDir = vi.fn(() => {
     throw new Error("installToTempDir must never be called during boot sync");
@@ -547,22 +554,48 @@ describe("server/openclaw-channel boot sync (e2e)", () => {
       );
     };
 
-    it("runs doctor --fix once per version and records success", () => {
+    // Issue #20: the migration moved out of syncAtBoot (which stamped runs
+    // activated before migrating, under a hardcoded 120s execFileSync) into
+    // the async server-phase reconciler — sized budgets, doctor-guard, and a
+    // fail-CLOSED gateway hold.
+    const doctorRunner = ({ doctorOk = true, doctorCalls = [] } = {}) =>
+      async (opts) => {
+        const args = Array.isArray(opts.args) ? opts.args : [];
+        if (args.includes("doctor")) {
+          doctorCalls.push(args);
+          return {
+            ok: doctorOk,
+            code: doctorOk ? 0 : 1,
+            tail: doctorOk ? "Doctor complete\n" : "doctor exit 1\n",
+            timedOut: false,
+          };
+        }
+        // `config validate` / `database preflight` are capability-probed:
+        // the pinned stable answers "unknown command" for both, which routes
+        // the reconciler through the conservative doctor path.
+        return {
+          ok: false,
+          code: 1,
+          tail: "error: unknown command\n",
+          timedOut: false,
+        };
+      };
+
+    it("reconciles config once per version with a guarded doctor run", async () => {
       const doctorCalls = [];
-      const execFileSyncImpl = vi.fn((cmd, args) => {
-        doctorCalls.push(args);
-        return "";
-      });
       const harness = createHarness({
         installedVersion: "2026.8.1",
         sentinelVersion: "2026.8.1",
-        execFileSyncImpl,
+        runnerImpl: doctorRunner({ doctorCalls }),
       });
       writeConfig(harness.openclawDir, { audit: { enabled: true } });
 
       harness.sync.syncAtBoot();
+      // syncAtBoot itself never spawns — the migration is the server phase's.
+      expect(doctorCalls).toHaveLength(0);
 
-      // doctor --fix --yes was invoked exactly once against the activated bin.
+      const outcome = await harness.sync.reconcileBootConfig();
+      expect(outcome.status).toBe("ok");
       expect(doctorCalls).toHaveLength(1);
       expect(doctorCalls[0]).toEqual(
         expect.arrayContaining(["doctor", "--fix", "--yes"]),
@@ -571,49 +604,60 @@ describe("server/openclaw-channel boot sync (e2e)", () => {
       const migration = harness.store.readState().configMigration;
       expect(migration.completedForVersion).toBe("2026.8.1");
       expect(migration.lastAttempt.ok).toBe(true);
+      expect(harness.store.readState().gatewayHold).toBe(null);
       // A pre-fix backup of the from-version config was kept.
       const backups = fs
         .readdirSync(harness.openclawDir)
         .filter((n) => n.startsWith("openclaw.json.pre-fix-"));
       expect(backups.length).toBeGreaterThanOrEqual(1);
 
-      // A second boot on the same version does NOT re-run doctor.
-      execFileSyncImpl.mockClear();
-      harness.sync.syncAtBoot();
-      expect(execFileSyncImpl).not.toHaveBeenCalled();
+      // A second reconcile on the same version does NOT re-run doctor.
+      const second = await harness.sync.reconcileBootConfig();
+      expect(second.status).toBe("ok");
+      expect(doctorCalls).toHaveLength(1);
     });
 
-    it("keeps the trigger armed to retry after a failed migration", async () => {
-      const execFileSyncImpl = vi.fn(() => {
-        throw new Error("doctor exit 1");
-      });
+    it("holds the gateway after a failed migration and re-runs only on change or operator force", async () => {
+      const doctorCalls = [];
       const harness = createHarness({
         installedVersion: "2026.8.1",
         sentinelVersion: "2026.8.1",
-        execFileSyncImpl,
+        runnerImpl: doctorRunner({ doctorOk: false, doctorCalls }),
       });
       writeConfig(harness.openclawDir, { bridge: { legacy: true } });
 
       harness.sync.syncAtBoot();
+      const first = await harness.sync.reconcileBootConfig();
+      expect(first.status).toBe("held");
       const migration = harness.store.readState().configMigration;
       expect(migration.completedForVersion).toBe(null);
       expect(migration.lastAttempt.ok).toBe(false);
+      // Fail CLOSED: the hold is first-class state (issue #20 — the old
+      // fail-open path let the gateway crash-loop on the rejected config).
+      expect(harness.store.readState().gatewayHold).toEqual(
+        expect.objectContaining({ reason: expect.stringContaining("2026.8.1") }),
+      );
+      expect(doctorCalls).toHaveLength(1);
 
-      // Next boot retries (trigger still armed).
-      harness.sync.syncAtBoot();
-      expect(execFileSyncImpl).toHaveBeenCalledTimes(2);
+      // Unchanged config + version + policy: the next boot keeps the hold
+      // WITHOUT re-running a potentially 30-minute doctor (re-attempt gate).
+      const second = await harness.sync.reconcileBootConfig();
+      expect(second.status).toBe("held");
+      expect(second.reused).toBe(true);
+      expect(doctorCalls).toHaveLength(1);
 
-      // Both boots emit the SAME stable outbox id — the dedupe key across
-      // repeats of the recurring failure notification.
+      // Operator retry forces a fresh attempt.
+      const forced = await harness.sync.reconcileBootConfig({ force: true });
+      expect(forced.status).toBe("held");
+      expect(doctorCalls).toHaveLength(2);
+
+      // The recurring hold notification keeps its stable outbox dedupe id.
       await flushAsync();
       expect(
         notifyIds(harness.notify).filter((id) =>
-          id.startsWith("config-migration-failed-"),
-        ),
-      ).toEqual([
-        "config-migration-failed-2026.8.1",
-        "config-migration-failed-2026.8.1",
-      ]);
+          id.startsWith("config-migration-held-"),
+        ).length,
+      ).toBeGreaterThanOrEqual(2);
     });
 
     it("writes a BETA environment stripe on beta and removes it on stable", () => {
@@ -980,11 +1024,11 @@ describe("server/openclaw-channel boot sync (e2e)", () => {
     });
 
     it("restores a pre-fix backup on downgrade instead of running doctor", async () => {
-      const execFileSyncImpl = vi.fn(() => "");
+      const doctorCalls = [];
       const harness = createHarness({
         installedVersion: "2026.7.1-2",
         sentinelVersion: "2026.7.1-2",
-        execFileSyncImpl,
+        runnerImpl: doctorRunner({ doctorCalls }),
       });
       // A backup saved before we migrated away from 2026.7.1-2.
       fs.mkdirSync(harness.openclawDir, { recursive: true });
@@ -995,10 +1039,12 @@ describe("server/openclaw-channel boot sync (e2e)", () => {
       writeConfig(harness.openclawDir, { migrated: "beta-shape" });
 
       harness.sync.syncAtBoot();
+      const outcome = await harness.sync.reconcileBootConfig();
 
       // The backup was restored (migrated shape gone, restored key present);
       // doctor was NOT run. (reconcileOpenclawJsonMirror later adds update.* keys.)
-      expect(execFileSyncImpl).not.toHaveBeenCalled();
+      expect(outcome.status).toBe("ok");
+      expect(doctorCalls).toHaveLength(0);
       const onDisk = JSON.parse(
         fs.readFileSync(path.join(harness.openclawDir, "openclaw.json"), "utf8"),
       );
@@ -1011,6 +1057,305 @@ describe("server/openclaw-channel boot sync (e2e)", () => {
       await flushAsync();
       expect(notifyIds(harness.notify)).toContain(
         "config-restore-2026.7.1-2",
+      );
+    });
+
+    // Issue #20 end-to-end shapes: a validate-capable target build. The
+    // runner answers `config validate` from the CURRENT on-disk config so
+    // strips/doctor visibly change the verdict.
+    const validateAwareRunner = ({
+      openclawDirRef,
+      doctorCalls = [],
+      doctorImpl = null,
+      dbPreflight = "unsupported",
+    }) =>
+      async (opts) => {
+        const args = Array.isArray(opts.args) ? opts.args : [];
+        if (args.includes("validate")) {
+          let config = {};
+          try {
+            config = JSON.parse(
+              fs.readFileSync(
+                path.join(openclawDirRef(), "openclaw.json"),
+                "utf8",
+              ),
+            );
+          } catch {}
+          const blamedLines = [];
+          if (config.meta?.lastTouchedAt !== undefined) {
+            blamedLines.push('meta: Unrecognized key: "lastTouchedAt"');
+          }
+          if (config.mystery !== undefined) {
+            blamedLines.push('Unrecognized key: "mystery"');
+          }
+          if (blamedLines.length) {
+            return {
+              ok: false,
+              code: 78,
+              tail: `${blamedLines.join("\n")}\n`,
+              timedOut: false,
+            };
+          }
+          return { ok: true, code: 0, tail: "config ok\n", timedOut: false };
+        }
+        if (args.includes("preflight")) {
+          if (dbPreflight === "unsupported") {
+            return {
+              ok: false,
+              code: 1,
+              tail: "error: unknown command 'database'\n",
+              timedOut: false,
+            };
+          }
+          return {
+            ok: true,
+            code: 0,
+            tail: `${JSON.stringify(dbPreflight)}\n`,
+            timedOut: false,
+          };
+        }
+        if (args.includes("doctor")) {
+          doctorCalls.push(args);
+          if (doctorImpl) return doctorImpl(opts);
+          return { ok: true, code: 0, tail: "Doctor complete\n", timedOut: false };
+        }
+        return { ok: true, code: 0, tail: "", timedOut: false };
+      };
+
+    it("strips curated retired keys (#20's exact set) while preserving MCP servers and env-ref secrets", async () => {
+      const doctorCalls = [];
+      let harness;
+      harness = createHarness({
+        installedVersion: "2026.9.1-beta.1",
+        sentinelVersion: "2026.9.1-beta.1",
+        runnerImpl: validateAwareRunner({
+          openclawDirRef: () => harness.openclawDir,
+          doctorCalls,
+        }),
+      });
+      writeConfig(harness.openclawDir, {
+        meta: { lastTouchedAt: "2026-07-01T00:00:00Z" },
+        cron: { maxConcurrentRuns: 3 },
+        mcp: {
+          servers: {
+            nessie: {
+              url: "https://example.com/mcp",
+              headers: { Authorization: "${NESSIE_TOKEN}" },
+            },
+          },
+        },
+      });
+
+      harness.sync.syncAtBoot();
+      const outcome = await harness.sync.reconcileBootConfig();
+
+      expect(outcome.status).toBe("ok");
+      expect(outcome.removedKeys).toContain("meta.lastTouchedAt");
+      expect(outcome.removedKeys).toContain("cron.maxConcurrentRuns");
+      const onDisk = JSON.parse(
+        fs.readFileSync(path.join(harness.openclawDir, "openclaw.json"), "utf8"),
+      );
+      expect(onDisk.meta).toBeUndefined();
+      // The incident's data loss must be impossible here: MCP servers and
+      // env-ref secrets survive untouched.
+      expect(onDisk.mcp.servers.nessie.headers.Authorization).toBe(
+        "${NESSIE_TOKEN}",
+      );
+      // Config validated clean after the curated strip: no doctor needed
+      // (db preflight is unsupported on this fake and the hint is absent —
+      // but a clean validate + strip means dbMigrationNeeded drove doctor).
+      expect(harness.store.readState().gatewayHold).toBe(null);
+    });
+
+    it("migrates agents.list → agents.entries on disk", async () => {
+      let harness;
+      harness = createHarness({
+        installedVersion: "2026.9.1-beta.1",
+        sentinelVersion: "2026.9.1-beta.1",
+        runnerImpl: validateAwareRunner({
+          openclawDirRef: () => harness.openclawDir,
+          dbPreflight: { ok: true, compatible: true },
+        }),
+      });
+      writeConfig(harness.openclawDir, {
+        agents: { list: [{ id: "main", name: "Main" }] },
+      });
+
+      harness.sync.syncAtBoot();
+      const outcome = await harness.sync.reconcileBootConfig();
+
+      expect(outcome.status).toBe("ok");
+      expect(outcome.renamedKeys).toContain("agents.list → agents.entries");
+      const onDisk = JSON.parse(
+        fs.readFileSync(path.join(harness.openclawDir, "openclaw.json"), "utf8"),
+      );
+      expect(onDisk.agents.list).toBeUndefined();
+      expect(onDisk.agents.entries.main).toEqual(
+        expect.objectContaining({ name: "Main" }),
+      );
+    });
+
+    it("never auto-strips UNKNOWN blamed keys — holds, then removes them only with operator consent", async () => {
+      const doctorCalls = [];
+      let harness;
+      harness = createHarness({
+        installedVersion: "2026.9.1-beta.1",
+        sentinelVersion: "2026.9.1-beta.1",
+        runnerImpl: validateAwareRunner({
+          openclawDirRef: () => harness.openclawDir,
+          doctorCalls,
+          // Doctor does NOT fix the unknown key (models the #20 shape).
+          doctorImpl: async () => ({
+            ok: true,
+            code: 0,
+            tail: "Doctor complete\n",
+            timedOut: false,
+          }),
+          dbPreflight: { ok: true, compatible: true },
+        }),
+      });
+      writeConfig(harness.openclawDir, {
+        mystery: { operatorData: true },
+        keep: { me: true },
+      });
+
+      harness.sync.syncAtBoot();
+      const outcome = await harness.sync.reconcileBootConfig();
+
+      // Unknown ≠ obsolete: the key survives, the gateway holds, the hold
+      // names the exact key for the operator.
+      expect(outcome.status).toBe("held");
+      expect(outcome.blamedKeys).toContain("mystery");
+      const held = JSON.parse(
+        fs.readFileSync(path.join(harness.openclawDir, "openclaw.json"), "utf8"),
+      );
+      expect(held.mystery).toEqual({ operatorData: true });
+      expect(harness.store.readState().gatewayHold.blamedKeys).toContain(
+        "mystery",
+      );
+
+      // Operator consent removes exactly the blamed keys and clears the hold.
+      const retried = await harness.sync.reconcileBootConfig({
+        force: true,
+        stripBlamedKeys: true,
+      });
+      expect(retried.status).toBe("ok");
+      const after = JSON.parse(
+        fs.readFileSync(path.join(harness.openclawDir, "openclaw.json"), "utf8"),
+      );
+      expect(after.mystery).toBeUndefined();
+      expect(after.keep).toEqual({ me: true });
+      expect(harness.store.readState().gatewayHold).toBe(null);
+    });
+
+    it("holds WITHOUT attempting doctor when the pre-migration snapshot cannot be written", async () => {
+      const doctorCalls = [];
+      let harness;
+      harness = createHarness({
+        installedVersion: "2026.9.1-beta.1",
+        sentinelVersion: "2026.9.1-beta.1",
+        runnerImpl: validateAwareRunner({
+          openclawDirRef: () => harness.openclawDir,
+          doctorCalls,
+        }),
+      });
+      writeConfig(harness.openclawDir, { meta: { lastTouchedAt: "x" } });
+      harness.sync.syncAtBoot();
+      // Snapshot target becomes unwritable: a directory squats on the name.
+      fs.mkdirSync(
+        path.join(harness.openclawDir, "openclaw.json.pre-fix-1.0.0.bak"),
+        { recursive: true },
+      );
+
+      const outcome = await harness.sync.reconcileBootConfig();
+
+      // No revert path = no doctor, no strips — fail closed with the hold.
+      expect(outcome.status).toBe("held");
+      expect(doctorCalls).toHaveLength(0);
+      const onDisk = JSON.parse(
+        fs.readFileSync(path.join(harness.openclawDir, "openclaw.json"), "utf8"),
+      );
+      expect(onDisk.meta.lastTouchedAt).toBe("x");
+    });
+
+    it("blocks and reverts a doctor stale-restore, holding the gateway (quarantine + tripwires)", async () => {
+      const doctorCalls = [];
+      let harness;
+      const liveConfig = {
+        mystery: { keepsConfigInvalid: true },
+        mcp: { servers: { nessie: { url: "https://example.com/mcp" } } },
+        meta2: { marker: "live" },
+      };
+      harness = createHarness({
+        installedVersion: "2026.9.1-beta.1",
+        sentinelVersion: "2026.9.1-beta.1",
+        runnerImpl: validateAwareRunner({
+          openclawDirRef: () => harness.openclawDir,
+          doctorCalls,
+          // Doctor "repairs" by swapping in a stale config that drops the
+          // MCP server — the #20 bug-3 shape.
+          doctorImpl: async () => {
+            fs.writeFileSync(
+              path.join(harness.openclawDir, "openclaw.json"),
+              JSON.stringify({ mystery: {}, mcp: { servers: {} } }, null, 2),
+            );
+            return {
+              ok: true,
+              code: 0,
+              tail: "Config auto-restored from last-known-good: openclaw.json (doctor-invalid-config)\n",
+              timedOut: false,
+            };
+          },
+          dbPreflight: { ok: true, compatible: true },
+        }),
+      });
+      writeConfig(harness.openclawDir, liveConfig);
+
+      harness.sync.syncAtBoot();
+      const outcome = await harness.sync.reconcileBootConfig();
+      await flushAsync();
+
+      expect(outcome.status).toBe("held");
+      // The stale swap was reverted: the live config is intact.
+      const onDisk = JSON.parse(
+        fs.readFileSync(path.join(harness.openclawDir, "openclaw.json"), "utf8"),
+      );
+      expect(onDisk.mcp.servers.nessie.url).toBe("https://example.com/mcp");
+      expect(onDisk.meta2.marker).toBe("live");
+      expect(
+        notifyIds(harness.notify).some((id) =>
+          id.startsWith("doctor-restore-blocked-"),
+        ),
+      ).toBe(true);
+    });
+
+    it("skips doctor entirely when the config validates and the DBs need no migration", async () => {
+      const doctorCalls = [];
+      let harness;
+      harness = createHarness({
+        installedVersion: "2026.9.1-beta.1",
+        sentinelVersion: "2026.9.1-beta.1",
+        runnerImpl: validateAwareRunner({
+          openclawDirRef: () => harness.openclawDir,
+          doctorCalls,
+          dbPreflight: { ok: true, compatible: true },
+        }),
+      });
+      writeConfig(harness.openclawDir, { clean: true });
+      // A state DB exists, so the db probe actually runs (and reports clean).
+      fs.mkdirSync(path.join(harness.openclawDir, "state"), { recursive: true });
+      fs.writeFileSync(
+        path.join(harness.openclawDir, "state", "openclaw.sqlite"),
+        "not-really-sqlite-but-present",
+      );
+
+      harness.sync.syncAtBoot();
+      const outcome = await harness.sync.reconcileBootConfig();
+
+      expect(outcome.status).toBe("ok");
+      expect(doctorCalls).toHaveLength(0);
+      expect(harness.store.readState().configMigration.completedForVersion).toBe(
+        "2026.9.1-beta.1",
       );
     });
   });

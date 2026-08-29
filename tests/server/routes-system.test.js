@@ -1114,6 +1114,9 @@ describe("server/routes/system", () => {
       acceptedAt: null,
       inStabilizationWindow: true,
       applyInProgress: true,
+      // Issue #20: the restart-handoff verdict banner reads this to avoid a
+      // green "activation verified" while the reconciler holds the gateway.
+      gatewayHold: null,
     });
   });
 
