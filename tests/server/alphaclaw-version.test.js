@@ -38,6 +38,7 @@ const createService = ({
   execMock = vi.fn(),
   fsImpl = fs,
   drain,
+  markExiting,
 } = {}) => {
   const { createAlphaclawVersionService } = loadVersionModule({ execMock });
   const service = createAlphaclawVersionService({
@@ -46,6 +47,7 @@ const createService = ({
     fetchImpl: fetchMock,
     fsImpl,
     ...(drain ? { drain } : {}),
+    ...(markExiting ? { markExiting } : {}),
   });
   return { service, fetchMock, execMock };
 };
@@ -913,16 +915,55 @@ describe("server/alphaclaw-version", () => {
     ).toBe(true);
   });
 
-  it("restarts via a container exit when running on a managed platform, draining first", async () => {
+  it("exits with the intentional-restart code (75) on container platforms, draining first", async () => {
     const exitSpy = vi.spyOn(process, "exit").mockImplementation((code) => {
       throw new Error(`exit ${code}`);
     });
     const drain = vi.fn(async () => {});
     const { service } = createService({ env: { RENDER: "true" }, drain });
 
-    await expect(service.restartProcess()).rejects.toThrow("exit 1");
+    // 75 = EX_TEMPFAIL: the supervising wrapper relaunches immediately
+    // without counting it toward crash thresholds; old wrappers treat it
+    // like any other nonzero exit (no worse than the old exit 1).
+    await expect(service.restartProcess()).rejects.toThrow("exit 75");
     expect(drain).toHaveBeenCalledTimes(1);
-    expect(exitSpy).toHaveBeenCalledWith(1);
+    expect(exitSpy).toHaveBeenCalledWith(75);
+  });
+
+  it("latches the lifecycle exiting state before draining", async () => {
+    vi.spyOn(process, "exit").mockImplementation((code) => {
+      throw new Error(`exit ${code}`);
+    });
+    const calls = [];
+    const markExiting = vi.fn((code) => calls.push(["markExiting", code]));
+    const drain = vi.fn(async () => calls.push(["drain"]));
+
+    // Container path: the latch carries the intentional-restart code so a
+    // SIGTERM inside the ≤10s drain window exits 75 instead of double-draining.
+    const { service } = createService({
+      env: { RENDER: "true" },
+      drain,
+      markExiting,
+    });
+    await expect(service.restartProcess()).rejects.toThrow("exit 75");
+    expect(calls).toEqual([["markExiting", 75], ["drain"]]);
+
+    // Respawn (VPS) path: the latch carries the clean-exit code.
+    const originalSpawn = childProcess.spawn;
+    childProcess.spawn = vi.fn(() => ({ unref: vi.fn() }));
+    try {
+      calls.length = 0;
+      const { service: vpsService } = createService({
+        env: {},
+        fsImpl: { ...fs, existsSync: vi.fn(() => false) },
+        drain,
+        markExiting,
+      });
+      await expect(vpsService.restartProcess()).rejects.toThrow("exit 0");
+      expect(calls).toEqual([["markExiting", 0], ["drain"]]);
+    } finally {
+      childProcess.spawn = originalSpawn;
+    }
   });
 
   it("spawns a detached replacement process outside containers, draining first", async () => {
@@ -973,8 +1014,8 @@ describe("server/alphaclaw-version", () => {
     });
     const { service } = createService({ env: { RENDER: "true" }, drain });
 
-    await expect(service.restartProcess()).rejects.toThrow("exit 1");
-    expect(exitSpy).toHaveBeenCalledWith(1);
+    await expect(service.restartProcess()).rejects.toThrow("exit 75");
+    expect(exitSpy).toHaveBeenCalledWith(75);
   });
 
   it("writes update marker to kRootDir on successful self-update", async () => {

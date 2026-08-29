@@ -222,11 +222,6 @@
 - **Context:** TODO comment in lib/server/gateway.js; gate in lib/server/openclaw-feature-gates.js. Surfaced by the eng review's "handoff after the beta contract is read" sequencing decision.
 - **Effort:** S. **Depends on:** applying 2026.8.1-beta.3+ on a staging deployment.
 
-## P2 — Latch shutdown state before the self-update restart drain
-- **What:** `restartProcess` (lib/server/alphaclaw-version.js) calls `serverLifecycle.drain()` without setting the lifecycle's `exiting` latch, so a SIGTERM or uncaughtException landing inside the ≤10s drain window starts a second concurrent drain and exits before the successor process is spawned — on an unsupervised VPS that means a self-update ends with nothing running. Route the restart through a lifecycle method (e.g. `prepareForRestart()`) that latches `exiting` and disarms signal re-entry, or move the respawn inside the guarded exit path.
-- **Why:** Red-team finding on the downtime-remediation ship review (2026-08-28); bounded window but the failure mode is "permanently down after update".
-- **Effort:** S. **Depends on:** nothing.
-
 ## P3 — Keep the workspace manifest inside the fingerprint worker
 - **What:** Each background snapshot refresh round-trips the full manifest (multi-MB at 15k+ files) through `postMessage`, costing ~7ms serialize + ~15ms deserialize on the main thread per refresh. The worker is persistent — cache the previous manifest worker-side (send it only on the first request) and return only fingerprint/limited/stats (and, with the delta moved worker-side, the computed delta).
 - **Why:** Last recurring main-thread stall on the status path (bounded: once per 45s refresh window). Ship-review performance finding, 2026-08-28.
@@ -302,6 +297,42 @@
 - **What:** Per-event-type filter pills on the All-events tab; a spot-check "explain current status" overseer mode with no incident; any new SSE event streams for the watchdog surfaces.
 - **Why:** Each was reviewed and deferred: three tabs cover the filtering need, the deterministic narrator explains live status for free, and the 2s status SSE + 15s polls already carry everything ("new event streams are the expensive path").
 - **Effort:** S each. **Depends on:** demand.
+## P2 — Claude Code launcher: fire with custom instruction text
+- **What:** An input UI on the launcher that passes `{"text": ...}` in the routine-fire body so a click can carry task instructions.
+- **Why:** Turns "open a session" into "open a session already working on X" — the highest-leverage extension of the launcher.
+- **Context:** The fire payload arrives wrapped in an untrusted `<routine-fire-payload>` block, so the routine's saved prompt must explicitly opt in to reading it (e.g. "act on the routine-fire-payload block"); needs UX design (input modal) and README prompt guidance. `lib/server/claude-code-service.js` is the extension point (currently posts no body by design).
+- **Effort:** M. **Depends on:** the launcher shipping.
+
+## P2 — Watchdog incident → Claude Code routine escalation
+- **What:** Reuse `claude-code-service` to fire the routine with a settled incident's narrative as the `text` payload ("escalate this incident to Claude Code").
+- **Why:** Platform potential: incidents debug themselves in a cloud session with context attached, instead of an operator copy-pasting log excerpts.
+- **Context:** Deferred from the launcher's CEO review; needs overseer-integration design (which incidents qualify, redaction of the narrative, notification links) and its own review. Blocked on the fire-with-text TODO above for the payload path.
+- **Effort:** M. **Depends on:** fire-with-custom-text.
+
+## P3 — Doctor check for Claude Code routine config shape
+- **What:** Surface the launcher service's `invalid_config` reason (bad host, wrong token prefix, half-configured pair) as a Doctor finding.
+- **Why:** Misconfiguration is currently visible only in the sidebar tooltip and the fire-time error toast; Doctor is where operators look for config drift.
+- **Context:** `createClaudeCodeService().getAvailability()` already returns the exact reason/message — the check is a thin adapter in lib/server/doctor/.
+- **Effort:** S. **Depends on:** nothing.
+
+## P3 — Mobile drawer doesn't close on external nav items
+- **What:** The generic `item.href` branch in `renderNavItem` (lib/public/js/components/sidebar.js) — used by the gated Dashboards link — never closes the mobile drawer, leaving the drawer and overlay covering the app while the new tab opens.
+- **Why:** The Claude Code launcher fixed this for itself via its `onBeforeOpen` callback (design-review finding); the same fix should backport to the generic external-item branch.
+- **Context:** `use-browse-navigation.js` `handleSelectNavItem` closes the drawer for internal items only; external anchors bypass it.
+- **Effort:** S. **Depends on:** nothing.
+
+## P3 — Claude Code launcher: durable cross-process fire lease
+- **What:** The launcher's single-flight (`inFlight`) and cooldown (`cooldownUntil`) live in memory on one `claudeCodeService` instance (lib/server/claude-code-service.js). A crash between Anthropic accepting a fire and AlphaClaw replying, or multiple server processes, or multiple team admins, each bypass the duplicate-billing guard; `busy`/`cooldown` are also shared across all admins (one admin's fire blocks another's).
+- **Why:** The fire endpoint has no upstream idempotency key, so every gap in the in-memory guard is a real (if narrow) double-billing window. Adversarial review (Claude + Codex) flagged it; accepted as out-of-scope for the initial launcher because the practical exposure is small (single-process deploy, one operator, rare crash-timing).
+- **Context:** Would need an atomic durable lease (file lock or the existing SQLite state dir) keyed per routine, plus persisting uncertain outcomes across boot. Design it alongside the P1 gatewayEnv allowlist work.
+- **Effort:** M. **Depends on:** nothing.
+
+## P3 — Sidebar nav a11y debt
+- **What:** Internal sidebar nav items are `<a>` elements without `href` (not keyboard-focusable), and rows are under the 44px touch-target minimum on mobile.
+- **Why:** Keyboard users cannot tab to most nav items; touch targets fall below platform guidelines. The Claude Code launcher item carries a real href (and aria-busy while launching) — the rest of the nav should catch up.
+- **Context:** `renderNavItem` in lib/public/js/components/sidebar.js and the `.sidebar-nav a` metrics in lib/public/css/shell.css:215-246. Repo-wide pass; keep visual density on desktop while adding focus/touch affordances.
+- **Effort:** M. **Depends on:** nothing.
+
 ## Completed
 
 ## Make env-save channel sync one atomic lifecycle-lock op
@@ -309,3 +340,14 @@
 - **Why:** Adversarial review M4 on the ship pass (2026-08-28). Rare (requires an operator restart racing an env save) and bounded, but the invariant "env save is atomic against lifecycle ops" held under execSync and silently weakened in the async conversion.
 - **Effort:** M (test updates across routes-system + coalescing suites). **Depends on:** nothing.
 - **Completed:** v0.9.37 (2026-08-28) — `PUT /api/env` acquires the shared gateway lifecycle lock once around the full remove → write → add sequence (lib/server/routes/system.js `env_sync` op); `syncChannelConfig` itself stays lock-free, so the whole save is one atomic lifecycle operation.
+
+## P3 — Guided state-DB restore when a rollback is refused
+- **What:** When boot refuses a rollback ("no OpenClaw version on this box can read the migrated state", `rollbackRefused` latch, issue #21), the notification names the newest `openclaw-backup-*.tar.gz` and points at the runbook — but restoring it is still a manual CLI dance. Build a guided flow (Upgrade page CTA → staged extract → `openclaw backup` restore steps → restart) that walks the operator through it.
+- **Why:** Auto-restore was deliberately rejected in the #21 fix plan (multi-GB extraction at boot, 2× disk requirement, silently discards state written since the backup). A guided flow keeps the human decision while removing the error-prone shell steps.
+- **Context:** Refusal path in lib/server/openclaw-channel-sync.js (`chooseBootRollbackTarget` → `rollback_refused` branch); recovery archive named via `newestArchiveName()`; runbook step 6 in AGENTS.md.
+- **Effort:** M. **Depends on:** nothing.
+
+## P3 — Slack allowFrom fallback for watchdog notifier targets
+- **What:** The Bug-7 fix (issue #21) falls back to `channels.telegram.allowFrom` numeric IDs when no pairing files exist. Slack was deliberately excluded: its allowFrom entries need per-account token derivation (`slack-<account>-allowFrom.json` naming), and Slack user IDs require a `conversations.open` call before posting. Add the Slack equivalent if a real box hits `no_channels_delivered` with only Slack configured.
+- **Context:** lib/server/watchdog-notify.js (`readChannelAllowFrom`, fan-out fallback block with the exclusion comment).
+- **Effort:** S. **Depends on:** nothing.

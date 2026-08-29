@@ -15,7 +15,8 @@ describe("server/onboarding/github", () => {
     const shellCmd = vi.fn(async (cmd, opts = {}) => {
       expect(cmd).toContain('git clone --depth=1 "https://github.com/my-org/source-repo.git"');
       expect(cmd).not.toContain("ghp_secret_token_value");
-      expect(opts.env?.ALPHACLAW_GITHUB_TOKEN).toBe("ghp_secret_token_value");
+      // The shared hardened askpass reads GITHUB_TOKEN (H9); never on the CLI.
+      expect(opts.env?.GITHUB_TOKEN).toBe("ghp_secret_token_value");
       expect(typeof opts.env?.GIT_ASKPASS).toBe("string");
       expect(fs.existsSync(opts.env.GIT_ASKPASS)).toBe(true);
       return "";
