@@ -1875,3 +1875,116 @@ describe("server/routes/browse preview size gates", () => {
     expect(res.body.content.startsWith("a".repeat(512))).toBe(true);
   });
 });
+
+// H4: containment is realpath-safe, not lexical. A symlink planted inside the
+// root (the agent has $HOME in ~/.openclaw) must not let read/write/move escape
+// the root or reach a locked subtree — while legitimate nested paths still work.
+describe("server/routes/browse symlink containment (H4)", () => {
+  const canSymlink = (() => {
+    const probe = createTestRoot();
+    try {
+      fs.symlinkSync(probe, path.join(probe, "self-link"));
+      return true;
+    } catch {
+      return false;
+    }
+  })();
+
+  const maybeIt = canSymlink ? it : it.skip;
+
+  maybeIt("rejects reading through a symlink that escapes the root", async () => {
+    const rootDir = createTestRoot();
+    const outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), "alphaclaw-outside-"));
+    fs.writeFileSync(path.join(outsideDir, "secret.txt"), "top-secret", "utf8");
+    fs.symlinkSync(outsideDir, path.join(rootDir, "esc"));
+    const app = createApp(rootDir);
+
+    const res = await request(app)
+      .get("/api/browse/read")
+      .query({ path: "esc/secret.txt" });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain("Path must stay within");
+  });
+
+  maybeIt("rejects writing through a symlink that escapes the root", async () => {
+    const rootDir = createTestRoot();
+    const outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), "alphaclaw-outside-"));
+    fs.writeFileSync(path.join(outsideDir, "target.txt"), "orig", "utf8");
+    fs.symlinkSync(outsideDir, path.join(rootDir, "esc"));
+    const app = createApp(rootDir);
+
+    const res = await request(app)
+      .put("/api/browse/write")
+      .send({ path: "esc/target.txt", content: "pwned" });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain("Path must stay within");
+    // The real file outside the root is untouched.
+    expect(fs.readFileSync(path.join(outsideDir, "target.txt"), "utf8")).toBe("orig");
+  });
+
+  maybeIt(
+    "rejects writing into a locked subtree reached via a symlink inside root",
+    async () => {
+      const rootDir = createTestRoot();
+      // .alphaclaw/hourly-git-sync.sh is a locked path; a symlink whose
+      // canonical target lands in that locked subtree must be re-checked
+      // against the policy on the CANONICAL relative path, not the request path.
+      fs.mkdirSync(path.join(rootDir, ".alphaclaw"), { recursive: true });
+      fs.writeFileSync(
+        path.join(rootDir, ".alphaclaw", "hourly-git-sync.sh"),
+        "#!/bin/bash\n",
+        "utf8",
+      );
+      fs.symlinkSync(
+        path.join(rootDir, ".alphaclaw"),
+        path.join(rootDir, "sneaky"),
+      );
+      const app = createApp(rootDir);
+
+      const res = await request(app)
+        .put("/api/browse/write")
+        .send({ path: "sneaky/hourly-git-sync.sh", content: "pwned" });
+
+      expect(res.status).toBe(403);
+      expect(fs.readFileSync(
+        path.join(rootDir, ".alphaclaw", "hourly-git-sync.sh"),
+        "utf8",
+      )).toBe("#!/bin/bash\n");
+    },
+  );
+
+  maybeIt("still allows a legitimate nested path (no over-blocking)", async () => {
+    const rootDir = createTestRoot();
+    fs.mkdirSync(path.join(rootDir, "sub", "deep"), { recursive: true });
+    fs.writeFileSync(path.join(rootDir, "sub", "deep", "ok.txt"), "hello", "utf8");
+    const app = createApp(rootDir);
+
+    const res = await request(app)
+      .get("/api/browse/read")
+      .query({ path: "sub/deep/ok.txt" });
+
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+    expect(res.body.content).toBe("hello");
+    expect(res.body.path).toBe("sub/deep/ok.txt");
+  });
+
+  maybeIt("allows writing a new file inside a real subdirectory", async () => {
+    const rootDir = createTestRoot();
+    fs.mkdirSync(path.join(rootDir, "sub"), { recursive: true });
+    fs.writeFileSync(path.join(rootDir, "sub", "f.txt"), "orig", "utf8");
+    const app = createApp(rootDir);
+
+    const res = await request(app)
+      .put("/api/browse/write")
+      .send({ path: "sub/f.txt", content: "updated" });
+
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+    expect(fs.readFileSync(path.join(rootDir, "sub", "f.txt"), "utf8")).toBe(
+      "updated",
+    );
+  });
+});
