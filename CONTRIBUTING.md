@@ -65,7 +65,7 @@ npm run test:live:dev # Live e2e: real dev-channel source build only (20-35 min,
 npm run test:ui       # Browser UI smoke: real server + headless Chromium (opt-in; self-skips without a browse CLI — set BROWSE_BIN)
 ```
 
-AlphaClaw uses [Vitest](https://vitest.dev/) for testing. `npm test` is hermetic by design: the live tiers under `tests/live/` run only with `OPENCLAW_LIVE_E2E=1` (the `test:live` scripts set it for you), so a green `npm test` does not exercise the real npm registry, GitHub API, or OpenClaw updater. `npm run test:ui` (`tests/browser/upgrade-ui-smoke.sh`) is likewise opt-in: it boots a real AlphaClaw server and drives it with a headless Chromium, and exits 0 with a SKIP message when no browse CLI is available.
+AlphaClaw uses [Vitest](https://vitest.dev/) for testing. `npm test` is hermetic by design: the live tiers under `tests/live/` run only with `OPENCLAW_LIVE_E2E=1` (the `test:live` scripts set it for you), so a green `npm test` does not exercise the real npm registry, GitHub API, or OpenClaw updater. `npm run test:ui` (`tests/browser/upgrade-ui-smoke.sh`) is likewise opt-in: it boots a real AlphaClaw server and drives it with a headless Chromium, needs network for the version catalog, and exits 0 with a SKIP message when no browse CLI is available (`BROWSE_BIN` points at the driver; `UI_SMOKE_PORT` overrides the default port).
 
 ### Project Structure
 

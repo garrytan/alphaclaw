@@ -3,7 +3,7 @@
 ## P3 — Multi-operator / multi-tab settings freshness
 - **What:** Push-refresh (SSE settings events) or ETag/If-Match concurrency for persisted settings so a second operator/tab sees changes without a remount.
 - **Why:** The toggle/status/error overhaul's generation guards fix single-client races only; concurrent editors remain last-write-wins with no live refresh of settings cards.
-- **Context:** `useSavedSetting` (lib/public/js/hooks/use-saved-setting.js) is the single write path — a settings SSE channel could feed its `retryLoad()`/cache seam. Surfaced by the plan's CEO review + outside voice.
+- **Context:** `useSavedSetting` (lib/public/js/hooks/use-saved-setting.js) is the standard write path (a few deliberate bespoke loops remain: cron's job-enable converge, General's SSE-proof API toggle) — a settings SSE channel could feed its `retryLoad()`/cache seam. Surfaced by the plan's CEO review + outside voice.
 - **Effort:** M. **Depends on:** deciding a settings-events transport (piggyback /api/events/status vs a new stream).
 
 ## P3 — Cron run-history: cap-aware pagination merge + bounded optimistic converge

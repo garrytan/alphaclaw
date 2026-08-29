@@ -265,7 +265,8 @@ npm run test:live:dev   # dev-channel source build only (20-35 min, ~5 GB disk);
                         # does not re-run the catalog/apply tiers above
 npm run test:ui         # Browser UI smoke of the Upgrade page: real server +
                         # headless Chromium asserting the rendered DOM (opt-in;
-                        # self-skips unless a browse CLI is present — set BROWSE_BIN)
+                        # needs network for the version catalog; self-skips
+                        # unless a browse CLI is present — set BROWSE_BIN)
 ```
 
 The live tiers also run in CI on a schedule (`.github/workflows/live-e2e.yml`):
