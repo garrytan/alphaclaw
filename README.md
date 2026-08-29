@@ -102,6 +102,10 @@ ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["alphaclaw", "start"]
 ```
 
+The repo ships this same recipe as the reference [`Dockerfile`](Dockerfile),
+and `npm run test:container` runs the full container E2E against an image
+built from it (docker required).
+
 ## Setup UI
 
 | Tab           | What it manages                                                                                                          |
@@ -309,6 +313,10 @@ npm run test:coverage   # Coverage report
 npm run test:live       # catalog + real stable/beta package applies (~5 min, network)
 npm run test:live:dev   # dev-channel source build only (20-35 min, ~5 GB disk);
                         # does not re-run the catalog/apply tiers above
+npm run test:container  # full production-container journey: builds the image,
+                        # boots a real stable gateway, drives a stable→beta
+                        # upgrade through headless Chromium, proves restart
+                        # durability (~25-40 min; needs docker + network)
 npm run test:ui         # Browser UI smoke of the Upgrade page: real server +
                         # headless Chromium asserting the rendered DOM (opt-in;
                         # needs network for the version catalog; self-skips
