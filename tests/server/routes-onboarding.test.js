@@ -49,6 +49,7 @@ const createBaseDeps = ({ onboarded = false, hasCodexOauth = false } = {}) => {
       ]),
     },
     shellCmd: vi.fn(async () => ""),
+    execFileCmd: vi.fn(async () => ""),
     gatewayEnv: vi.fn(() => ({
       HOME: "/tmp/alphaclaw",
       OPENCLAW_HOME: "/tmp/alphaclaw",
@@ -495,7 +496,7 @@ describe("server/routes/onboarding", () => {
     expect(initialPushCall).toBeTruthy();
 
     const gitInitCall = deps.shellCmd.mock.calls.find(([cmd]) =>
-      cmd.includes('git remote add origin "https://github.com/owner/repo.git"'),
+      cmd.includes("git remote add origin 'https://github.com/owner/repo.git'"),
     );
     expect(gitInitCall).toBeTruthy();
     expect(gitInitCall[0]).not.toContain("ghp_test_123456789");
@@ -623,14 +624,15 @@ describe("server/routes/onboarding", () => {
     const savedVars = deps.writeEnvFile.mock.calls.at(-1)[0];
     expect(savedVars.some((entry) => entry.key === "ANTHROPIC_TOKEN")).toBe(false);
 
-    const onboardCall = deps.shellCmd.mock.calls.find(([cmd]) =>
-      cmd.startsWith("openclaw onboard "),
+    const onboardCall = deps.execFileCmd.mock.calls.find(
+      ([file, args]) => file === "openclaw" && args[0] === "onboard",
     );
     expect(onboardCall).toBeTruthy();
-    expect(onboardCall[0]).toContain("--anthropic-api-key");
-    expect(onboardCall[0]).not.toContain("--token-provider");
-    expect(onboardCall[0]).not.toContain("sk-ant-oat01-stale-token");
-    expect(onboardCall[1]).toMatchObject({
+    const onboardArgs = onboardCall[1];
+    expect(onboardArgs).toContain("--anthropic-api-key");
+    expect(onboardArgs).not.toContain("--token-provider");
+    expect(onboardArgs).not.toContain("sk-ant-oat01-stale-token");
+    expect(onboardCall[2]).toMatchObject({
       env: expect.objectContaining({
         HOME: expect.any(String),
         OPENCLAW_CONFIG_PATH: "/tmp/openclaw/openclaw.json",
@@ -827,12 +829,13 @@ describe("server/routes/onboarding", () => {
     expect(
       deps.shellCmd.mock.calls.some(([cmd]) =>
         cmd.includes(
-          'git init -b main && git remote add origin "https://github.com/owner/target-repo.git"',
+          "git init -b main && git remote add origin 'https://github.com/owner/target-repo.git'",
         ),
       ),
     ).toBe(true);
-    expect(deps.shellCmd).toHaveBeenCalledWith(
-      'openclaw models set "openai/gpt-5.1-codex"',
+    expect(deps.execFileCmd).toHaveBeenCalledWith(
+      "openclaw",
+      ["models", "set", "--", "openai/gpt-5.1-codex"],
       expect.objectContaining({
         env: expect.objectContaining({ OPENCLAW_GATEWAY_TOKEN: "tok" }),
       }),
@@ -873,14 +876,16 @@ describe("server/routes/onboarding", () => {
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ ok: true });
     expect(
-      deps.shellCmd.mock.calls.some(([cmd]) => cmd.startsWith("openclaw onboard ")),
+      deps.execFileCmd.mock.calls.some(
+        ([file, args]) => file === "openclaw" && args[0] === "onboard",
+      ),
     ).toBe(true);
     expect(
       deps.shellCmd.mock.calls.some(([cmd]) => cmd.includes('git remote set-url origin')),
     ).toBe(false);
     expect(
       deps.shellCmd.mock.calls.some(([cmd]) =>
-        cmd.includes('git init -b main && git remote add origin "https://github.com/owner/repo.git"'),
+        cmd.includes("git init -b main && git remote add origin 'https://github.com/owner/repo.git'"),
       ),
     ).toBe(true);
   });
@@ -932,7 +937,7 @@ describe("server/routes/onboarding", () => {
     expect(
       deps.shellCmd.mock.calls.some(([cmd]) =>
         cmd.includes(
-          'git init -b main && git remote add origin "https://github.com/owner/import-target.git"',
+          "git init -b main && git remote add origin 'https://github.com/owner/import-target.git'",
         ),
       ),
     ).toBe(true);
@@ -2228,7 +2233,7 @@ describe("server/routes/onboarding additional coverage", () => {
     expect(
       deps.shellCmd.mock.calls.some(([cmd]) =>
         cmd.includes(
-          'git remote set-url origin "https://github.com/owner/repo.git"',
+          "git remote set-url origin 'https://github.com/owner/repo.git'",
         ),
       ),
     ).toBe(true);
@@ -2240,8 +2245,8 @@ describe("server/routes/onboarding additional coverage", () => {
   it("fails onboarding when the model cannot be set", async () => {
     const deps = createBaseDeps();
     mockHappyPathFiles(deps);
-    deps.shellCmd.mockImplementation(async (cmd) => {
-      if (cmd.startsWith("openclaw models set")) {
+    deps.execFileCmd.mockImplementation(async (file, args) => {
+      if (file === "openclaw" && args[0] === "models" && args[1] === "set") {
         throw new Error("unknown model");
       }
       return "";
