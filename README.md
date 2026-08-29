@@ -202,7 +202,7 @@ The built-in watchdog monitors gateway health and recovers from failures automat
 | **Crash detection**      | Gateway exit events plus an always-on 10s TCP port watcher, with immediate re-checks after every restart/repair |
 | **Crash-loop detection** | Threshold-based (default: 3 crashes in 300s)                           |
 | **Auto-repair**          | Runs `openclaw doctor --fix --yes`, relaunches gateway                 |
-| **Restart handoff**      | OpenClaw-requested restarts (config writes, `/restart`, plugin changes) are consumed as a verified handoff and relaunched promptly — never counted as crashes (OpenClaw 2026.8.1-beta) |
+| **Restart handoff**      | OpenClaw-requested restarts (config writes, `/restart`, plugin changes) are consumed as a verified handoff and relaunched promptly without crash accounting — rate-braked at 5 handoff relaunches per hour, after which the normal crash flow takes over (OpenClaw 2026.8.1-beta) |
 | **Notifications**        | Telegram, Discord, Slack, and WhatsApp alerts for crashes, repairs, and recovery |
 | **Event log**            | SQLite-backed incident history with API and UI access                  |
 
