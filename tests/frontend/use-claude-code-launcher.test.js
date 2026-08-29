@@ -106,7 +106,11 @@ beforeEach(() => {
   vi.clearAllMocks();
   useCachedFetch.mockReturnValue({ data: null });
   readUiSettings.mockReturnValue({});
-  global.window = { open: vi.fn(() => makeWin()) };
+  global.window = {
+    open: vi.fn(() => makeWin()),
+    addEventListener: vi.fn(),
+    removeEventListener: vi.fn(),
+  };
 });
 
 describe("useClaudeCodeLauncher status → tooltip", () => {
@@ -284,6 +288,52 @@ describe("useClaudeCodeLauncher confirm handshake", () => {
     const win = global.window.open.mock.results[0].value;
     expect(win.close).toHaveBeenCalled();
     expect(renderHook().confirmOpen).toBe(false);
+
+    // Lock released: a fresh click opens a fresh placeholder.
+    createClaudeCodeSession.mockResolvedValueOnce({ ok: true, sessionUrl: kSessionUrl });
+    renderHook().openClaudeCode(plainClick());
+    expect(global.window.open).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("useClaudeCodeLauncher confirm one-shot + unmount cleanup", () => {
+  const confirmRequired = () =>
+    Object.assign(new Error("Confirmation required before the first fire."), {
+      code: "confirm_required",
+    });
+
+  it("ignores a modal double-click on Start (one probe + one confirmed fire, never a third)", async () => {
+    createClaudeCodeSession
+      .mockRejectedValueOnce(confirmRequired())
+      .mockReturnValue(new Promise(() => {}));
+    renderHook().openClaudeCode(plainClick());
+    await flush();
+
+    const rerendered = renderHook();
+    rerendered.confirmStart();
+    rerendered.confirmStart();
+    await flush();
+    expect(createClaudeCodeSession).toHaveBeenCalledTimes(2);
+    // The second click must not run the error path that would close the
+    // placeholder the first (billed) fire is about to navigate.
+    const win = global.window.open.mock.results[0].value;
+    expect(win.close).not.toHaveBeenCalled();
+  });
+
+  it("unmount with a pending modal closes the orphan placeholder and releases the lock", async () => {
+    createClaudeCodeSession.mockRejectedValueOnce(confirmRequired());
+    renderHook().openClaudeCode(plainClick());
+    await flush();
+    renderHook(); // re-render collects the mount effect with current refs
+
+    // Run the collected effects and their teardowns (the harness collects
+    // without running; the unmount cleanup is the effect's return value).
+    for (const effect of harness.effects) {
+      const cleanup = effect();
+      if (typeof cleanup === "function") cleanup();
+    }
+    const win = global.window.open.mock.results[0].value;
+    expect(win.close).toHaveBeenCalled();
 
     // Lock released: a fresh click opens a fresh placeholder.
     createClaudeCodeSession.mockResolvedValueOnce({ ok: true, sessionUrl: kSessionUrl });

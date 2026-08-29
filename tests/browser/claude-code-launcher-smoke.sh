@@ -116,8 +116,9 @@ assert_page "($kItemExpr).getAttribute('title').includes('Fires your Claude Code
 "$B" js "($kItemExpr).click(); true" >/dev/null
 wait_page "document.body.textContent.includes('Start a Claude Code session?')" 8 "one-time confirmation modal appears (server confirm_required)"
 "$B" js "[...document.querySelectorAll('button')].find(b => b.textContent.trim()==='Cancel')?.click(); true" >/dev/null
-sleep 1
-assert_page "!document.body.textContent.includes('Start a Claude Code session?')" "Cancel closes the modal"
+# Poll to convergence — a fixed sleep before a negative assertion false-passes
+# on a slow machine if the DOM updates late.
+wait_page "!document.body.textContent.includes('Start a Claude Code session?')" 5 "Cancel closes the modal"
 
 echo "== phase 4: Start — real fire attempt fails honestly, consent persists =="
 "$B" js "($kItemExpr).click(); true" >/dev/null
@@ -129,7 +130,10 @@ wait_page "/rejected|not found|refused to fire|api\\.anthropic\\.com|unusable se
 assert_page "Object.keys(localStorage).some(k => String(localStorage.getItem(k)).includes('\"claudeCodeFireConfirmed\":true'))" "consent flag persisted to ui-settings"
 
 "$B" js "($kItemExpr).click(); true" >/dev/null
-sleep 2
+# Wait for a POSITIVE outcome signal of this click (another fire failure or
+# the cooldown refusal toast) before asserting the modal stayed away — a bare
+# sleep would false-pass if the modal simply hadn't rendered yet.
+wait_page "/rejected|not found|refused to fire|api\\.anthropic\\.com|unusable session URL|Timed out|wait a few seconds/.test(document.body.textContent)" 25 "post-consent click resolves (toast, no modal wait)"
 assert_page "!document.body.textContent.includes('Start a Claude Code session?')" "modal never reappears once consented"
 
 echo "PASS: claude-code launcher browser smoke"
