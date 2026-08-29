@@ -54,19 +54,26 @@ describe("scripts/reconcile-codex-plugin", () => {
     );
   });
 
-  it("falls back to the npm pin when the active version cannot be read", () => {
+  it("skips (never falls back to the pin) when the active version cannot be read", () => {
+    // A failed --version probe on a box whose release channel has a beta
+    // active would otherwise force-downgrade the plugin to the npm pin.
+    const logger = { log: vi.fn() };
     const exec = buildExec({
       activeVersion: null,
       plugins: [{ id: "codex", origin: "global", version: "2026.5.28" }],
     });
 
-    const result = reconcileCodexPlugin({ exec, logger: { log: vi.fn() } });
+    const result = reconcileCodexPlugin({ exec, logger });
 
     expect(result).toEqual({
-      changed: true,
-      previousVersion: "2026.5.28",
-      version: getPinnedOpenclawVersion(),
+      changed: false,
+      reason: "active-version-unknown",
     });
+    // Only the --version probe ran; nothing was listed or installed.
+    expect(exec).toHaveBeenCalledTimes(1);
+    expect(logger.log).toHaveBeenCalledWith(
+      expect.stringContaining("could not determine the active openclaw version"),
+    );
   });
 
   it("never force-downgrades the plugin under a dev-sha core — skips with a log", () => {
@@ -114,36 +121,19 @@ describe("scripts/reconcile-codex-plugin", () => {
     });
   });
 
-  it("treats an unavailable openclaw CLI as not installed", () => {
+  it("treats an unavailable openclaw CLI as unknown-version (skip), and helpers degrade cleanly", () => {
     const exec = vi.fn(() => {
       throw new Error("spawn openclaw ENOENT");
     });
 
     expect(getInstalledCodexPlugin({ exec })).toBe(null);
     expect(getActiveOpenclawVersion({ exec })).toBe("");
-    expect(reconcileCodexPlugin({ exec })).toEqual({
+    expect(
+      reconcileCodexPlugin({ exec, logger: { log: vi.fn() } }),
+    ).toEqual({
       changed: false,
-      reason: "not-installed",
+      reason: "active-version-unknown",
     });
-  });
-
-  it("skips reconciliation when the openclaw pin is missing and no active version resolves", () => {
-    const pkg = require("../../package.json");
-    const originalPin = pkg.dependencies.openclaw;
-    pkg.dependencies.openclaw = "";
-    try {
-      const exec = vi.fn(() => {
-        throw new Error("spawn openclaw ENOENT");
-      });
-      expect(reconcileCodexPlugin({ exec })).toEqual({
-        changed: false,
-        reason: "missing-pin",
-      });
-      // Only the --version probe ran.
-      expect(exec).toHaveBeenCalledTimes(1);
-    } finally {
-      pkg.dependencies.openclaw = originalPin;
-    }
   });
 
   it("runs reconciliation when executed as the main module and warns on failure", () => {

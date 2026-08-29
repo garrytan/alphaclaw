@@ -165,6 +165,84 @@ describeLive(
           expect(
             fs.existsSync(path.join(stateDir, "exec-approvals.json")),
           ).toBe(false);
+          // 5. Our own era layer against the REAL beta state dir: the row the
+          // set above created makes the backend sqlite; the boot seeding must
+          // never create the legacy file, and a poisoned one is reaped once.
+          const { createStateEra } = require("../../lib/server/openclaw-state-era");
+          const {
+            ensureManagedExecDefaults,
+          } = require("../../lib/server/exec-defaults-config");
+          const betaEra = createStateEra({
+            openclawDir: stateDir,
+            gatesInfo: () => ({
+              version: newestBeta,
+              features: { execApprovalsSqlite: true },
+            }),
+          });
+          const seedResult = await ensureManagedExecDefaults({
+            openclawDir: stateDir,
+            resolveExecApprovalsBackend: betaEra.resolveExecApprovalsBackend,
+            logger: kSilentLogger,
+          });
+          expect(seedResult.approvalsBackend).toBe("sqlite");
+          expect(fs.existsSync(path.join(stateDir, "exec-approvals.json"))).toBe(false);
+          fs.writeFileSync(
+            path.join(stateDir, "exec-approvals.json"),
+            JSON.stringify({ version: 1 }),
+          );
+          const reapResult = await ensureManagedExecDefaults({
+            openclawDir: stateDir,
+            resolveExecApprovalsBackend: betaEra.resolveExecApprovalsBackend,
+            logger: kSilentLogger,
+          });
+          expect(reapResult.reaped).toBe(true);
+          expect(fs.existsSync(path.join(stateDir, "exec-approvals.json"))).toBe(false);
+          // 6. The read-merge-write config flow the exec-config routes use.
+          fs.writeFileSync(
+            path.join(stateDir, "openclaw.json"),
+            JSON.stringify({ tools: { exec: { mode: "full", strictInlineEval: false } } }),
+          );
+          runCli([
+            "config",
+            "set",
+            "tools.exec",
+            JSON.stringify({ mode: "ask", host: "gateway", node: "", strictInlineEval: false }),
+            "--strict-json",
+          ]);
+          const execCfg = JSON.parse(runCli(["config", "get", "tools.exec", "--json"]));
+          expect(execCfg.mode).toBe("ask");
+          // 7. Pairing-store propagation (X5, CLI-level): a direct row write
+          // is visible to openclaw's own pairing tooling, and our direct
+          // DELETE removes it. (In-gateway memory visibility would need a
+          // booted gateway + live channel — out of this tier's scope; the
+          // pairing CLI reads the same store the gateway daemon does.)
+          const {
+            openWritableOpenclawStateDb,
+          } = require("../../lib/server/openclaw-state-db");
+          const {
+            deletePairingRequestByCode,
+          } = require("../../lib/server/openclaw-state-era");
+          const opened = openWritableOpenclawStateDb({ openclawDir: stateDir });
+          expect(opened).toBeTruthy();
+          try {
+            opened.db
+              .prepare(
+                "INSERT INTO channel_pairing_requests (channel_key, account_id, request_id, code, created_at, last_seen_at) VALUES ('telegram', 'default', 'live-r1', 'LIVE1234', '2026-01-01', '2026-01-01')",
+              )
+              .run();
+          } finally {
+            opened.db.close();
+          }
+          const pendingOut = runCli(["pairing", "list", "--channel", "telegram", "--json"]);
+          expect(pendingOut).toContain("LIVE1234");
+          const deletion = deletePairingRequestByCode({
+            openclawDir: stateDir,
+            channel: "telegram",
+            code: "live1234",
+          });
+          expect(deletion).toEqual({ ok: true, deleted: 1 });
+          const pendingAfter = runCli(["pairing", "list", "--channel", "telegram", "--json"]);
+          expect(pendingAfter).not.toContain("LIVE1234");
         } finally {
           try {
             betaInstall.cleanup?.();
@@ -187,6 +265,65 @@ describeLive(
           expect(pinApprovalsHelp).not.toMatch(kUnknownCommandPattern);
           expect(pinApprovalsHelp).toMatch(/^\s*get\b/m);
           expect(pinApprovalsHelp).not.toMatch(/^\s*pending\b/m);
+          // The v0.9.43 regression case, against the REAL pin: its state db
+          // eagerly creates exec_approvals_config EMPTY — a live legacy file
+          // must survive boot byte-identical (seeded, never renamed).
+          const pinStateDir = mkTemp("openclaw-live-pin-state-");
+          const pinEnv = {
+            ...process.env,
+            OPENCLAW_STATE_DIR: pinStateDir,
+            OPENCLAW_CONFIG_PATH: path.join(pinStateDir, "openclaw.json"),
+          };
+          fs.writeFileSync(path.join(pinStateDir, "openclaw.json"), "{}");
+          const runPinCli = (args) =>
+            String(
+              execFileSync(process.execPath, [pinBin, ...args], {
+                timeout: 120_000,
+                stdio: "pipe",
+                env: pinEnv,
+              }),
+            );
+          // Any CLI call materializes the pin's v1 state db (all tables, no rows).
+          runPinCli(["config", "get", "tools", "--json"]);
+          expect(
+            fs.existsSync(path.join(pinStateDir, "state", "openclaw.sqlite")),
+          ).toBe(true);
+          const liveDoc =
+            JSON.stringify({
+              version: 1,
+              socket: { path: "/x.sock", token: "pin-tok" },
+              defaults: { security: "full", ask: "off", askFallback: "full" },
+              agents: { "*": { allowlist: [{ pattern: "ls *", id: "a1" }] } },
+            }) + "\n";
+          fs.writeFileSync(path.join(pinStateDir, "exec-approvals.json"), liveDoc);
+          const { createStateEra } = require("../../lib/server/openclaw-state-era");
+          const {
+            ensureManagedExecDefaults,
+          } = require("../../lib/server/exec-defaults-config");
+          const pinEra = createStateEra({
+            openclawDir: pinStateDir,
+            gatesInfo: () => ({ version: pin, features: { execApprovalsSqlite: false } }),
+          });
+          const pinResult = await ensureManagedExecDefaults({
+            openclawDir: pinStateDir,
+            resolveExecApprovalsBackend: pinEra.resolveExecApprovalsBackend,
+            logger: kSilentLogger,
+          });
+          expect(pinResult.approvalsBackend).toBe("file");
+          expect(pinResult.reaped).toBe(false);
+          expect(
+            fs.readFileSync(path.join(pinStateDir, "exec-approvals.json"), "utf8"),
+          ).toBe(liveDoc);
+          // The read-merge-write config flow validates on the pin too.
+          runPinCli([
+            "config",
+            "set",
+            "tools.exec",
+            JSON.stringify({ mode: "full", strictInlineEval: false }),
+            "--strict-json",
+          ]);
+          const pinExecCfg = JSON.parse(runPinCli(["config", "get", "tools.exec", "--json"]));
+          expect(pinExecCfg.mode).toBe("full");
         } finally {
           try {
             pinInstall.cleanup?.();

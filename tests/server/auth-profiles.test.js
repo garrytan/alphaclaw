@@ -802,6 +802,47 @@ describe("server/auth-profiles shared state-db store", () => {
     ).toThrow(/auth store location/);
   });
 
+  it("never wipes the shared store when a read fails: mutators throw instead of saving a near-empty store", () => {
+    // A transient lock/corruption on the READ handle used to read as an
+    // empty store; the next upsert's load→mutate→save would then persist
+    // {profiles:{one entry}} and wipe every shared credential.
+    createSharedStateDb();
+    const db = new DatabaseSync(stateDbPath());
+    db.prepare(
+      "INSERT INTO auth_profile_stores (store_key, store_json, updated_at) VALUES ('shared', ?, 1)",
+    ).run(
+      JSON.stringify({
+        version: 1,
+        profiles: { "anthropic:default": { type: "api_key", provider: "anthropic", key: "sk-1" } },
+      }),
+    );
+    // Break the READ path only: drop the state table so the schema guard
+    // fails the load, while the flag row itself stays readable.
+    db.exec("DROP TABLE auth_profile_state");
+    db.close();
+
+    // Lenient (display) read degrades to empty…
+    expect(ap.listProfiles()).toEqual([]);
+    // …but a mutator refuses to build a save from that failed read.
+    expect(() =>
+      ap.upsertProfile("openai:default", {
+        type: "api_key",
+        provider: "openai",
+        key: "sk-2",
+      }),
+    ).toThrow(/shared OpenClaw auth store/);
+    // The original credential is still intact in the store.
+    const readBack = new DatabaseSync(stateDbPath(), { readOnly: true });
+    try {
+      const row = readBack
+        .prepare("SELECT store_json FROM auth_profile_stores WHERE store_key = 'shared'")
+        .get();
+      expect(JSON.parse(row.store_json).profiles["anthropic:default"].key).toBe("sk-1");
+    } finally {
+      readBack.close();
+    }
+  });
+
   it("keeps the legacy path when the flag says legacy", () => {
     createSharedStateDb({ flag: "legacy" });
     ap.upsertProfile("openai:default", {

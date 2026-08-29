@@ -1572,29 +1572,38 @@ describe("server/routes/pairings sqlite reject", () => {
       clawCmd: vi.fn(async () => ({ ok: true, stdout: "{}", stderr: "" })),
       isOnboarded: () => true,
       // No pairing files on a post-import beta box.
-      fsModule:
-        fsModule || {
-          existsSync: () => false,
-          readFileSync: () => {
-            throw new Error("no files on a post-import box");
-          },
-          mkdirSync: () => {},
-          writeFileSync: () => {},
-        },
+      fsModule: fsModule || sqliteEraFsModule(),
       openclawDir,
     });
     return { app, databasePath };
   };
 
+  // The 'stop writing legacy files in the sqlite era' invariant holds by
+  // construction (file writes only rewrite an EXISTING store) — this spy
+  // locks it in so a refactor cannot silently start creating the file whose
+  // sibling (exec-approvals.json) already took a production box down.
+  const sqliteEraFsModule = () => ({
+    existsSync: () => false,
+    readFileSync: () => {
+      throw new Error("no files on a post-import box");
+    },
+    mkdirSync: vi.fn(),
+    writeFileSync: vi.fn(),
+  });
+
   it("rejects a pending pairing by deleting the state-db row when no files exist", async () => {
+    const fsModule = sqliteEraFsModule();
     const { app, databasePath } = createSqliteApp({
       rows: [["telegram", "default", "r1", "ABCD1234"]],
+      fsModule,
     });
     const res = await request(app)
       .post("/api/pairings/abcd1234/reject")
       .send({ channel: "telegram" });
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ ok: true, removed: true });
+    // Never (re)creates a legacy pairing file on the sqlite era.
+    expect(fsModule.writeFileSync).not.toHaveBeenCalled();
 
     const db = new DatabaseSync(databasePath, { readOnly: true });
     try {

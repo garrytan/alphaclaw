@@ -4,6 +4,7 @@ const os = require("os");
 const path = require("path");
 
 const kScriptPath = path.resolve(__dirname, "../../lib/setup/hourly-git-sync.sh");
+const { buildHostileEnv } = require("./fixtures/hostile-env");
 
 describe("hourly-git-sync managed script", () => {
   let tmpDir;
@@ -93,17 +94,7 @@ describe("hourly-git-sync managed script", () => {
     );
     fs.writeFileSync(
       path.join(tmpDir, ".env"),
-      [
-        "# comment line",
-        "",
-        "NODE_OPTIONS=--max-old-space-size=8192 --heapsnapshot-signal=SIGUSR2",
-        `LD_PRELOAD=$(touch "${pwnedPath}")`,
-        `GITHUB_TOKEN="ghp_quoted_token"`,
-        "GITHUB_WORKSPACE_REPO=owner/repo with spaces",
-        "OPENCLAW_STATE_DIR='/data/.openclaw'",
-        "not a valid line",
-        "1BADKEY=nope",
-      ].join("\n"),
+      buildHostileEnv({ pwnedPath, githubToken: "ghp_quoted_token" }),
     );
     fs.writeFileSync(
       path.join(binDir, "alphaclaw"),

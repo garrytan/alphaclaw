@@ -1142,14 +1142,64 @@ if (fs.existsSync(hourlyGitSyncPath)) {
 // operator-controlled. Never overwrites a file alphaclaw did not author.
 const kManagedSnippetMarker = "# alphaclaw-managed openclaw environment";
 const shQuote = (value) => `'${String(value).replace(/'/g, `'\\''`)}'`;
+const kWrapperPathOverride = String(
+  process.env.ALPHACLAW_OPENCLAW_WRAPPER_PATH || "",
+).trim();
+const kProfileSnippetPathOverride = String(
+  process.env.ALPHACLAW_PROFILE_SNIPPET_PATH || "",
+).trim();
 if (String(process.env.ALPHACLAW_SKIP_PROFILE_ENV || "") === "1") {
   console.log(
     "[alphaclaw] Operator-shell openclaw env skipped by ALPHACLAW_SKIP_PROFILE_ENV",
   );
+} else if (
+  !kWrapperPathOverride &&
+  typeof process.getuid === "function" &&
+  process.getuid() !== 0
+) {
+  // Writing /usr/local/bin and /etc/profile.d is a root-deployment concern
+  // (the Docker images run as root); a non-root dev/test run must not spray
+  // files onto the host. Overriding the path opts back in (tests use this).
+  console.log(
+    "[alphaclaw] Operator-shell openclaw env skipped (not running as root) — `openclaw` in operator shells will not carry the managed state dir",
+  );
 } else {
-  const wrapperPath = "/usr/local/bin/openclaw";
+  // Persisted install outcome (never silent, survives the boot log): the
+  // post-deploy smoke and operators can check this instead of scrolling logs.
+  const operatorShellEnvOutcome = { at: new Date().toISOString() };
+  const persistOperatorShellEnvOutcome = () => {
+    try {
+      const outcomePath = path.join(
+        openclawDir,
+        ".alphaclaw",
+        "operator-shell-env.json",
+      );
+      fs.mkdirSync(path.dirname(outcomePath), { recursive: true });
+      fs.writeFileSync(
+        outcomePath,
+        JSON.stringify(operatorShellEnvOutcome, null, 2),
+      );
+    } catch {}
+  };
+  const wrapperPath = kWrapperPathOverride || "/usr/local/bin/openclaw";
   const { kOpenclawBinShimDir } = require("../lib/server/constants");
   const managedShimPath = path.join(kOpenclawBinShimDir, "openclaw");
+  // The pinned install's real bin, resolved at generation time — the wrapper
+  // execs this when no release-channel shim exists (pin/beta channels).
+  let installedOpenclawBinPath = "/nonexistent/openclaw";
+  try {
+    const openclawPkgDir = path.dirname(
+      require.resolve("openclaw/package.json"),
+    );
+    const openclawPkg = JSON.parse(
+      fs.readFileSync(path.join(openclawPkgDir, "package.json"), "utf8"),
+    );
+    const binRel =
+      typeof openclawPkg.bin === "string"
+        ? openclawPkg.bin
+        : Object.values(openclawPkg.bin || {})[0];
+    if (binRel) installedOpenclawBinPath = path.join(openclawPkgDir, binRel);
+  } catch {}
   const wrapperContent = [
     "#!/bin/sh",
     `${kManagedSnippetMarker} (wrapper) — regenerated at boot, do not edit.`,
@@ -1157,11 +1207,22 @@ if (String(process.env.ALPHACLAW_SKIP_PROFILE_ENV || "") === "1") {
     `export OPENCLAW_HOME=${shQuote(rootDir)}`,
     `export OPENCLAW_STATE_DIR=${shQuote(openclawDir)}`,
     `export OPENCLAW_CONFIG_PATH=${shQuote(path.join(openclawDir, "openclaw.json"))}`,
-    // Prefer the release-channel shim (the version alphaclaw manages); fall
-    // back to the next real openclaw on PATH, skipping this wrapper itself.
+    // Prefer the release-channel shim (the version alphaclaw manages — it
+    // only exists on the dev channel; pin/beta activation removes it), then
+    // the alphaclaw install's own openclaw bin, then a portable PATH walk
+    // that skips this wrapper itself. NOTE: `command -v -a` is NOT the
+    // fallback here — POSIX sh (dash, bash-as-sh) rejects the -a flag, which
+    // would leave the wrapper exiting 127 in front of a perfectly good
+    // openclaw on every non-dev box.
     `if [ -x ${shQuote(managedShimPath)} ]; then exec ${shQuote(managedShimPath)} "$@"; fi`,
-    `_real="$(command -v -a openclaw 2>/dev/null | grep -v '^${wrapperPath}$' | head -n 1)"`,
-    'if [ -n "$_real" ]; then exec "$_real" "$@"; fi',
+    `if [ -x ${shQuote(installedOpenclawBinPath)} ]; then exec ${shQuote(installedOpenclawBinPath)} "$@"; fi`,
+    '_ifs="$IFS"; IFS=:',
+    "for _dir in $PATH; do",
+    '  [ -n "$_dir" ] || continue',
+    `  [ "$_dir/openclaw" = ${shQuote(wrapperPath)} ] && continue`,
+    '  if [ -x "$_dir/openclaw" ]; then IFS="$_ifs"; exec "$_dir/openclaw" "$@"; fi',
+    "done",
+    'IFS="$_ifs"',
     `echo "openclaw: no managed openclaw found (expected ${managedShimPath})" >&2`,
     "exit 127",
     "",
@@ -1171,19 +1232,25 @@ if (String(process.env.ALPHACLAW_SKIP_PROFILE_ENV || "") === "1") {
       ? fs.readFileSync(wrapperPath, "utf8")
       : null;
     if (existing !== null && !existing.includes(kManagedSnippetMarker)) {
+      operatorShellEnvOutcome.wrapper = "skipped: existing non-managed file";
       console.log(
         `[alphaclaw] openclaw wrapper NOT installed: ${wrapperPath} exists and is not alphaclaw-managed`,
       );
-    } else if (existing !== wrapperContent) {
-      fs.writeFileSync(wrapperPath, wrapperContent, { mode: 0o755 });
-      console.log(`[alphaclaw] openclaw wrapper installed at ${wrapperPath}`);
+    } else {
+      if (existing !== wrapperContent) {
+        fs.writeFileSync(wrapperPath, wrapperContent, { mode: 0o755 });
+        console.log(`[alphaclaw] openclaw wrapper installed at ${wrapperPath}`);
+      }
+      operatorShellEnvOutcome.wrapper = `installed: ${wrapperPath}`;
     }
   } catch (e) {
+    operatorShellEnvOutcome.wrapper = `failed: ${e.message}`;
     console.log(
       `[alphaclaw] openclaw wrapper NOT installed (${e.message}) — operator shells resolve openclaw without the managed state dir`,
     );
   }
-  const profileSnippetPath = "/etc/profile.d/alphaclaw-openclaw.sh";
+  const profileSnippetPath =
+    kProfileSnippetPathOverride || "/etc/profile.d/alphaclaw-openclaw.sh";
   const profileContent = [
     `${kManagedSnippetMarker} — regenerated at boot, do not edit.`,
     `export ALPHACLAW_ROOT_DIR=${shQuote(rootDir)}`,
@@ -1200,9 +1267,12 @@ if (String(process.env.ALPHACLAW_SKIP_PROFILE_ENV || "") === "1") {
       fs.writeFileSync(profileSnippetPath, profileContent, { mode: 0o644 });
       console.log(`[alphaclaw] login-shell env snippet installed at ${profileSnippetPath}`);
     }
+    operatorShellEnvOutcome.profileSnippet = `installed: ${profileSnippetPath}`;
   } catch (e) {
+    operatorShellEnvOutcome.profileSnippet = `failed: ${e.message}`;
     console.log(`[alphaclaw] login-shell env snippet NOT installed (${e.message})`);
   }
+  persistOperatorShellEnvOutcome();
 }
 
 // ---------------------------------------------------------------------------

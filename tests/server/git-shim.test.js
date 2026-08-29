@@ -163,16 +163,10 @@ describe("server git shim scripts", () => {
     const pwnedPath = path.join(tempRoot, "pwned");
     fs.mkdirSync(repoRoot, { recursive: true });
     fs.mkdirSync(outsideDir, { recursive: true });
+    const { buildHostileEnv } = require("./fixtures/hostile-env");
     fs.writeFileSync(
       path.join(repoRoot, ".env"),
-      [
-        "NODE_OPTIONS=--max-old-space-size=8192 --heapsnapshot-signal=SIGUSR2",
-        `LD_PRELOAD=$(touch "${pwnedPath}")`,
-        "GITHUB_TOKEN=ghp_first",
-        // Last assignment wins, matching the JS reader's dedupe.
-        "GITHUB_TOKEN='ghp_env_token_2'",
-        "",
-      ].join("\n"),
+      buildHostileEnv({ pwnedPath }),
     );
 
     const harness = createBehaviorHarness({ repoRoot });
