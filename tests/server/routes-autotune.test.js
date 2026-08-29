@@ -210,5 +210,70 @@ describe("server/routes/autotune", () => {
     ).toEqual({ ok: true, value: { gatewayHeapMb: 1024, backupMaxTotalGb: null } });
     expect(validateOverrides(undefined)).toEqual({ ok: true, value: undefined });
     expect(validateOverrides([1]).ok).toBe(false);
+    // Floor 8: consumers assume the pre-feature floor (F8 ship review).
+    expect(validateOverrides({ agentConcurrencyCap: 5 }).ok).toBe(false);
+    expect(validateOverrides({ agentConcurrencyCap: 8 }).ok).toBe(true);
+  });
+
+  it("silences autotune notifications for every truthy WATCHDOG_NOTIFICATIONS_DISABLED form", () => {
+    // The watchdog parses the flag with isTruthy (1/true/yes/on) — the
+    // autotune gate must match exactly or `=1` operators keep getting pinged.
+    const { buildAutotuneApplyDeps } = require("../../lib/server/routes/autotune");
+    const prior = process.env.WATCHDOG_NOTIFICATIONS_DISABLED;
+    try {
+      for (const value of ["1", "true", "yes", "on"]) {
+        process.env.WATCHDOG_NOTIFICATIONS_DISABLED = value;
+        const notifications = [];
+        const deps = buildAutotuneApplyDeps({
+          watchdogNotifier: { notify: async (m) => notifications.push(m) },
+        });
+        deps.notify("resized");
+        expect(notifications, value).toEqual([]);
+      }
+      process.env.WATCHDOG_NOTIFICATIONS_DISABLED = "false";
+      const notifications = [];
+      const deps = buildAutotuneApplyDeps({
+        watchdogNotifier: { notify: async (m) => notifications.push(m) },
+      });
+      deps.notify("resized");
+      expect(notifications).toEqual(["resized"]);
+    } finally {
+      if (prior === undefined) delete process.env.WATCHDOG_NOTIFICATIONS_DISABLED;
+      else process.env.WATCHDOG_NOTIFICATIONS_DISABLED = prior;
+    }
+  });
+
+  it("coalesces concurrent reapplies onto one lock hold", async () => {
+    let acquires = 0;
+    const { app } = makeApp({
+      gatewayLifecycleLock: {
+        acquire: async () => {
+          acquires += 1;
+          await new Promise((resolve) => setTimeout(resolve, 25));
+          return () => {};
+        },
+      },
+    });
+    const [first, second] = await Promise.all([
+      request(app).post("/api/autotune/reapply"),
+      request(app).post("/api/autotune/reapply"),
+    ]);
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(200);
+    expect(acquires).toBe(1);
+  });
+
+  it("disabling with a tuned gateway still running marks restart-required", async () => {
+    const { stampGatewayEnvApplied } = require("../../lib/server/autotune");
+    // The running gateway was spawned with autotune values; rows are empty
+    // when disabled, so the pending-row check alone would miss this.
+    stampGatewayEnvApplied({ gatewayHeapMb: 1024, uvThreadpoolSize: 4 });
+    const { app, calls } = makeApp();
+    const res = await request(app)
+      .put("/api/autotune/settings")
+      .send({ enabled: false });
+    expect(res.status).toBe(200);
+    expect(res.body.restartRequired).toBe(true);
+    expect(calls.restartReasons).toContain("autotune_disabled");
   });
 });

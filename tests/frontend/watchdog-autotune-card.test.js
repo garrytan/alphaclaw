@@ -1,6 +1,62 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+// Hook harness (the use-saved-setting.test.js pattern): hook state lives in
+// per-call-index slots so the CONTAINER can be invoked directly without a DOM
+// renderer. Effects are collected, not run. Inert for the stateless view
+// tests below — none of the expanded components call hooks.
+vi.mock("preact/hooks", () => {
+  const harness = { slots: [], cursor: 0, effects: [] };
+  harness.beginRender = () => {
+    harness.cursor = 0;
+    harness.effects = [];
+  };
+  harness.reset = () => {
+    harness.slots = [];
+    harness.cursor = 0;
+    harness.effects = [];
+  };
+  const useState = (initialValue) => {
+    const index = harness.cursor++;
+    if (!(index in harness.slots)) {
+      harness.slots[index] =
+        typeof initialValue === "function" ? initialValue() : initialValue;
+    }
+    const setState = (next) => {
+      harness.slots[index] =
+        typeof next === "function" ? next(harness.slots[index]) : next;
+    };
+    return [harness.slots[index], setState];
+  };
+  const useRef = (initialValue = null) => {
+    const index = harness.cursor++;
+    if (!(index in harness.slots)) {
+      harness.slots[index] = { current: initialValue };
+    }
+    return harness.slots[index];
+  };
+  const useMemo = (factory) => factory();
+  const useCallback = (fn) => fn;
+  const useEffect = (effect) => {
+    harness.effects.push(effect);
+  };
+  return { useState, useRef, useMemo, useCallback, useEffect, __harness: harness };
+});
+
+// The container's fetches never fire under the harness (effects are collected,
+// not run) — the save path is what the container tests drive directly.
+vi.mock("../../lib/public/js/lib/api.js", async (importOriginal) => {
+  const actual = await importOriginal();
+  return {
+    ...actual,
+    fetchAutotune: vi.fn(async () => ({ ok: true })),
+    updateAutotuneSettings: vi.fn(async () => ({ ok: true })),
+  };
+});
+
+import * as preactHooks from "preact/hooks";
 import {
   AutotuneCardView,
+  WatchdogAutotuneCard,
   buildAutotuneCounts,
   buildAutotuneDisabledParagraph,
   buildAutotuneEnvironmentNote,
@@ -13,10 +69,16 @@ import {
   buildAutotuneToggleToast,
   formatAutotuneValue,
   kAutotuneAlphaclawRestartReason,
+  kAutotuneCacheKey,
+  kAutotuneHeapContext,
   kAutotuneKillSwitchToast,
 } from "../../lib/public/js/components/watchdog-tab/autotune-card.js";
 import { Badge } from "../../lib/public/js/components/badge.js";
 import { InlineErrorChip } from "../../lib/public/js/components/inline-error-chip.js";
+import { updateAutotuneSettings } from "../../lib/public/js/lib/api.js";
+import { invalidateCache, setCached } from "../../lib/public/js/lib/api-cache.js";
+
+const hookHarness = preactHooks.__harness;
 
 // Stateless view: invoke directly and walk the vnode tree (the
 // watchdog-resources-card.test.js pattern) — no DOM renderer needed. All
@@ -260,6 +322,22 @@ describe("frontend/watchdog autotune card — view models", () => {
     );
   });
 
+  it("disabled paragraph: a still-tuned running gateway is never described as defaults", () => {
+    const activeGatewayEnv = {
+      gatewayHeapMb: 1741,
+      uvThreadpoolSize: 8,
+      at: 1756400000000,
+    };
+    expect(buildAutotuneDisabledParagraph(kProfile, activeGatewayEnv)).toBe(
+      "Autotune is off, but the running gateway still uses its previous tuned values — built-in defaults apply after the next gateway restart. Detection stays on — Small tier (2.0 GB / 1 vCPU).",
+    );
+    // null activeGatewayEnv (or an older server omitting it) keeps the
+    // defaults-active copy.
+    expect(buildAutotuneDisabledParagraph(kProfile, null)).toContain(
+      "AlphaClaw and the gateway run with built-in defaults",
+    );
+  });
+
   // The container's onToggleEnabled outcome path lives behind preact hooks
   // this stateless harness can't run, so the kill-switch honesty rule is
   // pinned at the builder the container calls with the adopted ledger.
@@ -399,7 +477,16 @@ describe("frontend/watchdog autotune card — view models", () => {
     const shown = buildAutotuneRecommendationModel(
       makeLedger({ rows: [{ ...row, effectiveValue: 2048 }] }),
     );
-    expect(shown.command).toBe("NODE_OPTIONS=--max-old-space-size=512");
+    // The README's per-process form — the flag on the start command, never a
+    // blanket NODE_OPTIONS env var (children like the self-update npm install
+    // would inherit that).
+    expect(shown.command).toBe(
+      "node --max-old-space-size=512 bin/alphaclaw.js start",
+    );
+    expect(shown.text).toContain(
+      "add --max-old-space-size=512 to your AlphaClaw start command",
+    );
+    expect(shown.text).not.toContain("NODE_OPTIONS=");
     expect(shown.owner).toContain("does not apply on a gateway restart");
     expect(
       buildAutotuneRecommendationModel(
@@ -467,6 +554,28 @@ describe("frontend/watchdog autotune card — per-state renders", () => {
     // The overrides row ALWAYS renders — the heap-OOM journey depends on it.
     expect(text).toContain("Overrides: none set");
     expect(text).toContain("Gateway heap override (MB)");
+  });
+
+  it("DISABLED with a still-tuned gateway: the paragraph switches on activeGatewayEnv", () => {
+    const tree = renderView({
+      enabled: false,
+      ledger: makeLedger({
+        enabled: false,
+        activeGatewayEnv: {
+          gatewayHeapMb: 1741,
+          uvThreadpoolSize: 8,
+          at: 1756400000000,
+        },
+      }),
+    });
+    const text = treeText(tree);
+    expect(text).toContain(
+      "Autotune is off, but the running gateway still uses its previous tuned values — built-in defaults apply after the next gateway restart.",
+    );
+    expect(text).not.toContain(
+      "AlphaClaw and the gateway run with built-in defaults",
+    );
+    expect(text).toContain("Detection stays on — Small tier (2.0 GB / 1 vCPU).");
   });
 
   it("DEGRADED/SUPPRESSED: held-defaults warning above skipped rows", () => {
@@ -663,5 +772,54 @@ describe("frontend/watchdog autotune card — restart ownership (restartTarget)"
     // And no gateway-pending banner either — the pending notice is
     // gateway-owned; alphaclaw rows explain themselves inline.
     expect(treeText(tree)).not.toContain("waiting on a gateway restart");
+  });
+});
+
+describe("frontend/watchdog autotune card — container heap override draft", () => {
+  // Renders the CONTAINER through the hook harness (cache-seeded so both
+  // hooks hydrate synchronously; effects are collected, not run) and returns
+  // the props it passed to the view.
+  const renderContainer = () => {
+    hookHarness.beginRender();
+    const tree = WatchdogAutotuneCard({});
+    const view = collectNodes(tree).find(
+      (vnode) => vnode.type === AutotuneCardView,
+    );
+    expect(view).toBeTruthy();
+    return view.props;
+  };
+
+  beforeEach(() => {
+    hookHarness.reset();
+    invalidateCache(kAutotuneCacheKey);
+    updateAutotuneSettings.mockReset();
+  });
+
+  it("failed heap-override save drops the rejected draft — the field shows the server value", async () => {
+    setCached(kAutotuneCacheKey, {
+      ok: true,
+      ledger: makeLedger({ overrides: { gatewayHeapMb: 1024 } }),
+    });
+    let view = renderContainer();
+    expect(view.settingHydrated).toBe(true);
+    expect(view.heapDraftValue).toBe("1024");
+
+    view.onHeapInput({ target: { value: "2048" } });
+    view = renderContainer();
+    expect(view.heapDraftValue).toBe("2048");
+    expect(view.heapDirty).toBe(true);
+
+    updateAutotuneSettings.mockRejectedValueOnce(new Error("boom"));
+    await view.onHeapSave();
+    view = renderContainer();
+    // The hook reverted to the server value AND the rejected draft is gone —
+    // the chip's "showing the server's current state" claim stays true and
+    // Save is no longer armed with the never-adopted value.
+    expect(updateAutotuneSettings).toHaveBeenCalledWith({
+      overrides: { gatewayHeapMb: 2048 },
+    });
+    expect(view.heapDraftValue).toBe("1024");
+    expect(view.heapDirty).toBe(false);
+    expect(view.settingSaveError?.context).toBe(kAutotuneHeapContext);
   });
 });

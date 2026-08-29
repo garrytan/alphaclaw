@@ -14,6 +14,8 @@ const {
   getSqliteCacheMb,
   getBackupMaxTotalBytes,
   stampGatewayEnvApplied,
+  revertGatewayEnvStamp,
+  stampOpenclawConfigConsumed,
   getActiveGatewayHeapMb,
   resetAutotuneForTests,
 } = require("../../lib/server/autotune");
@@ -386,11 +388,12 @@ describe("server/autotune", () => {
     }
   });
 
-  it("clamps a >64 concurrency back to the legacy ceiling on disable, even when not owned", async () => {
+  it("leaves an operator-set >64 concurrency untouched on disable and skips the write", async () => {
     const { openclawDir, managedDir } = makeTempDirs();
     setLiveProfile({ memMb: 32768, cores: 16 });
     resetAutotuneForTests({ managedDir });
-    // A telegram sync under the raised cap wrote 90 — not ledger-owned.
+    // Hand-set in openclaw.json (operators always could) — no ledger
+    // provenance. Operator intent outranks autotune's cleanup.
     const { store, fn } = makeConfigStore({
       agents: { defaults: { maxConcurrent: 90, subagents: { maxConcurrent: 88 } } },
     });
@@ -401,9 +404,37 @@ describe("server/autotune", () => {
         env: { ALPHACLAW_AUTOTUNE_DISABLED: "1" },
       },
     });
-    // Pre-feature nothing could write >64; the oversize came from autotune's
-    // cap, so disable restores the legacy invariant. Sub-64 operator values
-    // are left alone (covered by the owned-from-absent revert test).
+    expect(store.config.agents.defaults.maxConcurrent).toBe(90);
+    expect(store.config.agents.defaults.subagents.maxConcurrent).toBe(88);
+    // And the no-op mutate must not round-trip the operator's file.
+    expect(fn.mock.results.at(-1).value.skipWrite).toBe(true);
+  });
+
+  it("clamps a >64 value the ledger attributes to autotune's own write on disable", async () => {
+    const { openclawDir, managedDir } = makeTempDirs();
+    setLiveProfile({ memMb: 32768, cores: 16 });
+    resetAutotuneForTests({ managedDir });
+    fs.writeFileSync(
+      path.join(managedDir, "autotune-ledger.json"),
+      JSON.stringify({
+        ownedKeys: {
+          "agents.defaults.maxConcurrent": {
+            ownedFromAbsent: false,
+            lastApplied: 90,
+          },
+        },
+      }),
+    );
+    const { store, fn } = makeConfigStore({
+      agents: { defaults: { maxConcurrent: 90, subagents: { maxConcurrent: 88 } } },
+    });
+    await applyResourceAutotune({
+      deps: {
+        openclawDir,
+        updateOpenclawConfigFn: fn,
+        env: { ALPHACLAW_AUTOTUNE_DISABLED: "1" },
+      },
+    });
     expect(store.config.agents.defaults.maxConcurrent).toBe(64);
     expect(store.config.agents.defaults.subagents.maxConcurrent).toBe(62);
   });
@@ -655,5 +686,168 @@ describe("server/autotune", () => {
     expect(ledger.rows.length).toBeGreaterThan(0);
     expect(ledger.rows.every((r) => r.status === "skipped")).toBe(true);
     expect(getGatewayNodeOptionsSuffix({ openclawDir, env: {} })).toBeNull();
+  });
+
+  it("retains concurrency ownership and holds the config through suppression", async () => {
+    const { openclawDir, managedDir } = makeTempDirs();
+    setLiveProfile({ memMb: 2048, cores: 1 });
+    resetAutotuneForTests({ managedDir });
+    const { store, fn } = makeConfigStore({});
+    await applyResourceAutotune({
+      deps: { openclawDir, updateOpenclawConfigFn: fn, env: {} },
+    });
+    const adopted = store.config.agents.defaults.maxConcurrent;
+    expect(adopted).toBeGreaterThanOrEqual(8);
+
+    // Limits vanish mid-run (transient EMFILE, cgroup remount): suppression
+    // must HOLD — never run the disable revert or drop provenance.
+    vi.restoreAllMocks();
+    spyCgroupFiles({});
+    resetMachineProfileForTests({ fsModule: containerFsModule });
+    const ledger = await applyResourceAutotune({
+      deps: { openclawDir, updateOpenclawConfigFn: fn, env: {} },
+    });
+    expect(ledger.suppressed).toBe(true);
+    expect(store.config.agents.defaults.maxConcurrent).toBe(adopted);
+    const persisted = JSON.parse(
+      fs.readFileSync(path.join(managedDir, "autotune-ledger.json"), "utf8"),
+    );
+    expect(persisted.ownedKeys["agents.defaults.maxConcurrent"]).toMatchObject({
+      ownedFromAbsent: true,
+      lastApplied: adopted,
+    });
+  });
+
+  it("recovers a crashed adoption from a stale intent instead of relinquishing", async () => {
+    const { openclawDir, managedDir } = makeTempDirs();
+    setLiveProfile({ memMb: 2048, cores: 1 });
+    resetAutotuneForTests({ managedDir });
+    // Crash window: intent persisted, openclaw.json written, confirm never
+    // landed. The next apply must confirm from the intent — not orphan the
+    // autotune-written value as "operator intent" forever.
+    fs.writeFileSync(
+      path.join(managedDir, "autotune-ledger.json"),
+      JSON.stringify({
+        ownedKeys: {
+          "agents.defaults.maxConcurrent": { intent: { value: 8, at: 1 } },
+        },
+      }),
+    );
+    const { store, fn } = makeConfigStore({
+      agents: { defaults: { maxConcurrent: 8 } },
+    });
+    const ledger = await applyResourceAutotune({
+      deps: { openclawDir, updateOpenclawConfigFn: fn, env: {} },
+    });
+    const row = ledger.rows.find((r) => r.knob === "agentConcurrencyCap");
+    expect(row.status).not.toBe("manual");
+    const persisted = JSON.parse(
+      fs.readFileSync(path.join(managedDir, "autotune-ledger.json"), "utf8"),
+    );
+    expect(persisted.ownedKeys["agents.defaults.maxConcurrent"]).toMatchObject({
+      ownedFromAbsent: true,
+      lastApplied: 8,
+    });
+    // Disable now restores the pre-feature ABSENT state — the recovery
+    // reconstructed the owned-from-absent provenance.
+    await applyResourceAutotune({
+      deps: {
+        openclawDir,
+        updateOpenclawConfigFn: fn,
+        env: { ALPHACLAW_AUTOTUNE_DISABLED: "1" },
+      },
+    });
+    expect(store.config.agents.defaults.maxConcurrent).toBeUndefined();
+  });
+
+  it("floors a sub-8 agentConcurrencyCap override at the boot-default floor", () => {
+    const derivation = deriveTunings(makeProfile({ memMb: 8192, cores: 4 }), {
+      overrides: { agentConcurrencyCap: 5 },
+    });
+    expect(derivation.values.agentConcurrencyCap).toBe(8);
+    expect(derivation.notes.agentConcurrencyCap).toMatchObject({
+      requested: 5,
+      applied: 8,
+    });
+    // The boot default can never exceed the requested-and-floored cap.
+    expect(derivation.values.bootMaxConcurrent).toBe(8);
+  });
+
+  it("clamps every memory/disk-shaped override to the live machine", () => {
+    const derivation = deriveTunings(
+      makeProfile({ memMb: 1024, cores: 0.5, diskGb: 10 }),
+      {
+        overrides: {
+          sqliteCacheMb: 64,
+          agentConcurrencyCap: 500,
+          backupMaxTotalGb: 60,
+          uvThreadpoolSize: 64,
+        },
+      },
+    );
+    expect(derivation.values.sqliteCacheMb).toBe(32); // M/32
+    expect(derivation.values.agentConcurrencyCap).toBe(8); // min(C*16, M/32) floor 8
+    expect(derivation.values.backupMaxTotalGb).toBe(10); // the disk itself
+    expect(derivation.values.uvThreadpoolSize).toBe(8); // ceil(C)*8 floor 8
+    for (const knob of [
+      "sqliteCacheMb",
+      "agentConcurrencyCap",
+      "backupMaxTotalGb",
+      "uvThreadpoolSize",
+    ]) {
+      expect(derivation.notes[knob]?.clamped).toBe(true);
+    }
+  });
+
+  it("reverts a spawn stamp whose launch failed, but never a superseded one", async () => {
+    const { openclawDir, managedDir } = makeTempDirs();
+    setLiveProfile({ memMb: 2048, cores: 1 });
+    resetAutotuneForTests({ managedDir });
+    const { fn } = makeConfigStore({});
+    await applyResourceAutotune({
+      deps: { openclawDir, updateOpenclawConfigFn: fn, env: {} },
+    });
+    const stamp = stampGatewayEnvApplied({ gatewayHeapMb: 1024, uvThreadpoolSize: 4 });
+    expect(getAutotuneLedger().rows.find((r) => r.knob === "gatewayHeapMb").status).toBe(
+      "applied",
+    );
+
+    // The spawn that consumed this env errored: the ledger must stop claiming
+    // a nonexistent gateway runs with it.
+    revertGatewayEnvStamp(stamp);
+    const reverted = getAutotuneLedger();
+    expect(reverted.activeGatewayEnv).toBeNull();
+    expect(reverted.rows.find((r) => r.knob === "gatewayHeapMb")).toMatchObject({
+      status: "pending_restart",
+      restartTarget: "gateway",
+    });
+
+    // A newer successful spawn's stamp is never clobbered by the failed
+    // predecessor's late cleanup.
+    const newer = stampGatewayEnvApplied({ gatewayHeapMb: 1024, uvThreadpoolSize: 4 });
+    revertGatewayEnvStamp(stamp);
+    expect(getAutotuneLedger().activeGatewayEnv).toEqual(newer);
+  });
+
+  it("light restart flips openclaw-config rows only, never gateway-env rows", async () => {
+    const { openclawDir, managedDir } = makeTempDirs();
+    setLiveProfile({ memMb: 2048, cores: 1 });
+    resetAutotuneForTests({ managedDir });
+    const { fn } = makeConfigStore({});
+    await applyResourceAutotune({
+      deps: { openclawDir, updateOpenclawConfigFn: fn, env: {} },
+    });
+    stampOpenclawConfigConsumed();
+    const ledger = getAutotuneLedger();
+    // The recycled gateway re-read openclaw.json…
+    expect(ledger.rows.find((r) => r.knob === "agentConcurrencyCap")).toMatchObject({
+      status: "applied",
+      restartTarget: null,
+    });
+    // …but kept its original process env.
+    expect(ledger.rows.find((r) => r.knob === "gatewayHeapMb")).toMatchObject({
+      status: "pending_restart",
+      restartTarget: "gateway",
+    });
   });
 });

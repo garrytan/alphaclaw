@@ -227,6 +227,93 @@ describe("server/watchdog autotune OOM classification", () => {
     }
   });
 
+  it("live-resize tick: two DIFFERENT transient readings never confirm a resize", async () => {
+    delete process.env.ALPHACLAW_AUTOTUNE_DISABLED;
+    try {
+      const files = spyCgroupFiles({
+        "/sys/fs/cgroup/memory.max": `${2048 * kMbLocal}\n`,
+        "/sys/fs/cgroup/cpu.max": "100000 100000",
+      });
+      resetMachineProfileForTests({
+        fsModule: {
+          existsSync: (p) => String(p) === "/.dockerenv",
+          readFileSync: () => {
+            throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+          },
+        },
+      });
+      const { getMachineProfile } = require("../../lib/server/machine-profile");
+      const { applyResourceAutotune } = require("../../lib/server/autotune");
+      await applyResourceAutotune({
+        trigger: "boot",
+        deps: {
+          env: {},
+          updateOpenclawConfigFn: ({ mutate }) => ({ ...(mutate({}) || {}) }),
+        },
+      });
+
+      const lock = { tryAcquire: vi.fn(() => () => {}) };
+      const { watchdog } = createHarness({ gatewayLifecycleLock: lock });
+      // Tick 1 observes 8GB (arms on that VALUE); tick 2 observes 4GB — a
+      // DIFFERENT reading. The debounce must re-arm, never confirm.
+      files["/sys/fs/cgroup/memory.max"] = `${8192 * kMbLocal}\n`;
+      await watchdog.checkContainerResize();
+      files["/sys/fs/cgroup/memory.max"] = `${4096 * kMbLocal}\n`;
+      await watchdog.checkContainerResize();
+      expect(lock.tryAcquire).not.toHaveBeenCalled();
+      expect(getMachineProfile().memory.limitBytes).toBe(2048 * kMbLocal);
+
+      // The 4GB reading repeats: NOW it confirms.
+      await watchdog.checkContainerResize();
+      expect(lock.tryAcquire).toHaveBeenCalledWith("autotune_resize");
+      expect(getMachineProfile().memory.limitBytes).toBe(4096 * kMbLocal);
+    } finally {
+      process.env.ALPHACLAW_AUTOTUNE_DISABLED = "1";
+    }
+  });
+
+  it("live-resize tick: a degraded read (cgroup limit vanished) never arms", async () => {
+    delete process.env.ALPHACLAW_AUTOTUNE_DISABLED;
+    try {
+      const files = spyCgroupFiles({
+        "/sys/fs/cgroup/memory.max": `${2048 * kMbLocal}\n`,
+        "/sys/fs/cgroup/cpu.max": "100000 100000",
+      });
+      resetMachineProfileForTests({
+        fsModule: {
+          existsSync: (p) => String(p) === "/.dockerenv",
+          readFileSync: () => {
+            throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+          },
+        },
+      });
+      const { getMachineProfile } = require("../../lib/server/machine-profile");
+      const { applyResourceAutotune } = require("../../lib/server/autotune");
+      await applyResourceAutotune({
+        trigger: "boot",
+        deps: {
+          env: {},
+          updateOpenclawConfigFn: ({ mutate }) => ({ ...(mutate({}) || {}) }),
+        },
+      });
+
+      // The cgroup limit becomes unreadable (EMFILE-class failure): the read
+      // substitutes host totals — a phantom "resize" that must never arm,
+      // no matter how many ticks it persists across.
+      delete files["/sys/fs/cgroup/memory.max"];
+      const lock = { tryAcquire: vi.fn(() => () => {}) };
+      const { watchdog } = createHarness({ gatewayLifecycleLock: lock });
+      await watchdog.checkContainerResize();
+      await watchdog.checkContainerResize();
+      await watchdog.checkContainerResize();
+      expect(lock.tryAcquire).not.toHaveBeenCalled();
+      expect(getMachineProfile().memory.limitBytes).toBe(2048 * kMbLocal);
+      expect(getMachineProfile().memory.source).toBe("cgroup-v2");
+    } finally {
+      process.env.ALPHACLAW_AUTOTUNE_DISABLED = "1";
+    }
+  });
+
   it("notifies once per incident across a crash loop, and stays silent on plain crashes", async () => {
     const { watchdog, insertWatchdogEvent, notifier } = createHarness();
     watchdog.onGatewayExit({ code: 137, expectedExit: false });

@@ -173,6 +173,26 @@ describe("frontend/watchdog resources card — capacity header", () => {
     });
   });
 
+  it("bare metal: host values are the correct values — no source badge at all", () => {
+    const tree = renderCard({
+      resources: kResources,
+      profile: {
+        ...kProfile,
+        memory: { limitBytes: 64 * kGb, source: "host" },
+        environment: "bare-metal",
+      },
+    });
+    expect(treeText(tree)).not.toContain("Host values");
+    // The warning stays reserved for degraded detection (container/unknown).
+    expect(
+      buildCapacityHeaderModel({
+        ...kProfile,
+        memory: { limitBytes: 64 * kGb, source: "host" },
+        environment: "unknown",
+      }).hostValues,
+    ).toBe(true);
+  });
+
   it("GPU chip renders ONLY when present: first device + '+N more', cyan tone", () => {
     const tree = renderCard({
       resources: kResources,

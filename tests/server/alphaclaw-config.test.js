@@ -322,6 +322,32 @@ describe("server/alphaclaw-config", () => {
     expect(readAutotuneEnabled({ openclawDir })).toBe(false);
   });
 
+  it("fails CLOSED on a non-ENOENT stat failure — only a missing file is a fresh install", () => {
+    const openclawDir = createTempOpenclawDir();
+    // The operator's enabled:false may be INSIDE the unreadable file — a
+    // transient EACCES/EIO must not flip the default-ON feature back on.
+    const eaccesFs = {
+      ...fs,
+      statSync: () => {
+        throw Object.assign(new Error("EACCES: permission denied"), {
+          code: "EACCES",
+        });
+      },
+    };
+    expect(readAutotuneEnabled({ openclawDir, fsModule: eaccesFs })).toBe(false);
+
+    // A genuinely missing file keeps the fresh-install default.
+    const enoentFs = {
+      ...fs,
+      statSync: () => {
+        throw Object.assign(new Error("ENOENT: no such file"), {
+          code: "ENOENT",
+        });
+      },
+    };
+    expect(readAutotuneEnabled({ openclawDir, fsModule: enoentFs })).toBe(true);
+  });
+
   it("merges autotune overrides per key and clears with null", () => {
     const openclawDir = createTempOpenclawDir();
 
