@@ -367,6 +367,11 @@
 - **Context:** Plan verification item V5 of the UI local-time normalization (v0.9.45).
 - **Effort:** S. **Depends on:** nothing.
 
+## P3 — Two pre-existing trend/calendar edges adjacent to the tz work
+- **What:** (a) Hourly (24h) cron trends drop a run stamped exactly at `windowEndMs` — the entry is admitted but its floor-bucket key lands past the last bucket and is skipped (`cron-service.js` bucket loop). (b) `cron-calendar-helpers.js` builds day slots via `rangeStartMs + offset * kDayMs` then `startOfDayMs`, so two offsets can collapse to one `dayKey` across a 25h DST fall-back day, colliding calendar cell keys.
+- **Why:** Both predate the v0.9.45 timezone work (flagged by its adversarial review because they sit on touched lines); each is a one-line-ish fix but changes pre-existing behavior, so they get their own change.
+- **Effort:** S. **Depends on:** nothing.
+
 ## Completed
 
 ## Make env-save channel sync one atomic lifecycle-lock op
