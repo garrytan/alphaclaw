@@ -47,6 +47,18 @@ describe("frontend/api", () => {
     expect(window.location.href).toBe("/setup");
   });
 
+  it("fetchStatus rejects on a 500 {error} envelope — a failed poll, never a status frame", async () => {
+    // The /api/status error path answers 500 {error}; consuming it as data
+    // kept connectivity "online" (truthy poll data) and rendered the legacy
+    // version-skew card ({error} has no .state) against a broken new server.
+    global.fetch.mockResolvedValue(
+      mockJsonResponse(500, { error: "status unavailable" }),
+    );
+    const api = await loadApiModule();
+
+    await expect(api.fetchStatus()).rejects.toThrow("status unavailable");
+  });
+
   it("runOnboard sends vars and modelKey payload", async () => {
     global.fetch.mockResolvedValue(mockJsonResponse(200, { ok: true }));
     const api = await loadApiModule();
@@ -682,6 +694,54 @@ describe("frontend/api", () => {
       "no_suppressed_channels",
     );
   });
+
+  it("restartGatewayAsync resolves the 202 {operationId} envelope from the async endpoint", async () => {
+    global.fetch.mockResolvedValue(
+      mockJsonResponse(202, { ok: true, operationId: "op-1", events: true }),
+    );
+    const api = await loadApiModule();
+
+    const result = await api.restartGatewayAsync();
+
+    expect(global.fetch).toHaveBeenCalledWith(
+      "/api/gateway/restart?async=1",
+      expect.objectContaining({ method: "POST" }),
+    );
+    expect(result).toEqual({ ok: true, operationId: "op-1", events: true });
+  });
+
+  it("restartGatewayAsync rejects 409 apply_in_progress with code+status, and unparseable bodies with the fallback message", async () => {
+    // 409 envelope: the controller branches on err.code, so the code and
+    // HTTP status must ride on the rejection.
+    global.fetch.mockResolvedValue(
+      mockJsonResponse(409, {
+        ok: false,
+        error: "A channel update is in progress",
+        code: "apply_in_progress",
+      }),
+    );
+    const api = await loadApiModule();
+    await expect(api.restartGatewayAsync()).rejects.toMatchObject({
+      message: "A channel update is in progress",
+      code: "apply_in_progress",
+      status: 409,
+    });
+
+    // Unparseable body on a failed response: fallback message, status kept,
+    // no code invented.
+    global.fetch.mockResolvedValue({
+      status: 500,
+      ok: false,
+      json: async () => {
+        throw new Error("bad json");
+      },
+    });
+    const rejection = await api.restartGatewayAsync().catch((err) => err);
+    expect(rejection).toBeInstanceOf(Error);
+    expect(rejection.message).toBe("Could not restart gateway");
+    expect(rejection.status).toBe(500);
+    expect(rejection.code).toBeUndefined();
+  });
 });
 
 const mockTextResponse = (status, text) => ({
@@ -778,7 +838,6 @@ describe("frontend/api endpoint wrapper coverage", () => {
     ["sendAgentMessage", [{ message: "hi", sessionKey: "k" }], "/api/agent/message", "POST"],
     ["sendAgentMessage", [], "/api/agent/message", "POST"],
     ["sendDoctorCardFix", [], "/api/doctor/findings//fix", "POST"],
-    ["restartGateway", [], "/api/gateway/restart", "POST"],
     ["fetchRestartStatus", [], "/api/restart-status", undefined],
     ["dismissRestartStatus", [], "/api/restart-status/dismiss", "POST"],
     ["fetchWatchdogStatus", [], "/api/watchdog/status", undefined],
@@ -1245,6 +1304,58 @@ describe("frontend/api behaviors", () => {
 
     await expect(api.fetchWatchdogLogs()).rejects.toThrow(
       "Could not load watchdog logs",
+    );
+  });
+
+  it("fetchWatchdogLogsDelta polls with the since=<gen>:<offset> cursor", async () => {
+    const payload = { ok: true, gen: 3, offset: 2048, data: "new line\n", reset: false };
+    global.fetch.mockResolvedValue(mockJsonResponse(200, payload));
+    const api = await loadApiModule();
+
+    const result = await api.fetchWatchdogLogsDelta({ gen: 3, offset: 1024 });
+
+    expect(global.fetch.mock.calls[0][0]).toBe(
+      "/api/watchdog/logs?since=3%3A1024",
+    );
+    expect(result).toEqual(payload);
+  });
+
+  it("fetchWatchdogLogsDelta sends an invalid cursor when none is known", async () => {
+    const payload = { ok: true, gen: 1, offset: 512, data: "fresh tail", reset: true };
+    global.fetch.mockResolvedValue(mockJsonResponse(200, payload));
+    const api = await loadApiModule();
+
+    const result = await api.fetchWatchdogLogsDelta();
+
+    // -1:-1 is never a valid cursor, so the server bootstraps the client
+    // with reset:true plus the fresh tail and the current cursor.
+    expect(global.fetch.mock.calls[0][0]).toBe(
+      "/api/watchdog/logs?since=-1%3A-1",
+    );
+    expect(result).toEqual(payload);
+  });
+
+  it("fetchWatchdogLogsDelta normalizes non-numeric cursor parts to -1", async () => {
+    global.fetch.mockResolvedValue(
+      mockJsonResponse(200, { ok: true, gen: 1, offset: 0, data: "", reset: true }),
+    );
+    const api = await loadApiModule();
+
+    await api.fetchWatchdogLogsDelta({ gen: "junk", offset: null });
+
+    expect(global.fetch.mock.calls[0][0]).toBe(
+      "/api/watchdog/logs?since=-1%3A-1",
+    );
+  });
+
+  it("fetchWatchdogLogsDelta throws on error responses", async () => {
+    global.fetch.mockResolvedValue(
+      mockJsonResponse(500, { ok: false, error: "log reader unavailable" }),
+    );
+    const api = await loadApiModule();
+
+    await expect(api.fetchWatchdogLogsDelta({ gen: 1, offset: 0 })).rejects.toThrow(
+      "log reader unavailable",
     );
   });
 

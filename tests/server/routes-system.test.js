@@ -157,6 +157,14 @@ const mockHttpsGetResponse = ({ statusCode = 200, body = "" } = {}) =>
   });
 
 describe("server/routes/system", () => {
+  // boot-phase is a module singleton whose process default is
+  // "starting_gateway"; the reducer (and the legacy projection derived from
+  // it) gate on it, so every test starts from a settled boot. Tests that
+  // need a failed boot set it explicitly and this reset un-leaks it.
+  beforeEach(() => {
+    require("../../lib/server/boot-phase").setBootPhase("ready");
+  });
+
   it("merges known vars and custom vars on GET /api/env", async () => {
     const deps = createSystemDeps();
     deps.readEnvFile.mockReturnValue([
@@ -389,7 +397,9 @@ describe("server/routes/system", () => {
 
     const restart = await request(app).post("/api/gateway/restart");
     expect(restart.status).toBe(200);
-    expect(restart.body).toEqual({ ok: true, restartRequired: false });
+    expect(restart.body).toEqual(
+      expect.objectContaining({ ok: true, restartRequired: false }),
+    );
     expect(deps.restartGateway).toHaveBeenCalledTimes(1);
 
     const envAfterRestart = await request(app).get("/api/env");
@@ -1284,8 +1294,14 @@ describe("server/routes/system", () => {
     expect(startingRes.body.gateway).toBe("starting");
     expect(startingRes.body.alphaclawVersion).toBeNull();
 
-    deps.fs.existsSync.mockReturnValue(false);
-    const notOnboardedRes = await request(app).get("/api/status");
+    // /api/status serves a shared snapshot with a short freshness window, so
+    // a config change is observed by a fresh service, not the same instance.
+    const notOnboardedDeps = createSystemDeps();
+    notOnboardedDeps.isGatewayRunning.mockResolvedValue(false);
+    notOnboardedDeps.alphaclawVersionService = {};
+    notOnboardedDeps.fs.existsSync.mockReturnValue(false);
+    const notOnboardedApp = createApp(notOnboardedDeps);
+    const notOnboardedRes = await request(notOnboardedApp).get("/api/status");
     expect(notOnboardedRes.body.gateway).toBe("not_onboarded");
     expect(notOnboardedRes.body.configExists).toBe(false);
   });
@@ -1295,14 +1311,34 @@ describe("server/routes/system", () => {
     try {
       const deps = createSystemDeps();
       deps.watchdog = { getStatus: vi.fn(() => ({ lifecycle: "running" })) };
-      deps.doctorService = { buildStatus: vi.fn(() => ({ ok: true, checks: [] })) };
+      deps.doctorService = {
+        buildStatus: vi.fn(() => ({
+          ok: true,
+          checks: [],
+          bootstrapContext: {
+            // Heavy per-file listings stay on /api/doctor/status; frames only
+            // carry what the shell's truncation warnings read.
+            files: [{ path: "a.md", rawChars: 999999 }],
+            activeFiles: [{ path: "a.md", rawChars: 999999 }],
+            inactiveTruncatedFiles: [{ path: "b.md" }],
+            truncationGuidance: "very long guidance text",
+            hasActiveTruncation: true,
+            activeTruncatedFiles: [{ path: "a.md", rawChars: 10, injectedChars: 5 }],
+            activeNearLimitFiles: [],
+          },
+        })),
+      };
       const routes = captureRoutes(deps);
       const handler = routes.get.get("/api/events/status");
       const req = new EventEmitter();
       const res = {
         setHeader: vi.fn(),
         flushHeaders: vi.fn(),
-        write: vi.fn(),
+        // A healthy client socket: write() returns true, otherwise the SSE
+        // backpressure guard would count every write as backed up and
+        // destroy the connection after 5 writes.
+        write: vi.fn(() => true),
+        destroy: vi.fn(),
         end: vi.fn(),
       };
 
@@ -1316,18 +1352,20 @@ describe("server/routes/system", () => {
       const firstData = res.write.mock.calls
         .map((call) => String(call[0]))
         .find((chunk) => chunk.startsWith("data: "));
-      const parsed = JSON.parse(firstData.slice("data: ".length));
+      const parsed = JSON.parse(firstData.slice("data: ".length).trimEnd());
       expect(parsed.watchdogStatus).toEqual({ lifecycle: "running" });
-      expect(parsed.doctorStatus).toEqual({ ok: true, checks: [] });
+      expect(parsed.doctorStatus).toEqual(
+        expect.objectContaining({ ok: true, checks: [] }),
+      );
+      expect(parsed.doctorStatus.bootstrapContext).toEqual({
+        hasActiveTruncation: true,
+        activeTruncatedFiles: [{ path: "a.md", rawChars: 10, injectedChars: 5 }],
+        activeNearLimitFiles: [],
+      });
       expect(parsed.status.gateway).toBe("running");
 
-      // The 2s interval emits another status event.
-      res.write.mockClear();
-      await vi.advanceTimersByTimeAsync(2000);
-      expect(res.write).toHaveBeenCalledWith("event: status\n");
-
-      // Payload build failures are swallowed without writing.
-      deps.isGatewayRunning.mockRejectedValue(new Error("gateway probe failed"));
+      // Identical payloads are deduplicated by the shared snapshot: the next
+      // 2s tick sends nothing new.
       res.write.mockClear();
       await vi.advanceTimersByTimeAsync(2000);
       expect(
@@ -1336,9 +1374,38 @@ describe("server/routes/system", () => {
         ),
       ).toBe(false);
 
-      // Keepalives flow every 15s.
+      // A real change is streamed on the next tick.
+      deps.watchdog.getStatus.mockReturnValue({ lifecycle: "restarting" });
+      res.write.mockClear();
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(res.write).toHaveBeenCalledWith("event: status\n");
+      const changedData = res.write.mock.calls
+        .map((call) => String(call[0]))
+        .find((chunk) => chunk.startsWith("data: "));
+      expect(JSON.parse(changedData.slice("data: ".length)).watchdogStatus).toEqual(
+        { lifecycle: "restarting" },
+      );
+
+      // A gateway-probe failure degrades to "no observation": the reducer
+      // reports unknown honestly (and streams the change) instead of failing
+      // the whole compute and freezing the last-good payload forever.
+      deps.isGatewayRunning.mockRejectedValue(new Error("gateway probe failed"));
+      res.write.mockClear();
+      await vi.advanceTimersByTimeAsync(2000);
+      const probeFailData = res.write.mock.calls
+        .map((call) => String(call[0]))
+        .find((chunk) => chunk.startsWith("data: "));
+      expect(probeFailData).toBeTruthy();
+      expect(
+        JSON.parse(probeFailData.slice("data: ".length)).status.state.state,
+      ).toBe("unknown");
+
+      // Keepalives flow every 15s, and the ≥1-frame/10s heartbeat re-sends
+      // the (unchanged) snapshot as a liveness signal.
+      deps.isGatewayRunning.mockResolvedValue(true);
       await vi.advanceTimersByTimeAsync(11000);
       expect(res.write).toHaveBeenCalledWith(": keepalive\n\n");
+      expect(res.write).toHaveBeenCalledWith("event: status\n");
 
       req.emit("close");
       expect(res.end).toHaveBeenCalled();
@@ -1355,7 +1422,12 @@ describe("server/routes/system", () => {
     const routes = captureRoutes(deps);
     const handler = routes.get.get("/api/events/status");
     const req = new EventEmitter();
-    const res = { setHeader: vi.fn(), write: vi.fn(), end: vi.fn() };
+    const res = {
+      setHeader: vi.fn(),
+      write: vi.fn(() => true),
+      destroy: vi.fn(),
+      end: vi.fn(),
+    };
 
     await handler(req, res);
     req.emit("close");
@@ -1367,6 +1439,141 @@ describe("server/routes/system", () => {
     expect(parsed.watchdogStatus).toBeNull();
     expect(parsed.doctorStatus).toBeNull();
     expect(res.end).toHaveBeenCalled();
+  });
+
+  const createSseClient = () => {
+    const req = new EventEmitter();
+    const res = {
+      setHeader: vi.fn(),
+      flushHeaders: vi.fn(),
+      write: vi.fn(() => true),
+      destroy: vi.fn(),
+      end: vi.fn(),
+    };
+    return { req, res };
+  };
+
+  const firstStatusPayload = (res) => {
+    const firstData = res.write.mock.calls
+      .map((call) => String(call[0]))
+      .find((chunk) => chunk.startsWith("data: "));
+    return JSON.parse(firstData.slice("data: ".length).trimEnd());
+  };
+
+  it("shares the doctor-status throttle across SSE connections", async () => {
+    vi.useFakeTimers();
+    try {
+      const deps = createSystemDeps();
+      deps.doctorService = { buildStatus: vi.fn(() => ({ ok: true, checks: [] })) };
+      const routes = captureRoutes(deps);
+      const handler = routes.get.get("/api/events/status");
+      const first = createSseClient();
+      const second = createSseClient();
+
+      await handler(first.req, first.res);
+      await handler(second.req, second.res);
+
+      // Both connections opened inside one 30s window: ONE buildStatus
+      // computation served both initial events (the throttle is shared, not
+      // per-connection).
+      expect(deps.doctorService.buildStatus).toHaveBeenCalledTimes(1);
+      expect(firstStatusPayload(first.res).doctorStatus).toEqual({
+        ok: true,
+        checks: [],
+      });
+      expect(firstStatusPayload(second.res).doctorStatus).toEqual({
+        ok: true,
+        checks: [],
+      });
+
+      // 2s ticks inside the window keep serving the shared cached value.
+      await vi.advanceTimersByTimeAsync(4000);
+      expect(deps.doctorService.buildStatus).toHaveBeenCalledTimes(1);
+
+      // Once the 30s window elapses, the next tick recomputes exactly once.
+      await vi.advanceTimersByTimeAsync(28000);
+      expect(deps.doctorService.buildStatus).toHaveBeenCalledTimes(2);
+
+      first.req.emit("close");
+      second.req.emit("close");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("destroys an SSE connection after five consecutive backpressured writes", async () => {
+    vi.useFakeTimers();
+    try {
+      const deps = createSystemDeps();
+      const routes = captureRoutes(deps);
+      const handler = routes.get.get("/api/events/status");
+      const req = new EventEmitter();
+      const res = {
+        setHeader: vi.fn(),
+        flushHeaders: vi.fn(),
+        // A permanently backed-up client socket: every write reports
+        // backpressure.
+        write: vi.fn(() => false),
+        end: vi.fn(),
+      };
+      res.destroy = vi.fn(() => {
+        res.destroyed = true;
+      });
+
+      // The snapshot service writes two chunks per frame plus keepalives;
+      // the guard counts consecutive backpressured WRITES. A permanently
+      // backed-up socket must be destroyed within a bounded window rather
+      // than buffering frames forever.
+      await handler(req, res); // first frame: writes 1-2 backpressured
+      expect(res.destroy).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(20000); // heartbeats + keepalives
+      expect(res.destroy).toHaveBeenCalled();
+
+      req.emit("close");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("resets the SSE backpressure counter after a successful write", async () => {
+    vi.useFakeTimers();
+    try {
+      const deps = createSystemDeps();
+      const routes = captureRoutes(deps);
+      const handler = routes.get.get("/api/events/status");
+      const req = new EventEmitter();
+      // Four backpressured writes, then the socket drains: the counter must
+      // reset instead of counting toward the destroy threshold of 5.
+      const writeResults = [false, false, false, false, true];
+      let writeCalls = 0;
+      const res = {
+        setHeader: vi.fn(),
+        flushHeaders: vi.fn(),
+        write: vi.fn(() => {
+          const flushed = writeCalls < writeResults.length ? writeResults[writeCalls] : true;
+          writeCalls += 1;
+          return flushed;
+        }),
+        destroy: vi.fn(),
+        end: vi.fn(),
+      };
+
+      // Connect frame = 2 writes (event + data), both backpressured (#1-#2).
+      await handler(req, res);
+      expect(res.destroy).not.toHaveBeenCalled();
+
+      // Heartbeat at ~10s adds #3-#4 (backpressured, counter 4 — still under
+      // the threshold of 5); the 15s keepalive (#5) drains → counter resets;
+      // later heartbeats keep streaming on the recovered socket.
+      await vi.advanceTimersByTimeAsync(26000);
+      expect(res.destroy).not.toHaveBeenCalled();
+      expect(res.write.mock.calls.length).toBeGreaterThan(5);
+
+      req.emit("close");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("falls back to the default schedule when the cron config is invalid", async () => {
@@ -1641,18 +1848,6 @@ describe("server/routes/system", () => {
       ok: false,
       error: "Could not fetch release notes",
     });
-  });
-
-  it("returns raw gateway status on GET /api/gateway-status", async () => {
-    const deps = createSystemDeps();
-    deps.clawCmd.mockResolvedValue({ ok: true, stdout: "gateway running" });
-    const app = createApp(deps);
-
-    const res = await request(app).get("/api/gateway-status");
-
-    expect(res.status).toBe(200);
-    expect(deps.clawCmd).toHaveBeenCalledWith("status");
-    expect(res.body).toEqual({ ok: true, stdout: "gateway running" });
   });
 
   it("returns 502 when listing agent sessions fails", async () => {
@@ -2051,6 +2246,187 @@ describe("server/routes/system", () => {
     }
   }, 30000);
 
+  it("runs an async restart as a streamed operation with human step labels", async () => {
+    const { setBootPhase, getBootPhase } = require("../../lib/server/boot-phase");
+    // A stale failed boot phase must be cleared by a verified restart.
+    setBootPhase("failed", { error: new Error("boot exploded") });
+    const deps = createSystemDeps();
+    deps.restartRequiredState.beginRestart = vi.fn(() => ({
+      operationId: "op-1",
+      reasonsSnapshot: [],
+    }));
+    deps.restartRequiredState.updateRestartOperation = vi.fn();
+    deps.restartRequiredState.completeRestart = vi.fn();
+    deps.operationEvents = {
+      createOperation: vi.fn(() => ({ operationId: "op-1" })),
+      publish: vi.fn(),
+      complete: vi.fn(),
+      fail: vi.fn(),
+    };
+    deps.watchdog = {
+      getStatus: vi.fn(() => ({ lifecycle: "running" })),
+      onExpectedRestart: vi.fn(),
+      onExpectedRestartSettled: vi.fn(),
+    };
+    let releaseCalled = false;
+    deps.gatewayLifecycleLock = {
+      acquire: vi.fn(async () => () => {
+        releaseCalled = true;
+      }),
+      getActiveOperation: vi.fn(() => null),
+    };
+    let resolveRestart;
+    deps.restartGateway = vi.fn(({ onStep }) => {
+      onStep({ step: "preparing_plugins", status: "skipped" });
+      onStep({ step: "stopping", status: "running" });
+      return new Promise((resolve) => {
+        resolveRestart = () => resolve({ durationMs: 1234 });
+      });
+    });
+    const app = createApp(deps);
+
+    const res = await request(app).post("/api/gateway/restart?async=1");
+    expect(res.status).toBe(202);
+    expect(res.body).toEqual({ ok: true, operationId: "op-1" });
+    expect(deps.operationEvents.createOperation).toHaveBeenCalledWith({
+      type: "gateway_restart",
+      operationId: "op-1",
+    });
+    // Steps stream with public labels, never bare internal ids.
+    expect(deps.operationEvents.publish).toHaveBeenCalledWith("op-1", {
+      event: "step",
+      data: expect.objectContaining({
+        name: "stopping",
+        label: "Stopping gateway",
+        status: "running",
+      }),
+    });
+    expect(deps.watchdog.onExpectedRestart).toHaveBeenCalled();
+    expect(deps.watchdog.onExpectedRestartSettled).not.toHaveBeenCalled();
+
+    resolveRestart();
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(deps.restartRequiredState.completeRestart).toHaveBeenCalledWith(
+      expect.objectContaining({
+        operationId: "op-1",
+        ok: true,
+        durationMs: 1234,
+      }),
+    );
+    expect(deps.operationEvents.complete).toHaveBeenCalledWith(
+      "op-1",
+      expect.objectContaining({
+        ok: true,
+        durationMs: 1234,
+      }),
+    );
+    expect(releaseCalled).toBe(true);
+    // The watchdog's expected-restart window closes the moment the operation
+    // settles — a dead gateway must not sit suppressed until lease expiry.
+    expect(deps.watchdog.onExpectedRestartSettled).toHaveBeenCalledTimes(1);
+    // A verified-ready gateway supersedes a failed boot: the boot_failed
+    // headline's own Retry action must be able to clear it.
+    expect(getBootPhase().phase).toBe("ready");
+  });
+
+  it("attaches concurrent restart requests to the active operation", async () => {
+    const deps = createSystemDeps();
+    deps.restartRequiredState.beginRestart = vi.fn(() => ({
+      operationId: "op-2",
+      reasonsSnapshot: [],
+    }));
+    deps.restartRequiredState.completeRestart = vi.fn();
+    let resolveRestart;
+    deps.restartGateway = vi.fn(
+      () =>
+        new Promise((resolve) => {
+          resolveRestart = () => resolve({ durationMs: 5 });
+        }),
+    );
+    const app = createApp(deps);
+
+    const first = request(app).post("/api/gateway/restart?async=1");
+    const firstRes = await first;
+    expect(firstRes.status).toBe(202);
+
+    const second = await request(app).post("/api/gateway/restart?async=1");
+    expect(second.status).toBe(202);
+    expect(second.body).toEqual({
+      ok: true,
+      attached: true,
+      operationId: "op-2",
+    });
+    expect(deps.restartGateway).toHaveBeenCalledTimes(1);
+    resolveRestart();
+  });
+
+  it("rejects a restart while a channel apply is in progress", async () => {
+    const deps = createSystemDeps();
+    deps.openclawChannelService = {
+      getChannelInfo: vi.fn(() => null),
+      isApplyInProgress: vi.fn(() => true),
+    };
+    const app = createApp(deps);
+
+    const res = await request(app).post("/api/gateway/restart");
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe("apply_in_progress");
+    expect(deps.restartGateway).not.toHaveBeenCalled();
+  });
+
+  it("surfaces redacted failure evidence when a restart never becomes ready", async () => {
+    const deps = createSystemDeps();
+    deps.restartRequiredState.beginRestart = vi.fn(() => ({
+      operationId: "op-3",
+      reasonsSnapshot: [],
+    }));
+    deps.restartRequiredState.completeRestart = vi.fn();
+    deps.operationEvents = {
+      createOperation: vi.fn(),
+      publish: vi.fn(),
+      complete: vi.fn(),
+      fail: vi.fn(),
+    };
+    const previousSecret = process.env.TEST_RESTART_SECRET;
+    process.env.TEST_RESTART_SECRET = "super-secret-token";
+    try {
+      const failure = Object.assign(
+        new Error("Gateway did not become ready within 120s"),
+        {
+          evidence: {
+            stderrTail: ["boom with super-secret-token inside", "second line"],
+            timeoutMs: 120000,
+          },
+        },
+      );
+      deps.restartGateway = vi.fn(async () => {
+        throw failure;
+      });
+      const app = createApp(deps);
+
+      const res = await request(app).post("/api/gateway/restart");
+      expect(res.status).toBe(500);
+      expect(res.body.error).toContain("did not become ready");
+      expect(res.body.evidence).toContain("boom with *** inside");
+      expect(res.body.evidence).not.toContain("super-secret-token");
+      expect(deps.restartRequiredState.completeRestart).toHaveBeenCalledWith(
+        expect.objectContaining({ operationId: "op-3", ok: false }),
+      );
+      expect(deps.operationEvents.fail).toHaveBeenCalled();
+
+      // The evidence stays retrievable by reference on /api/restart-status.
+      deps.restartRequiredState.getLastRestartOperation = vi.fn(() => ({
+        operationId: "op-3",
+        status: "failed",
+      }));
+      const statusRes = await request(app).get("/api/restart-status");
+      expect(statusRes.body.lastOperation.evidence).toContain("boom with ***");
+    } finally {
+      if (previousSecret === undefined) delete process.env.TEST_RESTART_SECRET;
+      else process.env.TEST_RESTART_SECRET = previousSecret;
+    }
+  });
+
   it("reports restart status and surfaces snapshot failures", async () => {
     const deps = createSystemDeps();
     const app = createApp(deps);
@@ -2062,6 +2438,9 @@ describe("server/routes/system", () => {
       restartRequired: false,
       restartInProgress: false,
       gatewayRunning: true,
+      reasons: [],
+      activeOperation: null,
+      lastOperation: null,
     });
 
     deps.restartRequiredState.getSnapshot.mockRejectedValueOnce(
@@ -2108,7 +2487,9 @@ describe("server/routes/system", () => {
     deps.restartGateway.mockRejectedValueOnce(new Error("restart blew up"));
     const failRes = await request(app).post("/api/gateway/restart");
     expect(failRes.status).toBe(500);
-    expect(failRes.body).toEqual({ ok: false, error: "restart blew up" });
+    expect(failRes.body).toEqual(
+      expect.objectContaining({ ok: false, error: "restart blew up" }),
+    );
     expect(deps.restartRequiredState.markRestartInProgress).toHaveBeenCalled();
     expect(deps.restartRequiredState.markRestartComplete).toHaveBeenCalled();
 
@@ -2118,9 +2499,259 @@ describe("server/routes/system", () => {
     );
     const snapshotFailRes = await request(app).post("/api/gateway/restart");
     expect(snapshotFailRes.status).toBe(500);
-    expect(snapshotFailRes.body).toEqual({
+    expect(snapshotFailRes.body).toEqual(
+      expect.objectContaining({
       ok: false,
       error: "snapshot store offline",
+    }),
+    );
+  });
+
+  it("returns the failure as a 500 to a synchronous request attached to an in-flight restart", async () => {
+    const deps = createSystemDeps();
+    deps.restartRequiredState.beginRestart = vi.fn(() => ({
+      operationId: "op-attach-fail",
+      reasonsSnapshot: [],
+    }));
+    deps.restartRequiredState.completeRestart = vi.fn();
+    let rejectRestart;
+    deps.restartGateway = vi.fn(
+      () =>
+        new Promise((_, reject) => {
+          rejectRestart = () => reject(new Error("gateway never came back"));
+        }),
+    );
+    // Raw handlers (not supertest) so the second request deterministically
+    // attaches BEFORE the in-flight operation fails.
+    const routes = captureRoutes(deps);
+    const handler = routes.post.get("/api/gateway/restart");
+    const createRes = () => {
+      const res = {
+        statusCode: 200,
+        body: undefined,
+        status(code) {
+          res.statusCode = code;
+          return res;
+        },
+        json(payload) {
+          res.body = payload;
+          return res;
+        },
+      };
+      return res;
+    };
+
+    const firstRes = createRes();
+    await handler({ query: { async: "1" } }, firstRes);
+    expect(firstRes.statusCode).toBe(202);
+
+    // A second synchronous click joins the active restart (never a competing
+    // one) and must surface that operation's failure as its own 500.
+    const secondRes = createRes();
+    const secondPending = handler({ query: {} }, secondRes);
+    rejectRestart();
+    await secondPending;
+
+    expect(secondRes.statusCode).toBe(500);
+    expect(secondRes.body).toEqual({
+      ok: false,
+      attached: true,
+      operationId: "op-attach-fail",
+      error: "gateway never came back",
     });
+    expect(deps.restartGateway).toHaveBeenCalledTimes(1);
+  });
+
+  it("pins the legacy gateway field as a pure projection of the reduced state", async () => {
+    const { setBootPhase } = require("../../lib/server/boot-phase");
+    // The documented compat contract: port-up states -> "running",
+    // pre-onboarding -> "not_onboarded", everything else -> "starting".
+    const project = (state) => {
+      if (state === "not_onboarded") return "not_onboarded";
+      return ["running", "degraded", "safe_mode", "flapping"].includes(state)
+        ? "running"
+        : "starting";
+    };
+    const cases = [
+      {
+        expectState: "not_onboarded",
+        mutate: (deps) => deps.fs.existsSync.mockReturnValue(false),
+      },
+      { expectState: "running", mutate: () => {} },
+      {
+        expectState: "degraded",
+        mutate: (deps) => {
+          deps.watchdog = { getStatus: () => ({ health: "degraded" }) };
+        },
+      },
+      {
+        expectState: "safe_mode",
+        mutate: (deps) => {
+          deps.watchdog = {
+            getStatus: () => ({ health: "healthy", safeMode: true }),
+          };
+        },
+      },
+      {
+        expectState: "flapping",
+        mutate: (deps) => {
+          deps.watchdog = { getStatus: () => ({ crashCountInWindow: 2 }) };
+        },
+      },
+      {
+        expectState: "down",
+        mutate: (deps) => deps.isGatewayRunning.mockResolvedValue(false),
+      },
+      {
+        expectState: "starting",
+        mutate: (deps) => {
+          deps.isGatewayRunning.mockResolvedValue(false);
+          deps.watchdog = { getStatus: () => ({ lifecycle: "restarting" }) };
+        },
+      },
+      { expectState: "boot_failed", boot: ["failed", { error: "boom" }] },
+      { expectState: "booting", boot: ["starting_gateway"] },
+      {
+        expectState: "unknown",
+        mutate: (deps) =>
+          deps.isGatewayRunning.mockRejectedValue(new Error("probe broke")),
+      },
+    ];
+
+    for (const testCase of cases) {
+      setBootPhase(...(testCase.boot || ["ready"]));
+      // Fresh deps + app per case: /api/status serves a shared snapshot with
+      // a freshness window, so state changes need a fresh service.
+      const deps = createSystemDeps();
+      testCase.mutate?.(deps);
+      const app = createApp(deps);
+
+      const res = await request(app).get("/api/status");
+
+      expect(res.status).toBe(200);
+      expect(res.body.state.state).toBe(testCase.expectState);
+      // The legacy field must ALWAYS equal the projection of the reduced
+      // state — never an independent computation that can disagree.
+      expect(res.body.gateway).toBe(project(testCase.expectState));
+    }
+    setBootPhase("ready");
+  });
+
+  it("maps the lifecycle-lock active operation onto the status badge", async () => {
+    const badgeFor = async (active) => {
+      const deps = createSystemDeps();
+      deps.gatewayLifecycleLock = {
+        acquire: vi.fn(),
+        getActiveOperation: vi.fn(() => active),
+      };
+      const app = createApp(deps);
+      const res = await request(app).get("/api/status");
+      expect(res.status).toBe(200);
+      return res.body.state.operation;
+    };
+
+    // Boot is expressed through bootPhase, never through the badge.
+    expect(await badgeFor({ kind: "boot", startedAt: 111 })).toBeNull();
+    expect(await badgeFor({ kind: "repair", startedAt: 222 })).toEqual({
+      kind: "repair",
+      label: "Repairing",
+      startedAt: 222,
+    });
+    // Unknown kinds still render a generic badge, never a bare internal id.
+    expect(await badgeFor({ kind: "compact", startedAt: 333 })).toEqual({
+      kind: "compact",
+      label: "Working…",
+      startedAt: 333,
+    });
+  });
+
+  it("records watchdog operation events for both restart outcomes", async () => {
+    const deps = createSystemDeps();
+    deps.restartRequiredState.beginRestart = vi.fn(() => ({
+      operationId: "op-ok",
+      reasonsSnapshot: [],
+    }));
+    deps.restartRequiredState.completeRestart = vi.fn();
+    deps.watchdog = {
+      getStatus: vi.fn(() => ({})),
+      onExpectedRestart: vi.fn(),
+      onExpectedRestartSettled: vi.fn(),
+      recordOperationEvent: vi.fn(),
+    };
+    deps.restartGateway = vi.fn(async () => ({ durationMs: 900, downtimeMs: 350 }));
+    const app = createApp(deps);
+
+    const okRes = await request(app).post("/api/gateway/restart");
+    expect(okRes.status).toBe(200);
+    expect(deps.watchdog.recordOperationEvent).toHaveBeenCalledWith({
+      kind: "gateway_restart",
+      status: "ok",
+      details: {
+        operationId: "op-ok",
+        trigger: "manual",
+        durationMs: 900,
+        downtimeMs: 350,
+      },
+    });
+
+    const previousSecret = process.env.TEST_RESTART_EVENT_SECRET;
+    process.env.TEST_RESTART_EVENT_SECRET = "hush-hush-value";
+    try {
+      deps.restartRequiredState.beginRestart.mockReturnValue({
+        operationId: "op-bad",
+        reasonsSnapshot: [],
+      });
+      deps.restartGateway.mockRejectedValueOnce(
+        new Error("bind failed for token hush-hush-value"),
+      );
+
+      const failRes = await request(app).post("/api/gateway/restart");
+      expect(failRes.status).toBe(500);
+      // The failure event carries the REDACTED message, never the secret.
+      expect(deps.watchdog.recordOperationEvent).toHaveBeenCalledWith({
+        kind: "gateway_restart",
+        status: "failed",
+        details: {
+          operationId: "op-bad",
+          trigger: "manual",
+          error: "bind failed for token ***",
+        },
+      });
+    } finally {
+      if (previousSecret === undefined) {
+        delete process.env.TEST_RESTART_EVENT_SECRET;
+      } else {
+        process.env.TEST_RESTART_EVENT_SECRET = previousSecret;
+      }
+    }
+  });
+
+  it("forwards the active restart operation's real expiresAt to the watchdog", async () => {
+    const deps = createSystemDeps();
+    deps.restartRequiredState.beginRestart = vi.fn(() => ({
+      operationId: "op-lease",
+      reasonsSnapshot: [],
+    }));
+    deps.restartRequiredState.completeRestart = vi.fn();
+    const expiresAt = Date.now() + 123456;
+    deps.restartRequiredState.getActiveRestartOperation = vi.fn(() => ({
+      operationId: "op-lease",
+      expiresAt,
+    }));
+    deps.watchdog = {
+      getStatus: vi.fn(() => ({})),
+      onExpectedRestart: vi.fn(),
+      onExpectedRestartSettled: vi.fn(),
+    };
+    deps.restartGateway = vi.fn(async () => ({ durationMs: 1 }));
+    const app = createApp(deps);
+
+    const res = await request(app).post("/api/gateway/restart");
+
+    expect(res.status).toBe(200);
+    // The suppression window forwarded to the watchdog is the operation
+    // record's OWN lease, not a value invented by the route.
+    expect(deps.watchdog.onExpectedRestart).toHaveBeenCalledWith({ expiresAt });
+    expect(deps.watchdog.onExpectedRestartSettled).toHaveBeenCalledTimes(1);
   });
 });

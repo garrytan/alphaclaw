@@ -5,7 +5,186 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
-## [Unreleased]
+## [0.9.37] - 2026-08-28
+
+### Added
+- **One honest gateway status.** The Gateway card now shows a single unified
+  state instead of separate (and sometimes contradictory) gateway/watchdog
+  rows. The vocabulary, in the order the card resolves it:
+  - **Not set up yet** — AlphaClaw hasn't been onboarded.
+  - **AlphaClaw starting / Startup failed** — the boot sequence itself.
+  - **Status unavailable** — no fresh observation; shows when it was last
+    confirmed running instead of guessing.
+  - **Configuration error** — OpenClaw rejected its config (exit 78);
+    automatic restarts pause until it's fixed.
+  - **Down** — not running, nothing in progress; Retry/Repair offered.
+  - **Starting** — launching, with elapsed time against the ready budget.
+  - **Unstable** — crashed and came back repeatedly; crash count and window
+    shown (estimated when the gateway runs outside AlphaClaw's supervision).
+  - **Running with issues** — up, but health probes are failing.
+  - **Channels paused** — the gateway's crash-loop breaker suppressed channel
+    autostart; one-click Resume.
+  - **Running** — up, healthy, with real uptime.
+  Every state carries a plain-language reason, the recommended action, and a
+  glossary explainer. Alerts (Telegram/Discord/Slack/WhatsApp) use the same
+  vocabulary, so what pings you matches what the page says.
+- **Restarts you can watch.** Restarting the gateway streams live steps
+  (checking plugins → stopping → starting → waiting for health check) with
+  honest outcomes: success reports measured downtime; failure shows the
+  actual error evidence (secrets redacted) with what to try next — no more
+  "Gateway restarted ✅" over a dead gateway. Restarts survive page reloads
+  and even an AlphaClaw crash mid-restart ("interrupted restart" on reboot).
+- **Faster dead-gateway detection.** An always-on 10-second port watcher plus
+  immediate re-checks after every restart/repair replace the old
+  up-to-2-minutes wait; stale verdicts like a lingering "crash loop" clear
+  the moment reality changes.
+- **Last-delivered timestamp for watchdog alerts** (next to the existing
+  Send test notification button), so you can verify alerting is actually
+  reaching you before you need it.
+
+### Changed
+- **Nearly everything is faster.** The server no longer freezes itself:
+  status checks, restarts, and boots run off the event loop; the
+  logs/watchdog page queries are indexed; the Upgrade page catalog serves
+  instantly from cache while refreshing in the background; responses are
+  compressed; charts load on demand. Status responses that took seconds
+  under load now answer in milliseconds.
+- **Expected restart during upgrades:** a gateway restart is part of channel
+  switches and upgrades; the watchdog now knows the restart window is
+  expected and won't report it as a crash or trigger rollback hooks during
+  it.
+- **API compatibility window:** `/api/status` keeps the legacy
+  `gateway`/`watchdogStatus` fields for one minor release as projections of
+  the new `state` object (they can no longer disagree). `POST
+  /api/gateway/restart` keeps blocking semantics by default; new clients
+  opt into `?async=1` + the streamed operation. Both defaults flip next
+  minor.
+- **Rollback implications:** automatic version rollback still arms after
+  gateway restarts; interrupted or failed restarts leave the rollback
+  window and its incident reporting exactly as before — with clearer
+  attribution in the incident feed ("automatic repair" vs manual restart).
+
+### Fixed
+- **Operations can no longer collide.** Channel updates, gateway restarts,
+  channel saves, and the watchdog's own recovery all serialize through one
+  lifecycle lock in both directions — an update can't kill a live restart,
+  a save can't interleave with a boot, and team-mode transitions hold the
+  same lock. A failed restart can no longer leave the card stuck on
+  "Starting" with no way out, and a gateway that crash-loops relaunches
+  with exponential backoff instead of hot-looping.
+- **Failure evidence stays readable and safe.** Restart evidence no longer
+  masks harmless values like file paths into `***` (only secret-named
+  values are redacted, longest-first so partial matches can't leak), and
+  failure messages get the same masking as stderr.
+- **Light theme and accessibility:** status dots now meet contrast minimums
+  in light mode, the reduced-motion setting actually stops every pulsing
+  animation, and small controls meet the 44px touch-target minimum on both
+  axes.
+- Charts recover after a failed load instead of staying blank for the whole
+  session; a stuck status-stream client is disconnected instead of
+  buffering frames without bound; port or channel changes written to
+  openclaw.json by any writer are picked up immediately.
+
+### Removed
+- `GET /api/gateway-status` (unused; it spawned a blocking 15s CLI status
+  call if ever hit). Use `GET /api/status` — the unified `state` object
+  carries everything it reported and more.
+
+## [0.9.36] - 2026-08-28
+
+Fix the chronic admin-UI downtime: the dashboard stays responsive while the
+gateway restarts, updates install, or the workspace grows. Verified on a
+15,000-file workspace: `/health` p99 dropped from 150–430ms to under 2ms,
+and proxied API writes no longer hang.
+
+### Fixed
+- **Proxied JSON writes no longer hang.** The admin server consumed request
+  bodies before proxying, so every JSON POST/PUT to gateway APIs stalled
+  until timeout. Proxied paths now stream bodies through untouched, with a
+  50 MB cap — oversized or chunked-encoding uploads get a fast 413 instead
+  of becoming an out-of-memory risk.
+- **Status polling no longer freezes the dashboard.** Workspace drift
+  fingerprinting (a full re-hash of every workspace file, previously re-run
+  every few seconds) moved to a background worker thread with incremental,
+  demand-driven refresh and bounded manifests (50k files / 10 MB per file);
+  channel, cron, and doctor status are served from short-lived caches; the
+  doctor run history no longer re-parses multi-megabyte manifests per
+  status request, and status responses stop embedding full manifests.
+- **Crashes no longer kill the dashboard silently.** Unhandled rejections
+  are logged and survived (a storm brake restarts cleanly if a subsystem
+  fails continuously), uncaught exceptions exit through a bounded graceful
+  shutdown, and a port conflict at startup retries loudly instead of dying.
+- **Gateway controls no longer freeze everything.** "Restart gateway",
+  channel saves, and watchdog recovery ran blocking CLI commands (up to
+  120s) on the request path. They are now async and serialized through a
+  single-flight lifecycle lock: double-clicking Restart coalesces, a save
+  during a restart queues, and shutdown cancels an in-flight restart
+  (including its 120s ready-wait) instead of waiting it out.
+- **Channel tokens can no longer leak into logs** when a channel add fails:
+  CLI failures are scrubbed of secret-bearing argument values before
+  logging, and unexpected 5xx responses return a generic message instead of
+  internal error details.
+- **The watchdog repair no longer parks itself.** `doctor --fix` runs
+  through a streaming runner with a 10-minute ceiling (previously killed at
+  15s), crash restarts back off exponentially, and a repair skipped during
+  an in-flight relaunch retries on a bounded cadence instead of dropping.
+- Log writing is buffered with size-capped rotation (no more per-line
+  synchronous writes on the hot path); the watchdog log endpoint clamps
+  unbounded tail reads to 4 MB.
+- SQLite contention: WAL mode with correct pragma ordering (no boot crash
+  when a draining predecessor holds a lock), bounded busy timeouts, and a
+  stale-result fallback for usage stats during gateway write bursts.
+- **OpenClaw update backups no longer fail forever at the backup step**
+  (#7, #9). AlphaClaw passed the fixed path `<root>/backups/openclaw` to
+  `openclaw backup create --output` without creating the directory, so the
+  CLI wrote the archive as a file at that exact path: the first
+  cross-channel/hard-gated run produced a verified multi-GB archive that
+  the artifact check couldn't see and falsely reported as "produced no
+  backup file" (#9, orphaning the archive), and every later run hit the
+  CLI's refuse-to-overwrite error (#7). Backups now go to unique per-run
+  archives (`openclaw-backup-<timestamp>-<opid>.tar.gz`) inside that
+  directory — a legacy archive file blocking the path is migrated into the
+  directory automatically — keep-3 retention actually prunes old archives,
+  and verify-failed archives are quarantined as `*.unverified`. Backup
+  errors now state the real cause and the offending path (overwrite
+  refusal, timeout, out of disk space, verify failure) instead of a
+  misleading "failed to verify" / "not trustworthy" message, the
+  "openclaw update repair" advice appears only when repair actually
+  applies, and the failed-update card's elapsed timer freezes at failure
+  instead of counting up forever. Revert-safe: after this fix the path is
+  a directory of archives, which older AlphaClaw versions and the CLI's
+  directory contract both handle correctly.
+
+### Added
+- **"AlphaClaw is updating" page during restarts and updates.** The port
+  answers immediately at boot — browsers get a human auto-refreshing page,
+  platforms get 200 `{status:"updating"}` health checks so they don't
+  restart-loop a container mid-update, and a boot stuck past 15 minutes
+  flips to 503 so the platform recovers it. The placeholder runs as its own
+  small process (so it keeps answering even while the boot installs block),
+  and retries its bind while a previous instance finishes draining.
+- **Three-state `/health`** (healthy / degraded with `gatewayDownSince` /
+  updating — always 200) and an opt-in strict `/health/ready` (503 while
+  the gateway is down; configure it only after onboarding).
+- **Event-loop and rejection telemetry** in `/api/watchdog/resources` (loop
+  lag percentiles, RSS, unhandled-rejection counts) with a sustained-lag
+  warning in the logs, plus a responsiveness harness under `scripts/dev/`.
+- README deployment sizing guidance (≥2 GB / 1 CPU recommended; per-process
+  heap budgets — the gateway no longer inherits the admin server's memory
+  flags).
+
+### Changed
+- Proxy engine swapped from the unmaintained `http-proxy` to `http-proxy-3`
+  (pinned 1.20.10), with a 30s fail-fast timeout for hung gateways that
+  disarms once a response starts streaming.
+- `/v1` JSON request bodies are capped at 20 MB (was 50 MB) to remove an
+  out-of-memory vector on small instances.
+- SSE status stream: doctor status recomputes on a 30s cadence shared
+  across tabs instead of per-tab, and clients that stop reading are
+  disconnected instead of buffering without bound.
+- Graceful shutdown drains in order (watchdog → HTTP → gateway → gmail →
+  terminal → service disposal → log flush) within a 10s deadline; SIGTERM,
+  self-update restarts, and crash exits all route through the same path.
 
 ### Added
 - **Agent Administration (`features.agentAdmin`, default OFF).** The OpenClaw

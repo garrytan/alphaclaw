@@ -1,6 +1,21 @@
 #!/usr/bin/env node
 "use strict";
 
+// Primitive boot-time crash guards: before the server loads, an unhandled
+// rejection must not kill boot silently (Node 22 default) and an uncaught
+// exception must exit LOUDLY. The server lifecycle orchestrator
+// (lib/server/init/server-lifecycle.js) replaces these with the full guarded
+// versions once it installs.
+process.on("unhandledRejection", (reason) => {
+  console.error(
+    `[alphaclaw] Unhandled rejection during boot (continuing): ${reason?.stack || reason}`,
+  );
+});
+process.on("uncaughtException", (error) => {
+  console.error(`[alphaclaw] Uncaught exception during boot: ${error?.stack || error}`);
+  process.exit(1);
+});
+
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
@@ -855,6 +870,40 @@ if (!kSetupPassword) {
 }
 
 // ---------------------------------------------------------------------------
+// 6b. Boot placeholder server
+// ---------------------------------------------------------------------------
+// The heavy pre-listen work below (pending-update npm install up to 3min,
+// gog CLI download, git fetches, migrations) used to leave the port silently
+// closed — users saw connection-refused and platform health checks failed.
+// The placeholder runs as a CHILD PROCESS (lib/boot-placeholder-child.js):
+// the boot work below blocks THIS process's event loop for minutes (execSync
+// npm install, gog download), so an in-process server would accept TCP but
+// never answer HTTP during exactly the windows it exists to cover. The
+// handler itself lives in lib/boot-placeholder.js where it is unit-testable.
+// SIGTERM'd right before the real server starts; the real server's
+// EADDRINUSE retry covers the close/rebind race.
+const bootPlaceholder = (() => {
+  try {
+    const { spawn } = require("child_process");
+    const child = spawn(
+      process.execPath,
+      [path.join(__dirname, "..", "lib", "boot-placeholder-child.js")],
+      {
+        env: {
+          ...process.env,
+          ALPHACLAW_PLACEHOLDER_PORT: String(Number.parseInt(kPort, 10) || 3000),
+        },
+        stdio: "ignore",
+      },
+    );
+    child.on("error", () => {});
+    return child;
+  } catch {
+    return null;
+  }
+})();
+
+// ---------------------------------------------------------------------------
 // 7. Set OPENCLAW_HOME globally so all child processes inherit it
 // ---------------------------------------------------------------------------
 
@@ -945,7 +994,9 @@ if (!gogInstalled) {
     const url = `https://github.com/steipete/gogcli/releases/download/v${gogVersion}/${tarball}`;
     execSync(
       `curl -fsSL "${url}" -o /tmp/gog.tar.gz && tar -xzf /tmp/gog.tar.gz -C /tmp/ && mv /tmp/gog /usr/local/bin/gog && chmod +x /usr/local/bin/gog && rm -f /tmp/gog.tar.gz`,
-      { stdio: "inherit" },
+      // A hung download must not stall boot forever (the placeholder page is
+      // covering the port, but /health flips to 503 after 15min).
+      { stdio: "inherit", timeout: 120000 },
     );
     console.log("[alphaclaw] gog CLI installed");
   } catch (e) {
@@ -1304,4 +1355,12 @@ try {
 // ---------------------------------------------------------------------------
 
 console.log("[alphaclaw] Setup complete -- starting server");
+if (bootPlaceholder) {
+  try {
+    // The child latches on SIGTERM (no further bind retries), destroys its
+    // connections, and exits within ~1s — the real server's EADDRINUSE
+    // retry covers any overlap.
+    bootPlaceholder.kill("SIGTERM");
+  } catch {}
+}
 require("../lib/server.js");

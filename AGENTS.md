@@ -17,15 +17,16 @@ If you need to understand the internals of OpenClaw, you can inspect the code at
 
 Runtime model:
 
-1. AlphaClaw server starts and manages OpenClaw as a child process.
-2. Setup UI calls AlphaClaw APIs for configuration and operations.
-3. AlphaClaw proxies gateway traffic and handles watchdog monitoring/repair.
+1. At boot, `bin/alphaclaw.js` first spawns a boot-placeholder child process (`lib/boot-placeholder.js` + `lib/boot-placeholder-child.js`) that holds the port — serving an auto-refreshing "updating" page to browsers and `200 {status:"updating"}` health checks to platforms (flipping `/health` to 503 if boot hangs past 15 minutes) — until the real server is ready to take over.
+2. AlphaClaw server starts and manages OpenClaw as a child process.
+3. Setup UI calls AlphaClaw APIs for configuration and operations.
+4. AlphaClaw proxies gateway traffic and handles watchdog monitoring/repair.
 
 ### Key Technologies
 
 - Node.js 22.22.3+ runtime (or a supported Node 24.15+/25.9+ release).
 - Express-based HTTP API server.
-- `http-proxy` for gateway proxy behavior.
+- `http-proxy-3` (pinned in `package.json`) for gateway proxy behavior, with `lil-http-terminator` for graceful HTTP drain on shutdown.
 - OpenClaw CLI/gateway process orchestration.
 - Preact + `htm` frontend patterns for Setup UI components.
 - Vitest + Supertest for server and route testing.
@@ -115,13 +116,13 @@ Design invariants (do not regress):
 - Rollback triggers (crash loop, exit 78, degraded >10 min) fire only on non-pin builds inside their 24h stabilization window — a build that never passes the 120s acceptance hold isn't rolled back directly, it just stays unaccepted until one of those triggers fires. Dev rollback targets the pin snapshot (falling back to a usable last-known-good stable overlay when the pin isn't locally recoverable) — never an in-crash rebuild. Unattended `doctor --fix` is suppressed inside that window (the 2026.7.1 plugins.allow bug is why).
 - The apply latch stays held once a restart is imminent (restarting success or deferred rollback) — releasing it early would let a second apply start only to be killed mid-overlay-write. A live-server pidfile (`<root>/.openclaw/.alphaclaw/alphaclaw-server.pid`, claimed at boot-sync time, never clobbering a live owner) makes a second `alphaclaw start`'s destructive boot sync a no-op.
 - Candidate code never sees secrets: package installs and verify probes run with an isolated HOME and a pinned registry/config; dev builds get an OPENCLAW_*/XDG_* allowlist with secret-shaped keys (TOKEN/SECRET/KEY/PASSWORD) filtered out.
-- Accepted supply-chain risk: the dev channel executes upstream build scripts (pnpm postinstalls). Mitigations: pre-switch verified backups (hard gate on downgrades AND dev switches), acceptance gating, blocklist, pin floor, secret-free build env.
+- Accepted supply-chain risk: the dev channel executes upstream build scripts (pnpm postinstalls). Mitigations: pre-switch verified backups (per-run timestamped `openclaw-backup-*.tar.gz` archives under the directory `<root>/backups/openclaw/`, last 3 kept; hard gate on downgrades AND dev switches), acceptance gating, blocklist, pin floor, secret-free build env.
 
 Runbook — "a dev/beta build broke":
 1. If it crash-looped inside the window, auto-rollback already ran: check the Upgrade page incident card + the chat notification; the bad build is blocklisted.
 2. Gateway up but misbehaving: Upgrade page → Roll back (targets last known-good, else the pin), or "Mark as good now" if the degradation is expected/self-inflicted.
 3. Dev checkout stuck (interrupted build / dirty worktree): run `openclaw update repair` from the Watchdog terminal; it finishes a half-completed update and does not touch user state.
-4. Downgrade landed on migrated state (gateway exits 78 after a downgrade): restore the pre-switch backup from `<root>/backups/openclaw` (`openclaw backup` docs; sqlite-only: `openclaw doctor --session-sqlite restore`).
+4. Downgrade landed on migrated state (gateway exits 78 after a downgrade): the restore candidate is the newest `openclaw-backup-*.tar.gz` archive in `<root>/backups/openclaw/` (last 3 kept); stage and activate it via the `openclaw backup` CLI steps (see its docs; sqlite-only: `openclaw doctor --session-sqlite restore`).
 5. Blocklist entries are permanent per version until cleared in the UI ("Clear" → "Try again").
 
 Runbook — update observability & the overseer:

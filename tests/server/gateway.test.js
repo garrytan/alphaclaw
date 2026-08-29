@@ -16,8 +16,19 @@ const kLegacyControlUiSkillPath = path.join(OPENCLAW_DIR, "skills", "control-ui"
 const kAlphaclawConfigPath = path.join(OPENCLAW_DIR, "alphaclaw.json");
 
 const modulePath = require.resolve("../../lib/server/gateway");
+// execFile-style mocks for the async gateway CLI calls.
+const execFileOk = (stdout = "") =>
+  vi.fn((file, args, opts, cb) => cb(null, stdout, ""));
+const execFileFail = (props = {}) =>
+  vi.fn((file, args, opts, cb) => {
+    const error = Object.assign(new Error(props.message || "exec failed"), props);
+    cb(error, props.stdout || "", props.stderr || "");
+  });
+
 const originalSpawn = childProcess.spawn;
 const originalExecSync = childProcess.execSync;
+const originalExecFile = childProcess.execFile;
+const originalExec = childProcess.exec;
 const originalExistsSync = fs.existsSync;
 const originalMkdirSync = fs.mkdirSync;
 const originalReaddirSync = fs.readdirSync;
@@ -51,6 +62,9 @@ const createChild = () => ({
   on: vi.fn(),
   kill: vi.fn(),
   exitCode: null,
+  // Real Node semantics: a live child has signalCode null; a SIGNAL-killed
+  // child sets signalCode and leaves exitCode null.
+  signalCode: null,
   killed: false,
 });
 
@@ -58,6 +72,8 @@ describe("server/gateway restart behavior", () => {
   afterEach(() => {
     childProcess.spawn = originalSpawn;
     childProcess.execSync = originalExecSync;
+    childProcess.execFile = originalExecFile;
+    childProcess.exec = originalExec;
     fs.existsSync = originalExistsSync;
     fs.mkdirSync = originalMkdirSync;
     fs.readdirSync = originalReaddirSync;
@@ -71,16 +87,28 @@ describe("server/gateway restart behavior", () => {
   it("always cold-starts when the gateway port is listening", async () => {
     const managedChild = createChild();
     const restartSupervisor = createChild();
-    const spawnMock = vi
-      .fn()
-      .mockReturnValueOnce(managedChild)
-      .mockReturnValueOnce(restartSupervisor);
+    // Model the real port lifecycle BEFORE requiring the module (it binds
+    // execFile/spawn at load): `stop` releases the port, `--force` reopens
+    // it — the restart pipeline now waits for the release before launching.
+    let gatewayPortOpen = false;
+    const spawnMock = vi.fn((file, args) => {
+      if (args?.[0] === "gateway" && args?.[1] === "--force") {
+        queueMicrotask(() => {
+          gatewayPortOpen = true;
+        });
+        return restartSupervisor;
+      }
+      return managedChild;
+    });
     const execSyncMock = vi.fn(() => "");
     childProcess.spawn = spawnMock;
     childProcess.execSync = execSyncMock;
     fs.existsSync = vi.fn(() => true);
-    let gatewayPortOpen = false;
     net.createConnection = vi.fn(() => createSocket(() => gatewayPortOpen));
+    childProcess.execFile = vi.fn((file, args, opts, cb) => {
+      if (args?.[0] === "gateway" && args?.[1] === "stop") gatewayPortOpen = false;
+      cb(null, "", "");
+    });
     delete require.cache[modulePath];
     const gateway = require(modulePath);
     fs.readFileSync = vi.fn(() =>
@@ -100,9 +128,13 @@ describe("server/gateway restart behavior", () => {
 
     gatewayPortOpen = true;
     const reloadEnv = vi.fn();
-    await gateway.restartGateway(reloadEnv);
+    const restartResult = await gateway.restartGateway(reloadEnv);
 
     expect(reloadEnv).toHaveBeenCalledTimes(1);
+    // Measured downtime (stop initiated → ready) rides on the result so the
+    // route can surface it in the success line and the operation record.
+    expect(restartResult.downtimeMs).toEqual(expect.any(Number));
+    expect(restartResult.downtimeMs).toBeGreaterThanOrEqual(0);
     expect(execSyncMock).not.toHaveBeenCalledWith(
       "openclaw gateway restart",
       expect.anything(),
@@ -254,9 +286,16 @@ describe("server/gateway restart behavior", () => {
       }),
     );
 
+    spawnMock.mockImplementation((file, args) => {
+      if (args?.[0] === "gateway" && args?.[1] === "--force") {
+        queueMicrotask(() => {
+          gatewayPortOpen = true;
+        });
+      }
+      return restartSupervisor;
+    });
     const reloadEnv = vi.fn();
     const restartPromise = gateway.restartGateway(reloadEnv);
-    gatewayPortOpen = true;
     await restartPromise;
 
     expect(reloadEnv).toHaveBeenCalledTimes(1);
@@ -276,17 +315,15 @@ describe("server/gateway restart behavior", () => {
     );
   });
 
-  it("retries channel plugin preflight after cleaning stale install stages", () => {
+  it("retries channel plugin preflight after cleaning stale install stages", async () => {
     const firstError = new Error(
       "ENOTEMPTY: directory not empty, rmdir '/app/node_modules/openclaw/dist/extensions/telegram/.openclaw-install-stage/node_modules/typebox/build/type/engine'",
     );
-    const execSyncMock = vi
+    const execFileMock = vi
       .fn()
-      .mockImplementationOnce(() => {
-        throw firstError;
-      })
-      .mockReturnValueOnce("{}");
-    childProcess.execSync = execSyncMock;
+      .mockImplementationOnce((file, args, opts, cb) => cb(firstError, "", ""))
+      .mockImplementationOnce((file, args, opts, cb) => cb(null, "{}", ""));
+    childProcess.execFile = execFileMock;
     fs.existsSync = vi.fn((targetPath) => targetPath === `${OPENCLAW_DIR}/openclaw.json`);
     fs.readFileSync = vi.fn((targetPath, ...args) => {
       if (targetPath === `${OPENCLAW_DIR}/openclaw.json`) {
@@ -319,22 +356,136 @@ describe("server/gateway restart behavior", () => {
     delete require.cache[modulePath];
     const gateway = require(modulePath);
 
-    gateway.prepareOpenclawChannelPlugins();
+    await gateway.prepareOpenclawChannelPlugins();
 
-    expect(execSyncMock).toHaveBeenCalledTimes(2);
-    expect(execSyncMock).toHaveBeenNthCalledWith(1, "openclaw plugins list --json", {
-      env: expect.any(Object),
-      timeout: 120000,
-      encoding: "utf8",
-    });
-    expect(execSyncMock).toHaveBeenNthCalledWith(2, "openclaw plugins list --json", {
-      env: expect.any(Object),
-      timeout: 120000,
-      encoding: "utf8",
-    });
+    expect(execFileMock).toHaveBeenCalledTimes(2);
+    for (const call of [1, 2]) {
+      expect(execFileMock).toHaveBeenNthCalledWith(
+        call,
+        "openclaw",
+        ["plugins", "list", "--json"],
+        {
+          env: expect.any(Object),
+          timeout: 120000,
+          encoding: "utf8",
+          // Shutdown cancellation rides on this signal (abortGatewayWaits).
+          signal: expect.any(AbortSignal),
+        },
+        expect.any(Function),
+      );
+    }
     expect(fs.rmSync).toHaveBeenCalledWith(
       expect.stringContaining("/telegram/.openclaw-install-stage"),
       expect.objectContaining({ recursive: true, force: true }),
+    );
+  });
+
+  it("memoizes only successful plugin preflights by desired plugin state", async () => {
+    let configRaw = JSON.stringify({ channels: { telegram: { enabled: true } } });
+    const execFileMock = vi
+      .fn()
+      // First preflight fails for a non-install-stage reason.
+      .mockImplementationOnce((file, args, opts, cb) =>
+        cb(new Error("EAI_AGAIN registry.npmjs.org"), "", ""),
+      )
+      .mockImplementation((file, args, opts, cb) => cb(null, "{}", ""));
+    childProcess.execFile = execFileMock;
+    fs.existsSync = vi.fn(
+      (targetPath) => targetPath === `${OPENCLAW_DIR}/openclaw.json`,
+    );
+    fs.readFileSync = vi.fn((targetPath, ...args) => {
+      if (targetPath === `${OPENCLAW_DIR}/openclaw.json`) return configRaw;
+      return originalReadFileSync(targetPath, ...args);
+    });
+    fs.readdirSync = vi.fn(() => []);
+    delete require.cache[modulePath];
+    const gateway = require(modulePath);
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    // A FAILED preflight is reported and must NOT seed the success memo.
+    expect(await gateway.prepareOpenclawChannelPlugins()).toEqual({
+      skipped: false,
+      failed: true,
+    });
+    expect(execFileMock).toHaveBeenCalledTimes(1);
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining("OpenClaw plugin preflight failed"),
+    );
+
+    // Same desired state after a failure: the preflight re-runs (and succeeds).
+    expect(await gateway.prepareOpenclawChannelPlugins()).toEqual({
+      skipped: false,
+    });
+    expect(execFileMock).toHaveBeenCalledTimes(2);
+
+    // Unchanged desired state after a success: the hash memo skips the whole
+    // CLI boot — the seconds-vs-minutes restart-downtime path.
+    expect(await gateway.prepareOpenclawChannelPlugins()).toEqual({
+      skipped: true,
+    });
+    expect(execFileMock).toHaveBeenCalledTimes(2);
+
+    // Changing the enabled-channel set invalidates the memo.
+    configRaw = JSON.stringify({
+      channels: { telegram: { enabled: true }, discord: { enabled: true } },
+    });
+    expect(await gateway.prepareOpenclawChannelPlugins()).toEqual({
+      skipped: false,
+    });
+    expect(execFileMock).toHaveBeenCalledTimes(3);
+  });
+
+  it("streams a warning (not done) for preparing_plugins when the preflight fails", async () => {
+    const supervisor = createChild();
+    let gatewayPortOpen = false;
+    childProcess.spawn = vi.fn((file, args) => {
+      if (args?.[0] === "gateway" && args?.[1] === "--force") {
+        queueMicrotask(() => {
+          gatewayPortOpen = true;
+        });
+      }
+      return supervisor;
+    });
+    childProcess.execFile = vi.fn((file, args, opts, cb) => {
+      if (args?.[0] === "plugins") {
+        cb(new Error("EAI_AGAIN registry.npmjs.org"), "", "network down");
+        return;
+      }
+      cb(null, "", "");
+    });
+    fs.existsSync = vi.fn(
+      (targetPath) => targetPath === `${OPENCLAW_DIR}/openclaw.json`,
+    );
+    fs.readFileSync = vi.fn((targetPath, ...args) => {
+      if (targetPath === `${OPENCLAW_DIR}/openclaw.json`) {
+        return JSON.stringify({ channels: { telegram: { enabled: true } } });
+      }
+      return originalReadFileSync(targetPath, ...args);
+    });
+    fs.readdirSync = vi.fn(() => []);
+    net.createConnection = vi.fn(() => createSocket(() => gatewayPortOpen));
+    delete require.cache[modulePath];
+    const gateway = require(modulePath);
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const onStep = vi.fn();
+
+    const result = await gateway.restartGateway(vi.fn(), { onStep });
+
+    // A failed preflight continues (the gateway may still boot) but must not
+    // stream as a clean "done" — the client renders this status verbatim.
+    const prepSteps = onStep.mock.calls
+      .map(([step]) => step)
+      .filter((step) => step.step === "preparing_plugins");
+    expect(prepSteps).toEqual([
+      { step: "preparing_plugins", status: "running" },
+      { step: "preparing_plugins", status: "warning" },
+    ]);
+    // The restart still proceeds through stop + force launch to ready.
+    expect(result.downtimeMs).toEqual(expect.any(Number));
+    expect(childProcess.spawn).toHaveBeenCalledWith(
+      "openclaw",
+      ["gateway", "--force"],
+      expect.objectContaining({ env: expect.any(Object) }),
     );
   });
 
@@ -364,8 +515,15 @@ describe("server/gateway restart behavior", () => {
     );
 
     await gateway.startGateway();
+    spawnMock.mockImplementation((file, args) => {
+      if (args?.[0] === "gateway" && args?.[1] === "--force") {
+        queueMicrotask(() => {
+          gatewayPortOpen = true;
+        });
+      }
+      return child;
+    });
     const restartPromise = gateway.restartGateway(vi.fn());
-    gatewayPortOpen = true;
     await restartPromise;
 
     const exitRegistration = child.on.mock.calls.find((call) => call[0] === "exit");
@@ -1357,7 +1515,7 @@ describe("server/gateway restart behavior", () => {
   });
 
   describe("gateway process lifecycle", () => {
-    it("streams managed gateway output, signals launch, and reports exits", () => {
+    it("streams managed gateway output, signals launch, and reports exits", async () => {
       const child = createChild();
       childProcess.spawn = vi.fn(() => child);
       childProcess.execSync = vi.fn(() => "{}");
@@ -1376,9 +1534,9 @@ describe("server/gateway restart behavior", () => {
       });
       gateway.setGatewayExitHandler(exitHandler);
 
-      const first = gateway.launchGatewayProcess();
+      const first = await gateway.launchGatewayProcess();
       expect(first).toBe(child);
-      expect(gateway.launchGatewayProcess()).toBe(child);
+      expect(await gateway.launchGatewayProcess()).toBe(child);
       expect(childProcess.spawn).toHaveBeenCalledTimes(1);
 
       const onStdout = child.stdout.on.mock.calls.find((c) => c[0] === "data")[1];
@@ -1453,19 +1611,19 @@ describe("server/gateway restart behavior", () => {
 
     it("logs execSync output and failures for short gateway commands", async () => {
       const behaviors = [
-        () => "gateway stopped\n",
-        () => {
+        (cb) => cb(null, "gateway stopped\n", ""),
+        (cb) => {
           const error = new Error("exec failed");
           error.stdout = "some stdout";
           error.stderr = "some stderr";
-          error.status = 7;
-          throw error;
+          error.code = 7;
+          cb(error, "some stdout", "some stderr");
         },
-        () => {
-          throw new Error("plain failure");
-        },
+        (cb) => cb(new Error("plain failure"), "", ""),
       ];
-      childProcess.execSync = vi.fn(() => behaviors.shift()());
+      childProcess.execFile = vi.fn((file, args, opts, cb) =>
+        behaviors.shift()(cb),
+      );
       delete require.cache[modulePath];
       const gateway = require(modulePath);
       const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
@@ -1487,8 +1645,8 @@ describe("server/gateway restart behavior", () => {
       );
     });
 
-    it("attaches signal handlers that stop the gateway and exit", () => {
-      childProcess.execSync = vi.fn(() => "");
+    it("attaches signal handlers that stop the gateway and exit", async () => {
+      childProcess.execFile = execFileOk("");
       delete require.cache[modulePath];
       const gateway = require(modulePath);
       const onSpy = vi.spyOn(process, "on").mockImplementation(() => process);
@@ -1498,29 +1656,82 @@ describe("server/gateway restart behavior", () => {
 
       const sigterm = onSpy.mock.calls.find((c) => c[0] === "SIGTERM")[1];
       const sigint = onSpy.mock.calls.find((c) => c[0] === "SIGINT")[1];
-      sigterm();
-      sigint();
+      // Handlers stop the gateway asynchronously before exiting.
+      await sigterm();
+      await sigint();
 
       expect(exitSpy).toHaveBeenCalledTimes(2);
       expect(exitSpy).toHaveBeenCalledWith(0);
-      expect(childProcess.execSync).toHaveBeenCalledWith(
-        "openclaw gateway stop",
+      expect(childProcess.execFile).toHaveBeenCalledWith(
+        "openclaw",
+        ["gateway", "stop"],
         expect.objectContaining({ encoding: "utf8" }),
+        expect.any(Function),
       );
       onSpy.mockRestore();
       exitSpy.mockRestore();
     });
 
+    it("stopGatewayForShutdown reaps the child and best-effort stops external gateways", async () => {
+      // The lifecycle orchestrator awaits this during graceful shutdown
+      // (instead of the plain SIGTERM/SIGINT handlers).
+      childProcess.exec = vi.fn((cmd, opts, cb) => {
+        cb(null, "", "");
+        return {};
+      });
+      delete require.cache[modulePath];
+      const gateway = require(modulePath);
+
+      await gateway.stopGatewayForShutdown();
+
+      expect(childProcess.exec).toHaveBeenCalledWith(
+        "openclaw gateway stop",
+        expect.objectContaining({ encoding: "utf8", timeout: 5000 }),
+        expect.any(Function),
+      );
+    });
+
+    it("escalates to SIGKILL when the gateway child ignores SIGTERM", async () => {
+      // Node sets child.killed=true the moment a signal is SENT — the
+      // escalation must not be gated on it, or a SIGTERM-ignoring gateway
+      // survives every shutdown holding the port.
+      const signals = [];
+      const child = createChild();
+      child.kill = vi.fn((sig) => {
+        signals.push(sig);
+        child.killed = true;
+        // Signal deaths set signalCode and leave exitCode null (real Node
+        // semantics — modeling exitCode here is exactly the mock error that
+        // hid the reap-wait bug from the unit suite).
+        if (sig === "SIGKILL") child.signalCode = "SIGKILL";
+        return true;
+      });
+      childProcess.spawn = vi.fn(() => child);
+      childProcess.execFile = execFileOk("");
+      fs.existsSync = vi.fn(() => false);
+      net.createConnection = vi.fn(() => createSocket(false));
+      delete require.cache[modulePath];
+      const gateway = require(modulePath);
+
+      await gateway.launchGatewayProcess();
+      const reaped = await gateway.stopGatewayChildAndWait({ graceMs: 50 });
+
+      expect(signals).toEqual(["SIGTERM", "SIGKILL"]);
+      expect(reaped).toBe(true);
+    });
+
     it("uses lifecycle restart for light restarts while the gateway is up", async () => {
-      const execSyncMock = vi
-        .fn()
-        .mockReturnValueOnce("restarted ok\n")
-        .mockImplementationOnce(() => {
+      const behaviors = [
+        (cb) => cb(null, "restarted ok\n", ""),
+        (cb) => {
           const error = new Error("restart failed");
-          error.stderr = "restart failed hard";
-          throw error;
-        });
-      childProcess.execSync = execSyncMock;
+          cb(error, "", "restart failed hard");
+        },
+      ];
+      const execFileMock = vi.fn((file, args, opts, cb) =>
+        behaviors.shift()(cb),
+      );
+      childProcess.execFile = execFileMock;
       net.createConnection = vi.fn(() => createSocket(true));
       delete require.cache[modulePath];
       const gateway = require(modulePath);
@@ -1532,9 +1743,11 @@ describe("server/gateway restart behavior", () => {
       await gateway.restartGatewayLight(reloadEnv);
 
       expect(reloadEnv).toHaveBeenCalledTimes(2);
-      expect(execSyncMock).toHaveBeenCalledWith(
-        "openclaw gateway restart",
+      expect(execFileMock).toHaveBeenCalledWith(
+        "openclaw",
+        ["gateway", "restart"],
         expect.objectContaining({ timeout: 90000 }),
+        expect.any(Function),
       );
       expect(logSpy).toHaveBeenCalledWith(
         "[alphaclaw] Gateway light restart complete",
@@ -1545,7 +1758,7 @@ describe("server/gateway restart behavior", () => {
     it("launches a managed process for light restarts when nothing is running", async () => {
       const child = createChild();
       childProcess.spawn = vi.fn(() => child);
-      childProcess.execSync = vi.fn(() => "");
+      childProcess.execFile = execFileOk("");
       fs.existsSync = vi.fn(() => false);
       net.createConnection = vi.fn(() => createSocket(false));
       delete require.cache[modulePath];
@@ -1564,7 +1777,7 @@ describe("server/gateway restart behavior", () => {
       try {
         const supervisor = createChild();
         childProcess.spawn = vi.fn(() => supervisor);
-        childProcess.execSync = vi.fn(() => "");
+        childProcess.execFile = execFileOk("");
         fs.existsSync = vi.fn(() => false);
         net.createConnection = vi.fn(() => ({
           setTimeout: vi.fn(),
@@ -1579,17 +1792,241 @@ describe("server/gateway restart behavior", () => {
         const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
 
         const pending = gateway.runGatewayCmd("--force");
+        pending.catch(() => {});
         await vi.advanceTimersByTimeAsync(121000);
-        await pending;
+        // A restart that never becomes ready is now an explicit failure with
+        // evidence attached (previously a silent success).
+        await expect(pending).rejects.toMatchObject({
+          name: "GatewayRestartError",
+          evidence: expect.objectContaining({ timeoutMs: 120000 }),
+        });
 
         expect(supervisor.kill).toHaveBeenCalledWith("SIGTERM");
-        expect(childProcess.execSync).toHaveBeenCalledWith(
-          "openclaw gateway stop",
+        expect(childProcess.execFile).toHaveBeenCalledWith(
+          "openclaw",
+          ["gateway", "stop"],
           expect.anything(),
+          expect.any(Function),
         );
         expect(warnSpy).toHaveBeenCalledWith(
           expect.stringContaining("did not become ready"),
         );
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("fails a restart fast with evidence when the supervisor cannot spawn", async () => {
+      const supervisor = createChild();
+      childProcess.spawn = vi.fn(() => supervisor);
+      childProcess.execFile = execFileOk("");
+      fs.existsSync = vi.fn(() => false);
+      net.createConnection = vi.fn(() => ({
+        setTimeout: vi.fn(),
+        destroy: vi.fn(),
+        on(event, handler) {
+          if (event === "error") handler();
+          return this;
+        },
+      }));
+      delete require.cache[modulePath];
+      const gateway = require(modulePath);
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+      vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+
+      const pending = gateway.runGatewayCmd("--force");
+      pending.catch(() => {});
+      // The openclaw binary is missing/non-executable (e.g. mid-apply): spawn
+      // emits 'error'. Without a listener this is process death; with it the
+      // restart fails within the poll cadence, not the 120s budget.
+      const errorHandler = supervisor.on.mock.calls.find(
+        (call) => call[0] === "error",
+      )?.[1];
+      expect(typeof errorHandler).toBe("function");
+      errorHandler(new Error("spawn openclaw ENOENT"));
+
+      const rejection = await pending.catch((err) => err);
+      expect(rejection.name).toBe("GatewayRestartError");
+      expect(rejection.evidence.stderrTail.join("\n")).toContain(
+        "spawn openclaw ENOENT",
+      );
+    });
+
+    it("abortGatewayWaits cancels an in-flight ready wait instead of burning the 120s budget", async () => {
+      vi.useFakeTimers();
+      try {
+        const supervisor = createChild();
+        childProcess.spawn = vi.fn(() => supervisor);
+        childProcess.execFile = execFileOk("");
+        fs.existsSync = vi.fn(() => false);
+        // The port never comes up: without the abort, this wait runs 120s.
+        net.createConnection = vi.fn(() => ({
+          setTimeout: vi.fn(),
+          destroy: vi.fn(),
+          on(event, handler) {
+            if (event === "error") handler();
+            return this;
+          },
+        }));
+        delete require.cache[modulePath];
+        const gateway = require(modulePath);
+        vi.spyOn(console, "warn").mockImplementation(() => {});
+
+        const pending = gateway.runGatewayCmd("--force");
+        pending.catch(() => {});
+        // Let the wait park on its first poll interval, then shutdown flips
+        // the module-level abort flag.
+        await vi.advanceTimersByTimeAsync(600);
+        gateway.abortGatewayWaits("shutdown");
+        await vi.advanceTimersByTimeAsync(1000);
+
+        // The wait ended within one poll interval, not the 120s ready budget,
+        // and the operation failed loudly (never a silent success).
+        const rejection = await pending.catch((err) => err);
+        expect(rejection.name).toBe("GatewayRestartError");
+        expect(rejection.message).toContain("shutdown");
+        expect(rejection.evidence.aborted).toBe(true);
+        // The orphaned supervisor was reaped rather than left holding the port.
+        expect(supervisor.kill).toHaveBeenCalledWith("SIGTERM");
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("resets the stderr evidence tail per restart attempt", async () => {
+      vi.useFakeTimers();
+      try {
+        const firstSupervisor = createChild();
+        const secondSupervisor = createChild();
+        const supervisors = [firstSupervisor, secondSupervisor];
+        childProcess.spawn = vi.fn(() => supervisors.shift());
+        childProcess.execFile = execFileOk("");
+        fs.existsSync = vi.fn(() => false);
+        net.createConnection = vi.fn(() => ({
+          setTimeout: vi.fn(),
+          destroy: vi.fn(),
+          on(event, handler) {
+            if (event === "timeout") handler();
+            return this;
+          },
+        }));
+        delete require.cache[modulePath];
+        const gateway = require(modulePath);
+        vi.spyOn(console, "warn").mockImplementation(() => {});
+        vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+
+        const emitStderr = (child, text) => {
+          const handler = child.stderr.on.mock.calls.find(
+            (call) => call[0] === "data",
+          )?.[1];
+          handler?.(text);
+        };
+
+        const firstAttempt = gateway.runGatewayCmd("--force");
+        firstAttempt.catch(() => {});
+        emitStderr(firstSupervisor, "old-noise from a previous attempt\n");
+        await vi.advanceTimersByTimeAsync(121000);
+        await expect(firstAttempt).rejects.toMatchObject({
+          name: "GatewayRestartError",
+        });
+
+        const secondAttempt = gateway.runGatewayCmd("--force");
+        secondAttempt.catch(() => {});
+        emitStderr(secondSupervisor, "fresh failure line\n");
+        await vi.advanceTimersByTimeAsync(121000);
+        const rejection = await secondAttempt.catch((err) => err);
+        expect(rejection.name).toBe("GatewayRestartError");
+        const tailText = rejection.evidence.stderrTail.join("\n");
+        expect(tailText).toContain("fresh failure line");
+        // Regression: the tail used to accumulate across attempts, so a
+        // failure's evidence included stderr from previous launches.
+        expect(tailText).not.toContain("old-noise");
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("warns and still force-restarts when the old gateway never releases the port", async () => {
+      vi.useFakeTimers();
+      try {
+        const supervisor = createChild();
+        const spawnMock = vi.fn(() => supervisor);
+        childProcess.spawn = spawnMock;
+        childProcess.execFile = execFileOk("");
+        fs.existsSync = vi.fn(() => false);
+        // The port answers before AND after `stop`: a wedged old process.
+        net.createConnection = vi.fn(() => ({
+          setTimeout: vi.fn(),
+          destroy: vi.fn(),
+          on(event, handler) {
+            if (event === "connect") handler();
+            return this;
+          },
+        }));
+        delete require.cache[modulePath];
+        const gateway = require(modulePath);
+        const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+        const pending = gateway.restartGateway(vi.fn());
+        await vi.advanceTimersByTimeAsync(16000);
+        const result = await pending;
+
+        // The bounded stop-settle wait gave up loudly instead of declaring a
+        // false instant success against the old process...
+        expect(warnSpy).toHaveBeenCalledWith(
+          expect.stringContaining("still holds the port"),
+        );
+        // ...and --force still ran to replace the wedged gateway.
+        expect(spawnMock).toHaveBeenCalledWith(
+          "openclaw",
+          ["gateway", "--force"],
+          expect.objectContaining({ env: expect.any(Object) }),
+        );
+        // Downtime measurement includes the full 15s stop-settle wait.
+        expect(result.downtimeMs).toBeGreaterThanOrEqual(15000);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("joins a secret split across stderr chunk boundaries into one tail line", async () => {
+      vi.useFakeTimers();
+      try {
+        const supervisor = createChild();
+        childProcess.spawn = vi.fn(() => supervisor);
+        childProcess.execFile = execFileOk("");
+        fs.existsSync = vi.fn(() => false);
+        net.createConnection = vi.fn(() => ({
+          setTimeout: vi.fn(),
+          destroy: vi.fn(),
+          on(event, handler) {
+            if (event === "timeout") handler();
+            return this;
+          },
+        }));
+        delete require.cache[modulePath];
+        const gateway = require(modulePath);
+        vi.spyOn(console, "warn").mockImplementation(() => {});
+        vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+
+        const attempt = gateway.runGatewayCmd("--force");
+        attempt.catch(() => {});
+        const emitStderr = supervisor.stderr.on.mock.calls.find(
+          (call) => call[0] === "data",
+        )[1];
+        // A secret value split across two data events must land in the tail
+        // as ONE joined line — redaction matches whole values, and two
+        // unmatchable halves would leak it through the mask.
+        emitStderr("token super");
+        emitStderr("secret123\n");
+        await vi.advanceTimersByTimeAsync(121000);
+        const rejection = await attempt.catch((err) => err);
+
+        expect(rejection.name).toBe("GatewayRestartError");
+        expect(rejection.evidence.stderrTail).toContain("token supersecret123");
+        // Neither half appears as its own (unredactable) tail entry.
+        expect(rejection.evidence.stderrTail).not.toContain("token super");
+        expect(rejection.evidence.stderrTail).not.toContain("secret123");
       } finally {
         vi.useRealTimers();
       }
@@ -1714,11 +2151,11 @@ describe("server/gateway restart behavior", () => {
       expect(childProcess.execSync).not.toHaveBeenCalled();
     });
 
-    it("warns when plugin preflight fails for non-install-stage reasons", () => {
-      childProcess.execSync = vi.fn(() => {
+    it("warns when plugin preflight fails for non-install-stage reasons", async () => {
+      childProcess.execFile = vi.fn((file, args, opts, cb) => {
         const error = new Error("EAI_AGAIN registry.npmjs.org");
         error.stderr = "network down";
-        throw error;
+        cb(error, "", "");
       });
       fs.existsSync = vi.fn(
         (targetPath) => targetPath === `${OPENCLAW_DIR}/openclaw.json`,
@@ -1731,20 +2168,24 @@ describe("server/gateway restart behavior", () => {
       fs.readdirSync = vi.fn(() => []);
       const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
 
-      gateway.prepareOpenclawChannelPlugins();
+      await gateway.prepareOpenclawChannelPlugins();
 
-      expect(childProcess.execSync).toHaveBeenCalledTimes(1);
+      expect(childProcess.execFile).toHaveBeenCalledTimes(1);
       expect(warnSpy).toHaveBeenCalledWith(
         expect.stringContaining("OpenClaw plugin preflight failed"),
       );
     });
 
-    it("warns when the plugin preflight retry also fails", () => {
-      childProcess.execSync = vi.fn(() => {
-        throw new Error(
-          "ENOTEMPTY: directory not empty, rmdir '.openclaw-install-stage'",
-        );
-      });
+    it("warns when the plugin preflight retry also fails", async () => {
+      childProcess.execFile = vi.fn((file, args, opts, cb) =>
+        cb(
+          new Error(
+            "ENOTEMPTY: directory not empty, rmdir '.openclaw-install-stage'",
+          ),
+          "",
+          "",
+        ),
+      );
       fs.existsSync = vi.fn(
         (targetPath) => targetPath === `${OPENCLAW_DIR}/openclaw.json`,
       );
@@ -1756,9 +2197,9 @@ describe("server/gateway restart behavior", () => {
       fs.readdirSync = vi.fn(() => []);
       const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
 
-      gateway.prepareOpenclawChannelPlugins();
+      await gateway.prepareOpenclawChannelPlugins();
 
-      expect(childProcess.execSync).toHaveBeenCalledTimes(2);
+      expect(childProcess.execFile).toHaveBeenCalledTimes(2);
       expect(warnSpy).toHaveBeenCalledWith(
         expect.stringContaining("OpenClaw plugin preflight retry failed"),
       );
@@ -1768,18 +2209,17 @@ describe("server/gateway restart behavior", () => {
       fs.existsSync = vi.fn(() => true);
       delete require.cache[modulePath];
       const gateway = require(modulePath);
-      fs.readFileSync = vi
-        .fn()
-        .mockImplementationOnce(() => {
-          throw new Error("EIO");
-        })
-        .mockImplementationOnce(() =>
-          JSON.stringify({ gateway: { port: 23456 } }),
-        )
-        .mockImplementationOnce(() => JSON.stringify({ gateway: {} }));
-
+      // The parsed config is memoized keyed on the fs function identities, so
+      // each variant installs a fresh mock to observe a re-read.
+      fs.readFileSync = vi.fn(() => {
+        throw new Error("EIO");
+      });
       expect(gateway.getGatewayPort()).toBe(kDefaultGatewayPort);
+      fs.readFileSync = vi.fn(() =>
+        JSON.stringify({ gateway: { port: 23456 } }),
+      );
       expect(gateway.getGatewayPort()).toBe(23456);
+      fs.readFileSync = vi.fn(() => JSON.stringify({ gateway: {} }));
       expect(gateway.getGatewayPort()).toBe(kDefaultGatewayPort);
     });
 
@@ -1824,18 +2264,18 @@ describe("server/gateway restart behavior", () => {
       return state;
     };
 
-    it("adds a telegram channel and scrubs the token into an env placeholder", () => {
+    it("adds a telegram channel and scrubs the token into an env placeholder", async () => {
       const state = setupConfig(JSON.stringify({ channels: {} }));
-      childProcess.execSync = vi.fn(() => {
+      childProcess.execFile = vi.fn((file, args, opts, cb) => {
         state.raw = JSON.stringify({
           channels: { telegram: { enabled: true, botToken: "tg-secret" } },
         });
-        return "";
+        cb(null, "", "");
       });
       delete require.cache[modulePath];
       const gateway = require(modulePath);
 
-      gateway.syncChannelConfig(
+      await gateway.syncChannelConfig(
         [
           { key: "TELEGRAM_BOT_TOKEN", value: "tg-secret" },
           { key: "EMPTY_VALUE", value: "" },
@@ -1843,28 +2283,30 @@ describe("server/gateway restart behavior", () => {
         "add",
       );
 
-      expect(childProcess.execSync).toHaveBeenCalledWith(
-        'openclaw channels add --channel telegram --token "tg-secret"',
+      expect(childProcess.execFile).toHaveBeenCalledWith(
+        "openclaw",
+        ["channels", "add", "--channel", "telegram", "--token", "tg-secret"],
         expect.objectContaining({ timeout: 15000, encoding: "utf8" }),
+        expect.any(Function),
       );
       expect(state.raw).toContain("${TELEGRAM_BOT_TOKEN}");
       expect(state.raw).not.toContain("tg-secret");
     });
 
-    it("adds a slack channel with both tokens and scrubs them", () => {
+    it("adds a slack channel with both tokens and scrubs them", async () => {
       const state = setupConfig(JSON.stringify({ channels: {} }));
-      childProcess.execSync = vi.fn(() => {
+      childProcess.execFile = vi.fn((file, args, opts, cb) => {
         state.raw = JSON.stringify({
           channels: {
             slack: { enabled: true, botToken: "xoxb-bot", appToken: "xapp-app" },
           },
         });
-        return "";
+        cb(null, "", "");
       });
       delete require.cache[modulePath];
       const gateway = require(modulePath);
 
-      gateway.syncChannelConfig(
+      await gateway.syncChannelConfig(
         [
           { key: "SLACK_BOT_TOKEN", value: "xoxb-bot" },
           { key: "SLACK_APP_TOKEN", value: "xapp-app" },
@@ -1872,9 +2314,20 @@ describe("server/gateway restart behavior", () => {
         "all",
       );
 
-      expect(childProcess.execSync).toHaveBeenCalledWith(
-        'openclaw channels add --channel slack --bot-token "xoxb-bot" --app-token "xapp-app"',
+      expect(childProcess.execFile).toHaveBeenCalledWith(
+        "openclaw",
+        [
+          "channels",
+          "add",
+          "--channel",
+          "slack",
+          "--bot-token",
+          "xoxb-bot",
+          "--app-token",
+          "xapp-app",
+        ],
         expect.objectContaining({ timeout: 15000 }),
+        expect.any(Function),
       );
       expect(state.raw).toContain("${SLACK_BOT_TOKEN}");
       expect(state.raw).toContain("${SLACK_APP_TOKEN}");
@@ -1882,29 +2335,95 @@ describe("server/gateway restart behavior", () => {
       expect(state.raw).not.toContain("xapp-app");
     });
 
-    it("skips slack when the app token is missing", () => {
+    it("skips slack when the app token is missing", async () => {
       setupConfig(JSON.stringify({ channels: {} }));
-      childProcess.execSync = vi.fn(() => "");
+      childProcess.execFile = execFileOk("");
       delete require.cache[modulePath];
       const gateway = require(modulePath);
 
-      gateway.syncChannelConfig([{ key: "SLACK_BOT_TOKEN", value: "xoxb-bot" }], "add");
+      await gateway.syncChannelConfig(
+        [{ key: "SLACK_BOT_TOKEN", value: "xoxb-bot" }],
+        "add",
+      );
 
-      expect(childProcess.execSync).not.toHaveBeenCalled();
+      expect(childProcess.execFile).not.toHaveBeenCalled();
     });
 
-    it("logs channel add failures", () => {
+    it("scrubs secret argv values from a failing channels add error message before logging", async () => {
       setupConfig(JSON.stringify({ channels: {} }));
-      childProcess.execSync = vi.fn(() => {
-        const error = new Error("add failed");
-        error.stderr = "invalid token";
-        throw error;
+      // execFile failures embed the full argv in error.message — exactly the
+      // shape Node produces for a non-zero exit.
+      childProcess.execFile = vi.fn((file, args, opts, cb) => {
+        cb(
+          new Error(
+            "Command failed: openclaw channels add --channel slack --bot-token xoxb-SECRET --app-token xapp-SECRET",
+          ),
+          "",
+          "",
+        );
       });
       delete require.cache[modulePath];
       const gateway = require(modulePath);
       const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
-      gateway.syncChannelConfig(
+      await gateway.syncChannelConfig(
+        [
+          { key: "SLACK_BOT_TOKEN", value: "xoxb-SECRET" },
+          { key: "SLACK_APP_TOKEN", value: "xapp-SECRET" },
+        ],
+        "add",
+      );
+
+      const logged = errorSpy.mock.calls
+        .map((call) => String(call[0]))
+        .find((line) => line.includes("channels add slack"));
+      // The values following --bot-token/--app-token were redacted before the
+      // message could reach process.log (served by /api/watchdog/logs).
+      expect(logged).toContain("[redacted]");
+      expect(logged).not.toContain("xoxb-SECRET");
+      expect(logged).not.toContain("xapp-SECRET");
+    });
+
+    it("scrubs token values echoed on stderr before logging channel add failures", async () => {
+      setupConfig(JSON.stringify({ channels: {} }));
+      childProcess.execFile = vi.fn((file, args, opts, cb) => {
+        cb(
+          new Error("add failed"),
+          "",
+          "invalid token tg-secret-value rejected by API",
+        );
+      });
+      delete require.cache[modulePath];
+      const gateway = require(modulePath);
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+      await gateway.syncChannelConfig(
+        [{ key: "TELEGRAM_BOT_TOKEN", value: "tg-secret-value" }],
+        "add",
+      );
+
+      expect(errorSpy).toHaveBeenCalledWith(
+        expect.stringContaining(
+          "channels add telegram: invalid token [redacted] rejected by API",
+        ),
+      );
+      const allLogged = errorSpy.mock.calls
+        .map((call) => String(call[0]))
+        .join("\n");
+      expect(allLogged).not.toContain("tg-secret-value");
+    });
+
+    it("logs channel add failures", async () => {
+      setupConfig(JSON.stringify({ channels: {} }));
+      childProcess.execFile = execFileFail({
+        message: "add failed",
+        stderr: "invalid token",
+      });
+      delete require.cache[modulePath];
+      const gateway = require(modulePath);
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+      await gateway.syncChannelConfig(
         [{ key: "TELEGRAM_BOT_TOKEN", value: "tg-secret" }],
         "add",
       );
@@ -1914,30 +2433,30 @@ describe("server/gateway restart behavior", () => {
       );
     });
 
-    it("removes channels whose tokens were cleared", () => {
+    it("removes channels whose tokens were cleared", async () => {
       setupConfig(JSON.stringify({ channels: { telegram: { enabled: true } } }));
-      childProcess.execSync = vi.fn(() => "");
+      childProcess.execFile = execFileOk("");
       delete require.cache[modulePath];
       const gateway = require(modulePath);
 
-      gateway.syncChannelConfig([], "remove");
+      await gateway.syncChannelConfig([], "remove");
 
-      expect(childProcess.execSync).toHaveBeenCalledWith(
-        "openclaw channels remove --channel telegram --delete",
+      expect(childProcess.execFile).toHaveBeenCalledWith(
+        "openclaw",
+        ["channels", "remove", "--channel", "telegram", "--delete"],
         expect.objectContaining({ timeout: 15000 }),
+        expect.any(Function),
       );
     });
 
-    it("logs channel remove failures", () => {
+    it("logs channel remove failures", async () => {
       setupConfig(JSON.stringify({ channels: { telegram: { enabled: true } } }));
-      childProcess.execSync = vi.fn(() => {
-        throw new Error("remove failed");
-      });
+      childProcess.execFile = execFileFail({ message: "remove failed" });
       delete require.cache[modulePath];
       const gateway = require(modulePath);
       const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
-      gateway.syncChannelConfig([], "all");
+      await gateway.syncChannelConfig([], "all");
 
       expect(errorSpy).toHaveBeenCalledWith(
         expect.stringContaining("channels remove telegram: remove failed"),
