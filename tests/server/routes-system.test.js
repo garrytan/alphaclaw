@@ -750,6 +750,20 @@ describe("server/routes/system", () => {
       expect.stringContaining('*/15 * * * * root bash "/tmp/openclaw/.alphaclaw/hourly-git-sync.sh"'),
       expect.objectContaining({ mode: 0o644 }),
     );
+    // Issue #25: runtime rewrites must carry the same env lines the
+    // onboarding writer emits — the previous drift stripped them on every
+    // PUT, leaving cron to resolve a phantom ~/.alphaclaw install and a
+    // divergent ~/.openclaw state db.
+    expect(deps.fs.writeFileSync).toHaveBeenCalledWith(
+      "/etc/cron.d/openclaw-hourly-sync",
+      expect.stringContaining("OPENCLAW_STATE_DIR=/tmp/openclaw"),
+      expect.objectContaining({ mode: 0o644 }),
+    );
+    expect(deps.fs.writeFileSync).toHaveBeenCalledWith(
+      "/etc/cron.d/openclaw-hourly-sync",
+      expect.stringContaining("ALPHACLAW_ROOT_DIR="),
+      expect.objectContaining({ mode: 0o644 }),
+    );
     expect(res.body.ok).toBe(true);
   });
 

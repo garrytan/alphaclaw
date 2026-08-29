@@ -30,6 +30,7 @@ const {
   resolveRealGitPath,
   shouldRefreshHourlyGitSyncScript,
 } = require("../lib/cli/git-runtime");
+const { buildSystemCronFile } = require("../lib/cli/system-cron");
 const {
   ensureMainUpstream,
   restoreMissingOpenclawConfigFromRemote,
@@ -266,6 +267,34 @@ try {
   console.log(`[alphaclaw] Symlink skipped: ${e.message}`);
 }
 
+// Divergence warning (issue #25): a REAL ~/.openclaw directory with its own
+// state db means some openclaw invocation ran without OPENCLAW_STATE_DIR and
+// built a second, divergent state database (the incident box had a 1.1MB
+// stray next to the real 392MB one — and `openclaw status` read the stray,
+// reporting a healthy gateway as "No channels configured"). The symlink above
+// is skipped whenever the path exists, so this warning is the only signal.
+try {
+  if (path.resolve(homeOpenclawLink) !== path.resolve(openclawDir)) {
+    const linkStat = fs.lstatSync(homeOpenclawLink);
+    if (
+      linkStat.isDirectory() &&
+      !linkStat.isSymbolicLink() &&
+      fs.existsSync(path.join(homeOpenclawLink, "state", "openclaw.sqlite"))
+    ) {
+      console.warn(
+        [
+          `[alphaclaw] WARNING: ${homeOpenclawLink} is a real directory with its own state database,`,
+          `[alphaclaw]          separate from the managed state dir ${openclawDir}.`,
+          "[alphaclaw]          Something ran `openclaw` without OPENCLAW_STATE_DIR (operator shell, cron)",
+          "[alphaclaw]          and built a second, divergent state db — commands reading it will show",
+          "[alphaclaw]          empty channels/sessions while the real gateway runs. Move it aside, e.g.:",
+          `[alphaclaw]          mv ${homeOpenclawLink} ${homeOpenclawLink}.stray`,
+        ].join("\n"),
+      );
+    }
+  }
+} catch {}
+
 // ---------------------------------------------------------------------------
 // 4. Ensure <rootDir>/.env exists (seed from template if missing)
 // ---------------------------------------------------------------------------
@@ -300,6 +329,23 @@ if (fs.existsSync(envFilePath)) {
   }
   console.log("[alphaclaw] Loaded .env");
 }
+
+// ---------------------------------------------------------------------------
+// 5b. Export the OpenClaw state-resolution env for EVERY verb (issue #25)
+// ---------------------------------------------------------------------------
+// Every CLI verb (git-sync, admin, telegram …) — not just `start` — can shell
+// `openclaw` or spawn children that do. Without these vars openclaw resolves
+// state to ~/.openclaw, and on >= 2026.9.1-beta.1 a wrong-dir invocation
+// CREATES and migrates a whole divergent state database. Placed after the
+// .env load so the managed values always win over a hand-edited .env, and
+// before the first verb dispatch. Deliberately only the three OPENCLAW_*
+// vars: exporting HOME/XDG_CONFIG_HOME here would reroute npm (~/.npmrc in
+// the pending-update install above), git config/SSH for git-sync, and the
+// ~/.openclaw symlink logic — the `start` path below keeps its full
+// five-var block for the server + its children.
+process.env.OPENCLAW_HOME = rootDir;
+process.env.OPENCLAW_STATE_DIR = openclawDir;
+process.env.OPENCLAW_CONFIG_PATH = path.join(openclawDir, "openclaw.json");
 
 const runGitSync = () => {
   const githubToken = String(process.env.GITHUB_TOKEN || "").trim();
@@ -1058,14 +1104,20 @@ if (fs.existsSync(hourlyGitSyncPath)) {
         "[alphaclaw] System cron setup skipped by ALPHACLAW_SKIP_SYSTEM_CRON_INSTALL",
       );
     } else if (cronEnabled) {
-      const cronContent = [
-        "SHELL=/bin/bash",
-        "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-        `${cronSchedule} root bash "${hourlyGitSyncPath}" >> /var/log/openclaw-hourly-sync.log 2>&1`,
-        "",
-      ].join("\n");
-      fs.writeFileSync(cronFilePath, cronContent, { mode: 0o644 });
-      console.log("[alphaclaw] System cron entry installed");
+      // Shared builder (issue #25): this boot-time reconcile used to rewrite
+      // the file WITHOUT the env lines on every start, destroying the correct
+      // onboarding-written copy — cron then ran against a phantom
+      // ~/.alphaclaw install.
+      const cronContent = buildSystemCronFile({
+        schedule: cronSchedule,
+        scriptPath: hourlyGitSyncPath,
+        rootDir,
+        openclawDir,
+      });
+      if (cronContent) {
+        fs.writeFileSync(cronFilePath, cronContent, { mode: 0o644 });
+        console.log("[alphaclaw] System cron entry installed");
+      }
     } else {
       try {
         fs.unlinkSync(cronFilePath);
@@ -1074,6 +1126,82 @@ if (fs.existsSync(hourlyGitSyncPath)) {
     }
   } catch (e) {
     console.log(`[alphaclaw] Cron setup skipped: ${e.message}`);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 8b. Operator-shell openclaw env: /usr/local/bin wrapper + profile.d (issue #25)
+// ---------------------------------------------------------------------------
+// `docker exec <c> openclaw status` runs with HOME=/root and none of the
+// OPENCLAW_* vars — on >= 2026.9.1-beta.1 that CREATES a divergent state db
+// in /root/.openclaw and reports a healthy gateway as "No channels
+// configured" (the exact incident misdirection). The wrapper catches every
+// shell (docker exec included, via PATH); profile.d only covers login shells
+// and is the secondary layer. Best-effort and never silent: the outcome is
+// logged either way. Values are single-quoted with escaping — rootDir is
+// operator-controlled. Never overwrites a file alphaclaw did not author.
+const kManagedSnippetMarker = "# alphaclaw-managed openclaw environment";
+const shQuote = (value) => `'${String(value).replace(/'/g, `'\\''`)}'`;
+if (String(process.env.ALPHACLAW_SKIP_PROFILE_ENV || "") === "1") {
+  console.log(
+    "[alphaclaw] Operator-shell openclaw env skipped by ALPHACLAW_SKIP_PROFILE_ENV",
+  );
+} else {
+  const wrapperPath = "/usr/local/bin/openclaw";
+  const { kOpenclawBinShimDir } = require("../lib/server/constants");
+  const managedShimPath = path.join(kOpenclawBinShimDir, "openclaw");
+  const wrapperContent = [
+    "#!/bin/sh",
+    `${kManagedSnippetMarker} (wrapper) — regenerated at boot, do not edit.`,
+    `export ALPHACLAW_ROOT_DIR=${shQuote(rootDir)}`,
+    `export OPENCLAW_HOME=${shQuote(rootDir)}`,
+    `export OPENCLAW_STATE_DIR=${shQuote(openclawDir)}`,
+    `export OPENCLAW_CONFIG_PATH=${shQuote(path.join(openclawDir, "openclaw.json"))}`,
+    // Prefer the release-channel shim (the version alphaclaw manages); fall
+    // back to the next real openclaw on PATH, skipping this wrapper itself.
+    `if [ -x ${shQuote(managedShimPath)} ]; then exec ${shQuote(managedShimPath)} "$@"; fi`,
+    `_real="$(command -v -a openclaw 2>/dev/null | grep -v '^${wrapperPath}$' | head -n 1)"`,
+    'if [ -n "$_real" ]; then exec "$_real" "$@"; fi',
+    `echo "openclaw: no managed openclaw found (expected ${managedShimPath})" >&2`,
+    "exit 127",
+    "",
+  ].join("\n");
+  try {
+    const existing = fs.existsSync(wrapperPath)
+      ? fs.readFileSync(wrapperPath, "utf8")
+      : null;
+    if (existing !== null && !existing.includes(kManagedSnippetMarker)) {
+      console.log(
+        `[alphaclaw] openclaw wrapper NOT installed: ${wrapperPath} exists and is not alphaclaw-managed`,
+      );
+    } else if (existing !== wrapperContent) {
+      fs.writeFileSync(wrapperPath, wrapperContent, { mode: 0o755 });
+      console.log(`[alphaclaw] openclaw wrapper installed at ${wrapperPath}`);
+    }
+  } catch (e) {
+    console.log(
+      `[alphaclaw] openclaw wrapper NOT installed (${e.message}) — operator shells resolve openclaw without the managed state dir`,
+    );
+  }
+  const profileSnippetPath = "/etc/profile.d/alphaclaw-openclaw.sh";
+  const profileContent = [
+    `${kManagedSnippetMarker} — regenerated at boot, do not edit.`,
+    `export ALPHACLAW_ROOT_DIR=${shQuote(rootDir)}`,
+    `export OPENCLAW_HOME=${shQuote(rootDir)}`,
+    `export OPENCLAW_STATE_DIR=${shQuote(openclawDir)}`,
+    `export OPENCLAW_CONFIG_PATH=${shQuote(path.join(openclawDir, "openclaw.json"))}`,
+    "",
+  ].join("\n");
+  try {
+    const existing = fs.existsSync(profileSnippetPath)
+      ? fs.readFileSync(profileSnippetPath, "utf8")
+      : null;
+    if (existing !== profileContent) {
+      fs.writeFileSync(profileSnippetPath, profileContent, { mode: 0o644 });
+      console.log(`[alphaclaw] login-shell env snippet installed at ${profileSnippetPath}`);
+    }
+  } catch (e) {
+    console.log(`[alphaclaw] login-shell env snippet NOT installed (${e.message})`);
   }
 }
 

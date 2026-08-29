@@ -66,6 +66,59 @@ describe("bin/alphaclaw port check", () => {
     expect(output).not.toContain("Node.js 22.22.2 is not supported");
   });
 
+  it("exports the OpenClaw state env for non-start verbs and leaves HOME alone", () => {
+    // Issue #25: every CLI verb (git-sync, admin, telegram ...) can shell
+    // `openclaw` or spawn children that do; without OPENCLAW_STATE_DIR those
+    // resolve ~/.openclaw and, on >= 2026.9.1-beta.1, build a divergent
+    // second state database. `start` already exported the vars (test below);
+    // this guards the verb path. HOME must stay untouched for verbs: hoisting
+    // it would reroute git config/SSH for git-sync and npm for updates.
+    const capturePath = path.join(tmpDir, "captured-verb-env.json");
+    const preloadPath = path.join(tmpDir, "capture-verb-env.js");
+    fs.writeFileSync(
+      preloadPath,
+      `
+Object.defineProperty(process.versions, "node", { value: "22.22.3" });
+const fs = require("fs");
+process.on("exit", () => {
+  fs.writeFileSync(process.env.ALPHACLAW_CAPTURE_ENV_PATH, JSON.stringify({
+    OPENCLAW_HOME: process.env.OPENCLAW_HOME,
+    OPENCLAW_STATE_DIR: process.env.OPENCLAW_STATE_DIR,
+    OPENCLAW_CONFIG_PATH: process.env.OPENCLAW_CONFIG_PATH,
+    HOME: process.env.HOME,
+    XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME,
+  }));
+});
+`,
+    );
+
+    try {
+      execSync(`node --require="${preloadPath}" "${binPath}" git-sync`, {
+        stdio: "pipe",
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          ALPHACLAW_ROOT_DIR: tmpDir,
+          ALPHACLAW_CAPTURE_ENV_PATH: capturePath,
+          HOME: tmpHome,
+          XDG_CONFIG_HOME: "",
+        },
+      });
+    } catch {
+      // git-sync exits 1 (missing --message) AFTER the env hoist — expected.
+    }
+
+    const reported = JSON.parse(fs.readFileSync(capturePath, "utf8"));
+    expect(reported.OPENCLAW_HOME).toBe(tmpDir);
+    expect(reported.OPENCLAW_STATE_DIR).toBe(path.join(tmpDir, ".openclaw"));
+    expect(reported.OPENCLAW_CONFIG_PATH).toBe(
+      path.join(tmpDir, ".openclaw", "openclaw.json"),
+    );
+    // Verb paths never touch HOME/XDG_CONFIG_HOME (start does — separately).
+    expect(reported.HOME).toBe(tmpHome);
+    expect(reported.XDG_CONFIG_HOME || "").toBe("");
+  });
+
   it("exits with error if PORT env var is 18789", () => {
     let output = "";
     let status = 0;
