@@ -7,7 +7,70 @@ Versions follow this repository's `package.json` release counter.
 
 ## [Unreleased]
 
-## [0.9.35] - 2026-08-27
+Best-of-breed toggles, status, and errors across the entire Setup UI: a
+22-agent audit confirmed 119 instances (~112 unique sites) of one defect
+class — pessimistic toggles that visually snap back, silent or toast-only
+failures, stale responses clobbering user actions, fetch-hostage cards, and
+loading/error/empty states conflated — and every instance is fixed on shared
+primitives.
+
+### Added
+- **`useSavedSetting`** (`lib/public/js/hooks/use-saved-setting.js`): the one
+  persisted-setting loop — optimistic apply with loud inline revert,
+  generation-guarded hydration (an in-flight GET can never clobber a user
+  action, even landing after the save), synchronous save lock, entity `key`
+  scoping with render-gated resets, load-failure state with Retry (a failed
+  GET never presents the default as fact), reconcile-on-ambiguous-failure
+  (a rejected fetch doesn't prove the PUT failed — the UI converges to server
+  truth), canonical response adoption via `selectSaved`, cache seeding via
+  `cacheKey` (instant remounts, no background revalidation of user-mutable
+  state), functional commits, and a `{ ok, error, value }` outcome contract.
+- **`SavedToggle`**, **`InlineErrorChip`**, **`AsyncSection`** shared
+  components: house labels ("Saving...", "Loading...") with `aria-busy`,
+  persistent inline error chips (`role=status aria-live=polite`) for anything
+  that reverts, and standard loading / error(+Retry) / empty region states.
+- AGENTS.md "Persisted settings and mutation feedback" conventions section.
+- Browser smoke coverage for the founding bug: the Overseer toggle must flip
+  instantly, never snap back, and persist across reload
+  (`tests/browser/upgrade-ui-smoke.sh`).
+
+### Fixed
+- **Overseer toggle** (the founding bug): flips instantly with a "Saving..."
+  state and reverts loudly inline on failure; stale settings responses can no
+  longer overwrite the operator's choice; the card renders immediately instead
+  of waiting for the availability probe, which is now warmed at server boot
+  (`upgrade-overseer.start()`), and the dead `runs` fallback that refetched
+  settings on every runs refresh is gone.
+- **`api-cache.js` force/in-flight bug** (hit channels, gmail watch, envars,
+  nodes): a forced post-mutation refresh could be satisfied by — or
+  overwritten by — a request dispatched before the mutation. Reads and writes
+  are now generation-guarded; a superseded request can neither be deduped
+  onto nor overwrite newer cache state, and `invalidateCache` makes in-flight
+  requests unusable for dedupe.
+- **`useCachedFetch`**: inline-lambda fetchers no longer re-trigger the mount
+  fetch every render (fetcher held in a ref), and hook-local state is
+  latest-request-wins so an older refresh resolving late cannot overwrite
+  newer data.
+- **Upgrade page**: a failed apply no longer leaves the entire page dead —
+  the failed progress card has a Dismiss affordance that re-enables all
+  controls; channel/catalog loads are latest-request-wins (a just-cleared
+  blocklist entry can no longer flash back); a failed "Check now" shows an
+  inline warning instead of silently keeping stale data; mark-good/rollback/
+  blocklist failures render persistent inline chips instead of transient
+  toasts; the channel card renders immediately with the picker visible
+  (cache-backed remounts) instead of a page-blanking loading shell; channel
+  saves refresh the shared /api/status so the sidebar footer updates
+  immediately.
+- **All remaining audited sites** across watchdog, agents, cron, google,
+  general, team, channels, telegram-workspace, providers, models, envars,
+  nodes, webhooks, file-viewer, onboarding, usage, doctor, pairings, and the
+  sidebar git panel: persisted toggles/selects are optimistic with inline
+  reverts, per-row actions show per-row pending states, list panes distinguish
+  loading from failed from empty, fetch errors never masquerade as confident
+  defaults, background refreshes never overwrite unsaved drafts, and
+  mutations invalidate the caches their consumers read. Disabled toggles and
+  subtle/neutral/warning buttons now look disabled (`cursor: not-allowed`,
+  reduced opacity). The unreferenced legacy `components/models.js` is deleted.
 
 Adopt the OpenClaw 2026.8.1 beta line and rebuild the upgrade experience:
 a narrated, durable, admin-notified update lifecycle, an optional AI

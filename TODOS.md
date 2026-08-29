@@ -1,5 +1,17 @@
 # TODOS
 
+## P3 — Multi-operator / multi-tab settings freshness
+- **What:** Push-refresh (SSE settings events) or ETag/If-Match concurrency for persisted settings so a second operator/tab sees changes without a remount.
+- **Why:** The toggle/status/error overhaul's generation guards fix single-client races only; concurrent editors remain last-write-wins with no live refresh of settings cards.
+- **Context:** `useSavedSetting` (lib/public/js/hooks/use-saved-setting.js) is the single write path — a settings SSE channel could feed its `retryLoad()`/cache seam. Surfaced by the plan's CEO review + outside voice.
+- **Effort:** M. **Depends on:** deciding a settings-events transport (piggyback /api/events/status vs a new stream).
+
+## P3 — Cron run-history: cap-aware pagination merge + bounded optimistic converge
+- **What:** (a) The runs poll skips replacing entries while paginated past page 1; with >200 entries loaded (server clamps limit to kMaxRunsLimit=200, lib/server/cron-service.js), every snapshot is truncated and live updates stay frozen until a job/filter switch — make the merge cap-aware (offset paging or merge-first-200). (b) The job-enable toggle's hold-until-confirm converge can pin the optimistic value if an external actor flips the job back between our commit and the confirming poll — add a timeout or generation-stamped converge.
+- **Why:** Both are narrow edges of the accepted optimistic/merge design, flagged by the slice verifier; neither is user-visible in normal operation.
+- **Context:** lib/public/js/components/cron-tab/use-cron-tab.js (truncated-snapshot guard ~line 213, converge effect ~line 244).
+- **Effort:** S.
+
 ## P3 — Verify sendChatAction deleted-topic semantics; optional opt-in liveness probe
 - **What:** On wintermute, call `sendChatAction` with a `message_thread_id` of a deleted forum topic and record whether Telegram returns a distinct thread-not-found error (reports exist of `ok: true` regardless). If it errors distinctly, consider an opt-in, low-frequency background probe for topics that never receive sends (default off — probes show "bot is typing…" to group members).
 - **Why:** Lazy stale-marking (shipped) only fires on real send failures; never-posted-to topics stay unverified.
