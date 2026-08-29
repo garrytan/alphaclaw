@@ -41,7 +41,8 @@ incident and tells you whether anything still needs your attention.
   records, and doctor output are sent to the Anthropic API; the review runs
   with secrets redacted from both the prompt and the model's output, in an
   isolated environment with tools disabled (and is skipped entirely if that
-  restriction can't be verified).
+  restriction can't be verified or the secret-redaction sources can't be
+  read).
 - **Status detail rows**: last probe time and failure reason, degraded
   duration, crash count against the crash-loop window, repair attempts,
   gateway PID, and last-exit details — all from data the server already had.
@@ -66,7 +67,8 @@ incident and tells you whether anything still needs your attention.
 - Skipped health probes during grace/restart windows can no longer close an
   incident early; planned restarts never open one.
 - Incident review requests return honest statuses (404 unknown incident,
-  429 rate-limited) with human-readable messages.
+  429 rate-limited, 503 reviewer infrastructure unavailable) with
+  human-readable messages.
 
 ## [0.9.40] - 2026-08-29
 
