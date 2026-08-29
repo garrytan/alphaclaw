@@ -193,6 +193,29 @@ describe("server/gateway restart behavior", () => {
     expect(gateway.gatewayEnv().OPENCLAW_NO_AUTO_UPDATE).toBe("1");
   });
 
+  it("excludes both Claude Code launcher keys from the gateway child env", () => {
+    const prevToken = process.env.CLAUDE_CODE_ROUTINE_TOKEN;
+    const prevUrl = process.env.CLAUDE_CODE_ROUTINE_URL;
+    process.env.CLAUDE_CODE_ROUTINE_TOKEN = "sk-ant-oat01-test-value";
+    process.env.CLAUDE_CODE_ROUTINE_URL = "trig_test";
+    try {
+      delete require.cache[modulePath];
+      const gateway = require(modulePath);
+
+      // The launcher config starts autonomous, billable Claude Code runs on
+      // the operator's claude.ai account; the gateway/agent must never inherit
+      // the token OR the routine URL it points at.
+      const env = gateway.gatewayEnv();
+      expect(env).not.toHaveProperty("CLAUDE_CODE_ROUTINE_TOKEN");
+      expect(env).not.toHaveProperty("CLAUDE_CODE_ROUTINE_URL");
+    } finally {
+      if (prevToken === undefined) delete process.env.CLAUDE_CODE_ROUTINE_TOKEN;
+      else process.env.CLAUDE_CODE_ROUTINE_TOKEN = prevToken;
+      if (prevUrl === undefined) delete process.env.CLAUDE_CODE_ROUTINE_URL;
+      else process.env.CLAUDE_CODE_ROUTINE_URL = prevUrl;
+    }
+  });
+
   it("defaults OPENCLAW_SUPERVISOR_MODE=external and honors the off|none escape hatch", () => {
     const previousMode = process.env.OPENCLAW_SUPERVISOR_MODE;
     const previousPolicy = process.env.OPENCLAW_SERVICE_REPAIR_POLICY;
