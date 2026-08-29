@@ -43,6 +43,14 @@ bucketed days at the *server's* midnight, and the Doctor tab served a frozen
 - **Conventions guard test** that fails the build if new `toLocale*` or
   `Intl.DateTimeFormat` calls appear outside `format.js`, so the
   normalization can't silently erode.
+- **Browser-level E2E** (`npm run test:ui:time`,
+  `tests/browser/time-format-smoke.sh`): boots a real isolated server and
+  asserts in headless Chromium — against expectations the browser itself
+  computes with the same Intl presets, so the test is locale/timezone
+  agnostic — that the gateway card matches the API instant, console lines
+  carry local `±HH:MM` prefixes with the zone caption and the
+  "Copy diagnostics (UTC)" label, and incident timelines show seconds with
+  dual-register tooltips.
 
 ### Changed
 - All ~75 timestamp render sites (gateway, watchdog, upgrade, cron, usage,
