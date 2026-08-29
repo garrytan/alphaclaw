@@ -157,7 +157,7 @@ alphaclaw admin GET /api/openclaw/runs --json
 echo '{"autoRepair":true}' | alphaclaw admin PUT /api/alphaclaw/config/watchdog --data-stdin --summary
 
 # dangerous: one-time confirm code, delivered to your admin channel
-alphaclaw admin DELETE /api/agents/legacy-bot --confirm 481920
+alphaclaw admin DELETE /api/agents/legacy-bot --confirm ABCD-EFGH
 ```
 
 **Honest framing (same convention as team mode).** This is not a security boundary against the agent. The agent already holds these credentials through its gateway environment. Agent Administration exists to keep secrets out of chat transcripts, attribute actions for audit, enable revocation, and add tiered guardrails and structured errors.

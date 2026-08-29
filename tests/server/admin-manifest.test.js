@@ -140,3 +140,124 @@ describe("admin-manifest route coverage", () => {
     ).toEqual([]);
   });
 });
+
+// The env.update resolver (A1) is the headline security surface: only CLEARING
+// an existing agent-editable secret escalates PUT /api/env to dangerous. Its
+// classification calls readEnvFile() from lib/server/env, which reads
+// ENV_FILE_PATH via the shared fs module — so we drive it by spying on
+// fs.readFileSync (vitest's module mocker does not intercept CJS require).
+describe("admin-manifest env.update body-aware tierResolver (A1)", () => {
+  const { ENV_FILE_PATH } = require("../../lib/server/constants");
+
+  // Point readEnvFile at a synthetic .env by intercepting the ONE fs.readFileSync
+  // call it makes for ENV_FILE_PATH; every other read passes through untouched.
+  const mockEnvFile = (entries) => {
+    const content = entries.map(({ key, value }) => `${key}=${value}`).join("\n");
+    const realReadFileSync = fs.readFileSync.bind(fs);
+    vi.spyOn(fs, "readFileSync").mockImplementation((target, ...rest) => {
+      if (target === ENV_FILE_PATH) return content;
+      return realReadFileSync(target, ...rest);
+    });
+  };
+
+  const resolveEnvUpdate = (body) => {
+    const op = manifest.findOp("PUT", "/api/env");
+    return manifest.resolveTier(op, { body });
+  };
+
+  it("escalates to dangerous when the payload OMITS an existing agent-editable secret", () => {
+    mockEnvFile([{ key: "ANTHROPIC_API_KEY", value: "x" }]);
+    expect(resolveEnvUpdate({ vars: [] })).toBe("dangerous");
+  });
+
+  it("escalates to dangerous when the payload BLANKS an existing agent-editable secret", () => {
+    mockEnvFile([{ key: "ANTHROPIC_API_KEY", value: "x" }]);
+    expect(
+      resolveEnvUpdate({ vars: [{ key: "ANTHROPIC_API_KEY", value: "" }] }),
+    ).toBe("dangerous");
+  });
+
+  it("stays restart when the payload KEEPS/rotates the secret (one-shot write, no confirm)", () => {
+    mockEnvFile([{ key: "ANTHROPIC_API_KEY", value: "x" }]);
+    expect(
+      resolveEnvUpdate({ vars: [{ key: "ANTHROPIC_API_KEY", value: "y" }] }),
+    ).toBe("restart");
+  });
+
+  // B3 regression: managed/reserved/hidden keys are preserved (or rejected)
+  // server-side regardless of the payload, so omitting one is NOT an agent
+  // clear and must NOT escalate — otherwise any deployment holding a channel
+  // token in .env would push every agent env write to dangerous.
+  it("does NOT escalate when a MANAGED channel token is omitted (B3)", () => {
+    mockEnvFile([{ key: "TELEGRAM_BOT_TOKEN", value: "t" }]);
+    expect(resolveEnvUpdate({ vars: [] })).toBe("restart");
+  });
+
+  it("does NOT escalate when a RESERVED system key is omitted (B3)", () => {
+    mockEnvFile([{ key: "SETUP_PASSWORD", value: "p" }]);
+    expect(resolveEnvUpdate({ vars: [] })).toBe("restart");
+  });
+
+  it("does NOT escalate when a HIDDEN known var is omitted (B3)", () => {
+    // kHiddenKnownVarKeys is non-empty (ANTHROPIC_TOKEN, visibleInEnvars:false).
+    const { kHiddenKnownVarKeys } = require("../../lib/server/utils/env-keys");
+    expect(kHiddenKnownVarKeys.has("ANTHROPIC_TOKEN")).toBe(true);
+    mockEnvFile([{ key: "ANTHROPIC_TOKEN", value: "tok" }]);
+    expect(resolveEnvUpdate({ vars: [] })).toBe("restart");
+  });
+
+  it("stays restart when the env file cannot be read (readEnvFile swallows → [])", () => {
+    // readEnvFile catches read failures and returns [], so an unreadable .env
+    // yields no known secrets to clear: tier stays at the base restart, never
+    // hard-blocking an agent write on an I/O blip.
+    const realReadFileSync = fs.readFileSync.bind(fs);
+    vi.spyOn(fs, "readFileSync").mockImplementation((target, ...rest) => {
+      if (target === ENV_FILE_PATH) throw new Error("unreadable env file");
+      return realReadFileSync(target, ...rest);
+    });
+    expect(resolveEnvUpdate({ vars: [] })).toBe("restart");
+  });
+});
+
+// A21 read-leak guard: browse content reads return raw bytes, so secret-bearing
+// paths resolve to denied for the agent actor. Exercised through the shared
+// browse read tierResolver.
+describe("admin-manifest browse read tierResolver (A21 secret-path guard)", () => {
+  const resolveBrowseRead = (queryPath) => {
+    const op = manifest.findOp("GET", "/api/browse/read");
+    return manifest.resolveTier(op, { query: { path: queryPath } });
+  };
+
+  it("allows ordinary workspace files", () => {
+    expect(resolveBrowseRead("notes.md")).toBe("safe");
+    expect(resolveBrowseRead("docs/readme.md")).toBe("safe");
+  });
+
+  it("denies the agent-admin token file", () => {
+    expect(resolveBrowseRead(".alphaclaw/agent-admin-token")).toBe("denied");
+  });
+
+  it("denies OAuth credential stores", () => {
+    expect(resolveBrowseRead("gogcli/credentials/x.json")).toBe("denied");
+  });
+
+  it("denies agent auth-profile stores", () => {
+    expect(resolveBrowseRead("agents/main/agent/auth-profiles.json")).toBe(
+      "denied",
+    );
+  });
+
+  // B1: the browse handler runs path.resolve() and confines to root, so ".."
+  // traversal reaches the real secret file. The resolver must collapse segments
+  // BEFORE matching — a raw prefix check on the query string would leak.
+  it("collapses .. traversal into a secret path and denies it (B1)", () => {
+    expect(resolveBrowseRead("skills/../.alphaclaw/agent-admin-token")).toBe(
+      "denied",
+    );
+    expect(resolveBrowseRead("x/../gogcli/credentials/y")).toBe("denied");
+  });
+
+  it("normalizes leading ./ and duplicate slashes before matching (B1)", () => {
+    expect(resolveBrowseRead(".//.alphaclaw/agent-admin-token")).toBe("denied");
+  });
+});

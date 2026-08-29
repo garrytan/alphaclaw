@@ -164,4 +164,87 @@ describe("cli/admin runAdminCommand", () => {
     expect(code).toBe(0);
     expect(stdoutJson().source).toBe("fallback");
   });
+
+  it("reads the request body from stdin with --data-stdin", async () => {
+    writeToken(rootDir);
+    const stub = await useStub(jsonHandler(200, { ok: true }));
+    const bodyJson = JSON.stringify({ vars: [{ key: "FOO", value: "bar" }] });
+    // Only fd 0 is redirected; the token-store's own file reads pass through.
+    const realReadFileSync = fs.readFileSync.bind(fs);
+    vi.spyOn(fs, "readFileSync").mockImplementation((target, ...rest) => {
+      if (target === 0) return bodyJson;
+      return realReadFileSync(target, ...rest);
+    });
+
+    const code = await runAdminCommand({
+      argv: ["PUT", "/api/env", "--data-stdin"],
+      rootDir,
+    });
+
+    expect(code).toBe(0);
+    expect(stub.received).toHaveLength(1);
+    expect(stub.received[0].body).toBe(bodyJson);
+  });
+
+  it("emits exactly one JSON line on stdout with --json", async () => {
+    writeToken(rootDir);
+    await useStub(jsonHandler(200, { ok: true, gateway: "running" }));
+
+    const code = await runAdminCommand({
+      argv: ["GET", "/api/status", "--json"],
+      rootDir,
+    });
+
+    expect(code).toBe(0);
+    const out = stdout();
+    expect(out.endsWith("\n")).toBe(true);
+    const lines = out.split("\n").filter((line) => line.length > 0);
+    expect(lines).toHaveLength(1);
+    expect(JSON.parse(lines[0])).toMatchObject({ ok: true, gateway: "running" });
+  });
+
+  it("prints a raw non-JSON 2xx body and exits 0 (A28)", async () => {
+    writeToken(rootDir);
+    await useStub((_req, res) => {
+      res.writeHead(200, { "Content-Type": "text/plain" });
+      res.end("pong");
+    });
+
+    const code = await runAdminCommand({ argv: ["GET", "/api/status"], rootDir });
+    expect(code).toBe(0);
+    expect(stdout().trim()).toBe("pong");
+  });
+
+  it("prefers --port over the inherited PORT env var (B8)", async () => {
+    writeToken(rootDir);
+    const stub = await startStub(jsonHandler(200, { ok: true }));
+    servers.push(stub.server);
+    // PORT points at a CLOSED port; --port must win and reach the live stub.
+    const closed = await startStub(() => {});
+    const closedPort = closed.port;
+    await closeServer(closed.server);
+    process.env.PORT = String(closedPort);
+
+    const code = await runAdminCommand({
+      argv: ["GET", "/api/status", "--port", String(stub.port)],
+      rootDir,
+    });
+
+    expect(code).toBe(0);
+    expect(stub.received).toHaveLength(1);
+  });
+
+  it("never leaks a __port pseudo-header to the server", async () => {
+    writeToken(rootDir);
+    const stub = await useStub(jsonHandler(200, { ok: true }));
+
+    await runAdminCommand({ argv: ["GET", "/api/status"], rootDir });
+
+    expect(stub.received).toHaveLength(1);
+    // Port travels in the http.request options now, never as a forged header.
+    expect(stub.received[0].headers).not.toHaveProperty("__port");
+    expect(
+      Object.keys(stub.received[0].headers).some((name) => name === "__port"),
+    ).toBe(false);
+  });
 });
