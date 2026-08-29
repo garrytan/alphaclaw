@@ -918,6 +918,80 @@ describe("server/doctor-service", () => {
     expect(missingItem.snippet).toBeUndefined();
   });
 
+  it("contains evidence snippets to the workspace and redacts secret-shaped values", async () => {
+    const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-snippet-guard-"));
+    const dbRoot = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-snippet-guard-db-"));
+    const outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-snippet-outside-"));
+    fs.writeFileSync(path.join(outsideDir, "secret.md"), "outside contents\n", "utf8");
+    fs.writeFileSync(
+      path.join(workspaceRoot, "AGENTS.md"),
+      "safe line\ntoken=doctor-snippet-secret-value\n",
+      "utf8",
+    );
+    // The service's sanitizer collects secret-shaped env values at creation.
+    process.env.DOCTOR_SNIPPET_TEST_TOKEN = "doctor-snippet-secret-value";
+    try {
+      const doctorDb = loadManagedDoctorDb();
+      doctorDb.initDoctorDb({ rootDir: dbRoot });
+
+      const { createDoctorService } = loadDoctorService();
+      const doctorService = createDoctorService({
+        clawCmd: vi.fn(),
+        listDoctorRuns: doctorDb.listDoctorRuns,
+        listDoctorCards: doctorDb.listDoctorCards,
+        getInitialWorkspaceBaseline: doctorDb.getInitialWorkspaceBaseline,
+        setInitialWorkspaceBaseline: doctorDb.setInitialWorkspaceBaseline,
+        createDoctorRun: doctorDb.createDoctorRun,
+        completeDoctorRun: doctorDb.completeDoctorRun,
+        insertDoctorCards: doctorDb.insertDoctorCards,
+        getDoctorRun: doctorDb.getDoctorRun,
+        getDoctorCardsByRunId: doctorDb.getDoctorCardsByRunId,
+        getDoctorCard: doctorDb.getDoctorCard,
+        updateDoctorCardStatus: doctorDb.updateDoctorCardStatus,
+        workspaceRoot,
+        managedRoot: workspaceRoot,
+        computeSnapshotAsync: fastComputeSnapshotAsync,
+      });
+
+      const traversalPath = path.relative(workspaceRoot, path.join(outsideDir, "secret.md"));
+      const imported = await doctorService.importDoctorResult({
+        rawOutput: JSON.stringify({
+          summary: "Snippet guard",
+          cards: [
+            {
+              priority: "P1",
+              category: "workspace",
+              title: "Snippet guard",
+              summary: "Snippet guard",
+              recommendation: "r",
+              evidence: [
+                { type: "path", path: traversalPath, startLine: 1, endLine: 2 },
+                { type: "path", path: path.join(outsideDir, "secret.md"), startLine: 1 },
+                { type: "path", path: "AGENTS.md", startLine: 1, endLine: 2 },
+              ],
+              targetPaths: ["AGENTS.md"],
+              fixPrompt: "Fix safely.",
+              status: "open",
+            },
+          ],
+        }),
+      });
+
+      const [card] = doctorDb.getDoctorCardsByRunId(imported.runId);
+      const [traversalItem, absoluteItem, insideItem] = card.evidence;
+
+      // Traversal ("../…") and absolute paths never read outside the root.
+      expect(traversalItem.snippet).toBeUndefined();
+      expect(absoluteItem.snippet).toBeUndefined();
+      // In-root snippets are captured but secret values are redacted.
+      expect(insideItem.snippet.text).toContain("safe line");
+      expect(insideItem.snippet.text).toContain("[redacted]");
+      expect(insideItem.snippet.text).not.toContain("doctor-snippet-secret-value");
+    } finally {
+      delete process.env.DOCTOR_SNIPPET_TEST_TOKEN;
+    }
+  });
+
   it("marks the run failed when the gateway command reports an error", async () => {
     const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-gwfail-workspace-"));
     const dbRoot = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-gwfail-db-"));
@@ -2004,15 +2078,22 @@ describe("server/doctor-service", () => {
       runsByIdCards = new Map(),
       summaries = [],
       llmCards = [],
+      clawCmd = null,
+      getReadiness = null,
+      computeSnapshot = undefined,
+      computeSnapshotAsync = fastComputeSnapshotAsync,
+      listDismissedSourceKeys = null,
     } = {}) => {
       const { createDoctorService } = loadDoctorService();
       const created = [];
       const runs = new Map();
       const service = createDoctorService({
-        clawCmd: vi.fn(async () => ({
-          ok: true,
-          stdout: JSON.stringify({ summary: "done", cards: llmCards }),
-        })),
+        clawCmd:
+          clawCmd ||
+          vi.fn(async () => ({
+            ok: true,
+            stdout: JSON.stringify({ summary: "done", cards: llmCards }),
+          })),
         listDoctorRuns: () => summaries,
         listDoctorCards: () => [],
         createDoctorRun: (run) => {
@@ -2036,8 +2117,9 @@ describe("server/doctor-service", () => {
         setInitialWorkspaceBaseline: () => null,
         workspaceRoot,
         managedRoot: workspaceRoot,
-        computeSnapshotAsync: fastComputeSnapshotAsync,
-        getGatewayReadiness: () => readiness,
+        ...(computeSnapshot ? { computeSnapshot } : {}),
+        computeSnapshotAsync,
+        getGatewayReadiness: () => (getReadiness ? getReadiness() : readiness),
         notify,
         runDoctorLintJson,
         readAutoRunEnabled,
@@ -2046,6 +2128,7 @@ describe("server/doctor-service", () => {
         setDoctorMeta: ({ key, value }) => {
           meta.set(key, value);
         },
+        listDismissedSourceKeys,
       });
       return { service, created, runsByIdCards, meta };
     };
@@ -2108,7 +2191,7 @@ describe("server/doctor-service", () => {
       });
       await expect(
         service.requestCardFix({ cardId: 5, sessionKey: "agent:main:main" }),
-      ).rejects.toMatchObject({ gatewayUnavailable: true });
+      ).rejects.toMatchObject({ gatewayUnavailable: true, reason: "safe mode" });
     });
 
     it("completes the run when the bridge fails but merges bridge cards when it works", async () => {
@@ -2277,23 +2360,37 @@ describe("server/doctor-service", () => {
         const notify = vi.fn(() => Promise.resolve({ ok: true }));
         const meta = new Map();
         let autoRunEnabled = false;
+        // A stale completed baseline run: needsInitialRun is false, so the
+        // fresh-install trigger stays out of this guard-reason matrix.
+        const staleIso = new Date(Date.now() - 8 * 24 * 60 * 60 * 1000).toISOString();
         const { service } = makeService({
           notify,
           meta,
           readAutoRunEnabled: () => autoRunEnabled,
           autoRunTickMs: 1000,
+          summaries: [
+            {
+              id: 1,
+              status: "completed",
+              engine: "gateway_agent",
+              workspaceFingerprint: "stale-baseline",
+              promptVersion: "doctor-v2",
+              contextProfile: "stable-2026.7",
+              openclawVersion: "",
+              completedAt: staleIso,
+              startedAt: staleIso,
+            },
+          ],
         });
         // Disabled → skip.
         await vi.advanceTimersByTimeAsync(1100 + 60000);
         expect(service.buildStatus().autoRun.lastSkipReason).toBe("disabled");
 
-        // Enabled but nothing stale/changed → not-stale (no completed run yet
-        // means needsInitialRun; stale=true with no baseline → meaningful
-        // changes false → "no-meaningful-change").
+        // Enabled but nothing changed → stale run with no readable baseline
+        // manifest → meaningful changes false → "no-meaningful-change".
         autoRunEnabled = true;
         await vi.advanceTimersByTimeAsync(1100 + 60000);
-        const reason = service.buildStatus().autoRun.lastSkipReason;
-        expect(["no-meaningful-change", "not-stale"]).toContain(reason);
+        expect(service.buildStatus().autoRun.lastSkipReason).toBe("no-meaningful-change");
 
         // Environment signature change → triggers a run.
         meta.set("last_env_signature", "different-signature");
@@ -2350,6 +2447,291 @@ describe("server/doctor-service", () => {
       } finally {
         vi.useRealTimers();
       }
+    });
+
+    it("skips the tick as busy while a manual run is in flight, without touching the throttle", async () => {
+      vi.useFakeTimers();
+      try {
+        const meta = new Map();
+        let releaseLlm;
+        const hangingClawCmd = vi.fn(
+          () =>
+            new Promise((resolve) => {
+              releaseLlm = () =>
+                resolve({
+                  ok: true,
+                  stdout: JSON.stringify({ summary: "done", cards: [] }),
+                });
+            }),
+        );
+        const { service } = makeService({
+          readAutoRunEnabled: () => true,
+          autoRunTickMs: 1000,
+          meta,
+          clawCmd: hangingClawCmd,
+        });
+        meta.set("last_env_signature", "different-signature");
+        // Manual run dispatches synchronously (busy latch set before any await).
+        const manualRun = service.runDoctor();
+        await vi.advanceTimersByTimeAsync(1100 + 60000);
+        expect(service.buildStatus().autoRun.lastSkipReason).toBe("busy");
+        // The busy skip never arms the throttle or the failure backoff.
+        expect(meta.get("last_auto_run")).toBeUndefined();
+        releaseLlm();
+        await manualRun;
+        await vi.runOnlyPendingTimersAsync();
+        service.dispose();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("restores the throttle marker when the gateway flips between pre-check and dispatch", async () => {
+      vi.useFakeTimers();
+      try {
+        const meta = new Map();
+        const staleMarker = {
+          at: new Date(Date.now() - 8 * 60 * 60 * 1000).toISOString(),
+          outcome: "ran",
+          envSignature: "old-signature",
+        };
+        meta.set("last_auto_run", staleMarker);
+        meta.set("last_env_signature", "different-signature");
+        let flipArmed = true;
+        const { service } = makeService({
+          readAutoRunEnabled: () => true,
+          autoRunTickMs: 1000,
+          meta,
+          // Degraded ONLY once the tick has committed to dispatch (it writes
+          // the "started" marker immediately before calling runDoctor): the
+          // tick's own pre-check and status build both see a ready gateway,
+          // and runDoctor's internal readiness check sees the flip.
+          getReadiness: () => {
+            if (flipArmed && meta.get("last_auto_run")?.outcome === "started") {
+              return { ok: false, reason: "flipped mid-dispatch" };
+            }
+            return { ok: true, reason: "" };
+          },
+        });
+        await vi.advanceTimersByTimeAsync(1100 + 60000);
+        await vi.runOnlyPendingTimersAsync();
+        // Benign non-dispatch: nothing auto-ran, so the previous marker is
+        // restored verbatim — the throttle slot is not burned and the failure
+        // backoff is not armed.
+        expect(service.buildStatus().autoRun.lastSkipReason).toBe("gateway-degraded");
+        expect(meta.get("last_auto_run")).toEqual(staleMarker);
+        // With the flip gone, the very next tick dispatches for real.
+        flipArmed = false;
+        await vi.advanceTimersByTimeAsync(1100 + 60000);
+        await vi.runOnlyPendingTimersAsync();
+        expect(meta.get("last_auto_run")?.outcome).toBe("ran");
+        service.dispose();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("dispatches the first scheduled run on a fresh install with healthy hardening", async () => {
+      vi.useFakeTimers();
+      try {
+        // No completed runs, no stored env signature, healthy hardening: only
+        // the needsInitialRun trigger can fire — and it must.
+        const meta = new Map();
+        const { service, created } = makeService({
+          readAutoRunEnabled: () => true,
+          autoRunTickMs: 1000,
+          meta,
+        });
+        await vi.advanceTimersByTimeAsync(1100 + 60000);
+        await vi.runOnlyPendingTimersAsync();
+        expect(meta.get("last_auto_run")?.outcome).toBe("ran");
+        expect(created).toHaveLength(1);
+        service.dispose();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("refreshes the workspace snapshot on the worker before a scheduled run, never synchronously", async () => {
+      vi.useFakeTimers();
+      try {
+        const meta = new Map();
+        // Any sync walk from the tick path fails the test loudly.
+        const computeSnapshotSpy = vi.fn(() => {
+          throw new Error("sync snapshot compute called from the auto-run tick");
+        });
+        const computeSnapshotAsyncSpy = vi.fn(fastComputeSnapshotAsync);
+        const { service } = makeService({
+          readAutoRunEnabled: () => true,
+          autoRunTickMs: 1000,
+          meta,
+          computeSnapshot: computeSnapshotSpy,
+          computeSnapshotAsync: computeSnapshotAsyncSpy,
+        });
+        await vi.advanceTimersByTimeAsync(1100 + 60000);
+        await vi.runOnlyPendingTimersAsync();
+        expect(meta.get("last_auto_run")?.outcome).toBe("ran");
+        expect(computeSnapshotAsyncSpy).toHaveBeenCalled();
+        expect(computeSnapshotSpy).not.toHaveBeenCalled();
+        service.dispose();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    describe("hardening trigger for scheduled scans", () => {
+      const { computeWorkspaceSnapshot } = require("../../lib/server/doctor/workspace-fingerprint");
+
+      const seedHardeningBreakage = (kind) => {
+        if (kind === "blocked") {
+          // Merged hardening file on disk with no config entry → "blocked".
+          fs.mkdirSync(path.join(workspaceRoot, "hooks", "bootstrap"), { recursive: true });
+          fs.writeFileSync(
+            path.join(workspaceRoot, "hooks", "bootstrap", "AGENTS.md"),
+            "# Hardening\n",
+            "utf8",
+          );
+        } else {
+          // AGENTS.md over the per-file cap → active truncation.
+          fs.writeFileSync(path.join(workspaceRoot, "AGENTS.md"), repeatText(20001), "utf8");
+        }
+      };
+
+      // Latest completed run matches the CURRENT fingerprint: zero workspace
+      // delta, not stale, needsInitialRun false — only hardeningNew can fire.
+      const makeMatchingSummary = () => {
+        const nowIso = new Date().toISOString();
+        return {
+          id: 1,
+          status: "completed",
+          engine: "gateway_agent",
+          workspaceFingerprint: computeWorkspaceSnapshot(workspaceRoot).fingerprint,
+          promptVersion: "doctor-v2",
+          contextProfile: "stable-2026.7",
+          openclawVersion: "",
+          completedAt: nowIso,
+          startedAt: nowIso,
+        };
+      };
+
+      it.each(["blocked", "truncation"])(
+        "triggers a run when hardening is %s with zero workspace delta",
+        async (kind) => {
+          vi.useFakeTimers();
+          try {
+            seedHardeningBreakage(kind);
+            const meta = new Map();
+            const { service, created } = makeService({
+              readAutoRunEnabled: () => true,
+              autoRunTickMs: 1000,
+              meta,
+              summaries: [makeMatchingSummary()],
+            });
+            await vi.advanceTimersByTimeAsync(1100 + 60000);
+            await vi.runOnlyPendingTimersAsync();
+            expect(meta.get("last_auto_run")?.outcome).toBe("ran");
+            // Zero delta → the dispatched run is a fingerprint reuse.
+            expect(created[0]).toMatchObject({ engine: "deterministic_reuse" });
+            service.dispose();
+          } finally {
+            vi.useRealTimers();
+          }
+        },
+      );
+
+      it("suppresses the trigger when the latest run already reported the condition", async () => {
+        vi.useFakeTimers();
+        try {
+          seedHardeningBreakage("blocked");
+          const meta = new Map();
+          const runsByIdCards = new Map([
+            [1, [{ priority: "P0", status: "open", source: "deterministic", sourceKey: "det:hardening:blocked" }]],
+          ]);
+          const { service, created } = makeService({
+            readAutoRunEnabled: () => true,
+            autoRunTickMs: 1000,
+            meta,
+            runsByIdCards,
+            summaries: [makeMatchingSummary()],
+          });
+          await vi.advanceTimersByTimeAsync(1100 + 60000);
+          expect(service.buildStatus().autoRun.lastSkipReason).toBe("not-stale");
+          expect(meta.get("last_auto_run")).toBeUndefined();
+          expect(created).toHaveLength(0);
+          service.dispose();
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      it("suppresses the trigger when a hardening source key was dismissed", async () => {
+        vi.useFakeTimers();
+        try {
+          seedHardeningBreakage("truncation");
+          const meta = new Map();
+          const { service, created } = makeService({
+            readAutoRunEnabled: () => true,
+            autoRunTickMs: 1000,
+            meta,
+            summaries: [makeMatchingSummary()],
+            listDismissedSourceKeys: () => ["boot:total_limit"],
+          });
+          await vi.advanceTimersByTimeAsync(1100 + 60000);
+          expect(service.buildStatus().autoRun.lastSkipReason).toBe("not-stale");
+          expect(meta.get("last_auto_run")).toBeUndefined();
+          expect(created).toHaveLength(0);
+          service.dispose();
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+    });
+
+    it("never re-notifies when last_notified_run_id is at or past the new run (crash replay)", async () => {
+      const notify = vi.fn(() => Promise.resolve({ ok: true }));
+      const meta = new Map();
+      // makeService run ids start at 101; 999 simulates a replayed marker.
+      meta.set("last_notified_run_id", 999);
+      const { service } = makeService({
+        notify,
+        meta,
+        llmCards: [
+          {
+            priority: "P0",
+            category: "workspace state",
+            title: "Dangerous drift",
+            summary: "s",
+            recommendation: "r",
+            fixPrompt: "f",
+            status: "open",
+          },
+        ],
+      });
+      const result = await service.runDoctor();
+      await settle();
+      expect(result.ok).toBe(true);
+      expect(notify).not.toHaveBeenCalled();
+      expect(meta.get("last_notified_run_id")).toBe(999);
+    });
+
+    it("reads dismissed source keys once per run", async () => {
+      const listDismissedSourceKeys = vi.fn(() => []);
+      const { service } = makeService({
+        listDismissedSourceKeys,
+        // Bridge cards force the second (bridge) dismissal filter too.
+        runDoctorLintJson: async () => ({
+          ok: false,
+          code: 1,
+          truncated: false,
+          stdout: JSON.stringify({
+            ok: false,
+            findings: [{ checkId: "x/y", severity: "info", message: "m" }],
+          }),
+        }),
+      });
+      await service.runDoctor();
+      await settle();
+      expect(listDismissedSourceKeys).toHaveBeenCalledTimes(1);
     });
 
     it("survives a throwing tick and clears the interval on dispose", async () => {

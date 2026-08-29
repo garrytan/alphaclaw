@@ -144,6 +144,37 @@ describe("frontend/doctor helpers (extended)", () => {
     );
   });
 
+  it("reads counts from the slim latestRun shape (nested under counts)", () => {
+    // status.latestRun nests cardCount/priorityCounts under counts.{...}.
+    expect(
+      getDoctorRunPillDetail({
+        status: "completed",
+        counts: { cardCount: 1, priorityCounts: { P0: 0, P1: 0, P2: 1 } },
+      }),
+    ).toBe("1 finding");
+    expect(
+      getDoctorRunPillDetail({
+        status: "completed",
+        counts: { cardCount: 0, priorityCounts: { P0: 0, P1: 0, P2: 0 } },
+      }),
+    ).toBe("No findings");
+    expect(
+      buildDoctorRunMarkers({
+        status: "completed",
+        counts: { cardCount: 2, priorityCounts: { P0: 1, P1: 1, P2: 0 } },
+      }),
+    ).toEqual([
+      { tone: "danger", count: 0, label: "P0" },
+      { tone: "warning", count: 0, label: "P1" },
+    ]);
+    expect(
+      buildDoctorRunMarkers({
+        status: "completed",
+        counts: { cardCount: 0, priorityCounts: { P0: 0, P1: 0, P2: 0 } },
+      }),
+    ).toEqual([{ tone: "success", count: 0, label: "No findings" }]);
+  });
+
   it("builds run markers for failures and P2-only runs", () => {
     expect(buildDoctorRunMarkers(null)).toEqual([]);
     expect(buildDoctorRunMarkers({ status: "failed" })).toEqual([
@@ -215,6 +246,48 @@ describe("frontend/doctor helpers (extended)", () => {
     );
     // Old payloads without gatewayReadiness never treat the gateway as down.
     expect(getDoctorRunDisabledReason({ needsInitialRun: true, gatewayReadiness: undefined })).toBe("");
+  });
+
+  it("keeps the Run button enabled when the environment is degraded", () => {
+    // Hardening blocked/starved is a P0-worthy environment condition with a
+    // zero workspace delta — the run must stay enabled.
+    expect(
+      getDoctorRunDisabledReason({
+        changeSummary: { changedFilesCount: 0 },
+        bootstrapContext: { hardening: { state: "blocked" } },
+      }),
+    ).toBe("");
+    expect(
+      getDoctorRunDisabledReason({
+        changeSummary: { changedFilesCount: 0 },
+        bootstrapContext: { hardening: { state: "starved" } },
+      }),
+    ).toBe("");
+    // Active truncation also enables the run without workspace changes.
+    expect(
+      getDoctorRunDisabledReason({
+        changeSummary: { changedFilesCount: 0 },
+        bootstrapContext: { hasActiveTruncation: true },
+      }),
+    ).toBe("");
+    // A healthy environment with no changes keeps the disabled reason.
+    expect(
+      getDoctorRunDisabledReason({
+        changeSummary: { changedFilesCount: 0 },
+        bootstrapContext: {
+          hardening: { state: "injected" },
+          hasActiveTruncation: false,
+        },
+      }),
+    ).toBe("No workspace changes since the last completed Drift Doctor run.");
+    // The gateway-not-ready reason still wins over degraded-environment states.
+    expect(
+      getDoctorRunDisabledReason({
+        changeSummary: { changedFilesCount: 0 },
+        bootstrapContext: { hardening: { state: "blocked" } },
+        gatewayReadiness: { ok: false, reason: "gateway is restarting" },
+      }),
+    ).toBe("Gateway not ready: gateway is restarting");
   });
 
   it("formats the gateway-not-ready message from one source", () => {

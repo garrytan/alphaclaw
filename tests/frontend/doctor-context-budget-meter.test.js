@@ -121,6 +121,40 @@ describe("frontend/doctor context budget meter model", () => {
     expect(model.rows[1].chip.tone).toBe("warning");
   });
 
+  it("clamps the percent (used for aria-valuenow) to an integer within 0-100", () => {
+    // Rounds to a whole number.
+    const rounded = buildContextBudgetMeterModel(
+      statusWithContext({
+        activeInjectedChars: 20000,
+        files: [
+          { ...kBaseFile, path: "AGENTS.md", rawChars: 100, injectedChars: 100 },
+        ],
+      }),
+    );
+    expect(rounded.percentUsed).toBe(33);
+    // Over-budget totals clamp at 100.
+    const overBudget = buildContextBudgetMeterModel(
+      statusWithContext({
+        activeInjectedChars: 120000,
+        files: [
+          { ...kBaseFile, path: "AGENTS.md", rawChars: 100, injectedChars: 100 },
+        ],
+      }),
+    );
+    expect(overBudget.percentUsed).toBe(100);
+    // A missing budget renders 0, never NaN.
+    const noBudget = buildContextBudgetMeterModel(
+      statusWithContext({
+        bootstrapTotalMaxChars: 0,
+        activeInjectedChars: 500,
+        files: [
+          { ...kBaseFile, path: "AGENTS.md", rawChars: 100, injectedChars: 100 },
+        ],
+      }),
+    );
+    expect(noBudget.percentUsed).toBe(0);
+  });
+
   it("flags truncated, starved, and blocked files with matching bar tones", () => {
     const model = buildContextBudgetMeterModel(
       statusWithContext({

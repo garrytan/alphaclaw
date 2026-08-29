@@ -287,6 +287,79 @@ describe("server/doctor/bootstrap-context", () => {
     expect(formatChars()).toBe("0 chars");
   });
 
+  it("excludes glob-pattern extras from the budget model instead of misreading them as missing", () => {
+    write("AGENTS.md", "root guidance");
+
+    const context = analyzeBootstrapContext({
+      workspaceRoot,
+      profile: kStableProfile,
+      extraFilePaths: ["hooks/bootstrap/*.md"],
+      hooksEnabled: true,
+    });
+
+    const pattern = context.files.find(
+      (file) => file.path === "hooks/bootstrap/*.md",
+    );
+    expect(pattern.active).toBe(false);
+    expect(pattern.activeReason).toBe("pattern_unmodeled");
+    // Unmodeled, not blocked: a pattern entry must never trip the
+    // invalid-basename card or count against the budget.
+    expect(pattern.injectable).toBe(true);
+    expect(pattern.injectedChars).toBe(0);
+    expect(context.blockedExtraFiles).toEqual([]);
+  });
+
+  it("rejects extras that resolve outside the workspace without reading them", () => {
+    write("AGENTS.md", "root guidance");
+    const outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-escape-"));
+    fs.writeFileSync(path.join(outsideDir, "AGENTS.md"), "outside content", "utf8");
+    const escapingPath = path
+      .relative(workspaceRoot, path.join(outsideDir, "AGENTS.md"))
+      .split(path.sep)
+      .join("/");
+
+    const context = analyzeBootstrapContext({
+      workspaceRoot,
+      profile: kStableProfile,
+      extraFilePaths: [escapingPath],
+      hooksEnabled: true,
+    });
+
+    const escaped = context.files.find((file) => file.path === escapingPath);
+    expect(escaped.active).toBe(false);
+    expect(escaped.activeReason).toBe("escapes_workspace");
+    expect(escaped.injectable).toBe(false);
+    // The file exists on disk but is never read: exists stays false.
+    expect(escaped.exists).toBe(false);
+    expect(escaped.rawChars).toBe(0);
+
+    fs.rmSync(outsideDir, { recursive: true, force: true });
+  });
+
+  it("flags on-disk hardening with a lost config entry as blocked, not unknown", () => {
+    write("AGENTS.md", "root guidance");
+    write("hooks/bootstrap/AGENTS.md", "safety rules on disk");
+
+    // No extras configured at all — the config entry was lost, but the merged
+    // hardening file exists: the agent runs without safety rules (blocked).
+    const context = analyzeBootstrapContext({
+      workspaceRoot,
+      profile: kStableProfile,
+      extraFilePaths: [],
+      hooksEnabled: true,
+    });
+
+    expect(context.hardening.state).toBe("blocked");
+    expect(context.hardening.files).toEqual([
+      expect.objectContaining({
+        path: "hooks/bootstrap/AGENTS.md",
+        exists: true,
+        injectable: false,
+        reason: "not_configured",
+      }),
+    ]);
+  });
+
   describe("createBootstrapContextAnalyzer", () => {
     const writeConfig = (managedRoot, config) => {
       fs.writeFileSync(

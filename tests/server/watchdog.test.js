@@ -2082,6 +2082,43 @@ describe("server/watchdog", () => {
     expect(global.fetch).not.toHaveBeenCalled();
   });
 
+  it("keeps exit-78 synchronous when only one of the two signature phrases matches", () => {
+    const { watchdog } = createHarness({ autoRepair: false });
+
+    // "exiting with code 78" present, but the healthy-incumbent phrase absent
+    // — the sibling probe-timeout error uses this shape and must keep
+    // latching (both phrases are required).
+    watchdog.onGatewayExit({
+      code: 78,
+      expectedExit: false,
+      stderrTail: [
+        "Gateway failed to start: incumbent did not become healthy, exiting with code 78 to prevent a systemd Restart=always loop",
+      ],
+      launchedAt: Date.now(),
+    });
+
+    // No flush: the plain config-error path must classify synchronously.
+    expect(watchdog.getStatus().lifecycle).toBe("configuration_error");
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  it("keeps exit-78 synchronous when no launch reference exists for the startup window", () => {
+    const { watchdog } = createHarness({ autoRepair: false });
+
+    // Full signature, but launchedAt is null and no gateway launch was ever
+    // recorded: with no startup-window reference the window check fails
+    // (fail-safe toward the config-error flow) and no probe is spawned.
+    watchdog.onGatewayExit({
+      code: 78,
+      expectedExit: false,
+      stderrTail: kStepAsideStderrTail,
+      launchedAt: null,
+    });
+
+    expect(watchdog.getStatus().lifecycle).toBe("configuration_error");
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
   it("discards a stale step-aside probe superseded by a newer launch", async () => {
     let resolveFirstFetch;
     let fetchCalls = 0;

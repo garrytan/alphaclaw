@@ -202,15 +202,15 @@ describe("server/onboarding/workspace bootstrap prompt sync", () => {
         String(target).endsWith(path.join("hooks", "bootstrap", "TOOLS.md")),
       ),
     ).toBe(false);
-    // The broken workspace failed on its write; the sync moved on and the
-    // failure surfaced through onFailure (not just the console).
+    // The broken workspace's write was ATTEMPTED (the mock throws for it);
+    // the sync moved on and the failure surfaced through onFailure (not just
+    // the console).
     expect(
       mockFs.writeFileSync.mock.calls.some(
         ([target]) =>
-          target === path.join(brokenWorkspace, "hooks", "bootstrap", "AGENTS.md") &&
-          false,
+          target === path.join(brokenWorkspace, "hooks", "bootstrap", "AGENTS.md"),
       ),
-    ).toBe(false);
+    ).toBe(true);
     expect(errorSpy).toHaveBeenCalledWith(
       expect.stringContaining(
         `[onboard] Bootstrap prompt sync workspace-sync:${brokenWorkspace} failed: read-only workspace`,
@@ -399,6 +399,74 @@ describe("server/onboarding/workspace bootstrap prompt sync", () => {
     });
 
     expect(mockFs.unlinkSync).toHaveBeenCalledWith(legacyPath);
+  });
+
+  it("keeps the legacy TOOLS.md when the config reconcile fails (write→reconcile→delete)", () => {
+    stubRegistryRead(null);
+    const workspaceDir = "/tmp/alphaclaw-reconcile-fail-workspace";
+    const legacyPath = path.join(workspaceDir, "hooks", "bootstrap", "TOOLS.md");
+    // Config still references the legacy TOOLS.md path, so the reconcile
+    // needs a write — which fails.
+    const config = JSON.stringify({
+      hooks: {
+        internal: {
+          enabled: true,
+          entries: {
+            "bootstrap-extra-files": {
+              enabled: true,
+              paths: ["hooks/bootstrap/AGENTS.md", "hooks/bootstrap/TOOLS.md"],
+            },
+          },
+        },
+      },
+    });
+    const makeFs = ({ configWriteFails }) => ({
+      readFileSync: vi.fn((target) => {
+        if (target === kToolsTemplatePath) return "Setup: {{SETUP_UI_URL}}";
+        if (target === kAgentsSourcePath) return "AGENTS TEMPLATE";
+        if (target === kConfigPath) return config;
+        throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+      }),
+      existsSync: vi.fn((target) => target === legacyPath),
+      writeFileSync: vi.fn((target) => {
+        if (configWriteFails && target === kConfigPath) {
+          throw new Error("disk full");
+        }
+      }),
+      mkdirSync: vi.fn(),
+      unlinkSync: vi.fn(),
+    });
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const onFailure = vi.fn();
+
+    // Reconcile failure: the config may still reference the legacy path, so
+    // the file it points at must NOT be deleted (self-heals next boot sync).
+    const failingFs = makeFs({ configWriteFails: true });
+    syncBootstrapPromptFiles({
+      fs: failingFs,
+      workspaceDir,
+      baseUrl: "https://setup.example.com",
+      onFailure,
+    });
+    expect(onFailure).toHaveBeenCalledWith(
+      "config-reconcile",
+      expect.objectContaining({ message: "disk full" }),
+    );
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining(
+        "[onboard] Bootstrap prompt sync config-reconcile failed: disk full",
+      ),
+    );
+    expect(failingFs.unlinkSync).not.toHaveBeenCalled();
+
+    // Same config with a working write: reconcile succeeds → deletion runs.
+    const workingFs = makeFs({ configWriteFails: false });
+    syncBootstrapPromptFiles({
+      fs: workingFs,
+      workspaceDir,
+      baseUrl: "https://setup.example.com",
+    });
+    expect(workingFs.unlinkSync).toHaveBeenCalledWith(legacyPath);
   });
 
   it("warns when the merged hardening file approaches the 20k injection cap", () => {

@@ -375,6 +375,7 @@ describe("server/routes/doctor", () => {
     const doctorService = createDoctorService();
     const error = new Error("Gateway is not ready for a Doctor fix: safe mode");
     error.gatewayUnavailable = true;
+    error.reason = "safe mode";
     doctorService.requestCardFix.mockRejectedValue(error);
     const app = createApp(doctorService);
 
@@ -383,7 +384,32 @@ describe("server/routes/doctor", () => {
     });
 
     expect(res.status).toBe(503);
-    expect(res.body.error).toContain("safe mode");
+    expect(res.body).toEqual({
+      ok: false,
+      error: "Gateway is not ready for a Doctor fix: safe mode",
+      gatewayUnavailable: true,
+      reason: "safe mode",
+    });
+  });
+
+  it("keeps the fix 503 envelope shape when the error carries no reason", async () => {
+    const doctorService = createDoctorService();
+    const error = new Error("Gateway is not ready for a Doctor fix");
+    error.gatewayUnavailable = true;
+    doctorService.requestCardFix.mockRejectedValue(error);
+    const app = createApp(doctorService);
+
+    const res = await request(app).post("/api/doctor/findings/7/fix").send({
+      sessionKey: "agent:main:doctor:42",
+    });
+
+    expect(res.status).toBe(503);
+    expect(res.body).toEqual({
+      ok: false,
+      error: "Gateway is not ready for a Doctor fix",
+      gatewayUnavailable: true,
+      reason: "",
+    });
   });
 
   it("reads and updates doctor settings", async () => {
