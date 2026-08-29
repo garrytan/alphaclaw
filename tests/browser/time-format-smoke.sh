@@ -117,10 +117,12 @@ echo "  ok: Last health check renders the Intl medium/short value"
 echo "== watchdog console: local prefixes, zone caption, UTC copy label =="
 "$B" goto "http://127.0.0.1:$kPort/#/watchdog" >/dev/null
 sleep 3
-assert_page "new RegExp('^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2} [+-][0-9]{2}:[0-9]{2} ').test(((document.querySelector('pre.watchdog-logs-panel')||{}).textContent||''))" \
-  "console lines start with local YYYY-MM-DD HH:mm:ss ±HH:MM"
-assert_page "((document.querySelector('pre.watchdog-logs-panel')||{}).textContent||'x').length > 1 && !new RegExp('^[0-9]{4}-[0-9]{2}-[0-9]{2}T').test(((document.querySelector('pre.watchdog-logs-panel')||{}).textContent||''))" \
-  "no raw ISO 'T' timestamps at line starts"
+# Multiline anchors ('m' flag): a regression on lines 2..N must fail the
+# smoke, not hide behind a clean first line.
+assert_page "(((document.querySelector('pre.watchdog-logs-panel')||{}).textContent||'').match(new RegExp('^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2} [+-][0-9]{2}:[0-9]{2} ','gm'))||[]).length >= 2" \
+  "multiple console lines start with local YYYY-MM-DD HH:mm:ss ±HH:MM"
+assert_page "((document.querySelector('pre.watchdog-logs-panel')||{}).textContent||'x').length > 1 && !new RegExp('^[0-9]{4}-[0-9]{2}-[0-9]{2}T','m').test(((document.querySelector('pre.watchdog-logs-panel')||{}).textContent||''))" \
+  "no raw ISO 'T' timestamps at any line start"
 assert_page "document.body.textContent.indexOf('Line timestamps shown in ' + Intl.DateTimeFormat().resolvedOptions().timeZone) >= 0" \
   "caption names the browser's actual zone"
 assert_page "Array.from(document.querySelectorAll('button')).some(b=>b.textContent.indexOf('Copy diagnostics (UTC)')>=0)" \

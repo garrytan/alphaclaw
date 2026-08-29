@@ -29,15 +29,16 @@ describe("frontend/watchdog localizeLogTimestamps", () => {
     expect(out).not.toContain(".114");
   });
 
-  it("rewrites secondless-ms and Z-less leading stamps too", () => {
+  it("rewrites ms-less stamps but passes naive (designator-less) ones through", () => {
     const noMs = "2026-08-28T10:00:02Z";
     expect(localizeLogTimestamps(`${noMs} line`)).toBe(
       `${expectedLocalStamp(noMs)} line`,
     );
+    // A stamp with NO zone designator is ambiguous — rewriting it would
+    // assume browser-local and silently mislabel child-process output
+    // (red-team finding). It passes through like mid-line ISO strings.
     const noZone = "2026-08-28T10:00:02";
-    expect(localizeLogTimestamps(`${noZone} line`)).toBe(
-      `${expectedLocalStamp(noZone)} line`,
-    );
+    expect(localizeLogTimestamps(`${noZone} line`)).toBe(`${noZone} line`);
   });
 
   it("leaves lines without a leading stamp byte-for-byte unchanged (mid-line ISO stays UTC)", () => {
@@ -77,5 +78,21 @@ describe("frontend/watchdog localizeLogTimestamps", () => {
         "",
       ].join("\n"),
     );
+  });
+
+  it("rewrites offset-bearing stamps using their real offset (never naive-local)", () => {
+    // +02:00 stamp = 10:00:00Z — must render the browser-local time of that
+    // INSTANT, never a naive parse of the wall-clock digits.
+    const line = "2026-08-29T12:00:00+02:00 [gateway] child says hi";
+    const out = localizeLogTimestamps(line);
+    const expected = new Date("2026-08-29T12:00:00+02:00");
+    expect(out).toContain(`:${String(expected.getMinutes()).padStart(2, "0")}:`);
+    expect(out).not.toContain("+02:00 [gateway]");
+    expect(out).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} [+-]\d{2}:\d{2} \[gateway\] child says hi$/);
+  });
+
+  it("passes naive (designator-less) stamps through unchanged — ambiguous zone", () => {
+    const line = "2026-08-29T12:00:00 [tool] naive stamp from a child process";
+    expect(localizeLogTimestamps(line)).toBe(line);
   });
 });
