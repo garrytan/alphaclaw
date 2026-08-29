@@ -85,6 +85,35 @@ describe("server/agents/service", () => {
     expect(agents.find((entry) => entry.id === "ops")?.default).toBe(false);
   });
 
+  // H10: a mutation must fail closed on an existing-but-unparseable config
+  // rather than reading it as {} and writing that back (wiping everything).
+  it("refuses to wipe an unparseable openclaw.json on a write (H10)", () => {
+    const original =
+      '{ // JSON5 with a comment openclaw accepts\n  "channels": {} }';
+    const writes = [];
+    const fsMock = {
+      existsSync: () => true,
+      mkdirSync: () => {},
+      readFileSync: (targetPath) => {
+        if (String(targetPath).endsWith("openclaw.json")) return original;
+        throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+      },
+      writeFileSync: (targetPath, content) => {
+        writes.push({ targetPath: String(targetPath), content: String(content) });
+      },
+    };
+    const service = createAgentsService({
+      fs: fsMock,
+      OPENCLAW_DIR: "/tmp/openclaw",
+    });
+
+    expect(() => service.createAgent({ id: "ops", name: "Ops" })).toThrow();
+    // openclaw.json was never overwritten.
+    expect(
+      writes.some((w) => w.targetPath.endsWith("openclaw.json")),
+    ).toBe(false);
+  });
+
   it("sets a new default agent and unsets others", () => {
     const fsMock = buildFsMock({
       initialConfig: {
