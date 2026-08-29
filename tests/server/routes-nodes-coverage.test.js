@@ -736,30 +736,36 @@ describe("server/routes/nodes coverage", { retry: 1 }, () => {
       expect(res.body.error).toBe("Invalid exec host");
     });
 
-    it("returns stderr when a config command fails", async () => {
+    it("returns stderr when the config write fails", async () => {
       const clawCmd = vi.fn(async () => ({ ok: false, stderr: "cfg failed" }));
       const app = createApp({ clawCmd });
       const res = await request(app)
         .post("/api/nodes/exec-config")
-        .send({ host: "gateway", security: "deny", ask: "always" });
+        .send({ host: "gateway", security: "deny", ask: "off" });
       expect(res.status).toBe(500);
       expect(res.body).toEqual({ ok: false, error: "cfg failed" });
     });
 
-    it("falls back to command-specific error message", async () => {
+    it("falls back to a generic error message", async () => {
       const clawCmd = vi.fn(async () => ({ ok: false, stderr: "" }));
       const app = createApp({ clawCmd });
       const res = await request(app)
         .post("/api/nodes/exec-config")
-        .send({ host: "gateway", security: "deny", ask: "always" });
+        .send({ host: "gateway", security: "deny", ask: "off" });
       expect(res.status).toBe(500);
-      expect(res.body.error).toBe(
-        "Could not apply exec config (config set tools.exec.host 'gateway')",
-      );
+      expect(res.body.error).toBe("Could not apply exec config");
     });
 
-    it("clears node target when host is gateway", async () => {
-      const clawCmd = vi.fn(async () => ({ ok: true, stdout: "", stderr: "" }));
+    // The write is a read-merge-write of the whole tools.exec object in one
+    // validated `config set … --strict-json` — never per-key writes of the
+    // retired security/ask keys (the 2026.9.x beta flags those as legacy and
+    // refuses every CLI command until doctor --fix).
+    it("clears node target and converts allowlist+on-miss to mode ask", async () => {
+      const clawCmd = vi.fn(async (cmd) =>
+        cmd.startsWith("config get")
+          ? { ok: true, stdout: "{}", stderr: "" }
+          : { ok: true, stdout: "", stderr: "" },
+      );
       const app = createApp({ clawCmd });
       const res = await request(app)
         .post("/api/nodes/exec-config")
@@ -767,26 +773,122 @@ describe("server/routes/nodes coverage", { retry: 1 }, () => {
       expect(res.status).toBe(200);
       expect(res.body).toEqual({ ok: true, restartRequired: true });
       expect(clawCmd.mock.calls.map((call) => call[0])).toEqual([
-        "config set tools.exec.host 'gateway'",
-        "config set tools.exec.security 'allowlist'",
-        "config set tools.exec.ask 'on-miss'",
-        "config set tools.exec.node ''",
+        "config get tools.exec --json",
+        `config set tools.exec '{"host":"gateway","node":"","mode":"ask"}' --strict-json`,
       ]);
     });
 
-    it("sets node target when host is node", async () => {
-      const clawCmd = vi.fn(async () => ({ ok: true, stdout: "", stderr: "" }));
+    it("keeps the legacy pair for the upstream bail-out combo (full + always)", async () => {
+      const clawCmd = vi.fn(async (cmd) =>
+        cmd.startsWith("config get")
+          ? { ok: true, stdout: "{}", stderr: "" }
+          : { ok: true, stdout: "", stderr: "" },
+      );
       const app = createApp({ clawCmd });
       const res = await request(app)
         .post("/api/nodes/exec-config")
         .send({ host: "node", security: "full", ask: "always", node: "node-3" });
       expect(res.status).toBe(200);
       expect(clawCmd.mock.calls.map((call) => call[0])).toEqual([
-        "config set tools.exec.host 'node'",
-        "config set tools.exec.security 'full'",
-        "config set tools.exec.ask 'always'",
-        "config set tools.exec.node 'node-3'",
+        "config get tools.exec --json",
+        `config set tools.exec '{"host":"node","node":"node-3","security":"full","ask":"always"}' --strict-json`,
       ]);
+    });
+
+    it.each([
+      ["full", "off", "full"],
+      ["allowlist", "off", "allowlist"],
+      ["deny", "off", "deny"],
+      ["deny", "on-miss", "deny"],
+      ["allowlist", "on-miss", "ask"],
+    ])("converts %s + %s to mode %s", async (security, ask, mode) => {
+      const clawCmd = vi.fn(async (cmd) =>
+        cmd.startsWith("config get")
+          ? { ok: true, stdout: "{}", stderr: "" }
+          : { ok: true, stdout: "", stderr: "" },
+      );
+      const app = createApp({ clawCmd });
+      const res = await request(app)
+        .post("/api/nodes/exec-config")
+        .send({ host: "gateway", security, ask });
+      expect(res.status).toBe(200);
+      const setCall = clawCmd.mock.calls[1][0];
+      expect(setCall).toContain(`"mode":"${mode}"`);
+      expect(setCall).not.toContain('"security":');
+      expect(setCall).not.toContain('"ask":');
+    });
+
+    it("preserves unmanaged tools.exec keys on write and keeps writing when the read fails", async () => {
+      const clawCmd = vi.fn(async (cmd) =>
+        cmd.startsWith("config get")
+          ? {
+              ok: true,
+              stdout: JSON.stringify({
+                security: "full",
+                ask: "off",
+                timeoutSeconds: 300,
+                strictInlineEval: false,
+              }),
+              stderr: "",
+            }
+          : { ok: true, stdout: "", stderr: "" },
+      );
+      const app = createApp({ clawCmd });
+      const res = await request(app)
+        .post("/api/nodes/exec-config")
+        .send({ host: "gateway", security: "full", ask: "off" });
+      expect(res.status).toBe(200);
+      const setCall = clawCmd.mock.calls[1][0];
+      expect(setCall).toContain('"timeoutSeconds":300');
+      expect(setCall).toContain('"strictInlineEval":false');
+      expect(setCall).toContain('"mode":"full"');
+      // The retired keys never survive the merge.
+      expect(setCall).not.toContain('"security":');
+      expect(setCall).not.toContain('"ask":');
+
+      // A failed read degrades to an empty merge base — the write still runs.
+      const failingGet = vi.fn(async (cmd) =>
+        cmd.startsWith("config get")
+          ? { ok: false, stdout: "", stderr: "boom" }
+          : { ok: true, stdout: "", stderr: "" },
+      );
+      const app2 = createApp({ clawCmd: failingGet });
+      const res2 = await request(app2)
+        .post("/api/nodes/exec-config")
+        .send({ host: "gateway", security: "full", ask: "off" });
+      expect(res2.status).toBe(200);
+      expect(failingGet.mock.calls[1][0]).toContain('"mode":"full"');
+    });
+
+    it("GET derives the legacy pair from tools.exec.mode and reports the raw mode", async () => {
+      const clawCmd = vi.fn(async () => ({
+        ok: true,
+        stdout: JSON.stringify({ host: "gateway", mode: "auto", node: "" }),
+        stderr: "",
+      }));
+      const app = createApp({ clawCmd });
+      const res = await request(app).get("/api/nodes/exec-config");
+      expect(res.status).toBe(200);
+      expect(res.body.config).toEqual({
+        host: "gateway",
+        security: "full",
+        ask: "on-miss",
+        node: "",
+        mode: "auto",
+      });
+    });
+
+    it("GET lets explicit legacy keys override the mode derivation", async () => {
+      const clawCmd = vi.fn(async () => ({
+        ok: true,
+        stdout: JSON.stringify({ mode: "full", security: "deny" }),
+        stderr: "",
+      }));
+      const app = createApp({ clawCmd });
+      const res = await request(app).get("/api/nodes/exec-config");
+      expect(res.body.config.security).toBe("deny");
+      expect(res.body.config.ask).toBe("off");
+      expect(res.body.config.mode).toBe("full");
     });
   });
 
