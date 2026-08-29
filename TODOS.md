@@ -67,3 +67,52 @@
 - **What:** `openclaw node run` authenticates with `OPENCLAW_GATEWAY_TOKEN`, which trusted-proxy mode rejects; `/api/nodes/connect-info` currently returns an empty token with a logged warning while team mode is on. Provide a working node path (gateway password credential, or a pairing flow) before recommending team mode to node users.
 - **Context:** lib/server/gateway-credential.js, lib/server/routes/nodes.js; degradation documented in the team-auth milestone report.
 - **Effort:** M. **Depends on:** verifying how `openclaw node run` accepts a password credential (docs/cli in the beta line).
+
+## P3 — Extract shared overseer-core + retrofit the upgrade overseer card to live updates
+- **What:** Pull the generic ~40% shared by `lib/server/upgrade-overseer.js` and `lib/server/watchdog-overseer.js` (env isolation, availability probe w/ SWR, `--help` flag discovery, envelope/verdict parsing, start/stop) into one module; then give the upgrade overseer card the watchdog card's freshness model (verdicts riding an existing poll instead of load-once).
+- **Why:** Two deliberate copies exist today (copy-the-skeleton won the eng review over premature extraction for exactly two consumers); the trigger for extraction is a third consumer or this retrofit.
+- **Context:** The watchdog copy already hardened several shared paths (fail-closed tool flags, output redaction) that the upgrade copy lacks — the extraction should level the upgrade overseer UP to those, not average them down. See the watchdog wave plan's cross-model notes.
+- **Effort:** M (→S with CC). **Depends on:** watchdog wave shipped.
+
+## P3 — Provisional overseer reviews of stuck-open incidents
+- **What:** Behind the same `watchdog.overseer.enabled` flag: one interim review when an incident stays open past ~10 min or hits a material event (crash_loop, config_error), superseded later by the final review; ≤2 reviews/incident total.
+- **Why:** The deterministic narrator covers "right now"; an LLM read of a stuck incident ("this looks like the 2026.7.1 plugins.allow bug — fix openclaw.json") is the one live moment it could add value. Deferred from the wave: final-only first, validate incident boundaries before spending on open ones.
+- **Context:** `runReviewFor` in lib/server/watchdog-overseer.js already takes an incident id; the healthy-steady-state gate is the line to carve an exception through — carefully (mid-storm reviews were deliberately killed).
+- **Effort:** M. **Depends on:** the wave's e2e boundary gate holding in production.
+
+## P3 — Overseer model pin + cost telemetry (both overseers together)
+- **What:** Pin the claude model (config key), count reviews/tokens/duration per overseer, surface in the UI cards.
+- **Why:** Neither overseer pins a model today (whatever the installed CLI defaults to) and cost is invisible; do both at once to avoid asymmetry.
+- **Effort:** S–M. **Depends on:** nothing.
+
+## P3 — Migrate WATCHDOG_AUTO_REPAIR / WATCHDOG_NOTIFICATIONS_DISABLED from env to alphaclaw.json
+- **What:** Move the two legacy watchdog toggles into alphaclaw.json with env fallback + one-release deprecation note.
+- **Why:** New settings already live in alphaclaw.json (`watchdog.overseer.enabled`); the split store means `PUT /api/watchdog/settings` writes env while the overseer toggle writes config — two backends for one card.
+- **Context:** `updateSettings` in lib/server/watchdog.js (writeEnvFile/reloadEnv path); never write env and config simultaneously.
+- **Effort:** M. **Depends on:** nothing.
+
+## P3 — StatusHero card absorbing the shared Gateway card on the Watchdog tab
+- **What:** Merge the Gateway card + status details + narrative card into one hero for the Watchdog tab (the shared Gateway card stays for other tabs).
+- **Why:** Three stacked cards carry one mental model; a hero reads faster. Deferred from the wave because forking a shared component was extra surface for equal information.
+- **Effort:** M. **Depends on:** watchdog wave shipped.
+
+## P3 — Resource telemetry follow-ups: configurable thresholds, sparklines/history
+- **What:** Optional alphaclaw.json keys for the (currently hardcoded 80/90%) resource warn/crit display thresholds; small ring buffer + sparklines for memory/CPU/event-loop lag.
+- **Why:** Deferred as expert knobs / width-hungry UI; revisit on demand. Display-only either way.
+- **Effort:** M. **Depends on:** nothing.
+
+## P3 — Resource-based alerting/enforcement (design needed — invariant territory)
+- **What:** Any watchdog *action* on resource signals (e.g., restart on sustained event-loop starvation or OOM pressure).
+- **Why:** Today resources are report-only by design ("the deterministic watchdog is the ONLY enforcement layer" covers gateway health, not host resources). Changing that is a policy design, not a feature toggle.
+- **Effort:** L. **Depends on:** explicit design review.
+
+## P3 — Capture the incident log window at close time
+- **What:** Persist the timestamp-filtered gateway log excerpt when an incident closes (per-incident file or capped blob) instead of re-reading the tail at review time.
+- **Why:** A late overseer review (stale-pending retry) on a busy log can lose the incident window; the wave ships a widened 256KB read + an explicit "may be partial" prompt label as the honest fallback. Capture-at-close removes the limitation at the cost of per-incident storage.
+- **Context:** `filterLogWindow` + the `isLate` branch in lib/server/watchdog-overseer.js; the cross-model disagreement is recorded in the wave plan (U5 known limitation).
+- **Effort:** M. **Depends on:** nothing.
+
+## P3 — Watchdog wave minor polish (deferred by scope decision)
+- **What:** Per-event-type filter pills on the All-events tab; a spot-check "explain current status" overseer mode with no incident; any new SSE event streams for the watchdog surfaces.
+- **Why:** Each was reviewed and deferred: three tabs cover the filtering need, the deterministic narrator explains live status for free, and the 2s status SSE + 15s polls already carry everything ("new event streams are the expensive path").
+- **Effort:** S each. **Depends on:** demand.

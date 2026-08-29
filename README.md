@@ -176,12 +176,15 @@ The built-in watchdog monitors gateway health and recovers from failures automat
 
 | Capability               | Details                                                                |
 | ------------------------ | ---------------------------------------------------------------------- |
-| **Health checks**        | Periodic `openclaw health` with configurable interval                  |
+| **Health checks**        | Periodic HTTP probes of the gateway's `/health` and `/readyz` (120s cadence, 5s while degraded) |
 | **Crash detection**      | Listens for gateway exit events                                        |
 | **Crash-loop detection** | Threshold-based (default: 3 crashes in 300s)                           |
 | **Auto-repair**          | Runs `openclaw doctor --fix --yes`, relaunches gateway                 |
-| **Notifications**        | Telegram, Discord, and Slack alerts for crashes, repairs, and recovery |
-| **Event log**            | SQLite-backed incident history with API and UI access                  |
+| **Live narration**       | Plain-language "what is happening / why / what happens next" with live countdowns (backoff, grace windows, the 10-min rollback clock) and honest suppression chips |
+| **Incident history**     | Persisted, grouped incidents (open → resolved/abandoned) with humanized event timelines, plus the raw SQLite event feed |
+| **Incident overseer**    | Optional (default off): a local Claude Code review of each settled incident — advisory verdict + suggested next action; deterministic recovery stays in charge |
+| **Notifications**        | Telegram, Discord, Slack, and WhatsApp alerts for crashes, repairs, and recovery, with deep links to the exact incident |
+| **Event log**            | SQLite-backed incident + event history with API and UI access          |
 
 ## Environment Variables
 
