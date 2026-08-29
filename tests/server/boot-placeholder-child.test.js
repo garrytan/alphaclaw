@@ -1,5 +1,7 @@
 const { spawn } = require("child_process");
+const fs = require("fs");
 const http = require("http");
+const os = require("os");
 const path = require("path");
 
 const kChildPath = path.join(__dirname, "..", "..", "lib", "boot-placeholder-child.js");
@@ -46,6 +48,7 @@ describe("bin boot placeholder child process", () => {
   let child = null;
   let blocker = null;
   let orphanPid = null;
+  let fixtureDir = null;
 
   afterEach(async () => {
     if (child && child.exitCode === null) {
@@ -53,6 +56,12 @@ describe("bin boot placeholder child process", () => {
       await new Promise((resolve) => child.on("exit", resolve));
     }
     child = null;
+    if (fixtureDir) {
+      try {
+        fs.rmSync(fixtureDir, { recursive: true, force: true });
+      } catch {}
+      fixtureDir = null;
+    }
     if (blocker) {
       try {
         blocker.closeAllConnections?.();
@@ -173,6 +182,66 @@ describe("bin boot placeholder child process", () => {
     const api = await httpGet(port, { path: "/api/status" });
     expect(api.status).toBe(503);
     expect(child.exitCode).toBeNull();
+  });
+
+  it("renders live update progress from a seeded ALPHACLAW_ROOT_DIR and still exits fast on SIGTERM", async () => {
+    fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "alphaclaw-placeholder-fixture-"));
+    const alphaclawDir = path.join(fixtureDir, ".openclaw", ".alphaclaw");
+    fs.mkdirSync(path.join(alphaclawDir, "runs"), { recursive: true });
+    const opId = "0a1b2c3d-e4f5-6789-abcd-ef0123456789";
+    const nowMs = Date.now();
+    fs.writeFileSync(
+      path.join(alphaclawDir, "openclaw-channel-state.json"),
+      JSON.stringify({
+        lastUpdateRun: { operationId: opId, target: { channel: "stable", version: "2026.8.1" } },
+        backups: [{ at: nowMs - 120_000, file: "backup.tgz", verified: true }],
+        gatewayHold: null,
+      }),
+    );
+    fs.writeFileSync(
+      path.join(alphaclawDir, "runs", `${opId}.json`),
+      JSON.stringify({
+        operationId: opId,
+        target: { channel: "stable", version: "2026.8.1" },
+        state: "running",
+        startedAt: nowMs - 60_000,
+        finishedAt: null,
+        steps: [
+          { name: "backup", status: "completed", at: nowMs - 50_000 },
+          { name: "install", status: "running", at: nowMs - 30_000 },
+        ],
+      }),
+    );
+
+    const port = 21400 + Math.floor(Math.random() * 500);
+    child = spawn(process.execPath, [kChildPath], {
+      env: {
+        ...process.env,
+        ALPHACLAW_PLACEHOLDER_PORT: String(port),
+        ALPHACLAW_ROOT_DIR: fixtureDir,
+      },
+      stdio: "ignore",
+    });
+
+    await waitForServer(port);
+    const browser = await httpGet(port, { path: "/", headers: { accept: "text/html" } });
+    expect(browser.status).toBe(503);
+    expect(browser.body).toContain("Updating to OpenClaw 2026.8.1 (stable)");
+    expect(browser.body).toContain("Install dependencies");
+    expect(browser.body).toContain("Verified backup taken at");
+    expect(browser.body).toContain("Large updates can take several minutes");
+
+    // The progress reader is poll-on-request (no timers), so the SIGTERM
+    // shutdown must stay just as fast with progress rendering active.
+    const exitedAt = new Promise((resolve) => child.on("exit", () => resolve(Date.now())));
+    const killedAt = Date.now();
+    child.kill("SIGTERM");
+    const at = await Promise.race([
+      exitedAt,
+      new Promise((resolve) => setTimeout(() => resolve("timeout"), 3000)),
+    ]);
+    expect(at).not.toBe("timeout");
+    expect(at - killedAt).toBeLessThan(2000);
   });
 
   it("self-exits via the orphan check when its parent dies", async () => {
