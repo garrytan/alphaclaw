@@ -1,4 +1,9 @@
 const { createWatchdog } = require("../../lib/server/watchdog");
+const {
+  kGatewayTcpWatchIntervalMs,
+  kWatchdogConnectedHealthCadenceMs,
+  kGatewayTcpTransitionDebounceMs,
+} = require("../../lib/server/constants");
 
 const flushMicrotasks = async () =>
   new Promise((resolve) => {
@@ -12,6 +17,8 @@ const kOriginalFetch = global.fetch;
 const createHarness = ({
   autoRepair = true,
   notificationsDisabled = false,
+  gatewayLifecycleLock = null,
+  probeGatewayTcp = null,
   clawCmdImpl,
   resolveSetupUrl = () => "https://setup.example.com",
   resolveGatewayHealthUrl = () => "http://127.0.0.1:18789/health",
@@ -43,6 +50,8 @@ const createHarness = ({
   const watchdog = createWatchdog({
     clawCmd,
     launchGatewayProcess,
+    probeGatewayTcp,
+    gatewayLifecycleLock,
     insertWatchdogEvent,
     notifier,
     readEnvFile,
@@ -51,6 +60,9 @@ const createHarness = ({
     resolveSetupUrl,
     resolveGatewayHealthUrl,
     resolveGatewayReadyzUrl,
+    // Crash-restart backoff resolves instantly in tests; backoff timing has
+    // its own dedicated fake-timer coverage.
+    sleepImpl: () => Promise.resolve(),
   });
 
   return {
@@ -139,7 +151,10 @@ describe("server/watchdog", () => {
 
     await vi.advanceTimersByTimeAsync(5_000);
 
-    expect(clawCmd).not.toHaveBeenCalledWith("doctor --fix --yes", { quiet: true });
+    expect(clawCmd).not.toHaveBeenCalledWith(
+      "doctor --fix --yes",
+      expect.objectContaining({ quiet: true }),
+    );
     expect(watchdog.getStatus()).toEqual(
       expect.objectContaining({
         lifecycle: "running",
@@ -212,12 +227,99 @@ describe("server/watchdog", () => {
     });
 
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    // Real crash exits arrive on separate event-loop turns; crash 1's async
+    // relaunch must settle (releasing operationInProgress) before the later
+    // crashes, or the crash-loop repair would be skipped as "in progress".
+    await flushMicrotasks();
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    await flushMicrotasks();
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
     await flushMicrotasks();
     await flushMicrotasks();
 
-    expect(clawCmd).toHaveBeenCalledWith("doctor --fix --yes", { quiet: true });
+    expect(clawCmd).toHaveBeenCalledWith(
+      "doctor --fix --yes",
+      expect.objectContaining({ quiet: true, timeoutMs: 600000 }),
+    );
+  });
+
+  it("retries a crash-loop repair skipped by an in-flight relaunch until the operation settles", async () => {
+    vi.useFakeTimers();
+    let releaseLaunch;
+    const launchGate = new Promise((resolve) => {
+      releaseLaunch = resolve;
+    });
+    const { watchdog, clawCmd, launchGatewayProcess } = createHarness({
+      autoRepair: true,
+      clawCmdImpl: async (command) => {
+        if (command === "doctor --fix --yes") return { ok: true, stdout: "fixed" };
+        return { ok: true, stdout: "" };
+      },
+      fetchImpl: async () => {
+        throw new Error("still unhealthy");
+      },
+    });
+    try {
+      // Crash 1's relaunch parks on this gate, holding operationInProgress.
+      launchGatewayProcess.mockImplementation(() => launchGate);
+
+      watchdog.onGatewayExit({ code: 1, expectedExit: false });
+      await vi.advanceTimersByTimeAsync(0); // relaunch reaches the launch await
+      watchdog.onGatewayExit({ code: 1, expectedExit: false });
+      watchdog.onGatewayExit({ code: 1, expectedExit: false }); // crash loop
+      await vi.advanceTimersByTimeAsync(0);
+
+      // Initial crash-loop repair was skipped (operation_in_progress) and the
+      // retry cadence is running; still skipped while the relaunch is parked.
+      const doctorCalls = () =>
+        clawCmd.mock.calls.filter((call) => call[0] === "doctor --fix --yes").length;
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(doctorCalls()).toBe(0);
+
+      // Relaunch settles → operationInProgress releases → next retry repairs.
+      releaseLaunch({ pid: 4242 });
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(doctorCalls()).toBe(1);
+    } finally {
+      watchdog.stop();
+      vi.useRealTimers();
+    }
+  });
+
+  it("stops crash-loop repair retries after the bounded attempt count", async () => {
+    vi.useFakeTimers();
+    const launchGate = new Promise(() => {}); // never settles
+    const { watchdog, clawCmd, launchGatewayProcess } = createHarness({
+      autoRepair: true,
+      fetchImpl: async () => {
+        throw new Error("still unhealthy");
+      },
+    });
+    try {
+      launchGatewayProcess.mockImplementation(() => launchGate);
+
+      watchdog.onGatewayExit({ code: 1, expectedExit: false });
+      await vi.advanceTimersByTimeAsync(0);
+      watchdog.onGatewayExit({ code: 1, expectedExit: false });
+      watchdog.onGatewayExit({ code: 1, expectedExit: false });
+      await vi.advanceTimersByTimeAsync(0);
+
+      // 5 bounded retries all skip while the operation never settles; the
+      // chain must then STOP — no repair attempts fire on later ticks even
+      // though the doctor command would now be reachable.
+      const doctorCalls = () =>
+        clawCmd.mock.calls.filter((call) => call[0] === "doctor --fix --yes").length;
+      for (let i = 0; i < 7; i += 1) {
+        await vi.advanceTimersByTimeAsync(2000);
+      }
+      expect(doctorCalls()).toBe(0);
+      await vi.advanceTimersByTimeAsync(20000);
+      expect(doctorCalls()).toBe(0);
+    } finally {
+      watchdog.stop();
+      vi.useRealTimers();
+    }
   });
 
   it("clears crash-loop lifecycle after a healthy check recovery", async () => {
@@ -243,7 +345,9 @@ describe("server/watchdog", () => {
 
     watchdog.onGatewayLaunch({ startedAt: Date.now() - 60_000 });
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    await vi.advanceTimersByTimeAsync(0);
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    await vi.advanceTimersByTimeAsync(0);
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
 
     expect(watchdog.getStatus()).toEqual(
@@ -274,7 +378,7 @@ describe("server/watchdog", () => {
     );
     expect(
       notifier.notify.mock.calls.some((call) =>
-        String(call?.[0] || "").includes("🟢 Gateway healthy again"),
+        String(call?.[0] || "").includes("🟢 Gateway running again"),
       ),
     ).toBe(true);
     watchdog.stop();
@@ -287,7 +391,9 @@ describe("server/watchdog", () => {
     });
 
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    await flushMicrotasks();
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    await flushMicrotasks();
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
     await flushMicrotasks();
 
@@ -308,7 +414,10 @@ describe("server/watchdog", () => {
     watchdog.onExpectedRestart();
     await flushMicrotasks();
 
-    expect(clawCmd).not.toHaveBeenCalledWith("doctor --fix --yes", { quiet: true });
+    expect(clawCmd).not.toHaveBeenCalledWith(
+      "doctor --fix --yes",
+      expect.objectContaining({ quiet: true }),
+    );
     expect(insertWatchdogEvent).toHaveBeenCalledWith(
       expect.objectContaining({
         eventType: "health_check",
@@ -437,9 +546,13 @@ describe("server/watchdog", () => {
         if (command === "doctor --fix --yes") return { ok: true, stdout: "fixed" };
         return { ok: true, stdout: "" };
       },
+      // Probe order: crash-1 resync (#1), crash-2 resync (#2), the repair's
+      // own verify (#3) and its operation-end resync (#4) — all while the
+      // gateway is still coming up. Only the launch-triggered probe (#5)
+      // finds it healthy, which is what makes the recovery "deferred".
       fetchImpl: async () => {
         healthChecks += 1;
-        if (healthChecks === 1) {
+        if (healthChecks <= 4) {
           throw new Error("not healthy yet");
         }
         return {
@@ -451,7 +564,11 @@ describe("server/watchdog", () => {
     });
 
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    // Space crash 1 from the rest: its async relaunch must release
+    // operationInProgress before the crash loop opens, as real exits do.
+    await flushMicrotasks();
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    await flushMicrotasks();
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
     await flushMicrotasks();
     await flushMicrotasks();
@@ -462,7 +579,13 @@ describe("server/watchdog", () => {
 
     expect(
       notifier.notify.mock.calls.some((call) =>
-        String(call?.[0] || "").includes("🟢 Gateway healthy again"),
+        String(call?.[0] || "").includes("🟢 Gateway running again"),
+      ),
+    ).toBe(true);
+    // Recovery copy names the resolving action so the alert thread closes.
+    expect(
+      notifier.notify.mock.calls.some((call) =>
+        String(call?.[0] || "").includes("Recovered after automatic repair."),
       ),
     ).toBe(true);
     expect(watchdog.getStatus()).toEqual(
@@ -494,7 +617,10 @@ describe("server/watchdog", () => {
     await vi.advanceTimersByTimeAsync(10_000);
 
     expect(clawCmd).toHaveBeenCalledTimes(1);
-    expect(clawCmd).toHaveBeenCalledWith("doctor --fix --yes", { quiet: true });
+    expect(clawCmd).toHaveBeenCalledWith(
+      "doctor --fix --yes",
+      expect.objectContaining({ quiet: true, timeoutMs: 600000 }),
+    );
     expect(
       notifier.notify.mock.calls.filter((call) =>
         String(call?.[0] || "").includes("awaiting health check"),
@@ -574,7 +700,7 @@ describe("server/watchdog", () => {
     expect(launchGatewayProcess).not.toHaveBeenCalled();
     expect(
       notifier.notify.mock.calls.some((call) =>
-        String(call?.[0] || "").includes("Gateway configuration invalid"),
+        String(call?.[0] || "").includes("Gateway configuration error"),
       ),
     ).toBe(true);
   });
@@ -742,7 +868,10 @@ describe("server/watchdog", () => {
       }),
     );
     expect(launchGatewayProcess).not.toHaveBeenCalled();
-    expect(clawCmd).not.toHaveBeenCalledWith("doctor --fix --yes", { quiet: true });
+    expect(clawCmd).not.toHaveBeenCalledWith(
+      "doctor --fix --yes",
+      expect.objectContaining({ quiet: true }),
+    );
     expect(insertWatchdogEvent).toHaveBeenCalledWith(
       expect.objectContaining({
         eventType: "config_error",
@@ -754,8 +883,8 @@ describe("server/watchdog", () => {
     expect(
       notifier.notify.mock.calls.some(
         (call) =>
-          String(call?.[0] || "").includes("Gateway configuration invalid") &&
-          String(call?.[0] || "").includes("automatic restart is paused"),
+          String(call?.[0] || "").includes("Gateway configuration error") &&
+          String(call?.[0] || "").includes("automatic gateway restart is paused"),
       ),
     ).toBe(true);
   });
@@ -843,7 +972,7 @@ describe("server/watchdog", () => {
     );
     const safeModeNotices = () =>
       notifier.notify.mock.calls.filter((call) =>
-        String(call?.[0] || "").includes("safe mode"),
+        String(call?.[0] || "").includes("channels paused"),
       );
     expect(safeModeNotices()).toHaveLength(1);
 
@@ -881,7 +1010,7 @@ describe("server/watchdog", () => {
     );
     expect(
       notifier.notify.mock.calls.some((call) =>
-        String(call?.[0] || "").includes("safe mode cleared"),
+        String(call?.[0] || "").includes("channels resumed"),
       ),
     ).toBe(true);
     watchdog.stop();
@@ -988,7 +1117,9 @@ describe("server/watchdog", () => {
     // Crash-loop notifications degrade to no-ops without a notifier, and the
     // watchdog link falls back to localhost when no setup URL resolver exists.
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    await flushMicrotasks();
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    await flushMicrotasks();
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
     await flushMicrotasks();
 
@@ -1044,13 +1175,15 @@ describe("server/watchdog", () => {
     });
 
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    await flushMicrotasks();
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    await flushMicrotasks();
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
     await flushMicrotasks();
 
     const crashLoopNotice = notifier.notify.mock.calls
       .map((call) => String(call?.[0] || ""))
-      .find((message) => message.includes("Crash loop detected"));
+      .find((message) => message.includes("crash loop detected"));
     expect(crashLoopNotice).toBeTruthy();
     expect(crashLoopNotice).not.toContain("View logs");
   });
@@ -1061,14 +1194,16 @@ describe("server/watchdog", () => {
     });
 
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    await flushMicrotasks();
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    await flushMicrotasks();
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
     await flushMicrotasks();
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
     await flushMicrotasks();
 
     const crashLoopNotices = notifier.notify.mock.calls.filter((call) =>
-      String(call?.[0] || "").includes("Crash loop detected"),
+      String(call?.[0] || "").includes("crash loop detected"),
     );
     expect(crashLoopNotices).toHaveLength(1);
     const crashLoopEvents = insertWatchdogEvent.mock.calls.filter(
@@ -1288,14 +1423,17 @@ describe("server/watchdog", () => {
     watchdog.onGatewayExit({ code: 78, expectedExit: false });
     await flushMicrotasks();
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    await flushMicrotasks();
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    await flushMicrotasks();
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
     await flushMicrotasks();
     await flushMicrotasks();
 
-    expect(clawCmd).not.toHaveBeenCalledWith("doctor --fix --yes", {
-      quiet: true,
-    });
+    expect(clawCmd).not.toHaveBeenCalledWith(
+      "doctor --fix --yes",
+      expect.objectContaining({ quiet: true }),
+    );
   });
 
   it("skips crash-loop auto-repair while awaiting recovery from a prior repair", async () => {
@@ -1320,7 +1458,9 @@ describe("server/watchdog", () => {
     expect(doctorCalls).toHaveLength(1);
 
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    await vi.advanceTimersByTimeAsync(0);
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    await vi.advanceTimersByTimeAsync(0);
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
     await vi.advanceTimersByTimeAsync(0);
 
@@ -1381,11 +1521,18 @@ describe("server/watchdog", () => {
     });
 
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
-    watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    // Crash exits arrive on separate event-loop turns; let crash 1's relaunch
+    // settle before crashes 2 and 3 land.
+    await flushMicrotasks();
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
     await flushMicrotasks();
-    // Crashes 1-2 relaunched the gateway; the third opened a crash loop and
-    // started an auto-repair whose doctor run is still in flight.
+    watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    await flushMicrotasks();
+    // Crash 1 relaunched immediately. Crash 2 entered the exponential backoff
+    // (instant sleepImpl in this harness) and, with the gateway still down at
+    // the re-check (the operation-end resync probe marked it degraded),
+    // legitimately relaunched. Crash 3 opened the crash loop and started an
+    // auto-repair whose doctor run is still in flight — no further relaunch.
     expect(launchGatewayProcess).toHaveBeenCalledTimes(2);
 
     watchdog.onGatewayExit({ code: 78, expectedExit: false });
@@ -1441,6 +1588,167 @@ describe("server/watchdog", () => {
     );
   });
 
+  it("keeps the expected-restart window through mid-restart healthy probes and expected exits", async () => {
+    vi.useFakeTimers();
+    let gatewayUp = true;
+    let doctorCalls = 0;
+    const { watchdog, launchGatewayProcess } = createHarness({
+      autoRepair: true,
+      clawCmdImpl: async (command) => {
+        if (command === "doctor --fix --yes") {
+          doctorCalls += 1;
+          return { ok: true, stdout: "fixed" };
+        }
+        return { ok: true, stdout: "" };
+      },
+      fetchImpl: async () => {
+        if (!gatewayUp) throw new Error("gateway down");
+        return {
+          ok: true,
+          status: 200,
+          text: async () => JSON.stringify({ ok: true, status: "live" }),
+        };
+      },
+    });
+    watchdog.start();
+    await vi.advanceTimersByTimeAsync(10);
+
+    // A route restart opens a lease-length window; prepare-before-stop means
+    // the OLD gateway still answers probes at this point.
+    watchdog.onExpectedRestart({ expiresAt: Date.now() + 10 * 60 * 1000 });
+    await vi.advanceTimersByTimeAsync(6_000);
+    // The mid-restart healthy probe must not clear the window or flip the
+    // lifecycle back to running.
+    expect(watchdog.getStatus().lifecycle).toBe("restarting");
+
+    // The stop lands: the expected exit's 15s default must not SHRINK the
+    // lease-length window.
+    gatewayUp = false;
+    watchdog.onGatewayExit({ code: 0, expectedExit: true });
+    // 20s into the restart — inside the 120s ready budget, past the old 15s
+    // window — failing probes stay suppressed: no degradation, no doctor
+    // repair, no competing launch under the live restart.
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(doctorCalls).toBe(0);
+    expect(launchGatewayProcess).not.toHaveBeenCalled();
+    expect(watchdog.getStatus().lifecycle).toBe("restarting");
+    watchdog.stop();
+  });
+
+  it("skips background recovery while another lifecycle operation holds the lock", async () => {
+    const {
+      createGatewayLifecycleLock,
+    } = require("../../lib/server/gateway-lifecycle-lock");
+    const lock = createGatewayLifecycleLock();
+    const { watchdog, launchGatewayProcess, insertWatchdogEvent } = createHarness({
+      autoRepair: true,
+      gatewayLifecycleLock: lock,
+      fetchImpl: async () => {
+        throw new Error("gateway down");
+      },
+    });
+
+    const release = await lock.acquire("restart");
+    const result = await watchdog.triggerRepair();
+    expect(result).toEqual({
+      ok: false,
+      skipped: true,
+      reason: "operation_in_progress",
+    });
+    expect(insertWatchdogEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        eventType: "repair",
+        status: "skipped",
+        details: expect.objectContaining({
+          reason: "lifecycle_operation_in_progress",
+        }),
+      }),
+    );
+
+    // A crash exit during the held lock must not relaunch a competing gateway.
+    watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    await flushMicrotasks();
+    expect(launchGatewayProcess).not.toHaveBeenCalled();
+
+    release();
+    // With the lock free again, recovery proceeds.
+    const repaired = await watchdog.triggerRepair();
+    expect(repaired.ok).toBe(true);
+  });
+
+  it("settling an expected restart closes the suppression window and resyncs immediately", async () => {
+    vi.useFakeTimers();
+    const { watchdog } = createHarness({
+      autoRepair: false,
+      fetchImpl: async () => {
+        throw new Error("gateway down");
+      },
+    });
+    watchdog.start();
+    await vi.advanceTimersByTimeAsync(10);
+
+    // A route restart opens a lease-length window (worst case 10 minutes).
+    watchdog.onExpectedRestart({ expiresAt: Date.now() + 10 * 60 * 1000 });
+    expect(watchdog.getStatus().lifecycle).toBe("restarting");
+
+    // While the window is open, failing checks are suppressed as expected.
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(watchdog.getStatus().health).not.toBe("degraded");
+    expect(watchdog.getStatus().health).not.toBe("unhealthy");
+
+    // The operation settles (failed — the gateway never came up). Detection
+    // must resume NOW, not at lease expiry.
+    watchdog.onExpectedRestartSettled();
+    await vi.advanceTimersByTimeAsync(10);
+    const health = watchdog.getStatus().health;
+    expect(["degraded", "unhealthy"]).toContain(health);
+    watchdog.stop();
+  });
+
+  it("demotes a stuck 'restarting' lifecycle when the settle probe fails", async () => {
+    const { watchdog } = createHarness({
+      autoRepair: false,
+      fetchImpl: async () => {
+        throw new Error("gateway down");
+      },
+    });
+
+    // Route restart begins; the gateway never comes back.
+    watchdog.onExpectedRestart({ expiresAt: Date.now() + 10 * 60 * 1000 });
+    expect(watchdog.getStatus().lifecycle).toBe("restarting");
+
+    watchdog.onExpectedRestartSettled();
+    await flushMicrotasks();
+    await flushMicrotasks();
+
+    // Left as "restarting" the reducer would report launch-in-progress
+    // ("Starting", no Retry) forever over a dead gateway.
+    expect(watchdog.getStatus().lifecycle).toBe("stopped");
+  });
+
+  it("records external operation events in the incident ledger", () => {
+    const { watchdog, insertWatchdogEvent } = createHarness({});
+
+    watchdog.recordOperationEvent({
+      kind: "gateway_restart",
+      status: "ok",
+      details: { operationId: "op-1", trigger: "manual", downtimeMs: 4200 },
+    });
+
+    expect(insertWatchdogEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        eventType: "operation",
+        source: "gateway_restart",
+        status: "ok",
+        details: expect.objectContaining({
+          operationId: "op-1",
+          downtimeMs: 4200,
+        }),
+        correlationId: expect.any(String),
+      }),
+    );
+  });
+
   it("pauses manual repair after repeated doctor failures", async () => {
     const { watchdog, notifier, insertWatchdogEvent } = createHarness({
       autoRepair: false,
@@ -1450,12 +1758,21 @@ describe("server/watchdog", () => {
         }
         return { ok: true, stdout: "" };
       },
+      // The gateway stays down throughout — otherwise the operation-end
+      // resync probe would (correctly) see a healthy gateway and reset the
+      // repair-attempt counter between the two failed repairs.
+      fetchImpl: async () => {
+        throw new Error("gateway down");
+      },
     });
 
     const firstResult = await watchdog.triggerRepair();
     expect(firstResult.ok).toBe(false);
+    // The repair marks health unhealthy; the operation-end resync probe then
+    // fails against the down gateway and records its own first-failure
+    // "degraded" observation. Either way: not healthy, attempts preserved.
     expect(watchdog.getStatus()).toEqual(
-      expect.objectContaining({ repairAttempts: 1, health: "unhealthy" }),
+      expect.objectContaining({ repairAttempts: 1, health: "degraded" }),
     );
     expect(insertWatchdogEvent).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -1490,7 +1807,11 @@ describe("server/watchdog", () => {
     });
 
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    // Space crash 1 from the rest so its relaunch releases the operation lock
+    // before the crash loop opens (real exits never share a tick).
+    await flushMicrotasks();
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    await flushMicrotasks();
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
     await flushMicrotasks();
     await flushMicrotasks();
@@ -1713,5 +2034,124 @@ describe("server/watchdog", () => {
         }),
       );
     });
+  });
+
+  it("runs the TCP liveness watcher on the 10s interval and stop() clears it", async () => {
+    vi.useFakeTimers();
+    const probeGatewayTcp = vi.fn(async () => {});
+    const { watchdog } = createHarness({ autoRepair: false, probeGatewayTcp });
+
+    watchdog.start();
+    await vi.advanceTimersByTimeAsync(0);
+    // The watcher is an interval, not an immediate probe.
+    expect(probeGatewayTcp).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(kGatewayTcpWatchIntervalMs);
+    expect(probeGatewayTcp).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(2 * kGatewayTcpWatchIntervalMs);
+    expect(probeGatewayTcp).toHaveBeenCalledTimes(3);
+
+    watchdog.stop();
+    await vi.advanceTimersByTimeAsync(3 * kGatewayTcpWatchIntervalMs);
+    expect(probeGatewayTcp).toHaveBeenCalledTimes(3);
+  });
+
+  it("tightens health cadence to ~30s only while status clients are connected", async () => {
+    vi.useFakeTimers();
+    const probeGatewayTcp = vi.fn(async () => {});
+    const { watchdog, insertWatchdogEvent } = createHarness({
+      autoRepair: false,
+      probeGatewayTcp,
+    });
+    const fastCadenceChecks = () =>
+      insertWatchdogEvent.mock.calls.filter(
+        (call) =>
+          call?.[0]?.eventType === "health_check" &&
+          call?.[0]?.source === "fast_cadence",
+      );
+
+    watchdog.start();
+    await vi.advanceTimersByTimeAsync(0); // bootstrap check at t=0 stamps lastHealthCheckAtMs
+
+    // Disconnected: three watcher ticks pass the 30s staleness mark with no
+    // fast-cadence check.
+    await vi.advanceTimersByTimeAsync(kWatchdogConnectedHealthCadenceMs);
+    expect(fastCadenceChecks()).toHaveLength(0);
+
+    watchdog.setStatusClientsConnected(true);
+    // t=40s: last check is 40s old (>= 30s) → one fast-cadence check.
+    await vi.advanceTimersByTimeAsync(kGatewayTcpWatchIntervalMs);
+    expect(fastCadenceChecks()).toHaveLength(1);
+    // t=50s/60s: last check only 10s/20s old → never more often than 30s.
+    await vi.advanceTimersByTimeAsync(2 * kGatewayTcpWatchIntervalMs);
+    expect(fastCadenceChecks()).toHaveLength(1);
+    // t=70s: 30s elapsed again → second fast-cadence check.
+    await vi.advanceTimersByTimeAsync(kGatewayTcpWatchIntervalMs);
+    expect(fastCadenceChecks()).toHaveLength(2);
+    watchdog.stop();
+  });
+
+  it("coalesces TCP transitions inside the debounce into one health check", async () => {
+    vi.useFakeTimers();
+    const { watchdog, insertWatchdogEvent } = createHarness({ autoRepair: false });
+
+    watchdog.onGatewayTcpTransition();
+    await vi.advanceTimersByTimeAsync(400);
+    watchdog.onGatewayTcpTransition();
+    watchdog.onGatewayTcpTransition();
+    expect(global.fetch).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(kGatewayTcpTransitionDebounceMs);
+
+    const transitionChecks = insertWatchdogEvent.mock.calls.filter(
+      (call) =>
+        call?.[0]?.eventType === "health_check" &&
+        call?.[0]?.source === "tcp_transition",
+    );
+    expect(transitionChecks).toHaveLength(1);
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("degrades on failures inside the boot grace once this launch confirmed healthy", async () => {
+    vi.useFakeTimers();
+    let healthChecks = 0;
+    const { watchdog, insertWatchdogEvent } = createHarness({
+      autoRepair: false,
+      fetchImpl: async () => {
+        healthChecks += 1;
+        if (healthChecks === 1) {
+          return {
+            ok: true,
+            status: 200,
+            text: async () => JSON.stringify({ ok: true, status: "live" }),
+          };
+        }
+        throw new Error("gateway went away");
+      },
+    });
+
+    // Cold launch: the 30s startup grace window is open.
+    watchdog.onGatewayLaunch({ startedAt: Date.now() });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(watchdog.getStatus().health).toBe("healthy");
+
+    // A TCP transition re-probes ~1s later — still well inside the grace
+    // window, but this launch has provably booted, so the failure is real.
+    watchdog.onGatewayTcpTransition();
+    await vi.advanceTimersByTimeAsync(kGatewayTcpTransitionDebounceMs);
+
+    expect(watchdog.getStatus().health).toBe("degraded");
+    expect(insertWatchdogEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        eventType: "health_check",
+        status: "failed",
+        details: expect.objectContaining({ reason: "gateway went away" }),
+      }),
+    );
+    const graceSkips = insertWatchdogEvent.mock.calls.filter(
+      (call) => call?.[0]?.details?.startupGraceActive,
+    );
+    expect(graceSkips).toHaveLength(0);
+    watchdog.stop();
   });
 });

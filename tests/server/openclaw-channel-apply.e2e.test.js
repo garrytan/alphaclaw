@@ -1,3 +1,4 @@
+const crypto = require("crypto");
 const fs = require("fs");
 const http = require("http");
 const os = require("os");
@@ -112,21 +113,49 @@ const writeCheckoutFixture = (rootDir, { sha, bin = true } = {}) => {
 };
 
 const defaultRunnerImpl = async (opts) => {
-  // A real `backup create --output <dir> --verify` writes a file; the apply
-  // flow's hard-gate now checks an artifact actually appeared, so the fake
-  // must be faithful and write one.
+  // Faithful model of the real CLI's --output contract (verified against the
+  // pinned openclaw 2026.7.1-2 source, dist/backup-create resolveOutputPath):
+  // an existing directory (or trailing separator) gets a timestamped archive
+  // INSIDE it; any other path IS the archive file, refused if it already
+  // exists; the parent is mkdir -p'd. The old stub only modeled the
+  // directory branch — which is exactly why issues #7/#9 were invisible.
   if (opts.command === "openclaw" && opts.args?.[0] === "backup") {
-    try {
-      const outIdx = opts.args.indexOf("--output");
-      const outDir = outIdx >= 0 ? opts.args[outIdx + 1] : null;
-      if (outDir) {
-        fs.mkdirSync(outDir, { recursive: true });
-        fs.writeFileSync(
-          path.join(outDir, `backup-${Date.now()}.tar`),
-          "stub backup\n",
-        );
+    const outIdx = opts.args.indexOf("--output");
+    const out = outIdx >= 0 ? opts.args[outIdx + 1] : null;
+    if (out) {
+      try {
+        const isDirTarget =
+          out.endsWith(path.sep) ||
+          (fs.existsSync(out) && fs.statSync(out).isDirectory());
+        const outFile = isDirTarget
+          ? path.join(out, `${crypto.randomUUID()}-openclaw-backup.tar.gz`)
+          : out;
+        if (fs.existsSync(outFile)) {
+          return {
+            ok: false,
+            code: 1,
+            tail: `Error: Refusing to overwrite existing backup archive: ${outFile}\n`,
+            timedOut: false,
+          };
+        }
+        fs.mkdirSync(path.dirname(outFile), { recursive: true });
+        fs.writeFileSync(outFile, "stub backup archive\n");
+        return {
+          ok: true,
+          code: 0,
+          tail: `Backup archive: ${outFile}\nCreated ${outFile}\nArchive verification: passed\n`,
+          timedOut: false,
+        };
+      } catch (error) {
+        // e.g. ENOTDIR when a legacy archive file blocks the parent path.
+        return {
+          ok: false,
+          code: 1,
+          tail: `Error: ${error.message}\n`,
+          timedOut: false,
+        };
       }
-    } catch {}
+    }
     return { ok: true, code: 0, tail: "backup verified\n", timedOut: false };
   }
   if (

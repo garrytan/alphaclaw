@@ -312,6 +312,39 @@ describe("server/team-auth-transition", () => {
     expect(fs.existsSync(resolveTeamAuthSnapshotPath({ openclawDir }))).toBe(false);
   });
 
+  it("disable survives a throwing restart: token auth restored on disk, failure reported", async () => {
+    const openclawDir = createTempOpenclawDir();
+    writeConfig(openclawDir, {
+      gateway: {
+        auth: {
+          mode: "trusted-proxy",
+          password: "${OPENCLAW_GATEWAY_PASSWORD}",
+          trustedProxy: { userHeader: "x-alphaclaw-user" },
+        },
+      },
+    });
+
+    const disabled = await disableTeamMode({
+      openclawDir,
+      env,
+      // restartGateway now THROWS when the gateway never becomes ready
+      // (GatewayRestartError contract on this branch). Disable must treat
+      // that as a failed probe — never rethrow (the route would crash) and
+      // never leave trusted-proxy config behind.
+      restartGateway: vi.fn(async () => {
+        throw new Error("Gateway did not become ready within 120s");
+      }),
+      getGatewayUrl: () => kGatewayUrl,
+      request: vi.fn(async () => ({ ok: false, status: 503 })),
+      probeOptions: kFastProbe,
+    });
+
+    expect(disabled.ok).toBe(false);
+    expect(disabled.error).toContain("did not become ready");
+    // The config restore happened BEFORE the restart — token auth is on disk.
+    expect(readConfig(openclawDir).gateway.auth.mode).not.toBe("trusted-proxy");
+  });
+
   it("disable without a snapshot reconstructs env-backed token auth", async () => {
     const openclawDir = createTempOpenclawDir();
     writeConfig(openclawDir, {

@@ -94,9 +94,48 @@ const writePinFixture = (installDir) => {
   );
 };
 
+// Faithful to the real CLI's --output contract (see the hermetic suites'
+// defaultRunnerImpl): the path IS the archive file unless it names an
+// existing directory. Hard-gated applies (prerelease/dev/downgrade) verify an
+// artifact exists at the exact path, so the stub must write one.
 const createBackupStubRunner = (realRunner) => ({
   runStreamed: (opts) => {
     if (opts.command === "openclaw" && opts.args?.[0] === "backup") {
+      const outIdx = opts.args.indexOf("--output");
+      const out = outIdx >= 0 ? opts.args[outIdx + 1] : null;
+      if (out) {
+        try {
+          const isDirTarget =
+            out.endsWith(path.sep) ||
+            (fs.existsSync(out) && fs.statSync(out).isDirectory());
+          const outFile = isDirTarget
+            ? path.join(out, `${Date.now()}-openclaw-backup.tar.gz`)
+            : out;
+          if (fs.existsSync(outFile)) {
+            return Promise.resolve({
+              ok: false,
+              code: 1,
+              tail: `Error: Refusing to overwrite existing backup archive: ${outFile}\n`,
+              timedOut: false,
+            });
+          }
+          fs.mkdirSync(path.dirname(outFile), { recursive: true });
+          fs.writeFileSync(outFile, "stub backup archive\n");
+          return Promise.resolve({
+            ok: true,
+            code: 0,
+            tail: `Created ${outFile}\nArchive verification: passed\n`,
+            timedOut: false,
+          });
+        } catch (error) {
+          return Promise.resolve({
+            ok: false,
+            code: 1,
+            tail: `Error: ${error.message}\n`,
+            timedOut: false,
+          });
+        }
+      }
       return Promise.resolve({ ok: true, code: 0, tail: "", timedOut: false });
     }
     return realRunner.runStreamed(opts);

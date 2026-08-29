@@ -33,8 +33,8 @@
 - **Guided Onboarding:** Step-by-step setup wizard — model selection, provider credentials, GitHub repo, channel pairing.
 - **Multi-Agent Management:** Sidebar-driven agent navigation with create, rename, and delete flows. Per-agent overview cards, channel bindings, and URL-driven agent selection.
 - **Team Access (beta):** Share one AlphaClaw with named teammates. Each person signs in with their own email and password, OpenClaw attributes messages per person, and a who's-online roster shows presence. Admins invite members with expiring single-use links, assign roles, and disable or remove accounts; members can chat and view status while updates, secrets, terminals, agents, and team management stay admin-only. Requires the OpenClaw 2026.8.1-beta line.
-- **Gateway Manager:** Spawns, monitors, restarts, and proxies the OpenClaw gateway as a managed child process.
-- **Watchdog:** Crash detection, crash-loop recovery, auto-repair (`openclaw doctor --fix`), Telegram/Discord/Slack notifications, and a live interactive terminal for monitoring gateway output directly from the browser.
+- **Gateway Manager:** Spawns, monitors, restarts, and proxies the OpenClaw gateway as a managed child process. Restarts stream live progress with honest outcomes — measured downtime on success, actual error evidence on failure.
+- **Watchdog:** Crash detection, crash-loop recovery, auto-repair (`openclaw doctor --fix`), Telegram/Discord/Slack/WhatsApp notifications, and a live interactive terminal for monitoring gateway output directly from the browser.
 - **Channel Orchestration:** Telegram, Discord, Slack, ClickClack, and Buzz bot pairing with per-agent channel bindings, credential sync, and a guided wizard for splitting Telegram into multi-threaded topic groups as your usage grows. ClickClack sets up from a single pasted setup code or URL; Buzz installs through a resumable plugin wizard (both need the OpenClaw beta line for their guided flows).
 - **Google Workspace:** OAuth integration for Gmail, Calendar, Drive, Docs, Sheets, Tasks, Contacts, and Meet, plus guided Gmail watch setup with Google Pub/Sub topic, subscription, and push endpoint handling.
 - **Cron Jobs:** Dedicated cron tab with job management, an interactive rolling calendar, run-history drilldowns, trend analytics, and per-run usage breakdowns.
@@ -64,6 +64,12 @@ AlphaClaw simply wraps OpenClaw, it's not a dependency. Remove AlphaClaw and you
 [![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/templates/alphaclaw)
 
 Render sponsors AlphaClaw. Use code **`RENDER-ALPHACLAW`** to redeem **$50 in Render credits**. The deployment is maintained in Render's [official AlphaClaw template repository](https://github.com/render-examples/openclaw-render-template).
+
+> **Render sizing:** one AlphaClaw container runs the admin server, the OpenClaw gateway (a second Node.js runtime), up to five `gog` Google Workspace daemons, an hourly git-sync cron, and periodic `npm`/`pnpm` installs during updates. We recommend **at least 2 GB RAM / 1 CPU** (Render `standard` or larger). The `starter` tier (512 MB / 0.5 CPU) can OOM under normal operation and makes every update slower.
+>
+> **Per-process heap budgets:** if you cap the Node heap, set it on the admin process only (e.g. `node --max-old-space-size=768 bin/alphaclaw.js start` in your start command) rather than via a blanket `NODE_OPTIONS` env var — children would inherit it. AlphaClaw already strips memory flags from the gateway's environment so the two processes keep separate budgets.
+>
+> **Health checks:** point your platform health check at `/health` (always 200 while the admin server can serve — a wedged gateway is healed by the watchdog, not container restarts). Operators who want strict gateway readiness gating can point it at `/health/ready` instead (503 while the gateway is down; be aware this restarts the container during gateway recovery, and a **fresh, not-yet-onboarded instance also reports 503** — only switch to `/health/ready` after onboarding completes or the container will restart-loop before you can finish setup). Ops signal: if `eventLoop.p99Ms` in `/api/watchdog/resources` stays above 500ms, check recent gateway restarts and workspace size.
 
 ### Other deployment options
 
@@ -125,7 +131,7 @@ The **Upgrade** page pins your OpenClaw to a release channel and lets you switch
 How it works:
 
 - **Explicit updates only.** Nothing installs on its own. Pick a version (last 5 stable, last 5 beta, or recent `main` commits), review its release notes, click once. Every restart deterministically re-loads the version you chose — offline, from a persisted copy on your data volume.
-- **Backed up before every switch.** AlphaClaw runs `openclaw backup create --verify` first; downgrades and dev builds are blocked unless the backup verifies (older versions — and the pin you'd roll back to — may not read migrated state).
+- **Backed up before every switch.** AlphaClaw runs `openclaw backup create --verify` first, writing a per-run timestamped archive under `<root>/backups/openclaw/` (the last 3 are retained); downgrades and dev builds are blocked unless the backup verifies (older versions — and the pin you'd roll back to — may not read migrated state).
 - **Database compatibility check.** Before an update applies, the target version's own binary verifies it can read snapshots of your state databases; incompatible updates are blocked before anything changes, and rollbacks that can't be verified say so honestly.
 - **Settings migration at boot.** After a version change, OpenClaw's own doctor migrates your settings once (keeping a per-version pre-migration backup); downgrades restore the exact settings saved for that version, and the Upgrade page shows the last migration result.
 - **What's new, per channel.** A curated card highlights each OpenClaw line's changes, with security-default flips called out separately — and those same security changes reappear in the apply confirmation before you commit to a cross-channel switch.
@@ -192,10 +198,10 @@ The built-in watchdog monitors gateway health and recovers from failures automat
 | Capability               | Details                                                                |
 | ------------------------ | ---------------------------------------------------------------------- |
 | **Health checks**        | Periodic `openclaw health` with configurable interval                  |
-| **Crash detection**      | Listens for gateway exit events                                        |
+| **Crash detection**      | Gateway exit events plus an always-on 10s TCP port watcher, with immediate re-checks after every restart/repair |
 | **Crash-loop detection** | Threshold-based (default: 3 crashes in 300s)                           |
 | **Auto-repair**          | Runs `openclaw doctor --fix --yes`, relaunches gateway                 |
-| **Notifications**        | Telegram, Discord, and Slack alerts for crashes, repairs, and recovery |
+| **Notifications**        | Telegram, Discord, Slack, and WhatsApp alerts for crashes, repairs, and recovery |
 | **Event log**            | SQLite-backed incident history with API and UI access                  |
 
 ## Environment Variables
@@ -233,7 +239,7 @@ AlphaClaw can expose an OpenAI-compatible API surface on the same public port as
 | `/v1/embeddings`                | POST    | Routes to OpenClaw's embeddings endpoint.                          |
 | `/v1/models`, `/v1/models/<id>` | GET     | Lists OpenClaw agent targets.                                      |
 
-When enabled, the proxy forwards requests to the loopback OpenClaw gateway. AlphaClaw requires `Authorization: Bearer <OPENCLAW_GATEWAY_TOKEN>` and rejects requests when the gateway token is missing or does not match before forwarding to OpenClaw. Failed bearer-token attempts are rate-limited before proxying. The setup-UI cookie is stripped before forwarding, hop-by-hop response headers are not passed through, and `/v1` JSON request bodies are accepted up to 50 MB. When disabled or missing from `alphaclaw.json`, `/v1` requests return 404.
+When enabled, the proxy forwards requests to the loopback OpenClaw gateway. AlphaClaw requires `Authorization: Bearer <OPENCLAW_GATEWAY_TOKEN>` and rejects requests when the gateway token is missing or does not match before forwarding to OpenClaw. Failed bearer-token attempts are rate-limited before proxying. The setup-UI cookie is stripped before forwarding, hop-by-hop response headers are not passed through, and `/v1` JSON request bodies are accepted up to 20 MB (lowered from 50 MB in v0.9.36 — parsing a 50 MB body can transiently need hundreds of MB of heap on small instances). When disabled or missing from `alphaclaw.json`, `/v1` requests return 404.
 
 **Security boundary (important).** OpenClaw treats `/v1/chat/completions` as a full operator-access surface. A caller with a valid `OPENCLAW_GATEWAY_TOKEN` can run any tool the configured agent profile allows. Treat this token like an owner credential:
 
@@ -261,7 +267,9 @@ If you need OpenClaw's full security posture (manual pairing codes, no query-str
 
 Release history lives in [CHANGELOG.md](CHANGELOG.md); contributor setup and
 test tiers are in [CONTRIBUTING.md](CONTRIBUTING.md); open work is tracked in
-[TODOS.md](TODOS.md).
+[TODOS.md](TODOS.md); design documents (gateway state model, Telegram topics
+discovery) live in [docs/designs/](docs/designs/); architecture notes and
+conventions for coding agents are in [AGENTS.md](AGENTS.md).
 
 ```bash
 npm install

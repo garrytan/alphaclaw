@@ -104,6 +104,7 @@ describe("server/model-catalog-cache", () => {
     });
     expect(second.source).toBe("cache");
     expect(second.refreshing).toBe(true);
+    await flushPromises();
     expect(shellCmd).toHaveBeenCalledTimes(1);
 
     resolveShell("{}");
@@ -162,6 +163,7 @@ describe("server/model-catalog-cache", () => {
     });
     expect(repeated.source).toBe(kModelCatalogBootstrapSource);
     expect(repeated.refreshing).toBe(true);
+    await flushPromises();
     expect(shellCmd).toHaveBeenCalledTimes(1);
 
     resolveShell("{}");
@@ -311,6 +313,7 @@ describe("server/model-catalog-cache", () => {
         { key: "anthropic/claude-opus-4-6", name: "Claude Opus 4.6" },
       ]),
     });
+    await flushPromises();
     expect(shellCmd).toHaveBeenCalledTimes(2);
 
     resolveRefresh("{}");
@@ -365,6 +368,7 @@ describe("server/model-catalog-cache", () => {
     const cached = await cache.getCatalogResponse();
     expect(cached.source).toBe("cache");
     expect(cached.refreshing).toBe(true);
+    await flushPromises();
     expect(shellCmd).toHaveBeenCalledTimes(1);
 
     await flushPromises();
@@ -380,6 +384,7 @@ describe("server/model-catalog-cache", () => {
     });
 
     await vi.advanceTimersByTimeAsync(kModelCatalogRefreshBackoffMs - 1);
+    await flushPromises();
     expect(shellCmd).toHaveBeenCalledTimes(1);
 
     await vi.advanceTimersByTimeAsync(1);
@@ -491,11 +496,13 @@ describe("server/model-catalog-cache", () => {
       refreshing: true,
       models: kFallbackOnboardingModels,
     });
+    await flushPromises();
     expect(shellCmd).toHaveBeenCalledTimes(1);
 
     await flushPromises();
 
     await vi.advanceTimersByTimeAsync(kModelCatalogRefreshBackoffMs - 1);
+    await flushPromises();
     expect(shellCmd).toHaveBeenCalledTimes(1);
 
     await vi.advanceTimersByTimeAsync(1);

@@ -45,7 +45,12 @@ describeLive("LIVE openclaw release catalog (real GitHub + npm)", { retry: 1 }, 
 
       expect(catalog.ok).toBe(true);
       // Degraded = one of the real sources failed. That IS the failure signal.
-      expect(catalog.degraded).toEqual({ github: false, npm: false });
+      // (githubRateLimited is a sub-flag of the github source, false when healthy.)
+      expect(catalog.degraded).toEqual({
+        github: false,
+        npm: false,
+        githubRateLimited: false,
+      });
       expect(Date.parse(catalog.staleAsOf)).toBeGreaterThan(0);
 
       // dist-tags: "latest" defines stable; the UI's primary CTA hangs off it.

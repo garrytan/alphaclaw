@@ -232,6 +232,11 @@ describe("frontend/upgrade-helpers durations and staleness (U15)", () => {
     expect(formatElapsed(null, kNow)).toBe("0s");
   });
 
+  it("clamps elapsed durations when the end bound precedes the start", async () => {
+    const { formatElapsed } = await loadUpgradeHelpers();
+    expect(formatElapsed(1000, 500)).toBe("0s");
+  });
+
   it("formats the output heartbeat", async () => {
     const { formatHeartbeat } = await loadUpgradeHelpers();
     expect(formatHeartbeat(kNow - 5_000, kNow)).toBe("last output 5s ago");
@@ -1230,9 +1235,35 @@ describe("frontend/upgrade-helpers misc models", () => {
       hint: "Install a newer Node with your platform's package manager.",
       code: "preflight_failed",
       docsUrl: null,
+      repairApplicable: false,
     });
     expect(buildErrorEnvelopeModel(null)).toBeNull();
     expect(buildErrorEnvelopeModel("plain text").message).toBe("plain text");
+  });
+
+  it("passes repairApplicable through error envelopes", async () => {
+    const { buildErrorEnvelopeModel } = await loadUpgradeHelpers();
+
+    expect(
+      buildErrorEnvelopeModel({
+        message: "npm run build failed",
+        code: "apply_failed",
+        repairApplicable: true,
+      }).repairApplicable,
+    ).toBe(true);
+    // Anything other than a literal true (absent, null, truthy strings)
+    // must normalize to false so the repair caption stays hidden.
+    expect(
+      buildErrorEnvelopeModel({ message: "backup failed" }).repairApplicable,
+    ).toBe(false);
+    expect(
+      buildErrorEnvelopeModel({ message: "x", repairApplicable: null })
+        .repairApplicable,
+    ).toBe(false);
+    expect(
+      buildErrorEnvelopeModel({ message: "x", repairApplicable: "yes" })
+        .repairApplicable,
+    ).toBe(false);
   });
 
   it("describes apply targets and last-known-good pairs", async () => {

@@ -3,10 +3,32 @@ const os = require("os");
 const path = require("path");
 const { execFileSync } = require("child_process");
 
+// Hosts that drive git through their own credential helper (e.g. Conductor
+// exports GIT_ASKPASS/ASKPASS_*) leak those vars into every child env. These
+// tests assert what the SHIM injects, so ambient auth vars must be scrubbed
+// before spreading — otherwise "does not inject auth" sees the host's
+// credentials and fails on a machine that never touched the shim.
+const cleanProcessEnv = () => {
+  const env = { ...process.env };
+  delete env.GIT_ASKPASS;
+  delete env.ASKPASS_USER;
+  delete env.ASKPASS_PASS;
+  delete env.GIT_TERMINAL_PROMPT;
+  return env;
+};
+
 const kGitShimPath = path.join(__dirname, "../../lib/scripts/git");
 const kGitAskPassPath = path.join(__dirname, "../../lib/scripts/git-askpass");
 
 const shellQuote = (value) => `'${String(value).replace(/'/g, `'\"'\"'`)}'`;
+
+// A host environment can carry its own git auth (e.g. Conductor sandboxes
+// export GIT_ASKPASS pointing at a live credential broker). The fake
+// git.real probes $GIT_ASKPASS, so inherited host auth would pollute the
+// logs and break the no-injection assertions — every spawn strips the
+// git-auth vars the shim itself is responsible for setting (the full
+// cleanProcessEnv scrub, including ambient ASKPASS_USER/ASKPASS_PASS).
+const spawnEnv = (overrides = {}) => ({ ...cleanProcessEnv(), ...overrides });
 
 const createBehaviorHarness = ({ repoRoot }) => {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "alphaclaw-git-shim-"));
@@ -69,10 +91,7 @@ describe("server git shim scripts", () => {
     const harness = createBehaviorHarness({ repoRoot });
     execFileSync(harness.shimPath, ["-C", repoRoot, "push", "origin", "main"], {
       cwd: outsideDir,
-      env: {
-        ...process.env,
-        GITHUB_TOKEN: "ghp_test_token",
-      },
+      env: spawnEnv({ GITHUB_TOKEN: "ghp_test_token" }),
       stdio: "pipe",
     });
 
@@ -95,10 +114,7 @@ describe("server git shim scripts", () => {
     const harness = createBehaviorHarness({ repoRoot });
     execFileSync(harness.shimPath, ["-c", "http.extraHeader=test", "-C", repoRoot, "push", "origin", "main"], {
       cwd: outsideDir,
-      env: {
-        ...process.env,
-        GITHUB_TOKEN: "ghp_test_token",
-      },
+      env: spawnEnv({ GITHUB_TOKEN: "ghp_test_token" }),
       stdio: "pipe",
     });
 
@@ -121,7 +137,7 @@ describe("server git shim scripts", () => {
     fs.writeFileSync(path.join(repoRoot, ".env"), 'GITHUB_TOKEN="ghp_env_token"\n');
 
     const harness = createBehaviorHarness({ repoRoot });
-    const env = { ...process.env };
+    const env = spawnEnv();
     delete env.GITHUB_TOKEN;
     execFileSync(harness.shimPath, ["-C", repoRoot, "push", "origin", "main"], {
       cwd: outsideDir,
@@ -150,10 +166,7 @@ describe("server git shim scripts", () => {
       ["--super-prefix=subdir/", "--attr-source", "HEAD", "-C", repoRoot, "push", "origin", "main"],
       {
         cwd: outsideDir,
-        env: {
-          ...process.env,
-          GITHUB_TOKEN: "ghp_test_token",
-        },
+        env: spawnEnv({ GITHUB_TOKEN: "ghp_test_token" }),
         stdio: "pipe",
       },
     );
@@ -181,10 +194,7 @@ describe("server git shim scripts", () => {
     const harness = createBehaviorHarness({ repoRoot });
     execFileSync(harness.shimPath, ["push", "origin", "main"], {
       cwd: symlinkWorkspaceDir,
-      env: {
-        ...process.env,
-        GITHUB_TOKEN: "ghp_test_token",
-      },
+      env: spawnEnv({ GITHUB_TOKEN: "ghp_test_token" }),
       stdio: "pipe",
     });
 
@@ -204,10 +214,7 @@ describe("server git shim scripts", () => {
     const harness = createBehaviorHarness({ repoRoot });
     execFileSync(harness.shimPath, ["push", "origin", "main"], {
       cwd: outsideDir,
-      env: {
-        ...process.env,
-        GITHUB_TOKEN: "ghp_test_token",
-      },
+      env: spawnEnv({ GITHUB_TOKEN: "ghp_test_token" }),
       stdio: "pipe",
     });
 
