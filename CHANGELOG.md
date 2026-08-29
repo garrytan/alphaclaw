@@ -5,6 +5,32 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [Unreleased]
+
+### Added
+- **Resource autotune (`autotune.enabled`, default ON).** AlphaClaw now reads
+  the container's actual capacity (cgroup v1/v2 memory limit, CPU quota,
+  disk, GPU presence — with host fallback and a container-of-unknown-size
+  suppression guard) and sizes its resource-dependent settings to the box:
+  the gateway's V8 heap (`--max-old-space-size`, strip-then-re-add so admin
+  and gateway keep separate budgets), the gateway/CLI `UV_THREADPOOL_SIZE`,
+  the agent-concurrency ceiling (replacing the fixed 64 — small boxes hold
+  today's floor, big boxes scale to 128), JSON body limits, SQLite page
+  caches (shared `applyOperationalPragmas`, negative-KiB semantics), and an
+  advisory backup-retention budget. Every decision lands in a persisted
+  ledger (detected → derived → applied, with per-row restart ownership:
+  gateway vs AlphaClaw) surfaced at `GET /api/autotune`, on the Watchdog
+  tab's new Autotune card, in `/api/status`'s `machine` block, the
+  `alphaclaw admin --summary` digest, the agent's `SKILL.md`/`TOOLS.md`, and
+  the medic/overseer prompts (numeric facts only). Live container resizes
+  are detected on the watchdog tick (event + notification + retune); gateway
+  heap-OOM and container-OOM exits are classified as distinct watchdog
+  events with machine-derived remediation. Opt out per deployment
+  (`PUT /api/autotune/settings {"enabled":false}` or the card toggle) or via
+  the `ALPHACLAW_AUTOTUNE_DISABLED=1` env kill-switch (works mid-crash-loop
+  from the platform dashboard); disabling restores pre-feature behavior,
+  including deleting the concurrency default autotune itself wrote.
+
 ## [0.9.42] - 2026-08-29
 
 The Watchdog tab now explains itself: a live narrative of what the watchdog
