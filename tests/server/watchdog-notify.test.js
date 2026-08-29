@@ -1044,3 +1044,77 @@ describe("server/watchdog-notify", () => {
     });
   });
 });
+
+// ── sqlite pairing store union (openclaw >= 2026.9.1-beta.1) ─────────────────
+// The beta imports *-allowFrom.json into channel_pairing_allow_entries and
+// DELETES the files at gateway startup — without the sqlite read, watchdog
+// incident notifications silently lose all pairing-derived targets.
+describe("watchdog-notify sqlite pairing store", () => {
+  const fs = require("fs");
+  const os = require("os");
+  const { DatabaseSync } = require("node:sqlite");
+  const {
+    getPairedTargetsByAccount,
+  } = require("../../lib/server/watchdog-notify");
+
+  const createStateDirWithAllowEntries = (rows) => {
+    const openclawDir = fs.mkdtempSync(
+      path.join(os.tmpdir(), "alphaclaw-notify-sqlite-"),
+    );
+    const databasePath = path.join(openclawDir, "state", "openclaw.sqlite");
+    fs.mkdirSync(path.dirname(databasePath), { recursive: true });
+    const db = new DatabaseSync(databasePath);
+    db.exec(
+      "CREATE TABLE channel_pairing_allow_entries (channel_key TEXT NOT NULL, account_id TEXT NOT NULL, entry TEXT NOT NULL, sort_order INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (channel_key, account_id, entry))",
+    );
+    const insert = db.prepare(
+      "INSERT INTO channel_pairing_allow_entries (channel_key, account_id, entry) VALUES (?, ?, ?)",
+    );
+    for (const [channel, accountId, entry] of rows) insert.run(channel, accountId, entry);
+    db.close();
+    return openclawDir;
+  };
+
+  it("resolves targets from the state db when the pairing files are gone (post-import beta box)", () => {
+    const openclawDir = createStateDirWithAllowEntries([
+      ["telegram", "default", "111"],
+      ["telegram", "alerts", "222"],
+      ["discord", "default", "999"],
+    ]);
+    const targets = getPairedTargetsByAccount({ channel: "telegram", openclawDir });
+    expect(new Map(targets)).toEqual(
+      new Map([
+        ["default", ["111"]],
+        ["alerts", ["222"]],
+      ]),
+    );
+  });
+
+  it("unions sqlite entries with remaining pairing files and dedupes ids", () => {
+    const openclawDir = createStateDirWithAllowEntries([
+      ["telegram", "default", "111"],
+    ]);
+    const credentialsDir = path.join(openclawDir, "credentials");
+    fs.mkdirSync(credentialsDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(credentialsDir, "telegram-default-allowFrom.json"),
+      JSON.stringify({ allowFrom: ["111", "333"] }),
+    );
+    const targets = getPairedTargetsByAccount({ channel: "telegram", openclawDir });
+    expect(Array.from(targets.get("default")).sort()).toEqual(["111", "333"]);
+  });
+
+  it("keeps working from files alone on a file-era box (no state db)", () => {
+    const openclawDir = fs.mkdtempSync(
+      path.join(os.tmpdir(), "alphaclaw-notify-file-"),
+    );
+    const credentialsDir = path.join(openclawDir, "credentials");
+    fs.mkdirSync(credentialsDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(credentialsDir, "telegram-default-allowFrom.json"),
+      JSON.stringify({ allowFrom: ["444"] }),
+    );
+    const targets = getPairedTargetsByAccount({ channel: "telegram", openclawDir });
+    expect(targets.get("default")).toEqual(["444"]);
+  });
+});

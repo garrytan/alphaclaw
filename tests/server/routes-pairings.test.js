@@ -1534,3 +1534,113 @@ describe("server/routes/pairings removeAccountRequestsFromPairingStore", () => {
     expect(unchangedFs.writeFileSync).not.toHaveBeenCalled();
   });
 });
+
+// ── sqlite pairing reject (openclaw >= 2026.9.1-beta.1) ──────────────────────
+// The beta keeps pending pairings in state/openclaw.sqlite and deletes the
+// legacy pairing files at gateway startup; neither version ships a `pairing
+// reject` CLI, so the reject route deletes the state-db row directly
+// (schema-guarded, parameterized) with the file store as the pre-import
+// fallback.
+describe("server/routes/pairings sqlite reject", () => {
+  const fs = require("fs");
+  const os = require("os");
+  const pathMod = require("path");
+  const { DatabaseSync } = require("node:sqlite");
+
+  const createSqliteApp = ({ rows = [], fsModule } = {}) => {
+    const openclawDir = fs.mkdtempSync(
+      pathMod.join(os.tmpdir(), "alphaclaw-pairing-sqlite-"),
+    );
+    const databasePath = pathMod.join(openclawDir, "state", "openclaw.sqlite");
+    fs.mkdirSync(pathMod.dirname(databasePath), { recursive: true });
+    const db = new DatabaseSync(databasePath);
+    db.exec(
+      "CREATE TABLE channel_pairing_requests (channel_key TEXT NOT NULL, account_id TEXT NOT NULL, request_id TEXT NOT NULL, code TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT '', last_seen_at TEXT NOT NULL DEFAULT '', meta_json TEXT, PRIMARY KEY (channel_key, account_id, request_id))",
+    );
+    const insert = db.prepare(
+      "INSERT INTO channel_pairing_requests (channel_key, account_id, request_id, code) VALUES (?, ?, ?, ?)",
+    );
+    for (const [channel, accountId, requestId, code] of rows) {
+      insert.run(channel, accountId, requestId, code);
+    }
+    db.close();
+
+    const app = express();
+    app.use(express.json());
+    registerPairingRoutes({
+      app,
+      clawCmd: vi.fn(async () => ({ ok: true, stdout: "{}", stderr: "" })),
+      isOnboarded: () => true,
+      // No pairing files on a post-import beta box.
+      fsModule:
+        fsModule || {
+          existsSync: () => false,
+          readFileSync: () => {
+            throw new Error("no files on a post-import box");
+          },
+          mkdirSync: () => {},
+          writeFileSync: () => {},
+        },
+      openclawDir,
+    });
+    return { app, databasePath };
+  };
+
+  it("rejects a pending pairing by deleting the state-db row when no files exist", async () => {
+    const { app, databasePath } = createSqliteApp({
+      rows: [["telegram", "default", "r1", "ABCD1234"]],
+    });
+    const res = await request(app)
+      .post("/api/pairings/abcd1234/reject")
+      .send({ channel: "telegram" });
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ ok: true, removed: true });
+
+    const db = new DatabaseSync(databasePath, { readOnly: true });
+    try {
+      expect(
+        db.prepare("SELECT COUNT(*) AS n FROM channel_pairing_requests").get().n,
+      ).toBe(0);
+    } finally {
+      db.close();
+    }
+  });
+
+  it("404s when neither the state db nor the file store holds the request", async () => {
+    const { app } = createSqliteApp({ rows: [] });
+    const res = await request(app)
+      .post("/api/pairings/MISSING/reject")
+      .send({ channel: "telegram" });
+    expect(res.status).toBe(404);
+  });
+
+  it("returns 503 (retryable) when the state db is unreadable and no file matched", async () => {
+    const openclawDir = fs.mkdtempSync(
+      pathMod.join(os.tmpdir(), "alphaclaw-pairing-broken-"),
+    );
+    const databasePath = pathMod.join(openclawDir, "state", "openclaw.sqlite");
+    fs.mkdirSync(pathMod.dirname(databasePath), { recursive: true });
+    fs.writeFileSync(databasePath, "not a database", "utf8");
+    const app = express();
+    app.use(express.json());
+    registerPairingRoutes({
+      app,
+      clawCmd: vi.fn(async () => ({ ok: true, stdout: "{}", stderr: "" })),
+      isOnboarded: () => true,
+      fsModule: {
+        existsSync: () => false,
+        readFileSync: () => {
+          throw new Error("no files");
+        },
+        mkdirSync: () => {},
+        writeFileSync: () => {},
+      },
+      openclawDir,
+    });
+    const res = await request(app)
+      .post("/api/pairings/ABCD1234/reject")
+      .send({ channel: "telegram" });
+    expect(res.status).toBe(503);
+    expect(res.body.error).toMatch(/retry/i);
+  });
+});

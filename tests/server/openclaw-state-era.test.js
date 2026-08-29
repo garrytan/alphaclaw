@@ -10,6 +10,10 @@ const {
   kSqliteEra,
   kFileEra,
   kIndeterminate,
+  readAuthSharedStoreLocation,
+  readChannelAllowEntriesByAccount,
+  deletePairingRequestByCode,
+  deleteChannelPairingRows,
 } = require("../../lib/server/openclaw-state-era");
 const { kOpenclawStateDbPath } = require("../../lib/server/openclaw-state-db");
 
@@ -261,5 +265,198 @@ describe("server/openclaw-state-era exec-approvals backend decision", () => {
       backend: "indeterminate",
       reapAllowed: false,
     });
+  });
+});
+
+// ── PR-2 surfaces: shared auth flag + pairing store ──────────────────────────
+
+const withStateDb = (openclawDir, setup) => {
+  const databasePath = path.join(openclawDir, kOpenclawStateDbPath);
+  fs.mkdirSync(path.dirname(databasePath), { recursive: true });
+  const db = new DatabaseSync(databasePath);
+  try {
+    setup(db);
+  } finally {
+    db.close();
+  }
+  return databasePath;
+};
+
+const createPairingTables = (db) => {
+  db.exec(
+    "CREATE TABLE channel_pairing_requests (channel_key TEXT NOT NULL, account_id TEXT NOT NULL, request_id TEXT NOT NULL, code TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT '', last_seen_at TEXT NOT NULL DEFAULT '', meta_json TEXT, PRIMARY KEY (channel_key, account_id, request_id))",
+  );
+  db.exec(
+    "CREATE TABLE channel_pairing_allow_entries (channel_key TEXT NOT NULL, account_id TEXT NOT NULL, entry TEXT NOT NULL, sort_order INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (channel_key, account_id, entry))",
+  );
+};
+
+describe("server/openclaw-state-era auth.sharedStore flag", () => {
+  it("reads state-db when the migration flipped the machine state", () => {
+    const openclawDir = createTempOpenclawDir();
+    withStateDb(openclawDir, (db) => {
+      db.exec(
+        "CREATE TABLE config_machine_state (state_key TEXT NOT NULL PRIMARY KEY, value_json TEXT NOT NULL, updated_at_ms INTEGER NOT NULL DEFAULT 0)",
+      );
+      db.prepare(
+        "INSERT INTO config_machine_state (state_key, value_json) VALUES ('auth.sharedStore', ?)",
+      ).run(JSON.stringify({ location: "state-db" }));
+    });
+    expect(readAuthSharedStoreLocation({ openclawDir })).toBe("state-db");
+  });
+
+  it("is legacy when the db, table, or flag row is missing (incl. the pinned v1 schema)", () => {
+    const noDb = createTempOpenclawDir();
+    expect(readAuthSharedStoreLocation({ openclawDir: noDb })).toBe("legacy");
+
+    // Pinned-version state db: no config_machine_state table at all.
+    const v1Schema = createTempOpenclawDir();
+    withStateDb(v1Schema, (db) => {
+      db.exec("CREATE TABLE cron_jobs (id TEXT PRIMARY KEY)");
+    });
+    expect(readAuthSharedStoreLocation({ openclawDir: v1Schema })).toBe("legacy");
+
+    // Beta schema pre-migration: table exists, flag row absent.
+    const noRow = createTempOpenclawDir();
+    withStateDb(noRow, (db) => {
+      db.exec(
+        "CREATE TABLE config_machine_state (state_key TEXT NOT NULL PRIMARY KEY, value_json TEXT NOT NULL)",
+      );
+    });
+    expect(readAuthSharedStoreLocation({ openclawDir: noRow })).toBe("legacy");
+  });
+
+  it("is unreadable — distinct from legacy — when the db cannot be opened", () => {
+    const openclawDir = createTempOpenclawDir();
+    const databasePath = path.join(openclawDir, kOpenclawStateDbPath);
+    fs.mkdirSync(path.dirname(databasePath), { recursive: true });
+    fs.writeFileSync(databasePath, "not a database", "utf8");
+    expect(
+      readAuthSharedStoreLocation({ openclawDir, logger: quietLogger() }),
+    ).toBe("unreadable");
+  });
+});
+
+describe("server/openclaw-state-era pairing store", () => {
+  it("reads allow entries grouped by normalized account id", () => {
+    const openclawDir = createTempOpenclawDir();
+    withStateDb(openclawDir, (db) => {
+      createPairingTables(db);
+      const insert = db.prepare(
+        "INSERT INTO channel_pairing_allow_entries (channel_key, account_id, entry) VALUES (?, ?, ?)",
+      );
+      insert.run("telegram", "default", "111");
+      insert.run("telegram", "default", "222");
+      insert.run("telegram", "Work", "333");
+      insert.run("discord", "default", "999");
+    });
+    const map = readChannelAllowEntriesByAccount({ openclawDir, channel: "telegram" });
+    expect(Array.from(map.get("default")).sort()).toEqual(["111", "222"]);
+    expect(Array.from(map.get("work"))).toEqual(["333"]);
+    expect(map.has("discord")).toBe(false);
+  });
+
+  it("returns an empty map when the db or tables are missing (file-era box)", () => {
+    const noDb = createTempOpenclawDir();
+    expect(readChannelAllowEntriesByAccount({ openclawDir: noDb, channel: "telegram" }).size).toBe(0);
+
+    const noTables = createTempOpenclawDir();
+    withStateDb(noTables, (db) => db.exec("CREATE TABLE cron_jobs (id TEXT PRIMARY KEY)"));
+    expect(
+      readChannelAllowEntriesByAccount({ openclawDir: noTables, channel: "telegram" }).size,
+    ).toBe(0);
+  });
+
+  it("deletes a pending pairing request by code, case-insensitively and account-scoped", () => {
+    const openclawDir = createTempOpenclawDir();
+    const databasePath = withStateDb(openclawDir, (db) => {
+      createPairingTables(db);
+      const insert = db.prepare(
+        "INSERT INTO channel_pairing_requests (channel_key, account_id, request_id, code) VALUES (?, ?, ?, ?)",
+      );
+      insert.run("telegram", "default", "r1", "ABCD1234");
+      insert.run("telegram", "work", "r2", "ABCD1234");
+      insert.run("telegram", "default", "r3", "ZZZZ0000");
+    });
+
+    // Account-scoped delete removes only that account's request.
+    expect(
+      deletePairingRequestByCode({
+        openclawDir,
+        channel: "telegram",
+        code: "abcd1234",
+        accountId: "work",
+      }),
+    ).toEqual({ ok: true, deleted: 1 });
+
+    // Unscoped delete removes the remaining match; unknown codes delete 0.
+    expect(
+      deletePairingRequestByCode({ openclawDir, channel: "telegram", code: "ABCD1234" }),
+    ).toEqual({ ok: true, deleted: 1 });
+    expect(
+      deletePairingRequestByCode({ openclawDir, channel: "telegram", code: "NOPE" }),
+    ).toEqual({ ok: true, deleted: 0 });
+
+    const db = new DatabaseSync(databasePath, { readOnly: true });
+    try {
+      const rows = db.prepare("SELECT code FROM channel_pairing_requests").all();
+      expect(rows.map((row) => row.code)).toEqual(["ZZZZ0000"]);
+    } finally {
+      db.close();
+    }
+  });
+
+  it("delete is a no-op {ok:true, deleted:0} without a state db, and {ok:false} on an unreadable one", () => {
+    const noDb = createTempOpenclawDir();
+    expect(
+      deletePairingRequestByCode({ openclawDir: noDb, channel: "telegram", code: "X" }),
+    ).toEqual({ ok: true, deleted: 0 });
+
+    const broken = createTempOpenclawDir();
+    const databasePath = path.join(broken, kOpenclawStateDbPath);
+    fs.mkdirSync(path.dirname(databasePath), { recursive: true });
+    fs.writeFileSync(databasePath, "not a database", "utf8");
+    const result = deletePairingRequestByCode({
+      openclawDir: broken,
+      channel: "telegram",
+      code: "X",
+      logger: quietLogger(),
+    });
+    expect(result.ok).toBe(false);
+    expect(String(result.error)).toBeTruthy();
+  });
+
+  it("clears an account's allow entries and requests (and a whole channel when unscoped)", () => {
+    const openclawDir = createTempOpenclawDir();
+    const databasePath = withStateDb(openclawDir, (db) => {
+      createPairingTables(db);
+      db.prepare(
+        "INSERT INTO channel_pairing_allow_entries (channel_key, account_id, entry) VALUES (?, ?, ?)",
+      ).run("telegram", "work", "111");
+      db.prepare(
+        "INSERT INTO channel_pairing_allow_entries (channel_key, account_id, entry) VALUES (?, ?, ?)",
+      ).run("telegram", "default", "222");
+      db.prepare(
+        "INSERT INTO channel_pairing_requests (channel_key, account_id, request_id, code) VALUES (?, ?, ?, ?)",
+      ).run("telegram", "work", "r1", "AAAA1111");
+    });
+
+    expect(
+      deleteChannelPairingRows({ openclawDir, channel: "telegram", accountId: "Work" }),
+    ).toEqual({ ok: true, allowEntriesDeleted: 1, requestsDeleted: 1 });
+
+    expect(deleteChannelPairingRows({ openclawDir, channel: "telegram" })).toEqual({
+      ok: true,
+      allowEntriesDeleted: 1,
+      requestsDeleted: 0,
+    });
+
+    const db = new DatabaseSync(databasePath, { readOnly: true });
+    try {
+      expect(db.prepare("SELECT COUNT(*) AS n FROM channel_pairing_allow_entries").get().n).toBe(0);
+      expect(db.prepare("SELECT COUNT(*) AS n FROM channel_pairing_requests").get().n).toBe(0);
+    } finally {
+      db.close();
+    }
   });
 });
