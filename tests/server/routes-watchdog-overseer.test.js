@@ -92,8 +92,16 @@ describe("POST /api/watchdog/overseer/review", () => {
       ["not_steady_state", 409],
       ["disabled", 409],
       ["no_incident", 404],
+      ["incident_missing", 404],
       ["query_failed", 500],
       ["review_failed", 500],
+      // Missing-infrastructure class: the overseer can't run at all.
+      ["no_anthropic_credential", 503],
+      ["claude_not_found", 503],
+      ["home_isolation_failed", 503],
+      ["probe_failed", 503],
+      ["cli_flags_unverifiable", 503],
+      ["redaction_sources_unreadable", 503],
     ]) {
       const deps = createDeps();
       deps.watchdogOverseer.requestReview.mockResolvedValue({ ok: false, code });

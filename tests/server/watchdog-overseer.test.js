@@ -111,6 +111,7 @@ const createHarness = ({
   doctorJson = '{"ok":true}',
   logLines = null,
   nowRef = { value: kNow },
+  overrides = {},
 } = {}) => {
   const db = createFakeIncidentsDb(seed);
   const notify = vi.fn(async () => ({ ok: true }));
@@ -138,6 +139,7 @@ const createHarness = ({
     logger: { log: () => {}, error: () => {} },
     bootDelayMs: 1,
     periodicCheckMs: 60_000,
+    ...overrides,
   });
   return { overseer, db, notify, runner, nowRef };
 };
@@ -208,6 +210,25 @@ describe("sanitizeVerdictText", () => {
     // U+2028/U+2029 render as line breaks in chat clients.
     const unicodeBreaks = sanitizeVerdictText("ok\u2028🐺 forged\u2029line", 200);
     expect(unicodeBreaks).toBe("ok 🐺 forged line");
+  });
+
+  it("defangs non-http schemes, www hosts, and protocol-relative URLs", () => {
+    expect(sanitizeVerdictText("get ftp://evil.example/x", 200)).toBe(
+      "get hxxp://evil.example/x",
+    );
+    expect(sanitizeVerdictText("open tg://resolve?domain=evil", 200)).toBe(
+      "open hxxp://resolve?domain=evil",
+    );
+    expect(sanitizeVerdictText("visit www.evil.example now", 200)).toBe(
+      "visit www[.]evil.example now",
+    );
+    expect(sanitizeVerdictText("go to //evil.example/path", 200)).toBe(
+      "go to / /evil.example/path",
+    );
+    // Plain prose slashes survive.
+    expect(sanitizeVerdictText("either/or and a/b tests", 200)).toBe(
+      "either/or and a/b tests",
+    );
   });
 });
 
@@ -600,7 +621,7 @@ describe("createWatchdogOverseer", () => {
     overseer.stop();
   });
 
-  it("buildOverseerEnv isolates the spawn env: allowlist + isolated HOME + API key only", () => {
+  it("buildOverseerEnv isolates the spawn env: allowlist + isolated HOME; API key only for the review spawn", () => {
     const { overseer } = createHarness({
       env: {
         PATH: "/usr/bin",
@@ -613,7 +634,12 @@ describe("createWatchdogOverseer", () => {
         SSH_AUTH_SOCK: "/run/agent.sock",
       },
     });
-    const isolated = overseer.buildOverseerEnv();
+    // Probe spawns (--version/--help/doctor) never receive the credential:
+    // least privilege against a PATH-hijacked binary.
+    const probeEnv = overseer.buildOverseerEnv();
+    expect(probeEnv.ANTHROPIC_API_KEY).toBeUndefined();
+    expect(Object.keys(probeEnv).sort()).toEqual(["HOME", "LANG", "PATH"]);
+    const isolated = overseer.buildOverseerEnv({ withCredential: true });
     expect(isolated.PATH).toBe("/usr/bin");
     expect(isolated.LANG).toBe("C.UTF-8");
     expect(isolated.ANTHROPIC_API_KEY).toBe("sk-ant-test");
@@ -625,6 +651,40 @@ describe("createWatchdogOverseer", () => {
       "LANG",
       "PATH",
     ]);
+  });
+
+  it("fails closed when a secret-redaction source cannot be read", async () => {
+    // A throwing .env/config reader means the scrub list is incomplete —
+    // the review must be REFUSED (state unavailable + reason), not sent.
+    const { overseer, db, runner } = createHarness({
+      overrides: {
+        readEnvFile: () => {
+          throw new Error("EACCES: permission denied");
+        },
+      },
+    });
+    const result = await overseer.maybeReviewNext();
+    expect(result.skipped).toBe("redaction_sources_unreadable");
+    const record = db.getIncidentById(1).overseer.current;
+    expect(record.state).toBe("unavailable");
+    expect(record.reason).toBe("redaction_sources_unreadable");
+    // The claude -p review spawn never ran (only --version/--help probes).
+    expect(runner.calls.some((call) => (call.args || [])[0] === "-p")).toBe(false);
+    overseer.stop();
+  });
+
+  it("fails closed when the config object reader throws", async () => {
+    const { overseer, db } = createHarness({
+      overrides: {
+        getConfigObject: () => {
+          throw new Error("openclaw.json is not JSON alphaclaw can parse");
+        },
+      },
+    });
+    const result = await overseer.maybeReviewNext();
+    expect(result.skipped).toBe("redaction_sources_unreadable");
+    expect(db.getIncidentById(1).overseer.current.state).toBe("unavailable");
+    overseer.stop();
   });
 
   it("records claude_not_found when the version probe fails, and probe_failed when it throws", async () => {

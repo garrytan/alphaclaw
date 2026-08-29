@@ -491,6 +491,12 @@ describe("boot abandonment", () => {
     expect(incident.status).toBe("abandoned");
     const { events } = db.getIncidentEvents(incidentId);
     expect(incident.resolvedAt).toBe(events[events.length - 1].createdAt);
+
+    // Abandoned rows carry no close-time rollup — the LIST count must fall
+    // back to a live COUNT, never claim 0 ("events pruned") while the detail
+    // read would show events.
+    const listed = db.listIncidents().find((entry) => entry.id === incidentId);
+    expect(listed.eventCount).toBe(events.length);
   });
 
   it("is a no-op with nothing dangling and fail-open on DB errors", () => {

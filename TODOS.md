@@ -202,8 +202,14 @@
 ## P3 — Extract shared overseer-core + retrofit the upgrade overseer card to live updates
 - **What:** Pull the generic ~40% shared by `lib/server/upgrade-overseer.js` and `lib/server/watchdog-overseer.js` (env isolation, availability probe w/ SWR, `--help` flag discovery, envelope/verdict parsing, start/stop) into one module; then give the upgrade overseer card the watchdog card's freshness model (verdicts riding an existing poll instead of load-once).
 - **Why:** Two deliberate copies exist today (copy-the-skeleton won the eng review over premature extraction for exactly two consumers); the trigger for extraction is a third consumer or this retrofit.
-- **Context:** The watchdog copy already hardened several shared paths (fail-closed tool flags, output redaction) that the upgrade copy lacks — the extraction should level the upgrade overseer UP to those, not average them down. See the watchdog wave plan's cross-model notes.
+- **Context:** The watchdog copy already hardened several shared paths (fail-closed tool flags, output + tail-truncation redaction, credential-scoped spawns, fail-closed redaction sources, temp-HOME cleanup/sweep) that the upgrade copy lacks — the extraction should level the upgrade overseer UP to those, not average them down. Known upgrade-copy gaps to close then: its `alphaclaw-overseer-home-*` temp dir is never removed/swept, and its probes receive the API key. See the watchdog wave plan's cross-model notes.
 - **Effort:** M (→S with CC). **Depends on:** watchdog wave shipped.
+
+## P3 — Async manual overseer review (fire-and-return + pending polling)
+- **What:** `POST /api/watchdog/overseer/review` currently awaits the whole review in the handler (availability probe + help + doctor + up to the 5-min claude deadline). Flip to fire-and-return: respond `{ok:true, started:true}` immediately and let the existing pending-state UI (15s incidents poll renders "review in progress") carry progress; keep the mutex/rate-limit semantics.
+- **Why:** A proxy/browser timeout during a long review surfaces as a spurious failure toast while the review continues server-side; the operator's retry then hits `busy`. Flagged by the ship adversarial review; sync was the deliberate v1 choice (operator watching the card), so this is UX hardening, not a bug fix.
+- **Context:** lib/server/routes/watchdog.js review handler; lib/server/watchdog-overseer.js requestReview (rate limit now stamps only when a review actually spawns, which async must preserve).
+- **Effort:** S.
 
 ## P3 — Provisional overseer reviews of stuck-open incidents
 - **What:** Behind the same `watchdog.overseer.enabled` flag: one interim review when an incident stays open past ~10 min or hits a material event (crash_loop, config_error), superseded later by the final review; ≤2 reviews/incident total.
