@@ -1109,6 +1109,9 @@ describe("server/routes/telegram", () => {
       expect(res.body.concurrency).toEqual({
         agentMaxConcurrent: null,
         subagentMaxConcurrent: null,
+        computedMaxConcurrent: 8,
+        computedSubagentMaxConcurrent: 6,
+        resourceCap: 64,
       });
       expect(telegramApi.getChatAdministrators).not.toHaveBeenCalled();
     });
@@ -1140,6 +1143,9 @@ describe("server/routes/telegram", () => {
       expect(res.body.concurrency).toEqual({
         agentMaxConcurrent: 12,
         subagentMaxConcurrent: 10,
+        computedMaxConcurrent: 8,
+        computedSubagentMaxConcurrent: 6,
+        resourceCap: 64,
       });
       expect(telegramApi.getChatAdministrators).not.toHaveBeenCalled();
     });
@@ -1162,6 +1168,9 @@ describe("server/routes/telegram", () => {
       expect(res.body.concurrency).toEqual({
         agentMaxConcurrent: 8,
         subagentMaxConcurrent: 6,
+        computedMaxConcurrent: 8,
+        computedSubagentMaxConcurrent: 6,
+        resourceCap: 64,
       });
       expect(telegramApi.getChatAdministrators).toHaveBeenCalledWith("-100");
       const cfg = readOpenclawJson();

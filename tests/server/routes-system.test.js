@@ -454,6 +454,10 @@ describe("server/routes/system", () => {
             enabled: false,
             disableLegacyLogin: false,
           },
+          autotune: {
+            enabled: true,
+            overrides: {},
+          },
         },
         openclawChannel: null,
         syncCron: expect.objectContaining({
@@ -825,6 +829,10 @@ describe("server/routes/system", () => {
           enabled: false,
           disableLegacyLogin: false,
         },
+        autotune: {
+          enabled: true,
+          overrides: {},
+        },
       },
     });
   });
@@ -862,6 +870,10 @@ describe("server/routes/system", () => {
           team: {
             enabled: false,
             disableLegacyLogin: false,
+          },
+          autotune: {
+            enabled: true,
+            overrides: {},
           },
         },
       }),
