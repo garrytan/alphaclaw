@@ -353,4 +353,75 @@ describe("server/routes/doctor", () => {
     expect(res.status).toBe(409);
     expect(res.body.error).toBe("Doctor fix already in progress");
   });
+
+  it("returns 503 when the gateway is unavailable for a run", async () => {
+    const doctorService = createDoctorService();
+    doctorService.runDoctor.mockResolvedValue({
+      ok: false,
+      gatewayUnavailable: true,
+      reason: "gateway lifecycle is crash_loop",
+      status: {},
+    });
+    const app = createApp(doctorService);
+
+    const res = await request(app).post("/api/doctor/run").send({});
+
+    expect(res.status).toBe(503);
+    expect(res.body.gatewayUnavailable).toBe(true);
+    expect(res.body.reason).toBe("gateway lifecycle is crash_loop");
+  });
+
+  it("returns 503 when the gateway is unavailable for a fix", async () => {
+    const doctorService = createDoctorService();
+    const error = new Error("Gateway is not ready for a Doctor fix: safe mode");
+    error.gatewayUnavailable = true;
+    doctorService.requestCardFix.mockRejectedValue(error);
+    const app = createApp(doctorService);
+
+    const res = await request(app).post("/api/doctor/findings/7/fix").send({
+      sessionKey: "agent:main:doctor:42",
+    });
+
+    expect(res.status).toBe(503);
+    expect(res.body.error).toContain("safe mode");
+  });
+
+  it("reads and updates doctor settings", async () => {
+    const doctorService = createDoctorService();
+    let enabled = false;
+    const app = express();
+    app.use(express.json());
+    registerDoctorRoutes({
+      app,
+      requireAuth: (req, res, next) => next(),
+      doctorService,
+      readDoctorAutoRunEnabled: () => enabled,
+      updateDoctorAutoRunEnabled: (next) => {
+        enabled = next === true;
+        return enabled;
+      },
+    });
+
+    const initial = await request(app).get("/api/doctor/settings");
+    expect(initial.status).toBe(200);
+    expect(initial.body).toEqual({ ok: true, settings: { autoRunEnabled: false } });
+
+    const updated = await request(app)
+      .put("/api/doctor/settings")
+      .send({ autoRunEnabled: true });
+    expect(updated.status).toBe(200);
+    expect(updated.body.settings.autoRunEnabled).toBe(true);
+
+    const invalid = await request(app)
+      .put("/api/doctor/settings")
+      .send({ autoRunEnabled: "yes" });
+    expect(invalid.status).toBe(400);
+  });
+
+  it("reads settings as disabled when no accessor is wired", async () => {
+    const app = createApp(createDoctorService());
+    const res = await request(app).get("/api/doctor/settings");
+    expect(res.status).toBe(200);
+    expect(res.body.settings.autoRunEnabled).toBe(false);
+  });
 });

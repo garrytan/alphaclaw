@@ -1488,4 +1488,404 @@ describe("server/doctor-service", () => {
       expect(second.alreadyRunning).toBeUndefined();
     });
   });
+
+  describe("liveness integration (fail-fast, notifications, auto-run)", () => {
+    let workspaceRoot;
+    beforeEach(() => {
+      workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-liveness-"));
+      fs.writeFileSync(path.join(workspaceRoot, "AGENTS.md"), "# Guidance\n", "utf8");
+    });
+
+    const settle = () => new Promise((resolve) => setImmediate(resolve));
+
+    const makeService = ({
+      readiness = { ok: true, reason: "" },
+      notify = null,
+      runDoctorLintJson = null,
+      readAutoRunEnabled = null,
+      autoRunTickMs = 999999,
+      meta = new Map(),
+      runsByIdCards = new Map(),
+      summaries = [],
+      llmCards = [],
+    } = {}) => {
+      const { createDoctorService } = loadDoctorService();
+      const created = [];
+      const runs = new Map();
+      const service = createDoctorService({
+        clawCmd: vi.fn(async () => ({
+          ok: true,
+          stdout: JSON.stringify({ summary: "done", cards: llmCards }),
+        })),
+        listDoctorRuns: () => summaries,
+        listDoctorCards: () => [],
+        createDoctorRun: (run) => {
+          created.push(run);
+          const id = 100 + created.length;
+          runs.set(id, { id, status: "running", ...run });
+          return id;
+        },
+        completeDoctorRun: ({ id, status, summary }) => {
+          const run = runs.get(id) || { id };
+          runs.set(id, { ...run, status, summary });
+        },
+        insertDoctorCards: ({ runId, cards }) => {
+          runsByIdCards.set(runId, [...(runsByIdCards.get(runId) || []), ...cards]);
+        },
+        getDoctorRun: (id) => runs.get(Number(id)) || null,
+        getDoctorCardsByRunId: (id) => runsByIdCards.get(Number(id)) || [],
+        getDoctorCard: () => null,
+        updateDoctorCardStatus: () => null,
+        getInitialWorkspaceBaseline: () => null,
+        setInitialWorkspaceBaseline: () => null,
+        workspaceRoot,
+        managedRoot: workspaceRoot,
+        computeSnapshotAsync: fastComputeSnapshotAsync,
+        getGatewayReadiness: () => readiness,
+        notify,
+        runDoctorLintJson,
+        readAutoRunEnabled,
+        autoRunTickMs,
+        getDoctorMeta: (key) => (meta.has(key) ? { key, value: meta.get(key) } : null),
+        setDoctorMeta: ({ key, value }) => {
+          meta.set(key, value);
+        },
+      });
+      return { service, created, runsByIdCards, meta };
+    };
+
+    it("fails fast with gatewayUnavailable on the LLM branch only", async () => {
+      const { service, created } = makeService({
+        readiness: { ok: false, reason: "gateway is unhealthy" },
+      });
+      const result = await service.runDoctor();
+      expect(result).toMatchObject({
+        ok: false,
+        gatewayUnavailable: true,
+        reason: "gateway is unhealthy",
+      });
+      // No running run was created.
+      expect(created).toHaveLength(0);
+    });
+
+    it("still serves fingerprint reuse while the gateway is degraded", async () => {
+      const { computeWorkspaceSnapshot } = require("../../lib/server/doctor/workspace-fingerprint");
+      const fingerprint = computeWorkspaceSnapshot(workspaceRoot).fingerprint;
+      const { service } = makeService({
+        readiness: { ok: false, reason: "gateway is unhealthy" },
+        summaries: [
+          {
+            id: 1,
+            status: "completed",
+            workspaceFingerprint: fingerprint,
+            promptVersion: "doctor-v2",
+            contextProfile: "stable-2026.7",
+            openclawVersion: "",
+            completedAt: new Date().toISOString(),
+            startedAt: new Date().toISOString(),
+          },
+        ],
+      });
+      const result = await service.runDoctor();
+      expect(result.reusedPreviousRun).toBe(true);
+    });
+
+    it("rejects card fixes with a gatewayUnavailable error while degraded", async () => {
+      const { createDoctorService } = loadDoctorService();
+      const service = createDoctorService({
+        clawCmd: vi.fn(),
+        listDoctorRuns: () => [],
+        listDoctorCards: () => [],
+        createDoctorRun: () => 1,
+        completeDoctorRun: vi.fn(),
+        insertDoctorCards: vi.fn(),
+        getDoctorRun: () => null,
+        getDoctorCardsByRunId: () => [],
+        getDoctorCard: () => ({ id: 5, fixPrompt: "fix it", status: "open" }),
+        updateDoctorCardStatus: () => null,
+        startDoctorCardFix: vi.fn(),
+        cancelDoctorCardFix: vi.fn(),
+        workspaceRoot,
+        managedRoot: workspaceRoot,
+        computeSnapshotAsync: fastComputeSnapshotAsync,
+        getGatewayReadiness: () => ({ ok: false, reason: "safe mode" }),
+      });
+      await expect(
+        service.requestCardFix({ cardId: 5, sessionKey: "agent:main:main" }),
+      ).rejects.toMatchObject({ gatewayUnavailable: true });
+    });
+
+    it("completes the run when the bridge fails but merges bridge cards when it works", async () => {
+      const failing = makeService({
+        runDoctorLintJson: async () => {
+          throw new Error("CLI missing");
+        },
+      });
+      const failResult = await failing.service.runDoctor();
+      await settle();
+      const failRun = failing.service.getDoctorRun(failResult.runId);
+      expect(failRun.status).toBe("completed");
+
+      const working = makeService({
+        runDoctorLintJson: async () => ({
+          ok: false,
+          code: 1,
+          truncated: false,
+          stdout: JSON.stringify({
+            ok: false,
+            findings: [
+              { checkId: "core/doctor/gateway-config", severity: "error", message: "bad token" },
+            ],
+          }),
+        }),
+      });
+      const okResult = await working.service.runDoctor();
+      await settle();
+      const cards = working.runsByIdCards.get(okResult.runId) || [];
+      expect(
+        cards.some((card) => card.sourceKey === "ocd:core/doctor/gateway-config:0"),
+      ).toBe(true);
+    });
+
+    it("notifies once on new non-bridge P0s with a deterministic outbox id", async () => {
+      const notify = vi.fn(() => Promise.resolve({ ok: true }));
+      const meta = new Map();
+      const { service } = makeService({
+        notify,
+        meta,
+        llmCards: [
+          {
+            priority: "P0",
+            category: "workspace state",
+            title: "Dangerous drift",
+            summary: "s",
+            recommendation: "r",
+            fixPrompt: "f",
+            status: "open",
+          },
+        ],
+      });
+      const result = await service.runDoctor();
+      await settle();
+      expect(notify).toHaveBeenCalledTimes(1);
+      const [message, opts] = notify.mock.calls[0];
+      expect(message).toContain("🐺 *AlphaClaw Watchdog*");
+      expect(message).toContain("Drift Doctor found 1 new P0 finding");
+      expect(message).toContain("Dangerous drift");
+      expect(opts).toEqual({ id: `doctor-run-${result.runId}-p0` });
+      expect(meta.get("last_notified_run_id")).toBe(result.runId);
+    });
+
+    it("does not notify for bridge-sourced P0s", async () => {
+      const notify = vi.fn(() => Promise.resolve({ ok: true }));
+      const { service } = makeService({
+        notify,
+        runDoctorLintJson: async () => ({
+          ok: false,
+          code: 1,
+          truncated: false,
+          stdout: JSON.stringify({
+            ok: false,
+            findings: [{ checkId: "x/y", severity: "error", message: "upstream boom" }],
+          }),
+        }),
+      });
+      await service.runDoctor();
+      await settle();
+      expect(notify).not.toHaveBeenCalled();
+    });
+
+    it("treats a P1→P0 escalation as new against the baseline", async () => {
+      const notify = vi.fn(() => Promise.resolve({ ok: true }));
+      const runsByIdCards = new Map();
+      // Baseline run 50 carries the same title at P1.
+      runsByIdCards.set(50, [
+        { priority: "P1", title: "Dangerous drift", source: "llm", sourceKey: "" },
+      ]);
+      const { service } = makeService({
+        notify,
+        runsByIdCards,
+        summaries: [
+          {
+            id: 50,
+            status: "completed",
+            engine: "gateway_agent",
+            workspaceFingerprint: "other",
+            promptVersion: "doctor-v2",
+            contextProfile: "stable-2026.7",
+            openclawVersion: "",
+            completedAt: new Date().toISOString(),
+            startedAt: new Date().toISOString(),
+          },
+        ],
+        llmCards: [
+          {
+            priority: "P0",
+            category: "workspace state",
+            title: "Dangerous drift",
+            summary: "s",
+            recommendation: "r",
+            fixPrompt: "f",
+            status: "open",
+          },
+        ],
+      });
+      await service.runDoctor();
+      await settle();
+      expect(notify).toHaveBeenCalledTimes(1);
+    });
+
+    it("never uses an import run as the notification baseline", async () => {
+      const notify = vi.fn(() => Promise.resolve({ ok: true }));
+      const runsByIdCards = new Map();
+      // The import run already saw this P0 — but imports are not baselines.
+      runsByIdCards.set(60, [
+        { priority: "P0", title: "Dangerous drift", source: "llm", sourceKey: "" },
+      ]);
+      const { service } = makeService({
+        notify,
+        runsByIdCards,
+        summaries: [
+          {
+            id: 60,
+            status: "completed",
+            engine: "manual_import",
+            workspaceFingerprint: "other",
+            promptVersion: "doctor-v2",
+            contextProfile: "stable-2026.7",
+            openclawVersion: "",
+            completedAt: new Date().toISOString(),
+            startedAt: new Date().toISOString(),
+          },
+        ],
+        llmCards: [
+          {
+            priority: "P0",
+            category: "workspace state",
+            title: "Dangerous drift",
+            summary: "s",
+            recommendation: "r",
+            fixPrompt: "f",
+            status: "open",
+          },
+        ],
+      });
+      await service.runDoctor();
+      await settle();
+      expect(notify).toHaveBeenCalledTimes(1);
+    });
+
+    it("skips the auto-run tick for every guard reason and runs when triggered", async () => {
+      vi.useFakeTimers();
+      try {
+        const notify = vi.fn(() => Promise.resolve({ ok: true }));
+        const meta = new Map();
+        let autoRunEnabled = false;
+        const { service } = makeService({
+          notify,
+          meta,
+          readAutoRunEnabled: () => autoRunEnabled,
+          autoRunTickMs: 1000,
+        });
+        // Disabled → skip.
+        await vi.advanceTimersByTimeAsync(1100 + 60000);
+        expect(service.buildStatus().autoRun.lastSkipReason).toBe("disabled");
+
+        // Enabled but nothing stale/changed → not-stale (no completed run yet
+        // means needsInitialRun; stale=true with no baseline → meaningful
+        // changes false → "no-meaningful-change").
+        autoRunEnabled = true;
+        await vi.advanceTimersByTimeAsync(1100 + 60000);
+        const reason = service.buildStatus().autoRun.lastSkipReason;
+        expect(["no-meaningful-change", "not-stale"]).toContain(reason);
+
+        // Environment signature change → triggers a run.
+        meta.set("last_env_signature", "different-signature");
+        await vi.advanceTimersByTimeAsync(1100 + 60000);
+        // Let the dispatched run settle on real microtasks.
+        await vi.runOnlyPendingTimersAsync();
+        expect(meta.get("last_auto_run")?.outcome).toBe("ran");
+        // Completion notification for the scheduled run.
+        expect(
+          notify.mock.calls.some(([message]) =>
+            message.includes("Scheduled Drift Doctor scan finished"),
+          ),
+        ).toBe(true);
+
+        // Immediately after: throttled by the 6h minimum interval.
+        meta.set("last_env_signature", "another-signature");
+        await vi.advanceTimersByTimeAsync(1100 + 60000);
+        expect(service.buildStatus().autoRun.lastSkipReason).toBe("throttled");
+
+        service.dispose();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("backs off after a failed auto-run until inputs change", async () => {
+      vi.useFakeTimers();
+      try {
+        const meta = new Map();
+        meta.set("last_env_signature", "changed");
+        // A last auto-run that failed 7h ago with the CURRENT signature: the
+        // 6h throttle has passed but the 24h failure backoff holds.
+        const { service } = makeService({
+          readAutoRunEnabled: () => true,
+          autoRunTickMs: 1000,
+          readiness: { ok: true, reason: "" },
+          meta,
+        });
+        // Compute the live signature by triggering one tick first (record it).
+        await vi.advanceTimersByTimeAsync(1100 + 60000);
+        await vi.runOnlyPendingTimersAsync();
+        const recorded = meta.get("last_auto_run");
+        expect(recorded?.outcome).toBe("ran");
+        // Rewrite history: same signature, failed, 7h ago.
+        meta.set("last_auto_run", {
+          at: new Date(Date.now() - 7 * 60 * 60 * 1000).toISOString(),
+          outcome: "failed",
+          envSignature: recorded.envSignature,
+        });
+        meta.set("last_env_signature", "changed-again");
+        await vi.advanceTimersByTimeAsync(1100 + 60000);
+        expect(service.buildStatus().autoRun.lastSkipReason).toBe("backoff");
+        service.dispose();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("survives a throwing tick and clears the interval on dispose", async () => {
+      vi.useFakeTimers();
+      try {
+        const { service } = makeService({
+          readAutoRunEnabled: () => {
+            throw new Error("config exploded");
+          },
+          autoRunTickMs: 1000,
+        });
+        await vi.advanceTimersByTimeAsync(1100 + 60000);
+        // readAutoRunEnabledSafe catches → "disabled", not "error".
+        expect(service.buildStatus().autoRun.lastSkipReason).toBe("disabled");
+        service.dispose();
+        const before = service.buildStatus().autoRun.lastCheckAt;
+        await vi.advanceTimersByTimeAsync(5000 + 120000);
+        expect(service.buildStatus().autoRun.lastCheckAt).toBe(before);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("exposes gateway readiness and auto-run state on the status payload", () => {
+      const { service } = makeService({
+        readiness: { ok: false, reason: "crash loop" },
+        readAutoRunEnabled: () => true,
+      });
+      const status = service.buildStatus();
+      expect(status.gatewayReadiness).toEqual({ ok: false, reason: "crash loop" });
+      expect(status.autoRun).toMatchObject({ enabled: true });
+      service.dispose();
+    });
+  });
 });

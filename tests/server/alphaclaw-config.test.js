@@ -55,6 +55,9 @@ describe("server/alphaclaw-config", () => {
       team: {
         enabled: false,
       },
+      doctor: {
+        autoRun: { enabled: false },
+      },
     });
   });
 
@@ -89,6 +92,9 @@ describe("server/alphaclaw-config", () => {
       },
       team: {
         enabled: false,
+      },
+      doctor: {
+        autoRun: { enabled: false },
       },
     });
   });

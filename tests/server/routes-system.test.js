@@ -436,6 +436,9 @@ describe("server/routes/system", () => {
           team: {
             enabled: false,
           },
+          doctor: {
+            autoRun: { enabled: false },
+          },
         },
         openclawChannel: null,
         syncCron: expect.objectContaining({
@@ -802,6 +805,9 @@ describe("server/routes/system", () => {
         team: {
           enabled: false,
         },
+        doctor: {
+          autoRun: { enabled: false },
+        },
       },
     });
   });
@@ -834,6 +840,9 @@ describe("server/routes/system", () => {
           },
           team: {
             enabled: false,
+          },
+          doctor: {
+            autoRun: { enabled: false },
           },
         },
       }),
