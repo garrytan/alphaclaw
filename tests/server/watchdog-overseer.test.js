@@ -196,6 +196,17 @@ describe("sanitizeVerdictText", () => {
     const forged = sanitizeVerdictText("ok\n🐺 *AlphaClaw Watchdog*\nfake alert");
     expect(forged).not.toContain("\n");
   });
+
+  it("neutralizes nested markdown links to a fixpoint and unicode line separators", () => {
+    // One-pass stripping would reassemble [[a](b)](c) into a live link.
+    const nested = sanitizeVerdictText("[[click](https://a)](https://b)", 200);
+    expect(nested).not.toMatch(/\[[^\]]*\]\([^)]*\)/);
+    const deep = sanitizeVerdictText("[[[x](1)](2)](3)", 200);
+    expect(deep).not.toMatch(/\[[^\]]*\]\([^)]*\)/);
+    // U+2028/U+2029 render as line breaks in chat clients.
+    const unicodeBreaks = sanitizeVerdictText("ok\u2028🐺 forged\u2029line", 200);
+    expect(unicodeBreaks).toBe("ok 🐺 forged line");
+  });
 });
 
 describe("parseVerdict", () => {
@@ -288,6 +299,56 @@ describe("createWatchdogOverseer", () => {
     expect(spawnedInput).toBeTruthy();
     expect(spawnedInput).not.toContain(kSecret);
     expect(spawnedInput).toContain("UNTRUSTED");
+  });
+
+  it("redacts the persisted transcript tail (whole-output invariant, incl. the failure path)", async () => {
+    // Success path: transcript echoes a secret-shaped env value.
+    const chatty = createFakeRunner();
+    const originalRun = chatty.runStreamed;
+    chatty.runStreamed = async (options) => {
+      const result = await originalRun(options);
+      if (options.args?.[0] === "-p") {
+        return { ...result, tail: `${result.tail}\nleaked ${kSecret}` };
+      }
+      return result;
+    };
+    const success = createHarness({ runner: chatty });
+    await success.overseer.maybeReviewNext();
+    expect(
+      success.db.getIncidentById(1).overseer.current.transcriptTail,
+    ).not.toContain(kSecret);
+
+    // Failure path (spawn dies mid-review): its transcriptTail is persisted too.
+    const failing = createFakeRunner();
+    const originalFailingRun = failing.runStreamed;
+    failing.runStreamed = async (options) => {
+      if (options.args?.[0] === "-p") {
+        return { ok: false, error: "boom", tail: `partial ${kSecret} output` };
+      }
+      return originalFailingRun(options);
+    };
+    const failure = createHarness({ runner: failing });
+    await failure.overseer.maybeReviewNext();
+    const failed = failure.db.getIncidentById(1).overseer.current;
+    expect(failed.state).toBe("failed");
+    expect(failed.transcriptTail).not.toContain(kSecret);
+  });
+
+  it("keeps live degradedReason out of the trusted status section (semi-trusted only)", async () => {
+    let spawnedInput = null;
+    const runner = createFakeRunner({
+      onSpawn: (options) => {
+        if (options.args?.[0] === "-p") spawnedInput = options.input;
+      },
+    });
+    const { overseer } = createHarness({
+      runner,
+      status: { health: "healthy", degradedReason: "gateway-influenced text" },
+    });
+    await overseer.maybeReviewNext();
+    const trustedSection = spawnedInput.split("=== INCIDENT EVENTS")[0];
+    expect(trustedSection).not.toContain("gateway-influenced text");
+    expect(spawnedInput).toContain("degradedReasonNow");
   });
 
   it("redacts and sanitizes model output before persisting", async () => {
@@ -498,6 +559,14 @@ describe("createWatchdogOverseer", () => {
         code: "not_steady_state",
       });
     });
+  });
+
+  it("normalizes in-review refusals to a code so the route's 409 body is never empty", async () => {
+    const runner = createFakeRunner({ helpText: "--output-format only" });
+    const { overseer } = createHarness({ runner });
+    const result = await overseer.requestReview({ incidentId: 1 });
+    expect(result.ok).toBe(false);
+    expect(result.code).toBe("cli_flags_unverifiable");
   });
 
   it("suppresses notification when the watchdog notifications kill switch is off", async () => {

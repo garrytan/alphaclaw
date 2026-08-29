@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 
 const loadIncidentHelpers = () =>
   import("../../lib/public/js/components/watchdog-tab/incidents/helpers.js");
@@ -7,30 +9,36 @@ const loadTabHelpers = () =>
 
 const kNow = Date.parse("2026-08-29T12:00:00Z");
 
-// The documented watchdog event-type list (lib/server/watchdog.js logEvent
-// call sites). lib/server (CJS) and lib/public (browser ESM) share no
-// constants module, so this mirrored list + the assertion below is the
-// drift pin.
-const kDocumentedEventTypes = [
-  "health_check",
-  "crash",
-  "crash_loop",
-  "restart",
-  "repair",
-  "recovery",
-  "config_error",
-  "safe_mode",
-  "safe_mode_resume",
-  "channel_rollback",
-  "notification",
-];
+// The REAL drift pin: extract the event-type literals from the watchdog's own
+// logEvent()/insertWatchdogEvent-adjacent call sites (lib/server is CJS, this
+// bundle is browser ESM — no shared constants module exists). A hardcoded
+// mirror list here would only test itself.
+const extractServerEventTypes = () => {
+  const source = readFileSync(
+    fileURLToPath(new URL("../../lib/server/watchdog.js", import.meta.url)),
+    "utf8",
+  );
+  const types = new Set();
+  for (const match of source.matchAll(/logEvent\(\s*"([a-z_]+)"/g)) {
+    types.add(match[1]);
+  }
+  // The notification event type is written by the notify path with a variable
+  // first arg in some shapes; assert it explicitly if present in source.
+  if (source.includes('"notification"')) types.add("notification");
+  return [...types];
+};
 
 describe("describeEvent", () => {
-  it("labels every documented watchdog event type (drift pin)", async () => {
+  it("labels every event type the watchdog actually logs (source-extracted drift pin)", async () => {
     const { kWatchdogEventLabels } = await loadIncidentHelpers();
-    expect(Object.keys(kWatchdogEventLabels).sort()).toEqual(
-      [...kDocumentedEventTypes].sort(),
-    );
+    const serverTypes = extractServerEventTypes();
+    expect(serverTypes.length).toBeGreaterThanOrEqual(10);
+    for (const eventType of serverTypes) {
+      expect(
+        Object.keys(kWatchdogEventLabels),
+        `label map is missing "${eventType}" (logged by lib/server/watchdog.js)`,
+      ).toContain(eventType);
+    }
   });
 
   it("humanizes unknown/foreign event types instead of failing", async () => {
@@ -170,6 +178,25 @@ describe("mergeIncidentPages", () => {
       [{ id: 7 }, { id: 6 }, null, { id: "bad" }],
     ]);
     expect(merged.map((incident) => incident.id)).toEqual([9, 8, 7, 6]);
+  });
+});
+
+describe("hash routing with deep-link queries", () => {
+  it("getHashRouterPath strips the query so /#/watchdog?incident=5 still matches the route", async () => {
+    const originalWindow = globalThis.window;
+    globalThis.window = { location: { hash: "#/watchdog?incident=5" } };
+    try {
+      const { getHashRouterPath } = await import(
+        "../../lib/public/js/hooks/use-hash-location.js"
+      );
+      expect(getHashRouterPath()).toBe("/watchdog");
+      globalThis.window.location.hash = "#/watchdog";
+      expect(getHashRouterPath()).toBe("/watchdog");
+      globalThis.window.location.hash = "";
+      expect(getHashRouterPath()).toBe("/general");
+    } finally {
+      globalThis.window = originalWindow;
+    }
   });
 });
 

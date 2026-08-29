@@ -88,11 +88,16 @@ describe("classifyEvent transition table", () => {
         details: { recovered: true },
       }),
     ).toBe("close_safe_mode");
+    // channel_rollback OPENS (EX_CONFIG in-window goes straight to rollback
+    // with no crash/config_error event); when an incident is already open the
+    // open decision appends via the active branch, preserving old behavior.
+    expect(classifyEvent({ eventType: "channel_rollback", status: "requested" })).toBe(
+      "open",
+    );
     for (const eventType of [
       "notification",
       "restart",
       "repair",
-      "channel_rollback",
       "crash_loop",
       "safe_mode_resume",
       "totally_unknown_type",
@@ -292,6 +297,130 @@ describe("incident lifecycle through the wrapped sink", () => {
     expect(insert(crashEvent())).toBe(0);
     // Rollback: no orphaned incident row.
     expect(db.listIncidents()).toEqual([]);
+  });
+});
+
+describe("resilience fixes (adversarial-review regressions)", () => {
+  it("a failed close keeps the incident active and retries on the next close event — no double insert, no orphan", () => {
+    initContext();
+    let failCloses = 1;
+    const flakyDb = {
+      ...db,
+      resolveIncident: (...args) => {
+        if (failCloses > 0) {
+          failCloses -= 1;
+          throw new Error("SQLITE_BUSY");
+        }
+        return db.resolveIncident(...args);
+      },
+    };
+    const tracker = createWatchdogIncidentTracker({
+      db: flakyDb,
+      getStatus: () => ({ health: "healthy" }),
+      getResourceSample: () => null,
+      logger: quietLogger,
+    });
+    const insert = tracker.wrapInsertEvent(db.insertWatchdogEvent);
+    insert(crashEvent());
+    const incidentId = tracker.getActiveIncidentId();
+    // First close attempt fails AFTER the recovery event persisted.
+    const eventId = insert(recoveryEvent());
+    expect(eventId).toBeGreaterThan(0);
+    // Exactly ONE recovery row — the old blanket catch double-inserted here.
+    const { events } = db.getIncidentEvents(incidentId);
+    expect(events.filter((event) => event.eventType === "recovery")).toHaveLength(1);
+    // Incident stayed active; the next healthy tick retries and closes it.
+    expect(tracker.getActiveIncidentId()).toBe(incidentId);
+    insert({
+      eventType: "health_check",
+      source: "health_timer",
+      status: "ok",
+      details: { ok: true },
+    });
+    expect(tracker.getActiveIncidentId()).toBe(null);
+    expect(db.getIncidentById(incidentId).status).toBe("resolved");
+  });
+
+  it("adopts an orphaned open row instead of bricking on the one-open unique index", () => {
+    initContext();
+    // Simulate a prior process/tracker error leaving an unowned open row.
+    const orphanId = db.insertIncident({ incidentKey: "gateway_degraded" });
+    const tracker = createTracker();
+    const insert = wrapped(tracker);
+    const eventId = insert(crashEvent());
+    expect(eventId).toBeGreaterThan(0);
+    expect(tracker.getActiveIncidentId()).toBe(orphanId);
+    insert(recoveryEvent());
+    const incident = db.getIncidentById(orphanId);
+    expect(incident.status).toBe("resolved");
+    // No second incident row was created.
+    expect(db.listIncidents()).toHaveLength(1);
+  });
+
+  it("safe-mode incidents survive routine healthy probes and close only on safe_mode recovered", () => {
+    initContext();
+    const tracker = createTracker();
+    const insert = wrapped(tracker);
+    insert({
+      eventType: "safe_mode",
+      source: "health_timer",
+      status: "failed",
+      details: { suppressed: ["telegram"] },
+    });
+    const incidentId = tracker.getActiveIncidentId();
+    // The gateway's /health stays green in safe mode — routine ok probes and
+    // even a recovery event must NOT close a safe-mode incident.
+    insert({
+      eventType: "health_check",
+      source: "health_timer",
+      status: "ok",
+      details: { ok: true },
+    });
+    insert(recoveryEvent());
+    expect(tracker.getActiveIncidentId()).toBe(incidentId);
+    insert({
+      eventType: "safe_mode",
+      source: "resume_channels",
+      status: "ok",
+      details: { recovered: true },
+    });
+    expect(tracker.getActiveIncidentId()).toBe(null);
+    expect(db.getIncidentById(incidentId).status).toBe("resolved");
+  });
+
+  it("a channel_rollback with no open incident opens a critical one (EX_CONFIG in-window path)", () => {
+    initContext();
+    const tracker = createTracker();
+    const insert = wrapped(tracker);
+    insert({
+      eventType: "channel_rollback",
+      source: "exit_event",
+      status: "requested",
+      details: { reason: "config_error", exitCode: 78 },
+    });
+    const incidentId = tracker.getActiveIncidentId();
+    expect(incidentId).toBeGreaterThan(0);
+    insert(recoveryEvent());
+    const incident = db.getIncidentById(incidentId);
+    expect(incident.incidentKey).toBe("channel_rollback");
+    expect(incident.summary.severity).toBe("critical");
+  });
+
+  it("GET events projection stays byte-compatible on a REAL stamped row", () => {
+    initContext();
+    const tracker = createTracker();
+    const insert = wrapped(tracker);
+    insert(crashEvent());
+    const [row] = db.getRecentEvents({ limit: 1 });
+    expect(Object.keys(row).sort()).toEqual([
+      "correlationId",
+      "createdAt",
+      "details",
+      "eventType",
+      "id",
+      "source",
+      "status",
+    ]);
   });
 });
 

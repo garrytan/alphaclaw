@@ -136,6 +136,23 @@ describe("deriveWatchdogPhase totality", () => {
     expect(deriveWatchdogPhase({}, kNow)).toBe("stopped");
   });
 
+  it("a stale 'restarting' lifecycle with bad health never masks the failure as a planned restart", () => {
+    // Unbounded lifecycle==="restarting" used to map to the reassuring
+    // info-tone expected_restart forever; degraded/unhealthy must win.
+    expect(
+      deriveWatchdogPhase(
+        { ...base, lifecycle: "restarting", health: "degraded" },
+        kNow,
+      ),
+    ).toBe("degraded_retrying");
+    expect(
+      deriveWatchdogPhase(
+        { ...base, lifecycle: "restarting", health: "unknown" },
+        kNow,
+      ),
+    ).toBe("expected_restart");
+  });
+
   it("expected restart window expires by timestamp", () => {
     const snapshot = {
       ...base,
