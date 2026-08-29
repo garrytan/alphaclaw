@@ -568,7 +568,7 @@ describe("frontend/upgrade-tab view", () => {
 
     const text = treeText(tree);
     expect(text).toContain("2026.7.2 rolled back at");
-    expect(text).toContain("Trigger: crash_loop, exit code 1");
+    expect(text).toContain("Trigger: crash loop, exit code 1");
 
     const clearButton = findActionButtonByLabel(tree, "Clear blocklist entry");
     clearButton.props.onClick();
@@ -962,7 +962,7 @@ describe("frontend/upgrade-tab view", () => {
 
     const text = treeText(tree);
     expect(text).toContain("blocklisted");
-    expect(text).toContain("trigger: crash_loop");
+    expect(text).toContain("trigger: crash loop");
     expect(text).toContain("exit code 1");
 
     const clearButton = findAllByType(tree, ActionButton).find(
