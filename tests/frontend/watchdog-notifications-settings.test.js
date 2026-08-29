@@ -44,6 +44,10 @@ vi.mock("preact/hooks", () => {
 vi.mock("../../lib/public/js/lib/api.js", () => ({
   fetchOpenclawNotifications: vi.fn(),
   updateOpenclawNotifications: vi.fn(),
+  fetchWatchdogSettings: vi.fn(),
+  updateWatchdogSettings: vi.fn(),
+  triggerWatchdogRepair: vi.fn(),
+  resumeWatchdogChannels: vi.fn(),
 }));
 
 vi.mock("../../lib/public/js/components/toast.js", () => ({
@@ -60,6 +64,7 @@ import {
   kDefaultRoutingNote,
 } from "../../lib/public/js/components/watchdog-tab/settings/index.js";
 import { InfoTooltip } from "../../lib/public/js/components/info-tooltip.js";
+import { InlineErrorChip } from "../../lib/public/js/components/inline-error-chip.js";
 import { Tooltip } from "../../lib/public/js/components/tooltip.js";
 
 const harness = preactHooks.__harness;
@@ -253,6 +258,47 @@ describe("frontend/watchdog update-notification settings", () => {
     await findButtonByText(tree, "Save").props.onclick();
 
     expect(showToast).toHaveBeenCalledWith("Store not available", "error");
+  });
+
+  it("renders the editor frame with disabled controls while loading — never a hostage", () => {
+    api.fetchOpenclawNotifications.mockReturnValue(new Promise(() => {}));
+    const tree = renderSection();
+
+    const text = treeText(tree);
+    expect(text).toContain("Loading...");
+    const selects = findAllByType(tree, "select");
+    expect(selects.length).toBe(1); // frame present pre-fetch
+    expect(selects[0].props.disabled).toBe(true);
+    expect(findButtonByText(tree, "Save").props.disabled).toBe(true);
+    expect(findButtonByText(tree, "Add target").props.disabled).toBe(true);
+    // The unknown default routing is not presented as fact mid-load.
+    expect(text).not.toContain(kDefaultRoutingNote);
+  });
+
+  it("keeps the editor visible on load failure with an inline error + Retry", async () => {
+    api.fetchOpenclawNotifications.mockRejectedValue(new Error("offline"));
+    let tree = await hydrateSection();
+
+    const chips = findAllByType(tree, InlineErrorChip);
+    expect(chips.length).toBe(1);
+    expect(treeText(tree)).toContain("Couldn't load notification settings.");
+    const selects = findAllByType(tree, "select");
+    expect(selects.length).toBe(1); // editor frame still rendered
+    expect(selects[0].props.disabled).toBe(true);
+    expect(findButtonByText(tree, "Save").props.disabled).toBe(true);
+    expect(treeText(tree)).not.toContain(kDefaultRoutingNote);
+
+    // Retry re-runs the load and re-enables the controls.
+    api.fetchOpenclawNotifications.mockResolvedValue({
+      ok: true,
+      notifications: { preferredChannel: "slack", adminTargets: [] },
+    });
+    chips[0].props.onRetry();
+    tree = await hydrateSection();
+    expect(findAllByType(tree, InlineErrorChip).length).toBe(0);
+    const reloadedSelect = findAllByType(tree, "select")[0];
+    expect(reloadedSelect.props.disabled).toBe(false);
+    expect(reloadedSelect.props.value).toBe("slack");
   });
 
   it("relocates the test-notification button next to the section", () => {
