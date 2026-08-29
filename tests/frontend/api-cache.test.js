@@ -4,6 +4,7 @@ import {
   getCached,
   getCachedAt,
   invalidateCache,
+  invalidateCachePrefix,
   setCached,
 } from "../../lib/public/js/lib/api-cache.js";
 
@@ -62,6 +63,42 @@ describe("frontend/api-cache", () => {
       );
     } finally {
       vi.unstubAllGlobals();
+    }
+  });
+
+  it("hydration skips and removes a corrupt persisted entry instead of aborting the rest", async () => {
+    const store = new Map([
+      ["acApiCache:/api/openclaw/catalog?bad", "{not json"],
+      [
+        "acApiCache:/api/openclaw/catalog?good",
+        JSON.stringify({ data: "survives", fetchedAt: 1 }),
+      ],
+    ]);
+    const fakeStorage = {
+      get length() {
+        return store.size;
+      },
+      key: (i) => [...store.keys()][i] ?? null,
+      getItem: (k) => (store.has(k) ? store.get(k) : null),
+      setItem: (k, v) => store.set(k, String(v)),
+      removeItem: (k) => store.delete(k),
+    };
+    vi.stubGlobal("sessionStorage", fakeStorage);
+    try {
+      vi.resetModules();
+      // Fresh module instance re-runs hydrateFromSessionStorage at load.
+      const freshCache = await import(
+        "../../lib/public/js/lib/api-cache.js"
+      );
+      expect(freshCache.getCached("/api/openclaw/catalog?good")).toBe(
+        "survives",
+      );
+      // The corrupt entry was dropped from storage so it can't break every
+      // future load.
+      expect(store.has("acApiCache:/api/openclaw/catalog?bad")).toBe(false);
+    } finally {
+      vi.unstubAllGlobals();
+      vi.resetModules();
     }
   });
 
@@ -189,5 +226,110 @@ describe("frontend/api-cache", () => {
     expect(fetcher).toHaveBeenCalledTimes(1);
     expect(otherFetcher).not.toHaveBeenCalled();
     expect(getCached("inflight-key")).toBe("shared-result");
+  });
+});
+
+// Generation guards: post-mutation refreshes must never be satisfied by — or
+// overwritten by — a request dispatched before the write.
+describe("frontend/api-cache generation guards", () => {
+  it("force does not reuse a pre-mutation in-flight promise, and the stale result cannot overwrite the fresh one", async () => {
+    let resolveOld;
+    const oldFetcher = vi.fn(
+      () => new Promise((resolve) => (resolveOld = resolve)),
+    );
+    const newFetcher = vi.fn(async () => "post-mutation");
+
+    const oldPromise = cachedFetch("gen-force-key", oldFetcher);
+    await vi.waitFor(() => expect(oldFetcher).toHaveBeenCalledTimes(1));
+
+    // A mutation happened; the caller forces a refresh. It must dispatch
+    // fresh — the in-flight GET predates the write.
+    const forcedPromise = cachedFetch("gen-force-key", newFetcher, { force: true });
+    await expect(forcedPromise).resolves.toBe("post-mutation");
+    expect(newFetcher).toHaveBeenCalledTimes(1);
+    expect(getCached("gen-force-key")).toBe("post-mutation");
+
+    // The superseded request lands late: its result must not clobber the cache.
+    resolveOld("pre-mutation");
+    await expect(oldPromise).resolves.toBe("pre-mutation");
+    expect(getCached("gen-force-key")).toBe("post-mutation");
+  });
+
+  it("a superseded request's cleanup cannot evict the replacement in-flight entry", async () => {
+    let resolveOld;
+    let resolveNew;
+    const oldFetcher = vi.fn(() => new Promise((resolve) => (resolveOld = resolve)));
+    const newFetcher = vi.fn(() => new Promise((resolve) => (resolveNew = resolve)));
+    const thirdFetcher = vi.fn(async () => "should-not-run");
+
+    const oldPromise = cachedFetch("gen-evict-key", oldFetcher);
+    const forcedPromise = cachedFetch("gen-evict-key", newFetcher, { force: true });
+    await vi.waitFor(() => expect(newFetcher).toHaveBeenCalledTimes(1));
+
+    // Old request settles first — its .finally must NOT delete the forced
+    // request's in-flight entry (identity-guarded delete).
+    resolveOld("old");
+    await oldPromise;
+
+    // A plain read while the forced request is still in flight dedupes onto
+    // it (proving the entry survived the old request's cleanup).
+    const dedupedPromise = cachedFetch("gen-evict-key", thirdFetcher);
+    resolveNew("new");
+    await expect(forcedPromise).resolves.toBe("new");
+    await expect(dedupedPromise).resolves.toBe("new");
+    expect(thirdFetcher).not.toHaveBeenCalled();
+  });
+
+  it("a setCached write (e.g. a poll) makes an older in-flight response unable to overwrite it", async () => {
+    let resolveOld;
+    const oldFetcher = vi.fn(() => new Promise((resolve) => (resolveOld = resolve)));
+    const oldPromise = cachedFetch("gen-poll-key", oldFetcher);
+    await vi.waitFor(() => expect(oldFetcher).toHaveBeenCalledTimes(1));
+
+    setCached("gen-poll-key", "poll-write");
+    resolveOld("stale");
+    await expect(oldPromise).resolves.toBe("stale");
+    expect(getCached("gen-poll-key")).toBe("poll-write");
+  });
+
+  it("invalidateCachePrefix drops every query-scoped variant of a key", async () => {
+    setCached("prefix-key", "global");
+    setCached("prefix-key?agentId=a", "scoped-a");
+    setCached("prefix-key?agentId=b", "scoped-b");
+    setCached("prefix-key-sibling", "sibling");
+
+    invalidateCachePrefix("prefix-key?");
+    expect(getCached("prefix-key")).toBe("global");
+    expect(getCached("prefix-key?agentId=a")).toBe(null);
+    expect(getCached("prefix-key?agentId=b")).toBe(null);
+
+    invalidateCachePrefix("prefix-key");
+    expect(getCached("prefix-key")).toBe(null);
+    expect(getCached("prefix-key-sibling")).toBe(null);
+
+    // Empty prefix is a no-op, never a cache wipe.
+    setCached("prefix-key", "back");
+    invalidateCachePrefix("");
+    expect(getCached("prefix-key")).toBe("back");
+  });
+
+  it("plain reads do not dedupe onto an in-flight promise made obsolete by invalidateCache", async () => {
+    let resolveOld;
+    const oldFetcher = vi.fn(() => new Promise((resolve) => (resolveOld = resolve)));
+    const freshFetcher = vi.fn(async () => "fresh");
+
+    const oldPromise = cachedFetch("gen-invalidate-key", oldFetcher);
+    await vi.waitFor(() => expect(oldFetcher).toHaveBeenCalledTimes(1));
+
+    invalidateCache("gen-invalidate-key");
+
+    const freshPromise = cachedFetch("gen-invalidate-key", freshFetcher);
+    await expect(freshPromise).resolves.toBe("fresh");
+    expect(freshFetcher).toHaveBeenCalledTimes(1);
+    expect(getCached("gen-invalidate-key")).toBe("fresh");
+
+    resolveOld("obsolete");
+    await expect(oldPromise).resolves.toBe("obsolete");
+    expect(getCached("gen-invalidate-key")).toBe("fresh");
   });
 });

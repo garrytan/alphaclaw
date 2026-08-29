@@ -533,6 +533,14 @@ textarea:focus {
   box-shadow: none;
 }
 
+/* An inert toggle must not invite clicks: the off state and the disabled
+   state are visually close in a dark theme, so the cursor carries the
+   distinction (class set by ToggleSwitch — sibling selectors can't reach
+   the wrapping label). */
+.ac-toggle-disabled {
+  cursor: not-allowed;
+}
+
 .ac-toggle-input:disabled + .ac-toggle-track + .ac-toggle-label {
   opacity: 0.6;
 }
