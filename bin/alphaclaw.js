@@ -120,6 +120,8 @@ Commands:
   telegram topic add  Add/update Telegram topic mapping by thread ID
   telegram topic create  Create a Telegram forum topic and register it
   telegram topics list  List registered, discovered, and stale Telegram topics
+  admin <METHOD> <path>  Administer AlphaClaw via the local API (requires features.agentAdmin)
+  admin manifest  Print the agent-admin operation catalog
   version   Print version
 
 Global options:
