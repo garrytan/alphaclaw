@@ -3,6 +3,10 @@ const os = require("os");
 const path = require("path");
 
 const { createTeamService } = require("../../lib/server/team-service");
+const {
+  createTeamGatewayConfig,
+} = require("../../lib/server/team/gateway-config");
+const { updateOpenclawConfig } = require("../../lib/server/openclaw-config");
 const { updateTeamConfig } = require("../../lib/server/alphaclaw-config");
 
 const kGatewayUrl = "http://127.0.0.1:18789";
@@ -19,6 +23,38 @@ const createProbeRequest = () => vi.fn(async () => ({ status: 200, error: null }
 const countHealthProbes = (request) =>
   request.mock.calls.filter((call) => String(call[0]?.url || "").endsWith("/health"))
     .length;
+
+// Roster + the real gateway.auth writer over it — the service takes both as
+// injected collaborators.
+const kMembers = [
+  { id: "m1", email: "garry@example.com", role: "admin", disabled: 0 },
+];
+const createWriterDeps = (openclawDir) => {
+  const stateFile = path.join(openclawDir, "team-state.json");
+  const teamStateStore = {
+    read: () =>
+      fs.existsSync(stateFile)
+        ? JSON.parse(fs.readFileSync(stateFile, "utf8"))
+        : {},
+    update(fn) {
+      const next = fn(this.read());
+      fs.writeFileSync(stateFile, JSON.stringify(next));
+      return next;
+    },
+  };
+  const membersStore = { listMembers: () => kMembers };
+  const writer = createTeamGatewayConfig({
+    openclawDir,
+    updateOpenclawConfig,
+    teamStateStore,
+    membersStore,
+    env: {},
+  });
+  return {
+    membersStore,
+    applyTeamGatewayConfig: () => writer.applyTeamGatewayConfig(),
+  };
+};
 
 describe("server/team-service", () => {
   describe("setEnabled transition guard", () => {
@@ -41,17 +77,18 @@ describe("server/team-service", () => {
         request,
         probeOptions: { healthAttempts: 1, healthRetryDelayMs: 0 },
         logger: kSilentLogger,
+        ...createWriterDeps(openclawDir),
       });
-      teamService.setOperators([{ id: "garry", name: "Garry" }]);
 
-      // enableTeamMode runs synchronously up to `await restartGateway()`, so
-      // the first call is parked mid-transition here.
+      // enableTeamMode reaches `await restartGateway()` after the async
+      // config write settles; the first call is parked mid-transition there.
       const firstTransition = teamService.setEnabled(true);
-      expect(restartGateway).toHaveBeenCalledTimes(1);
+      await vi.waitFor(() => expect(restartGateway).toHaveBeenCalledTimes(1));
 
       const second = await teamService.setEnabled(true);
       expect(second).toEqual({
         ok: false,
+        code: "transition_in_flight",
         error: "A team-mode transition is already running.",
       });
 
@@ -79,8 +116,8 @@ describe("server/team-service", () => {
         request,
         probeOptions: { healthAttempts: 1, healthRetryDelayMs: 0 },
         logger: kSilentLogger,
+        ...createWriterDeps(openclawDir),
       });
-      teamService.setOperators([{ id: "garry", name: "Garry" }]);
 
       await expect(teamService.setEnabled(true)).resolves.toEqual({
         ok: true,
@@ -109,8 +146,8 @@ describe("server/team-service", () => {
         request,
         probeOptions: { healthRetryDelayMs: 0 },
         logger: kSilentLogger,
+        ...createWriterDeps(openclawDir),
       });
-      teamService.setOperators([{ id: "garry", name: "Garry" }]);
       return { teamService, request };
     };
 
@@ -136,21 +173,51 @@ describe("server/team-service", () => {
       }
     });
 
-    it("re-probes after setOperators invalidates the cache", async () => {
+    it("re-probes after invalidateIdentityProbe (roster mutations)", async () => {
       const { teamService, request } = createEnabledService();
 
       await teamService.getIdentityProbe();
       await teamService.getIdentityProbe();
       expect(countHealthProbes(request)).toBe(1);
 
-      teamService.setOperators([
-        { id: "garry", name: "Garry" },
-        { id: "alice", name: "Alice" },
-      ]);
+      teamService.invalidateIdentityProbe();
 
       const refreshed = await teamService.getIdentityProbe();
       expect(countHealthProbes(request)).toBe(2);
       expect(refreshed).toEqual(expect.objectContaining({ ok: true }));
+    });
+
+    it("probes with an ACTIVE ADMIN's email first, regardless of roster order", async () => {
+      const openclawDir = createTempOpenclawDir();
+      updateTeamConfig({ openclawDir, enabled: true });
+      const request = createProbeRequest();
+      const members = [
+        { id: "m1", email: "member@example.com", role: "member", disabled: 0 },
+        { id: "m2", email: "gone@example.com", role: "admin", disabled: 1 },
+        { id: "m3", email: "admin@example.com", role: "admin", disabled: 0 },
+      ];
+      const writerDeps = createWriterDeps(openclawDir);
+      const teamService = createTeamService({
+        fsModule: fs,
+        openclawDir,
+        env: {},
+        getGatewayUrl: () => kGatewayUrl,
+        request,
+        probeOptions: { healthRetryDelayMs: 0 },
+        logger: kSilentLogger,
+        applyTeamGatewayConfig: writerDeps.applyTeamGatewayConfig,
+        membersStore: { listMembers: () => members },
+      });
+
+      await teamService.getIdentityProbe();
+      const invokeCall = request.mock.calls.find(
+        (call) => !String(call[0]?.url || "").endsWith("/health"),
+      );
+      // The disabled admin is filtered; the active admin wins over the
+      // roster-first member.
+      expect(invokeCall[0].headers["x-alphaclaw-user"]).toBe(
+        "admin@example.com",
+      );
     });
   });
 });

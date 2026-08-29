@@ -1,0 +1,62 @@
+{
+  "_comment": "Hand-curated 'What's new' per OpenClaw minor + channel, shown on the Upgrade page. Admin language only (no internal jargon — see the plan's D1 table). tests/server/openclaw-whats-new.test.js fails when the pinned beta minor has no entry, so bumping the tested beta means updating this file. lastVerifiedVersion is the newest release this entry was verified against; the UI notes when the channel has moved past it.",
+  "entries": [
+    {
+      "minor": "2026.8",
+      "channel": "beta",
+      "lastVerifiedVersion": "2026.8.1-beta.3",
+      "highlights": [
+        {
+          "title": "Team access",
+          "body": "Multiple people can use one agent with their own identity: profiles and avatars, a who's-online roster, messages attributed to their author, and per-member permissions.",
+          "tone": "info"
+        },
+        {
+          "title": "Shared secret store",
+          "body": "A team-wide place for API keys and tokens, managed from the OpenClaw dashboard (Settings → Secrets). Secrets can be locked to exact destination hosts.",
+          "tone": "info"
+        },
+        {
+          "title": "Verified database backups",
+          "body": "Compact, verified snapshots of OpenClaw's databases with safe restore to a fresh location.",
+          "tone": "info"
+        },
+        {
+          "title": "GPT-5.6 Sol, Terra, and Luna",
+          "body": "OpenAI's newest models work across both the OpenClaw and Codex engines, with model, engine, and thinking level switching together.",
+          "tone": "info"
+        },
+        {
+          "title": "New channels",
+          "body": "ClickClack gains a paste-one-code guided setup; Buzz connects agents to team rooms.",
+          "tone": "info"
+        },
+        {
+          "title": "Better managed restarts",
+          "body": "OpenClaw now understands that AlphaClaw manages its lifecycle, so restarts and updates coordinate instead of colliding.",
+          "tone": "info"
+        }
+      ],
+      "securityFlips": [
+        {
+          "key": "gateway.terminal.enabled",
+          "from": "off",
+          "to": "on",
+          "warning": "The OpenClaw dashboard gains a host terminal by default. Anyone with admin access to the dashboard can run commands on this server. Turn it off after upgrading if you don't want that."
+        },
+        {
+          "key": "skills.workshop.approvalPolicy",
+          "from": "ask first",
+          "to": "apply automatically",
+          "warning": "Agent-initiated skill changes now apply without asking. Set the policy to \"pending\" after upgrading to keep an approval step."
+        },
+        {
+          "key": "messages.statusReactions.enabled",
+          "from": "emoji reactions",
+          "to": "native Slack status",
+          "warning": "Slack progress switches from emoji reaction updates to Slack's native thread status. Re-enable status reactions in the Slack channel settings if your team relies on them."
+        }
+      ]
+    }
+  ]
+}

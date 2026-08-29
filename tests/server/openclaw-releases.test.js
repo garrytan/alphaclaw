@@ -187,7 +187,11 @@ describe("server/openclaw-releases", () => {
       const catalog = await service.getCatalog();
 
       expect(catalog.ok).toBe(true);
-      expect(catalog.degraded).toEqual({ github: false, npm: false });
+      expect(catalog.degraded).toEqual({
+        github: false,
+        npm: false,
+        githubRateLimited: false,
+      });
       expect(catalog.distTags).toEqual({
         latest: "2026.7.1-2",
         beta: "2026.7.2-beta.1",
@@ -398,6 +402,7 @@ describe("server/openclaw-releases", () => {
 
       const first = await service.getCatalog();
       expect(first.staleAsOf).toBe(new Date(kNow).toISOString());
+      expect(first.stale).toBe(false);
       expect(fs.existsSync(path.join(cacheDir, "github-releases.json"))).toBe(
         true,
       );
@@ -414,10 +419,24 @@ describe("server/openclaw-releases", () => {
       expect(second.stable).toEqual(first.stable);
       expect(second.dev).toEqual(first.dev);
 
-      // Third call after the TTL: revalidates with If-None-Match, 304 → cached
-      // data is reused and fetchedAt (→ staleAsOf) advances.
+      // Third call after the TTL: SWR — the stale catalog returns immediately
+      // while one coalesced background revalidation per source runs with
+      // If-None-Match; the 304s advance fetchedAt for the NEXT read.
       state.now = kNow + kTtlMs + 1000;
       const third = await service.getCatalog();
+      expect(third.ok).toBe(true);
+      expect(third.stale).toBe(true);
+      expect(third.degraded).toEqual({
+        github: false,
+        npm: false,
+        githubRateLimited: false,
+      });
+      expect(third.stable).toEqual(first.stable);
+      expect(third.dev).toEqual(first.dev);
+      // Served from the stale cache — staleAsOf still the original fetch time.
+      expect(third.staleAsOf).toBe(new Date(kNow).toISOString());
+
+      await service.__awaitRevalidations();
       expect(fetchImpl.mock.calls.length).toBe(callsAfterFirst + 3);
       const revalidations = calls.slice(callsAfterFirst);
       expect(
@@ -434,11 +453,33 @@ describe("server/openclaw-releases", () => {
         revalidations.find((call) => call.url.startsWith(kCompareUrlPrefix))
           .headers["If-None-Match"],
       ).toBe(etags.compare);
-      expect(third.ok).toBe(true);
-      expect(third.degraded).toEqual({ github: false, npm: false });
-      expect(third.stable).toEqual(first.stable);
-      expect(third.dev).toEqual(first.dev);
-      expect(third.staleAsOf).toBe(new Date(kNow + kTtlMs + 1000).toISOString());
+
+      // Fourth call: the revalidated caches are fresh again — zero fetches,
+      // staleAsOf advanced to the revalidation time.
+      const fourth = await service.getCatalog();
+      expect(fetchImpl.mock.calls.length).toBe(callsAfterFirst + 3);
+      expect(fourth.ok).toBe(true);
+      expect(fourth.stale).toBe(false);
+      expect(fourth.stable).toEqual(first.stable);
+      expect(fourth.dev).toEqual(first.dev);
+      expect(fourth.staleAsOf).toBe(
+        new Date(kNow + kTtlMs + 1000).toISOString(),
+      );
+    });
+
+    it("coalesces concurrent getCatalog calls into one upstream fan-out", async () => {
+      const { service, fetchImpl } = createHarness();
+
+      const [a, b] = await Promise.all([
+        service.getCatalog(),
+        service.getCatalog(),
+      ]);
+
+      expect(fetchImpl.mock.calls.length).toBe(3);
+      expect(a).toEqual(b);
+      // A follow-up call inside the TTL adds nothing either.
+      await service.getCatalog();
+      expect(fetchImpl.mock.calls.length).toBe(3);
     });
 
     it("forceRefresh bypasses the TTL but still sends If-None-Match", async () => {
@@ -474,7 +515,13 @@ describe("server/openclaw-releases", () => {
       const catalog = await service.getCatalog();
 
       expect(catalog.ok).toBe(true);
-      expect(catalog.degraded).toEqual({ github: true, npm: false });
+      // The 403 marks the github degradation as a rate limit so the client
+      // can suggest configuring GITHUB_TOKEN.
+      expect(catalog.degraded).toEqual({
+        github: true,
+        npm: false,
+        githubRateLimited: true,
+      });
       expect(catalog.distTags).toEqual({
         latest: "2026.7.1-2",
         beta: "2026.7.2-beta.1",
@@ -511,8 +558,15 @@ describe("server/openclaw-releases", () => {
       state.handlers = [failingGithubHandler(403), npmOnlyHandler()];
       const second = await service.getCatalog();
 
+      // SWR serves the stale cache immediately; nothing has failed yet from
+      // this read's point of view.
       expect(second.ok).toBe(true);
-      expect(second.degraded).toEqual({ github: true, npm: false });
+      expect(second.stale).toBe(true);
+      expect(second.degraded).toEqual({
+        github: false,
+        npm: false,
+        githubRateLimited: false,
+      });
       // GitHub-backed rows survive from the stale cache — notes intact.
       expect(second.stable).toEqual(first.stable);
       expect(second.beta).toEqual(first.beta);
@@ -521,6 +575,22 @@ describe("server/openclaw-releases", () => {
       expect(second.dev).toEqual(first.dev);
       // staleAsOf is the oldest source used: the stale GitHub fetch time.
       expect(second.staleAsOf).toBe(new Date(kNow).toISOString());
+
+      await service.__awaitRevalidations();
+
+      // The github revalidation failed with a 403 → later reads flag the
+      // degradation as rate-limited; npm revalidated fine.
+      const third = await service.getCatalog();
+      expect(third.ok).toBe(true);
+      expect(third.stale).toBe(true);
+      expect(third.degraded).toEqual({
+        github: true,
+        npm: false,
+        githubRateLimited: true,
+      });
+      expect(third.stable).toEqual(first.stable);
+      expect(third.staleAsOf).toBe(new Date(kNow).toISOString());
+      await service.__awaitRevalidations();
     });
 
     it("degrades npm without losing GitHub rows", async () => {
@@ -538,7 +608,11 @@ describe("server/openclaw-releases", () => {
       const catalog = await service.getCatalog();
 
       expect(catalog.ok).toBe(true);
-      expect(catalog.degraded).toEqual({ github: false, npm: true });
+      expect(catalog.degraded).toEqual({
+        github: false,
+        npm: true,
+        githubRateLimited: false,
+      });
       expect(catalog.distTags).toBe(null);
       expect(catalog.stable.map((row) => row.version)).toEqual([
         "2026.6.34",
@@ -562,7 +636,7 @@ describe("server/openclaw-releases", () => {
           ok: false,
           code: "catalog_unavailable",
           docsUrl: null,
-          degraded: { github: true, npm: true },
+          degraded: { github: true, npm: true, githubRateLimited: false },
           staleAsOf: null,
           distTags: null,
           stable: [],

@@ -20,6 +20,12 @@ const createDeps = () => {
     { id: 1, eventType: "crash", status: "failed" },
   ]);
   const readLogTail = vi.fn(() => "watchdog log line");
+  const readLogDelta = vi.fn(() => ({
+    gen: 3,
+    offset: 160,
+    data: "delta data",
+    reset: false,
+  }));
   const watchdogNotifier = {
     notify: vi.fn(async () => ({ ok: true, sent: 1 })),
   };
@@ -34,6 +40,7 @@ const createDeps = () => {
     watchdog,
     getRecentEvents,
     readLogTail,
+    readLogDelta,
     watchdogNotifier,
     watchdogTerminal,
   };
@@ -59,9 +66,29 @@ describe("server/routes/watchdog", () => {
     expect(res.status).toBe(200);
     expect(res.body).toEqual({
       ok: true,
-      status: { lifecycle: "running", health: "healthy" },
+      status: {
+        lifecycle: "running",
+        health: "healthy",
+        lastNotificationDeliveredAt: null,
+      },
     });
     expect(deps.watchdog.getStatus).toHaveBeenCalledTimes(1);
+  });
+
+  it("carries the notifier's last delivery timestamp on GET /api/watchdog/status", async () => {
+    const deps = createDeps();
+    deps.watchdogNotifier.getLastDeliveredAt = vi.fn(
+      () => "2026-08-28T10:15:30.000Z",
+    );
+    const app = createApp(deps);
+
+    const res = await request(app).get("/api/watchdog/status");
+
+    expect(res.status).toBe(200);
+    expect(res.body.status.lastNotificationDeliveredAt).toBe(
+      "2026-08-28T10:15:30.000Z",
+    );
+    expect(deps.watchdogNotifier.getLastDeliveredAt).toHaveBeenCalledTimes(1);
   });
 
   it("parses query params and returns events on GET /api/watchdog/events", async () => {
@@ -261,6 +288,61 @@ describe("server/routes/watchdog", () => {
     const errRes = await request(app).get("/api/watchdog/logs");
     expect(errRes.status).toBe(500);
     expect(errRes.body).toEqual({ ok: false, error: "log file missing" });
+  });
+
+  it("returns a JSON log delta when the since param is present", async () => {
+    const deps = createDeps();
+    const app = createApp(deps);
+
+    const res = await request(app).get("/api/watchdog/logs?since=3:128");
+
+    expect(res.status).toBe(200);
+    expect(deps.readLogDelta).toHaveBeenCalledWith({ gen: 3, offset: 128 });
+    expect(deps.readLogTail).not.toHaveBeenCalled();
+    expect(res.headers["content-type"]).toContain("application/json");
+    expect(res.body).toEqual({
+      ok: true,
+      gen: 3,
+      offset: 160,
+      data: "delta data",
+      reset: false,
+    });
+  });
+
+  it("routes malformed since cursors to the reset path", async () => {
+    const deps = createDeps();
+    deps.readLogDelta.mockReturnValue({
+      gen: 4,
+      offset: 512,
+      data: "fresh tail",
+      reset: true,
+    });
+    const app = createApp(deps);
+
+    const res = await request(app).get("/api/watchdog/logs?since=bogus");
+
+    expect(res.status).toBe(200);
+    expect(deps.readLogDelta).toHaveBeenCalledWith({ gen: -1, offset: 0 });
+    expect(res.body).toEqual({
+      ok: true,
+      gen: 4,
+      offset: 512,
+      data: "fresh tail",
+      reset: true,
+    });
+  });
+
+  it("returns 500 when readLogDelta throws", async () => {
+    const deps = createDeps();
+    deps.readLogDelta.mockImplementation(() => {
+      throw new Error("delta read failed");
+    });
+    const app = createApp(deps);
+
+    const res = await request(app).get("/api/watchdog/logs?since=1:0");
+
+    expect(res.status).toBe(500);
+    expect(res.body).toEqual({ ok: false, error: "delta read failed" });
   });
 
   it("returns 500 when triggerRepair rejects", async () => {

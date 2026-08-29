@@ -1,7 +1,14 @@
 const { runOnboardedBootSequence } = require("../../lib/server/startup");
+const { setBootPhase, getBootPhase } = require("../../lib/server/boot-phase");
 
 describe("server/startup", () => {
-  it("syncs gateway proxy config with the resolved setup URL before startup", () => {
+  // runOnboardedBootSequence mutates the boot-phase module singleton; leave
+  // every test on a settled boot so nothing leaks across tests.
+  afterEach(() => {
+    setBootPhase("ready");
+  });
+
+  it("syncs gateway proxy config with the resolved setup URL before startup", async () => {
     const callOrder = [];
     const ensureManagedExecDefaults = vi.fn(() =>
       callOrder.push("ensureManagedExecDefaults"),
@@ -33,7 +40,7 @@ describe("server/startup", () => {
       start: vi.fn(() => callOrder.push("gmailWatchService.start")),
     };
 
-    runOnboardedBootSequence({
+    await runOnboardedBootSequence({
       ensureManagedExecDefaults,
       ensureUsageTrackerPluginConfig,
       ensureWebhookMappingIds,
@@ -81,7 +88,7 @@ describe("server/startup", () => {
     ...overrides,
   });
 
-  it("logs and continues when the ensure steps fail", () => {
+  it("logs and continues when the ensure steps fail", async () => {
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     const deps = createBootDeps({
       ensureManagedExecDefaults: vi.fn(() => {
@@ -95,7 +102,7 @@ describe("server/startup", () => {
       }),
     });
 
-    runOnboardedBootSequence(deps);
+    await runOnboardedBootSequence(deps);
 
     expect(errorSpy).toHaveBeenCalledWith(
       "[alphaclaw] Failed to ensure managed exec defaults on boot: exec defaults broke",
@@ -112,7 +119,7 @@ describe("server/startup", () => {
     expect(deps.gmailWatchService.start).toHaveBeenCalled();
   });
 
-  it("logs the updated webhook mapping ids when the mapping changed", () => {
+  it("logs the updated webhook mapping ids when the mapping changed", async () => {
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
     const deps = createBootDeps({
       ensureWebhookMappingIds: vi.fn(() => ({
@@ -121,11 +128,86 @@ describe("server/startup", () => {
       })),
     });
 
-    runOnboardedBootSequence(deps);
+    await runOnboardedBootSequence(deps);
 
     expect(logSpy).toHaveBeenCalledWith(
       "[alphaclaw] Added IDs to webhook mappings: gmail, stripe",
     );
+  });
+
+  it("resolves with a failed boot phase and releases the lock when startGateway rejects", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const release = vi.fn();
+    const acquireLifecycleLock = vi.fn(async () => release);
+    const deps = createBootDeps({
+      acquireLifecycleLock,
+      startGateway: vi.fn(async () => {
+        throw new Error("gateway refused to launch");
+      }),
+    });
+
+    // Boot failures are reported via boot-phase, never thrown at the caller
+    // (callers fire-and-forget; a rejection here would be unhandled).
+    await expect(runOnboardedBootSequence(deps)).resolves.toBeUndefined();
+
+    expect(getBootPhase()).toEqual({
+      phase: "failed",
+      error: expect.stringContaining("gateway refused to launch"),
+    });
+    expect(errorSpy).toHaveBeenCalledWith(
+      "[alphaclaw] Boot gateway start failed: gateway refused to launch",
+    );
+    // The lifecycle lock must not stay held after a failed boot.
+    expect(release).toHaveBeenCalledTimes(1);
+    // Supervision still starts: recovering a down gateway is the watchdog's
+    // job, and the boot_failed phase (above) carries the remediation UI.
+    expect(deps.watchdog.start).toHaveBeenCalled();
+    expect(deps.gmailWatchService.start).toHaveBeenCalled();
+  });
+
+  it("reaches the ready boot phase and releases the lock on a successful boot", async () => {
+    const release = vi.fn();
+    const acquireLifecycleLock = vi.fn(async () => release);
+    const deps = createBootDeps({ acquireLifecycleLock });
+
+    await runOnboardedBootSequence(deps);
+
+    expect(acquireLifecycleLock).toHaveBeenCalledWith("boot");
+    expect(getBootPhase()).toEqual({ phase: "ready", error: null });
+    expect(release).toHaveBeenCalledTimes(1);
+    expect(deps.startGateway).toHaveBeenCalledTimes(1);
+    expect(deps.watchdog.start).toHaveBeenCalledTimes(1);
+  });
+
+  it("awaits the lifecycle lock before running any gateway-mutating step", async () => {
+    let resolveLock;
+    const release = vi.fn();
+    const acquireLifecycleLock = vi.fn(
+      () =>
+        new Promise((resolve) => {
+          resolveLock = () => resolve(release);
+        }),
+    );
+    const deps = createBootDeps({ acquireLifecycleLock });
+
+    const bootPromise = runOnboardedBootSequence(deps);
+    await new Promise((resolve) => setImmediate(resolve));
+
+    // Boot is parked on acquire("boot"): nothing that mutates gateway or
+    // channel state may run while another operation holds the lock.
+    expect(acquireLifecycleLock).toHaveBeenCalledWith("boot");
+    expect(deps.ensureManagedExecDefaults).not.toHaveBeenCalled();
+    expect(deps.syncChannelConfig).not.toHaveBeenCalled();
+    expect(deps.startGateway).not.toHaveBeenCalled();
+    // The phase already reports "starting" while waiting, though.
+    expect(getBootPhase()).toEqual({ phase: "starting_gateway", error: null });
+
+    resolveLock();
+    await bootPromise;
+
+    expect(deps.startGateway).toHaveBeenCalledTimes(1);
+    expect(getBootPhase()).toEqual({ phase: "ready", error: null });
+    expect(release).toHaveBeenCalledTimes(1);
   });
 
   const flushMicrotasks = () => new Promise((resolve) => setImmediate(resolve));
@@ -166,7 +248,7 @@ describe("server/startup", () => {
     expect(deps.gmailWatchService.start).toHaveBeenCalled();
   });
 
-  it("logs a synchronous readEnvFile throw as a channel sync failure and keeps booting", () => {
+  it("logs a synchronous readEnvFile throw as a channel sync failure and keeps booting", async () => {
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     const deps = createBootDeps({
       readEnvFile: vi.fn(() => {
@@ -174,7 +256,7 @@ describe("server/startup", () => {
       }),
     });
 
-    runOnboardedBootSequence(deps);
+    await runOnboardedBootSequence(deps);
 
     // readEnvFile throws during argument evaluation — synchronously, before
     // syncChannelConfig can even be invoked.
@@ -188,7 +270,7 @@ describe("server/startup", () => {
     expect(deps.gmailWatchService.start).toHaveBeenCalled();
   });
 
-  it("logs a primeStatusCaches throw after the watchdog has already started", () => {
+  it("logs a primeStatusCaches throw after the watchdog has already started", async () => {
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     const deps = createBootDeps({
       primeStatusCaches: vi.fn(() => {
@@ -196,7 +278,7 @@ describe("server/startup", () => {
       }),
     });
 
-    runOnboardedBootSequence(deps);
+    await runOnboardedBootSequence(deps);
 
     expect(errorSpy).toHaveBeenCalledWith(
       "[alphaclaw] Failed to prime status caches on boot: caches broke",

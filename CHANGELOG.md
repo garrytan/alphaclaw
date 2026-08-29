@@ -5,7 +5,225 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
-## [Unreleased]
+## [0.9.39] - 2026-08-29
+
+The gateway no longer crash-loops when a beta-only config key meets a stable
+build — and when a config error does stop it, AlphaClaw now troubleshoots and
+repairs it automatically.
+
+### Fixed
+- **Beta stripe no longer poisons stable boots.** The Control-UI environment
+  stripe (`gateway.controlUi.environment`) was written whenever the release
+  channel said beta/dev, even when a fallback (missing overlay, failed
+  activation, stale dev checkout, rollback) left the built-in stable OpenClaw
+  running — which rejects the key with `EX_CONFIG` and crash-looped every
+  boot with `gateway.controlUi: Unrecognized key: "environment"`. The stripe
+  is now gated on the build that will actually run (2026.8.1+ for beta, an
+  active dev shim with a 2026.8.1+ checkout for dev), and a stripe left
+  behind by an older AlphaClaw is removed on the next boot automatically.
+
+### Added
+- **Gateway startup medic (default on).** When the gateway exits with a fatal
+  configuration error, AlphaClaw now repairs it instead of only pausing
+  restarts: it removes config keys the gateway itself rejected (managed keys
+  immediately; others only with AI concurrence), or runs OpenClaw's
+  `doctor --fix`, then restarts the gateway — with a best-effort
+  `openclaw.json.medic-*.bak` backup before mutations (a missing config never
+  blocks the remedy), at most two attempts per incident, and a
+  notification describing exactly what was done. For failures without an
+  obvious fix, the medic asks the smartest frontier model you have an API key
+  for (Claude Fable 5 → Claude Opus 5 → GPT-5.6 → Gemini 3.1 Pro preview;
+  evidence is secret-redacted first) to diagnose and pick from the
+  whitelisted remedies —
+  the model can never edit anything itself. Toggle on the Upgrade page or at
+  `updates.openclaw.medic.enabled`; disabling restores the old
+  pause-and-notify behavior.
+
+## [0.9.38] - 2026-08-29
+
+Team accounts with real credentials, two new channels, and a beta-ready
+update pipeline — merged on top of 0.9.37's unified gateway-state,
+streamed-restart, and never-freeze work.
+
+### Added
+- **Team access with member accounts.** Share one AlphaClaw with named
+  teammates: each person signs in with their own email and password, and
+  OpenClaw sees who's who — attributed messages, per-person profiles, and a
+  who's-online roster. Admins invite members with expiring single-use links,
+  set roles, and disable or remove accounts (sessions and gateway authority
+  end together; the last admin can never be demoted). The enable wizard
+  explains the security boundary up front, applies the gateway change,
+  restarts, verifies the login handshake end to end, and restores the
+  previous setup automatically if the check fails. Optional lockdown turns
+  off shared-password login once your own account works (break-glass env
+  var included).
+- **Member permissions across the dashboard.** Members can chat and view
+  status; updates, secrets, terminals, agents, webhooks, and team management
+  stay admin-only — enforced on every API route, WebSocket, and OAuth
+  callback, with a role-aware navigation that hides admin pages.
+- **ClickClack channel.** Paste one setup code or URL on the beta for a
+  fully guided setup (codes are single-use and never stored); manual
+  token/base-URL fields work everywhere, including onboarding.
+- **Buzz channel.** A resumable guided wizard installs the plugin, restarts
+  the gateway, walks through relay + bot identity, waits for a room admin's
+  approval (survives page reloads without rotating the identity), and
+  finishes with room selection.
+- **"What's new" per channel.** A curated card shows each OpenClaw line's
+  highlights with security-default changes called out separately — and the
+  same security changes appear again in the apply confirmation before you
+  commit to a cross-channel switch.
+- **Database compatibility check.** Before an update applies, the target
+  version's own binary verifies it can read snapshots of your state
+  databases; incompatible updates are blocked before anything changes.
+  Rollbacks that cannot be verified say so honestly.
+- **Settings migration at boot.** After a version change, OpenClaw's own
+  doctor migrates your settings once (with a pre-migration backup kept per
+  version); downgrades restore the exact settings saved for that version.
+  The Upgrade page shows the last migration result.
+- **Repair button.** Dev builds that fail mid-update get a one-click
+  streamed `update repair`, recorded in the run timeline like any update.
+- **Verified install scripts.** Staged updates run the package's install
+  scripts in isolation and refuse to activate a tree whose install guard
+  proves they didn't finish.
+- **More surfaces:** feature-detecting capability probes for the installed
+  OpenClaw; a secrets-store banner on Envars; a channel-colored environment
+  stripe in the Control UI; markdown release notes (sanitized); a searchable
+  onboarding model picker with live-catalog-gated defaults; onboarding
+  without channels ("Continue with web chat"); a "What's next" checklist on
+  General; Slack `/login` command and progress-indicator setting; degraded
+  gateway states with plain-language recommended actions; gateway
+  restart-handoff awareness and control-plane rate-limit backoff.
+
+### Changed
+- Trusted-proxy identity now carries the member's **email** (matching the
+  gateway allowlist and per-identity permissions), injected — and spoofable
+  headers stripped — in one shared layer covering HTTP proxying, WebSocket
+  upgrades, and the webhook path.
+- External supervision (`OPENCLAW_SUPERVISOR_MODE=external`) is now the
+  default on every gateway launch — a no-op on stable, load-bearing on
+  2026.8+ — with an `off|none` escape hatch that fully reverts it.
+- The availability line reports honest release distance ("2 beta releases
+  behind" / "not running this channel yet"), and the rollback confirmation
+  states what a downgrade can and cannot verify.
+- Update repair runs are recorded in the durable run ledger with redacted
+  logs, like applies.
+
+### Fixed
+- A fresh install's first cross-channel switch is no longer blocked by the
+  backup guard when there is nothing to back up yet (live-verified against
+  the real beta).
+- Recurring boot notifications (settings migration, restores, preflight
+  warnings) are deduplicated per version instead of repeating every boot.
+- Config read caches can no longer serve stale contents when the underlying
+  reader changes.
+- The What's-new card and its security-change list now appear immediately
+  when you switch channels in the same session, instead of only after a
+  reload.
+- A guided ClickClack setup that fails after the code is accepted now cleans
+  up so you are not blocked from retrying, and ClickClack no longer strands
+  onboarding at a dead pairing step. A paused Buzz setup resumes where you
+  left off instead of restarting from the beginning.
+
+### Security
+- Team members can no longer read stored provider API keys or OAuth tokens
+  (the model-credentials endpoints are admin-only).
+- Turning team access off now fully ends member access: member sessions and
+  logins stop working, and existing shared-password sessions end the moment
+  shared-password login is disabled.
+- Member email addresses are strictly validated, member-account changes made
+  while team access is off no longer disturb the gateway login mode, a
+  half-completed enable can no longer strand the login configuration, and the
+  file that stores the previous gateway credential is owner-only.
+- Invite acceptance is transactional — a failed signup no longer burns a
+  single-use invite — and reveals nothing about which emails already exist.
+- Client-supplied forwarding headers are stripped before every gateway
+  request, and the Buzz plugin installs with an isolated home directory so
+  package scripts cannot read credentials from disk.
+
+## [0.9.37] - 2026-08-28
+
+### Added
+- **One honest gateway status.** The Gateway card now shows a single unified
+  state instead of separate (and sometimes contradictory) gateway/watchdog
+  rows. The vocabulary, in the order the card resolves it:
+  - **Not set up yet** — AlphaClaw hasn't been onboarded.
+  - **AlphaClaw starting / Startup failed** — the boot sequence itself.
+  - **Status unavailable** — no fresh observation; shows when it was last
+    confirmed running instead of guessing.
+  - **Configuration error** — OpenClaw rejected its config (exit 78);
+    automatic restarts pause until it's fixed.
+  - **Down** — not running, nothing in progress; Retry/Repair offered.
+  - **Starting** — launching, with elapsed time against the ready budget.
+  - **Unstable** — crashed and came back repeatedly; crash count and window
+    shown (estimated when the gateway runs outside AlphaClaw's supervision).
+  - **Running with issues** — up, but health probes are failing.
+  - **Channels paused** — the gateway's crash-loop breaker suppressed channel
+    autostart; one-click Resume.
+  - **Running** — up, healthy, with real uptime.
+  Every state carries a plain-language reason, the recommended action, and a
+  glossary explainer. Alerts (Telegram/Discord/Slack/WhatsApp) use the same
+  vocabulary, so what pings you matches what the page says.
+- **Restarts you can watch.** Restarting the gateway streams live steps
+  (checking plugins → stopping → starting → waiting for health check) with
+  honest outcomes: success reports measured downtime; failure shows the
+  actual error evidence (secrets redacted) with what to try next — no more
+  "Gateway restarted ✅" over a dead gateway. Restarts survive page reloads
+  and even an AlphaClaw crash mid-restart ("interrupted restart" on reboot).
+- **Faster dead-gateway detection.** An always-on 10-second port watcher plus
+  immediate re-checks after every restart/repair replace the old
+  up-to-2-minutes wait; stale verdicts like a lingering "crash loop" clear
+  the moment reality changes.
+- **Last-delivered timestamp for watchdog alerts** (next to the existing
+  Send test notification button), so you can verify alerting is actually
+  reaching you before you need it.
+
+### Changed
+- **Nearly everything is faster.** The server no longer freezes itself:
+  status checks, restarts, and boots run off the event loop; the
+  logs/watchdog page queries are indexed; the Upgrade page catalog serves
+  instantly from cache while refreshing in the background; responses are
+  compressed; charts load on demand. Status responses that took seconds
+  under load now answer in milliseconds.
+- **Expected restart during upgrades:** a gateway restart is part of channel
+  switches and upgrades; the watchdog now knows the restart window is
+  expected and won't report it as a crash or trigger rollback hooks during
+  it.
+- **API compatibility window:** `/api/status` keeps the legacy
+  `gateway`/`watchdogStatus` fields for one minor release as projections of
+  the new `state` object (they can no longer disagree). `POST
+  /api/gateway/restart` keeps blocking semantics by default; new clients
+  opt into `?async=1` + the streamed operation. Both defaults flip next
+  minor.
+- **Rollback implications:** automatic version rollback still arms after
+  gateway restarts; interrupted or failed restarts leave the rollback
+  window and its incident reporting exactly as before — with clearer
+  attribution in the incident feed ("automatic repair" vs manual restart).
+
+### Fixed
+- **Operations can no longer collide.** Channel updates, gateway restarts,
+  channel saves, and the watchdog's own recovery all serialize through one
+  lifecycle lock in both directions — an update can't kill a live restart,
+  a save can't interleave with a boot, and team-mode transitions hold the
+  same lock. A failed restart can no longer leave the card stuck on
+  "Starting" with no way out, and a gateway that crash-loops relaunches
+  with exponential backoff instead of hot-looping.
+- **Failure evidence stays readable and safe.** Restart evidence no longer
+  masks harmless values like file paths into `***` (only secret-named
+  values are redacted, longest-first so partial matches can't leak), and
+  failure messages get the same masking as stderr.
+- **Light theme and accessibility:** status dots now meet contrast minimums
+  in light mode, the reduced-motion setting actually stops every pulsing
+  animation, and small controls meet the 44px touch-target minimum on both
+  axes.
+- Charts recover after a failed load instead of staying blank for the whole
+  session; a stuck status-stream client is disconnected instead of
+  buffering frames without bound; port or channel changes written to
+  openclaw.json by any writer are picked up immediately.
+
+### Removed
+- `GET /api/gateway-status` (unused; it spawned a blocking 15s CLI status
+  call if ever hit). Use `GET /api/status` — the unified `state` object
+  carries everything it reported and more.
 
 ## [0.9.36] - 2026-08-28
 
