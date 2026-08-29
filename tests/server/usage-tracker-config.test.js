@@ -127,6 +127,26 @@ describe("server/usage-tracker-config", () => {
     ]);
   });
 
+  it("re-adds the usage-tracker path if a plugin uninstall sweep removed it (OpenClaw 2026.8)", () => {
+    // OpenClaw 2026.8 removes the exact recorded install paths from
+    // plugins.load.paths when a plugin is uninstalled. AlphaClaw's own bare-file
+    // plugin path must survive that: the boot reconcile re-adds it.
+    const cfg = {
+      plugins: {
+        allow: ["usage-tracker"],
+        load: { paths: ["/app/node_modules/some-other-plugin"] }, // our path swept away
+        entries: { "usage-tracker": { enabled: true } },
+      },
+    };
+
+    const changed = reconcileManagedPluginConfig(cfg);
+
+    expect(changed).toBe(true);
+    expect(cfg.plugins.load.paths).toContain(kUsageTrackerPluginPath);
+    // Unrelated paths are preserved.
+    expect(cfg.plugins.load.paths).toContain("/app/node_modules/some-other-plugin");
+  });
+
   it("migrates a stale @chrysb usage-tracker path to the canonical path on boot", () => {
     const openclawDir = createTempOpenclawDir();
     const configPath = path.join(openclawDir, "openclaw.json");

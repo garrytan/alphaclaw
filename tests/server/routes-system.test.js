@@ -447,10 +447,12 @@ describe("server/routes/system", () => {
             openclaw: {
               releaseChannel: "stable",
               overseer: { enabled: false },
+              medic: { enabled: true },
             },
           },
           team: {
             enabled: false,
+            disableLegacyLogin: false,
           },
         },
         openclawChannel: null,
@@ -816,10 +818,12 @@ describe("server/routes/system", () => {
           openclaw: {
             releaseChannel: "stable",
             overseer: { enabled: false },
+            medic: { enabled: true },
           },
         },
         team: {
           enabled: false,
+          disableLegacyLogin: false,
         },
       },
     });
@@ -852,10 +856,12 @@ describe("server/routes/system", () => {
             openclaw: {
               releaseChannel: "stable",
               overseer: { enabled: false },
+              medic: { enabled: true },
             },
           },
           team: {
             enabled: false,
+            disableLegacyLogin: false,
           },
         },
       }),

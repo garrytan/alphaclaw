@@ -182,7 +182,12 @@ describe("server/routes/auth", () => {
 
     const status = await request(app).get("/api/auth/status");
     expect(status.status).toBe(200);
-    expect(status.body).toEqual({ authEnabled: true });
+    expect(status.body).toEqual(
+      expect.objectContaining({
+        authEnabled: true,
+        team: expect.objectContaining({ enabled: false }),
+      }),
+    );
 
     const logout = await request(app).post("/api/auth/logout").send({});
     expect(logout.status).toBe(200);
@@ -191,7 +196,9 @@ describe("server/routes/auth", () => {
 
     const disabled = createTestApp({ setupPassword: "" });
     const disabledStatus = await request(disabled.app).get("/api/auth/status");
-    expect(disabledStatus.body).toEqual({ authEnabled: false });
+    expect(disabledStatus.body).toEqual(
+      expect.objectContaining({ authEnabled: false }),
+    );
   });
 
   it("cleans up throttle state on the scheduled interval", async () => {

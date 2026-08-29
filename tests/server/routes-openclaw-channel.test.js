@@ -43,6 +43,10 @@ const createDeps = (overrides = {}) => ({
       blockedId: "1.1.0",
     })),
     markGoodNow: vi.fn(() => ({ ok: true, acceptedAt: 123 })),
+    runUpdateRepair: vi.fn(async () => ({
+      status: 200,
+      body: { ok: true, steps: [] },
+    })),
     store: {
       clearBlocklist: vi.fn(),
       readState: vi.fn(() => ({ blocklist: [] })),
@@ -104,6 +108,7 @@ const kRoutes = [
   { method: "get", path: "/api/openclaw/channel" },
   { method: "get", path: "/api/openclaw/catalog" },
   { method: "post", path: "/api/openclaw/apply", body: { channel: "beta", version: "1.1.0" } },
+  { method: "post", path: "/api/openclaw/repair", body: {} },
   { method: "post", path: "/api/openclaw/rollback", body: {} },
   { method: "post", path: "/api/openclaw/mark-good", body: {} },
   { method: "post", path: "/api/openclaw/blocklist/clear", body: {} },
@@ -350,6 +355,79 @@ describe("server/routes/openclaw-channel", () => {
         error: "An AlphaClaw update is currently installing.",
       }),
     );
+  });
+
+  it("returns quick repair results inline and hands off long runs to the stream (2.3)", async () => {
+    // Quick gate rejection (not a dev checkout) is relayed inline with the
+    // operation handle, mirroring apply's quick-result contract.
+    const quickDeps = createDeps();
+    quickDeps.openclawChannelService.runUpdateRepair.mockResolvedValue({
+      status: 409,
+      body: {
+        ok: false,
+        code: "repair_not_applicable",
+        message: "Repair only applies to dev builds from source.",
+        hint: "For stable or beta, re-apply the version from the catalog instead.",
+      },
+    });
+    quickDeps.operationEvents.getOperation = vi.fn(() => ({ status: "pending" }));
+    const quickApp = createApp(quickDeps);
+
+    const quick = await request(quickApp).post("/api/openclaw/repair").send({});
+    expect(quick.status).toBe(409);
+    expect(quick.body).toEqual(
+      expect.objectContaining({
+        ok: false,
+        code: "repair_not_applicable",
+        operationId: "op-1",
+      }),
+    );
+    expect(quickDeps.openclawChannelService.runUpdateRepair).toHaveBeenCalledWith(
+      { operationId: "op-1" },
+    );
+    // The advertised operation must still reach a terminal state.
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(quickDeps.operationEvents.fail).toHaveBeenCalledTimes(1);
+
+    const slowDeps = createDeps();
+    slowDeps.openclawChannelService.runUpdateRepair.mockReturnValue(
+      new Promise(() => {}),
+    );
+    const slowApp = createApp(slowDeps);
+
+    const slow = await request(slowApp).post("/api/openclaw/repair").send({});
+    expect(slow.status).toBe(202);
+    expect(slow.body).toEqual({
+      ok: true,
+      operationId: "op-1",
+      events: "/api/operations/op-1/events",
+      streamUrl: "/api/operations/op-1/events",
+    });
+  });
+
+  it("terminates the repair stream when the service throws (2.3)", async () => {
+    const deps = createDeps();
+    deps.openclawChannelService.runUpdateRepair.mockRejectedValue(
+      new Error("exploded mid-repair"),
+    );
+    deps.operationEvents.getOperation = vi.fn(() => ({ status: "pending" }));
+    const app = createApp(deps);
+
+    const res = await request(app).post("/api/openclaw/repair").send({});
+    expect(res.status).toBe(500);
+    expect(res.body).toEqual(
+      expect.objectContaining({
+        ok: false,
+        code: "repair_failed",
+        message: "exploded mid-repair",
+        operationId: "op-1",
+      }),
+    );
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(deps.operationEvents.fail).toHaveBeenCalledTimes(1);
+    const [failedId, failedError] = deps.operationEvents.fail.mock.calls[0];
+    expect(failedId).toBe("op-1");
+    expect(failedError.message).toBe("exploded mid-repair");
   });
 
   it("maps rollback and mark-good service failures to 409 and successes to 200", async () => {

@@ -113,6 +113,9 @@ vi.mock("../../lib/public/js/lib/api.js", () => ({
   fetchStatus: vi.fn(),
   fetchOnboardStatus: vi.fn(),
   fetchAuthStatus: vi.fn(),
+  // Role-aware nav (team mode): the controller resolves the caller's identity
+  // on mount to filter admin-only nav items for members.
+  fetchAuthIdentity: vi.fn(() => Promise.resolve({ identity: null })),
   fetchAlphaclawVersion: vi.fn(),
   updateAlphaclaw: vi.fn(),
   fetchRestartStatus: vi.fn(),

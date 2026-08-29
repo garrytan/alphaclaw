@@ -177,7 +177,7 @@ describe("onboarding/validation edge cases", () => {
     expect(res.error).toBe("GitHub token and workspace repo are required");
   });
 
-  it("requires at least one channel token", () => {
+  it("accepts a zero-channel setup (web chat works without one)", () => {
     const res = run({
       vars: [
         { key: "OPENAI_API_KEY", value: "sk-test-123" },
@@ -185,7 +185,24 @@ describe("onboarding/validation edge cases", () => {
         { key: "GITHUB_WORKSPACE_REPO", value: "owner/repo" },
       ],
     });
-    expect(res.ok).toBe(false);
-    expect(res.error).toBe("At least one channel token is required");
+    expect(res.ok).toBe(true);
+  });
+
+  it("still blocks a half-configured Slack pair", () => {
+    const base = [
+      { key: "OPENAI_API_KEY", value: "sk-test-123" },
+      { key: "GITHUB_TOKEN", value: "ghp_test" },
+      { key: "GITHUB_WORKSPACE_REPO", value: "owner/repo" },
+    ];
+    const botOnly = run({
+      vars: [...base, { key: "SLACK_BOT_TOKEN", value: "xoxb-1" }],
+    });
+    expect(botOnly.ok).toBe(false);
+    expect(botOnly.error).toContain("app token");
+    const appOnly = run({
+      vars: [...base, { key: "SLACK_APP_TOKEN", value: "xapp-1" }],
+    });
+    expect(appOnly.ok).toBe(false);
+    expect(appOnly.error).toContain("bot token");
   });
 });

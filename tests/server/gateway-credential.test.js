@@ -40,6 +40,32 @@ describe("server/gateway-credential", () => {
     ).toEqual({ mode: "token", value: "resolved" });
   });
 
+  it("keys the config cache on the READER identity, not just mtime/size (merge resolution)", () => {
+    const openclawDir = createTempOpenclawDir();
+    writeConfig(openclawDir, { gateway: { auth: { token: "disk-token" } } });
+    // Warm the cache through the real fs reader.
+    expect(getGatewayCredential({ openclawDir, env: {} })).toEqual({
+      mode: "token",
+      value: "disk-token",
+    });
+
+    // Same path, same on-disk stat — but a swapped reader (a per-test fs
+    // mock) must never be served the previous reader's parse.
+    const mockFs = {
+      statSync: fs.statSync,
+      readFileSync: () =>
+        JSON.stringify({ gateway: { auth: { token: "mock-token" } } }),
+    };
+    expect(
+      getGatewayCredential({ fsModule: mockFs, openclawDir, env: {} }),
+    ).toEqual({ mode: "token", value: "mock-token" });
+    // And switching back re-reads through the real fs again.
+    expect(getGatewayCredential({ openclawDir, env: {} })).toEqual({
+      mode: "token",
+      value: "disk-token",
+    });
+  });
+
   it("defaults to empty token mode when nothing is configured", () => {
     const openclawDir = createTempOpenclawDir();
     expect(getGatewayCredential({ openclawDir, env: {} })).toEqual({
