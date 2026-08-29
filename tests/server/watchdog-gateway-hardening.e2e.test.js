@@ -538,6 +538,114 @@ describe("server/watchdog gateway hardening (e2e)", () => {
       watchdog.stop();
     });
 
+    it("skips the relaunch and latches when the lease expired during the fix", async () => {
+      // Only Date is faked: the medic's own async flow keeps real timers, but
+      // the lease check reads Date.now().
+      vi.useFakeTimers({ toFake: ["Date"] });
+      const configMedic = {
+        isEnabled: () => true,
+        run: vi.fn(async () => {
+          vi.setSystemTime(Date.now() + 11 * 60 * 1000); // past the 10-min lease
+          return { fixed: true, tier: "managed_key", actions: ["removed x"] };
+        }),
+      };
+      const { watchdog, launchGatewayProcess, notifier } = createStack({
+        configMedic,
+      });
+
+      watchdog.onGatewayExit({ code: 78, expectedExit: false, stderrTail: [] });
+      await flushMicrotasks();
+      await flushMicrotasks();
+
+      // The lock may have been force-released to another operation — a launch
+      // here would race it. Latch instead.
+      expect(launchGatewayProcess).not.toHaveBeenCalled();
+      expect(watchdog.getStatus().lifecycle).toBe("configuration_error");
+      const messages = notifier.notify.mock.calls.map((call) => call[0]);
+      expect(messages.some((m) => m.includes("restart is paused"))).toBe(true);
+      expect(messages.some((m) => m.includes("Restarting the gateway"))).toBe(false);
+      vi.useRealTimers();
+      watchdog.stop();
+    });
+
+    it("re-arms the medic after the rate-limit window expires", async () => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      const configMedic = createMedicMock({ fixed: true });
+      const { watchdog } = createStack({ configMedic });
+
+      for (let i = 0; i < 5; i += 1) {
+        watchdog.onGatewayExit({ code: 78, expectedExit: false, stderrTail: [] });
+        // eslint-disable-next-line no-await-in-loop
+        await flushMicrotasks();
+        // eslint-disable-next-line no-await-in-loop
+        await flushMicrotasks();
+        watchdog.onGatewayLaunch({ startedAt: Date.now(), pid: 200 + i });
+      }
+      expect(configMedic.run).toHaveBeenCalledTimes(5);
+
+      // An hour later the window has drained — the medic runs again.
+      vi.setSystemTime(Date.now() + 61 * 60 * 1000);
+      watchdog.onGatewayExit({ code: 78, expectedExit: false, stderrTail: [] });
+      await flushMicrotasks();
+      await flushMicrotasks();
+      expect(configMedic.run).toHaveBeenCalledTimes(6);
+      vi.useRealTimers();
+      watchdog.stop();
+    });
+
+    it("denies doctor --fix when rollback was eligible but went unhandled (stabilization window)", async () => {
+      const configMedic = createMedicMock({ fixed: true });
+      const { watchdog } = createStack({
+        configMedic,
+        releaseChannelHooks: {
+          // Eligible: non-pin build inside its stabilization window...
+          getInfo: vi.fn(() => ({ isPin: false, inStabilizationWindow: true })),
+          // ...but the rollback request goes unhandled (state race).
+          requestRollback: vi.fn(() => null),
+        },
+      });
+
+      watchdog.onGatewayExit({ code: 78, expectedExit: false, stderrTail: [] });
+      await flushMicrotasks();
+      await flushMicrotasks();
+
+      // openclaw#107226: unattended doctor --fix must not mutate state under
+      // a build we may be about to abandon.
+      expect(configMedic.run).toHaveBeenCalledWith(
+        expect.objectContaining({ allowDoctorFix: false }),
+      );
+      watchdog.stop();
+    });
+
+    it("latches with a medic event when configMedic.run rejects", async () => {
+      const configMedic = {
+        isEnabled: () => true,
+        run: vi.fn(async () => {
+          throw new Error("medic exploded");
+        }),
+      };
+      const { watchdog, launchGatewayProcess, notifier, insertWatchdogEvent } =
+        createStack({ configMedic });
+
+      watchdog.onGatewayExit({ code: 78, expectedExit: false, stderrTail: [] });
+      await flushMicrotasks();
+      await flushMicrotasks();
+
+      expect(launchGatewayProcess).not.toHaveBeenCalled();
+      expect(watchdog.getStatus().lifecycle).toBe("configuration_error");
+      expect(
+        insertWatchdogEvent.mock.calls.some(
+          (call) =>
+            call[0].eventType === "medic" &&
+            call[0].status === "failed" &&
+            JSON.stringify(call[0].details || {}).includes("medic exploded"),
+        ),
+      ).toBe(true);
+      const messages = notifier.notify.mock.calls.map((call) => call[0]);
+      expect(messages.some((m) => m.includes("restart is paused"))).toBe(true);
+      watchdog.stop();
+    });
+
     it("keeps the legacy latch when the medic is disabled", async () => {
       const configMedic = createMedicMock({ fixed: true, enabled: false });
       const { watchdog, launchGatewayProcess, notifier } = createStack({

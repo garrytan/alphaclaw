@@ -1,5 +1,11 @@
 # TODOS
 
+## P3 — Serialize alphaclaw.json writers under a file lock
+- **What:** Route every `writeAlphaclawConfig` read-modify-write (release channel, overseer/medic toggles, team settings, openai-compat flag) through `withFileLockSync`, the way `updateOpenclawConfig` already serializes openclaw.json writers.
+- **Why:** Two concurrent toggles (e.g. a medic PUT racing a team-settings PUT) can drop one write. Pre-existing pattern across all alphaclaw.json writers, not specific to the medic — flagged by the ship adversarial pass.
+- **Context:** `lib/server/alphaclaw-config.js` writeAlphaclawConfig + the update* helpers; the lock helper lives in `lib/server/utils/safe-file.js`. Mind the read cache (kConfigReadCache) when adding the lock.
+- **Effort:** S → CC: S.
+
 ## P3 — Plumb an AbortSignal through the startup medic
 - **What:** Pass a real cancellation signal from the watchdog's run-budget race into `configMedic.run` → `llmClient.complete` (fetch already takes one) and `runDoctorFix` (kill the spawned doctor), so a budget expiry cancels the in-flight work instead of orphaning it.
 - **Why:** Today the race latches correctly and every mutating step re-checks its budget (LLM deadline-capped, doctor timeout-capped, remove_keys re-checks remaining), so the practical zombie window is small — but a cancelled medic that still finishes a doctor run can rewrite openclaw.json after the lifecycle lock has moved on.

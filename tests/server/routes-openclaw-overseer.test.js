@@ -191,4 +191,39 @@ describe("server/routes/openclaw-channel overseer + sqlite backup", () => {
     expect(res.status).toBe(400);
     expect(res.body.code).toBe("invalid_setting");
   });
+
+  it("GET /api/openclaw/medic returns 500 medic_unavailable when availability throws", async () => {
+    const deps = createDeps({
+      gatewayMedic: {
+        getAvailability: vi.fn(() => {
+          throw new Error("state torn");
+        }),
+      },
+    });
+    const res = await request(createApp(deps)).get("/api/openclaw/medic");
+    expect(res.status).toBe(500);
+    expect(res.body.code).toBe("medic_unavailable");
+  });
+
+  it("PUT /api/openclaw/medic returns 500 medic_write_failed with the disk hint", async () => {
+    const deps = createDeps();
+    // A read-only fs: the settings write must surface as medic_write_failed.
+    deps.fs = new Proxy(fs, {
+      get(target, prop) {
+        if (prop === "writeFileSync") {
+          return () => {
+            throw new Error("ENOSPC: no space left on device");
+          };
+        }
+        const value = target[prop];
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const res = await request(createApp(deps))
+      .put("/api/openclaw/medic")
+      .send({ enabled: false });
+    expect(res.status).toBe(500);
+    expect(res.body.code).toBe("medic_write_failed");
+    expect(res.body.hint).toMatch(/disk space/);
+  });
 });

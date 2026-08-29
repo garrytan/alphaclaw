@@ -792,6 +792,25 @@ describe("server/openclaw-channel boot sync (e2e)", () => {
         fs.readFileSync(path.join(harness.openclawDir, "openclaw.json"), "utf8"),
       );
       expect(cfg.gateway?.controlUi?.environment).toBeUndefined();
+
+      // Same heal for the DEV/purple shape (dev selection, checkout gone).
+      const devHarness = createHarness({
+        pin: "1.0.0",
+        channel: "dev",
+        installedVersion: "1.0.0",
+        sentinelVersion: "1.0.0",
+        execFileSyncImpl: vi.fn(() => ""),
+      });
+      writeConfig(devHarness.openclawDir, {
+        gateway: {
+          controlUi: { environment: { label: "DEV · a1b2c3d", color: "purple" } },
+        },
+      });
+      devHarness.sync.syncAtBoot();
+      const devCfg = JSON.parse(
+        fs.readFileSync(path.join(devHarness.openclawDir, "openclaw.json"), "utf8"),
+      );
+      expect(devCfg.gateway?.controlUi?.environment).toBeUndefined();
     });
 
     it("writes the DEV stripe only when the dev checkout build knows the key", () => {

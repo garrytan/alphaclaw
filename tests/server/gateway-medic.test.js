@@ -567,6 +567,107 @@ describe("server/gateway-medic", () => {
     expect(outcome).toMatchObject({ fixed: true, tier: "doctor_fix" });
   });
 
+  it("never removes an ANCESTOR of a protected path (section-wide delete bypass)", async () => {
+    // Deleting "gateway" or "gateway.controlUi" would take gateway.auth /
+    // allowedOrigins down with it — the exact fail-open the denylist exists
+    // to prevent.
+    const openclawDir = mkOpenclawDir();
+    writeConfig(openclawDir, {
+      gateway: {
+        auth: { mode: "token" },
+        controlUi: { allowedOrigins: ["https://x"] },
+      },
+    });
+    const capture = {};
+    const medic = createMedic(openclawDir, {
+      llmClient: {
+        getAvailability: () => ({ available: true, provider: "anthropic", model: "m" }),
+        complete: vi.fn(async ({ prompt }) => {
+          capture.prompt = prompt;
+          return {
+            ok: true,
+            provider: "anthropic",
+            model: "m",
+            text: JSON.stringify({
+              diagnosis: "d",
+              remedy: "remove_keys",
+              keys: ["gateway", "gateway.controlUi"],
+              confidence: "high",
+            }),
+          };
+        }),
+      },
+    });
+
+    const outcome = await medic.run({
+      exitCode: 78,
+      stderrTail: [
+        'Unrecognized key: "gateway"',
+        'gateway: Unrecognized key: "controlUi"',
+      ],
+    });
+
+    expect(outcome.fixed).toBe(false);
+    const after = readConfig(openclawDir);
+    expect(after.gateway.auth).toEqual({ mode: "token" });
+    expect(after.gateway.controlUi.allowedOrigins).toEqual(["https://x"]);
+    expect(capture.prompt).toContain('"removableKeyPaths": []');
+  });
+
+  it("scrubs secrets out of the parsed blame structure, not just the raw tail", async () => {
+    const openclawDir = mkOpenclawDir();
+    writeConfig(openclawDir, { audit: {} });
+    const capture = {};
+    const medic = createMedic(openclawDir, {
+      llmClient: {
+        getAvailability: () => ({ available: true, provider: "anthropic", model: "m" }),
+        complete: vi.fn(async ({ prompt }) => {
+          capture.prompt = prompt;
+          return {
+            ok: true,
+            provider: "anthropic",
+            model: "m",
+            text: JSON.stringify({ diagnosis: "d", remedy: "none", confidence: "high" }),
+          };
+        }),
+      },
+    });
+
+    await medic.run({
+      exitCode: 78,
+      stderrTail: [
+        'Unrecognized key: "audit"',
+        // A validator echoing a secret VALUE inside an Invalid-value line: the
+        // captured `problem` text rides the "trusted" FAILURE JSON section.
+        "apiKey: Invalid value sk-ant-SuperSecretValue123 is malformed",
+      ],
+    });
+
+    expect(capture.prompt).not.toContain("sk-ant-SuperSecretValue123");
+  });
+
+  it("re-checks hand-set-ness inside the config lock and fails CLOSED on check errors", async () => {
+    const openclawDir = mkOpenclawDir();
+    const stripe = { label: "BETA · 2026.8.1", color: "amber" };
+    writeConfig(openclawDir, {
+      gateway: { controlUi: { environment: { ...stripe } } },
+    });
+    const medic = createMedic(openclawDir, {
+      isManagedStripeValue: () => {
+        throw new Error("ownership store unreadable");
+      },
+    });
+
+    const outcome = await medic.run({
+      exitCode: 78,
+      stderrTail: kStripeCrashStderr,
+    });
+
+    // Unverifiable ownership = treated as hand-set = never auto-removed.
+    expect(outcome.fixed).toBe(false);
+    expect(readConfig(openclawDir).gateway.controlUi.environment).toEqual(stripe);
+  });
+
   it("never treats a security-critical blamed path as removable", async () => {
     const openclawDir = mkOpenclawDir();
     writeConfig(openclawDir, { gateway: { auth: { mode: "token" } } });
@@ -690,6 +791,89 @@ describe("server/gateway-medic", () => {
     // Evidence structure survives redaction.
     expect(prompt).toContain("postgres://***@db.internal:5432/prod");
     expect(prompt).toContain('Unrecognized key: "audit"');
+  });
+
+  it("refuses to mutate when the budget expired during the model call", async () => {
+    let now = 0;
+    const openclawDir = mkOpenclawDir();
+    writeConfig(openclawDir, { audit: {} });
+    const medic = createMedic(openclawDir, {
+      nowFn: () => now,
+      llmClient: {
+        getAvailability: () => ({ available: true, provider: "anthropic", model: "m" }),
+        complete: vi.fn(async () => {
+          now += 200_000; // the model call ate the whole budget
+          return {
+            ok: true,
+            provider: "anthropic",
+            model: "m",
+            text: JSON.stringify({
+              diagnosis: "d",
+              remedy: "remove_keys",
+              keys: ["audit"],
+              confidence: "high",
+            }),
+          };
+        }),
+      },
+    });
+
+    const outcome = await medic.run({
+      exitCode: 78,
+      stderrTail: ['Unrecognized key: "audit"'],
+      budgetMs: 120_000,
+    });
+
+    // The watchdog may already have latched and released the lock — no
+    // mutation past the budget.
+    expect(outcome.fixed).toBe(false);
+    expect(outcome.error).toMatch(/budget exhausted/);
+    expect(readConfig(openclawDir).audit).toEqual({});
+  });
+
+  it("refuses to start doctor --fix with less than the runway floor", async () => {
+    const openclawDir = mkOpenclawDir();
+    writeConfig(openclawDir, { audit: {} });
+    const runDoctorFix = vi.fn(async () => ({ ok: true }));
+    const medic = createMedic(openclawDir, { runDoctorFix });
+
+    const outcome = await medic.run({
+      exitCode: 78,
+      stderrTail: ['Unrecognized key: "audit"'],
+      allowDoctorFix: true,
+      budgetMs: 20_000, // below kMinDoctorRunwayMs
+    });
+
+    expect(runDoctorFix).not.toHaveBeenCalled();
+    expect(outcome.fixed).toBe(false);
+    expect(outcome.error).toMatch(/budget exhausted/);
+  });
+
+  it("treats an unknown remedy string as unusable and falls to doctor", async () => {
+    const openclawDir = mkOpenclawDir();
+    writeConfig(openclawDir, { audit: {} });
+    const runDoctorFix = vi.fn(async () => ({ ok: true }));
+    const medic = createMedic(openclawDir, {
+      llmClient: {
+        getAvailability: () => ({ available: true, provider: "anthropic", model: "m" }),
+        complete: vi.fn(async () => ({
+          ok: true,
+          provider: "anthropic",
+          model: "m",
+          text: JSON.stringify({ diagnosis: "d", remedy: "reboot_universe", confidence: "high" }),
+        })),
+      },
+      runDoctorFix,
+    });
+
+    const outcome = await medic.run({
+      exitCode: 78,
+      stderrTail: ['Unrecognized key: "audit"'],
+      allowDoctorFix: true,
+    });
+
+    expect(runDoctorFix).toHaveBeenCalledTimes(1);
+    expect(outcome).toMatchObject({ fixed: true, tier: "doctor_fix" });
   });
 
   it("keeps only the newest three medic backups", async () => {

@@ -232,6 +232,31 @@ describe("server/llm-client", () => {
     expect(result.attempts[0].error).toMatch(/timed out after 20ms/);
   });
 
+  it("fails with the no-key error when no provider key is configured", async () => {
+    const fetchImpl = vi.fn();
+    const client = createFrontierLlmClient({ env: {}, fetchImpl });
+
+    const result = await client.complete({ prompt: "p" });
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/no frontier-model API key configured/);
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("treats an empty content array as a failed candidate, not a success", async () => {
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({ content: [], stop_reason: "end_turn" }))
+      .mockResolvedValueOnce(jsonResponse(anthropicBody("recovered")));
+    const client = createFrontierLlmClient({
+      env: { ANTHROPIC_API_KEY: "a" },
+      fetchImpl,
+    });
+
+    const result = await client.complete({ prompt: "p" });
+    expect(result).toMatchObject({ ok: true, model: "claude-opus-5", text: "recovered" });
+    expect(result.attempts[0].error).toBe("empty completion");
+  });
+
   it("stops trying candidates once the overall deadline is spent", async () => {
     let now = 0;
     const fetchImpl = vi.fn(async () => {
