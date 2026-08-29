@@ -298,7 +298,7 @@
 ## P3 — Gateway-state reason prose client-side (E7)
 - **What:** Expose `tcp.observedAt` (and crash-window inputs) in the status payload and build the "Last confirmed running 42s ago — reconnecting." / "3 restarts in the last 5 min" prose client-side.
 - **Why:** The only remaining server-composed relative-time prose. It is tz-safe (relative, recomputed every ~2s snapshot) so this is architectural hygiene, not a correctness bug.
-- **Context:** lib/server/gateway-state.js:188-231 `reasonForState`; consumed verbatim by lib/public/js/components/gateway.js. Deferred from the UI local-time normalization plan (CEO review E7).
+- **Context:** lib/server/gateway-state.js:195-235 `reasonForState`; consumed verbatim by lib/public/js/components/gateway.js. Deferred from the UI local-time normalization plan (CEO review E7).
 - **Effort:** M. **Depends on:** nothing.
 
 ## P3 — Usage-tracker ingest-time tz-aware day keys (E8)
@@ -314,7 +314,7 @@
 - **Effort:** S (one /design-consultation session). **Depends on:** nothing.
 
 ## P3 — upgrade-ui-smoke.sh: password selector matches two elements
-- **What:** `tests/browser/upgrade-ui-smoke.sh` stops at `browse wait 'input[type="password"]'` — login.html renders both `#password` and a hidden `#password-confirm`, and the browse CLI now refuses multi-match selectors. Fix: wait/fill `#password` by id (time-format-smoke.sh already does; better yet, share its API-login helper).
+- **What:** `tests/browser/upgrade-ui-smoke.sh` stops at `browse wait 'input[type="password"]'` — login.html renders both `#password` and a hidden `#password-confirm`, and the browse CLI now refuses multi-match selectors. Fix: wait/fill `#password` by id (claude-code-launcher-smoke.sh already does; better yet, share time-format-smoke.sh's in-page `POST /api/auth/login` approach, which sidesteps the form entirely).
 - **Why:** The upgrade smoke silently no-ops in environments with a current browse CLI, so the channel-segment regression it guards is unwatched.
 - **Context:** Pre-existing (login.html last touched v0.9.38, smoke v0.9.40); surfaced by /qa on 2026-08-29 while running it as a regression check for the time-normalization branch. Not modified per QA rule "never modify existing tests".
 - **Effort:** S. **Depends on:** nothing.
