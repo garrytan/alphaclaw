@@ -427,6 +427,17 @@ describe("frontend/gateway card (server-state matrix)", () => {
     expect(treeText(tree)).toMatch(/as of\s+\d+s ago/);
   });
 
+  it("renders no freeze stamp before the first frame (lastFrameAtMs 0 is not epoch 1970)", () => {
+    // lastFrameAtMs starts at 0 (no frame yet) — 0 must stay "no stamp",
+    // never a relative time computed against the 1970 epoch.
+    publishShell({
+      statusState: makeServerState({}),
+      connectivityMode: "reconnecting",
+    });
+    const tree = renderGateway({});
+    expect(treeText(tree)).not.toMatch(/as of/);
+  });
+
   it("pre-first-frame renders the client-owned connecting card with Restart disabled", () => {
     // Store still at defaults: no status frame has arrived.
     const tree = renderGateway({ status: null });
