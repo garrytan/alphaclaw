@@ -1899,6 +1899,217 @@ describe("server/openclaw-channel boot sync (e2e)", () => {
       expect(tail).not.toContain(secret);
       expect(tail).toContain("***");
     });
+
+    it("holds when the validator says 'unrecognized' with no parsable blame (narrow capability pattern, adv-12)", async () => {
+      // 'Unrecognized keys detected in configuration' carries no quoted key
+      // for the blame parser and no unknown-command text — the broad
+      // /unrecognized/ capability pattern misread this INVALID config as
+      // validate-missing, configHealthy passed, and the gateway launched on
+      // a rejected config. It must classify {available:true, valid:false}
+      // and end in the fail-closed hold.
+      const runnerImpl = async (opts) => {
+        const args = Array.isArray(opts.args) ? opts.args : [];
+        if (args.includes("validate")) {
+          return {
+            ok: false,
+            code: 78,
+            tail: "Unrecognized keys detected in configuration\n",
+            timedOut: false,
+          };
+        }
+        if (args.includes("preflight")) {
+          return {
+            ok: true,
+            code: 0,
+            tail: '{"ok":true,"compatible":true}\n',
+            timedOut: false,
+          };
+        }
+        if (args.includes("doctor")) {
+          return { ok: true, code: 0, tail: "Doctor complete\n", timedOut: false };
+        }
+        return { ok: true, code: 0, tail: "", timedOut: false };
+      };
+      const harness = createHarness({
+        installedVersion: "2026.9.1-beta.1",
+        sentinelVersion: "2026.9.1-beta.1",
+        runnerImpl,
+      });
+      writeConfig(harness.openclawDir, { mystery: { operatorData: true } });
+      harness.sync.syncAtBoot();
+
+      const outcome = await harness.sync.reconcileBootConfig();
+
+      expect(outcome.status).toBe("held");
+      expect(harness.store.readState().gatewayHold).toBeTruthy();
+    });
+
+    it("holds (fail-closed) instead of running doctor while a gateway process is live (adv-4)", async () => {
+      // An externally-supervised `openclaw gateway run` (outside our managed
+      // child) breaks the "gateway is NOT running at boot" assumption —
+      // doctor --fix against its open DBs is the corruption the quiesce
+      // machinery exists to prevent.
+      const doctorCalls = [];
+      const isRunning = vi.fn(async () => true);
+      const harness = createHarness({
+        installedVersion: "2026.8.1",
+        sentinelVersion: "2026.8.1",
+        runnerImpl: doctorRunner({ doctorCalls }),
+        extraSyncOptions: { gatewayQuiesce: { isRunning } },
+      });
+      writeConfig(harness.openclawDir, { audit: { enabled: true } });
+      harness.sync.syncAtBoot();
+
+      const outcome = await harness.sync.reconcileBootConfig();
+
+      expect(outcome.status).toBe("held");
+      expect(doctorCalls).toHaveLength(0);
+      expect(isRunning).toHaveBeenCalled();
+      expect(outcome.hold.reason).toContain(
+        "a gateway process is running — stop it, then Retry migration",
+      );
+      expect(harness.store.readState().gatewayHold.reason).toContain(
+        "a gateway process is running",
+      );
+      // No gateHash on the failed attempt: stopping the gateway does not
+      // change the config hash, so a plain next boot must retry the real
+      // work instead of reusing the hold.
+      expect(
+        harness.store.readState().configMigration.lastAttempt.gateHash ?? null,
+      ).toBe(null);
+      await flushAsync();
+      expect(notifyIds(harness.notify)).toContain(
+        "config-migration-held-2026.8.1",
+      );
+
+      // Gateway stopped → the same reconcile proceeds to the guarded doctor.
+      isRunning.mockResolvedValue(false);
+      const retried = await harness.sync.reconcileBootConfig({ force: true });
+      expect(retried.status).toBe("ok");
+      expect(doctorCalls).toHaveLength(1);
+      // (The bin-phase factory has no gatewayQuiesce dep at all — absence
+      // skips the check, pinned by every other doctor test in this file.)
+    });
+
+    it("a forced retry after a COMPLETED migration never re-snapshots over the old epoch's pre-fix backup (adv-11)", async () => {
+      let harness;
+      harness = createHarness({
+        pin: "1.0.0",
+        installedVersion: "2026.9.1-beta.1",
+        sentinelVersion: "2026.9.1-beta.1",
+        channel: "beta",
+        runnerImpl: validateAwareRunner({
+          openclawDirRef: () => harness.openclawDir,
+          dbPreflight: { ok: true, compatible: true },
+        }),
+      });
+      // Old-epoch pristine snapshot — the only viable downgrade-restore
+      // candidate for a later rollback to 1.0.0.
+      const oldBak = path.join(
+        harness.openclawDir,
+        "openclaw.json.pre-fix-1.0.0.bak",
+      );
+      fs.mkdirSync(harness.openclawDir, { recursive: true });
+      fs.writeFileSync(
+        oldBak,
+        JSON.stringify({ pristine: "pre-migration" }, null, 2),
+      );
+      writeConfig(harness.openclawDir, { migrated: "current-shape" });
+      harness.store.updateState((s) => {
+        s.pinVersion = "1.0.0";
+        s.applied = {
+          channel: "beta",
+          version: "2026.9.1-beta.1",
+          at: 1,
+          acceptedAt: 1,
+        };
+        s.configMigration = {
+          completedForVersion: "2026.9.1-beta.1",
+          lastAttempt: {
+            version: "2026.9.1-beta.1",
+            at: 1,
+            ok: true,
+            error: null,
+          },
+        };
+        return s;
+      });
+      expect(harness.sync.syncAtBoot().action).toBe("already_active");
+
+      const retried = await harness.sync.reconcileBootConfig({ force: true });
+      expect(retried.status).toBe("ok");
+      // The old epoch's snapshot keeps its pristine pre-migration shape…
+      expect(JSON.parse(fs.readFileSync(oldBak, "utf8"))).toEqual({
+        pristine: "pre-migration",
+      });
+      // …and the redundant retry's snapshot is SELF-named — content and name
+      // agree, and both restore paths gate a same-version .bak out as a
+      // candidate, so it is inert.
+      const selfBak = path.join(
+        harness.openclawDir,
+        "openclaw.json.pre-fix-2026.9.1-beta.1.bak",
+      );
+      expect(fs.existsSync(selfBak)).toBe(true);
+      expect(JSON.parse(fs.readFileSync(selfBak, "utf8")).migrated).toBe(
+        "current-shape",
+      );
+      const baks = fs
+        .readdirSync(harness.openclawDir)
+        .filter((n) => n.startsWith("openclaw.json.pre-fix-"))
+        .sort();
+      expect(baks).toEqual([
+        "openclaw.json.pre-fix-1.0.0.bak",
+        "openclaw.json.pre-fix-2026.9.1-beta.1.bak",
+      ]);
+
+      // A second forced retry keeps the existing self-named snapshot as-is.
+      writeConfig(harness.openclawDir, {
+        migrated: "current-shape",
+        edited: true,
+      });
+      const again = await harness.sync.reconcileBootConfig({ force: true });
+      expect(again.status).toBe("ok");
+      expect(
+        JSON.parse(fs.readFileSync(selfBak, "utf8")).edited,
+      ).toBeUndefined();
+    });
+
+    it("evicts '.restored.bak' artifacts before live pre-fix snapshots when pruning to keep-3", async () => {
+      const doctorCalls = [];
+      const harness = createHarness({
+        installedVersion: "2026.8.1",
+        sentinelVersion: "2026.8.1",
+        runnerImpl: doctorRunner({ doctorCalls }),
+      });
+      writeConfig(harness.openclawDir, { audit: { enabled: true } });
+      const seed = (name, ageMs) => {
+        const p = path.join(harness.openclawDir, name);
+        fs.writeFileSync(p, "{}");
+        const when = new Date(Date.now() - ageMs);
+        fs.utimesSync(p, when, when);
+      };
+      // Two OLD live snapshots and a NEWER consumed-restore artifact: a
+      // pure-mtime prune would evict an old epoch's only live snapshot and
+      // keep the inert .restored.bak leftover.
+      seed("openclaw.json.pre-fix-0.7.0.bak", 60 * 60 * 1000);
+      seed("openclaw.json.pre-fix-0.8.0.bak", 30 * 60 * 1000);
+      seed("openclaw.json.pre-fix-0.9.0.restored.bak", 5 * 60 * 1000);
+      harness.sync.syncAtBoot();
+
+      const outcome = await harness.sync.reconcileBootConfig();
+      expect(outcome.status).toBe("ok");
+      const names = fs
+        .readdirSync(harness.openclawDir)
+        .filter((n) => n.startsWith("openclaw.json.pre-fix-"))
+        .sort();
+      // The reconcile's own snapshot plus both live snapshots survive; the
+      // newest-but-consumed .restored.bak was evicted first.
+      expect(names).toEqual([
+        "openclaw.json.pre-fix-0.7.0.bak",
+        "openclaw.json.pre-fix-0.8.0.bak",
+        "openclaw.json.pre-fix-1.0.0.bak",
+      ]);
+    });
   });
 
   describe("boot config migration timeout & diagnostics (issue #21 bug 1)", () => {
@@ -2451,12 +2662,23 @@ describe("server/openclaw-channel boot sync (e2e)", () => {
       expect(cfg.audit).toEqual({ enabled: true });
       expect(cfg.legacyBridge).toEqual({ enabled: true });
       // The revert target was preflight-proven against a snapshot copy of
-      // the real state DB (scripted pass).
+      // the real state DB — via the STREAMED prober (the sync execFileSync
+      // variant froze the event loop for the whole gate budget, so the gate
+      // must never use it; scripted here as "unsupported" → proceed).
+      expect(
+        harness.runner.runStreamed.mock.calls.some(
+          (call) =>
+            (call[0]?.args || []).includes("preflight") &&
+            (call[0]?.args || []).some((arg) =>
+              String(arg).includes(".probe-"),
+            ),
+        ),
+      ).toBe(true);
       expect(
         probeExec.mock.calls.some((call) =>
           (call[1] || []).includes("preflight"),
         ),
-      ).toBe(true);
+      ).toBe(false);
       // The pending restart_expected run resolved with activated:false.
       const record = readGateRun(harness);
       expect(record.state).toBe("activation_failed");
@@ -2503,14 +2725,34 @@ describe("server/openclaw-channel boot sync (e2e)", () => {
       // recreate the exact brick. Merged policy: the gate DECLINES and the
       // reconciler falls through to the fail-closed HOLD (supersedes #21's
       // 'keeps the new build running' — the config is still rejected, so
-      // launching on it would just crash-loop).
-      const probeExec = vi.fn((cmd, args) => {
-        if (Array.isArray(args) && args.includes("preflight")) {
-          throw new Error("schema version 12; this build supports 1");
+      // launching on it would just crash-loop). The gate's revert preflights
+      // run through the STREAMED prober, so the block is scripted on the
+      // runner (the live db-probe sees the same failure and stays
+      // inconclusive → migration assumed needed → doctor runs and fails).
+      const blockedProbeRunner = async (opts) => {
+        const args = Array.isArray(opts.args) ? opts.args : [];
+        if (args.includes("validate")) {
+          return {
+            ok: false,
+            code: 78,
+            tail: 'Unrecognized key: "legacyBridge"\n',
+            timedOut: false,
+          };
         }
-        return "";
-      });
-      const harness = seedIncident({ probeExecFileSyncImpl: probeExec });
+        if (args.includes("doctor")) {
+          return { ok: false, code: 1, tail: "doctor exit 1\n", timedOut: false };
+        }
+        if (args.includes("preflight")) {
+          return {
+            ok: false,
+            code: 1,
+            tail: "schema version 12; this build supports 1\n",
+            timedOut: false,
+          };
+        }
+        return { ok: true, code: 0, tail: "", timedOut: false };
+      };
+      const harness = seedIncident({ runnerImpl: blockedProbeRunner });
       harness.sync.syncAtBoot();
 
       const outcome = await harness.sync.reconcileBootConfig();

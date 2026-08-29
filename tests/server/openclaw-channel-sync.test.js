@@ -904,6 +904,46 @@ describe("server/openclaw-channel-sync", () => {
       expect(installToTempDir).not.toHaveBeenCalled();
     });
 
+    it("409s gateway_busy while a settings migration holds the lifecycle lock (adv-5)", async () => {
+      // A reconcile_retry/boot holder can legitimately run a 30-min doctor;
+      // an apply's terminal restartProcess() would SIGKILL that migration
+      // mid-write. Soft-gate applies never touch the lock, so the entry gate
+      // is the only protection.
+      const activeOp = { value: { kind: "reconcile_retry", startedAt: 1 } };
+      const harness = createHarness({
+        pin: "1.0.0",
+        installedVersion: "1.0.0",
+        sentinelVersion: "1.0.0",
+        extraSyncOptions: {
+          getActiveGatewayOperation: () => activeOp.value,
+        },
+      });
+      const target = { channel: "beta", version: "1.1.0-beta.1" };
+
+      const retryBusy = await harness.sync.applyUpdate(target);
+      expect(retryBusy.status).toBe(409);
+      expect(retryBusy.body.code).toBe("gateway_busy");
+      expect(retryBusy.body.message).toMatch(/settings migration is running/i);
+      expect(harness.runner.runStreamed).not.toHaveBeenCalled();
+      expect(harness.installToTempDir).not.toHaveBeenCalled();
+
+      activeOp.value = { kind: "boot", startedAt: 1 };
+      const bootBusy = await harness.sync.applyUpdate(target);
+      expect(bootBusy.status).toBe(409);
+      expect(bootBusy.body.code).toBe("gateway_busy");
+
+      // Non-migration holders keep the generic gateway-operation envelope.
+      activeOp.value = { kind: "restart", startedAt: 1 };
+      const restartBusy = await harness.sync.applyUpdate(target);
+      expect(restartBusy.status).toBe(409);
+      expect(restartBusy.body.code).toBe("gateway_operation_in_progress");
+
+      // Lock released → the same apply proceeds.
+      activeOp.value = null;
+      const proceeded = await harness.sync.applyUpdate(target);
+      expect(proceeded.status).toBe(202);
+    });
+
     it("applies stable→beta: overlay + pin snapshot + record + restart", async () => {
       vi.useFakeTimers();
       const harness = createHarness({

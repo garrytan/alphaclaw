@@ -454,6 +454,135 @@ describe("server/openclaw-channel-backup-retry", () => {
       expect(quiesce.releaseSpy).toHaveBeenCalledTimes(1);
     });
 
+    it("runs the workspace-discovery retry LIVE: gateway relaunched and lock released BEFORE the retry CLI call", async () => {
+      // adv-2: the retry's budget is min(cliTimeoutMs = 10 min, envelope) —
+      // run in-quiesce it would blow the lock+stop+backup+start ≤ 10-min
+      // lease invariant and outlive the 9-min watchdog suppression, letting
+      // the force-released lease relaunch the gateway MID-TAR. The quiesce
+      // transaction must fully unwind first; the retry then runs live.
+      const kWorkspaceTail =
+        "Error: Config invalid at $OPENCLAW_HOME/.openclaw/openclaw.json.\n" +
+        "OpenClaw cannot reliably discover custom workspaces for backup.\n" +
+        "Fix the config or rerun with --no-include-workspace for a partial backup.\n";
+      const quiesce = makeQuiesceRecorder({});
+      const { runnerImpl, backupCalls } = makeBackupRunner({
+        script: [{ ok: false, tail: kWorkspaceTail }, { ok: true }],
+        onBackupCall: () => quiesce.calls.push("backup-cli"),
+      });
+      const harness = createHarness({ runnerImpl, gatewayQuiesce: quiesce });
+
+      const result = await harness.sync.applyUpdate(kHardGateTarget);
+      await flushAsync();
+
+      expect(result.status).toBe(202);
+      expect(backupCalls).toHaveLength(2);
+      // The retry CLI call comes strictly AFTER start + unsuppress + release.
+      expect(quiesce.calls).toEqual([
+        "acquireLock",
+        "isRunning",
+        "suppress",
+        "stop",
+        "backup-cli",
+        "start",
+        "unsuppress",
+        "release",
+        "backup-cli",
+      ]);
+      // The retry still succeeds as an honestly-marked partial backup.
+      const backupRecord = readRunBackupRecord(harness);
+      expect(backupRecord).toEqual(
+        expect.objectContaining({
+          quiesced: true,
+          attempts: 2,
+          partial: true,
+          noBackup: false,
+        }),
+      );
+      expect(
+        notifyMessages(harness.notify).some((m) =>
+          /WITHOUT workspace files/.test(m),
+        ),
+      ).toBe(true);
+    });
+
+    it("a quiesced-attempt timeout falls back to the live ladder (10-min ceiling) instead of failing terminally", async () => {
+      // adv-7: a box whose backup takes 7-10 minutes fails the 7-min quiesce
+      // budget but fits the live CLI ceiling — with ~18 min of envelope left,
+      // a terminal failure would lock it out of every hard gate forever.
+      const quiesce = makeQuiesceRecorder({});
+      const { runnerImpl, backupCalls } = makeBackupRunner({
+        script: [{ ok: false, timedOut: true, tail: "" }, { ok: true }],
+        onBackupCall: () => quiesce.calls.push("backup-cli"),
+      });
+      const harness = createHarness({ runnerImpl, gatewayQuiesce: quiesce });
+
+      const result = await harness.sync.applyUpdate(kHardGateTarget);
+
+      expect(result.status).toBe(202);
+      expect(backupCalls).toHaveLength(2);
+      // The gateway relaunched (and the lock released) before the live attempt.
+      expect(quiesce.calls).toEqual([
+        "acquireLock",
+        "isRunning",
+        "suppress",
+        "stop",
+        "backup-cli",
+        "start",
+        "unsuppress",
+        "release",
+        "backup-cli",
+      ]);
+      // The live attempt gets the full CLI ceiling, not the quiesce budget.
+      const { kOpenclawBackupTimeoutMs } = require("../../lib/server/constants");
+      expect(backupCalls[1].timeoutMs).toBe(kOpenclawBackupTimeoutMs);
+      const backupRecord = readRunBackupRecord(harness);
+      expect(backupRecord).toEqual(
+        expect.objectContaining({ quiesced: true, attempts: 2, noBackup: false }),
+      );
+    });
+
+    it("swallows a POST-timeout acquire rejection (no unhandledRejection) while still failing gateway_busy", async () => {
+      const unhandled = [];
+      const onUnhandled = (error) => unhandled.push(error);
+      process.on("unhandledRejection", onUnhandled);
+      try {
+        const calls = [];
+        const quiesce = {
+          acquireLock: vi.fn(async () => {
+            calls.push("acquireLock");
+            await sleep(80);
+            throw new Error("late acquire rejection");
+          }),
+          isRunning: vi.fn(async () => true),
+          suppress: vi.fn(),
+          unsuppress: vi.fn(),
+          stop: vi.fn(async () => true),
+          start: vi.fn(async () => {}),
+        };
+        const { runnerImpl, backupCalls } = makeBackupRunner({});
+        const harness = createHarness({
+          runnerImpl,
+          gatewayQuiesce: quiesce,
+          backupTuning: { quiesceLockTimeoutMs: 15 },
+        });
+
+        const result = await harness.sync.applyUpdate(kHardGateTarget);
+
+        // The race already gave up honestly…
+        expect(result.status).toBe(409);
+        expect(result.body.code).toBe("backup_failed");
+        expect(result.body.message).toMatch(/another gateway operation/i);
+        expect(backupCalls).toHaveLength(0);
+        // …and the late rejection lands in the chain's .catch, never as an
+        // unhandledRejection.
+        await sleep(200);
+        await flushAsync();
+        expect(unhandled).toEqual([]);
+      } finally {
+        process.off("unhandledRejection", onUnhandled);
+      }
+    });
+
     it("a failed gateway relaunch after the backup warns and notifies instead of failing the apply", async () => {
       const quiesce = makeQuiesceRecorder({ startThrows: true });
       const { runnerImpl } = makeBackupRunner({});

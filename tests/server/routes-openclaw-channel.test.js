@@ -441,13 +441,21 @@ describe("server/routes/openclaw-channel", () => {
           operationId: "op-1",
           state: "activated",
           dbPreflight: { migrationRequired: true, foundVersion: 1, targetVersion: 12 },
+          backup: {
+            file: "/data/backups/openclaw/openclaw-backup-1-aaaa.tar.gz",
+            verified: true,
+            noBackup: false,
+          },
         },
       ]),
     };
+    // state.backups holds a NEWER backup from an unrelated later run — it
+    // postdates the migration, so naming it would point recovery at an
+    // archive that already contains the migrated shape.
     deps.openclawChannelService.store.readState = vi.fn(() => ({
       blocklist: [],
       backups: [
-        { file: "/data/backups/openclaw/openclaw-backup-1-aaaa.tar.gz", verified: true },
+        { file: "/data/backups/openclaw/openclaw-backup-9-zzzz.tar.gz", verified: true },
       ],
     }));
     const app = createApp(deps);
@@ -455,6 +463,7 @@ describe("server/routes/openclaw-channel", () => {
     const fenced = await request(app).post("/api/openclaw/rollback").send({});
     expect(fenced.status).toBe(409);
     expect(fenced.body.code).toBe("rollback_requires_confirmation");
+    // The named backup is the MIGRATED run's own verified record.
     expect(fenced.body.backupFile).toBe(
       "/data/backups/openclaw/openclaw-backup-1-aaaa.tar.gz",
     );
@@ -465,6 +474,77 @@ describe("server/routes/openclaw-channel", () => {
       .send({ confirmDataRisk: true });
     expect(confirmed.status).toBe(200);
     expect(deps.openclawChannelService.requestChannelRollback).toHaveBeenCalledTimes(1);
+  });
+
+  it("still fences when a later benign repair run tops the ledger (adv-10)", async () => {
+    // A repair or no-migration apply AFTER the migrating run does not
+    // un-migrate the DBs — the fence must arm off the newest run that
+    // actually migrated, not listRuns()[0].
+    const deps = createDeps();
+    deps.openclawChannelService.runLedger = {
+      listRuns: vi.fn(() => [
+        {
+          operationId: "op-2",
+          state: "activated",
+          dbPreflight: { migrationRequired: false, foundVersion: 12, targetVersion: 12 },
+          backup: {
+            file: "/data/backups/openclaw/openclaw-backup-2-bbbb.tar.gz",
+            verified: true,
+            noBackup: false,
+          },
+        },
+        {
+          operationId: "op-1",
+          state: "activated",
+          dbPreflight: { migrationRequired: true, foundVersion: 1, targetVersion: 12 },
+          backup: {
+            file: "/data/backups/openclaw/openclaw-backup-1-aaaa.tar.gz",
+            verified: true,
+            noBackup: false,
+          },
+        },
+      ]),
+    };
+    const app = createApp(deps);
+
+    const fenced = await request(app).post("/api/openclaw/rollback").send({});
+    expect(fenced.status).toBe(409);
+    expect(fenced.body.code).toBe("rollback_requires_confirmation");
+    // The pre-MIGRATION backup, not the repair run's newer one.
+    expect(fenced.body.backupFile).toBe(
+      "/data/backups/openclaw/openclaw-backup-1-aaaa.tar.gz",
+    );
+    expect(fenced.body.hint).toContain("openclaw-backup-1-aaaa.tar.gz");
+    expect(deps.openclawChannelService.requestChannelRollback).not.toHaveBeenCalled();
+  });
+
+  it("names no backup when the migrated run has no verified backup of its own", async () => {
+    // The migrated run soft-failed its backup; a verified state.backups entry
+    // from another run must not stand in for it.
+    const deps = createDeps();
+    deps.openclawChannelService.runLedger = {
+      listRuns: vi.fn(() => [
+        {
+          operationId: "op-1",
+          state: "activated",
+          dbPreflight: { migrationRequired: true, foundVersion: 1, targetVersion: 12 },
+          backup: { noBackup: true, at: 1 },
+        },
+      ]),
+    };
+    deps.openclawChannelService.store.readState = vi.fn(() => ({
+      blocklist: [],
+      backups: [
+        { file: "/data/backups/openclaw/openclaw-backup-9-zzzz.tar.gz", verified: true },
+      ],
+    }));
+    const app = createApp(deps);
+
+    const fenced = await request(app).post("/api/openclaw/rollback").send({});
+    expect(fenced.status).toBe(409);
+    expect(fenced.body.code).toBe("rollback_requires_confirmation");
+    expect(fenced.body.backupFile).toBeNull();
+    expect(fenced.body.hint).toContain("No verified pre-update backup");
   });
 
   it("fences rollback while the reconciler holds the gateway", async () => {
@@ -572,6 +652,31 @@ describe("server/routes/openclaw-channel", () => {
       expect(res.body.hint).toBeTruthy();
       expect(deps.openclawChannelService.reconcileBootConfig).not.toHaveBeenCalled();
       expect(deps.gatewayHoldActions.acquireLock).not.toHaveBeenCalled();
+    });
+
+    it("refuses with gateway_running when a hold is set but a gateway process is running (adv-4a)", async () => {
+      // A hold means AlphaClaw refused to launch — a running gateway was
+      // started outside it, and the 30-min doctor must never touch its live
+      // DBs regardless of the hold.
+      const deps = holdDeps();
+      deps.gatewayHoldActions.isGatewayRunning = vi.fn(async () => true);
+      const app = createApp(deps);
+
+      const res = await request(app)
+        .post("/api/openclaw/reconcile/retry")
+        .send({});
+
+      expect(res.status).toBe(409);
+      expect(res.body.ok).toBe(false);
+      expect(res.body.code).toBe("gateway_running");
+      expect(res.body.message).toContain("cannot touch live databases");
+      // The hint names how to recover: stop the outside process, then retry.
+      expect(res.body.hint).toContain("outside AlphaClaw");
+      expect(res.body.hint).toContain("Stop that process");
+      expect(deps.openclawChannelService.reconcileBootConfig).not.toHaveBeenCalled();
+      expect(deps.gatewayHoldActions.acquireLock).not.toHaveBeenCalled();
+      expect(deps.gatewayHoldActions.clearLatch).not.toHaveBeenCalled();
+      expect(deps.gatewayHoldActions.startGateway).not.toHaveBeenCalled();
     });
 
     it("still runs with no hold when the gateway is DOWN (crash-loop recovery)", async () => {
