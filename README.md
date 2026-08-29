@@ -154,7 +154,7 @@ The CLI takes the request body inline or from stdin, plus optional flags for con
 alphaclaw admin GET /api/openclaw/runs --json
 
 # write: applies immediately, body from stdin
-echo '{"autoRepair":true}' | alphaclaw admin PUT /api/alphaclaw/config/watchdog --data-stdin --summary
+echo '{"autoRepair":true}' | alphaclaw admin PUT /api/watchdog/settings --data-stdin
 
 # dangerous: one-time confirm code, delivered to your admin channel
 alphaclaw admin DELETE /api/agents/legacy-bot --confirm ABCD-EFGH
@@ -171,6 +171,8 @@ alphaclaw admin DELETE /api/agents/legacy-bot --confirm ABCD-EFGH
 | `alphaclaw telegram topic add --thread <id> --name <text>` | Register a Telegram topic mapping             |
 | `alphaclaw telegram topic create --group <id> --name <text>` | Create a Telegram forum topic and register it |
 | `alphaclaw telegram topics list`                           | List registered, discovered, and stale topics |
+| `alphaclaw admin <METHOD> /api/path`                       | Agent-admin CLI: drive the dashboard API (needs `features.agentAdmin`) |
+| `alphaclaw admin manifest`                                 | Print the agent-admin operation catalog       |
 | `alphaclaw version`                                        | Print version                                 |
 | `alphaclaw help`                                           | Show help                                     |
 
@@ -268,9 +270,10 @@ If you need OpenClaw's full security posture (manual pairing codes, no query-str
 
 Release history lives in [CHANGELOG.md](CHANGELOG.md); contributor setup and
 test tiers are in [CONTRIBUTING.md](CONTRIBUTING.md); open work is tracked in
-[TODOS.md](TODOS.md); design documents (gateway state model, Telegram topics
-discovery) live in [docs/designs/](docs/designs/); architecture notes and
-conventions for coding agents are in [AGENTS.md](AGENTS.md).
+[TODOS.md](TODOS.md); design documents (Agent Administration, gateway state
+model, Telegram topics discovery) live in [docs/designs/](docs/designs/);
+architecture notes and conventions for coding agents are in
+[AGENTS.md](AGENTS.md).
 
 ```bash
 npm install

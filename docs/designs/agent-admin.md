@@ -48,7 +48,7 @@ spread — is tracked as a P1 TODO, out of this wave (large blast radius).
 ```
 
 ## Key components (as built)
-- **Operation manifest** (`lib/server/admin-manifest/`): 20 domain modules, ~177
+- **Operation manifest** (`lib/server/admin-manifest/`): 20 domain modules, 182
   ops. Single source of truth for agent-facing POLICY (tier, redaction, docs,
   hints) — route handlers keep owning validation. Matching is on `req.baseUrl +
   req.path` (Express trims the mount prefix). A route-coverage test fails CI if
