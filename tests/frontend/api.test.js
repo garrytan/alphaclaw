@@ -290,22 +290,9 @@ describe("frontend/api", () => {
     expect(result).toEqual({ ok: true, runId: 42 });
   });
 
-  it("importDoctorResult posts raw Doctor output", async () => {
-    global.fetch.mockResolvedValue(mockJsonResponse(201, { ok: true, runId: 43 }));
+  it("does not expose an importDoctorResult client (server route only)", async () => {
     const api = await loadApiModule();
-
-    const result = await api.importDoctorResult('{"summary":"Imported","cards":[]}');
-
-    expect(global.fetch).toHaveBeenCalledWith(
-      "/api/doctor/import",
-      expect.objectContaining({
-        method: "POST",
-        body: JSON.stringify({ rawOutput: '{"summary":"Imported","cards":[]}' }),
-        headers: expect.any(Headers),
-      }),
-    );
-    expectLastFetchHeaders("application/json");
-    expect(result).toEqual({ ok: true, runId: 43 });
+    expect(api.importDoctorResult).toBeUndefined();
   });
 
   it("fetchUsageSessionDetail encodes session id in path", async () => {

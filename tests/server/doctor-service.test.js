@@ -660,7 +660,10 @@ describe("server/doctor-service", () => {
 
   it("reports total Project Context truncation when active injected files exceed the total cap", () => {
     const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-bootstrap-total-limit-"));
+    const managedRoot = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-bootstrap-total-limit-managed-"));
     const dbRoot = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-bootstrap-total-limit-db-"));
+    // 60k total budget: AGENTS+SOUL+TOOLS consume it; everything after (incl.
+    // AlphaClaw's hook extra, injected LAST) starves.
     const activeProjectContextFiles = [
       "AGENTS.md",
       "SOUL.md",
@@ -669,12 +672,28 @@ describe("server/doctor-service", () => {
       "USER.md",
       "HEARTBEAT.md",
       "hooks/bootstrap/AGENTS.md",
-      "hooks/bootstrap/TOOLS.md",
     ];
     fs.mkdirSync(path.join(workspaceRoot, "hooks", "bootstrap"), { recursive: true });
     for (const filePath of activeProjectContextFiles) {
       fs.writeFileSync(path.join(workspaceRoot, filePath), repeatText(20000), "utf8");
     }
+    fs.writeFileSync(
+      path.join(managedRoot, "openclaw.json"),
+      JSON.stringify({
+        hooks: {
+          internal: {
+            enabled: true,
+            entries: {
+              "bootstrap-extra-files": {
+                enabled: true,
+                paths: ["hooks/bootstrap/AGENTS.md"],
+              },
+            },
+          },
+        },
+      }),
+      "utf8",
+    );
 
     const doctorDb = loadManagedDoctorDb();
     doctorDb.initDoctorDb({ rootDir: dbRoot });
@@ -694,7 +713,16 @@ describe("server/doctor-service", () => {
       getDoctorCard: doctorDb.getDoctorCard,
       updateDoctorCardStatus: doctorDb.updateDoctorCardStatus,
       workspaceRoot,
-      managedRoot: workspaceRoot,
+      managedRoot,
+      readOpenclawConfig: ({ openclawDir, fallback }) => {
+        try {
+          return JSON.parse(
+            fs.readFileSync(path.join(openclawDir, "openclaw.json"), "utf8"),
+          );
+        } catch {
+          return fallback;
+        }
+      },
       computeSnapshotAsync: fastComputeSnapshotAsync,
     });
 
@@ -708,11 +736,14 @@ describe("server/doctor-service", () => {
     expect(status.bootstrapContext.activeTruncatedFiles).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
-          path: "hooks/bootstrap/TOOLS.md",
+          path: "hooks/bootstrap/AGENTS.md",
           truncatedByTotalLimit: true,
+          skipped: true,
+          reason: "starved",
         }),
       ]),
     );
+    expect(status.bootstrapContext.hardening.state).toBe("starved");
   });
 
   it("describes reuse elapsed time in hours and days", async () => {
@@ -731,6 +762,9 @@ describe("server/doctor-service", () => {
             id: 1,
             status: "completed",
             workspaceFingerprint: fingerprint,
+            promptVersion: "doctor-v2",
+            contextProfile: "stable-2026.7",
+            openclawVersion: "",
             completedAt,
             startedAt: completedAt,
             rawResult: {},
@@ -1207,6 +1241,251 @@ describe("server/doctor-service", () => {
       const statusAfter = doctorService.buildStatus();
       expect(statusAfter.changeSummary.hasBaseline).toBe(true);
       expect(statusAfter.changeSummary.changedFilesCount).toBe(1);
+    });
+  });
+
+  describe("doctor-v2 reuse guard and card provenance", () => {
+    const makeFixtureService = ({
+      previousRun,
+      previousCards = [],
+      allCards = [],
+      workspaceRoot,
+      managedRoot = workspaceRoot,
+      featureGates = null,
+      getInstalledVersion,
+      inserts,
+      created,
+    }) => {
+      const { createDoctorService } = loadDoctorService();
+      return createDoctorService({
+        clawCmd: vi.fn(async () => ({
+          ok: true,
+          stdout: JSON.stringify({ summary: "fresh", cards: [] }),
+        })),
+        listDoctorRuns: () => (previousRun ? [previousRun] : []),
+        listDoctorCards: () => allCards,
+        createDoctorRun: (run) => {
+          created.push(run);
+          return created.length + 1;
+        },
+        completeDoctorRun: vi.fn(),
+        insertDoctorCards: (payload) => {
+          inserts.push(payload);
+        },
+        getDoctorRun: () => ({ rawResult: {} }),
+        getDoctorCardsByRunId: () => previousCards,
+        getDoctorCard: () => null,
+        updateDoctorCardStatus: () => null,
+        getInitialWorkspaceBaseline: () => null,
+        setInitialWorkspaceBaseline: () => null,
+        workspaceRoot,
+        managedRoot,
+        featureGates,
+        getInstalledVersion,
+        readOpenclawConfig: ({ openclawDir, fallback }) => {
+          try {
+            return JSON.parse(
+              fs.readFileSync(path.join(openclawDir, "openclaw.json"), "utf8"),
+            );
+          } catch {
+            return fallback;
+          }
+        },
+        computeSnapshotAsync: fastComputeSnapshotAsync,
+      });
+    };
+
+    const settleBackgroundRun = () => new Promise((resolve) => setImmediate(resolve));
+
+    const makeMatchingRun = (fingerprint, overrides = {}) => ({
+      id: 1,
+      status: "completed",
+      workspaceFingerprint: fingerprint,
+      promptVersion: "doctor-v2",
+      contextProfile: "stable-2026.7",
+      openclawVersion: "2026.7.1-2",
+      completedAt: new Date().toISOString(),
+      startedAt: new Date().toISOString(),
+      ...overrides,
+    });
+
+    let workspaceRoot;
+    beforeEach(() => {
+      workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-reuse-guard-"));
+      fs.writeFileSync(path.join(workspaceRoot, "AGENTS.md"), "# Guidance\n", "utf8");
+    });
+
+    it.each([
+      ["prompt version", { promptVersion: "doctor-v1" }],
+      ["context profile", { contextProfile: "beta-2026.8.1" }],
+      ["installed version", { openclawVersion: "2026.7.1-1" }],
+      ["legacy run without profile columns", { promptVersion: "doctor-v2", contextProfile: "", openclawVersion: "" }],
+    ])("rejects fingerprint reuse on a %s mismatch", async (_label, overrides) => {
+      const { computeWorkspaceSnapshot } = require("../../lib/server/doctor/workspace-fingerprint");
+      const fingerprint = computeWorkspaceSnapshot(workspaceRoot).fingerprint;
+      const inserts = [];
+      const created = [];
+      const doctorService = makeFixtureService({
+        previousRun: makeMatchingRun(fingerprint, overrides),
+        workspaceRoot,
+        getInstalledVersion: () => "2026.7.1-2",
+        inserts,
+        created,
+      });
+
+      const result = await doctorService.runDoctor();
+      await settleBackgroundRun();
+
+      expect(result.reusedPreviousRun).toBeUndefined();
+      expect(result.ok).toBe(true);
+      expect(created[0]).toMatchObject({
+        status: "running",
+        engine: "gateway_agent",
+        contextProfile: "stable-2026.7",
+        openclawVersion: "2026.7.1-2",
+      });
+    });
+
+    it("reuses on a full match and clones only LLM cards, recomputing bootstrap cards", async () => {
+      // A tiny per-file budget makes AGENTS.md (11 chars) truncate so a fresh
+      // bootstrap card must be emitted on the reuse run.
+      const managedRoot = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-reuse-managed-"));
+      fs.writeFileSync(
+        path.join(managedRoot, "openclaw.json"),
+        JSON.stringify({ agents: { defaults: { bootstrapMaxChars: 5, bootstrapTotalMaxChars: 60000 } } }),
+        "utf8",
+      );
+      const { computeWorkspaceSnapshot } = require("../../lib/server/doctor/workspace-fingerprint");
+      const fingerprint = computeWorkspaceSnapshot(workspaceRoot).fingerprint;
+      const inserts = [];
+      const created = [];
+      const doctorService = makeFixtureService({
+        previousRun: makeMatchingRun(fingerprint),
+        previousCards: [
+          { title: "LLM finding", status: "open", source: "llm", sourceKey: "" },
+          { title: "Legacy finding without source", status: "open" },
+          {
+            title: "Old bootstrap card",
+            status: "open",
+            source: "bootstrap",
+            sourceKey: "boot:file_limit:AGENTS.md",
+          },
+        ],
+        workspaceRoot,
+        managedRoot,
+        getInstalledVersion: () => "2026.7.1-2",
+        inserts,
+        created,
+      });
+
+      const result = await doctorService.runDoctor();
+
+      expect(result.reusedPreviousRun).toBe(true);
+      expect(created[0]).toMatchObject({ engine: "deterministic_reuse" });
+      // First insert: cloned LLM cards only (legacy source-less rows count as LLM).
+      expect(inserts[0].cards.map((card) => card.title)).toEqual([
+        "LLM finding",
+        "Legacy finding without source",
+      ]);
+      // Second insert: freshly recomputed bootstrap cards.
+      expect(inserts[1].cards).toEqual([
+        expect.objectContaining({
+          source: "bootstrap",
+          sourceKey: "boot:file_limit:AGENTS.md",
+        }),
+      ]);
+    });
+
+    it("suppresses sourced cards whose source key was previously dismissed", async () => {
+      const managedRoot = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-reuse-dismiss-"));
+      fs.writeFileSync(
+        path.join(managedRoot, "openclaw.json"),
+        JSON.stringify({ agents: { defaults: { bootstrapMaxChars: 5 } } }),
+        "utf8",
+      );
+      const { computeWorkspaceSnapshot } = require("../../lib/server/doctor/workspace-fingerprint");
+      const fingerprint = computeWorkspaceSnapshot(workspaceRoot).fingerprint;
+      const inserts = [];
+      const created = [];
+      const doctorService = makeFixtureService({
+        previousRun: makeMatchingRun(fingerprint),
+        previousCards: [],
+        allCards: [
+          {
+            title: "Old bootstrap card",
+            status: "dismissed",
+            source: "bootstrap",
+            sourceKey: "boot:file_limit:AGENTS.md",
+          },
+        ],
+        workspaceRoot,
+        managedRoot,
+        getInstalledVersion: () => "2026.7.1-2",
+        inserts,
+        created,
+      });
+
+      const result = await doctorService.runDoctor();
+
+      expect(result.reusedPreviousRun).toBe(true);
+      // Clone insert is empty and the dismissed bootstrap card is not re-emitted.
+      expect(inserts.every((insert) => insert.cards.length === 0)).toBe(true);
+    });
+
+    it("selects the beta profile through the feature gates", async () => {
+      const inserts = [];
+      const created = [];
+      const doctorService = makeFixtureService({
+        previousRun: null,
+        workspaceRoot,
+        featureGates: { supportsFeature: (name) => name === "bootstrapContractV2" },
+        getInstalledVersion: () => "2026.8.1-beta.3",
+        inserts,
+        created,
+      });
+
+      const status = doctorService.buildStatus();
+      expect(status.bootstrapContext.profileId).toBe("beta-2026.8.1");
+
+      await doctorService.runDoctor();
+      await settleBackgroundRun();
+      expect(created[0]).toMatchObject({
+        contextProfile: "beta-2026.8.1",
+        openclawVersion: "2026.8.1-beta.3",
+      });
+    });
+
+    it("releases the busy guard when run creation throws after the snapshot", async () => {
+      let shouldThrow = true;
+      const { createDoctorService } = loadDoctorService();
+      const service = createDoctorService({
+        clawCmd: vi.fn(async () => ({ ok: true, stdout: "{}" })),
+        listDoctorRuns: () => [],
+        listDoctorCards: () => [],
+        createDoctorRun: () => {
+          if (shouldThrow) {
+            shouldThrow = false;
+            throw new Error("db write failed");
+          }
+          return 7;
+        },
+        completeDoctorRun: vi.fn(),
+        insertDoctorCards: vi.fn(),
+        getDoctorRun: () => null,
+        getDoctorCardsByRunId: () => [],
+        getDoctorCard: () => null,
+        updateDoctorCardStatus: () => null,
+        workspaceRoot,
+        managedRoot: workspaceRoot,
+        computeSnapshotAsync: fastComputeSnapshotAsync,
+      });
+
+      await expect(service.runDoctor()).rejects.toThrow("db write failed");
+      // The busy guard must not stay latched: the next run proceeds.
+      const second = await service.runDoctor();
+      await settleBackgroundRun();
+      expect(second.ok).toBe(true);
+      expect(second.alreadyRunning).toBeUndefined();
     });
   });
 });
