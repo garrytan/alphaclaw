@@ -232,6 +232,17 @@ Use these conventions for all UI work under `lib/public/js` and `lib/public/css`
 - Prefer inline helper text under fields (`text-xs text-fg-muted` / `text-fg-dim`) for setup guidance.
 - For tip/help links in helper text, use the shared `ac-tip-link` class (token-backed via `--accent-link`) instead of per-file ad-hoc cyan classes.
 
+### Persisted settings and mutation feedback
+
+- Persisted booleans/selects go through `useSavedSetting` (`lib/public/js/hooks/use-saved-setting.js`) — optimistic apply, generation-guarded hydration, savingRef lock, loud revert. Booleans render via `<SavedToggle />`; selects/segmented controls render the hook's `value` directly plus an `<InlineErrorChip />` on failure.
+- One hook instance per settings DOCUMENT: when several controls share one GET/PUT (e.g. watchdog settings), use a single `useSavedSetting` (`select` = identity) and have each control call `commit({ ...value, field: next }, { context: "field" })`. Never instantiate per-field hooks against the same endpoint.
+- Mutations that revert a control show a persistent `<InlineErrorChip />` adjacent to it (cleared on the next attempt). Toasts are for successes and fire-and-forget notices only — never the sole surface for a revert.
+- A failed initial GET must never present a default value as fact: render the control disabled with a "Couldn't load — Retry" chip (`SavedToggle` does this via `loadError`/`onRetryLoad`).
+- Every fetch that writes user-mutable or list state carries a latest-request-wins guard (generation ref / `usePolling` / `useCachedFetch`); background refreshes never overwrite unsaved drafts (dirty-check merges).
+- Never gate a whole card on a fetch: render the frame immediately and scope "Loading..." to the data region or control label (`api-feature-panel.js` pattern). Lists/status panes distinguish loading / error(+Retry) / genuinely-empty — use `<AsyncSection />`.
+- After write/mutation APIs, `setCached`/`invalidateCache`/`refresh({ force: true })` the affected keys (see `lib/public/js/lib/api-cache.js` — force refreshes are generation-safe and never resolve to pre-mutation data).
+- Per-row actions get per-row pending state ("Approving...", "Binding...") on the clicked control, not a page-level spinner.
+
 ### Feedback and state
 
 - Use `showToast(...)` for user-visible operation outcomes.
