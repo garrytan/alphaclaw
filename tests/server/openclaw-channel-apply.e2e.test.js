@@ -3,6 +3,7 @@ const fs = require("fs");
 const http = require("http");
 const os = require("os");
 const path = require("path");
+const { DatabaseSync } = require("node:sqlite");
 
 const express = require("express");
 const request = require("supertest");
@@ -547,6 +548,66 @@ describe("server/openclaw-channel apply flow (e2e)", { retry: 1 }, () => {
           entry.event === "error" && /verify|missing internals/i.test(String(entry.data?.error)),
       ),
     ).toBe(true);
+  });
+
+  it("hard-blocks an apply when database preflight reports incompatibility", async () => {
+    const harness = createHarness({
+      pin: "1.0.0",
+      installedVersion: "1.0.0",
+      sentinelVersion: "1.0.0",
+      runnerImpl: async (opts, fallback) => {
+        if (
+          opts.command === "node" &&
+          opts.args?.[1] === "database" &&
+          opts.args?.[2] === "preflight"
+        ) {
+          // Nonzero exit = the target cannot read our current DB shape.
+          return {
+            ok: false,
+            code: 1,
+            tail: '{"ok":false,"reason":"schema newer than target"}',
+            timedOut: false,
+          };
+        }
+        return fallback(opts);
+      },
+    });
+    const { app, sync, store, openclawDir } = harness;
+    expect(sync.syncAtBoot().ok).toBe(true);
+
+    // Seed a real state DB so the preflight step has something to snapshot.
+    const stateDir = path.join(openclawDir, "state");
+    fs.mkdirSync(stateDir, { recursive: true });
+    const db = new DatabaseSync(path.join(stateDir, "openclaw.sqlite"));
+    db.exec("CREATE TABLE meta(k TEXT)");
+    db.close();
+
+    await request(app)
+      .put("/api/alphaclaw/config/updates/openclaw-release-channel")
+      .send({ releaseChannel: "beta" });
+
+    const { port } = await listenApp(app);
+    const applyRes = await request(app)
+      .post("/api/openclaw/apply")
+      .send({ channel: "beta", version: "1.1.0" });
+
+    if (applyRes.status === 409) {
+      expect(applyRes.body.code).toBe("db_preflight_failed");
+    } else {
+      expect(applyRes.status).toBe(202);
+      const collector = await openSseCollector({
+        port,
+        eventsPath: applyRes.body.events,
+      });
+      const events = await collector.done;
+      const doneEvent = events[events.length - 1];
+      expect(doneEvent.data.ok).toBe(false);
+      expect(doneEvent.data.code).toBe("db_preflight_failed");
+      expect(firstIndexOfStep(events, "db-preflight")).toBeGreaterThanOrEqual(0);
+    }
+
+    // The incompatible version is NEVER recorded as the applied build.
+    expect(store.readState().applied).toBeNull();
   });
 
   it("rejects concurrent applies and gates the legacy self-update route", async () => {

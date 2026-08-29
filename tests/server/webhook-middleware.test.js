@@ -182,6 +182,44 @@ describe("server/webhook-middleware", () => {
     }
   });
 
+  it("flags a 200 that drops the durable-ingress header after a hook proved durable", async () => {
+    // Spy gateway: return the durable header on the first request, then omit it.
+    let requestCount = 0;
+    const server = http.createServer((req, res) => {
+      const chunks = [];
+      req.on("data", (chunk) => chunks.push(chunk));
+      req.on("end", () => {
+        requestCount += 1;
+        res.statusCode = 200;
+        if (requestCount === 1) {
+          res.setHeader("x-openclaw-delivery-accepted", "durable");
+        }
+        res.end("");
+      });
+    });
+    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const gatewayUrl = `http://127.0.0.1:${server.address().port}`;
+
+    const logged = [];
+    const app = createHookApp({
+      gatewayUrl,
+      insertRequest: (entry) => logged.push(entry),
+    });
+
+    try {
+      await request(app).post("/hooks/telegram").send({ update_id: 1 });
+      await request(app).post("/hooks/telegram").send({ update_id: 2 });
+
+      expect(logged).toHaveLength(2);
+      // First request proved durable ingress — no annotation.
+      expect(logged[0].gatewayBody).not.toContain("[NOT DURABLY ACCEPTED]");
+      // Second dropped the header on a 200 — flagged.
+      expect(logged[1].gatewayBody).toContain("[NOT DURABLY ACCEPTED]");
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+
   it("strips identity, forwarded-evidence, and setup_token cookie from gateway-bound headers", async () => {
     const { server, calls, gatewayUrl } = await createGatewaySpyServer();
     const app = createHookApp({ gatewayUrl });
@@ -194,6 +232,9 @@ describe("server/webhook-middleware", () => {
         .set("x-openclaw-scopes", "operator.admin")
         .set("x-forwarded-for", "203.0.113.7")
         .set("forwarded", "for=203.0.113.7")
+        .set("x-forwarded-server", "edge.example.com")
+        .set("x-forwarded-port", "443")
+        .set("x-real-ip", "203.0.113.7")
         .set("cookie", "theme=dark; setup_token=abc.def")
         .set("x-hook-custom", "kept")
         .send(JSON.stringify({ hello: "world" }));
@@ -204,13 +245,32 @@ describe("server/webhook-middleware", () => {
       // Identity headers must never reach a trusted-proxy gateway.
       expect(forwarded["x-alphaclaw-user"]).toBeUndefined();
       expect(forwarded["x-openclaw-scopes"]).toBeUndefined();
-      // Client-controlled forwarded evidence must be stripped too.
+      // Client-controlled forwarded evidence must be stripped too — including
+      // x-forwarded-server, added to the evidence list by the merge resolution.
       expect(forwarded["x-forwarded-for"]).toBeUndefined();
       expect(forwarded.forwarded).toBeUndefined();
+      expect(forwarded["x-forwarded-server"]).toBeUndefined();
+      expect(forwarded["x-forwarded-port"]).toBeUndefined();
+      expect(forwarded["x-real-ip"]).toBeUndefined();
       // The AlphaClaw session cookie is removed; other cookies survive.
       expect(forwarded.cookie).toBe("theme=dark");
       // Benign headers still pass through.
       expect(forwarded["x-hook-custom"]).toBe("kept");
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+
+  it("does not flag hooks that never used durable ingress", async () => {
+    const { server, gatewayUrl } = await createGatewaySpyServer();
+    const logged = [];
+    const app = createHookApp({
+      gatewayUrl,
+      insertRequest: (entry) => logged.push(entry),
+    });
+    try {
+      await request(app).post("/hooks/discord").send({ x: 1 });
+      expect(logged[0].gatewayBody).not.toContain("[NOT DURABLY ACCEPTED]");
     } finally {
       await new Promise((resolve) => server.close(resolve));
     }

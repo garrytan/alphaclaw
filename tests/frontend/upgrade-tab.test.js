@@ -52,6 +52,7 @@ vi.mock("../../lib/public/js/lib/api.js", () => ({
   fetchStatus: vi.fn(),
   markOpenclawGood: vi.fn(),
   rollbackOpenclaw: vi.fn(),
+  runOpenclawRepair: vi.fn(),
   subscribeOpenclawApplyEvents: vi.fn(() => () => {}),
   updateOpenclawReleaseChannel: vi.fn(),
 }));
@@ -63,7 +64,13 @@ vi.mock("../../lib/public/js/components/toast.js", () => ({
 
 import * as preactHooks from "preact/hooks";
 import * as api from "../../lib/public/js/lib/api.js";
+import {
+  getCached,
+  invalidateCache,
+  setCached,
+} from "../../lib/public/js/lib/api-cache.js";
 import { showToast } from "../../lib/public/js/components/toast.js";
+import { gatewayShellStore } from "../../lib/public/js/components/restart-progress-card.js";
 import { UpgradeTabView } from "../../lib/public/js/components/upgrade-tab/index.js";
 import { useUpgradeTab } from "../../lib/public/js/components/upgrade-tab/use-upgrade-tab.js";
 import { buildChannelSaveErrorModel } from "../../lib/public/js/components/upgrade-tab/helpers.js";
@@ -316,7 +323,7 @@ describe("frontend/upgrade-tab view", () => {
     expect(text).toContain("last output 5s ago");
     expect(text).toContain("Preflight checks");
     expect(text).toContain("Download");
-    expect(text).toContain("Show raw log");
+    expect(text).toContain("Technical details");
 
     const actionButtons = findAllByType(tree, ActionButton);
     expect(actionButtons.length).toBeGreaterThan(0);
@@ -410,7 +417,7 @@ describe("frontend/upgrade-tab view", () => {
     expect(text).toContain("auto-rollback armed → last known good: 2026.7.2");
     expect(text).toContain("first 24h");
     expect(text).toContain(
-      "Channel-applied versions add ~10-30s to restarts (the built-in version boots fastest).",
+      "Channel-applied versions add ~10-60s to the first restart after a version change",
     );
 
     const markGood = findActionButtonByLabel(tree, "Mark as good now");
@@ -522,7 +529,7 @@ describe("frontend/upgrade-tab view", () => {
     expect(findActionButtonByLabel(tree, "Clear blocklist entry")).toBeTruthy();
     const rollback = findActionButtonByLabel(tree, "Roll back");
     expect(rollback).toBeTruthy();
-    expect(rollback.props.tone).toBe("warning");
+    expect(rollback.props.tone).toBe("danger");
     rollback.props.onClick();
     expect(onRequestRollback).toHaveBeenCalledTimes(1);
   });
@@ -538,12 +545,21 @@ describe("frontend/upgrade-tab view", () => {
       onCancelRollback,
     });
 
-    expect(treeText(tree)).toContain(
+    const dialogText = treeText(tree);
+    expect(dialogText).toContain(
       "Roll back to the last known good version now? The current version will be blocklisted.",
     );
+    // Danger copy: stable usually cannot verify beta-written state; the
+    // pre-apply backup is the recovery path.
+    expect(dialogText).toContain(
+      "The older version usually cannot verify state written by this one",
+    );
+    expect(dialogText).toContain(
+      "the backup taken before the update is the recovery path",
+    );
 
-    // The dialog's confirm — the only "Roll back" ActionButton in this render.
-    const confirmButton = findActionButtonByLabel(tree, "Roll back");
+    // The dialog's confirm — the only rollback ActionButton in this render.
+    const confirmButton = findActionButtonByLabel(tree, "Roll back anyway");
     expect(confirmButton).toBeTruthy();
     confirmButton.props.onClick();
     expect(onRollback).toHaveBeenCalledTimes(1);
@@ -1005,7 +1021,10 @@ describe("frontend/upgrade-tab view", () => {
     const text = treeText(tree);
     expect(text).toContain("build failed: tsc exited 2");
     expect(text).toContain("Check the raw log for the first TypeScript error.");
-    expect(text).toContain("Repair (run");
+    // A failed op explains the recovery path (D3): with no target/repair
+    // props on this view the re-stage caption is shown (the interactive
+    // re-stage/repair buttons are covered in the hook + repair suites).
+    expect(text).toContain("Re-staging downloads and installs");
   });
 
   it("hides the repair caption when the failure is not repair-applicable", () => {
@@ -1059,6 +1078,111 @@ describe("frontend/upgrade-tab view", () => {
     expect(text).toContain("37s");
     expect(text).not.toContain("1m 40s");
   });
+
+  describe("WhatsNewCard (2.1)", () => {
+    const kWhatsNew = {
+      minor: "2026.8",
+      channel: "beta",
+      lastVerifiedVersion: "2026.8.1-beta.3",
+      channelLatest: "2026.8.1-beta.3",
+      newerThanVerified: false,
+      highlights: [
+        { title: "Team access", body: "Profiles and per-member permissions.", tone: "info" },
+      ],
+      securityFlips: [
+        {
+          key: "gateway.terminal.enabled",
+          from: "off",
+          to: "on",
+          warning: "The dashboard gains a host terminal by default.",
+        },
+      ],
+    };
+
+    it("renders security flips ABOVE highlights for the active channel", () => {
+      const tree = renderView({
+        channelInfo: makeChannelInfo({ releaseChannel: "beta" }),
+        activeChannel: "beta",
+        catalog: makeCatalog(),
+        whatsNew: kWhatsNew,
+      });
+      const text = treeText(tree);
+      expect(text.replace(/\s+/g, " ")).toContain("What's new in 2026.8 ( beta )");
+      expect(text).toContain("Security changes to review");
+      expect(text).toContain("gateway.terminal.enabled");
+      expect(text).toContain("Team access");
+      // Hierarchy: the security section precedes the highlights (D5).
+      expect(text.indexOf("Security changes to review")).toBeLessThan(
+        text.indexOf("Team access"),
+      );
+    });
+
+    it("hides the card when browsing a different channel or with no entry", () => {
+      const stableText = treeText(
+        renderView({
+          channelInfo: makeChannelInfo(),
+          activeChannel: "stable",
+          catalog: makeCatalog(),
+          whatsNew: kWhatsNew, // beta entry, stable view
+        }),
+      );
+      expect(stableText.replace(/\s+/g, " ")).not.toContain("What's new in 2026.8");
+      const noneText = treeText(
+        renderView({
+          channelInfo: makeChannelInfo(),
+          catalog: makeCatalog(),
+          whatsNew: null,
+        }),
+      );
+      expect(noneText).not.toContain("Security changes to review");
+    });
+
+    it("notes when the channel has moved past the verified version", () => {
+      const text = treeText(
+        renderView({
+          channelInfo: makeChannelInfo({ releaseChannel: "beta" }),
+          activeChannel: "beta",
+          catalog: makeCatalog(),
+          whatsNew: {
+            ...kWhatsNew,
+            channelLatest: "2026.8.1-beta.9",
+            newerThanVerified: true,
+          },
+        }),
+      );
+      expect(text.replace(/\s+/g, " ")).toContain("tested with 2026.8.1-beta.3");
+    });
+
+    it("renders the flips as an amber block inside the apply confirm dialog (D5)", () => {
+      const tree = renderView({
+        channelInfo: makeChannelInfo(),
+        catalog: makeCatalog(),
+        pendingApply: {
+          payload: { channel: "beta", version: "2026.8.1-beta.3" },
+          label: "2026.8.1-beta.3",
+          isDowngrade: false,
+          confirm: {
+            title: "Switch to 2026.8.1-beta.3?",
+            tone: "primary",
+            confirmLabel: "Apply",
+            lines: ["Impact: ~2 min.", "Backup included."],
+            isDowngrade: false,
+            isBreaking: true,
+            steps: ["Backup", "Download", "Verify"],
+            securityFlips: kWhatsNew.securityFlips,
+          },
+        },
+      });
+      const text = treeText(tree);
+      expect(text).toContain("Security changes to review");
+      expect(text).toContain("gateway.terminal.enabled");
+      expect(text).toContain("The dashboard gains a host terminal by default.");
+      // The security block precedes the "What happens next" step list.
+      expect(text.indexOf("Security changes to review")).toBeLessThan(
+        text.indexOf("What happens next:"),
+      );
+    });
+  });
 });
 
 describe("frontend/upgrade-tab hook", () => {
@@ -1083,6 +1207,10 @@ describe("frontend/upgrade-tab hook", () => {
 
   beforeEach(() => {
     harness.reset();
+    // The mount loads go through the module-level SWR cache — drop entries a
+    // previous test seeded so every test observes its own mocked responses.
+    invalidateCache("/api/openclaw/channel");
+    invalidateCache("/api/openclaw/catalog");
     api.fetchOpenclawChannel.mockResolvedValue(makeChannelInfo());
     api.fetchOpenclawCatalog.mockResolvedValue({
       ok: true,
@@ -1114,6 +1242,45 @@ describe("frontend/upgrade-tab hook", () => {
     expect(state.activeChannel).toBe("beta");
     expect(state.channelSaveError).toBeNull();
     expect(state.savingChannel).toBe(false);
+  });
+
+  // REGRESSION (2.1): whatsNew is channel-scoped and rides the catalog
+  // payload — a same-session switch must reload it so the WhatsNewCard and the
+  // apply dialog's security-flips block reflect the NEW channel, not the old.
+  it("reloads the whats-new catalog after a channel switch so flips refresh", async () => {
+    api.fetchOpenclawCatalog
+      .mockResolvedValueOnce({
+        ok: true,
+        catalog: makeCatalog(),
+        channel: { releaseChannel: "stable" },
+        whatsNew: { channel: "stable", securityFlips: [] },
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        catalog: makeCatalog(),
+        channel: { releaseChannel: "beta" },
+        whatsNew: {
+          channel: "beta",
+          securityFlips: [{ key: "gateway.terminal.enabled" }],
+        },
+      });
+
+    let state = await hydrate();
+    expect(api.fetchOpenclawCatalog).toHaveBeenCalledTimes(1);
+
+    await state.onSelectChannel("beta");
+
+    // The switch triggered a second catalog read (no forced refresh).
+    expect(api.fetchOpenclawCatalog).toHaveBeenCalledTimes(2);
+    expect(api.fetchOpenclawCatalog).toHaveBeenLastCalledWith({
+      refresh: false,
+    });
+
+    state = renderHook({});
+    expect(state.whatsNew).toEqual({
+      channel: "beta",
+      securityFlips: [{ key: "gateway.terminal.enabled" }],
+    });
   });
 
   it("selecting the already-active channel does not PUT", async () => {
@@ -1187,6 +1354,66 @@ describe("frontend/upgrade-tab hook", () => {
       channel: "stable",
       version: "2026.7.2",
     });
+  });
+
+  it("passes curated security flips into the apply confirm when the target crosses into beta (D5)", async () => {
+    const kFlips = [
+      {
+        key: "gateway.terminal.enabled",
+        from: "off",
+        to: "on",
+        warning: "The dashboard gains a host terminal by default.",
+      },
+    ];
+    api.fetchOpenclawCatalog.mockResolvedValue({
+      ok: true,
+      catalog: makeCatalog(),
+      whatsNew: { minor: "2026.8", channel: "beta", securityFlips: kFlips },
+      channel: { releaseChannel: "stable" },
+    });
+    let state = await hydrate();
+    expect(state.whatsNew).toEqual(
+      expect.objectContaining({ channel: "beta" }),
+    );
+
+    // stable → beta: the flips ride along into the confirm model.
+    state.onRequestApply({
+      payload: { channel: "beta", version: "2026.7.3-beta.1" },
+      label: "2026.7.3-beta.1",
+    });
+    state = renderHook({});
+    expect(state.pendingApply.confirm.securityFlips).toEqual(kFlips);
+
+    // stable → stable: no channel crossing, no flips.
+    state.onCancelApply();
+    state = renderHook({});
+    state.onRequestApply({
+      payload: { channel: "stable", version: "2026.7.2" },
+      label: "2026.7.2",
+    });
+    state = renderHook({});
+    expect(state.pendingApply.confirm.securityFlips).toEqual([]);
+
+    // beta → beta: already running the channel, the flips already happened.
+    harness.reset();
+    // harness.reset() clears hook state but not the module-level api-cache;
+    // drop the cached stable channel/catalog so the fresh beta mocks below win.
+    invalidateCache("/api/openclaw/channel");
+    invalidateCache("/api/openclaw/catalog");
+    api.fetchOpenclawChannel.mockResolvedValue(
+      makeChannelInfo({
+        releaseChannel: "beta",
+        applied: { channel: "beta", version: "2026.7.3-beta.1" },
+        isPin: false,
+      }),
+    );
+    state = await hydrate();
+    state.onRequestApply({
+      payload: { channel: "beta", version: "2026.7.3-beta.1" },
+      label: "2026.7.3-beta.1",
+    });
+    state = renderHook({});
+    expect(state.pendingApply.confirm.securityFlips).toEqual([]);
   });
 
   it("switches to the RESTARTING phase when the restarting step arrives (U4)", async () => {
@@ -1501,6 +1728,175 @@ describe("frontend/upgrade-tab hook", () => {
     );
   });
 
+  it("paints a fresh-cached channel + catalog instantly without refetching (M4)", async () => {
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(kNow);
+    setCached("/api/openclaw/channel", makeChannelInfo({ releaseChannel: "beta" }));
+    setCached("/api/openclaw/catalog", { ok: true, catalog: makeCatalog() });
+    nowSpy.mockReturnValue(kNow + 1_000);
+
+    const state = await hydrate();
+
+    // Back-navigation inside the cache window: no network calls at all.
+    expect(api.fetchOpenclawChannel).not.toHaveBeenCalled();
+    expect(api.fetchOpenclawCatalog).not.toHaveBeenCalled();
+    expect(state.channelInfo.releaseChannel).toBe("beta");
+    expect(state.catalog).toEqual(makeCatalog());
+    expect(state.loadingChannel).toBe(false);
+    expect(state.loadingCatalog).toBe(false);
+  });
+
+  it("serves a stale-cached channel instantly, then applies the revalidated result (M4)", async () => {
+    const staleChannel = makeChannelInfo({ installedVersion: "2026.7.0" });
+    const freshChannel = makeChannelInfo({ installedVersion: "2026.7.1-2" });
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(kNow);
+    setCached("/api/openclaw/channel", staleChannel);
+    setCached("/api/openclaw/catalog", { ok: true, catalog: makeCatalog() });
+    nowSpy.mockReturnValue(kNow + 61_000); // past the 60s maxAge → SWR path
+
+    let resolveFreshChannel;
+    api.fetchOpenclawChannel.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveFreshChannel = resolve;
+        }),
+    );
+
+    let state = await hydrate();
+
+    // Instant paint from the stale entry while the revalidation is in flight.
+    expect(state.channelInfo.installedVersion).toBe("2026.7.0");
+    expect(state.loadingChannel).toBe(false);
+    expect(api.fetchOpenclawChannel).toHaveBeenCalledTimes(1);
+
+    resolveFreshChannel(freshChannel);
+    await flushAsync();
+    state = renderHook({});
+    expect(state.channelInfo.installedVersion).toBe("2026.7.1-2");
+  });
+
+  it("a late SWR revalidation never clobbers a fresher mutation result (mutation-stamp guard)", async () => {
+    const staleChannel = makeChannelInfo({
+      blocklist: [{ id: "stable:2026.7.2", reason: "crash loop" }],
+    });
+    const freshChannel = makeChannelInfo({ blocklist: [] });
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(kNow);
+    setCached("/api/openclaw/channel", staleChannel);
+    setCached("/api/openclaw/catalog", { ok: true, catalog: makeCatalog() });
+    nowSpy.mockReturnValue(kNow + 61_000); // past the 60s maxAge → SWR path
+
+    // The mount revalidation stalls in flight; the mutation reload resolves
+    // before it.
+    let resolveRevalidation;
+    api.fetchOpenclawChannel
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveRevalidation = resolve;
+          }),
+      )
+      .mockResolvedValueOnce(freshChannel);
+    api.markOpenclawGood.mockResolvedValue({ ok: true });
+
+    let state = await hydrate();
+    expect(state.channelInfo.blocklist).toHaveLength(1);
+
+    // A mutation completes while the revalidation is still in flight.
+    await state.onMarkGood();
+    state = renderHook({});
+    expect(state.channelInfo.blocklist).toEqual([]);
+
+    // The pre-mutation revalidation resolves late: it must neither overwrite
+    // the fresher state nor leave its stale payload re-stamped as "fresh" in
+    // the shared cache (which would resurrect it for the next mount).
+    resolveRevalidation(staleChannel);
+    await flushAsync();
+    state = renderHook({});
+    expect(state.channelInfo.blocklist).toEqual([]);
+    expect(getCached("/api/openclaw/channel")).not.toEqual(staleChannel);
+  });
+
+  it("clearing a blocklist entry supersedes an in-flight revalidation and drops the cached channel payload", async () => {
+    const staleChannel = makeChannelInfo({
+      blocklist: [{ id: "stable:2026.7.2", reason: "crash loop" }],
+    });
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(kNow);
+    setCached("/api/openclaw/channel", staleChannel);
+    setCached("/api/openclaw/catalog", { ok: true, catalog: makeCatalog() });
+    nowSpy.mockReturnValue(kNow + 61_000);
+
+    let resolveRevalidation;
+    api.fetchOpenclawChannel.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveRevalidation = resolve;
+        }),
+    );
+    api.clearOpenclawBlocklist.mockResolvedValue({ ok: true, blocklist: [] });
+
+    let state = await hydrate();
+    expect(state.channelInfo.blocklist).toHaveLength(1);
+
+    await state.onClearBlocklist("stable:2026.7.2");
+    state = renderHook({});
+    expect(state.channelInfo.blocklist).toEqual([]);
+
+    // The pre-clear revalidation resolves late: the cleared row must not be
+    // resurrected — not in state, and not via the cache on the next mount.
+    resolveRevalidation(staleChannel);
+    await flushAsync();
+    state = renderHook({});
+    expect(state.channelInfo.blocklist).toEqual([]);
+    expect(getCached("/api/openclaw/channel")).not.toEqual(staleChannel);
+  });
+
+  it("serves a stale-cached catalog instantly, then applies the revalidated result (M4)", async () => {
+    const staleCatalog = makeCatalog({ distTags: { latest: "2026.7.1-2" } });
+    const freshCatalog = makeCatalog({ distTags: { latest: "2026.7.2" } });
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(kNow);
+    setCached("/api/openclaw/channel", makeChannelInfo());
+    setCached("/api/openclaw/catalog", { ok: true, catalog: staleCatalog });
+    nowSpy.mockReturnValue(kNow + 61_000);
+
+    let resolveFreshCatalog;
+    api.fetchOpenclawCatalog.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveFreshCatalog = resolve;
+        }),
+    );
+
+    let state = await hydrate();
+
+    expect(state.catalog.distTags.latest).toBe("2026.7.1-2");
+    expect(state.loadingCatalog).toBe(false);
+    expect(api.fetchOpenclawCatalog).toHaveBeenCalledTimes(1);
+    // Mount revalidation never force-bypasses the server catalog cache.
+    expect(api.fetchOpenclawCatalog).toHaveBeenCalledWith({ refresh: false });
+
+    resolveFreshCatalog({ ok: true, catalog: freshCatalog });
+    await flushAsync();
+    state = renderHook({});
+    expect(state.catalog.distTags.latest).toBe("2026.7.2");
+  });
+
+  it("Check now bypasses the client cache and re-seeds it (M4)", async () => {
+    let state = await hydrate();
+    expect(api.fetchOpenclawCatalog).toHaveBeenCalledTimes(1);
+
+    state.onCheckNow();
+    await flushAsync();
+
+    // refresh:true always hits the network, never the SWR cache.
+    expect(api.fetchOpenclawCatalog).toHaveBeenCalledTimes(2);
+    expect(api.fetchOpenclawCatalog).toHaveBeenLastCalledWith({ refresh: true });
+    // ...and the result re-seeds the cache for the next mount.
+    expect(getCached("/api/openclaw/catalog")).toEqual({
+      ok: true,
+      catalog: makeCatalog(),
+      channel: { releaseChannel: "stable" },
+    });
+  });
+
   it("loads the recent-runs timeline on mount", async () => {
     api.fetchOpenclawRuns.mockResolvedValue({
       ok: true,
@@ -1565,5 +1961,326 @@ describe("frontend/upgrade-tab hook", () => {
         code: "log_not_found",
       }),
     );
+  });
+
+  it("the restart handoff publishes upgradeRestartActive to the shell store; cleanup clears it (M3.4 global banner)", async () => {
+    gatewayShellStore.reset();
+    try {
+      // No operationId/events in the apply result: the quick synchronous
+      // success path hands off to the restart phase immediately.
+      api.applyOpenclawVersion.mockResolvedValue({ ok: true });
+      let state = await hydrate();
+      expect(gatewayShellStore.get().upgradeRestartActive).toBe(false);
+
+      state.onRequestApply({
+        payload: { channel: "stable", version: "2026.7.2" },
+        label: "2026.7.2",
+        isDowngrade: false,
+      });
+      state = renderHook({});
+      await state.onConfirmApply();
+      state = renderHook({});
+      expect(state.operation?.phase).toBe("restarting");
+
+      // Effect #3 in hook declaration order is the upgradeRestartActive
+      // publish (mount load, rehydration, and the elapsed tick precede it).
+      const cleanup = harness.effects[3]();
+      expect(gatewayShellStore.get().upgradeRestartActive).toBe(true);
+
+      // Unmount (or leaving the restarting phase) clears the announcement —
+      // the global banner must never stick after the handoff ends.
+      cleanup();
+      expect(gatewayShellStore.get().upgradeRestartActive).toBe(false);
+    } finally {
+      gatewayShellStore.reset();
+    }
+  });
+});
+
+describe("frontend/upgrade-tab repair (2.3)", () => {
+  const flushAsync = async () => {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  };
+
+  const renderHook = (props = {}) => {
+    harness.beginRender();
+    return useUpgradeTab(props);
+  };
+
+  const hydrate = async (props = {}) => {
+    let state = renderHook(props);
+    harness.effects[0]();
+    await flushAsync();
+    state = renderHook(props);
+    return state;
+  };
+
+  const makeFailedOperation = (overrides = {}) => ({
+    operationId: "op-9",
+    resumed: false,
+    target: { channel: "beta", version: "2026.8.1-beta.3" },
+    label: "2026.8.1-beta.3",
+    startedAt: kNow - 60_000,
+    steps: [{ name: "activate", status: "failed", at: kNow - 5_000 }],
+    output: "raw log",
+    lastOutputAt: null,
+    phase: "failed",
+    error: {
+      message: "activation failed",
+      hint: null,
+      code: "activate_failed",
+      docsUrl: null,
+    },
+    ...overrides,
+  });
+
+  beforeEach(() => {
+    harness.reset();
+    // Drop the module-level api-cache so each case's fresh channel/catalog
+    // mocks win instead of a prior test's cached (dev/beta) payload.
+    invalidateCache("/api/openclaw/channel");
+    invalidateCache("/api/openclaw/catalog");
+    api.fetchOpenclawChannel.mockResolvedValue(makeChannelInfo());
+    api.fetchOpenclawCatalog.mockResolvedValue({
+      ok: true,
+      catalog: makeCatalog(),
+      channel: { releaseChannel: "stable" },
+    });
+    api.fetchOpenclawRuns.mockResolvedValue({ ok: true, runs: [] });
+    api.subscribeOpenclawApplyEvents.mockImplementation(() => () => {});
+  });
+
+  afterEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("offers Run repair on a failed operation when the dev checkout is active (D3)", () => {
+    const onRunRepair = vi.fn();
+    const tree = renderView({
+      channelInfo: makeChannelInfo({ releaseChannel: "dev" }),
+      catalog: makeCatalog(),
+      repairAvailable: true,
+      onRunRepair,
+      operation: makeFailedOperation({
+        target: { channel: "dev", devHead: true },
+        label: "latest dev (main HEAD)",
+      }),
+    });
+    const button = findActionButtonByLabel(tree, "Run repair");
+    expect(button).toBeTruthy();
+    button.props.onClick();
+    expect(onRunRepair).toHaveBeenCalledTimes(1);
+    // D3: one primary recovery action per failure state.
+    expect(findActionButtonByLabel(tree, "Re-stage version")).toBeFalsy();
+    expect(treeText(tree)).toContain("Repair:");
+  });
+
+  it("offers Re-stage version instead on package channels (D3/E-C7)", () => {
+    const onRetryApply = vi.fn();
+    const tree = renderView({
+      channelInfo: makeChannelInfo(),
+      catalog: makeCatalog(),
+      repairAvailable: false,
+      onRetryApply,
+      operation: makeFailedOperation(),
+    });
+    const button = findActionButtonByLabel(tree, "Re-stage version");
+    expect(button).toBeTruthy();
+    button.props.onClick();
+    expect(onRetryApply).toHaveBeenCalledTimes(1);
+    expect(findActionButtonByLabel(tree, "Run repair")).toBeFalsy();
+    expect(treeText(tree)).toContain("Re-staging downloads and installs");
+  });
+
+  it("a failed operation card can be dismissed", () => {
+    const onDismissOperation = vi.fn();
+    const tree = renderView({
+      channelInfo: makeChannelInfo(),
+      catalog: makeCatalog(),
+      onDismissOperation,
+      operation: makeFailedOperation(),
+    });
+    const button = findButtonByText(tree, "Dismiss");
+    expect(button).toBeTruthy();
+    button.props.onclick();
+    expect(onDismissOperation).toHaveBeenCalledTimes(1);
+  });
+
+  it("labels a repair operation as a repair, not an update", () => {
+    const running = renderView({
+      channelInfo: makeChannelInfo({ releaseChannel: "dev" }),
+      catalog: makeCatalog(),
+      operation: makeFailedOperation({
+        target: { repair: true },
+        label: "repair",
+        phase: "running",
+        error: null,
+      }),
+    });
+    expect(treeText(running)).toContain("Repairing the dev build");
+
+    const failed = renderView({
+      channelInfo: makeChannelInfo({ releaseChannel: "dev" }),
+      catalog: makeCatalog(),
+      repairAvailable: true,
+      operation: makeFailedOperation({ target: { repair: true }, label: "repair" }),
+    });
+    expect(treeText(failed)).toContain("Repair failed");
+  });
+
+  it("onRunRepair streams the repair and clears the card on done (no restart poll)", async () => {
+    let captured = null;
+    api.subscribeOpenclawApplyEvents.mockImplementation((options) => {
+      captured = options;
+      return () => {};
+    });
+    api.runOpenclawRepair.mockResolvedValue({
+      ok: true,
+      operationId: "op-r1",
+      events: "/api/operations/op-r1/events",
+    });
+    let state = await hydrate();
+
+    await state.onRunRepair();
+    state = renderHook({});
+    expect(state.operation).toEqual(
+      expect.objectContaining({ operationId: "op-r1", phase: "running" }),
+    );
+    expect(state.operation.target).toEqual({ repair: true });
+
+    captured.onMessage({ event: "done", data: {} });
+    state = renderHook({});
+    expect(state.operation).toBeNull();
+    expect(showToast).toHaveBeenCalledWith("Repair completed", "success");
+  });
+
+  it("surfaces the repair_not_applicable envelope as an apply error (E-C7)", async () => {
+    api.runOpenclawRepair.mockRejectedValue(
+      Object.assign(new Error("Repair only applies to dev builds from source."), {
+        code: "repair_not_applicable",
+        hint: "For stable or beta, re-apply the version from the catalog instead.",
+      }),
+    );
+    let state = await hydrate();
+
+    await state.onRunRepair();
+    state = renderHook({});
+    expect(state.operation).toBeNull();
+    expect(state.applyError).toEqual(
+      expect.objectContaining({
+        message: "Repair only applies to dev builds from source.",
+        hint: "For stable or beta, re-apply the version from the catalog instead.",
+      }),
+    );
+  });
+
+  it("marks the repair operation failed on a streamed error event", async () => {
+    let captured = null;
+    api.subscribeOpenclawApplyEvents.mockImplementation((options) => {
+      captured = options;
+      return () => {};
+    });
+    api.runOpenclawRepair.mockResolvedValue({
+      ok: true,
+      operationId: "op-r2",
+      events: "/api/operations/op-r2/events",
+    });
+    let state = await hydrate();
+    await state.onRunRepair();
+
+    captured.onMessage({
+      event: "error",
+      data: { error: "OpenClaw repair did not complete.", code: "repair_failed" },
+    });
+    state = renderHook({});
+    expect(state.operation.phase).toBe("failed");
+    expect(state.operation.error.message).toBe("OpenClaw repair did not complete.");
+  });
+
+  it("onRetryApply re-applies the failed operation's own target", async () => {
+    let captured = null;
+    api.subscribeOpenclawApplyEvents.mockImplementation((options) => {
+      captured = options;
+      return () => {};
+    });
+    api.applyOpenclawVersion.mockResolvedValue({
+      ok: true,
+      operationId: "op-a1",
+      events: "/api/operations/op-a1/events",
+    });
+    let state = await hydrate();
+    state.onRequestApply({
+      payload: { channel: "beta", version: "2026.7.3-beta.1" },
+      label: "2026.7.3-beta.1",
+    });
+    state = renderHook({});
+    await state.onConfirmApply();
+    captured.onMessage({
+      event: "error",
+      data: { error: "activation failed" },
+    });
+    state = renderHook({});
+    expect(state.operation.phase).toBe("failed");
+
+    api.applyOpenclawVersion.mockClear();
+    await state.onRetryApply();
+    expect(api.applyOpenclawVersion).toHaveBeenCalledWith({
+      channel: "beta",
+      version: "2026.7.3-beta.1",
+    });
+  });
+
+  it("onDismissOperation clears only a FAILED operation", async () => {
+    let captured = null;
+    api.subscribeOpenclawApplyEvents.mockImplementation((options) => {
+      captured = options;
+      return () => {};
+    });
+    api.applyOpenclawVersion.mockResolvedValue({
+      ok: true,
+      operationId: "op-a2",
+      events: "/api/operations/op-a2/events",
+    });
+    let state = await hydrate();
+    state.onRequestApply({
+      payload: { channel: "stable", version: "2026.7.2" },
+      label: "2026.7.2",
+    });
+    state = renderHook({});
+    await state.onConfirmApply();
+
+    // Running: dismiss is a no-op.
+    state = renderHook({});
+    state.onDismissOperation();
+    state = renderHook({});
+    expect(state.operation).not.toBeNull();
+
+    captured.onMessage({ event: "error", data: { error: "boom" } });
+    state = renderHook({});
+    state.onDismissOperation();
+    state = renderHook({});
+    expect(state.operation).toBeNull();
+  });
+
+  it("repairAvailable follows the dev channel/applied state", async () => {
+    api.fetchOpenclawChannel.mockResolvedValue(
+      makeChannelInfo({ releaseChannel: "dev" }),
+    );
+    let state = await hydrate();
+    expect(state.repairAvailable).toBe(true);
+
+    harness.reset();
+    invalidateCache("/api/openclaw/channel");
+    api.fetchOpenclawChannel.mockResolvedValue(makeChannelInfo());
+    state = await hydrate();
+    expect(state.repairAvailable).toBe(false);
+
+    harness.reset();
+    invalidateCache("/api/openclaw/channel");
+    api.fetchOpenclawChannel.mockResolvedValue(
+      makeChannelInfo({ applied: { channel: "dev", sha: "abc1234" } }),
+    );
+    state = await hydrate();
+    expect(state.repairAvailable).toBe(true);
   });
 });

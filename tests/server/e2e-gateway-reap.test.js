@@ -279,8 +279,13 @@ describe("gateway reap e2e (real child processes via PATH-shimmed openclaw)", ()
     // Shutdown must not wait for the supervisor: the abort check inside
     // waitForGatewayReady ends the 120s ready poll within one 500ms tick.
     expect(shutdownMs).toBeLessThan(5000);
-    // The cancelled restart op itself settles cleanly.
-    await expect(restartPromise).resolves.toBeUndefined();
+    // The cancelled restart settles deterministically — as an HONEST failure
+    // carrying abort evidence, never a silent success over a dead gateway
+    // (this branch's restart contract: outcomes are never fabricated).
+    await expect(restartPromise).rejects.toMatchObject({
+      name: "GatewayRestartError",
+      evidence: expect.objectContaining({ aborted: true }),
+    });
 
     // The killTimer fires 3s after abort — the supervisor survived SIGTERM
     // (proving the trap held) and must then die to the real SIGKILL.

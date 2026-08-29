@@ -607,6 +607,88 @@ textarea:focus {
   animation-delay: 0.95s;
 }
 
+/* Gateway state dot: color/motion are server-sent ({color, motion}); these
+   classes only translate them. Pulse means "operation in progress" — settled
+   states (including healthy/running) stay steady. */
+.ac-gateway-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  flex: none;
+}
+
+/* Dot palette as themed tokens: the dark values are the saturated fills the
+   card shipped with; light mode needs darker variants — the raw hexes measure
+   ~1.8-2.3:1 on a white card, below the 3:1 non-text minimum (WCAG 1.4.11). */
+:root {
+  --gateway-dot-gray: #6b7280;
+  --gateway-dot-green: #22c55e;
+  --gateway-dot-cyan: #22d3ee;
+  --gateway-dot-yellow: #eab308;
+  --gateway-dot-red: #ef4444;
+}
+
+[data-theme="light"] {
+  --gateway-dot-gray: #4b5563;
+  --gateway-dot-green: #16a34a;
+  --gateway-dot-cyan: #0891b2;
+  --gateway-dot-yellow: #a16207;
+  --gateway-dot-red: #dc2626;
+}
+
+.ac-gateway-dot--gray {
+  background: var(--gateway-dot-gray);
+}
+
+.ac-gateway-dot--green {
+  background: var(--gateway-dot-green);
+}
+
+.ac-gateway-dot--cyan {
+  background: var(--gateway-dot-cyan);
+}
+
+.ac-gateway-dot--yellow {
+  background: var(--gateway-dot-yellow);
+}
+
+.ac-gateway-dot--red {
+  background: var(--gateway-dot-red);
+}
+
+@keyframes acGatewayDotPulse {
+  0%,
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+  50% {
+    transform: scale(1.15);
+    opacity: 0.72;
+  }
+}
+
+.ac-gateway-dot--pulse {
+  animation: acGatewayDotPulse 2.6s ease-in-out infinite;
+}
+
+/* "Status unavailable": hollow gray ring — visually distinct from every
+   filled state. */
+.ac-gateway-dot--hollow {
+  background: transparent;
+  border: 2px solid var(--gateway-dot-gray);
+}
+
+/* Minimum touch target for small operational controls (WCAG 2.5.8). Both
+   axes: an icon-only dismiss button was 44px tall but ~18px wide. */
+.ac-touch {
+  min-height: 44px;
+  min-width: 44px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
 .ac-btn-green {
   border: 1px solid rgba(34, 197, 94, 0.45);
   background: linear-gradient(
@@ -656,10 +738,23 @@ textarea:focus {
   will-change: transform;
 }
 
+/* One global reduced-motion block: every pulse keyframe in the app settles
+   to steady; spinners slow to a linear crawl (they still convey progress). */
 @media (prefers-reduced-motion: reduce) {
   .ac-spinner {
     animation-duration: 1.8s;
     animation-timing-function: linear;
+  }
+
+  .ac-status-dot--healthy,
+  .ac-status-dot--info,
+  .ac-step-pill-pulse,
+  .ac-gateway-dot--pulse,
+  /* html-prefixed: tailwind.generated.css loads after this file and its
+     .animate-pulse utility has equal specificity — the extra type selector
+     lets the reduced-motion override win the cascade without !important. */
+  html .animate-pulse {
+    animation: none;
   }
 }
 

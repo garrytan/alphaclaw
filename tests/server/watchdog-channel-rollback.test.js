@@ -83,7 +83,7 @@ const createHarness = ({
 
 const crashLoopNotices = (notifier) =>
   notifier.notify.mock.calls.filter((call) =>
-    String(call?.[0] || "").includes("Crash loop detected"),
+    String(call?.[0] || "").includes("crash loop detected"),
   );
 
 // Exact stderr the beta healthy-incumbent step-aside emits on exit 78 (see
@@ -125,7 +125,9 @@ describe("server/watchdog release-channel rollback hooks", () => {
     });
 
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    await flushMicrotasks();
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    await flushMicrotasks();
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
     await flushMicrotasks();
 
@@ -148,7 +150,9 @@ describe("server/watchdog release-channel rollback hooks", () => {
     });
 
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    await flushMicrotasks();
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    await flushMicrotasks();
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
     await flushMicrotasks();
 
@@ -169,7 +173,7 @@ describe("server/watchdog release-channel rollback hooks", () => {
     const notices = crashLoopNotices(notifier);
     expect(notices).toHaveLength(1);
     expect(String(notices[0][0])).toContain(
-      "Auto-restart paused; manual action required.",
+      "Automatic gateway restart paused; manual action required.",
     );
   });
 
@@ -222,7 +226,7 @@ describe("server/watchdog release-channel rollback hooks", () => {
     );
     expect(
       out.notifier.notify.mock.calls.some((call) =>
-        String(call?.[0] || "").includes("Gateway configuration invalid"),
+        String(call?.[0] || "").includes("Gateway configuration error"),
       ),
     ).toBe(true);
 
@@ -253,7 +257,9 @@ describe("server/watchdog release-channel rollback hooks", () => {
 
     watchdog.beginManagedOperation();
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    await flushMicrotasks();
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    await flushMicrotasks();
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
     await flushMicrotasks();
 
@@ -266,7 +272,10 @@ describe("server/watchdog release-channel rollback hooks", () => {
     await flushMicrotasks();
 
     expect(watchdog.getStatus().crashCountInWindow).toBe(1);
-    expect(watchdog.getStatus().lifecycle).toBe("crashed");
+    // The relaunch's operation-end probe finds the gateway healthy and heals
+    // the lifecycle immediately (previously "crashed" lingered until the next
+    // 120s timer tick). The crash evidence stays in crashCountInWindow.
+    expect(watchdog.getStatus().lifecycle).toBe("running");
   });
 
   it("escalates a long degraded state to rollback and suppresses auto-repair in-window [REG]", async () => {
@@ -382,7 +391,7 @@ describe("server/watchdog release-channel rollback hooks", () => {
     );
     expect(
       notifier.notify.mock.calls.some((call) =>
-        String(call?.[0] || "").includes("Gateway configuration invalid"),
+        String(call?.[0] || "").includes("Gateway configuration error"),
       ),
     ).toBe(true);
   });
@@ -437,7 +446,7 @@ describe("server/watchdog release-channel rollback hooks", () => {
     const notices = crashLoopNotices(fellThrough.notifier);
     expect(notices).toHaveLength(1);
     expect(String(notices[0][0])).toContain(
-      "Auto-restart paused; manual action required.",
+      "Automatic gateway restart paused; manual action required.",
     );
   });
 
@@ -478,7 +487,9 @@ describe("server/watchdog release-channel rollback hooks", () => {
     // First incident: a crash loop requests exactly one rollback. (Under fake
     // timers setImmediate is faked too, so flush via the timer clock.)
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    await vi.advanceTimersByTimeAsync(0);
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    await vi.advanceTimersByTimeAsync(0);
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
     await vi.advanceTimersByTimeAsync(0);
     expect(hooks.requestRollback).toHaveBeenCalledTimes(1);
@@ -493,7 +504,9 @@ describe("server/watchdog release-channel rollback hooks", () => {
     expect(watchdog.getStatus().health).toBe("healthy");
 
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    await vi.advanceTimersByTimeAsync(0);
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    await vi.advanceTimersByTimeAsync(0);
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
     await vi.advanceTimersByTimeAsync(0);
     expect(hooks.requestRollback).toHaveBeenCalledTimes(2);
@@ -568,6 +581,7 @@ describe("server/watchdog release-channel rollback hooks", () => {
     // skipped as operation_in_progress.
     await flushMicrotasks();
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    await flushMicrotasks();
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
     await flushMicrotasks();
     await flushMicrotasks();
@@ -703,8 +717,8 @@ describe("server/watchdog release-channel rollback hooks", () => {
     expect(
       notifier.notify.mock.calls.some(
         (call) =>
-          String(call?.[0] || "").includes("Gateway configuration invalid") &&
-          String(call?.[0] || "").includes("automatic restart is paused"),
+          String(call?.[0] || "").includes("Gateway configuration error") &&
+          String(call?.[0] || "").includes("automatic gateway restart is paused"),
       ),
     ).toBe(true);
   });

@@ -248,7 +248,25 @@ describe("gateway proxy real-process e2e", () => {
       gatewayServer.closeAllConnections?.();
       await new Promise((resolve) => gatewayServer.close(resolve));
     }
-    if (tmpDir) fs.rmSync(tmpDir, { recursive: true, force: true });
+    if (tmpDir) {
+      // The real gateway grandchild can outlive the server's SIGTERM by a
+      // beat, still flushing its V8 compile cache into tmpDir (observed as
+      // ENOTEMPTY on CI). Retry, then tolerate a leaked temp dir rather than
+      // failing the whole suite on teardown.
+      for (let attempt = 0; attempt < 5; attempt += 1) {
+        try {
+          fs.rmSync(tmpDir, {
+            recursive: true,
+            force: true,
+            maxRetries: 5,
+            retryDelay: 200,
+          });
+          break;
+        } catch {
+          await sleep(300);
+        }
+      }
+    }
     // The graceful drain contract: SIGTERM exits 0 inside the 10s deadline
     // even after this file exercised every proxy failure mode.
     if (exitResult && exitResult !== "timeout") {

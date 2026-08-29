@@ -151,6 +151,38 @@ describe("server/init/server-lifecycle", () => {
     );
   });
 
+  it("catches a rejecting boot sequence instead of feeding the storm brake", async () => {
+    const server = trackServer(http.createServer(() => {}));
+    const logger = createSilentLogger();
+    const unhandled = vi.fn();
+    process.once("unhandledRejection", unhandled);
+    const lifecycle = createServerLifecycle({
+      server,
+      PORT: 0,
+      isOnboarded: () => true,
+      runOnboardedBootSequence: async () => {
+        throw new Error("boot exploded");
+      },
+      exitImpl: vi.fn(),
+      logger,
+      listenRetryDelayMs: 1,
+      shutdownDeadlineMs: 200,
+    });
+
+    lifecycle.startListening();
+    await new Promise((resolve) => server.on("listening", resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(unhandled).not.toHaveBeenCalled();
+    expect(
+      logger.error.mock.calls.some((call) =>
+        String(call[0]).includes("Boot sequence error: boot exploded"),
+      ),
+    ).toBe(true);
+    process.removeListener("unhandledRejection", unhandled);
+  });
+
   it("runs the onboarded boot sequence on listen when onboarded", async () => {
     const server = trackServer(http.createServer(() => {}));
     const runOnboardedBootSequence = vi.fn();
