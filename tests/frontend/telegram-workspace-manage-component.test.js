@@ -431,7 +431,43 @@ describe("frontend/telegram-workspace manage component", () => {
       expect(text).toContain("subagent 38");
     });
 
-    it("falls back to server-computed values and shows the machine cap", () => {
+    it("falls back to server-computed values and shows the machine cap when the cap is machine-derived", () => {
+      const text = renderToText(
+        renderManage({
+          configAgentMaxConcurrent: undefined,
+          configSubagentMaxConcurrent: undefined,
+          concurrency: {
+            computedMaxConcurrent: 24,
+            computedSubagentMaxConcurrent: 22,
+            resourceCap: 32,
+            resourceCapSource: "machine",
+          },
+        }),
+      );
+      expect(text).toContain("agent 24");
+      expect(text).toContain("subagent 22");
+      expect(text).toContain("capped by machine size at 32");
+    });
+
+    it("legacy-constant cap: keeps the concurrency copy but omits the machine-size claim", () => {
+      const text = renderToText(
+        renderManage({
+          configAgentMaxConcurrent: undefined,
+          configSubagentMaxConcurrent: undefined,
+          concurrency: {
+            computedMaxConcurrent: 24,
+            computedSubagentMaxConcurrent: 22,
+            resourceCap: 32,
+            resourceCapSource: "legacy",
+          },
+        }),
+      );
+      expect(text).toContain("agent 24");
+      expect(text).toContain("subagent 22");
+      expect(text).not.toContain("capped by machine size");
+    });
+
+    it("resourceCapSource absent (older server): never claims the cap came from machine size", () => {
       const text = renderToText(
         renderManage({
           configAgentMaxConcurrent: undefined,
@@ -445,7 +481,7 @@ describe("frontend/telegram-workspace manage component", () => {
       );
       expect(text).toContain("agent 24");
       expect(text).toContain("subagent 22");
-      expect(text).toContain("capped by machine size at 32");
+      expect(text).not.toContain("capped by machine size");
     });
 
     it("old server (no concurrency payload): legacy local formula, no machine-cap line", () => {

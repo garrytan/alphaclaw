@@ -154,12 +154,12 @@ describe("frontend/watchdog resources card — capacity header", () => {
     expect(treeText(tree)).toContain("4 vCPU · 8.0 GB memory · 80.0 GB disk");
     expect(badgeTexts(tree)).toEqual([{ tone: "neutral", text: "Medium" }]);
     // Never a happy-path source badge and never a "no GPU" chip.
-    expect(treeText(tree)).not.toContain("host values");
+    expect(treeText(tree)).not.toContain("Host values");
     expect(treeText(tree).toLowerCase()).not.toContain("no gpu");
     expect(treeText(tree).toLowerCase()).not.toContain("cgroup");
   });
 
-  it("degraded source: warning 'host values' badge appears", () => {
+  it("degraded source: warning 'Host values' badge appears", () => {
     const tree = renderCard({
       resources: kResources,
       profile: {
@@ -169,7 +169,7 @@ describe("frontend/watchdog resources card — capacity header", () => {
     });
     expect(badgeTexts(tree)).toContainEqual({
       tone: "warning",
-      text: "host values",
+      text: "Host values",
     });
   });
 

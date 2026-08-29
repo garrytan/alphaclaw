@@ -52,12 +52,22 @@ describe.skipIf(!dockerAvailable)(
       "cgroup limit is visible in-container and the derived heap flag sets V8's ceiling",
       { timeout: 300000 },
       () => {
+        const { deriveTunings } = require("../../lib/server/autotune");
+        const liveProfile = (memMb) => ({
+          memory: { limitBytes: memMb * kMb, source: "cgroup-v2" },
+          cpu: { cores: 1 },
+          disk: { totalBytes: 40 * 1024 * kMb, path: "/" },
+          tier: memMb <= 640 ? "micro" : "small",
+          environment: "container",
+        });
         for (const { memory, memMb } of [
           { memory: "512m", memMb: 512 },
           { memory: "2g", memMb: 2048 },
         ]) {
-          // Same formula as deriveTunings: clamp(0.5*M, 256, 8192).
-          const derivedHeapMb = Math.min(8192, Math.max(256, Math.round(0.5 * memMb)));
+          // The REAL shipped derivation — never a re-implemented copy that
+          // could silently drift from production.
+          const derivedHeapMb = deriveTunings(liveProfile(memMb), {}).values
+            .gatewayHeapMb;
           const result = runInContainer({
             memory,
             nodeArgs: [`--max-old-space-size=${derivedHeapMb}`],

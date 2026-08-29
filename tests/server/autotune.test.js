@@ -200,6 +200,13 @@ describe("server/autotune", () => {
     expect(inRange.notes).toEqual({});
   });
 
+  it("caps the DERIVED heap at the machine ceiling on tiny containers", () => {
+    // Below ~301MB the 256MB floor would exceed 0.85×M — autotune must never
+    // issue the OOM instruction its own override clamp exists to prevent.
+    const { values } = deriveTunings(makeProfile({ memMb: 256, cores: 0.5 }), {});
+    expect(values.gatewayHeapMb).toBe(218); // round(0.85 × 256)
+  });
+
   it("suppresses derivation on host values inside a container, tunes on bare metal", () => {
     const suppressed = deriveTunings(
       makeProfile({ memMb: 65536, cores: 16, source: "host", environment: "container" }),
@@ -528,7 +535,6 @@ describe("server/autotune", () => {
     // ownership cleared.
     const ledger = await applyResourceAutotune({
       deps: {
-        env: {},
         openclawDir,
         updateOpenclawConfigFn: fn,
         env: { ALPHACLAW_AUTOTUNE_DISABLED: "1" },

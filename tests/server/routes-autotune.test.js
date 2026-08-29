@@ -14,6 +14,9 @@ fs.mkdirSync(path.join(kTempRoot, ".openclaw", ".alphaclaw"), { recursive: true 
 
 const { registerAutotuneRoutes, validateOverrides } = require("../../lib/server/routes/autotune");
 const { resetAutotuneForTests } = require("../../lib/server/autotune");
+const {
+  resetMachineProfileForTests,
+} = require("../../lib/server/machine-profile");
 
 const makeApp = (overrides = {}) => {
   const app = express();
@@ -45,6 +48,12 @@ describe("server/routes/autotune", () => {
   afterEach(() => {
     resetAutotuneForTests();
     fs.rmSync(path.join(kTempRoot, ".openclaw", "alphaclaw.json"), { force: true });
+    // The persisted ledger also carries cross-test state (lastResize,
+    // ownership) — strict assertions must not be order-dependent.
+    fs.rmSync(
+      path.join(kTempRoot, ".openclaw", ".alphaclaw", "autotune-ledger.json"),
+      { force: true },
+    );
   });
 
   afterAll(() => {
@@ -134,6 +143,51 @@ describe("server/routes/autotune", () => {
     const res = await request(app).put("/api/autotune/resize-ack");
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ ok: true, acknowledged: false });
+  });
+
+  it("rejects unknown top-level body fields with the same 400 strictness", async () => {
+    const { app } = makeApp();
+    const res = await request(app)
+      .put("/api/autotune/settings")
+      .send({ override: { gatewayHeapMb: 2048 } }); // typo'd field
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain("override");
+  });
+
+  it("marks restart-required when the apply leaves a pending gateway row", async () => {
+    // Enable autotune for this app's apply path (deps env is process.env in
+    // routes) by clearing the kill-switch and mocking the cgroup files.
+    delete process.env.ALPHACLAW_AUTOTUNE_DISABLED;
+    const realReadFileSync = fs.readFileSync;
+    vi.spyOn(fs, "readFileSync").mockImplementation((filePath, ...args) => {
+      const key = String(filePath);
+      if (key === "/sys/fs/cgroup/memory.max") return `${2048 * 1024 * 1024}\n`;
+      if (key === "/sys/fs/cgroup/cpu.max") return "100000 100000";
+      if (key.startsWith("/sys/fs/cgroup")) {
+        throw Object.assign(new Error(`ENOENT: ${key}`), { code: "ENOENT" });
+      }
+      return realReadFileSync(filePath, ...args);
+    });
+    resetMachineProfileForTests({
+      fsModule: {
+        existsSync: (p2) => String(p2) === "/.dockerenv",
+        readFileSync: () => {
+          throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+        },
+      },
+    });
+    try {
+      const { app, calls } = makeApp();
+      // No spawn has stamped anything: gateway-env rows are pending_restart.
+      const res = await request(app).post("/api/autotune/reapply");
+      expect(res.status).toBe(200);
+      expect(res.body.restartRequired).toBe(true);
+      expect(calls.restartReasons).toContain("autotune_changed");
+    } finally {
+      vi.restoreAllMocks();
+      resetMachineProfileForTests();
+      process.env.ALPHACLAW_AUTOTUNE_DISABLED = "1";
+    }
   });
 
   it("rejects prototype-chain override keys (__proto__, toString, constructor)", async () => {

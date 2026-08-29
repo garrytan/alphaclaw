@@ -1112,6 +1112,7 @@ describe("server/routes/telegram", () => {
         computedMaxConcurrent: 8,
         computedSubagentMaxConcurrent: 6,
         resourceCap: 64,
+        resourceCapSource: "legacy",
       });
       expect(telegramApi.getChatAdministrators).not.toHaveBeenCalled();
     });
@@ -1146,6 +1147,7 @@ describe("server/routes/telegram", () => {
         computedMaxConcurrent: 8,
         computedSubagentMaxConcurrent: 6,
         resourceCap: 64,
+        resourceCapSource: "legacy",
       });
       expect(telegramApi.getChatAdministrators).not.toHaveBeenCalled();
     });
@@ -1171,6 +1173,7 @@ describe("server/routes/telegram", () => {
         computedMaxConcurrent: 8,
         computedSubagentMaxConcurrent: 6,
         resourceCap: 64,
+        resourceCapSource: "legacy",
       });
       expect(telegramApi.getChatAdministrators).toHaveBeenCalledWith("-100");
       const cfg = readOpenclawJson();

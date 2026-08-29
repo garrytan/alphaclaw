@@ -1,7 +1,8 @@
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import {
   AutotuneCardView,
   buildAutotuneCounts,
+  buildAutotuneDisabledParagraph,
   buildAutotuneEnvironmentNote,
   buildAutotuneMachineEcho,
   buildAutotuneOverridesLine,
@@ -9,8 +10,10 @@ import {
   buildAutotuneResizeBanner,
   buildAutotuneRowModel,
   buildAutotuneSummaryModel,
+  buildAutotuneToggleToast,
   formatAutotuneValue,
   kAutotuneAlphaclawRestartReason,
+  kAutotuneKillSwitchToast,
 } from "../../lib/public/js/components/watchdog-tab/autotune-card.js";
 import { Badge } from "../../lib/public/js/components/badge.js";
 import { InlineErrorChip } from "../../lib/public/js/components/inline-error-chip.js";
@@ -18,6 +21,12 @@ import { InlineErrorChip } from "../../lib/public/js/components/inline-error-chi
 // Stateless view: invoke directly and walk the vnode tree (the
 // watchdog-resources-card.test.js pattern) — no DOM renderer needed. All
 // hooks live in the container; every state arrives as props.
+// A component that throws during expansion is nulled from the tree — which
+// would let negative assertions ("no button exists") pass vacuously. Every
+// expansion error is recorded here; tests whose guarantees rest on the tree
+// being fully expanded assert expectNoExpandErrors().
+const kExpandErrors = [];
+
 const expandTree = (node) => {
   if (node == null || typeof node !== "object") return node;
   if (Array.isArray(node)) return node.map(expandTree);
@@ -25,7 +34,8 @@ const expandTree = (node) => {
   if (typeof node.type === "function") {
     try {
       out.rendered = expandTree(node.type(node.props || {}));
-    } catch {
+    } catch (error) {
+      kExpandErrors.push({ component: node.type.name || "anonymous", error });
       out.rendered = null;
     }
   }
@@ -34,6 +44,14 @@ const expandTree = (node) => {
   }
   return out;
 };
+
+const expectNoExpandErrors = () => {
+  expect(kExpandErrors).toEqual([]);
+};
+
+beforeEach(() => {
+  kExpandErrors.length = 0;
+});
 
 const collectNodes = (node, out = []) => {
   if (node == null || typeof node !== "object") return out;
@@ -209,6 +227,67 @@ describe("frontend/watchdog autotune card — view models", () => {
     expect(summary.partial).toBe(false);
   });
 
+  it("summary: all applied without a full profile (older server) never renders dash filler", () => {
+    const rows = [appliedRow("gatewayHeapMb", 1024)];
+    const noProfile = buildAutotuneSummaryModel(
+      makeLedger({ rows, profile: null }),
+    );
+    expect(noProfile.text).toBe("Tuned for this container — no action needed.");
+    const noMemory = buildAutotuneSummaryModel(
+      makeLedger({ rows, profile: { ...kProfile, memory: {} } }),
+    );
+    expect(noMemory.text).toBe("Tuned for this container — no action needed.");
+    const noCores = buildAutotuneSummaryModel(
+      makeLedger({ rows, profile: { ...kProfile, cpu: {} } }),
+    );
+    expect(noCores.text).toBe("Tuned for this container — no action needed.");
+  });
+
+  it("disabled paragraph: capitalized tier label, tier clause omitted when missing/unknown", () => {
+    expect(buildAutotuneDisabledParagraph(kProfile)).toBe(
+      "Autotune is off. AlphaClaw and the gateway run with built-in defaults sized for small containers. Detection stays on — Small tier (2.0 GB / 1 vCPU).",
+    );
+    expect(
+      buildAutotuneDisabledParagraph({ ...kProfile, tier: "unknown" }),
+    ).toBe(
+      "Autotune is off. AlphaClaw and the gateway run with built-in defaults sized for small containers. Detection stays on — 2.0 GB / 1 vCPU.",
+    );
+    expect(buildAutotuneDisabledParagraph({ ...kProfile, tier: null })).toBe(
+      "Autotune is off. AlphaClaw and the gateway run with built-in defaults sized for small containers. Detection stays on — 2.0 GB / 1 vCPU.",
+    );
+    expect(buildAutotuneDisabledParagraph(null)).toBe(
+      "Autotune is off. AlphaClaw and the gateway run with built-in defaults sized for small containers. Detection stays on.",
+    );
+  });
+
+  // The container's onToggleEnabled outcome path lives behind preact hooks
+  // this stateless harness can't run, so the kill-switch honesty rule is
+  // pinned at the builder the container calls with the adopted ledger.
+  it("toggle toast: a 'successful' enable overridden by the kill-switch reports honestly", () => {
+    const killSwitchLedger = makeLedger({
+      enabled: false,
+      killSwitchActive: true,
+    });
+    expect(buildAutotuneToggleToast(true, killSwitchLedger)).toEqual({
+      message: kAutotuneKillSwitchToast,
+      tone: "info",
+    });
+    expect(kAutotuneKillSwitchToast).toBe(
+      "Autotune stays off: the ALPHACLAW_AUTOTUNE_DISABLED environment kill-switch is set on this deployment — remove it to enable.",
+    );
+    // Normal outcomes keep the normal copy — including enabled=false WITHOUT
+    // the kill-switch (older server) and a disable while the switch is set.
+    expect(
+      buildAutotuneToggleToast(true, makeLedger({ enabled: true })).message,
+    ).toContain("Resource autotune enabled");
+    expect(
+      buildAutotuneToggleToast(true, makeLedger({ enabled: false })).message,
+    ).toContain("Resource autotune enabled");
+    expect(buildAutotuneToggleToast(false, killSwitchLedger).message).toContain(
+      "Resource autotune disabled",
+    );
+  });
+
   it("row model: clamped keeps the server's override-clamp reason inline", () => {
     const model = buildAutotuneRowModel(
       {
@@ -380,7 +459,7 @@ describe("frontend/watchdog autotune card — per-state renders", () => {
     const text = treeText(tree);
     expect(text).toContain("Detected: 2.0 GB RAM · 1 vCPU · small tier");
     expect(text).toContain(
-      "Autotune is off. AlphaClaw and the gateway run with built-in defaults sized for small containers. Detection stays on — this machine is a small tier (2.0 GB / 1 vCPU).",
+      "Autotune is off. AlphaClaw and the gateway run with built-in defaults sized for small containers. Detection stays on — Small tier (2.0 GB / 1 vCPU).",
     );
     // No ghost/derived values and no mutation affordance while off.
     expect(text).not.toContain("Gateway memory limit (V8 heap)");
@@ -476,6 +555,45 @@ describe("frontend/watchdog autotune card — per-state renders", () => {
     );
     expect(text).not.toContain("Recommendation");
   });
+
+  it("resize-banner buttons carry the house disabled classes while their action is in flight", () => {
+    const ledger = makeLedger({
+      lastResize: {
+        from: { memoryLimitBytes: 2 * kGb, cpuCores: 1 },
+        to: { memoryLimitBytes: 8 * kGb, cpuCores: 4 },
+        at: 1756400000000,
+        acknowledged: false,
+      },
+      rows: [
+        { knob: "gatewayHeapMb", status: "pending_restart", restartTarget: "gateway" },
+      ],
+    });
+    const buttonByText = (tree, text) =>
+      collectNodes(tree).find(
+        (vnode) =>
+          vnode.type === "button" &&
+          collectText(vnode).join(" ").trim() === text,
+      );
+
+    const idle = renderView({ ledger });
+    const idleRestart = buttonByText(idle, "Restart gateway");
+    const idleDismiss = buttonByText(idle, "Dismiss");
+    expect(idleRestart.props.class).not.toContain("opacity-50 cursor-not-allowed");
+    expect(idleDismiss.props.class).not.toContain("opacity-50 cursor-not-allowed");
+
+    const busy = renderView({
+      ledger,
+      restartingGateway: true,
+      dismissingResize: true,
+    });
+    const busyRestart = buttonByText(busy, "Restarting...");
+    const busyDismiss = buttonByText(busy, "Dismissing...");
+    expect(busyRestart.props.disabled).toBe(true);
+    expect(busyRestart.props.class).toContain("opacity-50 cursor-not-allowed");
+    expect(busyDismiss.props.disabled).toBe(true);
+    expect(busyDismiss.props.class).toContain("opacity-50 cursor-not-allowed");
+    expectNoExpandErrors();
+  });
 });
 
 describe("frontend/watchdog autotune card — restart ownership (restartTarget)", () => {
@@ -500,6 +618,7 @@ describe("frontend/watchdog autotune card — restart ownership (restartTarget)"
       ledger: makeLedger({ rows: kPendingRows }),
       onRestartGateway,
     });
+    expectNoExpandErrors();
     const gatewayRow = findRowByKnob(tree, "uvThreadpoolSize");
     expect(gatewayRow).toBeTruthy();
     const gatewayButtons = collectNodes(gatewayRow).filter(
@@ -516,6 +635,9 @@ describe("frontend/watchdog autotune card — restart ownership (restartTarget)"
       ledger: makeLedger({ rows: kPendingRows }),
       onRestartGateway,
     });
+    // Negative assertions below are only meaningful over a FULLY expanded
+    // tree — a swallowed subtree would hide a rogue button.
+    expectNoExpandErrors();
     const alphaclawRow = findRowByKnob(tree, "openAiCompatBodyLimitMb");
     expect(alphaclawRow).toBeTruthy();
     const buttons = collectNodes(alphaclawRow).filter(
@@ -533,6 +655,7 @@ describe("frontend/watchdog autotune card — restart ownership (restartTarget)"
       ledger: makeLedger({ rows: [kPendingRows[1]] }),
       onRestartGateway,
     });
+    expectNoExpandErrors();
     const wired = collectNodes(tree).filter(
       (vnode) => vnode.props?.onclick === onRestartGateway,
     );
