@@ -425,3 +425,87 @@ describe("extractPreFillValues provider keys and whatsapp owner", () => {
     expect(preFill.ANTHROPIC_API_KEY).toBeUndefined();
   });
 });
+
+// H2: config file entries can originate from a crafted `$include`, so a
+// traversal (or a symlink escaping the import base) must not read an outside
+// file and return its raw secrets in the scan response.
+describe("secret-detector containment (H2)", () => {
+  const fs = require("fs");
+  const os = require("os");
+  const path = require("path");
+  const tempDirs = [];
+
+  const makeDir = (prefix) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+    tempDirs.push(dir);
+    return dir;
+  };
+
+  afterEach(() => {
+    while (tempDirs.length) {
+      fs.rmSync(tempDirs.pop(), { recursive: true, force: true });
+    }
+  });
+
+  it("does not read a traversing config file (no outside-secret disclosure)", () => {
+    const baseDir = makeDir("h2-base-");
+    const outsideDir = makeDir("h2-outside-");
+    fs.writeFileSync(
+      path.join(outsideDir, "real.json"),
+      JSON.stringify({ models: { providers: { openai: { apiKey: "sk-outside-secret" } } } }),
+      "utf8",
+    );
+    const secrets = detectSecrets({
+      fs,
+      baseDir,
+      configFiles: [`../${path.basename(outsideDir)}/real.json`],
+      envFiles: [],
+    });
+    expect(secrets).toEqual([]);
+  });
+
+  it("does not read through a symlink escaping the import base", () => {
+    const baseDir = makeDir("h2-base-");
+    const outsideDir = makeDir("h2-outside-");
+    fs.writeFileSync(
+      path.join(outsideDir, "real.json"),
+      JSON.stringify({ channels: { telegram: { botToken: "123:AAOUTSIDE" } } }),
+      "utf8",
+    );
+    let symlinked = true;
+    try {
+      fs.symlinkSync(
+        path.join(outsideDir, "real.json"),
+        path.join(baseDir, "innocent.json"),
+      );
+    } catch {
+      symlinked = false;
+    }
+    if (!symlinked) return;
+    const secrets = detectSecrets({
+      fs,
+      baseDir,
+      configFiles: ["innocent.json"],
+      envFiles: [],
+    });
+    expect(secrets).toEqual([]);
+  });
+
+  it("still reads a legitimate in-base config file (allow-legit)", () => {
+    const baseDir = makeDir("h2-base-");
+    fs.writeFileSync(
+      path.join(baseDir, "openclaw.json"),
+      JSON.stringify({ models: { providers: { openai: { apiKey: "sk-inside-secret" } } } }),
+      "utf8",
+    );
+    const secrets = detectSecrets({
+      fs,
+      baseDir,
+      configFiles: ["openclaw.json"],
+      envFiles: [],
+    });
+    const openai = secrets.find((s) => s.suggestedEnvVar === "OPENAI_API_KEY");
+    expect(openai).toBeDefined();
+    expect(openai.value).toBe("sk-inside-secret");
+  });
+});
