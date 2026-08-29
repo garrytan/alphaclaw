@@ -238,6 +238,75 @@ describe("frontend/upgrade-tab view", () => {
     expect(text).toContain("Loading version catalog...");
   });
 
+  it("renders the channel picker (disabled) inside the loading skeleton — the card is never a hostage", () => {
+    const tree = renderView({ loadingChannel: true, loadingCatalog: true });
+    // The segmented control's static options render even before the channel
+    // GET resolves; only the data region shows the loading line.
+    const text = treeText(tree);
+    expect(text).toContain("Release channel");
+    expect(text).toContain("Stable");
+    expect(text).toContain("Beta");
+  });
+
+  it("renders a Dismiss affordance on a failed operation so the page is never dead", () => {
+    const onDismissOperation = vi.fn();
+    const tree = renderView({
+      channelInfo: makeChannelInfo(),
+      operation: {
+        operationId: "op-9",
+        phase: "failed",
+        label: "2026.8.1-beta.3",
+        startedAt: kNow - 60_000,
+        steps: [],
+        output: "",
+        lastOutputAt: null,
+        error: { message: "activation failed" },
+      },
+      onDismissOperation,
+    });
+    const text = treeText(tree);
+    expect(text).toContain("Dismiss to re-enable the page");
+    const dismiss = findButtonByText(tree, "Dismiss");
+    expect(dismiss).toBeTruthy();
+    dismiss.props.onclick();
+    expect(onDismissOperation).toHaveBeenCalled();
+  });
+
+  it("warns inline when a catalog refresh fails but stale data is shown", () => {
+    const tree = renderView({
+      channelInfo: makeChannelInfo(),
+      catalog: makeCatalog({ staleAsOf: kNow - 3_600_000 }),
+      catalogError: { message: "npm registry timeout", hint: null },
+    });
+    const text = treeText(tree);
+    expect(text).toContain(
+      "Could not refresh the catalog — showing the last loaded data",
+    );
+    expect(text).toContain("npm registry timeout");
+  });
+
+  it("renders the persistent action-error chip with a Dismiss button", () => {
+    const onDismissActionError = vi.fn();
+    const tree = renderView({
+      channelInfo: makeChannelInfo(),
+      actionError: {
+        headline: "Couldn't roll back OpenClaw.",
+        error: Object.assign(new Error("no rollback target"), {
+          hint: "Clear the blocklist first.",
+        }),
+      },
+      onDismissActionError,
+    });
+    const text = treeText(tree);
+    expect(text).toContain("Couldn't roll back OpenClaw.");
+    expect(text).toContain("no rollback target");
+    expect(text).toContain("Clear the blocklist first.");
+    const dismiss = findButtonByText(tree, "Dismiss");
+    expect(dismiss).toBeTruthy();
+    dismiss.props.onclick();
+    expect(onDismissActionError).toHaveBeenCalled();
+  });
+
   it("renders the EMPTY-OFFLINE state for a degraded catalog", () => {
     const tree = renderView({
       channelInfo: makeChannelInfo(),
@@ -1349,7 +1418,7 @@ describe("frontend/upgrade-tab hook", () => {
     expect(api.rollbackOpenclaw).not.toHaveBeenCalled();
   });
 
-  it("shows an error toast when the rollback is rejected with an envelope", async () => {
+  it("surfaces a rejected rollback as a persistent inline action error (never toast-only)", async () => {
     const envelopeError = Object.assign(
       new Error("no rollback target available"),
       { code: "rollback_unavailable", hint: "Clear the blocklist first." },
@@ -1361,10 +1430,21 @@ describe("frontend/upgrade-tab hook", () => {
 
     await state.onRollback();
 
-    expect(showToast).toHaveBeenCalledWith("no rollback target available", "error");
     state = renderHook({});
+    expect(state.actionError).toEqual({
+      headline: "Couldn't roll back OpenClaw.",
+      error: envelopeError,
+    });
+    expect(showToast).not.toHaveBeenCalledWith(
+      "no rollback target available",
+      "error",
+    );
     expect(state.operation).toBeNull();
     expect(state.rollingBack).toBe(false);
+
+    state.onDismissActionError();
+    state = renderHook({});
+    expect(state.actionError).toBeNull();
   });
 
   it("feeds streamed error envelopes (code/hint/docsUrl) into the failure model (U12)", async () => {

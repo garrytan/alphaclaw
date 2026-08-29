@@ -433,6 +433,30 @@ describe("server/upgrade-overseer", () => {
     const content = fs.readFileSync(opened.filePath, "utf8");
     expect(content).toContain("[overseer] --- claude transcript tail ---");
   });
+
+  it("start() warms the availability cache before any request asks for it", async () => {
+    const { ledger } = makeLedger();
+    const runner = makeRunner();
+    const { overseer } = makeOverseer({ ledger, runner });
+    try {
+      expect(runner.runStreamed).not.toHaveBeenCalled();
+      overseer.start();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      // The warm probe ran WITHOUT any getAvailability() caller — every
+      // restart (i.e. every upgrade) starts cold, and the settings GET must
+      // not stall behind the 10s `claude --version` probe.
+      const versionCalls = runner.calls.filter(
+        (call) => call.args?.[0] === "--version",
+      );
+      expect(versionCalls.length).toBe(1);
+      // A later read is served from the warmed cache (SWR may kick a
+      // background refresh once warm — assert the value, not call totals).
+      const availability = await overseer.getAvailability();
+      expect(availability.available).toBe(true);
+    } finally {
+      overseer.stop();
+    }
+  });
 });
 
 describe("server/alphaclaw-config overseer setting", () => {
