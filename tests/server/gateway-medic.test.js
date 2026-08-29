@@ -353,6 +353,62 @@ describe("server/gateway-medic", () => {
       // The evidence itself still made it into the prompt.
       expect(capture.prompt).toContain('Unrecognized key: "audit"');
     });
+
+    it("includes the numeric machine summary in the trusted FAILURE section", async () => {
+      const openclawDir = mkOpenclawDir();
+      writeConfig(openclawDir, { audit: {} });
+      const capture = {};
+      const medic = createMedic(openclawDir, {
+        llmClient: fakeLlm(
+          JSON.stringify({ diagnosis: "d", remedy: "none", confidence: "high" }),
+          capture,
+        ),
+        getMachineSummary: () => ({
+          memoryMb: 4096,
+          cores: 2,
+          tier: "medium",
+          activeGatewayHeapMb: 2048,
+          pendingGatewayHeapMb: 3072,
+        }),
+      });
+
+      await medic.run({ exitCode: 78, stderrTail: ['Unrecognized key: "audit"'] });
+
+      expect(capture.prompt).toContain('"memoryMb": 4096');
+      expect(capture.prompt).toContain('"tier": "medium"');
+      expect(capture.prompt).toContain('"activeGatewayHeapMb": 2048');
+      expect(capture.prompt).toContain('"pendingGatewayHeapMb": 3072');
+      // Still inside the trusted section, with the untrusted framing intact.
+      expect(capture.prompt).toContain(
+        "=== FAILURE (trusted, AlphaClaw-generated) ===",
+      );
+      expect(capture.prompt).toContain("UNTRUSTED");
+    });
+
+    it("omits the machine field when getMachineSummary throws (fail-open)", async () => {
+      const openclawDir = mkOpenclawDir();
+      writeConfig(openclawDir, { audit: {} });
+      const capture = {};
+      const medic = createMedic(openclawDir, {
+        llmClient: fakeLlm(
+          JSON.stringify({ diagnosis: "d", remedy: "none", confidence: "high" }),
+          capture,
+        ),
+        getMachineSummary: () => {
+          throw new Error("profile exploded");
+        },
+      });
+
+      const outcome = await medic.run({
+        exitCode: 78,
+        stderrTail: ['Unrecognized key: "audit"'],
+      });
+
+      // The prompt still built and the run completed — no machine field.
+      expect(capture.prompt).toContain('"removableKeyPaths"');
+      expect(capture.prompt).not.toContain('"machine"');
+      expect(outcome.tier).toBe("ai");
+    });
   });
 
   it("runs doctor --fix even when openclaw.json is missing (backup is best-effort)", async () => {
