@@ -7,9 +7,11 @@ const {
   readAlphaclawConfig,
   readOpenclawMedicEnabled,
   readOpenclawReleaseChannel,
+  readWatchdogOverseerEnabled,
   updateOpenAiCompatApiFeature,
   updateOpenclawMedicEnabled,
   updateOpenclawReleaseChannel,
+  updateWatchdogOverseerEnabled,
 } = require("../../lib/server/alphaclaw-config");
 
 const createTempOpenclawDir = () =>
@@ -211,5 +213,55 @@ describe("server/alphaclaw-config", () => {
     const on = updateOpenclawMedicEnabled({ openclawDir, enabled: true });
     expect(on.changed).toBe(true);
     expect(readOpenclawMedicEnabled({ openclawDir })).toBe(true);
+  });
+
+  it("defaults the watchdog overseer to DISABLED and normalizes anything but literal true", () => {
+    const openclawDir = createTempOpenclawDir();
+    // Missing config, missing watchdog block → off.
+    expect(readWatchdogOverseerEnabled({ openclawDir })).toBe(false);
+
+    // Truthy junk must NOT enable an off-by-default LLM feature.
+    for (const junk of ["true", 1, "yes", {}, []]) {
+      fs.writeFileSync(
+        path.join(openclawDir, "alphaclaw.json"),
+        JSON.stringify({ watchdog: { overseer: { enabled: junk } } }),
+        "utf8",
+      );
+      expect(readWatchdogOverseerEnabled({ openclawDir })).toBe(false);
+    }
+
+    fs.writeFileSync(
+      path.join(openclawDir, "alphaclaw.json"),
+      JSON.stringify({ watchdog: { overseer: { enabled: true } } }),
+      "utf8",
+    );
+    expect(readWatchdogOverseerEnabled({ openclawDir })).toBe(true);
+  });
+
+  it("persists the watchdog overseer toggle, reports changed, and keeps foreign watchdog keys", () => {
+    const openclawDir = createTempOpenclawDir();
+    // A future sibling key under watchdog must survive the toggle write.
+    fs.writeFileSync(
+      path.join(openclawDir, "alphaclaw.json"),
+      JSON.stringify({ watchdog: { futureKnob: 7, overseer: { model: "x" } } }),
+      "utf8",
+    );
+
+    const on = updateWatchdogOverseerEnabled({ openclawDir, enabled: true });
+    expect(on.changed).toBe(true);
+    expect(readWatchdogOverseerEnabled({ openclawDir })).toBe(true);
+
+    const again = updateWatchdogOverseerEnabled({ openclawDir, enabled: true });
+    expect(again.changed).toBe(false);
+
+    const off = updateWatchdogOverseerEnabled({ openclawDir, enabled: false });
+    expect(off.changed).toBe(true);
+    expect(readWatchdogOverseerEnabled({ openclawDir })).toBe(false);
+
+    const persisted = JSON.parse(
+      fs.readFileSync(path.join(openclawDir, "alphaclaw.json"), "utf8"),
+    );
+    expect(persisted.watchdog.futureKnob).toBe(7);
+    expect(persisted.watchdog.overseer.model).toBe("x");
   });
 });

@@ -88,10 +88,12 @@ describe("POST /api/watchdog/overseer/review", () => {
   it("maps refusal codes: 409 for busy/rate-limit/steady-state, 404 for no incident", async () => {
     for (const [code, status] of [
       ["busy", 409],
-      ["rate_limited", 409],
+      ["rate_limited", 429],
       ["not_steady_state", 409],
       ["disabled", 409],
       ["no_incident", 404],
+      ["query_failed", 500],
+      ["review_failed", 500],
     ]) {
       const deps = createDeps();
       deps.watchdogOverseer.requestReview.mockResolvedValue({ ok: false, code });
@@ -101,6 +103,9 @@ describe("POST /api/watchdog/overseer/review", () => {
         .send({});
       expect(res.status).toBe(status);
       expect(res.body.error).toBe(code);
+      // Machine code always ships with a human-readable message.
+      expect(typeof res.body.message).toBe("string");
+      expect(res.body.message.length).toBeGreaterThan(0);
     }
   });
 

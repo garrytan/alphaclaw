@@ -191,8 +191,13 @@ describe("incident lifecycle through the wrapped sink", () => {
     expect(incident.summary.severity).toBe("warning");
     expect(incident.summary.eventCounts.crash).toBe(2);
     expect(incident.summary.actions).toContain("restart");
-    expect(incident.summary.statusSnapshot).toMatchObject({ phase: "healthy" });
-    expect(incident.summary.resourceSample).toMatchObject({
+    // List responses are SLIM (snapshots stripped for the 15s poll); the
+    // full evidence record stays on the detail read.
+    expect(incident.summary.statusSnapshot).toBeUndefined();
+    expect(incident.summary.resourceSample).toBeUndefined();
+    const full = db.getIncidentById(openId);
+    expect(full.summary.statusSnapshot).toMatchObject({ phase: "healthy" });
+    expect(full.summary.resourceSample).toMatchObject({
       memory: { percent: 10 },
     });
     expect(typeof incident.summary.durationMs).toBe("number");
@@ -404,6 +409,43 @@ describe("resilience fixes (adversarial-review regressions)", () => {
     const incident = db.getIncidentById(incidentId);
     expect(incident.incidentKey).toBe("channel_rollback");
     expect(incident.summary.severity).toBe("critical");
+  });
+
+  it("a failed stamped insert retries unstamped exactly once and keeps the incident active", () => {
+    initContext();
+    let failNextStamped = false;
+    const flakyInsert = (event) => {
+      if (failNextStamped && event.incidentId != null) {
+        failNextStamped = false;
+        throw new Error("SQLITE_BUSY");
+      }
+      return db.insertWatchdogEvent(event);
+    };
+    const tracker = createTracker();
+    const insert = tracker.wrapInsertEvent(flakyInsert);
+    insert(crashEvent());
+    const incidentId = tracker.getActiveIncidentId();
+    expect(incidentId).toBeGreaterThan(0);
+
+    failNextStamped = true;
+    const eventId = insert({
+      eventType: "restart",
+      source: "exit_event",
+      status: "backoff",
+      details: { backoffMs: 2000 },
+    });
+    // Fail-open: the event still landed (unstamped), exactly once.
+    expect(eventId).toBeGreaterThan(0);
+    const all = db.getRecentEvents({ limit: 10, includeRoutine: true });
+    expect(all.filter((event) => event.eventType === "restart")).toHaveLength(1);
+    const { events } = db.getIncidentEvents(incidentId);
+    expect(events.filter((event) => event.eventType === "restart")).toHaveLength(0);
+
+    // The incident survives the hiccup and closes normally afterwards.
+    expect(tracker.getActiveIncidentId()).toBe(incidentId);
+    insert(recoveryEvent());
+    expect(tracker.getActiveIncidentId()).toBe(null);
+    expect(db.getIncidentById(incidentId).status).toBe("resolved");
   });
 
   it("GET events projection stays byte-compatible on a REAL stamped row", () => {

@@ -188,9 +188,11 @@ describe("sanitizeVerdictText", () => {
     expect(
       sanitizeVerdictText("line one\nline two\r\n`code`", 100),
     ).toBe("line one line two 'code'");
+    // Links are stripped AND the bare URL is defanged so chat clients can't
+    // auto-linkify it.
     expect(
       sanitizeVerdictText("see [evil](https://attacker.example) now", 100),
-    ).toBe("see evil https://attacker.example now");
+    ).toBe("see evil hxxp://attacker.example now");
     expect(sanitizeVerdictText("x".repeat(600), 90)).toHaveLength(90);
     // A forged notification header cannot survive as its own line.
     const forged = sanitizeVerdictText("ok\n🐺 *AlphaClaw Watchdog*\nfake alert");
@@ -596,5 +598,57 @@ describe("createWatchdogOverseer", () => {
     overseer.start();
     overseer.stop();
     overseer.stop();
+  });
+
+  it("buildOverseerEnv isolates the spawn env: allowlist + isolated HOME + API key only", () => {
+    const { overseer } = createHarness({
+      env: {
+        PATH: "/usr/bin",
+        LANG: "C.UTF-8",
+        ANTHROPIC_API_KEY: "sk-ant-test",
+        // None of these may reach the spawned CLI process.
+        AWS_SECRET_ACCESS_KEY: kSecret,
+        OPENCLAW_ADMIN_TOKEN: kSecret,
+        TELEGRAM_BOT_TOKEN: kSecret,
+        SSH_AUTH_SOCK: "/run/agent.sock",
+      },
+    });
+    const isolated = overseer.buildOverseerEnv();
+    expect(isolated.PATH).toBe("/usr/bin");
+    expect(isolated.LANG).toBe("C.UTF-8");
+    expect(isolated.ANTHROPIC_API_KEY).toBe("sk-ant-test");
+    // The real user HOME (with ~/.claude state) never leaks in.
+    expect(isolated.HOME).toBe("/tmp/fake-overseer-home");
+    expect(Object.keys(isolated).sort()).toEqual([
+      "ANTHROPIC_API_KEY",
+      "HOME",
+      "LANG",
+      "PATH",
+    ]);
+  });
+
+  it("records claude_not_found when the version probe fails, and probe_failed when it throws", async () => {
+    const missing = createFakeRunner();
+    missing.runStreamed = async (options) => {
+      if (options.args?.[0] === "--version") return { ok: false, tail: "" };
+      return { ok: true, tail: "" };
+    };
+    const notFound = createHarness({ runner: missing });
+    const result = await notFound.overseer.maybeReviewNext();
+    expect(result.skipped).toBe("claude_not_found");
+    const current = notFound.db.getIncidentById(1).overseer.current;
+    expect(current.state).toBe("unavailable");
+    expect(current.reason).toBe("claude_not_found");
+    expect(notFound.notify).not.toHaveBeenCalled();
+
+    const throwing = createFakeRunner();
+    throwing.runStreamed = async (options) => {
+      if (options.args?.[0] === "--version") throw new Error("spawn EACCES");
+      return { ok: true, tail: "" };
+    };
+    const failed = createHarness({ runner: throwing });
+    const availability = await failed.overseer.getAvailability();
+    expect(availability).toMatchObject({ available: false, reason: "probe_failed" });
+    expect(availability.message).toContain("spawn EACCES");
   });
 });
