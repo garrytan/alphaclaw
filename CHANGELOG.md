@@ -5,7 +5,7 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
-## [Unreleased]
+## [0.9.43] - 2026-08-29
 
 ### Added
 - **Resource autotune (`autotune.enabled`, default ON).** AlphaClaw now reads
@@ -29,7 +29,18 @@ Versions follow this repository's `package.json` release counter.
   (`PUT /api/autotune/settings {"enabled":false}` or the card toggle) or via
   the `ALPHACLAW_AUTOTUNE_DISABLED=1` env kill-switch (works mid-crash-loop
   from the platform dashboard); disabling restores pre-feature behavior,
-  including deleting the concurrency default autotune itself wrote.
+  including deleting the concurrency default autotune itself wrote — and it
+  never rewrites values you set by hand: only ledger-attributable writes are
+  reverted, and a no-change pass never round-trips your `openclaw.json`.
+
+### Changed
+- The OpenAI-compatible `/v1` endpoints now reject requests without a bearer
+  token before reading the request body, so unauthenticated traffic can no
+  longer occupy request-body memory at all.
+
+### Fixed
+- The stale `package-lock.json` version left behind by the 0.9.42 release is
+  synced.
 
 ## [0.9.42] - 2026-08-29
 
