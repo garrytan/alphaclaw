@@ -5,7 +5,6 @@ import { describe, expect, it, vi } from "vitest";
 // stays hermetic (same approach as upgrade-tab.test.js).
 vi.mock("../../lib/public/js/lib/api.js", () => ({
   fetchOpenclawOverseer: vi.fn(),
-  fetchOpenclawRuns: vi.fn(),
   updateOpenclawOverseer: vi.fn(),
 }));
 
@@ -14,7 +13,11 @@ vi.mock("../../lib/public/js/components/toast.js", () => ({
   ToastContainer: () => null,
 }));
 
-import { buildOverseerReportModel } from "../../lib/public/js/components/upgrade-tab/overseer-card.js";
+import {
+  buildOverseerAvailabilityLine,
+  buildOverseerReportModel,
+  describeOverseerSaveError,
+} from "../../lib/public/js/components/upgrade-tab/overseer-card.js";
 
 describe("frontend/upgrade overseer report view-model", () => {
   it("returns null when there is no run or no overseer payload", () => {
@@ -130,5 +133,32 @@ describe("frontend/upgrade overseer report view-model", () => {
     });
     expect(bare.summary).toBe("");
     expect(bare.recommendation).toBe("");
+  });
+
+  it("describes save failures without asserting an unconfirmed state", () => {
+    // A rejected fetch does not prove the PUT failed — the copy must not
+    // claim "still disabled" as fact; the hook reconciles with the server.
+    expect(describeOverseerSaveError(true)).toBe(
+      "Couldn't confirm enabling the overseer — showing the server's current state.",
+    );
+    expect(describeOverseerSaveError(false)).toBe(
+      "Couldn't confirm disabling the overseer — showing the server's current state.",
+    );
+  });
+
+  it("builds the availability line for available/unavailable/missing", () => {
+    expect(buildOverseerAvailabilityLine(null)).toBe(null);
+    expect(
+      buildOverseerAvailabilityLine({ available: true, message: "claude 1.2.3" }),
+    ).toBe("Available (claude 1.2.3)");
+    expect(buildOverseerAvailabilityLine({ available: true })).toBe(
+      "Available (claude CLI + Anthropic credential found)",
+    );
+    expect(
+      buildOverseerAvailabilityLine({ available: false, message: "No claude CLI" }),
+    ).toBe("No claude CLI");
+    expect(buildOverseerAvailabilityLine({ available: false })).toBe(
+      "Unavailable",
+    );
   });
 });

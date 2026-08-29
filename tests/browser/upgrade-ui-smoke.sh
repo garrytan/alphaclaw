@@ -93,4 +93,30 @@ grep -q '"releaseChannel": "stable"' "$kScratch/.openclaw/alphaclaw.json" \
   || fail "channel not restored to stable"
 echo "  ok: restored to stable"
 
+echo "== overseer toggle flips instantly and never snaps back =="
+# The founding regression of the toggle overhaul: a pessimistic handler let
+# Preact re-assert checked=false on the saving re-render, so the switch
+# visibly snapped back and looked dead. Only a real DOM catches that.
+overseer_input="[...document.querySelectorAll('.bg-surface')].find(c => c.textContent.includes('Overseer report'))?.querySelector('.ac-toggle-input')"
+assert_page "($overseer_input)?.checked === false" "overseer toggle starts disabled"
+# Click and read in ONE evaluation: separate CLI invocations are ~100ms+
+# apart, long enough for the localhost PUT to settle and mask a snap-back.
+# The synchronous read catches an immediate re-assertion; the optimistic
+# render frame itself is pinned by the unit harness (Preact re-renders are
+# async, so no DOM read here can be scheduled between click and re-render).
+assert_page "(i => { i?.closest('label')?.click(); return i?.checked === true; })($overseer_input)" "overseer toggle flipped instantly (no snap-back)"
+sleep 2
+assert_page "($overseer_input)?.checked === true" "overseer toggle stayed on after the save settled"
+node -e "const c=require('$kScratch/.openclaw/alphaclaw.json'); process.exit(c.updates?.openclaw?.overseer?.enabled===true?0:1)" \
+  || fail "overseer enabled not persisted to alphaclaw.json"
+echo "  ok: overseer enabled persisted on disk"
+
+echo "== overseer toggle state survives reload =="
+"$B" goto "http://127.0.0.1:$kPort/#/upgrade" >/dev/null
+sleep 3
+assert_page "($overseer_input)?.checked === true" "overseer toggle still on after reload"
+"$B" js "($overseer_input)?.closest('label')?.click(); true" >/dev/null
+sleep 2
+assert_page "($overseer_input)?.checked === false" "overseer toggle disabled again"
+
 echo "PASS: upgrade UI smoke"

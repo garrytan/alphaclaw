@@ -1,5 +1,13 @@
 # Gateway State Model
 
+> **Status (2026-08-29):** M2/M3 shipped in v0.9.37. The normative sections
+> (§3–§10) describe what now runs; §2's "as-implemented, pre-M2" survey is
+> historical. Known deviation from the §5 repair-lock matrix: manual repairs
+> currently skip with HTTP 200 `{skipped:true}` instead of queueing — tracked
+> in TODOS.md ("Manual repair should queue on the lifecycle lock, not skip").
+> The plan file referenced below was a working artifact and does not ship in
+> this repo.
+
 Canonical reference for the AlphaClaw gateway state model: the as-implemented state sources (pre-M2), the target unified model (M2), and the restart pipeline (M3). Implementers of M2.2–M3.x and reviewers of those PRs read this file; the plan (`system-instruction-you-are-working-modular-turing.md`) is the approved source — where current code disagrees with the plan, the plan wins and the code is marked "current code:".
 
 **Reading guide.** §2 is descriptive (what exists today, with file:line refs). §3–§10 are normative (what M2/M3 build). The State × UI matrix (§5) is the single source for UI labels, popovers, and notification copy. The precedence table (§4) is the reducer's contract; the reducer test matrix (M2.2) is generated from it.

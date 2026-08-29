@@ -296,8 +296,10 @@ describe("frontend/create-channel-modal option toggles reset per session (3.1)",
     expect(onSubmit.mock.calls[0][0].statusReactions).toBe("on");
 
     // Reopen for a DIFFERENT account — the modal stays mounted, so the toggle
-    // MUST reset to default and never ride account B's submit.
-    const accountB = { ...accountA, name: "Slack B" };
+    // MUST reset to default and never ride account B's submit. A different
+    // account means a different (provider, id): the init key is identity-
+    // based so background list refreshes can't reset an open form mid-edit.
+    const accountB = { ...accountA, id: "second", name: "Slack B" };
     const propsB = { ...propsA, account: accountB };
     mount(propsB);
     tree = render(propsB);

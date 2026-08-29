@@ -433,6 +433,63 @@ describe("server/upgrade-overseer", () => {
     const content = fs.readFileSync(opened.filePath, "utf8");
     expect(content).toContain("[overseer] --- claude transcript tail ---");
   });
+
+  it("start() warms the availability cache before any request asks for it", async () => {
+    const { ledger } = makeLedger();
+    const runner = makeRunner();
+    const { overseer } = makeOverseer({ ledger, runner });
+    try {
+      expect(runner.runStreamed).not.toHaveBeenCalled();
+      overseer.start();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      // The warm probe ran WITHOUT any getAvailability() caller — every
+      // restart (i.e. every upgrade) starts cold, and the settings GET must
+      // not stall behind the 10s `claude --version` probe.
+      const versionCalls = runner.calls.filter(
+        (call) => call.args?.[0] === "--version",
+      );
+      expect(versionCalls.length).toBe(1);
+      // A later read is served from the warmed cache (SWR may kick a
+      // background refresh once warm — assert the value, not call totals).
+      const availability = await overseer.getAvailability();
+      expect(availability.available).toBe(true);
+    } finally {
+      overseer.stop();
+    }
+  });
+
+  it("never hands the Anthropic credential to the version/help probes", async () => {
+    const { ledger } = makeLedger();
+    const runner = makeRunner();
+    const { overseer } = makeOverseer({ ledger, runner });
+    await overseer.getAvailability();
+    const probeCalls = runner.calls.filter((call) =>
+      ["--version", "--help"].includes(call.args?.[0]),
+    );
+    expect(probeCalls.length).toBeGreaterThan(0);
+    for (const call of probeCalls) {
+      // A planted/compromised `claude` on PATH must not receive the API key
+      // from a mere availability probe (boot-warm runs even when disabled);
+      // only real overseer runs get the credentialed env.
+      expect(call.env.ANTHROPIC_API_KEY).toBeUndefined();
+    }
+  });
+
+  it("single-flights concurrent cold availability probes", async () => {
+    const { ledger } = makeLedger();
+    const runner = makeRunner();
+    const { overseer } = makeOverseer({ ledger, runner });
+    const [first, second] = await Promise.all([
+      overseer.getAvailability(),
+      overseer.getAvailability(),
+    ]);
+    expect(first.available).toBe(true);
+    expect(second.available).toBe(true);
+    const versionCalls = runner.calls.filter(
+      (call) => call.args?.[0] === "--version",
+    );
+    expect(versionCalls.length).toBe(1);
+  });
 });
 
 describe("server/alphaclaw-config overseer setting", () => {

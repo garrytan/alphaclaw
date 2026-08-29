@@ -40,6 +40,18 @@
 - **What:** The Doctor one-time fix token (lib/server/doctor/) has no expiry column; the agent-admin confirm store added 10-min expiry + attempt caps. Backport the same hardening to Doctor.
 - **Effort:** S.
 
+## P3 — Multi-operator / multi-tab settings freshness
+- **What:** Push-refresh (SSE settings events) or ETag/If-Match concurrency for persisted settings so a second operator/tab sees changes without a remount.
+- **Why:** The toggle/status/error overhaul's generation guards fix single-client races only; concurrent editors remain last-write-wins with no live refresh of settings cards.
+- **Context:** `useSavedSetting` (lib/public/js/hooks/use-saved-setting.js) is the standard write path (a few deliberate bespoke loops remain: cron's job-enable converge, General's SSE-proof API toggle) — a settings SSE channel could feed its `retryLoad()`/cache seam. Surfaced by the plan's CEO review + outside voice.
+- **Effort:** M. **Depends on:** deciding a settings-events transport (piggyback /api/events/status vs a new stream).
+
+## P3 — Cron run-history: cap-aware pagination merge + bounded optimistic converge
+- **What:** (a) The runs poll skips replacing entries while paginated past page 1; with >200 entries loaded (server clamps limit to kMaxRunsLimit=200, lib/server/cron-service.js), every snapshot is truncated and live updates stay frozen until a job/filter switch — make the merge cap-aware (offset paging or merge-first-200). (b) The job-enable toggle's hold-until-confirm converge can pin the optimistic value if an external actor flips the job back between our commit and the confirming poll — add a timeout or generation-stamped converge.
+- **Why:** Both are narrow edges of the accepted optimistic/merge design, flagged by the slice verifier; neither is user-visible in normal operation.
+- **Context:** lib/public/js/components/cron-tab/use-cron-tab.js (truncated-snapshot guard ~line 213, converge effect ~line 244).
+- **Effort:** S.
+
 ## P3 — Serialize alphaclaw.json writers under a file lock
 - **What:** Route every `writeAlphaclawConfig` read-modify-write (release channel, overseer/medic toggles, team settings, openai-compat flag) through `withFileLockSync`, the way `updateOpenclawConfig` already serializes openclaw.json writers.
 - **Why:** Two concurrent toggles (e.g. a medic PUT racing a team-settings PUT) can drop one write. Pre-existing pattern across all alphaclaw.json writers, not specific to the medic — flagged by the ship adversarial pass.
@@ -215,6 +227,11 @@
 ## P3 — Ship-review maintainability follow-ups (2026-08-28, grouped)
 - **What:** (1) shared `applyOperationalPragmas(db)` helper for the WAL/NORMAL/busy_timeout block now copy-pasted in db/auth, db/doctor, db/watchdog, db/webhooks; (2) shared cron run-log tail-read helper (block repeated ×3 in cron-service.js); (3) shared `sleep` util (5 private copies); (4) one `kDoctorRepairTimeoutMs` constant for the 10-minute doctor-fix ceiling spelled in server.js and watchdog.js; (5) shared 1s sync-file-lock timeout constant (openclaw-config.js + topic-registry.js); (6) extract the proxy error handler and terminal error middleware from lib/server.js into a module so routes-proxy.test.js stops testing a verbatim copy; (7) `stream.end()` + bounded await-finish as a drain step in log-writer so stream-buffered bytes survive shutdown (in-memory queue already flushes); (8) make system-resources' loop-lag monitor injectable/stoppable for direct tests; (9) surface a `truncatedHistory` flag on cron run-history responses (256KB tail bound); (10) /v1-scoped error handler emitting the OpenAI error envelope for 413/400 parser errors; (11) SWR-cache `getGatewayPort` (sync read+parse per proxied request, sub-ms but unconditional); (12) stat-cache `analyzeBootstrapContext` file reads; (13) remaining test gaps: pairings single-flight/500 path, cron-store TTL-reopen/liveness cache, statusPayloadMemo invalidate-vs-in-flight race, doctor-service runStarting four-site reset → try/finally cleanup; (14) `Expect: 100-continue` proxied requests never get the post-header idle-timeout relaxation (http-proxy-3 skips the proxyReq event for them — consider stripping the header on the outgoing leg); (15) `installCrashGuards` removeAllListeners can drop dependency-registered process handlers — remove only known guards by reference; (16) browse preview TOCTOU: read at most limit+1 bytes from an fd instead of stat-then-readFileSync.
 - **Why:** All flagged by the /ship specialist review; deferred as churn-vs-risk at ship time, none user-visible today.
+- **Effort:** S each. **Depends on:** nothing.
+
+## P3 — Adversarial-review UI cache follow-ups (2026-08-29, grouped)
+- **What:** (1) `cachedFetch` SWR dedupe: when a reusable in-flight request exists, the second consumer's `onRevalidate` is never attached, so two components sharing a key (`/api/env` in Envars + Features, `/api/channels/accounts`) can render different vintages until their next refresh/poll/remount — attach a generation-gated `.then(onRevalidate)` (+`.catch(() => {})`) to the reused in-flight promise; (2) `useCachedFetch`: if `setCached()` supersedes an in-flight forced refresh, the cache correctly refuses the stale write but the awaiting hook still `setData(next)` with the pre-mutation result — re-check the key generation after the await before applying locally; (3) `models-tab/use-models.js` refresh and `providers.js` compute merges inside side-effecting `setState` updaters and synchronously read the result for cache writes — correct under Preact's eager updaters but fragile; compute merges from refs instead.
+- **Why:** Claude adversarial ship-review findings (2026-08-29); all are small self-healing windows or latent fragility, none user-visible as a deterministic bug today.
 - **Effort:** S each. **Depends on:** nothing.
 
 ## P2 — Node onboarding under team mode (trusted-proxy)
