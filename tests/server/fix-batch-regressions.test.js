@@ -115,9 +115,11 @@ describe("diff-review fix-batch regressions", () => {
     });
   });
 
-  describe("fingerprint client: timeout terminates the worker", () => {
+  describe("fingerprint worker client: timeout terminates the worker", () => {
     it("times out a hung request and a later request works on a fresh worker", async () => {
-      const { createFingerprintClient } = require("../../lib/server/doctor/fingerprint-client");
+      const {
+        createWorkspaceSnapshotWorkerClient,
+      } = require("../../lib/server/doctor/workspace-fingerprint");
       // A worker script that never replies to the first message, then behaves.
       const hangingWorkerPath = path.join(
         os.tmpdir(),
@@ -128,24 +130,24 @@ describe("diff-review fix-batch regressions", () => {
         `
         const { parentPort } = require("worker_threads");
         parentPort.on("message", (message) => {
-          if (message.rootDir === "/hang") return; // never reply
-          parentPort.postMessage({ id: message.id, ok: true, snapshot: { fingerprint: "fp", manifest: {} } });
+          if (message.workspaceRoot === "/hang") return; // never reply
+          parentPort.postMessage({ jobId: message.jobId, ok: true, snapshot: { fingerprint: "fp", manifest: {} } });
         });
         `,
       );
-      const client = createFingerprintClient({
-        workerPath: hangingWorkerPath,
+      const client = createWorkspaceSnapshotWorkerClient({
+        workerScriptPath: hangingWorkerPath,
         requestTimeoutMs: 150,
       });
       try {
-        await expect(client.computeSnapshot("/hang", {})).rejects.toThrow(
-          "Fingerprint worker timed out",
+        await expect(client.computeWorkspaceSnapshotAsync("/hang")).rejects.toThrow(
+          "Workspace snapshot worker timed out",
         );
         // The hung worker was terminated; a new request lazily respawns.
-        const result = await client.computeSnapshot("/ok", {});
+        const result = await client.computeWorkspaceSnapshotAsync("/ok");
         expect(result.fingerprint).toBe("fp");
       } finally {
-        client.dispose();
+        await client.terminate();
         fs.rmSync(hangingWorkerPath, { force: true });
       }
     });

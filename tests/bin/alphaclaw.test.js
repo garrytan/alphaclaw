@@ -27,6 +27,20 @@ describe("bin/alphaclaw port check", () => {
 
   const binPath = path.resolve(__dirname, "../../bin/alphaclaw.js");
 
+  // The CLI's Node version gate fires before anything these tests assert on
+  // (port check, SETUP_PASSWORD, state-dir export). Pin process.versions.node
+  // to a supported release via --require — the same preload idiom the
+  // git-sync version test below uses — so the gate is deterministic no matter
+  // which Node the host happens to run the suite with.
+  const supportedNodePreload = () => {
+    const preloadPath = path.join(tmpDir, "force-supported-node.js");
+    fs.writeFileSync(
+      preloadPath,
+      `Object.defineProperty(process.versions, "node", { value: "22.22.3" });`,
+    );
+    return `--require="${preloadPath}"`;
+  };
+
   it("allows git-sync on Node versions below OpenClaw's runtime minimum", () => {
     const preloadPath = path.join(tmpDir, "override-node-version.js");
     fs.writeFileSync(
@@ -56,7 +70,7 @@ describe("bin/alphaclaw port check", () => {
     let output = "";
     let status = 0;
     try {
-      execSync(`ALPHACLAW_ROOT_DIR="${tmpDir}" node "${binPath}" start`, {
+      execSync(`ALPHACLAW_ROOT_DIR="${tmpDir}" node ${supportedNodePreload()} "${binPath}" start`, {
         stdio: "pipe",
         encoding: "utf8",
         env: { ...process.env, PORT: "18789", ALPHACLAW_ROOT_DIR: tmpDir }
@@ -75,7 +89,7 @@ describe("bin/alphaclaw port check", () => {
     let output = "";
     let status = 0;
     try {
-      execSync(`ALPHACLAW_ROOT_DIR="${tmpDir}" node "${binPath}" start --port 18789`, {
+      execSync(`ALPHACLAW_ROOT_DIR="${tmpDir}" node ${supportedNodePreload()} "${binPath}" start --port 18789`, {
         stdio: "pipe",
         encoding: "utf8",
         env: { ...process.env, PORT: "3000", ALPHACLAW_ROOT_DIR: tmpDir }
@@ -95,7 +109,7 @@ describe("bin/alphaclaw port check", () => {
     let status = 0;
     try {
       // We expect it to fail on SETUP_PASSWORD missing, which is AFTER the port check
-      execSync(`ALPHACLAW_ROOT_DIR="${tmpDir}" node "${binPath}" start`, {
+      execSync(`ALPHACLAW_ROOT_DIR="${tmpDir}" node ${supportedNodePreload()} "${binPath}" start`, {
         stdio: "pipe",
         encoding: "utf8",
         env: { ...process.env, PORT: "3001", ALPHACLAW_ROOT_DIR: tmpDir, SETUP_PASSWORD: "" }
@@ -207,7 +221,7 @@ Module._load = function patchedLoad(request, parent, isMain) {
       `.trim(),
     );
 
-    execSync(`node "${binPath}" start`, {
+    execSync(`node ${supportedNodePreload()} "${binPath}" start`, {
       stdio: "pipe",
       encoding: "utf8",
       env: {
@@ -317,7 +331,7 @@ Module._load = function patchedLoad(request, parent, isMain) {
       `.trim(),
     );
 
-    execSync(`node "${binPath}" start`, {
+    execSync(`node ${supportedNodePreload()} "${binPath}" start`, {
       stdio: "pipe",
       encoding: "utf8",
       env: {
@@ -425,7 +439,7 @@ Module._load = function patchedLoad(request, parent, isMain) {
     fs.mkdirSync(compatPath, { recursive: true });
     fs.writeFileSync(path.join(compatPath, "config.json"), "{}");
 
-    execSync(`node "${binPath}" start`, {
+    execSync(`node ${supportedNodePreload()} "${binPath}" start`, {
       stdio: "pipe",
       encoding: "utf8",
       env: {

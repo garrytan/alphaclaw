@@ -5,7 +5,90 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
-## [Unreleased]
+## [0.9.37] - 2026-08-28
+
+### Added
+- **One honest gateway status.** The Gateway card now shows a single unified
+  state instead of separate (and sometimes contradictory) gateway/watchdog
+  rows. The vocabulary, in the order the card resolves it:
+  - **Not set up yet** — AlphaClaw hasn't been onboarded.
+  - **AlphaClaw starting / Startup failed** — the boot sequence itself.
+  - **Status unavailable** — no fresh observation; shows when it was last
+    confirmed running instead of guessing.
+  - **Configuration error** — OpenClaw rejected its config (exit 78);
+    automatic restarts pause until it's fixed.
+  - **Down** — not running, nothing in progress; Retry/Repair offered.
+  - **Starting** — launching, with elapsed time against the ready budget.
+  - **Unstable** — crashed and came back repeatedly; crash count and window
+    shown (estimated when the gateway runs outside AlphaClaw's supervision).
+  - **Running with issues** — up, but health probes are failing.
+  - **Channels paused** — the gateway's crash-loop breaker suppressed channel
+    autostart; one-click Resume.
+  - **Running** — up, healthy, with real uptime.
+  Every state carries a plain-language reason, the recommended action, and a
+  glossary explainer. Alerts (Telegram/Discord/Slack/WhatsApp) use the same
+  vocabulary, so what pings you matches what the page says.
+- **Restarts you can watch.** Restarting the gateway streams live steps
+  (checking plugins → stopping → starting → waiting for health check) with
+  honest outcomes: success reports measured downtime; failure shows the
+  actual error evidence (secrets redacted) with what to try next — no more
+  "Gateway restarted ✅" over a dead gateway. Restarts survive page reloads
+  and even an AlphaClaw crash mid-restart ("interrupted restart" on reboot).
+- **Faster dead-gateway detection.** An always-on 10-second port watcher plus
+  immediate re-checks after every restart/repair replace the old
+  up-to-2-minutes wait; stale verdicts like a lingering "crash loop" clear
+  the moment reality changes.
+- **Last-delivered timestamp for watchdog alerts** (next to the existing
+  Send test notification button), so you can verify alerting is actually
+  reaching you before you need it.
+
+### Changed
+- **Nearly everything is faster.** The server no longer freezes itself:
+  status checks, restarts, and boots run off the event loop; the
+  logs/watchdog page queries are indexed; the Upgrade page catalog serves
+  instantly from cache while refreshing in the background; responses are
+  compressed; charts load on demand. Status responses that took seconds
+  under load now answer in milliseconds.
+- **Expected restart during upgrades:** a gateway restart is part of channel
+  switches and upgrades; the watchdog now knows the restart window is
+  expected and won't report it as a crash or trigger rollback hooks during
+  it.
+- **API compatibility window:** `/api/status` keeps the legacy
+  `gateway`/`watchdogStatus` fields for one minor release as projections of
+  the new `state` object (they can no longer disagree). `POST
+  /api/gateway/restart` keeps blocking semantics by default; new clients
+  opt into `?async=1` + the streamed operation. Both defaults flip next
+  minor.
+- **Rollback implications:** automatic version rollback still arms after
+  gateway restarts; interrupted or failed restarts leave the rollback
+  window and its incident reporting exactly as before — with clearer
+  attribution in the incident feed ("automatic repair" vs manual restart).
+
+### Fixed
+- **Operations can no longer collide.** Channel updates, gateway restarts,
+  channel saves, and the watchdog's own recovery all serialize through one
+  lifecycle lock in both directions — an update can't kill a live restart,
+  a save can't interleave with a boot, and team-mode transitions hold the
+  same lock. A failed restart can no longer leave the card stuck on
+  "Starting" with no way out, and a gateway that crash-loops relaunches
+  with exponential backoff instead of hot-looping.
+- **Failure evidence stays readable and safe.** Restart evidence no longer
+  masks harmless values like file paths into `***` (only secret-named
+  values are redacted, longest-first so partial matches can't leak), and
+  failure messages get the same masking as stderr.
+- **Light theme and accessibility:** status dots now meet contrast minimums
+  in light mode, the reduced-motion setting actually stops every pulsing
+  animation, and small controls meet the 44px touch-target minimum on both
+  axes.
+- Charts recover after a failed load instead of staying blank for the whole
+  session; a stuck status-stream client is disconnected instead of
+  buffering frames without bound; port or channel changes written to
+  openclaw.json by any writer are picked up immediately.
+
+### Removed
+- `GET /api/gateway-status` (unused; it spawned a blocking 15s CLI status
+  call if ever hit). Use `GET /api/status` — the unified `state` object
+  carries everything it reported and more.
 
 ## [0.9.36] - 2026-08-28
 
