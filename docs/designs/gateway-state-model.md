@@ -50,6 +50,8 @@ stateDiagram-v2
     configuration_error --> stopped: stop()
 ```
 
+Current code (v0.9.39): the exit-78 branch consults the **gateway startup medic** (`gateway-medic.js`, default on via `updates.openclaw.medic.enabled`) after the rollback-eligibility check and before the incident settles. The watchdog enters `configuration_error`, then runs the medic under the gateway lifecycle lock (at most 2 attempts per incident, 5 runs per rolling hour across incidents); a successful repair transitions `configuration_error → restarting` and relaunches, and only when the medic is disabled, rate-limited, lock-contended, or out of remedies does the restart-paused latch notification fire. The diagram above predates the medic and shows only the direct latch path.
+
 Health axis setters:
 
 | health | set by |
@@ -114,7 +116,7 @@ The reducer evaluates rows in order; the first true predicate wins. Every input 
 | 1 | `not_onboarded` | onboarding marker absent (`isOnboarded()` false, `gateway.js:209`). Local file read — never stale. |
 | 2 | `booting` | `bootPhase !== "ready"` — the boot sequence holds the lifecycle mutex. `bootPhase === "failed"` → `booting(failed)` variant with the captured boot error as reason. |
 | 3 | `unknown` (stale) | newest `observedAt` across {tcp, health, operation} older than `kStateStaleMs` (15s), or the snapshot compute error counter indicates consecutive failures. Server emits `unknown` at 15s; the **UI holds the last-known state with an "as of Xs ago" stamp for a further 30s grace**, then shows "Status unavailable". |
-| 4 | `config_error` | config-error latch set: last observed gateway exit code == 78 (`kOpenclawConfigErrorExitCode`) and not since cleared by a successful launch or config-fix retry. Detached mode: latch only from evidence (stderr tail), labeled estimated. |
+| 4 | `config_error` | config-error latch set: last observed gateway exit code == 78 (`kOpenclawConfigErrorExitCode`) and not since cleared by a successful launch or config-fix retry. Current code (v0.9.39): the startup medic (default on) runs first under the lifecycle lock and may clear the latch itself by repairing openclaw.json and relaunching (`runConfigMedic`, watchdog.js); `config_error` settles only after the medic is disabled, rate-limited, or exhausted (2 attempts/incident). Detached mode: latch only from evidence (stderr tail), labeled estimated. |
 | 5 | `down` | `tcp.up === false` AND no active operation lease AND no relaunch pending — i.e. auto-restart paused (crash-loop threshold hit: `crashCountInWindow >= kWatchdogCrashLoopThreshold` (3)), repair attempts exhausted (`>= kWatchdogMaxRepairAttempts` (2)), or the last launch terminal-failed its ready budget. Reason carries last evidence + since. |
 | 6 | operation-in-flight (badge) | active lifecycle-mutex lease with a live operation record. Headline while the lease is held: `starting` when the current step is `launching`/`waiting_ready` and elapsed < ready budget; otherwise the operation kind labels the badge (`restarting` / `repairing` / `applying`) over the last settled headline. Transient `tcp.down` during a leased operation is expected and does **not** fall to row 5. |
 | 7 | `flapping` | `tcp.up === true` AND `1 <= crashCountInWindow < kWatchdogCrashLoopThreshold` (3) within `kWatchdogCrashLoopWindowMs` (300s). At the threshold auto-restart pauses and row 5 takes over. Detached mode: crash count is probe-inferred (§9) and labeled estimated. |
