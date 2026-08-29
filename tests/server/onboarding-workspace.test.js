@@ -469,6 +469,58 @@ describe("server/onboarding/workspace bootstrap prompt sync", () => {
     expect(workingFs.unlinkSync).toHaveBeenCalledWith(legacyPath);
   });
 
+  it("keeps the legacy TOOLS.md when openclaw.json exists but is not strict JSON", () => {
+    stubRegistryRead(null);
+    const workspaceDir = "/tmp/alphaclaw-json5-workspace";
+    const legacyPath = path.join(workspaceDir, "hooks", "bootstrap", "TOOLS.md");
+    // A legal upstream JSON5/${ENV}/$include config our strict parser cannot
+    // read — it may still reference hooks/bootstrap/TOOLS.md, so treating it
+    // as reconciled would delete the only hardening injection.
+    const json5Config = "{ hooks: { internal: { enabled: true } } } // JSON5";
+    const mockFs = {
+      readFileSync: vi.fn((target) => {
+        if (target === kToolsTemplatePath) return "Setup: {{SETUP_UI_URL}}";
+        if (target === kAgentsSourcePath) return "AGENTS TEMPLATE";
+        if (target === kConfigPath) return json5Config;
+        throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+      }),
+      existsSync: vi.fn(
+        (target) => target === kConfigPath || target === legacyPath,
+      ),
+      writeFileSync: vi.fn(),
+      mkdirSync: vi.fn(),
+      unlinkSync: vi.fn(),
+    };
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const onFailure = vi.fn();
+
+    syncBootstrapPromptFiles({
+      fs: mockFs,
+      workspaceDir,
+      baseUrl: "https://setup.example.com",
+      onFailure,
+    });
+
+    // The merged hardening file is still written...
+    expect(
+      mockFs.writeFileSync.mock.calls.some(
+        ([target]) =>
+          target === path.join(workspaceDir, "hooks", "bootstrap", "AGENTS.md"),
+      ),
+    ).toBe(true);
+    // ...but the unreadable config is never rewritten, and the legacy
+    // TOOLS.md it may still reference is kept (reconcile skipped).
+    expect(
+      mockFs.writeFileSync.mock.calls.some(([target]) => target === kConfigPath),
+    ).toBe(false);
+    expect(mockFs.unlinkSync).not.toHaveBeenCalled();
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining("openclaw.json exists but is not parseable"),
+    );
+    // Not a failure — a JSON5 config is legal upstream, so no watchdog noise.
+    expect(onFailure).not.toHaveBeenCalled();
+  });
+
   it("warns when the merged hardening file approaches the 20k injection cap", () => {
     stubRegistryRead(null);
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});

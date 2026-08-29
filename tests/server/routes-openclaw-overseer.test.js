@@ -351,6 +351,42 @@ describe("server/routes/openclaw-channel createSqliteBackupRunner", () => {
     expect(result.tail).toContain("Snapshot created.");
   });
 
+  it("rejects a forged snapshotPath outside the repository without running verify", async () => {
+    // The create report is parsed out of CLI chatter: a forged snapshotPath
+    // like "--help" would turn `backup sqlite verify <path>` into a
+    // successful help invocation and report an UNVERIFIED snapshot as
+    // verified. Anything not resolving inside the --repository we passed is
+    // treated exactly like an unparseable create report.
+    const forgedPaths = [
+      "--help",
+      "/etc",
+      "../outside",
+      `${kRepoDir}/../evil-sibling/snap`,
+      kRepoDir, // the repository dir itself is not a snapshot
+    ];
+    for (const forged of forgedPaths) {
+      const { run, runStreamed } = makeRunner({
+        results: [
+          {
+            ok: true,
+            code: 0,
+            timedOut: false,
+            tail: JSON.stringify({ ok: true, snapshotPath: forged }),
+          },
+        ],
+      });
+      const result = await run();
+
+      expect(runStreamed, `forged: ${forged}`).toHaveBeenCalledTimes(1);
+      expect(result.ok, `forged: ${forged}`).toBe(false);
+      expect(result.step, `forged: ${forged}`).toBe("create");
+      expect(result.snapshotPath, `forged: ${forged}`).toBe(null);
+      expect(result.tail, `forged: ${forged}`).toContain(
+        "no parsable snapshotPath",
+      );
+    }
+  });
+
   it("reports create-ok-verify-failed as a failure with the verify tail", async () => {
     const { run } = makeRunner({
       results: [

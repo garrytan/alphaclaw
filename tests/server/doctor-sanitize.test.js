@@ -92,6 +92,20 @@ describe("server/doctor/sanitize", () => {
     expect(capped).not.toContain("\n");
   });
 
+  it("never splits a surrogate pair at the cap", () => {
+    const { sanitize } = createDoctorTextSanitizer({ env: {} });
+    // "ab😀x" is 5 UTF-16 units (a, b, high, low, x); maxChars 4 keeps 3
+    // units, landing exactly on the high surrogate — it must be dropped, not
+    // emitted as a lone surrogate before the ellipsis.
+    const capped = sanitize("ab\u{1F600}x", { maxChars: 4 });
+    expect(capped).toBe("ab…");
+    expect(/[\ud800-\udbff](?![\udc00-\udfff])/.test(capped)).toBe(false);
+    // A pair that fits entirely inside the cap is kept intact.
+    expect(sanitize("ab\u{1F600}xyz", { maxChars: 6 })).toBe("ab\u{1F600}x…");
+    // Under the cap: untouched, pair intact.
+    expect(sanitize("ab\u{1F600}", { maxChars: 4 })).toBe("ab\u{1F600}");
+  });
+
   it("redacts before capping so a truncated secret cannot leak its prefix", () => {
     const { sanitize } = createDoctorTextSanitizer({
       env: { LEAKY_SECRET: "supersecretvalue" },

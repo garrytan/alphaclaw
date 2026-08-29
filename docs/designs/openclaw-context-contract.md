@@ -68,6 +68,23 @@ beta `dist/bootstrap-CaqLzAOR.js` (per-file/total/min/USER cap at line 252),
 Config overrides: `agents.defaults.bootstrapMaxChars` / `agents.defaults.bootstrapTotalMaxChars`
 (beta `docs/concepts/agent-workspace.md`); the USER 4k cap is NOT configurable.
 
+Per-agent precedence (both lines): `resolveBootstrapMaxChars(cfg, agentId)` /
+`resolveBootstrapTotalMaxChars(cfg, agentId)` read
+`resolveAgentConfig(cfg, agentId)?.bootstrap[Total]MaxChars ?? cfg.agents?.defaults?.…`, then a
+single validation ladder (`typeof raw === "number" && Number.isFinite(raw) && raw > 0` →
+`Math.floor(raw)`, else the built-in default). So a "main" roster entry's value beats
+`agents.defaults` — and a non-nullish but INVALID per-agent value (0, negative, string) fails
+validation and lands on the built-in default, NOT on `agents.defaults`. The roster is
+`agents.entries` (object map keyed by agent id) when that property exists, else `agents.list`
+(array of entries with `.id`); with no roster property, main is implicit with no overrides.
+Cited: beta `dist/bootstrap-CaqLzAOR.js` (`resolveBootstrapMaxChars`,
+`resolveBootstrapTotalMaxChars`) + `dist/agent-scope-config-CKOJa4MC.js` (`resolveAgentEntry`,
+`readAgentRosterProperty`, `resolveAgentConfig`); stable
+`dist/embedded-agent-helpers-DZZ4Y-Tw.js` (same resolver ladder) +
+`dist/agent-scope-config-BxAUeF6t.js` (`agents.list`-only roster). Drift Doctor models the MAIN
+session, so the analyzer resolves the effective budgets for agent id `main`
+(`lib/server/doctor/bootstrap-context.js` `resolveMainBootstrapBudget`).
+
 ### Truncation algorithm (identical symbols on both lines)
 
 - Default: keep **75% head / 25% tail** (`BOOTSTRAP_HEAD_RATIO = .75`) with a visible in-file
@@ -319,6 +336,8 @@ Run this on EVERY upstream release adoption (stable pin bump, beta adoption, cha
    ```
 2. Re-verify every cited fact in this document by grepping the new dist (chunk hashes change;
    search by symbol name: `VALID_BOOTSTRAP_NAMES`, `DEFAULT_BOOTSTRAP_TOTAL_MAX_CHARS`,
+   `resolveBootstrapMaxChars` (per-agent precedence: `resolveAgentEntry` /
+   `readAgentRosterProperty` roster shapes and the number-only validation ladder),
    `CRON_BOOTSTRAP_ALLOWLIST`, `jsonImpliesLint`, `GATEWAY_RESTART_HANDOFF_TTL_MS`,
    `GATEWAY_PROBE_ROUTES`, ...).
 3. Add or raise the context profiles in `lib/server/doctor/context-profiles.js` as needed

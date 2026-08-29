@@ -992,6 +992,82 @@ describe("server/doctor-service", () => {
     }
   });
 
+  it("refuses snippets through in-workspace symlinks and bounds huge-file reads", async () => {
+    const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-snippet-symlink-"));
+    const dbRoot = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-snippet-symlink-db-"));
+    const outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-snippet-symlink-out-"));
+    fs.writeFileSync(path.join(outsideDir, "host-secret.md"), "host file contents\n", "utf8");
+    // The lexical containment check passes for "sneaky.md" — only the
+    // realpath check can catch the link escaping the workspace.
+    fs.symlinkSync(path.join(outsideDir, "host-secret.md"), path.join(workspaceRoot, "sneaky.md"));
+    // A >512KB file: the read is capped, so the snippet comes from the head
+    // window and reports truncated even for an in-window range.
+    const hugeLines = ["head line one", "head line two"];
+    for (let index = 0; index < 40; index += 1) hugeLines.push(repeatText(20000, "x"));
+    fs.writeFileSync(path.join(workspaceRoot, "HUGE.md"), hugeLines.join("\n"), "utf8");
+    fs.writeFileSync(path.join(workspaceRoot, "AGENTS.md"), "# Guidance\n", "utf8");
+
+    const doctorDb = loadManagedDoctorDb();
+    doctorDb.initDoctorDb({ rootDir: dbRoot });
+
+    const { createDoctorService } = loadDoctorService();
+    const doctorService = createDoctorService({
+      clawCmd: vi.fn(),
+      listDoctorRuns: doctorDb.listDoctorRuns,
+      listDoctorCards: doctorDb.listDoctorCards,
+      getInitialWorkspaceBaseline: doctorDb.getInitialWorkspaceBaseline,
+      setInitialWorkspaceBaseline: doctorDb.setInitialWorkspaceBaseline,
+      createDoctorRun: doctorDb.createDoctorRun,
+      completeDoctorRun: doctorDb.completeDoctorRun,
+      insertDoctorCards: doctorDb.insertDoctorCards,
+      getDoctorRun: doctorDb.getDoctorRun,
+      getDoctorCardsByRunId: doctorDb.getDoctorCardsByRunId,
+      getDoctorCard: doctorDb.getDoctorCard,
+      updateDoctorCardStatus: doctorDb.updateDoctorCardStatus,
+      workspaceRoot,
+      managedRoot: workspaceRoot,
+      computeSnapshotAsync: fastComputeSnapshotAsync,
+    });
+
+    const imported = await doctorService.importDoctorResult({
+      rawOutput: JSON.stringify({
+        summary: "Symlink and cap guard",
+        cards: [
+          {
+            priority: "P1",
+            category: "workspace",
+            title: "Symlink and cap guard",
+            summary: "s",
+            recommendation: "r",
+            evidence: [
+              { type: "path", path: "sneaky.md", startLine: 1, endLine: 1 },
+              { type: "path", path: "HUGE.md", startLine: 1, endLine: 2 },
+            ],
+            targetPaths: ["AGENTS.md"],
+            fixPrompt: "Fix safely.",
+            status: "open",
+          },
+        ],
+      }),
+    });
+
+    const [card] = doctorDb.getDoctorCardsByRunId(imported.runId);
+    const [symlinkItem, hugeItem] = card.evidence;
+
+    // The symlink resolves outside the workspace: no snippet, no host bytes.
+    expect(symlinkItem.snippet).toBeUndefined();
+    expect(JSON.stringify(card)).not.toContain("host file contents");
+    // The huge file serves a head-window snippet with truncated semantics.
+    expect(hugeItem.snippet).toMatchObject({
+      text: "head line one\nhead line two",
+      startLine: 1,
+      endLine: 2,
+      truncated: true,
+    });
+
+    fs.rmSync(outsideDir, { recursive: true, force: true });
+  });
+
   it("marks the run failed when the gateway command reports an error", async () => {
     const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-gwfail-workspace-"));
     const dbRoot = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-gwfail-db-"));
@@ -1940,6 +2016,14 @@ describe("server/doctor-service", () => {
             source: "bootstrap",
             sourceKey: "boot:file_limit:AGENTS.md",
           },
+          // Bridge cards read openclaw.json/CLI state outside the workspace
+          // fingerprint: cloning them would freeze stale upstream findings.
+          {
+            title: "Stale upstream finding",
+            status: "open",
+            source: "openclaw_doctor",
+            sourceKey: "ocd:core/doctor/gateway-config:openclaw.json",
+          },
         ],
         workspaceRoot,
         managedRoot,
@@ -1952,12 +2036,14 @@ describe("server/doctor-service", () => {
 
       expect(result.reusedPreviousRun).toBe(true);
       expect(created[0]).toMatchObject({ engine: "deterministic_reuse" });
-      // First insert: cloned LLM cards only (legacy source-less rows count as LLM).
+      // First insert: cloned LLM cards only (legacy source-less rows count as
+      // LLM); bootstrap AND bridge cards are never cloned.
       expect(inserts[0].cards.map((card) => card.title)).toEqual([
         "LLM finding",
         "Legacy finding without source",
       ]);
-      // Second insert: freshly recomputed bootstrap cards.
+      // Second insert: freshly recomputed bootstrap cards (no bridge runner
+      // wired here → zero fresh bridge cards, and the stale one stays gone).
       expect(inserts[1].cards).toEqual([
         expect.objectContaining({
           source: "bootstrap",
@@ -2226,6 +2312,134 @@ describe("server/doctor-service", () => {
       expect(
         cards.some((card) => card.sourceKey === "ocd:core/doctor/gateway-config:3331faf3e131"),
       ).toBe(true);
+    });
+
+    describe("bridge freshness on fingerprint reuse", () => {
+      const { computeWorkspaceSnapshot } = require("../../lib/server/doctor/workspace-fingerprint");
+
+      const makeReuseSummary = () => {
+        const nowIso = new Date().toISOString();
+        return {
+          id: 1,
+          status: "completed",
+          engine: "gateway_agent",
+          workspaceFingerprint: computeWorkspaceSnapshot(workspaceRoot).fingerprint,
+          promptVersion: "doctor-v2",
+          contextProfile: "stable-2026.7",
+          openclawVersion: "",
+          completedAt: nowIso,
+          startedAt: nowIso,
+        };
+      };
+
+      const staleBridgeCard = {
+        title: "Stale upstream finding",
+        status: "open",
+        source: "openclaw_doctor",
+        sourceKey: "ocd:core/doctor/stale-check:openclaw.json",
+        priority: "P1",
+      };
+      const llmCard = {
+        title: "Carried LLM finding",
+        status: "open",
+        source: "llm",
+        sourceKey: "",
+      };
+
+      it("reruns the bridge fresh instead of cloning stale bridge cards", async () => {
+        const runDoctorLintJson = vi.fn(async () => ({
+          ok: false,
+          code: 1,
+          truncated: false,
+          stdout: JSON.stringify({
+            ok: false,
+            findings: [
+              { checkId: "core/doctor/gateway-config", severity: "error", message: "bad token" },
+            ],
+          }),
+        }));
+        const runsByIdCards = new Map([[1, [llmCard, staleBridgeCard]]]);
+        const { service, created } = makeService({
+          runDoctorLintJson,
+          runsByIdCards,
+          summaries: [makeReuseSummary()],
+        });
+        const result = await service.runDoctor();
+
+        expect(result.reusedPreviousRun).toBe(true);
+        expect(created[0]).toMatchObject({ engine: "deterministic_reuse" });
+        // The bridge ran fresh on the reuse path.
+        expect(runDoctorLintJson).toHaveBeenCalledTimes(1);
+        const cards = runsByIdCards.get(result.runId) || [];
+        // Cloned: the LLM card. Fresh: the new bridge finding. Gone: the
+        // stale bridge card from the source run.
+        expect(cards.map((card) => card.title)).toContain("Carried LLM finding");
+        expect(
+          cards.some(
+            (card) => card.sourceKey === "ocd:core/doctor/gateway-config:3331faf3e131",
+          ),
+        ).toBe(true);
+        expect(cards.map((card) => card.title)).not.toContain("Stale upstream finding");
+      });
+
+      it("still completes the reuse run when the bridge fails", async () => {
+        const runDoctorLintJson = vi.fn(async () => {
+          throw new Error("CLI missing");
+        });
+        const runsByIdCards = new Map([[1, [llmCard, staleBridgeCard]]]);
+        const { service } = makeService({
+          runDoctorLintJson,
+          runsByIdCards,
+          summaries: [makeReuseSummary()],
+        });
+        const result = await service.runDoctor();
+
+        expect(result.ok).toBe(true);
+        expect(result.reusedPreviousRun).toBe(true);
+        expect(runDoctorLintJson).toHaveBeenCalledTimes(1);
+        const cards = runsByIdCards.get(result.runId) || [];
+        // Zero bridge cards (fail-soft), stale ones not resurrected, LLM
+        // clone intact.
+        expect(cards.some((card) => card.source === "openclaw_doctor")).toBe(false);
+        expect(cards.map((card) => card.title)).toContain("Carried LLM finding");
+        expect(service.getDoctorRun(result.runId).status).toBe("completed");
+      });
+
+      it("filters fresh reuse bridge cards through dismissed source keys", async () => {
+        const listDismissedSourceKeys = vi.fn(() => [
+          "ocd:core/doctor/gateway-config:openclaw.json",
+        ]);
+        const runDoctorLintJson = vi.fn(async () => ({
+          ok: false,
+          code: 1,
+          truncated: false,
+          stdout: JSON.stringify({
+            ok: false,
+            findings: [
+              {
+                checkId: "core/doctor/gateway-config",
+                severity: "error",
+                message: "bad token",
+                path: "openclaw.json",
+              },
+            ],
+          }),
+        }));
+        const runsByIdCards = new Map([[1, [llmCard]]]);
+        const { service } = makeService({
+          runDoctorLintJson,
+          runsByIdCards,
+          summaries: [makeReuseSummary()],
+          listDismissedSourceKeys,
+        });
+        const result = await service.runDoctor();
+
+        expect(result.reusedPreviousRun).toBe(true);
+        // One dismissed-keys read shared by the sourced and bridge filters.
+        expect(listDismissedSourceKeys).toHaveBeenCalledTimes(1);
+        const cards = runsByIdCards.get(result.runId) || [];
+        expect(cards.some((card) => card.source === "openclaw_doctor")).toBe(false);
+      });
     });
 
     it("notifies once on new non-bridge P0s with a deterministic outbox id", async () => {

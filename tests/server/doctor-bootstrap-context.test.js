@@ -273,6 +273,69 @@ describe("server/doctor/bootstrap-context", () => {
     expect(cards[0].evidence[0].text).toContain("skipped entirely");
   });
 
+  it("excludes AlphaClaw hardening files from the generic truncation cards", () => {
+    // Hardening extra over its per-file cap: det:hardening:starved (single
+    // owner, deterministic checks) must be the ONLY card family — a generic
+    // boot:file_limit card would tell the fixer to reorganize a GENERATED
+    // file that the next sync overwrites.
+    write("hooks/bootstrap/AGENTS.md", "H".repeat(300));
+    const perFileContext = analyzeBootstrapContext({
+      workspaceRoot,
+      profile: kBeta81Profile,
+      extraFilePaths: ["hooks/bootstrap/AGENTS.md"],
+      hooksEnabled: true,
+      bootstrapMaxChars: 200,
+      bootstrapTotalMaxChars: 60000,
+    });
+    expect(perFileContext.hasActiveTruncation).toBe(true);
+    expect(perFileContext.hardening.state).toBe("starved");
+    expect(buildBootstrapTruncationCards(perFileContext)).toEqual([]);
+
+    // Only the hardening extra is total-limited (starved): no generic
+    // total-limit card either.
+    write("AGENTS.md", "A".repeat(200));
+    write("hooks/bootstrap/AGENTS.md", "H".repeat(100));
+    const starvedContext = analyzeBootstrapContext({
+      workspaceRoot,
+      profile: kBeta81Profile,
+      extraFilePaths: ["hooks/bootstrap/AGENTS.md"],
+      hooksEnabled: true,
+      bootstrapMaxChars: 300,
+      bootstrapTotalMaxChars: 220,
+    });
+    expect(starvedContext.hardening.state).toBe("starved");
+    expect(buildBootstrapTruncationCards(starvedContext)).toEqual([]);
+  });
+
+  it("keeps hardening files out of the total-limit card targets/evidence but counts them in the math", () => {
+    // AGENTS.md and the hardening extra are BOTH total-limited: the card
+    // fires for the root file, but the generated hardening file must not
+    // appear in targets/evidence (the fixPrompt says "only edit the files
+    // listed") — while the summary's raw total still includes it.
+    write("AGENTS.md", "A".repeat(300));
+    write("hooks/bootstrap/AGENTS.md", "H".repeat(100));
+    const context = analyzeBootstrapContext({
+      workspaceRoot,
+      profile: kBeta81Profile,
+      extraFilePaths: ["hooks/bootstrap/AGENTS.md"],
+      hooksEnabled: true,
+      bootstrapMaxChars: 400,
+      bootstrapTotalMaxChars: 250,
+    });
+    const cards = buildBootstrapTruncationCards(context);
+    expect(cards).toHaveLength(1);
+    const [totalCard] = cards;
+    expect(totalCard.sourceKey).toBe("boot:total_limit");
+    expect(totalCard.targetPaths).toEqual([{ path: "AGENTS.md" }]);
+    expect(
+      totalCard.evidence.every(
+        (item) => !String(item.text || item.path || "").includes("hooks/bootstrap/"),
+      ),
+    ).toBe(true);
+    // Total math still counts the hardening file's raw chars (300 + 100).
+    expect(totalCard.summary).toContain("400 chars");
+  });
+
   it("returns no cards when there is no active truncation", () => {
     write("AGENTS.md", "short");
 
@@ -537,6 +600,109 @@ describe("server/doctor/bootstrap-context", () => {
 
       expect(context.hardening.state).toBe("blocked");
       expect(context.hardening.reason).toBe("");
+    });
+
+    it("prefers the main entry's budgets from agents.entries over defaults", () => {
+      write("AGENTS.md", "rules");
+      writeConfig(managedRoot, {
+        agents: {
+          defaults: { bootstrapMaxChars: 30000, bootstrapTotalMaxChars: 70000 },
+          entries: {
+            main: { bootstrapMaxChars: 12000, bootstrapTotalMaxChars: 45000 },
+          },
+        },
+      });
+      const context = makeAnalyzer().analyze();
+      expect(context.bootstrapMaxChars).toBe(12000);
+      expect(context.bootstrapTotalMaxChars).toBe(45000);
+    });
+
+    it("prefers the main entry's budgets from agents.list over defaults", () => {
+      write("AGENTS.md", "rules");
+      writeConfig(managedRoot, {
+        agents: {
+          defaults: { bootstrapMaxChars: 30000 },
+          list: [
+            { id: "sidekick", bootstrapMaxChars: 5000 },
+            { id: "main", bootstrapMaxChars: 12000 },
+          ],
+        },
+      });
+      expect(makeAnalyzer().analyze().bootstrapMaxChars).toBe(12000);
+    });
+
+    it("ignores non-main entries and partial overrides fall back per key", () => {
+      write("AGENTS.md", "rules");
+      writeConfig(managedRoot, {
+        agents: {
+          defaults: { bootstrapMaxChars: 30000, bootstrapTotalMaxChars: 70000 },
+          entries: {
+            // Only a non-main entry overrides: main is absent from the
+            // roster, so defaults apply for both budgets.
+            sidekick: { bootstrapMaxChars: 5000, bootstrapTotalMaxChars: 9000 },
+          },
+        },
+      });
+      const context = makeAnalyzer().analyze();
+      expect(context.bootstrapMaxChars).toBe(30000);
+      expect(context.bootstrapTotalMaxChars).toBe(70000);
+
+      // A main entry overriding ONE budget: the other key nullish-falls
+      // through to defaults (dist: entry value ?? defaults value, per key).
+      writeConfig(managedRoot, {
+        agents: {
+          defaults: { bootstrapMaxChars: 30000, bootstrapTotalMaxChars: 70000 },
+          entries: { main: { bootstrapMaxChars: 12000 } },
+        },
+      });
+      const configPath = path.join(managedRoot, "openclaw.json");
+      fs.utimesSync(configPath, new Date(), new Date(Date.now() + 5000));
+      const partial = makeAnalyzer().analyze();
+      expect(partial.bootstrapMaxChars).toBe(12000);
+      expect(partial.bootstrapTotalMaxChars).toBe(70000);
+    });
+
+    it.each([
+      ["zero", 0],
+      ["negative", -5],
+      ["string", "12000"],
+    ])(
+      "an invalid (%s) per-agent budget fails validation onto the built-in default",
+      (_label, invalidValue) => {
+        write("AGENTS.md", "rules");
+        // Dist ladder: raw = entry value ?? defaults value, ONE validation
+        // pass — a non-nullish invalid per-agent value masks defaults and
+        // lands on the built-in default (20000), never on agents.defaults.
+        writeConfig(managedRoot, {
+          agents: {
+            defaults: { bootstrapMaxChars: 30000 },
+            entries: { main: { bootstrapMaxChars: invalidValue } },
+          },
+        });
+        expect(makeAnalyzer().analyze().bootstrapMaxChars).toBe(20000);
+      },
+    );
+
+    it("falls back to the profile default when defaults are invalid too", () => {
+      write("AGENTS.md", "rules");
+      // A nullish per-agent value falls to defaults; invalid defaults fall
+      // to the built-in default. Dist accepts numbers only — a numeric
+      // string in defaults is rejected the same way.
+      writeConfig(managedRoot, {
+        agents: {
+          defaults: { bootstrapMaxChars: "not-a-number" },
+          entries: { main: {} },
+        },
+      });
+      expect(makeAnalyzer().analyze().bootstrapMaxChars).toBe(20000);
+    });
+
+    it("floors fractional budgets like upstream", () => {
+      write("AGENTS.md", "rules");
+      writeConfig(managedRoot, {
+        agents: { entries: { main: { bootstrapMaxChars: 12000.9 } } },
+      });
+      expect(makeAnalyzer().analyze().bootstrapMaxChars).toBe(12000);
     });
 
     it("degrades to defaults with no config reader wired", () => {

@@ -1615,6 +1615,53 @@ describe("server/gateway restart behavior", () => {
       gateway.setGatewayExitHandler(null);
     });
 
+    it("classifies a late close from an old child against its own stderr tail", async () => {
+      const firstChild = createChild();
+      const secondChild = { ...createChild(), pid: 5678 };
+      const children = [firstChild, secondChild];
+      childProcess.spawn = vi.fn(() => children.shift());
+      fs.existsSync = vi.fn(() => false);
+      delete require.cache[modulePath];
+      const gateway = require(modulePath);
+      vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+      vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+      const exitHandler = vi.fn();
+      gateway.setGatewayExitHandler(exitHandler);
+
+      const first = await gateway.launchGatewayProcess();
+      const firstStderr = firstChild.stderr.on.mock.calls.find(
+        (c) => c[0] === "data",
+      )[1];
+      const firstClose = firstChild.on.mock.calls.find(
+        (c) => c[0] === "close",
+      )[1];
+      firstStderr(Buffer.from("first-child fatal config error\n"));
+
+      // The kernel exit lands (exitCode set) but 'close' is still pending —
+      // e.g. a grandchild inherited the stdio fds and holds them open.
+      firstChild.exitCode = 78;
+      const second = await gateway.launchGatewayProcess();
+      expect(second).not.toBe(first);
+      const secondStderr = secondChild.stderr.on.mock.calls.find(
+        (c) => c[0] === "data",
+      )[1];
+      secondStderr(Buffer.from("second-child boot noise\n"));
+
+      // The old child's close arrives AFTER the successor launched: it must
+      // be classified against the FIRST child's stderr — with the previous
+      // module-global tail (reset per launch) this exit-78 would have carried
+      // the successor's stderr instead.
+      firstClose(78, null);
+      expect(exitHandler).toHaveBeenCalledTimes(1);
+      expect(exitHandler).toHaveBeenCalledWith(
+        expect.objectContaining({ code: 78, pid: 1234 }),
+      );
+      const tail = exitHandler.mock.calls[0][0].stderrTail;
+      expect(tail).toContain("first-child fatal config error");
+      expect(tail).not.toContain("second-child boot noise");
+      gateway.setGatewayExitHandler(null);
+    });
+
     it("runs force restart via runGatewayCmd and logs supervisor output", async () => {
       const supervisor = createChild();
       childProcess.spawn = vi.fn(() => supervisor);

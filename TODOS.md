@@ -1,7 +1,7 @@
 # TODOS
 
 ## P3 — Serialize alphaclaw.json writers under a file lock
-- **What:** Route every `writeAlphaclawConfig` read-modify-write (release channel, overseer/medic toggles, team settings, openai-compat flag) through `withFileLockSync`, the way `updateOpenclawConfig` already serializes openclaw.json writers.
+- **What:** Route every `writeAlphaclawConfig` read-modify-write (release channel, overseer/medic toggles, team settings, openai-compat flag, doctor scheduled-scans toggle `updateDoctorAutoRunEnabled`) through `withFileLockSync`, the way `updateOpenclawConfig` already serializes openclaw.json writers.
 - **Why:** Two concurrent toggles (e.g. a medic PUT racing a team-settings PUT) can drop one write. Pre-existing pattern across all alphaclaw.json writers, not specific to the medic — flagged by the ship adversarial pass.
 - **Context:** `lib/server/alphaclaw-config.js` writeAlphaclawConfig + the update* helpers; the lock helper lives in `lib/server/utils/safe-file.js`. Mind the read cache (kConfigReadCache) when adding the lock.
 - **Effort:** S → CC: S.
@@ -36,23 +36,11 @@
 - **Context:** The full rewrite needs the 66 gateway tests moved off raw `fs.writeFileSync(configPath, content)` assertions.
 - **Effort:** M.
 
-## P3 — Wire restart-handoff consume into the watchdog exit classifier
-- **What:** In gateway.js's child exit handler, when the target supports the restart-handoff contract (capabilities probe) and the exit is unexpected, consume the handoff (`lib/server/openclaw-restart-handoff.js`) before classifying, and add a watchdog `onGatewayExit` branch that relaunches without crash accounting. Serialize exit classification per child pid.
-- **Why:** Correctly classify an OpenClaw-initiated fresh-process restart as intentional, not a crash.
-- **Context:** Deferred from Phase 1.7 — low value in practice because AlphaClaw sets `OPENCLAW_NO_RESPAWN=1`, so routine restarts stay in-process (no child exit to misclassify); a fresh-process handoff restart is rare. The module + tests exist; only the exit-handler wiring remains. Cooldown tolerance (window 15s->50s) already shipped.
-- **Effort:** M.
-
 ## P3 — Gateway close-event stale-generation guard
-- **What:** Exit classification listens on child "close" (chosen so post-exit stderr flushes are captured); if a grandchild inherits the stdio fds and outlives the gateway, "close" fires late (or never) and a minutes-late close is classified against the CURRENT module-level stderr tail — an old exit-78 could latch configuration_error against a healthy successor. Consider racing "exit" with a short bounded drain (250-500ms), or per-child tails with a generation check that drops stale closes.
-- **Why:** Bounded-but-real misclassification window; the health/TCP path is the slower backstop today.
-- **Context:** lib/server/gateway.js child.on("close") handler; watchdog onGatewayExit.
-- **Effort:** M.
-
-## P3 — Gate runHealthCheck during pending exit classification
-- **What:** While the watchdog's async exit resolver runs (handoff consume ≤5s + step-aside probes), lifecycle/health still read running/healthy and armed health timers can independently mark degraded or start rollback/auto-repair paths racing the resolver (serialized only by the lifecycle lock). Early-return from runHealthCheck while state.pendingExitClassification is true, mirroring the configurationErrorActive guard.
-- **Why:** Duplicate restart attempts / notification noise for one exit.
-- **Context:** lib/server/watchdog.js runHealthCheck + pendingExitClassification.
-- **Effort:** S.
+- **What:** Exit classification listens on child "close" (chosen so post-exit stderr flushes are captured); if a grandchild inherits the stdio fds and outlives the gateway, "close" fires late — or never. Per-child stderr tails shipped in v0.9.40 (each launch closure owns its tail; a late close is now always classified against its OWN child's stderr, never a successor's), so the remaining scope is only the bounded exit-vs-close race for the never-fires case: consider racing "exit" with a short bounded drain (250-500ms) so a close that never arrives cannot leave the exit unclassified.
+- **Why:** Bounded-but-real classification gap when close never fires; the health/TCP path is the slower backstop today.
+- **Context:** lib/server/gateway.js child.on("close") handler + createStderrTail; watchdog onGatewayExit.
+- **Effort:** S-M.
 
 ## P3 — OpenClaw-beta follow-ups (deferred from the beta-support plan)
 - **What:** Invite QR codes on the Team page; a "move this key to the shared secret store" CTA on the Models page; per-agent access mapping built on the members roster; an auto-canary channel (apply beta to a shadow gateway, promote on health). The Watchdog degraded-state badge (eventLoopDegraded/readyzFailing are already exposed in getStatus) is folded into the Phase 2/3 UI work.
@@ -232,6 +220,16 @@
 - **Effort:** S-M.
 
 ## Completed
+
+## Gate runHealthCheck during pending exit classification
+- **What:** While the watchdog's async exit resolver runs (handoff consume ≤5s + step-aside probes), lifecycle/health still read running/healthy and armed health timers can independently mark degraded or start rollback/auto-repair paths racing the resolver (serialized only by the lifecycle lock). Early-return from runHealthCheck while state.pendingExitClassification is true, mirroring the configurationErrorActive guard.
+- **Why:** Duplicate restart attempts / notification noise for one exit.
+- **Completed:** v0.9.40 (2026-08-29) — runHealthCheck early-returns while `state.pendingExitClassification` is truthy (lib/server/watchdog.js), right after the configurationErrorActive guard; the resolver owns the next transition, and the flag clears on settle or any newer lifecycle event.
+
+## Wire restart-handoff consume into the watchdog exit classifier
+- **What:** In gateway.js's child exit handler, when the target supports the restart-handoff contract and the exit is unexpected, consume the handoff before classifying, and add a watchdog `onGatewayExit` branch that relaunches without crash accounting. Serialize exit classification per child pid.
+- **Why:** Correctly classify an OpenClaw-initiated fresh-process restart as intentional, not a crash.
+- **Completed:** v0.9.40 (2026-08-29) — implemented against the tarball-verified protocol in `lib/server/gateway-restart-handoff.js` (per-PID exactly-once consume, 60s TTL cache) with the watchdog's `resolveSupervisedCleanExit` handling accepted/none/rejected on every clean unmanaged exit; gated on the supervisor-mode env rather than a capabilities probe (that gating refinement is tracked in "Retire the unwired upstream restart-handoff stub").
 
 ## Make env-save channel sync one atomic lifecycle-lock op
 - **What:** `PUT /api/env` runs remove-channels → write env → add-channels as two separately queued lock ops (lib/server/routes/system.js + gateway.js `syncChannelConfig`). A gateway restart queued between them launches with channels removed-but-not-yet-re-added (final config state self-corrects when the add runs, but the running gateway may need another restart to pick it up). Wrap remove+write+add in a single uniquely-keyed lock op (expose a narrow `withGatewayLifecycleLock` from gateway.js or a dedicated `syncChannelConfigForEnvSave`).
