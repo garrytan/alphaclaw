@@ -60,8 +60,8 @@ assert_page() { # assert_page <js-bool-expr> <label>
 
 echo "== login =="
 "$B" goto "http://127.0.0.1:$kPort/" >/dev/null
-"$B" wait 'input[type="password"]' >/dev/null
-"$B" fill 'input[type="password"]' "$kPass" >/dev/null
+"$B" wait 'input#password' >/dev/null
+"$B" fill 'input#password' "$kPass" >/dev/null
 "$B" js "document.querySelector('button[type=submit], button')?.click(); true" >/dev/null
 sleep 2
 
