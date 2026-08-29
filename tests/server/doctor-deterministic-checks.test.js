@@ -296,6 +296,64 @@ describe("server/doctor/deterministic-checks", () => {
     ).toMatchObject({ priority: "P1" });
   });
 
+  it("counts YAML block-scalar skill descriptions toward the prompt estimate", () => {
+    // description: | with 3 continuation lines — OpenClaw parses the full
+    // YAML value into the skills prompt, so every continuation char counts
+    // (they must stay inside the parser's 8KB frontmatter read window). The
+    // old marker-only parse recorded a 1-char description ("|") and the
+    // bloat warning stayed silent.
+    write(
+      workspaceRoot,
+      "skills/literal/SKILL.md",
+      [
+        "---",
+        "name: literal-skill",
+        "description: |",
+        `  ${"d".repeat(1000)}`,
+        `  ${"e".repeat(1000)}`,
+        `  ${"f".repeat(1000)}`,
+        "---",
+        "body",
+      ].join("\n"),
+    );
+    // Estimated: 97 overhead + 13 name + 3,002 description (3 x 1,000 joined
+    // by newlines) + 7 location = 3,119 ≥ the 3,000 char limit → P1. The old
+    // marker-only parse estimated 118 chars and emitted nothing.
+    const card = findCard(
+      build({ skillsLimits: { maxSkillsPromptChars: 3000 } }),
+      "det:skills-bloat",
+    );
+    expect(card).toMatchObject({ priority: "P1", category: "skills" });
+    expect(card.evidence[0].text).toContain("skills/literal: description 3002 chars");
+  });
+
+  it("counts folded block scalars and terminates the block at the next key line", () => {
+    // description: >- followed by name: back at key indent — the fold counts
+    // like a literal (char count is what matters, not folding semantics) and
+    // the un-indented name: line ends the block AND still parses as a key.
+    write(
+      workspaceRoot,
+      "skills/folded/SKILL.md",
+      [
+        "---",
+        "description: >-",
+        `  ${"g".repeat(1500)}`,
+        `  ${"h".repeat(1500)}`,
+        "name: folded-skill",
+        "---",
+        "body",
+      ].join("\n"),
+    );
+    const card = findCard(
+      build({ skillsLimits: { maxSkillsPromptChars: 3000 } }),
+      "det:skills-bloat",
+    );
+    // Exactly 3,001 chars (2 x 1,500 + the joining newline): the name: line
+    // is NOT swallowed into the description.
+    expect(card).toMatchObject({ priority: "P1" });
+    expect(card.evidence[0].text).toContain("skills/folded: description 3001 chars");
+  });
+
   it("caps the skills scan depth and candidate count", () => {
     // A SKILL.md nested deeper than 6 levels is ignored.
     write(

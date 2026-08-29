@@ -2221,6 +2221,35 @@ describe("server/doctor-service", () => {
       return { service, created, runsByIdCards, meta };
     };
 
+    // A MISSING stored env signature now counts as changed (the post-upgrade
+    // scan is due by design), so tests exercising the OTHER auto-run guards
+    // must seed the live signature first. A throwaway service sharing `meta`
+    // runs a fully-awaited fingerprint-reuse run: it writes
+    // last_env_signature without arming the throttle or the failure backoff.
+    const seedLiveEnvSignature = async (meta) => {
+      const { computeWorkspaceSnapshot } = require("../../lib/server/doctor/workspace-fingerprint");
+      const nowIso = new Date().toISOString();
+      const seeded = makeService({
+        meta,
+        summaries: [
+          {
+            id: 1,
+            status: "completed",
+            engine: "gateway_agent",
+            workspaceFingerprint: computeWorkspaceSnapshot(workspaceRoot).fingerprint,
+            promptVersion: "doctor-v2",
+            contextProfile: "stable-2026.7",
+            openclawVersion: "",
+            completedAt: nowIso,
+            startedAt: nowIso,
+          },
+        ],
+      });
+      const seededRun = await seeded.service.runDoctor();
+      expect(seededRun.reusedPreviousRun).toBe(true);
+      expect(meta.get("last_env_signature")).toBeTruthy();
+    };
+
     it("fails fast with gatewayUnavailable on the LLM branch only", async () => {
       const { service, created } = makeService({
         readiness: { ok: false, reason: "gateway is unhealthy" },
@@ -2440,6 +2469,50 @@ describe("server/doctor-service", () => {
         const cards = runsByIdCards.get(result.runId) || [];
         expect(cards.some((card) => card.source === "openclaw_doctor")).toBe(false);
       });
+
+      it("holds the run latch across reuse enrichment: concurrent runs get alreadyRunning", async () => {
+        let releaseBridge;
+        const bridgeGate = new Promise((resolve) => {
+          releaseBridge = resolve;
+        });
+        const runDoctorLintJson = vi.fn(async () => {
+          await bridgeGate;
+          return {
+            ok: true,
+            code: 0,
+            truncated: false,
+            stdout: JSON.stringify({ ok: true, findings: [] }),
+          };
+        });
+        const runsByIdCards = new Map([[1, [llmCard]]]);
+        const { service } = makeService({
+          runDoctorLintJson,
+          runsByIdCards,
+          summaries: [makeReuseSummary()],
+        });
+
+        const firstRun = service.runDoctor();
+        // While the bridge is in flight, the reuse run must hold the busy
+        // latch — not sit in the DB as an incomplete "completed" run a
+        // concurrent runDoctor could reuse (starting a second bridge).
+        const concurrent = await service.runDoctor();
+        expect(concurrent.ok).toBe(false);
+        expect(concurrent.alreadyRunning).toBe(true);
+        expect(concurrent.error).toBe("Doctor run already in progress");
+        expect(service.getDoctorRun(concurrent.runId).status).toBe("running");
+        expect(concurrent.status.runInProgress).toBe(true);
+        expect(runDoctorLintJson).toHaveBeenCalledTimes(1);
+
+        releaseBridge();
+        const result = await firstRun;
+        expect(result.reusedPreviousRun).toBe(true);
+        expect(result.runId).toBe(concurrent.runId);
+        // Reported completed only once every card (clone + fresh) is in.
+        expect(service.getDoctorRun(result.runId).status).toBe("completed");
+        expect(result.status.runInProgress).toBe(false);
+        const cards = runsByIdCards.get(result.runId) || [];
+        expect(cards.map((card) => card.title)).toContain("Carried LLM finding");
+      });
     });
 
     it("notifies once on new non-bridge P0s with a deterministic outbox id", async () => {
@@ -2604,6 +2677,9 @@ describe("server/doctor-service", () => {
 
         // Enabled but nothing changed → stale run with no readable baseline
         // manifest → meaningful changes false → "no-meaningful-change".
+        // (Seed the matching signature first: a MISSING one now schedules
+        // the post-upgrade scan by design — covered by its own test below.)
+        await seedLiveEnvSignature(meta);
         autoRunEnabled = true;
         await vi.advanceTimersByTimeAsync(1100 + 60000);
         expect(service.buildStatus().autoRun.lastSkipReason).toBe("no-meaningful-change");
@@ -2768,6 +2844,47 @@ describe("server/doctor-service", () => {
       }
     });
 
+    it("treats a missing stored env signature as changed and schedules the post-upgrade scan", async () => {
+      vi.useFakeTimers();
+      try {
+        // An existing install: completed doctor runs from before env-signature
+        // tracking shipped (no stored signature), a fresh (non-stale) matching
+        // baseline, healthy hardening, needsInitialRun false. No other trigger
+        // can fire — the missing signature alone must schedule the scan.
+        const { computeWorkspaceSnapshot } = require("../../lib/server/doctor/workspace-fingerprint");
+        const nowIso = new Date().toISOString();
+        const meta = new Map();
+        const { service, created } = makeService({
+          readAutoRunEnabled: () => true,
+          autoRunTickMs: 1000,
+          meta,
+          summaries: [
+            {
+              id: 1,
+              status: "completed",
+              engine: "gateway_agent",
+              workspaceFingerprint: computeWorkspaceSnapshot(workspaceRoot).fingerprint,
+              promptVersion: "doctor-v2",
+              contextProfile: "stable-2026.7",
+              openclawVersion: "",
+              completedAt: nowIso,
+              startedAt: nowIso,
+            },
+          ],
+        });
+        await vi.advanceTimersByTimeAsync(1100 + 60000);
+        await vi.runOnlyPendingTimersAsync();
+        expect(meta.get("last_auto_run")?.outcome).toBe("ran");
+        // Zero workspace delta → the post-upgrade scan is a fingerprint reuse.
+        expect(created[0]).toMatchObject({ engine: "deterministic_reuse" });
+        // The run recorded the signature: the next tick skips as unchanged.
+        expect(meta.get("last_env_signature")).toBeTruthy();
+        service.dispose();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it("refreshes the workspace snapshot on the worker before a scheduled run, never synchronously", async () => {
       vi.useFakeTimers();
       try {
@@ -2837,6 +2954,9 @@ describe("server/doctor-service", () => {
           try {
             seedHardeningBreakage(kind);
             const meta = new Map();
+            // Seed the matching env signature so hardeningNew — not the
+            // missing-signature (post-upgrade) trigger — is what fires.
+            await seedLiveEnvSignature(meta);
             const { service, created } = makeService({
               readAutoRunEnabled: () => true,
               autoRunTickMs: 1000,
@@ -2860,6 +2980,9 @@ describe("server/doctor-service", () => {
         try {
           seedHardeningBreakage("blocked");
           const meta = new Map();
+          // Matching signature: only the hardening-trigger suppression is
+          // under test, not the missing-signature (post-upgrade) trigger.
+          await seedLiveEnvSignature(meta);
           const runsByIdCards = new Map([
             [1, [{ priority: "P0", status: "open", source: "deterministic", sourceKey: "det:hardening:blocked" }]],
           ]);
@@ -2887,6 +3010,9 @@ describe("server/doctor-service", () => {
           // carry is exactly boot:file_limit:AGENTS.md.
           seedHardeningBreakage("truncation");
           const meta = new Map();
+          // Matching signature: only the dismissed-key suppression is under
+          // test, not the missing-signature (post-upgrade) trigger.
+          await seedLiveEnvSignature(meta);
           const { service, created } = makeService({
             readAutoRunEnabled: () => true,
             autoRunTickMs: 1000,
@@ -2912,6 +3038,9 @@ describe("server/doctor-service", () => {
           // state — the candidate keys come from the current condition only.
           seedHardeningBreakage("blocked");
           const meta = new Map();
+          // Matching signature: hardeningNew must be the trigger that fires,
+          // not the missing-signature (post-upgrade) trigger.
+          await seedLiveEnvSignature(meta);
           const { service, created } = makeService({
             readAutoRunEnabled: () => true,
             autoRunTickMs: 1000,
@@ -2942,6 +3071,9 @@ describe("server/doctor-service", () => {
             "utf8",
           );
           const meta = new Map();
+          // Matching signature: only the unreadable-config suppression is
+          // under test, not the missing-signature (post-upgrade) trigger.
+          await seedLiveEnvSignature(meta);
           const { service, created } = makeService({
             readAutoRunEnabled: () => true,
             autoRunTickMs: 1000,

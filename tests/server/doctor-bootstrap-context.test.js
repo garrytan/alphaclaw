@@ -509,6 +509,64 @@ describe("server/doctor/bootstrap-context", () => {
       ).toBe(true);
     });
 
+    it("mirrors the hook's config-key alias ladder: paths, else patterns, else files", () => {
+      // The bundled handler resolves extras as paths if non-empty, ELSE
+      // patterns if non-empty, ELSE files (dist bundled/bootstrap-extra-files
+      // handler.js resolveExtraBootstrapPatterns) — a config using the
+      // aliases must not model as "no extras" (false hardening-blocked).
+      write("hooks/bootstrap/AGENTS.md", "hardening");
+      const entryConfig = (entry) => ({
+        hooks: {
+          internal: {
+            enabled: true,
+            entries: { "bootstrap-extra-files": { enabled: true, ...entry } },
+          },
+        },
+      });
+      const analyzeWith = (entry) => {
+        writeConfig(managedRoot, entryConfig(entry));
+        // Fresh analyzer per config: no stat-cache bump dance needed.
+        return makeAnalyzer().analyze();
+      };
+
+      // patterns alone → modeled (the legacy alias injects upstream).
+      const patternsOnly = analyzeWith({ patterns: ["hooks/bootstrap/AGENTS.md"] });
+      expect(
+        patternsOnly.files.some((file) => file.path === "hooks/bootstrap/AGENTS.md"),
+      ).toBe(true);
+      expect(patternsOnly.hardening.state).toBe("injected");
+
+      // files alone → modeled.
+      const filesOnly = analyzeWith({ files: ["hooks/bootstrap/AGENTS.md"] });
+      expect(
+        filesOnly.files.some((file) => file.path === "hooks/bootstrap/AGENTS.md"),
+      ).toBe(true);
+      expect(filesOnly.hardening.state).toBe("injected");
+
+      // Non-empty paths short-circuit: aliases ignored, exactly like the
+      // handler — the alias entries must not double-count the budget.
+      const shortCircuit = analyzeWith({
+        paths: ["hooks/bootstrap/AGENTS.md"],
+        patterns: ["hooks/bootstrap/IGNORED.md"],
+        files: ["hooks/bootstrap/IGNORED2.md"],
+      });
+      const extraPaths = shortCircuit.files
+        .filter((file) => file.kind === "extra")
+        .map((file) => file.path);
+      expect(extraPaths).toEqual(["hooks/bootstrap/AGENTS.md"]);
+
+      // The ladder normalizes per key: an all-blank paths list is EMPTY and
+      // falls through to patterns (trimmed-string-list semantics).
+      const blankPaths = analyzeWith({
+        paths: ["   "],
+        patterns: ["hooks/bootstrap/AGENTS.md"],
+      });
+      expect(
+        blankPaths.files.some((file) => file.path === "hooks/bootstrap/AGENTS.md"),
+      ).toBe(true);
+      expect(blankPaths.hardening.state).toBe("injected");
+    });
+
     it("requires both hooks.internal.enabled and the entry's enabled flag", () => {
       write("hooks/bootstrap/AGENTS.md", "hardening");
       writeConfig(managedRoot, {
