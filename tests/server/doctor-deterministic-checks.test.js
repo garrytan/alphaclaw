@@ -71,7 +71,7 @@ describe("server/doctor/deterministic-checks", () => {
         hooksEnabled: true,
       },
     });
-    const hardening = findCard(cards, "det:hardening");
+    const hardening = findCard(cards, "det:hardening:blocked");
     expect(hardening).toMatchObject({ priority: "P0", category: "project context" });
     // Advisory-only fixPrompt: never targets the locked hooks/bootstrap path.
     expect(hardening.fixPrompt).toContain("Do not edit files under hooks/bootstrap/");
@@ -90,7 +90,7 @@ describe("server/doctor/deterministic-checks", () => {
         bootstrapTotalMaxChars: 220,
       },
     });
-    expect(findCard(cards, "det:hardening")).toMatchObject({ priority: "P0" });
+    expect(findCard(cards, "det:hardening:starved")).toMatchObject({ priority: "P0" });
   });
 
   it("flags non-AlphaClaw invalid extras as P1", () => {
@@ -105,7 +105,7 @@ describe("server/doctor/deterministic-checks", () => {
     expect(findCard(cards, "det:extra-invalid:notes/EXTRA.md")).toMatchObject({
       priority: "P1",
     });
-    expect(findCard(cards, "det:hardening")).toBeUndefined();
+    expect(findCard(cards, "det:hardening:blocked")).toBeUndefined();
   });
 
   it("grades MEMORY.md budget pressure as near (P2) then over (P1)", () => {
@@ -113,7 +113,7 @@ describe("server/doctor/deterministic-checks", () => {
     const nearCards = build({
       bootstrapArgs: { bootstrapMaxChars: 100, bootstrapTotalMaxChars: 60000 },
     });
-    expect(findCard(nearCards, "det:memory-budget")).toMatchObject({
+    expect(findCard(nearCards, "det:memory-budget:near")).toMatchObject({
       priority: "P2",
       category: "memory hygiene",
     });
@@ -122,7 +122,7 @@ describe("server/doctor/deterministic-checks", () => {
     const overCards = build({
       bootstrapArgs: { bootstrapMaxChars: 100, bootstrapTotalMaxChars: 60000 },
     });
-    expect(findCard(overCards, "det:memory-budget")).toMatchObject({ priority: "P1" });
+    expect(findCard(overCards, "det:memory-budget:over")).toMatchObject({ priority: "P1" });
   });
 
   it("flags MEMORY.md and memory.md coexisting", () => {

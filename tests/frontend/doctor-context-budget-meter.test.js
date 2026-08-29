@@ -93,7 +93,8 @@ describe("frontend/doctor context budget meter model", () => {
             ...kBaseFile,
             path: "hooks/bootstrap/extra.md",
             kind: "extra",
-            active: false,
+            active: true,
+            activeReason: "",
             rawChars: 500,
             capChars: 20000,
             injectedChars: 500,
@@ -186,6 +187,54 @@ describe("frontend/doctor context budget meter model", () => {
       }),
     );
     expect(nearModel.barTone).toBe("warning");
+  });
+
+  it("flags a non-active extra (hooks disabled) as blocked, never OK", () => {
+    const model = buildContextBudgetMeterModel(
+      statusWithContext({
+        files: [
+          // Hooks disabled: the analyzer keeps injectable:true but marks the
+          // extra active:false — it is not reaching the agent.
+          {
+            ...kBaseFile,
+            path: "hooks/bootstrap/SECURITY.md",
+            kind: "extra",
+            active: false,
+            activeReason: "hook_disabled",
+            injectable: true,
+            skipped: false,
+            rawChars: 1200,
+            injectedChars: 0,
+          },
+          // Same shape with a basename rejection reason: also blocked.
+          {
+            ...kBaseFile,
+            path: "hooks/bootstrap/BAD NAME.md",
+            kind: "extra",
+            active: false,
+            activeReason: "invalid_basename",
+            injectable: true,
+            skipped: false,
+            rawChars: 800,
+            injectedChars: 0,
+          },
+          // A root file that is active stays OK.
+          {
+            ...kBaseFile,
+            path: "AGENTS.md",
+            rawChars: 1000,
+            injectedChars: 1000,
+          },
+        ],
+      }),
+    );
+
+    expect(model.rows.map((row) => [row.path, row.state])).toEqual([
+      ["hooks/bootstrap/SECURITY.md", "blocked"],
+      ["hooks/bootstrap/BAD NAME.md", "blocked"],
+      ["AGENTS.md", "ok"],
+    ]);
+    expect(model.rows[0].chip).toEqual({ tone: "danger", label: "Blocked" });
   });
 
   it("renders nothing while the status is loading or the payload is old", () => {

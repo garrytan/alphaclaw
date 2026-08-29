@@ -446,11 +446,14 @@ describe("server/gateway restart behavior", () => {
     gatewayPortOpen = true;
     await restartPromise;
 
-    const exitRegistration = child.on.mock.calls.find((call) => call[0] === "exit");
-    expect(exitRegistration).toBeTruthy();
+    // Classification is registered on "close" (post-stdio-drain), never on
+    // "exit" — the final stderr chunk must be in the tail before the watchdog
+    // classifies.
+    const closeRegistration = child.on.mock.calls.find((call) => call[0] === "close");
+    expect(closeRegistration).toBeTruthy();
 
-    const [, onExit] = exitRegistration;
-    onExit(0, null);
+    const [, onClose] = closeRegistration;
+    onClose(0, null);
 
     expect(exitHandler).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -1464,7 +1467,11 @@ describe("server/gateway restart behavior", () => {
 
       const onStdout = child.stdout.on.mock.calls.find((c) => c[0] === "data")[1];
       const onStderr = child.stderr.on.mock.calls.find((c) => c[0] === "data")[1];
-      const onExit = child.on.mock.calls.find((c) => c[0] === "exit")[1];
+      // The exit handler must be wired to "close" (fires after stdio drains)
+      // so the final stderr chunk is captured before classification; no
+      // classification listener may sit on "exit" (stdio can still be open).
+      expect(child.on.mock.calls.some((c) => c[0] === "exit")).toBe(false);
+      const onClose = child.on.mock.calls.find((c) => c[0] === "close")[1];
 
       onStdout("warming up\n");
       expect(launchHandler).not.toHaveBeenCalled();
@@ -1480,8 +1487,11 @@ describe("server/gateway restart behavior", () => {
 
       onStderr(Buffer.from("first error\n\n"));
       onStderr(Array.from({ length: 60 }, (_, i) => `line-${i}`).join("\n"));
+      // The final stderr flush lands AFTER the process died (between kernel
+      // exit and stdio close) — classification on "close" must still see it.
+      onStderr(Buffer.from("final-flush-after-exit\n"));
 
-      onExit(1, "SIGKILL");
+      onClose(1, "SIGKILL");
       expect(exitHandler).toHaveBeenCalledWith(
         expect.objectContaining({
           code: 1,
@@ -1495,6 +1505,9 @@ describe("server/gateway restart behavior", () => {
       );
       expect(exitHandler.mock.calls[0][0].stderrTail).toHaveLength(50);
       expect(exitHandler.mock.calls[0][0].stderrTail).toContain("line-59");
+      expect(exitHandler.mock.calls[0][0].stderrTail).toContain(
+        "final-flush-after-exit",
+      );
       expect(errorSpy).toHaveBeenCalledWith(
         expect.stringContaining("Gateway exit handler error: exit-boom"),
       );

@@ -4,6 +4,7 @@ import {
   buildDoctorStatusFilterOptions,
   formatDoctorCategory,
   formatDoctorCharCount,
+  formatGatewayNotReadyMessage,
   getDoctorAutoRunStatusLine,
   getDoctorBootstrapWarningTitle,
   getDoctorCategoryTone,
@@ -12,6 +13,7 @@ import {
   getDoctorRunDisabledReason,
   getDoctorRunPillDetail,
   getDoctorStatusTone,
+  getGatewayNotReadyMessage,
   getDoctorWarningMessage,
   shouldShowDoctorWarning,
 } from "../../lib/public/js/components/doctor/helpers.js";
@@ -213,6 +215,40 @@ describe("frontend/doctor helpers (extended)", () => {
     );
     // Old payloads without gatewayReadiness never treat the gateway as down.
     expect(getDoctorRunDisabledReason({ needsInitialRun: true, gatewayReadiness: undefined })).toBe("");
+  });
+
+  it("formats the gateway-not-ready message from one source", () => {
+    expect(formatGatewayNotReadyMessage("gateway is restarting")).toBe(
+      "Gateway not ready: gateway is restarting",
+    );
+    expect(formatGatewayNotReadyMessage("  padded  ")).toBe(
+      "Gateway not ready: padded",
+    );
+    expect(formatGatewayNotReadyMessage("")).toBe("Gateway not ready.");
+    expect(formatGatewayNotReadyMessage()).toBe("Gateway not ready.");
+
+    expect(getGatewayNotReadyMessage(null)).toBe("");
+    expect(getGatewayNotReadyMessage({})).toBe("");
+    expect(
+      getGatewayNotReadyMessage({ gatewayReadiness: { ok: true, reason: "" } }),
+    ).toBe("");
+    expect(
+      getGatewayNotReadyMessage({
+        gatewayReadiness: { ok: false, reason: "gateway is restarting" },
+      }),
+    ).toBe("Gateway not ready: gateway is restarting");
+    expect(
+      getGatewayNotReadyMessage({ gatewayReadiness: { ok: false } }),
+    ).toBe("Gateway not ready.");
+
+    // The banner helper and the run-disabled reason always agree.
+    const degraded = {
+      runInProgress: true,
+      gatewayReadiness: { ok: false, reason: "gateway is restarting" },
+    };
+    expect(getDoctorRunDisabledReason(degraded)).toBe(
+      getGatewayNotReadyMessage(degraded),
+    );
   });
 
   it("summarizes the scheduled-scan check line", () => {

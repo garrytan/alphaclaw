@@ -56,12 +56,6 @@
 - **Context:** lib/server/gateway-credential.js, lib/server/routes/nodes.js; degradation documented in the team-auth milestone report.
 - **Effort:** M. **Depends on:** verifying how `openclaw node run` accepts a password credential (docs/cli in the beta line).
 
-## P2 — Upgrade overseer getDoctorJson must use `doctor --lint --json`
-- **What:** `getDoctorJson` (lib/server.js:470) invokes bare `openclaw doctor --json`, which is NOT lint mode on the pinned stable 2026.7.1-2 — bare `--json` is only meaningful there combined with `--lint`/`--post-upgrade` (verified in the stable tarball's register.maintenance dist). Switch to `openclaw doctor --lint --json`, the verified cross-version read-only invocation.
-- **Why:** The upgrade overseer's post-upgrade health read is parsing output that was never lint findings on stable; on beta, bare `--json` also flattens the exit code to 0 regardless of findings. Small, verified, surfaced by the 8.1 contract review.
-- **Context:** docs/designs/openclaw-context-contract.md §3 (doctor machine surface); the Drift Doctor wave's bridge (lib/server/doctor/openclaw-doctor.js) already uses the correct invocation — this aligns the overseer with it.
-- **Effort:** S. **Depends on:** nothing.
-
 ## P3 — Doctor per-run token cost display
 - **What:** Show each doctor run's LLM token cost on the Doctor tab by joining usage.db on the run's session key (`agent:main:doctor:<n>`).
 - **Why:** Scheduled scans (doctor autoRun) make doctor LLM spend recurring; operators should see what each scan cost before tuning frequency. Deferred from the 8.1 wave's CEO review.

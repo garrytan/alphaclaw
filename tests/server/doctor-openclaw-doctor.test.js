@@ -68,8 +68,8 @@ describe("server/doctor/openclaw-doctor", () => {
     expect(result.cards[0].fixPrompt).not.toContain("gateway token missing");
     expect(result.cards[1].priority).toBe("P1");
     expect(result.cards[2].priority).toBe("P2");
-    // Path-less findings key on the finding index.
-    expect(result.cards[1].sourceKey).toBe("ocd:core/doctor/skills-readiness:1");
+    // Path-less findings key on a stable content hash.
+    expect(result.cards[1].sourceKey).toBe("ocd:core/doctor/skills-readiness:168b43dbdda4");
   });
 
   it("suppresses upstream findings Drift Doctor covers deterministically", async () => {
@@ -86,7 +86,7 @@ describe("server/doctor/openclaw-doctor", () => {
       sanitize: passthroughSanitize,
     });
     expect(result.cards.map((card) => card.sourceKey)).toEqual([
-      "ocd:core/doctor/other:2",
+      "ocd:core/doctor/other:d14a58bae804",
     ]);
   });
 

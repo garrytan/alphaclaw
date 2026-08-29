@@ -1643,7 +1643,7 @@ describe("server/doctor-service", () => {
       await settle();
       const cards = working.runsByIdCards.get(okResult.runId) || [];
       expect(
-        cards.some((card) => card.sourceKey === "ocd:core/doctor/gateway-config:0"),
+        cards.some((card) => card.sourceKey === "ocd:core/doctor/gateway-config:3331faf3e131"),
       ).toBe(true);
     });
 
