@@ -42,6 +42,18 @@
 - **Context:** Deferred from Phase 1.7 — low value in practice because AlphaClaw sets `OPENCLAW_NO_RESPAWN=1`, so routine restarts stay in-process (no child exit to misclassify); a fresh-process handoff restart is rare. The module + tests exist; only the exit-handler wiring remains. Cooldown tolerance (window 15s->50s) already shipped.
 - **Effort:** M.
 
+## P3 — Gateway close-event stale-generation guard
+- **What:** Exit classification listens on child "close" (chosen so post-exit stderr flushes are captured); if a grandchild inherits the stdio fds and outlives the gateway, "close" fires late (or never) and a minutes-late close is classified against the CURRENT module-level stderr tail — an old exit-78 could latch configuration_error against a healthy successor. Consider racing "exit" with a short bounded drain (250-500ms), or per-child tails with a generation check that drops stale closes.
+- **Why:** Bounded-but-real misclassification window; the health/TCP path is the slower backstop today.
+- **Context:** lib/server/gateway.js child.on("close") handler; watchdog onGatewayExit.
+- **Effort:** M.
+
+## P3 — Gate runHealthCheck during pending exit classification
+- **What:** While the watchdog's async exit resolver runs (handoff consume ≤5s + step-aside probes), lifecycle/health still read running/healthy and armed health timers can independently mark degraded or start rollback/auto-repair paths racing the resolver (serialized only by the lifecycle lock). Early-return from runHealthCheck while state.pendingExitClassification is true, mirroring the configurationErrorActive guard.
+- **Why:** Duplicate restart attempts / notification noise for one exit.
+- **Context:** lib/server/watchdog.js runHealthCheck + pendingExitClassification.
+- **Effort:** S.
+
 ## P3 — OpenClaw-beta follow-ups (deferred from the beta-support plan)
 - **What:** Invite QR codes on the Team page; a "move this key to the shared secret store" CTA on the Models page; per-agent access mapping built on the members roster; an auto-canary channel (apply beta to a shadow gateway, promote on health). The Watchdog degraded-state badge (eventLoopDegraded/readyzFailing are already exposed in getStatus) is folded into the Phase 2/3 UI work.
 - **Why:** Recorded scope decisions from the CEO review; each is a platform follow-up after core beta support ships.
@@ -201,11 +213,23 @@
 - **Context:** cards already carry fixPrompt (doctor service); UI-only change in the Doctor tab.
 - **Effort:** S. **Depends on:** Drift Doctor 8.1 wave landing.
 
+## P3 — Stable notify keys for LLM doctor cards
+- **What:** maybeNotifyNewP0s dedupes LLM P0s by exact title (no sourceKey); a persistent P0 the model rewords re-notifies each scan. Derive a stable key (hash of category + sorted targetPaths) or feed prior open-card titles into the doctor prompt with reuse instructions.
+- **Why:** Notification fatigue once scheduled scans are on.
+- **Context:** lib/server/doctor/service.js maybeNotifyNewP0s cardKey; prompt.js.
+- **Effort:** S.
+
 ## P3 — SQLite snapshot retention (keep-N)
 - **What:** Keep-N retention for the SQLite snapshot repository at `<root>/backups/openclaw-sqlite/` (each `backup sqlite create` adds a new snapshot directory; nothing prunes them).
 - **Why:** The verified 8.1 contract makes `--repository` required on create, so snapshots accumulate unboundedly in our managed directory; companion to the size-aware archive retention entry above.
 - **Context:** create/verify contract in docs/designs/openclaw-context-contract.md §5 (`backup sqlite` CLI); `kOpenclawSqliteBackupDir` (lib/server/constants.js, added by the wave's backup-runner fix); pattern precedent in `pruneBackups` (lib/server/openclaw-channel-sync.js).
 - **Effort:** S. **Depends on:** the wave's backup sqlite runner fix landing.
+
+## P3 — doctor.db retention (keep-N runs)
+- **What:** doctor_runs persists full workspace_manifest_json (MBs per row at 50k files) and reuse runs clone raw_result_json; nothing prunes, and scheduled scans make growth unattended. Add keep-N retention deleting old runs' manifest/raw-result blobs while preserving dismissed source_keys (they feed suppression).
+- **Why:** Unbounded disk growth on VPS installs; the dismissed-keys DISTINCT scan grows with it (the partial index added this wave mitigates the query, not the growth).
+- **Context:** lib/server/db/doctor/; precedent in `pruneBackups` (lib/server/openclaw-channel-sync.js); companion to the SQLite snapshot retention entry above.
+- **Effort:** S-M.
 
 ## Completed
 

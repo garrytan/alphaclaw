@@ -2083,6 +2083,7 @@ describe("server/doctor-service", () => {
       computeSnapshot = undefined,
       computeSnapshotAsync = fastComputeSnapshotAsync,
       listDismissedSourceKeys = null,
+      readOpenclawConfig = null,
     } = {}) => {
       const { createDoctorService } = loadDoctorService();
       const created = [];
@@ -2129,6 +2130,7 @@ describe("server/doctor-service", () => {
           meta.set(key, value);
         },
         listDismissedSourceKeys,
+        ...(readOpenclawConfig ? { readOpenclawConfig } : {}),
       });
       return { service, created, runsByIdCards, meta };
     };
@@ -2664,9 +2666,11 @@ describe("server/doctor-service", () => {
         }
       });
 
-      it("suppresses the trigger when a hardening source key was dismissed", async () => {
+      it("suppresses the trigger when the condition's own source key was dismissed", async () => {
         vi.useFakeTimers();
         try {
+          // AGENTS.md over the per-file cap: the truncation card it would
+          // carry is exactly boot:file_limit:AGENTS.md.
           seedHardeningBreakage("truncation");
           const meta = new Map();
           const { service, created } = makeService({
@@ -2674,7 +2678,66 @@ describe("server/doctor-service", () => {
             autoRunTickMs: 1000,
             meta,
             summaries: [makeMatchingSummary()],
-            listDismissedSourceKeys: () => ["boot:total_limit"],
+            listDismissedSourceKeys: () => ["boot:file_limit:AGENTS.md"],
+          });
+          await vi.advanceTimersByTimeAsync(1100 + 60000);
+          expect(service.buildStatus().autoRun.lastSkipReason).toBe("not-stale");
+          expect(meta.get("last_auto_run")).toBeUndefined();
+          expect(created).toHaveLength(0);
+          service.dispose();
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      it("does not let an unrelated dismissed boot: key suppress a new blocked state", async () => {
+        vi.useFakeTimers();
+        try {
+          // A once-dismissed boot:file_limit:USER.md card (condition long
+          // gone) must not disable the trigger for a NEW hardening-blocked
+          // state — the candidate keys come from the current condition only.
+          seedHardeningBreakage("blocked");
+          const meta = new Map();
+          const { service, created } = makeService({
+            readAutoRunEnabled: () => true,
+            autoRunTickMs: 1000,
+            meta,
+            summaries: [makeMatchingSummary()],
+            listDismissedSourceKeys: () => ["boot:file_limit:USER.md"],
+          });
+          await vi.advanceTimersByTimeAsync(1100 + 60000);
+          await vi.runOnlyPendingTimersAsync();
+          expect(meta.get("last_auto_run")?.outcome).toBe("ran");
+          expect(created[0]).toMatchObject({ engine: "deterministic_reuse" });
+          service.dispose();
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      it("does not fire the hardening trigger when the config is unreadable", async () => {
+        vi.useFakeTimers();
+        try {
+          // Merged hardening file on disk PLUS an openclaw.json our parser
+          // cannot read: hardening reads "unknown" (config_unreadable), which
+          // must not count as blocked and must not schedule a scan.
+          seedHardeningBreakage("blocked");
+          fs.writeFileSync(
+            path.join(workspaceRoot, "openclaw.json"),
+            "{ hooks: { /* json5 */ } }",
+            "utf8",
+          );
+          const meta = new Map();
+          const { service, created } = makeService({
+            readAutoRunEnabled: () => true,
+            autoRunTickMs: 1000,
+            meta,
+            summaries: [makeMatchingSummary()],
+            readOpenclawConfig: () => null,
+          });
+          expect(service.buildStatus().bootstrapContext.hardening).toMatchObject({
+            state: "unknown",
+            reason: "config_unreadable",
           });
           await vi.advanceTimersByTimeAsync(1100 + 60000);
           expect(service.buildStatus().autoRun.lastSkipReason).toBe("not-stale");

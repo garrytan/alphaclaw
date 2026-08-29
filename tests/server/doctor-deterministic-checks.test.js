@@ -114,6 +114,18 @@ describe("server/doctor/deterministic-checks", () => {
     expect(hardening.fixPrompt).toContain("bootstrapMaxChars");
   });
 
+  it("emits no hardening card when the state is unknown (unreadable config)", () => {
+    // Merged hardening file on disk but openclaw.json is unreadable: the
+    // analyzer reports "unknown", which must never produce the P0 card.
+    write(workspaceRoot, "hooks/bootstrap/AGENTS.md", "safety rules on disk");
+    const cards = build({
+      bootstrapArgs: { hooksEnabled: false, configUnreadable: true },
+    });
+    expect(findCard(cards, "det:hardening:blocked")).toBeUndefined();
+    expect(findCard(cards, "det:hardening:starved")).toBeUndefined();
+    expect(cards.some((card) => card.sourceKey.startsWith("det:hardening"))).toBe(false);
+  });
+
   it("flags non-AlphaClaw invalid extras as P1", () => {
     write(workspaceRoot, "notes/EXTRA.md", "user extra");
     const cards = build({
@@ -236,10 +248,20 @@ describe("server/doctor/deterministic-checks", () => {
 
   it("flags disabled git sync from the managed cron state", () => {
     write(managedRoot, "cron/system-sync.json", JSON.stringify({ enabled: false }));
-    expect(findCard(build({}), "det:git-sync-disabled")).toMatchObject({
+    const card = findCard(build({}), "det:git-sync-disabled");
+    expect(card).toMatchObject({
       priority: "P1",
       category: "workspace state",
     });
+    // Text evidence only: the file lives OUTSIDE workspaceRoot, so a path
+    // entry would be refused a snippet and dead-link in browse.
+    expect(card.evidence).toEqual([
+      {
+        type: "text",
+        text: "<OPENCLAW_DIR>/cron/system-sync.json — enabled: false",
+      },
+    ]);
+    expect(card.evidence.some((item) => item.type === "path")).toBe(false);
 
     write(managedRoot, "cron/system-sync.json", JSON.stringify({ enabled: true }));
     expect(findCard(build({}), "det:git-sync-disabled")).toBeUndefined();

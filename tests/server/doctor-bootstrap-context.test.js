@@ -350,6 +350,7 @@ describe("server/doctor/bootstrap-context", () => {
     });
 
     expect(context.hardening.state).toBe("blocked");
+    expect(context.hardening.reason).toBe("");
     expect(context.hardening.files).toEqual([
       expect.objectContaining({
         path: "hooks/bootstrap/AGENTS.md",
@@ -358,6 +359,28 @@ describe("server/doctor/bootstrap-context", () => {
         reason: "not_configured",
       }),
     ]);
+  });
+
+  it("reports hardening unknown, not blocked, when the config is unreadable", () => {
+    write("AGENTS.md", "root guidance");
+    write("hooks/bootstrap/AGENTS.md", "safety rules on disk");
+
+    // openclaw.json exists but our parser cannot read it (JSON5/${ENV}/
+    // $include are legal upstream): the extras list is unknown, so the
+    // on-disk merged file must NOT read as a lost config entry.
+    const context = analyzeBootstrapContext({
+      workspaceRoot,
+      profile: kStableProfile,
+      extraFilePaths: [],
+      hooksEnabled: false,
+      configUnreadable: true,
+    });
+
+    expect(context.hardening.state).toBe("unknown");
+    expect(context.hardening.reason).toBe("config_unreadable");
+    expect(context.hardening.files).toEqual([]);
+    // No hardening card family for this state.
+    expect(buildBootstrapTruncationCards(context)).toEqual([]);
   });
 
   describe("createBootstrapContextAnalyzer", () => {
@@ -471,6 +494,49 @@ describe("server/doctor/bootstrap-context", () => {
       const configPath = path.join(managedRoot, "openclaw.json");
       fs.utimesSync(configPath, new Date(), new Date(Date.now() + 5000));
       expect(analyzer.analyze().bootstrapMaxChars).toBe(300);
+    });
+
+    it("reports hardening unknown when openclaw.json exists but cannot be parsed", () => {
+      write("AGENTS.md", "rules");
+      write("hooks/bootstrap/AGENTS.md", "hardening on disk");
+      // A JSON5-flavored config: on disk, but readOpenclawConfig({fallback:
+      // null}) yields null — NOT the same as a missing config entry.
+      fs.writeFileSync(
+        path.join(managedRoot, "openclaw.json"),
+        "{ hooks: { /* json5 */ } }",
+        "utf8",
+      );
+
+      const analyzer = createBootstrapContextAnalyzer({
+        workspaceRoot,
+        managedRoot,
+        getProfile: () => kStableProfile,
+        readOpenclawConfig: () => null,
+        isOnboarded: () => true,
+      });
+      const context = analyzer.analyze();
+
+      expect(context.hardening.state).toBe("unknown");
+      expect(context.hardening.reason).toBe("config_unreadable");
+      expect(buildBootstrapTruncationCards(context)).toEqual([]);
+    });
+
+    it("keeps the blocked state when the config file is missing (fresh install)", () => {
+      write("AGENTS.md", "rules");
+      write("hooks/bootstrap/AGENTS.md", "hardening on disk");
+      // No openclaw.json at all: a null read means "nothing configured yet",
+      // and the on-disk merged file still reads as a lost config entry.
+      const analyzer = createBootstrapContextAnalyzer({
+        workspaceRoot,
+        managedRoot,
+        getProfile: () => kStableProfile,
+        readOpenclawConfig: () => null,
+        isOnboarded: () => true,
+      });
+      const context = analyzer.analyze();
+
+      expect(context.hardening.state).toBe("blocked");
+      expect(context.hardening.reason).toBe("");
     });
 
     it("degrades to defaults with no config reader wired", () => {

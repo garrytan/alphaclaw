@@ -66,6 +66,25 @@ describe("server/doctor/sanitize", () => {
     expect(sanitize("a\tb\nc")).toBe("a\tb\nc");
   });
 
+  it("strips C1 controls (including NEL) in every mode", () => {
+    const { sanitize } = createDoctorTextSanitizer({ env: {} });
+    // U+0080, U+0085 (NEL), U+009C: C1 controls render as line breaks or
+    // hidden characters in some clients - stripped to spaces like C0.
+    expect(sanitize("a\u0080b\u0085c\u009Cd")).toBe("a b c d");
+    expect(sanitize("a\u0085b", { singleLine: true })).toBe("a b");
+  });
+
+  it("singleLine collapses Unicode line separators (U+2028/U+2029/NEL)", () => {
+    const { sanitize } = createDoctorTextSanitizer({ env: {} });
+    // Telegram renders U+2028 as a newline: a forged title must not smuggle
+    // extra lines into a notification through the Unicode separators.
+    expect(
+      sanitize("forged\u2028- fake finding\u2029tail", { singleLine: true }),
+    ).toBe("forged - fake finding tail");
+    // Mixed runs (ASCII + Unicode separators) collapse to a SINGLE space.
+    expect(sanitize("x\n\u2028\u0085\u2029y", { singleLine: true })).toBe("x y");
+  });
+
   it("singleLine collapses before the cap so the budget counts the final text", () => {
     const { sanitize } = createDoctorTextSanitizer({ env: {} });
     const capped = sanitize("line1\nline2", { maxChars: 8, singleLine: true });

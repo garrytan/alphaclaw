@@ -2553,6 +2553,54 @@ describe("server/watchdog", () => {
     watchdog.stop();
   });
 
+  it("isReadyForDispatch blocks degraded health but allows the unknown post-launch window", async () => {
+    vi.useFakeTimers();
+    const readyzState = { degraded: true };
+    const { watchdog } = createHarness({
+      autoRepair: false,
+      resolveGatewayReadyzUrl: () => "http://127.0.0.1:18789/readyz",
+      fetchImpl: async (url) => ({
+        ok: true,
+        status: 200,
+        text: async () =>
+          String(url).includes("readyz")
+            ? JSON.stringify({
+                ready: !readyzState.degraded,
+                failing: readyzState.degraded ? ["secrets"] : [],
+                eventLoop: { degraded: readyzState.degraded },
+              })
+            : JSON.stringify({ ok: true, status: "live" }),
+      }),
+    });
+
+    watchdog.start();
+    watchdog.onGatewayLaunch({ startedAt: Date.now() });
+    // Post-launch window: health is still "unknown" until the first probe
+    // lands — dispatch stays allowed rather than blocking every fresh boot.
+    expect(watchdog.getStatus().health).toBe("unknown");
+    expect(watchdog.isReadyForDispatch()).toEqual({ ok: true, reason: "" });
+
+    // Green /health + degraded /readyz marks health degraded while lifecycle
+    // stays "running" — an LLM doctor run against a degraded gateway would
+    // burn its timeout for nothing, so dispatch must block here too.
+    await vi.advanceTimersByTimeAsync(5_000);
+    const status = watchdog.getStatus();
+    expect(status.lifecycle).toBe("running");
+    expect(status.health).toBe("degraded");
+    expect(watchdog.isReadyForDispatch()).toEqual({
+      ok: false,
+      reason: "gateway health is degraded (failing health probes)",
+    });
+
+    // Recovery: readiness clears → health returns and dispatch reopens.
+    readyzState.degraded = false;
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(watchdog.getStatus().health).toBe("healthy");
+    expect(watchdog.isReadyForDispatch()).toEqual({ ok: true, reason: "" });
+    watchdog.stop();
+    vi.useRealTimers();
+  });
+
   it("marks health degraded on green /health + degraded /readyz, with one advisory doctor (1.8)", async () => {
     vi.useFakeTimers();
     const readyzState = { degraded: true };

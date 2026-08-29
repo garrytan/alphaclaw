@@ -4,10 +4,10 @@ import {
   getHardeningBadgeModel,
 } from "../../lib/public/js/components/general/hardening-badge.js";
 
-const statusWithHardening = (state, extra = {}) => ({
+const statusWithHardening = (state, extra = {}, hardeningExtra = {}) => ({
   releaseChannel: "stable",
   bootstrapContext: {
-    hardening: { state, files: [] },
+    hardening: { state, files: [], ...hardeningExtra },
   },
   ...extra,
 });
@@ -43,6 +43,20 @@ describe("frontend/general hardening badge", () => {
       tone: "neutral",
       label: "Hardening: unknown",
     });
+  });
+
+  it("stays neutral for unknown with a config_unreadable reason, with a specific title", () => {
+    // An unreadable openclaw.json (JSON5/env-include flavor) reports unknown,
+    // never the danger "blocked" badge — with a title that says why.
+    const model = getHardeningBadgeModel(
+      statusWithHardening("unknown", {}, { reason: "config_unreadable" }),
+    );
+    expect(model).toMatchObject({ tone: "neutral", label: "Hardening: unknown" });
+    expect(model.title).toContain("cannot parse");
+    // Plain unknown keeps the generic title.
+    expect(getHardeningBadgeModel(statusWithHardening("unknown")).title).toBe(
+      "Prompt hardening state could not be determined.",
+    );
   });
 
   it("shows unverified on the dev channel regardless of state", () => {
