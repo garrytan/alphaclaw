@@ -1048,4 +1048,203 @@ describe("server/chat-ws bridge", () => {
       expect(history.messages).toEqual([]);
     });
   });
+
+  describe("crash guards and cross-run isolation", () => {
+    const startRun = async ({ harness, browser, sessionKey, runId }) => {
+      const previous = harness.onRequest;
+      harness.onRequest = (frame) => {
+        if (frame.method === "chat.send" && frame.params.sessionKey === sessionKey) {
+          harness.respond(frame.id, { runId });
+          harness.onRequest = previous;
+          return;
+        }
+        if (previous) previous(frame);
+      };
+      browser.send({ type: "message", sessionKey, content: "go" });
+      return browser.waitFor(
+        (m) => m.type === "started" && m.sessionKey === sessionKey,
+        `started ${sessionKey}`,
+      );
+    };
+
+    // C2: a browser socket emitting 'error' (transport reset / oversized frame)
+    // must not take down the whole server. Before the fix wss.on("connection")
+    // attached no 'error' listener → Node threw → gracefulExit(1).
+    it("survives a browser socket error and keeps serving (C2)", async () => {
+      const harness = await startGatewayHarness();
+      harness.onRequest = respondEmptyHistory(harness);
+      const service = createService(harness);
+      const browser = await openBrowser(service);
+
+      // A frame larger than the server's 1MB maxPayload makes the server-side
+      // ws emit 'error' and close.
+      browser.client.send("x".repeat(2 * 1024 * 1024));
+      await new Promise((resolve) => setTimeout(resolve, 100));
+
+      // If the error had been unhandled the process would be gone; the service
+      // still answers, proving it stayed up.
+      const survivor = await openBrowser(service);
+      survivor.send({ type: "history", sessionKey: "after-error" });
+      const history = await survivor.waitFor((m) => m.type === "history", "history");
+      expect(history.messages).toEqual([]);
+    });
+
+    // H16: with exactly one browser run active, a concurrent FOREIGN run
+    // (Telegram/Slack — a runId/sessionKey that matches no browser target)
+    // must NOT be routed to the browser via the solo-run fallback, and its
+    // lifecycle:end must not delete the browser's own run target.
+    it("does not cross-deliver a foreign run to the solo browser (H16)", async () => {
+      const harness = await startGatewayHarness();
+      const service = createService(harness);
+      const browser = await openBrowser(service);
+      await startRun({
+        harness,
+        browser,
+        sessionKey: "s-browser",
+        runId: "run-browser",
+      });
+
+      // Foreign run: id present, matches no browser target.
+      harness.emit({
+        type: "event",
+        event: "agent",
+        payload: {
+          runId: "run-foreign",
+          stream: "assistant",
+          data: { delta: "FOREIGN-LEAK" },
+        },
+      });
+      // Foreign lifecycle:end would previously send a premature done and delete
+      // the browser's runTarget.
+      harness.emit({
+        type: "event",
+        event: "agent",
+        payload: {
+          runId: "run-foreign",
+          stream: "lifecycle",
+          data: { phase: "end" },
+        },
+      });
+
+      // Now the browser's OWN run streams and ends — it must arrive intact.
+      harness.emit({
+        type: "event",
+        event: "agent",
+        payload: {
+          runId: "run-browser",
+          stream: "assistant",
+          data: { delta: "my reply" },
+        },
+      });
+      harness.emit({
+        type: "event",
+        event: "agent",
+        payload: {
+          runId: "run-browser",
+          stream: "lifecycle",
+          data: { phase: "end" },
+        },
+      });
+
+      const done = await browser.waitFor(
+        (m) => m.type === "done" && m.sessionKey === "s-browser",
+        "browser done",
+      );
+      expect(done).toBeTruthy();
+      const chunks = browser.messages
+        .filter((m) => m.type === "chunk")
+        .map((m) => m.content);
+      expect(chunks).toEqual(["my reply"]);
+      expect(chunks).not.toContain("FOREIGN-LEAK");
+    });
+
+    // H16 (allow-legit): the id-less solo fallback still routes an event that
+    // carries neither runId nor sessionKey to the one active browser run.
+    it("still routes an id-less event to the solo browser run (H16 allow-legit)", async () => {
+      const harness = await startGatewayHarness();
+      const service = createService(harness);
+      const browser = await openBrowser(service);
+      await startRun({
+        harness,
+        browser,
+        sessionKey: "s-solo",
+        runId: "run-solo",
+      });
+
+      harness.emit({
+        type: "event",
+        event: "agent",
+        payload: { stream: "assistant", data: { delta: "id-less delta" } },
+      });
+      const chunk = await browser.waitFor((m) => m.type === "chunk", "chunk");
+      expect(chunk.content).toBe("id-less delta");
+    });
+
+    // H13: a flood of distinct foreign runIds, each with many events, must not
+    // grow the pending buffer without bound.
+    it("bounds the pending foreign-run buffer under a flood (H13)", async () => {
+      const harness = await startGatewayHarness();
+      harness.onRequest = respondEmptyHistory(harness);
+      const service = createService(harness);
+      // Establish the gateway connection so harness.emit reaches handleGatewayEvent.
+      await service.fetchHistory("agent:main:main");
+
+      for (let runIndex = 0; runIndex < 300; runIndex += 1) {
+        for (let eventIndex = 0; eventIndex < 300; eventIndex += 1) {
+          harness.emit({
+            type: "event",
+            event: "agent",
+            payload: {
+              runId: `foreign-${runIndex}`,
+              stream: "assistant",
+              data: { delta: `d${eventIndex}` },
+            },
+          });
+        }
+      }
+      await waitUntil(
+        () => service.getPendingBufferStats().runs > 0,
+        "buffered foreign runs",
+      );
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      const stats = service.getPendingBufferStats();
+      expect(stats.runs).toBeLessThanOrEqual(64);
+      // Per-run cap (200) × global run cap (64) is the hard ceiling.
+      expect(stats.events).toBeLessThanOrEqual(64 * 200);
+    });
+
+    // H13 (allow-legit): an event that arrives for a browser run BEFORE the
+    // chat.send response registers the runId still buffers and then flushes to
+    // the browser once the run is registered.
+    it("buffers then flushes a browser run's early event (H13 allow-legit)", async () => {
+      const harness = await startGatewayHarness();
+      const service = createService(harness);
+      const browser = await openBrowser(service);
+
+      // Hold the chat.send response so the early agent event races ahead of it.
+      let sendFrame = null;
+      harness.onRequest = (frame) => {
+        if (frame.method === "chat.send") sendFrame = frame;
+      };
+      browser.send({ type: "message", sessionKey: "s-race", content: "go" });
+      await waitUntil(() => sendFrame !== null, "pending chat.send");
+
+      // Early event for the not-yet-registered run — buffered.
+      harness.emit({
+        type: "event",
+        event: "agent",
+        payload: {
+          runId: "run-race",
+          stream: "assistant",
+          data: { delta: "early chunk" },
+        },
+      });
+
+      // Now register the run; the buffered event must flush to the browser.
+      harness.respond(sendFrame.id, { runId: "run-race" });
+      const chunk = await browser.waitFor((m) => m.type === "chunk", "chunk");
+      expect(chunk.content).toBe("early chunk");
+    });
+  });
 });

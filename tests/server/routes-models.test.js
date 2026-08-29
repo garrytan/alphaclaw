@@ -21,6 +21,7 @@ const flushPromises = async () => {
 const createModelDeps = () => {
   const deps = {
     shellCmd: vi.fn(),
+    execFileCmd: vi.fn(),
     gatewayEnv: vi.fn(() => ({ OPENCLAW_GATEWAY_TOKEN: "token" })),
     parseJsonFromNoisyOutput: vi.fn(() => ({})),
     normalizeOnboardingModels: vi.fn(() => []),
@@ -254,12 +255,12 @@ describe("server/routes/models", () => {
 
     expect(res.status).toBe(400);
     expect(res.body).toEqual({ ok: false, error: "Missing modelKey" });
-    expect(deps.shellCmd).not.toHaveBeenCalled();
+    expect(deps.execFileCmd).not.toHaveBeenCalled();
   });
 
-  it("sets model when modelKey is valid", async () => {
+  it("sets model when modelKey is valid (argv form, no shell)", async () => {
     const deps = createModelDeps();
-    deps.shellCmd.mockResolvedValue("");
+    deps.execFileCmd.mockResolvedValue("");
     const app = createApp(deps);
 
     const res = await request(app)
@@ -268,12 +269,50 @@ describe("server/routes/models", () => {
 
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ ok: true });
-    expect(deps.shellCmd).toHaveBeenCalledWith(
-      'openclaw models set "openai/gpt-5.1-codex"',
+    expect(deps.execFileCmd).toHaveBeenCalledWith(
+      "openclaw",
+      ["models", "set", "--", "openai/gpt-5.1-codex"],
       {
         env: { OPENCLAW_GATEWAY_TOKEN: "token" },
         timeout: 30000,
       },
+    );
+  });
+
+  it("passes a nested provider/vendor/model id through unharmed (allow-legit)", async () => {
+    const deps = createModelDeps();
+    deps.execFileCmd.mockResolvedValue("");
+    const app = createApp(deps);
+
+    const res = await request(app)
+      .post("/api/models/set")
+      .send({ modelKey: "openrouter/vendor/model" });
+
+    expect(res.status).toBe(200);
+    expect(deps.execFileCmd).toHaveBeenCalledWith(
+      "openclaw",
+      ["models", "set", "--", "openrouter/vendor/model"],
+      expect.any(Object),
+    );
+  });
+
+  it("never shell-interprets an injection payload in modelKey (C1)", async () => {
+    const deps = createModelDeps();
+    deps.execFileCmd.mockResolvedValue("");
+    const app = createApp(deps);
+
+    const payload = "a/b$(touch /tmp/pwn)";
+    const res = await request(app)
+      .post("/api/models/set")
+      .send({ modelKey: payload });
+
+    // The payload is passed as a single inert argv element — never through /bin/sh.
+    expect(res.status).toBe(200);
+    expect(deps.shellCmd).not.toHaveBeenCalled();
+    expect(deps.execFileCmd).toHaveBeenCalledWith(
+      "openclaw",
+      ["models", "set", "--", payload],
+      expect.any(Object),
     );
   });
 
