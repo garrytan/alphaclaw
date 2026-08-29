@@ -5,6 +5,71 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.9.42] - 2026-08-29
+
+The Watchdog tab now explains itself: a live narrative of what the watchdog
+is doing and why, a persisted incident history that groups raw events into
+readable stories, and an optional AI overseer that reviews each settled
+incident and tells you whether anything still needs your attention.
+
+### Added
+- **Live status narrative**: a card under the Gateway card that says in plain
+  language what is happening right now — "Degraded for 6m — probe returned
+  HTTP 503. Repair attempt 1 of 2 running. Auto-rollback in 3m 48s if not
+  recovered." — with live countdowns for backoff, grace, and rollback
+  deadlines, and an amber chip when auto-repair is paused by a stabilization
+  window (the toggle keeps showing what you configured; the chip shows what
+  is actually in effect).
+- **Incident history**: gateway trouble is now recorded as incidents —
+  opened on the first crash, failed probe, config error, release rollback,
+  or safe-mode entry, and closed on recovery — instead of a flat event log. Incident cards carry
+  a severity badge, a deterministic title ("Crash loop → rolled back ·
+  resolved in 8m"), and an expandable event timeline; the active incident is
+  pinned and pulsing. Older incidents page in with "Load more"; an "All
+  events" tab keeps the raw feed with a routine-probe filter. Incidents
+  survive restarts (an interrupted one is marked abandoned honestly) and
+  the overseer's verdict notifications deep-link straight to the incident
+  card.
+- **Incident overseer** (optional, off by default): after an incident
+  settles and the gateway is healthy again, a local Claude Code review is
+  recorded on the incident — a verdict (resolved / monitoring / action
+  needed), a plain-language summary, and a recommended action that surfaces
+  as the matching button (repair, restart, resume channels) only while it is
+  still applicable. Includes a "Review now" button, verdict chips on
+  incident cards, and one deduplicated notification per incident with a
+  "View incident" link. Advisory only: the deterministic watchdog remains
+  the sole recovery authority. When enabled, redacted gateway logs, incident
+  records, and doctor output are sent to the Anthropic API; the review runs
+  with secrets redacted from both the prompt and the model's output, in an
+  isolated environment with tools disabled (and is skipped entirely if that
+  restriction can't be verified or the secret-redaction sources can't be
+  read).
+- **Status detail rows**: last probe time and failure reason, degraded
+  duration, crash count against the crash-loop window, repair attempts,
+  gateway PID, and last-exit details — all from data the server already had.
+- **Resource telemetry**: event-loop lag percentiles (with a help tooltip)
+  and unhandled-rejection counts now render alongside the memory/disk/CPU
+  bars, with warning colors at sustained thresholds.
+
+### Changed
+- Watchdog cards reordered by usefulness: status → narrative → overseer →
+  incidents → backup → console → resources → settings.
+- The auto-repair toggle now tracks the live status stream, so a change made
+  elsewhere (another tab, environment) converges without a reload — and a
+  just-saved value never snaps back under a stale frame.
+- Incident list responses slimmed for the 15s poll; full evidence snapshots
+  stay on the incident detail read.
+- Failed API errors surface the server's human-readable message instead of a
+  bare code.
+
+### Fixed
+- Relative times and countdowns pause while the tab is hidden and stay
+  correct under clock skew in either direction.
+- Skipped health probes during grace/restart windows can no longer close an
+  incident early; planned restarts never open one.
+- Incident review requests return honest statuses (404 unknown incident,
+  429 rate-limited, 503 reviewer infrastructure unavailable) with
+  human-readable messages.
 ## [0.9.41] - 2026-08-29
 
 ### Added
