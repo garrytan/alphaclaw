@@ -5,7 +5,7 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
-## [Unreleased]
+## [0.9.39] - 2026-08-29
 
 Best-of-breed toggles, status, and errors across the entire Setup UI: a
 22-agent audit confirmed 119 instances (~112 unique sites) of one defect
@@ -71,6 +71,25 @@ primitives.
   mutations invalidate the caches their consumers read. Disabled toggles and
   subtle/neutral/warning buttons now look disabled (`cursor: not-allowed`,
   reduced opacity). The unreferenced legacy `components/models.js` is deleted.
+- **Models tab can no longer be blanked by a transient server error:** an
+  HTTP error response is treated as an error instead of being adopted as
+  empty configuration — your configured models, profiles, and provider order
+  stay put (and the error is shown) until a refresh succeeds. The same guard
+  keeps a failed Codex status check from fabricating "not connected" and a
+  failed thinking-options fetch from leaving the previous model's levels
+  selectable.
+- **Watchdog settings saves are narrower:** each toggle now writes only its
+  own setting, so flipping notifications can no longer overwrite an
+  auto-repair change made meanwhile from another tab or the CLI.
+
+### Security
+- Error-envelope documentation links only render as clickable anchors for
+  http(s) URLs — a hostile `docsUrl` in an upstream error can no longer
+  inject `javascript:` links into the UI.
+- The overseer's boot-time `claude --version` availability probe (and
+  `--help` flag discovery) no longer receive `ANTHROPIC_API_KEY`; only real
+  overseer runs get the credential. Concurrent cold probes are also
+  single-flighted.
 
 ## [0.9.37] - 2026-08-28
 
