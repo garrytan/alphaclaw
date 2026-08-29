@@ -5,8 +5,10 @@ const path = require("path");
 const {
   isOpenAiCompatApiEnabled,
   readAlphaclawConfig,
+  readDoctorAutoRunEnabled,
   readOpenclawMedicEnabled,
   readOpenclawReleaseChannel,
+  updateDoctorAutoRunEnabled,
   updateOpenAiCompatApiFeature,
   updateOpenclawMedicEnabled,
   updateOpenclawReleaseChannel,
@@ -211,5 +213,50 @@ describe("server/alphaclaw-config", () => {
     const on = updateOpenclawMedicEnabled({ openclawDir, enabled: true });
     expect(on.changed).toBe(true);
     expect(readOpenclawMedicEnabled({ openclawDir })).toBe(true);
+  });
+
+  it("defaults scheduled Doctor scans to OFF (opt-in, spends user tokens)", () => {
+    const openclawDir = createTempOpenclawDir();
+    expect(readDoctorAutoRunEnabled({ openclawDir })).toBe(false);
+  });
+
+  it("persists the Doctor auto-run toggle round-trip", () => {
+    const openclawDir = createTempOpenclawDir();
+
+    expect(updateDoctorAutoRunEnabled({ openclawDir, enabled: true })).toBe(true);
+    expect(readDoctorAutoRunEnabled({ openclawDir })).toBe(true);
+
+    expect(updateDoctorAutoRunEnabled({ openclawDir, enabled: false })).toBe(false);
+    expect(readDoctorAutoRunEnabled({ openclawDir })).toBe(false);
+  });
+
+  it("normalizes anything but literal true to off for Doctor auto-run", () => {
+    const openclawDir = createTempOpenclawDir();
+    fs.writeFileSync(
+      path.join(openclawDir, "alphaclaw.json"),
+      JSON.stringify({ doctor: { autoRun: { enabled: "yes" } } }),
+      "utf8",
+    );
+    expect(readDoctorAutoRunEnabled({ openclawDir })).toBe(false);
+    expect(readAlphaclawConfig({ openclawDir }).doctor.autoRun.enabled).toBe(false);
+
+    // Truthy-but-not-true through the updater is also normalized off.
+    expect(updateDoctorAutoRunEnabled({ openclawDir, enabled: 1 })).toBe(false);
+    expect(readDoctorAutoRunEnabled({ openclawDir })).toBe(false);
+  });
+
+  it("preserves unknown doctor keys through an auto-run update", () => {
+    const openclawDir = createTempOpenclawDir();
+    fs.writeFileSync(
+      path.join(openclawDir, "alphaclaw.json"),
+      JSON.stringify({ doctor: { futureKnob: "keep-me", autoRun: { enabled: false } } }),
+      "utf8",
+    );
+    updateDoctorAutoRunEnabled({ openclawDir, enabled: true });
+    const written = JSON.parse(
+      fs.readFileSync(path.join(openclawDir, "alphaclaw.json"), "utf8"),
+    );
+    expect(written.doctor.futureKnob).toBe("keep-me");
+    expect(written.doctor.autoRun.enabled).toBe(true);
   });
 });

@@ -1,6 +1,7 @@
 const {
   parseJsonSafe,
   parseJsonObjectFromNoisyOutput,
+  parseJsonValueFromNoisyOutput,
 } = require("../../lib/server/utils/json");
 
 describe("server/utils/json", () => {
@@ -24,5 +25,33 @@ describe("server/utils/json", () => {
       count: 2,
     });
     expect(parseJsonObjectFromNoisyOutput("no braces")).toBeNull();
+  });
+
+  it("keeps scanning past valid-but-wrong JSON when a validate predicate is given", () => {
+    const text = 'warn {} noise {"status":"ok"}\n{"protocol":"target","status":"accepted"}';
+    expect(
+      parseJsonValueFromNoisyOutput(text, {
+        validate: (value) => value?.protocol === "target",
+      }),
+    ).toEqual({ protocol: "target", status: "accepted" });
+    // Without the predicate the first balanced value wins.
+    expect(parseJsonValueFromNoisyOutput(text)).toEqual({});
+  });
+
+  it("resumes scanning after a balanced-but-unparseable candidate", () => {
+    const text = "log { not json } more {\"findings\":[1]}";
+    expect(
+      parseJsonValueFromNoisyOutput(text, {
+        validate: (value) => Array.isArray(value?.findings),
+      }),
+    ).toEqual({ findings: [1] });
+  });
+
+  it("returns null when nothing satisfies the predicate", () => {
+    expect(
+      parseJsonValueFromNoisyOutput('{"a":1} [2,3] {"b":4}', {
+        validate: () => false,
+      }),
+    ).toBeNull();
   });
 });
