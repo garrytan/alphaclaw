@@ -291,6 +291,22 @@ describe("frontend/agents-tab model card", () => {
       expect(card.thinkingOptionsLoading).toBe(false);
       expect(card.showThinkingSelect).toBe(false);
     });
+
+    it("treats a resolved {ok:false} envelope as an error, not the previous model's options", async () => {
+      // HTTP errors resolve as {ok:false} — a silent return would leave the
+      // PREVIOUS model's levels selectable for the new model with no error.
+      fetchThinkingOptions.mockResolvedValue({ ok: false, error: "boom" });
+      const onUpdateAgent = vi.fn();
+
+      renderHook({ agent: { id: "a1" }, onUpdateAgent });
+      harness.effects[0]?.();
+      await flushAsync();
+
+      const card = renderHook({ agent: { id: "a1" }, onUpdateAgent });
+      expect(card.thinkingOptionsError).toBeTruthy();
+      expect(card.thinkingOptionsLoading).toBe(false);
+      expect(card.showThinkingSelect).toBe(false);
+    });
   });
 
   describe("card header while loading", () => {

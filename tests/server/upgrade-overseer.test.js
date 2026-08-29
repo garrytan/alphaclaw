@@ -457,6 +457,39 @@ describe("server/upgrade-overseer", () => {
       overseer.stop();
     }
   });
+
+  it("never hands the Anthropic credential to the version/help probes", async () => {
+    const { ledger } = makeLedger();
+    const runner = makeRunner();
+    const { overseer } = makeOverseer({ ledger, runner });
+    await overseer.getAvailability();
+    const probeCalls = runner.calls.filter((call) =>
+      ["--version", "--help"].includes(call.args?.[0]),
+    );
+    expect(probeCalls.length).toBeGreaterThan(0);
+    for (const call of probeCalls) {
+      // A planted/compromised `claude` on PATH must not receive the API key
+      // from a mere availability probe (boot-warm runs even when disabled);
+      // only real overseer runs get the credentialed env.
+      expect(call.env.ANTHROPIC_API_KEY).toBeUndefined();
+    }
+  });
+
+  it("single-flights concurrent cold availability probes", async () => {
+    const { ledger } = makeLedger();
+    const runner = makeRunner();
+    const { overseer } = makeOverseer({ ledger, runner });
+    const [first, second] = await Promise.all([
+      overseer.getAvailability(),
+      overseer.getAvailability(),
+    ]);
+    expect(first.available).toBe(true);
+    expect(second.available).toBe(true);
+    const versionCalls = runner.calls.filter(
+      (call) => call.args?.[0] === "--version",
+    );
+    expect(versionCalls.length).toBe(1);
+  });
 });
 
 describe("server/alphaclaw-config overseer setting", () => {

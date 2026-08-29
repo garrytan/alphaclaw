@@ -344,4 +344,48 @@ describe("frontend/models-tab use-models", () => {
     // Successful status change invalidates + re-fetches the catalog.
     expect(invalidateCache).toHaveBeenCalledWith(kModelCatalogCacheKey);
   });
+
+  it("a resolved {ok:false} error envelope is an error, never adopted as empty config", async () => {
+    const hook = renderHook();
+    const { catalog, config, codex } = fetchStates();
+    catalog.refresh.mockResolvedValue(kCatalog);
+    codex.refresh.mockResolvedValue({ connected: true });
+    config.refresh.mockResolvedValue(configPayload());
+
+    hook.runRefreshEffect();
+    await flushAsync();
+    hook.render();
+    expect(hook.result().primary).toBe("anthropic/claude-opus-4-8");
+
+    // The fetchers resolve HTTP 500s as {ok:false} envelopes. Adopting one
+    // would clear models/profiles/order and advance the saved baselines.
+    config.refresh.mockResolvedValueOnce({ ok: false, error: "boom" });
+    await hook.result().refresh();
+    hook.render();
+
+    expect(hook.result().error).not.toBe("");
+    expect(hook.result().primary).toBe("anthropic/claude-opus-4-8"); // kept
+    expect(hook.result().authProfiles.length).toBeGreaterThan(0); // not cleared
+    // Baseline did not advance: the kept primary still reads as clean.
+    expect(hook.result().isDirty).toBe(false);
+  });
+
+  it("a resolved {ok:false} codex envelope keeps the last-known status (refreshCodexStatus)", async () => {
+    const hook = renderHook();
+    const { catalog, config, codex } = fetchStates();
+    catalog.refresh.mockResolvedValue(kCatalog);
+    codex.refresh.mockResolvedValue({ connected: true });
+    config.refresh.mockResolvedValue(configPayload());
+
+    hook.runRefreshEffect();
+    await flushAsync();
+    hook.render();
+
+    codex.refresh.mockResolvedValueOnce({ ok: false, error: "boom" });
+    await hook.result().refreshCodexStatus();
+    hook.render();
+
+    expect(hook.result().codexStatus.connected).toBe(true); // last-known kept
+    expect(hook.result().codexStatusError).toBe(true);
+  });
 });
