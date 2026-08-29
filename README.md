@@ -136,9 +136,9 @@ The **Upgrade** page pins your OpenClaw to a release channel and lets you switch
 How it works:
 
 - **Explicit updates only.** Nothing installs on its own. Pick a version (last 5 stable, last 5 beta, or recent `main` commits), review its release notes, click once. Every restart deterministically re-loads the version you chose — offline, from a persisted copy on your data volume.
-- **Backed up before every switch.** AlphaClaw runs `openclaw backup create --verify` first, writing a per-run timestamped archive under `<root>/backups/openclaw/` (the last 3 are retained); downgrades and dev builds are blocked unless the backup verifies (older versions — and the pin you'd roll back to — may not read migrated state).
+- **Backed up before every switch.** AlphaClaw runs `openclaw backup create --verify` first, writing a per-run timestamped archive under `<root>/backups/openclaw/` (the last 3 are retained); downgrades and dev builds are blocked unless the backup verifies (older versions — and the pin you'd roll back to — may not read migrated state). Downgrades and cross-channel switches pause the gateway briefly so the backup captures a consistent state database — the confirm dialog says so — with a retry ladder for vanished-file races when pausing isn't possible.
 - **Database compatibility check.** Before an update applies, the target version's own binary verifies it can read snapshots of your state databases; incompatible updates are blocked before anything changes, and rollbacks that can't be verified say so honestly.
-- **Settings migration at boot.** After a version change, OpenClaw's own doctor migrates your settings once (keeping a per-version pre-migration backup); downgrades restore the exact settings saved for that version, and the Upgrade page shows the last migration result.
+- **Settings migration at boot.** After a version change, OpenClaw's own doctor migrates your settings once (keeping a per-version pre-migration backup); downgrades restore the exact settings saved for that version, and the Upgrade page shows the last migration result. The migration is fail-closed: it runs BEFORE the new build's gateway can start, and on failure AlphaClaw reverts to a preflight-proven older build when that is safe — otherwise it holds the gateway with one-click "Retry migration" / "Strip blamed keys and retry" actions (see [docs/upgrade-troubleshooting.md](docs/upgrade-troubleshooting.md)).
 - **What's new, per channel.** A curated card highlights each OpenClaw line's changes, with security-default flips called out separately — and those same security changes reappear in the apply confirmation before you commit to a cross-channel switch.
 - **Repair.** A dev build that fails mid-update gets a one-click, streamed `openclaw update repair`, recorded in the run timeline like any other update.
 - **Auto-rollback.** A freshly switched version gets a 24-hour stabilization window. If it crash-loops, exits with a config error, or stays degraded, AlphaClaw blocklists it, restarts, and boots the last known-good build — then tells you on Telegram/Discord/Slack what happened and why. "Mark as good now" ends the window early once you're satisfied.
@@ -193,6 +193,7 @@ Team endpoints live under `/api/team` (`enable`, `disable`, `invites`, `members`
 | ---------------------------------------------------------- | --------------------------------------------- |
 | `alphaclaw start`                                          | Start the server (Setup UI + gateway manager) |
 | `alphaclaw git-sync -m "message"`                          | Commit and push the OpenClaw workspace        |
+| `alphaclaw doctor finding complete`                        | Mark a queued Doctor finding fixed after verification |
 | `alphaclaw telegram topic add --thread <id> --name <text>` | Register a Telegram topic mapping             |
 | `alphaclaw telegram topic create --group <id> --name <text>` | Create a Telegram forum topic and register it |
 | `alphaclaw telegram topics list`                           | List registered, discovered, and stale topics |
@@ -248,11 +249,15 @@ The built-in watchdog monitors gateway health and recovers from failures automat
 | `SLACK_BOT_TOKEN`                 | Optional | Slack bot token (Socket Mode)                      |
 | `WATCHDOG_AUTO_REPAIR`            | Optional | Enable auto-repair on crash (`true`/`false`)       |
 | `WATCHDOG_NOTIFICATIONS_DISABLED` | Optional | Disable watchdog notifications (`true`/`false`)    |
+| `ALPHACLAW_NOTIFY_WEBHOOK_URL`    | Optional | Extra out-of-band notification channel: watchdog/upgrade alerts are also POSTed here as `{"text": ...}` JSON — delivered even straight from the boot process when no server is up |
 | `PORT`                            | Optional | Server port (default `3000`)                       |
 | `ALPHACLAW_ROOT_DIR`              | Optional | Data directory (default `/data`)                   |
 | `ALPHACLAW_SKIP_SYSTEM_CRON_INSTALL` | Optional | Skip writes to `/etc/cron.d` while keeping cron config (`true`/`false`); the managed hourly script still exits when sync is disabled |
 | `ALPHACLAW_GIT_SHIM_PATH`         | Optional | Install the managed git auth shim at this path and prepend its directory to runtime `PATH` (default `/usr/local/bin/git`) |
 | `ALPHACLAW_GIT_ASKPASS_PATH`      | Optional | Install the git askpass helper at this path (default `$TMPDIR/alphaclaw-git-askpass.sh`) |
+| `OPENCLAW_DOCTOR_MIGRATION_TIMEOUT` | Optional | Base settings-migration budget in seconds (default 10 min). The budget scales with state-DB size up to a 30-min cap; an explicit value also raises the cap. |
+| `OPENCLAW_MIGRATION_GATE`         | Optional | Set `off` to disable the fail-closed settings-migration gate — a failed migration then holds the gateway instead of reverting to an older build |
+| `OPENCLAW_FORWARD_RECOVERY`       | Optional | Set `off` to disable forward recovery (the one-shot move to a newer blocklisted build when the stable pin itself can't boot the migrated state) |
 | `TRUST_PROXY_HOPS`                | Optional | Trust proxy hop count for correct client IP        |
 | `REMOTE_MCP_URL`                  | Optional | Upstream remote MCP server URL. When set together with `REMOTE_MCP_API_TOKEN`, AlphaClaw writes a managed `mcp.servers.<name>` entry to `openclaw.json` on every gateway start. |
 | `REMOTE_MCP_API_TOKEN`            | Optional | Bearer token for the remote MCP server. Persisted in `openclaw.json` as the `${REMOTE_MCP_API_TOKEN}` reference, never as plaintext. |
@@ -300,6 +305,9 @@ Release history lives in [CHANGELOG.md](CHANGELOG.md); contributor setup and
 test tiers are in [CONTRIBUTING.md](CONTRIBUTING.md); open work is tracked in
 [TODOS.md](TODOS.md); design documents (Agent Administration, gateway state
 model, Telegram topics discovery) live in [docs/designs/](docs/designs/);
+the operator runbook for upgrade failure states (held gateways, blocked
+restores, rollback fencing) is
+[docs/upgrade-troubleshooting.md](docs/upgrade-troubleshooting.md);
 architecture notes and conventions for coding agents are in
 [AGENTS.md](AGENTS.md).
 

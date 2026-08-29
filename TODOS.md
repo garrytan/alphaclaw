@@ -288,13 +288,6 @@
 - **What:** Per-event-type filter pills on the All-events tab; a spot-check "explain current status" overseer mode with no incident; any new SSE event streams for the watchdog surfaces.
 - **Why:** Each was reviewed and deferred: three tabs cover the filtering need, the deterministic narrator explains live status for free, and the 2s status SSE + 15s polls already carry everything ("new event streams are the expensive path").
 - **Effort:** S each. **Depends on:** demand.
-## Completed
-
-## Make env-save channel sync one atomic lifecycle-lock op
-- **What:** `PUT /api/env` runs remove-channels → write env → add-channels as two separately queued lock ops (lib/server/routes/system.js + gateway.js `syncChannelConfig`). A gateway restart queued between them launches with channels removed-but-not-yet-re-added (final config state self-corrects when the add runs, but the running gateway may need another restart to pick it up). Wrap remove+write+add in a single uniquely-keyed lock op (expose a narrow `withGatewayLifecycleLock` from gateway.js or a dedicated `syncChannelConfigForEnvSave`).
-- **Why:** Adversarial review M4 on the ship pass (2026-08-28). Rare (requires an operator restart racing an env save) and bounded, but the invariant "env save is atomic against lifecycle ops" held under execSync and silently weakened in the async conversion.
-- **Effort:** M (test updates across routes-system + coalescing suites). **Depends on:** nothing.
-- **Completed:** v0.9.37 (2026-08-28) — `PUT /api/env` acquires the shared gateway lifecycle lock once around the full remove → write → add sequence (lib/server/routes/system.js `env_sync` op); `syncChannelConfig` itself stays lock-free, so the whole save is one atomic lifecycle operation.
 
 ## P3 — Guided state-DB restore when a rollback is refused
 - **What:** When boot refuses a rollback ("no OpenClaw version on this box can read the migrated state", `rollbackRefused` latch, issue #21), the notification names the newest `openclaw-backup-*.tar.gz` and points at the runbook — but restoring it is still a manual CLI dance. Build a guided flow (Upgrade page CTA → staged extract → `openclaw backup` restore steps → restart) that walks the operator through it.
@@ -306,3 +299,11 @@
 - **What:** The Bug-7 fix (issue #21) falls back to `channels.telegram.allowFrom` numeric IDs when no pairing files exist. Slack was deliberately excluded: its allowFrom entries need per-account token derivation (`slack-<account>-allowFrom.json` naming), and Slack user IDs require a `conversations.open` call before posting. Add the Slack equivalent if a real box hits `no_channels_delivered` with only Slack configured.
 - **Context:** lib/server/watchdog-notify.js (`readChannelAllowFrom`, fan-out fallback block with the exclusion comment).
 - **Effort:** S. **Depends on:** nothing.
+
+## Completed
+
+## Make env-save channel sync one atomic lifecycle-lock op
+- **What:** `PUT /api/env` runs remove-channels → write env → add-channels as two separately queued lock ops (lib/server/routes/system.js + gateway.js `syncChannelConfig`). A gateway restart queued between them launches with channels removed-but-not-yet-re-added (final config state self-corrects when the add runs, but the running gateway may need another restart to pick it up). Wrap remove+write+add in a single uniquely-keyed lock op (expose a narrow `withGatewayLifecycleLock` from gateway.js or a dedicated `syncChannelConfigForEnvSave`).
+- **Why:** Adversarial review M4 on the ship pass (2026-08-28). Rare (requires an operator restart racing an env save) and bounded, but the invariant "env save is atomic against lifecycle ops" held under execSync and silently weakened in the async conversion.
+- **Effort:** M (test updates across routes-system + coalescing suites). **Depends on:** nothing.
+- **Completed:** v0.9.37 (2026-08-28) — `PUT /api/env` acquires the shared gateway lifecycle lock once around the full remove → write → add sequence (lib/server/routes/system.js `env_sync` op); `syncChannelConfig` itself stays lock-free, so the whole save is one atomic lifecycle operation.

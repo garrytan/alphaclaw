@@ -42,6 +42,11 @@ with one of:
 - `apply_in_progress` — a channel update is running; wait for it to settle.
 - `reconcile_not_needed` — no hold is recorded and the gateway is already
   running; the doctor never touches a live gateway's databases.
+- `gateway_running` — a hold is recorded but a gateway process is running
+  anyway, which means it was started outside AlphaClaw (a manual
+  `openclaw gateway` or an external supervisor — the hold is exactly
+  AlphaClaw refusing to launch one). The migration never touches live
+  databases; stop that process, then retry.
 - `reconcile_still_held` — the migration failed again; the message carries
   the hold reason.
 - `reconcile_skipped` — the reconciler declined to run (e.g. the openclaw

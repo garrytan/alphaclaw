@@ -62,16 +62,18 @@ npm run test:watch    # Watch mode
 npm run test:coverage # With coverage report
 npm run test:live     # Live e2e: real npm/GitHub catalog + package applies (~5 min, network)
 npm run test:live:dev # Live e2e: real dev-channel source build only (20-35 min, ~5 GB disk)
+npm run test:container # Container e2e: full production-container upgrade journey (~25-40 min; needs docker + network)
 npm run test:ui       # Browser UI smoke: real server + headless Chromium (opt-in; self-skips without a browse CLI — set BROWSE_BIN)
 ```
 
-AlphaClaw uses [Vitest](https://vitest.dev/) for testing. `npm test` is hermetic by design: the live tiers under `tests/live/` run only with `OPENCLAW_LIVE_E2E=1` (the `test:live` scripts set it for you), so a green `npm test` does not exercise the real npm registry, GitHub API, or OpenClaw updater. `npm run test:ui` (`tests/browser/upgrade-ui-smoke.sh`) is likewise opt-in: it boots a real AlphaClaw server and drives it with a headless Chromium, needs network for the version catalog, and exits 0 with a SKIP message when no browse CLI is available (`BROWSE_BIN` points at the driver; `UI_SMOKE_PORT` overrides the default port).
+AlphaClaw uses [Vitest](https://vitest.dev/) for testing. `npm test` is hermetic by design: the live tiers under `tests/live/` run only with `OPENCLAW_LIVE_E2E=1` (the `test:live` scripts set it for you), so a green `npm test` does not exercise the real npm registry, GitHub API, or OpenClaw updater. `npm run test:ui` (`tests/browser/upgrade-ui-smoke.sh`) is likewise opt-in: it boots a real AlphaClaw server and drives it with a headless Chromium, needs network for the version catalog, and exits 0 with a SKIP message when no browse CLI is available (`BROWSE_BIN` points at the driver; `UI_SMOKE_PORT` overrides the default port). `npm run test:container` (`tests/container/`) is the heaviest opt-in tier: it builds an image from the reference `Dockerfile`, boots a real stable OpenClaw gateway inside it, drives a stable→beta upgrade through the browser UI with headless Chromium, and proves the result survives a container replacement and restart — it needs docker plus network, and runs in CI nightly and as a PR gate for upgrade-path changes (`.github/workflows/container-e2e.yml`).
 
 ### Project Structure
 
 - `bin/` - CLI entrypoint (`alphaclaw.js`)
 - `lib/` - Core library (gateway manager, watchdog, setup UI, webhooks, etc.)
 - `tests/` - Test suites
+- `docs/` - Design documents (`docs/designs/`) and operator runbooks (e.g. `docs/upgrade-troubleshooting.md`)
 
 ## Submitting Changes
 
