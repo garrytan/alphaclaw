@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   cachedFetch,
   getCached,
+  getCachedAt,
   invalidateCache,
   invalidateCachePrefix,
   setCached,
@@ -24,6 +25,45 @@ describe("frontend/api-cache", () => {
     invalidateCache("basic-key");
     expect(getCached("basic-key")).toBe(null);
     expect(invalidateCache("")).toBeUndefined();
+  });
+
+  it("persists whitelisted keys to sessionStorage with an as-of stamp", () => {
+    const store = new Map();
+    const fakeStorage = {
+      get length() {
+        return store.size;
+      },
+      key: (i) => [...store.keys()][i] ?? null,
+      getItem: (k) => (store.has(k) ? store.get(k) : null),
+      setItem: (k, v) => store.set(k, String(v)),
+      removeItem: (k) => store.delete(k),
+    };
+    vi.stubGlobal("sessionStorage", fakeStorage);
+    try {
+      // Catalog keys persist; live-status keys never do.
+      setCached("/api/openclaw/catalog?channel=stable", { versions: [1] });
+      setCached("/api/watchdog/events?limit=20", { events: [] });
+      expect(store.has("acApiCache:/api/openclaw/catalog?channel=stable")).toBe(
+        true,
+      );
+      expect(store.has("acApiCache:/api/watchdog/events?limit=20")).toBe(false);
+
+      const persisted = JSON.parse(
+        store.get("acApiCache:/api/openclaw/catalog?channel=stable"),
+      );
+      expect(persisted.data).toEqual({ versions: [1] });
+      expect(typeof persisted.fetchedAt).toBe("number");
+      expect(getCachedAt("/api/openclaw/catalog?channel=stable")).toBe(
+        persisted.fetchedAt,
+      );
+
+      invalidateCache("/api/openclaw/catalog?channel=stable");
+      expect(store.has("acApiCache:/api/openclaw/catalog?channel=stable")).toBe(
+        false,
+      );
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it("bypasses caching for empty keys or non-function fetchers", async () => {
@@ -70,6 +110,31 @@ describe("frontend/api-cache", () => {
       expect(onRevalidate).toHaveBeenCalledWith("fresh-value"),
     );
     expect(getCached("swr-key")).toBe("fresh-value");
+  });
+
+  it("keeps serving stale data when a background revalidation fails", async () => {
+    setCached("swr-fail-key", "stale-value");
+    const fetcher = vi.fn(async () => {
+      throw new Error("upstream down");
+    });
+    const onRevalidate = vi.fn();
+
+    // A failed background revalidation must neither reject this call nor
+    // surface as an unhandled rejection — the stale entry stays.
+    await expect(
+      cachedFetch("swr-fail-key", fetcher, { maxAgeMs: 0, onRevalidate }),
+    ).resolves.toBe("stale-value");
+    await vi.waitFor(() => expect(fetcher).toHaveBeenCalledTimes(1));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(onRevalidate).not.toHaveBeenCalled();
+    expect(getCached("swr-fail-key")).toBe("stale-value");
+
+    // The in-flight slot was released: a later stale read retries the fetch.
+    await expect(
+      cachedFetch("swr-fail-key", fetcher, { maxAgeMs: 0 }),
+    ).resolves.toBe("stale-value");
+    await vi.waitFor(() => expect(fetcher).toHaveBeenCalledTimes(2));
   });
 
   it("revalidates stale data without an onRevalidate callback", async () => {

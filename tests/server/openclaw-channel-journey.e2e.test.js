@@ -1,3 +1,4 @@
+const crypto = require("crypto");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
@@ -73,21 +74,49 @@ const writePackageFixture = (
 };
 
 const defaultRunnerImpl = async (opts) => {
-  // A real `backup create --output <dir> --verify` writes a file; the apply
-  // flow's hard-gate now checks an artifact actually appeared, so the fake
-  // must be faithful and write one.
+  // Faithful model of the real CLI's --output contract (verified against the
+  // pinned openclaw 2026.7.1-2 source, dist/backup-create resolveOutputPath):
+  // an existing directory (or trailing separator) gets a timestamped archive
+  // INSIDE it; any other path IS the archive file, refused if it already
+  // exists; the parent is mkdir -p'd. The old stub only modeled the
+  // directory branch — which is exactly why issues #7/#9 were invisible.
   if (opts.command === "openclaw" && opts.args?.[0] === "backup") {
-    try {
-      const outIdx = opts.args.indexOf("--output");
-      const outDir = outIdx >= 0 ? opts.args[outIdx + 1] : null;
-      if (outDir) {
-        fs.mkdirSync(outDir, { recursive: true });
-        fs.writeFileSync(
-          path.join(outDir, `backup-${Date.now()}.tar`),
-          "stub backup\n",
-        );
+    const outIdx = opts.args.indexOf("--output");
+    const out = outIdx >= 0 ? opts.args[outIdx + 1] : null;
+    if (out) {
+      try {
+        const isDirTarget =
+          out.endsWith(path.sep) ||
+          (fs.existsSync(out) && fs.statSync(out).isDirectory());
+        const outFile = isDirTarget
+          ? path.join(out, `${crypto.randomUUID()}-openclaw-backup.tar.gz`)
+          : out;
+        if (fs.existsSync(outFile)) {
+          return {
+            ok: false,
+            code: 1,
+            tail: `Error: Refusing to overwrite existing backup archive: ${outFile}\n`,
+            timedOut: false,
+          };
+        }
+        fs.mkdirSync(path.dirname(outFile), { recursive: true });
+        fs.writeFileSync(outFile, "stub backup archive\n");
+        return {
+          ok: true,
+          code: 0,
+          tail: `Backup archive: ${outFile}\nCreated ${outFile}\nArchive verification: passed\n`,
+          timedOut: false,
+        };
+      } catch (error) {
+        // e.g. ENOTDIR when a legacy archive file blocks the parent path.
+        return {
+          ok: false,
+          code: 1,
+          tail: `Error: ${error.message}\n`,
+          timedOut: false,
+        };
       }
-    } catch {}
+    }
     return { ok: true, code: 0, tail: "backup verified\n", timedOut: false };
   }
   if (opts.command === "node" && opts.args?.[1] === "--version") {
@@ -259,8 +288,14 @@ describe("FULL JOURNEY: stable → beta → restart → stays beta", () => {
     const recordAfterApply = journey.readLedger().readRun(operationId);
     expect(recordAfterApply.state).toBe("restart_expected");
     expect(recordAfterApply.backup).toEqual(
-      expect.objectContaining({ verified: true, noBackup: false }),
+      expect.objectContaining({
+        verified: true,
+        noBackup: false,
+        // The exact per-run archive path is recorded (#7/#9 fix).
+        file: expect.stringMatching(/openclaw-backup.*\.tar\.gz$/),
+      }),
     );
+    expect(fs.statSync(recordAfterApply.backup.file).size).toBeGreaterThan(0);
 
     // Durable log: step transitions AND the streamed npm output, readable
     // over HTTP by validated operationId.
@@ -320,6 +355,45 @@ describe("FULL JOURNEY: stable → beta → restart → stays beta", () => {
         (n) => !n.opts?.id || !n.opts.id.startsWith("apply-failed-"),
       ),
     ).toBe(true);
+  });
+
+  it("two consecutive hard-gated applies leave two distinct archives (issue #7 regression)", async () => {
+    const journey = createJourney();
+    const backupsDir = path.join(journey.rootDir, "backups", "openclaw");
+    const archiveNames = () =>
+      fs
+        .readdirSync(backupsDir)
+        .filter((name) => /openclaw-backup.*\.tar\.gz$/.test(name));
+
+    // ── Process 1: first prerelease apply (hard backup gate). ───────────────
+    const p1 = journey.bootInstance({ withHttp: true });
+    expect(p1.sync.syncAtBoot().ok).toBe(true);
+    const first = await request(p1.app)
+      .post("/api/openclaw/apply")
+      .send({ channel: "beta", version: kBetaVersion });
+    expect([200, 202]).toContain(first.status);
+    await waitFor(() => {
+      const run = p1.sync.getChannelInfo().lastUpdateRun;
+      return run && run.finishedAt != null && run.ok === true;
+    });
+    expect(archiveNames()).toHaveLength(1);
+
+    // ── Process 2: activation restart, then a SECOND prerelease apply over
+    // the same disk. The pre-fix code reused one fixed archive path, so this
+    // apply failed forever with "Refusing to overwrite existing backup
+    // archive" (#7). Unique per-run paths make it just work. ─────────────────
+    journey.nowRef.now += 5_000;
+    const p2 = journey.bootInstance({ withHttp: true });
+    expect(p2.sync.syncAtBoot().action).toBe("activated");
+    const second = await request(p2.app)
+      .post("/api/openclaw/apply")
+      .send({ channel: "beta", version: "1.1.0-beta.2" });
+    expect([200, 202]).toContain(second.status);
+    await waitFor(() => {
+      const run = p2.sync.getChannelInfo().lastUpdateRun;
+      return run && run.finishedAt != null && run.ok === true;
+    });
+    expect(archiveNames()).toHaveLength(2);
   });
 
   it("failure variant: a failed verify records a failed run, notifies, and keeps the log", async () => {

@@ -479,3 +479,114 @@ describe("server/usage-db", () => {
     expect(usage.totals.totalTokens).toBe(200_000);
   });
 });
+
+// withStaleOnBusy: reads that hit SQLITE_BUSY after the 250ms busy_timeout
+// serve the previous result for the same args instead of 500ing. The module's
+// db handle is a DatabaseSync instance, so a prototype spy on prepare() is the
+// deterministic injection point for busy errors — no cross-process writer.
+describe("server/usage-db stale-on-busy reads", () => {
+  const insertCronEvent = (database) => {
+    database
+      .prepare(
+        `INSERT INTO usage_events (
+           timestamp, session_id, session_key, run_id, provider, model,
+           input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
+           total_tokens
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        Date.now(),
+        "raw-busy",
+        "agent:main:cron:busy-job:run:1",
+        "run-busy",
+        "openai",
+        "gpt-4o",
+        1_000,
+        0,
+        0,
+        0,
+        1_000,
+      );
+  };
+
+  const makeBusyPrepareSpy = (error) =>
+    vi.spyOn(DatabaseSync.prototype, "prepare").mockImplementation(() => {
+      throw error;
+    });
+
+  it("returns the previous (stale) result when a repeat read hits SQLITE_BUSY", () => {
+    const { database, getSessionUsageByKeyPattern } =
+      createUsageDbContext("usage-db-busy-stale-");
+    insertCronEvent(database);
+    const options = { keyPattern: "%:cron:busy-job%", sinceMs: 0 };
+
+    const fresh = getSessionUsageByKeyPattern(options);
+    expect(fresh.totals.totalTokens).toBe(1_000);
+
+    const prepareSpy = makeBusyPrepareSpy(new Error("database is locked"));
+    const stale = getSessionUsageByKeyPattern(options);
+
+    expect(prepareSpy).toHaveBeenCalled();
+    // The exact cached result object: served as-is, not recomputed.
+    expect(stale).toBe(fresh);
+  });
+
+  it("rethrows SQLITE_BUSY on a first-ever call with no cached value", () => {
+    const { database, getSessionUsageByKeyPattern } =
+      createUsageDbContext("usage-db-busy-first-");
+    insertCronEvent(database);
+
+    makeBusyPrepareSpy(new Error("database is locked"));
+
+    expect(() =>
+      getSessionUsageByKeyPattern({ keyPattern: "%:cron:busy-job%", sinceMs: 0 }),
+    ).toThrow(/locked/);
+  });
+
+  it("rethrows non-busy errors even when a stale value is cached", () => {
+    const { database, getSessionUsageByKeyPattern } =
+      createUsageDbContext("usage-db-nonbusy-");
+    insertCronEvent(database);
+    const options = { keyPattern: "%:cron:busy-job%", sinceMs: 0 };
+
+    getSessionUsageByKeyPattern(options);
+    makeBusyPrepareSpy(new Error("database disk image is malformed"));
+
+    expect(() => getSessionUsageByKeyPattern(options)).toThrow(/malformed/);
+  });
+
+  it("treats errcode 5 as busy even when the message never says busy/locked", () => {
+    const { database, getSessionUsageByKeyPattern } =
+      createUsageDbContext("usage-db-errcode-");
+    insertCronEvent(database);
+    const options = { keyPattern: "%:cron:busy-job%", sinceMs: 0 };
+
+    const fresh = getSessionUsageByKeyPattern(options);
+    // node:sqlite surfaces the structured code; the message alone would NOT
+    // match the /busy|locked/ fallback regex.
+    makeBusyPrepareSpy(
+      Object.assign(new Error("operation failed"), { errcode: 5 }),
+    );
+
+    expect(getSessionUsageByKeyPattern(options)).toBe(fresh);
+  });
+
+  it("closeUsageDb clears the fallback cache: a busy read after reinit rethrows", () => {
+    const context = createUsageDbContext("usage-db-cache-clear-");
+    const { database, getSessionUsageByKeyPattern, closeUsageDb, initUsageDb } =
+      context;
+    insertCronEvent(database);
+    const options = { keyPattern: "%:cron:busy-job%", sinceMs: 0 };
+
+    const fresh = getSessionUsageByKeyPattern(options);
+    expect(fresh.totals.totalTokens).toBe(1_000);
+
+    closeUsageDb();
+    initUsageDb({ rootDir: context.rootDir });
+
+    // Same args as the previously-cached read, but close cleared the cache:
+    // busy must surface instead of resurrecting a pre-close result.
+    makeBusyPrepareSpy(new Error("database is locked"));
+    expect(() => getSessionUsageByKeyPattern(options)).toThrow(/locked/);
+  });
+});
