@@ -809,7 +809,7 @@ describe("server/routes/system", () => {
           openclaw: {
             releaseChannel: "stable",
             overseer: { enabled: false },
-              medic: { enabled: true },
+            medic: { enabled: true },
           },
         },
         team: {

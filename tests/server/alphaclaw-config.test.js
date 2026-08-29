@@ -180,6 +180,18 @@ describe("server/alphaclaw-config", () => {
     expect(readOpenclawMedicEnabled({ openclawDir })).toBe(false);
   });
 
+  it("fails CLOSED on a corrupt config instead of re-enabling a disabled medic", () => {
+    const openclawDir = createTempOpenclawDir();
+    const configPath = path.join(openclawDir, "alphaclaw.json");
+
+    // Operator turned the medic off, then the file gets torn/corrupted.
+    updateOpenclawMedicEnabled({ openclawDir, enabled: false });
+    fs.writeFileSync(configPath, '{ "updates": { "openclaw": { "medic":', "utf8");
+
+    // The generic defaults would say enabled — the medic gate must not.
+    expect(readOpenclawMedicEnabled({ openclawDir })).toBe(false);
+  });
+
   it("persists the medic toggle and reports changed", () => {
     const openclawDir = createTempOpenclawDir();
 

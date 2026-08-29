@@ -211,6 +211,27 @@ describe("server/llm-client", () => {
     expect(result.attempts[0].error).toMatch(/timed out/);
   });
 
+  it("labels an undici-style body abort (TypeError: terminated) as a timeout", async () => {
+    // undici wraps a body-read abort in TypeError, not AbortError — the
+    // signal state is the truth.
+    const fetchImpl = vi.fn(async (url, { signal }) => ({
+      ok: true,
+      status: 200,
+      json: () =>
+        new Promise((resolve, reject) => {
+          signal.addEventListener("abort", () => reject(new TypeError("terminated")));
+        }),
+    }));
+    const client = createFrontierLlmClient({
+      env: { GEMINI_API_KEY: "g" },
+      fetchImpl,
+    });
+
+    const result = await client.complete({ prompt: "p", timeoutMs: 20 });
+    expect(result.ok).toBe(false);
+    expect(result.attempts[0].error).toMatch(/timed out after 20ms/);
+  });
+
   it("stops trying candidates once the overall deadline is spent", async () => {
     let now = 0;
     const fetchImpl = vi.fn(async () => {

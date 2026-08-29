@@ -276,6 +276,52 @@ describe("server/gateway-medic", () => {
       expect(outcome).toMatchObject({ fixed: true, tier: "ai_doctor_fix" });
     });
 
+    it("reports failure when the model-chosen doctor_fix fails", async () => {
+      const openclawDir = mkOpenclawDir();
+      writeConfig(openclawDir, { bridge: { legacy: true } });
+      const runDoctorFix = vi.fn(async () => ({ ok: false }));
+      const medic = createMedic(openclawDir, {
+        llmClient: fakeLlm(
+          JSON.stringify({ diagnosis: "d", remedy: "doctor_fix", confidence: "high" }),
+        ),
+        runDoctorFix,
+      });
+
+      const outcome = await medic.run({
+        exitCode: 78,
+        stderrTail: ["bridge: Invalid input"],
+        allowDoctorFix: true,
+      });
+
+      expect(outcome).toMatchObject({
+        fixed: false,
+        tier: "ai_doctor_fix",
+        error: "doctor --fix failed",
+      });
+    });
+
+    it("refuses a model-requested doctor_fix when the caller disallows it", async () => {
+      const openclawDir = mkOpenclawDir();
+      writeConfig(openclawDir, { bridge: { legacy: true } });
+      const runDoctorFix = vi.fn(async () => ({ ok: true }));
+      const medic = createMedic(openclawDir, {
+        llmClient: fakeLlm(
+          JSON.stringify({ diagnosis: "d", remedy: "doctor_fix", confidence: "high" }),
+        ),
+        runDoctorFix,
+      });
+
+      const outcome = await medic.run({
+        exitCode: 78,
+        stderrTail: ["bridge: Invalid input"],
+        allowDoctorFix: false, // stabilization window
+      });
+
+      expect(runDoctorFix).not.toHaveBeenCalled();
+      expect(outcome.fixed).toBe(false);
+      expect(outcome.error).toMatch(/not permitted/);
+    });
+
     it("scrubs secret-shaped values from every evidence stream before the API call", async () => {
       const openclawDir = mkOpenclawDir();
       writeConfig(openclawDir, {
@@ -464,6 +510,186 @@ describe("server/gateway-medic", () => {
     // Unparseable config: body withheld entirely rather than sent raw.
     expect(capture.prompt).toContain("body withheld");
     expect(capture.prompt).not.toContain("broken json");
+  });
+
+  it("reports failure when doctor --fix itself fails (fallback tier)", async () => {
+    const openclawDir = mkOpenclawDir();
+    writeConfig(openclawDir, { audit: { legacy: true } });
+    const runDoctorFix = vi.fn(async () => ({ ok: false, code: 1 }));
+    const medic = createMedic(openclawDir, { runDoctorFix });
+
+    const outcome = await medic.run({
+      exitCode: 78,
+      stderrTail: ['Unrecognized key: "audit"'],
+      allowDoctorFix: true,
+    });
+
+    expect(runDoctorFix).toHaveBeenCalledTimes(1);
+    expect(outcome).toMatchObject({
+      fixed: false,
+      tier: "doctor_fix",
+      error: "doctor --fix failed",
+    });
+  });
+
+  it("caps the doctor --fix timeout to the remaining run budget", async () => {
+    const openclawDir = mkOpenclawDir();
+    writeConfig(openclawDir, { audit: {} });
+    const runDoctorFix = vi.fn(async () => ({ ok: true }));
+    const medic = createMedic(openclawDir, { runDoctorFix });
+
+    await medic.run({
+      exitCode: 78,
+      stderrTail: ['Unrecognized key: "audit"'],
+      allowDoctorFix: true,
+      budgetMs: 120_000,
+    });
+
+    const [{ timeoutMs }] = runDoctorFix.mock.calls[0];
+    expect(timeoutMs).toBeGreaterThan(0);
+    expect(timeoutMs).toBeLessThanOrEqual(120_000);
+  });
+
+  it("escalates to doctor when the blamed managed key is already absent (stale blame)", async () => {
+    // One stale managed-key blame line must not disable the whole medic.
+    const openclawDir = mkOpenclawDir();
+    writeConfig(openclawDir, { gateway: { port: 18789 } }); // no stripe present
+    const runDoctorFix = vi.fn(async () => ({ ok: true }));
+    const medic = createMedic(openclawDir, { runDoctorFix });
+
+    const outcome = await medic.run({
+      exitCode: 78,
+      stderrTail: kStripeCrashStderr,
+      allowDoctorFix: true,
+    });
+
+    expect(runDoctorFix).toHaveBeenCalledTimes(1);
+    expect(outcome).toMatchObject({ fixed: true, tier: "doctor_fix" });
+  });
+
+  it("never treats a security-critical blamed path as removable", async () => {
+    const openclawDir = mkOpenclawDir();
+    writeConfig(openclawDir, { gateway: { auth: { mode: "token" } } });
+    const capture = {};
+    const medic = createMedic(openclawDir, {
+      llmClient: {
+        getAvailability: () => ({ available: true, provider: "anthropic", model: "m" }),
+        complete: vi.fn(async ({ prompt }) => {
+          capture.prompt = prompt;
+          return {
+            ok: true,
+            provider: "anthropic",
+            model: "m",
+            text: JSON.stringify({
+              diagnosis: "d",
+              remedy: "remove_keys",
+              keys: ["gateway.auth"],
+              confidence: "high",
+            }),
+          };
+        }),
+      },
+    });
+
+    const outcome = await medic.run({
+      exitCode: 78,
+      // The gateway (or an injected line) blames the auth subtree directly.
+      stderrTail: ['gateway: Unrecognized key: "auth"'],
+    });
+
+    expect(outcome.fixed).toBe(false);
+    expect(readConfig(openclawDir).gateway.auth).toEqual({ mode: "token" });
+    // The protected path never reached the model's removable list either.
+    expect(capture.prompt).toContain('"removableKeyPaths": []');
+  });
+
+  it("ignores unrecognized-key text embedded mid-line (echoed values)", () => {
+    const blamed = extractBlamedConfigPaths([
+      'Invalid input: received "gateway: Unrecognized key: \\"auth\\"" for field x',
+    ]);
+    expect(blamed.unrecognized).toEqual([]);
+  });
+
+  it("removes a literal dotted ROOT key instead of walking it as a path", async () => {
+    const openclawDir = mkOpenclawDir();
+    writeConfig(openclawDir, {
+      "channels.telegram.enabled": true, // literal root key with dots
+      channels: { telegram: { enabled: true } }, // unrelated nested setting
+    });
+    const medic = createMedic(openclawDir, {
+      llmClient: {
+        getAvailability: () => ({ available: true, provider: "anthropic", model: "m" }),
+        complete: vi.fn(async () => ({
+          ok: true,
+          provider: "anthropic",
+          model: "m",
+          text: JSON.stringify({
+            diagnosis: "d",
+            remedy: "remove_keys",
+            keys: ["channels.telegram.enabled"],
+            confidence: "high",
+          }),
+        })),
+      },
+    });
+
+    const outcome = await medic.run({
+      exitCode: 78,
+      stderrTail: ['Unrecognized key: "channels.telegram.enabled"'],
+    });
+
+    expect(outcome.fixed).toBe(true);
+    const after = readConfig(openclawDir);
+    expect("channels.telegram.enabled" in after).toBe(false);
+    expect(after.channels.telegram.enabled).toBe(true); // nested untouched
+  });
+
+  it("shape-redacts provider keys, cookies, and signed URLs bound for the model", async () => {
+    const openclawDir = mkOpenclawDir();
+    writeConfig(openclawDir, { audit: {} });
+    const capture = {};
+    const medic = createMedic(openclawDir, {
+      llmClient: {
+        getAvailability: () => ({ available: true, provider: "anthropic", model: "m" }),
+        complete: vi.fn(async ({ prompt }) => {
+          capture.prompt = prompt;
+          return {
+            ok: true,
+            provider: "anthropic",
+            model: "m",
+            text: JSON.stringify({ diagnosis: "d", remedy: "none", confidence: "high" }),
+          };
+        }),
+      },
+    });
+
+    await medic.run({
+      exitCode: 78,
+      stderrTail: [
+        'Unrecognized key: "audit"',
+        "google key AIzaSyA1234567890abcdefghijklmnopqrs rejected",
+        "github token ghp_AbCdEfGhIjKlMnOpQrStUvWxYz012345 expired",
+        "slack xoxb-1234567890-abcdefghijk failed",
+        "aws AKIAIOSFODNN7EXAMPLE denied",
+        "webhook https://hooks.slack.com/services/T000/B000/XXXX unreachable",
+        "db postgres://admin:hunter2pass@db.internal:5432/prod down",
+        "Cookie: session=deadbeefcafe1234; theme=dark",
+        "fetch https://bucket.s3.amazonaws.com/f?X-Amz-Signature=abc123def456 failed",
+      ],
+    });
+
+    const prompt = capture.prompt;
+    expect(prompt).not.toContain("AIzaSyA1234567890abcdefghijklmnopqrs");
+    expect(prompt).not.toContain("ghp_AbCdEfGhIjKlMnOpQrStUvWxYz012345");
+    expect(prompt).not.toContain("xoxb-1234567890-abcdefghijk");
+    expect(prompt).not.toContain("AKIAIOSFODNN7EXAMPLE");
+    expect(prompt).not.toContain("T000/B000/XXXX");
+    expect(prompt).not.toContain("hunter2pass");
+    expect(prompt).not.toContain("session=deadbeefcafe1234");
+    expect(prompt).not.toContain("X-Amz-Signature=abc123def456");
+    // Evidence structure survives redaction.
+    expect(prompt).toContain("postgres://***@db.internal:5432/prod");
+    expect(prompt).toContain('Unrecognized key: "audit"');
   });
 
   it("keeps only the newest three medic backups", async () => {

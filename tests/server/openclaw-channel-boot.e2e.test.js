@@ -100,6 +100,7 @@ const createHarness = ({
   sentinelVersion = null,
   storeWrap = (store) => store,
   execFileSyncImpl = undefined,
+  fsModule = undefined,
 } = {}) => {
   delete process.env.OPENCLAW_GIT_DIR;
   const rootDir = mkTemp("alphaclaw-boot-e2e-root-");
@@ -155,6 +156,7 @@ const createHarness = ({
     logger: kSilentLogger,
     backupsDir: path.join(rootDir, "backups", "openclaw"),
     ...(execFileSyncImpl ? { execFileSyncImpl } : {}),
+    ...(fsModule ? { fsModule } : {}),
   });
 
   return {
@@ -846,6 +848,46 @@ describe("server/openclaw-channel boot sync (e2e)", () => {
           path.join(placeholder.openclawDir, "openclaw.json"),
           "utf8",
         ),
+      );
+      expect(cfg.gateway?.controlUi?.environment).toBeUndefined();
+    });
+
+    it("does not record stripe ownership when the config write fails", () => {
+      // Ownership is recorded AFTER the locked openclaw.json write commits: a
+      // failed write must leave record and file consistent (both without the
+      // stripe), or the two desync and later removal logic misfires.
+      const failingFs = new Proxy(fs, {
+        get(target, prop) {
+          if (prop === "writeFileSync") {
+            return (file, ...rest) => {
+              const name = String(file);
+              if (name.includes("openclaw.json") && !name.endsWith(".lock")) {
+                throw new Error("ENOSPC: fake disk full");
+              }
+              return target.writeFileSync(file, ...rest);
+            };
+          }
+          const value = target[prop];
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      });
+      const harness = createHarness({
+        pin: "2026.8.1",
+        channel: "beta",
+        installedVersion: "2026.8.1",
+        sentinelVersion: "2026.8.1",
+        execFileSyncImpl: vi.fn(() => ""),
+        fsModule: failingFs,
+      });
+      writeConfig(harness.openclawDir, { gateway: {} });
+
+      const result = harness.sync.syncAtBoot();
+      expect(result.ok).toBe(true); // fail-open boot
+      // The write never committed, so no ownership was recorded and the
+      // on-disk config still has no stripe.
+      expect(harness.store.readState().managedStripe ?? null).toBe(null);
+      const cfg = JSON.parse(
+        fs.readFileSync(path.join(harness.openclawDir, "openclaw.json"), "utf8"),
       );
       expect(cfg.gateway?.controlUi?.environment).toBeUndefined();
     });
