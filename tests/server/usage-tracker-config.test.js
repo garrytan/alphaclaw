@@ -340,4 +340,38 @@ describe("server/usage-tracker-config", () => {
     expect(ensureUsageTrackerPluginConfig({ fsModule: fs, openclawDir })).toBe(false);
     expect(fs.readFileSync(configPath, "utf8")).toBe(before);
   });
+
+  // H10: the boot reconcile must be fail-closed. A fresh install (no file)
+  // initializes; an existing-but-unparseable file must NOT be rewritten as {}
+  // (which would wipe every channel/binding/hook/auth).
+  describe("boot fail-closed config handling (H10)", () => {
+    it("initializes a fresh install (no openclaw.json yet)", () => {
+      const openclawDir = createTempOpenclawDir();
+      const configPath = path.join(openclawDir, "openclaw.json");
+      expect(fs.existsSync(configPath)).toBe(false);
+
+      expect(
+        ensureUsageTrackerPluginConfig({ fsModule: fs, openclawDir }),
+      ).toBe(true);
+
+      const next = JSON.parse(fs.readFileSync(configPath, "utf8"));
+      expect(next.plugins.allow).toContain("usage-tracker");
+    });
+
+    it("throws (does NOT wipe) an existing unparseable config", () => {
+      const openclawDir = createTempOpenclawDir();
+      const configPath = path.join(openclawDir, "openclaw.json");
+      // Realistic hazard: a JSON5/comment-bearing config OpenClaw accepts but
+      // strict JSON.parse rejects, carrying real channel config.
+      const original =
+        '{\n  // managed by ops\n  "channels": { "telegram": { "enabled": true } }\n}\n';
+      fs.writeFileSync(configPath, original, "utf8");
+
+      expect(() =>
+        ensureUsageTrackerPluginConfig({ fsModule: fs, openclawDir }),
+      ).toThrow();
+      // The original file is left exactly as-is — never overwritten with {}.
+      expect(fs.readFileSync(configPath, "utf8")).toBe(original);
+    });
+  });
 });

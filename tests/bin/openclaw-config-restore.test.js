@@ -135,6 +135,7 @@ describe("restoreMissingOpenclawConfigFromRemote with injected modules", () => {
     existsSync: vi.fn(() => false),
     writeFileSync: vi.fn(),
     rmSync: vi.fn(),
+    mkdtempSync: vi.fn((prefix) => `${prefix}XXXX`),
     ...overrides,
   });
   const osModule = { tmpdir: () => "/fake-tmp" };
@@ -172,7 +173,13 @@ describe("restoreMissingOpenclawConfigFromRemote with injected modules", () => {
       reason: "empty_remote",
       branch: "release",
     });
-    const askPassPath = "/fake-tmp/alphaclaw-boot-git-askpass-4242.sh";
+    // Askpass is written into a private mkdtemp dir (H14), not a predictable
+    // ${pid} path.
+    const askPassDir = "/fake-tmp/alphaclaw-askpass-XXXX";
+    const askPassPath = `${askPassDir}/askpass.sh`;
+    expect(fsModule.mkdtempSync).toHaveBeenCalledWith(
+      "/fake-tmp/alphaclaw-askpass-",
+    );
     expect(fsModule.writeFileSync).toHaveBeenCalledTimes(1);
     expect(fsModule.writeFileSync).toHaveBeenCalledWith(
       askPassPath,
@@ -188,7 +195,10 @@ describe("restoreMissingOpenclawConfigFromRemote with injected modules", () => {
         GIT_ASKPASS: askPassPath,
       }),
     );
-    expect(fsModule.rmSync).toHaveBeenCalledWith(askPassPath, { force: true });
+    expect(fsModule.rmSync).toHaveBeenCalledWith(askPassDir, {
+      recursive: true,
+      force: true,
+    });
     expect(logs).toContain(
       "[alphaclaw] Remote config restore skipped: remote config empty",
     );

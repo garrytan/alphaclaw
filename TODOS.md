@@ -207,11 +207,6 @@
 - **Context:** TODO comment in lib/server/gateway.js; gate in lib/server/openclaw-feature-gates.js. Surfaced by the eng review's "handoff after the beta contract is read" sequencing decision.
 - **Effort:** S. **Depends on:** applying 2026.8.1-beta.3+ on a staging deployment.
 
-## P2 — Latch shutdown state before the self-update restart drain
-- **What:** `restartProcess` (lib/server/alphaclaw-version.js) calls `serverLifecycle.drain()` without setting the lifecycle's `exiting` latch, so a SIGTERM or uncaughtException landing inside the ≤10s drain window starts a second concurrent drain and exits before the successor process is spawned — on an unsupervised VPS that means a self-update ends with nothing running. Route the restart through a lifecycle method (e.g. `prepareForRestart()`) that latches `exiting` and disarms signal re-entry, or move the respawn inside the guarded exit path.
-- **Why:** Red-team finding on the downtime-remediation ship review (2026-08-28); bounded window but the failure mode is "permanently down after update".
-- **Effort:** S. **Depends on:** nothing.
-
 ## P3 — Keep the workspace manifest inside the fingerprint worker
 - **What:** Each background snapshot refresh round-trips the full manifest (multi-MB at 15k+ files) through `postMessage`, costing ~7ms serialize + ~15ms deserialize on the main thread per refresh. The worker is persistent — cache the previous manifest worker-side (send it only on the first request) and return only fingerprint/limited/stats (and, with the delta moved worker-side, the computed delta).
 - **Why:** Last recurring main-thread stall on the status path (bounded: once per 45s refresh window). Ship-review performance finding, 2026-08-28.
@@ -330,3 +325,14 @@
 - **Why:** Adversarial review M4 on the ship pass (2026-08-28). Rare (requires an operator restart racing an env save) and bounded, but the invariant "env save is atomic against lifecycle ops" held under execSync and silently weakened in the async conversion.
 - **Effort:** M (test updates across routes-system + coalescing suites). **Depends on:** nothing.
 - **Completed:** v0.9.37 (2026-08-28) — `PUT /api/env` acquires the shared gateway lifecycle lock once around the full remove → write → add sequence (lib/server/routes/system.js `env_sync` op); `syncChannelConfig` itself stays lock-free, so the whole save is one atomic lifecycle operation.
+
+## P3 — Guided state-DB restore when a rollback is refused
+- **What:** When boot refuses a rollback ("no OpenClaw version on this box can read the migrated state", `rollbackRefused` latch, issue #21), the notification names the newest `openclaw-backup-*.tar.gz` and points at the runbook — but restoring it is still a manual CLI dance. Build a guided flow (Upgrade page CTA → staged extract → `openclaw backup` restore steps → restart) that walks the operator through it.
+- **Why:** Auto-restore was deliberately rejected in the #21 fix plan (multi-GB extraction at boot, 2× disk requirement, silently discards state written since the backup). A guided flow keeps the human decision while removing the error-prone shell steps.
+- **Context:** Refusal path in lib/server/openclaw-channel-sync.js (`chooseBootRollbackTarget` → `rollback_refused` branch); recovery archive named via `newestArchiveName()`; runbook step 6 in AGENTS.md.
+- **Effort:** M. **Depends on:** nothing.
+
+## P3 — Slack allowFrom fallback for watchdog notifier targets
+- **What:** The Bug-7 fix (issue #21) falls back to `channels.telegram.allowFrom` numeric IDs when no pairing files exist. Slack was deliberately excluded: its allowFrom entries need per-account token derivation (`slack-<account>-allowFrom.json` naming), and Slack user IDs require a `conversations.open` call before posting. Add the Slack equivalent if a real box hits `no_channels_delivered` with only Slack configured.
+- **Context:** lib/server/watchdog-notify.js (`readChannelAllowFrom`, fan-out fallback block with the exclusion comment).
+- **Effort:** S. **Depends on:** nothing.

@@ -232,4 +232,56 @@ describe("server/commands", () => {
       expect(execMock).toHaveBeenCalledTimes(1);
     });
   });
+
+  // H1: shellCmd's echoed command must never print a secret-valued flag in the
+  // clear, even for values that don't match the ghp_/sk- prefixes.
+  it("masks --gateway-token and provider secret flags in the shellCmd log", async () => {
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    const execMock = vi.fn((cmd, opts, callback) => callback(null, "", ""));
+    const { createCommands } = loadCommandsModule({ execMock });
+    const { shellCmd } = createCommands({ gatewayEnv: () => ({}) });
+
+    await shellCmd(
+      'openclaw onboard --gateway-token "supersecret-gw" --anthropic-api-key plainkey123 --token bare-token-xyz',
+    );
+
+    const runningLog = logSpy.mock.calls.find(([message]) =>
+      String(message).startsWith("[onboard] Running:"),
+    );
+    expect(runningLog[0]).toContain("***");
+    expect(runningLog[0]).not.toContain("supersecret-gw");
+    expect(runningLog[0]).not.toContain("plainkey123");
+    expect(runningLog[0]).not.toContain("bare-token-xyz");
+  });
+
+  // execFileCmd runs argv-form (no /bin/sh), so an injection payload is inert.
+  it("passes argv through execFileCmd without a shell", async () => {
+    const execFileMock = vi.fn((file, args, opts, callback) =>
+      callback(null, "done\n", ""),
+    );
+    const originalExecFile = childProcess.execFile;
+    childProcess.execFile = execFileMock;
+    try {
+      delete require.cache[modulePath];
+      const { createCommands } = require(modulePath);
+      const { execFileCmd } = createCommands({ gatewayEnv: () => ({}) });
+
+      const payload = "a/b$(touch /tmp/pwn)";
+      await expect(
+        execFileCmd("openclaw", ["models", "set", "--", payload], {
+          timeout: 30000,
+        }),
+      ).resolves.toBe("done");
+
+      expect(execFileMock).toHaveBeenCalledWith(
+        "openclaw",
+        ["models", "set", "--", payload],
+        expect.objectContaining({ timeout: 30000 }),
+        expect.any(Function),
+      );
+    } finally {
+      childProcess.execFile = originalExecFile;
+      delete require.cache[modulePath];
+    }
+  });
 });
