@@ -531,6 +531,82 @@ describe("server/routes/openclaw-channel createSqliteBackupRunner", () => {
     ]);
   });
 
+  // ISSUE-001: live-captured openclaw 2026.8.1-beta.3 create report for an
+  // agent that has NEVER run (no per-agent DB file yet) — exit 1 plus this
+  // structured report on stdout, mirrored on stderr with CLI noise.
+  const kFreshAgentEnoentTail =
+    '{"ok": false, "error": {"type": "cli_error", "message": "ENOENT: no such file or directory, realpath \'/tmp/qa-oc-beta-state/agents/main/agent/openclaw-agent.sqlite\'"}}';
+
+  it("skips a fresh agent with no database yet instead of failing the run (ISSUE-001)", async () => {
+    const snapResearch = `${kRepoDir}/agent-research-2026-08-29T00-00-02`;
+    const { run, calls } = makeRunner({
+      config: { agents: { entries: { main: {}, research: {} } } },
+      results: [
+        ...okPair(kCreateReportTail),
+        // agent:main is fresh: create exits 1 with the captured ENOENT report.
+        { ok: false, code: 1, timedOut: false, tail: kFreshAgentEnoentTail },
+        ...okPair(makeCreateReportTail(snapResearch)),
+      ],
+    });
+    const result = await run();
+
+    // No verify for the skipped agent; the run continues to agent:research.
+    expect(calls).toHaveLength(5);
+    expect(result.ok).toBe(true);
+    expect(result.step).toBe("verify");
+    // Top-level snapshotPath stays the last VERIFIED success, never the skip.
+    expect(result.snapshotPath).toBe(snapResearch);
+    expect(result.databases).toEqual([
+      { target: "global", ok: true, step: "verify", snapshotPath: kSnapshotPath, code: 0, timedOut: false },
+      { target: "agent:main", ok: true, step: "skipped", snapshotPath: null, code: 1, timedOut: false, note: "no database yet — nothing to back up" },
+      { target: "agent:research", ok: true, step: "verify", snapshotPath: snapResearch, code: 0, timedOut: false },
+    ]);
+    expect(result.tail).toContain(
+      "Verified 2/3 databases: global, agent:research.",
+    );
+    expect(result.tail).toContain("skipped agent:main — no database yet");
+  });
+
+  it("a different agent create failure still fails the whole run (ISSUE-001)", async () => {
+    const otherFailureTails = [
+      "disk full",
+      // Structured cli_error that is NOT the missing-database shape.
+      '{"ok": false, "error": {"type": "cli_error", "message": "SQLITE_BUSY: database is locked"}}',
+    ];
+    for (const failureTail of otherFailureTails) {
+      const { run, runStreamed } = makeRunner({
+        config: { agents: { entries: { main: {} } } },
+        results: [
+          ...okPair(kCreateReportTail),
+          { ok: false, code: 1, timedOut: false, tail: failureTail },
+        ],
+      });
+      const result = await run();
+
+      expect(runStreamed, `tail: ${failureTail}`).toHaveBeenCalledTimes(3);
+      expect(result.ok, `tail: ${failureTail}`).toBe(false);
+      expect(result.step, `tail: ${failureTail}`).toBe("create");
+      expect(result.tail, `tail: ${failureTail}`).toContain(
+        "Create FAILED for database agent:main",
+      );
+    }
+  });
+
+  it("a global-database ENOENT is a real failure, never skipped (ISSUE-001)", async () => {
+    const { run, runStreamed } = makeRunner({
+      config: kGlobalOnlyConfig,
+      results: [
+        { ok: false, code: 1, timedOut: false, tail: kFreshAgentEnoentTail },
+      ],
+    });
+    const result = await run();
+
+    expect(runStreamed).toHaveBeenCalledTimes(1);
+    expect(result.ok).toBe(false);
+    expect(result.step).toBe("create");
+    expect(result.tail).toContain("Create FAILED for database global");
+  });
+
   it("reports unparseable create output as a failure and does not verify", async () => {
     const { run, runStreamed } = makeRunner({
       config: kGlobalOnlyConfig,
