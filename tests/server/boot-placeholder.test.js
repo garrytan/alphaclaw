@@ -103,6 +103,30 @@ describe("boot-placeholder", () => {
     expect(body).toContain("AlphaClaw is updating");
   });
 
+  it("renders mobile-safe: viewport meta, min-height centering, AA elapsed color", () => {
+    const handler = createBootPlaceholderHandler({
+      startedAtMs: 1_000,
+      maxUpdatingWindowMs: 60_000,
+      now: () => 1_000 + 5_000,
+    });
+    const res = createFakeRes();
+
+    handler(createFakeReq({ url: "/", headers: { accept: "text/html" } }), res);
+
+    const body = String(res.end.mock.calls[0][0]);
+    // Phones fall back to a ~980px viewport without this meta.
+    expect(body).toContain(
+      '<meta name="viewport" content="width=device-width, initial-scale=1">',
+    );
+    // min-height keeps flex centering without trapping overflow off-screen.
+    expect(body).toContain("min-height:100vh");
+    expect(body).not.toContain(";height:100vh");
+    // .elapsed uses the page's secondary text color — #6b7684 on #0b0e14
+    // fails WCAG AA at this size.
+    expect(body).toContain(".elapsed{color:#9aa4b2");
+    expect(body).not.toContain("#6b7684");
+  });
+
   it("serves non-browser clients a 503 JSON body with Retry-After", () => {
     const handler = createBootPlaceholderHandler({
       startedAtMs: 1_000,
@@ -150,7 +174,6 @@ const makeRun = (overrides = {}) => ({
 
 const makeProgress = (overrides = {}) => ({
   run: makeRun(),
-  backup: null,
   gatewayHold: null,
   ...overrides,
 });
@@ -291,14 +314,27 @@ describe("boot-placeholder progress page", () => {
     expect(body).not.toContain("Install dependencies");
   });
 
-  it("shows the verified-backup line only when the newest backup is verified", () => {
+  it("shows the verified-backup line only when THIS run's own backup verified", () => {
     const at = Date.UTC(2026, 0, 2, 14, 3, 0);
-    const verified = renderHtml(makeProgress({ backup: { at, verified: true, file: "b.tgz" } }));
+    const verified = renderHtml(
+      makeProgress({
+        run: makeRun({ backup: { at, verified: true, noBackup: false, file: "b.tgz" } }),
+      }),
+    );
     expect(verified).toContain("Verified backup taken at 14:03 UTC");
     expect(verified).not.toContain("b.tgz");
 
-    const unverified = renderHtml(makeProgress({ backup: { at, verified: false } }));
+    const unverified = renderHtml(
+      makeProgress({ run: makeRun({ backup: { at, verified: false } }) }),
+    );
     expect(unverified).not.toContain("Verified backup");
+
+    // Skipped/soft-failed backup: the run record carries noBackup and no
+    // verified flag — the line must be absent, not borrowed from elsewhere.
+    const skipped = renderHtml(
+      makeProgress({ run: makeRun({ backup: { at, noBackup: true } }) }),
+    );
+    expect(skipped).not.toContain("Verified backup");
   });
 
   it("adds the stall note when the newest step is older than 5 minutes and the run is not terminal", () => {
@@ -494,15 +530,50 @@ describe("createProgressReader", () => {
     ...overrides,
   });
 
-  it("resolves the pointed run plus newest backup and gatewayHold", () => {
-    writeFixture({ state: makeState(), runs: { [kOpId]: makeRun() } });
+  it("resolves the pointed run plus gatewayHold — the backup rides on the run record", () => {
+    writeFixture({
+      state: makeState(),
+      runs: {
+        [kOpId]: makeRun({
+          backup: { at: kNow - 45_000, file: "own.tgz", verified: true, noBackup: false },
+        }),
+      },
+    });
     const reader = createProgressReader({ rootDir, now: () => kNow });
 
     const progress = reader();
     expect(progress.run.operationId).toBe(kOpId);
     expect(progress.run.steps).toHaveLength(4);
-    expect(progress.backup.verified).toBe(true);
+    expect(progress.run.backup.verified).toBe(true);
+    // state.backups is deliberately NOT surfaced — it can belong to any prior
+    // run and must never stand in for this run's protection.
+    expect(progress.backup).toBeUndefined();
     expect(progress.gatewayHold).toBeNull();
+  });
+
+  it("never shows a stale state.backups entry when the current run took no backup", () => {
+    // state.backups[0] is a verified backup from a PRIOR run; the current
+    // run's own record says noBackup — the page must not claim protection.
+    writeFixture({
+      state: makeState(),
+      runs: { [kOpId]: makeRun({ backup: { at: kNow - 30_000, noBackup: true } }) },
+    });
+    const reader = createProgressReader({ rootDir, now: () => kNow });
+
+    const body = renderHtml(reader());
+    expect(body).toContain("Install dependencies");
+    expect(body).not.toContain("Verified backup");
+  });
+
+  it("shows the current run's verified backup end-to-end from disk", () => {
+    const at = Date.UTC(2026, 0, 2, 14, 3, 0);
+    writeFixture({
+      state: makeState(),
+      runs: { [kOpId]: makeRun({ backup: { at, verified: true, noBackup: false } }) },
+    });
+    const reader = createProgressReader({ rootDir, now: () => kNow });
+
+    expect(renderHtml(reader())).toContain("Verified backup taken at 14:03 UTC");
   });
 
   it("returns null when either file is garbage JSON (fail-open)", () => {

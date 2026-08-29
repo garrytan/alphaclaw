@@ -939,6 +939,66 @@ describe("server/openclaw-channel-sync", () => {
       expect(sync.isApplyInProgress()).toBe(true);
     });
 
+    it("persists the structured db-preflight verdict into the run record (issue #20 boot hint)", async () => {
+      const { DatabaseSync } = require("node:sqlite");
+      const preflightRunner = async (opts, fallback) => {
+        if (Array.isArray(opts.args) && opts.args.includes("preflight")) {
+          return {
+            ok: true,
+            code: 0,
+            tail: '{"status":"migration-required","foundVersion":1,"targetVersion":12}\n',
+            timedOut: false,
+          };
+        }
+        return fallback(opts);
+      };
+      const harness = createHarness({
+        pin: "1.0.0",
+        installedVersion: "1.0.0",
+        sentinelVersion: "1.0.0",
+        runnerImpl: preflightRunner,
+      });
+      // A real state DB: the preflight snapshots it with VACUUM INTO before
+      // probing, and dbSizesBytes must reflect it.
+      const stateDir = path.join(harness.openclawDir, "state");
+      fs.mkdirSync(stateDir, { recursive: true });
+      const db = new DatabaseSync(path.join(stateDir, "openclaw.sqlite"));
+      db.exec("CREATE TABLE t(x INTEGER)");
+      db.close();
+
+      const result = await harness.sync.applyUpdate({
+        channel: "beta",
+        version: "1.1.0",
+      });
+
+      expect(result.status).toBe(202);
+      const runsDir = path.join(harness.openclawDir, ".alphaclaw", "runs");
+      const records = fs
+        .readdirSync(runsDir)
+        .map((name) => JSON.parse(fs.readFileSync(path.join(runsDir, name), "utf8")));
+      expect(records).toHaveLength(1);
+      const [record] = records;
+      // The verdict survives the restart: boot sizes its migration budget
+      // from it and runs doctor without re-probing the live DBs.
+      expect(record.state).toBe("restart_expected");
+      expect(record.dbPreflight).toEqual(
+        expect.objectContaining({
+          migrationRequired: true,
+          foundVersion: 1,
+          targetVersion: 12,
+        }),
+      );
+      expect(record.dbPreflight.dbSizesBytes).toBeGreaterThan(0);
+      // The step timeline names the consequence for the operator.
+      expect(record.steps).toContainEqual(
+        expect.objectContaining({
+          name: "db-preflight",
+          status: "completed",
+          detail: "schema migration will run at the next start",
+        }),
+      );
+    });
+
     it("blocks downgrades when the backup fails, but only warns on upgrades", async () => {
       const failBackupRunner = async (opts, fallback) => {
         if (opts.command === "openclaw" && opts.args?.[0] === "backup") {

@@ -43,6 +43,7 @@ const {
   migrateManagedInternalFiles,
 } = require("../lib/server/internal-files-migration");
 const { assertSupportedNodeVersion } = require("../lib/node-runtime");
+const { isEarlyExitCliCommand } = require("../lib/boot-cli-verbs");
 
 const kUsageTrackerPluginPath = path.resolve(
   __dirname,
@@ -206,9 +207,12 @@ if (portFlag) {
 // further down still guards before the real server binds.
 const kPort = String(process.env.PORT || "3000").trim();
 
-// The reserved-port guard MUST precede the placeholder spawn below: the
-// placeholder binds kPort immediately, and a misconfigured PORT=18789 would
-// briefly squat the gateway's own port before this fatal exit fired.
+// ---------------------------------------------------------------------------
+// 1a. Reserved-port guard
+// ---------------------------------------------------------------------------
+// This guard MUST precede the placeholder spawn below: the placeholder binds
+// kPort immediately, and a misconfigured PORT=18789 would briefly squat the
+// gateway's own port before this fatal exit fired.
 if (kPort === "18789") {
   console.error(
     [
@@ -238,16 +242,14 @@ if (kPort === "18789") {
 // EADDRINUSE retry covers the close/rebind race. This now runs ABOVE the
 // port/SETUP_PASSWORD fatal exits — safe, because the child self-exits via
 // its ppid orphan check within ~3s of this process dying.
-const kIsEarlyExitCliCommand =
-  command === "git-sync" ||
-  command === "admin" ||
-  (command === "doctor" &&
-    commandScope === "finding" &&
-    commandAction === "complete") ||
-  (command === "telegram" &&
-    ((commandScope === "topic" &&
-      (commandAction === "add" || commandAction === "create")) ||
-      (commandScope === "topics" && commandAction === "list")));
+// The verb matrix lives in lib/boot-cli-verbs.js (unit-tested there). Anyone
+// adding or changing an early-exit dispatch site below MUST update that
+// module too, or the placeholder will fight a live server for the port.
+const kIsEarlyExitCliCommand = isEarlyExitCliCommand({
+  command,
+  commandScope,
+  commandAction,
+});
 const bootPlaceholder = (() => {
   // CLI verbs exit long before the server boots — don't bind a placeholder
   // web server for them (it would fight a live server for the port).

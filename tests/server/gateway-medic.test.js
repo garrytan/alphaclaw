@@ -840,6 +840,32 @@ describe("server/gateway-medic", () => {
     expect(readConfig(openclawDir).audit).toEqual({});
   });
 
+  it("skips the last-resort strip on an exhausted budget without touching the config", async () => {
+    // The watchdog's lifecycle-lock lease may be about to force-release — a
+    // config mutation landing after the lock moves on would race the
+    // relaunch, so the strip tier never starts under its 5s floor.
+    const openclawDir = mkOpenclawDir();
+    writeConfig(openclawDir, { audit: { legacy: true } });
+    const rawBefore = fs.readFileSync(
+      path.join(openclawDir, "openclaw.json"),
+      "utf8",
+    );
+    const medic = createMedic(openclawDir); // no llmClient, no runDoctorFix
+
+    const outcome = await medic.run({
+      exitCode: 78,
+      stderrTail: ['Unrecognized key: "audit"'],
+      budgetMs: 4_000, // below the strip tier's mutation floor
+    });
+
+    expect(outcome.fixed).toBe(false);
+    // No write at all: config byte-identical, no backup taken.
+    expect(
+      fs.readFileSync(path.join(openclawDir, "openclaw.json"), "utf8"),
+    ).toBe(rawBefore);
+    expect(listMedicBackups(openclawDir)).toHaveLength(0);
+  });
+
   it("refuses to start doctor --fix with less than the runway floor", async () => {
     const openclawDir = mkOpenclawDir();
     writeConfig(openclawDir, { audit: {} });

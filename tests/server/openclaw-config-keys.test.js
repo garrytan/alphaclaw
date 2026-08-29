@@ -70,6 +70,24 @@ describe("server/openclaw-config-keys", () => {
       expect(isProtectedKeyPath("gateway.controlUi.environment")).toBe(false);
       expect(isProtectedKeyPath("meta.lastTouchedAt")).toBe(false);
     });
+
+    it("protects listener-exposure keys against spoofed blame lines", () => {
+      // A crafted 'gateway: Unrecognized key: "bind"' stderr line must never
+      // change where the gateway listens or whether TLS fronts it — these
+      // paths route to the operator-consent path, never the auto-strip tiers.
+      for (const keyPath of [
+        "gateway.mode",
+        "gateway.bind",
+        "gateway.port",
+        "gateway.tls",
+      ]) {
+        expect(isProtectedKeyPath(keyPath)).toBe(true);
+        expect(isProtectedKeyPath(`${keyPath}.child`)).toBe(true);
+      }
+      // Non-exposure gateway leaves stay removable (the #20 recovery path).
+      expect(isProtectedKeyPath("gateway.controlUi.environment")).toBe(false);
+      expect(isProtectedKeyPath("gateway.portal")).toBe(false); // prefix ≠ substring
+    });
   });
 
   describe("removeKeyPathsFromConfigObject", () => {

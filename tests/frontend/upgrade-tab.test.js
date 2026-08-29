@@ -573,10 +573,14 @@ describe("frontend/upgrade-tab view", () => {
     const text = treeText(tree);
     expect(text).toContain("Strip blamed keys and retry?");
     expect(text).toContain(
-      "Remove the 2 setting key(s) OpenClaw's validator rejected? A backup was saved before migration; protected security settings are never removable.",
+      "Remove the 2 setting keys OpenClaw's validator rejected? A backup was saved before migration; protected security settings are never removable.",
     );
 
-    findActionButtonByLabel(tree, "Strip and retry").props.onClick();
+    const stripConfirm = findActionButtonByLabel(tree, "Strip and retry");
+    // Destructive-confirm convention: stripping keys deletes user data
+    // (backup-mitigated), so the confirm is danger like RollbackConfirmDialog.
+    expect(stripConfirm.props.tone).toBe("danger");
+    stripConfirm.props.onClick();
     expect(onConfirmStripReconcile).toHaveBeenCalledTimes(1);
 
     findActionButtonByLabel(tree, "Cancel").props.onClick();
@@ -807,6 +811,60 @@ describe("frontend/upgrade-tab view", () => {
 
     findActionButtonByLabel(tree, "Cancel").props.onClick();
     expect(onCancelRollback).toHaveBeenCalledTimes(1);
+  });
+
+  it("renders the second-stage data-risk confirm with the server's message and the verified backup file (#20)", () => {
+    const onConfirmRollbackDataRisk = vi.fn();
+    const onCancelRollbackDataRisk = vi.fn();
+    const tree = renderView({
+      channelInfo: makeChannelInfo(),
+      catalog: makeCatalog(),
+      rollbackDataRisk: {
+        message:
+          "This update migrated your state databases — the rollback target may not be able to read them.",
+        backupFile: "backup-2026-08-29.tar.gz",
+      },
+      onConfirmRollbackDataRisk,
+      onCancelRollbackDataRisk,
+    });
+
+    const text = treeText(tree);
+    expect(text).toContain("Roll back despite migrated data?");
+    // The server's 409 message renders verbatim; the guidance line names the
+    // verified pre-update backup to restore first.
+    expect(text).toContain(
+      "This update migrated your state databases — the rollback target may not be able to read them.",
+    );
+    expect(text).toContain(
+      "Restore the verified pre-update backup first (backup-2026-08-29.tar.gz), or roll back anyway — data written by the newer version may be unreadable.",
+    );
+
+    const confirmButton = findActionButtonByLabel(tree, "Roll back anyway");
+    expect(confirmButton).toBeTruthy();
+    expect(confirmButton.props.tone).toBe("danger");
+    confirmButton.props.onClick();
+    expect(onConfirmRollbackDataRisk).toHaveBeenCalledTimes(1);
+
+    findActionButtonByLabel(tree, "Cancel").props.onClick();
+    expect(onCancelRollbackDataRisk).toHaveBeenCalledTimes(1);
+  });
+
+  it("falls back to the no-backup data-risk line when the server recorded none", () => {
+    const tree = renderView({
+      channelInfo: makeChannelInfo(),
+      catalog: makeCatalog(),
+      rollbackDataRisk: { message: null, backupFile: null },
+    });
+
+    const text = treeText(tree);
+    expect(text).toContain("Roll back despite migrated data?");
+    // Message fallback for older servers that omit the envelope message.
+    expect(text).toContain(
+      "This update migrated your state databases — the rollback target may not be able to read them.",
+    );
+    expect(text).toContain(
+      "No verified pre-update backup is recorded — data written by the newer version may be unreadable if you roll back anyway.",
+    );
   });
 
   it("a segment change goes straight to onSelectChannel — no dialog in between (U1)", () => {
@@ -1994,6 +2052,76 @@ describe("frontend/upgrade-tab hook", () => {
     expect(api.rollbackOpenclaw).not.toHaveBeenCalled();
   });
 
+  it("a 409 rollback fence opens the data-risk dialog naming the backup — never the error chip (#20)", async () => {
+    const fenceError = Object.assign(
+      new Error(
+        "This update migrated your state databases — the rollback target may not be able to read them.",
+      ),
+      {
+        code: "rollback_requires_confirmation",
+        status: 409,
+        backupFile: "backup-2026-08-29.tar.gz",
+      },
+    );
+    api.rollbackOpenclaw.mockRejectedValueOnce(fenceError);
+    api.rollbackOpenclaw.mockResolvedValueOnce({ ok: true, target: { kind: "pin" } });
+    let state = await hydrate();
+    state.onRequestRollback();
+    state = renderHook({});
+
+    await state.onRollback();
+    expect(api.rollbackOpenclaw).toHaveBeenCalledWith({});
+
+    state = renderHook({});
+    // The fence is a consent gate, not a failure: no chip, no operation.
+    expect(state.actionError).toBeNull();
+    expect(state.operation).toBeNull();
+    expect(state.rollingBack).toBe(false);
+    expect(state.rollbackDataRisk).toEqual({
+      message:
+        "This update migrated your state databases — the rollback target may not be able to read them.",
+      backupFile: "backup-2026-08-29.tar.gz",
+    });
+
+    // Confirming re-sends the rollback WITH consent and hands off to the
+    // restart poller like a first-attempt success.
+    await state.onConfirmRollbackDataRisk();
+    expect(api.rollbackOpenclaw).toHaveBeenCalledTimes(2);
+    expect(api.rollbackOpenclaw).toHaveBeenLastCalledWith({
+      confirmDataRisk: true,
+    });
+    state = renderHook({});
+    expect(state.rollbackDataRisk).toBeNull();
+    expect(state.operation).toEqual(
+      expect.objectContaining({ phase: "restarting", label: "2026.7.1-2" }),
+    );
+  });
+
+  it("cancelling the data-risk dialog closes it without re-calling the API", async () => {
+    api.rollbackOpenclaw.mockRejectedValue(
+      Object.assign(new Error("migrated"), {
+        code: "rollback_requires_confirmation",
+        status: 409,
+        backupFile: null,
+      }),
+    );
+    let state = await hydrate();
+    state.onRequestRollback();
+    state = renderHook({});
+    await state.onRollback();
+    state = renderHook({});
+    expect(state.rollbackDataRisk).toEqual({
+      message: "migrated",
+      backupFile: null,
+    });
+
+    state.onCancelRollbackDataRisk();
+    state = renderHook({});
+    expect(state.rollbackDataRisk).toBeNull();
+    expect(api.rollbackOpenclaw).toHaveBeenCalledTimes(1);
+    expect(state.operation).toBeNull();
+  });
+
   it("surfaces a rejected rollback as a persistent inline action error (never toast-only)", async () => {
     const envelopeError = Object.assign(
       new Error("no rollback target available"),
@@ -2754,6 +2882,33 @@ describe("frontend/upgrade-tab gateway-hold recovery", () => {
       headline: "Couldn't retry the settings migration.",
       error: err,
     });
+  });
+
+  it("the route's other 409 codes keep the SERVER message on the chip, never a bare generic string", async () => {
+    // reconcile_skipped / reconcile_not_needed carry a server-set message and
+    // hint — the hook must hand the whole error to the InlineErrorChip so
+    // err.message renders under the headline.
+    const err = Object.assign(
+      new Error("The gateway is running and no hold is set."),
+      {
+        code: "reconcile_not_needed",
+        hint: "Nothing to retry — the doctor never touches live databases.",
+        status: 409,
+      },
+    );
+    api.retryOpenclawReconcile.mockRejectedValue(err);
+    let state = await hydrate();
+
+    await state.onRetryReconcile();
+
+    state = renderHook({});
+    expect(state.reconcileError).toEqual({
+      headline: "Couldn't retry the settings migration.",
+      error: err,
+    });
+    expect(state.reconcileError.error.message).toBe(
+      "The gateway is running and no hold is set.",
+    );
   });
 
   it("a succeeded migration with a failed gateway relaunch is not a silent success", async () => {

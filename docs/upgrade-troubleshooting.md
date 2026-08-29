@@ -31,6 +31,23 @@ name the exact config keys the migration blamed. From the banner choose:
 - **Strip blamed keys and retry** — AlphaClaw removes the named keys
   (backing up the original config first) and re-runs the migration.
 
+While the hold is set, a manual **restart is refused** (`409 gateway_held`
+from `POST /api/gateway/restart`): restarting would launch the gateway on
+the exact config the reconciler just rejected. Recover through the retry
+actions above instead.
+
+The retry endpoint (`POST /api/openclaw/reconcile/retry`) answers `409`
+with one of:
+
+- `apply_in_progress` — a channel update is running; wait for it to settle.
+- `reconcile_not_needed` — no hold is recorded and the gateway is already
+  running; the doctor never touches a live gateway's databases.
+- `reconcile_still_held` — the migration failed again; the message carries
+  the hold reason.
+- `reconcile_skipped` — the reconciler declined to run (e.g. the openclaw
+  binary could not be resolved); the hold and watchdog latch are untouched
+  and the gateway is not relaunched.
+
 ## Brief gateway pause during backup (quiesce)
 
 **Expected behavior**, not a failure: cross-channel applies (e.g.
@@ -43,9 +60,11 @@ for which step is stuck.
 
 Rolling back to an older version after the newer one migrated the state DB
 is fenced: the older binary cannot verify state written by the newer one.
-The rollback path requires **restoring the named pre-update backup first**
-(the rollback dialog names it). Rolling back without the restore is refused
-rather than risking a corrupt-state boot.
+The first rollback attempt answers `409 rollback_requires_confirmation`,
+and its `backupFile` field names the verified pre-update backup to
+**restore first**. The UI then shows a second-stage confirm dialog naming
+that backup; confirming (`confirmDataRisk: true`) proceeds with the
+rollback anyway — data written by the newer version may be unreadable.
 
 ## Where the evidence lives
 

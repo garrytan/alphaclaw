@@ -8,6 +8,7 @@ const {
 const {
   createOpenclawReleaseChannelStore,
 } = require("../../lib/server/openclaw-release-channel");
+const { createRunLedger } = require("../../lib/server/openclaw-run-ledger");
 
 // End-to-end coverage for syncAtBoot: the real channel-sync service + real
 // store recovering real on-disk trees, with the environment poisoned so any
@@ -1023,19 +1024,28 @@ describe("server/openclaw-channel boot sync (e2e)", () => {
       });
     });
 
-    it("restores a pre-fix backup on downgrade instead of running doctor", async () => {
+    it("restores a pre-fix backup on a genuine downgrade, once, consuming the snapshot", async () => {
       const doctorCalls = [];
       const harness = createHarness({
         installedVersion: "2026.7.1-2",
         sentinelVersion: "2026.7.1-2",
         runnerImpl: doctorRunner({ doctorCalls }),
       });
-      // A backup saved before we migrated away from 2026.7.1-2.
-      fs.mkdirSync(harness.openclawDir, { recursive: true });
-      fs.writeFileSync(
-        path.join(harness.openclawDir, "openclaw.json.pre-fix-2026.7.1-2.bak"),
-        JSON.stringify({ restored: true }, null, 2),
+      // Genuine regression: a migration COMPLETED for the newer 2026.8.1 and
+      // we are back on 2026.7.1-2 with its pre-migration backup on disk.
+      harness.store.updateState((s) => {
+        s.configMigration = {
+          completedForVersion: "2026.8.1",
+          lastAttempt: { version: "2026.8.1", at: 1, ok: true },
+        };
+        return s;
+      });
+      const bakPath = path.join(
+        harness.openclawDir,
+        "openclaw.json.pre-fix-2026.7.1-2.bak",
       );
+      fs.mkdirSync(harness.openclawDir, { recursive: true });
+      fs.writeFileSync(bakPath, JSON.stringify({ restored: true }, null, 2));
       writeConfig(harness.openclawDir, { migrated: "beta-shape" });
 
       harness.sync.syncAtBoot();
@@ -1044,6 +1054,7 @@ describe("server/openclaw-channel boot sync (e2e)", () => {
       // The backup was restored (migrated shape gone, restored key present);
       // doctor was NOT run. (reconcileOpenclawJsonMirror later adds update.* keys.)
       expect(outcome.status).toBe("ok");
+      expect(outcome.reason).toBe("round-trip-restore");
       expect(doctorCalls).toHaveLength(0);
       const onDisk = JSON.parse(
         fs.readFileSync(path.join(harness.openclawDir, "openclaw.json"), "utf8"),
@@ -1053,11 +1064,64 @@ describe("server/openclaw-channel boot sync (e2e)", () => {
       expect(harness.store.readState().configMigration.completedForVersion).toBe(
         "2026.7.1-2",
       );
+      // The snapshot was CONSUMED: it can never fire a second restore.
+      expect(fs.existsSync(bakPath)).toBe(false);
+
+      // A later forced retry must not restore again — the live config (edited
+      // since the restore) survives.
+      writeConfig(harness.openclawDir, { restored: true, edited: "since" });
+      const retried = await harness.sync.reconcileBootConfig({ force: true });
+      expect(retried.reason).not.toBe("round-trip-restore");
+      const afterRetry = JSON.parse(
+        fs.readFileSync(path.join(harness.openclawDir, "openclaw.json"), "utf8"),
+      );
+      expect(afterRetry.edited).toBe("since");
+
       // The restore notification carries its stable outbox id.
       await flushAsync();
       expect(notifyIds(harness.notify)).toContain(
         "config-restore-2026.7.1-2",
       );
+    });
+
+    it("never fires the round-trip restore on a forced same-version retry (red-team #1)", async () => {
+      // Fresh-install shape: the FIRST reconcile snapshots
+      // pre-fix-<pin>.bak while installedVersion === pin. A later forced
+      // retry (the operator's Retry-migration button) must run a forward
+      // migration, not silently overwrite live settings with that snapshot.
+      const doctorCalls = [];
+      let harness;
+      harness = createHarness({
+        pin: "2026.9.1-beta.1",
+        installedVersion: "2026.9.1-beta.1",
+        sentinelVersion: "2026.9.1-beta.1",
+        runnerImpl: validateAwareRunner({
+          openclawDirRef: () => harness.openclawDir,
+          doctorCalls,
+          dbPreflight: { ok: true, compatible: true },
+        }),
+      });
+      writeConfig(harness.openclawDir, { marker: "first-boot" });
+      harness.sync.syncAtBoot();
+
+      const first = await harness.sync.reconcileBootConfig();
+      expect(first.status).toBe("ok");
+      // The first-boot snapshot exists under the installed version's name.
+      const snapshots = fs
+        .readdirSync(harness.openclawDir)
+        .filter((n) => n.startsWith("openclaw.json.pre-fix-"));
+      expect(snapshots.length).toBeGreaterThanOrEqual(1);
+
+      // The operator edits settings, then forces a retry.
+      writeConfig(harness.openclawDir, { marker: "user-edited" });
+      const retried = await harness.sync.reconcileBootConfig({ force: true });
+
+      expect(retried.status).toBe("ok");
+      expect(retried.reason).not.toBe("round-trip-restore");
+      const onDisk = JSON.parse(
+        fs.readFileSync(path.join(harness.openclawDir, "openclaw.json"), "utf8"),
+      );
+      expect(onDisk.marker).toBe("user-edited");
     });
 
     // Issue #20 end-to-end shapes: a validate-capable target build. The
@@ -1357,6 +1421,481 @@ describe("server/openclaw-channel boot sync (e2e)", () => {
       expect(harness.store.readState().configMigration.completedForVersion).toBe(
         "2026.9.1-beta.1",
       );
+    });
+
+    // Boot-phase ledger steps need a pending restart_expected run — the same
+    // record applyUpdate leaves behind before the activation restart. The
+    // store's `applied` must target the installed build so syncAtBoot reports
+    // already_active and leaves the run for the reconciler to resolve.
+    const kBootOpId = "aaaabbbb-cccc-dddd-eeee-ffff00001111";
+    const seedRestartExpectedRun = (harness, { dbPreflight = null } = {}) => {
+      harness.store.updateState((s) => {
+        s.applied = {
+          channel: "beta",
+          version: "2026.9.1-beta.1",
+          at: 1,
+          acceptedAt: null,
+        };
+        return s;
+      });
+      const ledger = createRunLedger({
+        openclawDir: harness.openclawDir,
+        nowFn: () => harness.nowRef.now,
+        logger: kSilentLogger,
+      });
+      ledger.createRun({
+        operationId: kBootOpId,
+        target: { kind: "package", channel: "beta", version: "2026.9.1-beta.1" },
+      });
+      ledger.updateRun(kBootOpId, (record) => {
+        record.state = "restart_expected";
+        if (dbPreflight) record.dbPreflight = dbPreflight;
+        return record;
+      });
+      return kBootOpId;
+    };
+    const readRunRecord = (harness, operationId = kBootOpId) =>
+      JSON.parse(
+        fs.readFileSync(
+          path.join(harness.openclawDir, ".alphaclaw", "runs", `${operationId}.json`),
+          "utf8",
+        ),
+      );
+    const lastStepNamed = (record, name) =>
+      [...(record.steps || [])].reverse().find((step) => step.name === name) ||
+      null;
+
+    it("keeps attempt 1's pristine snapshot on a retry of the same failed epoch (red-team #2)", async () => {
+      let harness;
+      harness = createHarness({
+        installedVersion: "2026.9.1-beta.1",
+        sentinelVersion: "2026.9.1-beta.1",
+        runnerImpl: validateAwareRunner({
+          openclawDirRef: () => harness.openclawDir,
+          dbPreflight: { ok: true, compatible: true },
+        }),
+      });
+      // Curated strip mutates the file on attempt 1; the unknown key keeps
+      // the attempt failing.
+      writeConfig(harness.openclawDir, {
+        meta: { lastTouchedAt: "2026-07-01T00:00:00Z" },
+        mystery: { operatorData: true },
+      });
+      harness.sync.syncAtBoot();
+
+      const first = await harness.sync.reconcileBootConfig();
+      expect(first.status).toBe("held");
+      const snapshotPath = path.join(
+        harness.openclawDir,
+        "openclaw.json.pre-fix-1.0.0.bak",
+      );
+      const pristine = JSON.parse(fs.readFileSync(snapshotPath, "utf8"));
+      expect(pristine.meta.lastTouchedAt).toBe("2026-07-01T00:00:00Z");
+      // Attempt 1 really mutated the live config.
+      const mutated = JSON.parse(
+        fs.readFileSync(path.join(harness.openclawDir, "openclaw.json"), "utf8"),
+      );
+      expect(mutated.meta).toBeUndefined();
+
+      // Forced retry of the SAME failed epoch: the snapshot must keep the
+      // pristine pre-migration shape, not the already-mutated config.
+      const retried = await harness.sync.reconcileBootConfig({ force: true });
+      expect(retried.status).toBe("held");
+      const kept = JSON.parse(fs.readFileSync(snapshotPath, "utf8"));
+      expect(kept.meta.lastTouchedAt).toBe("2026-07-01T00:00:00Z");
+    });
+
+    it("holds the re-attempt gate across boots even when the failed attempt mutated the config (red-team #3)", async () => {
+      const doctorCalls = [];
+      let harness;
+      harness = createHarness({
+        installedVersion: "2026.9.1-beta.1",
+        sentinelVersion: "2026.9.1-beta.1",
+        runnerImpl: validateAwareRunner({
+          openclawDirRef: () => harness.openclawDir,
+          doctorCalls,
+          dbPreflight: { ok: true, compatible: true },
+        }),
+      });
+      writeConfig(harness.openclawDir, {
+        meta: { lastTouchedAt: "x" },
+        mystery: { operatorData: true },
+      });
+      harness.sync.syncAtBoot();
+
+      const first = await harness.sync.reconcileBootConfig();
+      expect(first.status).toBe("held");
+      expect(doctorCalls).toHaveLength(1);
+
+      // The next (crash-loop) boot recomputes the hash from the MUTATED
+      // config — the stored hash must match it, or the sized doctor budget
+      // re-runs on every restart.
+      const second = await harness.sync.reconcileBootConfig();
+      expect(second.status).toBe("held");
+      expect(second.reused).toBe(true);
+      expect(doctorCalls).toHaveLength(1);
+    });
+
+    it("persists a hold when the reconciler machinery itself throws (never a bare throw)", async () => {
+      const explode = { on: false };
+      const harness = createHarness({
+        installedVersion: "2026.9.1-beta.1",
+        sentinelVersion: "2026.9.1-beta.1",
+        execFileSyncImpl: vi.fn(() => ""),
+        storeWrap: (store) => ({
+          ...store,
+          readState: (...args) => {
+            if (explode.on) throw new Error("EIO: state read failed");
+            return store.readState(...args);
+          },
+        }),
+      });
+      writeConfig(harness.openclawDir, { clean: true });
+      harness.sync.syncAtBoot();
+
+      explode.on = true;
+      const outcome = await harness.sync.reconcileBootConfig();
+      explode.on = false;
+
+      expect(outcome.status).toBe("held");
+      expect(outcome.hold.reason).toMatch(/reconcile error: EIO/);
+      // The hold is PERSISTED (startup.js only keeps an in-memory flag; the
+      // watchdog consults state before relaunching the gateway).
+      const state = harness.store.readState();
+      expect(state.gatewayHold).toEqual(
+        expect.objectContaining({
+          reason: expect.stringContaining("reconcile error"),
+        }),
+      );
+      expect(state.configMigration.lastAttempt).toEqual(
+        expect.objectContaining({
+          ok: false,
+          error: expect.stringContaining("reconcile error"),
+        }),
+      );
+    });
+
+    it("returns held, never skipped, from the binary-unresolved path while a hold is persisted", async () => {
+      const makeBinlessHarness = () =>
+        createHarness({
+          installedVersion: "2026.9.1-beta.1",
+          sentinelVersion: "2026.9.1-beta.1",
+          execFileSyncImpl: vi.fn(() => ""),
+          storeWrap: (store) => ({
+            ...store,
+            resolvePackageBin: () => null,
+          }),
+        });
+
+      const heldHarness = makeBinlessHarness();
+      writeConfig(heldHarness.openclawDir, { clean: true });
+      heldHarness.store.updateState((s) => {
+        s.gatewayHold = {
+          reason: "previous migration hold",
+          at: 5,
+          operationId: null,
+          blamedKeys: [],
+        };
+        return s;
+      });
+      const heldOutcome = await heldHarness.sync.reconcileBootConfig();
+      expect(heldOutcome.status).toBe("held");
+      expect(heldOutcome.hold.reason).toBe("previous migration hold");
+
+      // Without a hold the same path stays an honest skip.
+      const freshHarness = makeBinlessHarness();
+      writeConfig(freshHarness.openclawDir, { clean: true });
+      const freshOutcome = await freshHarness.sync.reconcileBootConfig();
+      expect(freshOutcome.status).toBe("skipped");
+      expect(freshOutcome.reason).toBe("binary-unresolved");
+    });
+
+    it("closes the db-migrate probe step when the probe says no migration is needed", async () => {
+      const { DatabaseSync } = require("node:sqlite");
+      let harness;
+      harness = createHarness({
+        installedVersion: "2026.9.1-beta.1",
+        sentinelVersion: "2026.9.1-beta.1",
+        runnerImpl: validateAwareRunner({
+          openclawDirRef: () => harness.openclawDir,
+          dbPreflight: { ok: true, compatible: true },
+        }),
+      });
+      writeConfig(harness.openclawDir, { clean: true });
+      const stateDir = path.join(harness.openclawDir, "state");
+      fs.mkdirSync(stateDir, { recursive: true });
+      const db = new DatabaseSync(path.join(stateDir, "openclaw.sqlite"));
+      db.exec("CREATE TABLE t(x INTEGER)");
+      db.close();
+      seedRestartExpectedRun(harness);
+      harness.sync.syncAtBoot();
+
+      const outcome = await harness.sync.reconcileBootConfig();
+
+      expect(outcome.status).toBe("ok");
+      const record = readRunRecord(harness);
+      const dbStep = lastStepNamed(record, "db-migrate");
+      expect(dbStep).toEqual(
+        expect.objectContaining({
+          status: "completed",
+          detail: "no database migration needed",
+        }),
+      );
+      // Contract: no step may be left 'running' after the reconciler returns.
+      const lastByName = new Map();
+      for (const step of record.steps) lastByName.set(step.name, step.status);
+      expect([...lastByName.values()]).not.toContain("running");
+    });
+
+    it("closes the db-migrate step on the hold path: failed doctor → failed, successful doctor → completed", async () => {
+      const runHeld = async ({ doctorImpl }) => {
+        let harness;
+        harness = createHarness({
+          installedVersion: "2026.9.1-beta.1",
+          sentinelVersion: "2026.9.1-beta.1",
+          runnerImpl: validateAwareRunner({
+            openclawDirRef: () => harness.openclawDir,
+            doctorImpl,
+          }),
+        });
+        writeConfig(harness.openclawDir, { mystery: { operatorData: true } });
+        seedRestartExpectedRun(harness, {
+          dbPreflight: { migrationRequired: true },
+        });
+        harness.sync.syncAtBoot();
+        const outcome = await harness.sync.reconcileBootConfig();
+        expect(outcome.status).toBe("held");
+        return readRunRecord(harness);
+      };
+
+      // Doctor failed outright: the DB migration did not happen.
+      const failedRecord = await runHeld({
+        doctorImpl: async () => ({
+          ok: false,
+          code: 1,
+          tail: "doctor exit 1\n",
+          timedOut: false,
+        }),
+      });
+      expect(lastStepNamed(failedRecord, "db-migrate")).toEqual(
+        expect.objectContaining({
+          status: "failed",
+          detail: "doctor did not repair the config",
+        }),
+      );
+
+      // Doctor succeeded (DBs migrated) but the config stays invalid: the
+      // db step is honestly complete while config-migrate carries the hold.
+      const completedRecord = await runHeld({
+        doctorImpl: async () => ({
+          ok: true,
+          code: 0,
+          tail: "Doctor complete\n",
+          timedOut: false,
+        }),
+      });
+      expect(lastStepNamed(completedRecord, "db-migrate")).toEqual(
+        expect.objectContaining({ status: "completed" }),
+      );
+      expect(lastStepNamed(completedRecord, "config-migrate")).toEqual(
+        expect.objectContaining({ status: "failed" }),
+      );
+    });
+
+    it("runs doctor from the apply-time dbPreflight hint without invoking the live probe", async () => {
+      const { DatabaseSync } = require("node:sqlite");
+      const doctorCalls = [];
+      let harness;
+      harness = createHarness({
+        installedVersion: "2026.9.1-beta.1",
+        sentinelVersion: "2026.9.1-beta.1",
+        runnerImpl: validateAwareRunner({
+          openclawDirRef: () => harness.openclawDir,
+          doctorCalls,
+          dbPreflight: { ok: true, compatible: true },
+        }),
+      });
+      writeConfig(harness.openclawDir, { clean: true });
+      // A live DB exists — a probe WOULD find it, so zero preflight
+      // invocations proves the hint was authoritative.
+      const stateDir = path.join(harness.openclawDir, "state");
+      fs.mkdirSync(stateDir, { recursive: true });
+      const db = new DatabaseSync(path.join(stateDir, "openclaw.sqlite"));
+      db.exec("CREATE TABLE t(x INTEGER)");
+      db.close();
+      seedRestartExpectedRun(harness, {
+        dbPreflight: {
+          migrationRequired: true,
+          foundVersion: 1,
+          targetVersion: 12,
+        },
+      });
+      harness.sync.syncAtBoot();
+
+      const outcome = await harness.sync.reconcileBootConfig();
+
+      expect(outcome.status).toBe("ok");
+      // The config validated clean — ONLY the hint drove the doctor run.
+      expect(doctorCalls).toHaveLength(1);
+      const preflightCalls = harness.runner.runStreamed.mock.calls.filter(
+        (call) => (call[0]?.args || []).includes("preflight"),
+      );
+      expect(preflightCalls).toHaveLength(0);
+      expect(lastStepNamed(readRunRecord(harness), "db-migrate")).toEqual(
+        expect.objectContaining({ status: "completed" }),
+      );
+    });
+
+    it("holds on a doctor timeout with the sized-budget warning and an honest post-kill db verdict", async () => {
+      const { DatabaseSync } = require("node:sqlite");
+      const timeoutDoctor = async () => ({
+        ok: false,
+        code: null,
+        tail: "",
+        timedOut: true,
+      });
+
+      // (a) The post-kill probe finds no databases → consistent.
+      let consistent;
+      consistent = createHarness({
+        installedVersion: "2026.9.1-beta.1",
+        sentinelVersion: "2026.9.1-beta.1",
+        runnerImpl: validateAwareRunner({
+          openclawDirRef: () => consistent.openclawDir,
+          doctorImpl: timeoutDoctor,
+        }),
+      });
+      writeConfig(consistent.openclawDir, { mystery: { operatorData: true } });
+      seedRestartExpectedRun(consistent, {
+        dbPreflight: { migrationRequired: true },
+      });
+      consistent.sync.syncAtBoot();
+      const consistentOutcome = await consistent.sync.reconcileBootConfig();
+      expect(consistentOutcome.status).toBe("held");
+      expect(consistentOutcome.hold.reason).toContain("doctor timed out");
+      expect(
+        consistentOutcome.warnings.some((warning) =>
+          /timed out after its sized budget/.test(warning),
+        ),
+      ).toBe(true);
+      expect(lastStepNamed(readRunRecord(consistent), "db-migrate")).toEqual(
+        expect.objectContaining({
+          status: "warning",
+          detail: "databases report consistent after the timeout",
+        }),
+      );
+
+      // (b) The post-kill probe is inconclusive → unverified.
+      let unverified;
+      unverified = createHarness({
+        installedVersion: "2026.9.1-beta.1",
+        sentinelVersion: "2026.9.1-beta.1",
+        runnerImpl: validateAwareRunner({
+          openclawDirRef: () => unverified.openclawDir,
+          doctorImpl: timeoutDoctor,
+          dbPreflight: "unsupported",
+        }),
+      });
+      writeConfig(unverified.openclawDir, { mystery: { operatorData: true } });
+      const stateDir = path.join(unverified.openclawDir, "state");
+      fs.mkdirSync(stateDir, { recursive: true });
+      const db = new DatabaseSync(path.join(stateDir, "openclaw.sqlite"));
+      db.exec("CREATE TABLE t(x INTEGER)");
+      db.close();
+      seedRestartExpectedRun(unverified, {
+        dbPreflight: { migrationRequired: true },
+      });
+      unverified.sync.syncAtBoot();
+      const unverifiedOutcome = await unverified.sync.reconcileBootConfig();
+      expect(unverifiedOutcome.status).toBe("held");
+      expect(lastStepNamed(readRunRecord(unverified), "db-migrate")).toEqual(
+        expect.objectContaining({
+          status: "warning",
+          detail: "database state after the timeout is unverified",
+        }),
+      );
+    });
+
+    it("classifies a blamed-key tail as invalid even when unknown-command text co-occurs (parse-order pin)", async () => {
+      // The blame parse must run BEFORE the unknown-command check: validator
+      // output like 'Unrecognized key: "mystery"' matches the pattern's
+      // "unrecognized", and the wrong order reports an INVALID config as
+      // validate-missing (→ a false 'ok' once doctor exits 0).
+      const runnerImpl = async (opts) => {
+        const args = Array.isArray(opts.args) ? opts.args : [];
+        if (args.includes("validate")) {
+          return {
+            ok: false,
+            code: 1,
+            tail: 'Unrecognized key: "mystery"\nerror: unknown command \'frobnicate\'\n',
+            timedOut: false,
+          };
+        }
+        if (args.includes("doctor")) {
+          return { ok: true, code: 0, tail: "Doctor complete\n", timedOut: false };
+        }
+        return { ok: true, code: 0, tail: "", timedOut: false };
+      };
+      const harness = createHarness({
+        installedVersion: "2026.9.1-beta.1",
+        sentinelVersion: "2026.9.1-beta.1",
+        runnerImpl,
+      });
+      writeConfig(harness.openclawDir, { mystery: { operatorData: true } });
+      harness.sync.syncAtBoot();
+
+      const outcome = await harness.sync.reconcileBootConfig();
+
+      expect(outcome.status).toBe("held");
+      expect(outcome.blamedKeys).toEqual(["mystery"]);
+      expect(harness.store.readState().gatewayHold.blamedKeys).toContain(
+        "mystery",
+      );
+    });
+
+    it("scrubs secret values out of the persisted validator tail", async () => {
+      const secret = "hunter2-secret-value";
+      const runnerImpl = async (opts) => {
+        const args = Array.isArray(opts.args) ? opts.args : [];
+        if (args.includes("validate")) {
+          return {
+            ok: false,
+            code: 78,
+            tail: `Unrecognized key: "mystery"\nauth.apiToken must not equal ${secret}\n`,
+            timedOut: false,
+          };
+        }
+        if (args.includes("preflight")) {
+          return {
+            ok: true,
+            code: 0,
+            tail: '{"ok":true,"compatible":true}\n',
+            timedOut: false,
+          };
+        }
+        if (args.includes("doctor")) {
+          return { ok: true, code: 0, tail: "Doctor complete\n", timedOut: false };
+        }
+        return { ok: true, code: 0, tail: "", timedOut: false };
+      };
+      const harness = createHarness({
+        installedVersion: "2026.9.1-beta.1",
+        sentinelVersion: "2026.9.1-beta.1",
+        runnerImpl,
+      });
+      writeConfig(harness.openclawDir, {
+        mystery: { operatorData: true },
+        auth: { apiToken: secret },
+      });
+      harness.sync.syncAtBoot();
+
+      const outcome = await harness.sync.reconcileBootConfig();
+
+      expect(outcome.status).toBe("held");
+      const tail = harness.store.readState().configMigration.lastAttempt.tail;
+      expect(tail).toContain('Unrecognized key: "mystery"');
+      expect(tail).not.toContain(secret);
+      expect(tail).toContain("***");
     });
   });
 });

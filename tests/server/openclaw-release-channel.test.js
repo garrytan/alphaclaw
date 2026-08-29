@@ -104,6 +104,42 @@ describe("server/openclaw-release-channel", () => {
       ).toEqual(expectedEmpty);
     });
 
+    it("rejects malformed gatewayHold shapes (string, array, empty reason)", () => {
+      // The hold is first-class state consumed by startup, watchdog, and UI —
+      // a shape without a usable reason must normalize to "no hold", never a
+      // half-formed object those consumers would treat as held.
+      expect(normalizeState({ gatewayHold: "held" }).gatewayHold).toBeNull();
+      expect(
+        normalizeState({ gatewayHold: ["held"] }).gatewayHold,
+      ).toBeNull();
+      expect(
+        normalizeState({ gatewayHold: { reason: "" } }).gatewayHold,
+      ).toBeNull();
+      expect(
+        normalizeState({ gatewayHold: { reason: 42 } }).gatewayHold,
+      ).toBeNull();
+    });
+
+    it("filters non-string blamedKeys and caps them at 50", () => {
+      const manyKeys = Array.from({ length: 60 }, (_, i) => `key-${i}`);
+      const { gatewayHold } = normalizeState({
+        gatewayHold: {
+          reason: "x",
+          blamedKeys: [1, "a", null, ...manyKeys],
+        },
+      });
+
+      expect(gatewayHold).toEqual({
+        reason: "x",
+        // Absent/non-conforming metadata normalizes to explicit nulls.
+        at: null,
+        operationId: null,
+        // Strings survive the filter in order; the cap applies AFTER it.
+        blamedKeys: ["a", ...manyKeys.slice(0, 49)],
+      });
+      expect(gatewayHold.blamedKeys).toHaveLength(50);
+    });
+
     it("returns the empty state with corrupted:true on unparseable JSON without throwing", () => {
       const { store } = createStore();
       fs.mkdirSync(path.dirname(store.statePath), { recursive: true });

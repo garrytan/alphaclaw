@@ -7,7 +7,10 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 
-const { createDoctorGuard } = require("../../lib/server/doctor-guard");
+const {
+  createDoctorGuard,
+  buildDoctorRestoreBlockedNotification,
+} = require("../../lib/server/doctor-guard");
 
 const kSilentLogger = { log() {}, warn() {}, error() {} };
 const mkOpenclawDir = () =>
@@ -246,5 +249,25 @@ describe("server/doctor-guard", () => {
       run: async () => ({ ok: true, tail: "created default config\n" }),
     });
     expect(result.ok).toBe(true);
+  });
+
+  describe("buildDoctorRestoreBlockedNotification", () => {
+    // Single source for the operator copy: the watchdog-repair path and the
+    // boot reconciler both fire it — key-path COUNTS only, never values.
+    it("carries the dropped-path count and the blocked verdict", () => {
+      const message = buildDoctorRestoreBlockedNotification(3);
+      expect(message).toContain("3 setting path(s)");
+      expect(message).toContain("AlphaClaw blocked it");
+      expect(message).toContain("your settings are unchanged");
+      // The non-held variant never points at the Upgrade page.
+      expect(message).not.toContain("held");
+      expect(message).not.toContain("Upgrade page");
+    });
+
+    it("appends the gateway-hold pointer only in the held variant", () => {
+      const message = buildDoctorRestoreBlockedNotification(1, { held: true });
+      expect(message).toContain("1 setting path(s)");
+      expect(message).toContain("The gateway is held; see the Upgrade page.");
+    });
   });
 });

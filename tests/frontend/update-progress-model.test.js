@@ -70,6 +70,18 @@ describe("shared update-progress model", () => {
     ]);
   });
 
+  it("exports toEpochMs for the boot placeholder — epoch numbers, ISO strings, Dates", async () => {
+    const { toEpochMs } = await loadProgressModel();
+
+    expect(toEpochMs(kNow)).toBe(kNow);
+    expect(toEpochMs("2026-08-25T12:00:00.000Z")).toBe(kNow);
+    // Date instances resolve via getTime(), not the string round-trip.
+    expect(toEpochMs(new Date(kNow))).toBe(kNow);
+    expect(toEpochMs(null)).toBeNull();
+    expect(toEpochMs("")).toBeNull();
+    expect(toEpochMs("not a timestamp")).toBeNull();
+  });
+
   it("formats elapsed durations exactly as the old helpers export did", async () => {
     const { formatElapsed } = await loadProgressModel();
     expect(formatElapsed(kNow - 42_000, kNow)).toBe("42s");

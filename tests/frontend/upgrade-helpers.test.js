@@ -1641,10 +1641,23 @@ describe("frontend/upgrade-helpers gateway hold model", () => {
     expect(model.canStrip).toBe(true);
   });
 
-  it("spells out the strip consequences with the exact key count", async () => {
+  it("spells out the strip consequences with the exact key count, properly pluralized", async () => {
     const { buildStripKeysConfirmMessage } = await loadUpgradeHelpers();
     expect(buildStripKeysConfirmMessage(3)).toBe(
-      "Remove the 3 setting key(s) OpenClaw's validator rejected? A backup was saved before migration; protected security settings are never removable.",
+      "Remove the 3 setting keys OpenClaw's validator rejected? A backup was saved before migration; protected security settings are never removable.",
+    );
+    expect(buildStripKeysConfirmMessage(1)).toBe(
+      "Remove the 1 setting key OpenClaw's validator rejected? A backup was saved before migration; protected security settings are never removable.",
+    );
+  });
+
+  it("names the verified pre-update backup in the rollback data-risk line, with a no-backup fallback", async () => {
+    const { buildRollbackDataRiskLine } = await loadUpgradeHelpers();
+    expect(buildRollbackDataRiskLine("backup-2026-08-29.tar.gz")).toBe(
+      "Restore the verified pre-update backup first (backup-2026-08-29.tar.gz), or roll back anyway — data written by the newer version may be unreadable.",
+    );
+    expect(buildRollbackDataRiskLine(null)).toBe(
+      "No verified pre-update backup is recorded — data written by the newer version may be unreadable if you roll back anyway.",
     );
   });
 });

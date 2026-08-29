@@ -280,7 +280,15 @@ describe("server/openclaw-channel-backup-retry", () => {
         "unsuppress",
         "release",
       ]);
-      expect(quiesce.suppressDurationMs).toBeGreaterThan(0);
+      // The watchdog stays suppressed for the quiesce budget plus the shared
+      // slack constant — long enough to cover the relaunch after the backup.
+      const {
+        kOpenclawBackupQuiesceTimeoutMs,
+        kOpenclawBackupQuiesceSuppressSlackMs,
+      } = require("../../lib/server/constants");
+      expect(quiesce.suppressDurationMs).toBe(
+        kOpenclawBackupQuiesceTimeoutMs + kOpenclawBackupQuiesceSuppressSlackMs,
+      );
       const backupRecord = readRunBackupRecord(harness);
       expect(backupRecord).toEqual(
         expect.objectContaining({ quiesced: true, attempts: 1, noBackup: false }),
@@ -389,6 +397,43 @@ describe("server/openclaw-channel-backup-retry", () => {
       expect(backupRecord.vanishedPaths).toEqual([
         "/data/.openclaw/agents/main/sessions/56d1821e-9b48-4c93-a35a-4ada38240911.jsonl.lock",
       ]);
+    });
+
+    it("reports the honest window-exhausted failure when the quiesced attempt burns the whole envelope", async () => {
+      // The quiesced attempt consumes the entire phase envelope AND fails
+      // with a vanished file — the ladder gets its turn but has no time for
+      // a single live attempt. The 409 must say the window ran out, not
+      // fabricate a live-attempt failure.
+      const quiesce = makeQuiesceRecorder({});
+      const { runnerImpl, backupCalls } = makeBackupRunner({
+        script: [{ ok: false, tail: kVanishedLockTail }],
+      });
+      const harness = createHarness({
+        runnerImpl,
+        gatewayQuiesce: quiesce,
+        backupTuning: { phaseEnvelopeMs: 1000 },
+      });
+      harness.runner.runStreamed.mockImplementation(async (opts) => {
+        if (opts.command === "openclaw" && opts.args?.[0] === "backup") {
+          harness.nowRef.now += 2000;
+        }
+        return runnerImpl(opts);
+      });
+
+      const result = await harness.sync.applyUpdate(kHardGateTarget);
+
+      expect(result.status).toBe(409);
+      expect(result.body.code).toBe("backup_failed");
+      expect(result.body.message).toMatch(/backup window was exhausted/);
+      expect(result.body.message).toMatch(
+        /after 1 attempt, including one with the gateway paused/,
+      );
+      // No live-ladder attempt ran after the envelope was gone.
+      expect(backupCalls).toHaveLength(1);
+      // The gateway still came back before the failure surfaced.
+      expect(quiesce.start).toHaveBeenCalledTimes(1);
+      expect(quiesce.unsuppress).toHaveBeenCalledTimes(1);
+      expect(quiesce.releaseSpy).toHaveBeenCalledTimes(1);
     });
 
     it("a non-race failure during the quiesced attempt fails hard immediately — gateway restarted before the 409", async () => {
