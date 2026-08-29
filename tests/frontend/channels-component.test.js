@@ -79,7 +79,6 @@ const harness = preactHooks.__harness;
 // useState call order in Channels (see component source; useCachedFetch and
 // usePolling are module-mocked so they consume no slots).
 const kDeletingAccountSlot = 4;
-const kListRefreshErrorSlot = 15;
 
 const collectNodes = (vnode, out = []) => {
   if (vnode == null || typeof vnode !== "object") return out;
@@ -192,8 +191,6 @@ describe("frontend/channels component", () => {
       provider: "telegram",
       accountId: "default",
     });
-    expect(harness.slots[kListRefreshErrorSlot]).toBeInstanceOf(Error);
-
     tree = renderChannels();
     const chip = collectNodes(tree).find(
       (vnode) => vnode.type === InlineErrorChip,
@@ -206,7 +203,6 @@ describe("frontend/channels component", () => {
     // Retrying from the chip clears the note once the refresh succeeds.
     refresh.mockResolvedValue(kTelegramAccountsPayload);
     await chip.props.onRetry();
-    expect(harness.slots[kListRefreshErrorSlot]).toBe(null);
     tree = renderChannels();
     expect(
       collectNodes(tree).find((vnode) => vnode.type === InlineErrorChip),

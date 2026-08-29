@@ -43,6 +43,7 @@ vi.mock("preact/hooks", () => {
 
 vi.mock("../../lib/public/js/lib/api.js", () => ({
   fetchChannelAccountToken: vi.fn(),
+  fetchOpenclawCapabilities: vi.fn(async () => ({ capabilities: {} })),
 }));
 
 vi.mock("../../lib/public/js/lib/clipboard.js", () => ({

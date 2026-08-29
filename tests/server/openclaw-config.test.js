@@ -10,6 +10,7 @@ const {
   updateOpenclawConfig,
   writeOpenclawConfig,
 } = require("../../lib/server/openclaw-config");
+// readOpenclawConfig is used by the agents-shape tests below.
 
 // A config only openclaw itself can parse (JSON5 comments, trailing commas,
 // ${ENV} substitution). alphaclaw must refuse to rewrite it — anything else
@@ -166,6 +167,56 @@ describe("server/openclaw-config", () => {
         .readdirSync(openclawDir)
         .filter((name) => name.endsWith(".tmp"));
       expect(leftovers).toEqual([]);
+    });
+  });
+
+  describe("agents shape preservation (OpenClaw 2026.8 agents.entries)", () => {
+    const writeRaw = (obj) =>
+      fs.writeFileSync(configPath(), JSON.stringify(obj, null, 2));
+
+    it("reads keyed agents.entries as agents.list for every consumer", () => {
+      writeRaw({ agents: { entries: { main: { model: { id: "opus" } } } } });
+      const cfg = readOpenclawConfig({ openclawDir });
+      expect(cfg.agents.list).toEqual([{ id: "main", model: { id: "opus" } }]);
+      expect("entries" in cfg.agents).toBe(false);
+    });
+
+    it("preserves the entries shape when writing back a list-shaped config", () => {
+      writeRaw({ agents: { entries: { main: {} } } });
+      // Simulate the read-modify-write cycle AlphaClaw performs.
+      const cfg = readOpenclawConfig({ openclawDir });
+      cfg.agents.list.push({ id: "work", model: { id: "sonnet" } });
+      writeOpenclawConfig({ openclawDir, config: cfg });
+
+      const onDisk = JSON.parse(fs.readFileSync(configPath(), "utf8"));
+      expect(onDisk.agents.entries).toEqual({
+        main: {},
+        work: { model: { id: "sonnet" } },
+      });
+      expect("list" in onDisk.agents).toBe(false);
+    });
+
+    it("keeps a legacy list-shaped config as a list", () => {
+      writeRaw({ agents: { list: [{ id: "main" }] } });
+      const cfg = readOpenclawConfig({ openclawDir });
+      writeOpenclawConfig({ openclawDir, config: cfg });
+      const onDisk = JSON.parse(fs.readFileSync(configPath(), "utf8"));
+      expect(onDisk.agents.list).toEqual([{ id: "main" }]);
+      expect("entries" in onDisk.agents).toBe(false);
+    });
+
+    it("updateOpenclawConfig preserves the entries shape under lock", () => {
+      writeRaw({ agents: { entries: { main: {} } } });
+      updateOpenclawConfig({
+        openclawDir,
+        mutate: (config) => {
+          // The mutate closure sees the normalized list shape.
+          expect(Array.isArray(config.agents.list)).toBe(true);
+          config.agents.list.push({ id: "extra" });
+        },
+      });
+      const onDisk = JSON.parse(fs.readFileSync(configPath(), "utf8"));
+      expect(Object.keys(onDisk.agents.entries).sort()).toEqual(["extra", "main"]);
     });
   });
 });

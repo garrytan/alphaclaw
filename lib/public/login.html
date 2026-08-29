@@ -41,18 +41,40 @@
         id="login-form"
         class="bg-surface border border-border rounded-xl p-4 space-y-3"
       >
-        <select
-          id="operator"
+        <p id="invite-heading" class="text-sm hidden" style="color: var(--text)">
+          You've been invited to this AlphaClaw. Create your account:
+        </p>
+        <input
+          id="email"
+          type="email"
+          placeholder="Email"
+          autocomplete="username"
           class="w-full bg-field border border-border rounded-lg px-3 py-2 text-sm outline-none focus:border-fg-muted hidden"
           style="color: var(--text)"
-          aria-label="Operator"
-        ></select>
+        />
+        <input
+          id="display-name"
+          type="text"
+          placeholder="Display name (optional)"
+          autocomplete="name"
+          class="w-full bg-field border border-border rounded-lg px-3 py-2 text-sm outline-none focus:border-fg-muted hidden"
+          style="color: var(--text)"
+        />
         <input
           id="password"
           type="password"
           placeholder="Password"
           autofocus
+          autocomplete="current-password"
           class="w-full bg-field border border-border rounded-lg px-3 py-2 text-sm outline-none focus:border-fg-muted"
+          style="color: var(--text)"
+        />
+        <input
+          id="password-confirm"
+          type="password"
+          placeholder="Confirm password"
+          autocomplete="new-password"
+          class="w-full bg-field border border-border rounded-lg px-3 py-2 text-sm outline-none focus:border-fg-muted hidden"
           style="color: var(--text)"
         />
         <div id="error" class="text-status-error-muted text-xs hidden"></div>
@@ -64,44 +86,96 @@
         >
           Enter
         </button>
+        <button
+          id="mode-toggle"
+          type="button"
+          class="w-full text-xs hidden"
+          style="color: var(--text-muted)"
+        ></button>
       </form>
     </div>
     <script>
       const formEl = document.getElementById("login-form");
+      const inviteHeadingEl = document.getElementById("invite-heading");
+      const emailEl = document.getElementById("email");
+      const displayNameEl = document.getElementById("display-name");
       const passwordEl = document.getElementById("password");
+      const passwordConfirmEl = document.getElementById("password-confirm");
       const submitButtonEl = document.getElementById("submit-btn");
-      const operatorEl = document.getElementById("operator");
+      const modeToggleEl = document.getElementById("mode-toggle");
+      const errorEl = document.getElementById("error");
 
-      // Team mode: show an operator picker above the password. Identity only —
-      // the shared password stays the single credential.
-      (async () => {
-        try {
-          const res = await fetch("/api/team/login-info");
-          if (!res.ok) return;
-          const info = await res.json();
-          const operators = Array.isArray(info.operators) ? info.operators : [];
-          if (!info.teamEnabled || operators.length === 0) return;
-          const placeholder = document.createElement("option");
-          placeholder.value = "";
-          placeholder.textContent = "Who are you?";
-          operatorEl.appendChild(placeholder);
-          for (const operator of operators) {
-            if (!operator || !operator.id) continue;
-            const option = document.createElement("option");
-            option.value = operator.id;
-            option.textContent = operator.name || operator.id;
-            operatorEl.appendChild(option);
-          }
-          operatorEl.classList.remove("hidden");
-        } catch {}
-      })();
+      const inviteToken = new URLSearchParams(window.location.search).get(
+        "invite",
+      );
+      // Modes: "password" (shared password), "member" (email + password),
+      // "invite" (accept an invite and create an account).
+      let mode = inviteToken ? "invite" : "password";
+      let legacyLoginDisabled = false;
+      let teamEnabled = false;
 
-      const syncButtonState = () => {
-        const hasValue = passwordEl.value.length > 0;
-        submitButtonEl.disabled = !hasValue;
+      const show = (el, visible) => el.classList.toggle("hidden", !visible);
+
+      const applyMode = () => {
+        show(inviteHeadingEl, mode === "invite");
+        show(emailEl, mode !== "password");
+        show(displayNameEl, mode === "invite");
+        show(passwordConfirmEl, mode === "invite");
+        passwordEl.setAttribute(
+          "autocomplete",
+          mode === "invite" ? "new-password" : "current-password",
+        );
+        passwordEl.placeholder =
+          mode === "invite" ? "Choose a password (8+ characters)" : "Password";
+        submitButtonEl.textContent =
+          mode === "invite" ? "Create account" : "Enter";
+        if (mode === "invite" || legacyLoginDisabled) {
+          show(modeToggleEl, false);
+        } else if (teamEnabled) {
+          show(modeToggleEl, true);
+          modeToggleEl.textContent =
+            mode === "member"
+              ? "Use the shared setup password instead"
+              : "Sign in with your member email";
+        } else {
+          show(modeToggleEl, false);
+        }
+        syncButtonState();
       };
 
-      passwordEl.addEventListener("input", syncButtonState);
+      const syncButtonState = () => {
+        let ready = passwordEl.value.length > 0;
+        if (mode === "member") ready = ready && emailEl.value.length > 0;
+        if (mode === "invite") {
+          ready =
+            passwordEl.value.length >= 8 &&
+            passwordEl.value === passwordConfirmEl.value;
+        }
+        submitButtonEl.disabled = !ready;
+      };
+
+      [emailEl, displayNameEl, passwordEl, passwordConfirmEl].forEach((el) =>
+        el.addEventListener("input", syncButtonState),
+      );
+
+      modeToggleEl.addEventListener("click", () => {
+        mode = mode === "member" ? "password" : "member";
+        applyMode();
+        (mode === "member" ? emailEl : passwordEl).focus();
+      });
+
+      // Team-aware defaults: when member login is the only way in, lead with it.
+      fetch("/api/auth/status")
+        .then((res) => res.json())
+        .then((data) => {
+          teamEnabled = data?.team?.enabled === true;
+          legacyLoginDisabled = data?.team?.legacyLoginDisabled === true;
+          if (mode === "password" && (legacyLoginDisabled || teamEnabled)) {
+            mode = "member";
+          }
+          applyMode();
+        })
+        .catch(() => applyMode());
 
       const setPendingState = (isPending) => {
         submitButtonEl.disabled = isPending;
@@ -109,50 +183,62 @@
         submitButtonEl.classList.toggle("cursor-not-allowed", isPending);
       };
 
+      const showError = (message) => {
+        errorEl.textContent = message;
+        errorEl.classList.remove("hidden");
+      };
+
       formEl.addEventListener("submit", async (e) => {
         e.preventDefault();
-        const password = document.getElementById("password").value;
-        const errorEl = document.getElementById("error");
         errorEl.classList.add("hidden");
         setPendingState(true);
+        const url =
+          mode === "invite" ? "/api/auth/accept-invite" : "/api/auth/login";
+        const body =
+          mode === "invite"
+            ? {
+                token: inviteToken,
+                email: emailEl.value.trim(),
+                displayName: displayNameEl.value.trim(),
+                password: passwordEl.value,
+              }
+            : mode === "member"
+              ? { email: emailEl.value.trim(), password: passwordEl.value }
+              : { password: passwordEl.value };
         try {
-          const operatorId = operatorEl.value || "";
-          const res = await fetch("/api/auth/login", {
+          const res = await fetch(url, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(
-              operatorId ? { password, operatorId } : { password },
-            ),
+            body: JSON.stringify(body),
           });
           const data = await res.json();
           if (data.ok) {
             window.location.href = "/";
+          } else if (res.status === 429) {
+            const retryAfterFromHeader = Number.parseInt(
+              res.headers.get("retry-after") || "0",
+              10,
+            );
+            const retryAfterSec =
+              Number.isFinite(data.retryAfterSec) && data.retryAfterSec > 0
+                ? data.retryAfterSec
+                : Number.isFinite(retryAfterFromHeader) &&
+                    retryAfterFromHeader > 0
+                  ? retryAfterFromHeader
+                  : 30;
+            showError(`Too many attempts. Try again in ${retryAfterSec}s.`);
           } else {
-            if (res.status === 429) {
-              const retryAfterFromHeader = Number.parseInt(
-                res.headers.get("retry-after") || "0",
-                10,
-              );
-              const retryAfterSec =
-                Number.isFinite(data.retryAfterSec) && data.retryAfterSec > 0
-                  ? data.retryAfterSec
-                  : Number.isFinite(retryAfterFromHeader) &&
-                      retryAfterFromHeader > 0
-                    ? retryAfterFromHeader
-                    : 30;
-              errorEl.textContent = `Too many attempts. Try again in ${retryAfterSec}s.`;
-            } else {
-              errorEl.textContent = data.error || "Login failed";
-            }
-            errorEl.classList.remove("hidden");
+            showError(data.error || "Login failed");
           }
         } catch {
-          errorEl.textContent = "Connection error";
-          errorEl.classList.remove("hidden");
+          showError("Connection error");
         } finally {
           setPendingState(false);
+          syncButtonState();
         }
       });
+
+      applyMode();
     </script>
   </body>
 </html>

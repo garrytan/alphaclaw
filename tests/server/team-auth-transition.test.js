@@ -7,8 +7,11 @@ const {
   enableTeamMode,
   readTeamAuthSnapshot,
   resolveTeamAuthSnapshotPath,
-  syncTeamAllowUsers,
 } = require("../../lib/server/team-auth-transition");
+const {
+  createTeamGatewayConfig,
+} = require("../../lib/server/team/gateway-config");
+const { updateOpenclawConfig } = require("../../lib/server/openclaw-config");
 const { getGatewayCredential } = require("../../lib/server/gateway-credential");
 
 const kGatewayUrl = "http://127.0.0.1:18789";
@@ -41,8 +44,38 @@ const createProbeRequest = ({ acceptInvoke }) =>
 const kFastProbe = { healthAttempts: 2, healthRetryDelayMs: 1 };
 
 describe("server/team-auth-transition", () => {
-  const kOperators = [{ id: "garry" }, { id: "diana" }];
+  const kMembers = [
+    { id: "m1", email: "garry@example.com", role: "admin", disabled: 0 },
+    { id: "m2", email: "diana@example.com", role: "member", disabled: 0 },
+  ];
+  const kProbeUser = "garry@example.com";
   const env = { OPENCLAW_GATEWAY_TOKEN: "shared-token" };
+
+  // The REAL single writer (team/gateway-config.js) over a fake roster — the
+  // transition delegates the gateway.auth shape to it, so these tests assert
+  // the live-verified subtree lands on disk end to end.
+  const createApplyAuthConfig = ({ openclawDir, testEnv = env }) => {
+    const stateFile = path.join(openclawDir, "team-state.json");
+    const teamStateStore = {
+      read: () =>
+        fs.existsSync(stateFile)
+          ? JSON.parse(fs.readFileSync(stateFile, "utf8"))
+          : {},
+      update(fn) {
+        const next = fn(this.read());
+        fs.writeFileSync(stateFile, JSON.stringify(next));
+        return next;
+      },
+    };
+    const writer = createTeamGatewayConfig({
+      openclawDir,
+      updateOpenclawConfig,
+      teamStateStore,
+      membersStore: { listMembers: () => kMembers },
+      env: testEnv,
+    });
+    return () => writer.applyTeamGatewayConfig();
+  };
 
   it("enable happy path writes the trusted-proxy config and snapshots the old auth", async () => {
     const openclawDir = createTempOpenclawDir();
@@ -54,13 +87,14 @@ describe("server/team-auth-transition", () => {
     });
     const restartGateway = vi.fn(async () => {});
     const request = createProbeRequest({
-      acceptInvoke: (headers) => headers["x-alphaclaw-user"] === "garry",
+      acceptInvoke: (headers) => headers["x-alphaclaw-user"] === kProbeUser,
     });
 
     const result = await enableTeamMode({
       openclawDir,
       env,
-      operators: kOperators,
+      applyAuthConfig: createApplyAuthConfig({ openclawDir }),
+      probeUser: kProbeUser,
       restartGateway,
       getGatewayUrl: () => kGatewayUrl,
       request,
@@ -71,13 +105,34 @@ describe("server/team-auth-transition", () => {
     expect(restartGateway).toHaveBeenCalledTimes(1);
 
     const config = readConfig(openclawDir);
+    // The live-verified beta subtree: identityScopes at AUTH level (the
+    // strict trustedProxy object rejects it), member EMAILS as identity keys,
+    // deviceAutoApprove without operator.admin, and the internal-caller
+    // password as an env reference.
     expect(config.gateway.auth).toEqual({
       mode: "trusted-proxy",
       password: "${OPENCLAW_GATEWAY_PASSWORD}",
+      identityScopes: {
+        "garry@example.com": [
+          "operator.read",
+          "operator.write",
+          "operator.approvals",
+          "operator.admin",
+        ],
+        "diana@example.com": [
+          "operator.read",
+          "operator.write",
+          "operator.approvals",
+        ],
+      },
       trustedProxy: {
         userHeader: "x-alphaclaw-user",
         allowLoopback: true,
-        allowUsers: ["garry", "diana"],
+        deviceAutoApprove: {
+          enabled: true,
+          scopes: ["operator.read", "operator.write", "operator.approvals"],
+        },
+        allowUsers: ["garry@example.com", "diana@example.com"],
       },
     });
     // Token removed (mutually exclusive with trusted-proxy).
@@ -97,19 +152,32 @@ describe("server/team-auth-transition", () => {
     });
   });
 
-  it("refuses to enable without operators", async () => {
+  it("refuses to enable without a member account or a writer", async () => {
     const openclawDir = createTempOpenclawDir();
     writeConfig(openclawDir, {});
-    const result = await enableTeamMode({
+
+    const noMember = await enableTeamMode({
       openclawDir,
       env,
-      operators: [],
+      applyAuthConfig: createApplyAuthConfig({ openclawDir }),
+      probeUser: "",
       restartGateway: vi.fn(),
       getGatewayUrl: () => kGatewayUrl,
       probeOptions: kFastProbe,
     });
-    expect(result.ok).toBe(false);
-    expect(result.error).toMatch(/operator/i);
+    expect(noMember.ok).toBe(false);
+    expect(noMember.error).toMatch(/admin account/i);
+
+    const noWriter = await enableTeamMode({
+      openclawDir,
+      env,
+      probeUser: kProbeUser,
+      restartGateway: vi.fn(),
+      getGatewayUrl: () => kGatewayUrl,
+      probeOptions: kFastProbe,
+    });
+    expect(noWriter.ok).toBe(false);
+    expect(noWriter.error).toMatch(/writer/i);
   });
 
   it("auto-restores the snapshot and restarts again when the probe fails", async () => {
@@ -125,7 +193,8 @@ describe("server/team-auth-transition", () => {
     const result = await enableTeamMode({
       openclawDir,
       env,
-      operators: kOperators,
+      applyAuthConfig: createApplyAuthConfig({ openclawDir }),
+      probeUser: kProbeUser,
       restartGateway,
       getGatewayUrl: () => kGatewayUrl,
       request,
@@ -153,7 +222,8 @@ describe("server/team-auth-transition", () => {
     const result = await enableTeamMode({
       openclawDir,
       env,
-      operators: kOperators,
+      applyAuthConfig: createApplyAuthConfig({ openclawDir }),
+      probeUser: kProbeUser,
       restartGateway,
       getGatewayUrl: () => kGatewayUrl,
       request,
@@ -181,7 +251,8 @@ describe("server/team-auth-transition", () => {
     const result = await enableTeamMode({
       openclawDir,
       env,
-      operators: kOperators,
+      applyAuthConfig: createApplyAuthConfig({ openclawDir }),
+      probeUser: kProbeUser,
       restartGateway,
       getGatewayUrl: () => kGatewayUrl,
       request,
@@ -191,7 +262,7 @@ describe("server/team-auth-transition", () => {
 
     expect(result.ok).toBe(false);
     expect(result.restored).toBe(true);
-    expect(result.error).toMatch(/restart failed/i);
+    expect(result.error).toMatch(/enable failed/i);
     // Restart happened twice: the throwing apply + the restore.
     expect(restartGateway).toHaveBeenCalledTimes(2);
     // openclaw.json is back to token auth — the trusted-proxy flip did not
@@ -212,7 +283,8 @@ describe("server/team-auth-transition", () => {
     const enabled = await enableTeamMode({
       openclawDir,
       env,
-      operators: kOperators,
+      applyAuthConfig: createApplyAuthConfig({ openclawDir }),
+      probeUser: kProbeUser,
       restartGateway,
       getGatewayUrl: () => kGatewayUrl,
       request: enableRequest,
@@ -328,47 +400,5 @@ describe("server/team-auth-transition", () => {
     expect(readConfig(openclawDir).gateway.auth.token).toBe(
       "${OPENCLAW_GATEWAY_TOKEN}",
     );
-  });
-
-  describe("syncTeamAllowUsers", () => {
-    it("updates allowUsers while trusted-proxy mode is active", () => {
-      const openclawDir = createTempOpenclawDir();
-      writeConfig(openclawDir, {
-        gateway: {
-          auth: {
-            mode: "trusted-proxy",
-            trustedProxy: { userHeader: "x-alphaclaw-user", allowUsers: ["old"] },
-          },
-        },
-      });
-      const result = syncTeamAllowUsers({
-        openclawDir,
-        operators: [{ id: "new-1" }, { id: "new-2" }],
-      });
-      expect(result.changed).toBe(true);
-      expect(
-        readConfig(openclawDir).gateway.auth.trustedProxy.allowUsers,
-      ).toEqual(["new-1", "new-2"]);
-    });
-
-    it("is a no-op in token mode", () => {
-      const openclawDir = createTempOpenclawDir();
-      const config = { gateway: { auth: { token: "abc" } } };
-      writeConfig(openclawDir, config);
-      const before = fs.readFileSync(
-        path.join(openclawDir, "openclaw.json"),
-        "utf8",
-      );
-      const result = syncTeamAllowUsers({
-        openclawDir,
-        operators: [{ id: "someone" }],
-      });
-      expect(result.changed).toBe(false);
-      const after = fs.readFileSync(
-        path.join(openclawDir, "openclaw.json"),
-        "utf8",
-      );
-      expect(after).toBe(before);
-    });
   });
 });

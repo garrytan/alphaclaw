@@ -446,21 +446,47 @@ describe("frontend/upgrade-helpers status card", () => {
 
     expect(model.stabilization.badge).toBe("STABILIZING");
     expect(model.stabilization.line).toBe(
-      "auto-rollback armed → last known good: 2026.7.2",
+      "Post-upgrade monitoring period — auto-rollback armed → last known good: 2026.7.2",
     );
     expect(model.stabilization.caption).toContain("first 24h");
     expect(model.showStabilizationActions).toBe(true);
     expect(model.autoAcceptedNote).toBeNull();
     expect(model.bootCostNote).toBe(
-      "Channel-applied versions add ~10-30s to restarts (the built-in version boots fastest).",
+      "Channel-applied versions add ~10-60s to the first restart after a version change (settings migration and install checks run once; later restarts are fast).",
     );
   });
 
   it("names channel-applied versions (not 'non-stable') in the boot-cost note", async () => {
     const { kBootCostNote } = await loadUpgradeHelpers();
-    expect(kBootCostNote).toBe(
-      "Channel-applied versions add ~10-30s to restarts (the built-in version boots fastest).",
-    );
+    expect(kBootCostNote).toContain("Channel-applied versions add ~10-60s");
+    expect(kBootCostNote).toContain("settings migration");
+  });
+
+  it("surfaces the settings-migration result in admin language (2.1/D1)", async () => {
+    const { buildSettingsMigrationRow } = await loadUpgradeHelpers();
+
+    expect(buildSettingsMigrationRow(null)).toBeNull();
+    expect(buildSettingsMigrationRow({})).toBeNull();
+
+    expect(
+      buildSettingsMigrationRow({
+        completedForVersion: "2026.8.1-beta.3",
+        lastAttempt: { version: "2026.8.1-beta.3", at: 1, ok: true },
+      }),
+    ).toEqual({ ok: true, text: "Settings updated for 2026.8.1-beta.3" });
+
+    const failed = buildSettingsMigrationRow({
+      completedForVersion: "2026.7.1-2",
+      lastAttempt: {
+        version: "2026.8.1-beta.3",
+        at: 2,
+        ok: false,
+        error: "doctor exited 1",
+      },
+    });
+    expect(failed.ok).toBe(false);
+    expect(failed.text).toContain("Settings update for 2026.8.1-beta.3 failed");
+    expect(failed.text).toContain("retries at the next restart");
   });
 
   it("keeps the auto-accepted 24h note while the window stays armed (two-tier window)", async () => {
@@ -489,6 +515,29 @@ describe("frontend/upgrade-helpers status card", () => {
     // ("Mark as good now" / "Roll back now") must stay available.
     expect(model.showStabilizationActions).toBe(true);
     expect(model.autoAcceptedNote).toBe(kAutoAcceptedNote);
+
+    // D1: with the server-computed window end, the note shows remaining time.
+    const timed = buildStatusCardModel(
+      {
+        releaseChannel: "beta",
+        installedVersion: "2026.7.3-beta.1",
+        pinVersion: "2026.7.1-2",
+        applied: {
+          channel: "beta",
+          version: "2026.7.3-beta.1",
+          acceptedSource: "acceptance",
+        },
+        appliedId: "2026.7.3-beta.1",
+        isPin: false,
+        acceptedAt: kNow - 3_600_000,
+        inStabilizationWindow: true,
+        stabilizationEndsAt: kNow + 23 * 3_600_000,
+        lastKnownGood: { package: "2026.7.2", dev: null },
+        lastBoot: null,
+      },
+      kNow,
+    );
+    expect(timed.autoAcceptedNote).toBe(`${kAutoAcceptedNote} ~23h left`);
     expect(kAutoAcceptedNote).toBe(
       "Auto-rollback stays armed for 24h after activation — 'Mark as good now' disarms it.",
     );
@@ -691,6 +740,41 @@ describe("frontend/upgrade-helpers confirm models (U1/U3/U9)", () => {
     expect(model.isBreaking).toBe(false);
     expect(model.steps).toBeNull();
     expect(model.lines.join(" ")).not.toContain("Safety net");
+  });
+
+  it("carries curated security flips into the confirm model (D5)", async () => {
+    const { buildApplyConfirmModel } = await loadUpgradeHelpers();
+
+    const flips = [
+      {
+        key: "gateway.terminal.enabled",
+        from: "off",
+        to: "on",
+        warning: "The dashboard gains a host terminal by default.",
+      },
+    ];
+    const model = buildApplyConfirmModel({
+      payload: { channel: "beta", version: "2026.8.1-beta.3" },
+      label: "2026.8.1-beta.3",
+      currentChannel: "stable",
+      securityFlips: flips,
+    });
+    expect(model.securityFlips).toEqual(flips);
+
+    // Defaults and malformed inputs collapse to an empty list.
+    expect(
+      buildApplyConfirmModel({
+        payload: { channel: "stable", version: "2026.7.2" },
+        label: "2026.7.2",
+      }).securityFlips,
+    ).toEqual([]);
+    expect(
+      buildApplyConfirmModel({
+        payload: { channel: "beta", version: "2026.8.1-beta.3" },
+        label: "2026.8.1-beta.3",
+        securityFlips: "not-an-array",
+      }).securityFlips,
+    ).toEqual([]);
   });
 });
 
@@ -1118,9 +1202,18 @@ describe("frontend/upgrade-helpers misc models", () => {
       dev: { commits: [{ sha: "abc1234def", shortSha: "abc1234", current: true }] },
     };
 
+    // No installedVersion → the distance is unknown, so D13 states that
+    // explicitly rather than silently implying "up to date".
     expect(buildAvailabilityLine({ catalog, releaseChannel: "stable" })).toBe(
-      "Latest stable: 2026.7.2",
+      "Latest stable: 2026.7.2 — update status unavailable",
     );
+    expect(
+      buildAvailabilityLine({
+        catalog,
+        releaseChannel: "stable",
+        installedVersion: "2026.7.2",
+      }),
+    ).toBe("Latest stable: 2026.7.2");
     expect(buildAvailabilityLine({ catalog, releaseChannel: "beta" })).toBe(
       "No beta releases listed.",
     );
@@ -1282,4 +1375,109 @@ describe("frontend/upgrade-helpers misc models", () => {
     expect(verdict.ok).toBe(true);
   });
 
+  describe("releases-behind indicator", () => {
+    const catalog = {
+      beta: [
+        { version: "2026.8.1-beta.3" },
+        { version: "2026.8.1-beta.2" },
+        { version: "2026.8.1-beta.1" },
+      ],
+      stable: [{ version: "2026.7.1-2", isDistTagLatest: true }],
+    };
+
+    it("counts newer releases only when installed is on the selected channel", async () => {
+      const { computeReleasesBehind, formatReleasesBehind } =
+        await loadUpgradeHelpers();
+      const result = computeReleasesBehind({
+        catalog,
+        releaseChannel: "beta",
+        installedVersion: "2026.8.1-beta.1",
+      });
+      expect(result).toEqual({ status: "behind", count: 2 });
+      expect(formatReleasesBehind(result, "beta")).toBe("2 beta releases behind");
+    });
+
+    it("uses the singular noun exactly one release behind (E2)", async () => {
+      const { computeReleasesBehind, formatReleasesBehind } =
+        await loadUpgradeHelpers();
+      const result = computeReleasesBehind({
+        catalog,
+        releaseChannel: "beta",
+        installedVersion: "2026.8.1-beta.2",
+      });
+      expect(result).toEqual({ status: "behind", count: 1 });
+      expect(formatReleasesBehind(result, "beta")).toBe("1 beta release behind");
+    });
+
+    it("reports up-to-date on the newest release", async () => {
+      const { computeReleasesBehind, formatReleasesBehind } =
+        await loadUpgradeHelpers();
+      const result = computeReleasesBehind({
+        catalog,
+        releaseChannel: "beta",
+        installedVersion: "2026.8.1-beta.3",
+      });
+      expect(result.status).toBe("current");
+      expect(formatReleasesBehind(result)).toBe("Up to date");
+    });
+
+    it("says not-on-channel when installed belongs to a different channel", async () => {
+      const { computeReleasesBehind, formatReleasesBehind } =
+        await loadUpgradeHelpers();
+      const result = computeReleasesBehind({
+        catalog,
+        releaseChannel: "beta",
+        installedVersion: "2026.7.1-2", // a stable version, browsing beta
+      });
+      expect(result.status).toBe("not-on-channel");
+      expect(formatReleasesBehind(result)).toBe(
+        "Not running the selected channel",
+      );
+    });
+
+    it("appends distance/not-on-channel detail to the availability line", async () => {
+      const { buildAvailabilityLine } = await loadUpgradeHelpers();
+      expect(
+        buildAvailabilityLine({
+          catalog,
+          releaseChannel: "beta",
+          installedVersion: "2026.8.1-beta.1",
+        }),
+      ).toBe("Latest beta: 2026.8.1-beta.3 — 2 beta releases behind");
+      expect(
+        buildAvailabilityLine({
+          catalog,
+          releaseChannel: "beta",
+          installedVersion: "2026.7.1-2",
+        }),
+      ).toBe("Latest beta: 2026.8.1-beta.3 — not running this channel yet");
+    });
+
+    it("says update status unavailable when the distance is unknown (D13)", async () => {
+      const { buildAvailabilityLine } = await loadUpgradeHelpers();
+      // We know the latest beta but not what's installed — the distance can't
+      // be computed, so D13 says so instead of silently dropping the claim.
+      expect(
+        buildAvailabilityLine({
+          catalog,
+          releaseChannel: "beta",
+          installedVersion: null,
+        }),
+      ).toBe("Latest beta: 2026.8.1-beta.3 — update status unavailable");
+    });
+
+    it("returns unknown for dev, empty catalog, or missing version", async () => {
+      const { computeReleasesBehind, formatReleasesBehind } =
+        await loadUpgradeHelpers();
+      expect(
+        computeReleasesBehind({ catalog, releaseChannel: "dev", installedVersion: "x" })
+          .status,
+      ).toBe("unknown");
+      expect(
+        computeReleasesBehind({ catalog: null, releaseChannel: "beta", installedVersion: "x" })
+          .status,
+      ).toBe("unknown");
+      expect(formatReleasesBehind({ status: "unknown" })).toBeNull();
+    });
+  });
 });

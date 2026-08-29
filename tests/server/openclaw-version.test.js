@@ -30,6 +30,88 @@ const flushAsync = () => new Promise((resolve) => setImmediate(resolve));
 
 const kUpdateStatusCommand = "openclaw update status --json";
 
+describe("server/openclaw-version verifyStagedLifecycle", () => {
+  const { verifyStagedLifecycle } = require("../../lib/server/openclaw-version");
+  const pkgDir = "/staged/node_modules/openclaw";
+  const guardPath = `${pkgDir}/dist/openclaw-install-guard`;
+
+  const makeFs = (present) => {
+    const files = new Set(present);
+    return {
+      existsSync: (p) => files.has(p),
+      _delete: (p) => files.delete(p),
+      _files: files,
+    };
+  };
+
+  it("is a no-op when the guard is already gone (scripts ran, or stable)", async () => {
+    const execImpl = vi.fn();
+    const fsModule = makeFs([]); // no guard
+    await verifyStagedLifecycle({ openclawPackageDir: pkgDir, execImpl, fsModule });
+    expect(execImpl).not.toHaveBeenCalled();
+  });
+
+  it("runs the lifecycle scripts manually when the guard remains, then passes", async () => {
+    const fsModule = makeFs([
+      guardPath,
+      `${pkgDir}/scripts/preinstall-package-manager-warning.mjs`,
+      `${pkgDir}/scripts/postinstall-bundled-plugins.mjs`,
+    ]);
+    const execImpl = vi.fn((cmd, opts, cb) => {
+      // The preinstall script deletes the guard on success.
+      if (cmd.includes("preinstall")) fsModule._delete(guardPath);
+      cb(null, "", "");
+    });
+    await verifyStagedLifecycle({ openclawPackageDir: pkgDir, execImpl, fsModule });
+    expect(execImpl).toHaveBeenCalledTimes(2);
+  });
+
+  it("rejects when the guard survives even after running the scripts", async () => {
+    const fsModule = makeFs([
+      guardPath,
+      `${pkgDir}/scripts/preinstall-package-manager-warning.mjs`,
+    ]);
+    const execImpl = vi.fn((cmd, opts, cb) => cb(null, "", "")); // never deletes guard
+    await expect(
+      verifyStagedLifecycle({ openclawPackageDir: pkgDir, execImpl, fsModule }),
+    ).rejects.toThrow(/install incomplete/i);
+  });
+
+  it("propagates a lifecycle-script failure", async () => {
+    const fsModule = makeFs([
+      guardPath,
+      `${pkgDir}/scripts/preinstall-package-manager-warning.mjs`,
+    ]);
+    const execImpl = vi.fn((cmd, opts, cb) => cb(new Error("script crashed")));
+    await expect(
+      verifyStagedLifecycle({ openclawPackageDir: pkgDir, execImpl, fsModule }),
+    ).rejects.toThrow(/script crashed/);
+  });
+
+  it("fails staging when the guard is removed but POSTINSTALL fails (E-C5)", async () => {
+    // Guard absence proves only preinstall ran — a postinstall failure after
+    // the guard is gone must still fail staging, never save to the overlay.
+    const fsModule = makeFs([
+      guardPath,
+      `${pkgDir}/scripts/preinstall-package-manager-warning.mjs`,
+      `${pkgDir}/scripts/postinstall-bundled-plugins.mjs`,
+    ]);
+    const execImpl = vi.fn((cmd, opts, cb) => {
+      if (cmd.includes("preinstall")) {
+        fsModule._delete(guardPath); // preinstall succeeded
+        return cb(null, "", "");
+      }
+      cb(new Error("postinstall: bundled plugin prune failed"));
+    });
+    await expect(
+      verifyStagedLifecycle({ openclawPackageDir: pkgDir, execImpl, fsModule }),
+    ).rejects.toThrow(/postinstall/);
+    // Both scripts were attempted, in order.
+    expect(execImpl.mock.calls[0][0]).toContain("preinstall");
+    expect(execImpl.mock.calls[1][0]).toContain("postinstall");
+  });
+});
+
 const createService = ({ isOnboarded = false } = {}) => {
   const execMock = vi.fn();
   const execSyncMock = vi.fn();
@@ -431,6 +513,9 @@ describe("server/openclaw-version", () => {
       fs.readFileSync(require("path").join(result.tmpDir, "package.json"), "utf8"),
     );
     expect(manifest.dependencies.openclaw).toBe("2026.8.1-beta.3");
+    // npm >= 11.16 script allowlist — MANIFEST field, not the --allow-scripts
+    // flag (npm 11.19 rejects the flag in project-scoped installs; live-tested).
+    expect(manifest.allowScripts).toEqual(["openclaw"]);
     expect(execMock).toHaveBeenCalledWith(
       "npm install --omit=dev --prefer-online --package-lock=false --install-strategy=nested",
       expect.objectContaining({
@@ -527,6 +612,39 @@ describe("server/openclaw-version", () => {
     ).rejects.toThrow("npm ERR! EACCES");
   });
 
+  it("EXEC path: finishOk runs verifyStagedLifecycle — a guard-bearing tree rejects and is removed", async () => {
+    nodeRuntime.assertSupportedNodeVersion = () => {};
+    const fs = require("fs");
+    const path = require("path");
+    let stagedTmpDir;
+    const execMock = vi.fn((cmd, opts, callback) => {
+      if (String(cmd).startsWith("npm install")) {
+        stagedTmpDir = opts.cwd;
+        // A "successful" install whose lifecycle scripts were skipped: the
+        // staged tree still carries dist/openclaw-install-guard.
+        const distDir = path.join(opts.cwd, "node_modules", "openclaw", "dist");
+        fs.mkdirSync(distDir, { recursive: true });
+        fs.writeFileSync(path.join(distDir, "openclaw-install-guard"), "guard");
+        return callback(null, "added", "");
+      }
+      return callback(null, "", "");
+    });
+    const { installOpenclawVersionToTempDir } = loadVersionModule({
+      execMock,
+      execSyncMock: vi.fn(),
+    });
+
+    await expect(
+      installOpenclawVersionToTempDir({
+        versionSpec: "2026.8.1-beta.3",
+        execImpl: execMock,
+      }),
+    ).rejects.toThrow("install incomplete");
+    // The incomplete tree must never survive to reach the overlay store.
+    expect(stagedTmpDir).toContain("openclaw-prepare-");
+    expect(fs.existsSync(stagedTmpDir)).toBe(false);
+  });
+
   // Streamed installs (the release-channel apply path) run through an injected
   // runStreamImpl instead of exec so a hang or OOM kill still leaves output in
   // the durable update log.
@@ -559,6 +677,9 @@ describe("server/openclaw-version", () => {
         require("path").join(result.tmpDir, "node_modules", "openclaw"),
       );
       expect(result.stdout).toBe("added 42 packages");
+      // The staged-lifecycle verification ran inside finishOk (merge
+      // resolution: it covers the streamed path, not just exec).
+      expect(result.lifecycleVerified).toBe(true);
       expect(runStreamed).toHaveBeenCalledWith(
         expect.objectContaining({
           command: "npm",
@@ -619,6 +740,31 @@ describe("server/openclaw-version", () => {
           runStreamImpl: { runStreamed },
         }),
       ).rejects.toThrow("Failed to install openclaw@3.2.1");
+      expect(fs.existsSync(runStreamed.tmpDir)).toBe(false);
+    });
+
+    it("STREAMED path: finishOk runs verifyStagedLifecycle — a guard-bearing tree rejects and is removed", async () => {
+      const installOpenclawVersionToTempDir = loadStreamedInstaller();
+      const path = require("path");
+      // npm reports success but the lifecycle scripts were skipped: the
+      // runner plants the guard-bearing staged tree the way npm would leave
+      // it. A naive merge would have skipped this check on the streamed
+      // (production apply) path entirely.
+      const runStreamed = vi.fn(async ({ cwd }) => {
+        runStreamed.tmpDir = cwd;
+        const distDir = path.join(cwd, "node_modules", "openclaw", "dist");
+        fs.mkdirSync(distDir, { recursive: true });
+        fs.writeFileSync(path.join(distDir, "openclaw-install-guard"), "guard");
+        return { ok: true, tail: "added 42 packages, scripts skipped\n" };
+      });
+
+      await expect(
+        installOpenclawVersionToTempDir({
+          versionSpec: "2026.8.1",
+          runStreamImpl: { runStreamed },
+        }),
+      ).rejects.toThrow("install incomplete");
+      expect(runStreamed.tmpDir).toContain("openclaw-prepare-");
       expect(fs.existsSync(runStreamed.tmpDir)).toBe(false);
     });
 
