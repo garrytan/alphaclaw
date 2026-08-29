@@ -84,6 +84,11 @@ bucketed days at the *server's* midnight, and the Doctor tab served a frozen
   offset, and zone-less timestamps pass through unchanged instead of being
   guessed as browser-local; the timezone caption falls back to "local time"
   when the browser can't name its zone.
+- When the server can't recognize the browser's timezone, the cron trends
+  chart says so ("Day buckets use the server's timezone…") instead of
+  silently labeling server-local buckets with browser-local dates; the
+  trends endpoint also accepts a `?timeZone=` override and marks its
+  response `Vary: x-client-timezone` for HTTP caches.
 
 ## [0.9.44] - 2026-08-29
 
