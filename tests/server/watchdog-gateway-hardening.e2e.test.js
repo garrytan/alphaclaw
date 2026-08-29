@@ -25,7 +25,13 @@ const createFakeGateway = () => ({
   suppressed: [],
 });
 
-const createStack = ({ autoRepair = false, fakeGateway } = {}) => {
+const createStack = ({
+  autoRepair = false,
+  fakeGateway,
+  configMedic = null,
+  releaseChannelHooks = null,
+  medicRunBudgetMs = undefined,
+} = {}) => {
   process.env.WATCHDOG_AUTO_REPAIR = autoRepair ? "true" : "false";
   process.env.WATCHDOG_NOTIFICATIONS_DISABLED = "false";
 
@@ -88,6 +94,9 @@ const createStack = ({ autoRepair = false, fakeGateway } = {}) => {
     resolveSetupUrl: () => "https://setup.example.com",
     resolveGatewayHealthUrl: () => "http://127.0.0.1:18789/health",
     resolveGatewayReadyzUrl: () => "http://127.0.0.1:18789/readyz",
+    configMedic,
+    ...(releaseChannelHooks ? { releaseChannelHooks } : {}),
+    ...(medicRunBudgetMs === undefined ? {} : { medicRunBudgetMs }),
   });
 
   const app = express();
@@ -222,5 +231,202 @@ describe("server/watchdog gateway hardening (e2e)", () => {
       expect.objectContaining({ lifecycle: "running", health: "healthy" }),
     );
     watchdog.stop();
+  });
+
+  describe("startup medic on exit 78", () => {
+    const kStripeStderr = [
+      'gateway.controlUi: Unrecognized key: "environment"',
+    ];
+
+    const createMedicMock = ({ fixed, diagnosis = null, enabled = true } = {}) => ({
+      isEnabled: vi.fn(() => enabled),
+      run: vi.fn(async () =>
+        fixed
+          ? {
+              fixed: true,
+              tier: "managed_key",
+              actions: ["removed gateway.controlUi.environment"],
+              backup: "openclaw.json.medic-x.bak",
+            }
+          : { fixed: false, tier: "ai", diagnosis },
+      ),
+    });
+
+    it("repairs, notifies recovery, and relaunches instead of latching", async () => {
+      const configMedic = createMedicMock({ fixed: true });
+      const { watchdog, launchGatewayProcess, notifier, insertWatchdogEvent } =
+        createStack({ configMedic });
+
+      watchdog.onGatewayExit({
+        code: 78,
+        expectedExit: false,
+        stderrTail: kStripeStderr,
+      });
+      await flushMicrotasks();
+      await flushMicrotasks();
+
+      expect(configMedic.run).toHaveBeenCalledWith(
+        expect.objectContaining({
+          exitCode: 78,
+          stderrTail: kStripeStderr,
+          allowDoctorFix: true,
+          attempt: 1,
+        }),
+      );
+      expect(launchGatewayProcess).toHaveBeenCalledTimes(1);
+      const messages = notifier.notify.mock.calls.map((call) => call[0]);
+      expect(messages.some((m) => m.includes("auto-repaired"))).toBe(true);
+      expect(
+        messages.some((m) => m.includes("restart is paused")),
+      ).toBe(false);
+      expect(
+        insertWatchdogEvent.mock.calls.some(
+          (call) => call[0].eventType === "medic" && call[0].status === "ok",
+        ),
+      ).toBe(true);
+      expect(watchdog.getStatus().lifecycle).toBe("restarting");
+      watchdog.stop();
+    });
+
+    it("latches with the AI diagnosis when the medic cannot fix", async () => {
+      const configMedic = createMedicMock({
+        fixed: false,
+        diagnosis: "gateway.port expects a number; fix it by hand.",
+      });
+      const { watchdog, launchGatewayProcess, notifier } = createStack({
+        configMedic,
+      });
+
+      watchdog.onGatewayExit({
+        code: 78,
+        expectedExit: false,
+        stderrTail: ["gateway.port: Invalid input"],
+      });
+      await flushMicrotasks();
+      await flushMicrotasks();
+
+      expect(launchGatewayProcess).not.toHaveBeenCalled();
+      expect(watchdog.getStatus().lifecycle).toBe("configuration_error");
+      const messages = notifier.notify.mock.calls.map((call) => call[0]);
+      const latchMessage = messages.find((m) => m.includes("restart is paused"));
+      expect(latchMessage).toBeTruthy();
+      expect(latchMessage).toContain("AI diagnosis: gateway.port expects a number");
+      watchdog.stop();
+    });
+
+    it("caps medic attempts per incident, then latches the legacy way", async () => {
+      const configMedic = createMedicMock({ fixed: true });
+      const { watchdog, launchGatewayProcess, notifier } = createStack({
+        configMedic,
+      });
+
+      // Fix → relaunch → exit 78 again → fix → relaunch → exit 78 again:
+      // the third exit must latch without a third medic run.
+      for (let i = 0; i < 3; i += 1) {
+        watchdog.onGatewayExit({
+          code: 78,
+          expectedExit: false,
+          stderrTail: kStripeStderr,
+        });
+        // eslint-disable-next-line no-await-in-loop
+        await flushMicrotasks();
+        // eslint-disable-next-line no-await-in-loop
+        await flushMicrotasks();
+      }
+
+      expect(configMedic.run).toHaveBeenCalledTimes(2);
+      expect(configMedic.run).toHaveBeenLastCalledWith(
+        expect.objectContaining({ attempt: 2 }),
+      );
+      expect(launchGatewayProcess).toHaveBeenCalledTimes(2);
+      expect(watchdog.getStatus().lifecycle).toBe("configuration_error");
+      const messages = notifier.notify.mock.calls.map((call) => call[0]);
+      expect(messages.some((m) => m.includes("restart is paused"))).toBe(true);
+      watchdog.stop();
+    });
+
+    it("resets the attempt budget once the gateway really launches", async () => {
+      const configMedic = createMedicMock({ fixed: true });
+      const { watchdog } = createStack({ configMedic });
+
+      watchdog.onGatewayExit({ code: 78, expectedExit: false, stderrTail: [] });
+      await flushMicrotasks();
+      await flushMicrotasks();
+      watchdog.onGatewayLaunch({ startedAt: Date.now(), pid: 99 });
+
+      // A later, unrelated incident gets a fresh attempt 1.
+      watchdog.onGatewayExit({ code: 78, expectedExit: false, stderrTail: [] });
+      await flushMicrotasks();
+      await flushMicrotasks();
+      expect(configMedic.run).toHaveBeenLastCalledWith(
+        expect.objectContaining({ attempt: 1 }),
+      );
+      watchdog.stop();
+    });
+
+    it("latches when the medic overruns its run budget instead of holding the lock", async () => {
+      const configMedic = {
+        isEnabled: () => true,
+        run: vi.fn(() => new Promise(() => {})), // never resolves
+      };
+      const { watchdog, launchGatewayProcess, notifier } = createStack({
+        configMedic,
+        medicRunBudgetMs: 40,
+      });
+
+      watchdog.onGatewayExit({ code: 78, expectedExit: false, stderrTail: [] });
+      await new Promise((resolve) => setTimeout(resolve, 150));
+
+      expect(launchGatewayProcess).not.toHaveBeenCalled();
+      expect(watchdog.getStatus().lifecycle).toBe("configuration_error");
+      const messages = notifier.notify.mock.calls.map((call) => call[0]);
+      expect(messages.some((m) => m.includes("restart is paused"))).toBe(true);
+      watchdog.stop();
+    });
+
+    it("fails doctor gating CLOSED when the channel state cannot be read", async () => {
+      const configMedic = createMedicMock({ fixed: true });
+      const { watchdog } = createStack({
+        configMedic,
+        releaseChannelHooks: {
+          getInfo: vi.fn(() => {
+            throw new Error("state file torn");
+          }),
+          requestRollback: vi.fn(),
+        },
+      });
+
+      watchdog.onGatewayExit({ code: 78, expectedExit: false, stderrTail: [] });
+      await flushMicrotasks();
+      await flushMicrotasks();
+
+      // An unreadable channel state could hide a live stabilization window —
+      // unattended doctor --fix must not be offered (openclaw#107226).
+      expect(configMedic.run).toHaveBeenCalledWith(
+        expect.objectContaining({ allowDoctorFix: false }),
+      );
+      watchdog.stop();
+    });
+
+    it("keeps the legacy latch when the medic is disabled", async () => {
+      const configMedic = createMedicMock({ fixed: true, enabled: false });
+      const { watchdog, launchGatewayProcess, notifier } = createStack({
+        configMedic,
+      });
+
+      watchdog.onGatewayExit({
+        code: 78,
+        expectedExit: false,
+        stderrTail: kStripeStderr,
+      });
+      await flushMicrotasks();
+
+      expect(configMedic.run).not.toHaveBeenCalled();
+      expect(launchGatewayProcess).not.toHaveBeenCalled();
+      expect(watchdog.getStatus().lifecycle).toBe("configuration_error");
+      const messages = notifier.notify.mock.calls.map((call) => call[0]);
+      expect(messages.some((m) => m.includes("restart is paused"))).toBe(true);
+      watchdog.stop();
+    });
   });
 });

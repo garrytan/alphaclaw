@@ -145,4 +145,50 @@ describe("server/routes/openclaw-channel overseer + sqlite backup", () => {
     expect(res.body.code).toBe("backup_failed");
     expect(res.body.tail).toBe("disk full");
   });
+
+  it("GET /api/openclaw/medic returns the (default on) setting and AI availability", async () => {
+    const deps = createDeps({
+      gatewayMedic: {
+        getAvailability: vi.fn(() => ({
+          enabled: true,
+          ai: { available: true, provider: "anthropic", model: "claude-fable-5" },
+        })),
+      },
+    });
+    const res = await request(createApp(deps)).get("/api/openclaw/medic");
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({
+      ok: true,
+      enabled: true,
+      ai: { available: true, provider: "anthropic", model: "claude-fable-5" },
+    });
+  });
+
+  it("PUT /api/openclaw/medic persists the opt-out and GET reads it back", async () => {
+    const deps = createDeps();
+    const app = createApp(deps);
+
+    const put = await request(app)
+      .put("/api/openclaw/medic")
+      .send({ enabled: false });
+    expect(put.status).toBe(200);
+    expect(put.body).toEqual({ ok: true, enabled: false });
+
+    const get = await request(app).get("/api/openclaw/medic");
+    expect(get.body.enabled).toBe(false);
+
+    const raw = JSON.parse(
+      fs.readFileSync(path.join(deps.OPENCLAW_DIR, "alphaclaw.json"), "utf8"),
+    );
+    expect(raw.updates.openclaw.medic.enabled).toBe(false);
+  });
+
+  it("PUT /api/openclaw/medic rejects non-boolean input", async () => {
+    const res = await request(createApp(createDeps()))
+      .put("/api/openclaw/medic")
+      .send({ enabled: "yes" });
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe("invalid_setting");
+  });
 });

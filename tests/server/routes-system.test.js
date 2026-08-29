@@ -441,6 +441,7 @@ describe("server/routes/system", () => {
             openclaw: {
               releaseChannel: "stable",
               overseer: { enabled: false },
+              medic: { enabled: true },
             },
           },
           team: {
@@ -808,6 +809,7 @@ describe("server/routes/system", () => {
           openclaw: {
             releaseChannel: "stable",
             overseer: { enabled: false },
+              medic: { enabled: true },
           },
         },
         team: {
@@ -842,6 +844,7 @@ describe("server/routes/system", () => {
             openclaw: {
               releaseChannel: "stable",
               overseer: { enabled: false },
+              medic: { enabled: true },
             },
           },
           team: {
