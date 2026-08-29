@@ -79,6 +79,11 @@ bucketed days at the *server's* midnight, and the Doctor tab served a frozen
   string — a side effect of shared zone canonicalization; browsers already
   send canonical ids, so only hand-rolled callers comparing the echo to their
   input will notice.
+- Console lines whose leading timestamp carries a numeric offset (child
+  process output like `…T12:00:00+02:00`) now localize using that real
+  offset, and zone-less timestamps pass through unchanged instead of being
+  guessed as browser-local; the timezone caption falls back to "local time"
+  when the browser can't name its zone.
 
 ## [0.9.44] - 2026-08-29
 
