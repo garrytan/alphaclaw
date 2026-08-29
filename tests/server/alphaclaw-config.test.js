@@ -5,8 +5,10 @@ const path = require("path");
 const {
   isOpenAiCompatApiEnabled,
   readAlphaclawConfig,
+  readOpenclawMedicEnabled,
   readOpenclawReleaseChannel,
   updateOpenAiCompatApiFeature,
+  updateOpenclawMedicEnabled,
   updateOpenclawReleaseChannel,
 } = require("../../lib/server/alphaclaw-config");
 
@@ -70,6 +72,7 @@ describe("server/alphaclaw-config", () => {
         openclaw: {
           releaseChannel: "stable",
           overseer: { enabled: false },
+          medic: { enabled: true },
         },
       },
       team: {
@@ -106,6 +109,7 @@ describe("server/alphaclaw-config", () => {
         openclaw: {
           releaseChannel: "stable",
           overseer: { enabled: false },
+          medic: { enabled: true },
         },
       },
       team: {
@@ -153,5 +157,53 @@ describe("server/alphaclaw-config", () => {
       releaseChannel: "nightly",
     });
     expect(invalid.config.updates.openclaw.releaseChannel).toBe("stable");
+  });
+
+  it("defaults the startup medic to ENABLED (opt-out, unlike the overseer)", () => {
+    const openclawDir = createTempOpenclawDir();
+    // Missing config, missing updates block, and junk all normalize to on.
+    expect(readOpenclawMedicEnabled({ openclawDir })).toBe(true);
+
+    fs.writeFileSync(
+      path.join(openclawDir, "alphaclaw.json"),
+      JSON.stringify({ updates: { openclaw: { medic: { enabled: "no" } } } }),
+      "utf8",
+    );
+    expect(readOpenclawMedicEnabled({ openclawDir })).toBe(true);
+
+    // Only a literal false disables it.
+    fs.writeFileSync(
+      path.join(openclawDir, "alphaclaw.json"),
+      JSON.stringify({ updates: { openclaw: { medic: { enabled: false } } } }),
+      "utf8",
+    );
+    expect(readOpenclawMedicEnabled({ openclawDir })).toBe(false);
+  });
+
+  it("fails CLOSED on a corrupt config instead of re-enabling a disabled medic", () => {
+    const openclawDir = createTempOpenclawDir();
+    const configPath = path.join(openclawDir, "alphaclaw.json");
+
+    // Operator turned the medic off, then the file gets torn/corrupted.
+    updateOpenclawMedicEnabled({ openclawDir, enabled: false });
+    fs.writeFileSync(configPath, '{ "updates": { "openclaw": { "medic":', "utf8");
+
+    // The generic defaults would say enabled — the medic gate must not.
+    expect(readOpenclawMedicEnabled({ openclawDir })).toBe(false);
+  });
+
+  it("persists the medic toggle and reports changed", () => {
+    const openclawDir = createTempOpenclawDir();
+
+    const off = updateOpenclawMedicEnabled({ openclawDir, enabled: false });
+    expect(off.changed).toBe(true);
+    expect(readOpenclawMedicEnabled({ openclawDir })).toBe(false);
+
+    const again = updateOpenclawMedicEnabled({ openclawDir, enabled: false });
+    expect(again.changed).toBe(false);
+
+    const on = updateOpenclawMedicEnabled({ openclawDir, enabled: true });
+    expect(on.changed).toBe(true);
+    expect(readOpenclawMedicEnabled({ openclawDir })).toBe(true);
   });
 });

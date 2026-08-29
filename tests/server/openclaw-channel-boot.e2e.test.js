@@ -100,6 +100,7 @@ const createHarness = ({
   sentinelVersion = null,
   storeWrap = (store) => store,
   execFileSyncImpl = undefined,
+  fsModule = undefined,
 } = {}) => {
   delete process.env.OPENCLAW_GIT_DIR;
   const rootDir = mkTemp("alphaclaw-boot-e2e-root-");
@@ -155,6 +156,7 @@ const createHarness = ({
     logger: kSilentLogger,
     backupsDir: path.join(rootDir, "backups", "openclaw"),
     ...(execFileSyncImpl ? { execFileSyncImpl } : {}),
+    ...(fsModule ? { fsModule } : {}),
   });
 
   return {
@@ -663,6 +665,298 @@ describe("server/openclaw-channel boot sync (e2e)", () => {
         ),
       );
       expect(cfg.gateway?.controlUi?.environment).toBeUndefined();
+    });
+
+    it("never writes a stripe while the stable pin runs on a beta channel selection", () => {
+      // The user-facing failure mode: the channel selection says beta but a
+      // fallback (overlay missing, activation failed, fresh install) left the
+      // 2026.7.x pin running. That build hard-rejects
+      // gateway.controlUi.environment with EX_CONFIG — the stripe must not be
+      // written, or every boot crash-loops.
+      const harness = createHarness({
+        pin: "2026.7.1-2",
+        channel: "beta",
+        installedVersion: "2026.7.1-2",
+        sentinelVersion: "2026.7.1-2",
+        execFileSyncImpl: vi.fn(() => ""),
+      });
+      writeConfig(harness.openclawDir, { gateway: {} });
+
+      harness.sync.syncAtBoot();
+      const cfg = JSON.parse(
+        fs.readFileSync(path.join(harness.openclawDir, "openclaw.json"), "utf8"),
+      );
+      expect(cfg.gateway?.controlUi?.environment).toBeUndefined();
+      expect(harness.store.readState().managedStripe ?? null).toBe(null);
+    });
+
+    it("self-heals a poisoned config: removes the managed stripe when the pin runs", () => {
+      // A stripe written before the capability gate existed (or before a
+      // rollback to the pin) must be removed on the next boot, unblocking the
+      // exit-78 crash-loop without any manual openclaw.json surgery.
+      const harness = createHarness({
+        pin: "2026.7.1-2",
+        channel: "beta",
+        installedVersion: "2026.7.1-2",
+        sentinelVersion: "2026.7.1-2",
+        execFileSyncImpl: vi.fn(() => ""),
+      });
+      const stripe = { label: "BETA · 2026.8.1", color: "amber" };
+      harness.store.updateState((s) => {
+        s.managedStripe = { ...stripe };
+        return s;
+      });
+      writeConfig(harness.openclawDir, {
+        gateway: { controlUi: { environment: { ...stripe } } },
+      });
+
+      harness.sync.syncAtBoot();
+      const cfg = JSON.parse(
+        fs.readFileSync(path.join(harness.openclawDir, "openclaw.json"), "utf8"),
+      );
+      expect(cfg.gateway?.controlUi?.environment).toBeUndefined();
+      expect(harness.store.readState().managedStripe ?? null).toBe(null);
+    });
+
+    it("keeps the BETA stripe on a beta prerelease build (core-version capability)", () => {
+      // compareVersionParts ranks 2026.8.1-beta.N below 2026.8.1 — the gate
+      // must compare core parts only, or genuine beta builds lose the stripe.
+      const harness = createHarness({
+        pin: "2026.8.1-beta.2",
+        channel: "beta",
+        installedVersion: "2026.8.1-beta.2",
+        sentinelVersion: "2026.8.1-beta.2",
+        execFileSyncImpl: vi.fn(() => ""),
+      });
+      writeConfig(harness.openclawDir, { gateway: {} });
+
+      harness.sync.syncAtBoot();
+      const cfg = JSON.parse(
+        fs.readFileSync(path.join(harness.openclawDir, "openclaw.json"), "utf8"),
+      );
+      expect(cfg.gateway.controlUi.environment).toEqual({
+        label: "BETA · 2026.8.1-beta.2",
+        color: "amber",
+      });
+    });
+
+    it("removes the managed DEV stripe when the dev checkout is unavailable", () => {
+      // dev_unavailable falls back to the pin — the DEV stripe would exit-78
+      // the pin exactly like the beta case.
+      const harness = createHarness({
+        pin: "1.0.0",
+        channel: "dev",
+        installedVersion: "1.0.0",
+        sentinelVersion: "1.0.0",
+        execFileSyncImpl: vi.fn(() => ""),
+      });
+      const stripe = { label: `DEV · ${kDevSha.slice(0, 7)}`, color: "purple" };
+      harness.store.updateState((s) => {
+        s.applied = { channel: "dev", sha: kDevSha, at: 1 };
+        s.managedStripe = { ...stripe };
+        return s;
+      });
+      writeConfig(harness.openclawDir, {
+        gateway: { controlUi: { environment: { ...stripe } } },
+      });
+
+      harness.sync.syncAtBoot();
+      const cfg = JSON.parse(
+        fs.readFileSync(path.join(harness.openclawDir, "openclaw.json"), "utf8"),
+      );
+      expect(cfg.gateway?.controlUi?.environment).toBeUndefined();
+    });
+
+    it("removes an orphaned managed-shaped stripe even when the ownership record is lost", () => {
+      // Backup restores, corrupted-state resets, and torn writes can all
+      // leave a managed stripe in openclaw.json with no managedStripe record;
+      // the generated-shape predicate must still recognize and remove it, or
+      // a pin boot crash-loops forever with no self-heal.
+      const harness = createHarness({
+        pin: "2026.7.1-2",
+        channel: "beta",
+        installedVersion: "2026.7.1-2",
+        sentinelVersion: "2026.7.1-2",
+        execFileSyncImpl: vi.fn(() => ""),
+      });
+      writeConfig(harness.openclawDir, {
+        gateway: {
+          controlUi: {
+            environment: { label: "BETA · 2026.8.1-beta.3", color: "amber" },
+          },
+        },
+      });
+
+      harness.sync.syncAtBoot();
+      const cfg = JSON.parse(
+        fs.readFileSync(path.join(harness.openclawDir, "openclaw.json"), "utf8"),
+      );
+      expect(cfg.gateway?.controlUi?.environment).toBeUndefined();
+
+      // Same heal for the DEV/purple shape (dev selection, checkout gone).
+      const devHarness = createHarness({
+        pin: "1.0.0",
+        channel: "dev",
+        installedVersion: "1.0.0",
+        sentinelVersion: "1.0.0",
+        execFileSyncImpl: vi.fn(() => ""),
+      });
+      writeConfig(devHarness.openclawDir, {
+        gateway: {
+          controlUi: { environment: { label: "DEV · a1b2c3d", color: "purple" } },
+        },
+      });
+      devHarness.sync.syncAtBoot();
+      const devCfg = JSON.parse(
+        fs.readFileSync(path.join(devHarness.openclawDir, "openclaw.json"), "utf8"),
+      );
+      expect(devCfg.gateway?.controlUi?.environment).toBeUndefined();
+    });
+
+    it("writes the DEV stripe only when the dev checkout build knows the key", () => {
+      const seedDev = (harness) => {
+        harness.store.updateState((s) => {
+          s.pinVersion = "1.0.0";
+          s.applied = { channel: "dev", sha: kDevSha, at: 1, acceptedAt: null };
+          return s;
+        });
+      };
+
+      const capable = createHarness({
+        pin: "1.0.0",
+        channel: "dev",
+        installedVersion: "1.0.0",
+        execFileSyncImpl: vi.fn(() => ""),
+      });
+      seedDev(capable);
+      const capableCheckout = writeCheckoutFixture(capable.rootDir, {
+        sha: kDevSha,
+      });
+      fs.writeFileSync(
+        path.join(capableCheckout, "package.json"),
+        JSON.stringify({
+          name: "openclaw",
+          version: "2026.9.0",
+          bin: { openclaw: "./bin/entry.js" },
+        }),
+      );
+      writeConfig(capable.openclawDir, { gateway: {} });
+      expect(capable.sync.syncAtBoot().action).toBe("dev_shim");
+      let cfg = JSON.parse(
+        fs.readFileSync(path.join(capable.openclawDir, "openclaw.json"), "utf8"),
+      );
+      expect(cfg.gateway.controlUi.environment).toEqual({
+        label: `DEV · ${kDevSha.slice(0, 7)}`,
+        color: "purple",
+      });
+
+      // Placeholder-versioned checkout ("0.0.0-dev"): capability unprovable,
+      // fail closed — a pre-2026.8.1 dev build would exit 78 on the key.
+      const placeholder = createHarness({
+        pin: "1.0.0",
+        channel: "dev",
+        installedVersion: "1.0.0",
+        execFileSyncImpl: vi.fn(() => ""),
+      });
+      seedDev(placeholder);
+      writeCheckoutFixture(placeholder.rootDir, { sha: kDevSha });
+      writeConfig(placeholder.openclawDir, { gateway: {} });
+      expect(placeholder.sync.syncAtBoot().action).toBe("dev_shim");
+      cfg = JSON.parse(
+        fs.readFileSync(
+          path.join(placeholder.openclawDir, "openclaw.json"),
+          "utf8",
+        ),
+      );
+      expect(cfg.gateway?.controlUi?.environment).toBeUndefined();
+    });
+
+    it("does not record stripe ownership when the config write fails", () => {
+      // Ownership is recorded AFTER the locked openclaw.json write commits: a
+      // failed write must leave record and file consistent (both without the
+      // stripe), or the two desync and later removal logic misfires.
+      const failingFs = new Proxy(fs, {
+        get(target, prop) {
+          if (prop === "writeFileSync") {
+            return (file, ...rest) => {
+              const name = String(file);
+              if (name.includes("openclaw.json") && !name.endsWith(".lock")) {
+                throw new Error("ENOSPC: fake disk full");
+              }
+              return target.writeFileSync(file, ...rest);
+            };
+          }
+          const value = target[prop];
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      });
+      const harness = createHarness({
+        pin: "2026.8.1",
+        channel: "beta",
+        installedVersion: "2026.8.1",
+        sentinelVersion: "2026.8.1",
+        execFileSyncImpl: vi.fn(() => ""),
+        fsModule: failingFs,
+      });
+      writeConfig(harness.openclawDir, { gateway: {} });
+
+      const result = harness.sync.syncAtBoot();
+      expect(result.ok).toBe(true); // fail-open boot
+      // The write never committed, so no ownership was recorded and the
+      // on-disk config still has no stripe.
+      expect(harness.store.readState().managedStripe ?? null).toBe(null);
+      const cfg = JSON.parse(
+        fs.readFileSync(path.join(harness.openclawDir, "openclaw.json"), "utf8"),
+      );
+      expect(cfg.gateway?.controlUi?.environment).toBeUndefined();
+    });
+
+    it("re-checks stripe ownership inside the config lock (pre-lock TOCTOU)", () => {
+      // stripeChanged is computed from a pre-lock read; a stripe hand-set by
+      // a concurrent writer between that read and the locked mutate must not
+      // be overwritten as "managed".
+      const handSet = { label: "PROD FLEET", color: "red" };
+      const racingFs = new Proxy(fs, {
+        get(target, prop) {
+          if (prop === "readFileSync") {
+            return (file, ...rest) => {
+              const raw = target.readFileSync(file, ...rest);
+              // Simulate the concurrent hand-edit landing right before the
+              // LOCKED read (the second read of openclaw.json this boot).
+              if (String(file).endsWith("openclaw.json")) {
+                racingFs.readCount = (racingFs.readCount || 0) + 1;
+                if (racingFs.readCount === 2) {
+                  const parsed = JSON.parse(raw);
+                  parsed.gateway = { controlUi: { environment: { ...handSet } } };
+                  const text = JSON.stringify(parsed, null, 2);
+                  target.writeFileSync(file, text);
+                  return text;
+                }
+              }
+              return raw;
+            };
+          }
+          const value = target[prop];
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      });
+      const harness = createHarness({
+        pin: "2026.8.1",
+        channel: "beta",
+        installedVersion: "2026.8.1",
+        sentinelVersion: "2026.8.1",
+        execFileSyncImpl: vi.fn(() => ""),
+        fsModule: racingFs,
+      });
+      writeConfig(harness.openclawDir, { gateway: {} });
+
+      harness.sync.syncAtBoot();
+      const cfg = JSON.parse(
+        fs.readFileSync(path.join(harness.openclawDir, "openclaw.json"), "utf8"),
+      );
+      expect(cfg.gateway.controlUi.environment).toEqual(handSet);
+      // Ownership was NOT recorded for a stripe we did not write.
+      expect(harness.store.readState().managedStripe ?? null).toBe(null);
     });
 
     it("leaves a hand-set (unmanaged) environment stripe untouched", () => {

@@ -5,6 +5,40 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.9.39] - 2026-08-29
+
+The gateway no longer crash-loops when a beta-only config key meets a stable
+build — and when a config error does stop it, AlphaClaw now troubleshoots and
+repairs it automatically.
+
+### Fixed
+- **Beta stripe no longer poisons stable boots.** The Control-UI environment
+  stripe (`gateway.controlUi.environment`) was written whenever the release
+  channel said beta/dev, even when a fallback (missing overlay, failed
+  activation, stale dev checkout, rollback) left the built-in stable OpenClaw
+  running — which rejects the key with `EX_CONFIG` and crash-looped every
+  boot with `gateway.controlUi: Unrecognized key: "environment"`. The stripe
+  is now gated on the build that will actually run (2026.8.1+ for beta, an
+  active dev shim with a 2026.8.1+ checkout for dev), and a stripe left
+  behind by an older AlphaClaw is removed on the next boot automatically.
+
+### Added
+- **Gateway startup medic (default on).** When the gateway exits with a fatal
+  configuration error, AlphaClaw now repairs it instead of only pausing
+  restarts: it removes config keys the gateway itself rejected (managed keys
+  immediately; others only with AI concurrence), or runs OpenClaw's
+  `doctor --fix`, then restarts the gateway — with a best-effort
+  `openclaw.json.medic-*.bak` backup before mutations (a missing config never
+  blocks the remedy), at most two attempts per incident, and a
+  notification describing exactly what was done. For failures without an
+  obvious fix, the medic asks the smartest frontier model you have an API key
+  for (Claude Fable 5 → Claude Opus 5 → GPT-5.6 → Gemini 3.1 Pro preview;
+  evidence is secret-redacted first) to diagnose and pick from the
+  whitelisted remedies —
+  the model can never edit anything itself. Toggle on the Upgrade page or at
+  `updates.openclaw.medic.enabled`; disabling restores the old
+  pause-and-notify behavior.
+
 ## [0.9.38] - 2026-08-29
 
 Team accounts with real credentials, two new channels, and a beta-ready
