@@ -5,6 +5,87 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.9.43] - 2026-08-29
+
+A beta upgrade can no longer brick a box (issues #21, #22, #23). The root
+incident: a config-migration timeout let the new build boot anyway, one-way
+migrate the config and state DB, then roll back to a pin that could read
+neither — with every notification about it dropped. Every link in that chain
+is now fixed, plus the exec-approvals regression that took down all channels
+on sqlite-era OpenClaw.
+
+### Fixed
+- **Migration hard gate (#21 bug 2, the critical one)**: a failed boot-time
+  `doctor --fix` on a freshly applied build now aborts BEFORE that build ever
+  runs — the previous version is re-activated, its pre-migration settings are
+  restored, and the new build is blocklisted (`config_migration_failed`) with
+  a Clear-to-retry path. The gate preflights its own revert target and stays
+  forward when a part-migrated state DB makes reverting the more dangerous
+  move. Kill switch: `OPENCLAW_MIGRATION_GATE=off`.
+- **Migration timeout (#21 bug 1)**: the hard 120s `doctor --fix` timeout is
+  now tunable (`OPENCLAW_DOCTOR_MIGRATION_TIMEOUT`, default 10 min), scales
+  with state-DB size, and is capped at 12 min — under the boot placeholder's
+  15-minute health ceiling so the platform can never kill a migration
+  mid-flight. Doctor output is captured (secret-redacted) into the warning,
+  the notification, and `configMigration.lastAttempt.error`; timeouts kill
+  with SIGKILL so a lingering doctor can't hold locks.
+- **Rollback compatibility (#21 bug 3)**: boot rollback markers now preflight
+  EVERY candidate target — package targets AND the pin — against a snapshot
+  of the state DBs (copy-per-probe), plus an `agents.entries` config-shape
+  guard. A blocked target reroutes to the next compatible candidate; when
+  nothing can read the migrated state the rollback is REFUSED (the
+  blocked-but-compatible build keeps running under the watchdog latch) with
+  the newest backup archive named as the manual recovery path.
+- **Crash-rollback config restore (#21 bug 4)**: rolling back to a version
+  now restores its `openclaw.json.pre-fix-<version>.bak` even when the
+  migration bookkeeping already points at that version — the exact blind
+  spot that kept the #21 box unbootable. Pre-fix backup write failures are
+  surfaced instead of swallowed, and the backup is never named after the
+  version being migrated to.
+- **Pin last-known-good (#21 bug 5)**: a pin-only box now promotes the
+  healthy pin to `lastKnownGood.package` after the 120s health hold (with a
+  disk-checked overlay snapshot), so later rollbacks have a real target.
+- **Backup escape hatch (#21 bug 6)**: when `backup create` fails because a
+  broken config prevents workspace discovery, the backup retries once with
+  `--no-include-workspace` into a fresh archive, recorded and announced as
+  `partial` — config and state databases are still included.
+- **Deliverable notifications (#21 bug 7)**: the Telegram bot token now also
+  resolves from `openclaw.json` (fresh onboardings store it there, not in
+  `.env`), and fan-out falls back to numeric `channels.telegram.allowFrom`
+  chat IDs when no pairing files exist — the two gaps behind
+  `no_channels_delivered`. The outbox retries with exponential backoff for
+  48 hours instead of giving up after 5 attempts, and an abandoned event is
+  persisted as a `notification_abandoned` watchdog event. New out-of-band
+  webhook channel (`ALPHACLAW_NOTIFY_WEBHOOK_URL`) posts critical events
+  directly — including straight from the boot process for gate reverts,
+  refused rollbacks, and forward recovery, when no server is up to drain the
+  outbox.
+- **Intentional restarts (#21 bug 8 / #22)**: container restarts now exit
+  with the dedicated code 75 (EX_TEMPFAIL) so supervising wrappers can
+  relaunch immediately instead of falling to a failure page, and the
+  lifecycle latches its exiting state before the restart drain (a SIGTERM in
+  that window no longer races a second drain). Companion template-repo
+  change supervises `alphaclaw start` instead of `exec`-ing the failure
+  server.
+- **EX_CONFIG latch (#21 bug 9)**: while latched, the watchdog now watches
+  `openclaw.json` and re-arms exactly one relaunch per distinct config edit
+  (operator fix, medic repair, boot restore) instead of staying inert until
+  a container restart; the gateway card in `config_error` now surfaces the
+  Repair action that force-clears the latch.
+- **No bootable version (#21 bug 10)**: when the pin itself cannot boot and
+  a newer blocklisted build with a local overlay owns the migrated state,
+  the watchdog performs a one-shot FORWARD recovery to that build (audited,
+  never ping-pongs; kill switch `OPENCLAW_FORWARD_RECOVERY=off`). If that
+  also fails, a persisted `noBootableVersion` flag drives an unmissable
+  banner and notification instead of a silent dead box.
+- **Legacy exec-approvals (#23)**: AlphaClaw no longer recreates
+  `exec-approvals.json` on OpenClaw ≥ 2026.9.1-beta.1 (where its mere
+  existence fails all channels, cron, and heartbeat closed) — the managed
+  seeding is skipped when the SQLite `exec_approvals_config` backend is
+  detected, a stray legacy file is renamed aside at boot, and the
+  exec-approvals dashboard routes go through `openclaw approvals get/set`
+  on CLI-capable builds.
+
 ## [0.9.42] - 2026-08-29
 
 The Watchdog tab now explains itself: a live narrative of what the watchdog

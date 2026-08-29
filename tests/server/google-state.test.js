@@ -37,6 +37,9 @@ const createRecordingFs = (initialFiles = {}) => {
     files,
     writes,
     existsSync: (filePath) => files.has(filePath),
+    // writeFileAtomic mkdir's the parent; a no-op keeps this in-memory fs simple.
+    // With no renameSync, writeFileAtomic falls back to a direct writeFileSync.
+    mkdirSync: () => {},
     readFileSync: (filePath) => {
       if (!files.has(filePath)) throw new Error(`ENOENT: ${filePath}`);
       return files.get(filePath);
@@ -204,6 +207,40 @@ describe("server/google-state readGoogleState", () => {
     const read = readGoogleState({ fs, statePath });
     expect(read.accounts[0].personal).toBe(true);
     expect(read.gmailPush.topics.default).toBe("projects/p/topics/t");
+  });
+
+  // H11: a state file from a newer build (e.g. after a rollback) must be read
+  // best-effort and NOT migrated-then-saved, which would destroy its accounts.
+  it("reads a future-version state without migrating or overwriting it (H11)", () => {
+    const statePath = "/tmp/future.json";
+    const mockFs = createRecordingFs({
+      [statePath]: JSON.stringify({
+        version: 99,
+        accounts: [baseAccount({ id: "keep-me", email: "future@example.com" })],
+        gmailPush: { token: "future-token", topics: {} },
+        unknownFutureField: { keep: true },
+      }),
+    });
+    const read = readGoogleState({ fs: mockFs, statePath });
+    expect(read.accounts.map((a) => a.id)).toEqual(["keep-me"]);
+    // Read-only: the future file was never rewritten (no migrate-then-save wipe).
+    expect(mockFs.writes).toEqual([]);
+  });
+
+  // H11: an atomic write followed by a corrupt/torn file must not let the reader
+  // silently return empty and then persist that emptiness. We simulate a torn
+  // file directly: the reader returns empty state but writes nothing.
+  it("does not persist empty state when the on-disk file is torn (H11)", () => {
+    const statePath = "/tmp/torn.json";
+    const mockFs = createRecordingFs({ [statePath]: '{"version":2,"acc' });
+    const read = readGoogleState({ fs: mockFs, statePath });
+    expect(read).toEqual({
+      version: kGoogleStateVersion,
+      accounts: [],
+      gmailPush: { token: "", topics: {} },
+    });
+    // Critically, the torn file is NOT overwritten by the read path.
+    expect(mockFs.writes).toEqual([]);
   });
 });
 

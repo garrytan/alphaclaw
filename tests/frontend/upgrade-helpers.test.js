@@ -35,7 +35,7 @@ describe("frontend/upgrade-helpers badges", () => {
 
     const blockBadge = badges.find((badge) => badge.id === "blocklisted");
     expect(blockBadge.tone).toBe("danger");
-    expect(blockBadge.detail).toContain("trigger: crash_loop");
+    expect(blockBadge.detail).toContain("trigger: crash loop");
     expect(blockBadge.detail).toContain("exit code 1");
     expect(blockBadge.detail).toContain(new Date(kNow).toLocaleString());
   });
@@ -276,7 +276,7 @@ describe("frontend/upgrade-helpers incident card (U6)", () => {
 
     expect(incident.kind).toBe("rollback");
     expect(incident.title).toContain("2026.7.3 rolled back at");
-    expect(incident.detail).toBe("Trigger: crash_loop, exit code 1");
+    expect(incident.detail).toBe("Trigger: crash loop, exit code 1");
     expect(incident.blockedId).toBe("2026.7.3");
     expect(incident.recovery).toContain("clear the blocklist entry");
   });

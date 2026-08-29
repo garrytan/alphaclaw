@@ -60,6 +60,9 @@ const createMemoryFs = (initialFiles = {}) => {
     writeFileSync: (filePath, contents) => {
       files.set(filePath, String(contents));
     },
+    unlinkSync: (filePath) => {
+      files.delete(filePath);
+    },
     mkdirSync: () => {},
   };
 };
@@ -69,6 +72,8 @@ const approvalsPath = path.join(openclawDir, "exec-approvals.json");
 
 const createApp = ({
   clawCmd,
+  clawCmdWithRetry = null,
+  openclawCapabilities = null,
   fsModule,
   gatewayToken = "",
   getGatewayToken = null,
@@ -79,6 +84,8 @@ const createApp = ({
   registerNodeRoutes({
     app,
     clawCmd: clawCmd || vi.fn(async () => ({ ok: true, stdout: "{}", stderr: "" })),
+    clawCmdWithRetry,
+    openclawCapabilities,
     openclawDir,
     gatewayToken,
     getGatewayToken,
@@ -87,6 +94,10 @@ const createApp = ({
   });
   return app;
 };
+
+// SQLite-era openclaw (issue #23): the `approvals` CLI exists and the legacy
+// exec-approvals.json must never be created by these routes.
+const sqliteEraCapabilities = { get: async (key) => key === "execApprovalsCli" };
 
 // Real-socket proxy tests are timing-sensitive under parallel machine
 // load; one retry absorbs transient connect races without masking
@@ -900,6 +911,179 @@ describe("server/routes/nodes coverage", { retry: 1 }, () => {
       expect(res.body).toEqual({ ok: true });
       const stored = JSON.parse(fsModule.files.get(approvalsPath));
       expect(stored.agents["*"].allowlist).toEqual([{ pattern: "a", id: "keep" }]);
+    });
+  });
+
+  describe("exec approvals endpoints (sqlite-era, approvals CLI)", () => {
+    const storeDoc = {
+      version: 1,
+      socket: { path: "/data/.openclaw/exec-approvals.sock", token: "sekret" },
+      agents: { "*": { allowlist: [{ pattern: "git *", id: "id-1" }] } },
+    };
+
+    const createCliHarness = ({ getResult } = {}) => {
+      const fsModule = createMemoryFs();
+      const clawCmd = vi.fn(async (cmd) => {
+        if (cmd === "approvals get --json") {
+          return (
+            getResult || {
+              ok: true,
+              stdout: JSON.stringify(storeDoc),
+              stderr: "",
+            }
+          );
+        }
+        return { ok: true, stdout: "", stderr: "" };
+      });
+      // The set flows through the retry-aware runner; capture the tmpfile
+      // payload at call time (the route unlinks it in a finally).
+      const setCalls = [];
+      const clawCmdWithRetry = vi.fn(async (cmd) => {
+        const match = cmd.match(/^approvals set --file '([^']+)'$/);
+        setCalls.push({
+          cmd,
+          tmpFile: match ? match[1] : null,
+          payload: match ? JSON.parse(fsModule.files.get(match[1])) : null,
+        });
+        return { ok: true, stdout: "", stderr: "" };
+      });
+      const app = createApp({
+        clawCmd,
+        clawCmdWithRetry,
+        openclawCapabilities: sqliteEraCapabilities,
+        fsModule,
+      });
+      return { app, clawCmd, clawCmdWithRetry, fsModule, setCalls };
+    };
+
+    it("reads approvals via `approvals get --json` without touching the legacy file", async () => {
+      const { app, clawCmd, fsModule } = createCliHarness();
+      const res = await request(app).get("/api/nodes/exec-approvals");
+      expect(res.status).toBe(200);
+      expect(res.body.allowlist).toEqual([{ pattern: "git *", id: "id-1" }]);
+      expect(res.body.file.socket.token).toBe("sekret");
+      expect(clawCmd).toHaveBeenCalledWith("approvals get --json", {
+        quiet: true,
+      });
+      expect(fsModule.files.has(approvalsPath)).toBe(false);
+    });
+
+    it("surfaces a failed approvals get as 500 and never creates the legacy file", async () => {
+      const { app, fsModule } = createCliHarness({
+        getResult: { ok: false, stdout: "", stderr: "store exploded" },
+      });
+      const res = await request(app).get("/api/nodes/exec-approvals");
+      expect(res.status).toBe(500);
+      expect(res.body).toEqual({ ok: false, error: "store exploded" });
+      expect(fsModule.files.has(approvalsPath)).toBe(false);
+    });
+
+    it("adds allowlist entries via get -> mutate -> set --file and never creates the legacy file", async () => {
+      const { app, fsModule, clawCmdWithRetry, setCalls } = createCliHarness();
+      const res = await request(app)
+        .post("/api/nodes/exec-approvals/allowlist")
+        .send({ pattern: "ls *" });
+      expect(res.status).toBe(200);
+      expect(res.body.ok).toBe(true);
+      expect(res.body.entry.pattern).toBe("ls *");
+      expect(clawCmdWithRetry).toHaveBeenCalledTimes(1);
+      expect(setCalls).toHaveLength(1);
+      expect(setCalls[0].cmd).toMatch(/^approvals set --file '/);
+      // Tmpfile lands under the OS temp dir, not the openclaw dir…
+      expect(setCalls[0].tmpFile.startsWith(require("os").tmpdir())).toBe(true);
+      // …carries the full mutated snapshot (socket.token preserved)…
+      expect(setCalls[0].payload.socket.token).toBe("sekret");
+      expect(
+        setCalls[0].payload.agents["*"].allowlist.map((entry) => entry.pattern),
+      ).toEqual(["git *", "ls *"]);
+      // …and is unlinked afterwards. The legacy file is never created.
+      expect(fsModule.files.has(setCalls[0].tmpFile)).toBe(false);
+      expect(fsModule.files.has(approvalsPath)).toBe(false);
+    });
+
+    it("returns unchanged without a set when the pattern already exists in the store", async () => {
+      const { app, clawCmdWithRetry, fsModule } = createCliHarness();
+      const res = await request(app)
+        .post("/api/nodes/exec-approvals/allowlist")
+        .send({ pattern: " git * " });
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({
+        ok: true,
+        entry: { pattern: "git *", id: "id-1" },
+        unchanged: true,
+      });
+      expect(clawCmdWithRetry).not.toHaveBeenCalled();
+      expect(fsModule.files.has(approvalsPath)).toBe(false);
+    });
+
+    it("removes allowlist entries through the CLI and never creates the legacy file", async () => {
+      const { app, fsModule, setCalls } = createCliHarness();
+      const res = await request(app).delete(
+        "/api/nodes/exec-approvals/allowlist/id-1",
+      );
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ ok: true });
+      expect(setCalls).toHaveLength(1);
+      expect(setCalls[0].payload.agents["*"].allowlist).toEqual([]);
+      expect(fsModule.files.has(setCalls[0].tmpFile)).toBe(false);
+      expect(fsModule.files.has(approvalsPath)).toBe(false);
+    });
+
+    it("404s on an unknown id without calling set", async () => {
+      const { app, clawCmdWithRetry, fsModule } = createCliHarness();
+      const res = await request(app).delete(
+        "/api/nodes/exec-approvals/allowlist/missing",
+      );
+      expect(res.status).toBe(404);
+      expect(res.body.error).toBe("Allowlist entry not found");
+      expect(clawCmdWithRetry).not.toHaveBeenCalled();
+      expect(fsModule.files.has(approvalsPath)).toBe(false);
+    });
+
+    it("surfaces a failed approvals set as 500 and still unlinks the tmpfile", async () => {
+      const fsModule = createMemoryFs();
+      const clawCmd = vi.fn(async () => ({
+        ok: true,
+        stdout: JSON.stringify(storeDoc),
+        stderr: "",
+      }));
+      const clawCmdWithRetry = vi.fn(async () => ({
+        ok: false,
+        stdout: "",
+        stderr: "set exploded",
+      }));
+      const app = createApp({
+        clawCmd,
+        clawCmdWithRetry,
+        openclawCapabilities: sqliteEraCapabilities,
+        fsModule,
+      });
+      const res = await request(app)
+        .post("/api/nodes/exec-approvals/allowlist")
+        .send({ pattern: "ls *" });
+      expect(res.status).toBe(500);
+      expect(res.body).toEqual({ ok: false, error: "set exploded" });
+      // Tmpfile cleaned up in the finally; legacy file never created.
+      expect([...fsModule.files.keys()]).toEqual([]);
+    });
+
+    it("falls back to the legacy file path when the capability probe throws", async () => {
+      const fsModule = createMemoryFs();
+      const app = createApp({
+        openclawCapabilities: {
+          get: async () => {
+            throw new Error("probe exploded");
+          },
+        },
+        fsModule,
+      });
+      const res = await request(app).get("/api/nodes/exec-approvals");
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({
+        ok: true,
+        file: { version: 1, agents: { "*": { allowlist: [] } } },
+        allowlist: [],
+      });
     });
   });
 });

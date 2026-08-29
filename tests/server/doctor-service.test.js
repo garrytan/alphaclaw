@@ -1703,3 +1703,136 @@ describe("server/doctor-service", () => {
     });
   });
 });
+
+// H6: evidence snippet paths come from untrusted AI/import output. They must be
+// realpath-contained to the workspace, and must be regular files under a size
+// cap (no traversal, no symlink escape, no FIFO/huge-file DoS).
+describe("server/doctor-service evidence snippet containment (H6)", () => {
+  let managedDb = null;
+
+  afterEach(() => {
+    if (managedDb?.closeDoctorDb) {
+      managedDb.closeDoctorDb();
+      managedDb = null;
+    }
+  });
+
+  const importWithEvidence = async ({ workspaceRoot, evidence }) => {
+    const dbRoot = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-h6-db-"));
+    const doctorDb = loadDoctorDb();
+    doctorDb.initDoctorDb({ rootDir: dbRoot });
+    managedDb = doctorDb;
+    const { createDoctorService } = loadDoctorService();
+    const doctorService = createDoctorService({
+      clawCmd: vi.fn(async () => ({ ok: true, stdout: "{}" })),
+      listDoctorRuns: doctorDb.listDoctorRuns,
+      listDoctorRunSummaries: doctorDb.listDoctorRunSummaries,
+      getDoctorRunManifest: doctorDb.getDoctorRunManifest,
+      getLatestCompletedRunSummary: doctorDb.getLatestCompletedRunSummary,
+      listDoctorCards: doctorDb.listDoctorCards,
+      getInitialWorkspaceBaseline: doctorDb.getInitialWorkspaceBaseline,
+      setInitialWorkspaceBaseline: doctorDb.setInitialWorkspaceBaseline,
+      createDoctorRun: doctorDb.createDoctorRun,
+      completeDoctorRun: doctorDb.completeDoctorRun,
+      insertDoctorCards: doctorDb.insertDoctorCards,
+      getDoctorRun: doctorDb.getDoctorRun,
+      getDoctorCardsByRunId: doctorDb.getDoctorCardsByRunId,
+      getDoctorCard: doctorDb.getDoctorCard,
+      updateDoctorCardStatus: doctorDb.updateDoctorCardStatus,
+      workspaceRoot,
+      managedRoot: workspaceRoot,
+      computeSnapshotAsync: fastComputeSnapshotAsync,
+    });
+    const imported = await doctorService.importDoctorResult({
+      rawOutput: JSON.stringify({
+        summary: "findings",
+        cards: [
+          {
+            priority: "P1",
+            category: "correctness",
+            title: "evidence card",
+            summary: "s",
+            recommendation: "r",
+            evidence,
+            targetPaths: [],
+            fixPrompt: "fix",
+            status: "open",
+          },
+        ],
+      }),
+    });
+    const [card] = doctorDb.getDoctorCardsByRunId(imported.runId);
+    return card.evidence[0];
+  };
+
+  it("captures a snippet for an in-workspace evidence path (allow-legit)", async () => {
+    const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-h6-ws-"));
+    fs.writeFileSync(
+      path.join(workspaceRoot, "note.txt"),
+      "line one\nline two\nline three\n",
+      "utf8",
+    );
+    const item = await importWithEvidence({
+      workspaceRoot,
+      evidence: [{ type: "path", path: "note.txt", startLine: 1, endLine: 2 }],
+    });
+    expect(item.snippet).toBeTruthy();
+    expect(item.snippet.text).toBe("line one\nline two");
+  });
+
+  it("does not capture a snippet for a traversing evidence path", async () => {
+    const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-h6-ws-"));
+    const outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-h6-outside-"));
+    fs.writeFileSync(path.join(outsideDir, "secret.txt"), "TOP SECRET\n", "utf8");
+    const item = await importWithEvidence({
+      workspaceRoot,
+      evidence: [
+        {
+          type: "path",
+          path: `../${path.basename(outsideDir)}/secret.txt`,
+          startLine: 1,
+          endLine: 1,
+        },
+      ],
+    });
+    expect(item.snippet).toBeUndefined();
+  });
+
+  it("does not capture a snippet for a symlink escaping the workspace", async () => {
+    const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-h6-ws-"));
+    const outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-h6-outside-"));
+    fs.writeFileSync(path.join(outsideDir, "secret.txt"), "TOP SECRET\n", "utf8");
+    let symlinked = true;
+    try {
+      fs.symlinkSync(
+        path.join(outsideDir, "secret.txt"),
+        path.join(workspaceRoot, "innocent.txt"),
+      );
+    } catch {
+      symlinked = false;
+    }
+    if (!symlinked) return;
+    const item = await importWithEvidence({
+      workspaceRoot,
+      evidence: [{ type: "path", path: "innocent.txt", startLine: 1, endLine: 1 }],
+    });
+    expect(item.snippet).toBeUndefined();
+  });
+
+  it("does not read an oversized in-workspace file (DoS guard)", async () => {
+    const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-h6-ws-"));
+    const bigPath = path.join(workspaceRoot, "big.txt");
+    fs.writeFileSync(bigPath, "start\n", "utf8");
+    const fd = fs.openSync(bigPath, "r+");
+    try {
+      fs.ftruncateSync(fd, 3 * 1024 * 1024); // over the 2MB cap
+    } finally {
+      fs.closeSync(fd);
+    }
+    const item = await importWithEvidence({
+      workspaceRoot,
+      evidence: [{ type: "path", path: "big.txt", startLine: 1, endLine: 2 }],
+    });
+    expect(item.snippet).toBeUndefined();
+  });
+});

@@ -106,6 +106,7 @@ const createHarness = ({
   // default poison below still guards syncAtBoot itself, which must stay
   // offline and spawn-free.
   runnerImpl = null,
+  extraSyncOptions = undefined,
 } = {}) => {
   delete process.env.OPENCLAW_GIT_DIR;
   const rootDir = mkTemp("alphaclaw-boot-e2e-root-");
@@ -165,6 +166,7 @@ const createHarness = ({
     backupsDir: path.join(rootDir, "backups", "openclaw"),
     ...(execFileSyncImpl ? { execFileSyncImpl } : {}),
     ...(fsModule ? { fsModule } : {}),
+    ...(extraSyncOptions || {}),
   });
 
   return {
@@ -1896,6 +1898,1000 @@ describe("server/openclaw-channel boot sync (e2e)", () => {
       expect(tail).toContain('Unrecognized key: "mystery"');
       expect(tail).not.toContain(secret);
       expect(tail).toContain("***");
+    });
+  });
+
+  describe("boot config migration timeout & diagnostics (issue #21 bug 1)", () => {
+    const writeConfig = (openclawDir, obj) => {
+      fs.mkdirSync(openclawDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(openclawDir, "openclaw.json"),
+        JSON.stringify(obj, null, 2),
+      );
+    };
+
+    // Merged design (#20 engine + #21 knob): the doctor runs in the SERVER-
+    // phase reconciler via runner.runStreamed, never execFileSync in the bin
+    // phase. Budget formula: timeoutMs = min(max(30min, base),
+    // round(base + stateDbGb * 5min)) where base is the injected
+    // doctorMigrationTimeoutMs (default: OPENCLAW_DOCTOR_MIGRATION_TIMEOUT or
+    // 10 min). The old 12-minute bin-phase cap is GONE — the boot placeholder
+    // now resets its window on step progress (60-min ceiling), so the doctor
+    // cap is 30 minutes, raised further only when the operator's base exceeds
+    // it.
+    const doctorTimeoutFor = async ({
+      fakeDbBytes = null,
+      doctorMigrationTimeoutMs = undefined,
+    } = {}) => {
+      const runnerImpl = async (opts) => {
+        const args = Array.isArray(opts.args) ? opts.args : [];
+        if (args.includes("doctor")) {
+          return { ok: true, code: 0, tail: "Doctor complete\n", timedOut: false };
+        }
+        // `config validate` / `database preflight`: capability-probed stable
+        // answers, routing the reconciler through the doctor path.
+        return {
+          ok: false,
+          code: 1,
+          tail: "error: unknown command\n",
+          timedOut: false,
+        };
+      };
+      // Size the state DB via a statSync seam so the test never writes GiBs.
+      const fsModule =
+        fakeDbBytes == null
+          ? undefined
+          : {
+              ...fs,
+              statSync: (p, ...rest) => {
+                const st = fs.statSync(p, ...rest);
+                if (String(p).endsWith(path.join("state", "openclaw.sqlite"))) {
+                  return {
+                    size: fakeDbBytes,
+                    mtimeMs: st.mtimeMs,
+                    isFile: () => st.isFile(),
+                    isDirectory: () => st.isDirectory(),
+                  };
+                }
+                return st;
+              },
+            };
+      const harness = createHarness({
+        installedVersion: "2026.8.1",
+        sentinelVersion: "2026.8.1",
+        runnerImpl,
+        ...(fsModule ? { fsModule } : {}),
+        ...(doctorMigrationTimeoutMs !== undefined
+          ? { extraSyncOptions: { doctorMigrationTimeoutMs } }
+          : {}),
+      });
+      writeConfig(harness.openclawDir, { audit: {} });
+      if (fakeDbBytes != null) {
+        fs.mkdirSync(path.join(harness.openclawDir, "state"), {
+          recursive: true,
+        });
+        fs.writeFileSync(
+          path.join(harness.openclawDir, "state", "openclaw.sqlite"),
+          "not-a-real-db",
+        );
+      }
+      harness.sync.syncAtBoot();
+      // The bin phase never spawns the doctor anymore.
+      expect(harness.runner.runStreamed).not.toHaveBeenCalled();
+      const outcome = await harness.sync.reconcileBootConfig();
+      expect(outcome.status).toBe("ok");
+      const doctorCalls = harness.runner.runStreamed.mock.calls.filter(
+        (call) => (call[0]?.args || []).includes("doctor"),
+      );
+      expect(doctorCalls).toHaveLength(1);
+      expect(doctorCalls[0][0].args).toEqual(
+        expect.arrayContaining(["doctor", "--fix", "--yes"]),
+      );
+      return doctorCalls[0][0].timeoutMs;
+    };
+
+    it("sizes the reconciler doctor budget: tunable base, per-GB scaling, and a 30-minute cap raised only by a larger base", async () => {
+      // Default (no state DBs): the 10-minute tunable base, exact — the
+      // budget is a pure formula, not shaved by a wall clock.
+      expect(await doctorTimeoutFor()).toBe(600_000);
+      // A ~900MiB state DB scales the budget up by 5 min/GB.
+      expect(await doctorTimeoutFor({ fakeDbBytes: 900 * 1024 * 1024 })).toBe(
+        Math.round(600_000 + (900 / 1024) * 300_000),
+      );
+      // 8GiB would ask for 50 minutes — the 30-minute cap holds (the old
+      // 12-minute bin-phase cap is gone).
+      expect(await doctorTimeoutFor({ fakeDbBytes: 8 * 1024 ** 3 })).toBe(
+        30 * 60_000,
+      );
+      // The DI seam (backing OPENCLAW_DOCTOR_MIGRATION_TIMEOUT, which
+      // constants.js resolves at require time) lowers the base…
+      expect(await doctorTimeoutFor({ doctorMigrationTimeoutMs: 30_000 })).toBe(
+        30_000,
+      );
+      // …and a base past the 30-minute ceiling raises the cap with it: the
+      // operator explicitly asked for more than the default ceiling.
+      expect(
+        await doctorTimeoutFor({
+          fakeDbBytes: 8 * 1024 ** 3,
+          doctorMigrationTimeoutMs: 45 * 60_000,
+        }),
+      ).toBe(45 * 60_000);
+    });
+
+    // The old bin-phase tests 'captures the redacted doctor stderr tail into
+    // the warning and lastAttempt.error' and 'reports a timeout distinctly
+    // when doctor is killed on the deadline' pinned the DELETED execFileSync
+    // doctor path. Their reconciler equivalents already exist in the
+    // "boot config migration (doctor --fix)" describe above:
+    //   - 'scrubs secret values out of the persisted validator tail' covers
+    //     redaction of the persisted tail (redactValidatorTail →
+    //     configMigration.lastAttempt.tail). The doctor's raw stderr no
+    //     longer lands in lastAttempt.error — that field now carries the
+    //     doctorNote verdict string.
+    //   - 'holds on a doctor timeout with the sized-budget warning and an
+    //     honest post-kill db verdict' covers the distinct timeout branch
+    //     (runner timedOut → hold.reason 'doctor timed out' + the
+    //     sized-budget warning), which replaced the killed-execFileSync
+    //     "timed out after Ns" classification.
+  });
+
+  describe("crash-rollback config restore (issue #21 bug 4)", () => {
+    const writeConfig = (openclawDir, obj) => {
+      fs.mkdirSync(openclawDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(openclawDir, "openclaw.json"),
+        JSON.stringify(obj, null, 2),
+      );
+    };
+
+    // A validate-clean runner for reconciles that should complete without a
+    // doctor run (the restore paths return before any spawn; forced retries
+    // validate the live config).
+    const okRunner = async () => ({
+      ok: true,
+      code: 0,
+      tail: "",
+      timedOut: false,
+    });
+
+    const seedRollbackScenario = ({
+      execFileSyncImpl,
+      fsModule,
+      runnerImpl,
+    } = {}) => {
+      // The #21 shape: config migrated AWAY from the pin by a failed beta
+      // (lastAttempt names the beta), then a crash-rollback marker lands on
+      // the pin. completedForVersion === pin would previously skip the
+      // restore forever.
+      const harness = createHarness({
+        pin: "1.0.0",
+        installedVersion: "2026.9.1-beta.1",
+        sentinelVersion: "2026.9.1-beta.1",
+        execFileSyncImpl: execFileSyncImpl || vi.fn(() => ""),
+        ...(runnerImpl ? { runnerImpl } : {}),
+        ...(fsModule ? { fsModule } : {}),
+      });
+      saveOverlayFixture(harness.store, "1.0.0");
+      writeConfig(harness.openclawDir, {
+        agents: { entries: { main: {} } },
+        meta: { migrations: 12 },
+      });
+      fs.writeFileSync(
+        path.join(harness.openclawDir, "openclaw.json.pre-fix-1.0.0.bak"),
+        JSON.stringify({ agents: { list: [] } }, null, 2),
+      );
+      harness.store.updateState((s) => {
+        s.pinVersion = "1.0.0";
+        s.configMigration = {
+          completedForVersion: "1.0.0",
+          lastAttempt: {
+            version: "2026.9.1-beta.1",
+            at: 1,
+            ok: false,
+            error: "timed out after 120s",
+          },
+        };
+        return s;
+      });
+      harness.store.writeMarker({
+        target: { kind: "pin" },
+        blockedId: "2026.9.1-beta.1",
+        reason: "config_error",
+        exitCode: 78,
+        at: 1,
+      });
+      return harness;
+    };
+
+    it("restores the pre-fix config when a rollback marker lands on its version", async () => {
+      // Merged design: the restore is now two-phase. The BIN phase
+      // (syncAtBoot) consumes the marker and persists the boot context
+      // (lastBoot.rollbackTargetVersion) — the SERVER phase
+      // (reconcileBootConfig) keys the actual restore on it.
+      const harness = seedRollbackScenario({ runnerImpl: okRunner });
+
+      // Stage (a): the bin phase rolls back and persists the target, but
+      // never touches the config and never spawns.
+      const result = harness.sync.syncAtBoot();
+      expect(result.action).toBe("rollback");
+      expect(installedPackageJsonVersion(harness.installDir)).toBe("1.0.0");
+      const lastBoot = harness.store.readState().lastBoot;
+      expect(lastBoot.rollbackTargetVersion).toBe("1.0.0");
+      expect(lastBoot.previousInstalledVersion).toBe("2026.9.1-beta.1");
+      let cfg = JSON.parse(
+        fs.readFileSync(path.join(harness.openclawDir, "openclaw.json"), "utf8"),
+      );
+      expect(cfg.meta).toEqual({ migrations: 12 }); // not restored yet
+      expect(harness.runner.runStreamed).not.toHaveBeenCalled();
+
+      // Stage (b): the reconciler sees rollback + a pre-fix backup for the
+      // rolled-back-to version + a lastAttempt naming a NEWER version, and
+      // restores — even though completedForVersion already equals this
+      // version (the exact #21 blind spot).
+      const outcome = await harness.sync.reconcileBootConfig();
+      expect(outcome.status).toBe("ok");
+      expect(outcome.reason).toBe("rollback-restore");
+      cfg = JSON.parse(
+        fs.readFileSync(path.join(harness.openclawDir, "openclaw.json"), "utf8"),
+      );
+      // The migrated shape is gone: the backup was copied back verbatim.
+      expect(cfg.agents).toEqual({ list: [] });
+      expect(cfg.meta).toBeUndefined();
+      const migration = harness.store.readState().configMigration;
+      expect(migration.completedForVersion).toBe("1.0.0");
+      expect(migration.lastAttempt.ok).toBe(true);
+      await flushAsync();
+      expect(notifyIds(harness.notify)).toContain(
+        "config-restore-rollback-1.0.0",
+      );
+
+      // A FORCED retry (the operator's Retry-migration button) must never
+      // replay the stale rollback restore over live edits.
+      writeConfig(harness.openclawDir, {
+        agents: { list: [] },
+        edited: "since",
+      });
+      const retried = await harness.sync.reconcileBootConfig({ force: true });
+      expect(retried.status).toBe("ok");
+      expect(retried.reason).not.toBe("rollback-restore");
+      const afterRetry = JSON.parse(
+        fs.readFileSync(path.join(harness.openclawDir, "openclaw.json"), "utf8"),
+      );
+      expect(afterRetry.edited).toBe("since");
+    });
+
+    it("does not re-restore the pre-fix backup on subsequent steady-state boots", () => {
+      const harness = seedRollbackScenario();
+      harness.sync.syncAtBoot();
+
+      // The operator edits the config after the rollback restore…
+      writeConfig(harness.openclawDir, {
+        agents: { list: [] },
+        edited: true,
+      });
+      // …and a plain reboot must NOT clobber it back to the backup.
+      harness.sync.syncAtBoot();
+      const cfg = JSON.parse(
+        fs.readFileSync(path.join(harness.openclawDir, "openclaw.json"), "utf8"),
+      );
+      expect(cfg.edited).toBe(true);
+    });
+
+    it("holds the gateway (fail-closed) when the pre-fix backup cannot be written", async () => {
+      // Merge policy change: #21's bin phase WARNED and continued when the
+      // pre-fix backup write failed (id config-backup-write-failed-*). Under
+      // the #20 F7 fail-CLOSED reconciler that path is gone: no snapshot
+      // means no revert path, so no doctor runs and the gateway is HELD (the
+      // held notification replaces the old warn-and-continue one).
+      const failingFs = {
+        ...fs,
+        copyFileSync: (src, dest, ...rest) => {
+          if (String(dest).includes("openclaw.json.pre-fix-")) {
+            throw new Error("ENOSPC: no space left on device");
+          }
+          return fs.copyFileSync(src, dest, ...rest);
+        },
+      };
+      const harness = createHarness({
+        installedVersion: "2026.8.1",
+        sentinelVersion: "2026.8.1",
+        fsModule: failingFs,
+      });
+      writeConfig(harness.openclawDir, { audit: {} });
+      harness.sync.syncAtBoot();
+
+      const outcome = await harness.sync.reconcileBootConfig();
+
+      expect(outcome.status).toBe("held");
+      expect(
+        outcome.warnings.some((w) => w.includes("config snapshot failed")),
+      ).toBe(true);
+      expect(harness.store.readState().gatewayHold).toEqual(
+        expect.objectContaining({
+          reason: expect.stringContaining("config snapshot failed"),
+        }),
+      );
+      // Fail closed: nothing ran against the unprotected config (the poisoned
+      // default runner would have thrown into a 'reconcile error' hold).
+      expect(harness.runner.runStreamed).not.toHaveBeenCalled();
+      const onDisk = JSON.parse(
+        fs.readFileSync(path.join(harness.openclawDir, "openclaw.json"), "utf8"),
+      );
+      expect(onDisk.audit).toEqual({});
+      await flushAsync();
+      expect(notifyIds(harness.notify)).toContain(
+        "config-migration-held-2026.8.1",
+      );
+    });
+
+    it("names the pre-fix backup after the previously installed version when no history exists", async () => {
+      // Snapshot naming priority (merged): completedForVersion, then the
+      // version installed BEFORE this boot's activation
+      // (lastBoot.previousInstalledVersion, persisted by syncAtBoot), then
+      // the pin — never the version being migrated TO. Pin === installed
+      // here, so only the previous-installed source can name it.
+      const harness = createHarness({
+        pin: "2.0.0",
+        installedVersion: "1.0.0",
+        sentinelVersion: "1.0.0",
+        runnerImpl: okRunner,
+      });
+      saveOverlayFixture(harness.store, "2.0.0");
+      writeConfig(harness.openclawDir, { audit: {} });
+      harness.store.updateState((s) => {
+        s.pinVersion = "2.0.0";
+        s.applied = {
+          channel: "stable",
+          version: "2.0.0",
+          at: 1,
+          acceptedAt: null,
+        };
+        return s;
+      });
+
+      const boot = harness.sync.syncAtBoot();
+      expect(boot.action).toBe("activated");
+      expect(installedPackageJsonVersion(harness.installDir)).toBe("2.0.0");
+      expect(harness.store.readState().lastBoot.previousInstalledVersion).toBe(
+        "1.0.0",
+      );
+
+      const outcome = await harness.sync.reconcileBootConfig();
+      expect(outcome.status).toBe("ok");
+      expect(
+        fs.existsSync(
+          path.join(harness.openclawDir, "openclaw.json.pre-fix-1.0.0.bak"),
+        ),
+      ).toBe(true);
+      // Never named after the version being migrated TO (a same-version .bak
+      // would read as a downgrade-restore candidate later), and never the
+      // placeholder fallback.
+      expect(
+        fs.existsSync(
+          path.join(harness.openclawDir, "openclaw.json.pre-fix-2.0.0.bak"),
+        ),
+      ).toBe(false);
+      expect(
+        fs.existsSync(
+          path.join(harness.openclawDir, "openclaw.json.pre-fix-unknown.bak"),
+        ),
+      ).toBe(false);
+    });
+  });
+
+  describe("boot config migration gate (issue #21 bug 2)", () => {
+    const writeConfig = (openclawDir, obj) => {
+      fs.mkdirSync(openclawDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(openclawDir, "openclaw.json"),
+        JSON.stringify(obj, null, 2),
+      );
+    };
+
+    afterEach(() => {
+      delete process.env.OPENCLAW_MIGRATION_GATE;
+    });
+
+    // The gate moved (merge resolution): it now runs INSIDE the server-phase
+    // reconciler's failure path — after doctor failed and the config is still
+    // invalid — not in the bin phase. syncAtBoot only activates and persists
+    // the boot context; reconcileBootConfig snapshots the pre-fix backup,
+    // runs validate/doctor, and calls the gate before falling back to the
+    // fail-closed hold.
+    const writeStateDb = (openclawDir) => {
+      const { DatabaseSync } = require("node:sqlite");
+      fs.mkdirSync(path.join(openclawDir, "state"), { recursive: true });
+      const db = new DatabaseSync(
+        path.join(openclawDir, "state", "openclaw.sqlite"),
+      );
+      db.exec("CREATE TABLE t (x INTEGER)");
+      db.close();
+    };
+
+    // Reconciler-phase failure: `config validate` keeps blaming a key the
+    // beta rejects, doctor fails, and the live `database preflight` probe
+    // (runner-driven) is capability-missing → migration assumed needed.
+    const failingMigrationRunner = () => async (opts) => {
+      const args = Array.isArray(opts.args) ? opts.args : [];
+      if (args.includes("validate")) {
+        return {
+          ok: false,
+          code: 78,
+          tail: 'Unrecognized key: "legacyBridge"\n',
+          timedOut: false,
+        };
+      }
+      if (args.includes("doctor")) {
+        return { ok: false, code: 1, tail: "doctor exit 1\n", timedOut: false };
+      }
+      return {
+        ok: false,
+        code: 1,
+        tail: "error: unknown command 'database'\n",
+        timedOut: false,
+      };
+    };
+
+    // The #21 box, in miniature: healthy pin, beta freshly applied, the
+    // beta's migration fails. The gate must stop the beta BEFORE it ever
+    // launches (its first gateway run would one-way migrate the state DB).
+    // probeExecFileSyncImpl scripts the gate's preflight prober spawns
+    // (execFileSync `database preflight` against snapshot copies of the real
+    // state DB — VACUUM INTO, same mechanics as the apply-time preflight).
+    const seedIncident = ({ probeExecFileSyncImpl, runnerImpl } = {}) => {
+      const impl = probeExecFileSyncImpl || vi.fn(() => "");
+      const harness = createHarness({
+        pin: "2026.7.1-2",
+        installedVersion: "2026.7.1-2",
+        sentinelVersion: "2026.7.1-2",
+        channel: "beta",
+        execFileSyncImpl: impl,
+        runnerImpl: runnerImpl || failingMigrationRunner(),
+      });
+      saveOverlayFixture(harness.store, "2026.9.1-beta.1");
+      saveOverlayFixture(harness.store, "2026.7.1-2");
+      writeConfig(harness.openclawDir, {
+        audit: { enabled: true },
+        legacyBridge: { enabled: true },
+      });
+      writeStateDb(harness.openclawDir);
+      harness.store.updateState((s) => {
+        s.pinVersion = "2026.7.1-2";
+        s.applied = {
+          channel: "beta",
+          version: "2026.9.1-beta.1",
+          at: 1,
+          acceptedAt: null,
+        };
+        s.configMigration = {
+          completedForVersion: "2026.7.1-2",
+          lastAttempt: {
+            version: "2026.7.1-2",
+            at: 1,
+            ok: true,
+            error: null,
+          },
+        };
+        return s;
+      });
+      return harness;
+    };
+
+    // The apply left a restart_expected run behind — the gate must resolve it
+    // honestly (activated:false — the code activation was undone before
+    // anything launched on it).
+    const kGateOpId = "bbbbcccc-dddd-eeee-ffff-000011112222";
+    const seedGateRun = (harness) => {
+      const ledger = createRunLedger({
+        openclawDir: harness.openclawDir,
+        nowFn: () => harness.nowRef.now,
+        logger: kSilentLogger,
+      });
+      ledger.createRun({
+        operationId: kGateOpId,
+        target: { kind: "package", channel: "beta", version: "2026.9.1-beta.1" },
+      });
+      ledger.updateRun(kGateOpId, (record) => {
+        record.state = "restart_expected";
+        return record;
+      });
+      return kGateOpId;
+    };
+    const readGateRun = (harness) =>
+      JSON.parse(
+        fs.readFileSync(
+          path.join(
+            harness.openclawDir,
+            ".alphaclaw",
+            "runs",
+            `${kGateOpId}.json`,
+          ),
+          "utf8",
+        ),
+      );
+
+    it("[REG #21] incident replay: reverts to the previous version, restores the config, and blocklists the target", async () => {
+      const probeExec = vi.fn(() => "");
+      const harness = seedIncident({ probeExecFileSyncImpl: probeExec });
+      seedGateRun(harness);
+
+      // Bin phase: the fresh apply activates normally — no gate here anymore.
+      const boot = harness.sync.syncAtBoot();
+      expect(boot.action).toBe("activated");
+      expect(installedPackageJsonVersion(harness.installDir)).toBe(
+        "2026.9.1-beta.1",
+      );
+
+      // Server phase: validate fails, doctor fails, the gate fires.
+      const outcome = await harness.sync.reconcileBootConfig();
+
+      // The box never bricks: the pin is back, with its config restored.
+      expect(outcome.status).toBe("ok");
+      expect(outcome.reason).toBe("migration-gate-reverted");
+      expect(installedPackageJsonVersion(harness.installDir)).toBe(
+        "2026.7.1-2",
+      );
+      const state = harness.store.readState();
+      expect(state.applied).toBe(null);
+      expect(state.gatewayHold).toBe(null);
+      expect(state.blocklist).toEqual([
+        expect.objectContaining({
+          id: "2026.9.1-beta.1",
+          reason: "config_migration_failed",
+        }),
+      ]);
+      // The migration trigger stays armed for a retry after Clear.
+      expect(state.configMigration.completedForVersion).toBe("2026.7.1-2");
+      const cfg = JSON.parse(
+        fs.readFileSync(path.join(harness.openclawDir, "openclaw.json"), "utf8"),
+      );
+      // Restored pre-fix shape — including the key the beta rejected (the
+      // reverted-to build accepts it; the boot's own mirror keys may sit on
+      // top).
+      expect(cfg.audit).toEqual({ enabled: true });
+      expect(cfg.legacyBridge).toEqual({ enabled: true });
+      // The revert target was preflight-proven against a snapshot copy of
+      // the real state DB (scripted pass).
+      expect(
+        probeExec.mock.calls.some((call) =>
+          (call[1] || []).includes("preflight"),
+        ),
+      ).toBe(true);
+      // The pending restart_expected run resolved with activated:false.
+      const record = readGateRun(harness);
+      expect(record.state).toBe("activation_failed");
+      expect(record.ok).toBe(false);
+      await flushAsync();
+      expect(notifyIds(harness.notify)).toContain(
+        "config-migration-aborted-2026.9.1-beta.1",
+      );
+      // Still fully offline: the reconciler spawns, but never fetches.
+      expect(global.fetch).not.toHaveBeenCalled();
+      expect(harness.installToTempDir).not.toHaveBeenCalled();
+    });
+
+    it("OPENCLAW_MIGRATION_GATE=off falls through to the fail-closed hold", async () => {
+      // Merge policy change (documented): under #21's bin-phase gate, =off
+      // meant warn-and-continue — the new build launched anyway. Under the
+      // merged fail-CLOSED reconciler (#20 F7), disabling the gate only
+      // disables the REVERT: a failed migration still ends in a gateway
+      // hold, never a launch on a config this build rejects.
+      process.env.OPENCLAW_MIGRATION_GATE = "off";
+      const harness = seedIncident();
+      harness.sync.syncAtBoot();
+
+      const outcome = await harness.sync.reconcileBootConfig();
+
+      expect(outcome.status).toBe("held");
+      expect(harness.store.readState().gatewayHold).toEqual(
+        expect.objectContaining({
+          reason: expect.stringContaining("2026.9.1-beta.1"),
+        }),
+      );
+      // No revert happened: the new build stays installed (held, not run).
+      expect(installedPackageJsonVersion(harness.installDir)).toBe(
+        "2026.9.1-beta.1",
+      );
+      expect(harness.store.readState().blocklist).toEqual([]);
+      expect(
+        outcome.warnings.some((w) => w.includes("migration gate disabled")),
+      ).toBe(true);
+    });
+
+    it("holds the gateway when the revert target cannot read the migrated state", async () => {
+      // A part-migrated DB belongs to the new build — reverting would
+      // recreate the exact brick. Merged policy: the gate DECLINES and the
+      // reconciler falls through to the fail-closed HOLD (supersedes #21's
+      // 'keeps the new build running' — the config is still rejected, so
+      // launching on it would just crash-loop).
+      const probeExec = vi.fn((cmd, args) => {
+        if (Array.isArray(args) && args.includes("preflight")) {
+          throw new Error("schema version 12; this build supports 1");
+        }
+        return "";
+      });
+      const harness = seedIncident({ probeExecFileSyncImpl: probeExec });
+      harness.sync.syncAtBoot();
+
+      const outcome = await harness.sync.reconcileBootConfig();
+
+      expect(outcome.status).toBe("held");
+      expect(harness.store.readState().gatewayHold).toBeTruthy();
+      // No blocklist-revert: the new build stays installed, gateway held.
+      expect(installedPackageJsonVersion(harness.installDir)).toBe(
+        "2026.9.1-beta.1",
+      );
+      expect(harness.store.readState().blocklist).toEqual([]);
+      expect(
+        outcome.warnings.some((w) =>
+          w.includes("no revert target can read the current state"),
+        ),
+      ).toBe(true);
+    });
+
+    it("never gates a plain pin boot (no restore target)", async () => {
+      // A pin boot has no applied build and no older target to return to —
+      // the gate skips it, and the failed migration falls to the hold.
+      const harness = createHarness({
+        pin: "1.0.0",
+        installedVersion: "1.0.0",
+        sentinelVersion: "1.0.0",
+        execFileSyncImpl: vi.fn(() => ""),
+        runnerImpl: failingMigrationRunner(),
+      });
+      writeConfig(harness.openclawDir, {
+        audit: {},
+        legacyBridge: { enabled: true },
+      });
+
+      harness.sync.syncAtBoot();
+      const outcome = await harness.sync.reconcileBootConfig();
+      expect(outcome.reason).not.toBe("migration-gate-reverted");
+      expect(outcome.status).toBe("held");
+      expect(harness.store.readState().blocklist).toEqual([]);
+      expect(installedPackageJsonVersion(harness.installDir)).toBe("1.0.0");
+    });
+
+    it("gates a steady-state reboot of an already-active build (already_active)", async () => {
+      // Merged design: the gate is no longer keyed on the syncAtBoot action
+      // allowlist — only rollback / rollback_refused boots are excluded
+      // (those belong to the restore path). A reboot of an already-active
+      // build whose migration fails still enters the gate.
+      const harness = createHarness({
+        pin: "2026.7.1-2",
+        installedVersion: "2026.9.1-beta.1",
+        sentinelVersion: "2026.9.1-beta.1",
+        channel: "beta",
+        execFileSyncImpl: vi.fn(() => ""),
+        runnerImpl: failingMigrationRunner(),
+      });
+      saveOverlayFixture(harness.store, "2026.7.1-2");
+      writeConfig(harness.openclawDir, {
+        audit: {},
+        legacyBridge: { enabled: true },
+      });
+      harness.store.updateState((s) => {
+        s.pinVersion = "2026.7.1-2";
+        s.applied = {
+          channel: "beta",
+          version: "2026.9.1-beta.1",
+          at: 1,
+          acceptedAt: 1,
+        };
+        s.configMigration = {
+          completedForVersion: "2026.7.1-2",
+          lastAttempt: {
+            version: "2026.7.1-2",
+            at: 1,
+            ok: true,
+            error: null,
+          },
+        };
+        return s;
+      });
+
+      const boot = harness.sync.syncAtBoot();
+      expect(boot.action).toBe("already_active");
+      expect(harness.store.readState().lastBoot.action).toBe("already_active");
+
+      const outcome = await harness.sync.reconcileBootConfig();
+      expect(outcome.status).toBe("ok");
+      expect(outcome.reason).toBe("migration-gate-reverted");
+      expect(installedPackageJsonVersion(harness.installDir)).toBe(
+        "2026.7.1-2",
+      );
+      expect(harness.store.readState().blocklist).toEqual([
+        expect.objectContaining({
+          id: "2026.9.1-beta.1",
+          reason: "config_migration_failed",
+        }),
+      ]);
+    });
+  });
+
+  describe("boot rollback preflight & refusal (issue #21 bug 3)", () => {
+    const writeConfig = (openclawDir, obj) => {
+      fs.mkdirSync(openclawDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(openclawDir, "openclaw.json"),
+        JSON.stringify(obj, null, 2),
+      );
+    };
+
+    afterEach(() => {
+      delete process.env.ALPHACLAW_NOTIFY_WEBHOOK_URL;
+    });
+
+    const writeStateDb = (openclawDir) => {
+      const { DatabaseSync } = require("node:sqlite");
+      fs.mkdirSync(path.join(openclawDir, "state"), { recursive: true });
+      const db = new DatabaseSync(
+        path.join(openclawDir, "state", "openclaw.sqlite"),
+      );
+      db.exec("CREATE TABLE t (x INTEGER)");
+      db.close();
+    };
+
+    it("reroutes a blocked package target to a passing pin", async () => {
+      const impl = vi.fn((cmd, args) => {
+        if (args.includes("preflight")) {
+          // The bin path (args[0]) carries the overlay version directory.
+          if (String(args[0]).includes("2.0.0")) {
+            throw new Error("cannot read schema");
+          }
+          return "";
+        }
+        return "";
+      });
+      const harness = createHarness({
+        pin: "1.0.0",
+        installedVersion: "3.0.0",
+        sentinelVersion: "3.0.0",
+        execFileSyncImpl: impl,
+      });
+      saveOverlayFixture(harness.store, "2.0.0");
+      saveOverlayFixture(harness.store, "1.0.0");
+      writeConfig(harness.openclawDir, { audit: {} });
+      writeStateDb(harness.openclawDir);
+      harness.store.updateState((s) => {
+        s.pinVersion = "1.0.0";
+        s.configMigration = {
+          completedForVersion: "3.0.0",
+          lastAttempt: { version: "3.0.0", at: 1, ok: true, error: null },
+        };
+        return s;
+      });
+      harness.store.writeMarker({
+        target: { kind: "package", channel: "stable", version: "2.0.0" },
+        blockedId: "3.0.0",
+        reason: "config_error",
+        exitCode: 78,
+        at: 1,
+      });
+
+      const result = harness.sync.syncAtBoot();
+      expect(result.action).toBe("rollback");
+      expect(installedPackageJsonVersion(harness.installDir)).toBe("1.0.0");
+      expect(
+        result.warnings.some((w) =>
+          w.includes(
+            "rollback target 2.0.0 reports it cannot safely read the current database",
+          ),
+        ),
+      ).toBe(true);
+      await flushAsync();
+      expect(notifyIds(harness.notify)).toContain(
+        "boot-rollback-preflight-2.0.0",
+      );
+    });
+
+    it("refuses the rollback and keeps the blocked build when every target preflight-blocks", async () => {
+      process.env.ALPHACLAW_NOTIFY_WEBHOOK_URL = "http://127.0.0.1:9/hook";
+      const webhookFetch = vi.fn(async () => ({ ok: true, status: 200 }));
+      global.fetch = webhookFetch;
+      const impl = vi.fn((cmd, args) => {
+        if (args.includes("preflight")) {
+          throw new Error("schema version 12; this build supports 1");
+        }
+        return "";
+      });
+      const harness = createHarness({
+        pin: "1.0.0",
+        installedVersion: "2.0.0",
+        sentinelVersion: "2.0.0",
+        execFileSyncImpl: impl,
+      });
+      saveOverlayFixture(harness.store, "1.0.0");
+      writeConfig(harness.openclawDir, { audit: {} });
+      writeStateDb(harness.openclawDir);
+      harness.store.updateState((s) => {
+        s.pinVersion = "1.0.0";
+        s.applied = {
+          channel: "stable",
+          version: "2.0.0",
+          at: 1,
+          acceptedAt: null,
+        };
+        s.configMigration = {
+          completedForVersion: "2.0.0",
+          lastAttempt: { version: "2.0.0", at: 1, ok: true, error: null },
+        };
+        return s;
+      });
+      harness.store.writeMarker({
+        target: { kind: "pin" },
+        blockedId: "2.0.0",
+        reason: "config_error",
+        exitCode: 78,
+        at: 1,
+      });
+
+      const result = harness.sync.syncAtBoot();
+      expect(result.action).toBe("rollback_refused");
+      // The blocked-but-compatible build keeps running; the marker is gone.
+      expect(installedPackageJsonVersion(harness.installDir)).toBe("2.0.0");
+      expect(harness.store.readMarker()).toBe(null);
+      const state = harness.store.readState();
+      expect(state.rollbackRefused).toEqual(
+        expect.objectContaining({
+          blockedId: "2.0.0",
+          reason: "no_compatible_target",
+        }),
+      );
+      expect(harness.sync.getChannelInfo().rollbackRefused).toBeTruthy();
+      await flushAsync();
+      expect(notifyIds(harness.notify)).toContain("rollback-refused-2.0.0");
+
+      // The refusal reached the out-of-band webhook (boot-direct path).
+      await vi.waitFor(() => {
+        expect(webhookFetch).toHaveBeenCalled();
+      });
+      const [url, opts] = webhookFetch.mock.calls[0];
+      expect(String(url)).toBe("http://127.0.0.1:9/hook");
+      expect(String(opts.body)).toContain("Rollback refused");
+
+      // A re-request for the same build is refused without marker churn.
+      const again = harness.sync.requestChannelRollback({
+        reason: "config_error",
+        exitCode: 78,
+      });
+      expect(again.ok).toBe(false);
+      expect(again.code).toBe("rollback_refused_previously");
+      expect(harness.store.readMarker()).toBe(null);
+    });
+  });
+
+  describe("forward recovery (issue #21 bug 10)", () => {
+    afterEach(() => {
+      delete process.env.OPENCLAW_FORWARD_RECOVERY;
+    });
+
+    const seedPinWithBlockedNewer = () => {
+      const harness = createHarness({
+        pin: "1.0.0",
+        installedVersion: "1.0.0",
+        sentinelVersion: "1.0.0",
+        execFileSyncImpl: vi.fn(() => ""),
+      });
+      saveOverlayFixture(harness.store, "2.0.0");
+      harness.store.updateState((s) => {
+        s.pinVersion = "1.0.0";
+        s.applied = null;
+        return s;
+      });
+      harness.store.addBlocklist({
+        id: "2.0.0",
+        reason: "config_error",
+        exitCode: 78,
+      });
+      return harness;
+    };
+
+    it("forward-recovers a pin failure to the blocklisted newer overlay exactly once", async () => {
+      const harness = seedPinWithBlockedNewer();
+
+      const first = harness.sync.requestForwardRecovery({ exitCode: 78 });
+      expect(first.ok).toBe(true);
+      expect(first.target).toEqual({
+        kind: "package",
+        channel: "stable",
+        version: "2.0.0",
+      });
+      const marker = harness.store.readMarker();
+      expect(marker.reason).toBe("forward_recovery");
+      expect(marker.target.version).toBe("2.0.0");
+      let state = harness.store.readState();
+      expect(state.forwardRecovery.attemptedId).toBe("2.0.0");
+      expect(state.blocklist).toEqual([]);
+      await flushAsync();
+      expect(notifyIds(harness.notify)).toContain("forward-recovery-2.0.0");
+
+      // Boot consumes the marker: the forward build activates with a fresh
+      // stabilization window (accepted once already).
+      const result = harness.sync.syncAtBoot();
+      expect(result.action).toBe("rollback");
+      expect(installedPackageJsonVersion(harness.installDir)).toBe("2.0.0");
+      state = harness.store.readState();
+      expect(state.applied.version).toBe("2.0.0");
+      expect(state.applied.acceptedAt).toBeTruthy();
+      await flushAsync();
+      expect(
+        notifyMessages(harness.notify).some((m) =>
+          m.includes("Moved forward to OpenClaw 2.0.0"),
+        ),
+      ).toBe(true);
+
+      // Second cycle: the forward build failed too and the box rolled back
+      // to the pin again — nothing bootable remains.
+      harness.store.addBlocklist({
+        id: "2.0.0",
+        reason: "config_error",
+        exitCode: 78,
+      });
+      harness.store.updateState((s) => {
+        s.applied = null;
+        return s;
+      });
+      const second = harness.sync.requestForwardRecovery({ exitCode: 78 });
+      expect(second.ok).toBe(false);
+      expect(second.code).toBe("forward_already_attempted");
+      state = harness.store.readState();
+      expect(state.noBootableVersion).toEqual(
+        expect.objectContaining({ attemptedId: "2.0.0" }),
+      );
+      expect(harness.sync.getChannelInfo().noBootableVersion).toBeTruthy();
+      await flushAsync();
+      expect(notifyIds(harness.notify)).toContain(
+        "no-bootable-version-2.0.0",
+      );
+    });
+
+    it("OPENCLAW_FORWARD_RECOVERY=off disables forward recovery", () => {
+      process.env.OPENCLAW_FORWARD_RECOVERY = "off";
+      const harness = seedPinWithBlockedNewer();
+      const result = harness.sync.requestForwardRecovery({ exitCode: 78 });
+      expect(result.ok).toBe(false);
+      expect(result.code).toBe("disabled");
+      expect(harness.store.readMarker()).toBe(null);
+    });
+
+    it("skips blocklist entries whose reason does not imply migrated state", () => {
+      const harness = seedPinWithBlockedNewer();
+      harness.store.clearBlocklist("2.0.0");
+      harness.store.addBlocklist({
+        id: "2.0.0",
+        reason: "crash_loop",
+        exitCode: 1,
+      });
+      const result = harness.sync.requestForwardRecovery({ exitCode: 78 });
+      expect(result.ok).toBe(false);
+      expect(result.code).toBe("no_forward_candidate");
+    });
+  });
+
+  describe("pin last-known-good promotion (issue #21 bug 5)", () => {
+    it("promotes the pin to lastKnownGood.package after the health hold and snapshots its overlay", async () => {
+      const harness = createHarness({
+        pin: "1.0.0",
+        installedVersion: "1.0.0",
+        sentinelVersion: "1.0.0",
+        execFileSyncImpl: vi.fn(() => ""),
+        extraSyncOptions: { acceptanceHoldMs: 1000 },
+      });
+      harness.sync.syncAtBoot();
+      expect(harness.store.readState().lastKnownGood.package).toBe(null);
+
+      harness.sync.onGatewayHealthy();
+      harness.nowRef.now += 1000;
+      harness.sync.onGatewayHealthy();
+
+      await vi.waitFor(() => {
+        expect(harness.store.readState().lastKnownGood.package).toBe("1.0.0");
+      });
+      const state = harness.store.readState();
+      // Minimal state change: still a pin boot, nothing accepted.
+      expect(state.applied).toBe(null);
+      expect(harness.store.hasOverlay("1.0.0")).toBe(true);
     });
   });
 });
