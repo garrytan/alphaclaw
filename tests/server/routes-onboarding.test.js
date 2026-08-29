@@ -454,12 +454,13 @@ describe("server/routes/onboarding", () => {
       "sk-test-123456789",
     );
     expect(deps.authProfiles.syncConfigAuthReferencesForAgent).toHaveBeenCalledTimes(1);
-    // AGENTS.md is now written atomically (readFileSync + writeFileAtomic),
-    // not copied with copyFileSync.
+    // ONE merged hardening file (rules + tools map) written atomically —
+    // a separate TOOLS.md extra is rejected on OpenClaw 2026.8.1+.
     const agentsWriteCall = deps.fs.writeFileSync.mock.calls.find(
       ([target]) => target === "/tmp/openclaw/workspace/hooks/bootstrap/AGENTS.md",
     );
     expect(agentsWriteCall).toBeTruthy();
+    expect(agentsWriteCall[1]).toContain("https://example.com");
     expect(deps.fs.copyFileSync).not.toHaveBeenCalledWith(
       path.join(kSetupDir, "core-prompts", "AGENTS.md"),
       expect.anything(),
@@ -467,8 +468,7 @@ describe("server/routes/onboarding", () => {
     const toolsWriteCall = deps.fs.writeFileSync.mock.calls.find(
       ([path]) => path === "/tmp/openclaw/workspace/hooks/bootstrap/TOOLS.md",
     );
-    expect(toolsWriteCall).toBeTruthy();
-    expect(toolsWriteCall[1]).toContain("https://example.com");
+    expect(toolsWriteCall).toBeUndefined();
 
     expect(deps.fs.writeFileSync).toHaveBeenCalledWith(
       "/tmp/openclaw/.alphaclaw/hourly-git-sync.sh",
@@ -508,7 +508,7 @@ describe("server/routes/onboarding", () => {
     expect(writtenConfig.hooks.internal.enabled).toBe(true);
     expect(writtenConfig.hooks.internal.entries["bootstrap-extra-files"]).toEqual({
       enabled: true,
-      paths: ["hooks/bootstrap/AGENTS.md", "hooks/bootstrap/TOOLS.md"],
+      paths: ["hooks/bootstrap/AGENTS.md"],
     });
   });
 

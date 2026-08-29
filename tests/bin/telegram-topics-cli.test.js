@@ -54,8 +54,10 @@ describe("bin/alphaclaw telegram topic commands", () => {
   const configPath = () => path.join(openclawDir, "openclaw.json");
   const registryPath = () =>
     path.join(openclawDir, "workspace", "topic-registry.json");
+  // The tools/harness map now lives inside the single merged hardening file
+  // (hooks/bootstrap/AGENTS.md) — TOOLS.md extras are rejected on 2026.8.1+.
   const toolsPath = () =>
-    path.join(openclawDir, "workspace", "hooks", "bootstrap", "TOOLS.md");
+    path.join(openclawDir, "workspace", "hooks", "bootstrap", "AGENTS.md");
 
   const writeConfig = (cfg) => {
     fs.mkdirSync(openclawDir, { recursive: true });
