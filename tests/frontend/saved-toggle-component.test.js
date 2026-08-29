@@ -151,9 +151,12 @@ describe("frontend/async-section", () => {
     expect(chips[0].props.onRetry).toBe(onRetry);
   });
 
-  it("renders a loading line while loading", () => {
+  it("renders a loading line while loading, announced as a busy status region", () => {
     const tree = render({ loading: true, loadingLabel: "Loading incidents..." });
     expect(collectText(tree).join(" ")).toContain("Loading incidents...");
+    const region = collectNodes(tree).find((n) => n.type === "div");
+    expect(region.props.role).toBe("status");
+    expect(region.props["aria-busy"]).toBe("true");
   });
 
   it("renders a distinct empty state", () => {
