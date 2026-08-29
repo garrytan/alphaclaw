@@ -24,23 +24,11 @@
 - **Context:** Surfaced by /plan-eng-review outside voice (E2) on the telegram-topics-discovery plan. openclaw's writer: dist io chunk `writeConfigFileLocal`; alphaclaw reader: lib/server/openclaw-config.js.
 - **Effort:** M (→S with CC). **Depends on:** telegram-topics-discovery shipping; verify `gateway call config.patch` surface.
 
-## P3 — Live-tier openclaw backup CLI contract regression test
-- **What:** One tests/live assertion that a real `openclaw backup create --output <file>` writes exactly at the given path (refusing when it already exists) and `--output <dir>/` writes a timestamped archive inside the directory.
-- **Why:** Issues #7/#9 existed because every test stub encoded an unvalidated assumption about the CLI's `--output` contract; the contract is now verified from openclaw@2026.7.1-2 dist source, and a live guard catches future CLI changes.
-- **Context:** `createBackupStubRunner` (tests/live/live-helpers.js) stubs backup in the live tier; contract notes in the #7/#9 fix PR.
-- **Effort:** S. **Depends on:** live tier (`OPENCLAW_LIVE_E2E=1`) with a real openclaw build.
-
 ## P3 — Size-aware backup retention
 - **What:** Add a configurable max-total-bytes retention policy (always keeping >= 1 archive) on top of keep-3, and consider surfacing backup disk usage in the UI.
 - **Why:** Keep-3 of ~7 GiB archives is ~21 GiB with no byte budget; small-volume installs can hit ENOSPC (now at least reported honestly, with a pre-backup space warning).
 - **Context:** `kOpenclawBackupKeepCount` (lib/server/constants.js:272), `pruneBackups` (lib/server/openclaw-channel-sync.js).
 - **Effort:** S-M. **Depends on:** the #7/#9 backup fix landing.
-
-## P2 — Supervisor verified-restart handoff (OpenClaw 2026.8.1+)
-- **What:** Implement the beta's verified restart handoff in `restartGateway`/`stopGatewayChildAndWait`/watchdog `restartAfterCrash` once a 2026.8.1 build is installed and its lifecycle contract is readable. Env plumbing (`OPENCLAW_SUPERVISOR_MODE=external`, gated on `supportsFeature("supervisorMode")`) already ships.
-- **Why:** The pinned stable (2026.7.1-2) documents no external-supervision contract; implementing against an assumed shape risks a wrong handshake during the most fragile window (gateway restart).
-- **Context:** TODO comment in lib/server/gateway.js; gate in lib/server/openclaw-feature-gates.js. Surfaced by the eng review's "handoff after the beta contract is read" sequencing decision.
-- **Effort:** S. **Depends on:** applying 2026.8.1-beta.3+ on a staging deployment.
 
 ## P2 — Latch shutdown state before the self-update restart drain
 - **What:** `restartProcess` (lib/server/alphaclaw-version.js) calls `serverLifecycle.drain()` without setting the lifecycle's `exiting` latch, so a SIGTERM or uncaughtException landing inside the ≤10s drain window starts a second concurrent drain and exits before the successor process is spawned — on an unsupervised VPS that means a self-update ends with nothing running. Route the restart through a lifecycle method (e.g. `prepareForRestart()`) that latches `exiting` and disarms signal re-entry, or move the respawn inside the guarded exit path.
@@ -59,7 +47,7 @@
 - **Effort:** M. **Depends on:** nothing.
 
 ## P3 — Ship-review maintainability follow-ups (2026-08-28, grouped)
-- **What:** (1) shared `applyOperationalPragmas(db)` helper for the WAL/NORMAL/busy_timeout block now copy-pasted in db/auth, db/doctor, db/watchdog, db/webhooks; (2) shared cron run-log tail-read helper (block repeated ×3 in cron-service.js); (3) shared `sleep` util (5 private copies); (4) one `kDoctorRepairTimeoutMs` constant for the 10-minute doctor-fix ceiling spelled in server.js and watchdog.js; (5) shared 1s sync-file-lock timeout constant (openclaw-config.js + topic-registry.js); (6) extract the proxy error handler and terminal error middleware from lib/server.js into a module so routes-proxy.test.js stops testing a verbatim copy; (7) `stream.end()` + bounded await-finish as a drain step in log-writer so stream-buffered bytes survive shutdown (in-memory queue already flushes); (8) make system-resources' loop-lag monitor injectable/stoppable for direct tests; (9) surface a `truncatedHistory` flag on cron run-history responses (256KB tail bound); (10) /v1-scoped error handler emitting the OpenAI error envelope for 413/400 parser errors; (11) SWR-cache `getGatewayPort` (sync read+parse per proxied request, sub-ms but unconditional); (12) stat-cache `analyzeBootstrapContext` file reads; (13) remaining test gaps: pairings single-flight/500 path, cron-store TTL-reopen/liveness cache, statusPayloadMemo invalidate-vs-in-flight race, doctor-service runStarting four-site reset → try/finally cleanup; (14) `Expect: 100-continue` proxied requests never get the post-header idle-timeout relaxation (http-proxy-3 skips the proxyReq event for them — consider stripping the header on the outgoing leg); (15) `installCrashGuards` removeAllListeners can drop dependency-registered process handlers — remove only known guards by reference; (16) browse preview TOCTOU: read at most limit+1 bytes from an fd instead of stat-then-readFileSync.
+- **What:** (1) shared `applyOperationalPragmas(db)` helper for the WAL/NORMAL/busy_timeout block now copy-pasted in db/auth, db/doctor, db/watchdog, db/webhooks; (2) shared cron run-log tail-read helper (block repeated ×3 in cron-service.js); (3) shared `sleep` util (5 private copies); (4) one `kDoctorRepairTimeoutMs` constant for the 10-minute doctor-fix ceiling spelled in server.js and watchdog.js; (5) shared 1s sync-file-lock timeout constant (openclaw-config.js + topic-registry.js); (6) extract the proxy error handler and terminal error middleware from lib/server.js into a module so routes-proxy.test.js stops testing a verbatim copy; (7) `stream.end()` + bounded await-finish as a drain step in log-writer so stream-buffered bytes survive shutdown (in-memory queue already flushes); (8) make system-resources' loop-lag monitor injectable/stoppable for direct tests; (9) surface a `truncatedHistory` flag on cron run-history responses (256KB tail bound); (10) /v1-scoped error handler emitting the OpenAI error envelope for 413/400 parser errors; (11) SWR-cache `getGatewayPort` (sync read+parse per proxied request, sub-ms but unconditional); (12) remaining test gaps: pairings single-flight/500 path, cron-store TTL-reopen/liveness cache, statusPayloadMemo invalidate-vs-in-flight race; (13) `Expect: 100-continue` proxied requests never get the post-header idle-timeout relaxation (http-proxy-3 skips the proxyReq event for them — consider stripping the header on the outgoing leg); (14) `installCrashGuards` removeAllListeners can drop dependency-registered process handlers — remove only known guards by reference; (15) browse preview TOCTOU: read at most limit+1 bytes from an fd instead of stat-then-readFileSync.
 - **Why:** All flagged by the /ship specialist review; deferred as churn-vs-risk at ship time, none user-visible today.
 - **Effort:** S each. **Depends on:** nothing.
 
@@ -67,3 +55,33 @@
 - **What:** `openclaw node run` authenticates with `OPENCLAW_GATEWAY_TOKEN`, which trusted-proxy mode rejects; `/api/nodes/connect-info` currently returns an empty token with a logged warning while team mode is on. Provide a working node path (gateway password credential, or a pairing flow) before recommending team mode to node users.
 - **Context:** lib/server/gateway-credential.js, lib/server/routes/nodes.js; degradation documented in the team-auth milestone report.
 - **Effort:** M. **Depends on:** verifying how `openclaw node run` accepts a password credential (docs/cli in the beta line).
+
+## P2 — Upgrade overseer getDoctorJson must use `doctor --lint --json`
+- **What:** `getDoctorJson` (lib/server.js:470) invokes bare `openclaw doctor --json`, which is NOT lint mode on the pinned stable 2026.7.1-2 — bare `--json` is only meaningful there combined with `--lint`/`--post-upgrade` (verified in the stable tarball's register.maintenance dist). Switch to `openclaw doctor --lint --json`, the verified cross-version read-only invocation.
+- **Why:** The upgrade overseer's post-upgrade health read is parsing output that was never lint findings on stable; on beta, bare `--json` also flattens the exit code to 0 regardless of findings. Small, verified, surfaced by the 8.1 contract review.
+- **Context:** docs/designs/openclaw-context-contract.md §3 (doctor machine surface); the Drift Doctor wave's bridge (lib/server/doctor/openclaw-doctor.js) already uses the correct invocation — this aligns the overseer with it.
+- **Effort:** S. **Depends on:** nothing.
+
+## P3 — Doctor per-run token cost display
+- **What:** Show each doctor run's LLM token cost on the Doctor tab by joining usage.db on the run's session key (`agent:main:doctor:<n>`).
+- **Why:** Scheduled scans (doctor autoRun) make doctor LLM spend recurring; operators should see what each scan cost before tuning frequency. Deferred from the 8.1 wave's CEO review.
+- **Context:** doctor runs use deterministic session keys `agent:main:doctor:<n>`; usage.db already powers the usage views. Wave background in docs/designs/openclaw-context-contract.md.
+- **Effort:** S. **Depends on:** Drift Doctor 8.1 wave landing.
+
+## P3 — Session-kind context breakdown card
+- **What:** A Doctor-tab card visualizing the per-session-kind injection matrix (main/subagent/cron/group-channel) from the active context profile — which bootstrap files each session kind actually receives.
+- **Why:** Session-scope filtering is invisible today (on beta, subagents see only AGENTS.md; group chats lose MEMORY.md); operators assume every session sees the full workspace context. Deferred from the 8.1 wave's CEO review.
+- **Context:** the matrix is data in lib/server/doctor/context-profiles.js; verified facts and citations in docs/designs/openclaw-context-contract.md §2 (session-scope matrix).
+- **Effort:** S. **Depends on:** Drift Doctor 8.1 wave landing.
+
+## P3 — Copy-fix-prompt button on doctor findings
+- **What:** A copy-to-clipboard button on each doctor finding card exposing the card's fixPrompt, so operators can paste it into a session of their choosing.
+- **Why:** Fixes stay explicit-dispatch by doctrine; a copy affordance gives a manual path without wiring any auto-dispatch. Deferred from the 8.1 wave's CEO review.
+- **Context:** cards already carry fixPrompt (doctor service); UI-only change in the Doctor tab.
+- **Effort:** S. **Depends on:** Drift Doctor 8.1 wave landing.
+
+## P3 — SQLite snapshot retention (keep-N)
+- **What:** Keep-N retention for the SQLite snapshot repository at `<root>/backups/openclaw-sqlite/` (each `backup sqlite create` adds a new snapshot directory; nothing prunes them).
+- **Why:** The verified 8.1 contract makes `--repository` required on create, so snapshots accumulate unboundedly in our managed directory; companion to the size-aware archive retention entry above.
+- **Context:** create/verify contract in docs/designs/openclaw-context-contract.md §5 (`backup sqlite` CLI); `kOpenclawSqliteBackupDir` (lib/server/constants.js, added by the wave's backup-runner fix); pattern precedent in `pruneBackups` (lib/server/openclaw-channel-sync.js).
+- **Effort:** S. **Depends on:** the wave's backup sqlite runner fix landing.
