@@ -99,10 +99,12 @@ echo "== overseer toggle flips instantly and never snaps back =="
 # visibly snapped back and looked dead. Only a real DOM catches that.
 overseer_input="[...document.querySelectorAll('.bg-surface')].find(c => c.textContent.includes('Overseer report'))?.querySelector('.ac-toggle-input')"
 assert_page "($overseer_input)?.checked === false" "overseer toggle starts disabled"
-"$B" js "($overseer_input)?.closest('label')?.click(); true" >/dev/null
-# Immediately after the click — before any server round trip could settle —
-# the switch must already be checked (optimistic), not snapped back.
-assert_page "($overseer_input)?.checked === true" "overseer toggle flipped instantly (no snap-back)"
+# Click and read in ONE evaluation: separate CLI invocations are ~100ms+
+# apart, long enough for the localhost PUT to settle and mask a snap-back.
+# The synchronous read catches an immediate re-assertion; the optimistic
+# render frame itself is pinned by the unit harness (Preact re-renders are
+# async, so no DOM read here can be scheduled between click and re-render).
+assert_page "(i => { i?.closest('label')?.click(); return i?.checked === true; })($overseer_input)" "overseer toggle flipped instantly (no snap-back)"
 sleep 2
 assert_page "($overseer_input)?.checked === true" "overseer toggle stayed on after the save settled"
 node -e "const c=require('$kScratch/.openclaw/alphaclaw.json'); process.exit(c.updates?.openclaw?.overseer?.enabled===true?0:1)" \

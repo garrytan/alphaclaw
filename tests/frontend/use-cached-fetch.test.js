@@ -58,15 +58,22 @@ const deferred = () => {
 
 const renderHook = (key, fetcher, options) => {
   let currentFetcher = fetcher;
+  let currentKey = key;
   let latest;
-  const render = (nextFetcher = currentFetcher) => {
+  const render = (nextFetcher = currentFetcher, nextKey = currentKey) => {
     currentFetcher = nextFetcher;
+    currentKey = nextKey;
     harness.beginRender();
-    latest = useCachedFetch(key, currentFetcher, options);
+    latest = useCachedFetch(currentKey, currentFetcher, options);
     return latest;
   };
   render();
-  return { result: () => latest, render };
+  return {
+    result: () => latest,
+    render,
+    setKey: (nextKey) => render(currentFetcher, nextKey),
+    runKeyEffect: () => harness.effects[0](),
+  };
 };
 
 beforeEach(() => {
@@ -107,6 +114,31 @@ describe("frontend/use-cached-fetch", () => {
     // The stale refresh may not overwrite the newer hook-local data.
     expect(hook.result().data).toBe("newer");
     invalidateCache("ucf-latest-wins-key");
+  });
+
+  it("a key change resets error and loading — the previous entity's failure is never attributed to the new one", async () => {
+    const fetcher = vi.fn(async () => "ok");
+    const hook = renderHook("ucf-key-a", fetcher);
+    // Key A failed: error set, loading settled.
+    await hook.result().refresh({ force: true }).catch(() => {});
+    hook.render();
+    const failing = vi.fn(async () => {
+      throw new Error("a failed");
+    });
+    hook.render(failing);
+    await hook.result().refresh({ force: true }).catch(() => {});
+    hook.render();
+    expect(hook.result().error).toBeInstanceOf(Error);
+
+    // Switch to key B (uncached): the [key] effect must clear the stale
+    // error and report loading — never a confident-empty/error frame.
+    hook.setKey("ucf-key-b");
+    hook.runKeyEffect();
+    hook.render(fetcher, "ucf-key-b");
+    expect(hook.result().error).toBe(null);
+    expect(hook.result().loading).toBe(true);
+    invalidateCache("ucf-key-a");
+    invalidateCache("ucf-key-b");
   });
 
   it("a stale refresh error cannot overwrite newer success state", async () => {

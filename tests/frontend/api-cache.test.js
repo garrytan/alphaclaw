@@ -66,6 +66,42 @@ describe("frontend/api-cache", () => {
     }
   });
 
+  it("hydration skips and removes a corrupt persisted entry instead of aborting the rest", async () => {
+    const store = new Map([
+      ["acApiCache:/api/openclaw/catalog?bad", "{not json"],
+      [
+        "acApiCache:/api/openclaw/catalog?good",
+        JSON.stringify({ data: "survives", fetchedAt: 1 }),
+      ],
+    ]);
+    const fakeStorage = {
+      get length() {
+        return store.size;
+      },
+      key: (i) => [...store.keys()][i] ?? null,
+      getItem: (k) => (store.has(k) ? store.get(k) : null),
+      setItem: (k, v) => store.set(k, String(v)),
+      removeItem: (k) => store.delete(k),
+    };
+    vi.stubGlobal("sessionStorage", fakeStorage);
+    try {
+      vi.resetModules();
+      // Fresh module instance re-runs hydrateFromSessionStorage at load.
+      const freshCache = await import(
+        "../../lib/public/js/lib/api-cache.js"
+      );
+      expect(freshCache.getCached("/api/openclaw/catalog?good")).toBe(
+        "survives",
+      );
+      // The corrupt entry was dropped from storage so it can't break every
+      // future load.
+      expect(store.has("acApiCache:/api/openclaw/catalog?bad")).toBe(false);
+    } finally {
+      vi.unstubAllGlobals();
+      vi.resetModules();
+    }
+  });
+
   it("bypasses caching for empty keys or non-function fetchers", async () => {
     const fetcher = vi.fn(async () => "direct");
     await expect(cachedFetch("", fetcher)).resolves.toBe("direct");
