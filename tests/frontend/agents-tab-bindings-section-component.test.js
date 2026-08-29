@@ -10,7 +10,13 @@ vi.mock("../../lib/public/js/components/channels.js", () => ({
 
 vi.mock(
   "../../lib/public/js/components/agents-tab/agent-bindings-section/use-agent-bindings.js",
-  () => ({ useAgentBindings: vi.fn() }),
+  () => ({
+    useAgentBindings: vi.fn(),
+    // Real implementation: the shared key builder the row's pending compare
+    // uses — mocking it away would decouple the test from the set side.
+    buildBindKey: (provider, accountId) =>
+      `${String(provider || "").trim()}:${String(accountId || "").trim() || "default"}`,
+  }),
 );
 
 vi.mock(

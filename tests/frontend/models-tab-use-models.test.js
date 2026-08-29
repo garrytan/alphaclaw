@@ -131,7 +131,10 @@ const renderHook = (agentId = kAgentId) => {
   return {
     result: () => latest,
     render,
-    runRefreshEffect: () => harness.effects[0](),
+    // Drive a refresh via the hook's own action: the mount effect now
+    // first-sighting-skips (useCachedFetch's mount fetches cover the initial
+    // load; the forced refresh double-hit all three endpoints on every mount).
+    runRefreshEffect: () => latest.refresh(),
   };
 };
 

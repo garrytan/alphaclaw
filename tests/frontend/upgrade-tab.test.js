@@ -1203,6 +1203,80 @@ describe("frontend/upgrade-tab hook", () => {
     expect(api.updateOpenclawReleaseChannel).not.toHaveBeenCalled();
   });
 
+  it("a successful channel save refreshes the shared /api/status consumers; a failed one does not", async () => {
+    const onRefreshStatuses = vi.fn();
+    let state = await hydrate({ onRefreshStatuses });
+
+    await state.onSelectChannel("beta");
+    // The sidebar footer reads the shared status channel — it must update
+    // immediately, not on the next poll tick.
+    expect(onRefreshStatuses).toHaveBeenCalled();
+
+    onRefreshStatuses.mockClear();
+    api.updateOpenclawReleaseChannel.mockRejectedValue(new Error("nope"));
+    state = renderHook({ onRefreshStatuses });
+    await state.onSelectChannel("stable");
+    expect(onRefreshStatuses).not.toHaveBeenCalled();
+  });
+
+  it("onDismissOperation revives a dead page: operation cleared, stream stopped, data reloaded", async () => {
+    const unsubscribe = vi.fn();
+    api.subscribeOpenclawApplyEvents.mockImplementation(() => unsubscribe);
+    api.applyOpenclawVersion.mockResolvedValue({
+      ok: true,
+      operationId: "op-dead",
+      events: "/api/operations/op-dead/events",
+    });
+    let state = await hydrate();
+    state.onRequestApply({ payload: { version: "x" }, label: "x" });
+    state = renderHook({});
+    await state.onConfirmApply();
+    state = renderHook({});
+    expect(state.operation).toBeTruthy();
+    expect(state.actionsDisabled).toBe(true);
+
+    api.fetchOpenclawChannel.mockClear();
+    api.fetchOpenclawRuns.mockClear();
+    state.onDismissOperation();
+    await flushAsync();
+    state = renderHook({});
+    expect(state.operation).toBeNull();
+    expect(state.logOpen).toBe(false);
+    expect(state.actionsDisabled).toBe(false); // every control re-enables
+    expect(unsubscribe).toHaveBeenCalled();
+    expect(api.fetchOpenclawChannel).toHaveBeenCalled();
+    expect(api.fetchOpenclawRuns).toHaveBeenCalled();
+  });
+
+  it("actionsDisabled covers blocklist clears and catalog refreshes in flight", async () => {
+    let resolveClear;
+    api.clearOpenclawBlocklist.mockImplementation(
+      () => new Promise((resolve) => (resolveClear = resolve)),
+    );
+    let state = await hydrate();
+    expect(state.actionsDisabled).toBe(false);
+
+    const clearing = state.onClearBlocklist("v1");
+    state = renderHook({});
+    expect(state.actionsDisabled).toBe(true); // a reload race window is open
+    resolveClear({ ok: true, blocklist: [] });
+    await clearing;
+    state = renderHook({});
+    expect(state.actionsDisabled).toBe(false);
+
+    let resolveCatalog;
+    api.fetchOpenclawCatalog.mockImplementation(
+      () => new Promise((resolve) => (resolveCatalog = resolve)),
+    );
+    state.onCheckNow();
+    state = renderHook({});
+    expect(state.actionsDisabled).toBe(true);
+    resolveCatalog({ ok: true, catalog: makeCatalog() });
+    await flushAsync();
+    state = renderHook({});
+    expect(state.actionsDisabled).toBe(false);
+  });
+
   // REGRESSION: a failed persist must revert the selection LOUDLY — the
   // persistent inline error chip state is set and the segment snaps back with
   // an explanation, never silently.

@@ -188,4 +188,27 @@ describe("frontend/inline-error-chip", () => {
     const link = collectNodes(tree).find((n) => n.type === "a");
     expect(link.props.href).toBe("https://docs.example/x");
   });
+
+  it("never renders a non-http(s) docsUrl as a link", () => {
+    // Envelopes chain from gateway/CLI response bodies — a javascript: URL
+    // must not become an anchor in the admin UI.
+    for (const docsUrl of [
+      // eslint-disable-next-line no-script-url
+      "javascript:alert(1)",
+      "data:text/html,x",
+      "not a url",
+    ]) {
+      const error = Object.assign(new Error("failed"), { docsUrl });
+      const tree = expandTree(InlineErrorChip({ error, headline: "Oops." }));
+      expect(collectNodes(tree).find((n) => n.type === "a")).toBe(undefined);
+    }
+    // http stays allowed alongside https.
+    const httpError = Object.assign(new Error("failed"), {
+      docsUrl: "http://docs.example/x",
+    });
+    const httpTree = expandTree(InlineErrorChip({ error: httpError }));
+    expect(collectNodes(httpTree).find((n) => n.type === "a").props.href).toBe(
+      "http://docs.example/x",
+    );
+  });
 });

@@ -44,7 +44,7 @@ vi.mock("preact/hooks", () => {
 
 import * as preactHooks from "preact/hooks";
 import { useSavedSetting } from "../../lib/public/js/hooks/use-saved-setting.js";
-import { invalidateCache, setCached } from "../../lib/public/js/lib/api-cache.js";
+import { getCached, invalidateCache, setCached } from "../../lib/public/js/lib/api-cache.js";
 
 const harness = preactHooks.__harness;
 
@@ -405,6 +405,48 @@ describe("frontend/use-saved-setting", () => {
     hook.render();
     expect(hook.result().value).toBe(false); // the click wins
     invalidateCache("saved-setting-seed-key");
+  });
+
+  it("a superseded GET cannot re-seed the shared cache with pre-save data", async () => {
+    const loadGate = deferred();
+    const hook = renderHook({
+      cacheKey: "saved-setting-stale-seed-key",
+      load: () => loadGate.promise,
+      select: (d) => d.enabled,
+      save: vi.fn(async () => ({})),
+    });
+    hook.runLoadEffect(); // GET in flight, pre-commit generation
+
+    await hook.result().commit(true); // user commits; the GET is now stale
+    loadGate.resolve({ enabled: false }); // pre-save snapshot lands late
+    await flushAsync();
+    hook.render();
+    expect(hook.result().value).toBe(true);
+    // The cache must NOT hold the stale doc — a remount would otherwise seed
+    // an interactive control with the pre-save value.
+    expect(getCached("saved-setting-stale-seed-key")).toBe(null);
+    invalidateCache("saved-setting-stale-seed-key");
+  });
+
+  it("a selectSaved throw does not revert or fail a successful save", async () => {
+    const hook = renderHook({
+      load: async () => ({ enabled: false }),
+      select: (d) => d.enabled,
+      selectSaved: () => {
+        throw new Error("bad shape");
+      },
+      save: vi.fn(async () => ({})),
+    });
+    hook.runLoadEffect();
+    await flushAsync();
+    hook.render();
+
+    const outcome = await hook.result().commit(true);
+    hook.render();
+    expect(outcome.ok).toBe(true);
+    expect(hook.result().value).toBe(true); // optimistic value kept
+    expect(hook.result().saveError).toBe(null);
+    expect(hook.result().saving).toBe(false);
   });
 
   it("corrects a stale seed visibly when the revalidate differs and no click happened", async () => {
