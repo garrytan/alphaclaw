@@ -318,6 +318,12 @@
 - **Context:** Flagged by the plan-design-review of the UI local-time normalization plan (Pass 5).
 - **Effort:** S (one /design-consultation session). **Depends on:** nothing.
 
+## P3 — upgrade-ui-smoke.sh: password selector matches two elements
+- **What:** `tests/browser/upgrade-ui-smoke.sh` stops at `browse wait 'input[type="password"]'` — login.html renders both `#password` and a hidden `#password-confirm`, and the browse CLI now refuses multi-match selectors. Fix: wait/fill `#password` by id (time-format-smoke.sh already does; better yet, share its API-login helper).
+- **Why:** The upgrade smoke silently no-ops in environments with a current browse CLI, so the channel-segment regression it guards is unwatched.
+- **Context:** Pre-existing (login.html last touched v0.9.38, smoke v0.9.40); surfaced by /qa on 2026-08-29 while running it as a regression check for the time-normalization branch. Not modified per QA rule "never modify existing tests".
+- **Effort:** S. **Depends on:** nothing.
+
 ## Completed
 
 ## Make env-save channel sync one atomic lifecycle-lock op
