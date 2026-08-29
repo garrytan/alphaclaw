@@ -5,8 +5,11 @@ const path = require("path");
 const {
   isOpenAiCompatApiEnabled,
   readAlphaclawConfig,
+  readAutotuneEnabled,
+  readAutotuneSettings,
   readOpenclawMedicEnabled,
   readOpenclawReleaseChannel,
+  updateAutotuneSettings,
   updateOpenAiCompatApiFeature,
   updateOpenclawMedicEnabled,
   updateOpenclawReleaseChannel,
@@ -82,6 +85,10 @@ describe("server/alphaclaw-config", () => {
         enabled: false,
         disableLegacyLogin: false,
       },
+      autotune: {
+        enabled: true,
+        overrides: {},
+      },
     });
   });
 
@@ -119,6 +126,10 @@ describe("server/alphaclaw-config", () => {
       team: {
         enabled: false,
         disableLegacyLogin: false,
+      },
+      autotune: {
+        enabled: true,
+        overrides: {},
       },
     });
   });
@@ -209,5 +220,79 @@ describe("server/alphaclaw-config", () => {
     const on = updateOpenclawMedicEnabled({ openclawDir, enabled: true });
     expect(on.changed).toBe(true);
     expect(readOpenclawMedicEnabled({ openclawDir })).toBe(true);
+  });
+
+  it("defaults autotune to enabled (opt-out) and normalizes overrides strictly", () => {
+    const openclawDir = createTempOpenclawDir();
+
+    expect(readAutotuneEnabled({ openclawDir })).toBe(true);
+    expect(readAutotuneSettings({ openclawDir })).toEqual({
+      enabled: true,
+      overrides: {},
+    });
+
+    const configPath = path.join(openclawDir, "alphaclaw.json");
+    fs.writeFileSync(
+      configPath,
+      JSON.stringify({
+        autotune: {
+          enabled: "yes", // not literal false → enabled
+          overrides: {
+            gatewayHeapMb: 2048,
+            uvThreadpoolSize: 200, // out of bounds → dropped
+            agentConcurrencyCap: "64", // numeric string → accepted
+            unknownKnob: 5, // unknown → dropped
+            openAiCompatBodyLimitMb: 12.5, // non-integer → dropped
+          },
+        },
+      }),
+      "utf8",
+    );
+    expect(readAutotuneSettings({ openclawDir })).toEqual({
+      enabled: true,
+      overrides: { gatewayHeapMb: 2048, agentConcurrencyCap: 64 },
+    });
+  });
+
+  it("fails CLOSED on a corrupt config for the default-ON autotune gate", () => {
+    const openclawDir = createTempOpenclawDir();
+    fs.writeFileSync(
+      path.join(openclawDir, "alphaclaw.json"),
+      "{ not json",
+      "utf8",
+    );
+    expect(readAutotuneEnabled({ openclawDir })).toBe(false);
+  });
+
+  it("merges autotune overrides per key and clears with null", () => {
+    const openclawDir = createTempOpenclawDir();
+
+    updateAutotuneSettings({
+      openclawDir,
+      overrides: { gatewayHeapMb: 1024, sqliteCacheMb: 16 },
+    });
+    // Saving one key must not erase siblings.
+    const second = updateAutotuneSettings({
+      openclawDir,
+      overrides: { gatewayHeapMb: 2048 },
+    });
+    expect(second.changed).toBe(true);
+    expect(readAutotuneSettings({ openclawDir }).overrides).toEqual({
+      gatewayHeapMb: 2048,
+      sqliteCacheMb: 16,
+    });
+
+    // Explicit null clears exactly one key.
+    updateAutotuneSettings({ openclawDir, overrides: { gatewayHeapMb: null } });
+    expect(readAutotuneSettings({ openclawDir }).overrides).toEqual({
+      sqliteCacheMb: 16,
+    });
+
+    const disabled = updateAutotuneSettings({ openclawDir, enabled: false });
+    expect(disabled.changed).toBe(true);
+    expect(readAutotuneEnabled({ openclawDir })).toBe(false);
+
+    const noop = updateAutotuneSettings({ openclawDir, enabled: false });
+    expect(noop.changed).toBe(false);
   });
 });
