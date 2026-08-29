@@ -454,6 +454,9 @@ describe("server/routes/system", () => {
             enabled: false,
             disableLegacyLogin: false,
           },
+          watchdog: {
+            overseer: { enabled: false },
+          },
           autotune: {
             enabled: true,
             overrides: {},
@@ -829,6 +832,9 @@ describe("server/routes/system", () => {
           enabled: false,
           disableLegacyLogin: false,
         },
+        watchdog: {
+          overseer: { enabled: false },
+        },
         autotune: {
           enabled: true,
           overrides: {},
@@ -870,6 +876,9 @@ describe("server/routes/system", () => {
           team: {
             enabled: false,
             disableLegacyLogin: false,
+          },
+          watchdog: {
+            overseer: { enabled: false },
           },
           autotune: {
             enabled: true,

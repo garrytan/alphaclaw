@@ -43,6 +43,8 @@ vi.mock("preact/hooks", () => {
 
 vi.mock("../../lib/public/js/lib/api.js", () => ({
   fetchWatchdogEvents: vi.fn(),
+  fetchWatchdogIncidents: vi.fn(),
+  fetchWatchdogIncidentDetail: vi.fn(),
 }));
 
 import * as preactHooks from "preact/hooks";
@@ -108,9 +110,17 @@ const findAllByType = (tree, type) =>
 beforeEach(() => {
   harness.reset();
   vi.clearAllMocks();
-  // The events poll seeds from the shared api-cache (cacheKey) — drop the
-  // module-level entry so a prior test's data can't leak across cases.
-  invalidateCache("/api/watchdog/events?limit=20");
+  // Both polls seed from the shared api-cache (cacheKey) — drop the
+  // module-level entries so a prior test's data can't leak across cases.
+  invalidateCache("/api/watchdog/events?limit=20&includeRoutine=0");
+  invalidateCache("/api/watchdog/incidents?limit=10");
+  // refreshEvents refreshes BOTH feeds; give the incidents side a quiet
+  // default so events-focused cases don't reject on the sibling fetch.
+  api.fetchWatchdogIncidents.mockResolvedValue({
+    ok: true,
+    incidents: [],
+    hasMore: false,
+  });
 });
 
 describe("frontend/watchdog incidents hook", () => {
@@ -167,22 +177,38 @@ describe("frontend/watchdog incidents hook", () => {
 });
 
 describe("frontend/watchdog incidents card", () => {
-  const renderCard = (props = {}) =>
-    expandTree(WatchdogIncidentsCard(props));
+  const renderCard = (props = {}) => expandTree(WatchdogIncidentsCard(props));
+
+  const kIncident = {
+    id: 3,
+    incidentKey: "gateway_crash",
+    status: "resolved",
+    openedAt: "2026-08-28T10:00:00Z",
+    summary: {
+      trigger: "gateway_crash",
+      severity: "warning",
+      outcome: "recovered",
+      durationMs: 60_000,
+    },
+  };
 
   it("shows a loading line before the first poll settles — not the empty state", () => {
-    const tree = renderCard({ events: [], hasLoaded: false, error: null });
+    const tree = renderCard({
+      incidents: [],
+      incidentsLoaded: false,
+      incidentsError: null,
+    });
     const text = treeText(tree);
     expect(text).toContain("Loading incidents...");
-    expect(text).not.toContain("No incidents recorded.");
+    expect(text).not.toContain("No incidents recorded");
   });
 
   it("renders the error chip with Retry when the first load fails", () => {
     const onRefresh = () => {};
     const tree = renderCard({
-      events: [],
-      hasLoaded: false,
-      error: new Error("boom"),
+      incidents: [],
+      incidentsLoaded: false,
+      incidentsError: new Error("boom"),
       onRefresh,
     });
     const chips = findAllByType(tree, InlineErrorChip);
@@ -190,33 +216,66 @@ describe("frontend/watchdog incidents card", () => {
     expect(chips[0].props.onRetry).toBe(onRefresh);
     const text = treeText(tree);
     expect(text).toContain("Couldn't load incidents.");
-    expect(text).not.toContain("No incidents recorded.");
+    expect(text).not.toContain("No incidents recorded");
   });
 
   it("keeps the stale list visible with a refresh-failed note", () => {
     const tree = renderCard({
-      events: [{ eventType: "crash", status: "open", createdAt: "2026-08-28" }],
-      hasLoaded: true,
-      error: new Error("flaky"),
+      incidents: [kIncident],
+      incidentsLoaded: true,
+      incidentsError: new Error("flaky"),
     });
     const text = treeText(tree);
-    expect(text).toContain("Couldn't refresh incidents — showing the last loaded list.");
-    expect(text).toContain("crash"); // list still rendered
+    expect(text).toContain(
+      "Couldn't refresh incidents — showing the last loaded list.",
+    );
+    expect(text).toContain("Gateway crash"); // list still rendered
     expect(findAllByType(tree, InlineErrorChip).length).toBe(1);
   });
 
   it("renders the genuine empty state only after a successful load", () => {
-    const tree = renderCard({ events: [], hasLoaded: true, error: null });
-    expect(treeText(tree)).toContain("No incidents recorded.");
+    const tree = renderCard({
+      incidents: [],
+      incidentsLoaded: true,
+      incidentsError: null,
+    });
+    expect(treeText(tree)).toContain(
+      "No incidents recorded — the watchdog is quiet.",
+    );
     expect(findAllByType(tree, InlineErrorChip).length).toBe(0);
   });
 
+  it("applies the same loading/error/empty honesty to the All-events tab", () => {
+    const base = { activeTab: "events", events: [] };
+    expect(
+      treeText(renderCard({ ...base, eventsLoaded: false, eventsError: null })),
+    ).toContain("Loading events...");
+    const failed = renderCard({
+      ...base,
+      eventsLoaded: false,
+      eventsError: new Error("boom"),
+    });
+    expect(treeText(failed)).toContain("Couldn't load events.");
+    expect(findAllByType(failed, InlineErrorChip).length).toBe(1);
+    expect(
+      treeText(renderCard({ ...base, eventsLoaded: true, eventsError: null })),
+    ).toContain("No events recorded.");
+  });
+
   it("Refresh shows a pending affordance while polling", () => {
-    const idle = renderCard({ events: [], hasLoaded: true, isRefreshing: false });
+    const idle = renderCard({
+      incidents: [],
+      incidentsLoaded: true,
+      isRefreshing: false,
+    });
     expect(findAllByType(idle, ActionButton)[0].props.loading).toBe(false);
     expect(treeText(idle)).toContain("Refresh");
 
-    const busy = renderCard({ events: [], hasLoaded: true, isRefreshing: true });
+    const busy = renderCard({
+      incidents: [],
+      incidentsLoaded: true,
+      isRefreshing: true,
+    });
     const buttons = findAllByType(busy, "button");
     const refreshButton = buttons.find((vnode) =>
       collectText(vnode).join(" ").includes("Refreshing..."),
