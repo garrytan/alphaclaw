@@ -454,6 +454,9 @@ describe("server/routes/system", () => {
             enabled: false,
             disableLegacyLogin: false,
           },
+          watchdog: {
+            overseer: { enabled: false },
+          },
         },
         openclawChannel: null,
         syncCron: expect.objectContaining({
@@ -825,6 +828,9 @@ describe("server/routes/system", () => {
           enabled: false,
           disableLegacyLogin: false,
         },
+        watchdog: {
+          overseer: { enabled: false },
+        },
       },
     });
   });
@@ -862,6 +868,9 @@ describe("server/routes/system", () => {
           team: {
             enabled: false,
             disableLegacyLogin: false,
+          },
+          watchdog: {
+            overseer: { enabled: false },
           },
         },
       }),

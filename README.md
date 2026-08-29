@@ -117,7 +117,7 @@ built from it (docker required).
 | **Doctor**    | Drift Doctor workspace health review — scans for guidance drift, misplaced instructions, redundant docs, and queued fixes |
 | **Nodes**     | Guided local-node setup for VPS deployments, per-node browser attach, reconnect commands, and routing/pairing controls   |
 | **Team**      | Member accounts, invites, roles, and a who's-online roster (beta) — enable wizard applies the gateway change and verifies login end to end |
-| **Watchdog**  | Health monitoring, crash-loop status, auto-repair toggle, notifications, event log, live log tail, interactive terminal  |
+| **Watchdog**  | Health monitoring, live status narrative, incident history, optional AI incident overseer, auto-repair toggle, notifications, event log, live log tail, interactive terminal |
 | **Upgrade**   | OpenClaw versions & release channels — stable/beta/dev catalog, release notes, one-click switch with backup + auto-rollback |
 | **Models**    | AI provider credentials (Anthropic, OpenAI, Gemini, Mistral, Voyage, Groq, Deepgram) and model selection                 |
 | **Envars**    | Environment variables — view, edit, add — with gateway restart prompts                                                   |
@@ -225,12 +225,15 @@ The built-in watchdog monitors gateway health and recovers from failures automat
 
 | Capability               | Details                                                                |
 | ------------------------ | ---------------------------------------------------------------------- |
-| **Health checks**        | Periodic `openclaw health` with configurable interval                  |
+| **Health checks**        | Periodic HTTP probes of the gateway's `/health` and `/readyz` (120s cadence, 5s while degraded) |
 | **Crash detection**      | Gateway exit events plus an always-on 10s TCP port watcher, with immediate re-checks after every restart/repair |
 | **Crash-loop detection** | Threshold-based (default: 3 crashes in 300s)                           |
 | **Auto-repair**          | Runs `openclaw doctor --fix --yes`, relaunches gateway                 |
-| **Notifications**        | Telegram, Discord, Slack, and WhatsApp alerts for crashes, repairs, and recovery |
-| **Event log**            | SQLite-backed incident history with API and UI access                  |
+| **Live narration**       | Plain-language "what is happening / why / what happens next" with live countdowns (backoff, grace windows, the 10-min rollback clock) and honest suppression chips |
+| **Incident history**     | Persisted, grouped incidents (open → resolved/abandoned) with humanized event timelines, plus the raw SQLite event feed |
+| **Incident overseer**    | Optional (default off): a local Claude Code review of each settled incident — advisory verdict + suggested next action; deterministic recovery stays in charge. When enabled, redacted incident evidence is sent to the Anthropic API |
+| **Notifications**        | Telegram, Discord, Slack, and WhatsApp alerts for crashes, repairs, and recovery, with links to the Watchdog page (the optional overseer's verdict notification deep-links to the exact incident) |
+| **Event log**            | SQLite-backed incident + event history with API and UI access          |
 
 ## Environment Variables
 
