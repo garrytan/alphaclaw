@@ -238,8 +238,14 @@ Exit code 78 (EX_CONFIG) is overloaded — three distinct causes
    `openclaw doctor --fix` once, then retries.
 2. **Healthy-incumbent step-aside**: gateway lock / EADDRINUSE conflict where the existing
    gateway probes healthy — under systemd the newcomer exits 78 deliberately "to prevent a
-   systemd Restart=always loop" (`SupervisedGatewayLockError`). Benign; must not latch, roll
-   back, or notify.
+   systemd Restart=always loop" (`SupervisedGatewayLockError`; exact stderr wording carries
+   both "existing gateway is healthy" and "exiting with code 78"). Benign; must not latch,
+   roll back, or notify. Nuance (verified in `dist/supervisor-markers-CooPyJZl.js` +
+   `run-Bts2lL4H.js`): this branch fires only when upstream detects `supervisor === "systemd"`
+   via env hints (`OPENCLAW_SYSTEMD_UNIT`, `INVOCATION_ID`, `SYSTEMD_EXEC_PID`,
+   `JOURNAL_STREAM`); under other/no detected supervisors the healthy-incumbent path logs
+   "leaving it in control" and exits **0**, and `OPENCLAW_SUPERVISOR_MODE=external` alone
+   does not select the exit-78 branch.
 3. **Tailscale :443 route-ownership conflict** (`isTailscaleRouteOwnershipConflictError`
    mapped to `EXIT_CONFIG_ERROR`).
 

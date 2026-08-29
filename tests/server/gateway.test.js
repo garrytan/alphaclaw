@@ -231,6 +231,33 @@ describe("server/gateway restart behavior", () => {
     gateway.setGatewayFeatureGates(null);
   });
 
+  it("exposes isSupervisorModeActive mirroring the supervisorMode gate", () => {
+    delete require.cache[modulePath];
+    const gateway = require(modulePath);
+
+    // The watchdog's restart-handoff consume is gated on this getter: closed
+    // by default, closed on stable gates, open only for supervisorMode, and
+    // fail-closed when the gates themselves throw.
+    expect(gateway.isSupervisorModeActive()).toBe(false);
+
+    gateway.setGatewayFeatureGates({ supportsFeature: () => false });
+    expect(gateway.isSupervisorModeActive()).toBe(false);
+
+    gateway.setGatewayFeatureGates({
+      supportsFeature: (name) => name === "supervisorMode",
+    });
+    expect(gateway.isSupervisorModeActive()).toBe(true);
+
+    gateway.setGatewayFeatureGates({
+      supportsFeature: () => {
+        throw new Error("gates unavailable");
+      },
+    });
+    expect(gateway.isSupervisorModeActive()).toBe(false);
+
+    gateway.setGatewayFeatureGates(null);
+  });
+
   it("stopGatewayChild reaps a live managed gateway and is a safe no-op otherwise", async () => {
     // VPS restarts respawn detached + exit(0), skipping the SIGTERM handlers
     // that normally reap the managed child; server.js calls stopGatewayChild()
@@ -1460,6 +1487,10 @@ describe("server/gateway restart behavior", () => {
           code: 1,
           signal: "SIGKILL",
           expectedExit: false,
+          // Watchdog exit classification inputs: the exited PID (restart-
+          // handoff consume) and the spawn time (exit-78 step-aside window).
+          pid: 1234,
+          launchedAt: expect.any(Number),
         }),
       );
       expect(exitHandler.mock.calls[0][0].stderrTail).toHaveLength(50);
