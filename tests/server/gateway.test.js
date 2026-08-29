@@ -223,6 +223,76 @@ describe("server/gateway restart behavior", () => {
     }
   });
 
+  it("applies ALPHACLAW_GATEWAY_MAX_OLD_SPACE_SIZE to the daemon launch env only (issue #24)", () => {
+    const previousCap = process.env.ALPHACLAW_GATEWAY_MAX_OLD_SPACE_SIZE;
+    const previousNodeOptions = process.env.NODE_OPTIONS;
+    try {
+      delete process.env.NODE_OPTIONS;
+      process.env.ALPHACLAW_GATEWAY_MAX_OLD_SPACE_SIZE = "8192";
+      delete require.cache[modulePath];
+      const gateway = require(modulePath);
+
+      // The long-running daemon gets the operator's explicit cap…
+      expect(gateway.gatewayLaunchEnv().NODE_OPTIONS).toBe(
+        "--max-old-space-size=8192",
+      );
+      // …but plain gatewayEnv (every short-lived openclaw CLI child) does not.
+      expect(gateway.gatewayEnv().NODE_OPTIONS).toBeUndefined();
+
+      // The cap appends to surviving (non-memory) inherited flags.
+      process.env.NODE_OPTIONS = "--enable-source-maps --max-old-space-size=768";
+      expect(gateway.gatewayLaunchEnv().NODE_OPTIONS).toBe(
+        "--enable-source-maps --max-old-space-size=8192",
+      );
+
+      // Invalid values are ignored — no flag, no crash.
+      process.env.ALPHACLAW_GATEWAY_MAX_OLD_SPACE_SIZE = "lots";
+      delete process.env.NODE_OPTIONS;
+      expect(gateway.gatewayLaunchEnv().NODE_OPTIONS).toBeUndefined();
+    } finally {
+      if (previousCap === undefined) {
+        delete process.env.ALPHACLAW_GATEWAY_MAX_OLD_SPACE_SIZE;
+      } else {
+        process.env.ALPHACLAW_GATEWAY_MAX_OLD_SPACE_SIZE = previousCap;
+      }
+      if (previousNodeOptions === undefined) delete process.env.NODE_OPTIONS;
+      else process.env.NODE_OPTIONS = previousNodeOptions;
+    }
+  });
+
+  it("warns once per distinct stripped memory-flag set, naming the dropped tokens", () => {
+    const previousNodeOptions = process.env.NODE_OPTIONS;
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      process.env.NODE_OPTIONS = "--max-old-space-size=8192 --enable-source-maps";
+      delete require.cache[modulePath];
+      const gateway = require(modulePath);
+
+      gateway.gatewayEnv();
+      gateway.gatewayEnv();
+      const stripWarnings = warnSpy.mock.calls.filter(([line]) =>
+        String(line).includes("Stripped Node memory flag"),
+      );
+      // Once, not per call — gatewayEnv runs on every spawn/status path.
+      expect(stripWarnings).toHaveLength(1);
+      expect(stripWarnings[0][0]).toContain("--max-old-space-size=8192");
+      expect(stripWarnings[0][0]).toContain("ALPHACLAW_GATEWAY_MAX_OLD_SPACE_SIZE");
+
+      // A DIFFERENT stripped set warns again.
+      process.env.NODE_OPTIONS = "--max-semi-space-size=64";
+      gateway.gatewayEnv();
+      expect(
+        warnSpy.mock.calls.filter(([line]) =>
+          String(line).includes("Stripped Node memory flag"),
+        ),
+      ).toHaveLength(2);
+    } finally {
+      warnSpy.mockRestore();
+      if (previousNodeOptions === undefined) delete process.env.NODE_OPTIONS;
+      else process.env.NODE_OPTIONS = previousNodeOptions;
+    }
+  });
+
   it("stopGatewayChild reaps a live managed gateway and is a safe no-op otherwise", async () => {
     // VPS restarts respawn detached + exit(0), skipping the SIGTERM handlers
     // that normally reap the managed child; server.js calls stopGatewayChild()
