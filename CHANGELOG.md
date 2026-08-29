@@ -27,8 +27,9 @@ repairs it automatically.
   configuration error, AlphaClaw now repairs it instead of only pausing
   restarts: it removes config keys the gateway itself rejected (managed keys
   immediately; others only with AI concurrence), or runs OpenClaw's
-  `doctor --fix`, then restarts the gateway — with a `openclaw.json.medic-*.bak`
-  backup before every mutation, at most two attempts per incident, and a
+  `doctor --fix`, then restarts the gateway — with a best-effort
+  `openclaw.json.medic-*.bak` backup before mutations (a missing config never
+  blocks the remedy), at most two attempts per incident, and a
   notification describing exactly what was done. For failures without an
   obvious fix, the medic asks the smartest frontier model you have an API key
   for (Claude Fable 5 → Claude Opus 5 → GPT-5.6 → Gemini 3.1 Pro; evidence is

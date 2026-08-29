@@ -1,5 +1,29 @@
 # TODOS
 
+## P3 — Plumb an AbortSignal through the startup medic
+- **What:** Pass a real cancellation signal from the watchdog's run-budget race into `configMedic.run` → `llmClient.complete` (fetch already takes one) and `runDoctorFix` (kill the spawned doctor), so a budget expiry cancels the in-flight work instead of orphaning it.
+- **Why:** Today the race latches correctly and every mutating step re-checks its budget (LLM deadline-capped, doctor timeout-capped, remove_keys re-checks remaining), so the practical zombie window is small — but a cancelled medic that still finishes a doctor run can rewrite openclaw.json after the lifecycle lock has moved on.
+- **Context:** `lib/server/watchdog.js` runConfigMedic (Promise.race), `lib/server/gateway-medic.js` run(), `lib/server.js` runStreamedDoctorFix. The lease-expired relaunch guard exists and is the backstop; this closes the residual. Add a fake-clock test for the lease-expiry branch while here (currently the one untested watchdog medic branch).
+- **Effort:** M → CC: S.
+
+## P3 — Surface medic incidents in the Upgrade page card
+- **What:** Show the last medic incident on the Startup-medic card: when it ran, tier used, keys removed/doctor result, backup filename with a restore CTA, and the model consulted. Data already exists in the `medic` watchdog events (`GET /api/watchdog/events`) and the `openclaw.json.medic-*.bak` files.
+- **Why:** Today the audit trail lives in chat notifications and the watchdog event log; the card only shows the toggle + AI availability. An operator debugging a config incident should see what the medic did without scrolling Telegram.
+- **Context:** `lib/public/js/components/upgrade-tab/medic-card.js`; mirror the overseer card's report pattern. Pairs with the TODOS item "Notification remediation-action parity".
+- **Effort:** M → CC: S.
+
+## P3 — Allowlist-project the config body sent to the medic's AI tier
+- **What:** Replace the deny-list scrub of the serialized openclaw.json with an allowlist projection: send only schema-relevant structure (key paths + value types + the blamed subtrees), never raw string values, to the provider API.
+- **Why:** Value/shape-based redaction (secret-named keys, token shapes, cookies, signed URLs, DSN userinfo) covers the known classes but is structurally a blocklist; a projection is fail-closed for secret classes nobody listed yet.
+- **Context:** `lib/server/gateway-medic.js` renderConfigForPrompt/runAiTier. The model rarely needs raw values to pick between remove_keys/doctor_fix/none — key paths and the validator errors carry the signal.
+- **Effort:** S → CC: S.
+
+## P3 — Migrate the upgrade overseer onto the shared frontier LLM client
+- **What:** Swap `lib/server/upgrade-overseer.js` from spawning the `claude` CLI to `lib/server/llm-client.js` (raw fetch, Anthropic → OpenAI → Google fallback), keeping its recommend-only contract, redaction, and run-ledger persistence.
+- **Why:** The overseer currently requires a `claude` binary on PATH and only works with an Anthropic key; the medic's client works in any container with any of the three provider keys and already handles refusals, timeouts, and body-stall aborts. One LLM path to maintain instead of two.
+- **Context:** `createFrontierLlmClient` is dependency-free and tested. Preserve the overseer's isolated-env posture by keeping evidence redaction (it already scrubs) — the CLI sandboxing rationale disappears once no subprocess is spawned.
+- **Effort:** M → CC: S.
+
 ## P3 — Finish ensureGatewayProxyConfig migration onto updateOpenclawConfig
 - **What:** ensureGatewayProxyConfig (lib/server/gateway.js) now holds the shared file lock (`withFileLockSync`) around its read-modify-write, so it can no longer race the team-mode/channel-sync writers. Remaining nicety: replace its raw `JSON.parse`/`writeFileSync` body with `updateOpenclawConfig` itself (fail-closed read + agents-shape preservation + atomic temp+rename), writing the `${REMOTE_MCP_API_TOKEN}` placeholder directly instead of post-serialize string substitution.
 - **Why:** Consistency and beta agents-shape preservation on this one writer; the correctness-critical race is already closed by the lock.

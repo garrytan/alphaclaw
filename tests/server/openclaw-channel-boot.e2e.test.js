@@ -892,6 +892,54 @@ describe("server/openclaw-channel boot sync (e2e)", () => {
       expect(cfg.gateway?.controlUi?.environment).toBeUndefined();
     });
 
+    it("re-checks stripe ownership inside the config lock (pre-lock TOCTOU)", () => {
+      // stripeChanged is computed from a pre-lock read; a stripe hand-set by
+      // a concurrent writer between that read and the locked mutate must not
+      // be overwritten as "managed".
+      const handSet = { label: "PROD FLEET", color: "red" };
+      const racingFs = new Proxy(fs, {
+        get(target, prop) {
+          if (prop === "readFileSync") {
+            return (file, ...rest) => {
+              const raw = target.readFileSync(file, ...rest);
+              // Simulate the concurrent hand-edit landing right before the
+              // LOCKED read (the second read of openclaw.json this boot).
+              if (String(file).endsWith("openclaw.json")) {
+                racingFs.readCount = (racingFs.readCount || 0) + 1;
+                if (racingFs.readCount === 2) {
+                  const parsed = JSON.parse(raw);
+                  parsed.gateway = { controlUi: { environment: { ...handSet } } };
+                  const text = JSON.stringify(parsed, null, 2);
+                  target.writeFileSync(file, text);
+                  return text;
+                }
+              }
+              return raw;
+            };
+          }
+          const value = target[prop];
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      });
+      const harness = createHarness({
+        pin: "2026.8.1",
+        channel: "beta",
+        installedVersion: "2026.8.1",
+        sentinelVersion: "2026.8.1",
+        execFileSyncImpl: vi.fn(() => ""),
+        fsModule: racingFs,
+      });
+      writeConfig(harness.openclawDir, { gateway: {} });
+
+      harness.sync.syncAtBoot();
+      const cfg = JSON.parse(
+        fs.readFileSync(path.join(harness.openclawDir, "openclaw.json"), "utf8"),
+      );
+      expect(cfg.gateway.controlUi.environment).toEqual(handSet);
+      // Ownership was NOT recorded for a stripe we did not write.
+      expect(harness.store.readState().managedStripe ?? null).toBe(null);
+    });
+
     it("leaves a hand-set (unmanaged) environment stripe untouched", () => {
       const harness = createHarness({
         channel: "stable",
