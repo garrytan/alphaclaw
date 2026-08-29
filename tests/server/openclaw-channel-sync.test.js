@@ -1803,6 +1803,238 @@ describe("server/openclaw-channel-sync", () => {
     });
   });
 
+  describe("runUpdateRepair (2.3)", () => {
+    const makeOperationEvents = () => ({
+      publish: vi.fn(),
+      complete: vi.fn(),
+      fail: vi.fn(),
+    });
+
+    it("refuses repair on package channels (overlay ownership, E-C7)", async () => {
+      const { sync, runner } = createHarness({
+        pin: "1.0.0",
+        installedVersion: "1.0.0",
+        sentinelVersion: "1.0.0",
+      });
+
+      const result = await sync.runUpdateRepair({ operationId: "op-r" });
+
+      expect(result.status).toBe(409);
+      expect(result.body.code).toBe("repair_not_applicable");
+      expect(result.body.hint).toContain("re-apply the version from the catalog");
+      expect(runner.runStreamed).not.toHaveBeenCalled();
+    });
+
+    it("runs `openclaw update repair` on the dev checkout and completes the stream", async () => {
+      const operationEvents = makeOperationEvents();
+      const { sync, runner } = createHarness({
+        channel: "dev",
+        pin: "1.0.0",
+        installedVersion: "1.0.0",
+        sentinelVersion: "1.0.0",
+        extraSyncOptions: { operationEvents },
+      });
+
+      const result = await sync.runUpdateRepair({ operationId: "op-r" });
+
+      expect(result.status).toBe(200);
+      expect(result.body.ok).toBe(true);
+      const repairCall = runner.runStreamed.mock.calls.find(
+        ([opts]) => opts.command === "openclaw" && opts.args?.[0] === "update",
+      );
+      expect(repairCall).toBeTruthy();
+      expect(repairCall[0].args).toEqual(["update", "repair"]);
+      expect(operationEvents.complete).toHaveBeenCalledWith(
+        "op-r",
+        expect.objectContaining({ ok: true }),
+      );
+      expect(operationEvents.fail).not.toHaveBeenCalled();
+      expect(sync.isApplyInProgress()).toBe(false);
+    });
+
+    it("surfaces a repair refusal verbatim and FAILS the stream (not complete)", async () => {
+      const operationEvents = makeOperationEvents();
+      const { sync } = createHarness({
+        channel: "dev",
+        pin: "1.0.0",
+        installedVersion: "1.0.0",
+        sentinelVersion: "1.0.0",
+        runnerImpl: async (opts, fallback) => {
+          if (opts.command === "openclaw" && opts.args?.[0] === "update") {
+            return {
+              ok: false,
+              code: 1,
+              tail: "refused: supervisor mode is external",
+              timedOut: false,
+            };
+          }
+          return fallback(opts);
+        },
+        extraSyncOptions: { operationEvents },
+      });
+
+      const result = await sync.runUpdateRepair({ operationId: "op-r" });
+
+      expect(result.status).toBe(500);
+      expect(result.body.code).toBe("repair_failed");
+      expect(result.body.hint).toContain(
+        "refused: supervisor mode is external",
+      );
+      // Subscribers key success/failure off the SSE event name — a failed
+      // repair must emit "error", never "done".
+      expect(operationEvents.complete).not.toHaveBeenCalled();
+      expect(operationEvents.fail).toHaveBeenCalledTimes(1);
+      const [failedId, failedError] = operationEvents.fail.mock.calls[0];
+      expect(failedId).toBe("op-r");
+      expect(failedError.code).toBe("repair_failed");
+      expect(sync.isApplyInProgress()).toBe(false);
+    });
+
+    it("409s while another update operation holds the latch", async () => {
+      let releaseRepair;
+      const gate = new Promise((resolve) => {
+        releaseRepair = resolve;
+      });
+      const { sync } = createHarness({
+        channel: "dev",
+        pin: "1.0.0",
+        installedVersion: "1.0.0",
+        sentinelVersion: "1.0.0",
+        runnerImpl: async (opts, fallback) => {
+          if (opts.command === "openclaw" && opts.args?.[0] === "update") {
+            await gate;
+            return { ok: true, code: 0, tail: "", timedOut: false };
+          }
+          return fallback(opts);
+        },
+      });
+
+      const first = sync.runUpdateRepair({ operationId: "op-a" });
+      // The latch is taken synchronously before the runner is awaited.
+      const second = await sync.runUpdateRepair({ operationId: "op-b" });
+      expect(second.status).toBe(409);
+      expect(second.body.code).toBe("operation_in_progress");
+
+      releaseRepair();
+      const firstResult = await first;
+      expect(firstResult.status).toBe(200);
+    });
+
+    // Repairs are update runs too (merge resolution): they get a durable
+    // ledger record and a redacting log sink, completed on BOTH outcomes.
+    const makeLedgerSpy = () => {
+      const sink = {
+        writeLine: vi.fn(),
+        write: vi.fn(),
+        close: vi.fn(async () => {}),
+      };
+      return {
+        sink,
+        ledger: {
+          createRun: vi.fn(),
+          createLogSink: vi.fn(() => sink),
+          updateRun: vi.fn(),
+          completeRun: vi.fn(),
+        },
+      };
+    };
+
+    it("records the repair in the run ledger and completes it as activated on success", async () => {
+      const { sink, ledger } = makeLedgerSpy();
+      const { sync } = createHarness({
+        channel: "dev",
+        pin: "1.0.0",
+        installedVersion: "1.0.0",
+        sentinelVersion: "1.0.0",
+        extraSyncOptions: { runLedger: ledger },
+      });
+
+      const result = await sync.runUpdateRepair({ operationId: "op-r" });
+
+      expect(result.status).toBe(200);
+      expect(ledger.createRun).toHaveBeenCalledWith({
+        operationId: "op-r",
+        target: { channel: "dev", repair: true },
+      });
+      expect(ledger.createLogSink).toHaveBeenCalledWith(
+        expect.objectContaining({ operationId: "op-r" }),
+      );
+      expect(ledger.completeRun).toHaveBeenCalledTimes(1);
+      expect(ledger.completeRun).toHaveBeenCalledWith(
+        "op-r",
+        expect.objectContaining({ state: "activated", ok: true }),
+      );
+      // The durable sink is detached and closed after the run.
+      expect(sink.close).toHaveBeenCalled();
+    });
+
+    it("completes the ledger run as FAILED when the repair CLI refuses", async () => {
+      const { sink, ledger } = makeLedgerSpy();
+      const { sync } = createHarness({
+        channel: "dev",
+        pin: "1.0.0",
+        installedVersion: "1.0.0",
+        sentinelVersion: "1.0.0",
+        runnerImpl: async (opts, fallback) => {
+          if (opts.command === "openclaw" && opts.args?.[0] === "update") {
+            return { ok: false, code: 1, tail: "repair refused", timedOut: false };
+          }
+          return fallback(opts);
+        },
+        extraSyncOptions: { runLedger: ledger },
+      });
+
+      const result = await sync.runUpdateRepair({ operationId: "op-r" });
+
+      expect(result.status).toBe(500);
+      expect(ledger.completeRun).toHaveBeenCalledTimes(1);
+      expect(ledger.completeRun).toHaveBeenCalledWith(
+        "op-r",
+        expect.objectContaining({
+          state: "failed",
+          ok: false,
+          result: expect.objectContaining({ code: "repair_failed" }),
+        }),
+      );
+      expect(sink.close).toHaveBeenCalled();
+    });
+
+    it("terminates the ledger run + SSE when the repair stream REJECTS (no hang)", async () => {
+      const operationEvents = makeOperationEvents();
+      const { sink, ledger } = makeLedgerSpy();
+      const { sync } = createHarness({
+        channel: "dev",
+        pin: "1.0.0",
+        installedVersion: "1.0.0",
+        sentinelVersion: "1.0.0",
+        runnerImpl: async (opts, fallback) => {
+          if (opts.command === "openclaw" && opts.args?.[0] === "update") {
+            // A crash (spawn error, sink write throw) — runStreamed rejects.
+            throw new Error("spawn ENOMEM");
+          }
+          return fallback(opts);
+        },
+        extraSyncOptions: { runLedger: ledger, operationEvents },
+      });
+
+      const result = await sync.runUpdateRepair({ operationId: "op-r" });
+
+      // The route resolves (does not hang or throw) with a failure envelope.
+      expect(result.status).toBe(500);
+      expect(result.body.code).toBe("repair_failed");
+      // The ledger run is completed as failed (not left "running"), the SSE
+      // subscriber gets an error (not a hang), the sink closes, latch released.
+      expect(ledger.completeRun).toHaveBeenCalledWith(
+        "op-r",
+        expect.objectContaining({ state: "failed", ok: false }),
+      );
+      expect(operationEvents.fail).toHaveBeenCalledTimes(1);
+      expect(operationEvents.complete).not.toHaveBeenCalled();
+      expect(sink.close).toHaveBeenCalled();
+      expect(sync.isApplyInProgress()).toBe(false);
+    });
+  });
+
   describe("codex-round hardening", () => {
     it("re-applies a blocklisted sha via dev-head only after Clear (post-build recheck)", async () => {
       const { sync, store, rootDir } = createHarness({
@@ -1840,7 +2072,7 @@ describe("server/openclaw-channel-sync", () => {
     });
 
     it("fails a hard-gated apply with backup_failed when backup exits ok but writes no artifact", async () => {
-      const { sync, rootDir, store, installToTempDir } = createHarness({
+      const { sync, rootDir, store, openclawDir, installToTempDir } = createHarness({
         pin: "1.0.0",
         installedVersion: "1.0.0",
         sentinelVersion: "1.0.0",
@@ -1854,6 +2086,9 @@ describe("server/openclaw-channel-sync", () => {
         },
       });
       writeCheckoutFixture(rootDir, { sha: kDevSha });
+      // State exists → a silent no-op backup is a real integrity failure.
+      fs.mkdirSync(path.join(openclawDir, "state"), { recursive: true });
+      fs.writeFileSync(path.join(openclawDir, "state", "openclaw.sqlite"), "db");
 
       const result = await sync.applyUpdate({ channel: "dev", devHead: true });
 
@@ -1869,6 +2104,31 @@ describe("server/openclaw-channel-sync", () => {
       // The apply stopped at the gate — nothing was downloaded or built.
       expect(installToTempDir).not.toHaveBeenCalled();
       // The phantom backup was never recorded as a usable artifact.
+      expect(store.readState().backups || []).toHaveLength(0);
+    });
+
+    it("soft-passes the artifact check on a fresh install with no state to back up", async () => {
+      // Live-verified: the real stable binary exits 0 without writing a file
+      // when there is nothing to back up — a fresh install's first channel
+      // switch must not be bricked by the phantom-backup guard.
+      const { sync, rootDir, store } = createHarness({
+        pin: "1.0.0",
+        installedVersion: "1.0.0",
+        sentinelVersion: "1.0.0",
+        runnerImpl: async (opts, fallback) => {
+          if (opts.command === "openclaw" && opts.args?.[0] === "backup") {
+            return { ok: true, code: 0, tail: "nothing to back up\n", timedOut: false };
+          }
+          return fallback(opts);
+        },
+      });
+      writeCheckoutFixture(rootDir, { sha: kDevSha });
+
+      const result = await sync.applyUpdate({ channel: "dev", devHead: true });
+
+      // The gate let the apply proceed (dev build continues past backup).
+      expect(result.body.code).not.toBe("backup_failed");
+      // No phantom artifact was recorded.
       expect(store.readState().backups || []).toHaveLength(0);
     });
 

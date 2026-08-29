@@ -159,4 +159,77 @@ describe("server/commands", () => {
       "[alphaclaw] gog error: keyring locked",
     );
   });
+
+  describe("clawCmdWithRetry (gateway rate limiting)", () => {
+    const makeExec = (queue) =>
+      vi.fn((cmd, opts, callback) => {
+        const next = queue.shift();
+        if (next.err) {
+          callback(Object.assign(new Error("failed"), { code: next.code }), next.stdout || "", next.stderr || "");
+        } else {
+          callback(null, next.stdout || "", next.stderr || "");
+        }
+      });
+
+    it("retries on an UNAVAILABLE response honoring retryAfterMs, then succeeds", async () => {
+      const execMock = makeExec([
+        {
+          err: true,
+          stderr: '{"code":"UNAVAILABLE","retryable":true,"retryAfterMs":1200}',
+        },
+        { err: false, stdout: '{"ok":true}' },
+      ]);
+      const { createCommands } = loadCommandsModule({ execMock });
+      const { clawCmdWithRetry } = createCommands({ gatewayEnv: () => ({}) });
+      const sleeps = [];
+      const result = await clawCmdWithRetry("gateway call config.patch", {
+        sleepFn: async (ms) => sleeps.push(ms),
+      });
+      expect(result.ok).toBe(true);
+      expect(sleeps).toEqual([1200]);
+      expect(execMock).toHaveBeenCalledTimes(2);
+    });
+
+    it("caps the backoff at maxBackoffMs", async () => {
+      const execMock = makeExec([
+        { err: true, stderr: '{"code":"UNAVAILABLE","retryAfterMs":999999}' },
+        { err: false, stdout: "ok" },
+      ]);
+      const { createCommands } = loadCommandsModule({ execMock });
+      const { clawCmdWithRetry } = createCommands({ gatewayEnv: () => ({}) });
+      const sleeps = [];
+      await clawCmdWithRetry("gateway call config.patch", {
+        sleepFn: async (ms) => sleeps.push(ms),
+      });
+      expect(sleeps).toEqual([30000]);
+    });
+
+    it("gives up after maxRetries and returns the last failure", async () => {
+      const execMock = makeExec([
+        { err: true, stderr: '{"code":"UNAVAILABLE","retryAfterMs":10}' },
+        { err: true, stderr: '{"code":"UNAVAILABLE","retryAfterMs":10}' },
+        { err: true, stderr: '{"code":"UNAVAILABLE","retryAfterMs":10}' },
+      ]);
+      const { createCommands } = loadCommandsModule({ execMock });
+      const { clawCmdWithRetry } = createCommands({ gatewayEnv: () => ({}) });
+      const result = await clawCmdWithRetry("gateway call config.patch", {
+        sleepFn: async () => {},
+      });
+      expect(result.ok).toBe(false);
+      expect(execMock).toHaveBeenCalledTimes(3); // initial + 2 retries
+    });
+
+    it("does not retry a non-rate-limit failure", async () => {
+      const execMock = makeExec([
+        { err: true, stderr: "some other error" },
+      ]);
+      const { createCommands } = loadCommandsModule({ execMock });
+      const { clawCmdWithRetry } = createCommands({ gatewayEnv: () => ({}) });
+      const result = await clawCmdWithRetry("gateway call config.patch", {
+        sleepFn: async () => {},
+      });
+      expect(result.ok).toBe(false);
+      expect(execMock).toHaveBeenCalledTimes(1);
+    });
+  });
 });

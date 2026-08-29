@@ -99,6 +99,7 @@ const createHarness = ({
   installedVersion = null,
   sentinelVersion = null,
   storeWrap = (store) => store,
+  execFileSyncImpl = undefined,
 } = {}) => {
   delete process.env.OPENCLAW_GIT_DIR;
   const rootDir = mkTemp("alphaclaw-boot-e2e-root-");
@@ -153,6 +154,7 @@ const createHarness = ({
     nowFn,
     logger: kSilentLogger,
     backupsDir: path.join(rootDir, "backups", "openclaw"),
+    ...(execFileSyncImpl ? { execFileSyncImpl } : {}),
   });
 
   return {
@@ -182,6 +184,11 @@ const installedBinPath = (installDir) =>
 
 const notifyMessages = (notify) =>
   notify.mock.calls.map((call) => String(call?.[0] || ""));
+
+// Recurring boot notifications must carry STABLE outbox ids (merge
+// resolution): the notify outbox dedupes repeats by id across boots.
+const notifyIds = (notify) =>
+  notify.mock.calls.map((call) => call?.[1]?.id).filter(Boolean);
 
 const assertOffline = (harness) => {
   expect(harness.runner.runStreamed).not.toHaveBeenCalled();
@@ -280,6 +287,67 @@ describe("server/openclaw-channel boot sync (e2e)", () => {
       expect.objectContaining({ version: "1.1.0" }),
     );
     assertOffline(harness);
+  });
+
+  it("boot rollback warns (never blocks) when the target cannot verify current state (C1)", async () => {
+    const { DatabaseSync } = require("node:sqlite");
+    // The rollback target's `database preflight` rejects the snapshot with an
+    // unknown-command error — the stable-target case. Boot must activate
+    // anyway and surface the honest warning naming the backup as recovery.
+    const execFileSyncImpl = vi.fn((cmd, args) => {
+      if (Array.isArray(args) && args.includes("preflight")) {
+        const err = new Error("exit 1");
+        err.stderr = "error: unknown command 'database'";
+        throw err;
+      }
+      return "";
+    });
+    const harness = createHarness({
+      pin: "1.0.0",
+      channel: "beta",
+      installedVersion: "1.2.0",
+      execFileSyncImpl,
+    });
+    // A real state DB so enumerateStateDbs has something to snapshot.
+    const stateDir = path.join(harness.openclawDir, "state");
+    fs.mkdirSync(stateDir, { recursive: true });
+    const db = new DatabaseSync(path.join(stateDir, "openclaw.sqlite"));
+    db.exec("CREATE TABLE t(x INTEGER)");
+    db.close();
+    harness.store.updateState((s) => {
+      s.pinVersion = "1.0.0";
+      s.applied = { channel: "beta", version: "1.2.0", at: 1, acceptedAt: null };
+      return s;
+    });
+    expect(saveOverlayFixture(harness.store, "1.1.0")).toEqual({ ok: true });
+    harness.store.writeMarker({
+      target: { kind: "package", channel: "beta", version: "1.1.0" },
+      blockedId: "1.2.0",
+      reason: "crash_loop",
+    });
+
+    const result = harness.sync.syncAtBoot();
+
+    expect(result.ok).toBe(true);
+    expect(result.action).toBe("rollback");
+    // Warned, not blocked: the rollback still activated.
+    expect(installedPackageJsonVersion(harness.installDir)).toBe("1.1.0");
+    const lastBoot = harness.store.readState().lastBoot;
+    expect(
+      lastBoot.warnings.some((warning) =>
+        /cannot verify state written by the newer version/.test(warning),
+      ),
+    ).toBe(true);
+    expect(
+      lastBoot.warnings.some((warning) =>
+        /backup taken before the update/.test(warning),
+      ),
+    ).toBe(true);
+    // The warning notification carries its stable outbox id.
+    await flushAsync();
+    expect(notifyIds(harness.notify)).toContain(
+      "boot-rollback-preflight-1.1.0",
+    );
   });
 
   it("consumes rollback markers: container pin reset and VPS package rollback", async () => {
@@ -466,5 +534,190 @@ describe("server/openclaw-channel boot sync (e2e)", () => {
       ),
     ).toBe(true);
     assertOffline(harness);
+  });
+
+  describe("boot config migration (doctor --fix)", () => {
+    const writeConfig = (openclawDir, obj) => {
+      fs.mkdirSync(openclawDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(openclawDir, "openclaw.json"),
+        JSON.stringify(obj, null, 2),
+      );
+    };
+
+    it("runs doctor --fix once per version and records success", () => {
+      const doctorCalls = [];
+      const execFileSyncImpl = vi.fn((cmd, args) => {
+        doctorCalls.push(args);
+        return "";
+      });
+      const harness = createHarness({
+        installedVersion: "2026.8.1",
+        sentinelVersion: "2026.8.1",
+        execFileSyncImpl,
+      });
+      writeConfig(harness.openclawDir, { audit: { enabled: true } });
+
+      harness.sync.syncAtBoot();
+
+      // doctor --fix --yes was invoked exactly once against the activated bin.
+      expect(doctorCalls).toHaveLength(1);
+      expect(doctorCalls[0]).toEqual(
+        expect.arrayContaining(["doctor", "--fix", "--yes"]),
+      );
+      expect(doctorCalls[0]).not.toContain("--json");
+      const migration = harness.store.readState().configMigration;
+      expect(migration.completedForVersion).toBe("2026.8.1");
+      expect(migration.lastAttempt.ok).toBe(true);
+      // A pre-fix backup of the from-version config was kept.
+      const backups = fs
+        .readdirSync(harness.openclawDir)
+        .filter((n) => n.startsWith("openclaw.json.pre-fix-"));
+      expect(backups.length).toBeGreaterThanOrEqual(1);
+
+      // A second boot on the same version does NOT re-run doctor.
+      execFileSyncImpl.mockClear();
+      harness.sync.syncAtBoot();
+      expect(execFileSyncImpl).not.toHaveBeenCalled();
+    });
+
+    it("keeps the trigger armed to retry after a failed migration", async () => {
+      const execFileSyncImpl = vi.fn(() => {
+        throw new Error("doctor exit 1");
+      });
+      const harness = createHarness({
+        installedVersion: "2026.8.1",
+        sentinelVersion: "2026.8.1",
+        execFileSyncImpl,
+      });
+      writeConfig(harness.openclawDir, { bridge: { legacy: true } });
+
+      harness.sync.syncAtBoot();
+      const migration = harness.store.readState().configMigration;
+      expect(migration.completedForVersion).toBe(null);
+      expect(migration.lastAttempt.ok).toBe(false);
+
+      // Next boot retries (trigger still armed).
+      harness.sync.syncAtBoot();
+      expect(execFileSyncImpl).toHaveBeenCalledTimes(2);
+
+      // Both boots emit the SAME stable outbox id — the dedupe key across
+      // repeats of the recurring failure notification.
+      await flushAsync();
+      expect(
+        notifyIds(harness.notify).filter((id) =>
+          id.startsWith("config-migration-failed-"),
+        ),
+      ).toEqual([
+        "config-migration-failed-2026.8.1",
+        "config-migration-failed-2026.8.1",
+      ]);
+    });
+
+    it("writes a BETA environment stripe on beta and removes it on stable", () => {
+      const harness = createHarness({
+        channel: "beta",
+        installedVersion: "2026.8.1",
+        sentinelVersion: "2026.8.1",
+        execFileSyncImpl: vi.fn(() => ""),
+      });
+      writeConfig(harness.openclawDir, { gateway: {} });
+
+      harness.sync.syncAtBoot();
+      let cfg = JSON.parse(
+        fs.readFileSync(path.join(harness.openclawDir, "openclaw.json"), "utf8"),
+      );
+      // Strict-schema shape: exactly {label, color} (an extra marker key would
+      // exit-78 the beta gateway); label carries the version (D17), managed-
+      // ness is tracked in AlphaClaw state instead.
+      expect(cfg.gateway.controlUi.environment).toEqual({
+        label: "BETA · 2026.8.1",
+        color: "amber",
+      });
+      expect(cfg.gateway.controlUi.environment.label.length).toBeLessThanOrEqual(24);
+      expect(harness.store.readState().managedStripe).toEqual({
+        label: "BETA · 2026.8.1",
+        color: "amber",
+      });
+
+      // Switching to stable removes the managed stripe (recognized via the
+      // recorded managedStripe, or the legacy marker for older installs).
+      const stableHarness = createHarness({
+        channel: "stable",
+        installedVersion: "2026.8.1",
+        sentinelVersion: "2026.8.1",
+        execFileSyncImpl: vi.fn(() => ""),
+      });
+      writeConfig(stableHarness.openclawDir, {
+        gateway: {
+          controlUi: {
+            environment: { label: "BETA", color: "amber", _alphaclawManaged: true },
+          },
+        },
+      });
+      stableHarness.sync.syncAtBoot();
+      cfg = JSON.parse(
+        fs.readFileSync(
+          path.join(stableHarness.openclawDir, "openclaw.json"),
+          "utf8",
+        ),
+      );
+      expect(cfg.gateway?.controlUi?.environment).toBeUndefined();
+    });
+
+    it("leaves a hand-set (unmanaged) environment stripe untouched", () => {
+      const harness = createHarness({
+        channel: "stable",
+        installedVersion: "2026.8.1",
+        sentinelVersion: "2026.8.1",
+        execFileSyncImpl: vi.fn(() => ""),
+      });
+      writeConfig(harness.openclawDir, {
+        gateway: { controlUi: { environment: { label: "PROD", color: "red" } } },
+      });
+      harness.sync.syncAtBoot();
+      const cfg = JSON.parse(
+        fs.readFileSync(path.join(harness.openclawDir, "openclaw.json"), "utf8"),
+      );
+      expect(cfg.gateway.controlUi.environment).toEqual({
+        label: "PROD",
+        color: "red",
+      });
+    });
+
+    it("restores a pre-fix backup on downgrade instead of running doctor", async () => {
+      const execFileSyncImpl = vi.fn(() => "");
+      const harness = createHarness({
+        installedVersion: "2026.7.1-2",
+        sentinelVersion: "2026.7.1-2",
+        execFileSyncImpl,
+      });
+      // A backup saved before we migrated away from 2026.7.1-2.
+      fs.mkdirSync(harness.openclawDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(harness.openclawDir, "openclaw.json.pre-fix-2026.7.1-2.bak"),
+        JSON.stringify({ restored: true }, null, 2),
+      );
+      writeConfig(harness.openclawDir, { migrated: "beta-shape" });
+
+      harness.sync.syncAtBoot();
+
+      // The backup was restored (migrated shape gone, restored key present);
+      // doctor was NOT run. (reconcileOpenclawJsonMirror later adds update.* keys.)
+      expect(execFileSyncImpl).not.toHaveBeenCalled();
+      const onDisk = JSON.parse(
+        fs.readFileSync(path.join(harness.openclawDir, "openclaw.json"), "utf8"),
+      );
+      expect(onDisk.restored).toBe(true);
+      expect("migrated" in onDisk).toBe(false);
+      expect(harness.store.readState().configMigration.completedForVersion).toBe(
+        "2026.7.1-2",
+      );
+      // The restore notification carries its stable outbox id.
+      await flushAsync();
+      expect(notifyIds(harness.notify)).toContain(
+        "config-restore-2026.7.1-2",
+      );
+    });
   });
 });

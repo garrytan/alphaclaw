@@ -29,9 +29,16 @@ const createApp = ({
   getCodexAccountId = () => "acct-1",
   profile = null,
   removeChanged = true,
+  identityRole = null,
 } = {}) => {
   const app = express();
   app.use(express.json());
+  if (identityRole) {
+    app.use((req, res, next) => {
+      req.alphaclawIdentity = { kind: "member", role: identityRole };
+      next();
+    });
+  }
   const onAuthChanged = vi.fn();
   const upsertCodexProfile = vi.fn();
   registerCodexRoutes({
@@ -61,6 +68,19 @@ afterEach(() => {
 });
 
 describe("server/routes/codex coverage", () => {
+  describe("/auth/codex/start role gate (4.6/E-C11)", () => {
+    it("rejects member identities with 403 and allows admins", async () => {
+      const member = createApp({ identityRole: "member" });
+      const denied = await request(member.app).get("/auth/codex/start");
+      expect(denied.status).toBe(403);
+
+      const admin = createApp({ identityRole: "admin" });
+      const allowed = await request(admin.app).get("/auth/codex/start");
+      expect(allowed.status).toBe(302);
+      expect(allowed.headers.location).toContain("state=");
+    });
+  });
+
   describe("GET /api/codex/status", () => {
     it("reports disconnected when no profile exists", async () => {
       const { app } = createApp({ profile: null });

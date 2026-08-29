@@ -445,6 +445,7 @@ describe("server/routes/system", () => {
           },
           team: {
             enabled: false,
+            disableLegacyLogin: false,
           },
         },
         openclawChannel: null,
@@ -811,6 +812,7 @@ describe("server/routes/system", () => {
         },
         team: {
           enabled: false,
+          disableLegacyLogin: false,
         },
       },
     });
@@ -844,6 +846,7 @@ describe("server/routes/system", () => {
           },
           team: {
             enabled: false,
+            disableLegacyLogin: false,
           },
         },
       }),

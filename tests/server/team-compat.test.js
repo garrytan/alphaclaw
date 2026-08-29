@@ -113,7 +113,7 @@ describe("team mode compat matrix (default off)", () => {
     expect(headers.authorization).toBe("Bearer client-token");
   });
 
-  it("leaves openclaw.json byte-identical across a no-op boot with team off", () => {
+  it("leaves openclaw.json byte-identical across a no-op boot with team off", async () => {
     const openclawDir = createTempOpenclawDir();
     const configPath = path.join(openclawDir, "openclaw.json");
     // Deliberately quirky formatting: byte-equality catches any rewrite.
@@ -134,12 +134,8 @@ describe("team mode compat matrix (default off)", () => {
     const credential = getGatewayCredential({ openclawDir, env });
     const teamService = createTeamService({ fsModule: fs, openclawDir, env });
     expect(teamService.isTeamEnabled()).toBe(false);
-    expect(teamService.listOperators()).toEqual([]);
-    expect(teamService.resolveOperatorForSession({ sub: "x", opsv: 1 })).toBeNull();
-    expect(teamService.getLoginInfo()).toEqual({
-      teamEnabled: false,
-      operators: [],
-    });
+    // Probe is null while team mode is off — nothing to verify.
+    await expect(teamService.getIdentityProbe()).resolves.toBeNull();
 
     // Token clients untouched.
     expect(credential).toEqual({ mode: "token", value: "boot-token" });

@@ -193,33 +193,34 @@ describe("server/gateway restart behavior", () => {
     expect(gateway.gatewayEnv().OPENCLAW_NO_AUTO_UPDATE).toBe("1");
   });
 
-  it("sets OPENCLAW_SUPERVISOR_MODE=external only when the supervisorMode gate is open", () => {
-    delete process.env.OPENCLAW_SUPERVISOR_MODE;
-    delete require.cache[modulePath];
-    const gateway = require(modulePath);
+  it("defaults OPENCLAW_SUPERVISOR_MODE=external and honors the off|none escape hatch", () => {
+    const previousMode = process.env.OPENCLAW_SUPERVISOR_MODE;
+    const previousPolicy = process.env.OPENCLAW_SERVICE_REPAIR_POLICY;
+    try {
+      delete process.env.OPENCLAW_SUPERVISOR_MODE;
+      delete process.env.OPENCLAW_SERVICE_REPAIR_POLICY;
+      delete require.cache[modulePath];
+      const gateway = require(modulePath);
 
-    // Gate closed by default (no gates injected): stable behavior unchanged.
-    expect(gateway.gatewayEnv().OPENCLAW_SUPERVISOR_MODE).toBeUndefined();
+      // Default ON: harmless no-op on stable, load-bearing on 2026.8.1+ (the
+      // gateway skips its internal supervisor and defers restarts to us).
+      expect(gateway.gatewayEnv().OPENCLAW_SUPERVISOR_MODE).toBe("external");
+      expect(gateway.gatewayEnv().OPENCLAW_SERVICE_REPAIR_POLICY).toBe("external");
 
-    // Gate closed explicitly (stable 2026.7.x install).
-    gateway.setGatewayFeatureGates({ supportsFeature: () => false });
-    expect(gateway.gatewayEnv().OPENCLAW_SUPERVISOR_MODE).toBeUndefined();
-
-    // Gate open (2026.8.1-beta.1+): external supervision handoff env var.
-    gateway.setGatewayFeatureGates({
-      supportsFeature: (name) => name === "supervisorMode",
-    });
-    expect(gateway.gatewayEnv().OPENCLAW_SUPERVISOR_MODE).toBe("external");
-
-    // A throwing gate fails closed, never crashing gatewayEnv().
-    gateway.setGatewayFeatureGates({
-      supportsFeature: () => {
-        throw new Error("gates unavailable");
-      },
-    });
-    expect(gateway.gatewayEnv().OPENCLAW_SUPERVISOR_MODE).toBeUndefined();
-
-    gateway.setGatewayFeatureGates(null);
+      // Escape hatch: off|none neutralizes BOTH variables and the sentinel
+      // itself never reaches the child env.
+      process.env.OPENCLAW_SUPERVISOR_MODE = "off";
+      expect(gateway.gatewayEnv().OPENCLAW_SUPERVISOR_MODE).toBeUndefined();
+      expect(gateway.gatewayEnv().OPENCLAW_SERVICE_REPAIR_POLICY).toBeUndefined();
+    } finally {
+      if (previousMode === undefined) delete process.env.OPENCLAW_SUPERVISOR_MODE;
+      else process.env.OPENCLAW_SUPERVISOR_MODE = previousMode;
+      if (previousPolicy === undefined) {
+        delete process.env.OPENCLAW_SERVICE_REPAIR_POLICY;
+      } else {
+        process.env.OPENCLAW_SERVICE_REPAIR_POLICY = previousPolicy;
+      }
+    }
   });
 
   it("stopGatewayChild reaps a live managed gateway and is a safe no-op otherwise", async () => {

@@ -2177,6 +2177,65 @@ describe("server/agents/service", () => {
     expect(result.tokenUpdated).toBe(true);
   });
 
+  it("writes messages.statusReactions.enabled only on an explicit Slack choice (3.1)", () => {
+    const buildSlackFsMock = () =>
+      buildFsMock({
+        initialConfig: {
+          agents: { list: [{ id: "main", default: true }] },
+          channels: {
+            slack: {
+              enabled: true,
+              accounts: {
+                default: { botToken: "${SLACK_BOT_TOKEN}", name: "Slack" },
+              },
+            },
+          },
+          bindings: [
+            { agentId: "main", match: { channel: "slack", accountId: "default" } },
+          ],
+        },
+      });
+
+    // Explicit "on" restores the emoji reaction lifecycle.
+    const onMock = buildSlackFsMock();
+    createAgentsService({ fs: onMock, OPENCLAW_DIR: "/tmp/openclaw" })
+      .updateChannelAccount({
+        provider: "slack",
+        accountId: "default",
+        name: "Slack",
+        agentId: "main",
+        statusReactions: "on",
+      });
+    expect(onMock.readConfig().messages).toEqual({
+      statusReactions: { enabled: true },
+    });
+
+    // Explicit "off" pins the OpenClaw 2026.8 native-thread-status behavior.
+    const offMock = buildSlackFsMock();
+    createAgentsService({ fs: offMock, OPENCLAW_DIR: "/tmp/openclaw" })
+      .updateChannelAccount({
+        provider: "slack",
+        accountId: "default",
+        name: "Slack",
+        agentId: "main",
+        statusReactions: "off",
+      });
+    expect(offMock.readConfig().messages).toEqual({
+      statusReactions: { enabled: false },
+    });
+
+    // No choice -> the key is never written (operator config is never overridden).
+    const defaultMock = buildSlackFsMock();
+    createAgentsService({ fs: defaultMock, OPENCLAW_DIR: "/tmp/openclaw" })
+      .updateChannelAccount({
+        provider: "slack",
+        accountId: "default",
+        name: "Slack",
+        agentId: "main",
+      });
+    expect(defaultMock.readConfig().messages).toBeUndefined();
+  });
+
   it("does not rewrite env when updated token is unchanged", () => {
     const fsMock = buildFsMock({
       initialConfig: {

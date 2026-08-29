@@ -518,7 +518,9 @@ describe("server/watchdog", () => {
     });
 
     watchdog.onExpectedRestart();
-    await vi.advanceTimersByTimeAsync(15_000);
+    // Advance past the expected-restart suppression window (widened to 50s for the
+    // beta control-plane restart cooldown).
+    await vi.advanceTimersByTimeAsync(55_000);
 
     expect(watchdog.getStatus()).toEqual(
       expect.objectContaining({
@@ -1921,6 +1923,117 @@ describe("server/watchdog", () => {
     await vi.advanceTimersByTimeAsync(1_000);
     expect(global.fetch.mock.calls.length).toBe(fetchCalls);
     watchdog.stop();
+  });
+
+  it("marks health degraded on green /health + degraded /readyz, with one advisory doctor (1.8)", async () => {
+    vi.useFakeTimers();
+    const readyzState = { degraded: true };
+    const clawCmdImpl = vi.fn(async (cmd) => ({
+      ok: true,
+      stdout: cmd.startsWith("doctor")
+        ? JSON.stringify({
+            ok: false,
+            findings: [{ checkId: "secrets.runtime", detail: "secret load failed" }],
+          })
+        : JSON.stringify({ ok: true }),
+    }));
+    const { watchdog, insertWatchdogEvent } = createHarness({
+      clawCmdImpl,
+      resolveGatewayReadyzUrl: () => "http://127.0.0.1:18789/readyz",
+      fetchImpl: async (url) => ({
+        ok: true,
+        status: 200,
+        text: async () =>
+          String(url).includes("readyz")
+            ? JSON.stringify({
+                ready: !readyzState.degraded,
+                failing: readyzState.degraded ? ["secrets"] : [],
+                eventLoop: { degraded: readyzState.degraded },
+              })
+            : JSON.stringify({ ok: true, status: "live" }),
+      }),
+    });
+
+    watchdog.start();
+    watchdog.onGatewayLaunch({ startedAt: Date.now() });
+    await vi.advanceTimersByTimeAsync(5_000);
+
+    // /health is green but readiness is degraded — never show a plain green dot.
+    const status = watchdog.getStatus();
+    expect(status.health).toBe("degraded");
+    expect(status.eventLoopDegraded).toBe(true);
+    expect(status.readyzFailing).toEqual(["secrets"]);
+    // The transition logged once and ran ONE advisory doctor --json (warn-only).
+    const doctorCalls = clawCmdImpl.mock.calls.filter(([cmd]) =>
+      cmd.startsWith("doctor --json"),
+    );
+    expect(doctorCalls).toHaveLength(1);
+    expect(
+      insertWatchdogEvent.mock.calls.some(
+        ([event]) => event.eventType === "readiness_degraded",
+      ),
+    ).toBe(true);
+    // No restart/repair was driven by readiness degradation.
+    expect(status.repairAttempts).toBe(0);
+
+    // A second tick with the SAME degradation does not re-run the doctor.
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(
+      clawCmdImpl.mock.calls.filter(([cmd]) => cmd.startsWith("doctor --json")),
+    ).toHaveLength(1);
+
+    // Recovery: readiness clears → health returns to healthy on the next check.
+    readyzState.degraded = false;
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(watchdog.getStatus().health).toBe("healthy");
+    expect(watchdog.getStatus().eventLoopDegraded).toBe(false);
+    watchdog.stop();
+    vi.useRealTimers();
+  });
+
+  describe("readyz degraded surfaces (OpenClaw 2026.8)", () => {
+    it("parses eventLoop.degraded and failing[] from /readyz", async () => {
+      const { watchdog } = createHarness({
+        resolveGatewayReadyzUrl: () => "http://127.0.0.1:18789/readyz",
+        fetchImpl: async () => ({
+          ok: true,
+          status: 200,
+          text: async () =>
+            JSON.stringify({
+              ready: true,
+              failing: ["telegram"],
+              eventLoop: { degraded: true },
+            }),
+        }),
+      });
+      const readiness = await watchdog.probeGatewayReadiness();
+      expect(readiness.ok).toBe(true);
+      expect(readiness.eventLoopDegraded).toBe(true);
+      expect(readiness.failing).toEqual(["telegram"]);
+    });
+
+    it("defaults eventLoopDegraded to false on gateways without the block", async () => {
+      const { watchdog } = createHarness({
+        resolveGatewayReadyzUrl: () => "http://127.0.0.1:18789/readyz",
+        fetchImpl: async () => ({
+          ok: true,
+          status: 200,
+          text: async () => JSON.stringify({ ready: true }),
+        }),
+      });
+      const readiness = await watchdog.probeGatewayReadiness();
+      expect(readiness.eventLoopDegraded).toBe(false);
+    });
+
+    it("exposes the degraded fields in getStatus with safe defaults", () => {
+      const { watchdog } = createHarness();
+      expect(watchdog.getStatus()).toEqual(
+        expect.objectContaining({
+          eventLoopDegraded: false,
+          readyzFailing: [],
+        }),
+      );
+    });
   });
 
   it("runs the TCP liveness watcher on the 10s interval and stop() clears it", async () => {

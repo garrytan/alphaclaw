@@ -904,6 +904,19 @@ process.env.GOG_KEYRING_PASSWORD =
 
 process.env.XDG_CONFIG_HOME = openclawDir;
 
+// Supervisor contract (plan 1.1): every `openclaw` this process (or the boot
+// sync below) shells — including the once-per-version `doctor --fix` — must
+// carry OPENCLAW_SUPERVISOR_MODE/SERVICE_REPAIR_POLICY before lib/server.js
+// loads and mirrors them itself.
+try {
+  const {
+    ensureOpenclawStartupEnv,
+  } = require("../lib/server/openclaw-runtime-env");
+  ensureOpenclawStartupEnv();
+} catch (e) {
+  console.log(`[openclaw] supervisor env setup failed (fail-open): ${e.message}`);
+}
+
 // ---------------------------------------------------------------------------
 // 7b. OpenClaw release-channel boot sync (offline, synchronous, fail-open)
 // ---------------------------------------------------------------------------
