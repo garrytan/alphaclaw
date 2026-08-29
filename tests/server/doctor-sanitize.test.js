@@ -17,6 +17,33 @@ describe("server/doctor/sanitize", () => {
     expect(sanitize("mentions plainhostvalue")).toBe("mentions plainhostvalue");
   });
 
+  it("rebuilds the redactor from the live env once the TTL passes", () => {
+    let now = 0;
+    const env = { MY_API_TOKEN: "original-secret-value" };
+    const { sanitize } = createDoctorTextSanitizer({ env, nowMs: () => now });
+    expect(sanitize("leak original-secret-value")).toBe("leak [redacted]");
+
+    // Rotate + add secrets on the SAME env object — how /api/env and the env
+    // watcher mutate process.env at runtime, without a restart.
+    env.MY_API_TOKEN = "rotated-secret-value";
+    env.ADDED_SECRET = "added-secret-value";
+
+    // Within the TTL the cached redactor is reused: new values pass through.
+    now = 29999;
+    expect(sanitize("leak rotated-secret-value")).toBe("leak rotated-secret-value");
+    expect(sanitize("leak added-secret-value")).toBe("leak added-secret-value");
+
+    // Past the TTL the redactor rebuilds from the CURRENT env reference.
+    now = 30000;
+    expect(sanitize("leak rotated-secret-value and added-secret-value")).toBe(
+      "leak [redacted] and [redacted]",
+    );
+    // The rotated-away value is no longer scrubbed after the rebuild.
+    expect(sanitize("leak original-secret-value")).toBe(
+      "leak original-secret-value",
+    );
+  });
+
   it("redacts injected extra secret values", () => {
     const { sanitize } = createDoctorTextSanitizer({
       env: {},

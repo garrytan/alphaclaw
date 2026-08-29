@@ -36,12 +36,6 @@
 - **Context:** The full rewrite needs the 66 gateway tests moved off raw `fs.writeFileSync(configPath, content)` assertions.
 - **Effort:** M.
 
-## P3 — Gateway close-event stale-generation guard
-- **What:** Exit classification listens on child "close" (chosen so post-exit stderr flushes are captured); if a grandchild inherits the stdio fds and outlives the gateway, "close" fires late — or never. Per-child stderr tails shipped in v0.9.40 (each launch closure owns its tail; a late close is now always classified against its OWN child's stderr, never a successor's), so the remaining scope is only the bounded exit-vs-close race for the never-fires case: consider racing "exit" with a short bounded drain (250-500ms) so a close that never arrives cannot leave the exit unclassified.
-- **Why:** Bounded-but-real classification gap when close never fires; the health/TCP path is the slower backstop today.
-- **Context:** lib/server/gateway.js child.on("close") handler + createStderrTail; watchdog onGatewayExit.
-- **Effort:** S-M.
-
 ## P3 — OpenClaw-beta follow-ups (deferred from the beta-support plan)
 - **What:** Invite QR codes on the Team page; a "move this key to the shared secret store" CTA on the Models page; per-agent access mapping built on the members roster; an auto-canary channel (apply beta to a shadow gateway, promote on health). The Watchdog degraded-state badge (eventLoopDegraded/readyzFailing are already exposed in getStatus) is folded into the Phase 2/3 UI work.
 - **Why:** Recorded scope decisions from the CEO review; each is a platform follow-up after core beta support ships.
@@ -220,6 +214,11 @@
 - **Effort:** S-M.
 
 ## Completed
+
+## Gateway close-event stale-generation guard
+- **What:** Exit classification listens on child "close" (chosen so post-exit stderr flushes are captured); if a grandchild inherits the stdio fds and outlives the gateway, "close" fires late — or never. Per-child stderr tails cover the fires-late half; the remaining scope was the bounded exit-vs-close race for the never-fires case: race "exit" with a short bounded drain so a close that never arrives cannot leave the exit unclassified.
+- **Why:** A close that never fires meant the watchdog never saw the exit — no restart-handoff consume, no relaunch — until the descendant died; the health/TCP path was the slower backstop.
+- **Completed:** v0.9.40 (2026-08-29) — both halves shipped in lib/server/gateway.js. Per-child stderr tails: each launch closure owns its tail, so a late close is always classified against its OWN child's stderr, never a successor's. Bounded exit-vs-close drain: "exit" arms a 400ms unref'd drain timer (`kGatewayCloseDrainMs`) that runs the same finalize with the tail-so-far if close hasn't fired; first of {close, drain timeout} wins via a per-child settled flag and a late close after the timeout is a no-op (exactly-once classification). The restart-supervisor path (`runGatewayRestartCmd`) already records its exit on "exit" directly and needed no guard.
 
 ## Gate runHealthCheck during pending exit classification
 - **What:** While the watchdog's async exit resolver runs (handoff consume ≤5s + step-aside probes), lifecycle/health still read running/healthy and armed health timers can independently mark degraded or start rollback/auto-repair paths racing the resolver (serialized only by the lifecycle lock). Early-return from runHealthCheck while state.pendingExitClassification is true, mirroring the configurationErrorActive guard.

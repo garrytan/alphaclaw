@@ -79,6 +79,32 @@ describe("server/doctor/deterministic-checks", () => {
     expect(hardening.targetPaths).toEqual([]);
   });
 
+  it("gives the missing-file copy when the configured hardening file is gone from disk", () => {
+    // Config entry intact, file removed since the boot resync wrote it:
+    // blocked with reason "missing_file" — the generic blocked copy
+    // ("missing config entry, rejected basename, or disabled hook") would
+    // point at the wrong causes.
+    const cards = build({
+      bootstrapArgs: {
+        extraFilePaths: ["hooks/bootstrap/AGENTS.md"],
+        hooksEnabled: true,
+      },
+    });
+    const hardening = findCard(cards, "det:hardening:blocked");
+    expect(hardening).toMatchObject({ priority: "P0", category: "project context" });
+    expect(hardening.summary).toContain("missing from disk");
+    expect(hardening.recommendation).toContain("Restart AlphaClaw");
+    expect(hardening.evidence).toEqual([
+      {
+        type: "text",
+        text: "hooks/bootstrap/AGENTS.md: configured in openclaw.json but missing from disk",
+      },
+    ]);
+    // Template-only fixPrompt that never targets the managed path.
+    expect(hardening.fixPrompt).toContain("Do not edit files under hooks/bootstrap/");
+    expect(hardening.targetPaths).toEqual([]);
+  });
+
   it("raises the hardening P0 when extras are starved by the total budget", () => {
     write(workspaceRoot, "AGENTS.md", "A".repeat(200));
     write(workspaceRoot, "hooks/bootstrap/AGENTS.md", "H".repeat(100));

@@ -2286,6 +2286,70 @@ describe("server/doctor-service", () => {
       expect(result.reusedPreviousRun).toBe(true);
     });
 
+    it("includes the main agent's budget overrides in the env signature", async () => {
+      const { computeWorkspaceSnapshot } = require("../../lib/server/doctor/workspace-fingerprint");
+      const makeMatchingSummary = () => {
+        const nowIso = new Date().toISOString();
+        return {
+          id: 1,
+          status: "completed",
+          engine: "gateway_agent",
+          workspaceFingerprint: computeWorkspaceSnapshot(workspaceRoot).fingerprint,
+          promptVersion: "doctor-v2",
+          contextProfile: "stable-2026.7",
+          openclawVersion: "",
+          completedAt: nowIso,
+          startedAt: nowIso,
+        };
+      };
+      // A fully-awaited fingerprint-reuse run records the signature for the
+      // given config; comparing recorded signatures across configs observes
+      // buildEnvSignature without exporting it.
+      const signatureFor = async (config) => {
+        const meta = new Map();
+        const { service } = makeService({
+          meta,
+          summaries: [makeMatchingSummary()],
+          readOpenclawConfig: () => config,
+        });
+        const result = await service.runDoctor();
+        expect(result.reusedPreviousRun).toBe(true);
+        return meta.get("last_env_signature");
+      };
+      const configWith = (entries) => ({
+        agents: {
+          defaults: { bootstrapMaxChars: 20000, bootstrapTotalMaxChars: 60000 },
+          entries,
+        },
+      });
+
+      const baseline = await signatureFor(
+        configWith({
+          main: { bootstrapMaxChars: 20000 },
+          sidekick: { bootstrapMaxChars: 1000 },
+        }),
+      );
+      // An unrelated agent's override never flips the signature.
+      const unrelatedChange = await signatureFor(
+        configWith({
+          main: { bootstrapMaxChars: 20000 },
+          sidekick: { bootstrapMaxChars: 5000 },
+        }),
+      );
+      // The MAIN entry's override does: the analyzer honors it, so raising it
+      // to fix a truncation must read as an environment change.
+      const mainChange = await signatureFor(
+        configWith({
+          main: { bootstrapMaxChars: 30000 },
+          sidekick: { bootstrapMaxChars: 1000 },
+        }),
+      );
+
+      expect(baseline).toBeTruthy();
+      expect(unrelatedChange).toBe(baseline);
+      expect(mainChange).not.toBe(baseline);
+    });
+
     it("rejects card fixes with a gatewayUnavailable error while degraded", async () => {
       const { createDoctorService } = loadDoctorService();
       const service = createDoctorService({

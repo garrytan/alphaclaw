@@ -424,6 +424,60 @@ describe("server/doctor/bootstrap-context", () => {
     ]);
   });
 
+  it("flags a configured-but-missing hardening file as blocked, not unknown", () => {
+    write("AGENTS.md", "root guidance");
+    // The config entry is intact (readable config) but the file itself is
+    // gone from disk — the boot resync rewrites it, so something removed it
+    // since: the agent runs without safety rules and the badge must be loud.
+    const context = analyzeBootstrapContext({
+      workspaceRoot,
+      profile: kStableProfile,
+      extraFilePaths: ["hooks/bootstrap/AGENTS.md"],
+      hooksEnabled: true,
+    });
+
+    expect(context.hardening.state).toBe("blocked");
+    expect(context.hardening.reason).toBe("missing_file");
+    expect(context.hardening.files).toEqual([
+      expect.objectContaining({
+        path: "hooks/bootstrap/AGENTS.md",
+        exists: false,
+      }),
+    ]);
+  });
+
+  it("keeps a configured-but-missing hardening file unknown while the config is unreadable", () => {
+    write("AGENTS.md", "root guidance");
+    // An unreadable config proves nothing about the extras list — the
+    // missing-file state must never fire off an unverifiable entry.
+    const context = analyzeBootstrapContext({
+      workspaceRoot,
+      profile: kStableProfile,
+      extraFilePaths: ["hooks/bootstrap/AGENTS.md"],
+      hooksEnabled: true,
+      configUnreadable: true,
+    });
+
+    expect(context.hardening.state).toBe("unknown");
+    expect(context.hardening.reason).toBe("config_unreadable");
+  });
+
+  it("keeps pattern-only hardening entries out of the missing-file state", () => {
+    write("AGENTS.md", "root guidance");
+    // A glob entry is unmodeled (it may match files this estimator cannot
+    // expand) — with nothing on disk the state stays unknown, never a false
+    // blocked/missing_file P0.
+    const context = analyzeBootstrapContext({
+      workspaceRoot,
+      profile: kStableProfile,
+      extraFilePaths: ["hooks/bootstrap/*.md"],
+      hooksEnabled: true,
+    });
+
+    expect(context.hardening.state).toBe("unknown");
+    expect(context.hardening.reason).toBe("");
+  });
+
   it("reports hardening unknown, not blocked, when the config is unreadable", () => {
     write("AGENTS.md", "root guidance");
     write("hooks/bootstrap/AGENTS.md", "safety rules on disk");

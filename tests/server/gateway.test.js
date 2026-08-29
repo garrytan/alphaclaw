@@ -1565,10 +1565,11 @@ describe("server/gateway restart behavior", () => {
 
       const onStdout = child.stdout.on.mock.calls.find((c) => c[0] === "data")[1];
       const onStderr = child.stderr.on.mock.calls.find((c) => c[0] === "data")[1];
-      // The exit handler must be wired to "close" (fires after stdio drains)
-      // so the final stderr chunk is captured before classification; no
-      // classification listener may sit on "exit" (stdio can still be open).
-      expect(child.on.mock.calls.some((c) => c[0] === "exit")).toBe(false);
+      // Classification prefers "close" (fires after stdio drains) so the
+      // final stderr chunk is captured; the "exit" listener only arms the
+      // bounded drain fallback for a close a descendant holds open — it must
+      // never classify while close can still deliver within the window.
+      const onExit = child.on.mock.calls.find((c) => c[0] === "exit")[1];
       const onClose = child.on.mock.calls.find((c) => c[0] === "close")[1];
 
       onStdout("warming up\n");
@@ -1587,11 +1588,15 @@ describe("server/gateway restart behavior", () => {
       // Newline-terminated: appendStderrTail holds a trailing partial line in
       // its carry buffer until the line completes.
       onStderr(Array.from({ length: 60 }, (_, i) => `line-${i}`).join("\n") + "\n");
-      // The final stderr flush lands AFTER the process died (between kernel
-      // exit and stdio close) — classification on "close" must still see it.
+      // The kernel exit lands first, then the final stderr flush arrives
+      // between "exit" and "close" — the armed drain window must not
+      // classify early, and classification on "close" must still see it.
+      onExit(1, "SIGKILL");
+      expect(exitHandler).not.toHaveBeenCalled();
       onStderr(Buffer.from("final-flush-after-exit\n"));
 
       onClose(1, "SIGKILL");
+      expect(exitHandler).toHaveBeenCalledTimes(1);
       expect(exitHandler).toHaveBeenCalledWith(
         expect.objectContaining({
           code: 1,
@@ -1660,6 +1665,89 @@ describe("server/gateway restart behavior", () => {
       expect(tail).toContain("first-child fatal config error");
       expect(tail).not.toContain("second-child boot noise");
       gateway.setGatewayExitHandler(null);
+    });
+
+    it("classifies an exit whose close never fires once the bounded drain window lapses", async () => {
+      vi.useFakeTimers();
+      try {
+        const child = createChild();
+        childProcess.spawn = vi.fn(() => child);
+        fs.existsSync = vi.fn(() => false);
+        delete require.cache[modulePath];
+        const gateway = require(modulePath);
+        vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+        vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+        const exitHandler = vi.fn();
+        gateway.setGatewayExitHandler(exitHandler);
+
+        await gateway.launchGatewayProcess();
+        const onStderr = child.stderr.on.mock.calls.find(
+          (c) => c[0] === "data",
+        )[1];
+        const onExit = child.on.mock.calls.find((c) => c[0] === "exit")[1];
+
+        onStderr(Buffer.from("dying breath\n"));
+        // A descendant inherited the stdio fds and outlives the gateway:
+        // "exit" fires but "close" never does. Without the bounded drain the
+        // watchdog would never see this exit — no restart-handoff consume,
+        // no relaunch — until the descendant died.
+        child.exitCode = 1;
+        onExit(1, null);
+        expect(exitHandler).not.toHaveBeenCalled();
+
+        await vi.advanceTimersByTimeAsync(450);
+        expect(exitHandler).toHaveBeenCalledTimes(1);
+        expect(exitHandler).toHaveBeenCalledWith(
+          // Same (code, signal) the eventual close would have delivered, with
+          // the stderr received so far as evidence.
+          expect.objectContaining({ code: 1, signal: null, pid: 1234 }),
+        );
+        expect(exitHandler.mock.calls[0][0].stderrTail).toContain(
+          "dying breath",
+        );
+        gateway.setGatewayExitHandler(null);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("ignores a late close after the drain timeout already classified the exit", async () => {
+      vi.useFakeTimers();
+      try {
+        const child = createChild();
+        childProcess.spawn = vi.fn(() => child);
+        fs.existsSync = vi.fn(() => false);
+        delete require.cache[modulePath];
+        const gateway = require(modulePath);
+        vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+        vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+        const exitHandler = vi.fn();
+        gateway.setGatewayExitHandler(exitHandler);
+
+        await gateway.launchGatewayProcess();
+        const onStderr = child.stderr.on.mock.calls.find(
+          (c) => c[0] === "data",
+        )[1];
+        const onExit = child.on.mock.calls.find((c) => c[0] === "exit")[1];
+        const onClose = child.on.mock.calls.find((c) => c[0] === "close")[1];
+
+        child.exitCode = 78;
+        onExit(78, null);
+        await vi.advanceTimersByTimeAsync(450);
+        expect(exitHandler).toHaveBeenCalledTimes(1);
+
+        // The descendant finally dies and the stalled close delivers — hours
+        // late. The settled flag makes it a no-op: never a double report.
+        onStderr(Buffer.from("descendant flushed late\n"));
+        onClose(78, null);
+        expect(exitHandler).toHaveBeenCalledTimes(1);
+        expect(exitHandler.mock.calls[0][0].stderrTail).not.toContain(
+          "descendant flushed late",
+        );
+        gateway.setGatewayExitHandler(null);
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it("runs force restart via runGatewayCmd and logs supervisor output", async () => {

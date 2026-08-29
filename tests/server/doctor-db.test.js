@@ -205,6 +205,79 @@ describe("server/doctor-db", () => {
     ).toBeNull();
   });
 
+  it("carries source/sourceKey through single-card reads and fix mutations", () => {
+    const {
+      createDoctorRun,
+      insertDoctorCards,
+      getDoctorCardsByRunId,
+      getDoctorCard,
+      updateDoctorCardStatus,
+      startDoctorCardFix,
+      cancelDoctorCardFix,
+      completeDoctorCardFix,
+    } = createDoctorDbContext("doctor-db-provenance-");
+
+    const runId = createDoctorRun({
+      engine: "gateway_agent",
+      workspaceRoot: "/tmp/workspace",
+      workspaceFingerprint: "fp-provenance",
+      workspaceManifest: null,
+      promptVersion: "doctor-v2",
+    });
+    insertDoctorCards({
+      runId,
+      cards: [
+        {
+          priority: kDoctorPriority.P0,
+          category: "project context",
+          title: "Hardening blocked",
+          summary: "s",
+          recommendation: "r",
+          evidence: [],
+          targetPaths: [],
+          fixPrompt: "f",
+          status: kDoctorCardStatus.open,
+          source: "deterministic",
+          sourceKey: "det:hardening:blocked",
+        },
+      ],
+    });
+    const provenance = { source: "deterministic", sourceKey: "det:hardening:blocked" };
+    const [inserted] = getDoctorCardsByRunId(runId);
+    expect(inserted).toMatchObject(provenance);
+
+    // The single-card read must not relabel a sourced card as llm.
+    expect(getDoctorCard(inserted.id)).toMatchObject(provenance);
+
+    // Every mutation that returns a card keeps the provenance too — these
+    // feed the status/fix API responses.
+    expect(
+      updateDoctorCardStatus({ id: inserted.id, status: kDoctorCardStatus.open }),
+    ).toMatchObject(provenance);
+    expect(
+      startDoctorCardFix({
+        id: inserted.id,
+        runId: "doctor-fix-provenance",
+        tokenHash: "provenance-hash",
+      }),
+    ).toMatchObject(provenance);
+    expect(
+      cancelDoctorCardFix({ id: inserted.id, runId: "doctor-fix-provenance" }),
+    ).toMatchObject(provenance);
+    startDoctorCardFix({
+      id: inserted.id,
+      runId: "doctor-fix-provenance-2",
+      tokenHash: "provenance-hash-2",
+    });
+    expect(
+      completeDoctorCardFix({
+        id: inserted.id,
+        runId: "doctor-fix-provenance-2",
+        tokenHash: "provenance-hash-2",
+      }),
+    ).toMatchObject(provenance);
+  });
+
   it("lists run summaries without heavy payloads and with grouped counts", () => {
     const {
       createDoctorRun,

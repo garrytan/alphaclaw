@@ -9,6 +9,7 @@ import {
   getDoctorBootstrapWarningTitle,
   getDoctorCategoryTone,
   getDoctorChangeLabel,
+  getDoctorNoChangesNote,
   getDoctorPriorityTone,
   getDoctorRunDisabledReason,
   getDoctorRunPillDetail,
@@ -209,8 +210,8 @@ describe("frontend/doctor helpers (extended)", () => {
     expect(getDoctorCategoryTone("unmapped category")).toBe("info");
   });
 
-  it("explains why the Run button is disabled", () => {
-    // Gateway readiness wins over every other condition.
+  it("disables the Run button only when the gateway is not ready", () => {
+    // Gateway readiness is the ONLY disable.
     expect(
       getDoctorRunDisabledReason({
         runInProgress: true,
@@ -222,7 +223,10 @@ describe("frontend/doctor helpers (extended)", () => {
         gatewayReadiness: { ok: false, reason: "" },
       }),
     ).toBe("Gateway not ready.");
-    // Enabled states return an empty reason.
+    // Everything else stays enabled — including zero workspace changes: the
+    // server's zero-change path is a cheap reuse run (no LLM) that still
+    // re-evaluates every environment check, and with scheduled scans off it
+    // is the only way stale sourced findings clear.
     expect(
       getDoctorRunDisabledReason({
         runInProgress: true,
@@ -235,42 +239,11 @@ describe("frontend/doctor helpers (extended)", () => {
         changeSummary: { changedFilesCount: 2 },
       }),
     ).toBe("");
-    // No changes (or no status yet) keeps the legacy disabled reason.
     expect(
       getDoctorRunDisabledReason({
-        changeSummary: { changedFilesCount: 0 },
-      }),
-    ).toBe("No workspace changes since the last completed Drift Doctor run.");
-    expect(getDoctorRunDisabledReason(null)).toBe(
-      "No workspace changes since the last completed Drift Doctor run.",
-    );
-    // Old payloads without gatewayReadiness never treat the gateway as down.
-    expect(getDoctorRunDisabledReason({ needsInitialRun: true, gatewayReadiness: undefined })).toBe("");
-  });
-
-  it("keeps the Run button enabled when the environment is degraded", () => {
-    // Hardening blocked/starved is a P0-worthy environment condition with a
-    // zero workspace delta — the run must stay enabled.
-    expect(
-      getDoctorRunDisabledReason({
-        changeSummary: { changedFilesCount: 0 },
-        bootstrapContext: { hardening: { state: "blocked" } },
+        changeSummary: { hasBaseline: true, changedFilesCount: 0 },
       }),
     ).toBe("");
-    expect(
-      getDoctorRunDisabledReason({
-        changeSummary: { changedFilesCount: 0 },
-        bootstrapContext: { hardening: { state: "starved" } },
-      }),
-    ).toBe("");
-    // Active truncation also enables the run without workspace changes.
-    expect(
-      getDoctorRunDisabledReason({
-        changeSummary: { changedFilesCount: 0 },
-        bootstrapContext: { hasActiveTruncation: true },
-      }),
-    ).toBe("");
-    // A healthy environment with no changes keeps the disabled reason.
     expect(
       getDoctorRunDisabledReason({
         changeSummary: { changedFilesCount: 0 },
@@ -279,15 +252,45 @@ describe("frontend/doctor helpers (extended)", () => {
           hasActiveTruncation: false,
         },
       }),
-    ).toBe("No workspace changes since the last completed Drift Doctor run.");
-    // The gateway-not-ready reason still wins over degraded-environment states.
+    ).toBe("");
+    expect(getDoctorRunDisabledReason(null)).toBe("");
+    // Old payloads without gatewayReadiness never treat the gateway as down.
+    expect(getDoctorRunDisabledReason({ needsInitialRun: true, gatewayReadiness: undefined })).toBe("");
+  });
+
+  it("surfaces the no-changes message as an informational note, never a disable", () => {
+    const noChangesStatus = {
+      changeSummary: { hasBaseline: true, changedFilesCount: 0 },
+    };
+    expect(getDoctorNoChangesNote(noChangesStatus)).toBe(
+      "No workspace changes since the last completed Drift Doctor run.",
+    );
+    // The very same state keeps the button enabled.
+    expect(getDoctorRunDisabledReason(noChangesStatus)).toBe("");
+
+    // No note without a status, mid-run, pre-first-run, without a PROVEN
+    // baseline, or once anything actually changed.
+    expect(getDoctorNoChangesNote(null)).toBe("");
     expect(
-      getDoctorRunDisabledReason({
-        changeSummary: { changedFilesCount: 0 },
-        bootstrapContext: { hardening: { state: "blocked" } },
-        gatewayReadiness: { ok: false, reason: "gateway is restarting" },
+      getDoctorNoChangesNote({
+        runInProgress: true,
+        changeSummary: { hasBaseline: true, changedFilesCount: 0 },
       }),
-    ).toBe("Gateway not ready: gateway is restarting");
+    ).toBe("");
+    expect(
+      getDoctorNoChangesNote({
+        needsInitialRun: true,
+        changeSummary: { hasBaseline: true, changedFilesCount: 0 },
+      }),
+    ).toBe("");
+    expect(
+      getDoctorNoChangesNote({ changeSummary: { changedFilesCount: 0 } }),
+    ).toBe("");
+    expect(
+      getDoctorNoChangesNote({
+        changeSummary: { hasBaseline: true, changedFilesCount: 3 },
+      }),
+    ).toBe("");
   });
 
   it("formats the gateway-not-ready message from one source", () => {
