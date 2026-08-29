@@ -19,8 +19,8 @@ repairs it automatically.
   running — which rejects the key with `EX_CONFIG` and crash-looped every
   boot with `gateway.controlUi: Unrecognized key: "environment"`. The stripe
   is now gated on the build that will actually run (2026.8.1+ for beta, an
-  active dev shim for dev), and a stripe left behind by an older AlphaClaw is
-  removed on the next boot automatically.
+  active dev shim with a 2026.8.1+ checkout for dev), and a stripe left
+  behind by an older AlphaClaw is removed on the next boot automatically.
 
 ### Added
 - **Gateway startup medic (default on).** When the gateway exits with a fatal
@@ -32,8 +32,9 @@ repairs it automatically.
   blocks the remedy), at most two attempts per incident, and a
   notification describing exactly what was done. For failures without an
   obvious fix, the medic asks the smartest frontier model you have an API key
-  for (Claude Fable 5 → Claude Opus 5 → GPT-5.6 → Gemini 3.1 Pro; evidence is
-  secret-redacted first) to diagnose and pick from the whitelisted remedies —
+  for (Claude Fable 5 → Claude Opus 5 → GPT-5.6 → Gemini 3.1 Pro preview;
+  evidence is secret-redacted first) to diagnose and pick from the
+  whitelisted remedies —
   the model can never edit anything itself. Toggle on the Upgrade page or at
   `updates.openclaw.medic.enabled`; disabling restores the old
   pause-and-notify behavior.
