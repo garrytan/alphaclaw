@@ -153,6 +153,43 @@ describe("server git shim scripts", () => {
     expect(log).toContain("ASKPASS_PASS=ghp_env_token");
   });
 
+  it("parses .env without executing values and extracts only GITHUB_TOKEN (issue #26 sibling)", () => {
+    // The shim used to `. .env` with errors hidden — a spaced value silently
+    // dropped the var and $(…) in ANY value executed with the agent's
+    // privileges. The parser must survive both and export nothing else.
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "alphaclaw-git-root-"));
+    const repoRoot = path.join(tempRoot, "repo");
+    const outsideDir = path.join(tempRoot, "outside");
+    const pwnedPath = path.join(tempRoot, "pwned");
+    fs.mkdirSync(repoRoot, { recursive: true });
+    fs.mkdirSync(outsideDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(repoRoot, ".env"),
+      [
+        "NODE_OPTIONS=--max-old-space-size=8192 --heapsnapshot-signal=SIGUSR2",
+        `LD_PRELOAD=$(touch "${pwnedPath}")`,
+        "GITHUB_TOKEN=ghp_first",
+        // Last assignment wins, matching the JS reader's dedupe.
+        "GITHUB_TOKEN='ghp_env_token_2'",
+        "",
+      ].join("\n"),
+    );
+
+    const harness = createBehaviorHarness({ repoRoot });
+    const env = spawnEnv();
+    delete env.GITHUB_TOKEN;
+    delete env.NODE_OPTIONS;
+    execFileSync(harness.shimPath, ["-C", repoRoot, "push", "origin", "main"], {
+      cwd: outsideDir,
+      env,
+      stdio: "pipe",
+    });
+
+    const log = fs.readFileSync(harness.logPath, "utf8");
+    expect(log).toContain("ASKPASS_PASS=ghp_env_token_2");
+    expect(fs.existsSync(pwnedPath)).toBe(false);
+  });
+
   it("passes auth through when valued global options precede -C repo push commands", () => {
     const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "alphaclaw-git-root-"));
     const repoRoot = path.join(tempRoot, "repo");
