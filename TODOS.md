@@ -282,6 +282,28 @@
 - **What:** Per-event-type filter pills on the All-events tab; a spot-check "explain current status" overseer mode with no incident; any new SSE event streams for the watchdog surfaces.
 - **Why:** Each was reviewed and deferred: three tabs cover the filtering need, the deterministic narrator explains live status for free, and the 2s status SSE + 15s polls already carry everything ("new event streams are the expensive path").
 - **Effort:** S each. **Depends on:** demand.
+## P2 — Cron run-history UI: read run logs from the state db
+- **What:** The cron run/trend UI reads `cron/runs/<jobId>.jsonl` (lib/server/cron-service.js), but even the PINNED openclaw 2026.7.1-2 writes run logs to SQLite (`cron_run_logs`), and 2026.9.1-beta.1's `doctor --fix` additionally renames leftover `.jsonl` to `.jsonl.migrated` — after the first beta doctor run, run history and trends silently go empty. Port the bounded-tail reads to `cron_run_logs` (cached-handle pattern from lib/server/cron-store.js), keeping the `.jsonl` fallback for genuinely old dirs.
+- **Why:** Stale-data class of the issue-#23 family: a file the runtime no longer writes, read as if authoritative.
+- **Context:** Surfaced by the 2026.9.1-beta.1 compatibility review (plan §11). Self-contained: cron-service.js read paths + tests.
+- **Effort:** M → CC: S.
+
+## P3 — Retire the file-era code paths when the openclaw pin reaches ≥ 2026.9.x
+- **What:** Once package.json pins an openclaw whose state is SQLite-backed, delete the legacy branches: exec-approvals file seeding (lib/server/exec-defaults-config.js file half), pairing-file readers/writers (routes/pairings.js, watchdog-notify.js, agents/), the agent-db 'primary' auth path for the main agent (lib/server/auth-profiles.js), and the era hint machinery that exists only to tell the two eras apart (lib/server/openclaw-state-era.js documents every seam).
+- **Why:** Dual-era code is deliberate, bounded debt from the 2026.9.1-beta.1 compatibility work; the seams are explicit so retirement is mechanical.
+- **Effort:** M. **Depends on:** the npm pin moving to ≥ 2026.9.x and the beta line stabilizing.
+
+## P3 — Unified OpenClaw state-backend adapter + CI cross-version contract matrix
+- **What:** Fold exec-approvals/auth/pairing/cron state access behind one adapter module and run the live contract suite (tests/live/openclaw-live-cli-contract.e2e.test.js) against BOTH the pinned and the beta openclaw in CI (hermetic `npm pack openclaw@<v>` fixtures).
+- **Why:** Approach C from the compatibility review's CEO pass: the 2026.9 migration wave showed every direct state access is a latent break; an adapter plus a version matrix turns the next wave into a test failure instead of an outage.
+- **Context:** lib/server/openclaw-state-era.js and openclaw-state-db.js are the seeds; the era decision table lives in the plan for the #23 follow-up work.
+- **Effort:** L → CC: M. **Depends on:** the state-era module (landed).
+
+## P3 — Watchdog auth backend for main agent: route saves through `openclaw models auth` where expressible
+- **What:** Credential saves for the main agent currently write the shared state db directly in state-db mode (schema-guarded BEGIN IMMEDIATE, lib/server/auth-profiles.js). `openclaw models auth paste-api-key`/`paste-token` exist on both supported versions and would route API-key saves through openclaw's own validation and store selection; oauth profiles, ordering, and usage state have no CLI surface, so the direct writer stays for those either way.
+- **Why:** Prefer CLI surfaces over private-schema writes wherever one exists (compat review [C6]); a partial move only pays off if the api-key path is the churny one — check first.
+- **Effort:** S-M. **Depends on:** verifying paste-api-key flag shapes on both versions.
+
 ## Completed
 
 ## Make env-save channel sync one atomic lifecycle-lock op
