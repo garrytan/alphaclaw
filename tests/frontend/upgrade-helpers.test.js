@@ -3,6 +3,14 @@ const loadUpgradeHelpers = async () =>
 
 const kNow = Date.parse("2026-08-25T12:00:00.000Z");
 
+// Locale-dependent expectations are computed with the same Intl presets the
+// shared formatters use (see tests/frontend/format.test.js) — locale- and
+// tz-agnostic in the node test env.
+const kDateTimeFormat = new Intl.DateTimeFormat(undefined, {
+  dateStyle: "medium",
+  timeStyle: "short",
+});
+
 describe("frontend/upgrade-helpers badges", () => {
   it("maps row annotations to badge models", async () => {
     const { buildRowBadges } = await loadUpgradeHelpers();
@@ -37,7 +45,7 @@ describe("frontend/upgrade-helpers badges", () => {
     expect(blockBadge.tone).toBe("danger");
     expect(blockBadge.detail).toContain("trigger: crash_loop");
     expect(blockBadge.detail).toContain("exit code 1");
-    expect(blockBadge.detail).toContain(new Date(kNow).toLocaleString());
+    expect(blockBadge.detail).toContain(kDateTimeFormat.format(new Date(kNow)));
   });
 
   it("returns no badges for an unannotated row", async () => {
@@ -243,9 +251,11 @@ describe("frontend/upgrade-helpers durations and staleness (U15)", () => {
     expect(formatHeartbeat(null, kNow)).toBeNull();
   });
 
-  it("formats relative ages in minutes, hours, and days", async () => {
+  it("formats relative ages in seconds, minutes, hours, and days", async () => {
     const { formatRelativeAge } = await loadUpgradeHelpers();
-    expect(formatRelativeAge(kNow - 10_000, kNow)).toBe("just now");
+    // Shared-core dialect: "just now" only under 5s; a seconds tier exists.
+    expect(formatRelativeAge(kNow - 2_000, kNow)).toBe("just now");
+    expect(formatRelativeAge(kNow - 10_000, kNow)).toBe("10 seconds ago");
     expect(formatRelativeAge(kNow - 60_000, kNow)).toBe("1 minute ago");
     expect(formatRelativeAge(kNow - 5 * 60_000, kNow)).toBe("5 minutes ago");
     expect(formatRelativeAge(kNow - 3 * 3_600_000, kNow)).toBe("3 hours ago");

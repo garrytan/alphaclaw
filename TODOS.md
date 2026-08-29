@@ -287,6 +287,37 @@
 - **What:** Per-event-type filter pills on the All-events tab; a spot-check "explain current status" overseer mode with no incident; any new SSE event streams for the watchdog surfaces.
 - **Why:** Each was reviewed and deferred: three tabs cover the filtering need, the deterministic narrator explains live status for free, and the 2s status SSE + 15s polls already carry everything ("new event streams are the expensive path").
 - **Effort:** S each. **Depends on:** demand.
+
+## P3 — Absolute-time hover tooltips on every relative-time display (E4)
+- **What:** Extend the incidents-tab pattern (relative text + absolute `title` tooltip, ideally `<time datetime>`) to the remaining relative-only displays: team presence, telegram last-seen/last-sweep, upgrade catalog staleness, restart freeze stamps.
+- **Why:** "5m ago" answers "how recent"; the tooltip answers "when exactly" without a format change. Also the keyboard-accessibility story for `title`-only tooltips lives here.
+- **Context:** Deferred from the UI local-time normalization plan (CEO review E4). `buildIncidentTimeTooltip` (watchdog-tab/incidents/helpers.js) is the shape to generalize; `formatLocaleDateTimeWithZone` in lib/public/js/lib/format.js does the formatting.
+- **Effort:** M → CC: S. **Depends on:** the normalization PR landing.
+
+## P3 — Un-pin number/currency formatters from en-US (E5)
+- **What:** Switch `formatInteger`/`formatCompactNumber`/`formatUsd` (lib/public/js/lib/format.js) and the two `Number#toLocaleString` char counts in doctor/helpers.js (allowlisted in the conventions guard) from `"en-US"` to browser-default locale.
+- **Why:** Same "show data the way the local user expects" logic as the time normalization — but it changes USD symbol rendering abroad ("$1,234.50" → "1.234,50 $" in de-DE), so it's a separate product decision, not a mechanical follow-on.
+- **Context:** Deferred from the UI local-time normalization plan (CEO review E5). Tests pin the en-US outputs (tests/frontend/format.test.js).
+- **Effort:** S. **Depends on:** product decision on currency rendering.
+
+## P3 — Gateway-state reason prose client-side (E7)
+- **What:** Expose `tcp.observedAt` (and crash-window inputs) in the status payload and build the "Last confirmed running 42s ago — reconnecting." / "3 restarts in the last 5 min" prose client-side.
+- **Why:** The only remaining server-composed relative-time prose. It is tz-safe (relative, recomputed every ~2s snapshot) so this is architectural hygiene, not a correctness bug.
+- **Context:** lib/server/gateway-state.js:188-231 `reasonForState`; consumed verbatim by lib/public/js/components/gateway.js. Deferred from the UI local-time normalization plan (CEO review E7).
+- **Effort:** M. **Depends on:** nothing.
+
+## P3 — Usage-tracker ingest-time tz-aware day keys (E8)
+- **What:** The usage-tracker plugin writes UTC day keys at ingest (lib/plugin/usage-tracker/index.js:198-200); rows near local midnight land in the "wrong" day for non-UTC users until the read path re-buckets.
+- **Why:** The read path already re-buckets by the client timezone (lib/server/db/usage), so this only matters for consumers reading the raw `date` column. Fixing it at ingest needs a backfill/migration of existing rows.
+- **Context:** Deferred from the UI local-time normalization plan (CEO review E8).
+- **Effort:** M. **Depends on:** data migration plan.
+
+## P3 — Run /design-consultation to create DESIGN.md
+- **What:** The repo has no DESIGN.md; design reviews calibrate against universal principles instead of a stated system (fonts, spacing scale, color tokens, interaction patterns).
+- **Why:** Every future design review (and AI-generated UI work) gets sharper with a written design system; the setup UI already has consistent implicit conventions worth codifying.
+- **Context:** Flagged by the plan-design-review of the UI local-time normalization plan (Pass 5).
+- **Effort:** S (one /design-consultation session). **Depends on:** nothing.
+
 ## Completed
 
 ## Make env-save channel sync one atomic lifecycle-lock op

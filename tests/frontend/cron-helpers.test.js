@@ -1,6 +1,22 @@
 const loadCronHelpers = async () =>
   import("../../lib/public/js/components/cron-tab/cron-helpers.js");
 
+// Schedule wall-times render through the same UTC-pinned Intl presets
+// production uses (cron-helpers builds a synthetic UTC instant from the raw
+// cron fields), so expectations stay locale-agnostic in CI.
+const kUtcTime = new Intl.DateTimeFormat(undefined, {
+  timeStyle: "short",
+  timeZone: "UTC",
+});
+const kUtcHour = new Intl.DateTimeFormat(undefined, {
+  hour: "numeric",
+  timeZone: "UTC",
+});
+const wallTime = (hour, minute = 0) =>
+  kUtcTime.format(new Date(Date.UTC(2000, 0, 1, hour, minute)));
+const wallHour = (hour) =>
+  kUtcHour.format(new Date(Date.UTC(2000, 0, 1, hour)));
+
 describe("frontend/cron-helpers", () => {
   it("formats schedule labels", async () => {
     const { formatCronScheduleLabel } = await loadCronHelpers();
@@ -48,18 +64,18 @@ describe("frontend/cron-helpers", () => {
         kind: "cron",
         expr: "*/25 6-13 * * 1-5",
       }),
-    ).toBe("Every 25m, 6am-1pm weekdays");
+    ).toBe(`Every 25m, ${wallHour(6)}-${wallHour(13)} weekdays`);
     expect(
       formatCronScheduleLabel({
         kind: "cron",
         expr: "0 4 1 * *",
       }),
-    ).toBe("Monthly on day 1 at 4:00am");
+    ).toBe(`Monthly on day 1 at ${wallTime(4)}`);
     expect(
       formatCronScheduleLabel({
         cron: "0 10 * * 6",
       }),
-    ).toBe("Every Sat at 10:00am");
+    ).toBe(`Every Sat at ${wallTime(10)}`);
     expect(
       formatCronScheduleLabel({
         kind: "at",
@@ -171,9 +187,11 @@ describe("frontend/cron-helpers", () => {
     expect(formatRelativeCompact(nowMs - 10 * 60 * 60 * 1000, nowMs)).toBe("10h");
     expect(formatRelativeCompact(nowMs - 10 * 24 * 60 * 60 * 1000, nowMs)).toBe("10d");
     expect(formatRelativeCompact(nowMs - 30 * 24 * 60 * 60 * 1000, nowMs)).toBe("1mo");
+    expect(formatRelativeCompact(nowMs - 400 * 24 * 60 * 60 * 1000, nowMs)).toBe("1y");
     expect(formatRelativeCompact(0, nowMs)).toBe("—");
     expect(formatRelativeCompact("junk", nowMs)).toBe("—");
-    expect(formatRelativeCompact(nowMs + 90 * 1000, nowMs)).toBe("2m");
+    // Deltas floor to the containing unit (90s -> 1m, not rounded to 2m).
+    expect(formatRelativeCompact(nowMs + 90 * 1000, nowMs)).toBe("1m");
   });
 
   it("formats relative timestamps in both directions", async () => {
@@ -181,8 +199,9 @@ describe("frontend/cron-helpers", () => {
     const nowMs = Date.now();
     expect(formatRelativeMs(0, nowMs)).toBe("—");
     expect(formatRelativeMs(Number.NaN, nowMs)).toBe("—");
-    expect(formatRelativeMs(nowMs + 10 * 1000, nowMs)).toBe("in <1m");
-    expect(formatRelativeMs(nowMs - 10 * 1000, nowMs)).toBe("just now");
+    expect(formatRelativeMs(nowMs + 10 * 1000, nowMs)).toBe("in 10s");
+    expect(formatRelativeMs(nowMs - 10 * 1000, nowMs)).toBe("10s ago");
+    expect(formatRelativeMs(nowMs - 2 * 1000, nowMs)).toBe("just now");
     expect(formatRelativeMs(nowMs + 5 * 60 * 1000, nowMs)).toBe("in 5m");
     expect(formatRelativeMs(nowMs - 5 * 60 * 1000, nowMs)).toBe("5m ago");
     expect(formatRelativeMs(nowMs + 3 * 60 * 60 * 1000, nowMs)).toBe("in 3h");
@@ -207,13 +226,13 @@ describe("frontend/cron-helpers", () => {
     expect(formatCronScheduleLabel({ kind: "cron", expr: "*/5 * * * *" })).toBe("Every 5m");
     expect(formatCronScheduleLabel({ kind: "cron", expr: "0 */2 * * *" })).toBe("Every 2h");
     expect(formatCronScheduleLabel({ kind: "cron", expr: "30 18 * * *" })).toBe(
-      "Daily at 6:30pm",
+      `Daily at ${wallTime(18, 30)}`,
     );
     expect(formatCronScheduleLabel({ kind: "cron", expr: "0 0 * * *" })).toBe(
-      "Daily at 12:00am",
+      `Daily at ${wallTime(0)}`,
     );
     expect(formatCronScheduleLabel({ kind: "cron", expr: "15 9 * * 0,6" })).toBe(
-      "Every Sun, Sat at 9:15am",
+      `Every Sun, Sat at ${wallTime(9, 15)}`,
     );
     // Non-humanizable expressions fall back to the raw expression.
     expect(formatCronScheduleLabel({ kind: "cron", expr: "0 8 15 6 *" })).toBe("0 8 15 6 *");
@@ -241,7 +260,7 @@ describe("frontend/cron-helpers", () => {
         { kind: "cron", expr: "0 9 * * *", tz: "UTC" },
         { includeTimeZone: true },
       ),
-    ).toBe("Daily at 9:00am (UTC)");
+    ).toBe(`Daily at ${wallTime(9)} (UTC)`);
     // Non-humanizable expr with tz appended.
     expect(
       formatCronScheduleLabel(
@@ -255,7 +274,7 @@ describe("frontend/cron-helpers", () => {
         { kind: "cron", expr: "0 9 * * *" },
         { includeTimeZone: true, includeTimeZoneWhenDifferent: true },
       ),
-    ).toBe("Daily at 9:00am");
+    ).toBe(`Daily at ${wallTime(9)}`);
 
     // Fallback path (no kind) via cronExpr/timezone aliases.
     expect(
@@ -263,7 +282,7 @@ describe("frontend/cron-helpers", () => {
         { cronExpr: "0 9 * * *", timezone: "UTC" },
         { includeTimeZone: true },
       ),
-    ).toBe("Daily at 9:00am (UTC)");
+    ).toBe(`Daily at ${wallTime(9)} (UTC)`);
     expect(
       formatCronScheduleLabel(
         { expr: "0 8 15 6 *", timezone: "UTC" },
@@ -273,49 +292,32 @@ describe("frontend/cron-helpers", () => {
     expect(formatCronScheduleLabel({ cron: "0 8 15 6 *" })).toBe("0 8 15 6 *");
   });
 
-  it("resolves the client time zone from Intl when not provided", async () => {
+  it("falls back to the shared browser time zone when clientTimeZone is not provided", async () => {
+    // getClientTimeZone was replaced by format.js getBrowserTimeZone, which is
+    // memoized at module load — stub-based Intl swaps can no longer influence
+    // it, so the fallback path is asserted against the real captured zone.
     const { formatCronScheduleLabel } = await loadCronHelpers();
-    const schedule = { kind: "cron", expr: "0 9 * * *", tz: "Etc/GMT+8" };
+    const { getBrowserTimeZone } = await import("../../lib/public/js/lib/format.js");
+    const browserTimeZone = getBrowserTimeZone();
     const options = { includeTimeZoneWhenDifferent: true };
-    try {
-      // Client tz differs from schedule tz -> append.
-      vi.stubGlobal("Intl", {
-        DateTimeFormat: () => ({
-          resolvedOptions: () => ({ timeZone: "America/New_York" }),
-        }),
-      });
-      expect(formatCronScheduleLabel(schedule, options)).toBe(
-        "Daily at 9:00am (Etc/GMT+8)",
-      );
 
-      // Client tz matches schedule tz -> no suffix.
-      vi.stubGlobal("Intl", {
-        DateTimeFormat: () => ({
-          resolvedOptions: () => ({ timeZone: "etc/gmt+8" }),
-        }),
-      });
-      expect(formatCronScheduleLabel(schedule, options)).toBe("Daily at 9:00am");
+    // Schedule tz matches the browser tz (case-insensitively) -> no suffix.
+    expect(
+      formatCronScheduleLabel(
+        { kind: "cron", expr: "0 9 * * *", tz: browserTimeZone.toUpperCase() },
+        options,
+      ),
+    ).toBe(`Daily at ${wallTime(9)}`);
 
-      // Intl blows up -> unknown client tz -> append defensively.
-      vi.stubGlobal("Intl", {
-        DateTimeFormat: () => {
-          throw new Error("no intl");
-        },
-      });
-      expect(formatCronScheduleLabel(schedule, options)).toBe(
-        "Daily at 9:00am (Etc/GMT+8)",
-      );
-
-      // Intl reports no time zone -> append defensively.
-      vi.stubGlobal("Intl", {
-        DateTimeFormat: () => ({ resolvedOptions: () => ({}) }),
-      });
-      expect(formatCronScheduleLabel(schedule, options)).toBe(
-        "Daily at 9:00am (Etc/GMT+8)",
-      );
-    } finally {
-      vi.unstubAllGlobals();
-    }
+    // Schedule tz differs from the browser tz -> suffix appended.
+    const otherTimeZone =
+      browserTimeZone === "Etc/GMT+8" ? "Etc/GMT+9" : "Etc/GMT+8";
+    expect(
+      formatCronScheduleLabel(
+        { kind: "cron", expr: "0 9 * * *", tz: otherTimeZone },
+        options,
+      ),
+    ).toBe(`Daily at ${wallTime(9)} (${otherTimeZone})`);
   });
 
   it("derives job health and health class names", async () => {

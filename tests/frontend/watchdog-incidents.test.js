@@ -52,6 +52,8 @@ import * as api from "../../lib/public/js/lib/api.js";
 import { invalidateCache } from "../../lib/public/js/lib/api-cache.js";
 import { useWatchdogIncidents } from "../../lib/public/js/components/watchdog-tab/incidents/use-incidents.js";
 import { WatchdogIncidentsCard } from "../../lib/public/js/components/watchdog-tab/incidents/index.js";
+import { buildIncidentTimeTooltip } from "../../lib/public/js/components/watchdog-tab/incidents/helpers.js";
+import { formatLocaleDateTimeWithTodayTime } from "../../lib/public/js/lib/format.js";
 import { ActionButton } from "../../lib/public/js/components/action-button.js";
 import { InlineErrorChip } from "../../lib/public/js/components/inline-error-chip.js";
 
@@ -260,6 +262,83 @@ describe("frontend/watchdog incidents card", () => {
     expect(
       treeText(renderCard({ ...base, eventsLoaded: true, eventsError: null })),
     ).toContain("No events recorded.");
+  });
+
+  it("uses dual-register tooltips (local+offset · raw ISO) instead of bare raw ISO", () => {
+    const eventCreatedAt = "2026-08-27T09:15:02.114Z";
+    const tree = renderCard({
+      incidents: [kIncident],
+      incidentsLoaded: true,
+      expandedIds: { [kIncident.id]: true },
+      detailById: {
+        [kIncident.id]: {
+          loading: false,
+          error: null,
+          events: [
+            {
+              id: 1,
+              eventType: "crash",
+              status: "failed",
+              createdAt: eventCreatedAt,
+              details: { code: 1 },
+            },
+          ],
+        },
+      },
+    });
+    const spans = findAllByType(tree, "span");
+    const openedTooltip = buildIncidentTimeTooltip(kIncident.openedAt);
+    expect(openedTooltip).toContain(` · ${kIncident.openedAt}`);
+    expect(spans.some((span) => span.props.title === openedTooltip)).toBe(true);
+    const eventTooltip = buildIncidentTimeTooltip(eventCreatedAt);
+    expect(spans.some((span) => span.props.title === eventTooltip)).toBe(true);
+    // No tooltip carries the bare raw ISO anymore.
+    expect(spans.some((span) => span.props.title === kIncident.openedAt)).toBe(
+      false,
+    );
+    expect(spans.some((span) => span.props.title === eventCreatedAt)).toBe(
+      false,
+    );
+
+    // The All-events tab rows use the same dual-register tooltip.
+    const eventsTree = renderCard({
+      activeTab: "events",
+      eventsLoaded: true,
+      events: [
+        { id: 2, eventType: "restart", status: "ok", createdAt: eventCreatedAt },
+      ],
+    });
+    const eventSpans = findAllByType(eventsTree, "span");
+    expect(eventSpans.some((span) => span.props.title === eventTooltip)).toBe(
+      true,
+    );
+  });
+
+  it("renders timeline event times with seconds (sub-minute causality)", () => {
+    const eventCreatedAt = "2026-08-27T09:15:02.114Z";
+    const tree = renderCard({
+      incidents: [kIncident],
+      incidentsLoaded: true,
+      expandedIds: { [kIncident.id]: true },
+      detailById: {
+        [kIncident.id]: {
+          loading: false,
+          error: null,
+          events: [
+            {
+              id: 1,
+              eventType: "crash",
+              status: "failed",
+              createdAt: eventCreatedAt,
+              details: { code: 1 },
+            },
+          ],
+        },
+      },
+    });
+    expect(treeText(tree)).toContain(
+      formatLocaleDateTimeWithTodayTime(eventCreatedAt, { withSeconds: true }),
+    );
   });
 
   it("Refresh shows a pending affordance while polling", () => {

@@ -165,6 +165,93 @@ describe("server/routes/cron", () => {
     });
   });
 
+  it("resolves the client timezone header for trends and echoes it", async () => {
+    const deps = createDeps();
+    const app = createApp(deps);
+    const response = await request(app)
+      .get("/api/cron/jobs/job-a/trends?range=7d")
+      .set("x-client-timezone", "america/los_angeles");
+    expect(response.status).toBe(200);
+    expect(response.body.ok).toBe(true);
+    // Echoes the EFFECTIVE (canonicalized) zone it bucketed with.
+    expect(response.body.timeZone).toBe("America/Los_Angeles");
+    expect(deps.cronService.getJobRunTrends).toHaveBeenCalledWith({
+      jobId: "job-a",
+      range: "7d",
+      timeZone: "America/Los_Angeles",
+    });
+  });
+
+  it("falls back to the timeZone query param when the header is absent", async () => {
+    const deps = createDeps();
+    const app = createApp(deps);
+    const response = await request(app).get(
+      "/api/cron/jobs/job-a/trends?range=7d&timeZone=UTC",
+    );
+    expect(response.status).toBe(200);
+    expect(response.body.timeZone).toBe("UTC");
+    expect(deps.cronService.getJobRunTrends).toHaveBeenCalledWith(
+      expect.objectContaining({ timeZone: "UTC" }),
+    );
+  });
+
+  it("stays silent and legacy when the timezone header is missing", async () => {
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      const deps = createDeps();
+      const app = createApp(deps);
+      const response = await request(app).get("/api/cron/jobs/job-a/trends?range=7d");
+      expect(response.status).toBe(200);
+      expect(response.body.timeZone).toBeNull();
+      expect(deps.cronService.getJobRunTrends).toHaveBeenCalledWith(
+        expect.objectContaining({ timeZone: null }),
+      );
+      expect(logSpy).not.toHaveBeenCalled();
+    } finally {
+      logSpy.mockRestore();
+    }
+  });
+
+  it("logs one debug line and uses legacy buckets for garbage timezone headers", async () => {
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      const deps = createDeps();
+      const app = createApp(deps);
+      const response = await request(app)
+        .get("/api/cron/jobs/job-a/trends?range=7d")
+        .set("x-client-timezone", "Not/AZone");
+      expect(response.status).toBe(200);
+      expect(response.body.ok).toBe(true);
+      expect(response.body.timeZone).toBeNull();
+      expect(deps.cronService.getJobRunTrends).toHaveBeenCalledWith(
+        expect.objectContaining({ timeZone: null }),
+      );
+      expect(logSpy).toHaveBeenCalledTimes(1);
+      expect(logSpy.mock.calls[0][0]).toContain("invalid x-client-timezone");
+      expect(logSpy.mock.calls[0][1]).toBe("Not/AZone");
+    } finally {
+      logSpy.mockRestore();
+    }
+  });
+
+  it("caps oversized timezone headers before logging them", async () => {
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      const deps = createDeps();
+      const app = createApp(deps);
+      const oversized = "x".repeat(10 * 1024);
+      const response = await request(app)
+        .get("/api/cron/jobs/job-a/trends?range=7d")
+        .set("x-client-timezone", oversized);
+      expect(response.status).toBe(200);
+      expect(response.body.timeZone).toBeNull();
+      expect(logSpy).toHaveBeenCalledTimes(1);
+      expect(logSpy.mock.calls[0][1]).toHaveLength(64);
+    } finally {
+      logSpy.mockRestore();
+    }
+  });
+
   it("returns bulk usage and bulk runs", async () => {
     const deps = createDeps();
     const app = createApp(deps);

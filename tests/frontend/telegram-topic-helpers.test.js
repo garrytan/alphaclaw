@@ -9,7 +9,9 @@ describe("frontend/telegram-topic-helpers", () => {
     it("formats each relative bucket", async () => {
       const { formatRelativeTimestamp } = await loadTopicHelpers();
 
-      expect(formatRelativeTimestamp(kNowMs - 30 * 1000, kNowMs)).toBe("just now");
+      // Shared-core dialect: "just now" only under 5s; a seconds tier exists.
+      expect(formatRelativeTimestamp(kNowMs - 2 * 1000, kNowMs)).toBe("just now");
+      expect(formatRelativeTimestamp(kNowMs - 30 * 1000, kNowMs)).toBe("30s ago");
       expect(formatRelativeTimestamp(kNowMs - 5 * 60 * 1000, kNowMs)).toBe("5m ago");
       expect(formatRelativeTimestamp(kNowMs - 3 * 60 * 60 * 1000, kNowMs)).toBe("3h ago");
       expect(formatRelativeTimestamp(kNowMs - 12 * kDayMs, kNowMs)).toBe("12d ago");
