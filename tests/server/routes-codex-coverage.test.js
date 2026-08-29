@@ -154,15 +154,29 @@ describe("server/routes/codex coverage", () => {
   });
 
   describe("GET /auth/codex/callback", () => {
-    it("relays provider errors to the opener with quotes escaped", async () => {
+    it("relays provider errors to the opener as a JSON-encoded message", async () => {
       const { app } = createApp();
       const res = await request(app).get(
         "/auth/codex/callback?error=" + encodeURIComponent("denied'now"),
       );
       expect(res.status).toBe(200);
       expect(res.text).toContain("codex: 'error'");
-      expect(res.text).toContain("denied\\'now");
+      // JSON-encoded literal (the message is a quoted JS string, not '...').
+      expect(res.text).toContain('"denied\'now"');
       expect(res.text).toContain("Codex auth failed");
+    });
+
+    // H7: a `</script>` breakout in the reflected error must be neutralized.
+    it("neutralizes a </script> breakout in the reflected error (H7)", async () => {
+      const { app } = createApp();
+      const payload = "</script><img src=x onerror=alert(1)>";
+      const res = await request(app).get(
+        "/auth/codex/callback?error=" + encodeURIComponent(payload),
+      );
+      expect(res.status).toBe(200);
+      // The literal closing tag / angle brackets never reach the document.
+      expect(res.text).not.toContain("</script><img");
+      expect(res.text).toContain("\\u003c");
     });
 
     it("reports missing state or code", async () => {
