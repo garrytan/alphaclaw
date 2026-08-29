@@ -232,6 +232,75 @@ describe("frontend/api", () => {
     );
   });
 
+  it("fetchAutotune calls the autotune ledger endpoint", async () => {
+    const payload = { ok: true, ledger: { enabled: true, rows: [] } };
+    global.fetch.mockResolvedValue(mockJsonResponse(200, payload));
+    const api = await loadApiModule();
+
+    const result = await api.fetchAutotune();
+
+    expect(global.fetch).toHaveBeenCalledWith(
+      "/api/autotune",
+      expect.objectContaining({ headers: expect.any(Headers) }),
+    );
+    expect(result).toEqual(payload);
+  });
+
+  it("updateAutotuneSettings PUTs the settings body and surfaces server errors", async () => {
+    global.fetch.mockResolvedValue(
+      mockJsonResponse(200, { ok: true, changed: true }),
+    );
+    const api = await loadApiModule();
+    const body = { enabled: true, overrides: { gatewayHeapMb: 4096 } };
+
+    await api.updateAutotuneSettings(body);
+
+    expect(global.fetch).toHaveBeenCalledWith(
+      "/api/autotune/settings",
+      expect.objectContaining({
+        method: "PUT",
+        body: JSON.stringify(body),
+        headers: expect.any(Headers),
+      }),
+    );
+    expectLastFetchHeaders("application/json");
+
+    global.fetch.mockResolvedValue(
+      mockJsonResponse(400, { ok: false, error: "gatewayHeapMb out of range" }),
+    );
+    await expect(api.updateAutotuneSettings(body)).rejects.toThrow(
+      "gatewayHeapMb out of range",
+    );
+  });
+
+  it("reapplyAutotune posts to the reapply endpoint", async () => {
+    global.fetch.mockResolvedValue(
+      mockJsonResponse(200, { ok: true, ledger: { rows: [] } }),
+    );
+    const api = await loadApiModule();
+
+    await api.reapplyAutotune();
+
+    expect(global.fetch).toHaveBeenCalledWith(
+      "/api/autotune/reapply",
+      expect.objectContaining({ method: "POST" }),
+    );
+  });
+
+  it("acknowledgeAutotuneResize PUTs the resize-ack endpoint", async () => {
+    global.fetch.mockResolvedValue(
+      mockJsonResponse(200, { ok: true, acknowledged: true }),
+    );
+    const api = await loadApiModule();
+
+    await api.acknowledgeAutotuneResize();
+
+    expect(global.fetch).toHaveBeenCalledWith(
+      "/api/autotune/resize-ack",
+      expect.objectContaining({ method: "PUT" }),
+    );
+  });
+
   it("fetchUsageSummary calls usage summary endpoint", async () => {
     global.fetch.mockResolvedValue(mockJsonResponse(200, { ok: true, summary: { daily: [] } }));
     const api = await loadApiModule();

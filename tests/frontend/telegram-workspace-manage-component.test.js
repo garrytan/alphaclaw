@@ -410,4 +410,50 @@ describe("frontend/telegram-workspace manage component", () => {
     expect(harness.slots[kDeleteTopicConfirmSlot]).toBe(null);
     expect(harness.slots[kDeletingSlot]).toBe(null);
   });
+
+  // Concurrency copy: config read-back ?? server-computed ?? local legacy
+  // formula (lib/server/autotune.js is the source of truth for the
+  // server-computed values; the local formula only covers old servers).
+  describe("concurrency fallback chain + machine-cap context", () => {
+    it("prefers config read-back over everything", () => {
+      const text = renderToText(
+        renderManage({
+          configAgentMaxConcurrent: 40,
+          configSubagentMaxConcurrent: 38,
+          concurrency: {
+            computedMaxConcurrent: 24,
+            computedSubagentMaxConcurrent: 22,
+            resourceCap: 32,
+          },
+        }),
+      );
+      expect(text).toContain("agent 40");
+      expect(text).toContain("subagent 38");
+    });
+
+    it("falls back to server-computed values and shows the machine cap", () => {
+      const text = renderToText(
+        renderManage({
+          configAgentMaxConcurrent: undefined,
+          configSubagentMaxConcurrent: undefined,
+          concurrency: {
+            computedMaxConcurrent: 24,
+            computedSubagentMaxConcurrent: 22,
+            resourceCap: 32,
+          },
+        }),
+      );
+      expect(text).toContain("agent 24");
+      expect(text).toContain("subagent 22");
+      expect(text).toContain("capped by machine size at 32");
+    });
+
+    it("old server (no concurrency payload): legacy local formula, no machine-cap line", () => {
+      const text = renderToText(renderManage());
+      // 1 topic → max(1*3, 8) = 8 agents, max(8-2, 4) = 6 subagents.
+      expect(text).toContain("agent 8");
+      expect(text).toContain("subagent 6");
+      expect(text).not.toContain("capped by machine size");
+    });
+  });
 });

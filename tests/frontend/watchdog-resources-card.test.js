@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { WatchdogResourcesCard } from "../../lib/public/js/components/watchdog-tab/resources/index.js";
+import {
+  WatchdogResourcesCard,
+  buildCapacityHeaderModel,
+} from "../../lib/public/js/components/watchdog-tab/resources/index.js";
 import { ResourceBar } from "../../lib/public/js/components/watchdog-tab/resource-bar.js";
 import { AsyncSection } from "../../lib/public/js/components/async-section.js";
+import { Badge } from "../../lib/public/js/components/badge.js";
 import { InlineErrorChip } from "../../lib/public/js/components/inline-error-chip.js";
 import { Tooltip } from "../../lib/public/js/components/tooltip.js";
 
@@ -117,5 +121,89 @@ describe("frontend/watchdog resources card", () => {
       "AlphaClaw 128 B",
       "Other 640 B",
     ]);
+  });
+});
+
+const kGb = 1024 * 1024 * 1024;
+
+const kProfile = {
+  detectedAt: 1756400000000,
+  memory: { limitBytes: 8 * kGb, source: "cgroup-v2" },
+  cpu: { cores: 4, hostCores: 8, source: "cgroup-v2" },
+  disk: { totalBytes: 80 * kGb, path: "/" },
+  gpu: { present: false },
+  tier: "medium",
+  environment: "container",
+};
+
+const badgeTexts = (tree) =>
+  findAllByType(tree, Badge).map((badge) => ({
+    tone: badge.props.tone,
+    text: collectText(badge.props.children).join(""),
+  }));
+
+describe("frontend/watchdog resources card — capacity header", () => {
+  it("renders nothing extra without a profile (older server)", () => {
+    const tree = renderCard({ resources: kResources });
+    expect(findAllByType(tree, Badge).length).toBe(0);
+    expect(buildCapacityHeaderModel(null)).toBeNull();
+  });
+
+  it("happy path: text anchor + ONE neutral tier badge, no source badge, no GPU chip", () => {
+    const tree = renderCard({ resources: kResources, profile: kProfile });
+    expect(treeText(tree)).toContain("4 vCPU · 8.0 GB memory · 80.0 GB disk");
+    expect(badgeTexts(tree)).toEqual([{ tone: "neutral", text: "Medium" }]);
+    // Never a happy-path source badge and never a "no GPU" chip.
+    expect(treeText(tree)).not.toContain("host values");
+    expect(treeText(tree).toLowerCase()).not.toContain("no gpu");
+    expect(treeText(tree).toLowerCase()).not.toContain("cgroup");
+  });
+
+  it("degraded source: warning 'host values' badge appears", () => {
+    const tree = renderCard({
+      resources: kResources,
+      profile: {
+        ...kProfile,
+        memory: { limitBytes: 64 * kGb, source: "host" },
+      },
+    });
+    expect(badgeTexts(tree)).toContainEqual({
+      tone: "warning",
+      text: "host values",
+    });
+  });
+
+  it("GPU chip renders ONLY when present: first device + '+N more', cyan tone", () => {
+    const tree = renderCard({
+      resources: kResources,
+      profile: {
+        ...kProfile,
+        gpu: {
+          present: true,
+          vendor: "nvidia",
+          devices: [
+            { name: "NVIDIA A10G", vramBytes: 24 * kGb },
+            { name: "NVIDIA A10G", vramBytes: 24 * kGb },
+          ],
+        },
+      },
+    });
+    expect(badgeTexts(tree)).toContainEqual({
+      tone: "cyan",
+      text: "NVIDIA A10G +1 more",
+    });
+  });
+
+  it("presence-only GPU (nvidia-smi failed) still gets a chip from the vendor", () => {
+    const model = buildCapacityHeaderModel({
+      ...kProfile,
+      gpu: { present: true, vendor: "nvidia" },
+    });
+    expect(model.gpuLabel).toBe("nvidia");
+  });
+
+  it("disk row is omitted from the anchor when detection failed", () => {
+    const model = buildCapacityHeaderModel({ ...kProfile, disk: null });
+    expect(model.text).toBe("4 vCPU · 8.0 GB memory");
   });
 });
