@@ -235,7 +235,7 @@ Use these conventions for all UI work under `lib/public/js` and `lib/public/css`
 
 ### Persisted settings and mutation feedback
 
-- Persisted booleans/selects go through `useSavedSetting` (`lib/public/js/hooks/use-saved-setting.js`) — optimistic apply, generation-guarded hydration, savingRef lock, loud revert. Booleans render via `<SavedToggle />`; selects/segmented controls render the hook's `value` directly plus an `<InlineErrorChip />` on failure.
+- Persisted booleans/selects go through `useSavedSetting` (`lib/public/js/hooks/use-saved-setting.js`) — optimistic apply, generation-guarded hydration, savingRef lock, loud revert. Booleans render via `<SavedToggle />`; selects/segmented controls render the hook's `value` directly plus an `<InlineErrorChip />` on failure. Document-level hooks: `save` receives `(nextDoc, { context })` — when the endpoint patches per-field, narrow the request body to the field the context changed (watchdog settings is the model) so a stale local copy of a sibling field is never written back.
 - One hook instance per settings DOCUMENT: when several controls share one GET/PUT (e.g. watchdog settings), use a single `useSavedSetting` (`select` = identity) and have each control call `commit({ ...value, field: next }, { context: "field" })`. Never instantiate per-field hooks against the same endpoint.
 - Mutations that revert a control show a persistent `<InlineErrorChip />` adjacent to it (cleared on the next attempt). Toasts are for successes and fire-and-forget notices only — never the sole surface for a revert.
 - A failed initial GET must never present a default value as fact: render the control disabled with a "Couldn't load — Retry" chip (`SavedToggle` does this via `loadError`/`onRetryLoad`).

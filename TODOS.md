@@ -122,6 +122,11 @@
 - **Why:** All flagged by the /ship specialist review; deferred as churn-vs-risk at ship time, none user-visible today.
 - **Effort:** S each. **Depends on:** nothing.
 
+## P3 — Adversarial-review UI cache follow-ups (2026-08-29, grouped)
+- **What:** (1) `cachedFetch` SWR dedupe: when a reusable in-flight request exists, the second consumer's `onRevalidate` is never attached, so two components sharing a key (`/api/env` in Envars + Features, `/api/channels/accounts`) can render different vintages until their next refresh/poll/remount — attach a generation-gated `.then(onRevalidate)` (+`.catch(() => {})`) to the reused in-flight promise; (2) `useCachedFetch`: if `setCached()` supersedes an in-flight forced refresh, the cache correctly refuses the stale write but the awaiting hook still `setData(next)` with the pre-mutation result — re-check the key generation after the await before applying locally; (3) `models-tab/use-models.js` refresh and `providers.js` compute merges inside side-effecting `setState` updaters and synchronously read the result for cache writes — correct under Preact's eager updaters but fragile; compute merges from refs instead.
+- **Why:** Claude adversarial ship-review findings (2026-08-29); all are small self-healing windows or latent fragility, none user-visible as a deterministic bug today.
+- **Effort:** S each. **Depends on:** nothing.
+
 ## P2 — Node onboarding under team mode (trusted-proxy)
 - **What:** `openclaw node run` authenticates with `OPENCLAW_GATEWAY_TOKEN`, which trusted-proxy mode rejects; `/api/nodes/connect-info` currently returns an empty token with a logged warning while team mode is on. Provide a working node path (gateway password credential, or a pairing flow) before recommending team mode to node users.
 - **Context:** lib/server/gateway-credential.js, lib/server/routes/nodes.js; degradation documented in the team-auth milestone report.

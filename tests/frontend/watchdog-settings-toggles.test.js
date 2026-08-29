@@ -192,7 +192,7 @@ describe("frontend/watchdog settings toggles (document-level useSavedSetting)", 
     expect(hook.result().settingsLoadError).toBe(null);
   });
 
-  it("auto-repair flips optimistically, PUTs the MERGED doc, and toasts only on success", async () => {
+  it("auto-repair flips optimistically, PUTs ONLY its own field, and toasts only on success", async () => {
     const putGate = deferred();
     api.updateWatchdogSettings.mockReturnValue(putGate.promise);
     const onRefreshStatuses = vi.fn();
@@ -211,17 +211,17 @@ describe("frontend/watchdog settings toggles (document-level useSavedSetting)", 
     });
     await clicked;
     hook.render();
-    // Document-level commit: the sibling field rides along, untouched.
+    // The PUT body is narrowed to the changed field (the endpoint patches
+    // per-field): a stale local copy of the sibling is never written back.
     expect(api.updateWatchdogSettings).toHaveBeenCalledWith({
       autoRepair: true,
-      notificationsEnabled: true,
     });
     expect(hook.result().savingSettings).toBe(false);
     expect(showToast).toHaveBeenCalledWith("Auto-repair enabled", "success");
     expect(onRefreshStatuses).toHaveBeenCalled();
   });
 
-  it("notifications commit merges the current auto-repair value into the doc", async () => {
+  it("notifications commit keeps the sibling locally but sends only its own field", async () => {
     api.fetchWatchdogSettings.mockResolvedValue({
       ok: true,
       settings: { autoRepair: true, notificationsEnabled: true },
@@ -232,9 +232,10 @@ describe("frontend/watchdog settings toggles (document-level useSavedSetting)", 
     await hook.result().onToggleNotifications(false);
     hook.render();
     expect(api.updateWatchdogSettings).toHaveBeenCalledWith({
-      autoRepair: true,
       notificationsEnabled: false,
     });
+    // The optimistic document still carries the sibling for display.
+    expect(hook.result().settings.autoRepair).toBe(true);
     expect(hook.result().settings.notificationsEnabled).toBe(false);
     expect(showToast).toHaveBeenCalledWith("Notifications disabled", "success");
   });

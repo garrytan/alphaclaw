@@ -342,7 +342,12 @@ describe("frontend/use-saved-setting", () => {
 
     await hook.result().commit((current) => ({ ...current, notify: true }), { context: "notify" });
     hook.render();
-    expect(save).toHaveBeenCalledWith({ autoRepair: true, notify: true });
+    // save receives the commit's context so callers can narrow per-field
+    // request bodies when the endpoint patches individual fields.
+    expect(save).toHaveBeenCalledWith(
+      { autoRepair: true, notify: true },
+      { context: "notify" },
+    );
     expect(hook.result().value).toEqual({ autoRepair: true, notify: true });
   });
 
@@ -463,5 +468,57 @@ describe("frontend/use-saved-setting", () => {
     hook.render();
     expect(hook.result().value).toBe(false); // server corrected
     invalidateCache("saved-setting-seed-key-2");
+  });
+
+  it("a throwing functional updater fails that commit only — it cannot deadlock the lock", async () => {
+    const save = vi.fn(async () => ({}));
+    const hook = renderHook({
+      load: async () => ({ enabled: false }),
+      select: (d) => d.enabled,
+      save,
+    });
+    hook.runLoadEffect();
+    await flushAsync();
+    hook.render();
+
+    const boom = new Error("updater exploded");
+    const failed = await hook.result().commit(() => {
+      throw boom;
+    });
+    hook.render();
+    expect(failed.ok).toBe(false);
+    expect(failed.busy).toBeFalsy();
+    expect(failed.error).toBe(boom);
+    expect(save).not.toHaveBeenCalled();
+    expect(hook.result().value).toBe(false); // no optimistic write happened
+    expect(hook.result().saving).toBe(false);
+
+    // The lock was never taken, so the control still works.
+    const next = await hook.result().commit(true);
+    expect(next.ok).toBe(true);
+    expect(save).toHaveBeenCalledTimes(1);
+  });
+
+  it("a save that succeeds after its key was superseded does not fire the new key's onSaved", async () => {
+    const saveGate = deferred();
+    const save = vi.fn(() => saveGate.promise);
+    const onSaved = vi.fn();
+    const load = vi.fn(async () => ({ enabled: false }));
+    const options = (key) => ({ key, load, select: (d) => d.enabled, save, onSaved });
+    const hook = renderHook(options("a"));
+    hook.runLoadEffect();
+    await flushAsync();
+    hook.render();
+
+    const stale = hook.result().commit(true); // key a save in flight
+    hook.render(options("b")); // switch entities mid-save (render-phase reset)
+    hook.render(options("b"));
+
+    saveGate.resolve({ ok: true }); // key a's PUT succeeds late
+    const outcome = await stale;
+    // Truthful to the awaiting caller (the save DID land for entity a)...
+    expect(outcome.ok).toBe(true);
+    // ...but entity b's onSaved must not run with entity a's value.
+    expect(onSaved).not.toHaveBeenCalled();
   });
 });
