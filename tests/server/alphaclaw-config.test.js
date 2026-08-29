@@ -69,6 +69,9 @@ describe("server/alphaclaw-config", () => {
         openaiCompatApi: {
           enabled: true,
         },
+        agentAdmin: {
+          enabled: false,
+        },
       },
       updates: {
         openclaw: {
@@ -109,6 +112,7 @@ describe("server/alphaclaw-config", () => {
       features: {
         futureFeature: { enabled: true },
         openaiCompatApi: { enabled: false, note: "keep" },
+        agentAdmin: { enabled: false },
       },
       updates: {
         openclaw: {

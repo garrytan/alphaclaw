@@ -13,6 +13,9 @@ db/
 db/**
 !skills/
 !skills/**
+# Generated agent-admin skill: regenerated at boot and renders (masked) admin
+# identities — syncing adds no durability and would commit PII to the repo.
+skills/alphaclaw-admin/
 !hooks/
 !hooks/transforms/
 !hooks/transforms/**
@@ -21,4 +24,7 @@ db/**
 # OpenClaw 2026.4.20+: runtime execution state (job definitions stay in cron/jobs.json).
 cron/jobs-state.json
 !openclaw.json
+# AlphaClaw's own prefs (feature flags, release-channel selection, team mode):
+# git-synced so flags survive restore-from-git (README parity).
+!alphaclaw.json
 !.gitignore

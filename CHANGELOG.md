@@ -5,7 +5,7 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
-## [0.9.41] - 2026-08-29
+## [0.9.42] - 2026-08-29
 
 The Watchdog tab now explains itself: a live narrative of what the watchdog
 is doing and why, a persisted incident history that groups raw events into
@@ -70,6 +70,36 @@ incident and tells you whether anything still needs your attention.
 - Incident review requests return honest statuses (404 unknown incident,
   429 rate-limited, 503 reviewer infrastructure unavailable) with
   human-readable messages.
+## [0.9.41] - 2026-08-29
+
+### Added
+- **Agent Administration (`features.agentAdmin`, default OFF).** The OpenClaw
+  agent can now administer this AlphaClaw deployment on behalf of admin users —
+  env vars, channels, agents, cron, webhooks, models, updates, watchdog, team —
+  through an `alphaclaw admin <METHOD> /api/path` CLI backed by a manifest-
+  described, tier-enforced view of the existing dashboard API. When enabled, a
+  bearer token is minted (0600, state-dir, never git-synced), an
+  `alphaclaw-admin` skill is generated into the workspace, and a pointer stanza
+  is added to the agent's `TOOLS.md`. Operations are classified `safe` /
+  `write` / `restart` / `dangerous` / `denied`; dangerous operations require a
+  one-time confirm code delivered to a configured admin channel; every
+  agent-driven mutation is audited to `watchdog.db` and admins are notified of
+  restart-level and dangerous changes. **No observable change to existing
+  functionality with the flag off** (no token, no skill, no `TOOLS.md` stanza;
+  `/api/admin/*` returns 404). Enable it in Setup UI → General.
+- **Config write hardening.** `alphaclaw.json` writes now go through a locked,
+  atomic read-modify-write helper (`updateAlphaclawConfig`); `.env` writes are
+  atomic (temp+rename) with a locked `updateEnvFile` helper available for
+  callers; and `alphaclaw.json` is git-synced (README parity).
+
+### Security
+- The Agent Administration bearer path is opt-in per call site: it authorizes
+  only Express `/api` requests, never WebSocket upgrades (watchdog terminal,
+  chat) or the human-only cookie surfaces. It uses a separate rate-limit scope
+  from the dashboard login, so agent-bearer failures can never lock an operator
+  out. Documented honestly: this is not a security boundary against the agent
+  (which already holds these credentials via the gateway env) — it exists for
+  audit attribution, revocation, transcript hygiene, and tiered guardrails.
 
 ## [0.9.40] - 2026-08-29
 
@@ -156,6 +186,7 @@ primitives.
   `--help` flag discovery) no longer receive `ANTHROPIC_API_KEY`; only real
   overseer runs get the credential. Concurrent cold probes are also
   single-flighted.
+
 ## [0.9.39] - 2026-08-29
 
 The gateway no longer crash-loops when a beta-only config key meets a stable
