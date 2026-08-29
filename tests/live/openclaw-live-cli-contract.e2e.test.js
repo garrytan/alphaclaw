@@ -4,10 +4,15 @@
 // mocks; this tier screams when upstream drifts:
 //   1. `backup create` on the beta names --no-include-workspace (the backup
 //      retry in openclaw-channel-sync.js keys on the CLI naming the flag).
-//   2. `approvals` exists on the beta (the #23 capability probe + CLI-backed
-//      exec-approvals routes) and is ABSENT on the file-era pin (the legacy
-//      file fallback path).
+//   2. `approvals` exists on BOTH versions (verified live: the pin ships
+//      get/set/allowlist too — an earlier revision of this tier wrongly
+//      assumed the pin lacked the group). What discriminates the eras is the
+//      `pending` subcommand in the PARENT help, which only the sqlite era
+//      lists — the execApprovalsSqlite probe contract.
 //   3. `database preflight` exists on the beta (rollback preflight probes).
+//   4. `approvals get --json` wraps the document ({ path, exists, hash,
+//      file, effectivePolicy }) on BOTH versions — the CLI-backed routes
+//      unwrap `.file` (a bare-doc assumption corrupted the round-trip).
 //
 // Requires: network, a supported Node. Runtime: ~2-6 min (two real installs).
 // When this tier fails but the hermetic suite is green, suspect upstream
@@ -95,10 +100,14 @@ describeLive(
           // 1. The backup retry contract: the CLI itself names the flag.
           const backupHelp = helpText(betaBin, ["backup", "create", "--help"]);
           expect(backupHelp).toMatch(/--no-include-workspace/);
-          // 2. The #23 capability probe contract (sqlite-era approvals CLI).
+          // 2. The era-probe contract: the sqlite era lists `pending` in the
+          // PARENT approvals help (probing `approvals pending --help` is
+          // useless — commander 15 prints the parent help and exits 0 for an
+          // unknown subcommand + --help, on both eras).
           const approvalsHelp = helpText(betaBin, ["approvals", "--help"]);
           expect(approvalsHelp).not.toMatch(kUnknownCommandPattern);
-          expect(approvalsHelp).toMatch(/get|set/i);
+          expect(approvalsHelp).toMatch(/^\s*pending\b/m);
+          expect(approvalsHelp).toMatch(/^\s*get\b/m);
           // 3. The rollback-preflight probe contract.
           const preflightHelp = helpText(betaBin, [
             "database",
@@ -106,14 +115,65 @@ describeLive(
             "--help",
           ]);
           expect(preflightHelp).not.toMatch(kUnknownCommandPattern);
+          // 4. The get/set round-trip contract the CLI-backed routes encode:
+          // the doc is wrapped under `file`, `set --file` accepts alphaclaw's
+          // entry shape ({pattern, id, lastUsedAt}), a redacted get→set
+          // round-trip preserves the stored socket token server-side, and no
+          // legacy exec-approvals.json ever appears.
+          const stateDir = mkTemp("openclaw-live-approvals-state-");
+          const cliEnv = {
+            ...process.env,
+            OPENCLAW_STATE_DIR: stateDir,
+            OPENCLAW_CONFIG_PATH: path.join(stateDir, "openclaw.json"),
+          };
+          fs.writeFileSync(path.join(stateDir, "openclaw.json"), "{}");
+          const runCli = (args, input = null) =>
+            String(
+              execFileSync(process.execPath, [betaBin, ...args], {
+                timeout: 120_000,
+                stdio: "pipe",
+                env: cliEnv,
+                ...(input === null ? {} : { input }),
+              }),
+            );
+          const docPath = path.join(stateDir, "seed-doc.json");
+          fs.writeFileSync(
+            docPath,
+            JSON.stringify({
+              version: 1,
+              socket: { path: "/x.sock", token: "tok-live" },
+              defaults: { security: "full", ask: "off", askFallback: "full" },
+              agents: {
+                "*": { allowlist: [{ pattern: "ls *", id: "a1", lastUsedAt: 5 }] },
+              },
+            }),
+          );
+          runCli(["approvals", "set", "--file", docPath]);
+          const wrapped = JSON.parse(runCli(["approvals", "get", "--json"]));
+          expect(wrapped.file).toBeTruthy();
+          // The get output redacts the socket token…
+          expect(wrapped.file.socket.token).toBeUndefined();
+          // …and a redacted round-trip re-merges it server-side.
+          const mutated = wrapped.file;
+          mutated.agents["*"].allowlist.push({ pattern: "git status", id: "a2" });
+          fs.writeFileSync(docPath, JSON.stringify(mutated));
+          runCli(["approvals", "set", "--file", docPath]);
+          const roundTripped = JSON.parse(runCli(["approvals", "get", "--json"]));
+          expect(
+            roundTripped.file.agents["*"].allowlist.map((entry) => entry.pattern),
+          ).toEqual(["ls *", "git status"]);
+          expect(
+            fs.existsSync(path.join(stateDir, "exec-approvals.json")),
+          ).toBe(false);
         } finally {
           try {
             betaInstall.cleanup?.();
           } catch {}
         }
 
-        // The declared pin is file-era: `approvals` must read as an unknown
-        // command so the routes keep their legacy file fallback there.
+        // The declared pin is file-era but ALSO ships the approvals group
+        // (get/set/allowlist) — only `pending` is missing. The era probe and
+        // the CLI-backed routes both depend on exactly this split.
         const pin = readDeclaredPin();
         expect(pin).toBeTruthy();
         const pinInstall = await installOpenclawVersionToTempDir({
@@ -124,7 +184,9 @@ describeLive(
         try {
           const pinBin = resolveBin(pinInstall.openclawPackageDir);
           const pinApprovalsHelp = helpText(pinBin, ["approvals", "--help"]);
-          expect(pinApprovalsHelp).toMatch(kUnknownCommandPattern);
+          expect(pinApprovalsHelp).not.toMatch(kUnknownCommandPattern);
+          expect(pinApprovalsHelp).toMatch(/^\s*get\b/m);
+          expect(pinApprovalsHelp).not.toMatch(/^\s*pending\b/m);
         } finally {
           try {
             pinInstall.cleanup?.();

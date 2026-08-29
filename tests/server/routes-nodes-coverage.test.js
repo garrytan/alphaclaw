@@ -1022,6 +1022,18 @@ describe("server/routes/nodes coverage", { retry: 1 }, () => {
       socket: { path: "/data/.openclaw/exec-approvals.sock", token: "sekret" },
       agents: { "*": { allowlist: [{ pattern: "git *", id: "id-1" }] } },
     };
+    // The REAL `approvals get --json` output (verified live on 2026.7.1-2 and
+    // 2026.9.1-beta.1) wraps the document: the doc lives under `file`, next
+    // to path/exists/hash/effectivePolicy. The route must unwrap it — a
+    // bare-doc fixture here previously masked a round-trip corruption bug.
+    const wrapStoreDoc = (doc) =>
+      JSON.stringify({
+        path: "/data/.openclaw/state/openclaw.sqlite#exec_approvals_config",
+        exists: true,
+        hash: "abc123",
+        file: doc,
+        effectivePolicy: { scopes: [] },
+      });
 
     const createCliHarness = ({ getResult } = {}) => {
       const fsModule = createMemoryFs();
@@ -1030,7 +1042,7 @@ describe("server/routes/nodes coverage", { retry: 1 }, () => {
           return (
             getResult || {
               ok: true,
-              stdout: JSON.stringify(storeDoc),
+              stdout: wrapStoreDoc(storeDoc),
               stderr: "",
             }
           );

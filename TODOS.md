@@ -296,6 +296,7 @@
 ## P3 — Unified OpenClaw state-backend adapter + CI cross-version contract matrix
 - **What:** Fold exec-approvals/auth/pairing/cron state access behind one adapter module and run the live contract suite (tests/live/openclaw-live-cli-contract.e2e.test.js) against BOTH the pinned and the beta openclaw in CI (hermetic `npm pack openclaw@<v>` fixtures).
 - **Why:** Approach C from the compatibility review's CEO pass: the 2026.9 migration wave showed every direct state access is a latent break; an adapter plus a version matrix turns the next wave into a test failure instead of an outage.
+- **Includes:** the migration-lifecycle E2E from the review (pin → beta apply → forced failure → gate revert, asserting approvals/auth/pairing/notification targets stay functional on the surviving version) — the per-surface behaviors are unit-covered and were verified live against real installs of both versions; the automated end-to-end chain belongs with this matrix.
 - **Context:** lib/server/openclaw-state-era.js and openclaw-state-db.js are the seeds; the era decision table lives in the plan for the #23 follow-up work.
 - **Effort:** L → CC: M. **Depends on:** the state-era module (landed).
 
