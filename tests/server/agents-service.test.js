@@ -1974,6 +1974,65 @@ describe("server/agents/service", () => {
     ).rejects.toThrow("Channel login is currently only supported for WhatsApp");
   });
 
+  // H5: accountId is joined into a credentials path, so a traversal must be
+  // rejected in both login and login-status (the status is a file-exists oracle).
+  it("rejects a traversing accountId on whatsapp login (H5)", async () => {
+    const fsMock = buildFsMock({ initialConfig: {} });
+    const clawCmd = vi.fn(async () => ({ ok: true, stdout: "", stderr: "" }));
+    const service = createAgentsService({
+      fs: fsMock,
+      OPENCLAW_DIR: "/test/.openclaw",
+      readEnvFile: vi.fn(() => []),
+      writeEnvFile: vi.fn(),
+      reloadEnv: vi.fn(),
+      restartGateway: vi.fn(async () => {}),
+      clawCmd,
+    });
+
+    await expect(
+      service.runChannelAccountLogin({
+        provider: "whatsapp",
+        accountId: "../../../../etc/shadow",
+      }),
+    ).rejects.toThrow("Invalid channel accountId");
+    expect(clawCmd).not.toHaveBeenCalled();
+  });
+
+  it("rejects a traversing accountId on whatsapp login-status (H5 oracle)", () => {
+    const fsMock = buildFsMock({ initialConfig: {} });
+    const service = createAgentsService({
+      fs: fsMock,
+      OPENCLAW_DIR: "/test/.openclaw",
+    });
+
+    expect(() =>
+      service.getChannelAccountLoginStatus({
+        provider: "whatsapp",
+        accountId: "../../../../etc/shadow",
+      }),
+    ).toThrow("Invalid channel accountId");
+  });
+
+  it("still accepts a valid non-default accountId (allow-legit)", () => {
+    const fsMock = buildFsMock({
+      initialConfig: {},
+      fileContents: {
+        "/test/.openclaw/credentials/whatsapp/work-2/creds.json": "{}",
+      },
+    });
+    const service = createAgentsService({
+      fs: fsMock,
+      OPENCLAW_DIR: "/test/.openclaw",
+    });
+
+    expect(
+      service.getChannelAccountLoginStatus({
+        provider: "whatsapp",
+        accountId: "work-2",
+      }),
+    ).toEqual({ provider: "whatsapp", accountId: "work-2", linked: true });
+  });
+
   it("updates channel account name and bound agent", () => {
     const fsMock = buildFsMock({
       initialConfig: {
