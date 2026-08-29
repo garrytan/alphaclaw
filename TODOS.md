@@ -74,6 +74,12 @@
 - **Context:** lib/server/watchdog.js runRepair (tryAcquire), lib/server/routes/watchdog.js repair handler, lib/server/gateway-lifecycle-lock.js contract comment.
 - **Effort:** S.
 
+## P3 — Watchdog status gatewayPid stays null
+- **What:** `GET /api/watchdog/status` reports `gatewayPid: null` after boot and after a managed restart while lifecycle is `running`. Both gateway.js launch emit sites pass `pid: child.pid`, so some path drops it before/after the watchdog's `state.gatewayPid = pid` (launch-handler destructure, an exit-time reset racing the relaunch, or the restart-cmd path). Trace and fix; add a status assertion to the launch tests.
+- **Why:** Display/diagnostic gap only — the restart-handoff consume reads the EXIT payload's own pid (verified present live), so behavior is unaffected; but a null pid in status misleads operators and weakens the `?? state.gatewayPid` fallback.
+- **Context:** Found by /qa on brussels (2026-08-29), ISSUE-003 in .gstack/qa-reports/qa-report-localhost-3000-2026-08-29.md. lib/server/watchdog.js (state.gatewayPid), lib/server/gateway.js launch handlers.
+- **Effort:** S.
+
 ## P3 — Watchdog health-timeline sparkline
 - **What:** Small timeline strip on the watchdog page showing health-check outcomes/gateway state over the last 24h (data already persisted in watchdog_events).
 - **Why:** "Was it flapping overnight?" currently requires reading incident rows one by one.
