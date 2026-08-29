@@ -47,11 +47,16 @@ describe("frontend/channel-registry (5.0)", () => {
       expect.objectContaining({ wizard: true, capability: "buzzChannel" }),
     );
     expect(getChannelRegistryEntry("nope")).toBeNull();
-    // Every entry has the meta the menu/modal need.
+    // Every entry has the meta the menu/modal need. Icons are shared icon
+    // components (or null) — never /assets/* URLs, which the gateway proxy
+    // shadows (ISSUE-004).
     for (const entry of kChannelRegistry) {
       expect(entry.id).toBeTruthy();
       expect(entry.label).toBeTruthy();
-      expect(typeof entry.iconSrc).toBe("string");
+      expect(entry.icon === null || typeof entry.icon === "function").toBe(
+        true,
+      );
+      expect(entry.iconSrc).toBeUndefined();
     }
   });
 });

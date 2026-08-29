@@ -49,7 +49,7 @@ vi.mock("../../lib/public/js/components/channels.js", () => ({
   ALL_CHANNELS: ["telegram", "discord", "slack", "whatsapp", "clickclack"],
   getChannelMeta: (id) => ({
     label: id === "clickclack" ? "ClickClack" : id,
-    iconSrc: "",
+    icon: null,
   }),
 }));
 vi.mock("../../lib/public/js/components/toast.js", () => ({
