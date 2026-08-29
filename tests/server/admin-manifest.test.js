@@ -206,6 +206,53 @@ describe("admin-manifest env.update body-aware tierResolver (A1)", () => {
     expect(resolveEnvUpdate({ vars: [] })).toBe("restart");
   });
 
+  it("escalates to dangerous when an agent SETS a new Claude Code launcher key", () => {
+    // The launcher config is human-editable but agent-protected: repointing it
+    // would let a compromised agent hijack the operator's one-click launcher,
+    // so an agent write requires an operator confirm even though it is a set,
+    // not a clear.
+    mockEnvFile([{ key: "ANTHROPIC_API_KEY", value: "x" }]);
+    expect(
+      resolveEnvUpdate({
+        vars: [
+          { key: "ANTHROPIC_API_KEY", value: "x" },
+          { key: "CLAUDE_CODE_ROUTINE_TOKEN", value: "sk-ant-oat01-evil" },
+        ],
+      }),
+    ).toBe("dangerous");
+  });
+
+  it("escalates to dangerous when an agent ROTATES the launcher URL", () => {
+    mockEnvFile([{ key: "CLAUDE_CODE_ROUTINE_URL", value: "trig_original" }]);
+    expect(
+      resolveEnvUpdate({
+        vars: [{ key: "CLAUDE_CODE_ROUTINE_URL", value: "trig_attacker" }],
+      }),
+    ).toBe("dangerous");
+  });
+
+  it("escalates to dangerous when an agent CLEARS the launcher URL by omission (non-sensitive key)", () => {
+    // The URL is not secret-class, so the generic sensitive-clear rule would
+    // miss it — the agent-protected rule catches the omit-as-delete.
+    mockEnvFile([{ key: "CLAUDE_CODE_ROUTINE_URL", value: "trig_original" }]);
+    expect(resolveEnvUpdate({ vars: [] })).toBe("dangerous");
+  });
+
+  it("stays restart when the launcher keys are unchanged (kept verbatim)", () => {
+    mockEnvFile([
+      { key: "CLAUDE_CODE_ROUTINE_URL", value: "trig_x" },
+      { key: "CLAUDE_CODE_ROUTINE_TOKEN", value: "sk-ant-oat01-keep" },
+    ]);
+    expect(
+      resolveEnvUpdate({
+        vars: [
+          { key: "CLAUDE_CODE_ROUTINE_URL", value: "trig_x" },
+          { key: "CLAUDE_CODE_ROUTINE_TOKEN", value: "sk-ant-oat01-keep" },
+        ],
+      }),
+    ).toBe("restart");
+  });
+
   it("stays restart when the env file cannot be read (readEnvFile swallows → [])", () => {
     // readEnvFile catches read failures and returns [], so an unreadable .env
     // yields no known secrets to clear: tier stays at the base restart, never

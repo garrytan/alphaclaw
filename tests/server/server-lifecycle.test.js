@@ -246,6 +246,43 @@ describe("server/init/server-lifecycle", () => {
     expect(stopGateway).toHaveBeenCalledTimes(1);
   });
 
+  it("a signal during a marked-exiting drain exits immediately without a second drain", async () => {
+    const stopGateway = vi.fn(async () => {});
+    const killGatewayNow = vi.fn();
+    const exitCalls = [];
+    const lifecycle = createServerLifecycle({
+      server: new EventEmitter(),
+      PORT: 3999,
+      stopGateway,
+      killGatewayNow,
+      flushLogs: vi.fn(),
+      exitImpl: (code) => exitCalls.push(code),
+      logger: createSilentLogger(),
+      listenRetryDelayMs: 1,
+      shutdownDeadlineMs: 5000,
+    });
+
+    // restartProcess (alphaclaw-version.js) latches the lifecycle before
+    // running its own bounded drain(), so a SIGTERM landing inside that
+    // window must hit the already-draining fast path: immediate exit with
+    // the latched intentional-restart code, and NO second drain.
+    lifecycle.markExiting(75);
+    await lifecycle.gracefulExit(0, "SIGTERM");
+
+    expect(exitCalls).toEqual([75]);
+    expect(stopGateway).not.toHaveBeenCalled();
+    // Last-ditch gateway reap still runs so an orphaned child can't hold the
+    // port against the successor process.
+    expect(killGatewayNow).toHaveBeenCalledTimes(1);
+
+    // The latch is first-writer-wins: a later markExiting must not clobber
+    // an exit code that is already committed.
+    lifecycle.markExiting(0);
+    await lifecycle.gracefulExit(0, "SIGTERM again");
+    expect(exitCalls).toEqual([75, 75]);
+    expect(stopGateway).not.toHaveBeenCalled();
+  });
+
   it("enforces the hard shutdown deadline when a drain step hangs", async () => {
     const exitCalls = [];
     const lifecycle = createServerLifecycle({

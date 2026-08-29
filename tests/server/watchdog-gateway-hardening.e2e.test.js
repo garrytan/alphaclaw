@@ -32,6 +32,7 @@ const createStack = ({
   releaseChannelHooks = null,
   medicRunBudgetMs = undefined,
   gatewayLifecycleLock = null,
+  readConfigMtimeMs = undefined,
 } = {}) => {
   process.env.WATCHDOG_AUTO_REPAIR = autoRepair ? "true" : "false";
   process.env.WATCHDOG_NOTIFICATIONS_DISABLED = "false";
@@ -99,6 +100,7 @@ const createStack = ({
     ...(releaseChannelHooks ? { releaseChannelHooks } : {}),
     ...(medicRunBudgetMs === undefined ? {} : { medicRunBudgetMs }),
     ...(gatewayLifecycleLock ? { gatewayLifecycleLock } : {}),
+    ...(readConfigMtimeMs ? { readConfigMtimeMs } : {}),
   });
 
   const app = express();
@@ -233,6 +235,140 @@ describe("server/watchdog gateway hardening (e2e)", () => {
       expect.objectContaining({ lifecycle: "running", health: "healthy" }),
     );
     watchdog.stop();
+  });
+
+  describe("EX_CONFIG latch auto-retry on config change (issue #21 bug 9)", () => {
+    const latchWithExit78 = (stack) => {
+      stack.gateway.healthy = false;
+      stack.watchdog.onGatewayLaunch({ startedAt: Date.now(), pid: 1234 });
+      stack.watchdog.onGatewayExit({
+        code: 78,
+        expectedExit: false,
+        stderrTail: ["fatal configuration error"],
+      });
+    };
+
+    it("clears the latch and relaunches exactly once per distinct openclaw.json change", async () => {
+      const mtimeRef = { value: 100 };
+      const stack = createStack({
+        readConfigMtimeMs: () => mtimeRef.value,
+      });
+      latchWithExit78(stack);
+      await flushMicrotasks();
+      expect(stack.watchdog.getStatus().lifecycle).toBe(
+        "configuration_error",
+      );
+
+      // Unchanged config: the latch stays inert.
+      await stack.watchdog.runHealthCheck({ source: "health_timer" });
+      expect(stack.launchGatewayProcess).not.toHaveBeenCalled();
+
+      // The operator (or medic, or a boot restore) edits openclaw.json.
+      mtimeRef.value = 200;
+      stack.gateway.healthy = true;
+      await stack.watchdog.runHealthCheck({ source: "health_timer" });
+      await flushMicrotasks();
+      expect(stack.launchGatewayProcess).toHaveBeenCalledTimes(1);
+      expect(stack.watchdog.getStatus().lifecycle).toBe("restarting");
+
+      // Same mtime again: no second relaunch for the same edit.
+      await stack.watchdog.runHealthCheck({ source: "health_timer" });
+      expect(stack.launchGatewayProcess).toHaveBeenCalledTimes(1);
+      stack.watchdog.stop();
+    });
+
+    it("re-latches on a second exit 78 and stays inert until the config changes again", async () => {
+      const mtimeRef = { value: 100 };
+      const stack = createStack({
+        readConfigMtimeMs: () => mtimeRef.value,
+      });
+      latchWithExit78(stack);
+      await flushMicrotasks();
+
+      mtimeRef.value = 200;
+      await stack.watchdog.runHealthCheck({ source: "health_timer" });
+      await flushMicrotasks();
+      expect(stack.launchGatewayProcess).toHaveBeenCalledTimes(1);
+
+      // The relaunched gateway exits 78 again: re-latched with the NEW
+      // baseline — the same mtime can never retry twice.
+      stack.watchdog.onGatewayExit({
+        code: 78,
+        expectedExit: false,
+        stderrTail: ["fatal configuration error"],
+      });
+      await flushMicrotasks();
+      expect(stack.watchdog.getStatus().lifecycle).toBe(
+        "configuration_error",
+      );
+      await stack.watchdog.runHealthCheck({ source: "health_timer" });
+      expect(stack.launchGatewayProcess).toHaveBeenCalledTimes(1);
+
+      mtimeRef.value = 300;
+      await stack.watchdog.runHealthCheck({ source: "health_timer" });
+      await flushMicrotasks();
+      expect(stack.launchGatewayProcess).toHaveBeenCalledTimes(2);
+      stack.watchdog.stop();
+    });
+
+    it("does not auto-retry while openclaw.json is missing", async () => {
+      const mtimeRef = { value: 100 };
+      const stack = createStack({
+        readConfigMtimeMs: () =>
+          mtimeRef.value === null ? null : mtimeRef.value,
+      });
+      latchWithExit78(stack);
+      await flushMicrotasks();
+
+      // File deleted mid-repair: null reads as "unchanged".
+      mtimeRef.value = null;
+      await stack.watchdog.runHealthCheck({ source: "health_timer" });
+      expect(stack.launchGatewayProcess).not.toHaveBeenCalled();
+
+      // It reappears with a fresh mtime: one retry.
+      mtimeRef.value = 500;
+      await stack.watchdog.runHealthCheck({ source: "health_timer" });
+      await flushMicrotasks();
+      expect(stack.launchGatewayProcess).toHaveBeenCalledTimes(1);
+      stack.watchdog.stop();
+    });
+
+    it("does not auto-retry while a medic run holds the operation flag", async () => {
+      const mtimeRef = { value: 100 };
+      let resolveMedic;
+      const configMedic = {
+        isEnabled: vi.fn(() => true),
+        run: vi.fn(
+          () =>
+            new Promise((resolve) => {
+              resolveMedic = resolve;
+            }),
+        ),
+      };
+      const stack = createStack({
+        configMedic,
+        medicRunBudgetMs: 60_000,
+        readConfigMtimeMs: () => mtimeRef.value,
+      });
+      latchWithExit78(stack);
+      await flushMicrotasks();
+      expect(configMedic.run).toHaveBeenCalledTimes(1);
+
+      // Config changes while the medic is mid-run: the retry must not race
+      // the medic's own relaunch.
+      mtimeRef.value = 200;
+      await stack.watchdog.runHealthCheck({ source: "health_timer" });
+      expect(stack.launchGatewayProcess).not.toHaveBeenCalled();
+
+      resolveMedic({ fixed: false, tier: "none", diagnosis: null });
+      await flushMicrotasks();
+      await flushMicrotasks();
+      // Medic settled without a fix; the pending config change now retries.
+      await stack.watchdog.runHealthCheck({ source: "health_timer" });
+      await flushMicrotasks();
+      expect(stack.launchGatewayProcess).toHaveBeenCalledTimes(1);
+      stack.watchdog.stop();
+    });
   });
 
   describe("startup medic on exit 78", () => {

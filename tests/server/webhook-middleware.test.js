@@ -45,6 +45,36 @@ const createHookApp = ({ gatewayUrl, insertRequest = () => {} }) => {
 };
 
 describe("server/webhook-middleware", () => {
+  // MW2: /hooks/* is unauthenticated; a Set-Cookie or hop-by-hop header from
+  // the gateway must not cross back to the caller's browser.
+  it("does not forward Set-Cookie or hop-by-hop headers from the gateway (MW2)", async () => {
+    const server = http.createServer((req, res) => {
+      req.on("data", () => {});
+      req.on("end", () => {
+        res.statusCode = 200;
+        res.setHeader("content-type", "application/json");
+        res.setHeader("set-cookie", "session=leaked; Path=/");
+        res.setHeader("connection", "keep-alive");
+        res.setHeader("x-safe-header", "keep-me");
+        res.end(JSON.stringify({ ok: true }));
+      });
+    });
+    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const gatewayUrl = `http://127.0.0.1:${server.address().port}`;
+    const app = createHookApp({ gatewayUrl });
+
+    try {
+      const response = await request(app).post("/hooks/any").send({ a: 1 });
+      expect(response.status).toBe(200);
+      expect(response.headers["set-cookie"]).toBeUndefined();
+      expect(response.headers.connection).not.toBe("keep-alive");
+      // A benign header still passes through.
+      expect(response.headers["x-safe-header"]).toBe("keep-me");
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+
   it("maps hook query params into forwarded JSON body", async () => {
     const { server, calls, gatewayUrl } = await createGatewaySpyServer();
     const app = createHookApp({ gatewayUrl });

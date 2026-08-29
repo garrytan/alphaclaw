@@ -56,17 +56,44 @@ describe("server/login-throttle", () => {
     expect(secondLockMs).toBeLessThanOrEqual(kLoginMaxLockMs);
   });
 
-  it("removes state on login success", () => {
+  it("removes the client bucket on login success", () => {
     const throttle = createLoginThrottle();
     const now = 10_000;
-    throttle.getOrCreateLoginAttemptState("client-3", now);
+    const state = throttle.getOrCreateLoginAttemptState("client-3", now);
+    throttle.recordLoginFailure(state, now);
     throttle.recordLoginSuccess("client-3");
 
-    const state = throttle.getOrCreateLoginAttemptState("client-3", now + 1);
-    expect(state.client.attempts).toBe(0);
-    expect(state.client.failStreak).toBe(0);
-    expect(state.global.attempts).toBe(0);
-    expect(state.global.failStreak).toBe(0);
+    const next = throttle.getOrCreateLoginAttemptState("client-3", now + 1);
+    expect(next.client.attempts).toBe(0);
+    expect(next.client.failStreak).toBe(0);
+  });
+
+  // MW3: a single client's success must NOT zero the GLOBAL bucket, or a
+  // distributed brute force could reset the cross-client lockout by
+  // interleaving one valid login.
+  it("does not reset the global bucket on a single client's success (MW3)", () => {
+    const throttle = createLoginThrottle();
+    const now = 20_000;
+
+    // Accumulate global failures across several distinct clients.
+    for (let i = 0; i < 3; i += 1) {
+      const state = throttle.getOrCreateLoginAttemptState(`bad-${i}`, now + i);
+      throttle.recordLoginFailure(state, now + i);
+    }
+    const beforeSuccess = throttle.getOrCreateLoginAttemptState(
+      "observer",
+      now + 10,
+    );
+    expect(beforeSuccess.global.attempts).toBeGreaterThanOrEqual(3);
+
+    // A legitimate success by one client clears only that client.
+    throttle.recordLoginSuccess("good-client");
+
+    const afterSuccess = throttle.getOrCreateLoginAttemptState(
+      "observer-2",
+      now + 11,
+    );
+    expect(afterSuccess.global.attempts).toBeGreaterThanOrEqual(3);
   });
 
   it("isolates scoped throttle state in the same store", () => {
