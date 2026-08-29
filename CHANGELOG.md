@@ -21,14 +21,15 @@ incident and tells you whether anything still needs your attention.
   window (the toggle keeps showing what you configured; the chip shows what
   is actually in effect).
 - **Incident history**: gateway trouble is now recorded as incidents —
-  opened on the first crash, failed probe, config error, or safe-mode entry,
-  and closed on recovery — instead of a flat event log. Incident cards carry
+  opened on the first crash, failed probe, config error, release rollback,
+  or safe-mode entry, and closed on recovery — instead of a flat event log. Incident cards carry
   a severity badge, a deterministic title ("Crash loop → rolled back ·
   resolved in 8m"), and an expandable event timeline; the active incident is
   pinned and pulsing. Older incidents page in with "Load more"; an "All
   events" tab keeps the raw feed with a routine-probe filter. Incidents
   survive restarts (an interrupted one is marked abandoned honestly) and
-  notifications deep-link straight to the incident card.
+  the overseer's verdict notifications deep-link straight to the incident
+  card.
 - **Incident overseer** (optional, off by default): after an incident
   settles and the gateway is healthy again, a local Claude Code review is
   recorded on the incident — a verdict (resolved / monitoring / action
