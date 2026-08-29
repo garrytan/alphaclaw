@@ -216,6 +216,14 @@ describe("frontend/cron-helpers", () => {
     expect(formatNextRunRelativeMs(0, nowMs)).toBe("—");
     expect(formatNextRunRelativeMs(-5, nowMs)).toBe("—");
     expect(formatNextRunRelativeMs(nowMs - 3 * 60 * 60 * 1000, nowMs)).toBe("overdue by 3h");
+    // Floor policy pins (midpoints where round and floor disagree): 90m
+    // overdue is "1h", 36h overdue is "1d" — a revert to Math.round breaks.
+    expect(formatNextRunRelativeMs(nowMs - 90 * 60 * 1000, nowMs)).toBe(
+      "overdue by 1h",
+    );
+    expect(formatNextRunRelativeMs(nowMs - 36 * 60 * 60 * 1000, nowMs)).toBe(
+      "overdue by 1d",
+    );
     expect(formatNextRunRelativeMs(nowMs - 4 * 24 * 60 * 60 * 1000, nowMs)).toBe(
       "overdue by 4d",
     );

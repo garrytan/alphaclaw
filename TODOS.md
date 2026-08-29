@@ -355,6 +355,18 @@
 - **Context:** `renderNavItem` in lib/public/js/components/sidebar.js and the `.sidebar-nav a` metrics in lib/public/css/shell.css:215-246. Repo-wide pass; keep visual density on desktop while adding focus/touch affordances.
 - **Effort:** M. **Depends on:** nothing.
 
+## P3 — Locale QA matrix for the time-normalization surfaces (manual)
+- **What:** Visual pass with browser locale en-GB (24h), de-DE, ar-EG (RTL), ja-JP at 375px and 200% zoom over the tight cells (webhook request rows, team invite chips, cron settings card, run-history collapsed groups); wrap affected timestamp spans in `<bdi>` only if the ar-EG pass shows bidi reordering.
+- **Why:** Unit + E2E assertions are locale-agnostic by construction (browser-computed Intl expectations), so they prove correctness in any locale but can't judge *layout* in locales the CI browser doesn't run.
+- **Context:** Plan verification item V4 of the UI local-time normalization (v0.9.45); everything automatable was executed (en-US live QA 13/13, TZ-shifted suites, E2E 9/9). Needs a real user machine with switchable browser locale.
+- **Effort:** S (manual, ~20 min). **Depends on:** nothing.
+
+## P3 — Midnight-rollover re-render sweep for today-style timestamps
+- **What:** Confirm each `formatLocaleDateTimeWithTodayTime` surface (webhook lists, cron run history, usage sessions) refreshes its "today → time-only" labels across a local midnight via its existing poll/`useNowMs` cycle; add a ticker to any surface found static.
+- **Why:** A tab left open across midnight would otherwise show yesterday's times in the time-only style until the next poll. Pre-existing behavior (poll cycles cover the known surfaces) — this records the plan's V5 verification item instead of leaving it silently unchecked.
+- **Context:** Plan verification item V5 of the UI local-time normalization (v0.9.45).
+- **Effort:** S. **Depends on:** nothing.
+
 ## Completed
 
 ## Make env-save channel sync one atomic lifecycle-lock op

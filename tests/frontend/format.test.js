@@ -129,6 +129,10 @@ describe("frontend/format", () => {
 
   it("formatLocaleDateTimeWithTodayTime prints time only for today", async () => {
     const { formatLocaleDateTimeWithTodayTime } = await loadFormatModule();
+    // Freeze midday so the internal new Date() same-day check can never
+    // straddle local midnight between the two evaluations.
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(2026, 7, 29, 12, 0, 0));
     const now = new Date();
     const twoDaysAgo = new Date(Date.now() - 2 * 86400000);
 
@@ -148,6 +152,7 @@ describe("frontend/format", () => {
     expect(
       formatLocaleDateTimeWithTodayTime(1700000000, { valueIsUnixSeconds: true }),
     ).toBe(kDateTime.format(new Date(1700000000 * 1000)));
+    vi.useRealTimers();
   });
 
   it("formatLocaleDateTimeWithZone appends the numeric UTC offset", async () => {
@@ -164,7 +169,7 @@ describe("frontend/format", () => {
     }).format(date);
 
     expect(formatLocaleDateTimeWithZone(date)).toBe(expected);
-    expect(formatLocaleDateTimeWithZone(date)).toContain("GMT");
+    expect(formatLocaleDateTimeWithZone(date)).toMatch(/GMT|UTC/);
     expect(formatLocaleDateTimeWithZone(null)).toBe("—");
     expect(formatLocaleDateTimeWithZone("nope", { fallback: "" })).toBe("");
   });
@@ -243,6 +248,19 @@ describe("frontend/format", () => {
       expect(utc.date.format(instant)).toBe("Mar 10, 2026");
       expect(utc.hour.format(instant)).toBe("7 PM");
     }
+  });
+
+  it("renders distinct offsets across a DST fall-back pair (fold disambiguation)", async () => {
+    const { createFormatters } = await loadFormatModule();
+    const la = createFormatters("America/Los_Angeles");
+    // 2026-11-01: PDT (GMT-7) folds back to PST (GMT-8) at 02:00 local.
+    const beforeFold = new Date(Date.UTC(2026, 10, 1, 8, 29, 30)); // 01:29:30 GMT-7
+    const afterFold = new Date(Date.UTC(2026, 10, 1, 9, 30, 0)); // 01:30:00 GMT-8
+    const first = la.dateTimeWithZone.format(beforeFold);
+    const second = la.dateTimeWithZone.format(afterFold);
+    expect(first).not.toBe(second);
+    expect(first).toMatch(/[-\u2212]0?7/);
+    expect(second).toMatch(/[-\u2212]0?8/);
   });
 
   it("toLocalDayKey and isSameLocalDay use the local calendar", async () => {

@@ -238,6 +238,29 @@ describe("frontend/watchdog console card logs pane", () => {
     expect(text).not.toContain("Copy all");
   });
 
+  it("caption falls back to 'local time' when the browser zone is unknown", async () => {
+    // format.js returns "" from getBrowserTimeZone when Intl resolution
+    // fails; the caption must not render a dangling "shown in " preposition.
+    vi.resetModules();
+    vi.doMock("../../lib/public/js/lib/format.js", async (importOriginal) => ({
+      ...(await importOriginal()),
+      getBrowserTimeZone: () => "",
+    }));
+    try {
+      const { WatchdogConsoleCard: MockedCard } = await import(
+        "../../lib/public/js/components/watchdog-tab/console/index.js"
+      );
+      const tree = expandTree(
+        MockedCard({ loadingLogs: false, logs: "", logsError: null }),
+      );
+      const text = treeText(tree).replace(/\s+/g, " ");
+      expect(text).toContain("Line timestamps shown in local time");
+    } finally {
+      vi.doUnmock("../../lib/public/js/lib/format.js");
+      vi.resetModules();
+    }
+  });
+
   it("always shows the Logs-tab timezone hint, including loading and empty states", () => {
     // Whitespace-normalize: htm splits "text ${expr}" into separate children.
     const normalizedText = (tree) => treeText(tree).replace(/\s+/g, " ");

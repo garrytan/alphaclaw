@@ -74,6 +74,11 @@ bucketed days at the *server's* midnight, and the Doctor tab served a frozen
 - The timezone request header is memoized at page load alongside the display
   formatters, so server-side bucketing and on-screen times can never diverge
   mid-session.
+- The `timeZone` echoed by `/api/usage/summary` is now the canonical IANA id
+  (e.g. `america/new_york` → `America/New_York`) rather than the raw client
+  string — a side effect of shared zone canonicalization; browsers already
+  send canonical ids, so only hand-rolled callers comparing the echo to their
+  input will notice.
 
 ## [0.9.44] - 2026-08-29
 
