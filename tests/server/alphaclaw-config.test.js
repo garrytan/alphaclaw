@@ -55,6 +55,9 @@ describe("server/alphaclaw-config", () => {
       team: {
         enabled: false,
       },
+      watchdog: {
+        overseer: { enabled: false },
+      },
     });
   });
 
@@ -89,6 +92,9 @@ describe("server/alphaclaw-config", () => {
       },
       team: {
         enabled: false,
+      },
+      watchdog: {
+        overseer: { enabled: false },
       },
     });
   });
