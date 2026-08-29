@@ -47,6 +47,7 @@ vi.mock("../../lib/public/js/lib/api.js", () => ({
 
 import * as preactHooks from "preact/hooks";
 import * as api from "../../lib/public/js/lib/api.js";
+import { invalidateCache } from "../../lib/public/js/lib/api-cache.js";
 import { useWatchdogIncidents } from "../../lib/public/js/components/watchdog-tab/incidents/use-incidents.js";
 import { WatchdogIncidentsCard } from "../../lib/public/js/components/watchdog-tab/incidents/index.js";
 import { ActionButton } from "../../lib/public/js/components/action-button.js";
@@ -107,6 +108,9 @@ const findAllByType = (tree, type) =>
 beforeEach(() => {
   harness.reset();
   vi.clearAllMocks();
+  // The events poll seeds from the shared api-cache (cacheKey) — drop the
+  // module-level entry so a prior test's data can't leak across cases.
+  invalidateCache("/api/watchdog/events?limit=20");
 });
 
 describe("frontend/watchdog incidents hook", () => {

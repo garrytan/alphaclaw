@@ -43,6 +43,7 @@ vi.mock("preact/hooks", () => {
 
 vi.mock("../../lib/public/js/lib/api.js", () => ({
   fetchWatchdogLogs: vi.fn(),
+  fetchWatchdogLogsDelta: vi.fn(),
   closeWatchdogTerminalSession: vi.fn(),
 }));
 
@@ -138,10 +139,10 @@ describe("frontend/watchdog console logs poll", () => {
     };
   };
 
-  it("surfaces a first-poll failure as logsError instead of an empty pane", async () => {
+  it("surfaces a first-load failure as logsError instead of an empty pane", async () => {
     vi.useFakeTimers();
     const error = new Error("logs endpoint down");
-    api.fetchWatchdogLogs.mockRejectedValue(error);
+    api.fetchWatchdogLogs.mockRejectedValue(error); // initial tail fails
     renderHook();
     const unmount = mount();
     await vi.advanceTimersByTimeAsync(0);
@@ -151,8 +152,13 @@ describe("frontend/watchdog console logs poll", () => {
     expect(state.logs).toBe("");
     expect(state.logsError).toBe(error);
 
-    // The 3s poll keeps retrying; the next success clears the error.
-    api.fetchWatchdogLogs.mockResolvedValue("recovered output");
+    // The 3s delta poll keeps retrying; the next success clears the error.
+    api.fetchWatchdogLogsDelta.mockResolvedValue({
+      reset: true,
+      data: "recovered output",
+      gen: 1,
+      offset: 16,
+    });
     await vi.advanceTimersByTimeAsync(3000);
     state = renderHook();
     expect(state.logsError).toBe(null);
@@ -160,9 +166,9 @@ describe("frontend/watchdog console logs poll", () => {
     unmount();
   });
 
-  it("keeps the last loaded logs when a later poll fails (stale, flagged)", async () => {
+  it("keeps the last loaded logs when a later delta poll fails (stale, flagged)", async () => {
     vi.useFakeTimers();
-    api.fetchWatchdogLogs.mockResolvedValue("line one");
+    api.fetchWatchdogLogs.mockResolvedValue("line one"); // initial tail
     renderHook();
     const unmount = mount();
     await vi.advanceTimersByTimeAsync(0);
@@ -171,7 +177,7 @@ describe("frontend/watchdog console logs poll", () => {
     expect(state.logs).toBe("line one");
     expect(state.logsError).toBe(null);
 
-    api.fetchWatchdogLogs.mockRejectedValue(new Error("flaky"));
+    api.fetchWatchdogLogsDelta.mockRejectedValue(new Error("flaky"));
     await vi.advanceTimersByTimeAsync(3000);
     state = renderHook();
     expect(state.logs).toBe("line one"); // last-known-good stays on screen
