@@ -63,6 +63,7 @@ npm run test:coverage # With coverage report
 npm run test:live     # Live e2e: real npm/GitHub catalog + package applies (~5 min, network)
 npm run test:live:dev # Live e2e: real dev-channel source build only (20-35 min, ~5 GB disk)
 npm run test:ui       # Browser UI smoke: real server + headless Chromium (opt-in; self-skips without a browse CLI — set BROWSE_BIN)
+npm run test:ui:time  # Browser smoke of UI time formatting — locale/timezone agnostic by construction (opt-in; same harness)
 npm run test:ui:claude-code   # Browser smoke of the Open Claude Code launcher (opt-in; same harness)
 npm run test:live:claude-code # Fires the real routine — BILLS one claude.ai session (needs the routine env vars + CLAUDE_CODE_LIVE_FIRE=1)
 ```
