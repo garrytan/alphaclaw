@@ -43,6 +43,7 @@
 - **Prompt Hardening:** Ships anti-drift bootstrap prompts (`AGENTS.md`, `TOOLS.md`) injected into your agent's system prompt on every message — enforcing safe practices, commit discipline, and change summaries out of the box.
 - **Git Sync:** Automatic hourly commits of your OpenClaw workspace to GitHub with configurable cron schedule. Combined with prompt hardening, every agent action is version-controlled and auditable.
 - **Version Management:** In-place updates for both AlphaClaw and OpenClaw with in-app release notes, changelog review, and one-click apply.
+- **Agent Administration:** Optional (off by default) mode that lets the OpenClaw agent drive the same dashboard API the web UI uses through an `alphaclaw admin` CLI, with tiered guardrails, confirm codes for dangerous operations, a rotatable bearer token, and full Watchdog audit logging.
 - **Codex OAuth:** Built-in PKCE flow for OpenAI Codex CLI model access.
 
 ## Why AlphaClaw
@@ -133,6 +134,27 @@ How it works:
 - **Beta extras appear when the beta ships them.** On OpenClaw 2026.8.1-beta.1+ the UI gains a session Dashboards link, a "Create verified SQLite backup" button on the Watchdog tab, and a note about secret egress binding — all hidden (and their APIs closed) on older versions.
 
 The stable pin in `package.json` remains the recovery floor: whatever happens, a container restart can always fall back to it.
+
+## Agent Administration
+
+Off by default. When you enable `features.agentAdmin` (Setup UI -> General tab, "Agent Administration" panel, or `PUT /api/alphaclaw/config/features/agent-admin`), the OpenClaw agent can administer the deployment on behalf of admin users. It works through an `alphaclaw admin <METHOD> /api/path` CLI that drives the same dashboard HTTP API the web UI uses, so the server owns all validation and side effects. With the flag off, nothing observable changes.
+
+Enabling it regenerates an `alphaclaw-admin` skill into the agent's workspace (rebuilt at boot, effective on the agent's next session) and adds a pointer stanza to the agent's `TOOLS.md`. Operations are tiered: **safe** reads run freely, **write** operations mutate immediately, **restart** operations apply but need a gateway restart, **dangerous** operations require a one-time confirm code delivered to a configured admin channel, and **denied** operations stay operator-only. Every agent mutation is written to the Watchdog event log, and admins are notified of restart-level and dangerous changes. A bearer token (mode `0600`, kept in the managed state dir, never git-synced) authenticates the CLI; rotate it from the panel.
+
+The CLI takes the request body inline or from stdin, plus optional flags for confirm codes, a compact summary, and JSON output:
+
+```bash
+# safe: reads run freely
+alphaclaw admin GET /api/openclaw/runs --json
+
+# write: applies immediately, body from stdin
+echo '{"autoRepair":true}' | alphaclaw admin PUT /api/alphaclaw/config/watchdog --data-stdin --summary
+
+# dangerous: one-time confirm code, delivered to your admin channel
+alphaclaw admin DELETE /api/agents/legacy-bot --confirm 481920
+```
+
+**Honest framing (same convention as team mode).** This is not a security boundary against the agent. The agent already holds these credentials through its gateway environment. Agent Administration exists to keep secrets out of chat transcripts, attribute actions for audit, enable revocation, and add tiered guardrails and structured errors.
 
 ## CLI
 

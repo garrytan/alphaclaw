@@ -426,6 +426,9 @@ describe("server/routes/system", () => {
             openaiCompatApi: {
               enabled: false,
             },
+            agentAdmin: {
+              enabled: false,
+            },
           },
           updates: {
             openclaw: {
@@ -792,6 +795,9 @@ describe("server/routes/system", () => {
           openaiCompatApi: {
             enabled: true,
           },
+          agentAdmin: {
+            enabled: false,
+          },
         },
         updates: {
           openclaw: {
@@ -824,6 +830,9 @@ describe("server/routes/system", () => {
           features: {
             openaiCompatApi: {
               enabled: true,
+            },
+            agentAdmin: {
+              enabled: false,
             },
           },
           updates: {

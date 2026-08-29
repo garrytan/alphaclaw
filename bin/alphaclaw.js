@@ -813,6 +813,22 @@ if (
   process.exit(runTelegramTopicsList());
 }
 
+// `alphaclaw admin ...` — an out-of-process HTTP client for the running
+// server's /api surface. Early-exit BEFORE the release-channel boot sync so it
+// can never race an activation (same contract as the telegram/doctor verbs).
+if (command === "admin") {
+  const { runAdminCommand } = require("../lib/cli/admin");
+  runAdminCommand({ argv: commandArgs.slice(1), rootDir })
+    .then((code) => process.exit(code))
+    .catch((error) => {
+      process.stdout.write(
+        `${JSON.stringify({ ok: false, code: "cli_error", message: error.message })}\n`,
+      );
+      process.exit(1);
+    });
+  return;
+}
+
 const kPort = String(process.env.PORT || "3000").trim();
 if (kPort === "18789") {
   console.error(

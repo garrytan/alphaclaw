@@ -7,7 +7,9 @@
     "hooks/bootstrap/agents.md",
     "hooks/bootstrap/tools.md",
     "skills/gog-cli",
+    "skills/alphaclaw-admin",
     ".alphaclaw/hourly-git-sync.sh",
-    ".alphaclaw/.cli-device-auto-approved"
+    ".alphaclaw/.cli-device-auto-approved",
+    ".alphaclaw/agent-admin-token"
   ]
 }

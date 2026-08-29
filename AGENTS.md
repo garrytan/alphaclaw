@@ -71,6 +71,16 @@ Runtime model:
 
 - **This file (`AGENTS.md`):** Project-level guidance for coding agents working on the AlphaClaw codebase — architecture, conventions, release flow, UI patterns, etc.
 - **`lib/setup/core-prompts/AGENTS.md`:** Runtime prompt injected into the OpenClaw agent's system prompt. Only write there when the guidance is meant for the deployed agent's behavior, not for coding on this project.
+- **`lib/setup/skills/alphaclaw-admin/*.md`:** Fragments for the generated Agent Administration skill (the deployed agent's reference for the `alphaclaw admin` CLI). Prose only — the operation tables are generated from the manifest. Write here only when the guidance is for the agent administering AlphaClaw at runtime.
+
+### Agent Administration (features.agentAdmin)
+
+The Agent Administration feature (default OFF) lets the deployed OpenClaw agent drive the dashboard `/api` surface via `alphaclaw admin`, governed by an operation manifest.
+
+- **Adding or changing an `/api` route:** every route the agent may reach needs a descriptor in `lib/server/admin-manifest/domains/<domain>.js` (tier, and where relevant `params`/`readOp`/`secretFields`/`redactResponse`/`tierResolver`). The route-coverage test (`tests/server/admin-manifest.test.js`) fails CI for any unclassified `/api` route — either classify it or add it to `kUnmanifestedRoutes` in `lib/server/admin-manifest/index.js` **with a why-comment**.
+- **Never let the agent actor reach the gateway proxy:** enforcement denies any agent-actor `/api` request outside the manifest (all methods), so an unclassified route is denied, not proxied.
+- **Bearer auth is opt-in per call site** (`isAuthorizedRequest(req, { allowBearer })`): only the Express `/api` `requireAuth` path passes `true`. WS upgrades and manual checks must keep the default `false`.
+- **Reuse the shared `sanitizeLabel`/`toTableCell`** in `lib/server/utils/sanitize-label.js` for any live string rendered into the skill or a prompt.
 
 ## Operations
 
