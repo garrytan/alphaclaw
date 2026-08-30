@@ -420,6 +420,31 @@ describe("server/routes/system", () => {
     expect(res.body).toEqual({ ok: false, error: "Missing vars array" });
   });
 
+  it("carries a machine capacity block on GET /api/status (kill-switch-honest)", async () => {
+    const deps = createSystemDeps();
+    deps.fs.existsSync.mockReturnValue(true);
+    deps.isGatewayRunning.mockResolvedValue(true);
+    const app = createApp(deps);
+
+    const res = await request(app).get("/api/status");
+
+    expect(res.status).toBe(200);
+    // Shape, not values: the profile reads the real machine in tests, but the
+    // block must always exist with these fields, and autotune.enabled must
+    // reflect the env kill-switch (globally set in tests/setup-agent.js).
+    const machine = res.body.machine;
+    expect(machine).toBeTruthy();
+    expect(machine).toHaveProperty("tier");
+    expect(machine).toHaveProperty("memoryGb");
+    expect(machine).toHaveProperty("cores");
+    expect(machine).toHaveProperty("environment");
+    expect(machine.gpu).toHaveProperty("present");
+    expect(machine.autotune).toEqual({
+      enabled: false,
+      agentConcurrencyCap: null,
+    });
+  });
+
   it("reports running gateway status on GET /api/status", async () => {
     const deps = createSystemDeps();
     deps.fs.existsSync.mockReturnValue(true);
@@ -456,6 +481,10 @@ describe("server/routes/system", () => {
           },
           watchdog: {
             overseer: { enabled: false },
+          },
+          autotune: {
+            enabled: true,
+            overrides: {},
           },
         },
         openclawChannel: null,
@@ -845,6 +874,10 @@ describe("server/routes/system", () => {
         watchdog: {
           overseer: { enabled: false },
         },
+        autotune: {
+          enabled: true,
+          overrides: {},
+        },
       },
     });
   });
@@ -885,6 +918,10 @@ describe("server/routes/system", () => {
           },
           watchdog: {
             overseer: { enabled: false },
+          },
+          autotune: {
+            enabled: true,
+            overrides: {},
           },
         },
       }),
