@@ -82,6 +82,7 @@ const makeOverseer = ({
   channelInfo = () => ({ appliedId: "2026.8.1-beta.3", acceptedAt: 111 }),
   notify = vi.fn(async () => ({ ok: true })),
   getDoctorJson = async () => '{"ok":true}',
+  getMachineSummary = undefined,
 } = {}) => {
   const overseer = createUpgradeOverseer({
     ledger,
@@ -91,6 +92,7 @@ const makeOverseer = ({
     getChannelInfo: channelInfo,
     notify,
     getDoctorJson,
+    ...(getMachineSummary !== undefined ? { getMachineSummary } : {}),
     logger: { log: () => {} },
   });
   return { overseer, notify };
@@ -171,6 +173,52 @@ describe("server/upgrade-overseer", () => {
     expect(mainCall.args).toContain("--disallowedTools");
     // The untrusted-log warning made it into the prompt.
     expect(mainCall.input).toContain("UNTRUSTED");
+  });
+
+  it("includes the numeric machine summary in the prompt's trusted block", async () => {
+    const { ledger } = makeLedger();
+    seedFailedRun(ledger);
+    const runner = makeRunner();
+    const { overseer } = makeOverseer({
+      ledger,
+      runner,
+      getMachineSummary: () => ({
+        memoryMb: 2048,
+        cores: 1,
+        tier: "small",
+        activeGatewayHeapMb: 1024,
+      }),
+    });
+
+    await overseer.maybeRunForLatest();
+
+    const mainCall = runner.calls.find((c) => c.args?.[0] === "-p");
+    expect(mainCall.input).toContain("=== MACHINE (trusted, AlphaClaw-generated) ===");
+    expect(mainCall.input).toContain('"memoryMb": 2048');
+    expect(mainCall.input).toContain('"tier": "small"');
+    // The untrusted-log framing is untouched.
+    expect(mainCall.input).toContain("UNTRUSTED");
+  });
+
+  it("omits the machine section when getMachineSummary throws (fail-open)", async () => {
+    const { ledger } = makeLedger();
+    seedFailedRun(ledger);
+    const runner = makeRunner();
+    const { overseer } = makeOverseer({
+      ledger,
+      runner,
+      getMachineSummary: () => {
+        throw new Error("profile exploded");
+      },
+    });
+
+    await overseer.maybeRunForLatest();
+
+    // The review still ran to a verdict; the section is simply absent.
+    const mainCall = runner.calls.find((c) => c.args?.[0] === "-p");
+    expect(mainCall.input).not.toContain("=== MACHINE");
+    expect(mainCall.input).toContain("=== CHANNEL STATE (trusted, AlphaClaw-generated) ===");
+    expect(ledger.readRun(kOpId).overseer.verdict).toBe("healthy");
   });
 
   it("stores an unparseable verdict honestly and does not notify", async () => {

@@ -277,8 +277,102 @@ describe("server/onboarding/workspace bootstrap prompt sync", () => {
     expect(pendingContent).not.toContain("The native `createForumTopic` action");
   });
 
+  it("renders the Machine Resources section from the machine profile", () => {
+    stubRegistryRead(null);
+    const machineProfile = require("../../lib/server/machine-profile");
+    const autotune = require("../../lib/server/autotune");
+    vi.spyOn(machineProfile, "getMachineProfile").mockReturnValue({
+      detectedAt: 1,
+      tier: "medium",
+      memory: { limitBytes: 4 * 1024 * 1024 * 1024, source: "cgroup-v2" },
+      cpu: { cores: 2, hostCores: 8, source: "cgroup-v2" },
+      disk: { totalBytes: null, path: null },
+      gpu: {
+        present: true,
+        vendor: "nvidia",
+        // Control char: external nvidia-smi output goes through sanitizeLabel.
+        devices: [{ name: "NVIDIA\u0000 A10G", vramBytes: null }],
+      },
+      environment: "container",
+    });
+    vi.spyOn(autotune, "getAgentConcurrencyCap").mockReturnValue(32);
+    const mockFs = {
+      readFileSync: vi.fn((target) => {
+        if (target === kToolsTemplatePath) return "Setup: {{SETUP_UI_URL}}";
+        if (target === kAgentsSourcePath) return "AGENTS TEMPLATE";
+        throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+      }),
+      existsSync: vi.fn(() => false),
+      writeFileSync: vi.fn(),
+      mkdirSync: vi.fn(),
+      copyFileSync: vi.fn(),
+    };
+
+    syncBootstrapPromptFiles({
+      fs: mockFs,
+      workspaceDir: "/tmp/alphaclaw-machine-workspace",
+      baseUrl: "https://setup.example.com",
+    });
+
+    const toolsWrite = mockFs.writeFileSync.mock.calls.find(([target]) =>
+      String(target).endsWith("TOOLS.md"),
+    );
+    expect(toolsWrite).toBeTruthy();
+    const content = toolsWrite[1];
+    expect(content).toContain("## Machine Resources");
+    expect(content).toContain(
+      "- Capacity: medium tier — 4.0 GB RAM, 2 vCPU, GPU: NVIDIA A10G",
+    );
+    expect(content).toContain("- Agent concurrency cap (autotune): 32");
+    expect(content).toContain(
+      "run `alphaclaw admin GET /api/watchdog/resources` if agent administration is enabled",
+    );
+    // Injected into every agent session — the section stays tiny.
+    const section = content.slice(content.indexOf("## Machine Resources"));
+    expect(section.length).toBeLessThanOrEqual(500);
+  });
+
+  it("omits the Machine Resources section when the profile read throws (fail-open)", () => {
+    stubRegistryRead(null);
+    const machineProfile = require("../../lib/server/machine-profile");
+    vi.spyOn(machineProfile, "getMachineProfile").mockImplementation(() => {
+      throw new Error("profile exploded");
+    });
+    const mockFs = {
+      readFileSync: vi.fn((target) => {
+        if (target === kToolsTemplatePath) return "Setup: {{SETUP_UI_URL}}";
+        if (target === kAgentsSourcePath) return "AGENTS TEMPLATE";
+        throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+      }),
+      existsSync: vi.fn(() => false),
+      writeFileSync: vi.fn(),
+      mkdirSync: vi.fn(),
+      copyFileSync: vi.fn(),
+    };
+
+    syncBootstrapPromptFiles({
+      fs: mockFs,
+      workspaceDir: "/tmp/alphaclaw-machine-workspace",
+      baseUrl: "https://setup.example.com",
+    });
+
+    const toolsWrite = mockFs.writeFileSync.mock.calls.find(([target]) =>
+      String(target).endsWith("TOOLS.md"),
+    );
+    expect(toolsWrite).toBeTruthy();
+    // TOOLS.md still writes; only the machine section is missing.
+    expect(toolsWrite[1]).toContain("Setup: https://setup.example.com");
+    expect(toolsWrite[1]).not.toContain("## Machine Resources");
+  });
+
   it("degrades gracefully when config and google state are unreadable", () => {
     stubRegistryRead(null);
+    // Machine profile is host-derived (not routed through the injected fs), so
+    // pin it to a throw here to keep the exact-equality assertion meaningful.
+    const machineProfile = require("../../lib/server/machine-profile");
+    vi.spyOn(machineProfile, "getMachineProfile").mockImplementation(() => {
+      throw new Error("profile exploded");
+    });
     const mockFs = {
       readFileSync: vi.fn((target) => {
         if (target === kToolsTemplatePath) return "Setup: {{SETUP_UI_URL}}";

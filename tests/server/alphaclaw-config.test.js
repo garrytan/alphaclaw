@@ -5,9 +5,12 @@ const path = require("path");
 const {
   isOpenAiCompatApiEnabled,
   readAlphaclawConfig,
+  readAutotuneEnabled,
+  readAutotuneSettings,
   readOpenclawMedicEnabled,
   readOpenclawReleaseChannel,
   readWatchdogOverseerEnabled,
+  updateAutotuneSettings,
   updateOpenAiCompatApiFeature,
   updateOpenclawMedicEnabled,
   updateOpenclawReleaseChannel,
@@ -87,6 +90,10 @@ describe("server/alphaclaw-config", () => {
       watchdog: {
         overseer: { enabled: false },
       },
+      autotune: {
+        enabled: true,
+        overrides: {},
+      },
     });
   });
 
@@ -127,6 +134,10 @@ describe("server/alphaclaw-config", () => {
       },
       watchdog: {
         overseer: { enabled: false },
+      },
+      autotune: {
+        enabled: true,
+        overrides: {},
       },
     });
   });
@@ -267,5 +278,105 @@ describe("server/alphaclaw-config", () => {
     );
     expect(persisted.watchdog.futureKnob).toBe(7);
     expect(persisted.watchdog.overseer.model).toBe("x");
+  });
+
+  it("defaults autotune to enabled (opt-out) and normalizes overrides strictly", () => {
+    const openclawDir = createTempOpenclawDir();
+
+    expect(readAutotuneEnabled({ openclawDir })).toBe(true);
+    expect(readAutotuneSettings({ openclawDir })).toEqual({
+      enabled: true,
+      overrides: {},
+    });
+
+    const configPath = path.join(openclawDir, "alphaclaw.json");
+    fs.writeFileSync(
+      configPath,
+      JSON.stringify({
+        autotune: {
+          enabled: "yes", // not literal false → enabled
+          overrides: {
+            gatewayHeapMb: 2048,
+            uvThreadpoolSize: 200, // out of bounds → dropped
+            agentConcurrencyCap: "64", // numeric string → accepted
+            unknownKnob: 5, // unknown → dropped
+            openAiCompatBodyLimitMb: 12.5, // non-integer → dropped
+          },
+        },
+      }),
+      "utf8",
+    );
+    expect(readAutotuneSettings({ openclawDir })).toEqual({
+      enabled: true,
+      overrides: { gatewayHeapMb: 2048, agentConcurrencyCap: 64 },
+    });
+  });
+
+  it("fails CLOSED on a corrupt config for the default-ON autotune gate", () => {
+    const openclawDir = createTempOpenclawDir();
+    fs.writeFileSync(
+      path.join(openclawDir, "alphaclaw.json"),
+      "{ not json",
+      "utf8",
+    );
+    expect(readAutotuneEnabled({ openclawDir })).toBe(false);
+  });
+
+  it("fails CLOSED on a non-ENOENT stat failure — only a missing file is a fresh install", () => {
+    const openclawDir = createTempOpenclawDir();
+    // The operator's enabled:false may be INSIDE the unreadable file — a
+    // transient EACCES/EIO must not flip the default-ON feature back on.
+    const eaccesFs = {
+      ...fs,
+      statSync: () => {
+        throw Object.assign(new Error("EACCES: permission denied"), {
+          code: "EACCES",
+        });
+      },
+    };
+    expect(readAutotuneEnabled({ openclawDir, fsModule: eaccesFs })).toBe(false);
+
+    // A genuinely missing file keeps the fresh-install default.
+    const enoentFs = {
+      ...fs,
+      statSync: () => {
+        throw Object.assign(new Error("ENOENT: no such file"), {
+          code: "ENOENT",
+        });
+      },
+    };
+    expect(readAutotuneEnabled({ openclawDir, fsModule: enoentFs })).toBe(true);
+  });
+
+  it("merges autotune overrides per key and clears with null", () => {
+    const openclawDir = createTempOpenclawDir();
+
+    updateAutotuneSettings({
+      openclawDir,
+      overrides: { gatewayHeapMb: 1024, sqliteCacheMb: 16 },
+    });
+    // Saving one key must not erase siblings.
+    const second = updateAutotuneSettings({
+      openclawDir,
+      overrides: { gatewayHeapMb: 2048 },
+    });
+    expect(second.changed).toBe(true);
+    expect(readAutotuneSettings({ openclawDir }).overrides).toEqual({
+      gatewayHeapMb: 2048,
+      sqliteCacheMb: 16,
+    });
+
+    // Explicit null clears exactly one key.
+    updateAutotuneSettings({ openclawDir, overrides: { gatewayHeapMb: null } });
+    expect(readAutotuneSettings({ openclawDir }).overrides).toEqual({
+      sqliteCacheMb: 16,
+    });
+
+    const disabled = updateAutotuneSettings({ openclawDir, enabled: false });
+    expect(disabled.changed).toBe(true);
+    expect(readAutotuneEnabled({ openclawDir })).toBe(false);
+
+    const noop = updateAutotuneSettings({ openclawDir, enabled: false });
+    expect(noop.changed).toBe(false);
   });
 });
