@@ -75,4 +75,22 @@ describe("frontend/watchdog degraded card (D16)", () => {
     expect(text).toContain("secrets couldn't load");
     expect(text).toContain("last checked");
   });
+
+  it("renders last-checked as a browser-local time with seconds (probes land seconds apart)", () => {
+    const lastHealthCheckAt = "2026-08-28T00:00:00.000Z";
+    const text = renderText({
+      watchdogStatus: {
+        eventLoopDegraded: true,
+        readyzFailing: [],
+        lastHealthCheckAt,
+      },
+    });
+    // Same Intl preset production uses (format.js timeStyle medium), so the
+    // assertion stays locale- and timezone-agnostic in CI.
+    const expected = new Intl.DateTimeFormat(undefined, {
+      timeStyle: "medium",
+    }).format(new Date(lastHealthCheckAt));
+    expect(text).toContain("last checked");
+    expect(text).toContain(expected);
+  });
 });

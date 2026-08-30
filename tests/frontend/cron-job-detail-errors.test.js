@@ -113,6 +113,68 @@ describe("frontend/cron-tab job detail load failures", () => {
   });
 });
 
+const collectText = (node, out = []) => {
+  if (typeof node === "string" || typeof node === "number") {
+    out.push(String(node));
+    return out;
+  }
+  if (Array.isArray(node)) {
+    for (const child of node) collectText(child, out);
+    return out;
+  }
+  if (node && typeof node === "object") {
+    if (node.props) collectText(node.props.children, out);
+    if (node.rendered) collectText(node.rendered, out);
+  }
+  return out;
+};
+
+const treeText = (tree) => collectText(tree).join(" ");
+
+// Expected values are computed through the same Intl presets production uses
+// (format.js timeStyle short / dateStyle medium), so assertions stay locale-
+// and timezone-agnostic in CI.
+const kTime = new Intl.DateTimeFormat(undefined, { timeStyle: "short" });
+const kDateTime = new Intl.DateTimeFormat(undefined, {
+  dateStyle: "medium",
+  timeStyle: "short",
+});
+
+describe("frontend/cron-tab settings-card next-run absolute label", () => {
+  const renderCardText = (nextRunAtMs) =>
+    treeText(
+      expandTree(
+        CronJobSettingsCard({
+          job: { ...kJob, state: { nextRunAtMs } },
+        }),
+      ),
+    );
+
+  it("shows time-only for a next run later today", () => {
+    // "Now" itself is always the same local day as the render's own now.
+    const ts = Date.now();
+    expect(renderCardText(ts)).toContain(kTime.format(new Date(ts)));
+  });
+
+  it("prefixes Tomorrow for a next run on the next local day", () => {
+    // Built exactly like the component's tomorrowValue (setDate(+1)), so the
+    // expectation holds across DST and month boundaries.
+    const tomorrow = new Date();
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    const text = renderCardText(tomorrow.getTime());
+    expect(text).toContain(`Tomorrow ${kTime.format(tomorrow)}`);
+  });
+
+  it("shows the full locale date-time beyond tomorrow and an em-dash for no next run", () => {
+    const farDate = new Date();
+    farDate.setDate(farDate.getDate() + 10);
+    expect(renderCardText(farDate.getTime())).toContain(
+      kDateTime.format(farDate),
+    );
+    expect(renderCardText(0)).toContain("—");
+  });
+});
+
 describe("frontend/cron-tab settings-card enable toggle", () => {
   it("wires the SavedToggle to server-confirmed state, save errors, and the still-X describe copy", () => {
     const enableSaveError = {

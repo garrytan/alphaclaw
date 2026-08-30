@@ -1222,30 +1222,40 @@ describe("frontend/api behaviors", () => {
     expect(headers.get("x-client-timezone")).toBe("UTC");
   });
 
-  it("authFetch omits the timezone header when Intl lookup throws", async () => {
+  it("authFetch keeps the module-load timezone even if Intl breaks later (memoized)", async () => {
+    // getBrowserTimeZone is memoized in format.js at module load so the header
+    // always matches the zone the display formatters captured — a runtime Intl
+    // failure (or OS tz change) must NOT change the header mid-session.
+    const api = await loadApiModule();
+    const expected = new Intl.DateTimeFormat().resolvedOptions().timeZone;
     global.Intl = {
       DateTimeFormat: () => {
         throw new Error("boom");
       },
     };
-    const api = await loadApiModule();
 
     await api.authFetch("/api/ping");
 
     const headers = global.fetch.mock.calls[0][1].headers;
-    expect(headers.get("x-client-timezone")).toBe(null);
+    expect(headers.get("x-client-timezone")).toBe(expected);
   });
 
-  it("authFetch omits the timezone header when timezone is empty", async () => {
-    global.Intl = {
-      DateTimeFormat: () => ({ resolvedOptions: () => ({ timeZone: "" }) }),
-    };
-    const api = await loadApiModule();
+  it("authFetch omits the timezone header when the browser zone is unknown", async () => {
+    vi.resetModules();
+    vi.doMock("../../lib/public/js/lib/format.js", () => ({
+      getBrowserTimeZone: () => "",
+    }));
+    try {
+      const api = await import("../../lib/public/js/lib/api.js");
 
-    await api.authFetch("/api/ping");
+      await api.authFetch("/api/ping");
 
-    const headers = global.fetch.mock.calls[0][1].headers;
-    expect(headers.get("x-client-timezone")).toBe(null);
+      const headers = global.fetch.mock.calls[0][1].headers;
+      expect(headers.get("x-client-timezone")).toBe(null);
+    } finally {
+      vi.doUnmock("../../lib/public/js/lib/format.js");
+      vi.resetModules();
+    }
   });
 
   it("still redirects on 401 when localStorage.clear throws", async () => {

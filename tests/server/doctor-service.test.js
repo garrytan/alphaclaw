@@ -776,71 +776,163 @@ describe("server/doctor-service", () => {
     expect(status.bootstrapContext.hardening.state).toBe("starved");
   });
 
-  it("describes reuse elapsed time in hours and days", async () => {
+  it("persists reuse summaries without a frozen elapsed phrase", async () => {
     const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-elapsed-workspace-"));
     fs.writeFileSync(path.join(workspaceRoot, "AGENTS.md"), "# Guidance\n", "utf8");
     const { computeWorkspaceSnapshot } = require("../../lib/server/doctor/workspace-fingerprint");
     const fingerprint = computeWorkspaceSnapshot(workspaceRoot).fingerprint;
     const { createDoctorService } = loadDoctorService();
 
-    const runReuseWithCompletedAt = async (completedAt) => {
-      const summaries = [];
-      const doctorService = createDoctorService({
-        clawCmd: vi.fn(),
-        listDoctorRuns: () => [
-          {
-            id: 1,
-            status: "completed",
-            workspaceFingerprint: fingerprint,
-            promptVersion: "doctor-v2",
-            contextProfile: "stable-2026.7",
-            openclawVersion: "",
-            completedAt,
-            startedAt: completedAt,
-            rawResult: {},
-          },
-        ],
-        listDoctorRunSummaries: () => [
-          {
-            id: 1,
-            status: "completed",
-            workspaceFingerprint: fingerprint,
-            promptVersion: "doctor-v2",
-            contextProfile: "stable-2026.7",
-            openclawVersion: "",
-            completedAt,
-            startedAt: completedAt,
-          },
-        ],
-        getDoctorRunWorkspaceManifest: () => null,
-        listDoctorCards: () => [],
-        createDoctorRun: () => 2,
-        completeDoctorRun: ({ summary }) => {
-          summaries.push(summary);
+    // Source run completed 2 hours ago: the old code baked "(2 hours ago)"
+    // into the persisted summary, which then read back stale forever.
+    const completedAt = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+    const summaries = [];
+    const doctorService = createDoctorService({
+      clawCmd: vi.fn(),
+      listDoctorRuns: () => [
+        {
+          id: 1,
+          status: "completed",
+          workspaceFingerprint: fingerprint,
+          promptVersion: "doctor-v2",
+          contextProfile: "stable-2026.7",
+          openclawVersion: "",
+          completedAt,
+          startedAt: completedAt,
+          rawResult: {},
         },
-        insertDoctorCards: vi.fn(),
-        getDoctorRun: () => null,
-        getDoctorCardsByRunId: () => [{ status: "working", title: "Clone me" }],
-        getDoctorCard: () => null,
-        updateDoctorCardStatus: () => null,
+      ],
+      listDoctorRunSummaries: () => [
+        {
+          id: 1,
+          status: "completed",
+          workspaceFingerprint: fingerprint,
+          promptVersion: "doctor-v2",
+          contextProfile: "stable-2026.7",
+          openclawVersion: "",
+          completedAt,
+          startedAt: completedAt,
+        },
+      ],
+      getDoctorRunWorkspaceManifest: () => null,
+      listDoctorCards: () => [],
+      createDoctorRun: () => 2,
+      completeDoctorRun: ({ summary }) => {
+        summaries.push(summary);
+      },
+      insertDoctorCards: vi.fn(),
+      getDoctorRun: () => null,
+      getDoctorCardsByRunId: () => [{ status: "working", title: "Clone me" }],
+      getDoctorCard: () => null,
+      updateDoctorCardStatus: () => null,
+      workspaceRoot,
+      managedRoot: workspaceRoot,
+      computeSnapshotAsync: fastComputeSnapshotAsync,
+    });
+
+    const result = await doctorService.runDoctor();
+    expect(result.reusedPreviousRun).toBe(true);
+    const reuseSummary = summaries.find((summary) =>
+      /No workspace changes/.test(summary || ""),
+    );
+    expect(reuseSummary).toBe(
+      "No workspace changes since last scan. LLM findings carried over; environment checks re-evaluated.",
+    );
+    expect(reuseSummary).not.toMatch(/\(/);
+  });
+
+  it("scrubs legacy frozen-elapsed reuse summaries on read but leaves other summaries alone", async () => {
+    const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-scrub-workspace-"));
+    const dbRoot = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-scrub-db-"));
+    fs.writeFileSync(path.join(workspaceRoot, "AGENTS.md"), "# Guidance\n", "utf8");
+
+    const doctorDb = loadManagedDoctorDb();
+    doctorDb.initDoctorDb({ rootDir: dbRoot });
+
+    const { createDoctorService } = loadDoctorService();
+    const doctorService = createDoctorService({
+      clawCmd: vi.fn(),
+      listDoctorRuns: doctorDb.listDoctorRuns,
+      listDoctorRunSummaries: doctorDb.listDoctorRunSummaries,
+      getDoctorRunManifest: doctorDb.getDoctorRunManifest,
+      getLatestCompletedRunSummary: doctorDb.getLatestCompletedRunSummary,
+      listDoctorCards: doctorDb.listDoctorCards,
+      getInitialWorkspaceBaseline: doctorDb.getInitialWorkspaceBaseline,
+      setInitialWorkspaceBaseline: doctorDb.setInitialWorkspaceBaseline,
+      createDoctorRun: doctorDb.createDoctorRun,
+      completeDoctorRun: doctorDb.completeDoctorRun,
+      insertDoctorCards: doctorDb.insertDoctorCards,
+      getDoctorRun: doctorDb.getDoctorRun,
+      getDoctorCardsByRunId: doctorDb.getDoctorCardsByRunId,
+      getDoctorCard: doctorDb.getDoctorCard,
+      updateDoctorCardStatus: doctorDb.updateDoctorCardStatus,
+      workspaceRoot,
+      managedRoot: workspaceRoot,
+      computeSnapshotAsync: fastComputeSnapshotAsync,
+    });
+
+    // Seed runs straight into the DB the way legacy code persisted them.
+    const seedRun = async (summary) => {
+      const runId = doctorDb.createDoctorRun({
+        status: "completed",
+        engine: "gateway_agent",
         workspaceRoot,
-        managedRoot: workspaceRoot,
-        computeSnapshotAsync: fastComputeSnapshotAsync,
+        workspaceFingerprint: `fp-${summary.length}-${Math.random()}`,
+        promptVersion: "test",
       });
-      const result = await doctorService.runDoctor();
-      expect(result.reusedPreviousRun).toBe(true);
-      return summaries.find((summary) => /No workspace changes/.test(summary || ""));
+      doctorDb.completeDoctorRun({ id: runId, status: "completed", summary });
+      // listDoctorRuns orders by started_at (ms precision); keep seeds apart.
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      return runId;
     };
 
-    const hoursSummary = await runReuseWithCompletedAt(
-      new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString(),
-    );
-    const daysSummary = await runReuseWithCompletedAt(
-      new Date(Date.now() - 3 * 24 * 60 * 60 * 1000).toISOString(),
+    const scrubbedSummary = "No workspace changes since last scan. LLM findings carried over; environment checks re-evaluated.";
+    const legacyShapes = [
+      "No workspace changes since last scan (1 minute ago). Same findings apply.",
+      "No workspace changes since last scan (12 minutes ago). Same findings apply.",
+      "No workspace changes since last scan (2 hours ago). Same findings apply.",
+      "No workspace changes since last scan (3 days ago). Same findings apply.",
+      "No workspace changes since last scan (the last scan). Same findings apply.",
+    ];
+    // A coincidental "(3 minutes ago)" in a DIFFERENT sentence context must
+    // survive untouched — the scrub matches the exact legacy template only.
+    const coincidentalSummary =
+      "Found a stale lockfile refreshed recently (3 minutes ago). Consider pinning versions.";
+
+    const legacyRunIds = [];
+    for (const shape of legacyShapes) {
+      legacyRunIds.push(await seedRun(shape));
+    }
+    const coincidentalRunId = await seedRun(coincidentalSummary);
+    // Seed a legacy-shaped run LAST so the status path serves it as latestRun.
+    const latestLegacyRunId = await seedRun(
+      "No workspace changes since last scan (12 minutes ago). Same findings apply.",
     );
 
-    expect(hoursSummary).toMatch(/2 hours ago/);
-    expect(daysSummary).toMatch(/3 days ago/);
+    // Status path (/api/doctor/status): latestRun.summary is scrubbed.
+    const status = doctorService.buildStatus();
+    expect(status.latestRun.id).toBe(latestLegacyRunId);
+    expect(status.latestRun.summary).toBe(scrubbedSummary);
+
+    // Runs list path (/api/doctor/runs): every legacy shape is scrubbed, the
+    // coincidental phrase is not.
+    const listedRuns = doctorService.listDoctorRuns({ limit: 20 });
+    for (const runId of [...legacyRunIds, latestLegacyRunId]) {
+      const listed = listedRuns.find((run) => run.id === runId);
+      expect(listed.summary).toBe(scrubbedSummary);
+    }
+    const listedCoincidental = listedRuns.find((run) => run.id === coincidentalRunId);
+    expect(listedCoincidental.summary).toBe(coincidentalSummary);
+
+    // Single-run path (/api/doctor/runs/:id): same scrub, same exemption.
+    expect(doctorService.getDoctorRun(latestLegacyRunId).summary).toBe(scrubbedSummary);
+    expect(doctorService.getDoctorRun(coincidentalRunId).summary).toBe(coincidentalSummary);
+
+    // The DB row itself is untouched — this is a scrub-on-read, not a
+    // migration.
+    expect(doctorDb.getDoctorRun(latestLegacyRunId).summary).toBe(
+      "No workspace changes since last scan (12 minutes ago). Same findings apply.",
+    );
   });
 
   it("captures evidence snippets for path evidence with line ranges", async () => {

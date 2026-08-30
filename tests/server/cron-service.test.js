@@ -1141,3 +1141,163 @@ describe("server/cron-service trends", () => {
     }
   });
 });
+
+describe("server/cron-service trends client time zones", () => {
+  const sumPoints = (points, key) =>
+    points.reduce((sum, point) => sum + point[key], 0);
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("buckets a near-midnight entry into the client zone's day", () => {
+    // Frozen now: Aug 30 06:30 UTC === Aug 29 23:30 PDT.
+    vi.setSystemTime(new Date(Date.UTC(2026, 7, 30, 6, 30)));
+    const entryTs = Date.UTC(2026, 7, 30, 6, 0); // Aug 29 23:00 PDT / Aug 30 06:00 UTC
+    const openclawDir = createOpenclawDirWithCronJobs([]);
+    writeRunLog(openclawDir, "job-a", [
+      finishedEntry("job-a", { ts: entryTs, status: "ok" }),
+    ]);
+    try {
+      const service = makeService(openclawDir);
+
+      const laTrends = service.getJobRunTrends({
+        jobId: "job-a",
+        range: "7d",
+        timeZone: "America/Los_Angeles",
+      });
+      expect(laTrends.timeZone).toBe("America/Los_Angeles");
+      expect(laTrends.points).toHaveLength(7);
+      const laLast = laTrends.points[laTrends.points.length - 1];
+      expect(laLast.startMs).toBe(Date.UTC(2026, 7, 29, 7)); // Aug 29 00:00 PDT
+      expect(laLast.totalRuns).toBe(1);
+      // Buckets are contiguous: each endMs is the next startMs, last ends now.
+      laTrends.points.forEach((point, index) => {
+        const next = laTrends.points[index + 1];
+        expect(point.endMs).toBe(next ? next.startMs : Date.now());
+      });
+
+      const utcTrends = service.getJobRunTrends({
+        jobId: "job-a",
+        range: "7d",
+        timeZone: "UTC",
+      });
+      expect(utcTrends.timeZone).toBe("UTC");
+      const utcLast = utcTrends.points[utcTrends.points.length - 1];
+      // The same entry belongs to Aug 30 in UTC.
+      expect(utcLast.startMs).toBe(Date.UTC(2026, 7, 30));
+      expect(utcLast.totalRuns).toBe(1);
+    } finally {
+      fs.rmSync(openclawDir, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps day buckets aligned across a DST fall-back day", () => {
+    // Frozen now: Nov 3, 2026 noon PST.
+    vi.setSystemTime(new Date(Date.UTC(2026, 10, 3, 20, 0)));
+    const openclawDir = createOpenclawDirWithCronJobs([]);
+    writeRunLog(openclawDir, "job-a", [
+      // Both instants of the ambiguous 01:30 wall time on the 25h day.
+      finishedEntry("job-a", { ts: Date.UTC(2026, 10, 1, 8, 30), status: "ok" }), // 01:30 PDT
+      finishedEntry("job-a", { ts: Date.UTC(2026, 10, 1, 9, 30), status: "ok" }), // 01:30 PST
+    ]);
+    try {
+      const service = makeService(openclawDir);
+      const trends = service.getJobRunTrends({
+        jobId: "job-a",
+        range: "7d",
+        timeZone: "America/Los_Angeles",
+      });
+      expect(trends.sinceMs).toBe(Date.UTC(2026, 9, 28, 7)); // Oct 28 00:00 PDT
+      const nov1 = trends.points.find(
+        (point) => point.startMs === Date.UTC(2026, 10, 1, 7), // Nov 1 00:00 PDT
+      );
+      expect(nov1).toBeDefined();
+      expect(nov1.endMs).toBe(Date.UTC(2026, 10, 2, 8)); // Nov 2 00:00 PST
+      expect(nov1.endMs - nov1.startMs).toBe(25 * 60 * 60 * 1000);
+      expect(nov1.totalRuns).toBe(2);
+    } finally {
+      fs.rmSync(openclawDir, { recursive: true, force: true });
+    }
+  });
+
+  it("falls back to legacy server-local buckets without or with an invalid zone", () => {
+    vi.setSystemTime(new Date(Date.UTC(2026, 7, 30, 6, 30)));
+    const openclawDir = createOpenclawDirWithCronJobs([]);
+    writeRunLog(openclawDir, "job-a", [
+      finishedEntry("job-a", { ts: Date.now() - 1000, status: "ok" }),
+    ]);
+    try {
+      const service = makeService(openclawDir);
+      const legacy = service.getJobRunTrends({ jobId: "job-a", range: "7d" });
+      expect(legacy.timeZone).toBeNull();
+      expect(sumPoints(legacy.points, "totalRuns")).toBe(1);
+
+      const invalidZone = service.getJobRunTrends({
+        jobId: "job-a",
+        range: "7d",
+        timeZone: "Not/AZone",
+      });
+      expect(invalidZone.timeZone).toBeNull();
+      expect(invalidZone.points.map((point) => point.startMs)).toEqual(
+        legacy.points.map((point) => point.startMs),
+      );
+      expect(invalidZone.points.map((point) => point.endMs)).toEqual(
+        legacy.points.map((point) => point.endMs),
+      );
+    } finally {
+      fs.rmSync(openclawDir, { recursive: true, force: true });
+    }
+  });
+
+  it("anchors sinceMs windows to the client zone's day start", () => {
+    vi.setSystemTime(new Date(Date.UTC(2026, 7, 30, 6, 30)));
+    const openclawDir = createOpenclawDirWithCronJobs([]);
+    writeRunLog(openclawDir, "job-a", [
+      finishedEntry("job-a", { ts: Date.UTC(2026, 7, 28, 12, 0), status: "ok" }),
+    ]);
+    try {
+      const service = makeService(openclawDir);
+      const sinceMs = Date.UTC(2026, 7, 28, 12, 0); // Aug 28 05:00 PDT
+      const trends = service.getJobRunTrends({
+        jobId: "job-a",
+        range: "7d",
+        sinceMs,
+        timeZone: "America/Los_Angeles",
+      });
+      expect(trends.sinceMs).toBe(Date.UTC(2026, 7, 28, 7)); // Aug 28 00:00 PDT
+      expect(trends.points[0].startMs).toBe(Date.UTC(2026, 7, 28, 7));
+      expect(trends.points[0].totalRuns).toBe(1);
+    } finally {
+      fs.rmSync(openclawDir, { recursive: true, force: true });
+    }
+  });
+
+  it("leaves hourly 24h buckets untouched by the client zone", () => {
+    vi.setSystemTime(new Date(Date.UTC(2026, 7, 30, 6, 30)));
+    const openclawDir = createOpenclawDirWithCronJobs([]);
+    writeRunLog(openclawDir, "job-a", [
+      finishedEntry("job-a", { ts: Date.now() - 30 * 60 * 1000, status: "ok" }),
+    ]);
+    try {
+      const service = makeService(openclawDir);
+      const zoned = service.getJobRunTrends({
+        jobId: "job-a",
+        range: "24h",
+        timeZone: "America/Los_Angeles",
+      });
+      const legacy = service.getJobRunTrends({ jobId: "job-a", range: "24h" });
+      expect(zoned.bucket).toBe("hour");
+      expect(zoned.points.map((point) => point.startMs)).toEqual(
+        legacy.points.map((point) => point.startMs),
+      );
+      expect(sumPoints(zoned.points, "totalRuns")).toBe(1);
+    } finally {
+      fs.rmSync(openclawDir, { recursive: true, force: true });
+    }
+  });
+});
