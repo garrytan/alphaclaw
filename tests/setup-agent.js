@@ -15,6 +15,16 @@ const https = require("https");
 http.globalAgent = new http.Agent({ keepAlive: false });
 https.globalAgent = new https.Agent({ keepAlive: false });
 
+// Keep the suite hermetic against the machine it runs on.
+//
+// Resource autotune is default-ON and derives gateway env/limits from the
+// REAL container's cgroup files — on a big CI box, gatewayEnv() would grow a
+// machine-dependent --max-old-space-size and every env assertion would vary
+// by host. The kill-switch pins the legacy (pre-autotune) behavior globally;
+// autotune's own suites re-enable it per call via explicit `env: {}` options
+// and mocked cgroup files.
+process.env.ALPHACLAW_AUTOTUNE_DISABLED = "1";
+
 // Guarantee git exit-code fidelity for every test.
 //
 // Some sandboxed hosts interpose a `git` wrapper on PATH that swallows exit

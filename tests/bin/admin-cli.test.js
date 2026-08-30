@@ -122,6 +122,36 @@ describe("cli/admin runAdminCommand", () => {
     expect(stdout()).toContain("gateway: running");
   });
 
+  it("renders the machine line in --summary when the status carries one", async () => {
+    writeToken(rootDir);
+    await useStub(
+      jsonHandler(200, {
+        ok: true,
+        gateway: "running",
+        machine: {
+          tier: "medium",
+          memoryGb: 4,
+          cores: 2,
+          gpu: { present: true, name: "NVIDIA A10G" },
+          autotune: { enabled: true, agentConcurrencyCap: 32 },
+        },
+      }),
+    );
+
+    const code = await runAdminCommand({
+      argv: ["GET", "/api/status", "--summary"],
+      rootDir,
+    });
+    expect(code).toBe(0);
+    expect(stdout()).toContain("machine: 2 vCPU / 4 GB (medium), gpu · autotune on");
+
+    // No machine block (older server) → no machine line.
+    writes.length = 0;
+    await useStub(jsonHandler(200, { ok: true, gateway: "running" }));
+    await runAdminCommand({ argv: ["GET", "/api/status", "--summary"], rootDir });
+    expect(stdout()).not.toContain("machine:");
+  });
+
   it("rejects invalid --data JSON before sending a request (exit 2)", async () => {
     writeToken(rootDir);
     const stub = await useStub(jsonHandler(200, { ok: true }));

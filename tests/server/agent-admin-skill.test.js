@@ -4,6 +4,7 @@ const path = require("path");
 const { getManifest } = require("../../lib/server/admin-manifest");
 const {
   buildAdminSkillContent,
+  gatherLiveState,
   installAlphaclawAdminSkill,
   renderToolsStanza,
   maskTarget,
@@ -61,8 +62,9 @@ describe("agent-admin skill builder", () => {
   // On-demand skills are NOT under the 20k/150k always-injected bootstrap
   // budget; this guard just keeps context cost bounded as domains grow. A
   // typical deployment renders ~27-35k; the maximal fixture (all 18 domains,
-  // 10 admins, every channel) is ~47k. 52k leaves headroom without cutting the
-  // op tables, which are the load-bearing content.
+  // 10 admins, every channel) is ~52k with the doctor.settings ops. 56k
+  // leaves headroom without cutting the op tables, which are the
+  // load-bearing content.
   it("stays within the on-demand size budget on a maximal fixture", () => {
     const adminTargets = Array.from({ length: 10 }, (_, i) => ({
       channel: "telegram",
@@ -77,9 +79,89 @@ describe("agent-admin skill builder", () => {
         activeChannels: ["telegram", "discord", "slack", "whatsapp"],
         releaseChannel: "beta",
         restartRequired: true,
+        machine: {
+          tier: "medium",
+          memoryGb: 4.0,
+          cores: 2,
+          gpuLabel: "NVIDIA A10G",
+          autotuneEnabled: true,
+          agentConcurrencyCap: 32,
+        },
       },
     });
-    expect(content.length).toBeLessThan(52000);
+    // The machine + autotune lines render in Current State.
+    expect(content).toContain(
+      "- Machine: medium tier — 4.0 GB RAM, 2 vCPU, GPU: NVIDIA A10G",
+    );
+    expect(content).toContain(
+      "- Resource autotune: on (agent concurrency cap 32) — details: `alphaclaw admin GET /api/autotune`",
+    );
+    expect(content.length).toBeLessThan(56000);
+  });
+
+  it("renders no-GPU/autotune-off machine state and omits the lines when machine is absent", () => {
+    const content = buildAdminSkillContent({
+      fs,
+      manifest: getManifest(),
+      liveState: {
+        adminTargets: [],
+        machine: {
+          tier: "small",
+          memoryGb: 2.0,
+          cores: 1,
+          gpuLabel: null,
+          autotuneEnabled: false,
+          agentConcurrencyCap: null,
+        },
+      },
+    });
+    expect(content).toContain("- Machine: small tier — 2.0 GB RAM, 1 vCPU, no GPU");
+    // Off + no cap: no parenthetical, still points at the autotune API.
+    expect(content).toContain(
+      "- Resource autotune: off — details: `alphaclaw admin GET /api/autotune`",
+    );
+
+    // Fail-open: no machine object → no machine lines, skill still builds.
+    const withoutMachine = buildAdminSkillContent({
+      fs,
+      manifest: getManifest(),
+      liveState: { adminTargets: [] },
+    });
+    expect(withoutMachine).not.toContain("- Machine:");
+    expect(withoutMachine).not.toContain("- Resource autotune:");
+  });
+
+  it("sanitizes a markdown-injection GPU name through toTableCell", () => {
+    const content = buildAdminSkillContent({
+      fs,
+      manifest: getManifest(),
+      liveState: {
+        adminTargets: [],
+        machine: {
+          tier: "large",
+          memoryGb: 8.0,
+          cores: 4,
+          gpuLabel: "NVIDIA | `evil` [x](y)",
+          autotuneEnabled: true,
+          agentConcurrencyCap: 32,
+        },
+      },
+    });
+    // Pipes escaped so a hostile nvidia-smi name cannot break table/markdown
+    // structure; the rest survives as inert text.
+    expect(content).toContain("GPU: NVIDIA \\| `evil` [x](y)");
+    expect(content).not.toContain("GPU: NVIDIA | `evil`");
+  });
+
+  it("gathers a machine snapshot into live state (fail-open)", () => {
+    const openclawDir = makeOpenclawDir();
+    const state = gatherLiveState({ fs, openclawDir });
+    // Real host profile: exact numbers vary, the shape and vocabulary don't.
+    expect(state.machine).toBeTruthy();
+    expect(["micro", "small", "medium", "large", "xl"]).toContain(
+      state.machine.tier,
+    );
+    expect(typeof state.machine.autotuneEnabled).toBe("boolean");
   });
 
   it("installs the skill only when the flag is on AND a token exists", () => {
