@@ -189,12 +189,6 @@
 - **Why:** One source of truth for "what does the installed OpenClaw support"; probes survive dev builds and forks where version comparison fails closed.
 - **Context:** Documented split from the main-branch merge; the restart-handoff/env plumbing (OPENCLAW_SUPERVISOR_MODE default-external with the off|none hatch) is no longer gated.
 - **Effort:** M.
-## P3 — Live-tier openclaw backup CLI contract regression test
-- **What:** One tests/live assertion that a real `openclaw backup create --output <file>` writes exactly at the given path (refusing when it already exists) and `--output <dir>/` writes a timestamped archive inside the directory.
-- **Why:** Issues #7/#9 existed because every test stub encoded an unvalidated assumption about the CLI's `--output` contract; the contract is now verified from openclaw@2026.7.1-2 dist source, and a live guard catches future CLI changes.
-- **Context:** `createBackupStubRunner` (tests/live/live-helpers.js) stubs backup in the live tier; contract notes in the #7/#9 fix PR.
-- **Effort:** S. **Depends on:** live tier (`OPENCLAW_LIVE_E2E=1`) with a real openclaw build.
-
 ## P3 — Size-aware backup retention
 - **What:** Add a configurable max-total-bytes retention policy (always keeping >= 1 archive) on top of keep-3, and consider surfacing backup disk usage in the UI.
 - **Why:** Keep-3 of ~7 GiB archives is ~21 GiB with no byte budget; small-volume installs can hit ENOSPC (now at least reported honestly, with a pre-backup space warning).
@@ -227,6 +221,18 @@
 - **What:** `openclaw node run` authenticates with `OPENCLAW_GATEWAY_TOKEN`, which trusted-proxy mode rejects; `/api/nodes/connect-info` currently returns an empty token with a logged warning while team mode is on. Provide a working node path (gateway password credential, or a pairing flow) before recommending team mode to node users.
 - **Context:** lib/server/gateway-credential.js, lib/server/routes/nodes.js; degradation documented in the team-auth milestone report.
 - **Effort:** M. **Depends on:** verifying how `openclaw node run` accepts a password credential (docs/cli in the beta line).
+
+## P3 — Container-tier chaos leg
+- **What:** Kill the container mid-download during a stable→beta apply and assert the fresh boot recovers cleanly onto the stable pin (no half-installed tree, gateway healthy). Extends tests/container/openclaw-container-upgrade.e2e.test.js with a second, shorter journey.
+- **Why:** The container tier proves the happy-path restart; the crash-mid-apply recovery path is only covered by hermetic boot tests today — a real-image chaos leg would prove it against the real installer.
+- **Context:** tests/container/container-helpers.js (docker wrappers already support rm -f + fresh run on the same volume); hermetic coverage in the boot self-heal suites.
+- **Effort:** S. **Depends on:** container tier landing.
+
+## P3 — Placeholder authenticated detail view
+- **What:** Serve rich progress/error strings behind login during the restart window — the current boot placeholder (lib/boot-placeholder.js) deliberately renders no error content to unauthenticated callers, so an operator watching a restart sees only the generic updating page until the real server binds.
+- **Why:** During a failed activation the placeholder window is exactly when an operator most wants the step/error detail; today they must wait for the full UI (or read container logs).
+- **Context:** lib/boot-placeholder.js, lib/boot-placeholder-child.js; the container E2E's best-effort placeholder observation (tests/container/openclaw-container-upgrade.e2e.test.js) documents the current unauthenticated behavior.
+- **Effort:** M.
 
 ## P3 — Extract shared overseer-core + retrofit the upgrade overseer card to live updates
 - **What:** Pull the generic ~40% shared by `lib/server/upgrade-overseer.js` and `lib/server/watchdog-overseer.js` (env isolation, availability probe w/ SWR, `--help` flag discovery, envelope/verdict parsing, start/stop) into one module; then give the upgrade overseer card the watchdog card's freshness model (verdicts riding an existing poll instead of load-once).
@@ -318,6 +324,28 @@
 - **Why:** The upgrade smoke silently no-ops in environments with a current browse CLI, so the channel-segment regression it guards is unwatched.
 - **Context:** Pre-existing (login.html last touched v0.9.38, smoke v0.9.40); surfaced by /qa on 2026-08-29 while running it as a regression check for the time-normalization branch. Not modified per QA rule "never modify existing tests".
 - **Effort:** S. **Depends on:** nothing.
+## P2 — Cron run-history UI: read run logs from the state db
+- **What:** The cron run/trend UI reads `cron/runs/<jobId>.jsonl` (lib/server/cron-service.js), but even the PINNED openclaw 2026.7.1-2 writes run logs to SQLite (`cron_run_logs`), and 2026.9.1-beta.1's `doctor --fix` additionally renames leftover `.jsonl` to `.jsonl.migrated` — after the first beta doctor run, run history and trends silently go empty. Port the bounded-tail reads to `cron_run_logs` (cached-handle pattern from lib/server/cron-store.js), keeping the `.jsonl` fallback for genuinely old dirs.
+- **Why:** Stale-data class of the issue-#23 family: a file the runtime no longer writes, read as if authoritative.
+- **Context:** Surfaced by the 2026.9.1-beta.1 compatibility review (plan §11). Self-contained: cron-service.js read paths + tests.
+- **Effort:** M → CC: S.
+
+## P3 — Retire the file-era code paths when the openclaw pin reaches ≥ 2026.9.x
+- **What:** Once package.json pins an openclaw whose state is SQLite-backed, delete the legacy branches: exec-approvals file seeding (lib/server/exec-defaults-config.js file half), pairing-file readers/writers (routes/pairings.js, watchdog-notify.js, agents/), the agent-db 'primary' auth path for the main agent (lib/server/auth-profiles.js), and the era hint machinery that exists only to tell the two eras apart (lib/server/openclaw-state-era.js documents every seam).
+- **Why:** Dual-era code is deliberate, bounded debt from the 2026.9.1-beta.1 compatibility work; the seams are explicit so retirement is mechanical.
+- **Effort:** M. **Depends on:** the npm pin moving to ≥ 2026.9.x and the beta line stabilizing.
+
+## P3 — Unified OpenClaw state-backend adapter + CI cross-version contract matrix
+- **What:** Fold exec-approvals/auth/pairing/cron state access behind one adapter module and run the live contract suite (tests/live/openclaw-live-cli-contract.e2e.test.js) against BOTH the pinned and the beta openclaw in CI (hermetic `npm pack openclaw@<v>` fixtures).
+- **Why:** Approach C from the compatibility review's CEO pass: the 2026.9 migration wave showed every direct state access is a latent break; an adapter plus a version matrix turns the next wave into a test failure instead of an outage.
+- **Includes:** the migration-lifecycle E2E from the review (pin → beta apply → forced failure → gate revert, asserting approvals/auth/pairing/notification targets stay functional on the surviving version) — the per-surface behaviors are unit-covered and were verified live against real installs of both versions; the automated end-to-end chain belongs with this matrix.
+- **Context:** lib/server/openclaw-state-era.js and openclaw-state-db.js are the seeds; the era decision table lives in the plan for the #23 follow-up work.
+- **Effort:** L → CC: M. **Depends on:** the state-era module (landed).
+
+## P3 — Watchdog auth backend for main agent: route saves through `openclaw models auth` where expressible
+- **What:** Credential saves for the main agent currently write the shared state db directly in state-db mode (schema-guarded BEGIN IMMEDIATE, lib/server/auth-profiles.js). `openclaw models auth paste-api-key`/`paste-token` exist on both supported versions and would route API-key saves through openclaw's own validation and store selection; oauth profiles, ordering, and usage state have no CLI surface, so the direct writer stays for those either way.
+- **Why:** Prefer CLI surfaces over private-schema writes wherever one exists (compat review [C6]); a partial move only pays off if the api-key path is the churny one — check first.
+- **Effort:** S-M. **Depends on:** verifying paste-api-key flag shapes on both versions.
 
 ## P2 — Claude Code launcher: fire with custom instruction text
 - **What:** An input UI on the launcher that passes `{"text": ...}` in the routine-fire body so a click can carry task instructions.
@@ -390,3 +418,11 @@
 - **What:** The Bug-7 fix (issue #21) falls back to `channels.telegram.allowFrom` numeric IDs when no pairing files exist. Slack was deliberately excluded: its allowFrom entries need per-account token derivation (`slack-<account>-allowFrom.json` naming), and Slack user IDs require a `conversations.open` call before posting. Add the Slack equivalent if a real box hits `no_channels_delivered` with only Slack configured.
 - **Context:** lib/server/watchdog-notify.js (`readChannelAllowFrom`, fan-out fallback block with the exclusion comment).
 - **Effort:** S. **Depends on:** nothing.
+
+## Completed
+
+## Make env-save channel sync one atomic lifecycle-lock op
+- **What:** `PUT /api/env` runs remove-channels → write env → add-channels as two separately queued lock ops (lib/server/routes/system.js + gateway.js `syncChannelConfig`). A gateway restart queued between them launches with channels removed-but-not-yet-re-added (final config state self-corrects when the add runs, but the running gateway may need another restart to pick it up). Wrap remove+write+add in a single uniquely-keyed lock op (expose a narrow `withGatewayLifecycleLock` from gateway.js or a dedicated `syncChannelConfigForEnvSave`).
+- **Why:** Adversarial review M4 on the ship pass (2026-08-28). Rare (requires an operator restart racing an env save) and bounded, but the invariant "env save is atomic against lifecycle ops" held under execSync and silently weakened in the async conversion.
+- **Effort:** M (test updates across routes-system + coalescing suites). **Depends on:** nothing.
+- **Completed:** v0.9.37 (2026-08-28) — `PUT /api/env` acquires the shared gateway lifecycle lock once around the full remove → write → add sequence (lib/server/routes/system.js `env_sync` op); `syncChannelConfig` itself stays lock-free, so the whole save is one atomic lifecycle operation.

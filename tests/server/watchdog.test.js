@@ -769,6 +769,36 @@ describe("server/watchdog", () => {
     expect(watchdog.getStatus().uptimeMs).toBe(0);
   });
 
+  it.each([130, 143])(
+    "treats an expected exit with the beta's forwarded-signal code %i as clean, not a crash",
+    (code) => {
+      // openclaw >= 2026.9.1-beta.1 exits 130 (SIGINT) / 143 (SIGTERM) on
+      // forwarded signals instead of dying by the signal — an
+      // alphaclaw-initiated stop/restart must enter the expected-restart
+      // window, never crash accounting.
+      const { watchdog } = createHarness();
+      watchdog.onGatewayLaunch({ startedAt: Date.now(), pid: 1234 });
+
+      watchdog.onGatewayExit({ code, signal: null, expectedExit: true });
+
+      const status = watchdog.getStatus();
+      expect(status.lifecycle).toBe("restarting");
+      expect(status.lastExit).toBeNull();
+      expect(status.crashCount ?? 0).toBe(0);
+    },
+  );
+
+  it("still books an UNEXPECTED 143 as a crash (external kill)", () => {
+    const { watchdog } = createHarness();
+    watchdog.onGatewayLaunch({ startedAt: Date.now(), pid: 1234 });
+
+    watchdog.onGatewayExit({ code: 143, signal: null, expectedExit: false });
+
+    expect(watchdog.getStatus().lastExit).toEqual(
+      expect.objectContaining({ code: 143 }),
+    );
+  });
+
   it("preserves uptimeStartedAt on duplicate-launch exit", () => {
     const { watchdog } = createHarness();
 
@@ -916,6 +946,66 @@ describe("server/watchdog", () => {
     expect(result.ok).toBe(true);
     expect(doctorCalls).toHaveLength(1);
     expect(launchGatewayProcess).toHaveBeenCalledTimes(1);
+    expect(watchdog.getStatus().lifecycle).toBe("running");
+  });
+
+  it("start() preserves a latched configuration_error instead of clobbering it to running", async () => {
+    const { watchdog } = createHarness({ autoRepair: false });
+
+    // Boot order under a reconcile hold: latchManualIntervention() first,
+    // then startup.js calls watchdog.start() unconditionally. The latch must
+    // survive — "running" here reads as down-with-Retry and steers the
+    // operator into restarting onto the rejected config.
+    watchdog.latchManualIntervention();
+    watchdog.start();
+    await flushMicrotasks();
+
+    expect(watchdog.getStatus()).toEqual(
+      expect.objectContaining({
+        lifecycle: "configuration_error",
+        health: "unhealthy",
+      }),
+    );
+
+    // Clearing the latch (reconcile-retry flow) restores the normal
+    // transition out of the latched state.
+    watchdog.clearManualInterventionLatch();
+    expect(watchdog.getStatus()).toEqual(
+      expect.objectContaining({ lifecycle: "stopped", health: "unknown" }),
+    );
+    watchdog.stop();
+  });
+
+  it("clearManualInterventionLatch resets the latch and restores normal exit handling", async () => {
+    const { watchdog, launchGatewayProcess } = createHarness({
+      autoRepair: false,
+    });
+
+    watchdog.latchManualIntervention();
+    expect(watchdog.getStatus()).toEqual(
+      expect.objectContaining({
+        lifecycle: "configuration_error",
+        health: "unhealthy",
+      }),
+    );
+
+    watchdog.clearManualInterventionLatch();
+    expect(watchdog.getStatus()).toEqual(
+      expect.objectContaining({ lifecycle: "stopped", health: "unknown" }),
+    );
+
+    // With the latch cleared, a gateway exit gets the normal crash-restart
+    // handling again instead of the latched skip.
+    watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    await flushMicrotasks();
+    await flushMicrotasks();
+    expect(launchGatewayProcess).toHaveBeenCalledTimes(1);
+    expect(watchdog.getStatus()).toEqual(
+      expect.objectContaining({ lifecycle: "running", health: "healthy" }),
+    );
+
+    // Idempotent when no latch is active: a running lifecycle is untouched.
+    watchdog.clearManualInterventionLatch();
     expect(watchdog.getStatus().lifecycle).toBe("running");
   });
 

@@ -522,6 +522,57 @@ describe("frontend/gateway card (server-state matrix)", () => {
     expect(rollBack).toHaveBeenCalledTimes(1);
   });
 
+  it("rollback fence (#20): the shell's rollbackDataRisk slice renders the second-stage danger confirm naming the backup", () => {
+    const confirmRollbackDataRisk = vi.fn();
+    const cancelRollbackDataRisk = vi.fn();
+    publishShell({
+      statusState: makeServerState({}),
+      rollbackDataRisk: {
+        message:
+          "This update migrated your state databases — the rollback target may not be able to read them.",
+        backupFile: "backup-2026-08-29.tar.gz",
+      },
+    });
+    gatewayShellStore.publish({
+      actions: {
+        ...gatewayShellStore.get().actions,
+        confirmRollbackDataRisk,
+        cancelRollbackDataRisk,
+      },
+    });
+
+    const tree = renderGateway({});
+    // Two ConfirmDialogs render: [0] is the action confirm (hidden), the
+    // data-risk confirm is the visible one carrying the server's message.
+    const dialog = findAllByType(tree, ConfirmDialog).find(
+      (vnode) => vnode.props.title === "Roll back despite migrated data?",
+    );
+    expect(dialog).toBeTruthy();
+    expect(dialog.props.visible).toBe(true);
+    expect(dialog.props.confirmTone).toBe("danger");
+    expect(dialog.props.message).toBe(
+      "This update migrated your state databases — the rollback target may not be able to read them.",
+    );
+    expect(collectText(dialog).join(" ")).toContain(
+      "Restore the verified pre-update backup first (backup-2026-08-29.tar.gz), or roll back anyway — data written by the newer version may be unreadable.",
+    );
+
+    dialog.props.onConfirm();
+    expect(confirmRollbackDataRisk).toHaveBeenCalledTimes(1);
+    dialog.props.onCancel();
+    expect(cancelRollbackDataRisk).toHaveBeenCalledTimes(1);
+  });
+
+  it("no rollbackDataRisk slice: the data-risk confirm does not render", () => {
+    publishShell({ statusState: makeServerState({}) });
+    const tree = renderGateway({});
+    expect(
+      findAllByType(tree, ConfirmDialog).find(
+        (vnode) => vnode.props.title === "Roll back despite migrated data?",
+      ),
+    ).toBeUndefined();
+  });
+
   it("the fixture matrix covers every state in the server catalog (a new state cannot ship unrendered)", () => {
     const fixtureNames = new Set(kStateFixtures.map((fixture) => fixture.name));
     const catalogStates = Object.keys(kGatewayStateCatalog);

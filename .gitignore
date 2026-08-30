@@ -10,6 +10,7 @@ lib/public/dist/
 lib/public/css/tailwind.generated.css
 lib/public/css/vendor/
 .claude/worktrees/
+tests/container/artifacts/
 
 # QA working artifacts (reports/screenshots) stay local
 .gstack/

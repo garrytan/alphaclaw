@@ -126,9 +126,24 @@ fi
 EFFECTIVE_PWD="$(resolve_effective_pwd "$@")"
 
 if [ -z "${GITHUB_TOKEN:-}" ] && in_openclaw_root "$EFFECTIVE_PWD" && [ -f "$OPENCLAW_REPO_ROOT/.env" ]; then
-  set -a
-  . "$OPENCLAW_REPO_ROOT/.env" >/dev/null 2>&1 || true
-  set +a
+  # Extract ONLY GITHUB_TOKEN — never source (issue #26 sibling): sourcing
+  # executed $(…) in any .env value with the agent's privileges, and a value
+  # with spaces silently dropped the var. Last assignment wins (matching the
+  # JS reader); one layer of matching surrounding quotes is stripped.
+  # NOTE: keep in sync with the twin parser in lib/setup/hourly-git-sync.sh.
+  while IFS= read -r _env_line || [ -n "$_env_line" ]; do
+    case "$_env_line" in
+      GITHUB_TOKEN=*) ;;
+      *) continue ;;
+    esac
+    _env_val="${_env_line#GITHUB_TOKEN=}"
+    case "$_env_val" in
+      \"*\") _env_val="${_env_val#\"}"; _env_val="${_env_val%\"}" ;;
+      \'*\') _env_val="${_env_val#\'}"; _env_val="${_env_val%\'}" ;;
+    esac
+    GITHUB_TOKEN="$_env_val"
+    export GITHUB_TOKEN
+  done < "$OPENCLAW_REPO_ROOT/.env"
 fi
 
 if [ "${ALPHACLAW_GIT_NO_AUTH:-}" = "1" ] || [ -z "${GITHUB_TOKEN:-}" ] || ! in_openclaw_root "$EFFECTIVE_PWD"; then

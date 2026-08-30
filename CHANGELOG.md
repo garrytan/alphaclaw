@@ -5,7 +5,7 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
-## [0.9.45] - 2026-08-29
+## [0.9.46] - 2026-08-29
 
 Every time shown in the UI now renders in your browser's timezone and your
 locale's expected format — "Mar 10, 2026, 7:45 PM" in the US, "10.03.2026,
@@ -89,6 +89,76 @@ bucketed days at the *server's* midnight, and the Doctor tab served a frozen
   silently labeling server-local buckets with browser-local dates; the
   trends endpoint also accepts a `?timeZone=` override and marks its
   response `Vary: x-client-timezone` for HTTP caches.
+
+## [0.9.45] - 2026-08-29
+
+The two remaining upgrade incidents are fixed end-to-end (issues #18 and
+#20), and the whole stable→beta upgrade path is now proven on every PR by a
+real container upgrade driven through the real browser UI. This release also
+unifies 0.9.43's apply-time migration gate with a new fail-closed boot
+reconciler, so there is one migration engine with one recovery story.
+
+### Fixed
+- **Pre-update backup no longer races the live gateway (#18)**: downgrades,
+  dev switches, and cross-channel updates now pause the gateway briefly for
+  a consistent backup (the confirm dialog says so), with a retry ladder for
+  vanished-file races when pausing isn't possible. Failures name the exact
+  file and honest attempt count instead of a truncated path; a backup blocked
+  by a broken config retries once without workspace files and is recorded and
+  announced as partial.
+- **Settings migration is fail-closed (#20)**: the freshly activated build's
+  settings are validated and migrated BEFORE its gateway can ever start —
+  with a budget sized to your state databases (10 min + 5 min/GB, up to 30
+  min; `OPENCLAW_DOCTOR_MIGRATION_TIMEOUT` overrides the base and can raise
+  the cap) instead of the old fixed timeout. On failure, the 0.9.43 hard
+  gate reverts to a preflight-proven older build when that is safe;
+  otherwise the gateway is HELD with the exact blamed settings keys and
+  one-click "Retry migration" / "Strip blamed keys and retry" actions on
+  the Upgrade page. Unknown settings keys are never deleted without your
+  consent, manual gateway restarts are refused while the hold protects your
+  data, and a crash-looping box can no longer destroy weeks of settings.
+- **`doctor --fix` can no longer silently restore stale settings**: the
+  last-known-good file is quarantined during every doctor run, tripwires
+  catch backwards timestamps, shrinking MCP/provider inventories, and
+  secrets flattened from env references, and a blocked restore is reverted
+  and reported with key paths only — never values.
+- **Rolling back after a database migration now asks first**: both rollback
+  buttons (Upgrade page and Gateway card) show a second confirmation naming
+  the verified pre-update backup to restore, instead of silently handing the
+  old build databases it may not be able to read; API callers get a 409
+  with a `confirmDataRisk` escape hatch.
+- **The update wait page shows live progress**: during updates and restarts
+  the placeholder page now renders real step names with elapsed times, the
+  target version, and a backup-verified line tied to the actual run — legible
+  on phones — and its patience scales with step progress (60-minute cap) so
+  platforms no longer kill long migrations mid-flight.
+- **Watchdog and recovery hardening**: the exit-78 medic now queues briefly
+  behind a busy lifecycle lock instead of skipping (and stands down when a
+  competing repair already relaunched the gateway); a reconciler hold
+  survives watchdog startup and outranks 0.9.43's config-edit auto-relaunch;
+  the lifecycle-lock lease scales to the migration budget so a queued
+  restart can never interrupt a long migration; listener-exposure settings
+  (`gateway.mode/bind/port/tls`) can never be auto-stripped; persisted
+  validator output is secret-redacted.
+
+### Changed
+- The 0.9.43 migration hard gate now runs inside the fail-closed reconciler:
+  every gate decline — kill switch, missing snapshot, no compatible revert
+  target — holds the gateway instead of continuing on the rejected build,
+  and the migration timeout ceiling rises from 12 to 30 minutes now that the
+  wait page tracks step progress.
+
+### Added
+- **Container upgrade test tier**: a real Docker container running the
+  pinned stable OpenClaw is upgraded to the newest beta through the real
+  browser UI while session files churn, then must survive both a container
+  replacement and a `docker restart` on the same volume — run nightly and as
+  an always-on PR gate for upgrade-path changes, so a broken upgrade can no
+  longer merge blind.
+- A live-tier test that runs the real backup CLI under file churn, pinning
+  the vanished-file contract that caused #18.
+- `docs/upgrade-troubleshooting.md`: a runbook for held gateways, blocked
+  stale restores, quiesced backups, and their exact recovery commands.
 
 ## [0.9.44] - 2026-08-29
 
