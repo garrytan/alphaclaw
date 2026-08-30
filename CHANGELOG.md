@@ -5,6 +5,30 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.9.44] - 2026-08-29
+
+The sidebar gains an "Open Claude Code" launcher: one click starts a fresh
+Claude Code cloud session on claude.ai and opens it in a new tab — or, until
+you configure it, simply takes you to claude.ai/code.
+
+### Added
+- **Open Claude Code launcher** (Monitoring section of the sidebar): when a
+  Claude Code routine fire URL and per-routine token are configured in Envars
+  (`CLAUDE_CODE_ROUTINE_URL`, `CLAUDE_CODE_ROUTINE_TOKEN`), clicking the item
+  fires your routine through Anthropic's experimental routine-fire API and
+  opens the returned `claude.ai/code/session_…` in a new tab, with a live
+  interstitial while the session starts. Unconfigured, the item is a plain
+  link to claude.ai/code — always useful, never a dead click. Because a fire
+  starts an autonomous run that consumes your claude.ai subscription usage,
+  the first fire asks for a one-time confirmation (remembered per browser),
+  the server enforces that consent plus a single-flight guard and a short
+  cooldown, and cmd/ctrl-click always opens plain claude.ai/code without
+  firing. The launcher never sends the token to the browser (its status
+  endpoint is presence-only; like every Envars secret, admins can still view
+  it in the Envars editor), the token is excluded from the OpenClaw gateway's
+  child environment, and the fire endpoint is denied to the agent-admin
+  actor; config changes apply live without a restart.
+
 ## [0.9.43] - 2026-08-29
 
 A beta upgrade can no longer brick a box (issues #21, #22, #23). The root

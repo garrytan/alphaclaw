@@ -2,7 +2,10 @@ import { describe, expect, it } from "vitest";
 import {
   buildDashboardFocusUrl,
   buildNavSections,
+  filterNavSectionsForRole,
   getSelectedNavId,
+  kClaudeCodeNavItem,
+  kClaudeCodeUrl,
   kDashboardsNavItem,
   kNavSections,
 } from "../../lib/public/js/lib/app-navigation.js";
@@ -47,5 +50,37 @@ describe("app-navigation gated sections", () => {
   it("selects the team nav item for /team locations", () => {
     expect(getSelectedNavId({ location: "/team" })).toBe("team");
     expect(getSelectedNavId({ location: "/team/anything" })).toBe("team");
+  });
+});
+
+describe("claude-code launcher nav item", () => {
+  it("is the last static Monitoring item with the external href", () => {
+    const monitoring = kNavSections.find((s) => s.label === "Monitoring");
+    const last = monitoring.items[monitoring.items.length - 1];
+    expect(last).toEqual(kClaudeCodeNavItem);
+    expect(last).toEqual({
+      id: "claude-code",
+      label: "Open Claude Code",
+      href: kClaudeCodeUrl,
+    });
+    expect(kClaudeCodeUrl).toBe("https://claude.ai/code");
+  });
+
+  it("keeps Dashboards appended after it when the gate is open", () => {
+    const sections = buildNavSections({ features: { sessionDashboards: true } });
+    const monitoring = sections.find((s) => s.label === "Monitoring");
+    const ids = monitoring.items.map((item) => item.id);
+    expect(ids.indexOf("claude-code")).toBe(ids.length - 2);
+    expect(ids[ids.length - 1]).toBe("dashboards");
+  });
+
+  it("is hidden from members (firing bills the owner's claude.ai account)", () => {
+    const memberSections = filterNavSectionsForRole(kNavSections, "member");
+    const memberIds = memberSections.flatMap((s) => s.items.map((i) => i.id));
+    expect(memberIds).not.toContain("claude-code");
+    const adminIds = filterNavSectionsForRole(kNavSections, "admin").flatMap(
+      (s) => s.items.map((i) => i.id),
+    );
+    expect(adminIds).toContain("claude-code");
   });
 });
