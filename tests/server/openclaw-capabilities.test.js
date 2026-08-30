@@ -2,6 +2,7 @@ const {
   createOpenclawCapabilities,
   kPluginDependentTtlMs,
   kNegativeTtlMs,
+  kTimedOutTtlMs,
 } = require("../../lib/server/openclaw-capabilities");
 
 const ok = (stdout = "", stderr = "") => ({ ok: true, stdout, stderr });
@@ -149,6 +150,91 @@ describe("server/openclaw-capabilities", () => {
     clock += kNegativeTtlMs + 1;
     await caps.get("secretsStore");
     expect(clawCmd).toHaveBeenCalledTimes(2);
+  });
+
+  it("re-probes a TIMED-OUT result on a shorter TTL than a plain negative", async () => {
+    // openclaw >= 2026.9.1-beta.1 serializes every CLI call on a startup-
+    // migration lease that a long doctor --fix can hold for minutes: a probe
+    // timing out during that window means "try again shortly", never
+    // "unsupported for the next minute".
+    let clock = 0;
+    const clawCmd = vi.fn(async () => ({
+      ok: false,
+      stdout: "",
+      stderr: "",
+      timedOut: true,
+    }));
+    const caps = createOpenclawCapabilities({
+      clawCmd,
+      getInstalledVersion: () => "v",
+      nowFn: () => clock,
+      logger: { warn: () => {} },
+    });
+
+    expect(await caps.get("secretsStore")).toBe(false);
+    // Cached inside the timed-out TTL…
+    clock += kTimedOutTtlMs - 1;
+    await caps.get("secretsStore");
+    expect(clawCmd).toHaveBeenCalledTimes(1);
+    // …but re-probed before the regular negative TTL would have expired.
+    clock += 2;
+    await caps.get("secretsStore");
+    expect(clawCmd).toHaveBeenCalledTimes(2);
+    expect(kTimedOutTtlMs).toBeLessThan(kNegativeTtlMs);
+  });
+
+  it("discriminates the exec-approvals era via the parent approvals help (pending subcommand)", async () => {
+    // Probing `approvals pending --help` would be wrong: commander 15 prints
+    // the PARENT help and exits 0 for unknown-subcommand + --help, reporting
+    // true on both eras. The parent help's subcommand list is the signal.
+    const betaHelp = ok(
+      [
+        "Usage: openclaw approvals [options] [command]",
+        "Commands:",
+        "  get [options]        Fetch approvals",
+        "  set [options]        Replace approvals",
+        "  allowlist            Manage allowlist",
+        "  pending [options]    List pending approval requests",
+        "  resolve <id> <decision>",
+      ].join("\n"),
+    );
+    const pinnedHelp = ok(
+      [
+        "Usage: openclaw approvals [options] [command]",
+        "Commands:",
+        "  get [options]        Fetch approvals",
+        "  set [options]        Replace approvals",
+        "  allowlist            Manage allowlist",
+      ].join("\n"),
+    );
+
+    const betaCaps = createOpenclawCapabilities({
+      clawCmd: vi.fn(async () => betaHelp),
+      getInstalledVersion: () => "beta",
+    });
+    expect(await betaCaps.get("execApprovalsSqlite")).toBe("sqlite");
+
+    const pinnedCaps = createOpenclawCapabilities({
+      clawCmd: vi.fn(async () => pinnedHelp),
+      getInstalledVersion: () => "pin",
+    });
+    expect(await pinnedCaps.get("execApprovalsSqlite")).toBe("file");
+
+    // No approvals group at all: an ancient build — determinate file era.
+    const ancientCaps = createOpenclawCapabilities({
+      clawCmd: vi.fn(async () =>
+        fail("", 'OpenClaw does not know the command "approvals".'),
+      ),
+      getInstalledVersion: () => "old",
+    });
+    expect(await ancientCaps.get("execApprovalsSqlite")).toBe("file");
+
+    // Timeout / hard failure: UNKNOWN (indeterminate) — never a guess.
+    const timedOutCaps = createOpenclawCapabilities({
+      clawCmd: vi.fn(async () => ({ ok: false, stdout: "", stderr: "", timedOut: true })),
+      getInstalledVersion: () => "busy",
+    });
+    expect(await timedOutCaps.get("execApprovalsSqlite")).toBe("unknown");
   });
 });
 

@@ -769,6 +769,36 @@ describe("server/watchdog", () => {
     expect(watchdog.getStatus().uptimeMs).toBe(0);
   });
 
+  it.each([130, 143])(
+    "treats an expected exit with the beta's forwarded-signal code %i as clean, not a crash",
+    (code) => {
+      // openclaw >= 2026.9.1-beta.1 exits 130 (SIGINT) / 143 (SIGTERM) on
+      // forwarded signals instead of dying by the signal — an
+      // alphaclaw-initiated stop/restart must enter the expected-restart
+      // window, never crash accounting.
+      const { watchdog } = createHarness();
+      watchdog.onGatewayLaunch({ startedAt: Date.now(), pid: 1234 });
+
+      watchdog.onGatewayExit({ code, signal: null, expectedExit: true });
+
+      const status = watchdog.getStatus();
+      expect(status.lifecycle).toBe("restarting");
+      expect(status.lastExit).toBeNull();
+      expect(status.crashCount ?? 0).toBe(0);
+    },
+  );
+
+  it("still books an UNEXPECTED 143 as a crash (external kill)", () => {
+    const { watchdog } = createHarness();
+    watchdog.onGatewayLaunch({ startedAt: Date.now(), pid: 1234 });
+
+    watchdog.onGatewayExit({ code: 143, signal: null, expectedExit: false });
+
+    expect(watchdog.getStatus().lastExit).toEqual(
+      expect.objectContaining({ code: 143 }),
+    );
+  });
+
   it("preserves uptimeStartedAt on duplicate-launch exit", () => {
     const { watchdog } = createHarness();
 

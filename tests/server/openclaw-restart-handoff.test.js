@@ -55,4 +55,29 @@ describe("server/openclaw-restart-handoff", () => {
     expect(r.accepted).toBe(false);
     expect(clawCmd).not.toHaveBeenCalled();
   });
+
+  it("accepts the 2026.9.1-beta.1 payload shape (status: accepted)", async () => {
+    // Real beta payload: { ok, protocol, protocolVersion, status, handoff }.
+    const clawCmd = async () =>
+      ok(
+        JSON.stringify({
+          ok: true,
+          protocol: "gateway-restart-handoff",
+          protocolVersion: 1,
+          status: "accepted",
+          handoff: { pid: 4242 },
+        }),
+      );
+    const r = await consumeRestartHandoff({ clawCmd, pid: 4242 });
+    expect(r.accepted).toBe(true);
+  });
+
+  it("rejects the beta's status: none / rejected results", async () => {
+    for (const status of ["none", "rejected"]) {
+      const clawCmd = async () =>
+        ok(JSON.stringify({ ok: true, protocolVersion: 1, status }));
+      const r = await consumeRestartHandoff({ clawCmd, pid: 4242 });
+      expect(r.accepted).toBe(false);
+    }
+  });
 });
