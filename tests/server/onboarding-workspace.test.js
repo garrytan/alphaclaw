@@ -160,6 +160,91 @@ describe("server/onboarding/workspace bootstrap prompt sync", () => {
       copyFileSync: vi.fn(),
     };
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const onFailure = vi.fn();
+
+    syncBootstrapPromptFiles({
+      fs: mockFs,
+      workspaceDir: WORKSPACE_DIR,
+      baseUrl: "https://setup.example.com",
+      onFailure,
+    });
+
+    // ONE merged file per workspace: hardening rules first, tools map after.
+    const mainMergedWrite = mockFs.writeFileSync.mock.calls.find(
+      ([target]) =>
+        target === path.join(WORKSPACE_DIR, "hooks", "bootstrap", "AGENTS.md"),
+    );
+    expect(mainMergedWrite).toBeTruthy();
+    expect(mainMergedWrite[1].startsWith("AGENTS TEMPLATE")).toBe(true);
+    expect(mainMergedWrite[1]).toContain("Setup: https://setup.example.com");
+    expect(mainMergedWrite[1]).toContain("## Topic Registry");
+    expect(mainMergedWrite[1]).toContain("| Ops (-100123) | Deploys | 42 |");
+    expect(mainMergedWrite[1]).toContain("### Sync Rules");
+    expect(mainMergedWrite[1]).toContain("## Available Google Accounts");
+    expect(mainMergedWrite[1]).toContain(
+      "- garry@example.com (type: personal; client: default; status: authenticated; services: gmail:read)",
+    );
+    expect(mainMergedWrite[1]).toContain(
+      "- (unknown email) (type: company; client: default; status: awaiting sign-in",
+    );
+
+    const otherMergedWrite = mockFs.writeFileSync.mock.calls.find(
+      ([target]) =>
+        target === path.join(otherWorkspace, "hooks", "bootstrap", "AGENTS.md"),
+    );
+    expect(otherMergedWrite).toBeTruthy();
+    expect(otherMergedWrite[1].startsWith("AGENTS TEMPLATE")).toBe(true);
+    expect(mockFs.copyFileSync).not.toHaveBeenCalled();
+    // A separate TOOLS.md is never written anymore (rejected as a
+    // bootstrap-extra-files basename on OpenClaw 2026.8.1+).
+    expect(
+      mockFs.writeFileSync.mock.calls.some(([target]) =>
+        String(target).endsWith(path.join("hooks", "bootstrap", "TOOLS.md")),
+      ),
+    ).toBe(false);
+    // The broken workspace's write was ATTEMPTED (the mock throws for it);
+    // the sync moved on and the failure surfaced through onFailure (not just
+    // the console).
+    expect(
+      mockFs.writeFileSync.mock.calls.some(
+        ([target]) =>
+          target === path.join(brokenWorkspace, "hooks", "bootstrap", "AGENTS.md"),
+      ),
+    ).toBe(true);
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining(
+        `[onboard] Bootstrap prompt sync workspace-sync:${brokenWorkspace} failed: read-only workspace`,
+      ),
+    );
+    expect(onFailure).toHaveBeenCalledWith(
+      `workspace-sync:${brokenWorkspace}`,
+      expect.objectContaining({ message: "read-only workspace" }),
+    );
+  });
+
+  it("resolves secondary agent workspaces from the keyed agents.entries map (2026.8)", () => {
+    stubRegistryRead(null);
+    const otherWorkspace = "/tmp/alphaclaw-entries-workspace";
+    const config = JSON.stringify({
+      agents: {
+        entries: {
+          main: { workspace: WORKSPACE_DIR },
+          " research ": { workspace: otherWorkspace },
+          "no-workspace": {},
+        },
+      },
+    });
+    const mockFs = {
+      readFileSync: vi.fn((target) => {
+        if (target === kToolsTemplatePath) return "Setup: {{SETUP_UI_URL}}";
+        if (target === kAgentsSourcePath) return "AGENTS TEMPLATE";
+        if (target === kConfigPath) return config;
+        throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+      }),
+      existsSync: vi.fn(() => false),
+      writeFileSync: vi.fn(),
+      mkdirSync: vi.fn(),
+    };
 
     syncBootstrapPromptFiles({
       fs: mockFs,
@@ -167,49 +252,61 @@ describe("server/onboarding/workspace bootstrap prompt sync", () => {
       baseUrl: "https://setup.example.com",
     });
 
-    const mainToolsWrite = mockFs.writeFileSync.mock.calls.find(
-      ([target]) =>
-        target === path.join(WORKSPACE_DIR, "hooks", "bootstrap", "TOOLS.md"),
+    const mergedTargets = mockFs.writeFileSync.mock.calls
+      .map(([target]) => target)
+      .filter((target) =>
+        String(target).endsWith(path.join("hooks", "bootstrap", "AGENTS.md")),
+      );
+    expect(mergedTargets).toContain(
+      path.join(WORKSPACE_DIR, "hooks", "bootstrap", "AGENTS.md"),
     );
-    expect(mainToolsWrite).toBeTruthy();
-    expect(mainToolsWrite[1]).toContain("Setup: https://setup.example.com");
-    expect(mainToolsWrite[1]).toContain("## Topic Registry");
-    expect(mainToolsWrite[1]).toContain("| Ops (-100123) | Deploys | 42 |");
-    expect(mainToolsWrite[1]).toContain("### Sync Rules");
-    expect(mainToolsWrite[1]).toContain("## Available Google Accounts");
-    expect(mainToolsWrite[1]).toContain(
-      "- garry@example.com (type: personal; client: default; status: authenticated; services: gmail:read)",
+    expect(mergedTargets).toContain(
+      path.join(otherWorkspace, "hooks", "bootstrap", "AGENTS.md"),
     );
-    expect(mainToolsWrite[1]).toContain(
-      "- (unknown email) (type: company; client: default; status: awaiting sign-in",
-    );
+    // Only the two workspace-bearing entries fan out.
+    expect(mergedTargets).toHaveLength(2);
+  });
 
-    const otherToolsWrite = mockFs.writeFileSync.mock.calls.find(
-      ([target]) =>
-        target === path.join(otherWorkspace, "hooks", "bootstrap", "TOOLS.md"),
+  it("prefers agents.entries over agents.list when both exist (mirror upstream precedence)", () => {
+    stubRegistryRead(null);
+    const entriesWorkspace = "/tmp/alphaclaw-entries-precedence-workspace";
+    const listWorkspace = "/tmp/alphaclaw-list-precedence-workspace";
+    const config = JSON.stringify({
+      agents: {
+        entries: {
+          research: { workspace: entriesWorkspace },
+        },
+        list: [{ id: "stale", workspace: listWorkspace }],
+      },
+    });
+    const mockFs = {
+      readFileSync: vi.fn((target) => {
+        if (target === kToolsTemplatePath) return "Setup: {{SETUP_UI_URL}}";
+        if (target === kAgentsSourcePath) return "AGENTS TEMPLATE";
+        if (target === kConfigPath) return config;
+        throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+      }),
+      existsSync: vi.fn(() => false),
+      writeFileSync: vi.fn(),
+      mkdirSync: vi.fn(),
+    };
+
+    syncBootstrapPromptFiles({
+      fs: mockFs,
+      workspaceDir: WORKSPACE_DIR,
+      baseUrl: "https://setup.example.com",
+    });
+
+    const mergedTargets = mockFs.writeFileSync.mock.calls
+      .map(([target]) => target)
+      .filter((target) =>
+        String(target).endsWith(path.join("hooks", "bootstrap", "AGENTS.md")),
+      );
+    expect(mergedTargets).toContain(
+      path.join(entriesWorkspace, "hooks", "bootstrap", "AGENTS.md"),
     );
-    expect(otherToolsWrite).toBeTruthy();
-    // AGENTS.md is copied via readFileSync + writeFileAtomic now, never
-    // copyFileSync.
-    const otherAgentsWrite = mockFs.writeFileSync.mock.calls.find(
-      ([target]) =>
-        target === path.join(otherWorkspace, "hooks", "bootstrap", "AGENTS.md"),
-    );
-    expect(otherAgentsWrite).toBeTruthy();
-    expect(otherAgentsWrite[1]).toBe("AGENTS TEMPLATE");
-    expect(mockFs.copyFileSync).not.toHaveBeenCalled();
-    // The broken workspace failed on its first write, so its TOOLS.md was
-    // never written and the sync moved on.
-    expect(
-      mockFs.writeFileSync.mock.calls.some(
-        ([target]) =>
-          target === path.join(brokenWorkspace, "hooks", "bootstrap", "TOOLS.md"),
-      ),
-    ).toBe(false);
-    expect(errorSpy).toHaveBeenCalledWith(
-      expect.stringContaining(
-        `[onboard] Bootstrap sync skipped for ${brokenWorkspace}: read-only workspace`,
-      ),
+    expect(mergedTargets).not.toContain(
+      path.join(listWorkspace, "hooks", "bootstrap", "AGENTS.md"),
     );
   });
 
@@ -245,7 +342,7 @@ describe("server/onboarding/workspace bootstrap prompt sync", () => {
     });
     const toolsContent = (mockFs) =>
       mockFs.writeFileSync.mock.calls.find(([target]) =>
-        String(target).endsWith("TOOLS.md"),
+        String(target).endsWith(path.join("hooks", "bootstrap", "AGENTS.md")),
       )[1];
 
     stubRegistryRead({
@@ -315,7 +412,7 @@ describe("server/onboarding/workspace bootstrap prompt sync", () => {
     });
 
     const toolsWrite = mockFs.writeFileSync.mock.calls.find(([target]) =>
-      String(target).endsWith("TOOLS.md"),
+      String(target).endsWith(path.join("hooks", "bootstrap", "AGENTS.md")),
     );
     expect(toolsWrite).toBeTruthy();
     const content = toolsWrite[1];
@@ -357,10 +454,10 @@ describe("server/onboarding/workspace bootstrap prompt sync", () => {
     });
 
     const toolsWrite = mockFs.writeFileSync.mock.calls.find(([target]) =>
-      String(target).endsWith("TOOLS.md"),
+      String(target).endsWith(path.join("hooks", "bootstrap", "AGENTS.md")),
     );
     expect(toolsWrite).toBeTruthy();
-    // TOOLS.md still writes; only the machine section is missing.
+    // The merged AGENTS.md still writes; only the machine section is missing.
     expect(toolsWrite[1]).toContain("Setup: https://setup.example.com");
     expect(toolsWrite[1]).not.toContain("## Machine Resources");
   });
@@ -396,14 +493,14 @@ describe("server/onboarding/workspace bootstrap prompt sync", () => {
       baseUrl: "https://setup.example.com",
     });
 
-    const toolsWrite = mockFs.writeFileSync.mock.calls.find(([target]) =>
-      String(target).endsWith("TOOLS.md"),
+    const mergedWrite = mockFs.writeFileSync.mock.calls.find(([target]) =>
+      String(target).endsWith(path.join("hooks", "bootstrap", "AGENTS.md")),
     );
-    expect(toolsWrite).toBeTruthy();
-    expect(toolsWrite[1]).toBe("Setup: https://setup.example.com");
+    expect(mergedWrite).toBeTruthy();
+    expect(mergedWrite[1]).toBe("AGENTS TEMPLATE\n\nSetup: https://setup.example.com");
   });
 
-  it("logs an error when bootstrap sync fails entirely", () => {
+  it("reports through onFailure when bootstrap sync fails entirely", () => {
     const mockFs = {
       readFileSync: vi.fn(() => {
         throw new Error("template missing");
@@ -414,17 +511,480 @@ describe("server/onboarding/workspace bootstrap prompt sync", () => {
       copyFileSync: vi.fn(),
     };
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const onFailure = vi.fn();
 
     syncBootstrapPromptFiles({
       fs: mockFs,
       workspaceDir: "/tmp/alphaclaw-sync-workspace",
       baseUrl: "https://setup.example.com",
+      onFailure,
     });
 
     expect(errorSpy).toHaveBeenCalledWith(
-      "[onboard] Bootstrap prompt sync error:",
-      "template missing",
+      expect.stringContaining(
+        "[onboard] Bootstrap prompt sync merge-write failed: template missing",
+      ),
     );
+    expect(onFailure).toHaveBeenCalledWith(
+      "merge-write",
+      expect.objectContaining({ message: "template missing" }),
+    );
+  });
+
+  it("survives an onFailure callback that itself throws", () => {
+    const mockFs = {
+      readFileSync: vi.fn(() => {
+        throw new Error("template missing");
+      }),
+      existsSync: vi.fn(() => false),
+      writeFileSync: vi.fn(),
+      mkdirSync: vi.fn(),
+    };
+    vi.spyOn(console, "error").mockImplementation(() => {});
+
+    expect(() =>
+      syncBootstrapPromptFiles({
+        fs: mockFs,
+        workspaceDir: "/tmp/alphaclaw-sync-workspace",
+        baseUrl: "https://setup.example.com",
+        onFailure: () => {
+          throw new Error("reporting exploded");
+        },
+      }),
+    ).not.toThrow();
+  });
+
+  it("deletes the legacy AlphaClaw TOOLS.md after a successful merge", () => {
+    stubRegistryRead(null);
+    const legacyPath = path.join(
+      "/tmp/alphaclaw-legacy-workspace",
+      "hooks",
+      "bootstrap",
+      "TOOLS.md",
+    );
+    const mockFs = {
+      readFileSync: vi.fn((target) => {
+        if (target === kToolsTemplatePath) return "Setup: {{SETUP_UI_URL}}";
+        if (target === kAgentsSourcePath) return "AGENTS TEMPLATE";
+        throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+      }),
+      existsSync: vi.fn((target) => target === legacyPath),
+      writeFileSync: vi.fn(),
+      mkdirSync: vi.fn(),
+      unlinkSync: vi.fn(),
+    };
+
+    syncBootstrapPromptFiles({
+      fs: mockFs,
+      workspaceDir: "/tmp/alphaclaw-legacy-workspace",
+      baseUrl: "https://setup.example.com",
+    });
+
+    expect(mockFs.unlinkSync).toHaveBeenCalledWith(legacyPath);
+  });
+
+  it("keeps the legacy TOOLS.md when the config reconcile fails (write→reconcile→delete)", () => {
+    stubRegistryRead(null);
+    const workspaceDir = "/tmp/alphaclaw-reconcile-fail-workspace";
+    const legacyPath = path.join(workspaceDir, "hooks", "bootstrap", "TOOLS.md");
+    // Config still references the legacy TOOLS.md path, so the reconcile
+    // needs a write — which fails.
+    const config = JSON.stringify({
+      hooks: {
+        internal: {
+          enabled: true,
+          entries: {
+            "bootstrap-extra-files": {
+              enabled: true,
+              paths: ["hooks/bootstrap/AGENTS.md", "hooks/bootstrap/TOOLS.md"],
+            },
+          },
+        },
+      },
+    });
+    const makeFs = ({ configWriteFails }) => ({
+      readFileSync: vi.fn((target) => {
+        if (target === kToolsTemplatePath) return "Setup: {{SETUP_UI_URL}}";
+        if (target === kAgentsSourcePath) return "AGENTS TEMPLATE";
+        if (target === kConfigPath) return config;
+        throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+      }),
+      existsSync: vi.fn((target) => target === legacyPath),
+      writeFileSync: vi.fn((target) => {
+        if (configWriteFails && target === kConfigPath) {
+          throw new Error("disk full");
+        }
+      }),
+      mkdirSync: vi.fn(),
+      unlinkSync: vi.fn(),
+    });
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const onFailure = vi.fn();
+
+    // Reconcile failure: the config may still reference the legacy path, so
+    // the file it points at must NOT be deleted (self-heals next boot sync).
+    const failingFs = makeFs({ configWriteFails: true });
+    syncBootstrapPromptFiles({
+      fs: failingFs,
+      workspaceDir,
+      baseUrl: "https://setup.example.com",
+      onFailure,
+    });
+    expect(onFailure).toHaveBeenCalledWith(
+      "config-reconcile",
+      expect.objectContaining({ message: "disk full" }),
+    );
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining(
+        "[onboard] Bootstrap prompt sync config-reconcile failed: disk full",
+      ),
+    );
+    expect(failingFs.unlinkSync).not.toHaveBeenCalled();
+
+    // Same config with a working write: reconcile succeeds → deletion runs.
+    const workingFs = makeFs({ configWriteFails: false });
+    syncBootstrapPromptFiles({
+      fs: workingFs,
+      workspaceDir,
+      baseUrl: "https://setup.example.com",
+    });
+    expect(workingFs.unlinkSync).toHaveBeenCalledWith(legacyPath);
+  });
+
+  it("keeps the legacy TOOLS.md when openclaw.json exists but is not strict JSON", () => {
+    stubRegistryRead(null);
+    const workspaceDir = "/tmp/alphaclaw-json5-workspace";
+    const legacyPath = path.join(workspaceDir, "hooks", "bootstrap", "TOOLS.md");
+    // A legal upstream JSON5/${ENV}/$include config our strict parser cannot
+    // read — it may still reference hooks/bootstrap/TOOLS.md, so treating it
+    // as reconciled would delete the only hardening injection.
+    const json5Config = "{ hooks: { internal: { enabled: true } } } // JSON5";
+    const mockFs = {
+      readFileSync: vi.fn((target) => {
+        if (target === kToolsTemplatePath) return "Setup: {{SETUP_UI_URL}}";
+        if (target === kAgentsSourcePath) return "AGENTS TEMPLATE";
+        if (target === kConfigPath) return json5Config;
+        throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+      }),
+      existsSync: vi.fn(
+        (target) => target === kConfigPath || target === legacyPath,
+      ),
+      writeFileSync: vi.fn(),
+      mkdirSync: vi.fn(),
+      unlinkSync: vi.fn(),
+    };
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const onFailure = vi.fn();
+
+    syncBootstrapPromptFiles({
+      fs: mockFs,
+      workspaceDir,
+      baseUrl: "https://setup.example.com",
+      onFailure,
+    });
+
+    // The merged hardening file is still written...
+    expect(
+      mockFs.writeFileSync.mock.calls.some(
+        ([target]) =>
+          target === path.join(workspaceDir, "hooks", "bootstrap", "AGENTS.md"),
+      ),
+    ).toBe(true);
+    // ...but the unreadable config is never rewritten, and the legacy
+    // TOOLS.md it may still reference is kept (reconcile skipped).
+    expect(
+      mockFs.writeFileSync.mock.calls.some(([target]) => target === kConfigPath),
+    ).toBe(false);
+    expect(mockFs.unlinkSync).not.toHaveBeenCalled();
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining("openclaw.json exists but is not parseable"),
+    );
+    // Not a failure — a JSON5 config is legal upstream, so no watchdog noise.
+    expect(onFailure).not.toHaveBeenCalled();
+  });
+
+  it("warns when the merged hardening file approaches the 20k injection cap", () => {
+    stubRegistryRead(null);
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const mockFs = {
+      readFileSync: vi.fn((target) => {
+        if (target === kToolsTemplatePath) return "T".repeat(12000);
+        if (target === kAgentsSourcePath) return "A".repeat(6000);
+        throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+      }),
+      existsSync: vi.fn(() => false),
+      writeFileSync: vi.fn(),
+      mkdirSync: vi.fn(),
+    };
+
+    syncBootstrapPromptFiles({
+      fs: mockFs,
+      workspaceDir: "/tmp/alphaclaw-size-workspace",
+      baseUrl: "https://setup.example.com",
+    });
+
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining("approaching OpenClaw's 20,000-char per-file injection cap"),
+    );
+  });
+
+  it("reconciles the bootstrap-extra-files hook entry on the sync path, preserving user paths", () => {
+    stubRegistryRead(null);
+    const config = JSON.stringify({
+      hooks: {
+        internal: {
+          enabled: true,
+          entries: {
+            "bootstrap-extra-files": {
+              enabled: true,
+              paths: [
+                "hooks/bootstrap/AGENTS.md",
+                "hooks/bootstrap/TOOLS.md",
+                "hooks/bootstrap/USER.md",
+              ],
+            },
+          },
+        },
+      },
+    });
+    const mockFs = {
+      readFileSync: vi.fn((target) => {
+        if (target === kToolsTemplatePath) return "Setup: {{SETUP_UI_URL}}";
+        if (target === kAgentsSourcePath) return "AGENTS TEMPLATE";
+        if (target === kConfigPath) return config;
+        throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+      }),
+      existsSync: vi.fn(() => false),
+      writeFileSync: vi.fn(),
+      mkdirSync: vi.fn(),
+    };
+
+    syncBootstrapPromptFiles({
+      fs: mockFs,
+      workspaceDir: "/tmp/alphaclaw-reconcile-workspace",
+      baseUrl: "https://setup.example.com",
+    });
+
+    const configWrite = mockFs.writeFileSync.mock.calls.find(
+      ([target]) => target === kConfigPath,
+    );
+    expect(configWrite).toBeTruthy();
+    const written = JSON.parse(configWrite[1]);
+    // AlphaClaw's merged path first, the legacy AlphaClaw TOOLS.md path
+    // dropped, the user-added path preserved verbatim.
+    expect(written.hooks.internal.entries["bootstrap-extra-files"]).toEqual({
+      enabled: true,
+      paths: ["hooks/bootstrap/AGENTS.md", "hooks/bootstrap/USER.md"],
+    });
+  });
+
+  it("does not rewrite openclaw.json when the hook entry is already reconciled", () => {
+    stubRegistryRead(null);
+    const config = JSON.stringify({
+      hooks: {
+        internal: {
+          enabled: true,
+          entries: {
+            "bootstrap-extra-files": {
+              enabled: true,
+              paths: ["hooks/bootstrap/AGENTS.md"],
+            },
+          },
+        },
+      },
+    });
+    const mockFs = {
+      readFileSync: vi.fn((target) => {
+        if (target === kToolsTemplatePath) return "Setup: {{SETUP_UI_URL}}";
+        if (target === kAgentsSourcePath) return "AGENTS TEMPLATE";
+        if (target === kConfigPath) return config;
+        throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+      }),
+      existsSync: vi.fn(() => false),
+      writeFileSync: vi.fn(),
+      mkdirSync: vi.fn(),
+    };
+
+    syncBootstrapPromptFiles({
+      fs: mockFs,
+      workspaceDir: "/tmp/alphaclaw-noop-workspace",
+      baseUrl: "https://setup.example.com",
+    });
+
+    expect(
+      mockFs.writeFileSync.mock.calls.some(([target]) => target === kConfigPath),
+    ).toBe(false);
+  });
+
+  // The bundled hook resolves `paths` if non-empty, ELSE `patterns`, ELSE
+  // `files` — writing a managed non-empty `paths` array short-circuits the
+  // alias keys completely, so alias-configured extras must fold into `paths`.
+  const makeReconcileFs = (config) => ({
+    readFileSync: vi.fn((target) => {
+      if (target === kToolsTemplatePath) return "Setup: {{SETUP_UI_URL}}";
+      if (target === kAgentsSourcePath) return "AGENTS TEMPLATE";
+      if (target === kConfigPath) return config;
+      throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+    }),
+    existsSync: vi.fn(() => false),
+    writeFileSync: vi.fn(),
+    mkdirSync: vi.fn(),
+  });
+  const findConfigWrite = (mockFs) =>
+    mockFs.writeFileSync.mock.calls.find(([target]) => target === kConfigPath);
+
+  it("folds patterns-alias extras into managed paths and preserves the alias key", () => {
+    stubRegistryRead(null);
+    const mockFs = makeReconcileFs(
+      JSON.stringify({
+        hooks: {
+          internal: {
+            enabled: true,
+            entries: {
+              "bootstrap-extra-files": {
+                enabled: true,
+                patterns: ["hooks/bootstrap/PATTERNS.md", "notes/*.md"],
+              },
+            },
+          },
+        },
+      }),
+    );
+
+    syncBootstrapPromptFiles({
+      fs: mockFs,
+      workspaceDir: "/tmp/alphaclaw-patterns-alias-workspace",
+      baseUrl: "https://setup.example.com",
+    });
+
+    const configWrite = findConfigWrite(mockFs);
+    expect(configWrite).toBeTruthy();
+    const written = JSON.parse(configWrite[1]);
+    expect(written.hooks.internal.entries["bootstrap-extra-files"]).toEqual({
+      enabled: true,
+      // The alias key stays untouched — harmless once paths is a superset.
+      patterns: ["hooks/bootstrap/PATTERNS.md", "notes/*.md"],
+      paths: [
+        "hooks/bootstrap/AGENTS.md",
+        "hooks/bootstrap/PATTERNS.md",
+        "notes/*.md",
+      ],
+    });
+  });
+
+  it("folds files-alias extras into managed paths and preserves the alias key", () => {
+    stubRegistryRead(null);
+    const mockFs = makeReconcileFs(
+      JSON.stringify({
+        hooks: {
+          internal: {
+            enabled: true,
+            entries: {
+              "bootstrap-extra-files": {
+                enabled: true,
+                files: ["hooks/bootstrap/EXTRA.md"],
+              },
+            },
+          },
+        },
+      }),
+    );
+
+    syncBootstrapPromptFiles({
+      fs: mockFs,
+      workspaceDir: "/tmp/alphaclaw-files-alias-workspace",
+      baseUrl: "https://setup.example.com",
+    });
+
+    const configWrite = findConfigWrite(mockFs);
+    expect(configWrite).toBeTruthy();
+    const written = JSON.parse(configWrite[1]);
+    expect(written.hooks.internal.entries["bootstrap-extra-files"]).toEqual({
+      enabled: true,
+      files: ["hooks/bootstrap/EXTRA.md"],
+      paths: ["hooks/bootstrap/AGENTS.md", "hooks/bootstrap/EXTRA.md"],
+    });
+  });
+
+  it("keeps existing user paths in order ahead of folded alias extras", () => {
+    stubRegistryRead(null);
+    const mockFs = makeReconcileFs(
+      JSON.stringify({
+        hooks: {
+          internal: {
+            enabled: true,
+            entries: {
+              "bootstrap-extra-files": {
+                enabled: true,
+                paths: [
+                  "hooks/bootstrap/ZULU.md",
+                  "hooks/bootstrap/TOOLS.md",
+                  "hooks/bootstrap/ALPHA.md",
+                ],
+                patterns: ["notes/*.md"],
+                files: ["extra/FILES.md", "notes/*.md"],
+              },
+            },
+          },
+        },
+      }),
+    );
+
+    syncBootstrapPromptFiles({
+      fs: mockFs,
+      workspaceDir: "/tmp/alphaclaw-alias-order-workspace",
+      baseUrl: "https://setup.example.com",
+    });
+
+    const configWrite = findConfigWrite(mockFs);
+    expect(configWrite).toBeTruthy();
+    const written = JSON.parse(configWrite[1]);
+    // AlphaClaw's path first, user paths in their original order (legacy
+    // TOOLS.md dropped), then patterns, then files, exact duplicates deduped.
+    expect(
+      written.hooks.internal.entries["bootstrap-extra-files"].paths,
+    ).toEqual([
+      "hooks/bootstrap/AGENTS.md",
+      "hooks/bootstrap/ZULU.md",
+      "hooks/bootstrap/ALPHA.md",
+      "notes/*.md",
+      "extra/FILES.md",
+    ]);
+  });
+
+  it("is a no-op on re-run after alias extras were folded into paths", () => {
+    stubRegistryRead(null);
+    const firstFs = makeReconcileFs(
+      JSON.stringify({
+        hooks: {
+          internal: {
+            enabled: true,
+            entries: {
+              "bootstrap-extra-files": {
+                enabled: true,
+                patterns: ["hooks/bootstrap/PATTERNS.md"],
+              },
+            },
+          },
+        },
+      }),
+    );
+    syncBootstrapPromptFiles({
+      fs: firstFs,
+      workspaceDir: "/tmp/alphaclaw-alias-noop-workspace",
+      baseUrl: "https://setup.example.com",
+    });
+    const firstWrite = findConfigWrite(firstFs);
+    expect(firstWrite).toBeTruthy();
+
+    // Feed the first run's output back in: diff-before-write must hold.
+    const secondFs = makeReconcileFs(firstWrite[1]);
+    syncBootstrapPromptFiles({
+      fs: secondFs,
+      workspaceDir: "/tmp/alphaclaw-alias-noop-workspace",
+      baseUrl: "https://setup.example.com",
+    });
+    expect(findConfigWrite(secondFs)).toBeUndefined();
   });
 
   it("symlinks the env file into the openclaw dir when missing", () => {

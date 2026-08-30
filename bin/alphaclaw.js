@@ -20,6 +20,26 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 const { execFileSync, execSync } = require("child_process");
+
+// constants.js snapshots ALPHACLAW_ROOT_DIR at first require — the env MUST
+// be set before any ../lib require (v0.9.38 regression: helpers/
+// self-dependency load constants), or a `--root-dir` run splits state across
+// two roots. Same precedence as the re-derivation further down:
+// --root-dir flag → ALPHACLAW_ROOT_DIR env → ~/.alphaclaw.
+const resolveRootDirFromArgv = (argv) => {
+  const flagIndex = argv.indexOf("--root-dir");
+  const flagRootDir =
+    flagIndex !== -1 && flagIndex + 1 < argv.length
+      ? argv[flagIndex + 1]
+      : undefined;
+  return (
+    flagRootDir ||
+    process.env.ALPHACLAW_ROOT_DIR ||
+    path.join(os.homedir(), ".alphaclaw")
+  );
+};
+process.env.ALPHACLAW_ROOT_DIR = resolveRootDirFromArgv(process.argv.slice(2));
+
 const {
   shouldSkipSystemCronInstall,
   resolveGitAskPassPath,
@@ -190,13 +210,14 @@ const resolveGithubRepoPath = (value) =>
     .replace(/\.git$/, "");
 
 // ---------------------------------------------------------------------------
-// 1. Resolve root directory (before requiring any lib/ modules)
+// 1. Resolve root directory
 // ---------------------------------------------------------------------------
 
-const rootDir =
-  flagValue(args, "--root-dir") ||
-  process.env.ALPHACLAW_ROOT_DIR ||
-  path.join(os.homedir(), ".alphaclaw");
+// Idempotent re-derivation of the pre-require resolution at the top of this
+// file (same helper, same argv, and ALPHACLAW_ROOT_DIR already carries the
+// resolved value) — it cannot disagree with the root the ../lib requires
+// snapshotted.
+const rootDir = resolveRootDirFromArgv(args);
 
 process.env.ALPHACLAW_ROOT_DIR = rootDir;
 

@@ -86,6 +86,13 @@ const crashLoopNotices = (notifier) =>
     String(call?.[0] || "").includes("crash loop detected"),
   );
 
+// Exact stderr the beta healthy-incumbent step-aside emits on exit 78 (see
+// isHealthyIncumbentStepAsideExit in lib/server/watchdog.js).
+const kStepAsideStderrTail = [
+  "Gateway failed to start: gateway already running under systemd; existing gateway is healthy, exiting with code 78 to prevent a systemd Restart=always loop",
+  "If the gateway is supervised, stop it with: openclaw gateway stop",
+];
+
 describe("server/watchdog release-channel rollback hooks", () => {
   afterEach(() => {
     if (kOriginalAutoRepair == null) {
@@ -580,6 +587,96 @@ describe("server/watchdog release-channel rollback hooks", () => {
     await flushMicrotasks();
 
     expect(clawCmd).toHaveBeenCalledWith("doctor --fix --yes", { quiet: true, timeoutMs: 600000 });
+  });
+
+  it("bypasses the exit-78 step-aside probe once a rollback is already requested", async () => {
+    const hooks = createReleaseChannelHooks({
+      isPin: false,
+      inStabilizationWindow: true,
+    });
+    const { watchdog, insertWatchdogEvent } = createHarness({
+      autoRepair: false,
+      releaseChannelHooks: hooks,
+    });
+
+    // First exit-78 (no step-aside signature) requests the rollback.
+    watchdog.onGatewayExit({
+      code: 78,
+      expectedExit: false,
+      stderrTail: ["fatal configuration error"],
+    });
+    await flushMicrotasks();
+    expect(hooks.requestRollback).toHaveBeenCalledTimes(1);
+
+    // A step-aside-shaped exit-78 while the rollback restart is landing:
+    // rollback owns recovery — no probe starts, no reclassification, no
+    // duplicate rollback request, no latch.
+    watchdog.onGatewayExit({
+      code: 78,
+      expectedExit: false,
+      stderrTail: kStepAsideStderrTail,
+      launchedAt: Date.now(),
+    });
+    await flushMicrotasks();
+
+    expect(global.fetch).not.toHaveBeenCalled();
+    expect(hooks.requestRollback).toHaveBeenCalledTimes(1);
+    expect(insertWatchdogEvent).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        details: expect.objectContaining({ stepAside: true }),
+      }),
+    );
+    expect(insertWatchdogEvent).not.toHaveBeenCalledWith(
+      expect.objectContaining({ eventType: "config_error" }),
+    );
+    expect(watchdog.getStatus()).toEqual(
+      expect.objectContaining({ lifecycle: "crashed", health: "unhealthy" }),
+    );
+  });
+
+  it("discards a step-aside probe superseded by a managed operation", async () => {
+    const hooks = createReleaseChannelHooks({
+      isPin: false,
+      inStabilizationWindow: true,
+    });
+    let resolveFetch;
+    const { watchdog, insertWatchdogEvent } = createHarness({
+      autoRepair: false,
+      releaseChannelHooks: hooks,
+      fetchImpl: () =>
+        new Promise((resolve) => {
+          resolveFetch = resolve;
+        }),
+    });
+
+    watchdog.onGatewayExit({
+      code: 78,
+      expectedExit: false,
+      stderrTail: kStepAsideStderrTail,
+      launchedAt: Date.now(),
+    });
+    await flushMicrotasks();
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+
+    // A managed operation (version swap) starts while the probe is in
+    // flight: it owns the gateway bounce, so the probe result is discarded.
+    watchdog.beginManagedOperation();
+    resolveFetch({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({ ok: true, status: "live" }),
+    });
+    await flushMicrotasks();
+
+    expect(insertWatchdogEvent).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        details: expect.objectContaining({ stepAside: true }),
+      }),
+    );
+    expect(insertWatchdogEvent).not.toHaveBeenCalledWith(
+      expect.objectContaining({ eventType: "config_error" }),
+    );
+    watchdog.endManagedOperation();
   });
 
   it("[REG] treats exit code 78 as a fatal config error when hooks are omitted", async () => {

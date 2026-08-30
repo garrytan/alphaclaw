@@ -5,6 +5,85 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.9.48] - 2026-08-30
+
+Drift Doctor now understands how the installed OpenClaw actually injects
+workspace context — verified against the real 2026.7 stable and 2026.8.1 beta
+packages — and can watch your workspace on a schedule instead of waiting for
+you to click Run.
+
+### Added
+- **Scheduled Drift Doctor scans (opt-in).** A Doctor-tab toggle runs a scan
+  automatically when the workspace goes stale with meaningful changes, when
+  your environment changes (budgets, hooks, git-sync, OpenClaw version), or
+  when prompt hardening degrades — throttled to at most one scan per 6 hours,
+  skipped while the gateway is down, and never on by default.
+- **New-P0 notifications.** When a scan surfaces a new critical finding, you
+  get one Watchdog notification naming up to three findings — deduplicated
+  across restarts, never repeated for findings you already saw or dismissed.
+- **Context-budget meter (Doctor tab).** See the estimated injection size of
+  every bootstrap file against OpenClaw's real 60,000-character budget, with
+  per-file bars and truncation/starvation chips.
+- **Prompt-hardening badge (General tab).** At a glance: are AlphaClaw's
+  safety rules actually reaching the agent? States cover injected, partially
+  truncated, blocked, and unknown (including unreadable JSON5 configs and
+  unverified dev builds).
+- **Environment checks that don't need an LLM.** Every scan now also runs
+  deterministic checks: retired TOOLS.md/HEARTBEAT.md guidance on the beta,
+  invalid or starved bootstrap extras, MEMORY.md over budget, leftover
+  BOOTSTRAP.md, skills-prompt bloat, and git sync disabled.
+- **OpenClaw's own doctor, bridged in.** Scans run `openclaw doctor --lint
+  --json` alongside the LLM analysis and surface its findings as cards
+  (capped, deduplicated, and suppressed where Drift Doctor already covers
+  the same ground).
+- **Verified restart handoff.** When a supervised gateway exits because
+  OpenClaw itself requested a restart (config write, /restart, plugin
+  change), AlphaClaw now consumes the handoff record and relaunches promptly
+  instead of counting it as a crash.
+
+### Changed
+- **Doctor analysis upgraded to the doctor-v2 contract.** Corrected budgets
+  (60k total, not 150k), real truncation behavior (75/25 with visible
+  markers), MEMORY.md recognized as injected, per-version file ordering, and
+  the beta's 4k USER.md cap and session-scope filtering — all cited to the
+  shipped packages, with per-version profiles selected by installed version
+  (failing closed to stable). The first scan after upgrading re-analyzes
+  from scratch by design.
+- **Prompt hardening now ships as one merged `hooks/bootstrap/AGENTS.md`**
+  on every version — the beta no longer silently drops AlphaClaw's rules
+  with the retired TOOLS.md name, and existing installs migrate on next
+  boot with user-added extras preserved.
+- **Run button stays honest.** It disables with a visible reason only while
+  the gateway can't take a run (including degraded health); with zero file
+  changes it stays enabled — a no-change scan is cheap (no LLM call) and
+  re-checks your environment, config, and OpenClaw's own doctor findings.
+
+### Fixed
+- **Exit-78 no longer always means "config error".** A healthy-incumbent
+  step-aside (two gateways racing at boot) is now verified with a health
+  probe and treated as benign instead of latching restarts and triggering
+  rollback.
+- **SQLite backups cover every database and follow the real beta CLI.**
+  Create with the required `--repository`, then verify the exact snapshot
+  the create reported — for the shared state database AND each configured
+  agent's database (sessions, auth profiles). A backup that can't be
+  verified, or that skips a database, is reported as a failure with the
+  exact step that failed — never as a success.
+- **Dashboard focus links use the beta's URL grammar** (path form), so
+  focus deep links actually open.
+- **Notification and card hygiene hardened.** Finding titles can't forge
+  extra notification lines; evidence snippets can't read outside the
+  workspace (symlinks included) and are secret-redacted; secrets rotated
+  via the env editor are redacted without a restart; agent-dispatched fix
+  prompts only ever contain template text and validated identifiers.
+- **The context model matches the shipped packages byte-for-byte.**
+  Per-agent budget overrides, the `patterns`/`files` extras aliases, keyed
+  agent rosters, USER.md's basename-applied cap, missing-file markers
+  charged to the budget, and the 2 MiB read-rejection cap are all modeled
+  as the real gateway behaves — each cited to the package source.
+- **The upgrade overseer reads doctor output correctly on stable**
+  (`doctor --lint --json`, honoring the exit-code contract).
+
 ## [0.9.47] - 2026-08-30
 
 Every time shown in the UI now renders in your browser's timezone and your
@@ -90,6 +169,7 @@ bucketed days at the *server's* midnight, and the Doctor tab served a frozen
   trends endpoint also accepts a `?timeZone=` override and marks its
   response `Vary: x-client-timezone` for HTTP caches.
 
+
 ## [0.9.46] - 2026-08-29
 
 ### Added
@@ -126,6 +206,7 @@ bucketed days at the *server's* midnight, and the Doctor tab served a frozen
 ### Fixed
 - The stale `package-lock.json` version left behind by the 0.9.42 release is
   synced.
+
 
 ## [0.9.45] - 2026-08-29
 
@@ -196,6 +277,7 @@ reconciler, so there is one migration engine with one recovery story.
   the vanished-file contract that caused #18.
 - `docs/upgrade-troubleshooting.md`: a runbook for held gateways, blocked
   stale restores, quiesced backups, and their exact recovery commands.
+
 
 ## [0.9.44] - 2026-08-29
 
@@ -483,6 +565,7 @@ primitives.
   `--help` flag discovery) no longer receive `ANTHROPIC_API_KEY`; only real
   overseer runs get the credential. Concurrent cold probes are also
   single-flighted.
+
 
 ## [0.9.39] - 2026-08-29
 

@@ -4,6 +4,7 @@ const path = require("path");
 
 const {
   buildOnboardArgs,
+  reconcileBootstrapExtraEntryPaths,
   writeManagedImportOpenclawConfig,
   writeSanitizedOpenclawConfig,
 } = require("../../lib/server/onboarding/openclaw");
@@ -177,6 +178,45 @@ describe("server/onboarding/openclaw", () => {
     expect(next.gateway.http.endpoints.responses).toEqual({
       enabled: true,
       maxBodyBytes: 5678,
+    });
+  });
+
+  it("folds alias-configured bootstrap extras into managed paths during import", () => {
+    const openclawDir = createTempOpenclawDir();
+    const configPath = path.join(openclawDir, "openclaw.json");
+    fs.writeFileSync(
+      configPath,
+      JSON.stringify(
+        {
+          channels: {},
+          hooks: {
+            internal: {
+              enabled: true,
+              entries: {
+                "bootstrap-extra-files": {
+                  enabled: true,
+                  files: ["hooks/bootstrap/EXTRA.md"],
+                },
+              },
+            },
+          },
+        },
+        null,
+        2,
+      ),
+      "utf8",
+    );
+
+    writeManagedImportOpenclawConfig({ fs, openclawDir, varMap: {} });
+
+    const next = JSON.parse(fs.readFileSync(configPath, "utf8"));
+    // The bundled hook resolves a non-empty `paths` EXCLUSIVELY (aliases are
+    // short-circuited), so alias extras fold into `paths`; the alias key
+    // itself stays untouched.
+    expect(next.hooks.internal.entries["bootstrap-extra-files"]).toEqual({
+      enabled: true,
+      files: ["hooks/bootstrap/EXTRA.md"],
+      paths: ["hooks/bootstrap/AGENTS.md", "hooks/bootstrap/EXTRA.md"],
     });
   });
 
@@ -465,5 +505,31 @@ describe("server/onboarding/openclaw channel configuration", () => {
     expect(next.channels.whatsapp.groupAllowFrom).toEqual([
       "${WHATSAPP_OWNER_NUMBER}",
     ]);
+  });
+});
+
+describe("server/onboarding/openclaw reconcileBootstrapExtraEntryPaths", () => {
+  it("composes AlphaClaw's path, then paths, patterns, files — trimmed and deduped", () => {
+    expect(
+      reconcileBootstrapExtraEntryPaths({
+        paths: [" hooks/bootstrap/USER.md ", "hooks/bootstrap/TOOLS.md"],
+        patterns: ["notes/*.md", "hooks/bootstrap/USER.md"],
+        files: ["extra/FILES.md", "", "notes/*.md"],
+      }),
+    ).toEqual([
+      "hooks/bootstrap/AGENTS.md",
+      "hooks/bootstrap/USER.md",
+      "notes/*.md",
+      "extra/FILES.md",
+    ]);
+  });
+
+  it("handles a missing entry and non-array alias values", () => {
+    expect(reconcileBootstrapExtraEntryPaths(undefined)).toEqual([
+      "hooks/bootstrap/AGENTS.md",
+    ]);
+    expect(
+      reconcileBootstrapExtraEntryPaths({ patterns: "not-an-array" }),
+    ).toEqual(["hooks/bootstrap/AGENTS.md"]);
   });
 });

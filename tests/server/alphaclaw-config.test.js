@@ -7,14 +7,17 @@ const {
   readAlphaclawConfig,
   readAutotuneEnabled,
   readAutotuneSettings,
+  readDoctorAutoRunEnabled,
   readOpenclawMedicEnabled,
   readOpenclawReleaseChannel,
   readWatchdogOverseerEnabled,
   updateAutotuneSettings,
+  updateDoctorAutoRunEnabled,
   updateOpenAiCompatApiFeature,
   updateOpenclawMedicEnabled,
   updateOpenclawReleaseChannel,
   updateWatchdogOverseerEnabled,
+  writeAlphaclawConfig,
 } = require("../../lib/server/alphaclaw-config");
 
 const createTempOpenclawDir = () =>
@@ -90,6 +93,9 @@ describe("server/alphaclaw-config", () => {
       watchdog: {
         overseer: { enabled: false },
       },
+      doctor: {
+        autoRun: { enabled: false },
+      },
       autotune: {
         enabled: true,
         overrides: {},
@@ -134,6 +140,9 @@ describe("server/alphaclaw-config", () => {
       },
       watchdog: {
         overseer: { enabled: false },
+      },
+      doctor: {
+        autoRun: { enabled: false },
       },
       autotune: {
         enabled: true,
@@ -228,6 +237,113 @@ describe("server/alphaclaw-config", () => {
     const on = updateOpenclawMedicEnabled({ openclawDir, enabled: true });
     expect(on.changed).toBe(true);
     expect(readOpenclawMedicEnabled({ openclawDir })).toBe(true);
+  });
+
+  it("defaults scheduled Doctor scans to OFF (opt-in, spends user tokens)", () => {
+    const openclawDir = createTempOpenclawDir();
+    expect(readDoctorAutoRunEnabled({ openclawDir })).toBe(false);
+  });
+
+  it("persists the Doctor auto-run toggle round-trip", () => {
+    const openclawDir = createTempOpenclawDir();
+
+    expect(updateDoctorAutoRunEnabled({ openclawDir, enabled: true })).toBe(true);
+    expect(readDoctorAutoRunEnabled({ openclawDir })).toBe(true);
+
+    expect(updateDoctorAutoRunEnabled({ openclawDir, enabled: false })).toBe(false);
+    expect(readDoctorAutoRunEnabled({ openclawDir })).toBe(false);
+  });
+
+  it("normalizes anything but literal true to off for Doctor auto-run", () => {
+    const openclawDir = createTempOpenclawDir();
+    fs.writeFileSync(
+      path.join(openclawDir, "alphaclaw.json"),
+      JSON.stringify({ doctor: { autoRun: { enabled: "yes" } } }),
+      "utf8",
+    );
+    expect(readDoctorAutoRunEnabled({ openclawDir })).toBe(false);
+    expect(readAlphaclawConfig({ openclawDir }).doctor.autoRun.enabled).toBe(false);
+
+    // Truthy-but-not-true through the updater is also normalized off.
+    expect(updateDoctorAutoRunEnabled({ openclawDir, enabled: 1 })).toBe(false);
+    expect(readDoctorAutoRunEnabled({ openclawDir })).toBe(false);
+  });
+
+  it("writes alphaclaw.json atomically: temp file in the same dir, then rename", () => {
+    const openclawDir = createTempOpenclawDir();
+    const configPath = path.join(openclawDir, "alphaclaw.json");
+    const writes = [];
+    const renames = [];
+    const fsModule = {
+      ...fs,
+      writeFileSync: vi.fn((target, ...rest) => {
+        writes.push(String(target));
+        return fs.writeFileSync(target, ...rest);
+      }),
+      renameSync: vi.fn((from, to) => {
+        renames.push([String(from), String(to)]);
+        return fs.renameSync(from, to);
+      }),
+    };
+
+    const written = writeAlphaclawConfig({
+      fsModule,
+      openclawDir,
+      config: { team: { enabled: true } },
+    });
+
+    // The final path is NEVER written directly — a crash mid-write must not
+    // leave a torn alphaclaw.json (readAlphaclawConfig would silently fall
+    // back to defaults). Only a same-dir temp file, then a rename over it.
+    expect(writes).toHaveLength(1);
+    expect(writes[0]).not.toBe(configPath);
+    expect(path.dirname(writes[0])).toBe(openclawDir);
+    expect(renames).toEqual([[writes[0], configPath]]);
+    // What landed on disk is valid JSON and round-trips through the reader.
+    expect(JSON.parse(fs.readFileSync(configPath, "utf8")).team.enabled).toBe(true);
+    expect(written.team.enabled).toBe(true);
+    expect(readAlphaclawConfig({ openclawDir }).team.enabled).toBe(true);
+  });
+
+  it("leaves the previous config intact when the atomic rename fails", () => {
+    const openclawDir = createTempOpenclawDir();
+    const configPath = path.join(openclawDir, "alphaclaw.json");
+    updateOpenAiCompatApiFeature({ openclawDir, enabled: true });
+    const before = fs.readFileSync(configPath, "utf8");
+    const fsModule = {
+      ...fs,
+      renameSync: vi.fn(() => {
+        throw new Error("EIO: rename failed");
+      }),
+    };
+
+    expect(() =>
+      writeAlphaclawConfig({
+        fsModule,
+        openclawDir,
+        config: { features: { openaiCompatApi: { enabled: false } } },
+      }),
+    ).toThrow("EIO: rename failed");
+
+    // Target untouched (old, valid JSON) and the temp file cleaned up.
+    expect(fs.readFileSync(configPath, "utf8")).toBe(before);
+    expect(fs.readdirSync(openclawDir)).toEqual(["alphaclaw.json"]);
+    expect(isOpenAiCompatApiEnabled({ openclawDir })).toBe(true);
+  });
+
+  it("preserves unknown doctor keys through an auto-run update", () => {
+    const openclawDir = createTempOpenclawDir();
+    fs.writeFileSync(
+      path.join(openclawDir, "alphaclaw.json"),
+      JSON.stringify({ doctor: { futureKnob: "keep-me", autoRun: { enabled: false } } }),
+      "utf8",
+    );
+    updateDoctorAutoRunEnabled({ openclawDir, enabled: true });
+    const written = JSON.parse(
+      fs.readFileSync(path.join(openclawDir, "alphaclaw.json"), "utf8"),
+    );
+    expect(written.doctor.futureKnob).toBe("keep-me");
+    expect(written.doctor.autoRun.enabled).toBe(true);
   });
 
   it("defaults the watchdog overseer to DISABLED and normalizes anything but literal true", () => {

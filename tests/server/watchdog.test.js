@@ -14,6 +14,14 @@ const kOriginalAutoRepair = process.env.WATCHDOG_AUTO_REPAIR;
 const kOriginalNotificationsDisabled = process.env.WATCHDOG_NOTIFICATIONS_DISABLED;
 const kOriginalFetch = global.fetch;
 
+// Exact stderr the beta step-aside path emits (openclaw@2026.8.1-beta.3
+// dist, SupervisedGatewayLockError propagated through "Gateway failed to
+// start: ..." — see isHealthyIncumbentStepAsideExit in lib/server/watchdog.js).
+const kStepAsideStderrTail = [
+  "Gateway failed to start: gateway already running under systemd; existing gateway is healthy, exiting with code 78 to prevent a systemd Restart=always loop",
+  "If the gateway is supervised, stop it with: openclaw gateway stop",
+];
+
 const createHarness = ({
   autoRepair = true,
   notificationsDisabled = false,
@@ -28,6 +36,8 @@ const createHarness = ({
     status: 200,
     text: async () => JSON.stringify({ ok: true, status: "live" }),
   }),
+  supervisorModeActive,
+  consumeRestartHandoffImpl,
 } = {}) => {
   process.env.WATCHDOG_AUTO_REPAIR = autoRepair ? "true" : "false";
   process.env.WATCHDOG_NOTIFICATIONS_DISABLED = notificationsDisabled ? "true" : "false";
@@ -63,6 +73,13 @@ const createHarness = ({
     // Crash-restart backoff resolves instantly in tests; backoff timing has
     // its own dedicated fake-timer coverage.
     sleepImpl: () => Promise.resolve(),
+    // Handoff gate: the REAL default (gateway.isSupervisorModeActive) is now
+    // OPEN unless escape-hatched (supervisor mode defaults on), which would
+    // route every unexpected clean exit in this suite through the consume
+    // path. Keep the hermetic default CLOSED; handoff tests inject their own
+    // gate, and the default-gate resolution is unit-tested in gateway.test.js.
+    supervisorModeActive: supervisorModeActive ?? (() => false),
+    ...(consumeRestartHandoffImpl ? { consumeRestartHandoffImpl } : {}),
   });
 
   return {
@@ -2013,6 +2030,793 @@ describe("server/watchdog", () => {
     await vi.advanceTimersByTimeAsync(1_000);
     expect(global.fetch.mock.calls.length).toBe(fetchCalls);
     watchdog.stop();
+  });
+
+  it("classifies exit-78 as a benign step-aside when all three signals hold", async () => {
+    const { watchdog, insertWatchdogEvent, notifier, launchGatewayProcess } =
+      createHarness({ autoRepair: false });
+
+    watchdog.onGatewayExit({
+      code: 78,
+      signal: null,
+      expectedExit: false,
+      stderrTail: kStepAsideStderrTail,
+      launchedAt: Date.now() - 2_000,
+    });
+    await flushMicrotasks();
+    await flushMicrotasks();
+
+    // Signature + startup window + healthy incumbent probe: the incumbent
+    // keeps the port — no latch, no rollback, no notification, no relaunch.
+    expect(watchdog.getStatus()).toEqual(
+      expect.objectContaining({
+        lifecycle: "running",
+        crashCountInWindow: 0,
+      }),
+    );
+    expect(insertWatchdogEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        eventType: "restart",
+        source: "exit_event",
+        status: "ok",
+        details: expect.objectContaining({ stepAside: true, code: 78 }),
+      }),
+    );
+    expect(insertWatchdogEvent).not.toHaveBeenCalledWith(
+      expect.objectContaining({ eventType: "config_error" }),
+    );
+    expect(notifier.notify).not.toHaveBeenCalled();
+    expect(launchGatewayProcess).not.toHaveBeenCalled();
+    watchdog.stop();
+  });
+
+  it("latches when the step-aside probe finds no healthy incumbent", async () => {
+    const { watchdog, insertWatchdogEvent, notifier } = createHarness({
+      autoRepair: false,
+      fetchImpl: async () => {
+        throw new Error("no incumbent listening");
+      },
+    });
+
+    watchdog.onGatewayExit({
+      code: 78,
+      expectedExit: false,
+      stderrTail: kStepAsideStderrTail,
+      launchedAt: Date.now(),
+    });
+    await flushMicrotasks();
+    await flushMicrotasks();
+
+    // Fail-safe: two failed probe attempts fall through to the EXISTING
+    // config-error flow unchanged.
+    expect(global.fetch).toHaveBeenCalledTimes(2);
+    expect(watchdog.getStatus()).toEqual(
+      expect.objectContaining({
+        lifecycle: "configuration_error",
+        health: "unhealthy",
+      }),
+    );
+    expect(insertWatchdogEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        eventType: "config_error",
+        source: "exit_event",
+        status: "failed",
+        details: expect.objectContaining({ code: 78 }),
+      }),
+    );
+    expect(
+      notifier.notify.mock.calls.some((call) =>
+        String(call?.[0] || "").includes("Gateway configuration error"),
+      ),
+    ).toBe(true);
+  });
+
+  it("latches when the step-aside probe machinery itself throws", async () => {
+    const { watchdog, insertWatchdogEvent } = createHarness({
+      autoRepair: false,
+      resolveGatewayHealthUrl: () => {
+        throw new Error("resolver exploded");
+      },
+    });
+
+    watchdog.onGatewayExit({
+      code: 78,
+      expectedExit: false,
+      stderrTail: kStepAsideStderrTail,
+      launchedAt: Date.now(),
+    });
+    await flushMicrotasks();
+
+    expect(watchdog.getStatus()).toEqual(
+      expect.objectContaining({
+        lifecycle: "configuration_error",
+        health: "unhealthy",
+      }),
+    );
+    expect(insertWatchdogEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        eventType: "config_error",
+        details: expect.objectContaining({ code: 78 }),
+      }),
+    );
+  });
+
+  it("keeps exit-78 synchronous and never probes without the step-aside signature", () => {
+    const { watchdog } = createHarness({ autoRepair: false });
+
+    watchdog.onGatewayExit({
+      code: 78,
+      expectedExit: false,
+      stderrTail: ["fatal configuration error: invalid channels config"],
+      launchedAt: Date.now(),
+    });
+
+    // No flush: the plain config-error path must classify synchronously.
+    expect(watchdog.getStatus().lifecycle).toBe("configuration_error");
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  it("keeps exit-78 synchronous when the step-aside signature lands outside the startup window", () => {
+    const { watchdog } = createHarness({ autoRepair: false });
+
+    watchdog.onGatewayExit({
+      code: 78,
+      expectedExit: false,
+      stderrTail: kStepAsideStderrTail,
+      launchedAt: Date.now() - 61_000,
+    });
+
+    // A healthy probe alone can be another process or a stale incumbent;
+    // outside the boot window the exit latches without probing.
+    expect(watchdog.getStatus().lifecycle).toBe("configuration_error");
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  it("keeps exit-78 synchronous when only one of the two signature phrases matches", () => {
+    const { watchdog } = createHarness({ autoRepair: false });
+
+    // "exiting with code 78" present, but the healthy-incumbent phrase absent
+    // — the sibling probe-timeout error uses this shape and must keep
+    // latching (both phrases are required).
+    watchdog.onGatewayExit({
+      code: 78,
+      expectedExit: false,
+      stderrTail: [
+        "Gateway failed to start: incumbent did not become healthy, exiting with code 78 to prevent a systemd Restart=always loop",
+      ],
+      launchedAt: Date.now(),
+    });
+
+    // No flush: the plain config-error path must classify synchronously.
+    expect(watchdog.getStatus().lifecycle).toBe("configuration_error");
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  it("keeps exit-78 synchronous when no launch reference exists for the startup window", () => {
+    const { watchdog } = createHarness({ autoRepair: false });
+
+    // Full signature, but launchedAt is null and no gateway launch was ever
+    // recorded: with no startup-window reference the window check fails
+    // (fail-safe toward the config-error flow) and no probe is spawned.
+    watchdog.onGatewayExit({
+      code: 78,
+      expectedExit: false,
+      stderrTail: kStepAsideStderrTail,
+      launchedAt: null,
+    });
+
+    expect(watchdog.getStatus().lifecycle).toBe("configuration_error");
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  it("discards a stale step-aside probe superseded by a newer launch", async () => {
+    let resolveFirstFetch;
+    let fetchCalls = 0;
+    const healthyResponse = () => ({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({ ok: true, status: "live" }),
+    });
+    const { watchdog, insertWatchdogEvent } = createHarness({
+      autoRepair: false,
+      fetchImpl: () => {
+        fetchCalls += 1;
+        if (fetchCalls === 1) {
+          return new Promise((resolve) => {
+            resolveFirstFetch = resolve;
+          });
+        }
+        return Promise.resolve(healthyResponse());
+      },
+    });
+
+    watchdog.onGatewayExit({
+      code: 78,
+      expectedExit: false,
+      stderrTail: kStepAsideStderrTail,
+      launchedAt: Date.now(),
+    });
+    await flushMicrotasks();
+    // A newer launch lands while the probe is still in flight.
+    watchdog.onGatewayLaunch({ startedAt: Date.now(), pid: 999 });
+    await flushMicrotasks();
+
+    resolveFirstFetch(healthyResponse());
+    await flushMicrotasks();
+
+    // The healthy probe result belongs to a superseded exit: discarded — the
+    // launch owns state, and neither a stepAside event nor a latch may land.
+    expect(insertWatchdogEvent).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        details: expect.objectContaining({ stepAside: true }),
+      }),
+    );
+    expect(insertWatchdogEvent).not.toHaveBeenCalledWith(
+      expect.objectContaining({ eventType: "config_error" }),
+    );
+    expect(watchdog.getStatus().lifecycle).toBe("running");
+    watchdog.stop();
+  });
+
+  it("treats an accepted restart handoff as an expected restart with a prompt relaunch", async () => {
+    const consumeRestartHandoffImpl = vi.fn(async () => ({
+      status: "accepted",
+      reason: null,
+      handoff: {
+        pid: 4242,
+        source: "config-apply",
+        reason: "config changed",
+        restartKind: "gateway",
+      },
+    }));
+    const { watchdog, insertWatchdogEvent, launchGatewayProcess } =
+      createHarness({
+        autoRepair: false,
+        supervisorModeActive: () => true,
+        consumeRestartHandoffImpl,
+        fetchImpl: async () => {
+          throw new Error("gateway restarting");
+        },
+      });
+
+    watchdog.onGatewayLaunch({ startedAt: Date.now() - 5_000, pid: 4242 });
+    watchdog.onGatewayExit({
+      code: 0,
+      signal: null,
+      expectedExit: false,
+      pid: 4242,
+    });
+    await flushMicrotasks();
+    await flushMicrotasks();
+
+    expect(consumeRestartHandoffImpl).toHaveBeenCalledTimes(1);
+    expect(consumeRestartHandoffImpl).toHaveBeenCalledWith(
+      expect.objectContaining({ pid: 4242 }),
+    );
+    // Expected-restart handling: no crash accounting, no backoff, and the
+    // relaunch fires promptly (the gateway deferred its OWN restart to us).
+    expect(watchdog.getStatus()).toEqual(
+      expect.objectContaining({
+        lifecycle: "restarting",
+        crashCountInWindow: 0,
+      }),
+    );
+    expect(insertWatchdogEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        eventType: "restart",
+        source: "handoff",
+        status: "ok",
+        details: expect.objectContaining({
+          source: "config-apply",
+          reason: "config changed",
+          restartKind: "gateway",
+          pid: 4242,
+        }),
+      }),
+    );
+    expect(insertWatchdogEvent).not.toHaveBeenCalledWith(
+      expect.objectContaining({ eventType: "crash" }),
+    );
+    expect(insertWatchdogEvent).not.toHaveBeenCalledWith(
+      expect.objectContaining({ status: "backoff" }),
+    );
+    expect(launchGatewayProcess).toHaveBeenCalledTimes(1);
+    watchdog.stop();
+  });
+
+  it("brakes an accepted-handoff relaunch loop after the window cap and falls through to the crash flow", async () => {
+    // 2026.8.1 failure mode: a gateway stuck in a restart-request loop writes
+    // a handoff row and exits 0 on EVERY boot. Each accepted consume skips
+    // crash accounting, so without a brake the crash-loop breaker never
+    // engages and the relaunch loop runs forever with no notification.
+    const consumeRestartHandoffImpl = vi.fn(async () => ({
+      status: "accepted",
+      reason: null,
+      handoff: { pid: 4242, source: "config-apply", restartKind: "gateway" },
+    }));
+    const { watchdog, insertWatchdogEvent, launchGatewayProcess } =
+      createHarness({
+        autoRepair: false,
+        supervisorModeActive: () => true,
+        consumeRestartHandoffImpl,
+        fetchImpl: async () => {
+          throw new Error("gateway restarting");
+        },
+      });
+
+    // First 5 accepted-handoff exits within the window: expected-restart
+    // handling each time — prompt relaunch, zero crash accounting.
+    for (let i = 0; i < 5; i += 1) {
+      watchdog.onGatewayLaunch({ startedAt: Date.now(), pid: 4242 });
+      watchdog.onGatewayExit({ code: 0, expectedExit: false, pid: 4242 });
+      await flushMicrotasks();
+      await flushMicrotasks();
+    }
+    expect(launchGatewayProcess).toHaveBeenCalledTimes(5);
+    expect(insertWatchdogEvent).not.toHaveBeenCalledWith(
+      expect.objectContaining({ eventType: "crash" }),
+    );
+    expect(watchdog.getStatus().crashCountInWindow).toBe(0);
+
+    // The 6th accepted exit inside the window trips the brake: the handoff
+    // fast path is skipped and the exit takes the normal crash flow, so
+    // crash accounting (and, on repeats, backoff + the crash-loop breaker)
+    // engages. onGatewayLaunch between iterations must NOT have reset the
+    // rolling window — each loop pass is a real launch.
+    watchdog.onGatewayLaunch({ startedAt: Date.now(), pid: 4242 });
+    watchdog.onGatewayExit({ code: 0, expectedExit: false, pid: 4242 });
+    await flushMicrotasks();
+    await flushMicrotasks();
+
+    expect(insertWatchdogEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        eventType: "restart",
+        source: "handoff",
+        status: "skipped",
+        details: expect.objectContaining({
+          reason: "rate_limited",
+          relaunchesInWindow: 5,
+        }),
+      }),
+    );
+    expect(insertWatchdogEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        eventType: "crash",
+        source: "exit_event",
+        status: "failed",
+        details: expect.objectContaining({ code: 0 }),
+      }),
+    );
+    expect(watchdog.getStatus()).toEqual(
+      expect.objectContaining({
+        lifecycle: "crashed",
+        crashCountInWindow: 1,
+      }),
+    );
+    watchdog.stop();
+  });
+
+  it("keeps the existing classification for none and error handoff results with no incumbent", async () => {
+    for (const status of ["none", "error"]) {
+      const consumeRestartHandoffImpl = vi.fn(async () => ({
+        status,
+        reason: null,
+        handoff: null,
+      }));
+      const { watchdog, insertWatchdogEvent, launchGatewayProcess } =
+        createHarness({
+          autoRepair: false,
+          supervisorModeActive: () => true,
+          consumeRestartHandoffImpl,
+          // No healthy incumbent answers the disambiguation probe: this is a
+          // genuine clean-exit crash and must classify as one.
+          fetchImpl: async () => {
+            throw new Error("no incumbent listening");
+          },
+        });
+
+      // Hold the relaunch open: upstream's operation-end resync fires another
+      // health probe once the relaunch settles, which would blur the exact
+      // two-attempt disambiguation-probe count asserted below.
+      launchGatewayProcess.mockImplementation(() => new Promise(() => {}));
+
+      watchdog.onGatewayExit({
+        code: 0,
+        expectedExit: false,
+        pid: 4242,
+      });
+      await flushMicrotasks();
+      await flushMicrotasks();
+
+      expect(consumeRestartHandoffImpl).toHaveBeenCalledTimes(1);
+      // The incumbent probe ran (both attempts) before crash classification.
+      expect(global.fetch).toHaveBeenCalledTimes(2);
+      expect(insertWatchdogEvent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          eventType: "crash",
+          source: "exit_event",
+          status: "failed",
+          details: expect.objectContaining({ code: 0 }),
+        }),
+      );
+      expect(watchdog.getStatus().crashCountInWindow).toBe(1);
+      expect(launchGatewayProcess).toHaveBeenCalledTimes(1);
+    }
+  });
+
+  it("logs rejected handoffs at info level and classifies the exit normally", async () => {
+    const consumeRestartHandoffImpl = vi.fn(async () => ({
+      status: "rejected",
+      reason: "pid-mismatch",
+      handoff: null,
+    }));
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    const { watchdog, insertWatchdogEvent } = createHarness({
+      autoRepair: false,
+      supervisorModeActive: () => true,
+      consumeRestartHandoffImpl,
+      fetchImpl: async () => {
+        throw new Error("no incumbent listening");
+      },
+    });
+
+    watchdog.onGatewayExit({ code: 0, expectedExit: false, pid: 4242 });
+    await flushMicrotasks();
+    await flushMicrotasks();
+
+    expect(logSpy).toHaveBeenCalledWith(
+      expect.stringContaining("restart handoff rejected (pid-mismatch)"),
+    );
+    expect(insertWatchdogEvent).toHaveBeenCalledWith(
+      expect.objectContaining({ eventType: "crash" }),
+    );
+    expect(watchdog.getStatus().crashCountInWindow).toBe(1);
+  });
+
+  it("never consults the handoff consume when the supervisorMode gate is closed", async () => {
+    // Gate closed (harness default — production reaches this state via the
+    // OPENCLAW_SUPERVISOR_MODE=off|none escape hatch, unit-tested in
+    // gateway.test.js): the consume CLI is never spawned.
+    const { watchdog, clawCmd } = createHarness({ autoRepair: false });
+
+    watchdog.onGatewayExit({ code: 0, expectedExit: false, pid: 4242 });
+
+    // No flush: with the gate closed the classification stays synchronous.
+    expect(watchdog.getStatus()).toEqual(
+      expect.objectContaining({
+        lifecycle: "crashed",
+        crashCountInWindow: 1,
+      }),
+    );
+    expect(clawCmd).not.toHaveBeenCalled();
+    await flushMicrotasks();
+    expect(clawCmd).not.toHaveBeenCalled();
+  });
+
+  it("discards a handoff verdict superseded by a newer launch", async () => {
+    let resolveConsume;
+    const consumeRestartHandoffImpl = vi.fn(
+      () =>
+        new Promise((resolve) => {
+          resolveConsume = resolve;
+        }),
+    );
+    const { watchdog, insertWatchdogEvent, launchGatewayProcess } =
+      createHarness({
+        autoRepair: false,
+        supervisorModeActive: () => true,
+        consumeRestartHandoffImpl,
+      });
+
+    watchdog.onGatewayExit({ code: 0, expectedExit: false, pid: 1111 });
+    watchdog.onGatewayLaunch({ startedAt: Date.now(), pid: 2222 });
+    await flushMicrotasks();
+
+    resolveConsume({
+      status: "accepted",
+      reason: null,
+      handoff: { pid: 1111, source: "config-apply" },
+    });
+    await flushMicrotasks();
+    await flushMicrotasks();
+
+    // The consume settled after a newer launch: neither the handoff restart
+    // handling nor the crash fallback may land — the launch owns state.
+    expect(insertWatchdogEvent).not.toHaveBeenCalledWith(
+      expect.objectContaining({ source: "handoff" }),
+    );
+    expect(insertWatchdogEvent).not.toHaveBeenCalledWith(
+      expect.objectContaining({ eventType: "crash" }),
+    );
+    expect(launchGatewayProcess).not.toHaveBeenCalled();
+    expect(watchdog.getStatus().lifecycle).toBe("running");
+    watchdog.stop();
+  });
+
+  it("reclassifies a handoff-less clean exit as a step-aside when a healthy incumbent answers", async () => {
+    // Beta line without systemd hints: a newcomer that finds a healthy
+    // incumbent logs "leaving it in control" on STDOUT and exits 0 without
+    // writing a handoff row — consume says "none", but this is not a crash.
+    const consumeRestartHandoffImpl = vi.fn(async () => ({
+      status: "none",
+      reason: "missing",
+      handoff: null,
+    }));
+    const { watchdog, insertWatchdogEvent, notifier, launchGatewayProcess } =
+      createHarness({
+        autoRepair: false,
+        supervisorModeActive: () => true,
+        consumeRestartHandoffImpl,
+      });
+
+    watchdog.onGatewayExit({
+      code: 0,
+      signal: null,
+      expectedExit: false,
+      pid: 4242,
+    });
+    await flushMicrotasks();
+    await flushMicrotasks();
+
+    expect(watchdog.getStatus()).toEqual(
+      expect.objectContaining({
+        lifecycle: "running",
+        crashCountInWindow: 0,
+      }),
+    );
+    expect(insertWatchdogEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        eventType: "restart",
+        source: "exit_event",
+        status: "ok",
+        details: expect.objectContaining({ stepAside: true, code: 0 }),
+      }),
+    );
+    expect(insertWatchdogEvent).not.toHaveBeenCalledWith(
+      expect.objectContaining({ eventType: "crash" }),
+    );
+    expect(notifier.notify).not.toHaveBeenCalled();
+    expect(launchGatewayProcess).not.toHaveBeenCalled();
+    watchdog.stop();
+  });
+
+  it("exposes pendingExitClassification and blocks dispatch while an exit classification is in flight", async () => {
+    let resolveConsume;
+    const consumeRestartHandoffImpl = vi.fn(
+      () =>
+        new Promise((resolve) => {
+          resolveConsume = resolve;
+        }),
+    );
+    const { watchdog } = createHarness({
+      autoRepair: false,
+      supervisorModeActive: () => true,
+      consumeRestartHandoffImpl,
+      fetchImpl: async () => {
+        throw new Error("gateway restarting");
+      },
+    });
+
+    watchdog.onGatewayLaunch({ startedAt: Date.now(), pid: 4242 });
+    await flushMicrotasks();
+    expect(watchdog.getStatus().pendingExitClassification).toBe(false);
+
+    watchdog.onGatewayExit({ code: 0, expectedExit: false, pid: 4242 });
+
+    // While the consume is pending, lifecycle still reads pre-exit "running"
+    // — the flag is what keeps dispatch gates honest against a dead gateway.
+    expect(watchdog.getStatus()).toEqual(
+      expect.objectContaining({
+        lifecycle: "running",
+        pendingExitClassification: true,
+      }),
+    );
+    expect(watchdog.isReadyForDispatch()).toEqual({
+      ok: false,
+      reason: "a gateway exit is being classified",
+    });
+
+    resolveConsume({
+      status: "accepted",
+      reason: null,
+      handoff: { pid: 4242, source: "config-apply" },
+    });
+    await flushMicrotasks();
+    await flushMicrotasks();
+
+    expect(watchdog.getStatus()).toEqual(
+      expect.objectContaining({
+        lifecycle: "restarting",
+        pendingExitClassification: false,
+      }),
+    );
+    expect(watchdog.isReadyForDispatch()).toEqual({
+      ok: false,
+      reason: "gateway lifecycle is restarting",
+    });
+    watchdog.stop();
+  });
+
+  it("gates health ticks to a no-op while an exit classification is pending", async () => {
+    vi.useFakeTimers();
+    let resolveConsume;
+    const consumeRestartHandoffImpl = vi.fn(
+      () =>
+        new Promise((resolve) => {
+          resolveConsume = resolve;
+        }),
+    );
+    const { watchdog, insertWatchdogEvent } = createHarness({
+      autoRepair: false,
+      supervisorModeActive: () => true,
+      consumeRestartHandoffImpl,
+      fetchImpl: async () => {
+        throw new Error("gateway restarting");
+      },
+    });
+
+    watchdog.onGatewayLaunch({ startedAt: Date.now(), pid: 4242 });
+    await vi.advanceTimersByTimeAsync(0);
+    const probesBeforeExit = global.fetch.mock.calls.length;
+
+    watchdog.onGatewayExit({ code: 0, expectedExit: false, pid: 4242 });
+    expect(watchdog.getStatus().pendingExitClassification).toBe(true);
+    const eventsBeforeTicks = insertWatchdogEvent.mock.calls.length;
+
+    // Armed health timers keep firing while the resolver runs (5s bootstrap
+    // cadence): every tick must be a no-op — no probe, no logged check, no
+    // degraded marking or repair/rollback dispatch racing the resolver.
+    await vi.advanceTimersByTimeAsync(20_000);
+
+    expect(global.fetch.mock.calls.length).toBe(probesBeforeExit);
+    expect(insertWatchdogEvent.mock.calls.length).toBe(eventsBeforeTicks);
+    expect(watchdog.getStatus()).toEqual(
+      expect.objectContaining({
+        lifecycle: "running",
+        health: "unknown",
+        pendingExitClassification: true,
+      }),
+    );
+
+    resolveConsume({
+      status: "accepted",
+      reason: null,
+      handoff: { pid: 4242, source: "config-apply" },
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(watchdog.getStatus()).toEqual(
+      expect.objectContaining({
+        lifecycle: "restarting",
+        pendingExitClassification: false,
+      }),
+    );
+    watchdog.stop();
+  });
+
+  it("isReadyForDispatch reflects lifecycle, managed operations, and recovery", async () => {
+    const gatewayState = { up: true };
+    const { watchdog } = createHarness({
+      autoRepair: false,
+      fetchImpl: async () => {
+        if (!gatewayState.up) throw new Error("gateway down");
+        return {
+          ok: true,
+          status: 200,
+          text: async () => JSON.stringify({ ok: true, status: "live" }),
+        };
+      },
+    });
+
+    // Never started: nothing to dispatch against.
+    expect(watchdog.isReadyForDispatch()).toEqual({
+      ok: false,
+      reason: "gateway lifecycle is stopped",
+    });
+
+    watchdog.onGatewayLaunch({ startedAt: Date.now(), pid: 1234 });
+    await flushMicrotasks();
+    expect(watchdog.getStatus().health).toBe("healthy");
+    expect(watchdog.isReadyForDispatch()).toEqual({ ok: true, reason: "" });
+
+    // Managed updates block dispatch for their whole duration — not just
+    // while a transient lifecycle operation is in flight.
+    watchdog.beginManagedOperation();
+    expect(watchdog.isReadyForDispatch()).toEqual({
+      ok: false,
+      reason: "an OpenClaw update operation is in progress",
+    });
+
+    // The managed bounce leaves lifecycle "restarting": still not ready
+    // after the operation ends, until the relaunch reports in.
+    watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    watchdog.endManagedOperation();
+    expect(watchdog.isReadyForDispatch()).toEqual({
+      ok: false,
+      reason: "gateway lifecycle is restarting",
+    });
+
+    watchdog.onGatewayLaunch({ startedAt: Date.now(), pid: 1235 });
+    await flushMicrotasks();
+    expect(watchdog.isReadyForDispatch()).toEqual({ ok: true, reason: "" });
+
+    // Crashes block via lifecycle. Drop the gateway first: the relaunch's
+    // operation-end resync would otherwise read the healthy mock and clear
+    // the crash before the assertion.
+    gatewayState.up = false;
+    watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    await flushMicrotasks();
+    expect(watchdog.isReadyForDispatch()).toEqual({
+      ok: false,
+      reason: "gateway lifecycle is crashed",
+    });
+    watchdog.stop();
+  });
+
+  it("isReadyForDispatch blocks safe mode", async () => {
+    vi.useFakeTimers();
+    const gatewayState = { suppressed: ["telegram"] };
+    const { watchdog } = createHarness({
+      autoRepair: false,
+      resolveGatewayReadyzUrl: () => "http://127.0.0.1:18789/readyz",
+      fetchImpl: buildSafeModeFetch(gatewayState),
+    });
+
+    watchdog.start();
+    await vi.advanceTimersByTimeAsync(10);
+    expect(watchdog.getStatus().safeMode).toBe(true);
+    expect(watchdog.isReadyForDispatch()).toEqual({
+      ok: false,
+      reason: "gateway is in safe mode",
+    });
+    watchdog.stop();
+  });
+
+  it("isReadyForDispatch blocks degraded health but allows the unknown post-launch window", async () => {
+    vi.useFakeTimers();
+    const readyzState = { degraded: true };
+    const { watchdog } = createHarness({
+      autoRepair: false,
+      resolveGatewayReadyzUrl: () => "http://127.0.0.1:18789/readyz",
+      fetchImpl: async (url) => ({
+        ok: true,
+        status: 200,
+        text: async () =>
+          String(url).includes("readyz")
+            ? JSON.stringify({
+                ready: !readyzState.degraded,
+                failing: readyzState.degraded ? ["secrets"] : [],
+                eventLoop: { degraded: readyzState.degraded },
+              })
+            : JSON.stringify({ ok: true, status: "live" }),
+      }),
+    });
+
+    watchdog.start();
+    watchdog.onGatewayLaunch({ startedAt: Date.now() });
+    // Post-launch window: health is still "unknown" until the first probe
+    // lands — dispatch stays allowed rather than blocking every fresh boot.
+    expect(watchdog.getStatus().health).toBe("unknown");
+    expect(watchdog.isReadyForDispatch()).toEqual({ ok: true, reason: "" });
+
+    // Green /health + degraded /readyz marks health degraded while lifecycle
+    // stays "running" — an LLM doctor run against a degraded gateway would
+    // burn its timeout for nothing, so dispatch must block here too.
+    await vi.advanceTimersByTimeAsync(5_000);
+    const status = watchdog.getStatus();
+    expect(status.lifecycle).toBe("running");
+    expect(status.health).toBe("degraded");
+    expect(watchdog.isReadyForDispatch()).toEqual({
+      ok: false,
+      reason: "gateway health is degraded (failing health probes)",
+    });
+
+    // Recovery: readiness clears → health returns and dispatch reopens.
+    readyzState.degraded = false;
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(watchdog.getStatus().health).toBe("healthy");
+    expect(watchdog.isReadyForDispatch()).toEqual({ ok: true, reason: "" });
+    watchdog.stop();
+    vi.useRealTimers();
   });
 
   it("marks health degraded on green /health + degraded /readyz, with one advisory doctor (1.8)", async () => {

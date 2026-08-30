@@ -479,6 +479,9 @@ describe("server/routes/system", () => {
             enabled: false,
             disableLegacyLogin: false,
           },
+          doctor: {
+            autoRun: { enabled: false },
+          },
           watchdog: {
             overseer: { enabled: false },
           },
@@ -871,6 +874,9 @@ describe("server/routes/system", () => {
           enabled: false,
           disableLegacyLogin: false,
         },
+        doctor: {
+          autoRun: { enabled: false },
+        },
         watchdog: {
           overseer: { enabled: false },
         },
@@ -915,6 +921,9 @@ describe("server/routes/system", () => {
           team: {
             enabled: false,
             disableLegacyLogin: false,
+          },
+          doctor: {
+            autoRun: { enabled: false },
           },
           watchdog: {
             overseer: { enabled: false },

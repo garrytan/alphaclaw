@@ -371,22 +371,62 @@ describe("frontend/api", () => {
     expect(result).toEqual({ ok: true, runId: 42 });
   });
 
-  it("importDoctorResult posts raw Doctor output", async () => {
-    global.fetch.mockResolvedValue(mockJsonResponse(201, { ok: true, runId: 43 }));
+  it("startDoctorRun surfaces gateway unavailability from a 503", async () => {
+    global.fetch.mockResolvedValue(
+      mockJsonResponse(503, {
+        ok: false,
+        gatewayUnavailable: true,
+        reason: "gateway is restarting",
+        error: "Gateway not ready",
+      }),
+    );
     const api = await loadApiModule();
 
-    const result = await api.importDoctorResult('{"summary":"Imported","cards":[]}');
+    await expect(api.startDoctorRun()).rejects.toMatchObject({
+      message: "Gateway not ready",
+      gatewayUnavailable: true,
+      reason: "gateway is restarting",
+    });
+  });
+
+  it("fetchDoctorSettings calls the Doctor settings endpoint", async () => {
+    global.fetch.mockResolvedValue(
+      mockJsonResponse(200, { ok: true, settings: { autoRunEnabled: true } }),
+    );
+    const api = await loadApiModule();
+
+    const result = await api.fetchDoctorSettings();
 
     expect(global.fetch).toHaveBeenCalledWith(
-      "/api/doctor/import",
+      "/api/doctor/settings",
+      expect.objectContaining({ headers: expect.any(Headers) }),
+    );
+    expect(result).toEqual({ ok: true, settings: { autoRunEnabled: true } });
+  });
+
+  it("updateDoctorSettings puts the autoRun flag", async () => {
+    global.fetch.mockResolvedValue(
+      mockJsonResponse(200, { ok: true, settings: { autoRunEnabled: false } }),
+    );
+    const api = await loadApiModule();
+
+    const result = await api.updateDoctorSettings({ autoRunEnabled: false });
+
+    expect(global.fetch).toHaveBeenCalledWith(
+      "/api/doctor/settings",
       expect.objectContaining({
-        method: "POST",
-        body: JSON.stringify({ rawOutput: '{"summary":"Imported","cards":[]}' }),
+        method: "PUT",
+        body: JSON.stringify({ autoRunEnabled: false }),
         headers: expect.any(Headers),
       }),
     );
     expectLastFetchHeaders("application/json");
-    expect(result).toEqual({ ok: true, runId: 43 });
+    expect(result).toEqual({ ok: true, settings: { autoRunEnabled: false } });
+  });
+
+  it("does not expose an importDoctorResult client (server route only)", async () => {
+    const api = await loadApiModule();
+    expect(api.importDoctorResult).toBeUndefined();
   });
 
   it("fetchUsageSessionDetail encodes session id in path", async () => {

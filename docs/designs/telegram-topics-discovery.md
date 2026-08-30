@@ -20,8 +20,11 @@ when Telegram reports them gone, and notify the operator as the registry evolves
 Six components, each detailed in the implementation plan:
 1. **Traffic discovery** — unknown `(groupId, threadId)` pairs seen in session keys
    (usage/status labelers) are upserted into the registry as discovered/unnamed.
-2. **Always-on guidance** — the TOOLS.md Topic Registry section + Sync Rules render
-   even with zero topics (today an empty registry renders nothing).
+2. **Always-on guidance** — the Topic Registry section + Sync Rules render
+   even with zero topics (today an empty registry renders nothing). *(Since the
+   v0.9.40 hardening merge this section renders into the single merged
+   `hooks/bootstrap/AGENTS.md`, not a standalone TOOLS.md — see
+   `lib/server/topic-registry.js`.)*
 3. **CLI fix + topic create** — `alphaclaw telegram topic add` is broken in Telegram
    multi-account mode (reads only legacy `channels.telegram.groups`, writes the wrong
    config branch, wrong baseUrl on prompt re-sync); fix it, and add

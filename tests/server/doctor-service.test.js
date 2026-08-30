@@ -690,7 +690,10 @@ describe("server/doctor-service", () => {
 
   it("reports total Project Context truncation when active injected files exceed the total cap", () => {
     const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-bootstrap-total-limit-"));
+    const managedRoot = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-bootstrap-total-limit-managed-"));
     const dbRoot = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-bootstrap-total-limit-db-"));
+    // 60k total budget: AGENTS+SOUL+TOOLS consume it; everything after (incl.
+    // AlphaClaw's hook extra, injected LAST) starves.
     const activeProjectContextFiles = [
       "AGENTS.md",
       "SOUL.md",
@@ -699,12 +702,28 @@ describe("server/doctor-service", () => {
       "USER.md",
       "HEARTBEAT.md",
       "hooks/bootstrap/AGENTS.md",
-      "hooks/bootstrap/TOOLS.md",
     ];
     fs.mkdirSync(path.join(workspaceRoot, "hooks", "bootstrap"), { recursive: true });
     for (const filePath of activeProjectContextFiles) {
       fs.writeFileSync(path.join(workspaceRoot, filePath), repeatText(20000), "utf8");
     }
+    fs.writeFileSync(
+      path.join(managedRoot, "openclaw.json"),
+      JSON.stringify({
+        hooks: {
+          internal: {
+            enabled: true,
+            entries: {
+              "bootstrap-extra-files": {
+                enabled: true,
+                paths: ["hooks/bootstrap/AGENTS.md"],
+              },
+            },
+          },
+        },
+      }),
+      "utf8",
+    );
 
     const doctorDb = loadManagedDoctorDb();
     doctorDb.initDoctorDb({ rootDir: dbRoot });
@@ -724,7 +743,16 @@ describe("server/doctor-service", () => {
       getDoctorCard: doctorDb.getDoctorCard,
       updateDoctorCardStatus: doctorDb.updateDoctorCardStatus,
       workspaceRoot,
-      managedRoot: workspaceRoot,
+      managedRoot,
+      readOpenclawConfig: ({ openclawDir, fallback }) => {
+        try {
+          return JSON.parse(
+            fs.readFileSync(path.join(openclawDir, "openclaw.json"), "utf8"),
+          );
+        } catch {
+          return fallback;
+        }
+      },
       computeSnapshotAsync: fastComputeSnapshotAsync,
     });
 
@@ -738,11 +766,14 @@ describe("server/doctor-service", () => {
     expect(status.bootstrapContext.activeTruncatedFiles).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
-          path: "hooks/bootstrap/TOOLS.md",
+          path: "hooks/bootstrap/AGENTS.md",
           truncatedByTotalLimit: true,
+          skipped: true,
+          reason: "starved",
         }),
       ]),
     );
+    expect(status.bootstrapContext.hardening.state).toBe("starved");
   });
 
   it("persists reuse summaries without a frozen elapsed phrase", async () => {
@@ -763,6 +794,9 @@ describe("server/doctor-service", () => {
           id: 1,
           status: "completed",
           workspaceFingerprint: fingerprint,
+          promptVersion: "doctor-v2",
+          contextProfile: "stable-2026.7",
+          openclawVersion: "",
           completedAt,
           startedAt: completedAt,
           rawResult: {},
@@ -773,6 +807,9 @@ describe("server/doctor-service", () => {
           id: 1,
           status: "completed",
           workspaceFingerprint: fingerprint,
+          promptVersion: "doctor-v2",
+          contextProfile: "stable-2026.7",
+          openclawVersion: "",
           completedAt,
           startedAt: completedAt,
         },
@@ -799,7 +836,7 @@ describe("server/doctor-service", () => {
       /No workspace changes/.test(summary || ""),
     );
     expect(reuseSummary).toBe(
-      "No workspace changes since last scan. Same findings apply.",
+      "No workspace changes since last scan. LLM findings carried over; environment checks re-evaluated.",
     );
     expect(reuseSummary).not.toMatch(/\(/);
   });
@@ -849,7 +886,7 @@ describe("server/doctor-service", () => {
       return runId;
     };
 
-    const scrubbedSummary = "No workspace changes since last scan. Same findings apply.";
+    const scrubbedSummary = "No workspace changes since last scan. LLM findings carried over; environment checks re-evaluated.";
     const legacyShapes = [
       "No workspace changes since last scan (1 minute ago). Same findings apply.",
       "No workspace changes since last scan (12 minutes ago). Same findings apply.",
@@ -971,6 +1008,233 @@ describe("server/doctor-service", () => {
       endLine: 5,
     });
     expect(missingItem.snippet).toBeUndefined();
+  });
+
+  it("contains evidence snippets to the workspace and redacts secret-shaped values", async () => {
+    const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-snippet-guard-"));
+    const dbRoot = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-snippet-guard-db-"));
+    const outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-snippet-outside-"));
+    fs.writeFileSync(path.join(outsideDir, "secret.md"), "outside contents\n", "utf8");
+    fs.writeFileSync(
+      path.join(workspaceRoot, "AGENTS.md"),
+      "safe line\ntoken=doctor-snippet-secret-value\n",
+      "utf8",
+    );
+    // The service's sanitizer collects secret-shaped env values at creation.
+    process.env.DOCTOR_SNIPPET_TEST_TOKEN = "doctor-snippet-secret-value";
+    try {
+      const doctorDb = loadManagedDoctorDb();
+      doctorDb.initDoctorDb({ rootDir: dbRoot });
+
+      const { createDoctorService } = loadDoctorService();
+      const doctorService = createDoctorService({
+        clawCmd: vi.fn(),
+        listDoctorRuns: doctorDb.listDoctorRuns,
+        listDoctorCards: doctorDb.listDoctorCards,
+        getInitialWorkspaceBaseline: doctorDb.getInitialWorkspaceBaseline,
+        setInitialWorkspaceBaseline: doctorDb.setInitialWorkspaceBaseline,
+        createDoctorRun: doctorDb.createDoctorRun,
+        completeDoctorRun: doctorDb.completeDoctorRun,
+        insertDoctorCards: doctorDb.insertDoctorCards,
+        getDoctorRun: doctorDb.getDoctorRun,
+        getDoctorCardsByRunId: doctorDb.getDoctorCardsByRunId,
+        getDoctorCard: doctorDb.getDoctorCard,
+        updateDoctorCardStatus: doctorDb.updateDoctorCardStatus,
+        workspaceRoot,
+        managedRoot: workspaceRoot,
+        computeSnapshotAsync: fastComputeSnapshotAsync,
+      });
+
+      const traversalPath = path.relative(workspaceRoot, path.join(outsideDir, "secret.md"));
+      const imported = await doctorService.importDoctorResult({
+        rawOutput: JSON.stringify({
+          summary: "Snippet guard",
+          cards: [
+            {
+              priority: "P1",
+              category: "workspace",
+              title: "Snippet guard",
+              summary: "Snippet guard",
+              recommendation: "r",
+              evidence: [
+                { type: "path", path: traversalPath, startLine: 1, endLine: 2 },
+                { type: "path", path: path.join(outsideDir, "secret.md"), startLine: 1 },
+                { type: "path", path: "AGENTS.md", startLine: 1, endLine: 2 },
+              ],
+              targetPaths: ["AGENTS.md"],
+              fixPrompt: "Fix safely.",
+              status: "open",
+            },
+          ],
+        }),
+      });
+
+      const [card] = doctorDb.getDoctorCardsByRunId(imported.runId);
+      const [traversalItem, absoluteItem, insideItem] = card.evidence;
+
+      // Traversal ("../…") and absolute paths never read outside the root.
+      expect(traversalItem.snippet).toBeUndefined();
+      expect(absoluteItem.snippet).toBeUndefined();
+      // In-root snippets are captured but secret values are redacted.
+      expect(insideItem.snippet.text).toContain("safe line");
+      expect(insideItem.snippet.text).toContain("[redacted]");
+      expect(insideItem.snippet.text).not.toContain("doctor-snippet-secret-value");
+    } finally {
+      delete process.env.DOCTOR_SNIPPET_TEST_TOKEN;
+    }
+  });
+
+  it("refuses snippets through in-workspace symlinks and bounds huge-file reads", async () => {
+    const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-snippet-symlink-"));
+    const dbRoot = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-snippet-symlink-db-"));
+    const outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-snippet-symlink-out-"));
+    fs.writeFileSync(path.join(outsideDir, "host-secret.md"), "host file contents\n", "utf8");
+    // The lexical containment check passes for "sneaky.md" — only the
+    // realpath check can catch the link escaping the workspace.
+    fs.symlinkSync(path.join(outsideDir, "host-secret.md"), path.join(workspaceRoot, "sneaky.md"));
+    // A >512KB file: the reader scans in bounded chunks, so an in-window
+    // range is fully served (not truncated) without buffering the whole file.
+    const hugeLines = ["head line one", "head line two"];
+    for (let index = 0; index < 40; index += 1) hugeLines.push(repeatText(20000, "x"));
+    fs.writeFileSync(path.join(workspaceRoot, "HUGE.md"), hugeLines.join("\n"), "utf8");
+    fs.writeFileSync(path.join(workspaceRoot, "AGENTS.md"), "# Guidance\n", "utf8");
+
+    const doctorDb = loadManagedDoctorDb();
+    doctorDb.initDoctorDb({ rootDir: dbRoot });
+
+    const { createDoctorService } = loadDoctorService();
+    const doctorService = createDoctorService({
+      clawCmd: vi.fn(),
+      listDoctorRuns: doctorDb.listDoctorRuns,
+      listDoctorCards: doctorDb.listDoctorCards,
+      getInitialWorkspaceBaseline: doctorDb.getInitialWorkspaceBaseline,
+      setInitialWorkspaceBaseline: doctorDb.setInitialWorkspaceBaseline,
+      createDoctorRun: doctorDb.createDoctorRun,
+      completeDoctorRun: doctorDb.completeDoctorRun,
+      insertDoctorCards: doctorDb.insertDoctorCards,
+      getDoctorRun: doctorDb.getDoctorRun,
+      getDoctorCardsByRunId: doctorDb.getDoctorCardsByRunId,
+      getDoctorCard: doctorDb.getDoctorCard,
+      updateDoctorCardStatus: doctorDb.updateDoctorCardStatus,
+      workspaceRoot,
+      managedRoot: workspaceRoot,
+      computeSnapshotAsync: fastComputeSnapshotAsync,
+    });
+
+    const imported = await doctorService.importDoctorResult({
+      rawOutput: JSON.stringify({
+        summary: "Symlink and cap guard",
+        cards: [
+          {
+            priority: "P1",
+            category: "workspace",
+            title: "Symlink and cap guard",
+            summary: "s",
+            recommendation: "r",
+            evidence: [
+              { type: "path", path: "sneaky.md", startLine: 1, endLine: 1 },
+              { type: "path", path: "HUGE.md", startLine: 1, endLine: 2 },
+            ],
+            targetPaths: ["AGENTS.md"],
+            fixPrompt: "Fix safely.",
+            status: "open",
+          },
+        ],
+      }),
+    });
+
+    const [card] = doctorDb.getDoctorCardsByRunId(imported.runId);
+    const [symlinkItem, hugeItem] = card.evidence;
+
+    // The symlink resolves outside the workspace: no snippet, no host bytes.
+    expect(symlinkItem.snippet).toBeUndefined();
+    expect(JSON.stringify(card)).not.toContain("host file contents");
+    // The huge file's in-range citation is fully served: not truncated, and
+    // the whole file (< 8 MiB) was countable within the scan bound.
+    expect(hugeItem.snippet).toMatchObject({
+      text: "head line one\nhead line two",
+      startLine: 1,
+      endLine: 2,
+      truncated: false,
+      totalFileLines: 42,
+    });
+
+    fs.rmSync(outsideDir, { recursive: true, force: true });
+  });
+
+  it("serves citations past the 512KB chunk window and nulls past the 8MiB scan bound", async () => {
+    const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-snippet-deep-"));
+    const dbRoot = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-snippet-deep-db-"));
+    // ~9.4MB of ~1KB lines: line 700 sits past the 512KB chunk size (the old
+    // head-read returned an empty snippet for it) and line 9000 sits past the
+    // 8 MiB scan bound (no snippet at all rather than an unbounded read).
+    const deepLines = [];
+    for (let index = 1; index <= 9500; index += 1) {
+      deepLines.push(`line-${index} ${repeatText(980, "x")}`);
+    }
+    fs.writeFileSync(path.join(workspaceRoot, "DEEP.md"), deepLines.join("\n"), "utf8");
+    fs.writeFileSync(path.join(workspaceRoot, "AGENTS.md"), "# Guidance\n", "utf8");
+
+    const doctorDb = loadManagedDoctorDb();
+    doctorDb.initDoctorDb({ rootDir: dbRoot });
+
+    const { createDoctorService } = loadDoctorService();
+    const doctorService = createDoctorService({
+      clawCmd: vi.fn(),
+      listDoctorRuns: doctorDb.listDoctorRuns,
+      listDoctorCards: doctorDb.listDoctorCards,
+      getInitialWorkspaceBaseline: doctorDb.getInitialWorkspaceBaseline,
+      setInitialWorkspaceBaseline: doctorDb.setInitialWorkspaceBaseline,
+      createDoctorRun: doctorDb.createDoctorRun,
+      completeDoctorRun: doctorDb.completeDoctorRun,
+      insertDoctorCards: doctorDb.insertDoctorCards,
+      getDoctorRun: doctorDb.getDoctorRun,
+      getDoctorCardsByRunId: doctorDb.getDoctorCardsByRunId,
+      getDoctorCard: doctorDb.getDoctorCard,
+      updateDoctorCardStatus: doctorDb.updateDoctorCardStatus,
+      workspaceRoot,
+      managedRoot: workspaceRoot,
+      computeSnapshotAsync: fastComputeSnapshotAsync,
+    });
+
+    const imported = await doctorService.importDoctorResult({
+      rawOutput: JSON.stringify({
+        summary: "Deep citation",
+        cards: [
+          {
+            priority: "P1",
+            category: "workspace",
+            title: "Deep citation",
+            summary: "s",
+            recommendation: "r",
+            evidence: [
+              { type: "path", path: "DEEP.md", startLine: 700, endLine: 701 },
+              { type: "path", path: "DEEP.md", startLine: 9000, endLine: 9001 },
+            ],
+            targetPaths: ["AGENTS.md"],
+            fixPrompt: "Fix safely.",
+            status: "open",
+          },
+        ],
+      }),
+    });
+
+    const [card] = doctorDb.getDoctorCardsByRunId(imported.runId);
+    const [deepItem, pastBoundItem] = card.evidence;
+
+    // The cited lines past the first 512KB come back with correct content and
+    // metadata — but the file is larger than the 8 MiB scan bound, so
+    // totalFileLines is dropped instead of scanning to EOF to count lines.
+    expect(deepItem.snippet.startLine).toBe(700);
+    expect(deepItem.snippet.endLine).toBe(701);
+    expect(deepItem.snippet.truncated).toBe(false);
+    expect(deepItem.snippet.totalFileLines).toBeUndefined();
+    const deepSnippetLines = deepItem.snippet.text.split("\n");
+    expect(deepSnippetLines).toHaveLength(2);
+    expect(deepSnippetLines[0].startsWith("line-700 ")).toBe(true);
+    expect(deepSnippetLines[1].startsWith("line-701 ")).toBe(true);
+    // Reaching line 9000 needs more than 8 MiB of scanning: no snippet.
+    expect(pastBoundItem.snippet).toBeUndefined();
   });
 
   it("marks the run failed when the gateway command reports an error", async () => {
@@ -1794,11 +2058,1410 @@ describe("server/doctor-service", () => {
       expect(fs.existsSync(spawnLogPath)).toBe(false);
     });
   });
+
+  describe("doctor-v2 reuse guard and card provenance", () => {
+    const makeFixtureService = ({
+      previousRun,
+      previousCards = [],
+      allCards = [],
+      workspaceRoot,
+      managedRoot = workspaceRoot,
+      featureGates = null,
+      getInstalledVersion,
+      inserts,
+      created,
+    }) => {
+      const { createDoctorService } = loadDoctorService();
+      return createDoctorService({
+        clawCmd: vi.fn(async () => ({
+          ok: true,
+          stdout: JSON.stringify({ summary: "fresh", cards: [] }),
+        })),
+        listDoctorRuns: () => (previousRun ? [previousRun] : []),
+        listDoctorCards: () => allCards,
+        createDoctorRun: (run) => {
+          created.push(run);
+          return created.length + 1;
+        },
+        completeDoctorRun: vi.fn(),
+        insertDoctorCards: (payload) => {
+          inserts.push(payload);
+        },
+        getDoctorRun: () => ({ rawResult: {} }),
+        getDoctorCardsByRunId: () => previousCards,
+        getDoctorCard: () => null,
+        updateDoctorCardStatus: () => null,
+        getInitialWorkspaceBaseline: () => null,
+        setInitialWorkspaceBaseline: () => null,
+        workspaceRoot,
+        managedRoot,
+        featureGates,
+        getInstalledVersion,
+        readOpenclawConfig: ({ openclawDir, fallback }) => {
+          try {
+            return JSON.parse(
+              fs.readFileSync(path.join(openclawDir, "openclaw.json"), "utf8"),
+            );
+          } catch {
+            return fallback;
+          }
+        },
+        computeSnapshotAsync: fastComputeSnapshotAsync,
+      });
+    };
+
+    const settleBackgroundRun = () => new Promise((resolve) => setImmediate(resolve));
+
+    const makeMatchingRun = (fingerprint, overrides = {}) => ({
+      id: 1,
+      status: "completed",
+      workspaceFingerprint: fingerprint,
+      promptVersion: "doctor-v2",
+      contextProfile: "stable-2026.7",
+      openclawVersion: "2026.7.1-2",
+      completedAt: new Date().toISOString(),
+      startedAt: new Date().toISOString(),
+      ...overrides,
+    });
+
+    let workspaceRoot;
+    beforeEach(() => {
+      workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-reuse-guard-"));
+      fs.writeFileSync(path.join(workspaceRoot, "AGENTS.md"), "# Guidance\n", "utf8");
+    });
+
+    it.each([
+      ["prompt version", { promptVersion: "doctor-v1" }],
+      ["context profile", { contextProfile: "beta-2026.8.1" }],
+      ["installed version", { openclawVersion: "2026.7.1-1" }],
+      ["legacy run without profile columns", { promptVersion: "doctor-v2", contextProfile: "", openclawVersion: "" }],
+    ])("rejects fingerprint reuse on a %s mismatch", async (_label, overrides) => {
+      const { computeWorkspaceSnapshot } = require("../../lib/server/doctor/workspace-fingerprint");
+      const fingerprint = computeWorkspaceSnapshot(workspaceRoot).fingerprint;
+      const inserts = [];
+      const created = [];
+      const doctorService = makeFixtureService({
+        previousRun: makeMatchingRun(fingerprint, overrides),
+        workspaceRoot,
+        getInstalledVersion: () => "2026.7.1-2",
+        inserts,
+        created,
+      });
+
+      const result = await doctorService.runDoctor();
+      await settleBackgroundRun();
+
+      expect(result.reusedPreviousRun).toBeUndefined();
+      expect(result.ok).toBe(true);
+      expect(created[0]).toMatchObject({
+        status: "running",
+        engine: "gateway_agent",
+        contextProfile: "stable-2026.7",
+        openclawVersion: "2026.7.1-2",
+      });
+    });
+
+    it("reuses on a full match and clones only LLM cards, recomputing bootstrap cards", async () => {
+      // A tiny per-file budget makes AGENTS.md (11 chars) truncate so a fresh
+      // bootstrap card must be emitted on the reuse run.
+      const managedRoot = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-reuse-managed-"));
+      fs.writeFileSync(
+        path.join(managedRoot, "openclaw.json"),
+        JSON.stringify({ agents: { defaults: { bootstrapMaxChars: 5, bootstrapTotalMaxChars: 60000 } } }),
+        "utf8",
+      );
+      const { computeWorkspaceSnapshot } = require("../../lib/server/doctor/workspace-fingerprint");
+      const fingerprint = computeWorkspaceSnapshot(workspaceRoot).fingerprint;
+      const inserts = [];
+      const created = [];
+      const doctorService = makeFixtureService({
+        previousRun: makeMatchingRun(fingerprint),
+        previousCards: [
+          { title: "LLM finding", status: "open", source: "llm", sourceKey: "" },
+          { title: "Legacy finding without source", status: "open" },
+          {
+            title: "Old bootstrap card",
+            status: "open",
+            source: "bootstrap",
+            sourceKey: "boot:file_limit:AGENTS.md",
+          },
+          // Bridge cards read openclaw.json/CLI state outside the workspace
+          // fingerprint: cloning them would freeze stale upstream findings.
+          {
+            title: "Stale upstream finding",
+            status: "open",
+            source: "openclaw_doctor",
+            sourceKey: "ocd:core/doctor/gateway-config:openclaw.json",
+          },
+        ],
+        workspaceRoot,
+        managedRoot,
+        getInstalledVersion: () => "2026.7.1-2",
+        inserts,
+        created,
+      });
+
+      const result = await doctorService.runDoctor();
+
+      expect(result.reusedPreviousRun).toBe(true);
+      expect(created[0]).toMatchObject({ engine: "deterministic_reuse" });
+      // First insert: cloned LLM cards only (legacy source-less rows count as
+      // LLM); bootstrap AND bridge cards are never cloned.
+      expect(inserts[0].cards.map((card) => card.title)).toEqual([
+        "LLM finding",
+        "Legacy finding without source",
+      ]);
+      // Second insert: freshly recomputed bootstrap cards (no bridge runner
+      // wired here → zero fresh bridge cards, and the stale one stays gone).
+      expect(inserts[1].cards).toEqual([
+        expect.objectContaining({
+          source: "bootstrap",
+          sourceKey: "boot:file_limit:AGENTS.md",
+        }),
+      ]);
+    });
+
+    it("suppresses sourced cards whose source key was previously dismissed", async () => {
+      const managedRoot = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-reuse-dismiss-"));
+      fs.writeFileSync(
+        path.join(managedRoot, "openclaw.json"),
+        JSON.stringify({ agents: { defaults: { bootstrapMaxChars: 5 } } }),
+        "utf8",
+      );
+      const { computeWorkspaceSnapshot } = require("../../lib/server/doctor/workspace-fingerprint");
+      const fingerprint = computeWorkspaceSnapshot(workspaceRoot).fingerprint;
+      const inserts = [];
+      const created = [];
+      const doctorService = makeFixtureService({
+        previousRun: makeMatchingRun(fingerprint),
+        previousCards: [],
+        allCards: [
+          {
+            title: "Old bootstrap card",
+            status: "dismissed",
+            source: "bootstrap",
+            sourceKey: "boot:file_limit:AGENTS.md",
+          },
+        ],
+        workspaceRoot,
+        managedRoot,
+        getInstalledVersion: () => "2026.7.1-2",
+        inserts,
+        created,
+      });
+
+      const result = await doctorService.runDoctor();
+
+      expect(result.reusedPreviousRun).toBe(true);
+      // Clone insert is empty and the dismissed bootstrap card is not re-emitted.
+      expect(inserts.every((insert) => insert.cards.length === 0)).toBe(true);
+    });
+
+    it("selects the beta profile through the feature gates", async () => {
+      const inserts = [];
+      const created = [];
+      const doctorService = makeFixtureService({
+        previousRun: null,
+        workspaceRoot,
+        featureGates: { supportsFeature: (name) => name === "bootstrapContractV2" },
+        getInstalledVersion: () => "2026.8.1-beta.3",
+        inserts,
+        created,
+      });
+
+      const status = doctorService.buildStatus();
+      expect(status.bootstrapContext.profileId).toBe("beta-2026.8.1");
+
+      await doctorService.runDoctor();
+      await settleBackgroundRun();
+      expect(created[0]).toMatchObject({
+        contextProfile: "beta-2026.8.1",
+        openclawVersion: "2026.8.1-beta.3",
+      });
+    });
+
+    it("releases the busy guard when run creation throws after the snapshot", async () => {
+      let shouldThrow = true;
+      const { createDoctorService } = loadDoctorService();
+      const service = createDoctorService({
+        clawCmd: vi.fn(async () => ({ ok: true, stdout: "{}" })),
+        listDoctorRuns: () => [],
+        listDoctorCards: () => [],
+        createDoctorRun: () => {
+          if (shouldThrow) {
+            shouldThrow = false;
+            throw new Error("db write failed");
+          }
+          return 7;
+        },
+        completeDoctorRun: vi.fn(),
+        insertDoctorCards: vi.fn(),
+        getDoctorRun: () => null,
+        getDoctorCardsByRunId: () => [],
+        getDoctorCard: () => null,
+        updateDoctorCardStatus: () => null,
+        workspaceRoot,
+        managedRoot: workspaceRoot,
+        computeSnapshotAsync: fastComputeSnapshotAsync,
+      });
+
+      await expect(service.runDoctor()).rejects.toThrow("db write failed");
+      // The busy guard must not stay latched: the next run proceeds.
+      const second = await service.runDoctor();
+      await settleBackgroundRun();
+      expect(second.ok).toBe(true);
+      expect(second.alreadyRunning).toBeUndefined();
+    });
+  });
+
+  describe("liveness integration (fail-fast, notifications, auto-run)", () => {
+    let workspaceRoot;
+    beforeEach(() => {
+      workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-liveness-"));
+      fs.writeFileSync(path.join(workspaceRoot, "AGENTS.md"), "# Guidance\n", "utf8");
+    });
+
+    const settle = () => new Promise((resolve) => setImmediate(resolve));
+
+    const makeService = ({
+      readiness = { ok: true, reason: "" },
+      notify = null,
+      runDoctorLintJson = null,
+      readAutoRunEnabled = null,
+      autoRunTickMs = 999999,
+      meta = new Map(),
+      runsByIdCards = new Map(),
+      summaries = [],
+      llmCards = [],
+      clawCmd = null,
+      getReadiness = null,
+      computeSnapshot = undefined,
+      computeSnapshotAsync = fastComputeSnapshotAsync,
+      listDismissedSourceKeys = null,
+      readOpenclawConfig = null,
+    } = {}) => {
+      const { createDoctorService } = loadDoctorService();
+      const created = [];
+      const runs = new Map();
+      const service = createDoctorService({
+        clawCmd:
+          clawCmd ||
+          vi.fn(async () => ({
+            ok: true,
+            stdout: JSON.stringify({ summary: "done", cards: llmCards }),
+          })),
+        listDoctorRuns: () => summaries,
+        listDoctorCards: () => [],
+        createDoctorRun: (run) => {
+          created.push(run);
+          const id = 100 + created.length;
+          runs.set(id, { id, status: "running", ...run });
+          return id;
+        },
+        completeDoctorRun: ({ id, status, summary }) => {
+          const run = runs.get(id) || { id };
+          runs.set(id, { ...run, status, summary });
+        },
+        insertDoctorCards: ({ runId, cards }) => {
+          runsByIdCards.set(runId, [...(runsByIdCards.get(runId) || []), ...cards]);
+        },
+        getDoctorRun: (id) => runs.get(Number(id)) || null,
+        getDoctorCardsByRunId: (id) => runsByIdCards.get(Number(id)) || [],
+        getDoctorCard: () => null,
+        updateDoctorCardStatus: () => null,
+        getInitialWorkspaceBaseline: () => null,
+        setInitialWorkspaceBaseline: () => null,
+        workspaceRoot,
+        managedRoot: workspaceRoot,
+        ...(computeSnapshot ? { computeSnapshot } : {}),
+        computeSnapshotAsync,
+        getGatewayReadiness: () => (getReadiness ? getReadiness() : readiness),
+        notify,
+        runDoctorLintJson,
+        readAutoRunEnabled,
+        autoRunTickMs,
+        getDoctorMeta: (key) => (meta.has(key) ? { key, value: meta.get(key) } : null),
+        setDoctorMeta: ({ key, value }) => {
+          meta.set(key, value);
+        },
+        listDismissedSourceKeys,
+        ...(readOpenclawConfig ? { readOpenclawConfig } : {}),
+      });
+      return { service, created, runsByIdCards, meta };
+    };
+
+    // A MISSING stored env signature now counts as changed (the post-upgrade
+    // scan is due by design), so tests exercising the OTHER auto-run guards
+    // must seed the live signature first. A throwaway service sharing `meta`
+    // runs a fully-awaited fingerprint-reuse run: it writes
+    // last_env_signature without arming the throttle or the failure backoff.
+    const seedLiveEnvSignature = async (meta) => {
+      const { computeWorkspaceSnapshot } = require("../../lib/server/doctor/workspace-fingerprint");
+      const nowIso = new Date().toISOString();
+      const seeded = makeService({
+        meta,
+        summaries: [
+          {
+            id: 1,
+            status: "completed",
+            engine: "gateway_agent",
+            workspaceFingerprint: computeWorkspaceSnapshot(workspaceRoot).fingerprint,
+            promptVersion: "doctor-v2",
+            contextProfile: "stable-2026.7",
+            openclawVersion: "",
+            completedAt: nowIso,
+            startedAt: nowIso,
+          },
+        ],
+      });
+      const seededRun = await seeded.service.runDoctor();
+      expect(seededRun.reusedPreviousRun).toBe(true);
+      expect(meta.get("last_env_signature")).toBeTruthy();
+    };
+
+    it("fails fast with gatewayUnavailable on the LLM branch only", async () => {
+      const { service, created } = makeService({
+        readiness: { ok: false, reason: "gateway is unhealthy" },
+      });
+      const result = await service.runDoctor();
+      expect(result).toMatchObject({
+        ok: false,
+        gatewayUnavailable: true,
+        reason: "gateway is unhealthy",
+      });
+      // No running run was created.
+      expect(created).toHaveLength(0);
+    });
+
+    it("still serves fingerprint reuse while the gateway is degraded", async () => {
+      const { computeWorkspaceSnapshot } = require("../../lib/server/doctor/workspace-fingerprint");
+      const fingerprint = computeWorkspaceSnapshot(workspaceRoot).fingerprint;
+      const { service } = makeService({
+        readiness: { ok: false, reason: "gateway is unhealthy" },
+        summaries: [
+          {
+            id: 1,
+            status: "completed",
+            workspaceFingerprint: fingerprint,
+            promptVersion: "doctor-v2",
+            contextProfile: "stable-2026.7",
+            openclawVersion: "",
+            completedAt: new Date().toISOString(),
+            startedAt: new Date().toISOString(),
+          },
+        ],
+      });
+      const result = await service.runDoctor();
+      expect(result.reusedPreviousRun).toBe(true);
+    });
+
+    it("includes the main agent's budget overrides in the env signature", async () => {
+      const { computeWorkspaceSnapshot } = require("../../lib/server/doctor/workspace-fingerprint");
+      const makeMatchingSummary = () => {
+        const nowIso = new Date().toISOString();
+        return {
+          id: 1,
+          status: "completed",
+          engine: "gateway_agent",
+          workspaceFingerprint: computeWorkspaceSnapshot(workspaceRoot).fingerprint,
+          promptVersion: "doctor-v2",
+          contextProfile: "stable-2026.7",
+          openclawVersion: "",
+          completedAt: nowIso,
+          startedAt: nowIso,
+        };
+      };
+      // A fully-awaited fingerprint-reuse run records the signature for the
+      // given config; comparing recorded signatures across configs observes
+      // buildEnvSignature without exporting it.
+      const signatureFor = async (config) => {
+        const meta = new Map();
+        const { service } = makeService({
+          meta,
+          summaries: [makeMatchingSummary()],
+          readOpenclawConfig: () => config,
+        });
+        const result = await service.runDoctor();
+        expect(result.reusedPreviousRun).toBe(true);
+        return meta.get("last_env_signature");
+      };
+      const configWith = (entries) => ({
+        agents: {
+          defaults: { bootstrapMaxChars: 20000, bootstrapTotalMaxChars: 60000 },
+          entries,
+        },
+      });
+
+      const baseline = await signatureFor(
+        configWith({
+          main: { bootstrapMaxChars: 20000 },
+          sidekick: { bootstrapMaxChars: 1000 },
+        }),
+      );
+      // An unrelated agent's override never flips the signature.
+      const unrelatedChange = await signatureFor(
+        configWith({
+          main: { bootstrapMaxChars: 20000 },
+          sidekick: { bootstrapMaxChars: 5000 },
+        }),
+      );
+      // The MAIN entry's override does: the analyzer honors it, so raising it
+      // to fix a truncation must read as an environment change.
+      const mainChange = await signatureFor(
+        configWith({
+          main: { bootstrapMaxChars: 30000 },
+          sidekick: { bootstrapMaxChars: 1000 },
+        }),
+      );
+
+      expect(baseline).toBeTruthy();
+      expect(unrelatedChange).toBe(baseline);
+      expect(mainChange).not.toBe(baseline);
+    });
+
+    it("rejects card fixes with a gatewayUnavailable error while degraded", async () => {
+      const { createDoctorService } = loadDoctorService();
+      const service = createDoctorService({
+        clawCmd: vi.fn(),
+        listDoctorRuns: () => [],
+        listDoctorCards: () => [],
+        createDoctorRun: () => 1,
+        completeDoctorRun: vi.fn(),
+        insertDoctorCards: vi.fn(),
+        getDoctorRun: () => null,
+        getDoctorCardsByRunId: () => [],
+        getDoctorCard: () => ({ id: 5, fixPrompt: "fix it", status: "open" }),
+        updateDoctorCardStatus: () => null,
+        startDoctorCardFix: vi.fn(),
+        cancelDoctorCardFix: vi.fn(),
+        workspaceRoot,
+        managedRoot: workspaceRoot,
+        computeSnapshotAsync: fastComputeSnapshotAsync,
+        getGatewayReadiness: () => ({ ok: false, reason: "safe mode" }),
+      });
+      await expect(
+        service.requestCardFix({ cardId: 5, sessionKey: "agent:main:main" }),
+      ).rejects.toMatchObject({ gatewayUnavailable: true, reason: "safe mode" });
+    });
+
+    it("completes the run when the bridge fails but merges bridge cards when it works", async () => {
+      const failing = makeService({
+        runDoctorLintJson: async () => {
+          throw new Error("CLI missing");
+        },
+      });
+      const failResult = await failing.service.runDoctor();
+      await settle();
+      const failRun = failing.service.getDoctorRun(failResult.runId);
+      expect(failRun.status).toBe("completed");
+
+      const working = makeService({
+        runDoctorLintJson: async () => ({
+          ok: false,
+          code: 1,
+          truncated: false,
+          stdout: JSON.stringify({
+            ok: false,
+            findings: [
+              { checkId: "core/doctor/gateway-config", severity: "error", message: "bad token" },
+            ],
+          }),
+        }),
+      });
+      const okResult = await working.service.runDoctor();
+      await settle();
+      const cards = working.runsByIdCards.get(okResult.runId) || [];
+      expect(
+        cards.some((card) => card.sourceKey === "ocd:core/doctor/gateway-config:3331faf3e131"),
+      ).toBe(true);
+    });
+
+    describe("bridge freshness on fingerprint reuse", () => {
+      const { computeWorkspaceSnapshot } = require("../../lib/server/doctor/workspace-fingerprint");
+
+      const makeReuseSummary = () => {
+        const nowIso = new Date().toISOString();
+        return {
+          id: 1,
+          status: "completed",
+          engine: "gateway_agent",
+          workspaceFingerprint: computeWorkspaceSnapshot(workspaceRoot).fingerprint,
+          promptVersion: "doctor-v2",
+          contextProfile: "stable-2026.7",
+          openclawVersion: "",
+          completedAt: nowIso,
+          startedAt: nowIso,
+        };
+      };
+
+      const staleBridgeCard = {
+        title: "Stale upstream finding",
+        status: "open",
+        source: "openclaw_doctor",
+        sourceKey: "ocd:core/doctor/stale-check:openclaw.json",
+        priority: "P1",
+      };
+      const llmCard = {
+        title: "Carried LLM finding",
+        status: "open",
+        source: "llm",
+        sourceKey: "",
+      };
+
+      it("reruns the bridge fresh instead of cloning stale bridge cards", async () => {
+        const runDoctorLintJson = vi.fn(async () => ({
+          ok: false,
+          code: 1,
+          truncated: false,
+          stdout: JSON.stringify({
+            ok: false,
+            findings: [
+              { checkId: "core/doctor/gateway-config", severity: "error", message: "bad token" },
+            ],
+          }),
+        }));
+        const runsByIdCards = new Map([[1, [llmCard, staleBridgeCard]]]);
+        const { service, created } = makeService({
+          runDoctorLintJson,
+          runsByIdCards,
+          summaries: [makeReuseSummary()],
+        });
+        const result = await service.runDoctor();
+
+        expect(result.reusedPreviousRun).toBe(true);
+        expect(created[0]).toMatchObject({ engine: "deterministic_reuse" });
+        // The bridge ran fresh on the reuse path.
+        expect(runDoctorLintJson).toHaveBeenCalledTimes(1);
+        const cards = runsByIdCards.get(result.runId) || [];
+        // Cloned: the LLM card. Fresh: the new bridge finding. Gone: the
+        // stale bridge card from the source run.
+        expect(cards.map((card) => card.title)).toContain("Carried LLM finding");
+        expect(
+          cards.some(
+            (card) => card.sourceKey === "ocd:core/doctor/gateway-config:3331faf3e131",
+          ),
+        ).toBe(true);
+        expect(cards.map((card) => card.title)).not.toContain("Stale upstream finding");
+      });
+
+      it("still completes the reuse run when the bridge fails", async () => {
+        const runDoctorLintJson = vi.fn(async () => {
+          throw new Error("CLI missing");
+        });
+        const runsByIdCards = new Map([[1, [llmCard, staleBridgeCard]]]);
+        const { service } = makeService({
+          runDoctorLintJson,
+          runsByIdCards,
+          summaries: [makeReuseSummary()],
+        });
+        const result = await service.runDoctor();
+
+        expect(result.ok).toBe(true);
+        expect(result.reusedPreviousRun).toBe(true);
+        expect(runDoctorLintJson).toHaveBeenCalledTimes(1);
+        const cards = runsByIdCards.get(result.runId) || [];
+        // Zero bridge cards (fail-soft), stale ones not resurrected, LLM
+        // clone intact.
+        expect(cards.some((card) => card.source === "openclaw_doctor")).toBe(false);
+        expect(cards.map((card) => card.title)).toContain("Carried LLM finding");
+        expect(service.getDoctorRun(result.runId).status).toBe("completed");
+      });
+
+      it("filters fresh reuse bridge cards through dismissed source keys", async () => {
+        const listDismissedSourceKeys = vi.fn(() => [
+          "ocd:core/doctor/gateway-config:openclaw.json",
+        ]);
+        const runDoctorLintJson = vi.fn(async () => ({
+          ok: false,
+          code: 1,
+          truncated: false,
+          stdout: JSON.stringify({
+            ok: false,
+            findings: [
+              {
+                checkId: "core/doctor/gateway-config",
+                severity: "error",
+                message: "bad token",
+                path: "openclaw.json",
+              },
+            ],
+          }),
+        }));
+        const runsByIdCards = new Map([[1, [llmCard]]]);
+        const { service } = makeService({
+          runDoctorLintJson,
+          runsByIdCards,
+          summaries: [makeReuseSummary()],
+          listDismissedSourceKeys,
+        });
+        const result = await service.runDoctor();
+
+        expect(result.reusedPreviousRun).toBe(true);
+        // One dismissed-keys read shared by the sourced and bridge filters.
+        expect(listDismissedSourceKeys).toHaveBeenCalledTimes(1);
+        const cards = runsByIdCards.get(result.runId) || [];
+        expect(cards.some((card) => card.source === "openclaw_doctor")).toBe(false);
+      });
+
+      it("holds the run latch across reuse enrichment: concurrent runs get alreadyRunning", async () => {
+        let releaseBridge;
+        const bridgeGate = new Promise((resolve) => {
+          releaseBridge = resolve;
+        });
+        const runDoctorLintJson = vi.fn(async () => {
+          await bridgeGate;
+          return {
+            ok: true,
+            code: 0,
+            truncated: false,
+            stdout: JSON.stringify({ ok: true, findings: [] }),
+          };
+        });
+        const runsByIdCards = new Map([[1, [llmCard]]]);
+        const { service } = makeService({
+          runDoctorLintJson,
+          runsByIdCards,
+          summaries: [makeReuseSummary()],
+        });
+
+        const firstRun = service.runDoctor();
+        // While the bridge is in flight, the reuse run must hold the busy
+        // latch — not sit in the DB as an incomplete "completed" run a
+        // concurrent runDoctor could reuse (starting a second bridge).
+        const concurrent = await service.runDoctor();
+        expect(concurrent.ok).toBe(false);
+        expect(concurrent.alreadyRunning).toBe(true);
+        expect(concurrent.error).toBe("Doctor run already in progress");
+        expect(service.getDoctorRun(concurrent.runId).status).toBe("running");
+        expect(concurrent.status.runInProgress).toBe(true);
+        expect(runDoctorLintJson).toHaveBeenCalledTimes(1);
+
+        releaseBridge();
+        const result = await firstRun;
+        expect(result.reusedPreviousRun).toBe(true);
+        expect(result.runId).toBe(concurrent.runId);
+        // Reported completed only once every card (clone + fresh) is in.
+        expect(service.getDoctorRun(result.runId).status).toBe("completed");
+        expect(result.status.runInProgress).toBe(false);
+        const cards = runsByIdCards.get(result.runId) || [];
+        expect(cards.map((card) => card.title)).toContain("Carried LLM finding");
+      });
+    });
+
+    it("notifies once on new non-bridge P0s with a deterministic outbox id", async () => {
+      const notify = vi.fn(() => Promise.resolve({ ok: true }));
+      const meta = new Map();
+      const { service } = makeService({
+        notify,
+        meta,
+        llmCards: [
+          {
+            priority: "P0",
+            category: "workspace state",
+            title: "Dangerous drift",
+            summary: "s",
+            recommendation: "r",
+            fixPrompt: "f",
+            status: "open",
+          },
+        ],
+      });
+      const result = await service.runDoctor();
+      await settle();
+      expect(notify).toHaveBeenCalledTimes(1);
+      const [message, opts] = notify.mock.calls[0];
+      expect(message).toContain("🐺 *AlphaClaw Watchdog*");
+      expect(message).toContain("Drift Doctor found 1 new P0 finding");
+      expect(message).toContain("Dangerous drift");
+      expect(opts).toEqual({ id: `doctor-run-${result.runId}-p0` });
+      expect(meta.get("last_notified_run_id")).toBe(result.runId);
+    });
+
+    it("does not notify for bridge-sourced P0s", async () => {
+      const notify = vi.fn(() => Promise.resolve({ ok: true }));
+      const { service } = makeService({
+        notify,
+        runDoctorLintJson: async () => ({
+          ok: false,
+          code: 1,
+          truncated: false,
+          stdout: JSON.stringify({
+            ok: false,
+            findings: [{ checkId: "x/y", severity: "error", message: "upstream boom" }],
+          }),
+        }),
+      });
+      await service.runDoctor();
+      await settle();
+      expect(notify).not.toHaveBeenCalled();
+    });
+
+    it("treats a P1→P0 escalation as new against the baseline", async () => {
+      const notify = vi.fn(() => Promise.resolve({ ok: true }));
+      const runsByIdCards = new Map();
+      // Baseline run 50 carries the same title at P1.
+      runsByIdCards.set(50, [
+        { priority: "P1", title: "Dangerous drift", source: "llm", sourceKey: "" },
+      ]);
+      const { service } = makeService({
+        notify,
+        runsByIdCards,
+        summaries: [
+          {
+            id: 50,
+            status: "completed",
+            engine: "gateway_agent",
+            workspaceFingerprint: "other",
+            promptVersion: "doctor-v2",
+            contextProfile: "stable-2026.7",
+            openclawVersion: "",
+            completedAt: new Date().toISOString(),
+            startedAt: new Date().toISOString(),
+          },
+        ],
+        llmCards: [
+          {
+            priority: "P0",
+            category: "workspace state",
+            title: "Dangerous drift",
+            summary: "s",
+            recommendation: "r",
+            fixPrompt: "f",
+            status: "open",
+          },
+        ],
+      });
+      await service.runDoctor();
+      await settle();
+      expect(notify).toHaveBeenCalledTimes(1);
+    });
+
+    it("never uses an import run as the notification baseline", async () => {
+      const notify = vi.fn(() => Promise.resolve({ ok: true }));
+      const runsByIdCards = new Map();
+      // The import run already saw this P0 — but imports are not baselines.
+      runsByIdCards.set(60, [
+        { priority: "P0", title: "Dangerous drift", source: "llm", sourceKey: "" },
+      ]);
+      const { service } = makeService({
+        notify,
+        runsByIdCards,
+        summaries: [
+          {
+            id: 60,
+            status: "completed",
+            engine: "manual_import",
+            workspaceFingerprint: "other",
+            promptVersion: "doctor-v2",
+            contextProfile: "stable-2026.7",
+            openclawVersion: "",
+            completedAt: new Date().toISOString(),
+            startedAt: new Date().toISOString(),
+          },
+        ],
+        llmCards: [
+          {
+            priority: "P0",
+            category: "workspace state",
+            title: "Dangerous drift",
+            summary: "s",
+            recommendation: "r",
+            fixPrompt: "f",
+            status: "open",
+          },
+        ],
+      });
+      await service.runDoctor();
+      await settle();
+      expect(notify).toHaveBeenCalledTimes(1);
+    });
+
+    it("skips the auto-run tick for every guard reason and runs when triggered", async () => {
+      vi.useFakeTimers();
+      try {
+        const notify = vi.fn(() => Promise.resolve({ ok: true }));
+        const meta = new Map();
+        let autoRunEnabled = false;
+        // A stale completed baseline run: needsInitialRun is false, so the
+        // fresh-install trigger stays out of this guard-reason matrix.
+        const staleIso = new Date(Date.now() - 8 * 24 * 60 * 60 * 1000).toISOString();
+        const { service } = makeService({
+          notify,
+          meta,
+          readAutoRunEnabled: () => autoRunEnabled,
+          autoRunTickMs: 1000,
+          summaries: [
+            {
+              id: 1,
+              status: "completed",
+              engine: "gateway_agent",
+              workspaceFingerprint: "stale-baseline",
+              promptVersion: "doctor-v2",
+              contextProfile: "stable-2026.7",
+              openclawVersion: "",
+              completedAt: staleIso,
+              startedAt: staleIso,
+            },
+          ],
+        });
+        // Disabled → skip.
+        await vi.advanceTimersByTimeAsync(1100 + 60000);
+        expect(service.buildStatus().autoRun.lastSkipReason).toBe("disabled");
+
+        // Enabled but nothing changed → stale run with no readable baseline
+        // manifest → meaningful changes false → "no-meaningful-change".
+        // (Seed the matching signature first: a MISSING one now schedules
+        // the post-upgrade scan by design — covered by its own test below.)
+        await seedLiveEnvSignature(meta);
+        autoRunEnabled = true;
+        await vi.advanceTimersByTimeAsync(1100 + 60000);
+        expect(service.buildStatus().autoRun.lastSkipReason).toBe("no-meaningful-change");
+
+        // Environment signature change → triggers a run.
+        meta.set("last_env_signature", "different-signature");
+        await vi.advanceTimersByTimeAsync(1100 + 60000);
+        // Let the dispatched run settle on real microtasks.
+        await vi.runOnlyPendingTimersAsync();
+        expect(meta.get("last_auto_run")?.outcome).toBe("ran");
+        // Completion notification for the scheduled run.
+        expect(
+          notify.mock.calls.some(([message]) =>
+            message.includes("Scheduled Drift Doctor scan finished"),
+          ),
+        ).toBe(true);
+
+        // Immediately after: throttled by the 6h minimum interval.
+        meta.set("last_env_signature", "another-signature");
+        await vi.advanceTimersByTimeAsync(1100 + 60000);
+        expect(service.buildStatus().autoRun.lastSkipReason).toBe("throttled");
+
+        service.dispose();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("backs off after a failed auto-run until inputs change", async () => {
+      vi.useFakeTimers();
+      try {
+        const meta = new Map();
+        meta.set("last_env_signature", "changed");
+        // A last auto-run that failed 7h ago with the CURRENT signature: the
+        // 6h throttle has passed but the 24h failure backoff holds.
+        const { service } = makeService({
+          readAutoRunEnabled: () => true,
+          autoRunTickMs: 1000,
+          readiness: { ok: true, reason: "" },
+          meta,
+        });
+        // Compute the live signature by triggering one tick first (record it).
+        await vi.advanceTimersByTimeAsync(1100 + 60000);
+        await vi.runOnlyPendingTimersAsync();
+        const recorded = meta.get("last_auto_run");
+        expect(recorded?.outcome).toBe("ran");
+        // Rewrite history: same signature, failed, 7h ago.
+        meta.set("last_auto_run", {
+          at: new Date(Date.now() - 7 * 60 * 60 * 1000).toISOString(),
+          outcome: "failed",
+          envSignature: recorded.envSignature,
+        });
+        meta.set("last_env_signature", "changed-again");
+        await vi.advanceTimersByTimeAsync(1100 + 60000);
+        expect(service.buildStatus().autoRun.lastSkipReason).toBe("backoff");
+        service.dispose();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("holds the failure backoff on an unchanged fingerprint and lifts it when the workspace changes", async () => {
+      vi.useFakeTimers();
+      try {
+        const meta = new Map();
+        const { service } = makeService({
+          readAutoRunEnabled: () => true,
+          autoRunTickMs: 1000,
+          meta,
+        });
+        // Tick 1 (fresh install → needsInitialRun): runs and records the
+        // marker WITH the workspace fingerprint the run consumed.
+        await vi.advanceTimersByTimeAsync(1100 + 60000);
+        await vi.runOnlyPendingTimersAsync();
+        const recorded = meta.get("last_auto_run");
+        expect(recorded?.outcome).toBe("ran");
+        expect(recorded?.workspaceFingerprint).toBeTruthy();
+
+        // Rewrite history: failed 7h ago (6h throttle passed, 24h backoff
+        // not), SAME signature and SAME fingerprint → the backoff holds even
+        // though the envChanged trigger is armed.
+        meta.set("last_env_signature", "different-signature");
+        const failedMarker = {
+          at: new Date(Date.now() - 7 * 60 * 60 * 1000).toISOString(),
+          outcome: "failed",
+          envSignature: recorded.envSignature,
+          workspaceFingerprint: recorded.workspaceFingerprint,
+        };
+        meta.set("last_auto_run", failedMarker);
+        await vi.advanceTimersByTimeAsync(1100 + 60000);
+        expect(service.buildStatus().autoRun.lastSkipReason).toBe("backoff");
+        // The backoff skip never rewrites the marker.
+        expect(meta.get("last_auto_run")).toEqual(failedMarker);
+
+        // The workspace no longer matches what the failed run saw: the
+        // backoff lifts and the tick proceeds (subject to the other guards).
+        meta.set("last_auto_run", {
+          ...failedMarker,
+          workspaceFingerprint: "fingerprint-before-the-workspace-edit",
+        });
+        await vi.advanceTimersByTimeAsync(1100 + 60000);
+        await vi.runOnlyPendingTimersAsync();
+        expect(meta.get("last_auto_run")?.outcome).toBe("ran");
+        service.dispose();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("skips the tick as busy while a manual run is in flight, without touching the throttle", async () => {
+      vi.useFakeTimers();
+      try {
+        const meta = new Map();
+        let releaseLlm;
+        const hangingClawCmd = vi.fn(
+          () =>
+            new Promise((resolve) => {
+              releaseLlm = () =>
+                resolve({
+                  ok: true,
+                  stdout: JSON.stringify({ summary: "done", cards: [] }),
+                });
+            }),
+        );
+        const { service } = makeService({
+          readAutoRunEnabled: () => true,
+          autoRunTickMs: 1000,
+          meta,
+          clawCmd: hangingClawCmd,
+        });
+        meta.set("last_env_signature", "different-signature");
+        // Manual run dispatches synchronously (busy latch set before any await).
+        const manualRun = service.runDoctor();
+        await vi.advanceTimersByTimeAsync(1100 + 60000);
+        expect(service.buildStatus().autoRun.lastSkipReason).toBe("busy");
+        // The busy skip never arms the throttle or the failure backoff.
+        expect(meta.get("last_auto_run")).toBeUndefined();
+        releaseLlm();
+        await manualRun;
+        await vi.runOnlyPendingTimersAsync();
+        service.dispose();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("restores the throttle marker when the gateway flips between pre-check and dispatch", async () => {
+      vi.useFakeTimers();
+      try {
+        const meta = new Map();
+        const staleMarker = {
+          at: new Date(Date.now() - 8 * 60 * 60 * 1000).toISOString(),
+          outcome: "ran",
+          envSignature: "old-signature",
+        };
+        meta.set("last_auto_run", staleMarker);
+        meta.set("last_env_signature", "different-signature");
+        let flipArmed = true;
+        const { service } = makeService({
+          readAutoRunEnabled: () => true,
+          autoRunTickMs: 1000,
+          meta,
+          // Degraded ONLY once the tick has committed to dispatch (it writes
+          // the "started" marker immediately before calling runDoctor): the
+          // tick's own pre-check and status build both see a ready gateway,
+          // and runDoctor's internal readiness check sees the flip.
+          getReadiness: () => {
+            if (flipArmed && meta.get("last_auto_run")?.outcome === "started") {
+              return { ok: false, reason: "flipped mid-dispatch" };
+            }
+            return { ok: true, reason: "" };
+          },
+        });
+        await vi.advanceTimersByTimeAsync(1100 + 60000);
+        await vi.runOnlyPendingTimersAsync();
+        // Benign non-dispatch: nothing auto-ran, so the previous marker is
+        // restored verbatim — the throttle slot is not burned and the failure
+        // backoff is not armed.
+        expect(service.buildStatus().autoRun.lastSkipReason).toBe("gateway-degraded");
+        expect(meta.get("last_auto_run")).toEqual(staleMarker);
+        // With the flip gone, the very next tick dispatches for real.
+        flipArmed = false;
+        await vi.advanceTimersByTimeAsync(1100 + 60000);
+        await vi.runOnlyPendingTimersAsync();
+        expect(meta.get("last_auto_run")?.outcome).toBe("ran");
+        service.dispose();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("dispatches the first scheduled run on a fresh install with healthy hardening", async () => {
+      vi.useFakeTimers();
+      try {
+        // No completed runs, no stored env signature, healthy hardening: only
+        // the needsInitialRun trigger can fire — and it must.
+        const meta = new Map();
+        const { service, created } = makeService({
+          readAutoRunEnabled: () => true,
+          autoRunTickMs: 1000,
+          meta,
+        });
+        await vi.advanceTimersByTimeAsync(1100 + 60000);
+        await vi.runOnlyPendingTimersAsync();
+        expect(meta.get("last_auto_run")?.outcome).toBe("ran");
+        expect(created).toHaveLength(1);
+        service.dispose();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("treats a missing stored env signature as changed and schedules the post-upgrade scan", async () => {
+      vi.useFakeTimers();
+      try {
+        // An existing install: completed doctor runs from before env-signature
+        // tracking shipped (no stored signature), a fresh (non-stale) matching
+        // baseline, healthy hardening, needsInitialRun false. No other trigger
+        // can fire — the missing signature alone must schedule the scan.
+        const { computeWorkspaceSnapshot } = require("../../lib/server/doctor/workspace-fingerprint");
+        const nowIso = new Date().toISOString();
+        const meta = new Map();
+        const { service, created } = makeService({
+          readAutoRunEnabled: () => true,
+          autoRunTickMs: 1000,
+          meta,
+          summaries: [
+            {
+              id: 1,
+              status: "completed",
+              engine: "gateway_agent",
+              workspaceFingerprint: computeWorkspaceSnapshot(workspaceRoot).fingerprint,
+              promptVersion: "doctor-v2",
+              contextProfile: "stable-2026.7",
+              openclawVersion: "",
+              completedAt: nowIso,
+              startedAt: nowIso,
+            },
+          ],
+        });
+        await vi.advanceTimersByTimeAsync(1100 + 60000);
+        await vi.runOnlyPendingTimersAsync();
+        expect(meta.get("last_auto_run")?.outcome).toBe("ran");
+        // Zero workspace delta → the post-upgrade scan is a fingerprint reuse.
+        expect(created[0]).toMatchObject({ engine: "deterministic_reuse" });
+        // The run recorded the signature: the next tick skips as unchanged.
+        expect(meta.get("last_env_signature")).toBeTruthy();
+        service.dispose();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("refreshes the workspace snapshot on the worker before a scheduled run, never synchronously", async () => {
+      vi.useFakeTimers();
+      try {
+        const meta = new Map();
+        // Any sync walk from the tick path fails the test loudly.
+        const computeSnapshotSpy = vi.fn(() => {
+          throw new Error("sync snapshot compute called from the auto-run tick");
+        });
+        const computeSnapshotAsyncSpy = vi.fn(fastComputeSnapshotAsync);
+        const { service } = makeService({
+          readAutoRunEnabled: () => true,
+          autoRunTickMs: 1000,
+          meta,
+          computeSnapshot: computeSnapshotSpy,
+          computeSnapshotAsync: computeSnapshotAsyncSpy,
+        });
+        await vi.advanceTimersByTimeAsync(1100 + 60000);
+        await vi.runOnlyPendingTimersAsync();
+        expect(meta.get("last_auto_run")?.outcome).toBe("ran");
+        expect(computeSnapshotAsyncSpy).toHaveBeenCalled();
+        expect(computeSnapshotSpy).not.toHaveBeenCalled();
+        service.dispose();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    describe("hardening trigger for scheduled scans", () => {
+      const { computeWorkspaceSnapshot } = require("../../lib/server/doctor/workspace-fingerprint");
+
+      const seedHardeningBreakage = (kind) => {
+        if (kind === "blocked") {
+          // Merged hardening file on disk with no config entry → "blocked".
+          fs.mkdirSync(path.join(workspaceRoot, "hooks", "bootstrap"), { recursive: true });
+          fs.writeFileSync(
+            path.join(workspaceRoot, "hooks", "bootstrap", "AGENTS.md"),
+            "# Hardening\n",
+            "utf8",
+          );
+        } else {
+          // AGENTS.md over the per-file cap → active truncation.
+          fs.writeFileSync(path.join(workspaceRoot, "AGENTS.md"), repeatText(20001), "utf8");
+        }
+      };
+
+      // Latest completed run matches the CURRENT fingerprint: zero workspace
+      // delta, not stale, needsInitialRun false — only hardeningNew can fire.
+      const makeMatchingSummary = () => {
+        const nowIso = new Date().toISOString();
+        return {
+          id: 1,
+          status: "completed",
+          engine: "gateway_agent",
+          workspaceFingerprint: computeWorkspaceSnapshot(workspaceRoot).fingerprint,
+          promptVersion: "doctor-v2",
+          contextProfile: "stable-2026.7",
+          openclawVersion: "",
+          completedAt: nowIso,
+          startedAt: nowIso,
+        };
+      };
+
+      it.each(["blocked", "truncation"])(
+        "triggers a run when hardening is %s with zero workspace delta",
+        async (kind) => {
+          vi.useFakeTimers();
+          try {
+            seedHardeningBreakage(kind);
+            const meta = new Map();
+            // Seed the matching env signature so hardeningNew — not the
+            // missing-signature (post-upgrade) trigger — is what fires.
+            await seedLiveEnvSignature(meta);
+            const { service, created } = makeService({
+              readAutoRunEnabled: () => true,
+              autoRunTickMs: 1000,
+              meta,
+              summaries: [makeMatchingSummary()],
+            });
+            await vi.advanceTimersByTimeAsync(1100 + 60000);
+            await vi.runOnlyPendingTimersAsync();
+            expect(meta.get("last_auto_run")?.outcome).toBe("ran");
+            // Zero delta → the dispatched run is a fingerprint reuse.
+            expect(created[0]).toMatchObject({ engine: "deterministic_reuse" });
+            service.dispose();
+          } finally {
+            vi.useRealTimers();
+          }
+        },
+      );
+
+      it("suppresses the trigger when the latest run already reported the condition", async () => {
+        vi.useFakeTimers();
+        try {
+          seedHardeningBreakage("blocked");
+          const meta = new Map();
+          // Matching signature: only the hardening-trigger suppression is
+          // under test, not the missing-signature (post-upgrade) trigger.
+          await seedLiveEnvSignature(meta);
+          const runsByIdCards = new Map([
+            [1, [{ priority: "P0", status: "open", source: "deterministic", sourceKey: "det:hardening:blocked" }]],
+          ]);
+          const { service, created } = makeService({
+            readAutoRunEnabled: () => true,
+            autoRunTickMs: 1000,
+            meta,
+            runsByIdCards,
+            summaries: [makeMatchingSummary()],
+          });
+          await vi.advanceTimersByTimeAsync(1100 + 60000);
+          expect(service.buildStatus().autoRun.lastSkipReason).toBe("not-stale");
+          expect(meta.get("last_auto_run")).toBeUndefined();
+          expect(created).toHaveLength(0);
+          service.dispose();
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      it("suppresses the trigger when the condition's own source key was dismissed", async () => {
+        vi.useFakeTimers();
+        try {
+          // AGENTS.md over the per-file cap: the truncation card it would
+          // carry is exactly boot:file_limit:AGENTS.md.
+          seedHardeningBreakage("truncation");
+          const meta = new Map();
+          // Matching signature: only the dismissed-key suppression is under
+          // test, not the missing-signature (post-upgrade) trigger.
+          await seedLiveEnvSignature(meta);
+          const { service, created } = makeService({
+            readAutoRunEnabled: () => true,
+            autoRunTickMs: 1000,
+            meta,
+            summaries: [makeMatchingSummary()],
+            listDismissedSourceKeys: () => ["boot:file_limit:AGENTS.md"],
+          });
+          await vi.advanceTimersByTimeAsync(1100 + 60000);
+          expect(service.buildStatus().autoRun.lastSkipReason).toBe("not-stale");
+          expect(meta.get("last_auto_run")).toBeUndefined();
+          expect(created).toHaveLength(0);
+          service.dispose();
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      it("does not let an unrelated dismissed boot: key suppress a new blocked state", async () => {
+        vi.useFakeTimers();
+        try {
+          // A once-dismissed boot:file_limit:USER.md card (condition long
+          // gone) must not disable the trigger for a NEW hardening-blocked
+          // state — the candidate keys come from the current condition only.
+          seedHardeningBreakage("blocked");
+          const meta = new Map();
+          // Matching signature: hardeningNew must be the trigger that fires,
+          // not the missing-signature (post-upgrade) trigger.
+          await seedLiveEnvSignature(meta);
+          const { service, created } = makeService({
+            readAutoRunEnabled: () => true,
+            autoRunTickMs: 1000,
+            meta,
+            summaries: [makeMatchingSummary()],
+            listDismissedSourceKeys: () => ["boot:file_limit:USER.md"],
+          });
+          await vi.advanceTimersByTimeAsync(1100 + 60000);
+          await vi.runOnlyPendingTimersAsync();
+          expect(meta.get("last_auto_run")?.outcome).toBe("ran");
+          expect(created[0]).toMatchObject({ engine: "deterministic_reuse" });
+          service.dispose();
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      it("does not fire the hardening trigger when the config is unreadable", async () => {
+        vi.useFakeTimers();
+        try {
+          // Merged hardening file on disk PLUS an openclaw.json our parser
+          // cannot read: hardening reads "unknown" (config_unreadable), which
+          // must not count as blocked and must not schedule a scan.
+          seedHardeningBreakage("blocked");
+          fs.writeFileSync(
+            path.join(workspaceRoot, "openclaw.json"),
+            "{ hooks: { /* json5 */ } }",
+            "utf8",
+          );
+          const meta = new Map();
+          // Matching signature: only the unreadable-config suppression is
+          // under test, not the missing-signature (post-upgrade) trigger.
+          await seedLiveEnvSignature(meta);
+          const { service, created } = makeService({
+            readAutoRunEnabled: () => true,
+            autoRunTickMs: 1000,
+            meta,
+            summaries: [makeMatchingSummary()],
+            readOpenclawConfig: () => null,
+          });
+          expect(service.buildStatus().bootstrapContext.hardening).toMatchObject({
+            state: "unknown",
+            reason: "config_unreadable",
+          });
+          await vi.advanceTimersByTimeAsync(1100 + 60000);
+          expect(service.buildStatus().autoRun.lastSkipReason).toBe("not-stale");
+          expect(meta.get("last_auto_run")).toBeUndefined();
+          expect(created).toHaveLength(0);
+          service.dispose();
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+    });
+
+    it("never re-notifies when last_notified_run_id is at or past the new run (crash replay)", async () => {
+      const notify = vi.fn(() => Promise.resolve({ ok: true }));
+      const meta = new Map();
+      // makeService run ids start at 101; 999 simulates a replayed marker.
+      meta.set("last_notified_run_id", 999);
+      const { service } = makeService({
+        notify,
+        meta,
+        llmCards: [
+          {
+            priority: "P0",
+            category: "workspace state",
+            title: "Dangerous drift",
+            summary: "s",
+            recommendation: "r",
+            fixPrompt: "f",
+            status: "open",
+          },
+        ],
+      });
+      const result = await service.runDoctor();
+      await settle();
+      expect(result.ok).toBe(true);
+      expect(notify).not.toHaveBeenCalled();
+      expect(meta.get("last_notified_run_id")).toBe(999);
+    });
+
+    it("reads dismissed source keys once per run", async () => {
+      const listDismissedSourceKeys = vi.fn(() => []);
+      const { service } = makeService({
+        listDismissedSourceKeys,
+        // Bridge cards force the second (bridge) dismissal filter too.
+        runDoctorLintJson: async () => ({
+          ok: false,
+          code: 1,
+          truncated: false,
+          stdout: JSON.stringify({
+            ok: false,
+            findings: [{ checkId: "x/y", severity: "info", message: "m" }],
+          }),
+        }),
+      });
+      await service.runDoctor();
+      await settle();
+      expect(listDismissedSourceKeys).toHaveBeenCalledTimes(1);
+    });
+
+    it("survives a throwing tick and clears the interval on dispose", async () => {
+      vi.useFakeTimers();
+      try {
+        const { service } = makeService({
+          readAutoRunEnabled: () => {
+            throw new Error("config exploded");
+          },
+          autoRunTickMs: 1000,
+        });
+        await vi.advanceTimersByTimeAsync(1100 + 60000);
+        // readAutoRunEnabledSafe catches → "disabled", not "error".
+        expect(service.buildStatus().autoRun.lastSkipReason).toBe("disabled");
+        service.dispose();
+        const before = service.buildStatus().autoRun.lastCheckAt;
+        await vi.advanceTimersByTimeAsync(5000 + 120000);
+        expect(service.buildStatus().autoRun.lastCheckAt).toBe(before);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("exposes gateway readiness and auto-run state on the status payload", () => {
+      const { service } = makeService({
+        readiness: { ok: false, reason: "crash loop" },
+        readAutoRunEnabled: () => true,
+      });
+      const status = service.buildStatus();
+      expect(status.gatewayReadiness).toEqual({ ok: false, reason: "crash loop" });
+      expect(status.autoRun).toMatchObject({ enabled: true });
+      service.dispose();
+    });
+  });
 });
 
 // H6: evidence snippet paths come from untrusted AI/import output. They must be
-// realpath-contained to the workspace, and must be regular files under a size
-// cap (no traversal, no symlink escape, no FIFO/huge-file DoS).
+// realpath-contained to the workspace, and must be regular files read only
+// within the scan bound (no traversal, no symlink escape, no FIFO/huge-file
+// DoS).
 describe("server/doctor-service evidence snippet containment (H6)", () => {
   let managedDb = null;
 
@@ -1917,7 +3580,10 @@ describe("server/doctor-service evidence snippet containment (H6)", () => {
     fs.writeFileSync(bigPath, "start\n", "utf8");
     const fd = fs.openSync(bigPath, "r+");
     try {
-      fs.ftruncateSync(fd, 3 * 1024 * 1024); // over the 2MB cap
+      // Past the 8 MiB scan bound: the cited window (line 2 runs to EOF)
+      // cannot be completed within kSnippetScanMaxBytes, so the bounded
+      // reader must give up (null) instead of slurping the whole file.
+      fs.ftruncateSync(fd, 9 * 1024 * 1024);
     } finally {
       fs.closeSync(fd);
     }

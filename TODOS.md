@@ -97,12 +97,6 @@
 - **Context:** The full rewrite needs the 66 gateway tests moved off raw `fs.writeFileSync(configPath, content)` assertions.
 - **Effort:** M.
 
-## P3 — Wire restart-handoff consume into the watchdog exit classifier
-- **What:** In gateway.js's child exit handler, when the target supports the restart-handoff contract (capabilities probe) and the exit is unexpected, consume the handoff (`lib/server/openclaw-restart-handoff.js`) before classifying, and add a watchdog `onGatewayExit` branch that relaunches without crash accounting. Serialize exit classification per child pid.
-- **Why:** Correctly classify an OpenClaw-initiated fresh-process restart as intentional, not a crash.
-- **Context:** Deferred from Phase 1.7 — low value in practice because AlphaClaw sets `OPENCLAW_NO_RESPAWN=1`, so routine restarts stay in-process (no child exit to misclassify); a fresh-process handoff restart is rare. The module + tests exist; only the exit-handler wiring remains. Cooldown tolerance (window 15s->50s) already shipped.
-- **Effort:** M.
-
 ## P3 — OpenClaw-beta follow-ups (deferred from the beta-support plan)
 - **What:** Invite QR codes on the Team page; a "move this key to the shared secret store" CTA on the Models page; per-agent access mapping built on the members roster; an auto-canary channel (apply beta to a shadow gateway, promote on health). The Watchdog degraded-state badge (eventLoopDegraded/readyzFailing are already exposed in getStatus) is folded into the Phase 2/3 UI work.
 - **Why:** Recorded scope decisions from the CEO review; each is a platform follow-up after core beta support ships.
@@ -139,6 +133,12 @@
 - **What:** POST /api/watchdog/repair (source "manual") uses tryAcquire and returns `{ok:false, skipped:true, reason:"operation_in_progress"}` as HTTP 200 while any lifecycle operation holds the lock. The lock module's contract says user paths QUEUE; today only route restarts do. Either queue manual repairs or return 409 with a user-actionable message.
 - **Why:** Direct API users and badge-hidden windows (boot holds the lock but shows no badge) get a silent no-op today. Deliberately deferred at ship time (2026-08-28 red-team finding, conf 5): repair-behind-a-restart queueing is debatable UX and the card's disabled-action guard covers the visible cases.
 - **Context:** lib/server/watchdog.js runRepair (tryAcquire), lib/server/routes/watchdog.js repair handler, lib/server/gateway-lifecycle-lock.js contract comment.
+- **Effort:** S.
+
+## P3 — Watchdog status gatewayPid stays null
+- **What:** `GET /api/watchdog/status` reports `gatewayPid: null` after boot and after a managed restart while lifecycle is `running`. Both gateway.js launch emit sites pass `pid: child.pid`, so some path drops it before/after the watchdog's `state.gatewayPid = pid` (launch-handler destructure, an exit-time reset racing the relaunch, or the restart-cmd path). Trace and fix; add a status assertion to the launch tests.
+- **Why:** Display/diagnostic gap only — the restart-handoff consume reads the EXIT payload's own pid (verified present live), so behavior is unaffected; but a null pid in status misleads operators and weakens the `?? state.gatewayPid` fallback.
+- **Context:** Found by /qa on brussels (2026-08-29), ISSUE-003 in .gstack/qa-reports/qa-report-localhost-3000-2026-08-29.md. lib/server/watchdog.js (state.gatewayPid), lib/server/gateway.js launch handlers.
 - **Effort:** S.
 
 ## P3 — Watchdog health-timeline sparkline
@@ -204,6 +204,13 @@
 - **Why:** One source of truth for "what does the installed OpenClaw support"; probes survive dev builds and forks where version comparison fails closed.
 - **Context:** Documented split from the main-branch merge; the restart-handoff/env plumbing (OPENCLAW_SUPERVISOR_MODE default-external with the off|none hatch) is no longer gated.
 - **Effort:** M.
+
+## P3 — Retire the unwired upstream restart-handoff stub
+- **What:** lib/server/openclaw-restart-handoff.js (landed with the v0.9.37-39 merge) has zero requirers and encodes a guessed consume-response schema (`doc.consumed || doc.accepted || doc.restart`). The wired implementation is lib/server/gateway-restart-handoff.js, whose parsing follows the tarball-verified protocol (`protocol` marker + `status:"accepted"` + nested `handoff`). Delete the stub, or fold any capabilities-gating advice from it into the wired module first. Related: gate the consume spawn on the `restartHandoff` capability probe (openclaw-capabilities.js) so stable installs skip the bounded 5s CLI attempt — gateway.js's injectable param is ready for that wiring.
+- **Why:** Two modules claiming the same contract invite the wrong one being extended; the stub's schema is unverified.
+- **Context:** Merge-resolution finding (2026-08-29); verified contract in docs/designs/openclaw-context-contract.md §lifecycle appendix.
+- **Effort:** S. **Depends on:** nothing.
+
 ## P3 — Live-tier openclaw backup CLI contract regression test
 - **What:** One tests/live assertion that a real `openclaw backup create --output <file>` writes exactly at the given path (refusing when it already exists) and `--output <dir>/` writes a timestamped archive inside the directory.
 - **Why:** Issues #7/#9 existed because every test stub encoded an unvalidated assumption about the CLI's `--output` contract; the contract is now verified from openclaw@2026.7.1-2 dist source, and a live guard catches future CLI changes.
@@ -216,11 +223,10 @@
 - **Context:** `kOpenclawBackupKeepCount` (lib/server/constants.js), `pruneBackups` + the advisory block (lib/server/openclaw-channel-sync.js), `getBackupMaxTotalBytes` (lib/server/autotune.js).
 - **Effort:** S-M.
 
-## P2 — Supervisor verified-restart handoff (OpenClaw 2026.8.1+)
-- **What:** Implement the beta's verified restart handoff in `restartGateway`/`stopGatewayChildAndWait`/watchdog `restartAfterCrash` once a 2026.8.1 build is installed and its lifecycle contract is readable. Env plumbing (`OPENCLAW_SUPERVISOR_MODE=external`, gated on `supportsFeature("supervisorMode")`) already ships.
-- **Why:** The pinned stable (2026.7.1-2) documents no external-supervision contract; implementing against an assumed shape risks a wrong handshake during the most fragile window (gateway restart).
-- **Context:** TODO comment in lib/server/gateway.js; gate in lib/server/openclaw-feature-gates.js. Surfaced by the eng review's "handoff after the beta contract is read" sequencing decision.
-- **Effort:** S. **Depends on:** applying 2026.8.1-beta.3+ on a staging deployment.
+## P2 — Latch shutdown state before the self-update restart drain
+- **What:** `restartProcess` (lib/server/alphaclaw-version.js) calls `serverLifecycle.drain()` without setting the lifecycle's `exiting` latch, so a SIGTERM or uncaughtException landing inside the ≤10s drain window starts a second concurrent drain and exits before the successor process is spawned — on an unsupervised VPS that means a self-update ends with nothing running. Route the restart through a lifecycle method (e.g. `prepareForRestart()`) that latches `exiting` and disarms signal re-entry, or move the respawn inside the guarded exit path.
+- **Why:** Red-team finding on the downtime-remediation ship review (2026-08-28); bounded window but the failure mode is "permanently down after update".
+- **Effort:** S. **Depends on:** nothing.
 
 ## P3 — Keep the workspace manifest inside the fingerprint worker
 - **What:** Each background snapshot refresh round-trips the full manifest (multi-MB at 15k+ files) through `postMessage`, costing ~7ms serialize + ~15ms deserialize on the main thread per refresh. The worker is persistent — cache the previous manifest worker-side (send it only on the first request) and return only fingerprint/limited/stats (and, with the delta moved worker-side, the computed delta).
@@ -229,7 +235,7 @@
 - **Effort:** M. **Depends on:** nothing.
 
 ## P3 — Ship-review maintainability follow-ups (2026-08-28, grouped)
-- **What:** (1) ~~shared `applyOperationalPragmas(db)` helper~~ DONE on the resource-autotune branch (lib/server/db/pragmas.js, with an autotune-scaled negative-KiB `cache_size`); (2) shared cron run-log tail-read helper (block repeated ×3 in cron-service.js); (3) shared `sleep` util (5 private copies); (4) one `kDoctorRepairTimeoutMs` constant for the 10-minute doctor-fix ceiling spelled in server.js and watchdog.js; (5) shared 1s sync-file-lock timeout constant (openclaw-config.js + topic-registry.js); (6) extract the proxy error handler and terminal error middleware from lib/server.js into a module so routes-proxy.test.js stops testing a verbatim copy; (7) `stream.end()` + bounded await-finish as a drain step in log-writer so stream-buffered bytes survive shutdown (in-memory queue already flushes); (8) ~~make system-resources' loop-lag monitor injectable/stoppable~~ DONE on the resource-autotune branch (`startLoopLagMonitor({monitorFn, sampleWindowMs})` + `stopLoopLagMonitor`); (9) surface a `truncatedHistory` flag on cron run-history responses (256KB tail bound); (10) /v1-scoped error handler emitting the OpenAI error envelope for 413/400 parser errors; (11) SWR-cache `getGatewayPort` (sync read+parse per proxied request, sub-ms but unconditional); (12) stat-cache `analyzeBootstrapContext` file reads; (13) remaining test gaps: pairings single-flight/500 path, cron-store TTL-reopen/liveness cache, statusPayloadMemo invalidate-vs-in-flight race, doctor-service runStarting four-site reset → try/finally cleanup; (14) `Expect: 100-continue` proxied requests never get the post-header idle-timeout relaxation (http-proxy-3 skips the proxyReq event for them — consider stripping the header on the outgoing leg); (15) `installCrashGuards` removeAllListeners can drop dependency-registered process handlers — remove only known guards by reference; (16) browse preview TOCTOU: read at most limit+1 bytes from an fd instead of stat-then-readFileSync.
+- **What:** (1) ~~shared `applyOperationalPragmas(db)` helper~~ DONE on the resource-autotune branch (lib/server/db/pragmas.js, with an autotune-scaled negative-KiB `cache_size`); (2) shared cron run-log tail-read helper (block repeated ×3 in cron-service.js); (3) shared `sleep` util (5 private copies); (4) one `kDoctorRepairTimeoutMs` constant for the 10-minute doctor-fix ceiling spelled in server.js and watchdog.js; (5) shared 1s sync-file-lock timeout constant (openclaw-config.js + topic-registry.js); (6) extract the proxy error handler and terminal error middleware from lib/server.js into a module so routes-proxy.test.js stops testing a verbatim copy; (7) `stream.end()` + bounded await-finish as a drain step in log-writer so stream-buffered bytes survive shutdown (in-memory queue already flushes); (8) ~~make system-resources' loop-lag monitor injectable/stoppable~~ DONE on the resource-autotune branch (`startLoopLagMonitor({monitorFn, sampleWindowMs})` + `stopLoopLagMonitor`); (9) surface a `truncatedHistory` flag on cron run-history responses (256KB tail bound); (10) /v1-scoped error handler emitting the OpenAI error envelope for 413/400 parser errors; (11) SWR-cache `getGatewayPort` (sync read+parse per proxied request, sub-ms but unconditional); (12) ~~stat-cache `analyzeBootstrapContext` file reads~~ DONE on the Drift Doctor wave (createBootstrapContextAnalyzer mtime+size cache); (13) remaining test gaps: pairings single-flight/500 path, cron-store TTL-reopen/liveness cache, statusPayloadMemo invalidate-vs-in-flight race; (14) `Expect: 100-continue` proxied requests never get the post-header idle-timeout relaxation (http-proxy-3 skips the proxyReq event for them — consider stripping the header on the outgoing leg); (15) `installCrashGuards` removeAllListeners can drop dependency-registered process handlers — remove only known guards by reference; (16) browse preview TOCTOU: read at most limit+1 bytes from an fd instead of stat-then-readFileSync.
 - **Why:** All flagged by the /ship specialist review; deferred as churn-vs-risk at ship time, none user-visible today.
 - **Effort:** S each. **Depends on:** nothing.
 
@@ -242,6 +248,42 @@
 - **What:** `openclaw node run` authenticates with `OPENCLAW_GATEWAY_TOKEN`, which trusted-proxy mode rejects; `/api/nodes/connect-info` currently returns an empty token with a logged warning while team mode is on. Provide a working node path (gateway password credential, or a pairing flow) before recommending team mode to node users.
 - **Context:** lib/server/gateway-credential.js, lib/server/routes/nodes.js; degradation documented in the team-auth milestone report.
 - **Effort:** M. **Depends on:** verifying how `openclaw node run` accepts a password credential (docs/cli in the beta line).
+
+## P3 — Doctor per-run token cost display
+- **What:** Show each doctor run's LLM token cost on the Doctor tab by joining usage.db on the run's session key (`agent:main:doctor:<n>`).
+- **Why:** Scheduled scans (doctor autoRun) make doctor LLM spend recurring; operators should see what each scan cost before tuning frequency. Deferred from the 8.1 wave's CEO review.
+- **Context:** doctor runs use deterministic session keys `agent:main:doctor:<n>`; usage.db already powers the usage views. Wave background in docs/designs/openclaw-context-contract.md.
+- **Effort:** S. **Depends on:** Drift Doctor 8.1 wave landing.
+
+## P3 — Session-kind context breakdown card
+- **What:** A Doctor-tab card visualizing the per-session-kind injection matrix (main/subagent/cron/group-channel) from the active context profile — which bootstrap files each session kind actually receives.
+- **Why:** Session-scope filtering is invisible today (on beta, subagents see only AGENTS.md; group chats lose MEMORY.md); operators assume every session sees the full workspace context. Deferred from the 8.1 wave's CEO review.
+- **Context:** the matrix is data in lib/server/doctor/context-profiles.js; verified facts and citations in docs/designs/openclaw-context-contract.md §2 (session-scope matrix).
+- **Effort:** S. **Depends on:** Drift Doctor 8.1 wave landing.
+
+## P3 — Copy-fix-prompt button on doctor findings
+- **What:** A copy-to-clipboard button on each doctor finding card exposing the card's fixPrompt, so operators can paste it into a session of their choosing.
+- **Why:** Fixes stay explicit-dispatch by doctrine; a copy affordance gives a manual path without wiring any auto-dispatch. Deferred from the 8.1 wave's CEO review.
+- **Context:** cards already carry fixPrompt (doctor service); UI-only change in the Doctor tab.
+- **Effort:** S. **Depends on:** Drift Doctor 8.1 wave landing.
+
+## P3 — Stable notify keys for LLM doctor cards
+- **What:** maybeNotifyNewP0s dedupes LLM P0s by exact title (no sourceKey); a persistent P0 the model rewords re-notifies each scan. Derive a stable key (hash of category + sorted targetPaths) or feed prior open-card titles into the doctor prompt with reuse instructions.
+- **Why:** Notification fatigue once scheduled scans are on.
+- **Context:** lib/server/doctor/service.js maybeNotifyNewP0s cardKey; prompt.js.
+- **Effort:** S.
+
+## P3 — SQLite snapshot retention (keep-N)
+- **What:** Keep-N retention for the SQLite snapshot repository at `<root>/backups/openclaw-sqlite/` (each `backup sqlite create` adds a new snapshot directory; nothing prunes them).
+- **Why:** The verified 8.1 contract makes `--repository` required on create, so snapshots accumulate unboundedly in our managed directory; companion to the size-aware archive retention entry above.
+- **Context:** create/verify contract in docs/designs/openclaw-context-contract.md §5 (`backup sqlite` CLI); `kOpenclawSqliteBackupDir` (lib/server/constants.js, added by the wave's backup-runner fix); pattern precedent in `pruneBackups` (lib/server/openclaw-channel-sync.js).
+- **Effort:** S. **Depends on:** the wave's backup sqlite runner fix landing.
+
+## P3 — doctor.db retention (keep-N runs)
+- **What:** doctor_runs persists full workspace_manifest_json (MBs per row at 50k files) and reuse runs clone raw_result_json; nothing prunes, and scheduled scans make growth unattended. Add keep-N retention deleting old runs' manifest/raw-result blobs while preserving dismissed source_keys (they feed suppression).
+- **Why:** Unbounded disk growth on VPS installs; the dismissed-keys DISTINCT scan grows with it (the partial index added this wave mitigates the query, not the growth).
+- **Context:** lib/server/db/doctor/; precedent in `pruneBackups` (lib/server/openclaw-channel-sync.js); companion to the SQLite snapshot retention entry above.
+- **Effort:** S-M.
 
 ## P3 — Container-tier chaos leg
 - **What:** Kill the container mid-download during a stable→beta apply and assert the fresh boot recovers cleanly onto the stable pin (no half-installed tree, gateway healthy). Extends tests/container/openclaw-container-upgrade.e2e.test.js with a second, shorter journey.
@@ -422,6 +464,25 @@
 - **Effort:** S. **Depends on:** nothing.
 
 ## Completed
+
+## Serialize alphaclaw.json writers under a file lock
+- **What:** Route every writeAlphaclawConfig read-modify-write through the shared file lock.
+- **Completed:** v0.9.45 merge (2026-08-29) — upstream v0.9.42 wave added updateAlphaclawConfig (withFileLockSync around every update* helper); our doctor scheduled-scans updater was re-layered onto the same locked path during the merge.
+
+## Gateway close-event stale-generation guard
+- **What:** Exit classification listens on child "close" (chosen so post-exit stderr flushes are captured); if a grandchild inherits the stdio fds and outlives the gateway, "close" fires late — or never. Per-child stderr tails cover the fires-late half; the remaining scope was the bounded exit-vs-close race for the never-fires case: race "exit" with a short bounded drain so a close that never arrives cannot leave the exit unclassified.
+- **Why:** A close that never fires meant the watchdog never saw the exit — no restart-handoff consume, no relaunch — until the descendant died; the health/TCP path was the slower backstop.
+- **Completed:** v0.9.45 (2026-08-29) — both halves shipped in lib/server/gateway.js. Per-child stderr tails: each launch closure owns its tail, so a late close is always classified against its OWN child's stderr, never a successor's. Bounded exit-vs-close drain: "exit" arms a 400ms unref'd drain timer (`kGatewayCloseDrainMs`) that runs the same finalize with the tail-so-far if close hasn't fired; first of {close, drain timeout} wins via a per-child settled flag and a late close after the timeout is a no-op (exactly-once classification). The restart-supervisor path (`runGatewayRestartCmd`) already records its exit on "exit" directly and needed no guard.
+
+## Gate runHealthCheck during pending exit classification
+- **What:** While the watchdog's async exit resolver runs (handoff consume ≤5s + step-aside probes), lifecycle/health still read running/healthy and armed health timers can independently mark degraded or start rollback/auto-repair paths racing the resolver (serialized only by the lifecycle lock). Early-return from runHealthCheck while state.pendingExitClassification is true, mirroring the configurationErrorActive guard.
+- **Why:** Duplicate restart attempts / notification noise for one exit.
+- **Completed:** v0.9.45 (2026-08-29) — runHealthCheck early-returns while `state.pendingExitClassification` is truthy (lib/server/watchdog.js), right after the configurationErrorActive guard; the resolver owns the next transition, and the flag clears on settle or any newer lifecycle event.
+
+## Wire restart-handoff consume into the watchdog exit classifier
+- **What:** In gateway.js's child exit handler, when the target supports the restart-handoff contract and the exit is unexpected, consume the handoff before classifying, and add a watchdog `onGatewayExit` branch that relaunches without crash accounting. Serialize exit classification per child pid.
+- **Why:** Correctly classify an OpenClaw-initiated fresh-process restart as intentional, not a crash.
+- **Completed:** v0.9.45 (2026-08-29) — implemented against the tarball-verified protocol in `lib/server/gateway-restart-handoff.js` (per-PID exactly-once consume, 60s TTL cache) with the watchdog's `resolveSupervisedCleanExit` handling accepted/none/rejected on every clean unmanaged exit; gated on the supervisor-mode env rather than a capabilities probe (that gating refinement is tracked in "Retire the unwired upstream restart-handoff stub").
 
 ## Make env-save channel sync one atomic lifecycle-lock op
 - **What:** `PUT /api/env` runs remove-channels → write env → add-channels as two separately queued lock ops (lib/server/routes/system.js + gateway.js `syncChannelConfig`). A gateway restart queued between them launches with channels removed-but-not-yet-re-added (final config state self-corrects when the add runs, but the running gateway may need another restart to pick it up). Wrap remove+write+add in a single uniquely-keyed lock op (expose a narrow `withGatewayLifecycleLock` from gateway.js or a dedicated `syncChannelConfigForEnvSave`).

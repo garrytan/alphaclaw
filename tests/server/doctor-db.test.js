@@ -205,6 +205,79 @@ describe("server/doctor-db", () => {
     ).toBeNull();
   });
 
+  it("carries source/sourceKey through single-card reads and fix mutations", () => {
+    const {
+      createDoctorRun,
+      insertDoctorCards,
+      getDoctorCardsByRunId,
+      getDoctorCard,
+      updateDoctorCardStatus,
+      startDoctorCardFix,
+      cancelDoctorCardFix,
+      completeDoctorCardFix,
+    } = createDoctorDbContext("doctor-db-provenance-");
+
+    const runId = createDoctorRun({
+      engine: "gateway_agent",
+      workspaceRoot: "/tmp/workspace",
+      workspaceFingerprint: "fp-provenance",
+      workspaceManifest: null,
+      promptVersion: "doctor-v2",
+    });
+    insertDoctorCards({
+      runId,
+      cards: [
+        {
+          priority: kDoctorPriority.P0,
+          category: "project context",
+          title: "Hardening blocked",
+          summary: "s",
+          recommendation: "r",
+          evidence: [],
+          targetPaths: [],
+          fixPrompt: "f",
+          status: kDoctorCardStatus.open,
+          source: "deterministic",
+          sourceKey: "det:hardening:blocked",
+        },
+      ],
+    });
+    const provenance = { source: "deterministic", sourceKey: "det:hardening:blocked" };
+    const [inserted] = getDoctorCardsByRunId(runId);
+    expect(inserted).toMatchObject(provenance);
+
+    // The single-card read must not relabel a sourced card as llm.
+    expect(getDoctorCard(inserted.id)).toMatchObject(provenance);
+
+    // Every mutation that returns a card keeps the provenance too — these
+    // feed the status/fix API responses.
+    expect(
+      updateDoctorCardStatus({ id: inserted.id, status: kDoctorCardStatus.open }),
+    ).toMatchObject(provenance);
+    expect(
+      startDoctorCardFix({
+        id: inserted.id,
+        runId: "doctor-fix-provenance",
+        tokenHash: "provenance-hash",
+      }),
+    ).toMatchObject(provenance);
+    expect(
+      cancelDoctorCardFix({ id: inserted.id, runId: "doctor-fix-provenance" }),
+    ).toMatchObject(provenance);
+    startDoctorCardFix({
+      id: inserted.id,
+      runId: "doctor-fix-provenance-2",
+      tokenHash: "provenance-hash-2",
+    });
+    expect(
+      completeDoctorCardFix({
+        id: inserted.id,
+        runId: "doctor-fix-provenance-2",
+        tokenHash: "provenance-hash-2",
+      }),
+    ).toMatchObject(provenance);
+  });
+
   it("lists run summaries without heavy payloads and with grouped counts", () => {
     const {
       createDoctorRun,
@@ -485,5 +558,105 @@ describe("server/doctor-db", () => {
     expect(getDoctorRunManifest(firstRunId)).toEqual(firstManifest);
     expect(getDoctorRunManifest(failedRunId)).toBeNull();
     expect(getDoctorRunManifest(999999)).toBeNull();
+  });
+
+  it("migrates a pre-wave doctor.db idempotently and coerces legacy rows", () => {
+    const { DatabaseSync } = require("node:sqlite");
+    currentRootDir = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-db-prewave-"));
+    const dbDir = path.join(currentRootDir, "db");
+    fs.mkdirSync(dbDir, { recursive: true });
+    const dbPath = path.join(dbDir, "doctor.db");
+
+    // Pre-wave schema: no context_profile/openclaw_version on doctor_runs,
+    // no source/source_key (or fix_*) on doctor_cards.
+    const legacy = new DatabaseSync(dbPath);
+    legacy.exec(`
+      CREATE TABLE doctor_runs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        started_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+        completed_at TEXT,
+        status TEXT NOT NULL,
+        engine TEXT NOT NULL,
+        workspace_root TEXT NOT NULL,
+        workspace_fingerprint TEXT,
+        workspace_manifest_json TEXT,
+        prompt_version TEXT NOT NULL,
+        summary TEXT,
+        raw_result_json TEXT,
+        error TEXT,
+        reused_from_run_id INTEGER
+      );
+      CREATE TABLE doctor_meta (
+        key TEXT PRIMARY KEY,
+        value_json TEXT,
+        updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+      );
+      CREATE TABLE doctor_cards (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        run_id INTEGER NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+        updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+        priority TEXT NOT NULL,
+        category TEXT NOT NULL,
+        title TEXT NOT NULL,
+        summary TEXT,
+        recommendation TEXT NOT NULL,
+        evidence_json TEXT,
+        target_paths_json TEXT,
+        fix_prompt TEXT NOT NULL,
+        status TEXT NOT NULL,
+        FOREIGN KEY (run_id) REFERENCES doctor_runs(id) ON DELETE CASCADE
+      );
+      INSERT INTO doctor_runs (
+        completed_at, status, engine, workspace_root,
+        workspace_fingerprint, prompt_version, summary
+      ) VALUES (
+        strftime('%Y-%m-%dT%H:%M:%fZ','now'), 'completed', 'gateway_agent',
+        '/tmp/legacy', 'legacy-fp', 'doctor-v1', 'Legacy run'
+      );
+      INSERT INTO doctor_cards (
+        run_id, priority, category, title, summary,
+        recommendation, evidence_json, target_paths_json, fix_prompt, status
+      ) VALUES
+        (1, 'P1', 'workspace', 'Legacy open', 's', 'r', '[]', '[]', 'f', 'open'),
+        (1, 'P2', 'cleanup', 'Legacy dismissed', 's', 'r', '[]', '[]', 'f', 'dismissed');
+    `);
+    legacy.close();
+
+    currentDoctorDb = loadDoctorDb();
+    currentDoctorDb.initDoctorDb({ rootDir: currentRootDir });
+    // Twice: every migration step (ALTERs, index creation) must be idempotent.
+    currentDoctorDb.initDoctorDb({ rootDir: currentRootDir });
+
+    const run = currentDoctorDb.getDoctorRun(1);
+    expect(run.status).toBe(kDoctorRunStatus.completed);
+    expect(run.contextProfile).toBe("");
+    expect(run.openclawVersion).toBe("");
+    const [summary] = currentDoctorDb.listDoctorRunSummaries({ limit: 5 });
+    expect(summary.id).toBe(1);
+    expect(summary.contextProfile).toBe("");
+    expect(summary.openclawVersion).toBe("");
+
+    const cards = currentDoctorDb.getDoctorCardsByRunId(1);
+    expect(cards).toHaveLength(2);
+    for (const card of cards) {
+      expect(card.sourceKey).toBe("");
+      expect(card.source).toBe("llm");
+    }
+
+    // Legacy dismissed rows carry a NULL source_key: never a dismissed key.
+    expect(currentDoctorDb.listDismissedDoctorSourceKeys()).toEqual([]);
+
+    // The dismissal partial index landed (and survived the double init).
+    currentDoctorDb.closeDoctorDb();
+    const inspect = new DatabaseSync(dbPath);
+    const indexRow = inspect
+      .prepare(
+        "SELECT name, sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_doctor_cards_dismissed_source_key'",
+      )
+      .get();
+    inspect.close();
+    expect(indexRow).toBeTruthy();
+    expect(String(indexRow.sql)).toContain("WHERE status = 'dismissed'");
   });
 });
