@@ -141,7 +141,7 @@ describeLiveDev("LIVE openclaw dev-head build (real from-source pipeline)", () =
           // The updater clones to $OPENCLAW_HOME/openclaw — pointed at this
           // harness's rootDir so the checkout lands where channel-sync looks.
           // The repo's node_modules/.bin supplies the real pinned `openclaw`.
-          gatewayEnv: () => ({
+          openclawSpawnEnv: () => ({
             ...process.env,
             PATH: `${repoBinDir()}${path.delimiter}${process.env.PATH}`,
             OPENCLAW_HOME: rootDir,

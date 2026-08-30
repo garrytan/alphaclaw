@@ -571,6 +571,60 @@ describe("frontend/app-shell controller (shared status feed)", () => {
     expect(globalThis.window.location.reload).toHaveBeenCalledTimes(1);
   });
 
+  it("rollback fence (#20): the 409 raises the data-risk confirm on the shell store; confirm re-sends with consent, cancel clears", async () => {
+    let state = await settle();
+    const rollBack = gatewayShellStore.get().actions.rollBack;
+
+    api.rollbackOpenclaw.mockRejectedValue(
+      Object.assign(
+        new Error(
+          "This update migrated your state databases — the rollback target may not be able to read them.",
+        ),
+        {
+          code: "rollback_requires_confirmation",
+          status: 409,
+          backupFile: "backup-2026-08-29.tar.gz",
+        },
+      ),
+    );
+    await rollBack();
+    state = renderController({});
+    // A consent gate, not a failure: no toast, no reconnect handoff — the
+    // Gateway card renders the second-stage confirm off this slice.
+    expect(showToast).not.toHaveBeenCalled();
+    expect(state.state.connectivityMode).toBe("online");
+    expect(gatewayShellStore.get().rollbackDataRisk).toEqual({
+      message:
+        "This update migrated your state databases — the rollback target may not be able to read them.",
+      backupFile: "backup-2026-08-29.tar.gz",
+    });
+
+    // Cancel clears the slice without another API call.
+    gatewayShellStore.get().actions.cancelRollbackDataRisk();
+    state = renderController({});
+    expect(gatewayShellStore.get().rollbackDataRisk).toBeNull();
+    expect(api.rollbackOpenclaw).toHaveBeenCalledTimes(1);
+    expect(api.rollbackOpenclaw).toHaveBeenLastCalledWith({});
+
+    // Re-raise the fence, then confirm: the rollback re-sends WITH consent
+    // and the success path (toast + reconnect) runs as usual.
+    await rollBack();
+    state = renderController({});
+    expect(gatewayShellStore.get().rollbackDataRisk).not.toBeNull();
+    api.rollbackOpenclaw.mockResolvedValue({ ok: true });
+    await gatewayShellStore.get().actions.confirmRollbackDataRisk();
+    state = renderController({});
+    expect(api.rollbackOpenclaw).toHaveBeenLastCalledWith({
+      confirmDataRisk: true,
+    });
+    expect(gatewayShellStore.get().rollbackDataRisk).toBeNull();
+    expect(showToast).toHaveBeenCalledWith(
+      "Rolling back to the last known-good build — AlphaClaw is restarting",
+      "info",
+    );
+    expect(state.state.connectivityMode).toBe("alphaclaw_restarting");
+  });
+
   it("Retry after a managed update reuses the SAME isReady discriminator — never reloads against the old process", async () => {
     api.updateAlphaclaw.mockResolvedValue({
       ok: true,
