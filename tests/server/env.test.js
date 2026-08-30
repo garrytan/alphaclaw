@@ -96,6 +96,23 @@ describe("server/env", () => {
     );
   });
 
+  it("strips line breaks from keys and values before writing (issue #26 hardening)", () => {
+    // An embedded newline in a value would inject arbitrary extra .env lines
+    // into a file two root-cron shell scripts parse — key/value smuggling.
+    const env = loadEnvModule(tmpDir);
+
+    env.writeEnvFile([
+      { key: "OPENAI_API_KEY", value: "line1\nEVIL_KEY=oops" },
+      { key: "BRIGHTDATA_API_KEY", value: "a\r\nb\u2028c\u2029d e" },
+    ]);
+
+    // Every line-break flavor (CR, LF, U+2028, U+2029) is stripped; real
+    // spaces are legitimate values (the whole point of the shell-parser fix).
+    expect(fs.readFileSync(path.join(tmpDir, ".env"), "utf8")).toBe(
+      "OPENAI_API_KEY=line1EVIL_KEY=oops\nBRIGHTDATA_API_KEY=abcd e",
+    );
+  });
+
   it("returns an empty list when the env file is missing", () => {
     const env = loadEnvModule(tmpDir);
     expect(env.readEnvFile()).toEqual([]);

@@ -753,6 +753,20 @@ describe("server/routes/system", () => {
       expect.stringContaining('*/15 * * * * root bash "/tmp/openclaw/.alphaclaw/hourly-git-sync.sh"'),
       expect.objectContaining({ mode: 0o644 }),
     );
+    // Issue #25: runtime rewrites must carry the same env lines the
+    // onboarding writer emits — the previous drift stripped them on every
+    // PUT, leaving cron to resolve a phantom ~/.alphaclaw install and a
+    // divergent ~/.openclaw state db.
+    expect(deps.fs.writeFileSync).toHaveBeenCalledWith(
+      "/etc/cron.d/openclaw-hourly-sync",
+      expect.stringContaining("OPENCLAW_STATE_DIR=/tmp/openclaw"),
+      expect.objectContaining({ mode: 0o644 }),
+    );
+    expect(deps.fs.writeFileSync).toHaveBeenCalledWith(
+      "/etc/cron.d/openclaw-hourly-sync",
+      expect.stringContaining("ALPHACLAW_ROOT_DIR="),
+      expect.objectContaining({ mode: 0o644 }),
+    );
     expect(res.body.ok).toBe(true);
   });
 
@@ -1132,6 +1146,9 @@ describe("server/routes/system", () => {
       acceptedAt: null,
       inStabilizationWindow: true,
       applyInProgress: true,
+      // Issue #20: the restart-handoff verdict banner reads this to avoid a
+      // green "activation verified" while the reconciler holds the gateway.
+      gatewayHold: null,
     });
   });
 
@@ -2399,6 +2416,49 @@ describe("server/routes/system", () => {
     expect(res.status).toBe(409);
     expect(res.body.code).toBe("apply_in_progress");
     expect(deps.restartGateway).not.toHaveBeenCalled();
+  });
+
+  it("rejects a restart while the reconciler holds the gateway (issue #20)", async () => {
+    // A manual restart during a hold would launch the gateway on the exact
+    // config the reconciler just rejected — and dissolve the watchdog latch
+    // while state.gatewayHold stays set.
+    const deps = createSystemDeps();
+    deps.openclawChannelService = {
+      getChannelInfo: vi.fn(() => ({
+        gatewayHold: { reason: "settings migration failed", blamedKeys: ["mystery"] },
+      })),
+      isApplyInProgress: vi.fn(() => false),
+    };
+    const app = createApp(deps);
+
+    const res = await request(app).post("/api/gateway/restart");
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe("gateway_held");
+    expect(res.body.error).toContain("Retry migration");
+    expect(deps.restartGateway).not.toHaveBeenCalled();
+    expect(deps.restartRequiredState.markRestartInProgress).not.toHaveBeenCalled();
+  });
+
+  it("restarts normally when the channel state carries no gateway hold", async () => {
+    const deps = createSystemDeps();
+    deps.openclawChannelService = {
+      getChannelInfo: vi.fn(() => ({ gatewayHold: null })),
+      isApplyInProgress: vi.fn(() => false),
+    };
+    deps.restartRequiredState.beginRestart = vi.fn(() => ({
+      operationId: "op-hold-free",
+      reasonsSnapshot: [],
+    }));
+    deps.restartRequiredState.completeRestart = vi.fn();
+    deps.restartGateway = vi.fn(async () => ({ durationMs: 5 }));
+    const app = createApp(deps);
+
+    const res = await request(app).post("/api/gateway/restart");
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual(
+      expect.objectContaining({ ok: true, operationId: "op-hold-free" }),
+    );
+    expect(deps.restartGateway).toHaveBeenCalledTimes(1);
   });
 
   it("surfaces redacted failure evidence when a restart never becomes ready", async () => {

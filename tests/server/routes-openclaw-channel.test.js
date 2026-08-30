@@ -430,6 +430,369 @@ describe("server/routes/openclaw-channel", () => {
     expect(failedError.message).toBe("exploded mid-repair");
   });
 
+  // Issue #20: code rollback against migrated DBs is the incident's
+  // data-loss shape — the route fences it behind an explicit confirmation
+  // naming the verified backup.
+  it("fences rollback behind confirmDataRisk when the applied run migrated the DBs", async () => {
+    const deps = createDeps();
+    deps.openclawChannelService.runLedger = {
+      listRuns: vi.fn(() => [
+        {
+          operationId: "op-1",
+          state: "activated",
+          dbPreflight: { migrationRequired: true, foundVersion: 1, targetVersion: 12 },
+          backup: {
+            file: "/data/backups/openclaw/openclaw-backup-1-aaaa.tar.gz",
+            verified: true,
+            noBackup: false,
+          },
+        },
+      ]),
+    };
+    // state.backups holds a NEWER backup from an unrelated later run — it
+    // postdates the migration, so naming it would point recovery at an
+    // archive that already contains the migrated shape.
+    deps.openclawChannelService.store.readState = vi.fn(() => ({
+      blocklist: [],
+      backups: [
+        { file: "/data/backups/openclaw/openclaw-backup-9-zzzz.tar.gz", verified: true },
+      ],
+    }));
+    const app = createApp(deps);
+
+    const fenced = await request(app).post("/api/openclaw/rollback").send({});
+    expect(fenced.status).toBe(409);
+    expect(fenced.body.code).toBe("rollback_requires_confirmation");
+    // The named backup is the MIGRATED run's own verified record.
+    expect(fenced.body.backupFile).toBe(
+      "/data/backups/openclaw/openclaw-backup-1-aaaa.tar.gz",
+    );
+    expect(deps.openclawChannelService.requestChannelRollback).not.toHaveBeenCalled();
+
+    const confirmed = await request(app)
+      .post("/api/openclaw/rollback")
+      .send({ confirmDataRisk: true });
+    expect(confirmed.status).toBe(200);
+    expect(deps.openclawChannelService.requestChannelRollback).toHaveBeenCalledTimes(1);
+  });
+
+  it("still fences when a later benign repair run tops the ledger (adv-10)", async () => {
+    // A repair or no-migration apply AFTER the migrating run does not
+    // un-migrate the DBs — the fence must arm off the newest run that
+    // actually migrated, not listRuns()[0].
+    const deps = createDeps();
+    deps.openclawChannelService.runLedger = {
+      listRuns: vi.fn(() => [
+        {
+          operationId: "op-2",
+          state: "activated",
+          dbPreflight: { migrationRequired: false, foundVersion: 12, targetVersion: 12 },
+          backup: {
+            file: "/data/backups/openclaw/openclaw-backup-2-bbbb.tar.gz",
+            verified: true,
+            noBackup: false,
+          },
+        },
+        {
+          operationId: "op-1",
+          state: "activated",
+          dbPreflight: { migrationRequired: true, foundVersion: 1, targetVersion: 12 },
+          backup: {
+            file: "/data/backups/openclaw/openclaw-backup-1-aaaa.tar.gz",
+            verified: true,
+            noBackup: false,
+          },
+        },
+      ]),
+    };
+    const app = createApp(deps);
+
+    const fenced = await request(app).post("/api/openclaw/rollback").send({});
+    expect(fenced.status).toBe(409);
+    expect(fenced.body.code).toBe("rollback_requires_confirmation");
+    // The pre-MIGRATION backup, not the repair run's newer one.
+    expect(fenced.body.backupFile).toBe(
+      "/data/backups/openclaw/openclaw-backup-1-aaaa.tar.gz",
+    );
+    expect(fenced.body.hint).toContain("openclaw-backup-1-aaaa.tar.gz");
+    expect(deps.openclawChannelService.requestChannelRollback).not.toHaveBeenCalled();
+  });
+
+  it("names no backup when the migrated run has no verified backup of its own", async () => {
+    // The migrated run soft-failed its backup; a verified state.backups entry
+    // from another run must not stand in for it.
+    const deps = createDeps();
+    deps.openclawChannelService.runLedger = {
+      listRuns: vi.fn(() => [
+        {
+          operationId: "op-1",
+          state: "activated",
+          dbPreflight: { migrationRequired: true, foundVersion: 1, targetVersion: 12 },
+          backup: { noBackup: true, at: 1 },
+        },
+      ]),
+    };
+    deps.openclawChannelService.store.readState = vi.fn(() => ({
+      blocklist: [],
+      backups: [
+        { file: "/data/backups/openclaw/openclaw-backup-9-zzzz.tar.gz", verified: true },
+      ],
+    }));
+    const app = createApp(deps);
+
+    const fenced = await request(app).post("/api/openclaw/rollback").send({});
+    expect(fenced.status).toBe(409);
+    expect(fenced.body.code).toBe("rollback_requires_confirmation");
+    expect(fenced.body.backupFile).toBeNull();
+    expect(fenced.body.hint).toContain("No verified pre-update backup");
+  });
+
+  it("fences rollback while the reconciler holds the gateway", async () => {
+    const deps = createDeps();
+    deps.openclawChannelService.getChannelInfo = vi.fn(() => ({
+      ...createChannelInfo(),
+      gatewayHold: { reason: "settings migration failed", blamedKeys: ["mystery"] },
+    }));
+    const app = createApp(deps);
+
+    const fenced = await request(app).post("/api/openclaw/rollback").send({});
+    expect(fenced.status).toBe(409);
+    expect(fenced.body.code).toBe("rollback_requires_confirmation");
+  });
+
+  describe("POST /api/openclaw/reconcile/retry (issue #20 operator recovery)", () => {
+    const kReconcileLease = require("../../lib/server/constants")
+      .kOpenclawReconcileLifecycleLeaseMs;
+
+    const holdDeps = () => {
+      const deps = createDeps();
+      deps.openclawChannelService.reconcileBootConfig = vi.fn(async () => ({
+        status: "ok",
+        warnings: [],
+      }));
+      deps.openclawChannelService.isApplyInProgress = vi.fn(() => false);
+      deps.gatewayHoldActions = {
+        acquireLock: vi.fn(async () => vi.fn()),
+        clearLatch: vi.fn(),
+        startGateway: vi.fn(async () => {}),
+        // The recovery scenario: a hold is recorded and the gateway is down.
+        isGatewayRunning: vi.fn(async () => false),
+        readGatewayHold: vi.fn(() => ({
+          reason: "settings migration failed",
+          blamedKeys: ["mystery"],
+        })),
+      };
+      return deps;
+    };
+
+    it("re-runs the reconcile with force, clears the latch, and relaunches the gateway", async () => {
+      const deps = holdDeps();
+      const app = createApp(deps);
+
+      const res = await request(app)
+        .post("/api/openclaw/reconcile/retry")
+        .send({});
+
+      expect(res.status).toBe(200);
+      expect(res.body.ok).toBe(true);
+      expect(deps.openclawChannelService.reconcileBootConfig).toHaveBeenCalledWith({
+        force: true,
+        stripBlamedKeys: false,
+      });
+      expect(deps.gatewayHoldActions.clearLatch).toHaveBeenCalledTimes(1);
+      expect(deps.gatewayHoldActions.startGateway).toHaveBeenCalledTimes(1);
+    });
+
+    it("acquires the lifecycle lock with the reconcile lease, not the default", async () => {
+      // A sized doctor migration can outlive the default 10-min lease; a
+      // force-release mid-migration would let a queued restart launch the
+      // gateway against half-migrated DBs.
+      const deps = holdDeps();
+      const app = createApp(deps);
+
+      await request(app).post("/api/openclaw/reconcile/retry").send({});
+
+      expect(deps.gatewayHoldActions.acquireLock).toHaveBeenCalledWith(
+        "reconcile_retry",
+        { leaseMs: kReconcileLease },
+      );
+    });
+
+    it("refuses with apply_in_progress while a channel update is running", async () => {
+      const deps = holdDeps();
+      deps.openclawChannelService.isApplyInProgress = vi.fn(() => true);
+      const app = createApp(deps);
+
+      const res = await request(app)
+        .post("/api/openclaw/reconcile/retry")
+        .send({});
+
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe("apply_in_progress");
+      expect(res.body.message).toBeTruthy();
+      expect(res.body.hint).toBeTruthy();
+      expect(deps.openclawChannelService.reconcileBootConfig).not.toHaveBeenCalled();
+      expect(deps.gatewayHoldActions.acquireLock).not.toHaveBeenCalled();
+    });
+
+    it("refuses with reconcile_not_needed when no hold exists and the gateway is running", async () => {
+      // The reconciler's doctor pass must never touch a live gateway's DBs.
+      const deps = holdDeps();
+      deps.gatewayHoldActions.readGatewayHold = vi.fn(() => null);
+      deps.gatewayHoldActions.isGatewayRunning = vi.fn(async () => true);
+      const app = createApp(deps);
+
+      const res = await request(app)
+        .post("/api/openclaw/reconcile/retry")
+        .send({});
+
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe("reconcile_not_needed");
+      expect(res.body.message).toBeTruthy();
+      expect(res.body.hint).toBeTruthy();
+      expect(deps.openclawChannelService.reconcileBootConfig).not.toHaveBeenCalled();
+      expect(deps.gatewayHoldActions.acquireLock).not.toHaveBeenCalled();
+    });
+
+    it("refuses with gateway_running when a hold is set but a gateway process is running (adv-4a)", async () => {
+      // A hold means AlphaClaw refused to launch — a running gateway was
+      // started outside it, and the 30-min doctor must never touch its live
+      // DBs regardless of the hold.
+      const deps = holdDeps();
+      deps.gatewayHoldActions.isGatewayRunning = vi.fn(async () => true);
+      const app = createApp(deps);
+
+      const res = await request(app)
+        .post("/api/openclaw/reconcile/retry")
+        .send({});
+
+      expect(res.status).toBe(409);
+      expect(res.body.ok).toBe(false);
+      expect(res.body.code).toBe("gateway_running");
+      expect(res.body.message).toContain("cannot touch live databases");
+      // The hint names how to recover: stop the outside process, then retry.
+      expect(res.body.hint).toContain("outside AlphaClaw");
+      expect(res.body.hint).toContain("Stop that process");
+      expect(deps.openclawChannelService.reconcileBootConfig).not.toHaveBeenCalled();
+      expect(deps.gatewayHoldActions.acquireLock).not.toHaveBeenCalled();
+      expect(deps.gatewayHoldActions.clearLatch).not.toHaveBeenCalled();
+      expect(deps.gatewayHoldActions.startGateway).not.toHaveBeenCalled();
+    });
+
+    it("still runs with no hold when the gateway is DOWN (crash-loop recovery)", async () => {
+      const deps = holdDeps();
+      deps.gatewayHoldActions.readGatewayHold = vi.fn(() => null);
+      deps.gatewayHoldActions.isGatewayRunning = vi.fn(async () => false);
+      const app = createApp(deps);
+
+      const res = await request(app)
+        .post("/api/openclaw/reconcile/retry")
+        .send({});
+
+      expect(res.status).toBe(200);
+      expect(deps.openclawChannelService.reconcileBootConfig).toHaveBeenCalledTimes(1);
+    });
+
+    it("passes explicit strip consent through — and ONLY on strict boolean true", async () => {
+      const deps = holdDeps();
+      const app = createApp(deps);
+
+      await request(app)
+        .post("/api/openclaw/reconcile/retry")
+        .send({ stripBlamedKeys: true });
+      expect(deps.openclawChannelService.reconcileBootConfig).toHaveBeenLastCalledWith(
+        { force: true, stripBlamedKeys: true },
+      );
+
+      await request(app)
+        .post("/api/openclaw/reconcile/retry")
+        .send({ stripBlamedKeys: "true" });
+      expect(deps.openclawChannelService.reconcileBootConfig).toHaveBeenLastCalledWith(
+        { force: true, stripBlamedKeys: false },
+      );
+    });
+
+    it("returns 409 with the hold reason and the outcome when the reconcile still holds", async () => {
+      const deps = holdDeps();
+      deps.openclawChannelService.reconcileBootConfig = vi.fn(async () => ({
+        status: "held",
+        hold: { reason: "still broken", blamedKeys: ["mystery"] },
+      }));
+      const app = createApp(deps);
+
+      const res = await request(app)
+        .post("/api/openclaw/reconcile/retry")
+        .send({});
+
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe("reconcile_still_held");
+      // The envelope matches every sibling: the message IS the hold reason.
+      expect(res.body.message).toBe("still broken");
+      expect(res.body.hint).toBeTruthy();
+      expect(res.body.outcome).toEqual(
+        expect.objectContaining({ status: "held" }),
+      );
+      expect(deps.gatewayHoldActions.clearLatch).not.toHaveBeenCalled();
+      expect(deps.gatewayHoldActions.startGateway).not.toHaveBeenCalled();
+      // The lifecycle lock is released even on the held path.
+      expect(deps.gatewayHoldActions.acquireLock).toHaveBeenCalledTimes(1);
+    });
+
+    it("treats a skipped outcome as a 409, never as recovery", async () => {
+      // A skipped run left the hold exactly as it was — clearing the latch or
+      // relaunching on it would boot the config the reconciler just refused.
+      const deps = holdDeps();
+      deps.openclawChannelService.reconcileBootConfig = vi.fn(async () => ({
+        status: "skipped",
+        reason: "binary-unresolved",
+        warnings: [],
+      }));
+      const app = createApp(deps);
+
+      const res = await request(app)
+        .post("/api/openclaw/reconcile/retry")
+        .send({});
+
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe("reconcile_skipped");
+      expect(res.body.message).toBe("binary-unresolved");
+      expect(res.body.hint).toBeTruthy();
+      expect(res.body.outcome).toEqual(
+        expect.objectContaining({ status: "skipped" }),
+      );
+      expect(deps.gatewayHoldActions.clearLatch).not.toHaveBeenCalled();
+      expect(deps.gatewayHoldActions.startGateway).not.toHaveBeenCalled();
+    });
+
+    it("returns 501 with the structured envelope when the service lacks the reconciler", async () => {
+      const deps = createDeps();
+      const app = createApp(deps);
+      const res = await request(app)
+        .post("/api/openclaw/reconcile/retry")
+        .send({});
+      expect(res.status).toBe(501);
+      expect(res.body.code).toBe("reconcile_unavailable");
+      expect(res.body.message).toBeTruthy();
+      expect(res.body.hint).toBeTruthy();
+    });
+
+    it("reports a failed gateway relaunch without failing the reconcile", async () => {
+      const deps = holdDeps();
+      deps.gatewayHoldActions.startGateway = vi.fn(async () => {
+        throw new Error("spawn ENOENT");
+      });
+      const app = createApp(deps);
+
+      const res = await request(app)
+        .post("/api/openclaw/reconcile/retry")
+        .send({});
+
+      expect(res.status).toBe(200);
+      expect(res.body.ok).toBe(true);
+      expect(res.body.gatewayStart).toEqual({ ok: false, error: "spawn ENOENT" });
+    });
+  });
+
   it("maps rollback and mark-good service failures to 409 and successes to 200", async () => {
     const deps = createDeps();
     const app = createApp(deps);

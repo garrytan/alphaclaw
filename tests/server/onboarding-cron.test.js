@@ -44,6 +44,14 @@ describe("server/onboarding/cron", () => {
     // ALPHACLAW_ROOT_DIR the CLI resolves os.homedir()/.alphaclaw and the
     // hourly sync no-ops against a phantom install (issue #105).
     expect(cronContent).toContain(`ALPHACLAW_ROOT_DIR=${kRootDir}`);
+    // Issue #25: any `openclaw` child of the sync must resolve the managed
+    // state dir — on >= 2026.9.1-beta.1 a wrong-dir invocation CREATES a
+    // divergent second state database.
+    expect(cronContent).toContain(`OPENCLAW_HOME=${kRootDir}`);
+    expect(cronContent).toContain(`OPENCLAW_STATE_DIR=${openclawDir}`);
+    expect(cronContent).toContain(
+      `OPENCLAW_CONFIG_PATH=${path.join(openclawDir, "openclaw.json")}`,
+    );
     expect(cronContent).toContain("SHELL=/bin/bash");
     expect(cronContent).toMatch(/^0 \* \* \* \* root bash /m);
     // /etc/cron.d files without a trailing newline are ignored by cron.

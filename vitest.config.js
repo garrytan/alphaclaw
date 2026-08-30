@@ -8,14 +8,22 @@ import { configDefaults, defineConfig } from "vitest/config";
 // `npm test` stays hermetic and offline; use `npm run test:live[:dev]`.
 const kLiveE2eEnabled = process.env.OPENCLAW_LIVE_E2E === "1";
 
+// tests/container/** additionally need a running docker daemon: they build
+// the production image from the local checkout and drive a real stable→beta
+// upgrade through headless Chromium. Opt-in the same way:
+//   OPENCLAW_CONTAINER_E2E=1 → `npm run test:container` (~20-35 min)
+const kContainerE2eEnabled = process.env.OPENCLAW_CONTAINER_E2E === "1";
+
 export default defineConfig({
   test: {
     globals: true,
     environment: "node",
     include: ["tests/**/*.test.js"],
-    exclude: kLiveE2eEnabled
-      ? [...configDefaults.exclude]
-      : [...configDefaults.exclude, "tests/live/**"],
+    exclude: [
+      ...configDefaults.exclude,
+      ...(kLiveE2eEnabled ? [] : ["tests/live/**"]),
+      ...(kContainerE2eEnabled ? [] : ["tests/container/**"]),
+    ],
     restoreMocks: true,
     clearMocks: true,
     // Disables HTTP keep-alive: with it on (Node >=19 default), a pooled

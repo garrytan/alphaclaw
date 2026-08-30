@@ -50,6 +50,7 @@ const {
   resolveRealGitPath,
   shouldRefreshHourlyGitSyncScript,
 } = require("../lib/cli/git-runtime");
+const { buildSystemCronFile } = require("../lib/cli/system-cron");
 const {
   ensureMainUpstream,
   restoreMissingOpenclawConfigFromRemote,
@@ -64,6 +65,7 @@ const {
   migrateManagedInternalFiles,
 } = require("../lib/server/internal-files-migration");
 const { assertSupportedNodeVersion } = require("../lib/node-runtime");
+const { isEarlyExitCliCommand } = require("../lib/boot-cli-verbs");
 
 const kUsageTrackerPluginPath = path.resolve(
   __dirname,
@@ -224,6 +226,81 @@ if (portFlag) {
   process.env.PORT = portFlag;
 }
 
+// PORT is final after the --port flag above; the SETUP_PASSWORD check
+// further down still guards before the real server binds.
+const kPort = String(process.env.PORT || "3000").trim();
+
+// ---------------------------------------------------------------------------
+// 1a. Reserved-port guard
+// ---------------------------------------------------------------------------
+// This guard MUST precede the placeholder spawn below: the placeholder binds
+// kPort immediately, and a misconfigured PORT=18789 would briefly squat the
+// gateway's own port before this fatal exit fired.
+if (kPort === "18789") {
+  console.error(
+    [
+      "[alphaclaw] Fatal config error: AlphaClaw cannot be started on port 18789.",
+      "[alphaclaw] Port 18789 is reserved for the OpenClaw gateway.",
+    ].join("\n"),
+  );
+  process.exit(1);
+}
+
+// ---------------------------------------------------------------------------
+// 1b. Boot placeholder server
+// ---------------------------------------------------------------------------
+// The heavy pre-listen work below (pending-update npm install up to 3min,
+// gog CLI download, git fetches, migrations) used to leave the port silently
+// closed — users saw connection-refused and platform health checks failed.
+// Spawned HERE, right after ALPHACLAW_ROOT_DIR (which it inherits for live
+// update-progress rendering) and PORT are resolved, so it also covers the
+// pending self-update npm install below — previously a ~3-minute blind
+// window before the old spawn point.
+// The placeholder runs as a CHILD PROCESS (lib/boot-placeholder-child.js):
+// the boot work below blocks THIS process's event loop for minutes (execSync
+// npm install, gog download), so an in-process server would accept TCP but
+// never answer HTTP during exactly the windows it exists to cover. The
+// handler itself lives in lib/boot-placeholder.js where it is unit-testable.
+// SIGTERM'd right before the real server starts; the real server's
+// EADDRINUSE retry covers the close/rebind race. This now runs ABOVE the
+// port/SETUP_PASSWORD fatal exits — safe, because the child self-exits via
+// its ppid orphan check within ~3s of this process dying.
+// The verb matrix lives in lib/boot-cli-verbs.js (unit-tested there). Anyone
+// adding or changing an early-exit dispatch site below MUST update that
+// module too, or the placeholder will fight a live server for the port.
+const kIsEarlyExitCliCommand = isEarlyExitCliCommand({
+  command,
+  commandScope,
+  commandAction,
+});
+const bootPlaceholder = (() => {
+  // CLI verbs exit long before the server boots — don't bind a placeholder
+  // web server for them (it would fight a live server for the port).
+  if (kIsEarlyExitCliCommand) return null;
+  try {
+    const { spawn } = require("child_process");
+    const child = spawn(
+      process.execPath,
+      [path.join(__dirname, "..", "lib", "boot-placeholder-child.js")],
+      {
+        env: {
+          ...process.env,
+          ALPHACLAW_PLACEHOLDER_PORT: String(Number.parseInt(kPort, 10) || 3000),
+          // Explicit parent identity for the child's orphan check — the
+          // sampled-ppid fallback races a parent that exits before the
+          // child's first sample (fatal PORT/password guards below).
+          ALPHACLAW_PARENT_PID: String(process.pid),
+        },
+        stdio: "ignore",
+      },
+    );
+    child.on("error", () => {});
+    return child;
+  } catch {
+    return null;
+  }
+})();
+
 // ---------------------------------------------------------------------------
 // 2. Create directory structure
 // ---------------------------------------------------------------------------
@@ -287,6 +364,34 @@ try {
   console.log(`[alphaclaw] Symlink skipped: ${e.message}`);
 }
 
+// Divergence warning (issue #25): a REAL ~/.openclaw directory with its own
+// state db means some openclaw invocation ran without OPENCLAW_STATE_DIR and
+// built a second, divergent state database (the incident box had a 1.1MB
+// stray next to the real 392MB one — and `openclaw status` read the stray,
+// reporting a healthy gateway as "No channels configured"). The symlink above
+// is skipped whenever the path exists, so this warning is the only signal.
+try {
+  if (path.resolve(homeOpenclawLink) !== path.resolve(openclawDir)) {
+    const linkStat = fs.lstatSync(homeOpenclawLink);
+    if (
+      linkStat.isDirectory() &&
+      !linkStat.isSymbolicLink() &&
+      fs.existsSync(path.join(homeOpenclawLink, "state", "openclaw.sqlite"))
+    ) {
+      console.warn(
+        [
+          `[alphaclaw] WARNING: ${homeOpenclawLink} is a real directory with its own state database,`,
+          `[alphaclaw]          separate from the managed state dir ${openclawDir}.`,
+          "[alphaclaw]          Something ran `openclaw` without OPENCLAW_STATE_DIR (operator shell, cron)",
+          "[alphaclaw]          and built a second, divergent state db — commands reading it will show",
+          "[alphaclaw]          empty channels/sessions while the real gateway runs. Move it aside, e.g.:",
+          `[alphaclaw]          mv ${homeOpenclawLink} ${homeOpenclawLink}.stray`,
+        ].join("\n"),
+      );
+    }
+  }
+} catch {}
+
 // ---------------------------------------------------------------------------
 // 4. Ensure <rootDir>/.env exists (seed from template if missing)
 // ---------------------------------------------------------------------------
@@ -321,6 +426,23 @@ if (fs.existsSync(envFilePath)) {
   }
   console.log("[alphaclaw] Loaded .env");
 }
+
+// ---------------------------------------------------------------------------
+// 5b. Export the OpenClaw state-resolution env for EVERY verb (issue #25)
+// ---------------------------------------------------------------------------
+// Every CLI verb (git-sync, admin, telegram …) — not just `start` — can shell
+// `openclaw` or spawn children that do. Without these vars openclaw resolves
+// state to ~/.openclaw, and on >= 2026.9.1-beta.1 a wrong-dir invocation
+// CREATES and migrates a whole divergent state database. Placed after the
+// .env load so the managed values always win over a hand-edited .env, and
+// before the first verb dispatch. Deliberately only the three OPENCLAW_*
+// vars: exporting HOME/XDG_CONFIG_HOME here would reroute npm (~/.npmrc in
+// the pending-update install above), git config/SSH for git-sync, and the
+// ~/.openclaw symlink logic — the `start` path below keeps its full
+// five-var block for the server + its children.
+process.env.OPENCLAW_HOME = rootDir;
+process.env.OPENCLAW_STATE_DIR = openclawDir;
+process.env.OPENCLAW_CONFIG_PATH = path.join(openclawDir, "openclaw.json");
 
 const runGitSync = () => {
   const githubToken = String(process.env.GITHUB_TOKEN || "").trim();
@@ -854,16 +976,8 @@ if (command === "admin") {
   return;
 }
 
-const kPort = String(process.env.PORT || "3000").trim();
-if (kPort === "18789") {
-  console.error(
-    [
-      "[alphaclaw] Fatal config error: AlphaClaw cannot be started on port 18789.",
-      "[alphaclaw] Port 18789 is reserved for the OpenClaw gateway.",
-    ].join("\n"),
-  );
-  process.exit(1);
-}
+// (The reserved-port 18789 guard moved to 1a above — it must run before the
+// placeholder binds kPort.)
 
 const kSetupPassword = String(process.env.SETUP_PASSWORD || "").trim();
 if (!kSetupPassword) {
@@ -879,39 +993,8 @@ if (!kSetupPassword) {
   process.exit(1);
 }
 
-// ---------------------------------------------------------------------------
-// 6b. Boot placeholder server
-// ---------------------------------------------------------------------------
-// The heavy pre-listen work below (pending-update npm install up to 3min,
-// gog CLI download, git fetches, migrations) used to leave the port silently
-// closed — users saw connection-refused and platform health checks failed.
-// The placeholder runs as a CHILD PROCESS (lib/boot-placeholder-child.js):
-// the boot work below blocks THIS process's event loop for minutes (execSync
-// npm install, gog download), so an in-process server would accept TCP but
-// never answer HTTP during exactly the windows it exists to cover. The
-// handler itself lives in lib/boot-placeholder.js where it is unit-testable.
-// SIGTERM'd right before the real server starts; the real server's
-// EADDRINUSE retry covers the close/rebind race.
-const bootPlaceholder = (() => {
-  try {
-    const { spawn } = require("child_process");
-    const child = spawn(
-      process.execPath,
-      [path.join(__dirname, "..", "lib", "boot-placeholder-child.js")],
-      {
-        env: {
-          ...process.env,
-          ALPHACLAW_PLACEHOLDER_PORT: String(Number.parseInt(kPort, 10) || 3000),
-        },
-        stdio: "ignore",
-      },
-    );
-    child.on("error", () => {});
-    return child;
-  } catch {
-    return null;
-  }
-})();
+// (Section 6b, the boot placeholder server, moved to 1b above so it also
+// covers the pending self-update npm install.)
 
 // ---------------------------------------------------------------------------
 // 7. Set OPENCLAW_HOME globally so all child processes inherit it
@@ -1079,14 +1162,20 @@ if (fs.existsSync(hourlyGitSyncPath)) {
         "[alphaclaw] System cron setup skipped by ALPHACLAW_SKIP_SYSTEM_CRON_INSTALL",
       );
     } else if (cronEnabled) {
-      const cronContent = [
-        "SHELL=/bin/bash",
-        "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-        `${cronSchedule} root bash "${hourlyGitSyncPath}" >> /var/log/openclaw-hourly-sync.log 2>&1`,
-        "",
-      ].join("\n");
-      fs.writeFileSync(cronFilePath, cronContent, { mode: 0o644 });
-      console.log("[alphaclaw] System cron entry installed");
+      // Shared builder (issue #25): this boot-time reconcile used to rewrite
+      // the file WITHOUT the env lines on every start, destroying the correct
+      // onboarding-written copy — cron then ran against a phantom
+      // ~/.alphaclaw install.
+      const cronContent = buildSystemCronFile({
+        schedule: cronSchedule,
+        scriptPath: hourlyGitSyncPath,
+        rootDir,
+        openclawDir,
+      });
+      if (cronContent) {
+        fs.writeFileSync(cronFilePath, cronContent, { mode: 0o644 });
+        console.log("[alphaclaw] System cron entry installed");
+      }
     } else {
       try {
         fs.unlinkSync(cronFilePath);
@@ -1096,6 +1185,152 @@ if (fs.existsSync(hourlyGitSyncPath)) {
   } catch (e) {
     console.log(`[alphaclaw] Cron setup skipped: ${e.message}`);
   }
+}
+
+// ---------------------------------------------------------------------------
+// 8b. Operator-shell openclaw env: /usr/local/bin wrapper + profile.d (issue #25)
+// ---------------------------------------------------------------------------
+// `docker exec <c> openclaw status` runs with HOME=/root and none of the
+// OPENCLAW_* vars — on >= 2026.9.1-beta.1 that CREATES a divergent state db
+// in /root/.openclaw and reports a healthy gateway as "No channels
+// configured" (the exact incident misdirection). The wrapper catches every
+// shell (docker exec included, via PATH); profile.d only covers login shells
+// and is the secondary layer. Best-effort and never silent: the outcome is
+// logged either way. Values are single-quoted with escaping — rootDir is
+// operator-controlled. Never overwrites a file alphaclaw did not author.
+const kManagedSnippetMarker = "# alphaclaw-managed openclaw environment";
+const shQuote = (value) => `'${String(value).replace(/'/g, `'\\''`)}'`;
+const kWrapperPathOverride = String(
+  process.env.ALPHACLAW_OPENCLAW_WRAPPER_PATH || "",
+).trim();
+const kProfileSnippetPathOverride = String(
+  process.env.ALPHACLAW_PROFILE_SNIPPET_PATH || "",
+).trim();
+if (String(process.env.ALPHACLAW_SKIP_PROFILE_ENV || "") === "1") {
+  console.log(
+    "[alphaclaw] Operator-shell openclaw env skipped by ALPHACLAW_SKIP_PROFILE_ENV",
+  );
+} else if (
+  !kWrapperPathOverride &&
+  typeof process.getuid === "function" &&
+  process.getuid() !== 0
+) {
+  // Writing /usr/local/bin and /etc/profile.d is a root-deployment concern
+  // (the Docker images run as root); a non-root dev/test run must not spray
+  // files onto the host. Overriding the path opts back in (tests use this).
+  console.log(
+    "[alphaclaw] Operator-shell openclaw env skipped (not running as root) — `openclaw` in operator shells will not carry the managed state dir",
+  );
+} else {
+  // Persisted install outcome (never silent, survives the boot log): the
+  // post-deploy smoke and operators can check this instead of scrolling logs.
+  const operatorShellEnvOutcome = { at: new Date().toISOString() };
+  const persistOperatorShellEnvOutcome = () => {
+    try {
+      const outcomePath = path.join(
+        openclawDir,
+        ".alphaclaw",
+        "operator-shell-env.json",
+      );
+      fs.mkdirSync(path.dirname(outcomePath), { recursive: true });
+      fs.writeFileSync(
+        outcomePath,
+        JSON.stringify(operatorShellEnvOutcome, null, 2),
+      );
+    } catch {}
+  };
+  const wrapperPath = kWrapperPathOverride || "/usr/local/bin/openclaw";
+  const { kOpenclawBinShimDir } = require("../lib/server/constants");
+  const managedShimPath = path.join(kOpenclawBinShimDir, "openclaw");
+  // The pinned install's real bin, resolved at generation time — the wrapper
+  // execs this when no release-channel shim exists (pin/beta channels).
+  let installedOpenclawBinPath = "/nonexistent/openclaw";
+  try {
+    const openclawPkgDir = path.dirname(
+      require.resolve("openclaw/package.json"),
+    );
+    const openclawPkg = JSON.parse(
+      fs.readFileSync(path.join(openclawPkgDir, "package.json"), "utf8"),
+    );
+    const binRel =
+      typeof openclawPkg.bin === "string"
+        ? openclawPkg.bin
+        : Object.values(openclawPkg.bin || {})[0];
+    if (binRel) installedOpenclawBinPath = path.join(openclawPkgDir, binRel);
+  } catch {}
+  const wrapperContent = [
+    "#!/bin/sh",
+    `${kManagedSnippetMarker} (wrapper) — regenerated at boot, do not edit.`,
+    `export ALPHACLAW_ROOT_DIR=${shQuote(rootDir)}`,
+    `export OPENCLAW_HOME=${shQuote(rootDir)}`,
+    `export OPENCLAW_STATE_DIR=${shQuote(openclawDir)}`,
+    `export OPENCLAW_CONFIG_PATH=${shQuote(path.join(openclawDir, "openclaw.json"))}`,
+    // Prefer the release-channel shim (the version alphaclaw manages — it
+    // only exists on the dev channel; pin/beta activation removes it), then
+    // the alphaclaw install's own openclaw bin, then a portable PATH walk
+    // that skips this wrapper itself. NOTE: `command -v -a` is NOT the
+    // fallback here — POSIX sh (dash, bash-as-sh) rejects the -a flag, which
+    // would leave the wrapper exiting 127 in front of a perfectly good
+    // openclaw on every non-dev box.
+    `if [ -x ${shQuote(managedShimPath)} ]; then exec ${shQuote(managedShimPath)} "$@"; fi`,
+    `if [ -x ${shQuote(installedOpenclawBinPath)} ]; then exec ${shQuote(installedOpenclawBinPath)} "$@"; fi`,
+    '_ifs="$IFS"; IFS=:',
+    "for _dir in $PATH; do",
+    '  [ -n "$_dir" ] || continue',
+    `  [ "$_dir/openclaw" = ${shQuote(wrapperPath)} ] && continue`,
+    '  if [ -x "$_dir/openclaw" ]; then IFS="$_ifs"; exec "$_dir/openclaw" "$@"; fi',
+    "done",
+    'IFS="$_ifs"',
+    `echo "openclaw: no managed openclaw found (expected ${managedShimPath})" >&2`,
+    "exit 127",
+    "",
+  ].join("\n");
+  try {
+    const existing = fs.existsSync(wrapperPath)
+      ? fs.readFileSync(wrapperPath, "utf8")
+      : null;
+    if (existing !== null && !existing.includes(kManagedSnippetMarker)) {
+      operatorShellEnvOutcome.wrapper = "skipped: existing non-managed file";
+      console.log(
+        `[alphaclaw] openclaw wrapper NOT installed: ${wrapperPath} exists and is not alphaclaw-managed`,
+      );
+    } else {
+      if (existing !== wrapperContent) {
+        fs.writeFileSync(wrapperPath, wrapperContent, { mode: 0o755 });
+        console.log(`[alphaclaw] openclaw wrapper installed at ${wrapperPath}`);
+      }
+      operatorShellEnvOutcome.wrapper = `installed: ${wrapperPath}`;
+    }
+  } catch (e) {
+    operatorShellEnvOutcome.wrapper = `failed: ${e.message}`;
+    console.log(
+      `[alphaclaw] openclaw wrapper NOT installed (${e.message}) — operator shells resolve openclaw without the managed state dir`,
+    );
+  }
+  const profileSnippetPath =
+    kProfileSnippetPathOverride || "/etc/profile.d/alphaclaw-openclaw.sh";
+  const profileContent = [
+    `${kManagedSnippetMarker} — regenerated at boot, do not edit.`,
+    `export ALPHACLAW_ROOT_DIR=${shQuote(rootDir)}`,
+    `export OPENCLAW_HOME=${shQuote(rootDir)}`,
+    `export OPENCLAW_STATE_DIR=${shQuote(openclawDir)}`,
+    `export OPENCLAW_CONFIG_PATH=${shQuote(path.join(openclawDir, "openclaw.json"))}`,
+    "",
+  ].join("\n");
+  try {
+    const existing = fs.existsSync(profileSnippetPath)
+      ? fs.readFileSync(profileSnippetPath, "utf8")
+      : null;
+    if (existing !== profileContent) {
+      fs.writeFileSync(profileSnippetPath, profileContent, { mode: 0o644 });
+      console.log(`[alphaclaw] login-shell env snippet installed at ${profileSnippetPath}`);
+    }
+    operatorShellEnvOutcome.profileSnippet = `installed: ${profileSnippetPath}`;
+  } catch (e) {
+    operatorShellEnvOutcome.profileSnippet = `failed: ${e.message}`;
+    console.log(`[alphaclaw] login-shell env snippet NOT installed (${e.message})`);
+  }
+  persistOperatorShellEnvOutcome();
 }
 
 // ---------------------------------------------------------------------------

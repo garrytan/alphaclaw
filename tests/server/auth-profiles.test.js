@@ -679,3 +679,181 @@ describe("server/auth-profiles", () => {
     expect(config.gateway.port).toBe(18789);
   });
 });
+
+// ── Relocated shared auth store (openclaw >= 2026.9.1-beta.1) ────────────────
+// After doctor --fix flips config_machine_state auth.sharedStore to
+// { location: "state-db" }, the main agent's store lives in
+// state/openclaw.sqlite (auth_profile_stores/auth_profile_state, key
+// 'shared') and the agent db rows are deleted — writes must follow the flag
+// or openclaw silently ignores every saved credential.
+describe("server/auth-profiles shared state-db store", () => {
+  const stateDbPath = () =>
+    path.join(tmpDir, ".openclaw", "state", "openclaw.sqlite");
+
+  const createSharedStateDb = ({ flag = "state-db", withAuthTables = true } = {}) => {
+    fs.mkdirSync(path.dirname(stateDbPath()), { recursive: true });
+    const db = new DatabaseSync(stateDbPath());
+    db.exec(
+      "CREATE TABLE config_machine_state (state_key TEXT NOT NULL PRIMARY KEY, value_json TEXT NOT NULL, updated_at_ms INTEGER NOT NULL DEFAULT 0)",
+    );
+    if (flag) {
+      db.prepare(
+        "INSERT INTO config_machine_state (state_key, value_json) VALUES ('auth.sharedStore', ?)",
+      ).run(JSON.stringify({ location: flag }));
+    }
+    if (withAuthTables) {
+      db.exec(
+        "CREATE TABLE auth_profile_stores (store_key TEXT NOT NULL PRIMARY KEY, store_json TEXT NOT NULL, updated_at INTEGER NOT NULL)",
+      );
+      db.exec(
+        "CREATE TABLE auth_profile_state (store_key TEXT NOT NULL PRIMARY KEY, state_json TEXT NOT NULL, updated_at INTEGER NOT NULL)",
+      );
+    }
+    db.close();
+  };
+
+  const readSharedRow = (table, column) => {
+    const db = new DatabaseSync(stateDbPath(), { readOnly: true });
+    try {
+      const row = db
+        .prepare(`SELECT ${column} FROM ${table} WHERE store_key = 'shared'`)
+        .get();
+      return row ? JSON.parse(row[column]) : null;
+    } finally {
+      db.close();
+    }
+  };
+
+  afterEach(() => {
+    fs.rmSync(path.join(tmpDir, ".openclaw", "state"), {
+      recursive: true,
+      force: true,
+    });
+  });
+
+  it("reads and writes the shared 'shared' rows once the flag is state-db, leaving the agent db alone", () => {
+    createSharedStateDb();
+    const db = new DatabaseSync(stateDbPath());
+    db.prepare(
+      "INSERT INTO auth_profile_stores (store_key, store_json, updated_at) VALUES ('shared', ?, 1)",
+    ).run(
+      JSON.stringify({
+        version: 1,
+        profiles: { "anthropic:default": { type: "api_key", provider: "anthropic", key: "sk-1" } },
+      }),
+    );
+    db.close();
+
+    const profiles = ap.listProfiles();
+    expect(profiles).toEqual([
+      { id: "anthropic:default", type: "api_key", provider: "anthropic", key: "sk-1" },
+    ]);
+
+    ap.upsertProfile("openai:default", {
+      type: "api_key",
+      provider: "openai",
+      key: "sk-2",
+    });
+    const stored = readSharedRow("auth_profile_stores", "store_json");
+    expect(Object.keys(stored.profiles).sort()).toEqual([
+      "anthropic:default",
+      "openai:default",
+    ]);
+    // The relocated era must not resurrect agent-db/JSON stores.
+    expect(
+      fs.existsSync(
+        path.join(tmpDir, ".openclaw", "agents", "main", "agent", "auth-profiles.json"),
+      ),
+    ).toBe(false);
+
+    ap.setAuthOrder("openai", ["openai:default"]);
+    const state = readSharedRow("auth_profile_state", "state_json");
+    expect(state.order).toEqual({ openai: ["openai:default"] });
+  });
+
+  it("fails closed on writes when the shared store schema is unusable — never falls back to legacy stores", () => {
+    createSharedStateDb({ withAuthTables: false });
+    expect(() =>
+      ap.upsertProfile("openai:default", {
+        type: "api_key",
+        provider: "openai",
+        key: "sk-2",
+      }),
+    ).toThrow(/shared OpenClaw auth store/);
+    // No silent legacy fallback: neither the JSON store nor agent db appears.
+    expect(
+      fs.existsSync(
+        path.join(tmpDir, ".openclaw", "agents", "main", "agent", "auth-profiles.json"),
+      ),
+    ).toBe(false);
+  });
+
+  it("fails writes closed (but keeps reads working) when the flag is unreadable", () => {
+    fs.mkdirSync(path.dirname(stateDbPath()), { recursive: true });
+    fs.writeFileSync(stateDbPath(), "not a database", "utf8");
+    // Reads fall back to the (empty) legacy stores — stale beats broken.
+    expect(ap.listProfiles()).toEqual([]);
+    expect(() =>
+      ap.upsertProfile("openai:default", {
+        type: "api_key",
+        provider: "openai",
+        key: "sk-2",
+      }),
+    ).toThrow(/auth store location/);
+  });
+
+  it("never wipes the shared store when a read fails: mutators throw instead of saving a near-empty store", () => {
+    // A transient lock/corruption on the READ handle used to read as an
+    // empty store; the next upsert's load→mutate→save would then persist
+    // {profiles:{one entry}} and wipe every shared credential.
+    createSharedStateDb();
+    const db = new DatabaseSync(stateDbPath());
+    db.prepare(
+      "INSERT INTO auth_profile_stores (store_key, store_json, updated_at) VALUES ('shared', ?, 1)",
+    ).run(
+      JSON.stringify({
+        version: 1,
+        profiles: { "anthropic:default": { type: "api_key", provider: "anthropic", key: "sk-1" } },
+      }),
+    );
+    // Break the READ path only: drop the state table so the schema guard
+    // fails the load, while the flag row itself stays readable.
+    db.exec("DROP TABLE auth_profile_state");
+    db.close();
+
+    // Lenient (display) read degrades to empty…
+    expect(ap.listProfiles()).toEqual([]);
+    // …but a mutator refuses to build a save from that failed read.
+    expect(() =>
+      ap.upsertProfile("openai:default", {
+        type: "api_key",
+        provider: "openai",
+        key: "sk-2",
+      }),
+    ).toThrow(/shared OpenClaw auth store/);
+    // The original credential is still intact in the store.
+    const readBack = new DatabaseSync(stateDbPath(), { readOnly: true });
+    try {
+      const row = readBack
+        .prepare("SELECT store_json FROM auth_profile_stores WHERE store_key = 'shared'")
+        .get();
+      expect(JSON.parse(row.store_json).profiles["anthropic:default"].key).toBe("sk-1");
+    } finally {
+      readBack.close();
+    }
+  });
+
+  it("keeps the legacy path when the flag says legacy", () => {
+    createSharedStateDb({ flag: "legacy" });
+    ap.upsertProfile("openai:default", {
+      type: "api_key",
+      provider: "openai",
+      key: "sk-2",
+    });
+    // Written to the legacy JSON store (no agent db in this fixture).
+    const stored = readJson("agents/main/agent/auth-profiles.json");
+    expect(stored.profiles["openai:default"].key).toBe("sk-2");
+    const sharedRow = readSharedRow("auth_profile_stores", "store_json");
+    expect(sharedRow).toBe(null);
+  });
+});
