@@ -1,6 +1,6 @@
 {
   "name": "alphaclaw",
-  "version": "0.9.44",
+  "version": "0.9.45",
   "publishConfig": {
     "access": "public"
   },
@@ -28,6 +28,8 @@
     "test:live": "OPENCLAW_LIVE_E2E=1 vitest run tests/live --no-file-parallelism",
     "test:container": "OPENCLAW_CONTAINER_E2E=1 vitest run tests/container --no-file-parallelism",
     "test:ui": "tests/browser/upgrade-ui-smoke.sh",
+    "test:ui:claude-code": "tests/browser/claude-code-launcher-smoke.sh",
+    "test:live:claude-code": "OPENCLAW_LIVE_E2E=1 CLAUDE_CODE_LIVE_FIRE=1 vitest run tests/live/claude-code-fire.e2e.test.js --no-file-parallelism",
     "test:live:dev": "OPENCLAW_LIVE_E2E=1 OPENCLAW_LIVE_E2E_DEV=1 vitest run tests/live/openclaw-live-dev.e2e.test.js --no-file-parallelism",
     "test:watch": "vitest",
     "test:watchdog": "vitest run tests/server/watchdog.test.js tests/server/watchdog-db.test.js tests/server/routes-watchdog.test.js tests/server/watchdog-phase.test.js tests/server/watchdog-status-fields.test.js tests/server/watchdog-incidents.test.js tests/server/routes-watchdog-incidents.test.js tests/server/watchdog-overseer.test.js tests/server/routes-watchdog-overseer.test.js",

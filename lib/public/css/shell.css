@@ -245,6 +245,32 @@
   flex: 0 0 auto;
 }
 
+/* Claude Code launcher states: the row dims while a fire is in flight (the
+   click handler debounces re-clicks silently, so the visual carries the
+   "inert right now" signal), and the accent dot is the persistent,
+   tooltip-independent cue that a click starts a billable session. */
+.sidebar-nav a.is-launching {
+  opacity: 0.6;
+  cursor: default;
+}
+
+/* No hover feedback while inert — a brightening row would contradict the
+   dimmed/aria-disabled signal. pointer-events stays on so the title tooltip
+   keeps working. */
+.sidebar-nav a.is-launching:hover {
+  background: transparent;
+  color: inherit;
+}
+
+.sidebar-claude-live-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  flex: 0 0 auto;
+  margin-left: auto;
+}
+
 /* ── Sidebar footer (update banner) ────────────── */
 
 .sidebar-footer {

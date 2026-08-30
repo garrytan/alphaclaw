@@ -2127,3 +2127,80 @@ describe("frontend/api openclaw channel endpoints", () => {
     );
   });
 });
+
+describe("frontend/api claude-code helpers", () => {
+  const mockJsonResponse = (status, payload) => ({
+    status,
+    ok: status >= 200 && status < 300,
+    text: async () => JSON.stringify(payload),
+    json: async () => payload,
+  });
+
+  beforeEach(() => {
+    global.fetch = vi.fn();
+    global.window = { location: { href: "http://localhost/" } };
+  });
+
+  it("fetchClaudeCodeStatus returns the availability envelope", async () => {
+    const payload = { ok: true, availability: { available: true } };
+    global.fetch.mockResolvedValue(mockJsonResponse(200, payload));
+    const api = await import("../../lib/public/js/lib/api.js");
+    expect(await api.fetchClaudeCodeStatus()).toEqual(payload);
+    expect(global.fetch).toHaveBeenCalledWith(
+      "/api/claude-code/status",
+      expect.any(Object),
+    );
+  });
+
+  it("createClaudeCodeSession POSTs the confirmed flag and returns the session", async () => {
+    const payload = {
+      ok: true,
+      sessionId: "session_01A",
+      sessionUrl: "https://claude.ai/code/session_01A",
+    };
+    global.fetch.mockResolvedValue(mockJsonResponse(200, payload));
+    const api = await import("../../lib/public/js/lib/api.js");
+    const result = await api.createClaudeCodeSession({ confirmed: true });
+    expect(result).toEqual(payload);
+    const [, options] = global.fetch.mock.calls.at(-1);
+    expect(options.method).toBe("POST");
+    expect(JSON.parse(options.body)).toEqual({ confirmed: true });
+  });
+
+  it("keeps the machine code on the thrown error (the hook branches on it)", async () => {
+    global.fetch.mockResolvedValue(
+      mockJsonResponse(409, {
+        ok: false,
+        error: "confirm_required",
+        message: "Confirmation required before the first fire.",
+      }),
+    );
+    const api = await import("../../lib/public/js/lib/api.js");
+    await expect(api.createClaudeCodeSession()).rejects.toMatchObject({
+      code: "confirm_required",
+      message: "Confirmation required before the first fire.",
+    });
+  });
+
+  it("prefers a dedicated code field over error prose (middleware envelopes)", async () => {
+    global.fetch.mockResolvedValue(
+      mockJsonResponse(403, { error: "Admin access required", code: "admin_required" }),
+    );
+    const api = await import("../../lib/public/js/lib/api.js");
+    await expect(api.createClaudeCodeSession()).rejects.toMatchObject({
+      code: "admin_required",
+    });
+  });
+
+  it("throws a generic error on an unparseable body", async () => {
+    global.fetch.mockResolvedValue({
+      status: 502,
+      ok: false,
+      text: async () => "<html>bad gateway</html>",
+    });
+    const api = await import("../../lib/public/js/lib/api.js");
+    await expect(api.createClaudeCodeSession()).rejects.toThrow(
+      "<html>bad gateway</html>",
+    );
+  });
+});

@@ -295,6 +295,19 @@ describe("server/routes/auth team mode (4.2/4.6)", () => {
       .set("Cookie", memberCookie)
       .send({});
     expect(deniedCronWrite.status).toBe(403);
+    // The Claude Code launcher fires billable autonomous sessions on the
+    // owner's claude.ai account — members must be denied BOTH halves by the
+    // default-deny matrix (the prefix is deliberately not in
+    // kMemberApiReadPrefixes).
+    const deniedLauncherStatus = await request(app)
+      .get("/api/claude-code/status")
+      .set("Cookie", memberCookie);
+    expect(deniedLauncherStatus.status).toBe(403);
+    const deniedLauncherFire = await request(app)
+      .post("/api/claude-code/session")
+      .set("Cookie", memberCookie)
+      .send({ confirmed: true });
+    expect(deniedLauncherFire.status).toBe(403);
   });
 
   it("denies members the credential-returning model endpoints even under the allowed prefix (F1)", async () => {
