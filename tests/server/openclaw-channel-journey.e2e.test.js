@@ -326,8 +326,19 @@ describe("FULL JOURNEY: stable → beta → restart → stays beta", () => {
         installedVersion: kBetaVersion,
       }),
     );
-    // The run resolved to activated — not "interrupted".
-    expect(journey.readLedger().readRun(operationId).state).toBe("activated");
+    // Issue #20 ordering fix: syncAtBoot no longer stamps the run activated —
+    // the server-phase reconciler resolves it AFTER the settings migration,
+    // so a failed migration can never hide behind a clean-looking activation.
+    expect(journey.readLedger().readRun(operationId).state).toBe(
+      "restart_expected",
+    );
+    const reconcile = await p2.sync.reconcileBootConfig();
+    expect(["ok", "skipped"]).toContain(reconcile.status);
+    // The run resolved to activated — not "interrupted" — and carries the
+    // boot-phase step the placeholder/Upgrade page render.
+    const resolvedRun = journey.readLedger().readRun(operationId);
+    expect(resolvedRun.state).toBe("activated");
+    expect(resolvedRun.steps.map((step) => step.name)).toContain("activate");
 
     // ── Process 3: a second restart must STAY on beta ───────────────────────
     journey.nowRef.now += 5_000;

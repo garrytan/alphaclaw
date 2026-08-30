@@ -904,6 +904,46 @@ describe("server/openclaw-channel-sync", () => {
       expect(installToTempDir).not.toHaveBeenCalled();
     });
 
+    it("409s gateway_busy while a settings migration holds the lifecycle lock (adv-5)", async () => {
+      // A reconcile_retry/boot holder can legitimately run a 30-min doctor;
+      // an apply's terminal restartProcess() would SIGKILL that migration
+      // mid-write. Soft-gate applies never touch the lock, so the entry gate
+      // is the only protection.
+      const activeOp = { value: { kind: "reconcile_retry", startedAt: 1 } };
+      const harness = createHarness({
+        pin: "1.0.0",
+        installedVersion: "1.0.0",
+        sentinelVersion: "1.0.0",
+        extraSyncOptions: {
+          getActiveGatewayOperation: () => activeOp.value,
+        },
+      });
+      const target = { channel: "beta", version: "1.1.0-beta.1" };
+
+      const retryBusy = await harness.sync.applyUpdate(target);
+      expect(retryBusy.status).toBe(409);
+      expect(retryBusy.body.code).toBe("gateway_busy");
+      expect(retryBusy.body.message).toMatch(/settings migration is running/i);
+      expect(harness.runner.runStreamed).not.toHaveBeenCalled();
+      expect(harness.installToTempDir).not.toHaveBeenCalled();
+
+      activeOp.value = { kind: "boot", startedAt: 1 };
+      const bootBusy = await harness.sync.applyUpdate(target);
+      expect(bootBusy.status).toBe(409);
+      expect(bootBusy.body.code).toBe("gateway_busy");
+
+      // Non-migration holders keep the generic gateway-operation envelope.
+      activeOp.value = { kind: "restart", startedAt: 1 };
+      const restartBusy = await harness.sync.applyUpdate(target);
+      expect(restartBusy.status).toBe(409);
+      expect(restartBusy.body.code).toBe("gateway_operation_in_progress");
+
+      // Lock released → the same apply proceeds.
+      activeOp.value = null;
+      const proceeded = await harness.sync.applyUpdate(target);
+      expect(proceeded.status).toBe(202);
+    });
+
     it("applies stable→beta: overlay + pin snapshot + record + restart", async () => {
       vi.useFakeTimers();
       const harness = createHarness({
@@ -937,6 +977,66 @@ describe("server/openclaw-channel-sync", () => {
       // ~1.5s, and releasing it would let a second apply start only to be
       // killed mid-overlay-write by the pending restart.
       expect(sync.isApplyInProgress()).toBe(true);
+    });
+
+    it("persists the structured db-preflight verdict into the run record (issue #20 boot hint)", async () => {
+      const { DatabaseSync } = require("node:sqlite");
+      const preflightRunner = async (opts, fallback) => {
+        if (Array.isArray(opts.args) && opts.args.includes("preflight")) {
+          return {
+            ok: true,
+            code: 0,
+            tail: '{"status":"migration-required","foundVersion":1,"targetVersion":12}\n',
+            timedOut: false,
+          };
+        }
+        return fallback(opts);
+      };
+      const harness = createHarness({
+        pin: "1.0.0",
+        installedVersion: "1.0.0",
+        sentinelVersion: "1.0.0",
+        runnerImpl: preflightRunner,
+      });
+      // A real state DB: the preflight snapshots it with VACUUM INTO before
+      // probing, and dbSizesBytes must reflect it.
+      const stateDir = path.join(harness.openclawDir, "state");
+      fs.mkdirSync(stateDir, { recursive: true });
+      const db = new DatabaseSync(path.join(stateDir, "openclaw.sqlite"));
+      db.exec("CREATE TABLE t(x INTEGER)");
+      db.close();
+
+      const result = await harness.sync.applyUpdate({
+        channel: "beta",
+        version: "1.1.0",
+      });
+
+      expect(result.status).toBe(202);
+      const runsDir = path.join(harness.openclawDir, ".alphaclaw", "runs");
+      const records = fs
+        .readdirSync(runsDir)
+        .map((name) => JSON.parse(fs.readFileSync(path.join(runsDir, name), "utf8")));
+      expect(records).toHaveLength(1);
+      const [record] = records;
+      // The verdict survives the restart: boot sizes its migration budget
+      // from it and runs doctor without re-probing the live DBs.
+      expect(record.state).toBe("restart_expected");
+      expect(record.dbPreflight).toEqual(
+        expect.objectContaining({
+          migrationRequired: true,
+          foundVersion: 1,
+          targetVersion: 12,
+        }),
+      );
+      expect(record.dbPreflight.dbSizesBytes).toBeGreaterThan(0);
+      // The step timeline names the consequence for the operator.
+      expect(record.steps).toContainEqual(
+        expect.objectContaining({
+          name: "db-preflight",
+          status: "completed",
+          detail: "schema migration will run at the next start",
+        }),
+      );
     });
 
     it("blocks downgrades when the backup fails, but only warns on upgrades", async () => {
@@ -2274,7 +2374,7 @@ describe("server/openclaw-channel-sync", () => {
         installedVersion: "1.0.0",
         sentinelVersion: "1.0.0",
         extraSyncOptions: {
-          gatewayEnv: () => ({
+          openclawSpawnEnv: () => ({
             ...process.env,
             OPENCLAW_HOME: "/data",
             OPENCLAW_GATEWAY_TOKEN: "gw-secret",

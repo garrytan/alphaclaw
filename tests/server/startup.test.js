@@ -1,5 +1,8 @@
 const { runOnboardedBootSequence } = require("../../lib/server/startup");
 const { setBootPhase, getBootPhase } = require("../../lib/server/boot-phase");
+const {
+  kOpenclawReconcileLifecycleLeaseMs,
+} = require("../../lib/server/constants");
 
 describe("server/startup", () => {
   // runOnboardedBootSequence mutates the boot-phase module singleton; leave
@@ -172,7 +175,13 @@ describe("server/startup", () => {
 
     await runOnboardedBootSequence(deps);
 
-    expect(acquireLifecycleLock).toHaveBeenCalledWith("boot");
+    // The reconcile step can run a sized doctor migration (up to 30 min):
+    // the boot hold must carry the sized lease, not the default 10-min one
+    // whose force-release would hand the gateway to a queued operation
+    // mid-migration.
+    expect(acquireLifecycleLock).toHaveBeenCalledWith("boot", {
+      leaseMs: kOpenclawReconcileLifecycleLeaseMs,
+    });
     expect(getBootPhase()).toEqual({ phase: "ready", error: null });
     expect(release).toHaveBeenCalledTimes(1);
     expect(deps.startGateway).toHaveBeenCalledTimes(1);
@@ -195,7 +204,9 @@ describe("server/startup", () => {
 
     // Boot is parked on acquire("boot"): nothing that mutates gateway or
     // channel state may run while another operation holds the lock.
-    expect(acquireLifecycleLock).toHaveBeenCalledWith("boot");
+    expect(acquireLifecycleLock).toHaveBeenCalledWith("boot", {
+      leaseMs: kOpenclawReconcileLifecycleLeaseMs,
+    });
     expect(deps.ensureManagedExecDefaults).not.toHaveBeenCalled();
     expect(deps.syncChannelConfig).not.toHaveBeenCalled();
     expect(deps.startGateway).not.toHaveBeenCalled();
@@ -268,6 +279,74 @@ describe("server/startup", () => {
     expect(deps.startGateway).toHaveBeenCalled();
     expect(deps.watchdog.start).toHaveBeenCalled();
     expect(deps.gmailWatchService.start).toHaveBeenCalled();
+  });
+
+  it("skips the gateway launch but still starts supervision when the reconcile holds", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const deps = createBootDeps({
+      reconcileBootConfig: vi.fn(async () => ({
+        status: "held",
+        hold: { reason: "settings migration failed" },
+      })),
+    });
+
+    await runOnboardedBootSequence(deps);
+
+    // Fail CLOSED: the gateway must not start on the rejected config, but
+    // the full admin UI (watchdog, gmail, caches, ready phase) stays up so
+    // the operator can reach the retry actions.
+    expect(deps.startGateway).not.toHaveBeenCalled();
+    expect(deps.watchdog.start).toHaveBeenCalledTimes(1);
+    expect(deps.gmailWatchService.start).toHaveBeenCalled();
+    expect(getBootPhase()).toEqual({ phase: "ready", error: null });
+    expect(warnSpy).toHaveBeenCalledWith(
+      "[alphaclaw] Gateway held: settings migration failed",
+    );
+  });
+
+  it("holds the gateway when reconcileBootConfig itself rejects", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const deps = createBootDeps({
+      reconcileBootConfig: vi.fn(async () => {
+        throw new Error("reconcile machinery exploded");
+      }),
+    });
+
+    await runOnboardedBootSequence(deps);
+
+    // A reconcile machinery error must never start the gateway blind.
+    expect(deps.startGateway).not.toHaveBeenCalled();
+    expect(deps.watchdog.start).toHaveBeenCalledTimes(1);
+    expect(errorSpy).toHaveBeenCalledWith(
+      "[alphaclaw] Boot config reconciliation failed (gateway held): reconcile machinery exploded",
+    );
+  });
+
+  it("starts the gateway strictly after a clean reconcile", async () => {
+    const callOrder = [];
+    const deps = createBootDeps({
+      reconcileBootConfig: vi.fn(async () => {
+        callOrder.push("reconcileBootConfig");
+        return { status: "ok" };
+      }),
+      startGateway: vi.fn(async () => {
+        callOrder.push("startGateway");
+      }),
+    });
+
+    await runOnboardedBootSequence(deps);
+
+    expect(callOrder).toEqual(["reconcileBootConfig", "startGateway"]);
+    expect(getBootPhase()).toEqual({ phase: "ready", error: null });
+  });
+
+  it("keeps the legacy start path when no reconcileBootConfig dep is provided", async () => {
+    const deps = createBootDeps();
+
+    await runOnboardedBootSequence(deps);
+
+    expect(deps.startGateway).toHaveBeenCalledTimes(1);
+    expect(getBootPhase()).toEqual({ phase: "ready", error: null });
   });
 
   it("logs a primeStatusCaches throw after the watchdog has already started", async () => {

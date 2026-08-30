@@ -949,6 +949,66 @@ describe("server/watchdog", () => {
     expect(watchdog.getStatus().lifecycle).toBe("running");
   });
 
+  it("start() preserves a latched configuration_error instead of clobbering it to running", async () => {
+    const { watchdog } = createHarness({ autoRepair: false });
+
+    // Boot order under a reconcile hold: latchManualIntervention() first,
+    // then startup.js calls watchdog.start() unconditionally. The latch must
+    // survive — "running" here reads as down-with-Retry and steers the
+    // operator into restarting onto the rejected config.
+    watchdog.latchManualIntervention();
+    watchdog.start();
+    await flushMicrotasks();
+
+    expect(watchdog.getStatus()).toEqual(
+      expect.objectContaining({
+        lifecycle: "configuration_error",
+        health: "unhealthy",
+      }),
+    );
+
+    // Clearing the latch (reconcile-retry flow) restores the normal
+    // transition out of the latched state.
+    watchdog.clearManualInterventionLatch();
+    expect(watchdog.getStatus()).toEqual(
+      expect.objectContaining({ lifecycle: "stopped", health: "unknown" }),
+    );
+    watchdog.stop();
+  });
+
+  it("clearManualInterventionLatch resets the latch and restores normal exit handling", async () => {
+    const { watchdog, launchGatewayProcess } = createHarness({
+      autoRepair: false,
+    });
+
+    watchdog.latchManualIntervention();
+    expect(watchdog.getStatus()).toEqual(
+      expect.objectContaining({
+        lifecycle: "configuration_error",
+        health: "unhealthy",
+      }),
+    );
+
+    watchdog.clearManualInterventionLatch();
+    expect(watchdog.getStatus()).toEqual(
+      expect.objectContaining({ lifecycle: "stopped", health: "unknown" }),
+    );
+
+    // With the latch cleared, a gateway exit gets the normal crash-restart
+    // handling again instead of the latched skip.
+    watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    await flushMicrotasks();
+    await flushMicrotasks();
+    expect(launchGatewayProcess).toHaveBeenCalledTimes(1);
+    expect(watchdog.getStatus()).toEqual(
+      expect.objectContaining({ lifecycle: "running", health: "healthy" }),
+    );
+
+    // Idempotent when no latch is active: a running lifecycle is untouched.
+    watchdog.clearManualInterventionLatch();
+    expect(watchdog.getStatus().lifecycle).toBe("running");
+  });
+
   const buildSafeModeFetch = (gatewayState) => async (url) => {
     if (String(url).includes("/readyz")) {
       return {

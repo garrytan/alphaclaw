@@ -71,6 +71,65 @@ describe("server/openclaw-run-ledger", () => {
     });
   });
 
+  describe("boot step appends (issue #20)", () => {
+    it("appends boot-phase steps through the atomic RMW, preserving apply-time steps", () => {
+      const { ledger, nowRef } = makeLedger();
+      ledger.createRun({ operationId: kOpA, target: { version: "1.1.0" } });
+      ledger.updateRun(kOpA, (record) => {
+        record.steps = [{ name: "restarting", status: "running", at: 1 }];
+        return record;
+      });
+
+      nowRef.now += 100;
+      const next = ledger.appendStep(kOpA, {
+        name: "config-migrate",
+        status: "running",
+        detail: "running doctor --fix (budget 10 min)",
+      });
+
+      expect(next.steps.map((s) => s.name)).toEqual([
+        "restarting",
+        "config-migrate",
+      ]);
+      expect(next.steps[1]).toEqual(
+        expect.objectContaining({
+          status: "running",
+          at: 1_000_100,
+          detail: "running doctor --fix (budget 10 min)",
+        }),
+      );
+    });
+
+    it("no-ops on a missing name, an unknown run, and an invalid operationId", () => {
+      const { ledger } = makeLedger();
+      ledger.createRun({ operationId: kOpA, target: {} });
+      expect(ledger.appendStep(kOpA, { status: "running" }).steps).toEqual([]);
+      expect(ledger.appendStep(kOpB, { name: "x" })).toBeNull();
+      expect(ledger.appendStep("../escape", { name: "x" })).toBeNull();
+      expect(ledger.appendStep(undefined, { name: "x" })).toBeNull();
+    });
+
+    it("round-trips the structured dbPreflight verdict", () => {
+      const { ledger } = makeLedger();
+      ledger.createRun({ operationId: kOpA, target: {} });
+      ledger.updateRun(kOpA, (record) => {
+        record.dbPreflight = {
+          migrationRequired: true,
+          foundVersion: 1,
+          targetVersion: 12,
+          dbSizesBytes: 767 * 1024 * 1024,
+        };
+        return record;
+      });
+      expect(ledger.readRun(kOpA).dbPreflight).toEqual({
+        migrationRequired: true,
+        foundVersion: 1,
+        targetVersion: 12,
+        dbSizesBytes: 767 * 1024 * 1024,
+      });
+    });
+  });
+
   describe("boot transitions", () => {
     it("resolves restart_expected to activated / activation_failed", () => {
       const { ledger } = makeLedger();

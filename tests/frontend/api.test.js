@@ -1695,7 +1695,7 @@ describe("frontend/api openclaw channel endpoints", () => {
     );
   });
 
-  it("rollbackOpenclaw posts to the rollback endpoint", async () => {
+  it("rollbackOpenclaw posts to the rollback endpoint with an empty body by default", async () => {
     global.fetch.mockResolvedValue(
       mockJsonResponse(200, { ok: true, target: { kind: "pin" }, blockedId: "x" }),
     );
@@ -1706,7 +1706,21 @@ describe("frontend/api openclaw channel endpoints", () => {
     const [url, options] = global.fetch.mock.calls.at(-1);
     expect(url).toBe("/api/openclaw/rollback");
     expect(options.method).toBe("POST");
+    expect(options.body).toBe(JSON.stringify({}));
     expect(result).toEqual({ ok: true, target: { kind: "pin" }, blockedId: "x" });
+  });
+
+  it("rollbackOpenclaw sends the confirmDataRisk consent body", async () => {
+    global.fetch.mockResolvedValue(
+      mockJsonResponse(200, { ok: true, target: { kind: "pin" } }),
+    );
+    const api = await loadApiModule();
+
+    await api.rollbackOpenclaw({ confirmDataRisk: true });
+
+    const [url, options] = global.fetch.mock.calls.at(-1);
+    expect(url).toBe("/api/openclaw/rollback");
+    expect(options.body).toBe(JSON.stringify({ confirmDataRisk: true }));
   });
 
   it("rollbackOpenclaw surfaces 409 envelopes", async () => {
@@ -1723,6 +1737,153 @@ describe("frontend/api openclaw channel endpoints", () => {
     await expect(api.rollbackOpenclaw()).rejects.toThrow(
       "You're already on the built-in pin.",
     );
+  });
+
+  it("rollbackOpenclaw rejects the 409 rollback fence with code/hint/backupFile/status attached, and unparseable bodies with the fallback", async () => {
+    // The hook branches on err.code and the second-stage dialog names
+    // err.backupFile — both must ride on the rejection.
+    global.fetch.mockResolvedValue(
+      mockJsonResponse(409, {
+        ok: false,
+        code: "rollback_requires_confirmation",
+        message:
+          "This update migrated your state databases — the rollback target may not be able to read them.",
+        hint: "Restore the verified pre-update backup first (backup-1.tar.gz), or resend with confirmDataRisk: true to roll back anyway.",
+        backupFile: "backup-1.tar.gz",
+      }),
+    );
+    const api = await loadApiModule();
+
+    await expect(api.rollbackOpenclaw()).rejects.toMatchObject({
+      message:
+        "This update migrated your state databases — the rollback target may not be able to read them.",
+      code: "rollback_requires_confirmation",
+      hint: "Restore the verified pre-update backup first (backup-1.tar.gz), or resend with confirmDataRisk: true to roll back anyway.",
+      backupFile: "backup-1.tar.gz",
+      status: 409,
+    });
+
+    // Unparseable body on a failed response: fallback message, status kept,
+    // no code invented.
+    global.fetch.mockResolvedValue({
+      status: 500,
+      ok: false,
+      json: async () => {
+        throw new Error("bad json");
+      },
+    });
+    const rejection = await api.rollbackOpenclaw().catch((err) => err);
+    expect(rejection).toBeInstanceOf(Error);
+    expect(rejection.message).toBe("Could not roll back OpenClaw");
+    expect(rejection.status).toBe(500);
+    expect(rejection.code).toBeUndefined();
+    expect(rejection.backupFile).toBeUndefined();
+  });
+
+  it("retryOpenclawReconcile passes a 200 envelope through and sends the strip consent body", async () => {
+    global.fetch.mockResolvedValue(
+      mockJsonResponse(200, {
+        ok: true,
+        outcome: { status: "ok" },
+        gatewayStart: { ok: true },
+      }),
+    );
+    const api = await loadApiModule();
+
+    const result = await api.retryOpenclawReconcile();
+    let [url, options] = global.fetch.mock.calls.at(-1);
+    expect(url).toBe("/api/openclaw/reconcile/retry");
+    expect(options.method).toBe("POST");
+    expect(options.body).toBe(JSON.stringify({}));
+    expect(result).toEqual({
+      ok: true,
+      outcome: { status: "ok" },
+      gatewayStart: { ok: true },
+    });
+
+    await api.retryOpenclawReconcile({ stripBlamedKeys: true });
+    [url, options] = global.fetch.mock.calls.at(-1);
+    expect(options.body).toBe(JSON.stringify({ stripBlamedKeys: true }));
+  });
+
+  it("retryOpenclawReconcile rejects 409 still-held with code+outcome+status so the UI can name the fresh hold", async () => {
+    global.fetch.mockResolvedValue(
+      mockJsonResponse(409, {
+        ok: false,
+        code: "reconcile_still_held",
+        hint: "Fix the blamed keys, then retry.",
+        outcome: {
+          status: "held",
+          hold: { reason: "doctor exited 1 again", blamedKeys: ["gateway.oldKey"] },
+        },
+      }),
+    );
+    const api = await loadApiModule();
+
+    await expect(api.retryOpenclawReconcile()).rejects.toMatchObject({
+      code: "reconcile_still_held",
+      hint: "Fix the blamed keys, then retry.",
+      outcome: {
+        status: "held",
+        hold: { reason: "doctor exited 1 again", blamedKeys: ["gateway.oldKey"] },
+      },
+      status: 409,
+    });
+  });
+
+  it("retryOpenclawReconcile attaches message/hint generically for the other 409 codes", async () => {
+    // The route also answers reconcile_skipped and reconcile_not_needed —
+    // their server-set message must become the rejection's message so the
+    // hook's inline chip renders it instead of a generic string.
+    global.fetch.mockResolvedValue(
+      mockJsonResponse(409, {
+        ok: false,
+        code: "reconcile_not_needed",
+        message: "The gateway is running and no hold is set.",
+        hint: "Nothing to retry — the doctor never touches live databases.",
+      }),
+    );
+    const api = await loadApiModule();
+    await expect(api.retryOpenclawReconcile()).rejects.toMatchObject({
+      message: "The gateway is running and no hold is set.",
+      code: "reconcile_not_needed",
+      hint: "Nothing to retry — the doctor never touches live databases.",
+      status: 409,
+    });
+
+    global.fetch.mockResolvedValue(
+      mockJsonResponse(409, {
+        ok: false,
+        code: "reconcile_skipped",
+        message: "Reconcile skipped: no pending migration.",
+        hint: null,
+        outcome: { status: "skipped", reason: "no pending migration" },
+      }),
+    );
+    await expect(api.retryOpenclawReconcile()).rejects.toMatchObject({
+      message: "Reconcile skipped: no pending migration.",
+      code: "reconcile_skipped",
+      outcome: { status: "skipped", reason: "no pending migration" },
+      status: 409,
+    });
+  });
+
+  it("retryOpenclawReconcile falls back to the generic message on an unparseable body", async () => {
+    global.fetch.mockResolvedValue({
+      status: 500,
+      ok: false,
+      json: async () => {
+        throw new Error("bad json");
+      },
+    });
+    const api = await loadApiModule();
+
+    const rejection = await api.retryOpenclawReconcile().catch((err) => err);
+    expect(rejection).toBeInstanceOf(Error);
+    expect(rejection.message).toBe("Could not retry the settings migration");
+    expect(rejection.status).toBe(500);
+    expect(rejection.code).toBeUndefined();
+    expect(rejection.outcome).toBeUndefined();
   });
 
   it("markOpenclawGood posts to the mark-good endpoint", async () => {

@@ -425,6 +425,76 @@ describe("frontend/upgrade-helpers verdict banner (U4)", () => {
     const { buildVerdictBannerModel } = await loadUpgradeHelpers();
     expect(buildVerdictBannerModel({ expected: { version: "1" } })).toBeNull();
   });
+
+  it("replaces the green success with a gateway-held WARNING when gatewayHold is set", async () => {
+    const { buildVerdictBannerModel, kGatewayHeldVerdictMessage } =
+      await loadUpgradeHelpers();
+
+    const verdict = buildVerdictBannerModel({
+      expected: { version: "2026.8.1-beta.3" },
+      channel: {
+        installedVersion: "2026.8.1-beta.3",
+        appliedId: "2026.8.1-beta.3",
+        isPin: false,
+        gatewayHold: {
+          reason: "config_reconcile_failed",
+          at: kNow,
+          operationId: "0b1c2d3e-0000-4000-8000-000000000009",
+          blamedKeys: ["gateway.auth.mode"],
+        },
+      },
+    });
+
+    // Activation itself verified — ok stays true so the reconnect poller
+    // finishes instead of timing out — but the banner must not read green.
+    expect(verdict.ok).toBe(true);
+    expect(verdict.tone).toBe("warning");
+    expect(verdict.tone).not.toBe("success");
+    expect(verdict.message).toBe(kGatewayHeldVerdictMessage);
+    expect(verdict.message).toBe(
+      "Activated, but settings migration failed — the gateway is held. Check the notification for the exact keys, then use Retry migration.",
+    );
+    expect(verdict.message).not.toContain("activation verified");
+
+    // A hold must not mask a FAILED activation — the mismatch stays red.
+    const mismatch = buildVerdictBannerModel({
+      expected: { version: "2026.8.1-beta.3" },
+      channel: {
+        installedVersion: "2026.7.1",
+        appliedId: null,
+        isPin: true,
+        gatewayHold: { reason: "x", at: kNow, operationId: null, blamedKeys: [] },
+      },
+    });
+    expect(mismatch.ok).toBe(false);
+    expect(mismatch.tone).toBe("danger");
+  });
+
+  it("keeps the green success banner when gatewayHold is null or absent", async () => {
+    const { buildVerdictBannerModel } = await loadUpgradeHelpers();
+
+    const explicitNull = buildVerdictBannerModel({
+      expected: { version: "2026.7.2" },
+      channel: {
+        installedVersion: "2026.7.2",
+        appliedId: "2026.7.2",
+        isPin: false,
+        gatewayHold: null,
+      },
+    });
+    expect(explicitNull.ok).toBe(true);
+    expect(explicitNull.tone).toBe("success");
+    expect(explicitNull.message).toBe(
+      "Now on OpenClaw 2026.7.2 — activation verified",
+    );
+
+    // Absent entirely (an older server without the field) reads the same.
+    const absent = buildVerdictBannerModel({
+      expected: { version: "2026.7.2" },
+      channel: { installedVersion: "2026.7.2", appliedId: "2026.7.2", isPin: false },
+    });
+    expect(absent).toEqual(explicitNull);
+  });
 });
 
 describe("frontend/upgrade-helpers status card", () => {
@@ -697,6 +767,37 @@ describe("frontend/upgrade-helpers confirm models (U1/U3/U9)", () => {
     // The what-happens-next step list.
     expect(model.steps).toEqual(kApplyStepPreview);
     expect(model.steps.join(" → ")).toContain("Backup → Download → Verify");
+  });
+
+  it("states the gateway backup pause on breaking applies only", async () => {
+    const { buildApplyConfirmModel, kBackupPauseNote } =
+      await loadUpgradeHelpers();
+
+    // Cross-channel (stable→beta): the pre-update backup quiesces the
+    // gateway — the note lands right after the backup hard gate.
+    const breaking = buildApplyConfirmModel({
+      payload: { channel: "beta", version: "2026.8.1-beta.3" },
+      label: "2026.8.1-beta.3",
+      currentChannel: "stable",
+      notesAvailable: true,
+    });
+    expect(kBackupPauseNote).toBe(
+      "The gateway pauses briefly during the pre-update backup.",
+    );
+    const gateIndex = breaking.lines.indexOf(
+      "If the backup fails, nothing is installed.",
+    );
+    expect(gateIndex).toBeGreaterThan(-1);
+    expect(breaking.lines[gateIndex + 1]).toBe(kBackupPauseNote);
+
+    // A same-channel non-prerelease apply never pauses the gateway — no note.
+    const routine = buildApplyConfirmModel({
+      payload: { channel: "stable", version: "2026.7.2" },
+      label: "2026.7.2",
+      currentChannel: "stable",
+      notesAvailable: true,
+    });
+    expect(routine.lines.join(" ")).not.toContain(kBackupPauseNote);
   });
 
   it("marks degraded release-notes availability in the breaking confirm", async () => {
@@ -1479,5 +1580,84 @@ describe("frontend/upgrade-helpers misc models", () => {
       ).toBe("unknown");
       expect(formatReleasesBehind({ status: "unknown" })).toBeNull();
     });
+  });
+});
+
+describe("frontend/upgrade-helpers gateway hold model", () => {
+  it("returns null when there is no hold", async () => {
+    const { buildGatewayHoldModel } = await loadUpgradeHelpers();
+    expect(buildGatewayHoldModel(null)).toBeNull();
+    expect(buildGatewayHoldModel({})).toBeNull();
+    expect(buildGatewayHoldModel({ gatewayHold: null })).toBeNull();
+    // Defensive: a non-object hold (older server, corrupted state) is no hold.
+    expect(buildGatewayHoldModel({ gatewayHold: "held" })).toBeNull();
+  });
+
+  it("builds reason, sanitized string-only keys, and canStrip for a held gateway", async () => {
+    const { buildGatewayHoldModel } = await loadUpgradeHelpers();
+    const model = buildGatewayHoldModel({
+      gatewayHold: {
+        reason: "settings migration for 2026.8.1 failed: doctor exited 1",
+        at: kNow,
+        operationId: "op-hold-1",
+        blamedKeys: ["gateway.oldKey", 42, "", null, "channels.legacy"],
+      },
+    });
+    expect(model).toEqual({
+      reason: "settings migration for 2026.8.1 failed: doctor exited 1",
+      blamedKeys: ["gateway.oldKey", "channels.legacy"],
+      keyCount: 2,
+      canStrip: true,
+    });
+  });
+
+  it("cannot strip when the validator parsed no keys, and a missing reason gets a fallback", async () => {
+    const { buildGatewayHoldModel } = await loadUpgradeHelpers();
+    const model = buildGatewayHoldModel({
+      gatewayHold: { reason: null, at: kNow, operationId: null, blamedKeys: [] },
+    });
+    expect(model).toEqual({
+      reason: "Settings migration failed.",
+      blamedKeys: [],
+      keyCount: 0,
+      canStrip: false,
+    });
+  });
+
+  it("caps the key display at 12 with a +N more suffix entry", async () => {
+    const { buildGatewayHoldModel, kGatewayHoldKeyDisplayCap } =
+      await loadUpgradeHelpers();
+    expect(kGatewayHoldKeyDisplayCap).toBe(12);
+    const keys = Array.from({ length: 15 }, (_, i) => `settings.key${i}`);
+    const model = buildGatewayHoldModel({
+      gatewayHold: { reason: "migration failed", blamedKeys: keys },
+    });
+    expect(model.blamedKeys).toHaveLength(13);
+    expect(model.blamedKeys.slice(0, 12)).toEqual(keys.slice(0, 12));
+    expect(model.blamedKeys[12]).toBe("+3 more");
+    // canStrip and the confirm count follow the REAL key count, not the
+    // capped display list.
+    expect(model.keyCount).toBe(15);
+    expect(model.canStrip).toBe(true);
+  });
+
+  it("spells out the strip consequences with the exact key count, properly pluralized", async () => {
+    const { buildStripKeysConfirmMessage } = await loadUpgradeHelpers();
+    expect(buildStripKeysConfirmMessage(3)).toBe(
+      "Remove the 3 setting keys OpenClaw's validator rejected? A backup was saved before migration; protected security settings are never removable.",
+    );
+    expect(buildStripKeysConfirmMessage(1)).toBe(
+      "Remove the 1 setting key OpenClaw's validator rejected? A backup was saved before migration; protected security settings are never removable.",
+    );
+  });
+
+  it("names the verified pre-update backup in the rollback data-risk line, with a no-backup fallback", async () => {
+    const { buildRollbackDataRiskLine } = await loadUpgradeHelpers();
+    expect(buildRollbackDataRiskLine("backup-2026-08-29.tar.gz")).toBe(
+      "Restore the verified pre-update backup first (backup-2026-08-29.tar.gz), or roll back anyway — data written by the newer version may be unreadable.",
+    );
+    expect(buildRollbackDataRiskLine(null)).toBe(
+      "No verified pre-update backup is recorded — data written by the newer version may be unreadable if you roll back anyway.",
+    );
   });
 });

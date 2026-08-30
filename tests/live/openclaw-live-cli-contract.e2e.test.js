@@ -76,7 +76,7 @@ describeLive(
   { retry: 1 },
   () => {
     it(
-      "the newest beta supports --no-include-workspace, approvals, and database preflight; the pin stays file-era",
+      "the newest beta supports --no-include-workspace, approvals, and database preflight; the pin exposes approvals too",
       { timeout: kTestTimeoutMs },
       async () => {
         const releases = createOpenclawReleasesService({
@@ -249,9 +249,15 @@ describeLive(
           } catch {}
         }
 
-        // The declared pin is file-era but ALSO ships the approvals group
-        // (get/set/allowlist) — only `pending` is missing. The era probe and
-        // the CLI-backed routes both depend on exactly this split.
+        // Discovered against the LIVE registry (2026-08-29): the declared pin
+        // 2026.7.1-2 ALREADY ships the `approvals` CLI (get/set/allowlist),
+        // contrary to the original "pin is file-era" assumption — verified by
+        // installing the immutable package and running `approvals --help`.
+        // Only `pending` is missing on the pin; the era probe and the
+        // CLI-backed routes both depend on exactly this split, and the
+        // routes' legacy-file fallback matters only for builds whose CLI
+        // lacks the command, which the runtime capability probe detects
+        // per-build. Pin the contract the probe actually sees.
         const pin = readDeclaredPin();
         expect(pin).toBeTruthy();
         const pinInstall = await installOpenclawVersionToTempDir({

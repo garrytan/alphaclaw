@@ -45,6 +45,7 @@ const {
   migrateManagedInternalFiles,
 } = require("../lib/server/internal-files-migration");
 const { assertSupportedNodeVersion } = require("../lib/node-runtime");
+const { isEarlyExitCliCommand } = require("../lib/boot-cli-verbs");
 
 const kUsageTrackerPluginPath = path.resolve(
   __dirname,
@@ -203,6 +204,81 @@ const portFlag = flagValue(args, "--port");
 if (portFlag) {
   process.env.PORT = portFlag;
 }
+
+// PORT is final after the --port flag above; the SETUP_PASSWORD check
+// further down still guards before the real server binds.
+const kPort = String(process.env.PORT || "3000").trim();
+
+// ---------------------------------------------------------------------------
+// 1a. Reserved-port guard
+// ---------------------------------------------------------------------------
+// This guard MUST precede the placeholder spawn below: the placeholder binds
+// kPort immediately, and a misconfigured PORT=18789 would briefly squat the
+// gateway's own port before this fatal exit fired.
+if (kPort === "18789") {
+  console.error(
+    [
+      "[alphaclaw] Fatal config error: AlphaClaw cannot be started on port 18789.",
+      "[alphaclaw] Port 18789 is reserved for the OpenClaw gateway.",
+    ].join("\n"),
+  );
+  process.exit(1);
+}
+
+// ---------------------------------------------------------------------------
+// 1b. Boot placeholder server
+// ---------------------------------------------------------------------------
+// The heavy pre-listen work below (pending-update npm install up to 3min,
+// gog CLI download, git fetches, migrations) used to leave the port silently
+// closed — users saw connection-refused and platform health checks failed.
+// Spawned HERE, right after ALPHACLAW_ROOT_DIR (which it inherits for live
+// update-progress rendering) and PORT are resolved, so it also covers the
+// pending self-update npm install below — previously a ~3-minute blind
+// window before the old spawn point.
+// The placeholder runs as a CHILD PROCESS (lib/boot-placeholder-child.js):
+// the boot work below blocks THIS process's event loop for minutes (execSync
+// npm install, gog download), so an in-process server would accept TCP but
+// never answer HTTP during exactly the windows it exists to cover. The
+// handler itself lives in lib/boot-placeholder.js where it is unit-testable.
+// SIGTERM'd right before the real server starts; the real server's
+// EADDRINUSE retry covers the close/rebind race. This now runs ABOVE the
+// port/SETUP_PASSWORD fatal exits — safe, because the child self-exits via
+// its ppid orphan check within ~3s of this process dying.
+// The verb matrix lives in lib/boot-cli-verbs.js (unit-tested there). Anyone
+// adding or changing an early-exit dispatch site below MUST update that
+// module too, or the placeholder will fight a live server for the port.
+const kIsEarlyExitCliCommand = isEarlyExitCliCommand({
+  command,
+  commandScope,
+  commandAction,
+});
+const bootPlaceholder = (() => {
+  // CLI verbs exit long before the server boots — don't bind a placeholder
+  // web server for them (it would fight a live server for the port).
+  if (kIsEarlyExitCliCommand) return null;
+  try {
+    const { spawn } = require("child_process");
+    const child = spawn(
+      process.execPath,
+      [path.join(__dirname, "..", "lib", "boot-placeholder-child.js")],
+      {
+        env: {
+          ...process.env,
+          ALPHACLAW_PLACEHOLDER_PORT: String(Number.parseInt(kPort, 10) || 3000),
+          // Explicit parent identity for the child's orphan check — the
+          // sampled-ppid fallback races a parent that exits before the
+          // child's first sample (fatal PORT/password guards below).
+          ALPHACLAW_PARENT_PID: String(process.pid),
+        },
+        stdio: "ignore",
+      },
+    );
+    child.on("error", () => {});
+    return child;
+  } catch {
+    return null;
+  }
+})();
 
 // ---------------------------------------------------------------------------
 // 2. Create directory structure
@@ -879,16 +955,8 @@ if (command === "admin") {
   return;
 }
 
-const kPort = String(process.env.PORT || "3000").trim();
-if (kPort === "18789") {
-  console.error(
-    [
-      "[alphaclaw] Fatal config error: AlphaClaw cannot be started on port 18789.",
-      "[alphaclaw] Port 18789 is reserved for the OpenClaw gateway.",
-    ].join("\n"),
-  );
-  process.exit(1);
-}
+// (The reserved-port 18789 guard moved to 1a above — it must run before the
+// placeholder binds kPort.)
 
 const kSetupPassword = String(process.env.SETUP_PASSWORD || "").trim();
 if (!kSetupPassword) {
@@ -904,39 +972,8 @@ if (!kSetupPassword) {
   process.exit(1);
 }
 
-// ---------------------------------------------------------------------------
-// 6b. Boot placeholder server
-// ---------------------------------------------------------------------------
-// The heavy pre-listen work below (pending-update npm install up to 3min,
-// gog CLI download, git fetches, migrations) used to leave the port silently
-// closed — users saw connection-refused and platform health checks failed.
-// The placeholder runs as a CHILD PROCESS (lib/boot-placeholder-child.js):
-// the boot work below blocks THIS process's event loop for minutes (execSync
-// npm install, gog download), so an in-process server would accept TCP but
-// never answer HTTP during exactly the windows it exists to cover. The
-// handler itself lives in lib/boot-placeholder.js where it is unit-testable.
-// SIGTERM'd right before the real server starts; the real server's
-// EADDRINUSE retry covers the close/rebind race.
-const bootPlaceholder = (() => {
-  try {
-    const { spawn } = require("child_process");
-    const child = spawn(
-      process.execPath,
-      [path.join(__dirname, "..", "lib", "boot-placeholder-child.js")],
-      {
-        env: {
-          ...process.env,
-          ALPHACLAW_PLACEHOLDER_PORT: String(Number.parseInt(kPort, 10) || 3000),
-        },
-        stdio: "ignore",
-      },
-    );
-    child.on("error", () => {});
-    return child;
-  } catch {
-    return null;
-  }
-})();
+// (Section 6b, the boot placeholder server, moved to 1b above so it also
+// covers the pending self-update npm install.)
 
 // ---------------------------------------------------------------------------
 // 7. Set OPENCLAW_HOME globally so all child processes inherit it
