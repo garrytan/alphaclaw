@@ -44,7 +44,6 @@ import * as preactHooks from "preact/hooks";
 import {
   RestartProgressCard,
   buildRestartStepModels,
-  formatSecondsAgo,
   getCurrentStepName,
 } from "../../lib/public/js/components/restart-progress-card.js";
 import { ActionButton } from "../../lib/public/js/components/action-button.js";
@@ -374,9 +373,8 @@ describe("frontend/restart-progress-card", () => {
     expect(RestartProgressCard({ operation: null })).toBeNull();
   });
 
-  it("formatSecondsAgo renders short relative stamps", () => {
-    expect(formatSecondsAgo(kNow - 12000, kNow)).toBe("12s ago");
-    expect(formatSecondsAgo(kNow - 10 * 60000, kNow)).toBe("10m ago");
-    expect(formatSecondsAgo(null, kNow)).toBeNull();
-  });
+  // The former formatSecondsAgo helper is gone — freeze stamps now render
+  // through the shared formatRelativeTime core (covered in format.test.js;
+  // the gateway card's "as of Xs ago" rendering is covered in
+  // gateway-card.test.js).
 });

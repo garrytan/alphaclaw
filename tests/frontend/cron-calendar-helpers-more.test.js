@@ -177,4 +177,25 @@ describe("frontend/cron-calendar-helpers (extended)", () => {
     expect(range.dayCount).toBe(7);
     expect(range.rangeEndMs).toBeGreaterThan(range.rangeStartMs);
   });
+
+  it("labels day headers through the shared 7d chart-bucket preset with local day keys", () => {
+    const { days } = expandJobsToRollingSlots({ jobs: [], nowMs: kNowMs });
+    expect(days).toHaveLength(7);
+    for (const day of days) {
+      const dayStart = new Date(day.dayStartMs);
+      // Same weekday-short preset formatChartBucketLabel uses for 7d buckets,
+      // so the assertion stays locale-agnostic in CI.
+      expect(day.label).toBe(
+        dayStart.toLocaleDateString([], {
+          weekday: "short",
+          month: "numeric",
+          day: "numeric",
+        }),
+      );
+      const pad = (value) => String(value).padStart(2, "0");
+      expect(day.dayKey).toBe(
+        `${dayStart.getFullYear()}-${pad(dayStart.getMonth() + 1)}-${pad(dayStart.getDate())}`,
+      );
+    }
+  });
 });

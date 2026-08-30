@@ -169,6 +169,43 @@ describe("buildIncidentCardModel", () => {
   });
 });
 
+describe("buildIncidentTimeTooltip", () => {
+  it("dual-registers the local+offset half with the raw UTC ISO half", async () => {
+    const { buildIncidentTimeTooltip } = await loadIncidentHelpers();
+    const { formatLocaleDateTimeWithZone } = await import(
+      "../../lib/public/js/lib/format.js"
+    );
+    const iso = "2026-08-28T10:00:02.114Z";
+    const tooltip = buildIncidentTimeTooltip(iso);
+    expect(tooltip.endsWith(` · ${iso}`)).toBe(true);
+    const formatted = tooltip.slice(0, tooltip.length - ` · ${iso}`.length);
+    expect(formatted).toBe(formatLocaleDateTimeWithZone(iso, { fallback: "" }));
+    expect(formatted.length).toBeGreaterThan(0);
+    // The local half carries a numeric UTC offset (DST-fold disambiguation).
+    expect(formatted).toMatch(/GMT|UTC/);
+  });
+
+  it("derives the ISO half from Date and epoch-ms values via toISOString", async () => {
+    const { buildIncidentTimeTooltip } = await loadIncidentHelpers();
+    const iso = "2026-08-28T10:00:02.114Z";
+    expect(buildIncidentTimeTooltip(new Date(iso)).endsWith(` · ${iso}`)).toBe(
+      true,
+    );
+    expect(
+      buildIncidentTimeTooltip(Date.parse(iso)).endsWith(` · ${iso}`),
+    ).toBe(true);
+  });
+
+  it("returns empty string for missing or invalid values", async () => {
+    const { buildIncidentTimeTooltip } = await loadIncidentHelpers();
+    expect(buildIncidentTimeTooltip(null)).toBe("");
+    expect(buildIncidentTimeTooltip(undefined)).toBe("");
+    expect(buildIncidentTimeTooltip("")).toBe("");
+    expect(buildIncidentTimeTooltip("not a timestamp")).toBe("");
+    expect(buildIncidentTimeTooltip(new Date(NaN))).toBe("");
+  });
+});
+
 describe("mergeIncidentPages", () => {
   it("dedups by id across the polling first page and cached older pages", async () => {
     const { mergeIncidentPages } = await loadIncidentHelpers();

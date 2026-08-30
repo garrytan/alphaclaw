@@ -57,6 +57,8 @@ import * as api from "../../lib/public/js/lib/api.js";
 import { showToast } from "../../lib/public/js/components/toast.js";
 import { useWatchdogConsole } from "../../lib/public/js/components/watchdog-tab/console/use-console.js";
 import { WatchdogConsoleCard } from "../../lib/public/js/components/watchdog-tab/console/index.js";
+import { localizeLogTimestamps } from "../../lib/public/js/components/watchdog-tab/helpers.js";
+import { getBrowserTimeZone } from "../../lib/public/js/lib/format.js";
 import { useWatchdogTerminal } from "../../lib/public/js/components/watchdog-tab/terminal/use-terminal.js";
 import { InlineErrorChip } from "../../lib/public/js/components/inline-error-chip.js";
 
@@ -222,6 +224,58 @@ describe("frontend/watchdog console card logs pane", () => {
     const loading = renderCard({ loadingLogs: true, logs: "", logsError: null });
     expect(treeText(loading)).toContain("Loading logs...");
     expect(findAllByType(loading, InlineErrorChip).length).toBe(0);
+  });
+
+  it("localizes leading log-line stamps and labels the copy action as UTC diagnostics", () => {
+    const logs = "2026-08-28T10:00:02.114Z gateway started\nplain line\n";
+    const tree = renderCard({ loadingLogs: false, logs, logsError: null });
+    const text = treeText(tree);
+    // The pane shows the localized rewrite, never the raw leading ISO stamp.
+    expect(text).toContain(localizeLogTimestamps(logs));
+    expect(text).not.toContain("2026-08-28T10:00:02.114Z");
+    // Copied diagnostics stay UTC ISO — the label discloses the divergence.
+    expect(text).toContain("Copy diagnostics (UTC)");
+    expect(text).not.toContain("Copy all");
+  });
+
+  it("caption falls back to 'local time' when the browser zone is unknown", async () => {
+    // format.js returns "" from getBrowserTimeZone when Intl resolution
+    // fails; the caption must not render a dangling "shown in " preposition.
+    vi.resetModules();
+    vi.doMock("../../lib/public/js/lib/format.js", async (importOriginal) => ({
+      ...(await importOriginal()),
+      getBrowserTimeZone: () => "",
+    }));
+    try {
+      const { WatchdogConsoleCard: MockedCard } = await import(
+        "../../lib/public/js/components/watchdog-tab/console/index.js"
+      );
+      const tree = expandTree(
+        MockedCard({ loadingLogs: false, logs: "", logsError: null }),
+      );
+      const text = treeText(tree).replace(/\s+/g, " ");
+      expect(text).toContain("Line timestamps shown in local time");
+    } finally {
+      vi.doUnmock("../../lib/public/js/lib/format.js");
+      vi.resetModules();
+    }
+  });
+
+  it("always shows the Logs-tab timezone hint, including loading and empty states", () => {
+    // Whitespace-normalize: htm splits "text ${expr}" into separate children.
+    const normalizedText = (tree) => treeText(tree).replace(/\s+/g, " ");
+    const hint = `Line timestamps shown in ${getBrowserTimeZone()}`;
+    expect(
+      normalizedText(renderCard({ loadingLogs: true, logs: "", logsError: null })),
+    ).toContain(hint);
+    expect(
+      normalizedText(renderCard({ loadingLogs: false, logs: "", logsError: null })),
+    ).toContain(hint);
+    expect(
+      normalizedText(
+        renderCard({ loadingLogs: false, logs: "some output", logsError: null }),
+      ),
+    ).toContain(hint);
   });
 });
 

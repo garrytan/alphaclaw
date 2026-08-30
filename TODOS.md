@@ -309,6 +309,42 @@
 - **What:** Per-event-type filter pills on the All-events tab; a spot-check "explain current status" overseer mode with no incident; any new SSE event streams for the watchdog surfaces.
 - **Why:** Each was reviewed and deferred: three tabs cover the filtering need, the deterministic narrator explains live status for free, and the 2s status SSE + 15s polls already carry everything ("new event streams are the expensive path").
 - **Effort:** S each. **Depends on:** demand.
+
+## P3 — Absolute-time hover tooltips on every relative-time display (E4)
+- **What:** Extend the incidents-tab pattern (relative text + absolute `title` tooltip, ideally `<time datetime>`) to the remaining relative-only displays: team presence, telegram last-seen/last-sweep, upgrade catalog staleness, restart freeze stamps.
+- **Why:** "5m ago" answers "how recent"; the tooltip answers "when exactly" without a format change. Also the keyboard-accessibility story for `title`-only tooltips lives here.
+- **Context:** Deferred from the UI local-time normalization plan (CEO review E4). `buildIncidentTimeTooltip` (watchdog-tab/incidents/helpers.js) is the shape to generalize; `formatLocaleDateTimeWithZone` in lib/public/js/lib/format.js does the formatting.
+- **Effort:** M → CC: S. **Depends on:** the normalization PR landing.
+
+## P3 — Un-pin number/currency formatters from en-US (E5)
+- **What:** Switch `formatInteger`/`formatCompactNumber`/`formatUsd` (lib/public/js/lib/format.js) and the two `Number#toLocaleString` char counts in doctor/helpers.js (allowlisted in the conventions guard) from `"en-US"` to browser-default locale.
+- **Why:** Same "show data the way the local user expects" logic as the time normalization — but it changes USD symbol rendering abroad ("$1,234.50" → "1.234,50 $" in de-DE), so it's a separate product decision, not a mechanical follow-on.
+- **Context:** Deferred from the UI local-time normalization plan (CEO review E5). Tests pin the en-US outputs (tests/frontend/format.test.js).
+- **Effort:** S. **Depends on:** product decision on currency rendering.
+
+## P3 — Gateway-state reason prose client-side (E7)
+- **What:** Expose `tcp.observedAt` (and crash-window inputs) in the status payload and build the "Last confirmed running 42s ago — reconnecting." / "3 restarts in the last 5 min" prose client-side.
+- **Why:** The only remaining server-composed relative-time prose. It is tz-safe (relative, recomputed every ~2s snapshot) so this is architectural hygiene, not a correctness bug.
+- **Context:** lib/server/gateway-state.js:195-235 `reasonForState`; consumed verbatim by lib/public/js/components/gateway.js. Deferred from the UI local-time normalization plan (CEO review E7).
+- **Effort:** M. **Depends on:** nothing.
+
+## P3 — Usage-tracker ingest-time tz-aware day keys (E8)
+- **What:** The usage-tracker plugin writes UTC day keys at ingest (lib/plugin/usage-tracker/index.js:198-200); rows near local midnight land in the "wrong" day for non-UTC users until the read path re-buckets.
+- **Why:** The read path already re-buckets by the client timezone (lib/server/db/usage), so this only matters for consumers reading the raw `date` column. Fixing it at ingest needs a backfill/migration of existing rows.
+- **Context:** Deferred from the UI local-time normalization plan (CEO review E8).
+- **Effort:** M. **Depends on:** data migration plan.
+
+## P3 — Run /design-consultation to create DESIGN.md
+- **What:** The repo has no DESIGN.md; design reviews calibrate against universal principles instead of a stated system (fonts, spacing scale, color tokens, interaction patterns).
+- **Why:** Every future design review (and AI-generated UI work) gets sharper with a written design system; the setup UI already has consistent implicit conventions worth codifying.
+- **Context:** Flagged by the plan-design-review of the UI local-time normalization plan (Pass 5).
+- **Effort:** S (one /design-consultation session). **Depends on:** nothing.
+
+## P3 — upgrade-ui-smoke.sh: password selector matches two elements
+- **What:** `tests/browser/upgrade-ui-smoke.sh` stops at `browse wait 'input[type="password"]'` — login.html renders both `#password` and a hidden `#password-confirm`, and the browse CLI now refuses multi-match selectors. Fix: wait/fill `#password` by id (claude-code-launcher-smoke.sh already does; better yet, share time-format-smoke.sh's in-page `POST /api/auth/login` approach, which sidesteps the form entirely).
+- **Why:** The upgrade smoke silently no-ops in environments with a current browse CLI, so the channel-segment regression it guards is unwatched.
+- **Context:** Pre-existing (login.html last touched v0.9.38, smoke v0.9.40); surfaced by /qa on 2026-08-29 while running it as a regression check for the time-normalization branch. Not modified per QA rule "never modify existing tests".
+- **Effort:** S. **Depends on:** nothing.
 ## P2 — Cron run-history UI: read run logs from the state db
 - **What:** The cron run/trend UI reads `cron/runs/<jobId>.jsonl` (lib/server/cron-service.js), but even the PINNED openclaw 2026.7.1-2 writes run logs to SQLite (`cron_run_logs`), and 2026.9.1-beta.1's `doctor --fix` additionally renames leftover `.jsonl` to `.jsonl.migrated` — after the first beta doctor run, run history and trends silently go empty. Port the bounded-tail reads to `cron_run_logs` (cached-handle pattern from lib/server/cron-store.js), keeping the `.jsonl` fallback for genuinely old dirs.
 - **Why:** Stale-data class of the issue-#23 family: a file the runtime no longer writes, read as if authoritative.
@@ -367,6 +403,23 @@
 - **Why:** Keyboard users cannot tab to most nav items; touch targets fall below platform guidelines. The Claude Code launcher item carries a real href (and aria-busy while launching) — the rest of the nav should catch up.
 - **Context:** `renderNavItem` in lib/public/js/components/sidebar.js and the `.sidebar-nav a` metrics in lib/public/css/shell.css:215-246. Repo-wide pass; keep visual density on desktop while adding focus/touch affordances.
 - **Effort:** M. **Depends on:** nothing.
+
+## P3 — Locale QA matrix for the time-normalization surfaces (manual)
+- **What:** Visual pass with browser locale en-GB (24h), de-DE, ar-EG (RTL), ja-JP at 375px and 200% zoom over the tight cells (webhook request rows, team invite chips, cron settings card, run-history collapsed groups); wrap affected timestamp spans in `<bdi>` only if the ar-EG pass shows bidi reordering.
+- **Why:** Unit + E2E assertions are locale-agnostic by construction (browser-computed Intl expectations), so they prove correctness in any locale but can't judge *layout* in locales the CI browser doesn't run.
+- **Context:** Plan verification item V4 of the UI local-time normalization (v0.9.45); everything automatable was executed (en-US live QA 13/13, TZ-shifted suites, E2E 9/9). Needs a real user machine with switchable browser locale.
+- **Effort:** S (manual, ~20 min). **Depends on:** nothing.
+
+## P3 — Midnight-rollover re-render sweep for today-style timestamps
+- **What:** Confirm each `formatLocaleDateTimeWithTodayTime` surface (webhook lists, cron run history, usage sessions) refreshes its "today → time-only" labels across a local midnight via its existing poll/`useNowMs` cycle; add a ticker to any surface found static.
+- **Why:** A tab left open across midnight would otherwise show yesterday's times in the time-only style until the next poll. Pre-existing behavior (poll cycles cover the known surfaces) — this records the plan's V5 verification item instead of leaving it silently unchecked.
+- **Context:** Plan verification item V5 of the UI local-time normalization (v0.9.45).
+- **Effort:** S. **Depends on:** nothing.
+
+## P3 — Two pre-existing trend/calendar edges adjacent to the tz work
+- **What:** (a) Hourly (24h) cron trends drop a run stamped exactly at `windowEndMs` — the entry is admitted but its floor-bucket key lands past the last bucket and is skipped (`cron-service.js` bucket loop). (b) `cron-calendar-helpers.js` builds day slots via `rangeStartMs + offset * kDayMs` then `startOfDayMs`, so two offsets can collapse to one `dayKey` across a 25h DST fall-back day, colliding calendar cell keys.
+- **Why:** Both predate the v0.9.45 timezone work (flagged by its adversarial review because they sit on touched lines); each is a one-line-ish fix but changes pre-existing behavior, so they get their own change.
+- **Effort:** S. **Depends on:** nothing.
 
 ## Completed
 

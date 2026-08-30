@@ -5,6 +5,91 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.9.47] - 2026-08-30
+
+Every time shown in the UI now renders in your browser's timezone and your
+locale's expected format — "Mar 10, 2026, 7:45 PM" in the US, "10.03.2026,
+19:45" in Germany — from one shared formatter family instead of six competing
+hand-rolled dialects. Raw UTC ISO strings no longer leak into tooltips or the
+watchdog console, and two genuine timezone bugs are fixed: cron trend charts
+bucketed days at the *server's* midnight, and the Doctor tab served a frozen
+"(12 minutes ago)" phrase forever.
+
+### Added
+- **One time-format dialect**: `lib/public/js/lib/format.js` now carries the
+  full family — locale datetime (medium date + short time), date-only,
+  time-only (optional seconds), datetime + numeric UTC offset, datetime
+  ranges with elided dates ("Aug 29, 2026, 3:11 – 4:12 PM"), and a single
+  parametrized relative-time helper (compact "5m ago", long "5 minutes ago",
+  unit "5m"/"2mo", opt-in future "in 5m") that replaces six duplicate
+  implementations with divergent thresholds. Formatters are built through one
+  `createFormatters(timeZone?)` factory, so timezone-conversion tests
+  exercise the exact construction path production uses.
+- **Watchdog console in local time**: log-line timestamps render as
+  `YYYY-MM-DD HH:mm:ss ±HH:MM` in your zone (the offset survives copy/paste
+  and disambiguates DST folds), with a "Line timestamps shown in
+  ‹your zone›" caption on the Logs tab; the copy action is now labeled
+  **"Copy diagnostics (UTC)"** because the export deliberately stays UTC ISO
+  for escalation.
+- **Dual-register incident tooltips**: hovering an incident or event shows
+  "Mar 10, 2026, 7:45:02 PM GMT-7 · 2026-03-10T02:45:02.114Z" — local time
+  with the offset plus the exact UTC instant, instead of a raw ISO string.
+- **Browser-timezone cron trend buckets**: `/api/cron/jobs/:id/trends` now
+  buckets 7d/30d ranges at *your* midnight (via the `x-client-timezone`
+  header every request already carries), with a DST-safe day-start algorithm
+  (skipped and repeated midnights handled), canonicalized and size-capped
+  timezone caches, and the effective timezone echoed in the response.
+  Requests without the header keep the previous server-local behavior.
+- **Conventions guard test** that fails the build if new `toLocale*` or
+  `Intl.DateTimeFormat` calls appear outside `format.js`, so the
+  normalization can't silently erode.
+- **Browser-level E2E** (`npm run test:ui:time`,
+  `tests/browser/time-format-smoke.sh`): boots a real isolated server and
+  asserts in headless Chromium — against expectations the browser itself
+  computes with the same Intl presets, so the test is locale/timezone
+  agnostic — that the gateway card matches the API instant, console lines
+  carry local `±HH:MM` prefixes with the zone caption and the
+  "Copy diagnostics (UTC)" label, and incident timelines show seconds with
+  dual-register tooltips.
+
+### Changed
+- All ~75 timestamp render sites (gateway, watchdog, upgrade, cron, usage,
+  webhooks, team, telegram, doctor, chat, buzz, update modal, git panel) use
+  the shared formatters; ambient timestamps drop seconds by default while
+  sub-minute event surfaces (incident timeline, webhook request history,
+  cron run history) explicitly keep them.
+- Cron schedule descriptions render their wall-times through the locale
+  formatter ("Daily at 9:30 AM" in the US, "Daily at 09:30" in Germany) —
+  still never timezone-converted — so the schedule and next-run cells no
+  longer show two different time styles side by side.
+- Chat message times read "3:04 PM" instead of "03:04 PM"; relative-time
+  wording is now consistent everywhere (one threshold table, floor rounding).
+
+### Fixed
+- Doctor no longer serves a frozen "(12 minutes ago)" phrase written at scan
+  time: new summaries omit it and legacy rows are scrubbed on read.
+- Future timestamps no longer collapse to "just now" where a direction
+  matters (cron next-run shows "in 5m"), while past-only feeds keep the
+  clamp so server clock skew never shows "in 3s" on a past event.
+- The timezone request header is memoized at page load alongside the display
+  formatters, so server-side bucketing and on-screen times can never diverge
+  mid-session.
+- The `timeZone` echoed by `/api/usage/summary` is now the canonical IANA id
+  (e.g. `america/new_york` → `America/New_York`) rather than the raw client
+  string — a side effect of shared zone canonicalization; browsers already
+  send canonical ids, so only hand-rolled callers comparing the echo to their
+  input will notice.
+- Console lines whose leading timestamp carries a numeric offset (child
+  process output like `…T12:00:00+02:00`) now localize using that real
+  offset, and zone-less timestamps pass through unchanged instead of being
+  guessed as browser-local; the timezone caption falls back to "local time"
+  when the browser can't name its zone.
+- When the server can't recognize the browser's timezone, the cron trends
+  chart says so ("Day buckets use the server's timezone…") instead of
+  silently labeling server-local buckets with browser-local dates; the
+  trends endpoint also accepts a `?timeZone=` override and marks its
+  response `Vary: x-client-timezone` for HTTP caches.
+
 ## [0.9.46] - 2026-08-29
 
 ### Added
