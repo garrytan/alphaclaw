@@ -74,6 +74,7 @@ const createApp = ({
   clawCmd,
   clawCmdWithRetry = null,
   openclawCapabilities = null,
+  resolveExecApprovalsBackend = null,
   fsModule,
   gatewayToken = "",
   getGatewayToken = null,
@@ -86,6 +87,7 @@ const createApp = ({
     clawCmd: clawCmd || vi.fn(async () => ({ ok: true, stdout: "{}", stderr: "" })),
     clawCmdWithRetry,
     openclawCapabilities,
+    resolveExecApprovalsBackend,
     openclawDir,
     gatewayToken,
     getGatewayToken,
@@ -254,29 +256,42 @@ describe("server/routes/nodes coverage", { retry: 1 }, () => {
       expect(res.body).toEqual({ ok: false, error: "routing broke" });
     });
 
-    it("falls back to command-specific routing error", async () => {
+    it("falls back to a generic routing error", async () => {
       const clawCmd = vi.fn(async () => ({ ok: false, stderr: "" }));
       const app = createApp({ clawCmd });
       const res = await request(app).post("/api/nodes/node-1/route");
       expect(res.status).toBe(500);
       expect(res.body).toEqual({
         ok: false,
-        error: "Could not apply node routing (config set tools.exec.host 'node')",
+        error: "Could not apply node routing",
       });
     });
 
-    it("applies all routing commands on success", async () => {
-      const clawCmd = vi.fn(async () => ({ ok: true, stdout: "", stderr: "" }));
+    it("routes via one merged tools.exec write with mode ask (upstream's allowlist+on-miss conversion)", async () => {
+      const clawCmd = vi.fn(async (cmd) =>
+        cmd.startsWith("config get")
+          ? {
+              ok: true,
+              stdout: JSON.stringify({ strictInlineEval: false, security: "full", ask: "off" }),
+              stderr: "",
+            }
+          : { ok: true, stdout: "", stderr: "" },
+      );
       const app = createApp({ clawCmd });
       const res = await request(app).post("/api/nodes/node-9/route");
       expect(res.status).toBe(200);
       expect(res.body).toEqual({ ok: true, restartRequired: true, nodeId: "node-9" });
-      expect(clawCmd.mock.calls.map((call) => call[0])).toEqual([
-        "config set tools.exec.host 'node'",
-        "config set tools.exec.security 'allowlist'",
-        "config set tools.exec.ask 'on-miss'",
-        "config set tools.exec.node 'node-9'",
-      ]);
+      expect(clawCmd.mock.calls[0][0]).toBe("config get tools.exec --json");
+      const setCall = clawCmd.mock.calls[1][0];
+      expect(setCall).toMatch(/^config set tools\.exec '/);
+      expect(setCall).toContain("--strict-json");
+      expect(setCall).toContain('"mode":"ask"');
+      expect(setCall).toContain('"host":"node"');
+      expect(setCall).toContain('"node":"node-9"');
+      // Unmanaged keys survive the merge; retired keys never do.
+      expect(setCall).toContain('"strictInlineEval":false');
+      expect(setCall).not.toContain('"security":');
+      expect(setCall).not.toContain('"ask":');
     });
   });
 
@@ -736,30 +751,36 @@ describe("server/routes/nodes coverage", { retry: 1 }, () => {
       expect(res.body.error).toBe("Invalid exec host");
     });
 
-    it("returns stderr when a config command fails", async () => {
+    it("returns stderr when the config write fails", async () => {
       const clawCmd = vi.fn(async () => ({ ok: false, stderr: "cfg failed" }));
       const app = createApp({ clawCmd });
       const res = await request(app)
         .post("/api/nodes/exec-config")
-        .send({ host: "gateway", security: "deny", ask: "always" });
+        .send({ host: "gateway", security: "deny", ask: "off" });
       expect(res.status).toBe(500);
       expect(res.body).toEqual({ ok: false, error: "cfg failed" });
     });
 
-    it("falls back to command-specific error message", async () => {
+    it("falls back to a generic error message", async () => {
       const clawCmd = vi.fn(async () => ({ ok: false, stderr: "" }));
       const app = createApp({ clawCmd });
       const res = await request(app)
         .post("/api/nodes/exec-config")
-        .send({ host: "gateway", security: "deny", ask: "always" });
+        .send({ host: "gateway", security: "deny", ask: "off" });
       expect(res.status).toBe(500);
-      expect(res.body.error).toBe(
-        "Could not apply exec config (config set tools.exec.host 'gateway')",
-      );
+      expect(res.body.error).toBe("Could not apply exec config");
     });
 
-    it("clears node target when host is gateway", async () => {
-      const clawCmd = vi.fn(async () => ({ ok: true, stdout: "", stderr: "" }));
+    // The write is a read-merge-write of the whole tools.exec object in one
+    // validated `config set … --strict-json` — never per-key writes of the
+    // retired security/ask keys (the 2026.9.x beta flags those as legacy and
+    // refuses every CLI command until doctor --fix).
+    it("clears node target and converts allowlist+on-miss to mode ask", async () => {
+      const clawCmd = vi.fn(async (cmd) =>
+        cmd.startsWith("config get")
+          ? { ok: true, stdout: "{}", stderr: "" }
+          : { ok: true, stdout: "", stderr: "" },
+      );
       const app = createApp({ clawCmd });
       const res = await request(app)
         .post("/api/nodes/exec-config")
@@ -767,26 +788,148 @@ describe("server/routes/nodes coverage", { retry: 1 }, () => {
       expect(res.status).toBe(200);
       expect(res.body).toEqual({ ok: true, restartRequired: true });
       expect(clawCmd.mock.calls.map((call) => call[0])).toEqual([
-        "config set tools.exec.host 'gateway'",
-        "config set tools.exec.security 'allowlist'",
-        "config set tools.exec.ask 'on-miss'",
-        "config set tools.exec.node ''",
+        "config get tools.exec --json",
+        `config set tools.exec '{"host":"gateway","node":"","mode":"ask"}' --strict-json`,
       ]);
     });
 
-    it("sets node target when host is node", async () => {
-      const clawCmd = vi.fn(async () => ({ ok: true, stdout: "", stderr: "" }));
+    it("keeps the legacy pair for the upstream bail-out combo (full + always)", async () => {
+      const clawCmd = vi.fn(async (cmd) =>
+        cmd.startsWith("config get")
+          ? { ok: true, stdout: "{}", stderr: "" }
+          : { ok: true, stdout: "", stderr: "" },
+      );
       const app = createApp({ clawCmd });
       const res = await request(app)
         .post("/api/nodes/exec-config")
         .send({ host: "node", security: "full", ask: "always", node: "node-3" });
       expect(res.status).toBe(200);
       expect(clawCmd.mock.calls.map((call) => call[0])).toEqual([
-        "config set tools.exec.host 'node'",
-        "config set tools.exec.security 'full'",
-        "config set tools.exec.ask 'always'",
-        "config set tools.exec.node 'node-3'",
+        "config get tools.exec --json",
+        `config set tools.exec '{"host":"node","node":"node-3","security":"full","ask":"always"}' --strict-json`,
       ]);
+    });
+
+    it.each([
+      ["full", "off", "full"],
+      ["allowlist", "off", "allowlist"],
+      ["deny", "off", "deny"],
+      ["deny", "on-miss", "deny"],
+      ["allowlist", "on-miss", "ask"],
+    ])("converts %s + %s to mode %s", async (security, ask, mode) => {
+      const clawCmd = vi.fn(async (cmd) =>
+        cmd.startsWith("config get")
+          ? { ok: true, stdout: "{}", stderr: "" }
+          : { ok: true, stdout: "", stderr: "" },
+      );
+      const app = createApp({ clawCmd });
+      const res = await request(app)
+        .post("/api/nodes/exec-config")
+        .send({ host: "gateway", security, ask });
+      expect(res.status).toBe(200);
+      const setCall = clawCmd.mock.calls[1][0];
+      expect(setCall).toContain(`"mode":"${mode}"`);
+      expect(setCall).not.toContain('"security":');
+      expect(setCall).not.toContain('"ask":');
+    });
+
+    it("preserves unmanaged tools.exec keys on write and keeps writing when the read fails", async () => {
+      const clawCmd = vi.fn(async (cmd) =>
+        cmd.startsWith("config get")
+          ? {
+              ok: true,
+              stdout: JSON.stringify({
+                security: "full",
+                ask: "off",
+                timeoutSeconds: 300,
+                strictInlineEval: false,
+              }),
+              stderr: "",
+            }
+          : { ok: true, stdout: "", stderr: "" },
+      );
+      const app = createApp({ clawCmd });
+      const res = await request(app)
+        .post("/api/nodes/exec-config")
+        .send({ host: "gateway", security: "full", ask: "off" });
+      expect(res.status).toBe(200);
+      const setCall = clawCmd.mock.calls[1][0];
+      expect(setCall).toContain('"timeoutSeconds":300');
+      expect(setCall).toContain('"strictInlineEval":false');
+      expect(setCall).toContain('"mode":"full"');
+      // The retired keys never survive the merge.
+      expect(setCall).not.toContain('"security":');
+      expect(setCall).not.toContain('"ask":');
+
+      // A failed read degrades to an empty merge base — the write still runs.
+      const failingGet = vi.fn(async (cmd) =>
+        cmd.startsWith("config get")
+          ? { ok: false, stdout: "", stderr: "boom" }
+          : { ok: true, stdout: "", stderr: "" },
+      );
+      const app2 = createApp({ clawCmd: failingGet });
+      const res2 = await request(app2)
+        .post("/api/nodes/exec-config")
+        .send({ host: "gateway", security: "full", ask: "off" });
+      expect(res2.status).toBe(200);
+      expect(failingGet.mock.calls[1][0]).toContain('"mode":"full"');
+    });
+
+    it("GET derives the legacy pair from tools.exec.mode and reports the raw mode", async () => {
+      const clawCmd = vi.fn(async () => ({
+        ok: true,
+        stdout: JSON.stringify({ host: "gateway", mode: "auto", node: "" }),
+        stderr: "",
+      }));
+      const app = createApp({ clawCmd });
+      const res = await request(app).get("/api/nodes/exec-config");
+      expect(res.status).toBe(200);
+      // Upstream resolveExecPolicyForMode (both eras): ask/auto ⇒
+      // allowlist + on-miss. Mapping these to full-security was a security
+      // inversion (a GET→save cycle silently dropped allowlist enforcement).
+      expect(res.body.config).toEqual({
+        host: "gateway",
+        security: "allowlist",
+        ask: "on-miss",
+        node: "",
+        mode: "auto",
+      });
+    });
+
+    it("GET→POST round-trip of mode ask is stable (no policy drift)", async () => {
+      const clawCmd = vi.fn(async (cmd) =>
+        cmd.startsWith("config get")
+          ? {
+              ok: true,
+              stdout: JSON.stringify({ host: "gateway", mode: "ask", node: "" }),
+              stderr: "",
+            }
+          : { ok: true, stdout: "", stderr: "" },
+      );
+      const app = createApp({ clawCmd });
+      const getRes = await request(app).get("/api/nodes/exec-config");
+      const { host, security, ask, node } = getRes.body.config;
+      const postRes = await request(app)
+        .post("/api/nodes/exec-config")
+        .send({ host, security, ask, node });
+      expect(postRes.status).toBe(200);
+      // Saving exactly what GET displayed re-derives the same mode.
+      const setCall = clawCmd.mock.calls.at(-1)[0];
+      expect(setCall).toContain('"mode":"ask"');
+      expect(setCall).not.toContain('"security":');
+    });
+
+    it("GET lets explicit legacy keys override the mode derivation", async () => {
+      const clawCmd = vi.fn(async () => ({
+        ok: true,
+        stdout: JSON.stringify({ mode: "full", security: "deny" }),
+        stderr: "",
+      }));
+      const app = createApp({ clawCmd });
+      const res = await request(app).get("/api/nodes/exec-config");
+      expect(res.body.config.security).toBe("deny");
+      expect(res.body.config.ask).toBe("off");
+      expect(res.body.config.mode).toBe("full");
     });
   });
 
@@ -920,6 +1063,18 @@ describe("server/routes/nodes coverage", { retry: 1 }, () => {
       socket: { path: "/data/.openclaw/exec-approvals.sock", token: "sekret" },
       agents: { "*": { allowlist: [{ pattern: "git *", id: "id-1" }] } },
     };
+    // The REAL `approvals get --json` output (verified live on 2026.7.1-2 and
+    // 2026.9.1-beta.1) wraps the document: the doc lives under `file`, next
+    // to path/exists/hash/effectivePolicy. The route must unwrap it — a
+    // bare-doc fixture here previously masked a round-trip corruption bug.
+    const wrapStoreDoc = (doc) =>
+      JSON.stringify({
+        path: "/data/.openclaw/state/openclaw.sqlite#exec_approvals_config",
+        exists: true,
+        hash: "abc123",
+        file: doc,
+        effectivePolicy: { scopes: [] },
+      });
 
     const createCliHarness = ({ getResult } = {}) => {
       const fsModule = createMemoryFs();
@@ -928,7 +1083,7 @@ describe("server/routes/nodes coverage", { retry: 1 }, () => {
           return (
             getResult || {
               ok: true,
-              stdout: JSON.stringify(storeDoc),
+              stdout: wrapStoreDoc(storeDoc),
               stderr: "",
             }
           );
@@ -1065,6 +1220,47 @@ describe("server/routes/nodes coverage", { retry: 1 }, () => {
       expect(res.body).toEqual({ ok: false, error: "set exploded" });
       // Tmpfile cleaned up in the finally; legacy file never created.
       expect([...fsModule.files.keys()]).toEqual([]);
+    });
+
+    it("fails legacy WRITES closed (503) when the era is indeterminate and the CLI is unavailable", async () => {
+      // A capability-probe failure on a beta box must not let a dashboard
+      // allowlist edit CREATE exec-approvals.json — the file whose existence
+      // takes the gateway down (issue #23 fail-closed rule).
+      const fsModule = createMemoryFs();
+      const app = createApp({
+        fsModule,
+        openclawCapabilities: { get: async () => false }, // CLI "unavailable"
+        resolveExecApprovalsBackend: async () => ({
+          backend: "indeterminate",
+          signal: "indeterminate",
+          reapAllowed: false,
+        }),
+      });
+      const res = await request(app)
+        .post("/api/nodes/exec-approvals/allowlist")
+        .send({ pattern: "ls *" });
+      expect(res.status).toBe(503);
+      expect(res.body.error).toMatch(/retry/i);
+      // The legacy file was never created.
+      expect(fsModule.files.has(approvalsPath)).toBe(false);
+    });
+
+    it("still allows legacy writes on a determinate file era", async () => {
+      const fsModule = createMemoryFs();
+      const app = createApp({
+        fsModule,
+        openclawCapabilities: { get: async () => false },
+        resolveExecApprovalsBackend: async () => ({
+          backend: "file",
+          signal: "gate",
+          reapAllowed: false,
+        }),
+      });
+      const res = await request(app)
+        .post("/api/nodes/exec-approvals/allowlist")
+        .send({ pattern: "ls *" });
+      expect(res.status).toBe(200);
+      expect(fsModule.files.has(approvalsPath)).toBe(true);
     });
 
     it("falls back to the legacy file path when the capability probe throws", async () => {

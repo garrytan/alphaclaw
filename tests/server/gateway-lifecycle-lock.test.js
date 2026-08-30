@@ -37,6 +37,50 @@ describe("server/gateway-lifecycle-lock", () => {
     }
   });
 
+  it("honors a per-acquire {leaseMs} override — the lease fires at the overridden time, not the default", async () => {
+    vi.useFakeTimers();
+    try {
+      const warn = vi.fn();
+      const lock = createGatewayLifecycleLock({ leaseMs: 50, logger: { warn } });
+
+      // A boot-style holder whose operation legitimately outlives the
+      // default lease: the default expiry must NOT force-release it.
+      await lock.acquire("boot", { leaseMs: 500 });
+      await vi.advanceTimersByTimeAsync(51);
+      expect(warn).not.toHaveBeenCalled();
+      expect(lock.getActiveOperation()).toMatchObject({ kind: "boot" });
+
+      // The overridden lease still bounds the hold.
+      await vi.advanceTimersByTimeAsync(450);
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining('lease expired for "boot"'),
+      );
+      expect(lock.getActiveOperation()).toBeNull();
+
+      // tryAcquire takes the same override.
+      warn.mockClear();
+      const release = lock.tryAcquire("repair", { leaseMs: 200 });
+      expect(typeof release).toBe("function");
+      await vi.advanceTimersByTimeAsync(51);
+      expect(warn).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(150);
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining('lease expired for "repair"'),
+      );
+      expect(lock.getActiveOperation()).toBeNull();
+
+      // Omitting the option keeps the constructor default.
+      warn.mockClear();
+      await lock.acquire("restart");
+      await vi.advanceTimersByTimeAsync(51);
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining('lease expired for "restart"'),
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("grants queued acquirers strictly in FIFO order", async () => {
     const lock = createGatewayLifecycleLock({ logger: { warn: vi.fn() } });
     const order = [];

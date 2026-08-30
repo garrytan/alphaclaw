@@ -51,6 +51,7 @@ vi.mock("../../lib/public/js/lib/api.js", () => ({
   fetchOpenclawRuns: vi.fn(),
   fetchStatus: vi.fn(),
   markOpenclawGood: vi.fn(),
+  retryOpenclawReconcile: vi.fn(),
   rollbackOpenclaw: vi.fn(),
   runOpenclawRepair: vi.fn(),
   subscribeOpenclawApplyEvents: vi.fn(() => () => {}),
@@ -461,6 +462,181 @@ describe("frontend/upgrade-tab view", () => {
     );
     findButtonByText(tree, "Dismiss").props.onclick();
     expect(onDismissVerdict).toHaveBeenCalledTimes(1);
+
+    // The green (success) styling carries the banner — never the warning or
+    // failure tones.
+    const banners = collectNodes(tree).filter((vnode) =>
+      String(vnode.props?.class || "").includes("border-green-500/40"),
+    );
+    expect(banners.length).toBeGreaterThan(0);
+  });
+
+  it("renders the gateway-held verdict as a WARNING banner, never green", () => {
+    const kHeldMessage =
+      "Activated, but settings migration failed — the gateway is held. Check the notification for the exact keys, then use Retry migration.";
+    const tree = renderView({
+      channelInfo: makeChannelInfo(),
+      catalog: makeCatalog(),
+      // The restart-handoff poller builds this from the /api/status
+      // openclawChannel summary when it carries a non-null gatewayHold.
+      verdict: { ok: true, tone: "warning", message: kHeldMessage },
+    });
+
+    expect(treeText(tree)).toContain(kHeldMessage);
+    const nodes = collectNodes(tree);
+    const warningBanner = nodes.find(
+      (vnode) =>
+        String(vnode.props?.class || "").includes("border-yellow-500/40") &&
+        collectText(vnode).join(" ").includes(kHeldMessage),
+    );
+    expect(warningBanner).toBeTruthy();
+    const greenBanner = nodes.find(
+      (vnode) =>
+        String(vnode.props?.class || "").includes("border-green-500/40") &&
+        collectText(vnode).join(" ").includes(kHeldMessage),
+    );
+    expect(greenBanner).toBeUndefined();
+  });
+
+  it("renders the gateway-hold section with reason, blamed keys, and both actions", () => {
+    const onRetryReconcile = vi.fn();
+    const onRequestStripReconcile = vi.fn();
+    const tree = renderView({
+      channelInfo: makeChannelInfo({
+        gatewayHold: {
+          reason: "settings migration for 2026.8.1 failed: doctor exited 1",
+          at: kNow - 60_000,
+          operationId: "op-hold-1",
+          blamedKeys: ["gateway.oldKey", "channels.legacy"],
+        },
+      }),
+      catalog: makeCatalog(),
+      onRetryReconcile,
+      onRequestStripReconcile,
+    });
+
+    const text = treeText(tree);
+    expect(text).toContain("Settings migration needs attention");
+    expect(text).toContain(
+      "settings migration for 2026.8.1 failed: doctor exited 1",
+    );
+    expect(text).toContain("gateway.oldKey");
+    expect(text).toContain("channels.legacy");
+
+    findActionButtonByLabel(tree, "Retry migration").props.onClick();
+    expect(onRetryReconcile).toHaveBeenCalledTimes(1);
+
+    // The strip CTA never fires the retry directly — it only OPENS the
+    // confirm dialog (which is not on screen yet).
+    findActionButtonByLabel(tree, "Strip blamed keys and retry").props.onClick();
+    expect(onRequestStripReconcile).toHaveBeenCalledTimes(1);
+    expect(text).not.toContain("Strip blamed keys and retry?");
+  });
+
+  it("hides the strip action when the validator parsed no keys", () => {
+    const tree = renderView({
+      channelInfo: makeChannelInfo({
+        gatewayHold: {
+          reason: "migration failed",
+          at: kNow,
+          operationId: null,
+          blamedKeys: [],
+        },
+      }),
+      catalog: makeCatalog(),
+    });
+
+    expect(findActionButtonByLabel(tree, "Retry migration")).toBeTruthy();
+    expect(
+      findActionButtonByLabel(tree, "Strip blamed keys and retry"),
+    ).toBeUndefined();
+  });
+
+  it("strip goes through a confirm dialog with the exact count, backup, and protected-keys copy", () => {
+    const onConfirmStripReconcile = vi.fn();
+    const onCancelStripReconcile = vi.fn();
+    const tree = renderView({
+      channelInfo: makeChannelInfo({
+        gatewayHold: {
+          reason: "migration failed",
+          at: kNow,
+          operationId: null,
+          blamedKeys: ["gateway.oldKey", "channels.legacy"],
+        },
+      }),
+      catalog: makeCatalog(),
+      stripReconcilePrompt: true,
+      onConfirmStripReconcile,
+      onCancelStripReconcile,
+    });
+
+    const text = treeText(tree);
+    expect(text).toContain("Strip blamed keys and retry?");
+    expect(text).toContain(
+      "Remove the 2 setting keys OpenClaw's validator rejected? A backup was saved before migration; protected security settings are never removable.",
+    );
+
+    const stripConfirm = findActionButtonByLabel(tree, "Strip and retry");
+    // Destructive-confirm convention: stripping keys deletes user data
+    // (backup-mitigated), so the confirm is danger like RollbackConfirmDialog.
+    expect(stripConfirm.props.tone).toBe("danger");
+    stripConfirm.props.onClick();
+    expect(onConfirmStripReconcile).toHaveBeenCalledTimes(1);
+
+    findActionButtonByLabel(tree, "Cancel").props.onClick();
+    expect(onCancelStripReconcile).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows the retry in flight and disables the sibling strip action", () => {
+    const tree = renderView({
+      channelInfo: makeChannelInfo({
+        gatewayHold: {
+          reason: "migration failed",
+          at: kNow,
+          operationId: null,
+          blamedKeys: ["gateway.oldKey"],
+        },
+      }),
+      catalog: makeCatalog(),
+      retryingReconcile: "retry",
+      actionsDisabled: true,
+    });
+
+    const retry = findActionButtonByLabel(tree, "Retry migration");
+    expect(retry.props.loading).toBe(true);
+    const strip = findActionButtonByLabel(tree, "Strip blamed keys and retry");
+    expect(strip.props.disabled).toBe(true);
+    expect(strip.props.loading).toBe(false);
+  });
+
+  it("renders the still-held reason inline in the hold card with a Dismiss", () => {
+    const onDismissReconcileError = vi.fn();
+    const tree = renderView({
+      channelInfo: makeChannelInfo({
+        gatewayHold: {
+          reason: "migration failed",
+          at: kNow,
+          operationId: null,
+          blamedKeys: ["gateway.oldKey"],
+        },
+      }),
+      catalog: makeCatalog(),
+      reconcileError: {
+        headline: "Migration is still held: doctor exited 1 again",
+        error: null,
+      },
+      onDismissReconcileError,
+    });
+
+    expect(treeText(tree)).toContain(
+      "Migration is still held: doctor exited 1 again",
+    );
+    const dismiss = findAllByType(tree, "button").find(
+      (vnode) =>
+        collectText(vnode).join(" ").includes("Dismiss") &&
+        vnode.props.onclick === onDismissReconcileError,
+    );
+    expect(dismiss).toBeTruthy();
   });
 
   it("shows the STABILIZING badge with the Mark-as-good button and caption (U7)", () => {
@@ -635,6 +811,60 @@ describe("frontend/upgrade-tab view", () => {
 
     findActionButtonByLabel(tree, "Cancel").props.onClick();
     expect(onCancelRollback).toHaveBeenCalledTimes(1);
+  });
+
+  it("renders the second-stage data-risk confirm with the server's message and the verified backup file (#20)", () => {
+    const onConfirmRollbackDataRisk = vi.fn();
+    const onCancelRollbackDataRisk = vi.fn();
+    const tree = renderView({
+      channelInfo: makeChannelInfo(),
+      catalog: makeCatalog(),
+      rollbackDataRisk: {
+        message:
+          "This update migrated your state databases — the rollback target may not be able to read them.",
+        backupFile: "backup-2026-08-29.tar.gz",
+      },
+      onConfirmRollbackDataRisk,
+      onCancelRollbackDataRisk,
+    });
+
+    const text = treeText(tree);
+    expect(text).toContain("Roll back despite migrated data?");
+    // The server's 409 message renders verbatim; the guidance line names the
+    // verified pre-update backup to restore first.
+    expect(text).toContain(
+      "This update migrated your state databases — the rollback target may not be able to read them.",
+    );
+    expect(text).toContain(
+      "Restore the verified pre-update backup first (backup-2026-08-29.tar.gz), or roll back anyway — data written by the newer version may be unreadable.",
+    );
+
+    const confirmButton = findActionButtonByLabel(tree, "Roll back anyway");
+    expect(confirmButton).toBeTruthy();
+    expect(confirmButton.props.tone).toBe("danger");
+    confirmButton.props.onClick();
+    expect(onConfirmRollbackDataRisk).toHaveBeenCalledTimes(1);
+
+    findActionButtonByLabel(tree, "Cancel").props.onClick();
+    expect(onCancelRollbackDataRisk).toHaveBeenCalledTimes(1);
+  });
+
+  it("falls back to the no-backup data-risk line when the server recorded none", () => {
+    const tree = renderView({
+      channelInfo: makeChannelInfo(),
+      catalog: makeCatalog(),
+      rollbackDataRisk: { message: null, backupFile: null },
+    });
+
+    const text = treeText(tree);
+    expect(text).toContain("Roll back despite migrated data?");
+    // Message fallback for older servers that omit the envelope message.
+    expect(text).toContain(
+      "This update migrated your state databases — the rollback target may not be able to read them.",
+    );
+    expect(text).toContain(
+      "No verified pre-update backup is recorded — data written by the newer version may be unreadable if you roll back anyway.",
+    );
   });
 
   it("a segment change goes straight to onSelectChannel — no dialog in between (U1)", () => {
@@ -1822,6 +2052,76 @@ describe("frontend/upgrade-tab hook", () => {
     expect(api.rollbackOpenclaw).not.toHaveBeenCalled();
   });
 
+  it("a 409 rollback fence opens the data-risk dialog naming the backup — never the error chip (#20)", async () => {
+    const fenceError = Object.assign(
+      new Error(
+        "This update migrated your state databases — the rollback target may not be able to read them.",
+      ),
+      {
+        code: "rollback_requires_confirmation",
+        status: 409,
+        backupFile: "backup-2026-08-29.tar.gz",
+      },
+    );
+    api.rollbackOpenclaw.mockRejectedValueOnce(fenceError);
+    api.rollbackOpenclaw.mockResolvedValueOnce({ ok: true, target: { kind: "pin" } });
+    let state = await hydrate();
+    state.onRequestRollback();
+    state = renderHook({});
+
+    await state.onRollback();
+    expect(api.rollbackOpenclaw).toHaveBeenCalledWith({});
+
+    state = renderHook({});
+    // The fence is a consent gate, not a failure: no chip, no operation.
+    expect(state.actionError).toBeNull();
+    expect(state.operation).toBeNull();
+    expect(state.rollingBack).toBe(false);
+    expect(state.rollbackDataRisk).toEqual({
+      message:
+        "This update migrated your state databases — the rollback target may not be able to read them.",
+      backupFile: "backup-2026-08-29.tar.gz",
+    });
+
+    // Confirming re-sends the rollback WITH consent and hands off to the
+    // restart poller like a first-attempt success.
+    await state.onConfirmRollbackDataRisk();
+    expect(api.rollbackOpenclaw).toHaveBeenCalledTimes(2);
+    expect(api.rollbackOpenclaw).toHaveBeenLastCalledWith({
+      confirmDataRisk: true,
+    });
+    state = renderHook({});
+    expect(state.rollbackDataRisk).toBeNull();
+    expect(state.operation).toEqual(
+      expect.objectContaining({ phase: "restarting", label: "2026.7.1-2" }),
+    );
+  });
+
+  it("cancelling the data-risk dialog closes it without re-calling the API", async () => {
+    api.rollbackOpenclaw.mockRejectedValue(
+      Object.assign(new Error("migrated"), {
+        code: "rollback_requires_confirmation",
+        status: 409,
+        backupFile: null,
+      }),
+    );
+    let state = await hydrate();
+    state.onRequestRollback();
+    state = renderHook({});
+    await state.onRollback();
+    state = renderHook({});
+    expect(state.rollbackDataRisk).toEqual({
+      message: "migrated",
+      backupFile: null,
+    });
+
+    state.onCancelRollbackDataRisk();
+    state = renderHook({});
+    expect(state.rollbackDataRisk).toBeNull();
+    expect(api.rollbackOpenclaw).toHaveBeenCalledTimes(1);
+    expect(state.operation).toBeNull();
+  });
+
   it("surfaces a rejected rollback as a persistent inline action error (never toast-only)", async () => {
     const envelopeError = Object.assign(
       new Error("no rollback target available"),
@@ -2446,5 +2746,205 @@ describe("frontend/upgrade-tab repair (2.3)", () => {
     );
     state = await hydrate();
     expect(state.repairAvailable).toBe(true);
+  });
+});
+
+describe("frontend/upgrade-tab gateway-hold recovery", () => {
+  const flushAsync = async () => {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  };
+
+  const renderHook = (props = {}) => {
+    harness.beginRender();
+    return useUpgradeTab(props);
+  };
+
+  const hydrate = async (props = {}) => {
+    let state = renderHook(props);
+    harness.effects[0]();
+    await flushAsync();
+    state = renderHook(props);
+    return state;
+  };
+
+  beforeEach(() => {
+    harness.reset();
+    // Drop the module-level api-cache so each case's fresh channel/catalog
+    // mocks win instead of a prior test's cached (dev/beta) payload.
+    invalidateCache("/api/openclaw/channel");
+    invalidateCache("/api/openclaw/catalog");
+    api.fetchOpenclawChannel.mockResolvedValue(makeChannelInfo());
+    api.fetchOpenclawCatalog.mockResolvedValue({
+      ok: true,
+      catalog: makeCatalog(),
+      channel: { releaseChannel: "stable" },
+    });
+    api.fetchOpenclawRuns.mockResolvedValue({ ok: true, runs: [] });
+    api.subscribeOpenclawApplyEvents.mockImplementation(() => () => {});
+  });
+
+  afterEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("Retry migration calls the reconcile api and reloads the channel on success", async () => {
+    const onRefreshStatuses = vi.fn();
+    api.retryOpenclawReconcile.mockResolvedValue({
+      ok: true,
+      outcome: { status: "ok" },
+    });
+    let state = await hydrate({ onRefreshStatuses });
+    api.fetchOpenclawChannel.mockClear();
+    onRefreshStatuses.mockClear();
+
+    await state.onRetryReconcile();
+
+    expect(api.retryOpenclawReconcile).toHaveBeenCalledWith({});
+    // The hold lives on the channel payload — success re-reads it and
+    // refreshes the shared /api/status consumers (matches onMarkGood).
+    expect(api.fetchOpenclawChannel).toHaveBeenCalled();
+    expect(onRefreshStatuses).toHaveBeenCalled();
+    state = renderHook({ onRefreshStatuses });
+    expect(state.retryingReconcile).toBeNull();
+    expect(state.reconcileError).toBeNull();
+  });
+
+  it("the strip confirm consents with stripBlamedKeys: true — the prompt alone calls nothing", async () => {
+    api.retryOpenclawReconcile.mockResolvedValue({
+      ok: true,
+      outcome: { status: "ok" },
+    });
+    let state = await hydrate();
+
+    state.onRequestStripReconcile();
+    state = renderHook({});
+    expect(state.stripReconcilePrompt).toBe(true);
+    expect(api.retryOpenclawReconcile).not.toHaveBeenCalled();
+
+    // Cancel closes the prompt without consenting.
+    state.onCancelStripReconcile();
+    state = renderHook({});
+    expect(state.stripReconcilePrompt).toBe(false);
+    expect(api.retryOpenclawReconcile).not.toHaveBeenCalled();
+
+    state.onRequestStripReconcile();
+    state = renderHook({});
+    await state.onConfirmStripReconcile();
+    expect(api.retryOpenclawReconcile).toHaveBeenCalledWith({
+      stripBlamedKeys: true,
+    });
+    state = renderHook({});
+    expect(state.stripReconcilePrompt).toBe(false);
+  });
+
+  it("a 409 still-held response surfaces the fresh hold reason inline", async () => {
+    api.retryOpenclawReconcile.mockRejectedValue(
+      Object.assign(new Error("Could not retry the settings migration"), {
+        code: "reconcile_still_held",
+        status: 409,
+        outcome: {
+          status: "held",
+          hold: {
+            reason: "doctor exited 1 again",
+            blamedKeys: ["gateway.oldKey"],
+          },
+        },
+      }),
+    );
+    let state = await hydrate();
+
+    await state.onRetryReconcile();
+
+    state = renderHook({});
+    expect(state.reconcileError).toEqual({
+      headline: "Migration is still held: doctor exited 1 again",
+      error: null,
+    });
+    expect(state.retryingReconcile).toBeNull();
+
+    state.onDismissReconcileError();
+    state = renderHook({});
+    expect(state.reconcileError).toBeNull();
+  });
+
+  it("a non-409 retry failure keeps the error envelope for the inline chip", async () => {
+    const err = Object.assign(new Error("network down"), {
+      code: "reconcile_unavailable",
+      status: 501,
+    });
+    api.retryOpenclawReconcile.mockRejectedValue(err);
+    let state = await hydrate();
+
+    await state.onRetryReconcile();
+
+    state = renderHook({});
+    expect(state.reconcileError).toEqual({
+      headline: "Couldn't retry the settings migration.",
+      error: err,
+    });
+  });
+
+  it("the route's other 409 codes keep the SERVER message on the chip, never a bare generic string", async () => {
+    // reconcile_skipped / reconcile_not_needed carry a server-set message and
+    // hint — the hook must hand the whole error to the InlineErrorChip so
+    // err.message renders under the headline.
+    const err = Object.assign(
+      new Error("The gateway is running and no hold is set."),
+      {
+        code: "reconcile_not_needed",
+        hint: "Nothing to retry — the doctor never touches live databases.",
+        status: 409,
+      },
+    );
+    api.retryOpenclawReconcile.mockRejectedValue(err);
+    let state = await hydrate();
+
+    await state.onRetryReconcile();
+
+    state = renderHook({});
+    expect(state.reconcileError).toEqual({
+      headline: "Couldn't retry the settings migration.",
+      error: err,
+    });
+    expect(state.reconcileError.error.message).toBe(
+      "The gateway is running and no hold is set.",
+    );
+  });
+
+  it("a succeeded migration with a failed gateway relaunch is not a silent success", async () => {
+    api.retryOpenclawReconcile.mockResolvedValue({
+      ok: true,
+      outcome: { status: "ok" },
+      gatewayStart: { ok: false, error: "spawn ENOENT" },
+    });
+    let state = await hydrate();
+
+    await state.onRetryReconcile();
+
+    state = renderHook({});
+    expect(state.reconcileError).toEqual({
+      headline: "Settings migration succeeded, but the gateway failed to start.",
+      error: { message: "spawn ENOENT" },
+    });
+  });
+
+  it("retryingReconcile disables the page's actions while a retry is in flight", async () => {
+    let resolveRetry;
+    api.retryOpenclawReconcile.mockImplementation(
+      () => new Promise((resolve) => (resolveRetry = resolve)),
+    );
+    let state = await hydrate();
+    expect(state.actionsDisabled).toBe(false);
+
+    const retrying = state.onRetryReconcile();
+    state = renderHook({});
+    expect(state.retryingReconcile).toBe("retry");
+    expect(state.actionsDisabled).toBe(true);
+
+    resolveRetry({ ok: true, outcome: { status: "ok" } });
+    await retrying;
+    state = renderHook({});
+    expect(state.retryingReconcile).toBeNull();
+    expect(state.actionsDisabled).toBe(false);
   });
 });

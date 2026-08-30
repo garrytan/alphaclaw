@@ -246,6 +246,76 @@ describe("server/gateway restart behavior", () => {
     }
   });
 
+  it("applies ALPHACLAW_GATEWAY_MAX_OLD_SPACE_SIZE to the daemon launch env only (issue #24)", () => {
+    const previousCap = process.env.ALPHACLAW_GATEWAY_MAX_OLD_SPACE_SIZE;
+    const previousNodeOptions = process.env.NODE_OPTIONS;
+    try {
+      delete process.env.NODE_OPTIONS;
+      process.env.ALPHACLAW_GATEWAY_MAX_OLD_SPACE_SIZE = "8192";
+      delete require.cache[modulePath];
+      const gateway = require(modulePath);
+
+      // The long-running daemon gets the operator's explicit cap…
+      expect(gateway.gatewayLaunchEnv().NODE_OPTIONS).toBe(
+        "--max-old-space-size=8192",
+      );
+      // …but plain gatewayEnv (every short-lived openclaw CLI child) does not.
+      expect(gateway.gatewayEnv().NODE_OPTIONS).toBeUndefined();
+
+      // The cap appends to surviving (non-memory) inherited flags.
+      process.env.NODE_OPTIONS = "--enable-source-maps --max-old-space-size=768";
+      expect(gateway.gatewayLaunchEnv().NODE_OPTIONS).toBe(
+        "--enable-source-maps --max-old-space-size=8192",
+      );
+
+      // Invalid values are ignored — no flag, no crash.
+      process.env.ALPHACLAW_GATEWAY_MAX_OLD_SPACE_SIZE = "lots";
+      delete process.env.NODE_OPTIONS;
+      expect(gateway.gatewayLaunchEnv().NODE_OPTIONS).toBeUndefined();
+    } finally {
+      if (previousCap === undefined) {
+        delete process.env.ALPHACLAW_GATEWAY_MAX_OLD_SPACE_SIZE;
+      } else {
+        process.env.ALPHACLAW_GATEWAY_MAX_OLD_SPACE_SIZE = previousCap;
+      }
+      if (previousNodeOptions === undefined) delete process.env.NODE_OPTIONS;
+      else process.env.NODE_OPTIONS = previousNodeOptions;
+    }
+  });
+
+  it("warns once per distinct stripped memory-flag set, naming the dropped tokens", () => {
+    const previousNodeOptions = process.env.NODE_OPTIONS;
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      process.env.NODE_OPTIONS = "--max-old-space-size=8192 --enable-source-maps";
+      delete require.cache[modulePath];
+      const gateway = require(modulePath);
+
+      gateway.gatewayEnv();
+      gateway.gatewayEnv();
+      const stripWarnings = warnSpy.mock.calls.filter(([line]) =>
+        String(line).includes("Stripped Node memory flag"),
+      );
+      // Once, not per call — gatewayEnv runs on every spawn/status path.
+      expect(stripWarnings).toHaveLength(1);
+      expect(stripWarnings[0][0]).toContain("--max-old-space-size=8192");
+      expect(stripWarnings[0][0]).toContain("ALPHACLAW_GATEWAY_MAX_OLD_SPACE_SIZE");
+
+      // A DIFFERENT stripped set warns again.
+      process.env.NODE_OPTIONS = "--max-semi-space-size=64";
+      gateway.gatewayEnv();
+      expect(
+        warnSpy.mock.calls.filter(([line]) =>
+          String(line).includes("Stripped Node memory flag"),
+        ),
+      ).toHaveLength(2);
+    } finally {
+      warnSpy.mockRestore();
+      if (previousNodeOptions === undefined) delete process.env.NODE_OPTIONS;
+      else process.env.NODE_OPTIONS = previousNodeOptions;
+    }
+  });
+
   it("stopGatewayChild reaps a live managed gateway and is a safe no-op otherwise", async () => {
     // VPS restarts respawn detached + exit(0), skipping the SIGTERM handlers
     // that normally reap the managed child; server.js calls stopGatewayChild()
@@ -1713,6 +1783,72 @@ describe("server/gateway restart behavior", () => {
         expect.objectContaining({ encoding: "utf8", timeout: 5000 }),
         expect.any(Function),
       );
+    });
+
+    it("stopGatewayForBackup marks the exit expected, swallows CLI stop failures, and reports the stop verdict", async () => {
+      const child = createChild();
+      child.kill = vi.fn((sig) => {
+        child.killed = true;
+        // Signal deaths set signalCode and leave exitCode null (real Node
+        // semantics) so the reap wait settles without polling its budget.
+        child.signalCode = sig;
+        return true;
+      });
+      childProcess.spawn = vi.fn(() => child);
+      let stopCalls = 0;
+      childProcess.execFile = vi.fn((file, args, opts, cb) => {
+        if (args?.[0] === "gateway" && args?.[1] === "stop") {
+          stopCalls += 1;
+          // The external best-effort stop fails — quiesce must proceed on
+          // the port verdict, never throw.
+          cb(Object.assign(new Error("stop timed out"), { code: 1 }), "", "");
+          return;
+        }
+        cb(null, "", "");
+      });
+      fs.existsSync = vi.fn(() => false);
+      net.createConnection = vi.fn(() => createSocket(false));
+      delete require.cache[modulePath];
+      const gateway = require(modulePath);
+      vi.spyOn(console, "log").mockImplementation(() => {});
+      const exitHandler = vi.fn();
+      gateway.setGatewayExitHandler(exitHandler);
+
+      await gateway.launchGatewayProcess();
+      const verdict = await gateway.stopGatewayForBackup();
+
+      // The port released → waitForGatewayStopped's verdict rides through.
+      expect(verdict).toBe(true);
+      // The CLI stop ran once and its failure was swallowed (best-effort).
+      expect(stopCalls).toBe(1);
+
+      // The managed exit was marked expected BEFORE the kill: the watchdog
+      // must not count the quiesce as a crash.
+      const onExit = child.on.mock.calls.find((call) => call[0] === "exit")[1];
+      onExit(null, "SIGTERM");
+      expect(exitHandler).toHaveBeenCalledWith(
+        expect.objectContaining({ expectedExit: true }),
+      );
+
+      // Unlike stopGatewayForShutdown, the one-way abortGatewayWaits latch
+      // did NOT flip: the relaunch that follows the backup still spawns.
+      const relaunched = await gateway.launchGatewayProcess();
+      expect(relaunched).toBeTruthy();
+      expect(childProcess.spawn).toHaveBeenCalledTimes(2);
+    });
+
+    it("stopGatewayForBackup reports false when the port never releases", async () => {
+      childProcess.execFile = execFileOk("");
+      fs.existsSync = vi.fn(() => false);
+      // The old gateway keeps the port for the whole (tiny) settle window.
+      net.createConnection = vi.fn(() => createSocket(true));
+      delete require.cache[modulePath];
+      const gateway = require(modulePath);
+      vi.spyOn(console, "log").mockImplementation(() => {});
+
+      const verdict = await gateway.stopGatewayForBackup({ timeoutMs: 1 });
+
+      expect(verdict).toBe(false);
     });
 
     it("escalates to SIGKILL when the gateway child ignores SIGTERM", async () => {

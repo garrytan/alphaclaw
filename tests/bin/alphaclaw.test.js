@@ -66,6 +66,146 @@ describe("bin/alphaclaw port check", () => {
     expect(output).not.toContain("Node.js 22.22.2 is not supported");
   });
 
+  it("generates an operator-shell openclaw wrapper that works under POSIX sh without the dev shim", () => {
+    // The wrapper is #!/bin/sh; its PATH fallback must be POSIX (an earlier
+    // revision used `command -v -a`, which dash/bash-as-sh reject — every
+    // non-dev-channel box got a wrapper that exits 127 in front of a
+    // perfectly good openclaw).
+    const wrapperPath = path.join(tmpDir, "wrapper", "openclaw");
+    const profilePath = path.join(tmpDir, "profile.d", "alphaclaw-openclaw.sh");
+    fs.mkdirSync(path.dirname(wrapperPath), { recursive: true });
+    fs.mkdirSync(path.dirname(profilePath), { recursive: true });
+    // A "real" openclaw further down PATH (the pin install; no dev shim).
+    const realBinDir = path.join(tmpDir, "realbin");
+    fs.mkdirSync(realBinDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(realBinDir, "openclaw"),
+      [
+        "#!/bin/sh",
+        'printf "REAL_OPENCLAW args=%s OPENCLAW_STATE_DIR=%s\n" "$*" "${OPENCLAW_STATE_DIR:-}"',
+      ].join("\n"),
+      { mode: 0o755 },
+    );
+
+    // Intercept the final lib/server.js require so `start` runs the whole
+    // launcher (incl. the wrapper install) without booting a real server.
+    const interceptPreload = path.join(tmpDir, "intercept-server-load.js");
+    fs.writeFileSync(
+      interceptPreload,
+      `
+Object.defineProperty(process.versions, "node", { value: "22.22.3" });
+const Module = require("module");
+const realLoad = Module._load;
+Module._load = function (request, parent, isMain) {
+  if (typeof request === "string" && /lib[\\/]server(\.js)?$/.test(request)) {
+    process.exit(0);
+  }
+  return realLoad.apply(this, arguments);
+};
+`,
+    );
+    try {
+      execSync(`node --require="${interceptPreload}" "${binPath}" start`, {
+        stdio: "pipe",
+        encoding: "utf8",
+        timeout: 60000,
+        env: {
+          ...process.env,
+          ALPHACLAW_ROOT_DIR: tmpDir,
+          ALPHACLAW_OPENCLAW_WRAPPER_PATH: wrapperPath,
+          ALPHACLAW_PROFILE_SNIPPET_PATH: profilePath,
+          SETUP_PASSWORD: "test-password",
+          PORT: "3999",
+          ALPHACLAW_SKIP_SYSTEM_CRON_INSTALL: "true",
+          HOME: tmpHome,
+        },
+      });
+    } catch {
+      // Any nonzero exit after the wrapper install is irrelevant here.
+    }
+
+    expect(fs.existsSync(wrapperPath)).toBe(true);
+    const wrapperText = fs.readFileSync(wrapperPath, "utf8");
+    expect(wrapperText).not.toContain("command -v -a");
+
+    // Execute the generated wrapper under sh: no shim exists, so the PATH
+    // walk must find the real openclaw (skipping the wrapper itself) and the
+    // managed env must be exported.
+    const output = execSync(`sh "${wrapperPath}" status --json`, {
+      encoding: "utf8",
+      timeout: 15000,
+      env: {
+        PATH: `${path.dirname(wrapperPath)}${path.delimiter}${realBinDir}${path.delimiter}${process.env.PATH}`,
+      },
+    });
+    expect(output).toContain("REAL_OPENCLAW args=status --json");
+    expect(output).toContain(`OPENCLAW_STATE_DIR=${path.join(tmpDir, ".openclaw")}`);
+
+    // The install outcome is persisted, never silent.
+    const outcome = JSON.parse(
+      fs.readFileSync(
+        path.join(tmpDir, ".openclaw", ".alphaclaw", "operator-shell-env.json"),
+        "utf8",
+      ),
+    );
+    expect(outcome.wrapper).toContain("installed");
+    expect(outcome.profileSnippet).toContain("installed");
+    expect(fs.readFileSync(profilePath, "utf8")).toContain("OPENCLAW_STATE_DIR=");
+  });
+
+  it("exports the OpenClaw state env for non-start verbs and leaves HOME alone", () => {
+    // Issue #25: every CLI verb (git-sync, admin, telegram ...) can shell
+    // `openclaw` or spawn children that do; without OPENCLAW_STATE_DIR those
+    // resolve ~/.openclaw and, on >= 2026.9.1-beta.1, build a divergent
+    // second state database. `start` already exported the vars (test below);
+    // this guards the verb path. HOME must stay untouched for verbs: hoisting
+    // it would reroute git config/SSH for git-sync and npm for updates.
+    const capturePath = path.join(tmpDir, "captured-verb-env.json");
+    const preloadPath = path.join(tmpDir, "capture-verb-env.js");
+    fs.writeFileSync(
+      preloadPath,
+      `
+Object.defineProperty(process.versions, "node", { value: "22.22.3" });
+const fs = require("fs");
+process.on("exit", () => {
+  fs.writeFileSync(process.env.ALPHACLAW_CAPTURE_ENV_PATH, JSON.stringify({
+    OPENCLAW_HOME: process.env.OPENCLAW_HOME,
+    OPENCLAW_STATE_DIR: process.env.OPENCLAW_STATE_DIR,
+    OPENCLAW_CONFIG_PATH: process.env.OPENCLAW_CONFIG_PATH,
+    HOME: process.env.HOME,
+    XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME,
+  }));
+});
+`,
+    );
+
+    try {
+      execSync(`node --require="${preloadPath}" "${binPath}" git-sync`, {
+        stdio: "pipe",
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          ALPHACLAW_ROOT_DIR: tmpDir,
+          ALPHACLAW_CAPTURE_ENV_PATH: capturePath,
+          HOME: tmpHome,
+          XDG_CONFIG_HOME: "",
+        },
+      });
+    } catch {
+      // git-sync exits 1 (missing --message) AFTER the env hoist — expected.
+    }
+
+    const reported = JSON.parse(fs.readFileSync(capturePath, "utf8"));
+    expect(reported.OPENCLAW_HOME).toBe(tmpDir);
+    expect(reported.OPENCLAW_STATE_DIR).toBe(path.join(tmpDir, ".openclaw"));
+    expect(reported.OPENCLAW_CONFIG_PATH).toBe(
+      path.join(tmpDir, ".openclaw", "openclaw.json"),
+    );
+    // Verb paths never touch HOME/XDG_CONFIG_HOME (start does — separately).
+    expect(reported.HOME).toBe(tmpHome);
+    expect(reported.XDG_CONFIG_HOME || "").toBe("");
+  });
+
   it("exits with error if PORT env var is 18789", () => {
     let output = "";
     let status = 0;

@@ -5,11 +5,37 @@ REPO="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO"
 
 # Load persisted env vars when running under cron's minimal environment.
+# Parsed line-by-line, NEVER sourced (issue #26): under `set -e`, sourcing a
+# value with spaces (NODE_OPTIONS=--max-old-space-size=8192 --heapsnapshot-…)
+# made bash execute the trailing tokens and abort the entire sync with one
+# unread log line — and $(…) in any value executed as root. Only an allowlist
+# is exported: startup-sensitive vars (NODE_OPTIONS, LD_PRELOAD, GIT_*)
+# exported here would take effect when this script launches node/git — BEFORE
+# alphaclaw's JS dotenv loader runs — turning an .env write into root code
+# execution. The `alphaclaw git-sync` child re-loads the full .env itself, so
+# nothing functional is lost. Values keep spaces; one layer of matching
+# surrounding quotes is stripped; nothing is ever expanded or executed.
+# NOTE: keep in sync with the twin parser in lib/scripts/git (git shim).
 if [[ -f "$REPO/.env" ]]; then
-  set -a
-  # shellcheck disable=SC1091
-  source "$REPO/.env"
-  set +a
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    case "$line" in
+      ''|\#*) continue ;;
+    esac
+    key="${line%%=*}"
+    val="${line#*=}"
+    if [[ "$key" == "$line" ]]; then continue; fi
+    if [[ ! "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then continue; fi
+    case "$key" in
+      GITHUB_TOKEN|GITHUB_WORKSPACE_REPO|ALPHACLAW_*|OPENCLAW_*) ;;
+      *) continue ;;
+    esac
+    if [[ ${#val} -ge 2 && "$val" == \"*\" && "$val" == *\" ]]; then
+      val="${val:1:${#val}-2}"
+    elif [[ ${#val} -ge 2 && "$val" == \'*\' && "$val" == *\' ]]; then
+      val="${val:1:${#val}-2}"
+    fi
+    export "$key=$val"
+  done < "$REPO/.env"
 fi
 
 if [[ -f "$REPO/cron/system-sync.json" ]]; then

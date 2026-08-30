@@ -31,6 +31,7 @@ const createStack = ({
   configMedic = null,
   releaseChannelHooks = null,
   medicRunBudgetMs = undefined,
+  medicLockWaitMs = undefined,
   gatewayLifecycleLock = null,
   readConfigMtimeMs = undefined,
 } = {}) => {
@@ -99,6 +100,7 @@ const createStack = ({
     configMedic,
     ...(releaseChannelHooks ? { releaseChannelHooks } : {}),
     ...(medicRunBudgetMs === undefined ? {} : { medicRunBudgetMs }),
+    ...(medicLockWaitMs === undefined ? {} : { medicLockWaitMs }),
     ...(gatewayLifecycleLock ? { gatewayLifecycleLock } : {}),
     ...(readConfigMtimeMs ? { readConfigMtimeMs } : {}),
   });
@@ -327,6 +329,78 @@ describe("server/watchdog gateway hardening (e2e)", () => {
 
       // It reappears with a fresh mtime: one retry.
       mtimeRef.value = 500;
+      await stack.watchdog.runHealthCheck({ source: "health_timer" });
+      await flushMicrotasks();
+      expect(stack.launchGatewayProcess).toHaveBeenCalledTimes(1);
+      stack.watchdog.stop();
+    });
+
+    it("fails closed when the gateway-hold read errors: no retry that tick, retry once the read heals", async () => {
+      // adv-9: channelInfo() maps a read ERROR to null — the same value as
+      // "no hold" — so a transient state-file read error plus a changed mtime
+      // used to re-arm a blind relaunch of the exact config the hold rejects.
+      const mtimeRef = { value: 100 };
+      const holdRead = { fail: true };
+      const stack = createStack({
+        readConfigMtimeMs: () => mtimeRef.value,
+        releaseChannelHooks: {
+          getInfo: vi.fn(() => {
+            if (holdRead.fail) throw new Error("state file torn");
+            return {
+              isPin: true,
+              inStabilizationWindow: false,
+              gatewayHold: null,
+            };
+          }),
+          requestRollback: vi.fn(),
+        },
+      });
+      latchWithExit78(stack);
+      await flushMicrotasks();
+      expect(stack.watchdog.getStatus().lifecycle).toBe("configuration_error");
+
+      // Read error + changed mtime: the guard cannot tell "no hold" from
+      // "unreadable hold" — it must skip the relaunch this tick.
+      mtimeRef.value = 200;
+      await stack.watchdog.runHealthCheck({ source: "health_timer" });
+      expect(stack.launchGatewayProcess).not.toHaveBeenCalled();
+      expect(stack.watchdog.getStatus().lifecycle).toBe("configuration_error");
+
+      // The next tick's read heals and records no hold: the pending config
+      // change retries exactly once.
+      holdRead.fail = false;
+      stack.gateway.healthy = true;
+      await stack.watchdog.runHealthCheck({ source: "health_timer" });
+      await flushMicrotasks();
+      expect(stack.launchGatewayProcess).toHaveBeenCalledTimes(1);
+      stack.watchdog.stop();
+    });
+
+    it("keeps the latch inert under a recorded gateway hold and retries once it clears", async () => {
+      // Recovery from a hold goes through reconcile-retry, which validates
+      // before launching — the mtime auto-retry must not race the doctor.
+      const mtimeRef = { value: 100 };
+      const holdRef = { value: { reason: "settings migration failed" } };
+      const stack = createStack({
+        readConfigMtimeMs: () => mtimeRef.value,
+        releaseChannelHooks: {
+          getInfo: vi.fn(() => ({
+            isPin: true,
+            inStabilizationWindow: false,
+            gatewayHold: holdRef.value,
+          })),
+          requestRollback: vi.fn(),
+        },
+      });
+      latchWithExit78(stack);
+      await flushMicrotasks();
+
+      mtimeRef.value = 200;
+      await stack.watchdog.runHealthCheck({ source: "health_timer" });
+      expect(stack.launchGatewayProcess).not.toHaveBeenCalled();
+
+      holdRef.value = null;
+      stack.gateway.healthy = true;
       await stack.watchdog.runHealthCheck({ source: "health_timer" });
       await flushMicrotasks();
       expect(stack.launchGatewayProcess).toHaveBeenCalledTimes(1);
@@ -572,20 +646,100 @@ describe("server/watchdog gateway hardening (e2e)", () => {
       watchdog.stop();
     });
 
-    it("latches instead of running while another operation holds the lifecycle lock, without burning an attempt", async () => {
+    // Load-bearing invariant for the backup quiesce (issues #11/#18): a
+    // gateway exit during a managed operation schedules a relaunch 10s later
+    // (watchdog.js onGatewayExit), and ONLY a held lifecycle lock blocks it.
+    // The quiesce deliberately stops the gateway while holding that lock —
+    // if someone "simplifies" restartAfterCrash's tryAcquire gate, the
+    // watchdog would relaunch the gateway mid-backup and resurrect the
+    // vanished-file race this whole design exists to kill.
+    it("holds the 10s managed-operation relaunch while the lifecycle lock is held elsewhere", async () => {
+      vi.useFakeTimers();
+      try {
+        const {
+          createGatewayLifecycleLock,
+        } = require("../../lib/server/gateway-lifecycle-lock");
+        const lock = createGatewayLifecycleLock();
+        const releaseQuiesce = lock.tryAcquire("backup_quiesce");
+        const { watchdog, launchGatewayProcess } = createStack({
+          gatewayLifecycleLock: lock,
+        });
+
+        watchdog.beginManagedOperation();
+        watchdog.onGatewayExit({ code: 143, expectedExit: false, stderrTail: [] });
+        await vi.advanceTimersByTimeAsync(11_000);
+        // Lock held (the backup is running against a quiesced state dir):
+        // the relaunch is skipped, not queued.
+        expect(launchGatewayProcess).not.toHaveBeenCalled();
+
+        // Lock released, next managed-operation exit relaunches on schedule.
+        releaseQuiesce();
+        watchdog.onGatewayExit({ code: 143, expectedExit: false, stderrTail: [] });
+        await vi.advanceTimersByTimeAsync(11_000);
+        expect(launchGatewayProcess).toHaveBeenCalled();
+        watchdog.stop();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    // Issue #20: a lock-held exit-78 used to SKIP the medic outright — the
+    // boot sequence holds the lock exactly when a bad migration crashes the
+    // gateway, so the medic never ran and the box crash-looped. The medic now
+    // queues behind a transient holder for a bounded window.
+    it("queues behind a transient lifecycle holder and runs once it releases", async () => {
       const {
         createGatewayLifecycleLock,
       } = require("../../lib/server/gateway-lifecycle-lock");
       const lock = createGatewayLifecycleLock();
-      const releaseApply = lock.tryAcquire("apply");
+      const releaseBoot = lock.tryAcquire("boot");
+      const configMedic = createMedicMock({ fixed: true });
+      const { watchdog, gateway, launchGatewayProcess } = createStack({
+        configMedic,
+        gatewayLifecycleLock: lock,
+      });
+      // The gateway just exited 78 and stays down for the whole queue wait —
+      // no relaunch lands, so the launch generation is unchanged and the
+      // post-acquire supersede check lets the queued medic proceed.
+      gateway.healthy = false;
+
+      watchdog.onGatewayExit({ code: 78, expectedExit: false, stderrTail: [] });
+      await flushMicrotasks();
+      await flushMicrotasks();
+      // Still queued — the holder owns the gateway.
+      expect(configMedic.run).not.toHaveBeenCalled();
+      expect(launchGatewayProcess).not.toHaveBeenCalled();
+
+      // The transient holder (boot) releases → the queued medic runs with a
+      // real attempt and relaunches, then releases the lock.
+      releaseBoot();
+      await flushMicrotasks();
+      await flushMicrotasks();
+      await flushMicrotasks();
+      expect(configMedic.run).toHaveBeenCalledTimes(1);
+      expect(configMedic.run).toHaveBeenCalledWith(
+        expect.objectContaining({ attempt: 1 }),
+      );
+      expect(launchGatewayProcess).toHaveBeenCalledTimes(1);
+      expect(lock.tryAcquire("test")).toBeTruthy(); // released after the run
+      watchdog.stop();
+    });
+
+    it("latches without burning an attempt when the holder never releases within the wait window", async () => {
+      const {
+        createGatewayLifecycleLock,
+      } = require("../../lib/server/gateway-lifecycle-lock");
+      const lock = createGatewayLifecycleLock();
+      const releaseApply = lock.tryAcquire("apply"); // held for the whole test
       const configMedic = createMedicMock({ fixed: true });
       const { watchdog, launchGatewayProcess, notifier } = createStack({
         configMedic,
         gatewayLifecycleLock: lock,
+        medicLockWaitMs: 20,
       });
 
       watchdog.onGatewayExit({ code: 78, expectedExit: false, stderrTail: [] });
-      await flushMicrotasks();
+      await new Promise((resolve) => setTimeout(resolve, 80));
       await flushMicrotasks();
 
       expect(configMedic.run).not.toHaveBeenCalled();
@@ -605,6 +759,158 @@ describe("server/watchdog gateway hardening (e2e)", () => {
         expect.objectContaining({ attempt: 1 }),
       );
       expect(lock.tryAcquire("test")).toBeTruthy(); // released after the run
+      watchdog.stop();
+    });
+
+    it("self-releases a late-acquired lock after the wait window expired", async () => {
+      const {
+        createGatewayLifecycleLock,
+      } = require("../../lib/server/gateway-lifecycle-lock");
+      const lock = createGatewayLifecycleLock();
+      const releaseApply = lock.tryAcquire("apply");
+      const configMedic = createMedicMock({ fixed: true });
+      const { watchdog } = createStack({
+        configMedic,
+        gatewayLifecycleLock: lock,
+        medicLockWaitMs: 20,
+      });
+
+      watchdog.onGatewayExit({ code: 78, expectedExit: false, stderrTail: [] });
+      // The wait window expires with the holder still live → latch, refund.
+      await new Promise((resolve) => setTimeout(resolve, 60));
+      await flushMicrotasks();
+      expect(configMedic.run).not.toHaveBeenCalled();
+      expect(watchdog.getStatus().lifecycle).toBe("configuration_error");
+
+      // The holder releases AFTER the window: the queued acquire resolves
+      // late and must self-release — never strand the lock.
+      releaseApply();
+      await flushMicrotasks();
+      await flushMicrotasks();
+      const probe = lock.tryAcquire("probe");
+      expect(probe).toBeTruthy();
+      probe();
+
+      // The timed-out skip refunded the attempt: the next exit-78 still gets
+      // a real attempt 1.
+      watchdog.onGatewayExit({ code: 78, expectedExit: false, stderrTail: [] });
+      await flushMicrotasks();
+      await flushMicrotasks();
+      expect(configMedic.run).toHaveBeenCalledTimes(1);
+      expect(configMedic.run).toHaveBeenCalledWith(
+        expect.objectContaining({ attempt: 1 }),
+      );
+      watchdog.stop();
+    });
+
+    it("skips a queued medic as superseded when the prior holder already relaunched the gateway", async () => {
+      const {
+        createGatewayLifecycleLock,
+      } = require("../../lib/server/gateway-lifecycle-lock");
+      const lock = createGatewayLifecycleLock();
+      const releaseBoot = lock.tryAcquire("boot");
+      const configMedic = createMedicMock({ fixed: true });
+      const { watchdog, gateway, launchGatewayProcess, insertWatchdogEvent } =
+        createStack({
+          configMedic,
+          gatewayLifecycleLock: lock,
+        });
+      gateway.healthy = false;
+
+      watchdog.onGatewayExit({ code: 78, expectedExit: false, stderrTail: [] });
+      await flushMicrotasks();
+      expect(configMedic.run).not.toHaveBeenCalled();
+
+      // The holder repairs the config and relaunches (a launch always fires
+      // onGatewayLaunch) before releasing: the queued medic's exit-78
+      // observation is now stale.
+      gateway.healthy = true;
+      watchdog.onGatewayLaunch({ startedAt: Date.now(), pid: 4321 });
+      releaseBoot();
+      await flushMicrotasks();
+      await flushMicrotasks();
+      await flushMicrotasks();
+
+      // Superseded: no medic run, no config mutation, no competing relaunch —
+      // and the lock is released, not stranded.
+      expect(configMedic.run).not.toHaveBeenCalled();
+      expect(launchGatewayProcess).not.toHaveBeenCalled();
+      expect(
+        insertWatchdogEvent.mock.calls.some(
+          (call) =>
+            call[0].eventType === "medic" &&
+            call[0].status === "skipped" &&
+            (call[0].details || {}).reason === "medic_superseded",
+        ),
+      ).toBe(true);
+      const probe = lock.tryAcquire("probe");
+      expect(probe).toBeTruthy();
+      probe();
+
+      // The superseded skip did not burn the attempt: a later real incident
+      // (gateway down again, lock free) still gets attempt 1.
+      gateway.healthy = false;
+      watchdog.onGatewayExit({ code: 78, expectedExit: false, stderrTail: [] });
+      await flushMicrotasks();
+      await flushMicrotasks();
+      expect(configMedic.run).toHaveBeenCalledTimes(1);
+      expect(configMedic.run).toHaveBeenCalledWith(
+        expect.objectContaining({ attempt: 1 }),
+      );
+      watchdog.stop();
+    });
+
+    it("stands down a queued medic when the holder relaunched a gateway that is still WARMING", async () => {
+      // adv-6: a just-relaunched gateway answers /health not-ok while it warms
+      // up. A health-probe supersede would read that as "still down" and let
+      // the medic mutate openclaw.json under the live-but-warming gateway that
+      // owns the DBs — the launch generation must stand it down instead.
+      const {
+        createGatewayLifecycleLock,
+      } = require("../../lib/server/gateway-lifecycle-lock");
+      const lock = createGatewayLifecycleLock();
+      const releaseBoot = lock.tryAcquire("boot");
+      const configMedic = createMedicMock({ fixed: true });
+      const { watchdog, gateway, launchGatewayProcess, insertWatchdogEvent } =
+        createStack({
+          configMedic,
+          gatewayLifecycleLock: lock,
+        });
+      gateway.healthy = false;
+
+      watchdog.onGatewayExit({ code: 78, expectedExit: false, stderrTail: [] });
+      await flushMicrotasks();
+      expect(configMedic.run).not.toHaveBeenCalled();
+
+      // The holder relaunches, but the gateway has NOT reached /health yet
+      // (gateway.healthy stays false for the whole supersede window).
+      watchdog.onGatewayLaunch({ startedAt: Date.now(), pid: 5555 });
+      releaseBoot();
+      await flushMicrotasks();
+      await flushMicrotasks();
+      await flushMicrotasks();
+
+      expect(configMedic.run).not.toHaveBeenCalled();
+      expect(launchGatewayProcess).not.toHaveBeenCalled();
+      expect(
+        insertWatchdogEvent.mock.calls.some(
+          (call) =>
+            call[0].eventType === "medic" &&
+            call[0].status === "skipped" &&
+            (call[0].details || {}).reason === "medic_superseded",
+        ),
+      ).toBe(true);
+      // The lock is released, not stranded, and the attempt was refunded.
+      const probe = lock.tryAcquire("probe");
+      expect(probe).toBeTruthy();
+      probe();
+      watchdog.onGatewayExit({ code: 78, expectedExit: false, stderrTail: [] });
+      await flushMicrotasks();
+      await flushMicrotasks();
+      expect(configMedic.run).toHaveBeenCalledTimes(1);
+      expect(configMedic.run).toHaveBeenCalledWith(
+        expect.objectContaining({ attempt: 1 }),
+      );
       watchdog.stop();
     });
 
