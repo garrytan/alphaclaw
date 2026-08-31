@@ -33,6 +33,7 @@ describe("frontend/channel-registry (5.0)", () => {
       "discord",
       "slack",
       "whatsapp",
+      "signal",
       "clickclack",
       "buzz",
     ]);

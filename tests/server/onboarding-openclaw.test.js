@@ -6,6 +6,7 @@ const {
   buildOnboardArgs,
   reconcileBootstrapExtraEntryPaths,
   writeManagedImportOpenclawConfig,
+  snapshotExternalChannelConfigs,
   writeSanitizedOpenclawConfig,
 } = require("../../lib/server/onboarding/openclaw");
 
@@ -13,6 +14,81 @@ const createTempOpenclawDir = () =>
   fs.mkdtempSync(path.join(os.tmpdir(), "alphaclaw-onboarding-openclaw-test-"));
 
 describe("server/onboarding/openclaw", () => {
+  // #113: `openclaw onboard` rewrites openclaw.json from scratch on the fresh
+  // path — externally-configured channels (no managed env token) must survive
+  // via snapshot-before + add-only re-add through the sanitized write.
+  it("snapshots external channels and re-adds them through the sanitized write (#113)", () => {
+    const openclawDir = createTempOpenclawDir();
+    const configPath = path.join(openclawDir, "openclaw.json");
+    fs.writeFileSync(
+      configPath,
+      JSON.stringify({
+        channels: {
+          signal: { enabled: true, account: "+15550000000" },
+          telegram: { enabled: true, botToken: "managed-token" },
+        },
+      }),
+    );
+
+    const snapshot = snapshotExternalChannelConfigs({ fs, openclawDir });
+    expect(snapshot.signal).toEqual({ enabled: true, account: "+15550000000" });
+    // Managed channels (env-token lifecycle) are onboarding's to rewrite.
+    expect(snapshot.telegram).toBeUndefined();
+
+    // Simulate the onboard rewrite dropping everything.
+    fs.writeFileSync(configPath, JSON.stringify({ channels: {} }));
+    writeSanitizedOpenclawConfig({
+      fs,
+      openclawDir,
+      varMap: {},
+      preservedChannels: snapshot,
+    });
+    const written = JSON.parse(fs.readFileSync(configPath, "utf8"));
+    expect(written.channels.signal).toEqual({
+      enabled: true,
+      account: "+15550000000",
+    });
+  });
+
+  it("preserve is add-only: keys onboarding wrote are never overwritten (#113)", () => {
+    const openclawDir = createTempOpenclawDir();
+    const configPath = path.join(openclawDir, "openclaw.json");
+    // Post-onboard config already carries a fresh signal block.
+    fs.writeFileSync(
+      configPath,
+      JSON.stringify({
+        channels: { signal: { enabled: false, fresh: true } },
+      }),
+    );
+
+    const staleSnapshot = Object.create(null);
+    staleSnapshot.signal = { enabled: true, account: "+15559999999" };
+    writeSanitizedOpenclawConfig({
+      fs,
+      openclawDir,
+      varMap: {},
+      preservedChannels: staleSnapshot,
+    });
+    const written = JSON.parse(fs.readFileSync(configPath, "utf8"));
+    expect(written.channels.signal).toEqual({ enabled: false, fresh: true });
+  });
+
+  it("snapshot skips dangerous key names and non-object values (#113)", () => {
+    const openclawDir = createTempOpenclawDir();
+    const configPath = path.join(openclawDir, "openclaw.json");
+    // Raw JSON on purpose: `__proto__:` in a JS object literal sets the
+    // prototype instead of an own property and would never serialize.
+    fs.writeFileSync(
+      configPath,
+      '{"channels":{"__proto__":{"polluted":true},"constructor":{"polluted":true},"prototype":{"polluted":true},"weird":"just-a-string","list":[1,2,3],"matrix":{"enabled":true}}}',
+    );
+
+    const snapshot = snapshotExternalChannelConfigs({ fs, openclawDir });
+    expect(Object.keys(snapshot)).toEqual(["matrix"]);
+    expect(snapshot.matrix).toEqual({ enabled: true });
+    expect(Object.getPrototypeOf(snapshot)).toBe(null);
+  });
+
   it("builds onboarding args from submitted vars instead of stale process env auth", () => {
     process.env.ANTHROPIC_TOKEN = "sk-ant-oat01-stale-token";
 

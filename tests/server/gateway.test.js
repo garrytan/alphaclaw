@@ -1255,6 +1255,68 @@ describe("server/gateway restart behavior", () => {
     });
   });
 
+  it("reports an enabled external channel (signal) without any token; disabled stays hidden", () => {
+    // #113: signal is configured out-of-band (signal-cli) — no env token, no
+    // botToken. `external: true` skips the token gate, but the enabled gate
+    // still applies: a present-but-disabled block must never show.
+    fs.existsSync = vi.fn(() => true);
+    fs.readdirSync = vi.fn(() => []);
+    fs.readFileSync = vi.fn((targetPath, ...args) => {
+      if (targetPath === `${OPENCLAW_DIR}/openclaw.json`) {
+        return JSON.stringify({
+          channels: { signal: { enabled: true } },
+        });
+      }
+      return originalReadFileSync(targetPath, ...args);
+    });
+    delete require.cache[modulePath];
+    const gateway = require(modulePath);
+
+    expect(gateway.getChannelStatus()).toEqual({
+      signal: {
+        status: "configured",
+        paired: 0,
+        accounts: { default: { status: "configured", paired: 0 } },
+      },
+    });
+
+    fs.readFileSync = vi.fn((targetPath, ...args) => {
+      if (targetPath === `${OPENCLAW_DIR}/openclaw.json`) {
+        return JSON.stringify({
+          channels: { signal: { enabled: false } },
+        });
+      }
+      return originalReadFileSync(targetPath, ...args);
+    });
+    delete require.cache[modulePath];
+    const disabledGateway = require(modulePath);
+    expect(disabledGateway.getChannelStatus()).toEqual({});
+  });
+
+  it("runs the plugin preflight on a signal-only box (no phantom plugin ids)", async () => {
+    // Before #113 a signal-only config made hasEnabledChannelConfig() false,
+    // so the runtime-deps preflight never ran before the gateway booted. The
+    // preflight hashes channel NAMES only — no per-channel plugin ids exist.
+    fs.existsSync = vi.fn(
+      (targetPath) => targetPath === `${OPENCLAW_DIR}/openclaw.json`,
+    );
+    fs.readFileSync = vi.fn((targetPath, ...args) => {
+      if (targetPath === `${OPENCLAW_DIR}/openclaw.json`) {
+        return JSON.stringify({ channels: { signal: { enabled: true } } });
+      }
+      return originalReadFileSync(targetPath, ...args);
+    });
+    fs.readdirSync = vi.fn(() => []);
+    childProcess.execFile = execFileOk("{}");
+    delete require.cache[modulePath];
+    const gateway = require(modulePath);
+
+    expect(await gateway.prepareOpenclawChannelPlugins()).toEqual({
+      skipped: false,
+    });
+    expect(childProcess.execFile).toHaveBeenCalled();
+  });
+
   it("reports channel status per account while preserving provider summary", () => {
     fs.existsSync = vi.fn(() => true);
     fs.readdirSync = vi.fn((targetPath) => {
