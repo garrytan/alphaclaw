@@ -5,6 +5,21 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.9.62] - 2026-08-31
+
+### Added
+- **Merge gate on `main`** (the CI half; the branch-protection ruleset is
+  configured separately): a **version guard** fails any PR whose
+  `package.json` version does not strictly advance `main` (kills the
+  concurrent-version-claim races that forced unreviewed renumbering), a
+  **soak** check that keeps a PR red until its current commit has been open
+  ≥2h — measured from a non-forgeable GitHub timestamp, overridable with an
+  `expedite` label and auto-re-checked by a 30-min `ripen` job — and a
+  **tag-release** workflow that tags `v<version>` on every merge and trips
+  loudly on a duplicate-version collision. The container-E2E path filter was
+  widened to cover the watchdog/doctor/routes/server-core surfaces the boot
+  journey exercises. Contributor release flow updated: versions bump inside
+  PRs, so `npm version` is no longer part of publishing.
 ## [0.9.61] - 2026-08-31
 
 ### Changed
