@@ -5,6 +5,68 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.9.53] - 2026-08-31
+
+The sidebar's Open Claude Code button can now land you in a Claude Code
+session running on the box itself. AlphaClaw hosts `claude remote-control`
+in a detached tmux session, extracts its Remote Control URL, and prefers
+that local rescue path — the cloud routine stays as the fallback — so you
+can debug AlphaClaw/OpenClaw from claude.ai/code (or your phone) with hands
+on the actual machine. The whole flow was driven live against a real
+claude.ai login before landing.
+
+### Added
+- **Local rescue session launcher (local-first, routine fallback).** One
+  click starts (or rejoins) a Claude Code instance on this box in detached
+  tmux and navigates straight to its claude.ai/code session; the session
+  survives AlphaClaw restarts. Boxes without a completed local login keep
+  firing the cloud routine exactly as before.
+- **Guided one-time OAuth login in the web UI.** The Watchdog page walks
+  through `claude auth login` — clickable OAuth link, paste-the-code input,
+  success verified against `claude auth status` — with credentials kept in
+  a dedicated 0700 HOME that backups deliberately exclude (re-run the login
+  after restoring a backup).
+- **Watchdog rescue-session card.** State badge with Start/Stop/Login/Logout,
+  the session URL as a QR code (plain selectable link always beside it), a
+  copyable tmux attach hint for shell access, and a sanitized terminal-tail
+  viewer for diagnosing failed spawns.
+- **Incident auto-spawn.** When the watchdog opens an incident (and the
+  login is done), the rescue session warms automatically and the incident
+  notification includes its URL when the session is already running.
+  Unattended spawns always clamp to `acceptEdits` and skip below a ~500MB
+  free-memory floor.
+- **Five new env keys** on the Envars page — `CLAUDE_CODE_LOCAL_ENABLED`,
+  `CLAUDE_CODE_LOCAL_AUTOSTART`, `CLAUDE_CODE_LOCAL_PERMISSION_MODE`,
+  `CLAUDE_CODE_LOCAL_CWD`, `CLAUDE_CODE_LOCAL_SPAWN_ON_INCIDENT` — all
+  hot-reloaded, no restart required.
+- **Docker image: tmux + pinned Claude Code CLI.** The image now ships tmux
+  (so rescue sessions outlive the AlphaClaw process) and an exact-pinned
+  `@anthropic-ai/claude-code` install (pinned on purpose: the TUI-parsing
+  fixtures are captured against that version and the pin is bumped together
+  with a fixture refresh). Without either, the launcher degrades honestly —
+  script(1) hosting or the routine fallback.
+
+### Fixed
+- **The rescue session now actually reaches "running" on a logged-in box.**
+  Live QA with a real claude.ai login caught three gaps the same day:
+  `claude remote-control` exits (rather than prompting) on an untrusted
+  workspace, so trust is pre-seeded in the rescue HOME before every spawn;
+  its "Enable Remote Control? (y/n)" confirmation is answered automatically;
+  and the URL it publishes is the environment form
+  (`claude.ai/code?environment=…`), which the launcher now parses alongside
+  the per-session form. Each screen is pinned as a captured fixture.
+
+### Changed
+- **Ship-review hardening across the rescue feature.** The five
+  `CLAUDE_CODE_LOCAL_*` keys are agent-protected (an agent env write now
+  requires a dangerous-tier operator confirm, matching the routine keys);
+  agent-readable status also withholds the session id, not just the URL;
+  starting a session verifies the permission mode you confirmed against the
+  live config, so a mid-flight mode switch always re-asks; a launch that
+  discovers the login is missing mid-wait now falls back to the cloud
+  routine instead of timing out; and background probing got cheaper (pauses
+  while disabled, under memory pressure, and in hidden browser tabs).
+
 ## [0.9.52] - 2026-08-31
 
 Chat no longer eats messages. The Chat tab's session management was rebuilt

@@ -1,0 +1,7 @@
+Take this session with you and pick up right where you left off on any device.
+
+Open the Code tab in the Claude mobile app, or visit claude.ai/code in a browser.
+The session keeps running on this machine. Use your other devices as a remote
+control. Press Ctrl+C to stop.
+
+Enable Remote Control? (y/n)
