@@ -251,19 +251,31 @@ describe("frontend/providers component", () => {
     );
   });
 
-  it("a failed codex status check keeps the last-known status and shows an inline note (never fabricates 'Not connected')", async () => {
+  it("a failed codex status check keeps the last-known status and shows a retryable chip (never fabricates 'Not connected')", async () => {
     api.fetchCodexStatus.mockResolvedValue({ connected: true });
     let tree = await hydrateProviders();
 
     api.disconnectCodex.mockResolvedValue({ ok: true });
-    api.fetchCodexStatus.mockRejectedValue(new Error("status check failed"));
+    api.fetchCodexStatus.mockRejectedValue(new Error("status endpoint down"));
     await findActionButtonByLabel(tree, "Disconnect").props.onClick();
 
     tree = renderProviders();
+    const chips = findAllByType(tree, InlineErrorChip);
+    expect(chips.length).toBe(1);
+    expect(chips[0].props.headline).toBe(
+      "Status check failed — showing the last known Codex status",
+    );
     const text = collectText(tree).join(" ");
     expect(text).toContain("Connected");
-    expect(text).toContain("Status check failed");
+    expect(text).toContain("status endpoint down");
     expect(text).not.toContain("Not connected");
+
+    // Retry re-runs the same status check and clears the chip on success.
+    api.fetchCodexStatus.mockResolvedValue({ connected: true });
+    await chips[0].props.onRetry();
+    tree = renderProviders();
+    expect(findAllByType(tree, InlineErrorChip).length).toBe(0);
+    expect(collectText(tree).join(" ")).not.toContain("Status check failed");
   });
 
   it("saving env vars and the primary model invalidates the affected caches", async () => {
