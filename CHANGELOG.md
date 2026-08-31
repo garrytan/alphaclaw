@@ -5,7 +5,7 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
-## [0.9.60] - 2026-08-31
+## [0.9.63] - 2026-08-31
 
 The deployed OpenClaw agent no longer inherits AlphaClaw's own secrets.
 
@@ -24,6 +24,16 @@ The deployed OpenClaw agent no longer inherits AlphaClaw's own secrets.
   break-glass `ALPHACLAW_GATEWAY_ENV_UNRESTRICTED=1` restores the legacy
   behavior minus the always-denied secrets. Neither can be set from the
   dashboard-written `.env`, so the agent cannot grant itself broader access.
+## [0.9.61] - 2026-08-31
+
+### Changed
+- Added a **Merge unification safety** policy to the contributor guide
+  (`CLAUDE.md`): check for overlapping in-flight branches before starting,
+  never run two branches against one subsystem, merge `main` and reconcile
+  file-by-file before landing, claim version numbers at merge time, and
+  justify any rewrite of code merged in the last 7 days. Codifies the
+  reconciliation discipline that keeps fast-moving parallel work from
+  clobbering freshly-merged fixes. Docs/process only — no runtime change.
 
 ## [0.9.59] - 2026-08-31
 
