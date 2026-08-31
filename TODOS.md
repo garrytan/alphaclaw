@@ -320,11 +320,34 @@
 - **Why:** Neither overseer pins a model today (whatever the installed CLI defaults to) and cost is invisible; do both at once to avoid asymmetry.
 - **Effort:** S–M. **Depends on:** nothing.
 
-## P3 — Migrate WATCHDOG_AUTO_REPAIR / WATCHDOG_NOTIFICATIONS_DISABLED from env to alphaclaw.json
-- **What:** Move the two legacy watchdog toggles into alphaclaw.json with env fallback + one-release deprecation note.
+## P3 — Migrate WATCHDOG_AUTO_REPAIR / WATCHDOG_NOTIFICATIONS_DISABLED / WATCHDOG_NOTIFICATIONS_QUIET from env to alphaclaw.json
+- **What:** Move the three legacy watchdog toggles into alphaclaw.json with env fallback + one-release deprecation note (the verbose toggle added a third env key, `WATCHDOG_NOTIFICATIONS_QUIET`, deliberately on the same backend so this migration moves all of them together).
 - **Why:** New settings already live in alphaclaw.json (`watchdog.overseer.enabled`); the split store means `PUT /api/watchdog/settings` writes env while the overseer toggle writes config — two backends for one card.
-- **Context:** `updateSettings` in lib/server/watchdog.js (writeEnvFile/reloadEnv path); never write env and config simultaneously.
+- **Context:** `updateSettings` in lib/server/watchdog.js (updateEnvFile locked-RMW path) + `lib/server/notification-policy.js` env readers; never write env and config simultaneously.
 - **Effort:** M. **Depends on:** nothing.
+
+## P3 — Bin-phase boot-notices bridge (pre-server auto-fix notifications)
+- **What:** Durable boot-notices JSONL in the state dir written by `bin/alphaclaw.js` auto-fixes (pending-update self npm-install, openclaw.json restore from the git remote, pre-server config migrations), drained through `upgradeNotifier.notify` at server boot — mirroring channel-sync's `lastBoot.notifications` envelope pattern.
+- **Why:** These are genuine automatic fixes that today only reach the console; the verbose/important notification work (v0.9.49) covers the server phase only.
+- **Context:** No notifier exists in the bin process; `flushBootNotifications` (lib/server/openclaw-channel-sync.js) is the drain precedent. Classify all as important (action taken).
+- **Effort:** M → CC: S. **Depends on:** nothing.
+
+## P3 — Suppressed-notice digest/history
+- **What:** Daily digest (or Watchdog-tab history pane) of notices suppressed by Important-only mode.
+- **Why:** Quiet-mode operators may want a low-frequency rollup of what they didn't see.
+- **Context:** The outbox has a terminal `suppressedAt` state (flush-time suppressions), but the MAJORITY of suppressed notices are discarded pre-outbox by the enqueue gate in lib/server/upgrade-notifier.js — the digest needs enqueue-time persistence of suppressed events (deliberately rejected for v1 to keep the outbox lean).
+- **Effort:** M. **Depends on:** nothing.
+
+## P3 — Gmail-watch respawn notification with a repeated-failure threshold
+- **What:** Notify when the `gog serve` child keeps dying (lib/server/gmail-watch.js respawns every 5s, console-only today).
+- **Why:** The one remaining server-phase auto-fix loop with zero notification coverage; the raw 5s cadence needs a breaker (N consecutive failures) before notifying or it spams.
+- **Effort:** S. **Depends on:** nothing.
+
+## P3 — Gateway went-down notice debounce
+- **What:** Optional N-second debounce suppressing the down+up notification pair for transient blips.
+- **Why:** Only if the accepted volume delta (a single crash+recovery now notifies both ways with Verbose ON; previously silent) proves chatty in practice — deliberately NOT built in v1 to keep timers out of the crash path.
+- **Context:** `notifyOncePerIncident("gateway_went_down", ...)` in lib/server/watchdog.js handleCrashExit.
+- **Effort:** S. **Depends on:** field feedback.
 
 ## P3 — StatusHero card absorbing the shared Gateway card on the Watchdog tab
 - **What:** Merge the Gateway card + status details + narrative card into one hero for the Watchdog tab (the shared Gateway card stays for other tabs).

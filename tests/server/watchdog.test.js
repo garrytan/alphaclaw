@@ -12,6 +12,7 @@ const flushMicrotasks = async () =>
 
 const kOriginalAutoRepair = process.env.WATCHDOG_AUTO_REPAIR;
 const kOriginalNotificationsDisabled = process.env.WATCHDOG_NOTIFICATIONS_DISABLED;
+const kOriginalNotificationsQuiet = process.env.WATCHDOG_NOTIFICATIONS_QUIET;
 const kOriginalFetch = global.fetch;
 
 // Exact stderr the beta step-aside path emits (openclaw@2026.8.1-beta.3
@@ -38,6 +39,7 @@ const createHarness = ({
   }),
   supervisorModeActive,
   consumeRestartHandoffImpl,
+  updateEnvFile = null,
 } = {}) => {
   process.env.WATCHDOG_AUTO_REPAIR = autoRepair ? "true" : "false";
   process.env.WATCHDOG_NOTIFICATIONS_DISABLED = notificationsDisabled ? "true" : "false";
@@ -80,6 +82,7 @@ const createHarness = ({
     // gate, and the default-gate resolution is unit-tested in gateway.test.js.
     supervisorModeActive: supervisorModeActive ?? (() => false),
     ...(consumeRestartHandoffImpl ? { consumeRestartHandoffImpl } : {}),
+    ...(updateEnvFile ? { updateEnvFile } : {}),
   });
 
   return {
@@ -103,8 +106,14 @@ describe("server/watchdog", () => {
     }
     if (kOriginalNotificationsDisabled == null) {
       delete process.env.WATCHDOG_NOTIFICATIONS_DISABLED;
+      delete process.env.WATCHDOG_NOTIFICATIONS_QUIET;
     } else {
       process.env.WATCHDOG_NOTIFICATIONS_DISABLED = kOriginalNotificationsDisabled;
+      if (kOriginalNotificationsQuiet === undefined) {
+        delete process.env.WATCHDOG_NOTIFICATIONS_QUIET;
+      } else {
+        process.env.WATCHDOG_NOTIFICATIONS_QUIET = kOriginalNotificationsQuiet;
+      }
     }
     if (kOriginalFetch == null) {
       delete global.fetch;
@@ -393,11 +402,44 @@ describe("server/watchdog", () => {
         }),
       }),
     );
-    expect(
-      notifier.notify.mock.calls.some((call) =>
-        String(call?.[0] || "").includes("🟢 Gateway running again"),
-      ),
-    ).toBe(true);
+    const recoveryCall = notifier.notify.mock.calls.find((call) =>
+      String(call?.[0] || "").includes("🟢 Gateway running again"),
+    );
+    expect(recoveryCall).toBeTruthy();
+    // "Back online" is an informational notice: classified verbose so
+    // Important-only mode suppresses it (plan Phase-3 pin list).
+    expect(recoveryCall[1]).toEqual(
+      expect.objectContaining({ eventType: "recovery", verbose: true }),
+    );
+    watchdog.stop();
+  });
+
+  it("logs a skipped (not failed) notification event when the notifier suppresses", async () => {
+    const { watchdog, notifier, insertWatchdogEvent } = createHarness({
+      autoRepair: false,
+    });
+    // The central gate suppressed downstream (e.g. quiet mode): the event log
+    // must record `skipped`, never a spurious `failed` (D5).
+    notifier.notify.mockResolvedValue({
+      ok: false,
+      skipped: true,
+      reason: "verbose_notifications_disabled",
+    });
+
+    watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    await flushMicrotasks();
+    watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    await flushMicrotasks();
+    watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    await flushMicrotasks();
+
+    const notificationRows = insertWatchdogEvent.mock.calls
+      .map(([row]) => row)
+      .filter((row) => row.eventType === "notification");
+    expect(notificationRows.length).toBeGreaterThan(0);
+    for (const row of notificationRows) {
+      expect(row.status).toBe("skipped");
+    }
     watchdog.stop();
   });
 
@@ -889,7 +931,81 @@ describe("server/watchdog", () => {
     expect(settings).toEqual({
       autoRepair: true,
       notificationsEnabled: false,
+      // QUIET untouched (absent) → verbose stays at its default ON.
+      notificationsVerbose: true,
     });
+  });
+
+  it("writes the QUIET env flag inverted for notificationsVerbose and reads it back", () => {
+    const { watchdog, readEnvFile, writeEnvFile, reloadEnv } = createHarness({
+      autoRepair: false,
+      notificationsDisabled: false,
+    });
+    readEnvFile.mockReturnValue([]);
+    reloadEnv.mockImplementation(() => {
+      process.env.WATCHDOG_NOTIFICATIONS_QUIET = "true";
+    });
+
+    const settings = watchdog.updateSettings({ notificationsVerbose: false });
+
+    expect(writeEnvFile).toHaveBeenCalledWith([
+      { key: "WATCHDOG_NOTIFICATIONS_QUIET", value: "true" },
+    ]);
+    expect(settings.notificationsVerbose).toBe(false);
+    // Siblings untouched by a narrowed per-field PUT.
+    expect(settings.autoRepair).toBe(false);
+    expect(settings.notificationsEnabled).toBe(true);
+
+    reloadEnv.mockImplementation(() => {
+      process.env.WATCHDOG_NOTIFICATIONS_QUIET = "false";
+    });
+    const restored = watchdog.updateSettings({ notificationsVerbose: true });
+    expect(writeEnvFile).toHaveBeenLastCalledWith([
+      { key: "WATCHDOG_NOTIFICATIONS_QUIET", value: "false" },
+    ]);
+    expect(restored.notificationsVerbose).toBe(true);
+  });
+
+  it("uses the injected locked updateEnvFile for the read-modify-write when provided", () => {
+    const writes = [];
+    const updateEnvFile = vi.fn((mutator) => {
+      const next = mutator([{ key: "OPENAI_API_KEY", value: "x" }]);
+      writes.push(next);
+      return next;
+    });
+    const { watchdog, readEnvFile, writeEnvFile } = createHarness({
+      autoRepair: false,
+      notificationsDisabled: false,
+      updateEnvFile,
+    });
+
+    watchdog.updateSettings({ notificationsVerbose: false });
+
+    // The locked helper owns the whole read-modify-write; the unlocked pair
+    // is never touched (two concurrent per-field PUTs can't lose an update).
+    expect(updateEnvFile).toHaveBeenCalledTimes(1);
+    expect(readEnvFile).not.toHaveBeenCalled();
+    expect(writeEnvFile).not.toHaveBeenCalled();
+    expect(writes[0]).toEqual([
+      { key: "OPENAI_API_KEY", value: "x" },
+      { key: "WATCHDOG_NOTIFICATIONS_QUIET", value: "true" },
+    ]);
+  });
+
+  it("rejects non-boolean coercion for every settings field", () => {
+    const { watchdog, writeEnvFile } = createHarness({ autoRepair: false });
+    // A string "false" must 400 at the route via this throw — never coerce a
+    // truthy string into a suppression.
+    expect(() =>
+      watchdog.updateSettings({ notificationsVerbose: "false" }),
+    ).toThrow(
+      "Expected autoRepair, notificationsEnabled, and/or notificationsVerbose boolean",
+    );
+    expect(() => watchdog.updateSettings({ autoRepair: "true" })).toThrow();
+    expect(() =>
+      watchdog.updateSettings({ notificationsEnabled: 1 }),
+    ).toThrow();
+    expect(writeEnvFile).not.toHaveBeenCalled();
   });
 
   it("treats exit code 78 as a fatal config error without crash-loop restarts", async () => {
@@ -1967,10 +2083,10 @@ describe("server/watchdog", () => {
     const { watchdog, writeEnvFile } = createHarness({ autoRepair: false });
 
     expect(() => watchdog.updateSettings({})).toThrow(
-      "Expected autoRepair and/or notificationsEnabled boolean",
+      "Expected autoRepair, notificationsEnabled, and/or notificationsVerbose boolean",
     );
     expect(() => watchdog.updateSettings()).toThrow(
-      "Expected autoRepair and/or notificationsEnabled boolean",
+      "Expected autoRepair, notificationsEnabled, and/or notificationsVerbose boolean",
     );
     expect(writeEnvFile).not.toHaveBeenCalled();
   });

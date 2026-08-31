@@ -181,6 +181,7 @@ Use this format for any Telegram notices sent from AlphaClaw services (watchdog,
 5. For values with underscores or special characters (for example `crash_loop`), wrap the value in backticks:
    - `Trigger: \`crash_loop\``
 6. Do not use HTML tags (`<b>`, `<a href>`) for Telegram watchdog notices.
+7. **Classify every new notification call site** (`lib/server/notification-policy.js` is the authority): tag informational/green notices (`verbose: true` in the notify opts — back-online, health-OK, routine progress) and register them in `kVerboseNotificationSites` (the conventions test pins the set); leave problems, auto-fix actions, and anything needing operator intervention untagged (unclassified = always-send, the fail-loud default). Agent-admin audit notices carry `audit: true` (exempt from operator toggles). Outbox ids are stable signature keys, never bare timestamps (boot loops must dedupe).
 
 ## UI Conventions
 

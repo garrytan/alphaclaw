@@ -165,7 +165,13 @@ describe("server/upgrade-overseer", () => {
     expect(notify.mock.calls[0][0]).toContain("looks healthy");
     expect(notify.mock.calls[0][0]).toContain("Mark as good");
     expect(notify.mock.calls[0][1]).toEqual(
-      expect.objectContaining({ operationId: kOpId, eventType: "overseer" }),
+      // "healthy" verdict → informational (verbose); suspect/broken verdicts
+      // stay important (plan Phase-3 predicate split).
+      expect.objectContaining({
+        operationId: kOpId,
+        eventType: "overseer",
+        verbose: true,
+      }),
     );
     // The main call carried the discovered headless flags with tools disabled.
     const mainCall = runner.calls.find((c) => c.args?.[0] === "-p");
