@@ -63,6 +63,35 @@ describe("session-keys destination and sorting helpers", () => {
     expect(sortSessionsByPriority("nope")).toEqual([]);
   });
 
+  it("round-trips discord/slack DM rows through the destination pickers (E5)", () => {
+    // The canonical-parser fix makes the sessions endpoint emit reply targets
+    // for discord/slack DMs — these rows must both pass the destination
+    // filter AND yield a non-null destination for the webhook/cron pickers
+    // (they were selectable-but-inert before).
+    const discordRow = {
+      key: "agent:main:discord:direct:99",
+      replyChannel: "discord",
+      replyTo: "user:99",
+    };
+    const slackRow = {
+      key: "agent:scout:slack:direct:U02R12345",
+      replyChannel: "slack",
+      replyTo: "user:U02R12345",
+    };
+    expect(kDestinationSessionFilter(discordRow)).toBe(true);
+    expect(kDestinationSessionFilter(slackRow)).toBe(true);
+    expect(getDestinationFromSession(discordRow)).toEqual({
+      channel: "discord",
+      to: "user:99",
+      agentId: "main",
+    });
+    expect(getDestinationFromSession(slackRow)).toEqual({
+      channel: "slack",
+      to: "user:U02R12345",
+      agentId: "scout",
+    });
+  });
+
   it("builds destinations from reply metadata", () => {
     expect(getDestinationFromSession({ replyChannel: "telegram" })).toBe(null);
     expect(getDestinationFromSession(null)).toBe(null);
@@ -119,7 +148,7 @@ describe("session-keys destination and sorting helpers", () => {
       "Direct 99",
     );
     expect(getSessionDisplayLabel({ key: "agent:a:telegram:direct:99" })).toBe(
-      "Direct message",
+      "Direct message · 99",
     );
   });
 

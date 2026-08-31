@@ -1,6 +1,6 @@
 # Chat/session reliability — protocol v2, run lifecycle, durable outcomes
 
-Status: shipped (Phases 1–5; Phase 5 resume-streaming landed with the v0.9.50 adversarial-hardening wave — `hello.activeRuns` + `resume`/`resumed`/`resume-failed`)
+Status: shipped (Phases 1–5; Phase 5 resume-streaming landed with the v0.9.52 adversarial-hardening wave — `hello.activeRuns` + `resume`/`resumed`/`resume-failed`)
 Owner surfaces: `lib/server/chat/`, `lib/server/db/chat-runs/`, `lib/public/js/components/chat/`
 
 ## Problem

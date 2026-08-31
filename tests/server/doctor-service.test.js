@@ -334,6 +334,13 @@ describe("server/doctor-service", () => {
 
     expect(result.ok).toBe(true);
     expect(result.queued).toBe(true);
+    // Honest response: no reply target derivable from a doctor session key.
+    expect(result.delivery).toEqual({
+      attached: false,
+      replyChannel: "",
+      replyTo: "",
+      replyAccountId: "",
+    });
     expect(result.runId).toMatch(new RegExp(`^doctor-fix-${card.id}-`));
     expect(clawCmd).toHaveBeenCalledTimes(1);
     const command = clawCmd.mock.calls[0][0];
@@ -365,7 +372,7 @@ describe("server/doctor-service", () => {
 
     doctorDb.updateDoctorCardStatus({ id: card.id, status: "open" });
 
-    await doctorService.requestCardFix({
+    const deliveryResult = await doctorService.requestCardFix({
       cardId: card.id,
       sessionKey: "agent:main:telegram:direct:1050",
       replyChannel: "telegram",
@@ -373,6 +380,12 @@ describe("server/doctor-service", () => {
       prompt: "Apply the safe fix.",
     });
 
+    expect(deliveryResult.delivery).toEqual({
+      attached: true,
+      replyChannel: "telegram",
+      replyTo: "1050",
+      replyAccountId: "",
+    });
     expect(clawCmd).toHaveBeenCalledTimes(2);
     const deliveryCommand = clawCmd.mock.calls[1][0];
     expect(deliveryCommand).toContain(
@@ -1565,6 +1578,221 @@ describe("server/doctor-service", () => {
     expect(status.latestRun).not.toHaveProperty("rawResult");
   });
 
+  it("runStartPending latch: concurrent runDoctor during the pre-run snapshot await gets alreadyRunning", async () => {
+    const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-latch-"));
+    const dbRoot = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-latch-db-"));
+    fs.writeFileSync(path.join(workspaceRoot, "AGENTS.md"), "# Guidance\n", "utf8");
+
+    const doctorDb = loadManagedDoctorDb();
+    doctorDb.initDoctorDb({ rootDir: dbRoot });
+
+    let resolveSnapshot;
+    const snapshotGate = new Promise((resolve) => {
+      resolveSnapshot = resolve;
+    });
+    const computeSnapshotAsync = vi.fn(async (root, opts) => {
+      await snapshotGate;
+      return computeWorkspaceSnapshotBounded(root, { ...(opts || {}), batchPauseMs: 0 });
+    });
+    const clawCmd = vi.fn(async () => ({
+      ok: true,
+      stdout: JSON.stringify({ summary: "clean", cards: [] }),
+      stderr: "",
+    }));
+    const { createDoctorService } = loadDoctorService();
+    const doctorService = createDoctorService({
+      clawCmd,
+      listDoctorRuns: doctorDb.listDoctorRuns,
+      listDoctorCards: doctorDb.listDoctorCards,
+      getInitialWorkspaceBaseline: doctorDb.getInitialWorkspaceBaseline,
+      setInitialWorkspaceBaseline: doctorDb.setInitialWorkspaceBaseline,
+      createDoctorRun: doctorDb.createDoctorRun,
+      completeDoctorRun: doctorDb.completeDoctorRun,
+      insertDoctorCards: doctorDb.insertDoctorCards,
+      getDoctorRun: doctorDb.getDoctorRun,
+      getDoctorCardsByRunId: doctorDb.getDoctorCardsByRunId,
+      getDoctorCard: doctorDb.getDoctorCard,
+      updateDoctorCardStatus: doctorDb.updateDoctorCardStatus,
+      startDoctorCardFix: doctorDb.startDoctorCardFix,
+      cancelDoctorCardFix: doctorDb.cancelDoctorCardFix,
+      computeSnapshotAsync,
+      workspaceRoot,
+      managedRoot: workspaceRoot,
+    });
+
+    // First run is parked on the pre-run snapshot await — BEFORE the
+    // activeRunPromise latch exists. The runStartPending latch must cover
+    // exactly this window: a concurrent run must not slip through and start
+    // a second scan.
+    const firstRun = doctorService.runDoctor();
+    const concurrent = await doctorService.runDoctor();
+    expect(concurrent.ok).toBe(false);
+    expect(concurrent.alreadyRunning).toBe(true);
+    expect(concurrent.error).toBe("Doctor run already in progress");
+
+    resolveSnapshot();
+    const firstResult = await firstRun;
+    expect(firstResult.ok).toBe(true);
+    expect(computeSnapshotAsync).toHaveBeenCalledTimes(1);
+    // runStartPending released: the busy signal now comes from the REAL run
+    // latch (activeRunPromise carries the created run's id), not a stuck
+    // pending flag (which would report runId 0 forever).
+    const duringRun = await doctorService.runDoctor();
+    expect(duringRun.alreadyRunning).toBe(true);
+    expect(duringRun.runId).toBe(firstResult.runId);
+    // Once the background run settles, nothing blocks a new run.
+    await vi.waitFor(() => {
+      expect(doctorService.buildStatus().runInProgress).toBe(false);
+    });
+    const afterward = await doctorService.runDoctor();
+    expect(afterward.alreadyRunning).not.toBe(true);
+  });
+
+  it("clamps the worker-unavailable sync fallback to the legacy caps (X11)", async () => {
+    const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-fallback-"));
+    const dbRoot = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-fallback-db-"));
+    fs.writeFileSync(path.join(workspaceRoot, "AGENTS.md"), "# Guidance\n", "utf8");
+
+    const doctorDb = loadManagedDoctorDb();
+    doctorDb.initDoctorDb({ rootDir: dbRoot });
+
+    const computeSnapshotAsync = vi.fn(async () => {
+      throw new Error("Workspace snapshot worker unavailable (respawn cap reached)");
+    });
+    const syncCompute = vi.fn((root, opts) => {
+      syncCompute.lastOpts = opts;
+      return {
+        fingerprint: "sync-fallback",
+        manifest: {},
+        limited: false,
+        capsUsed: { maxFiles: opts.maxFiles, maxFileBytes: opts.maxFileBytes },
+        stats: { totalFiles: 0 },
+      };
+    });
+    const { createDoctorService } = loadDoctorService();
+    const doctorService = createDoctorService({
+      clawCmd: vi.fn(async () => ({
+        ok: true,
+        stdout: JSON.stringify({ summary: "clean", cards: [] }),
+        stderr: "",
+      })),
+      listDoctorRuns: doctorDb.listDoctorRuns,
+      listDoctorCards: doctorDb.listDoctorCards,
+      getInitialWorkspaceBaseline: doctorDb.getInitialWorkspaceBaseline,
+      setInitialWorkspaceBaseline: doctorDb.setInitialWorkspaceBaseline,
+      createDoctorRun: doctorDb.createDoctorRun,
+      completeDoctorRun: doctorDb.completeDoctorRun,
+      insertDoctorCards: doctorDb.insertDoctorCards,
+      getDoctorRun: doctorDb.getDoctorRun,
+      getDoctorCardsByRunId: doctorDb.getDoctorCardsByRunId,
+      getDoctorCard: doctorDb.getDoctorCard,
+      updateDoctorCardStatus: doctorDb.updateDoctorCardStatus,
+      computeSnapshot: syncCompute,
+      computeSnapshotAsync,
+      // Operator raised the caps well above legacy…
+      readScanCaps: () => ({ maxFiles: 500000, maxFileMb: 100 }),
+      workspaceRoot,
+      managedRoot: workspaceRoot,
+    });
+
+    const result = await doctorService.runDoctor();
+    expect(result.ok).toBe(true);
+    // …but the degraded sync path never runs above the legacy bounds: the
+    // event-loop block stays capped at the pre-configurable worst case.
+    expect(syncCompute).toHaveBeenCalledTimes(1);
+    expect(syncCompute.lastOpts.maxFiles).toBe(50000);
+    expect(syncCompute.lastOpts.maxFileBytes).toBe(10 * 1024 * 1024);
+  });
+
+  it("discards in-flight old-cap snapshot results after invalidateSnapshotCache (caps epoch)", async () => {
+    const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-caps-epoch-"));
+    const dbRoot = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-caps-epoch-db-"));
+    fs.writeFileSync(path.join(workspaceRoot, "AGENTS.md"), "# Guidance\n", "utf8");
+
+    const doctorDb = loadManagedDoctorDb();
+    doctorDb.initDoctorDb({ rootDir: dbRoot });
+
+    let resolveFirst;
+    const firstGate = new Promise((resolve) => {
+      resolveFirst = resolve;
+    });
+    const computeSnapshotAsync = vi.fn(async (root, opts) => {
+      if (computeSnapshotAsync.mock.calls.length === 1) {
+        await firstGate;
+        return {
+          fingerprint: "old-caps",
+          manifest: {},
+          limited: false,
+          capsUsed: { maxFiles: opts.maxFiles, maxFileBytes: opts.maxFileBytes },
+          stats: { totalFiles: 0 },
+        };
+      }
+      return {
+        fingerprint: "new-caps",
+        manifest: {},
+        limited: false,
+        capsUsed: { maxFiles: opts.maxFiles, maxFileBytes: opts.maxFileBytes },
+        stats: { totalFiles: 0 },
+      };
+    });
+
+    let caps = { maxFiles: null, maxFileMb: null };
+    const { createDoctorService } = loadDoctorService();
+    const doctorService = createDoctorService({
+      clawCmd: vi.fn(),
+      listDoctorRuns: doctorDb.listDoctorRuns,
+      listDoctorCards: doctorDb.listDoctorCards,
+      getInitialWorkspaceBaseline: doctorDb.getInitialWorkspaceBaseline,
+      setInitialWorkspaceBaseline: doctorDb.setInitialWorkspaceBaseline,
+      createDoctorRun: doctorDb.createDoctorRun,
+      completeDoctorRun: doctorDb.completeDoctorRun,
+      insertDoctorCards: doctorDb.insertDoctorCards,
+      getDoctorRun: doctorDb.getDoctorRun,
+      getDoctorCardsByRunId: doctorDb.getDoctorCardsByRunId,
+      getDoctorCard: doctorDb.getDoctorCard,
+      updateDoctorCardStatus: doctorDb.updateDoctorCardStatus,
+      computeSnapshotAsync,
+      readScanCaps: () => caps,
+      workspaceRoot,
+      managedRoot: workspaceRoot,
+    });
+
+    // A refresh is in flight under the default caps…
+    const firstRefresh = doctorService.refreshWorkspaceSnapshot();
+    expect(computeSnapshotAsync.mock.calls[0][1].maxFiles).toBe(200000);
+
+    // …when the operator changes the caps. The epoch bump must discard the
+    // in-flight old-cap result and queue a fresh-caps refresh behind it.
+    caps = { maxFiles: 1000, maxFileMb: 5 };
+    const invalidated = doctorService.invalidateSnapshotCache();
+
+    resolveFirst();
+    await firstRefresh;
+    await invalidated;
+
+    expect(computeSnapshotAsync).toHaveBeenCalledTimes(2);
+    const secondOpts = computeSnapshotAsync.mock.calls[1][1];
+    expect(secondOpts.maxFiles).toBe(1000);
+    expect(secondOpts.maxFileBytes).toBe(5 * 1024 * 1024);
+    // The discarded old-cap result never became the cache: the follow-up
+    // refresh saw NO previous fingerprint (a committed old result would have
+    // handed it "old-caps").
+    expect(secondOpts.previousFingerprint).toBe("");
+
+    const status = doctorService.buildStatus();
+    expect(computeSnapshotAsync).toHaveBeenCalledTimes(2);
+    expect(status.workspaceScan.configured).toEqual({ maxFiles: 1000, maxFileMb: 5 });
+    expect(status.workspaceScan.effective).toEqual({
+      maxFiles: 1000,
+      maxFileBytes: 5 * 1024 * 1024,
+      maxFileMb: 5,
+    });
+    expect(status.workspaceScan.capsUsed).toEqual({
+      maxFiles: 1000,
+      maxFileBytes: 5 * 1024 * 1024,
+    });
+  });
+
   it("serves the stale snapshot and recomputes it in the background", async () => {
     vi.useFakeTimers();
     try {
@@ -1625,6 +1853,9 @@ describe("server/doctor-service", () => {
       expect(computeSnapshotAsync).toHaveBeenCalledTimes(2);
       expect(computeSnapshotAsync).toHaveBeenLastCalledWith(workspaceRoot, {
         previousManifest: expect.any(Object),
+        previousFingerprint: expect.any(String),
+        maxFiles: expect.any(Number),
+        maxFileBytes: expect.any(Number),
       });
 
       // Refreshes coalesce while one is already in flight.
@@ -2725,6 +2956,9 @@ describe("server/doctor-service", () => {
         });
 
         const firstRun = service.runDoctor();
+        // Let the pre-run worker snapshot settle so the first run reaches the
+        // reuse branch and takes the run latch (the bridge gate then holds it).
+        await settle();
         // While the bridge is in flight, the reuse run must hold the busy
         // latch — not sit in the DB as an incomplete "completed" run a
         // concurrent runDoctor could reuse (starting a second bridge).
@@ -3592,5 +3826,343 @@ describe("server/doctor-service evidence snippet containment (H6)", () => {
       evidence: [{ type: "path", path: "big.txt", startLine: 1, endLine: 2 }],
     });
     expect(item.snippet).toBeUndefined();
+  });
+});
+
+describe("server/doctor-service review-batch regressions", () => {
+  afterEach(() => {
+    if (currentDoctorDb?.closeDoctorDb) {
+      currentDoctorDb.closeDoctorDb();
+      currentDoctorDb = null;
+    }
+  });
+
+  const makeMinimalService = (overrides = {}) => {
+    const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-review-batch-"));
+    const dbRoot = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-review-batch-db-"));
+    fs.writeFileSync(path.join(workspaceRoot, "AGENTS.md"), "# Guidance\n", "utf8");
+    const doctorDb = loadManagedDoctorDb();
+    doctorDb.initDoctorDb({ rootDir: dbRoot });
+    const { createDoctorService } = loadDoctorService();
+    const service = createDoctorService({
+      clawCmd: vi.fn(async () => ({
+        ok: true,
+        stdout: JSON.stringify({ summary: "clean", cards: [] }),
+        stderr: "",
+      })),
+      listDoctorRuns: doctorDb.listDoctorRuns,
+      listDoctorCards: doctorDb.listDoctorCards,
+      getInitialWorkspaceBaseline: doctorDb.getInitialWorkspaceBaseline,
+      setInitialWorkspaceBaseline: doctorDb.setInitialWorkspaceBaseline,
+      createDoctorRun: doctorDb.createDoctorRun,
+      completeDoctorRun: doctorDb.completeDoctorRun,
+      insertDoctorCards: doctorDb.insertDoctorCards,
+      getDoctorRun: doctorDb.getDoctorRun,
+      getDoctorCardsByRunId: doctorDb.getDoctorCardsByRunId,
+      getDoctorCard: doctorDb.getDoctorCard,
+      updateDoctorCardStatus: doctorDb.updateDoctorCardStatus,
+      startDoctorCardFix: doctorDb.startDoctorCardFix,
+      cancelDoctorCardFix: doctorDb.cancelDoctorCardFix,
+      computeSnapshotAsync: fastComputeSnapshotAsync,
+      workspaceRoot,
+      managedRoot: workspaceRoot,
+      alphaclawRootDir: "/data",
+      ...overrides,
+    });
+    return { service, doctorDb, workspaceRoot };
+  };
+
+  it("clears runStartPending when BOTH snapshot paths fail (latch never wedges)", async () => {
+    const { service } = makeMinimalService({
+      computeSnapshotAsync: vi.fn(async () => {
+        throw new Error("worker down");
+      }),
+      computeSnapshot: vi.fn(() => {
+        throw new Error("Workspace root is not readable: /gone");
+      }),
+    });
+
+    await expect(service.runDoctor()).rejects.toThrow(/not readable/);
+    // A wedged runStartPending would report alreadyRunning (runId 0) forever.
+    await expect(service.runDoctor()).rejects.toThrow(/not readable/);
+  });
+
+  it("sanitizes forged client reply fields before logging the mismatch warn", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const { service, doctorDb } = makeMinimalService();
+      const imported = await service.importDoctorResult({
+        rawOutput: JSON.stringify({
+          summary: "One finding",
+          cards: [
+            {
+              priority: "P1",
+              category: "guidance",
+              title: "t",
+              summary: "s",
+              recommendation: "r",
+              fixPrompt: "f",
+              status: "open",
+            },
+          ],
+        }),
+      });
+      const [card] = doctorDb.getDoctorCardsByRunId(imported.runId);
+
+      const forged = "9999\n[doctor] forged log line" + "A".repeat(300);
+      await service.requestCardFix({
+        cardId: card.id,
+        sessionKey: "agent:main:telegram:direct:1050",
+        replyChannel: "telegram",
+        replyTo: forged,
+        prompt: "Fix.",
+      });
+
+      const mismatchLine = warnSpy.mock.calls
+        .map((call) => String(call[0]))
+        .find((line) => line.includes("differs from server-derived"));
+      expect(mismatchLine).toBeTruthy();
+      expect(mismatchLine).not.toContain("\n");
+      expect(mismatchLine).not.toContain("forged log line" + "A".repeat(200));
+      // Capped at 120 chars per field.
+      expect(mismatchLine.length).toBeLessThan(500);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it("warns once (and only once) when session-target validation is not wired", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const { service, doctorDb } = makeMinimalService();
+      const imported = await service.importDoctorResult({
+        rawOutput: JSON.stringify({
+          summary: "s",
+          cards: [
+            {
+              priority: "P1",
+              category: "guidance",
+              title: "t",
+              summary: "s",
+              recommendation: "r",
+              fixPrompt: "f",
+              status: "open",
+            },
+          ],
+        }),
+      });
+      const [card] = doctorDb.getDoctorCardsByRunId(imported.runId);
+      await service.requestCardFix({ cardId: card.id, sessionKey: "agent:main:main", prompt: "x" });
+      doctorDb.updateDoctorCardStatus({ id: card.id, status: "open" });
+      await service.requestCardFix({ cardId: card.id, sessionKey: "agent:main:main", prompt: "x" });
+
+      const skipWarns = warnSpy.mock.calls
+        .map((call) => String(call[0]))
+        .filter((line) => line.includes("findSendableSession not wired"));
+      expect(skipWarns).toHaveLength(1);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+});
+
+describe("server/doctor-service dispatch byte budget (red-team RT3)", () => {
+  afterEach(() => {
+    if (currentDoctorDb?.closeDoctorDb) {
+      currentDoctorDb.closeDoctorDb();
+      currentDoctorDb = null;
+    }
+  });
+
+  it("rejects an oversized FINAL payload before the card flips (covers the fixPrompt fallback)", async () => {
+    const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-bytecap-"));
+    const dbRoot = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-bytecap-db-"));
+    fs.writeFileSync(path.join(workspaceRoot, "AGENTS.md"), "# G\n", "utf8");
+    const doctorDb = loadManagedDoctorDb();
+    doctorDb.initDoctorDb({ rootDir: dbRoot });
+    const clawCmd = vi.fn(async () => ({ ok: true, stdout: "{}", stderr: "" }));
+    const { createDoctorService } = loadDoctorService();
+    const service = createDoctorService({
+      clawCmd,
+      listDoctorRuns: doctorDb.listDoctorRuns,
+      listDoctorCards: doctorDb.listDoctorCards,
+      getInitialWorkspaceBaseline: doctorDb.getInitialWorkspaceBaseline,
+      setInitialWorkspaceBaseline: doctorDb.setInitialWorkspaceBaseline,
+      createDoctorRun: doctorDb.createDoctorRun,
+      completeDoctorRun: doctorDb.completeDoctorRun,
+      insertDoctorCards: doctorDb.insertDoctorCards,
+      getDoctorRun: doctorDb.getDoctorRun,
+      getDoctorCardsByRunId: doctorDb.getDoctorCardsByRunId,
+      getDoctorCard: doctorDb.getDoctorCard,
+      updateDoctorCardStatus: doctorDb.updateDoctorCardStatus,
+      startDoctorCardFix: doctorDb.startDoctorCardFix,
+      cancelDoctorCardFix: doctorDb.cancelDoctorCardFix,
+      computeSnapshotAsync: fastComputeSnapshotAsync,
+      workspaceRoot,
+      managedRoot: workspaceRoot,
+      alphaclawRootDir: "/data",
+    });
+    // The oversized prompt arrives via the CARD's fixPrompt (the route's
+    // char pre-filter never sees this path) — multi-byte chars make the
+    // byte length ~3x the char length.
+    const imported = await service.importDoctorResult({
+      rawOutput: JSON.stringify({
+        summary: "s",
+        cards: [
+          {
+            priority: "P1",
+            category: "guidance",
+            title: "t",
+            summary: "s",
+            recommendation: "r",
+            fixPrompt: "…".repeat(60000),
+            status: "open",
+          },
+        ],
+      }),
+    });
+    const [card] = doctorDb.getDoctorCardsByRunId(imported.runId);
+
+    await expect(
+      service.requestCardFix({ cardId: card.id, sessionKey: "agent:main:main" }),
+    ).rejects.toMatchObject({ promptTooLarge: true });
+    // Rejected BEFORE any state change: card still open, nothing dispatched.
+    expect(doctorDb.getDoctorCard(card.id).status).toBe("open");
+    expect(clawCmd).not.toHaveBeenCalled();
+  });
+});
+
+describe("server/doctor-service run-path snapshot freshness (adversarial finding 2)", () => {
+  afterEach(() => {
+    if (currentDoctorDb?.closeDoctorDb) {
+      currentDoctorDb.closeDoctorDb();
+      currentDoctorDb = null;
+    }
+  });
+
+  it("re-scans when the run joins a walk that began before the run was requested", async () => {
+    const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-joined-"));
+    const dbRoot = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-joined-db-"));
+    fs.writeFileSync(path.join(workspaceRoot, "AGENTS.md"), "# G\n", "utf8");
+    const doctorDb = loadManagedDoctorDb();
+    doctorDb.initDoctorDb({ rootDir: dbRoot });
+
+    let releaseFirst;
+    const firstGate = new Promise((resolve) => {
+      releaseFirst = resolve;
+    });
+    const computeSnapshotAsync = vi.fn(async (root, opts) => {
+      if (computeSnapshotAsync.mock.calls.length === 1) await firstGate;
+      return computeWorkspaceSnapshotBounded(root, { ...(opts || {}), batchPauseMs: 0 });
+    });
+    const { createDoctorService } = loadDoctorService();
+    const service = createDoctorService({
+      clawCmd: vi.fn(async () => ({
+        ok: true,
+        stdout: JSON.stringify({ summary: "clean", cards: [] }),
+        stderr: "",
+      })),
+      listDoctorRuns: doctorDb.listDoctorRuns,
+      listDoctorCards: doctorDb.listDoctorCards,
+      getInitialWorkspaceBaseline: doctorDb.getInitialWorkspaceBaseline,
+      setInitialWorkspaceBaseline: doctorDb.setInitialWorkspaceBaseline,
+      createDoctorRun: doctorDb.createDoctorRun,
+      completeDoctorRun: doctorDb.completeDoctorRun,
+      insertDoctorCards: doctorDb.insertDoctorCards,
+      getDoctorRun: doctorDb.getDoctorRun,
+      getDoctorCardsByRunId: doctorDb.getDoctorCardsByRunId,
+      getDoctorCard: doctorDb.getDoctorCard,
+      updateDoctorCardStatus: doctorDb.updateDoctorCardStatus,
+      computeSnapshotAsync,
+      workspaceRoot,
+      managedRoot: workspaceRoot,
+    });
+
+    // A background refresh (status polling) starts BEFORE the user's change…
+    const backgroundRefresh = service.refreshWorkspaceSnapshot();
+    // …the user edits a file, then explicitly runs the doctor.
+    fs.writeFileSync(path.join(workspaceRoot, "NEW.md"), "changed after walk began\n");
+    const runPromise = service.runDoctor();
+    releaseFirst();
+    await backgroundRefresh;
+    const result = await runPromise;
+
+    expect(result.ok).toBe(true);
+    // The run must NOT trust the joined pre-request walk: a second scan runs.
+    expect(computeSnapshotAsync.mock.calls.length).toBeGreaterThanOrEqual(2);
+    // The persisted run fingerprints the post-change workspace.
+    const run = doctorDb.getDoctorRun(result.runId);
+    expect(Object.keys(run.workspaceManifest)).toContain("NEW.md");
+  });
+});
+
+describe("server/doctor-service hardening transition log", () => {
+  afterEach(() => {
+    if (currentDoctorDb?.closeDoctorDb) {
+      currentDoctorDb.closeDoctorDb();
+      currentDoctorDb = null;
+    }
+  });
+
+  const hardeningWarnCalls = (warnSpy) =>
+    warnSpy.mock.calls.filter((call) =>
+      String(call[0] || "").includes("hardening state change observed"),
+    );
+
+  it("logs once when the observed hardening state changes, silent on first compute and no-change", () => {
+    const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-hardening-log-ws-"));
+    const dbRoot = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-hardening-log-db-"));
+    fs.writeFileSync(path.join(workspaceRoot, "AGENTS.md"), "# Guidance\n", "utf8");
+
+    const doctorDb = loadManagedDoctorDb();
+    doctorDb.initDoctorDb({ rootDir: dbRoot });
+    const { createDoctorService } = loadDoctorService();
+    const doctorService = createDoctorService({
+      clawCmd: vi.fn(),
+      listDoctorRuns: doctorDb.listDoctorRuns,
+      listDoctorRunSummaries: doctorDb.listDoctorRunSummaries,
+      getDoctorRunManifest: doctorDb.getDoctorRunManifest,
+      getLatestCompletedRunSummary: doctorDb.getLatestCompletedRunSummary,
+      listDoctorCards: doctorDb.listDoctorCards,
+      getInitialWorkspaceBaseline: doctorDb.getInitialWorkspaceBaseline,
+      setInitialWorkspaceBaseline: doctorDb.setInitialWorkspaceBaseline,
+      createDoctorRun: doctorDb.createDoctorRun,
+      completeDoctorRun: doctorDb.completeDoctorRun,
+      insertDoctorCards: doctorDb.insertDoctorCards,
+      getDoctorRun: doctorDb.getDoctorRun,
+      getDoctorCardsByRunId: doctorDb.getDoctorCardsByRunId,
+      getDoctorCard: doctorDb.getDoctorCard,
+      updateDoctorCardStatus: doctorDb.updateDoctorCardStatus,
+      workspaceRoot,
+      managedRoot: workspaceRoot,
+      computeSnapshotAsync: fastComputeSnapshotAsync,
+    });
+
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    // First compute after boot: no previous context — never a false transition.
+    doctorService.buildStatus();
+    expect(hardeningWarnCalls(warnSpy)).toHaveLength(0);
+
+    // Break hardening on disk (merged file present, config entry lost →
+    // blocked/not_configured), then expire the 30s bootstrap-context TTL.
+    fs.mkdirSync(path.join(workspaceRoot, "hooks", "bootstrap"), { recursive: true });
+    fs.writeFileSync(
+      path.join(workspaceRoot, "hooks", "bootstrap", "AGENTS.md"),
+      "safety rules",
+      "utf8",
+    );
+    const realNow = Date.now();
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => realNow + 31_000);
+    doctorService.buildStatus();
+    const observed = hardeningWarnCalls(warnSpy);
+    expect(observed).toHaveLength(1);
+    expect(String(observed[0][0])).toContain("blocked");
+    expect(String(observed[0][0])).toContain("hooks/bootstrap/AGENTS.md: not_configured");
+
+    // A no-change refresh stays silent.
+    warnSpy.mockClear();
+    nowSpy.mockImplementation(() => realNow + 62_000);
+    doctorService.buildStatus();
+    expect(hardeningWarnCalls(warnSpy)).toHaveLength(0);
   });
 });

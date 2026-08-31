@@ -132,7 +132,8 @@ const kBaseProps = {
   authProfiles: [],
   authOrder: {},
   codexStatus: { connected: true },
-  codexStatusError: false,
+  codexStatusError: "",
+  codexStatusKnown: true,
   onEditProfile: () => {},
   onEditAuthOrder: () => {},
   getProfileValue: () => null,
@@ -192,11 +193,34 @@ describe("frontend/models-tab provider auth card codex section", () => {
     expect(kBaseProps.onRefreshCodex).toHaveBeenCalledTimes(1);
   });
 
-  it("renders the status-check-failed note without overriding the last-known badge", () => {
-    const tree = renderCard({ codexStatusError: true });
+  it("renders the status-check-failed chip without overriding the last-known badge", () => {
+    const tree = renderCard({ codexStatusError: "status endpoint down" });
+    const chips = findAllByType(tree, InlineErrorChip);
+    expect(chips.length).toBe(1);
+    expect(chips[0].props.headline).toBe(
+      "Status check failed — showing the last known Codex status",
+    );
+    // The retry re-runs the same status fetch the card was given.
+    expect(chips[0].props.onRetry).toBe(kBaseProps.onRefreshCodex);
     const text = collectText(tree).join(" ");
-    expect(text).toContain("Status check failed");
+    expect(text).toContain("status endpoint down");
     expect(text).toContain("Connected");
     expect(text).not.toContain("Not connected");
+  });
+
+  it("a failed FIRST check says the status is unknown instead of claiming last-known data", () => {
+    const tree = renderCard({
+      codexStatus: { connected: false },
+      codexStatusError: "cold boot failure",
+      codexStatusKnown: false,
+    });
+    const chips = findAllByType(tree, InlineErrorChip);
+    expect(chips.length).toBe(1);
+    expect(chips[0].props.headline).toBe(
+      "Status check failed — Codex status unknown",
+    );
+    expect(collectText(tree).join(" ")).not.toContain(
+      "showing the last known",
+    );
   });
 });
