@@ -443,6 +443,65 @@ describe("server/watchdog", () => {
     watchdog.stop();
   });
 
+  it("notifies once per incident when the gateway goes down, with exit-shape copy", async () => {
+    // Health stays down for the whole test: both crashes belong to ONE
+    // incident (a healthy probe between them would close it — and a second
+    // incident correctly gets its own notice).
+    const { watchdog, notifier } = createHarness({
+      autoRepair: false,
+      fetchImpl: async () => {
+        throw new Error("gateway unavailable");
+      },
+    });
+
+    // Expected exits never notify.
+    watchdog.onGatewayExit({ code: 0, expectedExit: true });
+    await flushMicrotasks();
+    expect(notifier.notify).not.toHaveBeenCalled();
+
+    // First unexpected exit: one down notice, non-committal copy, exit code.
+    watchdog.onGatewayExit({ code: 137, expectedExit: false });
+    await flushMicrotasks();
+    const downCalls = () =>
+      notifier.notify.mock.calls.filter((call) =>
+        String(call?.[0] || "").includes("🔴 Gateway went down"),
+      );
+    expect(downCalls().length).toBe(1);
+    expect(downCalls()[0][0]).toContain("exit 137");
+    expect(downCalls()[0][0]).toContain("AlphaClaw will retry automatically");
+    expect(downCalls()[0][1]).toEqual(
+      expect.objectContaining({ eventType: "crash" }),
+    );
+    // Down notices are important (no verbose tag): quiet mode still gets them.
+    expect(downCalls()[0][1].verbose).toBe(false);
+
+    // A second crash in the same incident stays silent (once-per-incident).
+    watchdog.onGatewayExit({ code: 137, expectedExit: false });
+    await flushMicrotasks();
+    expect(downCalls().length).toBe(1);
+    watchdog.stop();
+  });
+
+  it("formats signal-only and shapeless exits in the down notice", async () => {
+    const { watchdog, notifier } = createHarness({ autoRepair: false });
+    watchdog.onGatewayExit({ signal: "SIGKILL", expectedExit: false });
+    await flushMicrotasks();
+    const first = notifier.notify.mock.calls.find((call) =>
+      String(call?.[0] || "").includes("🔴 Gateway went down"),
+    );
+    expect(first[0]).toContain("signal SIGKILL");
+    watchdog.stop();
+
+    const shapeless = createHarness({ autoRepair: false });
+    shapeless.watchdog.onGatewayExit({ expectedExit: false });
+    await flushMicrotasks();
+    const call = shapeless.notifier.notify.mock.calls.find((c) =>
+      String(c?.[0] || "").includes("🔴 Gateway went down"),
+    );
+    expect(call[0]).toContain("went down (unexpectedly)");
+    shapeless.watchdog.stop();
+  });
+
   it("suppresses notifier sends when notifications are disabled", async () => {
     const { watchdog, notifier } = createHarness({
       notificationsDisabled: true,
