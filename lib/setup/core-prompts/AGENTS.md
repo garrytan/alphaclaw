@@ -27,14 +27,14 @@ Your `.openclaw` directory is version-controlled and this is how work survives c
 
 ### Persistent Storage Rules
 
-This deployment runs in an ephemeral container. `/tmp`, other temp directories, and files outside `/data` can disappear on restart or redeploy.
+`/tmp` and other temp directories are not durable; files outside the managed state directory can disappear on restart or redeploy.
 
-Anything that must survive redeploys must live under `/data/.openclaw`.
+Anything that must survive restarts or redeploys must live under `$OPENCLAW_STATE_DIR` (this install: `{{STATE_DIR}}`).
 
 For plugins and other durable artifacts:
 
 - Prefer normal `openclaw plugins install <spec>` flows for persistent installs.
-- If you must stage or unpack a local plugin first, stage it under `/data/.openclaw/...`, not `/tmp/...`.
+- If you must stage or unpack a local plugin first, stage it under `$OPENCLAW_STATE_DIR/...`, not `/tmp/...`.
 - Never persist `plugins.load.paths` entries that point at temp directories.
 
 Anytime you add, edit, or remove workspace files, openclaw.json, cron.json, skills, or external resources (third-party pages, databases, integrations), **commit and push your changes to git**. Never force push; always pull first if there might be remote changes.

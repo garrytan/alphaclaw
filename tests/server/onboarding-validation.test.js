@@ -9,6 +9,29 @@ const kBaseVars = () => [
 const kResolveProvider = (modelKey) => String(modelKey || "").split("/")[0] || "";
 
 describe("onboarding/validation", () => {
+  it("accepts a minimax-cn model with MINIMAX_API_KEY (upstream PR #111)", () => {
+    // The curated catalog makes minimax-cn/* selectable in the wizard; the
+    // CN region reuses the same MINIMAX_API_KEY, so onboarding must not 400.
+    const res = validateOnboardingInput({
+      vars: [...kBaseVars(), { key: "MINIMAX_API_KEY", value: "mm-test" }],
+      modelKey: "minimax-cn/MiniMax-M3",
+      resolveModelProvider: kResolveProvider,
+      hasCodexOauthProfile: () => false,
+    });
+    expect(res.ok).toBe(true);
+  });
+
+  it("still rejects a minimax-cn model with no MINIMAX_API_KEY", () => {
+    const res = validateOnboardingInput({
+      vars: kBaseVars(),
+      modelKey: "minimax-cn/MiniMax-M3",
+      resolveModelProvider: kResolveProvider,
+      hasCodexOauthProfile: () => false,
+    });
+    expect(res.ok).toBe(false);
+    expect(res.status).toBe(400);
+  });
+
   it("accepts OPENROUTER_API_KEY when the selected model uses the openrouter provider", () => {
     const res = validateOnboardingInput({
       vars: [...kBaseVars(), { key: "OPENROUTER_API_KEY", value: "sk-or-test" }],

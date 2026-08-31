@@ -11,7 +11,17 @@ describe("frontend/model-config", () => {
     expect(modelConfig.getAuthProviderFromModelProvider("byteplus-plan")).toBe(
       "byteplus",
     );
+    expect(modelConfig.getAuthProviderFromModelProvider("minimax-cn")).toBe(
+      "minimax",
+    );
     expect(modelConfig.getAuthProviderFromModelProvider("google")).toBe("google");
+  });
+
+  it("lets CN model selections reuse the MiniMax API key", async () => {
+    const modelConfig = await loadModelConfig();
+    const keys = modelConfig.getVisibleAiFieldKeys("minimax-cn");
+    expect(keys.has("MINIMAX_API_KEY")).toBe(true);
+    expect(modelConfig.kProviderLabels["minimax-cn"]).toBe("MiniMax (China)");
   });
 
   it("returns visible AI field keys for provider", async () => {
