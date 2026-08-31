@@ -247,6 +247,38 @@ describe("server/routes/system", () => {
     expect(deps.restartGateway).not.toHaveBeenCalled();
   });
 
+  it("rejects malformed env var names on PUT /api/env (tier-bypass boundary)", async () => {
+    const deps = createSystemDeps();
+    const app = createApp(deps);
+
+    // Interior whitespace / control chars would canonicalize into a
+    // different (possibly protected) key on write — reject at the boundary.
+    for (const key of [
+      "CLAUDE_CODE_ROUTINE_URL\nX",
+      "FOO BAR",
+      "has-dash",
+      "with.dot",
+    ]) {
+      const res = await request(app).put("/api/env").send({ vars: [{ key, value: "v" }] });
+      expect(res.status).toBe(400);
+      expect(res.body.ok).toBe(false);
+      expect(res.body.error).toContain("Invalid environment variable name");
+    }
+    // Non-string keys coerce on write (String(["X"])==="X"); reject them so a
+    // protected key can't be smuggled past the tier gate as an array.
+    for (const key of [["CLAUDE_CODE_ROUTINE_URL"], 42, { toString: () => "X" }]) {
+      const res = await request(app).put("/api/env").send({ vars: [{ key, value: "v" }] });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain("Invalid environment variable name");
+    }
+    // Leading-digit keys are legitimate (the UI produces e.g. 2CAPTCHA_API_KEY)
+    // and trailing whitespace is benign — both accepted (not a 400).
+    for (const key of ["2CAPTCHA_API_KEY", "FEATURE_FLAG "]) {
+      const res = await request(app).put("/api/env").send({ vars: [{ key, value: "1" }] });
+      expect(res.status).not.toBe(400);
+    }
+  });
+
   it("rejects gog keyring password edits on PUT /api/env", async () => {
     const deps = createSystemDeps();
     const app = createApp(deps);

@@ -266,6 +266,64 @@ describe("admin-manifest env.update body-aware tierResolver (A1)", () => {
     expect(resolveEnvUpdate({ vars: [] })).toBe("dangerous");
   });
 
+  // PR #30 bypass regression: the resolver classified the RAW submitted key
+  // while the write path canonicalizes (stripLineBreaks + trim), so a padded
+  // or linebroken protected key slipped through at base tier yet persisted as
+  // the protected key — repointing the launcher with no operator confirm.
+  it("escalates to dangerous when a protected key is set with TRAILING WHITESPACE (bypass regression)", () => {
+    mockEnvFile([]);
+    expect(
+      resolveEnvUpdate({
+        vars: [{ key: "CLAUDE_CODE_ROUTINE_URL ", value: "trig_attacker" }],
+      }),
+    ).toBe("dangerous");
+  });
+
+  it("escalates to dangerous when a protected key is set with an embedded LINEBREAK (bypass regression)", () => {
+    mockEnvFile([]);
+    expect(
+      resolveEnvUpdate({
+        vars: [{ key: "CLAUDE_CODE_ROUTINE_TOKEN\n", value: "sk-ant-oat01-evil" }],
+      }),
+    ).toBe("dangerous");
+  });
+
+  it("does NOT escalate for a PADDED non-protected key (normalization is exact, not substring)", () => {
+    mockEnvFile([]);
+    expect(
+      resolveEnvUpdate({ vars: [{ key: "  FEATURE_FLAG  ", value: "1" }] }),
+    ).toBe("restart");
+  });
+
+  it("escalates to dangerous when a protected key is smuggled as a NON-STRING (array coercion)", () => {
+    // String(["CLAUDE_CODE_ROUTINE_URL"]) === "CLAUDE_CODE_ROUTINE_URL": the
+    // write path coerces, so the resolver must classify the coerced key, not
+    // filter non-strings out into the base tier.
+    mockEnvFile([]);
+    expect(
+      resolveEnvUpdate({
+        vars: [{ key: ["CLAUDE_CODE_ROUTINE_URL"], value: "http://evil/routine" }],
+      }),
+    ).toBe("dangerous");
+  });
+
+  it("escalates to dangerous for an array-coerced autonomous-spawn key", () => {
+    mockEnvFile([]);
+    expect(
+      resolveEnvUpdate({
+        vars: [{ key: ["CLAUDE_CODE_LOCAL_SPAWN_ON_INCIDENT"], value: "1" }],
+      }),
+    ).toBe("dangerous");
+  });
+
+  it("isAgentProtectedEnvKey normalizes its argument (unit)", () => {
+    const { isAgentProtectedEnvKey } = require("../../lib/server/utils/env-keys");
+    expect(isAgentProtectedEnvKey("CLAUDE_CODE_ROUTINE_URL ")).toBe(true);
+    expect(isAgentProtectedEnvKey("CLAUDE_CODE_ROUTINE_TOKEN\n")).toBe(true);
+    expect(isAgentProtectedEnvKey("CLAUDE_CODE_ROUTINE_URL")).toBe(true);
+    expect(isAgentProtectedEnvKey("FEATURE_FLAG")).toBe(false);
+  });
+
   it("stays restart when the launcher keys are unchanged (kept verbatim)", () => {
     mockEnvFile([
       { key: "CLAUDE_CODE_ROUTINE_URL", value: "trig_x" },
