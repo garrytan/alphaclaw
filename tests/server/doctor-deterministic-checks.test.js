@@ -471,3 +471,162 @@ describe("server/doctor/deterministic-checks", () => {
     }
   });
 });
+
+describe("server/doctor/dashboard-token-check", () => {
+  const {
+    buildDashboardTokenCards,
+    kDashboardTokenSourceKey,
+  } = require("../../lib/server/doctor/dashboard-token-check");
+  const {
+    createDashboardUrlService,
+  } = require("../../lib/server/gateway-dashboard-url");
+
+  const kTokenModeConfig = { gateway: { auth: {} } };
+
+  it("emits no card when the token resolves from config", async () => {
+    const cards = await buildDashboardTokenCards({
+      hasConfiguredDashboardToken: async () => true,
+      config: kTokenModeConfig,
+      onboarded: true,
+    });
+    expect(cards).toEqual([]);
+  });
+
+  it("emits the warning card when token-mode config resolution is empty on an onboarded box", async () => {
+    const cards = await buildDashboardTokenCards({
+      hasConfiguredDashboardToken: async () => false,
+      config: kTokenModeConfig,
+      onboarded: true,
+    });
+    expect(cards).toHaveLength(1);
+    expect(cards[0]).toMatchObject({
+      sourceKey: kDashboardTokenSourceKey,
+      priority: "P2",
+      status: "open",
+      source: "deterministic",
+      title:
+        "Gateway token not resolvable from config — dashboard links fall back to manual auth",
+    });
+    // Warning, not error: the launcher's CLI fallback may still cover clicks.
+    expect(cards[0].summary).toContain("warning, not an error");
+    // The token itself must never appear anywhere in card copy templates.
+    expect(cards[0].fixPrompt).toContain("Never print the token itself");
+  });
+
+  it("emits no card in trusted-proxy mode (tokenless IS the success path)", async () => {
+    const cards = await buildDashboardTokenCards({
+      hasConfiguredDashboardToken: async () => false,
+      config: { gateway: { auth: { mode: "trusted-proxy" } } },
+      onboarded: true,
+    });
+    expect(cards).toEqual([]);
+  });
+
+  it("emits no card in password mode (token auth would be a mixed config)", async () => {
+    const cards = await buildDashboardTokenCards({
+      hasConfiguredDashboardToken: async () => false,
+      config: { gateway: { auth: { mode: "password" } } },
+      onboarded: true,
+    });
+    expect(cards).toEqual([]);
+  });
+
+  it("counts a SecretRef-SHAPED token as configured WITHOUT resolving it (no exec providers in doctor passes)", async () => {
+    const importSecretRuntime = vi.fn();
+    const service = createDashboardUrlService({
+      fsModule: { readFileSync: () => "{}" },
+      openclawDir: "/tmp/openclaw",
+      readEnvFile: () => [],
+      clawCmd: vi.fn(),
+      importSecretRuntime,
+    });
+    const config = {
+      gateway: { auth: { token: { source: "exec", provider: "op", id: "gw" } } },
+    };
+    const cards = await buildDashboardTokenCards({
+      hasConfiguredDashboardToken: service.hasConfiguredDashboardToken,
+      config,
+      onboarded: true,
+    });
+    expect(cards).toEqual([]);
+    // The whole point: the probe never touches the secret runtime, so a
+    // scheduled scan can never spawn a source:"exec" provider.
+    expect(importSecretRuntime).not.toHaveBeenCalled();
+  });
+
+  it("emits no card before onboarding", async () => {
+    const cards = await buildDashboardTokenCards({
+      hasConfiguredDashboardToken: async () => false,
+      config: kTokenModeConfig,
+      onboarded: false,
+    });
+    expect(cards).toEqual([]);
+  });
+
+  it("emits no card without a readable config snapshot", async () => {
+    const cards = await buildDashboardTokenCards({
+      hasConfiguredDashboardToken: async () => false,
+      config: null,
+      onboarded: true,
+    });
+    expect(cards).toEqual([]);
+  });
+
+  it("degrades a resolver throw to no card and one fixed-code log line — never a crash", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const cards = await buildDashboardTokenCards({
+      hasConfiguredDashboardToken: async () => {
+        throw new Error("transient failure quoting #token=leaky-value");
+      },
+      config: kTokenModeConfig,
+      onboarded: true,
+    });
+    expect(cards).toEqual([]);
+    const warnLines = warnSpy.mock.calls.map((call) => String(call[0]));
+    const checkLines = warnLines.filter((line) =>
+      line.includes(kDashboardTokenSourceKey),
+    );
+    expect(checkLines).toHaveLength(1);
+    // Fail-closed: the fixed code only — the message can echo config text.
+    expect(checkLines[0]).not.toContain("leaky-value");
+  });
+
+  it("never invokes the CLI, even through the real service resolver", async () => {
+    const previousEnvToken = process.env.OPENCLAW_GATEWAY_TOKEN;
+    delete process.env.OPENCLAW_GATEWAY_TOKEN;
+    try {
+      const clawCmd = vi.fn(async () => ({
+        ok: true,
+        stdout: "Dashboard URL: http://127.0.0.1:18789/#token=cli-token",
+      }));
+      const service = createDashboardUrlService({
+        fsModule: {
+          readFileSync: () => JSON.stringify({ gateway: { auth: {} } }),
+        },
+        openclawDir: "/tmp/openclaw",
+        readEnvFile: () => [],
+        clawCmd,
+        importSecretRuntime: () =>
+          Promise.resolve([
+            { coerceSecretRef: () => null },
+            { resolveSecretRefValues: async () => new Map() },
+          ]),
+      });
+      const cards = await buildDashboardTokenCards({
+        hasConfiguredDashboardToken: service.hasConfiguredDashboardToken,
+        config: { gateway: { auth: {} } },
+        onboarded: true,
+      });
+      // Config-only probe came up empty AND the CLI-spawning fallback
+      // path was never touched: the card fires instead.
+      expect(cards).toHaveLength(1);
+      expect(clawCmd).not.toHaveBeenCalled();
+    } finally {
+      if (previousEnvToken === undefined) {
+        delete process.env.OPENCLAW_GATEWAY_TOKEN;
+      } else {
+        process.env.OPENCLAW_GATEWAY_TOKEN = previousEnvToken;
+      }
+    }
+  });
+});
