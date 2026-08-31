@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   WatchdogResourcesCard,
   buildCapacityHeaderModel,
+  buildMemoryTrendModel,
 } from "../../lib/public/js/components/watchdog-tab/resources/index.js";
 import { ResourceBar } from "../../lib/public/js/components/watchdog-tab/resource-bar.js";
 import { AsyncSection } from "../../lib/public/js/components/async-section.js";
@@ -225,5 +226,121 @@ describe("frontend/watchdog resources card — capacity header", () => {
   it("disk row is omitted from the anchor when detection failed", () => {
     const model = buildCapacityHeaderModel({ ...kProfile, disk: null });
     expect(model.text).toBe("4 vCPU · 8.0 GB memory");
+  });
+});
+
+// Every trend-enum state renders its HONEST copy (review 4A/6C): off and
+// collecting are stated, never dressed up as healthy; badge = word + tone.
+describe("buildMemoryTrendModel", () => {
+  const kNow = Date.parse("2026-08-31T09:00:00.000Z");
+  const base = {
+    rssMb: 812,
+    slopeMbPerHour: 65,
+    effectiveCapMb: 1024,
+    sampleCount: 12,
+    requiredSamples: 24,
+    projectedExhaustionAt: null,
+  };
+
+  it("hides the row for missing/legacy payloads and no_gateway", () => {
+    expect(buildMemoryTrendModel(null)).toBeNull();
+    expect(buildMemoryTrendModel(undefined)).toBeNull();
+    expect(buildMemoryTrendModel({ ...base, state: "no_gateway" })).toBeNull();
+  });
+
+  it("disabled states the fact and points at Settings", () => {
+    const model = buildMemoryTrendModel({ ...base, state: "disabled" });
+    expect(model.tone).toBe("neutral");
+    expect(model.label).toBe("Detection off");
+    expect(model.detail).toContain("Settings");
+    expect(model.alwaysVisible).toBe(false);
+  });
+
+  it("warming/insufficient show sample progress, never a verdict", () => {
+    for (const state of ["warming_up", "insufficient_samples"]) {
+      const model = buildMemoryTrendModel({ ...base, state });
+      expect(model.label).toBe("Collecting");
+      expect(model.detail).toContain("(12/24)");
+    }
+  });
+
+  it("normal is a subtle Stable badge with the numbers", () => {
+    const model = buildMemoryTrendModel({ ...base, state: "normal" });
+    expect(model.tone).toBe("success");
+    expect(model.label).toBe("Stable");
+    expect(model.detail).toContain("812 MB of 1024 MB cap");
+  });
+
+  it("watch is a warning marked unconfirmed", () => {
+    const model = buildMemoryTrendModel({ ...base, state: "watch" });
+    expect(model.tone).toBe("warning");
+    expect(model.detail).toContain("unconfirmed");
+    expect(model.alwaysVisible).toBe(false);
+  });
+
+  it("leak_suspected reads calm-narrative with slope + projection, always visible", () => {
+    const model = buildMemoryTrendModel(
+      {
+        ...base,
+        state: "leak_suspected",
+        projectedExhaustionAt: new Date(kNow + 3 * 60 * 60 * 1000).toISOString(),
+      },
+      { nowMs: kNow },
+    );
+    expect(model.tone).toBe("warning");
+    expect(model.label).toBe("Leak suspected");
+    expect(model.detail).toContain("Memory rising steadily");
+    expect(model.detail).toContain("+65 MB/h");
+    expect(model.detail).toContain("projected to reach its limit in ~3h");
+    expect(model.detail).not.toMatch(/LEAK DETECTED|!{2,}/);
+    expect(model.alwaysVisible).toBe(true);
+  });
+
+  it("critical is danger-toned and always visible", () => {
+    const model = buildMemoryTrendModel({ ...base, state: "critical" });
+    expect(model.tone).toBe("danger");
+    expect(model.label).toBe("Critical");
+    expect(model.alwaysVisible).toBe(true);
+  });
+
+  it("an unknown future state hides rather than guessing", () => {
+    expect(buildMemoryTrendModel({ ...base, state: "novel_state" })).toBeNull();
+  });
+
+  it("a projection already in the past is dropped (stale payload, never '~-3m')", () => {
+    for (const projectedExhaustionAt of [
+      new Date(kNow - 5 * 60 * 1000).toISOString(), // passed while tab was open
+      new Date(kNow).toISOString(), // exactly now
+      "not-a-timestamp",
+    ]) {
+      const model = buildMemoryTrendModel(
+        { ...base, state: "leak_suspected", projectedExhaustionAt },
+        { nowMs: kNow },
+      );
+      expect(model.detail).not.toContain("projected");
+      expect(model.detail).toContain("Memory rising steadily");
+    }
+  });
+
+  it("sparse payloads join cleanly — no dangling or doubled separators", () => {
+    const sparse = buildMemoryTrendModel(
+      {
+        state: "leak_suspected",
+        rssMb: null,
+        slopeMbPerHour: null,
+        effectiveCapMb: null,
+        projectedExhaustionAt: null,
+      },
+      { nowMs: kNow },
+    );
+    expect(sparse.detail).toBe("Memory rising steadily");
+    const noSlope = buildMemoryTrendModel(
+      { ...base, state: "normal", slopeMbPerHour: 0 },
+      { nowMs: kNow },
+    );
+    expect(noSlope.detail).toBe("812 MB of 1024 MB cap");
+    for (const model of [sparse, noSlope]) {
+      expect(model.detail).not.toMatch(/·\s*$|^\s*·|·\s*·/);
+    }
   });
 });

@@ -32,9 +32,10 @@
 - **Setup UI:** Password-protected web dashboard for onboarding, configuration, and day-to-day management.
 - **Guided Onboarding:** Step-by-step setup wizard — model selection, provider credentials, GitHub repo, channel pairing.
 - **Multi-Agent Management:** Sidebar-driven agent navigation with create, rename, and delete flows. Per-agent overview cards, channel bindings, and URL-driven agent selection.
+- **Agent Chat:** Chat with any agent session right from the sidebar. Sends queue durably and survive page reloads (failed messages get Retry/Discard, and retries reuse the message id so the bridge deduplicates them), Stop reports honestly, interruptions show up inline in the transcript, and the connection reconnects on its own with keepalives on both the browser and gateway sockets.
 - **Team Access (beta):** Share one AlphaClaw with named teammates. Each person signs in with their own email and password, OpenClaw attributes messages per person, and a who's-online roster shows presence. Admins invite members with expiring single-use links, assign roles, and disable or remove accounts; members can chat and view status while updates, secrets, terminals, agents, and team management stay admin-only. Requires the OpenClaw 2026.8.1-beta line.
 - **Gateway Manager:** Spawns, monitors, restarts, and proxies the OpenClaw gateway as a managed child process. Restarts stream live progress with honest outcomes — measured downtime on success, actual error evidence on failure.
-- **Watchdog:** Crash detection, crash-loop recovery, auto-repair (`openclaw doctor --fix`), Telegram/Discord/Slack/WhatsApp notifications, and a live interactive terminal for monitoring gateway output directly from the browser.
+- **Watchdog:** Crash detection, crash-loop recovery, auto-repair (`openclaw doctor --fix`), memory-leak detection that can warn hours before the gateway hits its limit (with strictly opt-in pre-OOM auto-restart), Telegram/Discord/Slack/WhatsApp notifications, and a live interactive terminal for monitoring gateway output directly from the browser.
 - **Resource Autotune:** Sizes resource-dependent settings to the container's real capacity (default ON) — gateway heap, agent concurrency, request body limits, SQLite caches, and an advisory backup budget — with a persisted detected → derived → applied ledger, live resize detection, and OOM classification. Opt out per deployment from the Watchdog tab or with the `ALPHACLAW_AUTOTUNE_DISABLED=1` kill-switch.
 - **Channel Orchestration:** Telegram, Discord, Slack, ClickClack, and Buzz bot pairing with per-agent channel bindings, credential sync, and a guided wizard for splitting Telegram into multi-threaded topic groups as your usage grows. ClickClack sets up from a single pasted setup code or URL; Buzz installs through a resumable plugin wizard (both need the OpenClaw beta line for their guided flows).
 - **Google Workspace:** OAuth integration for Gmail, Calendar, Drive, Docs, Sheets, Tasks, Contacts, and Meet, plus guided Gmail watch setup with Google Pub/Sub topic, subscription, and push endpoint handling.
@@ -120,7 +121,7 @@ built from it (docker required).
 | **Doctor**    | Drift Doctor workspace health review — LLM scan plus deterministic environment checks and bridged `openclaw doctor` findings, a context-budget meter against OpenClaw's real injection budget with self-explaining Blocked/Dropped/Truncated chips, opt-in scheduled scans, configurable scan limits, and queued fixes you can dispatch to your agent in the chat you pick |
 | **Nodes**     | Guided local-node setup for VPS deployments, per-node browser attach, reconnect commands, and routing/pairing controls   |
 | **Team**      | Member accounts, invites, roles, and a who's-online roster (beta) — enable wizard applies the gateway change and verifies login end to end |
-| **Watchdog**  | Health monitoring, live status narrative, incident history, optional AI incident overseer, resource autotune card, auto-repair toggle, notifications, event log, live log tail, interactive terminal |
+| **Watchdog**  | Health monitoring, live status narrative, incident history, optional AI incident overseer, resource autotune card, gateway memory trend + leak-detection settings, auto-repair toggle, notifications, event log, live log tail, interactive terminal |
 | **Upgrade**   | OpenClaw versions & release channels — stable/beta/dev catalog, release notes, one-click switch with backup + auto-rollback |
 | **Models**    | AI provider credentials (Anthropic, OpenAI, Gemini, Mistral, Voyage, Groq, Deepgram) and model selection                 |
 | **Envars**    | Environment variables — view, edit, add — with gateway restart prompts                                                   |
@@ -128,9 +129,9 @@ built from it (docker required).
 
 ## Open Claude Code Launcher
 
-The Monitoring section of the sidebar has an **Open Claude Code** item. Out of the box it opens [claude.ai/code](https://claude.ai/code) in a new tab. Configure it and one click starts a fresh Claude Code cloud session and lands you directly in it.
+The Monitoring section of the sidebar has an **Open Claude Code** item. Out of the box it opens [claude.ai/code](https://claude.ai/code) in a new tab. Configure it and one click starts a Claude Code session and lands you directly in it — a **local rescue session on the box itself** once you've done its one-time login (see below), or a fresh cloud session via a claude.ai routine.
 
-Setup (one time, on your claude.ai account — requires a Pro/Max/Team/Enterprise plan):
+Routine setup (one time, on your claude.ai account — requires a Pro/Max/Team/Enterprise plan):
 
 1. Create a routine at [claude.ai/code/routines](https://claude.ai/code/routines). Keep its prompt minimal — something like "Await instructions." — because every fire runs the routine's saved prompt as an **autonomous session** (shell access, no approval prompts) that consumes your claude.ai subscription usage.
 2. Edit the routine → **Add another trigger** → **API** → **Generate token**, then copy the fire URL and the token (shown once).
@@ -144,6 +145,34 @@ Behavior and guardrails:
 - The launcher never sends the token to the browser (status checks are presence-only), the token is excluded from the OpenClaw gateway's child environment, and the fire endpoint is denied to the agent-admin actor. Like every secret in `~/.alphaclaw/.env`, admins can view it in the Envars editor, and a same-host process that can read that file can read it too — the P1 "narrow gatewayEnv secret spread" TODO tracks tightening that class further.
 - Routines belong to one claude.ai account: in multi-admin installs, every admin's click fires (and bills) the token owner's account, and the session URL only opens for someone logged into that account.
 - `CLAUDE_CODE_ROUTINE_TOKEN` is **not** the same as `ANTHROPIC_TOKEN` (the `claude setup-token`), despite the shared `sk-ant-oat01-` prefix — it is a per-routine trigger credential from the claude.ai UI.
+
+### Local rescue session (preferred when set up)
+
+The launcher's local path opens a Claude Code instance running **on the box itself**: a `claude remote-control` session hosted in detached tmux, reached through its Remote Control URL. Once its login is done, the button prefers this path (the routine stays as the fallback), so you can debug AlphaClaw/OpenClaw from claude.ai/code — or your phone — with hands on the actual machine, even while OpenClaw is down.
+
+- **One-time login.** The Watchdog page's rescue-session card walks you through `claude auth login` in the browser (claude.ai subscription OAuth — Remote Control refuses API keys). Credentials live in `<root>/claude-code-local/home/`, deliberately **outside backups**: after restoring a backup, run the login again.
+- **Survives AlphaClaw restarts.** The tmux session outlives the AlphaClaw process; the card shows the session URL (with a QR code for your phone), a copyable `tmux … attach` hint for shell access, one-click Stop, and a sanitized terminal tail when a spawn fails. Optionally warm a session at boot, or automatically when the watchdog opens an incident — the incident notification carries the URL when the session is already running.
+- **Permissions.** Sessions default to `acceptEdits`; `bypassPermissions` is opt-in and only ever applies to sessions you start by clicking through the mode-named confirmation — unattended spawns (autostart, incidents) always clamp to `acceptEdits`. Note the session can read box content, including untrusted logs (a prompt-injection surface), and transmits selected content to Anthropic as part of operating Claude Code.
+- **Settings.** Five `CLAUDE_CODE_LOCAL_*` keys on the Envars page — enable/kill switch, autostart, permission mode, working directory, incident auto-spawn — all hot-reloaded, no restart. Disabling never kills a live session; stop it from the Watchdog card.
+
+#### State runbook (`local.state` on the status endpoint / Watchdog card)
+
+`<root>` below is `ALPHACLAW_ROOT_DIR` (`/data` in the container, `~/.alphaclaw` otherwise).
+
+| State | Meaning → fix |
+| ----- | ------------- |
+| `probing` | First background probe hasn't finished (just after boot) → re-check in a few seconds. |
+| `disabled` | `CLAUDE_CODE_LOCAL_ENABLED` is 0/false → re-enable in Envars (hot-reload). Disabling never kills a live session — it only blocks new spawns/logins; stop a still-live session from the Watchdog card. |
+| `not_installed` | The `claude` CLI is missing → `npm install -g @anthropic-ai/claude-code` (the Docker image ships a pinned copy, so this means a non-Docker install). |
+| `needs_login` | No OAuth credential under the rescue HOME → one-time login from the Watchdog card. Credentials live OUTSIDE backups at `<root>/claude-code-local/home/` — after restoring a backup, re-run the login. |
+| `login_in_progress` | The guided login is running (10-minute TTL) → finish or cancel it from the card; sessions cannot start meanwhile. |
+| `ready` | Installed and logged in, no session → the sidebar button (or Start on the card) spawns one. |
+| `starting` | Spawned; waiting up to 60s for the Remote Control URL. |
+| `running` | Live; URL (and QR) on the card. Shell attach, last resort when claude.ai is unreachable: `tmux -S <root>/claude-code-local/tmux.sock attach -t alphaclaw-rescue`. |
+| `error` | `local.error` carries code + message → view the sanitized tail on the card; Stop clears it, and the next start kills any leftover failed session before spawning fresh. |
+| `stopping` | A stop is in flight → transient. |
+
+Post-rollback cleanup: after rolling the feature back (env kill switch or code revert), a live tmux session deliberately survives — clean it up with `tmux -S <root>/claude-code-local/tmux.sock kill-server`. The credentials dir is harmless to leave; the card's Logout removes it beforehand if wanted.
 
 ## OpenClaw Release Channels
 
@@ -257,7 +286,9 @@ The built-in watchdog monitors gateway health and recovers from failures automat
 | **Incident history**     | Persisted, grouped incidents (open → resolved/abandoned) with humanized event timelines, plus the raw SQLite event feed |
 | **Incident overseer**    | Optional (default off): a local Claude Code review of each settled incident — advisory verdict + suggested next action; deterministic recovery stays in charge. When enabled, redacted incident evidence is sent to the Anthropic API |
 | **Resize & OOM awareness** | Detects live container resizes on the watchdog tick (event + notification + retune) and classifies gateway heap-OOM vs container-OOM exits as distinct events with machine-derived remediation |
-| **Notifications**        | Telegram, Discord, Slack, and WhatsApp alerts for crashes, repairs, and recovery, with links to the Watchdog page (the optional overseer's verdict notification deep-links to the exact incident) |
+| **Memory-leak detection** | Default on: samples the gateway's memory (whole process tree) once a minute and confirms a leak with a noise-resistant trend test — one calm notification per episode with projected time to the limit, a distinct alert if it turns critical, a live trend row on the Resources card, and a Drift Doctor finding with a guided fix runbook. Disable from Watchdog → Settings |
+| **Pre-OOM auto-restart** | Strictly opt-in (default off): when a confirmed leak turns critical, attempts a graceful gateway restart before the crash — through the same lifecycle lock and interlocks as a manual restart, never during an update's stabilization window, capped at 2 restarts per 24 hours. Arming it via the agent-admin CLI requires an operator confirm |
+| **Notifications**        | Telegram, Discord, Slack, and WhatsApp alerts for crashes, repairs, recovery, automatic fixes, and memory-leak warnings (one per episode, plus a distinct critical alert), with links to the Watchdog page (the optional overseer's verdict notification deep-links to the exact incident) — plus a Verbose/Important-only toggle that mutes informational notices without hiding problems |
 | **Event log**            | SQLite-backed incident + event history with API and UI access          |
 
 ## Environment Variables
@@ -274,7 +305,8 @@ The built-in watchdog monitors gateway health and recovers from failures automat
 | `WATCHDOG_AUTO_REPAIR`            | Optional | Enable auto-repair on crash (`true`/`false`)       |
 | `CLAUDE_CODE_ROUTINE_URL`         | Optional | Claude Code routine fire URL (or `trig_…` id) from claude.ai/code/routines — powers the sidebar launcher |
 | `CLAUDE_CODE_ROUTINE_TOKEN`       | Optional | Per-routine API-trigger token (`sk-ant-oat01-…`); the launcher keeps it server-side and out of the gateway child env |
-| `WATCHDOG_NOTIFICATIONS_DISABLED` | Optional | Disable watchdog notifications (`true`/`false`)    |
+| `WATCHDOG_NOTIFICATIONS_DISABLED` | Optional | Disable watchdog notifications (`true`/`false`). Deliberate exemptions that still deliver: the settings-card Test button, agent-admin audit notices, and the boot webhook |
+| `WATCHDOG_NOTIFICATIONS_QUIET`    | Optional | Important-only notifications (`true` = suppress informational/green notices; absent = verbose ON). Note: a platform-level env var applies only until the first dashboard save writes the key into `.env` — from then on (including after restarts) the `.env` value wins for all watchdog toggles |
 | `ALPHACLAW_NOTIFY_WEBHOOK_URL`    | Optional | Extra out-of-band notification channel: watchdog/upgrade alerts are also POSTed here as `{"text": ...}` JSON — delivered even straight from the boot process when no server is up |
 | `PORT`                            | Optional | Server port (default `3000`)                       |
 | `ALPHACLAW_ROOT_DIR`              | Optional | Data directory (default `/data`)                   |
@@ -331,7 +363,7 @@ If you need OpenClaw's full security posture (manual pairing codes, no query-str
 
 Release history lives in [CHANGELOG.md](CHANGELOG.md); contributor setup and
 test tiers are in [CONTRIBUTING.md](CONTRIBUTING.md); open work is tracked in
-[TODOS.md](TODOS.md); design documents (Agent Administration, gateway state
+[TODOS.md](TODOS.md); design documents (Agent Administration, chat reliability, gateway state
 model, the OpenClaw context contract, Telegram topics discovery) live in
 [docs/designs/](docs/designs/);
 the operator runbook for upgrade failure states (held gateways, blocked
@@ -350,7 +382,9 @@ npm run test:coverage   # Coverage report
 
 # Live e2e tiers (opt-in; hit the REAL npm registry / GitHub API and install
 # real OpenClaw releases — catch upstream drift the hermetic suite can't):
-npm run test:live       # catalog + real stable/beta package applies (~5 min, network)
+npm run test:live       # catalog + real stable/beta package applies, plus a
+                        # real-gateway memory-leak e2e against the newest beta
+                        # (network)
 npm run test:live:dev   # dev-channel source build only (20-35 min, ~5 GB disk);
                         # does not re-run the catalog/apply tiers above
 npm run test:container  # full production-container journey: builds the image,

@@ -48,6 +48,8 @@ vi.mock("../../lib/public/js/lib/api.js", () => ({
   resumeWatchdogChannels: vi.fn(),
   fetchOpenclawNotifications: vi.fn(),
   updateOpenclawNotifications: vi.fn(),
+  fetchWatchdogMemorySettings: vi.fn(),
+  updateWatchdogMemorySettings: vi.fn(),
 }));
 
 vi.mock("../../lib/public/js/components/toast.js", () => ({
@@ -61,10 +63,16 @@ import { showToast } from "../../lib/public/js/components/toast.js";
 import {
   describeAutoRepairSaveError,
   describeNotificationsSaveError,
+  describeVerboseSaveError,
   kAutoRepairContext,
   kNotificationsContext,
+  kNotificationsVerboseContext,
   kWatchdogSettingsCacheKey,
+  kWatchdogMemoryCacheKey,
+  kMemoryEnabledContext,
+  kMemoryAutoRestartContext,
   useWatchdogSettings,
+  useWatchdogMemorySettings,
 } from "../../lib/public/js/components/watchdog-tab/settings/use-settings.js";
 import { WatchdogSettingsCard } from "../../lib/public/js/components/watchdog-tab/settings/index.js";
 import { SavedToggle } from "../../lib/public/js/components/saved-toggle.js";
@@ -170,14 +178,25 @@ beforeEach(() => {
   vi.clearAllMocks();
   vi.spyOn(console, "warn").mockImplementation(() => {});
   invalidateCache(kWatchdogSettingsCacheKey);
+  invalidateCache(kWatchdogMemoryCacheKey);
   api.fetchWatchdogSettings.mockResolvedValue({
     ok: true,
-    settings: { autoRepair: false, notificationsEnabled: true },
+    settings: {
+      autoRepair: false,
+      notificationsEnabled: true,
+      notificationsVerbose: true,
+    },
+  });
+  api.fetchWatchdogMemorySettings.mockResolvedValue({
+    ok: true,
+    settings: { enabled: true, autoRestart: false, effectiveAutoRestart: false },
   });
 });
 
 describe("frontend/watchdog settings toggles (document-level useSavedSetting)", () => {
-  it("hydrates both toggles from ONE GET of the shared settings doc", async () => {
+  it("hydrates all three toggles from ONE GET of the shared settings doc", async () => {
+    // The server omits notificationsVerbose (older server): the documented
+    // default (true) fills it in — verbose is ON unless explicitly off.
     api.fetchWatchdogSettings.mockResolvedValue({
       ok: true,
       settings: { autoRepair: true, notificationsEnabled: false },
@@ -188,8 +207,54 @@ describe("frontend/watchdog settings toggles (document-level useSavedSetting)", 
     expect(hook.result().settings).toEqual({
       autoRepair: true,
       notificationsEnabled: false,
+      notificationsVerbose: true,
     });
     expect(hook.result().settingsLoadError).toBe(null);
+  });
+
+  it("verbose commit sends ONLY its own field and toasts the mode copy", async () => {
+    api.updateWatchdogSettings.mockResolvedValue({ ok: true });
+    const hook = await hydrateHook();
+
+    await hook.result().onToggleNotificationsVerbose(false);
+    hook.render();
+    expect(api.updateWatchdogSettings).toHaveBeenCalledWith({
+      notificationsVerbose: false,
+    });
+    expect(hook.result().settings.notificationsVerbose).toBe(false);
+    // Siblings stay for display, never written back.
+    expect(hook.result().settings.notificationsEnabled).toBe(true);
+    expect(showToast).toHaveBeenCalledWith(
+      "Now sending important notifications only",
+      "success",
+    );
+
+    await hook.result().onToggleNotificationsVerbose(true);
+    expect(api.updateWatchdogSettings).toHaveBeenLastCalledWith({
+      notificationsVerbose: true,
+    });
+    expect(showToast).toHaveBeenLastCalledWith(
+      "Verbose notifications enabled",
+      "success",
+    );
+  });
+
+  it("verbose save failure reverts with a context-scoped chip", async () => {
+    const error = new Error("disk full");
+    api.updateWatchdogSettings.mockRejectedValue(error);
+    const hook = await hydrateHook();
+
+    await hook.result().onToggleNotificationsVerbose(false);
+    hook.render();
+    expect(hook.result().settings.notificationsVerbose).toBe(true); // reverted
+    expect(hook.result().settingsSaveError).toMatchObject({
+      error,
+      context: kNotificationsVerboseContext,
+    });
+    expect(
+      hook.result().settingsSaveError.attempted.notificationsVerbose,
+    ).toBe(false);
+    expect(showToast).not.toHaveBeenCalled();
   });
 
   it("auto-repair flips optimistically, PUTs ONLY its own field, and toasts only on success", async () => {
@@ -318,6 +383,12 @@ describe("frontend/watchdog settings toggles (document-level useSavedSetting)", 
     expect(describeNotificationsSaveError({ notificationsEnabled: false })).toBe(
       "Couldn't confirm disabling notifications — showing the server's current state.",
     );
+    expect(describeVerboseSaveError({ notificationsVerbose: true })).toBe(
+      "Couldn't confirm switching to verbose notifications — showing the server's current state.",
+    );
+    expect(describeVerboseSaveError({ notificationsVerbose: false })).toBe(
+      "Couldn't confirm switching to important-only notifications — showing the server's current state.",
+    );
   });
 });
 
@@ -326,26 +397,84 @@ describe("frontend/watchdog settings card (SavedToggle wiring)", () => {
     harness.beginRender();
     return expandTree(
       WatchdogSettingsCard({
-        settings: { autoRepair: false, notificationsEnabled: true },
+        settings: {
+          autoRepair: false,
+          notificationsEnabled: true,
+          notificationsVerbose: true,
+        },
         settingsHydrated: true,
         ...props,
       }),
     );
   };
 
-  it("renders both rows as SavedToggles scoped by context", () => {
+  it("renders the env-var rows (incl. verbose) plus the memory-monitor rows as context-scoped SavedToggles", () => {
     const tree = renderCard();
     const savedToggles = findAllByType(tree, SavedToggle);
-    expect(savedToggles.length).toBe(2);
+    // Three env-var toggles + the memory-monitor section's two (its own
+    // settings document on /api/watchdog/memory).
+    expect(savedToggles.length).toBe(5);
     expect(savedToggles.map((vnode) => vnode.props.context)).toEqual([
       kAutoRepairContext,
       kNotificationsContext,
+      kNotificationsVerboseContext,
+      "memoryEnabled",
+      "memoryAutoRestart",
     ]);
     const toggles = findAllByType(tree, ToggleSwitch);
     expect(toggles[0].props.checked).toBe(false); // auto-repair
     expect(toggles[1].props.checked).toBe(true); // notifications
+    expect(toggles[2].props.checked).toBe(true); // verbose
     expect(toggles[0].props.label).toBe("Disabled");
     expect(toggles[1].props.label).toBe("Enabled");
+    // The verbose row names what you GET, not on/off.
+    expect(toggles[2].props.label).toBe("Verbose");
+    expect(toggles[2].props.disabled).toBe(false);
+    // Verbose ON → no suppression helper line.
+    expect(collectText(tree).join(" ")).not.toContain(
+      "Informational notices are suppressed from chat.",
+    );
+  });
+
+  it("verbose row is subordinate to the master toggle and explains quiet mode", () => {
+    const tree = renderCard({
+      settings: {
+        autoRepair: false,
+        notificationsEnabled: false,
+        notificationsVerbose: true,
+      },
+    });
+    const toggles = findAllByType(tree, ToggleSwitch);
+    // Master off → the verbose row disables (the kill switch subsumes it).
+    expect(toggles[2].props.disabled).toBe(true);
+    expect(collectText(tree).join(" ")).not.toContain(
+      "Informational notices are suppressed from chat.",
+    );
+
+    const quietTree = renderCard({
+      settings: {
+        autoRepair: false,
+        notificationsEnabled: true,
+        notificationsVerbose: false,
+      },
+    });
+    const quietToggles = findAllByType(quietTree, ToggleSwitch);
+    expect(quietToggles[2].props.label).toBe("Important only");
+    // Quiet mode states its contract under the row.
+    expect(collectText(quietTree).join(" ")).toContain(
+      "Informational notices are suppressed from chat.",
+    );
+  });
+
+  it("disables the auto-restart toggle while memory detection is off", () => {
+    const tree = renderCard();
+    const savedToggles = findAllByType(tree, SavedToggle);
+    const autoRestart = savedToggles.find(
+      (vnode) => vnode.props.context === "memoryAutoRestart",
+    );
+    // The unhydrated memory doc renders {} → detection not confirmed on →
+    // the consent knob stays disabled rather than armable-by-default.
+    expect(autoRestart.props.disabled).toBe(true);
   });
 
   it("shows Saving... only on the in-flight control; the sibling just disables", () => {
@@ -390,10 +519,11 @@ describe("frontend/watchdog settings card (SavedToggle wiring)", () => {
     const toggles = findAllByType(tree, ToggleSwitch);
     expect(toggles[0].props.disabled).toBe(true);
     expect(toggles[1].props.disabled).toBe(true);
+    expect(toggles[2].props.disabled).toBe(true);
     const chips = findAllByType(tree, InlineErrorChip).filter(
       (vnode) => vnode.props.onRetry === onRetryLoadSettings,
     );
-    expect(chips.length).toBe(2); // each control announces + offers Retry
+    expect(chips.length).toBe(3); // each control announces + offers Retry
     expect(collectText(tree).join(" ")).toContain("Couldn't load this setting.");
   });
 
@@ -404,5 +534,79 @@ describe("frontend/watchdog settings card (SavedToggle wiring)", () => {
     expect(toggles[1].props.label).toBe("Loading...");
     expect(toggles[0].props.disabled).toBe(true);
     expect(toggles[1].props.disabled).toBe(true);
+  });
+});
+
+describe("frontend/watchdog memory settings hook (per-field narrow saves)", () => {
+  const renderMemoryHook = () => {
+    let latest;
+    const render = () => {
+      harness.beginRender();
+      latest = useWatchdogMemorySettings();
+      return latest;
+    };
+    render();
+    return {
+      result: () => latest,
+      render,
+      runLoadEffect: () => harness.effects[0](),
+    };
+  };
+
+  const hydrateMemoryHook = async () => {
+    const hook = renderMemoryHook();
+    hook.runLoadEffect();
+    await flushAsync();
+    hook.render();
+    return hook;
+  };
+
+  it("enabled toggle PUTs ONLY {enabled}; the sibling field never rides along", async () => {
+    api.updateWatchdogMemorySettings.mockResolvedValue({
+      ok: true,
+      settings: { enabled: false, autoRestart: false, effectiveAutoRestart: false },
+    });
+    const hook = await hydrateMemoryHook();
+    expect(hook.result().memorySettings).toMatchObject({
+      enabled: true,
+      autoRestart: false,
+    });
+    await hook.result().onToggleMemoryEnabled(false);
+    expect(api.updateWatchdogMemorySettings).toHaveBeenCalledTimes(1);
+    expect(api.updateWatchdogMemorySettings).toHaveBeenCalledWith({
+      enabled: false,
+    });
+    expect(showToast).toHaveBeenCalledWith(
+      "Memory leak detection disabled",
+      "success",
+    );
+  });
+
+  it("autoRestart toggle PUTs ONLY {autoRestart} under its own save context", async () => {
+    api.updateWatchdogMemorySettings.mockResolvedValue({
+      ok: true,
+      settings: { enabled: true, autoRestart: true, effectiveAutoRestart: true },
+    });
+    const hook = await hydrateMemoryHook();
+    const commit = hook.result().onToggleMemoryAutoRestart(true);
+    hook.render();
+    expect(hook.result().savingMemoryContext).toBe(kMemoryAutoRestartContext);
+    await commit;
+    expect(api.updateWatchdogMemorySettings).toHaveBeenCalledTimes(1);
+    expect(api.updateWatchdogMemorySettings).toHaveBeenCalledWith({
+      autoRestart: true,
+    });
+    hook.render();
+    expect(hook.result().memorySettings.autoRestart).toBe(true);
+  });
+
+  it("a failed save reverts to server truth with a context-scoped error, no success toast", async () => {
+    api.updateWatchdogMemorySettings.mockRejectedValue(new Error("boom"));
+    const hook = await hydrateMemoryHook();
+    await hook.result().onToggleMemoryEnabled(false);
+    hook.render();
+    expect(hook.result().memorySettings.enabled).toBe(true); // reverted
+    expect(hook.result().memorySaveError?.context).toBe(kMemoryEnabledContext);
+    expect(showToast).not.toHaveBeenCalled();
   });
 });

@@ -2644,6 +2644,7 @@ describe("server/doctor-service", () => {
       computeSnapshotAsync = fastComputeSnapshotAsync,
       listDismissedSourceKeys = null,
       readOpenclawConfig = null,
+      getGatewayMemoryTrend = null,
     } = {}) => {
       const { createDoctorService } = loadDoctorService();
       const created = [];
@@ -2691,6 +2692,7 @@ describe("server/doctor-service", () => {
         },
         listDismissedSourceKeys,
         ...(readOpenclawConfig ? { readOpenclawConfig } : {}),
+        ...(getGatewayMemoryTrend ? { getGatewayMemoryTrend } : {}),
       });
       return { service, created, runsByIdCards, meta };
     };
@@ -2822,6 +2824,55 @@ describe("server/doctor-service", () => {
       expect(baseline).toBeTruthy();
       expect(unrelatedChange).toBe(baseline);
       expect(mainChange).not.toBe(baseline);
+    });
+
+    it("env signature tracks the NORMALIZED memory-trend digest (none|suspected|critical only)", async () => {
+      const { computeWorkspaceSnapshot } = require("../../lib/server/doctor/workspace-fingerprint");
+      const makeMatchingSummary = () => {
+        const nowIso = new Date().toISOString();
+        return {
+          id: 1,
+          status: "completed",
+          engine: "gateway_agent",
+          workspaceFingerprint: computeWorkspaceSnapshot(workspaceRoot).fingerprint,
+          promptVersion: "doctor-v2",
+          contextProfile: "stable-2026.7",
+          openclawVersion: "",
+          completedAt: nowIso,
+          startedAt: nowIso,
+        };
+      };
+      const signatureForTrend = async (trendState) => {
+        const meta = new Map();
+        const { service } = makeService({
+          meta,
+          summaries: [makeMatchingSummary()],
+          getGatewayMemoryTrend: () => ({ state: trendState }),
+        });
+        try {
+          const result = await service.runDoctor();
+          expect(result.reusedPreviousRun).toBe(true);
+          return meta.get("last_env_signature");
+        } finally {
+          // Undisposed services leak auto-run interval state into later
+          // fake-timer tests in this file (the hardening-trigger suite).
+          service.dispose();
+        }
+      };
+
+      const healthy = await signatureForTrend("normal");
+      // Harmless transitions never invalidate reuse: warming/insufficient/
+      // watch all normalize to "none".
+      expect(await signatureForTrend("warming_up")).toBe(healthy);
+      expect(await signatureForTrend("insufficient_samples")).toBe(healthy);
+      expect(await signatureForTrend("watch")).toBe(healthy);
+      // Leak onset flips the signature (auto-run trigger with zero workspace
+      // delta), and the escalation to critical flips it AGAIN.
+      const suspected = await signatureForTrend("leak_suspected");
+      expect(suspected).not.toBe(healthy);
+      const critical = await signatureForTrend("critical");
+      expect(critical).not.toBe(healthy);
+      expect(critical).not.toBe(suspected);
     });
 
     it("rejects card fixes with a gatewayUnavailable error while degraded", async () => {
@@ -3232,11 +3283,13 @@ describe("server/doctor-service", () => {
         await vi.runOnlyPendingTimersAsync();
         expect(meta.get("last_auto_run")?.outcome).toBe("ran");
         // Completion notification for the scheduled run.
-        expect(
-          notify.mock.calls.some(([message]) =>
-            message.includes("Scheduled Drift Doctor scan finished"),
-          ),
-        ).toBe(true);
+        const scanCall = notify.mock.calls.find(([message]) =>
+          message.includes("Scheduled Drift Doctor scan finished"),
+        );
+        expect(scanCall).toBeTruthy();
+        // Routine scan completions are informational: Important-only mode
+        // suppresses them (plan Phase-3 pin list); P0 notices stay important.
+        expect(scanCall[1].verbose).toBe(true);
 
         // Immediately after: throttled by the 6h minimum interval.
         meta.set("last_env_signature", "another-signature");

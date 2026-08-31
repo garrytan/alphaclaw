@@ -21,8 +21,31 @@ const mockPsFailure = () =>
 
 const {
   getSystemResources,
+  getProcessTreeUsage,
   readEventLoopLag,
+  resetProcessTreeMemoForTests,
 } = require("../../lib/server/system-resources");
+
+// Subtree RSS reads /proc/<pid>/status for the target and its descendants,
+// enumerating /proc via readdirSync. Intercept BOTH boundaries (the file
+// spy above covers status reads; this covers the directory listing).
+const spyProcDir = (pids) => {
+  const realReaddirSync = fs.readdirSync;
+  vi.spyOn(fs, "readdirSync").mockImplementation((dirPath, ...args) => {
+    if (String(dirPath) === "/proc") return pids.map(String);
+    return realReaddirSync(dirPath, ...args);
+  });
+};
+
+// Builds a /proc file map: each pid gets a status with the given PPid and RSS.
+const procTree = (specs) => {
+  const files = {};
+  for (const [pid, { ppid, rssMb }] of Object.entries(specs)) {
+    files[`/proc/${pid}/status`] =
+      `Name:\tproc\nPPid:\t${ppid}\nVmRSS:\t${rssMb * 1024} kB\n`;
+  }
+  return files;
+};
 
 // system-resources reads cgroup/proc files through the shared fs singleton and
 // shells out via child_process.execFile. We intercept those boundaries with
@@ -55,6 +78,9 @@ const createFileSystem = (files = {}) => {
 describe("server/system-resources", () => {
   afterEach(() => {
     execFileMock.mockReset();
+    // Subtree reads are memoized (5s TTL) — pids are reused across cases, so
+    // a stale memo would hand one test another test's tree.
+    resetProcessTreeMemoForTests();
   });
 
   afterAll(() => {
@@ -323,5 +349,91 @@ describe("server/system-resources", () => {
     const resources = getSystemResources({ gatewayPid: 777 });
 
     expect(resources.processes.gateway).toEqual({ rssBytes: null, pid: 777 });
+  });
+
+  describe("getProcessTreeUsage (subtree RSS: launcher + worker children)", () => {
+    it("sums a pid and all its descendants", () => {
+      // launcher 100 → worker 200 → grandchild 300; sibling 999 is unrelated.
+      createFileSystem(
+        procTree({
+          100: { ppid: 1, rssMb: 50 },
+          200: { ppid: 100, rssMb: 300 },
+          300: { ppid: 200, rssMb: 20 },
+          999: { ppid: 1, rssMb: 800 },
+        }),
+      );
+      spyProcDir([100, 200, 300, 999]);
+      const usage = getProcessTreeUsage(100);
+      // 50 + 300 + 20 = 370MB; the unrelated 800MB sibling is excluded.
+      expect(usage.rssBytes).toBe(370 * 1024 * 1024);
+    });
+
+    it("returns the single-pid RSS when the process has no children", () => {
+      createFileSystem(procTree({ 42: { ppid: 1, rssMb: 128 } }));
+      spyProcDir([42]);
+      expect(getProcessTreeUsage(42).rssBytes).toBe(128 * 1024 * 1024);
+    });
+
+    it("skips a child whose status is unreadable but still counts the rest", () => {
+      const files = procTree({
+        100: { ppid: 1, rssMb: 40 },
+        300: { ppid: 100, rssMb: 60 },
+      });
+      files["/proc/200/status"] = new Error("gone");
+      createFileSystem(files);
+      spyProcDir([100, 200, 300]);
+      // 40 + 60 = 100MB; pid 200 (ENOENT-ish) contributes nothing and does
+      // not abort the walk — but 300's PPid=100 keeps it in the tree.
+      expect(getProcessTreeUsage(100).rssBytes).toBe(100 * 1024 * 1024);
+    });
+
+    it("does not loop forever on a cyclic PPid graph", () => {
+      // Pathological: 100↔200 claim each other as parent.
+      createFileSystem(
+        procTree({
+          100: { ppid: 200, rssMb: 10 },
+          200: { ppid: 100, rssMb: 20 },
+        }),
+      );
+      spyProcDir([100, 200]);
+      const usage = getProcessTreeUsage(100);
+      // seen-set guard: each pid counted at most once (100 self + 200 child).
+      expect(usage.rssBytes).toBe(30 * 1024 * 1024);
+    });
+
+    it("returns null for a falsy pid and when /proc is unenumerable it falls back to single-pid", () => {
+      expect(getProcessTreeUsage(0)).toBeNull();
+      createFileSystem(procTree({ 42: { ppid: 1, rssMb: 64 } }));
+      vi.spyOn(fs, "readdirSync").mockImplementation(() => {
+        throw Object.assign(new Error("no /proc"), { code: "ENOENT" });
+      });
+      // No /proc listing → single-pid best effort (the target's own status).
+      expect(getProcessTreeUsage(42).rssBytes).toBe(64 * 1024 * 1024);
+    });
+
+    it("memoizes same-pid reads inside the TTL; a different pid busts the memo", () => {
+      // The Resources poll (5s, tab-open) and the watchdog tick (60s) share
+      // this reader — without the memo every poll re-walks all of /proc.
+      createFileSystem(
+        procTree({
+          100: { ppid: 1, rssMb: 50 },
+          200: { ppid: 100, rssMb: 30 },
+          300: { ppid: 1, rssMb: 10 },
+        }),
+      );
+      spyProcDir([100, 200, 300]);
+      expect(getProcessTreeUsage(100).rssBytes).toBe(80 * 1024 * 1024);
+      const walksAfterFirst = fs.readdirSync.mock.calls.filter(
+        ([dir]) => String(dir) === "/proc",
+      ).length;
+      // Same pid, same tick window: served from the memo, no second walk.
+      expect(getProcessTreeUsage(100).rssBytes).toBe(80 * 1024 * 1024);
+      expect(
+        fs.readdirSync.mock.calls.filter(([dir]) => String(dir) === "/proc")
+          .length,
+      ).toBe(walksAfterFirst);
+      // A different pid is a different tree: the memo must not serve it.
+      expect(getProcessTreeUsage(300).rssBytes).toBe(10 * 1024 * 1024);
+    });
   });
 });

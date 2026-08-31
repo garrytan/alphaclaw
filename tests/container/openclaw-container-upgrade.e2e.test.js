@@ -279,6 +279,33 @@ describeContainer("container E2E: stable→beta upgrade in the production image"
     await buildImage({ tag: kImageTag });
   });
 
+  step("image carries the rescue-session toolchain: tmux + pinned claude CLI", 3 * kMin, async () => {
+    // Rescue-session prerequisites baked into the image (Dockerfile layers).
+    // --entrypoint overrides tini/CMD so nothing boots; each probe is one
+    // short-lived `docker run --rm`. docker() rejects on a non-zero exit, so
+    // exit 0 IS the assertion — the output checks just name what was found.
+    const { stdout: tmuxOut } = await docker(
+      ["run", "--rm", "--entrypoint", "tmux", kImageTag, "-V"],
+      { timeoutMs: 2 * kMin },
+    );
+    expect(tmuxOut).toMatch(/tmux \d/);
+
+    // The claude CLI is PINNED in the Dockerfile (the TUI-parsing fixtures
+    // are captured per version) — assert the live binary matches the pin so
+    // an unpinned or drifted install can never slip through this tier.
+    const dockerfile = fs.readFileSync(path.join(repoRoot, "Dockerfile"), "utf8");
+    const pin = dockerfile.match(/@anthropic-ai\/claude-code@(\S+)/)?.[1];
+    expect(
+      pin,
+      "Dockerfile must pin @anthropic-ai/claude-code@<exact-version>",
+    ).toBeTruthy();
+    const { stdout: claudeOut } = await docker(
+      ["run", "--rm", "--entrypoint", "claude", kImageTag, "--version"],
+      { timeoutMs: 2 * kMin },
+    );
+    expect(claudeOut).toContain(pin);
+  });
+
   step("boots stable against the seeded volume: UI login + pin + gateway healthz", 12 * kMin, async () => {
     // (b) Seed the volume: onboarded marker + a stable-accepted config
     // carrying the #20-shaped keys.

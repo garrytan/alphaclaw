@@ -1005,6 +1005,19 @@ describe("frontend/api endpoint wrapper coverage", () => {
     ["fetchWatchdogSettings", [], "/api/watchdog/settings", undefined],
     ["updateWatchdogSettings", [{ enabled: true }], "/api/watchdog/settings", "PUT"],
     ["updateWatchdogSettings", [null], "/api/watchdog/settings", "PUT"],
+    ["fetchWatchdogMemorySettings", [], "/api/watchdog/memory", undefined],
+    [
+      "updateWatchdogMemorySettings",
+      [{ enabled: true }],
+      "/api/watchdog/memory",
+      "PUT",
+    ],
+    [
+      "updateWatchdogMemorySettings",
+      [{ autoRestart: false }],
+      "/api/watchdog/memory",
+      "PUT",
+    ],
     ["fetchAlphaclawVersion", [], "/api/alphaclaw/version", undefined],
     ["fetchAlphaclawVersion", [true], "/api/alphaclaw/version?refresh=1", undefined],
     ["updateAlphaclaw", [], "/api/alphaclaw/update", "POST"],
@@ -2346,5 +2359,169 @@ describe("frontend/api claude-code helpers", () => {
     await expect(api.createClaudeCodeSession()).rejects.toThrow(
       "<html>bad gateway</html>",
     );
+  });
+});
+
+describe("frontend/api claude-code local helpers", () => {
+  const mockJsonResponse = (status, payload) => ({
+    status,
+    ok: status >= 200 && status < 300,
+    text: async () => JSON.stringify(payload),
+    json: async () => payload,
+  });
+
+  beforeEach(() => {
+    global.fetch = vi.fn();
+    global.window = { location: { href: "http://localhost/" } };
+  });
+
+  it("fetchClaudeCodeStatusDirect hits the same status endpoint (poller path)", async () => {
+    const payload = {
+      ok: true,
+      availability: { available: true },
+      local: { enabled: true, state: "ready" },
+    };
+    global.fetch.mockResolvedValue(mockJsonResponse(200, payload));
+    const api = await import("../../lib/public/js/lib/api.js");
+    expect(await api.fetchClaudeCodeStatusDirect()).toEqual(payload);
+    expect(global.fetch).toHaveBeenCalledWith(
+      "/api/claude-code/status",
+      expect.any(Object),
+    );
+  });
+
+  it("createClaudeCodeLocalSession POSTs the confirmed flag + permissionMode and returns the envelope", async () => {
+    const payload = {
+      ok: true,
+      status: "running",
+      sessionId: "rescue_01A",
+      sessionUrl: "https://claude.ai/code/rescue_01A",
+    };
+    global.fetch.mockResolvedValue(mockJsonResponse(200, payload));
+    const api = await import("../../lib/public/js/lib/api.js");
+    const result = await api.createClaudeCodeLocalSession({
+      confirmed: true,
+      permissionMode: "bypassPermissions",
+    });
+    expect(result).toEqual(payload);
+    const [url, options] = global.fetch.mock.calls.at(-1);
+    expect(url).toBe("/api/claude-code/local/session");
+    expect(options.method).toBe("POST");
+    // permissionMode rides along so the server can refuse a stale consent
+    // snapshot (TOCTOU guard: mismatch answers 409 confirm_required).
+    expect(JSON.parse(options.body)).toEqual({
+      confirmed: true,
+      permissionMode: "bypassPermissions",
+    });
+  });
+
+  it("createClaudeCodeLocalSession defaults confirmed:false and permissionMode:null (strict server check)", async () => {
+    global.fetch.mockResolvedValue(mockJsonResponse(202, { ok: true, status: "starting" }));
+    const api = await import("../../lib/public/js/lib/api.js");
+    const result = await api.createClaudeCodeLocalSession();
+    expect(result).toEqual({ ok: true, status: "starting" });
+    const [, options] = global.fetch.mock.calls.at(-1);
+    expect(JSON.parse(options.body)).toEqual({
+      confirmed: false,
+      permissionMode: null,
+    });
+  });
+
+  it("keeps the machine code on thrown local refusals (the launcher branches on it)", async () => {
+    global.fetch.mockResolvedValue(
+      mockJsonResponse(409, {
+        ok: false,
+        error: "needs_login",
+        message: "Log in to Claude on the Watchdog page first (one-time).",
+      }),
+    );
+    const api = await import("../../lib/public/js/lib/api.js");
+    await expect(api.createClaudeCodeLocalSession()).rejects.toMatchObject({
+      code: "needs_login",
+      message: "Log in to Claude on the Watchdog page first (one-time).",
+    });
+  });
+
+  it("threads the server's live permissionMode + cwd onto a confirm_required error (authoritative modal source)", async () => {
+    // The 409 body carries the server's live config so the confirm modal names
+    // the mode the server is ACTUALLY set to, not a stale cached snapshot.
+    global.fetch.mockResolvedValue(
+      mockJsonResponse(409, {
+        ok: false,
+        error: "confirm_required",
+        message: "Confirm the rescue session before it starts.",
+        permissionMode: "bypassPermissions",
+        cwd: "/data/claude-code-local/workspace",
+      }),
+    );
+    const api = await import("../../lib/public/js/lib/api.js");
+    await expect(api.createClaudeCodeLocalSession()).rejects.toMatchObject({
+      code: "confirm_required",
+      permissionMode: "bypassPermissions",
+      cwd: "/data/claude-code-local/workspace",
+    });
+  });
+
+  it("omits permissionMode/cwd on the error when an older server does not send them", async () => {
+    global.fetch.mockResolvedValue(
+      mockJsonResponse(409, {
+        ok: false,
+        error: "confirm_required",
+        message: "Confirm the rescue session before it starts.",
+      }),
+    );
+    const api = await import("../../lib/public/js/lib/api.js");
+    const error = await api.createClaudeCodeLocalSession().catch((err) => err);
+    expect(error.code).toBe("confirm_required");
+    expect(error).not.toHaveProperty("permissionMode");
+    expect(error).not.toHaveProperty("cwd");
+  });
+
+  it("stop/login/cancel/logout POST their endpoints", async () => {
+    global.fetch.mockResolvedValue(mockJsonResponse(200, { ok: true }));
+    const api = await import("../../lib/public/js/lib/api.js");
+    const calls = [
+      [api.stopClaudeCodeLocalSession, "/api/claude-code/local/session/stop"],
+      [api.startClaudeCodeLocalLogin, "/api/claude-code/local/login"],
+      [api.cancelClaudeCodeLocalLogin, "/api/claude-code/local/login/cancel"],
+      [api.logoutClaudeCodeLocal, "/api/claude-code/local/logout"],
+    ];
+    for (const [fn, endpoint] of calls) {
+      await fn();
+      const [url, options] = global.fetch.mock.calls.at(-1);
+      expect(url).toBe(endpoint);
+      expect(options.method).toBe("POST");
+    }
+  });
+
+  it("submitClaudeCodeLocalLoginCode POSTs the code body", async () => {
+    global.fetch.mockResolvedValue(mockJsonResponse(200, { ok: true, status: "verifying" }));
+    const api = await import("../../lib/public/js/lib/api.js");
+    const result = await api.submitClaudeCodeLocalLoginCode({ code: "ABC-123" });
+    expect(result).toEqual({ ok: true, status: "verifying" });
+    const [url, options] = global.fetch.mock.calls.at(-1);
+    expect(url).toBe("/api/claude-code/local/login/code");
+    expect(JSON.parse(options.body)).toEqual({ code: "ABC-123" });
+  });
+
+  it("fetchClaudeCodeLocalTail encodes the source query", async () => {
+    global.fetch.mockResolvedValue(
+      mockJsonResponse(200, { ok: true, source: "login", tail: "output" }),
+    );
+    const api = await import("../../lib/public/js/lib/api.js");
+    const result = await api.fetchClaudeCodeLocalTail({ source: "login" });
+    expect(result.tail).toBe("output");
+    const [url] = global.fetch.mock.calls.at(-1);
+    expect(url).toBe("/api/claude-code/local/tail?source=login");
+  });
+
+  it("fetchClaudeCodeLocalTail surfaces the 404 no_buffer code", async () => {
+    global.fetch.mockResolvedValue(
+      mockJsonResponse(404, { ok: false, error: "no_buffer", message: "No output yet." }),
+    );
+    const api = await import("../../lib/public/js/lib/api.js");
+    await expect(api.fetchClaudeCodeLocalTail()).rejects.toMatchObject({
+      code: "no_buffer",
+    });
   });
 });

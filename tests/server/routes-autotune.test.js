@@ -277,3 +277,56 @@ describe("server/routes/autotune", () => {
     expect(calls.restartReasons).toContain("autotune_disabled");
   });
 });
+
+
+describe("buildAutotuneApplyDeps notify seam (durable pipeline)", () => {
+  const { buildAutotuneApplyDeps } = require("../../lib/server/routes/autotune");
+
+  afterEach(() => {
+    delete process.env.WATCHDOG_NOTIFICATIONS_DISABLED;
+  });
+
+  it("prefers the durable notifier and spreads opts (dedupe ids) through", async () => {
+    delete process.env.WATCHDOG_NOTIFICATIONS_DISABLED;
+    const notifier = { notify: vi.fn(async () => ({ ok: true })) };
+    const watchdogNotifier = { notify: vi.fn(async () => ({ ok: true })) };
+    const deps = buildAutotuneApplyDeps({ notifier, watchdogNotifier });
+
+    deps.notify("Autotune set agents.defaults.maxConcurrent to 32", {
+      id: "autotune-concurrency-unset-32-20260831",
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    // Boot/settings/reapply notices ride the outbox pipeline — never the raw
+    // fan-out — and the stable id arrives intact.
+    expect(watchdogNotifier.notify).not.toHaveBeenCalled();
+    expect(notifier.notify).toHaveBeenCalledWith(
+      "Autotune set agents.defaults.maxConcurrent to 32",
+      expect.objectContaining({
+        eventType: "autotune",
+        id: "autotune-concurrency-unset-32-20260831",
+      }),
+    );
+  });
+
+  it("falls back to the raw fan-out when the durable pipeline is unwired", async () => {
+    delete process.env.WATCHDOG_NOTIFICATIONS_DISABLED;
+    const watchdogNotifier = { notify: vi.fn(async () => ({ ok: true })) };
+    const deps = buildAutotuneApplyDeps({ watchdogNotifier });
+    deps.notify("legacy path", { id: "x" });
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(watchdogNotifier.notify).toHaveBeenCalledWith(
+      "legacy path",
+      expect.objectContaining({ eventType: "autotune", id: "x" }),
+    );
+  });
+
+  it("keeps the defense-in-depth master gate", async () => {
+    process.env.WATCHDOG_NOTIFICATIONS_DISABLED = "true";
+    const notifier = { notify: vi.fn(async () => ({ ok: true })) };
+    const deps = buildAutotuneApplyDeps({ notifier });
+    deps.notify("silenced", { id: "y" });
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(notifier.notify).not.toHaveBeenCalled();
+  });
+});
