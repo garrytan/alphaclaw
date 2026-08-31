@@ -14,6 +14,7 @@ If you need to understand the internals of OpenClaw, you can inspect the code at
 - `lib/server`: Express server, authenticated setup APIs, watchdog APIs, channel integrations, and proxying to the OpenClaw gateway.
 - `lib/public`: Setup UI frontend (component-driven tabs and flows for providers, envars, watchdog, webhooks, and onboarding).
 - `lib/setup`: Prompt hardening templates and setup-related assets injected into agent/system behavior.
+- Chat: `lib/server/chat/` (browser⇄gateway bridge, protocol v2, run lifecycle) + `lib/server/db/chat-runs/` (durable run outcomes/markers) + `lib/public/js/components/chat/` (feature folder; pure modules for run state, send outbox, transcript merge, reconnect). Contract + invariants (H8/H13/H16/MW5/C2, ambiguity policy): `docs/designs/chat-reliability.md`. `lib/server/chat-ws.js` is a re-export shim.
 
 Runtime model:
 

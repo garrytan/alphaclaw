@@ -32,6 +32,7 @@
 - **Setup UI:** Password-protected web dashboard for onboarding, configuration, and day-to-day management.
 - **Guided Onboarding:** Step-by-step setup wizard — model selection, provider credentials, GitHub repo, channel pairing.
 - **Multi-Agent Management:** Sidebar-driven agent navigation with create, rename, and delete flows. Per-agent overview cards, channel bindings, and URL-driven agent selection.
+- **Agent Chat:** Chat with any agent session right from the sidebar. Sends queue durably and survive page reloads (failed messages get Retry/Discard, and retries reuse the message id so the bridge deduplicates them), Stop reports honestly, interruptions show up inline in the transcript, and the connection reconnects on its own with keepalives on both the browser and gateway sockets.
 - **Team Access (beta):** Share one AlphaClaw with named teammates. Each person signs in with their own email and password, OpenClaw attributes messages per person, and a who's-online roster shows presence. Admins invite members with expiring single-use links, assign roles, and disable or remove accounts; members can chat and view status while updates, secrets, terminals, agents, and team management stay admin-only. Requires the OpenClaw 2026.8.1-beta line.
 - **Gateway Manager:** Spawns, monitors, restarts, and proxies the OpenClaw gateway as a managed child process. Restarts stream live progress with honest outcomes — measured downtime on success, actual error evidence on failure.
 - **Watchdog:** Crash detection, crash-loop recovery, auto-repair (`openclaw doctor --fix`), Telegram/Discord/Slack/WhatsApp notifications, and a live interactive terminal for monitoring gateway output directly from the browser.
@@ -331,7 +332,7 @@ If you need OpenClaw's full security posture (manual pairing codes, no query-str
 
 Release history lives in [CHANGELOG.md](CHANGELOG.md); contributor setup and
 test tiers are in [CONTRIBUTING.md](CONTRIBUTING.md); open work is tracked in
-[TODOS.md](TODOS.md); design documents (Agent Administration, gateway state
+[TODOS.md](TODOS.md); design documents (Agent Administration, chat reliability, gateway state
 model, the OpenClaw context contract, Telegram topics discovery) live in
 [docs/designs/](docs/designs/);
 the operator runbook for upgrade failure states (held gateways, blocked
