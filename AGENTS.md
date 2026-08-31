@@ -274,6 +274,7 @@ Use these conventions for all UI work under `lib/public/js` and `lib/public/css`
 - Keep loading/saving flags explicit in state (`saving`, `creating`, `restartingGateway`, etc.).
 - Reuse `<LoadingSpinner />` for loading indicators instead of inline spinner SVG markup.
 - Use `<Badge />` for compact status chips (e.g. connected/not connected) instead of one-off status span styling.
+- Every `warning`/`danger` badge carries a SELF-STANDING label naming the condition (never a bare "Error"/"Blocked"); cause detail rides adjacent text or the shared `<TooltipBadge />` — but tooltips are supplementary only (they do not open on touch — `tooltip.js` suppresses focus-open on tap), so a danger badge's required action must live in visible text, a drill-down, or the label itself. Never swallow a caught error into static copy: surface it through the envelope helpers (`buildErrorEnvelopeModel` / `<InlineErrorChip />`) where a chip fits, else bind the message into the copy. A failed status CHECK keeps last-known status rather than fabricating a state — and never claims "last known" data that doesn't exist (no prior data reads "unknown", not "not connected").
 - Use polling via `usePolling` for frequently refreshed backend-backed data.
 - For restart-required flows, render the standardized yellow restart banner style used in `providers`, `envars`, and `webhooks`.
 
