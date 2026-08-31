@@ -1,6 +1,6 @@
 # Chat/session reliability — protocol v2, run lifecycle, durable outcomes
 
-Status: shipped (Phases 1–4; Phase 5 resume-streaming tracked separately)
+Status: shipped (Phases 1–5; Phase 5 resume-streaming landed with the v0.9.50 adversarial-hardening wave — `hello.activeRuns` + `resume`/`resumed`/`resume-failed`)
 Owner surfaces: `lib/server/chat/`, `lib/server/db/chat-runs/`, `lib/public/js/components/chat/`
 
 ## Problem
@@ -51,8 +51,9 @@ Constants + validators: `lib/server/chat/protocol.js`; browser mirror
 - Browser → server: `message {clientMsgId, sessionKey, content, sentAt}`,
   `stop {sessionKey, runId?}`, `history {sessionKey, reqId}`, `ping`,
   (`resume` — Phase 5).
-- Server → browser: `hello {protocolVersion, maxContentBytes}` (first frame on
-  every connection), `ack`, `started`, `chunk`, `tool`,
+- Server → browser: `hello {protocolVersion, maxContentBytes, activeRuns}`
+  (first frame on every connection; `activeRuns` advertises resumable runs —
+  Phase 5), `ack`, `started`, `chunk`, `tool`,
   `done {reason: complete|stopped|interrupted|error, confidence, stopped?}`,
   `stopping`, `stop-failed`, `send-failed {code, retryable}`,
   `history {messages, markers, truncated}`, `desync`, `error`, `pong`,
@@ -61,7 +62,7 @@ Constants + validators: `lib/server/chat/protocol.js`; browser mirror
   control frames don't.
 - Ordering invariants: `ack` → `started` → stream → exactly ONE terminal
   `done` per started run — enforced by the registry's atomic
-  compare-and-finalize (`finalizeRun`: first caller to flip
+  compare-and-finalize (`finalize`: first caller to flip
   `record.finalized` wins; lifecycle end, stop-confirm timer, stall sweeper,
   RPC rejection, gateway disconnect, and stop-failed all funnel through it).
 
