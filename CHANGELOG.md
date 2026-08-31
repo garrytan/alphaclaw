@@ -5,6 +5,28 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.9.55] - 2026-08-31
+
+Disconnecting a Google account works again — and can no longer strand you
+half-disconnected. A v0.9.49 refactor broke every disconnect after the token
+was already revoked at Google, leaving the account stuck in the UI.
+
+### Fixed
+- Google account disconnect completes again: the account is removed locally
+  and `gog auth remove` runs (a variable-scoping regression had made every
+  attempt fail after upstream revocation).
+- Disconnect is now safely retryable: if Google's revocation endpoint times
+  out or errors, the account is kept and the response says
+  `retryable: true` with the resolved `accountId`, so a retry targets the
+  same account instead of silently falling back to the first one. Only a
+  confirmed-dead token (or nothing to revoke) proceeds to removal.
+- The refresh token now travels in the revocation request body (never the
+  URL), with a 10-second timeout so a stalled Google endpoint can't hang the
+  request.
+- Disconnect no longer erases accounts connected concurrently while it was
+  waiting on Google, and a failed keyring cleanup is surfaced as a warning
+  instead of swallowed.
+
 ## [0.9.54] - 2026-08-31
 
 Notifications grow a volume dial and lose their blind spots: a new Verbose
