@@ -7,6 +7,11 @@
 // with — run this after bumping the openclaw dependency, then commit the
 // regenerated JSON.
 //
+// Hand-curated rows do NOT belong in the generated file (this script would
+// erase them): they live in lib/server/model-catalog-curated.json and are
+// merged at load in lib/server/constants.js (generated rows win on key
+// collision).
+//
 // Usage:
 //   node scripts/refresh-model-bootstrap.mjs           # uses node_modules/.bin/openclaw
 //   node scripts/refresh-model-bootstrap.mjs --bin /path/to/openclaw

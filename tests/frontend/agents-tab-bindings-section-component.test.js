@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 // imports the node ESM loader can't resolve.
 vi.mock("../../lib/public/js/components/channels.js", () => ({
   ALL_CHANNELS: ["telegram", "discord", "slack", "whatsapp"],
+  CREATABLE_CHANNELS: ["telegram", "discord", "slack", "whatsapp"],
   ChannelsCard: () => null,
   getChannelMeta: (id) => ({ label: String(id || "") }),
 }));

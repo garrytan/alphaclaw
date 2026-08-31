@@ -7,7 +7,10 @@ const {
   kModelCatalogBootstrapSource,
   kModelCatalogRefreshBackoffMs,
 } = require("../../lib/server/model-catalog-cache");
-const { kFallbackOnboardingModels } = require("../../lib/server/constants");
+const {
+  kFallbackOnboardingModels,
+  mergeCatalogModels,
+} = require("../../lib/server/constants");
 
 const flushPromises = async () => {
   await Promise.resolve();
@@ -59,6 +62,47 @@ describe("server/model-catalog-cache", () => {
         }),
       ]),
     );
+
+    // PR #111: all six curated MiniMax rows survive the load-time merge —
+    // the generated bootstrap file carries none of them, and regenerating it
+    // can no longer erase them (they live in model-catalog-curated.json).
+    const kCuratedMinimaxKeys = [
+      "minimax-cn/MiniMax-M2.7",
+      "minimax-cn/MiniMax-M2.7-highspeed",
+      "minimax-cn/MiniMax-M3",
+      "minimax/MiniMax-M2.7",
+      "minimax/MiniMax-M2.7-highspeed",
+      "minimax/MiniMax-M3",
+    ];
+    for (const key of kCuratedMinimaxKeys) {
+      expect(
+        kFallbackOnboardingModels.some((model) => model.key === key),
+        key,
+      ).toBe(true);
+    }
+    // Output stays localeCompare-sorted by key end to end.
+    const keys = kFallbackOnboardingModels.map((model) => model.key);
+    expect(keys).toEqual([...keys].sort((a, b) => a.localeCompare(b)));
+  });
+
+  it("merges curated catalog rows with generated rows winning on key collision", () => {
+    const merged = mergeCatalogModels(
+      [
+        { key: "minimax/MiniMax-M3", provider: "minimax", label: "Generated M3" },
+        { key: "openai/gpt-6", provider: "openai", label: "GPT-6" },
+      ],
+      [
+        { key: "minimax/MiniMax-M3", provider: "minimax", label: "Curated M3" },
+        { key: "minimax-cn/MiniMax-M3", provider: "minimax-cn", label: "MiniMax-M3" },
+        { badShape: true },
+      ],
+    );
+    const byKey = Object.fromEntries(merged.map((model) => [model.key, model]));
+    // Freshest-from-CLI beats hand-curated on the same key.
+    expect(byKey["minimax/MiniMax-M3"].label).toBe("Generated M3");
+    expect(byKey["minimax-cn/MiniMax-M3"].label).toBe("MiniMax-M3");
+    expect(byKey["openai/gpt-6"].label).toBe("GPT-6");
+    expect(merged.length).toBe(3);
   });
 
   it("returns cached models immediately and shares a single in-flight refresh", async () => {

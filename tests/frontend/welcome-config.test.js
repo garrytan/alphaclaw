@@ -2,6 +2,28 @@ const loadWelcomeConfig = async () =>
   import("../../lib/public/js/components/onboarding/welcome-config.js");
 
 describe("frontend/welcome-config", () => {
+  it("counts server-detected external channels as configured (#113)", async () => {
+    const welcomeConfig = await loadWelcomeConfig();
+    expect(
+      welcomeConfig.hasAnyChannelConfigured({}, { detectedChannelIds: ["signal"] }),
+    ).toBe(true);
+    expect(
+      welcomeConfig.hasAnyChannelConfigured({}, { detectedChannelIds: [] }),
+    ).toBe(false);
+    // No ctx at all: exactly the old token-only behavior.
+    expect(welcomeConfig.hasAnyChannelConfigured({})).toBe(false);
+    expect(
+      welcomeConfig.hasAnyChannelConfigured({ TELEGRAM_BOT_TOKEN: "t" }),
+    ).toBe(true);
+    // Half-configured Slack still doesn't count.
+    expect(
+      welcomeConfig.hasAnyChannelConfigured(
+        { SLACK_BOT_TOKEN: "b" },
+        { detectedChannelIds: [] },
+      ),
+    ).toBe(false);
+  });
+
   it("reports a target repo format error for invalid GitHub input", async () => {
     const welcomeConfig = await loadWelcomeConfig();
 

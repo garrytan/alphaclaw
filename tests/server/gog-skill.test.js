@@ -23,6 +23,9 @@ describe("server/gog-skill", () => {
 
     expect(content).toContain("## Runtime Notes");
     expect(content).toContain("$OPENCLAW_STATE_DIR");
+    // Root-aware (#121): no openclawDir given → no literal path is guessed
+    // (the Docker-only /data must never be named on npx/VPS installs).
+    expect(content).not.toContain("/data");
     expect(content).toContain(
       'XDG_CONFIG_HOME="${OPENCLAW_STATE_DIR:-$OPENCLAW_HOME/.openclaw}"',
     );

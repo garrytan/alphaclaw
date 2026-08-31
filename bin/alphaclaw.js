@@ -55,7 +55,10 @@ const {
   ensureMainUpstream,
   restoreMissingOpenclawConfigFromRemote,
 } = require("../lib/cli/openclaw-config-restore");
-const { writeGitAskpassScript } = require("../lib/git-askpass-script");
+const {
+  writeGitAskpassScript,
+  kGitAskpassScript,
+} = require("../lib/git-askpass-script");
 const { buildSecretReplacements } = require("../lib/server/helpers");
 const { resolveSelfDependency } = require("../lib/server/self-dependency");
 const {
@@ -138,7 +141,7 @@ Usage: alphaclaw <command> [options]
 
 Commands:
   start     Start the AlphaClaw server (Setup UI + gateway manager)
-  git-sync  Commit and push /data/.openclaw safely using GITHUB_TOKEN
+  git-sync  Commit and push the managed .openclaw directory safely using GITHUB_TOKEN
   doctor finding complete  Mark a queued Doctor finding fixed after verification
   telegram topic add  Add/update Telegram topic mapping by thread ID
   telegram topic create  Create a Telegram forum topic and register it
@@ -476,7 +479,7 @@ const runGitSync = () => {
     return 1;
   }
   if (!fs.existsSync(path.join(openclawDir, ".git"))) {
-    console.error("[alphaclaw] No git repository at /data/.openclaw");
+    console.error(`[alphaclaw] No git repository at ${openclawDir}`);
     return 1;
   }
 
@@ -1573,21 +1576,30 @@ try {
 // ---------------------------------------------------------------------------
 
 try {
-  const gitAskPassSrc = path.join(__dirname, "..", "lib", "scripts", "git-askpass");
-  const gitAskPassDest = resolveGitAskPassPath({
-    tmpDir: os.tmpdir(),
-  });
+  // H14: never copy the askpass helper to a predictable shared-tmp name —
+  // copyFileSync follows a pre-planted symlink and chmod makes it executable,
+  // and the git shim then runs whatever lives at that path. Default to the
+  // shared writer's private mkdtemp (0700) dir; honor an explicit operator
+  // override, but write it exclusively (wx) so a symlink re-planted between
+  // the rm and the write fails the boot step instead of redirecting it.
+  const explicitAskPassPath = resolveGitAskPassPath();
+  let gitAskPassDest;
+  if (explicitAskPassPath) {
+    fs.mkdirSync(path.dirname(explicitAskPassPath), { recursive: true });
+    fs.rmSync(explicitAskPassPath, { force: true });
+    fs.writeFileSync(explicitAskPassPath, kGitAskpassScript, {
+      mode: 0o700,
+      flag: "wx",
+    });
+    gitAskPassDest = explicitAskPassPath;
+  } else {
+    ({ scriptPath: gitAskPassDest } = writeGitAskpassScript());
+  }
   const gitShimTemplatePath = path.join(__dirname, "..", "lib", "scripts", "git");
   const gitShimDest = resolveGitShimPath();
   process.env.PATH = prependGitShimDirToPath({
     shimPath: gitShimDest,
   });
-
-  if (fs.existsSync(gitAskPassSrc)) {
-    fs.mkdirSync(path.dirname(gitAskPassDest), { recursive: true });
-    fs.copyFileSync(gitAskPassSrc, gitAskPassDest);
-    fs.chmodSync(gitAskPassDest, 0o755);
-  }
 
   if (fs.existsSync(gitShimTemplatePath)) {
     const realGitPath =

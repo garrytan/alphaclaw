@@ -71,6 +71,98 @@ describe("server/onboarding/workspace bootstrap prompt sync", () => {
   const kConfigPath = path.join(OPENCLAW_DIR, "openclaw.json");
   const kGoogleStatePath = path.join(OPENCLAW_DIR, "gogcli", "state.json");
 
+  const buildTemplateMockFs = ({ tools, agents }) => ({
+    readFileSync: vi.fn((target) => {
+      if (target === kToolsTemplatePath) return tools;
+      if (target === kAgentsSourcePath) return agents;
+      if (target === kConfigPath) return "{}";
+      throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+    }),
+    existsSync: vi.fn(() => false),
+    writeFileSync: vi.fn(),
+    mkdirSync: vi.fn(),
+    copyFileSync: vi.fn(),
+  });
+  const findMergedWrite = (mockFs) =>
+    mockFs.writeFileSync.mock.calls.find(
+      ([target]) =>
+        target === path.join(WORKSPACE_DIR, "hooks", "bootstrap", "AGENTS.md"),
+    );
+
+  // #121: the agents template used to be concatenated RAW — a {{TOKEN}} in
+  // core-prompts/AGENTS.md would have shipped to the agent literally. This
+  // pins that BOTH templates go through the renderer.
+  it("substitutes {{TOKEN}} vars in BOTH templates; unknown tokens stay visible (#121)", () => {
+    const mockFs = buildTemplateMockFs({
+      tools: "Tools state {{STATE_DIR}} env {{ENV_FILE}} setup {{SETUP_UI_URL}}",
+      agents: "Agents root {{ROOT_DIR}} state {{STATE_DIR}} typo {{NOT_A_TOKEN}}",
+    });
+
+    syncBootstrapPromptFiles({
+      fs: mockFs,
+      workspaceDir: WORKSPACE_DIR,
+      baseUrl: "https://setup.example.com",
+      openclawDir: "/home/op/.alphaclaw/.openclaw",
+      rootDir: "/home/op/.alphaclaw",
+      envFilePath: "/home/op/.alphaclaw/.env",
+    });
+
+    const merged = findMergedWrite(mockFs);
+    expect(merged).toBeTruthy();
+    expect(merged[1]).toContain("Agents root /home/op/.alphaclaw state /home/op/.alphaclaw/.openclaw");
+    expect(merged[1]).toContain("Tools state /home/op/.alphaclaw/.openclaw env /home/op/.alphaclaw/.env");
+    expect(merged[1]).toContain("setup https://setup.example.com");
+    // Typo'd tokens stay visible instead of silently blanking a safety rule.
+    expect(merged[1]).toContain("{{NOT_A_TOKEN}}");
+  });
+
+  it("real shipped templates render with zero surviving tokens and zero /data (#121)", () => {
+    const mockFs = buildTemplateMockFs({
+      tools: realFs.readFileSync(kToolsTemplatePath, "utf8"),
+      agents: realFs.readFileSync(kAgentsSourcePath, "utf8"),
+    });
+
+    syncBootstrapPromptFiles({
+      fs: mockFs,
+      workspaceDir: WORKSPACE_DIR,
+      baseUrl: "https://setup.example.com",
+      openclawDir: "/home/user/.alphaclaw/.openclaw",
+      rootDir: "/home/user/.alphaclaw",
+      envFilePath: "/home/user/.alphaclaw/.env",
+    });
+
+    const merged = findMergedWrite(mockFs);
+    expect(merged).toBeTruthy();
+    expect(merged[1]).not.toContain("{{");
+    expect(merged[1]).not.toContain("/data");
+    expect(merged[1]).toContain(
+      "`$OPENCLAW_STATE_DIR` (this install: `/home/user/.alphaclaw/.openclaw`)",
+    );
+  });
+
+  it("an unsafe substitution value degrades to the env-var reference (#121)", () => {
+    const mockFs = buildTemplateMockFs({
+      tools: "State: {{STATE_DIR}}",
+      agents: "AGENTS",
+    });
+
+    syncBootstrapPromptFiles({
+      fs: mockFs,
+      workspaceDir: WORKSPACE_DIR,
+      baseUrl: "https://setup.example.com",
+      openclawDir: "/tmp/evil`touch pwned`\ndir",
+      rootDir: "/home/user/.alphaclaw",
+      envFilePath: "/home/user/.alphaclaw/.env",
+    });
+
+    const merged = findMergedWrite(mockFs);
+    expect(merged).toBeTruthy();
+    // Validated, not mutated: the hostile value never renders at all.
+    expect(merged[1]).toContain("State: $OPENCLAW_STATE_DIR");
+    expect(merged[1]).not.toContain("evil");
+    expect(merged[1]).not.toContain("`touch");
+  });
+
   const stubRegistryRead = (registry) => {
     const original = realFs.readFileSync;
     vi.spyOn(realFs, "readFileSync").mockImplementation((target, ...rest) => {
