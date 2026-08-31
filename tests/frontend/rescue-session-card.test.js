@@ -400,4 +400,51 @@ describe("WatchdogRescueSessionCard consent call sites", () => {
       permissionMode: "bypassPermissions",
     });
   });
+
+  it("a confirm_required carrying the server's live mode+cwd names THAT mode and re-fires it (not the polled snapshot)", async () => {
+    // The 409 body is authoritative: the polled snapshot says acceptEdits, the
+    // server refuses with bypassPermissions + its cwd, and the modal/consent/
+    // re-fire must all follow the server's mode.
+    const kServerCwd = "/data/claude-code-local/server-workspace";
+    const serverRefusal = Object.assign(new Error("confirm the session"), {
+      code: "confirm_required",
+      permissionMode: "bypassPermissions",
+      cwd: kServerCwd,
+    });
+    const hookState = makeHookState(baseLocal({ permissionMode: "acceptEdits" }));
+    hookState.start
+      .mockRejectedValueOnce(serverRefusal)
+      .mockResolvedValueOnce({ ok: true, status: "running" });
+    useClaudeCodeLocal.mockReturnValue(hookState);
+
+    // First render + Start click: the initial POST carries the polled snapshot
+    // mode, which the server refuses.
+    harness.beginRender();
+    let tree = expandTree(WatchdogRescueSessionCard({}));
+    const startBtn = findAllByType(tree, ActionButton).find(
+      (vnode) => vnode.props.idleLabel === "Start session",
+    );
+    await startBtn.props.onClick();
+    expect(hookState.start).toHaveBeenNthCalledWith(1, {
+      confirmed: false,
+      permissionMode: "acceptEdits",
+    });
+
+    // Re-render: the modal now names the SERVER's mode, not the polled one.
+    harness.beginRender();
+    tree = expandTree(WatchdogRescueSessionCard({}));
+    const modal = findAllByType(tree, ClaudeCodeConfirmModal)[0];
+    expect(modal.props.permissionMode).toBe("bypassPermissions");
+
+    await modal.props.onStart();
+    // Consent + the re-fire use the server's mode AND cwd.
+    expect(storeLocalConsent).toHaveBeenCalledWith({
+      permissionMode: "bypassPermissions",
+      cwd: kServerCwd,
+    });
+    expect(hookState.start).toHaveBeenNthCalledWith(2, {
+      confirmed: true,
+      permissionMode: "bypassPermissions",
+    });
+  });
 });

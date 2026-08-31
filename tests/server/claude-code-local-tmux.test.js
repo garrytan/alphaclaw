@@ -1,5 +1,61 @@
 const { createTmuxDriver } = require("../../lib/server/claude-code-local/tmux");
 
+// Cycle-3 adversarial-review fixes: history-limit before new-session, -s
+// all-window pane matching, bounded full-history capture.
+describe("tmux driver — adversarial-review hardening", () => {
+  const kSock = "/data/claude-code-local/tmux.sock";
+  const mkExec = (impl) =>
+    vi.fn((cmd, args, opts, cb) => {
+      const { code = 0, stdout = "", stderr = "" } = impl(args) || {};
+      const err = code === 0 ? null : Object.assign(new Error("x"), { code });
+      cb(err, stdout, stderr);
+    });
+
+  it("raises the GLOBAL history-limit BEFORE new-session (so the pane inherits it)", async () => {
+    const calls = [];
+    const execFileImpl = mkExec((args) => {
+      calls.push(args.slice(2)); // drop -S <sock>
+      return { code: 0 };
+    });
+    const driver = createTmuxDriver({ socketPath: kSock, execFileImpl });
+    await driver.newSession({ sessionName: "s", cwd: "/w", commandArgv: ["claude"], env: {} });
+    const historyIdx = calls.findIndex(
+      (a) => a.includes("set-option") && a.includes("-g") && a.includes("history-limit"),
+    );
+    const newSessionIdx = calls.findIndex((a) => a.includes("new-session"));
+    expect(historyIdx).toBeGreaterThanOrEqual(0);
+    expect(historyIdx).toBeLessThan(newSessionIdx); // set BEFORE the pane exists
+  });
+
+  it("lists panes across ALL windows (-s) and matches the recorded pane PID", async () => {
+    const execFileImpl = mkExec((args) => {
+      if (args.includes("list-panes")) {
+        expect(args).toContain("-s"); // all windows, not just current
+        return { code: 0, stdout: "9999 0\n4242 0\n" }; // human shell, then rescue pane
+      }
+      return { code: 0 };
+    });
+    const driver = createTmuxDriver({ socketPath: kSock, execFileImpl });
+    const matched = await driver.listPaneInfo({ sessionName: "s", env: {}, panePid: 4242 });
+    expect(matched).toEqual({ panePid: 4242, paneDead: false });
+    // Unknown PID → first row.
+    const first = await driver.listPaneInfo({ sessionName: "s", env: {}, panePid: 111 });
+    expect(first).toEqual({ panePid: 9999, paneDead: false });
+  });
+
+  it("bounds a full-history capture (lines=null) instead of an unbounded -S -", async () => {
+    let captured = null;
+    const execFileImpl = mkExec((args) => {
+      if (args.includes("capture-pane")) captured = args;
+      return { code: 0, stdout: "out" };
+    });
+    const driver = createTmuxDriver({ socketPath: kSock, execFileImpl });
+    await driver.capturePane({ sessionName: "s", lines: null, env: {} });
+    const sIdx = captured.lastIndexOf("-S");
+    expect(captured[sIdx + 1]).toBe("-50000"); // capped, never bare "-"
+  });
+});
+
 const kSocketPath = "/data/claude-code-local/tmux.sock";
 const kSessionName = "alphaclaw-rescue";
 const kWorkspace = "/data/claude-code-local/workspace";
@@ -40,7 +96,18 @@ describe("claude-code-local tmux driver", () => {
       expect(result.code).toBe(0);
       expect(execFileImpl).toHaveBeenCalledTimes(3);
       expect(execFileImpl.mock.calls[0][0]).toBe("tmux");
+      // history-limit is raised GLOBALLY first (before the pane exists) so the
+      // rescue pane inherits it — a -t session set afterward would not apply.
       expect(execFileImpl.mock.calls[0][1]).toEqual([
+        ...kSocketPrefix,
+        "set-option",
+        "-g",
+        "history-limit",
+        "50000",
+      ]);
+      // The scrubbed env must reach the server-starting call too.
+      expect(execFileImpl.mock.calls[0][2].env).toBe(kEnv);
+      expect(execFileImpl.mock.calls[1][1]).toEqual([
         ...kSocketPrefix,
         "new-session",
         "-d",
@@ -55,9 +122,7 @@ describe("claude-code-local tmux driver", () => {
         "--",
         ...kCommandArgv,
       ]);
-      // The scrubbed env must reach the server-starting call too.
-      expect(execFileImpl.mock.calls[0][2].env).toBe(kEnv);
-      expect(execFileImpl.mock.calls[1][1]).toEqual([
+      expect(execFileImpl.mock.calls[2][1]).toEqual([
         ...kSocketPrefix,
         "set-option",
         "-t",
@@ -65,21 +130,14 @@ describe("claude-code-local tmux driver", () => {
         "remain-on-exit",
         "on",
       ]);
-      expect(execFileImpl.mock.calls[2][1]).toEqual([
-        ...kSocketPrefix,
-        "set-option",
-        "-t",
-        kSessionName,
-        "history-limit",
-        "50000",
-      ]);
     });
 
-    it("skips the follow-up options when creation fails", async () => {
-      const { driver, execFileImpl } = createDriver(() => ({
-        error: kExitOneError("duplicate session"),
-        stderr: "duplicate session: alphaclaw-rescue",
-      }));
+    it("skips remain-on-exit when creation fails", async () => {
+      const { driver, execFileImpl } = createDriver((args) =>
+        args.includes("new-session")
+          ? { error: kExitOneError("duplicate session"), stderr: "duplicate session: alphaclaw-rescue" }
+          : { code: 0 },
+      );
       const result = await driver.newSession({
         sessionName: kSessionName,
         cwd: kWorkspace,
@@ -87,7 +145,8 @@ describe("claude-code-local tmux driver", () => {
         env: kEnv,
       });
       expect(result.code).toBe(1);
-      expect(execFileImpl).toHaveBeenCalledTimes(1);
+      // global set-option + failed new-session, but NO remain-on-exit follow-up.
+      expect(execFileImpl).toHaveBeenCalledTimes(2);
     });
   });
 
@@ -108,7 +167,7 @@ describe("claude-code-local tmux driver", () => {
       ]);
     });
 
-    it("captures the full history with -S - when lines is null", async () => {
+    it("bounds the full-history capture (lines=null) to -S -50000, never a bare -", async () => {
       const { driver, execFileImpl } = createDriver(() => ({ stdout: "full history\n" }));
       const text = await driver.capturePane({ sessionName: kSessionName, lines: null, env: kEnv });
       expect(text).toBe("full history\n");
@@ -120,7 +179,7 @@ describe("claude-code-local tmux driver", () => {
         "-t",
         kSessionName,
         "-S",
-        "-",
+        "-50000",
       ]);
     });
 
@@ -177,6 +236,7 @@ describe("claude-code-local tmux driver", () => {
       expect(execFileImpl.mock.calls[0][1]).toEqual([
         ...kSocketPrefix,
         "list-panes",
+        "-s",
         "-t",
         kSessionName,
         "-F",

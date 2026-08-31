@@ -301,6 +301,23 @@ describe("local rescue endpoints", () => {
     });
   });
 
+  it("forwards the server-truth permissionMode + cwd on a confirm_required refusal", async () => {
+    const deps = createLocalDeps();
+    deps.claudeCodeLocalService.startSession.mockResolvedValue({
+      ok: false,
+      code: "confirm_required",
+      message: "confirm again",
+      permissionMode: "bypassPermissions",
+      cwd: "/data/claude-code-local/workspace",
+    });
+    const res = await request(createApp(deps))
+      .post("/api/claude-code/local/session")
+      .send({ confirmed: true });
+    expect(res.status).toBe(409);
+    expect(res.body.permissionMode).toBe("bypassPermissions");
+    expect(res.body.cwd).toBe("/data/claude-code-local/workspace");
+  });
+
   it("threads the consented permission mode through to the service (TOCTOU guard)", async () => {
     const deps = createLocalDeps();
     await request(createApp(deps))

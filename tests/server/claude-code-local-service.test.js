@@ -679,6 +679,9 @@ describe("claude-code-local service", () => {
         source: "click",
       });
       expect(result).toMatchObject({ ok: false, code: "confirm_required" });
+      // The refusal carries server-truth mode+cwd so the modal renders it.
+      expect(result.permissionMode).toBe("bypassPermissions");
+      expect(result.cwd).toBe(kPaths.workspace);
       expect(driver.newSession).not.toHaveBeenCalled();
       const matched = await service.startSession({
         confirmed: true,
@@ -686,6 +689,97 @@ describe("claude-code-local service", () => {
         source: "click",
       });
       expect(matched).toMatchObject({ ok: true, status: "starting" });
+    });
+
+    it("never grants bypassPermissions on a null (unnamed) consent", async () => {
+      const env = { CLAUDE_CODE_LOCAL_PERMISSION_MODE: "bypassPermissions" };
+      const { service, driver } = createService({ env });
+      await service.refreshProbes({ force: true });
+      const result = await service.startSession({
+        confirmed: true,
+        consentedMode: null,
+        source: "click",
+      });
+      expect(result).toMatchObject({ ok: false, code: "confirm_required" });
+      expect(result.permissionMode).toBe("bypassPermissions");
+      expect(driver.newSession).not.toHaveBeenCalled();
+    });
+
+    it("captures the mode once and ignores a hot-reload after validation", async () => {
+      const env = { CLAUDE_CODE_LOCAL_PERMISSION_MODE: "acceptEdits" };
+      const { service, driver } = createService({ env });
+      await service.refreshProbes({ force: true });
+      // Flip the env mid-spawn (after newSession resolves) — the spawned
+      // session must carry the mode validated at the top, not the new one.
+      driver.newSession.mockImplementation(async () => {
+        env.CLAUDE_CODE_LOCAL_PERMISSION_MODE = "bypassPermissions";
+        driver.state.sessionAlive = true;
+        return { code: 0, stdout: "", stderr: "" };
+      });
+      await service.startSession({
+        confirmed: true,
+        consentedMode: "acceptEdits",
+        source: "click",
+      });
+      const argv = driver.newSession.mock.calls[0][0].commandArgv;
+      expect(argv).toContain("acceptEdits");
+      expect(argv).not.toContain("--dangerously-skip-permissions");
+    });
+  });
+
+  describe("double-start does not orphan the URL watcher", () => {
+    it("keeps the first watcher alive through a second start on a starting session", async () => {
+      const { service, driver } = createService({});
+      await service.refreshProbes({ force: true });
+      await service.startSession({ confirmed: true, source: "click" });
+      // Second click (another tab) while starting — early-returns "starting"
+      // but must NOT kill the in-flight URL watcher.
+      const second = await service.startSession({ confirmed: true, source: "click" });
+      expect(second).toMatchObject({ ok: true, status: "starting" });
+      driver.state.buffer = "https://claude.ai/code/sess_watcher12345";
+      await flush(60);
+      const snapshot = service.getStatusSnapshot();
+      expect(snapshot.state).toBe("running");
+      expect(snapshot.sessionUrl).toBe("https://claude.ai/code/sess_watcher12345");
+    });
+  });
+
+  describe("stop failure surfaces", () => {
+    it("reports stop_failed and keeps the session when kill-session fails", async () => {
+      const { service, driver } = createService({});
+      await service.refreshProbes({ force: true });
+      await service.startSession({ confirmed: true, source: "click" });
+      driver.state.buffer = "https://claude.ai/code/sess_running123456";
+      await flush(60);
+      driver.killSession.mockResolvedValueOnce({ ok: false, result: { stderr: "server busy" } });
+      const stopped = await service.stopSession();
+      expect(stopped).toMatchObject({ ok: false, code: "stop_failed" });
+      // The session is NOT cleared — a live remote shell must stay tracked
+      // (state stays "running": the shell really is still up).
+      expect(service.getStatusSnapshot().state).toBe("running");
+    });
+  });
+
+  describe("logout hardening", () => {
+    it("refuses while a login is in progress and verifies credential removal", async () => {
+      const child = createFakeChild();
+      const { service } = createService({
+        spawnImpl: vi.fn(() => child),
+        runStream: createFakeRunStream({ loggedIn: false }),
+      });
+      await service.refreshProbes({ force: true });
+      await service.startLogin();
+      expect(await service.logout()).toMatchObject({ ok: false, code: "login_in_progress" });
+    });
+
+    it("reports logout_failed when the credential file cannot be removed", async () => {
+      const { service, fsModule } = createService({});
+      await service.refreshProbes({ force: true });
+      const credPath = `${kPaths.home}/.claude/.credentials.json`;
+      fsModule.files.set(credPath, "creds");
+      fsModule.rmSync = vi.fn(); // swallow the delete (EACCES-style no-op)
+      const result = await service.logout();
+      expect(result).toMatchObject({ ok: false, code: "logout_failed" });
     });
   });
 
@@ -881,21 +975,26 @@ describe("claude-code-local service", () => {
   });
 
   describe("probe economy", () => {
-    it("serves the stale memo instead of probing under the memory floor", async () => {
+    it("skips the PERIODIC probe under the floor but a FORCED probe still runs", async () => {
       const resources = { low: false };
       const runStream = createFakeRunStream();
       const { service } = createService({
         runStream,
+        timers: { ...kFastTimers, probeMs: 0 }, // every non-forced call re-probes
         getResources: () =>
           resources.low
             ? { memory: { totalBytes: 1024 ** 3, usedBytes: 900 * 1024 * 1024 } }
             : { memory: { totalBytes: 4 * 1024 ** 3, usedBytes: 1024 ** 3 } },
       });
       await service.refreshProbes({ force: true });
-      const callsAfterFirst = runStream.runStreamed.mock.calls.length;
+      const afterFirst = runStream.runStreamed.mock.calls.length;
       resources.low = true;
+      // Periodic (non-forced) probe is throttled by the floor → no new calls.
+      await service.refreshProbes();
+      expect(runStream.runStreamed.mock.calls.length).toBe(afterFirst);
+      // A forced probe (login verification) must run even under the floor.
       await service.refreshProbes({ force: true });
-      expect(runStream.runStreamed.mock.calls.length).toBe(callsAfterFirst);
+      expect(runStream.runStreamed.mock.calls.length).toBeGreaterThan(afterFirst);
     });
 
     it("falls back to the managed workspace when CWD is not absolute", async () => {

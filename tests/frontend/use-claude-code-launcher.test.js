@@ -491,6 +491,76 @@ describe("useClaudeCodeLauncher local-first branch", () => {
     });
   });
 
+  it("a confirm_required carrying the server's live permissionMode+cwd renders THAT mode, keys consent to it, and re-fires it", async () => {
+    // ADVERSARIAL (verified context contract): the cached snapshot says
+    // acceptEdits, but the server is actually configured for bypassPermissions
+    // and says so on the 409 body. The modal must name the SERVER's mode (never
+    // the stale "acceptEdits"), and consent + the re-fire must use the server's
+    // mode AND cwd.
+    const kServerCwd = "/data/claude-code-local/server-workspace";
+    useCachedFetch.mockReturnValue({ data: localReadyStatus() }); // cached: acceptEdits
+    createClaudeCodeLocalSession
+      .mockRejectedValueOnce(
+        Object.assign(localError("confirm_required"), {
+          permissionMode: "bypassPermissions",
+          cwd: kServerCwd,
+        }),
+      )
+      .mockResolvedValueOnce({ ok: true, status: "running", sessionUrl: kLocalSessionUrl });
+    renderHook().openClaudeCode(plainClick());
+    await flush();
+
+    const rerendered = renderHook();
+    expect(rerendered.confirmOpen).toBe(true);
+    expect(rerendered.confirmMode).toBe("local");
+    // The modal names the SERVER's mode, not the cached acceptEdits snapshot.
+    expect(rerendered.confirmPermissionMode).toBe("bypassPermissions");
+
+    rerendered.confirmStart();
+    await flush();
+    // Consent stored for the SERVER's mode+cwd scope.
+    const storedSettings = updateUiSettings.mock.calls[0][0]({});
+    expect(storedSettings.claudeCodeLocalConfirmedScope).toEqual({
+      permissionMode: "bypassPermissions",
+      cwd: kServerCwd,
+    });
+    // The re-fire posts the SERVER's mode.
+    expect(createClaudeCodeLocalSession).toHaveBeenLastCalledWith({
+      confirmed: true,
+      permissionMode: "bypassPermissions",
+    });
+    const win = global.window.open.mock.results[0].value;
+    expect(win.location.href).toBe(kLocalSessionUrl);
+  });
+
+  it("falls back to the cached status mode+cwd when the 409 body omits them (older server)", async () => {
+    // Older server: the confirm_required refusal carries no permissionMode/cwd,
+    // so the modal and the re-fire fall back to the cached snapshot.
+    useCachedFetch.mockReturnValue({
+      data: localReadyStatus({ permissionMode: "bypassPermissions" }),
+    });
+    createClaudeCodeLocalSession
+      .mockRejectedValueOnce(localError("confirm_required"))
+      .mockResolvedValueOnce({ ok: true, status: "running", sessionUrl: kLocalSessionUrl });
+    renderHook().openClaudeCode(plainClick());
+    await flush();
+
+    const rerendered = renderHook();
+    expect(rerendered.confirmPermissionMode).toBe("bypassPermissions");
+
+    rerendered.confirmStart();
+    await flush();
+    const storedSettings = updateUiSettings.mock.calls[0][0]({});
+    expect(storedSettings.claudeCodeLocalConfirmedScope).toEqual({
+      permissionMode: "bypassPermissions",
+      cwd: kLocalCwd,
+    });
+    expect(createClaudeCodeLocalSession).toHaveBeenLastCalledWith({
+      confirmed: true,
+      permissionMode: "bypassPermissions",
+    });
+  });
+
   it("skips the local POST entirely when the cached status has no local block", async () => {
     // CRITICAL regression: unknown/absent status.local → routine path
     // exactly as today, zero local calls.

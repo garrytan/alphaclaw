@@ -2430,6 +2430,41 @@ describe("frontend/api claude-code local helpers", () => {
     });
   });
 
+  it("threads the server's live permissionMode + cwd onto a confirm_required error (authoritative modal source)", async () => {
+    // The 409 body carries the server's live config so the confirm modal names
+    // the mode the server is ACTUALLY set to, not a stale cached snapshot.
+    global.fetch.mockResolvedValue(
+      mockJsonResponse(409, {
+        ok: false,
+        error: "confirm_required",
+        message: "Confirm the rescue session before it starts.",
+        permissionMode: "bypassPermissions",
+        cwd: "/data/claude-code-local/workspace",
+      }),
+    );
+    const api = await import("../../lib/public/js/lib/api.js");
+    await expect(api.createClaudeCodeLocalSession()).rejects.toMatchObject({
+      code: "confirm_required",
+      permissionMode: "bypassPermissions",
+      cwd: "/data/claude-code-local/workspace",
+    });
+  });
+
+  it("omits permissionMode/cwd on the error when an older server does not send them", async () => {
+    global.fetch.mockResolvedValue(
+      mockJsonResponse(409, {
+        ok: false,
+        error: "confirm_required",
+        message: "Confirm the rescue session before it starts.",
+      }),
+    );
+    const api = await import("../../lib/public/js/lib/api.js");
+    const error = await api.createClaudeCodeLocalSession().catch((err) => err);
+    expect(error.code).toBe("confirm_required");
+    expect(error).not.toHaveProperty("permissionMode");
+    expect(error).not.toHaveProperty("cwd");
+  });
+
   it("stop/login/cancel/logout POST their endpoints", async () => {
     global.fetch.mockResolvedValue(mockJsonResponse(200, { ok: true }));
     const api = await import("../../lib/public/js/lib/api.js");
