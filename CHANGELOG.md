@@ -19,14 +19,15 @@ an error or rendered a bare "Error" pill got the same treatment.
   rewrites it", which fixes neither). The true cause now flows end to end
   with deterministic precedence, cause-specific card copy for symlink escapes
   and the read cap (never budget advice — the 2 MiB cap isn't configurable),
-  per-file evidence for rejected files (previously empty), an honest headline
+  per-file evidence for rejected files (previously misreported), an honest headline
   when causes are mixed, and a safe generic fallback for reason codes a
   future server may add. A file that is never injected at all (hook disabled,
   rejected basename) no longer surfaces budget advice just because it is
   also over a cap.
 - **A failed Codex status check can no longer fabricate "Not connected".**
   All four status-check surfaces (Providers, Models, onboarding, welcome)
-  keep the last checked status, show why the check failed with a Retry, and
+  keep the last checked status, show why the check failed (Providers and
+  Models add a Retry button), and
   say "Status unknown" when there is no prior data to claim — including when
   the server answers with an error envelope instead of a rejection.
 - **Caught errors stop disappearing into static copy.** The agent-admin token
@@ -45,7 +46,7 @@ an error or rendered a bare "Error" pill got the same treatment.
   not reaching the agent."), per-file rows with the specific cause and a
   one-clause fix (severity derived from impact — a fully-dropped file is
   danger DROPPED, truncation is warning PARTIAL, blocked is always danger),
-  an honest "updated {time}" stamp, a restart disambiguation footnote, and an
+  an "updated {time}" stamp, a restart disambiguation footnote, and an
   Open Drift Doctor button. The stale-doctor warning yields while the card is
   showing so two alert cards never stack.
 - **The card's CTA deep-links `#/doctor?focus=context`:** the context meter
@@ -62,8 +63,9 @@ an error or rendered a bare "Error" pill got the same treatment.
   sanitized against log forging).
 
 ### Changed
-- **Every warning/danger badge now names its condition and carries its
-  remedy** via the new shared TooltipBadge (visible label stays the
+- **Bare warning/danger badges across the flagged cohort now name their
+  condition and carry their remedy** via the new shared TooltipBadge
+  (visible label stays the
   accessible name; tooltips are supplementary since they never open on
   touch): "Error" → "Watch not running" (with a visible renew hint),
   "Needs auth" → "Authentication required", "Awaiting pairing" → "Pairing
