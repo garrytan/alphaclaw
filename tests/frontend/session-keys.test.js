@@ -23,12 +23,14 @@ describe("session-keys display helpers", () => {
     ).toBe("Main Thread");
   });
 
-  it("getSessionDisplayLabel renders telegram direct as Direct message", () => {
+  it("getSessionDisplayLabel renders telegram direct peer-qualified", () => {
+    // Deliberate v-next change: two DMs must not render as identical
+    // "Direct message" rows in a delivery picker — the peer id disambiguates.
     expect(
       getSessionDisplayLabel({
         key: "agent:main:telegram:default:direct:1050",
       }),
-    ).toBe("Direct message");
+    ).toBe("Direct message · 1050");
   });
 
   it("getSessionDisplayLabel renders non-telegram direct with id", () => {
