@@ -5,6 +5,67 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.9.50] - 2026-08-31
+
+One-click OpenClaw dashboards: every path into the Control UI now lands you
+signed in automatically — no terminal, no token pasting, no "Auth required"
+screen. Verified end-to-end on a real instance (real gateway, real browser
+click-through) and encoded as a live e2e suite.
+
+### Added
+- **Dashboards opens signed in.** The sidebar Dashboards link (and the
+  General tab's "Open Dashboard", the Team tab's "Open Control UI", and the
+  Envars "Open Secrets" deep link) now route through an authenticated
+  server-side launcher (`GET /gateway/launch`) that primes the gateway token
+  into the Control UI's URL fragment via an empty-body redirect. The token
+  never enters the page's JavaScript, any response body, any log line, or
+  any cacheable surface; members and trusted-proxy (team) installs get
+  tokenless links and sign in via proxy identity. First visit and every
+  visit after lands connected.
+- **Doctor warns when dashboard links can't be token-primed.** A new
+  deterministic check (`det:dashboard-token-unresolvable`) surfaces the one
+  failure the launcher can't fix — no resolvable gateway token in config —
+  as a visible warning card instead of a silent fallback to the manual
+  connect screen. It never runs the CLI or external secret providers, and
+  stays silent in trusted-proxy and password modes where tokenless is
+  correct.
+- **Live e2e proof of the credential chain.**
+  `tests/live/dashboard-launch.e2e.test.js` boots the real server
+  supervising a real gateway and proves: authenticated launch → tokened
+  302 → the launcher-issued token authenticates a real WebSocket connect
+  through the proxy; a wrong token is rejected; an unauthenticated launch
+  never sees a token. (Live tier, `OPENCLAW_LIVE_E2E=1`.)
+
+### Changed
+- **The Dashboards sidebar item grew up.** Distinct icon (it previously
+  shared Usage's), a tooltip ("opens in a new tab, signed in
+  automatically"), a visible-label-first accessible name, and the mobile
+  drawer now closes when the new tab opens.
+- **Token resolution is single-flight, bounded, and mode-aware.** One shared
+  resolver serves the launcher, `/api/gateway/dashboard`, and the doctor
+  check: concurrent launches share one resolution (at most one CLI spawn),
+  a hung external secret provider degrades the launch tokenless within 20s
+  instead of hanging the tab (and the next launch retries fresh), and
+  trusted-proxy/password modes short-circuit tokenless without ever
+  spawning the CLI or resurrecting a stale token into a link.
+
+### Fixed
+- **The Envars "Open Secrets" link no longer corrupts the token.** It used
+  to splice the settings path inside the URL fragment, landing on a broken
+  URL; it now routes through the launcher and lands connected on
+  Settings → Secrets.
+- **No more false "token missing" warning in team mode.** The General tab's
+  toast fired in trusted-proxy installs where tokenless sign-in is the
+  success path; entry points now just open connected.
+
+### Security
+- Failed `openclaw` CLI runs and launcher resolution errors now scrub
+  token-bearing values by shape and by known-secret value (process env,
+  env file, and config literals — with the env file read fail-closed)
+  before anything reaches a log line; `GET /api/gateway/dashboard` responses
+  are marked `Cache-Control: no-store` so the tokened URL can't sit in a
+  browser HTTP cache.
+
 ## [0.9.49] - 2026-08-31
 
 An upstream-alignment fix wave: the watchdog terminal finally gets a real
