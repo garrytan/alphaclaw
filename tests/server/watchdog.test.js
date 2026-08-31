@@ -11,7 +11,8 @@ const flushMicrotasks = async () =>
   });
 
 const kOriginalAutoRepair = process.env.WATCHDOG_AUTO_REPAIR;
-const kOriginalNotificationsDisabled = process.env.WATCHDOG_NOTIFICATIONS_DISABLED;
+const kOriginalNotificationsDisabled =
+  process.env.WATCHDOG_NOTIFICATIONS_DISABLED;
 const kOriginalNotificationsQuiet = process.env.WATCHDOG_NOTIFICATIONS_QUIET;
 const kOriginalFetch = global.fetch;
 
@@ -40,9 +41,12 @@ const createHarness = ({
   supervisorModeActive,
   consumeRestartHandoffImpl,
   updateEnvFile = null,
+  getRescueSessionLine,
 } = {}) => {
   process.env.WATCHDOG_AUTO_REPAIR = autoRepair ? "true" : "false";
-  process.env.WATCHDOG_NOTIFICATIONS_DISABLED = notificationsDisabled ? "true" : "false";
+  process.env.WATCHDOG_NOTIFICATIONS_DISABLED = notificationsDisabled
+    ? "true"
+    : "false";
   // Pin the verbose toggle to its default for every harness run — an ambient
   // WATCHDOG_NOTIFICATIONS_QUIET on the host must not flip assertions
   // (isVerboseEnabled reads live process.env). afterEach restores it.
@@ -87,6 +91,7 @@ const createHarness = ({
     supervisorModeActive: supervisorModeActive ?? (() => false),
     ...(consumeRestartHandoffImpl ? { consumeRestartHandoffImpl } : {}),
     ...(updateEnvFile ? { updateEnvFile } : {}),
+    ...(getRescueSessionLine ? { getRescueSessionLine } : {}),
   });
 
   return {
@@ -112,7 +117,8 @@ describe("server/watchdog", () => {
       delete process.env.WATCHDOG_NOTIFICATIONS_DISABLED;
       delete process.env.WATCHDOG_NOTIFICATIONS_QUIET;
     } else {
-      process.env.WATCHDOG_NOTIFICATIONS_DISABLED = kOriginalNotificationsDisabled;
+      process.env.WATCHDOG_NOTIFICATIONS_DISABLED =
+        kOriginalNotificationsDisabled;
       if (kOriginalNotificationsQuiet === undefined) {
         delete process.env.WATCHDOG_NOTIFICATIONS_QUIET;
       } else {
@@ -248,7 +254,8 @@ describe("server/watchdog", () => {
     const { watchdog, clawCmd } = createHarness({
       autoRepair: true,
       clawCmdImpl: async (command) => {
-        if (command === "doctor --fix --yes") return { ok: true, stdout: "fixed" };
+        if (command === "doctor --fix --yes")
+          return { ok: true, stdout: "fixed" };
         return { ok: true, stdout: "" };
       },
       fetchImpl: async () => {
@@ -282,7 +289,8 @@ describe("server/watchdog", () => {
     const { watchdog, clawCmd, launchGatewayProcess } = createHarness({
       autoRepair: true,
       clawCmdImpl: async (command) => {
-        if (command === "doctor --fix --yes") return { ok: true, stdout: "fixed" };
+        if (command === "doctor --fix --yes")
+          return { ok: true, stdout: "fixed" };
         return { ok: true, stdout: "" };
       },
       fetchImpl: async () => {
@@ -302,7 +310,8 @@ describe("server/watchdog", () => {
       // Initial crash-loop repair was skipped (operation_in_progress) and the
       // retry cadence is running; still skipped while the relaunch is parked.
       const doctorCalls = () =>
-        clawCmd.mock.calls.filter((call) => call[0] === "doctor --fix --yes").length;
+        clawCmd.mock.calls.filter((call) => call[0] === "doctor --fix --yes")
+          .length;
       await vi.advanceTimersByTimeAsync(2000);
       expect(doctorCalls()).toBe(0);
 
@@ -339,7 +348,8 @@ describe("server/watchdog", () => {
       // chain must then STOP — no repair attempts fire on later ticks even
       // though the doctor command would now be reachable.
       const doctorCalls = () =>
-        clawCmd.mock.calls.filter((call) => call[0] === "doctor --fix --yes").length;
+        clawCmd.mock.calls.filter((call) => call[0] === "doctor --fix --yes")
+          .length;
       for (let i = 0; i < 7; i += 1) {
         await vi.advanceTimersByTimeAsync(2000);
       }
@@ -539,6 +549,75 @@ describe("server/watchdog", () => {
     shapeless.watchdog.stop();
   });
 
+  it("appends the rescue-session line to incident-class notifications only", async () => {
+    vi.useFakeTimers();
+    const kRescueLine =
+      "🛟 Rescue session: https://claude.ai/code/sess_test123";
+    let healthChecks = 0;
+    const { watchdog, notifier } = createHarness({
+      autoRepair: false,
+      getRescueSessionLine: () => kRescueLine,
+      fetchImpl: async () => {
+        healthChecks += 1;
+        if (healthChecks === 1) throw new Error("gateway unavailable");
+        return {
+          ok: true,
+          status: 200,
+          text: async () => JSON.stringify({ ok: true, status: "live" }),
+        };
+      },
+    });
+
+    watchdog.onGatewayLaunch({ startedAt: Date.now() - 60_000 });
+    watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    await vi.advanceTimersByTimeAsync(0);
+    watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    await vi.advanceTimersByTimeAsync(0);
+    watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    await vi.advanceTimersByTimeAsync(120_000);
+
+    const messages = notifier.notify.mock.calls.map((call) =>
+      String(call?.[0] || ""),
+    );
+    const incidentMessages = messages.filter((message) =>
+      message.includes("crash"),
+    );
+    expect(incidentMessages.length).toBeGreaterThan(0);
+    expect(messages.some((message) => message.includes(kRescueLine))).toBe(
+      true,
+    );
+    // Non-incident notifications (the recovery green) stay clean: the line is
+    // an incident affordance, not a signature on every message.
+    const recovery = messages.find((message) =>
+      message.includes("🟢 Gateway running again"),
+    );
+    expect(recovery).toBeTruthy();
+    expect(recovery).not.toContain(kRescueLine);
+    watchdog.stop();
+  });
+
+  it("never lets a throwing rescue-line consult break a notification", async () => {
+    vi.useFakeTimers();
+    const { watchdog, notifier } = createHarness({
+      autoRepair: false,
+      getRescueSessionLine: () => {
+        throw new Error("rescue consult boom");
+      },
+      fetchImpl: async () => {
+        throw new Error("gateway unavailable");
+      },
+    });
+    watchdog.onGatewayLaunch({ startedAt: Date.now() - 60_000 });
+    watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    await vi.advanceTimersByTimeAsync(0);
+    watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    await vi.advanceTimersByTimeAsync(0);
+    watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(notifier.notify).toHaveBeenCalled();
+    watchdog.stop();
+  });
+
   it("suppresses notifier sends when notifications are disabled", async () => {
     const { watchdog, notifier } = createHarness({
       notificationsDisabled: true,
@@ -625,9 +704,10 @@ describe("server/watchdog", () => {
   });
 
   it("ignores duplicate-launch port-in-use exits", () => {
-    const { watchdog, insertWatchdogEvent, launchGatewayProcess } = createHarness({
-      autoRepair: true,
-    });
+    const { watchdog, insertWatchdogEvent, launchGatewayProcess } =
+      createHarness({
+        autoRepair: true,
+      });
 
     watchdog.onGatewayExit({
       code: 1,
@@ -698,7 +778,8 @@ describe("server/watchdog", () => {
     const { watchdog, notifier } = createHarness({
       autoRepair: true,
       clawCmdImpl: async (command) => {
-        if (command === "doctor --fix --yes") return { ok: true, stdout: "fixed" };
+        if (command === "doctor --fix --yes")
+          return { ok: true, stdout: "fixed" };
         return { ok: true, stdout: "" };
       },
       // Probe order: crash-1 resync (#1), crash-2 resync (#2), the repair's
@@ -833,9 +914,11 @@ describe("server/watchdog", () => {
   });
 
   it("pauses recovery when OpenClaw exits with EX_CONFIG", async () => {
-    const { watchdog, clawCmd, launchGatewayProcess, notifier } = createHarness({
-      autoRepair: true,
-    });
+    const { watchdog, clawCmd, launchGatewayProcess, notifier } = createHarness(
+      {
+        autoRepair: true,
+      },
+    );
 
     watchdog.onGatewayExit({
       code: 78,
@@ -1100,7 +1183,10 @@ describe("server/watchdog", () => {
     // A mistyped field must 400 even when a sibling field is valid — never
     // silently drop it from a mixed payload (pre-landing review).
     expect(() =>
-      watchdog.updateSettings({ autoRepair: true, notificationsVerbose: "true" }),
+      watchdog.updateSettings({
+        autoRepair: true,
+        notificationsVerbose: "true",
+      }),
     ).toThrow(
       "Expected autoRepair, notificationsEnabled, and/or notificationsVerbose boolean",
     );
@@ -1112,16 +1198,25 @@ describe("server/watchdog", () => {
   });
 
   it("treats exit code 78 as a fatal config error without crash-loop restarts", async () => {
-    const { watchdog, insertWatchdogEvent, notifier, launchGatewayProcess, clawCmd } =
-      createHarness({
-        autoRepair: false,
-        fetchImpl: async () => {
-          throw new Error("gateway unavailable");
-        },
-      });
+    const {
+      watchdog,
+      insertWatchdogEvent,
+      notifier,
+      launchGatewayProcess,
+      clawCmd,
+    } = createHarness({
+      autoRepair: false,
+      fetchImpl: async () => {
+        throw new Error("gateway unavailable");
+      },
+    });
 
     watchdog.onGatewayLaunch({ startedAt: Date.now(), pid: 1234 });
-    watchdog.onGatewayExit({ code: 78, expectedExit: false, stderrTail: ["invalid config"] });
+    watchdog.onGatewayExit({
+      code: 78,
+      expectedExit: false,
+      stderrTail: ["invalid config"],
+    });
     watchdog.onGatewayExit({ code: 78, expectedExit: false });
     watchdog.onGatewayExit({ code: 78, expectedExit: false });
     await flushMicrotasks();
@@ -1150,7 +1245,9 @@ describe("server/watchdog", () => {
       notifier.notify.mock.calls.some(
         (call) =>
           String(call?.[0] || "").includes("Gateway configuration error") &&
-          String(call?.[0] || "").includes("automatic gateway restart is paused"),
+          String(call?.[0] || "").includes(
+            "automatic gateway restart is paused",
+          ),
       ),
     ).toBe(true);
   });
@@ -1593,7 +1690,9 @@ describe("server/watchdog", () => {
         if (String(url).includes("/readyz")) {
           return new Promise((resolve, reject) => {
             opts.signal.addEventListener("abort", () =>
-              reject(Object.assign(new Error("aborted"), { name: "AbortError" })),
+              reject(
+                Object.assign(new Error("aborted"), { name: "AbortError" }),
+              ),
             );
           });
         }
@@ -1667,7 +1766,11 @@ describe("server/watchdog", () => {
         status: 200,
         text: async () => JSON.stringify({ ok: false, error: "draining" }),
       },
-      { ok: true, status: 200, text: async () => JSON.stringify({ ok: false }) },
+      {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({ ok: false }),
+      },
     ];
     const { watchdog, insertWatchdogEvent } = createHarness({
       autoRepair: false,
@@ -1706,7 +1809,8 @@ describe("server/watchdog", () => {
     const { watchdog } = createHarness({
       autoRepair: false,
       clawCmdImpl: async (command) => {
-        if (command === "doctor --fix --yes") return { ok: true, stdout: "fixed" };
+        if (command === "doctor --fix --yes")
+          return { ok: true, stdout: "fixed" };
         return { ok: true, stdout: "" };
       },
       fetchImpl: async () => {
@@ -1878,16 +1982,18 @@ describe("server/watchdog", () => {
   });
 
   it("logs when a repair cannot relaunch the gateway", async () => {
-    const { watchdog, launchGatewayProcess, insertWatchdogEvent } = createHarness({
-      autoRepair: true,
-      clawCmdImpl: async (command) => {
-        if (command === "doctor --fix --yes") return { ok: true, stdout: "fixed" };
-        return { ok: true, stdout: "" };
-      },
-      fetchImpl: async () => {
-        throw new Error("gateway down");
-      },
-    });
+    const { watchdog, launchGatewayProcess, insertWatchdogEvent } =
+      createHarness({
+        autoRepair: true,
+        clawCmdImpl: async (command) => {
+          if (command === "doctor --fix --yes")
+            return { ok: true, stdout: "fixed" };
+          return { ok: true, stdout: "" };
+        },
+        fetchImpl: async () => {
+          throw new Error("gateway down");
+        },
+      });
 
     launchGatewayProcess.mockReturnValue(null);
     const noChildResult = await watchdog.triggerRepair();
@@ -1970,13 +2076,14 @@ describe("server/watchdog", () => {
       createGatewayLifecycleLock,
     } = require("../../lib/server/gateway-lifecycle-lock");
     const lock = createGatewayLifecycleLock();
-    const { watchdog, launchGatewayProcess, insertWatchdogEvent } = createHarness({
-      autoRepair: true,
-      gatewayLifecycleLock: lock,
-      fetchImpl: async () => {
-        throw new Error("gateway down");
-      },
-    });
+    const { watchdog, launchGatewayProcess, insertWatchdogEvent } =
+      createHarness({
+        autoRepair: true,
+        gatewayLifecycleLock: lock,
+        fetchImpl: async () => {
+          throw new Error("gateway down");
+        },
+      });
 
     const release = await lock.acquire("restart");
     const result = await watchdog.triggerRepair();
@@ -2155,9 +2262,10 @@ describe("server/watchdog", () => {
   });
 
   it("logs crash restarts that cannot relaunch the gateway", async () => {
-    const { watchdog, launchGatewayProcess, insertWatchdogEvent } = createHarness({
-      autoRepair: false,
-    });
+    const { watchdog, launchGatewayProcess, insertWatchdogEvent } =
+      createHarness({
+        autoRepair: false,
+      });
 
     launchGatewayProcess.mockReturnValue(null);
     watchdog.onGatewayExit({ code: 1, expectedExit: false });
@@ -3050,7 +3158,9 @@ describe("server/watchdog", () => {
       stdout: cmd.startsWith("doctor")
         ? JSON.stringify({
             ok: false,
-            findings: [{ checkId: "secrets.runtime", detail: "secret load failed" }],
+            findings: [
+              { checkId: "secrets.runtime", detail: "secret load failed" },
+            ],
           })
         : JSON.stringify({ ok: true }),
     }));
@@ -3210,7 +3320,9 @@ describe("server/watchdog", () => {
 
   it("coalesces TCP transitions inside the debounce into one health check", async () => {
     vi.useFakeTimers();
-    const { watchdog, insertWatchdogEvent } = createHarness({ autoRepair: false });
+    const { watchdog, insertWatchdogEvent } = createHarness({
+      autoRepair: false,
+    });
 
     watchdog.onGatewayTcpTransition();
     await vi.advanceTimersByTimeAsync(400);

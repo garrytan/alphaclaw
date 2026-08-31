@@ -1,0 +1,1 @@
+Error: Workspace not trusted. Please run `claude` in /tmp/qa-root/claude-code-local/workspace first to review and accept the workspace trust dialog.

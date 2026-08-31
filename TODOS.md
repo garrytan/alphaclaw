@@ -50,8 +50,14 @@
 - **Pros:** Real-time sidebar, zero per-tab churn. **Cons:** OpenClaw exposes no session-change event, so the server would still poll the CLI once centrally — modest win over the micro-cache.
 - **Context:** Eng-review D6 (2026-08-31); micro-cache in lib/server/routes/system.js (`agentSessionsCacheTtlMs`), poll in lib/public/js/hooks/useAgentSessions.js.
 - **Effort:** M. **Depends on:** ideally an upstream session-change signal.
+## P3 — Rescue login modal: label the OAuth link instead of rendering the raw URL
+- **What:** The guided-login modal renders the full OAuth authorize URL as a 9-line wrapped link; show a short label ("Open claude.ai login") with the raw URL in a copyable line beneath.
+- **Why:** Cosmetic (found by /qa on vientiane, 2026-08-31, ISSUE-001); functional as-is.
+- **Context:** lib/public/js/components/claude-code-local-setup-modal.js, awaiting_code state. Evidence: .gstack/qa-reports/screenshots/login-modal-awaiting-code.png.
+- **Effort:** S. **Depends on:** nothing.
+
 ## P3 — Resource-autotune ship-review follow-ups (2026-08-29, grouped)
-- **What:** (1) container-hook tests for `WatchdogAutotuneCard` (restartSignal/detectedAt refetch triggers, per-context save isolation, heap-input validation toast, reapply/dismiss flows — only the presentational view + builders are covered); (2) `launchGatewayProcess` spawn-stamp glue test (heap regex from childEnv, UV match) at the call site; (3) extract the copy-pasted cgroup fs-spy/containerFsModule test fixtures (×6 files) into a shared tests helper; (4) unify the three machine-summary assemblies (agent-admin/skill.js `gatherLiveState`, routes/system.js `buildMachineSummary`, onboarding/workspace.js `renderMachineProfileMarkdown`) on one summarizer with per-surface sanitization at call sites; (5) hoist the 3500ms post-restart settle-refetch literal (autotune-card, incidents hook, general tab) into a shared constant; (6) design pass items for /design-review: collapse the N-identical "Restart gateway now" per-row buttons into a single affordance, and move underlined text-button actions (Restart/Copy) onto ActionButton; (7) ~~downsize-specific urgent-toned resize notification~~ (DONE v0.9.53 — any shrinking dimension gets the ⚠️ OOM-pressure copy, tested); (8) apply the shared cache pragma at cron-store's TTL reopen (+ decide agent-admin/usage sites); (9) a `pruneBackups` advisory-budget warning test; (10) an explicit boot-order test (autotune apply completes before `doSyncPromptFiles`, machine line present in first-boot artifacts with a GPU fixture).
+- **What:** (1) container-hook tests for `WatchdogAutotuneCard` (restartSignal/detectedAt refetch triggers, per-context save isolation, heap-input validation toast, reapply/dismiss flows — only the presentational view + builders are covered); (2) `launchGatewayProcess` spawn-stamp glue test (heap regex from childEnv, UV match) at the call site; (3) extract the copy-pasted cgroup fs-spy/containerFsModule test fixtures (×6 files) into a shared tests helper; (4) unify the three machine-summary assemblies (agent-admin/skill.js `gatherLiveState`, routes/system.js `buildMachineSummary`, onboarding/workspace.js `renderMachineProfileMarkdown`) on one summarizer with per-surface sanitization at call sites; (5) hoist the 3500ms post-restart settle-refetch literal (autotune-card, incidents hook, general tab) into a shared constant; (6) design pass items for /design-review: collapse the N-identical "Restart gateway now" per-row buttons into a single affordance, and move underlined text-button actions (Restart/Copy) onto ActionButton; (7) ~~downsize-specific urgent-toned resize notification~~ (DONE v0.9.54 — any shrinking dimension gets the ⚠️ OOM-pressure copy, tested); (8) apply the shared cache pragma at cron-store's TTL reopen (+ decide agent-admin/usage sites); (9) a `pruneBackups` advisory-budget warning test; (10) an explicit boot-order test (autotune apply completes before `doSyncPromptFiles`, machine line present in first-boot artifacts with a GPU fixture).
 - **Why:** All flagged by the /ship specialist review or plan-completion audit; each deferred as churn-vs-risk at ship time — none is user-visible today, and the risky logic beneath them is covered (82% diff coverage, regressions pinned).
 - **Context:** lib/public/js/components/watchdog-tab/autotune-card.js, lib/server/gateway.js (spawn stamp), lib/server/machine-summary.js (new shared prompt summarizer to extend), lib/server/cron-store.js, lib/server/openclaw-channel-sync.js (advisory block), lib/server/startup.js.
 - **Effort:** S each. **Depends on:** nothing.
@@ -196,7 +202,7 @@
 - **Why:** "Was it flapping overnight?" currently requires reading incident rows one by one.
 - **Effort:** S-M.
 
-## P3 — Notification remediation-action parity (PARTIALLY DONE, v0.9.53)
+## P3 — Notification remediation-action parity (PARTIALLY DONE, v0.9.54)
 - **What:** Alerts name the primary remediation with the same action vocabulary as the card's `actions[]`; today they share state labels and deep links but not the action wording.
 - **Done:** the crash-loop-paused notice names Retry/Repair (the `down` state's catalog actions) with a parity test against `actionsForState` (tests/server/auto-fix-notifications.test.js); auto-resolving notices deliberately stay action-free. Remaining: sweep the OTHER pre-existing alerts (config-error latch, rollback notices) for the same treatment.
 - **Context:** Copy source: lib/server/gateway-state.js catalog + actionsForState (now exported).
@@ -397,7 +403,7 @@
 
 ## P3 — Bin-phase boot-notices bridge (pre-server auto-fix notifications)
 - **What:** Durable boot-notices JSONL in the state dir written by `bin/alphaclaw.js` auto-fixes (pending-update self npm-install, openclaw.json restore from the git remote, pre-server config migrations), drained through `upgradeNotifier.notify` at server boot — mirroring channel-sync's `lastBoot.notifications` envelope pattern.
-- **Why:** These are genuine automatic fixes that today only reach the console; the verbose/important notification work (v0.9.53) covers the server phase only.
+- **Why:** These are genuine automatic fixes that today only reach the console; the verbose/important notification work (v0.9.54) covers the server phase only.
 - **Context:** No notifier exists in the bin process; `flushBootNotifications` (lib/server/openclaw-channel-sync.js) is the drain precedent. Classify all as important (action taken).
 - **Effort:** M → CC: S. **Depends on:** nothing.
 
@@ -508,17 +514,35 @@
 - **Context:** The fire payload arrives wrapped in an untrusted `<routine-fire-payload>` block, so the routine's saved prompt must explicitly opt in to reading it (e.g. "act on the routine-fire-payload block"); needs UX design (input modal) and README prompt guidance. `lib/server/claude-code-service.js` is the extension point (currently posts no body by design).
 - **Effort:** M. **Depends on:** the launcher shipping.
 
-## P2 — Watchdog incident → Claude Code routine escalation
-- **What:** Reuse `claude-code-service` to fire the routine with a settled incident's narrative as the `text` payload ("escalate this incident to Claude Code").
-- **Why:** Platform potential: incidents debug themselves in a cloud session with context attached, instead of an operator copy-pasting log excerpts.
-- **Context:** Deferred from the launcher's CEO review; needs overseer-integration design (which incidents qualify, redaction of the narrative, notification links) and its own review. Blocked on the fire-with-text TODO above for the payload path.
-- **Effort:** M. **Depends on:** fire-with-custom-text.
+## P2 — Watchdog incident → Claude Code routine escalation (fallback path)
+- **What:** Reuse `claude-code-service` to fire the cloud routine on incident escalation — now scoped as the FALLBACK variant, for boxes with a configured routine but no completed local rescue login: once the local login is done, incident auto-spawn (`CLAUDE_CODE_LOCAL_SPAWN_ON_INCIDENT`, shipped with the local rescue session) already warms an on-box session at incident open.
+- **Why:** Platform potential: incidents debug themselves in a session with context attached, instead of an operator copy-pasting log excerpts — and routine-only boxes shouldn't be left out.
+- **Context:** Deferred from the launcher's CEO review. The narrative-payload half (which incidents qualify, redaction of the untrusted narrative text) moved into the "Seed the local rescue session with incident context" entry below — design both launch paths against that one shared redaction/qualification policy. `lib/server/claude-code-service.js` is the extension point (currently posts no body by design); the incident-open hook seam is `onIncidentActivity` in lib/server/watchdog-incidents.js.
+- **Effort:** M. **Depends on:** fire-with-custom-text (payload path); the incident-context seeding entry's shared redaction design.
 
-## P3 — Doctor check for Claude Code routine config shape
-- **What:** Surface the launcher service's `invalid_config` reason (bad host, wrong token prefix, half-configured pair) as a Doctor finding.
-- **Why:** Misconfiguration is currently visible only in the sidebar tooltip and the fire-time error toast; Doctor is where operators look for config drift.
-- **Context:** `createClaudeCodeService().getAvailability()` already returns the exact reason/message — the check is a thin adapter in lib/server/doctor/.
+## P2 — Seed the local rescue session with incident context
+- **What:** When a rescue session spawns for (or is joined by) a watchdog incident, seed it with the incident's narrative — what opened it, key events, redacted log excerpts — instead of arriving blank, via send-keys into the live session or a context file in the session cwd.
+- **Why:** Incident auto-spawn (shipped) delivers a warm but empty session; the dream state is a session already loaded with why it exists.
+- **Context:** Deliberately deferred at implementation time as a prompt-injection surface: incident narratives embed untrusted gateway log content, so seeding needs shared redaction plus an explicit untrusted-content wrapper (the routine path's `<routine-fire-payload>` opt-in pattern), designed together with the P2 fire-with-text payload so both launch paths share one policy. Extension points: `ensureForIncident(context)` in lib/server/claude-code-local/index.js (the incident id already flows through as `spawnedBy`) and the notification-composition seam in lib/server/watchdog.js.
+- **Effort:** M. **Depends on:** fire-with-custom-text (shared payload/redaction design).
+
+## P3 — Doctor check for Claude Code launcher config drift (routine + local)
+- **What:** Surface both launch paths' misconfiguration as Doctor findings: the routine service's `invalid_config` reason (bad host, wrong token prefix, half-configured pair) AND the local rescue path's drift states — enabled-but-`needs_login` (including the credentials-lost-after-backup-restore case: `<rootDir>/claude-code-local/home/` is deliberately excluded from backups, so a restore silently drops the login until the operator re-runs it from the Watchdog card), invalid `CLAUDE_CODE_LOCAL_PERMISSION_MODE`/`CLAUDE_CODE_LOCAL_CWD` values, and the untested-claude-version warning.
+- **Why:** Misconfiguration is currently visible only in the sidebar tooltip, the Watchdog card, and fire-time toasts; Doctor is where operators look for config drift — and re-login-after-restore has no proactive surface at all today.
+- **Context:** `createClaudeCodeService().getAvailability()` and `createClaudeCodeLocalService().getStatusSnapshot()` already return the exact reason/warning strings — the check is a thin adapter in lib/server/doctor/.
 - **Effort:** S. **Depends on:** nothing.
+
+## P3 — Unify PTY spawn under pty-process.js
+- **What:** Refactor lib/server/watchdog-terminal.js onto the shared `spawnInPty` helper (lib/server/pty-process.js) that the rescue session's script(1) fallback hosting and the guided-login PTY already use.
+- **Why:** One PTY primitive instead of two copies of the script(1) harness; deferred mid-feature to keep blast radius off the stable watchdog-terminal surface.
+- **Context:** lib/server/pty-process.js was extracted during the local rescue session work (plan amendment D13); watchdog-terminal.js keeps its own child pattern until this lands.
+- **Effort:** S. **Depends on:** the local rescue session feature landing.
+
+## P3 — Adopt `claude remote-control --headless` when anthropics/claude-code#30447 ships
+- **What:** Swap the rescue spawn from TUI-in-tmux parsing to the upstream headless flag once it exists; the swap is isolated in `buildSpawnCommand()` (lib/server/claude-code-local/index.js). Drop the tmux dependency for the daemon path; keep tmux for the operator attach hint.
+- **Why:** TUI parsing (capture-pane → stripAnsi → URL regex) is the feature's highest-drift surface; a supported headless mode deletes it.
+- **Context:** Track anthropics/claude-code#30447. The version-pinned TUI fixtures (tests/server/fixtures/claude-code-tui/) and the Dockerfile's exact-version claude pin are the artifacts this retires.
+- **Effort:** S. **Depends on:** upstream shipping the flag.
 
 ## P3 — Mobile drawer doesn't close on external nav items
 - **What:** The generic `item.href` branch in `renderNavItem` (lib/public/js/components/sidebar.js) — used by the gated Dashboards link — never closes the mobile drawer, leaving the drawer and overlay covering the app while the new tab opens.
