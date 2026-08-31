@@ -44,7 +44,6 @@ vi.mock("preact/hooks", () => {
 vi.mock("../../lib/public/js/lib/api.js", () => ({
   approveDevice: vi.fn(),
   approvePairing: vi.fn(),
-  fetchDashboardUrl: vi.fn(),
   fetchDevicePairings: vi.fn(),
   fetchPairings: vi.fn(),
   rejectDevice: vi.fn(),
@@ -279,6 +278,33 @@ describe("frontend/use-general-tab", () => {
       hook = renderHook(cronProps);
       expect(hook.state.savingSyncCron).toBe(false);
       expect(hook.state.syncCronChoice).toBe("0 0 * * *");
+    });
+  });
+
+  describe("open dashboard", () => {
+    it("opens the server-side launcher synchronously — no fetch, no loading state", () => {
+      const openSpy = vi.fn();
+      vi.stubGlobal("window", { open: openSpy });
+      try {
+        const hook = renderHook({ statusData: statusWith({}) });
+
+        const result = hook.actions.handleOpenDashboard();
+        // Synchronous: the tab opens in the click's task, not after an await
+        // (Safari popup blockers kill async window.open).
+        expect(result).toBeUndefined();
+        expect(openSpy).toHaveBeenCalledTimes(1);
+        expect(openSpy).toHaveBeenCalledWith(
+          "/gateway/launch",
+          "_blank",
+          "noopener",
+        );
+        // The launcher resolves the token server-side: no dashboard fetch and
+        // no dashboardLoading round-trip remain.
+        expect(hook.state).not.toHaveProperty("dashboardLoading");
+        expect(showToast).not.toHaveBeenCalled();
+      } finally {
+        vi.unstubAllGlobals();
+      }
     });
   });
 

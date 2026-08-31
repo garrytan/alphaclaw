@@ -44,6 +44,7 @@ vi.mock("preact/hooks", () => {
 vi.mock("../../lib/public/js/lib/api.js", () => ({
   fetchEnvVars: vi.fn(),
   saveEnvVars: vi.fn(),
+  fetchOpenclawCapabilities: vi.fn(),
 }));
 
 vi.mock("../../lib/public/js/components/toast.js", () => ({
@@ -139,6 +140,48 @@ describe("frontend/envars component", () => {
     });
     const tree = renderEnvars();
     expect(findAllByType(tree, InlineErrorChip).length).toBe(0);
+  });
+
+  it("Open Secrets opens the launcher's secrets target synchronously — no fetch", () => {
+    const openSpy = vi.fn();
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("window", { open: openSpy });
+    vi.stubGlobal("fetch", fetchSpy);
+    try {
+      // One mock serves both useCachedFetch callers: the env payload for the
+      // page and the capabilities payload that gates the banner.
+      useCachedFetch.mockReturnValue({
+        data: {
+          vars: [],
+          reservedKeys: [],
+          capabilities: { secretsStore: true },
+        },
+        error: null,
+        loading: false,
+        refresh: vi.fn(),
+      });
+
+      const tree = renderEnvars();
+      const openSecrets = collectNodes(tree).find(
+        (vnode) =>
+          vnode.type === "button" &&
+          JSON.stringify(vnode.props.children || "").includes("Open Secrets"),
+      );
+      expect(openSecrets).toBeTruthy();
+
+      openSecrets.props.onclick();
+      expect(openSpy).toHaveBeenCalledTimes(1);
+      expect(openSpy).toHaveBeenCalledWith(
+        "/gateway/launch?to=secrets",
+        "_blank",
+        "noopener",
+      );
+      // The launcher 302 carries the token server-side — the click never
+      // fetches a dashboard URL first.
+      expect(fetchSpy).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it("surfaces a Cancel/reload failure inline near the actions and clears it on the next attempt", async () => {

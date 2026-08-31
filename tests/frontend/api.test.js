@@ -1018,7 +1018,6 @@ describe("frontend/api endpoint wrapper coverage", () => {
       "/api/watchdog/memory",
       "PUT",
     ],
-    ["fetchDashboardUrl", [], "/api/gateway/dashboard", undefined],
     ["fetchAlphaclawVersion", [], "/api/alphaclaw/version", undefined],
     ["fetchAlphaclawVersion", [true], "/api/alphaclaw/version?refresh=1", undefined],
     ["updateAlphaclaw", [], "/api/alphaclaw/update", "POST"],
