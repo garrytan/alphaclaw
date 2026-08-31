@@ -35,6 +35,34 @@ describe("admin-manifest engine", () => {
     ).toBe("restart");
   });
 
+  it("escalates agent notification-toggle writes to dangerous (audit-gate survival)", () => {
+    const op = manifest.findOp("PUT", "/api/watchdog/settings");
+    expect(op?.id).toBe("watchdog.settings.update");
+    // autoRepair alone stays a routine write…
+    expect(manifest.resolveTier(op, { body: { autoRepair: true } })).toBe(
+      "write",
+    );
+    // …but touching either notification toggle requires a dangerous-tier
+    // confirm: the agent must not silence the operator's alert channel
+    // without an operator-approved code (the confirm delivery is
+    // audit-class, so the gate survives the very setting under attack).
+    expect(
+      manifest.resolveTier(op, { body: { notificationsEnabled: false } }),
+    ).toBe("dangerous");
+    expect(
+      manifest.resolveTier(op, {
+        body: { autoRepair: true, notificationsVerbose: false },
+      }),
+    ).toBe("dangerous");
+  });
+
+  it("tier resolver survives primitive JSON bodies instead of throwing", () => {
+    const op = manifest.findOp("PUT", "/api/watchdog/settings");
+    for (const body of [true, 1, "x", null, undefined, ["a"]]) {
+      expect(manifest.resolveTier(op, { body })).toBe("write");
+    }
+  });
+
   it("has EXACTLY one matching op per concrete (method, path) — no pattern collisions", () => {
     // Literal-vs-:param collisions are the failure this guards (A24). For each
     // op, its own concrete path must resolve to exactly one op.

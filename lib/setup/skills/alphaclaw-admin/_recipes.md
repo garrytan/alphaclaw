@@ -9,7 +9,7 @@ Read `GET /api/env` first to see which keys exist (values are masked); include e
 
 **Check upgrade status:** `alphaclaw admin GET /api/openclaw/channel` (current build/channel) and `GET /api/status --summary`.
 
-**Mute watchdog notifications:** `alphaclaw admin PUT /api/watchdog/settings --data '{"notificationsEnabled":false}'` (takes effect immediately, no restart).
+**Mute watchdog notifications** (dangerous-tier — silencing the operator's alert channel needs a one-time confirm code): `alphaclaw admin PUT /api/watchdog/settings --data '{"notificationsEnabled":false}' --confirm <code>` (takes effect immediately, no restart). The `notificationsVerbose` toggle escalates the same way; `autoRepair` alone stays write-tier.
 
 **Add a channel account:** `alphaclaw admin POST /api/channels/accounts --data '{...}'` — returns a 202 with an `operationId`; poll `GET /api/operations/<id>/events`. Restart required after.
 

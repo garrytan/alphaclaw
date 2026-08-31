@@ -5,6 +5,91 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.9.54] - 2026-08-31
+
+Notifications grow a volume dial and lose their blind spots: a new Verbose
+toggle keeps chat quiet without hiding real problems, the gateway finally
+says when it goes DOWN (not just when it comes back), and every automatic
+fix AlphaClaw performs — config migrations, autotune rewrites, stray-file
+repairs, auth restores — now announces itself. The master Notifications
+toggle becomes truthful: off now means off for everything, with the agent
+audit trail as the one deliberate exception.
+
+### Added
+
+- **Verbose notification toggle (default on).** A third switch on the
+  Watchdog settings card — "Verbose" vs "Important only". Important-only
+  mode suppresses informational notices (gateway back online, channels
+  resumed, activation verified, update progress, scheduled doctor scans,
+  topic-discovery digests, healthy overseer verdicts, config-change retry
+  progress, the AlphaClaw update-available notice) while problems,
+  failures, and action-taken repairs still arrive. Persisted as
+  `WATCHDOG_NOTIFICATIONS_QUIET`; exposed via `GET/PUT
+/api/watchdog/settings` (`notificationsVerbose`) and the agent-admin
+  manifest; a helper line states the quiet-mode contract.
+- **"Gateway went down" alerts.** A single unexpected gateway exit now
+  notifies once per incident with exit/signal-aware copy — previously only
+  the third crash (crash loop) said anything, so you heard "back online"
+  without ever hearing "went offline".
+- **Every server-phase auto-fix now notifies:** successful automatic
+  settings/database migrations (previously only failures spoke), the
+  reconciler's machinery-error gateway hold, autotune's openclaw.json
+  concurrency writes and disable-reverts (one composed message per apply;
+  container downsizes get an urgent OOM-pressure warning), pin
+  re-activation after an interrupted activation, quarantined-config
+  recovery, stray legacy exec-approvals repair, team-mode auth
+  auto-restore, and config-change gateway retries. Boot-loopable fixes
+  carry stable outbox dedupe ids, so a boot loop collapses into one alert
+  instead of a storm (user-initiated one-shots such as team-mode enable
+  failures are deliberately timestamp-keyed: each attempt is a new event).
+
+### Changed
+
+- **Notifications off now means off.** The master toggle previously gated
+  only a handful of alert paths — upgrade failures, migration holds,
+  rollbacks and ~30 other sources ignored it. A central delivery policy now
+  enforces both toggles at the outbox (enqueue AND delivery time — queued
+  alerts are re-checked before they land: master-toggle-off holds them for
+  redelivery when you re-enable, within the outbox's 48h window, while
+  Important-only drops informational notices for good), with documented
+  exceptions: the Test button, agent-admin audit notices, and the boot
+  webhook for unbootable boxes.
+- **The agent can't silence you quietly.** An agent-admin request touching
+  either notification toggle now escalates to a dangerous-tier operator
+  confirm, and agent-admin audit notices are exempt from both toggles — a
+  semi-trusted agent can never mute the announcement of its own change.
+- **Crash-loop alerts name their remediation** ("use Retry (or Repair) from
+  the Watchdog tab") using the gateway card's own action vocabulary, and
+  exit copy is signal-aware everywhere (`signal SIGKILL` instead of
+  `unknown`).
+
+### Fixed
+
+- Suppressed notifications log a `skipped` event row instead of a spurious
+  `failed`; suppression log lines carry the event id only, never message
+  content.
+- Concurrent per-field settings saves can no longer lose each other's
+  change (the env write now holds a file lock across the read-modify-write).
+- Mixed settings payloads with a mistyped field are rejected instead of
+  silently dropping the bad field.
+- Autotune's resize notices keep their dedupe ids end-to-end (capacity
+  flapping no longer duplicates alerts), and boot/settings retune notices
+  ride the durable outbox so they survive restarts.
+- A brief notifications-off window can no longer destroy pending alerts:
+  flush-time master-toggle suppression holds queued events for redelivery
+  instead of dropping them, and a terminally suppressed outbox entry
+  revives on a fresh enqueue of the same id — one quiet window used to
+  permanently swallow every future re-notify of a stable id. Terminal
+  suppressions persist their reason across restarts.
+- The team-mode operator-lockout path (auth enable failed AND the auto-
+  restore failed) now alerts loudly — it was the one silent branch — and
+  exception snippets in alert copy are sanitized (newlines, backticks, and
+  links stripped; length capped).
+- Config-retry notices key to the latch episode, so an editor autosave
+  burst produces one notice instead of one per save, and machinery-hold
+  alerts normalize volatile reason fragments (paths, digits) so a boot
+  loop can't mint a fresh alert each iteration.
+
 ## [0.9.53] - 2026-08-31
 
 The sidebar's Open Claude Code button can now land you in a Claude Code
@@ -16,6 +101,7 @@ on the actual machine. The whole flow was driven live against a real
 claude.ai login before landing.
 
 ### Added
+
 - **Local rescue session launcher (local-first, routine fallback).** One
   click starts (or rejoins) a Claude Code instance on this box in detached
   tmux and navigates straight to its claude.ai/code session; the session
@@ -47,6 +133,7 @@ claude.ai login before landing.
   script(1) hosting or the routine fallback.
 
 ### Fixed
+
 - **The rescue session now actually reaches "running" on a logged-in box.**
   Live QA with a real claude.ai login caught three gaps the same day:
   `claude remote-control` exits (rather than prompting) on an untrusted
@@ -57,6 +144,7 @@ claude.ai login before landing.
   the per-session form. Each screen is pinned as a captured fixture.
 
 ### Changed
+
 - **Ship-review hardening across the rescue feature.** The five
   `CLAUDE_CODE_LOCAL_*` keys are agent-protected (an agent env write now
   requires a dangerous-tier operator confirm, matching the routine keys);
@@ -75,6 +163,7 @@ stop (and says so honestly when it can't), and every stop, interruption, and
 ambiguous outcome is recorded visibly in the conversation — across reloads.
 
 ### Added
+
 - **Durable send queue.** Typing while the agent is streaming — or while
   disconnected — queues the message visibly ("Queued") and auto-sends when the
   session is free; it never silently vanishes. Queued/failed messages survive
@@ -112,6 +201,7 @@ ambiguous outcome is recorded visibly in the conversation — across reloads.
   viewports with screen-reader-announced streaming.
 
 ### Fixed
+
 - A hard-to-hit race could skip "Limited mode" detection against an older
   server when the connection was slow to open — retries there could have
   duplicated a message; detection now arms from the moment the socket opens
@@ -156,6 +246,7 @@ ambiguous outcome is recorded visibly in the conversation — across reloads.
   auto-attached to. Remaining accepted residuals are logged in TODOS.md.
 
 ### Changed
+
 - The chat bridge (`lib/server/chat-ws.js`) was decomposed into
   `lib/server/chat/` and the 1116-line chat route into
   `lib/public/js/components/chat/` (pure, unit-tested modules for run state,
@@ -172,6 +263,7 @@ file, the true cause, and the fix — and the ~20 other places that swallowed
 an error or rendered a bare "Error" pill got the same treatment.
 
 ### Fixed
+
 - **The Doctor no longer gives advice that can't work when prompt hardening
   is blocked by a rejected read.** An escaping symlink or a >2 MiB hardening
   file used to be misdiagnosed as "missing file" ("restart — the resync
@@ -200,6 +292,7 @@ an error or rendered a bare "Error" pill got the same treatment.
   hover-only native tooltip becomes the shared keyboard-reachable one.
 
 ### Added
+
 - **A "Prompt hardening" card on the General tab for problem states** (the
   healthy state keeps the compact badge): an impact anchor ("Safety rules are
   not reaching the agent."), per-file rows with the specific cause and a
@@ -222,6 +315,7 @@ an error or rendered a bare "Error" pill got the same treatment.
   sanitized against log forging).
 
 ### Changed
+
 - **Bare warning/danger badges across the flagged cohort now name their
   condition and carry their remedy** via the new shared TooltipBadge
   (visible label stays the
@@ -240,6 +334,7 @@ Drift Doctor's "Ask Agent to Fix" now actually delivers to the chat you pick
 raised, configurable, and honestly reported.
 
 ### Fixed
+
 - **"Ask Agent to Fix" silently never delivered to most DMs.** The reply
   target derived from hand-rolled Telegram-only regexes: account-scoped keys
   (`…telegram:default:direct:…`), suffixed keys (`…:heartbeat`), bare groups,
@@ -263,6 +358,7 @@ raised, configurable, and honestly reported.
   own agent.
 
 ### Added
+
 - **Configurable scan caps** (Doctor settings → Scan limits): defaults raised
   to 200k files / 50MB per file (was 50k/10MB), bounds 1k–500k / 1–100MB,
   blank = default; changes re-scan immediately, no restart. The partial-scan
@@ -271,7 +367,7 @@ raised, configurable, and honestly reported.
 - **Honest fix-dispatch lifecycle:** the modal filters to deliverable + main
   sessions, shows a "delivers to chat / runs in main thread" hint before
   send, Telegram DM rows are peer-qualified ("Direct message · 1050"), the
-  toast says delivery was *requested* (never "delivered"), and working cards
+  toast says delivery was _requested_ (never "delivered"), and working cards
   carry a persisted dispatch record ("delivery requested → telegram · 1050" /
   "dispatch failed").
 - **Scan coverage forensics:** every doctor run persists the caps + stats its
@@ -288,6 +384,7 @@ raised, configurable, and honestly reported.
   refresh).
 
 ### Changed
+
 - **One-time full re-analysis after upgrade:** workspace fingerprints changed
   (tool-owned directories like `dist`, `.venv`, `__pycache__`, `.cache`,
   `coverage` are now ignored; capped scans fold exclusion counters into the
@@ -306,6 +403,7 @@ server-side, and model pricing/catalog gaps close — plus two security
 hardenings found while verifying prior waves.
 
 ### Added
+
 - **MiniMax (China) support.** `minimax-cn` model selections reuse your
   existing MiniMax API key, six MiniMax models (M2.7, M2.7-highspeed, M3 —
   both regions) ship in the cold-start catalog via a new curated overlay
@@ -318,6 +416,7 @@ hardenings found while verifying prior waves.
   runtime-deps preflight now also runs on Signal-only boxes.
 
 ### Changed
+
 - **Prompt guidance is install-aware.** Durable-storage rules render the
   real managed state directory — env-var-first
   (`$OPENCLAW_STATE_DIR (this install: …)`) — instead of the Docker-only
@@ -331,6 +430,7 @@ hardenings found while verifying prior waves.
   via `gpt-5.4` instead of `gpt-5`.
 
 ### Fixed
+
 - **`openclaw doctor --fix` is readable in the Watchdog terminal.** The PTY
   was spawned with a 0×0 window (Node TUIs saw `isTTY=true, columns=0` and
   rendered one glyph per line); the browser's fitted size now applies at
@@ -355,7 +455,7 @@ hardenings found while verifying prior waves.
   `ALPHACLAW_GIT_ASKPASS_PATH` override is written exclusively (`wx`).
 - **A boot or env-save sync can never auto-remove a channel that has no
   managed env token** — the removal branch used to `channels remove
-  --delete` any enabled channel without a saved token. WhatsApp's lifecycle
+--delete` any enabled channel without a saved token. WhatsApp's lifecycle
   is unchanged and now pinned by a regression test.
 - **Externally-configured channels survive fresh onboarding**: non-managed
   `channels.*` entries are snapshotted before `openclaw onboard` rewrites
@@ -376,6 +476,7 @@ packages — and can watch your workspace on a schedule instead of waiting for
 you to click Run.
 
 ### Added
+
 - **Scheduled Drift Doctor scans (opt-in).** A Doctor-tab toggle runs a scan
   automatically when the workspace goes stale with meaningful changes, when
   your environment changes (budgets, hooks, git-sync, OpenClaw version), or
@@ -396,7 +497,7 @@ you to click Run.
   invalid or starved bootstrap extras, MEMORY.md over budget, leftover
   BOOTSTRAP.md, skills-prompt bloat, and git sync disabled.
 - **OpenClaw's own doctor, bridged in.** Scans run `openclaw doctor --lint
-  --json` alongside the LLM analysis and surface its findings as cards
+--json` alongside the LLM analysis and surface its findings as cards
   (capped, deduplicated, and suppressed where Drift Doctor already covers
   the same ground).
 - **Verified restart handoff.** When a supervised gateway exits because
@@ -405,6 +506,7 @@ you to click Run.
   instead of counting it as a crash.
 
 ### Changed
+
 - **Doctor analysis upgraded to the doctor-v2 contract.** Corrected budgets
   (60k total, not 150k), real truncation behavior (75/25 with visible
   markers), MEMORY.md recognized as injected, per-version file ordering, and
@@ -422,6 +524,7 @@ you to click Run.
   re-checks your environment, config, and OpenClaw's own doctor findings.
 
 ### Fixed
+
 - **Exit-78 no longer always means "config error".** A healthy-incumbent
   step-aside (two gateways racing at boot) is now verified with a health
   probe and treated as benign instead of latching restarts and triggering
@@ -454,10 +557,11 @@ locale's expected format — "Mar 10, 2026, 7:45 PM" in the US, "10.03.2026,
 19:45" in Germany — from one shared formatter family instead of six competing
 hand-rolled dialects. Raw UTC ISO strings no longer leak into tooltips or the
 watchdog console, and two genuine timezone bugs are fixed: cron trend charts
-bucketed days at the *server's* midnight, and the Doctor tab served a frozen
+bucketed days at the _server's_ midnight, and the Doctor tab served a frozen
 "(12 minutes ago)" phrase forever.
 
 ### Added
+
 - **One time-format dialect**: `lib/public/js/lib/format.js` now carries the
   full family — locale datetime (medium date + short time), date-only,
   time-only (optional seconds), datetime + numeric UTC offset, datetime
@@ -477,7 +581,7 @@ bucketed days at the *server's* midnight, and the Doctor tab served a frozen
   "Mar 10, 2026, 7:45:02 PM GMT-7 · 2026-03-10T02:45:02.114Z" — local time
   with the offset plus the exact UTC instant, instead of a raw ISO string.
 - **Browser-timezone cron trend buckets**: `/api/cron/jobs/:id/trends` now
-  buckets 7d/30d ranges at *your* midnight (via the `x-client-timezone`
+  buckets 7d/30d ranges at _your_ midnight (via the `x-client-timezone`
   header every request already carries), with a DST-safe day-start algorithm
   (skipped and repeated midnights handled), canonicalized and size-capped
   timezone caches, and the effective timezone echoed in the response.
@@ -495,6 +599,7 @@ bucketed days at the *server's* midnight, and the Doctor tab served a frozen
   dual-register tooltips.
 
 ### Changed
+
 - All ~75 timestamp render sites (gateway, watchdog, upgrade, cron, usage,
   webhooks, team, telegram, doctor, chat, buzz, update modal, git panel) use
   the shared formatters; ambient timestamps drop seconds by default while
@@ -508,6 +613,7 @@ bucketed days at the *server's* midnight, and the Doctor tab served a frozen
   wording is now consistent everywhere (one threshold table, floor rounding).
 
 ### Fixed
+
 - Doctor no longer serves a frozen "(12 minutes ago)" phrase written at scan
   time: new summaries omit it and legacy rows are scrubbed on read.
 - Future timestamps no longer collapse to "just now" where a direction
@@ -532,10 +638,10 @@ bucketed days at the *server's* midnight, and the Doctor tab served a frozen
   trends endpoint also accepts a `?timeZone=` override and marks its
   response `Vary: x-client-timezone` for HTTP caches.
 
-
 ## [0.9.46] - 2026-08-29
 
 ### Added
+
 - **Resource autotune (`autotune.enabled`, default ON).** AlphaClaw now reads
   the container's actual capacity (cgroup v1/v2 memory limit, CPU quota,
   disk, GPU presence — with host fallback and a container-of-unknown-size
@@ -562,14 +668,15 @@ bucketed days at the *server's* midnight, and the Doctor tab served a frozen
   reverted, and a no-change pass never round-trips your `openclaw.json`.
 
 ### Changed
+
 - The OpenAI-compatible `/v1` endpoints now reject requests without a bearer
   token before reading the request body, so unauthenticated traffic can no
   longer occupy request-body memory at all.
 
 ### Fixed
+
 - The stale `package-lock.json` version left behind by the 0.9.42 release is
   synced.
-
 
 ## [0.9.45] - 2026-08-29
 
@@ -580,6 +687,7 @@ unifies 0.9.43's apply-time migration gate with a new fail-closed boot
 reconciler, so there is one migration engine with one recovery story.
 
 ### Fixed
+
 - **Pre-update backup no longer races the live gateway (#18)**: downgrades,
   dev switches, and cross-channel updates now pause the gateway briefly for
   a consistent backup (the confirm dialog says so), with a retry ladder for
@@ -623,6 +731,7 @@ reconciler, so there is one migration engine with one recovery story.
   validator output is secret-redacted.
 
 ### Changed
+
 - The 0.9.43 migration hard gate now runs inside the fail-closed reconciler:
   every gate decline — kill switch, missing snapshot, no compatible revert
   target — holds the gateway instead of continuing on the rejected build,
@@ -630,6 +739,7 @@ reconciler, so there is one migration engine with one recovery story.
   wait page tracks step progress.
 
 ### Added
+
 - **Container upgrade test tier**: a real Docker container running the
   pinned stable OpenClaw is upgraded to the newest beta through the real
   browser UI while session files churn, then must survive both a container
@@ -641,7 +751,6 @@ reconciler, so there is one migration engine with one recovery story.
 - `docs/upgrade-troubleshooting.md`: a runbook for held gateways, blocked
   stale restores, quiesced backups, and their exact recovery commands.
 
-
 ## [0.9.44] - 2026-08-29
 
 The sidebar gains an "Open Claude Code" launcher: one click starts a fresh
@@ -649,6 +758,7 @@ Claude Code cloud session on claude.ai and opens it in a new tab — or, until
 you configure it, simply takes you to claude.ai/code.
 
 ### Added
+
 - **Open Claude Code launcher** (Monitoring section of the sidebar): when a
   Claude Code routine fire URL and per-routine token are configured in Envars
   (`CLAUDE_CODE_ROUTINE_URL`, `CLAUDE_CODE_ROUTINE_TOKEN`), clicking the item
@@ -676,6 +786,7 @@ is now fixed, plus the exec-approvals regression that took down all channels
 on sqlite-era OpenClaw.
 
 ### Fixed
+
 - **Migration hard gate (#21 bug 2, the critical one)**: a failed boot-time
   `doctor --fix` on a freshly applied build now aborts BEFORE that build ever
   runs — the previous version is re-activated, its pre-migration settings are
@@ -755,6 +866,7 @@ readable stories, and an optional AI overseer that reviews each settled
 incident and tells you whether anything still needs your attention.
 
 ### Added
+
 - **Live status narrative**: a card under the Gateway card that says in plain
   language what is happening right now — "Degraded for 6m — probe returned
   HTTP 503. Repair attempt 1 of 2 running. Auto-rollback in 3m 48s if not
@@ -794,6 +906,7 @@ incident and tells you whether anything still needs your attention.
   bars, with warning colors at sustained thresholds.
 
 ### Changed
+
 - Watchdog cards reordered by usefulness: status → narrative → overseer →
   incidents → backup → console → resources → settings.
 - The auto-repair toggle now tracks the live status stream, so a change made
@@ -805,6 +918,7 @@ incident and tells you whether anything still needs your attention.
   bare code.
 
 ### Fixed
+
 - Relative times and countdowns pause while the tab is hidden and stay
   correct under clock skew in either direction.
 - Skipped health probes during grace/restart windows can no longer close an
@@ -812,9 +926,11 @@ incident and tells you whether anything still needs your attention.
 - Incident review requests return honest statuses (404 unknown incident,
   429 rate-limited, 503 reviewer infrastructure unavailable) with
   human-readable messages.
+
 ## [0.9.41] - 2026-08-29
 
 ### Added
+
 - **Agent Administration (`features.agentAdmin`, default OFF).** The OpenClaw
   agent can now administer this AlphaClaw deployment on behalf of admin users —
   env vars, channels, agents, cron, webhooks, models, updates, watchdog, team —
@@ -835,6 +951,7 @@ incident and tells you whether anything still needs your attention.
   callers; and `alphaclaw.json` is git-synced (README parity).
 
 ### Security
+
 - The Agent Administration bearer path is opt-in per call site: it authorizes
   only Express `/api` requests, never WebSocket upgrades (watchdog terminal,
   chat) or the human-only cookie surfaces. It uses a separate rate-limit scope
@@ -853,6 +970,7 @@ loading/error/empty states conflated — and every instance is fixed on shared
 primitives.
 
 ### Added
+
 - **`useSavedSetting`** (`lib/public/js/hooks/use-saved-setting.js`): the one
   persisted-setting loop — optimistic apply with loud inline revert,
   generation-guarded hydration (an in-flight GET can never clobber a user
@@ -873,6 +991,7 @@ primitives.
   (`tests/browser/upgrade-ui-smoke.sh`).
 
 ### Fixed
+
 - **Overseer toggle** (the founding bug): flips instantly with a "Saving..."
   state and reverts loudly inline on failure; stale settings responses can no
   longer overwrite the operator's choice; the card renders immediately instead
@@ -921,6 +1040,7 @@ primitives.
   auto-repair change made meanwhile from another tab or the CLI.
 
 ### Security
+
 - Error-envelope documentation links only render as clickable anchors for
   http(s) URLs — a hostile `docsUrl` in an upstream error can no longer
   inject `javascript:` links into the UI.
@@ -929,7 +1049,6 @@ primitives.
   overseer runs get the credential. Concurrent cold probes are also
   single-flighted.
 
-
 ## [0.9.39] - 2026-08-29
 
 The gateway no longer crash-loops when a beta-only config key meets a stable
@@ -937,6 +1056,7 @@ build — and when a config error does stop it, AlphaClaw now troubleshoots and
 repairs it automatically.
 
 ### Fixed
+
 - **Beta stripe no longer poisons stable boots.** The Control-UI environment
   stripe (`gateway.controlUi.environment`) was written whenever the release
   channel said beta/dev, even when a fallback (missing overlay, failed
@@ -948,6 +1068,7 @@ repairs it automatically.
   behind by an older AlphaClaw is removed on the next boot automatically.
 
 ### Added
+
 - **Gateway startup medic (default on).** When the gateway exits with a fatal
   configuration error, AlphaClaw now repairs it instead of only pausing
   restarts: it removes config keys the gateway itself rejected (managed keys
@@ -971,6 +1092,7 @@ update pipeline — merged on top of 0.9.37's unified gateway-state,
 streamed-restart, and never-freeze work.
 
 ### Added
+
 - **Team access with member accounts.** Share one AlphaClaw with named
   teammates: each person signs in with their own email and password, and
   OpenClaw sees who's who — attributed messages, per-person profiles, and a
@@ -1020,6 +1142,7 @@ streamed-restart, and never-freeze work.
   restart-handoff awareness and control-plane rate-limit backoff.
 
 ### Changed
+
 - Trusted-proxy identity now carries the member's **email** (matching the
   gateway allowlist and per-identity permissions), injected — and spoofable
   headers stripped — in one shared layer covering HTTP proxying, WebSocket
@@ -1034,6 +1157,7 @@ streamed-restart, and never-freeze work.
   logs, like applies.
 
 ### Fixed
+
 - A fresh install's first cross-channel switch is no longer blocked by the
   backup guard when there is nothing to back up yet (live-verified against
   the real beta).
@@ -1050,6 +1174,7 @@ streamed-restart, and never-freeze work.
   left off instead of restarting from the beginning.
 
 ### Security
+
 - Team members can no longer read stored provider API keys or OAuth tokens
   (the model-credentials endpoints are admin-only).
 - Turning team access off now fully ends member access: member sessions and
@@ -1068,6 +1193,7 @@ streamed-restart, and never-freeze work.
 ## [0.9.37] - 2026-08-28
 
 ### Added
+
 - **One honest gateway status.** The Gateway card now shows a single unified
   state instead of separate (and sometimes contradictory) gateway/watchdog
   rows. The vocabulary, in the order the card resolves it:
@@ -1085,9 +1211,9 @@ streamed-restart, and never-freeze work.
   - **Channels paused** — the gateway's crash-loop breaker suppressed channel
     autostart; one-click Resume.
   - **Running** — up, healthy, with real uptime.
-  Every state carries a plain-language reason, the recommended action, and a
-  glossary explainer. Alerts (Telegram/Discord/Slack/WhatsApp) use the same
-  vocabulary, so what pings you matches what the page says.
+    Every state carries a plain-language reason, the recommended action, and a
+    glossary explainer. Alerts (Telegram/Discord/Slack/WhatsApp) use the same
+    vocabulary, so what pings you matches what the page says.
 - **Restarts you can watch.** Restarting the gateway streams live steps
   (checking plugins → stopping → starting → waiting for health check) with
   honest outcomes: success reports measured downtime; failure shows the
@@ -1103,6 +1229,7 @@ streamed-restart, and never-freeze work.
   reaching you before you need it.
 
 ### Changed
+
 - **Nearly everything is faster.** The server no longer freezes itself:
   status checks, restarts, and boots run off the event loop; the
   logs/watchdog page queries are indexed; the Upgrade page catalog serves
@@ -1116,7 +1243,7 @@ streamed-restart, and never-freeze work.
 - **API compatibility window:** `/api/status` keeps the legacy
   `gateway`/`watchdogStatus` fields for one minor release as projections of
   the new `state` object (they can no longer disagree). `POST
-  /api/gateway/restart` keeps blocking semantics by default; new clients
+/api/gateway/restart` keeps blocking semantics by default; new clients
   opt into `?async=1` + the streamed operation. Both defaults flip next
   minor.
 - **Rollback implications:** automatic version rollback still arms after
@@ -1125,6 +1252,7 @@ streamed-restart, and never-freeze work.
   attribution in the incident feed ("automatic repair" vs manual restart).
 
 ### Fixed
+
 - **Operations can no longer collide.** Channel updates, gateway restarts,
   channel saves, and the watchdog's own recovery all serialize through one
   lifecycle lock in both directions — an update can't kill a live restart,
@@ -1146,6 +1274,7 @@ streamed-restart, and never-freeze work.
   openclaw.json by any writer are picked up immediately.
 
 ### Removed
+
 - `GET /api/gateway-status` (unused; it spawned a blocking 15s CLI status
   call if ever hit). Use `GET /api/status` — the unified `state` object
   carries everything it reported and more.
@@ -1158,6 +1287,7 @@ gateway restarts, updates install, or the workspace grows. Verified on a
 and proxied API writes no longer hang.
 
 ### Fixed
+
 - **Proxied JSON writes no longer hang.** The admin server consumed request
   bodies before proxying, so every JSON POST/PUT to gateway APIs stalled
   until timeout. Proxied paths now stream bodies through untouched, with a
@@ -1216,6 +1346,7 @@ and proxied API writes no longer hang.
   directory contract both handle correctly.
 
 ### Added
+
 - **"AlphaClaw is updating" page during restarts and updates.** The port
   answers immediately at boot — browsers get a human auto-refreshing page,
   platforms get 200 `{status:"updating"}` health checks so they don't
@@ -1234,6 +1365,7 @@ and proxied API writes no longer hang.
   flags).
 
 ### Changed
+
 - Proxy engine swapped from the unmaintained `http-proxy` to `http-proxy-3`
   (pinned 1.20.10), with a 30s fail-fast timeout for hung gateways that
   disarms once a response starts streaming.
@@ -1246,7 +1378,6 @@ and proxied API writes no longer hang.
   terminal → service disposal → log flush) within a 10s deadline; SIGTERM,
   self-update restarts, and crash exits all route through the same path.
 
-
 ## [0.9.35] - 2026-08-27
 
 Adopt the OpenClaw 2026.8.1 beta line and rebuild the upgrade experience:
@@ -1254,6 +1385,7 @@ a narrated, durable, admin-notified update lifecycle, an optional AI
 overseer, and a default-off team web view.
 
 ### Added
+
 - **Upgrade page overhaul.** Clicking a release channel now persists
   immediately (spinner while saving, a persistent inline error chip on
   failure — never a silent snap-back). A standing mismatch banner shows
@@ -1307,6 +1439,7 @@ overseer, and a default-off team web view.
   catalog next to the other GPT-5.6 entries.
 
 ### Changed
+
 - Cross-channel, prerelease, and downgrade applies now HARD-require a
   verified backup (an artifact must actually appear, not just exit 0); the
   run records the exact backup. Same-channel upgrades stay soft-gated but
@@ -1318,6 +1451,7 @@ overseer, and a default-off team web view.
   every beta feature hides behind a fail-closed version gate.
 
 ### Security
+
 - The unauthenticated webhook/oauth proxy paths now strip client-supplied
   identity and forwarded-evidence headers before forwarding to the gateway,
   matching the authenticated proxy boundaries (spoofing guard for
@@ -1329,6 +1463,7 @@ overseer, and a default-off team web view.
   covers file reads.
 
 ### Fixed
+
 - Hot request paths (proxy identity resolution, subprocess spawns, the
   OpenAI-compat bridge) cache config/state reads by mtime instead of
   re-parsing per request.
@@ -1341,6 +1476,7 @@ overseer, and a default-off team web view.
 ## [0.9.34] - 2026-08-26
 
 ### Added
+
 - **OpenClaw release channels (stable / beta / dev).** Pick a channel and a
   version from a new **Upgrade** page and switch with one click — including
   building OpenClaw's `main` branch from source the same way its dev channel
@@ -1365,6 +1501,7 @@ overseer, and a default-off team web view.
   OpenClaw build — scheduled in CI to catch upstream drift.
 
 ### Changed
+
 - The gateway now runs with `OPENCLAW_NO_AUTO_UPDATE=1`; version changes go
   through the Upgrade page only, and out-of-band changes are detected and
   reverted at the next restart.
@@ -1374,6 +1511,7 @@ overseer, and a default-off team web view.
   isolated HOME and a secret-free environment.
 
 ### Fixed
+
 - Version comparisons now rank hotfix suffixes (`2026.7.1-2`) above their
   base release and prereleases (`-beta.N`) below it, consistently across the
   server and the UI.
@@ -1384,36 +1522,44 @@ overseer, and a default-off team web view.
   pinned version.
 
 ### Removed
+
 - Stale `pnpm-lock.yaml` (pinned an old OpenClaw; CI and installs are
   npm-only).
 
 ## [0.9.33] - 2026-07-21
 
 ### Fixed
+
 - Cron message delivery no longer logs a spurious warning.
 
 ## [0.9.32] - 2026-07-21
 
 ### Added
+
 - Cron jobs are restored from OpenClaw's SQLite store after a restart.
 
 ### Changed
+
 - Test coverage raised from 71% to 99.6% of lines (2,077 tests).
 
 ## [0.9.31] - 2026-07-16
 
 ### Changed
+
 - OpenClaw pinned to 2026.7.1-2 (hotfix) and the watchdog hardened for the
   OpenClaw 2026.7.1 gateway lifecycle contract.
 
 ### Fixed
+
 - Webhook mappings created before OpenClaw 7.1 get IDs backfilled so they
   keep working after the upgrade.
 
 ## [0.9.30] - 2026-07-16
 
 ### Added
+
 - OpenClaw 2026.7.1 support and GPT-5.6 model support.
 
 ### Fixed
+
 - Onboarding writes `ALPHACLAW_ROOT_DIR` into the generated system cron file.

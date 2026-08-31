@@ -578,6 +578,46 @@ describe("server/openclaw-channel-sync", () => {
       );
     });
 
+    it("notifies when the pin is re-activated from its overlay after an interrupted activation", async () => {
+      const { sync, store, installDir, notify } = createHarness({
+        pin: "1.0.0",
+        channel: "stable",
+        installedVersion: "1.0.0",
+        // No sentinel: a crash mid-copy left a plausible package.json…
+      });
+      store.updateState((s) => {
+        s.pinVersion = "1.0.0";
+        return s;
+      });
+      expect(saveOverlayFixture(store, "1.0.0")).toEqual({ ok: true });
+      // …over a gutted tree: remove dist so pinTreeLooksComplete() is false.
+      fs.rmSync(path.join(installDir, "node_modules", "openclaw", "dist"), {
+        recursive: true,
+        force: true,
+      });
+
+      const result = sync.syncAtBoot();
+      await flushAsync();
+
+      expect(result.ok).toBe(true);
+      expect(store.readSentinel({ installDir })).toEqual(
+        expect.objectContaining({ version: "1.0.0" }),
+      );
+      // Previously a warnings.push that flushBootNotifications drops whenever
+      // any notification is queued the same boot — now a real notice with a
+      // day-bucketed dedupe id (boot loops collapse into one alert).
+      const call = notify.mock.calls.find((entry) =>
+        String(entry?.[0] || "").includes(
+          "re-activated from its overlay after an interrupted activation",
+        ),
+      );
+      expect(call).toBeTruthy();
+      expect(call[1]).toEqual(
+        expect.objectContaining({ eventType: "recovery" }),
+      );
+      expect(call[1].id).toMatch(/^pin-reactivated-1\.0\.0-\d{8}$/);
+    });
+
     it("writes the dev bin shim when HEAD matches, and falls back on mismatch", () => {
       const harness = createHarness({
         pin: "1.0.0",

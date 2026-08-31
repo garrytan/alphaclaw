@@ -3158,11 +3158,13 @@ describe("server/doctor-service", () => {
         await vi.runOnlyPendingTimersAsync();
         expect(meta.get("last_auto_run")?.outcome).toBe("ran");
         // Completion notification for the scheduled run.
-        expect(
-          notify.mock.calls.some(([message]) =>
-            message.includes("Scheduled Drift Doctor scan finished"),
-          ),
-        ).toBe(true);
+        const scanCall = notify.mock.calls.find(([message]) =>
+          message.includes("Scheduled Drift Doctor scan finished"),
+        );
+        expect(scanCall).toBeTruthy();
+        // Routine scan completions are informational: Important-only mode
+        // suppresses them (plan Phase-3 pin list); P0 notices stay important.
+        expect(scanCall[1].verbose).toBe(true);
 
         // Immediately after: throttled by the 6h minimum interval.
         meta.set("last_env_signature", "another-signature");

@@ -209,6 +209,16 @@ describe("server/watchdog autotune OOM classification", () => {
       expect(freeLock.tryAcquire).toHaveBeenCalledWith("autotune_resize");
       expect(release).toHaveBeenCalled();
       expect(getMachineProfile().memory.limitBytes).toBe(8192 * kMbLocal);
+      // The resize retune's outbox dedupe id must survive the watchdog's
+      // notify seam end-to-end (pre-landing review: the seam used to drop
+      // every opts field except the verbose flag, so capacity flapping
+      // delivered duplicates instead of deduping).
+      const retuneCall = free.notifier.notify.mock.calls.find(([message]) =>
+        String(message).includes("Container resized"),
+      );
+      expect(retuneCall).toBeTruthy();
+      expect(retuneCall[1].eventType).toBe("autotune");
+      expect(retuneCall[1].id).toMatch(/^autotune-retune-.+-\d{8}$/);
       const resizeEvents = free.insertWatchdogEvent.mock.calls
         .map(([event]) => event)
         .filter(

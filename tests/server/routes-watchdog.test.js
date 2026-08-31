@@ -13,8 +13,16 @@ const createDeps = () => {
       ok: true,
       results: [{ channel: "telegram", ok: true }],
     })),
-    getSettings: vi.fn(() => ({ autoRepair: true, notificationsEnabled: true })),
-    updateSettings: vi.fn(({ autoRepair }) => ({ autoRepair, notificationsEnabled: true })),
+    getSettings: vi.fn(() => ({
+      autoRepair: true,
+      notificationsEnabled: true,
+      notificationsVerbose: true,
+    })),
+    updateSettings: vi.fn(({ autoRepair }) => ({
+      autoRepair,
+      notificationsEnabled: true,
+      notificationsVerbose: true,
+    })),
   };
   const getRecentEvents = vi.fn(() => [
     { id: 1, eventType: "crash", status: "failed" },
@@ -202,8 +210,44 @@ describe("server/routes/watchdog", () => {
     });
     expect(res.body).toEqual({
       ok: true,
-      settings: { autoRepair: false, notificationsEnabled: true },
+      settings: {
+        autoRepair: false,
+        notificationsEnabled: true,
+        notificationsVerbose: true,
+      },
     });
+  });
+
+  it("passes notificationsVerbose through the PUT body untouched", async () => {
+    const deps = createDeps();
+    const app = createApp(deps);
+
+    const res = await request(app)
+      .put("/api/watchdog/settings")
+      .send({ notificationsVerbose: false });
+
+    expect(res.status).toBe(200);
+    expect(deps.watchdog.updateSettings).toHaveBeenCalledWith({
+      notificationsVerbose: false,
+    });
+  });
+
+  it("400s a string-typed notificationsVerbose instead of coercing it (F4)", async () => {
+    const deps = createDeps();
+    deps.watchdog.updateSettings.mockImplementation(() => {
+      throw new Error(
+        "Expected autoRepair, notificationsEnabled, and/or notificationsVerbose boolean",
+      );
+    });
+    const app = createApp(deps);
+
+    const res = await request(app)
+      .put("/api/watchdog/settings")
+      .send({ notificationsVerbose: "false" });
+
+    expect(res.status).toBe(400);
+    expect(res.body.ok).toBe(false);
+    expect(res.body.error).toContain("notificationsVerbose");
   });
 
   it("returns 500 when getStatus throws on GET /api/watchdog/status", async () => {
@@ -375,7 +419,11 @@ describe("server/routes/watchdog", () => {
     expect(okRes.status).toBe(200);
     expect(okRes.body).toEqual({
       ok: true,
-      settings: { autoRepair: true, notificationsEnabled: true },
+      settings: {
+        autoRepair: true,
+        notificationsEnabled: true,
+        notificationsVerbose: true,
+      },
     });
 
     deps.watchdog.getSettings.mockImplementation(() => {

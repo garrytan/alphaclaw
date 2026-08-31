@@ -287,7 +287,13 @@ describe("createWatchdogOverseer", () => {
     expect(message).toContain(
       "- [View incident](http://host:3000/#/watchdog?incident=1)",
     );
-    expect(opts).toEqual({ eventType: "overseer", id: "watchdog-overseer-1" });
+    // The canned verdict is "resolved" → informational (verbose); a
+    // monitoring/action_needed verdict stays important (plan Phase-3 split).
+    expect(opts).toEqual({
+      eventType: "overseer",
+      id: "watchdog-overseer-1",
+      verbose: true,
+    });
   });
 
   it("redacts secrets from the assembled prompt before the spawn", async () => {
