@@ -264,6 +264,107 @@ process.on("exit", () => {
     expect(output).toContain("SETUP_PASSWORD is missing or empty");
   });
 
+  it("boot reconcile falls back to the default schedule when system-sync.json holds an injected one", () => {
+    const preloadPath = path.join(tmpDir, "capture-cron-write.js");
+    const capturePath = path.join(tmpDir, "captured-cron-content.txt");
+    // Seed an on-disk cron config carrying the injection payload the shared
+    // guard exists for. The boot reconcile must write the DEFAULT schedule.
+    fs.mkdirSync(path.join(tmpDir, ".openclaw", "cron"), { recursive: true });
+    fs.writeFileSync(
+      path.join(tmpDir, ".openclaw", "cron", "system-sync.json"),
+      JSON.stringify({ enabled: true, schedule: "PATH=/tmp/evil\n*\n*\n*\n*" }),
+    );
+    fs.writeFileSync(
+      preloadPath,
+      `
+const fs = require("fs");
+const os = require("os");
+const path = require("path");
+const Module = require("module");
+const childProcess = require("child_process");
+
+const realLoad = Module._load;
+const realCopyFileSync = fs.copyFileSync;
+const realWriteFileSync = fs.writeFileSync;
+const realUnlinkSync = fs.unlinkSync;
+const realRenameSync = fs.renameSync;
+const realChmodSync = fs.chmodSync;
+
+const capturePath = process.env.ALPHACLAW_CAPTURE_CRON_PATH;
+const testHome = process.env.ALPHACLAW_TEST_HOME;
+if (testHome) {
+  os.homedir = () => testHome;
+}
+
+childProcess.execSync = (command, options = {}) => "";
+
+const cronWrites = {};
+fs.copyFileSync = (src, dest, ...rest) => {
+  const target = String(dest || "");
+  if (target.startsWith("/usr/local/bin/") || target.startsWith("/etc/cron.d/")) return;
+  return realCopyFileSync(src, dest, ...rest);
+};
+fs.writeFileSync = (targetPath, data, ...rest) => {
+  const target = String(targetPath || "");
+  if (target.startsWith("/etc/cron.d/")) {
+    cronWrites[target] = String(data);
+    return;
+  }
+  if (target.startsWith("/usr/local/bin/")) return;
+  return realWriteFileSync(targetPath, data, ...rest);
+};
+fs.renameSync = (from, to, ...rest) => {
+  const src = String(from || "");
+  const dest = String(to || "");
+  if (dest.startsWith("/etc/cron.d/")) {
+    // Complete the atomic install against the captured temp content.
+    realWriteFileSync(capturePath, cronWrites[src] || "");
+    return;
+  }
+  return realRenameSync(from, to, ...rest);
+};
+fs.unlinkSync = (targetPath, ...rest) => {
+  if (String(targetPath || "").startsWith("/etc/cron.d/")) return;
+  return realUnlinkSync(targetPath, ...rest);
+};
+fs.chmodSync = (targetPath, ...rest) => {
+  if (String(targetPath || "").startsWith("/usr/local/bin/")) return;
+  return realChmodSync(targetPath, ...rest);
+};
+
+Module._load = function patchedLoad(request, parent, isMain) {
+  const parentFile = String(parent && parent.filename ? parent.filename : "");
+  if (
+    (request === "../lib/server.js" || String(request || "").endsWith("/lib/server.js")) &&
+    parentFile.endsWith(path.join("bin", "alphaclaw.js"))
+  ) {
+    return {};
+  }
+  return realLoad.apply(this, arguments);
+};
+      `.trim(),
+    );
+
+    const output = execSync(`node ${supportedNodePreload()} "${binPath}" start`, {
+      stdio: "pipe",
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        SETUP_PASSWORD: "test-password",
+        ALPHACLAW_ROOT_DIR: tmpDir,
+        ALPHACLAW_GIT_SHIM_PATH: path.join(tmpDir, "bin", "git"),
+        ALPHACLAW_TEST_HOME: tmpHome,
+        ALPHACLAW_CAPTURE_CRON_PATH: capturePath,
+        NODE_OPTIONS: `--require=${preloadPath}`,
+      },
+    });
+
+    expect(output).toContain("Ignoring invalid stored sync-cron schedule");
+    const cronContent = fs.readFileSync(capturePath, "utf8");
+    expect(cronContent).toContain('0 * * * * root bash');
+    expect(cronContent).not.toContain("/tmp/evil");
+  });
+
   it("exports OPENCLAW_STATE_DIR during managed startup", () => {
     const preloadPath = path.join(tmpDir, "capture-openclaw-env.js");
     const capturePath = path.join(tmpDir, "captured-openclaw-env.json");
