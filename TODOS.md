@@ -368,6 +368,12 @@
 - **Context:** Detection seams: `readMemorySample()` dep in lib/server/watchdog.js; cap math in lib/server/gateway-memory-monitor.js (`computeEffectiveCap`).
 - **Effort:** M. **Depends on:** security review.
 
+## P3 — Calibrate tree-RSS vs single-process heap-cap pressure math
+- **What:** `computeEffectiveCap` models ONE V8 process (`activeHeapMb + 192MB overhead`) but the pressure numerator is the whole process TREE from `getProcessTreeUsage` (launcher + worker + descendants, with per-process VmRSS double-counting shared pages). Options: compare max single-process RSS in the tree against the heap cap (tree RSS stays for the container cap), or size `gatewayNativeOverheadMb` to explicitly budget the launcher.
+- **Why:** Tree-over-heap-cap structurally overestimates pressure — a busy-but-healthy gateway subtree could brush the 90% fast-path band; the inverse error underestimates co-residents in the container cap. Mitigated today by the fast path's rising-slope requirement and the critical 2-eval confirm, so a flat-at-92% gateway never restarts; this sharpens the margin rather than fixing a live false-positive. Red-team finding from the memory-leak wave ship review.
+- **Context:** lib/server/gateway-memory-monitor.js (`computeEffectiveCap`, fast path); sampler in lib/server/watchdog.js (`readMemorySampleSafe`) already has per-pid granularity available in `getProcessTreeUsage`'s walk.
+- **Effort:** S. **Depends on:** a live remeasure of launcher/worker RSS split (the wave's live e2e harness, tests/live/openclaw-live-memory.e2e.test.js, can produce it).
+
 ## P3 — Consume OpenClaw's own memory-pressure diagnostics as a corroborating signal
 - **What:** Parse the gateway log line `[diagnostics/memory] memory pressure: level=critical reason=rss_threshold rss=... heap=...` (2026.9.1-beta.1+) into the watchdog memory monitor as a second, upstream-sourced signal beside the RSS trend — and surface its heap-vs-RSS split (a flat heap with runaway RSS indicates an off-main-isolate leak, e.g. a plugin, where heap raises cannot help).
 - **Why:** Upstream now self-reports pressure with per-isolate heap numbers AlphaClaw cannot observe from outside; corroboration would cut false positives and sharpen the doctor card's plugin-vs-main-leak diagnosis.

@@ -33,12 +33,14 @@ you opt in — the gateway is restarted gracefully before it runs out of memory.
   scans.
 - **Pre-OOM auto-restart (strictly opt-in, default OFF).** When a confirmed
   leak turns critical, the watchdog can restart the gateway gracefully before
-  the crash — through the same lifecycle lock as every other restart, never
-  during an update's stabilization window, capped at 2 restarts per 24 hours
-  at least 6 hours apart (the brake survives AlphaClaw restarts), and never
-  counted as a crash. The deployed agent cannot arm this switch for itself:
-  any agent-admin write that would turn effective auto-restart on requires an
-  operator confirm.
+  the crash — through the same lifecycle lock and interlocks as a manual
+  restart (never mid-channel-apply, never over a reconciler hold), never
+  during an update's stabilization window, only on a tick with a fresh
+  memory reading, capped at 2 restarts per 24 hours at least 6 hours apart
+  (the brake survives AlphaClaw restarts; a failed restart attempt refunds
+  that budget instead of burning it), and never counted as a crash. The
+  deployed agent cannot arm this switch for itself: any agent-admin write
+  that would turn effective auto-restart on requires an operator confirm.
 - **Leak context reaches the AI diagnosis surfaces.** Incident post-mortems
   carry the close-time memory trend (episode evidence only when it actually
   correlates with the incident), and the numeric machine summary the gateway

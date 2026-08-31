@@ -546,6 +546,7 @@ describe("server/alphaclaw-config", () => {
       enabled: false,
       autoRestart: false,
       effectiveAutoRestart: false,
+      configUnreadable: true,
     });
   });
 

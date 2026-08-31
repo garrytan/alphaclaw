@@ -23,6 +23,7 @@ const {
   getSystemResources,
   getProcessTreeUsage,
   readEventLoopLag,
+  resetProcessTreeMemoForTests,
 } = require("../../lib/server/system-resources");
 
 // Subtree RSS reads /proc/<pid>/status for the target and its descendants,
@@ -77,6 +78,9 @@ const createFileSystem = (files = {}) => {
 describe("server/system-resources", () => {
   afterEach(() => {
     execFileMock.mockReset();
+    // Subtree reads are memoized (5s TTL) — pids are reused across cases, so
+    // a stale memo would hand one test another test's tree.
+    resetProcessTreeMemoForTests();
   });
 
   afterAll(() => {
@@ -405,6 +409,31 @@ describe("server/system-resources", () => {
       });
       // No /proc listing → single-pid best effort (the target's own status).
       expect(getProcessTreeUsage(42).rssBytes).toBe(64 * 1024 * 1024);
+    });
+
+    it("memoizes same-pid reads inside the TTL; a different pid busts the memo", () => {
+      // The Resources poll (5s, tab-open) and the watchdog tick (60s) share
+      // this reader — without the memo every poll re-walks all of /proc.
+      createFileSystem(
+        procTree({
+          100: { ppid: 1, rssMb: 50 },
+          200: { ppid: 100, rssMb: 30 },
+          300: { ppid: 1, rssMb: 10 },
+        }),
+      );
+      spyProcDir([100, 200, 300]);
+      expect(getProcessTreeUsage(100).rssBytes).toBe(80 * 1024 * 1024);
+      const walksAfterFirst = fs.readdirSync.mock.calls.filter(
+        ([dir]) => String(dir) === "/proc",
+      ).length;
+      // Same pid, same tick window: served from the memo, no second walk.
+      expect(getProcessTreeUsage(100).rssBytes).toBe(80 * 1024 * 1024);
+      expect(
+        fs.readdirSync.mock.calls.filter(([dir]) => String(dir) === "/proc")
+          .length,
+      ).toBe(walksAfterFirst);
+      // A different pid is a different tree: the memo must not serve it.
+      expect(getProcessTreeUsage(300).rssBytes).toBe(10 * 1024 * 1024);
     });
   });
 });

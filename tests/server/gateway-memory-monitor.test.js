@@ -408,6 +408,50 @@ describe("episode lifecycle (small config)", () => {
     expect(snapshot.criticalEvalStreak).toBe(0);
   });
 
+  it("noteProcessExited freezes the live episode NOW without waiting for the replacement pid", () => {
+    const monitor = createGatewayMemoryMonitor({ config: kSmallConfig });
+    drive(monitor, { ticks: 15, rssAt: (i) => mb(100 + 5 * i), pid: 100 });
+    const live = monitor.getTrend();
+    expect(live.state).toBe("leak_suspected");
+    const exitAtMs = kStartMs + 16 * kTickMs;
+    monitor.noteProcessExited(exitAtMs);
+    // The frozen summary is visible immediately (incident close between the
+    // exit and the replacement's first sample must see the episode).
+    const trend = monitor.getTrend();
+    expect(trend.state).toBe("no_gateway");
+    expect(trend.episodeId).toBeNull();
+    expect(trend.projectedExhaustionAt).toBeNull();
+    expect(trend.pressureFraction).toBeNull();
+    expect(trend.lastEpisodeSummary).toMatchObject({
+      episodeId: live.episodeId,
+      pid: 100,
+      reason: "process_exited",
+      endedAt: new Date(exitAtMs).toISOString(),
+    });
+    // Idempotent: a second call (or one with no live episode) is a no-op.
+    monitor.noteProcessExited(exitAtMs + kTickMs);
+    expect(monitor.getTrend().lastEpisodeSummary.endedAt).toBe(
+      new Date(exitAtMs).toISOString(),
+    );
+    // The replacement pid starts a clean baseline.
+    const atMs = kStartMs + 20 * kTickMs;
+    monitor.addSample({ atMs, pid: 200, rssBytes: mb(90) });
+    const { snapshot } = monitor.evaluate(atMs);
+    expect(["warming_up", "insufficient_samples"]).toContain(snapshot.state);
+    expect(snapshot.lastEpisodeSummary?.episodeId).toBe(live.episodeId);
+  });
+
+  it("noteProcessExited with a foreign pid is a no-op (episode survives an unrelated child exit)", () => {
+    const monitor = createGatewayMemoryMonitor({ config: kSmallConfig });
+    drive(monitor, { ticks: 15, rssAt: (i) => mb(100 + 5 * i), pid: 100 });
+    expect(monitor.getTrend().state).toBe("leak_suspected");
+    monitor.noteProcessExited(kStartMs + 16 * kTickMs, 9999);
+    const trend = monitor.getTrend();
+    expect(trend.state).toBe("leak_suspected");
+    expect(trend.episodeId).toBeTruthy();
+    expect(trend.lastEpisodeSummary).toBeNull();
+  });
+
   it("noteMitigation counts into the cleared summary", () => {
     const monitor = createGatewayMemoryMonitor({ config: kSmallConfig });
     drive(monitor, { ticks: 15, rssAt: (i) => mb(100 + 5 * i) });

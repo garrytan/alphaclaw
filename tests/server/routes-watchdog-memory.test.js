@@ -172,6 +172,23 @@ describe("admin-manifest memoryUpdateTierResolver", () => {
     expect(resolve({ body: { autoRestart: true } })).toBe("dangerous");
   });
 
+  it("fails closed when the config read fell back to defaults (configUnreadable signal)", () => {
+    // readWatchdogMemorySettings does not throw on a corrupt file — it
+    // returns fail-closed DEFAULTS flagged configUnreadable. Without this
+    // branch the resolver would judge {enabled:true} against autoRestart:false
+    // defaults and hand an agent a plain write tier while the real stored
+    // state is unknown.
+    const resolve = resolverFor({
+      enabled: false,
+      autoRestart: false,
+      effectiveAutoRestart: false,
+      configUnreadable: true,
+    });
+    expect(resolve({ body: { enabled: true } })).toBe("dangerous");
+    expect(resolve({ body: { autoRestart: false } })).toBe("dangerous");
+    expect(resolve({ body: { enabled: false } })).toBe("dangerous");
+  });
+
   it("the production op wires a resolver", () => {
     const domain = require("../../lib/server/admin-manifest/domains/watchdog");
     const op = domain.ops.find((o) => o.id === "watchdog.memory.update");

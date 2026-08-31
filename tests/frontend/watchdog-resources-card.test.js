@@ -306,4 +306,41 @@ describe("buildMemoryTrendModel", () => {
   it("an unknown future state hides rather than guessing", () => {
     expect(buildMemoryTrendModel({ ...base, state: "novel_state" })).toBeNull();
   });
+
+  it("a projection already in the past is dropped (stale payload, never '~-3m')", () => {
+    for (const projectedExhaustionAt of [
+      new Date(kNow - 5 * 60 * 1000).toISOString(), // passed while tab was open
+      new Date(kNow).toISOString(), // exactly now
+      "not-a-timestamp",
+    ]) {
+      const model = buildMemoryTrendModel(
+        { ...base, state: "leak_suspected", projectedExhaustionAt },
+        { nowMs: kNow },
+      );
+      expect(model.detail).not.toContain("projected");
+      expect(model.detail).toContain("Memory rising steadily");
+    }
+  });
+
+  it("sparse payloads join cleanly — no dangling or doubled separators", () => {
+    const sparse = buildMemoryTrendModel(
+      {
+        state: "leak_suspected",
+        rssMb: null,
+        slopeMbPerHour: null,
+        effectiveCapMb: null,
+        projectedExhaustionAt: null,
+      },
+      { nowMs: kNow },
+    );
+    expect(sparse.detail).toBe("Memory rising steadily");
+    const noSlope = buildMemoryTrendModel(
+      { ...base, state: "normal", slopeMbPerHour: 0 },
+      { nowMs: kNow },
+    );
+    expect(noSlope.detail).toBe("812 MB of 1024 MB cap");
+    for (const model of [sparse, noSlope]) {
+      expect(model.detail).not.toMatch(/·\s*$|^\s*·|·\s*·/);
+    }
+  });
 });

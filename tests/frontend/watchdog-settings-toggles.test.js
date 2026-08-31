@@ -48,6 +48,8 @@ vi.mock("../../lib/public/js/lib/api.js", () => ({
   resumeWatchdogChannels: vi.fn(),
   fetchOpenclawNotifications: vi.fn(),
   updateOpenclawNotifications: vi.fn(),
+  fetchWatchdogMemorySettings: vi.fn(),
+  updateWatchdogMemorySettings: vi.fn(),
 }));
 
 vi.mock("../../lib/public/js/components/toast.js", () => ({
@@ -64,7 +66,11 @@ import {
   kAutoRepairContext,
   kNotificationsContext,
   kWatchdogSettingsCacheKey,
+  kWatchdogMemoryCacheKey,
+  kMemoryEnabledContext,
+  kMemoryAutoRestartContext,
   useWatchdogSettings,
+  useWatchdogMemorySettings,
 } from "../../lib/public/js/components/watchdog-tab/settings/use-settings.js";
 import { WatchdogSettingsCard } from "../../lib/public/js/components/watchdog-tab/settings/index.js";
 import { SavedToggle } from "../../lib/public/js/components/saved-toggle.js";
@@ -170,9 +176,14 @@ beforeEach(() => {
   vi.clearAllMocks();
   vi.spyOn(console, "warn").mockImplementation(() => {});
   invalidateCache(kWatchdogSettingsCacheKey);
+  invalidateCache(kWatchdogMemoryCacheKey);
   api.fetchWatchdogSettings.mockResolvedValue({
     ok: true,
     settings: { autoRepair: false, notificationsEnabled: true },
+  });
+  api.fetchWatchdogMemorySettings.mockResolvedValue({
+    ok: true,
+    settings: { enabled: true, autoRestart: false, effectiveAutoRestart: false },
   });
 });
 
@@ -419,5 +430,79 @@ describe("frontend/watchdog settings card (SavedToggle wiring)", () => {
     expect(toggles[1].props.label).toBe("Loading...");
     expect(toggles[0].props.disabled).toBe(true);
     expect(toggles[1].props.disabled).toBe(true);
+  });
+});
+
+describe("frontend/watchdog memory settings hook (per-field narrow saves)", () => {
+  const renderMemoryHook = () => {
+    let latest;
+    const render = () => {
+      harness.beginRender();
+      latest = useWatchdogMemorySettings();
+      return latest;
+    };
+    render();
+    return {
+      result: () => latest,
+      render,
+      runLoadEffect: () => harness.effects[0](),
+    };
+  };
+
+  const hydrateMemoryHook = async () => {
+    const hook = renderMemoryHook();
+    hook.runLoadEffect();
+    await flushAsync();
+    hook.render();
+    return hook;
+  };
+
+  it("enabled toggle PUTs ONLY {enabled}; the sibling field never rides along", async () => {
+    api.updateWatchdogMemorySettings.mockResolvedValue({
+      ok: true,
+      settings: { enabled: false, autoRestart: false, effectiveAutoRestart: false },
+    });
+    const hook = await hydrateMemoryHook();
+    expect(hook.result().memorySettings).toMatchObject({
+      enabled: true,
+      autoRestart: false,
+    });
+    await hook.result().onToggleMemoryEnabled(false);
+    expect(api.updateWatchdogMemorySettings).toHaveBeenCalledTimes(1);
+    expect(api.updateWatchdogMemorySettings).toHaveBeenCalledWith({
+      enabled: false,
+    });
+    expect(showToast).toHaveBeenCalledWith(
+      "Memory leak detection disabled",
+      "success",
+    );
+  });
+
+  it("autoRestart toggle PUTs ONLY {autoRestart} under its own save context", async () => {
+    api.updateWatchdogMemorySettings.mockResolvedValue({
+      ok: true,
+      settings: { enabled: true, autoRestart: true, effectiveAutoRestart: true },
+    });
+    const hook = await hydrateMemoryHook();
+    const commit = hook.result().onToggleMemoryAutoRestart(true);
+    hook.render();
+    expect(hook.result().savingMemoryContext).toBe(kMemoryAutoRestartContext);
+    await commit;
+    expect(api.updateWatchdogMemorySettings).toHaveBeenCalledTimes(1);
+    expect(api.updateWatchdogMemorySettings).toHaveBeenCalledWith({
+      autoRestart: true,
+    });
+    hook.render();
+    expect(hook.result().memorySettings.autoRestart).toBe(true);
+  });
+
+  it("a failed save reverts to server truth with a context-scoped error, no success toast", async () => {
+    api.updateWatchdogMemorySettings.mockRejectedValue(new Error("boom"));
+    const hook = await hydrateMemoryHook();
+    await hook.result().onToggleMemoryEnabled(false);
+    hook.render();
+    expect(hook.result().memorySettings.enabled).toBe(true); // reverted
+    expect(hook.result().memorySaveError?.context).toBe(kMemoryEnabledContext);
+    expect(showToast).not.toHaveBeenCalled();
   });
 });
