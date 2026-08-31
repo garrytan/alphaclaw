@@ -198,14 +198,32 @@ describe("frontend/chat send-outbox (durable send)", () => {
     expect(outbox.listAll()[0].status).toBe("unknown");
     expect(outbox.nextEligible("s1")).toBeNull();
 
-    // Manual retry re-queues with a clean slate.
-    outbox.retry(item.clientMsgId);
+    // Manual retry re-queues with a clean slate AND a fresh clientMsgId:
+    // the bridge replays an unknown terminal for the same id for its whole
+    // dedupe window, which would turn the explicit Retry into a no-op loop.
+    const originalId = String(item.clientMsgId);
+    outbox.retry(originalId);
     const retried = outbox.listAll()[0];
     expect(retried.status).toBe("queued");
     expect(retried.attempts).toBe(0);
     expect(retried.nextAttemptAt).toBe(0);
     expect(retried.lastError).toBeNull();
+    expect(retried.clientMsgId).not.toBe(originalId);
+    expect(retried.content).toBe("schroedinger");
     expect(outbox.nextEligible("s1")).toBe(retried);
+  });
+
+  it("manual retry of a FAILED item keeps its clientMsgId (dedupe-safe path)", () => {
+    const { outbox } = makeOutbox();
+    const item = outbox.enqueue({ sessionKey: "s1", content: "keep id" });
+    outbox.markInflight(item.clientMsgId);
+    outbox.markFailed(item.clientMsgId, { code: "gateway_unavailable", retryable: false });
+    // Non-retryable classified failure parks as failed; explicit Retry reuses
+    // the id — error terminals fall through to a fresh send server-side.
+    const failedId = outbox.listAll()[0].clientMsgId;
+    outbox.retry(failedId);
+    expect(outbox.listAll()[0].clientMsgId).toBe(failedId);
+    expect(outbox.listAll()[0].status).toBe("queued");
   });
 
   it("retryable failures auto-requeue until the cap", () => {
