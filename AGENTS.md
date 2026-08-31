@@ -41,7 +41,7 @@ Runtime model:
 - Reuse existing server route and state patterns before introducing new abstractions.
 - Update tests when behavior changes in routes, watchdog flows, or setup state.
 - Before running tests in a fresh checkout, run `npm install` so `vitest` (devDependency) is available for `npm test`.
-- `npm test` is hermetic by design — `tests/live/**` (real npm/GitHub/OpenClaw-updater e2e) is excluded unless `OPENCLAW_LIVE_E2E=1`. Use `npm run test:live` (network, ~5 min) or `npm run test:live:dev` (the real dev source build ONLY — 20-35 min measured, 35-min build timeout; it does not re-run the catalog/apply tiers). When a live tier fails but the hermetic suite is green, suspect upstream OpenClaw drift first and update the encoded assumption, not the guard.
+- `npm test` is hermetic by design — `tests/live/**` (real npm/GitHub/OpenClaw-updater e2e) is excluded unless `OPENCLAW_LIVE_E2E=1`. Use `npm run test:live` (network; longer than the old ~5 min now that the tier includes the real-beta memory-leak e2e) or `npm run test:live:dev` (the real dev source build ONLY — 20-35 min measured, 35-min build timeout; it does not re-run the catalog/apply tiers). When a live tier fails but the hermetic suite is green, suspect upstream OpenClaw drift first and update the encoded assumption, not the guard.
 
 ### Code Structure
 

@@ -60,7 +60,7 @@ npm install
 npm test              # Run all tests (hermetic — no network)
 npm run test:watch    # Watch mode
 npm run test:coverage # With coverage report
-npm run test:live     # Live e2e: real npm/GitHub catalog + package applies (~5 min, network)
+npm run test:live     # Live e2e: real npm/GitHub catalog + package applies + real-gateway memory-leak e2e (network)
 npm run test:live:dev # Live e2e: real dev-channel source build only (20-35 min, ~5 GB disk)
 npm run test:container # Container e2e: full production-container upgrade journey (~25-40 min; needs docker + network)
 npm run test:ui       # Browser UI smoke: real server + headless Chromium (opt-in; self-skips without a browse CLI — set BROWSE_BIN)
