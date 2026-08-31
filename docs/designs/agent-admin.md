@@ -17,15 +17,23 @@ curl the entire dashboard API with the SETUP_PASSWORD it inherits via
 pattern and replaces it with a paved, tiered, audited road.
 
 ## Threat model (honest — do not soften)
-`gatewayEnv()` (lib/server/gateway.js) spreads the full `process.env` into the
-agent's shell, so the agent already holds `SETUP_PASSWORD` and every provider
-key, with exec security `full` / ask `off`. **Agent Administration is therefore
-NOT a security boundary against the agent.** Its auth layer exists to (a) keep
-secrets out of chat transcripts, (b) attribute actions (`actor=agent`) for
-audit, (c) enable revocation, and (d) add tiered guardrails + structured errors.
-Same honesty convention as team mode ("NOT a security boundary"). The one change
-that WOULD make the tiers a real boundary — narrowing `gatewayEnv`'s secret
-spread — is tracked as a P1 TODO, out of this wave (large blast radius).
+As of v0.9.60, `gatewayEnv()` (lib/server/gateway.js) no longer spreads the full
+`process.env` into the agent's shell: `filterGatewayChildEnv`
+(lib/server/gateway-env-policy.js) applies an explicit allowlist with an
+absolute deny list, so `SETUP_PASSWORD`, webhook/platform secrets, and
+AlphaClaw internals are withheld from the OpenClaw child. This closes ENV
+inheritance — the agent-admin tiers are now a real boundary against the agent
+obtaining those secrets *from its environment*.
+
+**Residual, not softened:** the child still runs as the same UID with
+`HOME=kRootDir` and exec security `full` / ask `off`, so if exec is
+unsandboxed it can read `kRootDir/.env` directly from disk. That is a
+filesystem-level concern (sandboxing / file permissions), separate from env
+inheritance, and this feature does not claim to close it. The auth layer still
+exists to (a) keep secrets out of chat transcripts, (b) attribute actions
+(`actor=agent`) for audit, (c) enable revocation, and (d) add tiered guardrails
++ structured errors. Break-glass `ALPHACLAW_GATEWAY_ENV_UNRESTRICTED=1`
+(deployment env only) restores the legacy spread minus the absolute deny set.
 
 ## Architecture
 ```

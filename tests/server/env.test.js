@@ -82,6 +82,33 @@ describe("server/env", () => {
     ).toHaveLength(1);
   });
 
+  it("never applies the gateway-env hatch keys from .env (agent self-grant defense)", () => {
+    // These control what the OpenClaw child inherits; the agent can write
+    // .env, so reloadEnv must ignore them (deployment env only).
+    fs.writeFileSync(
+      path.join(tmpDir, ".env"),
+      [
+        "OPENAI_API_KEY=ok",
+        "ALPHACLAW_GATEWAY_ENV_UNRESTRICTED=1",
+        "ALPHACLAW_GATEWAY_ENV_PASSTHROUGH=*",
+      ].join("\n"),
+    );
+    const env = loadEnvModule(tmpDir);
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    delete process.env.ALPHACLAW_GATEWAY_ENV_UNRESTRICTED;
+    delete process.env.ALPHACLAW_GATEWAY_ENV_PASSTHROUGH;
+
+    env.reloadEnv();
+
+    expect(process.env.OPENAI_API_KEY).toBe("ok");
+    expect(process.env.ALPHACLAW_GATEWAY_ENV_UNRESTRICTED).toBeUndefined();
+    expect(process.env.ALPHACLAW_GATEWAY_ENV_PASSTHROUGH).toBeUndefined();
+    // And they never surface through the file readers either.
+    expect(env.readEnvFile().some((v) => v.key.startsWith("ALPHACLAW_GATEWAY_ENV_"))).toBe(
+      true,
+    );
+  });
+
   it("writes a deduped env file using the last value for each key", () => {
     const env = loadEnvModule(tmpDir);
 
