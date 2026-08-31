@@ -100,7 +100,12 @@ describe("server/chat-ws", () => {
 
     const history = await service.fetchHistory("agent:main:main");
 
-    expect(history).toEqual({ messages: [], rawHistory: { messages: [] } });
+    expect(history).toEqual({
+      messages: [],
+      rawHistory: { messages: [] },
+      markers: [],
+      truncated: false,
+    });
     expect(captured.headers.origin).toBeUndefined();
     expect(captured.connectParams).toMatchObject({
       client: {
@@ -115,7 +120,7 @@ describe("server/chat-ws", () => {
     );
     expect(captured.historyParams).toEqual({
       sessionKey: "agent:main:main",
-      limit: 200,
+      limit: 201,
     });
   });
 

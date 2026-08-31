@@ -329,10 +329,14 @@ describe("server/chat-ws bridge", () => {
       await expect(service.fetchHistory("")).resolves.toEqual({
         messages: [],
         rawHistory: null,
+        markers: [],
+        truncated: false,
       });
       await expect(service.fetchHistory()).resolves.toEqual({
         messages: [],
         rawHistory: null,
+        markers: [],
+        truncated: false,
       });
     });
 
@@ -448,7 +452,12 @@ describe("server/chat-ws bridge", () => {
       const fromEmpty = await service.fetchHistory("s");
       expect(fromEmpty.messages).toEqual([]);
       const fromNull = await service.fetchHistory("s");
-      expect(fromNull).toEqual({ messages: [], rawHistory: null });
+      expect(fromNull).toEqual({
+        messages: [],
+        rawHistory: null,
+        markers: [],
+        truncated: false,
+      });
     });
   });
 
@@ -988,13 +997,36 @@ describe("server/chat-ws bridge", () => {
         if (frame.method === "chat.abort") harness.respond(frame.id, {});
       };
       browser.send({ type: "stop", sessionKey: "stop-a" });
+      // Stop is no longer blind-optimistic: the bridge answers `stopping`, and
+      // the terminal `done` arrives only once the gateway's lifecycle end
+      // confirms the abort (or the confirm timer fires unconfirmed).
+      const stopping = await browser.waitFor(
+        (m) => m.type === "stopping" && m.sessionKey === "stop-a",
+        "stopping frame",
+      );
+      expect(stopping.runId).toBe("run-a");
+      await waitUntil(
+        () => harness.requests.some((f) => f.method === "chat.abort"),
+        "chat.abort request",
+      );
+      const abort = harness.requests.find((f) => f.method === "chat.abort");
+      expect(abort.params).toEqual({ sessionKey: "stop-a" });
+      harness.emit({
+        type: "event",
+        event: "agent",
+        payload: {
+          runId: "run-a",
+          stream: "lifecycle",
+          data: { phase: "end" },
+        },
+      });
       const done = await browser.waitFor(
         (m) => m.type === "done" && m.stopped === true,
         "stopped done",
       );
       expect(done.sessionKey).toBe("stop-a");
-      const abort = harness.requests.find((f) => f.method === "chat.abort");
-      expect(abort.params).toEqual({ sessionKey: "stop-a" });
+      expect(done.reason).toBe("stopped");
+      expect(done.confidence).toBe("confirmed");
 
       // A browser without tracked runs can still request a stop.
       const otherBrowser = await openBrowser(service);
