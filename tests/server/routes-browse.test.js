@@ -7,8 +7,21 @@ const request = require("supertest");
 
 const { registerBrowseRoutes } = require("../../lib/server/routes/browse");
 
-const createTestRoot = () =>
-  fs.mkdtempSync(path.join(os.tmpdir(), "alphaclaw-browse-test-"));
+// Roots are minted per test; the registry + module-scope afterEach keeps a
+// full run from leaking ~90 directories (some holding git repos) into
+// os.tmpdir() (upstream #123/#71). The factory only records — hooks must be
+// registered once at module scope, never inside a helper at test runtime.
+const kTempDirs = [];
+const createTestRoot = () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "alphaclaw-browse-test-"));
+  kTempDirs.push(dir);
+  return dir;
+};
+afterEach(() => {
+  while (kTempDirs.length) {
+    fs.rmSync(kTempDirs.pop(), { recursive: true, force: true });
+  }
+});
 
 const createApp = (kRootDir) => {
   const app = express();
