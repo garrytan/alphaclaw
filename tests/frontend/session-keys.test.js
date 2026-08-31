@@ -24,7 +24,7 @@ describe("session-keys display helpers", () => {
   });
 
   it("getSessionDisplayLabel renders telegram direct peer-qualified", () => {
-    // Deliberate v-next change: two DMs must not render as identical
+    // Deliberate 0.9.49 change: two DMs must not render as identical
     // "Direct message" rows in a delivery picker — the peer id disambiguates.
     expect(
       getSessionDisplayLabel({
