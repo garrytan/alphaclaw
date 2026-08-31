@@ -470,14 +470,14 @@
 
 .chat-connection-pill.is-offline,
 .chat-connection-pill.is-storage {
-  border-color: rgba(248, 113, 113, 0.5);
-  color: #fca5a5;
+  border-color: var(--status-error-border);
+  color: var(--status-error);
 }
 
 .chat-connection-pill.is-fallback,
 .chat-connection-pill.is-legacy {
-  border-color: rgba(251, 191, 36, 0.5);
-  color: #fcd34d;
+  border-color: var(--status-warning-border);
+  color: var(--status-warning);
 }
 
 .chat-connection-pill button {
@@ -508,7 +508,7 @@
 }
 
 .chat-bubble.is-failed {
-  border-color: rgba(248, 113, 113, 0.55);
+  border-color: var(--status-error-border);
 }
 
 .chat-bubble-state-chip {
@@ -572,13 +572,13 @@
 
 .chat-system-marker.is-interrupted,
 .chat-system-marker.is-unknown {
-  border-color: rgba(251, 191, 36, 0.45);
-  color: #fcd34d;
+  border-color: var(--status-warning-border);
+  color: var(--status-warning);
 }
 
 .chat-system-marker.is-error {
-  border-color: rgba(248, 113, 113, 0.5);
-  color: #fca5a5;
+  border-color: var(--status-error-border);
+  color: var(--status-error);
 }
 
 .chat-system-marker-time {
@@ -600,8 +600,8 @@
   align-items: center;
   gap: 8px;
   font-size: 11px;
-  color: #fca5a5;
-  border: 1px solid rgba(248, 113, 113, 0.4);
+  color: var(--status-error);
+  border: 1px solid var(--status-error-border);
   border-radius: 8px;
   padding: 4px 10px;
 }
@@ -620,17 +620,33 @@
   font-size: 11px;
   padding: 5px 12px;
   border-radius: 999px;
-  border: 1px solid var(--border);
-  background: var(--panel, rgba(20, 20, 24, 0.92));
+  border: 1px solid var(--border-strong);
+  background: var(--bg-content);
   color: var(--text);
   cursor: pointer;
+}
+
+.chat-jump-pill:hover {
+  border-color: var(--border-strong);
+  background: var(--bg-hover);
+}
+
+.chat-bubble-copy:hover {
+  color: var(--text);
+}
+
+.chat-stalled-note {
+  align-self: center;
+  font-size: 11px;
+  color: var(--text-dim);
+  padding: 2px 10px;
 }
 
 .chat-composer-warning,
 .chat-composer-hold {
   flex-basis: 100%;
   font-size: 11px;
-  color: #fcd34d;
+  color: var(--status-warning);
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -639,7 +655,7 @@
 }
 
 .chat-composer-warning {
-  color: #fca5a5;
+  color: var(--status-error);
 }
 
 .chat-composer-hold-send {
@@ -689,12 +705,16 @@
   .chat-composer-send,
   .chat-composer-stop,
   .chat-bubble-action,
-  .chat-history-error button {
-    min-height: 40px;
+  .chat-history-error button,
+  .chat-connection-pill button,
+  .chat-jump-pill {
+    min-height: 44px;
   }
 
   .chat-bubble-copy {
     opacity: 1;
+    min-height: 44px;
+    min-width: 32px;
   }
 
   .chat-jump-pill {

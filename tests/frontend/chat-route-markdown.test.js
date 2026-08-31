@@ -34,3 +34,23 @@ describe("frontend/chat markdown safety (H8)", () => {
     }
   });
 });
+
+// Behavior half of the H8 guard: the string asserts above pin the WIRING;
+// these pin the OUTPUT — a regression in the normalize helpers that reopened
+// an injection path would pass a pure string grep.
+describe("frontend/chat markdown safety (H8 behavior)", () => {
+  it("neutralizes javascript: links and inline HTML", async () => {
+    const { renderMarkdownHtml } = await import(
+      "../../lib/public/js/components/chat/markdown.js"
+    );
+    const hostile = renderMarkdownHtml("[x](javascript:alert(1))");
+    expect(hostile).not.toContain("javascript:");
+    // Raw HTML must be ESCAPED to text — a live <img> tag would carry the
+    // handler; the escaped "&lt;img" form is inert.
+    const injected = renderMarkdownHtml('<img src=x onerror="alert(1)">');
+    expect(injected).not.toContain("<img");
+    expect(injected).toContain("&lt;img");
+    const safe = renderMarkdownHtml("[ok](https://example.com)");
+    expect(safe).toContain("https://example.com");
+  });
+});

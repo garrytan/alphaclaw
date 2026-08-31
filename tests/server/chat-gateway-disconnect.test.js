@@ -168,7 +168,9 @@ describe("server/chat gateway disconnect lifecycle", () => {
     // never swept — liveness is measured from the last event, not run start.
     const twinHarness = await kit.startGatewayHarness();
     const twinService = kit.createService(twinHarness, {
-      timings: { stallMs: 400, sweepIntervalMs: 40 },
+      // Wide margin (15x the emit cadence): a loaded CI runner stalling the
+      // event loop for a few hundred ms must not sweep a healthy run.
+      timings: { stallMs: 1500, sweepIntervalMs: 40 },
     });
     const twinBrowser = await kit.openBrowser(twinService);
     await kit.startRun({

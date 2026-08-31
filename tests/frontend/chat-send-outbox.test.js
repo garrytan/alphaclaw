@@ -405,3 +405,60 @@ describe("frontend/chat send-outbox (durable send)", () => {
     expect(storage.getItem(kStorageKey)).toBeNull();
   });
 });
+
+describe("send-outbox: socket-death requeue and live-eviction warning", () => {
+  it("requeueAllInflight returns every inflight item to queued, immediately eligible", async () => {
+    const { createSendOutbox } = await import(
+      "../../lib/public/js/components/chat/send-outbox.js"
+    );
+    const nowRef = { now: 1_000_000 };
+    let uuidCounter = 0;
+    const outbox = createSendOutbox({
+      storage: null,
+      storageKey: "t",
+      now: () => nowRef.now,
+      uuid: () => `rq-${(uuidCounter += 1)}`,
+      random: () => 0.5,
+    });
+    const a = outbox.enqueue({ sessionKey: "s1", content: "one" });
+    const b = outbox.enqueue({ sessionKey: "s2", content: "two" });
+    outbox.markInflight(a.clientMsgId);
+    outbox.markInflight(b.clientMsgId);
+    outbox.requeueAllInflight();
+    const items = outbox.listAll();
+    expect(items.map((item) => item.status)).toEqual(["queued", "queued"]);
+    expect(outbox.nextEligible("s1")?.clientMsgId).toBe(a.clientMsgId);
+    expect(outbox.nextEligible("s2")?.clientMsgId).toBe(b.clientMsgId);
+  });
+
+  it("warns loudly when the byte cap is forced to evict a LIVE item from storage", async () => {
+    const { createSendOutbox, kOutboxMaxBytes } = await import(
+      "../../lib/public/js/components/chat/send-outbox.js"
+    );
+    const backing = new Map();
+    const storage = {
+      getItem: (key) => (backing.has(key) ? backing.get(key) : null),
+      setItem: (key, value) => backing.set(key, value),
+      removeItem: (key) => backing.delete(key),
+    };
+    const persistErrors = [];
+    let uuidCounter = 0;
+    const outbox = createSendOutbox({
+      storage,
+      storageKey: "t-evict",
+      now: () => 1_000_000,
+      uuid: () => `ev-${(uuidCounter += 1)}`,
+      random: () => 0.5,
+      onPersistError: (err) => persistErrors.push(String(err?.message || err)),
+    });
+    // Two queued items whose combined serialized size exceeds the byte cap:
+    // no terminal items exist, so the eviction must sacrifice a LIVE one —
+    // and say so (a reload would lose it).
+    outbox.enqueue({ sessionKey: "s1", content: "x".repeat(kOutboxMaxBytes / 2) });
+    outbox.enqueue({ sessionKey: "s1", content: "y".repeat(kOutboxMaxBytes / 2 + 1024) });
+    expect(persistErrors.length).toBeGreaterThan(0);
+    expect(persistErrors[0]).toContain("evicted a live item");
+    // Both items still live in memory for this session.
+    expect(outbox.listForSession("s1")).toHaveLength(2);
+  });
+});

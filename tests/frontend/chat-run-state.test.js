@@ -339,3 +339,35 @@ describe("frontend/chat run-state reducer", () => {
     expect(settled.activeRunId).toBe("");
   });
 });
+
+describe("run-state: STARTED while stopping", () => {
+  it("adopts the runId without resurrecting a stopping session", async () => {
+    const { createSessionRunState, reduceRunState, kStopping } = await import(
+      "../../lib/public/js/components/chat/run-state.js"
+    );
+    let state = reduceRunState(createSessionRunState(), {
+      type: "OUTBOX_INFLIGHT",
+      clientMsgId: "cm-1",
+    });
+    state = reduceRunState(state, { type: "STOP_CLICKED" });
+    expect(state.phase).toBe(kStopping);
+    // chat.send resolves while the stop is pending: the run id is adopted (so
+    // a later stop targets it) but the phase must STAY stopping.
+    state = reduceRunState(state, {
+      type: "STARTED",
+      clientMsgId: "cm-1",
+      runId: "r-late",
+      messageId: "m1",
+    });
+    expect(state.phase).toBe(kStopping);
+    expect(state.activeRunId).toBe("r-late");
+    // The stop terminal settles it.
+    state = reduceRunState(state, {
+      type: "DONE",
+      runId: "r-late",
+      reason: "stopped",
+      confidence: "confirmed",
+    });
+    expect(state.phase).toBe("idle");
+  });
+});
