@@ -458,10 +458,14 @@ describe("server/watchdog memory monitor", () => {
         restartGatewayForMitigation: restart,
         mitigationStatePath: statePath,
       });
-      // The disarm lands while the mitigation notification is in flight —
-      // after the gates passed, before the restart fires.
+      // The disarm lands (once) while the mitigation notification is in
+      // flight — after the gates passed, before the restart fires.
+      let disarmPending = true;
       harness.notifier.notify.mockImplementation(async (message) => {
-        if (message.includes("Restarting gateway")) disarmed = true;
+        if (disarmPending && message.includes("Restarting gateway")) {
+          disarmed = true;
+          disarmPending = false;
+        }
         return { ok: true };
       });
       launchGateway(harness);
@@ -476,10 +480,17 @@ describe("server/watchdog memory monitor", () => {
       // The budget stamp was refunded: no restart happened, none is booked.
       const persisted = JSON.parse(fs.readFileSync(statePath, "utf8"));
       expect(persisted.restarts).toHaveLength(0);
-      // Re-arm: the very next critical tick may restart (no brake residue).
+      // Re-arm: the very next critical tick may restart (no brake residue),
+      // and it notifies AGAIN — the aborted attempt's announcement must not
+      // dedupe-suppress the restart that actually happens.
       disarmed = false;
       await criticalScenario(harness, 2);
       expect(restart).toHaveBeenCalledTimes(1);
+      expect(
+        notifications(harness.notifier).filter((m) =>
+          m.includes("Restarting gateway before it runs out of memory"),
+        ),
+      ).toHaveLength(2);
     });
 
     it("a FAILED restart refunds the 24h budget and applies the short failure cooldown instead", async () => {
