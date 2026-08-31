@@ -20,8 +20,9 @@ audit trail as the one deliberate exception.
   Watchdog settings card — "Verbose" vs "Important only". Important-only
   mode suppresses informational notices (gateway back online, channels
   resumed, activation verified, update progress, scheduled doctor scans,
-  topic-discovery digests, healthy overseer verdicts) while problems,
-  failures, and every automatic fix still arrive. Persisted as
+  topic-discovery digests, healthy overseer verdicts, config-change retry
+  progress, the AlphaClaw update-available notice) while problems,
+  failures, and action-taken repairs still arrive. Persisted as
   `WATCHDOG_NOTIFICATIONS_QUIET`; exposed via `GET/PUT
   /api/watchdog/settings` (`notificationsVerbose`) and the agent-admin
   manifest; a helper line states the quiet-mode contract.
@@ -36,8 +37,10 @@ audit trail as the one deliberate exception.
   container downsizes get an urgent OOM-pressure warning), pin
   re-activation after an interrupted activation, quarantined-config
   recovery, stray legacy exec-approvals repair, team-mode auth
-  auto-restore, and config-change gateway retries. All carry stable outbox
-  dedupe ids, so a boot loop collapses into one alert instead of a storm.
+  auto-restore, and config-change gateway retries. Boot-loopable fixes
+  carry stable outbox dedupe ids, so a boot loop collapses into one alert
+  instead of a storm (user-initiated one-shots such as team-mode enable
+  failures are deliberately timestamp-keyed: each attempt is a new event).
 
 ### Changed
 - **Notifications off now means off.** The master toggle previously gated
@@ -73,8 +76,8 @@ audit trail as the one deliberate exception.
   flush-time master-toggle suppression holds queued events for redelivery
   instead of dropping them, and a terminally suppressed outbox entry
   revives on a fresh enqueue of the same id — one quiet window used to
-  permanently swallow every future re-notify of a stable id. Suppression
-  reasons (master vs. quiet) survive restarts.
+  permanently swallow every future re-notify of a stable id. Terminal
+  suppressions persist their reason across restarts.
 - The team-mode operator-lockout path (auth enable failed AND the auto-
   restore failed) now alerts loudly — it was the one silent branch — and
   exception snippets in alert copy are sanitized (newlines, backticks, and
