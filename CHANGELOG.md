@@ -5,7 +5,7 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
-## [0.9.51] - 2026-08-31
+## [0.9.52] - 2026-08-31
 
 One-click OpenClaw dashboards: every path into the Control UI now lands you
 signed in automatically — no terminal, no token pasting, no "Auth required"
@@ -67,6 +67,75 @@ click-through) and encoded as a live e2e suite.
   before anything reaches a log line; `GET /api/gateway/dashboard` responses
   are marked `Cache-Control: no-store` so the tokened URL can't sit in a
   browser HTTP cache.
+
+## [0.9.51] - 2026-08-31
+
+Every "something is wrong" surface now tells you what, why, and how to fix
+it: the vague "Hardening: blocked" badge is replaced by a card naming the
+file, the true cause, and the fix — and the ~20 other places that swallowed
+an error or rendered a bare "Error" pill got the same treatment.
+
+### Fixed
+- **The Doctor no longer gives advice that can't work when prompt hardening
+  is blocked by a rejected read.** An escaping symlink or a >2 MiB hardening
+  file used to be misdiagnosed as "missing file" ("restart — the resync
+  rewrites it", which fixes neither). The true cause now flows end to end
+  with deterministic precedence, cause-specific card copy for symlink escapes
+  and the read cap (never budget advice — the 2 MiB cap isn't configurable),
+  per-file evidence for rejected files (previously misreported), an honest headline
+  when causes are mixed, and a safe generic fallback for reason codes a
+  future server may add. A file that is never injected at all (hook disabled,
+  rejected basename) no longer surfaces budget advice just because it is
+  also over a cap.
+- **A failed Codex status check can no longer fabricate "Not connected".**
+  All four status-check surfaces (Providers, Models, onboarding, welcome)
+  keep the last checked status, show why the check failed (Providers and
+  Models add a Retry button), and
+  say "Status unknown" when there is no prior data to claim — including when
+  the server answers with an error envelope instead of a rejection.
+- **Caught errors stop disappearing into static copy.** The agent-admin token
+  panel renders the server's own hint (the "(mint failure)" guess is gone);
+  upgrade-status refresh failures name the cause like the catalog card
+  already did; team presence failures show the real message on its own line
+  (a 500 no longer reads "could not reach the server"); the Google
+  credentials modal, watchdog terminal, and onboarding model catalog all
+  surface the underlying message; a restart-evidence fetch failure is no
+  longer misreported as "Evidence expired"; and the sidebar git panel's
+  hover-only native tooltip becomes the shared keyboard-reachable one.
+
+### Added
+- **A "Prompt hardening" card on the General tab for problem states** (the
+  healthy state keeps the compact badge): an impact anchor ("Safety rules are
+  not reaching the agent."), per-file rows with the specific cause and a
+  one-clause fix (severity derived from impact — a fully-dropped file is
+  danger DROPPED, truncation is warning PARTIAL, blocked is always danger),
+  an "updated {time}" stamp, a restart disambiguation footnote, and an
+  Open Drift Doctor button. The stale-doctor warning yields while the card is
+  showing so two alert cards never stack.
+- **The card's CTA deep-links `#/doctor?focus=context`:** the context meter
+  scrolls into view, the fresh hardening finding is highlighted persistently,
+  and rejected-read or unconfigured files the meter cannot list get an
+  explanatory hint line — the arrival is never a dead end.
+- **Doctor context-meter chips explain themselves:** hover or focus any
+  Blocked/Dropped/Truncated chip for the cause and fix (the "Starved" label
+  is now "Dropped"), backed by one client copy map whose coverage against the
+  server's canonical reason list is CI-enforced.
+- **The server logs "hardening state change observed"** with per-file causes
+  whenever the state or reason set changes between status refreshes — "when
+  did it break?" is answerable from logs even when no scan ran (paths
+  sanitized against log forging).
+
+### Changed
+- **Bare warning/danger badges across the flagged cohort now name their
+  condition and carry their remedy** via the new shared TooltipBadge
+  (visible label stays the
+  accessible name; tooltips are supplementary since they never open on
+  touch): "Error" → "Watch not running" (with a visible renew hint),
+  "Needs auth" → "Authentication required", "Awaiting pairing" → "Pairing
+  incomplete", node "Disconnected"/"Pending approval" carry reconnect and
+  approval guidance, Telegram "stale"/"no account attributed" explain
+  consequence and fix, and Resources "Host values" explains what it means.
+  The rule is codified in AGENTS.md so the class can't regress.
 
 ## [0.9.50] - 2026-08-31
 

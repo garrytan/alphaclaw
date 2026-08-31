@@ -313,7 +313,9 @@ describe("frontend/models-tab use-models", () => {
     hook.render();
 
     expect(hook.result().codexStatus.connected).toBe(true);
-    expect(hook.result().codexStatusError).toBe(true);
+    expect(hook.result().codexStatusError).toBe("status endpoint down");
+    // A prior successful check exists, so render sites may say "last known".
+    expect(hook.result().codexStatusKnown).toBe(true);
     // Failure path must not touch the model catalog either.
     expect(invalidateCache).not.toHaveBeenCalledWith(kModelCatalogCacheKey);
   });
@@ -332,14 +334,14 @@ describe("frontend/models-tab use-models", () => {
     codex.refresh.mockRejectedValueOnce(new Error("down"));
     await hook.result().refreshCodexStatus();
     hook.render();
-    expect(hook.result().codexStatusError).toBe(true);
+    expect(hook.result().codexStatusError).toBe("down");
 
     codex.refresh.mockResolvedValueOnce({ connected: false });
     await hook.result().refreshCodexStatus();
     hook.render();
 
     expect(hook.result().codexStatus.connected).toBe(false);
-    expect(hook.result().codexStatusError).toBe(false);
+    expect(hook.result().codexStatusError).toBe("");
     expect(codex.refresh).toHaveBeenCalledWith({ force: true });
     // Successful status change invalidates + re-fetches the catalog.
     expect(invalidateCache).toHaveBeenCalledWith(kModelCatalogCacheKey);
@@ -386,6 +388,20 @@ describe("frontend/models-tab use-models", () => {
     hook.render();
 
     expect(hook.result().codexStatus.connected).toBe(true); // last-known kept
-    expect(hook.result().codexStatusError).toBe(true);
+    expect(hook.result().codexStatusError).toBe("boom");
+  });
+
+  it("a failed FIRST check reports no last-known status (codexStatusKnown stays false)", async () => {
+    const hook = renderHook();
+    const { codex } = fetchStates();
+    codex.refresh.mockRejectedValue(new Error("cold boot failure"));
+
+    await hook.result().refreshCodexStatus();
+    hook.render();
+
+    // No successful check has ever happened — render sites must say
+    // "status unknown", never claim last-known data that doesn't exist.
+    expect(hook.result().codexStatusKnown).toBe(false);
+    expect(hook.result().codexStatusError).toBe("cold boot failure");
   });
 });
