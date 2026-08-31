@@ -133,6 +133,49 @@ describe("server/auto-fix notifications — autotune composition", () => {
     );
   });
 
+  it("announces the disable revert that clamps an autotune-written >64 value", async () => {
+    const { openclawDir, managedDir } = makeTempDirs();
+    setLiveProfile({ memMb: 8192, cores: 4 });
+    // Seed a ledger that attributes a 96 boot default to autotune's own
+    // confirmed write (only attributable values may be clamped on disable).
+    fs.writeFileSync(
+      path.join(managedDir, "autotune-ledger.json"),
+      JSON.stringify({
+        version: 1,
+        ownedKeys: {
+          "agents.defaults.maxConcurrent": {
+            ownedFromAbsent: false,
+            lastApplied: 96,
+          },
+        },
+      }),
+      "utf8",
+    );
+    resetAutotuneForTests({ managedDir });
+    const { fn } = makeConfigStore({
+      agents: { defaults: { maxConcurrent: 96 } },
+    });
+    const notify = vi.fn();
+
+    await applyResourceAutotune({
+      trigger: "reapply",
+      deps: {
+        env: { ALPHACLAW_AUTOTUNE_DISABLED: "1" },
+        openclawDir,
+        updateOpenclawConfigFn: fn,
+        notify,
+      },
+    });
+
+    expect(notify).toHaveBeenCalledTimes(1);
+    expect(notify.mock.calls[0][0]).toContain(
+      "clamped back to 64 (was 96)",
+    );
+    expect(notify.mock.calls[0][1].id).toMatch(
+      /^autotune-concurrency-96-64-\d{8}$/,
+    );
+  });
+
   it("folds the concurrency delta into ONE resize notification and uses the urgent downsize copy", async () => {
     const { openclawDir, managedDir } = makeTempDirs();
     setLiveProfile({ memMb: 8192, cores: 4 });
@@ -248,7 +291,7 @@ describe("server/auto-fix notifications — reconciler notice contracts", () => 
 
 describe("server/auto-fix notifications — E5 action-vocabulary parity", () => {
   it("the crash-loop paused copy names the down state's catalog actions verbatim", () => {
-    // TODOS:149 remediation-action parity: alert copy naming a manual
+    // TODOS.md "Notification remediation-action parity": alert copy naming a manual
     // remediation must use the SAME labels as the gateway card's actions[].
     // A crash-looping gateway with restarts paused is port-down → state
     // `down`: Retry primary, Repair secondary.

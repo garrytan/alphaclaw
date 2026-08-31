@@ -161,6 +161,107 @@ describe("server/notification-policy — master toggle (C3)", () => {
   });
 });
 
+describe("server/notification-policy — shared helpers", () => {
+  it("utcDayBucket formats a UTC YYYYMMDD bucket", () => {
+    const {
+      utcDayBucket,
+    } = require("../../lib/server/notification-policy");
+    expect(utcDayBucket(Date.UTC(2026, 7, 31, 23, 59))).toBe("20260831");
+    expect(utcDayBucket(Date.UTC(2026, 8, 1, 0, 0))).toBe("20260901");
+  });
+
+  it("fireAndForgetNotify never throws and swallows rejections", async () => {
+    const {
+      fireAndForgetNotify,
+    } = require("../../lib/server/notification-policy");
+    expect(() =>
+      fireAndForgetNotify(() => {
+        throw new Error("sync boom");
+      }, "m"),
+    ).not.toThrow();
+    expect(() =>
+      fireAndForgetNotify(async () => {
+        throw new Error("async boom");
+      }, "m"),
+    ).not.toThrow();
+    expect(() => fireAndForgetNotify(null, "m")).not.toThrow();
+    const notify = vi.fn(async () => ({ ok: true }));
+    fireAndForgetNotify(notify, "msg", { id: "x" });
+    expect(notify).toHaveBeenCalledWith("msg", { id: "x" });
+  });
+
+  it("wrapRawNotifierWithPolicy gates raw paths exactly like the central pipeline", async () => {
+    const {
+      wrapRawNotifierWithPolicy,
+    } = require("../../lib/server/notification-policy");
+    const raw = vi.fn(async () => ({ ok: true, sent: 1 }));
+    const wrapped = wrapRawNotifierWithPolicy(raw);
+
+    // Default env: everything delivers.
+    delete process.env.WATCHDOG_NOTIFICATIONS_QUIET;
+    delete process.env.WATCHDOG_NOTIFICATIONS_DISABLED;
+    await wrapped("hello", { eventType: "topic_discovery" });
+    expect(raw).toHaveBeenCalledTimes(1);
+
+    // Quiet suppresses verbose-tagged sends with the distinct reason.
+    process.env.WATCHDOG_NOTIFICATIONS_QUIET = "true";
+    const suppressed = await wrapped("digest", {
+      eventType: "topic_discovery",
+      ...{ verbose: true },
+    });
+    expect(suppressed).toEqual({
+      ok: false,
+      skipped: true,
+      reason: "verbose_notifications_disabled",
+    });
+    expect(raw).toHaveBeenCalledTimes(1);
+
+    // Master off suppresses everything…
+    delete process.env.WATCHDOG_NOTIFICATIONS_QUIET;
+    process.env.WATCHDOG_NOTIFICATIONS_DISABLED = "true";
+    const masterOff = await wrapped("anything", {});
+    expect(masterOff).toEqual({
+      ok: false,
+      skipped: true,
+      reason: "notifications_disabled",
+    });
+    // …except audit-class notices.
+    const audited = await wrapped("audit", { audit: true });
+    expect(audited.ok).toBe(true);
+    expect(raw).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("server/notification-policy — audit-flag wiring contracts", () => {
+  // The security property "the agent cannot silence its own audit trail"
+  // rests on the two agent-admin call sites actually passing audit: true —
+  // pin the wiring so a refactor can't drop the flag silently.
+  it("both agent-admin notify call sites carry the audit flag", () => {
+    const source = fs.readFileSync(
+      path.join(
+        __dirname,
+        "..",
+        "..",
+        "lib",
+        "server",
+        "init",
+        "register-server-routes.js",
+      ),
+      "utf8",
+    );
+    const confirmSite = source.slice(
+      source.indexOf("agent-admin-confirm-"),
+      source.indexOf("agent-admin-confirm-") + 600,
+    );
+    const changeSite = source.slice(
+      source.indexOf("agent-admin-change-"),
+      source.indexOf("agent-admin-change-") + 600,
+    );
+    expect(confirmSite).toContain("audit: true");
+    expect(changeSite).toContain("audit: true");
+  });
+});
+
 describe("server/upgrade-notifier policy gate", () => {
   it("suppresses a verbose event at enqueue when quiet — never queued", async () => {
     process.env.WATCHDOG_NOTIFICATIONS_QUIET = "true";
@@ -266,6 +367,38 @@ describe("server/upgrade-notifier policy gate", () => {
       outbox.listEvents().find((entry) => entry.id === "e-verbose")
         .abandonedAt,
     ).toBeNull();
+  });
+
+  it("outbox-unavailable fallback normalizes flush suppression to the public skipped shape", async () => {
+    delete process.env.WATCHDOG_NOTIFICATIONS_QUIET;
+    delete process.env.WATCHDOG_NOTIFICATIONS_DISABLED;
+    // Policy passes the enqueue gate, then suppresses at the flush re-check
+    // (models a settings flip mid-call); the broken outbox forces the direct
+    // fallback path.
+    let calls = 0;
+    const flippy = vi.fn(() => {
+      calls += 1;
+      return calls === 1
+        ? { ok: true }
+        : { ok: false, reason: "verbose_notifications_disabled" };
+    });
+    const fanout = vi.fn(async () => ({ ok: true, sent: 1 }));
+    const notifier = createUpgradeNotifier({
+      notifier: { notify: fanout, sendToTarget: vi.fn() },
+      outbox: { enqueue: () => null, flush: async () => ({}) },
+      operatorsStore: { read: () => ({ notifications: {} }) },
+      logger: kSilentLogger,
+      shouldSend: flippy,
+    });
+    const result = await notifier.notify("late suppression", { id: "e1" });
+    // Public contract: callers see `skipped`, never the internal `suppressed`.
+    expect(result).toEqual({
+      ok: false,
+      skipped: true,
+      reason: "verbose_notifications_disabled",
+    });
+    expect(result.suppressed).toBeUndefined();
+    expect(fanout).not.toHaveBeenCalled();
   });
 
   it("suppressedAt survives a restart — a suppressed event never resurrects", async () => {

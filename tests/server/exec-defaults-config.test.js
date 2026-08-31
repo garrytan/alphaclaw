@@ -334,6 +334,46 @@ describe("server/exec-defaults-config", () => {
     );
   });
 
+  it("announces a stray-file merge with a stray/entry-count id", async () => {
+    const openclawDir = createTempOpenclawDir();
+    fs.writeFileSync(
+      path.join(openclawDir, "openclaw.json"),
+      JSON.stringify({ tools: { profile: "full" } }, null, 2),
+      "utf8",
+    );
+    // One stray a buggy earlier reaper renamed away, with one recoverable
+    // allowlist entry.
+    fs.writeFileSync(
+      path.join(openclawDir, "exec-approvals.json.stray-1712345678901"),
+      JSON.stringify({
+        version: 1,
+        agents: { main: { allowlist: [{ pattern: "npm test" }] } },
+      }),
+      "utf8",
+    );
+    const notify = vi.fn(async () => ({ ok: true }));
+
+    await ensureManagedExecDefaults({
+      fsModule: fs,
+      openclawDir,
+      resolveExecApprovalsBackend: backendResolver("file"),
+      logger: quietLogger(),
+      notify,
+    });
+
+    const mergeCall = notify.mock.calls.find(([message]) =>
+      String(message).includes("Merged"),
+    );
+    expect(mergeCall).toBeTruthy();
+    expect(mergeCall[0]).toContain("1 approval entry recovered");
+    expect(mergeCall[1]).toEqual(
+      expect.objectContaining({
+        eventType: "recovery",
+        id: "exec-approvals-merged-1-1",
+      }),
+    );
+  });
+
   it("a throwing notify hook never breaks the ensure step", async () => {
     const openclawDir = createTempOpenclawDir();
     createExecApprovalsStateDb(openclawDir, { withRow: true });

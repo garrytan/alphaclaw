@@ -43,6 +43,10 @@ const createHarness = ({
 } = {}) => {
   process.env.WATCHDOG_AUTO_REPAIR = autoRepair ? "true" : "false";
   process.env.WATCHDOG_NOTIFICATIONS_DISABLED = notificationsDisabled ? "true" : "false";
+  // Pin the verbose toggle to its default for every harness run — an ambient
+  // WATCHDOG_NOTIFICATIONS_QUIET on the host must not flip assertions
+  // (isVerboseEnabled reads live process.env). afterEach restores it.
+  delete process.env.WATCHDOG_NOTIFICATIONS_QUIET;
 
   const insertWatchdogEvent = vi.fn();
   const clawCmd = vi.fn(
@@ -479,6 +483,39 @@ describe("server/watchdog", () => {
     watchdog.onGatewayExit({ code: 137, expectedExit: false });
     await flushMicrotasks();
     expect(downCalls().length).toBe(1);
+    watchdog.stop();
+  });
+
+  it("re-fires the down notice for a NEW incident after recovery closes the first", async () => {
+    let healthy = false;
+    const { watchdog, notifier } = createHarness({
+      autoRepair: false,
+      fetchImpl: async () => {
+        if (!healthy) throw new Error("gateway unavailable");
+        return {
+          ok: true,
+          status: 200,
+          text: async () => JSON.stringify({ ok: true, status: "live" }),
+        };
+      },
+    });
+
+    watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    await flushMicrotasks();
+    const downs = () =>
+      notifier.notify.mock.calls.filter(([message]) =>
+        String(message).includes("🔴 Gateway went down"),
+      );
+    expect(downs().length).toBe(1);
+
+    // Recovery closes the incident (and clears the once-per-incident keys)…
+    healthy = true;
+    await watchdog.runHealthCheck({ source: "test" });
+    // …so the NEXT unexpected exit is a new incident with its own notice.
+    healthy = false;
+    watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    await flushMicrotasks();
+    expect(downs().length).toBe(2);
     watchdog.stop();
   });
 
@@ -1060,6 +1097,13 @@ describe("server/watchdog", () => {
     ).toThrow(
       "Expected autoRepair, notificationsEnabled, and/or notificationsVerbose boolean",
     );
+    // A mistyped field must 400 even when a sibling field is valid — never
+    // silently drop it from a mixed payload (pre-landing review).
+    expect(() =>
+      watchdog.updateSettings({ autoRepair: true, notificationsVerbose: "true" }),
+    ).toThrow(
+      "Expected autoRepair, notificationsEnabled, and/or notificationsVerbose boolean",
+    );
     expect(() => watchdog.updateSettings({ autoRepair: "true" })).toThrow();
     expect(() =>
       watchdog.updateSettings({ notificationsEnabled: 1 }),
@@ -1290,11 +1334,15 @@ describe("server/watchdog", () => {
         details: expect.objectContaining({ recovered: true }),
       }),
     );
-    expect(
-      notifier.notify.mock.calls.some((call) =>
-        String(call?.[0] || "").includes("channels resumed"),
-      ),
-    ).toBe(true);
+    const resumedCall = notifier.notify.mock.calls.find((call) =>
+      String(call?.[0] || "").includes("channels resumed"),
+    );
+    expect(resumedCall).toBeTruthy();
+    // "Resumed — pause cleared" is informational: Important-only mode
+    // suppresses it (plan Phase-3 pin list).
+    expect(resumedCall[1]).toEqual(
+      expect.objectContaining({ eventType: "recovery", verbose: true }),
+    );
     watchdog.stop();
   });
 
