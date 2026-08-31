@@ -5,6 +5,69 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.9.50] - 2026-08-31
+
+Drift Doctor's "Ask Agent to Fix" now actually delivers to the chat you pick
+— any channel, any session-key shape — and the workspace scan caps are
+raised, configurable, and honestly reported.
+
+### Fixed
+- **"Ask Agent to Fix" silently never delivered to most DMs.** The reply
+  target derived from hand-rolled Telegram-only regexes: account-scoped keys
+  (`…telegram:default:direct:…`), suffixed keys (`…:heartbeat`), bare groups,
+  and every Discord/Slack DM lost delivery while the UI showed a success
+  toast. Delivery targets now derive through the canonical suffix/account-
+  tolerant parser, server-side, validated against the live session list —
+  Discord/Slack DMs get proper `user:<id>` targets and account-scoped keys
+  deliver through their account (`replyAccountId`/`--reply-account`). The
+  same fix repairs `POST /api/agent/message` and the webhook/cron destination
+  pickers for non-Telegram DMs.
+- **One unreadable directory no longer kills the workspace scan**, deep or
+  ultra-wide trees no longer crash the walk (iterative traversal, no spread
+  overflow), files vanishing mid-scan stay a non-event, a file being actively
+  appended can no longer hang the scan (hashing is bounded at the observed
+  size), and persistently unreadable files now honestly mark the scan
+  partial instead of silently vanishing from drift detection.
+- **Messages to another agent's session now run under that agent.**
+  "Send to agent" previously always executed as the main agent; with
+  delivery now working for every channel, a non-main agent's DM would have
+  received the main agent's answer — the turn now runs under the session's
+  own agent.
+
+### Added
+- **Configurable scan caps** (Doctor settings → Scan limits): defaults raised
+  to 200k files / 50MB per file (was 50k/10MB), bounds 1k–500k / 1–100MB,
+  blank = default; changes re-scan immediately, no restart. The partial-scan
+  banner now states real numbers (files found vs cap, oversize/hash-budget/
+  unreadable-dir skips) and links to the settings card.
+- **Honest fix-dispatch lifecycle:** the modal filters to deliverable + main
+  sessions, shows a "delivers to chat / runs in main thread" hint before
+  send, Telegram DM rows are peer-qualified ("Direct message · 1050"), the
+  toast says delivery was *requested* (never "delivered"), and working cards
+  carry a persisted dispatch record ("delivery requested → telegram · 1050" /
+  "dispatch failed").
+- **Scan coverage forensics:** every doctor run persists the caps + stats its
+  snapshot was built under (`scan_stats_json`).
+- **Pre-merge review hardening** (specialist + red-team + cross-model passes,
+  all findings fixed): oversized fix prompts are a clean 400 before any state
+  change (char pre-filter + byte budget on the final payload); a failing
+  sessions CLI maps to 502, never a client-blaming 400; failed dispatches
+  leave a visible "last fix dispatch failed" marker on the reopened card and
+  the record survives no-change scan cloning; scan-limit inputs revert their
+  drafts on rejected saves and lock during any in-flight settings save; the
+  scanner reuses one hash buffer and only skips the manifest round-trip when
+  nothing was re-hashed (touched-but-identical files no longer re-hash every
+  refresh).
+
+### Changed
+- **One-time full re-analysis after upgrade:** workspace fingerprints changed
+  (tool-owned directories like `dist`, `.venv`, `__pycache__`, `.cache`,
+  `coverage` are now ignored; capped scans fold exclusion counters into the
+  fingerprint so changes beyond the cap bust the reuse guard). The first scan
+  after this release re-analyzes from scratch by design.
+- **Bounded doctor.db growth:** run manifests are retained only on the newest
+  two manifest-bearing runs plus the latest completed run.
+
 ## [0.9.49] - 2026-08-31
 
 An upstream-alignment fix wave: the watchdog terminal finally gets a real

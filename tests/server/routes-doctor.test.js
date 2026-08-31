@@ -430,7 +430,17 @@ describe("server/routes/doctor", () => {
 
     const initial = await request(app).get("/api/doctor/settings");
     expect(initial.status).toBe(200);
-    expect(initial.body).toEqual({ ok: true, settings: { autoRunEnabled: false } });
+    expect(initial.body).toEqual({
+      ok: true,
+      settings: {
+        autoRunEnabled: false,
+        // No scan accessor wired: configured null, effective = built-ins.
+        scan: {
+          maxFiles: { configured: null, effective: 200000 },
+          maxFileMb: { configured: null, effective: 50 },
+        },
+      },
+    });
 
     const updated = await request(app)
       .put("/api/doctor/settings")
@@ -442,6 +452,90 @@ describe("server/routes/doctor", () => {
       .put("/api/doctor/settings")
       .send({ autoRunEnabled: "yes" });
     expect(invalid.status).toBe(400);
+
+    // Partial-body rule: an empty body is a client bug, not a no-op success.
+    const empty = await request(app).put("/api/doctor/settings").send({});
+    expect(empty.status).toBe(400);
+  });
+
+  it("validates and persists scan cap settings", async () => {
+    const doctorService = createDoctorService();
+    doctorService.invalidateSnapshotCache = vi.fn();
+    let enabled = true;
+    let scan = { maxFiles: null, maxFileMb: null };
+    const app = express();
+    app.use(express.json());
+    registerDoctorRoutes({
+      app,
+      requireAuth: (req, res, next) => next(),
+      doctorService,
+      readDoctorAutoRunEnabled: () => enabled,
+      updateDoctorAutoRunEnabled: (next) => {
+        enabled = next === true;
+        return enabled;
+      },
+      readDoctorScanConfig: () => ({ ...scan }),
+      updateDoctorScanConfig: ({ maxFiles, maxFileMb }) => {
+        if (maxFiles !== undefined) scan.maxFiles = maxFiles;
+        if (maxFileMb !== undefined) scan.maxFileMb = maxFileMb;
+        return { ...scan };
+      },
+    });
+
+    // Scan-only partial body: valid set within bounds.
+    const set = await request(app)
+      .put("/api/doctor/settings")
+      .send({ scan: { maxFiles: 300000 } });
+    expect(set.status).toBe(200);
+    expect(set.body.settings.scan.maxFiles).toEqual({
+      configured: 300000,
+      effective: 300000,
+    });
+    // autoRunEnabled untouched by a scan-only body.
+    expect(set.body.settings.autoRunEnabled).toBe(true);
+    // Cache invalidated so the new caps apply without a restart.
+    expect(doctorService.invalidateSnapshotCache).toHaveBeenCalledTimes(1);
+
+    // Mixed body updates both.
+    const mixed = await request(app)
+      .put("/api/doctor/settings")
+      .send({ autoRunEnabled: false, scan: { maxFileMb: 25 } });
+    expect(mixed.status).toBe(200);
+    expect(mixed.body.settings.autoRunEnabled).toBe(false);
+    expect(mixed.body.settings.scan.maxFileMb).toEqual({
+      configured: 25,
+      effective: 25,
+    });
+
+    // null resets to the built-in default.
+    const reset = await request(app)
+      .put("/api/doctor/settings")
+      .send({ scan: { maxFiles: null } });
+    expect(reset.status).toBe(200);
+    expect(reset.body.settings.scan.maxFiles).toEqual({
+      configured: null,
+      effective: 200000,
+    });
+
+    // Out-of-bounds, floats, wrong types, empty scan objects: loud 400s.
+    for (const badScan of [
+      { maxFiles: 999 },
+      { maxFiles: 500001 },
+      { maxFiles: 1.5 },
+      { maxFiles: "many" },
+      { maxFileMb: 0 },
+      { maxFileMb: 101 },
+      {},
+    ]) {
+      const bad = await request(app)
+        .put("/api/doctor/settings")
+        .send({ scan: badScan });
+      expect(bad.status).toBe(400);
+    }
+    const badShape = await request(app)
+      .put("/api/doctor/settings")
+      .send({ scan: [1, 2] });
+    expect(badShape.status).toBe(400);
   });
 
   it("reads settings as disabled when no accessor is wired", async () => {
@@ -449,5 +543,86 @@ describe("server/routes/doctor", () => {
     const res = await request(app).get("/api/doctor/settings");
     expect(res.status).toBe(200);
     expect(res.body.settings.autoRunEnabled).toBe(false);
+  });
+});
+
+describe("server/routes/doctor review-batch regressions", () => {
+  it("returns 500 for a scan body when the scan updater is not wired (no partial write)", async () => {
+    const doctorService = createDoctorService();
+    let enabled = false;
+    const updateAutoRun = vi.fn((next) => {
+      enabled = next === true;
+      return enabled;
+    });
+    const app = express();
+    app.use(express.json());
+    registerDoctorRoutes({
+      app,
+      requireAuth: (req, res, next) => next(),
+      doctorService,
+      readDoctorAutoRunEnabled: () => enabled,
+      updateDoctorAutoRunEnabled: updateAutoRun,
+      readDoctorScanConfig: () => ({ maxFiles: null, maxFileMb: null }),
+      // updateDoctorScanConfig deliberately NOT wired.
+    });
+
+    const res = await request(app)
+      .put("/api/doctor/settings")
+      .send({ autoRunEnabled: true, scan: { maxFiles: 2000 } });
+    expect(res.status).toBe(500);
+    expect(res.body.error).toBe("Doctor scan settings unavailable");
+    // The mixed body must not half-apply the autoRun flag before failing.
+    expect(updateAutoRun).not.toHaveBeenCalled();
+  });
+
+  it("rejects oversized fix prompts with a 400 before any dispatch", async () => {
+    const doctorService = createDoctorService();
+    const app = createApp(doctorService);
+    const res = await request(app)
+      .post("/api/doctor/findings/7/fix")
+      .send({ sessionKey: "agent:main:main", prompt: "A".repeat(100001) });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/100000 characters or fewer/);
+    expect(doctorService.requestCardFix).not.toHaveBeenCalled();
+  });
+});
+
+describe("server/routes/doctor combined atomic settings write (adversarial C-ADV6)", () => {
+  it("routes a mixed body through ONE combined write (no half-applied 500s)", async () => {
+    const doctorService = createDoctorService();
+    doctorService.invalidateSnapshotCache = vi.fn();
+    const legacyAutoRun = vi.fn();
+    const legacyScan = vi.fn();
+    const combined = vi.fn(({ autoRunEnabled, maxFiles, maxFileMb }) => ({
+      autoRunEnabled: autoRunEnabled === true,
+      scan: { maxFiles: maxFiles ?? null, maxFileMb: maxFileMb ?? null },
+    }));
+    const app = express();
+    app.use(express.json());
+    registerDoctorRoutes({
+      app,
+      requireAuth: (req, res, next) => next(),
+      doctorService,
+      readDoctorAutoRunEnabled: () => false,
+      updateDoctorAutoRunEnabled: legacyAutoRun,
+      readDoctorScanConfig: () => ({ maxFiles: 300000, maxFileMb: null }),
+      updateDoctorScanConfig: legacyScan,
+      updateDoctorSettingsCombined: combined,
+    });
+
+    const res = await request(app)
+      .put("/api/doctor/settings")
+      .send({ autoRunEnabled: true, scan: { maxFiles: 300000 } });
+    expect(res.status).toBe(200);
+    expect(combined).toHaveBeenCalledTimes(1);
+    expect(combined).toHaveBeenCalledWith({
+      autoRunEnabled: true,
+      maxFiles: 300000,
+      maxFileMb: undefined,
+    });
+    // The split writers must NOT run when the combined writer is wired.
+    expect(legacyAutoRun).not.toHaveBeenCalled();
+    expect(legacyScan).not.toHaveBeenCalled();
+    expect(doctorService.invalidateSnapshotCache).toHaveBeenCalledTimes(1);
   });
 });
