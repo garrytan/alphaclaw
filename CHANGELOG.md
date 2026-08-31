@@ -5,7 +5,7 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
-## [0.9.55] - 2026-08-31
+## [0.9.57] - 2026-08-31
 
 Disconnecting a Google account works again — and can no longer strand you
 half-disconnected. A v0.9.49 refactor broke every disconnect after the token
@@ -29,6 +29,134 @@ was already revoked at Google, leaving the account stuck in the UI.
 - With multiple Google accounts configured, a disconnect request without an
   `accountId` is now refused instead of guessing the first account (the Setup
   UI always sends one; agents get the exact rule in the admin manifest).
+
+## [0.9.56] - 2026-08-31
+
+One-click OpenClaw dashboards: every path into the Control UI now lands you
+signed in automatically — no terminal, no token pasting, no "Auth required"
+screen. Verified end-to-end on a real instance (real gateway, real browser
+click-through) and encoded as a live e2e suite.
+
+### Added
+- **Dashboards opens signed in.** The sidebar Dashboards link (and the
+  General tab's "OpenClaw Gateway Dashboard" Open button, the Team tab's
+  "Open Control UI", and the Envars "Open Secrets" deep link) now route
+  through an authenticated
+  server-side launcher (`GET /gateway/launch`) that primes the gateway token
+  into the Control UI's URL fragment via an empty-body redirect. The token
+  never enters the page's JavaScript, any response body, any log line, or
+  any cacheable surface; members and trusted-proxy (team) installs get
+  tokenless links and sign in via proxy identity. First visit and every
+  visit after lands connected.
+- **Doctor warns when dashboard links can't be token-primed.** A new
+  deterministic check (`det:dashboard-token-unresolvable`) surfaces the one
+  failure the launcher can't fix — no resolvable gateway token in config —
+  as a visible warning card instead of a silent fallback to the manual
+  connect screen. It never runs the CLI or external secret providers, and
+  stays silent in trusted-proxy and password modes where tokenless is
+  correct.
+- **Live e2e proof of the credential chain.**
+  `tests/live/dashboard-launch.e2e.test.js` boots the real server
+  supervising a real gateway and proves: authenticated launch → tokened
+  302 → the launcher-issued token authenticates a real WebSocket connect
+  through the proxy; a wrong token is rejected; an unauthenticated launch
+  never sees a token. (Live tier, `OPENCLAW_LIVE_E2E=1`.)
+
+### Changed
+- **The Dashboards sidebar item grew up.** Distinct icon (it previously
+  shared Usage's), a tooltip ("Opens OpenClaw session dashboards in a new
+  tab (signed in automatically)"), a visible-label-first accessible name,
+  and the mobile
+  drawer now closes when the new tab opens.
+- **Token resolution is single-flight, bounded, and mode-aware.** One shared
+  resolver serves the launcher, `/api/gateway/dashboard`, and the doctor
+  check: concurrent launches share one resolution (at most one CLI spawn),
+  a hung external secret provider degrades the launch tokenless within 20s
+  instead of hanging the tab (and the next launch retries fresh), and
+  trusted-proxy/password modes short-circuit tokenless without ever
+  spawning the CLI or resurrecting a stale token into a link.
+
+### Fixed
+- **The Envars "Open Secrets" link no longer corrupts the token.** It used
+  to splice the settings path inside the URL fragment, landing on a broken
+  URL; it now routes through the launcher and lands connected on
+  Settings → Secrets.
+- **No more false "token missing" warning in team mode.** The General tab's
+  toast fired in trusted-proxy installs where tokenless sign-in is the
+  success path; entry points now just open connected.
+
+### Security
+- Failed `openclaw` CLI runs now scrub token-bearing values by shape, and
+  launcher resolution errors by shape and by known-secret value (process
+  env, env file, and config literals — with the env file read fail-closed)
+  before anything reaches a log line; `GET /api/gateway/dashboard` responses
+  are marked `Cache-Control: no-store` so the tokened URL can't sit in a
+  browser HTTP cache.
+
+## [0.9.55] - 2026-08-31
+
+The watchdog now sees a memory leak coming instead of explaining the crash
+afterward: gateway memory is sampled every minute, a rising trend is called
+out hours before the limit, Drift Doctor turns it into a guided fix, and — if
+you opt in — the gateway is restarted gracefully before it runs out of memory.
+
+### Added
+- **Memory-leak detection (default ON, report-only).** The watchdog samples
+  the gateway's memory (RSS) once a minute and confirms a leak with a
+  noise-resistant trend test (rising per-window floors + projected time to
+  the limit against a co-residency-aware cap). You get one calm notification
+  per episode ("memory rising steadily — projected to reach its limit in
+  ~3h"), a distinct 🔴 alert if it turns critical, persisted watchdog events
+  (`leak_suspected` / `leak_critical` / `leak_cleared` with an episode
+  summary), and an honest live trend row on the Watchdog tab's Resources
+  card. Disable anytime: Watchdog → Settings → Memory leak detection.
+- **Drift Doctor knows about leaks.** A suspected or critical leak surfaces
+  as a deterministic finding card (episode-scoped, so dismissing one false
+  positive never silences a future real leak) with an "Ask agent to fix"
+  runbook: confirm the trend, inspect recently added plugins/config, check
+  the logs, and apply machine-specific memory-limit advice that refuses to
+  suggest a raise when the container is already at its limit. A recent
+  episode stays visible as evidence even after a restart replaced the
+  process, and leak onset counts as an environment change for scheduled
+  scans.
+- **Pre-OOM auto-restart (strictly opt-in, default OFF).** When a confirmed
+  leak turns critical, the watchdog can restart the gateway gracefully before
+  the crash — through the same lifecycle lock and interlocks as a manual
+  restart (never mid-channel-apply, never over a reconciler hold), never
+  during an update's stabilization window, only on a tick with a fresh
+  memory reading, capped at 2 restarts per 24 hours at least 6 hours apart
+  (the brake survives AlphaClaw restarts; a failed restart attempt refunds
+  that budget instead of burning it), and never counted as a crash. The
+  deployed agent cannot arm this switch for itself: any agent-admin write
+  that would turn effective auto-restart on requires an operator confirm.
+- **Leak context reaches the AI diagnosis surfaces.** Incident post-mortems
+  carry the close-time memory trend (episode evidence only when it actually
+  correlates with the incident), and the numeric machine summary the gateway
+  medic and upgrade overseer read now includes the RSS trend — numbers and
+  closed enums only.
+
+### Fixed
+- **The Resources card's "Gateway" memory segment now counts the whole
+  gateway process tree.** On OpenClaw 2026.9.1-beta.1, `gateway run` can fork
+  a worker child that holds the real heap while the launcher stays ~50MB — a
+  launcher-only read showed a tiny, flat number while the real gateway (and
+  any leak in it) lived in the worker. Both the card and the leak monitor now
+  read the subtree (`getProcessTreeUsage`, one bounded `/proc` pass).
+- `getProcessUsage` (per-pid RSS) is now exported from
+  `lib/server/system-resources.js` — the memory monitor's default sampler
+  depends on it (caught by the new real-process leak e2e).
+- **Toggling memory settings can never destroy a corrupt config.** If
+  alphaclaw.json exists but cannot be parsed, `PUT /api/watchdog/memory`
+  now refuses with 409 `config_unreadable` instead of silently rebuilding
+  the entire file from defaults (which would have erased every unrelated
+  setting). The deployed agent also cannot arm auto-restart through
+  concurrent split writes — the `autoRestart: true` field itself now always
+  requires an operator confirm.
+- **Memory-limit advice is honest about what it can fix.** The critical
+  alert and the Drift Doctor runbook embed the "raise the gateway heap"
+  command only when the pressure is actually against the heap cap; pressure
+  against the container limit gets "raising the heap will not help" guidance
+  instead.
 
 ## [0.9.54] - 2026-08-31
 

@@ -1514,6 +1514,80 @@ describe("server/doctor-service", () => {
     );
   });
 
+  it("includes the wired dashboard-token check in a full doctor run's output", async () => {
+    // Wiring proof, not another unit test: an unwired check passes its unit
+    // suite while never appearing in a run. Registers through the same
+    // registerDashboardTokenCheck path register-server-routes uses, then
+    // asserts the card lands among the run's persisted cards.
+    const previousEnvToken = process.env.OPENCLAW_GATEWAY_TOKEN;
+    delete process.env.OPENCLAW_GATEWAY_TOKEN;
+    const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-dash-token-"));
+    const dbRoot = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-dash-token-db-"));
+    fs.writeFileSync(path.join(workspaceRoot, "AGENTS.md"), "# Guidance\n", "utf8");
+    try {
+      const doctorDb = loadManagedDoctorDb();
+      doctorDb.initDoctorDb({ rootDir: dbRoot });
+
+      const { createDashboardUrlService } = require("../../lib/server/gateway-dashboard-url");
+      const clawCmd = vi.fn(async () => ({
+        ok: true,
+        stdout: "Dashboard URL: http://127.0.0.1:18789/#token=cli-token",
+      }));
+      const dashboardUrlService = createDashboardUrlService({
+        // Token mode, no token anywhere: config-only resolution comes up empty.
+        fsModule: { readFileSync: () => JSON.stringify({ gateway: { auth: {} } }) },
+        openclawDir: "/tmp/openclaw",
+        readEnvFile: () => [],
+        clawCmd,
+        importSecretRuntime: () =>
+          Promise.resolve([
+            { coerceSecretRef: () => null },
+            { resolveSecretRefValues: async () => new Map() },
+          ]),
+      });
+
+      const { createDoctorService } = loadDoctorService();
+      const doctorService = createDoctorService({
+        clawCmd: vi.fn(),
+        listDoctorRuns: doctorDb.listDoctorRuns,
+        listDoctorCards: doctorDb.listDoctorCards,
+        getInitialWorkspaceBaseline: doctorDb.getInitialWorkspaceBaseline,
+        setInitialWorkspaceBaseline: doctorDb.setInitialWorkspaceBaseline,
+        createDoctorRun: doctorDb.createDoctorRun,
+        completeDoctorRun: doctorDb.completeDoctorRun,
+        insertDoctorCards: doctorDb.insertDoctorCards,
+        getDoctorRun: doctorDb.getDoctorRun,
+        getDoctorCardsByRunId: doctorDb.getDoctorCardsByRunId,
+        getDoctorCard: doctorDb.getDoctorCard,
+        updateDoctorCardStatus: doctorDb.updateDoctorCardStatus,
+        readOpenclawConfig: () => ({ gateway: { auth: {} } }),
+        isOnboarded: () => true,
+        workspaceRoot,
+        managedRoot: workspaceRoot,
+        computeSnapshotAsync: fastComputeSnapshotAsync,
+      });
+      doctorService.registerDashboardTokenCheck(dashboardUrlService);
+
+      const imported = await doctorService.importDoctorResult({
+        rawOutput: JSON.stringify({ summary: "Clean", cards: [] }),
+      });
+
+      const cards = doctorDb.getDoctorCardsByRunId(imported.runId);
+      expect(cards).toEqual([
+        expect.objectContaining({
+          sourceKey: "det:dashboard-token-unresolvable",
+          priority: "P2",
+          source: "deterministic",
+        }),
+      ]);
+      // The check is config-only: the CLI-spawning resolver path never ran.
+      expect(clawCmd).not.toHaveBeenCalled();
+    } finally {
+      if (previousEnvToken === undefined) delete process.env.OPENCLAW_GATEWAY_TOKEN;
+      else process.env.OPENCLAW_GATEWAY_TOKEN = previousEnvToken;
+    }
+  });
+
   it("returns a slim latestRun without workspaceManifest or rawResult", async () => {
     const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-slim-status-"));
     const dbRoot = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-slim-status-db-"));
@@ -2570,6 +2644,7 @@ describe("server/doctor-service", () => {
       computeSnapshotAsync = fastComputeSnapshotAsync,
       listDismissedSourceKeys = null,
       readOpenclawConfig = null,
+      getGatewayMemoryTrend = null,
     } = {}) => {
       const { createDoctorService } = loadDoctorService();
       const created = [];
@@ -2617,6 +2692,7 @@ describe("server/doctor-service", () => {
         },
         listDismissedSourceKeys,
         ...(readOpenclawConfig ? { readOpenclawConfig } : {}),
+        ...(getGatewayMemoryTrend ? { getGatewayMemoryTrend } : {}),
       });
       return { service, created, runsByIdCards, meta };
     };
@@ -2748,6 +2824,55 @@ describe("server/doctor-service", () => {
       expect(baseline).toBeTruthy();
       expect(unrelatedChange).toBe(baseline);
       expect(mainChange).not.toBe(baseline);
+    });
+
+    it("env signature tracks the NORMALIZED memory-trend digest (none|suspected|critical only)", async () => {
+      const { computeWorkspaceSnapshot } = require("../../lib/server/doctor/workspace-fingerprint");
+      const makeMatchingSummary = () => {
+        const nowIso = new Date().toISOString();
+        return {
+          id: 1,
+          status: "completed",
+          engine: "gateway_agent",
+          workspaceFingerprint: computeWorkspaceSnapshot(workspaceRoot).fingerprint,
+          promptVersion: "doctor-v2",
+          contextProfile: "stable-2026.7",
+          openclawVersion: "",
+          completedAt: nowIso,
+          startedAt: nowIso,
+        };
+      };
+      const signatureForTrend = async (trendState) => {
+        const meta = new Map();
+        const { service } = makeService({
+          meta,
+          summaries: [makeMatchingSummary()],
+          getGatewayMemoryTrend: () => ({ state: trendState }),
+        });
+        try {
+          const result = await service.runDoctor();
+          expect(result.reusedPreviousRun).toBe(true);
+          return meta.get("last_env_signature");
+        } finally {
+          // Undisposed services leak auto-run interval state into later
+          // fake-timer tests in this file (the hardening-trigger suite).
+          service.dispose();
+        }
+      };
+
+      const healthy = await signatureForTrend("normal");
+      // Harmless transitions never invalidate reuse: warming/insufficient/
+      // watch all normalize to "none".
+      expect(await signatureForTrend("warming_up")).toBe(healthy);
+      expect(await signatureForTrend("insufficient_samples")).toBe(healthy);
+      expect(await signatureForTrend("watch")).toBe(healthy);
+      // Leak onset flips the signature (auto-run trigger with zero workspace
+      // delta), and the escalation to critical flips it AGAIN.
+      const suspected = await signatureForTrend("leak_suspected");
+      expect(suspected).not.toBe(healthy);
+      const critical = await signatureForTrend("critical");
+      expect(critical).not.toBe(healthy);
+      expect(critical).not.toBe(suspected);
     });
 
     it("rejects card fixes with a gatewayUnavailable error while degraded", async () => {

@@ -53,6 +53,50 @@ describe("getStatus() additive fields", () => {
     expect(status.awaitingAutoRepairRecovery).toBe(false);
     expect(typeof status.serverNow).toBe("number");
     expect(status.repairAttemptLimit).toBeGreaterThan(0);
+    // Memory monitor: latched enum + ISO + boolean only — the 2s SSE frame-
+    // dedupe projection must never see an always-changing numeric here.
+    expect(status.memory).toEqual({
+      trendState: "no_gateway",
+      trendSince: null,
+      autoRestartEnabled: false,
+    });
+  });
+
+  it("memory status stays frame-stable across repeated reads (SSE dedupe safety)", async () => {
+    const { watchdog } = createHarness();
+    const readMemorySample = vi.fn(() => ({ rssBytes: 100 * 1024 * 1024 }));
+    // Re-create with an injected sampler + settings so a tick actually runs.
+    const memWatchdog = createWatchdog({
+      clawCmd: vi.fn(async () => ({ ok: true })),
+      launchGatewayProcess: vi.fn(async () => null),
+      insertWatchdogEvent: vi.fn(),
+      notifier: { notify: vi.fn(async () => ({ ok: true })) },
+      readEnvFile: vi.fn(() => ""),
+      writeEnvFile: vi.fn(),
+      reloadEnv: vi.fn(),
+      resolveSetupUrl: () => "http://localhost",
+      sleepImpl: () => Promise.resolve(),
+      readMemorySample,
+      readMemorySettings: () => ({
+        enabled: true,
+        autoRestart: false,
+        effectiveAutoRestart: false,
+      }),
+    });
+    memWatchdog.onGatewayLaunch({ pid: 777, startedAt: Date.now() });
+    await memWatchdog.checkMemoryTrend();
+    const first = memWatchdog.getStatus().memory;
+    expect(first.trendState).toBe("warming_up");
+    expect(first.trendSince).toBeTruthy();
+    // Repeated getStatus reads with NO new tick are byte-identical — no
+    // volatile numerics leak into the projection.
+    const second = memWatchdog.getStatus().memory;
+    expect(JSON.stringify(second)).toBe(JSON.stringify(first));
+    // Another tick in the SAME state changes nothing either.
+    await memWatchdog.checkMemoryTrend();
+    const third = memWatchdog.getStatus().memory;
+    expect(JSON.stringify(third)).toBe(JSON.stringify(first));
+    void watchdog;
   });
 
   it("records lastExit and crash phase on an unexpected gateway exit", async () => {

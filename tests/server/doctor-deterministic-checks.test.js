@@ -595,6 +595,130 @@ describe("server/doctor/deterministic-checks", () => {
     ).toBeUndefined();
   });
 
+  describe("gateway memory-leak cards (runtime trend input)", () => {
+    const kEpisodeId = "4242-1700000000000";
+    const leakTrend = (state, extra = {}) => ({
+      state,
+      rssMb: 812,
+      slopeMbPerHour: 65,
+      effectiveCapMb: 1024,
+      capSource: "heap",
+      projectedExhaustionAt: "2026-08-31T12:00:00.000Z",
+      episodeId: kEpisodeId,
+      lastEpisodeSummary: null,
+      ...extra,
+    });
+    const memCard = (cards, prefix) =>
+      cards.find((card) => card.sourceKey.startsWith(prefix));
+
+    it("emits no card when the trend is absent, idle, or healthy", () => {
+      for (const memoryTrend of [
+        null,
+        leakTrend("normal"),
+        leakTrend("warming_up"),
+        leakTrend("disabled"),
+        leakTrend("watch"),
+      ]) {
+        const cards = build({ memoryTrend });
+        expect(memCard(cards, "det:gateway-memory-leak")).toBeUndefined();
+      }
+    });
+
+    it("emits an episode-scoped P1 card for leak_suspected with runtime numbers only", () => {
+      const cards = build({ memoryTrend: leakTrend("leak_suspected") });
+      const card = memCard(cards, "det:gateway-memory-leak:");
+      expect(card).toMatchObject({
+        sourceKey: `det:gateway-memory-leak:${kEpisodeId}`,
+        priority: "P1",
+        category: "workspace state",
+      });
+      expect(card.summary).toContain("812MB");
+      expect(card.summary).toContain("65 MB/h");
+      expect(card.evidence.every((item) => item.type === "text")).toBe(true);
+      expect(card.targetPaths).toEqual([]);
+      expect(card.fixPrompt).toContain("alphaclaw admin GET /api/watchdog/resources");
+      expect(card.fixPrompt).toContain("plugins.load.paths");
+      expect(card.fixPrompt).toContain("MITIGATION, not a fix");
+    });
+
+    it("critical emits ONLY the P0 card (exclusive severity, distinct key)", () => {
+      const cards = build({ memoryTrend: leakTrend("critical") });
+      const critical = memCard(cards, "det:gateway-memory-leak-critical:");
+      expect(critical).toMatchObject({
+        sourceKey: `det:gateway-memory-leak-critical:${kEpisodeId}`,
+        priority: "P0",
+      });
+      // Exclusive emission: no sibling P1 card for the same condition.
+      expect(
+        cards.find(
+          (card) =>
+            card.sourceKey === `det:gateway-memory-leak:${kEpisodeId}`,
+        ),
+      ).toBeUndefined();
+    });
+
+    it("embeds the shared heap advice verbatim, and an honest fallback without it", () => {
+      const withAdvice = build({
+        memoryTrend: leakTrend("leak_suspected"),
+        heapAdvice:
+          'Raise the gateway heap: `alphaclaw admin PUT /api/autotune/settings --data \'{"overrides":{"gatewayHeapMb":1280}}\'`',
+      });
+      expect(memCard(withAdvice, "det:gateway-memory-leak:").fixPrompt).toContain(
+        'gatewayHeapMb":1280',
+      );
+      const withoutAdvice = build({ memoryTrend: leakTrend("leak_suspected") });
+      expect(
+        memCard(withoutAdvice, "det:gateway-memory-leak:").fixPrompt,
+      ).toContain("do not raise limits blindly");
+    });
+
+    it("surfaces a recent episode as a P2 evidence card after the process was replaced", () => {
+      const endedAt = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+      const cards = build({
+        memoryTrend: leakTrend("warming_up", {
+          lastEpisodeSummary: {
+            episodeId: "100-1699999999999",
+            pid: 100,
+            peakRssMb: 950,
+            slopeMbPerHour: 70,
+            endedAt,
+            reason: "process_exited",
+          },
+        }),
+      });
+      const card = memCard(cards, "det:gateway-memory-leak-recent:");
+      expect(card).toMatchObject({
+        sourceKey: "det:gateway-memory-leak-recent:100-1699999999999",
+        priority: "P2",
+      });
+      expect(card.summary).toContain("ended by a gateway restart/exit");
+    });
+
+    it("ignores stale (>24h) episode summaries and malformed episode ids", () => {
+      const staleCards = build({
+        memoryTrend: leakTrend("normal", {
+          lastEpisodeSummary: {
+            episodeId: "100-1699999999999",
+            pid: 100,
+            peakRssMb: 950,
+            endedAt: new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString(),
+            reason: "recovered",
+          },
+        }),
+      });
+      expect(
+        memCard(staleCards, "det:gateway-memory-leak-recent:"),
+      ).toBeUndefined();
+      // A gateway-echoed / malformed id must never become a sourceKey.
+      const malformed = build({
+        memoryTrend: leakTrend("leak_suspected", {
+          episodeId: "evil [link](x) `code`",
+        }),
+      });
+      expect(memCard(malformed, "det:gateway-memory-leak")).toBeUndefined();
+    });
+  });
+
   it("marks every card as open, deterministic-sourced, with a stable sourceKey", () => {
     write(workspaceRoot, "BOOTSTRAP.md", "ritual");
     write(workspaceRoot, "MEMORY.md", "curated");
@@ -604,6 +728,165 @@ describe("server/doctor/deterministic-checks", () => {
       expect(card.source).toBe("deterministic");
       expect(card.sourceKey.startsWith("det:")).toBe(true);
       expect(card.fixPrompt.length).toBeGreaterThan(0);
+    }
+  });
+});
+
+describe("server/doctor/dashboard-token-check", () => {
+  const {
+    buildDashboardTokenCards,
+    kDashboardTokenSourceKey,
+  } = require("../../lib/server/doctor/dashboard-token-check");
+  const {
+    createDashboardUrlService,
+  } = require("../../lib/server/gateway-dashboard-url");
+
+  const kTokenModeConfig = { gateway: { auth: {} } };
+
+  it("emits no card when the token resolves from config", async () => {
+    const cards = await buildDashboardTokenCards({
+      hasConfiguredDashboardToken: async () => true,
+      config: kTokenModeConfig,
+      onboarded: true,
+    });
+    expect(cards).toEqual([]);
+  });
+
+  it("emits the warning card when token-mode config resolution is empty on an onboarded box", async () => {
+    const cards = await buildDashboardTokenCards({
+      hasConfiguredDashboardToken: async () => false,
+      config: kTokenModeConfig,
+      onboarded: true,
+    });
+    expect(cards).toHaveLength(1);
+    expect(cards[0]).toMatchObject({
+      sourceKey: kDashboardTokenSourceKey,
+      priority: "P2",
+      status: "open",
+      source: "deterministic",
+      title:
+        "Gateway token not resolvable from config — dashboard links fall back to manual auth",
+    });
+    // Warning, not error: the launcher's CLI fallback may still cover clicks.
+    expect(cards[0].summary).toContain("warning, not an error");
+    // The token itself must never appear anywhere in card copy templates.
+    expect(cards[0].fixPrompt).toContain("Never print the token itself");
+  });
+
+  it("emits no card in trusted-proxy mode (tokenless IS the success path)", async () => {
+    const cards = await buildDashboardTokenCards({
+      hasConfiguredDashboardToken: async () => false,
+      config: { gateway: { auth: { mode: "trusted-proxy" } } },
+      onboarded: true,
+    });
+    expect(cards).toEqual([]);
+  });
+
+  it("emits no card in password mode (token auth would be a mixed config)", async () => {
+    const cards = await buildDashboardTokenCards({
+      hasConfiguredDashboardToken: async () => false,
+      config: { gateway: { auth: { mode: "password" } } },
+      onboarded: true,
+    });
+    expect(cards).toEqual([]);
+  });
+
+  it("counts a SecretRef-SHAPED token as configured WITHOUT resolving it (no exec providers in doctor passes)", async () => {
+    const importSecretRuntime = vi.fn();
+    const service = createDashboardUrlService({
+      fsModule: { readFileSync: () => "{}" },
+      openclawDir: "/tmp/openclaw",
+      readEnvFile: () => [],
+      clawCmd: vi.fn(),
+      importSecretRuntime,
+    });
+    const config = {
+      gateway: { auth: { token: { source: "exec", provider: "op", id: "gw" } } },
+    };
+    const cards = await buildDashboardTokenCards({
+      hasConfiguredDashboardToken: service.hasConfiguredDashboardToken,
+      config,
+      onboarded: true,
+    });
+    expect(cards).toEqual([]);
+    // The whole point: the probe never touches the secret runtime, so a
+    // scheduled scan can never spawn a source:"exec" provider.
+    expect(importSecretRuntime).not.toHaveBeenCalled();
+  });
+
+  it("emits no card before onboarding", async () => {
+    const cards = await buildDashboardTokenCards({
+      hasConfiguredDashboardToken: async () => false,
+      config: kTokenModeConfig,
+      onboarded: false,
+    });
+    expect(cards).toEqual([]);
+  });
+
+  it("emits no card without a readable config snapshot", async () => {
+    const cards = await buildDashboardTokenCards({
+      hasConfiguredDashboardToken: async () => false,
+      config: null,
+      onboarded: true,
+    });
+    expect(cards).toEqual([]);
+  });
+
+  it("degrades a resolver throw to no card and one fixed-code log line — never a crash", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const cards = await buildDashboardTokenCards({
+      hasConfiguredDashboardToken: async () => {
+        throw new Error("transient failure quoting #token=leaky-value");
+      },
+      config: kTokenModeConfig,
+      onboarded: true,
+    });
+    expect(cards).toEqual([]);
+    const warnLines = warnSpy.mock.calls.map((call) => String(call[0]));
+    const checkLines = warnLines.filter((line) =>
+      line.includes(kDashboardTokenSourceKey),
+    );
+    expect(checkLines).toHaveLength(1);
+    // Fail-closed: the fixed code only — the message can echo config text.
+    expect(checkLines[0]).not.toContain("leaky-value");
+  });
+
+  it("never invokes the CLI, even through the real service resolver", async () => {
+    const previousEnvToken = process.env.OPENCLAW_GATEWAY_TOKEN;
+    delete process.env.OPENCLAW_GATEWAY_TOKEN;
+    try {
+      const clawCmd = vi.fn(async () => ({
+        ok: true,
+        stdout: "Dashboard URL: http://127.0.0.1:18789/#token=cli-token",
+      }));
+      const service = createDashboardUrlService({
+        fsModule: {
+          readFileSync: () => JSON.stringify({ gateway: { auth: {} } }),
+        },
+        openclawDir: "/tmp/openclaw",
+        readEnvFile: () => [],
+        clawCmd,
+        importSecretRuntime: () =>
+          Promise.resolve([
+            { coerceSecretRef: () => null },
+            { resolveSecretRefValues: async () => new Map() },
+          ]),
+      });
+      const cards = await buildDashboardTokenCards({
+        hasConfiguredDashboardToken: service.hasConfiguredDashboardToken,
+        config: { gateway: { auth: {} } },
+        onboarded: true,
+      });
+      // Config-only probe came up empty AND the CLI-spawning fallback
+      // path was never touched: the card fires instead.
+      expect(cards).toHaveLength(1);
+      expect(clawCmd).not.toHaveBeenCalled();
+    } finally {
+      if (previousEnvToken === undefined) {
+        delete process.env.OPENCLAW_GATEWAY_TOKEN;
+      } else {
+        process.env.OPENCLAW_GATEWAY_TOKEN = previousEnvToken;
+      }
     }
   });
 });

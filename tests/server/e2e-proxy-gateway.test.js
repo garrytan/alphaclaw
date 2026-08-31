@@ -581,4 +581,40 @@ describe("gateway proxy real-process e2e", () => {
     });
     expect(outcome).toBe("status:401");
   });
+
+  // /gateway/launch rides the non-/api auth path on purpose: expired sessions
+  // get the login PAGE redirect (not 401 JSON) and the agent bearer physically
+  // cannot reach it (allowBearer only applies under /api/). These three cases
+  // pin that contract in the real process — the reason the route needs no
+  // admin-manifest entry.
+  it("redirects an unauthenticated /gateway/launch to the login page", async () => {
+    const res = await httpRequest(serverPort, {
+      path: "/gateway/launch?to=dashboards",
+    });
+    expect(res.status).toBe(302);
+    expect(res.headers.location).toBe("/login.html");
+  });
+
+  it("redirects a bearer-only /gateway/launch to the login page (bearer never works off /api)", async () => {
+    const res = await httpRequest(serverPort, {
+      path: "/gateway/launch?to=dashboards",
+      headers: { authorization: "Bearer some-agent-token" },
+    });
+    expect(res.status).toBe(302);
+    expect(res.headers.location).toBe("/login.html");
+  });
+
+  it("302s a session-cookie /gateway/launch to the dashboards sub-path with an empty body", async () => {
+    const res = await httpRequest(serverPort, {
+      path: "/gateway/launch?to=dashboards",
+      headers: { cookie },
+    });
+    expect(res.status).toBe(302);
+    // This harness never onboards, so the launcher takes the tokenless branch
+    // deterministically (and never spawns the CLI); the tokened branches are
+    // pinned by routes-dashboard-launch.test.js.
+    expect(res.headers.location).toBe("/openclaw/dashboards");
+    expect(res.headers["cache-control"]).toBe("no-store");
+    expect(res.body.toString("utf8")).toBe("");
+  });
 });

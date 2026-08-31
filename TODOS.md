@@ -438,12 +438,57 @@
 ## P3 — Resource telemetry follow-ups: configurable thresholds, sparklines/history
 - **What:** Optional alphaclaw.json keys for the (currently hardcoded 80/90%) resource warn/crit display thresholds; small ring buffer + sparklines for memory/CPU/event-loop lag.
 - **Why:** Deferred as expert knobs / width-hungry UI; revisit on demand. Display-only either way.
+- **Update (memory-leak wave):** the gateway RSS ring buffer now EXISTS (in-memory, ~120 samples, inside `lib/server/gateway-memory-monitor.js`) — a memory sparkline only needs a read path from the detector's sample window to the resources payload.
 - **Effort:** M. **Depends on:** nothing.
 
 ## P3 — Resource-based alerting/enforcement (design needed — invariant territory)
 - **What:** Any watchdog *action* on resource signals (e.g., restart on sustained event-loop starvation or OOM pressure).
 - **Why:** Today resources are report-only by design ("the deterministic watchdog is the ONLY enforcement layer" covers gateway health, not host resources). Changing that is a policy design, not a feature toggle.
+- **Update (memory-leak wave):** DESIGNED AND SHIPPED for the gateway-memory case — the reviewed policy (opt-in default OFF `watchdog.memory.autoRestart`, watchdog-owned lifecycle lock, stabilization-window suppression, persisted 2-per-24h brake, expected-restart semantics; see the AGENTS.md memory-monitor bullet). CPU / event-loop / disk enforcement remains undesigned; any new signal must go through the same explicit-design bar, reusing the memory policy as the template.
 - **Effort:** L. **Depends on:** explicit design review.
+
+## P3 — AlphaClaw self-process memory-leak detection
+- **What:** Run `createGatewayMemoryMonitor` against the admin server's own `process.memoryUsage().rss` (we are also a long-lived Node process with in-memory maps).
+- **Why:** The detector is pure and signal-agnostic; the missing piece is mitigation semantics — the server cannot pre-OOM restart ITSELF safely (drain, pidfile, boot-placeholder interplay), so v1 would be detect+notify only.
+- **Context:** Detector module `lib/server/gateway-memory-monitor.js`; the watchdog tick pattern in `checkMemoryTrend` is the wiring template. Deferred from the memory-leak wave CEO review (D7.3).
+- **Effort:** M → CC: S. **Depends on:** nothing.
+
+## P3 — Doctor LLM prompt: machine/memory context line
+- **What:** Feed `getMachineSummaryForPrompt()` (now including `gatewayRssTrendMbPerHour`/`gatewayMemoryTrendState`) into the Drift Doctor LLM prompt.
+- **Why:** The deterministic leak card already carries the finding; prompt context would only help the LLM tier reason about memory-adjacent workspace findings. Speculative until a real case shows the gap. Deferred from the memory-leak wave (D7.5).
+- **Context:** `buildDoctorPrompt` (lib/server/doctor/prompt.js); machine summary consumers today are the medic + upgrade overseer.
+- **Effort:** S. **Depends on:** nothing.
+
+## P3 — V8-heap-precision gateway sampling (security review required)
+- **What:** Upgrade the RSS proxy to real V8 heap numbers for the CHILD gateway — candidates: Node diagnostic report on signal (`--report-on-signal` + parse), an opt-in `/readyz` memory block if upstream ships one, or inspector-protocol `HeapProfiler` (least favored).
+- **Why:** RSS conflates heap with allocator fragmentation/native memory; heap-precision would sharpen the leak-vs-fragmentation call and the heap-raise advice. Every candidate widens the gateway's attack/perf surface, so this needs its own security review — deliberately excluded from the memory-leak wave.
+- **Context:** Detection seams: `readMemorySample()` dep in lib/server/watchdog.js; cap math in lib/server/gateway-memory-monitor.js (`computeEffectiveCap`).
+- **Effort:** M. **Depends on:** security review.
+
+## P3 — Calibrate tree-RSS vs single-process heap-cap pressure math
+- **What:** `computeEffectiveCap` models ONE V8 process (`activeHeapMb + 192MB overhead`) but the pressure numerator is the whole process TREE from `getProcessTreeUsage` (launcher + worker + descendants, with per-process VmRSS double-counting shared pages). Options: compare max single-process RSS in the tree against the heap cap (tree RSS stays for the container cap), or size `gatewayNativeOverheadMb` to explicitly budget the launcher.
+- **Why:** Tree-over-heap-cap structurally overestimates pressure — a busy-but-healthy gateway subtree could brush the 90% fast-path band; the inverse error underestimates co-residents in the container cap. Mitigated today by the fast path's rising-slope requirement and the critical 2-eval confirm, so a flat-at-92% gateway never restarts; this sharpens the margin rather than fixing a live false-positive. Red-team finding from the memory-leak wave ship review.
+- **Context:** lib/server/gateway-memory-monitor.js (`computeEffectiveCap`, fast path); sampler in lib/server/watchdog.js (`readMemorySampleSafe`) already has per-pid granularity available in `getProcessTreeUsage`'s walk.
+- **Effort:** S. **Depends on:** a live remeasure of launcher/worker RSS split (the wave's live e2e harness, tests/live/openclaw-live-memory.e2e.test.js, can produce it).
+- **Also (same seam):** the subtree walk is synchronous on the main event loop (worst case ~8192 /proc status reads per uncached call; 5s TTL memo bounds frequency, typical containers are <300 pids ≈ ms). If a real deployment shows loop-lag spikes attributable to it, move the walk off-thread (fingerprint-worker precedent) or lower kMaxProcScan with an explicit truncation marker instead of silent cutoff.
+
+## P3 — Corrupt-config write refusal for the remaining alphaclaw.json updaters
+- **What:** `updateWatchdogMemorySettings` now refuses to write while alphaclaw.json exists-but-cannot-parse (error code `config_unreadable`, PUT /api/watchdog/memory → 409) — but the other updaters (`updateWatchdogSettings`, `updateAutotuneSettings`, `updateDoctorAutoRunEnabled`, `updateOpenAiCompatApiFeature`, etc., all built on `updateAlphaclawConfig`) still merge onto `kDefaultAlphaclawConfig` when the read falls back, silently rebuilding the whole file from defaults and destroying unrelated operator settings.
+- **Why:** A "toggle write" during transient corruption (torn write, disk pressure) must not be the thing that makes the corruption permanent. Red-team finding from the memory-leak wave; fixed narrowly there to bound blast radius.
+- **Context:** The guard belongs in `updateAlphaclawConfig` itself (lib/server/alphaclaw-config.js) — one existsSync+JSON.parse probe under the file lock, plus a route-level 409 mapping per caller. Template: the memory updater + routes/watchdog.js PUT handler.
+- **Effort:** S. **Depends on:** nothing.
+
+## P3 — Consume OpenClaw's own memory-pressure diagnostics as a corroborating signal
+- **What:** Parse the gateway log line `[diagnostics/memory] memory pressure: level=critical reason=rss_threshold rss=... heap=...` (2026.9.1-beta.1+) into the watchdog memory monitor as a second, upstream-sourced signal beside the RSS trend — and surface its heap-vs-RSS split (a flat heap with runaway RSS indicates an off-main-isolate leak, e.g. a plugin, where heap raises cannot help).
+- **Why:** Upstream now self-reports pressure with per-isolate heap numbers AlphaClaw cannot observe from outside; corroboration would cut false positives and sharpen the doctor card's plugin-vs-main-leak diagnosis.
+- **Context:** Discovered during the memory-leak wave's live tier; log format is beta and unversioned — treat as an encoded assumption with a guard test, per the drift doctrine. Consumption point: the gateway stderr/stdout tail already flows through lib/server/gateway.js.
+- **Effort:** M → CC: S. **Depends on:** log-format stability check against the next beta.
+
+## P3 — Shared rolling-window rate-brake helper
+- **What:** One `rollingWindowBrake` util for the three copies: medic runs (`medicRunTimestamps`), handoff relaunches (`handoffRelaunchTimestamps`), memory mitigations (`memoryMitigationTimestamps` — the persisted one).
+- **Why:** Third copy shipped with the memory-leak wave; the persistence wrinkle (only the memory brake persists) is why it was not extracted inline.
+- **Context:** All three live in lib/server/watchdog.js.
+- **Effort:** S. **Depends on:** nothing.
 
 ## P3 — Capture the incident log window at close time
 - **What:** Persist the timestamp-filtered gateway log excerpt when an incident closes (per-incident file or capped blob) instead of re-reading the tail at review time.
@@ -550,12 +595,6 @@
 - **Context:** Track anthropics/claude-code#30447. The version-pinned TUI fixtures (tests/server/fixtures/claude-code-tui/) and the Dockerfile's exact-version claude pin are the artifacts this retires.
 - **Effort:** S. **Depends on:** upstream shipping the flag.
 
-## P3 — Mobile drawer doesn't close on external nav items
-- **What:** The generic `item.href` branch in `renderNavItem` (lib/public/js/components/sidebar.js) — used by the gated Dashboards link — never closes the mobile drawer, leaving the drawer and overlay covering the app while the new tab opens.
-- **Why:** The Claude Code launcher fixed this for itself via its `onBeforeOpen` callback (design-review finding); the same fix should backport to the generic external-item branch.
-- **Context:** `use-browse-navigation.js` `handleSelectNavItem` closes the drawer for internal items only; external anchors bypass it.
-- **Effort:** S. **Depends on:** nothing.
-
 ## P3 — Claude Code launcher: durable cross-process fire lease
 - **What:** The launcher's single-flight (`inFlight`) and cooldown (`cooldownUntil`) live in memory on one `claudeCodeService` instance (lib/server/claude-code-service.js). A crash between Anthropic accepting a fire and AlphaClaw replying, or multiple server processes, or multiple team admins, each bypass the duplicate-billing guard; `busy`/`cooldown` are also shared across all admins (one admin's fire blocks another's).
 - **Why:** The fire endpoint has no upstream idempotency key, so every gap in the in-memory guard is a real (if narrow) double-billing window. Adversarial review (Claude + Codex) flagged it; accepted as out-of-scope for the initial launcher because the practical exposure is small (single-process deploy, one operator, rare crash-timing).
@@ -585,7 +624,43 @@
 - **Why:** Both predate the v0.9.45 timezone work (flagged by its adversarial review because they sit on touched lines); each is a one-line-ish fix but changes pre-existing behavior, so they get their own change.
 - **Effort:** S. **Depends on:** nothing.
 
+## P2 — Dashboard launcher: bootstrapToken owner-grade handoff for the CLI fallback
+- **What:** Upgrade the launcher's CLI fallback from scraping the shared token to forwarding the one-time `#bootstrapToken=…&bootstrapProfile=owner` fragment that `openclaw dashboard --no-open --json` mints (`browserUrl` field, verified on 2026.9.1-beta.1). Single-use + 600s TTL (`DEVICE_BOOTSTRAP_TOKEN_TTL_MS`, atomic consume) means mint per click — the launcher's single-flight CLI memo must NOT share one bootstrap URL across concurrent launches. Feature-gate via the existing gate pattern (lib/server/openclaw-feature-gates.js) and re-verify the JSON contract per version against the npm tarball per the context-contract re-verification checklist.
+- **Why:** Covers installs running an ephemeral unrecoverable runtime token (where config-first resolution returns nothing) and removes the shared token from browser URLs entirely — the bootstrap grant is owner-grade, expiring, and single-use.
+- **Context:** docs/designs/openclaw-context-contract.md §6 (owner-handoff facts + citations); lib/server/gateway-dashboard-url.js `resolveDashboardToken` (the CLI fallback to upgrade); lib/server/routes/dashboard-launch.js. Deferred from the launcher plan's follow-ups.
+- **Effort:** M. **Depends on:** the launcher shipping; per-version verification of the `dashboard --json` contract. Related: upstream's own handoff never URL-embeds a SecretRef-backed token (`includeTokenInUrl = Boolean(token) && !hasSecretRef`); AlphaClaw's resolver embeds the materialized value (pre-existing behavior) — the bootstrap handoff removes that divergence for SecretRef installs too.
+
+## P3 — Post-login return path for launcher clicks
+- **What:** login.html hardcodes the post-login redirect to "/" (`window.location.href = "/"`, ~line 216), so an expired-session click on the Dashboards launcher authenticates and then loses the `/gateway/launch?to=dashboards` target. Add an open-redirect-safe `?next=` parameter: the login redirect carries the original path, and login.html honors it only after validation (single-origin relative path — reject schemes, hosts, and protocol-relative `//`).
+- **Why:** The launcher's expired-session UX currently dead-ends one click short of the target; a validated `next` closes the loop without opening a redirect hole.
+- **Context:** lib/public/login.html; lib/server/routes/auth.js (the login-page redirect for unauthenticated non-`/api` requests). Deferred from the launcher plan's follow-ups.
+- **Effort:** S. **Depends on:** nothing.
+
+## P2 — Auth-gate the catch-all WS upgrade to the gateway
+- **What:** The upgrade handler in lib/server/watchdog-terminal-ws.js auth-checks `/openclaw*`, the terminal path, and `/api/ws/chat`, but its final catch-all `proxy.ws(...)` forwards every other upgrade path — including the Control UI's actual root-path WS — to the gateway with no AlphaClaw auth in front (the gateway's connect-frame auth still applies downstream). CAVEAT for any fix: node onboarding connects through that same proxied WS with only the gateway token and NO AlphaClaw cookie — a naive `isAuthorizedRequest` gate breaks node pairing. The gate must leave a path for token-bearing node connects (or scope the check to the paths the browser Control UI uses).
+- **Why:** With the launcher making dashboard access one-click, the WS side should match the HTTP side's auth boundary instead of relying solely on gateway connect-frame auth.
+- **Context:** lib/server/watchdog-terminal-ws.js (`server.on("upgrade")`, catch-all at the end); identity strip/inject already handled by resolveProxyIdentity/applyProxyIdentity. Deferred from the launcher plan's follow-ups.
+- **Effort:** M. **Depends on:** verifying the node-onboarding WS handshake on both supported lines.
+
+## P3 — Launcher focus deep-links into product surfaces
+- **What:** Deep-link Watchdog incidents / Cron runs / Usage rows into the matching OpenClaw dashboard session: a launcher query param `?focus=<sessionKey>`, validated server-side and TRANSLATED to the path-form `/focus/dashboard/...` URL via `buildDashboardFocusUrl` — OpenClaw parses no query-form focus (path grammar only).
+- **Why:** "Open this session's dashboard" from an incident/run/usage row is the natural next step once launcher clicks land authenticated; today those surfaces have no jump.
+- **Context:** lib/public/js/lib/app-navigation.js `buildDashboardFocusUrl` (client helper exists); lib/server/routes/dashboard-launch.js (extend the allowlist mapping — raw input never interpolated into Location); focus path grammar cited in docs/designs/openclaw-context-contract.md §5 (Dashboards focus deep links).
+- **Effort:** S-M. **Depends on:** the launcher shipping.
+
+## P3 — Consolidate the two gateway-token resolvers
+- **What:** lib/server/gateway-dashboard-url.js (config-first, browser-URL-safe, SecretRef/env-file/CLI fallback) and lib/server/gateway-credential.js (env-first; returns the gateway PASSWORD in password/trusted-proxy modes) both resolve gateway credentials. Fold them into one mode-aware resolver with per-consumer projections. Hard constraints: preserve the routes-system.test.js precedence pins (dashboard resolution is config-first, test-pinned) and the invariant that a password NEVER feeds a browser URL. Also flagged during the launcher review (collaborative repo, not fixed there): `kLocalOnlyApiPrefixes` (lib/server/routes/proxy.js) lists `/api/gateway-status` but no route serves it.
+- **Why:** Two resolvers with different precedence invite the wrong one being extended; today a cross-reference comment is the only guard.
+- **Context:** Cross-reference comment in gateway-dashboard-url.js; tests/server/routes-system.test.js precedence pins. Deferred from the launcher plan's follow-ups. Also fold in: GET /api/gateway/dashboard answers `needsAuth:true` in trusted-proxy mode where tokenless IS the success path — a false 'auth missing' signal to the agent-actor consumer; distinguish tokenless-success (e.g. a `mode` field) when the shapes are next unpinned.
+- **Effort:** M. **Depends on:** the launcher shipping.
+
 ## Completed
+
+## Mobile drawer doesn't close on external nav items
+- **What:** The generic `item.href` branch in `renderNavItem` (lib/public/js/components/sidebar.js) — used by the gated Dashboards link — never closes the mobile drawer, leaving the drawer and overlay covering the app while the new tab opens.
+- **Why:** The Claude Code launcher fixed this for itself via its `onBeforeOpen` callback (design-review finding); the same fix should backport to the generic external-item branch.
+- **Completed:** v0.9.56 (2026-08-31) — the external-item anchor branch now notifies the shell via a new `onExternalNavClick` prop (wired to `closeMobileSidebar` in app.js) without preventDefault, so native new-tab navigation is untouched; pinned by tests/frontend/sidebar-external-nav.test.js.
+
 
 ## Serialize alphaclaw.json writers under a file lock
 - **What:** Route every writeAlphaclawConfig read-modify-write through the shared file lock.
