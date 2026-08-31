@@ -197,6 +197,28 @@ describe("server/db/chat-runs", () => {
     expect(listMarkers("small")).toHaveLength(1);
   });
 
+  it("caps total rows globally — unique session keys can't grow the db forever", () => {
+    // The per-session cap is useless against a client minting UNIQUE session
+    // keys (1 row each): without the global ceiling an authenticated socket
+    // grows chat-runs.db until disk exhaustion. Runtime pruning fires from
+    // recordSend itself (every 500 inserts), so a long-lived server stays
+    // bounded without waiting for a reboot.
+    for (let index = 0; index < 5600; index += 1) {
+      recordSend({
+        sessionKey: `flood-${index}`,
+        clientMsgId: "cm",
+        messageId: `m-${index}`,
+      });
+    }
+    pruneChatRuns();
+    // markTerminal on a pruned row updates nothing — the oldest rows are
+    // provably gone while the newest survive.
+    markTerminal({ sessionKey: "flood-0", clientMsgId: "cm", status: "stopped" });
+    markTerminal({ sessionKey: "flood-5599", clientMsgId: "cm", status: "stopped" });
+    expect(listMarkers("flood-0")).toHaveLength(0);
+    expect(listMarkers("flood-5599")).toHaveLength(1);
+  });
+
   it("caps stored error text at 500 characters", () => {
     recordSend({ sessionKey: "s1", clientMsgId: "cm1", messageId: "m1" });
     markTerminal({
@@ -259,13 +281,39 @@ describe("chat/history stable ids + truncation", () => {
     );
   });
 
-  it("prefers a native row id when the gateway provides one", () => {
+  it("prefers a native row id when the gateway provides one, disambiguated per rendered row", () => {
     const built = buildHistoryMessages({
       history: { messages: [row({ id: "native-7" })] },
       sessionKey: "s",
       limit: 10,
     });
-    expect(built.messages[0].id).toBe("h:native-7");
+    // Role (and toolCallId/occurrence when present) suffix the native id: one
+    // gateway message splits into a text row plus one row per tool call, and
+    // the bare native id would mint DUPLICATE keys across those rows.
+    expect(built.messages[0].id).toBe("h:native-7:assistant");
+  });
+
+  it("a native-id message split across text and tool rows never duplicates ids", () => {
+    const built = buildHistoryMessages({
+      history: {
+        messages: [
+          {
+            id: "native-9",
+            role: "assistant",
+            timestamp: 1000,
+            content: [
+              { type: "text", text: "running a tool" },
+              { type: "toolCall", id: "tc-1", name: "exec", arguments: {} },
+              { type: "toolCall", id: "tc-2", name: "exec", arguments: {} },
+            ],
+          },
+        ],
+      },
+      sessionKey: "s",
+      limit: 10,
+    });
+    const ids = built.messages.map((m) => m.id);
+    expect(new Set(ids).size).toBe(ids.length);
   });
 
   it("reports truncation only when a row beyond the limit proves older history", () => {

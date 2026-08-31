@@ -64,6 +64,34 @@ ambiguous outcome is recorded visibly in the conversation — across reloads.
 - Stop stays available against older servers; a "Still working…" hint appears
   when a run goes quiet for a couple of minutes; keyboard focus returns to
   the composer after Retry/Discard.
+- Adversarial-review hardening (two independent fresh-context passes, Claude +
+  Codex, both gated the merge until fixed): a failed send's stored terminal no
+  longer blocks its own retry for 10 minutes (retry is now a fresh attempt);
+  a stale or timed-out gateway connection attempt can no longer tear down the
+  healthy replacement socket (falsely interrupting every live run) or feed
+  duplicate events into transcripts; `chat-runs.db` is bounded by a global row
+  cap with runtime pruning (unique session keys could previously grow it until
+  disk exhaustion); a delayed Stop naming an already-finished run settles
+  cleanly instead of killing the session's newer run; a second tab waiting on
+  `session_busy` now attaches to the live run and sees its stream and
+  terminal; a run that finished while a tab was disconnected no longer wedges
+  that session's queue on reconnect; acknowledged-but-unsettled sends requeue
+  on socket loss (dedupe-safe) instead of stranding; a foreign run's lifecycle
+  end on the same session can no longer fail a still-pending send; per-run
+  stream cursors can no longer silently lose frames after reconnect (a stale
+  cursor now forces a history reconcile); a finished run's live row with a
+  stream hole self-heals instead of duplicating the bubble forever; history
+  ids from native gateway rows are disambiguated per rendered row; ids
+  containing control characters are rejected (registry-key collision + log
+  injection); chat session keys are validated before reaching gateway RPCs on
+  every path including HTTP history, whose errors are now classified instead
+  of leaking raw gateway text; logout clears queued chat content and drafts;
+  a transient socket blip can no longer latch the sticky HTTP-fallback mode;
+  oversized drafts are measured post-JSON-escaping so pathological content
+  hits the visible size chip instead of killing the socket; concurrent Stops
+  collapse into one abort; buffered foreign-run events are byte-capped; and a
+  tab's send allowance counts only its own sends, not org-wide runs it
+  auto-attached to. Remaining accepted residuals are logged in TODOS.md.
 
 ### Changed
 - The chat bridge (`lib/server/chat-ws.js`) was decomposed into

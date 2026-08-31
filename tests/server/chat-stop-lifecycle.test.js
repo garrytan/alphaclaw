@@ -331,6 +331,92 @@ describe("server/chat stop lifecycle", () => {
     expect(browser.messages.some((m) => m.runId === "r5-late")).toBe(false);
   });
 
+  it("a stop naming an unknown runId settles without killing the session's current run", async () => {
+    const harness = await kit.startGatewayHarness();
+    const service = kit.createService(harness);
+    const browser = await kit.openBrowser(service);
+    await kit.startRun({
+      harness,
+      browser,
+      sessionKey: "s-late-stop",
+      runId: "run-current",
+      clientMsgId: "cm-current",
+    });
+
+    // A late stop for an already-finalized run: it IS stopped — settle the
+    // client, but the CURRENT run must keep streaming untouched.
+    browser.send({ type: "stop", sessionKey: "s-late-stop", runId: "run-ghost" });
+    const done = await browser.waitFor(
+      (m) => m.type === "done" && m.runId === "run-ghost",
+      "ghost stop settles",
+    );
+    expect(done).toMatchObject({ reason: "stopped", stopped: true });
+    expect(harness.requests.filter((f) => f.method === "chat.abort")).toHaveLength(0);
+
+    harness.emit({
+      type: "event",
+      event: "agent",
+      payload: {
+        runId: "run-current",
+        stream: "assistant",
+        data: { delta: "still alive" },
+      },
+    });
+    const chunk = await browser.waitFor(
+      (m) => m.type === "chunk" && m.content === "still alive",
+      "current run still streaming",
+    );
+    expect(chunk.runId).toBe("run-current");
+
+    // Allow-legit twin: a stop WITHOUT a runId still stops the current run.
+    harness.onRequest = (frame) => {
+      if (frame.method === "chat.abort") harness.respond(frame.id, {});
+    };
+    browser.send({ type: "stop", sessionKey: "s-late-stop" });
+    await browser.waitFor((m) => m.type === "stopping", "stopping");
+    await waitUntil(
+      () => harness.requests.filter((f) => f.method === "chat.abort").length === 1,
+      "abort fired for the runId-less stop",
+    );
+  });
+
+  it("a second stop while one is in flight re-acknowledges without a second abort", async () => {
+    const harness = await kit.startGatewayHarness();
+    const heldAborts = [];
+    harness.onRequest = (frame) => {
+      if (frame.method === "chat.abort") heldAborts.push(frame);
+    };
+    const service = kit.createService(harness);
+    const browser = await kit.openBrowser(service);
+    await kit.startRun({
+      harness,
+      browser,
+      sessionKey: "s-double-stop",
+      runId: "run-ds",
+      clientMsgId: "cm-ds",
+    });
+
+    browser.send({ type: "stop", sessionKey: "s-double-stop", runId: "run-ds" });
+    await browser.waitFor((m) => m.type === "stopping", "first stopping");
+    browser.send({ type: "stop", sessionKey: "s-double-stop", runId: "run-ds" });
+    await waitUntil(
+      () => browser.messages.filter((m) => m.type === "stopping").length === 2,
+      "second stopping ack",
+    );
+    // Overlapping aborts could interleave with the first one's failure
+    // rollback and record the stop as a natural completion.
+    expect(heldAborts).toHaveLength(1);
+
+    harness.respond(heldAborts[0].id, {});
+    harness.emit({
+      type: "event",
+      event: "agent",
+      payload: { runId: "run-ds", stream: "lifecycle", data: { phase: "end" } },
+    });
+    const done = await browser.waitFor((m) => m.type === "done", "stop confirmed");
+    expect(done).toMatchObject({ reason: "stopped", confidence: "confirmed" });
+  });
+
   it("swallows an abort failure that loses the race to a natural completion", async () => {
     vi.spyOn(console, "error").mockImplementation(() => {});
     const harness = await kit.startGatewayHarness();

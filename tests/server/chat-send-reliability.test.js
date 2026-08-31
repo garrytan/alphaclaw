@@ -218,6 +218,83 @@ describe("server/chat send reliability", () => {
     expect(harness.requests.filter((f) => f.method === "chat.send")).toHaveLength(0);
   });
 
+  it("a duplicate of a FAILED send is a fresh attempt, not a replayed failure", async () => {
+    // A confirmed pre-write failure writes an `error` terminal row and tells
+    // the client it is retryable. The retry keeps the clientMsgId by design —
+    // replaying the stored failure here would silently disable the entire
+    // retry path for the 10-minute dedupe window.
+    const { store } = createRecordingStore({
+      findRecentTerminal: ({ clientMsgId }) =>
+        clientMsgId === "cm-errored"
+          ? {
+              sessionKey: "s-retry",
+              clientMsgId: "cm-errored",
+              status: "error",
+              errorCode: "gateway_unavailable",
+            }
+          : null,
+    });
+    const harness = await kit.startGatewayHarness();
+    harness.onRequest = (frame) => {
+      if (frame.method === "chat.send") harness.respond(frame.id, { runId: "r-retry" });
+    };
+    const service = kit.createService(harness, { chatRunsStore: store });
+    const browser = await kit.openBrowser(service);
+
+    browser.send({
+      type: "message",
+      clientMsgId: "cm-errored",
+      sessionKey: "s-retry",
+      content: "try again",
+    });
+    const started = await browser.waitFor((m) => m.type === "started", "fresh started");
+    expect(started).toMatchObject({ clientMsgId: "cm-errored", runId: "r-retry" });
+    expect(harness.requests.filter((f) => f.method === "chat.send")).toHaveLength(1);
+  });
+
+  it("a session-routed lifecycle end never finalizes an unstarted record", async () => {
+    // A foreign run finishing on the same session during our send window must
+    // not fail the pending send (and then orphan-abort our own run when the
+    // RPC resolves).
+    const harness = await kit.startGatewayHarness();
+    let heldSend = null;
+    harness.onRequest = (frame) => {
+      if (frame.method === "chat.send") heldSend = frame;
+    };
+    const service = kit.createService(harness);
+    const browser = await kit.openBrowser(service);
+
+    browser.send({
+      type: "message",
+      clientMsgId: "cm-pending-guard",
+      sessionKey: "s-guard",
+      content: "hold",
+    });
+    await browser.waitFor((m) => m.type === "ack", "ack");
+    await waitUntil(() => heldSend !== null, "send reached gateway");
+
+    // Foreign lifecycle end routed by session key while our record is pending.
+    harness.emit({
+      type: "event",
+      event: "agent",
+      payload: { sessionKey: "s-guard", stream: "lifecycle", data: { phase: "end" } },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(browser.messages.some((m) => m.type === "send-failed")).toBe(false);
+    expect(browser.messages.some((m) => m.type === "done")).toBe(false);
+
+    // Our own RPC then resolves normally — the run starts and completes.
+    harness.respond(heldSend.id, { runId: "r-guard" });
+    await browser.waitFor((m) => m.type === "started", "started");
+    harness.emit({
+      type: "event",
+      event: "agent",
+      payload: { runId: "r-guard", stream: "lifecycle", data: { phase: "end" } },
+    });
+    const done = await browser.waitFor((m) => m.type === "done", "done");
+    expect(done.reason).toBe("complete");
+  });
+
   it("rejects a second concurrent send in the same session with session_busy", async () => {
     const harness = await kit.startGatewayHarness();
     const service = kit.createService(harness);

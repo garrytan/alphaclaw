@@ -103,6 +103,36 @@ describe("frontend/chat transcript-store mergeHistory", () => {
     expect(covered.some((m) => m.live)).toBe(false);
   });
 
+  it("a finished run's HOLEY live row yields once history persists a newer reply", () => {
+    // A dropped chunk means the live text never exactly matches history's
+    // full row — without the supersede rule the truncated copy would render
+    // as a duplicate bubble for the rest of the tab's lifetime.
+    const live = applyChunk({
+      messages: [],
+      messageId: "m3",
+      content: "final ans", // hole: history persisted "final answer"
+      runId: "r3",
+      now: 2_000,
+    });
+    const healed = mergeHistory({
+      current: live,
+      rows: [historyRow("h10", "assistant", "final answer", 2_100)],
+      activeMessageId: "",
+    });
+    expect(healed.map((m) => m.id)).toEqual(["h10"]);
+    expect(healed.some((m) => m.live)).toBe(false);
+
+    // Twin: while history only has OLDER rows (gateway persist lag), the
+    // live row is retained — never blank shown text.
+    const retained = mergeHistory({
+      current: live,
+      rows: [historyRow("h11", "assistant", "an older reply", 50)],
+      activeMessageId: "",
+    });
+    expect(retained).toHaveLength(2);
+    expect(retained).toContain(live[0]);
+  });
+
   it("confirmation is bounded and one-shot", () => {
     const onConfirmed = vi.fn();
     const itemA = {

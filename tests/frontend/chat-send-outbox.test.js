@@ -431,6 +431,34 @@ describe("send-outbox: socket-death requeue and live-eviction warning", () => {
     expect(outbox.nextEligible("s2")?.clientMsgId).toBe(b.clientMsgId);
   });
 
+  it("requeueAllInflight also requeues ACKED items, with a hold for history confirmation", async () => {
+    // The socket died after ack but before a terminal: the run's outcome went
+    // to the dead socket and pending runs are never advertised in
+    // hello.activeRuns — NOT requeueing strands the item as "sent, never
+    // settled". The short hold lets the reconnect history merge confirm
+    // delivery (removing the item) before any dedupe-safe resend fires.
+    const { createSendOutbox } = await import(
+      "../../lib/public/js/components/chat/send-outbox.js"
+    );
+    const nowRef = { now: 1_000_000 };
+    let uuidCounter = 0;
+    const outbox = createSendOutbox({
+      storage: null,
+      storageKey: "t",
+      now: () => nowRef.now,
+      uuid: () => `ra-${(uuidCounter += 1)}`,
+      random: () => 0.5,
+    });
+    const item = outbox.enqueue({ sessionKey: "s1", content: "acked one" });
+    outbox.markInflight(item.clientMsgId);
+    outbox.markAcked(item.clientMsgId);
+    outbox.requeueAllInflight();
+    expect(outbox.listAll()[0].status).toBe("queued");
+    expect(outbox.nextEligible("s1")).toBeNull();
+    nowRef.now += 5_000;
+    expect(outbox.nextEligible("s1")?.clientMsgId).toBe(item.clientMsgId);
+  });
+
   it("warns loudly when the byte cap is forced to evict a LIVE item from storage", async () => {
     const { createSendOutbox, kOutboxMaxBytes } = await import(
       "../../lib/public/js/components/chat/send-outbox.js"

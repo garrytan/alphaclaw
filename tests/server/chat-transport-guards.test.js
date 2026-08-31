@@ -128,6 +128,19 @@ describe("server/chat transport guards", () => {
         content: "hi",
       }).ok,
     ).toBe(true);
+    // Control characters are rejected: the registry's composite key is
+    // newline-delimited (an id containing \n could collide two records) and
+    // ids are echoed into structured log lines.
+    expect(
+      validateMessageFrame({ sessionKey: "a\nb", content: "hi" }).ok,
+    ).toBe(false);
+    expect(
+      validateMessageFrame({
+        sessionKey: "s",
+        clientMsgId: "cm\u0000x",
+        content: "hi",
+      }).ok,
+    ).toBe(false);
     const oversized = validateMessageFrame({
       sessionKey: "s",
       content: "y".repeat(1_100_000),

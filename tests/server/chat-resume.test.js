@@ -353,6 +353,40 @@ describe("server/chat resume streaming", () => {
   });
 
   // Allow-legit twin for run advertising: no live runs → nothing advertised.
+  it("a cursor beyond the run's own seq reports a gap (per-run seq vs stale session cursor)", async () => {
+    const harness = await kit.startGatewayHarness();
+    const service = kit.createService(harness);
+    const browserA = await kit.openBrowser(service);
+    await browserA.waitFor((m) => m.type === "hello", "hello A");
+    await kit.startRun({
+      harness,
+      browser: browserA,
+      sessionKey: "rs-stale",
+      runId: "run-stale",
+      clientMsgId: "cm-stale",
+    });
+    emitDelta(harness, "run-stale", "one");
+    await browserA.waitFor((m) => m.type === "chunk", "chunk on A");
+
+    // A client whose per-session cursor carried over from an earlier, longer
+    // run asks past this run's end: an empty replay must NOT read as
+    // "complete" — frames may have been missed during the disconnect.
+    const browserB = await kit.openBrowser(service);
+    await browserB.waitFor((m) => m.type === "hello", "hello B");
+    browserB.send({
+      type: "resume",
+      sessionKey: "rs-stale",
+      runId: "run-stale",
+      afterSeq: 99,
+    });
+    const resumed = await browserB.waitFor(
+      (m) => m.type === "resumed" && m.runId === "run-stale",
+      "resumed with gap",
+    );
+    expect(resumed.gap).toBe(true);
+    expect(streamFrames(browserB)).toHaveLength(0);
+  });
+
   it("a browser connecting while no runs are live gets an empty activeRuns list", async () => {
     const harness = await kit.startGatewayHarness();
     const service = kit.createService(harness);
