@@ -333,19 +333,34 @@ describe("frontend/watchdog settings card (SavedToggle wiring)", () => {
     );
   };
 
-  it("renders both rows as SavedToggles scoped by context", () => {
+  it("renders the env-var rows plus the memory-monitor rows as context-scoped SavedToggles", () => {
     const tree = renderCard();
     const savedToggles = findAllByType(tree, SavedToggle);
-    expect(savedToggles.length).toBe(2);
+    // Two env-var toggles + the memory-monitor section's two (its own
+    // settings document on /api/watchdog/memory).
+    expect(savedToggles.length).toBe(4);
     expect(savedToggles.map((vnode) => vnode.props.context)).toEqual([
       kAutoRepairContext,
       kNotificationsContext,
+      "memoryEnabled",
+      "memoryAutoRestart",
     ]);
     const toggles = findAllByType(tree, ToggleSwitch);
     expect(toggles[0].props.checked).toBe(false); // auto-repair
     expect(toggles[1].props.checked).toBe(true); // notifications
     expect(toggles[0].props.label).toBe("Disabled");
     expect(toggles[1].props.label).toBe("Enabled");
+  });
+
+  it("disables the auto-restart toggle while memory detection is off", () => {
+    const tree = renderCard();
+    const savedToggles = findAllByType(tree, SavedToggle);
+    const autoRestart = savedToggles.find(
+      (vnode) => vnode.props.context === "memoryAutoRestart",
+    );
+    // The unhydrated memory doc renders {} → detection not confirmed on →
+    // the consent knob stays disabled rather than armable-by-default.
+    expect(autoRestart.props.disabled).toBe(true);
   });
 
   it("shows Saving... only on the in-flight control; the sibling just disables", () => {
