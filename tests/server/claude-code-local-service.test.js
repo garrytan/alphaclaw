@@ -119,9 +119,11 @@ const kPaths = {
   lockFile: "/data/claude-code-local/lifecycle.lock",
 };
 
+// Success-path tests get a generous URL deadline so an event-loop stall on a
+// loaded CI worker can never trip it; the timeout test overrides its own.
 const kFastTimers = {
   urlPollMs: 2,
-  urlDeadlineMs: 250,
+  urlDeadlineMs: 2_000,
   trustWatchMs: 2,
   loginPollMs: 2,
   loginTtlMs: 500,
@@ -349,7 +351,9 @@ describe("claude-code-local service", () => {
     });
 
     it("times out into a kept-for-diagnosis error session", async () => {
-      const { service, driver } = createService({});
+      const { service, driver } = createService({
+        timers: { ...kFastTimers, urlDeadlineMs: 250 },
+      });
       await service.refreshProbes({ force: true });
       await service.startSession({ confirmed: true, source: "click" });
       driver.state.buffer = "still booting…";
@@ -626,14 +630,283 @@ describe("claude-code-local service", () => {
     it("refuses when a live foreign process holds the lock, steals a stale one", async () => {
       const { service, fsModule } = createService({});
       await service.refreshProbes({ force: true });
-      // PID 1 is always alive on linux; a fresh timestamp = genuinely held.
-      fsModule.files.set(kPaths.lockFile, JSON.stringify({ pid: 1, at: Date.now() }));
+      // The parent shell is a live same-uid process this runner can always
+      // signal — a portable stand-in for a foreign live holder (PID 1 is
+      // EPERM-guarded on unprivileged runners).
+      fsModule.files.set(
+        kPaths.lockFile,
+        JSON.stringify({ pid: process.ppid, at: Date.now() }),
+      );
       const held = await service.startSession({ confirmed: true, source: "click" });
       expect(held).toMatchObject({ ok: false, code: "busy" });
       // A dead holder is stale regardless of timestamp.
       fsModule.files.set(kPaths.lockFile, JSON.stringify({ pid: 999999999, at: Date.now() }));
       const stolen = await service.startSession({ confirmed: true, source: "click" });
       expect(stolen).toMatchObject({ ok: true });
+    });
+
+    it("treats an EPERM holder as alive (another uid's process exists)", async () => {
+      const { driver, fsModule } = createService({});
+      const killSpy = vi.spyOn(process, "kill").mockImplementation(() => {
+        const err = new Error("EPERM");
+        err.code = "EPERM";
+        throw err;
+      });
+      try {
+        const { service } = createService({ driver, fsModule });
+        await service.refreshProbes({ force: true });
+        fsModule.files.set(
+          kPaths.lockFile,
+          JSON.stringify({ pid: 4242424, at: Date.now() }),
+        );
+        const held = await service.startSession({ confirmed: true, source: "click" });
+        expect(held).toMatchObject({ ok: false, code: "busy" });
+      } finally {
+        killSpy.mockRestore();
+      }
+    });
+  });
+
+  describe("consent-mode TOCTOU guard", () => {
+    it("refuses a click whose consented mode mismatches the live config", async () => {
+      const env = { CLAUDE_CODE_LOCAL_PERMISSION_MODE: "acceptEdits" };
+      const { service, driver } = createService({ env });
+      await service.refreshProbes({ force: true });
+      env.CLAUDE_CODE_LOCAL_PERMISSION_MODE = "bypassPermissions"; // hot-reload race
+      const result = await service.startSession({
+        confirmed: true,
+        consentedMode: "acceptEdits",
+        source: "click",
+      });
+      expect(result).toMatchObject({ ok: false, code: "confirm_required" });
+      expect(driver.newSession).not.toHaveBeenCalled();
+      const matched = await service.startSession({
+        confirmed: true,
+        consentedMode: "bypassPermissions",
+        source: "click",
+      });
+      expect(matched).toMatchObject({ ok: true, status: "starting" });
+    });
+  });
+
+  describe("generation staleness", () => {
+    it("ignores a late URL after the session was stopped mid-watch", async () => {
+      const { service, driver } = createService({});
+      await service.refreshProbes({ force: true });
+      await service.startSession({ confirmed: true, source: "click" });
+      await service.stopSession();
+      driver.state.sessionAlive = true; // simulate stale capture still flowing
+      driver.state.buffer = "https://claude.ai/code/sess_late00000000";
+      await flush(60);
+      const snapshot = service.getStatusSnapshot();
+      expect(snapshot.state).toBe("ready");
+      expect(snapshot.sessionUrl).toBeNull();
+    });
+
+    it("errors with spawn_failed when the pane dies before the URL appears", async () => {
+      const { service, driver } = createService({});
+      await service.refreshProbes({ force: true });
+      await service.startSession({ confirmed: true, source: "click" });
+      driver.state.buffer = "booting…";
+      driver.state.sessionAlive = false; // process died mid-starting
+      await flush(80);
+      const snapshot = service.getStatusSnapshot();
+      expect(snapshot.state).toBe("error");
+      expect(snapshot.error.code).toBe("spawn_failed");
+    });
+  });
+
+  describe("script(1) hosting fallback", () => {
+    const createScriptService = ({ env = {} } = {}) => {
+      const driver = createFakeDriver();
+      driver.state.tmuxOk = false;
+      const child = createFakeChild();
+      const spawnImpl = vi.fn(() => child);
+      const built = createService({
+        env,
+        driver,
+        spawnImpl,
+      });
+      // hasScriptCommandImpl is a factory option; rebuild with it set.
+      const service = createClaudeCodeLocalService({
+        env,
+        fsModule: built.fsModule,
+        tmux: driver,
+        runStream: createFakeRunStream(),
+        spawnImpl,
+        hasScriptCommandImpl: () => true,
+        logger: { log: vi.fn(), warn: vi.fn(), error: vi.fn() },
+        paths: kPaths,
+        timers: kFastTimers,
+      });
+      return { service, driver, child, spawnImpl, fsModule: built.fsModule };
+    };
+
+    it("spawns via script(1), warns about restart survival, and extracts the URL from the buffer", async () => {
+      const { service, child } = createScriptService();
+      await service.refreshProbes({ force: true });
+      const started = await service.startSession({ confirmed: true, source: "click" });
+      expect(started).toMatchObject({ ok: true, status: "starting" });
+      child.stdout.emit(
+        "data",
+        "Continue coding in the Claude mobile app or https://claude.ai/code?environment=env_01SCRIPTHOST\n",
+      );
+      await flush(60);
+      const snapshot = service.getStatusSnapshot();
+      expect(snapshot.state).toBe("running");
+      expect(snapshot.hosting).toBe("script");
+      expect(snapshot.sessionUrl).toBe(
+        "https://claude.ai/code?environment=env_01SCRIPTHOST",
+      );
+      expect(snapshot.warnings.join(" ")).toContain("does not survive AlphaClaw restarts");
+    });
+
+    it("answers the trust prompt and the RC confirm exactly once each on stdin", async () => {
+      const { service, child } = createScriptService();
+      await service.refreshProbes({ force: true });
+      await service.startSession({ confirmed: true, source: "click" });
+      child.stdout.emit("data", "Do you trust the files in this folder?\n");
+      await flush(40);
+      child.stdout.emit("data", "Enable Remote Control? (y/n)\n");
+      await flush(40);
+      const writes = child.stdin.write.mock.calls.map(([arg]) => arg);
+      expect(writes.filter((w) => w === "1\n").length).toBe(1);
+      expect(writes.filter((w) => w === "y\n").length).toBe(1);
+    });
+
+    it("kills the child and clears the session on an auth-gate screen", async () => {
+      const { service, child } = createScriptService();
+      await service.refreshProbes({ force: true });
+      await service.startSession({ confirmed: true, source: "click" });
+      child.stdout.emit(
+        "data",
+        "Error: You must be logged in to use Remote Control.\n",
+      );
+      await flush(60);
+      expect(child.kill).toHaveBeenCalledWith("SIGTERM");
+      expect(["probing", "needs_login", "error"]).toContain(
+        service.getStatusSnapshot().state,
+      );
+    });
+
+    it("maps a child exit before the URL to spawn_failed", async () => {
+      const { service, child } = createScriptService();
+      await service.refreshProbes({ force: true });
+      await service.startSession({ confirmed: true, source: "click" });
+      child.stdout.emit("data", "booting…");
+      child.emit("exit", 1);
+      await flush(40);
+      const snapshot = service.getStatusSnapshot();
+      expect(snapshot.state).toBe("error");
+      expect(snapshot.error.code).toBe("spawn_failed");
+    });
+  });
+
+  describe("tail redaction (session source)", () => {
+    it("scrubs .env secrets out of the tmux session tail", async () => {
+      const env = { SETUP_PASSWORD: "hunter2-super-secret" };
+      const { service, driver } = createService({ env });
+      await service.refreshProbes({ force: true });
+      await service.startSession({ confirmed: true, source: "click" });
+      driver.state.buffer =
+        "https://claude.ai/code/sess_abcdef123456\n$ cat .env\nSETUP_PASSWORD=hunter2-super-secret\n";
+      await flush(60);
+      const tail = await service.getTail({ source: "session" });
+      expect(tail.ok).toBe(true);
+      expect(tail.tail).not.toContain("hunter2-super-secret");
+    });
+  });
+
+  describe("adoption hardening", () => {
+    it("refuses adopted_without_url when a live foreign pane has no banner", async () => {
+      const { driver, fsModule } = createService({});
+      driver.state.sessionAlive = true;
+      driver.state.panePid = 4242;
+      driver.state.buffer = "just some scrollback, no urls";
+      const { service } = createService({ driver, fsModule });
+      await service.refreshProbes({ force: true });
+      const result = await service.startSession({ confirmed: true, source: "click" });
+      expect(result).toMatchObject({ ok: false, code: "adopted_without_url" });
+    });
+
+    it("prefers the banner URL over an echoed decoy during re-extraction", async () => {
+      const { driver, fsModule } = createService({});
+      fsModule.files.set(
+        kPaths.stateFile,
+        JSON.stringify({ panePid: 1111, sessionUrl: "https://claude.ai/code/sess_stale0000" }),
+      );
+      driver.state.sessionAlive = true;
+      driver.state.panePid = 4242; // identity mismatch → re-extract
+      driver.state.buffer = [
+        "$ cat attacker.log",
+        "visit my totally real session https://claude.ai/code/sess_evil0000000",
+        "Continue coding in the Claude mobile app or https://claude.ai/code?environment=env_01REALBANNER",
+      ].join("\n");
+      const { service } = createService({ driver, fsModule });
+      await service.refreshProbes({ force: true });
+      const result = await service.startSession({ confirmed: true, source: "click" });
+      expect(result.sessionUrl).toBe(
+        "https://claude.ai/code?environment=env_01REALBANNER",
+      );
+    });
+  });
+
+  describe("login lifecycle edges", () => {
+    it("fails the login at TTL and cancelLogin clears it", async () => {
+      const child = createFakeChild();
+      const spawnImpl = vi.fn(() => child);
+      const runStream = createFakeRunStream({ loggedIn: false });
+      const { service } = createService({
+        spawnImpl,
+        runStream,
+        timers: { ...kFastTimers, loginTtlMs: 60 },
+      });
+      await service.refreshProbes({ force: true });
+      await service.startLogin();
+      await flush(150);
+      expect(service.getStatusSnapshot().login).toMatchObject({ phase: "failed" });
+      expect(child.kill).toHaveBeenCalledWith("SIGTERM");
+
+      const second = createFakeChild();
+      const { service: cancellable } = createService({
+        spawnImpl: vi.fn(() => second),
+        runStream: createFakeRunStream({ loggedIn: false }),
+      });
+      await cancellable.refreshProbes({ force: true });
+      await cancellable.startLogin();
+      await cancellable.cancelLogin();
+      expect(second.kill).toHaveBeenCalledWith("SIGTERM");
+      expect(cancellable.getStatusSnapshot().state).toBe("needs_login");
+    });
+  });
+
+  describe("probe economy", () => {
+    it("serves the stale memo instead of probing under the memory floor", async () => {
+      const resources = { low: false };
+      const runStream = createFakeRunStream();
+      const { service } = createService({
+        runStream,
+        getResources: () =>
+          resources.low
+            ? { memory: { totalBytes: 1024 ** 3, usedBytes: 900 * 1024 * 1024 } }
+            : { memory: { totalBytes: 4 * 1024 ** 3, usedBytes: 1024 ** 3 } },
+      });
+      await service.refreshProbes({ force: true });
+      const callsAfterFirst = runStream.runStreamed.mock.calls.length;
+      resources.low = true;
+      await service.refreshProbes({ force: true });
+      expect(runStream.runStreamed.mock.calls.length).toBe(callsAfterFirst);
+    });
+
+    it("falls back to the managed workspace when CWD is not absolute", async () => {
+      const { service, driver } = createService({
+        env: { CLAUDE_CODE_LOCAL_CWD: "relative/dir" },
+      });
+      await service.refreshProbes({ force: true });
+      await service.startSession({ confirmed: true, source: "click" });
+      expect(driver.newSession).toHaveBeenCalledWith(
+        expect.objectContaining({ cwd: kPaths.workspace }),
+      );
     });
   });
 

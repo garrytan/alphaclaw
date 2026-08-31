@@ -84,9 +84,6 @@ describe("watchdog-incidents rescue hook", () => {
   });
 
   it("never lets a throwing hook affect incident processing", () => {
-    const { db, insert, sink } = {
-      ...createTracker({}),
-    };
     const throwing = createTracker();
     throwing.onIncidentActivity.mockImplementation(() => {
       throw new Error("hook boom");
@@ -96,8 +93,6 @@ describe("watchdog-incidents rescue hook", () => {
     expect(throwing.db.insertIncident).toHaveBeenCalledTimes(1);
     // Escalation path too.
     expect(() => throwing.sink({ eventType: "crash_loop", details: {} })).not.toThrow();
-    void db;
-    void insert;
   });
 
   it("does not fire kind=open when a rolled-back open transaction throws", () => {

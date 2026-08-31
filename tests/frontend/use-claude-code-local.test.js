@@ -157,17 +157,91 @@ describe("useClaudeCodeLocal poll cadence", () => {
   });
 });
 
+describe("useClaudeCodeLocal visibility pause", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    global.document = {
+      hidden: false,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    };
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    delete global.document;
+  });
+
+  it("mounts hidden without polling, then refreshes immediately on visibility return", async () => {
+    global.document.hidden = true;
+    renderHook();
+    let cleanup = runEffects();
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(fetchClaudeCodeStatusDirect).not.toHaveBeenCalled();
+
+    // The visibilitychange handler flips the reactive flag; the interval
+    // effect re-run on the next render polls immediately.
+    const handler = global.document.addEventListener.mock.calls.find(
+      (call) => call[0] === "visibilitychange",
+    )[1];
+    global.document.hidden = false;
+    handler();
+    cleanup();
+    renderHook();
+    cleanup = runEffects();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fetchClaudeCodeStatusDirect).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(fetchClaudeCodeStatusDirect).toHaveBeenCalledTimes(2);
+    cleanup();
+  });
+
+  it("stops the interval while the document is hidden", async () => {
+    renderHook();
+    let cleanup = runEffects();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fetchClaudeCodeStatusDirect).toHaveBeenCalledTimes(1);
+
+    const handler = global.document.addEventListener.mock.calls.find(
+      (call) => call[0] === "visibilitychange",
+    )[1];
+    global.document.hidden = true;
+    handler();
+    cleanup();
+    renderHook();
+    cleanup = runEffects();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(fetchClaudeCodeStatusDirect).toHaveBeenCalledTimes(1);
+    cleanup();
+  });
+});
+
 describe("useClaudeCodeLocal mutations", () => {
   const kStatusCacheKey = "/api/claude-code/status";
 
-  it("start posts the consent flag, invalidates the status cache, and refreshes", async () => {
+  it("start posts the consent flag + permissionMode, invalidates the status cache, and refreshes", async () => {
     createClaudeCodeLocalSession.mockResolvedValue({ ok: true, status: "starting" });
     const hook = renderHook();
-    const result = await hook.start({ confirmed: true });
-    expect(createClaudeCodeLocalSession).toHaveBeenCalledWith({ confirmed: true });
+    const result = await hook.start({
+      confirmed: true,
+      permissionMode: "acceptEdits",
+    });
+    expect(createClaudeCodeLocalSession).toHaveBeenCalledWith({
+      confirmed: true,
+      permissionMode: "acceptEdits",
+    });
     expect(result).toEqual({ ok: true, status: "starting" });
     expect(invalidateCache).toHaveBeenCalledWith(kStatusCacheKey);
     expect(fetchClaudeCodeStatusDirect).toHaveBeenCalled();
+  });
+
+  it("start defaults permissionMode to null (no consent-scope assertion)", async () => {
+    createClaudeCodeLocalSession.mockResolvedValue({ ok: true, status: "starting" });
+    const hook = renderHook();
+    await hook.start({ confirmed: false });
+    expect(createClaudeCodeLocalSession).toHaveBeenCalledWith({
+      confirmed: false,
+      permissionMode: null,
+    });
   });
 
   it("every mutating action invalidates the shared cache key — even when refused", async () => {

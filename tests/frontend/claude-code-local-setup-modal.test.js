@@ -181,7 +181,7 @@ describe("ClaudeCodeLocalSetupModal render states", () => {
     expect(treeText(tree)).toContain("Starting the Claude CLI login");
   });
 
-  it("awaiting_code shows the OAuth link (new tab, noopener), a monospace input, and Submit", () => {
+  it("awaiting_code shows the OAuth link (new tab, noopener), a standard-recipe input, and Submit", () => {
     const tree = renderModal({
       local: loginLocal("awaiting_code", { oauthUrl: kOauthUrl }),
     });
@@ -193,7 +193,13 @@ describe("ClaudeCodeLocalSetupModal render states", () => {
     expect(link.props.rel).toBe("noopener");
     const input = findAllByType(tree, "input")[0];
     expect(input).toBeTruthy();
-    expect(String(input.props.class)).toContain("font-mono");
+    const inputClass = String(input.props.class);
+    expect(inputClass).toContain("font-mono");
+    // The app's standard input recipe, at text-base (16px) so iOS Safari
+    // never zooms the modal on focus (this flow is phone-pitched).
+    expect(inputClass).toContain("bg-field");
+    expect(inputClass).toContain("focus:border-fg-muted");
+    expect(inputClass).toContain("text-base");
     expect(buttonLabels(tree)).toContain("Submit");
   });
 
@@ -256,6 +262,8 @@ describe("ClaudeCodeLocalSetupModal render states", () => {
       collectText(vnode.props.children).join("").includes("Show CLI output"),
     );
     expect(toggle).toBeTruthy();
+    // Expanded touch target without a bigger visual footprint.
+    expect(String(toggle.props.class)).toContain("py-2 -my-2");
     await toggle.props.onclick();
     expect(fetchTail).toHaveBeenCalledWith({ source: "login" });
   });

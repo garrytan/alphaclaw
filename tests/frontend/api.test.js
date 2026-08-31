@@ -2378,7 +2378,7 @@ describe("frontend/api claude-code local helpers", () => {
     );
   });
 
-  it("createClaudeCodeLocalSession POSTs the confirmed flag and returns the envelope", async () => {
+  it("createClaudeCodeLocalSession POSTs the confirmed flag + permissionMode and returns the envelope", async () => {
     const payload = {
       ok: true,
       status: "running",
@@ -2387,21 +2387,32 @@ describe("frontend/api claude-code local helpers", () => {
     };
     global.fetch.mockResolvedValue(mockJsonResponse(200, payload));
     const api = await import("../../lib/public/js/lib/api.js");
-    const result = await api.createClaudeCodeLocalSession({ confirmed: true });
+    const result = await api.createClaudeCodeLocalSession({
+      confirmed: true,
+      permissionMode: "bypassPermissions",
+    });
     expect(result).toEqual(payload);
     const [url, options] = global.fetch.mock.calls.at(-1);
     expect(url).toBe("/api/claude-code/local/session");
     expect(options.method).toBe("POST");
-    expect(JSON.parse(options.body)).toEqual({ confirmed: true });
+    // permissionMode rides along so the server can refuse a stale consent
+    // snapshot (TOCTOU guard: mismatch answers 409 confirm_required).
+    expect(JSON.parse(options.body)).toEqual({
+      confirmed: true,
+      permissionMode: "bypassPermissions",
+    });
   });
 
-  it("createClaudeCodeLocalSession defaults confirmed to false (strict server check)", async () => {
+  it("createClaudeCodeLocalSession defaults confirmed:false and permissionMode:null (strict server check)", async () => {
     global.fetch.mockResolvedValue(mockJsonResponse(202, { ok: true, status: "starting" }));
     const api = await import("../../lib/public/js/lib/api.js");
     const result = await api.createClaudeCodeLocalSession();
     expect(result).toEqual({ ok: true, status: "starting" });
     const [, options] = global.fetch.mock.calls.at(-1);
-    expect(JSON.parse(options.body)).toEqual({ confirmed: false });
+    expect(JSON.parse(options.body)).toEqual({
+      confirmed: false,
+      permissionMode: null,
+    });
   });
 
   it("keeps the machine code on thrown local refusals (the launcher branches on it)", async () => {

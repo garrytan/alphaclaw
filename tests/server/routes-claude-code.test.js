@@ -200,7 +200,7 @@ describe("claude-code admin-manifest classification (security pin)", () => {
     }
   });
 
-  it("strips sessionUrl, oauthUrl, error tail, and warnings from agent-read status", () => {
+  it("strips sessionUrl, sessionId, oauthUrl, error tail, and warnings from agent-read status", () => {
     const domain = require("../../lib/server/admin-manifest/domains/claude-code");
     const statusOp = domain.ops.find((op) => op.id === "claude-code.status");
     const redacted = statusOp.redactResponse({
@@ -209,6 +209,7 @@ describe("claude-code admin-manifest classification (security pin)", () => {
       local: {
         state: "error",
         sessionUrl: "https://claude.ai/code/secret",
+        sessionId: "secret",
         socketPath: "/data/claude-code-local/tmux.sock",
         login: { phase: "awaiting_code", oauthUrl: "https://claude.com/cai/oauth/x" },
         error: { code: "url_extract_timeout", message: "m", tailSanitized: "box content" },
@@ -216,6 +217,8 @@ describe("claude-code admin-manifest classification (security pin)", () => {
       },
     });
     expect(redacted.local.sessionUrl).toBeUndefined();
+    // The URL is canonically reconstructable from the id — both go.
+    expect(redacted.local.sessionId).toBeUndefined();
     expect(redacted.local.socketPath).toBeUndefined();
     expect(redacted.local.login.oauthUrl).toBeUndefined();
     expect(redacted.local.login.phase).toBe("awaiting_code");
@@ -269,6 +272,7 @@ describe("local rescue endpoints", () => {
     expect(starting.body).toEqual({ ok: true, status: "starting" });
     expect(deps.claudeCodeLocalService.startSession).toHaveBeenCalledWith({
       confirmed: true,
+      consentedMode: null,
       source: "click",
     });
 
@@ -292,8 +296,46 @@ describe("local rescue endpoints", () => {
       .send({ confirmed: "yes" });
     expect(deps.claudeCodeLocalService.startSession).toHaveBeenCalledWith({
       confirmed: false,
+      consentedMode: null,
       source: "click",
     });
+  });
+
+  it("threads the consented permission mode through to the service (TOCTOU guard)", async () => {
+    const deps = createLocalDeps();
+    await request(createApp(deps))
+      .post("/api/claude-code/local/session")
+      .send({ confirmed: true, permissionMode: "acceptEdits" });
+    expect(deps.claudeCodeLocalService.startSession).toHaveBeenCalledWith({
+      confirmed: true,
+      consentedMode: "acceptEdits",
+      source: "click",
+    });
+    // Non-string junk stays null — the guard is opt-in, never a crash vector.
+    await request(createApp(deps))
+      .post("/api/claude-code/local/session")
+      .send({ confirmed: true, permissionMode: 42 });
+    expect(deps.claudeCodeLocalService.startSession).toHaveBeenLastCalledWith({
+      confirmed: true,
+      consentedMode: null,
+      source: "click",
+    });
+  });
+
+  it("pins every CLAUDE_CODE_LOCAL_* key as agent-protected (dangerous-tier env writes)", () => {
+    // An agent-actor env write to these reconfigures the operator's launcher
+    // (CWD hooks execute in sessions; AUTOSTART/SPAWN_ON_INCIDENT spawn with
+    // no click) — same escalation rationale as the routine keys.
+    const { kAgentProtectedEnvKeys } = require("../../lib/server/utils/env-keys");
+    for (const key of [
+      "CLAUDE_CODE_LOCAL_ENABLED",
+      "CLAUDE_CODE_LOCAL_AUTOSTART",
+      "CLAUDE_CODE_LOCAL_PERMISSION_MODE",
+      "CLAUDE_CODE_LOCAL_CWD",
+      "CLAUDE_CODE_LOCAL_SPAWN_ON_INCIDENT",
+    ]) {
+      expect(kAgentProtectedEnvKeys.has(key), `${key} must be agent-protected`).toBe(true);
+    }
   });
 
   // Full refusal map: 4xx are caller-fixable (the launcher falls back to the

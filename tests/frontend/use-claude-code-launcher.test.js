@@ -351,6 +351,7 @@ describe("useClaudeCodeLauncher confirm one-shot + unmount cleanup", () => {
 // ---------------------------------------------------------------- local ----
 
 const kLocalSessionUrl = "https://claude.ai/code/rescue_01XYZ";
+const kLocalCwd = "/data/claude-code-local/workspace";
 
 const localReadyStatus = (overrides = {}) => ({
   ok: true,
@@ -359,6 +360,7 @@ const localReadyStatus = (overrides = {}) => ({
     enabled: true,
     state: "ready",
     permissionMode: "acceptEdits",
+    cwd: kLocalCwd,
     ...overrides,
   },
 });
@@ -384,9 +386,14 @@ describe("useClaudeCodeLauncher local-first branch", () => {
     expect(showToast).toHaveBeenCalledWith("Claude Code session started", "success");
   });
 
-  it("sends confirmed:true only when the stored consent mode matches the configured one", async () => {
+  it("sends confirmed:true (with the snapshot's permissionMode) only when the stored consent scope matches mode AND cwd", async () => {
     useCachedFetch.mockReturnValue({ data: localReadyStatus() });
-    readUiSettings.mockReturnValue({ claudeCodeLocalConfirmedMode: "acceptEdits" });
+    readUiSettings.mockReturnValue({
+      claudeCodeLocalConfirmedScope: {
+        permissionMode: "acceptEdits",
+        cwd: kLocalCwd,
+      },
+    });
     createClaudeCodeLocalSession.mockResolvedValue({
       ok: true,
       status: "running",
@@ -394,7 +401,12 @@ describe("useClaudeCodeLauncher local-first branch", () => {
     });
     renderHook().openClaudeCode(plainClick());
     await flush();
-    expect(createClaudeCodeLocalSession).toHaveBeenCalledWith({ confirmed: true });
+    // The POST carries the mode the consent was checked against, so the
+    // server can refuse a stale snapshot (TOCTOU guard).
+    expect(createClaudeCodeLocalSession).toHaveBeenCalledWith({
+      confirmed: true,
+      permissionMode: "acceptEdits",
+    });
   });
 
   it("a permission-mode change (bypassPermissions) invalidates consent and forces the re-confirm modal", async () => {
@@ -404,14 +416,22 @@ describe("useClaudeCodeLauncher local-first branch", () => {
     useCachedFetch.mockReturnValue({
       data: localReadyStatus({ permissionMode: "bypassPermissions" }),
     });
-    readUiSettings.mockReturnValue({ claudeCodeLocalConfirmedMode: "acceptEdits" });
+    readUiSettings.mockReturnValue({
+      claudeCodeLocalConfirmedScope: {
+        permissionMode: "acceptEdits",
+        cwd: kLocalCwd,
+      },
+    });
     createClaudeCodeLocalSession
       .mockRejectedValueOnce(localError("confirm_required"))
       .mockResolvedValueOnce({ ok: true, status: "running", sessionUrl: kLocalSessionUrl });
     renderHook().openClaudeCode(plainClick());
     await flush();
 
-    expect(createClaudeCodeLocalSession).toHaveBeenCalledWith({ confirmed: false });
+    expect(createClaudeCodeLocalSession).toHaveBeenCalledWith({
+      confirmed: false,
+      permissionMode: "bypassPermissions",
+    });
     const rerendered = renderHook();
     expect(rerendered.confirmOpen).toBe(true);
     expect(rerendered.confirmMode).toBe("local");
@@ -419,12 +439,56 @@ describe("useClaudeCodeLauncher local-first branch", () => {
 
     rerendered.confirmStart();
     await flush();
-    // Consent stored FOR THE MODE, and the re-fire asserts it.
+    // Consent stored FOR THE MODE+CWD SCOPE, and the re-fire asserts it.
     const storedSettings = updateUiSettings.mock.calls[0][0]({});
-    expect(storedSettings.claudeCodeLocalConfirmedMode).toBe("bypassPermissions");
-    expect(createClaudeCodeLocalSession).toHaveBeenLastCalledWith({ confirmed: true });
+    expect(storedSettings.claudeCodeLocalConfirmedScope).toEqual({
+      permissionMode: "bypassPermissions",
+      cwd: kLocalCwd,
+    });
+    expect(createClaudeCodeLocalSession).toHaveBeenLastCalledWith({
+      confirmed: true,
+      permissionMode: "bypassPermissions",
+    });
     const win = global.window.open.mock.results[0].value;
     expect(win.location.href).toBe(kLocalSessionUrl);
+  });
+
+  it("a configured-cwd change invalidates consent and forces the re-confirm modal", async () => {
+    // Consent is scoped to the working directory too: the same mode against
+    // a different cwd is a different grant.
+    useCachedFetch.mockReturnValue({ data: localReadyStatus() });
+    readUiSettings.mockReturnValue({
+      claudeCodeLocalConfirmedScope: {
+        permissionMode: "acceptEdits",
+        cwd: "/data/claude-code-local/old-workspace",
+      },
+    });
+    createClaudeCodeLocalSession
+      .mockRejectedValueOnce(localError("confirm_required"))
+      .mockResolvedValueOnce({ ok: true, status: "running", sessionUrl: kLocalSessionUrl });
+    renderHook().openClaudeCode(plainClick());
+    await flush();
+
+    expect(createClaudeCodeLocalSession).toHaveBeenCalledWith({
+      confirmed: false,
+      permissionMode: "acceptEdits",
+    });
+    const rerendered = renderHook();
+    expect(rerendered.confirmOpen).toBe(true);
+    expect(rerendered.confirmMode).toBe("local");
+
+    rerendered.confirmStart();
+    await flush();
+    // The fresh grant covers the NEW cwd.
+    const storedSettings = updateUiSettings.mock.calls[0][0]({});
+    expect(storedSettings.claudeCodeLocalConfirmedScope).toEqual({
+      permissionMode: "acceptEdits",
+      cwd: kLocalCwd,
+    });
+    expect(createClaudeCodeLocalSession).toHaveBeenLastCalledWith({
+      confirmed: true,
+      permissionMode: "acceptEdits",
+    });
   });
 
   it("skips the local POST entirely when the cached status has no local block", async () => {
@@ -559,6 +623,121 @@ describe("useClaudeCodeLauncher local 202 poll", () => {
       { durationMs: 10_000 },
     );
     expect(createClaudeCodeSession).not.toHaveBeenCalled();
+  });
+
+  it("tolerates a transient poll fetch failure and keeps polling to the conclusion", async () => {
+    // Pins the poll-error tolerance: ONE failed status fetch never settles
+    // the launch — the loop continues until the cap or a terminal state.
+    useCachedFetch.mockReturnValue({ data: localReadyStatus() });
+    createClaudeCodeLocalSession.mockResolvedValue({ ok: true, status: "starting" });
+    fetchClaudeCodeStatusDirect
+      .mockRejectedValueOnce(new Error("offline"))
+      .mockResolvedValueOnce(
+        localReadyStatus({ state: "running", sessionUrl: kLocalSessionUrl }),
+      );
+    renderHook().openClaudeCode(plainClick());
+    await vi.advanceTimersByTimeAsync(0);
+
+    await vi.advanceTimersByTimeAsync(1_500);
+    expect(fetchClaudeCodeStatusDirect).toHaveBeenCalledTimes(1);
+    const win = global.window.open.mock.results[0].value;
+    expect(win.close).not.toHaveBeenCalled();
+    expect(showToast).not.toHaveBeenCalled();
+    expect(win.location.href).toBe("");
+
+    await vi.advanceTimersByTimeAsync(1_500);
+    expect(fetchClaudeCodeStatusDirect).toHaveBeenCalledTimes(2);
+    expect(win.location.href).toBe(kLocalSessionUrl);
+    expect(createClaudeCodeSession).not.toHaveBeenCalled();
+  });
+
+  it("mid-poll needs_login stops polling and falls back to the routine on the SAME window (+ one-time toast)", async () => {
+    // The server's auth-gate path can conclude a 202 start in needs_login
+    // instead of error: that is the api-contract fallback trio, not a
+    // timeout.
+    useCachedFetch.mockReturnValue({ data: localReadyStatus() });
+    createClaudeCodeLocalSession.mockResolvedValue({ ok: true, status: "starting" });
+    fetchClaudeCodeStatusDirect.mockResolvedValue(
+      localReadyStatus({ state: "needs_login" }),
+    );
+    createClaudeCodeSession.mockResolvedValue({ ok: true, sessionUrl: kSessionUrl });
+    renderHook().openClaudeCode(plainClick());
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(1_500);
+
+    expect(global.window.open).toHaveBeenCalledTimes(1);
+    const win = global.window.open.mock.results[0].value;
+    expect(win.document.write).toHaveBeenCalledWith(
+      expect.stringContaining("Starting Claude Code session"),
+    );
+    expect(createClaudeCodeSession).toHaveBeenCalledWith({ confirmed: false });
+    expect(win.location.href).toBe(kSessionUrl);
+    expect(win.close).not.toHaveBeenCalled();
+    expect(showToast).toHaveBeenCalledWith(
+      "Set up local rescue sessions from the Watchdog page",
+      "info",
+      { durationMs: 10_000 },
+    );
+    const storedSettings = updateUiSettings.mock.calls[0][0]({});
+    expect(storedSettings.claudeCodeLocalSetupToastShown).toBe(true);
+
+    // The poll loop stopped: no further status fetches after the fallback.
+    expect(fetchClaudeCodeStatusDirect).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(fetchClaudeCodeStatusDirect).toHaveBeenCalledTimes(1);
+  });
+
+  it("mid-poll needs_login with the toast flag persisted skips the repeat toast", async () => {
+    useCachedFetch.mockReturnValue({ data: localReadyStatus() });
+    readUiSettings.mockReturnValue({ claudeCodeLocalSetupToastShown: true });
+    createClaudeCodeLocalSession.mockResolvedValue({ ok: true, status: "starting" });
+    fetchClaudeCodeStatusDirect.mockResolvedValue(
+      localReadyStatus({ state: "needs_login" }),
+    );
+    createClaudeCodeSession.mockResolvedValue({ ok: true, sessionUrl: kSessionUrl });
+    renderHook().openClaudeCode(plainClick());
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(1_500);
+
+    expect(showToast).not.toHaveBeenCalledWith(
+      "Set up local rescue sessions from the Watchdog page",
+      "info",
+      { durationMs: 10_000 },
+    );
+    const win = global.window.open.mock.results[0].value;
+    expect(win.location.href).toBe(kSessionUrl);
+  });
+
+  it("mid-poll disabled/not_installed stop polling and fall back to the routine (no setup toast)", async () => {
+    for (const state of ["disabled", "not_installed"]) {
+      harness.reset();
+      vi.clearAllMocks();
+      global.window = {
+        open: vi.fn(() => makeWin()),
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      };
+      readUiSettings.mockReturnValue({});
+      useCachedFetch.mockReturnValue({ data: localReadyStatus() });
+      createClaudeCodeLocalSession.mockResolvedValue({ ok: true, status: "starting" });
+      fetchClaudeCodeStatusDirect.mockResolvedValue(localReadyStatus({ state }));
+      createClaudeCodeSession.mockResolvedValue({ ok: true, sessionUrl: kSessionUrl });
+      renderHook().openClaudeCode(plainClick());
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(1_500);
+
+      const win = global.window.open.mock.results[0].value;
+      expect(createClaudeCodeSession).toHaveBeenCalledWith({ confirmed: false });
+      expect(win.location.href).toBe(kSessionUrl);
+      expect(win.close).not.toHaveBeenCalled();
+      expect(showToast).toHaveBeenCalledWith("Claude Code session started", "success");
+      expect(showToast).not.toHaveBeenCalledWith(
+        "Set up local rescue sessions from the Watchdog page",
+        "info",
+        { durationMs: 10_000 },
+      );
+      expect(fetchClaudeCodeStatusDirect).toHaveBeenCalledTimes(1);
+    }
   });
 });
 

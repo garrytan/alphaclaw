@@ -45,8 +45,19 @@ vi.mock("../../lib/public/js/hooks/use-claude-code-local.js", () => ({
   useClaudeCodeLocal: vi.fn(),
 }));
 
+// The card shares the launcher's consent helpers; mock them so the tests can
+// pin the exact scope (mode + cwd) the card keys consent on.
+vi.mock("../../lib/public/js/hooks/use-claude-code-launcher.js", () => ({
+  hasLocalConsent: vi.fn(() => false),
+  storeLocalConsent: vi.fn(),
+}));
+
 import * as preactHooks from "preact/hooks";
 import { useClaudeCodeLocal } from "../../lib/public/js/hooks/use-claude-code-local.js";
+import {
+  hasLocalConsent,
+  storeLocalConsent,
+} from "../../lib/public/js/hooks/use-claude-code-launcher.js";
 import {
   WatchdogRescueSessionCard,
   buildRescueQrModel,
@@ -135,6 +146,15 @@ const renderCard = (local) => {
   useClaudeCodeLocal.mockReturnValue(makeHookState(local));
   harness.beginRender();
   return expandTree(WatchdogRescueSessionCard({}));
+};
+
+// Variant exposing the mocked hook state so tests can assert on the action
+// mocks the card wires into its click handlers.
+const renderCardWithState = (local) => {
+  const hookState = makeHookState(local);
+  useClaudeCodeLocal.mockReturnValue(hookState);
+  harness.beginRender();
+  return { tree: expandTree(WatchdogRescueSessionCard({})), hookState };
 };
 
 const baseLocal = (overrides = {}) => ({
@@ -327,5 +347,57 @@ describe("WatchdogRescueSessionCard render states", () => {
     expect(modal).toBeTruthy();
     expect(modal.props.mode).toBe("local");
     expect(modal.props.permissionMode).toBe("bypassPermissions");
+  });
+
+  it("expands the CLI-output toggle touch target without changing its visual size", () => {
+    const tree = renderCard(
+      baseLocal({
+        state: "error",
+        error: { code: "spawn_failed", message: "boom", tailSanitized: "tail" },
+      }),
+    );
+    const toggle = findAllByType(tree, "button").find((vnode) =>
+      collectText(vnode.props.children).join("").includes("Show CLI output"),
+    );
+    expect(toggle).toBeTruthy();
+    expect(String(toggle.props.class)).toContain("py-2 -my-2");
+  });
+});
+
+describe("WatchdogRescueSessionCard consent call sites", () => {
+  const findStartButton = (tree) =>
+    findAllByType(tree, ActionButton).find(
+      (vnode) => vnode.props.idleLabel === "Start session",
+    );
+
+  it("Start checks consent keyed to mode AND cwd, and posts the snapshot's permissionMode", async () => {
+    const { tree, hookState } = renderCardWithState(baseLocal());
+    await findStartButton(tree).props.onClick();
+    expect(hasLocalConsent).toHaveBeenCalledWith({
+      permissionMode: "acceptEdits",
+      cwd: "/data/claude-code-local/workspace",
+    });
+    // hasLocalConsent is mocked to false: the POST must not assert consent,
+    // but it still carries the mode for the server-side TOCTOU check.
+    expect(hookState.start).toHaveBeenCalledWith({
+      confirmed: false,
+      permissionMode: "acceptEdits",
+    });
+  });
+
+  it("confirm-modal Start stores the mode+cwd scope, then fires confirmed", async () => {
+    const { tree, hookState } = renderCardWithState(
+      baseLocal({ permissionMode: "bypassPermissions" }),
+    );
+    const modal = findAllByType(tree, ClaudeCodeConfirmModal)[0];
+    await modal.props.onStart();
+    expect(storeLocalConsent).toHaveBeenCalledWith({
+      permissionMode: "bypassPermissions",
+      cwd: "/data/claude-code-local/workspace",
+    });
+    expect(hookState.start).toHaveBeenCalledWith({
+      confirmed: true,
+      permissionMode: "bypassPermissions",
+    });
   });
 });
