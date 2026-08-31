@@ -2062,6 +2062,50 @@ describe("server/agents/service", () => {
     ).toEqual({ provider: "whatsapp", accountId: "work-2", linked: true });
   });
 
+  // H5 sibling: deleteChannelAccount joins the id into destructive rmSync
+  // paths (whatsapp auth dir, allowFrom files) — traversal shapes must be
+  // rejected before any config read or filesystem touch.
+  it("rejects a traversing accountId on channel account delete (H5)", async () => {
+    const fsMock = buildFsMock({ initialConfig: {} });
+    const service = createAgentsService({
+      fs: fsMock,
+      OPENCLAW_DIR: "/test/.openclaw",
+    });
+
+    await expect(
+      service.deleteChannelAccount({
+        provider: "whatsapp",
+        accountId: "../../../../etc",
+      }),
+    ).rejects.toThrow("Invalid channel accountId");
+    expect(fsMock.rmSync).not.toHaveBeenCalled();
+    expect(fsMock.writeFileSync).not.toHaveBeenCalled();
+  });
+
+  it("rejects a hostile accountId even when planted as a real config key (H5)", async () => {
+    // The :898-style existence gate alone would pass this id — it exists in
+    // openclaw.json. The shape guard must fire first.
+    const fsMock = buildFsMock({
+      initialConfig: {
+        channels: {
+          whatsapp: {
+            enabled: true,
+            accounts: { "../x": { name: "planted" } },
+          },
+        },
+      },
+    });
+    const service = createAgentsService({
+      fs: fsMock,
+      OPENCLAW_DIR: "/test/.openclaw",
+    });
+
+    await expect(
+      service.deleteChannelAccount({ provider: "whatsapp", accountId: "../x" }),
+    ).rejects.toThrow("Invalid channel accountId");
+    expect(fsMock.rmSync).not.toHaveBeenCalled();
+  });
+
   it("updates channel account name and bound agent", () => {
     const fsMock = buildFsMock({
       initialConfig: {

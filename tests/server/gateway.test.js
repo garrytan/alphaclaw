@@ -1255,6 +1255,68 @@ describe("server/gateway restart behavior", () => {
     });
   });
 
+  it("reports an enabled external channel (signal) without any token; disabled stays hidden", () => {
+    // #113: signal is configured out-of-band (signal-cli) — no env token, no
+    // botToken. `external: true` skips the token gate, but the enabled gate
+    // still applies: a present-but-disabled block must never show.
+    fs.existsSync = vi.fn(() => true);
+    fs.readdirSync = vi.fn(() => []);
+    fs.readFileSync = vi.fn((targetPath, ...args) => {
+      if (targetPath === `${OPENCLAW_DIR}/openclaw.json`) {
+        return JSON.stringify({
+          channels: { signal: { enabled: true } },
+        });
+      }
+      return originalReadFileSync(targetPath, ...args);
+    });
+    delete require.cache[modulePath];
+    const gateway = require(modulePath);
+
+    expect(gateway.getChannelStatus()).toEqual({
+      signal: {
+        status: "configured",
+        paired: 0,
+        accounts: { default: { status: "configured", paired: 0 } },
+      },
+    });
+
+    fs.readFileSync = vi.fn((targetPath, ...args) => {
+      if (targetPath === `${OPENCLAW_DIR}/openclaw.json`) {
+        return JSON.stringify({
+          channels: { signal: { enabled: false } },
+        });
+      }
+      return originalReadFileSync(targetPath, ...args);
+    });
+    delete require.cache[modulePath];
+    const disabledGateway = require(modulePath);
+    expect(disabledGateway.getChannelStatus()).toEqual({});
+  });
+
+  it("runs the plugin preflight on a signal-only box (no phantom plugin ids)", async () => {
+    // Before #113 a signal-only config made hasEnabledChannelConfig() false,
+    // so the runtime-deps preflight never ran before the gateway booted. The
+    // preflight hashes channel NAMES only — no per-channel plugin ids exist.
+    fs.existsSync = vi.fn(
+      (targetPath) => targetPath === `${OPENCLAW_DIR}/openclaw.json`,
+    );
+    fs.readFileSync = vi.fn((targetPath, ...args) => {
+      if (targetPath === `${OPENCLAW_DIR}/openclaw.json`) {
+        return JSON.stringify({ channels: { signal: { enabled: true } } });
+      }
+      return originalReadFileSync(targetPath, ...args);
+    });
+    fs.readdirSync = vi.fn(() => []);
+    childProcess.execFile = execFileOk("{}");
+    delete require.cache[modulePath];
+    const gateway = require(modulePath);
+
+    expect(await gateway.prepareOpenclawChannelPlugins()).toEqual({
+      skipped: false,
+    });
+    expect(childProcess.execFile).toHaveBeenCalled();
+  });
+
   it("reports channel status per account while preserving provider summary", () => {
     fs.existsSync = vi.fn(() => true);
     fs.readdirSync = vi.fn((targetPath) => {
@@ -2784,6 +2846,55 @@ describe("server/gateway restart behavior", () => {
       expect(childProcess.execFile).toHaveBeenCalledWith(
         "openclaw",
         ["channels", "remove", "--channel", "telegram", "--delete"],
+        expect.objectContaining({ timeout: 15000 }),
+        expect.any(Function),
+      );
+    });
+
+    it("never auto-removes an externally-configured channel (no envKey)", async () => {
+      // Upstream #113 precondition: signal has no managed env token, so the
+      // removal branch must skip it — on every boot AND env save — while
+      // managed channels keep their remove-on-cleared-token behavior.
+      setupConfig(
+        JSON.stringify({
+          channels: { signal: { enabled: true }, telegram: { enabled: true } },
+        }),
+      );
+      childProcess.execFile = execFileOk("");
+      delete require.cache[modulePath];
+      const gateway = require(modulePath);
+
+      await gateway.syncChannelConfig([], "all");
+
+      expect(childProcess.execFile).toHaveBeenCalledWith(
+        "openclaw",
+        ["channels", "remove", "--channel", "telegram", "--delete"],
+        expect.objectContaining({ timeout: 15000 }),
+        expect.any(Function),
+      );
+      const removedChannels = childProcess.execFile.mock.calls
+        .map((call) => call[1])
+        .filter((args) => args[0] === "channels" && args[1] === "remove")
+        .map((args) => args[args.indexOf("--channel") + 1]);
+      expect(removedChannels).toEqual(["telegram"]);
+    });
+
+    it("still removes whatsapp when its owner number is cleared (pinned behavior)", async () => {
+      // whatsapp declares `sync: false` but the flag is deliberately NOT
+      // honored this wave: its env-clear removal lifecycle must stay
+      // byte-identical (see TODOS for the flag's fate).
+      setupConfig(
+        JSON.stringify({ channels: { whatsapp: { enabled: true } } }),
+      );
+      childProcess.execFile = execFileOk("");
+      delete require.cache[modulePath];
+      const gateway = require(modulePath);
+
+      await gateway.syncChannelConfig([], "remove");
+
+      expect(childProcess.execFile).toHaveBeenCalledWith(
+        "openclaw",
+        ["channels", "remove", "--channel", "whatsapp", "--delete"],
         expect.objectContaining({ timeout: 15000 }),
         expect.any(Function),
       );

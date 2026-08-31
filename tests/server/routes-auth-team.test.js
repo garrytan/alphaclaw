@@ -131,6 +131,28 @@ describe("server/routes/auth team mode (4.2/4.6)", () => {
     });
   });
 
+  it("exempts the exact OAuth callback pathnames from session auth (mount-prefix fix)", async () => {
+    // Under app.use("/auth", requireAuth) Express strips the mount prefix
+    // from req.path, so the old req.path check never matched and a cookie-less
+    // browser was bounced to /login.html instead of completing the callback.
+    app.get("/auth/google/callback", (req, res) => res.json({ reached: "google" }));
+    app.get("/auth/google/callback-evil", (req, res) => res.json({ reached: "evil" }));
+    app.get("/auth/codex/callback", (req, res) => res.json({ reached: "codex" }));
+
+    const google = await request(app).get("/auth/google/callback?code=x&state=y");
+    expect(google.status).toBe(200);
+    expect(google.body).toEqual({ reached: "google" });
+
+    const codex = await request(app).get("/auth/codex/callback?code=x&state=y");
+    expect(codex.status).toBe(200);
+    expect(codex.body).toEqual({ reached: "codex" });
+
+    // Exact pathname compare: a prefix-shaped sibling must stay behind auth.
+    const evil = await request(app).get("/auth/google/callback-evil");
+    expect(evil.status).toBe(302);
+    expect(evil.headers.location).toBe("/login.html");
+  });
+
   it("rejects a wrong member password and records the failure", async () => {
     createAdmin();
     const res = await loginMember("admin@example.com", "wrong");

@@ -5,6 +5,141 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.9.50] - 2026-08-31
+
+Drift Doctor's "Ask Agent to Fix" now actually delivers to the chat you pick
+— any channel, any session-key shape — and the workspace scan caps are
+raised, configurable, and honestly reported.
+
+### Fixed
+- **"Ask Agent to Fix" silently never delivered to most DMs.** The reply
+  target derived from hand-rolled Telegram-only regexes: account-scoped keys
+  (`…telegram:default:direct:…`), suffixed keys (`…:heartbeat`), bare groups,
+  and every Discord/Slack DM lost delivery while the UI showed a success
+  toast. Delivery targets now derive through the canonical suffix/account-
+  tolerant parser, server-side, validated against the live session list —
+  Discord/Slack DMs get proper `user:<id>` targets and account-scoped keys
+  deliver through their account (`replyAccountId`/`--reply-account`). The
+  same fix repairs `POST /api/agent/message` and the webhook/cron destination
+  pickers for non-Telegram DMs.
+- **One unreadable directory no longer kills the workspace scan**, deep or
+  ultra-wide trees no longer crash the walk (iterative traversal, no spread
+  overflow), files vanishing mid-scan stay a non-event, a file being actively
+  appended can no longer hang the scan (hashing is bounded at the observed
+  size), and persistently unreadable files now honestly mark the scan
+  partial instead of silently vanishing from drift detection.
+- **Messages to another agent's session now run under that agent.**
+  "Send to agent" previously always executed as the main agent; with
+  delivery now working for every channel, a non-main agent's DM would have
+  received the main agent's answer — the turn now runs under the session's
+  own agent.
+
+### Added
+- **Configurable scan caps** (Doctor settings → Scan limits): defaults raised
+  to 200k files / 50MB per file (was 50k/10MB), bounds 1k–500k / 1–100MB,
+  blank = default; changes re-scan immediately, no restart. The partial-scan
+  banner now states real numbers (files found vs cap, oversize/hash-budget/
+  unreadable-dir skips) and links to the settings card.
+- **Honest fix-dispatch lifecycle:** the modal filters to deliverable + main
+  sessions, shows a "delivers to chat / runs in main thread" hint before
+  send, Telegram DM rows are peer-qualified ("Direct message · 1050"), the
+  toast says delivery was *requested* (never "delivered"), and working cards
+  carry a persisted dispatch record ("delivery requested → telegram · 1050" /
+  "dispatch failed").
+- **Scan coverage forensics:** every doctor run persists the caps + stats its
+  snapshot was built under (`scan_stats_json`).
+- **Pre-merge review hardening** (specialist + red-team + cross-model passes,
+  all findings fixed): oversized fix prompts are a clean 400 before any state
+  change (char pre-filter + byte budget on the final payload); a failing
+  sessions CLI maps to 502, never a client-blaming 400; failed dispatches
+  leave a visible "last fix dispatch failed" marker on the reopened card and
+  the record survives no-change scan cloning; scan-limit inputs revert their
+  drafts on rejected saves and lock during any in-flight settings save; the
+  scanner reuses one hash buffer and only skips the manifest round-trip when
+  nothing was re-hashed (touched-but-identical files no longer re-hash every
+  refresh).
+
+### Changed
+- **One-time full re-analysis after upgrade:** workspace fingerprints changed
+  (tool-owned directories like `dist`, `.venv`, `__pycache__`, `.cache`,
+  `coverage` are now ignored; capped scans fold exclusion counters into the
+  fingerprint so changes beyond the cap bust the reuse guard). The first scan
+  after this release re-analyzes from scratch by design.
+- **Bounded doctor.db growth:** run manifests are retained only on the newest
+  two manifest-bearing runs plus the latest completed run.
+
+## [0.9.49] - 2026-08-31
+
+An upstream-alignment fix wave: the watchdog terminal finally gets a real
+window size, agent guidance stops naming Docker-only paths on npx and VPS
+installs, a Signal channel configured out-of-band becomes visible to status
+and onboarding (and survives it), the Google OAuth flow payload moves fully
+server-side, and model pricing/catalog gaps close — plus two security
+hardenings found while verifying prior waves.
+
+### Added
+- **MiniMax (China) support.** `minimax-cn` model selections reuse your
+  existing MiniMax API key, six MiniMax models (M2.7, M2.7-highspeed, M3 —
+  both regions) ship in the cold-start catalog via a new curated overlay
+  that catalog regeneration can no longer erase, and the picker shows a
+  labeled "MiniMax (China)" section.
+- **Signal shows up.** A Signal channel configured in openclaw.json (linked
+  via signal-cli) now appears in `/api/status`, renders as a
+  "Signal — Configured" row in the onboarding Channels step, and flips the
+  finish button from "Continue with web chat" to "Next". The plugin
+  runtime-deps preflight now also runs on Signal-only boxes.
+
+### Changed
+- **Prompt guidance is install-aware.** Durable-storage rules render the
+  real managed state directory — env-var-first
+  (`$OPENCLAW_STATE_DIR (this install: …)`) — instead of the Docker-only
+  `/data/.openclaw`, across the bootstrap templates, the gog skill, and the
+  admin-skill rules. Existing installs self-heal on the next restart; the
+  `alphaclaw git-sync` CLI messages are root-agnostic too. Fixes the Drift
+  Doctor P1 ("guidance names a nonexistent root") on `npx alphaclaw start`.
+- **Model pricing fallback resolves the most specific match** at component
+  boundaries (`gpt-5` can no longer shadow `gpt-5.5`; `gpt-5x` no longer
+  false-positives onto `gpt-5`). Note: `gpt-5.4-nano`-style ids now price
+  via `gpt-5.4` instead of `gpt-5`.
+
+### Fixed
+- **`openclaw doctor --fix` is readable in the Watchdog terminal.** The PTY
+  was spawned with a 0×0 window (Node TUIs saw `isTTY=true, columns=0` and
+  rendered one glyph per line); the browser's fitted size now applies at
+  spawn, the latest size is recorded per connection and used by every
+  respawn (Restart session picks it up), sizes are integer-clamped on both
+  untrusted paths, and each spawn logs its size for future diagnosis.
+- **Google OAuth state can no longer be re-encoded.** The account-linking
+  payload lives server-side behind an opaque single-use state (TTL'd,
+  size-capped, softly bound to the starting browser session), the token
+  exchange is pinned to the start-time redirect URI, a denied consent
+  consumes the flow, and an unknown accountId can no longer be planted for
+  the callback to adopt. The session-less OAuth callback exemption now
+  actually matches (it compared the wrong path under the /auth mount) and
+  uses an exact pathname, so `/auth/google/callback-evil` never rides it.
+- **Channel account deletion rejects traversal ids** before any config read,
+  with containment inside both destructive cleanup helpers — a hostile
+  account key planted in openclaw.json can no longer steer `rm -rf`-class
+  deletes outside the credentials directory.
+- **The boot git-askpass helper moved off the predictable `/tmp` path** into
+  the shared private-mkdtemp writer (a pre-planted symlink could redirect
+  the copy and get executed by git); an explicit
+  `ALPHACLAW_GIT_ASKPASS_PATH` override is written exclusively (`wx`).
+- **A boot or env-save sync can never auto-remove a channel that has no
+  managed env token** — the removal branch used to `channels remove
+  --delete` any enabled channel without a saved token. WhatsApp's lifecycle
+  is unchanged and now pinned by a regression test.
+- **Externally-configured channels survive fresh onboarding**: non-managed
+  `channels.*` entries are snapshotted before `openclaw onboard` rewrites
+  the config and re-added add-only through the sanitized write (hardened
+  against prototype-pollution key names).
+- **Eight missing model prices** (gpt-5.5, gpt-5.4-mini, kimi-k2.6:cloud,
+  deepseek-v4-flash:cloud, glm-5.1:cloud, grok-4.3, qwen3-coder-next,
+  minimax-m3:cloud) — gpt-5.5/gpt-5.4-mini were mispricing as gpt-5, the
+  rest billed at zero.
+- **Test temp-dir leaks** in the models/browse route suites (~108 leaked
+  directories per run); the repo-wide sweep is tracked in TODOS.
+
 ## [0.9.48] - 2026-08-30
 
 Drift Doctor now understands how the installed OpenClaw actually injects
