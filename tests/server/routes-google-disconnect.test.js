@@ -20,7 +20,7 @@ const { readGoogleState, writeGoogleState } = require("../../lib/server/google-s
 // pre-fix contract, pinned here so any future "gate everything" change is a
 // conscious decision.
 
-const buildDisconnectApp = ({ accounts = [], exportOk = true, tokenData } = {}) => {
+const buildDisconnectApp = ({ accounts = [], exportOk = true, removeOk = true, tokenData } = {}) => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "alphaclaw-gdisc-"));
   const statePath = path.join(tmpDir, "google-state.json");
   if (accounts.length) {
@@ -48,6 +48,9 @@ const buildDisconnectApp = ({ accounts = [], exportOk = true, tokenData } = {}) 
           const staged = tokenData === undefined ? { refresh_token: "rt-1" } : tokenData;
           fs.writeFileSync(outMatch[1], JSON.stringify(staged));
         }
+      }
+      if (cmd.includes("auth remove") && !removeOk) {
+        return { ok: false, stdout: "", stderr: "keyring locked" };
       }
       return { ok: true, stdout: "", stderr: "" };
     },
@@ -230,6 +233,42 @@ describe("server/routes POST /api/google/disconnect (PR #35 clientArg regression
 
     expect(res.body.ok).toBe(true);
     expect(gogCalls[1]).toBe('--client "acme-client" auth remove "user@example.com" --force');
+    expect(readAccounts(statePath)).toHaveLength(0);
+  });
+
+  it("does not clobber accounts written concurrently during the awaited revocation (fresh-read removal)", async () => {
+    const { app, statePath } = build({ accounts: [baseAccount()] });
+    // Simulate an OAuth-callback completion landing while the disconnect is
+    // parked on the revoke fetch: the state file gains acc2 mid-flight. A
+    // removal derived from the pre-await snapshot would erase acc2.
+    global.fetch = async () => {
+      writeGoogleState({
+        fs,
+        statePath,
+        state: {
+          version: 2,
+          accounts: [baseAccount(), baseAccount({ id: "acc2", email: "two@example.com" })],
+        },
+      });
+      return okFetch();
+    };
+
+    const res = await request(app).post("/api/google/disconnect").send({ accountId: "acc1" });
+
+    expect(res.body.ok).toBe(true);
+    const remaining = readAccounts(statePath);
+    expect(remaining).toHaveLength(1);
+    expect(remaining[0].id).toBe("acc2");
+  });
+
+  it("surfaces a warning when gog auth remove fails but state removal proceeds", async () => {
+    global.fetch = okFetch;
+    const { app, statePath } = build({ accounts: [baseAccount()], removeOk: false });
+
+    const res = await request(app).post("/api/google/disconnect").send({ accountId: "acc1" });
+
+    expect(res.body.ok).toBe(true);
+    expect(res.body.warning).toMatch(/credential entry may remain/);
     expect(readAccounts(statePath)).toHaveLength(0);
   });
 
