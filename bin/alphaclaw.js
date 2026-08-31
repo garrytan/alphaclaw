@@ -50,7 +50,7 @@ const {
   resolveRealGitPath,
   shouldRefreshHourlyGitSyncScript,
 } = require("../lib/cli/git-runtime");
-const { buildSystemCronFile } = require("../lib/cli/system-cron");
+const { buildSystemCronFile, isSafeCronSchedule } = require("../lib/cli/system-cron");
 const {
   ensureMainUpstream,
   restoreMissingOpenclawConfigFromRemote,
@@ -1155,7 +1155,13 @@ if (fs.existsSync(hourlyGitSyncPath)) {
         const cfg = JSON.parse(fs.readFileSync(syncCronConfig, "utf8"));
         cronEnabled = cfg.enabled !== false;
         const schedule = String(cfg.schedule || "").trim();
-        if (/^(\S+\s+){4}\S+$/.test(schedule)) cronSchedule = schedule;
+        if (isSafeCronSchedule(schedule)) {
+          cronSchedule = schedule;
+        } else if (schedule) {
+          console.log(
+            `[alphaclaw] Ignoring invalid stored sync-cron schedule ${JSON.stringify(schedule)}; using the default (${cronSchedule})`,
+          );
+        }
       } catch {}
     }
 
@@ -1176,8 +1182,23 @@ if (fs.existsSync(hourlyGitSyncPath)) {
         openclawDir,
       });
       if (cronContent) {
-        fs.writeFileSync(cronFilePath, cronContent, { mode: 0o644 });
+        // Atomic install (dotted temp names are ignored by cron.d).
+        if (typeof fs.renameSync === "function") {
+          fs.writeFileSync(`${cronFilePath}.tmp`, cronContent, { mode: 0o644 });
+          fs.renameSync(`${cronFilePath}.tmp`, cronFilePath);
+        } else {
+          fs.writeFileSync(cronFilePath, cronContent, { mode: 0o644 });
+        }
         console.log("[alphaclaw] System cron entry installed");
+      } else {
+        // The builder refused — never leave a stale (possibly pre-fix
+        // poisoned) managed file behind for cron to keep executing.
+        try {
+          fs.unlinkSync(cronFilePath);
+          console.log(
+            "[alphaclaw] Removed managed cron file: builder refused the current configuration",
+          );
+        } catch {}
       }
     } else {
       try {

@@ -5,6 +5,34 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.9.58] - 2026-08-31
+
+The hourly sync schedule can no longer be used to smuggle anything into the
+root cron file — and a bad schedule can no longer silently kill the sync job.
+
+### Fixed
+- Cron schedule validation is now semantic and shared by all three writers
+  of `/etc/cron.d/openclaw-hourly-sync`: exactly five space-separated numeric
+  fields within real cron ranges. Previously, separators matched ANY
+  whitespace, so a schedule containing newlines could inject environment or
+  command lines into the root cron file.
+- Charset-legal but invalid schedules (like `99 * * * *`) are rejected too —
+  cron rejects the entire file on one bad line, which silently stopped the
+  hourly sync while the dashboard reported it installed.
+- An invalid schedule stored on disk now falls back to the hourly default
+  LOUDLY: a warning is logged and `GET /api/sync-cron` reports
+  `scheduleFallback` with the rejected value.
+- A cron write the builder refuses now returns an error instead of `ok:true`
+  while `/etc/cron.d` silently keeps the old line; at boot, a refused
+  configuration removes the managed cron file instead of leaving a stale one.
+- The cron file is installed atomically (temp file + rename), so a crash
+  mid-write can never leave a truncated root cron file.
+
+### Changed
+- Schedules with named days/months (`MON`, `JAN`) or `@aliases` are no longer
+  accepted; the built-in UI only ever offered numeric presets. If a stored
+  schedule used names, it falls back to hourly and the API says so.
+
 ## [0.9.57] - 2026-08-31
 
 Disconnecting a Google account works again — and can no longer strand you

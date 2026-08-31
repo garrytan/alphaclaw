@@ -1867,8 +1867,50 @@ describe("server/routes/system", () => {
       .put("/api/sync-cron")
       .send({ schedule: "not-cron" });
     expect(badSchedule.status).toBe(400);
-    expect(badSchedule.body.error).toBe("schedule must be a 5-field cron string");
+    expect(badSchedule.body.error).toMatch(/five space-separated numeric cron fields/);
     expect(deps.fs.writeFileSync).not.toHaveBeenCalled();
+
+    // Control-character injection class (the old \s-separator shape passed
+    // every one of these through to the root-owned /etc/cron.d file).
+    for (const schedule of [
+      "* * * *\r0",
+      "*\n*\n*\n*\n*",
+      "PATH=/x\n0 * * *",
+      "*\t*\t*\t*\t*",
+      "0 * * * *#x",
+      // Charset-legal but cron-INVALID values would make cron reject the
+      // whole root file — the validator is semantic, not just a charset.
+      "99 * * * *",
+      "*/0 * * * *",
+      "50-10 * * * *",
+      "- - - - -",
+      "5/2 * * * *",
+      "0 2 * * MON",
+    ]) {
+      const res = await request(app).put("/api/sync-cron").send({ schedule });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toMatch(/five space-separated numeric cron fields/);
+    }
+    expect(deps.fs.writeFileSync).not.toHaveBeenCalled();
+  });
+
+  it("falls back to the default schedule when the on-disk cron config holds an injected schedule", async () => {
+    const deps = createSystemDeps();
+    deps.fs.existsSync.mockImplementation((p) => String(p).includes("system-sync.json"));
+    deps.fs.readFileSync.mockImplementation((p) => {
+      if (String(p).includes("system-sync.json")) {
+        return JSON.stringify({ enabled: true, schedule: "PATH=/tmp/evil\n*\n*\n*\n*" });
+      }
+      return "";
+    });
+    const app = createApp(deps);
+
+    const res = await request(app).get("/api/sync-cron");
+    expect(res.status).toBe(200);
+    expect(res.body.schedule).toBe("0 * * * *");
+    // The fallback is observable, never silent: the injected value is named.
+    expect(res.body.scheduleFallback).toBe(true);
+    expect(res.body.invalidStoredSchedule).toContain("/tmp/evil");
   });
 
   it("removes the system cron file when sync cron is disabled", async () => {
