@@ -1,0 +1,88 @@
+# Soak gate: a required check that stays RED until a PR's current head commit
+# has been open long enough for a human to actually read it, then flips green.
+# Born from the audit finding that 7/20 PRs merged in <15 min (one 23-fix
+# security wave in 2 minutes). RED-until-ripe is NORMAL here, not broken CI —
+# add the `expedite` label to override (audit-logged as a label event).
+#
+# Time source is non-forgeable: the created_at of the FIRST Actions run for the
+# current head SHA (GitHub-stamped at push), not a git commit date the author
+# controls. Known interaction: a rebase/new-push starts a fresh head SHA and so
+# resets the clock — acceptable given the `expedite` override and the ripen
+# job; a patch-id-based inheritance refinement is noted in the remediation plan.
+name: Soak
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, ready_for_review, labeled, unlabeled]
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  soak:
+    runs-on: ubuntu-latest
+    env:
+      SOAK_HOURS: "2"
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Enforce soak window (unless expedited)
+        run: |
+          set -euo pipefail
+          labels='${{ toJSON(github.event.pull_request.labels.*.name) }}'
+          if echo "$labels" | grep -q '"expedite"'; then
+            echo "::notice::expedite label present — soak window waived."
+            exit 0
+          fi
+          head_sha='${{ github.event.pull_request.head.sha }}'
+          repo='${{ github.repository }}'
+          # Earliest Actions run for this head SHA = GitHub-stamped push time.
+          first_created=$(gh api "repos/${repo}/actions/runs?head_sha=${head_sha}&per_page=100" \
+            --jq '[.workflow_runs[].created_at] | sort | .[0] // empty')
+          if [ -z "$first_created" ]; then
+            echo "::error::No Actions run found yet for ${head_sha}; the check will re-evaluate on the next run (see the ripen job)."
+            exit 1
+          fi
+          first_epoch=$(date -u -d "$first_created" +%s)
+          now_epoch=$(date -u +%s)
+          age_min=$(( (now_epoch - first_epoch) / 60 ))
+          need_min=$(( SOAK_HOURS * 60 ))
+          echo "Head ${head_sha} first seen ${first_created} (${age_min} min ago); soak needs ${need_min} min."
+          if [ "$age_min" -lt "$need_min" ]; then
+            echo "::error::Soak window not met: ${age_min}/${need_min} min. RED-until-ripe is expected — the ripen job re-checks every 30 min, or add the 'expedite' label to override."
+            exit 1
+          fi
+          echo "::notice::Soak window met (${age_min} min)."
+
+  # Scheduled re-runner: the soak check can't re-evaluate itself once time
+  # passes, so re-run the latest failed soak run on every open PR. Within ~30
+  # min of a PR ripening, its soak check flips green with no human action.
+  ripen:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Re-run failed soak checks on open PRs
+        run: |
+          set -euo pipefail
+          repo='${{ github.repository }}'
+          for pr in $(gh api "repos/${repo}/pulls?state=open&per_page=100" --jq '.[].number'); do
+            head=$(gh api "repos/${repo}/pulls/${pr}" --jq '.head.sha')
+            run=$(gh api "repos/${repo}/actions/workflows/soak.yml/runs?head_sha=${head}&per_page=1" \
+              --jq '.workflow_runs[0] | select(.conclusion=="failure") | .id' || true)
+            if [ -n "${run:-}" ]; then
+              echo "Re-running soak run ${run} for PR #${pr}"
+              gh api --method POST "repos/${repo}/actions/runs/${run}/rerun-failed-jobs" || true
+            fi
+          done
+
+# Cron delivery has NO guaranteed bound (typically minutes to tens of minutes);
+# `workflow_dispatch` is the manual fallback. Note the `schedule`/`dispatch`
+# triggers are additive to the pull_request trigger above.

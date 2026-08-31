@@ -88,19 +88,49 @@ The Agent Administration feature (default OFF) lets the deployed OpenClaw agent 
 
 ## Operations
 
+### Merge Gate (branch protection on `main`)
+
+A GitHub ruleset protects `main`: PRs required (no direct pushes), squash-only,
+required conversation resolution, strict up-to-date, and required status checks
+`test (22)`, `gate` (the always-running container-e2e aggregator), and `soak`.
+There are 0 required approvals — this is a solo repo where any higher count
+deadlocks; the gate is CI + a soak window, not human sign-off. Details:
+
+- **Version guard** (`scripts/ci/assert-version-advances.mjs`, run in `ci.yml`
+  on PRs): a PR's `package.json` version must strictly advance `main`'s. Every
+  PR bumps, including reverts. This is why versions are claimed at merge time,
+  not branch time (see CLAUDE.md "Merge unification safety"). `VERSION` is not a
+  tracked file — `package.json` is the source of truth.
+- **Soak** (`soak.yml`): a required check that stays RED until the current head
+  commit has been open ≥ 2h (measured from the first Actions run for that head
+  SHA — GitHub-stamped, not author-forgeable). **RED-until-ripe is normal, not
+  broken CI.** Add the `expedite` label to override (audit-logged). A `ripen`
+  cron re-runs failed soak checks every ~30 min so a ripened PR flips green with
+  no manual action; cron delivery has no guaranteed bound, and
+  `workflow_dispatch` is the manual fallback.
+- **Tags** (`tag-release.yml`): each push to `main` tags `v<version>`; a
+  same-version/different-sha collision fails loudly (the renumber-race tripwire).
+- **Break-glass:** disable the ruleset (`gh api --method PUT
+  repos/<owner>/<repo>/rulesets/<id> -f enforcement=disabled`) — every use is in
+  the audit log. Re-enable after.
+
+Because versions bump inside PRs, the release flow below no longer runs
+`npm version` — publish the already-bumped version and let `tag-release.yml`
+create the tag.
+
 ### Release Flow (Beta -> Production)
 
 Use this release flow when promoting tested beta builds to production:
 
 1. Ensure `main` is clean and synced, and tests pass.
-2. Publish beta iterations as needed:
-   - `npm version prerelease --preid=beta`
-   - `git push && git push --tags`
+2. Publish beta iterations as needed (the version was already bumped in-PR; do
+   NOT run `npm version` — it would create an untagged second bump and a git
+   tag that races `tag-release.yml`):
    - `npm publish --tag beta`
 3. Immediately after each beta publish, update `~/Projects/openclaw-railway-template` on the `beta` branch to pin the exact beta version in `package.json` (for example `0.3.2-beta.4`), then commit and push that template change. Do not leave the beta template on `latest`, or Docker layer cache can reuse an older install.
-4. When ready for production, publish a stable release version (for example `0.3.2`):
-   - `npm version 0.3.2`
-   - `git push && git push --tags`
+4. When ready for production, publish the stable release version already on
+   `main` (do NOT run `npm version`; `tag-release.yml` created the `v<version>`
+   tag on merge):
    - `npm publish` (publishes to `latest`)
    - Pin all deployment templates on `main` to that release: set `@chrysb/alphaclaw` in `~/Projects/openclaw-railway-template`, `~/Projects/openclaw-render-template`, and `~/Projects/openclaw-apex-template` to the released version. The Render checkout must track `render-examples/openclaw-render-template`; verify `gh api repos/render-examples/openclaw-render-template --jq '.permissions.push'` returns `true` before publishing, and stop if write access is missing. Templates rely on AlphaClaw’s declared `openclaw` dependency — do not add `package.json` `overrides` for `openclaw` unless you have a one-off debug reason. Run `npm install` in each repo, confirm `npm ls openclaw` matches AlphaClaw’s `package.json` pin, commit `package.json` and `package-lock.json`, and push. Skipping a template leaves it stale relative to the others.
 5. Return templates to production channel:
