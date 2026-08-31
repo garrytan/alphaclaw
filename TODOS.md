@@ -1,5 +1,11 @@
 # TODOS
 
+## P3 — Rescue login modal: label the OAuth link instead of rendering the raw URL
+- **What:** The guided-login modal renders the full OAuth authorize URL as a 9-line wrapped link; show a short label ("Open claude.ai login") with the raw URL in a copyable line beneath.
+- **Why:** Cosmetic (found by /qa on vientiane, 2026-08-31, ISSUE-001); functional as-is.
+- **Context:** lib/public/js/components/claude-code-local-setup-modal.js, awaiting_code state. Evidence: .gstack/qa-reports/screenshots/login-modal-awaiting-code.png.
+- **Effort:** S. **Depends on:** nothing.
+
 ## P3 — Resource-autotune ship-review follow-ups (2026-08-29, grouped)
 - **What:** (1) container-hook tests for `WatchdogAutotuneCard` (restartSignal/detectedAt refetch triggers, per-context save isolation, heap-input validation toast, reapply/dismiss flows — only the presentational view + builders are covered); (2) `launchGatewayProcess` spawn-stamp glue test (heap regex from childEnv, UV match) at the call site; (3) extract the copy-pasted cgroup fs-spy/containerFsModule test fixtures (×6 files) into a shared tests helper; (4) unify the three machine-summary assemblies (agent-admin/skill.js `gatherLiveState`, routes/system.js `buildMachineSummary`, onboarding/workspace.js `renderMachineProfileMarkdown`) on one summarizer with per-surface sanitization at call sites; (5) hoist the 3500ms post-restart settle-refetch literal (autotune-card, incidents hook, general tab) into a shared constant; (6) design pass items for /design-review: collapse the N-identical "Restart gateway now" per-row buttons into a single affordance, and move underlined text-button actions (Restart/Copy) onto ActionButton; (7) downsize-specific urgent-toned resize notification (copy is currently direction-neutral); (8) apply the shared cache pragma at cron-store's TTL reopen (+ decide agent-admin/usage sites); (9) a `pruneBackups` advisory-budget warning test; (10) an explicit boot-order test (autotune apply completes before `doSyncPromptFiles`, machine line present in first-boot artifacts with a GPU fixture).
 - **Why:** All flagged by the /ship specialist review or plan-completion audit; each deferred as churn-vs-risk at ship time — none is user-visible today, and the risky logic beneath them is covered (82% diff coverage, regressions pinned).
