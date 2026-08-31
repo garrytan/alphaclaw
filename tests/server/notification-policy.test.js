@@ -111,6 +111,56 @@ describe("server/notification-policy", () => {
   });
 });
 
+describe("server/notification-policy — master toggle (C3)", () => {
+  it("disabled silences everything through the pipeline, with its own reason", () => {
+    const env = { WATCHDOG_NOTIFICATIONS_DISABLED: "true" };
+    expect(shouldSendNotification({}, env)).toEqual({
+      ok: false,
+      reason: "notifications_disabled",
+    });
+    expect(shouldSendNotification({ verbose: true }, env).reason).toBe(
+      "notifications_disabled",
+    );
+    for (const eventType of ["crash", "upgrade_failed", "health", "info"]) {
+      expect(shouldSendNotification({ eventType }, env).ok).toBe(false);
+    }
+    // Audit notices (agent-admin) are exempt: a semi-trusted actor must not
+    // be able to silence the audit trail of its own change (F3).
+    expect(shouldSendNotification({ audit: true }, env).ok).toBe(true);
+    expect(
+      shouldSendNotification({ audit: true, verbose: true }, env).ok,
+    ).toBe(true);
+  });
+
+  it("master gate applies at enqueue AND at flush", async () => {
+    delete process.env.WATCHDOG_NOTIFICATIONS_DISABLED;
+    delete process.env.WATCHDOG_NOTIFICATIONS_QUIET;
+    const { notifier, outbox, fanout } = makeNotifier();
+
+    // Queued while enabled…
+    await notifier.notify("🔴 queued important", { id: "e1" });
+    await notifier.notify("🔐 queued audit", { id: "e2", audit: true });
+    // …operator disables notifications before delivery.
+    process.env.WATCHDOG_NOTIFICATIONS_DISABLED = "true";
+    await notifier.flush();
+
+    // The important event terminally suppresses; the audit event delivers.
+    const events = outbox.listEvents();
+    expect(events.find((e) => e.id === "e1").suppressedAt).toBeTruthy();
+    expect(events.find((e) => e.id === "e2").deliveredAt).toBeTruthy();
+    expect(fanout).toHaveBeenCalledTimes(1);
+    expect(fanout.mock.calls[0][0]).toBe("🔐 queued audit");
+
+    // New enqueues are refused with the master reason.
+    const refused = await notifier.notify("🔴 new", { id: "e3" });
+    expect(refused).toEqual({
+      ok: false,
+      skipped: true,
+      reason: "notifications_disabled",
+    });
+  });
+});
+
 describe("server/upgrade-notifier policy gate", () => {
   it("suppresses a verbose event at enqueue when quiet — never queued", async () => {
     process.env.WATCHDOG_NOTIFICATIONS_QUIET = "true";
