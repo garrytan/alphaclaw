@@ -38,6 +38,7 @@ const createHarness = ({
   }),
   supervisorModeActive,
   consumeRestartHandoffImpl,
+  getRescueSessionLine,
 } = {}) => {
   process.env.WATCHDOG_AUTO_REPAIR = autoRepair ? "true" : "false";
   process.env.WATCHDOG_NOTIFICATIONS_DISABLED = notificationsDisabled ? "true" : "false";
@@ -80,6 +81,7 @@ const createHarness = ({
     // gate, and the default-gate resolution is unit-tested in gateway.test.js.
     supervisorModeActive: supervisorModeActive ?? (() => false),
     ...(consumeRestartHandoffImpl ? { consumeRestartHandoffImpl } : {}),
+    ...(getRescueSessionLine ? { getRescueSessionLine } : {}),
   });
 
   return {
@@ -398,6 +400,66 @@ describe("server/watchdog", () => {
         String(call?.[0] || "").includes("🟢 Gateway running again"),
       ),
     ).toBe(true);
+    watchdog.stop();
+  });
+
+  it("appends the rescue-session line to incident-class notifications only", async () => {
+    vi.useFakeTimers();
+    const kRescueLine = "🛟 Rescue session: https://claude.ai/code/sess_test123";
+    let healthChecks = 0;
+    const { watchdog, notifier } = createHarness({
+      autoRepair: false,
+      getRescueSessionLine: () => kRescueLine,
+      fetchImpl: async () => {
+        healthChecks += 1;
+        if (healthChecks === 1) throw new Error("gateway unavailable");
+        return {
+          ok: true,
+          status: 200,
+          text: async () => JSON.stringify({ ok: true, status: "live" }),
+        };
+      },
+    });
+
+    watchdog.onGatewayLaunch({ startedAt: Date.now() - 60_000 });
+    watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    await vi.advanceTimersByTimeAsync(0);
+    watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    await vi.advanceTimersByTimeAsync(0);
+    watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    await vi.advanceTimersByTimeAsync(120_000);
+
+    const messages = notifier.notify.mock.calls.map((call) => String(call?.[0] || ""));
+    const incidentMessages = messages.filter((message) => message.includes("crash"));
+    expect(incidentMessages.length).toBeGreaterThan(0);
+    expect(messages.some((message) => message.includes(kRescueLine))).toBe(true);
+    // Non-incident notifications (the recovery green) stay clean: the line is
+    // an incident affordance, not a signature on every message.
+    const recovery = messages.find((message) => message.includes("🟢 Gateway running again"));
+    expect(recovery).toBeTruthy();
+    expect(recovery).not.toContain(kRescueLine);
+    watchdog.stop();
+  });
+
+  it("never lets a throwing rescue-line consult break a notification", async () => {
+    vi.useFakeTimers();
+    const { watchdog, notifier } = createHarness({
+      autoRepair: false,
+      getRescueSessionLine: () => {
+        throw new Error("rescue consult boom");
+      },
+      fetchImpl: async () => {
+        throw new Error("gateway unavailable");
+      },
+    });
+    watchdog.onGatewayLaunch({ startedAt: Date.now() - 60_000 });
+    watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    await vi.advanceTimersByTimeAsync(0);
+    watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    await vi.advanceTimersByTimeAsync(0);
+    watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(notifier.notify).toHaveBeenCalled();
     watchdog.stop();
   });
 

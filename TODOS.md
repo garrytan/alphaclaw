@@ -416,17 +416,35 @@
 - **Context:** The fire payload arrives wrapped in an untrusted `<routine-fire-payload>` block, so the routine's saved prompt must explicitly opt in to reading it (e.g. "act on the routine-fire-payload block"); needs UX design (input modal) and README prompt guidance. `lib/server/claude-code-service.js` is the extension point (currently posts no body by design).
 - **Effort:** M. **Depends on:** the launcher shipping.
 
-## P2 — Watchdog incident → Claude Code routine escalation
-- **What:** Reuse `claude-code-service` to fire the routine with a settled incident's narrative as the `text` payload ("escalate this incident to Claude Code").
-- **Why:** Platform potential: incidents debug themselves in a cloud session with context attached, instead of an operator copy-pasting log excerpts.
-- **Context:** Deferred from the launcher's CEO review; needs overseer-integration design (which incidents qualify, redaction of the narrative, notification links) and its own review. Blocked on the fire-with-text TODO above for the payload path.
-- **Effort:** M. **Depends on:** fire-with-custom-text.
+## P2 — Watchdog incident → Claude Code routine escalation (fallback path)
+- **What:** Reuse `claude-code-service` to fire the cloud routine on incident escalation — now scoped as the FALLBACK variant, for boxes with a configured routine but no completed local rescue login: once the local login is done, incident auto-spawn (`CLAUDE_CODE_LOCAL_SPAWN_ON_INCIDENT`, shipped with the local rescue session) already warms an on-box session at incident open.
+- **Why:** Platform potential: incidents debug themselves in a session with context attached, instead of an operator copy-pasting log excerpts — and routine-only boxes shouldn't be left out.
+- **Context:** Deferred from the launcher's CEO review. The narrative-payload half (which incidents qualify, redaction of the untrusted narrative text) moved into the "Seed the local rescue session with incident context" entry below — design both launch paths against that one shared redaction/qualification policy. `lib/server/claude-code-service.js` is the extension point (currently posts no body by design); the incident-open hook seam is `onIncidentActivity` in lib/server/watchdog-incidents.js.
+- **Effort:** M. **Depends on:** fire-with-custom-text (payload path); the incident-context seeding entry's shared redaction design.
 
-## P3 — Doctor check for Claude Code routine config shape
-- **What:** Surface the launcher service's `invalid_config` reason (bad host, wrong token prefix, half-configured pair) as a Doctor finding.
-- **Why:** Misconfiguration is currently visible only in the sidebar tooltip and the fire-time error toast; Doctor is where operators look for config drift.
-- **Context:** `createClaudeCodeService().getAvailability()` already returns the exact reason/message — the check is a thin adapter in lib/server/doctor/.
+## P2 — Seed the local rescue session with incident context
+- **What:** When a rescue session spawns for (or is joined by) a watchdog incident, seed it with the incident's narrative — what opened it, key events, redacted log excerpts — instead of arriving blank, via send-keys into the live session or a context file in the session cwd.
+- **Why:** Incident auto-spawn (shipped) delivers a warm but empty session; the dream state is a session already loaded with why it exists.
+- **Context:** Deliberately deferred at implementation time as a prompt-injection surface: incident narratives embed untrusted gateway log content, so seeding needs shared redaction plus an explicit untrusted-content wrapper (the routine path's `<routine-fire-payload>` opt-in pattern), designed together with the P2 fire-with-text payload so both launch paths share one policy. Extension points: `ensureForIncident(context)` in lib/server/claude-code-local/index.js (the incident id already flows through as `spawnedBy`) and the notification-composition seam in lib/server/watchdog.js.
+- **Effort:** M. **Depends on:** fire-with-custom-text (shared payload/redaction design).
+
+## P3 — Doctor check for Claude Code launcher config drift (routine + local)
+- **What:** Surface both launch paths' misconfiguration as Doctor findings: the routine service's `invalid_config` reason (bad host, wrong token prefix, half-configured pair) AND the local rescue path's drift states — enabled-but-`needs_login` (including the credentials-lost-after-backup-restore case: `<rootDir>/claude-code-local/home/` is deliberately excluded from backups, so a restore silently drops the login until the operator re-runs it from the Watchdog card), invalid `CLAUDE_CODE_LOCAL_PERMISSION_MODE`/`CLAUDE_CODE_LOCAL_CWD` values, and the untested-claude-version warning.
+- **Why:** Misconfiguration is currently visible only in the sidebar tooltip, the Watchdog card, and fire-time toasts; Doctor is where operators look for config drift — and re-login-after-restore has no proactive surface at all today.
+- **Context:** `createClaudeCodeService().getAvailability()` and `createClaudeCodeLocalService().getStatusSnapshot()` already return the exact reason/warning strings — the check is a thin adapter in lib/server/doctor/.
 - **Effort:** S. **Depends on:** nothing.
+
+## P3 — Unify PTY spawn under pty-process.js
+- **What:** Refactor lib/server/watchdog-terminal.js onto the shared `spawnInPty` helper (lib/server/pty-process.js) that the rescue session's script(1) fallback hosting and the guided-login PTY already use.
+- **Why:** One PTY primitive instead of two copies of the script(1) harness; deferred mid-feature to keep blast radius off the stable watchdog-terminal surface.
+- **Context:** lib/server/pty-process.js was extracted during the local rescue session work (plan amendment D13); watchdog-terminal.js keeps its own child pattern until this lands.
+- **Effort:** S. **Depends on:** the local rescue session feature landing.
+
+## P3 — Adopt `claude remote-control --headless` when anthropics/claude-code#30447 ships
+- **What:** Swap the rescue spawn from TUI-in-tmux parsing to the upstream headless flag once it exists; the swap is isolated in `buildSpawnCommand()` (lib/server/claude-code-local/index.js). Drop the tmux dependency for the daemon path; keep tmux for the operator attach hint.
+- **Why:** TUI parsing (capture-pane → stripAnsi → URL regex) is the feature's highest-drift surface; a supported headless mode deletes it.
+- **Context:** Track anthropics/claude-code#30447. The version-pinned TUI fixtures (tests/server/fixtures/claude-code-tui/) and the Dockerfile's exact-version claude pin are the artifacts this retires.
+- **Effort:** S. **Depends on:** upstream shipping the flag.
 
 ## P3 — Mobile drawer doesn't close on external nav items
 - **What:** The generic `item.href` branch in `renderNavItem` (lib/public/js/components/sidebar.js) — used by the gated Dashboards link — never closes the mobile drawer, leaving the drawer and overlay covering the app while the new tab opens.

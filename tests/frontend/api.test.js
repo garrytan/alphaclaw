@@ -2323,3 +2323,121 @@ describe("frontend/api claude-code helpers", () => {
     );
   });
 });
+
+describe("frontend/api claude-code local helpers", () => {
+  const mockJsonResponse = (status, payload) => ({
+    status,
+    ok: status >= 200 && status < 300,
+    text: async () => JSON.stringify(payload),
+    json: async () => payload,
+  });
+
+  beforeEach(() => {
+    global.fetch = vi.fn();
+    global.window = { location: { href: "http://localhost/" } };
+  });
+
+  it("fetchClaudeCodeStatusDirect hits the same status endpoint (poller path)", async () => {
+    const payload = {
+      ok: true,
+      availability: { available: true },
+      local: { enabled: true, state: "ready" },
+    };
+    global.fetch.mockResolvedValue(mockJsonResponse(200, payload));
+    const api = await import("../../lib/public/js/lib/api.js");
+    expect(await api.fetchClaudeCodeStatusDirect()).toEqual(payload);
+    expect(global.fetch).toHaveBeenCalledWith(
+      "/api/claude-code/status",
+      expect.any(Object),
+    );
+  });
+
+  it("createClaudeCodeLocalSession POSTs the confirmed flag and returns the envelope", async () => {
+    const payload = {
+      ok: true,
+      status: "running",
+      sessionId: "rescue_01A",
+      sessionUrl: "https://claude.ai/code/rescue_01A",
+    };
+    global.fetch.mockResolvedValue(mockJsonResponse(200, payload));
+    const api = await import("../../lib/public/js/lib/api.js");
+    const result = await api.createClaudeCodeLocalSession({ confirmed: true });
+    expect(result).toEqual(payload);
+    const [url, options] = global.fetch.mock.calls.at(-1);
+    expect(url).toBe("/api/claude-code/local/session");
+    expect(options.method).toBe("POST");
+    expect(JSON.parse(options.body)).toEqual({ confirmed: true });
+  });
+
+  it("createClaudeCodeLocalSession defaults confirmed to false (strict server check)", async () => {
+    global.fetch.mockResolvedValue(mockJsonResponse(202, { ok: true, status: "starting" }));
+    const api = await import("../../lib/public/js/lib/api.js");
+    const result = await api.createClaudeCodeLocalSession();
+    expect(result).toEqual({ ok: true, status: "starting" });
+    const [, options] = global.fetch.mock.calls.at(-1);
+    expect(JSON.parse(options.body)).toEqual({ confirmed: false });
+  });
+
+  it("keeps the machine code on thrown local refusals (the launcher branches on it)", async () => {
+    global.fetch.mockResolvedValue(
+      mockJsonResponse(409, {
+        ok: false,
+        error: "needs_login",
+        message: "Log in to Claude on the Watchdog page first (one-time).",
+      }),
+    );
+    const api = await import("../../lib/public/js/lib/api.js");
+    await expect(api.createClaudeCodeLocalSession()).rejects.toMatchObject({
+      code: "needs_login",
+      message: "Log in to Claude on the Watchdog page first (one-time).",
+    });
+  });
+
+  it("stop/login/cancel/logout POST their endpoints", async () => {
+    global.fetch.mockResolvedValue(mockJsonResponse(200, { ok: true }));
+    const api = await import("../../lib/public/js/lib/api.js");
+    const calls = [
+      [api.stopClaudeCodeLocalSession, "/api/claude-code/local/session/stop"],
+      [api.startClaudeCodeLocalLogin, "/api/claude-code/local/login"],
+      [api.cancelClaudeCodeLocalLogin, "/api/claude-code/local/login/cancel"],
+      [api.logoutClaudeCodeLocal, "/api/claude-code/local/logout"],
+    ];
+    for (const [fn, endpoint] of calls) {
+      await fn();
+      const [url, options] = global.fetch.mock.calls.at(-1);
+      expect(url).toBe(endpoint);
+      expect(options.method).toBe("POST");
+    }
+  });
+
+  it("submitClaudeCodeLocalLoginCode POSTs the code body", async () => {
+    global.fetch.mockResolvedValue(mockJsonResponse(200, { ok: true, status: "verifying" }));
+    const api = await import("../../lib/public/js/lib/api.js");
+    const result = await api.submitClaudeCodeLocalLoginCode({ code: "ABC-123" });
+    expect(result).toEqual({ ok: true, status: "verifying" });
+    const [url, options] = global.fetch.mock.calls.at(-1);
+    expect(url).toBe("/api/claude-code/local/login/code");
+    expect(JSON.parse(options.body)).toEqual({ code: "ABC-123" });
+  });
+
+  it("fetchClaudeCodeLocalTail encodes the source query", async () => {
+    global.fetch.mockResolvedValue(
+      mockJsonResponse(200, { ok: true, source: "login", tail: "output" }),
+    );
+    const api = await import("../../lib/public/js/lib/api.js");
+    const result = await api.fetchClaudeCodeLocalTail({ source: "login" });
+    expect(result.tail).toBe("output");
+    const [url] = global.fetch.mock.calls.at(-1);
+    expect(url).toBe("/api/claude-code/local/tail?source=login");
+  });
+
+  it("fetchClaudeCodeLocalTail surfaces the 404 no_buffer code", async () => {
+    global.fetch.mockResolvedValue(
+      mockJsonResponse(404, { ok: false, error: "no_buffer", message: "No output yet." }),
+    );
+    const api = await import("../../lib/public/js/lib/api.js");
+    await expect(api.fetchClaudeCodeLocalTail()).rejects.toMatchObject({
+      code: "no_buffer",
+    });
+  });
+});

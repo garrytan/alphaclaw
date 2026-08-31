@@ -5,6 +5,46 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [Unreleased]
+
+The sidebar's Open Claude Code button can now land you in a Claude Code
+session running on the box itself. AlphaClaw hosts `claude remote-control`
+in a detached tmux session, extracts its Remote Control URL, and prefers
+that local rescue path — the cloud routine stays as the fallback — so you
+can debug AlphaClaw/OpenClaw from claude.ai/code (or your phone) with hands
+on the actual machine.
+
+### Added
+- **Local rescue session launcher (local-first, routine fallback).** One
+  click starts (or rejoins) a Claude Code instance on this box in detached
+  tmux and navigates straight to its claude.ai/code session; the session
+  survives AlphaClaw restarts. Boxes without a completed local login keep
+  firing the cloud routine exactly as before.
+- **Guided one-time OAuth login in the web UI.** The Watchdog page walks
+  through `claude auth login` — clickable OAuth link, paste-the-code input,
+  success verified against `claude auth status` — with credentials kept in
+  a dedicated 0700 HOME that backups deliberately exclude (re-run the login
+  after restoring a backup).
+- **Watchdog rescue-session card.** State badge with Start/Stop/Login/Logout,
+  the session URL as a QR code (plain selectable link always beside it), a
+  copyable tmux attach hint for shell access, and a sanitized terminal-tail
+  viewer for diagnosing failed spawns.
+- **Incident auto-spawn.** When the watchdog opens an incident (and the
+  login is done), the rescue session warms automatically and the incident
+  notification includes its URL when the session is already running.
+  Unattended spawns always clamp to `acceptEdits` and skip below a ~500MB
+  free-memory floor.
+- **Five new env keys** on the Envars page — `CLAUDE_CODE_LOCAL_ENABLED`,
+  `CLAUDE_CODE_LOCAL_AUTOSTART`, `CLAUDE_CODE_LOCAL_PERMISSION_MODE`,
+  `CLAUDE_CODE_LOCAL_CWD`, `CLAUDE_CODE_LOCAL_SPAWN_ON_INCIDENT` — all
+  hot-reloaded, no restart required.
+- **Docker image: tmux + pinned Claude Code CLI.** The image now ships tmux
+  (so rescue sessions outlive the AlphaClaw process) and an exact-pinned
+  `@anthropic-ai/claude-code` install (pinned on purpose: the TUI-parsing
+  fixtures are captured against that version and the pin is bumped together
+  with a fixture refresh). Without either, the launcher degrades honestly —
+  script(1) hosting or the routine fallback.
+
 ## [0.9.48] - 2026-08-30
 
 Drift Doctor now understands how the installed OpenClaw actually injects
