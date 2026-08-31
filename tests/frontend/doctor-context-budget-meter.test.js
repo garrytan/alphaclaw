@@ -203,9 +203,15 @@ describe("frontend/doctor context budget meter model", () => {
       "starved",
       "blocked",
     ]);
+    // Vocabulary unification with the General hardening card: a fully-cut
+    // file is "Dropped" to a user, never the internal "starved".
     expect(model.rows[0].chip).toEqual({ tone: "danger", label: "Truncated" });
-    expect(model.rows[1].chip).toEqual({ tone: "warning", label: "Starved" });
+    expect(model.rows[1].chip).toEqual({ tone: "warning", label: "Dropped" });
     expect(model.rows[2].chip).toEqual({ tone: "danger", label: "Blocked" });
+    // Rows expose the reason and cause+short tooltip copy for the chips.
+    expect(model.rows[0].reason).toBe("file_limit");
+    expect(model.rows[0].chipTooltip).toContain("per-file injection cap");
+    expect(model.rows[1].chipTooltip).toContain("dropped entirely");
 
     const nearModel = buildContextBudgetMeterModel(
       statusWithContext({
@@ -288,5 +294,76 @@ describe("frontend/doctor context budget meter model", () => {
       }),
     });
     expect(vnode).not.toBe(null);
+  });
+});
+
+describe("frontend/doctor context budget meter rejected-read hints", () => {
+  const blockedStatus = (reason, files) => ({
+    bootstrapContext: {
+      estimated: true,
+      bootstrapMaxChars: 20000,
+      bootstrapTotalMaxChars: 60000,
+      activeInjectedChars: 100,
+      hardening: { state: "blocked", reason, files },
+      files: [
+        {
+          kind: "root",
+          exists: true,
+          active: true,
+          injectable: true,
+          skipped: false,
+          truncated: false,
+          nearFileLimit: false,
+          reason: "",
+          activeReason: "",
+          path: "AGENTS.md",
+          injectedChars: 100,
+          rawChars: 100,
+        },
+      ],
+    },
+  });
+
+  it("points at rejected-read files the row filter cannot show", () => {
+    // exists:false files never appear as rows — the hint line is the meter's
+    // honest pointer at them ("everything here looks OK" must not happen
+    // while General says BLOCKED).
+    const model = buildContextBudgetMeterModel(
+      blockedStatus("escapes_workspace", [
+        {
+          path: "hooks/bootstrap/AGENTS.md",
+          exists: false,
+          reason: "escapes_workspace",
+        },
+      ]),
+    );
+    expect(model.rejectedHints).toEqual([
+      "hooks/bootstrap/AGENTS.md is rejected before it can be read — run a scan for the full finding.",
+    ]);
+  });
+
+  it("phrases plain-missing files as missing, not rejected", () => {
+    const model = buildContextBudgetMeterModel(
+      blockedStatus("missing_file", [
+        { path: "hooks/bootstrap/AGENTS.md", exists: false, reason: "" },
+      ]),
+    );
+    expect(model.rejectedHints).toEqual([
+      "hooks/bootstrap/AGENTS.md is missing from disk — run a scan for the full finding.",
+    ]);
+  });
+
+  it("emits no hints for non-rejected blocked causes or healthy states", () => {
+    expect(
+      buildContextBudgetMeterModel(
+        blockedStatus("", [
+          { path: "hooks/bootstrap/AGENTS.md", exists: true, reason: "not_configured" },
+        ]),
+      ).rejectedHints,
+    ).toEqual([]);
+    const healthy = buildContextBudgetMeterModel(
+      blockedStatus("escapes_workspace", []),
+    );
+    expect(healthy.rejectedHints).toEqual([]);
   });
 });

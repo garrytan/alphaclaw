@@ -3594,3 +3594,74 @@ describe("server/doctor-service evidence snippet containment (H6)", () => {
     expect(item.snippet).toBeUndefined();
   });
 });
+
+describe("server/doctor-service hardening transition log", () => {
+  afterEach(() => {
+    if (currentDoctorDb?.closeDoctorDb) {
+      currentDoctorDb.closeDoctorDb();
+      currentDoctorDb = null;
+    }
+  });
+
+  const hardeningWarnCalls = (warnSpy) =>
+    warnSpy.mock.calls.filter((call) =>
+      String(call[0] || "").includes("hardening state change observed"),
+    );
+
+  it("logs once when the observed hardening state changes, silent on first compute and no-change", () => {
+    const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-hardening-log-ws-"));
+    const dbRoot = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-hardening-log-db-"));
+    fs.writeFileSync(path.join(workspaceRoot, "AGENTS.md"), "# Guidance\n", "utf8");
+
+    const doctorDb = loadManagedDoctorDb();
+    doctorDb.initDoctorDb({ rootDir: dbRoot });
+    const { createDoctorService } = loadDoctorService();
+    const doctorService = createDoctorService({
+      clawCmd: vi.fn(),
+      listDoctorRuns: doctorDb.listDoctorRuns,
+      listDoctorRunSummaries: doctorDb.listDoctorRunSummaries,
+      getDoctorRunManifest: doctorDb.getDoctorRunManifest,
+      getLatestCompletedRunSummary: doctorDb.getLatestCompletedRunSummary,
+      listDoctorCards: doctorDb.listDoctorCards,
+      getInitialWorkspaceBaseline: doctorDb.getInitialWorkspaceBaseline,
+      setInitialWorkspaceBaseline: doctorDb.setInitialWorkspaceBaseline,
+      createDoctorRun: doctorDb.createDoctorRun,
+      completeDoctorRun: doctorDb.completeDoctorRun,
+      insertDoctorCards: doctorDb.insertDoctorCards,
+      getDoctorRun: doctorDb.getDoctorRun,
+      getDoctorCardsByRunId: doctorDb.getDoctorCardsByRunId,
+      getDoctorCard: doctorDb.getDoctorCard,
+      updateDoctorCardStatus: doctorDb.updateDoctorCardStatus,
+      workspaceRoot,
+      managedRoot: workspaceRoot,
+      computeSnapshotAsync: fastComputeSnapshotAsync,
+    });
+
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    // First compute after boot: no previous context — never a false transition.
+    doctorService.buildStatus();
+    expect(hardeningWarnCalls(warnSpy)).toHaveLength(0);
+
+    // Break hardening on disk (merged file present, config entry lost →
+    // blocked/not_configured), then expire the 30s bootstrap-context TTL.
+    fs.mkdirSync(path.join(workspaceRoot, "hooks", "bootstrap"), { recursive: true });
+    fs.writeFileSync(
+      path.join(workspaceRoot, "hooks", "bootstrap", "AGENTS.md"),
+      "safety rules",
+      "utf8",
+    );
+    const realNow = Date.now();
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => realNow + 31_000);
+    doctorService.buildStatus();
+    const observed = hardeningWarnCalls(warnSpy);
+    expect(observed).toHaveLength(1);
+    expect(String(observed[0][0])).toContain("blocked");
+    expect(String(observed[0][0])).toContain("hooks/bootstrap/AGENTS.md: not_configured");
+
+    // A no-change refresh stays silent.
+    warnSpy.mockClear();
+    nowSpy.mockImplementation(() => realNow + 62_000);
+    doctorService.buildStatus();
+    expect(hardeningWarnCalls(warnSpy)).toHaveLength(0);
+  });
+});
