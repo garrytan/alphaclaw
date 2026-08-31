@@ -26,14 +26,10 @@ describe("frontend/general hardening badge", () => {
       tone: "success",
       label: "Hardening: injected",
     });
-    expect(getHardeningBadgeModel(statusWithHardening("starved"))).toMatchObject({
-      tone: "warning",
-      label: "Hardening: partial",
-    });
-    expect(getHardeningBadgeModel(statusWithHardening("blocked"))).toMatchObject({
-      tone: "danger",
-      label: "Hardening: blocked",
-    });
+    // Problem states are owned by GeneralHardeningCard (file, cause, fix,
+    // action) — the badge yields entirely on non-dev channels.
+    expect(getHardeningBadgeModel(statusWithHardening("starved"))).toBe(null);
+    expect(getHardeningBadgeModel(statusWithHardening("blocked"))).toBe(null);
     expect(getHardeningBadgeModel(statusWithHardening("unknown"))).toMatchObject({
       tone: "neutral",
       label: "Hardening: unknown",
@@ -53,9 +49,9 @@ describe("frontend/general hardening badge", () => {
     );
     expect(model).toMatchObject({ tone: "neutral", label: "Hardening: unknown" });
     expect(model.title).toContain("cannot parse");
-    // Plain unknown keeps the generic title.
+    // Plain unknown keeps a generic title that still names the action.
     expect(getHardeningBadgeModel(statusWithHardening("unknown")).title).toBe(
-      "Prompt hardening state could not be determined.",
+      "Prompt hardening state could not be determined. Run /context on the agent to check.",
     );
   });
 

@@ -589,6 +589,44 @@ describe("server/doctor/bootstrap-context", () => {
     expect(extra.rawChars).toBe(0);
     // Hardening must not report healthy for a file the agent never receives.
     expect(context.hardening.state).toBe("blocked");
+    // The top-level diagnosis names the TRUE cause — "missing_file" advice
+    // ("restart, the resync rewrites it") cannot fix a symlink escape.
+    expect(context.hardening.reason).toBe("escapes_workspace");
+
+    fs.rmSync(outsideDir, { recursive: true, force: true });
+  });
+
+  it("derives the top-level blocked reason with deterministic precedence on mixed causes", () => {
+    write("AGENTS.md", "root guidance");
+    const outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-mixed-cause-"));
+    fs.writeFileSync(path.join(outsideDir, "AGENTS.md"), "outside hardening", "utf8");
+    fs.mkdirSync(path.join(workspaceRoot, "hooks", "bootstrap"), { recursive: true });
+    fs.symlinkSync(
+      path.join(outsideDir, "AGENTS.md"),
+      path.join(workspaceRoot, "hooks", "bootstrap", "AGENTS.md"),
+    );
+
+    // One escaping symlink + one plain-missing configured extra: the
+    // precedence order (escapes_workspace > file_too_large > missing_file)
+    // wins regardless of config entry order — never first-file-wins.
+    const context = analyzeBootstrapContext({
+      workspaceRoot,
+      profile: kStableProfile,
+      extraFilePaths: [
+        "hooks/bootstrap/MEMORY.md",
+        "hooks/bootstrap/AGENTS.md",
+      ],
+      hooksEnabled: true,
+    });
+
+    expect(context.hardening.state).toBe("blocked");
+    expect(context.hardening.reason).toBe("escapes_workspace");
+    // Each file keeps its own true cause for downstream per-file copy.
+    const reasons = Object.fromEntries(
+      context.hardening.files.map((file) => [file.path, file.reason]),
+    );
+    expect(reasons["hooks/bootstrap/AGENTS.md"]).toBe("escapes_workspace");
+    expect(reasons["hooks/bootstrap/MEMORY.md"]).toBe("");
 
     fs.rmSync(outsideDir, { recursive: true, force: true });
   });
@@ -628,6 +666,8 @@ describe("server/doctor/bootstrap-context", () => {
     expect(extra.exists).toBe(false);
     expect(extra.rawChars).toBe(0);
     expect(context.hardening.state).toBe("blocked");
+    // Named cause, not "missing_file" — restarting cannot shrink the file.
+    expect(context.hardening.reason).toBe("file_too_large");
   });
 
   it("flags on-disk hardening with a lost config entry as blocked, not unknown", () => {
@@ -1101,5 +1141,28 @@ describe("server/doctor/bootstrap-context", () => {
       expect(context.bootstrapMaxChars).toBe(20000);
       expect(context.hooksEnabled).toBe(false);
     });
+  });
+
+  it("prefers the activation reason over budget reasons in the hardening payload", () => {
+    // A file OpenClaw never injects at all (hooks disabled) must not surface
+    // budget advice just because it is also over the per-file cap.
+    write("AGENTS.md", "root guidance");
+    write("hooks/bootstrap/AGENTS.md", "H".repeat(300));
+
+    const context = analyzeBootstrapContext({
+      workspaceRoot,
+      profile: kStableProfile,
+      extraFilePaths: ["hooks/bootstrap/AGENTS.md"],
+      hooksEnabled: false,
+      bootstrapMaxChars: 100,
+    });
+
+    expect(context.hardening.state).toBe("blocked");
+    expect(context.hardening.files).toEqual([
+      expect.objectContaining({
+        path: "hooks/bootstrap/AGENTS.md",
+        reason: "hook_disabled",
+      }),
+    ]);
   });
 });

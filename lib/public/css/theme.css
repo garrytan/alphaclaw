@@ -749,6 +749,11 @@ textarea:focus {
 /* One global reduced-motion block: every pulse keyframe in the app settles
    to steady; spinners slow to a linear crawl (they still convey progress). */
 @media (prefers-reduced-motion: reduce) {
+  .chat-connection-spinner {
+    animation-duration: 1.8s;
+    animation-timing-function: linear;
+  }
+
   .ac-spinner {
     animation-duration: 1.8s;
     animation-timing-function: linear;

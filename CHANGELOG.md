@@ -5,7 +5,7 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
-## [0.9.50] - 2026-08-31
+## [0.9.53] - 2026-08-31
 
 Notifications grow a volume dial and lose their blind spots: a new Verbose
 toggle keeps chat quiet without hiding real problems, the gateway finally
@@ -87,6 +87,234 @@ audit trail as the one deliberate exception.
   alerts normalize volatile reason fragments (paths, digits) so a boot
   loop can't mint a fresh alert each iteration.
 
+## [0.9.52] - 2026-08-31
+
+Chat no longer eats messages. The Chat tab's session management was rebuilt
+end to end for ChatGPT-level reliability: every keystroke survives, Stop means
+stop (and says so honestly when it can't), and every stop, interruption, and
+ambiguous outcome is recorded visibly in the conversation — across reloads.
+
+### Added
+- **Durable send queue.** Typing while the agent is streaming — or while
+  disconnected — queues the message visibly ("Queued") and auto-sends when the
+  session is free; it never silently vanishes. Queued/failed messages survive
+  page reloads (restored as "Not sent — Retry", never auto-sent), failed sends
+  get Retry/Discard on the bubble, and a queued message can be cancelled back
+  into the draft. Retries are safe by construction: the client message id is
+  the idempotency key and the bridge deduplicates, so a retry can never post a
+  duplicate turn.
+- **Honest stop lifecycle.** Stop shows "Stopping…" until the gateway confirms
+  (or an unconfirmed timeout is recorded as such); a failed abort says
+  "Couldn't stop — try again" instead of pretending. "You stopped this
+  response" appears inline in the transcript and persists across reloads.
+- **Interruptions are terminal, visible, and persisted.** A gateway restart or
+  crash mid-run ends the stream with an "Interrupted — the agent may have kept
+  working" marker (no more streaming-forever UI); a run silent for 5+ minutes
+  is closed out honestly and recorded as a watchdog event. Ambiguous outcomes
+  (server restarted mid-send) surface as "may have been sent — check the
+  transcript" with manual Retry/Discard, and queued messages wait for explicit
+  confirmation after an interruption instead of firing into a possibly-live
+  run. Backed by a new `chat-runs` store with boot reconciliation.
+- **Resilient connection.** Unlimited jittered reconnects with a visible
+  "Retry now" after a minute (the old client gave up silently after 8
+  attempts and left the composer dead); keepalives on both the browser and
+  gateway sockets; a Limited mode against older servers; HTTP fallback keeps
+  history readable. New sessions now appear in the sidebar without a reload
+  (visibility-paused 30s polling; the sessions endpoint gained a micro-cache
+  so N tabs share one OpenClaw CLI spawn).
+- **Transcript polish.** History refreshes merge by stable message identity —
+  no more full-list blanking/remount after every turn (open tool cards and
+  scroll position survive); an assistant reply no longer splits into duplicate
+  bubbles around tool calls; id-less tool calls are never lost to name-dedupe;
+  "Older messages aren't shown" appears only when older history actually
+  exists; Escape stops, a "Jump to latest" pill appears when scrolled up,
+  messages have a copy button, and the chat pane finally works on narrow
+  viewports with screen-reader-announced streaming.
+
+### Fixed
+- A hard-to-hit race could skip "Limited mode" detection against an older
+  server when the connection was slow to open — retries there could have
+  duplicated a message; detection now arms from the moment the socket opens
+  and sends never fire before the protocol level is known.
+- A history refresh that failed over the live connection left "Refreshing
+  history…" up forever with no way to retry; it now settles with an inline
+  Retry.
+- Long streams stay smooth: the transcript no longer re-renders every message
+  bubble (with a full markdown re-parse) for every streamed token, and
+  status colors now use the theme's semantic tokens so warning/error text is
+  legible in light mode too (the jump-to-latest pill was unreadable there).
+- Stop stays available against older servers; a "Still working…" hint appears
+  when a run goes quiet for a couple of minutes; keyboard focus returns to
+  the composer after Retry/Discard.
+- Adversarial-review hardening (two independent fresh-context passes, Claude +
+  Codex, both gated the merge until fixed): a failed send's stored terminal no
+  longer blocks its own retry for 10 minutes (retry is now a fresh attempt);
+  a stale or timed-out gateway connection attempt can no longer tear down the
+  healthy replacement socket (falsely interrupting every live run) or feed
+  duplicate events into transcripts; `chat-runs.db` is bounded by a global row
+  cap with runtime pruning (unique session keys could previously grow it until
+  disk exhaustion); a delayed Stop naming an already-finished run settles
+  cleanly instead of killing the session's newer run; a second tab waiting on
+  `session_busy` now attaches to the live run and sees its stream and
+  terminal; a run that finished while a tab was disconnected no longer wedges
+  that session's queue on reconnect; acknowledged-but-unsettled sends requeue
+  on socket loss (dedupe-safe) instead of stranding; a foreign run's lifecycle
+  end on the same session can no longer fail a still-pending send; per-run
+  stream cursors can no longer silently lose frames after reconnect (a stale
+  cursor now forces a history reconcile); a finished run's live row with a
+  stream hole self-heals instead of duplicating the bubble forever; history
+  ids from native gateway rows are disambiguated per rendered row; ids
+  containing control characters are rejected (registry-key collision + log
+  injection); chat session keys are validated before reaching gateway RPCs on
+  every path including HTTP history, whose errors are now classified instead
+  of leaking raw gateway text; logout clears queued chat content and drafts;
+  a transient socket blip can no longer latch the sticky HTTP-fallback mode;
+  oversized drafts are measured post-JSON-escaping so pathological content
+  hits the visible size chip instead of killing the socket; concurrent Stops
+  collapse into one abort; buffered foreign-run events are byte-capped; and a
+  tab's send allowance counts only its own sends, not org-wide runs it
+  auto-attached to. Remaining accepted residuals are logged in TODOS.md.
+
+### Changed
+- The chat bridge (`lib/server/chat-ws.js`) was decomposed into
+  `lib/server/chat/` and the 1116-line chat route into
+  `lib/public/js/components/chat/` (pure, unit-tested modules for run state,
+  send outbox, transcript merging, and reconnect policy). Protocol v2 adds
+  acks, per-run sequence numbers, and exactly-one-terminal-per-run semantics
+  while remaining compatible with old bundles in both directions. Design doc:
+  `docs/designs/chat-reliability.md`.
+
+## [0.9.51] - 2026-08-31
+
+Every "something is wrong" surface now tells you what, why, and how to fix
+it: the vague "Hardening: blocked" badge is replaced by a card naming the
+file, the true cause, and the fix — and the ~20 other places that swallowed
+an error or rendered a bare "Error" pill got the same treatment.
+
+### Fixed
+- **The Doctor no longer gives advice that can't work when prompt hardening
+  is blocked by a rejected read.** An escaping symlink or a >2 MiB hardening
+  file used to be misdiagnosed as "missing file" ("restart — the resync
+  rewrites it", which fixes neither). The true cause now flows end to end
+  with deterministic precedence, cause-specific card copy for symlink escapes
+  and the read cap (never budget advice — the 2 MiB cap isn't configurable),
+  per-file evidence for rejected files (previously misreported), an honest headline
+  when causes are mixed, and a safe generic fallback for reason codes a
+  future server may add. A file that is never injected at all (hook disabled,
+  rejected basename) no longer surfaces budget advice just because it is
+  also over a cap.
+- **A failed Codex status check can no longer fabricate "Not connected".**
+  All four status-check surfaces (Providers, Models, onboarding, welcome)
+  keep the last checked status, show why the check failed (Providers and
+  Models add a Retry button), and
+  say "Status unknown" when there is no prior data to claim — including when
+  the server answers with an error envelope instead of a rejection.
+- **Caught errors stop disappearing into static copy.** The agent-admin token
+  panel renders the server's own hint (the "(mint failure)" guess is gone);
+  upgrade-status refresh failures name the cause like the catalog card
+  already did; team presence failures show the real message on its own line
+  (a 500 no longer reads "could not reach the server"); the Google
+  credentials modal, watchdog terminal, and onboarding model catalog all
+  surface the underlying message; a restart-evidence fetch failure is no
+  longer misreported as "Evidence expired"; and the sidebar git panel's
+  hover-only native tooltip becomes the shared keyboard-reachable one.
+
+### Added
+- **A "Prompt hardening" card on the General tab for problem states** (the
+  healthy state keeps the compact badge): an impact anchor ("Safety rules are
+  not reaching the agent."), per-file rows with the specific cause and a
+  one-clause fix (severity derived from impact — a fully-dropped file is
+  danger DROPPED, truncation is warning PARTIAL, blocked is always danger),
+  an "updated {time}" stamp, a restart disambiguation footnote, and an
+  Open Drift Doctor button. The stale-doctor warning yields while the card is
+  showing so two alert cards never stack.
+- **The card's CTA deep-links `#/doctor?focus=context`:** the context meter
+  scrolls into view, the fresh hardening finding is highlighted persistently,
+  and rejected-read or unconfigured files the meter cannot list get an
+  explanatory hint line — the arrival is never a dead end.
+- **Doctor context-meter chips explain themselves:** hover or focus any
+  Blocked/Dropped/Truncated chip for the cause and fix (the "Starved" label
+  is now "Dropped"), backed by one client copy map whose coverage against the
+  server's canonical reason list is CI-enforced.
+- **The server logs "hardening state change observed"** with per-file causes
+  whenever the state or reason set changes between status refreshes — "when
+  did it break?" is answerable from logs even when no scan ran (paths
+  sanitized against log forging).
+
+### Changed
+- **Bare warning/danger badges across the flagged cohort now name their
+  condition and carry their remedy** via the new shared TooltipBadge
+  (visible label stays the
+  accessible name; tooltips are supplementary since they never open on
+  touch): "Error" → "Watch not running" (with a visible renew hint),
+  "Needs auth" → "Authentication required", "Awaiting pairing" → "Pairing
+  incomplete", node "Disconnected"/"Pending approval" carry reconnect and
+  approval guidance, Telegram "stale"/"no account attributed" explain
+  consequence and fix, and Resources "Host values" explains what it means.
+  The rule is codified in AGENTS.md so the class can't regress.
+
+## [0.9.50] - 2026-08-31
+
+Drift Doctor's "Ask Agent to Fix" now actually delivers to the chat you pick
+— any channel, any session-key shape — and the workspace scan caps are
+raised, configurable, and honestly reported.
+
+### Fixed
+- **"Ask Agent to Fix" silently never delivered to most DMs.** The reply
+  target derived from hand-rolled Telegram-only regexes: account-scoped keys
+  (`…telegram:default:direct:…`), suffixed keys (`…:heartbeat`), bare groups,
+  and every Discord/Slack DM lost delivery while the UI showed a success
+  toast. Delivery targets now derive through the canonical suffix/account-
+  tolerant parser, server-side, validated against the live session list —
+  Discord/Slack DMs get proper `user:<id>` targets and account-scoped keys
+  deliver through their account (`replyAccountId`/`--reply-account`). The
+  same fix repairs `POST /api/agent/message` and the webhook/cron destination
+  pickers for non-Telegram DMs.
+- **One unreadable directory no longer kills the workspace scan**, deep or
+  ultra-wide trees no longer crash the walk (iterative traversal, no spread
+  overflow), files vanishing mid-scan stay a non-event, a file being actively
+  appended can no longer hang the scan (hashing is bounded at the observed
+  size), and persistently unreadable files now honestly mark the scan
+  partial instead of silently vanishing from drift detection.
+- **Messages to another agent's session now run under that agent.**
+  "Send to agent" previously always executed as the main agent; with
+  delivery now working for every channel, a non-main agent's DM would have
+  received the main agent's answer — the turn now runs under the session's
+  own agent.
+
+### Added
+- **Configurable scan caps** (Doctor settings → Scan limits): defaults raised
+  to 200k files / 50MB per file (was 50k/10MB), bounds 1k–500k / 1–100MB,
+  blank = default; changes re-scan immediately, no restart. The partial-scan
+  banner now states real numbers (files found vs cap, oversize/hash-budget/
+  unreadable-dir skips) and links to the settings card.
+- **Honest fix-dispatch lifecycle:** the modal filters to deliverable + main
+  sessions, shows a "delivers to chat / runs in main thread" hint before
+  send, Telegram DM rows are peer-qualified ("Direct message · 1050"), the
+  toast says delivery was *requested* (never "delivered"), and working cards
+  carry a persisted dispatch record ("delivery requested → telegram · 1050" /
+  "dispatch failed").
+- **Scan coverage forensics:** every doctor run persists the caps + stats its
+  snapshot was built under (`scan_stats_json`).
+- **Pre-merge review hardening** (specialist + red-team + cross-model passes,
+  all findings fixed): oversized fix prompts are a clean 400 before any state
+  change (char pre-filter + byte budget on the final payload); a failing
+  sessions CLI maps to 502, never a client-blaming 400; failed dispatches
+  leave a visible "last fix dispatch failed" marker on the reopened card and
+  the record survives no-change scan cloning; scan-limit inputs revert their
+  drafts on rejected saves and lock during any in-flight settings save; the
+  scanner reuses one hash buffer and only skips the manifest round-trip when
+  nothing was re-hashed (touched-but-identical files no longer re-hash every
+  refresh).
+
+### Changed
+- **One-time full re-analysis after upgrade:** workspace fingerprints changed
+  (tool-owned directories like `dist`, `.venv`, `__pycache__`, `.cache`,
+  `coverage` are now ignored; capped scans fold exclusion counters into the
+  fingerprint so changes beyond the cap bust the reuse guard). The first scan
+  after this release re-analyzes from scratch by design.
+- **Bounded doctor.db growth:** run manifests are retained only on the newest
+  two manifest-bearing runs plus the latest completed run.
 ## [0.9.49] - 2026-08-31
 
 An upstream-alignment fix wave: the watchdog terminal finally gets a real

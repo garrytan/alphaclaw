@@ -8,6 +8,9 @@ const {
   readAutotuneEnabled,
   readAutotuneSettings,
   readDoctorAutoRunEnabled,
+  readDoctorScanConfig,
+  updateDoctorScanConfig,
+  updateDoctorSettingsConfig,
   readOpenclawMedicEnabled,
   readOpenclawReleaseChannel,
   readWatchdogOverseerEnabled,
@@ -95,6 +98,7 @@ describe("server/alphaclaw-config", () => {
       },
       doctor: {
         autoRun: { enabled: false },
+        scan: { maxFiles: null, maxFileMb: null },
       },
       autotune: {
         enabled: true,
@@ -143,6 +147,7 @@ describe("server/alphaclaw-config", () => {
       },
       doctor: {
         autoRun: { enabled: false },
+        scan: { maxFiles: null, maxFileMb: null },
       },
       autotune: {
         enabled: true,
@@ -331,6 +336,52 @@ describe("server/alphaclaw-config", () => {
     expect(isOpenAiCompatApiEnabled({ openclawDir })).toBe(true);
   });
 
+  it("normalizes doctor scan caps: clamp/reject matrix", () => {
+    const openclawDir = createTempOpenclawDir();
+    // Hand-edited out-of-bounds / wrong-type values normalize to null
+    // (built-in default) — storage never surprises the scanner.
+    const cases = [
+      [{ maxFiles: 999, maxFileMb: 0 }, { maxFiles: null, maxFileMb: null }],
+      [{ maxFiles: 500001, maxFileMb: 101 }, { maxFiles: null, maxFileMb: null }],
+      [{ maxFiles: 1.5, maxFileMb: "big" }, { maxFiles: null, maxFileMb: null }],
+      [{ maxFiles: 1000, maxFileMb: 1 }, { maxFiles: 1000, maxFileMb: 1 }],
+      [{ maxFiles: 500000, maxFileMb: 100 }, { maxFiles: 500000, maxFileMb: 100 }],
+      [{}, { maxFiles: null, maxFileMb: null }],
+    ];
+    for (const [stored, expected] of cases) {
+      fs.writeFileSync(
+        path.join(openclawDir, "alphaclaw.json"),
+        JSON.stringify({ doctor: { scan: stored } }),
+        "utf8",
+      );
+      expect(readDoctorScanConfig({ openclawDir })).toEqual(expected);
+    }
+  });
+
+  it("updates doctor scan caps partially and resets on null", () => {
+    const openclawDir = createTempOpenclawDir();
+    expect(updateDoctorScanConfig({ openclawDir, maxFiles: 300000 })).toEqual({
+      maxFiles: 300000,
+      maxFileMb: null,
+    });
+    // Partial update leaves the other cap untouched.
+    expect(updateDoctorScanConfig({ openclawDir, maxFileMb: 25 })).toEqual({
+      maxFiles: 300000,
+      maxFileMb: 25,
+    });
+    // null resets to the built-in default.
+    expect(updateDoctorScanConfig({ openclawDir, maxFiles: null })).toEqual({
+      maxFiles: null,
+      maxFileMb: 25,
+    });
+    expect(readDoctorScanConfig({ openclawDir })).toEqual({
+      maxFiles: null,
+      maxFileMb: 25,
+    });
+    // Scan updates never disturb sibling doctor settings.
+    expect(readDoctorAutoRunEnabled({ openclawDir })).toBe(false);
+  });
+
   it("preserves unknown doctor keys through an auto-run update", () => {
     const openclawDir = createTempOpenclawDir();
     fs.writeFileSync(
@@ -494,5 +545,31 @@ describe("server/alphaclaw-config", () => {
 
     const noop = updateAutotuneSettings({ openclawDir, enabled: false });
     expect(noop.changed).toBe(false);
+  });
+});
+
+describe("server/alphaclaw-config combined doctor settings write (adversarial C-ADV6)", () => {
+  it("applies toggle + caps in ONE locked write and leaves untouched fields alone", () => {
+    const openclawDir = createTempOpenclawDir();
+    const applied = updateDoctorSettingsConfig({
+      openclawDir,
+      autoRunEnabled: true,
+      maxFiles: 300000,
+    });
+    expect(applied).toEqual({
+      autoRunEnabled: true,
+      scan: { maxFiles: 300000, maxFileMb: null },
+    });
+    // Field-untouched semantics: a caps-only follow-up must not disturb the toggle.
+    const capsOnly = updateDoctorSettingsConfig({ openclawDir, maxFileMb: 25 });
+    expect(capsOnly).toEqual({
+      autoRunEnabled: true,
+      scan: { maxFiles: 300000, maxFileMb: 25 },
+    });
+    expect(readDoctorAutoRunEnabled({ openclawDir })).toBe(true);
+    expect(readDoctorScanConfig({ openclawDir })).toEqual({
+      maxFiles: 300000,
+      maxFileMb: 25,
+    });
   });
 });

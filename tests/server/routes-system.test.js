@@ -122,6 +122,9 @@ const createApp = (deps) => {
   app.use(express.json());
   registerSystemRoutes({
     app,
+    // This suite drives one app with per-request CLI mocks — the session-list
+    // micro-cache would serve request N-1's mock to request N.
+    agentSessionsCacheTtlMs: 0,
     ...deps,
   });
   return app;
@@ -481,6 +484,7 @@ describe("server/routes/system", () => {
           },
           doctor: {
             autoRun: { enabled: false },
+            scan: { maxFiles: null, maxFileMb: null },
           },
           watchdog: {
             overseer: { enabled: false },
@@ -876,6 +880,7 @@ describe("server/routes/system", () => {
         },
         doctor: {
           autoRun: { enabled: false },
+          scan: { maxFiles: null, maxFileMb: null },
         },
         watchdog: {
           overseer: { enabled: false },
@@ -924,6 +929,7 @@ describe("server/routes/system", () => {
           },
           doctor: {
             autoRun: { enabled: false },
+            scan: { maxFiles: null, maxFileMb: null },
           },
           watchdog: {
             overseer: { enabled: false },
@@ -1244,6 +1250,12 @@ describe("server/routes/system", () => {
       ok: true,
       stdout: JSON.stringify({
         sessions: [
+          // Bare group (no topic): deliverable to the bare group id.
+          {
+            key: "agent:main:telegram:group:-100555",
+            sessionId: "bare-group-session",
+            updatedAt: 12,
+          },
           { key: "agent:main:main", sessionId: "main-session", updatedAt: 10 },
           {
             key: "agent:morpheus:telegram:direct:1050",
@@ -1263,6 +1275,33 @@ describe("server/routes/system", () => {
             sessionId: "topic-session",
             updatedAt: 5,
           },
+          // The silent-delivery-loss regression forms (all previously derived
+          // EMPTY reply targets from the $-anchored telegram-only resolver).
+          {
+            key: "agent:main:telegram:direct:1050:heartbeat",
+            sessionId: "suffixed-direct-session",
+            updatedAt: 4,
+          },
+          {
+            key: "agent:main:telegram:default:direct:1050",
+            sessionId: "account-direct-session",
+            updatedAt: 3,
+          },
+          {
+            key: "agent:main:discord:direct:99",
+            sessionId: "discord-direct-session",
+            updatedAt: 2,
+          },
+          {
+            key: "agent:main:slack:direct:U02R12345",
+            sessionId: "slack-direct-session",
+            updatedAt: 1,
+          },
+          {
+            key: "agent:main:discord:channel:123456",
+            sessionId: "discord-channel-session",
+            updatedAt: 0,
+          },
         ],
       }),
     });
@@ -1278,6 +1317,20 @@ describe("server/routes/system", () => {
     expect(res.body.ok).toBe(true);
     expect(res.body.sessions).toEqual([
       {
+        key: "agent:main:telegram:group:-100555",
+        sessionId: "bare-group-session",
+        updatedAt: 12,
+        agentId: "main",
+        agentLabel: "Main Agent",
+        channel: "telegram",
+        groupName: "",
+        topicName: "",
+        replyChannel: "telegram",
+        replyTo: "-100555",
+        replyAccountId: "",
+        deliverable: true,
+      },
+      {
         key: "agent:morpheus:telegram:direct:1050",
         sessionId: "morpheus-direct-session",
         updatedAt: 11,
@@ -1288,6 +1341,8 @@ describe("server/routes/system", () => {
         topicName: "",
         replyChannel: "telegram",
         replyTo: "1050",
+        replyAccountId: "",
+        deliverable: true,
       },
       {
         key: "agent:main:main",
@@ -1300,6 +1355,8 @@ describe("server/routes/system", () => {
         topicName: "",
         replyChannel: "",
         replyTo: "",
+        replyAccountId: "",
+        deliverable: false,
       },
       {
         key: "agent:main:hook:abc",
@@ -1312,6 +1369,8 @@ describe("server/routes/system", () => {
         topicName: "",
         replyChannel: "",
         replyTo: "",
+        replyAccountId: "",
+        deliverable: false,
       },
       {
         key: "agent:main:cron:abc",
@@ -1324,6 +1383,8 @@ describe("server/routes/system", () => {
         topicName: "",
         replyChannel: "",
         replyTo: "",
+        replyAccountId: "",
+        deliverable: false,
       },
       {
         key: "agent:main:doctor:42",
@@ -1336,6 +1397,8 @@ describe("server/routes/system", () => {
         topicName: "",
         replyChannel: "",
         replyTo: "",
+        replyAccountId: "",
+        deliverable: false,
       },
       {
         key: "agent:main:telegram:direct:1050",
@@ -1348,6 +1411,8 @@ describe("server/routes/system", () => {
         topicName: "",
         replyChannel: "telegram",
         replyTo: "1050",
+        replyAccountId: "",
+        deliverable: true,
       },
       {
         key: "agent:main:telegram:group:-1003709908795:topic:4011",
@@ -1360,6 +1425,80 @@ describe("server/routes/system", () => {
         topicName: "Rosebud",
         replyChannel: "telegram",
         replyTo: "-1003709908795:4011",
+        replyAccountId: "",
+        deliverable: true,
+      },
+      // Fails before the canonical-parser fix: every row below derived an
+      // empty reply target and delivery was silently dropped.
+      {
+        key: "agent:main:telegram:direct:1050:heartbeat",
+        sessionId: "suffixed-direct-session",
+        updatedAt: 4,
+        agentId: "main",
+        agentLabel: "Main Agent",
+        channel: "telegram",
+        groupName: "",
+        topicName: "",
+        replyChannel: "telegram",
+        replyTo: "1050",
+        replyAccountId: "",
+        deliverable: true,
+      },
+      {
+        key: "agent:main:telegram:default:direct:1050",
+        sessionId: "account-direct-session",
+        updatedAt: 3,
+        agentId: "main",
+        agentLabel: "Main Agent",
+        channel: "telegram",
+        groupName: "",
+        topicName: "",
+        replyChannel: "telegram",
+        replyTo: "1050",
+        replyAccountId: "default",
+        deliverable: true,
+      },
+      {
+        key: "agent:main:discord:direct:99",
+        sessionId: "discord-direct-session",
+        updatedAt: 2,
+        agentId: "main",
+        agentLabel: "Main Agent",
+        channel: "discord",
+        groupName: "",
+        topicName: "",
+        replyChannel: "discord",
+        replyTo: "user:99",
+        replyAccountId: "",
+        deliverable: true,
+      },
+      {
+        key: "agent:main:slack:direct:U02R12345",
+        sessionId: "slack-direct-session",
+        updatedAt: 1,
+        agentId: "main",
+        agentLabel: "Main Agent",
+        channel: "slack",
+        groupName: "",
+        topicName: "",
+        replyChannel: "slack",
+        replyTo: "user:U02R12345",
+        replyAccountId: "",
+        deliverable: true,
+      },
+      {
+        key: "agent:main:discord:channel:123456",
+        sessionId: "discord-channel-session",
+        updatedAt: 0,
+        agentId: "main",
+        agentLabel: "Main Agent",
+        channel: "discord",
+        groupName: "",
+        topicName: "",
+        replyChannel: "discord",
+        replyTo: "channel:123456",
+        replyAccountId: "",
+        deliverable: true,
       },
     ]);
   });
@@ -2137,6 +2276,16 @@ describe("server/routes/system", () => {
         },
         { key: "agent:main:main", sessionId: "main-session", updatedAt: 9 },
         { key: "agent:main:hook:x", sessionId: "", updatedAt: 8 },
+        {
+          key: "agent:main:telegram:work:direct:2020",
+          sessionId: "tg-account-session",
+          updatedAt: 7,
+        },
+        {
+          key: "agent:scout:telegram:direct:3030",
+          sessionId: "scout-session",
+          updatedAt: 6,
+        },
       ],
     });
     deps.clawCmd.mockImplementation(async (command) => {
@@ -2174,6 +2323,30 @@ describe("server/routes/system", () => {
     expect(bareRes.status).toBe(200);
     expect(deps.clawCmd).toHaveBeenCalledWith(
       `agent --agent main --message 'plain'`,
+      { quiet: true },
+    );
+
+    // Account-scoped DM keys deliver through that account (`--reply-account`).
+    const accountRes = await request(app).post("/api/agent/message").send({
+      message: "via work account",
+      sessionKey: "agent:main:telegram:work:direct:2020",
+    });
+    expect(accountRes.status).toBe(200);
+    expect(deps.clawCmd).toHaveBeenCalledWith(
+      `agent --agent main --message 'via work account' --deliver --reply-channel 'telegram' --reply-to '2020' --reply-account 'work'`,
+      { quiet: true },
+    );
+
+    // A non-main agent's session runs under THAT agent: the deliver path
+    // carries no sessionKey, so a hardcoded main would execute the wrong
+    // agent and deliver its answer into the other agent's chat.
+    const scoutRes = await request(app).post("/api/agent/message").send({
+      message: "for scout",
+      sessionKey: "agent:scout:telegram:direct:3030",
+    });
+    expect(scoutRes.status).toBe(200);
+    expect(deps.clawCmd).toHaveBeenCalledWith(
+      `agent --agent 'scout' --message 'for scout' --deliver --reply-channel 'telegram' --reply-to '3030'`,
       { quiet: true },
     );
   });
@@ -3035,5 +3208,52 @@ describe("server/routes/system agentAdmin tri-state on GET /api/status", () => {
 
     expect(res.status).toBe(200);
     expect(res.body.agentAdmin).toEqual({ state: "enabled" });
+  });
+});
+
+describe("server/routes/system agent-sessions micro-cache", () => {
+  const createCachingApp = (deps) => {
+    const app = express();
+    app.use(express.json());
+    registerSystemRoutes({ app, agentSessionsCacheTtlMs: 15_000, ...deps });
+    return app;
+  };
+
+  it("shares one CLI spawn across requests inside the TTL", async () => {
+    const deps = createSystemDeps();
+    deps.clawCmd.mockResolvedValue({
+      ok: true,
+      stdout: JSON.stringify({
+        sessions: [{ key: "agent:main:main", id: "s1", updatedAt: 5 }],
+      }),
+    });
+    const app = createCachingApp(deps);
+
+    const first = await request(app).get("/api/agent/sessions");
+    const second = await request(app).get("/api/agent/sessions");
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(200);
+    expect(second.body.sessions).toEqual(first.body.sessions);
+    // The whole point: N polling tabs must not each spawn `openclaw sessions`.
+    expect(
+      deps.clawCmd.mock.calls.filter(([cmd]) => String(cmd).startsWith("sessions")),
+    ).toHaveLength(1);
+  });
+
+  it("never caches an empty list (pre-onboarding must see the first session appear)", async () => {
+    const deps = createSystemDeps();
+    deps.clawCmd.mockResolvedValueOnce({ ok: true, stdout: "{}" });
+    deps.clawCmd.mockResolvedValueOnce({
+      ok: true,
+      stdout: JSON.stringify({
+        sessions: [{ key: "agent:main:main", id: "s1", updatedAt: 5 }],
+      }),
+    });
+    const app = createCachingApp(deps);
+
+    const empty = await request(app).get("/api/agent/sessions");
+    expect(empty.body.sessions).toEqual([]);
+    const fresh = await request(app).get("/api/agent/sessions");
+    expect(fresh.body.sessions).toHaveLength(1);
   });
 });
