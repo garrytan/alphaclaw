@@ -122,6 +122,9 @@ const createApp = (deps) => {
   app.use(express.json());
   registerSystemRoutes({
     app,
+    // This suite drives one app with per-request CLI mocks — the session-list
+    // micro-cache would serve request N-1's mock to request N.
+    agentSessionsCacheTtlMs: 0,
     ...deps,
   });
   return app;
@@ -3035,5 +3038,52 @@ describe("server/routes/system agentAdmin tri-state on GET /api/status", () => {
 
     expect(res.status).toBe(200);
     expect(res.body.agentAdmin).toEqual({ state: "enabled" });
+  });
+});
+
+describe("server/routes/system agent-sessions micro-cache", () => {
+  const createCachingApp = (deps) => {
+    const app = express();
+    app.use(express.json());
+    registerSystemRoutes({ app, agentSessionsCacheTtlMs: 15_000, ...deps });
+    return app;
+  };
+
+  it("shares one CLI spawn across requests inside the TTL", async () => {
+    const deps = createSystemDeps();
+    deps.clawCmd.mockResolvedValue({
+      ok: true,
+      stdout: JSON.stringify({
+        sessions: [{ key: "agent:main:main", id: "s1", updatedAt: 5 }],
+      }),
+    });
+    const app = createCachingApp(deps);
+
+    const first = await request(app).get("/api/agent/sessions");
+    const second = await request(app).get("/api/agent/sessions");
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(200);
+    expect(second.body.sessions).toEqual(first.body.sessions);
+    // The whole point: N polling tabs must not each spawn `openclaw sessions`.
+    expect(
+      deps.clawCmd.mock.calls.filter(([cmd]) => String(cmd).startsWith("sessions")),
+    ).toHaveLength(1);
+  });
+
+  it("never caches an empty list (pre-onboarding must see the first session appear)", async () => {
+    const deps = createSystemDeps();
+    deps.clawCmd.mockResolvedValueOnce({ ok: true, stdout: "{}" });
+    deps.clawCmd.mockResolvedValueOnce({
+      ok: true,
+      stdout: JSON.stringify({
+        sessions: [{ key: "agent:main:main", id: "s1", updatedAt: 5 }],
+      }),
+    });
+    const app = createCachingApp(deps);
+
+    const empty = await request(app).get("/api/agent/sessions");
+    expect(empty.body.sessions).toEqual([]);
+    const fresh = await request(app).get("/api/agent/sessions");
+    expect(fresh.body.sessions).toHaveLength(1);
   });
 });
