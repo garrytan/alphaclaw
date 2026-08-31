@@ -6,6 +6,7 @@ import {
   getSelectedNavId,
   kClaudeCodeNavItem,
   kClaudeCodeUrl,
+  kDashboardLaunchUrl,
   kDashboardsNavItem,
   kNavSections,
 } from "../../lib/public/js/lib/app-navigation.js";
@@ -31,7 +32,13 @@ describe("app-navigation gated sections", () => {
     expect(monitoring.items[monitoring.items.length - 1]).toEqual(
       kDashboardsNavItem,
     );
-    expect(kDashboardsNavItem.href).toBe("/openclaw/dashboards");
+    // Contract pin: the server-side launcher route the item (and the three
+    // window.open consumers) depend on.
+    expect(kDashboardLaunchUrl).toBe("/gateway/launch");
+    expect(kDashboardsNavItem.href).toBe("/gateway/launch?to=dashboards");
+    expect(kDashboardsNavItem.title).toBe(
+      "Opens OpenClaw session dashboards in a new tab (signed in automatically)",
+    );
     // The base sections are never mutated.
     const baseMonitoring = kNavSections.find((s) => s.label === "Monitoring");
     expect(
@@ -112,17 +119,18 @@ describe("buildDashboardFocusUrl", () => {
     );
   });
 
-  it("falls back to the dashboards index for unparseable keys", () => {
-    expect(buildDashboardFocusUrl("")).toBe("/openclaw/dashboards");
-    expect(buildDashboardFocusUrl("   ")).toBe("/openclaw/dashboards");
-    expect(buildDashboardFocusUrl(null)).toBe("/openclaw/dashboards");
-    expect(buildDashboardFocusUrl(undefined)).toBe("/openclaw/dashboards");
-    expect(buildDashboardFocusUrl("main")).toBe("/openclaw/dashboards");
-    expect(buildDashboardFocusUrl("agent:")).toBe("/openclaw/dashboards");
+  it("falls back to the launcher's dashboards target for unparseable keys", () => {
+    const fallback = `${kDashboardLaunchUrl}?to=dashboards`;
+    expect(buildDashboardFocusUrl("")).toBe(fallback);
+    expect(buildDashboardFocusUrl("   ")).toBe(fallback);
+    expect(buildDashboardFocusUrl(null)).toBe(fallback);
+    expect(buildDashboardFocusUrl(undefined)).toBe(fallback);
+    expect(buildDashboardFocusUrl("main")).toBe(fallback);
+    expect(buildDashboardFocusUrl("agent:")).toBe(fallback);
     // No rest separator at all -> not a session key.
-    expect(buildDashboardFocusUrl("agent:main")).toBe("/openclaw/dashboards");
+    expect(buildDashboardFocusUrl("agent:main")).toBe(fallback);
     // Empty agent id.
-    expect(buildDashboardFocusUrl("agent::main")).toBe("/openclaw/dashboards");
+    expect(buildDashboardFocusUrl("agent::main")).toBe(fallback);
   });
 });
 

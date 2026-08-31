@@ -979,7 +979,6 @@ describe("frontend/api endpoint wrapper coverage", () => {
     ["fetchWatchdogSettings", [], "/api/watchdog/settings", undefined],
     ["updateWatchdogSettings", [{ enabled: true }], "/api/watchdog/settings", "PUT"],
     ["updateWatchdogSettings", [null], "/api/watchdog/settings", "PUT"],
-    ["fetchDashboardUrl", [], "/api/gateway/dashboard", undefined],
     ["fetchAlphaclawVersion", [], "/api/alphaclaw/version", undefined],
     ["fetchAlphaclawVersion", [true], "/api/alphaclaw/version?refresh=1", undefined],
     ["updateAlphaclaw", [], "/api/alphaclaw/update", "POST"],
