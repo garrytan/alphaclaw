@@ -5,6 +5,59 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [Unreleased]
+
+Chat no longer eats messages. The Chat tab's session management was rebuilt
+end to end for ChatGPT-level reliability: every keystroke survives, Stop means
+stop (and says so honestly when it can't), and every stop, interruption, and
+ambiguous outcome is recorded visibly in the conversation — across reloads.
+
+### Added
+- **Durable send queue.** Typing while the agent is streaming — or while
+  disconnected — queues the message visibly ("Queued") and auto-sends when the
+  session is free; it never silently vanishes. Queued/failed messages survive
+  page reloads (restored as "Not sent — Retry", never auto-sent), failed sends
+  get Retry/Discard on the bubble, and a queued message can be cancelled back
+  into the draft. Retries are safe by construction: the client message id is
+  the idempotency key and the bridge deduplicates, so a retry can never post a
+  duplicate turn.
+- **Honest stop lifecycle.** Stop shows "Stopping…" until the gateway confirms
+  (or an unconfirmed timeout is recorded as such); a failed abort says
+  "Couldn't stop — try again" instead of pretending. "You stopped this
+  response" appears inline in the transcript and persists across reloads.
+- **Interruptions are terminal, visible, and persisted.** A gateway restart or
+  crash mid-run ends the stream with an "Interrupted — the agent may have kept
+  working" marker (no more streaming-forever UI); a run silent for 5+ minutes
+  is closed out honestly and recorded as a watchdog event. Ambiguous outcomes
+  (server restarted mid-send) surface as "may have been sent — check the
+  transcript" with manual Retry/Discard, and queued messages wait for explicit
+  confirmation after an interruption instead of firing into a possibly-live
+  run. Backed by a new `chat-runs` store with boot reconciliation.
+- **Resilient connection.** Unlimited jittered reconnects with a visible
+  "Retry now" after a minute (the old client gave up silently after 8
+  attempts and left the composer dead); keepalives on both the browser and
+  gateway sockets; a Limited mode against older servers; HTTP fallback keeps
+  history readable. New sessions now appear in the sidebar without a reload
+  (visibility-paused 30s polling; the sessions endpoint gained a micro-cache
+  so N tabs share one OpenClaw CLI spawn).
+- **Transcript polish.** History refreshes merge by stable message identity —
+  no more full-list blanking/remount after every turn (open tool cards and
+  scroll position survive); an assistant reply no longer splits into duplicate
+  bubbles around tool calls; id-less tool calls are never lost to name-dedupe;
+  "Older messages aren't shown" appears only when older history actually
+  exists; Escape stops, a "Jump to latest" pill appears when scrolled up,
+  messages have a copy button, and the chat pane finally works on narrow
+  viewports with screen-reader-announced streaming.
+
+### Changed
+- The chat bridge (`lib/server/chat-ws.js`) was decomposed into
+  `lib/server/chat/` and the 1116-line chat route into
+  `lib/public/js/components/chat/` (pure, unit-tested modules for run state,
+  send outbox, transcript merging, and reconnect policy). Protocol v2 adds
+  acks, per-run sequence numbers, and exactly-one-terminal-per-run semantics
+  while remaining compatible with old bundles in both directions. Design doc:
+  `docs/designs/chat-reliability.md`.
+
 ## [0.9.48] - 2026-08-30
 
 Drift Doctor now understands how the installed OpenClaw actually injects

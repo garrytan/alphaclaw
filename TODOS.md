@@ -1,5 +1,26 @@
 # TODOS
 
+## P3 — Chat: session deep-links (2026-08-31)
+- **What:** Put the selected session in the URL (`/chat/<sessionKey>`, per-segment encoded like OpenClaw's session-path grammar) so chat sessions are deep-linkable and back/forward-navigable.
+- **Why:** Navigation parity with the rest of the app; today `/chat` carries no session and reloads land on the last-selected key from localStorage.
+- **Pros:** Shareable links, browser history works. **Cons:** Touches app-shell routing conventions beyond the chat folder.
+- **Context:** Deferred by the 2026-08-31 chat-reliability CEO review (see docs/designs/chat-reliability.md). Selection state lives in lib/public/js/app.js + hooks/useAgentSessions.js (`kAgentLastSessionKey`).
+- **Effort:** S-M. **Depends on:** nothing.
+
+## P3 — Chat: history pagination beyond the 200-row window (2026-08-31)
+- **What:** A "load older" affordance for chat history. The bridge now reports an honest `truncated` flag (fetch 201, trim), but protocol-4 `chat.history` has no cursor.
+- **Why:** Long-running sessions cap at the newest 200 rows.
+- **Pros:** Full-history reading. **Cons:** Blocked on upstream cursor support; needs a capability probe (house rule: probe behavior, never version-gate — lib/server/openclaw-capabilities.js).
+- **Context:** Deferred by the 2026-08-31 chat-reliability reviews; `kHistoryLimit` in lib/server/chat/index.js, merge path in lib/public/js/components/chat/transcript-store.js is already merge-by-id so prepending older pages is straightforward client-side.
+- **Effort:** M. **Depends on:** upstream OpenClaw history cursor.
+
+## P3 — Chat: session-list push over SSE instead of polling (2026-08-31)
+- **What:** Push session-list changes over the existing status SSE (`/api/events/status` pattern) instead of the 30s visibility-paused poll + 15s server micro-cache that shipped with the chat rework.
+- **Why:** Removes polling entirely; today's mitigation already coalesces N tabs into one `openclaw sessions --json --all-agents` spawn per 15s window.
+- **Pros:** Real-time sidebar, zero per-tab churn. **Cons:** OpenClaw exposes no session-change event, so the server would still poll the CLI once centrally — modest win over the micro-cache.
+- **Context:** Eng-review D6 (2026-08-31); micro-cache in lib/server/routes/system.js (`agentSessionsCacheTtlMs`), poll in lib/public/js/hooks/useAgentSessions.js.
+- **Effort:** M. **Depends on:** ideally an upstream session-change signal.
+
 ## P3 — Resource-autotune ship-review follow-ups (2026-08-29, grouped)
 - **What:** (1) container-hook tests for `WatchdogAutotuneCard` (restartSignal/detectedAt refetch triggers, per-context save isolation, heap-input validation toast, reapply/dismiss flows — only the presentational view + builders are covered); (2) `launchGatewayProcess` spawn-stamp glue test (heap regex from childEnv, UV match) at the call site; (3) extract the copy-pasted cgroup fs-spy/containerFsModule test fixtures (×6 files) into a shared tests helper; (4) unify the three machine-summary assemblies (agent-admin/skill.js `gatherLiveState`, routes/system.js `buildMachineSummary`, onboarding/workspace.js `renderMachineProfileMarkdown`) on one summarizer with per-surface sanitization at call sites; (5) hoist the 3500ms post-restart settle-refetch literal (autotune-card, incidents hook, general tab) into a shared constant; (6) design pass items for /design-review: collapse the N-identical "Restart gateway now" per-row buttons into a single affordance, and move underlined text-button actions (Restart/Copy) onto ActionButton; (7) downsize-specific urgent-toned resize notification (copy is currently direction-neutral); (8) apply the shared cache pragma at cron-store's TTL reopen (+ decide agent-admin/usage sites); (9) a `pruneBackups` advisory-budget warning test; (10) an explicit boot-order test (autotune apply completes before `doSyncPromptFiles`, machine line present in first-boot artifacts with a GPU fixture).
 - **Why:** All flagged by the /ship specialist review or plan-completion audit; each deferred as churn-vs-risk at ship time — none is user-visible today, and the risky logic beneath them is covered (82% diff coverage, regressions pinned).
