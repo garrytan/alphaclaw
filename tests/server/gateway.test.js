@@ -2789,6 +2789,55 @@ describe("server/gateway restart behavior", () => {
       );
     });
 
+    it("never auto-removes an externally-configured channel (no envKey)", async () => {
+      // Upstream #113 precondition: signal has no managed env token, so the
+      // removal branch must skip it — on every boot AND env save — while
+      // managed channels keep their remove-on-cleared-token behavior.
+      setupConfig(
+        JSON.stringify({
+          channels: { signal: { enabled: true }, telegram: { enabled: true } },
+        }),
+      );
+      childProcess.execFile = execFileOk("");
+      delete require.cache[modulePath];
+      const gateway = require(modulePath);
+
+      await gateway.syncChannelConfig([], "all");
+
+      expect(childProcess.execFile).toHaveBeenCalledWith(
+        "openclaw",
+        ["channels", "remove", "--channel", "telegram", "--delete"],
+        expect.objectContaining({ timeout: 15000 }),
+        expect.any(Function),
+      );
+      const removedChannels = childProcess.execFile.mock.calls
+        .map((call) => call[1])
+        .filter((args) => args[0] === "channels" && args[1] === "remove")
+        .map((args) => args[args.indexOf("--channel") + 1]);
+      expect(removedChannels).toEqual(["telegram"]);
+    });
+
+    it("still removes whatsapp when its owner number is cleared (pinned behavior)", async () => {
+      // whatsapp declares `sync: false` but the flag is deliberately NOT
+      // honored this wave: its env-clear removal lifecycle must stay
+      // byte-identical (see TODOS for the flag's fate).
+      setupConfig(
+        JSON.stringify({ channels: { whatsapp: { enabled: true } } }),
+      );
+      childProcess.execFile = execFileOk("");
+      delete require.cache[modulePath];
+      const gateway = require(modulePath);
+
+      await gateway.syncChannelConfig([], "remove");
+
+      expect(childProcess.execFile).toHaveBeenCalledWith(
+        "openclaw",
+        ["channels", "remove", "--channel", "whatsapp", "--delete"],
+        expect.objectContaining({ timeout: 15000 }),
+        expect.any(Function),
+      );
+    });
+
     it("logs channel remove failures", async () => {
       setupConfig(JSON.stringify({ channels: { telegram: { enabled: true } } }));
       childProcess.execFile = execFileFail({ message: "remove failed" });
