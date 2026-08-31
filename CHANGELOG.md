@@ -5,6 +5,69 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.9.50] - 2026-08-31
+
+Notifications grow a volume dial and lose their blind spots: a new Verbose
+toggle keeps chat quiet without hiding real problems, the gateway finally
+says when it goes DOWN (not just when it comes back), and every automatic
+fix AlphaClaw performs — config migrations, autotune rewrites, stray-file
+repairs, auth restores — now announces itself. The master Notifications
+toggle becomes truthful: off now means off for everything, with the agent
+audit trail as the one deliberate exception.
+
+### Added
+- **Verbose notification toggle (default on).** A third switch on the
+  Watchdog settings card — "Verbose" vs "Important only". Important-only
+  mode suppresses informational notices (gateway back online, channels
+  resumed, activation verified, update progress, scheduled doctor scans,
+  topic-discovery digests, healthy overseer verdicts) while problems,
+  failures, and every automatic fix still arrive. Persisted as
+  `WATCHDOG_NOTIFICATIONS_QUIET`; exposed via `GET/PUT
+  /api/watchdog/settings` (`notificationsVerbose`) and the agent-admin
+  manifest; a helper line states the quiet-mode contract.
+- **"Gateway went down" alerts.** A single unexpected gateway exit now
+  notifies once per incident with exit/signal-aware copy — previously only
+  the third crash (crash loop) said anything, so you heard "back online"
+  without ever hearing "went offline".
+- **Every server-phase auto-fix now notifies:** successful automatic
+  settings/database migrations (previously only failures spoke), the
+  reconciler's machinery-error gateway hold, autotune's openclaw.json
+  concurrency writes and disable-reverts (one composed message per apply;
+  container downsizes get an urgent OOM-pressure warning), pin
+  re-activation after an interrupted activation, quarantined-config
+  recovery, stray legacy exec-approvals repair, team-mode auth
+  auto-restore, and config-change gateway retries. All carry stable outbox
+  dedupe ids, so a boot loop collapses into one alert instead of a storm.
+
+### Changed
+- **Notifications off now means off.** The master toggle previously gated
+  only a handful of alert paths — upgrade failures, migration holds,
+  rollbacks and ~30 other sources ignored it. A central delivery policy now
+  enforces both toggles at the outbox (enqueue AND delivery time, so a
+  notice queued before you flipped a switch can't land days later), with
+  documented exceptions: the Test button, agent-admin audit notices, and
+  the boot webhook for unbootable boxes.
+- **The agent can't silence you quietly.** An agent-admin request touching
+  either notification toggle now escalates to a dangerous-tier operator
+  confirm, and agent-admin audit notices are exempt from both toggles — a
+  semi-trusted agent can never mute the announcement of its own change.
+- **Crash-loop alerts name their remediation** ("use Retry (or Repair) from
+  the Watchdog tab") using the gateway card's own action vocabulary, and
+  exit copy is signal-aware everywhere (`signal SIGKILL` instead of
+  `unknown`).
+
+### Fixed
+- Suppressed notifications log a `skipped` event row instead of a spurious
+  `failed`; suppression log lines carry the event id only, never message
+  content.
+- Concurrent per-field settings saves can no longer lose each other's
+  change (the env write now holds a file lock across the read-modify-write).
+- Mixed settings payloads with a mistyped field are rejected instead of
+  silently dropping the bad field.
+- Autotune's resize notices keep their dedupe ids end-to-end (capacity
+  flapping no longer duplicates alerts), and boot/settings retune notices
+  ride the durable outbox so they survive restarts.
+
 ## [0.9.49] - 2026-08-31
 
 An upstream-alignment fix wave: the watchdog terminal finally gets a real
