@@ -550,6 +550,27 @@ describe("server/alphaclaw-config", () => {
     });
   });
 
+  it("REFUSES a write while the config is corrupt instead of rebuilding it from defaults", () => {
+    const openclawDir = createTempOpenclawDir();
+    // Seed a real config with unrelated operator settings, then corrupt it.
+    updateWatchdogMemorySettings({ openclawDir, autoRestart: true });
+    const configPath = path.join(openclawDir, "alphaclaw.json");
+    const goodRaw = fs.readFileSync(configPath, "utf8");
+    fs.writeFileSync(configPath, `${goodRaw.slice(0, 20)}{broken`, "utf8");
+    let thrown = null;
+    try {
+      updateWatchdogMemorySettings({ openclawDir, enabled: false });
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown?.code).toBe("config_unreadable");
+    // The corrupt file was left untouched — nothing was rewritten from
+    // defaults (a "toggle write" must never destroy unrelated settings).
+    expect(fs.readFileSync(configPath, "utf8")).toBe(
+      `${goodRaw.slice(0, 20)}{broken`,
+    );
+  });
+
   it("derives effectiveAutoRestart = enabled && autoRestart without rewriting stored values", () => {
     const openclawDir = createTempOpenclawDir();
     updateWatchdogMemorySettings({ openclawDir, autoRestart: true });

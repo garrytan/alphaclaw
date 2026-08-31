@@ -279,6 +279,23 @@ describe("fast high-pressure path", () => {
     expect(snapshot.state).not.toBe("critical");
   });
 
+  it("two rising jitter ticks with a NEGATIVE window slope never latch (slope-gated)", () => {
+    const monitor = createGatewayMemoryMonitor({
+      config: { startupGraceMs: 0 },
+    });
+    // High plateau, dip, then two tiny consecutive rises: per-tick rssRising
+    // is true twice in a row, but the fitted slope over the window is
+    // negative — noise at 92% pressure is not growth.
+    const shape = [1012, 1012, 1012, 1012, 1012, 1000, 1001, 1002];
+    const { transitions, snapshot } = drive(monitor, {
+      ticks: shape.length,
+      rssAt: (i) => mb(shape[i]),
+      capAt: cap,
+    });
+    expect(transitions).toHaveLength(0);
+    expect(snapshot.state).not.toBe("critical");
+  });
+
   it("the fast path never fires inside the startup grace", () => {
     const monitor = createGatewayMemoryMonitor(); // 10-min grace
     const { transitions, snapshot } = drive(monitor, {
@@ -439,6 +456,67 @@ describe("episode lifecycle (small config)", () => {
     const { snapshot } = monitor.evaluate(atMs);
     expect(["warming_up", "insufficient_samples"]).toContain(snapshot.state);
     expect(snapshot.lastEpisodeSummary?.episodeId).toBe(live.episodeId);
+  });
+
+  it("emits escalated_critical ONCE per episode even when pressure oscillates around the threshold", () => {
+    const config = { ...kSmallConfig, pressureFraction: 0.5 };
+    const monitor = createGatewayMemoryMonitor({ config });
+    // Latch via the trend path against a heap cap (130+192 = 322MB), then
+    // hover: above 90% (rising) → dip below → above again.
+    const capAt = () => ({ activeHeapMb: 130 });
+    const shape = (i) => {
+      if (i < 38) return mb(100 + 5 * i); // climb to ~290 → escalates near 90%
+      if (i === 38) return mb(280); // dip: de-escalates, streak resets
+      return mb(292 + (i - 39)); // back above 90%, rising again
+    };
+    const { transitions } = drive(monitor, {
+      ticks: 44,
+      rssAt: shape,
+      capAt,
+    });
+    const escalations = transitions.filter(
+      (t) => t.type === "escalated_critical",
+    );
+    expect(escalations).toHaveLength(1);
+    // The live flag still tracks honestly (re-escalated at the end).
+    expect(monitor.getTrend().state).toBe("critical");
+  });
+
+  it("noteDetectionDisabled freezes honestly and clears everything except the summary", () => {
+    const monitor = createGatewayMemoryMonitor({ config: kSmallConfig });
+    drive(monitor, { ticks: 15, rssAt: (i) => mb(100 + 5 * i), pid: 100 });
+    expect(monitor.getTrend().state).toBe("leak_suspected");
+    const atMs = kStartMs + 16 * kTickMs;
+    monitor.noteDetectionDisabled(atMs);
+    const trend = monitor.getTrend();
+    expect(trend.state).toBe("disabled");
+    expect(trend.episodeId).toBeNull();
+    expect(trend.lastEpisodeSummary).toMatchObject({
+      pid: 100,
+      reason: "detection_disabled",
+    });
+    // Re-enable with the SAME pid: detection starts from scratch — no stale
+    // samples, no retained streaks, full warm-up before any verdict.
+    const backAt = kStartMs + 20 * kTickMs;
+    monitor.addSample({ atMs: backAt, pid: 100, rssBytes: mb(290) });
+    const { snapshot, transitions } = monitor.evaluate(backAt);
+    expect(["warming_up", "insufficient_samples"]).toContain(snapshot.state);
+    expect(transitions).toHaveLength(0);
+    expect(snapshot.criticalEvalStreak).toBe(0);
+  });
+
+  it("same-pid reuse after noteProcessExited starts a clean baseline (buffers cleared)", () => {
+    const monitor = createGatewayMemoryMonitor({ config: kSmallConfig });
+    drive(monitor, { ticks: 15, rssAt: (i) => mb(100 + 5 * i), pid: 100 });
+    monitor.noteProcessExited(kStartMs + 16 * kTickMs, 100);
+    // The OS hands the replacement the SAME numeric pid: without the buffer
+    // clear, addSample would skip the pid-change reset and blend old samples
+    // into the new process's trend with no startup grace.
+    const backAt = kStartMs + 17 * kTickMs;
+    monitor.addSample({ atMs: backAt, pid: 100, rssBytes: mb(500) });
+    const { snapshot, transitions } = monitor.evaluate(backAt);
+    expect(["warming_up", "insufficient_samples"]).toContain(snapshot.state);
+    expect(transitions).toHaveLength(0);
   });
 
   it("noteProcessExited with a foreign pid is a no-op (episode survives an unrelated child exit)", () => {

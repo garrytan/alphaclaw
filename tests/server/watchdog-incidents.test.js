@@ -628,6 +628,65 @@ describe("incident queries", () => {
     });
   });
 
+  it("drops an in-window episode whose pid does not match any crash this incident tracked", () => {
+    initContext();
+    const openedAt = Date.now();
+    const tracker = createTracker({
+      getResourceSample: () => ({
+        memory: { percent: 10 },
+        gatewayMemoryTrend: {
+          state: "warming_up",
+          rssMb: 120,
+          lastEpisodeSummary: {
+            episodeId: "777-1699999999999",
+            pid: 777, // a DIFFERENT process's episode, frozen minutes earlier
+            peakRssMb: 950,
+            endedAt: new Date(openedAt - 2 * 60 * 1000).toISOString(),
+            reason: "process_exited",
+          },
+        },
+      }),
+    });
+    const insert = wrapped(tracker);
+    insert(crashEvent({ details: { code: 1, pid: 4242 } }));
+    insert(recoveryEvent());
+    const [incident] = db.listIncidents();
+    const full = db.getIncidentById(incident.id);
+    const trend = full.summary.resourceSample.gatewayMemoryTrend;
+    // Time alone is not identity: the window matched but the pid did not.
+    expect(trend.lastEpisodeSummary).toBeNull();
+    expect(full.summary.crashedPids).toEqual([4242]);
+  });
+
+  it("keeps an in-window episode whose pid MATCHES the tracked crash", () => {
+    initContext();
+    const openedAt = Date.now();
+    const tracker = createTracker({
+      getResourceSample: () => ({
+        memory: { percent: 10 },
+        gatewayMemoryTrend: {
+          state: "warming_up",
+          rssMb: 120,
+          lastEpisodeSummary: {
+            episodeId: "4242-1699999999999",
+            pid: 4242,
+            peakRssMb: 950,
+            endedAt: new Date(openedAt - 2 * 60 * 1000).toISOString(),
+            reason: "process_exited",
+          },
+        },
+      }),
+    });
+    const insert = wrapped(tracker);
+    insert(crashEvent({ details: { code: 1, pid: 4242 } }));
+    insert(recoveryEvent());
+    const [incident] = db.listIncidents();
+    const full = db.getIncidentById(incident.id);
+    expect(
+      full.summary.resourceSample.gatewayMemoryTrend.lastEpisodeSummary,
+    ).toMatchObject({ episodeId: "4242-1699999999999" });
+  });
+
   it("omits an UNCORRELATED stale episode summary from the close sample", () => {
     initContext();
     const tracker = createTracker({

@@ -57,6 +57,18 @@ you opt in — the gateway is restarted gracefully before it runs out of memory.
 - `getProcessUsage` (per-pid RSS) is now exported from
   `lib/server/system-resources.js` — the memory monitor's default sampler
   depends on it (caught by the new real-process leak e2e).
+- **Toggling memory settings can never destroy a corrupt config.** If
+  alphaclaw.json exists but cannot be parsed, `PUT /api/watchdog/memory`
+  now refuses with 409 `config_unreadable` instead of silently rebuilding
+  the entire file from defaults (which would have erased every unrelated
+  setting). The deployed agent also cannot arm auto-restart through
+  concurrent split writes — the `autoRestart: true` field itself now always
+  requires an operator confirm.
+- **Memory-limit advice is honest about what it can fix.** The critical
+  alert and the Drift Doctor runbook embed the "raise the gateway heap"
+  command only when the pressure is actually against the heap cap; pressure
+  against the container limit gets "raising the heap will not help" guidance
+  instead.
 
 ## [0.9.49] - 2026-08-31
 

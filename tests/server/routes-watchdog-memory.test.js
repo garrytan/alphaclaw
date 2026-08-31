@@ -110,6 +110,21 @@ describe("PUT /api/watchdog/memory", () => {
     });
   });
 
+  it("409s config_unreadable instead of 500 when the updater refuses a corrupt config", async () => {
+    const deps = createDeps({
+      updateWatchdogMemorySettings: vi.fn(() => {
+        const err = new Error("alphaclaw.json exists but cannot be parsed");
+        err.code = "config_unreadable";
+        throw err;
+      }),
+    });
+    const res = await request(createApp(deps))
+      .put("/api/watchdog/memory")
+      .send({ enabled: false });
+    expect(res.status).toBe(409);
+    expect(res.body).toEqual({ ok: false, error: "config_unreadable" });
+  });
+
   it("503s when the updater is not wired", async () => {
     const res = await request(
       createApp(createDeps({ updateWatchdogMemorySettings: null })),
@@ -149,6 +164,19 @@ describe("admin-manifest memoryUpdateTierResolver", () => {
   it("escalates an agent write that ARMS auto-restart (direct flag)", () => {
     const resolve = resolverFor({ enabled: true, autoRestart: false });
     expect(resolve({ body: { autoRestart: true } })).toBe("dangerous");
+  });
+
+  it("escalates autoRestart:true even while detection is off (split-write TOCTOU closure)", () => {
+    // From {enabled:false, autoRestart:false}, concurrent {enabled:true} and
+    // {autoRestart:true} writes each look non-arming against the pre-write
+    // snapshot, then serialize into an armed switch. Every path to armed must
+    // pass an operator confirm, so autoRestart:true is dangerous
+    // UNCONDITIONALLY — not just when the resulting effective state arms.
+    const resolve = resolverFor({ enabled: false, autoRestart: false });
+    expect(resolve({ body: { autoRestart: true } })).toBe("dangerous");
+    expect(
+      resolve({ body: { enabled: false, autoRestart: true } }),
+    ).toBe("dangerous");
   });
 
   it("escalates the enabled-flip bypass (re-enabling detection re-arms a stored autoRestart)", () => {

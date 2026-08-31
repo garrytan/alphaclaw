@@ -167,10 +167,11 @@ describe("server/watchdog memory monitor", () => {
     expect(leakNotices).toHaveLength(2);
   });
 
-  it("emits a distinct critical event + 🔴 notification with the shared heap remedy", async () => {
+  it("emits a distinct critical event + 🔴 notification; container pressure NEVER gets heap advice", async () => {
     const harness = createHarness();
     launchGateway(harness);
     // Capped: containerLimit 400MB, no co-residents → fast path at ≥360MB.
+    // capSource is "container" — heap-raise advice cannot help here.
     await driveTicks(harness, {
       ticks: 4,
       sampleAt: (i) => ({
@@ -185,9 +186,31 @@ describe("server/watchdog memory monitor", () => {
       m.includes("memory critical"),
     );
     expect(critical).toBeTruthy();
+    expect(critical).toContain("raising the gateway heap will not help");
+    expect(critical).not.toContain("resource autotune");
+    expect(harness.watchdog.getStatus().memory.trendState).toBe("critical");
+  });
+
+  it("heap-capped pressure (capSource heap) gets the shared heap remedy", async () => {
+    const harness = createHarness();
+    launchGateway(harness);
+    // activeHeapMb 128 → heap cap 320MB (128 + 192 overhead); container far
+    // above → capSource "heap"; fast path at ≥288MB rising.
+    await driveTicks(harness, {
+      ticks: 4,
+      sampleAt: (i) => ({
+        rssBytes: (300 + 5 * i) * kMb,
+        cgroupUsedBytes: (300 + 5 * i) * kMb,
+        containerLimitBytes: 4096 * kMb,
+        activeHeapMb: 128,
+      }),
+    });
+    const critical = notifications(harness.notifier).find((m) =>
+      m.includes("memory critical"),
+    );
+    expect(critical).toBeTruthy();
     // Autotune is kill-switched in tests: the shared remedy names the escape.
     expect(critical).toContain("resource autotune");
-    expect(harness.watchdog.getStatus().memory.trendState).toBe("critical");
   });
 
   it("disabled settings idle the monitor without sampling", async () => {
@@ -572,6 +595,112 @@ describe("server/watchdog memory monitor", () => {
       blocked = null;
       await criticalScenario(harness, 2);
       expect(restart).toHaveBeenCalledTimes(1);
+    });
+
+    it("releases the lifecycle lock even when the mitigation notifier throws", async () => {
+      const restart = vi.fn(async () => ({ ok: true }));
+      const release = vi.fn();
+      const gatewayLifecycleLock = { tryAcquire: vi.fn(() => release) };
+      const statePath = path.join(
+        fs.mkdtempSync(path.join(os.tmpdir(), "memory-mitigation-")),
+        "memory-mitigation-state.json",
+      );
+      const harness = createHarness({
+        settings: { enabled: true, autoRestart: true, effectiveAutoRestart: true },
+        restartGatewayForMitigation: restart,
+        gatewayLifecycleLock,
+        mitigationStatePath: statePath,
+      });
+      harness.notifier.notify.mockImplementation(async (message) => {
+        if (message.includes("Restarting gateway")) {
+          throw new Error("channel down");
+        }
+        return { ok: true };
+      });
+      const consoleSpy = vi
+        .spyOn(console, "error")
+        .mockImplementation(() => {});
+      launchGateway(harness);
+      await criticalScenario(harness);
+      consoleSpy.mockRestore();
+      expect(restart).not.toHaveBeenCalled();
+      // The lock never leaks (every acquisition released)...
+      expect(release.mock.calls.length).toBe(
+        gatewayLifecycleLock.tryAcquire.mock.calls.length,
+      );
+      expect(release.mock.calls.length).toBeGreaterThan(0);
+      // ...and the budget stamp was refunded: nothing was mitigated.
+      const persisted = JSON.parse(fs.readFileSync(statePath, "utf8"));
+      expect(persisted.restarts).toHaveLength(0);
+    });
+
+    it("drops future-dated brake stamps at load (clock rollback cannot brake forever)", async () => {
+      const restart = vi.fn(async () => ({ ok: true }));
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), "memory-mitigation-"));
+      const statePath = path.join(dir, "memory-mitigation-state.json");
+      // A stamp 12h in the future (hand-edit or clock rollback) would make
+      // now - last negative → min-interval brake engaged indefinitely.
+      fs.writeFileSync(
+        statePath,
+        JSON.stringify({ restarts: [kStartMs + 12 * 60 * 60 * 1000] }),
+      );
+      const harness = createHarness({
+        settings: { enabled: true, autoRestart: true, effectiveAutoRestart: true },
+        restartGatewayForMitigation: restart,
+        mitigationStatePath: statePath,
+      });
+      launchGateway(harness);
+      await criticalScenario(harness);
+      expect(restart).toHaveBeenCalledTimes(1);
+    });
+
+    it("disable→re-enable starts detection from scratch (no stale critical carries into the mitigation gate)", async () => {
+      const restart = vi.fn(async () => ({ ok: true }));
+      let enabled = true;
+      let busy = true;
+      const harness = createHarness({
+        readMemorySettings: () => ({
+          enabled,
+          autoRestart: enabled,
+          effectiveAutoRestart: enabled,
+        }),
+        restartGatewayForMitigation: restart,
+        // Busy lock keeps the fresh-critical phase from restarting so the
+        // stale-state carryover is what the re-enable phase would exercise.
+        gatewayLifecycleLock: { tryAcquire: vi.fn(() => (busy ? null : vi.fn())) },
+      });
+      launchGateway(harness);
+      await criticalScenario(harness);
+      expect(harness.watchdog.getStatus().memory.trendState).toBe("critical");
+      expect(restart).not.toHaveBeenCalled();
+      // Operator pauses detection...
+      enabled = false;
+      await driveTicks(harness, {
+        startTick: 8,
+        ticks: 1,
+        sampleAt: () => ({ rssBytes: 390 * kMb }),
+      });
+      expect(harness.watchdog.getMemoryTrend().state).toBe("disabled");
+      // ...and re-enables with the lock now free: ONE critical-looking tick
+      // must not restart — the stale episode/streaks were dropped, detection
+      // re-confirms from a clean baseline.
+      enabled = true;
+      busy = false;
+      await driveTicks(harness, {
+        startTick: 9,
+        ticks: 2,
+        sampleAt: (i) => ({
+          rssBytes: (392 + 2 * i) * kMb,
+          cgroupUsedBytes: (392 + 2 * i) * kMb,
+          containerLimitBytes: 400 * kMb,
+        }),
+      });
+      expect(restart).not.toHaveBeenCalled();
+      expect(
+        ["warming_up", "insufficient_samples"].includes(
+          harness.watchdog.getMemoryTrend().state,
+        ),
+      ).toBe(true);
     });
 
     it("keeps braking in-memory when the brake file cannot be persisted", async () => {
