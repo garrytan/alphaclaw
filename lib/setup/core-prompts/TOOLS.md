@@ -13,24 +13,24 @@ Do not deflect actionable requests to the Setup UI. If a command or tool is avai
 | General   | `{{SETUP_UI_URL}}#general`   | Gateway status & restart, channel health (Telegram/Discord), pending pairings, feature health (Embeddings/Audio), Google Workspace connection, repo auto-sync schedule, OpenClaw dashboard |
 | Watchdog  | `{{SETUP_UI_URL}}#watchdog`  | Gateway watchdog lifecycle, crash-loop visibility, restart diagnostics, and auto-repair feature                                                                                            |
 | Providers | `{{SETUP_UI_URL}}#providers` | AI provider credentials (Anthropic, OpenAI, Gemini, Mistral, Voyage, Groq, Deepgram), feature capabilities, Codex OAuth                                                                    |
-| Envars    | `{{SETUP_UI_URL}}#envars`    | View/edit/add environment variables (saved to `/data/.env`), gateway restart to apply changes                                                                                              |
+| Envars    | `{{SETUP_UI_URL}}#envars`    | View/edit/add environment variables (saved to `{{ENV_FILE}}`), gateway restart to apply changes                                                                                            |
 | Webhooks  | `{{SETUP_UI_URL}}#webhooks`  | Webhook endpoint visibility, create flow, request history, and gateway delivery debugging                                                                                                  |
 | Browse    | `{{SETUP_UI_URL}}#browse`    | File browser and editor rooted at `.openclaw`, markdown preview/edit flow, and git-aware save workflow                                                                                     |
 
 ### Environment variables
 
-Changes to env vars are made through the **Envars** tab (`{{SETUP_UI_URL}}#envars`). After saving, a gateway restart may be required to pick up the changes — the UI prompts for this automatically. Do not edit `/data/.env` directly; use the Setup UI so changes are validated and the gateway restart is handled.
+Changes to env vars are made through the **Envars** tab (`{{SETUP_UI_URL}}#envars`). After saving, a gateway restart may be required to pick up the changes — the UI prompts for this automatically. Do not edit `{{ENV_FILE}}` directly; use the Setup UI so changes are validated and the gateway restart is handled.
 
 ### Persistent storage
 
-This deployment runs in an ephemeral container. `/tmp` and other temp locations do not survive redeploys.
+`/tmp` and other temp locations are not durable and can vanish on restart or redeploy.
 
-Anything persistent must live under `/data/.openclaw`.
+Anything persistent must live under `$OPENCLAW_STATE_DIR` (this install: `{{STATE_DIR}}`).
 
 For plugins and local tooling:
 
 - Prefer normal `openclaw plugins install <spec>` flows for durable installs.
-- If you need to stage a local plugin or helper files first, put them under `/data/.openclaw/...`, not `/tmp/...`.
+- If you need to stage a local plugin or helper files first, put them under `$OPENCLAW_STATE_DIR/...`, not `/tmp/...`.
 - Do not leave durable `plugins.load.paths` entries pointing at temp directories.
 
 ### Google Workspace

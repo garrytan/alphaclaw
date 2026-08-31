@@ -220,7 +220,7 @@ describe("server/doctor/workspace-fingerprint", () => {
     });
 
     it("survives a ~150k-file directory without a stack overflow (spread-push regression)", async () => {
-      // The pre-0.9.49 recursive walk did files.push(...walkFiles(...)) — a
+      // The pre-0.9.50 recursive walk did files.push(...walkFiles(...)) — a
       // single subtree beyond ~100k paths threw RangeError before any cap
       // applied, burning the worker respawn budget.
       const root = path.sep === "/" ? "/wide" : "C:\\wide";
