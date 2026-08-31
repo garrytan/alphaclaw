@@ -5,7 +5,7 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
-## [Unreleased]
+## [0.9.50] - 2026-08-31
 
 The watchdog now sees a memory leak coming instead of explaining the crash
 afterward: gateway memory is sampled every minute, a rising trend is called
