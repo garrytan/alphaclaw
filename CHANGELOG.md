@@ -14,8 +14,9 @@ click-through) and encoded as a live e2e suite.
 
 ### Added
 - **Dashboards opens signed in.** The sidebar Dashboards link (and the
-  General tab's "Open Dashboard", the Team tab's "Open Control UI", and the
-  Envars "Open Secrets" deep link) now route through an authenticated
+  General tab's "OpenClaw Gateway Dashboard" Open button, the Team tab's
+  "Open Control UI", and the Envars "Open Secrets" deep link) now route
+  through an authenticated
   server-side launcher (`GET /gateway/launch`) that primes the gateway token
   into the Control UI's URL fragment via an empty-body redirect. The token
   never enters the page's JavaScript, any response body, any log line, or
@@ -38,8 +39,9 @@ click-through) and encoded as a live e2e suite.
 
 ### Changed
 - **The Dashboards sidebar item grew up.** Distinct icon (it previously
-  shared Usage's), a tooltip ("opens in a new tab, signed in
-  automatically"), a visible-label-first accessible name, and the mobile
+  shared Usage's), a tooltip ("Opens OpenClaw session dashboards in a new
+  tab (signed in automatically)"), a visible-label-first accessible name,
+  and the mobile
   drawer now closes when the new tab opens.
 - **Token resolution is single-flight, bounded, and mode-aware.** One shared
   resolver serves the launcher, `/api/gateway/dashboard`, and the doctor
@@ -59,9 +61,9 @@ click-through) and encoded as a live e2e suite.
   success path; entry points now just open connected.
 
 ### Security
-- Failed `openclaw` CLI runs and launcher resolution errors now scrub
-  token-bearing values by shape and by known-secret value (process env,
-  env file, and config literals — with the env file read fail-closed)
+- Failed `openclaw` CLI runs now scrub token-bearing values by shape, and
+  launcher resolution errors by shape and by known-secret value (process
+  env, env file, and config literals — with the env file read fail-closed)
   before anything reaches a log line; `GET /api/gateway/dashboard` responses
   are marked `Cache-Control: no-store` so the tokened URL can't sit in a
   browser HTTP cache.
