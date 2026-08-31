@@ -5,6 +5,20 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.9.59] - 2026-08-31
+
+Closes an agent-privilege-escalation hole in the environment editor.
+
+### Fixed
+- The Agent Administration tier gate can no longer be bypassed to repoint the
+  Claude Code launcher without an operator confirmation. A deployed agent
+  could previously smuggle a protected launcher key (e.g.
+  `CLAUDE_CODE_ROUTINE_URL`) past the "dangerous" tier by padding it with
+  whitespace/newlines or wrapping it as a JSON array — the tier check saw a
+  different key than the one actually written to disk. Key classification and
+  persistence now use one shared normalizer, and `PUT /api/env` rejects
+  malformed or non-string key names outright.
+
 ## [0.9.58] - 2026-08-31
 
 The hourly sync schedule can no longer be used to smuggle anything into the
