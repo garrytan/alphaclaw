@@ -5,6 +5,57 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [Unreleased]
+
+The watchdog now sees a memory leak coming instead of explaining the crash
+afterward: gateway memory is sampled every minute, a rising trend is called
+out hours before the limit, Drift Doctor turns it into a guided fix, and — if
+you opt in — the gateway is restarted gracefully before it runs out of memory.
+
+### Added
+- **Memory-leak detection (default ON, report-only).** The watchdog samples
+  the gateway's memory (RSS) once a minute and confirms a leak with a
+  noise-resistant trend test (rising per-window floors + projected time to
+  the limit against a co-residency-aware cap). You get one calm notification
+  per episode ("memory rising steadily — projected to reach its limit in
+  ~3h"), a distinct 🔴 alert if it turns critical, persisted watchdog events
+  (`leak_suspected` / `leak_critical` / `leak_cleared` with an episode
+  summary), and an honest live trend row on the Watchdog tab's Resources
+  card. Disable anytime: Watchdog → Settings → Memory leak detection.
+- **Drift Doctor knows about leaks.** A suspected or critical leak surfaces
+  as a deterministic finding card (episode-scoped, so dismissing one false
+  positive never silences a future real leak) with an "Ask agent to fix"
+  runbook: confirm the trend, inspect recently added plugins/config, check
+  the logs, and apply machine-specific memory-limit advice that refuses to
+  suggest a raise when the container is already at its limit. A recent
+  episode stays visible as evidence even after a restart replaced the
+  process, and leak onset counts as an environment change for scheduled
+  scans.
+- **Pre-OOM auto-restart (strictly opt-in, default OFF).** When a confirmed
+  leak turns critical, the watchdog can restart the gateway gracefully before
+  the crash — through the same lifecycle lock as every other restart, never
+  during an update's stabilization window, capped at 2 restarts per 24 hours
+  at least 6 hours apart (the brake survives AlphaClaw restarts), and never
+  counted as a crash. The deployed agent cannot arm this switch for itself:
+  any agent-admin write that would turn effective auto-restart on requires an
+  operator confirm.
+- **Leak context reaches the AI diagnosis surfaces.** Incident post-mortems
+  carry the close-time memory trend (episode evidence only when it actually
+  correlates with the incident), and the numeric machine summary the gateway
+  medic and upgrade overseer read now includes the RSS trend — numbers and
+  closed enums only.
+
+### Fixed
+- **The Resources card's "Gateway" memory segment now counts the whole
+  gateway process tree.** On OpenClaw 2026.9.1-beta.1, `gateway run` can fork
+  a worker child that holds the real heap while the launcher stays ~50MB — a
+  launcher-only read showed a tiny, flat number while the real gateway (and
+  any leak in it) lived in the worker. Both the card and the leak monitor now
+  read the subtree (`getProcessTreeUsage`, one bounded `/proc` pass).
+- `getProcessUsage` (per-pid RSS) is now exported from
+  `lib/server/system-resources.js` — the memory monitor's default sampler
+  depends on it (caught by the new real-process leak e2e).
+
 ## [0.9.48] - 2026-08-30
 
 Drift Doctor now understands how the installed OpenClaw actually injects

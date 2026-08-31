@@ -334,12 +334,44 @@
 ## P3 — Resource telemetry follow-ups: configurable thresholds, sparklines/history
 - **What:** Optional alphaclaw.json keys for the (currently hardcoded 80/90%) resource warn/crit display thresholds; small ring buffer + sparklines for memory/CPU/event-loop lag.
 - **Why:** Deferred as expert knobs / width-hungry UI; revisit on demand. Display-only either way.
+- **Update (memory-leak wave):** the gateway RSS ring buffer now EXISTS (in-memory, ~120 samples, inside `lib/server/gateway-memory-monitor.js`) — a memory sparkline only needs a read path from the detector's sample window to the resources payload.
 - **Effort:** M. **Depends on:** nothing.
 
 ## P3 — Resource-based alerting/enforcement (design needed — invariant territory)
 - **What:** Any watchdog *action* on resource signals (e.g., restart on sustained event-loop starvation or OOM pressure).
 - **Why:** Today resources are report-only by design ("the deterministic watchdog is the ONLY enforcement layer" covers gateway health, not host resources). Changing that is a policy design, not a feature toggle.
+- **Update (memory-leak wave):** DESIGNED AND SHIPPED for the gateway-memory case — the reviewed policy (opt-in default OFF `watchdog.memory.autoRestart`, watchdog-owned lifecycle lock, stabilization-window suppression, persisted 2-per-24h brake, expected-restart semantics; see the AGENTS.md memory-monitor bullet). CPU / event-loop / disk enforcement remains undesigned; any new signal must go through the same explicit-design bar, reusing the memory policy as the template.
 - **Effort:** L. **Depends on:** explicit design review.
+
+## P3 — AlphaClaw self-process memory-leak detection
+- **What:** Run `createGatewayMemoryMonitor` against the admin server's own `process.memoryUsage().rss` (we are also a long-lived Node process with in-memory maps).
+- **Why:** The detector is pure and signal-agnostic; the missing piece is mitigation semantics — the server cannot pre-OOM restart ITSELF safely (drain, pidfile, boot-placeholder interplay), so v1 would be detect+notify only.
+- **Context:** Detector module `lib/server/gateway-memory-monitor.js`; the watchdog tick pattern in `checkMemoryTrend` is the wiring template. Deferred from the memory-leak wave CEO review (D7.3).
+- **Effort:** M → CC: S. **Depends on:** nothing.
+
+## P3 — Doctor LLM prompt: machine/memory context line
+- **What:** Feed `getMachineSummaryForPrompt()` (now including `gatewayRssTrendMbPerHour`/`gatewayMemoryTrendState`) into the Drift Doctor LLM prompt.
+- **Why:** The deterministic leak card already carries the finding; prompt context would only help the LLM tier reason about memory-adjacent workspace findings. Speculative until a real case shows the gap. Deferred from the memory-leak wave (D7.5).
+- **Context:** `buildDoctorPrompt` (lib/server/doctor/prompt.js); machine summary consumers today are the medic + upgrade overseer.
+- **Effort:** S. **Depends on:** nothing.
+
+## P3 — V8-heap-precision gateway sampling (security review required)
+- **What:** Upgrade the RSS proxy to real V8 heap numbers for the CHILD gateway — candidates: Node diagnostic report on signal (`--report-on-signal` + parse), an opt-in `/readyz` memory block if upstream ships one, or inspector-protocol `HeapProfiler` (least favored).
+- **Why:** RSS conflates heap with allocator fragmentation/native memory; heap-precision would sharpen the leak-vs-fragmentation call and the heap-raise advice. Every candidate widens the gateway's attack/perf surface, so this needs its own security review — deliberately excluded from the memory-leak wave.
+- **Context:** Detection seams: `readMemorySample()` dep in lib/server/watchdog.js; cap math in lib/server/gateway-memory-monitor.js (`computeEffectiveCap`).
+- **Effort:** M. **Depends on:** security review.
+
+## P3 — Consume OpenClaw's own memory-pressure diagnostics as a corroborating signal
+- **What:** Parse the gateway log line `[diagnostics/memory] memory pressure: level=critical reason=rss_threshold rss=... heap=...` (2026.9.1-beta.1+) into the watchdog memory monitor as a second, upstream-sourced signal beside the RSS trend — and surface its heap-vs-RSS split (a flat heap with runaway RSS indicates an off-main-isolate leak, e.g. a plugin, where heap raises cannot help).
+- **Why:** Upstream now self-reports pressure with per-isolate heap numbers AlphaClaw cannot observe from outside; corroboration would cut false positives and sharpen the doctor card's plugin-vs-main-leak diagnosis.
+- **Context:** Discovered during the memory-leak wave's live tier; log format is beta and unversioned — treat as an encoded assumption with a guard test, per the drift doctrine. Consumption point: the gateway stderr/stdout tail already flows through lib/server/gateway.js.
+- **Effort:** M → CC: S. **Depends on:** log-format stability check against the next beta.
+
+## P3 — Shared rolling-window rate-brake helper
+- **What:** One `rollingWindowBrake` util for the three copies: medic runs (`medicRunTimestamps`), handoff relaunches (`handoffRelaunchTimestamps`), memory mitigations (`memoryMitigationTimestamps` — the persisted one).
+- **Why:** Third copy shipped with the memory-leak wave; the persistence wrinkle (only the memory brake persists) is why it was not extracted inline.
+- **Context:** All three live in lib/server/watchdog.js.
+- **Effort:** S. **Depends on:** nothing.
 
 ## P3 — Capture the incident log window at close time
 - **What:** Persist the timestamp-filtered gateway log excerpt when an incident closes (per-incident file or capped blob) instead of re-reading the tail at review time.
