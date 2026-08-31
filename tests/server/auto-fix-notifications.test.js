@@ -176,6 +176,41 @@ describe("server/auto-fix notifications — autotune composition", () => {
     );
   });
 
+  it("announces a crash-window recovered write even when the value already matches", async () => {
+    const { openclawDir, managedDir } = makeTempDirs();
+    setLiveProfile({ memMb: 8192, cores: 4 });
+    // A stale intent whose value matches the config: OUR write landed but
+    // the confirm (and its announcement) died with a crash.
+    fs.writeFileSync(
+      path.join(managedDir, "autotune-ledger.json"),
+      JSON.stringify({
+        version: 1,
+        ownedKeys: {
+          "agents.defaults.maxConcurrent": {
+            intent: { value: 32, at: 1 },
+          },
+        },
+      }),
+      "utf8",
+    );
+    resetAutotuneForTests({ managedDir });
+    const { fn } = makeConfigStore({
+      agents: { defaults: { maxConcurrent: 32 } },
+    });
+    const notify = vi.fn();
+
+    await applyResourceAutotune({
+      trigger: "boot",
+      deps: { env: {}, openclawDir, updateOpenclawConfigFn: fn, notify },
+    });
+
+    const confirmCall = notify.mock.calls.find(([message]) =>
+      String(message).includes("Autotune confirmed"),
+    );
+    expect(confirmCall).toBeTruthy();
+    expect(confirmCall[0]).toContain("written just before a restart");
+  });
+
   it("folds the concurrency delta into ONE resize notification and uses the urgent downsize copy", async () => {
     const { openclawDir, managedDir } = makeTempDirs();
     setLiveProfile({ memMb: 8192, cores: 4 });

@@ -132,10 +132,10 @@ describe("server/notification-policy — master toggle (C3)", () => {
     ).toBe(true);
   });
 
-  it("master gate applies at enqueue AND at flush", async () => {
+  it("master gate refuses new enqueues but HOLDS (never destroys) queued events", async () => {
     delete process.env.WATCHDOG_NOTIFICATIONS_DISABLED;
     delete process.env.WATCHDOG_NOTIFICATIONS_QUIET;
-    const { notifier, outbox, fanout } = makeNotifier();
+    const { notifier, outbox, fanout, nowRef } = makeNotifier();
 
     // Queued while enabled…
     await notifier.notify("🔴 queued important", { id: "e1" });
@@ -144,9 +144,15 @@ describe("server/notification-policy — master toggle (C3)", () => {
     process.env.WATCHDOG_NOTIFICATIONS_DISABLED = "true";
     await notifier.flush();
 
-    // The important event terminally suppresses; the audit event delivers.
+    // The important event HOLDS — not delivered, not terminally destroyed,
+    // no attempt burned (a brief off-window must not purge alerts queued
+    // while notifications were on). The audit event delivers regardless.
     const events = outbox.listEvents();
-    expect(events.find((e) => e.id === "e1").suppressedAt).toBeTruthy();
+    const held = events.find((e) => e.id === "e1");
+    expect(held.deliveredAt).toBeNull();
+    expect(held.suppressedAt).toBeNull();
+    expect(held.abandonedAt).toBeNull();
+    expect(held.attempts).toBe(0);
     expect(events.find((e) => e.id === "e2").deliveredAt).toBeTruthy();
     expect(fanout).toHaveBeenCalledTimes(1);
     expect(fanout.mock.calls[0][0]).toBe("🔐 queued audit");
@@ -158,6 +164,57 @@ describe("server/notification-policy — master toggle (C3)", () => {
       skipped: true,
       reason: "notifications_disabled",
     });
+
+    // Re-enabling delivers the held alert — nothing was lost.
+    delete process.env.WATCHDOG_NOTIFICATIONS_DISABLED;
+    nowRef.now += 120_000;
+    await notifier.flush();
+    expect(
+      outbox.listEvents().find((e) => e.id === "e1").deliveredAt,
+    ).toBeTruthy();
+  });
+
+  it("a suppressed tombstone revives on a fresh same-id enqueue (F2)", async () => {
+    delete process.env.WATCHDOG_NOTIFICATIONS_DISABLED;
+    delete process.env.WATCHDOG_NOTIFICATIONS_QUIET;
+    const { notifier, outbox, fanout, nowRef } = makeNotifier();
+
+    // A verbose notice queued while verbose was on…
+    await notifier.notify("⬆️ update available", {
+      id: "alphaclaw-update-1.2.3",
+      verbose: true,
+    });
+    // …terminally suppressed by a quiet flip before delivery.
+    process.env.WATCHDOG_NOTIFICATIONS_QUIET = "true";
+    await notifier.flush();
+    expect(
+      outbox.listEvents().find((e) => e.id === "alphaclaw-update-1.2.3")
+        .suppressedAt,
+    ).toBeTruthy();
+
+    // Verbose back on: the daily re-check re-notifies the SAME stable id —
+    // the tombstone must revive, not swallow every future notice forever.
+    delete process.env.WATCHDOG_NOTIFICATIONS_QUIET;
+    const requeued = await notifier.notify("⬆️ update available", {
+      id: "alphaclaw-update-1.2.3",
+      verbose: true,
+    });
+    expect(requeued.ok).toBe(true);
+    nowRef.now += 60_000;
+    await notifier.flush();
+    expect(
+      outbox.listEvents().find((e) => e.id === "alphaclaw-update-1.2.3")
+        .deliveredAt,
+    ).toBeTruthy();
+    expect(fanout).toHaveBeenCalledTimes(1);
+
+    // Delivered entries still dedupe (no duplicate chat messages).
+    await notifier.notify("⬆️ update available", {
+      id: "alphaclaw-update-1.2.3",
+      verbose: true,
+    });
+    await notifier.flush();
+    expect(fanout).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -259,6 +316,50 @@ describe("server/notification-policy — audit-flag wiring contracts", () => {
     );
     expect(confirmSite).toContain("audit: true");
     expect(changeSite).toContain("audit: true");
+  });
+
+  it("the audit bypass exists at exactly the two agent-admin sites (nowhere else)", () => {
+    // `audit: true` is a toggle-bypass capability — pin its emitter set the
+    // same way the verbose registry pins classification, so a new bypass
+    // site cannot appear unreviewed.
+    const kRepoRoot = path.join(__dirname, "..", "..");
+    const listServerFiles = (dir, out = []) => {
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        const full = path.join(dir, entry.name);
+        if (entry.isDirectory()) listServerFiles(full, out);
+        else if (entry.name.endsWith(".js")) out.push(full);
+      }
+      return out;
+    };
+    const hits = [];
+    for (const filePath of [
+      ...listServerFiles(path.join(kRepoRoot, "lib", "server")),
+      path.join(kRepoRoot, "lib", "server.js"),
+    ]) {
+      const rel = path
+        .relative(kRepoRoot, filePath)
+        .split(path.sep)
+        .join("/");
+      // The policy/outbox/notifier plumbing constructs audit fields by
+      // design (same exclusion as the verbose scan).
+      if (
+        [
+          "lib/server/notification-policy.js",
+          "lib/server/notify-outbox.js",
+          "lib/server/upgrade-notifier.js",
+          "lib/server/watchdog.js", // envelope forwarding, not an emitter
+        ].includes(rel)
+      ) {
+        continue;
+      }
+      const count = (
+        fs.readFileSync(filePath, "utf8").match(/audit\s*:\s*true/g) || []
+      ).length;
+      if (count > 0) hits.push([rel, count]);
+    }
+    expect(Object.fromEntries(hits)).toEqual({
+      "lib/server/init/register-server-routes.js": 2,
+    });
   });
 });
 
@@ -399,6 +500,20 @@ describe("server/upgrade-notifier policy gate", () => {
     });
     expect(result.suppressed).toBeUndefined();
     expect(fanout).not.toHaveBeenCalled();
+  });
+
+  it("terminal suppression persists its reason for the audit trail", async () => {
+    delete process.env.WATCHDOG_NOTIFICATIONS_DISABLED;
+    delete process.env.WATCHDOG_NOTIFICATIONS_QUIET;
+    const { notifier, outbox } = makeNotifier();
+    await notifier.notify("queued then silenced", { id: "e1", verbose: true });
+    process.env.WATCHDOG_NOTIFICATIONS_QUIET = "true";
+    await notifier.flush();
+    const event = outbox.listEvents()[0];
+    expect(event.suppressedAt).toBeTruthy();
+    // The reason survives (and restarts, via normalizeEvent) so the audit
+    // trail shows WHY the event terminally suppressed.
+    expect(event.suppressedReason).toBe("verbose_notifications_disabled");
   });
 
   it("suppressedAt survives a restart — a suppressed event never resurrects", async () => {

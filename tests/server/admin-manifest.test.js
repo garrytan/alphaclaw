@@ -56,6 +56,13 @@ describe("admin-manifest engine", () => {
     ).toBe("dangerous");
   });
 
+  it("tier resolver survives primitive JSON bodies instead of throwing", () => {
+    const op = manifest.findOp("PUT", "/api/watchdog/settings");
+    for (const body of [true, 1, "x", null, undefined, ["a"]]) {
+      expect(manifest.resolveTier(op, { body })).toBe("write");
+    }
+  });
+
   it("has EXACTLY one matching op per concrete (method, path) — no pattern collisions", () => {
     // Literal-vs-:param collisions are the failure this guards (A24). For each
     // op, its own concrete path must resolve to exactly one op.

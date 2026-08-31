@@ -366,12 +366,10 @@ describe("server/exec-defaults-config", () => {
     );
     expect(mergeCall).toBeTruthy();
     expect(mergeCall[0]).toContain("1 approval entry recovered");
-    expect(mergeCall[1]).toEqual(
-      expect.objectContaining({
-        eventType: "recovery",
-        id: "exec-approvals-merged-1-1",
-      }),
-    );
+    expect(mergeCall[1].eventType).toBe("recovery");
+    // Day-bucketed: a genuinely new merge months later must not dedupe
+    // against a stale count-keyed entry.
+    expect(mergeCall[1].id).toMatch(/^exec-approvals-merged-1-1-\d{8}$/);
   });
 
   it("a throwing notify hook never breaks the ensure step", async () => {

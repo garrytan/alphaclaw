@@ -225,6 +225,43 @@ describe("server/team-auth-transition", () => {
     expect(config.channels).toEqual({ telegram: { enabled: true } });
   });
 
+  it("notifies the operator-lockout case: restore-also-failed is the loudest path", async () => {
+    const openclawDir = createTempOpenclawDir();
+    writeConfig(openclawDir, {
+      gateway: { auth: { token: "${OPENCLAW_GATEWAY_TOKEN}" } },
+    });
+    // First restart (apply) succeeds; the restore restart throws.
+    let calls = 0;
+    const restartGateway = vi.fn(async () => {
+      calls += 1;
+      if (calls > 1) throw new Error("gateway refused to come back");
+    });
+    const request = createProbeRequest({ acceptInvoke: () => false });
+    const notify = vi.fn(async () => ({ ok: true }));
+
+    const result = await enableTeamMode({
+      openclawDir,
+      env,
+      applyAuthConfig: createApplyAuthConfig({ openclawDir }),
+      probeUser: kProbeUser,
+      restartGateway,
+      getGatewayUrl: () => kGatewayUrl,
+      request,
+      probeOptions: kFastProbe,
+      logger: { warn: vi.fn() },
+      notify,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.restored).toBe(false);
+    const lockout = notify.mock.calls.find(([message]) =>
+      String(message).includes("restoring the previous gateway auth also failed"),
+    );
+    expect(lockout).toBeTruthy();
+    expect(lockout[0]).toContain("🔴");
+    expect(lockout[1].id).toMatch(/^team-auth-restore-failed-\d+$/);
+  });
+
   it("restores health-probe failures too", async () => {
     const openclawDir = createTempOpenclawDir();
     writeConfig(openclawDir, { gateway: { auth: { token: "abc" } } });
