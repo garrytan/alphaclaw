@@ -105,6 +105,141 @@ describe("server/doctor/deterministic-checks", () => {
     expect(hardening.targetPaths).toEqual([]);
   });
 
+  it("gives symlink-specific copy when the hardening file escapes the workspace", () => {
+    // An escaping symlink is REJECTED by upstream's guarded open — the
+    // missing-file advice ("restart, the resync rewrites it") cannot fix it,
+    // so the card must name the symlink and the delete-then-restart fix.
+    const outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-det-outside-"));
+    write(outsideDir, "AGENTS.md", "outside hardening");
+    fs.mkdirSync(path.join(workspaceRoot, "hooks", "bootstrap"), { recursive: true });
+    fs.symlinkSync(
+      path.join(outsideDir, "AGENTS.md"),
+      path.join(workspaceRoot, "hooks", "bootstrap", "AGENTS.md"),
+    );
+
+    const cards = build({
+      bootstrapArgs: {
+        extraFilePaths: ["hooks/bootstrap/AGENTS.md"],
+        hooksEnabled: true,
+      },
+    });
+    const hardening = findCard(cards, "det:hardening:blocked");
+    expect(hardening).toMatchObject({ priority: "P0", category: "project context" });
+    expect(hardening.summary).toContain("escaping symlink");
+    expect(hardening.recommendation).toContain("Delete the symlink");
+    // The missing-file fix must NOT be presented for a symlink escape.
+    expect(hardening.recommendation).not.toContain(
+      "the boot resync rewrites the hardening file",
+    );
+    expect(hardening.evidence).toEqual([
+      {
+        type: "text",
+        text:
+          "hooks/bootstrap/AGENTS.md: resolves outside the workspace (an escaping symlink) — " +
+          "OpenClaw rejects the read",
+      },
+    ]);
+    expect(hardening.fixPrompt).toContain("Do not edit files under hooks/bootstrap/");
+    expect(hardening.targetPaths).toEqual([]);
+
+    fs.rmSync(outsideDir, { recursive: true, force: true });
+  });
+
+  it("gives read-cap copy when the hardening file exceeds 2 MiB", () => {
+    write(workspaceRoot, "AGENTS.md", "root guidance");
+    write(
+      workspaceRoot,
+      "hooks/bootstrap/AGENTS.md",
+      "H".repeat(2 * 1024 * 1024 + 1),
+    );
+
+    const cards = build({
+      bootstrapArgs: {
+        extraFilePaths: ["hooks/bootstrap/AGENTS.md"],
+        hooksEnabled: true,
+      },
+    });
+    const hardening = findCard(cards, "det:hardening:blocked");
+    expect(hardening).toMatchObject({ priority: "P0" });
+    expect(hardening.summary).toContain("2 MiB read cap");
+    // The 2 MiB cap is not configurable — never advise raising a budget.
+    expect(hardening.recommendation).not.toContain("bootstrapMaxChars");
+    expect(hardening.recommendation).toContain("investigate what bloated it");
+    expect(hardening.evidence).toEqual([
+      {
+        type: "text",
+        text:
+          "hooks/bootstrap/AGENTS.md: exceeds OpenClaw's 2 MiB read cap — rejected outright, " +
+          "never truncated",
+      },
+    ]);
+  });
+
+  it("uses generic blocked copy with per-file evidence when causes are mixed", () => {
+    const outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-det-mixed-"));
+    write(outsideDir, "AGENTS.md", "outside hardening");
+    fs.mkdirSync(path.join(workspaceRoot, "hooks", "bootstrap"), { recursive: true });
+    fs.symlinkSync(
+      path.join(outsideDir, "AGENTS.md"),
+      path.join(workspaceRoot, "hooks", "bootstrap", "AGENTS.md"),
+    );
+
+    // Escaping symlink + plain-missing configured extra: the headline must
+    // never assert one cause the evidence contradicts — generic framing,
+    // per-file truth in the evidence lines.
+    const cards = build({
+      bootstrapArgs: {
+        extraFilePaths: [
+          "hooks/bootstrap/AGENTS.md",
+          "hooks/bootstrap/MEMORY.md",
+        ],
+        hooksEnabled: true,
+      },
+    });
+    const hardening = findCard(cards, "det:hardening:blocked");
+    expect(hardening.summary).toContain(
+      "missing config entry, rejected basename, or disabled hook",
+    );
+    const evidenceTexts = hardening.evidence.map((entry) => entry.text).sort();
+    expect(evidenceTexts).toEqual([
+      "hooks/bootstrap/AGENTS.md: resolves outside the workspace (an escaping symlink) — " +
+        "OpenClaw rejects the read",
+      "hooks/bootstrap/MEMORY.md: configured in openclaw.json but missing from disk",
+    ]);
+
+    fs.rmSync(outsideDir, { recursive: true, force: true });
+  });
+
+  it("degrades an unknown future blocked reason to the generic copy", () => {
+    // The reason switch carries an explicit default: a value this build does
+    // not know must yield today's generic blocked copy, never undefined text.
+    const cards = buildDeterministicCards({
+      workspaceRoot,
+      managedRoot,
+      profile: kStableProfile,
+      bootstrapContext: {
+        files: [],
+        blockedExtraFiles: [],
+        hardening: {
+          state: "blocked",
+          reason: "some_future_reason",
+          files: [
+            { path: "hooks/bootstrap/AGENTS.md", exists: false, reason: "" },
+          ],
+        },
+      },
+      onboarded: true,
+      releaseChannel: "stable",
+    });
+    const hardening = findCard(cards, "det:hardening:blocked");
+    expect(hardening).toBeTruthy();
+    expect(hardening.summary).toContain(
+      "missing config entry, rejected basename, or disabled hook",
+    );
+    expect(hardening.summary).not.toContain("undefined");
+    expect(hardening.recommendation).toContain("hooks.internal");
+  });
+
   it("raises the hardening P0 when extras are starved by the total budget", () => {
     write(workspaceRoot, "AGENTS.md", "A".repeat(200));
     write(workspaceRoot, "hooks/bootstrap/AGENTS.md", "H".repeat(100));
