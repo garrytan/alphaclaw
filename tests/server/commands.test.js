@@ -119,6 +119,33 @@ describe("server/commands", () => {
     expect(logSpy).toHaveBeenCalledWith("[alphaclaw] Error: bad flag");
   });
 
+  it("scrubs token-bearing URL params from the failed-command stderr log", async () => {
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    const execMock = vi.fn((cmd, opts, callback) => {
+      callback(
+        Object.assign(new Error("fail"), { code: 1 }),
+        "",
+        "could not open http://127.0.0.1:18789/#token=leaky-shared-token — also ?bootstrapToken=leaky-handoff expired\n",
+      );
+    });
+    const { createCommands } = loadCommandsModule({ execMock });
+    const { clawCmd } = createCommands({ gatewayEnv: () => ({}) });
+
+    const result = await clawCmd("dashboard --no-open");
+
+    // The raw result still carries stderr for callers that redact themselves;
+    // only the shared console log line is scrubbed.
+    expect(result.stderr).toContain("leaky-shared-token");
+    const errorLines = logSpy.mock.calls
+      .map((call) => String(call[0]))
+      .filter((line) => line.startsWith("[alphaclaw] Error:"));
+    expect(errorLines).toHaveLength(1);
+    expect(errorLines[0]).not.toContain("leaky-shared-token");
+    expect(errorLines[0]).not.toContain("leaky-handoff");
+    expect(errorLines[0]).toContain("#token=***");
+    expect(errorLines[0]).toContain("?bootstrapToken=***");
+  });
+
   it("runs gog commands with the keyring environment", async () => {
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
     const execMock = vi.fn((cmd, opts, callback) => {

@@ -1,6 +1,7 @@
 const {
   collectSecretValues,
   redactSecrets,
+  scrubTokenParams,
 } = require("../../lib/server/utils/redact");
 
 describe("server/utils/redact", () => {
@@ -71,5 +72,30 @@ describe("server/utils/redact", () => {
     expect(redacted).not.toContain("supersecrettoken123");
     expect(redacted).not.toContain("other-secret-99");
     expect(redacted).toContain("***");
+  });
+
+  it("scrubs token params by shape across #, ?, and & separators", () => {
+    expect(
+      scrubTokenParams(
+        "open http://127.0.0.1:18789/#token=leaky-one then ?token=leaky-two&other=1 and &token=leaky-three",
+      ),
+    ).toBe(
+      "open http://127.0.0.1:18789/#token=*** then ?token=***&other=1 and &token=***",
+    );
+    expect(
+      scrubTokenParams("handoff #bootstrapToken=one-time&bootstrapProfile=owner"),
+    ).toBe("handoff #bootstrapToken=***&bootstrapProfile=owner");
+  });
+
+  it("scrubs token params case-insensitively and coerces non-string input", () => {
+    expect(scrubTokenParams("url #TOKEN=Leaky ?BootstrapToken=Leaky2")).toBe(
+      "url #TOKEN=*** ?BootstrapToken=***",
+    );
+    expect(scrubTokenParams(null)).toBe("");
+    expect(scrubTokenParams(undefined)).toBe("");
+    // Values without a token-shaped param pass through untouched.
+    expect(scrubTokenParams("plain stderr: bad flag")).toBe(
+      "plain stderr: bad flag",
+    );
   });
 });
