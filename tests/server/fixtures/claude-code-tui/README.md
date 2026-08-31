@@ -17,7 +17,11 @@ with `remain-on-exit on` (T0 spike).
   OAuth URL (NOTE: real host is claude.com with a /cai/oauth/ path, not
   claude.ai) and waits at "Paste code here if prompted >". The embedded PKCE
   code_challenge/state are dead single-use values from the spike session.
-- rc-url-screen.txt — TODO(T0b): capture on a logged-in box: the
-  `claude remote-control` screen showing https://claude.ai/code/<sessionId>.
-  Until then the URL detector is tested against the binary-verified format
-  (see synthetic-rc-url-screen.txt) and MUST be re-verified at T0b.
+- rc-url-screen.txt — captured live (T0b, logged-in run): the persistent
+  server's banner advertises https://claude.ai/code?environment=env_<id>
+  (the environment form), NOT /code/<sessionId> — both shapes are parsed.
+- rc-enable-prompt.txt — the "Enable Remote Control? (y/n)" confirm the
+  watcher answers with y + Enter.
+- rc-workspace-not-trusted.txt — the non-interactive trust refusal (the
+  subcommand EXITS instead of prompting; ensureWorkspaceTrust pre-seeds
+  projects[cwd].hasTrustDialogAccepted in the rescue .claude.json).

@@ -6,6 +6,8 @@ const {
   extractOauthUrl,
   detectAuthGateError,
   detectTrustPrompt,
+  detectRemoteControlConfirm,
+  detectWorkspaceNotTrusted,
   detectAwaitingCode,
   detectBridgeDisconnect,
 } = require("../../lib/server/claude-code-local/tui");
@@ -57,6 +59,24 @@ describe("claude-code-local tui parsers", () => {
     it("does not match the auth-gate fixture", () => {
       expect(extractRemoteControlUrl(fixture("rc-needs-login.txt"))).toBeNull();
     });
+
+    it("extracts the environment URL from the live-captured server banner", () => {
+      // Captured from a real logged-in `claude remote-control` run (T0b):
+      // the persistent server advertises ?environment=env_…, not /code/<id>.
+      const found = extractRemoteControlUrl(fixture("rc-url-screen.txt"));
+      expect(found).toEqual({
+        sessionId: "env_01MyMxkFbNBqEjseRKpkzk71",
+        sessionUrl: "https://claude.ai/code?environment=env_01MyMxkFbNBqEjseRKpkzk71",
+      });
+    });
+
+    it("prefers the session form when both shapes are present", () => {
+      const both =
+        "https://claude.ai/code?environment=env_01AAAA\nhttps://claude.ai/code/sess_12345678";
+      expect(extractRemoteControlUrl(both)?.sessionUrl).toBe(
+        "https://claude.ai/code/sess_12345678",
+      );
+    });
   });
 
   describe("extractOauthUrl (fixture-pinned: claude.com /cai/oauth path)", () => {
@@ -96,6 +116,17 @@ describe("claude-code-local tui parsers", () => {
       expect(detectTrustPrompt("Do you trust the files in this folder?")).toBe(true);
       expect(detectTrustPrompt("WARNING: Bypass Permissions mode ...")).toBe(true);
       expect(detectTrustPrompt("just some output")).toBe(false);
+    });
+
+    it("detects the enable-remote-control confirm from the captured prompt", () => {
+      expect(detectRemoteControlConfirm(fixture("rc-enable-prompt.txt"))).toBe(true);
+      expect(detectRemoteControlConfirm(fixture("rc-url-screen.txt"))).toBe(true);
+      expect(detectRemoteControlConfirm("some other output")).toBe(false);
+    });
+
+    it("detects the workspace-not-trusted exit screen", () => {
+      expect(detectWorkspaceNotTrusted(fixture("rc-workspace-not-trusted.txt"))).toBe(true);
+      expect(detectWorkspaceNotTrusted(fixture("rc-url-screen.txt"))).toBe(false);
     });
 
     it("detects the awaiting-code prompt from the captured login buffer", () => {

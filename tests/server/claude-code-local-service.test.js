@@ -290,6 +290,50 @@ describe("claude-code-local service", () => {
       );
     });
 
+    it("pre-seeds workspace trust in the rescue .claude.json before spawning", async () => {
+      const { service, fsModule } = createService({});
+      await service.refreshProbes({ force: true });
+      await service.startSession({ confirmed: true, source: "click" });
+      const config = JSON.parse(fsModule.files.get(`${kPaths.home}/.claude.json`));
+      expect(config.projects[kPaths.workspace]).toMatchObject({
+        hasTrustDialogAccepted: true,
+      });
+    });
+
+    it("answers Enable Remote Control? (y/n) exactly once, then extracts the env URL", async () => {
+      const { service, driver } = createService({});
+      await service.refreshProbes({ force: true });
+      await service.startSession({ confirmed: true, source: "click" });
+      driver.state.buffer = "Enable Remote Control? (y/n)";
+      await flush(30);
+      const yCalls = () =>
+        driver.sendKeys.mock.calls.filter(([args]) => args.text === "y").length;
+      expect(yCalls()).toBe(1);
+      await flush(30);
+      expect(yCalls()).toBe(1); // prompt persists on screen; answered once
+      driver.state.buffer +=
+        "\n·✔︎· Connected · workspace · HEAD\nContinue coding in the Claude mobile app or https://claude.ai/code?environment=env_01TESTENV42\nspace to show QR code";
+      await flush(60);
+      const snapshot = service.getStatusSnapshot();
+      expect(snapshot.state).toBe("running");
+      expect(snapshot.sessionUrl).toBe(
+        "https://claude.ai/code?environment=env_01TESTENV42",
+      );
+    });
+
+    it("maps the workspace-not-trusted exit to an actionable error", async () => {
+      const { service, driver } = createService({});
+      await service.refreshProbes({ force: true });
+      await service.startSession({ confirmed: true, source: "click" });
+      driver.state.buffer =
+        "Error: Workspace not trusted. Please run `claude` in /x first to review and accept the workspace trust dialog.";
+      await flush(60);
+      const snapshot = service.getStatusSnapshot();
+      expect(snapshot.state).toBe("error");
+      expect(snapshot.error.code).toBe("workspace_not_trusted");
+      expect(driver.killSession).toHaveBeenCalled();
+    });
+
     it("maps the auth-gate screen to an error, clears the session, and re-probes login", async () => {
       const { service, driver } = createService({});
       await service.refreshProbes({ force: true });
