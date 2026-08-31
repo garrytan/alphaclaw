@@ -459,6 +459,130 @@ describe("server/doctor/deterministic-checks", () => {
     ).toBeUndefined();
   });
 
+  describe("gateway memory-leak cards (runtime trend input)", () => {
+    const kEpisodeId = "4242-1700000000000";
+    const leakTrend = (state, extra = {}) => ({
+      state,
+      rssMb: 812,
+      slopeMbPerHour: 65,
+      effectiveCapMb: 1024,
+      capSource: "heap",
+      projectedExhaustionAt: "2026-08-31T12:00:00.000Z",
+      episodeId: kEpisodeId,
+      lastEpisodeSummary: null,
+      ...extra,
+    });
+    const memCard = (cards, prefix) =>
+      cards.find((card) => card.sourceKey.startsWith(prefix));
+
+    it("emits no card when the trend is absent, idle, or healthy", () => {
+      for (const memoryTrend of [
+        null,
+        leakTrend("normal"),
+        leakTrend("warming_up"),
+        leakTrend("disabled"),
+        leakTrend("watch"),
+      ]) {
+        const cards = build({ memoryTrend });
+        expect(memCard(cards, "det:gateway-memory-leak")).toBeUndefined();
+      }
+    });
+
+    it("emits an episode-scoped P1 card for leak_suspected with runtime numbers only", () => {
+      const cards = build({ memoryTrend: leakTrend("leak_suspected") });
+      const card = memCard(cards, "det:gateway-memory-leak:");
+      expect(card).toMatchObject({
+        sourceKey: `det:gateway-memory-leak:${kEpisodeId}`,
+        priority: "P1",
+        category: "workspace state",
+      });
+      expect(card.summary).toContain("812MB");
+      expect(card.summary).toContain("65 MB/h");
+      expect(card.evidence.every((item) => item.type === "text")).toBe(true);
+      expect(card.targetPaths).toEqual([]);
+      expect(card.fixPrompt).toContain("alphaclaw admin GET /api/watchdog/resources");
+      expect(card.fixPrompt).toContain("plugins.load.paths");
+      expect(card.fixPrompt).toContain("MITIGATION, not a fix");
+    });
+
+    it("critical emits ONLY the P0 card (exclusive severity, distinct key)", () => {
+      const cards = build({ memoryTrend: leakTrend("critical") });
+      const critical = memCard(cards, "det:gateway-memory-leak-critical:");
+      expect(critical).toMatchObject({
+        sourceKey: `det:gateway-memory-leak-critical:${kEpisodeId}`,
+        priority: "P0",
+      });
+      // Exclusive emission: no sibling P1 card for the same condition.
+      expect(
+        cards.find(
+          (card) =>
+            card.sourceKey === `det:gateway-memory-leak:${kEpisodeId}`,
+        ),
+      ).toBeUndefined();
+    });
+
+    it("embeds the shared heap advice verbatim, and an honest fallback without it", () => {
+      const withAdvice = build({
+        memoryTrend: leakTrend("leak_suspected"),
+        heapAdvice:
+          'Raise the gateway heap: `alphaclaw admin PUT /api/autotune/settings --data \'{"overrides":{"gatewayHeapMb":1280}}\'`',
+      });
+      expect(memCard(withAdvice, "det:gateway-memory-leak:").fixPrompt).toContain(
+        'gatewayHeapMb":1280',
+      );
+      const withoutAdvice = build({ memoryTrend: leakTrend("leak_suspected") });
+      expect(
+        memCard(withoutAdvice, "det:gateway-memory-leak:").fixPrompt,
+      ).toContain("do not raise limits blindly");
+    });
+
+    it("surfaces a recent episode as a P2 evidence card after the process was replaced", () => {
+      const endedAt = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+      const cards = build({
+        memoryTrend: leakTrend("warming_up", {
+          lastEpisodeSummary: {
+            episodeId: "100-1699999999999",
+            pid: 100,
+            peakRssMb: 950,
+            slopeMbPerHour: 70,
+            endedAt,
+            reason: "process_exited",
+          },
+        }),
+      });
+      const card = memCard(cards, "det:gateway-memory-leak-recent:");
+      expect(card).toMatchObject({
+        sourceKey: "det:gateway-memory-leak-recent:100-1699999999999",
+        priority: "P2",
+      });
+      expect(card.summary).toContain("ended by a gateway restart/exit");
+    });
+
+    it("ignores stale (>24h) episode summaries and malformed episode ids", () => {
+      const staleCards = build({
+        memoryTrend: leakTrend("normal", {
+          lastEpisodeSummary: {
+            episodeId: "100-1699999999999",
+            pid: 100,
+            peakRssMb: 950,
+            endedAt: new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString(),
+            reason: "recovered",
+          },
+        }),
+      });
+      expect(
+        memCard(staleCards, "det:gateway-memory-leak-recent:"),
+      ).toBeUndefined();
+      // A gateway-echoed / malformed id must never become a sourceKey.
+      const malformed = build({
+        memoryTrend: leakTrend("leak_suspected", {
+          episodeId: "evil [link](x) `code`",
+        }),
+      });
+      expect(memCard(malformed, "det:gateway-memory-leak")).toBeUndefined();
+    });
+  });
+
   it("marks every card as open, deterministic-sourced, with a stable sourceKey", () => {
     write(workspaceRoot, "BOOTSTRAP.md", "ritual");
     write(workspaceRoot, "MEMORY.md", "curated");
