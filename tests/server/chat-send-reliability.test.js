@@ -218,6 +218,58 @@ describe("server/chat send reliability", () => {
     expect(harness.requests.filter((f) => f.method === "chat.send")).toHaveLength(0);
   });
 
+  it("a duplicate live send from a NEW socket replays the streamed output so far", async () => {
+    const harness = await kit.startGatewayHarness();
+    const service = kit.createService(harness);
+    const browserA = await kit.openBrowser(service);
+    await kit.startRun({
+      harness,
+      browser: browserA,
+      sessionKey: "s-reattach",
+      runId: "run-ra",
+      clientMsgId: "cm-ra",
+    });
+    harness.emit({
+      type: "event",
+      event: "agent",
+      payload: { runId: "run-ra", stream: "assistant", data: { delta: "first half" } },
+    });
+    await browserA.waitFor((m) => m.type === "chunk", "chunk on A");
+
+    // A reconnected tab re-sends the acked item (dedupe-safe by design). The
+    // fresh socket has seen NONE of the run's output — a bare synthetic
+    // `started` would leave an empty bubble until history refreshes.
+    const browserB = await kit.openBrowser(service);
+    await browserB.waitFor((m) => m.type === "hello", "hello B");
+    browserB.send({
+      type: "message",
+      clientMsgId: "cm-ra",
+      sessionKey: "s-reattach",
+      content: "go",
+    });
+    await browserB.waitFor((m) => m.type === "ack", "re-ack on B");
+    const replayedChunk = await browserB.waitFor(
+      (m) => m.type === "chunk" && m.content === "first half",
+      "replayed chunk on B",
+    );
+    expect(replayedChunk.runId).toBe("run-ra");
+    const startedB = browserB.messages.find((m) => m.type === "started");
+    expect(startedB).toMatchObject({ runId: "run-ra", seq: 1 });
+    // No second chat.send reached the gateway.
+    expect(harness.requests.filter((f) => f.method === "chat.send")).toHaveLength(1);
+
+    // B is attached: live frames now fan out to both sockets.
+    harness.emit({
+      type: "event",
+      event: "agent",
+      payload: { runId: "run-ra", stream: "assistant", data: { delta: "second half" } },
+    });
+    await browserB.waitFor(
+      (m) => m.type === "chunk" && m.content === "second half",
+      "live chunk on B",
+    );
+  });
+
   it("a duplicate of a FAILED send is a fresh attempt, not a replayed failure", async () => {
     // A confirmed pre-write failure writes an `error` terminal row and tells
     // the client it is retryable. The retry keeps the clientMsgId by design —
