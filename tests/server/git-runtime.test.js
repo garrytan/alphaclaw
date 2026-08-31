@@ -24,16 +24,18 @@ describe("cli/git runtime helpers", () => {
   });
 
   it("resolves git helper paths from runtime environment", () => {
+    // No shared-tmp default anymore (H14): without an explicit override the
+    // resolver yields "" and boot uses writeGitAskpassScript()'s private
+    // mkdtemp dir instead of a predictable /tmp name.
     expect(
       resolveGitAskPassPath({
         env: { TMPDIR: "/runtime/tmp" },
-        tmpDir: "/fallback/tmp",
       }),
-    ).toBe("/runtime/tmp/alphaclaw-git-askpass.sh");
+    ).toBe("");
+    expect(resolveGitAskPassPath({ env: {} })).toBe("");
     expect(
       resolveGitAskPassPath({
         env: { ALPHACLAW_GIT_ASKPASS_PATH: "/state/git-askpass" },
-        tmpDir: "/fallback/tmp",
       }),
     ).toBe("/state/git-askpass");
     expect(
