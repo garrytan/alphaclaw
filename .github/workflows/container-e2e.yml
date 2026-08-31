@@ -50,7 +50,12 @@ jobs:
           changed=$(git diff --name-only "origin/${BASE_REF}...HEAD")
           echo "changed files:"
           echo "$changed"
-          pattern='^(lib/server/openclaw-|lib/server/gateway|bin/alphaclaw\.js|Dockerfile|tests/container/|lib/boot-placeholder)'
+          # The heavy job boots the FULL server on the container journey:
+          # watchdog, boot-time doctor/config reconcile, startup, and every
+          # routes/* module load. The original filter covered only the
+          # upgrade/gateway surface, so PRs changing watchdog/doctor/routes/
+          # server-core (which the boot journey exercises) skipped it.
+          pattern='^(lib/server/openclaw-|lib/server/gateway|lib/server/watchdog|lib/server/doctor|lib/server/routes/|lib/server/startup\.js|lib/server/boot-phase\.js|lib/server\.js|lib/server/gateway-env-policy\.js|bin/alphaclaw\.js|Dockerfile|tests/container/|lib/boot-placeholder)'
           if echo "$changed" | grep -qE "$pattern"; then
             echo "run_heavy=true" >> "$GITHUB_OUTPUT"
             echo "upgrade/gateway/container surface touched → heavy job runs"
