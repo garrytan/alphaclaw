@@ -5,7 +5,7 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
-## [Unreleased]
+## [0.9.50] - 2026-08-31
 
 Chat no longer eats messages. The Chat tab's session management was rebuilt
 end to end for ChatGPT-level reliability: every keystroke survives, Stop means
@@ -48,6 +48,22 @@ ambiguous outcome is recorded visibly in the conversation — across reloads.
   exists; Escape stops, a "Jump to latest" pill appears when scrolled up,
   messages have a copy button, and the chat pane finally works on narrow
   viewports with screen-reader-announced streaming.
+
+### Fixed
+- A hard-to-hit race could skip "Limited mode" detection against an older
+  server when the connection was slow to open — retries there could have
+  duplicated a message; detection now arms from the moment the socket opens
+  and sends never fire before the protocol level is known.
+- A history refresh that failed over the live connection left "Refreshing
+  history…" up forever with no way to retry; it now settles with an inline
+  Retry.
+- Long streams stay smooth: the transcript no longer re-renders every message
+  bubble (with a full markdown re-parse) for every streamed token, and
+  status colors now use the theme's semantic tokens so warning/error text is
+  legible in light mode too (the jump-to-latest pill was unreadable there).
+- Stop stays available against older servers; a "Still working…" hint appears
+  when a run goes quiet for a couple of minutes; keyboard focus returns to
+  the composer after Retry/Discard.
 
 ### Changed
 - The chat bridge (`lib/server/chat-ws.js`) was decomposed into
