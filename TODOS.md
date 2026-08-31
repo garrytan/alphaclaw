@@ -1,5 +1,16 @@
 # TODOS
 
+## P2 — Chat-reliability ship-review deferrals (2026-08-31, grouped)
+- **What:** (1) Wire `send-outbox.clearAll()` (and the chat draft keys) to auth-IDENTITY change, not just the explicit-logout `localStorage.clear()` — a session that expires before a different member logs in on the same browser resurrects the previous member's queued message content via `restoreOnLoad()` (security specialist, conf 6). (2) Debug-payload wire negotiation: history responses always carry `rawHistory` + per-row `rawMessage`, and tool stream frames carry `rawEvent` — 2x+ payload inflation for data only the `?chatDebug=1` drawer reads; add a `debug:true` request field / `?includeRaw=1` and strip otherwise (perf specialist; the replay-buffer copy already strips rawEvent). (3) Chat hook test harness batch — use-chat-store/-connection/-composer glue is untested (frame router reqId guard, 2s refetch dedupe coalescing, legacy single-shot markAcked, handleClosed fan-out, draft-debounce blur/unload flush, cancel-append); the mocked-preact-hooks harness pattern (tests/frontend/watchdog-tab.test.js) applies. Also: browser-keepalive terminate side (needs a non-ponging fake in wss.clients), a `gatewayPingIntervalMs` timing override + wedged-gateway test, and an express-level `/api/chat/history` passthrough test. (4) Consolidate `gateway-client.js`'s `resolveTokenValue`/`getGatewayToken` with `gateway-credential`'s `resolveConfigSecret` (subtly different regex + no SecretRef guard; behavior-pinned by the auth-token tests, so consolidate with care).
+- **Why:** Each flagged by the /ship review army (security/performance/testing/maintainability specialists) and verified real; deferred as beyond this wave's blast radius — none is user-visible on the happy path and the risky lifecycle logic beneath them is covered (83% diff coverage, ~160 chat tests).
+- **Context:** lib/public/js/components/chat/send-outbox.js (clearAll), lib/server/chat/{index,send-service}.js (raw* fields), lib/server/chat/gateway-client.js (credential resolver, ping override), tests/frontend + tests/server/helpers/chat-gateway-harness.js.
+- **Effort:** S each, except the hook-harness batch (M). **Depends on:** (1) an identity signal in the UI (pairs with the per-operator attribution item below).
+
+## P2 — Chat-reliability adversarial-review deferrals (2026-08-31, grouped)
+- **What:** (1) Cross-tab outbox deletion sync — removal tombstones are tab-local, so when two tabs restored the same item, tab A's confirm/discard can be resurrected by tab B's next merge-on-fresh-read persist; fix is persisted shared tombstones or a `storage`-event listener that drops removed ids live. (2) Clock-skew-proof outbox confirmation — `mergeHistory` confirms sent items against gateway history timestamps within [−60s, ack+30s] using the browser clock; >60s skew (VPS without NTP, wrong browser clock) means user messages never confirm and render twice; needs a server-supplied clock offset (e.g. `hello.serverNow`) or an id-based confirmation signal. (3) Resume amplification at team scale — every socket gets ALL registry runs in `hello.activeRuns` and resumes each one: ≥60 org-wide active runs would trip the 60-frames/10s inbound flood cap on reconnect (reconnect storm) and every tab receives every member's token streams (bandwidth, and the acknowledged any-member-reads-any-session posture); needs per-tab relevance filtering (e.g. resume only sessions the tab has state for) once per-operator attribution exists. (4) Stall-sweeper vs long-running tools — a >5-min-silent tool call (common for builds) gets finalized `interrupted` + `holdFlush`, and the run's REAL lifecycle:end then arrives for an unknown runId and is buffered forever instead of drained; consider a gateway-side liveness probe or draining buffered terminals against the store's terminal rows.
+- **Why:** Flagged by the /ship adversarial passes (Claude + Codex, fresh-context attacker prompts) and verified real, but each needs a design decision (identity signal, clock contract, attribution model) beyond this wave's blast radius. The wave's fixes for the same passes' criticals (terminal-replay retry block, stale gateway sockets, unbounded chat-runs.db growth, late-stop cross-run kill, interruptedLocal wedge) all landed in v0.9.52.
+- **Context:** lib/public/js/components/chat/send-outbox.js (tombstones), transcript-store.js (confirmation window), lib/server/chat/index.js (activeRuns fan-out), send-service.js (sweeper + buffered terminals).
+- **Effort:** S–M each. **Depends on:** (1)/(3) pair with the identity/attribution items above; (2) needs a small protocol addition.
 ## P2 — Hardening dismissal-key granularity + freshness stamp (2026-08-31, from ship adversarial review)
 - **What:** (1) `det:hardening:blocked` is one sourceKey across distinct causes (missing_file / escapes_workspace / file_too_large): a user who dismisses a benign missing-file P0 permanently suppresses doctor cards AND scheduled-scan triggers for a later escaping-symlink block (`service.js` readDismissedSourceKeys + the scan-trigger candidateKeys gate). Split the key per reason (`det:hardening:blocked:<reason>`) or reset the dismissal when the reason set changes — either changes dedupe semantics, so it needs its own review. Mitigation shipped: the General hardening card is non-dismissible and always renders. (2) The card's "updated {time}" stamps the payload's FIRST RENDER (module WeakMap), not SSE delivery — opening the tab after being away overstates freshness by up to the SSE re-emit gap; stamping at the app-shell receive site would fix it.
 - **Why:** Both flagged by the ship adversarial review as real but judgment-bearing; neither is a regression (the shared key predates this wave).
@@ -19,8 +30,34 @@
 - **Effort:** S each, except node-pty (M) and Signal parity (M).
 
 
+## P3 — Chat: session deep-links (2026-08-31)
+- **What:** Put the selected session in the URL (`/chat/<sessionKey>`, per-segment encoded like OpenClaw's session-path grammar) so chat sessions are deep-linkable and back/forward-navigable.
+- **Why:** Navigation parity with the rest of the app; today `/chat` carries no session and reloads land on the last-selected key from localStorage.
+- **Pros:** Shareable links, browser history works. **Cons:** Touches app-shell routing conventions beyond the chat folder.
+- **Context:** Deferred by the 2026-08-31 chat-reliability CEO review (see docs/designs/chat-reliability.md). Selection state lives in lib/public/js/app.js + hooks/useAgentSessions.js (`kAgentLastSessionKey`).
+- **Effort:** S-M. **Depends on:** nothing.
+
+## P3 — Chat: history pagination beyond the 200-row window (2026-08-31)
+- **What:** A "load older" affordance for chat history. The bridge now reports an honest `truncated` flag (fetch 201, trim), but protocol-4 `chat.history` has no cursor.
+- **Why:** Long-running sessions cap at the newest 200 rows.
+- **Pros:** Full-history reading. **Cons:** Blocked on upstream cursor support; needs a capability probe (house rule: probe behavior, never version-gate — lib/server/openclaw-capabilities.js).
+- **Context:** Deferred by the 2026-08-31 chat-reliability reviews; `kHistoryLimit` in lib/server/chat/index.js, merge path in lib/public/js/components/chat/transcript-store.js is already merge-by-id so prepending older pages is straightforward client-side.
+- **Effort:** M. **Depends on:** upstream OpenClaw history cursor.
+
+## P3 — Chat: session-list push over SSE instead of polling (2026-08-31)
+- **What:** Push session-list changes over the existing status SSE (`/api/events/status` pattern) instead of the 30s visibility-paused poll + 15s server micro-cache that shipped with the chat rework.
+- **Why:** Removes polling entirely; today's mitigation already coalesces N tabs into one `openclaw sessions --json --all-agents` spawn per 15s window.
+- **Pros:** Real-time sidebar, zero per-tab churn. **Cons:** OpenClaw exposes no session-change event, so the server would still poll the CLI once centrally — modest win over the micro-cache.
+- **Context:** Eng-review D6 (2026-08-31); micro-cache in lib/server/routes/system.js (`agentSessionsCacheTtlMs`), poll in lib/public/js/hooks/useAgentSessions.js.
+- **Effort:** M. **Depends on:** ideally an upstream session-change signal.
+## P3 — Rescue login modal: label the OAuth link instead of rendering the raw URL
+- **What:** The guided-login modal renders the full OAuth authorize URL as a 9-line wrapped link; show a short label ("Open claude.ai login") with the raw URL in a copyable line beneath.
+- **Why:** Cosmetic (found by /qa on vientiane, 2026-08-31, ISSUE-001); functional as-is.
+- **Context:** lib/public/js/components/claude-code-local-setup-modal.js, awaiting_code state. Evidence: .gstack/qa-reports/screenshots/login-modal-awaiting-code.png.
+- **Effort:** S. **Depends on:** nothing.
+
 ## P3 — Resource-autotune ship-review follow-ups (2026-08-29, grouped)
-- **What:** (1) container-hook tests for `WatchdogAutotuneCard` (restartSignal/detectedAt refetch triggers, per-context save isolation, heap-input validation toast, reapply/dismiss flows — only the presentational view + builders are covered); (2) `launchGatewayProcess` spawn-stamp glue test (heap regex from childEnv, UV match) at the call site; (3) extract the copy-pasted cgroup fs-spy/containerFsModule test fixtures (×6 files) into a shared tests helper; (4) unify the three machine-summary assemblies (agent-admin/skill.js `gatherLiveState`, routes/system.js `buildMachineSummary`, onboarding/workspace.js `renderMachineProfileMarkdown`) on one summarizer with per-surface sanitization at call sites; (5) hoist the 3500ms post-restart settle-refetch literal (autotune-card, incidents hook, general tab) into a shared constant; (6) design pass items for /design-review: collapse the N-identical "Restart gateway now" per-row buttons into a single affordance, and move underlined text-button actions (Restart/Copy) onto ActionButton; (7) downsize-specific urgent-toned resize notification (copy is currently direction-neutral); (8) apply the shared cache pragma at cron-store's TTL reopen (+ decide agent-admin/usage sites); (9) a `pruneBackups` advisory-budget warning test; (10) an explicit boot-order test (autotune apply completes before `doSyncPromptFiles`, machine line present in first-boot artifacts with a GPU fixture).
+- **What:** (1) container-hook tests for `WatchdogAutotuneCard` (restartSignal/detectedAt refetch triggers, per-context save isolation, heap-input validation toast, reapply/dismiss flows — only the presentational view + builders are covered); (2) `launchGatewayProcess` spawn-stamp glue test (heap regex from childEnv, UV match) at the call site; (3) extract the copy-pasted cgroup fs-spy/containerFsModule test fixtures (×6 files) into a shared tests helper; (4) unify the three machine-summary assemblies (agent-admin/skill.js `gatherLiveState`, routes/system.js `buildMachineSummary`, onboarding/workspace.js `renderMachineProfileMarkdown`) on one summarizer with per-surface sanitization at call sites; (5) hoist the 3500ms post-restart settle-refetch literal (autotune-card, incidents hook, general tab) into a shared constant; (6) design pass items for /design-review: collapse the N-identical "Restart gateway now" per-row buttons into a single affordance, and move underlined text-button actions (Restart/Copy) onto ActionButton; (7) ~~downsize-specific urgent-toned resize notification~~ (DONE v0.9.54 — any shrinking dimension gets the ⚠️ OOM-pressure copy, tested); (8) apply the shared cache pragma at cron-store's TTL reopen (+ decide agent-admin/usage sites); (9) a `pruneBackups` advisory-budget warning test; (10) an explicit boot-order test (autotune apply completes before `doSyncPromptFiles`, machine line present in first-boot artifacts with a GPU fixture).
 - **Why:** All flagged by the /ship specialist review or plan-completion audit; each deferred as churn-vs-risk at ship time — none is user-visible today, and the risky logic beneath them is covered (82% diff coverage, regressions pinned).
 - **Context:** lib/public/js/components/watchdog-tab/autotune-card.js, lib/server/gateway.js (spawn stamp), lib/server/machine-summary.js (new shared prompt summarizer to extend), lib/server/cron-store.js, lib/server/openclaw-channel-sync.js (advisory block), lib/server/startup.js.
 - **Effort:** S each. **Depends on:** nothing.
@@ -129,7 +166,7 @@
 - **Effort:** S–M (per item).
 
 ## P2 — Team-mode security follow-ups (deferred from the 0.9.36 ship review)
-- **What:** (a) Per-member chat/session isolation — team mode v1 keeps global agent sessions (channels, hooks, crons) with no owner column, so a member can enumerate (`GET /api/usage/sessions`) and read/send to (`GET /api/chat/history`, chat WS) ANY session; documented in `chat-ws.js` ("chat traffic is NOT attributed per-operator in team mode v1"). A real fix adds an owner/attribution column to usage_events + a visibility filter keyed on `req.alphaclawIdentity`. (b) Role demotion only takes gateway effect on the next restart (`restartRequired:true`) — the running gateway keeps the old operator scope until then (OpenClaw captures auth at startup). (c) Verified restart-handoff for `OPENCLAW_SUPERVISOR_MODE=external` (2026.8.1+): env plumbing ships default-on, but `openclaw-restart-handoff.js` has no production caller, so a gateway-initiated fresh-process restart could feed watchdog crash accounting (mitigated: `OPENCLAW_NO_RESPAWN=1` keeps routine restarts in-process, 50s expected-exit window). (d) `getAdvertisedScopes` is not wired in production, so the scope-name intersection guard is a no-op (mitigated: names are hardcoded to live-verified OperatorScopeSchema values).
+- **What:** (a) Per-member chat/session isolation — team mode v1 keeps global agent sessions (channels, hooks, crons) with no owner column, so a member can enumerate (`GET /api/usage/sessions`) and read/send to (`GET /api/chat/history`, chat WS) ANY session; documented in `lib/server/chat/gateway-client.js` ("chat traffic is NOT attributed per-operator in team mode v1"). A real fix adds an owner/attribution column to usage_events + a visibility filter keyed on `req.alphaclawIdentity`. (b) Role demotion only takes gateway effect on the next restart (`restartRequired:true`) — the running gateway keeps the old operator scope until then (OpenClaw captures auth at startup). (c) Verified restart-handoff for `OPENCLAW_SUPERVISOR_MODE=external` (2026.8.1+): env plumbing ships default-on, but `openclaw-restart-handoff.js` has no production caller, so a gateway-initiated fresh-process restart could feed watchdog crash accounting (mitigated: `OPENCLAW_NO_RESPAWN=1` keeps routine restarts in-process, 50s expected-exit window). (d) `getAdvertisedScopes` is not wired in production, so the scope-name intersection guard is a no-op (mitigated: names are hardcoded to live-verified OperatorScopeSchema values).
 - **Why:** All are acceptable under the plan's "team roles are a CONVENIENCE boundary, host isolation is the precondition" posture; none is a credential leak or auth bypass after the 0.9.36 fixes.
 - **Effort:** M–L (per item).
 
@@ -165,9 +202,10 @@
 - **Why:** "Was it flapping overnight?" currently requires reading incident rows one by one.
 - **Effort:** S-M.
 
-## P3 — Notification remediation-action parity
-- **What:** Alerts name the primary remediation ("Repair from the Watchdog tab") with the same action vocabulary as the card's `actions[]`; today they share state labels and deep links but not the action wording.
-- **Context:** Copy source: lib/server/gateway-state.js catalog + actionsForState.
+## P3 — Notification remediation-action parity (PARTIALLY DONE, v0.9.54)
+- **What:** Alerts name the primary remediation with the same action vocabulary as the card's `actions[]`; today they share state labels and deep links but not the action wording.
+- **Done:** the crash-loop-paused notice names Retry/Repair (the `down` state's catalog actions) with a parity test against `actionsForState` (tests/server/auto-fix-notifications.test.js); auto-resolving notices deliberately stay action-free. Remaining: sweep the OTHER pre-existing alerts (config-error latch, rollback notices) for the same treatment.
+- **Context:** Copy source: lib/server/gateway-state.js catalog + actionsForState (now exported).
 - **Effort:** S.
 
 ## P3 — Downloadable redacted diagnostic bundle
@@ -357,11 +395,34 @@
 - **Why:** Neither overseer pins a model today (whatever the installed CLI defaults to) and cost is invisible; do both at once to avoid asymmetry.
 - **Effort:** S–M. **Depends on:** nothing.
 
-## P3 — Migrate WATCHDOG_AUTO_REPAIR / WATCHDOG_NOTIFICATIONS_DISABLED from env to alphaclaw.json
-- **What:** Move the two legacy watchdog toggles into alphaclaw.json with env fallback + one-release deprecation note.
+## P3 — Migrate WATCHDOG_AUTO_REPAIR / WATCHDOG_NOTIFICATIONS_DISABLED / WATCHDOG_NOTIFICATIONS_QUIET from env to alphaclaw.json
+- **What:** Move the three legacy watchdog toggles into alphaclaw.json with env fallback + one-release deprecation note (the verbose toggle added a third env key, `WATCHDOG_NOTIFICATIONS_QUIET`, deliberately on the same backend so this migration moves all of them together).
 - **Why:** New settings already live in alphaclaw.json (`watchdog.overseer.enabled`); the split store means `PUT /api/watchdog/settings` writes env while the overseer toggle writes config — two backends for one card.
-- **Context:** `updateSettings` in lib/server/watchdog.js (writeEnvFile/reloadEnv path); never write env and config simultaneously.
+- **Context:** `updateSettings` in lib/server/watchdog.js (updateEnvFile locked-RMW path) + `lib/server/notification-policy.js` env readers; never write env and config simultaneously.
 - **Effort:** M. **Depends on:** nothing.
+
+## P3 — Bin-phase boot-notices bridge (pre-server auto-fix notifications)
+- **What:** Durable boot-notices JSONL in the state dir written by `bin/alphaclaw.js` auto-fixes (pending-update self npm-install, openclaw.json restore from the git remote, pre-server config migrations), drained through `upgradeNotifier.notify` at server boot — mirroring channel-sync's `lastBoot.notifications` envelope pattern.
+- **Why:** These are genuine automatic fixes that today only reach the console; the verbose/important notification work (v0.9.54) covers the server phase only.
+- **Context:** No notifier exists in the bin process; `flushBootNotifications` (lib/server/openclaw-channel-sync.js) is the drain precedent. Classify all as important (action taken).
+- **Effort:** M → CC: S. **Depends on:** nothing.
+
+## P3 — Suppressed-notice digest/history
+- **What:** Daily digest (or Watchdog-tab history pane) of notices suppressed by Important-only mode.
+- **Why:** Quiet-mode operators may want a low-frequency rollup of what they didn't see.
+- **Context:** The outbox has a terminal `suppressedAt` state (flush-time suppressions), but the MAJORITY of suppressed notices are discarded pre-outbox by the enqueue gate in lib/server/upgrade-notifier.js — the digest needs enqueue-time persistence of suppressed events (deliberately rejected for v1 to keep the outbox lean).
+- **Effort:** M. **Depends on:** nothing.
+
+## P3 — Gmail-watch respawn notification with a repeated-failure threshold
+- **What:** Notify when the `gog serve` child keeps dying (lib/server/gmail-watch.js respawns every 5s, console-only today).
+- **Why:** The one remaining server-phase auto-fix loop with zero notification coverage; the raw 5s cadence needs a breaker (N consecutive failures) before notifying or it spams.
+- **Effort:** S. **Depends on:** nothing.
+
+## P3 — Gateway went-down notice debounce
+- **What:** Optional N-second debounce suppressing the down+up notification pair for transient blips.
+- **Why:** Only if the accepted volume delta (a single crash+recovery now notifies both ways with Verbose ON; previously silent) proves chatty in practice — deliberately NOT built in v1 to keep timers out of the crash path.
+- **Context:** `notifyOncePerIncident("gateway_went_down", ...)` in lib/server/watchdog.js handleCrashExit.
+- **Effort:** S. **Depends on:** field feedback.
 
 ## P3 — StatusHero card absorbing the shared Gateway card on the Watchdog tab
 - **What:** Merge the Gateway card + status details + narrative card into one hero for the Watchdog tab (the shared Gateway card stays for other tabs).
@@ -498,17 +559,35 @@
 - **Context:** The fire payload arrives wrapped in an untrusted `<routine-fire-payload>` block, so the routine's saved prompt must explicitly opt in to reading it (e.g. "act on the routine-fire-payload block"); needs UX design (input modal) and README prompt guidance. `lib/server/claude-code-service.js` is the extension point (currently posts no body by design).
 - **Effort:** M. **Depends on:** the launcher shipping.
 
-## P2 — Watchdog incident → Claude Code routine escalation
-- **What:** Reuse `claude-code-service` to fire the routine with a settled incident's narrative as the `text` payload ("escalate this incident to Claude Code").
-- **Why:** Platform potential: incidents debug themselves in a cloud session with context attached, instead of an operator copy-pasting log excerpts.
-- **Context:** Deferred from the launcher's CEO review; needs overseer-integration design (which incidents qualify, redaction of the narrative, notification links) and its own review. Blocked on the fire-with-text TODO above for the payload path.
-- **Effort:** M. **Depends on:** fire-with-custom-text.
+## P2 — Watchdog incident → Claude Code routine escalation (fallback path)
+- **What:** Reuse `claude-code-service` to fire the cloud routine on incident escalation — now scoped as the FALLBACK variant, for boxes with a configured routine but no completed local rescue login: once the local login is done, incident auto-spawn (`CLAUDE_CODE_LOCAL_SPAWN_ON_INCIDENT`, shipped with the local rescue session) already warms an on-box session at incident open.
+- **Why:** Platform potential: incidents debug themselves in a session with context attached, instead of an operator copy-pasting log excerpts — and routine-only boxes shouldn't be left out.
+- **Context:** Deferred from the launcher's CEO review. The narrative-payload half (which incidents qualify, redaction of the untrusted narrative text) moved into the "Seed the local rescue session with incident context" entry below — design both launch paths against that one shared redaction/qualification policy. `lib/server/claude-code-service.js` is the extension point (currently posts no body by design); the incident-open hook seam is `onIncidentActivity` in lib/server/watchdog-incidents.js.
+- **Effort:** M. **Depends on:** fire-with-custom-text (payload path); the incident-context seeding entry's shared redaction design.
 
-## P3 — Doctor check for Claude Code routine config shape
-- **What:** Surface the launcher service's `invalid_config` reason (bad host, wrong token prefix, half-configured pair) as a Doctor finding.
-- **Why:** Misconfiguration is currently visible only in the sidebar tooltip and the fire-time error toast; Doctor is where operators look for config drift.
-- **Context:** `createClaudeCodeService().getAvailability()` already returns the exact reason/message — the check is a thin adapter in lib/server/doctor/.
+## P2 — Seed the local rescue session with incident context
+- **What:** When a rescue session spawns for (or is joined by) a watchdog incident, seed it with the incident's narrative — what opened it, key events, redacted log excerpts — instead of arriving blank, via send-keys into the live session or a context file in the session cwd.
+- **Why:** Incident auto-spawn (shipped) delivers a warm but empty session; the dream state is a session already loaded with why it exists.
+- **Context:** Deliberately deferred at implementation time as a prompt-injection surface: incident narratives embed untrusted gateway log content, so seeding needs shared redaction plus an explicit untrusted-content wrapper (the routine path's `<routine-fire-payload>` opt-in pattern), designed together with the P2 fire-with-text payload so both launch paths share one policy. Extension points: `ensureForIncident(context)` in lib/server/claude-code-local/index.js (the incident id already flows through as `spawnedBy`) and the notification-composition seam in lib/server/watchdog.js.
+- **Effort:** M. **Depends on:** fire-with-custom-text (shared payload/redaction design).
+
+## P3 — Doctor check for Claude Code launcher config drift (routine + local)
+- **What:** Surface both launch paths' misconfiguration as Doctor findings: the routine service's `invalid_config` reason (bad host, wrong token prefix, half-configured pair) AND the local rescue path's drift states — enabled-but-`needs_login` (including the credentials-lost-after-backup-restore case: `<rootDir>/claude-code-local/home/` is deliberately excluded from backups, so a restore silently drops the login until the operator re-runs it from the Watchdog card), invalid `CLAUDE_CODE_LOCAL_PERMISSION_MODE`/`CLAUDE_CODE_LOCAL_CWD` values, and the untested-claude-version warning.
+- **Why:** Misconfiguration is currently visible only in the sidebar tooltip, the Watchdog card, and fire-time toasts; Doctor is where operators look for config drift — and re-login-after-restore has no proactive surface at all today.
+- **Context:** `createClaudeCodeService().getAvailability()` and `createClaudeCodeLocalService().getStatusSnapshot()` already return the exact reason/warning strings — the check is a thin adapter in lib/server/doctor/.
 - **Effort:** S. **Depends on:** nothing.
+
+## P3 — Unify PTY spawn under pty-process.js
+- **What:** Refactor lib/server/watchdog-terminal.js onto the shared `spawnInPty` helper (lib/server/pty-process.js) that the rescue session's script(1) fallback hosting and the guided-login PTY already use.
+- **Why:** One PTY primitive instead of two copies of the script(1) harness; deferred mid-feature to keep blast radius off the stable watchdog-terminal surface.
+- **Context:** lib/server/pty-process.js was extracted during the local rescue session work (plan amendment D13); watchdog-terminal.js keeps its own child pattern until this lands.
+- **Effort:** S. **Depends on:** the local rescue session feature landing.
+
+## P3 — Adopt `claude remote-control --headless` when anthropics/claude-code#30447 ships
+- **What:** Swap the rescue spawn from TUI-in-tmux parsing to the upstream headless flag once it exists; the swap is isolated in `buildSpawnCommand()` (lib/server/claude-code-local/index.js). Drop the tmux dependency for the daemon path; keep tmux for the operator attach hint.
+- **Why:** TUI parsing (capture-pane → stripAnsi → URL regex) is the feature's highest-drift surface; a supported headless mode deletes it.
+- **Context:** Track anthropics/claude-code#30447. The version-pinned TUI fixtures (tests/server/fixtures/claude-code-tui/) and the Dockerfile's exact-version claude pin are the artifacts this retires.
+- **Effort:** S. **Depends on:** upstream shipping the flag.
 
 ## P3 — Mobile drawer doesn't close on external nav items
 - **What:** The generic `item.href` branch in `renderNavItem` (lib/public/js/components/sidebar.js) — used by the gated Dashboards link — never closes the mobile drawer, leaving the drawer and overlay covering the app while the new tab opens.

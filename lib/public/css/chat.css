@@ -428,3 +428,296 @@
   overflow-wrap: anywhere;
   word-break: break-word;
 }
+
+/* ── Chat reliability rework additions ─────────── */
+
+.chat-route-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.chat-thread-wrap {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Connection pills — every degraded mode is named, never silent. */
+.chat-connection-banner {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+  max-width: 340px;
+}
+
+.chat-connection-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  padding: 5px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.chat-connection-pill.is-offline,
+.chat-connection-pill.is-storage {
+  border-color: var(--status-error-border);
+  color: var(--status-error);
+}
+
+.chat-connection-pill.is-fallback,
+.chat-connection-pill.is-legacy {
+  border-color: var(--status-warning-border);
+  color: var(--status-warning);
+}
+
+.chat-connection-pill button {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 999px;
+}
+
+.chat-connection-spinner {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  border: 2px solid var(--text-dim);
+  border-top-color: transparent;
+  animation: chat-connection-spin 0.9s linear infinite;
+}
+
+@keyframes chat-connection-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Outbox-backed bubble states: pending is visibly tentative, failure is loud. */
+.chat-bubble.is-pending {
+  opacity: 0.75;
+  border-style: dashed;
+}
+
+.chat-bubble.is-failed {
+  border-color: var(--status-error-border);
+}
+
+.chat-bubble-state-chip {
+  font-size: 10px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+}
+
+.chat-bubble-copy {
+  margin-left: auto;
+  border: none;
+  background: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 11px;
+  padding: 0 2px;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+.chat-bubble:hover .chat-bubble-copy,
+.chat-bubble-copy:focus-visible {
+  opacity: 1;
+}
+
+.chat-bubble-actions,
+.chat-bubble-failure {
+  margin-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.chat-bubble-action {
+  align-self: flex-start;
+  font-size: 11px;
+  padding: 3px 10px;
+  border-radius: 8px;
+}
+
+/* Inline system markers — the persisted stop/interrupt/unknown record. */
+.chat-system-marker {
+  align-self: center;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
+  max-width: 90%;
+  font-size: 11px;
+  color: var(--text-muted);
+  border: 1px dashed var(--border);
+  border-radius: 999px;
+  padding: 4px 12px;
+  text-align: center;
+}
+
+.chat-system-marker.is-stopped {
+  color: var(--text-muted);
+}
+
+.chat-system-marker.is-interrupted,
+.chat-system-marker.is-unknown {
+  border-color: var(--status-warning-border);
+  color: var(--status-warning);
+}
+
+.chat-system-marker.is-error {
+  border-color: var(--status-error-border);
+  color: var(--status-error);
+}
+
+.chat-system-marker-time {
+  color: var(--text-dim);
+}
+
+/* History status rows — the transcript is never blanked by a refetch. */
+.chat-truncated-note,
+.chat-history-loading {
+  align-self: center;
+  font-size: 11px;
+  color: var(--text-dim);
+  padding: 2px 10px;
+}
+
+.chat-history-error {
+  align-self: center;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--status-error);
+  border: 1px solid var(--status-error-border);
+  border-radius: 8px;
+  padding: 4px 10px;
+}
+
+.chat-history-error button {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 8px;
+}
+
+.chat-jump-pill {
+  position: absolute;
+  bottom: 14px;
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: 11px;
+  padding: 5px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--border-strong);
+  background: var(--bg-content);
+  color: var(--text);
+  cursor: pointer;
+}
+
+.chat-jump-pill:hover {
+  border-color: var(--border-strong);
+  background: var(--bg-hover);
+}
+
+.chat-bubble-copy:hover {
+  color: var(--text);
+}
+
+.chat-stalled-note {
+  align-self: center;
+  font-size: 11px;
+  color: var(--text-dim);
+  padding: 2px 10px;
+}
+
+.chat-composer-warning,
+.chat-composer-hold {
+  flex-basis: 100%;
+  font-size: 11px;
+  color: var(--status-warning);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 4px 2px;
+}
+
+.chat-composer-warning {
+  color: var(--status-error);
+}
+
+.chat-composer-hold-send {
+  font-size: 11px;
+  padding: 3px 10px;
+  border-radius: 8px;
+  white-space: nowrap;
+}
+
+.chat-composer {
+  flex-wrap: wrap;
+}
+
+/* Keyboard a11y: chips and pills carry visible focus. */
+.chat-bubble-action:focus-visible,
+.chat-jump-pill:focus-visible,
+.chat-connection-pill button:focus-visible,
+.chat-bubble-copy:focus-visible,
+.chat-composer-hold-send:focus-visible {
+  outline: 2px solid var(--accent, #22d3ee);
+  outline-offset: 2px;
+}
+
+/* Narrow viewports: the chat pane was desktop-only (zero media queries). */
+@media (max-width: 720px) {
+  .chat-route-header {
+    padding: 12px 12px 8px;
+  }
+
+  .chat-connection-banner {
+    align-items: flex-start;
+    max-width: 100%;
+  }
+
+  .chat-thread {
+    padding: 12px;
+  }
+
+  .chat-bubble {
+    max-width: 96%;
+  }
+
+  .chat-composer {
+    padding: 10px 12px;
+  }
+
+  .chat-composer-send,
+  .chat-composer-stop,
+  .chat-bubble-action,
+  .chat-history-error button,
+  .chat-connection-pill button,
+  .chat-jump-pill {
+    min-height: 44px;
+  }
+
+  .chat-bubble-copy {
+    opacity: 1;
+    min-height: 44px;
+    min-width: 32px;
+  }
+
+  .chat-jump-pill {
+    bottom: 10px;
+  }
+}

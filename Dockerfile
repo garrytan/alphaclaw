@@ -16,7 +16,16 @@
 # volume, port 3000, and `alphaclaw start` (restartProcess() exits the
 # process inside a container and relies on the orchestrator restart policy).
 FROM node:22-slim
-RUN apt-get update && apt-get install -y --no-install-recommends git curl procps cron tini ca-certificates && rm -rf /var/lib/apt/lists/*
+# tmux hosts the local Claude Code rescue session in a detached session that
+# survives AlphaClaw process restarts (a human can also attach over SSH).
+RUN apt-get update && apt-get install -y --no-install-recommends git curl procps cron tini tmux ca-certificates && rm -rf /var/lib/apt/lists/*
+# Claude Code CLI for the local rescue session. PINNED on purpose: the
+# TUI-parsing fixtures (tests/server/fixtures/claude-code-tui/) are captured
+# per CLI version — bump this pin and refresh the fixtures together. Costs
+# ~100-150MB; drop this line to run without the local rescue feature (it
+# degrades to not_installed + the cloud-routine fallback). Kept above the
+# tarball COPY so the layer stays cached across E2E rebuilds.
+RUN npm install -g @anthropic-ai/claude-code@2.1.251
 WORKDIR /app
 ARG ALPHACLAW_PKG=alphaclaw.tgz
 COPY ${ALPHACLAW_PKG} /tmp/alphaclaw.tgz

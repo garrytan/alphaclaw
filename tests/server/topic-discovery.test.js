@@ -157,7 +157,9 @@ describe("server/topic-discovery", () => {
       expect(digest).toContain("2 new topics discovered");
       expect(digest).toContain("-100#7");
       expect(digest).toContain("1 named from openclaw's cache (Deploys)");
-      expect(options).toEqual({ eventType: "topic_discovery" });
+      // Sweep digests are informational: classified verbose so Important-only
+      // mode suppresses them (plan Phase-3 pin list).
+      expect(options).toEqual({ eventType: "topic_discovery", verbose: true });
 
       // Enrichment cleared the discovered flag by naming the topic.
       const named = topicRegistry

@@ -130,6 +130,8 @@ describe("server/chat-ws fake gateway sockets", () => {
     await expect(service.fetchHistory("s")).resolves.toEqual({
       messages: [],
       rawHistory: { messages: [] },
+      markers: [],
+      truncated: false,
     });
   });
 
@@ -170,8 +172,12 @@ describe("server/chat-ws fake gateway sockets", () => {
       send: vi.fn(),
     };
     connectionHandler(fakeBrowserWs);
+    // Protocol v2 greets every connection with a hello frame; falsy inbound
+    // frames after that must produce nothing further.
+    expect(fakeBrowserWs.send).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(fakeBrowserWs.send.mock.calls[0][0]).type).toBe("hello");
     listeners.message(undefined);
     listeners.message("");
-    expect(fakeBrowserWs.send).not.toHaveBeenCalled();
+    expect(fakeBrowserWs.send).toHaveBeenCalledTimes(1);
   });
 });

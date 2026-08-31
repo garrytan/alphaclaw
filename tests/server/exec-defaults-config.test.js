@@ -292,6 +292,120 @@ describe("server/exec-defaults-config", () => {
     );
   });
 
+  it("announces a reap through the notify hook with a per-file id (auto-fix coverage)", async () => {
+    const openclawDir = createTempOpenclawDir();
+    createExecApprovalsStateDb(openclawDir, { withRow: true });
+    fs.writeFileSync(
+      path.join(openclawDir, "openclaw.json"),
+      JSON.stringify({ tools: { profile: "full" } }, null, 2),
+      "utf8",
+    );
+    fs.writeFileSync(
+      path.join(openclawDir, "exec-approvals.json"),
+      JSON.stringify({ version: 1 }),
+      "utf8",
+    );
+    const notify = vi.fn(async () => ({ ok: true }));
+
+    await ensureManagedExecDefaults({
+      fsModule: fs,
+      openclawDir,
+      resolveExecApprovalsBackend: backendResolver("sqlite", {
+        reapAllowed: true,
+      }),
+      logger: quietLogger(),
+      nowFn: () => 1712345678901,
+      notify,
+    });
+
+    // The stray file would fail the gateway closed — renaming it is a real
+    // auto-fix and must announce itself. Per-file id: a re-created stray is a
+    // new event; same-file boot loops dedupe in the outbox.
+    const reapCall = notify.mock.calls.find((call) =>
+      String(call?.[0] || "").includes("stray legacy exec-approvals.json"),
+    );
+    expect(reapCall).toBeTruthy();
+    expect(reapCall[0]).toContain("exec-approvals.json.stray-1712345678901");
+    expect(reapCall[1]).toEqual(
+      expect.objectContaining({
+        eventType: "recovery",
+        id: "exec-approvals-reaped-exec-approvals.json.stray-1712345678901",
+      }),
+    );
+  });
+
+  it("announces a stray-file merge with a stray/entry-count id", async () => {
+    const openclawDir = createTempOpenclawDir();
+    fs.writeFileSync(
+      path.join(openclawDir, "openclaw.json"),
+      JSON.stringify({ tools: { profile: "full" } }, null, 2),
+      "utf8",
+    );
+    // One stray a buggy earlier reaper renamed away, with one recoverable
+    // allowlist entry.
+    fs.writeFileSync(
+      path.join(openclawDir, "exec-approvals.json.stray-1712345678901"),
+      JSON.stringify({
+        version: 1,
+        agents: { main: { allowlist: [{ pattern: "npm test" }] } },
+      }),
+      "utf8",
+    );
+    const notify = vi.fn(async () => ({ ok: true }));
+
+    await ensureManagedExecDefaults({
+      fsModule: fs,
+      openclawDir,
+      resolveExecApprovalsBackend: backendResolver("file"),
+      logger: quietLogger(),
+      notify,
+    });
+
+    const mergeCall = notify.mock.calls.find(([message]) =>
+      String(message).includes("Merged"),
+    );
+    expect(mergeCall).toBeTruthy();
+    expect(mergeCall[0]).toContain("1 approval entry recovered");
+    expect(mergeCall[1].eventType).toBe("recovery");
+    // Day-bucketed: a genuinely new merge months later must not dedupe
+    // against a stale count-keyed entry.
+    expect(mergeCall[1].id).toMatch(/^exec-approvals-merged-1-1-\d{8}$/);
+  });
+
+  it("a throwing notify hook never breaks the ensure step", async () => {
+    const openclawDir = createTempOpenclawDir();
+    createExecApprovalsStateDb(openclawDir, { withRow: true });
+    fs.writeFileSync(
+      path.join(openclawDir, "openclaw.json"),
+      JSON.stringify({ tools: { profile: "full" } }, null, 2),
+      "utf8",
+    );
+    fs.writeFileSync(
+      path.join(openclawDir, "exec-approvals.json"),
+      JSON.stringify({ version: 1 }),
+      "utf8",
+    );
+
+    const result = await ensureManagedExecDefaults({
+      fsModule: fs,
+      openclawDir,
+      resolveExecApprovalsBackend: backendResolver("sqlite", {
+        reapAllowed: true,
+      }),
+      logger: quietLogger(),
+      notify: () => {
+        throw new Error("notifier exploded");
+      },
+    });
+
+    // Blanket rule: a notifier failure must never turn a successful cleanup
+    // into a failed boot step.
+    expect(result.changed).toBe(true);
+    expect(fs.existsSync(path.join(openclawDir, "exec-approvals.json"))).toBe(
+      false,
+    );
+  });
+
   it("fails closed on file creation when the era is indeterminate", async () => {
     // A broken/timed-out probe on a possibly-beta box must not write the
     // legacy file (creating it there is the outage). Skipping the seed on a
