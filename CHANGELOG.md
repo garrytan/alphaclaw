@@ -5,6 +5,25 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.9.63] - 2026-08-31
+
+The deployed OpenClaw agent no longer inherits AlphaClaw's own secrets.
+
+### Fixed
+- `gatewayEnv()` previously spread the entire server environment into every
+  OpenClaw child process, so the agent's shell held `SETUP_PASSWORD`, the
+  keyring password, platform deploy tokens, and every internal credential —
+  which meant Agent Administration's tiers were not a real boundary against a
+  compromised agent. The gateway/agent now receives an explicit allowlist:
+  the OpenClaw and provider keys it genuinely needs pass through, everything
+  else (led by `SETUP_PASSWORD`) is withheld, and an absolute deny list can
+  never be overridden. This closes environment inheritance; a same-UID
+  read of the on-disk `.env` remains a separate, documented concern.
+- If a deployment needs an extra variable to reach the gateway, add it to
+  `ALPHACLAW_GATEWAY_ENV_PASSTHROUGH` (deployment environment only). A
+  break-glass `ALPHACLAW_GATEWAY_ENV_UNRESTRICTED=1` restores the legacy
+  behavior minus the always-denied secrets. Neither can be set from the
+  dashboard-written `.env`, so the agent cannot grant itself broader access.
 ## [0.9.62] - 2026-08-31
 
 ### Added

@@ -74,11 +74,11 @@
 - **Context:** lib/server/system-resources.js, lib/server/machine-profile.js (detectEnvironment), lib/server/routes/autotune.js (markPendingGatewayRestart), lib/server/alphaclaw-config.js (kAutotuneProbeCache), lib/server/autotune.js + telegram-workspace.js (sync-write provenance).
 - **Effort:** S each. **Depends on:** nothing.
 
-## P1 — Narrow gatewayEnv secret spread
-- **What:** `gatewayEnv()` (lib/server/gateway.js) spreads the full `process.env` into the OpenClaw gateway child, so the agent's shell inherits `SETUP_PASSWORD` and every provider key. Replace the spread with an explicit allowlist of what the gateway/agent actually needs.
-- **Why:** This is the reason Agent Administration is "not a security boundary against the agent" — the agent can bypass every tier by curl-logging in with the inherited password. Narrowing this env is the single change that would turn the agent-admin tiers into a real boundary.
-- **Context:** Documented in the agent-admin design doc's threat model (docs/designs/agent-admin.md). Large blast radius — every gateway child-process contract changes; needs its own review.
-- **Effort:** M. **Depends on:** an inventory of which env keys the gateway/agent tools actually read.
+## P3 — Verify gateway daemon does not need GOG_KEYRING_PASSWORD in-process (from A4 gateway-env allowlist)
+- **What:** v0.9.60's gateway-env allowlist (lib/server/gateway-env-policy.js) denies GOG_KEYRING_PASSWORD to the OpenClaw child. AlphaClaw's own `gog` spawns re-inject it (commands.js, gmail-watch), but if the openclaw gateway daemon (or a gog subprocess it spawns for OAuth-backed Gmail channels) relies on INHERITING it to unlock the keyring, stored Google credentials would silently fail to decrypt.
+- **Why:** Denying a keyring password from the deployed agent is the security-correct default, but it must not silently break Gmail-via-agent. Confidence was moderate (the daemon may never read it in-process).
+- **Context:** Runtime-verify on a box with a configured Gmail channel that the agent can still send/receive after the allowlist; if it needs the password, re-inject it on the daemon launch env AFTER the filter (as the gog spawns do) rather than relaxing the deny. Recover in the meantime with ALPHACLAW_GATEWAY_ENV_PASSTHROUGH=GOG_KEYRING_PASSWORD.
+- **Effort:** S. **Depends on:** a live Gmail-channel test box.
 
 ## P2 — Agent-admin: manifest → MCP tool export (E1)
 - **What:** Emit the agent-admin operation manifest as MCP tool definitions so other assistants can drive AlphaClaw with the same tiers/redaction.
@@ -598,7 +598,7 @@
 ## P3 — Claude Code launcher: durable cross-process fire lease
 - **What:** The launcher's single-flight (`inFlight`) and cooldown (`cooldownUntil`) live in memory on one `claudeCodeService` instance (lib/server/claude-code-service.js). A crash between Anthropic accepting a fire and AlphaClaw replying, or multiple server processes, or multiple team admins, each bypass the duplicate-billing guard; `busy`/`cooldown` are also shared across all admins (one admin's fire blocks another's).
 - **Why:** The fire endpoint has no upstream idempotency key, so every gap in the in-memory guard is a real (if narrow) double-billing window. Adversarial review (Claude + Codex) flagged it; accepted as out-of-scope for the initial launcher because the practical exposure is small (single-process deploy, one operator, rare crash-timing).
-- **Context:** Would need an atomic durable lease (file lock or the existing SQLite state dir) keyed per routine, plus persisting uncertain outcomes across boot. Design it alongside the P1 gatewayEnv allowlist work.
+- **Context:** Would need an atomic durable lease (file lock or the existing SQLite state dir) keyed per routine, plus persisting uncertain outcomes across boot. (The gatewayEnv allowlist that this referenced shipped in v0.9.60 — lib/server/gateway-env-policy.js.)
 - **Effort:** M. **Depends on:** nothing.
 
 ## P3 — Sidebar nav a11y debt

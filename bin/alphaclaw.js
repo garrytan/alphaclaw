@@ -425,6 +425,14 @@ if (fs.existsSync(envFilePath)) {
     if (eqIdx === -1) continue;
     const key = trimmed.slice(0, eqIdx);
     const value = trimmed.slice(eqIdx + 1);
+    // The gateway-env allowlist hatches must come from the real deployment
+    // environment ONLY. The agent can write this .env (HOME=rootDir, exec
+    // full), so honoring these keys here would let it self-grant broader
+    // gateway-child inheritance on the next restart — skip them so the
+    // boot-time snapshot in gateway-env-policy.js reflects deployment env.
+    if (key === "ALPHACLAW_GATEWAY_ENV_UNRESTRICTED" || key === "ALPHACLAW_GATEWAY_ENV_PASSTHROUGH") {
+      continue;
+    }
     if (value) process.env[key] = value;
   }
   console.log("[alphaclaw] Loaded .env");
