@@ -593,4 +593,127 @@ describe("incident queries", () => {
     expect(db.getIncidentById(oldId)).toBe(null);
     expect(db.getIncidentById(openId)).not.toBe(null);
   });
+
+  it("close-time sample carries the memory trend and a WINDOW-CORRELATED episode summary", () => {
+    initContext();
+    const openedAt = Date.now();
+    const tracker = createTracker({
+      getResourceSample: () => ({
+        memory: { percent: 10 },
+        gatewayMemoryTrend: {
+          state: "warming_up",
+          rssMb: 120,
+          lastEpisodeSummary: {
+            episodeId: "100-1699999999999",
+            pid: 100,
+            peakRssMb: 950,
+            // Ended 2 minutes before the incident opened — inside the
+            // 10-minute correlation lead.
+            endedAt: new Date(openedAt - 2 * 60 * 1000).toISOString(),
+            reason: "process_exited",
+          },
+        },
+      }),
+    });
+    const insert = wrapped(tracker);
+    insert(crashEvent());
+    insert(recoveryEvent());
+    const [incident] = db.listIncidents();
+    const full = db.getIncidentById(incident.id);
+    const trend = full.summary.resourceSample.gatewayMemoryTrend;
+    expect(trend.state).toBe("warming_up");
+    expect(trend.lastEpisodeSummary).toMatchObject({
+      episodeId: "100-1699999999999",
+      peakRssMb: 950,
+    });
+  });
+
+  it("drops an in-window episode whose pid does not match any crash this incident tracked", () => {
+    initContext();
+    const openedAt = Date.now();
+    const tracker = createTracker({
+      getResourceSample: () => ({
+        memory: { percent: 10 },
+        gatewayMemoryTrend: {
+          state: "warming_up",
+          rssMb: 120,
+          lastEpisodeSummary: {
+            episodeId: "777-1699999999999",
+            pid: 777, // a DIFFERENT process's episode, frozen minutes earlier
+            peakRssMb: 950,
+            endedAt: new Date(openedAt - 2 * 60 * 1000).toISOString(),
+            reason: "process_exited",
+          },
+        },
+      }),
+    });
+    const insert = wrapped(tracker);
+    insert(crashEvent({ details: { code: 1, pid: 4242 } }));
+    insert(recoveryEvent());
+    const [incident] = db.listIncidents();
+    const full = db.getIncidentById(incident.id);
+    const trend = full.summary.resourceSample.gatewayMemoryTrend;
+    // Time alone is not identity: the window matched but the pid did not.
+    expect(trend.lastEpisodeSummary).toBeNull();
+    expect(full.summary.crashedPids).toEqual([4242]);
+  });
+
+  it("keeps an in-window episode whose pid MATCHES the tracked crash", () => {
+    initContext();
+    const openedAt = Date.now();
+    const tracker = createTracker({
+      getResourceSample: () => ({
+        memory: { percent: 10 },
+        gatewayMemoryTrend: {
+          state: "warming_up",
+          rssMb: 120,
+          lastEpisodeSummary: {
+            episodeId: "4242-1699999999999",
+            pid: 4242,
+            peakRssMb: 950,
+            endedAt: new Date(openedAt - 2 * 60 * 1000).toISOString(),
+            reason: "process_exited",
+          },
+        },
+      }),
+    });
+    const insert = wrapped(tracker);
+    insert(crashEvent({ details: { code: 1, pid: 4242 } }));
+    insert(recoveryEvent());
+    const [incident] = db.listIncidents();
+    const full = db.getIncidentById(incident.id);
+    expect(
+      full.summary.resourceSample.gatewayMemoryTrend.lastEpisodeSummary,
+    ).toMatchObject({ episodeId: "4242-1699999999999" });
+  });
+
+  it("omits an UNCORRELATED stale episode summary from the close sample", () => {
+    initContext();
+    const tracker = createTracker({
+      getResourceSample: () => ({
+        memory: { percent: 10 },
+        gatewayMemoryTrend: {
+          state: "normal",
+          rssMb: 120,
+          lastEpisodeSummary: {
+            episodeId: "100-1699000000000",
+            pid: 100,
+            peakRssMb: 950,
+            // Ended two days ago — an unrelated old episode must never be
+            // presented as evidence for THIS incident.
+            endedAt: new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString(),
+            reason: "recovered",
+          },
+        },
+      }),
+    });
+    const insert = wrapped(tracker);
+    insert(crashEvent());
+    insert(recoveryEvent());
+    const [incident] = db.listIncidents();
+    const full = db.getIncidentById(incident.id);
+    const trend = full.summary.resourceSample.gatewayMemoryTrend;
+    expect(trend.state).toBe("normal");
+    expect(trend.lastEpisodeSummary).toBeNull();
+  });
 });

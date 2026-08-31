@@ -488,6 +488,7 @@ describe("server/routes/system", () => {
           },
           watchdog: {
             overseer: { enabled: false },
+            memory: { enabled: true, autoRestart: false },
           },
           autotune: {
             enabled: true,
@@ -884,6 +885,7 @@ describe("server/routes/system", () => {
         },
         watchdog: {
           overseer: { enabled: false },
+          memory: { enabled: true, autoRestart: false },
         },
         autotune: {
           enabled: true,
@@ -933,6 +935,7 @@ describe("server/routes/system", () => {
           },
           watchdog: {
             overseer: { enabled: false },
+            memory: { enabled: true, autoRestart: false },
           },
           autotune: {
             enabled: true,
