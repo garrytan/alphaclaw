@@ -424,6 +424,32 @@ describe("frontend/api", () => {
     expect(result).toEqual({ ok: true, settings: { autoRunEnabled: false } });
   });
 
+  it("updateDoctorSettings narrows the PUT body to the fields provided", async () => {
+    global.fetch.mockResolvedValue(mockJsonResponse(200, { ok: true, settings: {} }));
+    const api = await loadApiModule();
+
+    // Scan-only body: autoRunEnabled must NOT ride along (a stale local copy
+    // of a sibling field must never be written back).
+    await api.updateDoctorSettings({ scan: { maxFiles: 300000 } });
+    expect(global.fetch).toHaveBeenLastCalledWith(
+      "/api/doctor/settings",
+      expect.objectContaining({
+        method: "PUT",
+        body: JSON.stringify({ scan: { maxFiles: 300000 } }),
+      }),
+    );
+
+    // Toggle-only body: scan must not ride along.
+    await api.updateDoctorSettings({ autoRunEnabled: true });
+    expect(global.fetch).toHaveBeenLastCalledWith(
+      "/api/doctor/settings",
+      expect.objectContaining({
+        method: "PUT",
+        body: JSON.stringify({ autoRunEnabled: true }),
+      }),
+    );
+  });
+
   it("does not expose an importDoctorResult client (server route only)", async () => {
     const api = await loadApiModule();
     expect(api.importDoctorResult).toBeUndefined();

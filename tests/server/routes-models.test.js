@@ -53,12 +53,22 @@ const createModelDeps = () => {
   return deps;
 };
 
+// Every createApp() call mints a temp root; without cleanup a full run leaks
+// one directory per test into os.tmpdir() (upstream #123/#71).
+const kTempDirs = [];
+afterEach(() => {
+  while (kTempDirs.length) {
+    fs.rmSync(kTempDirs.pop(), { recursive: true, force: true });
+  }
+});
+
 const createApp = (deps) => {
   const app = express();
   app.use(express.json());
   const tempRoot = fs.mkdtempSync(
     path.join(os.tmpdir(), "alphaclaw-routes-models-"),
   );
+  kTempDirs.push(tempRoot);
   const modelCatalogCache = createModelCatalogCache({
     cachePath: path.join(tempRoot, "cache", "model-catalog.json"),
     shellCmd: deps.shellCmd,
