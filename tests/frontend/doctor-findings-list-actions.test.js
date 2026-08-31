@@ -119,3 +119,65 @@ describe("frontend/doctor-findings-list status action pending affordance", () =>
     expect(buttonByLabel(tree, "Dismiss").props.disabled).toBe(false);
   });
 });
+
+describe("frontend/doctor-findings-list fix delivery chip (E8)", () => {
+  const treeText = (tree) => JSON.stringify(tree);
+
+  it("shows the requested-delivery chip on working cards with an attached target", () => {
+    const tree = renderList({
+      cards: [
+        makeCard({
+          status: "working",
+          fixDelivery: {
+            attached: true,
+            replyChannel: "telegram",
+            replyTo: "1050",
+            gatewayOk: true,
+          },
+        }),
+      ],
+    });
+    const text = treeText(tree);
+    expect(text).toContain("delivery requested → telegram");
+    expect(text).toContain("· 1050");
+    // Honest copy: never claims the message was delivered.
+    expect(text).not.toContain("delivering");
+  });
+
+  it("shows the main-session chip on working cards without a delivery target", () => {
+    const tree = renderList({
+      cards: [
+        makeCard({
+          status: "working",
+          fixDelivery: { attached: false, replyChannel: "", replyTo: "", gatewayOk: true },
+        }),
+      ],
+    });
+    expect(treeText(tree)).toContain("main session");
+  });
+
+  it("surfaces a failed dispatch on the reverted OPEN card (the record must not be invisible)", () => {
+    // Failed dispatches revert the card to open — the persisted failure
+    // record renders THERE, not on an unreachable working+failed state.
+    const tree = renderList({
+      cards: [
+        makeCard({
+          status: "open",
+          fixDelivery: {
+            attached: true,
+            replyChannel: "telegram",
+            replyTo: "1050",
+            gatewayOk: false,
+          },
+        }),
+      ],
+    });
+    expect(treeText(tree)).toContain("last fix dispatch failed");
+  });
+
+  it("renders no chip without a dispatch record", () => {
+    const text = treeText(renderList({ cards: [makeCard({ status: "working" })] }));
+    expect(text).not.toContain("delivery requested");
+    expect(text).not.toContain("dispatch failed");
+  });
+});

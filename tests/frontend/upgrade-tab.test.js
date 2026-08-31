@@ -1277,21 +1277,24 @@ describe("frontend/upgrade-tab view", () => {
     expect(segmented.props.disabled).toBe(false);
   });
 
-  it("keeps last loaded data visible with an amber notice when a refresh fails", () => {
+  it("keeps last loaded data visible with an amber notice naming the cause when a refresh fails", () => {
     const tree = renderView({
       channelInfo: makeChannelInfo(),
       catalog: makeCatalog(),
       channelError: {
         message: "Could not read channel state",
-        hint: null,
+        hint: "Check that the gateway is reachable.",
         code: "channel_state_unavailable",
       },
     });
 
-    const text = treeText(tree);
-    expect(text).toContain("Could not refresh status — showing last loaded data.");
-    // The full-page error block stays reserved for the no-data case.
-    expect(text).not.toContain("Could not read channel state");
+    const text = treeText(tree).replace(/\s+/g, " ");
+    // The warm notice carries the cause and the hint (never a bare
+    // "could not refresh" with the error dropped).
+    expect(text).toContain(
+      "Could not refresh status — showing last loaded data ( Could not read channel state )",
+    );
+    expect(text).toContain("Check that the gateway is reachable.");
     expect(text).toContain("Release channel");
   });
 

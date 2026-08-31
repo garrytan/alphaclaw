@@ -119,6 +119,18 @@ const collectText = (node, out = []) => {
   return out;
 };
 
+const collectNodes = (node, out = []) => {
+  if (node == null || typeof node !== "object") return out;
+  if (Array.isArray(node)) {
+    for (const child of node) collectNodes(child, out);
+    return out;
+  }
+  out.push(node);
+  if (node.props) collectNodes(node.props.children, out);
+  if (node.rendered) collectNodes(node.rendered, out);
+  return out;
+};
+
 const deferred = () => {
   let resolve;
   let reject;
@@ -204,9 +216,16 @@ describe("frontend/sidebar-git-panel summary poll", () => {
     await intervalCallbacks.at(-1)();
     await flushAsync();
 
-    const text = renderText();
+    const tree = expandTree(renderPanel());
+    const text = collectText(tree).join(" ");
     expect(text).toContain("acme/repo"); // panel still shows data
-    expect(text).toContain("Refresh failed - showing last known state");
+    expect(text).toContain("Refresh failed — showing last known state");
+    // The raw error rides the shared portal-backed Tooltip (not a native
+    // title attribute).
+    const tooltip = collectNodes(tree).find(
+      (node) => node.props?.text === "git offline",
+    );
+    expect(tooltip).toBeTruthy();
   });
 
   it("renders the error-only panel when the initial load fails with no data", async () => {

@@ -368,6 +368,24 @@ describe("frontend/restart-progress-card", () => {
     expect(treeText(tree)).toContain("Evidence expired");
   });
 
+  it("evidence disclosure renders a distinct error line when the fetch fails — never 'Evidence expired'", async () => {
+    const onLoadEvidence = vi.fn(async () => {
+      throw new Error("network down");
+    });
+    const failedOperation = {
+      ...kRunningOperation,
+      phase: "failed",
+      error: { message: "boom", hint: null, code: null },
+    };
+    let tree = renderCard({ operation: failedOperation, onLoadEvidence });
+    findButtonByText(tree, "Show evidence").props.onclick();
+    await flushMicrotasks();
+    tree = renderCard({ operation: failedOperation, onLoadEvidence });
+    const text = treeText(tree);
+    expect(text).toContain("Couldn't load evidence — network down");
+    expect(text).not.toContain("Evidence expired");
+  });
+
   it("renders nothing without an operation", () => {
     harness.beginRender();
     expect(RestartProgressCard({ operation: null })).toBeNull();
