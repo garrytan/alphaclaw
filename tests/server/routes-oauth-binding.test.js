@@ -272,6 +272,48 @@ describe("server/routes OAuth callback binding (E-C11 / PR #114 pattern)", () =>
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
+  it("stages the refresh token in a private mkdtemp file, never a predictable /tmp path (H14)", async () => {
+    const { app, tmpDir } = buildGoogleApp();
+    const state = await startFlow(app);
+
+    const writes = [];
+    const realWriteFileSync = fs.writeFileSync;
+    vi.spyOn(fs, "writeFileSync").mockImplementation((target, data, opts) => {
+      writes.push({ target: String(target), opts });
+      return realWriteFileSync(target, data, opts);
+    });
+    global.fetch = async (url) => {
+      if (String(url).includes("oauth2.googleapis.com/token")) {
+        return {
+          ok: true,
+          json: async () => ({
+            access_token: "at",
+            refresh_token: "rt",
+            scope: "gmail-scope",
+          }),
+        };
+      }
+      return { ok: true, json: async () => ({ email: "linked@example.com" }) };
+    };
+
+    const res = await request(app).get(
+      `/auth/google/callback?code=c&state=${state}`,
+    );
+    expect(res.text).toContain("google: 'success'");
+
+    const tokenWrite = writes.find((w) =>
+      w.target.endsWith("token.json"),
+    );
+    expect(tokenWrite).toBeTruthy();
+    // Not the old predictable, world-readable shared-tmp path.
+    expect(tokenWrite.target).not.toMatch(/\/gog-token-\d+\.json$/);
+    expect(tokenWrite.target).toContain("alphaclaw-gog-");
+    expect(tokenWrite.opts).toMatchObject({ mode: 0o600 });
+    // The private dir is cleaned up (no residual token file on disk).
+    expect(fs.existsSync(tokenWrite.target)).toBe(false);
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
   it("a start with an unknown accountId cannot plant it — the callback creates a fresh account (regression)", async () => {
     const { app, tmpDir } = buildGoogleApp();
     const state = await startFlow(app, {

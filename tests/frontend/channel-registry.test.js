@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   kChannelRegistry,
   kAllChannelIds,
+  kCreatableChannelIds,
   getChannelRegistryEntry,
 } from "../../lib/public/js/lib/channel-registry.js";
 import { BuzzPendingCard } from "../../lib/public/js/components/channels/buzz-wizard.js";
@@ -48,6 +49,20 @@ describe("frontend/channel-registry (5.0)", () => {
       expect.objectContaining({ wizard: true, capability: "buzzChannel" }),
     );
     expect(getChannelRegistryEntry("nope")).toBeNull();
+
+    // External channels (signal) appear in the full id list (they show as
+    // Configured in status) but NOT in the creatable list — the Add-channel
+    // menu must never offer a channel whose create modal errors server-side.
+    expect(kAllChannelIds).toContain("signal");
+    expect(kCreatableChannelIds).not.toContain("signal");
+    expect(kCreatableChannelIds).toEqual([
+      "telegram",
+      "discord",
+      "slack",
+      "whatsapp",
+      "clickclack",
+      "buzz",
+    ]);
     // Every entry has the meta the menu/modal need. Icons are shared icon
     // components (or null) — never /assets/* URLs, which the gateway proxy
     // shadows (ISSUE-004).
