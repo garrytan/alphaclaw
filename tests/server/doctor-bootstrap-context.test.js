@@ -1142,4 +1142,27 @@ describe("server/doctor/bootstrap-context", () => {
       expect(context.hooksEnabled).toBe(false);
     });
   });
+
+  it("prefers the activation reason over budget reasons in the hardening payload", () => {
+    // A file OpenClaw never injects at all (hooks disabled) must not surface
+    // budget advice just because it is also over the per-file cap.
+    write("AGENTS.md", "root guidance");
+    write("hooks/bootstrap/AGENTS.md", "H".repeat(300));
+
+    const context = analyzeBootstrapContext({
+      workspaceRoot,
+      profile: kStableProfile,
+      extraFilePaths: ["hooks/bootstrap/AGENTS.md"],
+      hooksEnabled: false,
+      bootstrapMaxChars: 100,
+    });
+
+    expect(context.hardening.state).toBe("blocked");
+    expect(context.hardening.files).toEqual([
+      expect.objectContaining({
+        path: "hooks/bootstrap/AGENTS.md",
+        reason: "hook_disabled",
+      }),
+    ]);
+  });
 });

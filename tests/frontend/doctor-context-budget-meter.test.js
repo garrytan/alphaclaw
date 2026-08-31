@@ -353,11 +353,27 @@ describe("frontend/doctor context budget meter rejected-read hints", () => {
     ]);
   });
 
-  it("emits no hints for non-rejected blocked causes or healthy states", () => {
+  it("points at the not_configured synthetic entry the rows cannot show", () => {
+    // The on-disk-but-unconfigured file exists only in hardening.files —
+    // never as a meter row — so the hint is its only pointer here.
     expect(
       buildContextBudgetMeterModel(
         blockedStatus("", [
           { path: "hooks/bootstrap/AGENTS.md", exists: true, reason: "not_configured" },
+        ]),
+      ).rejectedHints,
+    ).toEqual([
+      "hooks/bootstrap/AGENTS.md is on disk but has no bootstrap config entry — run a scan for the full finding.",
+    ]);
+  });
+
+  it("emits no hints for row-visible blocked causes or empty file lists", () => {
+    // invalid_basename/hook_disabled files exist and render as Blocked rows —
+    // no hint needed on top.
+    expect(
+      buildContextBudgetMeterModel(
+        blockedStatus("", [
+          { path: "hooks/bootstrap/TOOLS.md", exists: true, reason: "invalid_basename" },
         ]),
       ).rejectedHints,
     ).toEqual([]);
@@ -365,5 +381,28 @@ describe("frontend/doctor context budget meter rejected-read hints", () => {
       blockedStatus("escapes_workspace", []),
     );
     expect(healthy.rejectedHints).toEqual([]);
+  });
+});
+
+describe("frontend/doctor context budget meter healthy rows", () => {
+  it("healthy and near-limit rows never carry failure tooltip copy", () => {
+    const model = buildContextBudgetMeterModel(
+      statusWithContext({
+        files: [
+          { ...kBaseFile, path: "AGENTS.md", rawChars: 100, injectedChars: 100 },
+          {
+            ...kBaseFile,
+            path: "SOUL.md",
+            rawChars: 19500,
+            injectedChars: 19500,
+            nearFileLimit: true,
+          },
+        ],
+      }),
+    );
+    expect(model.rows[0].state).toBe("ok");
+    expect(model.rows[0].chipTooltip).toBe("");
+    expect(model.rows[1].state).toBe("near-limit");
+    expect(model.rows[1].chipTooltip).toBe("");
   });
 });

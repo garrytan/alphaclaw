@@ -23,14 +23,15 @@ describe("frontend/doctor focus deep-link", () => {
       focusParam: "context",
       cards: [hardeningCard()],
       latestCompletedRunId: 42,
-      meterAvailable: true,
     });
-    expect(resolved.scrollTarget).toBe("context-section");
+    // The real DOM id — the caller resolves it via getElementById, so element
+    // absence (no meter rendered) is the availability check at runtime.
+    expect(resolved.scrollTarget).toBe("doctor-context-section");
     expect(resolved.highlightCardId).toBe("7");
   });
 
   it("never highlights a stale, resolved, or non-hardening finding", () => {
-    const base = { focusParam: "context", latestCompletedRunId: 42, meterAvailable: true };
+    const base = { focusParam: "context", latestCompletedRunId: 42 };
     // Stale: finding from an older run than the latest completed one.
     expect(
       resolveDoctorFocus({ ...base, cards: [hardeningCard({ runId: 41 })] })
@@ -60,24 +61,19 @@ describe("frontend/doctor focus deep-link", () => {
       focusParam: "context",
       cards: [],
       latestCompletedRunId: 42,
-      meterAvailable: true,
     });
-    expect(resolved.scrollTarget).toBe("context-section");
+    expect(resolved.scrollTarget).toBe("doctor-context-section");
     expect(resolved.highlightCardId).toBe("");
   });
 
-  it("ignores unknown params and yields null scroll when the section can't render", () => {
+  it("ignores unknown params entirely", () => {
     // Allowlist: only focus=context exactly is honored.
     expect(
-      resolveDoctorFocus({ focusParam: "evil", cards: [hardeningCard()], meterAvailable: true }),
+      resolveDoctorFocus({ focusParam: "evil", cards: [hardeningCard()] }),
     ).toEqual({ scrollTarget: null, highlightCardId: "" });
-    expect(resolveDoctorFocus({ focusParam: "", meterAvailable: true })).toEqual({
+    expect(resolveDoctorFocus({ focusParam: "" })).toEqual({
       scrollTarget: null,
       highlightCardId: "",
     });
-    expect(
-      resolveDoctorFocus({ focusParam: "context", meterAvailable: false })
-        .scrollTarget,
-    ).toBe(null);
   });
 });

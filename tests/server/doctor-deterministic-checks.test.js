@@ -197,9 +197,10 @@ describe("server/doctor/deterministic-checks", () => {
       },
     });
     const hardening = findCard(cards, "det:hardening:blocked");
-    expect(hardening.summary).toContain(
-      "missing config entry, rejected basename, or disabled hook",
-    );
+    // Mixed causes get a dedicated headline that never asserts a single
+    // cause the evidence contradicts.
+    expect(hardening.summary).toContain("multiple distinct causes");
+    expect(hardening.recommendation).toContain("Address each file's cause");
     const evidenceTexts = hardening.evidence.map((entry) => entry.text).sort();
     expect(evidenceTexts).toEqual([
       "hooks/bootstrap/AGENTS.md: resolves outside the workspace (an escaping symlink) — " +
