@@ -2544,9 +2544,15 @@ describe("server/doctor-service", () => {
           summaries: [makeMatchingSummary()],
           getGatewayMemoryTrend: () => ({ state: trendState }),
         });
-        const result = await service.runDoctor();
-        expect(result.reusedPreviousRun).toBe(true);
-        return meta.get("last_env_signature");
+        try {
+          const result = await service.runDoctor();
+          expect(result.reusedPreviousRun).toBe(true);
+          return meta.get("last_env_signature");
+        } finally {
+          // Undisposed services leak auto-run interval state into later
+          // fake-timer tests in this file (the hardening-trigger suite).
+          service.dispose();
+        }
       };
 
       const healthy = await signatureForTrend("normal");
