@@ -129,3 +129,20 @@ describe("frontend/gmail-watch-toggle", () => {
     expect(badgeText(loaded)).toContain("Stopped");
   });
 });
+
+describe("frontend/gmail watch toggle danger state", () => {
+  it("enabled-but-not-running states the observed fact with a VISIBLE remedy", () => {
+    const tree = render({ watchStatus: { enabled: true, running: false } });
+    const badge = collectNodes(tree).find(
+      (node) => node.props?.label === "Watch not running",
+    );
+    expect(badge).toBeTruthy();
+    expect(badge.props.tone).toBe("danger");
+    expect(badge.props.text).toContain("renew the watch");
+    const text = collectText(tree).join(" ");
+    // Required action lives in visible text (doctrine: tooltips never open on
+    // touch) and the bare "Error" label is gone.
+    expect(text).toContain("renew the watch or check the account's Pub/Sub setup");
+    expect(text).not.toMatch(/\bError\b/);
+  });
+});

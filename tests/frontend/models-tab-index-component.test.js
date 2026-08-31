@@ -108,7 +108,8 @@ const kModelsBase = {
   authProfiles: [],
   authOrder: {},
   codexStatus: { connected: false },
-  codexStatusError: false,
+  codexStatusError: "",
+  codexStatusKnown: false,
   loading: true,
   saving: false,
   ready: false,
@@ -164,20 +165,26 @@ describe("frontend/models-tab pane shell states", () => {
     );
   });
 
-  it("threads codexStatusError through to the provider auth cards", () => {
+  it("threads codexStatusError and codexStatusKnown through to the provider auth cards", () => {
     useModels.mockReturnValue({
       ...kModelsBase,
       loading: false,
       ready: true,
       configuredModels: { "openai-codex/gpt-5.6-sol": {} },
       codexStatus: { connected: true },
-      codexStatusError: true,
+      codexStatusError: "status endpoint down",
+      codexStatusKnown: true,
     });
     const tree = renderModels({});
 
     const cards = findAllByType(tree, ProviderAuthCard);
     expect(cards.length).toBeGreaterThan(0);
-    expect(cards.every((card) => card.props.codexStatusError === true)).toBe(
+    expect(
+      cards.every(
+        (card) => card.props.codexStatusError === "status endpoint down",
+      ),
+    ).toBe(true);
+    expect(cards.every((card) => card.props.codexStatusKnown === true)).toBe(
       true,
     );
   });
