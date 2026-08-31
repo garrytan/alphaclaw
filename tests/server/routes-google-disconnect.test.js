@@ -159,7 +159,7 @@ describe("server/routes POST /api/google/disconnect (PR #35 clientArg regression
     expect(readAccounts(statePath)).toHaveLength(1);
   });
 
-  it("falls back to the FIRST account when no accountId is sent (documented destructive default)", async () => {
+  it("refuses an accountId-less disconnect when multiple accounts exist (no destructive fallback)", async () => {
     global.fetch = okFetch;
     const { app, statePath, gogCalls } = build({
       accounts: [baseAccount(), baseAccount({ id: "acc2", email: "two@example.com" })],
@@ -167,11 +167,21 @@ describe("server/routes POST /api/google/disconnect (PR #35 clientArg regression
 
     const res = await request(app).post("/api/google/disconnect").send({});
 
+    expect(res.body.ok).toBe(false);
+    expect(res.body.error).toMatch(/accountId is required/);
+    expect(gogCalls).toHaveLength(0);
+    expect(readAccounts(statePath)).toHaveLength(2);
+  });
+
+  it("falls back to the only account when no accountId is sent and exactly one exists", async () => {
+    global.fetch = okFetch;
+    const { app, statePath, gogCalls } = build({ accounts: [baseAccount()] });
+
+    const res = await request(app).post("/api/google/disconnect").send({});
+
     expect(res.body.ok).toBe(true);
     expect(gogCalls[1]).toBe('--client "acme-client" auth remove "user@example.com" --force');
-    const remaining = readAccounts(statePath);
-    expect(remaining).toHaveLength(1);
-    expect(remaining[0].id).toBe("acc2");
+    expect(readAccounts(statePath)).toHaveLength(0);
   });
 
   it("still removes the account when the token is already revoked upstream (400 invalid_token)", async () => {
