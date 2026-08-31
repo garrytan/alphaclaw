@@ -11,6 +11,8 @@ const {
   readOpenclawMedicEnabled,
   readOpenclawReleaseChannel,
   readWatchdogOverseerEnabled,
+  readWatchdogMemorySettings,
+  updateWatchdogMemorySettings,
   updateAutotuneSettings,
   updateDoctorAutoRunEnabled,
   updateOpenAiCompatApiFeature,
@@ -92,6 +94,7 @@ describe("server/alphaclaw-config", () => {
       },
       watchdog: {
         overseer: { enabled: false },
+        memory: { enabled: true, autoRestart: false },
       },
       doctor: {
         autoRun: { enabled: false },
@@ -140,6 +143,7 @@ describe("server/alphaclaw-config", () => {
       },
       watchdog: {
         overseer: { enabled: false },
+        memory: { enabled: true, autoRestart: false },
       },
       doctor: {
         autoRun: { enabled: false },
@@ -494,5 +498,105 @@ describe("server/alphaclaw-config", () => {
 
     const noop = updateAutotuneSettings({ openclawDir, enabled: false });
     expect(noop.changed).toBe(false);
+  });
+
+  it("defaults memory detection ON (opt-out) and autoRestart OFF (strict opt-in)", () => {
+    const openclawDir = createTempOpenclawDir();
+    // Missing file = fresh install → defaults.
+    expect(readWatchdogMemorySettings({ openclawDir })).toEqual({
+      enabled: true,
+      autoRestart: false,
+      effectiveAutoRestart: false,
+    });
+
+    // Truthy junk must never enable the enforcement half.
+    for (const junk of ["true", 1, "yes", {}, []]) {
+      fs.writeFileSync(
+        path.join(openclawDir, "alphaclaw.json"),
+        JSON.stringify({ watchdog: { memory: { autoRestart: junk } } }),
+        "utf8",
+      );
+      expect(readWatchdogMemorySettings({ openclawDir }).autoRestart).toBe(
+        false,
+      );
+    }
+    // Falsy junk must not disable detection: only literal false does.
+    fs.writeFileSync(
+      path.join(openclawDir, "alphaclaw.json"),
+      JSON.stringify({ watchdog: { memory: { enabled: 0 } } }),
+      "utf8",
+    );
+    expect(readWatchdogMemorySettings({ openclawDir }).enabled).toBe(true);
+    fs.writeFileSync(
+      path.join(openclawDir, "alphaclaw.json"),
+      JSON.stringify({ watchdog: { memory: { enabled: false } } }),
+      "utf8",
+    );
+    expect(readWatchdogMemorySettings({ openclawDir }).enabled).toBe(false);
+  });
+
+  it("fails CLOSED on a corrupt config (never re-enables detection an operator turned off)", () => {
+    const openclawDir = createTempOpenclawDir();
+    fs.writeFileSync(
+      path.join(openclawDir, "alphaclaw.json"),
+      "{broken",
+      "utf8",
+    );
+    expect(readWatchdogMemorySettings({ openclawDir })).toEqual({
+      enabled: false,
+      autoRestart: false,
+      effectiveAutoRestart: false,
+    });
+  });
+
+  it("derives effectiveAutoRestart = enabled && autoRestart without rewriting stored values", () => {
+    const openclawDir = createTempOpenclawDir();
+    updateWatchdogMemorySettings({ openclawDir, autoRestart: true });
+    expect(readWatchdogMemorySettings({ openclawDir })).toEqual({
+      enabled: true,
+      autoRestart: true,
+      effectiveAutoRestart: true,
+    });
+
+    // Detection off: enforcement is effectively off, but the stored
+    // autoRestart choice survives the round-trip.
+    updateWatchdogMemorySettings({ openclawDir, enabled: false });
+    expect(readWatchdogMemorySettings({ openclawDir })).toEqual({
+      enabled: false,
+      autoRestart: true,
+      effectiveAutoRestart: false,
+    });
+    updateWatchdogMemorySettings({ openclawDir, enabled: true });
+    expect(readWatchdogMemorySettings({ openclawDir }).effectiveAutoRestart).toBe(
+      true,
+    );
+  });
+
+  it("updates memory settings per-field, reports changed, and keeps foreign keys", () => {
+    const openclawDir = createTempOpenclawDir();
+    fs.writeFileSync(
+      path.join(openclawDir, "alphaclaw.json"),
+      JSON.stringify({ watchdog: { futureKnob: 7, memory: { note: "keep" } } }),
+      "utf8",
+    );
+
+    const on = updateWatchdogMemorySettings({ openclawDir, autoRestart: true });
+    expect(on.changed).toBe(true);
+    expect(on.settings).toEqual({
+      enabled: true,
+      autoRestart: true,
+      effectiveAutoRestart: true,
+    });
+
+    const again = updateWatchdogMemorySettings({ openclawDir, autoRestart: true });
+    expect(again.changed).toBe(false);
+
+    const persisted = JSON.parse(
+      fs.readFileSync(path.join(openclawDir, "alphaclaw.json"), "utf8"),
+    );
+    expect(persisted.watchdog.futureKnob).toBe(7);
+    expect(persisted.watchdog.memory.note).toBe("keep");
+    // Per-field narrow: the autoRestart write never touched enabled.
+    expect(persisted.watchdog.memory.enabled).toBe(true);
   });
 });
