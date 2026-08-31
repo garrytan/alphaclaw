@@ -26,6 +26,9 @@ was already revoked at Google, leaving the account stuck in the UI.
 - Disconnect no longer erases accounts connected concurrently while it was
   waiting on Google, and a failed keyring cleanup is surfaced as a warning
   instead of swallowed.
+- With multiple Google accounts configured, a disconnect request without an
+  `accountId` is now refused instead of guessing the first account (the Setup
+  UI always sends one; agents get the exact rule in the admin manifest).
 
 ## [0.9.54] - 2026-08-31
 
