@@ -228,9 +228,9 @@
 - **Why:** Red-team finding on the downtime-remediation ship review (2026-08-28); bounded window but the failure mode is "permanently down after update".
 - **Effort:** S. **Depends on:** nothing.
 
-## P3 — Keep the workspace manifest inside the fingerprint worker
-- **What:** Each background snapshot refresh round-trips the full manifest (multi-MB at 15k+ files) through `postMessage`, costing ~7ms serialize + ~15ms deserialize on the main thread per refresh. The worker is persistent — cache the previous manifest worker-side (send it only on the first request) and return only fingerprint/limited/stats (and, with the delta moved worker-side, the computed delta).
-- **Why:** Last recurring main-thread stall on the status path (bounded: once per 45s refresh window). Ship-review performance finding, 2026-08-28.
+## P2 — Keep the workspace manifest inside the fingerprint worker
+- **What:** Each background snapshot refresh round-trips the full manifest (multi-MB at 15k+ files) through `postMessage`, costing ~7ms serialize + ~15ms deserialize on the main thread per refresh. The worker is persistent — cache the previous manifest worker-side (send it only on the first request) and return only fingerprint/limited/stats (and, with the delta moved worker-side, the computed delta). Also cover the sibling main-thread cost: run-create JSON.stringifys the full manifest for the SQLite write (db/doctor createDoctorRun) — serialize it in the worker (ship the JSON string) or move the blob write off the run-insert critical path.
+- **Why:** Last recurring main-thread stall on the status path (bounded: once per ≤60s refresh window). Ship-review performance finding, 2026-08-28. **Bumped P3→P2 on the deliverable-fix-dispatch wave (2026-08-31): the default cap raise to 200k files quadruples the clone cost for over-cap workspaces.** Partially mitigated on that wave: the worker now omits the manifest from the result message when the fingerprint is unchanged (steady-state refreshes are clone-free), so the remaining cost is changed-workspace refreshes only.
 - **Context:** lib/server/doctor/workspace-fingerprint.js (worker round-trip), lib/server/doctor/fingerprint-worker.js, lib/server/doctor/service.js (`calculateWorkspaceDelta` call site).
 - **Effort:** M. **Depends on:** nothing.
 
@@ -279,11 +279,29 @@
 - **Context:** create/verify contract in docs/designs/openclaw-context-contract.md §5 (`backup sqlite` CLI); `kOpenclawSqliteBackupDir` (lib/server/constants.js, added by the wave's backup-runner fix); pattern precedent in `pruneBackups` (lib/server/openclaw-channel-sync.js).
 - **Effort:** S. **Depends on:** the wave's backup sqlite runner fix landing.
 
-## P3 — doctor.db retention (keep-N runs)
-- **What:** doctor_runs persists full workspace_manifest_json (MBs per row at 50k files) and reuse runs clone raw_result_json; nothing prunes, and scheduled scans make growth unattended. Add keep-N retention deleting old runs' manifest/raw-result blobs while preserving dismissed source_keys (they feed suppression).
-- **Why:** Unbounded disk growth on VPS installs; the dismissed-keys DISTINCT scan grows with it (the partial index added this wave mitigates the query, not the growth).
-- **Context:** lib/server/db/doctor/; precedent in `pruneBackups` (lib/server/openclaw-channel-sync.js); companion to the SQLite snapshot retention entry above.
-- **Effort:** S-M.
+## P3 — doctor.db retention (raw_result_json + dismissed-keys residual)
+- **What:** ~~workspace_manifest_json growth~~ DONE on the deliverable-fix-dispatch wave (2026-08-31): `pruneRunManifests` keeps manifests only on the newest 2 manifest-bearing runs plus the latest completed run. Residual: reuse runs still clone raw_result_json with no pruning, and the dismissed-keys DISTINCT scan grows with total rows. Add keep-N retention for raw_result_json blobs while preserving dismissed source_keys (they feed suppression).
+- **Why:** Remaining unbounded disk growth on VPS installs (the partial index added earlier mitigates the query, not the growth).
+- **Context:** lib/server/db/doctor/ (`pruneRunManifests` is the pattern to extend); precedent in `pruneBackups` (lib/server/openclaw-channel-sync.js).
+- **Effort:** S.
+
+## P3 — Stale `working`-card reaper for Doctor fixes
+- **What:** The fix dispatch is fire-and-forget (`gateway call agent` without `--expect-final`): a card whose agent crashed, refused, or never ran the completion callback stays `working` forever unless the operator clicks Reopen. Add a TTL reaper (e.g. revert to `open` after 24h with a note on the card) driven off `fix_started_at`, and consider `--expect-final`-style delivered-confirmation as the fuller fix.
+- **Why:** Zero-silent-failures residual from the deliverable-fix-dispatch wave (2026-08-31): the dispatch record (`fix_delivery_json`) shows dispatch state, but post-acceptance failures still need manual cleanup.
+- **Context:** lib/server/doctor/service.js (dispatch at requestCardFix), lib/server/db/doctor (fix_started_at column exists), manual Reopen in lib/public/js/components/doctor/findings-list.js.
+- **Effort:** S-M. **Depends on:** nothing.
+
+## P3 — Verify delivery-route grammar for WhatsApp JIDs and Discord/Slack thread keys
+- **What:** The typed reply-target mapping treats peer ids as single colon-delimited segments, so a device-suffixed WhatsApp JID (`1234:12@s.whatsapp.net`) would truncate at the first colon, and discord/slack `group:<id>:topic:<thread>` keys drop the thread id (replies go to the channel, not the thread). Verify against the pinned openclaw whether such key shapes are ever emitted; add typed support + parity-matrix rows if so.
+- **Why:** Adversarial-review finding on the deliverable-fix-dispatch wave (2026-08-31); risk today is low (such keys were entirely non-deliverable before the wave, and a truncated JID fails rather than misdelivers) but the grammar should be contract-verified. Related pre-existing hardening: clawCmd uses exec with the default 1MB maxBuffer — a huge `sessions --json --all-agents` output errors the lookup (now honestly a 502).
+- **Context:** lib/server/utils/session-keys.js (getReplyTargetFromSessionKey), tests/server/session-keys.test.js (kDeliveryMatrix), tests/live/doctor-fix-dispatch-contract.e2e.test.js.
+- **Effort:** S. **Depends on:** nothing.
+
+## P3 — gitignore-aware workspace scanning (git fast path)
+- **What:** When the workspace is a git repo, use `git status --porcelain`/`git ls-files` as the change oracle instead of walking+hashing everything — free .gitignore semantics, native speed, and the static `kIgnoredDirectoryNames` list becomes a fallback for non-git workspaces only.
+- **Why:** The principled fix for huge-workspace scans (the 2026-08-31 wave raised caps and trimmed ignores, which covers today's cases but keeps hashing build junk in repos with unusual layouts). Changes fingerprint semantics → one full re-analysis on rollout.
+- **Context:** lib/server/doctor/workspace-fingerprint.js (walkFiles / kIgnoredDirectoryNames); scan caps config in lib/server/alphaclaw-config.js (doctor.scan).
+- **Effort:** M. **Depends on:** nothing.
 
 ## P3 — Container-tier chaos leg
 - **What:** Kill the container mid-download during a stable→beta apply and assert the fresh boot recovers cleanly onto the stable pin (no half-installed tree, gateway healthy). Extends tests/container/openclaw-container-upgrade.e2e.test.js with a second, shorter journey.
