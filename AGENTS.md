@@ -38,6 +38,7 @@ Runtime model:
 ### Change Patterns
 
 - Keep edits targeted and production-safe; favor small, reviewable changes.
+- Before starting and before merging, follow the **Merge unification safety** rules in `CLAUDE.md` — `main` moves fast and parallel branches on one subsystem have destroyed each other's freshly-merged work here.
 - Preserve existing behavior unless the task explicitly requires behavior changes.
 - Follow existing UI conventions and shared components for consistency.
 - Reuse existing server route and state patterns before introducing new abstractions.

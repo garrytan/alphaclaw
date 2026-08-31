@@ -20,6 +20,16 @@ Versions follow this repository's `package.json` release counter.
   widened to cover the watchdog/doctor/routes/server-core surfaces the boot
   journey exercises. Contributor release flow updated: versions bump inside
   PRs, so `npm version` is no longer part of publishing.
+## [0.9.61] - 2026-08-31
+
+### Changed
+- Added a **Merge unification safety** policy to the contributor guide
+  (`CLAUDE.md`): check for overlapping in-flight branches before starting,
+  never run two branches against one subsystem, merge `main` and reconcile
+  file-by-file before landing, claim version numbers at merge time, and
+  justify any rewrite of code merged in the last 7 days. Codifies the
+  reconciliation discipline that keeps fast-moving parallel work from
+  clobbering freshly-merged fixes. Docs/process only — no runtime change.
 
 ## [0.9.59] - 2026-08-31
 
