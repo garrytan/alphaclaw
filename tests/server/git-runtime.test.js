@@ -138,7 +138,8 @@ describe("cli/git runtime helpers", () => {
     expect(validateGitSyncFilePath("notes/todo.md")).toEqual({ ok: true });
     expect(validateGitSyncFilePath("/etc/passwd")).toEqual({
       ok: false,
-      error: "[alphaclaw] --file must stay within /data/.openclaw",
+      // Root-agnostic wording (#121): /data only exists on Docker installs.
+      error: "[alphaclaw] --file must stay within the managed .openclaw directory",
     });
     expect(validateGitSyncFilePath("../escape.md").ok).toBe(false);
     expect(validateGitSyncFilePath("a/../../b.md").ok).toBe(false);

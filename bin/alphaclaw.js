@@ -141,7 +141,7 @@ Usage: alphaclaw <command> [options]
 
 Commands:
   start     Start the AlphaClaw server (Setup UI + gateway manager)
-  git-sync  Commit and push /data/.openclaw safely using GITHUB_TOKEN
+  git-sync  Commit and push the managed .openclaw directory safely using GITHUB_TOKEN
   doctor finding complete  Mark a queued Doctor finding fixed after verification
   telegram topic add  Add/update Telegram topic mapping by thread ID
   telegram topic create  Create a Telegram forum topic and register it
@@ -479,7 +479,7 @@ const runGitSync = () => {
     return 1;
   }
   if (!fs.existsSync(path.join(openclawDir, ".git"))) {
-    console.error("[alphaclaw] No git repository at /data/.openclaw");
+    console.error(`[alphaclaw] No git repository at ${openclawDir}`);
     return 1;
   }
 
