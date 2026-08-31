@@ -257,7 +257,7 @@ The built-in watchdog monitors gateway health and recovers from failures automat
 | **Incident history**     | Persisted, grouped incidents (open → resolved/abandoned) with humanized event timelines, plus the raw SQLite event feed |
 | **Incident overseer**    | Optional (default off): a local Claude Code review of each settled incident — advisory verdict + suggested next action; deterministic recovery stays in charge. When enabled, redacted incident evidence is sent to the Anthropic API |
 | **Resize & OOM awareness** | Detects live container resizes on the watchdog tick (event + notification + retune) and classifies gateway heap-OOM vs container-OOM exits as distinct events with machine-derived remediation |
-| **Notifications**        | Telegram, Discord, Slack, and WhatsApp alerts for crashes, repairs, and recovery, with links to the Watchdog page (the optional overseer's verdict notification deep-links to the exact incident) |
+| **Notifications**        | Telegram, Discord, Slack, and WhatsApp alerts for crashes, repairs, recovery, and every automatic fix, with links to the Watchdog page (the optional overseer's verdict notification deep-links to the exact incident) — plus a Verbose/Important-only toggle that mutes informational notices without hiding problems |
 | **Event log**            | SQLite-backed incident + event history with API and UI access          |
 
 ## Environment Variables

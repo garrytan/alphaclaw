@@ -43,10 +43,12 @@ audit trail as the one deliberate exception.
 - **Notifications off now means off.** The master toggle previously gated
   only a handful of alert paths — upgrade failures, migration holds,
   rollbacks and ~30 other sources ignored it. A central delivery policy now
-  enforces both toggles at the outbox (enqueue AND delivery time, so a
-  notice queued before you flipped a switch can't land days later), with
-  documented exceptions: the Test button, agent-admin audit notices, and
-  the boot webhook for unbootable boxes.
+  enforces both toggles at the outbox (enqueue AND delivery time — queued
+  alerts are re-checked before they land: master-toggle-off holds them for
+  redelivery when you re-enable, within the outbox's 48h window, while
+  Important-only drops informational notices for good), with documented
+  exceptions: the Test button, agent-admin audit notices, and the boot
+  webhook for unbootable boxes.
 - **The agent can't silence you quietly.** An agent-admin request touching
   either notification toggle now escalates to a dangerous-tier operator
   confirm, and agent-admin audit notices are exempt from both toggles — a
@@ -67,6 +69,20 @@ audit trail as the one deliberate exception.
 - Autotune's resize notices keep their dedupe ids end-to-end (capacity
   flapping no longer duplicates alerts), and boot/settings retune notices
   ride the durable outbox so they survive restarts.
+- A brief notifications-off window can no longer destroy pending alerts:
+  flush-time master-toggle suppression holds queued events for redelivery
+  instead of dropping them, and a terminally suppressed outbox entry
+  revives on a fresh enqueue of the same id — one quiet window used to
+  permanently swallow every future re-notify of a stable id. Suppression
+  reasons (master vs. quiet) survive restarts.
+- The team-mode operator-lockout path (auth enable failed AND the auto-
+  restore failed) now alerts loudly — it was the one silent branch — and
+  exception snippets in alert copy are sanitized (newlines, backticks, and
+  links stripped; length capped).
+- Config-retry notices key to the latch episode, so an editor autosave
+  burst produces one notice instead of one per save, and machinery-hold
+  alerts normalize volatile reason fragments (paths, digits) so a boot
+  loop can't mint a fresh alert each iteration.
 
 ## [0.9.49] - 2026-08-31
 
