@@ -1,14 +1,16 @@
 # OpenClaw Context Contract — verified from npm tarballs
 
-Durable record of the OpenClaw workspace-context, doctor-CLI, and lifecycle contracts that
-AlphaClaw's Drift Doctor, watchdog, and supervisor code depend on. Every fact below was
-verified by reading the actual published npm tarballs — not docs, not assumptions:
+Durable record of the OpenClaw workspace-context, doctor-CLI, lifecycle, and Control-UI auth
+contracts that AlphaClaw's Drift Doctor, watchdog, supervisor, and dashboard-launcher code
+depend on. Every fact below was verified by reading the actual published npm tarballs — not
+docs, not assumptions:
 
 | Line | Package | Extracted at (planning pass) | Re-fetch |
 |------|---------|------------------------------|----------|
 | stable | `openclaw@2026.7.1-2` | `/tmp/oc-stable/package` | `npm pack openclaw@2026.7.1-2` |
 | beta | `openclaw@2026.8.1-beta.3` | `/tmp/oc-beta/package` | `npm pack openclaw@2026.8.1-beta.3` |
 | beta (gate floor) | `openclaw@2026.8.1-beta.1` | `/tmp/oc-beta1/package` | `npm pack openclaw@2026.8.1-beta.1` |
+| beta (2026.9 line) | `openclaw@2026.9.1-beta.1` | `/tmp/oc-91b1/package` | `npm pack openclaw@2026.9.1-beta.1` |
 
 Citations are `package version → dist file → symbol`. Dist chunk names are content-hashed and
 change per release; the symbol names are the stable handle. The machine-checked mirror of this
@@ -350,7 +352,98 @@ segment (`FOCUS_SEGMENT = "/focus"`, `dist/control-ui-routing-ZPtw_aQu.js`,
 literal session keys; `parseControlUiSessionPath`, `dist/session-ref-D0jeEavD.js`). No
 `?focus=` query form is parsed anywhere in the dist.
 
-## 6. Re-verification checklist
+## 6. Control UI auth handoff (beta 2026.9.1-beta.1)
+
+What the browser-side Control UI accepts as credentials and what the gateway serves around
+it — the contract behind AlphaClaw's dashboard launcher (`/gateway/launch` building
+`/openclaw<path>#token=…`). One citation caveat: the Control UI browser bundle
+(`dist/control-ui/assets/*`) is minified with no stable symbol names, so for those chunks the
+stable grep handles are the quoted string literals instead.
+
+### URL credential consumption
+
+The location bootstrap block builds a `URLSearchParams` over `location.search` AND one over
+`location.hash`, and reads credentials from both — on ANY path (no pathname check gates
+consumption; the current path only influences the default `sessionKey`):
+
+- `#token=<token>` is the canonical form. Hash wins over query (`hash ?? query`); `?token=`
+  still works but logs a console warning — grep handle: "Query parameters may appear in
+  server logs." — and is flagged (`queryTokenUsed`).
+- After consumption the `token` params are DELETED from both query and hash and the cleaned
+  location is written back via `history.replaceState` — the credential survives in neither
+  the address bar nor history.
+- `password` is deleted from BOTH query and hash and never read — password auth cannot be
+  pre-populated via URL (the only password intake is the native shell's
+  `window.__OPENCLAW_NATIVE_CONTROL_AUTH__` handoff, which is likewise deleted after read).
+- `bootstrapToken` is fragment-only (`hash.has("bootstrapToken")`; the query is never
+  consulted for it) and deleted the same way.
+
+Cited: `dist/control-ui/assets/control-ui-core-C8yWLRKX.js` (the bootstrapToken consumption
+block — locate it by the console-warning literal above).
+
+### One-time owner bootstrap handoff
+
+`openclaw dashboard` does not put the shared token in its handoff URL — it mints a one-time
+device grant and builds `${httpUrl}#bootstrapToken=<tok>&bootstrapProfile=owner`
+(`issueControlUiBrowserHandoff`, `dist/control-ui-handoff-C8yANigf.js`; fragment param
+literals `CONTROL_UI_BOOTSTRAP_PROFILE_FRAGMENT_PARAM = "bootstrapProfile"` and
+`CONTROL_UI_OWNER_BOOTSTRAP_PROFILE_HINT = "owner"`, `dist/zod-schema-DqnjEAlb.js`):
+
+- TTL: `DEVICE_BOOTSTRAP_TOKEN_TTL_MS = 600 * 1e3` (10 minutes). Single-use: redemption is
+  one atomic cross-process transaction
+  (`consumeDeviceBootstrapTokenWithSetupCompletionInTransaction`). Both in
+  `dist/device-bootstrap-Cr_4iTOZ.js`.
+- `CONTROL_UI_OWNER_BOOTSTRAP_PROFILE` ("Full browser-owner profile issued only by dashboard
+  and graphical onboarding", `dist/device-bootstrap-Cr_4iTOZ.js`) is the owner-grade grant;
+  a bootstrap token requested through any other surface is normalized against the handoff
+  allowlist and stripped to member-grade scopes (`normalizeDeviceBootstrapHandoffProfile`;
+  strips are logged as `bootstrap_token_scopes_stripped` via
+  `warnIfIssuedBootstrapScopesWereStripped`).
+- `openclaw dashboard --json` (works with `--no-open`) exposes the handoff as `browserUrl`
+  plus `browserBootstrapExpiresAtMs` and `tokenIncluded`; the no-open hint says "Run
+  `openclaw dashboard --json` and open its `browserUrl` within ten minutes."
+  (`dist/dashboard-sAM2U-dR.js`).
+
+### Canonical shared-token URL
+
+The CLI's plain dashboard link is exactly `${links.httpUrl}#token=${encodeURIComponent(token)}`,
+and `includeTokenInUrl = Boolean(token) && !credentialPlan.localToken.hasSecretRef` — a
+SecretRef-backed gateway token is never placed in a URL (`dist/control-ui-handoff-C8yANigf.js`).
+AlphaClaw's launcher mirrors this exact fragment shape.
+
+### CSP: no iframe embedding
+
+The gateway serves the Control UI with `frame-ancestors 'none'` in its Content-Security-Policy
+(`dist/control-ui-DOG892GV.js`) — embedding the Control UI in an AlphaClaw iframe is blocked
+upstream by design; the launcher's new-tab flow is the supported shape.
+
+### Client-side credential persistence (informative)
+
+AlphaClaw's launcher supplies the token on every click, so these persistence semantics are
+informative, not load-bearing — never assert them in product behavior:
+
+- Shared token → sessionStorage key `openclaw.control.token.v1:<normalized gateway URL>`
+  (tab-scoped; the key builder prefixes the literal `openclaw.control.token.v1:` and the
+  store accessor resolves the sessionStorage getter — exported as `en` from
+  `dist/control-ui/assets/control-ui-core-DNfX79w1.js`).
+- Settings → localStorage key `openclaw.control.settings.v1:<normalized gateway URL>`.
+- Per-device token: the gateway's `hello-ok` frame carries
+  `auth: { deviceToken, role, scopes, issuedAtMs, deviceTokens[] }` — a durable per-device
+  credential issued after the first successful connect and stored separately from the shared
+  token, so later visits can auto-connect tokenless. Schema in
+  `dist/control-ui/assets/control-ui-boot-BuU2-GlI.js` (also `dist/client-CLXr2nlo.js`).
+
+### trusted-proxy vs token auth
+
+`gateway.auth.mode = "trusted-proxy"` is mutually exclusive with token auth: config
+validation throws "trusted-proxy and token auth are mutually exclusive" when `auth.token`
+is also set, and requires a non-empty `gateway.auth.trustedProxy.userHeader`.
+`authorizeTrustedProxy` validates `req.socket.remoteAddress` against `trustedProxies`
+(`isTrustedProxyAddress`) before extracting the user identity from the configured header.
+All in `dist/auth-B1wvUSi9.js`. Consequence for AlphaClaw: in team (trusted-proxy) mode a
+tokenless `/openclaw` URL IS the success path — never mint or append a token there.
+
+## 7. Re-verification checklist
 
 Run this on EVERY upstream release adoption (stable pin bump, beta adoption, channel change):
 
@@ -375,3 +468,12 @@ Run this on EVERY upstream release adoption (stable pin bump, beta adoption, cha
 5. Live tier (`OPENCLAW_LIVE_E2E=1`) re-runs the CLI-contract assertions:
    `doctor --lint --json` schema, `backup sqlite create → verify` cycle,
    `gateway restart-handoff capabilities --json` protocol.
+6. Control UI auth handoff facts (§6): re-grep the new dist for the query-token warning
+   literal ("Query parameters may appear in server logs"), the storage-key literals
+   (`openclaw.control.token.v1`, `openclaw.control.settings.v1`), and the symbols
+   `issueControlUiBrowserHandoff`, `DEVICE_BOOTSTRAP_TOKEN_TTL_MS`,
+   `CONTROL_UI_OWNER_BOOTSTRAP_PROFILE`, `includeTokenInUrl`, `frame-ancestors 'none'`,
+   `authorizeTrustedProxy` + "trusted-proxy and token auth are mutually exclusive". The
+   dashboard launcher (`lib/server/routes/dashboard-launch.js` +
+   `lib/server/gateway-dashboard-url.js`) encodes these into product behavior — drift here
+   degrades one-click auth silently (the connect screen is the visible fallback).
