@@ -52,8 +52,14 @@ import * as api from "../../lib/public/js/lib/api.js";
 import { invalidateCache } from "../../lib/public/js/lib/api-cache.js";
 import { useWatchdogIncidents } from "../../lib/public/js/components/watchdog-tab/incidents/use-incidents.js";
 import { WatchdogIncidentsCard } from "../../lib/public/js/components/watchdog-tab/incidents/index.js";
-import { buildIncidentTimeTooltip } from "../../lib/public/js/components/watchdog-tab/incidents/helpers.js";
-import { formatLocaleDateTimeWithTodayTime } from "../../lib/public/js/lib/format.js";
+import {
+  buildIncidentTimeTooltip,
+  describeEvent,
+} from "../../lib/public/js/components/watchdog-tab/incidents/helpers.js";
+import {
+  formatDurationLongMs,
+  formatLocaleDateTimeWithTodayTime,
+} from "../../lib/public/js/lib/format.js";
 import { ActionButton } from "../../lib/public/js/components/action-button.js";
 import { InlineErrorChip } from "../../lib/public/js/components/inline-error-chip.js";
 
@@ -339,6 +345,88 @@ describe("frontend/watchdog incidents card", () => {
     expect(treeText(tree)).toContain(
       formatLocaleDateTimeWithTodayTime(eventCreatedAt, { withSeconds: true }),
     );
+  });
+
+  describe("salient line for details.degradedRetry", () => {
+    const renderTimelineText = (details) =>
+      treeText(
+        renderCard({
+          incidents: [kIncident],
+          incidentsLoaded: true,
+          expandedIds: { [kIncident.id]: true },
+          detailById: {
+            [kIncident.id]: {
+              loading: false,
+              error: null,
+              events: [
+                {
+                  id: 1,
+                  eventType: "health_check",
+                  status: "failed",
+                  createdAt: "2026-08-27T09:15:02.114Z",
+                  details,
+                },
+              ],
+            },
+          },
+        }),
+      );
+
+    it("composes the probe reason with the next retry delay", () => {
+      const details = {
+        reason: "gateway health returned HTTP 503",
+        degradedRetry: { attempt: 3, nextDelayMs: 30_000 },
+      };
+      const expectedDelay = formatDurationLongMs(30_000);
+      expect(expectedDelay).toBe("30s");
+      const described = describeEvent({
+        eventType: "health_check",
+        status: "failed",
+        details,
+      });
+      expect(described.detail).toBe(
+        `gateway health returned HTTP 503 · next retry in ${expectedDelay}`,
+      );
+      const text = renderTimelineText(details);
+      expect(text).toContain("gateway health returned HTTP 503");
+      expect(text).toContain(`next retry in ${expectedDelay}`);
+    });
+
+    it("renders next retry alone when the row carries no reason", () => {
+      const details = { degradedRetry: { attempt: 0, nextDelayMs: 5_000 } };
+      expect(
+        describeEvent({ eventType: "health_check", status: "failed", details })
+          .detail,
+      ).toBe(`next retry in ${formatDurationLongMs(5_000)}`);
+      expect(renderTimelineText(details)).toContain(
+        `next retry in ${formatDurationLongMs(5_000)}`,
+      );
+    });
+
+    it("leaves rows without degradedRetry unchanged", () => {
+      const details = { reason: "gateway health returned HTTP 503" };
+      expect(
+        describeEvent({ eventType: "health_check", status: "failed", details })
+          .detail,
+      ).toBe("gateway health returned HTTP 503");
+      expect(renderTimelineText(details)).not.toContain("next retry in");
+      // The server emits a literal `degradedRetry: null` once the loop is
+      // disarmed — that is a bare reason too, not a fabricated retry line.
+      const disarmed = { ...details, degradedRetry: null };
+      expect(
+        describeEvent({ eventType: "health_check", status: "failed", details: disarmed })
+          .detail,
+      ).toBe("gateway health returned HTTP 503");
+      expect(renderTimelineText(disarmed)).not.toContain("next retry in");
+      // A malformed nextDelayMs never fabricates a "next retry in" line.
+      expect(
+        describeEvent({
+          eventType: "health_check",
+          status: "failed",
+          details: { ...details, degradedRetry: { attempt: 1, nextDelayMs: "soon" } },
+        }).detail,
+      ).toBe("gateway health returned HTTP 503");
+    });
   });
 
   it("Refresh shows a pending affordance while polling", () => {
