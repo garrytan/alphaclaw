@@ -132,7 +132,7 @@ const kFastTimers = {
 
 const flush = (ms = 25) => new Promise((r) => setTimeout(r, ms));
 
-const createService = ({ env = {}, driver, fsModule, runStream, spawnImpl, getResources, timers } = {}) => {
+const createService = ({ env = {}, driver, fsModule, runStream, spawnImpl, getResources, timers, resolveExternalBaseUrl } = {}) => {
   const fakeDriver = driver || createFakeDriver();
   const fakeFs = fsModule || createFakeFs();
   return {
@@ -145,6 +145,7 @@ const createService = ({ env = {}, driver, fsModule, runStream, spawnImpl, getRe
       runStream: runStream || createFakeRunStream(),
       spawnImpl,
       getResources,
+      resolveExternalBaseUrl,
       logger: { log: vi.fn(), warn: vi.fn(), error: vi.fn() },
       paths: kPaths,
       timers: timers || kFastTimers,
@@ -276,9 +277,18 @@ describe("claude-code-local service", () => {
       await flush(60);
       const snapshot = service.getStatusSnapshot();
       expect(snapshot.state).toBe("running");
-      expect(snapshot.sessionUrl).toBe("https://claude.ai/code/sess_abcdef123456");
+      // The snapshot carries the revocable wrapper path — never the raw
+      // claude.ai URL (boundary pin).
+      expect(snapshot.sessionUrl).toMatch(/^\/rescue\/[0-9a-f]{64}$/);
       expect(snapshot.spawnedBy).toBe("click");
-      expect(service.getNotificationLine()).toContain("https://claude.ai/code/sess_abcdef123456");
+      const token = snapshot.sessionUrl.slice("/rescue/".length);
+      expect(service.resolveRescueRedirect(token)).toBe(
+        "https://claude.ai/code/sess_abcdef123456",
+      );
+      // No external base configured → raw-URL fallback with the config hint.
+      const line = service.getNotificationLine();
+      expect(line).toContain("https://claude.ai/code/sess_abcdef123456");
+      expect(line).toContain("ALPHACLAW_SETUP_URL");
     });
 
     it("answers the trust prompt while waiting", async () => {
@@ -318,9 +328,10 @@ describe("claude-code-local service", () => {
       await flush(60);
       const snapshot = service.getStatusSnapshot();
       expect(snapshot.state).toBe("running");
-      expect(snapshot.sessionUrl).toBe(
-        "https://claude.ai/code?environment=env_01TESTENV42",
-      );
+      expect(snapshot.sessionUrl).toMatch(/^\/rescue\/[0-9a-f]{64}$/);
+      expect(
+        service.resolveRescueRedirect(snapshot.sessionUrl.slice("/rescue/".length)),
+      ).toBe("https://claude.ai/code?environment=env_01TESTENV42");
     });
 
     it("maps the workspace-not-trusted exit to an actionable error", async () => {
@@ -409,11 +420,13 @@ describe("claude-code-local service", () => {
   describe("adoption", () => {
     it("trusts the persisted URL only on pane-identity match", async () => {
       const { driver, fsModule } = { ...createService({}) };
+      const kPersistedToken = "ab".repeat(32);
       const persisted = {
         sessionName: "alphaclaw-rescue",
         phase: "running",
         sessionId: "sess_persisted01",
         sessionUrl: "https://claude.ai/code/sess_persisted01",
+        linkToken: kPersistedToken,
         panePid: 4242,
         spawnedBy: "click",
         startedAt: 111,
@@ -425,19 +438,29 @@ describe("claude-code-local service", () => {
       const { service } = createService({ driver, fsModule });
       await service.refreshProbes({ force: true });
       const result = await service.startSession({ confirmed: true, source: "click" });
+      // Identity match ⇒ the persisted link token is REUSED (link continuity
+      // across AlphaClaw reboots of a still-live session).
       expect(result).toMatchObject({
         ok: true,
         status: "running",
-        sessionUrl: "https://claude.ai/code/sess_persisted01",
+        sessionUrl: `/rescue/${kPersistedToken}`,
       });
+      expect(service.resolveRescueRedirect(kPersistedToken)).toBe(
+        "https://claude.ai/code/sess_persisted01",
+      );
       expect(driver.newSession).not.toHaveBeenCalled();
     });
 
     it("re-extracts from scrollback when the pane identity mismatches", async () => {
       const { driver, fsModule } = { ...createService({}) };
+      const kStaleToken = "cd".repeat(32);
       fsModule.files.set(
         kPaths.stateFile,
-        JSON.stringify({ panePid: 1111, sessionUrl: "https://claude.ai/code/sess_stale0000" }),
+        JSON.stringify({
+          panePid: 1111,
+          sessionUrl: "https://claude.ai/code/sess_stale0000",
+          linkToken: kStaleToken,
+        }),
       );
       driver.state.sessionAlive = true;
       driver.state.panePid = 4242;
@@ -445,7 +468,15 @@ describe("claude-code-local service", () => {
       const { service } = createService({ driver, fsModule });
       await service.refreshProbes({ force: true });
       const result = await service.startSession({ confirmed: true, source: "click" });
-      expect(result.sessionUrl).toBe("https://claude.ai/code/sess_fresh0000");
+      // Identity mismatch ⇒ the link token ROTATES with the re-extracted URL:
+      // a replaced session must not be reachable via the old capability.
+      expect(result.sessionUrl).toMatch(/^\/rescue\/[0-9a-f]{64}$/);
+      const freshToken = result.sessionUrl.slice("/rescue/".length);
+      expect(freshToken).not.toBe(kStaleToken);
+      expect(service.resolveRescueRedirect(kStaleToken)).toBeNull();
+      expect(service.resolveRescueRedirect(freshToken)).toBe(
+        "https://claude.ai/code/sess_fresh0000",
+      );
     });
 
     it("reaps a dead pane instead of adopting it", async () => {
@@ -740,7 +771,10 @@ describe("claude-code-local service", () => {
       await flush(60);
       const snapshot = service.getStatusSnapshot();
       expect(snapshot.state).toBe("running");
-      expect(snapshot.sessionUrl).toBe("https://claude.ai/code/sess_watcher12345");
+      expect(snapshot.sessionUrl).toMatch(/^\/rescue\/[0-9a-f]{64}$/);
+      expect(
+        service.resolveRescueRedirect(snapshot.sessionUrl.slice("/rescue/".length)),
+      ).toBe("https://claude.ai/code/sess_watcher12345");
     });
   });
 
@@ -752,11 +786,18 @@ describe("claude-code-local service", () => {
       driver.state.buffer = "https://claude.ai/code/sess_running123456";
       await flush(60);
       driver.killSession.mockResolvedValueOnce({ ok: false, result: { stderr: "server busy" } });
+      const preStopToken = service
+        .getStatusSnapshot()
+        .sessionUrl.slice("/rescue/".length);
       const stopped = await service.stopSession();
       expect(stopped).toMatchObject({ ok: false, code: "stop_failed" });
       // The session is NOT cleared — a live remote shell must stay tracked
-      // (state stays "running": the shell really is still up).
+      // (state stays "running": the shell really is still up), and the
+      // capability link stays LIVE with it.
       expect(service.getStatusSnapshot().state).toBe("running");
+      expect(service.resolveRescueRedirect(preStopToken)).toBe(
+        "https://claude.ai/code/sess_running123456",
+      );
     });
   });
 
@@ -785,9 +826,12 @@ describe("claude-code-local service", () => {
 
   describe("generation staleness", () => {
     it("ignores a late URL after the session was stopped mid-watch", async () => {
-      const { service, driver } = createService({});
+      const { service, driver, fsModule } = createService({});
       await service.refreshProbes({ force: true });
       await service.startSession({ confirmed: true, source: "click" });
+      // The token is minted (and persisted) at spawn, before the URL exists.
+      const preStopToken = JSON.parse(fsModule.files.get(kPaths.stateFile)).linkToken;
+      expect(preStopToken).toMatch(/^[0-9a-f]{64}$/);
       await service.stopSession();
       driver.state.sessionAlive = true; // simulate stale capture still flowing
       driver.state.buffer = "https://claude.ai/code/sess_late00000000";
@@ -795,6 +839,8 @@ describe("claude-code-local service", () => {
       const snapshot = service.getStatusSnapshot();
       expect(snapshot.state).toBe("ready");
       expect(snapshot.sessionUrl).toBeNull();
+      // Revocation survives the stale watcher: the pre-stop capability is dead.
+      expect(service.resolveRescueRedirect(preStopToken)).toBeNull();
     });
 
     it("errors with spawn_failed when the pane dies before the URL appears", async () => {
@@ -849,9 +895,10 @@ describe("claude-code-local service", () => {
       const snapshot = service.getStatusSnapshot();
       expect(snapshot.state).toBe("running");
       expect(snapshot.hosting).toBe("script");
-      expect(snapshot.sessionUrl).toBe(
-        "https://claude.ai/code?environment=env_01SCRIPTHOST",
-      );
+      expect(snapshot.sessionUrl).toMatch(/^\/rescue\/[0-9a-f]{64}$/);
+      expect(
+        service.resolveRescueRedirect(snapshot.sessionUrl.slice("/rescue/".length)),
+      ).toBe("https://claude.ai/code?environment=env_01SCRIPTHOST");
       expect(snapshot.warnings.join(" ")).toContain("does not survive AlphaClaw restarts");
     });
 
@@ -939,9 +986,10 @@ describe("claude-code-local service", () => {
       const { service } = createService({ driver, fsModule });
       await service.refreshProbes({ force: true });
       const result = await service.startSession({ confirmed: true, source: "click" });
-      expect(result.sessionUrl).toBe(
-        "https://claude.ai/code?environment=env_01REALBANNER",
-      );
+      expect(result.sessionUrl).toMatch(/^\/rescue\/[0-9a-f]{64}$/);
+      expect(
+        service.resolveRescueRedirect(result.sessionUrl.slice("/rescue/".length)),
+      ).toBe("https://claude.ai/code?environment=env_01REALBANNER");
     });
   });
 
@@ -1038,6 +1086,162 @@ describe("claude-code-local service", () => {
       expect(fsModule.files.get(`${kPaths.home}/.claude.json`)).toContain(
         "hasCompletedOnboarding",
       );
+    });
+  });
+
+  describe("rescue link capability", () => {
+    const kRescueUrl = "https://claude.ai/code/sess_rescuecap01";
+    const startRunning = async (opts = {}) => {
+      const built = createService(opts);
+      await built.service.refreshProbes({ force: true });
+      await built.service.startSession({ confirmed: true, source: "click" });
+      built.driver.state.buffer = kRescueUrl;
+      await flush(60);
+      const snapshot = built.service.getStatusSnapshot();
+      expect(snapshot.state).toBe("running");
+      return { ...built, token: snapshot.sessionUrl.slice("/rescue/".length) };
+    };
+
+    it("rotates the token across start → stop → start (old link dies)", async () => {
+      const { service, driver, token: tokenA } = await startRunning();
+      expect(service.resolveRescueRedirect(tokenA)).toBe(kRescueUrl);
+      await service.stopSession();
+      expect(service.resolveRescueRedirect(tokenA)).toBeNull();
+      await service.startSession({ confirmed: true, source: "click" });
+      driver.state.buffer = kRescueUrl;
+      await flush(60);
+      const tokenB = service.getStatusSnapshot().sessionUrl.slice("/rescue/".length);
+      expect(tokenB).not.toBe(tokenA);
+      expect(service.resolveRescueRedirect(tokenB)).toBe(kRescueUrl);
+      expect(service.resolveRescueRedirect(tokenA)).toBeNull();
+    });
+
+    it("does not resolve while starting — but the token is already persisted at spawn", async () => {
+      const { service, driver, fsModule } = createService({});
+      await service.refreshProbes({ force: true });
+      const started = await service.startSession({ confirmed: true, source: "click" });
+      expect(started).toMatchObject({ ok: true, status: "starting" });
+      const token = JSON.parse(fsModule.files.get(kPaths.stateFile)).linkToken;
+      expect(token).toMatch(/^[0-9a-f]{64}$/);
+      expect(service.resolveRescueRedirect(token)).toBeNull();
+      driver.state.buffer = kRescueUrl;
+      await flush(60);
+      expect(service.resolveRescueRedirect(token)).toBe(kRescueUrl);
+    });
+
+    it("refuses empty, wrong-same-length, and wrong-different-length tokens without throwing", async () => {
+      const { service, token } = await startRunning();
+      const crypto = require("crypto");
+      const spy = vi.spyOn(crypto, "timingSafeEqual");
+      expect(service.resolveRescueRedirect("")).toBeNull();
+      expect(service.resolveRescueRedirect("ff".repeat(32))).toBeNull();
+      expect(service.resolveRescueRedirect("short")).toBeNull();
+      expect(service.resolveRescueRedirect(null)).toBeNull();
+      // Hash-both-sides semantic: the different-length candidate still went
+      // through timingSafeEqual (digests are fixed-length — no throw, no
+      // length oracle).
+      expect(spy).toHaveBeenCalled();
+      expect(service._internals.timingSafeTokenEqual("short", token)).toBe(false);
+      expect(service._internals.timingSafeTokenEqual(token, token)).toBe(true);
+      spy.mockRestore();
+    });
+
+    it("mints a fresh token when adopting pre-feature state (no linkToken persisted)", async () => {
+      const { driver, fsModule } = createService({});
+      fsModule.files.set(
+        kPaths.stateFile,
+        JSON.stringify({
+          panePid: 4242,
+          sessionId: "sess_upgrade001",
+          sessionUrl: "https://claude.ai/code/sess_upgrade001",
+        }),
+      );
+      driver.state.sessionAlive = true;
+      driver.state.panePid = 4242;
+      const { service } = createService({ driver, fsModule });
+      await service.refreshProbes({ force: true });
+      const result = await service.startSession({ confirmed: true, source: "click" });
+      expect(result.sessionUrl).toMatch(/^\/rescue\/[0-9a-f]{64}$/);
+      const persisted = JSON.parse(fsModule.files.get(kPaths.stateFile));
+      expect(persisted.linkToken).toBe(result.sessionUrl.slice("/rescue/".length));
+    });
+
+    it("never reuses a malformed persisted linkToken even on identity match", async () => {
+      const { driver, fsModule } = createService({});
+      const kBadToken = "NOT-64-HEX";
+      fsModule.files.set(
+        kPaths.stateFile,
+        JSON.stringify({
+          panePid: 4242,
+          sessionUrl: "https://claude.ai/code/sess_tampered01",
+          linkToken: kBadToken,
+        }),
+      );
+      driver.state.sessionAlive = true;
+      driver.state.panePid = 4242;
+      const { service } = createService({ driver, fsModule });
+      await service.refreshProbes({ force: true });
+      const result = await service.startSession({ confirmed: true, source: "click" });
+      expect(result.sessionUrl).toMatch(/^\/rescue\/[0-9a-f]{64}$/);
+      expect(result.sessionUrl).not.toContain(kBadToken);
+      expect(service.resolveRescueRedirect(kBadToken)).toBeNull();
+    });
+
+    it("notification line carries the absolute wrapper link when a base URL resolves", async () => {
+      const { service, token } = await startRunning({
+        resolveExternalBaseUrl: () => "https://box.example/",
+      });
+      expect(service.getNotificationLine()).toBe(
+        `🛟 Rescue session: https://box.example/rescue/${token}`,
+      );
+    });
+
+    it("origin-normalizes a base URL that carries a path", async () => {
+      const { service, token } = await startRunning({
+        resolveExternalBaseUrl: () => "https://box.example/setup",
+      });
+      expect(service.getNotificationLine()).toBe(
+        `🛟 Rescue session: https://box.example/rescue/${token}`,
+      );
+    });
+
+    it("falls back to the raw URL + config hint when no base resolves (never a localhost wrapper)", async () => {
+      for (const resolveExternalBaseUrl of [
+        undefined,
+        () => "",
+        () => "file:///etc",
+        () => "not a url",
+        () => {
+          throw new Error("boom");
+        },
+      ]) {
+        const { service } = await startRunning({ resolveExternalBaseUrl });
+        const line = service.getNotificationLine();
+        expect(line).toContain(kRescueUrl);
+        expect(line).toContain("ALPHACLAW_SETUP_URL");
+        expect(line).not.toContain("/rescue/");
+        expect(line).not.toContain("localhost");
+      }
+    });
+
+    it("kill switch keeps the live link resolving while the snapshot hides it", async () => {
+      const env = { CLAUDE_CODE_LOCAL_ENABLED: "" };
+      const { service, token } = await startRunning({ env });
+      env.CLAUDE_CODE_LOCAL_ENABLED = "0";
+      const snapshot = service.getStatusSnapshot();
+      expect(snapshot.state).toBe("disabled");
+      expect(snapshot.sessionUrl).toBeNull();
+      // Disabling never cuts off a live rescue: the capability stays valid
+      // until the session is actually stopped.
+      expect(service.resolveRescueRedirect(token)).toBe(kRescueUrl);
+    });
+
+    it("pane death revokes the link on the liveness check", async () => {
+      const { service, driver, token } = await startRunning();
+      expect(service.resolveRescueRedirect(token)).toBe(kRescueUrl);
+      driver.state.sessionAlive = false;
+      await service.checkSessionLiveness();
+      expect(service.resolveRescueRedirect(token)).toBeNull();
     });
   });
 });
