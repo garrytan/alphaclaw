@@ -53,6 +53,11 @@ old models all surface as actionable cards.
   severity, finding class, and (for skills) the flagged model set live in the
   sourceKey, so dismissing a mild card can never suppress a later severe one.
 
+### Removed
+- The CI soak gate (`soak.yml`, added in v0.9.62): PRs no longer stay RED for
+  2 hours before merge. Removed by owner decision — merges are gated by tests
+  and the container-e2e aggregator alone.
+
 ## [0.9.64] - 2026-08-31
 
 Disconnecting a Google account (and Gmail-watch teardown generally) is now

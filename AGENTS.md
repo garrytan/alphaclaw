@@ -92,22 +92,21 @@ The Agent Administration feature (default OFF) lets the deployed OpenClaw agent 
 
 A GitHub ruleset protects `main`: PRs required (no direct pushes), squash-only,
 required conversation resolution, strict up-to-date, and required status checks
-`test (22)`, `gate` (the always-running container-e2e aggregator), and `soak`.
+`test (22)` and `gate` (the always-running container-e2e aggregator).
 There are 0 required approvals — this is a solo repo where any higher count
-deadlocks; the gate is CI + a soak window, not human sign-off. Details:
+deadlocks; the gate is CI, not human sign-off. Details:
 
 - **Version guard** (`scripts/ci/assert-version-advances.mjs`, run in `ci.yml`
   on PRs): a PR's `package.json` version must strictly advance `main`'s. Every
   PR bumps, including reverts. This is why versions are claimed at merge time,
   not branch time (see CLAUDE.md "Merge unification safety"). `VERSION` is not a
   tracked file — `package.json` is the source of truth.
-- **Soak** (`soak.yml`): a required check that stays RED until the current head
-  commit has been open ≥ 2h (measured from the first Actions run for that head
-  SHA — GitHub-stamped, not author-forgeable). **RED-until-ripe is normal, not
-  broken CI.** Add the `expedite` label to override (audit-logged). A `ripen`
-  cron re-runs failed soak checks every ~30 min so a ripened PR flips green with
-  no manual action; cron delivery has no guaranteed bound, and
-  `workflow_dispatch` is the manual fallback.
+- **Soak window: removed (v0.9.65, owner decision).** `soak.yml` (v0.9.62) held
+  PRs RED until the head commit was ≥ 2h old, with an `expedite` label override
+  and a `ripen` cron. It was deleted deliberately — do not resurrect it as a
+  "missing check" cleanup; if merge pacing is ever wanted again, revisit the
+  design (the patch-id inheritance refinement noted in its header) rather than
+  restoring the file.
 - **Tags** (`tag-release.yml`): each push to `main` tags `v<version>`; a
   same-version/different-sha collision fails loudly (the renumber-race tripwire).
 - **Break-glass:** disable the ruleset (`gh api --method PUT
