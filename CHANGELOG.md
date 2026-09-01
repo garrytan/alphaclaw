@@ -5,6 +5,76 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.9.66] - 2026-09-01
+
+Post-incident hardening (2026-09-01 outage): a slow-but-healthy gateway boot no
+longer escalates to a rescue session, a failed restart now names its real
+blocking cause with persisted evidence, a stale upstream state-lifecycle lock
+is cleared before it can wedge a boot, and a broken `openclaw doctor` CLI is a
+first-class surfaced state instead of an invisible red herring.
+
+### Added
+- `GATEWAY_RESTART_READY_TIMEOUT` (seconds, default 300, clamped 30–480): the
+  gateway restart readiness budget, raised from a fixed 120s that a loaded box
+  cold-starting 72 plugins legitimately exceeded. The wait still returns the
+  instant the gateway answers. One shared operation budget derived from it now
+  governs every restart-class lifecycle-lock hold, the restart operation
+  record's lifetime (kept alive while queued and between steps), and the
+  watchdog's expected-restart suppression windows — so a configured wait can
+  never outlive the machinery that protects it.
+- Failed restarts persist their evidence: the redacted last lines of the
+  gateway's stderr AND stdout are stored on the restart operation record
+  (written 0600) and served by `GET /api/restart-status` even after AlphaClaw
+  itself restarts, and `errorSummary` now appends the last error-shaped line
+  ("… — last gateway error: ERROR another OpenClaw process owns
+  state-lifecycle …") instead of only the timeout symptom. Evidence redaction
+  gained shape-based token masking (Bearer/JWT/provider keys/DSNs) and
+  control-character normalization applied before matching.
+- Pre-start sweep of provably-stale upstream OpenClaw state-lifecycle locks
+  (`$TMPDIR/openclaw-state-locks-*`), the incident's actual blocker: runs
+  first in the boot sequence (before any step that can spawn the openclaw
+  CLI), reactively before relaunches that follow a failed attempt, and during
+  cold-start restarts. Safety rules: locks whose recorded owner is alive and
+  openclaw/node-shaped are never touched; deletion goes through an atomic
+  quarantine-rename; every decision is logged under `[state-lock-sweep]`;
+  `ALPHACLAW_STATE_LOCK_SWEEP_DISABLED=1` is the kill switch. Exercised for
+  real (seeded lock + killed boot) in the container e2e tier.
+- Doctor-CLI availability is now a first-class state: all six doctor call
+  sites classify outcomes through one classifier (a CLI that cannot start is
+  distinct from "zero findings" and from a timed-out capture), transitions
+  emit a single `doctor_probe` watchdog event plus a greppable process.log
+  line, and doctor status exposes `openclawDoctorCli`. Medic, watchdog
+  overseer, upgrade overseer, and the watchdog's advisory probe now share one
+  single-flight collector that returns usable doctor output or null — never
+  raw stderr laundered into LLM evidence prompts.
+- Channel status APIs expose `pinDiverged` + `appliedVersion`, and the boot
+  log prints `running <version> (<channel> channel) over declared pin <pin> —
+  expected…` — so `npm ls` reporting the `openclaw` dependency "invalid"
+  while a channel apply is active reads as the designed overlay behavior, not
+  version drift (foreign tampering detection is unchanged).
+
+### Fixed
+- A restart operation's `durationMs`/`downtimeMs` now survive an AlphaClaw
+  restart (the reload path silently dropped them; the UI reads both).
+- A dead restart supervisor fails the operation within one poll tick — with a
+  final readiness probe so a daemonizing supervisor or healthy incumbent
+  never false-fails — instead of burning the whole readiness budget.
+- The `doctorJsonShape` capability probe was removed (it had zero consumers,
+  and its legitimate stable-channel answer was defined as its falsy value, so
+  every healthy install re-spawned `openclaw doctor --json` every ~60s —
+  ~530 spawns/day observed during the incident). When any capability probe
+  sees the CLI-startup-crash signature (or a full pass times out end to end),
+  the capabilities layer serves cached answers instead of re-spawning a
+  broken CLI.
+- Deployment-only env keys are now skipped by BOTH `.env` load paths (the
+  boot loader in `bin/alphaclaw.js` previously hardcoded only the two
+  gateway-env hatches), and the two new restart-hardening knobs are
+  deployment-only — an agent-written `.env` can neither shrink the ready
+  budget nor disarm the lock sweep.
+- `writeFileAtomic` gained an opt-in `mode` (exclusive-create temp file, so
+  0600 lands on a fresh inode even over a pre-existing looser file); the
+  system-cron writer now uses it instead of a hand-rolled duplicate.
+
 ## [0.9.65] - 2026-09-01
 
 Drift Doctor now audits your models: outdated bindings, invalid model
