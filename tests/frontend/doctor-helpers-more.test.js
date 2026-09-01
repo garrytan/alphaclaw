@@ -44,6 +44,8 @@ describe("frontend/doctor helpers (extended)", () => {
 
   it("maps categories to tones with a default", () => {
     expect(getDoctorCategoryTone("mixed-concerns")).toBe("cyan");
+    expect(getDoctorCategoryTone("model drift")).toBe("warning");
+    expect(getDoctorCategoryTone("model_drift")).toBe("warning");
     expect(getDoctorCategoryTone("something else")).toBe("info");
     expect(getDoctorCategoryTone()).toBe("info");
   });

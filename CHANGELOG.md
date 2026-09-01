@@ -40,6 +40,80 @@ The rescue-session link is now revocable: stop kills it everywhere, restart mint
 - One-time link rotation: a session adopted from pre-upgrade state gets a
   fresh token at adoption (the persisted state had none).
 
+## [0.9.65] - 2026-09-01
+
+Drift Doctor now audits your models: outdated bindings, invalid model
+codings, wrong context limits, and skills that still steer the agent toward
+old models all surface as actionable cards.
+
+### Added
+- **Model-drift checks in Drift Doctor.** Every scan now validates the
+  workspace's model setup against a curated Anthropic model ontology
+  (tiers, lifecycle status, documented context windows and output caps):
+  - Agent bindings on deprecated models (e.g. Claude Opus 4.6) get a P1 card
+    with a one-click fix prompt naming the newest successor available **on
+    the binding's own provider** — never a model your gateway can't run, a
+    different provider's credentials, or a catalog row marked unavailable.
+    Superseded-but-served models get a gentler P2 nudge once their successor
+    is actually installed.
+  - Invalid model codings are caught: malformed keys, made-up Anthropic
+    versions, models a custom provider no longer declares (checked against
+    your own `models.providers` list, even when a stale catalog still carries
+    the key). Copy hedges honestly when judging against a cached or bundled
+    catalog snapshot.
+  - The model catalog's taxonomy is validated (every first-party Anthropic
+    model classified exactly once, unambiguous labels, consistent provider
+    fields) — a model newer than the ontology surfaces as a finding instead
+    of passing silently.
+  - Max context sizes are verified: first-party catalog rows are compared
+    against the models' documented context windows and output caps, and
+    custom `models.providers` entries without a plausible `contextWindow`
+    (or provider-level default) are flagged, including explicit implausible
+    overrides.
+  - Workspace skills whose SKILL.md references old models get per-skill cards
+    with replacement guidance, under strict safety bounds (streamed directory
+    walk, 8MB read budget, symlink containment, lookalike-token guards) and
+    honest truncation/overflow notes.
+- Doctor scheduled scans now react to model changes: the environment
+  signature includes the agents' model bindings, custom provider definitions,
+  and a catalog digest, so editing openclaw.json or refreshing the catalog
+  triggers a re-evaluation without waiting for a workspace edit.
+- The shared model-catalog cache gained an exec-free `peekCatalog()` view
+  (models + source) that the doctor consumes by late DI — scans never spawn
+  the CLI and fall back to the bundled catalog when the cache is cold.
+- New "model drift" doctor card category with its own UI tone.
+
+### Fixed
+- Dismissal semantics for the new cards follow the repo doctrine end to end:
+  severity, finding class, and (for skills) the flagged model set live in the
+  sourceKey, so dismissing a mild card can never suppress a later severe one.
+
+### Removed
+- The CI soak gate (`soak.yml`, added in v0.9.62): PRs no longer stay RED for
+  2 hours before merge. Removed by owner decision — merges are gated by tests
+  and the container-e2e aggregator alone.
+
+## [0.9.64] - 2026-08-31
+
+Disconnecting a Google account (and Gmail-watch teardown generally) is now
+race-safe and can no longer leave a live token or a stray process behind.
+
+### Fixed
+- Disconnecting a Google account now stops its Gmail watch first — the local
+  push-serve process is shut down and Google is told to stop delivering,
+  instead of the account row being deleted out from under a running watcher
+  (which used to leave a process holding its port and Google delivering for up
+  to 7 days).
+- A Gmail-watch teardown or a concurrently completing sign-in can no longer
+  clobber each other's state: every Google-account write that spans a
+  multi-second operation (disconnect, connect, credential save, watch
+  start/stop, serve restart) now happens under a lock against freshly read
+  state, closing a window where a just-connected account (and its live token)
+  could be silently erased.
+- A disconnect whose token export TIMES OUT now keeps the account and reports a
+  retryable error, instead of assuming there was no token to revoke and
+  removing the account — which could have orphaned a still-live token at Google.
+
 ## [0.9.63] - 2026-08-31
 
 The deployed OpenClaw agent no longer inherits AlphaClaw's own secrets.
