@@ -37,15 +37,11 @@ describe("ci/merge-gate workflow contract", () => {
     }
   });
 
-  it("soak.yml gates on a soak window with an expedite override and a ripen re-runner", () => {
-    const s = wf("soak.yml");
-    expect(s).toMatch(/^\s{2}soak:/m);
-    expect(s).toContain("SOAK_HOURS");
-    expect(s).toContain('"expedite"');
-    expect(s).toMatch(/^\s{2}ripen:/m);
-    expect(s).toContain("rerun-failed-jobs");
-    // Non-forgeable time source: first Actions run for the head SHA.
-    expect(s).toContain("actions/runs?head_sha=");
+  it("the soak gate stays removed (v0.9.65 owner decision — see AGENTS.md merge-gate section)", () => {
+    // soak.yml (v0.9.62) was deleted deliberately, not lost in a refactor.
+    // This inverse pin keeps a well-meaning cleanup from resurrecting it and
+    // silently re-imposing the 2h RED-until-ripe merge window.
+    expect(() => wf("soak.yml")).toThrow(/ENOENT/);
   });
 
   it("tag-release.yml tags on main push and trips on a duplicate-version collision", () => {
