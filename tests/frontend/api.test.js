@@ -2395,7 +2395,7 @@ describe("frontend/api claude-code local helpers", () => {
       ok: true,
       status: "running",
       sessionId: "rescue_01A",
-      sessionUrl: "https://claude.ai/code/rescue_01A",
+      sessionUrl: "https://box.example/rescue/feedfacefeedface",
     };
     global.fetch.mockResolvedValue(mockJsonResponse(200, payload));
     const api = await import("../../lib/public/js/lib/api.js");

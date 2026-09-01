@@ -704,6 +704,18 @@
 - **Context:** lib/server/watchdog-notify.js (`readChannelAllowFrom`, fan-out fallback block with the exclusion comment).
 - **Effort:** S. **Depends on:** nothing.
 
+## P3 — Operator "rotate rescue link" action without restarting the session
+- **What:** A button on the Watchdog rescue card (plus service method) that mints a new `linkToken`, persists it, and re-notifies — invalidating every distributed link without killing the live session.
+- **Why:** Stop + start already rotates the link, but costs the session (and its context). A leaked link with a healthy session shouldn't force a restart.
+- **Context:** `lib/server/claude-code-local/index.js` — rotate = replace `session.linkToken` + `persistSession()` under `runExclusive`; the resolver picks up the new token immediately. Re-notify via the existing notification-line hook. Deferred from the rescue-link CEO review (2026-09-01, D3.5).
+- **Effort:** M (service + route + card button + tests). **Depends on:** the rescue-link capability wrapper (v0.9.66).
+
+## P3 — Migrate the timing-safe comparison sites onto lib/server/utils/timing-safe.js
+- **What:** Move the four existing timing-safe comparisons (`routes/auth.js:93`, `routes/auth.js:429`, `routes/proxy.js:52`, `db/auth/members.js:62` — two distinct semantics today) and the non-timing-safe `!==` in `gmail-push.js:140` onto the shared hash-both-sides util shipped in v0.9.66.
+- **Why:** One canonical, length-leak-free comparator instead of five variants; gmail-push's plain `!==` is the outlier that should not exist on a token check.
+- **Context:** `lib/server/utils/timing-safe.js` carries the canonical semantic (from `routes/auth.js:424-429`). Deliberately NOT done in the rescue-link PR (blast-radius discipline per CLAUDE.md merge rules — security-sensitive comparison code across auth/proxy/members belongs in its own reviewed diff).
+- **Effort:** S. **Depends on:** nothing (util already shipped).
+
 ## Completed
 
 ## Make env-save channel sync one atomic lifecycle-lock op

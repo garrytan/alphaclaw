@@ -552,7 +552,7 @@ describe("server/watchdog", () => {
   it("appends the rescue-session line to incident-class notifications only", async () => {
     vi.useFakeTimers();
     const kRescueLine =
-      "🛟 Rescue session: https://claude.ai/code/sess_test123";
+      "🛟 Rescue session: https://box.example/rescue/feedfacefeedfacefeedfacefeedfacefeedfacefeedfacefeedfacefeedface";
     let healthChecks = 0;
     const { watchdog, notifier } = createHarness({
       autoRepair: false,
@@ -2184,6 +2184,25 @@ describe("server/watchdog", () => {
         correlationId: expect.any(String),
       }),
     );
+  });
+
+  it("rescue-link audit events are incident-neutral: eventType operation, no notification fired", () => {
+    // Pins an existing by-construction property (recordOperationEvent logs
+    // eventType "operation", outside the incident allowlist) — the rescue
+    // route's redeemed/probe events must never open, close, or stamp an
+    // incident, and must never fan out a notification.
+    const { watchdog, notifier, insertWatchdogEvent } = createHarness({});
+    for (const kind of ["rescue_link_redeemed", "rescue_link_probe_failed"]) {
+      watchdog.recordOperationEvent({
+        kind,
+        status: "ok",
+        details: { ip: "203.0.113.9", userAgent: "phone", tokenId: "deadbeef" },
+      });
+      expect(insertWatchdogEvent).toHaveBeenCalledWith(
+        expect.objectContaining({ eventType: "operation", source: kind }),
+      );
+    }
+    expect(notifier.notify).not.toHaveBeenCalled();
   });
 
   it("pauses manual repair after repeated doctor failures", async () => {
