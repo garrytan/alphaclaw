@@ -2803,3 +2803,93 @@ describe("server/openclaw-channel-sync", () => {
     );
   });
 });
+
+describe("pinDiverged legibility (post-incident 2026-09-01)", () => {
+  it("an applied build over the pin: boot log names the expected divergence, action is NOT drift_reverted, and getChannelInfo carries pinDiverged + appliedVersion", async () => {
+    const logs = [];
+    const { sync, store, installDir } = createHarness({
+      pin: "1.0.0",
+      installedVersion: "1.0.0",
+      sentinelVersion: "1.0.0",
+      extraSyncOptions: {
+        logger: { log: (m) => logs.push(String(m)), warn() {}, error() {} },
+      },
+    });
+    expect(sync.syncAtBoot().ok).toBe(true);
+    expect((await sync.applyUpdate({ channel: "beta", version: "1.1.0" })).status).toBe(202);
+
+    // The apply records the pick; the OVERLAY activates on the next boot —
+    // exactly the incident host's steady state (beta over the declared pin).
+    const boot = sync.syncAtBoot();
+    await flushAsync();
+    expect(boot.ok).toBe(true);
+    expect(boot.action).not.toBe("drift_reverted");
+    expect(store.readInstalledVersion({ installDir })).toBe("1.1.0");
+
+    const info = sync.getChannelInfo();
+    expect(info).toMatchObject({
+      installedVersion: "1.1.0",
+      pinVersion: "1.0.0",
+      appliedVersion: "1.1.0",
+      pinDiverged: true,
+    });
+    // The greppable boot line the next incident responder needs.
+    expect(
+      logs.some((m) =>
+        m.includes('over declared pin 1.0.0') && m.includes('npm ls'),
+      ),
+    ).toBe(true);
+  });
+
+  it("pinDiverged never legitimizes anomalies: pin path false, installed≠applied false, dev channel false", async () => {
+    // Pin path (nothing applied).
+    const pinOnly = createHarness({
+      pin: "1.0.0",
+      installedVersion: "1.0.0",
+      sentinelVersion: "1.0.0",
+    });
+    expect(pinOnly.sync.syncAtBoot().ok).toBe(true);
+    expect(pinOnly.sync.getChannelInfo().pinDiverged).toBe(false);
+
+    // Anomaly: applied recorded but the live tree matches NEITHER pin nor
+    // applied (stale state / foreign drift) — not "expected".
+    const anomaly = createHarness({
+      pin: "1.0.0",
+      installedVersion: "9.9.9",
+      sentinelVersion: "9.9.9",
+    });
+    anomaly.store.updateState((s) => {
+      s.pinVersion = "1.0.0";
+      s.applied = {
+        channel: "beta",
+        version: "1.1.0",
+        sha: null,
+        at: 1,
+        acceptedAt: null,
+        acceptedSource: null,
+      };
+      return s;
+    });
+    expect(anomaly.sync.getChannelInfo().pinDiverged).toBe(false);
+
+    // Dev channel: installedVersion is the dormant fallback, not what runs.
+    const dev = createHarness({
+      pin: "1.0.0",
+      installedVersion: "1.1.0",
+      sentinelVersion: "1.1.0",
+    });
+    dev.store.updateState((s) => {
+      s.pinVersion = "1.0.0";
+      s.applied = {
+        channel: "dev",
+        version: "1.1.0",
+        sha: "abc123",
+        at: 1,
+        acceptedAt: null,
+        acceptedSource: null,
+      };
+      return s;
+    });
+    expect(dev.sync.getChannelInfo().pinDiverged).toBe(false);
+  });
+});

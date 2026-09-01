@@ -12,6 +12,20 @@ Canonical reference for the AlphaClaw gateway state model: the as-implemented st
 
 **Reading guide.** §2 is descriptive (what exists today, with file:line refs). §3–§10 are normative (what M2/M3 build). The State × UI matrix (§5) is the single source for UI labels, popovers, and notification copy. The precedence table (§4) is the reducer's contract; the reducer test matrix (M2.2) is generated from it.
 
+> **2026-09 update (post-incident hardening, supersedes the 120s figures below).**
+> The restart ready budget is no longer a fixed 120s: it is env-tunable
+> (`GATEWAY_RESTART_READY_TIMEOUT`, default 300s, clamped 30–480s,
+> `constants.js`), and every restart-class lifecycle-lock hold, the operation
+> record's lifetime (with a queue/step keepalive refresh), and the watchdog
+> expected-restart suppression windows derive from one shared
+> `kGatewayRestartOperationBudgetMs`. A restart that fails now persists a
+> redacted evidence tail + cause-line-enriched `errorSummary` on the
+> operation record (0600 `alphaclaw-restart-operation.json`), aborts the wait
+> early when the restart supervisor dies (with one final readiness probe),
+> and a pre-start sweep clears provably-stale upstream state-lifecycle locks
+> (boot / reactive launch / cold-start sites — `openclaw-state-locks.js`).
+> The pre-M2 defect list below is retained as history.
+
 ---
 
 ## 2. Current state (as-implemented, pre-M2)

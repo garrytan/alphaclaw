@@ -42,6 +42,7 @@ const createHarness = ({
   consumeRestartHandoffImpl,
   updateEnvFile = null,
   getRescueSessionLine,
+  collectAdvisoryDoctorJson = null,
 } = {}) => {
   process.env.WATCHDOG_AUTO_REPAIR = autoRepair ? "true" : "false";
   process.env.WATCHDOG_NOTIFICATIONS_DISABLED = notificationsDisabled
@@ -69,6 +70,7 @@ const createHarness = ({
 
   const watchdog = createWatchdog({
     clawCmd,
+    ...(collectAdvisoryDoctorJson ? { collectAdvisoryDoctorJson } : {}),
     launchGatewayProcess,
     probeGatewayTcp,
     gatewayLifecycleLock,
@@ -3147,6 +3149,78 @@ describe("server/watchdog", () => {
     expect(watchdog.getStatus().health).toBe("healthy");
     expect(watchdog.isReadyForDispatch()).toEqual({ ok: true, reason: "" });
     watchdog.stop();
+    vi.useRealTimers();
+  });
+
+  it("advisory doctor via the injected collector: null hides nothing behind noise; secret-y output still hints; health stays probe-driven", async () => {
+    vi.useFakeTimers();
+    const makeReadyzHarness = (collectAdvisoryDoctorJson) => {
+      const clawCmdImpl = vi.fn(async () => ({
+        ok: true,
+        stdout: JSON.stringify({ ok: true }),
+      }));
+      const harness = createHarness({
+        clawCmdImpl,
+        collectAdvisoryDoctorJson,
+        resolveGatewayReadyzUrl: () => "http://127.0.0.1:18789/readyz",
+        fetchImpl: async (url) => ({
+          ok: true,
+          status: 200,
+          text: async () =>
+            String(url).includes("readyz")
+              ? JSON.stringify({
+                  ready: false,
+                  failing: ["secrets"],
+                  eventLoop: { degraded: true },
+                })
+              : JSON.stringify({ ok: true, status: "live" }),
+        }),
+      });
+      return { ...harness, clawCmdImpl };
+    };
+
+    // Broken doctor CLI: the collector yields null — no crash noise enters
+    // the event log, no hint event, and NO raw clawCmd doctor spawn.
+    const collectorNull = vi.fn(async () => null);
+    const broken = makeReadyzHarness(collectorNull);
+    broken.watchdog.start();
+    broken.watchdog.onGatewayLaunch({ startedAt: Date.now() });
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(collectorNull).toHaveBeenCalledTimes(1);
+    expect(
+      broken.clawCmdImpl.mock.calls.some(([cmd]) => cmd.startsWith("doctor")),
+    ).toBe(false);
+    expect(
+      broken.insertWatchdogEvent.mock.calls.some(
+        ([event]) =>
+          event.eventType === "readiness_degraded" &&
+          event.details?.hint === "doctor reports secret-runtime degradation",
+      ),
+    ).toBe(false);
+    // Health classification is untouched by the broken doctor tool.
+    expect(broken.watchdog.getStatus().health).toBe("degraded");
+    broken.watchdog.stop?.();
+
+    // Usable doctor output naming a secret failure still produces the hint.
+    const collectorSecrets = vi.fn(async () =>
+      JSON.stringify({
+        ok: false,
+        findings: [{ checkId: "secrets.runtime", detail: "secret load failed" }],
+      }),
+    );
+    const hinted = makeReadyzHarness(collectorSecrets);
+    hinted.watchdog.start();
+    hinted.watchdog.onGatewayLaunch({ startedAt: Date.now() });
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(collectorSecrets).toHaveBeenCalledTimes(1);
+    expect(
+      hinted.insertWatchdogEvent.mock.calls.some(
+        ([event]) =>
+          event.eventType === "readiness_degraded" &&
+          event.details?.hint === "doctor reports secret-runtime degradation",
+      ),
+    ).toBe(true);
+    hinted.watchdog.stop?.();
     vi.useRealTimers();
   });
 

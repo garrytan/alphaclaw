@@ -1,5 +1,35 @@
 # TODOS
 
+## P2 — File the two upstream openclaw reports from the 2026-09-01 incident (gateway-hardening wave)
+- **What:** (1) `openclaw doctor`'s `registerBundledHealthChecks` resolves plugin public surfaces through the bundled-only loader, so a registry/npm-installed plugin (codex) crashes the CLI at startup ("Could not start the CLI … Unable to resolve bundled plugin public surface codex/api.js", 2026.9.1-beta.1) — it should resolve via the plugin registry. (2) State-lifecycle locks (`$TMPDIR/openclaw-state-locks-*`) carry no documented ownership metadata and no cleanup verb; a lock left by a killed boot wedges every later boot AND every CLI invocation on >= 2026.9.1. Ask for owner metadata (pid/started-at in a defined format) or a `state-locks clean` verb.
+- **Why:** AlphaClaw now carries two belts coupled to these internals (the doctor-CLI classifier's crash signatures and the pre-start lock sweep in `lib/server/openclaw-state-locks.js`); both are stamped "verified against 2026.9.1-beta.1" and should be DELETED once upstream owns the fixes. Upstream lock ownership/fencing is under design (openclaw/openclaw#121069) — reference it in the report and re-verify the sweep against whatever lands.
+- **Context:** incident 2026-09-01 (host srv-d776lrvpm1nc73e08c9g, ~6 min down); lib/server/doctor/classify-doctor-cli.js, lib/server/openclaw-state-locks.js (header comments carry the verified-against stamps).
+- **Effort:** S. **Depends on:** upstream issue tracker access.
+
+## P3 — Doctor-availability UI chip (gateway-hardening wave follow-up)
+- **What:** A small chip/badge on the Doctor tab rendering `openclawDoctorCli` from doctor status ("upstream doctor broken since <at>: <reason>") — the tracker (`lib/server/doctor/availability.js`) and status field already exist; this is render-only.
+- **Why:** Today the state is visible in doctor status JSON, watchdog `doctor_probe` events, and a process.log line; a glanceable chip closes the loop for operators who live in the UI.
+- **Context:** lib/server/doctor/service.js buildStatus (`openclawDoctorCli`), lib/public/js/components/doctor/. Run `npm run build:ui` after the change.
+- **Effort:** S. **Depends on:** —.
+
+## P3 — Upgrade-page note rendering pinDiverged/appliedVersion (gateway-hardening wave follow-up)
+- **What:** A one-line note on the Upgrade page when `pinDiverged` is true: "running <appliedVersion> (<channel>) over the declared pin <pinVersion> — expected; `npm ls` will report the dep invalid". Both channel APIs already expose the fields.
+- **Why:** The 2026-09-01 responder diagnosed the expected overlay divergence as a version-drift bug; the boot log line now names it, but the Upgrade page is where operators actually look.
+- **Context:** routes/system.js buildOpenclawChannelSummary, routes/openclaw-channel.js catalog `channel`, lib/public/js/components/upgrade-tab/. Run `npm run build:ui`.
+- **Effort:** S. **Depends on:** —.
+
+## P3 — Adaptive readiness budget from watchdog history (rejected for the hardening wave, revisitable)
+- **What:** Scale `GATEWAY_RESTART_READY_TIMEOUT`'s effective value from recorded cold-start durations (`watchdog_events` gateway_restart `durationMs`, 30-day retention) — e.g. `max(configured, 2 x p95 cold start)` with the existing 480s ceiling.
+- **Why:** Deliberately rejected in the plan review (D3a): couples gateway.js to the watchdog DB and under-scales on first boot/DB loss, while a generous static budget costs nothing (the wait returns the instant the port answers). Revisit only if heterogeneous fleets make one static default wrong in both directions.
+- **Context:** lib/server/constants.js (kGatewayRestartReadyTimeoutMs + kGatewayRestartOperationBudgetMs derivation), lib/server/db/watchdog (durationMs in gateway_restart events).
+- **Effort:** M. **Depends on:** the hardening wave's budget threading (landed).
+
+## P3 — Single-flight doctor collector freshness barrier (documented v1 nuance)
+- **What:** A joiner of the shared doctor spawn may receive results from a run started BEFORE its trigger (e.g. a post-repair medic collect coalescing onto a pre-repair spawn). Option: joiners whose trigger timestamp postdates the in-flight run's start optionally wait for the NEXT run.
+- **Why:** Bounded staleness (one 60s spawn) accepted in review; matters most in the post-repair evidence window. The collector's header documents the nuance.
+- **Context:** lib/server/doctor/collect-doctor-json.js.
+- **Effort:** S. **Depends on:** —.
+
 ## P3 — Google disconnect: verify no gog no-token stderr contract remains (2026-08-31, from the v0.9.64 fix wave)
 - **What:** The v0.9.64 fix wave closed the red-team findings on disconnect: (1) a locked read-modify-write helper `updateGoogleState` now serializes the disconnect removal AND the OAuth-callback upsert (both read fresh under one lock — the lost-update / disconnect-vs-reauth race is closed); (2) `gogCmd` now returns `timedOut`/`code`, and a TIMED-OUT token export is treated as retryable (keeps the account) instead of orphaning a live token; (3) disconnect now stops the account's Gmail watch (local serve process + `gmail watch stop`) before revocation via the injected `stopGmailWatch`. (4) grant-wide revocation: sibling rows are self-correcting — `/api/google/accounts` re-probes `gog auth list --check` on every fetch, so a sibling invalidated by a grant-wide revoke shows unauthenticated on the next status load; no persistent staleness, left as-is.
 - **Remaining (P3, needs a live box):** a CLEAN nonzero (non-timeout) export failure still falls through to best-effort removal because AlphaClaw does not know gog's exact "no such account / no token" stderr string — verify that string against the pinned gog build and, if a clean nonzero can mean "transient but not killed" (e.g. locked keyring exiting nonzero without timeout), route it to retryable too. Contract-test it; do NOT guess the string.

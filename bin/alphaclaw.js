@@ -416,6 +416,10 @@ try {
 // 5. Load .env into process.env
 // ---------------------------------------------------------------------------
 
+const {
+  kDeploymentOnlyEnvKeys,
+} = require("../lib/server/deployment-only-env");
+
 if (fs.existsSync(envFilePath)) {
   const content = fs.readFileSync(envFilePath, "utf8");
   for (const line of content.split("\n")) {
@@ -425,12 +429,12 @@ if (fs.existsSync(envFilePath)) {
     if (eqIdx === -1) continue;
     const key = trimmed.slice(0, eqIdx);
     const value = trimmed.slice(eqIdx + 1);
-    // The gateway-env allowlist hatches must come from the real deployment
-    // environment ONLY. The agent can write this .env (HOME=rootDir, exec
-    // full), so honoring these keys here would let it self-grant broader
-    // gateway-child inheritance on the next restart — skip them so the
-    // boot-time snapshot in gateway-env-policy.js reflects deployment env.
-    if (key === "ALPHACLAW_GATEWAY_ENV_UNRESTRICTED" || key === "ALPHACLAW_GATEWAY_ENV_PASSTHROUGH") {
+    // Deployment-only keys must come from the real deployment environment
+    // ONLY. The agent can write this .env (HOME=rootDir, exec full), so
+    // honoring them here would let it self-grant broader gateway-child env
+    // inheritance — or steer the restart budget / disarm the stale-lock
+    // sweep on the next boot. Shared list: lib/server/deployment-only-env.
+    if (kDeploymentOnlyEnvKeys.includes(key)) {
       continue;
     }
     if (value) process.env[key] = value;
