@@ -2395,14 +2395,17 @@ describe("server/gateway restart behavior", () => {
         "owns state-lifecycle",
       );
       expect(rejection.evidence.stderrTail[0]).toHaveLength(2048);
-      gateway.__resetGatewayLaunchGateForTests();
     });
 
-    it("sweeps stale state locks reactively: never on a clean launch, always after a failed attempt", async () => {
-      const stateLocks = require("../../lib/server/openclaw-state-locks");
-      const sweepSpy = vi
-        .spyOn(stateLocks, "sweepStaleOpenclawStateLocks")
-        .mockReturnValue({ cleared: [], kept: [], errors: [] });
+    it("appends live-openclaw-process diagnostics to evidence when the failure is lock contention", async () => {
+      const lockContention = require("../../lib/server/openclaw-lock-contention");
+      vi.spyOn(lockContention, "describeLockContention").mockReturnValue({
+        live: [{ pid: 57, cmdline: "openclaw gateway run" }],
+        lockDirs: ["openclaw-state-locks-0"],
+        lines: [
+          "[alphaclaw] restart: 1 live openclaw process(es) — a lifecycle lock holder is one of these: pid 57 (openclaw gateway run)",
+        ],
+      });
       const supervisor = createChild();
       childProcess.spawn = vi.fn(() => supervisor);
       childProcess.execFile = execFileOk("");
@@ -2410,79 +2413,51 @@ describe("server/gateway restart behavior", () => {
       net.createConnection = vi.fn(() => createSocket(false));
       delete require.cache[modulePath];
       const gateway = require(modulePath);
-      vi.spyOn(console, "log").mockImplementation(() => {});
       vi.spyOn(console, "warn").mockImplementation(() => {});
+      vi.spyOn(console, "log").mockImplementation(() => {});
       vi.spyOn(process.stderr, "write").mockImplementation(() => true);
-      gateway.__resetGatewayLaunchGateForTests();
 
-      // Clean launch (light-restart fallback path): gate disarmed => the
-      // launch-path sweep must NOT run (no racing healthy incumbents).
-      await gateway.restartGatewayLight(vi.fn());
-      const launchSweeps = () =>
-        sweepSpy.mock.calls.filter(([opts]) => opts?.site === "launch");
-      expect(launchSweeps()).toHaveLength(0);
-
-      // A failed restart attempt arms the gate. (The restart supervisor is a
-      // FRESH spawn — take the LAST registered handlers, not the managed
-      // child's from the clean launch above.)
       const pending = gateway.runGatewayCmd("--force");
       pending.catch(() => {});
       await new Promise((resolve) => setImmediate(resolve));
+      const stderrHandler = supervisor.stderr.on.mock.calls
+        .filter((call) => call[0] === "data")
+        .at(-1)?.[1];
+      stderrHandler("ERROR another OpenClaw process owns state-lifecycle\n");
       const exitHandler = supervisor.on.mock.calls
         .filter((call) => call[0] === "exit")
         .at(-1)?.[1];
       exitHandler(1, null);
-      await pending.catch(() => {});
-      expect(gateway.__getGatewayLaunchGateForTests().lastAttemptFailed).toBe(
-        true,
-      );
 
-      // ...so the next launch-path entry sweeps. (Mark the mock managed
-      // child as exited so the light restart takes the launch fallback.)
-      supervisor.exitCode = 1;
-      await gateway.restartGatewayLight(vi.fn());
-      expect(launchSweeps().length).toBeGreaterThanOrEqual(1);
-      expect(launchSweeps()[0][0]).toMatchObject({
-        site: "launch",
-        afterFailedReady: true,
+      const rejection = await pending.catch((err) => err);
+      expect(rejection.name).toBe("GatewayRestartError");
+      // The diagnostic rides in the persisted evidence, naming the live holder.
+      expect(rejection.evidence.stdoutTail.join("\n")).toContain(
+        "pid 57 (openclaw gateway run)",
+      );
+      expect(lockContention.describeLockContention).toHaveBeenCalledWith({
+        site: "restart",
       });
-      gateway.__resetGatewayLaunchGateForTests();
     });
 
-    it("cold starts sweep between the settled stop and the fresh spawn, with portReleased", async () => {
-      const stateLocks = require("../../lib/server/openclaw-state-locks");
-      const sweepSpy = vi
-        .spyOn(stateLocks, "sweepStaleOpenclawStateLocks")
-        .mockReturnValue({ cleared: [], kept: [], errors: [] });
+    it("does NOT run the contention diagnostic for unrelated failures", async () => {
+      const lockContention = require("../../lib/server/openclaw-lock-contention");
+      const spy = vi.spyOn(lockContention, "describeLockContention");
       const supervisor = createChild();
-      let running = false;
-      // Port is down until the supervisor spawn — stop settles instantly
-      // (portReleased=true), then the ready wait succeeds.
-      childProcess.spawn = vi.fn(() => {
-        running = true;
-        return supervisor;
-      });
+      childProcess.spawn = vi.fn(() => supervisor);
       childProcess.execFile = execFileOk("");
       fs.existsSync = vi.fn(() => false);
-      net.createConnection = vi.fn(() => createSocket(() => running));
+      net.createConnection = vi.fn(() => createSocket(false));
       delete require.cache[modulePath];
       const gateway = require(modulePath);
+      vi.spyOn(console, "warn").mockImplementation(() => {});
       vi.spyOn(console, "log").mockImplementation(() => {});
-      gateway.__resetGatewayLaunchGateForTests();
-
-      await gateway.restartGateway(vi.fn());
-      const coldSweeps = sweepSpy.mock.calls.filter(
-        ([opts]) => opts?.site === "cold_start",
-      );
-      expect(coldSweeps).toHaveLength(1);
-      expect(coldSweeps[0][0]).toMatchObject({
-        site: "cold_start",
-        portReleased: true,
-      });
-      // Sweep ran before the fresh --force spawn.
-      expect(sweepSpy.mock.invocationCallOrder[0]).toBeLessThan(
-        childProcess.spawn.mock.invocationCallOrder[0],
-      );
+      const pending = gateway.runGatewayCmd("--force");
+      pending.catch(() => {});
+      await new Promise((resolve) => setImmediate(resolve));
+      supervisor.on.mock.calls.filter((c) => c[0] === "exit").at(-1)?.[1](1, null);
+      await pending.catch(() => {});
+      expect(spy).not.toHaveBeenCalled();
     });
 
     it("a dying supervisor still succeeds when a final probe finds the gateway up (healthy incumbent)", async () => {

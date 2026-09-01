@@ -541,51 +541,6 @@ describeContainer("container E2E: stable→beta upgrade in the production image"
     await waitForVersion(kContainerA, ctx.beta, 10 * kMin);
   });
 
-  step("boot state-lock sweep clears a stale dead-owner lock after a killed boot (incident 2026-09-01)", 12 * kMin, async () => {
-    // The default-on boot sweep is globally disabled in unit tiers (it
-    // deletes real tmpdir entries), so THIS is its one real-format execution
-    // before production: seed a lock whose recorded owner is provably dead,
-    // kill PID 1 (a literal killed-boot — the incident's own trigger), let
-    // --restart=always bring the container back, and require the boot sweep
-    // to have cleared the lock before the gateway came up.
-    await execInContainer(kContainerA, [
-      "sh",
-      "-c",
-      `printf '{"pid":3999999,"at":0}' > /tmp/openclaw-state-locks-0`,
-    ]);
-    await execInContainer(kContainerA, ["test", "-f", "/tmp/openclaw-state-locks-0"]);
-    const beforeStartedAt = await containerStartedAt(kContainerA);
-    const beforeRestarts = await restartCount(kContainerA);
-    await execInContainer(kContainerA, ["sh", "-c", "kill 1"]).catch(() => {});
-    await waitFor(
-      async () => {
-        if ((await restartCount(kContainerA)) > beforeRestarts) return true;
-        return (await containerStartedAt(kContainerA)) !== beforeStartedAt;
-      },
-      { timeoutMs: 5 * kMin, intervalMs: 2000, label: "killed-boot restart observed" },
-    );
-    ctx.cookie = null;
-    await waitForUiUp(kContainerA, 5 * kMin);
-    // Assert the SEEDED content is gone, not the path: a healthy post-boot
-    // gateway may legitimately recreate its own lock at the same name — the
-    // sweep's job was only to remove the dead-owner payload we planted.
-    const seededSurvived = await execInContainer(kContainerA, [
-      "sh",
-      "-c",
-      "grep -q 3999999 /tmp/openclaw-state-locks-0 2>/dev/null",
-    ])
-      .then(() => true)
-      .catch(() => false);
-    if (seededSurvived) {
-      throw new Error(
-        "boot state-lock sweep did NOT clear the seeded dead-owner /tmp/openclaw-state-locks-0",
-      );
-    }
-    console.log(
-      "[container-e2e] boot state-lock sweep cleared the seeded stale lock after a killed boot",
-    );
-  });
-
   step("browser shows the beta verdict after a fresh login", 8 * kMin, async () => {
     // (h) The verdict banner may have expired after reloads — accept either
     // the banner or the status card's Running row showing the beta.

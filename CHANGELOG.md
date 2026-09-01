@@ -9,8 +9,8 @@ Versions follow this repository's `package.json` release counter.
 
 Post-incident hardening (2026-09-01 outage): a slow-but-healthy gateway boot no
 longer escalates to a rescue session, a failed restart now names its real
-blocking cause with persisted evidence, a stale upstream state-lifecycle lock
-is cleared before it can wedge a boot, and a broken `openclaw doctor` CLI is a
+blocking cause with persisted evidence (including WHICH live OpenClaw process
+holds the state-lifecycle lock), and a broken `openclaw doctor` CLI is a
 first-class surfaced state instead of an invisible red herring.
 
 ### Added
@@ -30,15 +30,19 @@ first-class surfaced state instead of an invisible red herring.
   state-lifecycle …") instead of only the timeout symptom. Evidence redaction
   gained shape-based token masking (Bearer/JWT/provider keys/DSNs) and
   control-character normalization applied before matching.
-- Pre-start sweep of provably-stale upstream OpenClaw state-lifecycle locks
-  (`$TMPDIR/openclaw-state-locks-*`), the incident's actual blocker: runs
-  first in the boot sequence (before any step that can spawn the openclaw
-  CLI), reactively before relaunches that follow a failed attempt, and during
-  cold-start restarts. Safety rules: locks whose recorded owner is alive and
-  openclaw/node-shaped are never touched; deletion goes through an atomic
-  quarantine-rename; every decision is logged under `[state-lock-sweep]`;
-  `ALPHACLAW_STATE_LOCK_SWEEP_DISABLED=1` is the kill switch. Exercised for
-  real (seeded lock + killed boot) in the container e2e tier.
+- Lock-contention diagnostics (read-only). Verified against the openclaw
+  2026.9.1-beta.1 tarball: the state-lifecycle "lock" is an exclusive SQLite
+  transaction held by a LIVE process (`BEGIN EXCLUSIVE` on
+  `$TMPDIR/openclaw-state-locks-<uid>/<family>.<hash>.lock.sqlite`, released by
+  the kernel the instant the holder dies) — so a leftover lock file never
+  blocks anyone, and "another OpenClaw process owns state-lifecycle" always
+  names a live holder (in the incident: the pre-restart process still shutting
+  down). When a restart fails with that refusal, AlphaClaw now appends the
+  live openclaw processes (pid + cmdline via /proc, mirroring upstream's own
+  owner-status logic) to the persisted evidence, and the boot sequence logs
+  any openclaw process already alive before it spawns anything. Nothing is
+  ever deleted: removing a held lock file would let a second acquirer take
+  the exclusive lock on a fresh inode — two owners of the state database.
 - Doctor-CLI availability is now a first-class state: all six doctor call
   sites classify outcomes through one classifier (a CLI that cannot start is
   distinct from "zero findings" and from a timed-out capture), transitions
@@ -68,9 +72,8 @@ first-class surfaced state instead of an invisible red herring.
   broken CLI.
 - Deployment-only env keys are now skipped by BOTH `.env` load paths (the
   boot loader in `bin/alphaclaw.js` previously hardcoded only the two
-  gateway-env hatches), and the two new restart-hardening knobs are
-  deployment-only — an agent-written `.env` can neither shrink the ready
-  budget nor disarm the lock sweep.
+  gateway-env hatches), and the new restart-budget knob is deployment-only —
+  an agent-written `.env` cannot shrink the ready budget.
 - `writeFileAtomic` gained an opt-in `mode` (exclusive-create temp file, so
   0600 lands on a fresh inode even over a pre-existing looser file); the
   system-cron writer now uses it instead of a hand-rolled duplicate.

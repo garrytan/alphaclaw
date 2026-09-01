@@ -24,12 +24,6 @@ https.globalAgent = new https.Agent({ keepAlive: false });
 // autotune's own suites re-enable it per call via explicit `env: {}` options
 // and mocked cgroup files.
 process.env.ALPHACLAW_AUTOTUNE_DISABLED = "1";
-// The stale-lock sweep deletes matching entries in the REAL os.tmpdir() —
-// on a dev machine running an actual openclaw gateway, a cold-start test
-// could reap a live installation's lock. Off for every tier; the sweep's own
-// suite re-enables it per test, and one container-tier case exercises the
-// real thing inside Docker.
-process.env.ALPHACLAW_STATE_LOCK_SWEEP_DISABLED = "1";
 
 // Guarantee git exit-code fidelity for every test.
 //

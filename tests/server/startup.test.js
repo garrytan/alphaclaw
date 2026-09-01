@@ -11,7 +11,7 @@ describe("server/startup", () => {
     setBootPhase("ready");
   });
 
-  it("sweeps stale state locks FIRST inside the boot lock — before any step that can spawn the openclaw CLI", async () => {
+  it("reports lock contention FIRST inside the boot lock — before any step that can spawn the openclaw CLI", async () => {
     const callOrder = [];
     const mkStep = (name, ret) =>
       vi.fn(() => {
@@ -19,10 +19,10 @@ describe("server/startup", () => {
         return ret;
       });
     await runOnboardedBootSequence({
-      sweepStateLocksAtBoot: mkStep("sweepStateLocksAtBoot", {
-        cleared: [],
-        kept: [],
-        errors: [],
+      reportLockContentionAtBoot: mkStep("reportLockContentionAtBoot", {
+        live: [],
+        lockDirs: [],
+        lines: [],
       }),
       ensureManagedExecDefaults: mkStep("ensureManagedExecDefaults"),
       ensureUsageTrackerPluginConfig: mkStep("ensureUsageTrackerPluginConfig"),
@@ -41,17 +41,19 @@ describe("server/startup", () => {
       watchdog: { start: mkStep("watchdog.start") },
       gmailWatchService: { start: mkStep("gmailWatchService.start") },
     });
-    // The sweep must beat every CLI-spawning step: on openclaw >= 2026.9.1
-    // all CLI work serializes on the state-lifecycle lock, so a stale lock
-    // wedges reconcile's sized doctor --fix long before startGateway.
-    expect(callOrder[0]).toBe("sweepStateLocksAtBoot");
-    expect(callOrder.indexOf("sweepStateLocksAtBoot")).toBeLessThan(
+    // The report must beat every CLI-spawning step: on openclaw >= 2026.9.1
+    // all CLI work serializes on the state-lifecycle coordinator held by a
+    // LIVE process — an orphan from a killed previous boot is what a later
+    // "owns state-lifecycle" refusal points at; name it before anything can
+    // contend with it.
+    expect(callOrder[0]).toBe("reportLockContentionAtBoot");
+    expect(callOrder.indexOf("reportLockContentionAtBoot")).toBeLessThan(
       callOrder.indexOf("ensureManagedExecDefaults"),
     );
-    expect(callOrder.indexOf("sweepStateLocksAtBoot")).toBeLessThan(
+    expect(callOrder.indexOf("reportLockContentionAtBoot")).toBeLessThan(
       callOrder.indexOf("syncChannelConfig"),
     );
-    expect(callOrder.indexOf("sweepStateLocksAtBoot")).toBeLessThan(
+    expect(callOrder.indexOf("reportLockContentionAtBoot")).toBeLessThan(
       callOrder.indexOf("reconcileBootConfig"),
     );
     expect(callOrder.indexOf("reconcileBootConfig")).toBeLessThan(
@@ -59,11 +61,11 @@ describe("server/startup", () => {
     );
   });
 
-  it("a throwing boot sweep never aborts the boot sequence", async () => {
+  it("a throwing boot contention report never aborts the boot sequence", async () => {
     const startGateway = vi.fn();
     await runOnboardedBootSequence({
-      sweepStateLocksAtBoot: vi.fn(() => {
-        throw new Error("sweep exploded");
+      reportLockContentionAtBoot: vi.fn(() => {
+        throw new Error("report exploded");
       }),
       ensureManagedExecDefaults: vi.fn(),
       ensureUsageTrackerPluginConfig: vi.fn(),

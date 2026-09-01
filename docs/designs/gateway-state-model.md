@@ -22,8 +22,10 @@ Canonical reference for the AlphaClaw gateway state model: the as-implemented st
 > redacted evidence tail + cause-line-enriched `errorSummary` on the
 > operation record (0600 `alphaclaw-restart-operation.json`), aborts the wait
 > early when the restart supervisor dies (with one final readiness probe),
-> and a pre-start sweep clears provably-stale upstream state-lifecycle locks
-> (boot / reactive launch / cold-start sites — `openclaw-state-locks.js`).
+> and a lock-contention failure ("another OpenClaw process owns
+> state-lifecycle") appends the live openclaw processes to the evidence —
+> upstream's coordinator is an exclusive SQLite transaction held by a live
+> process, never a stale file (`openclaw-lock-contention.js`, read-only).
 > The pre-M2 defect list below is retained as history.
 
 ---

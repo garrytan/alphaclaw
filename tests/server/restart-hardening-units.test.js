@@ -204,13 +204,12 @@ describe("deployment-only env keys cover BOTH load paths", () => {
     kDeploymentOnlyEnvKeys,
   } = require("../../lib/server/deployment-only-env");
 
-  it("lists the gateway hatches AND the restart-hardening knobs", () => {
+  it("lists the gateway hatches AND the restart-hardening knob", () => {
     expect(kDeploymentOnlyEnvKeys).toEqual(
       expect.arrayContaining([
         "ALPHACLAW_GATEWAY_ENV_UNRESTRICTED",
         "ALPHACLAW_GATEWAY_ENV_PASSTHROUGH",
         "GATEWAY_RESTART_READY_TIMEOUT",
-        "ALPHACLAW_STATE_LOCK_SWEEP_DISABLED",
       ]),
     );
   });

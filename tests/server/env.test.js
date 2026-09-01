@@ -91,10 +91,9 @@ describe("server/env", () => {
         "OPENAI_API_KEY=ok",
         "ALPHACLAW_GATEWAY_ENV_UNRESTRICTED=1",
         "ALPHACLAW_GATEWAY_ENV_PASSTHROUGH=*",
-        // Restart-hardening knobs are deployment-only too: an agent-written
-        // .env must not shrink the ready budget or disarm the lock sweep.
+        // The restart-hardening knob is deployment-only too: an agent-written
+        // .env must not shrink the ready budget.
         "GATEWAY_RESTART_READY_TIMEOUT=30",
-        "ALPHACLAW_STATE_LOCK_SWEEP_DISABLED=1",
       ].join("\n"),
     );
     const env = loadEnvModule(tmpDir);
@@ -103,7 +102,6 @@ describe("server/env", () => {
     delete process.env.ALPHACLAW_GATEWAY_ENV_PASSTHROUGH;
     const savedReadyTimeout = process.env.GATEWAY_RESTART_READY_TIMEOUT;
     delete process.env.GATEWAY_RESTART_READY_TIMEOUT;
-    delete process.env.ALPHACLAW_STATE_LOCK_SWEEP_DISABLED;
 
     env.reloadEnv();
 
@@ -111,13 +109,9 @@ describe("server/env", () => {
     expect(process.env.ALPHACLAW_GATEWAY_ENV_UNRESTRICTED).toBeUndefined();
     expect(process.env.ALPHACLAW_GATEWAY_ENV_PASSTHROUGH).toBeUndefined();
     expect(process.env.GATEWAY_RESTART_READY_TIMEOUT).toBeUndefined();
-    expect(process.env.ALPHACLAW_STATE_LOCK_SWEEP_DISABLED).toBeUndefined();
     if (savedReadyTimeout !== undefined) {
       process.env.GATEWAY_RESTART_READY_TIMEOUT = savedReadyTimeout;
     }
-    // Restore the suite-wide safety pin (tests/setup-agent.js): without it,
-    // later tests in this worker could sweep the REAL os.tmpdir().
-    process.env.ALPHACLAW_STATE_LOCK_SWEEP_DISABLED = "1";
     // And they never surface through the file readers either.
     expect(env.readEnvFile().some((v) => v.key.startsWith("ALPHACLAW_GATEWAY_ENV_"))).toBe(
       true,
