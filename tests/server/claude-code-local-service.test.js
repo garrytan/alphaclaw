@@ -1220,6 +1220,12 @@ describe("claude-code-local service", () => {
         () => "",
         () => "file:///etc",
         () => "not a url",
+        // The REAL resolveSetupUrl never returns empty — its zero-config
+        // default is http://localhost:3000 (onboarding/workspace.js). These
+        // two pin the loopback filter that keeps that default from shipping
+        // dead wrapper links in notifications and QR codes.
+        () => "http://localhost:3000",
+        () => "http://127.0.0.1:8080",
         () => {
           throw new Error("boom");
         },

@@ -28,6 +28,11 @@ The rescue-session link is now revocable: stop kills it everywhere, restart mint
   transports — Telegram (`disable_web_page_preview`), Slack
   (`unfurl_links`/`unfurl_media` off), and Discord (`SUPPRESS_EMBEDS`) — so
   platform crawlers no longer follow (and thereby redeem) rescue links.
+- When `ALPHACLAW_SETUP_URL` (or an equivalent base-URL variable) is set, the
+  rescue link shown on the card and QR code is built from that validated
+  public origin rather than from request headers, so a misconfigured reverse
+  proxy can never point the link at a foreign host. Without a configured base
+  the request origin is still used, as before.
 - New shared util `lib/server/utils/timing-safe.js` (hash-both-sides
   `timingSafeEqual` — the canonical semantic from `routes/auth.js`), used by
   the rescue resolver. Migrating the pre-existing comparison sites onto it is

@@ -280,6 +280,86 @@ describe("rescue-link route", () => {
     expect(checkSessionLiveness).toHaveBeenCalledTimes(2);
   });
 
+  it("stamps suppressed counts onto the next event so capped windows never read as silence", async () => {
+    let now = 7_000_000;
+    const recordOperationEvent = vi.fn();
+    const { app } = createApp({
+      recordOperationEvent,
+      throttle: createGates(),
+      nowFn: () => now,
+    });
+    // 1 probe event allowed, then 4 suppressed inside the per-IP window.
+    for (let i = 0; i < 5; i += 1) {
+      await request(app).get(`/rescue/${"66".repeat(32)}`);
+    }
+    expect(recordOperationEvent).toHaveBeenCalledTimes(1);
+    expect(recordOperationEvent.mock.calls[0][0].details.suppressedSinceLast).toBe(0);
+    now += 5 * 60 * 1000 + 1;
+    await request(app).get(`/rescue/${"66".repeat(32)}`);
+    expect(recordOperationEvent).toHaveBeenCalledTimes(2);
+    expect(recordOperationEvent.mock.calls[1][0].details.suppressedSinceLast).toBe(4);
+  });
+
+  it("global-first gating: an exhausted global window blocks before any per-client state is touched", async () => {
+    let now = 8_000_000;
+    const gates = createGates();
+    const perClientCalls = vi.spyOn(gates.probe, "getOrCreateLoginAttemptState");
+    const recordOperationEvent = vi.fn();
+    const { app } = createApp({
+      recordOperationEvent,
+      throttle: gates,
+      nowFn: () => now,
+    });
+    // Exhaust the global probe window (12/hour) from distinct spoofed IPs.
+    for (let i = 0; i < 12; i += 1) {
+      await request(app)
+        .get(`/rescue/${"77".repeat(32)}`)
+        .set("X-Forwarded-For", `203.0.113.${i}`);
+      now += 5 * 60 * 1000 + 1; // step past the per-IP window each time
+    }
+    const callsAtExhaustion = perClientCalls.mock.calls.length;
+    // Flood from 50 more forged IPs: no per-client bucket may be created —
+    // this is the peak-cardinality bound against spoofed-IP OOM.
+    for (let i = 0; i < 50; i += 1) {
+      const res = await request(app)
+        .get(`/rescue/${"77".repeat(32)}`)
+        .set("X-Forwarded-For", `198.51.100.${i}`);
+      expect(res.status).toBe(404);
+    }
+    expect(perClientCalls.mock.calls.length).toBe(callsAtExhaustion);
+  });
+
+  it("does not stack liveness kicks while one is in flight, even past the interval", async () => {
+    let now = 9_000_000;
+    let resolveHung;
+    const checkSessionLiveness = vi.fn(
+      () => new Promise((resolve) => { resolveHung = resolve; }),
+    );
+    const { app } = createApp({
+      service: {
+        resolveRescueRedirect: (token) => (token === kToken ? kTarget : null),
+        checkSessionLiveness,
+      },
+      nowFn: () => now,
+    });
+    await request(app).get(`/rescue/${kToken}`);
+    now += 60_000; // far past the 10s interval — but the first kick still hangs
+    await request(app).get(`/rescue/${kToken}`);
+    expect(checkSessionLiveness).toHaveBeenCalledTimes(1);
+    resolveHung();
+    await new Promise((r) => setImmediate(r));
+    now += 60_000;
+    await request(app).get(`/rescue/${kToken}`);
+    expect(checkSessionLiveness).toHaveBeenCalledTimes(2);
+  });
+
+  it("trims the token once so the resolver and audit hash see the same canonical value", async () => {
+    const resolver = vi.fn(() => null);
+    const { app } = createApp({ resolver });
+    await request(app).get(`/rescue/%20${kToken}%20`);
+    expect(resolver).toHaveBeenCalledWith(kToken);
+  });
+
   it("fails open when a throttle gate itself throws: events still flow, responses unchanged", async () => {
     const recordOperationEvent = vi.fn();
     const throwingGate = {
