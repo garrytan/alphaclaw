@@ -71,7 +71,8 @@ import { ClaudeCodeLocalSetupModal } from "../../lib/public/js/components/claude
 
 const harness = preactHooks.__harness;
 
-const kLocalSessionUrl = "https://claude.ai/code/rescue_01XYZ";
+const kLocalSessionUrl =
+  "https://box.example/rescue/abababababababababababababababababababababababababababababababab";
 
 // ModalShell portals into document.body (absent under the node environment);
 // the modals stay unexpanded — their own suite covers them.
@@ -185,8 +186,11 @@ beforeEach(() => {
 
 describe("buildRescueQrModel (known vector)", () => {
   it("encodes a fixed URL to a stable, deterministic module grid", () => {
-    const first = buildRescueQrModel(kLocalSessionUrl);
-    const second = buildRescueQrModel(kLocalSessionUrl);
+    // Own fixed input, deliberately NOT the shared card fixture: this test
+    // pins encoder determinism, and QR size scales with input length.
+    const kQrVectorUrl = "https://claude.ai/code/rescue_01XYZ";
+    const first = buildRescueQrModel(kQrVectorUrl);
+    const second = buildRescueQrModel(kQrVectorUrl);
     // Pinned against qrcode-generator 2.0.4 (type auto, level M): a bump that
     // changes the encoding surfaces here, not as a silently different QR.
     expect(first.moduleCount).toBe(29);
