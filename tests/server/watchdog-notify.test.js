@@ -310,7 +310,7 @@ describe("server/watchdog-notify", () => {
     expect(telegramApi.sendMessage).toHaveBeenCalledWith(
       "100",
       "*Gateway crashed*",
-      { parseMode: "Markdown" },
+      { parseMode: "Markdown", disableWebPagePreview: true },
     );
     expect(consoleErrorSpy).toHaveBeenCalledWith(
       "[watchdog] telegram notification failed for 200: blocked by user",
@@ -655,7 +655,7 @@ describe("server/watchdog-notify", () => {
       expect(telegramApi.sendMessage).toHaveBeenCalledWith(
         "111",
         "Upgrade failed",
-        { parseMode: "Markdown" },
+        { parseMode: "Markdown", disableWebPagePreview: true },
       );
     });
 
@@ -810,7 +810,7 @@ describe("server/watchdog-notify", () => {
       expect(telegramApi.sendMessage).toHaveBeenCalledWith(
         "12345",
         "Upgrade failed",
-        { parseMode: "Markdown" },
+        { parseMode: "Markdown", disableWebPagePreview: true },
       );
 
       delete process.env.TELEGRAM_BOT_TOKEN;

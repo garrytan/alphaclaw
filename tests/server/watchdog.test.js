@@ -2186,6 +2186,25 @@ describe("server/watchdog", () => {
     );
   });
 
+  it("rescue-link audit events are incident-neutral: eventType operation, no notification fired", () => {
+    // Pins an existing by-construction property (recordOperationEvent logs
+    // eventType "operation", outside the incident allowlist) — the rescue
+    // route's redeemed/probe events must never open, close, or stamp an
+    // incident, and must never fan out a notification.
+    const { watchdog, notifier, insertWatchdogEvent } = createHarness({});
+    for (const kind of ["rescue_link_redeemed", "rescue_link_probe_failed"]) {
+      watchdog.recordOperationEvent({
+        kind,
+        status: "ok",
+        details: { ip: "203.0.113.9", userAgent: "phone", tokenId: "deadbeef" },
+      });
+      expect(insertWatchdogEvent).toHaveBeenCalledWith(
+        expect.objectContaining({ eventType: "operation", source: kind }),
+      );
+    }
+    expect(notifier.notify).not.toHaveBeenCalled();
+  });
+
   it("pauses manual repair after repeated doctor failures", async () => {
     const { watchdog, notifier, insertWatchdogEvent } = createHarness({
       autoRepair: false,
