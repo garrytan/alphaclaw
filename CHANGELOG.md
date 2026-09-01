@@ -5,6 +5,41 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.9.66] - 2026-09-01
+
+The rescue-session link is now revocable: stop kills it everywhere, restart mints a new one.
+
+### Added
+- **Rescue-link capability wrapper.** The local rescue session's card, QR
+  code, launcher, and 🛟 notification lines now hand out an AlphaClaw-owned
+  link — `<your-alphaclaw>/rescue/<256-bit token>` — that 302-redirects to the
+  live claude.ai Remote Control URL and uniformly 404s otherwise. Stopping the
+  session invalidates every distributed copy; each start mints a fresh token;
+  an AlphaClaw restart adopting a still-live session keeps the same link.
+  Previously the surfaces repeated the raw claude.ai URL, whose
+  environment-form is stable per box — old links in channel history stayed
+  usable after stop and came back identical on restart.
+- **Rescue-link audit trail.** Each redemption records a watchdog operation
+  event (`rescue_link_redeemed`, with client IP + truncated user agent);
+  failed lookups record `rescue_link_probe_failed`. Event writes are capped
+  (per-IP and globally) so probing can never flood watchdog.db; the caps never
+  change the response. Events are incident-neutral by construction.
+- Telegram watchdog notifications now send with `disable_web_page_preview`, so
+  Telegram's unfurler no longer follows (and audit-pollutes) rescue links.
+- New shared util `lib/server/utils/timing-safe.js` (hash-both-sides
+  `timingSafeEqual` — the canonical semantic from `routes/auth.js`), used by
+  the rescue resolver. Migrating the pre-existing comparison sites onto it is
+  tracked in TODOS.md.
+
+### Notes
+- **Cutover:** links distributed before this upgrade are raw claude.ai URLs —
+  stop + start the rescue session once after upgrading to switch to revocable
+  links. With no public base URL configured (`ALPHACLAW_SETUP_URL`),
+  notification lines keep carrying the raw claude.ai URL (a localhost wrapper
+  link would be dead on a phone) plus a config hint.
+- One-time link rotation: a session adopted from pre-upgrade state gets a
+  fresh token at adoption (the persisted state had none).
+
 ## [0.9.63] - 2026-08-31
 
 The deployed OpenClaw agent no longer inherits AlphaClaw's own secrets.
