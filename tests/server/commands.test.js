@@ -156,7 +156,15 @@ describe("server/commands", () => {
 
     const result = await gogCmd("auth list");
 
-    expect(result).toEqual({ ok: true, stdout: "ok", stderr: "" });
+    // timedOut/code distinguish a transient (killed/timeout) failure from a
+    // clean nonzero exit — success carries the defaults.
+    expect(result).toEqual({
+      ok: true,
+      stdout: "ok",
+      stderr: "",
+      timedOut: false,
+      code: null,
+    });
     expect(execMock).toHaveBeenCalledWith(
       "gog auth list",
       expect.objectContaining({
@@ -181,10 +189,34 @@ describe("server/commands", () => {
 
     const result = await gogCmd("gmail list", { quiet: false });
 
-    expect(result).toEqual({ ok: false, stdout: "", stderr: "keyring locked" });
+    // A plain Error (no .killed) is a clean failure: timedOut false, code null.
+    expect(result).toEqual({
+      ok: false,
+      stdout: "",
+      stderr: "keyring locked",
+      timedOut: false,
+      code: null,
+    });
     expect(logSpy).toHaveBeenCalledWith(
       "[alphaclaw] gog error: keyring locked",
     );
+  });
+
+  it("flags a killed/timed-out gog command as timedOut (transient, not no-token)", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    const execMock = vi.fn((cmd, opts, callback) => {
+      const err = new Error("timed out");
+      err.killed = true;
+      err.signal = "SIGTERM";
+      callback(err, "", "");
+    });
+    const { createCommands } = loadCommandsModule({ execMock });
+    const { gogCmd } = createCommands({ gatewayEnv: () => ({}) });
+
+    const result = await gogCmd("auth tokens export foo", { quiet: true });
+
+    expect(result.ok).toBe(false);
+    expect(result.timedOut).toBe(true);
   });
 
   describe("clawCmdWithRetry (gateway rate limiting)", () => {

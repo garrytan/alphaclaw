@@ -9,6 +9,7 @@ const {
   createEmptyGoogleState,
   readGoogleState,
   writeGoogleState,
+  updateGoogleState,
   listGoogleAccounts,
   getGoogleAccountById,
   getGoogleAccountByEmailAndClient,
@@ -574,5 +575,60 @@ describe("server/google-state upsert/remove", () => {
     const missing = removeGoogleAccount({ state, accountId: "nope" });
     expect(missing.account).toBeNull();
     expect(missing.state.accounts).toHaveLength(2);
+  });
+});
+
+describe("server/google-state updateGoogleState (locked read-modify-write)", () => {
+  let tmpDir;
+  let statePath;
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "alphaclaw-gstate-upd-"));
+    statePath = path.join(tmpDir, "google-state.json");
+  });
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("applies the mutator to freshly-read state and persists normalized", () => {
+    writeGoogleState({
+      fs,
+      statePath,
+      state: { version: 2, accounts: [baseAccount()] },
+    });
+    const result = updateGoogleState({
+      fs,
+      statePath,
+      mutator: (current) =>
+        upsertGoogleAccount({
+          state: current,
+          account: baseAccount({ id: "acct-2", email: "b@x.com" }),
+        }).state,
+    });
+    expect(result.accounts.map((a) => a.id).sort()).toEqual(["acct-1", "acct-2"]);
+    expect(readGoogleState({ fs, statePath }).accounts.map((a) => a.id).sort()).toEqual([
+      "acct-1",
+      "acct-2",
+    ]);
+  });
+
+  it("reads state FRESH inside the call, not from a stale snapshot", () => {
+    writeGoogleState({ fs, statePath, state: { version: 2, accounts: [baseAccount()] } });
+    // Simulate a concurrent writer landing an acct-2 AFTER we'd have read a
+    // stale snapshot: the mutator must see acct-2 (fresh read) and preserve it
+    // while removing acct-1 — the disconnect-vs-callback race the lock closes.
+    writeGoogleState({
+      fs,
+      statePath,
+      state: {
+        version: 2,
+        accounts: [baseAccount(), baseAccount({ id: "acct-2", email: "b@x.com" })],
+      },
+    });
+    const result = updateGoogleState({
+      fs,
+      statePath,
+      mutator: (current) => removeGoogleAccount({ state: current, accountId: "acct-1" }).state,
+    });
+    expect(result.accounts.map((a) => a.id)).toEqual(["acct-2"]);
   });
 });
