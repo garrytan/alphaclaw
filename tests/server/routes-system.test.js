@@ -1703,6 +1703,36 @@ describe("server/routes/system", () => {
     expect(res.end).toHaveBeenCalled();
   });
 
+  it("drives watchdog.setStatusClientsConnected from the status-stream client count", async () => {
+    // The seam the connected health cadence hangs off: the first SSE client
+    // flips the watchdog to "someone is watching", the last disconnect flips
+    // it back. Only the 0<->1 edges matter, so the count is projected to a
+    // boolean here rather than in the watchdog.
+    const deps = createSystemDeps();
+    deps.watchdog = {
+      getStatus: vi.fn(() => ({ lifecycle: "running" })),
+      setStatusClientsConnected: vi.fn(),
+    };
+    const routes = captureRoutes(deps);
+    const handler = routes.get.get("/api/events/status");
+    const req = new EventEmitter();
+    const res = {
+      setHeader: vi.fn(),
+      flushHeaders: vi.fn(),
+      write: vi.fn(() => true),
+      destroy: vi.fn(),
+      end: vi.fn(),
+    };
+
+    await handler(req, res);
+    expect(deps.watchdog.setStatusClientsConnected).toHaveBeenCalledTimes(1);
+    expect(deps.watchdog.setStatusClientsConnected).toHaveBeenLastCalledWith(true);
+
+    req.emit("close");
+    expect(deps.watchdog.setStatusClientsConnected).toHaveBeenCalledTimes(2);
+    expect(deps.watchdog.setStatusClientsConnected).toHaveBeenLastCalledWith(false);
+  });
+
   const createSseClient = () => {
     const req = new EventEmitter();
     const res = {
