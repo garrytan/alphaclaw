@@ -11,6 +11,78 @@ describe("server/startup", () => {
     setBootPhase("ready");
   });
 
+  it("reports lock contention FIRST inside the boot lock — before any step that can spawn the openclaw CLI", async () => {
+    const callOrder = [];
+    const mkStep = (name, ret) =>
+      vi.fn(() => {
+        callOrder.push(name);
+        return ret;
+      });
+    await runOnboardedBootSequence({
+      reportLockContentionAtBoot: mkStep("reportLockContentionAtBoot", {
+        live: [],
+        lockDirs: [],
+        lines: [],
+      }),
+      ensureManagedExecDefaults: mkStep("ensureManagedExecDefaults"),
+      ensureUsageTrackerPluginConfig: mkStep("ensureUsageTrackerPluginConfig"),
+      ensureWebhookMappingIds: mkStep("ensureWebhookMappingIds", {
+        changed: false,
+        updatedIds: [],
+      }),
+      doSyncPromptFiles: mkStep("doSyncPromptFiles"),
+      reloadEnv: mkStep("reloadEnv"),
+      syncChannelConfig: mkStep("syncChannelConfig"),
+      readEnvFile: mkStep("readEnvFile", []),
+      ensureGatewayProxyConfig: mkStep("ensureGatewayProxyConfig"),
+      resolveSetupUrl: mkStep("resolveSetupUrl", "https://setup.example.com"),
+      reconcileBootConfig: mkStep("reconcileBootConfig", { status: "ok" }),
+      startGateway: mkStep("startGateway"),
+      watchdog: { start: mkStep("watchdog.start") },
+      gmailWatchService: { start: mkStep("gmailWatchService.start") },
+    });
+    // The report must beat every CLI-spawning step: on openclaw >= 2026.9.1
+    // all CLI work serializes on the state-lifecycle coordinator held by a
+    // LIVE process — an orphan from a killed previous boot is what a later
+    // "owns state-lifecycle" refusal points at; name it before anything can
+    // contend with it.
+    expect(callOrder[0]).toBe("reportLockContentionAtBoot");
+    expect(callOrder.indexOf("reportLockContentionAtBoot")).toBeLessThan(
+      callOrder.indexOf("ensureManagedExecDefaults"),
+    );
+    expect(callOrder.indexOf("reportLockContentionAtBoot")).toBeLessThan(
+      callOrder.indexOf("syncChannelConfig"),
+    );
+    expect(callOrder.indexOf("reportLockContentionAtBoot")).toBeLessThan(
+      callOrder.indexOf("reconcileBootConfig"),
+    );
+    expect(callOrder.indexOf("reconcileBootConfig")).toBeLessThan(
+      callOrder.indexOf("startGateway"),
+    );
+  });
+
+  it("a throwing boot contention report never aborts the boot sequence", async () => {
+    const startGateway = vi.fn();
+    await runOnboardedBootSequence({
+      reportLockContentionAtBoot: vi.fn(() => {
+        throw new Error("report exploded");
+      }),
+      ensureManagedExecDefaults: vi.fn(),
+      ensureUsageTrackerPluginConfig: vi.fn(),
+      ensureWebhookMappingIds: vi.fn(() => ({ changed: false, updatedIds: [] })),
+      doSyncPromptFiles: vi.fn(),
+      reloadEnv: vi.fn(),
+      syncChannelConfig: vi.fn(),
+      readEnvFile: vi.fn(() => []),
+      ensureGatewayProxyConfig: vi.fn(),
+      resolveSetupUrl: vi.fn(() => "https://setup.example.com"),
+      startGateway,
+      watchdog: { start: vi.fn() },
+      gmailWatchService: { start: vi.fn() },
+    });
+    expect(startGateway).toHaveBeenCalled();
+  });
+
   it("syncs gateway proxy config with the resolved setup URL before startup", async () => {
     const callOrder = [];
     const ensureManagedExecDefaults = vi.fn(() =>

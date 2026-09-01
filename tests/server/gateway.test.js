@@ -1,3 +1,11 @@
+// Pin the ready budget to the drill-friendly 120s BEFORE any lib require:
+// constants.js reads GATEWAY_RESTART_READY_TIMEOUT at module load, and the
+// per-test `delete require.cache[gateway]` re-require does NOT re-evaluate
+// the cached constants module. The 300s production default is asserted in
+// its own vi.resetModules-based block below. NOTE for future drills: a
+// deadline-boundary drill against the DEFAULT budget must advance ~600s+.
+process.env.GATEWAY_RESTART_READY_TIMEOUT = "120";
+
 const childProcess = require("child_process");
 const fs = require("fs");
 const net = require("net");
@@ -2252,6 +2260,231 @@ describe("server/gateway restart behavior", () => {
       expect(rejection.evidence.stderrTail.join("\n")).toContain(
         "spawn openclaw ENOENT",
       );
+    });
+
+    it("fails fast with the supervisor's exit code when it dies before ready (no budget burn)", async () => {
+      const supervisor = createChild();
+      childProcess.spawn = vi.fn(() => supervisor);
+      childProcess.execFile = execFileOk("");
+      fs.existsSync = vi.fn(() => false);
+      let running = false;
+      net.createConnection = vi.fn(() => createSocket(() => running));
+      delete require.cache[modulePath];
+      const gateway = require(modulePath);
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+      vi.spyOn(console, "log").mockImplementation(() => {});
+
+      const pending = gateway.runGatewayCmd("--force");
+      pending.catch(() => {});
+      const exitHandler = supervisor.on.mock.calls.find(
+        (call) => call[0] === "exit",
+      )?.[1];
+      expect(typeof exitHandler).toBe("function");
+      exitHandler(1, null);
+
+      // Settles within the poll cadence (real timers), not the ready budget —
+      // and names the real cause, not the timeout symptom.
+      const rejection = await pending.catch((err) => err);
+      expect(rejection.name).toBe("GatewayRestartError");
+      expect(rejection.message).toBe(
+        "Gateway restart supervisor exited (code 1) before ready",
+      );
+      expect(rejection.evidence.supervisorExit).toEqual({
+        code: 1,
+        signal: null,
+      });
+      // Failure path still runs the stop CLI (same contract as the timeout).
+      expect(childProcess.execFile).toHaveBeenCalledWith(
+        "openclaw",
+        ["gateway", "stop"],
+        expect.anything(),
+        expect.any(Function),
+      );
+    });
+
+    it("names the signal when the supervisor is signal-killed before ready", async () => {
+      const supervisor = createChild();
+      childProcess.spawn = vi.fn(() => supervisor);
+      childProcess.execFile = execFileOk("");
+      fs.existsSync = vi.fn(() => false);
+      net.createConnection = vi.fn(() => createSocket(false));
+      delete require.cache[modulePath];
+      const gateway = require(modulePath);
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+      vi.spyOn(console, "log").mockImplementation(() => {});
+
+      const pending = gateway.runGatewayCmd("--force");
+      pending.catch(() => {});
+      const exitHandler = supervisor.on.mock.calls.find(
+        (call) => call[0] === "exit",
+      )?.[1];
+      // Real Node semantics for a signal kill: code null, signal set.
+      exitHandler(null, "SIGKILL");
+
+      const rejection = await pending.catch((err) => err);
+      expect(rejection.name).toBe("GatewayRestartError");
+      expect(rejection.message).toBe(
+        "Gateway restart supervisor exited (signal SIGKILL) before ready",
+      );
+    });
+
+    it("a supervisor that daemonizes (exit 0) does NOT abort a wait that succeeds", async () => {
+      const supervisor = createChild();
+      childProcess.spawn = vi.fn(() => supervisor);
+      childProcess.execFile = execFileOk("");
+      fs.existsSync = vi.fn(() => false);
+      let running = false;
+      net.createConnection = vi.fn(() => createSocket(() => running));
+      delete require.cache[modulePath];
+      const gateway = require(modulePath);
+      vi.spyOn(console, "log").mockImplementation(() => {});
+
+      const pending = gateway.runGatewayCmd("--force");
+      const exitHandler = supervisor.on.mock.calls.find(
+        (call) => call[0] === "exit",
+      )?.[1];
+      // Clean daemonize: exit 0 while the port is still coming up...
+      exitHandler(0, null);
+      // ...and the gateway answers shortly after.
+      setTimeout(() => {
+        running = true;
+      }, 600);
+
+      // Resolves (runGatewayCmd returns no payload) instead of aborting on
+      // the exit-0 supervisor — exit 0 is daemonization, not failure.
+      await expect(pending).resolves.toBeUndefined();
+    });
+
+    it("captures stdout in its OWN evidence ring (lock-wait messages) and caps retained lines at 2KB", async () => {
+      const supervisor = createChild();
+      childProcess.spawn = vi.fn(() => supervisor);
+      childProcess.execFile = execFileOk("");
+      fs.existsSync = vi.fn(() => false);
+      net.createConnection = vi.fn(() => createSocket(false));
+      delete require.cache[modulePath];
+      const gateway = require(modulePath);
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+      vi.spyOn(console, "log").mockImplementation(() => {});
+      vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+      vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+
+      const pending = gateway.runGatewayCmd("--force");
+      pending.catch(() => {});
+      await new Promise((resolve) => setImmediate(resolve));
+      const stdoutHandler = supervisor.stdout.on.mock.calls
+        .filter((call) => call[0] === "data")
+        .at(-1)?.[1];
+      const stderrHandler = supervisor.stderr.on.mock.calls
+        .filter((call) => call[0] === "data")
+        .at(-1)?.[1];
+      // The incident's blocking message can arrive on STDOUT — it must land
+      // in evidence without a shared ring letting stdout noise evict stderr.
+      stdoutHandler(
+        "waiting: another OpenClaw process owns state-lifecycle\n",
+      );
+      // A gateway spraying one huge line must be bounded at RETENTION time.
+      stderrHandler(`${"x".repeat(10_000)}\n`);
+      const exitHandler = supervisor.on.mock.calls
+        .filter((call) => call[0] === "exit")
+        .at(-1)?.[1];
+      exitHandler(1, null);
+
+      const rejection = await pending.catch((err) => err);
+      expect(rejection.name).toBe("GatewayRestartError");
+      expect(rejection.evidence.stdoutTail.join("\n")).toContain(
+        "owns state-lifecycle",
+      );
+      expect(rejection.evidence.stderrTail[0]).toHaveLength(2048);
+    });
+
+    it("appends live-openclaw-process diagnostics to evidence when the failure is lock contention", async () => {
+      const lockContention = require("../../lib/server/openclaw-lock-contention");
+      vi.spyOn(lockContention, "describeLockContention").mockReturnValue({
+        live: [{ pid: 57, cmdline: "openclaw gateway run" }],
+        lockDirs: ["openclaw-state-locks-0"],
+        lines: [
+          "[alphaclaw] restart: 1 live openclaw process(es) — a lifecycle lock holder is one of these: pid 57 (openclaw gateway run)",
+        ],
+      });
+      const supervisor = createChild();
+      childProcess.spawn = vi.fn(() => supervisor);
+      childProcess.execFile = execFileOk("");
+      fs.existsSync = vi.fn(() => false);
+      net.createConnection = vi.fn(() => createSocket(false));
+      delete require.cache[modulePath];
+      const gateway = require(modulePath);
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+      vi.spyOn(console, "log").mockImplementation(() => {});
+      vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+
+      const pending = gateway.runGatewayCmd("--force");
+      pending.catch(() => {});
+      await new Promise((resolve) => setImmediate(resolve));
+      const stderrHandler = supervisor.stderr.on.mock.calls
+        .filter((call) => call[0] === "data")
+        .at(-1)?.[1];
+      stderrHandler("ERROR another OpenClaw process owns state-lifecycle\n");
+      const exitHandler = supervisor.on.mock.calls
+        .filter((call) => call[0] === "exit")
+        .at(-1)?.[1];
+      exitHandler(1, null);
+
+      const rejection = await pending.catch((err) => err);
+      expect(rejection.name).toBe("GatewayRestartError");
+      // The diagnostic rides in the persisted evidence, naming the live holder.
+      expect(rejection.evidence.stdoutTail.join("\n")).toContain(
+        "pid 57 (openclaw gateway run)",
+      );
+      expect(lockContention.describeLockContention).toHaveBeenCalledWith({
+        site: "restart",
+      });
+    });
+
+    it("does NOT run the contention diagnostic for unrelated failures", async () => {
+      const lockContention = require("../../lib/server/openclaw-lock-contention");
+      const spy = vi.spyOn(lockContention, "describeLockContention");
+      const supervisor = createChild();
+      childProcess.spawn = vi.fn(() => supervisor);
+      childProcess.execFile = execFileOk("");
+      fs.existsSync = vi.fn(() => false);
+      net.createConnection = vi.fn(() => createSocket(false));
+      delete require.cache[modulePath];
+      const gateway = require(modulePath);
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+      vi.spyOn(console, "log").mockImplementation(() => {});
+      const pending = gateway.runGatewayCmd("--force");
+      pending.catch(() => {});
+      await new Promise((resolve) => setImmediate(resolve));
+      supervisor.on.mock.calls.filter((c) => c[0] === "exit").at(-1)?.[1](1, null);
+      await pending.catch(() => {});
+      expect(spy).not.toHaveBeenCalled();
+    });
+
+    it("a dying supervisor still succeeds when a final probe finds the gateway up (healthy incumbent)", async () => {
+      const supervisor = createChild();
+      childProcess.spawn = vi.fn(() => supervisor);
+      childProcess.execFile = execFileOk("");
+      fs.existsSync = vi.fn(() => false);
+      // The wait's own probes see the port down; only the FINAL post-exit
+      // probe finds it up (an incumbent gateway still holding it, or the
+      // child winning the race with its dying supervisor).
+      let running = false;
+      net.createConnection = vi.fn(() => createSocket(() => running));
+      delete require.cache[modulePath];
+      const gateway = require(modulePath);
+      vi.spyOn(console, "log").mockImplementation(() => {});
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      const pending = gateway.runGatewayCmd("--force");
+      const exitHandler = supervisor.on.mock.calls.find(
+        (call) => call[0] === "exit",
+      )?.[1];
+      exitHandler(78, null);
+      // The abort short-circuits at the next loop top; the final probe then
+      // sees the port up.
+      running = true;
+
+      await expect(pending).resolves.toBeUndefined();
     });
 
     it("abortGatewayWaits cancels an in-flight ready wait instead of burning the 120s budget", async () => {

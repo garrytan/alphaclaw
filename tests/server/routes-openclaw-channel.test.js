@@ -901,6 +901,9 @@ describe("server/routes/openclaw-channel", () => {
       installedVersion: "1.0.0",
       pinVersion: "1.0.0",
       appliedId: null,
+      appliedVersion: null,
+      // Pin path: nothing applied ⇒ never "expected divergence".
+      pinDiverged: false,
     });
     const info = createChannelInfo();
     expect(deps.openclawReleasesService.annotateCatalog).toHaveBeenCalledWith(

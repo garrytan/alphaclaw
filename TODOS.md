@@ -1,5 +1,35 @@
 # TODOS
 
+## P2 — File the two upstream openclaw reports from the 2026-09-01 incident (gateway-hardening wave)
+- **What:** (1) `openclaw doctor`'s `registerBundledHealthChecks` resolves plugin public surfaces through the bundled-only loader, so a registry/npm-installed plugin (codex) crashes the CLI at startup ("Could not start the CLI … Unable to resolve bundled plugin public surface codex/api.js", 2026.9.1-beta.1) — it should resolve via the plugin registry. (2) The state-lifecycle coordinator refusal ("another OpenClaw process owns state-lifecycle") names no holder: the coordinator is an exclusive SQLite transaction (`dist/state-database-coordinator-*.js` + `dist/node-sqlite-*.js`, `BEGIN EXCLUSIVE` on `<family>.<hash>.lock.sqlite`) so the refusal is correct, but an operator cannot tell WHICH live process holds it. Ask upstream to record holder identity (pid/argv/startedAt — the same owner-status data its gateway pid-lock already tracks in `dist/gateway-lock-*.js`) alongside the coordinator and include it in the contention error.
+- **Why:** AlphaClaw now carries two belts coupled to these internals (the doctor-CLI classifier's crash signatures, and the read-only lock-contention diagnostic in `lib/server/openclaw-lock-contention.js` that lists live openclaw processes via /proc as a proxy for the holder); both are stamped "verified against 2026.9.1-beta.1" and should be DELETED once upstream owns the fixes. Upstream lock ownership/fencing is under design (openclaw/openclaw#121069) — reference it and re-verify against whatever lands. NOTE for the record: this wave's plan originally specified a destructive "stale lock sweep"; the tarball proved a leftover lock file can never block (kernel releases the advisory lock on holder exit) and that deleting a HELD lock file would allow double ownership of the state DB — so the sweep was replaced by the diagnostic before merge.
+- **Context:** incident 2026-09-01 (host srv-d776lrvpm1nc73e08c9g, ~6 min down); lib/server/doctor/classify-doctor-cli.js, lib/server/openclaw-lock-contention.js (header comments carry the verified-against stamps and the coordinator semantics).
+- **Effort:** S. **Depends on:** upstream issue tracker access.
+
+## P3 — Doctor-availability UI chip (gateway-hardening wave follow-up)
+- **What:** A small chip/badge on the Doctor tab rendering `openclawDoctorCli` from doctor status ("upstream doctor broken since <at>: <reason>") — the tracker (`lib/server/doctor/availability.js`) and status field already exist; this is render-only.
+- **Why:** Today the state is visible in doctor status JSON, watchdog `doctor_probe` events, and a process.log line; a glanceable chip closes the loop for operators who live in the UI.
+- **Context:** lib/server/doctor/service.js buildStatus (`openclawDoctorCli`), lib/public/js/components/doctor/. Run `npm run build:ui` after the change.
+- **Effort:** S. **Depends on:** —.
+
+## P3 — Upgrade-page note rendering pinDiverged/appliedVersion (gateway-hardening wave follow-up)
+- **What:** A one-line note on the Upgrade page when `pinDiverged` is true: "running <appliedVersion> (<channel>) over the declared pin <pinVersion> — expected; `npm ls` will report the dep invalid". Both channel APIs already expose the fields.
+- **Why:** The 2026-09-01 responder diagnosed the expected overlay divergence as a version-drift bug; the boot log line now names it, but the Upgrade page is where operators actually look.
+- **Context:** routes/system.js buildOpenclawChannelSummary, routes/openclaw-channel.js catalog `channel`, lib/public/js/components/upgrade-tab/. Run `npm run build:ui`.
+- **Effort:** S. **Depends on:** —.
+
+## P3 — Adaptive readiness budget from watchdog history (rejected for the hardening wave, revisitable)
+- **What:** Scale `GATEWAY_RESTART_READY_TIMEOUT`'s effective value from recorded cold-start durations (`watchdog_events` gateway_restart `durationMs`, 30-day retention) — e.g. `max(configured, 2 x p95 cold start)` with the existing 480s ceiling.
+- **Why:** Deliberately rejected in the plan review (D3a): couples gateway.js to the watchdog DB and under-scales on first boot/DB loss, while a generous static budget costs nothing (the wait returns the instant the port answers). Revisit only if heterogeneous fleets make one static default wrong in both directions.
+- **Context:** lib/server/constants.js (kGatewayRestartReadyTimeoutMs + kGatewayRestartOperationBudgetMs derivation), lib/server/db/watchdog (durationMs in gateway_restart events).
+- **Effort:** M. **Depends on:** the hardening wave's budget threading (landed).
+
+## P3 — Single-flight doctor collector freshness barrier (documented v1 nuance)
+- **What:** A joiner of the shared doctor spawn may receive results from a run started BEFORE its trigger (e.g. a post-repair medic collect coalescing onto a pre-repair spawn). Option: joiners whose trigger timestamp postdates the in-flight run's start optionally wait for the NEXT run.
+- **Why:** Bounded staleness (one 60s spawn) accepted in review; matters most in the post-repair evidence window. The collector's header documents the nuance.
+- **Context:** lib/server/doctor/collect-doctor-json.js.
+- **Effort:** S. **Depends on:** —.
+
 ## P3 — Model-drift review deferrals (2026-09-01, grouped)
 - **What:** (1) Consolidate the two skills-tree walks — `deterministic-checks.js` `scanWorkspaceSkills` (8KB frontmatter reads, prompt-budget check) and `model-drift.js` `scanSkillFilesForStaleModels` (256KB body reads, 8MB total budget, stale-model check) walk `skills/` independently on every doctor scan; one shared bounded walk should feed both consumers. (2) Verify the openclaw custom-provider schema (`models.providers.*` — provider-level `contextWindow` defaults, per-model shapes, and whether `agents.*.model.fallbacks` exists at all) against the pinned upstream tarball/docs, then tighten `collectConfiguredModels` and the custom-provider checks in `model-drift.js` — today they duck-type defensively and treat unparseable shapes as "cannot judge".
 - **Why:** Both flagged in the 2026-09-01 CEO/eng retro-review of the model-drift feature (with a Codex outside-voice pass) and accepted as follow-ups: (1) is a DRY/IO cleanup with no behavior change, (2) trades defensive silence for verified strictness — both beyond the review wave's blast radius.

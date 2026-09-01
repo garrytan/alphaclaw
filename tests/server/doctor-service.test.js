@@ -2645,6 +2645,7 @@ describe("server/doctor-service", () => {
       listDismissedSourceKeys = null,
       readOpenclawConfig = null,
       getGatewayMemoryTrend = null,
+      getDoctorAvailability = null,
     } = {}) => {
       const { createDoctorService } = loadDoctorService();
       const created = [];
@@ -2693,6 +2694,7 @@ describe("server/doctor-service", () => {
         listDismissedSourceKeys,
         ...(readOpenclawConfig ? { readOpenclawConfig } : {}),
         ...(getGatewayMemoryTrend ? { getGatewayMemoryTrend } : {}),
+        ...(getDoctorAvailability ? { getDoctorAvailability } : {}),
       });
       return { service, created, runsByIdCards, meta };
     };
@@ -2930,6 +2932,52 @@ describe("server/doctor-service", () => {
       expect(
         cards.some((card) => card.sourceKey === "ocd:core/doctor/gateway-config:3331faf3e131"),
       ).toBe(true);
+    });
+
+    it("an UNAVAILABLE doctor CLI stays fail-soft but is no longer silent (warn names the cause)", async () => {
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const { service } = makeService({
+        // The incident's shape: cli_error envelope from a CLI that cannot
+        // start — previously indistinguishable from "zero findings".
+        runDoctorLintJson: async () => ({
+          ok: false,
+          code: 1,
+          truncated: false,
+          stdout: JSON.stringify({
+            ok: false,
+            error: {
+              type: "cli_error",
+              message:
+                "Could not start the CLI. Unable to resolve bundled plugin public surface codex/api.js",
+            },
+          }),
+        }),
+      });
+      const result = await service.runDoctor();
+      await settle();
+      expect(service.getDoctorRun(result.runId).status).toBe("completed");
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining("openclaw doctor CLI unavailable (cli_error"),
+      );
+      warnSpy.mockRestore();
+    });
+
+    it("buildStatus surfaces the upstream doctor-CLI availability (openclawDoctorCli)", async () => {
+      const availability = {
+        status: "unavailable",
+        reason: "cli_startup_crash",
+        detail: "Could not start the CLI.",
+        at: 1234,
+        version: "2026.9.1-beta.1",
+        consecutiveUnavailable: 3,
+      };
+      const { service } = makeService({
+        getDoctorAvailability: () => availability,
+      });
+      expect(service.buildStatus().openclawDoctorCli).toEqual(availability);
+      // Absent dep degrades to null (never throws).
+      const bare = makeService({});
+      expect(bare.service.buildStatus().openclawDoctorCli).toBeNull();
     });
 
     describe("bridge freshness on fingerprint reuse", () => {

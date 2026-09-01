@@ -3,6 +3,9 @@ const {
   kPluginDependentTtlMs,
   kNegativeTtlMs,
   kTimedOutTtlMs,
+  kCliUnavailableTtlMs,
+  kAllTimedOutTtlMs,
+  kCapabilityKeys,
 } = require("../../lib/server/openclaw-capabilities");
 
 const ok = (stdout = "", stderr = "") => ({ ok: true, stdout, stderr });
@@ -47,18 +50,18 @@ describe("server/openclaw-capabilities", () => {
     expect(hs.supported).toBe(false);
   });
 
-  it("detects the structured doctor --json shape vs legacy", async () => {
-    const structured = createOpenclawCapabilities({
-      clawCmd: async () => ok(JSON.stringify({ ok: true, findings: [] })),
+  // doctorJsonShape was deleted (zero consumers; its legitimate stable
+  // answer was the falsy value, so healthy installs re-spawned `doctor
+  // --json` every 60s — the 2026-09-01 probe storm). Shape detection now
+  // lives per-run in doctor/classify-doctor-cli.js.
+  it("no longer exposes a doctorJsonShape probe", async () => {
+    const caps = createOpenclawCapabilities({
+      clawCmd: async () => ok(""),
       getInstalledVersion: () => "v",
     });
-    expect(await structured.get("doctorJsonShape")).toBe("structured");
-
-    const legacy = createOpenclawCapabilities({
-      clawCmd: async () => ok(JSON.stringify({ healthy: true })),
-      getInstalledVersion: () => "v",
-    });
-    expect(await legacy.get("doctorJsonShape")).toBe("legacy");
+    await expect(caps.get("doctorJsonShape")).rejects.toThrow(
+      /unknown OpenClaw capability/,
+    );
   });
 
   it("detects clickclack guided setup via the --code flag", async () => {
@@ -265,5 +268,132 @@ describe("server/openclaw-capabilities buzz probe (5.2)", () => {
       getInstalledVersion: () => "2026.8.1-beta.3",
     });
     expect(await beta.get("buzzChannel")).toBe(true);
+  });
+
+  describe("CLI-unavailable layer suppression (post-incident 2026-09-01)", () => {
+    const kCrash =
+      "Could not start the CLI.\nReason: Unable to resolve bundled plugin public surface codex/api.js";
+
+    it("a startup-crash signature arms a 30-min window: cached positives survive, misses serve falsy, ZERO spawns", async () => {
+      let clock = 0;
+      let cliBroken = false;
+      const clawCmd = vi.fn(async () =>
+        cliBroken ? fail("", kCrash) : ok("Usage: openclaw backup sqlite ..."),
+      );
+      const recorded = [];
+      const caps = createOpenclawCapabilities({
+        clawCmd,
+        getInstalledVersion: () => "v",
+        nowFn: () => clock,
+        logger: { warn: vi.fn() },
+        doctorAvailability: { record: (c) => recorded.push(c) },
+      });
+      // Healthy probe caches a positive (Infinity TTL).
+      expect(await caps.get("backupSqlite")).toBe(true);
+      // The CLI breaks: the next probe sees the crash text and arms the window.
+      cliBroken = true;
+      expect(await caps.get("secretsStore")).toBe(false);
+      expect(recorded[0]).toMatchObject({
+        status: "unavailable",
+        reason: "cli_startup_crash",
+      });
+      const spawnsAtArm = clawCmd.mock.calls.length;
+      // During the window: cached positive SERVED (not regressed to falsy)...
+      expect(await caps.get("backupSqlite")).toBe(true);
+      // ...misses serve the declared falsy without spawning...
+      expect(await caps.get("updateRepair")).toBe(false);
+      expect(await caps.get("execApprovalsSqlite")).toBe("unknown");
+      expect(clawCmd.mock.calls.length).toBe(spawnsAtArm);
+      // ...and expiry re-probes (per-instance injected clock).
+      clock += kCliUnavailableTtlMs + 1;
+      cliBroken = false;
+      expect(await caps.get("updateRepair")).toBe(true);
+      expect(clawCmd.mock.calls.length).toBeGreaterThan(spawnsAtArm);
+    });
+
+    it("a SUB-COMMAND cli_error envelope does NOT arm suppression (T6 load-bearing negative)", async () => {
+      const subCommandEnvelope = JSON.stringify({
+        ok: false,
+        error: {
+          type: "cli_error",
+          message: "ENOENT: no such file, realpath '/data/openclaw-agent.sqlite'",
+        },
+      });
+      let clock = 0;
+      const clawCmd = vi.fn(async () => fail(subCommandEnvelope, ""));
+      const caps = createOpenclawCapabilities({
+        clawCmd,
+        getInstalledVersion: () => "v",
+        nowFn: () => clock,
+      });
+      expect(await caps.get("backupSqlite")).toBe(false);
+      // Normal per-probe negative caching still applies: a re-probe happens
+      // after the ordinary negative TTL — no layer-wide blackout.
+      clock += kNegativeTtlMs + 1;
+      await caps.get("backupSqlite");
+      expect(clawCmd).toHaveBeenCalledTimes(2);
+    });
+
+    it("hang class: a full all-timeout pass arms a 5-min window (a wedged CLI produces no crash text)", async () => {
+      let clock = 0;
+      const clawCmd = vi.fn(async () => ({
+        ok: false,
+        stdout: "",
+        stderr: "",
+        code: null,
+        timedOut: true,
+      }));
+      const warn = vi.fn();
+      const caps = createOpenclawCapabilities({
+        clawCmd,
+        getInstalledVersion: () => "v",
+        nowFn: () => clock,
+        logger: { warn },
+      });
+      await caps.getAll();
+      const spawnsAfterFirstPass = clawCmd.mock.calls.length;
+      expect(spawnsAfterFirstPass).toBeGreaterThan(0);
+      // Within the hang window (which outlives the 30s timed-out TTL): a
+      // second getAll spawns NOTHING — previously it re-paid every timeout
+      // every 30s.
+      clock += kTimedOutTtlMs + 1;
+      await caps.getAll();
+      expect(clawCmd.mock.calls.length).toBe(spawnsAfterFirstPass);
+      expect(kAllTimedOutTtlMs).toBeGreaterThan(kTimedOutTtlMs);
+      // After the hang window: probing resumes.
+      clock += kAllTimedOutTtlMs + 1;
+      await caps.get("backupSqlite");
+      expect(clawCmd.mock.calls.length).toBeGreaterThan(spawnsAfterFirstPass);
+    });
+
+    it("suppression state is per-instance and clears on full invalidate (channel apply)", async () => {
+      let clock = 0;
+      const brokenCmd = vi.fn(async () => fail("", kCrash));
+      const a = createOpenclawCapabilities({
+        clawCmd: brokenCmd,
+        getInstalledVersion: () => "v",
+        nowFn: () => clock,
+      });
+      await a.get("backupSqlite"); // arms A's window
+      // Instance isolation: a sibling instance probes freely.
+      const healthyCmd = vi.fn(async () => ok("Usage: ..."));
+      const b = createOpenclawCapabilities({
+        clawCmd: healthyCmd,
+        getInstalledVersion: () => "v",
+        nowFn: () => clock,
+      });
+      expect(await b.get("backupSqlite")).toBe(true);
+      // Full invalidation (channel apply/rollback) resets A's window.
+      const armedSpawns = brokenCmd.mock.calls.length;
+      await a.get("updateRepair"); // suppressed: no spawn
+      expect(brokenCmd.mock.calls.length).toBe(armedSpawns);
+      a.invalidate();
+      await a.get("updateRepair"); // re-probes
+      expect(brokenCmd.mock.calls.length).toBeGreaterThan(armedSpawns);
+    });
+
+    it("the capability catalog no longer includes doctorJsonShape", () => {
+      expect(kCapabilityKeys).not.toContain("doctorJsonShape");
+    });
   });
 });

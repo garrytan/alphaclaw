@@ -8,7 +8,7 @@ const kTempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "alphaclaw-state-"));
 process.env.ALPHACLAW_ROOT_DIR = kTempRoot;
 
 const {
-  kGatewayLifecycleLeaseMs,
+  kGatewayRestartOperationBudgetMs,
   kRestartOperationRetentionMs,
 } = require("../../lib/server/constants");
 const {
@@ -170,7 +170,9 @@ describe("server/restart-required-state (operation lifecycle)", () => {
       kind: "gateway_restart",
       startedAt: 10_000,
       bootId: "boot-A",
-      expiresAt: 10_000 + kGatewayLifecycleLeaseMs,
+      // Initial lifetime = the shared restart-operation budget (the route
+      // keepalive extends it while queued/running).
+      expiresAt: 10_000 + kGatewayRestartOperationBudgetMs,
       status: "running",
       lastStep: null,
       errorSummary: null,
@@ -337,7 +339,7 @@ describe("server/restart-required-state (boot reconciliation)", () => {
     const store = makeStore({ now: () => nowMs, getBootId: () => "boot-A" });
     const { operationId } = store.beginRestart();
 
-    nowMs += kGatewayLifecycleLeaseMs + 1;
+    nowMs += kGatewayRestartOperationBudgetMs + 1;
     expect(store.getActiveRestartOperation()).toBeNull();
     const last = store.getLastRestartOperation();
     expect(last.operationId).toBe(operationId);
@@ -364,6 +366,218 @@ describe("server/restart-required-state (boot reconciliation)", () => {
       "alphaclaw-restart-operation.json",
     );
     expect(fs.existsSync(operationFile)).toBe(false);
+  });
+
+  it("durationMs/downtimeMs survive a fresh instance over the same dir (reload previously dropped them)", () => {
+    let nowMs = 100_000;
+    const stateDir = makeStateDir();
+    const storeA = createRestartRequiredState({
+      isGatewayRunning: async () => true,
+      flagStore: nullFlagStore(),
+      stateDir,
+      now: () => nowMs,
+    });
+    const { operationId } = storeA.beginRestart();
+    storeA.completeRestart({
+      operationId,
+      ok: true,
+      durationMs: 4200,
+      downtimeMs: 3100,
+    });
+
+    // Simulated AlphaClaw supervisor restart: a brand-new instance reloads
+    // the persisted record — the UI reads these fields from it.
+    const storeB = createRestartRequiredState({
+      isGatewayRunning: async () => true,
+      flagStore: nullFlagStore(),
+      stateDir,
+      now: () => nowMs,
+    });
+    storeB.reconcileOnBoot();
+    expect(storeB.getLastRestartOperation()).toMatchObject({
+      operationId,
+      status: "succeeded",
+      durationMs: 4200,
+      downtimeMs: 3100,
+    });
+  });
+
+  it("evidenceTail round-trips a reload with a tail-keeping 4000-char cap", () => {
+    let nowMs = 100_000;
+    const stateDir = makeStateDir();
+    const storeA = createRestartRequiredState({
+      isGatewayRunning: async () => true,
+      flagStore: nullFlagStore(),
+      stateDir,
+      now: () => nowMs,
+    });
+    const { operationId } = storeA.beginRestart();
+    // Plant the cause line at the very END of an oversized tail: a
+    // head-keeping cap would drop it.
+    const causeLine = "state-lifecycle lock held by dead pid 57 — cannot start";
+    const oversized = `${"noise line\n".repeat(600)}${causeLine}`;
+    expect(oversized.length).toBeGreaterThan(4000);
+    storeA.completeRestart({
+      operationId,
+      ok: false,
+      errorSummary: "boom",
+      evidenceTail: oversized,
+    });
+    const saved = storeA.getLastRestartOperation();
+    expect(saved.evidenceTail.length).toBeLessThanOrEqual(4000);
+    expect(saved.evidenceTail.endsWith(causeLine)).toBe(true);
+
+    const storeB = createRestartRequiredState({
+      isGatewayRunning: async () => true,
+      flagStore: nullFlagStore(),
+      stateDir,
+      now: () => nowMs,
+    });
+    storeB.reconcileOnBoot();
+    const reloaded = storeB.getLastRestartOperation();
+    expect(reloaded.evidenceTail.endsWith(causeLine)).toBe(true);
+    // Empty/absent stays absent — never "".
+    expect(reloaded.evidenceTail).not.toBe("");
+  });
+
+  it("reload guards evidenceTail against corrupted/hand-edited files (non-string, oversized tail-keeping)", () => {
+    let nowMs = 100_000;
+    const stateDir = makeStateDir();
+    const storeA = createRestartRequiredState({
+      isGatewayRunning: async () => true,
+      flagStore: nullFlagStore(),
+      stateDir,
+      now: () => nowMs,
+    });
+    const { operationId } = storeA.beginRestart();
+    storeA.completeRestart({ operationId, ok: false, errorSummary: "boom" });
+
+    const operationFile = path.join(
+      stateDir,
+      "alphaclaw-restart-operation.json",
+    );
+    // Hand-edit: non-string evidenceTail plus a multi-MB variant.
+    const raw = JSON.parse(fs.readFileSync(operationFile, "utf8"));
+    raw.evidenceTail = { sneaky: "object" };
+    fs.writeFileSync(operationFile, JSON.stringify(raw));
+    const storeB = createRestartRequiredState({
+      isGatewayRunning: async () => true,
+      flagStore: nullFlagStore(),
+      stateDir,
+      now: () => nowMs,
+    });
+    storeB.reconcileOnBoot();
+    expect(storeB.getLastRestartOperation().evidenceTail).toBeUndefined();
+
+    raw.evidenceTail = `${"x".repeat(3_000_000)}THE-END`;
+    fs.writeFileSync(operationFile, JSON.stringify(raw));
+    const storeC = createRestartRequiredState({
+      isGatewayRunning: async () => true,
+      flagStore: nullFlagStore(),
+      stateDir,
+      now: () => nowMs,
+    });
+    storeC.reconcileOnBoot();
+    const guarded = storeC.getLastRestartOperation().evidenceTail;
+    expect(guarded.length).toBe(4000);
+    expect(guarded.endsWith("THE-END")).toBe(true);
+  });
+
+  it("a legacy (pre-upgrade) operation file without the new fields still loads", () => {
+    let nowMs = 100_000;
+    const stateDir = makeStateDir();
+    const legacy = {
+      operationId: "11111111-2222-3333-4444-555555555555",
+      kind: "gateway_restart",
+      startedAt: nowMs - 1000,
+      bootId: "old-boot",
+      expiresAt: nowMs + 60_000,
+      status: "failed",
+      lastStep: "waiting_ready",
+      errorSummary: "Gateway did not become ready within 120s",
+      completedAt: nowMs - 500,
+      reasonsSnapshot: [],
+    };
+    fs.mkdirSync(stateDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(stateDir, "alphaclaw-restart-operation.json"),
+      JSON.stringify(legacy),
+    );
+    const store = createRestartRequiredState({
+      isGatewayRunning: async () => true,
+      flagStore: nullFlagStore(),
+      stateDir,
+      now: () => nowMs,
+    });
+    store.reconcileOnBoot();
+    const loaded = store.getLastRestartOperation();
+    expect(loaded).toMatchObject({
+      operationId: legacy.operationId,
+      status: "failed",
+    });
+    expect(loaded.evidenceTail).toBeUndefined();
+    expect(loaded.durationMs).toBeUndefined();
+  });
+
+  it("updateRestartOperation refreshes expiresAt (queue keepalive) without touching lastStep", () => {
+    let nowMs = 10_000;
+    const store = makeStore({ now: () => nowMs, getBootId: () => "boot-A" });
+    const { operationId } = store.beginRestart();
+    store.updateRestartOperation({ operationId, lastStep: "stopping" });
+
+    // Keepalive: expiry extended past the initial budget; lastStep untouched.
+    const refreshed = store.updateRestartOperation({
+      operationId,
+      expiresAt: nowMs + kGatewayRestartOperationBudgetMs * 3,
+    });
+    expect(refreshed.expiresAt).toBe(
+      nowMs + kGatewayRestartOperationBudgetMs * 3,
+    );
+    expect(refreshed.lastStep).toBe("stopping");
+
+    // The record now survives well past the initial budget...
+    nowMs += kGatewayRestartOperationBudgetMs + 1;
+    expect(store.getActiveRestartOperation()).not.toBeNull();
+    // ...and the eventual completion persists the real outcome + evidence,
+    // never "interrupted".
+    const done = store.completeRestart({
+      operationId,
+      ok: false,
+      errorSummary: "real failure",
+      evidenceTail: "the real cause line",
+    });
+    expect(done.status).toBe("failed");
+    expect(done.evidenceTail).toBe("the real cause line");
+    // A non-finite or closed-record refresh is refused.
+    expect(
+      store.updateRestartOperation({ operationId, expiresAt: nowMs + 1 }),
+    ).toBeNull();
+  });
+
+  it("a failing operation persist warns ONCE per operation (evidence is load-bearing; silence was the incident's failure mode)", () => {
+    const stateDir = makeStateDir();
+    const store = createRestartRequiredState({
+      isGatewayRunning: async () => true,
+      flagStore: nullFlagStore(),
+      stateDir,
+    });
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { operationId } = store.beginRestart();
+    // Break the persist path: a DIRECTORY at the operation file's path makes
+    // the atomic rename fail on every subsequent write.
+    const operationFile = path.join(stateDir, "alphaclaw-restart-operation.json");
+    fs.rmSync(operationFile, { force: true });
+    fs.mkdirSync(operationFile);
+    fs.writeFileSync(path.join(operationFile, "occupant"), "x");
+
+    store.updateRestartOperation({ operationId, lastStep: "stopping" });
+    store.updateRestartOperation({ operationId, lastStep: "launching" });
+    const persistWarns = warnSpy.mock.calls.filter(([msg]) =>
+      String(msg).includes("failed to persist restart-operation"),
+    );
+    expect(persistWarns).toHaveLength(1);
+    warnSpy.mockRestore();
+    fs.rmSync(operationFile, { recursive: true, force: true });
   });
 
   it("prunes stale terminal records at boot in a fresh instance", () => {

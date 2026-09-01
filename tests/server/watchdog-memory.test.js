@@ -388,6 +388,16 @@ describe("server/watchdog memory monitor", () => {
       await criticalScenario(harness, 2);
       expect(restart).toHaveBeenCalledTimes(1);
       expect(release).toHaveBeenCalled();
+      // Restart-class hold: the mitigation lease is the shared operation
+      // budget (which tracks the configurable ready wait) — the fixed default
+      // lease would force-release mid-cold-start on slow boxes.
+      const {
+        kGatewayRestartOperationBudgetMs,
+      } = require("../../lib/server/constants");
+      expect(gatewayLifecycleLock.tryAcquire).toHaveBeenCalledWith(
+        "memory_mitigation",
+        { leaseMs: kGatewayRestartOperationBudgetMs },
+      );
     });
 
     it("is suppressed inside a build stabilization window (rollback owns recovery)", async () => {

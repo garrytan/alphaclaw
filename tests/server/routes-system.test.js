@@ -1198,7 +1198,10 @@ describe("server/routes/system", () => {
           acceptedSource: null,
         },
         appliedId: "2026.8.1",
+        appliedVersion: "2026.8.1",
         isPin: false,
+        // Expected divergence: the applied beta is what runs, over the pin.
+        pinDiverged: true,
         acceptedAt: null,
         inStabilizationWindow: true,
         lastKnownGood: { package: null, dev: null },
@@ -1220,7 +1223,11 @@ describe("server/routes/system", () => {
       installedVersion: "2026.8.1",
       pinVersion: "2026.7.1-2",
       appliedId: "2026.8.1",
+      appliedVersion: "2026.8.1",
       isPin: false,
+      // "running the applied build over the declared pin — expected" (the
+      // 2026-09-01 incident's npm-ls red herring, made legible).
+      pinDiverged: true,
       acceptedAt: null,
       inStabilizationWindow: true,
       applyInProgress: true,

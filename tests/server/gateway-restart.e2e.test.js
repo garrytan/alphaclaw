@@ -12,6 +12,12 @@ const kTempRoot = fs.mkdtempSync(
   path.join(os.tmpdir(), "alphaclaw-restart-drill-"),
 );
 process.env.ALPHACLAW_ROOT_DIR = kTempRoot;
+// Pin the ready budget to 120s before any lib require (constants reads the
+// env at module load): the drills' fake-timer advancement loops and frame
+// assertions are calibrated to a 120s budget. NOTE: a drill against the
+// production default (300s ready / 600s+ operation budget) must advance
+// ~600s+ per attempt.
+process.env.GATEWAY_RESTART_READY_TIMEOUT = "120";
 
 const { EventEmitter } = require("events");
 const childProcess = require("child_process");
@@ -430,6 +436,9 @@ describe("server/gateway restart drills (e2e)", () => {
     fake.neverReady = true;
     fake.stderrLines = [
       `gateway boot: auth failed for token ${kSecret}`,
+      // X9 production-path check: an ANSI escape INSIDE the secret must not
+      // defeat value-matching (controls are stripped BEFORE redaction).
+      `retry auth with token super\x1b[31msecrettoken123`,
       "bind: address already in use",
     ];
     const harness = createDrillHarness({
@@ -467,11 +476,18 @@ describe("server/gateway restart drills (e2e)", () => {
       const events = client.events();
       const terminal = events[events.length - 1];
       expect(terminal.event).toBe("error");
-      expect(terminal.data).toEqual({
-        error: "Gateway did not become ready within 120s",
+      // The summary now names the blocking CAUSE (last error-shaped line of
+      // the redacted gateway output), not just the timeout symptom.
+      expect(terminal.data).toMatchObject({
         code: "restart_failed",
         hint: "Retry, run Repair, or check the gateway logs.",
       });
+      expect(terminal.data.error).toContain(
+        "Gateway did not become ready within 120s",
+      );
+      expect(terminal.data.error).toContain(
+        "last gateway error: bind: address already in use",
+      );
       expect(events.some((e) => e.event === "done")).toBe(false);
       expect(events.some((e) => e.data?.name === "ready")).toBe(false);
       // Evidence rides by reference on /api/restart-status, never on frames —
@@ -489,8 +505,16 @@ describe("server/gateway restart drills (e2e)", () => {
       expect(status.body.lastOperation).toMatchObject({
         operationId,
         status: "failed",
-        errorSummary: "Gateway did not become ready within 120s",
       });
+      expect(status.body.lastOperation.errorSummary).toContain(
+        "Gateway did not become ready within 120s",
+      );
+      expect(status.body.lastOperation.errorSummary).toContain(
+        "last gateway error: bind: address already in use",
+      );
+      // The raw persisted field never leaks into the response — `evidence`
+      // is the single contract the UI reads.
+      expect(status.body.lastOperation).not.toHaveProperty("evidenceTail");
       // The planted env-file secret in the stderr tail is masked to "***" and
       // never appears in cleartext anywhere in the response body.
       expect(status.body.lastOperation.evidence).toContain(
@@ -500,6 +524,23 @@ describe("server/gateway restart drills (e2e)", () => {
         "address already in use",
       );
       expect(JSON.stringify(status.body)).not.toContain(kSecret);
+      // The ANSI-poisoned copy is normalized-then-masked through the REAL
+      // route pipeline — no fragment of the secret survives.
+      expect(JSON.stringify(status.body)).not.toContain("secrettoken123");
+
+      // Evidence precedence guard: a NEWER operation must never serve the
+      // failed operation's in-memory evidence. Complete a fresh operation
+      // directly on the store; the route now reports THAT operation with
+      // null evidence — not operation A's tail.
+      const { operationId: opB } =
+        harness.restartRequiredState.beginRestart();
+      harness.restartRequiredState.completeRestart({
+        operationId: opB,
+        ok: true,
+      });
+      const statusB = await request(app).get("/api/restart-status");
+      expect(statusB.body.lastOperation.operationId).toBe(opB);
+      expect(statusB.body.lastOperation.evidence).toBeNull();
     } finally {
       client?.close();
       vi.useRealTimers();
@@ -681,5 +722,95 @@ describe("server/gateway restart drills (e2e)", () => {
     } finally {
       client.close();
     }
+  });
+
+  it("queued behind a long lifecycle hold: the queue keepalive keeps the record alive and the restart completes with its real outcome (never interrupted)", async () => {
+    const fake = createFakeGateway({ portOpen: true });
+    const harness = createDrillHarness({ fake });
+    const app = createApp(harness.deps);
+    const {
+      kGatewayRestartOperationBudgetMs,
+    } = require("../../lib/server/constants");
+    vi.useFakeTimers();
+    try {
+      const acquireSpy = vi.spyOn(harness.gatewayLifecycleLock, "acquire");
+      // An alien long hold (a channel apply) parks the restart in the queue
+      // for LONGER than the record's initial lifetime.
+      const releaseHold = await harness.gatewayLifecycleLock.acquire("apply", {
+        leaseMs: 60 * 60_000,
+      });
+      const res = await request(app).post("/api/gateway/restart?async=1");
+      expect(res.status).toBe(202);
+      const { operationId } = res.body;
+
+      // Past the initial budget while still queued: without the 60s queue
+      // keepalive every /api/restart-status poll would reap the record as
+      // "interrupted" and the eventual outcome + evidence would be dropped.
+      await vi.advanceTimersByTimeAsync(kGatewayRestartOperationBudgetMs + 61_000);
+      expect(
+        harness.restartRequiredState.getActiveRestartOperation(),
+      ).toMatchObject({ operationId, status: "running" });
+
+      // Release the hold: the restart acquires with the restart-class BUDGET
+      // lease (not the fixed default) and completes with its real outcome.
+      releaseHold();
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(acquireSpy).toHaveBeenCalledWith("restart", {
+        leaseMs: kGatewayRestartOperationBudgetMs,
+      });
+      expect(
+        harness.restartRequiredState.getLastRestartOperation(),
+      ).toMatchObject({ operationId, status: "succeeded" });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("failure evidence survives an AlphaClaw supervisor restart (persisted record, fresh app)", async () => {
+    // Session 1: a failed operation persists the redacted evidence tail into
+    // the operation record (this is what the in-memory copy can NOT do).
+    const stateDir = mkStateDir();
+    const storeA = createRestartRequiredState({
+      isGatewayRunning: async () => false,
+      flagStore: nullFlagStore(),
+      stateDir,
+    });
+    const { operationId } = storeA.beginRestart();
+    storeA.completeRestart({
+      operationId,
+      ok: false,
+      errorSummary:
+        "Gateway did not become ready within 120s — last gateway error: ERROR another OpenClaw process owns state-lifecycle",
+      evidenceTail:
+        "loading plugins...\nERROR another OpenClaw process owns state-lifecycle: /tmp/openclaw-state-locks-0",
+      durationMs: 121_000,
+    });
+
+    // Session 2: a brand-new store over the same dir (simulated AlphaClaw
+    // restart) and a brand-new app — the route's in-memory evidence is gone;
+    // the persisted record is the only carrier.
+    const storeB = createRestartRequiredState({
+      isGatewayRunning: async () => false,
+      flagStore: nullFlagStore(),
+      stateDir,
+    });
+    storeB.reconcileOnBoot();
+    const harness = createDrillHarness({ restartRequiredState: storeB });
+    const app = createApp(harness.deps);
+
+    const status = await request(app).get("/api/restart-status");
+    expect(status.status).toBe(200);
+    expect(status.body.lastOperation).toMatchObject({
+      operationId,
+      status: "failed",
+      durationMs: 121_000,
+    });
+    expect(status.body.lastOperation.evidence).toContain(
+      "owns state-lifecycle",
+    );
+    expect(status.body.lastOperation).not.toHaveProperty("evidenceTail");
+    expect(status.body.lastOperation.errorSummary).toContain(
+      "last gateway error:",
+    );
   });
 });
