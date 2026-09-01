@@ -41,6 +41,35 @@ describe("GET /api/claude-code/status", () => {
     expect(res.body.availability).toEqual({ available: true });
   });
 
+  it("absolutizes the relative rescue link from the request origin", async () => {
+    const deps = createDeps({
+      claudeCodeLocalService: {
+        getStatusSnapshot: vi.fn(() => ({
+          enabled: true,
+          state: "running",
+          sessionUrl: "/rescue/abc",
+        })),
+      },
+      getBaseUrl: (req) => `https://box.example`,
+    });
+    const res = await request(createApp(deps)).get("/api/claude-code/status");
+    expect(res.body.local.sessionUrl).toBe("https://box.example/rescue/abc");
+  });
+
+  it("passes the relative rescue link through unchanged when getBaseUrl is absent (older wiring)", async () => {
+    const deps = createDeps({
+      claudeCodeLocalService: {
+        getStatusSnapshot: vi.fn(() => ({
+          enabled: true,
+          state: "running",
+          sessionUrl: "/rescue/abc",
+        })),
+      },
+    });
+    const res = await request(createApp(deps)).get("/api/claude-code/status");
+    expect(res.body.local.sessionUrl).toBe("/rescue/abc");
+  });
+
   it("keeps the routine availability when the local snapshot throws", async () => {
     const deps = createDeps({
       claudeCodeLocalService: {
@@ -208,7 +237,9 @@ describe("claude-code admin-manifest classification (security pin)", () => {
       availability: { available: true },
       local: {
         state: "error",
-        sessionUrl: "https://claude.ai/code/secret",
+        // Wrapper-shaped now: the capability URL must be stripped for agent
+        // actors — /rescue/:token is unauthenticated, the token IS access.
+        sessionUrl: "https://box.example/rescue/deadbeef",
         sessionId: "secret",
         socketPath: "/data/claude-code-local/tmux.sock",
         login: { phase: "awaiting_code", oauthUrl: "https://claude.com/cai/oauth/x" },
@@ -280,13 +311,27 @@ describe("local rescue endpoints", () => {
       ok: true,
       status: "running",
       sessionId: "sess_abc123def",
-      sessionUrl: "https://claude.ai/code/sess_abc123def",
+      sessionUrl: "/rescue/feedface",
     });
     const running = await request(app)
       .post("/api/claude-code/local/session")
       .send({ confirmed: true });
     expect(running.status).toBe(200);
-    expect(running.body.sessionUrl).toBe("https://claude.ai/code/sess_abc123def");
+    // Relative wrapper path passes through when getBaseUrl is unwired.
+    expect(running.body.sessionUrl).toBe("/rescue/feedface");
+
+    const absDeps = createLocalDeps();
+    absDeps.getBaseUrl = () => "https://box.example";
+    absDeps.claudeCodeLocalService.startSession.mockResolvedValue({
+      ok: true,
+      status: "running",
+      sessionId: "sess_abc123def",
+      sessionUrl: "/rescue/feedface",
+    });
+    const absolutized = await request(createApp(absDeps))
+      .post("/api/claude-code/local/session")
+      .send({ confirmed: true });
+    expect(absolutized.body.sessionUrl).toBe("https://box.example/rescue/feedface");
   });
 
   it("enforces the strict-boolean consent handshake", async () => {
