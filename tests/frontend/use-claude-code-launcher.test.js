@@ -350,7 +350,8 @@ describe("useClaudeCodeLauncher confirm one-shot + unmount cleanup", () => {
 
 // ---------------------------------------------------------------- local ----
 
-const kLocalSessionUrl = "https://claude.ai/code/rescue_01XYZ";
+const kLocalSessionUrl =
+  "https://box.example/rescue/abababababababababababababababababababababababababababababababab";
 const kLocalCwd = "/data/claude-code-local/workspace";
 
 const localReadyStatus = (overrides = {}) => ({
