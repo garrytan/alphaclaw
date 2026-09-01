@@ -20,7 +20,14 @@ const { readGoogleState, writeGoogleState } = require("../../lib/server/google-s
 // pre-fix contract, pinned here so any future "gate everything" change is a
 // conscious decision.
 
-const buildDisconnectApp = ({ accounts = [], exportOk = true, removeOk = true, tokenData } = {}) => {
+const buildDisconnectApp = ({
+  accounts = [],
+  exportOk = true,
+  exportTimedOut = false,
+  removeOk = true,
+  tokenData,
+  stopGmailWatch,
+} = {}) => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "alphaclaw-gdisc-"));
   const statePath = path.join(tmpDir, "google-state.json");
   if (accounts.length) {
@@ -40,7 +47,8 @@ const buildDisconnectApp = ({ accounts = [], exportOk = true, removeOk = true, t
     gogCmd: async (cmd) => {
       gogCalls.push(cmd);
       if (cmd.includes("tokens export")) {
-        if (!exportOk) return { ok: false, stdout: "", stderr: "export failed" };
+        if (exportTimedOut) return { ok: false, stdout: "", stderr: "", timedOut: true, code: null };
+        if (!exportOk) return { ok: false, stdout: "", stderr: "export failed", timedOut: false, code: 1 };
         // Stage the token file at the --out path so the route finds a
         // refresh token and exercises the revocation fetch.
         const outMatch = cmd.match(/--out "([^"]+)"/);
@@ -57,6 +65,7 @@ const buildDisconnectApp = ({ accounts = [], exportOk = true, removeOk = true, t
     getBaseUrl: () => "http://127.0.0.1:3000",
     readGoogleCredentials: () => ({ clientId: "cid", clientSecret: "sec" }),
     getApiEnableUrl: () => "",
+    stopGmailWatch,
     constants: {
       GOG_CONFIG_DIR: tmpDir,
       GOG_STATE_PATH: statePath,
@@ -104,6 +113,57 @@ describe("server/routes POST /api/google/disconnect (PR #35 clientArg regression
       } catch {}
     }
     tmpDirs = [];
+  });
+
+  // Fix wave (v0.9.64): the three deferred red-team findings on disconnect.
+  it("stops the account's Gmail watch before revocation (orphaned-serve-process fix)", async () => {
+    global.fetch = okFetch;
+    const stopCalls = [];
+    const { app } = build({
+      accounts: [baseAccount()],
+      stopGmailWatch: async (args) => {
+        stopCalls.push(args);
+        return { ok: true };
+      },
+    });
+
+    const res = await request(app).post("/api/google/disconnect").send({ accountId: "acc1" });
+
+    expect(res.body.ok).toBe(true);
+    expect(stopCalls).toEqual([{ accountId: "acc1" }]);
+  });
+
+  it("continues the disconnect when Gmail watch stop throws (best-effort)", async () => {
+    global.fetch = okFetch;
+    const { app, statePath } = build({
+      accounts: [baseAccount()],
+      stopGmailWatch: async () => {
+        throw new Error("watch stop boom");
+      },
+    });
+
+    const res = await request(app).post("/api/google/disconnect").send({ accountId: "acc1" });
+
+    expect(res.body.ok).toBe(true);
+    expect(readAccounts(statePath)).toHaveLength(0);
+  });
+
+  it("keeps the account (retryable) when the token export TIMES OUT — never orphans a live token", async () => {
+    global.fetch = async () => {
+      throw new Error("revocation must not run when export timed out");
+    };
+    const { app, statePath, gogCalls } = build({
+      accounts: [baseAccount()],
+      exportTimedOut: true,
+    });
+
+    const res = await request(app).post("/api/google/disconnect").send({ accountId: "acc1" });
+
+    expect(res.body.ok).toBe(false);
+    expect(res.body.retryable).toBe(true);
+    expect(res.body.accountId).toBe("acc1");
+    expect(gogCalls.some((c) => c.includes("auth remove"))).toBe(false);
+    expect(readAccounts(statePath)).toHaveLength(1);
   });
 
   it("removes the account and invokes gog auth remove (clientArg scoping regression)", async () => {

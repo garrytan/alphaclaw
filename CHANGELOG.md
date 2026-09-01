@@ -5,7 +5,7 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
-## [0.9.64] - 2026-09-01
+## [0.9.65] - 2026-09-01
 
 Drift Doctor now audits your models: outdated bindings, invalid model
 codings, wrong context limits, and skills that still steer the agent toward
@@ -52,6 +52,27 @@ old models all surface as actionable cards.
 - Dismissal semantics for the new cards follow the repo doctrine end to end:
   severity, finding class, and (for skills) the flagged model set live in the
   sourceKey, so dismissing a mild card can never suppress a later severe one.
+
+## [0.9.64] - 2026-08-31
+
+Disconnecting a Google account (and Gmail-watch teardown generally) is now
+race-safe and can no longer leave a live token or a stray process behind.
+
+### Fixed
+- Disconnecting a Google account now stops its Gmail watch first — the local
+  push-serve process is shut down and Google is told to stop delivering,
+  instead of the account row being deleted out from under a running watcher
+  (which used to leave a process holding its port and Google delivering for up
+  to 7 days).
+- A Gmail-watch teardown or a concurrently completing sign-in can no longer
+  clobber each other's state: every Google-account write that spans a
+  multi-second operation (disconnect, connect, credential save, watch
+  start/stop, serve restart) now happens under a lock against freshly read
+  state, closing a window where a just-connected account (and its live token)
+  could be silently erased.
+- A disconnect whose token export TIMES OUT now keeps the account and reports a
+  retryable error, instead of assuming there was no token to revoke and
+  removing the account — which could have orphaned a still-live token at Google.
 
 ## [0.9.63] - 2026-08-31
 
