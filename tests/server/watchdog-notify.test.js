@@ -145,18 +145,26 @@ describe("server/watchdog-notify", () => {
     expect(defaultClient.postMessage.mock.calls[0][2]).toEqual({
       thread_ts: null,
       mrkdwn: true,
+      unfurl_links: false,
+      unfurl_media: false,
     });
     expect(defaultClient.postMessage.mock.calls[1][2]).toEqual({
       thread_ts: "xoxb-default-ts-1",
       mrkdwn: true,
+      unfurl_links: false,
+      unfurl_media: false,
     });
     expect(alertsClient.postMessage.mock.calls[0][2]).toEqual({
       thread_ts: null,
       mrkdwn: true,
+      unfurl_links: false,
+      unfurl_media: false,
     });
     expect(alertsClient.postMessage.mock.calls[1][2]).toEqual({
       thread_ts: "xoxb-alerts-ts-1",
       mrkdwn: true,
+      unfurl_links: false,
+      unfurl_media: false,
     });
   });
 
@@ -345,6 +353,7 @@ describe("server/watchdog-notify", () => {
     expect(discordApi.sendDirectMessage).toHaveBeenCalledWith(
       "D1",
       "**Gateway healthy** again",
+      { suppressEmbeds: true },
     );
     expect(consoleErrorSpy).toHaveBeenCalledWith(
       "[watchdog] discord notification failed for D2: cannot DM",
@@ -840,7 +849,7 @@ describe("server/watchdog-notify", () => {
       expect(clientsByToken.get("xoxb-alerts").postMessage).toHaveBeenCalledWith(
         "U_ADMIN",
         "Upgrade failed",
-        { mrkdwn: true },
+        { mrkdwn: true, unfurl_links: false, unfurl_media: false },
       );
 
       const missing = await notifier.sendToTarget(
@@ -868,6 +877,7 @@ describe("server/watchdog-notify", () => {
       expect(discordApi.sendDirectMessage).toHaveBeenCalledWith(
         "999",
         "Upgrade **failed**",
+        { suppressEmbeds: true },
       );
 
       delete process.env.DISCORD_BOT_TOKEN;
@@ -897,6 +907,8 @@ describe("server/watchdog-notify", () => {
       expect(sent).toEqual({ ok: true });
       expect(slackApi.postMessage).toHaveBeenCalledWith("U_ADMIN", "Upgrade failed", {
         mrkdwn: true,
+        unfurl_links: false,
+        unfurl_media: false,
       });
       expect(createSlackApi).not.toHaveBeenCalled();
     });

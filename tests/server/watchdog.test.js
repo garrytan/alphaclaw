@@ -552,7 +552,7 @@ describe("server/watchdog", () => {
   it("appends the rescue-session line to incident-class notifications only", async () => {
     vi.useFakeTimers();
     const kRescueLine =
-      "🛟 Rescue session: https://claude.ai/code/sess_test123";
+      "🛟 Rescue session: https://box.example/rescue/feedfacefeedfacefeedfacefeedfacefeedfacefeedfacefeedfacefeedface";
     let healthChecks = 0;
     const { watchdog, notifier } = createHarness({
       autoRepair: false,

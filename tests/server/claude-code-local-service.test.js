@@ -1116,6 +1116,15 @@ describe("claude-code-local service", () => {
       expect(service.resolveRescueRedirect(tokenA)).toBeNull();
     });
 
+    it("idempotent start while running returns the SAME wrapper link — no rotation, never the raw URL", async () => {
+      const { service, token } = await startRunning();
+      const again = await service.startSession({ confirmed: true, source: "click" });
+      expect(again).toMatchObject({ ok: true, status: "running" });
+      expect(again.sessionUrl).toBe(`/rescue/${token}`);
+      expect(again.sessionUrl).not.toContain("claude.ai");
+      expect(service.resolveRescueRedirect(token)).toBe(kRescueUrl);
+    });
+
     it("does not resolve while starting — but the token is already persisted at spawn", async () => {
       const { service, driver, fsModule } = createService({});
       await service.refreshProbes({ force: true });

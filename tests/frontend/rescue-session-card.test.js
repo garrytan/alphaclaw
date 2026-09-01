@@ -277,6 +277,8 @@ describe("WatchdogRescueSessionCard render states", () => {
     expect(svg.props["aria-label"]).toBe("QR code for the rescue session URL");
     const text = treeText(tree);
     expect(text).toContain("started by click");
+    // Revocation copy: the operator must learn the link dies on Stop.
+    expect(text).toContain("This link stops working when the session is stopped.");
     expect(text).toContain("tmux -S");
     expect(text).toContain("/data/claude-code-local/tmux.sock");
     expect(text).toContain("alphaclaw-rescue");

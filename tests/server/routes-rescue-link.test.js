@@ -3,6 +3,10 @@ const request = require("supertest");
 
 const { registerRescueLinkRoutes } = require("../../lib/server/routes/rescue-link");
 const { createLoginThrottle } = require("../../lib/server/login-throttle");
+const {
+  kRescueLinkProbeGate,
+  kRescueLinkRedeemGate,
+} = require("../../lib/server/constants");
 
 const kToken = "ab".repeat(32);
 const kTarget = "https://claude.ai/code/sess_route00001";
@@ -49,30 +53,11 @@ const createApp = ({
   return { app, claudeCodeLocalService };
 };
 
-// Event-rate gates with the production windows, driven by a fake clock.
+// Event-rate gates built from the REAL production configs (constants.js) —
+// a change to the production windows changes what these tests pin.
 const createGates = () => ({
-  probe: createLoginThrottle({
-    scope: "rescue-probe",
-    windowMs: 5 * 60 * 1000,
-    maxAttempts: 1,
-    baseLockMs: 5 * 60 * 1000,
-    maxLockMs: 5 * 60 * 1000,
-    globalWindowMs: 60 * 60 * 1000,
-    globalMaxAttempts: 12,
-    globalBaseLockMs: 60 * 60 * 1000,
-    globalMaxLockMs: 60 * 60 * 1000,
-  }),
-  redeem: createLoginThrottle({
-    scope: "rescue-redeem",
-    windowMs: 60 * 1000,
-    maxAttempts: 1,
-    baseLockMs: 60 * 1000,
-    maxLockMs: 60 * 1000,
-    globalWindowMs: 60 * 60 * 1000,
-    globalMaxAttempts: 600,
-    globalBaseLockMs: 60 * 1000,
-    globalMaxLockMs: 60 * 1000,
-  }),
+  probe: createLoginThrottle(kRescueLinkProbeGate),
+  redeem: createLoginThrottle(kRescueLinkRedeemGate),
 });
 
 describe("rescue-link route", () => {
@@ -250,7 +235,7 @@ describe("rescue-link route", () => {
     await new Promise((r) => setImmediate(r));
   });
 
-  it("HEAD gets the redirect but records no audit event and kicks no liveness check", async () => {
+  it("HEAD: valid-token redemption IS audited (token holders only), miss probes are not, liveness never kicks", async () => {
     const recordOperationEvent = vi.fn();
     const checkSessionLiveness = vi.fn(async () => {});
     const { app } = createApp({
@@ -263,10 +248,57 @@ describe("rescue-link route", () => {
     const hit = await request(app).head(`/rescue/${kToken}`);
     expect(hit.status).toBe(302);
     expect(hit.headers.location).toBe(kTarget);
+    // A HEAD with a valid token received the live Location — only a token
+    // holder can do that, so it must land in the audit trail.
+    expect(recordOperationEvent).toHaveBeenCalledTimes(1);
+    expect(recordOperationEvent.mock.calls[0][0].kind).toBe("rescue_link_redeemed");
     const miss = await request(app).head(`/rescue/${"44".repeat(32)}`);
     expect(miss.status).toBe(404);
-    expect(recordOperationEvent).not.toHaveBeenCalled();
+    // Miss probes stay unaudited on HEAD (scanner noise), and HEAD never
+    // triggers the tmux-forking liveness kick.
+    expect(recordOperationEvent).toHaveBeenCalledTimes(1);
     expect(checkSessionLiveness).not.toHaveBeenCalled();
+  });
+
+  it("coalesces the liveness kick: rapid redemptions fork once per interval", async () => {
+    let now = 5_000_000;
+    const checkSessionLiveness = vi.fn(async () => {});
+    const { app } = createApp({
+      service: {
+        resolveRescueRedirect: (token) => (token === kToken ? kTarget : null),
+        checkSessionLiveness,
+      },
+      nowFn: () => now,
+    });
+    for (let i = 0; i < 3; i += 1) {
+      const res = await request(app).get(`/rescue/${kToken}`);
+      expect(res.status).toBe(302);
+    }
+    expect(checkSessionLiveness).toHaveBeenCalledTimes(1);
+    now += 10_001;
+    await request(app).get(`/rescue/${kToken}`);
+    expect(checkSessionLiveness).toHaveBeenCalledTimes(2);
+  });
+
+  it("fails open when a throttle gate itself throws: events still flow, responses unchanged", async () => {
+    const recordOperationEvent = vi.fn();
+    const throwingGate = {
+      getOrCreateLoginAttemptState: () => {
+        throw new Error("store gone");
+      },
+    };
+    const { app } = createApp({
+      recordOperationEvent,
+      throttle: { probe: throwingGate, redeem: throwingGate },
+    });
+    const hit = await request(app).get(`/rescue/${kToken}`);
+    expect(hit.status).toBe(302);
+    const miss = await request(app).get(`/rescue/${"55".repeat(32)}`);
+    expect(miss.status).toBe(404);
+    // Both events written despite the broken cap store (fail-open).
+    const kinds = recordOperationEvent.mock.calls.map(([e]) => e.kind);
+    expect(kinds).toContain("rescue_link_redeemed");
+    expect(kinds).toContain("rescue_link_probe_failed");
   });
 
   it("rejects malformed percent-encoding as a 400 that echoes no path or token", async () => {

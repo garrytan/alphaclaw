@@ -24,8 +24,10 @@ The rescue-session link is now revocable: stop kills it everywhere, restart mint
   failed lookups record `rescue_link_probe_failed`. Event writes are capped
   (per-IP and globally) so probing can never flood watchdog.db; the caps never
   change the response. Events are incident-neutral by construction.
-- Telegram watchdog notifications now send with `disable_web_page_preview`, so
-  Telegram's unfurler no longer follows (and audit-pollutes) rescue links.
+- Watchdog notifications now suppress link previews on all three chat
+  transports — Telegram (`disable_web_page_preview`), Slack
+  (`unfurl_links`/`unfurl_media` off), and Discord (`SUPPRESS_EMBEDS`) — so
+  platform crawlers no longer follow (and thereby redeem) rescue links.
 - New shared util `lib/server/utils/timing-safe.js` (hash-both-sides
   `timingSafeEqual` — the canonical semantic from `routes/auth.js`), used by
   the rescue resolver. Migrating the pre-existing comparison sites onto it is

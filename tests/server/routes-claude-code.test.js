@@ -41,7 +41,7 @@ describe("GET /api/claude-code/status", () => {
     expect(res.body.availability).toEqual({ available: true });
   });
 
-  it("absolutizes the relative rescue link from the request origin", async () => {
+  it("absolutizes the relative rescue link from the request origin when no base is configured", async () => {
     const deps = createDeps({
       claudeCodeLocalService: {
         getStatusSnapshot: vi.fn(() => ({
@@ -54,6 +54,41 @@ describe("GET /api/claude-code/status", () => {
     });
     const res = await request(createApp(deps)).get("/api/claude-code/status");
     expect(res.body.local.sessionUrl).toBe("https://box.example/rescue/abc");
+  });
+
+  it("prefers the validated configured origin over request headers for the token-bearing link", async () => {
+    const deps = createDeps({
+      claudeCodeLocalService: {
+        getStatusSnapshot: vi.fn(() => ({
+          enabled: true,
+          state: "running",
+          sessionUrl: "/rescue/abc",
+        })),
+        getExternalBaseOrigin: () => "https://configured.example",
+      },
+      // A misconfigured proxy could make this attacker-influenced — it must
+      // lose to the configured base for a capability-carrying link.
+      getBaseUrl: () => "https://evil-forwarded-host.example",
+    });
+    const res = await request(createApp(deps)).get("/api/claude-code/status");
+    expect(res.body.local.sessionUrl).toBe("https://configured.example/rescue/abc");
+  });
+
+  it("leaves an already-absolute sessionUrl untouched even when getBaseUrl is wired", async () => {
+    const deps = createDeps({
+      claudeCodeLocalService: {
+        getStatusSnapshot: vi.fn(() => ({
+          enabled: true,
+          state: "running",
+          sessionUrl: "https://claude.ai/code/legacy",
+        })),
+      },
+      getBaseUrl: () => "https://box.example",
+    });
+    const res = await request(createApp(deps)).get("/api/claude-code/status");
+    // Defensive branch: only "/"-prefixed values get the origin prefix — a
+    // mixed-version window serving a raw absolute URL must not double-prefix.
+    expect(res.body.local.sessionUrl).toBe("https://claude.ai/code/legacy");
   });
 
   it("passes the relative rescue link through unchanged when getBaseUrl is absent (older wiring)", async () => {
