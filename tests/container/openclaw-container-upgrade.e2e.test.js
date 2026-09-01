@@ -566,14 +566,17 @@ describeContainer("container E2E: stable→beta upgrade in the production image"
     );
     ctx.cookie = null;
     await waitForUiUp(kContainerA, 5 * kMin);
-    const lockStillThere = await execInContainer(kContainerA, [
-      "test",
-      "-e",
-      "/tmp/openclaw-state-locks-0",
+    // Assert the SEEDED content is gone, not the path: a healthy post-boot
+    // gateway may legitimately recreate its own lock at the same name — the
+    // sweep's job was only to remove the dead-owner payload we planted.
+    const seededSurvived = await execInContainer(kContainerA, [
+      "sh",
+      "-c",
+      "grep -q 3999999 /tmp/openclaw-state-locks-0 2>/dev/null",
     ])
       .then(() => true)
       .catch(() => false);
-    if (lockStillThere) {
+    if (seededSurvived) {
       throw new Error(
         "boot state-lock sweep did NOT clear the seeded dead-owner /tmp/openclaw-state-locks-0",
       );

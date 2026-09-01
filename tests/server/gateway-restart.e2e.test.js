@@ -436,6 +436,9 @@ describe("server/gateway restart drills (e2e)", () => {
     fake.neverReady = true;
     fake.stderrLines = [
       `gateway boot: auth failed for token ${kSecret}`,
+      // X9 production-path check: an ANSI escape INSIDE the secret must not
+      // defeat value-matching (controls are stripped BEFORE redaction).
+      `retry auth with token super\x1b[31msecrettoken123`,
       "bind: address already in use",
     ];
     const harness = createDrillHarness({
@@ -521,6 +524,23 @@ describe("server/gateway restart drills (e2e)", () => {
         "address already in use",
       );
       expect(JSON.stringify(status.body)).not.toContain(kSecret);
+      // The ANSI-poisoned copy is normalized-then-masked through the REAL
+      // route pipeline — no fragment of the secret survives.
+      expect(JSON.stringify(status.body)).not.toContain("secrettoken123");
+
+      // Evidence precedence guard: a NEWER operation must never serve the
+      // failed operation's in-memory evidence. Complete a fresh operation
+      // directly on the store; the route now reports THAT operation with
+      // null evidence — not operation A's tail.
+      const { operationId: opB } =
+        harness.restartRequiredState.beginRestart();
+      harness.restartRequiredState.completeRestart({
+        operationId: opB,
+        ok: true,
+      });
+      const statusB = await request(app).get("/api/restart-status");
+      expect(statusB.body.lastOperation.operationId).toBe(opB);
+      expect(statusB.body.lastOperation.evidence).toBeNull();
     } finally {
       client?.close();
       vi.useRealTimers();
@@ -701,6 +721,48 @@ describe("server/gateway restart drills (e2e)", () => {
       ]);
     } finally {
       client.close();
+    }
+  });
+
+  it("queued behind a long lifecycle hold: the queue keepalive keeps the record alive and the restart completes with its real outcome (never interrupted)", async () => {
+    const fake = createFakeGateway({ portOpen: true });
+    const harness = createDrillHarness({ fake });
+    const app = createApp(harness.deps);
+    const {
+      kGatewayRestartOperationBudgetMs,
+    } = require("../../lib/server/constants");
+    vi.useFakeTimers();
+    try {
+      const acquireSpy = vi.spyOn(harness.gatewayLifecycleLock, "acquire");
+      // An alien long hold (a channel apply) parks the restart in the queue
+      // for LONGER than the record's initial lifetime.
+      const releaseHold = await harness.gatewayLifecycleLock.acquire("apply", {
+        leaseMs: 60 * 60_000,
+      });
+      const res = await request(app).post("/api/gateway/restart?async=1");
+      expect(res.status).toBe(202);
+      const { operationId } = res.body;
+
+      // Past the initial budget while still queued: without the 60s queue
+      // keepalive every /api/restart-status poll would reap the record as
+      // "interrupted" and the eventual outcome + evidence would be dropped.
+      await vi.advanceTimersByTimeAsync(kGatewayRestartOperationBudgetMs + 61_000);
+      expect(
+        harness.restartRequiredState.getActiveRestartOperation(),
+      ).toMatchObject({ operationId, status: "running" });
+
+      // Release the hold: the restart acquires with the restart-class BUDGET
+      // lease (not the fixed default) and completes with its real outcome.
+      releaseHold();
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(acquireSpy).toHaveBeenCalledWith("restart", {
+        leaseMs: kGatewayRestartOperationBudgetMs,
+      });
+      expect(
+        harness.restartRequiredState.getLastRestartOperation(),
+      ).toMatchObject({ operationId, status: "succeeded" });
+    } finally {
+      vi.useRealTimers();
     }
   });
 

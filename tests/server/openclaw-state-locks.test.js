@@ -132,6 +132,14 @@ describe("sweepStaleOpenclawStateLocks", () => {
     expect(extractPidFromText("1788279875123\n").pid).toBeNull();
     expect(extractPidFromText('{"pid":1234,"at":1788279875123}').pid).toBe(1234);
     expect(extractPidFromText("pid=77").pid).toBe(77);
+    // Valid JSON whose only "pid" is NESTED names a worker/former owner, not
+    // the holder — scraping it could clear a LIVE owner's lock. PID-less.
+    expect(
+      extractPidFromText('{"sessions":[{"id":"x","pid":123}]}'),
+    ).toEqual({ pid: null, source: "json_no_pid" });
+    expect(
+      extractPidFromText('{"lastOwner":{"pid":123},"at":1}'),
+    ).toEqual({ pid: null, source: "json_no_pid" });
     // Out-of-range pids are kept, not killed-and-misread.
     const dir = mkTmp();
     writeLock(dir, "openclaw-state-locks-0", 'pid="9999999999"');
@@ -278,6 +286,41 @@ describe("sweepStaleOpenclawStateLocks", () => {
     expect(
       fs.readdirSync(dir).filter((n) => n.includes(".reaping.")),
     ).toEqual([]);
+  });
+
+  it("quarantine verify-fail renames the racing fresh lock straight back (X5)", () => {
+    const dir = mkTmp();
+    const p = writeLock(dir, "openclaw-state-locks-0", JSON.stringify({ pid: 54321 }));
+    // Race simulation: between the sweep's inspection lstat and its rename,
+    // a legitimate lock replaces the entry (new inode). The quarantined
+    // inode then mismatches the inspected one — it must be renamed back.
+    const realLstat = fs.lstatSync.bind(fs);
+    let inspections = 0;
+    const racingFs = Object.create(fs);
+    racingFs.lstatSync = (target) => {
+      if (target === p) {
+        inspections += 1;
+        if (inspections === 1) {
+          const stats = realLstat(target);
+          // Swap in a fresh legitimate lock AFTER the inspection.
+          fs.rmSync(p, { force: true });
+          fs.writeFileSync(p, JSON.stringify({ pid: process.pid }));
+          return stats; // the sweep decides on the OLD (dead-owner) stats
+        }
+      }
+      return realLstat(target);
+    };
+    const result = sweepStaleOpenclawStateLocks({
+      tmpDir: dir,
+      fsModule: racingFs,
+      killFn: killDead,
+      log: silentLog,
+    });
+    expect(result.kept.map((k) => k.reason)).toEqual(["changed_under_us"]);
+    expect(result.cleared).toEqual([]);
+    // The fresh lock survived, back at its original name, content intact.
+    expect(JSON.parse(fs.readFileSync(p, "utf8")).pid).toBe(process.pid);
+    expect(fs.readdirSync(dir).filter((n) => n.includes(".reaping."))).toEqual([]);
   });
 
   it("emits the belt-disarmed breadcrumb after a failed readiness wait with zero matches", () => {

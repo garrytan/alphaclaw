@@ -554,6 +554,32 @@ describe("server/restart-required-state (boot reconciliation)", () => {
     ).toBeNull();
   });
 
+  it("a failing operation persist warns ONCE per operation (evidence is load-bearing; silence was the incident's failure mode)", () => {
+    const stateDir = makeStateDir();
+    const store = createRestartRequiredState({
+      isGatewayRunning: async () => true,
+      flagStore: nullFlagStore(),
+      stateDir,
+    });
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { operationId } = store.beginRestart();
+    // Break the persist path: a DIRECTORY at the operation file's path makes
+    // the atomic rename fail on every subsequent write.
+    const operationFile = path.join(stateDir, "alphaclaw-restart-operation.json");
+    fs.rmSync(operationFile, { force: true });
+    fs.mkdirSync(operationFile);
+    fs.writeFileSync(path.join(operationFile, "occupant"), "x");
+
+    store.updateRestartOperation({ operationId, lastStep: "stopping" });
+    store.updateRestartOperation({ operationId, lastStep: "launching" });
+    const persistWarns = warnSpy.mock.calls.filter(([msg]) =>
+      String(msg).includes("failed to persist restart-operation"),
+    );
+    expect(persistWarns).toHaveLength(1);
+    warnSpy.mockRestore();
+    fs.rmSync(operationFile, { recursive: true, force: true });
+  });
+
   it("prunes stale terminal records at boot in a fresh instance", () => {
     let nowMs = 100_000;
     const stateDir = makeStateDir();

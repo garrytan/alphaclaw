@@ -2355,6 +2355,49 @@ describe("server/gateway restart behavior", () => {
       await expect(pending).resolves.toBeUndefined();
     });
 
+    it("captures stdout in its OWN evidence ring (lock-wait messages) and caps retained lines at 2KB", async () => {
+      const supervisor = createChild();
+      childProcess.spawn = vi.fn(() => supervisor);
+      childProcess.execFile = execFileOk("");
+      fs.existsSync = vi.fn(() => false);
+      net.createConnection = vi.fn(() => createSocket(false));
+      delete require.cache[modulePath];
+      const gateway = require(modulePath);
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+      vi.spyOn(console, "log").mockImplementation(() => {});
+      vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+      vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+
+      const pending = gateway.runGatewayCmd("--force");
+      pending.catch(() => {});
+      await new Promise((resolve) => setImmediate(resolve));
+      const stdoutHandler = supervisor.stdout.on.mock.calls
+        .filter((call) => call[0] === "data")
+        .at(-1)?.[1];
+      const stderrHandler = supervisor.stderr.on.mock.calls
+        .filter((call) => call[0] === "data")
+        .at(-1)?.[1];
+      // The incident's blocking message can arrive on STDOUT — it must land
+      // in evidence without a shared ring letting stdout noise evict stderr.
+      stdoutHandler(
+        "waiting: another OpenClaw process owns state-lifecycle\n",
+      );
+      // A gateway spraying one huge line must be bounded at RETENTION time.
+      stderrHandler(`${"x".repeat(10_000)}\n`);
+      const exitHandler = supervisor.on.mock.calls
+        .filter((call) => call[0] === "exit")
+        .at(-1)?.[1];
+      exitHandler(1, null);
+
+      const rejection = await pending.catch((err) => err);
+      expect(rejection.name).toBe("GatewayRestartError");
+      expect(rejection.evidence.stdoutTail.join("\n")).toContain(
+        "owns state-lifecycle",
+      );
+      expect(rejection.evidence.stderrTail[0]).toHaveLength(2048);
+      gateway.__resetGatewayLaunchGateForTests();
+    });
+
     it("sweeps stale state locks reactively: never on a clean launch, always after a failed attempt", async () => {
       const stateLocks = require("../../lib/server/openclaw-state-locks");
       const sweepSpy = vi

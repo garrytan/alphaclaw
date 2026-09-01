@@ -71,9 +71,13 @@ describe("GATEWAY_RESTART_READY_TIMEOUT clamp (module-load read)", () => {
     );
   });
 
-  it("falls back to the default on junk", async () => {
+  it("falls back to the default on junk — WITH a warning (an operator who set the var mid-incident must hear back)", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
     const constants = await loadConstantsWithEnv("not-a-number");
     expect(constants.kGatewayRestartReadyTimeoutMs).toBe(300_000);
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining("GATEWAY_RESTART_READY_TIMEOUT=not-a-number"),
+    );
   });
 });
 
