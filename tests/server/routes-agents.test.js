@@ -385,6 +385,30 @@ describe("server/routes/agents", () => {
     });
   });
 
+  // X4: the failed-clear outcome must reach the client exactly like the
+  // deferred one — the delete succeeded, the allow entries did not go away.
+  it("DELETE /api/channels/accounts forwards pairingRowsCleanupFailed + pairingRowsCleanupError with ok:true authoritative", async () => {
+    const agentsService = createAgentsServiceMock();
+    agentsService.deleteChannelAccount.mockResolvedValue({
+      ok: true,
+      pairingRowsCleanupFailed: true,
+      pairingRowsCleanupError: "pairing tables schema is unsupported (upstream changed it)",
+    });
+    const app = createApp(agentsService);
+
+    const response = await request(app).delete("/api/channels/accounts").send({
+      provider: "telegram",
+      accountId: "alerts",
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual({
+      ok: true,
+      pairingRowsCleanupFailed: true,
+      pairingRowsCleanupError: "pairing tables schema is unsupported (upstream changed it)",
+    });
+  });
+
   it("DELETE /api/channels/accounts forwards the service's outcome flags (gatewayRestartFailed, pairingRowsCleanupDeferred) with ok:true authoritative", async () => {
     const agentsService = createAgentsServiceMock();
     agentsService.deleteChannelAccount.mockResolvedValue({

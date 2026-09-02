@@ -3280,6 +3280,58 @@ describe("server/agents/service", () => {
       errorSpy.mockRestore();
     });
 
+    // X4: an `ok: false` from the row clear (schema mismatch, DB failure) was
+    // logged and mapped to a clean `{ ok: true }` — the account was gone from
+    // the config while its allow entries stayed authorized and a retry 404'd.
+    // The delete still succeeds (config already mutated) but says so.
+    it("a pairing-row clear that fails (schema mismatch) surfaces pairingRowsCleanupFailed + the reason on the result, with the SECURITY log", async () => {
+      const openclawDir = fs.mkdtempSync(path.join(os.tmpdir(), "alphaclaw-agents-delete-"));
+      const databasePath = path.join(openclawDir, "state", "openclaw.sqlite");
+      fs.mkdirSync(path.dirname(databasePath), { recursive: true });
+      const db = new DatabaseSync(databasePath);
+      // Upstream renamed the columns: the table exists but not in the shape
+      // this code knows, so the clear must refuse rather than guess.
+      db.exec(
+        "CREATE TABLE channel_pairing_allow_entries (channel TEXT NOT NULL, account TEXT NOT NULL, who TEXT NOT NULL)",
+      );
+      db.exec("INSERT INTO channel_pairing_allow_entries VALUES ('telegram', 'alerts', '111')");
+      db.close();
+      const fsMock = buildFsMock({ initialConfig: twoAccountConfig() });
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const service = createAgentsService({
+        fs: fsMock,
+        OPENCLAW_DIR: openclawDir,
+        readEnvFile: () => [
+          { key: "TELEGRAM_BOT_TOKEN", value: "123:abc" },
+          { key: "TELEGRAM_BOT_TOKEN_ALERTS", value: "456:def" },
+        ],
+        writeEnvFile: vi.fn(),
+        reloadEnv: vi.fn(),
+        clawCmd: vi.fn(async () => ({ ok: true, stdout: "", stderr: "" })),
+      });
+
+      const result = await service.deleteChannelAccount({
+        provider: "telegram",
+        accountId: "alerts",
+      });
+
+      expect(result).toEqual({
+        ok: true,
+        pairingRowsCleanupFailed: true,
+        pairingRowsCleanupError: expect.stringMatching(/schema is unsupported/),
+      });
+      expect(result.pairingRowsCleanupDeferred).toBeUndefined();
+      // The delete itself happened…
+      expect(Object.keys(fsMock.readConfig().channels.telegram.accounts)).toEqual(["default"]);
+      // …and the gap is LOUD.
+      expect(errorSpy).toHaveBeenCalledWith(
+        expect.stringMatching(/SECURITY: could not clear telegram\/alerts pairing rows .*STILL authorized/),
+      );
+      errorSpy.mockRestore();
+      warnSpy.mockRestore();
+    });
+
     it("a CLI failure keeps the pairing rows (and config/env) intact — nothing is destroyed before the irreversible half succeeds", async () => {
       const { openclawDir, databasePath } = seedStateDbWithPairingRows();
       const fsMock = buildFsMock({ initialConfig: twoAccountConfig() });

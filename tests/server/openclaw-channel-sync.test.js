@@ -1166,6 +1166,68 @@ describe("server/openclaw-channel-sync", () => {
           ...options,
         });
 
+      // X5: the 0600 chmod is best-effort (network filesystems may refuse
+      // modes) but was silent — a 0644 archive recorded as verified with no
+      // trace. The record now carries mode/modeError, the step warns, and the
+      // operator is notified; the normal path records mode "0600" + mtime.
+      it("records mode '0600' and the archive's mtime on a normal publish (the fence's record-vs-disk facts)", async () => {
+        const harness = mkHarness();
+        const result = await harness.sync.applyUpdate(hardGateTarget);
+        expect(result.status).toBe(202);
+        const recorded = harness.store.readState().backups[0];
+        expect(recorded.mode).toBe("0600");
+        expect(recorded.modeError).toBeUndefined();
+        expect(recorded.mtimeMs).toBe(fs.statSync(recorded.file).mtimeMs);
+        expect(recorded.bytes).toBe(fs.statSync(recorded.file).size);
+        expect(harness.store.readState().lastUpdateRun.steps).not.toContainEqual(
+          expect.objectContaining({
+            name: "backup",
+            detail: expect.stringMatching(/default mode/),
+          }),
+        );
+        // The inventory projects the mode.
+        const entry = harness.sync
+          .listBackupInventory()
+          .entries.find((candidate) => candidate.file === recorded.file);
+        expect(entry.mode).toBe("0600");
+      });
+
+      it("a refused chmod 0600 still records the verified backup, but as mode 'default' with modeError, a backup warning step and a notification", async () => {
+        const failingFs = {
+          ...fs,
+          promises: fs.promises,
+          chmodSync: (target, mode) => {
+            if (String(target).endsWith(".tar.gz")) {
+              throw new Error("EPERM: operation not permitted, chmod");
+            }
+            return fs.chmodSync(target, mode);
+          },
+        };
+        const harness = mkHarness({ extraSyncOptions: { fsModule: failingFs } });
+        const result = await harness.sync.applyUpdate(hardGateTarget);
+        expect(result.status).toBe(202);
+        const recorded = harness.store.readState().backups[0];
+        expect(recorded.verified).toBe(true);
+        expect(recorded.mode).toBe("default");
+        expect(recorded.modeError).toMatch(/EPERM/);
+        expect(harness.store.readState().lastUpdateRun.steps).toContainEqual(
+          expect.objectContaining({
+            name: "backup",
+            status: "warning",
+            detail: expect.stringMatching(/archive left at the filesystem's default mode — chmod 0600 failed \(EPERM/),
+          }),
+        );
+        expect(
+          notifyMessages(harness.notify).some((message) =>
+            /permissions could not be tightened: archive left at the filesystem's default mode/.test(message),
+          ),
+        ).toBe(true);
+        const entry = harness.sync
+          .listBackupInventory()
+          .entries.find((candidate) => candidate.file === recorded.file);
+        expect(entry.mode).toBe("default");
+      });
+
       it("#9: first hard-gated apply writes a unique archive and records it", async () => {
         const harness = mkHarness();
         const backupsDir = backupsDirOf(harness);
@@ -2586,6 +2648,92 @@ describe("server/openclaw-channel-sync", () => {
             detail: "no state to back up yet — nothing a migration could lose",
           }),
         );
+      });
+
+      // X3: the allowlist used to `continue` on the NAME before looking at
+      // the entry — a symlink named `.env`/`logs`, a special file named `tmp`
+      // or a credentials dump renamed `.env` all counted as fresh. The names
+      // are accepted only in their expected shape.
+      describe("allowlisted names are checked by SHAPE, not name (X3)", () => {
+        const expectNotFresh = async (harness) => {
+          const result = await harness.sync.applyUpdate(hardGateTarget);
+          expect(result.status).toBe(409);
+          expect(result.body.code).toBe("backup_failed");
+          expect(result.body.message).toMatch(/reported success but produced no backup file/);
+        };
+        const expectFresh = async (harness) => {
+          const result = await harness.sync.applyUpdate(hardGateTarget);
+          expect(result.body.code).not.toBe("backup_failed");
+          expect(harness.store.readState().lastUpdateRun.steps).toContainEqual(
+            expect.objectContaining({
+              name: "backup",
+              status: "warning",
+              detail: "no state to back up yet — nothing a migration could lose",
+            }),
+          );
+        };
+
+        it("a `.env` symlink that points anywhere but <rootDir>/.env is NOT fresh", async () => {
+          const harness = mkFresh();
+          fs.mkdirSync(harness.openclawDir, { recursive: true });
+          fs.symlinkSync("/etc/passwd", path.join(harness.openclawDir, ".env"));
+          await expectNotFresh(harness);
+        });
+
+        it("a `.env` symlink to <rootDir>/.env whose target is not a regular file is NOT fresh", async () => {
+          const harness = mkFresh();
+          fs.mkdirSync(harness.openclawDir, { recursive: true });
+          fs.mkdirSync(path.join(harness.rootDir, ".env"));
+          fs.symlinkSync(path.join(harness.rootDir, ".env"), path.join(harness.openclawDir, ".env"));
+          await expectNotFresh(harness);
+        });
+
+        it("the onboarding `.env` link to an existing regular <rootDir>/.env stays fresh (secrets in AlphaClaw's own env are not OpenClaw state)", async () => {
+          const harness = mkFresh();
+          fs.mkdirSync(harness.openclawDir, { recursive: true });
+          fs.writeFileSync(path.join(harness.rootDir, ".env"), "SETUP_PASSWORD=pw\nTELEGRAM_BOT_TOKEN=1:a\n");
+          fs.symlinkSync(path.join(harness.rootDir, ".env"), path.join(harness.openclawDir, ".env"));
+          await expectFresh(harness);
+        });
+
+        it("a small regular `.env` with only bookkeeping keys is fresh; one carrying OPENCLAW_*/TOKEN-shaped keys is NOT", async () => {
+          const bookkeeping = mkFresh();
+          fs.mkdirSync(bookkeeping.openclawDir, { recursive: true });
+          fs.writeFileSync(path.join(bookkeeping.openclawDir, ".env"), "# planted by setup\nSETUP_PASSWORD=pw\n");
+          await expectFresh(bookkeeping);
+
+          const secretful = mkFresh();
+          fs.mkdirSync(secretful.openclawDir, { recursive: true });
+          fs.writeFileSync(
+            path.join(secretful.openclawDir, ".env"),
+            "SETUP_PASSWORD=pw\nOPENCLAW_GATEWAY_TOKEN=abc\n",
+          );
+          await expectNotFresh(secretful);
+
+          const oversized = mkFresh();
+          fs.mkdirSync(oversized.openclawDir, { recursive: true });
+          fs.writeFileSync(path.join(oversized.openclawDir, ".env"), `# ${"x".repeat(5000)}\n`);
+          await expectNotFresh(oversized);
+        });
+
+        it.each([".alphaclaw", "logs", "backups", "tmp"])(
+          "a symlink named %s where a bookkeeping directory would be is NOT fresh",
+          async (name) => {
+            const harness = mkFresh();
+            fs.mkdirSync(harness.openclawDir, { recursive: true });
+            const elsewhere = path.join(harness.rootDir, "elsewhere");
+            fs.mkdirSync(elsewhere, { recursive: true });
+            fs.symlinkSync(elsewhere, path.join(harness.openclawDir, name));
+            await expectNotFresh(harness);
+          },
+        );
+
+        it("a regular file named `logs` is NOT fresh", async () => {
+          const harness = mkFresh();
+          fs.mkdirSync(harness.openclawDir, { recursive: true });
+          fs.writeFileSync(path.join(harness.openclawDir, "logs"), "not a dir\n");
+          await expectNotFresh(harness);
+        });
       });
     });
 

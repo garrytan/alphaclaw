@@ -156,7 +156,7 @@ describe("server/routes/codex OAuth exchange vs the state-DB quiet period", () =
   });
   let token = null;
 
-  const createOauthApp = () => {
+  const createOauthApp = ({ notify = null } = {}) => {
     const app = express();
     app.use(express.json());
     const onAuthChanged = vi.fn();
@@ -180,6 +180,7 @@ describe("server/routes/codex OAuth exchange vs the state-DB quiet period", () =
         removeCodexProfiles: () => false,
       },
       onAuthChanged,
+      notify,
     });
     return { app, onAuthChanged, upsertCodexProfile, stored };
   };
@@ -380,5 +381,85 @@ describe("server/routes/codex OAuth exchange vs the state-DB quiet period", () =
     expect(upsertCodexProfile).toHaveBeenCalledTimes(2);
     expect(stored).toEqual([]);
     expect(onAuthChanged).not.toHaveBeenCalled();
+  });
+
+  // X7: a deferred write that FAILS after the barrier lifts left the tokens
+  // only in memory with nothing client-visible — the UI badge kept saying
+  // "saved after the backup finishes". The status route now carries the
+  // slot's outcome, and the failure reaches the operator via notify.
+  describe("GET /api/codex/status deferredWrite outcome (X7)", () => {
+    it("pending while the barrier holds → saved after the deferred write lands; a direct write clears it", async () => {
+      const { app, stored } = createOauthApp();
+      const state = await startAndGetState(app);
+      global.fetch = vi.fn(async () => {
+        ({ token } = await beginStateDbQuiet({ owner: "backup", maxMs: 60_000 }));
+        return tokenResponse();
+      });
+
+      const before = await request(app).get("/api/codex/status");
+      expect(before.body.deferredWrite).toBeUndefined();
+
+      await request(app).get(`/auth/codex/callback?code=c1&state=${state}`);
+      const pending = await request(app).get("/api/codex/status");
+      expect(pending.body.deferredWrite).toEqual({
+        state: "pending",
+        reason: "backup_in_progress",
+        at: expect.any(Number),
+      });
+
+      token.release();
+      token = null;
+      await flushMacrotask();
+      expect(stored).toHaveLength(1);
+      const saved = await request(app).get("/api/codex/status");
+      expect(saved.body.deferredWrite).toEqual({
+        state: "saved",
+        reason: null,
+        at: expect.any(Number),
+      });
+
+      // A later direct exchange supersedes the slot and its outcome.
+      global.fetch = vi.fn(async () => tokenResponse());
+      const state2 = await startAndGetState(app);
+      await request(app).get(`/auth/codex/callback?code=c2&state=${state2}`);
+      const cleared = await request(app).get("/api/codex/status");
+      expect(cleared.body.deferredWrite).toBeUndefined();
+    });
+
+    it("failed after the barrier lifts → status says so with the reason, and the operator is notified (important-class)", async () => {
+      const notify = vi.fn(async () => ({ ok: true }));
+      const { app, upsertCodexProfile, stored } = createOauthApp({ notify });
+      const state = await startAndGetState(app);
+      global.fetch = vi.fn(async () => {
+        ({ token } = await beginStateDbQuiet({ owner: "backup", maxMs: 60_000 }));
+        return tokenResponse();
+      });
+      vi.spyOn(console, "error").mockImplementation(() => {});
+
+      await request(app).get(`/auth/codex/callback?code=c1&state=${state}`);
+      upsertCodexProfile.mockImplementation(() => {
+        throw new Error("schema drift");
+      });
+      token.release();
+      token = null;
+      await flushMacrotask();
+
+      expect(stored).toEqual([]);
+      const failed = await request(app).get("/api/codex/status");
+      expect(failed.body).toEqual({
+        connected: false,
+        deferredWrite: { state: "failed", reason: "schema drift", at: expect.any(Number) },
+      });
+      expect(notify).toHaveBeenCalledTimes(1);
+      expect(notify.mock.calls[0][0]).toMatch(
+        /Codex connection was not saved — the deferred profile write failed after the backup \(schema drift\)\. Reconnect Codex/,
+      );
+      expect(notify.mock.calls[0][1]).toEqual(
+        expect.objectContaining({
+          eventType: "health",
+          id: expect.stringMatching(/^codex-deferred-write-failed-/),
+        }),
+      );
+    });
   });
 });
