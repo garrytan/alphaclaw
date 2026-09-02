@@ -2100,6 +2100,10 @@ describe("server/openclaw-channel-backup-retry", () => {
         // A run that activated counts as "state written since" for every
         // OLDER archive; a failed run does not.
         activated = true,
+        // The run's activation time relative to its archive: null = a legacy
+        // record without finishedAt (the window floors on startedAt); a
+        // positive offset = the run activated AFTER taking this archive.
+        finishedAtOffsetMs = null,
       } = {},
     ) => {
       harness.nowRef.now = kRealisticNow;
@@ -2114,6 +2118,7 @@ describe("server/openclaw-channel-backup-retry", () => {
         harness.ledger.createRun({ operationId, target: { channel: "stable", version: "1.0.0" } });
         harness.ledger.updateRun(operationId, (record) => {
           record.startedAt = at - 1000;
+          if (finishedAtOffsetMs !== null) record.finishedAt = at + finishedAtOffsetMs;
           record.state = activated ? "activated" : "failed";
           record.ok = activated;
           record.backup = { noBackup: false, file, verified, partial, at, producer, usableCheck: "manifest_ok" };
@@ -2124,6 +2129,23 @@ describe("server/openclaw-channel-backup-retry", () => {
       return { file, at, sha256 };
     };
     const contentionScript = [{ ok: false, tail: kLeaseLostTail }, { ok: false, tail: kLeaseLostTail }];
+
+    it("never offers a run's OWN pre-update backup once that run activated — the window floors on activation (finishedAt), not on the start", async () => {
+      // The archive was taken 1 s after the run started and the run switched
+      // builds 30 s later: everything the new build rewrote postdates it.
+      const { runnerImpl } = makeBackupRunner({ script: contentionScript });
+      const harness = createHarness({ runnerImpl });
+      seedReusableArchive(harness, { ageMs: 3 * kHour, finishedAtOffsetMs: 30_000 });
+
+      const result = await harness.sync.applyUpdate(kHardGateTarget);
+
+      expect(result.status).toBe(409);
+      expect(result.body.code).toBe("backup_failed");
+      expect(result.body.reusableBackup).toBeUndefined();
+      // The inventory publishes the same floor the gate used.
+      const inventory = harness.sync.listBackupInventory();
+      expect(inventory.reuseWindowStartMs).toBe(harness.nowRef.now - 3 * kHour + 30_000);
+    });
 
     it("offers the verified earlier backup on the 409 (reusableBackup) and does NOT reuse it without consent", async () => {
       const { runnerImpl, backupCalls } = makeBackupRunner({ script: contentionScript });

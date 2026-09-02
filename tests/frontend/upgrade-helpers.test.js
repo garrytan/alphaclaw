@@ -2001,6 +2001,10 @@ describe("frontend/upgrade-helpers backup reuse consent (WI-4.4/4.5)", () => {
     const cases = [
       { applied: { channel: "stable", version: "2026.8.2", at: laterAt } },
       { lastUpdateRun: { operationId: "op-9", ok: true, startedAt: laterAt } },
+      // The window floors on the run's ACTIVATION (finishedAt), not its start:
+      // a run that started before this archive but switched builds after it
+      // still fences it (its own pre-update backup is exactly that archive).
+      { lastUpdateRun: { operationId: "op-9", ok: true, startedAt: earlierAt, finishedAt: laterAt } },
       { configMigration: { lastAttempt: { ok: true, at: laterAt } } },
     ];
     for (const channelInfo of cases) {
