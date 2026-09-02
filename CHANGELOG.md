@@ -40,6 +40,14 @@ gateway that drained and exited stayed down until a human clicked Restart.
   classifies, and the adopted launcher's gateway child (matched by process
   name) is resolved from /proc and handed to the restart-handoff consume (the
   handoff row is keyed by the gateway's pid, not the launcher's).
+- **Shutdown-deadline reap is supervisor-aware too:** the last-ditch
+  `killGatewayNow` used by the server lifecycle's abandoned-drain escape
+  hatches now goes through `killManagedGatewayChildNow`, which skips an
+  adopted launcher for the same reason (it reaps its own gateway).
+- **`capSource: "budget"` downstream:** the incident overseer's trusted
+  projection keeps the new cap source instead of dropping it, and the critical
+  alert names the operator budget (`watchdog.memory.budgetMb`) rather than
+  calling it the container limit.
 - **Stale predecessor exits** (`lib/server/watchdog.js`): an EXPECTED late
   exit of a pid that is no longer the supervised gateway (the old launcher
   finishing a minutes-long drain after a cold restart adopted its successor)
