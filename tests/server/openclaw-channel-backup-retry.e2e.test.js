@@ -2800,9 +2800,12 @@ describe("server/openclaw-channel-backup-retry", () => {
       expect(capped.truncated).toBe(true);
     });
 
-    it("reports an unreadable backups directory honestly", () => {
+    it("reports an unreadable backups directory honestly (ENOTDIR: a file where the directory should be — a MISSING directory is the empty fresh-box state, see below)", () => {
       const { runnerImpl } = makeBackupRunner({});
       const harness = createHarness({ runnerImpl });
+      const backupsDir = path.join(harness.rootDir, "backups", "openclaw");
+      fs.mkdirSync(path.dirname(backupsDir), { recursive: true });
+      fs.writeFileSync(backupsDir, "not a directory\n");
       const inventory = harness.sync.listBackupInventory();
       expect(inventory.readable).toBe(false);
       expect(inventory.entries).toEqual([]);
@@ -3022,6 +3025,24 @@ describe("server/openclaw-channel-backup-retry", () => {
         return s;
       });
       expect(harness.store.readState().backups[0]).toEqual({ ...backup, at: 5, dir: "/data/backups/openclaw" });
+    });
+
+    it("a backups directory that does not exist yet is an EMPTY inventory (readable) — a fresh box says 'No backups yet', never 'Couldn't read backups'", () => {
+      const { runnerImpl } = makeBackupRunner({});
+      const harness = createHarness({ runnerImpl });
+      const backupsDir = path.join(harness.rootDir, "backups", "openclaw");
+      fs.rmSync(backupsDir, { recursive: true, force: true });
+      expect(fs.existsSync(backupsDir)).toBe(false);
+
+      const inventory = harness.sync.listBackupInventory();
+
+      expect(inventory).toEqual(
+        expect.objectContaining({ readable: true, entries: [], truncated: false, newestArchive: null }),
+      );
+      // A path that exists but cannot be read as a directory stays unreadable.
+      fs.mkdirSync(path.dirname(backupsDir), { recursive: true });
+      fs.writeFileSync(backupsDir, "not a directory\n");
+      expect(harness.sync.listBackupInventory().readable).toBe(false);
     });
 
     it("old-shape records (no producer/usableCheck/reused) still load and read as upstream-produced", () => {
