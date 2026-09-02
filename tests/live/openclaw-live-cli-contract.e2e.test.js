@@ -37,7 +37,7 @@ const {
   createOpenclawReleasesService,
 } = require("../../lib/server/openclaw-releases");
 const { readDeclaredPin } = require("../../lib/server/openclaw-channel-sync");
-const { kLiveEnabled, kSilentLogger, mkTemp } = liveHelpers;
+const { kLiveEnabled, kSilentLogger, mkTemp, scrubTestRunnerEnv } = liveHelpers;
 
 const describeLive = kLiveEnabled ? describe : describe.skip;
 
@@ -64,6 +64,7 @@ const helpText = (bin, args) => {
       execFileSync(process.execPath, [bin, ...args], {
         timeout: 120_000,
         stdio: "pipe",
+        env: scrubTestRunnerEnv(),
       }),
     );
   } catch (error) {
@@ -122,7 +123,7 @@ describeLive(
           // legacy exec-approvals.json ever appears.
           const stateDir = mkTemp("openclaw-live-approvals-state-");
           const cliEnv = {
-            ...process.env,
+            ...scrubTestRunnerEnv(),
             OPENCLAW_STATE_DIR: stateDir,
             OPENCLAW_CONFIG_PATH: path.join(stateDir, "openclaw.json"),
           };
@@ -224,12 +225,17 @@ describeLive(
           } = require("../../lib/server/openclaw-state-era");
           const opened = openWritableOpenclawStateDb({ openclawDir: stateDir });
           expect(opened).toBeTruthy();
+          // Verified against 2026.9.1-beta.1: `pairing list` hides pending
+          // requests older than the CLI's pending TTL (PAIRING_PENDING_TTL_MS)
+          // and reads ISO-8601 strings, not epoch ms — a stale or numeric
+          // created_at makes the row invisible while our DELETE still works.
+          const seededAt = new Date().toISOString();
           try {
             opened.db
               .prepare(
-                "INSERT INTO channel_pairing_requests (channel_key, account_id, request_id, code, created_at, last_seen_at) VALUES ('telegram', 'default', 'live-r1', 'LIVE1234', '2026-01-01', '2026-01-01')",
+                "INSERT INTO channel_pairing_requests (channel_key, account_id, request_id, code, created_at, last_seen_at) VALUES ('telegram', 'default', 'live-r1', 'LIVE1234', ?, ?)",
               )
-              .run();
+              .run(seededAt, seededAt);
           } finally {
             opened.db.close();
           }
@@ -276,7 +282,7 @@ describeLive(
           // must survive boot byte-identical (seeded, never renamed).
           const pinStateDir = mkTemp("openclaw-live-pin-state-");
           const pinEnv = {
-            ...process.env,
+            ...scrubTestRunnerEnv(),
             OPENCLAW_STATE_DIR: pinStateDir,
             OPENCLAW_CONFIG_PATH: path.join(pinStateDir, "openclaw.json"),
           };
@@ -289,8 +295,12 @@ describeLive(
                 env: pinEnv,
               }),
             );
-          // Any CLI call materializes the pin's v1 state db (all tables, no rows).
-          runPinCli(["config", "get", "tools", "--json"]);
+          // Any successful CLI call materializes the pin's v1 state db (all
+          // tables, no rows). `approvals get --json` is the one the routes
+          // depend on and exits 0 on an empty config — `config get <missing
+          // path>` exits 1 on the pin ("Config path not found"), verified live.
+          const pinApprovals = JSON.parse(runPinCli(["approvals", "get", "--json"]));
+          expect(pinApprovals.file).toBeTruthy();
           expect(
             fs.existsSync(path.join(pinStateDir, "state", "openclaw.sqlite")),
           ).toBe(true);

@@ -56,6 +56,21 @@ const repoOpenclawBin = () => {
 
 const repoBinDir = () => path.resolve(__dirname, "../../node_modules/.bin");
 
+// Env for spawning the REAL openclaw CLI (or a real AlphaClaw server that
+// spawns it) from inside vitest. Verified against openclaw 2026.9.1-beta.1:
+// the CLI treats an inherited `VITEST` variable as "running under a test
+// runner" and suppresses its stdout entirely (`approvals get --json` exits 0
+// with zero bytes), and vitest's NODE_OPTIONS loader flags perturb child
+// startup. Scrub both so the child runs like a normal CLI invocation.
+const scrubTestRunnerEnv = (base = process.env) => {
+  const env = { ...base };
+  delete env.NODE_OPTIONS;
+  for (const key of Object.keys(env)) {
+    if (key.startsWith("VITEST")) delete env[key];
+  }
+  return env;
+};
+
 const waitFor = async (predicate, timeoutMs, label = "condition") => {
   const startedAt = Date.now();
   while (!(await predicate())) {
@@ -155,5 +170,6 @@ module.exports = {
   createCountingFetch,
   repoOpenclawBin,
   repoBinDir,
+  scrubTestRunnerEnv,
   waitFor,
 };

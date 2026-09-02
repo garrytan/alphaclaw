@@ -8,6 +8,7 @@ const {
   kLiveEnabled,
   kSilentLogger,
   mkTemp,
+  scrubTestRunnerEnv,
   waitFor,
 } = require("./live-helpers");
 const {
@@ -47,16 +48,8 @@ describeLive("live: OpenClaw beta gateway contracts", () => {
   let overlayBin;
 
   const gatewayEnv = () => {
-    // Vitest workers export NODE_OPTIONS (loader/register flags) and VITEST_* vars;
-    // spreading them into the openclaw child perturbs some subcommands. Scrub them so
-    // the child runs like a normal CLI invocation.
-    const base = { ...process.env };
-    delete base.NODE_OPTIONS;
-    for (const key of Object.keys(base)) {
-      if (key.startsWith("VITEST")) delete base[key];
-    }
     return withOpenclawStartupEnv({
-      ...base,
+      ...scrubTestRunnerEnv(),
       HOME: rootDir,
       OPENCLAW_HOME: rootDir,
       OPENCLAW_CONFIG_PATH: path.join(openclawDir, "openclaw.json"),

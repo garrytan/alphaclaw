@@ -2,7 +2,13 @@ const fs = require("fs");
 const path = require("path");
 const { spawn } = require("child_process");
 
-const { kLiveEnabled, kSilentLogger, mkTemp, waitFor } = require("./live-helpers");
+const {
+  kLiveEnabled,
+  kSilentLogger,
+  mkTemp,
+  scrubTestRunnerEnv,
+  waitFor,
+} = require("./live-helpers");
 const {
   installOpenclawVersionToTempDir,
 } = require("../../lib/server/openclaw-version");
@@ -92,13 +98,8 @@ describeLive("live: gateway memory leak via a real plugin", () => {
   let overlayBin;
 
   const gatewayEnv = () => {
-    const base = { ...process.env };
-    delete base.NODE_OPTIONS;
-    for (const key of Object.keys(base)) {
-      if (key.startsWith("VITEST")) delete base[key];
-    }
     return withOpenclawStartupEnv({
-      ...base,
+      ...scrubTestRunnerEnv(),
       HOME: rootDir,
       OPENCLAW_HOME: rootDir,
       OPENCLAW_CONFIG_PATH: path.join(openclawDir, "openclaw.json"),
