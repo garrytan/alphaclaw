@@ -112,7 +112,20 @@ const writeCheckoutFixture = (rootDir, { sha, bin = true } = {}) => {
   return checkoutDir;
 };
 
+// The usable-backup check (issue #54, WI-6.1) runs `gzip -t` + manifest
+// extraction through the same runner seam; answer like a real archive does.
+const kStubManifestTail = `${JSON.stringify({
+  schemaVersion: 1,
+  assets: [{ kind: "sqlite", sourcePath: "/data/.openclaw/state/openclaw.sqlite", archivePath: "state/openclaw.sqlite" }],
+})}\n`;
+
 const defaultRunnerImpl = async (opts) => {
+  if (opts.command === "gzip" && opts.args?.[0] === "-t") {
+    return { ok: true, code: 0, tail: "", timedOut: false };
+  }
+  if (opts.command === "tar" && opts.args?.[0] === "-xzOf") {
+    return { ok: true, code: 0, tail: kStubManifestTail, timedOut: false };
+  }
   // Faithful model of the real CLI's --output contract (verified against the
   // pinned openclaw 2026.7.1-2 source, dist/backup-create resolveOutputPath):
   // an existing directory (or trailing separator) gets a timestamped archive

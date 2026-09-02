@@ -2,6 +2,7 @@
 // sweep after the openclaw 2026.9.1-beta.1 tarball showed the coordinator is
 // an exclusive SQLite transaction held by a LIVE process — never a stale file).
 const {
+  kStateContentionPattern,
   describeLockContention,
   listLiveOpenclawProcesses,
   listLockDirs,
@@ -108,5 +109,40 @@ describe("looksLikeLockContention", () => {
     expect(looksLikeLockContention("SqliteError: database is locked")).toBe(true);
     expect(looksLikeLockContention("bind: address already in use")).toBe(false);
     expect(looksLikeLockContention("")).toBe(false);
+  });
+
+  // Issue #54 lease-failure texts, verified against the 2026.9.1-beta.1 dist.
+  it("matches every state-lease failure text (LOST / TIMEOUT / STORAGE_FAILED / lock wait)", () => {
+    const fixtures = [
+      "SQLite transaction lock wait failed",
+      "Error: lease migration.legacy-audit/filesystem-sqlite-boundary was lost",
+      "OPENCLAW_STATE_LEASE_LOST",
+      "timed out waiting for lease migration.legacy-audit/filesystem-sqlite-boundary",
+      "OPENCLAW_STATE_LEASE_TIMEOUT: acquire gave up after 5000ms",
+      "failed to acquire lease migration.legacy-audit/filesystem-sqlite-boundary",
+      "OPENCLAW_STATE_LEASE_STORAGE_FAILED",
+    ];
+    for (const text of fixtures) {
+      expect(looksLikeLockContention(text), text).toBe(true);
+      expect(kStateContentionPattern.test(text), text).toBe(true);
+    }
+  });
+
+  it("does not over-match unrelated acquire/lost wording without the <scope>/<key> token", () => {
+    for (const text of [
+      "failed to acquire the network interface",
+      "connection was lost",
+      "timed out waiting for the gateway to answer",
+      "ENOENT: no such file or directory, lstat '/data/x.lock'",
+    ]) {
+      expect(looksLikeLockContention(text), text).toBe(false);
+    }
+  });
+
+  it("exports ONE combined pattern that both consumers share (case-insensitive)", () => {
+    expect(kStateContentionPattern).toBeInstanceOf(RegExp);
+    expect(kStateContentionPattern.flags).toContain("i");
+    expect(kStateContentionPattern.test("sqlite TRANSACTION LOCK WAIT FAILED")).toBe(true);
+    expect(kStateContentionPattern.test("Another OpenClaw Process Owns State-Lifecycle")).toBe(true);
   });
 });
