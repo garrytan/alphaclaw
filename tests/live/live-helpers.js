@@ -1,6 +1,7 @@
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
+const { spawnSync } = require("child_process");
 
 // Shared plumbing for the LIVE e2e tiers (tests/live/**). These suites talk to
 // the real npm registry and the real GitHub API on purpose: their job is to
@@ -308,17 +309,87 @@ const writePinFixture = (installDir) => {
   );
 };
 
-// Faithful to the real CLI's --output contract (see the hermetic suites'
-// defaultRunnerImpl): the path IS the archive file unless it names an
-// existing directory. Hard-gated applies (prerelease/dev/downgrade) verify an
-// artifact exists at the exact path, so the stub must write one.
-const createBackupStubRunner = (realRunner) => ({
+// Faithful to the real CLI's output contract (see the hermetic suites'
+// defaultRunnerImpl): the --output path IS the archive file unless it names
+// an existing directory, an existing file is refused, and the artifact is a
+// REAL gzip'd tar in upstream's layout — `<archiveRoot>/manifest.json`
+// (schemaVersion 1, ONE directory-level `kind: "state"` asset) above
+// `<archiveRoot>/payload/posix<stateDir>` holding a copy of the state dir.
+// The product's usable check (`gzip -t` + depth-1 manifest coverage) judges
+// this archive exactly as it judges a real one — a plain-text stub made every
+// hard-gated live apply refuse honestly with `not in gzip format`. Hard-gated
+// applies (prerelease/dev/downgrade) verify an artifact exists at the exact
+// path, so the stub must write one. `stateDir` is the box's OpenClaw dir
+// (what channel-sync's stateDir() resolves: OPENCLAW_STATE_DIR, else the
+// openclaw dir); with neither the option nor the env the stub fails LOUDLY
+// rather than fabricate an archive that covers nothing.
+const kStubArchiveRoot = "2026-09-02T00-00-00.000+00-00-openclaw-backup";
+// Runtime trees the store keeps under the openclaw dir (overlays, caches,
+// logs) are not state and would make every stub backup copy gigabytes.
+const kStubPayloadSkipPattern = /(^|[\\/])(\.alphaclaw|backups|node_modules|logs|overlays)([\\/]|$)/;
+const toPosixPath = (value) => String(value).split(path.sep).join("/");
+
+const writeStubBackupArchive = ({ outFile, stateDir }) => {
+  const staging = fs.mkdtempSync(path.join(os.tmpdir(), "alphaclaw-live-backup-stub-"));
+  try {
+    const root = path.join(staging, kStubArchiveRoot);
+    const posixStateDir = toPosixPath(path.resolve(stateDir));
+    const payloadDir = path.join(root, "payload", `posix${posixStateDir}`);
+    fs.mkdirSync(payloadDir, { recursive: true });
+    if (fs.existsSync(stateDir)) {
+      fs.cpSync(stateDir, payloadDir, {
+        recursive: true,
+        filter: (src) => !kStubPayloadSkipPattern.test(path.relative(stateDir, src)),
+      });
+    }
+    const manifest = {
+      schemaVersion: 1,
+      createdAt: new Date().toISOString(),
+      archiveRoot: kStubArchiveRoot,
+      runtimeVersion: "live-backup-stub",
+      platform: process.platform,
+      nodeVersion: process.version,
+      options: { includeWorkspace: false, onlyConfig: false },
+      paths: { stateDir: posixStateDir, configPath: `${posixStateDir}/openclaw.json` },
+      assets: [
+        {
+          kind: "state",
+          sourcePath: posixStateDir,
+          archivePath: `${kStubArchiveRoot}/payload/posix${posixStateDir}`,
+        },
+      ],
+      skipped: [],
+    };
+    fs.writeFileSync(path.join(root, "manifest.json"), `${JSON.stringify(manifest)}\n`);
+    fs.mkdirSync(path.dirname(outFile), { recursive: true });
+    const tar = spawnSync("tar", ["-czf", outFile, "-C", staging, kStubArchiveRoot], {
+      stdio: "pipe",
+    });
+    if (tar.error) throw tar.error;
+    if (tar.status !== 0) {
+      throw new Error(
+        `tar exited ${tar.status ?? tar.signal}: ${String(tar.stderr || "").trim()}`,
+      );
+    }
+  } finally {
+    fs.rmSync(staging, { recursive: true, force: true });
+  }
+};
+
+const createBackupStubRunner = (realRunner, { stateDir = null } = {}) => ({
   runStreamed: (opts) => {
     if (opts.command === "openclaw" && opts.args?.[0] === "backup") {
       const outIdx = opts.args.indexOf("--output");
       const out = outIdx >= 0 ? opts.args[outIdx + 1] : null;
       if (out) {
         try {
+          const resolvedStateDir =
+            stateDir || opts.env?.OPENCLAW_STATE_DIR || opts.env?.OPENCLAW_DIR || null;
+          if (!resolvedStateDir) {
+            throw new Error(
+              "backup stub needs the state dir — pass { stateDir } or set OPENCLAW_STATE_DIR in the spawn env",
+            );
+          }
           const isDirTarget =
             out.endsWith(path.sep) ||
             (fs.existsSync(out) && fs.statSync(out).isDirectory());
@@ -333,8 +404,7 @@ const createBackupStubRunner = (realRunner) => ({
               timedOut: false,
             });
           }
-          fs.mkdirSync(path.dirname(outFile), { recursive: true });
-          fs.writeFileSync(outFile, "stub backup archive\n");
+          writeStubBackupArchive({ outFile, stateDir: resolvedStateDir });
           return Promise.resolve({
             ok: true,
             code: 0,

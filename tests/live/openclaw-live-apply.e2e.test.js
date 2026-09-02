@@ -87,7 +87,9 @@ const createLiveHarness = () => {
     return s;
   });
 
-  const runner = createBackupStubRunner(createRunStream({}));
+  // The stub writes a real upstream-layout archive of THIS box's state dir;
+  // the hard gate's usable check then judges it like a real one.
+  const runner = createBackupStubRunner(createRunStream({}), { stateDir: openclawDir });
 
   const releases = createOpenclawReleasesService({
     cacheDir: path.join(rootDir, "cache", "openclaw-catalog"),

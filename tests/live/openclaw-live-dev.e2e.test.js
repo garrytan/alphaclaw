@@ -131,7 +131,7 @@ describeLiveDev("LIVE openclaw dev-head build (real from-source pipeline)", () =
         return s;
       });
 
-      const runner = createBackupStubRunner(createRunStream({}));
+      const runner = createBackupStubRunner(createRunStream({}), { stateDir: openclawDir });
 
       const restartProcess = vi.fn();
       const buildSync = () =>
