@@ -6,6 +6,7 @@ const {
   initLogWriter,
   getLogPath,
   readLogTail,
+  readLogTailInfo,
   getLogGeneration,
   readLogDelta,
   flushLogWriter,
@@ -51,6 +52,20 @@ describe("server/log-writer", () => {
   // Must run before any initLogWriter call in this file: module state persists.
   it("returns an empty tail before init", () => {
     expect(readLogTail(65536)).toBe("");
+    expect(readLogTailInfo(65536)).toEqual({ text: "", hitCap: false });
+  });
+
+  it("readLogTailInfo reports hitCap only when the file was larger than the requested tail", async () => {
+    initLogWriter({ rootDir, maxBytes: 1024 * 1024 });
+    process.stdout.write(`${"x".repeat(3000)}\n`);
+    await __flushForTests();
+    const cut = readLogTailInfo(1024);
+    expect(cut.hitCap).toBe(true);
+    expect(cut.text.length).toBeLessThanOrEqual(1024);
+    const whole = readLogTailInfo(65536);
+    expect(whole.hitCap).toBe(false);
+    expect(whole.text).toContain("xxx");
+    expect(readLogTail(65536)).toBe(whole.text);
   });
 
   it("writes patched stdout/stderr lines with ISO prefix and readLogTail returns them", async () => {
