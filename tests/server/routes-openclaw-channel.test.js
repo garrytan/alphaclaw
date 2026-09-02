@@ -588,12 +588,21 @@ describe("server/routes/openclaw-channel", () => {
       truncated: false,
       newestArchive: null,
     });
+    // What publishSuccess records about the archive it just verified (X1):
+    // the fence checks the file on disk against THESE, never against the
+    // inventory's copy of the same record.
+    const recordedFacts = (file) => {
+      const st = fs.lstatSync(file);
+      return { bytes: st.size, mtimeMs: st.mtimeMs };
+    };
 
-    it("reports backupFileExists:true and names the file when the archive is still on disk (regular file, contained, inventory vouches)", async () => {
+    it("reports backupFileExists:true and names the file when the archive is still on disk (regular file, contained, inventory vouches, size + mtime match the record)", async () => {
       const deps = createDeps();
       const file = writeArchive(deps.OPENCLAW_DIR, "openclaw-backup-1-aaaa.tar.gz");
       deps.openclawChannelService.runLedger = {
-        listRuns: vi.fn(() => [kMigratedRun({ file, verified: true, noBackup: false })]),
+        listRuns: vi.fn(() => [
+          kMigratedRun({ file, verified: true, noBackup: false, ...recordedFacts(file) }),
+        ]),
       };
       deps.openclawChannelService.listBackupInventory = vi.fn(() =>
         inventoryFor(deps.OPENCLAW_DIR, [inventoryEntry(file)]),
@@ -806,6 +815,7 @@ describe("server/routes/openclaw-channel", () => {
             partial: true,
             reused: true,
             reusedAgeMs: 3 * 60 * 60 * 1000,
+            ...recordedFacts(file),
           }),
         ]),
       };
@@ -828,6 +838,116 @@ describe("server/routes/openclaw-channel", () => {
       );
       expect(fenced.body.hint).toMatch(/workspace files were excluded/);
       expect(fenced.body.hint).toMatch(/taken 3 hours before this update — state written since is not in it/);
+    });
+
+    // X1: the inventory's `sha256` is copied from the same persisted record,
+    // so the digest cross-check proved nothing about the bytes — a same-size
+    // regular file swapped onto the recorded path passed as "verified" and
+    // the hint told the operator to restore it. The fence now checks the disk
+    // against the record's own size + mtime (no hashing on the request path)
+    // and never calls a file "verified" when it has nothing to compare.
+    describe("record-vs-disk content check (X1)", () => {
+      const swapSameSizeFile = (file) => {
+        // Same byte count, different content, written later: what a swap of
+        // the archive looks like without hashing it.
+        const size = fs.lstatSync(file).size;
+        fs.writeFileSync(file, "x".repeat(size));
+        const later = new Date(fs.lstatSync(file).mtimeMs + 60_000);
+        fs.utimesSync(file, later, later);
+      };
+
+      it("a same-size regular file swapped onto the recorded path is NOT the verified backup (content_changed, backupFileExists:false, do-not-restore hint)", async () => {
+        const deps = createDeps();
+        const file = writeArchive(deps.OPENCLAW_DIR, "openclaw-backup-1-aaaa.tar.gz");
+        const facts = recordedFacts(file);
+        swapSameSizeFile(file);
+        deps.openclawChannelService.runLedger = {
+          listRuns: vi.fn(() => [
+            kMigratedRun({ file, verified: true, noBackup: false, sha256: "a".repeat(64), ...facts }),
+          ]),
+        };
+        // The inventory vouches with the SAME record's digest — the old,
+        // tautological check — and its lstat size matches the swapped file.
+        deps.openclawChannelService.listBackupInventory = vi.fn(() =>
+          inventoryFor(deps.OPENCLAW_DIR, [inventoryEntry(file, { sha256: "a".repeat(64) })]),
+        );
+        const app = createApp(deps);
+
+        const fenced = await request(app).post("/api/openclaw/rollback").send({});
+        expect(fenced.status).toBe(409);
+        expect(fenced.body.backupFileExists).toBe(false);
+        expect(fenced.body.backupFileCaveat).toBe("content_changed");
+        expect(fenced.body.hint).toMatch(/failed verification — the file on disk is not the archive that was verified/);
+        expect(fenced.body.hint).toMatch(/do not restore it/);
+        expect(fenced.body.hint).not.toMatch(/present and unchanged/);
+      });
+
+      it("a record with neither bytes nor mtime is unverifiable_content — never 'verified' on a path match alone", async () => {
+        const deps = createDeps();
+        const file = writeArchive(deps.OPENCLAW_DIR, "openclaw-backup-1-aaaa.tar.gz");
+        deps.openclawChannelService.runLedger = {
+          listRuns: vi.fn(() => [kMigratedRun({ file, verified: true, noBackup: false })]),
+        };
+        deps.openclawChannelService.listBackupInventory = vi.fn(() =>
+          inventoryFor(deps.OPENCLAW_DIR, [inventoryEntry(file)]),
+        );
+        const app = createApp(deps);
+
+        const fenced = await request(app).post("/api/openclaw/rollback").send({});
+        expect(fenced.status).toBe(409);
+        expect(fenced.body.backupFileExists).toBe(false);
+        expect(fenced.body.backupFileCaveat).toBe("unverifiable_content");
+        expect(fenced.body.hint).toMatch(/carries no size or modification time/);
+      });
+
+      it("an untouched archive passes with no caveat, and the hint claims only 'present and unchanged since it was verified' (the runbook re-verifies)", async () => {
+        const deps = createDeps();
+        const file = writeArchive(deps.OPENCLAW_DIR, "openclaw-backup-1-aaaa.tar.gz");
+        deps.openclawChannelService.runLedger = {
+          listRuns: vi.fn(() => [
+            kMigratedRun({ file, verified: true, noBackup: false, ...recordedFacts(file) }),
+          ]),
+        };
+        deps.openclawChannelService.listBackupInventory = vi.fn(() =>
+          inventoryFor(deps.OPENCLAW_DIR, [inventoryEntry(file)]),
+        );
+        const app = createApp(deps);
+
+        const fenced = await request(app).post("/api/openclaw/rollback").send({});
+        expect(fenced.body.backupFileExists).toBe(true);
+        expect(fenced.body.backupFileCaveat).toBeNull();
+        expect(fenced.body.hint).toMatch(/is present and unchanged since it was verified/);
+        expect(fenced.body.hint).toMatch(/re-verifies it with gzip -t and its manifest/);
+        expect(fenced.body.hint).not.toMatch(/^Restore the verified/);
+      });
+
+      it("a legacy record with bytes but no mtime: same size inside the backup window passes; a newer mtime past the window is content_changed", async () => {
+        for (const swapped of [false, true]) {
+          const deps = createDeps();
+          const file = writeArchive(deps.OPENCLAW_DIR, "openclaw-backup-1-aaaa.tar.gz");
+          const { bytes } = recordedFacts(file);
+          // `at` = the backup phase start: the archive was written inside the
+          // phase envelope after it. A swap lands well past that window.
+          const at = fs.lstatSync(file).mtimeMs - 30_000;
+          if (swapped) {
+            const later = new Date(at + 60 * 60 * 1000);
+            fs.utimesSync(file, later, later);
+          }
+          deps.openclawChannelService.runLedger = {
+            listRuns: vi.fn(() => [kMigratedRun({ file, verified: true, noBackup: false, bytes, at })]),
+          };
+          deps.openclawChannelService.listBackupInventory = vi.fn(() =>
+            inventoryFor(deps.OPENCLAW_DIR, [inventoryEntry(file)]),
+          );
+          const app = createApp(deps);
+
+          const fenced = await request(app).post("/api/openclaw/rollback").send({});
+          expect(fenced.body.backupFileExists, `swapped=${swapped}`).toBe(!swapped);
+          expect(fenced.body.backupFileCaveat, `swapped=${swapped}`).toBe(
+            swapped ? "content_changed" : null,
+          );
+        }
+      });
     });
   });
 

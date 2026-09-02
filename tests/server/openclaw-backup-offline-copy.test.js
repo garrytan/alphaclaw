@@ -596,6 +596,84 @@ describe("server/openclaw-backup-offline-copy", () => {
       await new Promise((resolve) => setTimeout(resolve, 60));
     });
 
+    // X2: when the budget race loses, the orphaned backup() keeps stepping
+    // (closing its source does not stop it — node:sqlite zombifies the
+    // connection). The abort path closes the source at once, unlinks the
+    // destination, waits a short bound for the orphan to settle, and past
+    // the bound marks the failure `orphanedBackup: true` so the driver can
+    // record that the barrier was released over a still-stepping backup.
+    describe("orphaned sqlite backup() after a budget abort (X2)", () => {
+      const closeTrackingDatabaseSync = () => {
+        let onClose = () => {};
+        const closes = [];
+        const DatabaseSync = class extends kStubDatabaseSync {
+          close() {
+            closes.push(Date.now());
+            onClose();
+          }
+        };
+        return { DatabaseSync, closes, whenClosed: new Promise((resolve) => (onClose = resolve)) };
+      };
+
+      it("closes the source immediately, then returns the budget error as soon as the orphan settles (no orphanedBackup flag)", async () => {
+        const tracking = closeTrackingDatabaseSync();
+        let destinationSeen = null;
+        const args = makeCopyArgs({
+          budgetMs: 100,
+          nowFn: () => 1_000_000,
+          orphanSettleMs: 5000,
+          sqliteModule: {
+            DatabaseSync: tracking.DatabaseSync,
+            // Resolves only once the source has been closed — the orphan
+            // "finishes" in response to the abort.
+            backup: (_src, destination) => {
+              destinationSeen = destination;
+              fs.mkdirSync(path.dirname(destination), { recursive: true });
+              fs.writeFileSync(destination, "partial copy");
+              return tracking.whenClosed.then(() => 1);
+            },
+          },
+        });
+        const startedAt = Date.now();
+        const error = await createOfflineCopy(args).catch((caught) => caught);
+        expect(error).toMatchObject({ stage: "budget" });
+        expect(error.orphanedBackup).toBeUndefined();
+        // Settled well inside the 5 s bound because the close released it.
+        expect(Date.now() - startedAt).toBeLessThan(3000);
+        expect(tracking.closes.length).toBeGreaterThanOrEqual(1);
+        expect(fs.existsSync(destinationSeen)).toBe(false);
+        expect(fs.readdirSync(args.backupsDir)).toEqual([]);
+      });
+
+      it("a backup that never settles inside the bound fails with stage budget AND orphanedBackup: true, its destination unlinked", async () => {
+        const tracking = closeTrackingDatabaseSync();
+        let destinationSeen = null;
+        const args = makeCopyArgs({
+          budgetMs: 50,
+          nowFn: () => 1_000_000,
+          orphanSettleMs: 60,
+          sqliteModule: {
+            DatabaseSync: tracking.DatabaseSync,
+            backup: (_src, destination) => {
+              destinationSeen = destination;
+              fs.mkdirSync(path.dirname(destination), { recursive: true });
+              fs.writeFileSync(destination, "partial copy");
+              return new Promise(() => {});
+            },
+          },
+        });
+        const startedAt = Date.now();
+        const error = await createOfflineCopy(args).catch((caught) => caught);
+        expect(error).toMatchObject({ stage: "budget", orphanedBackup: true });
+        // Waited the bound (source closed first), then gave up honestly.
+        expect(Date.now() - startedAt).toBeGreaterThanOrEqual(100);
+        expect(Date.now() - startedAt).toBeLessThan(3000);
+        expect(tracking.closes.length).toBeGreaterThanOrEqual(1);
+        expect(fs.existsSync(destinationSeen)).toBe(false);
+        expect(fs.readdirSync(args.backupsDir)).toEqual([]);
+      });
+    });
+
     // ── The walk is budgeted and yields; it is not one blocking recursion ──
     it("re-checks the budget every kWalkCheckpointEvery entries: a huge workspace is interrupted by the deadline instead of walked to the end", async () => {
       const stateDir = "/synthetic-alphaclaw-state";

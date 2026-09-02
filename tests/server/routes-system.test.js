@@ -3413,6 +3413,77 @@ describe("server/routes/system", () => {
     );
   });
 
+  // X8: the "View logs" link was built from X-Forwarded-Proto/Host — a
+  // spoofable header could plant a phishing host or Markdown delimiters in an
+  // important-class operator notification. The configured public URL wins
+  // when one exists; a request-derived base is embedded only when it is a
+  // plain http(s) origin; otherwise the link is dropped, never the message.
+  describe("incumbent notification link hardening (X8)", () => {
+    const incumbentDeps = ({ operationId }) => {
+      const deps = createSystemDeps();
+      deps.restartRequiredState.beginRestart = vi.fn(() => ({ operationId, reasonsSnapshot: [] }));
+      deps.restartRequiredState.completeRestart = vi.fn();
+      deps.watchdog = {
+        getStatus: vi.fn(() => ({})),
+        onExpectedRestart: vi.fn(),
+        onExpectedRestartSettled: vi.fn(),
+        recordOperationEvent: vi.fn(),
+      };
+      deps.notify = vi.fn(async () => ({ ok: true }));
+      deps.restartGateway = vi.fn(async () => {
+        throw new GatewayIncumbentRestartError("the previous gateway is still running", {
+          wasRunningBefore: true,
+          stopConfirmed: false,
+        });
+      });
+      return deps;
+    };
+
+    it("prefers the configured public URL over the request's forwarded host", async () => {
+      const deps = incumbentDeps({ operationId: "op-inc-cfg" });
+      deps.resolveSetupUrl = vi.fn(() => "https://ops.configured.example/");
+      const app = createApp(deps);
+
+      await request(app).post("/api/gateway/restart").set("x-forwarded-host", "evil.example");
+
+      expect(deps.notify).toHaveBeenCalledTimes(1);
+      const [message] = deps.notify.mock.calls[0];
+      expect(message).toContain("[View logs](https://ops.configured.example/#/watchdog)");
+      expect(message).not.toContain("evil.example");
+    });
+
+    it("a localhost default from the resolver counts as unconfigured — the (valid) request-derived origin is used", async () => {
+      const deps = incumbentDeps({ operationId: "op-inc-local" });
+      deps.resolveSetupUrl = vi.fn(() => "http://localhost:3000");
+      const app = createApp(deps);
+
+      await request(app).post("/api/gateway/restart").set("x-forwarded-host", "ops.example.net:8443");
+
+      const [message] = deps.notify.mock.calls[0];
+      expect(message).toContain("[View logs](https://ops.example.net:8443/#/watchdog)");
+    });
+
+    it.each([
+      ["Markdown delimiters", "evil.example)[x](https://phish.example"],
+      ["whitespace", "evil.example /#/watchdog"],
+      ["userinfo", "user@phish.example"],
+      ["a path", "phish.example/login"],
+    ])("drops the link (message still delivered) when the request-derived base carries %s", async (_label, host) => {
+      const deps = incumbentDeps({ operationId: "op-inc-forged" });
+      deps.resolveSetupUrl = vi.fn(() => "");
+      const app = createApp(deps);
+
+      const res = await request(app).post("/api/gateway/restart").set("x-forwarded-host", host);
+
+      expect(res.status).toBe(500);
+      expect(deps.notify).toHaveBeenCalledTimes(1);
+      const [message] = deps.notify.mock.calls[0];
+      expect(message).toContain("🔴 Gateway restart did not take effect\n");
+      expect(message).not.toContain("View logs");
+      expect(message).not.toContain("phish.example");
+    });
+  });
+
   // C23: the structured evidence line rides on the STDERR side of the merge
   // (stderr is merged last), so a noisy stderr ring cannot push it out of the
   // tail-keeping 4000-char cap.
