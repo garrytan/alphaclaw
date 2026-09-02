@@ -10,6 +10,15 @@ describe("admin-manifest engine", () => {
     expect(manifest.listOps().length).toBeGreaterThan(100);
   });
 
+  it("escalates an agent-initiated situation report to dangerous, keeps a settled re-review at write", () => {
+    const op = manifest.findOp("POST", "/api/watchdog/overseer/review");
+    expect(op.id).toBe("watchdog.overseer.review");
+    expect(manifest.resolveTier(op, { body: {} })).toBe("dangerous");
+    expect(manifest.resolveTier(op, { body: null })).toBe("dangerous");
+    expect(manifest.resolveTier(op, { body: { incidentId: 12 } })).toBe("write");
+    expect(manifest.findOp("GET", "/api/watchdog/overseer/situation")?.tier).toBe("safe");
+  });
+
   it("assigns every op a valid tier and unique id", () => {
     const seen = new Set();
     for (const op of manifest.listOps()) {
