@@ -1862,6 +1862,86 @@ describe("frontend/upgrade-helpers backup reuse consent (WI-4.4/4.5)", () => {
     ).toBe("No eligible backup to reuse");
   });
 
+  it("a list that is loading, failed to load, or that the server could not scan is never 'No eligible backup'", async () => {
+    const {
+      buildApplyConfirmModel,
+      buildBackupReuseConsentModel,
+      buildBackupReuseConsent,
+      kBackupReuseInventoryErrorReason,
+      kBackupReuseInventoryLoadingReason,
+      kBackupReuseInventoryUnreadableReason,
+      kBackupReuseNoneReason,
+    } = await loadUpgradeHelpers();
+    const failed = buildBackupReuseConsentModel({
+      inventory: null,
+      inventoryError: new Error("Could not read the backup inventory"),
+      nowMs: kNow,
+    });
+    expect(failed).toEqual({
+      available: false,
+      entry: null,
+      sha256: null,
+      reason: kBackupReuseInventoryErrorReason,
+      retryable: true,
+    });
+    expect(buildBackupReuseConsent({ consentModel: failed, checked: true })).toBeNull();
+    // Loading (no data yet, no error): a distinct, non-retryable reason.
+    expect(
+      buildBackupReuseConsentModel({ inventory: null, inventoryLoading: true, nowMs: kNow }),
+    ).toEqual(
+      expect.objectContaining({
+        available: false,
+        reason: kBackupReuseInventoryLoadingReason,
+        retryable: false,
+      }),
+    );
+    // A stale refresh failure with last-known data still binds to that data.
+    expect(
+      buildBackupReuseConsentModel({
+        inventory: { entries: [makeEntry()] },
+        inventoryError: new Error("timeout"),
+        inventoryLoading: true,
+        nowMs: kNow,
+      }),
+    ).toEqual(expect.objectContaining({ available: true, sha256: kSha }));
+    // The server's own "could not scan the directory" flag (a 200).
+    expect(
+      buildBackupReuseConsentModel({ inventory: { readable: false, entries: [] }, nowMs: kNow }),
+    ).toEqual(
+      expect.objectContaining({
+        available: false,
+        reason: kBackupReuseInventoryUnreadableReason,
+        retryable: true,
+      }),
+    );
+    // A readable, genuinely empty list keeps the plain reason.
+    expect(
+      buildBackupReuseConsentModel({ inventory: { readable: true, entries: [] }, nowMs: kNow }),
+    ).toEqual(expect.objectContaining({ reason: kBackupReuseNoneReason }));
+    // buildApplyConfirmModel threads both flags to the hard-gate consent.
+    const confirm = buildApplyConfirmModel({
+      payload: { channel: "stable", version: "2026.7.0" },
+      label: "2026.7.0",
+      isDowngrade: true,
+      currentChannel: "stable",
+      backupInventory: null,
+      backupInventoryError: new Error("offline"),
+      nowMs: kNow,
+    });
+    expect(confirm.backupReuse.reason).toBe(kBackupReuseInventoryErrorReason);
+    expect(
+      buildApplyConfirmModel({
+        payload: { channel: "stable", version: "2026.7.0" },
+        label: "2026.7.0",
+        isDowngrade: true,
+        currentChannel: "stable",
+        backupInventory: null,
+        backupInventoryLoading: true,
+        nowMs: kNow,
+      }).backupReuse.reason,
+    ).toBe(kBackupReuseInventoryLoadingReason);
+  });
+
   it("R7: an archive older than 24 h is never offered for consent — disabled with the stale reason", async () => {
     const {
       buildBackupReuseConsentModel,
@@ -2122,6 +2202,47 @@ describe("frontend/upgrade-helpers backup reuse consent (WI-4.4/4.5)", () => {
         nowMs: kNow,
       }).ageLabel,
     ).toBe("1 minute ago");
+  });
+
+  it("the offer keeps the absolute timestamp and its age strings re-derive against the live clock", async () => {
+    const { buildBackupReuseOfferModel, buildBackupReuseOfferLabels } = await loadUpgradeHelpers();
+    const at = kNow - 2 * 3_600_000;
+    const offer = buildBackupReuseOfferModel({
+      error: {
+        code: "backup_failed",
+        reusableBackup: { file: "/b.tar.gz", at, ageMs: 2 * 3_600_000, sha256: kSha },
+      },
+      target: { channel: "stable", version: "2026.8.2" },
+      nowMs: kNow,
+    });
+    expect(offer.at).toBe(at);
+    // Build-time snapshot and the render-time derivation agree at kNow…
+    expect(buildBackupReuseOfferLabels(offer, kNow)).toEqual({
+      ageLabel: "2 hours ago",
+      ctaLabel: offer.ctaLabel,
+      lossWindowLine: offer.lossWindowLine,
+    });
+    // …and an hour later the render-time strings have moved with the clock.
+    expect(buildBackupReuseOfferLabels(offer, kNow + 3_600_000)).toEqual({
+      ageLabel: "3 hours ago",
+      ctaLabel: "Retry using the backup taken 3 hours ago",
+      lossWindowLine: "That backup was taken 3 hours ago — state written since would not be in it.",
+    });
+    // Only `ageMs` on the wire: the timestamp is reconstructed from it.
+    const fromAge = buildBackupReuseOfferModel({
+      error: { code: "backup_failed", reusableBackup: { file: "/b.tar.gz", ageMs: 90_000, sha256: kSha } },
+      nowMs: kNow,
+    });
+    expect(fromAge.at).toBe(kNow - 90_000);
+    // Neither: the strings say so instead of inventing an age.
+    const unknown = buildBackupReuseOfferModel({
+      error: { code: "backup_failed", reusableBackup: { file: "/b.tar.gz", sha256: kSha } },
+      nowMs: kNow,
+    });
+    expect(unknown.at).toBeNull();
+    expect(buildBackupReuseOfferLabels(unknown, kNow).ctaLabel).toBe(
+      "Retry using the backup taken at an unknown time",
+    );
   });
 
   it("offers nothing for other codes, a missing offer, or a malformed digest", async () => {
