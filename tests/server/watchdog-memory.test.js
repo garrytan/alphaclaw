@@ -194,6 +194,28 @@ describe("server/watchdog memory monitor", () => {
     expect(harness.watchdog.getStatus().memory.trendState).toBe("critical");
   });
 
+  it("budget-capped critical pressure names the operator budget, never the container or heap advice (issue #56)", async () => {
+    const harness = createHarness({
+      settings: { enabled: true, autoRestart: false, effectiveAutoRestart: false, budgetMb: 400 },
+    });
+    launchGateway(harness);
+    // 100 GB box: only the operator budget binds.
+    await driveTicks(harness, {
+      ticks: 8,
+      sampleAt: (i) => ({
+        rssBytes: (365 + 4 * i) * kMb,
+        cgroupUsedBytes: (365 + 4 * i) * kMb,
+        containerLimitBytes: 100 * 1024 * kMb,
+      }),
+    });
+    expect(harness.watchdog.getMemoryTrend().capSource).toBe("budget");
+    const critical = notifications(harness.notifier).find((m) => m.includes("memory critical"));
+    expect(critical).toBeTruthy();
+    expect(critical).toContain("operator memory budget (400 MB, watchdog.memory.budgetMb)");
+    expect(critical).not.toContain("against the container limit");
+    expect(critical).not.toContain("resource autotune");
+  });
+
   it("heap-capped pressure (capSource heap) gets the shared heap remedy", async () => {
     const harness = createHarness();
     launchGateway(harness);

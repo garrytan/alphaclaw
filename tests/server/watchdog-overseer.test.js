@@ -1609,6 +1609,25 @@ describe("pickTrustedResources memory-trend projection (field-wise validation)",
     });
   });
 
+  it("keeps the operator-budget cap source (issue #56) in the trusted projection", () => {
+    const projected = pickTrustedResources({
+      memory: { usedBytes: 1, totalBytes: 2, percent: 50 },
+      gatewayMemoryTrend: {
+        state: "critical",
+        rssMb: 380,
+        slopeMbPerHour: 12,
+        effectiveCapMb: 400,
+        capSource: "budget",
+        pressureFraction: 0.95,
+        projectedExhaustionAt: null,
+        episodeId: "4242-1700000000000",
+        lastEpisodeSummary: null,
+      },
+    });
+    expect(projected.gatewayMemoryTrend.capSource).toBe("budget");
+    expect(projected.gatewayMemoryTrend.effectiveCapMb).toBe(400);
+  });
+
   it("drops smuggled free strings, malformed enums, and bad timestamps — never passes them through", () => {
     const projected = pickTrustedResources({
       gatewayMemoryTrend: {

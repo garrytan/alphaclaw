@@ -2070,6 +2070,32 @@ describe("server/gateway restart behavior", () => {
       expect(supervisor.kill).not.toHaveBeenCalledWith("SIGKILL");
     });
 
+    it("killManagedGatewayChildNow (shutdown-deadline reap) skips an adopted supervisor but SIGKILLs a direct child", async () => {
+      const supervisor = createChild();
+      childProcess.spawn = vi.fn(() => supervisor);
+      childProcess.execSync = vi.fn(() => "");
+      fs.existsSync = vi.fn(() => false);
+      fs.readdirSync = vi.fn(() => []);
+      net.createConnection = vi.fn(() => createSocket(true));
+      delete require.cache[modulePath];
+      const gateway = require(modulePath);
+      vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+      vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+
+      await gateway.runGatewayCmd("--force");
+      expect(gateway.killManagedGatewayChildNow()).toBe(false);
+      expect(supervisor.kill).not.toHaveBeenCalled();
+
+      // A direct `gateway run` child is still reaped hard.
+      const direct = createChild();
+      childProcess.spawn = vi.fn(() => direct);
+      delete require.cache[modulePath];
+      const gateway2 = require(modulePath);
+      await gateway2.launchGatewayProcess();
+      expect(gateway2.killManagedGatewayChildNow()).toBe(true);
+      expect(direct.kill).toHaveBeenCalledWith("SIGKILL");
+    });
+
     it("stopGatewayChildAndWait still escalates to SIGKILL for a direct gateway run child", async () => {
       const child = createChild();
       childProcess.spawn = vi.fn(() => child);
