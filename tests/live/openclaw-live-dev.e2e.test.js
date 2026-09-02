@@ -44,6 +44,7 @@ const {
   kFixturePin,
   writePinFixture,
   createBackupStubRunner,
+  scrubTestRunnerEnv,
   repoBinDir,
   repoOpenclawBin,
   waitFor,
@@ -145,8 +146,12 @@ describeLiveDev("LIVE openclaw dev-head build (real from-source pipeline)", () =
           // The updater clones to $OPENCLAW_HOME/openclaw — pointed at this
           // harness's rootDir so the checkout lands where channel-sync looks.
           // The repo's node_modules/.bin supplies the real pinned `openclaw`.
+          // Scrubbed: the pinned CLI prints NOTHING (not even its --json
+          // report) when it inherits vitest's VITEST variable — live-verified
+          // 2026-09-02 (705 bytes of dry-run JSON without it, 0 with it) —
+          // which read as build:warning "updater output was not parseable".
           openclawSpawnEnv: () => ({
-            ...process.env,
+            ...scrubTestRunnerEnv(),
             PATH: `${repoBinDir()}${path.delimiter}${process.env.PATH}`,
             OPENCLAW_HOME: rootDir,
             OPENCLAW_NO_AUTO_UPDATE: "1",

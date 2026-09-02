@@ -139,6 +139,12 @@ describe("looksLikeLockContention", () => {
       "connection was lost",
       "timed out waiting for the gateway to answer",
       "ENOENT: no such file or directory, lstat '/data/x.lock'",
+      // URLs and file paths carry a slash too; only a lease token counts
+      // (a false verdict would retry inside the quiesce and make the failure
+      // reuse-eligible).
+      "timed out waiting for https://registry.npmjs.org/openclaw",
+      "failed to acquire artifact /tmp/openclaw-prepare-x/pkg.tgz",
+      "download of /data/backups/openclaw/x.tar.gz was lost",
     ]) {
       expect(looksLikeLockContention(text), text).toBe(false);
     }

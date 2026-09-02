@@ -79,6 +79,12 @@
 - **Context:** `lib/server/notify-outbox.js` (`partialAt` dedupe, `deliverEvent` result shape), `lib/server/watchdog-notify.js` fan-out/`sendToTarget`, `tests/server/notify-outbox.test.js`. Keep the 48 h age-out and the terminal-immediate abandonment.
 - **Effort:** M. **Depends on:** nothing.
 
+## P3 — Outbox incident stamps survive a failed incident insert (2026-09-02, from the #54 wave's review)
+- **What:** `notify-outbox.js` stamps `partialAt` / `abandonedAt` on the outbox entry BEFORE `insertEvent` writes the `notification_partial` / `notification_abandoned` watchdog row, and a throwing insert is swallowed — so a transient watchdog-DB failure at that instant leaves the entry stamped and the incident row missing forever (the UI never shows the partial/abandoned delivery). Record the pending incident on the entry (`incidentPending: "partial" | "abandoned"`) when the insert fails and retry the insert on the next flush/heartbeat until it lands; the stamps themselves must stay (abandonment must stop the delivery retries).
+- **Why:** The stamp is what stops retries and dedupes the event, so it cannot simply move after the insert; the fix needs a small durable retry, not a reorder. Flagged by the cross-model review of the #54 wave; low frequency (needs the watchdog DB to fail at the exact stamp moment), high honesty cost when it happens.
+- **Context:** `lib/server/notify-outbox.js` (`entry.partialAt = now`, `entry.abandonedAt = now`, the `insertEvent?.(…)` try/catch below each), `tests/server/notify-outbox.test.js`.
+- **Effort:** S. **Depends on:** nothing.
+
 ## P3 — Live-tier debris guard in CI (2026-09-02, from the #54 wave's disk-full incident)
 - **What:** `.github/workflows/live-e2e.yml` runs the live tier on a persistent-ish runner disk with no pre-flight: add a `df -h /` + `rm -rf /tmp/alphaclaw-live-* /tmp/openclaw-prepare-*` step before the tier, a post-run `du -shc /tmp/alphaclaw-live-* /tmp/openclaw-prepare-*` step that FAILS the job when anything survived (the in-process `afterAll` sweep in `tests/live/live-helpers.js` should leave zero), and keep `$TMPDIR/alphaclaw-openclaw-cache` as a cache path (`actions/cache` keyed on the three `kOpenclawLines` versions) so the nightly warms it once.
 - **Why:** The in-repo fix (afterAll sweep, tracked installs, `assertFreeDiskBytes`) makes a completed or failed run clean up after itself; a run the runner kills (job timeout, cancellation) still leaks GBs, and CI is the one place nobody runs `df` by hand. The 2026-09-02 incident filled a 64 GB disk in one afternoon.

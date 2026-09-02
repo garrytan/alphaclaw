@@ -76,6 +76,27 @@ describe("server/openclaw-capabilities", () => {
       expect(kCapabilityKeys).toContain("gatewayStopForce");
     });
 
+    it("a FAILED probe is read as help output only when it really is the `gateway stop` usage text — a crash that merely mentions options/--help stays unknown (retried), never a cached unsupported", async () => {
+      const answers = [
+        fail("", "Error: could not parse options; run with --help"),
+        fail("", "Usage: openclaw gateway stop [options]\n\nOptions:\n  -h, --help  display help for command\n"),
+        fail("", kHelpWithForce),
+      ];
+      const clawCmd = vi.fn(async () => answers.shift());
+      const caps = createOpenclawCapabilities({
+        clawCmd,
+        getInstalledVersion: () => "2026.8.2",
+      });
+      expect(await caps.get("gatewayStopForce")).toBe("unknown");
+      // "unknown" is the falsy (negative) value: it is NOT cached for the
+      // version, so the next read probes again.
+      caps.invalidate("gatewayStopForce");
+      expect(await caps.get("gatewayStopForce")).toBe("unsupported");
+      caps.invalidate("gatewayStopForce");
+      expect(await caps.get("gatewayStopForce")).toBe("supported");
+      expect(clawCmd).toHaveBeenCalledTimes(3);
+    });
+
     it("reports supported when the stop usage text advertises --force, probing `gateway stop --help` once per version", async () => {
       const clawCmd = vi.fn(async () => ok(kHelpWithForce));
       const caps = createOpenclawCapabilities({

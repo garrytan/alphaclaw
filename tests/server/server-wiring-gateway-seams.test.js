@@ -324,7 +324,11 @@ describe("gateway seam contracts + behaviour through the installed handler", () 
       expect(notify).toHaveBeenCalledTimes(1);
       expect(notify).toHaveBeenCalledWith(
         expect.stringContaining("🔴 Gateway launch aborted by the prelaunch hook"),
-        { eventType: "prelaunch_hook", id: "prelaunch-hook-not_root_owned-managed-launch" },
+        {
+          eventType: "prelaunch_hook",
+          // code + site + hour bucket (the real clock here).
+          id: expect.stringMatching(/^prelaunch-hook-not_root_owned-managed-launch-\d+$/),
+        },
       );
     } finally {
       gateway.setGatewayPrelaunchHookHandler(null);

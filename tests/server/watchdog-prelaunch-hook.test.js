@@ -530,7 +530,7 @@ describe("createGatewayPrelaunchHookHandler (the lib/server.js composition)", ()
   it("'ran': ledger row only (kind prelaunch_hook, status ran) + onPrelaunchHook; no notification", () => {
     const watchdog = fakeWatchdog();
     const notify = vi.fn(async () => ({ ok: true }));
-    const handler = createGatewayPrelaunchHookHandler({ watchdog, notify });
+    const handler = createGatewayPrelaunchHookHandler({ watchdog, notify, nowFn: () => 5 * 3_600_000 });
     const outcome = ranOutcome();
     handler(outcome);
     expect(watchdog.recordOperationEvent).toHaveBeenCalledTimes(1);
@@ -554,7 +554,7 @@ describe("createGatewayPrelaunchHookHandler (the lib/server.js composition)", ()
   it("'refused': ledger row + ONE important-class (untagged) notification with id prelaunch-hook-<code>-<site> + onPrelaunchHook", () => {
     const watchdog = fakeWatchdog();
     const notify = vi.fn(async () => ({ ok: true }));
-    const handler = createGatewayPrelaunchHookHandler({ watchdog, notify });
+    const handler = createGatewayPrelaunchHookHandler({ watchdog, notify, nowFn: () => 5 * 3_600_000 });
     const outcome = refusedOutcome();
     handler(outcome);
 
@@ -580,24 +580,29 @@ describe("createGatewayPrelaunchHookHandler (the lib/server.js composition)", ()
     // filtered by "Important only" mode.
     expect(opts).toEqual({
       eventType: "prelaunch_hook",
-      id: "prelaunch-hook-not_root_owned-managed-launch",
+      id: "prelaunch-hook-not_root_owned-managed-launch-5",
     });
     expect(watchdog.onPrelaunchHook).toHaveBeenCalledWith(outcome);
   });
 
-  it("'failed': the id is keyed on code + site so the outbox dedupes a retry loop at the same site", () => {
+  it("'failed': the id is keyed on code + site + hour bucket — a retry loop at one site dedupes, a fresh incident an hour later re-alerts", () => {
     const watchdog = fakeWatchdog();
     const notify = vi.fn(async () => ({ ok: true }));
-    const handler = createGatewayPrelaunchHookHandler({ watchdog, notify });
+    const handler = createGatewayPrelaunchHookHandler({ watchdog, notify, nowFn: () => 5 * 3_600_000 });
     handler(failedOutcome());
     handler(failedOutcome());
     handler(failedOutcome({ site: "light restart" }));
     expect(notify.mock.calls.map(([, opts]) => opts.id)).toEqual([
-      "prelaunch-hook-nonzero_exit-restart",
-      "prelaunch-hook-nonzero_exit-restart",
-      "prelaunch-hook-nonzero_exit-light-restart",
+      "prelaunch-hook-nonzero_exit-restart-5",
+      "prelaunch-hook-nonzero_exit-restart-5",
+      "prelaunch-hook-nonzero_exit-light-restart-5",
     ]);
     expect(notify.mock.calls[0][0]).toContain("Reason: `nonzero_exit`");
+    // A delivered outbox entry never revives on the same id, so without the
+    // bucket every later independent failure at this site would be silenced.
+    const later = createGatewayPrelaunchHookHandler({ watchdog, notify, nowFn: () => 6 * 3_600_000 + 1 });
+    later(failedOutcome());
+    expect(notify.mock.calls.at(-1)[1].id).toBe("prelaunch-hook-nonzero_exit-restart-6");
   });
 
   it("a rejecting or throwing notify is logged and never blocks the ledger row or the watchdog narration", async () => {
@@ -642,7 +647,7 @@ describe("createGatewayPrelaunchHookHandler (the lib/server.js composition)", ()
   it("against a REAL watchdog: the operation row (eventType operation / source prelaunch_hook) and the degraded row both land, and getStatus() narrates the abort", () => {
     const { watchdog, insertWatchdogEvent } = createHarness();
     const notify = vi.fn(async () => ({ ok: true }));
-    const handler = createGatewayPrelaunchHookHandler({ watchdog, notify });
+    const handler = createGatewayPrelaunchHookHandler({ watchdog, notify, nowFn: () => 5 * 3_600_000 });
     handler(refusedOutcome());
 
     const rows = insertWatchdogEvent.mock.calls.map(([row]) => row);
@@ -669,7 +674,9 @@ describe("createGatewayPrelaunchHookHandler (the lib/server.js composition)", ()
     });
     expect(notify).toHaveBeenCalledWith(
       expect.stringContaining("Gateway launch aborted by the prelaunch hook"),
-      expect.objectContaining({ id: "prelaunch-hook-not_root_owned-managed-launch" }),
+      expect.objectContaining({
+        id: expect.stringMatching(/^prelaunch-hook-not_root_owned-managed-launch-\d+$/),
+      }),
     );
   });
 });

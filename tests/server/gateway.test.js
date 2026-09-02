@@ -2079,7 +2079,11 @@ describe("server/gateway restart behavior", () => {
       const [file, args, opts] = childProcess.execFile.mock.calls[0];
       expect(file).toBe("openclaw");
       expect(args).toEqual(["gateway", "stop", "--force"]);
-      expect(opts).toMatchObject({ encoding: "utf8", timeout: 5000 });
+      // The stop keeps whatever the 5 s shutdown budget has left after the
+      // (cached, here instant) --force probe — never more, never below the floor.
+      expect(opts).toMatchObject({ encoding: "utf8" });
+      expect(opts.timeout).toBeGreaterThanOrEqual(1000);
+      expect(opts.timeout).toBeLessThanOrEqual(5000);
       expect(opts.signal).toBeUndefined();
     });
 
@@ -2115,15 +2119,20 @@ describe("server/gateway restart behavior", () => {
 
       expect(childProcess.execFile).toHaveBeenCalledTimes(2);
       const [probeCall, stopCall] = childProcess.execFile.mock.calls;
-      // The probe ran with NO abort signal and the shutdown stop's budget
-      // (not the probe's 10s default)...
+      // The probe ran with NO abort signal and a SHORT slice of the shutdown
+      // stop's budget (not the probe's 10s default, and not the whole 5 s:
+      // probe + stop must both fit inside the 10 s process shutdown deadline)...
       expect(probeCall[0]).toBe("openclaw");
       expect(probeCall[1]).toEqual(["gateway", "stop", "--help"]);
       expect(probeCall[2].signal).toBeUndefined();
-      expect(probeCall[2].timeout).toBe(5000);
-      // ...so the stop carried --force (a 2026.8.x+ CLI refuses without it).
+      expect(probeCall[2].timeout).toBe(gateway.kGatewayShutdownProbeTimeoutMs);
+      expect(gateway.kGatewayShutdownProbeTimeoutMs).toBe(1500);
+      // ...so the stop carried --force (a 2026.8.x+ CLI refuses without it)
+      // and kept the remainder of the budget.
       expect(stopCall[1]).toEqual(["gateway", "stop", "--force"]);
-      expect(stopCall[2]).toMatchObject({ encoding: "utf8", timeout: 5000 });
+      expect(stopCall[2]).toMatchObject({ encoding: "utf8" });
+      expect(stopCall[2].timeout).toBeGreaterThanOrEqual(1000);
+      expect(stopCall[2].timeout).toBeLessThanOrEqual(5000);
       expect(stopCall[2].signal).toBeUndefined();
     });
 
@@ -3102,6 +3111,10 @@ describe("server/gateway restart behavior", () => {
       ["nothing was running, new pid up", false, false, [], [20], true],
       ["nothing was running but a pre-stop pid survives with no new pid", false, false, [10], [10], false],
       ["port never released, new pid up (incumbent still answers)", false, true, [10], [10, 20], false],
+      // An external supervisor swapped the process between two 500 ms port
+      // polls: no "port down" sample, but every pre-stop pid is gone and a
+      // NEW pid answers — the old gateway is provably gone.
+      ["port never observed down, old pid gone, NEW pid up (fast external swap)", false, true, [10], [20], true],
       ["port never released, old pid gone (no pid evidence off-Linux)", false, true, [], [], false],
       ["port never released, old pid survives, no new pid", false, true, [10], [10], false],
     ])(
@@ -3403,6 +3416,36 @@ describe("server/gateway restart behavior", () => {
       gateway.setGatewayPrelaunchHookHandler(null);
     });
 
+    it("kills the hook's whole process group and fails the launch closed when the hook outlives its budget (hard deadline)", async () => {
+      const gateway = require(modulePath);
+      vi.spyOn(console, "log").mockImplementation(() => {});
+      const killProcess = vi.fn();
+      const deps = hookDeps();
+      // A hostile hook: it traps the signal, or leaves a descendant holding its
+      // stdout — execFile's own timeout never yields a callback.
+      deps.execFile = vi.fn(() => ({ pid: 777 }));
+
+      const error = await gateway
+        .runGatewayPrelaunchHook({ ...deps, timeoutMs: 20, graceMs: 30, killProcess })
+        .then(
+          () => {
+            throw new Error("expected the hook to fail");
+          },
+          (thrown) => thrown,
+        );
+
+      expect(error).toBeInstanceOf(gateway.GatewayPrelaunchHookError);
+      expect(error.code).toBe("timeout");
+      expect(error.message).toMatch(/timed out/);
+      // The group (negative pid) first, then the child itself as a backstop.
+      expect(killProcess).toHaveBeenCalledWith(-777, "SIGKILL");
+      expect(killProcess).toHaveBeenCalledWith(777, "SIGKILL");
+      expect(deps.execFile.mock.calls[0][2]).toEqual(
+        expect.objectContaining({ timeout: 20, killSignal: "SIGKILL", detached: true }),
+      );
+      expect(deps.closeSync).toHaveBeenCalledWith(42);
+    });
+
     it("runs an executable persistent prelaunch hook with the gateway environment", async () => {
       // Ported from #4 — the env is now the MINIMAL projection, never
       // gatewayEnv(): a secret in the process env must not reach the hook.
@@ -3429,7 +3472,10 @@ describe("server/gateway restart behavior", () => {
         );
         const env = deps.execFile.mock.calls[0][2].env;
         expect(env).toEqual({
-          PATH: process.env.PATH || "",
+          // A fixed system PATH (sudo secure_path style), never the process's
+          // own: a writable dir on the inherited PATH would let a planted
+          // interpreter run under `#!/usr/bin/env …` on every launch.
+          PATH: gateway.kGatewayPrelaunchHookPath,
           HOME: ALPHACLAW_DIR,
           OPENCLAW_STATE_DIR: OPENCLAW_DIR,
           OPENCLAW_CONFIG_PATH: `${OPENCLAW_DIR}/openclaw.json`,
