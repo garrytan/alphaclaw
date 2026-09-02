@@ -1,5 +1,6 @@
 const {
   renderTelegramHtml,
+  renderHouseLinks,
   escapeTelegramHtml,
   validateTelegramHtml,
 } = require("../../lib/server/utils/telegram-html");
@@ -88,6 +89,50 @@ describe("utils/telegram-html", () => {
           '<b>see <a href="https://x.y/#/w">logs</a> now</b>',
         );
       });
+
+      // Adversarial review P3 (11): the #54 headline `*Backup failed - `SQLite
+      // lock` (attempt 1)*` used to degrade to literal asterisks because the
+      // bold pass ran per text segment. Telegram allows <b> to contain <code>.
+      describe("bold spanning a code span", () => {
+        it("pairs * markers across a code span — <b>…<code>…</code>…</b>", () => {
+          const { html } = renderTelegramHtml("*Backup failed - `SQLite lock` (attempt 1)*");
+          expect(html).toBe("<b>Backup failed - <code>SQLite lock</code> (attempt 1)</b>");
+          expect(validateTelegramHtml(html)).toBe(true);
+        });
+
+        it("several code spans and a link inside one bold span", () => {
+          expect(
+            renderTelegramHtml("*`a` and `b` - [logs](https://x.y)*").html,
+          ).toBe('<b><code>a</code> and <code>b</code> - <a href="https://x.y">logs</a></b>');
+        });
+
+        it("a * inside the code span stays a literal code character, never a marker", () => {
+          expect(renderTelegramHtml("*a `b*c` d*").html).toBe("<b>a <code>b*c</code> d</b>");
+          expect(renderTelegramHtml("x `5 * 3` y").html).toBe("x <code>5 * 3</code> y");
+          // The only * outside the code span is unpaired → literal.
+          expect(renderTelegramHtml("*a `b*c` d").html).toBe("*a <code>b*c</code> d");
+        });
+
+        it("an unbalanced * next to a code span stays literal and the code still renders", () => {
+          expect(renderTelegramHtml("*Backup failed - `lock`").html).toBe(
+            "*Backup failed - <code>lock</code>",
+          );
+          expect(renderTelegramHtml("Backup failed - `lock`*").html).toBe(
+            "Backup failed - <code>lock</code>*",
+          );
+          expect(renderTelegramHtml("**`x`*").html).toBe("*<b><code>x</code></b>");
+        });
+
+        it("a bold pair never spans a newline even with a code span between", () => {
+          expect(renderTelegramHtml("*a `b`\nc*").html).toBe("*a <code>b</code>\nc*");
+        });
+
+        it("code points (emoji) inside bold are never split", () => {
+          expect(renderTelegramHtml("*🐺 AlphaClaw `x` 🔴*").html).toBe(
+            "<b>🐺 AlphaClaw <code>x</code> 🔴</b>",
+          );
+        });
+      });
     });
 
     describe("code spans", () => {
@@ -100,9 +145,14 @@ describe("utils/telegram-html", () => {
         );
       });
 
-      it("a * inside a code span never pairs with one outside", () => {
+      it("a * inside a code span is opaque to the bold pass (the outer pair still renders)", () => {
+        // Pin moved by P3 (11): bold now pairs ACROSS the code span; the
+        // protected `*` inside it stays literal either way.
         expect(renderTelegramHtml("*a `b*c` d*").html).toBe(
-          "*a <code>b*c</code> d*",
+          "<b>a <code>b*c</code> d</b>",
+        );
+        expect(renderTelegramHtml("`a*` b `*c`").html).toBe(
+          "<code>a*</code> b <code>*c</code>",
         );
       });
 
@@ -153,6 +203,72 @@ describe("utils/telegram-html", () => {
         expect(renderTelegramHtml("[la\nbel](https://x.y)").html).toBe("[la\nbel](https://x.y)");
         expect(renderTelegramHtml("[](https://x.y)").html).toBe("[](https://x.y)");
       });
+
+      // Adversarial review P3 (10): the url used to end at the FIRST `)`.
+      describe("parentheses in the url", () => {
+        it("balanced parentheses inside the url are part of the link", () => {
+          expect(
+            renderTelegramHtml("[X](https://a.b/c_(paren)_d)").html,
+          ).toBe('<a href="https://a.b/c_(paren)_d">X</a>');
+          expect(
+            renderTelegramHtml("[q](https://a.b/?f=(1)&g=(2))").html,
+          ).toBe('<a href="https://a.b/?f=(1)&amp;g=(2)">q</a>');
+        });
+
+        it("a `)` after the link stays text — the link closes at its own paren", () => {
+          expect(renderTelegramHtml("(see [X](https://a.b/c))").html).toBe(
+            '(see <a href="https://a.b/c">X</a>)',
+          );
+          expect(renderTelegramHtml("(see [X](https://a.b/c_(p)))").html).toBe(
+            '(see <a href="https://a.b/c_(p)">X</a>)',
+          );
+        });
+
+        it("an unbalanced `(` inside the url is not a link", () => {
+          expect(renderTelegramHtml("[X](https://a.b/c_(p)").html).toBe("[X](https://a.b/c_(p)");
+        });
+      });
+    });
+
+    // The link grammar is exported for the Slack renderer (watchdog-notify's
+    // formatSlackMessage) so both transports parse the same house link.
+    describe("renderHouseLinks (shared link parser)", () => {
+      const collect = (text) => {
+        const runs = [];
+        const links = [];
+        renderHouseLinks(text, {
+          text: (run) => {
+            runs.push(run);
+            return "";
+          },
+          link: (link) => {
+            links.push(link);
+            return "";
+          },
+        });
+        return { runs, links };
+      };
+
+      it("hands every literal run and every link (with http verdict and raw source) to the callbacks", () => {
+        const { runs, links } = collect(
+          "a [X](https://a.b/c_(p)) b [Y](ftp://z) c",
+        );
+        expect(runs).toEqual(["a ", " b ", " c"]);
+        expect(links).toEqual([
+          { label: "X", url: "https://a.b/c_(p)", http: true, raw: "[X](https://a.b/c_(p))" },
+          { label: "Y", url: "ftp://z", http: false, raw: "[Y](ftp://z)" },
+        ]);
+      });
+
+      it("concatenates the callback results in source order", () => {
+        expect(
+          renderHouseLinks("a [X](https://x.y) b", {
+            text: (run) => run.toUpperCase(),
+            link: ({ label, url }) => `{${label}→${url}}`,
+          }),
+        ).toBe("A {X→https://x.y} B");
+        expect(renderHouseLinks(null, { text: (run) => run, link: () => "L" })).toBe("");
+      });
     });
 
     describe("validator fallback", () => {
@@ -182,8 +298,14 @@ describe("utils/telegram-html", () => {
       expect(validateTelegramHtml('<a href="https://x.y"><b>b</b></a>')).toBe(true);
     });
 
+    it("accepts <code> nested inside <b> (what the bold-over-code render emits)", () => {
+      expect(validateTelegramHtml("<b>a <code>b</code> c</b>")).toBe(true);
+      expect(validateTelegramHtml("<b><code>a</code> <code>b</code></b>")).toBe(true);
+    });
+
     it("rejects overlapping / mis-nested tags", () => {
       expect(validateTelegramHtml("<b><code>x</b></code>")).toBe(false);
+      expect(validateTelegramHtml("<code><b>x</code></b>")).toBe(false);
       expect(validateTelegramHtml('<a href="https://x"><b>y</a></b>')).toBe(false);
     });
 

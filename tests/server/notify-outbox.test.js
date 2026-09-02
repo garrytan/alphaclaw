@@ -1254,4 +1254,122 @@ describe("server/upgrade-notifier state-db quiet hold", () => {
     expect(flushSpy).toHaveBeenCalledTimes(1);
     expect(fanout).toHaveBeenCalledTimes(1);
   });
+
+  // Adversarial review (g): with the outbox unavailable the direct send used
+  // to run straight into the quiet period, where target resolution serves the
+  // readers' "unavailable" fallback — the message was silently lost.
+  describe("outbox unavailable while quiet", () => {
+    const makeBrokenOutboxNotifier = ({ logger = kSilentLogger } = {}) => {
+      const outboxStub = {
+        enqueue: vi.fn(() => null),
+        flush: vi.fn(async () => ({ delivered: 0, failed: 0, pending: 0 })),
+        listEvents: () => [],
+      };
+      const fanout = vi.fn(async () => ({ ok: true, sent: 1, failed: 0, failures: [] }));
+      const notifier = createUpgradeNotifier({
+        notifier: { notify: fanout, sendToTarget: vi.fn(async () => ({ ok: true })) },
+        outbox: outboxStub,
+        operatorsStore: {
+          read: () => ({ notifications: { preferredChannel: null, adminTargets: [] } }),
+        },
+        logger,
+      });
+      return { notifier, fanout, outboxStub };
+    };
+
+    it("holds the direct send and delivers it when the barrier lifts — never into the quiet period", async () => {
+      const { notifier, fanout } = makeBrokenOutboxNotifier();
+      const { token } = await beginStateDbQuiet({ owner: "backup", maxMs: 60_000 });
+
+      const result = await notifier.notify("backup failed", { id: "e1", eventType: "upgrade_failed" });
+
+      expect(result).toEqual({ ok: true, held: true, reason: "state_db_quiet" });
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(fanout).not.toHaveBeenCalled();
+
+      token.release();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(fanout).toHaveBeenCalledTimes(1);
+      expect(fanout).toHaveBeenCalledWith("backup failed", { eventType: "upgrade_failed" });
+    });
+
+    it("held sends are delivered in arrival order, then the outbox flush runs", async () => {
+      const { notifier, fanout, outboxStub } = makeBrokenOutboxNotifier();
+      const { token } = await beginStateDbQuiet({ owner: "backup", maxMs: 60_000 });
+      await notifier.notify("first", { id: "e1" });
+      await notifier.notify("second", { id: "e2" });
+      expect(fanout).not.toHaveBeenCalled();
+
+      token.release();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(fanout.mock.calls.map((call) => call[0])).toEqual(["first", "second"]);
+      expect(outboxStub.flush).toHaveBeenCalledTimes(1);
+    });
+
+    it("the barrier EXPIRING (not released) also delivers the held send", async () => {
+      const { notifier, fanout } = makeBrokenOutboxNotifier();
+      await beginStateDbQuiet({ owner: "backup", maxMs: 10_000 });
+      await notifier.notify("held", { id: "e1" });
+
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(fanout).toHaveBeenCalledWith("held", { eventType: "info" });
+    });
+
+    it("a failed held delivery is logged, never retried (there is no durable outbox to retry from)", async () => {
+      const logger = { log: vi.fn(), warn: vi.fn(), error: vi.fn() };
+      const { notifier, fanout } = makeBrokenOutboxNotifier({ logger });
+      fanout.mockResolvedValue({ ok: false, reason: "no_channels_delivered", failures: [] });
+      const { token } = await beginStateDbQuiet({ owner: "backup", maxMs: 60_000 });
+      await notifier.notify("held", { id: "e1" });
+
+      token.release();
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(fanout).toHaveBeenCalledTimes(1);
+      expect(logger.log).toHaveBeenCalledWith(
+        "[upgrade-notifier] held direct send failed (info): no_channels_delivered",
+      );
+    });
+
+    it("the hold buffer is bounded at 50: the oldest is dropped with a log line", async () => {
+      const logger = { log: vi.fn(), warn: vi.fn(), error: vi.fn() };
+      const { notifier, fanout } = makeBrokenOutboxNotifier({ logger });
+      const { token } = await beginStateDbQuiet({ owner: "backup", maxMs: 60_000 });
+      for (let i = 0; i < 51; i += 1) {
+        await notifier.notify(`m${i}`, { id: `e${i}` });
+      }
+      expect(logger.log).toHaveBeenCalledWith(
+        expect.stringContaining("held direct-send buffer full (50) — dropping oldest"),
+      );
+
+      token.release();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(fanout).toHaveBeenCalledTimes(50);
+      expect(fanout.mock.calls[0][0]).toBe("m1");
+      expect(fanout.mock.calls[49][0]).toBe("m50");
+    });
+
+    it("stop() during a hold drops the buffer loudly instead of sending into the quiet period", async () => {
+      const logger = { log: vi.fn(), warn: vi.fn(), error: vi.fn() };
+      const { notifier, fanout } = makeBrokenOutboxNotifier({ logger });
+      const { token } = await beginStateDbQuiet({ owner: "backup", maxMs: 60_000 });
+      await notifier.notify("held", { id: "e1" });
+
+      notifier.stop();
+      expect(logger.log).toHaveBeenCalledWith(
+        "[upgrade-notifier] stopping with 1 held direct send(s) undelivered",
+      );
+      token.release();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(fanout).not.toHaveBeenCalled();
+    });
+
+    it("outside a quiet period the direct send is still immediate (unchanged degrade path)", async () => {
+      const { notifier, fanout, outboxStub } = makeBrokenOutboxNotifier();
+      const result = await notifier.notify("disk is full", { id: "e1" });
+      expect(fanout).toHaveBeenCalledTimes(1);
+      expect(result.ok).toBe(true);
+      expect(result.held).toBeUndefined();
+      expect(outboxStub.flush).not.toHaveBeenCalled();
+    });
+  });
 });

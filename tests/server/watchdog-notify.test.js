@@ -1326,6 +1326,46 @@ describe("watchdog-notify telegram HTML transport", () => {
       expect(api.sendMessage).toHaveBeenCalledTimes(1);
     });
 
+    // Adversarial review (e): a bare 403 used to be deterministic. Only the
+    // descriptions that need a human on the Telegram side qualify.
+    it.each([
+      "Forbidden: bot was blocked by the user",
+      "Forbidden: bot was kicked from the group chat",
+      "Forbidden: bot was kicked from the supergroup chat",
+      "Forbidden: user is deactivated",
+    ])("403 %s is deterministic (never retried)", async (message) => {
+      const api = {
+        sendMessage: vi.fn(async () => {
+          throw telegramError(message, 403);
+        }),
+      };
+      expect(await sendTelegramRendered({ api, chatId: "100", text: "x" })).toMatchObject({
+        ok: false,
+        errorCode: 403,
+        deterministic: true,
+      });
+    });
+
+    it.each([
+      "Forbidden: bot can't initiate conversation with a user",
+      "Forbidden: bot is not a member of the supergroup chat",
+      "Forbidden: bot can't send messages to bots",
+      "Forbidden",
+    ])("403 %s stays TRANSIENT (pairing/starting the bot can fix it)", async (message) => {
+      const api = {
+        sendMessage: vi.fn(async () => {
+          throw telegramError(message, 403);
+        }),
+      };
+      expect(await sendTelegramRendered({ api, chatId: "100", text: "x" })).toEqual({
+        ok: false,
+        reason: message,
+        errorCode: 403,
+        deterministic: false,
+      });
+      expect(api.sendMessage).toHaveBeenCalledTimes(1);
+    });
+
     it("400 chat not found is deterministic", async () => {
       const api = {
         sendMessage: vi.fn(async () => {
@@ -1597,6 +1637,39 @@ describe("watchdog-notify telegram HTML transport", () => {
       );
       expect(formatSlackMessage("")).toBe("");
       expect(formatSlackMessage(null)).toBe("");
+    });
+
+    // Adversarial review P3 (10): the Slack renderer duplicated the link regex
+    // and truncated at the first `)` exactly like Telegram did. Both now share
+    // renderHouseLinks.
+    it("a url with balanced parentheses renders whole; a trailing `)` outside the link stays text", () => {
+      expect(formatSlackMessage("[X](https://a.b/c_(paren)_d) tail")).toBe(
+        "<https://a.b/c_(paren)_d|X> tail",
+      );
+      expect(formatSlackMessage("(see [X](https://a.b/c))")).toBe("(see <https://a.b/c|X>)");
+      expect(formatSlackMessage("(see [X](https://a.b/c_(p)))")).toBe(
+        "(see <https://a.b/c_(p)|X>)",
+      );
+    });
+
+    // Adversarial review (f): Slack mrkdwn escapes & < > in text, and `|`
+    // ends the url part of <url|label>.
+    it("escapes & < > in the minted label and percent-encodes | < > in the url", () => {
+      expect(formatSlackMessage("[a<b&c>d](https://x.y/p)")).toBe(
+        "<https://x.y/p|a&lt;b&amp;c&gt;d>",
+      );
+      expect(formatSlackMessage("[label](https://x.y/p|q)")).toBe(
+        "<https://x.y/p%7Cq|label>",
+      );
+      expect(formatSlackMessage("[label](https://x.y/?a=<1>&b=2)")).toBe(
+        "<https://x.y/?a=%3C1%3E&b=2|label>",
+      );
+      // Literal runs outside links are the compose site's text — untouched.
+      expect(formatSlackMessage("a & b < c [x](https://y.z)")).toBe(
+        "a & b < c <https://y.z|x>",
+      );
+      // Non-http targets stay exactly as authored (no escaping either).
+      expect(formatSlackMessage("[a<b](ftp://x|y)")).toBe("[a<b](ftp://x|y)");
     });
 
     it("fan-out and sendToTarget both post the Slack-rendered link", async () => {
