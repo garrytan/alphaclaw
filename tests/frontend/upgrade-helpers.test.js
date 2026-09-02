@@ -1672,6 +1672,29 @@ describe("frontend/upgrade-helpers gateway hold model", () => {
   });
 
   // WI-4.1: the fence re-stats the recorded archive and qualifies it.
+  it("a present archive that failed the fence's re-verification is never called pruned — the line names the caveat and says do not restore it", async () => {
+    const { buildRollbackDataRiskLine } = await loadUpgradeHelpers();
+    const line = buildRollbackDataRiskLine({
+      backupFile: "/data/backups/openclaw/openclaw-backup-1-abcdef01.tar.gz",
+      backupFileExists: false,
+      backupFileCaveat: "content_changed",
+      newestSurvivingBackup: { file: "/data/backups/openclaw/openclaw-backup-0-older000.tar.gz", at: 1, producer: "openclaw" },
+    });
+    expect(line).toContain("is on disk but failed verification");
+    expect(line).toContain("its content changed since it was verified");
+    expect(line).toContain("do not restore it");
+    expect(line).not.toContain("no longer on disk");
+    expect(line).toContain("openclaw-backup-0-older000.tar.gz");
+    // An unknown caveat code is shown verbatim rather than swallowed.
+    expect(
+      buildRollbackDataRiskLine({ backupFile: "/x.tar.gz", backupFileExists: false, backupFileCaveat: "weird_code" }),
+    ).toContain("weird_code");
+    // "missing" keeps the pruned wording.
+    expect(
+      buildRollbackDataRiskLine({ backupFile: "/x.tar.gz", backupFileExists: false, backupFileCaveat: "missing" }),
+    ).toContain("no longer on disk");
+  });
+
   it("renders the fence re-stat caveats: pruned → newest surviving archive, partial, reused loss window", async () => {
     const { buildRollbackDataRiskLine } = await loadUpgradeHelpers();
     const kNow = Date.parse("2026-09-02T12:00:00.000Z");

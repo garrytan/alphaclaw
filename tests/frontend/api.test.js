@@ -1985,6 +1985,7 @@ describe("frontend/api openclaw channel endpoints", () => {
         backupFileExists: false,
         backupPartial: true,
         backupReused: true,
+        backupFileCaveat: "content_changed",
         reusedAgeMs: 7_200_000,
         newestSurvivingBackup: {
           file: "/backups/openclaw-backup-new.tar.gz",
@@ -2001,6 +2002,7 @@ describe("frontend/api openclaw channel endpoints", () => {
       backupFileExists: false,
       backupPartial: true,
       backupReused: true,
+      backupFileCaveat: "content_changed",
       reusedAgeMs: 7_200_000,
       newestSurvivingBackup: {
         file: "/backups/openclaw-backup-new.tar.gz",

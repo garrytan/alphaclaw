@@ -3399,7 +3399,7 @@ describe("server/agents/service", () => {
     // cue is the log line, not a flag that promises a later clear). Driven
     // through the reachable branch: a schema-drifted pairing table answers
     // { ok: false } from deleteChannelPairingRows.
-    it("a non-barrier failure of the pairing-row clear (schema drift) is loud, never fails the delete, and is never reported as deferred", async () => {
+    it("a non-barrier failure of the pairing-row clear (schema drift) is loud, never fails the delete, is reported as FAILED (never as deferred)", async () => {
       const openclawDir = fs.mkdtempSync(
         path.join(os.tmpdir(), "alphaclaw-agents-delete-drift-"),
       );
@@ -3435,7 +3435,14 @@ describe("server/agents/service", () => {
 
         // The delete completed and is reported as a plain success — no
         // deferral flag for a failure nothing will retry.
-        expect(result).toEqual({ ok: true });
+        // The delete completed (config already mutated) and the failed clear is
+        // REPORTED, never hidden behind a plain success or a "deferred" claim.
+        expect(result).toEqual({
+          ok: true,
+          pairingRowsCleanupFailed: true,
+          pairingRowsCleanupError: expect.stringContaining("schema is unsupported"),
+        });
+        expect(result.pairingRowsCleanupDeferred).toBeUndefined();
         expect(clawCmd).toHaveBeenCalledTimes(1);
         expect(writeEnvFile).toHaveBeenCalledWith([
           { key: "TELEGRAM_BOT_TOKEN", value: "123:abc" },
@@ -3443,13 +3450,12 @@ describe("server/agents/service", () => {
         expect(Object.keys(fsMock.readConfig().channels.telegram.accounts)).toEqual([
           "default",
         ]);
-        // Loud, with the retry guidance — and NOT the barrier's SECURITY line.
+        // Loud (SECURITY class — allow entries stay authorized), with the retry guidance. NOT the barrier's deferrITY line.
         expect(errorSpy).toHaveBeenCalledWith(
           expect.stringMatching(
-            /Could not clear telegram\/alerts pairing rows from the state db: pairing tables schema is unsupported.*retry the delete/,
+            /SECURITY: could not clear telegram\/alerts pairing rows from the state db: pairing tables schema is unsupported.*STILL authorized.*re-run the delete/,
           ),
         );
-        expect(errorSpy).not.toHaveBeenCalledWith(expect.stringContaining("SECURITY:"));
       } finally {
         errorSpy.mockRestore();
         warnSpy.mockRestore();

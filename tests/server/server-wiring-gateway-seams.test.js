@@ -82,6 +82,20 @@ const createWatchdogHarness = () => {
   return { watchdog, insertWatchdogEvent };
 };
 
+describe("init/register-server-routes.js hands the notifier and the configured URL to the Codex and system routes", () => {
+  const routesSource = readSource("lib", "server", "init", "register-server-routes.js");
+  it("registerCodexRoutes gets notify (deferred-write failures reach the operator)", () => {
+    const start = routesSource.indexOf("registerCodexRoutes({");
+    const block = routesSource.slice(start, routesSource.indexOf("});", start));
+    expect(block).toContain("notify: (message, opts) => upgradeNotifier?.notify?.(message, opts),");
+  });
+  it("registerSystemRoutes gets resolveSetupUrl (notification links prefer the configured public URL)", () => {
+    const start = routesSource.indexOf("registerSystemRoutes({");
+    const block = routesSource.slice(start, routesSource.indexOf("getChannelStatus,", start));
+    expect(block).toContain("resolveSetupUrl,");
+  });
+});
+
 describe("lib/server.js composition pins (lane C / lane A hand-offs)", () => {
   const serverSource = readSource("lib", "server.js");
 

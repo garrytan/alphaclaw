@@ -803,6 +803,35 @@ describe("server/routes/openclaw-channel", () => {
       expect(fenced.body.hint).toMatch(/no other archive survives/);
     });
 
+    it("a partial archive's caveat names the RECORDED reasons (a skipped credentials symlink is not 'workspace files')", async () => {
+      const deps = createDeps();
+      const file = writeArchive(deps.OPENCLAW_DIR, "openclaw-backup-1-aaaa.tar.gz");
+      deps.openclawChannelService.runLedger = {
+        listRuns: vi.fn(() => [
+          kMigratedRun({
+            file,
+            verified: true,
+            noBackup: false,
+            partial: true,
+            partialReasons: ["credentials: symlink not followed"],
+            ...recordedFacts(file),
+          }),
+        ]),
+      };
+      deps.openclawChannelService.listBackupInventory = vi.fn(() =>
+        inventoryFor(deps.OPENCLAW_DIR, [
+          inventoryEntry(file, { partial: true, eligible: false, ineligibleReason: "partial" }),
+        ]),
+      );
+      const app = createApp(deps);
+
+      const fenced = await request(app).post("/api/openclaw/rollback").send({});
+      expect(fenced.status).toBe(409);
+      expect(fenced.body.backupPartial).toBe(true);
+      expect(fenced.body.hint).toMatch(/it is partial — credentials: symlink not followed/);
+      expect(fenced.body.hint).not.toMatch(/workspace files were excluded/);
+    });
+
     it("carries the partial and age-qualified reused caveats", async () => {
       const deps = createDeps();
       const file = writeArchive(deps.OPENCLAW_DIR, "openclaw-backup-1-aaaa.tar.gz");
