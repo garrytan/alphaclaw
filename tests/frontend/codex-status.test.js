@@ -1,13 +1,22 @@
 import { describe, expect, it } from "vitest";
 import {
+  applyCodexDeferredSaveRead,
+  applyCodexExchangeOutcome,
   applyCodexStatusRead,
+  beginCodexDeferredSave,
   buildCodexConnectedMessage,
+  buildCodexDeferredSaveFailedLine,
   buildCodexStatusBadgeModel,
   buildCodexStatusErrorModel,
   buildCodexStoreUnavailableLine,
   isCodexDeferredSuccess,
   kCodexConnectedDeferredMessage,
+  kCodexDeferredSaveDisconnectedReadLimit,
+  kCodexDeferredSaveIdle,
+  kCodexDeferredSaveNotFoundReason,
+  kCodexDeferredSaveRecheckMs,
   kCodexStatusBadges,
+  needsCodexDeferredSaveRecheck,
 } from "../../lib/public/js/lib/codex-status.js";
 import {
   buildStoreUnavailableLine,
@@ -147,5 +156,131 @@ describe("frontend/codex-status error model", () => {
     expect(buildCodexStatusErrorModel({ connected: true }, true).error).toBe(
       "",
     );
+  });
+});
+
+// X7: the "saved after the backup finishes" badge is a claim about a write
+// that has not happened — it must end as saved, failed, or never seen; a lost
+// write must never leave the UI asserting a save forever.
+describe("frontend/codex-status deferred-save claim (server deferredWrite verdict + read count)", () => {
+  const pending = () => beginCodexDeferredSave();
+
+  it("an exchange outcome opens the claim only for deferred:true; a direct save retires an earlier failure", () => {
+    expect(applyCodexExchangeOutcome({ ok: true, deferred: true })).toEqual({
+      pending: true,
+      disconnectedReads: 0,
+      failedReason: null,
+    });
+    expect(applyCodexExchangeOutcome({ ok: true })).toBe(kCodexDeferredSaveIdle);
+    expect(applyCodexExchangeOutcome({ codex: "success", deferred: true }).pending).toBe(true);
+  });
+
+  it("server verdicts: pending keeps the badge, saved clears it, failed clears it and names the reason", () => {
+    const p = pending();
+    expect(
+      applyCodexDeferredSaveRead(p, { connected: false, deferredWrite: { state: "pending" } }),
+    ).toBe(p);
+    expect(
+      applyCodexDeferredSaveRead(p, { connected: true, deferredWrite: { state: "saved" } }),
+    ).toBe(kCodexDeferredSaveIdle);
+    // `saved` is trusted even if the profile read is momentarily disconnected.
+    expect(
+      applyCodexDeferredSaveRead(p, { connected: false, deferredWrite: { state: "saved" } }),
+    ).toBe(kCodexDeferredSaveIdle);
+    const failed = applyCodexDeferredSaveRead(p, {
+      connected: false,
+      deferredWrite: { state: "failed", reason: "store closed for a second backup" },
+    });
+    expect(failed).toEqual({
+      pending: false,
+      disconnectedReads: 0,
+      failedReason: "store closed for a second backup",
+    });
+    expect(buildCodexDeferredSaveFailedLine(failed.failedReason)).toBe(
+      "Codex connection was not saved (store closed for a second backup) — reconnect",
+    );
+    // A failed verdict without a reason still says why in words.
+    expect(
+      applyCodexDeferredSaveRead(p, { connected: false, deferredWrite: { state: "failed" } })
+        .failedReason,
+    ).toBe("unknown error");
+    expect(buildCodexDeferredSaveFailedLine(null)).toBeNull();
+    expect(buildCodexDeferredSaveFailedLine("")).toBeNull();
+  });
+
+  it("a failed verdict is surfaced even when THIS client never saw the deferred answer (reload / other tab)", () => {
+    const failed = applyCodexDeferredSaveRead(kCodexDeferredSaveIdle, {
+      connected: false,
+      deferredWrite: { state: "failed", reason: "x" },
+    });
+    expect(failed.failedReason).toBe("x");
+    // …and it stands until the store proves a connection again.
+    expect(applyCodexDeferredSaveRead(failed, { connected: false })).toBe(failed);
+    expect(applyCodexDeferredSaveRead(failed, kUnavailable)).toBe(failed);
+    expect(applyCodexDeferredSaveRead(failed, { connected: true })).toBe(kCodexDeferredSaveIdle);
+    // Idle stays idle by identity on ordinary reads.
+    expect(applyCodexDeferredSaveRead(kCodexDeferredSaveIdle, { connected: false })).toBe(
+      kCodexDeferredSaveIdle,
+    );
+    expect(applyCodexDeferredSaveRead(null, { connected: true })).toBe(kCodexDeferredSaveIdle);
+  });
+
+  it("without a server verdict: unavailable reads teach nothing; connected clears; the SECOND readable disconnected read fails the claim", () => {
+    const p = pending();
+    expect(applyCodexDeferredSaveRead(p, kUnavailable)).toBe(p);
+    expect(applyCodexDeferredSaveRead(p, { connected: true })).toBe(kCodexDeferredSaveIdle);
+
+    const strike1 = applyCodexDeferredSaveRead(p, { connected: false });
+    expect(strike1).toEqual({ pending: true, disconnectedReads: 1, failedReason: null });
+    // The first strike is what schedules the follow-up read.
+    expect(needsCodexDeferredSaveRecheck(p, strike1)).toBe(true);
+    expect(needsCodexDeferredSaveRecheck(p, p)).toBe(false);
+    expect(needsCodexDeferredSaveRecheck(strike1, strike1)).toBe(false);
+    expect(kCodexDeferredSaveRecheckMs).toBe(2000);
+    // The badge still says pending after one strike.
+    expect(
+      buildCodexStatusBadgeModel({
+        codexStatus: { connected: false },
+        codexStatusKnown: true,
+        deferredSavePending: strike1.pending,
+      }),
+    ).toBe(kCodexStatusBadges.deferredSave);
+    // An unavailable read in between does not reset or add strikes.
+    expect(applyCodexDeferredSaveRead(strike1, kUnavailable)).toBe(strike1);
+
+    const strike2 = applyCodexDeferredSaveRead(strike1, { connected: false });
+    expect(kCodexDeferredSaveDisconnectedReadLimit).toBe(2);
+    expect(strike2).toEqual({
+      pending: false,
+      disconnectedReads: 0,
+      failedReason: kCodexDeferredSaveNotFoundReason,
+    });
+    expect(needsCodexDeferredSaveRecheck(strike1, strike2)).toBe(false);
+    expect(buildCodexDeferredSaveFailedLine(strike2.failedReason)).toBe(
+      "Codex connection was not saved (the saved connection did not appear after the backup) — reconnect",
+    );
+    expect(
+      buildCodexStatusBadgeModel({
+        codexStatus: { connected: false },
+        codexStatusKnown: true,
+        deferredSavePending: strike2.pending,
+      }),
+    ).toBe(kCodexStatusBadges.notConnected);
+  });
+
+  it("applyCodexStatusRead carries the server's deferredWrite verdict through the unavailable overlay", () => {
+    const read = applyCodexStatusRead({
+      previous: { connected: true },
+      previousKnown: true,
+      next: { ...kUnavailable, deferredWrite: { state: "failed", reason: "x" } },
+    });
+    expect(read.status).toEqual({
+      connected: true,
+      unavailable: true,
+      reason: "backup_in_progress",
+      deferredWrite: { state: "failed", reason: "x" },
+    });
+    // No verdict → no field invented.
+    expect("deferredWrite" in applyCodexStatusRead({ next: kUnavailable }).status).toBe(false);
   });
 });

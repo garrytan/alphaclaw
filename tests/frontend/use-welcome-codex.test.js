@@ -59,6 +59,10 @@ import {
   fetchCodexStatus,
 } from "../../lib/public/js/lib/api.js";
 import { openCodexAuthWindow } from "../../lib/public/js/lib/codex-oauth-window.js";
+import {
+  kCodexDeferredSaveNotFoundReason,
+  kCodexDeferredSaveRecheckMs,
+} from "../../lib/public/js/lib/codex-status.js";
 import { useWelcomeCodex } from "../../lib/public/js/components/onboarding/use-welcome-codex.js";
 
 const harness = preactHooks.__harness;
@@ -211,6 +215,76 @@ describe("frontend/use-welcome-codex status check semantics", () => {
     hook = renderHook();
     expect(hook.codexStatus).toEqual({ connected: false });
     expect(hook.codexStatusKnown).toBe(true);
+  });
+
+  // Deferred manual exchange while the status read answers `firstRead`.
+  // `beforeComplete` runs right before the exchange (fake timers must not
+  // start before the mount flush's setTimeout(0), or it never resolves).
+  const completeDeferredExchange = async (firstRead, beforeComplete = () => {}) => {
+    fetchCodexStatus.mockResolvedValue({ connected: false });
+    let hook = renderHook();
+    harness.effects[0]();
+    await flushAsync();
+    hook = renderHook();
+    exchangeCodexOAuth.mockResolvedValue({ ok: true, deferred: true, reason: "backup_in_progress" });
+    fetchCodexStatus.mockResolvedValue(firstRead);
+    hook.setCodexManualInput("http://localhost:1455/auth/callback?code=abc&state=def");
+    hook = renderHook();
+    beforeComplete();
+    await hook.completeCodexAuth();
+    return renderHook();
+  };
+
+  it("X7: the server's deferredWrite:failed verdict ends the pending claim with the reason; a later connected read retires it", async () => {
+    let hook = await completeDeferredExchange({
+      connected: false,
+      unavailable: true,
+      reason: "backup_in_progress",
+    });
+    expect(hook.codexDeferredSavePending).toBe(true);
+    expect(hook.codexDeferredSaveFailedReason).toBeNull();
+
+    fetchCodexStatus.mockResolvedValue({
+      connected: false,
+      deferredWrite: { state: "failed", reason: "store closed for a second backup" },
+    });
+    harness.effects[0]();
+    await flushAsync();
+    hook = renderHook();
+    expect(hook.codexDeferredSavePending).toBe(false);
+    expect(hook.codexDeferredSaveFailedReason).toBe("store closed for a second backup");
+    expect(hook.codexStatus.connected).toBe(false);
+
+    // Reconnected (direct save this time): the failure line goes away.
+    exchangeCodexOAuth.mockResolvedValue({ ok: true });
+    fetchCodexStatus.mockResolvedValue({ connected: true });
+    hook.setCodexManualInput("http://localhost:1455/auth/callback?code=abc&state=def");
+    hook = renderHook();
+    await hook.completeCodexAuth();
+    hook = renderHook();
+    expect(hook.codexDeferredSaveFailedReason).toBeNull();
+    expect(hook.codexDeferredSavePending).toBe(false);
+    expect(hook.codexStatus).toEqual({ connected: true });
+  });
+
+  it("X7: without a server verdict, one readable connected:false read keeps the claim and arms a recheck; the second ends it", async () => {
+    try {
+      // The read right after the exchange is readable and still disconnected.
+      let hook = await completeDeferredExchange({ connected: false }, () => vi.useFakeTimers());
+      expect(hook.codexDeferredSavePending).toBe(true);
+      expect(hook.codexDeferredSaveFailedReason).toBeNull();
+      const readsBefore = fetchCodexStatus.mock.calls.length;
+
+      await vi.advanceTimersByTimeAsync(kCodexDeferredSaveRecheckMs);
+      expect(fetchCodexStatus.mock.calls.length).toBe(readsBefore + 1);
+      hook = renderHook();
+      expect(hook.codexDeferredSavePending).toBe(false);
+      expect(hook.codexDeferredSaveFailedReason).toBe(kCodexDeferredSaveNotFoundReason);
+      await vi.advanceTimersByTimeAsync(kCodexDeferredSaveRecheckMs * 3);
+      expect(fetchCodexStatus.mock.calls.length).toBe(readsBefore + 1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("a resolved {ok:false} envelope is a failed check too (last-known kept)", async () => {
