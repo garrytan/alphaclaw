@@ -1862,6 +1862,134 @@ describe("frontend/upgrade-helpers backup reuse consent (WI-4.4/4.5)", () => {
     ).toBe("No eligible backup to reuse");
   });
 
+  it("R7: an archive older than 24 h is never offered for consent — disabled with the stale reason", async () => {
+    const {
+      buildBackupReuseConsentModel,
+      buildBackupReuseConsent,
+      kBackupReuseMaxAgeMs,
+      kBackupReuseStaleReason,
+    } = await loadUpgradeHelpers();
+    expect(kBackupReuseMaxAgeMs).toBe(24 * 60 * 60 * 1000);
+    const tooOld = makeEntry({ at: kNow - kBackupReuseMaxAgeMs - 1 });
+    const model = buildBackupReuseConsentModel({
+      inventory: { entries: [tooOld] },
+      nowMs: kNow,
+    });
+    expect(model).toEqual(
+      expect.objectContaining({ available: false, sha256: null, reason: kBackupReuseStaleReason }),
+    );
+    expect(buildBackupReuseConsent({ consentModel: model, checked: true })).toBeNull();
+    // Exactly at the boundary the server still accepts it (<=), so do we.
+    const atBoundary = buildBackupReuseConsentModel({
+      inventory: { entries: [makeEntry({ at: kNow - kBackupReuseMaxAgeMs })] },
+      nowMs: kNow,
+    });
+    expect(atBoundary.available).toBe(true);
+    // Fresh AND stale archives: the stale one never wins even when newer-looking
+    // entries are absent — selection runs on the survivors only.
+    const mixed = buildBackupReuseConsentModel({
+      inventory: {
+        entries: [
+          makeEntry({ at: kNow - 26 * 3_600_000, sha256: "b".repeat(64) }),
+          makeEntry({ at: kNow - 3 * 3_600_000 }),
+        ],
+      },
+      nowMs: kNow,
+    });
+    expect(mixed.sha256).toBe(kSha);
+  });
+
+  it("R7: an archive that predates the last successful apply / migration / run is never offered", async () => {
+    const {
+      buildBackupReuseConsentModel,
+      buildBackupReuseWindowStartMs,
+      kBackupReuseStaleReason,
+    } = await loadUpgradeHelpers();
+    const archiveAt = kNow - 3 * 3_600_000;
+    const entry = makeEntry({ at: archiveAt });
+    const laterAt = archiveAt + 60_000;
+    const earlierAt = archiveAt - 60_000;
+
+    // No channel info at all: the window is unbounded below (server: since=0).
+    expect(buildBackupReuseWindowStartMs(null)).toBe(0);
+    expect(
+      buildBackupReuseConsentModel({ inventory: { entries: [entry] }, channelInfo: null, nowMs: kNow })
+        .available,
+    ).toBe(true);
+
+    // Each of the server's three records bounds the window on its own.
+    const cases = [
+      { applied: { channel: "stable", version: "2026.8.2", at: laterAt } },
+      { lastUpdateRun: { operationId: "op-9", ok: true, startedAt: laterAt } },
+      { configMigration: { lastAttempt: { ok: true, at: laterAt } } },
+    ];
+    for (const channelInfo of cases) {
+      expect(buildBackupReuseWindowStartMs(channelInfo)).toBe(laterAt);
+      const model = buildBackupReuseConsentModel({
+        inventory: { entries: [entry] },
+        channelInfo,
+        nowMs: kNow,
+      });
+      expect(model).toEqual(
+        expect.objectContaining({ available: false, sha256: null, reason: kBackupReuseStaleReason }),
+      );
+    }
+
+    // FAILED runs / migrations do not move the window (server: ok gates both),
+    // and an archive taken AT the boundary is still accepted (>=).
+    const failed = {
+      applied: { at: earlierAt },
+      lastUpdateRun: { operationId: "op-9", ok: false, startedAt: laterAt },
+      configMigration: { lastAttempt: { ok: false, at: laterAt } },
+    };
+    expect(buildBackupReuseWindowStartMs(failed)).toBe(earlierAt);
+    expect(
+      buildBackupReuseConsentModel({ inventory: { entries: [entry] }, channelInfo: failed, nowMs: kNow })
+        .available,
+    ).toBe(true);
+    expect(
+      buildBackupReuseConsentModel({
+        inventory: { entries: [entry] },
+        channelInfo: { applied: { at: archiveAt } },
+        nowMs: kNow,
+      }).available,
+    ).toBe(true);
+    // The newest record wins (max), whichever field carries it; ISO strings
+    // are accepted like the rest of the channel payload.
+    expect(
+      buildBackupReuseWindowStartMs({
+        applied: { at: earlierAt },
+        lastUpdateRun: { ok: true, startedAt: new Date(laterAt).toISOString() },
+      }),
+    ).toBe(laterAt);
+  });
+
+  it("R7: buildApplyConfirmModel threads channelInfo into the consent candidate", async () => {
+    const { buildApplyConfirmModel, kBackupReuseStaleReason } = await loadUpgradeHelpers();
+    const inventory = { entries: [makeEntry({ at: kNow - 3 * 3_600_000 })] };
+    const without = buildApplyConfirmModel({
+      payload: { channel: "stable", version: "2026.8.2" },
+      label: "2026.8.2",
+      isDowngrade: true,
+      currentChannel: "stable",
+      backupInventory: inventory,
+      nowMs: kNow,
+    });
+    expect(without.backupReuse.available).toBe(true);
+    const gated = buildApplyConfirmModel({
+      payload: { channel: "stable", version: "2026.8.2" },
+      label: "2026.8.2",
+      isDowngrade: true,
+      currentChannel: "stable",
+      backupInventory: inventory,
+      channelInfo: { applied: { channel: "stable", version: "2026.9.1", at: kNow - 3_600_000 } },
+      nowMs: kNow,
+    });
+    expect(gated.backupReuse).toEqual(
+      expect.objectContaining({ available: false, reason: kBackupReuseStaleReason }),
+    );
+  });
+
   it("an eligible archive without a recorded digest cannot bind consent — says so, never sends", async () => {
     const { buildBackupReuseConsentModel, buildBackupReuseConsent, kBackupReuseNoDigestReason } =
       await loadUpgradeHelpers();
