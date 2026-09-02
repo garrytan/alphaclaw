@@ -1,5 +1,23 @@
 # TODOS
 
+## P2 — OOM attribution behind the adopted launcher (2026-09-02, from issue #56)
+- **What:** After a cold restart the managed child is the `openclaw.mjs` compile-cache launcher (v0.9.70 adoption). It exits with the gateway's code, but a gateway killed by an UNFORWARDED signal (kernel OOM SIGKILL) surfaces as launcher exit code 1 — so `classifyOomExit` (137/SIGKILL) never fires for the exact incident class the memory monitor exists for; only the V8 heap-OOM stderr signature still classifies. Options: read the cgroup `memory.events` `oom_kill` counter delta (or `dmesg`) on a code-1 exit of an adopted supervisor with a recent critical trend; or map the launcher's exit to the child's signal if upstream exposes it.
+- **Why:** `state.lastExit` shows a generic code 1 and the OOM remedy notification is skipped, hiding the memory incident from the operator. Flagged by the v0.9.70 adversarial review (Claude + Codex agreed).
+- **Context:** lib/server/watchdog.js `classifyOomExit`; lib/server/gateway.js `attachManagedGatewayExitClassification` (the `workerPid` it now carries is the hook for a cgroup/dmesg lookup).
+- **Effort:** S–M (human ~3h / CC ~20min). **Priority:** P2.
+
+## P3 — Watchdog-side guard for a memory budget below the gateway's baseline (2026-09-02, from issue #56)
+- **What:** `PUT /api/watchdog/memory` now rejects a `budgetMb` at or below the CURRENT RSS, but a hand-edited alphaclaw.json or a baseline that grows after the write (new plugins, bigger skills snapshot) can still leave the budget under the fresh-process footprint: every restart then goes critical after the 10-min grace + two rising ticks and the brake merely paces the loop (up to `maxRestartsPerDay` full-drain restarts a day, each logged as a leak mitigation). Add: when a FRESH pid reaches critical with `capSource: "budget"` within N minutes of grace end, emit `budget_below_baseline`, notify once, and veto mitigation for that episode.
+- **Why:** Nothing today distinguishes "leak" from "misconfigured budget" once the budget is stored. Flagged by the v0.9.70 adversarial review.
+- **Context:** lib/server/watchdog.js `maybeRunMemoryMitigation` / `memoryMitigationVetoReason`; the route-level check in lib/server/routes/watchdog.js is the first half.
+- **Effort:** S (human ~2h / CC ~15min). **Priority:** P3.
+
+## P3 — Container-tier verification of the adopted-supervisor lifecycle (2026-09-02, from issue #56)
+- **What:** v0.9.70 changes the gateway/boot spine (cold-restart supervisor adoption, supervisor-aware stop, stale-predecessor guard) but `npm run test:container` was not runnable where it shipped (no Docker). Run the container tier against a 2026.9.x beta to confirm: (a) a worker SIGTERM after a cold restart now reaches the watchdog and relaunches without auto-repair; (b) shutdown/backup stops leave no orphaned draining gateway holding the port; (c) the restart-handoff consume accepts with the resolved worker pid.
+- **Why:** The hermetic suite models the launcher with mocks; the real process tree (launcher → gateway, stdio inherit) is only exercised in the container tier.
+- **Context:** tests/container/**, lib/server/gateway.js `runGatewayRestartCmd` ready branch, lib/server/watchdog.js `resolveSupervisedCleanExit`.
+- **Effort:** S (human ~1h / CC ~10min, needs Docker). **Priority:** P3.
+
 ## P2 — Clamp + deployment-only the remaining `WATCHDOG_*` knobs (2026-09-01, from the degraded-backoff wave)
 - **What:** `WATCHDOG_STARTUP_FAILURE_THRESHOLD`, `WATCHDOG_MAX_REPAIR_ATTEMPTS`, and `WATCHDOG_CRASH_LOOP_WINDOW` (plus `WATCHDOG_CRASH_LOOP_THRESHOLD` / `WATCHDOG_LOG_RETENTION_DAYS` if judged the same class) are still read via bare `parsePositiveInt`, unbounded, and honored from the agent-writable `.env`. Give them the treatment the three cadence knobs got in v0.9.68: parse → clamp → one boot warn via `readClampedEnvSeconds` (or a sibling count variant for the unitless ones), membership in `kDeploymentOnlyEnvKeys`, README env-table rows with the "Read at process start; deployment env only" sentence, and a `constants-cadence.test.js`-style membership + clamp test.
 - **Why:** Same self-blinding vector the cadence knobs closed: an agent (or a typo) writing `.env` can today set a crash-loop window of 1s or a repair budget of 0 and silently disable the watchdog's recovery machinery. Flagged in the v0.9.68 CEO review (F3) and deliberately held out of that wave's scope.
