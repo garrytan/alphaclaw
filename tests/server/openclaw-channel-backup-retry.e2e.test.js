@@ -1707,7 +1707,10 @@ describe("server/openclaw-channel-backup-retry", () => {
 
   // ── WI-6.1: usable check after every verified artifact ───────────────────
   describe("usable check (WI-6.1)", () => {
-    it("treats an archive whose manifest lists no state DB as a verify failure (terminal, quarantined)", async () => {
+    it("treats an archive whose manifest covers no state DB as a verify failure (terminal, quarantined)", async () => {
+      // A config-only manifest: its single asset is the config file, so no
+      // directory-level asset covers state/openclaw.sqlite (the real upstream
+      // shape is one kind:"state" asset at the state dir — see the module tests).
       const { runnerImpl, backupCalls } = makeBackupRunner({
         manifestTail: `${JSON.stringify({ schemaVersion: 1, assets: [{ archivePath: "openclaw.json" }] })}\n`,
       });
@@ -1718,7 +1721,7 @@ describe("server/openclaw-channel-backup-retry", () => {
 
       expect(result.status).toBe(409);
       expect(result.body.code).toBe("backup_failed");
-      expect(result.body.message).toMatch(/failed to verify — the archive's manifest could not be read \(manifest lists no state\/openclaw\.sqlite\)/);
+      expect(result.body.message).toMatch(/failed to verify — the archive's manifest could not be read \(manifest covers no state\/openclaw\.sqlite\)/);
       expect(backupCalls).toHaveLength(1);
       const names = fs.readdirSync(path.join(harness.rootDir, "backups", "openclaw"));
       expect(names).toHaveLength(1);
@@ -1752,7 +1755,13 @@ describe("server/openclaw-channel-backup-retry", () => {
       expect(record.usableCheck).toBe("manifest_ok");
       expect(archiveToolCalls.map((c) => c.command)).toEqual(["gzip", "tar"]);
       expect(archiveToolCalls[0].args).toEqual(["-t", record.file]);
-      expect(archiveToolCalls[1].args).toEqual(["-xzOf", record.file, "--wildcards", "*/manifest.json"]);
+      expect(archiveToolCalls[1].args).toEqual([
+        "-xzOf",
+        record.file,
+        "--wildcards",
+        "--occurrence=1",
+        "*/manifest.json",
+      ]);
     });
   });
 

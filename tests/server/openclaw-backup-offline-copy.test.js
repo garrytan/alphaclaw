@@ -570,6 +570,105 @@ describe("server/openclaw-backup-offline-copy", () => {
       expect(verdict.producer).toBe("openclaw");
     });
 
+    // The REAL upstream manifest shape (captured from `openclaw backup create
+    // --verify` on the 2026.7.1-2 pin and 2026.9.1-beta.1): ONE directory-level
+    // state asset; the databases are tar entries beneath it, never assets.
+    const upstreamManifest = (stateDirPath, { agentRoots = true } = {}) => ({
+      schemaVersion: 1,
+      createdAt: "2026-09-02T19:46:13.626Z",
+      archiveRoot: "2026-09-02T19-46-13.626+00-00-openclaw-backup",
+      runtimeVersion: "2026.9.1-beta.1",
+      platform: "linux",
+      nodeVersion: "v22.23.2",
+      options: { includeWorkspace: true, onlyConfig: false },
+      paths: {
+        stateDir: stateDirPath,
+        configPath: `${stateDirPath}/openclaw.json`,
+        oauthDir: `${stateDirPath}/credentials`,
+        workspaceDirs: [`${stateDirPath}/workspace`],
+        ...(agentRoots
+          ? { agentRoots: [{ agentId: "main", sourcePath: `${stateDirPath}/agents/main/agent` }] }
+          : {}),
+      },
+      assets: [
+        {
+          kind: "state",
+          sourcePath: stateDirPath,
+          archivePath: `2026-09-02T19-46-13.626+00-00-openclaw-backup/payload/posix${stateDirPath}`,
+        },
+      ],
+      skipped: [{ kind: "workspace", sourcePath: `${stateDirPath}/workspace`, reason: "missing" }],
+    });
+    const scriptedManifest = (manifest) => async (spec) =>
+      spec.command === "gzip" ? { ok: true, tail: "" } : { ok: true, tail: `${JSON.stringify(manifest)}\n` };
+
+    it("accepts the real upstream shape: one directory-level state asset covers the box's databases", async () => {
+      for (const agentRoots of [true, false]) {
+        const verdict = await verifyArchiveManifest({
+          file: "/data/backups/openclaw/openclaw-backup-1-abc.tar.gz",
+          runCommand: scriptedManifest(upstreamManifest("/data/.openclaw", { agentRoots })),
+          requiredArchivePaths: ["state/openclaw.sqlite", "agents/main/agent/openclaw-agent.sqlite"],
+          stateDir: "/data/.openclaw",
+        });
+        expect(verdict.ok).toBe(true);
+        expect(verdict.producer).toBe("openclaw");
+      }
+    });
+
+    it("resolves coverage against manifest.paths.stateDir when the caller passes no stateDir", async () => {
+      const verdict = await verifyArchiveManifest({
+        file: "/x.tar.gz",
+        runCommand: scriptedManifest(upstreamManifest("/tmp/oc-manifest-pin-enPE")),
+        requiredArchivePaths: ["state/openclaw.sqlite"],
+      });
+      expect(verdict.ok).toBe(true);
+    });
+
+    it("stops the manifest extraction at the first match (--occurrence=1) and still gzip-tests the whole archive", async () => {
+      const calls = [];
+      await verifyArchiveManifest({
+        file: "/x.tar.gz",
+        runCommand: async (spec) => {
+          calls.push(spec);
+          return spec.command === "gzip"
+            ? { ok: true, tail: "" }
+            : { ok: true, tail: JSON.stringify(upstreamManifest("/data/.openclaw")) };
+        },
+        requiredArchivePaths: ["state/openclaw.sqlite"],
+        stateDir: "/data/.openclaw",
+      });
+      expect(calls[0]).toEqual(expect.objectContaining({ command: "gzip", args: ["-t", "/x.tar.gz"] }));
+      expect(calls[1].args).toEqual(["-xzOf", "/x.tar.gz", "--wildcards", "--occurrence=1", "*/manifest.json"]);
+    });
+
+    it("rejects a manifest whose assets cover none of the databases (config-only archive, foreign state dir)", async () => {
+      const configOnly = {
+        ...upstreamManifest("/data/.openclaw"),
+        options: { includeWorkspace: false, onlyConfig: true },
+        assets: [{ kind: "config", sourcePath: "/data/.openclaw/openclaw.json", archivePath: "r/payload/posix/data/.openclaw/openclaw.json" }],
+      };
+      const verdict = await verifyArchiveManifest({
+        file: "/x.tar.gz",
+        runCommand: scriptedManifest(configOnly),
+        requiredArchivePaths: ["state/openclaw.sqlite"],
+        stateDir: "/data/.openclaw",
+      });
+      expect(verdict).toEqual(
+        expect.objectContaining({ ok: false, stage: "assets", reason: "manifest covers no state/openclaw.sqlite" }),
+      );
+      // A directory asset from ANOTHER state dir must not cover this box's databases.
+      const foreign = await verifyArchiveManifest({
+        file: "/x.tar.gz",
+        runCommand: scriptedManifest({ ...upstreamManifest("/other/.openclaw"), paths: { stateDir: "/other/.openclaw" } }),
+        requiredArchivePaths: ["state/openclaw.sqlite"],
+        stateDir: "/data/.openclaw",
+      });
+      // manifest.paths.stateDir wins for resolution, so the archive covers ITS
+      // own /other/.openclaw/state/openclaw.sqlite — a restore of that archive
+      // onto this box is the operator's explicit choice, not a usability defect.
+      expect(foreign.ok).toBe(true);
+    });
+
     it("fails on gzip, manifest, parse, and assets stages with honest reasons", async () => {
       const scripted = (gzipOk, tarOk, tarTail) => async (spec) =>
         spec.command === "gzip"
@@ -592,7 +691,7 @@ describe("server/openclaw-backup-offline-copy", () => {
         requiredArchivePaths: ["state/openclaw.sqlite"],
       });
       expect(assets).toEqual(
-        expect.objectContaining({ stage: "assets", reason: "manifest lists no state/openclaw.sqlite" }),
+        expect.objectContaining({ stage: "assets", reason: "manifest covers no state/openclaw.sqlite" }),
       );
     });
 
