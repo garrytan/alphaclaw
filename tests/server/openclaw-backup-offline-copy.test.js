@@ -12,6 +12,8 @@ const {
   kOfflineCopyProducer,
   kOfflineCopyFormatVersion,
   kOfflineCopyArchiveSuffix,
+  kOfflineCopyTempDirPrefix,
+  kIntegrityCheckpointIntervalMs,
   kManifestTailBytes,
   kManifestMaxBytes,
   kWalkCheckpointEvery,
@@ -20,6 +22,8 @@ const {
   producerOfArchiveName,
   assessExclusivity,
   defaultListFdHolders,
+  defaultSpawnIntegrityWorker,
+  checkIntegrity,
   walkStateTree,
   walkStateTreeAsync,
   verifyArchiveManifest,
@@ -187,8 +191,10 @@ describe("server/openclaw-backup-offline-copy", () => {
         handleCount: 2,
       });
       expect(report.ok).toBe(false);
+      // pid AND argv: the operator can tell a foreign holder from AlphaClaw's
+      // own transient CLI shell-out that coincided with the sample.
       expect(report.failures).toEqual([
-        "1 live openclaw process(es): 57",
+        "1 live openclaw process(es): 57 (openclaw gateway run)",
         "2 in-process state-db handle(s) open",
       ]);
     });
@@ -240,6 +246,51 @@ describe("server/openclaw-backup-offline-copy", () => {
         selfPid: 77,
       });
       expect(holders).toEqual([{ pid: 42, path: "/s/state/openclaw.sqlite-wal" }]);
+    });
+
+    it("matches the kernel-canonical spelling too: a state dir reached through a symlink still finds its holders", () => {
+      // /proc/<pid>/fd links always report the resolved path; the configured
+      // state dir goes through /srv/current → /data/alphaclaw.
+      const fsModule = {
+        realpathSync: (p) => {
+          if (p === "/srv/current/.openclaw/state/openclaw.sqlite") {
+            return "/data/alphaclaw/.openclaw/state/openclaw.sqlite";
+          }
+          throw new Error(`ENOENT ${p}`);
+        },
+        readdirSync: (p) => {
+          if (p === "/proc") return ["42"];
+          if (p === "/proc/42/fd") return ["3"];
+          throw new Error(`unexpected ${p}`);
+        },
+        readlinkSync: (p) => {
+          if (p === "/proc/42/fd/3") return "/data/alphaclaw/.openclaw/state/openclaw.sqlite-wal";
+          throw new Error(`unexpected ${p}`);
+        },
+      };
+      const holders = defaultListFdHolders({
+        fsModule,
+        dbPaths: ["/srv/current/.openclaw/state/openclaw.sqlite"],
+        selfPid: 1,
+      });
+      expect(holders).toEqual([{ pid: 42, path: "/data/alphaclaw/.openclaw/state/openclaw.sqlite-wal" }]);
+    });
+
+    it("keeps scanning under the configured spelling when realpath fails (db not yet on disk)", () => {
+      const fsModule = {
+        realpathSync: () => {
+          throw new Error("ENOENT");
+        },
+        readdirSync: (p) => {
+          if (p === "/proc") return ["42"];
+          if (p === "/proc/42/fd") return ["3"];
+          throw new Error(`unexpected ${p}`);
+        },
+        readlinkSync: () => "/s/state/openclaw.sqlite",
+      };
+      expect(
+        defaultListFdHolders({ fsModule, dbPaths: ["/s/state/openclaw.sqlite"], selfPid: 1 }),
+      ).toEqual([{ pid: 42, path: "/s/state/openclaw.sqlite" }]);
     });
 
     it("returns null when /proc is unreadable", () => {
@@ -394,6 +445,27 @@ describe("server/openclaw-backup-offline-copy", () => {
       });
       expect(copied.prepare("SELECT count(*) AS n FROM t").get().n).toBe(3);
       copied.close();
+    });
+
+    it("stages the copy under the exported temp-dir prefix the channel-sync sweeper matches", async () => {
+      const seen = [];
+      const args = makeCopyArgs({
+        runCommand: (spec) => {
+          seen.push(...(spec.args || []).map(String));
+          return realRunCommand(spec);
+        },
+      });
+      const result = await createOfflineCopy(args);
+      expect(result.ok).toBe(true);
+      const staged = seen.filter(
+        (arg) =>
+          path.dirname(arg) === args.backupsDir &&
+          path.basename(arg).startsWith(kOfflineCopyTempDirPrefix),
+      );
+      expect(staged.length).toBeGreaterThan(0);
+      expect(path.basename(staged[0])).toMatch(new RegExp(`^\\${kOfflineCopyTempDirPrefix}${process.pid}-[0-9a-f]{8}$`));
+      // Removed in the finally — only the archive remains.
+      expect(fs.readdirSync(args.backupsDir)).toEqual([path.basename(args.outputFile)]);
     });
 
     it("excludes workspaces above the inline limit and records partial:true", async () => {
@@ -763,6 +835,122 @@ describe("server/openclaw-backup-offline-copy", () => {
     it("requires runCommand and isQuiet", async () => {
       await expect(createOfflineCopy(makeCopyArgs({ runCommand: null }))).rejects.toThrow(TypeError);
       await expect(createOfflineCopy(makeCopyArgs({ isQuiet: null }))).rejects.toThrow(TypeError);
+    });
+  });
+
+  // ── PRAGMA integrity_check runs OFF the event loop, bounded like backup() ──
+  describe("checkIntegrity (worker thread)", () => {
+    const { EventEmitter } = require("events");
+    // A worker that never answers: the shape checkIntegrity drives, nothing more.
+    const makeHangingWorker = () => {
+      const worker = new EventEmitter();
+      worker.terminate = vi.fn(async () => {});
+      return worker;
+    };
+
+    it("real copy: verdict + user_version come back from the worker while the main thread keeps turning", async () => {
+      const dir = mkTemp("alphaclaw-integrity-");
+      const copyPath = path.join(dir, "copy.sqlite");
+      writeDb(copyPath, { userVersion: 11 });
+      let turned = false;
+      const pending = checkIntegrity({ copyPath, remainingMs: () => 10_000 });
+      // A macrotask queued right after the call runs BEFORE the verdict
+      // lands — impossible on the synchronous in-process path, where the
+      // already-settled promise's continuation wins the microtask race.
+      setImmediate(() => {
+        turned = true;
+      });
+      await expect(pending).resolves.toEqual({ integrity: "ok", userVersion: 11 });
+      expect(turned).toBe(true);
+    });
+
+    it("real copy that is not a database: stage integrity, 'could not run', never a pass", async () => {
+      const dir = mkTemp("alphaclaw-integrity-");
+      const copyPath = path.join(dir, "garbage.sqlite");
+      fs.writeFileSync(copyPath, "not a database at all, but long enough to be opened\n".repeat(20));
+      await expect(checkIntegrity({ copyPath })).rejects.toMatchObject({
+        stage: "integrity",
+        message: expect.stringMatching(/integrity_check on garbage\.sqlite could not run/),
+      });
+    });
+
+    it("a check that outlives the remaining budget rejects with stage budget and terminates the worker", async () => {
+      const worker = makeHangingWorker();
+      const startedAt = Date.now();
+      await expect(
+        checkIntegrity({
+          copyPath: "/x/openclaw.sqlite",
+          remainingMs: () => 40,
+          spawnWorker: () => worker,
+        }),
+      ).rejects.toMatchObject({
+        stage: "budget",
+        message: expect.stringMatching(/during integrity of openclaw\.sqlite/),
+      });
+      expect(Date.now() - startedAt).toBeLessThan(2000);
+      expect(worker.terminate).toHaveBeenCalledTimes(1);
+    });
+
+    it("a quiet barrier lost WHILE the check runs aborts through the interval checkpoint (quiet_lost), terminating the worker", async () => {
+      const worker = makeHangingWorker();
+      let quiet = true;
+      setTimeout(() => {
+        quiet = false;
+      }, 5);
+      await expect(
+        checkIntegrity({
+          copyPath: "/x/openclaw.sqlite",
+          remainingMs: () => 10_000,
+          checkpoint: (stage) => {
+            if (!quiet) throw new OfflineCopyError("quiet_lost", `state-db quiet period ended during ${stage}`);
+          },
+          spawnWorker: () => worker,
+        }),
+      ).rejects.toMatchObject({
+        stage: "quiet_lost",
+        message: expect.stringMatching(/during integrity/),
+      });
+      expect(worker.terminate).toHaveBeenCalledTimes(1);
+      expect(kIntegrityCheckpointIntervalMs).toBeLessThanOrEqual(1000);
+    });
+
+    it("a worker that dies without a verdict is an integrity failure, not a pass", async () => {
+      const worker = makeHangingWorker();
+      const pending = checkIntegrity({ copyPath: "/x/openclaw.sqlite", spawnWorker: () => worker });
+      worker.emit("exit", 1);
+      await expect(pending).rejects.toMatchObject({
+        stage: "integrity",
+        message: expect.stringMatching(/worker exited \(1\) without a verdict/),
+      });
+    });
+
+    it("createOfflineCopy: the default (real sqlite) path uses the worker seam and the deadline reaches INTO the integrity stage", async () => {
+      const worker = makeHangingWorker();
+      const spawn = vi.fn(() => worker);
+      const args = makeCopyArgs({ budgetMs: 150, spawnIntegrityWorker: spawn });
+      const startedAt = Date.now();
+      await expect(createOfflineCopy(args)).rejects.toMatchObject({
+        stage: "budget",
+        message: expect.stringMatching(/during integrity of/),
+      });
+      expect(Date.now() - startedAt).toBeLessThan(5000);
+      expect(spawn).toHaveBeenCalledTimes(1);
+      expect(worker.terminate).toHaveBeenCalled();
+      // No archive, no staging debris.
+      expect(fs.readdirSync(args.backupsDir)).toEqual([]);
+    });
+
+    it("the production default spawns a real node:worker_threads Worker", async () => {
+      const dir = mkTemp("alphaclaw-integrity-");
+      const copyPath = path.join(dir, "copy.sqlite");
+      writeDb(copyPath, { userVersion: 2 });
+      const worker = defaultSpawnIntegrityWorker({ copyPath });
+      const message = await new Promise((resolve, reject) => {
+        worker.on("message", resolve);
+        worker.on("error", reject);
+      });
+      expect(message).toEqual({ ok: true, verdict: "ok", userVersion: 2 });
+      await worker.terminate();
     });
   });
 
