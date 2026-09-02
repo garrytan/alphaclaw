@@ -143,6 +143,26 @@ describe("server/openclaw-state-db quiet period + handle accounting", () => {
     expect(getStateDbHandleCount()).toBe(0);
   });
 
+  it("a throwing native close() still releases the handle count (finally) — the offline copy's handleCount===0 gate is never pinned shut", () => {
+    const closeSpy = vi
+      .spyOn(DatabaseSync.prototype, "close")
+      .mockImplementationOnce(function () {
+        throw new Error("close exploded");
+      });
+    try {
+      const handle = openReadonlyOpenclawStateDb({ openclawDir: tempDir });
+      expect(getStateDbHandleCount()).toBe(1);
+      expect(() => handle.db.close()).toThrow("close exploded");
+      expect(getStateDbHandleCount()).toBe(0);
+      // The retry reaches the real native close (the throw was one-shot) and
+      // must not push the counter below zero.
+      handle.db.close();
+      expect(getStateDbHandleCount()).toBe(0);
+    } finally {
+      closeSpy.mockRestore();
+    }
+  });
+
   it("while quiet: the read-only open returns null (the existing 'unavailable' fallback) without touching the db", async () => {
     const { token } = await beginStateDbQuiet({ owner: "test", maxMs: 60_000 });
     try {

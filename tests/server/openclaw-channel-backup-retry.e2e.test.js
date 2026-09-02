@@ -30,6 +30,10 @@ const {
   kOpenclawBackupQuiesceTimeoutMs,
   kOpenclawBackupOfflineCopyBudgetMs,
   kOpenclawBackupQuiesceSuppressSlackMs,
+  kOpenclawBackupQuiesceLeaseReserveMs,
+  kOpenclawBackupReuseVerifyTimeoutMs,
+  kOpenclawBackupStaleTempDirSlackMs,
+  kOpenclawStateDbQuietSlackMs,
   kOpenclawBackupTimeoutMs,
 } = require("../../lib/server/constants");
 
@@ -297,6 +301,10 @@ const kFastTuning = {
   postQuiesceReadyTimeoutMs: 10,
   postQuiescePollMs: 5,
   postQuiesceSettleMs: 1,
+  // The usable-check reserve the ladder keeps back from every attempt budget.
+  // Scaled down with the 1 s envelopes the exhaustion tests use; the floor
+  // tests set their own explicit value.
+  usableCheckReserveMs: 100,
 };
 
 // Hermetic diagnosis probes: no /proc reads, no live-process listing.
@@ -455,19 +463,27 @@ describe("server/openclaw-channel-backup-retry", () => {
         "release",
       ]);
       expect(isStateDbQuiet()).toBe(false);
+      // The barrier's expiry is derived from the effective budgets + slack.
       expect(quiesce.dbQuietOptions).toEqual(
-        expect.objectContaining({ owner: "quiesced-backup", maxMs: expect.any(Number) }),
+        expect.objectContaining({
+          owner: "quiesced-backup",
+          maxMs:
+            kOpenclawBackupQuiesceTimeoutMs +
+            kOpenclawBackupOfflineCopyBudgetMs +
+            kOpenclawStateDbQuietSlackMs,
+        }),
       );
       // The lifecycle lease and the watchdog suppression both span the
-      // quiesced attempts AND the offline copy that may follow them.
-      expect(quiesce.acquireOptions).toEqual({
-        leaseMs: kOpenclawBackupQuiesceTimeoutMs + kOpenclawBackupOfflineCopyBudgetMs,
-      });
-      expect(quiesce.suppressDurationMs).toBe(
+      // quiesced attempts AND the offline copy that may follow them, PLUS a
+      // reserve for what else runs under the lock (stop, barrier begin,
+      // usable check, prune, relaunch ready budget) — without it the lease
+      // force-releases mid-copy.
+      const holdMs =
         kOpenclawBackupQuiesceTimeoutMs +
-          kOpenclawBackupOfflineCopyBudgetMs +
-          kOpenclawBackupQuiesceSuppressSlackMs,
-      );
+        kOpenclawBackupOfflineCopyBudgetMs +
+        kOpenclawBackupQuiesceLeaseReserveMs;
+      expect(quiesce.acquireOptions).toEqual({ leaseMs: holdMs });
+      expect(quiesce.suppressDurationMs).toBe(holdMs + kOpenclawBackupQuiesceSuppressSlackMs);
       const backupRecord = readRunBackupRecord(harness);
       expect(backupRecord).toEqual(
         expect.objectContaining({
@@ -493,6 +509,82 @@ describe("server/openclaw-channel-backup-retry", () => {
       expect(eventsOfType(harness.insertEvent, "state_db_quiet").map((e) => e.status)).toEqual(
         expect.arrayContaining(["begin", "quiet", "released"]),
       );
+    });
+
+    it("derives the quiet barrier's maxMs from the EFFECTIVE quiesce/offline budgets (tuned budgets raise it; an explicit override wins)", async () => {
+      const quiesce = makeQuiesceRecorder({});
+      const { runnerImpl } = makeBackupRunner({});
+      const harness = createHarness({
+        runnerImpl,
+        gatewayQuiesce: quiesce,
+        backupTuning: { quiesceTimeoutMs: 20 * 60 * 1000, offlineCopyBudgetMs: 12 * 60 * 1000 },
+      });
+
+      const result = await harness.sync.applyUpdate(kHardGateTarget);
+
+      expect(result.status).toBe(202);
+      expect(quiesce.dbQuietOptions.maxMs).toBe(32 * 60 * 1000 + kOpenclawStateDbQuietSlackMs);
+
+      const explicit = makeQuiesceRecorder({});
+      const second = createHarness({
+        runnerImpl: makeBackupRunner({}).runnerImpl,
+        gatewayQuiesce: explicit,
+        backupTuning: { quiesceTimeoutMs: 20 * 60 * 1000, stateDbQuietMaxMs: 60_000 },
+      });
+      expect((await second.sync.applyUpdate(kHardGateTarget)).status).toBe(202);
+      expect(explicit.dbQuietOptions.maxMs).toBe(60_000);
+    });
+
+    it("reserves the usable-check floor: no live attempt starts when the envelope cannot hold attempt + reserve (window_exhausted, frozen clock)", async () => {
+      // The quiesced attempt times out having eaten 6 s of a 10 s envelope;
+      // 4 s remain — less than an attempt plus the 5 s reserve. Without the
+      // floor a live attempt would run, succeed, and then be quarantined by
+      // a 1 ms usable check.
+      const quiesce = makeQuiesceRecorder({});
+      const { runnerImpl, backupCalls } = makeBackupRunner({
+        script: [{ ok: false, timedOut: true, tail: "" }, { ok: true }],
+      });
+      const harness = createHarness({
+        runnerImpl,
+        gatewayQuiesce: quiesce,
+        backupTuning: { phaseEnvelopeMs: 10_000, usableCheckReserveMs: 5_000 },
+      });
+      harness.runner.runStreamed.mockImplementation(async (opts) => {
+        if (opts.command === "openclaw" && opts.args?.[0] === "backup") harness.nowRef.now += 6_000;
+        return runnerImpl(opts);
+      });
+
+      const result = await harness.sync.applyUpdate(kHardGateTarget);
+
+      expect(result.status).toBe(409);
+      expect(result.body.code).toBe("backup_failed");
+      expect(result.body.message).toMatch(/backup window was exhausted/);
+      expect(backupCalls).toHaveLength(1);
+      // The quiesced attempt's own deadline already kept the reserve back.
+      expect(backupCalls[0].timeoutMs).toBe(5_000);
+      expect(quiesce.start).toHaveBeenCalledTimes(1);
+    });
+
+    it("the usable check always gets at least the reserve, even when the succeeding attempt spent the envelope", async () => {
+      const quiesce = makeQuiesceRecorder({});
+      const { runnerImpl, archiveToolCalls } = makeBackupRunner({});
+      const harness = createHarness({
+        runnerImpl,
+        gatewayQuiesce: quiesce,
+        backupTuning: { phaseEnvelopeMs: 10_000, usableCheckReserveMs: 5_000 },
+      });
+      harness.runner.runStreamed.mockImplementation(async (opts) => {
+        if (opts.command === "openclaw" && opts.args?.[0] === "backup") harness.nowRef.now += 9_999;
+        return runnerImpl(opts);
+      });
+
+      const result = await harness.sync.applyUpdate(kHardGateTarget);
+
+      expect(result.status).toBe(202);
+      expect(archiveToolCalls.map((c) => c.command)).toEqual(["gzip", "tar"]);
+      // 1 ms was left in the envelope; the check got the 5 s reserve instead.
+      expect(archiveToolCalls[0].timeoutMs).toBe(5_000);
+      expect(readRunBackupRecord(harness).usableCheck).toBe("manifest_ok");
     });
 
     it("does not stop or relaunch a gateway that was not running (wasRunning sampled under the lock)", async () => {
@@ -1465,13 +1557,21 @@ describe("server/openclaw-channel-backup-retry", () => {
       const { runnerImpl, backupCalls } = makeOfflineCopyRunner({});
       const harness = createHarness({ runnerImpl, gatewayQuiesce: quiesce });
       seedStateDb(harness);
-      // Prior run: 1 byte took the whole quiesce budget → today's DB predicts
-      // far longer than what remains.
+      // Prior run: the upstream CLI's OWN attempt took the whole quiesce
+      // budget for 1 byte → today's DB predicts far longer than what remains.
       const priorId = crypto.randomUUID();
       harness.ledger.createRun({ operationId: priorId, target: { channel: "beta" } });
       harness.ledger.updateRun(priorId, (record) => {
         record.startedAt = 1;
-        record.backup = { noBackup: false, durationMs: kOpenclawBackupQuiesceTimeoutMs, stateBytes: 1, file: "/x", verified: true };
+        record.backup = {
+          noBackup: false,
+          producer: "openclaw",
+          attemptMs: kOpenclawBackupQuiesceTimeoutMs,
+          durationMs: kOpenclawBackupQuiesceTimeoutMs + 60_000,
+          stateBytes: 1,
+          file: "/x",
+          verified: true,
+        };
         return record;
       });
 
@@ -1482,7 +1582,64 @@ describe("server/openclaw-channel-backup-retry", () => {
       const record = readRunBackupRecord(harness);
       expect(record.offlineCopy).toEqual(expect.objectContaining({ ok: true, reason: "predicted_too_slow" }));
       expect(record.diagnosis.predictedUpstreamMs).toBeGreaterThan(kOpenclawBackupQuiesceTimeoutMs);
-      expect(record.diagnosis.priorRun.operationId).toBe(priorId);
+      expect(record.diagnosis.priorRun).toEqual({
+        operationId: priorId,
+        attemptMs: kOpenclawBackupQuiesceTimeoutMs,
+        stateBytes: 1,
+      });
+    });
+
+    it("calibrates predictedUpstreamMs from the prior UPSTREAM attempt's own wall time only — never a whole-step duration, never an offline-copy run", async () => {
+      const quiesce = makeQuiesceRecorder({});
+      const { runnerImpl, backupCalls } = makeOfflineCopyRunner({});
+      const harness = createHarness({ runnerImpl, gatewayQuiesce: quiesce });
+      seedStateDb(harness);
+      // Newest prior run: an offline copy whose step took forever (lock wait,
+      // stop, copy, prune) — it says nothing about the upstream CLI's speed,
+      // and predicting from it would send every later run to the offline copy.
+      const offlineId = crypto.randomUUID();
+      harness.ledger.createRun({ operationId: offlineId, target: { channel: "beta" } });
+      harness.ledger.updateRun(offlineId, (record) => {
+        record.startedAt = 2;
+        record.backup = {
+          noBackup: false,
+          producer: "alphaclaw-offline-copy",
+          durationMs: kOpenclawBackupQuiesceTimeoutMs * 4,
+          attemptMs: kOpenclawBackupQuiesceTimeoutMs * 4,
+          stateBytes: 1,
+          file: "/y",
+          verified: true,
+        };
+        return record;
+      });
+      // Older prior run: a legacy (pre-attemptMs) upstream record whose
+      // durationMs is the whole step — not calibration input either.
+      const legacyId = crypto.randomUUID();
+      harness.ledger.createRun({ operationId: legacyId, target: { channel: "beta" } });
+      harness.ledger.updateRun(legacyId, (record) => {
+        record.startedAt = 1;
+        record.backup = { noBackup: false, durationMs: kOpenclawBackupQuiesceTimeoutMs * 4, stateBytes: 1, file: "/x", verified: true };
+        return record;
+      });
+      // The upstream CLI takes 1234 ms of frozen clock.
+      harness.runner.runStreamed.mockImplementation(async (opts) => {
+        if (opts.command === "openclaw" && opts.args?.[0] === "backup") harness.nowRef.now += 1234;
+        return runnerImpl(opts);
+      });
+
+      const result = await harness.sync.applyUpdate(kHardGateTarget);
+
+      expect(result.status).toBe(202);
+      // No short-circuit: the upstream attempt ran and succeeded.
+      expect(backupCalls).toHaveLength(1);
+      const record = readRunBackupRecord(harness);
+      expect(record.producer).toBe("openclaw");
+      expect(record.offlineCopy).toBeNull();
+      expect(record.diagnosis.predictedUpstreamMs).toBeNull();
+      expect(record.diagnosis.priorRun).toBeNull();
+      // This run records the CLI's own wall time for the NEXT calibration.
+      expect(record.attemptMs).toBe(1234);
+      expect(record.durationMs).toBeGreaterThanOrEqual(1234);
     });
 
     it("refuses the offline copy (honest 409) when the state dir is not exclusively ours — a live openclaw process", async () => {
@@ -1985,6 +2142,116 @@ describe("server/openclaw-channel-backup-retry", () => {
       expect(result.body.reusableBackup.file).toBe(older.file);
     });
 
+    it("offline copy refused in-quiesce: the reuse gate re-verifies candidates only AFTER dbResume + start + release (gateway up, barrier released)", async () => {
+      const quiesce = makeQuiesceRecorder({});
+      const { runnerImpl, backupCalls } = makeOfflineCopyRunner({
+        script: [{ ok: false, signal: "SIGKILL", killed: true, tail: "" }],
+        onBackupCall: () => quiesce.calls.push("backup-cli"),
+        onArchiveTool: (opts) => {
+          quiesce.calls.push(`${opts.command}:${isStateDbQuiet() ? "quiet" : "resumed"}`);
+          return null;
+        },
+      });
+      const harness = createHarness({
+        runnerImpl,
+        gatewayQuiesce: quiesce,
+        backupProbes: {
+          ...kQuietProbes,
+          listProcesses: () => [{ pid: 4242, cmdline: "openclaw gateway run" }],
+        },
+      });
+      const seeded = seedReusableArchive(harness, { ageMs: 2 * kHour });
+      seedStateDb(harness);
+
+      const result = await harness.sync.applyUpdate(kHardGateTarget);
+
+      expect(result.status).toBe(409);
+      expect(result.body.message).toMatch(/offline copy was refused/);
+      expect(result.body.reusableBackup).toEqual(
+        expect.objectContaining({ file: seeded.file, sha256: seeded.sha256 }),
+      );
+      expect(backupCalls).toHaveLength(1);
+      // gzip -t / tar (the candidate re-verification) come strictly after the
+      // quiesce unwound — never with the gateway down and the barrier held.
+      expect(quiesce.calls).toEqual([
+        "acquireLock",
+        "isRunning",
+        "suppress",
+        "stop",
+        "dbQuiet",
+        "backup-cli",
+        "dbResume",
+        "start",
+        "unsuppress",
+        "release",
+        "gzip:resumed",
+        "tar:resumed",
+      ]);
+    });
+
+    it("window_exhausted is reachable for reuse: the candidate re-verification gets its OWN budget, not the spent envelope", async () => {
+      const quiesce = makeQuiesceRecorder({});
+      const gzipTimeouts = [];
+      const { runnerImpl, backupCalls } = makeBackupRunner({
+        script: [{ ok: false, tail: kVanishedLockTail }],
+        onArchiveTool: (opts) => {
+          if (opts.command !== "gzip") return null;
+          gzipTimeouts.push(opts.timeoutMs);
+          // A real gzip -t of a multi-GB archive cannot finish in a few ms.
+          return opts.timeoutMs < 1000 ? { ok: false, code: null, tail: "", timedOut: true } : null;
+        },
+      });
+      const harness = createHarness({
+        runnerImpl,
+        gatewayQuiesce: quiesce,
+        backupTuning: { phaseEnvelopeMs: 1000 },
+      });
+      const seeded = seedReusableArchive(harness, { ageMs: 2 * kHour });
+      harness.runner.runStreamed.mockImplementation(async (opts) => {
+        if (opts.command === "openclaw" && opts.args?.[0] === "backup") harness.nowRef.now += 2000;
+        return runnerImpl(opts);
+      });
+
+      const result = await harness.sync.applyUpdate(kHardGateTarget);
+
+      expect(result.status).toBe(409);
+      expect(result.body.message).toMatch(/backup window was exhausted/);
+      expect(backupCalls).toHaveLength(1);
+      expect(gzipTimeouts).toEqual([kOpenclawBackupReuseVerifyTimeoutMs]);
+      expect(result.body.reusableBackup).toEqual(
+        expect.objectContaining({ file: seeded.file, sha256: seeded.sha256 }),
+      );
+    });
+
+    it("a usable check that hits OUR timeout is window_exhausted: honest message, the CLI-verified archive stays in place (no .unverified), reuse offered", async () => {
+      const { runnerImpl, backupCalls } = makeBackupRunner({
+        onArchiveTool: (opts) =>
+          opts.command === "gzip" && !opts.args[1].includes("prev0000")
+            ? { ok: false, code: null, tail: "", timedOut: true }
+            : null,
+      });
+      const harness = createHarness({ runnerImpl });
+      const seeded = seedReusableArchive(harness, { ageMs: 2 * kHour });
+
+      const result = await harness.sync.applyUpdate(kHardGateTarget);
+
+      expect(result.status).toBe(409);
+      expect(result.body.code).toBe("backup_failed");
+      expect(result.body.message).toMatch(/ran out of time — the archive was written but could not be checked/);
+      expect(result.body.message).not.toMatch(/failed to verify/);
+      expect(lastStepDetail(harness, "backup", "failed").error).toBe("usable check timed out: gzip");
+      expect(backupCalls).toHaveLength(1);
+      // The archive keeps its real name — no quarantine — and is a survivor
+      // the hint can name.
+      const backupsDir = path.join(harness.rootDir, "backups", "openclaw");
+      const names = fs.readdirSync(backupsDir);
+      expect(names.some((n) => n.endsWith(".unverified"))).toBe(false);
+      expect(names.filter((n) => /^openclaw-backup-.*\.tar\.gz$/.test(n))).toHaveLength(2);
+      expect(result.body.hint).toMatch(/The newest surviving backup is/);
+      expect(result.body.reusableBackup).toEqual(expect.objectContaining({ file: seeded.file }));
+      expect(readRunBackupRecord(harness)).toEqual(expect.objectContaining({ noBackup: true }));
+    });
+
     it("never runs the reuse check for a non-retryable class (ENOSPC), even with a perfect candidate", async () => {
       const { runnerImpl, archiveToolCalls } = makeBackupRunner({
         script: [{ ok: false, tail: "Error: ENOSPC no space left on device\n" }],
@@ -2177,6 +2444,42 @@ describe("server/openclaw-channel-backup-retry", () => {
       const names = fs.readdirSync(backupsDir);
       expect(names).not.toContain("openclaw-backup-1-pinned00.tar.gz");
       expect(names.filter((n) => /^openclaw-backup-.*\.tar\.gz$/.test(n))).toHaveLength(3);
+    });
+  });
+
+  // ── Stale offline-copy temp dirs (crash/SIGTERM debris) ──────────────────
+  describe("stale .offline-copy-* temp dirs", () => {
+    it("sweeps a temp dir older than the offline-copy budget + slack; a fresh one (and a same-named plain file) survive", async () => {
+      const { runnerImpl } = makeBackupRunner({});
+      const harness = createHarness({ runnerImpl });
+      harness.nowRef.now = kRealisticNow;
+      const backupsDir = path.join(harness.rootDir, "backups", "openclaw");
+      const stale = path.join(backupsDir, ".offline-copy-4242-deadbeef");
+      const fresh = path.join(backupsDir, ".offline-copy-4243-cafef00d");
+      const notADir = path.join(backupsDir, ".offline-copy-note");
+      fs.mkdirSync(path.join(stale, "openclaw-backup-1-deadbeef", "state"), { recursive: true });
+      fs.writeFileSync(
+        path.join(stale, "openclaw-backup-1-deadbeef", "state", "openclaw.sqlite"),
+        "copied db\n",
+      );
+      fs.mkdirSync(fresh, { recursive: true });
+      fs.writeFileSync(notADir, "operator note\n");
+      const staleAt = new Date(
+        kRealisticNow - kOpenclawBackupOfflineCopyBudgetMs - kOpenclawBackupStaleTempDirSlackMs - 60_000,
+      );
+      fs.utimesSync(stale, staleAt, staleAt);
+      fs.utimesSync(notADir, staleAt, staleAt);
+      const freshAt = new Date(kRealisticNow - 1000);
+      fs.utimesSync(fresh, freshAt, freshAt);
+
+      const result = await harness.sync.applyUpdate(kHardGateTarget);
+
+      expect(result.status).toBe(202);
+      const names = fs.readdirSync(backupsDir).sort();
+      expect(names).not.toContain(".offline-copy-4242-deadbeef");
+      expect(names).toContain(".offline-copy-4243-cafef00d");
+      expect(names).toContain(".offline-copy-note");
+      expect(names.filter((n) => /^openclaw-backup-.*\.tar\.gz$/.test(n))).toHaveLength(1);
     });
   });
 
