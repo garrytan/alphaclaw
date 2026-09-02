@@ -5,6 +5,89 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.9.69] - 2026-09-02
+
+The incident overseer answers "what is happening?" in any watchdog state. The
+card's review button no longer refuses while the gateway is degraded or an
+incident is live — it produces a situation report from the current status, the
+live incident, the last 30 minutes of log (with the real coverage disclosed),
+doctor output, and recent incident history. Advisory only; the deterministic
+watchdog stays the only enforcement layer.
+
+### Changed
+- **Behavior change:** the Incident overseer card's "Review now" is now
+  "Review current situation" and ALWAYS produces a situation report — it no
+  longer re-reviews the newest settled incident. Re-review a specific settled
+  incident from its row in Incident history ("Review this incident"); the API
+  keeps its shape (`POST /api/watchdog/overseer/review` with `incidentId`).
+  The manual `not_steady_state` refusal is gone; an open incident requested by
+  id refuses with `incident_open` and points at the situation report.
+- A situation report never consumes the automatic review floor, so it cannot
+  postpone a settled incident's automatic review. The manual 2-minute rate
+  limit is stamped when evidence is actually sent — never on a refusal.
+- Settled-incident re-reviews can now run while the gateway is degraded or a
+  different incident is open; their prompt labels live sections "at review
+  time" instead of "post-incident" in that case.
+- The rate-limit refusal names the remaining wait ("try again in about 1m").
+- Incident-history rollups are enum-validated before riding the overseer's
+  trusted prompt tier; `abandonOpenIncidents` ignores overseer audit events
+  when back-dating an abandoned incident's terminal timestamp.
+
+### Added
+- `GET /api/watchdog/overseer/situation` — the card's 15s poll: `current`
+  (latest attempt), `lastVerdict` (most recent completed report, kept even
+  when later attempts fail), `nextManualAt`, `inFlight`. Allowlisted
+  projection; raw model transcripts never cross the API. Admin-manifest op
+  `watchdog.overseer.situation.read` (safe tier).
+- `watchdog_meta` table (additive, created at boot) holding the situation
+  slot; `lib/server/overseer-situation-slot.js` (stale `pending` self-heals
+  unconditionally at boot and after 10 minutes on read).
+- `overseer_review` watchdog events: every manual review attempt that reached
+  the reviewer (refusals included, one row per reason per 2-minute window)
+  leaves an append-only audit row (verdict or refusal reason, mode, duration),
+  stamped on the live incident a situation report looked at or the incident
+  re-reviewed — never on an unrelated active incident. The Events tab labels
+  them "Overseer review" with the verdict as the detail.
+- `POST /api/watchdog/overseer/review` returns `mode`, `record`, `persisted`;
+  a report that ran but could not be saved is still returned (200 with a
+  `warning: { code: "persist_failed", message }` envelope). Rate-limit refusals
+  (429) carry a `Retry-After` header.
+- `readLogTailInfo` in the log writer reports whether the byte tail was cut at
+  the front; situation reports disclose real log coverage ("covers
+  08:04–08:21, 412 lines (tail did not reach the window start)").
+- Card: scope line under the button, evidence provenance line, a "situation
+  changed since this report" delta line (verdict badge turns neutral, CTAs
+  hide), inline status line instead of error toasts, elapsed time while a
+  report runs, a rate-limit countdown, kind label, and a one-click swap between
+  the situation report and the latest post-incident review.
+- `inFlight` on the situation endpoint is a typed object
+  (`{ kind: "situation" | "incident" | "automatic", incidentId, startedAt }`,
+  `null` when idle). The card shows "Reviewing…" only for a situation report;
+  any other holder of the review mutex disables the button with the reason
+  ("Automatic review of incident #7 in progress"). The incident-row action
+  honors the same mutex and the shared 2-minute rate limit (countdown title).
+- Review failures cross the API with their own codes: `spawn_failed` (502) and
+  `timed_out` (504) instead of a generic `review_failed` (500).
+- Situation-report evidence carries `windowMs` and `logCapped`; the card's
+  evidence line discloses the 64k evidence cap ("newest 64k chars").
+
+### Fixed
+- Clicking the overseer's review button while the gateway was degraded (the
+  moment an operator most wants a read) surfaced "Reviews only run once the
+  gateway is healthy with no open incident" instead of a report.
+- A model-driven CTA (`action_needed`) is hidden while the watchdog's own
+  repair ladder is mid-operation, and a routine `phase` flip no longer marks a
+  fresh report as "changed since" (it flips on every retry tick).
+- The situation prompt's live-incident block is trimmed whole events at a time
+  to fit its cap, so "latest N of M events" is the N the model received; a log
+  window cut by the evidence cap says "front cut to the evidence cap" instead
+  of "log begins".
+- Refusal audit rows dedupe per target (mode + incident), so a refused
+  situation report no longer swallows the audit trail of a refused re-review;
+  a situation report that crashes still leaves a `failed` audit row.
+- The card reports "Connection lost" only for real fetch network errors, not
+  for any `TypeError` thrown by client code.
+
 ## [0.9.68] - 2026-09-01
 
 Reasonable health-check cadence while the gateway is degraded: the retry loop
