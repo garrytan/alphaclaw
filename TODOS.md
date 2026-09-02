@@ -54,6 +54,12 @@
 - **Context:** lib/server/overseer-situation-slot.js, `persistOverseer`/`readOverseerRecord` in lib/server/watchdog-overseer.js, lib/server/db/watchdog/index.js (`updateIncidentOverseer`, `getOverseerSituation`/`setOverseerSituation`), the incidents list slimming in `slimIncidentForList`.
 - **Effort:** M. **Depends on:** a third review kind.
 
+## P3 — Project the incident detail's `overseer` blob through the API allowlist (2026-09-02, from the overseer-anytime wave)
+- **What:** `GET /api/watchdog/incidents/:id` returns `overseer_json` verbatim, including `current.transcriptTail` (scrubbed, but server-only by design) and `history`. Run `current`/`lastVerdict` through `projectRecordForApi` the way the situation slot's `GET /api/watchdog/overseer/situation` already does, and drop `history` unless the incidents card turns out to read it.
+- **Why:** Pre-existing on main (#19). The v0.9.69 independent review flagged the inconsistency once the situation slot shipped an allowlisted projection: two overseer records, two exposure rules. Not changed in that PR because the endpoint's shape predates the 7-day window and the card's history use was not audited.
+- **Context:** lib/server/routes/watchdog.js (`GET /api/watchdog/incidents/:id`), `projectRecordForApi` in lib/server/overseer-situation-slot.js, `slimIncidentForList` in lib/server/db/watchdog/index.js, lib/public/js/components/watchdog-tab/incidents/.
+- **Effort:** S. **Depends on:** confirming no UI reader of `overseer.history` / `transcriptTail`.
+
 ## P3 — Watchdog tab design-system pass via /design-consultation (2026-09-02, from the overseer-anytime wave)
 - **What:** Decide tab-wide: inset report blocks (`ac-surface-inset` nested inside cards — both overseer cards, degraded card) vs a `border-t` divider; a 16px-minimum body type scale for dense ops cards vs today's `text-xs`/`text-sm`; an explicit `--font-sans` on the app root.
 - **Why:** The v0.9.69 design review's outside voice hard-rejected the nested report card and the sub-16px body copy against universal app-UI rules; the independent designer accepted both as the house pattern. Kept for consistency in that PR — a one-card divergence is worse than either choice — but the system-level decision is still open.

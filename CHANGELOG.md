@@ -87,6 +87,11 @@ watchdog stays the only enforcement layer.
   a situation report that crashes still leaves a `failed` audit row.
 - The card reports "Connection lost" only for real fetch network errors, not
   for any `TypeError` thrown by client code.
+- The situation slot never rebuilds its record over a read that THREW (lock
+  contention, I/O): the write is refused, the report stays ephemeral with the
+  `persist_failed` warning, and the stored verdict and history survive. A
+  corrupt blob is still replaced by the next write. The spawn error string in
+  a failed review's summary now passes through the secret scrubber.
 
 ## [0.9.68] - 2026-09-01
 
