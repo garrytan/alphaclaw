@@ -11,6 +11,7 @@ const {
   beginStateDbQuiet,
   releaseStateDbQuiet,
   isStateDbQuiet,
+  whenStateDbQuietReleased,
   getStateDbQuietState,
   enterStateDbHandle,
   exitStateDbHandle,
@@ -525,6 +526,96 @@ describe("server/state-db-quiet", () => {
       expect(error.code).toBe("backup_in_progress");
       expect(error.message).toBe(kBackupInProgressMessage);
       expect(new StateDbQuietError("custom").message).toBe("custom");
+    });
+  });
+
+  // Writers that already mutated something the barrier does not gate before
+  // their state-db half was refused (a deleted channel account's pairing
+  // rows, a redeemed one-use OAuth code) finish the write here — registered
+  // listeners' end() cannot serve them: endListeners() only reaches the
+  // entries recorded when begin() ran.
+  describe("whenStateDbQuietReleased", () => {
+    it("runs armed waiters exactly once on release, AFTER the listeners' end() (the stores are open again)", async () => {
+      const order = [];
+      onStateDbQuiet(makeListener("store", { end: vi.fn(() => order.push("end")) }));
+      const { token } = await beginStateDbQuiet({ owner: kOwner, maxMs: kMaxMs });
+      const waiter = vi.fn(() => order.push("waiter"));
+      whenStateDbQuietReleased(waiter);
+      expect(waiter).not.toHaveBeenCalled();
+
+      token.release();
+      expect(waiter).toHaveBeenCalledTimes(1);
+      expect(order).toEqual(["end", "waiter"]);
+      token.release();
+      expect(waiter).toHaveBeenCalledTimes(1);
+    });
+
+    it("runs on expiry as well — the writer is never stranded behind a barrier that timed out", async () => {
+      vi.useFakeTimers();
+      await beginStateDbQuiet({ owner: kOwner, maxMs: 1000 });
+      const waiter = vi.fn();
+      whenStateDbQuietReleased(waiter);
+      await vi.advanceTimersByTimeAsync(999);
+      expect(waiter).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(waiter).toHaveBeenCalledTimes(1);
+      expect(isStateDbQuiet()).toBe(false);
+    });
+
+    it("runs when a begin rolls back (owner abort) — armed while the barrier was still forming", async () => {
+      onStateDbQuiet(makeListener("slow", { begin: () => new Promise(() => {}) }));
+      const controller = new AbortController();
+      const pending = beginStateDbQuiet({
+        owner: kOwner,
+        maxMs: kMaxMs,
+        signal: controller.signal,
+      });
+      const waiter = vi.fn();
+      whenStateDbQuietReleased(waiter);
+      expect(waiter).not.toHaveBeenCalled();
+
+      controller.abort(new Error("owner deadline"));
+      await expect(pending).rejects.toThrow("owner deadline");
+      expect(waiter).toHaveBeenCalledTimes(1);
+      expect(isStateDbQuiet()).toBe(false);
+    });
+
+    it("runs on the next macrotask when no barrier is held, and a disarm cancels it", async () => {
+      const waiter = vi.fn();
+      whenStateDbQuietReleased(waiter);
+      expect(waiter).not.toHaveBeenCalled();
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(waiter).toHaveBeenCalledTimes(1);
+
+      const cancelled = vi.fn();
+      whenStateDbQuietReleased(cancelled)();
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(cancelled).not.toHaveBeenCalled();
+    });
+
+    it("a disarmed waiter never runs on release; a throwing waiter is reported and never starves the others", async () => {
+      const onEvent = vi.fn();
+      const { token } = await beginStateDbQuiet({ owner: kOwner, maxMs: kMaxMs, onEvent });
+      const disarmed = vi.fn();
+      whenStateDbQuietReleased(disarmed)();
+      whenStateDbQuietReleased(() => {
+        throw new Error("boom");
+      });
+      const survivor = vi.fn();
+      whenStateDbQuietReleased(survivor);
+
+      token.release();
+      expect(disarmed).not.toHaveBeenCalled();
+      expect(survivor).toHaveBeenCalledTimes(1);
+      expect(eventsOf(onEvent, "release_waiter_error")).toEqual([
+        expect.objectContaining({ kind: kStateDbQuietEventKind, error: "boom" }),
+      ]);
+      expect(eventsOf(onEvent, "released")).toHaveLength(1);
+    });
+
+    it("requires a function", () => {
+      expect(() => whenStateDbQuietReleased(null)).toThrow(TypeError);
+      expect(() => whenStateDbQuietReleased("later")).toThrow(TypeError);
     });
   });
 

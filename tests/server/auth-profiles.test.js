@@ -963,6 +963,21 @@ describe("server/auth-profiles state-DB quiet period", () => {
     expect(ap.getProfile("openai:default").key).toBe("sk-new");
   });
 
+  // R8: routes whose response shape cannot carry the lenient read's marker
+  // (getCodexProfile() → null reads as "disconnected") ask this in-memory
+  // question instead — no fs/sqlite behind it.
+  it("getAuthStoreAvailability is the in-memory unavailable marker while the barrier holds", async () => {
+    expect(ap.getAuthStoreAvailability()).toEqual({ unavailable: false, reason: null });
+    ({ token } = await beginStateDbQuiet({ owner: "backup", maxMs: 60_000 }));
+    expect(ap.getAuthStoreAvailability()).toEqual({
+      unavailable: true,
+      reason: "backup_in_progress",
+    });
+    token.release();
+    token = null;
+    expect(ap.getAuthStoreAvailability()).toEqual({ unavailable: false, reason: null });
+  });
+
   it("the agent-db writer arms busy_timeout = 3000 (parity with the state-db writer)", () => {
     createAgentDb();
     const execSpy = vi.spyOn(DatabaseSync.prototype, "exec");
