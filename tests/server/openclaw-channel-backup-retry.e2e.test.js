@@ -106,7 +106,12 @@ const makeBackupRunner = ({
   const runnerImpl = async (opts) => {
     const archiveTool = answerArchiveTool(opts, manifestTail === undefined ? {} : { manifestTail });
     if (archiveTool) {
-      archiveToolCalls.push({ command: opts.command, args: opts.args, timeoutMs: opts.timeoutMs });
+      archiveToolCalls.push({
+        command: opts.command,
+        args: opts.args,
+        timeoutMs: opts.timeoutMs,
+        tailBytes: opts.tailBytes,
+      });
       return onArchiveTool?.(opts) ?? archiveTool;
     }
     if (opts.command === "openclaw" && opts.args?.[0] === "backup") {
@@ -1759,9 +1764,11 @@ describe("server/openclaw-channel-backup-retry", () => {
         "-xzOf",
         record.file,
         "--wildcards",
+        "--no-wildcards-match-slash",
         "--occurrence=1",
         "*/manifest.json",
       ]);
+      expect(archiveToolCalls[1].tailBytes).toBe(16 * 1024 * 1024);
     });
   });
 

@@ -624,7 +624,54 @@ describe("server/openclaw-backup-offline-copy", () => {
       expect(verdict.ok).toBe(true);
     });
 
-    it("stops the manifest extraction at the first match (--occurrence=1) and still gzip-tests the whole archive", async () => {
+    it("survives a workspace that ships its own manifest.json (real tar: only the depth-1 manifest is read)", async () => {
+      const args = makeCopyArgs();
+      // A Chrome-extension-style manifest inside the inline workspace — a
+      // bare `*/manifest.json` wildcard would match it too.
+      fs.mkdirSync(path.join(args.stateDir, "workspace", "ext"), { recursive: true });
+      fs.writeFileSync(
+        path.join(args.stateDir, "workspace", "ext", "manifest.json"),
+        JSON.stringify({ manifest_version: 3, name: "not ours" }),
+      );
+      await createOfflineCopy(args);
+      const verdict = await verifyArchiveManifest({
+        file: args.outputFile,
+        runCommand: realRunCommand,
+        requiredArchivePaths: ["state/openclaw.sqlite", "agents/main/agent/openclaw-agent.sqlite"],
+        stateDir: args.stateDir,
+      });
+      expect(verdict.ok).toBe(true);
+      expect(verdict.manifest.producer).toBe(kOfflineCopyProducer);
+    });
+
+    it("survives a busy install: a 400-session-file tree yields a manifest far larger than the runner's default 64 KB tail", async () => {
+      const args = makeCopyArgs();
+      const sessions = path.join(args.stateDir, "agents", "main", "sessions");
+      for (let i = 0; i < 400; i += 1) {
+        fs.writeFileSync(path.join(sessions, `session-${String(i).padStart(4, "0")}-${"x".repeat(24)}.jsonl`), "{}\n");
+      }
+      await createOfflineCopy(args);
+      const verdict = await verifyArchiveManifest({
+        file: args.outputFile,
+        runCommand: realRunCommand,
+        requiredArchivePaths: ["state/openclaw.sqlite", "agents/main/agent/openclaw-agent.sqlite"],
+        stateDir: args.stateDir,
+      });
+      expect(verdict.ok).toBe(true);
+      expect(verdict.manifest.assets.length).toBeGreaterThan(400);
+    });
+
+    it("rejects a manifest without a numeric schemaVersion even when assets[] is present", async () => {
+      const verdict = await verifyArchiveManifest({
+        file: "/x.tar.gz",
+        runCommand: scriptedManifest({ assets: [{ kind: "state", sourcePath: "/data/.openclaw", archivePath: "r/payload/posix/data/.openclaw" }] }),
+        requiredArchivePaths: ["state/openclaw.sqlite"],
+        stateDir: "/data/.openclaw",
+      });
+      expect(verdict).toEqual(expect.objectContaining({ ok: false, stage: "parse" }));
+    });
+
+    it("stops the manifest extraction at the first depth-1 match and still gzip-tests the whole archive", async () => {
       const calls = [];
       await verifyArchiveManifest({
         file: "/x.tar.gz",
@@ -638,7 +685,15 @@ describe("server/openclaw-backup-offline-copy", () => {
         stateDir: "/data/.openclaw",
       });
       expect(calls[0]).toEqual(expect.objectContaining({ command: "gzip", args: ["-t", "/x.tar.gz"] }));
-      expect(calls[1].args).toEqual(["-xzOf", "/x.tar.gz", "--wildcards", "--occurrence=1", "*/manifest.json"]);
+      expect(calls[1].args).toEqual([
+        "-xzOf",
+        "/x.tar.gz",
+        "--wildcards",
+        "--no-wildcards-match-slash",
+        "--occurrence=1",
+        "*/manifest.json",
+      ]);
+      expect(calls[1].tailBytes).toBe(16 * 1024 * 1024);
     });
 
     it("rejects a manifest whose assets cover none of the databases (config-only archive, foreign state dir)", async () => {
@@ -687,7 +742,11 @@ describe("server/openclaw-backup-offline-copy", () => {
       expect(parse).toEqual(expect.objectContaining({ stage: "parse" }));
       const assets = await verifyArchiveManifest({
         file: "/x",
-        runCommand: scripted(true, true, JSON.stringify({ assets: [{ archivePath: "openclaw.json" }] })),
+        runCommand: scripted(
+          true,
+          true,
+          JSON.stringify({ schemaVersion: 1, assets: [{ archivePath: "openclaw.json" }] }),
+        ),
         requiredArchivePaths: ["state/openclaw.sqlite"],
       });
       expect(assets).toEqual(
