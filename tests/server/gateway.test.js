@@ -110,6 +110,13 @@ describe("server/gateway restart behavior", () => {
     // openclaw processes; a developer's own gateway must never leak into a
     // drill's pid evidence. Tests that need pids override this spy.
     vi.spyOn(lockContention, "listLiveOpenclawProcesses").mockReturnValue([]);
+    // Hermetic by default (C13): a managed launch fires the `gateway stop
+    // --help` capability probe through execFile; gateway.js binds execFile at
+    // require time, so a fresh require in a test that never installed its own
+    // mock would run the REAL pinned openclaw CLI, unawaited, outliving the
+    // test. Tests that need a specific probe answer install their own mock
+    // before their require (afterEach restores the real one).
+    childProcess.execFile = execFileOk("");
   });
 
   afterEach(() => {
@@ -2917,6 +2924,42 @@ describe("server/gateway restart behavior", () => {
   });
 
   describe("capability-gated `gateway stop --force` and stop honesty (WI-5.1)", () => {
+    // C13: the managed launch primes the probe (fire-and-forget) so a later
+    // stop — including the 5 s shutdown budget — consults the cache instead
+    // of spending its budget on `gateway stop --help`.
+    it("a managed launch warms the --force capability probe exactly once; the later shutdown stop consults the cache", async () => {
+      const child = createChild();
+      childProcess.spawn = vi.fn(() => child);
+      childProcess.execSync = vi.fn(() => "");
+      const calls = [];
+      childProcess.execFile = vi.fn((file, args, opts, cb) => {
+        calls.push(args);
+        if (isStopHelpProbe(args)) return cb(null, kStopHelpWithForce, "");
+        return cb(null, "", "");
+      });
+      fs.existsSync = vi.fn(() => true);
+      net.createConnection = vi.fn(() => createSocket(false));
+      delete require.cache[modulePath];
+      const gateway = require(modulePath);
+      vi.spyOn(console, "log").mockImplementation(() => {});
+      fs.readFileSync = vi.fn(() =>
+        JSON.stringify({
+          agents: { defaults: { model: { primary: "openai/gpt-5.1-codex" } } },
+        }),
+      );
+
+      await gateway.startGateway();
+      expect(childProcess.spawn).toHaveBeenCalledTimes(1);
+      // The warm-up is not awaited by the launch; let it settle.
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(calls).toEqual([["gateway", "stop", "--help"]]);
+
+      await gateway.stopGatewayForShutdown();
+      // No second probe: the cached answer drove the --force stop.
+      expect(calls.filter(isStopHelpProbe)).toHaveLength(1);
+      expect(calls.at(-1)).toEqual(["gateway", "stop", "--force"]);
+    });
+
     it("appends --force to managed stops only when the installed CLI advertises it, probing once per version", async () => {
       const calls = [];
       childProcess.execFile = vi.fn((file, args, opts, cb) => {
@@ -3090,6 +3133,82 @@ describe("server/gateway restart behavior", () => {
   });
 
   describe("incumbent-aware cold restart (WI-5.2)", () => {
+    // C12: the pid snapshot used to take the human-evidence scan (12
+    // openclaw-ish entries, ascending pid) and filter for gateways AFTER the
+    // cap — on a busy host the newest pids (the swapped-in gateway) fell off
+    // and a real swap with no port-down sample was recorded incumbent.
+    it("the gateway pid snapshot filters inside the scan and is uncapped: 14 openclaw-ish processes with the new gateway at the highest pid still prove pid replacement", async () => {
+      vi.useFakeTimers();
+      try {
+        const doctors = Array.from({ length: 12 }, (_, i) => ({
+          pid: 100 + i,
+          argv: ["node", "/app/node_modules/openclaw/dist/entry.js", "doctor", "--json"],
+        }));
+        let oldGatewayAlive = true;
+        const procTable = () => [
+          ...doctors,
+          ...(oldGatewayAlive
+            ? [{ pid: 777, argv: ["node", "/app/node_modules/openclaw/dist/entry.js", "gateway", "run"] }]
+            : [{ pid: 5000, argv: ["openclaw", "gateway", "--force"] }]),
+        ];
+        // Honors match/limit exactly like the real /proc scan (see the
+        // openclaw-lock-contention unit pins): pid order, cap AFTER match.
+        lockContention.listLiveOpenclawProcesses.mockImplementation(
+          ({ match = null, limit = 12 } = {}) => {
+            const found = [];
+            for (const proc of procTable()) {
+              if (typeof match === "function" && !match(proc.argv)) continue;
+              found.push({ pid: proc.pid, cmdline: proc.argv.join(" ") });
+              if (found.length >= limit) break;
+            }
+            return found;
+          },
+        );
+        const stampSpy = vi.spyOn(autotune, "stampGatewayEnvApplied").mockReturnValue(null);
+        const supervisor = { ...createChild(), pid: 5000 };
+        childProcess.spawn = vi.fn(() => supervisor);
+        childProcess.execFile = vi.fn((file, args, opts, cb) => {
+          if (isStopHelpProbe(args)) return cb(null, kStopHelpWithForce, "");
+          if (args?.[0] === "gateway" && args?.[1] === "stop") {
+            // The swap happens between two port polls: no down sample ever.
+            oldGatewayAlive = false;
+            return cb(null, "", "");
+          }
+          return cb(null, "", "");
+        });
+        fs.existsSync = vi.fn(() => false);
+        net.createConnection = vi.fn(() => createSocket(true));
+        delete require.cache[modulePath];
+        const gateway = require(modulePath);
+        vi.spyOn(console, "log").mockImplementation(() => {});
+        vi.spyOn(console, "warn").mockImplementation(() => {});
+
+        const pending = gateway.restartGateway(vi.fn()).then(
+          (value) => ({ value }),
+          (error) => ({ error }),
+        );
+        await vi.advanceTimersByTimeAsync(16000);
+        const settled = await pending;
+
+        expect(settled.error).toBeUndefined();
+        expect(settled.value).toMatchObject({ ok: true });
+        expect(stampSpy).toHaveBeenCalledTimes(1);
+        // The snapshot asked the scan for gateways only, uncapped.
+        expect(lockContention.listLiveOpenclawProcesses).toHaveBeenCalledWith(
+          expect.objectContaining({ match: expect.any(Function), limit: Infinity }),
+        );
+        const { match } = lockContention.listLiveOpenclawProcesses.mock.calls.find(
+          ([opts]) => typeof opts?.match === "function",
+        )[0];
+        expect(match(["openclaw", "gateway", "--force"])).toBe(true);
+        expect(match(["node", "/app/node_modules/openclaw/dist/entry.js", "gateway", "run"])).toBe(true);
+        expect(match(["/opt/x/openclaw-gateway"])).toBe(true);
+        expect(match(["openclaw", "doctor", "--json"])).toBe(false);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     const evidence = ({ stopConfirmed, wasRunningBefore, preStopPids = [] }) => ({
       stopConfirmed,
       wasRunningBefore,
@@ -3848,8 +3967,11 @@ describe("server/gateway restart behavior", () => {
         "REAL exec: a `#!/bin/sh` hook runs through /proc/<pid>/fd/<fd> with the minimal env",
         async () => {
           // Real realpath/open/fstat/execFile — only the owner uid is pinned
-          // (a non-root test user cannot create a root-owned file).
+          // (a non-root test user cannot create a root-owned file). The
+          // describe-level hermetic execFile mock is undone here on purpose:
+          // this pin exists to run the real binary.
           pinFstatUid(0);
+          childProcess.execFile = originalExecFile;
           fs.writeFileSync(
             hookFile,
             '#!/bin/sh\necho "hook-ran home=$HOME keys=$(env | wc -l)"\nexit 0\n',

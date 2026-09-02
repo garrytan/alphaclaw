@@ -1694,4 +1694,58 @@ describe("server/routes/pairings sqlite reject", () => {
       .send({ channel: "telegram" });
     expect(after.status).toBe(200);
   });
+
+  // C17: the documented contract ("pairing approvals answer 409
+  // backup_in_progress") was only true for reject (a direct state-db write).
+  // Approve and the device approve/reject paths are CLI shell-outs that open
+  // the state DB — exactly the live traffic the barrier suppresses — so they
+  // refuse BEFORE spawning.
+  it("pairing approve and device approve/reject answer 409 backup_in_progress while quiet and never spawn the CLI", async () => {
+    const {
+      beginStateDbQuiet,
+      resetStateDbQuietForTests,
+    } = require("../../lib/server/state-db-quiet");
+    resetStateDbQuietForTests();
+    const clawCmd = vi.fn(async () => ({ ok: true, stdout: "{}", stderr: "" }));
+    const app = createApp({
+      clawCmd,
+      isOnboarded: () => true,
+      fsModule: sqliteEraFsModule(),
+    });
+    const quietBody = {
+      ok: false,
+      code: "backup_in_progress",
+      error: "A backup is in progress; retry in about two minutes.",
+    };
+    const { token } = await beginStateDbQuiet({ owner: "backup", maxMs: 60_000 });
+    try {
+      const approve = await request(app)
+        .post("/api/pairings/ABCD1234/approve")
+        .send({ channel: "telegram" });
+      expect(approve.status).toBe(409);
+      expect(approve.headers["retry-after"]).toBe("120");
+      expect(approve.body).toEqual(quietBody);
+
+      const deviceApprove = await request(app).post("/api/devices/req-1/approve");
+      expect(deviceApprove.status).toBe(409);
+      expect(deviceApprove.headers["retry-after"]).toBe("120");
+      expect(deviceApprove.body).toEqual(quietBody);
+
+      const deviceReject = await request(app).post("/api/devices/req-1/reject");
+      expect(deviceReject.status).toBe(409);
+      expect(deviceReject.headers["retry-after"]).toBe("120");
+      expect(deviceReject.body).toEqual(quietBody);
+
+      expect(clawCmd).not.toHaveBeenCalled();
+    } finally {
+      token.release();
+      resetStateDbQuietForTests();
+    }
+    // Released: approve reaches the CLI.
+    const after = await request(app)
+      .post("/api/pairings/ABCD1234/approve")
+      .send({ channel: "telegram" });
+    expect(after.status).toBe(200);
+    expect(clawCmd).toHaveBeenCalledWith("pairing approve 'telegram' 'ABCD1234'");
+  });
 });

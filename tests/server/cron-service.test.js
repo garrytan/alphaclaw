@@ -1380,4 +1380,49 @@ describe("server/cron-service state-DB quiet period", () => {
       fs.rmSync(openclawDir, { recursive: true, force: true });
     }
   });
+
+  // C11: while quiet the prompt-edit flag lookup ran against the jobs.json
+  // fallback, so a sqlite-only job answered "unknown cron job id" — false.
+  // Every cron mutator is a gateway RPC and the gateway is stopped for the
+  // whole quiet period: they all answer StateDbQuietError, before any spawn.
+  it("cron mutators throw StateDbQuietError while quiet (nothing spawns) and go through after release", async () => {
+    const { StateDbQuietError } = require("../../lib/server/state-db-quiet");
+    const openclawDir = createOpenclawDirWithRawStore(null);
+    addSqliteCronStore(openclawDir, [sqliteJob]);
+    try {
+      const clawCmd = vi.fn(async () => ({ ok: true, stdout: "{}" }));
+      const cronService = makeService(openclawDir, { clawCmd });
+      const { token } = await beginStateDbQuiet({ owner: "backup", maxMs: 60_000 });
+      try {
+        await expect(
+          cronService.updateJobPrompt({ jobId: "sqlite-job", message: "edited" }),
+        ).rejects.toBeInstanceOf(StateDbQuietError);
+        await expect(cronService.runJobNow("sqlite-job")).rejects.toBeInstanceOf(
+          StateDbQuietError,
+        );
+        await expect(
+          cronService.setJobEnabled({ jobId: "sqlite-job", enabled: false }),
+        ).rejects.toBeInstanceOf(StateDbQuietError);
+        await expect(
+          cronService.updateJobRouting({
+            jobId: "sqlite-job",
+            sessionTarget: "isolated",
+            wakeMode: "now",
+            deliveryMode: "announce",
+            deliveryChannel: "telegram",
+          }),
+        ).rejects.toBeInstanceOf(StateDbQuietError);
+        expect(clawCmd).not.toHaveBeenCalled();
+      } finally {
+        token.release();
+      }
+      // Released: the sqlite-era job resolves its flag and the edit runs.
+      await cronService.updateJobPrompt({ jobId: "sqlite-job", message: "edited" });
+      expect(clawCmd).toHaveBeenCalledTimes(1);
+      expect(clawCmd.mock.calls[0][0]).toContain("cron edit 'sqlite-job' --message 'edited'");
+    } finally {
+      closeCronStoreDb();
+      fs.rmSync(openclawDir, { recursive: true, force: true });
+    }
+  });
 });

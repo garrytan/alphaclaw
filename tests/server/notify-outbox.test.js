@@ -485,6 +485,96 @@ describe("server/notify-outbox", () => {
       expect(insertEvent).toHaveBeenCalledTimes(1);
     });
 
+    // C9: a terminal abandonment happens after ONE attempt, so a stable-id
+    // repeat notice (the daily `alphaclaw-update-<version>`) that hit a
+    // blocked bot must not stay silenced forever once the operator fixes the
+    // channel — a fresh same-id enqueue revives the tombstone (attempts
+    // reset), and if still blocked it costs one more honest abandonment.
+    it("a fresh same-id enqueue revives a TERMINAL-abandoned tombstone: new attempt, delivered once the channel works", async () => {
+      const logger = { log: vi.fn(), warn: vi.fn(), error: vi.fn() };
+      const insertEvent = vi.fn();
+      const { outbox, nowRef } = makeOutbox({ logger, insertEvent });
+      const stable = { id: "alphaclaw-update-1.2.3", message: "update available", eventType: "info" };
+      outbox.enqueue(stable);
+      const blocked = vi.fn(async () => ({
+        ok: false,
+        reason: "no_channels_delivered",
+        failures: [kBlocked],
+        terminal: true,
+      }));
+      await outbox.flush({ deliver: blocked });
+      expect(outbox.listEvents()[0]).toMatchObject({
+        abandonedAt: nowRef.now,
+        abandonedTerminal: true,
+        attempts: 1,
+      });
+
+      // Next day: the daily re-notify enqueues the same id — still blocked →
+      // one more attempt and one more abandonment (honest, never a storm).
+      nowRef.now += 24 * 60 * 60 * 1000;
+      outbox.enqueue(stable);
+      expect(outbox.listEvents()).toHaveLength(1);
+      expect(outbox.listEvents()[0]).toMatchObject({ abandonedAt: null, attempts: 0 });
+      await outbox.flush({ deliver: blocked });
+      expect(blocked).toHaveBeenCalledTimes(2);
+      expect(insertEvent).toHaveBeenCalledTimes(2);
+      expect(logger.error).toHaveBeenCalledTimes(2);
+
+      // Operator unblocks the bot; the next day's enqueue delivers.
+      nowRef.now += 24 * 60 * 60 * 1000;
+      outbox.enqueue(stable);
+      const ok = vi.fn(async () => ({ ok: true }));
+      const result = await outbox.flush({ deliver: ok });
+      expect(result.delivered).toBe(1);
+      expect(outbox.listEvents()[0]).toMatchObject({
+        deliveredAt: nowRef.now,
+        abandonedAt: null,
+        abandonedTerminal: false,
+      });
+      // Delivered: a further same-id enqueue is the plain dedupe again.
+      outbox.enqueue(stable);
+      await outbox.flush({ deliver: ok });
+      expect(ok).toHaveBeenCalledTimes(1);
+    });
+
+    it("a 48h age-out tombstone (terminal:false) stays deduped on a same-id enqueue", async () => {
+      const insertEvent = vi.fn();
+      const { outbox, nowRef } = makeOutbox({ insertEvent });
+      outbox.enqueue({ id: "e1", message: "msg" });
+      nowRef.now += 48 * 60 * 60 * 1000 + 1;
+      await outbox.flush({ deliver: vi.fn(async () => ({ ok: false, reason: "down" })) });
+      expect(outbox.listEvents()[0]).toMatchObject({
+        abandonedAt: nowRef.now,
+        abandonedTerminal: false,
+      });
+      outbox.enqueue({ id: "e1", message: "msg" });
+      expect(outbox.listEvents()[0].abandonedAt).toBe(nowRef.now);
+      const deliver = vi.fn(async () => ({ ok: true }));
+      await outbox.flush({ deliver });
+      expect(deliver).not.toHaveBeenCalled();
+      expect(insertEvent).toHaveBeenCalledTimes(1);
+    });
+
+    it("an old outbox file without abandonedTerminal loads as an age-out tombstone (deduped, never revived)", () => {
+      const { outbox, openclawDir } = makeOutbox();
+      const outboxPath = path.join(openclawDir, ".alphaclaw", "notify-outbox.json");
+      fs.mkdirSync(path.dirname(outboxPath), { recursive: true });
+      fs.writeFileSync(
+        outboxPath,
+        JSON.stringify({
+          events: [
+            { id: "legacy", message: "m", eventType: "info", createdAt: 1, abandonedAt: 2 },
+          ],
+        }),
+      );
+      // listEvents is the raw file: the marker is simply absent on old files,
+      // and an absent marker means "age-out semantics" — no revival.
+      expect(outbox.listEvents()[0].abandonedTerminal).toBeUndefined();
+      outbox.enqueue({ id: "legacy", message: "m", eventType: "info" });
+      expect(outbox.listEvents()[0].abandonedAt).toBe(2);
+      expect(outbox.listEvents()).toHaveLength(1);
+    });
+
     it("the 48h age-out still labels its abandonment terminal:false", async () => {
       const insertEvent = vi.fn();
       const { outbox, nowRef } = makeOutbox({ insertEvent });

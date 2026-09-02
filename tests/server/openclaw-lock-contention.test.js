@@ -62,6 +62,51 @@ describe("listLiveOpenclawProcesses", () => {
       }),
     ).toEqual([]);
   });
+
+  // C12: /proc lists pids ascending, so the default 12-entry cap over every
+  // openclaw-ish process drops the NEWEST pids — the just-spawned gateway a
+  // restart verdict needs. `match` narrows before the cap; `limit` lifts it.
+  describe("14 openclaw-ish processes with the gateways at the highest pids", () => {
+    const table = {};
+    // 12 lower-pid one-shot CLI children (doctor/status/tools under the
+    // openclaw package) fill the default cap on a busy host.
+    for (let i = 0; i < 12; i += 1) {
+      table[String(100 + i)] = {
+        cmdline: `node\0/app/node_modules/openclaw/dist/entry.js\0doctor\0--json\0`,
+      };
+    }
+    table["5000"] = { cmdline: "openclaw\0gateway\0--force\0" };
+    table["5001"] = { cmdline: "node\0/app/node_modules/openclaw/dist/entry.js\0gateway\0run\0" };
+    const isGatewayArgv = (argv) => /(^|\s)gateway(\s|$)/.test(argv.join(" "));
+
+    it("the default (human evidence) scan stays capped at 12 and misses both gateways", () => {
+      const live = listLiveOpenclawProcesses({ ...fakeProc(table), selfPid: 1 });
+      expect(live).toHaveLength(12);
+      expect(live.map((p) => p.pid)).not.toContain(5000);
+      expect(live.map((p) => p.pid)).not.toContain(5001);
+    });
+
+    it("`match` filters BEFORE the cap so the gateway pids are found under the default cap", () => {
+      const live = listLiveOpenclawProcesses({
+        ...fakeProc(table),
+        selfPid: 1,
+        match: isGatewayArgv,
+      });
+      expect(live.map((p) => p.pid).sort()).toEqual([5000, 5001]);
+    });
+
+    it("`limit: Infinity` lifts the cap; a junk limit falls back to the default", () => {
+      expect(
+        listLiveOpenclawProcesses({ ...fakeProc(table), selfPid: 1, limit: Infinity }),
+      ).toHaveLength(14);
+      expect(
+        listLiveOpenclawProcesses({ ...fakeProc(table), selfPid: 1, limit: "all" }),
+      ).toHaveLength(12);
+      expect(
+        listLiveOpenclawProcesses({ ...fakeProc(table), selfPid: 1, limit: 3 }),
+      ).toHaveLength(3);
+    });
+  });
 });
 
 describe("describeLockContention", () => {

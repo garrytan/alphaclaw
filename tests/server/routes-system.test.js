@@ -116,7 +116,12 @@ const createSystemDeps = () => {
     },
     OPENCLAW_DIR: "/tmp/openclaw",
     ensureGatewayProxyConfig: vi.fn(() => false),
-    getBaseUrl: vi.fn(() => "https://setup.example.com"),
+    // Req-shaped like the production helper (helpers.js getBaseUrl reads
+    // req.headers): a caller that forgets the request dereferences undefined
+    // here exactly as it would in production, instead of passing silently.
+    getBaseUrl: vi.fn(
+      (req) => `https://${req.headers["x-forwarded-host"] || "setup.example.com"}`,
+    ),
     kAlphaclawGithubReleasesBaseUrl:
       "https://api.github.com/repos/garrytan/alphaclaw/releases",
   };
@@ -3334,6 +3339,133 @@ describe("server/routes/system", () => {
     );
   });
 
+  // C01: the notification used to call the req-shaped getBaseUrl() with no
+  // request from the async tail — a TypeError in production (no link, no
+  // notification, an unhandled rejection). The base URL is resolved in the
+  // handler and a resolver failure costs only the link.
+  it("the incumbent notification's View-logs link is request-derived; a throwing getBaseUrl drops the link, never the notification", async () => {
+    const deps = createSystemDeps();
+    deps.getBaseUrl = vi.fn(() => {
+      throw new TypeError("Cannot read properties of undefined (reading 'headers')");
+    });
+    deps.restartRequiredState.beginRestart = vi.fn(() => ({
+      operationId: "op-inc-nolink",
+      reasonsSnapshot: [],
+    }));
+    deps.restartRequiredState.completeRestart = vi.fn();
+    deps.watchdog = {
+      getStatus: vi.fn(() => ({})),
+      onExpectedRestart: vi.fn(),
+      onExpectedRestartSettled: vi.fn(),
+      recordOperationEvent: vi.fn(),
+    };
+    deps.notify = vi.fn(async () => ({ ok: true }));
+    deps.restartGateway = vi.fn(async () => {
+      throw new GatewayIncumbentRestartError(
+        "the previous gateway is still running: the gateway port never released after stop",
+        { wasRunningBefore: true, stopConfirmed: false },
+      );
+    });
+    const app = createApp(deps);
+
+    const res = await request(app)
+      .post("/api/gateway/restart")
+      .set("x-forwarded-host", "ops.example.net");
+
+    expect(res.status).toBe(500);
+    expect(res.body.error).toContain("Gateway restart did not take effect");
+    // The resolver saw the request (production shape), failed, and the
+    // notification still went out — without a link.
+    expect(deps.getBaseUrl).toHaveBeenCalledWith(expect.objectContaining({ headers: expect.any(Object) }));
+    expect(deps.notify).toHaveBeenCalledTimes(1);
+    const [message] = deps.notify.mock.calls[0];
+    expect(message).toContain("🔴 Gateway restart did not take effect\n");
+    expect(message).not.toContain("View logs");
+  });
+
+  it("the incumbent notification's View-logs link honors the request's forwarded host", async () => {
+    const deps = createSystemDeps();
+    deps.restartRequiredState.beginRestart = vi.fn(() => ({
+      operationId: "op-inc-fwd",
+      reasonsSnapshot: [],
+    }));
+    deps.restartRequiredState.completeRestart = vi.fn();
+    deps.watchdog = {
+      getStatus: vi.fn(() => ({})),
+      onExpectedRestart: vi.fn(),
+      onExpectedRestartSettled: vi.fn(),
+      recordOperationEvent: vi.fn(),
+    };
+    deps.notify = vi.fn(async () => ({ ok: true }));
+    deps.restartGateway = vi.fn(async () => {
+      throw new GatewayIncumbentRestartError("the previous gateway is still running", {
+        wasRunningBefore: true,
+        stopConfirmed: false,
+      });
+    });
+    const app = createApp(deps);
+
+    await request(app).post("/api/gateway/restart").set("x-forwarded-host", "ops.example.net");
+
+    expect(deps.notify).toHaveBeenCalledTimes(1);
+    expect(deps.notify.mock.calls[0][0]).toContain(
+      "[View logs](https://ops.example.net/#/watchdog)",
+    );
+  });
+
+  // C23: the structured evidence line rides on the STDERR side of the merge
+  // (stderr is merged last), so a noisy stderr ring cannot push it out of the
+  // tail-keeping 4000-char cap.
+  it("the incumbent evidence line survives the evidence cap under a >4000-char stderr tail", async () => {
+    const deps = createSystemDeps();
+    deps.restartRequiredState.beginRestart = vi.fn(() => ({
+      operationId: "op-inc-noisy",
+      reasonsSnapshot: [],
+    }));
+    deps.restartRequiredState.completeRestart = vi.fn();
+    deps.watchdog = {
+      getStatus: vi.fn(() => ({})),
+      onExpectedRestart: vi.fn(),
+      onExpectedRestartSettled: vi.fn(),
+      recordOperationEvent: vi.fn(),
+    };
+    deps.notify = vi.fn(async () => ({ ok: true }));
+    // 40 lines x 200 chars — what createStderrTail's 50x2KB ring can hold.
+    const noisyStderr = Array.from(
+      { length: 40 },
+      (_, i) => `gateway: warn ${String(i).padStart(3, "0")} ${"x".repeat(180)}`,
+    );
+    deps.restartGateway = vi.fn(async () => {
+      throw new GatewayIncumbentRestartError("the previous gateway is still running", {
+        wasRunningBefore: true,
+        stopConfirmed: false,
+        preStopPids: [777],
+        postReadyPids: [777],
+        newPids: [],
+        survivingPids: [777],
+        stderrTail: noisyStderr,
+        stdoutTail: ["gateway: stdout line"],
+      });
+    });
+    const app = createApp(deps);
+
+    const res = await request(app).post("/api/gateway/restart");
+
+    expect(res.status).toBe(500);
+    expect(res.body.evidence.length).toBeLessThanOrEqual(4000);
+    expect(res.body.evidence).toContain("incumbent evidence:");
+    expect(res.body.evidence).toContain('"survivingPids":[777]');
+    // The structured line is the LAST line of the tail.
+    expect(res.body.evidence.split("\n").at(-1)).toMatch(/^\[alphaclaw\] incumbent evidence: \{/);
+    expect(deps.restartRequiredState.completeRestart).toHaveBeenCalledWith(
+      expect.objectContaining({
+        operationId: "op-inc-noisy",
+        ok: false,
+        evidenceTail: expect.stringContaining('"survivingPids":[777]'),
+      }),
+    );
+  });
+
   // R4: the notification used to be awaited while the lifecycle lock and
   // restartInFlight were held — an outbox-unavailable direct send blocking on
   // channel I/O held the restart lock with it.
@@ -3756,7 +3888,7 @@ describe("server/routes/system agent-sessions micro-cache", () => {
 });
 
 describe("server/routes/system createSwrCache shouldRefresh", () => {
-  const { createSwrCache } = require("../../lib/server/routes/system");
+  const { createSwrCache } = require("../../lib/server/utils/swr-cache");
   const kTtlMs = 5000;
 
   beforeEach(() => {
