@@ -412,7 +412,7 @@ const kSoftGateTarget = { channel: "stable", version: "1.1.0" };
 const notifyMessages = (notify) =>
   notify.mock.calls.map(([message]) => String(message));
 
-const readRunBackupRecord = (harness) => {
+const readNewestRunRecord = (harness) => {
   const runsDir = path.join(harness.openclawDir, ".alphaclaw", "runs");
   const names = fs.readdirSync(runsDir);
   expect(names.length).toBeGreaterThan(0);
@@ -420,8 +420,9 @@ const readRunBackupRecord = (harness) => {
     JSON.parse(fs.readFileSync(path.join(runsDir, name), "utf8")),
   );
   records.sort((a, b) => (b.startedAt ?? 0) - (a.startedAt ?? 0));
-  return records[0].backup;
+  return records[0];
 };
+const readRunBackupRecord = (harness) => readNewestRunRecord(harness).backup;
 
 describe("server/openclaw-channel-backup-retry", () => {
   beforeEach(() => {
@@ -1937,6 +1938,9 @@ describe("server/openclaw-channel-backup-retry", () => {
       expect(result.status).toBe(202);
       const record = readRunBackupRecord(harness);
       expect(record.usableCheck).toBe("manifest_ok");
+      // The digest a later consented reuse binds to is recorded with the
+      // artifact, streamed over the file the usable check just passed.
+      expect(record.sha256).toBe(sha256Of(record.file));
       expect(archiveToolCalls.map((c) => c.command)).toEqual(["gzip", "tar"]);
       expect(archiveToolCalls[0].args).toEqual(["-t", record.file]);
       expect(archiveToolCalls[1].args).toEqual([
@@ -2004,14 +2008,24 @@ describe("server/openclaw-channel-backup-retry", () => {
       expect(result.status).toBe(409);
       expect(result.body.code).toBe("backup_failed");
       expect(backupCalls).toHaveLength(2);
-      expect(result.body.reusableBackup).toEqual({
+      const offer = {
         file: seeded.file,
         at: seeded.at,
         ageMs: 3 * kHour,
         sha256: seeded.sha256,
         producer: "openclaw",
-      });
-      expect(readRunBackupRecord(harness)).toEqual(expect.objectContaining({ noBackup: true }));
+      };
+      expect(result.body.reusableBackup).toEqual(offer);
+      // A real backup outlives the quick-result window, so the offer must also
+      // reach the resume poll (lastUpdateRun.result) and the run ledger.
+      expect(harness.store.readState().lastUpdateRun.result).toEqual(
+        expect.objectContaining({ ok: false, code: "backup_failed", reusableBackup: offer }),
+      );
+      const run = readNewestRunRecord(harness);
+      expect(run.result).toEqual(
+        expect.objectContaining({ ok: false, code: "backup_failed", reusableBackup: offer }),
+      );
+      expect(run.backup).toEqual(expect.objectContaining({ noBackup: true }));
       expect(eventsOfType(harness.insertEvent, "backup_reused")).toHaveLength(0);
       // The archive is untouched (fd-based verification never mutates it).
       expect(sha256Of(seeded.file)).toBe(seeded.sha256);
@@ -2335,7 +2349,9 @@ describe("server/openclaw-channel-backup-retry", () => {
       const stateFile = path.join(backupsDir, "openclaw-backup-107-statebk0.tar.gz");
       fs.writeFileSync(stateFile, "s\n");
       harness.store.updateState((s) => {
-        s.backups = [{ file: stateFile, verified: true, at: now - 107, producer: "openclaw" }];
+        s.backups = [
+          { file: stateFile, verified: true, at: now - 107, producer: "openclaw", sha256: "ab".repeat(32) },
+        ];
         return s;
       });
 
@@ -2365,8 +2381,12 @@ describe("server/openclaw-channel-backup-retry", () => {
           operationId: verifiedOp,
           sizeBytes: 2,
           at: now - 100,
+          // No digest on the record → null, never undefined (the UI keys on it
+          // to pre-fill consent).
+          sha256: null,
         }),
       );
+      expect(byName["openclaw-backup-107-statebk0.tar.gz"].sha256).toBe("ab".repeat(32));
       expect(byName["openclaw-backup-101-partial0.alphaclaw.tar.gz"]).toEqual(
         expect.objectContaining({ eligible: false, ineligibleReason: "partial", producer: "alphaclaw-offline-copy" }),
       );
