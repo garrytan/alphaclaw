@@ -7,6 +7,12 @@ const nodePath = require("path");
 const { EventEmitter } = require("events");
 
 const { registerSystemRoutes } = require("../../lib/server/routes/system");
+// The restart primitive's failure classes — thrown by gateway.js's cold
+// restart, caught by runRestartOperation by instanceof (same module instance).
+const {
+  GatewayRestartError,
+  GatewayIncumbentRestartError,
+} = require("../../lib/server/gateway");
 
 // readAlphaclawConfig serves identical re-reads from a module-level
 // mtime/size cache; a strictly increasing mtime per stat keeps every test
@@ -3157,21 +3163,18 @@ describe("server/routes/system", () => {
       fail: vi.fn(),
     };
     deps.notify = vi.fn(async () => ({ ok: true }));
-    // gateway.js's cold-start shape for a refused stop + surviving incumbent.
+    // gateway.js's cold-start outcome for a refused stop + surviving incumbent:
+    // THROWN as GatewayIncumbentRestartError (P1 review fix — it used to be a
+    // returned { ok:false, incumbent:true } that only this route understood).
     deps.restartGateway = vi.fn(async ({ onStep }) => {
       onStep({
         step: "stopping",
         status: "warning",
         detail: "openclaw gateway stop was refused by the CLI (non-interactive guard) and the old gateway still holds the port",
       });
-      return {
-        ok: false,
-        incumbent: true,
-        durationMs: 12,
-        downtimeMs: 15_000,
-        detail:
-          "the previous gateway is still running: the gateway port never released after stop (the OpenClaw CLI refused the non-interactive stop); 1 pre-restart gateway process(es) still alive (pid 777) and no new gateway process observed",
-        evidence: {
+      throw new GatewayIncumbentRestartError(
+        "the previous gateway is still running: the gateway port never released after stop (the OpenClaw CLI refused the non-interactive stop); 1 pre-restart gateway process(es) still alive (pid 777) and no new gateway process observed",
+        {
           wasRunningBefore: true,
           stopConfirmed: false,
           cliRefused: true,
@@ -3187,7 +3190,7 @@ describe("server/routes/system", () => {
           stdoutTail: [],
           supervisorExit: { code: 1, signal: null },
         },
-      };
+      );
     });
     const app = createApp(deps);
 
@@ -3310,12 +3313,12 @@ describe("server/routes/system", () => {
     deps.notify = vi.fn(async () => {
       throw new Error("telegram down");
     });
-    deps.restartGateway = vi.fn(async () => ({
-      ok: false,
-      incumbent: true,
-      detail: "the previous gateway is still running: the gateway port never released after stop",
-      evidence: { wasRunningBefore: true, stopConfirmed: false },
-    }));
+    deps.restartGateway = vi.fn(async () => {
+      throw new GatewayIncumbentRestartError(
+        "the previous gateway is still running: the gateway port never released after stop",
+        { wasRunningBefore: true, stopConfirmed: false },
+      );
+    });
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
     const app = createApp(deps);
 
@@ -3357,6 +3360,101 @@ describe("server/routes/system", () => {
     expect(deps.notify).not.toHaveBeenCalled();
     expect(deps.watchdog.recordOperationEvent).not.toHaveBeenCalledWith(
       expect.objectContaining({ kind: "restart_incumbent" }),
+    );
+  });
+
+  it("a plain GatewayRestartError (never ready) is a restart_failed, never classified incumbent", async () => {
+    const deps = createSystemDeps();
+    deps.restartRequiredState.beginRestart = vi.fn(() => ({
+      operationId: "op-never-ready",
+      reasonsSnapshot: [],
+    }));
+    deps.restartRequiredState.completeRestart = vi.fn();
+    deps.watchdog = {
+      getStatus: vi.fn(() => ({})),
+      onExpectedRestart: vi.fn(),
+      onExpectedRestartSettled: vi.fn(),
+      recordOperationEvent: vi.fn(),
+    };
+    deps.operationEvents = {
+      createOperation: vi.fn(),
+      publish: vi.fn(),
+      complete: vi.fn(),
+      fail: vi.fn(),
+    };
+    deps.notify = vi.fn(async () => ({ ok: true }));
+    deps.restartGateway = vi.fn(async () => {
+      throw new GatewayRestartError("Gateway did not become ready within 300s", {
+        stderrTail: ["boot: listen EADDRINUSE"],
+      });
+    });
+    const app = createApp(deps);
+
+    const res = await request(app).post("/api/gateway/restart");
+
+    expect(res.status).toBe(500);
+    expect(deps.operationEvents.fail).toHaveBeenCalledWith(
+      "op-never-ready",
+      expect.objectContaining({ code: "restart_failed" }),
+    );
+    expect(deps.notify).not.toHaveBeenCalled();
+    expect(deps.watchdog.recordOperationEvent).not.toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "restart_incumbent" }),
+    );
+    const failed = deps.watchdog.recordOperationEvent.mock.calls.find(
+      ([event]) => event.kind === "gateway_restart" && event.status === "failed",
+    );
+    expect(failed[0].details.reason).toBeUndefined();
+  });
+
+  it("contract guard: a restart primitive that RESOLVES ok:false (instead of throwing) is recorded as a failure, never as success", async () => {
+    // Nothing in gateway.js returns this shape any more (the incumbent
+    // verdict throws); if a future restart path regresses to a returned
+    // failure, the route must fail loudly rather than clear the banner and
+    // record gateway_restart:ok over a gateway that did not restart.
+    const deps = createSystemDeps();
+    deps.restartRequiredState.beginRestart = vi.fn(() => ({
+      operationId: "op-resolved-false",
+      reasonsSnapshot: ["env_vars_changed"],
+    }));
+    deps.restartRequiredState.completeRestart = vi.fn();
+    deps.watchdog = {
+      getStatus: vi.fn(() => ({})),
+      onExpectedRestart: vi.fn(),
+      onExpectedRestartSettled: vi.fn(),
+      recordOperationEvent: vi.fn(),
+    };
+    deps.operationEvents = {
+      createOperation: vi.fn(),
+      publish: vi.fn(),
+      complete: vi.fn(),
+      fail: vi.fn(),
+    };
+    deps.notify = vi.fn(async () => ({ ok: true }));
+    deps.restartGateway = vi.fn(async () => ({
+      ok: false,
+      detail: "legacy returned failure",
+    }));
+    const app = createApp(deps);
+
+    const res = await request(app).post("/api/gateway/restart");
+
+    expect(res.status).toBe(500);
+    expect(res.body.error).toContain("reported failure without throwing");
+    expect(res.body.error).toContain("legacy returned failure");
+    expect(deps.restartRequiredState.completeRestart).toHaveBeenCalledWith(
+      expect.objectContaining({ operationId: "op-resolved-false", ok: false }),
+    );
+    expect(deps.operationEvents.complete).not.toHaveBeenCalled();
+    expect(deps.operationEvents.fail).toHaveBeenCalledWith(
+      "op-resolved-false",
+      expect.objectContaining({ code: "restart_failed" }),
+    );
+    expect(deps.watchdog.recordOperationEvent).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "gateway_restart", status: "failed" }),
+    );
+    expect(deps.watchdog.recordOperationEvent).not.toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "gateway_restart", status: "ok" }),
     );
   });
 

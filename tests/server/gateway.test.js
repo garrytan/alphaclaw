@@ -2083,6 +2083,89 @@ describe("server/gateway restart behavior", () => {
       expect(opts.signal).toBeUndefined();
     });
 
+    // Real execFile with an ALREADY-aborted AbortSignal never spawns: it
+    // rejects at once with AbortError (no `killed`, empty output). The mocks
+    // below reproduce that so a probe still riding the module abort signal
+    // reads "unknown" — exactly the pre-fix failure.
+    const execFileHonoringAbort = (impl) =>
+      vi.fn((file, args, opts, cb) => {
+        if (opts?.signal?.aborted) {
+          const error = Object.assign(new Error("The operation was aborted"), {
+            name: "AbortError",
+            code: "ABORT_ERR",
+          });
+          return cb(error, "", "");
+        }
+        return impl(file, args, opts, cb);
+      });
+
+    it("stopGatewayForShutdown with a COLD capability cache still probes `gateway stop --help` after the module abort fired (non-abortable, inside the 5s shutdown budget) and appends --force when advertised (P3 review fix)", async () => {
+      // The common cold-cache shape: startGateway skipped its boot warm-up
+      // because the gateway was already listening (an externally-supervised
+      // gateway — precisely what the shutdown CLI stop exists for).
+      childProcess.execFile = execFileHonoringAbort((file, args, opts, cb) => {
+        if (isStopHelpProbe(args)) return cb(null, kStopHelpWithForce, "");
+        return cb(null, "", "");
+      });
+      delete require.cache[modulePath];
+      const gateway = require(modulePath);
+      vi.spyOn(console, "log").mockImplementation(() => {});
+
+      await gateway.stopGatewayForShutdown();
+
+      expect(childProcess.execFile).toHaveBeenCalledTimes(2);
+      const [probeCall, stopCall] = childProcess.execFile.mock.calls;
+      // The probe ran with NO abort signal and the shutdown stop's budget
+      // (not the probe's 10s default)...
+      expect(probeCall[0]).toBe("openclaw");
+      expect(probeCall[1]).toEqual(["gateway", "stop", "--help"]);
+      expect(probeCall[2].signal).toBeUndefined();
+      expect(probeCall[2].timeout).toBe(5000);
+      // ...so the stop carried --force (a 2026.8.x+ CLI refuses without it).
+      expect(stopCall[1]).toEqual(["gateway", "stop", "--force"]);
+      expect(stopCall[2]).toMatchObject({ encoding: "utf8", timeout: 5000 });
+      expect(stopCall[2].signal).toBeUndefined();
+    });
+
+    it("stopGatewayForShutdown never appends --force on the pin (2026.7.1-2: no --force in the stop usage) — cold cache, abort fired", async () => {
+      childProcess.execFile = execFileHonoringAbort((file, args, opts, cb) => {
+        if (isStopHelpProbe(args)) return cb(null, kStopHelpWithoutForce, "");
+        return cb(null, "", "");
+      });
+      delete require.cache[modulePath];
+      const gateway = require(modulePath);
+      vi.spyOn(console, "log").mockImplementation(() => {});
+
+      await gateway.stopGatewayForShutdown();
+
+      expect(childProcess.execFile).toHaveBeenCalledTimes(2);
+      const [probeCall, stopCall] = childProcess.execFile.mock.calls;
+      expect(probeCall[1]).toEqual(["gateway", "stop", "--help"]);
+      expect(probeCall[2].signal).toBeUndefined();
+      expect(stopCall[1]).toEqual(["gateway", "stop"]);
+      expect(stopCall[2].signal).toBeUndefined();
+    });
+
+    it("the non-shutdown stop keeps its abortable probe (module abort signal, probe default timeout)", async () => {
+      childProcess.execFile = execFileHonoringAbort((file, args, opts, cb) => {
+        if (isStopHelpProbe(args)) return cb(null, kStopHelpWithForce, "");
+        return cb(null, "", "");
+      });
+      delete require.cache[modulePath];
+      const gateway = require(modulePath);
+      vi.spyOn(console, "log").mockImplementation(() => {});
+
+      await gateway.runGatewayCmd("stop");
+
+      const [probeCall, stopCall] = childProcess.execFile.mock.calls;
+      expect(probeCall[1]).toEqual(["gateway", "stop", "--help"]);
+      expect(probeCall[2].signal).toBeInstanceOf(AbortSignal);
+      expect(probeCall[2].signal.aborted).toBe(false);
+      expect(probeCall[2].timeout).toBe(10000);
+      expect(stopCall[1]).toEqual(["gateway", "stop", "--force"]);
+      expect(stopCall[2].signal).toBeInstanceOf(AbortSignal);
+    });
+
     it("stopGatewayForBackup marks the exit expected, swallows CLI stop failures, and reports the stop verdict", async () => {
       const child = createChild();
       child.kill = vi.fn((sig) => {
@@ -2670,9 +2753,13 @@ describe("server/gateway restart behavior", () => {
         const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
 
         const onStep = vi.fn();
-        const pending = gateway.restartGateway(vi.fn(), { onStep });
+        // The incumbent verdict REJECTS (P1 review fix): settle the handler
+        // up front so the fake-timer advance cannot leave it unhandled.
+        const pending = gateway
+          .restartGateway(vi.fn(), { onStep })
+          .then(() => null, (error) => error);
         await vi.advanceTimersByTimeAsync(16000);
-        const result = await pending;
+        const error = await pending;
 
         // The bounded stop-settle wait gave up loudly instead of declaring a
         // false instant success against the old process...
@@ -2685,23 +2772,25 @@ describe("server/gateway restart behavior", () => {
           ["gateway", "--force"],
           expect.objectContaining({ env: expect.any(Object) }),
         );
-        // Downtime measurement includes the full 15s stop-settle wait.
-        expect(result.downtimeMs).toBeGreaterThanOrEqual(15000);
         // The stop CLI itself succeeded, so the stopping step stays "done"
         // (the warning status is reserved for a refused/failed stop)...
         expect(onStep).toHaveBeenCalledWith({ step: "stopping", status: "done" });
         // ...but "ready" from a port that NEVER released is the incumbent
         // answering, not a restarted gateway: this pin moved from a claimed
-        // success to an honest incumbent verdict (WI-5.2).
-        expect(result).toMatchObject({
-          ok: false,
-          incumbent: true,
-          evidence: expect.objectContaining({
+        // success to an honest incumbent verdict (WI-5.2), and from a RETURNED
+        // { ok:false, incumbent:true } to a THROWN GatewayIncumbentRestartError
+        // (P1 review fix: every caller relies on "restartGateway throws when
+        // the gateway did not restart"). No downtimeMs rides on a failure.
+        expect(error).toBeInstanceOf(gateway.GatewayIncumbentRestartError);
+        expect(error).toBeInstanceOf(gateway.GatewayRestartError);
+        expect(error.incumbent).toBe(true);
+        expect(error.evidence).toEqual(
+          expect.objectContaining({
             wasRunningBefore: true,
             stopConfirmed: false,
             cliRefused: false,
           }),
-        });
+        );
       } finally {
         vi.useRealTimers();
       }
@@ -3055,7 +3144,7 @@ describe("server/gateway restart behavior", () => {
       expect(verdict.detail).toContain("1 pre-restart gateway process(es) still alive (pid 10)");
     });
 
-    it("streams stopping: warning and returns the incumbent verdict (no autotune stamp, no launch notice) when the stop is refused and the incumbent keeps the port", async () => {
+    it("streams stopping: warning and REJECTS with GatewayIncumbentRestartError (no autotune stamp, no launch notice) when the stop is refused and the incumbent keeps the port", async () => {
       vi.useFakeTimers();
       try {
         lockContention.listLiveOpenclawProcesses.mockReturnValue([
@@ -3086,14 +3175,22 @@ describe("server/gateway restart behavior", () => {
         gateway.setGatewayLaunchHandler(launchHandler);
         const onStep = vi.fn();
 
-        const pending = gateway.restartGateway(vi.fn(), { onStep });
+        // Rejection handler attached up front (see the never-releases pin).
+        const pending = gateway
+          .restartGateway(vi.fn(), { onStep })
+          .then(() => null, (error) => error);
         await vi.advanceTimersByTimeAsync(16000);
-        const result = await pending;
+        const error = await pending;
 
-        expect(result).toMatchObject({
-          ok: false,
+        // THROWN, not returned: the class every restartGateway() caller can
+        // catch (a GatewayRestartError subclass), carrying the verdict.
+        expect(error).toBeInstanceOf(gateway.GatewayIncumbentRestartError);
+        expect(error).toBeInstanceOf(gateway.GatewayRestartError);
+        expect(error).toMatchObject({
+          name: "GatewayIncumbentRestartError",
+          code: "restart_incumbent",
+          reason: "incumbent_gateway_still_running",
           incumbent: true,
-          downtimeMs: expect.any(Number),
           detail: expect.stringContaining("the previous gateway is still running"),
           evidence: expect.objectContaining({
             wasRunningBefore: true,
@@ -3110,6 +3207,8 @@ describe("server/gateway restart behavior", () => {
             stdoutTail: expect.any(Array),
           }),
         });
+        expect(error.message).toContain("Gateway restart did not take effect");
+        expect(error.message).toContain("refused the non-interactive stop");
         const stopping = onStep.mock.calls
           .map(([step]) => step)
           .filter((step) => step.step === "stopping");
@@ -3162,9 +3261,11 @@ describe("server/gateway restart behavior", () => {
         vi.spyOn(console, "warn").mockImplementation(() => {});
         const onStep = vi.fn();
 
-        const pending = gateway.restartGateway(vi.fn(), { onStep });
+        const pending = gateway
+          .restartGateway(vi.fn(), { onStep })
+          .then(() => null, (error) => error);
         await vi.advanceTimersByTimeAsync(16000);
-        const result = await pending;
+        const error = await pending;
 
         expect(onStep).toHaveBeenCalledWith({
           step: "stopping",
@@ -3172,11 +3273,11 @@ describe("server/gateway restart behavior", () => {
           detail: expect.stringContaining("failed (exit 3)"),
         });
         expect(onStep).not.toHaveBeenCalledWith({ step: "stopping", status: "done" });
-        expect(result).toMatchObject({
-          ok: false,
-          incumbent: true,
-          evidence: expect.objectContaining({ cliRefused: false, cliExitCode: 3, cliForced: true }),
-        });
+        expect(error).toBeInstanceOf(gateway.GatewayIncumbentRestartError);
+        expect(error.incumbent).toBe(true);
+        expect(error.evidence).toEqual(
+          expect.objectContaining({ cliRefused: false, cliExitCode: 3, cliForced: true }),
+        );
       } finally {
         vi.useRealTimers();
       }

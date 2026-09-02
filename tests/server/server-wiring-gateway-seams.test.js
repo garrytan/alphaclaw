@@ -156,6 +156,57 @@ describe("lib/server.js composition pins (lane C / lane A hand-offs)", () => {
     expect(systemSource).toContain("id: `restart-incumbent-${operationId}`");
     expect(systemSource).toContain('eventType: "restart_incumbent"');
   });
+
+  it("the incumbent verdict is ONE class: thrown by gateway.js, caught by routes/system.js by instanceof, read by the watchdog mitigation via its incumbent flag (P1 review fix)", () => {
+    // routes/system.js imports the class from gateway.js instead of defining
+    // a private one, and no longer converts a returned { ok:false, incumbent }.
+    const systemSource = readSource("lib", "server", "routes", "system.js");
+    const importStart = systemSource.indexOf("const {\n  GatewayRestartError,");
+    expect(importStart).toBeGreaterThan(-1);
+    const importBlock = systemSource.slice(
+      importStart,
+      systemSource.indexOf('} = require("../gateway");', importStart),
+    );
+    expect(importBlock).toContain("GatewayIncumbentRestartError,");
+    expect(importBlock).toContain("kGatewayIncumbentRestartReason,");
+    expect(systemSource).not.toMatch(/class GatewayIncumbentRestartError/);
+    expect(systemSource).not.toContain("result?.incumbent");
+    expect(systemSource).toContain("err instanceof GatewayIncumbentRestartError");
+    // gateway.js THROWS it from the cold restart and no longer returns it.
+    const gatewaySource = readSource("lib", "server", "gateway.js");
+    expect(gatewaySource).toContain("throw new GatewayIncumbentRestartError(");
+    expect(gatewaySource).not.toMatch(/return \{\s*ok: false,\s*incumbent: true/);
+    // The watchdog mitigation reads the flag the class carries.
+    const watchdogSource = readSource("lib", "server", "watchdog.js");
+    expect(watchdogSource).toContain("const incumbent = err?.incumbent === true;");
+
+    // The exported class's contract.
+    const gateway = require(gatewayModulePath);
+    expect(typeof gateway.GatewayIncumbentRestartError).toBe("function");
+    expect(gateway.kGatewayIncumbentRestartReason).toBe("incumbent_gateway_still_running");
+    const error = new gateway.GatewayIncumbentRestartError(
+      "the previous gateway is still running: the gateway port never released after stop",
+      { cliRefused: true, survivingPids: [777] },
+    );
+    expect(error).toBeInstanceOf(Error);
+    expect(error).toBeInstanceOf(gateway.GatewayRestartError);
+    expect(error).toBeInstanceOf(gateway.GatewayIncumbentRestartError);
+    expect(error).toMatchObject({
+      name: "GatewayIncumbentRestartError",
+      code: "restart_incumbent",
+      reason: "incumbent_gateway_still_running",
+      incumbent: true,
+      detail: "the previous gateway is still running: the gateway port never released after stop",
+      evidence: { cliRefused: true, survivingPids: [777] },
+    });
+    expect(error.message).toBe(
+      "Gateway restart did not take effect — the previous gateway is still running: the gateway port never released after stop",
+    );
+    // A plain GatewayRestartError is NOT an incumbent verdict.
+    const plain = new gateway.GatewayRestartError("never ready", {});
+    expect(plain).not.toBeInstanceOf(gateway.GatewayIncumbentRestartError);
+    expect(plain.incumbent).toBeUndefined();
+  });
 });
 
 describe("gateway seam contracts + behaviour through the installed handler", () => {

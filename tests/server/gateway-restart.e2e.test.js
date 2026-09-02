@@ -30,7 +30,11 @@ const {
   kDefaultGatewayPort,
   GATEWAY_HOST,
 } = require("../../lib/server/constants");
-const { registerSystemRoutes } = require("../../lib/server/routes/system");
+// routes/system.js binds gateway.js's GatewayIncumbentRestartError at ITS
+// load time (the class the restart route catches by instanceof). Each drill
+// fresh-requires gateway.js, so the routes module is fresh-required against
+// the same instance (createFakeGateway/createApp) — production has one of each.
+const kSystemRoutesModulePath = require.resolve("../../lib/server/routes/system");
 const { registerAgentRoutes } = require("../../lib/server/routes/agents");
 const {
   createOperationEventsService,
@@ -214,6 +218,8 @@ const createFakeGateway = ({
 
   delete require.cache[kGatewayModulePath];
   fake.gateway = require(kGatewayModulePath);
+  // Re-bind the routes module to THIS gateway instance (see the header note).
+  delete require.cache[kSystemRoutesModulePath];
   return fake;
 };
 
@@ -311,6 +317,9 @@ const createDrillHarness = ({
 const createApp = (deps) => {
   const app = express();
   app.use(express.json());
+  // Resolved at call time: after createFakeGateway this is the routes module
+  // loaded against the drill's gateway instance.
+  const { registerSystemRoutes } = require(kSystemRoutesModulePath);
   registerSystemRoutes({ app, ...deps });
   return app;
 };
@@ -394,6 +403,7 @@ describe("server/gateway restart drills (e2e)", () => {
     childProcess.execFile = originalExecFile;
     net.createConnection = originalCreateConnection;
     delete require.cache[kGatewayModulePath];
+    delete require.cache[kSystemRoutesModulePath];
     vi.useRealTimers();
   });
 

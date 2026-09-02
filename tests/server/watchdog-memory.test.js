@@ -10,6 +10,9 @@ const kTempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "watchdog-memory-"));
 process.env.ALPHACLAW_ROOT_DIR = kTempRoot;
 
 const { createWatchdog } = require("../../lib/server/watchdog");
+// The incumbent verdict gateway.js THROWS from a cold restart (P1 review fix):
+// the mitigation must treat it as the failed restart it is.
+const { GatewayIncumbentRestartError } = require("../../lib/server/gateway");
 
 const kMb = 1024 * 1024;
 const kStartMs = 1_700_000_000_000;
@@ -565,6 +568,91 @@ describe("server/watchdog memory monitor", () => {
       expect(
         JSON.parse(fs.readFileSync(statePath, "utf8")).restarts,
       ).toHaveLength(1);
+    });
+
+    it("an INCUMBENT verdict thrown by the restart (gateway.js GatewayIncumbentRestartError) is a FAILED mitigation: failed gateway_restart event naming the reason, budget stamp refunded, anti-thrash cooldown, loud notification", async () => {
+      // Pre-fix, gateway.js RETURNED { ok:false, incumbent:true } and this
+      // path recorded gateway_restart:ok, kept the brake stamp, and left the
+      // leaking gateway running with no notification (the #54 class).
+      let incumbent = true;
+      const restart = vi.fn(async () => {
+        if (incumbent) {
+          throw new GatewayIncumbentRestartError(
+            "the previous gateway is still running: the gateway port never released after stop (the OpenClaw CLI refused the non-interactive stop); 1 pre-restart gateway process(es) still alive (pid 777) and no new gateway process observed",
+            {
+              wasRunningBefore: true,
+              stopConfirmed: false,
+              cliRefused: true,
+              cliExitCode: 1,
+              cliForced: false,
+              preStopPids: [777],
+              postReadyPids: [777],
+              newPids: [],
+              survivingPids: [777],
+            },
+          );
+        }
+        return { ok: true };
+      });
+      const statePath = path.join(
+        fs.mkdtempSync(path.join(os.tmpdir(), "memory-mitigation-")),
+        "memory-mitigation-state.json",
+      );
+      const harness = createHarness({
+        settings: { enabled: true, autoRestart: true, effectiveAutoRestart: true },
+        restartGatewayForMitigation: restart,
+        mitigationStatePath: statePath,
+      });
+      launchGateway(harness);
+      await criticalScenario(harness);
+      expect(restart).toHaveBeenCalledTimes(1);
+
+      // Ledger: started → FAILED with the reason; never ok.
+      const restartRows = harness.insertWatchdogEvent.mock.calls
+        .map(([row]) => row)
+        .filter(
+          (row) => row.eventType === "operation" && row.source === "gateway_restart",
+        );
+      expect(restartRows.map((row) => row.status)).toEqual(["started", "failed"]);
+      expect(restartRows[1].details).toEqual({
+        trigger: "memory_mitigation",
+        error: expect.stringContaining("Gateway restart did not take effect"),
+        reason: "incumbent_gateway_still_running",
+      });
+      const failedEvent = memoryEvents(harness.insertWatchdogEvent).find(
+        (e) => e.details.kind === "mitigation_restart_failed",
+      );
+      expect(failedEvent.details).toMatchObject({
+        reason: "incumbent_gateway_still_running",
+        message: expect.stringContaining("the previous gateway is still running"),
+      });
+      // Loud, with the reason: the leak was NOT mitigated.
+      const failureNotice = notifications(harness.notifier).find((m) =>
+        m.includes("Pre-OOM gateway restart failed"),
+      );
+      expect(failureNotice).toContain("Reason: `incumbent_gateway_still_running`");
+      expect(failureNotice).toContain("The previous gateway is still running");
+      // The window settled: the failure is never hidden as "expected".
+      expect(harness.watchdog.getStatus().expectedRestartUntil).toBeNull();
+
+      // The 2-per-24h budget stamp was refunded (nothing was mitigated)...
+      expect(JSON.parse(fs.readFileSync(statePath, "utf8")).restarts).toHaveLength(0);
+      // ...and the short anti-thrash cooldown holds the next ticks exactly
+      // like every other failed restart.
+      incumbent = false;
+      await criticalScenario(harness, 3);
+      expect(restart).toHaveBeenCalledTimes(1);
+      await driveTicks(harness, {
+        startTick: 20, // 20 min after kStartMs > 15-min cooldown
+        ticks: 3,
+        sampleAt: (i) => ({
+          rssBytes: (365 + 4 * i) * kMb,
+          cgroupUsedBytes: (365 + 4 * i) * kMb,
+          containerLimitBytes: 400 * kMb,
+        }),
+      });
+      expect(restart).toHaveBeenCalledTimes(2);
+      expect(JSON.parse(fs.readFileSync(statePath, "utf8")).restarts).toHaveLength(1);
     });
 
     it("a held critical verdict without a fresh sample never restarts (evidence-backed enforcement)", async () => {
