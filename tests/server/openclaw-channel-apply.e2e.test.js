@@ -687,6 +687,53 @@ describe("server/openclaw-channel apply flow (e2e)", { retry: 1 }, () => {
     expect(releasedRes.status).toBe(409);
   });
 
+  it("reads the updater's UpdateRunResult out of a build log whose EARLIER lines also parse as JSON (build:completed, never a false warning)", async () => {
+    // Live-verified 2026-09-02: a real from-source dev build logs brace/bracket
+    // noise before the updater's final report, and a first-JSON-value parse
+    // read `status` as unknown → build:warning on every real dev build.
+    const harness = createHarness({
+      pin: "1.0.0",
+      installedVersion: "1.0.0",
+      sentinelVersion: "1.0.0",
+      runnerImpl: async (opts, fallback) => {
+        if (opts.command === "openclaw" && opts.args?.[0] === "update") {
+          return {
+            ok: true,
+            code: 0,
+            timedOut: false,
+            tail: [
+              '{"level":"info","msg":"pnpm build starting"}',
+              '["esbuild", 1, 2]',
+              "compiled 1200 files {ok}",
+              '{"status":"ok","steps":[{"name":"build","status":"ok"}],"plugins":{"status":"ok"}}',
+              "",
+            ].join("\n"),
+          };
+        }
+        return fallback(opts);
+      },
+    });
+    writeCheckoutFixture(harness.rootDir, { sha: kDevSha });
+
+    const applyRes = await request(harness.app)
+      .post("/api/openclaw/apply")
+      .send({ channel: "dev", devHead: true });
+    expect(applyRes.status).toBe(202);
+    await waitFor(
+      () => harness.store.readState().lastUpdateRun?.finishedAt != null,
+    );
+
+    const run = harness.store.readState().lastUpdateRun;
+    const stepNames = run.steps.map((step) => `${step.name}:${step.status}`);
+    expect(stepNames, stepNames.join(", ")).toContain("build:completed");
+    expect(stepNames).not.toContain("build:warning");
+    const build = run.steps.find((step) => step.name === "build" && step.status === "completed");
+    expect(JSON.stringify(build)).toContain('"updaterStatus":"ok"');
+    expect(harness.store.readState().applied).toEqual(
+      expect.objectContaining({ channel: "dev", sha: kDevSha }),
+    );
+  });
+
   it("streams multi-MB dev-build output over SSE and records the checkout sha", async () => {
     const updateGate = deferred();
     const bigChunk = "x".repeat(64 * 1024);
