@@ -1,5 +1,6 @@
 const crypto = require("crypto");
 const fs = require("fs");
+const { DatabaseSync } = require("node:sqlite");
 const os = require("os");
 const path = require("path");
 
@@ -2774,6 +2775,621 @@ describe("server/openclaw-channel-sync", () => {
       expect(manual.sync.markGoodNow().ok).toBe(true);
       expect(manual.sync.getChannelInfo().inStabilizationWindow).toBe(false);
       expect(manual.store.readState().applied.acceptedSource).toBe("manual");
+    });
+  });
+
+  describe("pin stabilization window", () => {
+    const bumpedPinHarness = (options = {}) => {
+      const harness = createHarness({
+        pin: "1.0.1",
+        channel: "stable",
+        installedVersion: "1.0.1",
+        sentinelVersion: "1.0.1",
+        ...options,
+      });
+      harness.store.updateState((s) => {
+        s.pinVersion = "1.0.0";
+        return s;
+      });
+      return harness;
+    };
+
+    it("pin_reconciled records the previous pin and opens the pin window once the install is on the new pin", async () => {
+      const { sync, store, nowRef } = bumpedPinHarness();
+
+      const result = sync.syncAtBoot();
+      await flushAsync();
+
+      expect(result.action).toBe("pin_reconciled");
+      const state = store.readState();
+      expect(state.previousPin).toEqual({ version: "1.0.0", at: nowRef.now });
+      expect(state.pinWindow).toEqual({
+        version: "1.0.1",
+        openedAt: nowRef.now,
+        acceptedAt: null,
+        acceptedSource: null,
+      });
+      const info = sync.getChannelInfo();
+      expect(info.isPin).toBe(true);
+      expect(info.inStabilizationWindow).toBe(true);
+      expect(info.stabilization).toEqual(
+        expect.objectContaining({
+          source: "pin",
+          inWindow: true,
+          blockedId: "1.0.1",
+          acceptedAt: null,
+          endsAt: null,
+          target: null,
+        }),
+      );
+    });
+
+    it("a lagging install leaves the window pending; a later boot on the new pin arms it", async () => {
+      const { sync, store, installDir } = bumpedPinHarness({
+        installedVersion: "1.0.0",
+        sentinelVersion: "1.0.0",
+      });
+
+      expect(sync.syncAtBoot().action).toBe("pin_reconciled");
+      await flushAsync();
+      expect(store.readState().pinWindow.openedAt).toBeNull();
+      expect(sync.getChannelInfo().stabilization.source).toBeNull();
+      expect(sync.getChannelInfo().inStabilizationWindow).toBe(false);
+
+      writeInstallFixture(installDir, { version: "1.0.1" });
+      store.writeSentinel({ installDir, version: "1.0.1" });
+      expect(sync.syncAtBoot().ok).toBe(true);
+      await flushAsync();
+      expect(store.readState().pinWindow.openedAt).not.toBeNull();
+      expect(sync.getChannelInfo().stabilization.source).toBe("pin");
+    });
+
+    it("markGoodNow accepts the pin window: auto-acceptance keeps it armed until it elapses, manual disarms it", async () => {
+      const auto = bumpedPinHarness({ stabilizationWindowMs: 10_000 });
+      expect(auto.sync.syncAtBoot().action).toBe("pin_reconciled");
+      await flushAsync();
+      expect(auto.sync.markGoodNow({ source: "acceptance" }).ok).toBe(true);
+      expect(auto.sync.getChannelInfo().inStabilizationWindow).toBe(true);
+      expect(auto.sync.getChannelInfo().stabilizationEndsAt).toBe(
+        auto.nowRef.now + 10_000,
+      );
+      auto.nowRef.now += 10_001;
+      expect(auto.sync.getChannelInfo().inStabilizationWindow).toBe(false);
+      expect(auto.sync.getChannelInfo().stabilization.source).toBeNull();
+
+      const manual = bumpedPinHarness({ stabilizationWindowMs: 10_000 });
+      expect(manual.sync.syncAtBoot().action).toBe("pin_reconciled");
+      await flushAsync();
+      expect(manual.sync.markGoodNow().ok).toBe(true);
+      expect(manual.sync.getChannelInfo().inStabilizationWindow).toBe(false);
+      expect(manual.store.readState().pinWindow.acceptedSource).toBe("manual");
+      expect(manual.sync.markGoodNow()).toEqual(
+        expect.objectContaining({ ok: false, code: "nothing_to_accept" }),
+      );
+    });
+
+    it("onGatewayHealthy auto-accepts the pin window after the health hold", async () => {
+      const { sync, store, notify, nowRef } = bumpedPinHarness({
+        acceptanceHoldMs: 5_000,
+      });
+      expect(sync.syncAtBoot().action).toBe("pin_reconciled");
+      await flushAsync();
+
+      sync.onGatewayHealthy();
+      expect(store.readState().pinWindow.acceptedAt).toBeNull();
+      nowRef.now += 5_000;
+      sync.onGatewayHealthy();
+      await flushAsync();
+
+      expect(store.readState().pinWindow).toEqual(
+        expect.objectContaining({
+          acceptedAt: nowRef.now,
+          acceptedSource: "acceptance",
+        }),
+      );
+      expect(sync.getChannelInfo().inStabilizationWindow).toBe(true);
+      expect(
+        notifyMessages(notify).some((message) =>
+          /new pinned version\) is healthy/.test(message),
+        ),
+      ).toBe(true);
+    });
+
+    it("rolls a failing new pin back to the previous pin's overlay and blocklists the pin", async () => {
+      vi.useFakeTimers();
+      const { sync, store, restartProcess, notify } = bumpedPinHarness();
+      expect(sync.syncAtBoot().action).toBe("pin_reconciled");
+      await flushAsync();
+      expect(saveOverlayFixture(store, "1.0.0")).toEqual({ ok: true });
+      // A healthy hold already promoted the new pin to last-known-good.
+      store.updateState((s) => {
+        s.lastKnownGood.package = "1.0.1";
+        return s;
+      });
+      expect(sync.getChannelInfo().stabilization.target).toEqual({
+        kind: "package",
+        channel: "stable",
+        version: "1.0.0",
+      });
+
+      const result = sync.requestChannelRollback({
+        reason: "crash_loop",
+        exitCode: 1,
+      });
+
+      expect(result.ok).toBe(true);
+      expect(result.blockedId).toBe("1.0.1");
+      // LKG re-points to the build we are landing on, not the blocklisted pin.
+      expect(store.readState().lastKnownGood.package).toBe("1.0.0");
+      expect(result.target).toEqual({
+        kind: "package",
+        channel: "stable",
+        version: "1.0.0",
+      });
+      expect(store.readMarker()).toEqual(
+        expect.objectContaining({
+          source: "pin",
+          blockedId: "1.0.1",
+          target: { kind: "package", channel: "stable", version: "1.0.0" },
+        }),
+      );
+      expect(store.isBlocklisted("1.0.1")).toBe(true);
+      vi.advanceTimersByTime(1000);
+      expect(restartProcess).toHaveBeenCalledTimes(1);
+      await flushAsync();
+      expect(
+        notifyMessages(notify).some((message) =>
+          message.includes("rolling back to the previous version 1.0.0"),
+        ),
+      ).toBe(true);
+    });
+
+    it("refuses a pin rollback when no earlier version exists locally — never targets the blocked pin", async () => {
+      vi.useFakeTimers();
+      const { sync, store, restartProcess, watchdogLatch, notify } =
+        bumpedPinHarness();
+      expect(sync.syncAtBoot().action).toBe("pin_reconciled");
+      await flushAsync();
+
+      const result = sync.requestChannelRollback({
+        reason: "crash_loop",
+        exitCode: 1,
+      });
+      await flushAsync();
+
+      expect(result.ok).toBe(false);
+      expect(result.code).toBe("pin_rollback_unavailable");
+      expect(store.readMarker()).toBeNull();
+      // A refusal leaves the pin runnable: no blocklist entry it could never
+      // leave, and the watchdog latches on the unhandled result itself.
+      expect(store.isBlocklisted("1.0.1")).toBe(false);
+      expect(store.readState().rollbackRefused).toEqual(
+        expect.objectContaining({
+          blockedId: "1.0.1",
+          reason: "no_pin_rollback_target",
+        }),
+      );
+      expect(watchdogLatch).not.toHaveBeenCalled();
+      vi.advanceTimersByTime(1000);
+      expect(restartProcess).not.toHaveBeenCalled();
+      expect(
+        notifyMessages(notify).some((message) =>
+          message.includes("no earlier version is available locally"),
+        ),
+      ).toBe(true);
+      expect(sync.requestChannelRollback({ reason: "crash_loop" }).code).toBe(
+        "rollback_refused_previously",
+      );
+    });
+
+    const installedTreeVersion = (installDir) =>
+      JSON.parse(
+        fs.readFileSync(
+          path.join(installDir, "node_modules", "openclaw", "package.json"),
+          "utf8",
+        ),
+      ).version;
+
+    it("a manual Roll back now on a pin with no local target is a side-effect-free refusal", async () => {
+      const { sync, store, notify } = bumpedPinHarness();
+      expect(sync.syncAtBoot().action).toBe("pin_reconciled");
+      await flushAsync();
+      notify.mockClear();
+
+      const result = sync.requestChannelRollback({ reason: "manual" });
+      await flushAsync();
+
+      expect(result.code).toBe("pin_rollback_unavailable");
+      expect(store.readState().rollbackRefused).toBeNull();
+      expect(store.isBlocklisted("1.0.1")).toBe(false);
+      expect(store.readMarker()).toBeNull();
+      expect(notify).not.toHaveBeenCalled();
+    });
+
+    it("falls back to a usable last-known-good overlay when the previous pin has none", async () => {
+      vi.useFakeTimers();
+      const { sync, store } = bumpedPinHarness();
+      expect(sync.syncAtBoot().action).toBe("pin_reconciled");
+      await flushAsync();
+      store.updateState((s) => {
+        s.lastKnownGood.package = "0.9.9";
+        return s;
+      });
+      expect(saveOverlayFixture(store, "0.9.9")).toEqual({ ok: true });
+      expect(sync.getChannelInfo().stabilization.target).toEqual({
+        kind: "package",
+        channel: "stable",
+        version: "0.9.9",
+      });
+
+      const result = sync.requestChannelRollback({ reason: "crash_loop" });
+
+      expect(result.ok).toBe(true);
+      expect(result.target).toEqual({
+        kind: "package",
+        channel: "stable",
+        version: "0.9.9",
+      });
+      expect(store.isBlocklisted("1.0.1")).toBe(true);
+    });
+
+    it("after a pin rollback, the next bump remembers the parked stable as the previous pin", async () => {
+      const { sync, store } = createHarness({
+        pin: "1.0.2",
+        channel: "stable",
+        installedVersion: "1.0.2",
+        sentinelVersion: "1.0.2",
+      });
+      store.updateState((s) => {
+        s.pinVersion = "1.0.1";
+        s.applied = {
+          channel: "stable",
+          version: "1.0.0",
+          at: 1,
+          acceptedAt: 1,
+          reason: "pin_rollback",
+        };
+        s.blocklist.push({ id: "1.0.1", reason: "crash_loop", exitCode: 1, at: 2 });
+        return s;
+      });
+      expect(saveOverlayFixture(store, "1.0.0")).toEqual({ ok: true });
+
+      expect(sync.syncAtBoot().action).toBe("pin_reconciled");
+      await flushAsync();
+
+      const state = store.readState();
+      expect(state.pinVersion).toBe("1.0.2");
+      expect(state.previousPin.version).toBe("1.0.0");
+      expect(state.applied).toBeNull();
+      expect(state.pinWindow.version).toBe("1.0.2");
+      expect(sync.getChannelInfo().stabilization.target).toEqual({
+        kind: "package",
+        channel: "stable",
+        version: "1.0.0",
+      });
+    });
+
+    it("a channel rollback never lands on a blocklisted pin", async () => {
+      vi.useFakeTimers();
+      const withFloor = createHarness({
+        pin: "1.0.1",
+        installedVersion: "1.2.0",
+        sentinelVersion: "1.2.0",
+      });
+      withFloor.store.updateState((s) => {
+        s.pinVersion = "1.0.1";
+        s.previousPin = { version: "1.0.0", at: 1 };
+        s.applied = { channel: "beta", version: "1.2.0", at: 1, acceptedAt: null };
+        s.blocklist.push({ id: "1.0.1", reason: "crash_loop", exitCode: 1, at: 2 });
+        return s;
+      });
+      expect(saveOverlayFixture(withFloor.store, "1.0.0")).toEqual({ ok: true });
+      const rolled = withFloor.sync.requestChannelRollback({ reason: "crash_loop" });
+      expect(rolled.ok).toBe(true);
+      expect(rolled.target).toEqual({
+        kind: "package",
+        channel: "stable",
+        version: "1.0.0",
+      });
+
+      const noFloor = createHarness({
+        pin: "1.0.1",
+        installedVersion: "1.2.0",
+        sentinelVersion: "1.2.0",
+      });
+      noFloor.store.updateState((s) => {
+        s.pinVersion = "1.0.1";
+        s.applied = { channel: "beta", version: "1.2.0", at: 1, acceptedAt: null };
+        s.blocklist.push({ id: "1.0.1", reason: "crash_loop", exitCode: 1, at: 2 });
+        return s;
+      });
+      const refused = noFloor.sync.requestChannelRollback({ reason: "crash_loop" });
+      await flushAsync();
+      expect(refused.code).toBe("rollback_floor_blocklisted");
+      expect(noFloor.store.readMarker()).toBeNull();
+      expect(noFloor.store.readState().rollbackRefused).toEqual(
+        expect.objectContaining({ blockedId: "1.2.0", reason: "pin_floor_blocklisted" }),
+      );
+      expect(
+        notifyMessages(noFloor.notify).some((message) =>
+          message.includes("is blocklisted from an earlier failure"),
+        ),
+      ).toBe(true);
+    });
+
+    it("boot never offers a blocklisted pin as a rollback candidate", async () => {
+      const { sync, store, installDir } = createHarness({
+        pin: "1.0.1",
+        channel: "stable",
+        installedVersion: "1.0.1",
+        sentinelVersion: "1.0.1",
+      });
+      store.updateState((s) => {
+        s.pinVersion = "1.0.1";
+        s.applied = { channel: "dev", sha: kDevSha, at: 1, acceptedAt: null };
+        s.blocklist.push({ id: "1.0.1", reason: "crash_loop", exitCode: 1, at: 2 });
+        return s;
+      });
+      store.writeMarker({
+        target: { kind: "pin" },
+        blockedId: kDevSha,
+        reason: "crash_loop",
+        exitCode: 1,
+      });
+
+      const result = sync.syncAtBoot();
+      await sync.flushBootNotifications();
+
+      expect(result.action).toBe("rollback_refused");
+      expect(store.readMarker()).toBeNull();
+      expect(store.readState().rollbackRefused).toEqual(
+        expect.objectContaining({ blockedId: kDevSha, reason: "no_compatible_target" }),
+      );
+      expect(installedTreeVersion(installDir)).toBe("1.0.1");
+    });
+
+    it("keeps the previous pin's overlay through an apply while the pin window is armed", async () => {
+      const { sync, store } = bumpedPinHarness();
+      expect(sync.syncAtBoot().action).toBe("pin_reconciled");
+      await flushAsync();
+      expect(saveOverlayFixture(store, "1.0.0")).toEqual({ ok: true });
+      expect(saveOverlayFixture(store, "0.5.0")).toEqual({ ok: true });
+
+      const applied = await sync.applyUpdate({ channel: "beta", version: "1.1.0" });
+      await flushAsync();
+
+      expect(applied.status).toBe(202);
+      expect(store.hasOverlay("1.0.0")).toBe(true);
+      expect(store.hasOverlay("0.5.0")).toBe(false);
+    });
+
+    const pinRollbackMarkerHarness = ({
+      withOverlay = true,
+      markerSource = "pin",
+      extraSyncOptions = {},
+    } = {}) => {
+      const harness = createHarness({
+        pin: "1.0.1",
+        channel: "stable",
+        installedVersion: "1.0.1",
+        sentinelVersion: "1.0.1",
+        extraSyncOptions,
+      });
+      harness.store.updateState((s) => {
+        s.pinVersion = "1.0.1";
+        s.previousPin = { version: "1.0.0", at: 1 };
+        s.pinWindow = {
+          version: "1.0.1",
+          openedAt: 1,
+          acceptedAt: null,
+          acceptedSource: null,
+        };
+        s.blocklist.push({ id: "1.0.1", reason: "crash_loop", exitCode: 1, at: 2 });
+        return s;
+      });
+      if (withOverlay) {
+        expect(saveOverlayFixture(harness.store, "1.0.0")).toEqual({ ok: true });
+      }
+      harness.store.writeMarker({
+        target: { kind: "package", channel: "stable", version: "1.0.0" },
+        blockedId: "1.0.1",
+        reason: "crash_loop",
+        exitCode: 1,
+        ...(markerSource ? { source: markerSource } : {}),
+      });
+      return harness;
+    };
+
+    // A real state DB makes the boot preflight prober run; the CLI stub then
+    // answers like a line that has no `database preflight` at all.
+    const seedStateDbAndUnsupportedPreflight = () => {
+      const execFileSyncImpl = vi.fn(() => {
+        const error = new Error("Command failed");
+        error.stdout = "";
+        error.stderr = "error: unknown command 'database'\n";
+        throw error;
+      });
+      const seed = (openclawDir) => {
+        const dir = path.join(openclawDir, "state");
+        fs.mkdirSync(dir, { recursive: true });
+        const db = new DatabaseSync(path.join(dir, "openclaw.sqlite"));
+        db.exec("CREATE TABLE t (id INTEGER PRIMARY KEY); INSERT INTO t VALUES (1);");
+        db.close();
+      };
+      return { execFileSyncImpl, seed };
+    };
+
+    it("inside a pin window an unsupported database preflight from a pre-2026.8 target is a block, not a warn-and-proceed", async () => {
+      const { execFileSyncImpl, seed } = seedStateDbAndUnsupportedPreflight();
+      const { sync, store, openclawDir, installDir } = pinRollbackMarkerHarness({
+        extraSyncOptions: { execFileSyncImpl },
+      });
+      seed(openclawDir);
+
+      const result = sync.syncAtBoot();
+      await sync.flushBootNotifications();
+
+      expect(execFileSyncImpl).toHaveBeenCalled();
+      expect(result.action).toBe("rollback_refused");
+      expect(installedTreeVersion(installDir)).toBe("1.0.1");
+      expect(store.readState().applied).toBeNull();
+      expect(
+        result.warnings.some((warning) =>
+          warning.includes("cannot safely read the current database"),
+        ),
+      ).toBe(true);
+    });
+
+    it("outside a pin window the same unsupported preflight still warns and proceeds", async () => {
+      const { execFileSyncImpl, seed } = seedStateDbAndUnsupportedPreflight();
+      const { sync, store, openclawDir, installDir } = pinRollbackMarkerHarness({
+        markerSource: null,
+        extraSyncOptions: { execFileSyncImpl },
+      });
+      // A channel-style marker: the failing build is an applied beta, not the pin.
+      store.updateState((s) => {
+        s.pinVersion = "1.0.1";
+        s.blocklist = [];
+        s.applied = { channel: "beta", version: "1.2.0", at: 1, acceptedAt: null };
+        return s;
+      });
+      store.writeMarker({
+        target: { kind: "package", channel: "stable", version: "1.0.0" },
+        blockedId: "1.2.0",
+        reason: "crash_loop",
+      });
+      seed(openclawDir);
+
+      const result = sync.syncAtBoot();
+      await sync.flushBootNotifications();
+
+      expect(result.action).toBe("rollback");
+      expect(installedTreeVersion(installDir)).toBe("1.0.0");
+      expect(
+        result.warnings.some((warning) =>
+          warning.includes("cannot verify state written by the newer version"),
+        ),
+      ).toBe(true);
+    });
+
+    it("boot consumes a pin-window marker onto the previous pin and stays there across reboots", async () => {
+      const { sync, store, installDir, notify } = pinRollbackMarkerHarness();
+
+      const first = sync.syncAtBoot();
+      await sync.flushBootNotifications();
+
+      expect(first.action).toBe("rollback");
+      expect(installedTreeVersion(installDir)).toBe("1.0.0");
+      expect(store.readMarker()).toBeNull();
+      expect(store.readState().applied).toEqual(
+        expect.objectContaining({
+          channel: "stable",
+          version: "1.0.0",
+          reason: "pin_rollback",
+        }),
+      );
+      expect(sync.getChannelInfo().stabilization.source).toBe("channel");
+      expect(
+        notifyMessages(notify).some((message) => /rolled back/i.test(message)),
+      ).toBe(true);
+
+      // Declared pin 1.0.1 is blocklisted: the next boot must keep the
+      // previous pin active instead of re-activating the bad pin.
+      const second = sync.syncAtBoot();
+      await flushAsync();
+      expect(second.ok).toBe(true);
+      expect(second.action).not.toBe("pin_reconciled");
+      expect(installedTreeVersion(installDir)).toBe("1.0.0");
+      expect(store.readState().applied).toEqual(
+        expect.objectContaining({ version: "1.0.0", reason: "pin_rollback" }),
+      );
+      expect(store.isBlocklisted("1.0.1")).toBe(true);
+    });
+
+    it("a pin-window marker whose overlay fails to activate reports a refusal, not a rollback", async () => {
+      const { sync, store, installDir, notify } = pinRollbackMarkerHarness();
+      const realActivate = store.activateOverlay;
+      store.activateOverlay = vi.fn(() => ({ ok: false, error: "EACCES" }));
+      try {
+        const result = sync.syncAtBoot();
+        await sync.flushBootNotifications();
+
+        expect(result.action).toBe("rollback_refused");
+        expect(installedTreeVersion(installDir)).toBe("1.0.1");
+        expect(store.readState().applied).toBeNull();
+        expect(store.readState().rollbackRefused).toEqual(
+          expect.objectContaining({
+            blockedId: "1.0.1",
+            reason: "pin_rollback_activation_failed",
+          }),
+        );
+        expect(
+          notifyMessages(notify).some((message) =>
+            message.includes("could not activate 1.0.0"),
+          ),
+        ).toBe(true);
+        expect(
+          notifyMessages(notify).some((message) => /rolled back/i.test(message)),
+        ).toBe(false);
+      } finally {
+        store.activateOverlay = realActivate;
+      }
+    });
+
+    it("a pin-window marker whose target overlay is missing refuses instead of falling back to the blocked pin", async () => {
+      const { sync, store, installDir } = pinRollbackMarkerHarness({
+        withOverlay: false,
+      });
+
+      const result = sync.syncAtBoot();
+      await sync.flushBootNotifications();
+
+      expect(result.action).toBe("rollback_refused");
+      expect(installedTreeVersion(installDir)).toBe("1.0.1");
+      expect(store.readState().applied).toBeNull();
+      expect(store.readMarker()).toBeNull();
+      expect(store.readState().rollbackRefused).toEqual(
+        expect.objectContaining({
+          blockedId: "1.0.1",
+          reason: "no_compatible_target",
+        }),
+      );
+      expect(
+        result.warnings.some((warning) =>
+          warning.includes("has no local overlay to activate"),
+        ),
+      ).toBe(true);
+    });
+
+    it("the pin supersedes an older stable pick only when the new pin is not blocklisted", async () => {
+      const { sync, store } = createHarness({
+        pin: "1.0.2",
+        channel: "stable",
+        installedVersion: "1.0.0",
+        sentinelVersion: "1.0.0",
+      });
+      store.updateState((s) => {
+        s.pinVersion = "1.0.1";
+        s.applied = {
+          channel: "stable",
+          version: "1.0.0",
+          at: 1,
+          acceptedAt: 1,
+          reason: "pin_rollback",
+        };
+        s.blocklist.push({ id: "1.0.2", reason: "crash_loop", exitCode: 1, at: 2 });
+        return s;
+      });
+      expect(saveOverlayFixture(store, "1.0.0")).toEqual({ ok: true });
+
+      const result = sync.syncAtBoot();
+      await flushAsync();
+
+      expect(result.action).toBe("pin_reconciled");
+      expect(store.readState().pinVersion).toBe("1.0.2");
+      expect(store.readState().applied).toEqual(
+        expect.objectContaining({ version: "1.0.0", reason: "pin_rollback" }),
+      );
     });
   });
 

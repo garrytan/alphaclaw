@@ -5,6 +5,46 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.9.69] - 2026-09-02
+
+A freshly bumped OpenClaw pin now gets the same 24-hour automatic-rollback
+watch as a channel apply: once the installed tree is on the new pin, a crash
+loop, config-error exit, or sustained degradation inside that window rolls the
+box back to the previous pin and blocklists the new one, and the Upgrade page
+shows the pin under watch the whole time.
+
+### Added
+- **Pin stabilization window.** Bumping the `openclaw` pin in `package.json`
+  opens a 24-hour window as soon as the installed tree is running the new pin.
+  Inside it the crash-loop, config-error-exit, and degraded-for-10-minutes
+  rollback triggers fire exactly as they do after a channel switch; the window
+  disarms on "Mark as good" or once the build has been accepted for 24 hours.
+- **Previous-pin rollback target.** The version that was running before the
+  bump is remembered and its locally persisted overlay is kept on disk while
+  the window is open, so a pin rollback has an offline target whenever that
+  overlay exists (a usable last-known-good is the fallback; with neither, the
+  rollback refuses and says so instead of re-running the failing pin). A
+  completed pin rollback is recorded as such in the channel state, and no
+  later rollback path — channel, dev, or boot — lands on a blocklisted pin.
+- **Upgrade page** shows the pin under watch — the version, time remaining, and
+  the same Mark as good / Roll back actions a channel apply gets.
+
+### Changed
+- The rule that decides whether a rollback trigger may fire now lives in one
+  place, shared by the watchdog, the API, and the Upgrade page — pin windows and
+  channel windows can no longer drift apart. The existing stabilization fields
+  on the channel-info API keep working and now report pin windows too.
+- Overlay pruning keeps the previous pin's overlay while its window is open,
+  so the rollback target cannot be pruned out from under the watch.
+- Boot pin reconcile never re-activates a blocklisted pin: after a pin rollback
+  the box stays on the previous pin until the blocklist entry is cleared in the
+  UI.
+- For the 2026.7.1-2 → 2026.8.x hop specifically: 7.x has no database
+  preflight, so inside a pin window an "unsupported" preflight from a pre-2026.8
+  target is treated as blocked — the automatic path is block, refusal latch,
+  and notification (the newest `openclaw-backup` archive is the manual
+  recovery path), not a rollback.
+
 ## [0.9.68] - 2026-09-01
 
 Reasonable health-check cadence while the gateway is degraded: the retry loop
