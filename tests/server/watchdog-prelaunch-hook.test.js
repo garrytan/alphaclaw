@@ -268,6 +268,252 @@ describe("watchdog.onPrelaunchHook", () => {
   });
 });
 
+// P2 review fix: a relaunch that returns NO child because the hook refused/
+// failed is a fail-closed abort, not EX_CONFIG. The two config-error paths
+// that relaunch (the openclaw.json-mtime auto-retry and the medic's post-fix
+// relaunch) used to re-latch configuration_error for it — telling the operator
+// "fix openclaw.json" (and, on the medic path, sending the EX_CONFIG
+// notification) for a hook problem. Both branches pinned: hook-aborted →
+// stand down with the hook narration; genuine no-child → latch as before.
+describe("config-error relaunch paths vs a hook-aborted launch", () => {
+  const flushMicrotasks = async () =>
+    new Promise((resolve) => {
+      setImmediate(resolve);
+    });
+  const kOriginalAutoRepair = process.env.WATCHDOG_AUTO_REPAIR;
+  const kOriginalNotificationsDisabled = process.env.WATCHDOG_NOTIFICATIONS_DISABLED;
+
+  afterEach(() => {
+    if (kOriginalAutoRepair == null) delete process.env.WATCHDOG_AUTO_REPAIR;
+    else process.env.WATCHDOG_AUTO_REPAIR = kOriginalAutoRepair;
+    if (kOriginalNotificationsDisabled == null) {
+      delete process.env.WATCHDOG_NOTIFICATIONS_DISABLED;
+    } else {
+      process.env.WATCHDOG_NOTIFICATIONS_DISABLED = kOriginalNotificationsDisabled;
+    }
+  });
+
+  // The gateway is down throughout (nothing launches); the injected reader
+  // stands in for gateway.getLastGatewayPrelaunchHookOutcome.
+  const createLatchHarness = ({ configMedic = null } = {}) => {
+    process.env.WATCHDOG_AUTO_REPAIR = "false";
+    process.env.WATCHDOG_NOTIFICATIONS_DISABLED = "false";
+    const insertWatchdogEvent = vi.fn();
+    const notifier = { notify: vi.fn(async () => ({ ok: true })) };
+    const mtimeRef = { value: 100 };
+    const hookOutcomeRef = { value: null };
+    const launchGatewayProcess = vi.fn(async () => null);
+    const watchdog = createWatchdog({
+      clawCmd: vi.fn(async () => ({ ok: true, stdout: "" })),
+      launchGatewayProcess,
+      insertWatchdogEvent,
+      notifier,
+      readEnvFile: vi.fn(() => ""),
+      writeEnvFile: vi.fn(),
+      reloadEnv: vi.fn(),
+      resolveSetupUrl: () => "http://localhost",
+      resolveGatewayHealthUrl: () => "http://gateway/health",
+      resolveGatewayReadyzUrl: () => "",
+      sleepImpl: () => Promise.resolve(),
+      supervisorModeActive: () => false,
+      readConfigMtimeMs: () => mtimeRef.value,
+      getLastGatewayPrelaunchHookOutcome: () => hookOutcomeRef.value,
+      configMedic,
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new Error("gateway unavailable");
+      }),
+    );
+    return {
+      watchdog,
+      insertWatchdogEvent,
+      notifier,
+      mtimeRef,
+      hookOutcomeRef,
+      launchGatewayProcess,
+    };
+  };
+  const latchWithExit78 = (harness) => {
+    harness.watchdog.onGatewayLaunch({ startedAt: Date.now(), pid: 1234 });
+    harness.watchdog.onGatewayExit({
+      code: 78,
+      expectedExit: false,
+      stderrTail: ["fatal configuration error"],
+    });
+  };
+  const rows = (harness) => harness.insertWatchdogEvent.mock.calls.map(([row]) => row);
+  const standDownRows = (harness) =>
+    rows(harness).filter(
+      (row) => row.eventType === "config_error" && row.status === "skipped",
+    );
+  const messages = (harness) => harness.notifier.notify.mock.calls.map(([m]) => m);
+
+  describe("openclaw.json-change auto-retry", () => {
+    it("hook REFUSED the relaunch → no configuration_error re-latch: lifecycle stopped, degradedReason prelaunch_hook_failed, one stand-down row", async () => {
+      const harness = createLatchHarness();
+      latchWithExit78(harness);
+      await flushMicrotasks();
+      expect(harness.watchdog.getStatus()).toMatchObject({
+        lifecycle: "configuration_error",
+        phase: "config_error_latched",
+      });
+
+      // The operator edits openclaw.json; the retry's launch is aborted by
+      // the hook (gateway.js records the outcome, launch resolves null).
+      harness.mtimeRef.value = 200;
+      harness.hookOutcomeRef.value = refusedOutcome({ site: "managed launch" });
+      await harness.watchdog.runHealthCheck({ source: "health_timer" });
+      await flushMicrotasks();
+      expect(harness.launchGatewayProcess).toHaveBeenCalledTimes(1);
+
+      const status = harness.watchdog.getStatus();
+      expect(status.lifecycle).toBe("stopped");
+      expect(status.lifecycle).not.toBe("configuration_error");
+      expect(status.phase).toBe("stopped");
+      expect(status.health).toBe("unhealthy");
+      expect(status.degradedReason).toBe("prelaunch_hook_failed");
+      expect(status.prelaunchHook).toMatchObject({
+        status: "refused",
+        code: "not_root_owned",
+        site: "managed launch",
+      });
+      expect(standDownRows(harness)).toEqual([
+        expect.objectContaining({
+          source: "config_changed",
+          details: {
+            reason: "prelaunch_hook_aborted_launch",
+            hookStatus: "refused",
+            code: "not_root_owned",
+            site: "managed launch",
+          },
+        }),
+      ]);
+      // Exactly one degraded row narrates the hook (the handler's own call,
+      // when wired, is not duplicated by the stand-down).
+      expect(degradedRows(harness.insertWatchdogEvent)).toHaveLength(1);
+      harness.watchdog.stop();
+    });
+
+    it("hook FAILED (non-zero exit) is handled the same as refused, and does not duplicate an already-showing narration", async () => {
+      const harness = createLatchHarness();
+      latchWithExit78(harness);
+      await flushMicrotasks();
+
+      // Production order: the installed handler narrates the outcome via
+      // onPrelaunchHook INSIDE the launch, before launchGatewayProcess
+      // resolves null.
+      const outcome = failedOutcome({ site: "managed launch" });
+      harness.launchGatewayProcess.mockImplementation(async () => {
+        harness.hookOutcomeRef.value = outcome;
+        harness.watchdog.onPrelaunchHook(outcome);
+        return null;
+      });
+      harness.mtimeRef.value = 200;
+      await harness.watchdog.runHealthCheck({ source: "health_timer" });
+      await flushMicrotasks();
+
+      const status = harness.watchdog.getStatus();
+      expect(status.lifecycle).toBe("stopped");
+      expect(status.phase).toBe("stopped");
+      expect(status.degradedReason).toBe("prelaunch_hook_failed");
+      expect(status.prelaunchHook).toMatchObject({ status: "failed", code: "nonzero_exit" });
+      expect(standDownRows(harness)).toHaveLength(1);
+      expect(degradedRows(harness.insertWatchdogEvent)).toHaveLength(1);
+      harness.watchdog.stop();
+    });
+
+    it("control: a no-child relaunch WITHOUT a hook abort (outcome ran / none) re-latches configuration_error exactly as before", async () => {
+      for (const outcome of [null, ranOutcome()]) {
+        const harness = createLatchHarness();
+        latchWithExit78(harness);
+        await flushMicrotasks();
+
+        harness.mtimeRef.value = 200;
+        harness.hookOutcomeRef.value = outcome;
+        await harness.watchdog.runHealthCheck({ source: "health_timer" });
+        await flushMicrotasks();
+        expect(harness.launchGatewayProcess).toHaveBeenCalledTimes(1);
+
+        const status = harness.watchdog.getStatus();
+        expect(status.lifecycle).toBe("configuration_error");
+        expect(status.phase).toBe("config_error_latched");
+        expect(status.degradedReason).not.toBe("prelaunch_hook_failed");
+        expect(standDownRows(harness)).toHaveLength(0);
+        harness.watchdog.stop();
+      }
+    });
+  });
+
+  describe("medic post-fix relaunch", () => {
+    const createMedic = () => ({
+      isEnabled: vi.fn(() => true),
+      run: vi.fn(async () => ({
+        fixed: true,
+        tier: "managed_key",
+        actions: ["removed gateway.controlUi.environment"],
+        backup: "openclaw.json.medic-x.bak",
+      })),
+    });
+
+    it("hook REFUSED the medic's relaunch → no re-latch and NO EX_CONFIG notification (the hook handler already told the operator)", async () => {
+      const harness = createLatchHarness({ configMedic: createMedic() });
+      // The exit-78 latch's own notification is sent before the medic runs;
+      // the relaunch that follows the fix is what the hook aborts.
+      harness.hookOutcomeRef.value = refusedOutcome({ site: "managed launch" });
+      latchWithExit78(harness);
+      await flushMicrotasks();
+      await flushMicrotasks();
+      await flushMicrotasks();
+
+      expect(harness.launchGatewayProcess).toHaveBeenCalledTimes(1);
+      const status = harness.watchdog.getStatus();
+      expect(status.lifecycle).toBe("stopped");
+      expect(status.phase).toBe("stopped");
+      expect(status.degradedReason).toBe("prelaunch_hook_failed");
+      expect(standDownRows(harness)).toEqual([
+        expect.objectContaining({
+          source: "medic",
+          details: expect.objectContaining({
+            reason: "prelaunch_hook_aborted_launch",
+            hookStatus: "refused",
+          }),
+        }),
+      ]);
+      // The auto-repair notice went out; the post-relaunch "restart is
+      // paused until the config is fixed" latch notice did NOT.
+      const sent = messages(harness);
+      expect(sent.some((m) => m.includes("auto-repaired"))).toBe(true);
+      expect(
+        sent.filter((m) => m.includes("automatic gateway restart is paused")),
+      ).toHaveLength(0);
+      harness.watchdog.stop();
+    });
+
+    it("control: the medic's relaunch returning no child WITHOUT a hook abort re-latches configuration_error and notifies", async () => {
+      const harness = createLatchHarness({ configMedic: createMedic() });
+      harness.hookOutcomeRef.value = null;
+      latchWithExit78(harness);
+      await flushMicrotasks();
+      await flushMicrotasks();
+      await flushMicrotasks();
+
+      expect(harness.launchGatewayProcess).toHaveBeenCalledTimes(1);
+      const status = harness.watchdog.getStatus();
+      expect(status.lifecycle).toBe("configuration_error");
+      expect(status.phase).toBe("config_error_latched");
+      expect(standDownRows(harness)).toHaveLength(0);
+      expect(
+        messages(harness).some((m) =>
+          m.includes("automatic gateway restart is paused"),
+        ),
+      ).toBe(true);
+      harness.watchdog.stop();
+    });
+  });
+});
+
 describe("createGatewayPrelaunchHookHandler (the lib/server.js composition)", () => {
   const fakeWatchdog = () => ({
     recordOperationEvent: vi.fn(),

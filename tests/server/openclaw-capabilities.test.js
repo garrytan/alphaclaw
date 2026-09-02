@@ -91,6 +91,38 @@ describe("server/openclaw-capabilities", () => {
       });
     });
 
+    it("per-call cmdOpts ride over the probe's own clawCmd options for THAT run only, and never bypass a fresh cache (the shutdown stop's non-abortable, budgeted probe)", async () => {
+      const clawCmd = vi.fn(async () => ok(kHelpWithForce));
+      const caps = createOpenclawCapabilities({
+        clawCmd,
+        getInstalledVersion: () => "2026.8.2",
+      });
+      expect(
+        await caps.get("gatewayStopForce", {
+          cmdOpts: { abortable: false, timeoutMs: 5000 },
+        }),
+      ).toBe("supported");
+      expect(clawCmd).toHaveBeenCalledTimes(1);
+      expect(clawCmd).toHaveBeenCalledWith("gateway stop --help", {
+        quiet: true,
+        timeoutMs: 5000,
+        abortable: false,
+      });
+      // Cache-first: a fresh answer is served without a spawn, whatever the
+      // per-call options say.
+      expect(
+        await caps.get("gatewayStopForce", { cmdOpts: { timeoutMs: 1 } }),
+      ).toBe("supported");
+      expect(clawCmd).toHaveBeenCalledTimes(1);
+      // Without cmdOpts the probe's own defaults are untouched.
+      caps.invalidate("gatewayStopForce");
+      expect(await caps.get("gatewayStopForce")).toBe("supported");
+      expect(clawCmd).toHaveBeenLastCalledWith("gateway stop --help", {
+        quiet: true,
+        timeoutMs: 10000,
+      });
+    });
+
     it("reports unsupported on the pin (usage text without --force) and CACHES it — never re-spawns for a legitimate negative", async () => {
       let now = 1_000_000;
       const clawCmd = vi.fn(async () => ok(kHelpWithoutForce));
