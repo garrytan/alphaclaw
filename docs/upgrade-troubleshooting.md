@@ -88,7 +88,7 @@ or, mid-run, `… lease migration.legacy-audit/filesystem-sqlite-boundary was lo
 The pinned 2026.7.1-2 has no lease: it finishes under the same lock and only
 logs `Config health-state write failed: database is locked`.
 
-**What AlphaClaw does (v0.9.70+, the #54 backup ladder):** the failure is classified
+**What AlphaClaw does (v0.9.71+, the #54 backup ladder):** the failure is classified
 `lock_contention` (a *retryable* kind, alongside `killed`; `spawn_error` is
 terminal) from the last 20 lines of CLI output, and the ladder runs — still
 with the gateway paused and the state-database quiet period held:

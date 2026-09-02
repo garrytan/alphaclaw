@@ -5,7 +5,7 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
-## [0.9.70] - 2026-09-02
+## [0.9.71] - 2026-09-02
 
 Fixes issue #54 — a beta → stable downgrade refused `409 backup_failed`
 after the quiesced pre-update backup lost OpenClaw's SQLite state lease

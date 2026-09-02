@@ -75,7 +75,7 @@
 
 ## P3 — Per-channel notification retry state in the outbox (2026-09-02, from the #54 wave)
 - **What:** The outbox record carries ONE attempt counter/backoff per event; a partial delivery (`sent>0 && failed>0`) emits `notification_partial` and the event is acknowledged as delivered, so the failed channel is never retried. Give each target its own `{ attempts, nextAt, lastError, terminal }` inside the record (schema bump with a legacy-record normalizer), flush only the pending targets, and make `notification_partial` resolve when they catch up.
-- **Why:** Lane B (v0.9.70, the #54 wave) made delivery honest (per-target `errorCode`/`deterministic`, terminal = ALL targets failed deterministically, partial = an event) but deliberately stopped short of per-channel retry — the partial event covers the class for operators, and the outbox schema change deserves its own review (plan §10). Without it, a flaky Discord token with a healthy Telegram silently loses every Discord copy.
+- **Why:** Lane B (v0.9.71, the #54 wave) made delivery honest (per-target `errorCode`/`deterministic`, terminal = ALL targets failed deterministically, partial = an event) but deliberately stopped short of per-channel retry — the partial event covers the class for operators, and the outbox schema change deserves its own review (plan §10). Without it, a flaky Discord token with a healthy Telegram silently loses every Discord copy.
 - **Context:** `lib/server/notify-outbox.js` (`partialAt` dedupe, `deliverEvent` result shape), `lib/server/watchdog-notify.js` fan-out/`sendToTarget`, `tests/server/notify-outbox.test.js`. Keep the 48 h age-out and the terminal-immediate abandonment.
 - **Effort:** M. **Depends on:** nothing.
 
