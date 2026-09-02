@@ -88,7 +88,7 @@ or, mid-run, `… lease migration.legacy-audit/filesystem-sqlite-boundary was lo
 The pinned 2026.7.1-2 has no lease: it finishes under the same lock and only
 logs `Config health-state write failed: database is locked`.
 
-**What AlphaClaw does (v0.9.69+):** the failure is classified
+**What AlphaClaw does (v0.9.70+, the #54 backup ladder):** the failure is classified
 `lock_contention` (a *retryable* kind, alongside `killed`; `spawn_error` is
 terminal) from the last 20 lines of CLI output, and the ladder runs — still
 with the gateway paused and the state-database quiet period held:
@@ -122,13 +122,25 @@ archive (age and producer) in its hint, and the run record carries
 `diagnosis` and `exclusivityEvidence` so the ladder is reconstructible.
 
 **`409 backup_in_progress` on writes:** while the quiet period is held,
-AlphaClaw's own state-database writers (pairing approvals, auth-profile
-saves, channel-account deletes) answer `409 { code: "backup_in_progress" }`
-with `Retry-After: 120`; status readers serve last-known data, the cron
-store falls back to `jobs.json`, and notification flushes are held (never
-dropped) until the barrier releases. Retry after the pause. Kill switch:
-`OPENCLAW_STATE_DB_QUIET=off` (deployment env only) — the barrier then
-no-ops and the offline copy records `quiet: "disabled"` in its evidence.
+AlphaClaw's own state-database writers answer `409 { code:
+"backup_in_progress" }` with `Retry-After: 120` **before** anything is
+mutated. The contract covers every pairing write (`POST
+/api/pairings/:id/approve` and `/reject`, `POST /api/devices/:id/approve`
+and `/reject` — a pairing write during the pause would put a live
+`openclaw` process on the state DB, exactly the traffic the barrier
+suppresses), auth-profile saves and channel-account deletes. Status readers
+serve last-known data, the cron store falls back to `jobs.json`, and
+notification flushes are held (never dropped) until the barrier releases.
+Two writers finish instead of refusing when the barrier begins *mid-flight*
+(config already changed): a channel delete clears the account's pairing
+rows after release and reports `pairingRowsCleanupDeferred: true`; the
+Codex OAuth exchange keeps the redeemed tokens and answers `202 { deferred:
+true }`. `GET /api/models/config`, `/api/models/auth` and
+`/api/codex/status` carry `unavailable: true, reason: "backup_in_progress"`
+so configured credentials render as unavailable, not deleted. Retry after
+the pause. Kill switch: `OPENCLAW_STATE_DB_QUIET=off` (deployment env only)
+— the barrier then no-ops and the offline copy records `quiet: "disabled"`
+in its evidence.
 
 **Still failing?** `offline_copy_refused` means another process holds a
 state database open (the 409 names the pid); stop it and retry. A
@@ -158,6 +170,32 @@ what AlphaClaw saw. `journalMode: "delete"` with a state DB over 256 MB is
 why the quiesced driver skips the upstream attempt and takes the offline
 copy first; the copy itself is unaffected (SQLite's online backup API is
 consistent in either journal mode).
+
+### Platform requirement: GNU tar and gzip
+
+The "usable" check every archive must pass (`backup.usableCheck:
+"manifest_ok"`) extracts the depth-1 manifest with
+`tar -xzOf … --wildcards --no-wildcards-match-slash --occurrence=1
+'*/manifest.json'`. Those are **GNU tar** long options; busybox tar and
+BSD `bsdtar` (Alpine, macOS) reject them, and the check has no fallback.
+The production image (`node:22-slim`, Debian) ships GNU tar and gzip, and
+the container tier asserts it (`tar --version` must report `GNU tar`) so
+the image is checked rather than assumed. Only the offline copy's *write*
+step has a portable `tar | gzip -1` pipe — that path is dead-ended on a
+non-GNU host because the verify that follows it fails anyway.
+
+**Symptom on a self-built image without GNU tar:** every hard-gated update
+(downgrade, dev switch, cross-channel apply) fails terminally at the
+`verify` stage — the run record's `backup.attempts[].kind` is `verify` with
+a `manifest.json not extractable: … unrecognized option` reason — and the
+archive the upstream CLI had already verified is quarantined as
+`<name>.unverified` (renamed, never deleted; keep-3 pruning spares the
+newest). Consented reuse refuses every candidate for the same reason. Fix
+the image (`apt-get install tar gzip` on Debian, `apk add tar gzip` on
+Alpine — the `tar` package, not busybox's applet) rather than working
+around the gate; a quarantined `.unverified` archive can be inspected by
+hand with `tar -xzf`. A bsdtar-compatible extraction is a tracked
+follow-up (TODOS "bsdtar-compatible manifest extraction").
 
 ## Restoring a backup
 
@@ -329,9 +367,13 @@ successful launch.
 AlphaClaw root and the OpenClaw state dir; regular file owned by `uid 0`
 (the deployed agent shares AlphaClaw's uid, so owner=self proves nothing);
 execute bit set; not group- or world-writable; no symlink (`O_NOFOLLOW`);
-executed by inode (`/proc/self/fd/<n>` on Linux) with a minimal env
-(`PATH`, `HOME`, `OPENCLAW_STATE_DIR`, `OPENCLAW_CONFIG_PATH`,
-`ALPHACLAW_ROOT_DIR` — never gateway secrets); 120 s budget.
+executed by inode (`/proc/<pid>/fd/<fd>` on Linux — the AlphaClaw parent's
+pid, not `/proc/self`, which fails with ENOENT for `#!` scripts; elsewhere
+the realpath is re-checked against the inspected inode) with a minimal env
+(a fixed system `PATH` of `/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`
+— never AlphaClaw's own — plus `HOME`, `OPENCLAW_STATE_DIR`,
+`OPENCLAW_CONFIG_PATH`, `ALPHACLAW_ROOT_DIR`; never gateway secrets);
+120 s budget.
 
 **Next steps:** read the hook's stdout/stderr in the AlphaClaw process log,
 fix the file (`chown 0:0`, `chmod 0755`, move it out of the tree) or the
