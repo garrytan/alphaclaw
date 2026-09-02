@@ -5,6 +5,9 @@ const {
   resolveTelegramBotToken,
   sendTelegramRendered,
   formatSlackMessage,
+  kTelegramTargetSourcePairing,
+  kTelegramTargetSourceAllowFrom,
+  kTelegramTargetSourceAdmin,
 } = require("../../lib/server/watchdog-notify");
 
 // Telegram API errors as telegram-api.js throws them (error_code attached).
@@ -1366,36 +1369,114 @@ describe("watchdog-notify telegram HTML transport", () => {
       expect(api.sendMessage).toHaveBeenCalledTimes(1);
     });
 
-    it("400 chat not found is deterministic", async () => {
-      const api = {
+    // C30 (source-aware chat-not-found): Telegram answers `400 chat not
+    // found` both for a dead chat AND for a numeric id the bot has never
+    // exchanged a message with. Only a pairing-store target has a proven
+    // prior interaction, so only there is the shape final.
+    describe("400 chat not found is deterministic ONLY for a pairing-store target", () => {
+      const kChatNotFoundApi = () => ({
         sendMessage: vi.fn(async () => {
           throw telegramError("Bad Request: chat not found", 400);
         }),
-      };
-      expect(await sendTelegramRendered({ api, chatId: "100", text: "x" })).toEqual({
-        ok: false,
-        reason: "Bad Request: chat not found",
-        errorCode: 400,
-        deterministic: true,
+      });
+
+      it("pairing target → deterministic (the chat is gone)", async () => {
+        const api = kChatNotFoundApi();
+        expect(
+          await sendTelegramRendered({
+            api,
+            chatId: "100",
+            text: "x",
+            source: kTelegramTargetSourcePairing,
+          }),
+        ).toEqual({
+          ok: false,
+          reason: "Bad Request: chat not found",
+          errorCode: 400,
+          deterministic: true,
+        });
+        expect(api.sendMessage).toHaveBeenCalledTimes(1);
+      });
+
+      it.each([
+        ["allowFrom-fallback", kTelegramTargetSourceAllowFrom],
+        ["admin", kTelegramTargetSourceAdmin],
+        ["omitted (unproven)", undefined],
+      ])(
+        "%s target → RETRYABLE (the user may simply never have messaged the bot)",
+        async (_label, source) => {
+          const api = kChatNotFoundApi();
+          expect(
+            await sendTelegramRendered({ api, chatId: "100", text: "x", source }),
+          ).toEqual({
+            ok: false,
+            reason: "Bad Request: chat not found",
+            errorCode: 400,
+            deterministic: false,
+          });
+          // No plain resend: this is not a parse rejection.
+          expect(api.sendMessage).toHaveBeenCalledTimes(1);
+        },
+      );
+
+      it("provenance never softens a 403 blocked/kicked/deactivated verdict", async () => {
+        for (const source of [
+          kTelegramTargetSourceAllowFrom,
+          kTelegramTargetSourceAdmin,
+          undefined,
+        ]) {
+          const api = {
+            sendMessage: vi.fn(async () => {
+              throw telegramError("Forbidden: bot was blocked by the user", 403);
+            }),
+          };
+          expect(
+            await sendTelegramRendered({ api, chatId: "100", text: "x", source }),
+          ).toMatchObject({ ok: false, errorCode: 403, deterministic: true });
+        }
+      });
+
+      it("a 403 whose description says chat not found is NOT proven deterministic (no longer in the 403 pattern)", async () => {
+        const api = {
+          sendMessage: vi.fn(async () => {
+            throw telegramError("Forbidden: chat not found", 403);
+          }),
+        };
+        expect(
+          await sendTelegramRendered({
+            api,
+            chatId: "100",
+            text: "x",
+            source: kTelegramTargetSourceAdmin,
+          }),
+        ).toMatchObject({ ok: false, errorCode: 403, deterministic: false });
       });
     });
 
-    it("a parse 400 that survives the plain-text fallback is deterministic", async () => {
-      const api = {
-        sendMessage: vi.fn(async () => {
-          throw kParseError();
-        }),
-      };
-      const result = await sendTelegramRendered({ api, chatId: "100", text: "*x*" });
-      expect(result).toEqual({
-        ok: false,
-        reason: expect.stringContaining("can't parse entities"),
-        errorCode: 400,
-        deterministic: true,
-      });
-      expect(api.sendMessage).toHaveBeenCalledTimes(2);
-      expect(api.sendMessage.mock.calls[1][2]).toEqual(kPlainOpts);
-    });
+    it.each([
+      ["pairing", kTelegramTargetSourcePairing],
+      ["allowFrom", kTelegramTargetSourceAllowFrom],
+      ["admin", kTelegramTargetSourceAdmin],
+      ["omitted", undefined],
+    ])(
+      "a parse 400 that survives the plain-text fallback is deterministic (source %s)",
+      async (_label, source) => {
+        const api = {
+          sendMessage: vi.fn(async () => {
+            throw kParseError();
+          }),
+        };
+        const result = await sendTelegramRendered({ api, chatId: "100", text: "*x*", source });
+        expect(result).toEqual({
+          ok: false,
+          reason: expect.stringContaining("can't parse entities"),
+          errorCode: 400,
+          deterministic: true,
+        });
+        expect(api.sendMessage).toHaveBeenCalledTimes(2);
+        expect(api.sendMessage.mock.calls[1][2]).toEqual(kPlainOpts);
+      },
+    );
 
     it("a plain-text fallback that fails transiently (429) stays transient with its errorCode", async () => {
       const api = {
@@ -1496,7 +1577,7 @@ describe("watchdog-notify telegram HTML transport", () => {
       expect(consoleErrorSpy).not.toHaveBeenCalled();
     });
 
-    it("fan-out: deterministic failures ride the failures list with errorCode", async () => {
+    it("fan-out: deterministic failures ride the failures list with errorCode (pairing-store targets — chat not found IS final here)", async () => {
       const fsMock = buildCredentialsFsMock({
         "telegram-default-allowFrom.json": ["100", "200"],
       });
@@ -1542,6 +1623,50 @@ describe("watchdog-notify telegram HTML transport", () => {
       expect(consoleErrorSpy).toHaveBeenCalledWith(
         "[watchdog] telegram notification failed for 100: Forbidden: bot was blocked by the user",
       );
+    });
+
+    // C30: the allowFrom fallback hands the send helper ids copied into
+    // openclaw.json by hand — Telegram says "chat not found" for any of them
+    // the user has not yet messaged. That is fixable (the user opens the
+    // bot), so the outbox must keep retrying instead of abandoning on the
+    // first flush. A 403 blocked stays final regardless.
+    it("fan-out: allowFrom-fallback targets keep 400 chat not found RETRYABLE (403 blocked stays deterministic)", async () => {
+      const fsMock = buildCredentialsFsMock(
+        {},
+        { openclawJson: { channels: { telegram: { allowFrom: ["100", "200"] } } } },
+      );
+      const telegramApi = {
+        sendMessage: vi.fn(async (chatId) => {
+          if (chatId === "100") throw telegramError("Forbidden: bot was blocked by the user", 403);
+          throw telegramError("Bad Request: chat not found", 400);
+        }),
+      };
+      const notifier = createWatchdogNotifier({
+        telegramApi,
+        fsImpl: fsMock,
+        openclawDir: "/tmp/openclaw",
+      });
+
+      const result = await notifier.notify("Upgrade failed");
+
+      expect(result.ok).toBe(false);
+      expect(result.channels.telegram).toMatchObject({ sent: 0, failed: 2, targets: 2 });
+      expect(result.failures).toEqual([
+        {
+          channel: "telegram",
+          target: "100",
+          reason: "Forbidden: bot was blocked by the user",
+          errorCode: 403,
+          deterministic: true,
+        },
+        {
+          channel: "telegram",
+          target: "200",
+          reason: "Bad Request: chat not found",
+          errorCode: 400,
+          deterministic: false,
+        },
+      ]);
     });
 
     it("fan-out: the webhook failure record never carries the (secret-bearing) URL", async () => {
@@ -1597,7 +1722,9 @@ describe("watchdog-notify telegram HTML transport", () => {
       ]);
     });
 
-    it("sendToTarget: a non-parse 400 fails with errorCode and does not stamp delivery", async () => {
+    // C30: an admin target is operator-typed — never proven to have messaged
+    // the bot — so its chat-not-found stays on the retry ladder.
+    it("sendToTarget: an admin target's 400 chat not found fails RETRYABLE with errorCode and does not stamp delivery", async () => {
       const telegramApi = {
         sendMessage: vi.fn(async () => {
           throw telegramError("Bad Request: chat not found", 400);
@@ -1618,10 +1745,45 @@ describe("watchdog-notify telegram HTML transport", () => {
         ok: false,
         reason: "Bad Request: chat not found",
         errorCode: 400,
-        deterministic: true,
+        deterministic: false,
       });
       expect(telegramApi.sendMessage).toHaveBeenCalledTimes(1);
       expect(notifier.getLastDeliveredAt()).toBeNull();
+    });
+
+    it("sendToTarget: a caller that vouches source=pairing gets the deterministic chat-not-found verdict", async () => {
+      const telegramApi = {
+        sendMessage: vi.fn(async () => {
+          throw telegramError("Bad Request: chat not found", 400);
+        }),
+      };
+      const notifier = createWatchdogNotifier({
+        telegramApi,
+        fsImpl: kEmptyFsMock,
+        openclawDir: "/tmp/openclaw",
+      });
+      expect(
+        await notifier.sendToTarget(
+          { channel: "telegram", target: "12345", source: kTelegramTargetSourcePairing },
+          "Upgrade failed",
+        ),
+      ).toMatchObject({ ok: false, errorCode: 400, deterministic: true });
+    });
+
+    it("sendToTarget: an admin target's 403 blocked stays deterministic", async () => {
+      const telegramApi = {
+        sendMessage: vi.fn(async () => {
+          throw telegramError("Forbidden: bot was blocked by the user", 403);
+        }),
+      };
+      const notifier = createWatchdogNotifier({
+        telegramApi,
+        fsImpl: kEmptyFsMock,
+        openclawDir: "/tmp/openclaw",
+      });
+      expect(
+        await notifier.sendToTarget({ channel: "telegram", target: "12345" }, "Upgrade failed"),
+      ).toMatchObject({ ok: false, errorCode: 403, deterministic: true });
     });
   });
 

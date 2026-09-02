@@ -816,11 +816,21 @@ describe("server/upgrade-notifier routing", () => {
     errorCode: 403,
     deterministic: true,
   });
-  const kChatNotFound = {
+  // C30: `400 chat not found` is deterministic ONLY when the target came from
+  // the pairing store (fan-out path). sendToTarget's admin targets report the
+  // same wire error as retryable — the id may simply never have messaged the
+  // bot. Two fixtures, one per provenance.
+  const kChatNotFoundPaired = {
     ok: false,
     reason: "Bad Request: chat not found",
     errorCode: 400,
     deterministic: true,
+  };
+  const kChatNotFoundRetryable = {
+    ok: false,
+    reason: "Bad Request: chat not found",
+    errorCode: 400,
+    deterministic: false,
   };
   const kRateLimited = {
     ok: false,
@@ -978,9 +988,14 @@ describe("server/upgrade-notifier routing", () => {
     describe("fan-out path (no admin targets)", () => {
       it.each([
         [
-          "every target deterministic (403 + chat-not-found) → terminal",
-          [asFanoutFailure("1", kBlocked()), asFanoutFailure("2", kChatNotFound)],
+          "every target deterministic (403 + pairing-store chat-not-found) → terminal",
+          [asFanoutFailure("1", kBlocked()), asFanoutFailure("2", kChatNotFoundPaired)],
           true,
+        ],
+        [
+          "403 + an allowFrom-fallback chat-not-found (retryable) → transient",
+          [asFanoutFailure("1", kBlocked()), asFanoutFailure("2", kChatNotFoundRetryable)],
+          false,
         ],
         [
           "zero resolvable targets (no_channels_delivered, no failures) → transient",
@@ -1112,12 +1127,25 @@ describe("server/upgrade-notifier routing", () => {
         );
       });
 
-      it("a single deterministic admin target → terminal", async () => {
+      it("a single deterministic admin target (403 blocked) → terminal", async () => {
         const { notifier } = makeNotifier({
           prefs: { preferredChannel: null, adminTargets: [{ channel: "telegram", target: "111" }] },
-          sendResults: { "telegram:111": kChatNotFound },
+          sendResults: { "telegram:111": kBlocked() },
         });
         expect((await notifier.deliverEvent(kEvent)).terminal).toBe(true);
+      });
+
+      it("an admin target's 400 chat not found → transient (the operator can still message the bot)", async () => {
+        const { notifier } = makeNotifier({
+          prefs: { preferredChannel: null, adminTargets: [{ channel: "telegram", target: "111" }] },
+          sendResults: { "telegram:111": kChatNotFoundRetryable },
+        });
+        const result = await notifier.deliverEvent(kEvent);
+        expect(result.ok).toBe(false);
+        expect(result).not.toHaveProperty("terminal");
+        expect(result.failures[0]).toEqual(
+          expect.objectContaining({ errorCode: 400, deterministic: false }),
+        );
       });
 
       it("preferred fails, fallback succeeds → ok:true with the failed target as partial evidence", async () => {
@@ -1216,7 +1244,7 @@ describe("server/upgrade-notifier routing", () => {
               { channel: "slack", target: "U1", accountId: null },
             ],
           },
-          sendResults: { "telegram:111": kChatNotFound },
+          sendResults: { "telegram:111": kChatNotFoundRetryable },
         });
         await notifier.notify("update applied", { id: "e1", eventType: "upgrade" });
         const flushed = await notifier.flush();
