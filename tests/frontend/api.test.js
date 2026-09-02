@@ -2101,6 +2101,13 @@ describe("frontend/api openclaw channel endpoints", () => {
     expect(global.fetch.mock.calls.at(-1)[0]).toBe("/api/openclaw/backups");
     expect(result).toEqual(inventory);
 
+    // R5: a forced read asks the SERVER to rescan (its 5 s SWR copy can still
+    // describe the pre-update directory); the default read stays cache-friendly.
+    await api.fetchOpenclawBackups({ force: true });
+    expect(global.fetch.mock.calls.at(-1)[0]).toBe("/api/openclaw/backups?force=1");
+    await api.fetchOpenclawBackups({ force: false });
+    expect(global.fetch.mock.calls.at(-1)[0]).toBe("/api/openclaw/backups");
+
     global.fetch.mockResolvedValue(
       mockJsonResponse(500, {
         ok: false,
