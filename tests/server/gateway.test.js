@@ -2182,6 +2182,56 @@ describe("server/gateway restart behavior", () => {
       expect(stopCall[2].signal).toBeInstanceOf(AbortSignal);
     });
 
+    // The shutdown stop's timeout used to be a flat 5 s on a raw exec(); it is
+    // now the REMAINDER of that budget after the cold --force probe (capped at
+    // its 1.5 s slice). The pins above only see an instant probe — this one
+    // lets the probe run to its slice and checks the arithmetic the 10 s
+    // process shutdown deadline depends on.
+    it("stopGatewayForShutdown: a cold probe that runs to its 1.5s slice leaves the CLI stop the REMAINDER of the 5s budget (3.5s), and the inconclusive answer never adds --force", async () => {
+      vi.useFakeTimers();
+      try {
+        childProcess.execFile = execFileHonoringAbort((file, args, opts, cb) => {
+          if (isStopHelpProbe(args)) {
+            // `gateway stop --help` hangs (a lease-blocked CLI startup); the
+            // probe's own timeout kills it — execFile reports `killed`.
+            setTimeout(
+              () =>
+                cb(
+                  Object.assign(new Error("probe timed out"), { killed: true, code: null }),
+                  "",
+                  "",
+                ),
+              opts.timeout,
+            );
+            return;
+          }
+          return cb(null, "", "");
+        });
+        delete require.cache[modulePath];
+        const gateway = require(modulePath);
+        vi.spyOn(console, "log").mockImplementation(() => {});
+        vi.spyOn(console, "warn").mockImplementation(() => {});
+
+        const pending = gateway.stopGatewayForShutdown();
+        await vi.advanceTimersByTimeAsync(gateway.kGatewayShutdownProbeTimeoutMs);
+        await pending;
+
+        expect(childProcess.execFile).toHaveBeenCalledTimes(2);
+        const [probeCall, stopCall] = childProcess.execFile.mock.calls;
+        expect(probeCall[1]).toEqual(["gateway", "stop", "--help"]);
+        expect(probeCall[2].timeout).toBe(1500);
+        expect(probeCall[2].signal).toBeUndefined();
+        // A timed-out probe reads "unknown", never "supported": no blind --force.
+        expect(stopCall[1]).toEqual(["gateway", "stop"]);
+        // 5000 budget - 1500 spent on the probe (fake clock: exact) = 3500,
+        // comfortably above the 1 s floor — probe + stop stay inside 5 s.
+        expect(stopCall[2].timeout).toBe(3500);
+        expect(stopCall[2].signal).toBeUndefined();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it("stopGatewayForBackup marks the exit expected, swallows CLI stop failures, and reports the stop verdict", async () => {
       const child = createChild();
       child.kill = vi.fn((sig) => {
@@ -3496,6 +3546,7 @@ describe("server/gateway restart behavior", () => {
     const hookDeps = (overrides = {}) => ({
       hookPath: kHookPath,
       realpathSync: vi.fn((target) => target),
+      lstatSync: vi.fn(() => ({ isSymbolicLink: () => false })),
       openSync: vi.fn(() => 42),
       fstatSync: vi.fn(() => rootStat()),
       statSync: vi.fn(() => rootStat()),
@@ -3626,6 +3677,35 @@ describe("server/gateway restart behavior", () => {
       });
       expect(deps.execFile).not.toHaveBeenCalled();
       expect(deps.closeSync).toHaveBeenCalledWith(42);
+    });
+
+    it("refuses a symlinked configured path BEFORE resolving or opening it (lstat), and a path with a symlinked component", async () => {
+      const gateway = require(modulePath);
+      vi.spyOn(console, "log").mockImplementation(() => {});
+      // The link itself: realpath would happily resolve it to a valid target.
+      const linked = hookDeps({
+        lstatSync: vi.fn(() => ({ isSymbolicLink: () => true })),
+        realpathSync: vi.fn(() => "/usr/bin/true"),
+      });
+      const error = await hookError(linked);
+      expect(error).toBeInstanceOf(gateway.GatewayPrelaunchHookError);
+      expect(error.code).toBe("symlink");
+      expect(error.message).toContain("must not be a symlink");
+      expect(linked.realpathSync).not.toHaveBeenCalled();
+      expect(linked.openSync).not.toHaveBeenCalled();
+      expect(linked.execFile).not.toHaveBeenCalled();
+      // A symlinked directory component: lstat sees a regular file, realpath
+      // moves it — the path must be canonical.
+      // Argument-aware: the roots canonicalize to themselves, only the hook moves.
+      const component = hookDeps({
+        realpathSync: vi.fn((target) =>
+          target === kHookPath ? "/usr/local/lib/alphaclaw-hooks/pre-launch" : target,
+        ),
+      });
+      const componentError = await hookError(component);
+      expect(componentError.code).toBe("symlink");
+      expect(componentError.message).toContain("canonical");
+      expect(component.openSync).not.toHaveBeenCalled();
     });
 
     it("refuses a symlink (O_NOFOLLOW → ELOOP) without ever executing", async () => {

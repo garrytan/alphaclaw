@@ -161,7 +161,7 @@ live/container tiers + docs.
   with a 500 MB offline-copy calibration, and the offline-copy manifest
   contract vs upstream. **Container tier:** a SQLite-contention holder
   during the quiesce window plus `tar`/`gzip` presence in the image — run
-  for real on the sandbox's own dockerd (11/11 in 196 s: image build, stable
+  for real on the sandbox's own dockerd (14/14 in 222 s on the final code paths: image build, rescue toolchain, stable
   boot, hard gate armed, browser-driven stable→beta apply through quiesce →
   backup → usable check → install, orchestrator restart, durability legs);
   only `tests/live/autotune-container.e2e.test.js` needs a host whose docker
