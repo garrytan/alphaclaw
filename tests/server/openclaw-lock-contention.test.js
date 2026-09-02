@@ -121,6 +121,11 @@ describe("looksLikeLockContention", () => {
       "OPENCLAW_STATE_LEASE_TIMEOUT: acquire gave up after 5000ms",
       "failed to acquire lease migration.legacy-audit/filesystem-sqlite-boundary",
       "OPENCLAW_STATE_LEASE_STORAGE_FAILED",
+      // Verbatim from the real CLIs (2026.8.2 and 2026.9.1-beta.1, captured
+      // live): the label is four words, so a one-token label slot misses it.
+      "timed out waiting for legacy audit migration lease migration.legacy-audit/filesystem-sqlite-boundary",
+      "failed to acquire legacy audit migration lease migration.legacy-audit/filesystem-sqlite-boundary",
+      "legacy audit migration lease migration.legacy-audit/filesystem-sqlite-boundary was lost",
     ];
     for (const text of fixtures) {
       expect(looksLikeLockContention(text), text).toBe(true);
