@@ -5,6 +5,148 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## v0.9.NEXT (unreleased)
+
+Fixes issue #54 — a beta → stable downgrade refused `409 backup_failed`
+after the quiesced pre-update backup lost OpenClaw's SQLite state lease
+(`SQLite transaction lock wait failed` → `…lease … was lost`) and nobody was
+told — and hardens every upgrade/downgrade and backup/restore flow around it.
+Absorbs PR #4 (gateway prelaunch hook) with a real trust boundary. One PR,
+per-subsystem commits: state-DB quiet period → notifications → gateway
+honesty → backup ladder / offline copy / consented reuse → UI → integration →
+live/container tiers + docs.
+
+### Fixed
+- **Backup ladder (#54).** Lease loss and raw SQLite busy signatures classify
+  as `lock_contention` (one shared pattern with the restart-evidence
+  diagnostic, `lib/server/openclaw-lock-contention.js`), a killed CLI as
+  `killed`, a CLI that never started as `spawn_error` (terminal, names the
+  cause); every classifier branch reads the last 20 output lines instead of
+  the final one. The quiesced driver retries lock contention in-quiesce
+  (budget-aware, ≤2, 15 s → 30 s, fixed deadline) and, when that is
+  exhausted or the CLI was killed, takes an **AlphaClaw offline copy** of the
+  still-paused state dir instead of giving up — see Added. Timeouts and
+  live-file races relaunch the gateway, wait for it to answer and settle,
+  then run the live ladder; the "retrying after a live-file race" label after
+  a timeout is gone. Fresh-install waiver of the hard gate now fails closed
+  (literally empty state tree only). Attempt wording is honest ("single
+  attempt, with the gateway paused" / "after N attempts, M with the gateway
+  paused"); `backup: running` is emitted once; a failed relaunch is its own
+  `gateway-relaunch: warning` step; every hard-gate refusal names the newest
+  surviving archive (age + producer).
+- **Notifications.** Telegram sends no longer die on `Bad Request: can't
+  parse entities`: notices stay in the house format and the transport renders
+  them to validated HTML (`lib/server/utils/telegram-html.js`), falling back
+  to plain text locally and on a parse `400` (counted delivered). Delivery is
+  honest: per-target error codes, `terminal` only when every target failed
+  deterministically (403 blocked, chat not found, parse 400 surviving the
+  fallback) → immediate `notification_abandoned` instead of 48 h of retries;
+  zero resolvable targets stays transient; partial fan-out raises one
+  `notification_partial` event per outbox id; `POST
+  /api/watchdog/test-notification` reports real per-channel failures; Slack
+  renders `[label](url)` as `<url|label>`. The apply outcome notification is
+  always delivered (`apply-accepted-<operationId>`, no longer verbose).
+- **Gateway stop/restart honesty.** The recovery restart that recorded
+  `succeeded` while the CLI refused `openclaw gateway stop` (non-interactive
+  guard, 2026.8.2+) is gone: `--force` is passed only when the installed CLI
+  advertises it (`gateway stop --help` capability probe — the 2026.7.1-2 pin
+  has no such flag), the shutdown stop is unified onto the same helper, and
+  a restart succeeds only when the old gateway is proven gone (port observed
+  down, or a new pid with every pre-stop pid exited); otherwise the operation
+  is recorded failed with `reason: "incumbent_gateway_still_running"`, event
+  `restart_incumbent`, an important notification, the restart-required banner
+  kept and no autotune stamp. `stopping: warning` when a stop was refused and
+  the port never released.
+- **Rollback fence** re-stats the referenced archive and says whether it
+  still exists, was partial (workspace excluded) or a consented reuse (with
+  its age) — the second-stage dialog renders the caveats.
+- Consecutive identical failed `health_check` rows inside an expected-restart
+  window are deduped (first logged + count).
+
+### Added
+- **State-DB quiet period** (`lib/server/state-db-quiet.js`): an awaited
+  barrier with an owner token held from confirmed gateway stop to just before
+  the relaunch. Status readers serve last-known data, the cron store falls
+  back to `jobs.json`, notification flushes are held (never dropped), and
+  AlphaClaw's own state-DB writers answer `409 { code: "backup_in_progress"
+  }` + `Retry-After: 120`. Expiry aborts the backup rather than silently
+  reopening. Kill switch `OPENCLAW_STATE_DB_QUIET=off` (deployment env only).
+- **Pre-backup diagnosis** (`backup_diagnosis` event, `record.backup.diagnosis`):
+  journal mode, filesystem type, state bytes, live openclaw processes, and a
+  prediction from the prior run. A rollback-journal DB over 256 MB (network
+  volumes) or a prediction over the remaining pause budget skips the upstream
+  attempt and goes straight to the offline copy.
+- **AlphaClaw offline copy** (`lib/server/openclaw-backup-offline-copy.js`,
+  format in `docs/designs/backup-offline-copy.md`): after exclusivity is
+  proven (stop confirmed, quiet barrier held, zero live openclaw processes,
+  zero in-process handles, Linux `/proc/*/fd` scan clean) every `*.sqlite`
+  is copied with SQLite's online backup API, integrity-checked, archived with
+  `tar -I 'gzip -1'` as `openclaw-backup-<ts>-<opId8>.alphaclaw.tar.gz` with
+  a manifest that shares upstream's core fields plus `producer:
+  "alphaclaw-offline-copy"`, `alphaclawFormatVersion`, `exclusivityEvidence`
+  and `diagnosis`. Workspaces ride along below 512 MiB (else `partial:
+  true`). Measured: a 526 MB state tree in 19 s. Both producers share
+  retention (keep-3), inventory and the fenced-run pin.
+- **Usable-backup definition** (WI-6.1): every verified artifact passes
+  `gzip -t` + manifest extraction listing this box's state databases →
+  `record.backup.usableCheck: "manifest_ok"`; a failing check is a `verify`
+  failure (terminal, quarantined `.unverified`).
+- **Backup inventory** — `GET /api/openclaw/backups` (5 s cache, tier
+  `safe`, never on the status path) and an Upgrade-tab Backups card with
+  producer, age, size, provenance and eligibility.
+- **Consented backup reuse** (WI-4.5): when the full fresh ladder fails with
+  a retryable class on a hard gate, the 409 carries `reusableBackup: {
+  file, at, ageMs, sha256, producer }` (newest verified non-partial ≤ 24 h
+  archive with nothing applied since, re-verified on an open fd); resending
+  with `allowBackupReuse: { sha256 }` (humans only — the agent actor is
+  denied) re-runs the full ladder and only then proceeds with that archive,
+  recorded as `backup.reused` with its age, announced, event
+  `backup_reused`, pinned against pruning while the run is fenced. The
+  confirm dialog shows the hard-gate/pause notes on every downgrade and an
+  opt-in checkbox that is never pre-checked.
+- **Gateway prelaunch hook** (absorbs PR #4): `ALPHACLAW_GATEWAY_PRELAUNCH_HOOK`
+  (deployment env only) runs a root-owned, out-of-tree, non-writable
+  executable by inode with a minimal env before every gateway launch; any
+  refusal or failure aborts the launch fail-closed (`GatewayPrelaunchHookError`,
+  event `prelaunch_hook`, important notification). README section.
+- New watchdog event kinds: `backup_diagnosis`, `backup_quiesce`,
+  `backup_contention`, `backup_offline_copy`, `backup_reused`,
+  `state_db_quiet`, `notification_partial`, `restart_incumbent`,
+  `prelaunch_hook` (and `notification_abandoned` now fires immediately for
+  terminal failures).
+- **Live tier** (real npm installs of 2026.7.1-2 / 2026.8.2 / 2026.9.1-beta.1,
+  cached per version): the #54 reproduction against the real beta with a
+  held `BEGIN IMMEDIATE` (retry-succeeds and offline-copy paths), the same
+  shape under the pin (no lease — finishes under the lock), the
+  `gateway stop --help` `--force` contract across the three lines, the real
+  beta → 2026.8.2 downgrade through the hard gate to activation and a healthy
+  gateway (plus the reverse `incompatible` preflight block), the 12-cell
+  restore drill (producer × journal mode × target: extract, place assets per
+  manifest, target preflight, `integrity_check`, `gateway run` to `/healthz`)
+  with a 500 MB offline-copy calibration, and the offline-copy manifest
+  contract vs upstream. **Container tier:** a SQLite-contention holder
+  during the quiesce window plus `tar`/`gzip` presence in the image.
+- Docs: `docs/upgrade-troubleshooting.md` gains "Backup blocked by
+  state-database contention", "Restoring a backup" (the runbook the UI links
+  to), "Reusing a recent backup (consent)", "Restart did not take effect
+  (incumbent gateway)" and "Gateway prelaunch hook"; AGENTS.md invariants
+  for the ladder, the quiet period, stop/restart honesty and the hook
+  boundary; the Telegram notice rule now says "author the house format, the
+  transport renders HTML".
+
+### Notes
+- **Compatibility:** run records gain `backup.{quiescedAttempts,
+  contentionRetries, offlineCopy, diagnosis, producer, usableCheck,
+  exclusivityEvidence, reused}` and `applied.operationId`; old files load
+  under the new normalizers. State-DB writes during a backup pause return
+  `409 backup_in_progress` — retry after the pause. `--force` on `gateway
+  stop` is probed, never assumed. The offline-copy archive is
+  AlphaClaw-owned; restore is the same manual runbook as an upstream archive.
+- Upstream follow-ups filed from this wave are tracked in TODOS.md ("File
+  upstream", item 3: lease `busy_timeout 0` + lease held across the snapshot
+  read; rollback-journal self-block) with the AlphaClaw belts to retire once
+  fixed.
+
 ## [0.9.68] - 2026-09-01
 
 Reasonable health-check cadence while the gateway is degraded: the retry loop
