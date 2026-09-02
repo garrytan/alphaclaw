@@ -40,6 +40,60 @@ describe("shared update-progress model", () => {
     expect(model[0].error).toBeNull();
   });
 
+  it("carries the server's backup attempt wording and reuse/offline-copy warnings VERBATIM (no client re-wording)", async () => {
+    const { buildStepListModel } = await loadProgressModel();
+    const model = buildStepListModel([
+      {
+        name: "backup",
+        status: "running",
+        at: 1,
+        detail: "pausing the gateway for a consistent backup",
+      },
+      {
+        name: "backup",
+        status: "running",
+        at: 2,
+        detail: "retrying after state-DB lock contention (attempt 2, with the gateway paused)",
+      },
+      {
+        name: "backup",
+        status: "warning",
+        at: 3,
+        detail:
+          "fresh backup failed (lock_contention) — proceeding with the verified backup from 2 hours ago; state written since is not in it (after 3 attempts, 2 with the gateway paused)",
+      },
+      { name: "gateway-relaunch", status: "warning", at: 4, error: "gateway did not come back" },
+    ]);
+    expect(model).toEqual([
+      expect.objectContaining({
+        label: "Backup",
+        status: "warning",
+        detail:
+          "fresh backup failed (lock_contention) — proceeding with the verified backup from 2 hours ago; state written since is not in it (after 3 attempts, 2 with the gateway paused)",
+        error: null,
+      }),
+      expect.objectContaining({
+        label: "Gateway relaunch",
+        status: "warning",
+        error: "gateway did not come back",
+      }),
+    ]);
+
+    // The single-attempt wording and the offline-copy detail pass through
+    // untouched as well.
+    const single = buildStepListModel([
+      {
+        name: "backup",
+        status: "completed",
+        at: 1,
+        detail: "verified offline copy (single attempt, with the gateway paused)",
+      },
+    ]);
+    expect(single[0].detail).toBe(
+      "verified offline copy (single attempt, with the gateway paused)",
+    );
+  });
+
   it("helpers.js re-exports the SAME references — no fork of the model", async () => {
     const model = await loadProgressModel();
     const helpers = await loadUpgradeHelpers();

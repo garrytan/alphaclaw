@@ -47,7 +47,10 @@ vi.mock("../../lib/public/js/lib/api.js", () => ({
   fetchWatchdogSettings: vi.fn(),
   updateWatchdogSettings: vi.fn(),
   triggerWatchdogRepair: vi.fn(),
+  triggerWatchdogTestNotification: vi.fn(),
   resumeWatchdogChannels: vi.fn(),
+  fetchWatchdogMemorySettings: vi.fn(),
+  updateWatchdogMemorySettings: vi.fn(),
 }));
 
 vi.mock("../../lib/public/js/components/toast.js", () => ({
@@ -63,6 +66,11 @@ import {
   WatchdogSettingsCard,
   kDefaultRoutingNote,
 } from "../../lib/public/js/components/watchdog-tab/settings/index.js";
+import {
+  buildTestNotificationOutcome,
+  formatTestNotificationFailure,
+  kTestNotificationNoChannelsMessage,
+} from "../../lib/public/js/components/watchdog-tab/settings/test-notification.js";
 import { InfoTooltip } from "../../lib/public/js/components/info-tooltip.js";
 import { InlineErrorChip } from "../../lib/public/js/components/inline-error-chip.js";
 import { Tooltip } from "../../lib/public/js/components/tooltip.js";
@@ -315,5 +323,164 @@ describe("frontend/watchdog update-notification settings", () => {
     expect(section).toBeTruthy();
     const testButton = findButtonByText(section, "Test");
     expect(testButton).toBeTruthy();
+  });
+});
+
+// WI-3.5: POST /api/watchdog/test-notification answers 502 {ok:false, error,
+// result} when every channel failed; the card must list result.failures[]
+// per channel/target/reason instead of a bare toast.
+describe("frontend/watchdog test-notification outcome", () => {
+  const kTelegramParseFailure = {
+    channel: "telegram",
+    target: "12345",
+    reason: "Bad Request: can't parse entities",
+    errorCode: 400,
+    deterministic: true,
+  };
+
+  const renderCard = (props = {}) => {
+    harness.beginRender();
+    return expandTree(
+      WatchdogSettingsCard({
+        settings: { autoRepair: false, notificationsEnabled: true },
+        ...props,
+      }),
+    );
+  };
+
+  beforeEach(() => {
+    harness.reset();
+    vi.clearAllMocks();
+    api.fetchOpenclawNotifications.mockReturnValue(new Promise(() => {}));
+    api.fetchWatchdogMemorySettings.mockReturnValue(new Promise(() => {}));
+  });
+
+  it("builds the outcome model: 502 failures per channel/target/reason, success parts, no-channels", () => {
+    const failed = buildTestNotificationOutcome({
+      error: Object.assign(new Error("Test notification failed on every channel — telegram: …"), {
+        status: 502,
+        result: {
+          ok: false,
+          channels: { telegram: { sent: 0, failed: 1, skipped: false } },
+          failures: [kTelegramParseFailure, { channel: "slack", reason: "channel_not_found" }],
+        },
+      }),
+    });
+    expect(failed.ok).toBe(false);
+    expect(failed.message).toBe("Test notification failed on every channel — telegram: …");
+    expect(failed.failures).toEqual([
+      {
+        channel: "telegram",
+        target: "12345",
+        reason: "Bad Request: can't parse entities",
+        errorCode: "400",
+      },
+      { channel: "slack", target: null, reason: "channel_not_found", errorCode: null },
+    ]);
+    expect(formatTestNotificationFailure(failed.failures[0])).toBe(
+      "telegram (12345): Bad Request: can't parse entities [400]",
+    );
+    expect(formatTestNotificationFailure(failed.failures[1])).toBe("slack: channel_not_found");
+
+    // A rejection without a preserved body still renders its message.
+    expect(buildTestNotificationOutcome({ error: new Error("offline") })).toEqual(
+      expect.objectContaining({ ok: false, message: "offline", failures: [] }),
+    );
+
+    const sent = buildTestNotificationOutcome({
+      data: {
+        ok: true,
+        result: { channels: { telegram: { sent: 1, failed: 0 }, webhook: { sent: 1, failed: 0 } } },
+      },
+    });
+    expect(sent).toEqual(
+      expect.objectContaining({
+        ok: true,
+        hasFailures: false,
+        message: "Test notification sent: telegram: 1 sent, webhook: 1 sent",
+      }),
+    );
+
+    const partial = buildTestNotificationOutcome({
+      data: {
+        ok: true,
+        result: {
+          channels: { telegram: { sent: 1, failed: 0 }, slack: { sent: 0, failed: 1 } },
+          failures: [{ channel: "slack", target: "C1", reason: "not_in_channel" }],
+        },
+      },
+    });
+    expect(partial.hasFailures).toBe(true);
+    expect(partial.message).toBe(
+      "Test notification partially delivered — telegram: 1 sent, slack: 1 failed",
+    );
+    expect(partial.failures).toHaveLength(1);
+
+    expect(buildTestNotificationOutcome({ data: { ok: true, result: { channels: {} } } })).toEqual(
+      expect.objectContaining({ ok: true, noChannels: true, message: kTestNotificationNoChannelsMessage }),
+    );
+  });
+
+  it("renders the 502 per-channel failures inline (channel, target, reason) — not a bare toast", async () => {
+    api.triggerWatchdogTestNotification.mockRejectedValue(
+      Object.assign(
+        new Error(
+          "Test notification failed on every channel — telegram: Bad Request: can't parse entities (400)",
+        ),
+        {
+          status: 502,
+          result: { ok: false, failures: [kTelegramParseFailure] },
+        },
+      ),
+    );
+    let tree = renderCard();
+    await findButtonByText(tree, "Test").props.onClick();
+    tree = renderCard();
+
+    const text = treeText(tree);
+    expect(text).toContain(
+      "Test notification failed on every channel — telegram: Bad Request: can't parse entities (400)",
+    );
+    expect(text).toContain("telegram (12345): Bad Request: can't parse entities [400]");
+    expect(showToast).not.toHaveBeenCalled();
+  });
+
+  it("keeps the success path a toast; a partial delivery also lists the failed targets inline", async () => {
+    api.triggerWatchdogTestNotification.mockResolvedValue({
+      ok: true,
+      result: { channels: { telegram: { sent: 1, failed: 0 } } },
+    });
+    let tree = renderCard();
+    await findButtonByText(tree, "Test").props.onClick();
+    tree = renderCard();
+    expect(showToast).toHaveBeenCalledWith(
+      "Test notification sent: telegram: 1 sent",
+      "success",
+    );
+    expect(treeText(tree)).not.toContain("Bad Request");
+
+    showToast.mockClear();
+    api.triggerWatchdogTestNotification.mockResolvedValue({
+      ok: true,
+      result: {
+        channels: { telegram: { sent: 1, failed: 0 }, slack: { sent: 0, failed: 1 } },
+        failures: [{ channel: "slack", target: "C1", reason: "not_in_channel", errorCode: null }],
+      },
+    });
+    tree = renderCard();
+    await findButtonByText(tree, "Test").props.onClick();
+    tree = renderCard();
+    expect(showToast).toHaveBeenCalledWith(
+      "Test notification partially delivered — telegram: 1 sent, slack: 1 failed",
+      "warning",
+    );
+    expect(treeText(tree)).toContain("slack (C1): not_in_channel");
+  });
+
+  it("toasts the no-channels case as a warning", async () => {
+    api.triggerWatchdogTestNotification.mockResolvedValue({ ok: true, result: { channels: {} } });
+    const tree = renderCard();
+    await findButtonByText(tree, "Test").props.onClick();
+    expect(showToast).toHaveBeenCalledWith(kTestNotificationNoChannelsMessage, "warning");
   });
 });

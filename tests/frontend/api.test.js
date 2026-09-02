@@ -1937,6 +1937,201 @@ describe("frontend/api openclaw channel endpoints", () => {
     expect(rejection.backupFile).toBeUndefined();
   });
 
+  it("rollbackOpenclaw carries the WI-4.1 fence re-stat fields (exists/partial/reused/age/survivor)", async () => {
+    global.fetch.mockResolvedValue(
+      mockJsonResponse(409, {
+        ok: false,
+        code: "rollback_requires_confirmation",
+        message: "migrated",
+        hint: "…",
+        backupFile: "/backups/openclaw-backup-old.tar.gz",
+        backupFileExists: false,
+        backupPartial: true,
+        backupReused: true,
+        reusedAgeMs: 7_200_000,
+        newestSurvivingBackup: {
+          file: "/backups/openclaw-backup-new.tar.gz",
+          at: 1_700_000_000_000,
+          producer: "openclaw",
+        },
+      }),
+    );
+    const api = await loadApiModule();
+
+    await expect(api.rollbackOpenclaw()).rejects.toMatchObject({
+      code: "rollback_requires_confirmation",
+      backupFile: "/backups/openclaw-backup-old.tar.gz",
+      backupFileExists: false,
+      backupPartial: true,
+      backupReused: true,
+      reusedAgeMs: 7_200_000,
+      newestSurvivingBackup: {
+        file: "/backups/openclaw-backup-new.tar.gz",
+        at: 1_700_000_000_000,
+        producer: "openclaw",
+      },
+    });
+
+    // Non-boolean / non-object shapes are dropped, never coerced.
+    global.fetch.mockResolvedValue(
+      mockJsonResponse(409, {
+        ok: false,
+        code: "rollback_requires_confirmation",
+        backupFile: "b.tar.gz",
+        backupFileExists: "yes",
+        newestSurvivingBackup: "b.tar.gz",
+        reusedAgeMs: "soon",
+      }),
+    );
+    const loose = await api.rollbackOpenclaw().catch((err) => err);
+    expect(loose.backupFileExists).toBeUndefined();
+    expect(loose.newestSurvivingBackup).toBeUndefined();
+    expect(loose.reusedAgeMs).toBeUndefined();
+  });
+
+  it("applyOpenclawVersion carries the 409 backup_failed reusableBackup offer (object only) and sends the consent body verbatim", async () => {
+    const kSha = "c".repeat(64);
+    global.fetch.mockResolvedValue(
+      mockJsonResponse(409, {
+        ok: false,
+        code: "backup_failed",
+        message: "Backup failed: state lease lost (after 3 attempts, 2 with the gateway paused)",
+        hint: "Newest surviving archive: …",
+        reusableBackup: {
+          file: "/backups/openclaw-backup-x.tar.gz",
+          at: 1_700_000_000_000,
+          ageMs: 3_600_000,
+          sha256: kSha,
+          producer: "openclaw",
+        },
+      }),
+    );
+    const api = await loadApiModule();
+
+    await expect(
+      api.applyOpenclawVersion({ channel: "stable", version: "2026.8.2" }),
+    ).rejects.toMatchObject({
+      code: "backup_failed",
+      reusableBackup: {
+        file: "/backups/openclaw-backup-x.tar.gz",
+        at: 1_700_000_000_000,
+        ageMs: 3_600_000,
+        sha256: kSha,
+        producer: "openclaw",
+      },
+    });
+
+    // The consent object rides the body exactly as given — {sha256}, no path.
+    global.fetch.mockResolvedValue(
+      mockJsonResponse(202, { ok: true, operationId: "op-3", events: "/e" }),
+    );
+    await api.applyOpenclawVersion({
+      channel: "stable",
+      version: "2026.8.2",
+      allowBackupReuse: { sha256: kSha },
+    });
+    const [, options] = global.fetch.mock.calls.at(-1);
+    expect(JSON.parse(options.body)).toEqual({
+      channel: "stable",
+      version: "2026.8.2",
+      allowBackupReuse: { sha256: kSha },
+    });
+
+    // A non-object reusableBackup is never attached.
+    global.fetch.mockResolvedValue(
+      mockJsonResponse(409, { ok: false, code: "backup_failed", reusableBackup: "x" }),
+    );
+    const loose = await api
+      .applyOpenclawVersion({ channel: "stable", version: "2026.8.2" })
+      .catch((err) => err);
+    expect(loose.code).toBe("backup_failed");
+    expect(loose.reusableBackup).toBeUndefined();
+  });
+
+  it("fetchOpenclawBackups reads the inventory envelope and surfaces its error envelope", async () => {
+    const inventory = {
+      ok: true,
+      backupsDir: "/root/backups/openclaw",
+      readable: true,
+      entries: [{ file: "/root/backups/openclaw/a.tar.gz", eligible: true }],
+      truncated: false,
+      newestArchive: { name: "a.tar.gz" },
+    };
+    global.fetch.mockResolvedValue(mockJsonResponse(200, inventory));
+    const api = await loadApiModule();
+
+    const result = await api.fetchOpenclawBackups();
+    expect(global.fetch.mock.calls.at(-1)[0]).toBe("/api/openclaw/backups");
+    expect(result).toEqual(inventory);
+
+    global.fetch.mockResolvedValue(
+      mockJsonResponse(500, {
+        ok: false,
+        code: "backups_unavailable",
+        message: "Could not read the backup inventory",
+      }),
+    );
+    await expect(api.fetchOpenclawBackups()).rejects.toMatchObject({
+      code: "backups_unavailable",
+      message: "Could not read the backup inventory",
+    });
+  });
+
+  it("triggerWatchdogTestNotification preserves the 502 body — per-channel failures ride the rejection", async () => {
+    const result = {
+      ok: false,
+      sent: 0,
+      failed: 1,
+      channels: { telegram: { sent: 0, failed: 1, skipped: false, targets: 1 } },
+      failures: [
+        {
+          channel: "telegram",
+          target: "12345",
+          reason: "Bad Request: can't parse entities",
+          errorCode: 400,
+          deterministic: true,
+        },
+      ],
+    };
+    global.fetch.mockResolvedValue(
+      mockJsonResponse(502, {
+        ok: false,
+        error: "Test notification failed on every channel — telegram: Bad Request: can't parse entities (400)",
+        result,
+      }),
+    );
+    const api = await loadApiModule();
+
+    await expect(api.triggerWatchdogTestNotification()).rejects.toMatchObject({
+      message:
+        "Test notification failed on every channel — telegram: Bad Request: can't parse entities (400)",
+      status: 502,
+      result,
+    });
+
+    // Success keeps resolving the body unchanged.
+    global.fetch.mockResolvedValue(
+      mockJsonResponse(200, { ok: true, result: { ok: true, sent: 1, failed: 0 } }),
+    );
+    await expect(api.triggerWatchdogTestNotification()).resolves.toEqual({
+      ok: true,
+      result: { ok: true, sent: 1, failed: 0 },
+    });
+
+    // Unparseable failure body: fallback message, no invented result.
+    global.fetch.mockResolvedValue({
+      status: 503,
+      ok: false,
+      json: async () => {
+        throw new Error("bad json");
+      },
+    });
+    const rejection = await api.triggerWatchdogTestNotification().catch((err) => err);
+    expect(rejection.message).toBe("Could not send test notification");
+    expect(rejection.status).toBe(503);
+    expect(rejection.result).toBeUndefined();
+  });
+
   it("retryOpenclawReconcile passes a 200 envelope through and sends the strip consent body", async () => {
     global.fetch.mockResolvedValue(
       mockJsonResponse(200, {

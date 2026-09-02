@@ -44,6 +44,7 @@ vi.mock("preact/hooks", () => {
 vi.mock("../../lib/public/js/lib/api.js", () => ({
   applyOpenclawVersion: vi.fn(),
   clearOpenclawBlocklist: vi.fn(),
+  fetchOpenclawBackups: vi.fn(),
   fetchOpenclawCatalog: vi.fn(),
   fetchOpenclawChannel: vi.fn(),
   fetchOpenclawRun: vi.fn(),
@@ -2080,10 +2081,17 @@ describe("frontend/upgrade-tab hook", () => {
     expect(state.actionError).toBeNull();
     expect(state.operation).toBeNull();
     expect(state.rollingBack).toBe(false);
+    // Pin updated (WI-4.1): the fence model now carries the re-stat caveat
+    // fields; an older server that omits them yields the neutral shape.
     expect(state.rollbackDataRisk).toEqual({
       message:
         "This update migrated your state databases — the rollback target may not be able to read them.",
       backupFile: "backup-2026-08-29.tar.gz",
+      backupFileExists: undefined,
+      backupPartial: false,
+      backupReused: false,
+      reusedAgeMs: null,
+      newestSurvivingBackup: null,
     });
 
     // Confirming re-sends the rollback WITH consent and hands off to the
@@ -2113,10 +2121,9 @@ describe("frontend/upgrade-tab hook", () => {
     state = renderHook({});
     await state.onRollback();
     state = renderHook({});
-    expect(state.rollbackDataRisk).toEqual({
-      message: "migrated",
-      backupFile: null,
-    });
+    expect(state.rollbackDataRisk).toEqual(
+      expect.objectContaining({ message: "migrated", backupFile: null }),
+    );
 
     state.onCancelRollbackDataRisk();
     state = renderHook({});
