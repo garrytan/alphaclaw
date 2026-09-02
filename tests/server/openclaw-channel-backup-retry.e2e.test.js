@@ -32,6 +32,7 @@ const {
   kOpenclawBackupQuiesceSuppressSlackMs,
   kOpenclawBackupQuiesceLeaseReserveMs,
   kOpenclawBackupReuseVerifyTimeoutMs,
+  kOpenclawBackupReuseMaxAgeMs,
   kOpenclawBackupClockSkewToleranceMs,
   kOpenclawBackupStaleTempDirSlackMs,
   kOpenclawStateDbQuietSlackMs,
@@ -2468,7 +2469,19 @@ describe("server/openclaw-channel-backup-retry", () => {
       const verifiedOp = recordRun({ file: verifiedFile, verified: true, at: now - 100 });
       const partialFile = path.join(backupsDir, "openclaw-backup-101-partial0.alphaclaw.tar.gz");
       fs.writeFileSync(partialFile, "p\n");
-      recordRun({ file: partialFile, verified: true, partial: true, at: now - 101, producer: "alphaclaw-offline-copy" });
+      const kPartialReasons = [
+        "workspace files excluded (900 MB > 512 MB inline limit)",
+        "credentials/oauth.json: symlink skipped",
+      ];
+      recordRun({
+        file: partialFile,
+        verified: true,
+        partial: true,
+        // Non-string debris on the record never reaches the UI.
+        partialReasons: [...kPartialReasons, 42, "  "],
+        at: now - 101,
+        producer: "alphaclaw-offline-copy",
+      });
       const unverifiedFile = path.join(backupsDir, "openclaw-backup-102-unverif0.tar.gz");
       fs.writeFileSync(unverifiedFile, "u\n");
       recordRun({ file: unverifiedFile, verified: false, at: now - 102 });
@@ -2518,11 +2531,20 @@ describe("server/openclaw-channel-backup-retry", () => {
           // No digest on the record → null, never undefined (the UI keys on it
           // to pre-fill consent).
           sha256: null,
+          // Old records carry no reasons → null, so the UI falls back to its
+          // generic partial label instead of rendering "undefined".
+          partialReasons: null,
         }),
       );
       expect(byName["openclaw-backup-107-statebk0.tar.gz"].sha256).toBe("ab".repeat(32));
       expect(byName["openclaw-backup-101-partial0.alphaclaw.tar.gz"]).toEqual(
-        expect.objectContaining({ eligible: false, ineligibleReason: "partial", producer: "alphaclaw-offline-copy" }),
+        expect.objectContaining({
+          eligible: false,
+          ineligibleReason: "partial",
+          producer: "alphaclaw-offline-copy",
+          // The record's reasons ride the inventory verbatim (strings only).
+          partialReasons: kPartialReasons,
+        }),
       );
       expect(byName["openclaw-backup-102-unverif0.tar.gz"].ineligibleReason).toBe("unverified");
       expect(byName["openclaw-backup-103-noprov00.tar.gz"].ineligibleReason).toBe("no_provenance");
@@ -2554,6 +2576,58 @@ describe("server/openclaw-channel-backup-retry", () => {
       expect(inventory.readable).toBe(false);
       expect(inventory.entries).toEqual([]);
       expect(inventory.newestArchive).toBeNull();
+    });
+
+    it("publishes the reuse gate's window (ledger activations included) and its max age — the UI's consent model binds to the same bounds", () => {
+      const { runnerImpl } = makeBackupRunner({});
+      const harness = createHarness({ runnerImpl });
+      // The harness clock starts near epoch; hours-ago timestamps need a
+      // realistic "now" (the window is clamped at 0).
+      harness.nowRef.now = Date.parse("2026-09-02T12:00:00.000Z");
+      const now = harness.nowRef.now;
+      const kHour = 60 * 60 * 1000;
+
+      // Nothing recorded: unbounded below, 24 h cap from the shared constant.
+      let inventory = harness.sync.listBackupInventory();
+      expect(inventory.reuseWindowStartMs).toBe(0);
+      expect(inventory.reuseMaxAgeMs).toBe(kOpenclawBackupReuseMaxAgeMs);
+      expect(inventory.reuseMaxAgeMs).toBe(24 * kHour);
+
+      // An ACTIVATED run the channel payload no longer points at (lastUpdateRun
+      // cleared) still fences the window — this is exactly what the UI's
+      // channel-payload mirror cannot see. A FAILED run never moves it.
+      const seedRun = ({ state, ok, startedAt }) => {
+        const operationId = crypto.randomUUID();
+        harness.ledger.createRun({ operationId, target: {} });
+        harness.ledger.updateRun(operationId, (r) => {
+          r.state = state;
+          r.ok = ok;
+          r.startedAt = startedAt;
+          return r;
+        });
+        return operationId;
+      };
+      seedRun({ state: "activated", ok: true, startedAt: now - 2 * kHour });
+      seedRun({ state: "failed", ok: false, startedAt: now - 1 * kHour });
+      harness.store.updateState((s) => {
+        s.applied = { channel: "stable", version: "1.0.5", at: now - 5 * kHour, acceptedAt: null };
+        s.lastUpdateRun = null;
+        return s;
+      });
+      inventory = harness.sync.listBackupInventory();
+      expect(inventory.reuseWindowStartMs).toBe(now - 2 * kHour);
+
+      // The newest record wins, whichever store carries it.
+      harness.store.updateState((s) => {
+        s.configMigration = { lastAttempt: { ok: true, at: now - 90 * 60 * 1000 } };
+        return s;
+      });
+      expect(harness.sync.listBackupInventory().reuseWindowStartMs).toBe(now - 90 * 60 * 1000);
+
+      // The value is the gate's own verdict: an archive taken just before the
+      // window start is refused by the reuse gate, one taken at/after it is
+      // offered — pinned end-to-end elsewhere in this file (WI-4.5 "later
+      // ACTIVATED run fences out every older archive").
     });
 
     it("does not live on getChannelInfo() (status hot path)", () => {

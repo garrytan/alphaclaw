@@ -648,6 +648,41 @@ describe("frontend/upgrade-tab Backups card (WI-4.3)", () => {
     expect(text).toContain("timeout");
     expect(findAllByType(card, InlineErrorChip).length).toBe(0);
   });
+
+  it("F4: renders a partial archive's recorded reasons on its row (old records keep the generic label)", () => {
+    const tree = renderView({
+      channelInfo: makeChannelInfo(),
+      backupsInventory: makeInventory([
+        makeEntry({
+          file: "/root/backups/openclaw/openclaw-backup-offline.alphaclaw.tar.gz",
+          name: "openclaw-backup-offline.alphaclaw.tar.gz",
+          producer: "alphaclaw-offline-copy",
+          partial: true,
+          eligible: false,
+          ineligibleReason: "partial",
+          partialReasons: [
+            "workspace files excluded (900 MB > 512 MB inline limit)",
+            "credentials/oauth.json: symlink skipped",
+          ],
+        }),
+        makeEntry({
+          file: "/root/backups/openclaw/openclaw-backup-legacy.alphaclaw.tar.gz",
+          name: "openclaw-backup-legacy.alphaclaw.tar.gz",
+          producer: "alphaclaw-offline-copy",
+          at: kNow - 5 * 3_600_000,
+          partial: true,
+          eligible: false,
+          ineligibleReason: "partial",
+        }),
+      ]),
+    });
+    const text = collectText(findBackupsCard(tree)).join(" ").replace(/\s+/g, " ");
+    expect(text).toContain(
+      "partial — workspace files excluded (900 MB > 512 MB inline limit); credentials/oauth.json: symlink skipped",
+    );
+    // The reason-less legacy record still says what was always true of it.
+    expect(text).toContain("partial — workspace files excluded ");
+  });
 });
 
 describe("frontend/upgrade-tab progress card — backup warnings + gateway relaunch (WI-1.9/3.5)", () => {
@@ -1036,6 +1071,40 @@ describe("frontend/upgrade-tab hook — consent + reuse retry + fence fields", (
     await state.onConfirmApply();
     expect(api.applyOpenclawVersion).toHaveBeenCalledWith(kDowngradeTarget);
     expect("allowBackupReuse" in api.applyOpenclawVersion.mock.calls[0][0]).toBe(false);
+  });
+
+  it("F2: the inventory's server-published reuse window fences an archive the channel payload alone would offer", async () => {
+    // channelInfo carries no apply/run/migration record (nothing to mirror),
+    // but the server's ledger saw an activation after this archive was taken.
+    const entry = makeEntry();
+    setCached(
+      kBackupsCacheKey,
+      makeInventory([entry], {
+        reuseWindowStartMs: Number(entry.at) + 60_000,
+        reuseMaxAgeMs: 24 * 3_600_000,
+      }),
+    );
+    let state = await hydrate();
+    requestDowngrade(state);
+    state = renderHook({});
+    expect(state.pendingApply.confirm.backupReuse).toEqual(
+      expect.objectContaining({ available: false, sha256: null, reason: kBackupReuseStaleReason }),
+    );
+    const tree = renderView({
+      channelInfo: state.channelInfo,
+      pendingApply: state.pendingApply,
+    });
+    expect(findConsentToggle(tree).props.disabled).toBe(true);
+    expect(treeText(tree)).toContain(kBackupReuseStaleReason);
+
+    // Same inventory without the server window (old server) → offered.
+    harness.reset();
+    invalidateCache(kBackupsCacheKey);
+    setCached(kBackupsCacheKey, makeInventory([entry]));
+    state = await hydrate();
+    requestDowngrade(state);
+    state = renderHook({});
+    expect(state.pendingApply.confirm.backupReuse.available).toBe(true);
   });
 
   it("a backup_failed WITHOUT an offer, or a different code, yields no offer", async () => {

@@ -74,6 +74,7 @@ vi.mock("../../lib/public/js/lib/codex-oauth-window.js", () => ({
 
 import * as preactHooks from "preact/hooks";
 import * as api from "../../lib/public/js/lib/api.js";
+import { showToast } from "../../lib/public/js/components/toast.js";
 import { invalidateCache, invalidateCachePrefix } from "../../lib/public/js/lib/api-cache.js";
 import { openCodexAuthWindow } from "../../lib/public/js/lib/codex-oauth-window.js";
 import { SecretInput } from "../../lib/public/js/components/secret-input.js";
@@ -276,6 +277,69 @@ describe("frontend/providers component", () => {
     tree = renderProviders();
     expect(findAllByType(tree, InlineErrorChip).length).toBe(0);
     expect(collectText(tree).join(" ")).not.toContain("Status check failed");
+  });
+
+  it("a quiet-period codex status (unavailable: true) keeps the last-known 'Connected' under an 'Unavailable during backup' badge — never 'Not connected'", async () => {
+    api.fetchCodexStatus.mockResolvedValue({ connected: true });
+    let tree = await hydrateProviders();
+    expect(collectText(tree).join(" ")).toContain("Connected");
+
+    api.fetchCodexStatus.mockResolvedValue({
+      connected: false,
+      unavailable: true,
+      reason: "backup_in_progress",
+    });
+    // Disconnect's follow-up status read is the quiet-period one.
+    api.disconnectCodex.mockResolvedValue({ ok: true });
+    await findActionButtonByLabel(tree, "Disconnect").props.onClick();
+    tree = renderProviders();
+
+    const text = collectText(tree).join(" ");
+    expect(text).toContain("Unavailable during backup");
+    expect(text).toContain(
+      "Credential store unavailable during a backup — showing the last known Codex status (connected).",
+    );
+    expect(text).not.toContain("Not connected");
+    // Not a failed check: no error chip.
+    expect(findAllByType(tree, InlineErrorChip).length).toBe(0);
+  });
+
+  it("a deferred manual exchange (202 deferred:true) toasts the honest message and badges the pending save", async () => {
+    api.fetchCodexStatus.mockResolvedValue({
+      connected: false,
+      unavailable: true,
+      reason: "backup_in_progress",
+    });
+    api.exchangeCodexOAuth.mockResolvedValue({
+      ok: true,
+      deferred: true,
+      reason: "backup_in_progress",
+    });
+    let tree = await hydrateProviders();
+    // The tab cache may carry a last-known "connected" from an earlier test
+    // (kept under the unavailable marker — that is the point), so the entry
+    // point is either Connect or Reconnect; both start the same flow.
+    (
+      findButtonByText(tree, "Connect Codex OAuth") ||
+      findButtonByText(tree, "Reconnect Codex")
+    ).props.onclick();
+    tree = renderProviders();
+    findAllByType(tree, "input")
+      .find((vnode) => String(vnode.props.placeholder || "").includes("auth/callback"))
+      .props.onInput({
+        target: { value: "http://localhost:1455/auth/callback?code=abc&state=def" },
+      });
+    tree = renderProviders();
+    await findActionButtonByLabel(tree, "Complete Codex OAuth").props.onClick();
+    tree = renderProviders();
+
+    expect(showToast).toHaveBeenCalledWith(
+      "Codex connected — saved after the backup finishes",
+      "success",
+    );
+    const text = collectText(tree).join(" ");
+    expect(text).toContain("Connected — saved after the backup finishes");
+    expect(text).not.toContain("Not connected");
   });
 
   it("saving env vars and the primary model invalidates the affected caches", async () => {

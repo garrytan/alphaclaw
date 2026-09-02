@@ -58,6 +58,8 @@ vi.mock("../../lib/public/js/lib/codex-oauth-window.js", () => ({
 
 import * as preactHooks from "preact/hooks";
 import * as api from "../../lib/public/js/lib/api.js";
+import { showToast } from "../../lib/public/js/components/toast.js";
+import { Badge } from "../../lib/public/js/components/badge.js";
 import { ActionButton } from "../../lib/public/js/components/action-button.js";
 import { InlineErrorChip } from "../../lib/public/js/components/inline-error-chip.js";
 import { ProviderAuthCard } from "../../lib/public/js/components/models-tab/provider-auth-card.js";
@@ -222,5 +224,95 @@ describe("frontend/models-tab provider auth card codex section", () => {
     expect(collectText(tree).join(" ")).not.toContain(
       "showing the last known",
     );
+  });
+
+  it("a quiet-period status renders 'Unavailable during backup' with the last-known line — never 'Not connected'", () => {
+    const tree = renderCard({
+      codexStatus: { connected: true, unavailable: true, reason: "backup_in_progress" },
+      codexStatusKnown: true,
+    });
+    const badge = findAllByType(tree, Badge).find((vnode) =>
+      collectText(vnode).join(" ").includes("Unavailable during backup"),
+    );
+    expect(badge).toBeTruthy();
+    expect(badge.props.tone).toBe("warning");
+    const text = collectText(tree).join(" ");
+    expect(text).toContain(
+      "Credential store unavailable during a backup — showing the last known Codex status (connected).",
+    );
+    expect(text).not.toContain("Not connected");
+
+    // Never checked + unavailable: says unknown-until-it-finishes, not "not connected".
+    const cold = collectText(
+      renderCard({
+        codexStatus: { connected: false, unavailable: true, reason: "backup_in_progress" },
+        codexStatusKnown: false,
+      }),
+    ).join(" ");
+    expect(cold).toContain("Codex status unknown until it finishes");
+    expect(cold).not.toContain("Not connected");
+  });
+
+  it("a deferred exchange (202 deferred:true) toasts the honest message and shows 'Connected — saved after the backup finishes' until the store confirms", async () => {
+    api.exchangeCodexOAuth.mockResolvedValue({
+      ok: true,
+      deferred: true,
+      reason: "backup_in_progress",
+    });
+    let tree = renderCard({
+      codexStatus: { connected: false, unavailable: true, reason: "backup_in_progress" },
+      codexStatusKnown: false,
+    });
+    // Start the flow (popup blocked → manual paste path), paste, complete.
+    findAllByType(tree, "button")
+      .find((vnode) => collectText(vnode).join(" ").includes("Connect Codex OAuth"))
+      .props.onclick();
+    tree = renderCard({
+      codexStatus: { connected: false, unavailable: true, reason: "backup_in_progress" },
+      codexStatusKnown: false,
+    });
+    findAllByType(tree, "input")[0].props.onInput({
+      target: { value: "http://localhost:1455/auth/callback?code=abc&state=def" },
+    });
+    tree = renderCard({
+      codexStatus: { connected: false, unavailable: true, reason: "backup_in_progress" },
+      codexStatusKnown: false,
+    });
+    await findActionButtonByLabel(tree, "Complete Codex OAuth").props.onClick();
+
+    expect(showToast).toHaveBeenCalledWith(
+      "Codex connected — saved after the backup finishes",
+      "success",
+    );
+    expect(kBaseProps.onRefreshCodex).toHaveBeenCalledTimes(1);
+    tree = renderCard({
+      codexStatus: { connected: false, unavailable: true, reason: "backup_in_progress" },
+      codexStatusKnown: false,
+    });
+    const badge = findAllByType(tree, Badge).find((vnode) =>
+      collectText(vnode).join(" ").includes("saved after the backup finishes"),
+    );
+    expect(badge).toBeTruthy();
+    expect(badge.props.tone).toBe("info");
+    expect(collectText(tree).join(" ")).not.toContain("Not connected");
+
+    // The store confirms the saved connection: the ordinary badge is back.
+    // (Running the collected effects includes the window message listener —
+    // stub a window for it; node has none.)
+    const originalWindow = globalThis.window;
+    globalThis.window = { addEventListener: vi.fn(), removeEventListener: vi.fn() };
+    try {
+      tree = renderCard({ codexStatus: { connected: true }, codexStatusKnown: true });
+      for (const effect of harness.effects) effect();
+    } finally {
+      globalThis.window = originalWindow;
+    }
+    tree = renderCard({ codexStatus: { connected: true }, codexStatusKnown: true });
+    // (The harness walks props.children AND rendered, so a badge's text
+    // collects twice — match by inclusion, not equality.)
+    const labels = findAllByType(tree, Badge).map((vnode) => collectText(vnode).join(" "));
+    expect(labels.some((label) => label.includes("Connected"))).toBe(true);
+    expect(labels.join(" ")).not.toContain("saved after");
+    expect(labels.join(" ")).not.toContain("Unavailable");
   });
 });
