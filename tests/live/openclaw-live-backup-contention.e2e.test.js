@@ -359,7 +359,7 @@ describeLive("LIVE #54 reproduction: runBackup vs real CLIs under SQLite lock co
       const offline = readArchiveManifest(produced.offlineCopy);
 
       // Upstream (2026.9.1-beta.1) schemaVersion-1 core: every key it writes
-      // is present in ours; ours adds exactly the documented four
+      // is present in ours; ours adds exactly the documented five
       // (docs/designs/backup-offline-copy.md §3).
       expect(upstream.schemaVersion).toBe(1);
       expect(offline.schemaVersion).toBe(1);
@@ -369,7 +369,7 @@ describeLive("LIVE #54 reproduction: runBackup vs real CLIs under SQLite lock co
       expect(missingInOffline, `upstream manifest keys missing from the offline copy: ${missingInOffline}`).toEqual([]);
       const alphaclawOnly = offlineKeys.filter((key) => !upstreamKeys.includes(key)).sort();
       expect(alphaclawOnly).toEqual(
-        ["alphaclawFormatVersion", "diagnosis", "exclusivityEvidence", "producer"].sort(),
+        ["alphaclawFormatVersion", "diagnosis", "exclusivityEvidence", "partialReasons", "producer"].sort(),
       );
       // paths.* and options.* core keys.
       const upstreamPathKeys = Object.keys(upstream.paths).sort();

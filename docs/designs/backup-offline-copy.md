@@ -229,7 +229,7 @@ key); every other core key (`schemaVersion`, `createdAt`, `archiveRoot`,
 `runtimeVersion`, `platform`, `nodeVersion`, `options.{includeWorkspace,
 onlyConfig}`, `paths.{stateDir,configPath,oauthDir,workspaceDirs}`, `assets[]`,
 `skipped[] { kind, sourcePath, reason }`) is identical. The offline-copy
-manifest carries the same core set plus `producer`, `alphaclawFormatVersion`,
+manifest carries the same core set plus `producer`, `alphaclawFormatVersion`, `partialReasons`,
 `exclusivityEvidence`, `diagnosis` — and lists databases per file (`kind:
 "sqlite"`, `archivePath` relative to `<archiveRoot>/`).
 
