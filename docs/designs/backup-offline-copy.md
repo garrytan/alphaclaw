@@ -131,8 +131,10 @@ An archive from either producer counts as verified only when:
 2. `tar -xzOf <file> --wildcards '*/manifest.json'` extracts a JSON object with
    an `assets[]` array,
 3. that manifest lists this box's state databases (`state/openclaw.sqlite`, or
-   the per-agent DB set when there is no global DB) by `archivePath` or
-   `sourcePath` suffix.
+   the per-agent DB set when there is no global DB) — by `archivePath` /
+   `sourcePath` suffix (per-file assets, the offline copy) OR by an asset
+   whose `sourcePath` is the state dir or an ancestor of the database
+   (upstream's single `kind: "state"` asset; see §7).
 
 The run record carries `backup.usableCheck: "manifest_ok"`; a failing check is
 treated as a `verify` failure (terminal, quarantined as `.unverified`).
@@ -141,6 +143,10 @@ treated as a `verify` failure (terminal, quarantined as `.unverified`).
 
 There is no tar-restore CLI upstream; restore is a supervised manual procedure.
 
+The operator-facing version of these steps (with the exact commands, the
+preflight vocabulary and the "restart did not take effect" cross-check) is
+`docs/upgrade-troubleshooting.md` "Restoring a backup"; the UI links there.
+
 1. **Stop the gateway.** From the Watchdog terminal: `openclaw gateway stop`
    (on 2026.8.x/2026.9.x add `--force` when the shell is non-interactive).
    Confirm nothing listens on the gateway port and no `openclaw` process is
@@ -148,9 +154,12 @@ There is no tar-restore CLI upstream; restore is a supervised manual procedure.
 2. **Extract into an isolated directory**, never over the live state dir:
    `mkdir /tmp/restore && tar -xzf <archive> -C /tmp/restore`.
 3. **Read `manifest.json`.** For each `assets[]` entry, `archivePath` is the
-   file inside the extracted root and `sourcePath` is where it belongs. Check
-   `producer`, `createdAt`, `options.includeWorkspace` and `skipped[]` so you
-   know what is NOT in the archive (excluded workspaces, sidecars).
+   file (offline copy) or directory (upstream's single `state` asset — the
+   whole state dir under `payload/posix<stateDir>`) inside the extracted
+   root, and `sourcePath` is where it belongs; place each at `sourcePath`
+   relative to `paths.stateDir`. Check `producer`, `createdAt`,
+   `options.includeWorkspace` and `skipped[]` so you know what is NOT in the
+   archive (excluded workspaces, sidecars).
 4. **Move the current state dir aside** (`mv /data/.openclaw
    /data/.openclaw.pre-restore-<ts>`) and **place assets** per the manifest:
    `openclaw.json`, then every `sqlite` asset, then the remaining files. Do
@@ -185,7 +194,83 @@ recorded as `backup.reused: true` with `reusedAgeMs` and the fresh failure,
 announced as an important notification, and pinned against pruning while the
 migrating run is fenced.
 
-## 7. Inventory
+## 7. Verified against upstream (live tier, 2026-09-02)
+
+Facts recorded by `tests/live/openclaw-live-backup-contention.e2e.test.js`,
+`openclaw-live-restore-drill.e2e.test.js` and `openclaw-live-downgrade.e2e.test.js`
+against the real 2026.7.1-2 (pin), 2026.8.2 (stable) and 2026.9.1-beta.1
+(beta) packages. Re-verify here before changing the check or the format.
+
+### Upstream manifest shape (all three lines)
+
+Upstream's `backup create` writes exactly ONE asset:
+
+```json
+"assets": [{ "kind": "state", "sourcePath": "<stateDir>",
+             "archivePath": "<archiveRoot>/payload/posix<stateDir>" }]
+```
+
+The state DB is never a per-file asset — it lives under that directory in
+the archive (`…/payload/posix<stateDir>/state/openclaw.sqlite`). 2026.8.2 and
+the beta add `paths.agentRoots[] { agentId, sourcePath }` (the pin has no such
+key); every other core key (`schemaVersion`, `createdAt`, `archiveRoot`,
+`runtimeVersion`, `platform`, `nodeVersion`, `options.{includeWorkspace,
+onlyConfig}`, `paths.{stateDir,configPath,oauthDir,workspaceDirs}`, `assets[]`,
+`skipped[] { kind, sourcePath, reason }`) is identical. The offline-copy
+manifest carries the same core set plus `producer`, `alphaclawFormatVersion`,
+`exclusivityEvidence`, `diagnosis` — and lists databases per file (`kind:
+"sqlite"`, `archivePath` relative to `<archiveRoot>/`).
+
+**Consequence for the usable check (§4, WI-6.1):** "the manifest lists this
+box's state databases" must accept a required DB when an asset's
+`sourcePath` is the state dir (or any ancestor of the DB's absolute path),
+not only when an asset's `archivePath`/`sourcePath` ends with
+`state/openclaw.sqlite`. A per-file-only rule rejects EVERY upstream archive
+and turns every hard-gated apply into `409 backup_failed (verify)`.
+
+### Lease behaviour under a held RESERVED lock (`BEGIN IMMEDIATE`)
+
+| CLI | Lease | Under the lock | Output |
+|---|---|---|---|
+| 2026.7.1-2 | none | exit 0 in ~1.4 s, archive verified | `Config health-state write failed: database is locked` (warning) |
+| 2026.8.2 | legacy-audit (when `logs/config-audit.jsonl` / `audit/system-agent.jsonl` / `audit/crestodian.jsonl` exists) | exit 1 after ~11 s, no archive | `[sqlite/transaction] SQLite transaction lock wait failed` ×N, `Warning: the backup outcome could not be recorded: database is locked`, `timed out waiting for legacy audit migration lease migration.legacy-audit/filesystem-sqlite-boundary` |
+| 2026.9.1-beta.1 | same | same | same (the mid-run form is `… lease migration.legacy-audit/filesystem-sqlite-boundary was lost`, issue #54) |
+
+The lease-timeout line's label has spaces ("legacy audit migration lease");
+`kStateContentionPattern` must match it on its own, not only via the
+companion lines. The beta refuses a fixture per-agent DB ("has no schema
+ownership metadata … a direct file copy was refused") but backs up a
+fixture GLOBAL state DB (it runs its own schema check on it).
+
+### `database preflight` vocabulary (standalone snapshot, `--json`)
+
+| found → target | status | exit |
+|---|---|---|
+| pin DB (user_version 1) → 2026.8.2 (15) / beta (12) | `migration-required` | 0 |
+| 2026.8.2 DB (15) → 2026.8.2 | `exact` | 0 |
+| beta DB (12) → 2026.8.2 (15) | `migration-required` | 0 (the #54 downgrade IS readable) |
+| 2026.8.2 DB (15) → beta (12) | `incompatible` | 1 (hard-blocks the apply) |
+| any DB with `-wal`/`-shm` beside it | `indeterminate` ("requires a consolidated snapshot with no sidecars") | 1 |
+
+The pin has no `database` command (`Unknown command: openclaw database`).
+`runDatabasePreflight` always probes a `VACUUM INTO` snapshot, so the
+sidecar case never reaches it; the manual runbook must do the same.
+
+### Restore drill results (12 cells + calibration)
+
+Producer {upstream, alphaclaw-offline-copy} × fixture journal {WAL, DELETE}
+× target {pin, stable, beta}: every cell restored by the runbook (extract →
+place `assets[]` at `archivePath → sourcePath`), preflighted (`unsupported`
+on the pin, `migration-required` / found 1 elsewhere), passed
+`PRAGMA integrity_check`, and booted `gateway run` to `/healthz` in 6-8 s
+(budget 120 s). Restored databases carry no sidecars from either producer.
+Calibration: a 526 MB state tree (500 MB of incompressible rows in a second
+DB) offline-copied in **19.2 s** (27 MB/s source throughput; sqlite
+`backup()` + `tar -I 'gzip -1'`) → 525 MB archive, both copies
+`integrity_check ok` — well inside the 8-minute budget, which therefore has
+~25× headroom at this size and covers roughly 12 GB at the same rate.
+
+## 8. Inventory
 
 `GET /api/openclaw/backups` (5 s cache, manifest tier `safe`) lists every
 archive-class file in the backups directory with provenance from the run

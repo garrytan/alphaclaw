@@ -55,6 +55,15 @@ const kGatewayPort = 18789;
 const kStateDbPath = "/data/.openclaw/state/openclaw.sqlite";
 const kChurnScriptPath = "/data/e2e-churn.sh";
 const kChurnControlPath = "/data/e2e-churn-on";
+// Issue #54 stage: a SECOND detached process that holds SQLite's RESERVED
+// lock (BEGIN IMMEDIATE) on the state DB while the gateway is down — the
+// quiesce window in which the pre-update backup runs. Own control file so it
+// can be stopped independently of the churner; a JSONL log of every hold.
+const kContentionScriptPath = "/data/e2e-contention.cjs";
+const kContentionControlPath = "/data/e2e-contention-on";
+const kContentionLogPath = "/data/e2e-contention.jsonl";
+const kContentionHoldMinMs = 15_000;
+const kContentionHoldMaxMs = 30_000;
 
 const kMin = 60 * 1000;
 
@@ -104,6 +113,7 @@ const ctx = {
   cookie: null,
   bootStartedAt: null,
   placeholderObserved: null,
+  contentionOutcome: null,
   metaKeyAfterUpgrade: undefined,
   activeContainer: kContainerA,
 };
@@ -255,9 +265,15 @@ describeContainer("container E2E: stable→beta upgrade in the production image"
   }, 2 * kMin);
 
   afterAll(async () => {
-    // Stop the churner loop (best-effort; it also dies with its container).
+    // Stop the churner + contention loops (best-effort; both also die with
+    // their container).
     try {
-      await execInContainer(ctx.activeContainer, ["rm", "-f", kChurnControlPath]);
+      await execInContainer(ctx.activeContainer, [
+        "rm",
+        "-f",
+        kChurnControlPath,
+        kContentionControlPath,
+      ]);
     } catch {}
     // Preserve evidence before teardown when the journey broke.
     if (journeyBroken) {
@@ -304,6 +320,32 @@ describeContainer("container E2E: stable→beta upgrade in the production image"
       { timeoutMs: 2 * kMin },
     );
     expect(claudeOut).toContain(pin);
+  });
+
+  step("image carries tar + gzip (the offline copy and the usable check need them)", 2 * kMin, async () => {
+    // The #54 offline copy archives with `tar -I 'gzip -1'` and every
+    // verified artifact passes `gzip -t` + `tar -xzOf … manifest.json`
+    // (WI-6.1). node:22-slim ships both, but a slimmer base or a stripped
+    // layer would turn every hard-gated backup into a verify failure — so
+    // the image itself is asserted, not assumed. `command -v` exits 1 when a
+    // tool is missing, which docker() surfaces as a rejection.
+    const { stdout } = await docker(
+      [
+        "run",
+        "--rm",
+        "--entrypoint",
+        "sh",
+        kImageTag,
+        "-c",
+        "command -v tar && command -v gzip && tar --version | head -1 && gzip --version | head -1",
+      ],
+      { timeoutMs: 2 * kMin },
+    );
+    expect(stdout).toMatch(/\/tar\b/);
+    expect(stdout).toMatch(/\/gzip\b/);
+    // GNU tar: the offline copy's primary `-I` path (the `sh -c` pipe is
+    // only the busybox/bsd fallback).
+    expect(stdout).toMatch(/GNU tar/);
   });
 
   step("boots stable against the seeded volume: UI login + pin + gateway healthz", 12 * kMin, async () => {
@@ -402,6 +444,90 @@ describeContainer("container E2E: stable→beta upgrade in the production image"
           .then(() => true)
           .catch(() => false),
       { timeoutMs: 30_000, intervalMs: 1000, label: "churner writing catalog.json" },
+    );
+  });
+
+  step("starts the SQLite-contention holder (issue #54 shape)", 2 * kMin, async () => {
+    // (e2) The concurrent writer that cost issue #54 its state lease: while
+    // /healthz FAILS (the gateway is paused for the quiesced backup) this
+    // detached script takes BEGIN IMMEDIATE on the state DB and holds it for
+    // 15-30 s, then RELEASES and waits for the gateway to come back before
+    // holding again — one hold per quiesce window, never a permanent lock
+    // (a permanent foreign holder would rightly make the offline copy refuse
+    // on its /proc fd scan, and the journey's question is "does the ladder
+    // ride through contention", not "does it refuse a hostile box"). Every
+    // hold is logged as JSONL so the assertion after the journey can prove
+    // the hold overlapped the backup window instead of hoping it did.
+    // Mirrors the churner: own control file, execDetachedInContainer, and
+    // node:sqlite (flagged on older 22.x lines — both spawns are tried).
+    const contentionScript = [
+      "const fs = require('fs');",
+      "const http = require('http');",
+      "const { DatabaseSync } = require('node:sqlite');",
+      `const kDb = ${JSON.stringify(kStateDbPath)};`,
+      `const kControl = ${JSON.stringify(kContentionControlPath)};`,
+      `const kLog = ${JSON.stringify(kContentionLogPath)};`,
+      `const kHealth = 'http://127.0.0.1:${kGatewayPort}/healthz';`,
+      `const kHoldMin = ${kContentionHoldMinMs};`,
+      `const kHoldMax = ${kContentionHoldMaxMs};`,
+      "const sleep = (ms) => new Promise((r) => setTimeout(r, ms));",
+      "const log = (entry) => { try { fs.appendFileSync(kLog, JSON.stringify({ at: new Date().toISOString(), ...entry }) + '\\n'); } catch {} };",
+      "const healthy = () => new Promise((resolve) => {",
+      "  const req = http.get(kHealth, (res) => { res.resume(); resolve(res.statusCode >= 200 && res.statusCode < 300); });",
+      "  req.on('error', () => resolve(false));",
+      "  req.setTimeout(1000, () => { req.destroy(); resolve(false); });",
+      "});",
+      "(async () => {",
+      "  log({ event: 'start', pid: process.pid });",
+      "  let holds = 0;",
+      "  while (fs.existsSync(kControl)) {",
+      "    if (await healthy()) { await sleep(500); continue; }",
+      "    if (!fs.existsSync(kDb)) { await sleep(500); continue; }",
+      "    let db = null;",
+      "    try {",
+      "      db = new DatabaseSync(kDb);",
+      "      db.exec('PRAGMA busy_timeout = 5000');",
+      "      db.exec('BEGIN IMMEDIATE');",
+      "      holds += 1;",
+      "      const holdMs = kHoldMin + Math.floor(Math.random() * (kHoldMax - kHoldMin));",
+      "      const until = Date.now() + holdMs;",
+      "      log({ event: 'hold', hold: holds, holdMs });",
+      "      while (Date.now() < until && fs.existsSync(kControl)) await sleep(250);",
+      "      db.exec('ROLLBACK');",
+      "      log({ event: 'release', hold: holds });",
+      "    } catch (error) {",
+      "      log({ event: 'error', message: String(error && error.message || error) });",
+      "      await sleep(1000);",
+      "    } finally {",
+      "      try { if (db) db.close(); } catch {}",
+      "    }",
+      "    // One hold per quiesce window: wait for the gateway to answer again",
+      "    // (or the control file to go) before considering another hold.",
+      "    while (fs.existsSync(kControl) && !(await healthy())) await sleep(1000);",
+      "  }",
+      "  log({ event: 'stop', holds });",
+      "})();",
+    ].join("\n");
+    await seedVolume(kVolume, {
+      [kContentionScriptPath]: contentionScript,
+      [kContentionControlPath]: "1",
+    });
+    try {
+      await execDetachedInContainer(kContainerA, ["node", kContentionScriptPath]);
+    } catch {
+      await execDetachedInContainer(kContainerA, [
+        "node",
+        "--experimental-sqlite",
+        kContentionScriptPath,
+      ]);
+    }
+    // Prove it is alive before moving on: its first log line is the start marker.
+    await waitFor(
+      () =>
+        execInContainer(kContainerA, ["cat", kContentionLogPath])
+          .then(({ stdout }) => stdout.includes('"event":"start"'))
+          .catch(() => false),
+      { timeoutMs: 30_000, intervalMs: 1000, label: "contention holder started" },
     );
   });
 
@@ -576,6 +702,93 @@ describeContainer("container E2E: stable→beta upgrade in the production image"
     } finally {
       await browser.close().catch(() => {});
     }
+  });
+
+  step("run record: the backup rode through the contention window and is verified", 3 * kMin, async () => {
+    // (g2) The durable authority for what the backup step did survives the
+    // activation restart: runs/<opId>.json via GET /api/openclaw/runs. The
+    // assertions are honest about WHO ran the backup: the stable pin's CLI
+    // (2026.7.1-2) does not take a state lease and finishes under a held
+    // RESERVED lock (verified live: exit 0, "Config health-state write
+    // failed: database is locked" as a warning), so contention RETRIES are
+    // expected only when the classifier saw a lease/lock failure. What must
+    // ALWAYS hold: the holder's lock overlapped the backup window, the ladder
+    // still produced a VERIFIED, usable archive, and any contention that was
+    // classified was handled (retries with the gateway paused, or the
+    // offline copy) instead of ending the run.
+    const runsDoc = await fetchJsonWithCookie(`${baseUrl()}/api/openclaw/runs`, ctx.cookie);
+    const run = (runsDoc.runs || []).find(
+      (entry) => entry?.target?.version === ctx.beta && entry?.backup,
+    );
+    expect(run, `no run record for the ${ctx.beta} apply: ${JSON.stringify(runsDoc).slice(0, 800)}`).toBeTruthy();
+    const detail = await fetchJsonWithCookie(
+      `${baseUrl()}/api/openclaw/runs/${encodeURIComponent(run.operationId)}`,
+      ctx.cookie,
+    );
+    const backup = detail?.run?.backup ?? detail?.backup ?? run.backup;
+    expect(backup.noBackup).toBe(false);
+    expect(backup.verified).toBe(true);
+    expect(backup.usableCheck).toBe("manifest_ok");
+    expect(["openclaw", "alphaclaw-offline-copy"]).toContain(backup.producer);
+    expect(backup.quiesced).toBe(true);
+    expect(backup.attempts).toBeGreaterThanOrEqual(1);
+
+    // The holder's log proves a hold overlapped the backup step (both sides
+    // are wall-clock ISO/epoch stamps from the same container clock).
+    const { stdout: holderLog } = await execInContainer(ctx.activeContainer, [
+      "cat",
+      kContentionLogPath,
+    ]).catch(() => ({ stdout: "" }));
+    const holds = holderLog
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => {
+        try {
+          return JSON.parse(line);
+        } catch {
+          return null;
+        }
+      })
+      .filter((entry) => entry && entry.event === "hold");
+    // record.backup.at is the step's START (backupStartedAt in runBackup);
+    // durationMs spans the whole ladder.
+    const backupStartedAt = Number(backup.at);
+    const backupFinishedAt = backupStartedAt + Number(backup.durationMs || 0);
+    const overlapping = holds.filter((hold) => {
+      const start = Date.parse(hold.at);
+      const end = start + Number(hold.holdMs || 0);
+      return start <= backupFinishedAt && end >= backupStartedAt;
+    });
+    console.log(
+      `[container-e2e] contention holder: ${holds.length} hold(s), ${overlapping.length} overlapping the backup window; ` +
+        `backup attempts=${backup.attempts} quiescedAttempts=${backup.quiescedAttempts} contentionRetries=${backup.contentionRetries} ` +
+        `producer=${backup.producer} offlineCopy=${JSON.stringify(backup.offlineCopy)} durationMs=${backup.durationMs}`,
+    );
+    expect(holds.length, `holder never took a lock:\n${holderLog.slice(-1500)}`).toBeGreaterThanOrEqual(1);
+    expect(overlapping.length, "no hold overlapped the backup window").toBeGreaterThanOrEqual(1);
+
+    // Contention handling, when contention was classified at all: retries
+    // ran with the gateway still paused, or the offline copy stood in — and
+    // the run still ended with the verified artifact asserted above.
+    const contentionHandled =
+      (backup.contentionRetries ?? 0) > 0 || backup.offlineCopy?.ok === true;
+    if (contentionHandled) {
+      expect(backup.quiescedAttempts).toBeGreaterThanOrEqual(1);
+      if (backup.offlineCopy?.ok) {
+        expect(backup.producer).toBe("alphaclaw-offline-copy");
+        expect(backup.file).toMatch(/\.alphaclaw\.tar\.gz$/);
+      }
+    } else {
+      // The pin's CLI finished under the lock: no lease, no retry needed.
+      expect(backup.producer).toBe("openclaw");
+      expect(backup.contentionRetries ?? 0).toBe(0);
+    }
+    ctx.contentionOutcome = {
+      holds: holds.length,
+      overlapping: overlapping.length,
+      contentionRetries: backup.contentionRetries ?? 0,
+      producer: backup.producer,
+    };
   });
 
   step("live instance runs the beta and the #20 config seeds survived", 5 * kMin, async () => {

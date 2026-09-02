@@ -84,6 +84,92 @@ const waitFor = async (predicate, timeoutMs, label = "condition") => {
 const kVersionShape = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?$/;
 const kFullShaShape = /^[0-9a-f]{40}$/;
 
+// The three upstream lines the #54 hardening was verified against (tarballs
+// unpacked and read; see the plan's §2). The pin comes from package.json —
+// the other two are the exact versions issue #54 downgraded between. Bump
+// deliberately: every contract below is stamped against these.
+const readDeclaredPin = () =>
+  JSON.parse(
+    fs.readFileSync(path.resolve(__dirname, "../../package.json"), "utf8"),
+  ).dependencies.openclaw;
+const kOpenclawLines = Object.freeze({
+  pin: readDeclaredPin(),
+  stable: "2026.8.2",
+  beta: "2026.9.1-beta.1",
+});
+
+// bin entry of an installed openclaw package dir (string or map form).
+const resolvePackageBin = (openclawPackageDir) => {
+  const pkg = JSON.parse(
+    fs.readFileSync(path.join(openclawPackageDir, "package.json"), "utf8"),
+  );
+  const rel =
+    typeof pkg.bin === "string" ? pkg.bin : Object.values(pkg.bin || {})[0];
+  return path.join(openclawPackageDir, rel);
+};
+
+// Real `npm install` of an exact upstream version, cached across live files
+// and runs under one per-version directory (the package is immutable on the
+// registry, so the cache key is the version). A cached tree is trusted only
+// when its bin actually runs and reports the version; anything else is
+// reinstalled. Set ALPHACLAW_LIVE_OPENCLAW_CACHE to relocate the cache (the
+// default lives in the temp dir and is NOT swept at exit — that is the point).
+const stageOpenclawVersion = async (
+  version,
+  { timeoutMs = 8 * 60 * 1000, logger = kSilentLogger } = {},
+) => {
+  const {
+    installOpenclawVersionToTempDir,
+  } = require("../../lib/server/openclaw-version");
+  const { execFileSync } = require("child_process");
+  if (!kVersionShape.test(String(version))) {
+    throw new Error(`stageOpenclawVersion needs an exact version, got ${version}`);
+  }
+  const cacheRoot =
+    process.env.ALPHACLAW_LIVE_OPENCLAW_CACHE ||
+    path.join(os.tmpdir(), "alphaclaw-live-openclaw-cache");
+  const cacheDir = path.join(cacheRoot, version);
+  const packageDir = path.join(cacheDir, "node_modules", "openclaw");
+  const runsAsVersion = () => {
+    try {
+      const out = String(
+        execFileSync(process.execPath, [resolvePackageBin(packageDir), "--version"], {
+          timeout: 60_000,
+          stdio: "pipe",
+          env: { ...scrubTestRunnerEnv(), OPENCLAW_NO_AUTO_UPDATE: "1" },
+        }),
+      );
+      return out
+        .split(/[\s()]+/)
+        .map((token) => token.replace(/^v/, ""))
+        .includes(version);
+    } catch {
+      return false;
+    }
+  };
+  if (fs.existsSync(packageDir) && runsAsVersion()) {
+    return { version, packageDir, bin: resolvePackageBin(packageDir), fromCache: true };
+  }
+  fs.rmSync(cacheDir, { recursive: true, force: true });
+  const staged = await installOpenclawVersionToTempDir({
+    versionSpec: version,
+    timeoutMs,
+    logger,
+  });
+  fs.mkdirSync(cacheRoot, { recursive: true });
+  try {
+    fs.renameSync(staged.tmpDir, cacheDir);
+  } catch {
+    // Cross-device temp dirs: copy, then let the installer's cleanup run.
+    fs.cpSync(staged.tmpDir, cacheDir, { recursive: true });
+    staged.cleanup();
+  }
+  if (!runsAsVersion()) {
+    throw new Error(`staged openclaw ${version} does not report its own version`);
+  }
+  return { version, packageDir, bin: resolvePackageBin(packageDir), fromCache: false };
+};
+
 // Shared pin fixture + backup stub used by the apply and dev tiers: a
 // minimal plausible pin tree (production ships the real image tree) and a
 // runner that intercepts ONLY `openclaw backup` (needs a live gateway).
@@ -164,6 +250,10 @@ module.exports = {
   kVersionShape,
   kFullShaShape,
   kFixturePin,
+  kOpenclawLines,
+  readDeclaredPin,
+  resolvePackageBin,
+  stageOpenclawVersion,
   writePinFixture,
   createBackupStubRunner,
   mkTemp,
