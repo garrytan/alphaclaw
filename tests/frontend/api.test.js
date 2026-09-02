@@ -819,6 +819,33 @@ describe("frontend/api", () => {
     expect(result).toEqual(payload);
   });
 
+  it("fetchWatchdogOverseerSituation returns the situation payload and rejects on the not_wired 503", async () => {
+    const payload = { ok: true, current: null, lastVerdict: null, nextManualAt: 0, inFlight: false };
+    global.fetch.mockResolvedValueOnce(mockJsonResponse(200, payload));
+    const api = await loadApiModule();
+    await expect(api.fetchWatchdogOverseerSituation()).resolves.toEqual(payload);
+    expect(global.fetch.mock.calls[0][0]).toBe("/api/watchdog/overseer/situation");
+
+    global.fetch.mockResolvedValueOnce(
+      mockJsonResponse(503, { ok: false, error: "not_wired" }),
+    );
+    await expect(api.fetchWatchdogOverseerSituation()).rejects.toThrow("not_wired");
+  });
+
+  it("requestWatchdogOverseerReview prefers the human message on a refusal envelope", async () => {
+    global.fetch.mockResolvedValueOnce(
+      mockJsonResponse(429, {
+        ok: false,
+        error: "rate_limited",
+        message: "Manual reviews are limited to one every 2 minutes — try again in about 1m.",
+      }),
+    );
+    const api = await loadApiModule();
+    await expect(api.requestWatchdogOverseerReview()).rejects.toThrow(
+      "Manual reviews are limited to one every 2 minutes — try again in about 1m.",
+    );
+  });
+
   it("resumeWatchdogChannels surfaces server error messages", async () => {
     global.fetch.mockResolvedValue(
       mockJsonResponse(409, { ok: false, error: "no_suppressed_channels" }),
@@ -1002,6 +1029,16 @@ describe("frontend/api endpoint wrapper coverage", () => {
     ["closeWatchdogTerminalSession", ["s1"], "/api/watchdog/terminal/close", "POST"],
     ["triggerWatchdogRepair", [], "/api/watchdog/repair", "POST"],
     ["fetchWatchdogResources", [], "/api/watchdog/resources", undefined],
+    ["fetchWatchdogOverseer", [], "/api/watchdog/overseer", undefined],
+    ["updateWatchdogOverseer", [true], "/api/watchdog/overseer", "PUT"],
+    ["requestWatchdogOverseerReview", [], "/api/watchdog/overseer/review", "POST"],
+    [
+      "requestWatchdogOverseerReview",
+      [{ incidentId: 12 }],
+      "/api/watchdog/overseer/review",
+      "POST",
+    ],
+    ["fetchWatchdogOverseerSituation", [], "/api/watchdog/overseer/situation", undefined],
     ["fetchWatchdogSettings", [], "/api/watchdog/settings", undefined],
     ["updateWatchdogSettings", [{ enabled: true }], "/api/watchdog/settings", "PUT"],
     ["updateWatchdogSettings", [null], "/api/watchdog/settings", "PUT"],
