@@ -55,6 +55,38 @@ const createApp = (deps) => {
 };
 
 describe("POST /api/watchdog/test-notification", () => {
+  // C32: while the state-DB quiet period holds, the raw notifier resolves zero
+  // sqlite-era pairing targets and would answer "nothing is configured or
+  // paired" — false. The route answers the repo-wide 409 and never sends.
+  it("answers 409 backup_in_progress (Retry-After 120) while the state-DB quiet period holds, without calling the notifier", async () => {
+    const {
+      beginStateDbQuiet,
+      resetStateDbQuietForTests,
+    } = require("../../lib/server/state-db-quiet");
+    resetStateDbQuietForTests();
+    const deps = createDeps();
+    const app = createApp(deps);
+    const { token } = await beginStateDbQuiet({ owner: "backup", maxMs: 60_000 });
+    try {
+      const res = await request(app).post("/api/watchdog/test-notification");
+      expect(res.status).toBe(409);
+      expect(res.headers["retry-after"]).toBe("120");
+      expect(res.body).toEqual({
+        ok: false,
+        code: "backup_in_progress",
+        error: "A backup is in progress; retry in about two minutes.",
+      });
+      expect(deps.watchdogNotifier.notify).not.toHaveBeenCalled();
+    } finally {
+      token.release();
+      resetStateDbQuietForTests();
+    }
+    // Released: the same request reaches the notifier.
+    const after = await request(app).post("/api/watchdog/test-notification");
+    expect(after.status).toBe(200);
+    expect(deps.watchdogNotifier.notify).toHaveBeenCalledTimes(1);
+  });
+
   it("sends a test notification and returns the notifier's per-channel result", async () => {
     const deps = createDeps();
     const app = createApp(deps);
