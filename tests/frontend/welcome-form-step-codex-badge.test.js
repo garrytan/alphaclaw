@@ -172,6 +172,46 @@ describe("frontend/welcome-form-step codex status badge", () => {
     expect(badge.props.tone).toBe("warning");
   });
 
+  it("a quiet-period status renders 'Unavailable during backup' with the honest line, never 'Not connected'", () => {
+    const tree = renderStep({
+      codexStatus: { connected: false, unavailable: true, reason: "backup_in_progress" },
+      codexStatusUnknown: false,
+      codexStatusKnown: false,
+    });
+    const badge = findBadgeByText(tree, "Unavailable during backup");
+    expect(badge).toBeTruthy();
+    expect(badge.props.tone).toBe("warning");
+    const text = collectText(tree).join(" ");
+    expect(text).toContain("Codex status unknown until it finishes");
+    expect(text).not.toContain("Not connected");
+
+    const lastKnown = collectText(
+      renderStep({
+        codexStatus: { connected: true, unavailable: true, reason: "backup_in_progress" },
+        codexStatusUnknown: false,
+        codexStatusKnown: true,
+      }),
+    ).join(" ");
+    expect(lastKnown).toContain("showing the last known Codex status (connected)");
+  });
+
+  it("a deferred save renders 'Connected — saved after the backup finishes' until the store confirms", () => {
+    const tree = renderStep({
+      codexStatus: { connected: false, unavailable: true, reason: "backup_in_progress" },
+      codexDeferredSavePending: true,
+    });
+    const badge = findBadgeByText(tree, "Connected — saved after the backup finishes");
+    expect(badge).toBeTruthy();
+    expect(badge.props.tone).toBe("info");
+
+    const confirmed = renderStep({
+      codexStatus: { connected: true },
+      codexDeferredSavePending: true,
+    });
+    expect(findBadgeByText(confirmed, "saved after")).toBeUndefined();
+    expect(findBadgeByText(confirmed, "Connected")).toBeTruthy();
+  });
+
   it("a kept last-known connected status renders 'Connected' even while checks fail", () => {
     const tree = renderStep({
       codexStatus: { connected: true },

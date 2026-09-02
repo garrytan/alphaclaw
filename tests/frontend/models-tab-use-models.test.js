@@ -404,4 +404,86 @@ describe("frontend/models-tab use-models", () => {
     expect(hook.result().codexStatusKnown).toBe(false);
     expect(hook.result().codexStatusError).toBe("cold boot failure");
   });
+
+  it("a quiet-period config read (unavailable: true) keeps the last-known profiles/order and flags the store — never adopts the empty placeholders", async () => {
+    const hook = renderHook();
+    const { catalog, config, codex } = fetchStates();
+    catalog.refresh.mockResolvedValue(kCatalog);
+    codex.refresh.mockResolvedValue({ connected: true });
+    config.refresh.mockResolvedValue(configPayload());
+    hook.runRefreshEffect();
+    await flushAsync();
+    hook.render();
+    expect(hook.result().authProfiles).toHaveLength(2);
+    expect(hook.result().authStoreUnavailable).toBeNull();
+
+    // A pending draft edit must survive the unavailable read too.
+    hook.result().editProfile("anthropic:default", { key: "draft-key" });
+    hook.render();
+
+    config.refresh.mockResolvedValue(
+      configPayload({
+        authProfiles: [],
+        authOrder: {},
+        unavailable: true,
+        reason: "backup_in_progress",
+      }),
+    );
+    await hook.result().refresh();
+    hook.render();
+
+    expect(hook.result().authProfiles).toHaveLength(2);
+    expect(hook.result().authOrder).toEqual({
+      anthropic: ["anthropic:default", "anthropic:manual"],
+    });
+    expect(hook.result().getProfileValue("anthropic:default")).toEqual({ key: "draft-key" });
+    expect(hook.result().authStoreUnavailable).toEqual({ reason: "backup_in_progress" });
+    // primary/configuredModels come from openclaw.json, not the store — still adopted.
+    expect(hook.result().primary).toBe("anthropic/claude-opus-4-8");
+    expect(hook.result().error).toBe("");
+
+    // The barrier lifts: the next readable payload clears the flag and adopts.
+    config.refresh.mockResolvedValue(configPayload({ authProfiles: [] }));
+    await hook.result().refresh();
+    hook.render();
+    expect(hook.result().authStoreUnavailable).toBeNull();
+    expect(hook.result().authProfiles).toEqual([]);
+  });
+
+  it("a quiet-period codex status keeps the last-known connection under the unavailable marker (refresh and refreshCodexStatus)", async () => {
+    const hook = renderHook();
+    const { catalog, config, codex } = fetchStates();
+    catalog.refresh.mockResolvedValue(kCatalog);
+    config.refresh.mockResolvedValue(configPayload());
+
+    // A FIRST read that is unavailable is not a checked status.
+    codex.refresh.mockResolvedValue({ connected: false, unavailable: true, reason: "backup_in_progress" });
+    hook.runRefreshEffect();
+    await flushAsync();
+    hook.render();
+    expect(hook.result().codexStatus).toEqual({
+      connected: false,
+      unavailable: true,
+      reason: "backup_in_progress",
+    });
+    expect(hook.result().codexStatusKnown).toBe(false);
+
+    codex.refresh.mockResolvedValue({ connected: true });
+    await hook.result().refreshCodexStatus();
+    hook.render();
+    expect(hook.result().codexStatus).toEqual({ connected: true });
+    expect(hook.result().codexStatusKnown).toBe(true);
+
+    codex.refresh.mockResolvedValue({ connected: false, unavailable: true, reason: "backup_in_progress" });
+    await hook.result().refreshCodexStatus();
+    hook.render();
+    // Still connected as far as anyone knows — only the marker is new.
+    expect(hook.result().codexStatus).toEqual({
+      connected: true,
+      unavailable: true,
+      reason: "backup_in_progress",
+    });
+    expect(hook.result().codexStatusKnown).toBe(true);
+    expect(hook.result().codexStatusError).toBe("");
+  });
 });

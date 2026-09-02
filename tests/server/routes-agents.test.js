@@ -385,6 +385,43 @@ describe("server/routes/agents", () => {
     });
   });
 
+  it("DELETE /api/channels/accounts forwards the service's outcome flags (gatewayRestartFailed, pairingRowsCleanupDeferred) with ok:true authoritative", async () => {
+    const agentsService = createAgentsServiceMock();
+    agentsService.deleteChannelAccount.mockResolvedValue({
+      ok: true,
+      gatewayRestartFailed: true,
+      pairingRowsCleanupDeferred: true,
+    });
+    const app = createApp(agentsService);
+
+    const response = await request(app).delete("/api/channels/accounts").send({
+      provider: "telegram",
+      accountId: "alerts",
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual({
+      ok: true,
+      gatewayRestartFailed: true,
+      pairingRowsCleanupDeferred: true,
+    });
+
+    // A service result without flags (or none at all) is still a plain ok.
+    agentsService.deleteChannelAccount.mockResolvedValue(undefined);
+    const bare = await request(app)
+      .delete("/api/channels/accounts")
+      .send({ provider: "telegram", accountId: "alerts" });
+    expect(bare.status).toBe(200);
+    expect(bare.body).toEqual({ ok: true });
+
+    // `ok` from the service can never demote the successful delete.
+    agentsService.deleteChannelAccount.mockResolvedValue({ ok: false, gatewayRestartFailed: true });
+    const demoted = await request(app)
+      .delete("/api/channels/accounts")
+      .send({ provider: "telegram", accountId: "alerts" });
+    expect(demoted.body).toEqual({ ok: true, gatewayRestartFailed: true });
+  });
+
   it("maps an invalid-accountId rejection to HTTP 400 on DELETE /api/channels/accounts", async () => {
     const agentsService = createAgentsServiceMock();
     agentsService.deleteChannelAccount.mockRejectedValue(

@@ -1964,6 +1964,72 @@ describe("frontend/upgrade-helpers backup reuse consent (WI-4.4/4.5)", () => {
     ).toBe(laterAt);
   });
 
+  it("prefers the server-published reuse window/max age on the inventory over the channel-payload mirror (F2)", async () => {
+    const {
+      buildBackupReuseConsentModel,
+      buildBackupReuseWindowStartMs,
+      buildBackupReuseMaxAgeMs,
+      kBackupReuseMaxAgeMs,
+      kBackupReuseStaleReason,
+    } = await loadUpgradeHelpers();
+    const archiveAt = kNow - 3 * 3_600_000;
+    const entry = makeEntry({ at: archiveAt });
+
+    // The ledger's older activation is visible ONLY through the inventory:
+    // channelInfo says nothing, yet the archive predates the server's window.
+    const inventory = { entries: [entry], reuseWindowStartMs: archiveAt + 60_000 };
+    expect(buildBackupReuseWindowStartMs(null, inventory)).toBe(archiveAt + 60_000);
+    expect(
+      buildBackupReuseConsentModel({ inventory, channelInfo: null, nowMs: kNow }),
+    ).toEqual(
+      expect.objectContaining({ available: false, sha256: null, reason: kBackupReuseStaleReason }),
+    );
+
+    // Both are lower bounds: a fresher channel payload (apply just landed,
+    // inventory still cached) still fences — max(), never "server wins".
+    expect(
+      buildBackupReuseWindowStartMs(
+        { applied: { at: archiveAt + 120_000 } },
+        { reuseWindowStartMs: archiveAt - 60_000 },
+      ),
+    ).toBe(archiveAt + 120_000);
+    // Server window at/below the archive's timestamp keeps it offered (>=).
+    expect(
+      buildBackupReuseConsentModel({
+        inventory: { entries: [entry], reuseWindowStartMs: archiveAt },
+        nowMs: kNow,
+      }).available,
+    ).toBe(true);
+
+    // Absent / malformed server values fall back to the mirror (old servers).
+    expect(buildBackupReuseWindowStartMs(null, { entries: [] })).toBe(0);
+    expect(buildBackupReuseWindowStartMs(null, { reuseWindowStartMs: "nope" })).toBe(0);
+    expect(buildBackupReuseMaxAgeMs(null)).toBe(kBackupReuseMaxAgeMs);
+    expect(buildBackupReuseMaxAgeMs({ reuseMaxAgeMs: 0 })).toBe(kBackupReuseMaxAgeMs);
+    expect(buildBackupReuseMaxAgeMs({ reuseMaxAgeMs: -5 })).toBe(kBackupReuseMaxAgeMs);
+    expect(buildBackupReuseMaxAgeMs({ reuseMaxAgeMs: "x" })).toBe(kBackupReuseMaxAgeMs);
+
+    // A server-published max age is authoritative in both directions.
+    const twoHours = 2 * 3_600_000;
+    expect(buildBackupReuseMaxAgeMs({ reuseMaxAgeMs: twoHours })).toBe(twoHours);
+    expect(
+      buildBackupReuseConsentModel({
+        inventory: { entries: [entry], reuseMaxAgeMs: twoHours },
+        nowMs: kNow,
+      }),
+    ).toEqual(expect.objectContaining({ available: false, reason: kBackupReuseStaleReason }));
+    const old = makeEntry({ at: kNow - 30 * 3_600_000 });
+    expect(
+      buildBackupReuseConsentModel({
+        inventory: { entries: [old], reuseMaxAgeMs: 48 * 3_600_000 },
+        nowMs: kNow,
+      }).available,
+    ).toBe(true);
+    expect(
+      buildBackupReuseConsentModel({ inventory: { entries: [old] }, nowMs: kNow }).available,
+    ).toBe(false);
+  });
+
   it("R7: buildApplyConfirmModel threads channelInfo into the consent candidate", async () => {
     const { buildApplyConfirmModel, kBackupReuseStaleReason } = await loadUpgradeHelpers();
     const inventory = { entries: [makeEntry({ at: kNow - 3 * 3_600_000 })] };
@@ -2153,5 +2219,45 @@ describe("frontend/upgrade-helpers backup reuse consent (WI-4.4/4.5)", () => {
       { id: "ineligible", label: "not reusable — no run record for it", tone: "warning" },
     ]);
     expect(buildBackupInventoryRows(null, kNow)).toEqual([]);
+  });
+
+  it("renders a partial archive's recorded reasons (workspace exclusion, skipped core symlinks) and falls back to the generic label for old records (F4)", async () => {
+    const {
+      buildBackupInventoryRows,
+      buildBackupPartialBadgeLabel,
+      buildBackupPartialReasonText,
+      kBackupIneligibleReasonLabels,
+    } = await loadUpgradeHelpers();
+    const reasons = [
+      "workspace files excluded (900 MB > 512 MB inline limit)",
+      "credentials/oauth.json: symlink skipped",
+    ];
+    const partial = makeEntry({
+      partial: true,
+      eligible: false,
+      ineligibleReason: "partial",
+      producer: "alphaclaw-offline-copy",
+      partialReasons: reasons,
+    });
+    expect(buildBackupPartialReasonText(partial)).toBe(reasons.join("; "));
+    expect(buildBackupPartialBadgeLabel(partial)).toBe(`partial — ${reasons.join("; ")}`);
+    const [row] = buildBackupInventoryRows({ entries: [partial] }, kNow);
+    expect(row.badges.map((badge) => badge.label)).toEqual([
+      "verified",
+      `partial — ${reasons.join("; ")}`,
+    ]);
+
+    // Old records: partial:true with no reasons (or null / debris) keep the
+    // generic workspace-excluded label rather than inventing a reason.
+    for (const partialReasons of [undefined, null, [], ["  ", 42]]) {
+      const legacy = makeEntry({ partial: true, eligible: false, ineligibleReason: "partial", partialReasons });
+      expect(buildBackupPartialBadgeLabel(legacy)).toBe("partial — workspace files excluded");
+      expect(buildBackupInventoryRows({ entries: [legacy] }, kNow)[0].badges[1].label).toBe(
+        "partial — workspace files excluded",
+      );
+    }
+    expect(buildBackupPartialReasonText(null)).toBe(kBackupIneligibleReasonLabels.partial);
+    // Whitespace is trimmed; non-strings are dropped, never rendered.
+    expect(buildBackupPartialReasonText({ partialReasons: ["  a ", 7, "b"] })).toBe("a; b");
   });
 });

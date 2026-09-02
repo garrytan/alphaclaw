@@ -55,6 +55,7 @@ vi.mock("../../lib/public/js/lib/codex-oauth-window.js", () => ({
 import * as preactHooks from "preact/hooks";
 import {
   disconnectCodex,
+  exchangeCodexOAuth,
   fetchCodexStatus,
 } from "../../lib/public/js/lib/api.js";
 import { openCodexAuthWindow } from "../../lib/public/js/lib/codex-oauth-window.js";
@@ -136,6 +137,47 @@ describe("frontend/use-welcome-codex status check semantics", () => {
     expect(hook.codexStatusError).toBe("status endpoint down");
     // A prior checked status exists, so the step is not in the unknown state.
     expect(hook.codexStatusUnknown).toBe(false);
+  });
+
+  it("a quiet-period read (unavailable: true) keeps the last-known connection under the marker; a deferred exchange flags the pending save", async () => {
+    await mountConnected();
+
+    fetchCodexStatus.mockResolvedValue({
+      connected: false,
+      unavailable: true,
+      reason: "backup_in_progress",
+    });
+    let hook = renderHook();
+    harness.effects[0]();
+    await flushAsync();
+    hook = renderHook();
+    expect(hook.codexStatus).toEqual({
+      connected: true,
+      unavailable: true,
+      reason: "backup_in_progress",
+    });
+    expect(hook.codexStatusKnown).toBe(true);
+    expect(hook.codexStatusUnknown).toBe(false);
+    expect(hook.codexStatusError).toBe("");
+    expect(hook.codexDeferredSavePending).toBe(false);
+
+    // Manual exchange answered 202 deferred: connected, save pending.
+    exchangeCodexOAuth.mockResolvedValue({ ok: true, deferred: true, reason: "backup_in_progress" });
+    hook.setCodexManualInput("http://localhost:1455/auth/callback?code=abc&state=def");
+    hook = renderHook();
+    await hook.completeCodexAuth();
+    hook = renderHook();
+    expect(hook.codexDeferredSavePending).toBe(true);
+    expect(setFormError).not.toHaveBeenCalledWith(expect.stringContaining("failed"));
+
+    // The store confirms the saved connection → pending clears.
+    fetchCodexStatus.mockResolvedValue({ connected: true });
+    hook = renderHook();
+    harness.effects[0]();
+    await flushAsync();
+    hook = renderHook();
+    expect(hook.codexDeferredSavePending).toBe(false);
+    expect(hook.codexStatus).toEqual({ connected: true });
   });
 
   it("a resolved {ok:false} envelope is a failed check too (last-known kept)", async () => {
