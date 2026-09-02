@@ -526,6 +526,91 @@ describe("server/routes/models state-DB quiet period", () => {
       });
     expectBackupInProgress(res);
     expect(deps.shellCmd).not.toHaveBeenCalledWith(expect.stringMatching(/git/));
+    // R2: the quiet-gated profile write runs BEFORE the openclaw.json model
+    // write — the route must never rewrite the config and then answer 409.
+    expect(deps.authProfiles.setModelConfig).not.toHaveBeenCalled();
+  });
+
+  it("PUT /api/models/config refuses at entry while a barrier is held — nothing is touched, not even the config write", async () => {
+    const { beginStateDbQuiet, resetStateDbQuietForTests } = require("../../lib/server/state-db-quiet");
+    resetStateDbQuietForTests();
+    const { token } = await beginStateDbQuiet({ owner: "backup", maxMs: 60_000 });
+    try {
+      const deps = createModelDeps();
+      const app = createApp(deps);
+      const res = await request(app)
+        .put("/api/models/config")
+        .send({ primary: "openai/gpt-5.1-codex", authOrder: { openai: ["openai:default"] } });
+      expectBackupInProgress(res);
+      expect(deps.authProfiles.setModelConfig).not.toHaveBeenCalled();
+      expect(deps.authProfiles.setAuthOrder).not.toHaveBeenCalled();
+      expect(deps.authProfiles.upsertProfile).not.toHaveBeenCalled();
+      expect(deps.authProfiles.syncConfigAuthReferencesForAgent).not.toHaveBeenCalled();
+      expect(deps.writeEnvFile).not.toHaveBeenCalled();
+    } finally {
+      token.release();
+      resetStateDbQuietForTests();
+    }
+  });
+
+  it("PUT /api/models/config orders every quiet-gated store write before the openclaw.json model write", async () => {
+    const deps = createModelDeps();
+    const order = [];
+    deps.authProfiles.upsertProfile.mockImplementation(() => order.push("upsertProfile"));
+    deps.authProfiles.setAuthOrder.mockImplementation(() => order.push("setAuthOrder"));
+    deps.authProfiles.setModelConfig.mockImplementation(() => order.push("setModelConfig"));
+    deps.authProfiles.syncConfigAuthReferencesForAgent.mockImplementation(() =>
+      order.push("syncConfigAuthReferencesForAgent"),
+    );
+    const app = createApp(deps);
+    const res = await request(app)
+      .put("/api/models/config")
+      .send({
+        primary: "openai/gpt-5.1-codex",
+        profiles: [{ id: "openai:default", type: "api_key", provider: "openai", key: "sk-1" }],
+        authOrder: { openai: ["openai:default"] },
+      });
+    expect(res.status).toBe(200);
+    expect(order).toEqual([
+      "upsertProfile",
+      "setAuthOrder",
+      "setModelConfig",
+      "syncConfigAuthReferencesForAgent",
+    ]);
+  });
+
+  // R8: during a backup the lenient store read is the "unavailable" marker;
+  // the routes carry it additively so configured credentials read as
+  // unavailable, never as removed.
+  it("GET /api/models/config and /api/models/auth carry unavailable:true + reason while the store is unavailable, and omit them otherwise", async () => {
+    const deps = createModelDeps();
+    deps.authProfiles.loadAuthStore.mockReturnValue({
+      version: 1,
+      profiles: {},
+      unavailable: true,
+      reason: "backup_in_progress",
+    });
+    const app = createApp(deps);
+
+    const config = await request(app).get("/api/models/config");
+    expect(config.status).toBe(200);
+    expect(config.body).toEqual(
+      expect.objectContaining({ ok: true, authProfiles: [], authOrder: {}, unavailable: true, reason: "backup_in_progress" }),
+    );
+    const auth = await request(app).get("/api/models/auth");
+    expect(auth.status).toBe(200);
+    expect(auth.body).toEqual({
+      ok: true,
+      profiles: [],
+      order: {},
+      unavailable: true,
+      reason: "backup_in_progress",
+    });
+
+    deps.authProfiles.loadAuthStore.mockReturnValue({ version: 1, profiles: {}, order: {} });
+    const available = await request(app).get("/api/models/auth");
+    expect(available.body).toEqual({ ok: true, profiles: [], order: {} });
+    expect(available.body.unavailable).toBeUndefined();
   });
 
   it("other auth-store failures keep their 500 mapping", async () => {

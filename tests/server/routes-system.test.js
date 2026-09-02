@@ -3334,6 +3334,68 @@ describe("server/routes/system", () => {
     );
   });
 
+  // R4: the notification used to be awaited while the lifecycle lock and
+  // restartInFlight were held — an outbox-unavailable direct send blocking on
+  // channel I/O held the restart lock with it.
+  it("the incumbent notification never holds the lifecycle lock or restartInFlight — a slow notify leaves both released when the failure returns", async () => {
+    const deps = createSystemDeps();
+    deps.restartRequiredState.beginRestart = vi.fn(() => ({
+      operationId: "op-slow-notify",
+      reasonsSnapshot: [],
+    }));
+    deps.restartRequiredState.completeRestart = vi.fn();
+    deps.watchdog = {
+      getStatus: vi.fn(() => ({})),
+      onExpectedRestart: vi.fn(),
+      onExpectedRestartSettled: vi.fn(),
+      recordOperationEvent: vi.fn(),
+    };
+    const release = vi.fn();
+    deps.gatewayLifecycleLock = {
+      acquire: vi.fn(async () => release),
+      getActiveOperation: vi.fn(() => null),
+    };
+    let settleNotify = null;
+    deps.notify = vi.fn(
+      () =>
+        new Promise((resolve) => {
+          settleNotify = resolve;
+        }),
+    );
+    deps.restartGateway = vi.fn(async () => {
+      throw new GatewayIncumbentRestartError(
+        "the previous gateway is still running: the gateway port never released after stop",
+        { wasRunningBefore: true, stopConfirmed: false },
+      );
+    });
+    const app = createApp(deps);
+
+    const res = await request(app).post("/api/gateway/restart");
+
+    expect(res.status).toBe(500);
+    expect(res.body.error).toContain("Gateway restart did not take effect");
+    expect(deps.notify).toHaveBeenCalledTimes(1);
+    // The failure record + ledger events are synchronous truth…
+    expect(deps.restartRequiredState.completeRestart).toHaveBeenCalledWith(
+      expect.objectContaining({ operationId: "op-slow-notify", ok: false }),
+    );
+    expect(deps.watchdog.recordOperationEvent).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "restart_incumbent", status: "failed" }),
+    );
+    // …and the lock/window are released while the notify is still pending.
+    expect(release).toHaveBeenCalledTimes(1);
+    expect(deps.watchdog.onExpectedRestartSettled).toHaveBeenCalledTimes(1);
+    // restartInFlight is clear: a second restart starts fresh instead of
+    // attaching to a "still running" first one.
+    const second = await request(app).post("/api/gateway/restart");
+    expect(second.status).toBe(500);
+    expect(second.body.attached).toBeUndefined();
+    expect(deps.restartRequiredState.beginRestart).toHaveBeenCalledTimes(2);
+    expect(deps.gatewayLifecycleLock.acquire).toHaveBeenCalledTimes(2);
+    expect(release).toHaveBeenCalledTimes(2);
+    settleNotify?.({ ok: true });
+  });
+
   it("a successful restart result carrying ok:true is unchanged (no incumbent handling)", async () => {
     const deps = createSystemDeps();
     deps.restartRequiredState.beginRestart = vi.fn(() => ({
