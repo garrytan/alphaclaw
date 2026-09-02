@@ -32,6 +32,7 @@ const {
   kOpenclawBackupQuiesceSuppressSlackMs,
   kOpenclawBackupQuiesceLeaseReserveMs,
   kOpenclawBackupReuseVerifyTimeoutMs,
+  kOpenclawBackupClockSkewToleranceMs,
   kOpenclawBackupStaleTempDirSlackMs,
   kOpenclawStateDbQuietSlackMs,
   kOpenclawBackupTimeoutMs,
@@ -226,6 +227,13 @@ const kLeaseLostTail = [
 ].join("\n");
 
 const sha256Of = (file) => crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
+
+// The reuse gate hands the archive tools /proc/<pid>/fd/<fd> — the inode it
+// will hash — never the candidate's pathname. Pins that tell candidates apart
+// by name resolve the link back (same process, so readlink works).
+const kProcFdPrefix = `/proc/${process.pid}/fd/`;
+const archiveToolFile = (arg) =>
+  String(arg).startsWith(kProcFdPrefix) ? fs.readlinkSync(arg) : String(arg);
 
 const lastStepDetail = (harness, name, status) =>
   harness.store
@@ -2156,8 +2164,8 @@ describe("server/openclaw-channel-backup-retry", () => {
         script: contentionScript,
         onArchiveTool: (opts) => {
           if (opts.command !== "gzip") return null;
-          seenFiles.push(opts.args[1]);
-          return opts.args[1].includes("newer0000")
+          seenFiles.push(archiveToolFile(opts.args[1]));
+          return archiveToolFile(opts.args[1]).includes("newer0000")
             ? { ok: false, code: null, tail: "", timedOut: true }
             : null;
         },
@@ -2176,6 +2184,132 @@ describe("server/openclaw-channel-backup-retry", () => {
         "openclaw-backup-1-older000.tar.gz",
       ]);
       expect(result.body.reusableBackup.file).toBe(older.file);
+    });
+
+    // ── The re-verification binds to the OPENED inode, never the pathname ──
+    it("re-verifies a candidate through /proc/<pid>/fd/<fd> — the inode it hashes — never through the pathname (Linux)", async () => {
+      const reuseToolCalls = [];
+      const { runnerImpl } = makeBackupRunner({
+        script: contentionScript,
+        onArchiveTool: (opts) => {
+          // Resolved HERE, while the gate still holds the fd open — it is
+          // closed (and the /proc entry gone) by the time the apply returns.
+          reuseToolCalls.push({
+            command: opts.command,
+            file: opts.args[1],
+            resolved: fs.readlinkSync(opts.args[1]),
+          });
+          return null;
+        },
+      });
+      const harness = createHarness({ runnerImpl });
+      const seeded = seedReusableArchive(harness, { ageMs: 2 * kHour });
+
+      const result = await harness.sync.applyUpdate(kHardGateTarget);
+
+      expect(result.status).toBe(409);
+      expect(result.body.reusableBackup).toEqual(
+        expect.objectContaining({ file: seeded.file, sha256: seeded.sha256 }),
+      );
+      expect(reuseToolCalls.map((c) => c.command)).toEqual(["gzip", "tar"]);
+      for (const call of reuseToolCalls) {
+        expect(call.file).toMatch(new RegExp(`^/proc/${process.pid}/fd/\\d+$`));
+        expect(call.resolved).toBe(seeded.file);
+      }
+    });
+
+    it("refuses a candidate swapped under its pathname between the usable check and the hash — consent never binds to an unchecked inode", async () => {
+      let swapped = false;
+      const { runnerImpl } = makeBackupRunner({
+        script: contentionScript,
+        onArchiveTool: (opts) => {
+          if (opts.command !== "tar" || swapped) return null;
+          swapped = true;
+          // A local writer renames a different archive onto the candidate's
+          // path while the manifest extraction is still running.
+          const target = archiveToolFile(opts.args[1]);
+          fs.writeFileSync(`${target}.decoy`, "a different archive\n");
+          fs.renameSync(`${target}.decoy`, target);
+          return null;
+        },
+      });
+      const harness = createHarness({ runnerImpl });
+      const seeded = seedReusableArchive(harness, { ageMs: 2 * kHour });
+
+      const result = await harness.sync.applyUpdate({
+        ...kHardGateTarget,
+        allowBackupReuse: { sha256: seeded.sha256 },
+      });
+
+      expect(swapped).toBe(true);
+      expect(result.status).toBe(409);
+      expect(result.body.code).toBe("backup_failed");
+      expect(result.body.reusableBackup).toBeUndefined();
+      expect(readRunBackupRecord(harness).noBackup).toBe(true);
+      expect(eventsOfType(harness.insertEvent, "backup_reused")).toHaveLength(0);
+    });
+
+    it("off Linux (platform seam): the tools read the pathname and a swap during the usable check is refused by the re-stat against the opened inode", async () => {
+      const toolFiles = [];
+      const { runnerImpl } = makeBackupRunner({
+        script: contentionScript,
+        onArchiveTool: (opts) => {
+          toolFiles.push(opts.args[1]);
+          if (opts.command !== "gzip") return null;
+          fs.writeFileSync(`${opts.args[1]}.decoy`, "a different archive\n");
+          fs.renameSync(`${opts.args[1]}.decoy`, opts.args[1]);
+          return null;
+        },
+      });
+      const harness = createHarness({ runnerImpl, extraSyncOptions: { platform: "darwin" } });
+      const seeded = seedReusableArchive(harness, { ageMs: 2 * kHour });
+
+      const result = await harness.sync.applyUpdate({
+        ...kHardGateTarget,
+        allowBackupReuse: { sha256: seeded.sha256 },
+      });
+
+      expect(result.status).toBe(409);
+      expect(result.body.reusableBackup).toBeUndefined();
+      // No /proc path off Linux: gzip and tar both read the pathname.
+      expect(toolFiles).toEqual([seeded.file, seeded.file]);
+      expect(eventsOfType(harness.insertEvent, "backup_reused")).toHaveLength(0);
+    });
+
+    // ── The 24 h window is bounded on BOTH sides ──
+    it("never offers a future-dated candidate (clock jump or forged record) — the inventory says future_dated", async () => {
+      const { runnerImpl } = makeBackupRunner({ script: contentionScript });
+      const harness = createHarness({ runnerImpl });
+      const seeded = seedReusableArchive(harness, { ageMs: -(2 * kHour) });
+      const [entry] = harness.sync.listBackupInventory().entries;
+      expect(entry).toEqual(
+        expect.objectContaining({ file: seeded.file, eligible: false, ineligibleReason: "future_dated" }),
+      );
+
+      const result = await harness.sync.applyUpdate({
+        ...kHardGateTarget,
+        allowBackupReuse: { sha256: seeded.sha256 },
+      });
+
+      expect(result.status).toBe(409);
+      expect(result.body.reusableBackup).toBeUndefined();
+      expect(eventsOfType(harness.insertEvent, "backup_reused")).toHaveLength(0);
+      // The only ledger run with a real backup is the seed itself — the
+      // current run recorded none (the seed sorts as the "newest" record, so
+      // readRunBackupRecord cannot be used here).
+      expect(harness.ledger.listRuns().filter((run) => run.backup?.noBackup === false)).toHaveLength(1);
+    });
+
+    it("a record inside the clock-skew tolerance still counts as recent", async () => {
+      const { runnerImpl } = makeBackupRunner({ script: contentionScript });
+      const harness = createHarness({ runnerImpl });
+      const seeded = seedReusableArchive(harness, {
+        ageMs: -(kOpenclawBackupClockSkewToleranceMs - 1000),
+      });
+      expect(harness.sync.listBackupInventory().entries[0].eligible).toBe(true);
+      const result = await harness.sync.applyUpdate(kHardGateTarget);
+      expect(result.status).toBe(409);
+      expect(result.body.reusableBackup).toEqual(expect.objectContaining({ file: seeded.file }));
     });
 
     it("offline copy refused in-quiesce: the reuse gate re-verifies candidates only AFTER dbResume + start + release (gateway up, barrier released)", async () => {
@@ -2262,7 +2396,7 @@ describe("server/openclaw-channel-backup-retry", () => {
     it("a usable check that hits OUR timeout is window_exhausted: honest message, the CLI-verified archive stays in place (no .unverified), reuse offered", async () => {
       const { runnerImpl, backupCalls } = makeBackupRunner({
         onArchiveTool: (opts) =>
-          opts.command === "gzip" && !opts.args[1].includes("prev0000")
+          opts.command === "gzip" && !archiveToolFile(opts.args[1]).includes("prev0000")
             ? { ok: false, code: null, tail: "", timedOut: true }
             : null,
       });
@@ -2522,6 +2656,27 @@ describe("server/openclaw-channel-backup-retry", () => {
       expect(names).toContain(".offline-copy-4243-cafef00d");
       expect(names).toContain(".offline-copy-note");
       expect(names.filter((n) => /^openclaw-backup-.*\.tar\.gz$/.test(n))).toHaveLength(1);
+    });
+  });
+
+  // ── Archives carry credentials: 0700 directory, 0600 files ───────────────
+  describe("archive and directory permissions", () => {
+    it("repairs an existing world-readable backups dir to 0700 and tightens the upstream archive to 0600 once it verifies", async () => {
+      const { runnerImpl } = makeBackupRunner({});
+      const harness = createHarness({ runnerImpl });
+      const backupsDir = path.join(harness.rootDir, "backups", "openclaw");
+      // An operator (or an older release under umask 022) created it 0755.
+      fs.mkdirSync(backupsDir, { recursive: true });
+      fs.chmodSync(backupsDir, 0o755);
+
+      const result = await harness.sync.applyUpdate(kHardGateTarget);
+
+      expect(result.status).toBe(202);
+      expect(fs.statSync(backupsDir).mode & 0o777).toBe(0o700);
+      const record = readRunBackupRecord(harness);
+      expect(record.verified).toBe(true);
+      // The stub CLI wrote the archive under the umask (0644).
+      expect(fs.statSync(record.file).mode & 0o777).toBe(0o600);
     });
   });
 
