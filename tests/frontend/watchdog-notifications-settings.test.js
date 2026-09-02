@@ -69,7 +69,6 @@ import {
 import {
   buildTestNotificationOutcome,
   formatTestNotificationFailure,
-  kTestNotificationNoChannelsMessage,
 } from "../../lib/public/js/components/watchdog-tab/settings/test-notification.js";
 import { InfoTooltip } from "../../lib/public/js/components/info-tooltip.js";
 import { InlineErrorChip } from "../../lib/public/js/components/inline-error-chip.js";
@@ -330,6 +329,9 @@ describe("frontend/watchdog update-notification settings", () => {
 // result} when every channel failed; the card must list result.failures[]
 // per channel/target/reason instead of a bare toast.
 describe("frontend/watchdog test-notification outcome", () => {
+  // Mirrors kTestNotificationNoChannels in lib/server/routes/watchdog.js.
+  const kNoChannelsServerMessage =
+    "No notification channel delivered the test message — nothing is configured or paired.";
   const kTelegramParseFailure = {
     channel: "telegram",
     target: "12345",
@@ -416,8 +418,23 @@ describe("frontend/watchdog test-notification outcome", () => {
     );
     expect(partial.failures).toHaveLength(1);
 
+    // "Nothing configured" is a 502 (the notifier's verdict is `ok: sent > 0`,
+    // reason no_channels_delivered, no failures) — the server's own message
+    // is the single string; the model never invents a second one.
+    const nothingConfigured = buildTestNotificationOutcome({
+      error: Object.assign(new Error(kNoChannelsServerMessage), {
+        status: 502,
+        result: { ok: false, sent: 0, failed: 0, reason: "no_channels_delivered", failures: [], channels: {} },
+      }),
+    });
+    expect(nothingConfigured).toEqual(
+      expect.objectContaining({ ok: false, message: kNoChannelsServerMessage, failures: [], parts: [] }),
+    );
+    expect("noChannels" in nothingConfigured).toBe(false);
+    // A 200 without per-channel counts (not a shape the server emits) still
+    // honours the server's ok:true rather than claiming nothing is configured.
     expect(buildTestNotificationOutcome({ data: { ok: true, result: { channels: {} } } })).toEqual(
-      expect.objectContaining({ ok: true, noChannels: true, message: kTestNotificationNoChannelsMessage }),
+      expect.objectContaining({ ok: true, hasFailures: false, message: "Test notification sent" }),
     );
   });
 
@@ -477,10 +494,18 @@ describe("frontend/watchdog test-notification outcome", () => {
     expect(treeText(tree)).toContain("slack (C1): not_in_channel");
   });
 
-  it("toasts the no-channels case as a warning", async () => {
-    api.triggerWatchdogTestNotification.mockResolvedValue({ ok: true, result: { channels: {} } });
-    const tree = renderCard();
+  it("renders the nothing-configured 502 inline with the server's message — no toast, no invented string", async () => {
+    api.triggerWatchdogTestNotification.mockRejectedValue(
+      Object.assign(new Error(kNoChannelsServerMessage), {
+        status: 502,
+        result: { ok: false, sent: 0, failed: 0, reason: "no_channels_delivered", failures: [], channels: {} },
+      }),
+    );
+    let tree = renderCard();
     await findButtonByText(tree, "Test").props.onClick();
-    expect(showToast).toHaveBeenCalledWith(kTestNotificationNoChannelsMessage, "warning");
+    tree = renderCard();
+    expect(treeText(tree)).toContain(kNoChannelsServerMessage);
+    expect(treeText(tree)).not.toContain("No channels configured");
+    expect(showToast).not.toHaveBeenCalled();
   });
 });

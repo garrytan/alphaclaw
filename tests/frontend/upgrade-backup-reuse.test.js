@@ -85,10 +85,16 @@ import {
   buildApplyConfirmModel,
   buildBackupReuseOfferModel,
   kBackupReuseConsentLabel,
+  kBackupReuseInventoryErrorReason,
+  kBackupReuseInventoryLoadingReason,
+  kBackupReuseInventoryUnreadableReason,
+  kBackupReuseNoneReason,
   kBackupReuseStaleReason,
   kBackupsEmptyLabel,
   kBackupsRunbookUrl,
+  kBackupsUnreadableMessage,
 } from "../../lib/public/js/components/upgrade-tab/helpers.js";
+import { kBackupReuseRetryInventoryLabel } from "../../lib/public/js/components/upgrade-tab/dialogs.js";
 import { ActionButton } from "../../lib/public/js/components/action-button.js";
 import { InlineErrorChip } from "../../lib/public/js/components/inline-error-chip.js";
 import { ToggleSwitch } from "../../lib/public/js/components/toggle-switch.js";
@@ -530,8 +536,41 @@ describe("frontend/upgrade-tab Backups card (WI-4.3)", () => {
       backupsInventory: makeInventory([]),
     });
     const text = collectText(findBackupsCard(tree)).join(" ");
-    expect(text).toContain("No backups yet — the first cross-channel update creates one");
+    expect(text).toContain(kBackupsEmptyLabel);
+    // The pre-update backup runs on EVERY apply (same-channel upgrades are
+    // merely soft-gated) — the empty copy must not claim cross-channel only.
+    expect(kBackupsEmptyLabel).not.toMatch(/cross-channel/);
+    expect(kBackupsEmptyLabel).toMatch(/next OpenClaw update/);
     expect(text).not.toContain("Loading backups");
+  });
+
+  it("renders a 200 with readable:false as the ERROR state (never 'No backups yet'), Retry wired", () => {
+    const onRetryBackups = vi.fn();
+    const tree = renderView({
+      channelInfo: makeChannelInfo(),
+      backupsInventory: makeInventory([], { readable: false }),
+      onRetryBackups,
+    });
+    const card = findBackupsCard(tree);
+    const chips = findAllByType(card, InlineErrorChip);
+    expect(chips.length).toBe(1);
+    expect(chips[0].props.headline).toBe("Couldn't read backups");
+    const text = collectText(card).join(" ");
+    expect(text).toContain(kBackupsUnreadableMessage);
+    expect(text).toContain("/root/backups/openclaw");
+    expect(text).not.toContain(kBackupsEmptyLabel);
+    const retry = findAllByType(card, "button").find((v) =>
+      collectText(v).join("").includes("Retry"),
+    );
+    retry.props.onclick();
+    expect(onRetryBackups).toHaveBeenCalledTimes(1);
+    // A readable scan with no archives is still the genuine EMPTY state.
+    const empty = renderView({
+      channelInfo: makeChannelInfo(),
+      backupsInventory: makeInventory([], { readable: true }),
+    });
+    expect(findAllByType(findBackupsCard(empty), InlineErrorChip).length).toBe(0);
+    expect(collectText(findBackupsCard(empty)).join(" ")).toContain(kBackupsEmptyLabel);
   });
 
   it("renders the ERROR state as a chip with Retry wired to onRetryBackups", () => {
@@ -612,7 +651,10 @@ describe("frontend/upgrade-tab Backups card (WI-4.3)", () => {
     expect(text).toContain("missing — no longer on disk");
     expect(text).toContain("not reusable — no run record for it");
     expect(text).toContain("unverified");
-    expect(text).toContain("Showing the newest 50 archives");
+    // The truncation count is the server's capped page (entries.length), not a
+    // client literal that could drift from the server's cap.
+    expect(text).toContain("Showing the newest 4 archives");
+    expect(text).not.toContain("Showing the newest 50 archives");
     expect(text).not.toContain(kBackupsEmptyLabel);
 
     // AsyncSection returns its children, so the harness walks each row twice
@@ -870,14 +912,39 @@ describe("frontend/upgrade-tab hook — consent + reuse retry + fence fields", (
     expect(state.applyError).toEqual(
       expect.objectContaining({ code: "backup_failed" }),
     );
+    // The model keeps the ABSOLUTE timestamp; the age strings are derived at
+    // render time against the page clock (below), never frozen at the 409.
     expect(state.backupReuseOffer).toEqual(
       expect.objectContaining({
         sha256: kSha,
         target: kDowngradeTarget,
         label: "2026.7.0",
-        ctaLabel: "Retry using the backup taken 2 hours ago",
+        at: kReusableBackup.at,
       }),
     );
+    const atArrival = renderView({
+      channelInfo: state.channelInfo,
+      applyError: state.applyError,
+      backupReuseOffer: state.backupReuseOffer,
+      nowMs: kNow,
+    });
+    expect(findActionButtonByLabel(atArrival, "Retry using the backup taken 2 hours ago")).toBeTruthy();
+    // An hour later, with the failed card still on screen, the disclosed loss
+    // window has grown with the clock — on the CTA, the caption and the dialog.
+    const later = renderView({
+      channelInfo: state.channelInfo,
+      applyError: state.applyError,
+      backupReuseOffer: state.backupReuseOffer,
+      backupReuseRetryPrompt: true,
+      nowMs: kNow + 3_600_000,
+    });
+    expect(findActionButtonByLabel(later, "Retry using the backup taken 3 hours ago")).toBeTruthy();
+    expect(findActionButtonByLabel(later, "Retry using the backup taken 2 hours ago")).toBeFalsy();
+    const laterText = treeText(later).replace(/\s+/g, " ");
+    expect(laterText).toContain(
+      "A fresh backup could not be made. That backup was taken 3 hours ago — state written since would not be in it.",
+    );
+    expect(laterText).not.toContain("taken 2 hours ago");
     expect(state.backupReuseRetryPrompt).toBe(false);
     // The inventory is re-read once the apply settles.
     expect(api.fetchOpenclawBackups).toHaveBeenCalled();
@@ -1188,6 +1255,152 @@ describe("frontend/upgrade-tab hook — consent + reuse retry + fence fields", (
     state = renderHook({});
     expect(state.operation.phase).toBe("failed");
     expect(state.backupReuseOffer).toBeNull();
+  });
+
+  it("running a repair clears a leftover reuse offer — a quick-failing repair never shows the earlier apply's CTA", async () => {
+    let captured = null;
+    api.subscribeOpenclawApplyEvents.mockImplementation((options) => {
+      captured = options;
+      return () => {};
+    });
+    api.fetchOpenclawChannel.mockResolvedValue(makeChannelInfo({ releaseChannel: "dev" }));
+    api.applyOpenclawVersion.mockResolvedValue({ ok: true, operationId: "op-1", events: "/e" });
+    let state = await hydrate();
+    expect(state.repairAvailable).toBe(true);
+    state.onRequestApply({ payload: { channel: "dev", devHead: true }, label: "latest dev" });
+    state = renderHook({});
+    await state.onConfirmApply();
+    captured.onMessage({
+      event: "error",
+      data: { error: "Backup failed", code: "backup_failed", reusableBackup: kReusableBackup },
+    });
+    state = renderHook({});
+    expect(state.operation.phase).toBe("failed");
+    expect(state.backupReuseOffer).not.toBeNull();
+    // The failed dev card offers BOTH the reuse retry and Run repair.
+    const failedCard = renderView({
+      channelInfo: state.channelInfo,
+      operation: state.operation,
+      backupReuseOffer: state.backupReuseOffer,
+      repairAvailable: true,
+    });
+    expect(findActionButtonByLabel(failedCard, "Run repair")).toBeTruthy();
+    expect(findActionButtonByLabel(failedCard, "Retry using the backup taken 2 hours ago")).toBeTruthy();
+
+    // Run repair is rejected before an operationId exists (busy / 5xx).
+    api.runOpenclawRepair.mockRejectedValueOnce(
+      Object.assign(new Error("Another operation is in progress"), { code: "busy", status: 409 }),
+    );
+    state.onRequestBackupReuseRetry();
+    state = renderHook({});
+    expect(state.backupReuseRetryPrompt).toBe(true);
+    await state.onRunRepair();
+    state = renderHook({});
+    expect(state.operation).toBeNull();
+    expect(state.applyError.message).toBe("Another operation is in progress");
+    expect(state.backupReuseOffer).toBeNull();
+    expect(state.backupReuseRetryPrompt).toBe(false);
+    const repairError = renderView({
+      channelInfo: state.channelInfo,
+      applyError: state.applyError,
+      backupReuseOffer: state.backupReuseOffer,
+      backupReuseRetryPrompt: state.backupReuseRetryPrompt,
+      repairAvailable: true,
+    });
+    const text = treeText(repairError);
+    expect(text).toContain("Another operation is in progress");
+    expect(text).not.toContain("A fresh backup could not be made");
+    expect(text).not.toContain("Retry using the backup");
+    expect(api.applyOpenclawVersion).toHaveBeenCalledTimes(1);
+  });
+
+  it("a hard-gated confirm opened while the inventory read FAILED says so (not 'No eligible backup') and re-binds after a retry", async () => {
+    // The harness collects effects without running them, so the inventory's
+    // mount read is driven by hand through the same forced-refresh path.
+    api.fetchOpenclawBackups.mockRejectedValueOnce(
+      Object.assign(new Error("Could not read the backup inventory"), { code: "backups_unavailable" }),
+    );
+    let state = await hydrate();
+    await state.onRetryBackups();
+    state = renderHook({});
+    expect(state.backupsInventory).toBeNull();
+    expect(state.backupsError).toBeTruthy();
+    requestDowngrade(state);
+    state = renderHook({});
+    expect(state.pendingApply.confirm.backupReuse).toEqual(
+      expect.objectContaining({
+        available: false,
+        sha256: null,
+        reason: kBackupReuseInventoryErrorReason,
+        retryable: true,
+      }),
+    );
+    expect(state.pendingApply.confirm.backupReuse.reason).not.toBe(kBackupReuseNoneReason);
+    const tree = renderView({
+      channelInfo: state.channelInfo,
+      pendingApply: state.pendingApply,
+      onRetryBackups: state.onRetryBackups,
+    });
+    expect(findConsentToggle(tree).props.disabled).toBe(true);
+    const text = treeText(tree);
+    expect(text).toContain(kBackupReuseInventoryErrorReason);
+    expect(text).not.toContain(kBackupReuseNoneReason);
+    // The dialog offers the same re-read as the card; it forces the server.
+    const retry = findAllByType(tree, "button").find(
+      (v) => collectText(v).join("") === kBackupReuseRetryInventoryLabel,
+    );
+    expect(retry).toBeTruthy();
+    api.fetchOpenclawBackups.mockResolvedValue(makeInventory());
+    await retry.props.onclick();
+    expect(api.fetchOpenclawBackups).toHaveBeenLastCalledWith({ force: true });
+    state = renderHook({});
+    expect(state.backupsInventory).toEqual(makeInventory());
+    // The re-bind effect (last declared) binds the consent to the real newest archive.
+    harness.effects[harness.effects.length - 1]();
+    state = renderHook({});
+    expect(state.pendingApply.confirm.backupReuse).toEqual(
+      expect.objectContaining({ available: true, sha256: kSha }),
+    );
+    // Checked-while-unreadable never sent consent; fail-closed all the way.
+    harness.reset();
+    invalidateCache(kBackupsCacheKey);
+    api.fetchOpenclawBackups.mockRejectedValueOnce(new Error("offline"));
+    api.applyOpenclawVersion.mockClear();
+    state = await hydrate();
+    await state.onRetryBackups();
+    state = renderHook({});
+    requestDowngrade(state);
+    state = renderHook({});
+    state.onToggleBackupReuseConsent(true);
+    state = renderHook({});
+    api.applyOpenclawVersion.mockResolvedValueOnce({ ok: true, operationId: "op-1", events: "/e" });
+    await state.onConfirmApply();
+    expect(api.applyOpenclawVersion).toHaveBeenCalledWith(kDowngradeTarget);
+    expect("allowBackupReuse" in api.applyOpenclawVersion.mock.calls[0][0]).toBe(false);
+  });
+
+  it("a 200 with readable:false disables the consent with the unreadable reason (+ retry), never 'No eligible backup'", async () => {
+    setCached(kBackupsCacheKey, makeInventory([], { readable: false }));
+    let state = await hydrate();
+    requestDowngrade(state);
+    state = renderHook({});
+    expect(state.pendingApply.confirm.backupReuse).toEqual(
+      expect.objectContaining({
+        available: false,
+        sha256: null,
+        reason: kBackupReuseInventoryUnreadableReason,
+        retryable: true,
+      }),
+    );
+    const tree = renderView({ channelInfo: state.channelInfo, pendingApply: state.pendingApply });
+    expect(findConsentToggle(tree).props.disabled).toBe(true);
+    expect(treeText(tree)).toContain(kBackupReuseInventoryUnreadableReason);
+    expect(treeText(tree)).not.toContain(kBackupReuseNoneReason);
+    expect(
+      findAllByType(tree, "button").some(
+        (v) => collectText(v).join("") === kBackupReuseRetryInventoryLabel,
+      ),
+    ).toBe(true);
   });
 
   it("dismissing a failed operation clears the offer and the prompt", async () => {
