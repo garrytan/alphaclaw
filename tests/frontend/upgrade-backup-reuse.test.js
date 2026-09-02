@@ -84,6 +84,7 @@ import {
 import {
   buildApplyConfirmModel,
   buildBackupReuseOfferModel,
+  kBackupReuseCandidateChangedNotice,
   kBackupReuseConsentLabel,
   kBackupReuseInventoryErrorReason,
   kBackupReuseInventoryLoadingReason,
@@ -313,6 +314,24 @@ describe("frontend/upgrade-tab apply confirm — backup reuse consent (WI-4.4)",
     });
     expect(findConsentToggle(noDigest).props.disabled).toBe(true);
     expect(treeText(noDigest)).toContain("has no recorded digest");
+  });
+
+  it("X6: a revoked consent renders the one-line 'newest backup changed' notice, unchecked; absent otherwise", () => {
+    const revoked = renderView({
+      channelInfo: makeChannelInfo(),
+      pendingApply: { ...makePendingDowngrade(), reuseConsentReset: true },
+    });
+    expect(treeText(revoked)).toContain(kBackupReuseCandidateChangedNotice);
+    expect(kBackupReuseCandidateChangedNotice).toBe(
+      "The newest backup changed — re-check to proceed with it.",
+    );
+    expect(findConsentToggle(revoked).props.checked).toBe(false);
+
+    const plain = renderView({
+      channelInfo: makeChannelInfo(),
+      pendingApply: makePendingDowngrade({ reuseConsent: true }),
+    });
+    expect(treeText(plain)).not.toContain(kBackupReuseCandidateChangedNotice);
   });
 
   it("routine same-channel upgrades carry no consent line at all", () => {
@@ -1100,6 +1119,114 @@ describe("frontend/upgrade-tab hook — consent + reuse retry + fence fields", (
       ...kDowngradeTarget,
       allowBackupReuse: { sha256: kSha },
     });
+  });
+
+  it("X6: a CHECKED consent is revoked (with the notice) when the re-read changes the candidate's digest — the new digest is never sent", async () => {
+    const oldSha = "b".repeat(64);
+    setCached(
+      kBackupsCacheKey,
+      makeInventory([
+        makeEntry({
+          name: "openclaw-backup-2026-09-02T07-00-00.tar.gz",
+          at: kNow - 5 * 3_600_000,
+          sha256: oldSha,
+        }),
+      ]),
+    );
+    let state = await hydrate();
+    requestDowngrade(state);
+    state = renderHook({});
+    state.onToggleBackupReuseConsent(true);
+    state = renderHook({});
+    expect(state.pendingApply.reuseConsent).toBe(true);
+    expect(state.pendingApply.confirm.backupReuse.sha256).toBe(oldSha);
+
+    // The forced re-read lands with a DIFFERENT newest archive while the
+    // operator's checkmark is still on screen.
+    api.fetchOpenclawBackups.mockResolvedValue(makeInventory());
+    await state.onRetryBackups();
+    state = renderHook({});
+    harness.effects[harness.effects.length - 1]();
+    state = renderHook({});
+    expect(state.pendingApply.confirm.backupReuse.sha256).toBe(kSha);
+    expect(state.pendingApply.reuseConsent).toBe(false);
+    expect(state.pendingApply.reuseConsentReset).toBe(true);
+    const tree = renderView({
+      channelInfo: state.channelInfo,
+      pendingApply: state.pendingApply,
+    });
+    expect(treeText(tree)).toContain(kBackupReuseCandidateChangedNotice);
+    expect(findConsentToggle(tree).props.checked).toBe(false);
+
+    // Confirming now sends NO consent — the operator never authorized kSha.
+    api.applyOpenclawVersion.mockResolvedValueOnce({ ok: true, operationId: "op-1", events: "/e" });
+    await state.onConfirmApply();
+    expect(api.applyOpenclawVersion).toHaveBeenLastCalledWith(kDowngradeTarget);
+    expect("allowBackupReuse" in api.applyOpenclawVersion.mock.calls[0][0]).toBe(false);
+  });
+
+  it("X6: re-checking after a revocation retires the notice and binds to the archive now shown", async () => {
+    const oldSha = "b".repeat(64);
+    setCached(kBackupsCacheKey, makeInventory([makeEntry({ sha256: oldSha })]));
+    let state = await hydrate();
+    requestDowngrade(state);
+    state = renderHook({});
+    state.onToggleBackupReuseConsent(true);
+    state = renderHook({});
+    api.fetchOpenclawBackups.mockResolvedValue(makeInventory());
+    await state.onRetryBackups();
+    state = renderHook({});
+    harness.effects[harness.effects.length - 1]();
+    state = renderHook({});
+    expect(state.pendingApply.reuseConsentReset).toBe(true);
+
+    state.onToggleBackupReuseConsent(true);
+    state = renderHook({});
+    expect(state.pendingApply.reuseConsent).toBe(true);
+    expect(state.pendingApply.reuseConsentReset).toBe(false);
+    api.applyOpenclawVersion.mockResolvedValueOnce({ ok: true, operationId: "op-1", events: "/e" });
+    await state.onConfirmApply();
+    expect(api.applyOpenclawVersion).toHaveBeenLastCalledWith({
+      ...kDowngradeTarget,
+      allowBackupReuse: { sha256: kSha },
+    });
+  });
+
+  it("X6: a CHECKED consent is revoked when the candidate DISAPPEARS; kept when the digest is unchanged", async () => {
+    setCached(kBackupsCacheKey, makeInventory());
+    let state = await hydrate();
+    requestDowngrade(state);
+    state = renderHook({});
+    state.onToggleBackupReuseConsent(true);
+    state = renderHook({});
+
+    // Same digest, different inventory object (metadata churn): the consent
+    // still names the archive the operator saw — kept, no notice.
+    api.fetchOpenclawBackups.mockResolvedValue(
+      makeInventory([makeEntry({ sizeBytes: 99 })], { truncated: true }),
+    );
+    await state.onRetryBackups();
+    state = renderHook({});
+    harness.effects[harness.effects.length - 1]();
+    state = renderHook({});
+    expect(state.pendingApply.confirm.backupReuse.sha256).toBe(kSha);
+    expect(state.pendingApply.reuseConsent).toBe(true);
+    expect(state.pendingApply.reuseConsentReset).not.toBe(true);
+
+    // The archive is gone from the re-read: nothing to bind to → revoked.
+    api.fetchOpenclawBackups.mockResolvedValue(makeInventory([]));
+    await state.onRetryBackups();
+    state = renderHook({});
+    harness.effects[harness.effects.length - 1]();
+    state = renderHook({});
+    expect(state.pendingApply.confirm.backupReuse).toEqual(
+      expect.objectContaining({ available: false, sha256: null, reason: kBackupReuseNoneReason }),
+    );
+    expect(state.pendingApply.reuseConsent).toBe(false);
+    expect(state.pendingApply.reuseConsentReset).toBe(true);
+    api.applyOpenclawVersion.mockResolvedValueOnce({ ok: true, operationId: "op-1", events: "/e" });
+    await state.onConfirmApply();
+    expect(api.applyOpenclawVersion).toHaveBeenLastCalledWith(kDowngradeTarget);
   });
 
   it("R7: a verified archive that predates the last apply is not offered — toggle disabled, no consent sent", async () => {

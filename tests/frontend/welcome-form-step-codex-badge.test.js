@@ -212,6 +212,24 @@ describe("frontend/welcome-form-step codex status badge", () => {
     expect(findBadgeByText(confirmed, "Connected")).toBeTruthy();
   });
 
+  it("X7: a lost deferred save renders the 'was not saved (<reason>) — reconnect' line under an honest 'Not connected' badge", () => {
+    const tree = renderStep({
+      codexStatus: { connected: false },
+      codexDeferredSavePending: false,
+      codexDeferredSaveFailedReason: "store closed for a second backup",
+    });
+    expect(collectText(tree).join(" ")).toContain(
+      "Codex connection was not saved (store closed for a second backup) — reconnect",
+    );
+    expect(findBadgeByText(tree, "Not connected")).toBeTruthy();
+    expect(findBadgeByText(tree, "saved after")).toBeUndefined();
+
+    // No failure → no line (the default prop).
+    expect(collectText(renderStep({ codexStatus: { connected: false } })).join(" ")).not.toContain(
+      "was not saved",
+    );
+  });
+
   it("a kept last-known connected status renders 'Connected' even while checks fail", () => {
     const tree = renderStep({
       codexStatus: { connected: true },

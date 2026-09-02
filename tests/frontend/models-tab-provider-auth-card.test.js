@@ -63,6 +63,7 @@ import { Badge } from "../../lib/public/js/components/badge.js";
 import { ActionButton } from "../../lib/public/js/components/action-button.js";
 import { InlineErrorChip } from "../../lib/public/js/components/inline-error-chip.js";
 import { ProviderAuthCard } from "../../lib/public/js/components/models-tab/provider-auth-card.js";
+import { kCodexDeferredSaveRecheckMs } from "../../lib/public/js/lib/codex-status.js";
 
 const harness = preactHooks.__harness;
 
@@ -314,5 +315,84 @@ describe("frontend/models-tab provider auth card codex section", () => {
     expect(labels.some((label) => label.includes("Connected"))).toBe(true);
     expect(labels.join(" ")).not.toContain("saved after");
     expect(labels.join(" ")).not.toContain("Unavailable");
+  });
+
+  const kUnavailableStatus = { connected: false, unavailable: true, reason: "backup_in_progress" };
+
+  // Runs the deferred manual exchange (popup blocked → paste → complete) so
+  // the card holds the pending claim; returns nothing — callers re-render.
+  const completeDeferredExchange = async () => {
+    api.exchangeCodexOAuth.mockResolvedValue({ ok: true, deferred: true, reason: "backup_in_progress" });
+    let tree = renderCard({ codexStatus: kUnavailableStatus, codexStatusKnown: false });
+    findAllByType(tree, "button")
+      .find((vnode) => collectText(vnode).join(" ").includes("Connect Codex OAuth"))
+      .props.onclick();
+    tree = renderCard({ codexStatus: kUnavailableStatus, codexStatusKnown: false });
+    findAllByType(tree, "input")[0].props.onInput({
+      target: { value: "http://localhost:1455/auth/callback?code=abc&state=def" },
+    });
+    tree = renderCard({ codexStatus: kUnavailableStatus, codexStatusKnown: false });
+    await findActionButtonByLabel(tree, "Complete Codex OAuth").props.onClick();
+  };
+
+  // The harness collects effects instead of running them; run the status
+  // effects for ONE status object, with a window for the message listener.
+  const renderWithStatusRead = (codexStatus) => {
+    const originalWindow = globalThis.window;
+    globalThis.window = { addEventListener: vi.fn(), removeEventListener: vi.fn() };
+    try {
+      renderCard({ codexStatus, codexStatusKnown: true });
+      for (const effect of harness.effects) effect();
+    } finally {
+      globalThis.window = originalWindow;
+    }
+    return renderCard({ codexStatus, codexStatusKnown: true });
+  };
+
+  it("X7: the server's deferredWrite:failed verdict ends the pending badge and says the connection was not saved", async () => {
+    await completeDeferredExchange();
+    let tree = renderCard({ codexStatus: kUnavailableStatus, codexStatusKnown: false });
+    expect(collectText(tree).join(" ")).toContain("saved after the backup finishes");
+
+    tree = renderWithStatusRead({
+      connected: false,
+      deferredWrite: { state: "failed", reason: "store closed for a second backup" },
+    });
+    const text = collectText(tree).join(" ");
+    expect(text).toContain(
+      "Codex connection was not saved (store closed for a second backup) — reconnect",
+    );
+    expect(text).not.toContain("saved after the backup finishes");
+    const labels = findAllByType(tree, Badge).map((vnode) => collectText(vnode).join(" "));
+    expect(labels.join(" ")).toContain("Not connected");
+  });
+
+  it("X7: without a server verdict, a readable connected:false status schedules ONE recheck via onRefreshCodex; the second ends the claim", async () => {
+    vi.useFakeTimers();
+    try {
+      await completeDeferredExchange();
+      const refreshesAfterExchange = kBaseProps.onRefreshCodex.mock.calls.length;
+
+      // Strike one: badge still pending, recheck armed.
+      let tree = renderWithStatusRead({ connected: false });
+      let text = collectText(tree).join(" ");
+      expect(text).toContain("saved after the backup finishes");
+      expect(text).not.toContain("was not saved");
+      expect(kBaseProps.onRefreshCodex.mock.calls.length).toBe(refreshesAfterExchange);
+      await vi.advanceTimersByTimeAsync(kCodexDeferredSaveRecheckMs);
+      expect(kBaseProps.onRefreshCodex.mock.calls.length).toBe(refreshesAfterExchange + 1);
+
+      // Strike two (the recheck's read, a NEW status object): claim failed.
+      tree = renderWithStatusRead({ connected: false });
+      text = collectText(tree).join(" ");
+      expect(text).toContain(
+        "Codex connection was not saved (the saved connection did not appear after the backup) — reconnect",
+      );
+      expect(text).not.toContain("saved after the backup finishes");
+      await vi.advanceTimersByTimeAsync(kCodexDeferredSaveRecheckMs * 3);
+      expect(kBaseProps.onRefreshCodex.mock.calls.length).toBe(refreshesAfterExchange + 1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
