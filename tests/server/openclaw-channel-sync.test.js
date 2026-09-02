@@ -2465,6 +2465,109 @@ describe("server/openclaw-channel-sync", () => {
         expect(result.status).toBe(409);
         expect(result.body.code).toBe("backup_failed");
       });
+
+      // "Fresh" is an allowlist: anything outside AlphaClaw's own bookkeeping
+      // is state a migration could lose, whether or not this code knows its
+      // name — credentials, identity, legacy auth profiles, cron, pairing.
+      it.each([
+        [
+          "a credentials store",
+          (dir) => {
+            fs.mkdirSync(path.join(dir, "credentials"), { recursive: true });
+            fs.writeFileSync(path.join(dir, "credentials", "telegram.json"), "{}\n");
+          },
+        ],
+        [
+          "a legacy auth-profiles.json",
+          (dir) => {
+            fs.mkdirSync(path.join(dir, "agents", "main", "agent"), { recursive: true });
+            fs.writeFileSync(
+              path.join(dir, "agents", "main", "agent", "auth-profiles.json"),
+              '{"profiles":[]}\n',
+            );
+          },
+        ],
+        [
+          "an identity dir",
+          (dir) => {
+            fs.mkdirSync(path.join(dir, "identity"), { recursive: true });
+            fs.writeFileSync(path.join(dir, "identity", "device.json"), "{}\n");
+          },
+        ],
+        [
+          "cron state",
+          (dir) => {
+            fs.mkdirSync(path.join(dir, "cron"), { recursive: true });
+            fs.writeFileSync(path.join(dir, "cron", "jobs.json"), "[]\n");
+          },
+        ],
+        [
+          "a file this code has no name for",
+          (dir) => fs.writeFileSync(path.join(dir, "pairing-telegram.json"), "{}\n"),
+        ],
+        [
+          "a symlink where a directory would be",
+          (dir) => fs.symlinkSync("/etc", path.join(dir, "credentials")),
+        ],
+      ])(
+        "refuses (no_artifact 409) when the tree holds %s and nothing else — no database, no config, no sessions",
+        async (_label, plant) => {
+          const harness = mkFresh();
+          fs.mkdirSync(harness.openclawDir, { recursive: true });
+          plant(harness.openclawDir);
+          const result = await harness.sync.applyUpdate(hardGateTarget);
+          expect(result.status).toBe(409);
+          expect(result.body.code).toBe("backup_failed");
+          expect(result.body.message).toMatch(/reported success but produced no backup file/);
+        },
+      );
+
+      it("still waives with AlphaClaw's own bookkeeping and empty directories around an empty config (.alphaclaw, logs, backups, tmp, the .env link, empty state/ and agents/main/sessions/)", async () => {
+        const harness = mkFresh();
+        const dir = harness.openclawDir;
+        fs.mkdirSync(path.join(dir, ".alphaclaw", "runs"), { recursive: true });
+        fs.writeFileSync(path.join(dir, ".alphaclaw", "runs", "r.json"), "{}\n");
+        fs.mkdirSync(path.join(dir, "logs"), { recursive: true });
+        fs.writeFileSync(path.join(dir, "logs", "gateway.log"), "log\n");
+        fs.mkdirSync(path.join(dir, "backups"), { recursive: true });
+        fs.mkdirSync(path.join(dir, "tmp"), { recursive: true });
+        fs.symlinkSync(path.join(harness.rootDir, ".env"), path.join(dir, ".env"));
+        fs.mkdirSync(path.join(dir, "state"), { recursive: true });
+        fs.mkdirSync(path.join(dir, "agents", "main", "sessions"), { recursive: true });
+        fs.writeFileSync(path.join(dir, "openclaw.json"), "{}\n");
+        const result = await harness.sync.applyUpdate(hardGateTarget);
+        expect(result.body.code).not.toBe("backup_failed");
+        expect(harness.store.readState().lastUpdateRun.steps).toContainEqual(
+          expect.objectContaining({
+            name: "backup",
+            status: "warning",
+            detail: "no state to back up yet — nothing a migration could lose",
+          }),
+        );
+      });
+    });
+
+    it("db-preflight: no database + a credentials store alone → warning step (same allowlist predicate), never a silent 'no state database' pass", async () => {
+      const harness = createHarness({
+        pin: "1.0.0",
+        installedVersion: "1.0.0",
+        sentinelVersion: "1.0.0",
+      });
+      fs.mkdirSync(path.join(harness.openclawDir, "credentials"), { recursive: true });
+      fs.writeFileSync(path.join(harness.openclawDir, "credentials", "telegram.json"), "{}\n");
+      const result = await harness.sync.applyUpdate({ channel: "beta", version: "1.1.0" });
+      expect(result.status).toBe(202);
+      const steps = harness.store.readState().lastUpdateRun.steps;
+      expect(steps).toContainEqual(
+        expect.objectContaining({
+          name: "db-preflight",
+          status: "warning",
+          detail: expect.stringMatching(/no state database to probe — the state tree is not empty/),
+        }),
+      );
+      expect(steps).not.toContainEqual(
+        expect.objectContaining({ name: "db-preflight", detail: "no state database" }),
+      );
     });
 
     // Same predicate at the db-preflight blind spot: no database to probe is

@@ -12,12 +12,16 @@ const {
   kOfflineCopyProducer,
   kOfflineCopyFormatVersion,
   kOfflineCopyArchiveSuffix,
+  kManifestTailBytes,
+  kManifestMaxBytes,
+  kWalkCheckpointEvery,
   OfflineCopyError,
   isOfflineCopyArchiveName,
   producerOfArchiveName,
   assessExclusivity,
   defaultListFdHolders,
   walkStateTree,
+  walkStateTreeAsync,
   verifyArchiveManifest,
   createOfflineCopy,
 } = require("../../lib/server/openclaw-backup-offline-copy");
@@ -301,8 +305,11 @@ describe("server/openclaw-backup-offline-copy", () => {
       expect(result.file).toBe(args.outputFile);
       expect(result.bytes).toBeGreaterThan(0);
       expect(result.partial).toBe(false);
+      expect(result.partialReasons).toEqual([]);
       expect(result.method).toBe("tar -I gzip -1");
       expect(fs.statSync(args.outputFile).size).toBe(result.bytes);
+      // The archive carries credentials: 0600, whatever the umask.
+      expect(fs.statSync(args.outputFile).mode & 0o777).toBe(0o600);
       // No temp debris left behind.
       expect(fs.readdirSync(args.backupsDir)).toEqual([path.basename(args.outputFile)]);
 
@@ -400,6 +407,194 @@ describe("server/openclaw-backup-offline-copy", () => {
         ]),
       );
       expect(listArchive(args.outputFile).some((e) => e.includes("workspace/"))).toBe(false);
+    });
+
+    // ── Symlinked core assets: never silently absent from a "verified" copy ──
+    it("follows a symlinked openclaw.json that resolves to a regular file (config-map mount) and records it as the config asset", async () => {
+      const stateDir = makeStateDir();
+      const mounted = mkTemp("alphaclaw-offline-copy-configmap-");
+      const target = path.join(mounted, "..data", "openclaw.json");
+      fs.mkdirSync(path.dirname(target), { recursive: true });
+      fs.renameSync(path.join(stateDir, "openclaw.json"), target);
+      fs.symlinkSync(target, path.join(stateDir, "openclaw.json"));
+      const args = makeCopyArgs({ stateDir });
+
+      const result = await createOfflineCopy(args);
+
+      expect(result.partial).toBe(false);
+      expect(result.manifest.paths.configPath).toBe(path.join(stateDir, "openclaw.json"));
+      expect(result.manifest.assets).toContainEqual({
+        kind: "config",
+        sourcePath: path.join(stateDir, "openclaw.json"),
+        archivePath: "openclaw.json",
+      });
+      // The archive holds the TARGET's bytes, not a dangling link.
+      const extractDir = mkTemp("alphaclaw-offline-copy-extract-");
+      execFileSync("tar", ["-xzf", args.outputFile, "-C", extractDir]);
+      const copied = path.join(extractDir, "openclaw-backup-1000-abcdef12", "openclaw.json");
+      expect(fs.lstatSync(copied).isSymbolicLink()).toBe(false);
+      expect(fs.readFileSync(copied, "utf8")).toBe('{"agents":{}}\n');
+    });
+
+    it("a symlinked credentials dir is NOT followed: the copy is partial with the reason, oauthDir is null, and the archive lacks it", async () => {
+      const stateDir = makeStateDir();
+      const elsewhere = mkTemp("alphaclaw-offline-copy-creds-");
+      fs.writeFileSync(path.join(elsewhere, "telegram.json"), "{}\n");
+      fs.rmSync(path.join(stateDir, "credentials"), { recursive: true });
+      fs.symlinkSync(elsewhere, path.join(stateDir, "credentials"));
+      const args = makeCopyArgs({ stateDir });
+
+      const result = await createOfflineCopy(args);
+
+      expect(result.partial).toBe(true);
+      expect(result.partialReasons).toEqual(["credentials: core asset is a symlink (not followed)"]);
+      expect(result.manifest.paths.oauthDir).toBeNull();
+      expect(result.manifest.partialReasons).toEqual(result.partialReasons);
+      expect(result.manifest.skipped).toContainEqual(
+        expect.objectContaining({ kind: "symlink", core: true, sourcePath: path.join(stateDir, "credentials") }),
+      );
+      expect(listArchive(args.outputFile).some((entry) => entry.includes("credentials/"))).toBe(false);
+      // The non-core hostname-link is skipped as before and never makes the copy partial.
+      const hostnameLink = result.manifest.skipped.find((entry) => entry.sourcePath.endsWith("hostname-link"));
+      expect(hostnameLink).toEqual(expect.objectContaining({ kind: "symlink" }));
+      expect(hostnameLink.core).toBeUndefined();
+    });
+
+    it("a config symlink that does not resolve to a regular file leaves configPath null and the copy partial", async () => {
+      const stateDir = makeStateDir();
+      fs.rmSync(path.join(stateDir, "openclaw.json"));
+      fs.symlinkSync("/nonexistent-alphaclaw-config.json", path.join(stateDir, "openclaw.json"));
+
+      const result = await createOfflineCopy(makeCopyArgs({ stateDir }));
+
+      expect(result.partial).toBe(true);
+      expect(result.partialReasons).toEqual([
+        "openclaw.json: config symlink does not resolve to a regular file",
+      ]);
+      expect(result.manifest.paths.configPath).toBeNull();
+      expect(result.manifest.assets.some((asset) => asset.kind === "config")).toBe(false);
+    });
+
+    // ── The deadline reaches INTO the sqlite backup, not only between stages ──
+    const kStubDatabaseSync = class {
+      constructor() {}
+      exec() {}
+      prepare() {
+        return { get: () => ({ integrity_check: "ok", user_version: 1 }) };
+      }
+      close() {}
+    };
+
+    it("bounds sqlite backup() by the remaining budget: a never-settling backup rejects with stage budget and leaves no file", async () => {
+      const args = makeCopyArgs({
+        budgetMs: 200,
+        nowFn: () => 1_000_000,
+        sqliteModule: {
+          DatabaseSync: kStubDatabaseSync,
+          backup: () => new Promise(() => {}),
+        },
+      });
+      const startedAt = Date.now();
+      await expect(createOfflineCopy(args)).rejects.toMatchObject({
+        stage: "budget",
+        message: expect.stringMatching(/during sqlite_backup of .*\.sqlite .* did not finish in time/),
+      });
+      expect(Date.now() - startedAt).toBeLessThan(5000);
+      expect(fs.readdirSync(args.backupsDir)).toEqual([]);
+    });
+
+    it("a quiet barrier lost DURING the sqlite backup surfaces through the progress hook as quiet_lost, and the orphaned backup's later failure is swallowed", async () => {
+      let quiet = true;
+      const args = makeCopyArgs({
+        isQuiet: () => quiet,
+        sqliteModule: {
+          DatabaseSync: kStubDatabaseSync,
+          backup: (_src, _dest, { progress }) =>
+            new Promise((_resolve, reject) => {
+              quiet = false;
+              progress();
+              setTimeout(() => reject(new Error("orphan finished later")), 20);
+            }),
+        },
+      });
+      await expect(createOfflineCopy(args)).rejects.toMatchObject({
+        stage: "quiet_lost",
+        message: expect.stringMatching(/during sqlite_backup/),
+      });
+      await new Promise((resolve) => setTimeout(resolve, 60));
+    });
+
+    // ── The walk is budgeted and yields; it is not one blocking recursion ──
+    it("re-checks the budget every kWalkCheckpointEvery entries: a huge workspace is interrupted by the deadline instead of walked to the end", async () => {
+      const stateDir = "/synthetic-alphaclaw-state";
+      const dirent = (name, type) => ({
+        name,
+        isSymbolicLink: () => false,
+        isDirectory: () => type === "dir",
+        isFile: () => type === "file",
+      });
+      const fsModule = {
+        readdirSync: (dir) => {
+          if (dir === stateDir) return [dirent("workspace", "dir")];
+          if (dir === path.join(stateDir, "workspace")) {
+            return Array.from({ length: 5000 }, (_, i) => dirent(`f${i}.txt`, "file"));
+          }
+          throw new Error(`unexpected readdir ${dir}`);
+        },
+        statSync: () => ({ size: 1 }),
+      };
+      let checkpoints = 0;
+      const tree = await walkStateTreeAsync({
+        stateDir,
+        fsModule,
+        checkpoint: () => {
+          checkpoints += 1;
+        },
+      });
+      expect(checkpoints).toBe(Math.floor(5001 / kWalkCheckpointEvery));
+      expect(tree.workspaces.get(path.join(stateDir, "workspace")).files).toHaveLength(5000);
+      // node_modules inside a workspace is payload (upstream parity), so it counts too.
+      expect(walkStateTree({ stateDir, fsModule }).workspaces.size).toBe(1);
+
+      let now = 0;
+      const args = makeCopyArgs({
+        stateDir,
+        fsModule,
+        budgetMs: 10,
+        nowFn: () => {
+          now += 100;
+          return now;
+        },
+      });
+      await expect(createOfflineCopy(args)).rejects.toMatchObject({
+        stage: "budget",
+        message: expect.stringMatching(/during enumerate/),
+      });
+    });
+
+    // ── Producer and verifier share the manifest ceiling ──
+    it("refuses at stage manifest (before any archive is written) when the manifest would exceed manifestMaxBytes; exactly at the ceiling it passes", async () => {
+      const stateDir = makeStateDir();
+      const fixedNow = () => 1_700_000_000_000;
+      // Warm-up run: any sidecar the read-only opens leave beside the sources
+      // is in place before the size is measured.
+      await createOfflineCopy(makeCopyArgs({ stateDir, nowFn: fixedNow }));
+      const probe = await createOfflineCopy(makeCopyArgs({ stateDir, nowFn: fixedNow }));
+      const manifestBytes = Buffer.byteLength(`${JSON.stringify(probe.manifest)}\n`);
+
+      const atLimit = await createOfflineCopy(
+        makeCopyArgs({ stateDir, nowFn: fixedNow, manifestMaxBytes: manifestBytes }),
+      );
+      expect(atLimit.ok).toBe(true);
+
+      const over = makeCopyArgs({ stateDir, nowFn: fixedNow, manifestMaxBytes: manifestBytes - 1 });
+      await expect(createOfflineCopy(over)).rejects.toMatchObject({
+        stage: "manifest",
+        message: expect.stringMatching(/over the .* the usable check can read back/),
+      });
+      expect(fs.readdirSync(over.backupsDir)).toEqual([]);
+      expect(kManifestMaxBytes).toBeLessThan(kManifestTailBytes);
+      expect(kManifestTailBytes).toBe(16 * 1024 * 1024);
     });
 
     it("refuses BEFORE copying when exclusivity fails, leaving no file behind", async () => {

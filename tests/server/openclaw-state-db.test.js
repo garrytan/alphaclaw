@@ -143,24 +143,67 @@ describe("server/openclaw-state-db quiet period + handle accounting", () => {
     expect(getStateDbHandleCount()).toBe(0);
   });
 
-  it("a throwing native close() still releases the handle count (finally) — the offline copy's handleCount===0 gate is never pinned shut", () => {
+  // Moved from the lane-X pin "a throwing native close() still releases the
+  // handle count (finally)": releasing an OPEN handle made it an uncounted
+  // reader invisible to the offline copy (its /proc fd scan skips this
+  // process) — the false "exclusive" verdict the counter exists to prevent.
+  // The count now follows the connection's real state: a one-shot throw is
+  // retried and released; a connection that stays open stays counted.
+  it("a one-shot throwing native close() is retried once: the successful retry releases the count and close() does not throw", () => {
     const closeSpy = vi
       .spyOn(DatabaseSync.prototype, "close")
       .mockImplementationOnce(function () {
         throw new Error("close exploded");
       });
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
     try {
       const handle = openReadonlyOpenclawStateDb({ openclawDir: tempDir });
       expect(getStateDbHandleCount()).toBe(1);
-      expect(() => handle.db.close()).toThrow("close exploded");
+      expect(() => handle.db.close()).not.toThrow();
+      expect(handle.db.isOpen).toBe(false);
       expect(getStateDbHandleCount()).toBe(0);
-      // The retry reaches the real native close (the throw was one-shot) and
-      // must not push the counter below zero.
-      handle.db.close();
+      expect(logSpy).toHaveBeenCalledWith(expect.stringMatching(/succeeded on retry/));
+      // A double close surfaces node:sqlite's own error and never underflows.
+      expect(() => handle.db.close()).toThrow();
       expect(getStateDbHandleCount()).toBe(0);
     } finally {
       closeSpy.mockRestore();
+      logSpy.mockRestore();
     }
+  });
+
+  it("a native close() that keeps throwing while the connection stays open keeps the handle COUNTED (the offline copy's exclusivity gate must still see it) until a later close succeeds", () => {
+    const original = DatabaseSync.prototype.close;
+    const closeSpy = vi.spyOn(DatabaseSync.prototype, "close").mockImplementation(function () {
+      throw new Error("close exploded");
+    });
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const handle = openReadonlyOpenclawStateDb({ openclawDir: tempDir });
+      expect(() => handle.db.close()).toThrow("close exploded");
+      expect(closeSpy).toHaveBeenCalledTimes(2);
+      expect(handle.db.isOpen).toBe(true);
+      expect(getStateDbHandleCount()).toBe(1);
+      expect(errorSpy).toHaveBeenCalledWith(expect.stringMatching(/stays counted/));
+      // The connection heals: the next close succeeds and releases the count.
+      closeSpy.mockImplementation(function () {
+        return original.call(this);
+      });
+      handle.db.close();
+      expect(handle.db.isOpen).toBe(false);
+      expect(getStateDbHandleCount()).toBe(0);
+    } finally {
+      closeSpy.mockRestore();
+      errorSpy.mockRestore();
+    }
+  });
+
+  it("a close() that throws because the connection was already closed underneath the wrapper releases the count (isOpen is false)", () => {
+    const handle = openReadonlyOpenclawStateDb({ openclawDir: tempDir });
+    expect(getStateDbHandleCount()).toBe(1);
+    DatabaseSync.prototype.close.call(handle.db);
+    expect(() => handle.db.close()).toThrow(/not open/);
+    expect(getStateDbHandleCount()).toBe(0);
   });
 
   it("while quiet: the read-only open returns null (the existing 'unavailable' fallback) without touching the db", async () => {
