@@ -938,10 +938,16 @@ describe("server/auth-profiles state-DB quiet period", () => {
       message: "A backup is in progress; retry in about two minutes.",
     });
 
-    // Lenient reads keep working off the untouched store.
-    expect(ap.listProfiles().map((profile) => [profile.id, profile.key])).toEqual([
-      ["openai:default", "sk-old"],
-    ]);
+    // Lenient reads say "store unavailable" while the barrier holds — never a
+    // bare empty list that would render as "no credentials" for the whole
+    // backup — and touch nothing.
+    expect(ap.loadAuthStore()).toEqual({
+      version: 1,
+      profiles: {},
+      unavailable: true,
+      reason: "backup_in_progress",
+    });
+    expect(ap.listProfiles()).toEqual([]);
     expect(fs.existsSync(jsonStorePath())).toBe(false);
 
     // A non-main agent has no state-db store at all — still refused, since the
@@ -963,5 +969,102 @@ describe("server/auth-profiles state-DB quiet period", () => {
     ap.upsertProfile("openai:default", { type: "api_key", provider: "openai", key: "sk-new" });
     expect(execSpy.mock.calls.map(([sql]) => sql)).toContain("PRAGMA busy_timeout = 3000;");
     expect(ap.getProfile("openai:default").key).toBe("sk-new");
+  });
+
+  // ── Readers open TRACKED (counted + busy_timeout 2000) ──────────────────
+  // Observed from inside the read: DatabaseSync.prototype.prepare runs
+  // between the tracked open and its close, so the handle count it sees is
+  // the count DURING the read, and the busy_timeout it reads is the one the
+  // statement runs under.
+  const { getStateDbHandleCount } = require("../../lib/server/state-db-quiet");
+  const observeStoreReads = (fn, { sqlFilter = /./ } = {}) => {
+    const originalPrepare = DatabaseSync.prototype.prepare;
+    const observed = [];
+    const prepareSpy = vi
+      .spyOn(DatabaseSync.prototype, "prepare")
+      .mockImplementation(function (sql) {
+        if (!/PRAGMA/.test(sql) && sqlFilter.test(sql)) {
+          observed.push({
+            handles: getStateDbHandleCount(),
+            busyTimeout: originalPrepare.call(this, "PRAGMA busy_timeout").get().timeout,
+          });
+        }
+        return originalPrepare.call(this, sql);
+      });
+    try {
+      return { result: fn(), observed };
+    } finally {
+      prepareSpy.mockRestore();
+    }
+  };
+
+  const createSharedStateDbWithProfile = () => {
+    const stateDbPath = path.join(tmpDir, ".openclaw", "state", "openclaw.sqlite");
+    fs.mkdirSync(path.dirname(stateDbPath), { recursive: true });
+    const db = new DatabaseSync(stateDbPath);
+    db.exec(
+      "CREATE TABLE config_machine_state (state_key TEXT NOT NULL PRIMARY KEY, value_json TEXT NOT NULL, updated_at_ms INTEGER NOT NULL DEFAULT 0)",
+    );
+    db.prepare(
+      "INSERT INTO config_machine_state (state_key, value_json) VALUES ('auth.sharedStore', ?)",
+    ).run(JSON.stringify({ location: "state-db" }));
+    db.exec(
+      "CREATE TABLE auth_profile_stores (store_key TEXT NOT NULL PRIMARY KEY, store_json TEXT NOT NULL, updated_at INTEGER NOT NULL)",
+    );
+    db.exec(
+      "CREATE TABLE auth_profile_state (store_key TEXT NOT NULL PRIMARY KEY, state_json TEXT NOT NULL, updated_at INTEGER NOT NULL)",
+    );
+    db.prepare(
+      "INSERT INTO auth_profile_stores (store_key, store_json, updated_at) VALUES ('shared', ?, 1)",
+    ).run(
+      JSON.stringify({
+        version: 1,
+        profiles: { "anthropic:default": { type: "api_key", provider: "anthropic", key: "sk-1" } },
+      }),
+    );
+    db.close();
+  };
+
+  it("the agent-db store reader opens TRACKED with the pinned read busy_timeout (2000): the handle is counted while the read is in flight", () => {
+    createAgentDb();
+    expect(getStateDbHandleCount()).toBe(0);
+    const { result, observed } = observeStoreReads(() => ap.listProfiles(), {
+      sqlFilter: /auth_profile_store\b/,
+    });
+    expect(result.map((profile) => profile.id)).toEqual(["openai:default"]);
+    expect(observed).toEqual([{ handles: 1, busyTimeout: 2000 }]);
+    expect(getStateDbHandleCount()).toBe(0);
+  });
+
+  it("the shared (state-db) store reader opens TRACKED with busy_timeout 2000 too (was an untracked 3000)", () => {
+    createSharedStateDbWithProfile();
+    const { result, observed } = observeStoreReads(() => ap.listProfiles(), {
+      sqlFilter: /auth_profile_stores\b/,
+    });
+    expect(result.map((profile) => profile.id)).toEqual(["anthropic:default"]);
+    expect(observed).toEqual([{ handles: 1, busyTimeout: 2000 }]);
+    expect(getStateDbHandleCount()).toBe(0);
+  });
+
+  it("on a migrated box the lenient read during quiet is the unavailable marker — never the stale/empty agent db — and recovers on release", async () => {
+    createSharedStateDbWithProfile();
+    expect(ap.listProfiles().map((profile) => profile.id)).toEqual(["anthropic:default"]);
+
+    ({ token } = await beginStateDbQuiet({ owner: "backup", maxMs: 60_000 }));
+    expect(ap.loadAuthStore()).toEqual({
+      version: 1,
+      profiles: {},
+      unavailable: true,
+      reason: "backup_in_progress",
+    });
+    expect(ap.listProfiles()).toEqual([]);
+    expect(() => ap.loadAuthStore("main", { strict: true })).toThrow(StateDbQuietError);
+    expect(getStateDbHandleCount()).toBe(0);
+
+    token.release();
+    token = null;
+    const recovered = ap.loadAuthStore();
+    expect(recovered.unavailable).toBeUndefined();
+    expect(Object.keys(recovered.profiles)).toEqual(["anthropic:default"]);
   });
 });

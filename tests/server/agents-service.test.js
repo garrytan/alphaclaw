@@ -1,4 +1,13 @@
+const fs = require("fs");
+const os = require("os");
+const path = require("path");
+const { DatabaseSync } = require("node:sqlite");
 const { createAgentsService } = require("../../lib/server/agents/service");
+const {
+  beginStateDbQuiet,
+  StateDbQuietError,
+  resetStateDbQuietForTests,
+} = require("../../lib/server/state-db-quiet");
 
 const buildFsMock = ({ initialConfig = {}, fileContents = {} } = {}) => {
   let currentConfig = JSON.parse(JSON.stringify(initialConfig));
@@ -3142,5 +3151,144 @@ describe("server/agents/service", () => {
         agentId: "main",
       }),
     ).rejects.toThrow("Channel token already exists in TELEGRAM_BOT_TOKEN");
+  });
+
+  // ── deleteChannelAccount: the state-db pairing rows are the FIRST mutation ──
+  // The rows are the one write the quiet barrier gates (StateDbQuietError →
+  // 409 backup_in_progress); clearing them before the CLI/env/config writes
+  // means a held barrier aborts with nothing changed, and a barrier that
+  // begins during the awaited CLI call finds nothing left to refuse — the
+  // account can never vanish from openclaw.json with its allow entries still
+  // authorized (and the retry can never 404).
+  describe("deleteChannelAccount: state-db pairing rows first", () => {
+    const seedStateDbWithPairingRows = () => {
+      const openclawDir = fs.mkdtempSync(path.join(os.tmpdir(), "alphaclaw-agents-delete-"));
+      const databasePath = path.join(openclawDir, "state", "openclaw.sqlite");
+      fs.mkdirSync(path.dirname(databasePath), { recursive: true });
+      const db = new DatabaseSync(databasePath);
+      db.exec(
+        "CREATE TABLE channel_pairing_requests (channel_key TEXT NOT NULL, account_id TEXT NOT NULL, request_id TEXT NOT NULL, code TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT '', last_seen_at TEXT NOT NULL DEFAULT '', meta_json TEXT, PRIMARY KEY (channel_key, account_id, request_id))",
+      );
+      db.exec(
+        "CREATE TABLE channel_pairing_allow_entries (channel_key TEXT NOT NULL, account_id TEXT NOT NULL, entry TEXT NOT NULL, sort_order INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (channel_key, account_id, entry))",
+      );
+      const insert = db.prepare(
+        "INSERT INTO channel_pairing_allow_entries (channel_key, account_id, entry) VALUES (?, ?, ?)",
+      );
+      insert.run("telegram", "alerts", "111");
+      insert.run("telegram", "default", "222");
+      db.close();
+      return { openclawDir, databasePath };
+    };
+    const allowEntriesFor = (databasePath, accountId) => {
+      const db = new DatabaseSync(databasePath, { readOnly: true });
+      try {
+        return db
+          .prepare(
+            "SELECT entry FROM channel_pairing_allow_entries WHERE channel_key = 'telegram' AND account_id = ? ORDER BY entry",
+          )
+          .all(accountId)
+          .map((row) => row.entry);
+      } finally {
+        db.close();
+      }
+    };
+    const twoAccountConfig = () => ({
+      agents: { list: [{ id: "main", default: true }] },
+      channels: {
+        telegram: {
+          enabled: true,
+          dmPolicy: "pairing",
+          groupPolicy: "allowlist",
+          defaultAccount: "default",
+          accounts: {
+            default: { botToken: "${TELEGRAM_BOT_TOKEN}", name: "Telegram" },
+            alerts: { botToken: "${TELEGRAM_BOT_TOKEN_ALERTS}", name: "Alerts" },
+          },
+        },
+      },
+      bindings: [],
+    });
+    let token = null;
+
+    beforeEach(() => {
+      resetStateDbQuietForTests();
+    });
+
+    afterEach(() => {
+      token?.release();
+      token = null;
+      resetStateDbQuietForTests();
+    });
+
+    it("clears the rows BEFORE the CLI call; a barrier that begins mid-CLI has nothing left to refuse and the delete completes", async () => {
+      const { openclawDir, databasePath } = seedStateDbWithPairingRows();
+      const fsMock = buildFsMock({ initialConfig: twoAccountConfig() });
+      const readEnvFile = vi.fn(() => [
+        { key: "TELEGRAM_BOT_TOKEN", value: "123:abc" },
+        { key: "TELEGRAM_BOT_TOKEN_ALERTS", value: "456:def" },
+      ]);
+      const writeEnvFile = vi.fn();
+      const reloadEnv = vi.fn();
+      const seenInsideCli = {};
+      const clawCmd = vi.fn(async () => {
+        seenInsideCli.alerts = allowEntriesFor(databasePath, "alerts");
+        seenInsideCli.default = allowEntriesFor(databasePath, "default");
+        // A backup's quiet barrier forms while the CLI is still running.
+        ({ token } = await beginStateDbQuiet({ owner: "backup", maxMs: 60_000 }));
+        return { ok: true, stdout: "", stderr: "" };
+      });
+      const service = createAgentsService({
+        fs: fsMock,
+        OPENCLAW_DIR: openclawDir,
+        readEnvFile,
+        writeEnvFile,
+        reloadEnv,
+        clawCmd,
+      });
+
+      const result = await service.deleteChannelAccount({
+        provider: "telegram",
+        accountId: "alerts",
+      });
+
+      expect(result).toEqual({ ok: true });
+      // The deleted account's rows were already gone when the CLI ran; the
+      // sibling account's rows are untouched.
+      expect(seenInsideCli).toEqual({ alerts: [], default: ["222"] });
+      expect(clawCmd).toHaveBeenCalledTimes(1);
+      expect(writeEnvFile).toHaveBeenCalledWith([{ key: "TELEGRAM_BOT_TOKEN", value: "123:abc" }]);
+      expect(reloadEnv).toHaveBeenCalled();
+      expect(Object.keys(fsMock.readConfig().channels.telegram.accounts)).toEqual(["default"]);
+      expect(allowEntriesFor(databasePath, "default")).toEqual(["222"]);
+    });
+
+    it("a barrier already held refuses with StateDbQuietError before ANY mutation (rows, CLI, env, config untouched)", async () => {
+      const { openclawDir, databasePath } = seedStateDbWithPairingRows();
+      const fsMock = buildFsMock({ initialConfig: twoAccountConfig() });
+      const writeEnvFile = vi.fn();
+      const clawCmd = vi.fn(async () => ({ ok: true, stdout: "", stderr: "" }));
+      const service = createAgentsService({
+        fs: fsMock,
+        OPENCLAW_DIR: openclawDir,
+        readEnvFile: () => [{ key: "TELEGRAM_BOT_TOKEN_ALERTS", value: "456:def" }],
+        writeEnvFile,
+        reloadEnv: vi.fn(),
+        clawCmd,
+      });
+      ({ token } = await beginStateDbQuiet({ owner: "backup", maxMs: 60_000 }));
+
+      await expect(
+        service.deleteChannelAccount({ provider: "telegram", accountId: "alerts" }),
+      ).rejects.toThrow(StateDbQuietError);
+
+      expect(clawCmd).not.toHaveBeenCalled();
+      expect(writeEnvFile).not.toHaveBeenCalled();
+      expect(Object.keys(fsMock.readConfig().channels.telegram.accounts).sort()).toEqual([
+        "alerts",
+        "default",
+      ]);
+      expect(allowEntriesFor(databasePath, "alerts")).toEqual(["111"]);
+    });
   });
 });
