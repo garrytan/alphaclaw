@@ -21,6 +21,23 @@ describe("shared update-progress model", () => {
     expect(kStepLabels.activate).toBe("Activating new version");
     expect(kStepLabels["config-migrate"]).toBe("Migrating settings");
     expect(kStepLabels["db-migrate"]).toBe("Migrating databases");
+    // The backup pause's relaunch failure is its own step (issue #54), so
+    // the Backup row keeps the backup's own outcome.
+    expect(kStepLabels["gateway-relaunch"]).toBe("Gateway relaunch");
+  });
+
+  it("keeps a failed gateway relaunch off the Backup row", async () => {
+    const { buildStepListModel } = await loadProgressModel();
+    const model = buildStepListModel([
+      { name: "backup", status: "running", at: 1 },
+      { name: "backup", status: "completed", at: 2 },
+      { name: "gateway-relaunch", status: "warning", at: 3, error: "relaunch exploded" },
+    ]);
+    expect(model.map((step) => [step.label, step.status])).toEqual([
+      ["Backup", "completed"],
+      ["Gateway relaunch", "warning"],
+    ]);
+    expect(model[0].error).toBeNull();
   });
 
   it("helpers.js re-exports the SAME references — no fork of the model", async () => {

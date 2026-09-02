@@ -245,6 +245,8 @@ describe("server/routes/openclaw-channel", () => {
       sha: null,
       devHead: false,
       operationId: "op-1",
+      // No consent carried → the service sees null (never undefined/true).
+      allowBackupReuse: null,
     });
 
     const slowDeps = createDeps();
@@ -545,6 +547,240 @@ describe("server/routes/openclaw-channel", () => {
     expect(fenced.body.code).toBe("rollback_requires_confirmation");
     expect(fenced.body.backupFile).toBeNull();
     expect(fenced.body.hint).toContain("No verified pre-update backup");
+  });
+
+  // WI-4.1: the fence re-stats the recorded archive and says what is in it.
+  describe("rollback fence re-stat (WI-4.1)", () => {
+    const kMigratedRun = (backup) => ({
+      operationId: "op-1",
+      state: "activated",
+      startedAt: 1_000,
+      dbPreflight: { migrationRequired: true, foundVersion: 1, targetVersion: 12 },
+      backup,
+    });
+    const writeArchive = (dir, name) => {
+      fs.mkdirSync(dir, { recursive: true });
+      const file = path.join(dir, name);
+      fs.writeFileSync(file, "archive bytes\n");
+      return file;
+    };
+
+    it("reports backupFileExists:true and names the file when the archive is still on disk", async () => {
+      const deps = createDeps();
+      const file = writeArchive(deps.OPENCLAW_DIR, "openclaw-backup-1-aaaa.tar.gz");
+      deps.openclawChannelService.runLedger = {
+        listRuns: vi.fn(() => [kMigratedRun({ file, verified: true, noBackup: false })]),
+      };
+      const app = createApp(deps);
+
+      const fenced = await request(app).post("/api/openclaw/rollback").send({});
+      expect(fenced.status).toBe(409);
+      expect(fenced.body).toEqual(
+        expect.objectContaining({
+          backupFile: file,
+          backupFileExists: true,
+          backupPartial: false,
+          backupReused: false,
+          reusedAgeMs: null,
+          newestSurvivingBackup: null,
+        }),
+      );
+      expect(fenced.body.hint).toContain(file);
+      expect(fenced.body.hint).not.toMatch(/no longer on disk/);
+    });
+
+    it("names the newest surviving archive with the honest caveat when the recorded one is gone", async () => {
+      const deps = createDeps();
+      const missing = path.join(deps.OPENCLAW_DIR, "openclaw-backup-1-aaaa.tar.gz");
+      deps.openclawChannelService.runLedger = {
+        listRuns: vi.fn(() => [kMigratedRun({ file: missing, verified: true, noBackup: false })]),
+      };
+      deps.openclawChannelService.listBackupInventory = vi.fn(() => ({
+        entries: [
+          { file: "/data/backups/openclaw/openclaw-backup-9-zzzz.tar.gz", exists: false, at: 9 },
+          {
+            file: "/data/backups/openclaw/openclaw-backup-5-bbbb.alphaclaw.tar.gz",
+            exists: true,
+            at: 5,
+            producer: "alphaclaw-offline-copy",
+          },
+        ],
+      }));
+      const app = createApp(deps);
+
+      const fenced = await request(app).post("/api/openclaw/rollback").send({});
+      expect(fenced.status).toBe(409);
+      expect(fenced.body.backupFile).toBe(missing);
+      expect(fenced.body.backupFileExists).toBe(false);
+      expect(fenced.body.newestSurvivingBackup).toEqual({
+        file: "/data/backups/openclaw/openclaw-backup-5-bbbb.alphaclaw.tar.gz",
+        at: 5,
+        producer: "alphaclaw-offline-copy",
+      });
+      expect(fenced.body.hint).toMatch(/no longer on disk/);
+      expect(fenced.body.hint).toContain("openclaw-backup-5-bbbb.alphaclaw.tar.gz");
+      expect(fenced.body.hint).toMatch(/may not predate the migration/);
+    });
+
+    it("says so when the recorded archive is gone and nothing survives (inventory unavailable too)", async () => {
+      const deps = createDeps();
+      const missing = path.join(deps.OPENCLAW_DIR, "openclaw-backup-1-aaaa.tar.gz");
+      deps.openclawChannelService.runLedger = {
+        listRuns: vi.fn(() => [kMigratedRun({ file: missing, verified: true, noBackup: false })]),
+      };
+      deps.openclawChannelService.listBackupInventory = vi.fn(() => {
+        throw new Error("EIO");
+      });
+      const app = createApp(deps);
+
+      const fenced = await request(app).post("/api/openclaw/rollback").send({});
+      expect(fenced.status).toBe(409);
+      expect(fenced.body.backupFileExists).toBe(false);
+      expect(fenced.body.newestSurvivingBackup).toBeNull();
+      expect(fenced.body.hint).toMatch(/no other archive survives/);
+    });
+
+    it("carries the partial and age-qualified reused caveats", async () => {
+      const deps = createDeps();
+      const file = writeArchive(deps.OPENCLAW_DIR, "openclaw-backup-1-aaaa.tar.gz");
+      deps.openclawChannelService.runLedger = {
+        listRuns: vi.fn(() => [
+          kMigratedRun({
+            file,
+            verified: true,
+            noBackup: false,
+            partial: true,
+            reused: true,
+            reusedAgeMs: 3 * 60 * 60 * 1000,
+          }),
+        ]),
+      };
+      const app = createApp(deps);
+
+      const fenced = await request(app).post("/api/openclaw/rollback").send({});
+      expect(fenced.status).toBe(409);
+      expect(fenced.body).toEqual(
+        expect.objectContaining({
+          backupFileExists: true,
+          backupPartial: true,
+          backupReused: true,
+          reusedAgeMs: 3 * 60 * 60 * 1000,
+        }),
+      );
+      expect(fenced.body.hint).toMatch(/workspace files were excluded/);
+      expect(fenced.body.hint).toMatch(/taken 3 hours before this update — state written since is not in it/);
+    });
+  });
+
+  // WI-4.5 consent contract: strict object, humans only.
+  describe("POST /api/openclaw/apply allowBackupReuse consent", () => {
+    const kSha = "a".repeat(64);
+
+    it("passes a well-formed consent through to the service (lowercased digest)", async () => {
+      const deps = createDeps();
+      const app = createApp(deps);
+      const res = await request(app)
+        .post("/api/openclaw/apply")
+        .send({ channel: "beta", version: "1.1.0", allowBackupReuse: { sha256: kSha.toUpperCase() } });
+      expect(res.status).toBe(200);
+      expect(deps.openclawChannelService.applyUpdate).toHaveBeenCalledWith(
+        expect.objectContaining({ allowBackupReuse: { sha256: kSha } }),
+      );
+    });
+
+    it.each([
+      ["bare true", true],
+      ['string "true"', "true"],
+      ["a digest string", kSha],
+      ["an array", [kSha]],
+      ["a short digest", { sha256: "abc" }],
+      ["a non-hex digest", { sha256: "g".repeat(64) }],
+      ["a missing digest", {}],
+    ])("400s invalid_body for %s and never calls the service", async (_label, allowBackupReuse) => {
+      const deps = createDeps();
+      const app = createApp(deps);
+      const res = await request(app)
+        .post("/api/openclaw/apply")
+        .send({ channel: "beta", version: "1.1.0", allowBackupReuse });
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe("invalid_body");
+      expect(deps.openclawChannelService.applyUpdate).not.toHaveBeenCalled();
+    });
+
+    it("403s an agent actor carrying the consent (even a malformed one) before validation", async () => {
+      const deps = createDeps();
+      const app = express();
+      app.use(express.json());
+      // The bearer path sets this on every agent request (routes/auth.js).
+      app.use((req, _res, next) => {
+        req.alphaclawActor = { type: "agent" };
+        next();
+      });
+      registerOpenclawChannelRoutes({ app, ...deps });
+      for (const allowBackupReuse of [{ sha256: kSha }, true]) {
+        const res = await request(app)
+          .post("/api/openclaw/apply")
+          .send({ channel: "beta", version: "1.1.0", allowBackupReuse });
+        expect(res.status).toBe(403);
+        expect(res.body.code).toBe("humans_only");
+      }
+      expect(deps.openclawChannelService.applyUpdate).not.toHaveBeenCalled();
+      // Without the consent field the agent's apply proceeds normally.
+      const plain = await request(app)
+        .post("/api/openclaw/apply")
+        .send({ channel: "beta", version: "1.1.0" });
+      expect(plain.status).toBe(200);
+    });
+  });
+
+  // WI-4.3: inventory rides its own SWR cache, never getChannelInfo().
+  describe("GET /api/openclaw/backups", () => {
+    it("returns the service inventory and serves it from the 5s cache on the next read", async () => {
+      const deps = createDeps();
+      const inventory = {
+        backupsDir: "/data/backups/openclaw",
+        readable: true,
+        entries: [{ file: "/data/backups/openclaw/openclaw-backup-1-aaaa.tar.gz", eligible: true }],
+        truncated: false,
+        newestArchive: { file: "/data/backups/openclaw/openclaw-backup-1-aaaa.tar.gz", sizeBytes: 10 },
+      };
+      deps.openclawChannelService.listBackupInventory = vi.fn(() => inventory);
+      const app = createApp(deps);
+
+      const first = await request(app).get("/api/openclaw/backups");
+      expect(first.status).toBe(200);
+      expect(first.body).toEqual({ ok: true, ...inventory });
+      const second = await request(app).get("/api/openclaw/backups");
+      expect(second.status).toBe(200);
+      expect(deps.openclawChannelService.listBackupInventory).toHaveBeenCalledTimes(1);
+      expect(deps.openclawChannelService.getChannelInfo).not.toHaveBeenCalled();
+    });
+
+    it("answers an empty inventory when the service has no listBackupInventory (boot-shape service)", async () => {
+      const deps = createDeps();
+      const app = createApp(deps);
+      const res = await request(app).get("/api/openclaw/backups");
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({
+        ok: true,
+        backupsDir: null,
+        readable: false,
+        entries: [],
+        truncated: false,
+        newestArchive: null,
+      });
+    });
+
+    it("500s with the structured envelope when the first read throws", async () => {
+      const deps = createDeps();
+      deps.openclawChannelService.listBackupInventory = vi.fn(() => {
+        throw new Error("EIO");
+      });
+      const app = createApp(deps);
+      const res = await request(app).get("/api/openclaw/backups");
+      expect(res.status).toBe(500);
+      expect(res.body).toEqual(expect.objectContaining({ ok: false, code: "backups_unavailable" }));
+    });
   });
 
   it("fences rollback while the reconciler holds the gateway", async () => {
