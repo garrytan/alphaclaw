@@ -701,9 +701,14 @@ describe("server/openclaw-channel apply flow (e2e)", { retry: 1 }, () => {
             ok: true,
             code: 0,
             timedOut: false,
+            // The runner's tail interleaves stderr ahead of the stdout report.
+            // The first two lines are VERBATIM from the pinned CLI's doctor
+            // output (captured 2026-09-02): the shell hint carries a valid
+            // JSON array, which is exactly what the first-value parse returned.
             tail: [
+              "[warning] core/doctor/node-hosting-preconditions gateway.bind - Gateway is only bound to loopback.",
+              "│  openclaw config set commands.ownerAllowFrom '[\"telegram:123456789\"]'   │",
               '{"level":"info","msg":"pnpm build starting"}',
-              '["esbuild", 1, 2]',
               "compiled 1200 files {ok}",
               '{"status":"ok","steps":[{"name":"build","status":"ok"}],"plugins":{"status":"ok"}}',
               "",
