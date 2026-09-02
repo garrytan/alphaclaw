@@ -42,6 +42,30 @@
 - **Context:** `isReservedUserEnvVar = kSystemVars ∪ kEnvVarsReservedForUserInput` (env-keys.js) — add `kDeploymentOnlyEnvKeys` (import the leaf module) so the PUT rejects with an actionable message; optionally expose the list on `GET /api/env` for the Envars tab (lib/public/js/components/envars.js). tests/server/routes-system.test.js has the PUT harness.
 - **Effort:** S (human ~1h / CC ~10min). **Priority:** P2. **Depends on:** —.
 
+## P3 — Rescue-session deep link on action_needed situation reports (2026-09-02, from the overseer-anytime wave)
+- **What:** When a situation report's verdict is `action_needed`, offer the "Open Claude Code" rescue session link inline on the overseer card's CTA row.
+- **Why:** The operator's next move after an actionable read is usually to get hands on the box; today the rescue card sits one card below, which is why this was deferred rather than built.
+- **Context:** lib/public/js/components/watchdog-tab/overseer-card.js (CTA row), lib/public/js/components/watchdog-tab/rescue-session-card.js (link source — reuse its capability-link handling, never the raw claude.ai URL).
+- **Effort:** S. **Depends on:** demand.
+
+## P3 — Unify incident and situation verdict storage (2026-09-02, from the overseer-anytime wave)
+- **What:** Fold `watchdog_incidents.overseer_json` and the `watchdog_meta` `overseer_situation` slot into one `watchdog_overseer_reviews` table keyed by kind + optional incident id.
+- **Why:** Two persistence slots with the same `{v, current, history}` shape are fine for two review kinds; a third kind (e.g. automatic provisional reviews) is the trigger to unify. Deferred deliberately: unifying now would rewrite #19's storage inside the 7-day window.
+- **Context:** lib/server/overseer-situation-slot.js, `persistOverseer`/`readOverseerRecord` in lib/server/watchdog-overseer.js, lib/server/db/watchdog/index.js (`updateIncidentOverseer`, `getOverseerSituation`/`setOverseerSituation`), the incidents list slimming in `slimIncidentForList`.
+- **Effort:** M. **Depends on:** a third review kind.
+
+## P3 — Project the incident detail's `overseer` blob through the API allowlist (2026-09-02, from the overseer-anytime wave)
+- **What:** `GET /api/watchdog/incidents/:id` returns `overseer_json` verbatim, including `current.transcriptTail` (scrubbed, but server-only by design) and `history`. Run `current`/`lastVerdict` through `projectRecordForApi` the way the situation slot's `GET /api/watchdog/overseer/situation` already does, and drop `history` unless the incidents card turns out to read it.
+- **Why:** Pre-existing on main (#19). The v0.9.69 independent review flagged the inconsistency once the situation slot shipped an allowlisted projection: two overseer records, two exposure rules. Not changed in that PR because the endpoint's shape predates the 7-day window and the card's history use was not audited.
+- **Context:** lib/server/routes/watchdog.js (`GET /api/watchdog/incidents/:id`), `projectRecordForApi` in lib/server/overseer-situation-slot.js, `slimIncidentForList` in lib/server/db/watchdog/index.js, lib/public/js/components/watchdog-tab/incidents/.
+- **Effort:** S. **Depends on:** confirming no UI reader of `overseer.history` / `transcriptTail`.
+
+## P3 — Watchdog tab design-system pass via /design-consultation (2026-09-02, from the overseer-anytime wave)
+- **What:** Decide tab-wide: inset report blocks (`ac-surface-inset` nested inside cards — both overseer cards, degraded card) vs a `border-t` divider; a 16px-minimum body type scale for dense ops cards vs today's `text-xs`/`text-sm`; an explicit `--font-sans` on the app root.
+- **Why:** The v0.9.69 design review's outside voice hard-rejected the nested report card and the sub-16px body copy against universal app-UI rules; the independent designer accepted both as the house pattern. Kept for consistency in that PR — a one-card divergence is worse than either choice — but the system-level decision is still open.
+- **Context:** lib/public/js/components/watchdog-tab/overseer-card.js, lib/public/js/components/upgrade-tab/overseer-card.js, lib/public/js/components/watchdog-tab/degraded-card.js, tailwind.config.cjs tokens.
+- **Effort:** M. **Depends on:** a /design-consultation session.
+
 ## P2 — File the two upstream openclaw reports from the 2026-09-01 incident (gateway-hardening wave)
 - **What:** (1) `openclaw doctor`'s `registerBundledHealthChecks` resolves plugin public surfaces through the bundled-only loader, so a registry/npm-installed plugin (codex) crashes the CLI at startup ("Could not start the CLI … Unable to resolve bundled plugin public surface codex/api.js", 2026.9.1-beta.1) — it should resolve via the plugin registry. (2) The state-lifecycle coordinator refusal ("another OpenClaw process owns state-lifecycle") names no holder: the coordinator is an exclusive SQLite transaction (`dist/state-database-coordinator-*.js` + `dist/node-sqlite-*.js`, `BEGIN EXCLUSIVE` on `<family>.<hash>.lock.sqlite`) so the refusal is correct, but an operator cannot tell WHICH live process holds it. Ask upstream to record holder identity (pid/argv/startedAt — the same owner-status data its gateway pid-lock already tracks in `dist/gateway-lock-*.js`) alongside the coordinator and include it in the contention error.
 - **Why:** AlphaClaw now carries two belts coupled to these internals (the doctor-CLI classifier's crash signatures, and the read-only lock-contention diagnostic in `lib/server/openclaw-lock-contention.js` that lists live openclaw processes via /proc as a proxy for the holder); both are stamped "verified against 2026.9.1-beta.1" and should be DELETED once upstream owns the fixes. Upstream lock ownership/fencing is under design (openclaw/openclaw#121069) — reference it and re-verify against whatever lands. NOTE for the record: this wave's plan originally specified a destructive "stale lock sweep"; the tarball proved a leftover lock file can never block (kernel releases the advisory lock on holder exit) and that deleting a HELD lock file would allow double ownership of the state DB — so the sweep was replaced by the diagnostic before merge.
@@ -226,7 +250,7 @@
 - **Effort:** S → CC: S.
 
 ## P3 — Migrate the upgrade overseer onto the shared frontier LLM client
-- **What:** Swap `lib/server/upgrade-overseer.js` from spawning the `claude` CLI to `lib/server/llm-client.js` (raw fetch, Anthropic → OpenAI → Google fallback), keeping its recommend-only contract, redaction, and run-ledger persistence.
+- **What:** Swap `lib/server/upgrade-overseer.js` from spawning the `claude` CLI to `lib/server/llm-client.js` (raw fetch, Anthropic → OpenAI → Google fallback), keeping its recommend-only contract, redaction, and run-ledger persistence. Do the same for `lib/server/watchdog-overseer.js` — the incident overseer's situation report (v0.9.69) inherits the `claude`-binary dependency; keep its stricter fail-closed posture (verifiable tool restriction becomes moot without a subprocess, redaction fail-closed stays).
 - **Why:** The overseer currently requires a `claude` binary on PATH and only works with an Anthropic key; the medic's client works in any container with any of the three provider keys and already handles refusals, timeouts, and body-stall aborts. One LLM path to maintain instead of two.
 - **Context:** `createFrontierLlmClient` is dependency-free and tested. Preserve the overseer's isolated-env posture by keeping evidence redaction (it already scrubs) — the CLI sandboxing rationale disappears once no subprocess is spawned.
 - **Effort:** M → CC: S.
@@ -465,13 +489,13 @@
 ## P3 — Async manual overseer review (fire-and-return + pending polling)
 - **What:** `POST /api/watchdog/overseer/review` currently awaits the whole review in the handler (availability probe + help + doctor + up to the 5-min claude deadline). Flip to fire-and-return: respond `{ok:true, started:true}` immediately and let the existing pending-state UI (15s incidents poll renders "review in progress") carry progress; keep the mutex/rate-limit semantics.
 - **Why:** A proxy/browser timeout during a long review surfaces as a spurious failure toast while the review continues server-side; the operator's retry then hits `busy`. Flagged by the ship adversarial review; sync was the deliberate v1 choice (operator watching the card), so this is UX hardening, not a bug fix.
-- **Context:** lib/server/routes/watchdog.js review handler; lib/server/watchdog-overseer.js requestReview (rate limit now stamps only when a review actually spawns, which async must preserve).
+- **Context:** lib/server/routes/watchdog.js review handler; lib/server/watchdog-overseer.js requestReview (rate limit now stamps only when a review actually spawns, which async must preserve). Refreshed 2026-09-02 (v0.9.69): the situation slot persists a `pending` state and the card polls `GET /api/watchdog/overseer/situation` every 15s, so the fire-and-return flip is now mostly the route change; `overseer-situation-slot.js` already self-heals an interrupted pending, and the card shows "Connection lost — the review continues on the server" when the request drops.
 - **Effort:** S.
 
 ## P3 — Provisional overseer reviews of stuck-open incidents
 - **What:** Behind the same `watchdog.overseer.enabled` flag: one interim review when an incident stays open past ~10 min or hits a material event (crash_loop, config_error), superseded later by the final review; ≤2 reviews/incident total.
 - **Why:** The deterministic narrator covers "right now"; an LLM read of a stuck incident ("this looks like the 2026.7.1 plugins.allow bug — fix openclaw.json") is the one live moment it could add value. Deferred from the wave: final-only first, validate incident boundaries before spending on open ones.
-- **Context:** `runReviewFor` in lib/server/watchdog-overseer.js already takes an incident id; the healthy-steady-state gate is the line to carve an exception through — carefully (mid-storm reviews were deliberately killed).
+- **Context (refreshed 2026-09-02, v0.9.69):** the MANUAL situation report now exists — `runSituationReport` in lib/server/watchdog-overseer.js reads current status + the live incident's latest events + logs + doctor and persists to the `watchdog_meta` slot with no steady-state gate. The automatic variant is "call it from `maybeReviewNext` when an incident has been open > N min" plus a notification-policy decision (`notification-policy.js` verbose registry); no gate exception is needed anymore. Automatic mid-storm reviews were deliberately killed in the wave — re-decide the API-cost/notification side before flipping that, and make it supersede into the situation slot's history rather than the incident row (a pre-settle record on the incident row blocks `pickEligibleIncident`).
 - **Effort:** M. **Depends on:** the wave's e2e boundary gate holding in production.
 
 ## P3 — Overseer model pin + cost telemetry (both overseers together)
@@ -575,7 +599,7 @@
 - **Effort:** M. **Depends on:** nothing.
 
 ## P3 — Watchdog wave minor polish (deferred by scope decision)
-- **What:** Per-event-type filter pills on the All-events tab; a spot-check "explain current status" overseer mode with no incident; any new SSE event streams for the watchdog surfaces.
+- **What:** Per-event-type filter pills on the All-events tab; ~~a spot-check "explain current status" overseer mode with no incident~~ (shipped in v0.9.69 as the situation report); any new SSE event streams for the watchdog surfaces.
 - **Why:** Each was reviewed and deferred: three tabs cover the filtering need, the deterministic narrator explains live status for free, and the 2s status SSE + 15s polls already carry everything ("new event streams are the expensive path").
 - **Effort:** S each. **Depends on:** demand.
 
