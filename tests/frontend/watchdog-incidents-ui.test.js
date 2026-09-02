@@ -41,6 +41,24 @@ describe("describeEvent", () => {
     }
   });
 
+  it("labels overseer audit rows and surfaces their verdict or refusal as the detail", async () => {
+    const { kWatchdogEventLabels, describeEvent } = await loadIncidentHelpers();
+    expect(kWatchdogEventLabels.overseer_review).toBe("Overseer review");
+    const ok = describeEvent({
+      eventType: "overseer_review",
+      status: "ok",
+      details: { mode: "situation", manual: true, verdict: "all_clear", durationMs: 1200 },
+    });
+    expect(ok.label).toBe("Overseer review");
+    expect(ok.detail).toBe("situation report: all clear");
+    const refused = describeEvent({
+      eventType: "overseer_review",
+      status: "failed",
+      details: { mode: "incident", manual: true, unavailableReason: "cli_flags_unverifiable" },
+    });
+    expect(refused.detail).toBe("incident review refused: cli flags unverifiable");
+  });
+
   it("humanizes unknown/foreign event types instead of failing", async () => {
     const { describeEvent } = await loadIncidentHelpers();
     const described = describeEvent({
