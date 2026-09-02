@@ -1580,6 +1580,48 @@ describe("server/openclaw-channel-sync", () => {
         expect(names).toContain("unrelated.txt");
         expect(names).toContain("openclaw-backup-notes.txt");
       });
+
+      // Regression pin for the archive-class predicate (isBackupArchiveName):
+      // the pre-#54 pattern was unanchored (/openclaw-backup.*\.tar\.gz$/), so
+      // an operator's own "copy-of-openclaw-backup-….tar.gz" in the directory
+      // counted as an archive and keep-3 could DELETE it. The anchored
+      // predicate spares it, while the AlphaClaw offline-copy suffix
+      // (.alphaclaw.tar.gz) stays inside retention.
+      it("retention classifies by the anchored archive name: an operator's copy-of-… file is spared, an .alphaclaw.tar.gz counts toward keep-3", async () => {
+        const harness = mkHarness();
+        const backupsDir = backupsDirOf(harness);
+        fs.mkdirSync(backupsDir, { recursive: true, mode: 0o700 });
+        const seed = (name, mtimeSec) => {
+          const full = path.join(backupsDir, name);
+          fs.writeFileSync(full, `seed ${name}\n`);
+          fs.utimesSync(full, mtimeSec, mtimeSec);
+        };
+        // Oldest of everything: the unanchored pattern would evict it first.
+        seed("copy-of-openclaw-backup-a.tar.gz", 900);
+        seed("openclaw-backup-a.tar.gz", 1000);
+        seed("openclaw-backup-b.tar.gz", 2000);
+        seed("openclaw-backup-c.tar.gz", 3000);
+        seed("openclaw-backup-e.alphaclaw.tar.gz", 3500);
+        seed("openclaw-backup-d.tar.gz", 4000);
+
+        const result = await harness.sync.applyUpdate(hardGateTarget);
+        expect(result.status).toBe(202);
+
+        const names = fs.readdirSync(backupsDir).sort();
+        // Never retention's business — it does not start with the producer prefix.
+        expect(names).toContain("copy-of-openclaw-backup-a.tar.gz");
+        // keep-3 by mtime among archive-class files: this run's fresh archive,
+        // d, and the offline-copy-suffixed e; a, b, c are evicted.
+        expect(names).toContain("openclaw-backup-d.tar.gz");
+        expect(names).toContain("openclaw-backup-e.alphaclaw.tar.gz");
+        expect(names).not.toContain("openclaw-backup-a.tar.gz");
+        expect(names).not.toContain("openclaw-backup-b.tar.gz");
+        expect(names).not.toContain("openclaw-backup-c.tar.gz");
+        const archiveClass = names.filter((name) =>
+          /^openclaw-backup-[^/]*\.(alphaclaw\.)?tar\.gz$/.test(name),
+        );
+        expect(archiveClass).toHaveLength(3);
+      });
     });
 
     it("rejects and cleans up artifacts that fail dist-shape verification", async () => {

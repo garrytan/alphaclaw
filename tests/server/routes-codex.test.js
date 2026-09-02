@@ -333,4 +333,52 @@ describe("server/routes/codex OAuth exchange vs the state-DB quiet period", () =
       expect.stringContaining("deferred Codex profile write FAILED (schema drift)"),
     );
   });
+
+  // The DIRECT write's non-barrier failures kept their pre-deferral contract
+  // across the rewrite (persistCodexProfileOrDefer re-throws anything that is
+  // not a StateDbQuietError): a store error is still an ERROR to the client —
+  // callback → error page carrying the message, exchange → 500 with no
+  // Retry-After — never a "deferred" success, and no pending slot is armed
+  // that a later barrier release could replay.
+  it("a non-barrier store failure on the direct write is still an error (callback page / exchange 500) — never deferred, nothing armed for a later release", async () => {
+    const { app, upsertCodexProfile, onAuthChanged, stored } = createOauthApp();
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    global.fetch = vi.fn(async () => tokenResponse());
+    upsertCodexProfile.mockImplementation(() => {
+      throw new Error("state/openclaw.sqlite is busy");
+    });
+
+    const callbackState = await startAndGetState(app);
+    const callback = await request(app).get(
+      `/auth/codex/callback?code=c1&state=${callbackState}`,
+    );
+    expect(callback.status).toBe(200);
+    expect(callback.text).toContain("codex: 'error'");
+    expect(callback.text).toContain("state/openclaw.sqlite is busy");
+    expect(callback.text).not.toContain("deferred");
+
+    const exchangeState = await startAndGetState(app);
+    const exchange = await request(app)
+      .post("/api/codex/exchange")
+      .send({ input: `http://localhost:1455/auth/callback?code=c2&state=${exchangeState}` });
+    expect(exchange.status).toBe(500);
+    expect(exchange.headers["retry-after"]).toBeUndefined();
+    expect(exchange.body).toEqual({ ok: false, error: "state/openclaw.sqlite is busy" });
+
+    expect(upsertCodexProfile).toHaveBeenCalledTimes(2);
+    expect(onAuthChanged).not.toHaveBeenCalled();
+    expect(console.warn).not.toHaveBeenCalledWith(
+      expect.stringContaining("deferred until the barrier lifts"),
+    );
+
+    // No phantom slot: a later barrier cycle replays nothing.
+    upsertCodexProfile.mockImplementation((credential) => stored.push(credential));
+    ({ token } = await beginStateDbQuiet({ owner: "backup", maxMs: 60_000 }));
+    token.release();
+    token = null;
+    await flushMacrotask();
+    expect(upsertCodexProfile).toHaveBeenCalledTimes(2);
+    expect(stored).toEqual([]);
+    expect(onAuthChanged).not.toHaveBeenCalled();
+  });
 });

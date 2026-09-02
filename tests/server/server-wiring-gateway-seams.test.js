@@ -28,6 +28,7 @@ const {
   createGatewayPrelaunchHookHandler,
 } = require("../../lib/server/watchdog");
 const { assessExclusivity } = require("../../lib/server/openclaw-backup-offline-copy");
+const { createGatewayLifecycleLock } = require("../../lib/server/gateway-lifecycle-lock");
 
 const originalSpawn = childProcess.spawn;
 const originalExecFile = childProcess.execFile;
@@ -133,6 +134,39 @@ describe("lib/server.js composition pins (lane C / lane A hand-offs)", () => {
     const block = serverSource.slice(start, serverSource.indexOf("},", start));
     expect(block).toContain("getStopEvidence: () => getLastGatewayStopEvidence?.() ?? null");
     expect(block).toContain("stopGatewayForBackup({");
+  });
+
+  it("the backup quiesce seam's acquireLock forwards the driver's {leaseMs} to the lifecycle lock (main dropped it — the hold leased at the default and force-released mid-copy)", async () => {
+    const start = serverSource.indexOf("gatewayQuiesce: {");
+    const block = serverSource.slice(start, serverSource.indexOf("},", start));
+    const match = block.match(
+      /acquireLock:\s*(\(options\)\s*=>\s*gatewayLifecycleLock\.acquire\("backup_quiesce",\s*options\))/,
+    );
+    expect(match).not.toBeNull();
+    // The consumer half of the contract: channel-sync sizes the hold itself.
+    const channelSyncSource = readSource("lib", "server", "openclaw-channel-sync.js");
+    expect(channelSyncSource).toMatch(
+      /gatewayQuiesce\.acquireLock\(\{[^}]*?leaseMs:\s*quiesceHoldMs\(\),/,
+    );
+
+    // Run the EXACT arrow lib/server.js binds against a real lock whose
+    // default lease is tiny: the driver's override must outlive it.
+    vi.useFakeTimers();
+    try {
+      const warn = vi.fn();
+      const lock = createGatewayLifecycleLock({ leaseMs: 50, logger: { warn } });
+      const acquireLock = new Function("gatewayLifecycleLock", `return ${match[1]};`)(lock);
+      const release = await acquireLock({ leaseMs: 5_000 });
+      expect(typeof release).toBe("function");
+      await vi.advanceTimersByTimeAsync(51);
+      // Past the default lease and still held — no force-release, no warning.
+      expect(lock.getActiveOperation()).toMatchObject({ kind: "backup_quiesce" });
+      expect(warn).not.toHaveBeenCalled();
+      release();
+      expect(lock.getActiveOperation()).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("register-server-routes passes the outbox-backed notify into registerSystemRoutes (the incumbent-restart notification's carrier)", () => {

@@ -90,6 +90,7 @@ import {
   useModels,
   kCodexStatusCacheKey,
 } from "../../lib/public/js/components/models-tab/use-models.js";
+import { kModelsConfigCacheKey } from "../../lib/public/js/lib/cache-keys.js";
 import { kModelCatalogCacheKey } from "../../lib/public/js/lib/model-catalog.js";
 
 const harness = preactHooks.__harness;
@@ -485,5 +486,57 @@ describe("frontend/models-tab use-models", () => {
     });
     expect(hook.result().codexStatusKnown).toBe(true);
     expect(hook.result().codexStatusError).toBe("");
+  });
+
+  // Kept last: the only UNSCOPED test — it is the one mode that writes the
+  // module-level tab cache, and it leaves that cache populated.
+  it("the tab cache never seeds a quiet-period placeholder as a checked status or as the profile list; a checked read does seed", async () => {
+    const mount = () => renderHook("");
+    const hook = mount();
+    const catalog = __cachedFetchRegistry.get(kModelCatalogCacheKey);
+    const config = __cachedFetchRegistry.get(kModelsConfigCacheKey);
+    const codex = __cachedFetchRegistry.get(kCodexStatusCacheKey);
+    catalog.refresh.mockResolvedValue(kCatalog);
+    config.refresh.mockResolvedValue(configPayload());
+    codex.refresh.mockResolvedValue({
+      connected: false,
+      unavailable: true,
+      reason: "backup_in_progress",
+    });
+    hook.runRefreshEffect();
+    await flushAsync();
+    hook.render();
+    expect(hook.result().codexStatusKnown).toBe(false);
+    expect(hook.result().authProfiles).toHaveLength(2);
+
+    // Remount from the cache: the readable parts of that refresh seeded, the
+    // unavailable codex placeholder did not (it would read as checked).
+    harness.reset();
+    const second = mount();
+    expect(second.result().primary).toBe("anthropic/claude-opus-4-8");
+    expect(second.result().authProfiles).toHaveLength(2);
+    expect(second.result().codexStatusKnown).toBe(false);
+    expect(second.result().codexStatus).toEqual({ connected: false });
+
+    // A checked codex read seeds; an unavailable CONFIG read must not
+    // replace the cached profiles/order with the empty placeholders.
+    codex.refresh.mockResolvedValue({ connected: true });
+    config.refresh.mockResolvedValue(
+      configPayload({ authProfiles: [], authOrder: {}, unavailable: true, reason: "backup_in_progress" }),
+    );
+    await second.result().refresh();
+    second.render();
+    expect(second.result().authStoreUnavailable).toEqual({ reason: "backup_in_progress" });
+
+    harness.reset();
+    const third = mount();
+    expect(third.result().codexStatusKnown).toBe(true);
+    expect(third.result().codexStatus).toEqual({ connected: true });
+    expect(third.result().authProfiles).toHaveLength(2);
+    expect(third.result().authOrder).toEqual({
+      anthropic: ["anthropic:default", "anthropic:manual"],
+    });
+    // The flag itself is per-mount state, not cache: a fresh mount starts readable.
+    expect(third.result().authStoreUnavailable).toBeNull();
   });
 });

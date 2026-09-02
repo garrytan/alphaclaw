@@ -514,6 +514,125 @@ describe("config-error relaunch paths vs a hook-aborted launch", () => {
   });
 });
 
+// The crash-relaunch (exit_event) and repair-relaunch ledger rows used to say
+// only "returned no child" — when the prelaunch hook is what aborted that
+// relaunch, the real cause lived in console.error alone. noChildDetails() now
+// names the abort on the row. The no-hook shape stays byte-identical
+// (watchdog.test.js pins it), so the key appears exactly when a refused/failed
+// outcome gated the launch.
+describe("crash/repair relaunch ledger rows name a hook-aborted launch (noChildDetails)", () => {
+  const flushMicrotasks = async () =>
+    new Promise((resolve) => {
+      setImmediate(resolve);
+    });
+  const kOriginalAutoRepair = process.env.WATCHDOG_AUTO_REPAIR;
+  const kOriginalNotificationsDisabled = process.env.WATCHDOG_NOTIFICATIONS_DISABLED;
+
+  afterEach(() => {
+    if (kOriginalAutoRepair == null) delete process.env.WATCHDOG_AUTO_REPAIR;
+    else process.env.WATCHDOG_AUTO_REPAIR = kOriginalAutoRepair;
+    if (kOriginalNotificationsDisabled == null) {
+      delete process.env.WATCHDOG_NOTIFICATIONS_DISABLED;
+    } else {
+      process.env.WATCHDOG_NOTIFICATIONS_DISABLED = kOriginalNotificationsDisabled;
+    }
+  });
+
+  // The gateway is down throughout and every relaunch returns no child; the
+  // injected reader stands in for gateway.getLastGatewayPrelaunchHookOutcome.
+  const createNoChildHarness = ({ autoRepair = false, hookOutcome = null } = {}) => {
+    process.env.WATCHDOG_AUTO_REPAIR = autoRepair ? "true" : "false";
+    process.env.WATCHDOG_NOTIFICATIONS_DISABLED = "false";
+    const insertWatchdogEvent = vi.fn();
+    const watchdog = createWatchdog({
+      clawCmd: vi.fn(async (command) =>
+        command === "doctor --fix --yes"
+          ? { ok: true, stdout: "fixed" }
+          : { ok: true, stdout: "" },
+      ),
+      launchGatewayProcess: vi.fn(async () => null),
+      insertWatchdogEvent,
+      notifier: { notify: vi.fn(async () => ({ ok: true })) },
+      readEnvFile: vi.fn(() => ""),
+      writeEnvFile: vi.fn(),
+      reloadEnv: vi.fn(),
+      resolveSetupUrl: () => "http://localhost",
+      resolveGatewayHealthUrl: () => "http://gateway/health",
+      resolveGatewayReadyzUrl: () => "",
+      sleepImpl: () => Promise.resolve(),
+      supervisorModeActive: () => false,
+      getLastGatewayPrelaunchHookOutcome: () => hookOutcome,
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new Error("gateway unavailable");
+      }),
+    );
+    const relaunchFailures = (source) =>
+      insertWatchdogEvent.mock.calls
+        .map(([row]) => row)
+        .filter(
+          (row) =>
+            row.eventType === "restart" && row.source === source && row.status === "failed",
+        );
+    return { watchdog, insertWatchdogEvent, relaunchFailures };
+  };
+
+  it("crash relaunch (exit_event): the failed row carries prelaunchHook {status, code} for a refused or failed hook", async () => {
+    for (const [outcome, expected] of [
+      [refusedOutcome({ site: "restart" }), { status: "refused", code: "not_root_owned" }],
+      [failedOutcome({ site: "restart" }), { status: "failed", code: "nonzero_exit" }],
+    ]) {
+      const harness = createNoChildHarness({ hookOutcome: outcome });
+      harness.watchdog.onGatewayExit({ code: 1, expectedExit: false });
+      await flushMicrotasks();
+      const rows = harness.relaunchFailures("exit_event");
+      expect(rows).toHaveLength(1);
+      expect(rows[0].details).toEqual({
+        reason: "launchGatewayProcess returned no child",
+        prelaunchHook: expected,
+      });
+      harness.watchdog.stop();
+    }
+  });
+
+  it("crash relaunch (exit_event) control: no hook abort (outcome null / ran) keeps the exact legacy detail shape", async () => {
+    for (const outcome of [null, ranOutcome()]) {
+      const harness = createNoChildHarness({ hookOutcome: outcome });
+      harness.watchdog.onGatewayExit({ code: 1, expectedExit: false });
+      await flushMicrotasks();
+      const rows = harness.relaunchFailures("exit_event");
+      expect(rows).toHaveLength(1);
+      expect(rows[0].details).toEqual({ reason: "launchGatewayProcess returned no child" });
+      harness.watchdog.stop();
+    }
+  });
+
+  it("repair relaunch: the post-doctor failed row names the hook abort the same way (and not without one)", async () => {
+    const aborted = createNoChildHarness({
+      autoRepair: true,
+      hookOutcome: refusedOutcome({ site: "managed launch" }),
+    });
+    const result = await aborted.watchdog.triggerRepair();
+    expect(result).toMatchObject({ ok: true, launchedGateway: false });
+    expect(aborted.relaunchFailures("repair")).toHaveLength(1);
+    expect(aborted.relaunchFailures("repair")[0].details).toEqual({
+      reason: "launchGatewayProcess returned no child",
+      prelaunchHook: { status: "refused", code: "not_root_owned" },
+    });
+    aborted.watchdog.stop();
+
+    const plain = createNoChildHarness({ autoRepair: true, hookOutcome: null });
+    await plain.watchdog.triggerRepair();
+    expect(plain.relaunchFailures("repair")).toHaveLength(1);
+    expect(plain.relaunchFailures("repair")[0].details).toEqual({
+      reason: "launchGatewayProcess returned no child",
+    });
+    plain.watchdog.stop();
+  });
+});
+
 describe("createGatewayPrelaunchHookHandler (the lib/server.js composition)", () => {
   const fakeWatchdog = () => ({
     recordOperationEvent: vi.fn(),

@@ -3339,5 +3339,70 @@ describe("server/agents/service", () => {
       ]);
       expect(allowEntriesFor(databasePath, "alerts")).toEqual(["111"]);
     });
+
+    // The clear's own NON-barrier failures kept their pre-deferral contract
+    // across the move into the deferral helper: loud, but never failing a
+    // delete whose CLI/config half already ran, and never dressed up as
+    // `pairingRowsCleanupDeferred` (nothing will retry it — the operator's
+    // cue is the log line, not a flag that promises a later clear). Driven
+    // through the reachable branch: a schema-drifted pairing table answers
+    // { ok: false } from deleteChannelPairingRows.
+    it("a non-barrier failure of the pairing-row clear (schema drift) is loud, never fails the delete, and is never reported as deferred", async () => {
+      const openclawDir = fs.mkdtempSync(
+        path.join(os.tmpdir(), "alphaclaw-agents-delete-drift-"),
+      );
+      const databasePath = path.join(openclawDir, "state", "openclaw.sqlite");
+      fs.mkdirSync(path.dirname(databasePath), { recursive: true });
+      const db = new DatabaseSync(databasePath);
+      // Upstream renamed a column: the table exists but lacks `entry`.
+      db.exec(
+        "CREATE TABLE channel_pairing_allow_entries (channel_key TEXT NOT NULL, account_id TEXT NOT NULL, allow_value TEXT NOT NULL)",
+      );
+      db.close();
+      const fsMock = buildFsMock({ initialConfig: twoAccountConfig() });
+      const writeEnvFile = vi.fn();
+      const clawCmd = vi.fn(async () => ({ ok: true, stdout: "", stderr: "" }));
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const service = createAgentsService({
+        fs: fsMock,
+        OPENCLAW_DIR: openclawDir,
+        readEnvFile: () => [
+          { key: "TELEGRAM_BOT_TOKEN", value: "123:abc" },
+          { key: "TELEGRAM_BOT_TOKEN_ALERTS", value: "456:def" },
+        ],
+        writeEnvFile,
+        reloadEnv: vi.fn(),
+        clawCmd,
+      });
+      try {
+        const result = await service.deleteChannelAccount({
+          provider: "telegram",
+          accountId: "alerts",
+        });
+
+        // The delete completed and is reported as a plain success — no
+        // deferral flag for a failure nothing will retry.
+        expect(result).toEqual({ ok: true });
+        expect(clawCmd).toHaveBeenCalledTimes(1);
+        expect(writeEnvFile).toHaveBeenCalledWith([
+          { key: "TELEGRAM_BOT_TOKEN", value: "123:abc" },
+        ]);
+        expect(Object.keys(fsMock.readConfig().channels.telegram.accounts)).toEqual([
+          "default",
+        ]);
+        // Loud, with the retry guidance — and NOT the barrier's SECURITY line.
+        expect(errorSpy).toHaveBeenCalledWith(
+          expect.stringMatching(
+            /Could not clear telegram\/alerts pairing rows from the state db: pairing tables schema is unsupported.*retry the delete/,
+          ),
+        );
+        expect(errorSpy).not.toHaveBeenCalledWith(expect.stringContaining("SECURITY:"));
+      } finally {
+        errorSpy.mockRestore();
+        warnSpy.mockRestore();
+        fs.rmSync(openclawDir, { recursive: true, force: true });
+      }
+    });
   });
 });

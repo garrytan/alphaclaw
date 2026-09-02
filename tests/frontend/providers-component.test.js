@@ -210,6 +210,38 @@ describe("frontend/providers component", () => {
     expect(collectText(tree).join(" ")).toContain("Loading model catalog...");
   });
 
+  // NOTE: runs second, while the tab cache still has no codex status — the
+  // FIRST read of the session is the quiet-period placeholder.
+  it("a FIRST status read that is unavailable is not a checked status: unknown-until-it-finishes, never 'Not connected', and the tab cache does not seed it as checked", async () => {
+    api.fetchCodexStatus.mockResolvedValue({
+      connected: false,
+      unavailable: true,
+      reason: "backup_in_progress",
+    });
+    let tree = await hydrateProviders();
+
+    let text = collectText(tree).join(" ");
+    expect(text).toContain("Unavailable during backup");
+    expect(text).toContain(
+      "Credential store unavailable during a backup — Codex status unknown until it finishes.",
+    );
+    expect(text).not.toContain("showing the last known");
+    expect(text).not.toContain("Not connected");
+    // Not a failed check: no retry chip, and the connect entry point is live.
+    expect(findAllByType(tree, InlineErrorChip).length).toBe(0);
+    expect(findButtonByText(tree, "Connect Codex OAuth")).toBeTruthy();
+
+    // Next mount seeds from the tab cache: an unavailable placeholder must
+    // not read as a checked status there either (that would render "Not
+    // connected" over a live auth the moment the tab is reopened).
+    harness.reset();
+    tree = renderProviders();
+    text = collectText(tree).join(" ");
+    expect(text).toContain("Status unknown");
+    expect(text).not.toContain("Not connected");
+    expect(text).not.toContain("Unavailable during backup");
+  });
+
   it("Reconnect Codex actually starts the OAuth flow while connected (no connected-guard no-op)", async () => {
     api.fetchCodexStatus.mockResolvedValue({ connected: true });
     const tree = await hydrateProviders();

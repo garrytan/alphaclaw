@@ -180,6 +180,39 @@ describe("frontend/use-welcome-codex status check semantics", () => {
     expect(hook.codexStatus).toEqual({ connected: true });
   });
 
+  it("a FIRST read that is unavailable is not a checked status (known stays false, no error, loading cleared); the first readable read is", async () => {
+    fetchCodexStatus.mockResolvedValue({
+      connected: false,
+      unavailable: true,
+      reason: "backup_in_progress",
+    });
+    let hook = renderHook();
+    harness.effects[0]();
+    await flushAsync();
+    hook = renderHook();
+    expect(hook.codexLoading).toBe(false);
+    expect(hook.codexStatus).toEqual({
+      connected: false,
+      unavailable: true,
+      reason: "backup_in_progress",
+    });
+    // connected:false here is a placeholder — nothing was learned.
+    expect(hook.codexStatusKnown).toBe(false);
+    // ...but it is not a FAILED check either: no error, not the error-unknown state.
+    expect(hook.codexStatusError).toBe("");
+    expect(hook.codexStatusUnknown).toBe(false);
+    expect(hook.codexDeferredSavePending).toBe(false);
+
+    // The barrier lifts: the first readable status is the checked truth.
+    fetchCodexStatus.mockResolvedValue({ connected: false });
+    hook = renderHook();
+    harness.effects[0]();
+    await flushAsync();
+    hook = renderHook();
+    expect(hook.codexStatus).toEqual({ connected: false });
+    expect(hook.codexStatusKnown).toBe(true);
+  });
+
   it("a resolved {ok:false} envelope is a failed check too (last-known kept)", async () => {
     await mountConnected();
 

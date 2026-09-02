@@ -1257,6 +1257,122 @@ describe("frontend/upgrade-tab hook — consent + reuse retry + fence fields", (
     expect(state.backupReuseOffer).toBeNull();
   });
 
+  it("a RESUMED run (page reload mid-run) that settles as backup_failed with reusableBackup offers the retry from the persisted result", async () => {
+    // Mount with an unfinished persisted run: the rehydration effect resumes
+    // it with NO SSE stream, so the outcome can only arrive through the resume
+    // poll's lastUpdateRun.result — which the server stamps with the same
+    // reusableBackup offer as the 409 body (retry e2e: "must also reach the
+    // resume poll"). Neither the quick-result nor the streamed path exercises
+    // this branch; a reload mid-update is exactly when an operator needs it.
+    const persistedRun = {
+      operationId: "op-7",
+      target: kDowngradeTarget,
+      startedAt: kNow - 60_000,
+      finishedAt: null,
+      ok: null,
+      steps: [{ name: "backup", status: "running", at: kNow - 50_000 }],
+    };
+    api.fetchOpenclawChannel.mockResolvedValue(
+      makeChannelInfo({ lastUpdateRun: persistedRun }),
+    );
+    let state = await hydrate();
+    // Effect #1 in declaration order is the rehydration effect.
+    harness.effects[1]();
+    state = renderHook({});
+    expect(state.operation).toEqual(
+      expect.objectContaining({ resumed: true, phase: "running", operationId: "op-7" }),
+    );
+    expect(api.subscribeOpenclawApplyEvents).not.toHaveBeenCalled();
+
+    // The next poll sees the run settled: failed at the backup, with the offer
+    // on the persisted result envelope.
+    api.fetchOpenclawChannel.mockResolvedValue(
+      makeChannelInfo({
+        lastUpdateRun: {
+          ...persistedRun,
+          finishedAt: kNow,
+          ok: false,
+          steps: [{ name: "backup", status: "failed", at: kNow, error: "state lease lost" }],
+          result: {
+            ok: false,
+            code: "backup_failed",
+            message: "Backup failed: state lease lost (after 3 attempts, 2 with the gateway paused)",
+            hint: "Newest surviving archive: …",
+            reusableBackup: kReusableBackup,
+          },
+        },
+      }),
+    );
+    api.fetchOpenclawChannel.mockClear();
+    expect(api.fetchOpenclawBackups).not.toHaveBeenCalled();
+    vi.useFakeTimers();
+    let stopPoll = null;
+    try {
+      // Effect #6 is the resume poll: the four page effects (mount load,
+      // rehydration, tick, shell publish) and the inventory hook's two
+      // effects precede it. It arms a 3 s timer, then reads the channel.
+      stopPoll = harness.effects[6]();
+      expect(api.fetchOpenclawChannel).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(3000);
+      expect(api.fetchOpenclawChannel).toHaveBeenCalledTimes(1);
+    } finally {
+      if (typeof stopPoll === "function") stopPoll();
+      vi.useRealTimers();
+    }
+    await flushAsync();
+
+    state = renderHook({});
+    expect(state.operation).toEqual(
+      expect.objectContaining({ resumed: true, phase: "failed", finishedAt: kNow }),
+    );
+    expect(state.operation.error).toEqual(
+      expect.objectContaining({
+        code: "backup_failed",
+        hint: "Newest surviving archive: …",
+      }),
+    );
+    // After a reload there is no in-flight apply target to bind to — the offer
+    // is built from the PERSISTED run's target and labelled from it.
+    expect(state.backupReuseOffer).toEqual(
+      expect.objectContaining({
+        sha256: kSha,
+        target: kDowngradeTarget,
+        label: "2026.7.0",
+        at: kReusableBackup.at,
+      }),
+    );
+    // The settled run re-reads the inventory, forcing the server rescan.
+    expect(api.fetchOpenclawBackups).toHaveBeenCalledWith({ force: true });
+
+    // The resumed failure card offers the same CTA as the streamed path.
+    const tree = renderView({
+      channelInfo: state.channelInfo,
+      operation: state.operation,
+      backupReuseOffer: state.backupReuseOffer,
+    });
+    expect(
+      findActionButtonByLabel(tree, "Retry using the backup taken 2 hours ago"),
+    ).toBeTruthy();
+
+    // Confirming resends the persisted target with consent bound to the offer,
+    // replacing the resumed failure with a fresh (streamed) attempt.
+    state.onRequestBackupReuseRetry();
+    state = renderHook({});
+    expect(state.backupReuseRetryPrompt).toBe(true);
+    api.applyOpenclawVersion.mockResolvedValueOnce({ ok: true, operationId: "op-8", events: "/e" });
+    await state.onConfirmBackupReuseRetry();
+    expect(api.applyOpenclawVersion).toHaveBeenCalledWith({
+      ...kDowngradeTarget,
+      allowBackupReuse: { sha256: kSha },
+    });
+    state = renderHook({});
+    expect(state.operation).toEqual(
+      expect.objectContaining({ resumed: false, phase: "running", operationId: "op-8" }),
+    );
+    expect(state.backupReuseOffer).toBeNull();
+    expect(state.backupReuseRetryPrompt).toBe(false);
+  });
+
   it("running a repair clears a leftover reuse offer — a quick-failing repair never shows the earlier apply's CTA", async () => {
     let captured = null;
     api.subscribeOpenclawApplyEvents.mockImplementation((options) => {
