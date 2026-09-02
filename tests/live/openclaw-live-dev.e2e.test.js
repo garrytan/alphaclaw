@@ -35,6 +35,7 @@ const {
   parseJsonObjectFromNoisyOutput,
 } = require("../../lib/server/utils/json");
 const {
+  assertFreeDiskBytes,
   kLiveEnabled,
   kLiveDevEnabled,
   kSilentLogger,
@@ -98,6 +99,9 @@ describeLiveDev("LIVE openclaw dev-head build (real from-source pipeline)", () =
     "builds real main from source via the updater, boot-activates the shim, and executes it",
     { timeout: kDevBuildTimeoutMs + 5 * 60 * 1000 },
     async () => {
+      // A from-source build needs ~5 GB (git clone + pnpm store + dist):
+      // fail fast with the sweep instruction rather than 20 min in.
+      assertFreeDiskBytes(8 * 1024 ** 3, { label: "the live dev source build" });
       const rootDir = mkTemp("alphaclaw-live-dev-e2e-");
       fs.mkdirSync(path.join(rootDir, "logs"), { recursive: true });
       const openclawDir = path.join(rootDir, ".openclaw");

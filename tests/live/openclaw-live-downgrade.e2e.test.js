@@ -50,9 +50,6 @@ const {
 } = require("../../lib/server/operation-events");
 const { createRunStream } = require("../../lib/server/openclaw-run-stream");
 const {
-  installOpenclawVersionToTempDir,
-} = require("../../lib/server/openclaw-version");
-const {
   readOpenclawReleaseChannel,
 } = require("../../lib/server/alphaclaw-config");
 const { withOpenclawStartupEnv } = require("../../lib/server/openclaw-runtime-env");
@@ -64,17 +61,23 @@ const {
   readRunBackupRecord,
 } = require("./live-backup-harness");
 const {
+  assertFreeDiskBytes,
   kLiveEnabled,
   kOpenclawLines,
   kSilentLogger,
   mkTemp,
   resolvePackageBin,
   stageOpenclawVersion,
+  stageTempInstall,
   waitFor,
 } = liveHelpers;
 
 const describeLive = kLiveEnabled ? describe : describe.skip;
 
+// Disk footprint per harness: the installed line's overlay + activated copy
+// (~0.7 GB each) plus the real `npm install` of the target and ITS overlay —
+// two harnesses per file. Every root is a tracked temp dir (swept in
+// afterAll, see live-helpers); the version cache outlives the run on purpose.
 const kInstallTimeoutMs = 8 * 60 * 1000;
 const kApplySettleTimeoutMs = kInstallTimeoutMs + 2 * 60 * 1000;
 const kTestTimeoutMs = 14 * 60 * 1000;
@@ -176,8 +179,10 @@ const createDowngradeHarness = ({ installed }) => {
       packageRoot,
       store,
       runStream: createRunStream({}),
+      // Tracked real install: the prepare dir joins the sweep the moment npm
+      // starts, so a run killed mid-download leaves nothing behind.
       installToTempDir: (opts) =>
-        installOpenclawVersionToTempDir({ ...opts, timeoutMs: kInstallTimeoutMs }),
+        stageTempInstall({ ...opts, timeoutMs: kInstallTimeoutMs }),
       resolveInstallDir: () => installDir,
       readReleaseChannel: () => readOpenclawReleaseChannel({ openclawDir }),
       releases: releasesOverride !== undefined ? releasesOverride : releases,
@@ -339,6 +344,8 @@ describeLive("LIVE #54 downgrade: real 2026.9.1-beta.1 → 2026.8.2 through the 
   let stable;
 
   beforeAll(async () => {
+    // Fail fast with the sweep instruction, not mid-run with ENOSPC.
+    assertFreeDiskBytes(undefined, { label: "the live downgrade suite" });
     beta = await stageOpenclawVersion(kOpenclawLines.beta, { timeoutMs: kInstallTimeoutMs });
     stable = await stageOpenclawVersion(kOpenclawLines.stable, { timeoutMs: kInstallTimeoutMs });
   }, kTestTimeoutMs);

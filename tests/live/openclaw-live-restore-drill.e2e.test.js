@@ -57,6 +57,7 @@ const { withOpenclawStartupEnv } = require("../../lib/server/openclaw-runtime-en
 const { parseJsonObjectFromNoisyOutput } = require("../../lib/server/utils/json");
 const { buildCliEnv } = require("./live-backup-harness");
 const {
+  assertFreeDiskBytes,
   kLiveEnabled,
   kOpenclawLines,
   mkTemp,
@@ -68,6 +69,9 @@ const {
 
 const describeLive = kLiveEnabled ? describe : describe.skip;
 
+// Disk footprint: two cached installs (warmed once, outside the sweep), 12
+// restore roots (small), and the 500 MB calibration tree + its ~525 MB
+// archive (freed in-test). Every root is a tracked temp dir (afterAll sweep).
 const kInstallTimeoutMs = 8 * 60 * 1000;
 const kSetupTimeoutMs = 12 * 60 * 1000;
 const kCellTimeoutMs = 5 * 60 * 1000;
@@ -342,6 +346,8 @@ describeLive("LIVE restore drill (WI-6.2): producer × journal mode × target", 
   let portCounter = kBasePort + 1;
 
   beforeAll(async () => {
+    // Fail fast with the sweep instruction, not mid-calibration with ENOSPC.
+    assertFreeDiskBytes(undefined, { label: "the live restore drill" });
     bins.pin = repoOpenclawBin();
     bins.stable = (await stageOpenclawVersion(kOpenclawLines.stable, { timeoutMs: kInstallTimeoutMs })).bin;
     bins.beta = (await stageOpenclawVersion(kOpenclawLines.beta, { timeoutMs: kInstallTimeoutMs })).bin;

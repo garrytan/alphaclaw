@@ -33,7 +33,11 @@ live/container tiers + docs.
   attempt, with the gateway paused" / "after N attempts, M with the gateway
   paused"); `backup: running` is emitted once; a failed relaunch is its own
   `gateway-relaunch: warning` step; every hard-gate refusal names the newest
-  surviving archive (age + producer).
+  surviving archive (age + producer). The contention pattern also matches the
+  lease-TIMEOUT/acquire lines whose label is several words (`timed out
+  waiting for legacy audit migration lease migration.legacy-audit/…`, the
+  real 2026.8.2 / beta wording), not only the mid-run `was lost` form — the
+  live #54 reproduction against the real beta caught the gap.
 - **Notifications.** Telegram sends no longer die on `Bad Request: can't
   parse entities`: notices stay in the house format and the transport renders
   them to validated HTML (`lib/server/utils/telegram-html.js`), falling back
@@ -45,7 +49,16 @@ live/container tiers + docs.
   `notification_partial` event per outbox id; `POST
   /api/watchdog/test-notification` reports real per-channel failures; Slack
   renders `[label](url)` as `<url|label>`. The apply outcome notification is
-  always delivered (`apply-accepted-<operationId>`, no longer verbose).
+  always delivered (`apply-accepted-<operationId>`, no longer verbose). One
+  shared house-link grammar (`renderHouseLinks`, URLs with balanced
+  parentheses) drives both the Telegram and the Slack renderer; bold may
+  wrap a code span (`<b>…<code>…</code>…</b>`); Slack labels are `& < >`
+  escaped and URLs `| < >` percent-encoded; a Telegram `403` is deterministic
+  only for blocked/kicked/deactivated/chat-not-found descriptions (every other
+  403 is retried); and outbox-unavailable direct sends arriving during the
+  state-DB quiet period are held in memory (max 50) and delivered when the
+  barrier lifts (`{ ok: true, held: true, reason: "state_db_quiet" }`), with
+  a shutdown mid-hold logging the undelivered count.
 - **Gateway stop/restart honesty.** The recovery restart that recorded
   `succeeded` while the CLI refused `openclaw gateway stop` (non-interactive
   guard, 2026.8.2+) is gone: `--force` is passed only when the installed CLI
@@ -88,9 +101,21 @@ live/container tiers + docs.
   true`). Measured: a 526 MB state tree in 19 s. Both producers share
   retention (keep-3), inventory and the fenced-run pin.
 - **Usable-backup definition** (WI-6.1): every verified artifact passes
-  `gzip -t` + manifest extraction listing this box's state databases →
-  `record.backup.usableCheck: "manifest_ok"`; a failing check is a `verify`
-  failure (terminal, quarantined `.unverified`).
+  `gzip -t` + a manifest check → `record.backup.usableCheck: "manifest_ok"`;
+  a failing check is a `verify` failure (terminal, quarantined
+  `.unverified`). The check judges **coverage**, not per-file listing: a
+  state DB counts when an asset names it (the offline copy's per-file
+  assets) or when an asset's `sourcePath` is the state dir or an ancestor of
+  it, resolved against `manifest.paths.stateDir` — real upstream manifests
+  (pin, 2026.8.2, beta) carry exactly ONE `kind: "state"` directory asset,
+  and the first container-tier run caught the per-file rule refusing a
+  genuine archive and failing the hard gate closed on a false verdict. The
+  manifest is read at depth 1 only (`--wildcards --no-wildcards-match-slash
+  '*/manifest.json' --occurrence=1`, so a workspace's own `manifest.json` is
+  never the one parsed; 9–14 ms on real archives), through a 16 MB tail with
+  a compact offline-copy manifest (the 64 KB default truncated it at ≳280
+  files), and the parsed object must carry a numeric `schemaVersion` and an
+  `assets[]` array.
 - **Backup inventory** — `GET /api/openclaw/backups` (5 s cache, tier
   `safe`, never on the status path) and an Upgrade-tab Backups card with
   producer, age, size, provenance and eligibility.
@@ -109,6 +134,16 @@ live/container tiers + docs.
   executable by inode with a minimal env before every gateway launch; any
   refusal or failure aborts the launch fail-closed (`GatewayPrelaunchHookError`,
   event `prelaunch_hook`, important notification). README section.
+- **Integration of the gateway seams** (lane I): the shared capabilities
+  instance feeds the `--force` probe (`setGatewayCapabilities`), the
+  prelaunch-hook outcome reaches the watchdog (`onPrelaunchHook` →
+  `degradedReason: "prelaunch_hook_failed"`, `getStatus().prelaunchHook`, a
+  `prelaunch_hook` event and a house-format notification), the incumbent
+  verdict reaches the system routes' notifier, `applied.operationId` survives
+  the store normalizer, the offline copy under `OPENCLAW_STATE_DB_QUIET=off`
+  records `quiet: "disabled"` in its evidence (per stage), and state-file
+  compatibility tests pin that old channel-state/run files load under the new
+  normalizers and new fields load under the old code.
 - New watchdog event kinds: `backup_diagnosis`, `backup_quiesce`,
   `backup_contention`, `backup_offline_copy`, `backup_reused`,
   `state_db_quiet`, `notification_partial`, `restart_incumbent`,
@@ -125,16 +160,51 @@ live/container tiers + docs.
   manifest, target preflight, `integrity_check`, `gateway run` to `/healthz`)
   with a 500 MB offline-copy calibration, and the offline-copy manifest
   contract vs upstream. **Container tier:** a SQLite-contention holder
-  during the quiesce window plus `tar`/`gzip` presence in the image.
+  during the quiesce window plus `tar`/`gzip` presence in the image — run
+  for real on the sandbox's own dockerd (11/11 in 196 s: image build, stable
+  boot, hard gate armed, browser-driven stable→beta apply through quiesce →
+  backup → usable check → install, orchestrator restart, durability legs);
+  only `tests/live/autotune-container.e2e.test.js` needs a host whose docker
+  cgroup is not in threaded mode (memory-limited containers).
+- **Live-tier disk hygiene** (from the 2026-09-02 incident: 46 GB of `/tmp`
+  debris in one afternoon, `alphaclaw-live-downgrade-*` alone 21 GB over 15
+  runs, `/` at 100 %, 12 files red with ENOSPC). Root cause: vitest 4's
+  forks pool ends a worker with SIGTERM, which never emits `exit`, so the
+  helpers' exit-time sweep had never run — every live run leaked its whole
+  temp set, not only interrupted ones. `tests/live/live-helpers.js` now
+  sweeps every tracked root in an `afterAll` it registers on each live file
+  (plus best-effort SIGTERM/SIGINT/SIGHUP and `exit` sweeps), real installs
+  go through `stageTempInstall` (the `openclaw-prepare-*` dir is tracked the
+  moment npm starts) with `staged.cleanup()` in `finally` blocks, the
+  per-version install cache moved out of the sweep namespace to
+  `$TMPDIR/alphaclaw-openclaw-cache/<version>` (env override unchanged), and
+  the heavy suites call `assertFreeDiskBytes()` (4 GiB; 8 GiB for the dev
+  build) to fail fast with the sweep instruction (`rm -rf
+  /tmp/alphaclaw-live-* /tmp/openclaw-prepare-*`, check `df -h /`) instead
+  of dying mid-run.
 - Docs: `docs/upgrade-troubleshooting.md` gains "Backup blocked by
   state-database contention", "Restoring a backup" (the runbook the UI links
   to), "Reusing a recent backup (consent)", "Restart did not take effect
   (incumbent gateway)" and "Gateway prelaunch hook"; AGENTS.md invariants
   for the ladder, the quiet period, stop/restart honesty and the hook
   boundary; the Telegram notice rule now says "author the house format, the
-  transport renders HTML".
+  transport renders HTML" (one link grammar for Telegram and Slack, bold over
+  code spans); the `test:live` note carries the Node-22-first, sweep,
+  cache-dir and cgroup facts.
 
 ### Notes
+- **Review adjudication:** an adversarial review of the merged server lanes
+  (22 agents on the integrated tree) returned 26 findings — 15 confirmed and
+  fixed in this entry (manifest depth-1 extraction and tail size, incumbent
+  verdict contract, reuse gate outside the quiesce, `deleteChannelAccount`
+  ordering under the barrier, usable-check budget floor, upstream-only
+  prediction source, `applied.operationId` normalization, shared link
+  grammar, bold over code spans, stale `.offline-copy-*` sweep, bounded
+  reuse verification, shutdown-probe abortability, tracked auth-store
+  readers with `busy_timeout`, hook-outcome-aware `latchConfigError`), 3
+  refuted with a cited mechanism, 8 low-confidence items evaluated (the cheap
+  ones — Telegram 403 scope, Slack escaping, quiet-held direct sends — fixed;
+  the rest recorded in TODOS.md).
 - **Compatibility:** run records gain `backup.{quiescedAttempts,
   contentionRetries, offlineCopy, diagnosis, producer, usableCheck,
   exclusivityEvidence, reused}` and `applied.operationId`; old files load

@@ -55,6 +55,12 @@
 - **Context:** `lib/server/notify-outbox.js` (`partialAt` dedupe, `deliverEvent` result shape), `lib/server/watchdog-notify.js` fan-out/`sendToTarget`, `tests/server/notify-outbox.test.js`. Keep the 48 h age-out and the terminal-immediate abandonment.
 - **Effort:** M. **Depends on:** nothing.
 
+## P3 — Live-tier debris guard in CI (2026-09-02, from the #54 wave's disk-full incident)
+- **What:** `.github/workflows/live-e2e.yml` runs the live tier on a persistent-ish runner disk with no pre-flight: add a `df -h /` + `rm -rf /tmp/alphaclaw-live-* /tmp/openclaw-prepare-*` step before the tier, a post-run `du -shc /tmp/alphaclaw-live-* /tmp/openclaw-prepare-*` step that FAILS the job when anything survived (the in-process `afterAll` sweep in `tests/live/live-helpers.js` should leave zero), and keep `$TMPDIR/alphaclaw-openclaw-cache` as a cache path (`actions/cache` keyed on the three `kOpenclawLines` versions) so the nightly warms it once.
+- **Why:** The in-repo fix (afterAll sweep, tracked installs, `assertFreeDiskBytes`) makes a completed or failed run clean up after itself; a run the runner kills (job timeout, cancellation) still leaks GBs, and CI is the one place nobody runs `df` by hand. The 2026-09-02 incident filled a 64 GB disk in one afternoon.
+- **Context:** tests/live/live-helpers.js (`sweepLiveTempDirs`, `kOpenclawVersionCacheDirName`, `assertFreeDiskBytes`), .github/workflows/live-e2e.yml, AGENTS.md "test:live" note (the sweep rule).
+- **Effort:** S. **Depends on:** nothing.
+
 ## P3 — Doctor-availability UI chip (gateway-hardening wave follow-up)
 - **What:** A small chip/badge on the Doctor tab rendering `openclawDoctorCli` from doctor status ("upstream doctor broken since <at>: <reason>") — the tracker (`lib/server/doctor/availability.js`) and status field already exist; this is render-only.
 - **Why:** Today the state is visible in doctor status JSON, watchdog `doctor_probe` events, and a process.log line; a glanceable chip closes the loop for operators who live in the UI.

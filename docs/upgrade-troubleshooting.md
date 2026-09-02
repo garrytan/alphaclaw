@@ -183,6 +183,19 @@ A `.unverified` suffix is a quarantined failed artifact — never restore it.
 A `partial: true` run record (or `options.includeWorkspace: false` in the
 manifest) means workspace files are **not** in the archive.
 
+**How an archive earned `verified`** (`backup.usableCheck: "manifest_ok"` in
+the run record): `gzip -t` passed, and the manifest **covers** this box's
+state databases — either an asset names the database (the offline copy's
+per-file assets) or an asset's `sourcePath` is the state dir / an ancestor
+of the database, resolved against `manifest.paths.stateDir` (upstream's
+single `kind: "state"` asset). The check reads exactly the archive's
+top-level `<archiveRoot>/manifest.json` (depth 1 — a workspace's own
+`manifest.json` deeper in the tree is never the one judged) and requires a
+numeric `schemaVersion` plus an `assets[]` array. If you restore by hand,
+apply the same reading: the manifest at the archive root is the authority,
+and for an upstream archive the DB files are tar entries *under* the state
+asset, not assets of their own.
+
 **Steps:**
 
 1. **Stop the gateway** and confirm it is gone. From the Watchdog terminal:
