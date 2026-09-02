@@ -1670,4 +1670,360 @@ describe("frontend/upgrade-helpers gateway hold model", () => {
       "No verified pre-update backup is recorded — data written by the newer version may be unreadable if you roll back anyway.",
     );
   });
+
+  // WI-4.1: the fence re-stats the recorded archive and qualifies it.
+  it("renders the fence re-stat caveats: pruned → newest surviving archive, partial, reused loss window", async () => {
+    const { buildRollbackDataRiskLine } = await loadUpgradeHelpers();
+    const kNow = Date.parse("2026-09-02T12:00:00.000Z");
+
+    // Object model without caveats === the legacy string line.
+    expect(
+      buildRollbackDataRiskLine({ backupFile: "b.tar.gz", backupFileExists: true }, kNow),
+    ).toBe(buildRollbackDataRiskLine("b.tar.gz"));
+    // Older servers omit backupFileExists — undefined is NOT "pruned".
+    expect(buildRollbackDataRiskLine({ backupFile: "b.tar.gz" }, kNow)).toBe(
+      buildRollbackDataRiskLine("b.tar.gz"),
+    );
+
+    const pruned = buildRollbackDataRiskLine(
+      {
+        backupFile: "/backups/openclaw-backup-old.tar.gz",
+        backupFileExists: false,
+        newestSurvivingBackup: {
+          file: "/backups/openclaw-backup-new.alphaclaw.tar.gz",
+          at: kNow - 3 * 3_600_000,
+          producer: "alphaclaw-offline-copy",
+        },
+      },
+      kNow,
+    );
+    expect(pruned).toContain("the original pre-migration backup was pruned");
+    expect(pruned).toContain(
+      "The newest surviving archive is /backups/openclaw-backup-new.alphaclaw.tar.gz (offline copy, 3 hours ago)",
+    );
+    expect(pruned).toContain("it may not predate the migration, so check its date before restoring");
+
+    const prunedNoSurvivor = buildRollbackDataRiskLine(
+      { backupFile: "/backups/old.tar.gz", backupFileExists: false, newestSurvivingBackup: null },
+      kNow,
+    );
+    expect(prunedNoSurvivor).toContain("no other archive survives");
+
+    const partial = buildRollbackDataRiskLine(
+      { backupFile: "b.tar.gz", backupFileExists: true, backupPartial: true },
+      kNow,
+    );
+    expect(partial).toContain("Note: workspace files were excluded from it.");
+
+    const reused = buildRollbackDataRiskLine(
+      {
+        backupFile: "b.tar.gz",
+        backupFileExists: true,
+        backupReused: true,
+        reusedAgeMs: 2 * 3_600_000,
+      },
+      kNow,
+    );
+    expect(reused).toContain(
+      "it was taken 2 hours before this update — state written since is not in it",
+    );
+
+    // Both caveats join with "; " inside one Note.
+    const both = buildRollbackDataRiskLine(
+      {
+        backupFile: "b.tar.gz",
+        backupFileExists: true,
+        backupPartial: true,
+        backupReused: true,
+        reusedAgeMs: 90_000,
+      },
+      kNow,
+    );
+    expect(both).toContain(
+      "Note: workspace files were excluded from it; it was taken 1 minute before this update — state written since is not in it.",
+    );
+  });
+});
+
+describe("frontend/upgrade-helpers backup reuse consent (WI-4.4/4.5)", () => {
+  const kNow = Date.parse("2026-09-02T12:00:00.000Z");
+  const kSha = "a".repeat(64);
+  const makeEntry = (overrides = {}) => ({
+    file: "/backups/openclaw-backup-2026-09-02T09-00-00.tar.gz",
+    name: "openclaw-backup-2026-09-02T09-00-00.tar.gz",
+    producer: "openclaw",
+    sizeBytes: 12_345_678,
+    mtimeMs: kNow - 3 * 3_600_000,
+    at: kNow - 3 * 3_600_000,
+    verified: true,
+    partial: false,
+    reused: false,
+    exists: true,
+    operationId: "op-1",
+    eligible: true,
+    ineligibleReason: null,
+    sha256: kSha,
+    ...overrides,
+  });
+
+  it("downgrades carry the hard-gate and pause notes even within one channel (issue #54)", async () => {
+    const { buildApplyConfirmModel, kBackupHardGateNote, kBackupPauseNote } =
+      await loadUpgradeHelpers();
+    const model = buildApplyConfirmModel({
+      payload: { channel: "stable", version: "2026.8.2" },
+      label: "2026.8.2",
+      isDowngrade: true,
+      currentChannel: "stable",
+    });
+    expect(model.isBreaking).toBe(false);
+    expect(model.hardGate).toBe(true);
+    const gateIndex = model.lines.indexOf(kBackupHardGateNote);
+    expect(gateIndex).toBeGreaterThan(-1);
+    expect(model.lines[gateIndex + 1]).toBe(kBackupPauseNote);
+    // The two notes are the last TEXT lines; the consent checkbox follows.
+    expect(model.lines[model.lines.length - 1]).toBe(kBackupPauseNote);
+    expect(model.backupReuse).toEqual(
+      expect.objectContaining({ available: false, reason: "No eligible backup to reuse" }),
+    );
+  });
+
+  it("dev switches are hard-gated too; routine same-channel upgrades carry no consent line", async () => {
+    const { buildApplyConfirmModel } = await loadUpgradeHelpers();
+    const dev = buildApplyConfirmModel({
+      payload: { channel: "dev", devHead: true },
+      label: "latest dev (main HEAD)",
+      currentChannel: "dev",
+    });
+    expect(dev.hardGate).toBe(true);
+    expect(dev.backupReuse).not.toBeNull();
+
+    const routine = buildApplyConfirmModel({
+      payload: { channel: "stable", version: "2026.7.2" },
+      label: "2026.7.2",
+      currentChannel: "stable",
+    });
+    expect(routine.hardGate).toBe(false);
+    expect(routine.backupReuse).toBeNull();
+  });
+
+  it("binds consent to the NEWEST eligible archive's sha256 with the loss-window sentence", async () => {
+    const { buildBackupReuseConsentModel, buildBackupReuseConsent } =
+      await loadUpgradeHelpers();
+    const older = makeEntry({
+      file: "/backups/older.tar.gz",
+      name: "older.tar.gz",
+      at: kNow - 26 * 3_600_000,
+      sha256: "b".repeat(64),
+    });
+    // Sorted oldest-first on purpose: selection is by `at`, not position.
+    const model = buildBackupReuseConsentModel({
+      inventory: { entries: [older, makeEntry()] },
+      nowMs: kNow,
+    });
+    expect(model.available).toBe(true);
+    expect(model.sha256).toBe(kSha);
+    expect(model.name).toBe("openclaw-backup-2026-09-02T09-00-00.tar.gz");
+    expect(model.producerLabel).toBe("upstream");
+    expect(model.lossWindowLine).toBe(
+      "Taken 3 hours ago — state written since would not be in it.",
+    );
+    // The payload carries the digest ONLY — never a path or name.
+    expect(buildBackupReuseConsent({ consentModel: model, checked: true })).toEqual({
+      sha256: kSha,
+    });
+    expect(buildBackupReuseConsent({ consentModel: model, checked: false })).toBeNull();
+  });
+
+  it("skips partial, unverified, missing and ineligible entries; no candidate → disabled with the reason", async () => {
+    const { buildBackupReuseConsentModel, buildBackupReuseConsent } =
+      await loadUpgradeHelpers();
+    const model = buildBackupReuseConsentModel({
+      inventory: {
+        entries: [
+          makeEntry({ partial: true, eligible: false, ineligibleReason: "partial" }),
+          makeEntry({ verified: false, eligible: false, ineligibleReason: "unverified" }),
+          makeEntry({ exists: false, eligible: false, ineligibleReason: "missing" }),
+          makeEntry({ eligible: false, ineligibleReason: "no_provenance" }),
+        ],
+      },
+      nowMs: kNow,
+    });
+    expect(model).toEqual(
+      expect.objectContaining({
+        available: false,
+        sha256: null,
+        reason: "No eligible backup to reuse",
+      }),
+    );
+    // Checked-but-unavailable never sends consent.
+    expect(buildBackupReuseConsent({ consentModel: model, checked: true })).toBeNull();
+    expect(
+      buildBackupReuseConsentModel({ inventory: null, nowMs: kNow }).reason,
+    ).toBe("No eligible backup to reuse");
+  });
+
+  it("an eligible archive without a recorded digest cannot bind consent — says so, never sends", async () => {
+    const { buildBackupReuseConsentModel, buildBackupReuseConsent, kBackupReuseNoDigestReason } =
+      await loadUpgradeHelpers();
+    const model = buildBackupReuseConsentModel({
+      inventory: { entries: [makeEntry({ sha256: null })] },
+      nowMs: kNow,
+    });
+    expect(model.available).toBe(false);
+    expect(model.reason).toBe(kBackupReuseNoDigestReason);
+    // The loss window still renders so the operator knows what exists.
+    expect(model.lossWindowLine).toContain("3 hours ago");
+    expect(buildBackupReuseConsent({ consentModel: model, checked: true })).toBeNull();
+    // A malformed digest is treated like no digest.
+    expect(
+      buildBackupReuseConsentModel({
+        inventory: { entries: [makeEntry({ sha256: "not-hex" })] },
+        nowMs: kNow,
+      }).available,
+    ).toBe(false);
+  });
+
+  it("builds the retry offer from a 409 backup_failed reusableBackup — sha256-bound, age-labelled", async () => {
+    const { buildBackupReuseOfferModel } = await loadUpgradeHelpers();
+    const error = Object.assign(new Error("Backup failed (lock_contention)"), {
+      code: "backup_failed",
+      reusableBackup: {
+        file: "/backups/openclaw-backup-x.alphaclaw.tar.gz",
+        at: kNow - 2 * 3_600_000,
+        ageMs: 2 * 3_600_000,
+        sha256: kSha,
+        producer: "alphaclaw-offline-copy",
+      },
+    });
+    const offer = buildBackupReuseOfferModel({
+      error,
+      target: { channel: "stable", version: "2026.8.2" },
+      label: "2026.8.2",
+      nowMs: kNow,
+    });
+    expect(offer).toEqual(
+      expect.objectContaining({
+        sha256: kSha,
+        file: "/backups/openclaw-backup-x.alphaclaw.tar.gz",
+        name: "openclaw-backup-x.alphaclaw.tar.gz",
+        producerLabel: "offline copy",
+        ageLabel: "2 hours ago",
+        label: "2026.8.2",
+        target: { channel: "stable", version: "2026.8.2" },
+        ctaLabel: "Retry using the backup taken 2 hours ago",
+      }),
+    );
+    expect(offer.lossWindowLine).toBe(
+      "That backup was taken 2 hours ago — state written since would not be in it.",
+    );
+
+    // Age falls back to `at` when ageMs is absent.
+    expect(
+      buildBackupReuseOfferModel({
+        error: {
+          code: "backup_failed",
+          reusableBackup: { file: "/b.tar.gz", at: kNow - 60_000, sha256: kSha },
+        },
+        target: { channel: "stable", version: "2026.8.2" },
+        nowMs: kNow,
+      }).ageLabel,
+    ).toBe("1 minute ago");
+  });
+
+  it("offers nothing for other codes, a missing offer, or a malformed digest", async () => {
+    const { buildBackupReuseOfferModel } = await loadUpgradeHelpers();
+    const reusableBackup = { file: "/b.tar.gz", at: kNow, ageMs: 0, sha256: kSha };
+    expect(
+      buildBackupReuseOfferModel({ error: { code: "enospc", reusableBackup }, nowMs: kNow }),
+    ).toBeNull();
+    expect(
+      buildBackupReuseOfferModel({ error: { code: "backup_failed" }, nowMs: kNow }),
+    ).toBeNull();
+    expect(
+      buildBackupReuseOfferModel({
+        error: { code: "backup_failed", reusableBackup: { ...reusableBackup, sha256: "abc" } },
+        nowMs: kNow,
+      }),
+    ).toBeNull();
+    expect(buildBackupReuseOfferModel({ error: null })).toBeNull();
+  });
+
+  it("builds inventory rows: age · size · producer · self-standing badges, newest highlighted", async () => {
+    const { buildBackupInventoryRows } = await loadUpgradeHelpers();
+    const rows = buildBackupInventoryRows(
+      {
+        entries: [
+          makeEntry(),
+          makeEntry({
+            file: "/backups/openclaw-backup-offline.alphaclaw.tar.gz",
+            name: "openclaw-backup-offline.alphaclaw.tar.gz",
+            producer: "alphaclaw-offline-copy",
+            at: kNow - 30 * 60_000,
+            partial: true,
+            eligible: false,
+            ineligibleReason: "partial",
+            sizeBytes: 512,
+          }),
+          makeEntry({
+            file: "/backups/openclaw-backup-gone.tar.gz",
+            name: "openclaw-backup-gone.tar.gz",
+            exists: false,
+            sizeBytes: null,
+            at: kNow - 48 * 3_600_000,
+            eligible: false,
+            ineligibleReason: "missing",
+          }),
+          makeEntry({
+            file: "/backups/openclaw-backup-stray.tar.gz",
+            name: "openclaw-backup-stray.tar.gz",
+            verified: false,
+            at: kNow - 7 * 24 * 3_600_000,
+            eligible: false,
+            ineligibleReason: "no_provenance",
+            reused: true,
+          }),
+        ],
+      },
+      kNow,
+    );
+    expect(rows.map((row) => row.name)).toEqual([
+      "openclaw-backup-2026-09-02T09-00-00.tar.gz",
+      "openclaw-backup-offline.alphaclaw.tar.gz",
+      "openclaw-backup-gone.tar.gz",
+      "openclaw-backup-stray.tar.gz",
+    ]);
+    // Newest ON DISK (by `at`) is the offline copy taken 30 min ago — not
+    // list position, and never a missing archive.
+    expect(rows.map((row) => row.newest)).toEqual([false, true, false, false]);
+    expect(rows[0]).toEqual(
+      expect.objectContaining({
+        ageLabel: "3 hours ago",
+        sizeLabel: "11.8 MB",
+        producerLabel: "upstream",
+        producerTone: "neutral",
+        missing: false,
+      }),
+    );
+    expect(rows[0].badges).toEqual([{ id: "verified", label: "verified", tone: "success" }]);
+    expect(rows[1]).toEqual(
+      expect.objectContaining({ producerLabel: "offline copy", producerTone: "cyan", sizeLabel: "512 B" }),
+    );
+    // Partial carries its own badge (reason visible) and is not repeated as
+    // a second "not reusable" chip.
+    expect(rows[1].badges.map((badge) => badge.label)).toEqual([
+      "verified",
+      "partial — workspace files excluded",
+    ]);
+    expect(rows[2]).toEqual(expect.objectContaining({ missing: true, sizeLabel: "—" }));
+    expect(rows[2].badges.map((badge) => badge.label)).toEqual([
+      "verified",
+      "missing — no longer on disk",
+    ]);
+    expect(rows[3].badges).toEqual([
+      { id: "unverified", label: "unverified", tone: "warning" },
+      { id: "reused", label: "reused for a later update", tone: "info" },
+      { id: "ineligible", label: "not reusable — no run record for it", tone: "warning" },
+    ]);
+    expect(buildBackupInventoryRows(null, kNow)).toEqual([]);
+  });
 });
