@@ -43,7 +43,7 @@ live/container tiers + docs.
   them to validated HTML (`lib/server/utils/telegram-html.js`), falling back
   to plain text locally and on a parse `400` (counted delivered). Delivery is
   honest: per-target error codes, `terminal` only when every target failed
-  deterministically (403 blocked, chat not found, parse 400 surviving the
+  deterministically (403 blocked, chat not found for a pairing-store target, parse 400 surviving the
   fallback) → immediate `notification_abandoned` instead of 48 h of retries;
   zero resolvable targets stays transient; partial fan-out raises one
   `notification_partial` event per outbox id; `POST
@@ -244,6 +244,8 @@ live/container tiers + docs.
 - **Gateway pid evidence is uncapped.** The restart-incumbent verdict's pid snapshot filtered for gateway processes AFTER a 12-entry cap over every openclaw-ish process, so a busy host could hide the swapped-in gateway or a surviving one; the gateway snapshot now filters inside the scan with no cap (`listLiveOpenclawProcesses({ match, limit })`); the human evidence lines keep the cap.
 - **Upgrade tab honesty.** The 409 reuse offer keeps the archive's absolute timestamp and derives its "taken … ago" / loss-window strings at render time; "Run repair" clears a leftover reuse offer; a hard-gated confirm opened while the backup list is loading, failed, or `readable:false` says so (with "Retry reading backups") instead of "No eligible backup to reuse"; the Backups card renders `readable:false` as the ERROR state, prints the server's returned page size, and no longer implies only cross-channel updates create a backup. The unreachable "No channels configured" 200-path in the test-notification settings is gone (the server answers 502).
 - **Hermetic gateway tests** mock `execFile` by default so no hermetic test boots the real pinned CLI via the managed launch's `gateway stop --help` warm-up; `createSwrCache` moved to `lib/server/utils/swr-cache.js`; one exported `formatAge`; the `.offline-copy-` staging prefix is the producer's export; `parseMountInfoFsType` gains unit pins; a short-circuited refused copy no longer reads "(after 0 attempts)".
+- **Telegram `400 chat not found` is final only for a proven chat.** Target provenance (pairing store · `allowFrom` fallback · explicit admin target) now rides through the Telegram send; `400 chat not found` abandons after one attempt only for a pairing-store target (the bot has talked to that chat before), while an `allowFrom` id the bot has never exchanged a message with — Telegram answers the same 400 until the user messages the bot — keeps the 48 h retry ladder, the same human-fixable state the 403 "can't initiate conversation" shape already keeps retryable.
+- **Watchdog tab names a hook-aborted launch.** When the prelaunch hook refused or failed the launch, the Watchdog tab shows "Gateway launch aborted by the prelaunch hook" with the code, site and message and the fix (repair or unset the hook, then restart) instead of "Watchdog stopped / monitoring is not running"; the incidents list labels the `prelaunch_hook` event kind.
 - **Docs.** Prelaunch hook runbook says `/proc/<pid>/fd/<fd>` (parent pid) with the fixed system `PATH`; the `409 backup_in_progress` contract names every covered write and the mid-flight deferrals; `OPENCLAW_STATE_DB_QUIET` in the README env table; GNU tar documented as a hard requirement (with a TODOS entry for a bsdtar-compatible extraction); version floors corrected to v0.9.71 (the version this PR claims; PR #57 holds v0.9.70).
 
 ### Notes
