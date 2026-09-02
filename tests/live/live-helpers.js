@@ -14,21 +14,124 @@ const kLiveDevEnabled = process.env.OPENCLAW_LIVE_E2E_DEV === "1";
 
 const kSilentLogger = { log() {}, warn() {}, error() {} };
 
-// Every temp dir is swept at process exit: one live run stages multiple GBs
-// (overlay stores, npm caches, a dev checkout) and on tmpfs /tmp that is RAM.
+// TEMP-DIR HYGIENE (incident 2026-09-02: 46 GB of /tmp debris in one
+// afternoon, `alphaclaw-live-downgrade-*` alone 21 GB over 15 runs). One live
+// run stages multiple GBs (real npm installs, overlay stores, a dev checkout),
+// so every temp root this tier creates is tracked here and swept:
+//
+//   1. in an `afterAll` registered on the test file's root suite — the
+//      PRIMARY path. Vitest 4's forks pool tears a worker down with
+//      `fork.kill()` (SIGTERM, then SIGKILL 500 ms later — ForksPoolWorker
+//      .stop()), and Node's default SIGTERM disposition terminates WITHOUT
+//      emitting `exit`, so a `process.on("exit")` sweep alone never ran on a
+//      completed file. afterAll runs before that teardown, on pass AND fail
+//      (also after a failed beforeAll);
+//   2. on SIGTERM/SIGINT/SIGHUP — best effort inside the 500 ms SIGKILL
+//      window for a cancelled run (Ctrl-C, orchestrator abort);
+//   3. at `exit` — for the plain-node / `process.exit()` paths.
+//
+// Roots that must OUTLIVE a run (the per-version install cache below) live
+// outside the `alphaclaw-live-*` / `openclaw-prepare-*` namespaces on
+// purpose, so an operator's prefix sweep between runs never deletes them.
 const kCreatedTempDirs = [];
-process.once("exit", () => {
-  for (const dir of kCreatedTempDirs) {
+
+// Register a directory this process created for the sweep (idempotent).
+const trackTempDir = (dir) => {
+  if (dir && !kCreatedTempDirs.includes(dir)) kCreatedTempDirs.push(dir);
+  return dir;
+};
+
+// Remove every tracked directory now. Synchronous and best-effort: a dir that
+// is already gone (cleanup() ran, or the staging rename moved it into the
+// cache) is a no-op, and one failure never blocks the rest. Returns the
+// number of directories that still existed and were removed.
+const sweepLiveTempDirs = () => {
+  let removed = 0;
+  while (kCreatedTempDirs.length > 0) {
+    const dir = kCreatedTempDirs.pop();
     try {
-      fs.rmSync(dir, { recursive: true, force: true });
+      if (fs.existsSync(dir)) {
+        fs.rmSync(dir, { recursive: true, force: true, maxRetries: 2 });
+        removed += 1;
+      }
     } catch {}
   }
+  return removed;
+};
+
+process.once("exit", () => {
+  sweepLiveTempDirs();
 });
+for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"]) {
+  try {
+    process.once(signal, () => {
+      sweepLiveTempDirs();
+      process.exit(128 + (signal === "SIGINT" ? 2 : signal === "SIGHUP" ? 1 : 15));
+    });
+  } catch {}
+}
+// Vitest exposes the hooks as globals (vitest.config.js `globals: true`);
+// registering here attaches the sweep to whichever live file required us,
+// after that file's own afterAll hooks (stack order), so a suite that kills
+// its spawned server/gateway in afterAll does so before its root vanishes.
+if (typeof globalThis.afterAll === "function") {
+  globalThis.afterAll(() => {
+    sweepLiveTempDirs();
+  }, 5 * 60 * 1000);
+}
 
 const mkTemp = (prefix) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
-  kCreatedTempDirs.push(dir);
-  return dir;
+  return trackTempDir(dir);
+};
+
+// Fail FAST when the disk is already too full for a heavy live suite, with the
+// sweep instruction in the message, instead of dying mid-run with ENOSPC
+// (which is how the 2026-09-02 incident surfaced: 12 files red at once, /
+// at 100 %). Default floor 4 GiB — one real install (~0.7 GB) × the two or
+// three copies a heavy suite keeps live (staged + overlay + activated) plus
+// the archive under test. Returns the free bytes, or null when the platform
+// has no statfs (never blocks there).
+const kDefaultFreeDiskFloorBytes = 4 * 1024 ** 3;
+const assertFreeDiskBytes = (
+  minBytes = kDefaultFreeDiskFloorBytes,
+  { dir = os.tmpdir(), label = "this live suite" } = {},
+) => {
+  if (typeof fs.statfsSync !== "function") return null;
+  let stat;
+  try {
+    stat = fs.statfsSync(dir);
+  } catch {
+    return null;
+  }
+  const freeBytes = Number(stat.bavail) * Number(stat.bsize);
+  if (!Number.isFinite(freeBytes)) return null;
+  if (freeBytes < minBytes) {
+    const gib = (bytes) => (bytes / 1024 ** 3).toFixed(1);
+    throw new Error(
+      `free disk below ${gib(minBytes)} GiB (${gib(freeBytes)} GiB free under ${dir}) — ` +
+        `${label} stages real OpenClaw installs there; sweep /tmp/alphaclaw-live-* and ` +
+        `/tmp/openclaw-prepare-* (leftovers of interrupted live runs) and check \`df -h /\` before retrying`,
+    );
+  }
+  return freeBytes;
+};
+
+// The REAL installer (lib/server/openclaw-version.js) mints its own
+// `openclaw-prepare-*` dir and removes it only when the caller's cleanup()
+// runs — a run interrupted mid-`npm install` leaked ~0.7 GB per call before
+// this wrapper. Same contract as installOpenclawVersionToTempDir, but the
+// prepare dir is tracked for the sweep the moment it is created. Callers
+// still call `staged.cleanup()` in a finally (the sweep is the backstop).
+const stageTempInstall = (opts = {}) => {
+  const {
+    installOpenclawVersionToTempDir,
+  } = require("../../lib/server/openclaw-version");
+  const trackingFs = {
+    ...fs,
+    mkdtempSync: (prefix, ...rest) => trackTempDir(fs.mkdtempSync(prefix, ...rest)),
+  };
+  return installOpenclawVersionToTempDir({ fsModule: trackingFs, ...opts });
 };
 
 // Real fetch, wrapped so tests can assert HOW MANY network calls happened
@@ -112,22 +215,24 @@ const resolvePackageBin = (openclawPackageDir) => {
 // and runs under one per-version directory (the package is immutable on the
 // registry, so the cache key is the version). A cached tree is trusted only
 // when its bin actually runs and reports the version; anything else is
-// reinstalled. Set ALPHACLAW_LIVE_OPENCLAW_CACHE to relocate the cache (the
-// default lives in the temp dir and is NOT swept at exit — that is the point).
+// reinstalled. Set ALPHACLAW_LIVE_OPENCLAW_CACHE to relocate the cache. The
+// default, `$TMPDIR/alphaclaw-openclaw-cache/<version>`, is deliberately NOT
+// swept at exit and deliberately NOT under the `alphaclaw-live-*` prefix: the
+// operator's between-runs sweep (`rm -rf /tmp/alphaclaw-live-*
+// /tmp/openclaw-prepare-*`) must not throw away the ~0.7 GB-per-version cache
+// the whole tier warms once.
+const kOpenclawVersionCacheDirName = "alphaclaw-openclaw-cache";
 const stageOpenclawVersion = async (
   version,
   { timeoutMs = 8 * 60 * 1000, logger = kSilentLogger } = {},
 ) => {
-  const {
-    installOpenclawVersionToTempDir,
-  } = require("../../lib/server/openclaw-version");
   const { execFileSync } = require("child_process");
   if (!kVersionShape.test(String(version))) {
     throw new Error(`stageOpenclawVersion needs an exact version, got ${version}`);
   }
   const cacheRoot =
     process.env.ALPHACLAW_LIVE_OPENCLAW_CACHE ||
-    path.join(os.tmpdir(), "alphaclaw-live-openclaw-cache");
+    path.join(os.tmpdir(), kOpenclawVersionCacheDirName);
   const cacheDir = path.join(cacheRoot, version);
   const packageDir = path.join(cacheDir, "node_modules", "openclaw");
   const runsAsVersion = () => {
@@ -151,7 +256,10 @@ const stageOpenclawVersion = async (
     return { version, packageDir, bin: resolvePackageBin(packageDir), fromCache: true };
   }
   fs.rmSync(cacheDir, { recursive: true, force: true });
-  const staged = await installOpenclawVersionToTempDir({
+  // Tracked install: an interruption mid-`npm install` leaves the prepare dir
+  // to the sweep instead of on disk; after the rename below the tracked path
+  // no longer exists, so the sweep never touches the cache.
+  const staged = await stageTempInstall({
     versionSpec: version,
     timeoutMs,
     logger,
@@ -161,10 +269,15 @@ const stageOpenclawVersion = async (
     fs.renameSync(staged.tmpDir, cacheDir);
   } catch {
     // Cross-device temp dirs: copy, then let the installer's cleanup run.
-    fs.cpSync(staged.tmpDir, cacheDir, { recursive: true });
-    staged.cleanup();
+    try {
+      fs.cpSync(staged.tmpDir, cacheDir, { recursive: true });
+    } finally {
+      staged.cleanup();
+    }
   }
   if (!runsAsVersion()) {
+    // Never leave a broken tree where the next run would trust-then-reject it.
+    fs.rmSync(cacheDir, { recursive: true, force: true });
     throw new Error(`staged openclaw ${version} does not report its own version`);
   }
   return { version, packageDir, bin: resolvePackageBin(packageDir), fromCache: false };
@@ -251,12 +364,18 @@ module.exports = {
   kFullShaShape,
   kFixturePin,
   kOpenclawLines,
+  kOpenclawVersionCacheDirName,
+  kDefaultFreeDiskFloorBytes,
   readDeclaredPin,
   resolvePackageBin,
   stageOpenclawVersion,
+  stageTempInstall,
   writePinFixture,
   createBackupStubRunner,
   mkTemp,
+  trackTempDir,
+  sweepLiveTempDirs,
+  assertFreeDiskBytes,
   createCountingFetch,
   repoOpenclawBin,
   repoBinDir,

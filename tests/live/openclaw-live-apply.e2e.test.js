@@ -42,18 +42,17 @@ const {
 } = require("../../lib/server/operation-events");
 const { createRunStream } = require("../../lib/server/openclaw-run-stream");
 const {
-  installOpenclawVersionToTempDir,
-} = require("../../lib/server/openclaw-version");
-const {
   readOpenclawReleaseChannel,
 } = require("../../lib/server/alphaclaw-config");
 const {
+  assertFreeDiskBytes,
   kLiveEnabled,
   kSilentLogger,
   kFixturePin,
   writePinFixture,
   createBackupStubRunner,
   mkTemp,
+  stageTempInstall,
   waitFor,
 } = liveHelpers;
 
@@ -107,8 +106,10 @@ const createLiveHarness = () => {
       packageRoot,
       store,
       runStream: runner,
+      // Tracked real install (prepare dir swept even if the run is killed
+      // mid-download; see live-helpers stageTempInstall).
       installToTempDir: (opts) =>
-        installOpenclawVersionToTempDir({ ...opts, timeoutMs: kInstallTimeoutMs }),
+        stageTempInstall({ ...opts, timeoutMs: kInstallTimeoutMs }),
       resolveInstallDir: () => installDir,
       readReleaseChannel: () => readOpenclawReleaseChannel({ openclawDir }),
       releases: releasesOverride !== undefined ? releasesOverride : releases,
@@ -262,6 +263,12 @@ const applyAndActivate = async (harness, { channel, version }) => {
 };
 
 describeLive("LIVE openclaw package apply (real npm artifacts)", () => {
+  beforeAll(() => {
+    // Two real installs + their overlays + activated copies (~3 GB peak):
+    // fail fast with the sweep instruction rather than mid-run with ENOSPC.
+    assertFreeDiskBytes(undefined, { label: "the live package-apply suite" });
+  });
+
   it(
     "applies the real latest STABLE release end-to-end and executes the activated binary",
     { timeout: kApplyTestTimeoutMs },

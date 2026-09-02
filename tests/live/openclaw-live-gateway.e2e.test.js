@@ -5,15 +5,14 @@ const { spawnSync, spawn } = require("child_process");
 const { DatabaseSync } = require("node:sqlite");
 
 const {
+  assertFreeDiskBytes,
   kLiveEnabled,
   kSilentLogger,
   mkTemp,
   scrubTestRunnerEnv,
+  stageTempInstall,
   waitFor,
 } = require("./live-helpers");
-const {
-  installOpenclawVersionToTempDir,
-} = require("../../lib/server/openclaw-version");
 const {
   createOpenclawReleaseChannelStore,
 } = require("../../lib/server/openclaw-release-channel");
@@ -60,6 +59,9 @@ describeLive("live: OpenClaw beta gateway contracts", () => {
   };
 
   beforeAll(async () => {
+    // Real install + overlay + activated copy (~2 GB): fail fast with the
+    // sweep instruction rather than mid-run with ENOSPC.
+    assertFreeDiskBytes(undefined, { label: "the live gateway-contract suite" });
     rootDir = mkTemp("alphaclaw-live-gw-root-");
     openclawDir = path.join(rootDir, ".openclaw");
     installDir = mkTemp("alphaclaw-live-gw-install-");
@@ -68,29 +70,33 @@ describeLive("live: OpenClaw beta gateway contracts", () => {
 
     betaVersion = await resolveNewestBeta();
 
-    // Stage the beta and verify its lifecycle completed (guard gone).
-    const staged = await installOpenclawVersionToTempDir({
+    // Stage the beta (tracked prepare dir) and verify its lifecycle
+    // completed (guard gone).
+    const staged = await stageTempInstall({
       versionSpec: betaVersion,
       timeoutMs: kInstallTimeoutMs,
     });
-    expect(staged.lifecycleVerified).toBe(true);
-    expect(
-      fs.existsSync(
-        path.join(staged.openclawPackageDir, "dist", "openclaw-install-guard"),
-      ),
-    ).toBe(false);
-
     store = createOpenclawReleaseChannelStore({
       rootDir,
       openclawDir,
       logger: kSilentLogger,
     });
-    const saved = store.saveOverlayFromTempInstall({
-      openclawPackageDir: staged.openclawPackageDir,
-      version: betaVersion,
-    });
-    expect(saved.ok).toBe(true);
-    staged.cleanup();
+    try {
+      expect(staged.lifecycleVerified).toBe(true);
+      expect(
+        fs.existsSync(
+          path.join(staged.openclawPackageDir, "dist", "openclaw-install-guard"),
+        ),
+      ).toBe(false);
+      const saved = store.saveOverlayFromTempInstall({
+        openclawPackageDir: staged.openclawPackageDir,
+        version: betaVersion,
+      });
+      expect(saved.ok).toBe(true);
+    } finally {
+      // ~0.7 GB staged tree: removed on every path, not only the happy one.
+      staged.cleanup();
+    }
 
     const activated = store.activateOverlay({ installDir, version: betaVersion });
     expect(activated.ok).toBe(true);

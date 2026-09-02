@@ -30,9 +30,10 @@ delete process.env.OPENCLAW_GIT_DIR;
 
 const { execFileSync } = require("child_process");
 
-const {
-  installOpenclawVersionToTempDir,
-} = require("../../lib/server/openclaw-version");
+// Real installs go through the tracked wrapper (tests/live/live-helpers.js
+// stageTempInstall): the prepare dir is swept even when the run is killed
+// before the finally blocks below reach cleanup().
+const installOpenclawVersionToTempDir = liveHelpers.stageTempInstall;
 const {
   createOpenclawReleasesService,
 } = require("../../lib/server/openclaw-releases");

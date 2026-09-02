@@ -3,15 +3,14 @@ const path = require("path");
 const { spawn } = require("child_process");
 
 const {
+  assertFreeDiskBytes,
   kLiveEnabled,
   kSilentLogger,
   mkTemp,
   scrubTestRunnerEnv,
+  stageTempInstall,
   waitFor,
 } = require("./live-helpers");
-const {
-  installOpenclawVersionToTempDir,
-} = require("../../lib/server/openclaw-version");
 const {
   createOpenclawReleaseChannelStore,
 } = require("../../lib/server/openclaw-release-channel");
@@ -117,6 +116,9 @@ describeLive("live: gateway memory leak via a real plugin", () => {
   };
 
   beforeAll(async () => {
+    // Real install + overlay + activated copy (~2 GB): fail fast with the
+    // sweep instruction rather than mid-run with ENOSPC.
+    assertFreeDiskBytes(undefined, { label: "the live memory-leak suite" });
     rootDir = mkTemp("alphaclaw-live-mem-root-");
     openclawDir = path.join(rootDir, ".openclaw");
     installDir = mkTemp("alphaclaw-live-mem-install-");
@@ -124,22 +126,27 @@ describeLive("live: gateway memory leak via a real plugin", () => {
     fs.mkdirSync(path.join(openclawDir, "state"), { recursive: true });
 
     const betaVersion = await resolveNewestBeta();
-    const staged = await installOpenclawVersionToTempDir({
+    const staged = await stageTempInstall({
       versionSpec: betaVersion,
       timeoutMs: kInstallTimeoutMs,
     });
-    expect(staged.lifecycleVerified).toBe(true);
     const store = createOpenclawReleaseChannelStore({
       rootDir,
       openclawDir,
       logger: kSilentLogger,
     });
-    const saved = store.saveOverlayFromTempInstall({
-      openclawPackageDir: staged.openclawPackageDir,
-      version: betaVersion,
-    });
-    expect(saved.ok).toBe(true);
-    staged.cleanup();
+    try {
+      expect(staged.lifecycleVerified).toBe(true);
+      const saved = store.saveOverlayFromTempInstall({
+        openclawPackageDir: staged.openclawPackageDir,
+        version: betaVersion,
+      });
+      expect(saved.ok).toBe(true);
+    } finally {
+      // The staged tree is ~0.7 GB; drop it on every path (a failed overlay
+      // save used to leak it until the process exit that never came).
+      staged.cleanup();
+    }
     const activated = store.activateOverlay({ installDir, version: betaVersion });
     expect(activated.ok).toBe(true);
     overlayBin = store.resolvePackageBin(

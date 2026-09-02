@@ -407,7 +407,14 @@ npm run test:coverage   # Coverage report
 # real OpenClaw releases — catch upstream drift the hermetic suite can't):
 npm run test:live       # catalog + real stable/beta package applies, plus a
                         # real-gateway memory-leak e2e against the newest beta
-                        # (network)
+                        # (network). Needs a supported Node FIRST on PATH (the
+                        # real npm installs resolve `node` from PATH). Stages GBs
+                        # under $TMPDIR: roots are swept per file; between
+                        # interrupted runs `rm -rf /tmp/alphaclaw-live-*
+                        # /tmp/openclaw-prepare-*` and check `df -h /` — the
+                        # per-version install cache lives outside that prefix
+                        # ($TMPDIR/alphaclaw-openclaw-cache; override with
+                        # ALPHACLAW_LIVE_OPENCLAW_CACHE)
 npm run test:live:dev   # dev-channel source build only (20-35 min, ~5 GB disk);
                         # does not re-run the catalog/apply tiers above
 npm run test:container  # full production-container journey: builds the image,

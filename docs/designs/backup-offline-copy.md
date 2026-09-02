@@ -128,16 +128,28 @@ a way a restore runbook must know about.
 An archive from either producer counts as verified only when:
 
 1. `gzip -t <file>` passes,
-2. `tar -xzOf <file> --wildcards '*/manifest.json'` extracts a JSON object with
-   an `assets[]` array,
-3. that manifest lists this box's state databases (`state/openclaw.sqlite`, or
-   the per-agent DB set when there is no global DB) — by `archivePath` /
-   `sourcePath` suffix (per-file assets, the offline copy) OR by an asset
-   whose `sourcePath` is the state dir or an ancestor of the database
-   (upstream's single `kind: "state"` asset; see §7).
+2. the **depth-1** manifest extracts and parses:
+   `tar -xzOf <file> --wildcards --no-wildcards-match-slash '*/manifest.json'
+   --occurrence=1` — GNU `*` would otherwise span `/` and, with
+   `--occurrence=1`, deterministically pick a *workspace's* own
+   `manifest.json` when it sorts first; the extraction streams through a
+   16 MB tail (the runStreamed default of 64 KB truncated a real-size
+   offline-copy manifest at ≳280 files, which is why the producer writes
+   compact JSON), and the parsed object must carry a numeric `schemaVersion`
+   and an `assets[]` array (9–14 ms on real archives);
+3. that manifest **covers** this box's state databases
+   (`state/openclaw.sqlite`, or the per-agent DB set when there is no global
+   DB) — by `archivePath` / `sourcePath` suffix (per-file assets, the offline
+   copy) OR by an asset whose `sourcePath` is the state dir or an ancestor of
+   the database's absolute path, resolved against `manifest.paths.stateDir`
+   (upstream's single `kind: "state"` asset; see §7). Coverage, not listing:
+   a per-file-only rule rejected every real upstream archive and failed the
+   hard gate closed on a false verdict in the first container-tier run.
 
 The run record carries `backup.usableCheck: "manifest_ok"`; a failing check is
-treated as a `verify` failure (terminal, quarantined as `.unverified`).
+treated as a `verify` failure (terminal, quarantined as `.unverified`). Both
+producers are judged by this one check — the offline copy's own `gzip -t` +
+manifest step after publish is the same function.
 
 ## 5. Restore runbook (manual — the same steps as an upstream archive)
 
