@@ -1,9 +1,40 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createRequire } from "node:module";
+
+// Card-level cases call WatchdogNarrativeCard as a plain function (no DOM
+// renderer). It only touches useMemo from preact/hooks, and useNowMs is
+// swapped for a clock that honours `enabled` the way the real hook does:
+// disabled → frozen at the mount value, enabled → the advancing clock.
+const clock = vi.hoisted(() => ({ mountMs: 0, nowMs: 0 }));
+vi.mock("preact/hooks", () => ({ useMemo: (factory) => factory() }));
+vi.mock("../../lib/public/js/hooks/use-now-ms.js", () => ({
+  useNowMs: vi.fn((_intervalMs, { enabled = true } = {}) =>
+    enabled ? clock.nowMs : clock.mountMs,
+  ),
+}));
 
 const require = createRequire(import.meta.url);
 const loadHelpers = () =>
   import("../../lib/public/js/components/watchdog-tab/helpers.js");
+const loadCard = () =>
+  import("../../lib/public/js/components/watchdog-tab/narrative-card.js");
+const loadUseNowMs = () => import("../../lib/public/js/hooks/use-now-ms.js");
+
+const collectText = (node, out = []) => {
+  if (typeof node === "string" || typeof node === "number") {
+    out.push(String(node));
+    return out;
+  }
+  if (Array.isArray(node)) {
+    for (const child of node) collectText(child, out);
+    return out;
+  }
+  if (node && typeof node === "object" && node.props) {
+    collectText(node.props.children, out);
+  }
+  return out;
+};
+const treeText = (tree) => collectText(tree).join("");
 
 const kNow = Date.parse("2026-08-29T12:00:00Z");
 
@@ -104,6 +135,166 @@ describe("buildWatchdogNarrative", () => {
     expect(narrative.budgets).toEqual([{ key: "crashes", label: "2/3 crashes" }]);
   });
 
+  describe("degraded_retrying countdown from status.degradedRetry", () => {
+    const kDueAt = new Date(kNow + 20_000).toISOString();
+    const degradedRetrying = {
+      ...baseStatus,
+      phase: "degraded_retrying",
+      health: "degraded",
+      // 20s, not 15s: the "no 5s" assertion below scans the whole detail
+      // string, and "Degraded for 15s." would substring-match it.
+      degradedSince: new Date(kNow - 20_000).toISOString(),
+      degradedReason: "gateway health returned HTTP 503",
+    };
+    const armedRetry = {
+      attempt: 2,
+      nextDelayMs: 20_000,
+      dueAt: kDueAt,
+      inFlight: false,
+    };
+
+    it("pushes a Next retry countdown ending at degradedRetry.dueAt", async () => {
+      const { buildWatchdogNarrative } = await loadHelpers();
+      const narrative = buildWatchdogNarrative(
+        { ...degradedRetrying, degradedRetry: armedRetry },
+        kNow,
+      );
+      expect(narrative.countdowns).toContainEqual({
+        key: "degraded_retry",
+        label: "Next retry",
+        endsAt: kDueAt,
+      });
+      const retry = narrative.countdowns.find(
+        (countdown) => countdown.key === "degraded_retry",
+      );
+      // No value override while armed — the live countdown is the value.
+      expect(retry.value).toBeUndefined();
+      expect(narrative.chips.map((chip) => chip.key)).not.toContain(
+        "degraded_retry_probe",
+      );
+    });
+
+    it("overrides the countdown value with probing… while in flight (dueAt is already past), keeping the row shape", async () => {
+      const { buildWatchdogNarrative } = await loadHelpers();
+      // While inFlight the timer has already fired, so dueAt is in the past —
+      // a countdown here would read "imminent" for the whole probe. The row
+      // stays mounted (same key/label) so the card doesn't shift; only the
+      // value changes. No chip: the chips row is warning-styled and shared
+      // with the persistent suppression chip, so a transient activity
+      // indicator there reads as high-stakes.
+      const dueAt = new Date(kNow - 3_000).toISOString();
+      const narrative = buildWatchdogNarrative(
+        {
+          ...degradedRetrying,
+          degradedRetry: {
+            attempt: 2,
+            nextDelayMs: 20_000,
+            dueAt,
+            inFlight: true,
+          },
+        },
+        kNow,
+      );
+      expect(narrative.countdowns).toContainEqual({
+        key: "degraded_retry",
+        label: "Next retry",
+        endsAt: dueAt,
+        value: "probing…",
+      });
+      expect(narrative.chips.map((chip) => chip.key)).not.toContain(
+        "degraded_retry_probe",
+      );
+      expect(narrative.chips.map((chip) => chip.label)).not.toContain(
+        "Retry probe running",
+      );
+    });
+
+    it("still shows probing… when dueAt is null mid-flight (cleared between tick and probe completion)", async () => {
+      const { buildWatchdogNarrative } = await loadHelpers();
+      const narrative = buildWatchdogNarrative(
+        {
+          ...degradedRetrying,
+          degradedRetry: {
+            attempt: 2,
+            nextDelayMs: 20_000,
+            dueAt: null,
+            inFlight: true,
+          },
+        },
+        kNow,
+      );
+      expect(narrative.countdowns).toContainEqual({
+        key: "degraded_retry",
+        label: "Next retry",
+        endsAt: null,
+        value: "probing…",
+      });
+      expect(narrative.chips).toHaveLength(0);
+    });
+
+    it("also counts down in degraded_pre_rollback, ahead of the rollback deadline", async () => {
+      const { buildWatchdogNarrative } = await loadHelpers();
+      const rollbackDeadlineAt = new Date(kNow + 300_000).toISOString();
+      const narrative = buildWatchdogNarrative(
+        {
+          ...degradedRetrying,
+          phase: "degraded_pre_rollback",
+          rollbackDeadlineAt,
+          degradedRetry: armedRetry,
+        },
+        kNow,
+      );
+      expect(narrative.countdowns.map((countdown) => countdown.key)).toEqual([
+        "degraded_retry",
+        "rollback",
+      ]);
+    });
+
+    it("ignores degradedRetry outside the degraded phases (no countdown, no chip)", async () => {
+      const { buildWatchdogNarrative } = await loadHelpers();
+      for (const phase of ["healthy", "crash_backoff"]) {
+        for (const degradedRetry of [
+          armedRetry,
+          { ...armedRetry, inFlight: true },
+        ]) {
+          const narrative = buildWatchdogNarrative(
+            { ...baseStatus, phase, degradedRetry },
+            kNow,
+          );
+          expect(narrative.countdowns.map((countdown) => countdown.key)).not.toContain(
+            "degraded_retry",
+          );
+          expect(narrative.chips.map((chip) => chip.key)).not.toContain(
+            "degraded_retry_probe",
+          );
+        }
+      }
+    });
+
+    it("pushes no degraded_retry countdown when degradedRetry is null or dueAt is garbage", async () => {
+      const { buildWatchdogNarrative } = await loadHelpers();
+      const keysFor = (degradedRetry) =>
+        buildWatchdogNarrative({ ...degradedRetrying, degradedRetry }, kNow)
+          .countdowns.map((countdown) => countdown.key);
+      expect(keysFor(null)).not.toContain("degraded_retry");
+      expect(keysFor(undefined)).not.toContain("degraded_retry");
+      expect(
+        keysFor({ attempt: 0, nextDelayMs: 5_000, dueAt: "garbage", inFlight: false }),
+      ).not.toContain("degraded_retry");
+    });
+
+    it("degraded copy is numberless — retries back off, so no fixed cadence is promised", async () => {
+      const { buildWatchdogNarrative, kWatchdogPhaseCopy } = await loadHelpers();
+      expect(kWatchdogPhaseCopy.degraded_retrying.detail).not.toContain("5s");
+      const narrative = buildWatchdogNarrative(
+        { ...degradedRetrying, degradedRetry: armedRetry },
+        kNow,
+      );
+      expect(narrative.detail).toContain("Retrying with exponential backoff");
+      expect(narrative.detail).not.toContain("5s");
+    });
+  });
+
   it("shows repair attempt budget while repairing", async () => {
     const { buildWatchdogNarrative } = await loadHelpers();
     const narrative = buildWatchdogNarrative(
@@ -148,6 +339,83 @@ describe("buildWatchdogNarrative", () => {
       kNow,
     );
     expect(narrative.detail).toContain("Suppressed: telegram, discord.");
+  });
+});
+
+describe("WatchdogNarrativeCard tick gate", () => {
+  beforeEach(async () => {
+    // The card offsets the tick by (serverNow − Date.now()); pin the wall
+    // clock to serverNow so the offset is zero and the countdown is exact.
+    vi.useFakeTimers();
+    vi.setSystemTime(kNow);
+    clock.mountMs = kNow;
+    clock.nowMs = kNow;
+    const { useNowMs } = await loadUseNowMs();
+    useNowMs.mockClear();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("keeps ticking when degradedRetry is the only time-dependent field (readiness-degraded phase leaves degradedSince null)", async () => {
+    const { WatchdogNarrativeCard } = await loadCard();
+    const { useNowMs } = await loadUseNowMs();
+    const watchdogStatus = {
+      ...baseStatus,
+      phase: "degraded_retrying",
+      health: "degraded",
+      degradedSince: null,
+      degradedRetry: {
+        attempt: 1,
+        nextDelayMs: 20_000,
+        dueAt: new Date(kNow + 20_000).toISOString(),
+        inFlight: false,
+      },
+    };
+    const mounted = treeText(WatchdogNarrativeCard({ watchdogStatus }));
+    expect(mounted).toContain("Next retry: 20s");
+    expect(useNowMs).toHaveBeenLastCalledWith(1000, { enabled: true });
+
+    clock.nowMs = kNow + 1_000;
+    const ticked = treeText(WatchdogNarrativeCard({ watchdogStatus }));
+    expect(ticked).toContain("Next retry: 19s");
+  });
+
+  it("renders Next retry: probing… (not imminent) while the retry probe is in flight", async () => {
+    const { WatchdogNarrativeCard } = await loadCard();
+    const inFlight = {
+      ...baseStatus,
+      phase: "degraded_retrying",
+      health: "degraded",
+      degradedSince: new Date(kNow - 20_000).toISOString(),
+      degradedRetry: {
+        attempt: 1,
+        nextDelayMs: 20_000,
+        dueAt: new Date(kNow - 3_000).toISOString(),
+        inFlight: true,
+      },
+    };
+    const text = treeText(WatchdogNarrativeCard({ watchdogStatus: inFlight }));
+    expect(text).toContain("Next retry: probing…");
+    expect(text).not.toContain("imminent");
+    expect(text).not.toContain("Retry probe running");
+
+    // dueAt cleared mid-flight: the row must still render the override
+    // rather than throwing on a null endsAt.
+    const cleared = {
+      ...inFlight,
+      degradedRetry: { ...inFlight.degradedRetry, dueAt: null },
+    };
+    expect(
+      treeText(WatchdogNarrativeCard({ watchdogStatus: cleared })),
+    ).toContain("Next retry: probing…");
+  });
+
+  it("stays idle on a healthy card with nothing time-dependent", async () => {
+    const { WatchdogNarrativeCard } = await loadCard();
+    const { useNowMs } = await loadUseNowMs();
+    WatchdogNarrativeCard({ watchdogStatus: { ...baseStatus, degradedRetry: null } });
+    expect(useNowMs).toHaveBeenLastCalledWith(1000, { enabled: false });
   });
 });
 

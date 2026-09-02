@@ -3,6 +3,8 @@ const {
   kGatewayTcpWatchIntervalMs,
   kWatchdogConnectedHealthCadenceMs,
   kGatewayTcpTransitionDebounceMs,
+  kWatchdogDegradedCheckIntervalMs,
+  kWatchdogDegradedCheckMaxIntervalMs,
 } = require("../../lib/server/constants");
 
 const flushMicrotasks = async () =>
@@ -214,7 +216,7 @@ describe("server/watchdog", () => {
     watchdog.stop();
   });
 
-  it("uses 5s degraded retries to recover before regular interval", async () => {
+  it("first degraded retry still fires 5s after the failed probe (regression pin)", async () => {
     vi.useFakeTimers();
     let healthChecks = 0;
     const { watchdog } = createHarness({
@@ -1785,8 +1787,9 @@ describe("server/watchdog", () => {
 
     watchdog.onGatewayLaunch({ startedAt: Date.now() - 60_000 });
     // Bootstrap checks at t=0/5s/10s consume the first three responses; the
-    // degraded 5s retry at t=15s consumes the fourth, then keeps rescheduling
-    // until the regular 120s interval overlaps with a pending retry timer.
+    // first degraded retry at t=15s consumes the fourth, then the backoff loop
+    // keeps re-arming (5s → 10s → 20s → 30s, holding at the 30s cap) until
+    // the regular 120s interval overlaps with a pending retry timer.
     await vi.advanceTimersByTimeAsync(130_000);
 
     const reasons = insertWatchdogEvent.mock.calls
@@ -3475,5 +3478,913 @@ describe("server/watchdog", () => {
     );
     expect(graceSkips).toHaveLength(0);
     watchdog.stop();
+  });
+
+  describe("degraded retry backoff", () => {
+    // The literal offsets below spell out the documented default schedule
+    // (5s → 10s → 20s → 30s cap); pin the defaults so the literals stay honest.
+    it("defaults are 5s initial / 30s cap (the literals below assume this)", () => {
+      expect(kWatchdogDegradedCheckIntervalMs).toBe(5_000);
+      expect(kWatchdogDegradedCheckMaxIntervalMs).toBe(30_000);
+    });
+
+    const wait = (ms) =>
+      new Promise((resolve) => {
+        setTimeout(resolve, ms);
+      });
+
+    // Per-URL fetch fake driven by a mutable control object so a test can
+    // flip the gateway between up / down / slow / hung mid-timeline. The fake
+    // ignores the abort signal on purpose: slow modes stand in for whatever
+    // makes a real tick long, so tick duration is fully test-controlled.
+    const createFetchControl = () => {
+      const control = {
+        healthOk: false,
+        healthDelayMs: 0,
+        healthHang: false,
+        pending: [],
+        readyzFailing: [],
+      };
+      const fetchImpl = async (url) => {
+        if (String(url).includes("readyz")) {
+          return {
+            ok: true,
+            status: 200,
+            text: async () =>
+              JSON.stringify({
+                ready: control.readyzFailing.length === 0,
+                failing: control.readyzFailing,
+                eventLoop: { degraded: false },
+              }),
+          };
+        }
+        if (control.healthHang) {
+          return new Promise((resolve, reject) => {
+            control.pending.push({ resolve, reject });
+          });
+        }
+        if (control.healthDelayMs > 0) await wait(control.healthDelayMs);
+        if (!control.healthOk) throw new Error("gateway down");
+        return {
+          ok: true,
+          status: 200,
+          text: async () => JSON.stringify({ ok: true, status: "live" }),
+        };
+      };
+      return { control, fetchImpl };
+    };
+
+    const healthChecksFrom = (insertWatchdogEvent, source) =>
+      insertWatchdogEvent.mock.calls
+        .map((call) => call?.[0])
+        .filter(
+          (event) =>
+            event?.eventType === "health_check" && event?.source === source,
+        );
+
+    const failedRetryDetails = (insertWatchdogEvent) =>
+      healthChecksFrom(insertWatchdogEvent, "degraded_retry")
+        .filter((event) => event.status === "failed")
+        .map((event) => event.details?.degradedRetry);
+
+    const advanceUntil = async (predicate, { stepMs = 1_000, maxMs } = {}) => {
+      for (let elapsed = 0; elapsed < maxMs; elapsed += stepMs) {
+        if (predicate()) return;
+        await vi.advanceTimersByTimeAsync(stepMs);
+      }
+      expect(predicate()).toBe(true);
+    };
+
+    // Dead gateway, closed startup grace: the bootstrap probes at t=0/5/10s
+    // hit the startup-failure threshold and mark degraded on the third.
+    const degradeViaBootstrap = async (watchdog) => {
+      watchdog.onGatewayLaunch({ startedAt: Date.now() - 60_000 });
+      await advanceUntil(() => watchdog.getStatus().health === "degraded", {
+        maxMs: 30_000,
+      });
+    };
+
+    // Walk one episode to the 30s plateau: +5s → +10s → +20s → +30s.
+    const advanceToPlateau = async (watchdog, insertWatchdogEvent) => {
+      const before = healthChecksFrom(insertWatchdogEvent, "degraded_retry")
+        .length;
+      for (const delayMs of [5_000, 10_000, 20_000, 30_000]) {
+        await vi.advanceTimersByTimeAsync(delayMs);
+      }
+      expect(
+        healthChecksFrom(insertWatchdogEvent, "degraded_retry"),
+      ).toHaveLength(before + 4);
+      expect(watchdog.getStatus().degradedRetry).toMatchObject({
+        attempt: 4,
+        nextDelayMs: 30_000,
+        inFlight: false,
+      });
+    };
+
+    // The next retry lands exactly `delayMs` out — not a tick earlier.
+    const expectNextRetryAt = async (watchdog, insertWatchdogEvent, delayMs) => {
+      const before = healthChecksFrom(insertWatchdogEvent, "degraded_retry")
+        .length;
+      await vi.advanceTimersByTimeAsync(delayMs - 1);
+      expect(
+        healthChecksFrom(insertWatchdogEvent, "degraded_retry"),
+      ).toHaveLength(before);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(
+        healthChecksFrom(insertWatchdogEvent, "degraded_retry"),
+      ).toHaveLength(before + 1);
+    };
+
+    it("backs off 5s → 10s → 20s → 30s cap and reports the schedule in status and event details", async () => {
+      vi.useFakeTimers();
+      const { control, fetchImpl } = createFetchControl();
+      const { watchdog, insertWatchdogEvent } = createHarness({
+        autoRepair: false,
+        fetchImpl,
+      });
+
+      expect(watchdog.getStatus().degradedRetry).toBeNull();
+      await degradeViaBootstrap(watchdog);
+      expect(watchdog.getStatus().degradedRetry).toEqual({
+        attempt: 0,
+        nextDelayMs: 5_000,
+        dueAt: new Date(Date.now() + 5_000).toISOString(),
+        inFlight: false,
+      });
+      // The degrade-site row names the retry it just armed.
+      const degradeRow = insertWatchdogEvent.mock.calls
+        .map((call) => call[0])
+        .find(
+          (event) =>
+            event.eventType === "health_check" && event.status === "failed",
+        );
+      expect(degradeRow.details.degradedRetry).toEqual({
+        attempt: 0,
+        nextDelayMs: 5_000,
+      });
+
+      // [delay until this retry fires, delay the loop arms after it].
+      const schedule = [
+        [5_000, 10_000],
+        [10_000, 20_000],
+        [20_000, 30_000],
+        [30_000, 30_000],
+        [30_000, 30_000],
+      ];
+      let fired = 0;
+      for (const [delayMs, nextDelayMs] of schedule) {
+        await expectNextRetryAt(watchdog, insertWatchdogEvent, delayMs);
+        fired += 1;
+        expect(watchdog.getStatus().degradedRetry).toEqual({
+          attempt: fired,
+          nextDelayMs,
+          dueAt: new Date(Date.now() + nextDelayMs).toISOString(),
+          inFlight: false,
+        });
+      }
+      expect(failedRetryDetails(insertWatchdogEvent)).toEqual([
+        { attempt: 1, nextDelayMs: 10_000 },
+        { attempt: 2, nextDelayMs: 20_000 },
+        { attempt: 3, nextDelayMs: 30_000 },
+        { attempt: 4, nextDelayMs: 30_000 },
+        { attempt: 5, nextDelayMs: 30_000 },
+      ]);
+
+      control.healthOk = true;
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(watchdog.getStatus().health).toBe("healthy");
+      expect(watchdog.getStatus().degradedRetry).toBeNull();
+      watchdog.stop();
+    });
+
+    it("resets the backoff after a real recovery so the next episode starts at 5s", async () => {
+      vi.useFakeTimers();
+      const { control, fetchImpl } = createFetchControl();
+      const { watchdog, insertWatchdogEvent } = createHarness({
+        autoRepair: false,
+        fetchImpl,
+      });
+
+      await degradeViaBootstrap(watchdog);
+      await advanceToPlateau(watchdog, insertWatchdogEvent);
+
+      control.healthOk = true;
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(watchdog.getStatus().health).toBe("healthy");
+      expect(watchdog.getStatus().degradedRetry).toBeNull();
+
+      // The regular 120s probe finds the gateway down again: a fresh episode.
+      control.healthOk = false;
+      await advanceUntil(() => watchdog.getStatus().health === "degraded", {
+        maxMs: 130_000,
+      });
+      expect(watchdog.getStatus().degradedRetry).toMatchObject({
+        attempt: 0,
+        nextDelayMs: 5_000,
+      });
+      await expectNextRetryAt(watchdog, insertWatchdogEvent, 5_000);
+      watchdog.stop();
+    });
+
+    it("starts a fresh 5s episode after an expected restart + relaunch", async () => {
+      // Coverage note: onExpectedRestart's own clear is defensive — every
+      // route from "restarting" back to an armed loop passes through another
+      // resetting clear (onGatewayLaunch below, or the ok path's post-readiness
+      // reset), so this pins the end-to-end behavior, not that one line.
+      vi.useFakeTimers();
+      const { fetchImpl } = createFetchControl();
+      const { watchdog, insertWatchdogEvent } = createHarness({
+        autoRepair: false,
+        fetchImpl,
+      });
+
+      await degradeViaBootstrap(watchdog);
+      await advanceToPlateau(watchdog, insertWatchdogEvent);
+
+      watchdog.onExpectedRestart();
+      expect(watchdog.getStatus().degradedRetry).toBeNull();
+      await vi.advanceTimersByTimeAsync(0);
+      // The relaunched gateway reports in (what the launcher does in
+      // production) and never answers a probe.
+      watchdog.onGatewayLaunch({ startedAt: Date.now() - 60_000 });
+      await advanceUntil(() => watchdog.getStatus().health === "degraded", {
+        maxMs: 30_000,
+      });
+      expect(watchdog.getStatus().degradedRetry).toMatchObject({
+        attempt: 0,
+        nextDelayMs: 5_000,
+      });
+      await expectNextRetryAt(watchdog, insertWatchdogEvent, 5_000);
+      watchdog.stop();
+    });
+
+    it("resets the backoff when a successful repair relaunches the gateway", async () => {
+      vi.useFakeTimers();
+      const { fetchImpl } = createFetchControl();
+      const { watchdog, insertWatchdogEvent, launchGatewayProcess } =
+        createHarness({
+          autoRepair: false,
+          clawCmdImpl: async (command) =>
+            command === "doctor --fix --yes"
+              ? { ok: true, stdout: "fixed" }
+              : { ok: true, stdout: "" },
+          fetchImpl,
+        });
+
+      await degradeViaBootstrap(watchdog);
+      await advanceToPlateau(watchdog, insertWatchdogEvent);
+
+      const repairPromise = watchdog.triggerRepair();
+      await vi.advanceTimersByTimeAsync(0);
+      expect((await repairPromise).ok).toBe(true);
+      expect(launchGatewayProcess).toHaveBeenCalledTimes(1);
+      expect(watchdog.getStatus().health).toBe("unknown");
+
+      // The relaunch reports in through onGatewayLaunch (its clear resets the
+      // episode) and the new process never answers either.
+      watchdog.onGatewayLaunch({ startedAt: Date.now() - 60_000 });
+      expect(watchdog.getStatus().degradedRetry).toBeNull();
+      await advanceUntil(() => watchdog.getStatus().health === "degraded", {
+        maxMs: 30_000,
+      });
+      expect(watchdog.getStatus().degradedRetry).toMatchObject({
+        attempt: 0,
+        nextDelayMs: 5_000,
+      });
+      await expectNextRetryAt(watchdog, insertWatchdogEvent, 5_000);
+      watchdog.stop();
+    });
+
+    it("resets the backoff when the stale plateau timer fires after a failed repair", async () => {
+      vi.useFakeTimers();
+      const { control, fetchImpl } = createFetchControl();
+      const { watchdog, insertWatchdogEvent, launchGatewayProcess } =
+        createHarness({
+          autoRepair: false,
+          clawCmdImpl: async (command) =>
+            command === "doctor --fix --yes"
+              ? { ok: false, stderr: "doctor exploded" }
+              : { ok: true, stdout: "" },
+          fetchImpl,
+        });
+
+      await degradeViaBootstrap(watchdog);
+      await advanceToPlateau(watchdog, insertWatchdogEvent);
+
+      // Hold the repair's operation_end resync probe open. Left instant, it
+      // would fail and re-degrade BEFORE the stale timer fires — which by
+      // design continues the armed timer and its counter (same incident).
+      control.healthHang = true;
+      const repairPromise = watchdog.triggerRepair();
+      await vi.advanceTimersByTimeAsync(0);
+      expect((await repairPromise).ok).toBe(false);
+      expect(launchGatewayProcess).not.toHaveBeenCalled();
+      expect(watchdog.getStatus().health).toBe("unhealthy");
+      expect(control.pending).toHaveLength(1);
+
+      // The plateau timer fires against a non-degraded gateway: no probe,
+      // and the episode's counter is dropped.
+      const fetchCallsBefore = global.fetch.mock.calls.length;
+      const retriesBefore = healthChecksFrom(
+        insertWatchdogEvent,
+        "degraded_retry",
+      ).length;
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(global.fetch.mock.calls.length).toBe(fetchCallsBefore);
+      expect(
+        healthChecksFrom(insertWatchdogEvent, "degraded_retry"),
+      ).toHaveLength(retriesBefore);
+      expect(watchdog.getStatus().degradedRetry).toBeNull();
+
+      // The resync probe finally reports the gateway down: a fresh episode.
+      control.healthHang = false;
+      control.pending.shift().reject(new Error("gateway down"));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(watchdog.getStatus().health).toBe("degraded");
+      expect(watchdog.getStatus().degradedRetry).toMatchObject({
+        attempt: 0,
+        nextDelayMs: 5_000,
+      });
+      await expectNextRetryAt(watchdog, insertWatchdogEvent, 5_000);
+      watchdog.stop();
+    });
+
+    it("suppresses fast_cadence while the degraded loop is armed or in flight", async () => {
+      vi.useFakeTimers();
+      const { control, fetchImpl } = createFetchControl();
+      const probeGatewayTcp = vi.fn(async () => {});
+      const { watchdog, insertWatchdogEvent } = createHarness({
+        autoRepair: false,
+        probeGatewayTcp,
+        fetchImpl,
+      });
+
+      watchdog.start();
+      await degradeViaBootstrap(watchdog);
+      await advanceToPlateau(watchdog, insertWatchdogEvent);
+
+      // At the 30s plateau with a 4s probe, the probe-stamp gap seen by the
+      // 10s TCP watcher exceeds the 30s fast_cadence threshold before the next
+      // retry fires — the exact window the gate has to close.
+      control.healthDelayMs = 4_000;
+      watchdog.setStatusClientsConnected(true);
+      const retriesBefore = healthChecksFrom(
+        insertWatchdogEvent,
+        "degraded_retry",
+      ).length;
+      for (let tick = 0; tick < 30; tick += 1) {
+        await vi.advanceTimersByTimeAsync(kGatewayTcpWatchIntervalMs);
+        expect(
+          healthChecksFrom(insertWatchdogEvent, "fast_cadence"),
+        ).toHaveLength(0);
+      }
+      // The loop itself kept probing the whole time.
+      expect(
+        healthChecksFrom(insertWatchdogEvent, "degraded_retry").length,
+      ).toBeGreaterThan(retriesBefore + 3);
+      expect(watchdog.getStatus().health).toBe("degraded");
+      watchdog.stop();
+    });
+
+    it("keeps fast_cadence for a degraded gateway with no armed loop (lifecycle restarting)", async () => {
+      vi.useFakeTimers();
+      const { fetchImpl } = createFetchControl();
+      const probeGatewayTcp = vi.fn(async () => {});
+      const { watchdog, insertWatchdogEvent } = createHarness({
+        autoRepair: false,
+        probeGatewayTcp,
+        fetchImpl,
+      });
+
+      watchdog.start();
+      watchdog.onExpectedRestart();
+      // Past the 50s expected-restart window the failures stop being
+      // suppressed, but lifecycle is still "restarting" — the degraded loop
+      // never arms for that state.
+      await vi.advanceTimersByTimeAsync(55_000);
+      expect(watchdog.getStatus()).toMatchObject({
+        health: "degraded",
+        lifecycle: "restarting",
+        degradedRetry: null,
+      });
+      // No retry is pending, so the failed row must not promise one either —
+      // the incidents UI renders details.degradedRetry as "next retry in Ns".
+      const failedRows = insertWatchdogEvent.mock.calls
+        .map((call) => call[0])
+        .filter(
+          (row) => row.eventType === "health_check" && row.status === "failed",
+        );
+      expect(failedRows.length).toBeGreaterThanOrEqual(1);
+      for (const row of failedRows) {
+        expect(row.details.degradedRetry).toBeNull();
+      }
+
+      watchdog.setStatusClientsConnected(true);
+      await vi.advanceTimersByTimeAsync(
+        kWatchdogConnectedHealthCadenceMs + kGatewayTcpWatchIntervalMs,
+      );
+      expect(
+        healthChecksFrom(insertWatchdogEvent, "fast_cadence").length,
+      ).toBeGreaterThanOrEqual(1);
+      watchdog.stop();
+    });
+
+    it("backs off readiness-degraded retries (green /health, failing /readyz) instead of resetting every tick", async () => {
+      vi.useFakeTimers();
+      const { control, fetchImpl } = createFetchControl();
+      control.healthOk = true;
+      control.readyzFailing = ["secrets"];
+      const { watchdog, insertWatchdogEvent } = createHarness({
+        autoRepair: false,
+        resolveGatewayReadyzUrl: () => "http://127.0.0.1:18789/readyz",
+        fetchImpl,
+      });
+
+      watchdog.start();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(watchdog.getStatus()).toMatchObject({
+        lifecycle: "running",
+        health: "degraded",
+      });
+      expect(watchdog.getStatus().degradedRetry).toMatchObject({
+        attempt: 0,
+        nextDelayMs: 5_000,
+      });
+
+      // Each retry sees a green /health (which clears the timer) and then a
+      // failing /readyz (which re-degrades and re-arms in the same tick): the
+      // counter must survive that round trip.
+      const schedule = [
+        [5_000, 10_000],
+        [10_000, 20_000],
+        [20_000, 30_000],
+        [30_000, 30_000],
+      ];
+      let fired = 0;
+      for (const [delayMs, nextDelayMs] of schedule) {
+        await expectNextRetryAt(watchdog, insertWatchdogEvent, delayMs);
+        fired += 1;
+        expect(watchdog.getStatus().health).toBe("degraded");
+        expect(watchdog.getStatus().degradedRetry).toMatchObject({
+          attempt: fired,
+          nextDelayMs,
+          inFlight: false,
+        });
+      }
+
+      // Readiness recovers on the next retry: a real recovery, counter reset.
+      control.readyzFailing = [];
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(watchdog.getStatus().health).toBe("healthy");
+      expect(watchdog.getStatus().degradedRetry).toBeNull();
+
+      // Readiness degrades again: the new episode starts from 5s.
+      control.readyzFailing = ["secrets"];
+      watchdog.onGatewayTcpTransition();
+      await vi.advanceTimersByTimeAsync(kGatewayTcpTransitionDebounceMs);
+      expect(watchdog.getStatus().health).toBe("degraded");
+      expect(watchdog.getStatus().degradedRetry).toMatchObject({
+        attempt: 0,
+        nextDelayMs: 5_000,
+      });
+      await expectNextRetryAt(watchdog, insertWatchdogEvent, 5_000);
+      watchdog.stop();
+    });
+
+    it("starts a fresh episode when an in-flight retry fails after a tcp_transition recovery, arming exactly one timer", async () => {
+      vi.useFakeTimers();
+      const { control, fetchImpl } = createFetchControl();
+      const { watchdog, insertWatchdogEvent } = createHarness({
+        autoRepair: false,
+        fetchImpl,
+      });
+
+      await degradeViaBootstrap(watchdog);
+      await advanceToPlateau(watchdog, insertWatchdogEvent);
+
+      // The plateau retry fires and its /health probe hangs.
+      control.healthHang = true;
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(control.pending).toHaveLength(1);
+      expect(watchdog.getStatus().degradedRetry).toMatchObject({
+        attempt: 5,
+        inFlight: true,
+      });
+
+      // A TCP up-transition probe lands meanwhile and sees a live gateway.
+      control.healthHang = false;
+      control.healthOk = true;
+      watchdog.onGatewayTcpTransition();
+      await vi.advanceTimersByTimeAsync(kGatewayTcpTransitionDebounceMs);
+      expect(watchdog.getStatus().health).toBe("healthy");
+      // Counter reset; the only thing left of the loop is the pending probe.
+      expect(watchdog.getStatus().degradedRetry).toEqual({
+        attempt: 0,
+        nextDelayMs: null,
+        dueAt: null,
+        inFlight: true,
+      });
+
+      // The slow probe finally reports down: a failure observed after a
+      // confirmed recovery is a NEW episode, not a continuation of the old.
+      control.healthOk = false;
+      control.pending.shift().reject(new Error("gateway down"));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(watchdog.getStatus().health).toBe("degraded");
+      expect(watchdog.getStatus().degradedRetry).toEqual({
+        attempt: 0,
+        nextDelayMs: 5_000,
+        dueAt: new Date(Date.now() + 5_000).toISOString(),
+        inFlight: false,
+      });
+      expect(failedRetryDetails(insertWatchdogEvent).at(-1)).toEqual({
+        attempt: 0,
+        nextDelayMs: 5_000,
+      });
+
+      // Exactly one armed timer: one retry at +5s, none stacked behind it.
+      await expectNextRetryAt(watchdog, insertWatchdogEvent, 5_000);
+      const afterFirst = healthChecksFrom(insertWatchdogEvent, "degraded_retry")
+        .length;
+      await vi.advanceTimersByTimeAsync(9_999);
+      expect(
+        healthChecksFrom(insertWatchdogEvent, "degraded_retry"),
+      ).toHaveLength(afterFirst);
+      watchdog.stop();
+    });
+
+    it("holds the loop handle through a long tick: status stays in-flight and fast_cadence never fires", async () => {
+      vi.useFakeTimers();
+      const { control, fetchImpl } = createFetchControl();
+      const probeGatewayTcp = vi.fn(async () => {});
+      const { watchdog, insertWatchdogEvent } = createHarness({
+        autoRepair: false,
+        probeGatewayTcp,
+        fetchImpl,
+      });
+
+      watchdog.start();
+      await degradeViaBootstrap(watchdog);
+      watchdog.setStatusClientsConnected(true);
+
+      // A 36s probe outlasts the 30s fast_cadence threshold on its own, so the
+      // gate must hold on the in-flight tick, not just on the armed timer.
+      control.healthDelayMs = 36_000;
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(watchdog.getStatus().degradedRetry).toMatchObject({
+        attempt: 1,
+        inFlight: true,
+      });
+      const noFastCadence = () =>
+        expect(
+          healthChecksFrom(insertWatchdogEvent, "fast_cadence"),
+        ).toHaveLength(0);
+      for (let tick = 0; tick < 3; tick += 1) {
+        await vi.advanceTimersByTimeAsync(kGatewayTcpWatchIntervalMs);
+        expect(watchdog.getStatus().degradedRetry).toMatchObject({
+          attempt: 1,
+          inFlight: true,
+        });
+        noFastCadence();
+      }
+      await vi.advanceTimersByTimeAsync(kGatewayTcpWatchIntervalMs);
+      expect(watchdog.getStatus().degradedRetry).toMatchObject({
+        attempt: 1,
+        nextDelayMs: 10_000,
+        inFlight: false,
+      });
+      noFastCadence();
+      // Further plateau ticks, each longer than the threshold.
+      for (let tick = 0; tick < 24; tick += 1) {
+        await vi.advanceTimersByTimeAsync(kGatewayTcpWatchIntervalMs);
+        expect(watchdog.getStatus().degradedRetry).not.toBeNull();
+        noFastCadence();
+      }
+      watchdog.stop();
+    });
+
+    it("an unexpected gateway exit mid-episode disarms the pending retry and resets the counter", async () => {
+      vi.useFakeTimers();
+      const { fetchImpl } = createFetchControl();
+      const { watchdog, insertWatchdogEvent } = createHarness({
+        autoRepair: false,
+        fetchImpl,
+      });
+
+      await degradeViaBootstrap(watchdog);
+      await advanceToPlateau(watchdog, insertWatchdogEvent);
+
+      watchdog.onGatewayExit({ code: 1, expectedExit: false });
+      expect(watchdog.getStatus().degradedRetry).toBeNull();
+      // The crash relaunch and its operation_end resync settle; the gateway
+      // stays down, so lifecycle stays "crashed" and the loop never re-arms.
+      await vi.advanceTimersByTimeAsync(0);
+      expect(watchdog.getStatus().lifecycle).toBe("crashed");
+      expect(watchdog.getStatus().degradedRetry).toBeNull();
+
+      const retriesBefore = healthChecksFrom(
+        insertWatchdogEvent,
+        "degraded_retry",
+      ).length;
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(
+        healthChecksFrom(insertWatchdogEvent, "degraded_retry"),
+      ).toHaveLength(retriesBefore);
+      expect(watchdog.getStatus().degradedRetry).toBeNull();
+      watchdog.stop();
+    });
+
+    it("stop() disarms the pending degraded retry", async () => {
+      vi.useFakeTimers();
+      const { fetchImpl } = createFetchControl();
+      const { watchdog, insertWatchdogEvent } = createHarness({
+        autoRepair: false,
+        fetchImpl,
+      });
+
+      await degradeViaBootstrap(watchdog);
+      await advanceToPlateau(watchdog, insertWatchdogEvent);
+
+      watchdog.stop();
+      expect(watchdog.getStatus().degradedRetry).toBeNull();
+      const fetchCallsBefore = global.fetch.mock.calls.length;
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(global.fetch.mock.calls.length).toBe(fetchCallsBefore);
+      expect(watchdog.getStatus().degradedRetry).toBeNull();
+    });
+
+    it("a clear landing while the handle is null but the counter stands still resets it (reset-before-guard)", async () => {
+      vi.useFakeTimers();
+      const { control, fetchImpl } = createFetchControl();
+      // Hold /readyz open on demand: the ok path parks between its clear
+      // ({ resetBackoff: false } — handle nulled, counter kept) and the
+      // post-readiness reset, exactly the window a clear must still end.
+      const readyzHold = { active: false, pending: [] };
+      const { watchdog, insertWatchdogEvent } = createHarness({
+        autoRepair: false,
+        resolveGatewayReadyzUrl: () => "http://127.0.0.1:18789/readyz",
+        fetchImpl: async (url, opts) => {
+          if (readyzHold.active && String(url).includes("readyz")) {
+            return new Promise((resolve) => {
+              readyzHold.pending.push(resolve);
+            });
+          }
+          return fetchImpl(url, opts);
+        },
+      });
+
+      await degradeViaBootstrap(watchdog);
+      await advanceToPlateau(watchdog, insertWatchdogEvent);
+
+      control.healthOk = true;
+      readyzHold.active = true;
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(readyzHold.pending).toHaveLength(1);
+      expect(watchdog.getStatus().health).toBe("healthy");
+      // Handle already nulled ({ resetBackoff: false } keeps delay/dueAt
+      // describing the fired timer); only the counter matters here.
+      expect(watchdog.getStatus().degradedRetry).toMatchObject({
+        attempt: 5,
+        inFlight: true,
+      });
+
+      // A relaunch reports in while the tick is parked: its clear finds no
+      // handle to cancel but must still drop the episode's counter.
+      control.healthOk = false;
+      readyzHold.active = false;
+      watchdog.onGatewayLaunch({ startedAt: Date.now() - 60_000 });
+      expect(watchdog.getStatus().degradedRetry).toEqual({
+        attempt: 0,
+        nextDelayMs: null,
+        dueAt: null,
+        inFlight: true,
+      });
+      readyzHold.pending.shift()({
+        ok: true,
+        status: 200,
+        text: async () =>
+          JSON.stringify({
+            ready: true,
+            failing: [],
+            eventLoop: { degraded: false },
+          }),
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(watchdog.getStatus().degradedRetry).toBeNull();
+
+      // The relaunched gateway never answers: the new episode starts at 5s,
+      // not at the parked tick's 30s plateau.
+      await advanceUntil(() => watchdog.getStatus().health === "degraded", {
+        maxMs: 30_000,
+      });
+      expect(watchdog.getStatus().degradedRetry).toMatchObject({
+        attempt: 0,
+        nextDelayMs: 5_000,
+        inFlight: false,
+      });
+      await expectNextRetryAt(watchdog, insertWatchdogEvent, 5_000);
+      watchdog.stop();
+    });
+
+    it("ticks skipped by operationInProgress do not inflate the attempt counter", async () => {
+      vi.useFakeTimers();
+      const { fetchImpl } = createFetchControl();
+      let resolveDoctor = null;
+      const { watchdog, insertWatchdogEvent } = createHarness({
+        autoRepair: false,
+        clawCmdImpl: async (command) =>
+          command === "doctor --fix --yes"
+            ? new Promise((resolve) => {
+                resolveDoctor = resolve;
+              })
+            : { ok: true, stdout: "" },
+        fetchImpl,
+      });
+
+      await degradeViaBootstrap(watchdog);
+      await expectNextRetryAt(watchdog, insertWatchdogEvent, 5_000);
+      expect(watchdog.getStatus().degradedRetry).toMatchObject({
+        attempt: 1,
+        nextDelayMs: 10_000,
+        inFlight: false,
+      });
+
+      // A manual repair hangs in doctor, holding operationInProgress: every
+      // retry tick early-returns before probing.
+      const repairPromise = watchdog.triggerRepair();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(typeof resolveDoctor).toBe("function");
+      const retriesBefore = healthChecksFrom(
+        insertWatchdogEvent,
+        "degraded_retry",
+      ).length;
+      const fetchCallsBefore = global.fetch.mock.calls.length;
+      for (let tick = 0; tick < 3; tick += 1) {
+        await vi.advanceTimersByTimeAsync(10_000);
+        expect(watchdog.getStatus().degradedRetry).toMatchObject({
+          attempt: 1,
+          nextDelayMs: 10_000,
+          inFlight: false,
+        });
+      }
+      expect(
+        healthChecksFrom(insertWatchdogEvent, "degraded_retry"),
+      ).toHaveLength(retriesBefore);
+      expect(global.fetch.mock.calls.length).toBe(fetchCallsBefore);
+
+      // The repair fails; its operation_end resync finds the gateway still
+      // down, and the loop's next tick is the first real retry since.
+      resolveDoctor({ ok: false, stderr: "doctor exploded" });
+      expect((await repairPromise).ok).toBe(false);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(watchdog.getStatus()).toMatchObject({
+        health: "degraded",
+        lifecycle: "running",
+      });
+      await expectNextRetryAt(watchdog, insertWatchdogEvent, 10_000);
+      expect(watchdog.getStatus().degradedRetry).toMatchObject({
+        attempt: 2,
+        nextDelayMs: 20_000,
+        inFlight: false,
+      });
+      watchdog.stop();
+    });
+
+    it("a rejection inside the retry probe does not kill the loop", async () => {
+      vi.useFakeTimers();
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      const { fetchImpl } = createFetchControl();
+      let throwOnNextResolve = false;
+      const { watchdog, insertWatchdogEvent } = createHarness({
+        autoRepair: false,
+        // The health-URL resolver is the one awaited dependency on a
+        // degraded_retry tick that is not already caught: fetch errors are,
+        // and auto-repair (with its notifier) never runs from the loop
+        // (allowAutoRepair: false).
+        resolveGatewayHealthUrl: () => {
+          if (throwOnNextResolve) {
+            throwOnNextResolve = false;
+            throw new Error("gateway config unreadable");
+          }
+          return "http://127.0.0.1:18789/health";
+        },
+        fetchImpl,
+      });
+
+      await degradeViaBootstrap(watchdog);
+      await advanceToPlateau(watchdog, insertWatchdogEvent);
+
+      throwOnNextResolve = true;
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(errorSpy).toHaveBeenCalledWith(
+        "[watchdog] degraded retry probe threw: gateway config unreadable",
+      );
+      // The tick counted (it did try to probe) and the loop re-armed.
+      expect(watchdog.getStatus().degradedRetry).toMatchObject({
+        attempt: 5,
+        nextDelayMs: 30_000,
+        inFlight: false,
+      });
+      await expectNextRetryAt(watchdog, insertWatchdogEvent, 30_000);
+      expect(watchdog.getStatus().degradedRetry).toMatchObject({
+        attempt: 6,
+        inFlight: false,
+      });
+      watchdog.stop();
+    });
+
+    it("a failure from another source while the timer is armed reports the remaining time, not f(attempt)", async () => {
+      vi.useFakeTimers();
+      const { fetchImpl } = createFetchControl();
+      const { watchdog, insertWatchdogEvent } = createHarness({
+        autoRepair: false,
+        fetchImpl,
+      });
+
+      await degradeViaBootstrap(watchdog);
+      await advanceToPlateau(watchdog, insertWatchdogEvent);
+      const { dueAt } = watchdog.getStatus().degradedRetry;
+
+      // 10s into the 30s plateau timer a TCP transition probe fails too.
+      await vi.advanceTimersByTimeAsync(10_000);
+      watchdog.onGatewayTcpTransition();
+      await vi.advanceTimersByTimeAsync(kGatewayTcpTransitionDebounceMs);
+      const tcpRows = healthChecksFrom(insertWatchdogEvent, "tcp_transition");
+      expect(tcpRows).toHaveLength(1);
+      expect(tcpRows[0].status).toBe("failed");
+      const remainingMs = 30_000 - 10_000 - kGatewayTcpTransitionDebounceMs;
+      expect(tcpRows[0].details.degradedRetry).toEqual({
+        attempt: 4,
+        nextDelayMs: remainingMs,
+      });
+      // The armed timer is untouched: same due time, same counter.
+      expect(watchdog.getStatus().degradedRetry).toMatchObject({
+        attempt: 4,
+        nextDelayMs: 30_000,
+        dueAt,
+        inFlight: false,
+      });
+      await expectNextRetryAt(watchdog, insertWatchdogEvent, remainingMs);
+      watchdog.stop();
+    });
+
+    it("a crash exit landing mid-probe: the in-flight probe's failed row promises no retry", async () => {
+      vi.useFakeTimers();
+      const { control, fetchImpl } = createFetchControl();
+      const { watchdog, insertWatchdogEvent } = createHarness({
+        autoRepair: false,
+        fetchImpl,
+      });
+
+      await degradeViaBootstrap(watchdog);
+      await advanceToPlateau(watchdog, insertWatchdogEvent);
+
+      // The plateau retry fires and its /health probe hangs.
+      control.healthHang = true;
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(control.pending).toHaveLength(1);
+      expect(watchdog.getStatus().degradedRetry).toMatchObject({
+        attempt: 5,
+        inFlight: true,
+      });
+
+      // The gateway crashes under the hung probe: the exit clears the handle
+      // and resets the counter; the relaunch's operation_end resync fails too.
+      control.healthHang = false;
+      const rowsBefore = insertWatchdogEvent.mock.calls.length;
+      watchdog.onGatewayExit({ code: 1, expectedExit: false });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(watchdog.getStatus().lifecycle).toBe("crashed");
+
+      // The hung probe finally reports down. Neither the schedule at the
+      // degrade site nor the callback's re-arm arms anything outside
+      // lifecycle "running", so no failed row may promise a retry.
+      control.pending.shift().reject(new Error("gateway down"));
+      await vi.advanceTimersByTimeAsync(0);
+      const failedRows = insertWatchdogEvent.mock.calls
+        .slice(rowsBefore)
+        .map((call) => call[0])
+        .filter(
+          (row) => row.eventType === "health_check" && row.status === "failed",
+        );
+      expect(failedRows.map((row) => row.source)).toEqual(
+        expect.arrayContaining(["operation_end", "degraded_retry"]),
+      );
+      for (const row of failedRows) {
+        expect(row.details.degradedRetry).toBeNull();
+      }
+      expect(watchdog.getStatus().degradedRetry).toBeNull();
+
+      // Nothing re-armed behind the crash.
+      const retriesBefore = healthChecksFrom(
+        insertWatchdogEvent,
+        "degraded_retry",
+      ).length;
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(
+        healthChecksFrom(insertWatchdogEvent, "degraded_retry"),
+      ).toHaveLength(retriesBefore);
+      watchdog.stop();
+    });
   });
 });

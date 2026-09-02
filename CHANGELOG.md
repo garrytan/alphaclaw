@@ -5,6 +5,52 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.9.68] - 2026-09-01
+
+Reasonable health-check cadence while the gateway is degraded: the retry loop
+backs off instead of probing every 5 seconds forever, the watchdog card shows
+when the next check lands, and the cadence knobs are documented, clamped, and
+deployment-env only.
+
+### Changed
+- Degraded health-check retries now back off 5s → 10s → 20s → 30s (cap) instead
+  of a flat 5s forever. Sustained degraded episodes cost ~6× fewer `/health`
+  probes and `watchdog_events` rows (~100–120/hour instead of ~720). Short blips
+  still recover on the same schedule (the first retry is unchanged at 5s), and
+  hard down/up detection is unchanged — TCP port transitions still trigger an
+  immediate debounced probe (≤2s with a browser open, ≤10s unattended). The
+  retry counter resets on real recovery, on expected restarts and relaunches,
+  and when a stale timer fires into a non-degraded state; it deliberately
+  survives a green-`/health`-but-failing-`/readyz` tick so the most persistent
+  wedged state ramps like every other. Bootstrap's bounded 5s loop stays.
+- The connected-browser `fast_cadence` 30s probe is suppressed while the
+  degraded retry loop is armed or in flight — that loop owns the cadence then.
+  Degraded states without the loop (`restarting`, `crash_loop`) keep
+  `fast_cadence` as their sub-120s probe.
+- `WATCHDOG_CHECK_INTERVAL` and `WATCHDOG_DEGRADED_CHECK_INTERVAL` (previously
+  undocumented and unbounded) are now documented, clamped (`30`–`3600` and
+  `2`–`120` seconds), and deployment-env only — never honored from the
+  agent-writable `.env`. Out-of-range or malformed values warn once at boot and
+  clamp or fall back to the default.
+
+### Added
+- `WATCHDOG_DEGRADED_CHECK_MAX_INTERVAL` (seconds, default `30`, clamped
+  `5`–`120`, never below `WATCHDOG_DEGRADED_CHECK_INTERVAL`): the cap for the
+  degraded retry delay. Deployment env only.
+- The watchdog card shows a live "Next retry" countdown while degraded (reading
+  "probing…" while a retry's probe is in flight), watchdog status
+  exposes `degradedRetry: { attempt, nextDelayMs, dueAt, inFlight }`, and failed
+  `health_check` / `degraded_retry` incident rows carry the time to the next retry
+  ("next retry in 30s") — only when a retry is actually armed, so a gateway that
+  is restarting or crash-looping never advertises a retry that will not come.
+
+### Notes
+- **Compatibility** for anyone who set the cadence knobs: values below the new
+  floors clamp (`WATCHDOG_CHECK_INTERVAL` < 30 becomes 30); a
+  `WATCHDOG_DEGRADED_CHECK_INTERVAL` below 30 now ramps toward the cap instead
+  of staying flat (≥ 30 behaves as before); and values set only in `.env` stop
+  applying — move the var to your platform's environment.
+
 ## [0.9.67] - 2026-09-01
 
 Post-incident hardening (2026-09-01 outage): a slow-but-healthy gateway boot no

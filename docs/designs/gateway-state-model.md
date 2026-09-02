@@ -43,7 +43,7 @@ flowchart TB
         OP["Upgrade operation SSE<br/>operation-events.js — step events, replay on reconnect<br/>used only by channel applies"]
     end
     TCP -- "every 2s snapshot tick (kStatusSnapshotIntervalMs)" --> STATUS["/api/status gateway field<br/>running | starting | not_onboarded<br/>system.js:602-607"]
-    WD -- "120s timer (kWatchdogCheckIntervalMs)<br/>5s while degraded / during bootstrap<br/>SKIPPED during repairs (watchdog.js:708)<br/>SKIPPED while config-error latched (:701)" --> WSTATUS["watchdogStatus in snapshot"]
+    WD -- "120s timer (kWatchdogCheckIntervalMs)<br/>degraded retries 5s→30s backoff / 5s during bootstrap<br/>SKIPPED during repairs (watchdog.js:708)<br/>SKIPPED while config-error latched (:701)" --> WSTATUS["watchdogStatus in snapshot"]
     RR -- "on config change / CLI flag write<br/>reason dropped at API (system.js:934-946)" --> BANNER["restart banner"]
     OP -- "event-driven" --> UPGRADE["Upgrade page progress"]
 ```
@@ -58,7 +58,7 @@ Lifecycle axis (`stopped | running | restarting | crashed | crash_loop | configu
 stateDiagram-v2
     [*] --> running: start() assumes running with health unknown (watchdog.js 1176)
     running --> restarting: managed child exit while managedOperationActive (relaunch after 10s backoff)
-    running --> restarting: expected exit with code 0 or null (15s expected window opens)
+    running --> restarting: expected exit with code 0 or null (50s expected window opens)
     running --> crashed: unexpected managed child exit
     running --> configuration_error: exit code 78 EX_CONFIG latch (watchdog.js 1011-1063 — rollback path may intercept to crashed)
     crashed --> running: restartAfterCrash relaunch ok (onGatewayLaunch)
@@ -86,7 +86,7 @@ Health axis setters:
 |---|---|
 | `unknown` | every launch/restart transition; repair success before verify |
 | `healthy` | successful `/health` probe (`watchdog.js:737`) — also forces `lifecycle=running`, clears crash window |
-| `degraded` | failed probe past 30s startup grace and 3-strike startup threshold (`watchdog.js:857`); starts the 5s degraded retry loop |
+| `degraded` | failed probe past 30s startup grace and 3-strike startup threshold (`watchdog.js:857`); starts the degraded retry loop (5s → 10s → 20s → 30s cap; counter survives green-`/health`-but-failing-`/readyz` ticks) |
 | `unhealthy` | crash/config-error exits; failed repair |
 
 Defects to carry into M2 (all current code):
@@ -143,7 +143,7 @@ The reducer evaluates rows in order; the first true predicate wins. Every input 
 |---|---|---|
 | 1 | `not_onboarded` | onboarding marker absent (`isOnboarded()` false, `gateway.js:209`). Local file read — never stale. |
 | 2 | `booting` | `bootPhase !== "ready"` — the boot sequence holds the lifecycle mutex. `bootPhase === "failed"` → `booting(failed)` variant with the captured boot error as reason. |
-| 3 | `unknown` (stale) | newest `observedAt` across {tcp, health, operation} older than `kStateStaleMs` (15s), or the snapshot compute error counter indicates consecutive failures. Server emits `unknown` at 15s; the **UI holds the last-known state with an "as of Xs ago" stamp for a further 30s grace**, then shows "Status unavailable". |
+| 3 | `unknown` (stale) | newest `observedAt` across {tcp, health, operation} older than `kGatewayStateStaleMs` (15s), or the snapshot compute error counter indicates consecutive failures. Server emits `unknown` at 15s; the **UI holds the last-known state with an "as of Xs ago" stamp for a further 30s grace**, then shows "Status unavailable". |
 | 4 | `config_error` | config-error latch set: last observed gateway exit code == 78 (`kOpenclawConfigErrorExitCode`) and not since cleared by a successful launch or config-fix retry. Current code (v0.9.39): the startup medic (default on) runs first under the lifecycle lock and may clear the latch itself by repairing openclaw.json and relaunching (`runConfigMedic`, watchdog.js); `config_error` settles only after the medic is disabled, rate-limited, or exhausted (2 attempts/incident). Detached mode: latch only from evidence (stderr tail), labeled estimated. |
 | 5 | `down` | `tcp.up === false` AND no active operation lease AND no relaunch pending — i.e. auto-restart paused (crash-loop threshold hit: `crashCountInWindow >= kWatchdogCrashLoopThreshold` (3)), repair attempts exhausted (`>= kWatchdogMaxRepairAttempts` (2)), or the last launch terminal-failed its ready budget. Reason carries last evidence + since. |
 | 6 | operation-in-flight (badge) | active lifecycle-mutex lease with a live operation record. Headline while the lease is held: `starting` when the current step is `launching`/`waiting_ready` and elapsed < ready budget; otherwise the operation kind labels the badge (`restarting` / `repairing` / `applying`) over the last settled headline. Transient `tcp.down` during a leased operation is expected and does **not** fall to row 5. |
@@ -303,7 +303,7 @@ Step labels are human ("Checking plugins", "Stopping gateway", "Starting gateway
 | gateway death | **exit-based**: child `exit` event, immediate | **poll-based**: 10s always-on TCP watcher (M2.3) |
 | exit codes / EX_CONFIG latch | exit-based, reliable (`onGatewayExit`, code 78 latch) | unavailable — inferred from log/stderr tail evidence only |
 | crash-loop counting | exit-based (`crashTimestamps`, 3-in-300s) | **probe-inferred**: TCP down→up cycles counted as estimated crashes |
-| health (wedged-but-TCP-up) | `/health` probe: 30s cadence while ≥1 SSE client connected, 120s baseline otherwise (env-tunable backstop); immediate debounced re-probes on TCP up/down transitions, on `waitForGatewayReady` success, and at every operation end (`allowDuringOperation: true, allowAutoRepair: false` — operation-end probes are resync-only: letting them start another repair would chain repair → probe → repair with no timer gap while the gateway is down; the mid-operation skip at `watchdog.js:708` stays) | same probe cadence — probes are the only signal |
+| health (wedged-but-TCP-up) | `/health` probe: 30s cadence while ≥1 SSE client connected, 120s baseline otherwise (env-tunable backstop); immediate debounced re-probes on TCP up/down transitions, on `waitForGatewayReady` success, and at every operation end (`allowDuringOperation: true, allowAutoRepair: false` — operation-end probes are resync-only: letting them start another repair would chain repair → probe → repair with no timer gap while the gateway is down; the mid-operation skip at `watchdog.js:708` stays); degraded retries back off 5s→30s (env-tunable initial/cap, deployment-env only) and suppress the 30s connected cadence while the loop is armed or in flight | same probe cadence — probes are the only signal |
 | pid / uptime | child pid; uptime from launch | discovered pid via `notifyGatewayLaunch` where available; uptime resets on observed launch |
 
 **Evidence honesty:** probe-inferred counts and attributions carry the label "estimated — gateway runs outside AlphaClaw's supervision" as a **detail line, never the headline**. Exit-code claims appear only for managed children.
