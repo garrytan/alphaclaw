@@ -475,3 +475,70 @@ describe("server/routes/models", () => {
     );
   });
 });
+
+describe("server/routes/models state-DB quiet period", () => {
+  const { StateDbQuietError } = require("../../lib/server/state-db-quiet");
+
+  const expectBackupInProgress = (res) => {
+    expect(res.status).toBe(409);
+    expect(res.headers["retry-after"]).toBe("120");
+    expect(res.body).toEqual({
+      ok: false,
+      code: "backup_in_progress",
+      error: "A backup is in progress; retry in about two minutes.",
+    });
+  };
+
+  it("PUT /api/models/auth/:profileId maps a quiet-period write to 409 backup_in_progress", async () => {
+    const deps = createModelDeps();
+    deps.authProfiles.upsertProfile.mockImplementation(() => {
+      throw new StateDbQuietError();
+    });
+    const app = createApp(deps);
+    const res = await request(app)
+      .put("/api/models/auth/openai:default")
+      .send({ type: "api_key", provider: "openai", key: "sk-1" });
+    expectBackupInProgress(res);
+    expect(deps.writeEnvFile).not.toHaveBeenCalled();
+  });
+
+  it("DELETE /api/models/auth/:profileId maps a quiet-period write to 409", async () => {
+    const deps = createModelDeps();
+    deps.authProfiles.removeProfile.mockImplementation(() => {
+      throw new StateDbQuietError();
+    });
+    const app = createApp(deps);
+    const res = await request(app).delete("/api/models/auth/openai:default");
+    expectBackupInProgress(res);
+  });
+
+  it("PUT /api/models/config maps a quiet-period profile write to 409 and never runs the git sync", async () => {
+    const deps = createModelDeps();
+    deps.authProfiles.upsertProfile.mockImplementation(() => {
+      throw new StateDbQuietError();
+    });
+    const app = createApp(deps);
+    const res = await request(app)
+      .put("/api/models/config")
+      .send({
+        primary: "openai/gpt-5.1-codex",
+        profiles: [{ id: "openai:default", type: "api_key", provider: "openai", key: "sk-1" }],
+      });
+    expectBackupInProgress(res);
+    expect(deps.shellCmd).not.toHaveBeenCalledWith(expect.stringMatching(/git/));
+  });
+
+  it("other auth-store failures keep their 500 mapping", async () => {
+    const deps = createModelDeps();
+    deps.authProfiles.upsertProfile.mockImplementation(() => {
+      throw new Error("schema drift");
+    });
+    const app = createApp(deps);
+    const res = await request(app)
+      .put("/api/models/auth/openai:default")
+      .send({ type: "api_key", provider: "openai", key: "sk-1" });
+    expect(res.status).toBe(500);
+    expect(res.headers["retry-after"]).toBeUndefined();
+    expect(res.body).toEqual({ ok: false, error: "schema drift" });
+  });
+});

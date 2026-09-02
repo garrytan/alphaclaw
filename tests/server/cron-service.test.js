@@ -1301,3 +1301,83 @@ describe("server/cron-service trends client time zones", () => {
     }
   });
 });
+
+describe("server/cron-service state-DB quiet period", () => {
+  const {
+    beginStateDbQuiet,
+    getStateDbQuietState,
+    resetStateDbQuietForTests,
+  } = require("../../lib/server/state-db-quiet");
+  const { closeCronStoreDb } = require("../../lib/server/cron-store");
+
+  afterEach(() => {
+    closeCronStoreDb();
+    resetStateDbQuietForTests();
+  });
+
+  const sqliteJob = {
+    id: "sqlite-job",
+    name: "SQLite Job",
+    enabled: true,
+    createdAtMs: 1,
+    updatedAtMs: 4,
+    schedule: { kind: "cron", expr: "0 8 * * *" },
+    sessionTarget: "isolated",
+    wakeMode: "now",
+    payload: { kind: "agentTurn", message: "current prompt" },
+    state: { nextRunAtMs: 500 },
+  };
+
+  it("closes the long-lived handle on begin, serves the jobs.json fallback while quiet, and resumes sqlite on release", async () => {
+    const openclawDir = createOpenclawDirWithCronJobs([
+      { id: "legacy-job", name: "Legacy Job", enabled: true },
+    ]);
+    const databasePath = addSqliteCronStore(openclawDir, [sqliteJob]);
+    try {
+      const cronService = makeService(openclawDir);
+      expect(cronService.listJobs().storePath).toBe(databasePath);
+      // The cached read handle is the one AlphaClaw connection that outlives
+      // a request — it shows up in the barrier's handle count.
+      expect(getStateDbQuietState().openHandles).toBe(1);
+
+      const { token } = await beginStateDbQuiet({ owner: "backup", maxMs: 60_000 });
+      try {
+        expect(getStateDbQuietState().openHandles).toBe(0);
+        const held = cronService.listJobs();
+        expect(held.storePath).toBe(path.join(openclawDir, "cron", "jobs.json"));
+        expect(held.jobs.map((job) => job.id)).toEqual(["legacy-job"]);
+        // Repeated reads do not reopen the db while quiet.
+        cronService.listJobs();
+        expect(getStateDbQuietState().openHandles).toBe(0);
+      } finally {
+        token.release();
+      }
+
+      const resumed = cronService.listJobs();
+      expect(resumed.storePath).toBe(databasePath);
+      expect(resumed.jobs.map((job) => job.id)).toEqual(["sqlite-job"]);
+      expect(getStateDbQuietState().openHandles).toBe(1);
+    } finally {
+      closeCronStoreDb();
+      fs.rmSync(openclawDir, { recursive: true, force: true });
+    }
+  });
+
+  it("a box with no jobs.json lists nothing (not an error) while quiet", async () => {
+    const openclawDir = createOpenclawDirWithRawStore(null);
+    addSqliteCronStore(openclawDir, [sqliteJob]);
+    try {
+      const cronService = makeService(openclawDir);
+      const { token } = await beginStateDbQuiet({ owner: "backup", maxMs: 60_000 });
+      try {
+        expect(cronService.listJobs().jobs).toEqual([]);
+      } finally {
+        token.release();
+      }
+      expect(cronService.listJobs().jobs.map((job) => job.id)).toEqual(["sqlite-job"]);
+    } finally {
+      closeCronStoreDb();
+      fs.rmSync(openclawDir, { recursive: true, force: true });
+    }
+  });
+});

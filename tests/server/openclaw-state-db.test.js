@@ -68,3 +68,123 @@ describe("server/openclaw-state-db", () => {
     }
   });
 });
+
+describe("server/openclaw-state-db quiet period + handle accounting", () => {
+  const {
+    kReadonlyBusyTimeoutMs,
+    kWritableBusyTimeoutMs,
+    openWritableOpenclawStateDb,
+    openTrackedReadonlyDatabase,
+  } = require("../../lib/server/openclaw-state-db");
+  const {
+    StateDbQuietError,
+    beginStateDbQuiet,
+    getStateDbHandleCount,
+    resetStateDbQuietForTests,
+  } = require("../../lib/server/state-db-quiet");
+
+  let tempDir = "";
+
+  beforeEach(() => {
+    resetStateDbQuietForTests();
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "alphaclaw-state-db-quiet-"));
+    const databasePath = path.join(tempDir, kOpenclawStateDbPath);
+    fs.mkdirSync(path.dirname(databasePath), { recursive: true });
+    const db = new DatabaseSync(databasePath);
+    db.exec("CREATE TABLE cron_jobs (id TEXT PRIMARY KEY, payload TEXT)");
+    db.close();
+  });
+
+  afterEach(() => {
+    resetStateDbQuietForTests();
+    if (tempDir) fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const busyTimeoutOf = (db) => db.prepare("PRAGMA busy_timeout").get().timeout;
+
+  it("read-only opens ALWAYS arm busy_timeout = 2000 (pinned)", () => {
+    expect(kReadonlyBusyTimeoutMs).toBe(2000);
+    const handle = openReadonlyOpenclawStateDb({ openclawDir: tempDir });
+    try {
+      expect(busyTimeoutOf(handle.db)).toBe(2000);
+    } finally {
+      handle.db.close();
+    }
+    const tracked = openTrackedReadonlyDatabase(path.join(tempDir, kOpenclawStateDbPath));
+    try {
+      expect(busyTimeoutOf(tracked)).toBe(2000);
+      expect(() => tracked.exec("INSERT INTO cron_jobs (id, payload) VALUES ('a', 'b')")).toThrow();
+    } finally {
+      tracked.close();
+    }
+  });
+
+  it("writable opens arm busy_timeout = 3000 (pinned)", () => {
+    expect(kWritableBusyTimeoutMs).toBe(3000);
+    const handle = openWritableOpenclawStateDb({ openclawDir: tempDir });
+    try {
+      expect(busyTimeoutOf(handle.db)).toBe(3000);
+    } finally {
+      handle.db.close();
+    }
+  });
+
+  it("counts every open handle until its close(), without underflow on a double close", () => {
+    expect(getStateDbHandleCount()).toBe(0);
+    const reader = openReadonlyOpenclawStateDb({ openclawDir: tempDir });
+    const writer = openWritableOpenclawStateDb({ openclawDir: tempDir });
+    expect(getStateDbHandleCount()).toBe(2);
+    reader.db.close();
+    expect(getStateDbHandleCount()).toBe(1);
+    writer.db.close();
+    expect(getStateDbHandleCount()).toBe(0);
+    // node:sqlite rejects a second close; the counter must not go negative.
+    expect(() => writer.db.close()).toThrow();
+    expect(getStateDbHandleCount()).toBe(0);
+  });
+
+  it("while quiet: the read-only open returns null (the existing 'unavailable' fallback) without touching the db", async () => {
+    const { token } = await beginStateDbQuiet({ owner: "test", maxMs: 60_000 });
+    try {
+      expect(openReadonlyOpenclawStateDb({ openclawDir: tempDir })).toBeNull();
+      expect(getStateDbHandleCount()).toBe(0);
+    } finally {
+      token.release();
+    }
+    expect(openReadonlyOpenclawStateDb({ openclawDir: tempDir })).not.toBeNull();
+  });
+
+  it("while quiet: the writable open throws StateDbQuietError (code backup_in_progress)", async () => {
+    const { token } = await beginStateDbQuiet({ owner: "test", maxMs: 60_000 });
+    try {
+      expect(() => openWritableOpenclawStateDb({ openclawDir: tempDir })).toThrow(StateDbQuietError);
+      let caught = null;
+      try {
+        openWritableOpenclawStateDb({ openclawDir: tempDir });
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught.code).toBe("backup_in_progress");
+      expect(getStateDbHandleCount()).toBe(0);
+    } finally {
+      token.release();
+    }
+    const handle = openWritableOpenclawStateDb({ openclawDir: tempDir });
+    handle.db.close();
+  });
+
+  it("begin waits for an open handle to close before forming the barrier", async () => {
+    const handle = openReadonlyOpenclawStateDb({ openclawDir: tempDir });
+    let settled = false;
+    const pending = beginStateDbQuiet({ owner: "test", maxMs: 60_000 }).then((result) => {
+      settled = true;
+      return result;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    expect(settled).toBe(false);
+    handle.db.close();
+    const { token } = await pending;
+    expect(settled).toBe(true);
+    token.release();
+  });
+});

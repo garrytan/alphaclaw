@@ -1652,4 +1652,46 @@ describe("server/routes/pairings sqlite reject", () => {
     expect(res.status).toBe(503);
     expect(res.body.error).toMatch(/retry/i);
   });
+
+  it("409 backup_in_progress (Retry-After 120) while the state-DB quiet period holds — the row is untouched", async () => {
+    const {
+      beginStateDbQuiet,
+      resetStateDbQuietForTests,
+    } = require("../../lib/server/state-db-quiet");
+    resetStateDbQuietForTests();
+    const fsModule = sqliteEraFsModule();
+    const { app, databasePath } = createSqliteApp({
+      rows: [["telegram", "default", "r1", "ABCD1234"]],
+      fsModule,
+    });
+    const { token } = await beginStateDbQuiet({ owner: "backup", maxMs: 60_000 });
+    try {
+      const res = await request(app)
+        .post("/api/pairings/abcd1234/reject")
+        .send({ channel: "telegram" });
+      expect(res.status).toBe(409);
+      expect(res.headers["retry-after"]).toBe("120");
+      expect(res.body).toEqual({
+        ok: false,
+        code: "backup_in_progress",
+        error: "A backup is in progress; retry in about two minutes.",
+      });
+      expect(fsModule.writeFileSync).not.toHaveBeenCalled();
+    } finally {
+      token.release();
+    }
+    const db = new DatabaseSync(databasePath, { readOnly: true });
+    try {
+      expect(
+        db.prepare("SELECT COUNT(*) AS n FROM channel_pairing_requests").get().n,
+      ).toBe(1);
+    } finally {
+      db.close();
+    }
+    // Once released the same request goes through.
+    const after = await request(app)
+      .post("/api/pairings/abcd1234/reject")
+      .send({ channel: "telegram" });
+    expect(after.status).toBe(200);
+  });
 });

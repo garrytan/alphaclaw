@@ -491,3 +491,110 @@ describe("server/upgrade-notifier routing", () => {
     expect(outbox.listEvents()[0].deliveredAt).toBeNull();
   });
 });
+
+describe("server/upgrade-notifier state-db quiet hold", () => {
+  const {
+    beginStateDbQuiet,
+    resetStateDbQuietForTests,
+  } = require("../../lib/server/state-db-quiet");
+
+  const makeHeldNotifier = () => {
+    const { outbox } = makeOutbox();
+    const fanout = vi.fn(async () => ({ ok: true, sent: 1 }));
+    const flushSpy = vi.spyOn(outbox, "flush");
+    const notifier = createUpgradeNotifier({
+      notifier: { notify: fanout, sendToTarget: vi.fn(async () => ({ ok: true })) },
+      outbox,
+      operatorsStore: {
+        read: () => ({ notifications: { preferredChannel: null, adminTargets: [] } }),
+      },
+      logger: kSilentLogger,
+    });
+    return { notifier, outbox, fanout, flushSpy };
+  };
+
+  beforeEach(() => {
+    // Notifiers built by earlier tests in this file never called stop(); drop
+    // their listeners so only the one under test observes the barrier.
+    resetStateDbQuietForTests({ listeners: true });
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    resetStateDbQuietForTests({ listeners: true });
+  });
+
+  it("enqueue is never gated: events queue durably while quiet and flush the moment the barrier lifts", async () => {
+    const { notifier, outbox, fanout, flushSpy } = makeHeldNotifier();
+    const { token } = await beginStateDbQuiet({ owner: "backup", maxMs: 60_000 });
+
+    const result = await notifier.notify("update applied", { id: "e1" });
+    expect(result).toEqual({ ok: true, queued: true, id: "e1" });
+    expect(outbox.listEvents()).toHaveLength(1);
+    // The debounce would fire at 250ms — held, so nothing is delivered.
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(flushSpy).not.toHaveBeenCalled();
+    expect(fanout).not.toHaveBeenCalled();
+    expect(outbox.listEvents()[0].deliveredAt).toBeNull();
+
+    token.release();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(flushSpy).toHaveBeenCalledTimes(1);
+    expect(fanout).toHaveBeenCalledWith("update applied", { eventType: "info" });
+    expect(outbox.listEvents()[0].deliveredAt).not.toBeNull();
+  });
+
+  it("begin cancels a pending debounce and the periodic heartbeat; end re-arms the heartbeat", async () => {
+    const { notifier, flushSpy } = makeHeldNotifier();
+    notifier.start();
+    expect(flushSpy).toHaveBeenCalledTimes(1);
+    await notifier.notify("queued before quiet", { id: "e1" });
+    flushSpy.mockClear();
+
+    const { token } = await beginStateDbQuiet({ owner: "backup", maxMs: 600_000 });
+    await vi.advanceTimersByTimeAsync(130_000);
+    expect(flushSpy).not.toHaveBeenCalled();
+
+    token.release();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(flushSpy).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(flushSpy).toHaveBeenCalledTimes(2);
+    notifier.stop();
+  });
+
+  it("start() during a hold defers the boot re-drain and heartbeat until the barrier lifts", async () => {
+    const { notifier, flushSpy } = makeHeldNotifier();
+    const { token } = await beginStateDbQuiet({ owner: "backup", maxMs: 600_000 });
+    notifier.start();
+    await vi.advanceTimersByTimeAsync(61_000);
+    expect(flushSpy).not.toHaveBeenCalled();
+
+    token.release();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(flushSpy).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(flushSpy).toHaveBeenCalledTimes(2);
+    notifier.stop();
+  });
+
+  it("stop() unsubscribes from the barrier: a later release no longer flushes a stopped notifier", async () => {
+    const { notifier, flushSpy } = makeHeldNotifier();
+    notifier.start();
+    notifier.stop();
+    flushSpy.mockClear();
+    const { token } = await beginStateDbQuiet({ owner: "backup", maxMs: 60_000 });
+    token.release();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(flushSpy).not.toHaveBeenCalled();
+  });
+
+  it("without a hold, notify() still debounces a flush as before", async () => {
+    const { notifier, flushSpy, fanout } = makeHeldNotifier();
+    await notifier.notify("plain", { id: "e1" });
+    await vi.advanceTimersByTimeAsync(250);
+    expect(flushSpy).toHaveBeenCalledTimes(1);
+    expect(fanout).toHaveBeenCalledTimes(1);
+  });
+});

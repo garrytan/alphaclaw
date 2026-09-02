@@ -857,3 +857,111 @@ describe("server/auth-profiles shared state-db store", () => {
     expect(sharedRow).toBe(null);
   });
 });
+
+describe("server/auth-profiles state-DB quiet period", () => {
+  const {
+    StateDbQuietError,
+    beginStateDbQuiet,
+    resetStateDbQuietForTests,
+  } = require("../../lib/server/state-db-quiet");
+
+  const agentDbPath = () =>
+    path.join(tmpDir, ".openclaw", "agents", "main", "agent", "openclaw-agent.sqlite");
+  const jsonStorePath = () =>
+    path.join(tmpDir, ".openclaw", "agents", "main", "agent", "auth-profiles.json");
+
+  const createAgentDb = () => {
+    const database = new DatabaseSync(agentDbPath());
+    database.exec(`
+      CREATE TABLE auth_profile_store (
+        store_key TEXT NOT NULL PRIMARY KEY,
+        store_json TEXT NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE TABLE auth_profile_state (
+        state_key TEXT NOT NULL PRIMARY KEY,
+        state_json TEXT NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+    `);
+    database
+      .prepare(
+        "INSERT INTO auth_profile_store (store_key, store_json, updated_at) VALUES (?, ?, ?)",
+      )
+      .run(
+        "primary",
+        JSON.stringify({
+          version: 1,
+          profiles: { "openai:default": { type: "api_key", provider: "openai", key: "sk-old" } },
+        }),
+        1,
+      );
+    database.close();
+  };
+
+  let token = null;
+
+  beforeEach(() => {
+    resetStateDbQuietForTests();
+  });
+
+  afterEach(() => {
+    token?.release();
+    token = null;
+    resetStateDbQuietForTests();
+    fs.rmSync(path.join(tmpDir, ".openclaw", "state"), { recursive: true, force: true });
+  });
+
+  it("every mutator throws StateDbQuietError while quiet and nothing is written (agent db AND json paths)", async () => {
+    createAgentDb();
+    ({ token } = await beginStateDbQuiet({ owner: "backup", maxMs: 60_000 }));
+
+    const mutations = [
+      () => ap.upsertProfile("openai:default", { type: "api_key", provider: "openai", key: "sk-new" }),
+      () => ap.removeProfile("openai:default"),
+      () => ap.setAuthOrder("openai", ["openai:default"]),
+      () => ap.upsertCodexProfile({ access: "a", refresh: "r", expires: 1 }),
+      () => ap.removeCodexProfiles(),
+      () => ap.upsertApiKeyProfileForEnvVar("openai", "sk-env"),
+    ];
+    for (const mutate of mutations) {
+      expect(mutate).toThrow(StateDbQuietError);
+    }
+    let caught = null;
+    try {
+      ap.upsertProfile("openai:default", { type: "api_key", provider: "openai", key: "sk-new" });
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toMatchObject({
+      code: "backup_in_progress",
+      message: "A backup is in progress; retry in about two minutes.",
+    });
+
+    // Lenient reads keep working off the untouched store.
+    expect(ap.listProfiles().map((profile) => [profile.id, profile.key])).toEqual([
+      ["openai:default", "sk-old"],
+    ]);
+    expect(fs.existsSync(jsonStorePath())).toBe(false);
+
+    // A non-main agent has no state-db store at all — still refused, since the
+    // agent tree is inside the backup's snapshot.
+    expect(() =>
+      ap.upsertProfile("openai:default", { type: "api_key", provider: "openai", key: "x" }, "sidekick"),
+    ).toThrow(StateDbQuietError);
+    expect(fs.existsSync(path.join(tmpDir, ".openclaw", "agents", "sidekick"))).toBe(false);
+
+    token.release();
+    token = null;
+    ap.upsertProfile("openai:default", { type: "api_key", provider: "openai", key: "sk-new" });
+    expect(ap.getProfile("openai:default").key).toBe("sk-new");
+  });
+
+  it("the agent-db writer arms busy_timeout = 3000 (parity with the state-db writer)", () => {
+    createAgentDb();
+    const execSpy = vi.spyOn(DatabaseSync.prototype, "exec");
+    ap.upsertProfile("openai:default", { type: "api_key", provider: "openai", key: "sk-new" });
+    expect(execSpy.mock.calls.map(([sql]) => sql)).toContain("PRAGMA busy_timeout = 3000;");
+    expect(ap.getProfile("openai:default").key).toBe("sk-new");
+  });
+});

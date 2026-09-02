@@ -3371,3 +3371,141 @@ describe("server/routes/system agent-sessions micro-cache", () => {
     expect(fresh.body.sessions).toHaveLength(1);
   });
 });
+
+describe("server/routes/system createSwrCache shouldRefresh", () => {
+  const { createSwrCache } = require("../../lib/server/routes/system");
+  const kTtlMs = 5000;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("seeds on the first read even when shouldRefresh says no", () => {
+    const compute = vi.fn(() => "v1");
+    const read = createSwrCache(compute, kTtlMs, { shouldRefresh: () => false });
+    expect(read()).toBe("v1");
+    expect(compute).toHaveBeenCalledTimes(1);
+  });
+
+  it("serves the stale value and skips the background compute while shouldRefresh is false, then resumes", async () => {
+    let value = "v1";
+    let allowed = true;
+    const compute = vi.fn(() => value);
+    const read = createSwrCache(compute, kTtlMs, { shouldRefresh: () => allowed });
+    expect(read()).toBe("v1");
+
+    value = "v2";
+    allowed = false;
+    vi.advanceTimersByTime(kTtlMs + 1);
+    expect(read()).toBe("v1");
+    await vi.runAllTimersAsync();
+    expect(compute).toHaveBeenCalledTimes(1);
+    expect(read()).toBe("v1");
+
+    allowed = true;
+    expect(read()).toBe("v1");
+    await vi.runAllTimersAsync();
+    expect(compute).toHaveBeenCalledTimes(2);
+    expect(read()).toBe("v2");
+  });
+
+  it("without the option (and with a non-function) it behaves exactly as before", async () => {
+    let value = "a";
+    const compute = vi.fn(() => value);
+    const plain = createSwrCache(compute, kTtlMs);
+    const junk = createSwrCache(compute, kTtlMs, { shouldRefresh: "nope" });
+    expect(plain()).toBe("a");
+    expect(junk()).toBe("a");
+    value = "b";
+    vi.advanceTimersByTime(kTtlMs);
+    expect(plain()).toBe("a");
+    expect(junk()).toBe("a");
+    await vi.runAllTimersAsync();
+    expect(plain()).toBe("b");
+    expect(junk()).toBe("b");
+  });
+
+  it("invalidate() forces a synchronous reseed regardless of shouldRefresh", () => {
+    let value = "v1";
+    const compute = vi.fn(() => value);
+    const read = createSwrCache(compute, kTtlMs, { shouldRefresh: () => false });
+    expect(read()).toBe("v1");
+    value = "v2";
+    read.invalidate();
+    expect(read()).toBe("v2");
+    expect(compute).toHaveBeenCalledTimes(2);
+  });
+
+  it("a compute that throws during refresh keeps the stale value", async () => {
+    let fail = false;
+    const compute = vi.fn(() => {
+      if (fail) throw new Error("db busy");
+      return "ok";
+    });
+    const read = createSwrCache(compute, kTtlMs);
+    expect(read()).toBe("ok");
+    fail = true;
+    vi.advanceTimersByTime(kTtlMs);
+    expect(read()).toBe("ok");
+    await vi.runAllTimersAsync();
+    expect(read()).toBe("ok");
+    expect(compute).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("server/routes/system channel status during the state-DB quiet period", () => {
+  const {
+    beginStateDbQuiet,
+    resetStateDbQuietForTests,
+  } = require("../../lib/server/state-db-quiet");
+
+  beforeEach(() => {
+    require("../../lib/server/boot-phase").setBootPhase("ready");
+    resetStateDbQuietForTests();
+  });
+
+  afterEach(() => {
+    resetStateDbQuietForTests();
+  });
+
+  it("GET /api/status keeps serving the last-known channel status while quiet, and refreshes after release", async () => {
+    const deps = createSystemDeps();
+    const app = createApp(deps);
+
+    const first = await request(app).get("/api/status");
+    expect(first.status).toBe(200);
+    expect(first.body.channels).toEqual({ telegram: "ready" });
+    expect(deps.getChannelStatus).toHaveBeenCalledTimes(1);
+
+    // Hold the barrier BEFORE freezing the clock (the handle drain polls
+    // against Date.now), then age every status cache past its TTL.
+    const { token } = await beginStateDbQuiet({ owner: "backup", maxMs: 60_000 });
+    const realNow = Date.now();
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(realNow + 6_000);
+    try {
+      deps.getChannelStatus.mockReturnValue({ telegram: "not_ready" });
+      const held = await request(app).get("/api/status");
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(held.body.channels).toEqual({ telegram: "ready" });
+      expect(deps.getChannelStatus).toHaveBeenCalledTimes(1);
+    } finally {
+      token.release();
+    }
+
+    nowSpy.mockReturnValue(realNow + 12_000);
+    const afterRelease = await request(app).get("/api/status");
+    // Stale-while-revalidate: this read serves the old value and schedules
+    // the refresh off the request tick.
+    expect(afterRelease.body.channels).toEqual({ telegram: "ready" });
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(deps.getChannelStatus).toHaveBeenCalledTimes(2);
+
+    nowSpy.mockReturnValue(realNow + 18_000);
+    const fresh = await request(app).get("/api/status");
+    expect(fresh.body.channels).toEqual({ telegram: "not_ready" });
+  });
+});
