@@ -41,6 +41,21 @@ describe("describeEvent", () => {
     }
   });
 
+  // The prelaunch-hook row is written through recordOperationEvent (kind) and
+  // the notify path's eventType, not a logEvent("prelaunch_hook", …) literal,
+  // so the source-extracted pin above cannot see it — pin the label directly.
+  it("labels prelaunch_hook rows (written outside the logEvent literal the drift pin scans)", async () => {
+    const { kWatchdogEventLabels, describeEvent } = await loadIncidentHelpers();
+    expect(kWatchdogEventLabels.prelaunch_hook).toBe("Prelaunch hook");
+    const described = describeEvent({
+      eventType: "prelaunch_hook",
+      status: "failed",
+      details: { reason: "prelaunch_hook_failed", code: "not_root_owned", site: "managed launch" },
+    });
+    expect(described.label).toBe("Prelaunch hook");
+    expect(described.tone).toBe("danger");
+  });
+
   it("labels overseer audit rows and surfaces their verdict or refusal as the detail", async () => {
     const { kWatchdogEventLabels, describeEvent } = await loadIncidentHelpers();
     expect(kWatchdogEventLabels.overseer_review).toBe("Overseer review");

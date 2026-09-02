@@ -340,6 +340,140 @@ describe("buildWatchdogNarrative", () => {
     );
     expect(narrative.detail).toContain("Suppressed: telegram, discord.");
   });
+
+  // C31: a hook-aborted launch parks the watchdog in phase `stopped`, whose
+  // copy ("monitoring is not running") is false there — the watchdog is up,
+  // the GATEWAY never started. getStatus() exports `prelaunchHook` for the
+  // narration; degradedReason is only a hint a later probe may overwrite.
+  describe("prelaunch-hook aborted launch", () => {
+    const kHookMessage =
+      "hook /etc/alphaclaw/prelaunch.sh is owned by uid 1000, must be root-owned";
+    const hookAborted = {
+      ...baseStatus,
+      phase: "stopped",
+      health: "unknown",
+      lifecycle: "stopped",
+      degradedReason: "prelaunch_hook_failed",
+      prelaunchHook: {
+        status: "refused",
+        code: "not_root_owned",
+        site: "managed launch",
+        message: kHookMessage,
+        hookPath: "/etc/alphaclaw/prelaunch.sh",
+        at: new Date(kNow - 5_000).toISOString(),
+      },
+    };
+    const plainStopped = {
+      ...baseStatus,
+      phase: "stopped",
+      health: "unknown",
+      lifecycle: "stopped",
+      prelaunchHook: null,
+    };
+
+    it("overrides the stopped copy: danger tone, launch-aborted headline, hook detail, no 'monitoring is not running'", async () => {
+      const { buildWatchdogNarrative } = await loadHelpers();
+      const narrative = buildWatchdogNarrative(hookAborted, kNow);
+      expect(narrative.phase).toBe("stopped");
+      expect(narrative.tone).toBe("danger");
+      expect(narrative.headline).toBe("Gateway launch aborted by the prelaunch hook");
+      expect(narrative.detail).toBe(
+        `The ALPHACLAW_GATEWAY_PRELAUNCH_HOOK refused the launch (not_root_owned, at managed launch): ${kHookMessage}. Fix or unset the hook, then restart the gateway.`,
+      );
+      expect(narrative.detail).not.toContain("monitoring is not running");
+      expect(narrative.headline).not.toContain("Watchdog stopped");
+    });
+
+    it("control: a plain stopped status (prelaunchHook null) keeps the neutral stopped copy", async () => {
+      const { buildWatchdogNarrative, kWatchdogPhaseCopy } = await loadHelpers();
+      const narrative = buildWatchdogNarrative(plainStopped, kNow);
+      expect(narrative.tone).toBe("neutral");
+      expect(narrative.headline).toBe(kWatchdogPhaseCopy.stopped.headline);
+      expect(narrative.detail).toBe("Gateway monitoring is not running.");
+      expect(narrative.detail).not.toContain("PRELAUNCH_HOOK");
+    });
+
+    it("a failed (not refused) hook reads 'failed the launch' and still narrates without a code", async () => {
+      const { buildWatchdogNarrative } = await loadHelpers();
+      const narrative = buildWatchdogNarrative(
+        {
+          ...hookAborted,
+          prelaunchHook: {
+            status: "failed",
+            code: null,
+            site: "boot",
+            message: "hook exited with code 3",
+          },
+        },
+        kNow,
+      );
+      expect(narrative.tone).toBe("danger");
+      expect(narrative.detail).toBe(
+        "The ALPHACLAW_GATEWAY_PRELAUNCH_HOOK failed the launch (at boot): hook exited with code 3. Fix or unset the hook, then restart the gateway.",
+      );
+    });
+
+    it("a prelaunchHook whose status is 'ran' (or a non-object) never triggers the override", async () => {
+      const { buildWatchdogNarrative } = await loadHelpers();
+      for (const prelaunchHook of [{ status: "ran" }, "refused", 42, undefined]) {
+        const narrative = buildWatchdogNarrative({ ...plainStopped, prelaunchHook }, kNow);
+        expect(narrative.tone).toBe("neutral");
+        expect(narrative.detail).not.toContain("PRELAUNCH_HOOK");
+      }
+    });
+
+    it("in any other phase the hook detail is APPENDED so a probe overwriting degradedReason cannot hide it", async () => {
+      const { buildWatchdogNarrative, kWatchdogPhaseCopy } = await loadHelpers();
+      // e.g. a refused light restart of a still-live gateway: the phase
+      // derives healthy, degradedReason has since been reset by a probe.
+      const narrative = buildWatchdogNarrative(
+        {
+          ...hookAborted,
+          phase: "healthy",
+          health: "healthy",
+          lifecycle: "running",
+          degradedReason: null,
+        },
+        kNow,
+      );
+      expect(narrative.phase).toBe("healthy");
+      expect(narrative.headline).toBe(kWatchdogPhaseCopy.healthy.headline);
+      expect(narrative.tone).toBe(kWatchdogPhaseCopy.healthy.tone);
+      expect(narrative.detail).toContain(
+        `The ALPHACLAW_GATEWAY_PRELAUNCH_HOOK refused the launch (not_root_owned, at managed launch): ${kHookMessage}.`,
+      );
+      expect(narrative.detail).toContain("Fix or unset the hook, then restart the gateway.");
+    });
+
+    it("crash_backoff keeps its own copy first and appends the hook detail after it", async () => {
+      const { buildWatchdogNarrative } = await loadHelpers();
+      const narrative = buildWatchdogNarrative(
+        {
+          ...hookAborted,
+          phase: "crash_backoff",
+          health: "unhealthy",
+          lifecycle: "crashed",
+          lastExit: { code: 1, signal: null, at: new Date(kNow).toISOString() },
+          backoff: { active: true, untilMs: kNow + 8_000, attempt: 1 },
+        },
+        kNow,
+      );
+      expect(narrative.headline).toBe("Gateway crashed");
+      const crashIdx = narrative.detail.indexOf("Relaunching with exponential backoff.");
+      const hookIdx = narrative.detail.indexOf("The ALPHACLAW_GATEWAY_PRELAUNCH_HOOK");
+      expect(crashIdx).toBeGreaterThanOrEqual(0);
+      expect(hookIdx).toBeGreaterThan(crashIdx);
+    });
+
+    it("the narrative card renders the hook-aborted headline and detail", async () => {
+      const { WatchdogNarrativeCard } = await loadCard();
+      const text = treeText(WatchdogNarrativeCard({ watchdogStatus: hookAborted }));
+      expect(text).toContain("Gateway launch aborted by the prelaunch hook");
+      expect(text).toContain("not_root_owned");
+      expect(text).toContain("Fix or unset the hook");
+      expect(text).not.toContain("monitoring is not running");
+    });
+  });
 });
 
 describe("WatchdogNarrativeCard tick gate", () => {
