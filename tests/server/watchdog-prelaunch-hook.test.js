@@ -1,0 +1,429 @@
+// Prelaunch hook outcomes reaching the watchdog (lane I integration of lane
+// C's gateway.setGatewayPrelaunchHookHandler seam):
+//   watchdog.onPrelaunchHook(outcome)      — degradedReason narration +
+//                                            ONE degraded (health_check/failed)
+//                                            row; cleared by launch / healthy
+//   createGatewayPrelaunchHookHandler(...) — the composition lib/server.js
+//                                            installs: ledger row + important
+//                                            notification + onPrelaunchHook
+const {
+  createWatchdog,
+  createGatewayPrelaunchHookHandler,
+} = require("../../lib/server/watchdog");
+const { kWatchdogPhases } = require("../../lib/server/watchdog-phase");
+
+const kOriginalQuiet = process.env.WATCHDOG_NOTIFICATIONS_QUIET;
+
+const healthyFetch = async () => ({
+  ok: true,
+  status: 200,
+  text: async () => JSON.stringify({ ok: true }),
+});
+
+const createHarness = ({ fetchImpl = healthyFetch } = {}) => {
+  const insertWatchdogEvent = vi.fn();
+  const notifier = { notify: vi.fn(async () => ({ ok: true })) };
+  const watchdog = createWatchdog({
+    clawCmd: vi.fn(async () => ({ ok: true })),
+    launchGatewayProcess: vi.fn(async () => null),
+    insertWatchdogEvent,
+    notifier,
+    readEnvFile: vi.fn(() => ""),
+    writeEnvFile: vi.fn(),
+    reloadEnv: vi.fn(),
+    resolveSetupUrl: () => "http://localhost",
+    resolveGatewayHealthUrl: () => "http://gateway/health",
+    resolveGatewayReadyzUrl: () => "",
+    sleepImpl: () => Promise.resolve(),
+    supervisorModeActive: () => false,
+  });
+  vi.stubGlobal("fetch", vi.fn(fetchImpl));
+  return { watchdog, insertWatchdogEvent, notifier };
+};
+
+// Exactly the outcome shape gateway.js reports (tests/server/gateway.test.js
+// pins it against the real launch paths).
+const refusedOutcome = (overrides = {}) => ({
+  status: "refused",
+  code: "not_root_owned",
+  hookPath: "/opt/alphaclaw/hooks/pre-gateway-launch",
+  message: "prelaunch hook must be owned by root (uid 1000)",
+  site: "managed launch",
+  durationMs: 3,
+  exitCode: null,
+  signal: null,
+  ...overrides,
+});
+const failedOutcome = (overrides = {}) => ({
+  status: "failed",
+  code: "nonzero_exit",
+  hookPath: "/opt/alphaclaw/hooks/pre-gateway-launch",
+  message: "prelaunch hook exited 2",
+  site: "restart",
+  durationMs: 812,
+  exitCode: 2,
+  signal: null,
+  ...overrides,
+});
+const ranOutcome = (overrides = {}) => ({
+  status: "ran",
+  code: null,
+  hookPath: "/opt/alphaclaw/hooks/pre-gateway-launch",
+  message: null,
+  site: "managed launch",
+  durationMs: 40,
+  exitCode: 0,
+  signal: null,
+  ...overrides,
+});
+
+const degradedRows = (insertWatchdogEvent) =>
+  insertWatchdogEvent.mock.calls
+    .map(([row]) => row)
+    .filter((row) => row.eventType === "health_check" && row.status === "failed");
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+  if (kOriginalQuiet == null) delete process.env.WATCHDOG_NOTIFICATIONS_QUIET;
+  else process.env.WATCHDOG_NOTIFICATIONS_QUIET = kOriginalQuiet;
+});
+
+describe("watchdog.onPrelaunchHook", () => {
+  it("a refused hook sets degradedReason=prelaunch_hook_failed, narrates the outcome on getStatus(), and writes ONE degraded row — without inventing a phase", () => {
+    const { watchdog, insertWatchdogEvent } = createHarness();
+    const before = watchdog.getStatus();
+    expect(before.prelaunchHook).toBe(null);
+    expect(before.degradedReason).toBe(null);
+
+    watchdog.onPrelaunchHook(refusedOutcome());
+
+    const status = watchdog.getStatus();
+    expect(status.degradedReason).toBe("prelaunch_hook_failed");
+    expect(status.prelaunchHook).toEqual({
+      status: "refused",
+      code: "not_root_owned",
+      site: "managed launch",
+      hookPath: "/opt/alphaclaw/hooks/pre-gateway-launch",
+      message: "prelaunch hook must be owned by root (uid 1000)",
+      at: expect.any(String),
+    });
+    expect(Date.parse(status.prelaunchHook.at)).not.toBeNaN();
+    // The phase enum is untouched (15 values) and the phase is whatever the
+    // existing latches derive — here the never-started "stopped" — with the
+    // new reason narrating it.
+    expect(kWatchdogPhases).toHaveLength(15);
+    expect(status.phase).toBe(before.phase);
+    expect(status.lifecycle).toBe(before.lifecycle);
+    expect(status.health).toBe(before.health);
+
+    // The degraded row watchdog-incidents.js classifies as an incident open.
+    const rows = degradedRows(insertWatchdogEvent);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      eventType: "health_check",
+      source: "prelaunch_hook",
+      status: "failed",
+      details: {
+        reason: "prelaunch_hook_failed",
+        launchAborted: true,
+        hookStatus: "refused",
+        code: "not_root_owned",
+        site: "managed launch",
+        hookPath: "/opt/alphaclaw/hooks/pre-gateway-launch",
+        exitCode: null,
+        signal: null,
+        durationMs: 3,
+      },
+    });
+    expect(rows[0].correlationId).toBeTruthy();
+  });
+
+  it("a failed hook (non-zero exit) carries exitCode/signal/site into the row and the narration", () => {
+    const { watchdog, insertWatchdogEvent } = createHarness();
+    watchdog.onPrelaunchHook(failedOutcome({ signal: "SIGKILL", exitCode: null }));
+    expect(watchdog.getStatus().prelaunchHook).toMatchObject({
+      status: "failed",
+      code: "nonzero_exit",
+      site: "restart",
+    });
+    expect(degradedRows(insertWatchdogEvent)[0].details).toMatchObject({
+      hookStatus: "failed",
+      exitCode: null,
+      signal: "SIGKILL",
+      durationMs: 812,
+    });
+  });
+
+  it("ignores 'ran' with no prior failure and unknown statuses (no state, no rows)", () => {
+    const { watchdog, insertWatchdogEvent } = createHarness();
+    watchdog.onPrelaunchHook(ranOutcome());
+    watchdog.onPrelaunchHook({ status: "weird" });
+    watchdog.onPrelaunchHook(null);
+    watchdog.onPrelaunchHook();
+    expect(watchdog.getStatus().prelaunchHook).toBe(null);
+    expect(watchdog.getStatus().degradedReason).toBe(null);
+    expect(insertWatchdogEvent).not.toHaveBeenCalled();
+  });
+
+  it("a later 'ran' outcome clears the failure narration (that launch proceeds)", () => {
+    const { watchdog } = createHarness();
+    watchdog.onPrelaunchHook(refusedOutcome());
+    expect(watchdog.getStatus().degradedReason).toBe("prelaunch_hook_failed");
+    watchdog.onPrelaunchHook(ranOutcome());
+    expect(watchdog.getStatus().degradedReason).toBe(null);
+    expect(watchdog.getStatus().prelaunchHook).toBe(null);
+  });
+
+  it("the next successful launch (onGatewayLaunch) clears the failure narration", () => {
+    const { watchdog } = createHarness();
+    watchdog.onPrelaunchHook(refusedOutcome());
+    watchdog.onGatewayLaunch({ pid: 4242, startedAt: Date.now() });
+    const status = watchdog.getStatus();
+    expect(status.degradedReason).toBe(null);
+    expect(status.prelaunchHook).toBe(null);
+    expect(status.lifecycle).toBe("running");
+  });
+
+  it("a refused light restart of a LIVE gateway keeps phase healthy and the next healthy probe clears the narration (and closes the incident with its ok row)", async () => {
+    vi.useFakeTimers();
+    try {
+      const { watchdog, insertWatchdogEvent } = createHarness();
+      watchdog.onGatewayLaunch({ pid: 111, startedAt: Date.now() - 60_000 });
+      await vi.advanceTimersByTimeAsync(10);
+      expect(watchdog.getStatus().phase).toBe("healthy");
+
+      watchdog.onPrelaunchHook(refusedOutcome({ site: "light restart" }));
+      const during = watchdog.getStatus();
+      expect(during.phase).toBe("healthy");
+      expect(during.health).toBe("healthy");
+      expect(during.degradedReason).toBe("prelaunch_hook_failed");
+      expect(during.prelaunchHook.site).toBe("light restart");
+      const rowsBefore = insertWatchdogEvent.mock.calls.length;
+
+      // Next regular health check (120s cadence) is healthy → cleared, and
+      // its non-skipped ok row is what watchdog-incidents.js closes on.
+      await vi.advanceTimersByTimeAsync(120_000);
+      const after = watchdog.getStatus();
+      expect(after.degradedReason).toBe(null);
+      expect(after.prelaunchHook).toBe(null);
+      expect(after.phase).toBe("healthy");
+      const okRows = insertWatchdogEvent.mock.calls
+        .slice(rowsBefore)
+        .map(([row]) => row)
+        .filter(
+          (row) =>
+            row.eventType === "health_check" &&
+            row.status === "ok" &&
+            !row.details?.skipped,
+        );
+      expect(okRows.length).toBeGreaterThanOrEqual(1);
+      watchdog.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("clearing never clobbers a probe-derived degradedReason", async () => {
+    vi.useFakeTimers();
+    try {
+      let mode = "healthy";
+      const { watchdog } = createHarness({
+        fetchImpl: async () =>
+          mode === "healthy"
+            ? healthyFetch()
+            : {
+                ok: false,
+                status: 503,
+                text: async () => JSON.stringify({ error: "queue backlog" }),
+              },
+      });
+      watchdog.onGatewayLaunch({ pid: 111, startedAt: Date.now() - 60_000 });
+      await vi.advanceTimersByTimeAsync(10);
+      mode = "failing";
+      await vi.advanceTimersByTimeAsync(120_000);
+      expect(watchdog.getStatus().degradedReason).toBe("queue backlog");
+
+      // A 'ran' hook outcome (some other launch path proceeding) leaves the
+      // probe's reason alone.
+      watchdog.onPrelaunchHook(ranOutcome());
+      expect(watchdog.getStatus().degradedReason).toBe("queue backlog");
+      watchdog.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("the narration is frame-stable across getStatus() reads (SSE dedupe safety) and bounded in length", () => {
+    const { watchdog } = createHarness();
+    watchdog.onPrelaunchHook(
+      refusedOutcome({ message: "m".repeat(1000), code: "c".repeat(200), site: "s".repeat(200) }),
+    );
+    const first = watchdog.getStatus().prelaunchHook;
+    const second = watchdog.getStatus().prelaunchHook;
+    expect(JSON.stringify(second)).toBe(JSON.stringify(first));
+    expect(first.message).toHaveLength(200);
+    expect(first.code).toHaveLength(80);
+    expect(first.site).toHaveLength(60);
+  });
+});
+
+describe("createGatewayPrelaunchHookHandler (the lib/server.js composition)", () => {
+  const fakeWatchdog = () => ({
+    recordOperationEvent: vi.fn(),
+    onPrelaunchHook: vi.fn(),
+  });
+
+  it("requires a watchdog with recordOperationEvent", () => {
+    expect(() => createGatewayPrelaunchHookHandler()).toThrow(TypeError);
+    expect(() => createGatewayPrelaunchHookHandler({ watchdog: {} })).toThrow(
+      /watchdog is required/,
+    );
+  });
+
+  it("'ran': ledger row only (kind prelaunch_hook, status ran) + onPrelaunchHook; no notification", () => {
+    const watchdog = fakeWatchdog();
+    const notify = vi.fn(async () => ({ ok: true }));
+    const handler = createGatewayPrelaunchHookHandler({ watchdog, notify });
+    const outcome = ranOutcome();
+    handler(outcome);
+    expect(watchdog.recordOperationEvent).toHaveBeenCalledTimes(1);
+    expect(watchdog.recordOperationEvent).toHaveBeenCalledWith({
+      kind: "prelaunch_hook",
+      status: "ran",
+      details: {
+        code: null,
+        hookPath: "/opt/alphaclaw/hooks/pre-gateway-launch",
+        site: "managed launch",
+        durationMs: 40,
+        exitCode: 0,
+        signal: null,
+        message: null,
+      },
+    });
+    expect(notify).not.toHaveBeenCalled();
+    expect(watchdog.onPrelaunchHook).toHaveBeenCalledWith(outcome);
+  });
+
+  it("'refused': ledger row + ONE important-class (untagged) notification with id prelaunch-hook-<code>-<site> + onPrelaunchHook", () => {
+    const watchdog = fakeWatchdog();
+    const notify = vi.fn(async () => ({ ok: true }));
+    const handler = createGatewayPrelaunchHookHandler({ watchdog, notify });
+    const outcome = refusedOutcome();
+    handler(outcome);
+
+    expect(watchdog.recordOperationEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: "prelaunch_hook",
+        status: "refused",
+        details: expect.objectContaining({
+          code: "not_root_owned",
+          site: "managed launch",
+          message: "prelaunch hook must be owned by root (uid 1000)",
+        }),
+      }),
+    );
+    expect(notify).toHaveBeenCalledTimes(1);
+    const [message, opts] = notify.mock.calls[0];
+    expect(message.split("\n")[0]).toBe("🐺 *AlphaClaw Watchdog*");
+    expect(message).toContain("🔴 Gateway launch aborted by the prelaunch hook");
+    expect(message).toContain("Reason: `not_root_owned`");
+    expect(message).toContain("Site: managed launch");
+    expect(message).toContain("Detail: prelaunch hook must be owned by root (uid 1000)");
+    // Important class: NO verbose/audit tags — an aborted launch is never
+    // filtered by "Important only" mode.
+    expect(opts).toEqual({
+      eventType: "prelaunch_hook",
+      id: "prelaunch-hook-not_root_owned-managed-launch",
+    });
+    expect(watchdog.onPrelaunchHook).toHaveBeenCalledWith(outcome);
+  });
+
+  it("'failed': the id is keyed on code + site so the outbox dedupes a retry loop at the same site", () => {
+    const watchdog = fakeWatchdog();
+    const notify = vi.fn(async () => ({ ok: true }));
+    const handler = createGatewayPrelaunchHookHandler({ watchdog, notify });
+    handler(failedOutcome());
+    handler(failedOutcome());
+    handler(failedOutcome({ site: "light restart" }));
+    expect(notify.mock.calls.map(([, opts]) => opts.id)).toEqual([
+      "prelaunch-hook-nonzero_exit-restart",
+      "prelaunch-hook-nonzero_exit-restart",
+      "prelaunch-hook-nonzero_exit-light-restart",
+    ]);
+    expect(notify.mock.calls[0][0]).toContain("Reason: `nonzero_exit`");
+  });
+
+  it("a rejecting or throwing notify is logged and never blocks the ledger row or the watchdog narration", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const rejecting = fakeWatchdog();
+    const rejectingHandler = createGatewayPrelaunchHookHandler({
+      watchdog: rejecting,
+      notify: vi.fn(async () => {
+        throw new Error("telegram down");
+      }),
+    });
+    expect(() => rejectingHandler(refusedOutcome())).not.toThrow();
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(rejecting.recordOperationEvent).toHaveBeenCalledTimes(1);
+    expect(rejecting.onPrelaunchHook).toHaveBeenCalledTimes(1);
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining("prelaunch-hook notification failed: telegram down"),
+    );
+
+    const throwing = fakeWatchdog();
+    const throwingHandler = createGatewayPrelaunchHookHandler({
+      watchdog: throwing,
+      notify: () => {
+        throw new Error("sync boom");
+      },
+    });
+    expect(() => throwingHandler(failedOutcome())).not.toThrow();
+    expect(throwing.onPrelaunchHook).toHaveBeenCalledTimes(1);
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining("prelaunch-hook notification failed: sync boom"),
+    );
+  });
+
+  it("works without a notifier (notify omitted) — ledger + narration only", () => {
+    const watchdog = fakeWatchdog();
+    const handler = createGatewayPrelaunchHookHandler({ watchdog });
+    expect(() => handler(refusedOutcome())).not.toThrow();
+    expect(watchdog.recordOperationEvent).toHaveBeenCalledTimes(1);
+    expect(watchdog.onPrelaunchHook).toHaveBeenCalledTimes(1);
+  });
+
+  it("against a REAL watchdog: the operation row (eventType operation / source prelaunch_hook) and the degraded row both land, and getStatus() narrates the abort", () => {
+    const { watchdog, insertWatchdogEvent } = createHarness();
+    const notify = vi.fn(async () => ({ ok: true }));
+    const handler = createGatewayPrelaunchHookHandler({ watchdog, notify });
+    handler(refusedOutcome());
+
+    const rows = insertWatchdogEvent.mock.calls.map(([row]) => row);
+    expect(rows).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          eventType: "operation",
+          source: "prelaunch_hook",
+          status: "refused",
+          details: expect.objectContaining({ code: "not_root_owned", site: "managed launch" }),
+        }),
+        expect.objectContaining({
+          eventType: "health_check",
+          source: "prelaunch_hook",
+          status: "failed",
+          details: expect.objectContaining({ reason: "prelaunch_hook_failed" }),
+        }),
+      ]),
+    );
+    expect(rows).toHaveLength(2);
+    expect(watchdog.getStatus()).toMatchObject({
+      degradedReason: "prelaunch_hook_failed",
+      prelaunchHook: expect.objectContaining({ status: "refused", code: "not_root_owned" }),
+    });
+    expect(notify).toHaveBeenCalledWith(
+      expect.stringContaining("Gateway launch aborted by the prelaunch hook"),
+      expect.objectContaining({ id: "prelaunch-hook-not_root_owned-managed-launch" }),
+    );
+  });
+});

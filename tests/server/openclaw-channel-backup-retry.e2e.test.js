@@ -1623,10 +1623,15 @@ describe("server/openclaw-channel-backup-retry", () => {
       );
     });
 
-    it("kill switch OPENCLAW_STATE_DB_QUIET=off: the backup proceeds with a no-op token, and the offline copy refuses (barrier disabled)", async () => {
+    it("kill switch OPENCLAW_STATE_DB_QUIET=off: the backup proceeds with a no-op token, and the offline copy still runs — recording quiet:\"disabled\" as evidence, not a refusal", async () => {
+      // Orchestrator decision (lane I): the operator deliberately disabled
+      // the barrier, so the copy is gated by the remaining proofs (confirmed
+      // stop, no live processes/handles/fd holders) and the manifest records
+      // the disabled barrier honestly. A MISSING or EXPIRED token still
+      // refuses (openclaw-backup-offline-copy.test.js).
       process.env.OPENCLAW_STATE_DB_QUIET = "off";
       try {
-        const quiesce = makeQuiesceRecorder({});
+        const quiesce = makeQuiesceRecorder({ stopEvidence: { confirmed: true, via: "port_released" } });
         const { runnerImpl } = makeOfflineCopyRunner({
           script: [{ ok: false, signal: "SIGKILL", killed: true, tail: "" }],
           onBackupCall: () => quiesce.calls.push(isStateDbQuiet() ? "quiet:on" : "quiet:off"),
@@ -1638,8 +1643,25 @@ describe("server/openclaw-channel-backup-retry", () => {
 
         expect(quiesce.calls).toContain("quiet:off");
         expect(eventsOfType(harness.insertEvent, "state_db_quiet").map((e) => e.status)).toEqual(["disabled"]);
-        expect(result.status).toBe(409);
-        expect(result.body.message).toMatch(/state-db quiet barrier disabled/);
+        expect(result.status).toBe(202);
+        const record = readRunBackupRecord(harness);
+        expect(record).toEqual(
+          expect.objectContaining({
+            noBackup: false,
+            producer: "alphaclaw-offline-copy",
+            offlineCopy: expect.objectContaining({ ok: true, reason: "killed" }),
+          }),
+        );
+        expect(record.exclusivityEvidence).toEqual(
+          expect.objectContaining({
+            stopConfirmed: true,
+            quiet: "disabled",
+            quietOwner: "quiesced-backup",
+            liveProcesses: 0,
+            handleCount: 0,
+          }),
+        );
+        expect(fs.statSync(record.file).size).toBeGreaterThan(0);
       } finally {
         delete process.env.OPENCLAW_STATE_DB_QUIET;
       }

@@ -143,19 +143,37 @@ describe("server/openclaw-backup-offline-copy", () => {
       expect(report.failures).toEqual(["gateway stop not confirmed"]);
     });
 
-    it("refuses when the quiet barrier is missing, lost, or disabled by the kill switch", () => {
+    it("refuses when the quiet barrier is missing or lost", () => {
       expect(assessExclusivity({ ...base, quietToken: null }).failures).toEqual([
         "state-db quiet barrier missing",
       ]);
       expect(assessExclusivity({ ...base, isQuiet: () => false }).failures).toEqual([
         "state-db quiet barrier lost",
       ]);
+    });
+
+    it("accepts a barrier DISABLED by the OPENCLAW_STATE_DB_QUIET kill switch as evidence, not a refusal", () => {
+      // Lane D's kill switch returns a { disabled: true } token and never
+      // enters the quiet state, so isQuiet() reads false — that must not be
+      // mistaken for a lost barrier. The other hard gates still apply.
       const disabled = assessExclusivity({
         ...base,
         quietToken: { ...heldToken, disabled: true },
+        isQuiet: () => false,
       });
-      expect(disabled.failures).toEqual(["state-db quiet barrier disabled"]);
-      expect(disabled.evidence.quiet).toBe("disabled");
+      expect(disabled.ok).toBe(true);
+      expect(disabled.failures).toEqual([]);
+      expect(disabled.evidence).toEqual(
+        expect.objectContaining({ quiet: "disabled", quietOwner: "quiesced-backup" }),
+      );
+      const disabledButLive = assessExclusivity({
+        ...base,
+        quietToken: { ...heldToken, disabled: true },
+        isQuiet: () => false,
+        liveProcesses: [{ pid: 9 }],
+      });
+      expect(disabledButLive.ok).toBe(false);
+      expect(disabledButLive.failures).toEqual(["1 live openclaw process(es): 9"]);
     });
 
     it("refuses on live openclaw processes and open in-process handles", () => {
@@ -394,6 +412,21 @@ describe("server/openclaw-backup-offline-copy", () => {
         message: expect.stringMatching(/1 live openclaw process/),
       });
       expect(fs.readdirSync(args.backupsDir)).toEqual([]);
+    });
+
+    it("completes under a kill-switch-disabled barrier (isQuiet false throughout) and records quiet:\"disabled\" in the manifest", async () => {
+      const isQuiet = vi.fn(() => false);
+      const args = makeCopyArgs({
+        exclusivity: { ...fullExclusivity, quietToken: { ...heldToken, disabled: true } },
+        isQuiet,
+      });
+      const result = await createOfflineCopy(args);
+      expect(result.ok).toBe(true);
+      expect(result.exclusivityEvidence).toEqual(
+        expect.objectContaining({ quiet: "disabled", completeness: "full" }),
+      );
+      expect(result.manifest.exclusivityEvidence.quiet).toBe("disabled");
+      expect(fs.readdirSync(args.backupsDir)).toEqual([path.basename(args.outputFile)]);
     });
 
     it("aborts with quiet_lost when the barrier drops mid-copy and cleans up", async () => {
