@@ -869,6 +869,58 @@ describe("server/routes/openclaw-channel", () => {
       expect(fenced.body.hint).toMatch(/taken 3 hours before this update — state written since is not in it/);
     });
 
+    // D2: the consented-reuse path records the verified inode's bytes/mtimeMs
+    // (tryReuseRecentBackup ← verifyReuseCandidate), so a reused record is
+    // NEVER `unverifiable_content` — the fence used to tell the operator "do
+    // not restore it" and then name the same archive as the survivor. This
+    // record carries exactly the fields the reuse path writes (no fresh-
+    // publish `recordedFacts` spread, no mode/stateBytes/durationMs).
+    it("a record shaped exactly as the reuse path writes it verifies (bytes + mtimeMs) and keeps the reused loss-window caveat", async () => {
+      const deps = createDeps();
+      const file = writeArchive(deps.OPENCLAW_DIR, "openclaw-backup-1-aaaa.tar.gz");
+      const st = fs.lstatSync(file);
+      const reusedRecord = {
+        at: 1,
+        dir: deps.OPENCLAW_DIR,
+        file,
+        verified: true,
+        reused: true,
+        reusedAgeMs: 3 * 60 * 60 * 1000,
+        sha256: "ab".repeat(32),
+        producer: "openclaw",
+        bytes: st.size,
+        mtimeMs: st.mtimeMs,
+        usableCheck: "manifest_ok",
+        freshAttemptFailure: { kind: "lock_contention", message: "lock contention" },
+        noBackup: false,
+      };
+      deps.openclawChannelService.runLedger = {
+        listRuns: vi.fn(() => [kMigratedRun(reusedRecord)]),
+      };
+      deps.openclawChannelService.listBackupInventory = vi.fn(() =>
+        inventoryFor(deps.OPENCLAW_DIR, [
+          inventoryEntry(file, { reused: true, sha256: reusedRecord.sha256 }),
+        ]),
+      );
+      const app = createApp(deps);
+
+      const fenced = await request(app).post("/api/openclaw/rollback").send({});
+      expect(fenced.status).toBe(409);
+      expect(fenced.body).toEqual(
+        expect.objectContaining({
+          backupFile: file,
+          backupFileExists: true,
+          backupFileCaveat: null,
+          backupReused: true,
+          reusedAgeMs: 3 * 60 * 60 * 1000,
+          newestSurvivingBackup: null,
+        }),
+      );
+      expect(fenced.body.hint).toMatch(/present and unchanged since it was verified/);
+      expect(fenced.body.hint).toMatch(/taken 3 hours before this update — state written since is not in it/);
+      expect(fenced.body.hint).not.toMatch(/failed verification|do not restore|no size or modification time/);
+    });
+
     // X1: the inventory's `sha256` is copied from the same persisted record,
     // so the digest cross-check proved nothing about the bytes — a same-size
     // regular file swapped onto the recorded path passed as "verified" and

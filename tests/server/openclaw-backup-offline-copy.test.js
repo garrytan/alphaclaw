@@ -596,12 +596,15 @@ describe("server/openclaw-backup-offline-copy", () => {
       await new Promise((resolve) => setTimeout(resolve, 60));
     });
 
-    // X2: when the budget race loses, the orphaned backup() keeps stepping
-    // (closing its source does not stop it — node:sqlite zombifies the
-    // connection). The abort path closes the source at once, unlinks the
-    // destination, waits a short bound for the orphan to settle, and past
-    // the bound marks the failure `orphanedBackup: true` so the driver can
-    // record that the barrier was released over a still-stepping backup.
+    // X2: the fallback for a backup() whose current step never returns (the
+    // progress hook is never called again, so nothing can throw into the job;
+    // closing its source does not stop it — node:sqlite zombifies the
+    // connection). These fakes ignore the hook on purpose: the abort path
+    // closes the source at once, unlinks the destination, waits a short bound
+    // for the orphan to settle, and past the bound marks the failure
+    // `orphanedBackup: true` so the driver can record that the barrier was
+    // released over a still-stepping backup. The NORMAL abort — the hook's
+    // throw cancelling the job — is pinned in the describe below.
     describe("orphaned sqlite backup() after a budget abort (X2)", () => {
       const closeTrackingDatabaseSync = () => {
         let onClose = () => {};
@@ -670,6 +673,133 @@ describe("server/openclaw-backup-offline-copy", () => {
         expect(Date.now() - startedAt).toBeLessThan(3000);
         expect(tracking.closes.length).toBeGreaterThanOrEqual(1);
         expect(fs.existsSync(destinationSeen)).toBe(false);
+        expect(fs.readdirSync(args.backupsDir)).toEqual([]);
+      });
+    });
+
+    // D1/D4: a throw from the `progress` hook is node:sqlite's cancel — the
+    // job aborts at that step boundary, backup() rejects with the thrown
+    // value and no further step runs. The previous shape swallowed the
+    // checkpoint's throw, so a budget/quiet abort left the job stepping as an
+    // orphan that restarted from page 1 on every gateway write after the
+    // relaunch (livelock, state-DB read lock, unlinked destination's disk).
+    // These pins drive the REAL node:sqlite module against a multi-step DB.
+    describe("abort cancels sqlite backup() through the progress hook (real node:sqlite)", () => {
+      const sqlite = require("node:sqlite");
+      // Enough pages that a `rate: 5` backup takes dozens of steps.
+      const growStateDb = (stateDir) => {
+        const db = new DatabaseSync(path.join(stateDir, "state", "openclaw.sqlite"));
+        db.exec("CREATE TABLE big(x TEXT)");
+        const insert = db.prepare("INSERT INTO big VALUES (?)");
+        db.exec("BEGIN");
+        for (let i = 0; i < 3000; i += 1) insert.run("x".repeat(400));
+        db.exec("COMMIT");
+        db.close();
+      };
+      // The real module with a step counter around the copy's own hook; the
+      // module identity differs from `node:sqlite`, so the integrity check
+      // would run in-process — never reached, the abort lands before it.
+      const countingSqlite = ({ onStep }) => {
+        const counter = { steps: 0 };
+        return {
+          counter,
+          sqliteModule: {
+            DatabaseSync: sqlite.DatabaseSync,
+            backup: (src, dest, options) =>
+              sqlite.backup(src, dest, {
+                ...options,
+                rate: 5,
+                progress: (info) => {
+                  counter.steps += 1;
+                  onStep(counter.steps);
+                  options.progress(info);
+                },
+              }),
+          },
+        };
+      };
+
+      it("a quiet barrier lost between steps aborts the job: the promise settles as quiet_lost, no further step runs, no orphan flag", async () => {
+        const stateDir = makeStateDir();
+        growStateDb(stateDir);
+        let quiet = true;
+        const { counter, sqliteModule } = countingSqlite({
+          onStep: (step) => {
+            if (step === 2) quiet = false;
+          },
+        });
+        const args = makeCopyArgs({ stateDir, sqliteModule, isQuiet: () => quiet });
+
+        const error = await createOfflineCopy(args).catch((caught) => caught);
+
+        expect(error).toMatchObject({
+          stage: "quiet_lost",
+          message: expect.stringMatching(/ended during sqlite_backup/),
+        });
+        expect(error.orphanedBackup).toBeUndefined();
+        expect(counter.steps).toBe(2);
+        // The job is dead, not orphaned: no step lands after the settle.
+        await new Promise((resolve) => setTimeout(resolve, 200));
+        expect(counter.steps).toBe(2);
+        expect(fs.readdirSync(args.backupsDir)).toEqual([]);
+      });
+
+      it("a deadline exhausted between steps aborts the job through the same hook (stage budget), no orphan flag", async () => {
+        const stateDir = makeStateDir();
+        growStateDb(stateDir);
+        let now = 1_000_000;
+        const { counter, sqliteModule } = countingSqlite({
+          onStep: (step) => {
+            // The clock leaps past the deadline while the job is mid-copy.
+            if (step === 2) now += 120_000;
+          },
+        });
+        const args = makeCopyArgs({ stateDir, sqliteModule, budgetMs: 60_000, nowFn: () => now });
+
+        const error = await createOfflineCopy(args).catch((caught) => caught);
+
+        expect(error).toMatchObject({
+          stage: "budget",
+          message: expect.stringMatching(/exhausted during sqlite_backup/),
+        });
+        expect(error.orphanedBackup).toBeUndefined();
+        expect(counter.steps).toBe(2);
+        await new Promise((resolve) => setTimeout(resolve, 200));
+        expect(counter.steps).toBe(2);
+        expect(fs.readdirSync(args.backupsDir)).toEqual([]);
+      });
+
+      it("after the outer deadline timer fires, the NEXT step throws the budget error into the job (contract fake): rejected with that value, settled long before the orphan bound", async () => {
+        let rejectedWith = null;
+        const args = makeCopyArgs({
+          budgetMs: 20,
+          nowFn: () => 1_000_000,
+          orphanSettleMs: 5000,
+          sqliteModule: {
+            DatabaseSync: kStubDatabaseSync,
+            // node:sqlite's contract: the promise rejects with whatever the
+            // hook threw. This step returns 60 ms in — after the 20 ms timer.
+            backup: (_src, _dest, { progress }) =>
+              new Promise((resolve, reject) => {
+                setTimeout(() => {
+                  try {
+                    progress({ totalPages: 2, remainingPages: 1 });
+                    resolve(1);
+                  } catch (thrown) {
+                    rejectedWith = thrown;
+                    reject(thrown);
+                  }
+                }, 60);
+              }),
+          },
+        });
+        const startedAt = Date.now();
+        const error = await createOfflineCopy(args).catch((caught) => caught);
+
+        expect(error).toMatchObject({ stage: "budget" });
+        expect(error.orphanedBackup).toBeUndefined();
+        expect(rejectedWith).toBe(error);
+        expect(Date.now() - startedAt).toBeLessThan(3000);
         expect(fs.readdirSync(args.backupsDir)).toEqual([]);
       });
     });
@@ -800,6 +930,56 @@ describe("server/openclaw-backup-offline-copy", () => {
         },
       });
       await expect(createOfflineCopy(args)).rejects.toMatchObject({ stage: "budget" });
+    });
+
+    // D13: the live-process sample and the /proc fd scan must describe the
+    // same instant — the walk in between yields for seconds, so a child that
+    // spawns during it was missed by a pre-walk argv sample yet caught by the
+    // fd scan and refused as a foreign holder.
+    describe("live processes are re-sampled after the walk, next to the fd scan", () => {
+      it("a child that appears during the walk is refused BY NAME even though the pre-walk sample was empty", async () => {
+        let samples = 0;
+        const args = makeCopyArgs({
+          exclusivity: { ...fullExclusivity, liveProcesses: [] },
+          sampleLiveProcesses: async () => {
+            samples += 1;
+            return [{ pid: 777, cmdline: "openclaw sessions list --json" }];
+          },
+        });
+        await expect(createOfflineCopy(args)).rejects.toMatchObject({
+          stage: "exclusivity",
+          message: expect.stringMatching(/1 live openclaw process\(es\): 777 \(openclaw sessions list --json\)/),
+        });
+        expect(samples).toBe(1);
+        expect(fs.readdirSync(args.backupsDir)).toEqual([]);
+      });
+
+      it("a child seen only by the pre-walk sample that is gone at the re-sample does not refuse; the evidence records the settled sample", async () => {
+        const args = makeCopyArgs({
+          exclusivity: {
+            ...fullExclusivity,
+            liveProcesses: [{ pid: 777, cmdline: "openclaw sessions list --json" }],
+          },
+          sampleLiveProcesses: async () => [],
+        });
+        const result = await createOfflineCopy(args);
+        expect(result.exclusivityEvidence).toEqual(
+          expect.objectContaining({ liveProcesses: 0, completeness: "full" }),
+        );
+      });
+
+      it("without a sampler the pre-walk sample is the verdict (fail-closed)", async () => {
+        const args = makeCopyArgs({
+          exclusivity: {
+            ...fullExclusivity,
+            liveProcesses: [{ pid: 4242, cmdline: "openclaw gateway run" }],
+          },
+        });
+        await expect(createOfflineCopy(args)).rejects.toMatchObject({
+          stage: "exclusivity",
+          message: expect.stringMatching(/4242 \(openclaw gateway run\)/),
+        });
+      });
     });
 
     it("names the sqlite_backup stage when a source database cannot be opened", async () => {
