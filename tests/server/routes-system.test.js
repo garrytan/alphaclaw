@@ -4094,4 +4094,65 @@ describe("server/routes/system channel status during the state-DB quiet period",
     const fresh = await request(app).get("/api/status");
     expect(fresh.body.channels).toEqual({ telegram: "not_ready" });
   });
+
+  // D13: `sessions --json` is a CLI child that opens the state DB — the very
+  // traffic the barrier suppresses, and the offline copy's exclusivity scan
+  // would refuse the paused box over OUR OWN poll. Never spawn while quiet.
+  describe("GET /api/agent/sessions never spawns the sessions CLI while quiet", () => {
+    const { kBackupInProgressCode, kStateDbQuietRetryAfterSec } = require(
+      "../../lib/server/state-db-quiet",
+    );
+    const oneSessionStdout = JSON.stringify({
+      items: [{ key: "agent:main:main", id: "row-id", lastActivityAt: 7 }],
+    });
+
+    it("answers 409 backup_in_progress + Retry-After before spawning when nothing is cached, and spawns again once released", async () => {
+      const deps = createSystemDeps();
+      deps.clawCmd.mockResolvedValue({ ok: true, stdout: oneSessionStdout });
+      const app = createApp(deps);
+
+      const { token } = await beginStateDbQuiet({ owner: "backup", maxMs: 60_000 });
+      try {
+        const held = await request(app).get("/api/agent/sessions");
+        expect(held.status).toBe(409);
+        expect(held.body).toEqual(
+          expect.objectContaining({ ok: false, code: kBackupInProgressCode }),
+        );
+        expect(held.headers["retry-after"]).toBe(String(kStateDbQuietRetryAfterSec));
+        expect(deps.clawCmd).not.toHaveBeenCalled();
+      } finally {
+        token.release();
+      }
+
+      const released = await request(app).get("/api/agent/sessions");
+      expect(released.status).toBe(200);
+      expect(released.body.sessions).toEqual([
+        expect.objectContaining({ key: "agent:main:main", sessionId: "row-id" }),
+      ]);
+      expect(deps.clawCmd).toHaveBeenCalledTimes(1);
+    });
+
+    it("serves the last-known session list while quiet — even past the cache TTL — without spawning", async () => {
+      const deps = createSystemDeps();
+      deps.clawCmd.mockResolvedValue({ ok: true, stdout: oneSessionStdout });
+      // TTL 0 here: the list is cached but never served on the hot path, so
+      // a 200 while quiet can only be the last-known projection.
+      const app = createApp(deps);
+
+      const warm = await request(app).get("/api/agent/sessions");
+      expect(warm.status).toBe(200);
+      expect(deps.clawCmd).toHaveBeenCalledTimes(1);
+
+      const { token } = await beginStateDbQuiet({ owner: "backup", maxMs: 60_000 });
+      try {
+        deps.clawCmd.mockResolvedValue({ ok: false, stderr: "must not be spawned" });
+        const held = await request(app).get("/api/agent/sessions");
+        expect(held.status).toBe(200);
+        expect(held.body.sessions).toEqual(warm.body.sessions);
+        expect(deps.clawCmd).toHaveBeenCalledTimes(1);
+      } finally {
+        token.release();
+      }
+    });
+  });
 });

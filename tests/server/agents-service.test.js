@@ -3453,12 +3453,196 @@ describe("server/agents/service", () => {
         // Loud (SECURITY class — allow entries stay authorized), with the retry guidance. NOT the barrier's deferrITY line.
         expect(errorSpy).toHaveBeenCalledWith(
           expect.stringMatching(
-            /SECURITY: could not clear telegram\/alerts pairing rows from the state db: pairing tables schema is unsupported.*STILL authorized.*re-run the delete/,
+            // The remedy must be one that WORKS: "re-run the delete" 404s at
+            // the not-found check (the account is already gone), so the log
+            // names re-add-then-delete (re-adding clears the rows) or the
+            // by-hand row delete.
+            /SECURITY: could not clear telegram\/alerts pairing rows from the state db: pairing tables schema is unsupported.*STILL authorized; re-add telegram\/alerts \(adding an account clears its stale pairing rows\) and delete it again, or delete the rows by hand from state\/openclaw\.sqlite/,
           ),
         );
+        expect(errorSpy).not.toHaveBeenCalledWith(expect.stringMatching(/re-run the delete/));
       } finally {
         errorSpy.mockRestore();
         warnSpy.mockRestore();
+        fs.rmSync(openclawDir, { recursive: true, force: true });
+      }
+    });
+  });
+
+  // Re-adding an id must never inherit the pairing rows a deleted account
+  // left behind (a deferred clear lost to a process death mid-hold, or the
+  // failed clear above): the add clears that provider/account's rows FIRST,
+  // as its one quiet-gated write, before the env/config writes.
+  describe("createChannelAccount: stale pairing rows cleared before the add", () => {
+    const seedStateDbWithPairingRows = () => {
+      const openclawDir = fs.mkdtempSync(path.join(os.tmpdir(), "alphaclaw-agents-readd-"));
+      const databasePath = path.join(openclawDir, "state", "openclaw.sqlite");
+      fs.mkdirSync(path.dirname(databasePath), { recursive: true });
+      const db = new DatabaseSync(databasePath);
+      db.exec(
+        "CREATE TABLE channel_pairing_requests (channel_key TEXT NOT NULL, account_id TEXT NOT NULL, request_id TEXT NOT NULL, code TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT '', last_seen_at TEXT NOT NULL DEFAULT '', meta_json TEXT, PRIMARY KEY (channel_key, account_id, request_id))",
+      );
+      db.exec(
+        "CREATE TABLE channel_pairing_allow_entries (channel_key TEXT NOT NULL, account_id TEXT NOT NULL, entry TEXT NOT NULL, sort_order INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (channel_key, account_id, entry))",
+      );
+      const insert = db.prepare(
+        "INSERT INTO channel_pairing_allow_entries (channel_key, account_id, entry) VALUES (?, ?, ?)",
+      );
+      insert.run("telegram", "alerts", "111");
+      insert.run("telegram", "default", "222");
+      db.prepare(
+        "INSERT INTO channel_pairing_requests (channel_key, account_id, request_id, code) VALUES (?, ?, ?, ?)",
+      ).run("telegram", "alerts", "req-1", "ABCD");
+      db.close();
+      return { openclawDir, databasePath };
+    };
+    const allowEntriesFor = (databasePath, accountId) => {
+      const db = new DatabaseSync(databasePath, { readOnly: true });
+      try {
+        return db
+          .prepare(
+            "SELECT entry FROM channel_pairing_allow_entries WHERE channel_key = 'telegram' AND account_id = ? ORDER BY entry",
+          )
+          .all(accountId)
+          .map((row) => row.entry);
+      } finally {
+        db.close();
+      }
+    };
+    const pendingRequestsFor = (databasePath, accountId) => {
+      const db = new DatabaseSync(databasePath, { readOnly: true });
+      try {
+        return db
+          .prepare(
+            "SELECT request_id FROM channel_pairing_requests WHERE channel_key = 'telegram' AND account_id = ?",
+          )
+          .all(accountId)
+          .map((row) => row.request_id);
+      } finally {
+        db.close();
+      }
+    };
+    const oneAccountConfig = () => ({
+      agents: { list: [{ id: "main", default: true }] },
+      channels: {
+        telegram: {
+          enabled: true,
+          dmPolicy: "pairing",
+          groupPolicy: "allowlist",
+          defaultAccount: "default",
+          accounts: {
+            default: { botToken: "${TELEGRAM_BOT_TOKEN}", name: "Telegram" },
+          },
+        },
+      },
+      bindings: [],
+    });
+    const addAlerts = (service) =>
+      service.createChannelAccount({
+        provider: "telegram",
+        name: "Alerts",
+        accountId: "alerts",
+        token: "456:def",
+        agentId: "main",
+      });
+    let token = null;
+
+    beforeEach(() => {
+      resetStateDbQuietForTests();
+    });
+
+    afterEach(() => {
+      token?.release();
+      token = null;
+      resetStateDbQuietForTests();
+    });
+
+    it("re-adding a deleted account's id clears its stale allow entries and pending requests (the SECURITY log's remedy works), sibling untouched", async () => {
+      const { openclawDir, databasePath } = seedStateDbWithPairingRows();
+      const fsMock = buildFsMock({ initialConfig: oneAccountConfig() });
+      const writeEnvFile = vi.fn();
+      const clawCmd = vi.fn(async () => ({ ok: true, stdout: "", stderr: "" }));
+      const service = createAgentsService({
+        fs: fsMock,
+        OPENCLAW_DIR: openclawDir,
+        readEnvFile: () => [{ key: "TELEGRAM_BOT_TOKEN", value: "123:abc" }],
+        writeEnvFile,
+        reloadEnv: vi.fn(),
+        clawCmd,
+      });
+      try {
+        const result = await addAlerts(service);
+
+        expect(result.account).toEqual(
+          expect.objectContaining({ id: "alerts", envKey: "TELEGRAM_BOT_TOKEN_ALERTS" }),
+        );
+        expect(allowEntriesFor(databasePath, "alerts")).toEqual([]);
+        expect(pendingRequestsFor(databasePath, "alerts")).toEqual([]);
+        expect(allowEntriesFor(databasePath, "default")).toEqual(["222"]);
+        expect(Object.keys(fsMock.readConfig().channels.telegram.accounts).sort()).toEqual([
+          "alerts",
+          "default",
+        ]);
+      } finally {
+        fs.rmSync(openclawDir, { recursive: true, force: true });
+      }
+    });
+
+    it("a held backup barrier refuses the add BEFORE any mutation (StateDbQuietError → 409 upstream): no env write, no CLI, rows intact", async () => {
+      const { openclawDir, databasePath } = seedStateDbWithPairingRows();
+      const fsMock = buildFsMock({ initialConfig: oneAccountConfig() });
+      const writeEnvFile = vi.fn();
+      const clawCmd = vi.fn(async () => ({ ok: true, stdout: "", stderr: "" }));
+      const service = createAgentsService({
+        fs: fsMock,
+        OPENCLAW_DIR: openclawDir,
+        readEnvFile: () => [{ key: "TELEGRAM_BOT_TOKEN", value: "123:abc" }],
+        writeEnvFile,
+        reloadEnv: vi.fn(),
+        clawCmd,
+      });
+      ({ token } = await beginStateDbQuiet({ owner: "backup", maxMs: 60_000 }));
+      try {
+        const error = await addAlerts(service).catch((caught) => caught);
+
+        expect(error).toBeInstanceOf(StateDbQuietError);
+        expect(writeEnvFile).not.toHaveBeenCalled();
+        expect(clawCmd).not.toHaveBeenCalled();
+        expect(Object.keys(fsMock.readConfig().channels.telegram.accounts)).toEqual(["default"]);
+        expect(allowEntriesFor(databasePath, "alerts")).toEqual(["111"]);
+      } finally {
+        fs.rmSync(openclawDir, { recursive: true, force: true });
+      }
+    });
+
+    it("a stale-row clear that fails (schema drift) refuses the add and names why — never an account that inherits the old allow entries", async () => {
+      const openclawDir = fs.mkdtempSync(path.join(os.tmpdir(), "alphaclaw-agents-readd-drift-"));
+      const databasePath = path.join(openclawDir, "state", "openclaw.sqlite");
+      fs.mkdirSync(path.dirname(databasePath), { recursive: true });
+      const db = new DatabaseSync(databasePath);
+      db.exec(
+        "CREATE TABLE channel_pairing_allow_entries (channel_key TEXT NOT NULL, account_id TEXT NOT NULL, allow_value TEXT NOT NULL)",
+      );
+      db.close();
+      const fsMock = buildFsMock({ initialConfig: oneAccountConfig() });
+      const writeEnvFile = vi.fn();
+      const clawCmd = vi.fn(async () => ({ ok: true, stdout: "", stderr: "" }));
+      const service = createAgentsService({
+        fs: fsMock,
+        OPENCLAW_DIR: openclawDir,
+        readEnvFile: () => [{ key: "TELEGRAM_BOT_TOKEN", value: "123:abc" }],
+        writeEnvFile,
+        reloadEnv: vi.fn(),
+        clawCmd,
+      });
+      try {
+        await expect(addAlerts(service)).rejects.toThrow(
+          /Could not clear stale pairing rows for telegram\/alerts before adding it: pairing tables schema is unsupported/,
+        );
+        expect(writeEnvFile).not.toHaveBeenCalled();
+        expect(clawCmd).not.toHaveBeenCalled();
+        expect(Object.keys(fsMock.readConfig().channels.telegram.accounts)).toEqual(["default"]);
+      } finally {
         fs.rmSync(openclawDir, { recursive: true, force: true });
       }
     });

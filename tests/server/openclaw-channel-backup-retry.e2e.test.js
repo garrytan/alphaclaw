@@ -1680,6 +1680,61 @@ describe("server/openclaw-channel-backup-retry", () => {
       expect(record.exclusivityEvidence).toEqual(expect.objectContaining({ liveProcesses: 0 }));
     });
 
+    // D13: the pre-copy argv sample and the /proc fd scan used to describe
+    // different instants (the state walk between them yields for seconds):
+    // our own `sessions list` child spawned during the walk was invisible to
+    // the sample and refused by the fd scan as a foreign holder — a terminal
+    // 409 whose hint told the operator to stop AlphaClaw's own process.
+    it("a transient openclaw child that spawns AFTER the pre-walk sample and exits during the post-walk re-settle does not refuse the offline copy", async () => {
+      const quiesce = makeQuiesceRecorder({});
+      const { runnerImpl } = makeOfflineCopyRunner({
+        script: [{ ok: false, signal: "SIGKILL", killed: true, tail: "" }],
+      });
+      // Sample 1 is the diagnosis, sample 2 the driver's pre-walk sample:
+      // both empty, and the child spawns right after sample 2. The post-walk
+      // settle loop (samples 3 and 4) still sees it; it has exited by 5.
+      // The fd scan sees the child's handle exactly while it is alive.
+      let samples = 0;
+      let childAlive = false;
+      const listProcesses = vi.fn(() => {
+        samples += 1;
+        if (samples === 2) {
+          childAlive = true;
+          return [];
+        }
+        if (samples >= 5) childAlive = false;
+        return childAlive ? [{ pid: 777, cmdline: "openclaw sessions list --json" }] : [];
+      });
+      const listFdHolders = vi.fn(() =>
+        childAlive ? [{ pid: 777, path: "/state/openclaw.sqlite" }] : [],
+      );
+      const harness = createHarness({
+        runnerImpl,
+        gatewayQuiesce: quiesce,
+        backupProbes: { ...kQuietProbes, listProcesses, listFdHolders },
+      });
+      seedStateDb(harness);
+
+      const result = await harness.sync.applyUpdate(kHardGateTarget);
+
+      expect(result.status).toBe(202);
+      expect(samples).toBeGreaterThanOrEqual(5);
+      // The fd scan ran once the re-settle had drained the child, so it was clean.
+      expect(listFdHolders).toHaveBeenCalledTimes(1);
+      expect(listFdHolders.mock.results[0].value).toEqual([]);
+      const record = readRunBackupRecord(harness);
+      expect(record).toEqual(
+        expect.objectContaining({
+          producer: "alphaclaw-offline-copy",
+          verified: true,
+          offlineCopy: expect.objectContaining({ ok: true, reason: "killed" }),
+        }),
+      );
+      expect(record.exclusivityEvidence).toEqual(
+        expect.objectContaining({ liveProcesses: 0, fdScan: "clean" }),
+      );
+    });
+
     it("short-circuits when the prior run's throughput predicts the upstream backup cannot fit the pause", async () => {
       const quiesce = makeQuiesceRecorder({});
       const { runnerImpl, backupCalls } = makeOfflineCopyRunner({});
@@ -2216,6 +2271,11 @@ describe("server/openclaw-channel-backup-retry", () => {
           usableCheck: "manifest_ok",
           attempts: 2,
           freshAttemptFailure: expect.objectContaining({ kind: "lock_contention" }),
+          // The verified inode's content facts, same as a fresh publish
+          // records — the rollback fence compares the disk against these
+          // (a reused record without them was `unverifiable_content`).
+          bytes: fs.statSync(seeded.file).size,
+          mtimeMs: fs.statSync(seeded.file).mtimeMs,
         }),
       );
       expect(record.freshAttemptFailure.message).toMatch(/lock contention.*\(after 2 attempts\)/);

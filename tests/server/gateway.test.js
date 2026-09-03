@@ -3616,6 +3616,39 @@ describe("server/gateway restart behavior", () => {
       expect(deps.closeSync).toHaveBeenCalledWith(42);
     });
 
+    it("redacts secret-shaped values in the hook's stdout/stderr before they reach the platform log", async () => {
+      // Hooks read state/config and often run with shell tracing (`set -x`),
+      // so a provider key or bearer token echoes straight into the log line.
+      // redactSecretShapes is shape-based and substitutes `***`.
+      const rawKey = "sk-abcdefghijklmnopqrstuvwxyz123456";
+      const rawBearer = "Bearer eyJabcdefghijklmnop.qrstuvwxyz0123456789.ABCDEFGHIJKLMNOP";
+      const rawSlack = "xoxb-SECRET-abcdefghijklmnop";
+      const gateway = require(modulePath);
+      const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+      const deps = hookDeps({
+        execFile: vi.fn((file, args, opts, cb) =>
+          cb(
+            null,
+            `+ curl -H "Authorization: ${rawBearer}"\nOPENAI_API_KEY=${rawKey}\n`,
+            `warning: token ${rawSlack} still in env\n`,
+          ),
+        ),
+      });
+
+      expect(await gateway.runGatewayPrelaunchHook(deps)).toBe(true);
+
+      const lines = logSpy.mock.calls.map(([text]) => String(text));
+      const stdoutLine = lines.find((text) => text.includes("prelaunch hook stdout:"));
+      const stderrLine = lines.find((text) => text.includes("prelaunch hook stderr:"));
+      expect(stdoutLine).toContain("***");
+      expect(stdoutLine).not.toContain(rawKey);
+      expect(stdoutLine).not.toContain(rawBearer);
+      expect(stdoutLine).toContain("OPENAI_API_KEY=***");
+      expect(stderrLine).toContain("***");
+      expect(stderrLine).not.toContain(rawSlack);
+      expect(stderrLine).toContain("warning: token *** still in env");
+    });
+
     it("runs an executable persistent prelaunch hook with the gateway environment", async () => {
       // Ported from #4 — the env is now the MINIMAL projection, never
       // gatewayEnv(): a secret in the process env must not reach the hook.
