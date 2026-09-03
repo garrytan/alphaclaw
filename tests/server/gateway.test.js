@@ -92,6 +92,65 @@ describe("server/gateway restart behavior", () => {
     delete require.cache[modulePath];
   });
 
+  it("runs an executable persistent prelaunch hook with the gateway environment", async () => {
+    const gateway = require(modulePath);
+    const execFile = vi.fn(async () => ({ stdout: "patched\n", stderr: "" }));
+    const hookPath = path.join(OPENCLAW_DIR, "hooks", "pre-gateway-launch");
+
+    await expect(
+      gateway.runGatewayPrelaunchHook({
+        hookPath,
+        existsSync: () => true,
+        statSync: () => ({ isFile: () => true, mode: 0o100755 }),
+        execFile,
+      }),
+    ).resolves.toBe(true);
+    expect(execFile).toHaveBeenCalledWith(
+      hookPath,
+      [],
+      expect.objectContaining({
+        env: expect.objectContaining({ OPENCLAW_STATE_DIR: OPENCLAW_DIR }),
+        timeout: 120_000,
+        maxBuffer: 1024 * 1024,
+      }),
+    );
+  });
+
+  it("refuses a non-executable prelaunch hook", async () => {
+    const gateway = require(modulePath);
+    await expect(
+      gateway.runGatewayPrelaunchHook({
+        hookPath: "/tmp/not-executable",
+        existsSync: () => true,
+        statSync: () => ({ isFile: () => true, mode: 0o100644 }),
+      }),
+    ).rejects.toThrow("must be an executable regular file");
+  });
+
+  it("treats a hook that vanished between exists and stat as absent, and a failing hook as no launch", async () => {
+    const gateway = require(modulePath);
+    const enoent = Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+    await expect(
+      gateway.runGatewayPrelaunchHook({
+        hookPath: "/tmp/vanished-hook",
+        existsSync: () => true,
+        statSync: () => {
+          throw enoent;
+        },
+      }),
+    ).resolves.toBe(false);
+    await expect(
+      gateway.runGatewayPrelaunchHook({
+        hookPath: "/tmp/failing-hook",
+        existsSync: () => true,
+        statSync: () => ({ isFile: () => true, mode: 0o100755 }),
+        execFile: async () => {
+          throw Object.assign(new Error("Command failed: exit 3"), { code: 3 });
+        },
+      }),
+    ).rejects.toThrow("exit 3");
+  });
+
   it("always cold-starts when the gateway port is listening", async () => {
     const managedChild = createChild();
     const restartSupervisor = createChild();

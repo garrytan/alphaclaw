@@ -5,6 +5,23 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.9.71] - 2026-09-02
+
+Operators can run their own executable before every gateway launch. AlphaClaw
+looks for `<state dir>/hooks/pre-gateway-launch`; when present it runs it with
+the gateway's own environment before the gateway process is spawned, so runtime
+patches and sidecars can be restored before OpenClaw imports its bundle.
+
+### Added
+- **Gateway prelaunch hook.** An optional executable at
+  `<OPENCLAW_DIR>/hooks/pre-gateway-launch` runs before each gateway spawn with
+  the gateway's allowlisted environment and a 120-second timeout; its output is
+  echoed to the AlphaClaw log with a `[prelaunch-hook]` prefix. It fails
+  closed: a hook that is not an executable regular file, times out, or exits
+  non-zero means the gateway is not launched and the watchdog reports the
+  launch as "no child" with the hook's error in the log. No hook file means
+  nothing changes.
+
 ## [0.9.69] - 2026-09-02
 
 The incident overseer answers "what is happening?" in any watchdog state. The

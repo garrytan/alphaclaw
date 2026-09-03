@@ -88,6 +88,10 @@ The Agent Administration feature (default OFF) lets the deployed OpenClaw agent 
 
 ## Operations
 
+### Gateway prelaunch hook (operators)
+
+- An optional executable at `<OPENCLAW_DIR>/hooks/pre-gateway-launch` runs before EVERY managed gateway spawn (`launchGatewayProcess` in `lib/server/gateway.js`, after plugin preparation, before the abort check and the spawn) with the gateway's own allowlisted environment (`gatewayEnv()`, no daemon heap cap), a 120s timeout and a 1 MiB output cap; output is echoed with a `[prelaunch-hook]` prefix. It fails CLOSED: not an executable regular file, timeout, or non-zero exit → no launch (`launchGatewayProcess` returns `null`, the watchdog reports "returned no child", the reason is in the log). A hook that vanishes between the existence check and `stat` (ENOENT) counts as absent. Never put secrets in the hook path or its output; it inherits only what the gateway child may see.
+
 ### Merge Gate (branch protection on `main`)
 
 A GitHub ruleset protects `main`: PRs required (no direct pushes), squash-only,
