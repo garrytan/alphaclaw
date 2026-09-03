@@ -45,6 +45,36 @@ const createHookApp = ({ gatewayUrl, insertRequest = () => {} }) => {
 };
 
 describe("server/webhook-middleware", () => {
+  // MW2: /hooks/* is unauthenticated; a Set-Cookie or hop-by-hop header from
+  // the gateway must not cross back to the caller's browser.
+  it("does not forward Set-Cookie or hop-by-hop headers from the gateway (MW2)", async () => {
+    const server = http.createServer((req, res) => {
+      req.on("data", () => {});
+      req.on("end", () => {
+        res.statusCode = 200;
+        res.setHeader("content-type", "application/json");
+        res.setHeader("set-cookie", "session=leaked; Path=/");
+        res.setHeader("connection", "keep-alive");
+        res.setHeader("x-safe-header", "keep-me");
+        res.end(JSON.stringify({ ok: true }));
+      });
+    });
+    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const gatewayUrl = `http://127.0.0.1:${server.address().port}`;
+    const app = createHookApp({ gatewayUrl });
+
+    try {
+      const response = await request(app).post("/hooks/any").send({ a: 1 });
+      expect(response.status).toBe(200);
+      expect(response.headers["set-cookie"]).toBeUndefined();
+      expect(response.headers.connection).not.toBe("keep-alive");
+      // A benign header still passes through.
+      expect(response.headers["x-safe-header"]).toBe("keep-me");
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+
   it("maps hook query params into forwarded JSON body", async () => {
     const { server, calls, gatewayUrl } = await createGatewaySpyServer();
     const app = createHookApp({ gatewayUrl });
@@ -177,6 +207,118 @@ describe("server/webhook-middleware", () => {
       expect(JSON.parse(loggedRequests[0].payload)).toEqual({
         session: "SESSION_ID",
       });
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+
+  it("flags a 200 that drops the durable-ingress header after a hook proved durable", async () => {
+    // Spy gateway: return the durable header on the first request, then omit it.
+    let requestCount = 0;
+    const server = http.createServer((req, res) => {
+      const chunks = [];
+      req.on("data", (chunk) => chunks.push(chunk));
+      req.on("end", () => {
+        requestCount += 1;
+        res.statusCode = 200;
+        if (requestCount === 1) {
+          res.setHeader("x-openclaw-delivery-accepted", "durable");
+        }
+        res.end("");
+      });
+    });
+    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const gatewayUrl = `http://127.0.0.1:${server.address().port}`;
+
+    const logged = [];
+    const app = createHookApp({
+      gatewayUrl,
+      insertRequest: (entry) => logged.push(entry),
+    });
+
+    try {
+      await request(app).post("/hooks/telegram").send({ update_id: 1 });
+      await request(app).post("/hooks/telegram").send({ update_id: 2 });
+
+      expect(logged).toHaveLength(2);
+      // First request proved durable ingress — no annotation.
+      expect(logged[0].gatewayBody).not.toContain("[NOT DURABLY ACCEPTED]");
+      // Second dropped the header on a 200 — flagged.
+      expect(logged[1].gatewayBody).toContain("[NOT DURABLY ACCEPTED]");
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+
+  it("strips identity, forwarded-evidence, and setup_token cookie from gateway-bound headers", async () => {
+    const { server, calls, gatewayUrl } = await createGatewaySpyServer();
+    const app = createHookApp({ gatewayUrl });
+
+    try {
+      const response = await request(app)
+        .post("/hooks/schwab-oauth")
+        .set("content-type", "application/json")
+        .set("x-alphaclaw-user", "spoofed-operator")
+        .set("x-openclaw-scopes", "operator.admin")
+        .set("x-forwarded-for", "203.0.113.7")
+        .set("forwarded", "for=203.0.113.7")
+        .set("x-forwarded-server", "edge.example.com")
+        .set("x-forwarded-port", "443")
+        .set("x-real-ip", "203.0.113.7")
+        .set("cookie", "theme=dark; setup_token=abc.def")
+        .set("x-hook-custom", "kept")
+        .send(JSON.stringify({ hello: "world" }));
+      expect(response.status).toBe(200);
+      expect(calls).toHaveLength(1);
+
+      const forwarded = calls[0].headers;
+      // Identity headers must never reach a trusted-proxy gateway.
+      expect(forwarded["x-alphaclaw-user"]).toBeUndefined();
+      expect(forwarded["x-openclaw-scopes"]).toBeUndefined();
+      // Client-controlled forwarded evidence must be stripped too — including
+      // x-forwarded-server, added to the evidence list by the merge resolution.
+      expect(forwarded["x-forwarded-for"]).toBeUndefined();
+      expect(forwarded.forwarded).toBeUndefined();
+      expect(forwarded["x-forwarded-server"]).toBeUndefined();
+      expect(forwarded["x-forwarded-port"]).toBeUndefined();
+      expect(forwarded["x-real-ip"]).toBeUndefined();
+      // The AlphaClaw session cookie is removed; other cookies survive.
+      expect(forwarded.cookie).toBe("theme=dark");
+      // Benign headers still pass through.
+      expect(forwarded["x-hook-custom"]).toBe("kept");
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+
+  it("does not flag hooks that never used durable ingress", async () => {
+    const { server, gatewayUrl } = await createGatewaySpyServer();
+    const logged = [];
+    const app = createHookApp({
+      gatewayUrl,
+      insertRequest: (entry) => logged.push(entry),
+    });
+    try {
+      await request(app).post("/hooks/discord").send({ x: 1 });
+      expect(logged[0].gatewayBody).not.toContain("[NOT DURABLY ACCEPTED]");
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+
+  it("drops the cookie header entirely when setup_token is the only cookie", async () => {
+    const { server, calls, gatewayUrl } = await createGatewaySpyServer();
+    const app = createHookApp({ gatewayUrl });
+
+    try {
+      const response = await request(app)
+        .post("/hooks/schwab-oauth")
+        .set("content-type", "application/json")
+        .set("cookie", "setup_token=abc.def")
+        .send(JSON.stringify({ hello: "world" }));
+      expect(response.status).toBe(200);
+      expect(calls).toHaveLength(1);
+      expect(calls[0].headers.cookie).toBeUndefined();
     } finally {
       await new Promise((resolve) => server.close(resolve));
     }

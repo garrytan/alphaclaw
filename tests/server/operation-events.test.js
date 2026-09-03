@@ -162,6 +162,9 @@ describe("server/operation-events", () => {
     try {
       const service = createOperationEventsService({ ttlMs: 50 });
       const { operationId: expiredId } = service.createOperation();
+      // Pending operations get a long grace window past TTL (a quiet build
+      // must not lose its terminal event), so only a TERMINAL op sweeps at TTL.
+      service.complete(expiredId, {});
       // A second createOperation exercises the sweeper early-return guard.
       const { operationId: subscribedId } = service.createOperation();
 
@@ -180,6 +183,15 @@ describe("server/operation-events", () => {
       // Expired but still-subscribed operations survive the sweep.
       expect(service.getOperation(subscribedId)).toBeTruthy();
 
+      // A pending (never-terminal) operation survives TTL expiry within its
+      // grace window, then is reaped once the grace window lapses too.
+      const graceService = createOperationEventsService({ ttlMs: 50 });
+      const { operationId: pendingId } = graceService.createOperation();
+      vi.advanceTimersByTime(30_000);
+      expect(graceService.getOperation(pendingId)).toBeTruthy();
+      vi.advanceTimersByTime(2 * 60 * 60 * 1000 + 30_000);
+      expect(graceService.getOperation(pendingId)).toBeNull();
+
       // Closing before expiry leaves the operation for the sweeper.
       const fresh = createOperationEventsService({ ttlMs: 120_000 });
       const { operationId: activeId } = fresh.createOperation();
@@ -192,6 +204,56 @@ describe("server/operation-events", () => {
     }
   });
 
+  it("keeps a pending operation alive across TTL windows while publishing, then sweeps after the grace", () => {
+    vi.useFakeTimers();
+    try {
+      const service = createOperationEventsService({ ttlMs: 50 });
+      const { operationId } = service.createOperation({ type: "channel-apply" });
+
+      // Publish every 30ms across several 50ms TTL windows: every publish
+      // re-arms the expiry, so a long chatty operation is never swept mid-run.
+      for (let idx = 0; idx < 10; idx += 1) {
+        vi.advanceTimersByTime(30);
+        expect(
+          service.publish(operationId, { event: "phase", data: { idx } }),
+        ).toBe(true);
+      }
+      expect(service.getOperation(operationId)).toBeTruthy();
+
+      // A sweep tick right after the last publish: still inside the grace.
+      vi.advanceTimersByTime(30_000);
+      expect(service.getOperation(operationId)).toBeTruthy();
+
+      // Publishing stops: the pending op is reaped once TTL + the 2h pending
+      // grace window lapse.
+      vi.advanceTimersByTime(2 * 60 * 60 * 1000 + 30_000);
+      expect(service.getOperation(operationId)).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("carries code/hint/docsUrl from the failure error into the error event", () => {
+    const service = createOperationEventsService();
+    const { operationId } = service.createOperation();
+
+    const failed = service.fail(
+      operationId,
+      Object.assign(new Error("boom"), { code: "x", hint: "h", docsUrl: "d" }),
+    );
+
+    expect(failed).toBe(true);
+    const operation = service.getOperation(operationId);
+    expect(operation.status).toBe("failed");
+    expect(operation.events[0].event).toBe("error");
+    expect(operation.events[0].data).toEqual({
+      error: "boom",
+      code: "x",
+      hint: "h",
+      docsUrl: "d",
+    });
+  });
+
   it("marks operations completed with a done event payload", () => {
     const service = createOperationEventsService();
     const { operationId } = service.createOperation({ type: "  spaced  " });
@@ -202,5 +264,27 @@ describe("server/operation-events", () => {
     expect(operation.status).toBe("completed");
     expect(operation.events[0].event).toBe("done");
     expect(operation.events[0].data).toEqual({ result: 42 });
+  });
+
+  it("falls back to a random UUID for blank or non-string preset operation ids", () => {
+    const service = createOperationEventsService();
+    const uuidPattern =
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+    // Two blank presets must yield DISTINCT operations — a shared fallback id
+    // would silently merge unrelated operations' event streams.
+    const first = service.createOperation({ operationId: "" });
+    const second = service.createOperation({ operationId: "" });
+    expect(first.operationId).toMatch(uuidPattern);
+    expect(second.operationId).toMatch(uuidPattern);
+    expect(first.operationId).not.toBe(second.operationId);
+    expect(service.getOperation(first.operationId)).toBeTruthy();
+    expect(service.getOperation(second.operationId)).toBeTruthy();
+
+    // Whitespace-only and non-string presets fall back the same way.
+    const blank = service.createOperation({ operationId: "   " });
+    const numeric = service.createOperation({ operationId: 42 });
+    expect(blank.operationId).toMatch(uuidPattern);
+    expect(numeric.operationId).toMatch(uuidPattern);
   });
 });

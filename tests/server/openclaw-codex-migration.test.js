@@ -5,8 +5,21 @@ const path = require("path");
 const {
   migrateLegacyCodexState,
 } = require("../../lib/server/openclaw-codex-migration");
+const { isSupportedNodeVersion } = require("../../lib/node-runtime");
 
-describe("server/openclaw-codex-migration", () => {
+// The migration drives OpenClaw's real SQLite layer, which hard-refuses Node
+// runtimes whose embedded SQLite carries the WAL-reset corruption bug (e.g.
+// Node 24.13's SQLite 3.50.4). On those runtimes the failure is categorical,
+// not a regression — skip loudly instead of failing red. CI and production
+// images run supported Node versions and execute this test.
+const kRuntimeSupported = isSupportedNodeVersion();
+if (!kRuntimeSupported) {
+  console.warn(
+    `[openclaw-codex-migration.test] skipped: Node ${process.versions.node} is below AlphaClaw's supported matrix (OpenClaw refuses its embedded SQLite). Run under Node >=22.22.3 <23, >=24.15 <25, or >=25.9.`,
+  );
+}
+
+describe.runIf(kRuntimeSupported)("server/openclaw-codex-migration", () => {
   it("migrates legacy Codex routes and OAuth credentials into canonical SQLite state", async () => {
     const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "alphaclaw-codex-migration-"));
     const configPath = path.join(stateDir, "openclaw.json");

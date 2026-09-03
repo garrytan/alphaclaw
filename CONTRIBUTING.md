@@ -57,18 +57,26 @@ npm install
 ### Running Tests
 
 ```bash
-npm test              # Run all tests
+npm test              # Run all tests (hermetic — no network)
 npm run test:watch    # Watch mode
 npm run test:coverage # With coverage report
+npm run test:live     # Live e2e: real npm/GitHub catalog + package applies + real-gateway memory-leak e2e (network)
+npm run test:live:dev # Live e2e: real dev-channel source build only (20-35 min, ~5 GB disk)
+npm run test:container # Container e2e: full production-container upgrade journey (~25-40 min; needs docker + network)
+npm run test:ui       # Browser UI smoke: real server + headless Chromium (opt-in; self-skips without a browse CLI — set BROWSE_BIN)
+npm run test:ui:time  # Browser smoke of UI time formatting — locale/timezone agnostic by construction (opt-in; same harness; UI_TIME_SMOKE_PORT overrides the port)
+npm run test:ui:claude-code   # Browser smoke of the Open Claude Code launcher (opt-in; same harness)
+npm run test:live:claude-code # Fires the real routine — BILLS one claude.ai session (needs the routine env vars + CLAUDE_CODE_LIVE_FIRE=1)
 ```
 
-AlphaClaw uses [Vitest](https://vitest.dev/) for testing.
+AlphaClaw uses [Vitest](https://vitest.dev/) for testing. `npm test` is hermetic by design: the live tiers under `tests/live/` run only with `OPENCLAW_LIVE_E2E=1` (the `test:live` scripts set it for you), so a green `npm test` does not exercise the real npm registry, GitHub API, or OpenClaw updater. The live tier also includes a resource-autotune container smoke (`tests/live/autotune-container.e2e.test.js`) that additionally needs a working Docker daemon — it validates real cgroup limits and V8 heap behavior inside `docker run --memory` and self-skips when Docker is unavailable — and a memory-leak e2e (`tests/live/openclaw-live-memory.e2e.test.js`) that installs the newest OpenClaw beta, injects a leaking plugin into a real gateway, and proves the RSS-trend sampler sees the leak (its hermetic counterpart, `tests/server/e2e-memory-leak.test.js`, runs real child processes and is Linux-only). `npm run test:ui` (`tests/browser/upgrade-ui-smoke.sh`) is likewise opt-in: it boots a real AlphaClaw server and drives it with a headless Chromium, needs network for the version catalog, and exits 0 with a SKIP message when no browse CLI is available (`BROWSE_BIN` points at the driver; `UI_SMOKE_PORT` overrides the default port). `npm run test:container` (`tests/container/`) is the heaviest opt-in tier: it builds an image from the reference `Dockerfile`, boots a real stable OpenClaw gateway inside it, drives a stable→beta upgrade through the browser UI with headless Chromium, and proves the result survives a container replacement and restart — it needs docker plus network, and runs in CI nightly and as a PR gate for upgrade-path changes (`.github/workflows/container-e2e.yml`).
 
 ### Project Structure
 
 - `bin/` - CLI entrypoint (`alphaclaw.js`)
 - `lib/` - Core library (gateway manager, watchdog, setup UI, webhooks, etc.)
 - `tests/` - Test suites
+- `docs/` - Design documents (`docs/designs/`) and operator runbooks (e.g. `docs/upgrade-troubleshooting.md`)
 
 ## Submitting Changes
 

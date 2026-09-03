@@ -16,11 +16,26 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node-version }}
           cache: npm
+
+      # Version guard: a PR's package.json version must strictly advance the
+      # base branch's, so concurrent PRs can't both claim the same number and
+      # slip through (the renumber races the v0.9.3x–v0.9.6x wave hit). Every
+      # PR bumps, including reverts. See CLAUDE.md "Merge unification safety".
+      - name: Version guard
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+          git show "origin/${BASE_REF}:package.json" > /tmp/base-package.json
+          node scripts/ci/assert-version-advances.mjs /tmp/base-package.json ./package.json
 
       - run: npm ci
 

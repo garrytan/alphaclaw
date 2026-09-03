@@ -87,6 +87,7 @@ describe("server/helpers", () => {
       { key: "anthropic/claude-opus-4-6", name: "Opus 4.6" },
       { key: "zai/glm-5", name: "GLM 5" },
       { key: "minimax/MiniMax-M2.5", name: "MiniMax M2.5" },
+      { key: "minimax-cn/MiniMax-M3", name: "MiniMax M3 CN" },
       { key: "openai/gpt-5.1-codex", name: "Duplicate" },
       { key: "google/gemini-3.1-pro-preview" },
       { bad: "shape" },
@@ -102,6 +103,11 @@ describe("server/helpers", () => {
         key: "google/gemini-3.1-pro-preview",
         provider: "google",
         label: "google/gemini-3.1-pro-preview",
+      },
+      {
+        key: "minimax-cn/MiniMax-M3",
+        provider: "minimax-cn",
+        label: "MiniMax M3 CN",
       },
       {
         key: "minimax/MiniMax-M2.5",
@@ -132,6 +138,36 @@ describe("server/helpers", () => {
     expect(compareVersionParts("1.2", "1.2.0")).toBe(0);
     expect(compareVersionParts("1.3.0", "1.2.9")).toBe(1);
     expect(compareVersionParts("1.2.3", "1.10.0")).toBe(-1);
+  });
+
+  it("orders OpenClaw out-of-band hotfix suffixes above the base release", () => {
+    expect(compareVersionParts("2026.7.1-2", "2026.7.1")).toBe(1);
+    expect(compareVersionParts("2026.7.1", "2026.7.1-2")).toBe(-1);
+    expect(compareVersionParts("2026.7.1-2", "2026.7.1-1")).toBe(1);
+    expect(compareVersionParts("2026.7.1-2", "2026.7.1-2")).toBe(0);
+    expect(compareVersionParts("2026.7.2", "2026.7.1-2")).toBe(1);
+    // Prerelease labels rank below their base release (semver), aligned with
+    // the frontend comparator — a beta→release move is an upgrade.
+    expect(compareVersionParts("2026.8.1-beta", "2026.8.1")).toBe(-1);
+    expect(compareVersionParts("2026.8.1", "2026.8.1-beta.3")).toBe(1);
+    expect(compareVersionParts("2026.8.1-beta.10", "2026.8.1-beta.9")).toBe(1);
+    expect(compareVersionParts("2026.8.1-beta.3", "2026.7.1-2")).toBe(1);
+  });
+
+  it("strips a leading v before comparing versions", () => {
+    // GitHub tags arrive v-prefixed; without the strip "v2026.7.1" would parse
+    // as 0.7.1 and flip the downgrade/backup gate.
+    expect(compareVersionParts("v2026.7.1", "2026.7.1")).toBe(0);
+    expect(compareVersionParts("v2026.7.2", "2026.7.1")).toBe(1);
+    expect(compareVersionParts("2026.7.1", "v2026.7.2")).toBe(-1);
+    expect(compareVersionParts("v2026.7.1-2", "v2026.7.1")).toBe(1);
+  });
+
+  it("treats zero-padded hotfix suffixes as numerically equal in both directions", () => {
+    // "-02" and "-2" name the same out-of-band hotfix; a lexicographic suffix
+    // compare would rank them unequal and misfire the downgrade/backup gate.
+    expect(compareVersionParts("2026.7.1-2", "2026.7.1-02")).toBe(0);
+    expect(compareVersionParts("2026.7.1-02", "2026.7.1-2")).toBe(0);
   });
 
   it("reads debug mode from environment flags", () => {

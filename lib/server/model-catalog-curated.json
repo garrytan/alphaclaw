@@ -1,0 +1,35 @@
+{
+  "comment": "Hand-curated catalog rows merged into kFallbackOnboardingModels at load (lib/server/constants.js). model-catalog-bootstrap.json is regenerated VERBATIM from the pinned CLI by scripts/refresh-model-bootstrap.mjs, which would erase hand edits — rows the pinned CLI does not emit live here instead. On a key collision the generated row wins (freshest-from-CLI beats hand-curated). Added for upstream PR #111: the 2026.7.1-2 CLI emits no direct minimax/minimax-cn rows.",
+  "models": [
+    {
+      "key": "minimax-cn/MiniMax-M2.7",
+      "provider": "minimax-cn",
+      "label": "MiniMax-M2.7"
+    },
+    {
+      "key": "minimax-cn/MiniMax-M2.7-highspeed",
+      "provider": "minimax-cn",
+      "label": "MiniMax-M2.7-highspeed"
+    },
+    {
+      "key": "minimax-cn/MiniMax-M3",
+      "provider": "minimax-cn",
+      "label": "MiniMax-M3"
+    },
+    {
+      "key": "minimax/MiniMax-M2.7",
+      "provider": "minimax",
+      "label": "MiniMax-M2.7"
+    },
+    {
+      "key": "minimax/MiniMax-M2.7-highspeed",
+      "provider": "minimax",
+      "label": "MiniMax-M2.7-highspeed"
+    },
+    {
+      "key": "minimax/MiniMax-M3",
+      "provider": "minimax",
+      "label": "MiniMax-M3"
+    }
+  ]
+}

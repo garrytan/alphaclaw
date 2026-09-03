@@ -1,0 +1,136 @@
+name: Container E2E
+
+# The full production-container journey: build the image from this checkout,
+# boot a REAL stable OpenClaw gateway, drive a stable→beta upgrade through
+# headless Chromium under live file churn, and prove restart durability
+# (tests/container/**). Heavy (~25-40 min), so pull_request runs are gated by
+# a cheap path filter job — but the workflow itself ALWAYS triggers on PRs
+# (no `paths:` filter: a path-filtered required check pends forever on
+# non-matching PRs; the `gate` job below reports success instead).
+
+# NOTE: GitHub disables `schedule` triggers in repos with no activity for 60
+# days — if this repo goes quiet, re-enable the workflow or run it via
+# workflow_dispatch; the drift alarm does not fire while disabled.
+
+on:
+  schedule:
+    - cron: "37 10 * * *"
+  workflow_dispatch:
+  pull_request:
+
+# Read-only token: the job executes third-party code (npm lifecycle scripts,
+# real OpenClaw installs) with GITHUB_TOKEN in the step env.
+permissions:
+  contents: read
+
+jobs:
+  # Cheap decider: PRs only pay the heavy job when they touch the upgrade /
+  # gateway / container surface. Schedule + dispatch always run it.
+  filter:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      run_heavy: ${{ steps.decide.outputs.run_heavy }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - id: decide
+        name: Decide whether the heavy job runs
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            echo "run_heavy=true" >> "$GITHUB_OUTPUT"
+            echo "non-PR event → heavy job always runs"
+            exit 0
+          fi
+          changed=$(git diff --name-only "origin/${BASE_REF}...HEAD")
+          echo "changed files:"
+          echo "$changed"
+          # The heavy job boots the FULL server on the container journey:
+          # watchdog, boot-time doctor/config reconcile, startup, and every
+          # routes/* module load. The original filter covered only the
+          # upgrade/gateway surface, so PRs changing watchdog/doctor/routes/
+          # server-core (which the boot journey exercises) skipped it.
+          pattern='^(lib/server/openclaw-|lib/server/gateway|lib/server/watchdog|lib/server/doctor|lib/server/routes/|lib/server/startup\.js|lib/server/boot-phase\.js|lib/server\.js|lib/server/gateway-env-policy\.js|bin/alphaclaw\.js|Dockerfile|tests/container/|lib/boot-placeholder)'
+          if echo "$changed" | grep -qE "$pattern"; then
+            echo "run_heavy=true" >> "$GITHUB_OUTPUT"
+            echo "upgrade/gateway/container surface touched → heavy job runs"
+          else
+            echo "run_heavy=false" >> "$GITHUB_OUTPUT"
+            echo "no matching paths → heavy job skipped (gate reports success)"
+          fi
+
+  container-e2e:
+    needs: filter
+    if: needs.filter.outputs.run_heavy == 'true'
+    runs-on: ubuntu-latest
+    # Budget: image build (~5 min) + stable boot + browser-driven beta apply
+    # (up to 15 min) + restart + two durability legs; the job limit must
+    # exceed the tests' own worst case so vitest reports a timeout instead of
+    # the runner killing the process.
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - id: playwright-version
+        name: Resolve pinned Playwright version
+        run: |
+          echo "version=$(node -p "require('./package-lock.json').packages['node_modules/playwright'].version")" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ steps.playwright-version.outputs.version }}
+
+      - run: npx playwright install --with-deps chromium
+
+      - run: npm run test:container
+        env:
+          # Authenticated GitHub API calls (release notes) — the anonymous
+          # quota is shared per runner IP and flakes.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # PRs must not go green on a silently skipped journey: registry
+          # sanity problems (no beta / beta not newer than the pin) FAIL.
+          # Schedule/dispatch stay non-strict — an upstream dist-tag pause is
+          # not this repo's regression.
+          OPENCLAW_CONTAINER_E2E_STRICT: ${{ github.event_name == 'pull_request' && '1' || '0' }}
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: container-e2e-artifacts
+          path: tests/container/artifacts/
+          if-no-files-found: ignore
+
+  # Mark THIS job required in branch protection (not container-e2e): it
+  # succeeds both when the heavy job passed and when the filter skipped it,
+  # and fails only when the heavy job actually failed or was cancelled.
+  gate:
+    needs: [filter, container-e2e]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Fail if the filter or the heavy job failed
+        run: |
+          filter="${{ needs.filter.result }}"
+          heavy="${{ needs.container-e2e.result }}"
+          echo "filter result: $filter / container-e2e result: $heavy"
+          if [ "$filter" != "success" ]; then
+            exit 1
+          fi
+          if [ "$heavy" = "failure" ] || [ "$heavy" = "cancelled" ]; then
+            exit 1
+          fi
+          exit 0

@@ -2,16 +2,53 @@ const fs = require("fs");
 const os = require("os");
 const childProcess = require("child_process");
 
-// system-resources destructures execSync from child_process at load time, so
+// system-resources destructures execFile from child_process at load time, so
 // the replacement must be installed before the module is required.
-const kRealExecSync = childProcess.execSync;
-const execSyncMock = vi.fn(kRealExecSync);
-childProcess.execSync = execSyncMock;
+const kRealExecFile = childProcess.execFile;
+const execFileMock = vi.fn(kRealExecFile);
+childProcess.execFile = execFileMock;
 
-const { getSystemResources } = require("../../lib/server/system-resources");
+// The ps fallback is async with a per-pid memo: mocks invoke the callback
+// synchronously so the memo is populated before readPsStats returns.
+const mockPsOutput = (stdout) =>
+  execFileMock.mockImplementation((cmd, args, opts, cb) => {
+    cb(null, stdout, "");
+  });
+const mockPsFailure = () =>
+  execFileMock.mockImplementation((cmd, args, opts, cb) => {
+    cb(new Error("ps failed"), "", "");
+  });
+
+const {
+  getSystemResources,
+  getProcessTreeUsage,
+  readEventLoopLag,
+  resetProcessTreeMemoForTests,
+} = require("../../lib/server/system-resources");
+
+// Subtree RSS reads /proc/<pid>/status for the target and its descendants,
+// enumerating /proc via readdirSync. Intercept BOTH boundaries (the file
+// spy above covers status reads; this covers the directory listing).
+const spyProcDir = (pids) => {
+  const realReaddirSync = fs.readdirSync;
+  vi.spyOn(fs, "readdirSync").mockImplementation((dirPath, ...args) => {
+    if (String(dirPath) === "/proc") return pids.map(String);
+    return realReaddirSync(dirPath, ...args);
+  });
+};
+
+// Builds a /proc file map: each pid gets a status with the given PPid and RSS.
+const procTree = (specs) => {
+  const files = {};
+  for (const [pid, { ppid, rssMb }] of Object.entries(specs)) {
+    files[`/proc/${pid}/status`] =
+      `Name:\tproc\nPPid:\t${ppid}\nVmRSS:\t${rssMb * 1024} kB\n`;
+  }
+  return files;
+};
 
 // system-resources reads cgroup/proc files through the shared fs singleton and
-// shells out via child_process.execSync. We intercept those boundaries with
+// shells out via child_process.execFile. We intercept those boundaries with
 // spies that fall through to the real fs for unrelated paths.
 //
 // NOTE: the module keeps a private CPU snapshot (prevCpuSnapshot) between
@@ -40,11 +77,14 @@ const createFileSystem = (files = {}) => {
 
 describe("server/system-resources", () => {
   afterEach(() => {
-    execSyncMock.mockReset();
+    execFileMock.mockReset();
+    // Subtree reads are memoized (5s TTL) — pids are reused across cases, so
+    // a stale memo would hand one test another test's tree.
+    resetProcessTreeMemoForTests();
   });
 
   afterAll(() => {
-    childProcess.execSync = kRealExecSync;
+    childProcess.execFile = kRealExecFile;
   });
 
   it("reports cgroup v2 memory, cpu quota, disk, and process usage", () => {
@@ -105,7 +145,7 @@ describe("server/system-resources", () => {
       }
       throw new Error("statfs unavailable");
     });
-    execSyncMock.mockReturnValue("1024  2.5\n");
+    mockPsOutput("1024  2.5\n");
 
     const first = getSystemResources({ gatewayPid: 987 });
     expect(first.memory).toEqual({
@@ -124,9 +164,11 @@ describe("server/system-resources", () => {
     // /proc read failed, so gateway usage came from ps.
     expect(first.processes.gateway).toEqual({ rssBytes: 1024 * 1024, pid: 987 });
     expect(statfsSpy).toHaveBeenCalled();
-    expect(execSyncMock).toHaveBeenCalledWith(
-      "ps -o rss=,pcpu= -p 987",
+    expect(execFileMock).toHaveBeenCalledWith(
+      "ps",
+      ["-o", "rss=,pcpu=", "-p", "987"],
       expect.objectContaining({ encoding: "utf8", timeout: 2000 }),
+      expect.any(Function),
     );
 
     // Zero elapsed time between snapshots leaves the percent unknown.
@@ -179,9 +221,7 @@ describe("server/system-resources", () => {
       blocks: 10,
       bfree: 10,
     });
-    execSyncMock.mockImplementation(() => {
-      throw new Error("ps failed");
-    });
+    mockPsFailure();
 
     const resources = getSystemResources({ gatewayPid: 12345 });
 
@@ -198,7 +238,7 @@ describe("server/system-resources", () => {
       blocks: 10,
       bfree: 5,
     });
-    const execSpy = execSyncMock;
+    const execSpy = execFileMock;
 
     const resources = getSystemResources();
 
@@ -257,6 +297,44 @@ describe("server/system-resources", () => {
     expect(resources.cpu.percent).toBe(25);
   });
 
+  it("reports event-loop lag alongside resources", () => {
+    createFileSystem({});
+    vi.spyOn(os, "cpus").mockReturnValue(new Array(2).fill({ model: "x" }));
+    vi.spyOn(os, "loadavg").mockReturnValue([0, 0, 0]);
+    vi.spyOn(fs, "statfsSync").mockReturnValue({
+      bsize: 4096,
+      blocks: 10,
+      bfree: 5,
+    });
+
+    const resources = getSystemResources();
+
+    // The resources payload carries the fixed-window telemetry (values are
+    // null until the first 5s sampling window completes) — assert shape,
+    // not magnitudes.
+    expect(Object.keys(resources.eventLoop).sort()).toEqual([
+      "maxMs",
+      "p50Ms",
+      "p99Ms",
+    ]);
+    for (const value of Object.values(resources.eventLoop)) {
+      expect(value === null || typeof value === "number").toBe(true);
+    }
+
+    // The poll-window reader keeps its own shape (meanMs plus the grafted
+    // p50Ms) on a live histogram — real values here, so numbers, not nulls.
+    const lag = readEventLoopLag({ warn: () => {} });
+    expect(Object.keys(lag).sort()).toEqual([
+      "maxMs",
+      "meanMs",
+      "p50Ms",
+      "p99Ms",
+    ]);
+    for (const value of Object.values(lag)) {
+      expect(value === null || typeof value === "number").toBe(true);
+    }
+  });
+
   it("handles empty ps output fields", () => {
     createFileSystem({});
     vi.spyOn(os, "cpus").mockReturnValue(new Array(2).fill({ model: "x" }));
@@ -266,10 +344,96 @@ describe("server/system-resources", () => {
       blocks: 10,
       bfree: 5,
     });
-    execSyncMock.mockReturnValue("   ");
+    mockPsOutput("   ");
 
     const resources = getSystemResources({ gatewayPid: 777 });
 
     expect(resources.processes.gateway).toEqual({ rssBytes: null, pid: 777 });
+  });
+
+  describe("getProcessTreeUsage (subtree RSS: launcher + worker children)", () => {
+    it("sums a pid and all its descendants", () => {
+      // launcher 100 → worker 200 → grandchild 300; sibling 999 is unrelated.
+      createFileSystem(
+        procTree({
+          100: { ppid: 1, rssMb: 50 },
+          200: { ppid: 100, rssMb: 300 },
+          300: { ppid: 200, rssMb: 20 },
+          999: { ppid: 1, rssMb: 800 },
+        }),
+      );
+      spyProcDir([100, 200, 300, 999]);
+      const usage = getProcessTreeUsage(100);
+      // 50 + 300 + 20 = 370MB; the unrelated 800MB sibling is excluded.
+      expect(usage.rssBytes).toBe(370 * 1024 * 1024);
+    });
+
+    it("returns the single-pid RSS when the process has no children", () => {
+      createFileSystem(procTree({ 42: { ppid: 1, rssMb: 128 } }));
+      spyProcDir([42]);
+      expect(getProcessTreeUsage(42).rssBytes).toBe(128 * 1024 * 1024);
+    });
+
+    it("skips a child whose status is unreadable but still counts the rest", () => {
+      const files = procTree({
+        100: { ppid: 1, rssMb: 40 },
+        300: { ppid: 100, rssMb: 60 },
+      });
+      files["/proc/200/status"] = new Error("gone");
+      createFileSystem(files);
+      spyProcDir([100, 200, 300]);
+      // 40 + 60 = 100MB; pid 200 (ENOENT-ish) contributes nothing and does
+      // not abort the walk — but 300's PPid=100 keeps it in the tree.
+      expect(getProcessTreeUsage(100).rssBytes).toBe(100 * 1024 * 1024);
+    });
+
+    it("does not loop forever on a cyclic PPid graph", () => {
+      // Pathological: 100↔200 claim each other as parent.
+      createFileSystem(
+        procTree({
+          100: { ppid: 200, rssMb: 10 },
+          200: { ppid: 100, rssMb: 20 },
+        }),
+      );
+      spyProcDir([100, 200]);
+      const usage = getProcessTreeUsage(100);
+      // seen-set guard: each pid counted at most once (100 self + 200 child).
+      expect(usage.rssBytes).toBe(30 * 1024 * 1024);
+    });
+
+    it("returns null for a falsy pid and when /proc is unenumerable it falls back to single-pid", () => {
+      expect(getProcessTreeUsage(0)).toBeNull();
+      createFileSystem(procTree({ 42: { ppid: 1, rssMb: 64 } }));
+      vi.spyOn(fs, "readdirSync").mockImplementation(() => {
+        throw Object.assign(new Error("no /proc"), { code: "ENOENT" });
+      });
+      // No /proc listing → single-pid best effort (the target's own status).
+      expect(getProcessTreeUsage(42).rssBytes).toBe(64 * 1024 * 1024);
+    });
+
+    it("memoizes same-pid reads inside the TTL; a different pid busts the memo", () => {
+      // The Resources poll (5s, tab-open) and the watchdog tick (60s) share
+      // this reader — without the memo every poll re-walks all of /proc.
+      createFileSystem(
+        procTree({
+          100: { ppid: 1, rssMb: 50 },
+          200: { ppid: 100, rssMb: 30 },
+          300: { ppid: 1, rssMb: 10 },
+        }),
+      );
+      spyProcDir([100, 200, 300]);
+      expect(getProcessTreeUsage(100).rssBytes).toBe(80 * 1024 * 1024);
+      const walksAfterFirst = fs.readdirSync.mock.calls.filter(
+        ([dir]) => String(dir) === "/proc",
+      ).length;
+      // Same pid, same tick window: served from the memo, no second walk.
+      expect(getProcessTreeUsage(100).rssBytes).toBe(80 * 1024 * 1024);
+      expect(
+        fs.readdirSync.mock.calls.filter(([dir]) => String(dir) === "/proc")
+          .length,
+      ).toBe(walksAfterFirst);
+      // A different pid is a different tree: the memo must not serve it.
+      expect(getProcessTreeUsage(300).rssBytes).toBe(10 * 1024 * 1024);
+    });
   });
 });

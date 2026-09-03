@@ -29,9 +29,16 @@ const createApp = ({
   getCodexAccountId = () => "acct-1",
   profile = null,
   removeChanged = true,
+  identityRole = null,
 } = {}) => {
   const app = express();
   app.use(express.json());
+  if (identityRole) {
+    app.use((req, res, next) => {
+      req.alphaclawIdentity = { kind: "member", role: identityRole };
+      next();
+    });
+  }
   const onAuthChanged = vi.fn();
   const upsertCodexProfile = vi.fn();
   registerCodexRoutes({
@@ -61,6 +68,19 @@ afterEach(() => {
 });
 
 describe("server/routes/codex coverage", () => {
+  describe("/auth/codex/start role gate (4.6/E-C11)", () => {
+    it("rejects member identities with 403 and allows admins", async () => {
+      const member = createApp({ identityRole: "member" });
+      const denied = await request(member.app).get("/auth/codex/start");
+      expect(denied.status).toBe(403);
+
+      const admin = createApp({ identityRole: "admin" });
+      const allowed = await request(admin.app).get("/auth/codex/start");
+      expect(allowed.status).toBe(302);
+      expect(allowed.headers.location).toContain("state=");
+    });
+  });
+
   describe("GET /api/codex/status", () => {
     it("reports disconnected when no profile exists", async () => {
       const { app } = createApp({ profile: null });
@@ -134,15 +154,29 @@ describe("server/routes/codex coverage", () => {
   });
 
   describe("GET /auth/codex/callback", () => {
-    it("relays provider errors to the opener with quotes escaped", async () => {
+    it("relays provider errors to the opener as a JSON-encoded message", async () => {
       const { app } = createApp();
       const res = await request(app).get(
         "/auth/codex/callback?error=" + encodeURIComponent("denied'now"),
       );
       expect(res.status).toBe(200);
       expect(res.text).toContain("codex: 'error'");
-      expect(res.text).toContain("denied\\'now");
+      // JSON-encoded literal (the message is a quoted JS string, not '...').
+      expect(res.text).toContain('"denied\'now"');
       expect(res.text).toContain("Codex auth failed");
+    });
+
+    // H7: a `</script>` breakout in the reflected error must be neutralized.
+    it("neutralizes a </script> breakout in the reflected error (H7)", async () => {
+      const { app } = createApp();
+      const payload = "</script><img src=x onerror=alert(1)>";
+      const res = await request(app).get(
+        "/auth/codex/callback?error=" + encodeURIComponent(payload),
+      );
+      expect(res.status).toBe(200);
+      // The literal closing tag / angle brackets never reach the document.
+      expect(res.text).not.toContain("</script><img");
+      expect(res.text).toContain("\\u003c");
     });
 
     it("reports missing state or code", async () => {

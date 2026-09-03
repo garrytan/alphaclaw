@@ -1,6 +1,8 @@
 #!/usr/bin/env sh
 case "$1" in
-  *Username*) echo "x-access-token" ;;
-  *Password*) echo "${GITHUB_TOKEN:-}" ;;
-  *) echo "" ;;
+  *Username*) printf "%s" "x-access-token" ;;
+  *Password*)
+    u=${1#*\'}; u=${u%%\'*}; a=${u#*://}; a=${a%%/*}; host=${a##*@}; host=${host%%:*}
+    [ "$host" = github.com ] && printf "%s" "${GITHUB_TOKEN:-}" || printf "" ;;
+  *) printf "" ;;
 esac

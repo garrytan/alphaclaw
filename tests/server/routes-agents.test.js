@@ -385,6 +385,25 @@ describe("server/routes/agents", () => {
     });
   });
 
+  it("maps an invalid-accountId rejection to HTTP 400 on DELETE /api/channels/accounts", async () => {
+    const agentsService = createAgentsServiceMock();
+    agentsService.deleteChannelAccount.mockRejectedValue(
+      new Error("Invalid channel accountId"),
+    );
+    const app = createApp(agentsService);
+
+    const response = await request(app).delete("/api/channels/accounts").send({
+      provider: "whatsapp",
+      accountId: "../../../../etc",
+    });
+
+    expect(response.status).toBe(400);
+    expect(response.body).toEqual({
+      ok: false,
+      error: "Invalid channel accountId",
+    });
+  });
+
   it("lists agents on GET /api/agents", async () => {
     const agentsService = createAgentsServiceMock();
     const app = createApp(agentsService);

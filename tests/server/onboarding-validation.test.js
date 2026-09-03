@@ -9,6 +9,29 @@ const kBaseVars = () => [
 const kResolveProvider = (modelKey) => String(modelKey || "").split("/")[0] || "";
 
 describe("onboarding/validation", () => {
+  it("accepts a minimax-cn model with MINIMAX_API_KEY (upstream PR #111)", () => {
+    // The curated catalog makes minimax-cn/* selectable in the wizard; the
+    // CN region reuses the same MINIMAX_API_KEY, so onboarding must not 400.
+    const res = validateOnboardingInput({
+      vars: [...kBaseVars(), { key: "MINIMAX_API_KEY", value: "mm-test" }],
+      modelKey: "minimax-cn/MiniMax-M3",
+      resolveModelProvider: kResolveProvider,
+      hasCodexOauthProfile: () => false,
+    });
+    expect(res.ok).toBe(true);
+  });
+
+  it("still rejects a minimax-cn model with no MINIMAX_API_KEY", () => {
+    const res = validateOnboardingInput({
+      vars: kBaseVars(),
+      modelKey: "minimax-cn/MiniMax-M3",
+      resolveModelProvider: kResolveProvider,
+      hasCodexOauthProfile: () => false,
+    });
+    expect(res.ok).toBe(false);
+    expect(res.status).toBe(400);
+  });
+
   it("accepts OPENROUTER_API_KEY when the selected model uses the openrouter provider", () => {
     const res = validateOnboardingInput({
       vars: [...kBaseVars(), { key: "OPENROUTER_API_KEY", value: "sk-or-test" }],
@@ -177,7 +200,7 @@ describe("onboarding/validation edge cases", () => {
     expect(res.error).toBe("GitHub token and workspace repo are required");
   });
 
-  it("requires at least one channel token", () => {
+  it("accepts a zero-channel setup (web chat works without one)", () => {
     const res = run({
       vars: [
         { key: "OPENAI_API_KEY", value: "sk-test-123" },
@@ -185,7 +208,24 @@ describe("onboarding/validation edge cases", () => {
         { key: "GITHUB_WORKSPACE_REPO", value: "owner/repo" },
       ],
     });
-    expect(res.ok).toBe(false);
-    expect(res.error).toBe("At least one channel token is required");
+    expect(res.ok).toBe(true);
+  });
+
+  it("still blocks a half-configured Slack pair", () => {
+    const base = [
+      { key: "OPENAI_API_KEY", value: "sk-test-123" },
+      { key: "GITHUB_TOKEN", value: "ghp_test" },
+      { key: "GITHUB_WORKSPACE_REPO", value: "owner/repo" },
+    ];
+    const botOnly = run({
+      vars: [...base, { key: "SLACK_BOT_TOKEN", value: "xoxb-1" }],
+    });
+    expect(botOnly.ok).toBe(false);
+    expect(botOnly.error).toContain("app token");
+    const appOnly = run({
+      vars: [...base, { key: "SLACK_APP_TOKEN", value: "xapp-1" }],
+    });
+    expect(appOnly.ok).toBe(false);
+    expect(appOnly.error).toContain("bot token");
   });
 });

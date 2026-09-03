@@ -85,6 +85,35 @@ describe("server/agents/service", () => {
     expect(agents.find((entry) => entry.id === "ops")?.default).toBe(false);
   });
 
+  // H10: a mutation must fail closed on an existing-but-unparseable config
+  // rather than reading it as {} and writing that back (wiping everything).
+  it("refuses to wipe an unparseable openclaw.json on a write (H10)", () => {
+    const original =
+      '{ // JSON5 with a comment openclaw accepts\n  "channels": {} }';
+    const writes = [];
+    const fsMock = {
+      existsSync: () => true,
+      mkdirSync: () => {},
+      readFileSync: (targetPath) => {
+        if (String(targetPath).endsWith("openclaw.json")) return original;
+        throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+      },
+      writeFileSync: (targetPath, content) => {
+        writes.push({ targetPath: String(targetPath), content: String(content) });
+      },
+    };
+    const service = createAgentsService({
+      fs: fsMock,
+      OPENCLAW_DIR: "/tmp/openclaw",
+    });
+
+    expect(() => service.createAgent({ id: "ops", name: "Ops" })).toThrow();
+    // openclaw.json was never overwritten.
+    expect(
+      writes.some((w) => w.targetPath.endsWith("openclaw.json")),
+    ).toBe(false);
+  });
+
   it("sets a new default agent and unsets others", () => {
     const fsMock = buildFsMock({
       initialConfig: {
@@ -1974,6 +2003,109 @@ describe("server/agents/service", () => {
     ).rejects.toThrow("Channel login is currently only supported for WhatsApp");
   });
 
+  // H5: accountId is joined into a credentials path, so a traversal must be
+  // rejected in both login and login-status (the status is a file-exists oracle).
+  it("rejects a traversing accountId on whatsapp login (H5)", async () => {
+    const fsMock = buildFsMock({ initialConfig: {} });
+    const clawCmd = vi.fn(async () => ({ ok: true, stdout: "", stderr: "" }));
+    const service = createAgentsService({
+      fs: fsMock,
+      OPENCLAW_DIR: "/test/.openclaw",
+      readEnvFile: vi.fn(() => []),
+      writeEnvFile: vi.fn(),
+      reloadEnv: vi.fn(),
+      restartGateway: vi.fn(async () => {}),
+      clawCmd,
+    });
+
+    await expect(
+      service.runChannelAccountLogin({
+        provider: "whatsapp",
+        accountId: "../../../../etc/shadow",
+      }),
+    ).rejects.toThrow("Invalid channel accountId");
+    expect(clawCmd).not.toHaveBeenCalled();
+  });
+
+  it("rejects a traversing accountId on whatsapp login-status (H5 oracle)", () => {
+    const fsMock = buildFsMock({ initialConfig: {} });
+    const service = createAgentsService({
+      fs: fsMock,
+      OPENCLAW_DIR: "/test/.openclaw",
+    });
+
+    expect(() =>
+      service.getChannelAccountLoginStatus({
+        provider: "whatsapp",
+        accountId: "../../../../etc/shadow",
+      }),
+    ).toThrow("Invalid channel accountId");
+  });
+
+  it("still accepts a valid non-default accountId (allow-legit)", () => {
+    const fsMock = buildFsMock({
+      initialConfig: {},
+      fileContents: {
+        "/test/.openclaw/credentials/whatsapp/work-2/creds.json": "{}",
+      },
+    });
+    const service = createAgentsService({
+      fs: fsMock,
+      OPENCLAW_DIR: "/test/.openclaw",
+    });
+
+    expect(
+      service.getChannelAccountLoginStatus({
+        provider: "whatsapp",
+        accountId: "work-2",
+      }),
+    ).toEqual({ provider: "whatsapp", accountId: "work-2", linked: true });
+  });
+
+  // H5 sibling: deleteChannelAccount joins the id into destructive rmSync
+  // paths (whatsapp auth dir, allowFrom files) — traversal shapes must be
+  // rejected before any config read or filesystem touch.
+  it("rejects a traversing accountId on channel account delete (H5)", async () => {
+    const fsMock = buildFsMock({ initialConfig: {} });
+    const service = createAgentsService({
+      fs: fsMock,
+      OPENCLAW_DIR: "/test/.openclaw",
+    });
+
+    await expect(
+      service.deleteChannelAccount({
+        provider: "whatsapp",
+        accountId: "../../../../etc",
+      }),
+    ).rejects.toThrow("Invalid channel accountId");
+    expect(fsMock.rmSync).not.toHaveBeenCalled();
+    expect(fsMock.writeFileSync).not.toHaveBeenCalled();
+  });
+
+  it("rejects a hostile accountId even when planted as a real config key (H5)", async () => {
+    // The :898-style existence gate alone would pass this id — it exists in
+    // openclaw.json. The shape guard must fire first.
+    const fsMock = buildFsMock({
+      initialConfig: {
+        channels: {
+          whatsapp: {
+            enabled: true,
+            accounts: { "../x": { name: "planted" } },
+          },
+        },
+      },
+    });
+    const service = createAgentsService({
+      fs: fsMock,
+      OPENCLAW_DIR: "/test/.openclaw",
+    });
+
+    await expect(
+      service.deleteChannelAccount({ provider: "whatsapp", accountId: "../x" }),
+    ).rejects.toThrow("Invalid channel accountId");
+    expect(fsMock.rmSync).not.toHaveBeenCalled();
+  });
+
   it("updates channel account name and bound agent", () => {
     const fsMock = buildFsMock({
       initialConfig: {
@@ -2175,6 +2307,65 @@ describe("server/agents/service", () => {
     ]);
     expect(reloadEnv).toHaveBeenCalled();
     expect(result.tokenUpdated).toBe(true);
+  });
+
+  it("writes messages.statusReactions.enabled only on an explicit Slack choice (3.1)", () => {
+    const buildSlackFsMock = () =>
+      buildFsMock({
+        initialConfig: {
+          agents: { list: [{ id: "main", default: true }] },
+          channels: {
+            slack: {
+              enabled: true,
+              accounts: {
+                default: { botToken: "${SLACK_BOT_TOKEN}", name: "Slack" },
+              },
+            },
+          },
+          bindings: [
+            { agentId: "main", match: { channel: "slack", accountId: "default" } },
+          ],
+        },
+      });
+
+    // Explicit "on" restores the emoji reaction lifecycle.
+    const onMock = buildSlackFsMock();
+    createAgentsService({ fs: onMock, OPENCLAW_DIR: "/tmp/openclaw" })
+      .updateChannelAccount({
+        provider: "slack",
+        accountId: "default",
+        name: "Slack",
+        agentId: "main",
+        statusReactions: "on",
+      });
+    expect(onMock.readConfig().messages).toEqual({
+      statusReactions: { enabled: true },
+    });
+
+    // Explicit "off" pins the OpenClaw 2026.8 native-thread-status behavior.
+    const offMock = buildSlackFsMock();
+    createAgentsService({ fs: offMock, OPENCLAW_DIR: "/tmp/openclaw" })
+      .updateChannelAccount({
+        provider: "slack",
+        accountId: "default",
+        name: "Slack",
+        agentId: "main",
+        statusReactions: "off",
+      });
+    expect(offMock.readConfig().messages).toEqual({
+      statusReactions: { enabled: false },
+    });
+
+    // No choice -> the key is never written (operator config is never overridden).
+    const defaultMock = buildSlackFsMock();
+    createAgentsService({ fs: defaultMock, OPENCLAW_DIR: "/tmp/openclaw" })
+      .updateChannelAccount({
+        provider: "slack",
+        accountId: "default",
+        name: "Slack",
+        agentId: "main",
+      });
+    expect(defaultMock.readConfig().messages).toBeUndefined();
   });
 
   it("does not rewrite env when updated token is unchanged", () => {

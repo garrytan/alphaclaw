@@ -1,0 +1,167 @@
+import { describe, expect, it } from "vitest";
+import {
+  buildDashboardFocusUrl,
+  buildNavSections,
+  filterNavSectionsForRole,
+  getSelectedNavId,
+  kClaudeCodeNavItem,
+  kClaudeCodeUrl,
+  kDashboardLaunchUrl,
+  kDashboardsNavItem,
+  kNavSections,
+} from "../../lib/public/js/lib/app-navigation.js";
+
+describe("app-navigation gated sections", () => {
+  it("returns exactly the base sections when the dashboards gate is closed or unknown", () => {
+    expect(buildNavSections()).toBe(kNavSections);
+    expect(buildNavSections({ features: {} })).toBe(kNavSections);
+    expect(buildNavSections({ features: { sessionDashboards: false } })).toBe(
+      kNavSections,
+    );
+    // Fail-closed on non-boolean truthiness too.
+    expect(buildNavSections({ features: { sessionDashboards: "yes" } })).toBe(
+      kNavSections,
+    );
+  });
+
+  it("appends the Dashboards external link to Monitoring when the gate is open", () => {
+    const sections = buildNavSections({
+      features: { sessionDashboards: true },
+    });
+    const monitoring = sections.find((s) => s.label === "Monitoring");
+    expect(monitoring.items[monitoring.items.length - 1]).toEqual(
+      kDashboardsNavItem,
+    );
+    // Contract pin: the server-side launcher route the item (and the three
+    // window.open consumers) depend on.
+    expect(kDashboardLaunchUrl).toBe("/gateway/launch");
+    expect(kDashboardsNavItem.href).toBe("/gateway/launch?to=dashboards");
+    expect(kDashboardsNavItem.title).toBe(
+      "Opens OpenClaw session dashboards in a new tab (signed in automatically)",
+    );
+    // The base sections are never mutated.
+    const baseMonitoring = kNavSections.find((s) => s.label === "Monitoring");
+    expect(
+      baseMonitoring.items.some((item) => item.id === "dashboards"),
+    ).toBe(false);
+  });
+
+  it("selects the team nav item for /team locations", () => {
+    expect(getSelectedNavId({ location: "/team" })).toBe("team");
+    expect(getSelectedNavId({ location: "/team/anything" })).toBe("team");
+  });
+});
+
+// Path-form focus links per OpenClaw 2026.8.1-beta docs/web/urls.md — the
+// Control UI does not accept query focus forms.
+describe("buildDashboardFocusUrl", () => {
+  it("emits literal-key path refs (one URL-encoded segment per colon segment)", () => {
+    expect(buildDashboardFocusUrl("agent:main:main")).toBe(
+      "/openclaw/focus/dashboard/main/main",
+    );
+    expect(buildDashboardFocusUrl("agent:main:telegram:12345")).toBe(
+      "/openclaw/focus/dashboard/main/telegram/12345",
+    );
+    expect(buildDashboardFocusUrl("agent:main:cron:nightly:run:8821")).toBe(
+      "/openclaw/focus/dashboard/main/cron/nightly/run/8821",
+    );
+    // Whitespace is trimmed before parsing.
+    expect(buildDashboardFocusUrl("  agent:main:main  ")).toBe(
+      "/openclaw/focus/dashboard/main/main",
+    );
+  });
+
+  it("uses the short-id form (trailing UUID hex, dashes omitted) when the rest ends in a UUID", () => {
+    expect(
+      buildDashboardFocusUrl("agent:main:6db92d48-13f2-4a7c-9e21-0123456789ab"),
+    ).toBe("/openclaw/focus/dashboard/main/6db92d4813f24a7c9e210123456789ab");
+    expect(
+      buildDashboardFocusUrl(
+        "agent:roboclaw:subagent:6db92d48-13f2-4a7c-9e21-0123456789ab",
+      ),
+    ).toBe(
+      "/openclaw/focus/dashboard/roboclaw/6db92d4813f24a7c9e210123456789ab",
+    );
+  });
+
+  it("escapes literal segments per the documented grammar", () => {
+    // ~key disambiguation for a one-segment rest that parses like a short id
+    // (docs example: agent:main:release-deadbeef).
+    expect(buildDashboardFocusUrl("agent:main:release-deadbeef")).toBe(
+      "/openclaw/focus/dashboard/main/~key/release-deadbeef",
+    );
+    expect(buildDashboardFocusUrl("agent:main:deadbeefcafe1234")).toBe(
+      "/openclaw/focus/dashboard/main/~key/deadbeefcafe1234",
+    );
+    // Reserved literal names never need the marker.
+    expect(buildDashboardFocusUrl("agent:main:global")).toBe(
+      "/openclaw/focus/dashboard/main/global",
+    );
+    // Dot segments and leading ~ escaping.
+    expect(buildDashboardFocusUrl("agent:main:.:x")).toBe(
+      "/openclaw/focus/dashboard/main/~dot/x",
+    );
+    expect(buildDashboardFocusUrl("agent:main:..")).toBe(
+      "/openclaw/focus/dashboard/main/~dotdot",
+    );
+    expect(buildDashboardFocusUrl("agent:main:~weird")).toBe(
+      "/openclaw/focus/dashboard/main/~~weird",
+    );
+    // encodeURIComponent applies per segment (agent id included).
+    expect(buildDashboardFocusUrl("agent:my agent:a b/c")).toBe(
+      "/openclaw/focus/dashboard/my%20agent/a%20b%2Fc",
+    );
+  });
+
+  it("emits the agent-level focus URL when the key has an empty rest", () => {
+    expect(buildDashboardFocusUrl("agent:main:")).toBe(
+      "/openclaw/focus/dashboard/main",
+    );
+  });
+
+  it("falls back to the launcher's dashboards target for unparseable keys", () => {
+    const fallback = `${kDashboardLaunchUrl}?to=dashboards`;
+    expect(buildDashboardFocusUrl("")).toBe(fallback);
+    expect(buildDashboardFocusUrl("   ")).toBe(fallback);
+    expect(buildDashboardFocusUrl(null)).toBe(fallback);
+    expect(buildDashboardFocusUrl(undefined)).toBe(fallback);
+    expect(buildDashboardFocusUrl("main")).toBe(fallback);
+    expect(buildDashboardFocusUrl("agent:")).toBe(fallback);
+    // No rest separator at all -> not a session key.
+    expect(buildDashboardFocusUrl("agent:main")).toBe(fallback);
+    // Empty agent id.
+    expect(buildDashboardFocusUrl("agent::main")).toBe(fallback);
+  });
+});
+
+describe("claude-code launcher nav item", () => {
+  it("is the last static Monitoring item with the external href", () => {
+    const monitoring = kNavSections.find((s) => s.label === "Monitoring");
+    const last = monitoring.items[monitoring.items.length - 1];
+    expect(last).toEqual(kClaudeCodeNavItem);
+    expect(last).toEqual({
+      id: "claude-code",
+      label: "Open Claude Code",
+      href: kClaudeCodeUrl,
+    });
+    expect(kClaudeCodeUrl).toBe("https://claude.ai/code");
+  });
+
+  it("keeps Dashboards appended after it when the gate is open", () => {
+    const sections = buildNavSections({ features: { sessionDashboards: true } });
+    const monitoring = sections.find((s) => s.label === "Monitoring");
+    const ids = monitoring.items.map((item) => item.id);
+    expect(ids.indexOf("claude-code")).toBe(ids.length - 2);
+    expect(ids[ids.length - 1]).toBe("dashboards");
+  });
+
+  it("is hidden from members (firing bills the owner's claude.ai account)", () => {
+    const memberSections = filterNavSectionsForRole(kNavSections, "member");
+    const memberIds = memberSections.flatMap((s) => s.items.map((i) => i.id));
+    expect(memberIds).not.toContain("claude-code");
+    const adminIds = filterNavSectionsForRole(kNavSections, "admin").flatMap(
+      (s) => s.items.map((i) => i.id),
+    );
+    expect(adminIds).toContain("claude-code");
+  });
+});

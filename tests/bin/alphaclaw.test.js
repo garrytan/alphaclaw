@@ -27,6 +27,20 @@ describe("bin/alphaclaw port check", () => {
 
   const binPath = path.resolve(__dirname, "../../bin/alphaclaw.js");
 
+  // The CLI's Node version gate fires before anything these tests assert on
+  // (port check, SETUP_PASSWORD, state-dir export). Pin process.versions.node
+  // to a supported release via --require — the same preload idiom the
+  // git-sync version test below uses — so the gate is deterministic no matter
+  // which Node the host happens to run the suite with.
+  const supportedNodePreload = () => {
+    const preloadPath = path.join(tmpDir, "force-supported-node.js");
+    fs.writeFileSync(
+      preloadPath,
+      `Object.defineProperty(process.versions, "node", { value: "22.22.3" });`,
+    );
+    return `--require="${preloadPath}"`;
+  };
+
   it("allows git-sync on Node versions below OpenClaw's runtime minimum", () => {
     const preloadPath = path.join(tmpDir, "override-node-version.js");
     fs.writeFileSync(
@@ -52,11 +66,151 @@ describe("bin/alphaclaw port check", () => {
     expect(output).not.toContain("Node.js 22.22.2 is not supported");
   });
 
+  it("generates an operator-shell openclaw wrapper that works under POSIX sh without the dev shim", () => {
+    // The wrapper is #!/bin/sh; its PATH fallback must be POSIX (an earlier
+    // revision used `command -v -a`, which dash/bash-as-sh reject — every
+    // non-dev-channel box got a wrapper that exits 127 in front of a
+    // perfectly good openclaw).
+    const wrapperPath = path.join(tmpDir, "wrapper", "openclaw");
+    const profilePath = path.join(tmpDir, "profile.d", "alphaclaw-openclaw.sh");
+    fs.mkdirSync(path.dirname(wrapperPath), { recursive: true });
+    fs.mkdirSync(path.dirname(profilePath), { recursive: true });
+    // A "real" openclaw further down PATH (the pin install; no dev shim).
+    const realBinDir = path.join(tmpDir, "realbin");
+    fs.mkdirSync(realBinDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(realBinDir, "openclaw"),
+      [
+        "#!/bin/sh",
+        'printf "REAL_OPENCLAW args=%s OPENCLAW_STATE_DIR=%s\n" "$*" "${OPENCLAW_STATE_DIR:-}"',
+      ].join("\n"),
+      { mode: 0o755 },
+    );
+
+    // Intercept the final lib/server.js require so `start` runs the whole
+    // launcher (incl. the wrapper install) without booting a real server.
+    const interceptPreload = path.join(tmpDir, "intercept-server-load.js");
+    fs.writeFileSync(
+      interceptPreload,
+      `
+Object.defineProperty(process.versions, "node", { value: "22.22.3" });
+const Module = require("module");
+const realLoad = Module._load;
+Module._load = function (request, parent, isMain) {
+  if (typeof request === "string" && /lib[\\/]server(\.js)?$/.test(request)) {
+    process.exit(0);
+  }
+  return realLoad.apply(this, arguments);
+};
+`,
+    );
+    try {
+      execSync(`node --require="${interceptPreload}" "${binPath}" start`, {
+        stdio: "pipe",
+        encoding: "utf8",
+        timeout: 60000,
+        env: {
+          ...process.env,
+          ALPHACLAW_ROOT_DIR: tmpDir,
+          ALPHACLAW_OPENCLAW_WRAPPER_PATH: wrapperPath,
+          ALPHACLAW_PROFILE_SNIPPET_PATH: profilePath,
+          SETUP_PASSWORD: "test-password",
+          PORT: "3999",
+          ALPHACLAW_SKIP_SYSTEM_CRON_INSTALL: "true",
+          HOME: tmpHome,
+        },
+      });
+    } catch {
+      // Any nonzero exit after the wrapper install is irrelevant here.
+    }
+
+    expect(fs.existsSync(wrapperPath)).toBe(true);
+    const wrapperText = fs.readFileSync(wrapperPath, "utf8");
+    expect(wrapperText).not.toContain("command -v -a");
+
+    // Execute the generated wrapper under sh: no shim exists, so the PATH
+    // walk must find the real openclaw (skipping the wrapper itself) and the
+    // managed env must be exported.
+    const output = execSync(`sh "${wrapperPath}" status --json`, {
+      encoding: "utf8",
+      timeout: 15000,
+      env: {
+        PATH: `${path.dirname(wrapperPath)}${path.delimiter}${realBinDir}${path.delimiter}${process.env.PATH}`,
+      },
+    });
+    expect(output).toContain("REAL_OPENCLAW args=status --json");
+    expect(output).toContain(`OPENCLAW_STATE_DIR=${path.join(tmpDir, ".openclaw")}`);
+
+    // The install outcome is persisted, never silent.
+    const outcome = JSON.parse(
+      fs.readFileSync(
+        path.join(tmpDir, ".openclaw", ".alphaclaw", "operator-shell-env.json"),
+        "utf8",
+      ),
+    );
+    expect(outcome.wrapper).toContain("installed");
+    expect(outcome.profileSnippet).toContain("installed");
+    expect(fs.readFileSync(profilePath, "utf8")).toContain("OPENCLAW_STATE_DIR=");
+  });
+
+  it("exports the OpenClaw state env for non-start verbs and leaves HOME alone", () => {
+    // Issue #25: every CLI verb (git-sync, admin, telegram ...) can shell
+    // `openclaw` or spawn children that do; without OPENCLAW_STATE_DIR those
+    // resolve ~/.openclaw and, on >= 2026.9.1-beta.1, build a divergent
+    // second state database. `start` already exported the vars (test below);
+    // this guards the verb path. HOME must stay untouched for verbs: hoisting
+    // it would reroute git config/SSH for git-sync and npm for updates.
+    const capturePath = path.join(tmpDir, "captured-verb-env.json");
+    const preloadPath = path.join(tmpDir, "capture-verb-env.js");
+    fs.writeFileSync(
+      preloadPath,
+      `
+Object.defineProperty(process.versions, "node", { value: "22.22.3" });
+const fs = require("fs");
+process.on("exit", () => {
+  fs.writeFileSync(process.env.ALPHACLAW_CAPTURE_ENV_PATH, JSON.stringify({
+    OPENCLAW_HOME: process.env.OPENCLAW_HOME,
+    OPENCLAW_STATE_DIR: process.env.OPENCLAW_STATE_DIR,
+    OPENCLAW_CONFIG_PATH: process.env.OPENCLAW_CONFIG_PATH,
+    HOME: process.env.HOME,
+    XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME,
+  }));
+});
+`,
+    );
+
+    try {
+      execSync(`node --require="${preloadPath}" "${binPath}" git-sync`, {
+        stdio: "pipe",
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          ALPHACLAW_ROOT_DIR: tmpDir,
+          ALPHACLAW_CAPTURE_ENV_PATH: capturePath,
+          HOME: tmpHome,
+          XDG_CONFIG_HOME: "",
+        },
+      });
+    } catch {
+      // git-sync exits 1 (missing --message) AFTER the env hoist — expected.
+    }
+
+    const reported = JSON.parse(fs.readFileSync(capturePath, "utf8"));
+    expect(reported.OPENCLAW_HOME).toBe(tmpDir);
+    expect(reported.OPENCLAW_STATE_DIR).toBe(path.join(tmpDir, ".openclaw"));
+    expect(reported.OPENCLAW_CONFIG_PATH).toBe(
+      path.join(tmpDir, ".openclaw", "openclaw.json"),
+    );
+    // Verb paths never touch HOME/XDG_CONFIG_HOME (start does — separately).
+    expect(reported.HOME).toBe(tmpHome);
+    expect(reported.XDG_CONFIG_HOME || "").toBe("");
+  });
+
   it("exits with error if PORT env var is 18789", () => {
     let output = "";
     let status = 0;
     try {
-      execSync(`ALPHACLAW_ROOT_DIR="${tmpDir}" node "${binPath}" start`, {
+      execSync(`ALPHACLAW_ROOT_DIR="${tmpDir}" node ${supportedNodePreload()} "${binPath}" start`, {
         stdio: "pipe",
         encoding: "utf8",
         env: { ...process.env, PORT: "18789", ALPHACLAW_ROOT_DIR: tmpDir }
@@ -75,7 +229,7 @@ describe("bin/alphaclaw port check", () => {
     let output = "";
     let status = 0;
     try {
-      execSync(`ALPHACLAW_ROOT_DIR="${tmpDir}" node "${binPath}" start --port 18789`, {
+      execSync(`ALPHACLAW_ROOT_DIR="${tmpDir}" node ${supportedNodePreload()} "${binPath}" start --port 18789`, {
         stdio: "pipe",
         encoding: "utf8",
         env: { ...process.env, PORT: "3000", ALPHACLAW_ROOT_DIR: tmpDir }
@@ -95,7 +249,7 @@ describe("bin/alphaclaw port check", () => {
     let status = 0;
     try {
       // We expect it to fail on SETUP_PASSWORD missing, which is AFTER the port check
-      execSync(`ALPHACLAW_ROOT_DIR="${tmpDir}" node "${binPath}" start`, {
+      execSync(`ALPHACLAW_ROOT_DIR="${tmpDir}" node ${supportedNodePreload()} "${binPath}" start`, {
         stdio: "pipe",
         encoding: "utf8",
         env: { ...process.env, PORT: "3001", ALPHACLAW_ROOT_DIR: tmpDir, SETUP_PASSWORD: "" }
@@ -108,6 +262,107 @@ describe("bin/alphaclaw port check", () => {
     expect(status).toBe(1);
     expect(output).not.toContain("AlphaClaw cannot be started on port 18789");
     expect(output).toContain("SETUP_PASSWORD is missing or empty");
+  });
+
+  it("boot reconcile falls back to the default schedule when system-sync.json holds an injected one", () => {
+    const preloadPath = path.join(tmpDir, "capture-cron-write.js");
+    const capturePath = path.join(tmpDir, "captured-cron-content.txt");
+    // Seed an on-disk cron config carrying the injection payload the shared
+    // guard exists for. The boot reconcile must write the DEFAULT schedule.
+    fs.mkdirSync(path.join(tmpDir, ".openclaw", "cron"), { recursive: true });
+    fs.writeFileSync(
+      path.join(tmpDir, ".openclaw", "cron", "system-sync.json"),
+      JSON.stringify({ enabled: true, schedule: "PATH=/tmp/evil\n*\n*\n*\n*" }),
+    );
+    fs.writeFileSync(
+      preloadPath,
+      `
+const fs = require("fs");
+const os = require("os");
+const path = require("path");
+const Module = require("module");
+const childProcess = require("child_process");
+
+const realLoad = Module._load;
+const realCopyFileSync = fs.copyFileSync;
+const realWriteFileSync = fs.writeFileSync;
+const realUnlinkSync = fs.unlinkSync;
+const realRenameSync = fs.renameSync;
+const realChmodSync = fs.chmodSync;
+
+const capturePath = process.env.ALPHACLAW_CAPTURE_CRON_PATH;
+const testHome = process.env.ALPHACLAW_TEST_HOME;
+if (testHome) {
+  os.homedir = () => testHome;
+}
+
+childProcess.execSync = (command, options = {}) => "";
+
+const cronWrites = {};
+fs.copyFileSync = (src, dest, ...rest) => {
+  const target = String(dest || "");
+  if (target.startsWith("/usr/local/bin/") || target.startsWith("/etc/cron.d/")) return;
+  return realCopyFileSync(src, dest, ...rest);
+};
+fs.writeFileSync = (targetPath, data, ...rest) => {
+  const target = String(targetPath || "");
+  if (target.startsWith("/etc/cron.d/")) {
+    cronWrites[target] = String(data);
+    return;
+  }
+  if (target.startsWith("/usr/local/bin/")) return;
+  return realWriteFileSync(targetPath, data, ...rest);
+};
+fs.renameSync = (from, to, ...rest) => {
+  const src = String(from || "");
+  const dest = String(to || "");
+  if (dest.startsWith("/etc/cron.d/")) {
+    // Complete the atomic install against the captured temp content.
+    realWriteFileSync(capturePath, cronWrites[src] || "");
+    return;
+  }
+  return realRenameSync(from, to, ...rest);
+};
+fs.unlinkSync = (targetPath, ...rest) => {
+  if (String(targetPath || "").startsWith("/etc/cron.d/")) return;
+  return realUnlinkSync(targetPath, ...rest);
+};
+fs.chmodSync = (targetPath, ...rest) => {
+  if (String(targetPath || "").startsWith("/usr/local/bin/")) return;
+  return realChmodSync(targetPath, ...rest);
+};
+
+Module._load = function patchedLoad(request, parent, isMain) {
+  const parentFile = String(parent && parent.filename ? parent.filename : "");
+  if (
+    (request === "../lib/server.js" || String(request || "").endsWith("/lib/server.js")) &&
+    parentFile.endsWith(path.join("bin", "alphaclaw.js"))
+  ) {
+    return {};
+  }
+  return realLoad.apply(this, arguments);
+};
+      `.trim(),
+    );
+
+    const output = execSync(`node ${supportedNodePreload()} "${binPath}" start`, {
+      stdio: "pipe",
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        SETUP_PASSWORD: "test-password",
+        ALPHACLAW_ROOT_DIR: tmpDir,
+        ALPHACLAW_GIT_SHIM_PATH: path.join(tmpDir, "bin", "git"),
+        ALPHACLAW_TEST_HOME: tmpHome,
+        ALPHACLAW_CAPTURE_CRON_PATH: capturePath,
+        NODE_OPTIONS: `--require=${preloadPath}`,
+      },
+    });
+
+    expect(output).toContain("Ignoring invalid stored sync-cron schedule");
+    const cronContent = fs.readFileSync(capturePath, "utf8");
+    expect(cronContent).toContain('0 * * * * root bash');
+    expect(cronContent).not.toContain("/tmp/evil");
   });
 
   it("exports OPENCLAW_STATE_DIR during managed startup", () => {
@@ -207,7 +462,7 @@ Module._load = function patchedLoad(request, parent, isMain) {
       `.trim(),
     );
 
-    execSync(`node "${binPath}" start`, {
+    execSync(`node ${supportedNodePreload()} "${binPath}" start`, {
       stdio: "pipe",
       encoding: "utf8",
       env: {
@@ -231,6 +486,142 @@ Module._load = function patchedLoad(request, parent, isMain) {
     }));
     expect(reportedEnv.PATH.split(path.delimiter)[0]).toBe(path.join(tmpDir, "bin"));
 
+  });
+
+  it("bakes --root-dir into lib/server/constants before any lib require (ISSUE-002)", () => {
+    // v0.9.38 regression: bin's top-level helpers/self-dependency requires
+    // load constants.js, which snapshots ALPHACLAW_ROOT_DIR at first require.
+    // The env used to be set only AFTER those requires, so a `--root-dir` run
+    // split state across two roots (banner on the flag's root, boot sync/env
+    // watcher on ~/.alphaclaw). Assert the constants snapshot the server will
+    // actually use (the require cache is shared) points at the flag's root,
+    // not the fake home's ~/.alphaclaw.
+    const preloadPath = path.join(tmpDir, "capture-root-dir.js");
+    const capturePath = path.join(tmpDir, "captured-root-dir.json");
+    fs.writeFileSync(
+      preloadPath,
+      `
+const fs = require("fs");
+const os = require("os");
+const path = require("path");
+const Module = require("module");
+const childProcess = require("child_process");
+
+const realLoad = Module._load;
+const realCopyFileSync = fs.copyFileSync;
+const realWriteFileSync = fs.writeFileSync;
+const realUnlinkSync = fs.unlinkSync;
+const realChmodSync = fs.chmodSync;
+
+const capturePath = process.env.ALPHACLAW_CAPTURE_ENV_PATH;
+const testHome = process.env.ALPHACLAW_TEST_HOME;
+if (testHome) {
+  os.homedir = () => testHome;
+}
+
+childProcess.execSync = (command, options = {}) => {
+  const cmd = String(command || "");
+  if (
+    cmd.startsWith("command -v ") ||
+    cmd === "pgrep -x cron" ||
+    cmd === "cron"
+  ) {
+    return "";
+  }
+  if (cmd.startsWith("git ")) {
+    return "";
+  }
+  return "";
+};
+
+fs.copyFileSync = (src, dest, ...rest) => {
+  const target = String(dest || "");
+  if (
+    target.startsWith("/usr/local/bin/") ||
+    target.startsWith("/etc/cron.d/")
+  ) {
+    return;
+  }
+  return realCopyFileSync(src, dest, ...rest);
+};
+
+fs.writeFileSync = (targetPath, data, ...rest) => {
+  const target = String(targetPath || "");
+  if (
+    target.startsWith("/usr/local/bin/") ||
+    target.startsWith("/etc/cron.d/")
+  ) {
+    return;
+  }
+  return realWriteFileSync(targetPath, data, ...rest);
+};
+
+fs.unlinkSync = (targetPath, ...rest) => {
+  const target = String(targetPath || "");
+  if (target.startsWith("/etc/cron.d/")) return;
+  return realUnlinkSync(targetPath, ...rest);
+};
+
+fs.chmodSync = (targetPath, ...rest) => {
+  const target = String(targetPath || "");
+  if (target.startsWith("/usr/local/bin/")) return;
+  return realChmodSync(targetPath, ...rest);
+};
+
+Module._load = function patchedLoad(request, parent, isMain) {
+  const parentFile = String(parent && parent.filename ? parent.filename : "");
+  if (
+    (request === "../lib/server.js" || String(request || "").endsWith("/lib/server.js")) &&
+    parentFile.endsWith(path.join("bin", "alphaclaw.js"))
+  ) {
+    // Cached from bin's own top-level requires — this returns the snapshot
+    // the whole server would run with.
+    const constants = realLoad.call(
+      this,
+      path.join(path.dirname(parentFile), "..", "lib", "server", "constants.js"),
+      parent,
+      false,
+    );
+    fs.writeFileSync(
+      capturePath,
+      JSON.stringify({
+        constantsAlphaclawDir: constants.ALPHACLAW_DIR,
+        rootDirEnv: process.env.ALPHACLAW_ROOT_DIR,
+      }),
+    );
+    return {};
+  }
+  return realLoad.apply(this, arguments);
+};
+      `.trim(),
+    );
+
+    // The child gets NO ALPHACLAW_ROOT_DIR — only the flag names the root.
+    const childEnv = {
+      ...process.env,
+      SETUP_PASSWORD: "test-password",
+      ALPHACLAW_TEST_HOME: tmpHome,
+      ALPHACLAW_CAPTURE_ENV_PATH: capturePath,
+      NODE_OPTIONS: `--require=${preloadPath}`,
+    };
+    delete childEnv.ALPHACLAW_ROOT_DIR;
+
+    execSync(
+      `node ${supportedNodePreload()} "${binPath}" start --root-dir "${tmpDir}"`,
+      {
+        stdio: "pipe",
+        encoding: "utf8",
+        env: childEnv,
+      },
+    );
+
+    const captured = JSON.parse(fs.readFileSync(capturePath, "utf8"));
+    expect(captured.constantsAlphaclawDir).toBe(tmpDir);
+    expect(captured.rootDirEnv).toBe(tmpDir);
+    // The pre-fix baked value: the (fake) home's default root.
+    expect(captured.constantsAlphaclawDir).not.toBe(
+      path.join(tmpHome, ".alphaclaw"),
+    );
   });
 
   it("creates a gogcli compatibility symlink under the managed home", () => {
@@ -317,7 +708,7 @@ Module._load = function patchedLoad(request, parent, isMain) {
       `.trim(),
     );
 
-    execSync(`node "${binPath}" start`, {
+    execSync(`node ${supportedNodePreload()} "${binPath}" start`, {
       stdio: "pipe",
       encoding: "utf8",
       env: {
@@ -425,7 +816,7 @@ Module._load = function patchedLoad(request, parent, isMain) {
     fs.mkdirSync(compatPath, { recursive: true });
     fs.writeFileSync(path.join(compatPath, "config.json"), "{}");
 
-    execSync(`node "${binPath}" start`, {
+    execSync(`node ${supportedNodePreload()} "${binPath}" start`, {
       stdio: "pipe",
       encoding: "utf8",
       env: {

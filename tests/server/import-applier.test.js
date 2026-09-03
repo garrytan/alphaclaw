@@ -771,3 +771,100 @@ describe("import-applier canonicalizeConfigEnvRefs env var remapping", () => {
     expect(result.renamedEnvVars).toBe(0);
   });
 });
+
+// H3: match.path / transform.module come from the imported (untrusted) config.
+// A `../` module path must not move a host file into _backup (arb read/exfil)
+// or write a shim outside baseDir (arb write) — both later git-synced.
+describe("import-applier alignHookTransforms traversal containment (H3)", () => {
+  it("skips a transform module that escapes the import base", () => {
+    const baseDir = fs.mkdtempSync(
+      path.join(os.tmpdir(), "alphaclaw-h3-base-"),
+    );
+    kTempDirs.push(baseDir);
+    const outsideDir = fs.mkdtempSync(
+      path.join(os.tmpdir(), "alphaclaw-h3-outside-"),
+    );
+    kTempDirs.push(outsideDir);
+
+    const outsideFile = path.join(outsideDir, "host-transform.mjs");
+    fs.writeFileSync(outsideFile, "// host secret\n", "utf8");
+
+    // Relative path from the transforms root out to the planted host file.
+    const escapingModule = path
+      .relative(path.join(baseDir, "hooks", "transforms"), outsideFile)
+      .split(path.sep)
+      .join("/");
+    expect(escapingModule.startsWith("../")).toBe(true);
+
+    fs.writeFileSync(
+      path.join(baseDir, "openclaw.json"),
+      JSON.stringify({
+        hooks: {
+          mappings: [
+            {
+              match: { path: "evilhook" },
+              transform: { module: escapingModule },
+            },
+          ],
+        },
+      }),
+      "utf8",
+    );
+
+    const result = alignHookTransforms({
+      fs,
+      baseDir,
+      configFiles: ["openclaw.json"],
+    });
+
+    // Nothing aligned; the host file was neither moved nor backed up.
+    expect(result).toEqual({ alignedCount: 0 });
+    expect(fs.readFileSync(outsideFile, "utf8")).toBe("// host secret\n");
+    expect(
+      fs.existsSync(path.join(baseDir, "hooks", "transforms", "_backup")),
+    ).toBe(false);
+    // No shim escaped the base either.
+    expect(fs.existsSync(path.join(outsideDir, "evilhook"))).toBe(false);
+  });
+
+  it("still aligns a legitimate in-base transform module (allow-legit)", () => {
+    const baseDir = fs.mkdtempSync(
+      path.join(os.tmpdir(), "alphaclaw-h3-legit-"),
+    );
+    kTempDirs.push(baseDir);
+    const actualDir = path.join(baseDir, "hooks", "transforms", "old-gmail");
+    fs.mkdirSync(actualDir, { recursive: true });
+    fs.writeFileSync(path.join(actualDir, "transform.mjs"), "// t\n", "utf8");
+
+    fs.writeFileSync(
+      path.join(baseDir, "openclaw.json"),
+      JSON.stringify({
+        hooks: {
+          mappings: [
+            {
+              match: { path: "gmail" },
+              transform: { module: "old-gmail/transform.mjs" },
+            },
+          ],
+        },
+      }),
+      "utf8",
+    );
+
+    const result = alignHookTransforms({
+      fs,
+      baseDir,
+      configFiles: ["openclaw.json"],
+    });
+
+    expect(result.alignedCount).toBe(1);
+    const shimPath = path.join(
+      baseDir,
+      "hooks",
+      "transforms",
+      "gmail",
+      "gmail-transform.mjs",
+    );
+    expect(fs.existsSync(shimPath)).toBe(true);
+  });
+});

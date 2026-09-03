@@ -1,6 +1,10 @@
 #!/bin/bash
 # systemctl shim for Docker (no real systemd available)
 # Translates restart/stop/status into process signals so the Express wrapper handles lifecycle.
+# The pattern must match BOTH launch shapes:
+#   /app/node_modules/.bin/openclaw gateway run        (pinned npm install)
+#   node /data/openclaw/<bin>.js gateway run           (release-channel dev checkout via shim)
+# hence "openclaw[^ ]* gateway" rather than the literal "openclaw gateway".
 
 ACTION=""
 UNIT=""
@@ -21,7 +25,7 @@ case "$ACTION" in
       exit 0
     fi
     # Status check for a specific unit
-    if pgrep -f "openclaw gateway" >/dev/null 2>&1; then
+    if pgrep -f "openclaw[^ ]* gateway" >/dev/null 2>&1; then
       echo "● ${UNIT}"
       echo "   Active: active (running)"
       exit 0
@@ -32,7 +36,7 @@ case "$ACTION" in
     fi
     ;;
   is-active)
-    if pgrep -f "openclaw gateway" >/dev/null 2>&1; then
+    if pgrep -f "openclaw[^ ]* gateway" >/dev/null 2>&1; then
       echo "active"
       exit 0
     else
@@ -41,9 +45,9 @@ case "$ACTION" in
     fi
     ;;
   restart|stop)
-    pkill -TERM -f "openclaw gateway" 2>/dev/null || true
+    pkill -TERM -f "openclaw[^ ]* gateway" 2>/dev/null || true
     sleep 1
-    pkill -9 -f "openclaw gateway" 2>/dev/null || true
+    pkill -9 -f "openclaw[^ ]* gateway" 2>/dev/null || true
     rm -f /data/.openclaw/gateway.lock /data/.openclaw/gateway.pid 2>/dev/null
     exit 0
     ;;

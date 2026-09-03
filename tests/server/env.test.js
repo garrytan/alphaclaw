@@ -82,6 +82,42 @@ describe("server/env", () => {
     ).toHaveLength(1);
   });
 
+  it("never applies the gateway-env hatch keys from .env (agent self-grant defense)", () => {
+    // These control what the OpenClaw child inherits; the agent can write
+    // .env, so reloadEnv must ignore them (deployment env only).
+    fs.writeFileSync(
+      path.join(tmpDir, ".env"),
+      [
+        "OPENAI_API_KEY=ok",
+        "ALPHACLAW_GATEWAY_ENV_UNRESTRICTED=1",
+        "ALPHACLAW_GATEWAY_ENV_PASSTHROUGH=*",
+        // The restart-hardening knob is deployment-only too: an agent-written
+        // .env must not shrink the ready budget.
+        "GATEWAY_RESTART_READY_TIMEOUT=30",
+      ].join("\n"),
+    );
+    const env = loadEnvModule(tmpDir);
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    delete process.env.ALPHACLAW_GATEWAY_ENV_UNRESTRICTED;
+    delete process.env.ALPHACLAW_GATEWAY_ENV_PASSTHROUGH;
+    const savedReadyTimeout = process.env.GATEWAY_RESTART_READY_TIMEOUT;
+    delete process.env.GATEWAY_RESTART_READY_TIMEOUT;
+
+    env.reloadEnv();
+
+    expect(process.env.OPENAI_API_KEY).toBe("ok");
+    expect(process.env.ALPHACLAW_GATEWAY_ENV_UNRESTRICTED).toBeUndefined();
+    expect(process.env.ALPHACLAW_GATEWAY_ENV_PASSTHROUGH).toBeUndefined();
+    expect(process.env.GATEWAY_RESTART_READY_TIMEOUT).toBeUndefined();
+    if (savedReadyTimeout !== undefined) {
+      process.env.GATEWAY_RESTART_READY_TIMEOUT = savedReadyTimeout;
+    }
+    // And they never surface through the file readers either.
+    expect(env.readEnvFile().some((v) => v.key.startsWith("ALPHACLAW_GATEWAY_ENV_"))).toBe(
+      true,
+    );
+  });
+
   it("writes a deduped env file using the last value for each key", () => {
     const env = loadEnvModule(tmpDir);
 
@@ -93,6 +129,23 @@ describe("server/env", () => {
 
     expect(fs.readFileSync(path.join(tmpDir, ".env"), "utf8")).toBe(
       "BRIGHTDATA_API_KEY=bright\nOPENAI_API_KEY=second",
+    );
+  });
+
+  it("strips line breaks from keys and values before writing (issue #26 hardening)", () => {
+    // An embedded newline in a value would inject arbitrary extra .env lines
+    // into a file two root-cron shell scripts parse — key/value smuggling.
+    const env = loadEnvModule(tmpDir);
+
+    env.writeEnvFile([
+      { key: "OPENAI_API_KEY", value: "line1\nEVIL_KEY=oops" },
+      { key: "BRIGHTDATA_API_KEY", value: "a\r\nb\u2028c\u2029d e" },
+    ]);
+
+    // Every line-break flavor (CR, LF, U+2028, U+2029) is stripped; real
+    // spaces are legitimate values (the whole point of the shell-parser fix).
+    expect(fs.readFileSync(path.join(tmpDir, ".env"), "utf8")).toBe(
+      "OPENAI_API_KEY=line1EVIL_KEY=oops\nBRIGHTDATA_API_KEY=abcd e",
     );
   });
 

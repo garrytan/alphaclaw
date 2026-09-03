@@ -210,6 +210,87 @@ describe("server/cost-utils openclaw dist pricing scraper", () => {
     expect(substringMatch.pricingFound).toBe(true);
     expect(substringMatch.inputCost).toBeCloseTo(0.8, 8);
 
+    // PR #86: prefix shadowing is dead — the most specific key wins, and
+    // provider-qualified ids resolve their trailing component exactly.
+    const gpt55 = costUtils.deriveCostBreakdown({
+      provider: "openai",
+      model: "openai/gpt-5.5",
+      inputTokens: 1_000_000,
+      outputTokens: 1_000_000,
+    });
+    expect(gpt55.totalCost).toBeCloseTo(35.0, 8); // gpt-5 shadow gave 11.25
+
+    const gpt54mini = costUtils.deriveCostBreakdown({
+      provider: "openai",
+      model: "openai/gpt-5.4-mini",
+      inputTokens: 1_000_000,
+      outputTokens: 1_000_000,
+    });
+    expect(gpt54mini.totalCost).toBeCloseTo(5.25, 8);
+
+    // Fork-only regression: gpt-4o used to shadow gpt-4o-mini for
+    // provider-qualified ids (12.5 instead of 0.75 per 1M+1M).
+    const gpt4oMini = costUtils.deriveCostBreakdown({
+      provider: "openai",
+      model: "openai/gpt-4o-mini",
+      inputTokens: 1_000_000,
+      outputTokens: 1_000_000,
+    });
+    expect(gpt4oMini.totalCost).toBeCloseTo(0.75, 8);
+
+    // All eight PR #86 additions resolve to their own entries.
+    const kExpectedPerMillionTotals = {
+      "gpt-5.5": 35.0,
+      "gpt-5.4-mini": 5.25,
+      "kimi-k2.6:cloud": 3.8,
+      "deepseek-v4-flash:cloud": 0.42,
+      "glm-5.1:cloud": 5.8,
+      "grok-4.3": 3.75,
+      "qwen3-coder-next": 0.91,
+      "minimax-m3:cloud": 3.0,
+    };
+    for (const [modelId, expectedTotal] of Object.entries(
+      kExpectedPerMillionTotals,
+    )) {
+      const breakdown = costUtils.deriveCostBreakdown({
+        provider: "",
+        model: modelId,
+        inputTokens: 1_000_000,
+        outputTokens: 1_000_000,
+      });
+      expect(breakdown.pricingFound, modelId).toBe(true);
+      expect(breakdown.totalCost, modelId).toBeCloseTo(expectedTotal, 8);
+    }
+
+    // Boundary rule: alphanumeric-adjacent lookalikes never family-match.
+    const falsePositive = costUtils.deriveCostBreakdown({
+      provider: "openai",
+      model: "gpt-5x",
+      inputTokens: 1_000_000,
+    });
+    expect(falsePositive.pricingFound).toBe(false);
+    const digitRun = costUtils.deriveCostBreakdown({
+      provider: "openai",
+      model: "gpt-55",
+      inputTokens: 1_000_000,
+    });
+    expect(digitRun.pricingFound).toBe(false);
+
+    // Family fallback still works across namespace styles (boundary match on
+    // the full id, most specific key first).
+    const bedrockStyle = costUtils.deriveCostBreakdown({
+      provider: "bedrock",
+      model: "us.anthropic.claude-opus-4-8-v1:0",
+      inputTokens: 1_000_000,
+    });
+    expect(bedrockStyle.pricingFound).toBe(true);
+    const datedCodex = costUtils.deriveCostBreakdown({
+      provider: "openai",
+      model: "gpt-5.1-codex-20260101",
+      inputTokens: 1_000_000,
+    });
+    expect(datedCodex.inputCost).toBeCloseTo(2.5, 8);
+
     const unknown = costUtils.deriveCostBreakdown({
       provider: "x",
       model: "totally-unknown-model",

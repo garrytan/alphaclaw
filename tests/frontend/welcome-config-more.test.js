@@ -93,9 +93,9 @@ describe("frontend/welcome-config (extended)", () => {
   });
 
   it("walks the channels group error states", () => {
-    expect(getWelcomeGroupError("channels", {})).toBe(
-      "Add at least one channel to continue.",
-    );
+    // Channels are optional (2.4): zero channels is valid — the web chat works
+    // without one. Only half-configured Slack still blocks.
+    expect(getWelcomeGroupError("channels", {})).toBe("");
     expect(
       getWelcomeGroupError("channels", { SLACK_APP_TOKEN: "xapp-1" }),
     ).toBe("Add the Slack bot token to continue with Slack.");
@@ -124,7 +124,9 @@ describe("frontend/welcome-config (extended)", () => {
     expect(groupById.ai.validate(kValidVals, kValidCtx)).toBe(true);
     expect(groupById.ai.validate({}, {})).toBe(false);
     expect(groupById.channels.validate(kValidVals)).toBe(true);
-    expect(groupById.channels.validate({})).toBe(false);
+    // Zero channels validates (optional group); half-configured Slack does not.
+    expect(groupById.channels.validate({})).toBe(true);
+    expect(groupById.channels.validate({ SLACK_APP_TOKEN: "xapp-1" })).toBe(false);
     expect(groupById.tools.validate()).toBe(true);
   });
 

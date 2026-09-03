@@ -9,23 +9,32 @@ const { kSetupDir } = require("../../lib/server/constants");
 
 const createBaseDeps = ({ onboarded = false, hasCodexOauth = false } = {}) => {
   const kOnboardingMarkerPath = "/tmp/alphaclaw/onboarded.json";
+  const fsMock = {
+    mkdirSync: vi.fn(),
+    existsSync: vi.fn((targetPath) =>
+      onboarded ? targetPath === kOnboardingMarkerPath : false,
+    ),
+    statSync: vi.fn(() => {
+      throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+    }),
+    readdirSync: vi.fn(() => []),
+    copyFileSync: vi.fn(),
+    rmSync: vi.fn(),
+    readFileSync: vi.fn(() => "{}"),
+    writeFileSync: vi.fn(),
+    appendFileSync: vi.fn(),
+  };
+  // writeFileAtomic writes `<path>.<pid>.tmp` then renames; replay the most
+  // recent write at the rename target so assertions (and per-test content
+  // maps) keyed by the final path keep working.
+  fsMock.renameSync = vi.fn((sourcePath, targetPath) => {
+    const sourceWrite = [...fsMock.writeFileSync.mock.calls]
+      .reverse()
+      .find(([writtenPath]) => writtenPath === sourcePath);
+    if (sourceWrite) fsMock.writeFileSync(targetPath, ...sourceWrite.slice(1));
+  });
   return {
-    fs: {
-      mkdirSync: vi.fn(),
-      existsSync: vi.fn((targetPath) =>
-        onboarded ? targetPath === kOnboardingMarkerPath : false,
-      ),
-      statSync: vi.fn(() => {
-        throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
-      }),
-      readdirSync: vi.fn(() => []),
-      copyFileSync: vi.fn(),
-      rmSync: vi.fn(),
-      renameSync: vi.fn(),
-      readFileSync: vi.fn(() => "{}"),
-      writeFileSync: vi.fn(),
-      appendFileSync: vi.fn(),
-    },
+    fs: fsMock,
     constants: {
       OPENCLAW_DIR: "/tmp/openclaw",
       WORKSPACE_DIR: "/tmp/openclaw/workspace",
@@ -40,6 +49,7 @@ const createBaseDeps = ({ onboarded = false, hasCodexOauth = false } = {}) => {
       ]),
     },
     shellCmd: vi.fn(async () => ""),
+    execFileCmd: vi.fn(async () => ""),
     gatewayEnv: vi.fn(() => ({
       HOME: "/tmp/alphaclaw",
       OPENCLAW_HOME: "/tmp/alphaclaw",
@@ -445,15 +455,21 @@ describe("server/routes/onboarding", () => {
       "sk-test-123456789",
     );
     expect(deps.authProfiles.syncConfigAuthReferencesForAgent).toHaveBeenCalledTimes(1);
-    expect(deps.fs.copyFileSync).toHaveBeenCalledWith(
+    // ONE merged hardening file (rules + tools map) written atomically —
+    // a separate TOOLS.md extra is rejected on OpenClaw 2026.8.1+.
+    const agentsWriteCall = deps.fs.writeFileSync.mock.calls.find(
+      ([target]) => target === "/tmp/openclaw/workspace/hooks/bootstrap/AGENTS.md",
+    );
+    expect(agentsWriteCall).toBeTruthy();
+    expect(agentsWriteCall[1]).toContain("https://example.com");
+    expect(deps.fs.copyFileSync).not.toHaveBeenCalledWith(
       path.join(kSetupDir, "core-prompts", "AGENTS.md"),
-      "/tmp/openclaw/workspace/hooks/bootstrap/AGENTS.md",
+      expect.anything(),
     );
     const toolsWriteCall = deps.fs.writeFileSync.mock.calls.find(
       ([path]) => path === "/tmp/openclaw/workspace/hooks/bootstrap/TOOLS.md",
     );
-    expect(toolsWriteCall).toBeTruthy();
-    expect(toolsWriteCall[1]).toContain("https://example.com");
+    expect(toolsWriteCall).toBeUndefined();
 
     expect(deps.fs.writeFileSync).toHaveBeenCalledWith(
       "/tmp/openclaw/.alphaclaw/hourly-git-sync.sh",
@@ -480,7 +496,7 @@ describe("server/routes/onboarding", () => {
     expect(initialPushCall).toBeTruthy();
 
     const gitInitCall = deps.shellCmd.mock.calls.find(([cmd]) =>
-      cmd.includes('git remote add origin "https://github.com/owner/repo.git"'),
+      cmd.includes("git remote add origin 'https://github.com/owner/repo.git'"),
     );
     expect(gitInitCall).toBeTruthy();
     expect(gitInitCall[0]).not.toContain("ghp_test_123456789");
@@ -493,7 +509,7 @@ describe("server/routes/onboarding", () => {
     expect(writtenConfig.hooks.internal.enabled).toBe(true);
     expect(writtenConfig.hooks.internal.entries["bootstrap-extra-files"]).toEqual({
       enabled: true,
-      paths: ["hooks/bootstrap/AGENTS.md", "hooks/bootstrap/TOOLS.md"],
+      paths: ["hooks/bootstrap/AGENTS.md"],
     });
   });
 
@@ -608,14 +624,15 @@ describe("server/routes/onboarding", () => {
     const savedVars = deps.writeEnvFile.mock.calls.at(-1)[0];
     expect(savedVars.some((entry) => entry.key === "ANTHROPIC_TOKEN")).toBe(false);
 
-    const onboardCall = deps.shellCmd.mock.calls.find(([cmd]) =>
-      cmd.startsWith("openclaw onboard "),
+    const onboardCall = deps.execFileCmd.mock.calls.find(
+      ([file, args]) => file === "openclaw" && args[0] === "onboard",
     );
     expect(onboardCall).toBeTruthy();
-    expect(onboardCall[0]).toContain("--anthropic-api-key");
-    expect(onboardCall[0]).not.toContain("--token-provider");
-    expect(onboardCall[0]).not.toContain("sk-ant-oat01-stale-token");
-    expect(onboardCall[1]).toMatchObject({
+    const onboardArgs = onboardCall[1];
+    expect(onboardArgs).toContain("--anthropic-api-key");
+    expect(onboardArgs).not.toContain("--token-provider");
+    expect(onboardArgs).not.toContain("sk-ant-oat01-stale-token");
+    expect(onboardCall[2]).toMatchObject({
       env: expect.objectContaining({
         HOME: expect.any(String),
         OPENCLAW_CONFIG_PATH: "/tmp/openclaw/openclaw.json",
@@ -812,12 +829,13 @@ describe("server/routes/onboarding", () => {
     expect(
       deps.shellCmd.mock.calls.some(([cmd]) =>
         cmd.includes(
-          'git init -b main && git remote add origin "https://github.com/owner/target-repo.git"',
+          "git init -b main && git remote add origin 'https://github.com/owner/target-repo.git'",
         ),
       ),
     ).toBe(true);
-    expect(deps.shellCmd).toHaveBeenCalledWith(
-      'openclaw models set "openai/gpt-5.1-codex"',
+    expect(deps.execFileCmd).toHaveBeenCalledWith(
+      "openclaw",
+      ["models", "set", "--", "openai/gpt-5.1-codex"],
       expect.objectContaining({
         env: expect.objectContaining({ OPENCLAW_GATEWAY_TOKEN: "tok" }),
       }),
@@ -858,14 +876,16 @@ describe("server/routes/onboarding", () => {
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ ok: true });
     expect(
-      deps.shellCmd.mock.calls.some(([cmd]) => cmd.startsWith("openclaw onboard ")),
+      deps.execFileCmd.mock.calls.some(
+        ([file, args]) => file === "openclaw" && args[0] === "onboard",
+      ),
     ).toBe(true);
     expect(
       deps.shellCmd.mock.calls.some(([cmd]) => cmd.includes('git remote set-url origin')),
     ).toBe(false);
     expect(
       deps.shellCmd.mock.calls.some(([cmd]) =>
-        cmd.includes('git init -b main && git remote add origin "https://github.com/owner/repo.git"'),
+        cmd.includes("git init -b main && git remote add origin 'https://github.com/owner/repo.git'"),
       ),
     ).toBe(true);
   });
@@ -917,7 +937,7 @@ describe("server/routes/onboarding", () => {
     expect(
       deps.shellCmd.mock.calls.some(([cmd]) =>
         cmd.includes(
-          'git init -b main && git remote add origin "https://github.com/owner/import-target.git"',
+          "git init -b main && git remote add origin 'https://github.com/owner/import-target.git'",
         ),
       ),
     ).toBe(true);
@@ -2213,7 +2233,7 @@ describe("server/routes/onboarding additional coverage", () => {
     expect(
       deps.shellCmd.mock.calls.some(([cmd]) =>
         cmd.includes(
-          'git remote set-url origin "https://github.com/owner/repo.git"',
+          "git remote set-url origin 'https://github.com/owner/repo.git'",
         ),
       ),
     ).toBe(true);
@@ -2225,8 +2245,8 @@ describe("server/routes/onboarding additional coverage", () => {
   it("fails onboarding when the model cannot be set", async () => {
     const deps = createBaseDeps();
     mockHappyPathFiles(deps);
-    deps.shellCmd.mockImplementation(async (cmd) => {
-      if (cmd.startsWith("openclaw models set")) {
+    deps.execFileCmd.mockImplementation(async (file, args) => {
+      if (file === "openclaw" && args[0] === "models" && args[1] === "set") {
         throw new Error("unknown model");
       }
       return "";

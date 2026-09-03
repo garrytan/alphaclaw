@@ -102,4 +102,53 @@ describe("frontend/model-catalog", () => {
     });
     expect(getCached(kModelCatalogCacheKey)).toEqual(result);
   });
+
+  describe("resolveOnboardingModelDefault (GPT-5.6 defaults)", () => {
+    const load = () => import("../../lib/public/js/lib/model-catalog.js");
+    const withGpt56 = [
+      { key: "openai/gpt-5.6" },
+      { key: "openai/gpt-5.6-sol" },
+      { key: "anthropic/claude-opus-4-8" },
+    ];
+
+    it("defaults a fresh API-key OpenAI setup to the gpt-5.6 alias when listed", async () => {
+      const { resolveOnboardingModelDefault } = await load();
+      expect(
+        resolveOnboardingModelDefault({ catalog: withGpt56, authProvider: "openai" }),
+      ).toBe("openai/gpt-5.6");
+    });
+
+    it("defaults a fresh Codex OAuth setup to the exact gpt-5.6-sol when listed", async () => {
+      const { resolveOnboardingModelDefault } = await load();
+      expect(
+        resolveOnboardingModelDefault({
+          catalog: withGpt56,
+          authProvider: "openai-codex",
+        }),
+      ).toBe("openai/gpt-5.6-sol");
+    });
+
+    it("never preselects a beta-only default absent from the catalog", async () => {
+      const { resolveOnboardingModelDefault } = await load();
+      // Stable-pin catalog: no gpt-5.6. Falls back to the catalog-gated default.
+      const stableCatalog = [{ key: "anthropic/claude-opus-4-8" }];
+      expect(
+        resolveOnboardingModelDefault({
+          catalog: stableCatalog,
+          authProvider: "openai",
+        }),
+      ).toBe("anthropic/claude-opus-4-8");
+    });
+
+    it("respects an already-chosen model", async () => {
+      const { resolveOnboardingModelDefault } = await load();
+      expect(
+        resolveOnboardingModelDefault({
+          catalog: withGpt56,
+          authProvider: "openai",
+          currentModelKey: "anthropic/claude-opus-4-8",
+        }),
+      ).toBe("anthropic/claude-opus-4-8");
+    });
+  });
 });

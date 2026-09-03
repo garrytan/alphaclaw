@@ -1,0 +1,44 @@
+# Tag every merged version on main. The audit found zero git tags across 20
+# releases (releases existed only as package.json strings) and version numbers
+# racing across concurrent PRs. On each push to main this creates v<version>
+# at the merge commit; if the tag already exists at a DIFFERENT sha it fails
+# loudly — that is the renumber-race tripwire (two merges claimed one version).
+#
+# Note: tags created with GITHUB_TOKEN do not trigger further tag-triggered
+# workflows (none exist today). Tags mark merged repo versions; npm publishes
+# remain a separate, manual step (see AGENTS.md release flow).
+name: Tag release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Tag v<package.json version> if new
+        run: |
+          set -euo pipefail
+          version=$(node -p "require('./package.json').version")
+          tag="v${version}"
+          sha='${{ github.sha }}'
+          existing=$(git rev-parse -q --verify "refs/tags/${tag}" || true)
+          if [ -z "$existing" ]; then
+            git tag "$tag" "$sha"
+            git push origin "$tag"
+            echo "::notice::Tagged ${tag} at ${sha}."
+          elif [ "$existing" = "$sha" ]; then
+            echo "::notice::${tag} already exists at ${sha} — nothing to do."
+          else
+            echo "::error::${tag} already exists at ${existing}, but this push is ${sha}. Two merges claimed version ${version} — renumber one (see CLAUDE.md 'Merge unification safety')."
+            exit 1
+          fi

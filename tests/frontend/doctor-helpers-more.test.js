@@ -4,12 +4,17 @@ import {
   buildDoctorStatusFilterOptions,
   formatDoctorCategory,
   formatDoctorCharCount,
+  formatGatewayNotReadyMessage,
+  getDoctorAutoRunStatusLine,
   getDoctorBootstrapWarningTitle,
   getDoctorCategoryTone,
   getDoctorChangeLabel,
+  getDoctorNoChangesNote,
   getDoctorPriorityTone,
+  getDoctorRunDisabledReason,
   getDoctorRunPillDetail,
   getDoctorStatusTone,
+  getGatewayNotReadyMessage,
   getDoctorWarningMessage,
   shouldShowDoctorWarning,
 } from "../../lib/public/js/components/doctor/helpers.js";
@@ -39,6 +44,8 @@ describe("frontend/doctor helpers (extended)", () => {
 
   it("maps categories to tones with a default", () => {
     expect(getDoctorCategoryTone("mixed-concerns")).toBe("cyan");
+    expect(getDoctorCategoryTone("model drift")).toBe("warning");
+    expect(getDoctorCategoryTone("model_drift")).toBe("warning");
     expect(getDoctorCategoryTone("something else")).toBe("info");
     expect(getDoctorCategoryTone()).toBe("info");
   });
@@ -140,6 +147,37 @@ describe("frontend/doctor helpers (extended)", () => {
     );
   });
 
+  it("reads counts from the slim latestRun shape (nested under counts)", () => {
+    // status.latestRun nests cardCount/priorityCounts under counts.{...}.
+    expect(
+      getDoctorRunPillDetail({
+        status: "completed",
+        counts: { cardCount: 1, priorityCounts: { P0: 0, P1: 0, P2: 1 } },
+      }),
+    ).toBe("1 finding");
+    expect(
+      getDoctorRunPillDetail({
+        status: "completed",
+        counts: { cardCount: 0, priorityCounts: { P0: 0, P1: 0, P2: 0 } },
+      }),
+    ).toBe("No findings");
+    expect(
+      buildDoctorRunMarkers({
+        status: "completed",
+        counts: { cardCount: 2, priorityCounts: { P0: 1, P1: 1, P2: 0 } },
+      }),
+    ).toEqual([
+      { tone: "danger", count: 0, label: "P0" },
+      { tone: "warning", count: 0, label: "P1" },
+    ]);
+    expect(
+      buildDoctorRunMarkers({
+        status: "completed",
+        counts: { cardCount: 0, priorityCounts: { P0: 0, P1: 0, P2: 0 } },
+      }),
+    ).toEqual([{ tone: "success", count: 0, label: "No findings" }]);
+  });
+
   it("builds run markers for failures and P2-only runs", () => {
     expect(buildDoctorRunMarkers(null)).toEqual([]);
     expect(buildDoctorRunMarkers({ status: "failed" })).toEqual([
@@ -161,5 +199,165 @@ describe("frontend/doctor helpers (extended)", () => {
       "dismissed",
       "fixed",
     ]);
+  });
+
+  it("maps the new categories to tones", () => {
+    expect(getDoctorCategoryTone("project context")).toBe("warning");
+    expect(getDoctorCategoryTone("stale_guidance")).toBe("warning");
+    expect(getDoctorCategoryTone("Contradiction")).toBe("danger");
+    expect(getDoctorCategoryTone("memory-hygiene")).toBe("info");
+    expect(getDoctorCategoryTone("skills")).toBe("cyan");
+    expect(getDoctorCategoryTone("openclaw_doctor")).toBe("secondary");
+    // Existing fallback stays intact.
+    expect(getDoctorCategoryTone("unmapped category")).toBe("info");
+  });
+
+  it("disables the Run button only when the gateway is not ready", () => {
+    // Gateway readiness is the ONLY disable.
+    expect(
+      getDoctorRunDisabledReason({
+        runInProgress: true,
+        gatewayReadiness: { ok: false, reason: "gateway is restarting" },
+      }),
+    ).toBe("Gateway not ready: gateway is restarting");
+    expect(
+      getDoctorRunDisabledReason({
+        gatewayReadiness: { ok: false, reason: "" },
+      }),
+    ).toBe("Gateway not ready.");
+    // Everything else stays enabled — including zero workspace changes: the
+    // server's zero-change path is a cheap reuse run (no LLM) that still
+    // re-evaluates every environment check, and with scheduled scans off it
+    // is the only way stale sourced findings clear.
+    expect(
+      getDoctorRunDisabledReason({
+        runInProgress: true,
+        gatewayReadiness: { ok: true, reason: "" },
+      }),
+    ).toBe("");
+    expect(getDoctorRunDisabledReason({ needsInitialRun: true })).toBe("");
+    expect(
+      getDoctorRunDisabledReason({
+        changeSummary: { changedFilesCount: 2 },
+      }),
+    ).toBe("");
+    expect(
+      getDoctorRunDisabledReason({
+        changeSummary: { hasBaseline: true, changedFilesCount: 0 },
+      }),
+    ).toBe("");
+    expect(
+      getDoctorRunDisabledReason({
+        changeSummary: { changedFilesCount: 0 },
+        bootstrapContext: {
+          hardening: { state: "injected" },
+          hasActiveTruncation: false,
+        },
+      }),
+    ).toBe("");
+    expect(getDoctorRunDisabledReason(null)).toBe("");
+    // Old payloads without gatewayReadiness never treat the gateway as down.
+    expect(getDoctorRunDisabledReason({ needsInitialRun: true, gatewayReadiness: undefined })).toBe("");
+  });
+
+  it("surfaces the no-changes message as an informational note, never a disable", () => {
+    const noChangesStatus = {
+      changeSummary: { hasBaseline: true, changedFilesCount: 0 },
+    };
+    expect(getDoctorNoChangesNote(noChangesStatus)).toBe(
+      "No workspace changes since the last completed Drift Doctor run.",
+    );
+    // The very same state keeps the button enabled.
+    expect(getDoctorRunDisabledReason(noChangesStatus)).toBe("");
+
+    // No note without a status, mid-run, pre-first-run, without a PROVEN
+    // baseline, or once anything actually changed.
+    expect(getDoctorNoChangesNote(null)).toBe("");
+    expect(
+      getDoctorNoChangesNote({
+        runInProgress: true,
+        changeSummary: { hasBaseline: true, changedFilesCount: 0 },
+      }),
+    ).toBe("");
+    expect(
+      getDoctorNoChangesNote({
+        needsInitialRun: true,
+        changeSummary: { hasBaseline: true, changedFilesCount: 0 },
+      }),
+    ).toBe("");
+    expect(
+      getDoctorNoChangesNote({ changeSummary: { changedFilesCount: 0 } }),
+    ).toBe("");
+    expect(
+      getDoctorNoChangesNote({
+        changeSummary: { hasBaseline: true, changedFilesCount: 3 },
+      }),
+    ).toBe("");
+  });
+
+  it("formats the gateway-not-ready message from one source", () => {
+    expect(formatGatewayNotReadyMessage("gateway is restarting")).toBe(
+      "Gateway not ready: gateway is restarting",
+    );
+    expect(formatGatewayNotReadyMessage("  padded  ")).toBe(
+      "Gateway not ready: padded",
+    );
+    expect(formatGatewayNotReadyMessage("")).toBe("Gateway not ready.");
+    expect(formatGatewayNotReadyMessage()).toBe("Gateway not ready.");
+
+    expect(getGatewayNotReadyMessage(null)).toBe("");
+    expect(getGatewayNotReadyMessage({})).toBe("");
+    expect(
+      getGatewayNotReadyMessage({ gatewayReadiness: { ok: true, reason: "" } }),
+    ).toBe("");
+    expect(
+      getGatewayNotReadyMessage({
+        gatewayReadiness: { ok: false, reason: "gateway is restarting" },
+      }),
+    ).toBe("Gateway not ready: gateway is restarting");
+    expect(
+      getGatewayNotReadyMessage({ gatewayReadiness: { ok: false } }),
+    ).toBe("Gateway not ready.");
+
+    // The banner helper and the run-disabled reason always agree.
+    const degraded = {
+      runInProgress: true,
+      gatewayReadiness: { ok: false, reason: "gateway is restarting" },
+    };
+    expect(getDoctorRunDisabledReason(degraded)).toBe(
+      getGatewayNotReadyMessage(degraded),
+    );
+  });
+
+  it("summarizes the scheduled-scan check line", () => {
+    expect(getDoctorAutoRunStatusLine(null)).toBe("");
+    expect(getDoctorAutoRunStatusLine({})).toBe("");
+    expect(
+      getDoctorAutoRunStatusLine({ lastCheckAt: "not-a-date" }),
+    ).toBe("");
+    const line = getDoctorAutoRunStatusLine({
+      lastCheckAt: "2026-08-28T10:00:00.000Z",
+      lastSkipReason: "not-stale",
+    });
+    expect(line.startsWith("Last check: ")).toBe(true);
+    expect(line.endsWith("— workspace not stale yet")).toBe(true);
+    const ranLine = getDoctorAutoRunStatusLine({
+      lastCheckAt: "2026-08-28T10:00:00.000Z",
+      lastSkipReason: "ran",
+    });
+    expect(ranLine.endsWith("— ran a scan")).toBe(true);
+    // Unknown reasons pass through verbatim; empty reasons drop the suffix.
+    expect(
+      getDoctorAutoRunStatusLine({
+        lastCheckAt: "2026-08-28T10:00:00.000Z",
+        lastSkipReason: "mystery",
+      }).endsWith("— mystery"),
+    ).toBe(true);
+    expect(
+      getDoctorAutoRunStatusLine({
+        lastCheckAt: "2026-08-28T10:00:00.000Z",
+        lastSkipReason: "",
+      }).includes("—"),
+    ).toBe(false);
   });
 });
