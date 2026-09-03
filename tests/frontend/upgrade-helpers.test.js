@@ -2369,6 +2369,47 @@ describe("frontend/upgrade-helpers backup reuse consent (WI-4.4/4.5)", () => {
     expect(buildBackupInventoryRows(null, kNow)).toEqual([]);
   });
 
+  // D6: the server's `future_dated` ineligibility (run record ahead of this
+  // box's clock beyond the skew tolerance) must read as a sentence, never
+  // fall through to the raw enum on the badge.
+  it("a future-dated archive's badge names the clock problem, and every server ineligibility enum has a readable label (D6)", async () => {
+    const { buildBackupInventoryRows, kBackupIneligibleReasonLabels } = await loadUpgradeHelpers();
+    const rows = buildBackupInventoryRows(
+      { entries: [makeEntry({ eligible: false, ineligibleReason: "future_dated" })] },
+      kNow,
+    );
+    expect(rows[0].badges).toContainEqual({
+      id: "ineligible",
+      label: "not reusable — dated in the future — check the box's clock",
+      tone: "warning",
+    });
+    expect(rows[0].badges.map((badge) => badge.label).join(" ")).not.toContain("future_dated");
+    // Every value listBackupInventory can emit (openclaw-channel-sync.js)
+    // has a label — a new server enum must land here too.
+    for (const reason of [
+      "outside_dir",
+      "symlink",
+      "no_provenance",
+      "unverified",
+      "partial",
+      "future_dated",
+      "missing",
+    ]) {
+      expect(typeof kBackupIneligibleReasonLabels[reason]).toBe("string");
+      expect(kBackupIneligibleReasonLabels[reason]).not.toBe("");
+    }
+  });
+
+  // D10: the server maps ENOENT to an EMPTY (readable) inventory, so
+  // `readable:false` is EACCES/ENOTDIR/a stray file — the error copy must not
+  // invite the operator to dismiss a real failure as "not created yet".
+  it("the unreadable-backups copy never blames a missing directory (D10)", async () => {
+    const { kBackupsUnreadableMessage } = await loadUpgradeHelpers();
+    expect(kBackupsUnreadableMessage).not.toMatch(/not exist/i);
+    expect(kBackupsUnreadableMessage).toContain("permissions");
+    expect(kBackupsUnreadableMessage).toContain("stray file");
+  });
+
   it("renders a partial archive's recorded reasons (workspace exclusion, skipped core symlinks) and falls back to the generic label for old records (F4)", async () => {
     const {
       buildBackupInventoryRows,
