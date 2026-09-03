@@ -57,6 +57,9 @@ barrier held) and only after proving exclusivity.
 The `.alphaclaw.tar.gz` suffix is what distinguishes the producer on disk.
 Retention (`keep-3`), the inventory API and failure cleanup classify both
 producers with one pattern: `^openclaw-backup-[^/]*\.(alphaclaw\.)?tar\.gz$`.
+The archive is written `0600` inside a `0700` backups directory; a refused
+`chmod` (network filesystems) never fails the backup but is recorded on the
+run (`backup.mode`, `backup.modeError`), warned and notified.
 
 ### What is copied and how
 
@@ -65,7 +68,8 @@ producers with one pattern: `^openclaw-backup-[^/]*\.(alphaclaw\.)?tar\.gz$`.
 | `*.sqlite` (anywhere in the walk) | `node:sqlite` `backup(sourceDb, dest)` with the source opened `readOnly` and `PRAGMA busy_timeout = 30000` | Consistent single-file copy; `-wal`/`-shm`/`-journal` sidecars are **skipped** and listed under `skipped[]` with `coveredBy`. Each copy passes `PRAGMA integrity_check` and records `user_version`. |
 | Regular files | `copyFile` verbatim | `openclaw.json` is `kind: config`, everything else `kind: file`. |
 | Workspace dirs (`workspace`, `workspace-*`) | verbatim, **only** when their total size ≤ `kOpenclawBackupWorkspaceInlineBytes` (512 MiB) | Otherwise excluded → `options.includeWorkspace: false`, the run records `partial: true`, and the archive is never a reuse candidate. |
-| Symlinks, special files | skipped | Listed in `skipped[]`. |
+| Symlinks | `openclaw.json` is followed when it resolves to a regular file (`viaSymlink`); every other symlink is skipped and listed in `skipped[]` (`kind: "symlink"`, directory symlinks are never followed) | A skipped symlink at a **core asset** path (`openclaw.json`, `credentials/**`, `identity/**`, `state/**`, `agents/<id>/agent/**`, any `*.sqlite`) is appended to `partialReasons` and makes the run `partial: true` (never a reuse candidate); a symlink elsewhere is just skipped. |
+| Special files | skipped | Listed in `skipped[]`. |
 | `.alphaclaw/`, `logs/`, `tmp/`, `node_modules/`, `backups/` | skipped | AlphaClaw bookkeeping and non-state trees. |
 
 ## 3. `manifest.json`
@@ -95,6 +99,7 @@ Upstream core fields (schemaVersion 1) plus AlphaClaw's additions:
   "skipped": [
     { "kind": "sqlite-sidecar", "sourcePath": "/data/.openclaw/state/openclaw.sqlite-wal", "reason": "covered by the online sqlite copy", "coveredBy": "/data/.openclaw/state/openclaw.sqlite" }
   ],
+  "partialReasons": [],
   "producer": "alphaclaw-offline-copy",
   "alphaclawFormatVersion": 1,
   "exclusivityEvidence": {
@@ -284,9 +289,20 @@ DB) offline-copied in **19.2 s** (27 MB/s source throughput; sqlite
 
 ## 8. Inventory
 
-`GET /api/openclaw/backups` (5 s cache, manifest tier `safe`) lists every
-archive-class file in the backups directory with provenance from the run
-ledger / channel state: `{ file, producer, sizeBytes, mtimeMs, at, verified,
-partial, reused, exists, eligible, ineligibleReason }`. Symlinks, files outside
-the directory, files nothing recorded (`no_provenance`), unverified or partial
-archives and recorded-but-missing files are listed but never eligible.
+`GET /api/openclaw/backups` (5 s SWR cache, manifest tier `safe`, never on
+the status path; `?force=1` bypasses the cache, and an apply settling
+invalidates it) answers `{ backupsDir, readable, entries[], truncated,
+newestArchive, reuseWindowStartMs, reuseMaxAgeMs }`. `readable: false` means
+the directory exists but could not be scanned (a missing directory is an
+empty inventory, not an error); `entries` is newest-first and capped at 50
+(`truncated: true` when more exist). Each entry carries `{ file, producer,
+sizeBytes, mtimeMs, at, verified, partial, partialReasons, reused, sha256,
+exists, eligible, ineligibleReason }` with provenance from the run ledger /
+channel state. Symlinks (`symlink`), files outside the directory
+(`outside_dir`), files nothing recorded (`no_provenance`), unverified
+(`unverified`) or partial (`partial`) archives, records dated in the future
+(`future_dated`) and recorded-but-missing files (`missing`, `exists: false`)
+are listed but never eligible. `reuseWindowStartMs` / `reuseMaxAgeMs` are the
+bounds the consent gate in §6 enforces, computed by the same helper
+(`computeReuseWindowStartMs`), so the Upgrade tab's reuse offer can only name
+an archive the server would accept.

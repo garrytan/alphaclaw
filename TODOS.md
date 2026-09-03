@@ -401,12 +401,6 @@
 - **Context:** Merge-resolution finding (2026-08-29); verified contract in docs/designs/openclaw-context-contract.md §lifecycle appendix.
 - **Effort:** S. **Depends on:** nothing.
 
-## P3 — Live-tier openclaw backup CLI contract regression test
-- **What:** One tests/live assertion that a real `openclaw backup create --output <file>` writes exactly at the given path (refusing when it already exists) and `--output <dir>/` writes a timestamped archive inside the directory.
-- **Why:** Issues #7/#9 existed because every test stub encoded an unvalidated assumption about the CLI's `--output` contract; the contract is now verified from openclaw@2026.7.1-2 dist source, and a live guard catches future CLI changes.
-- **Context:** `createBackupStubRunner` (tests/live/live-helpers.js) stubs backup in the live tier; contract notes in the #7/#9 fix PR.
-- **Effort:** S. **Depends on:** live tier (`OPENCLAW_LIVE_E2E=1`) with a real openclaw build.
-
 ## P3 — Enforced backup pruning to the autotune byte budget
 - **What:** The resource-autotune branch shipped the ADVISORY half of size-aware retention: a disk-derived budget (`backupMaxTotalGb`, 20% of the backups volume clamped 2–60GB) that warns via `pruneBackups` and renders in the autotune ledger when the kept archives exceed it. Remaining: an opt-in ENFORCED mode that actually prunes below keep-3 toward the budget (always keeping ≥1 archive), plus surfacing backup disk usage in the UI.
 - **Why:** Auto-deleting verified backups is destructive and non-revertible, so enforcement needs its own explicit opt-in design (per the plan's outside-voice review) — the advisory warning covers the ENOSPC-awareness gap meanwhile.
@@ -782,6 +776,12 @@
 - **Effort:** M. **Depends on:** the launcher shipping.
 
 ## Completed
+
+## Live-tier openclaw backup CLI contract regression test
+- **What:** One tests/live assertion that a real `openclaw backup create --output <file>` writes exactly at the given path (refusing when it already exists) and `--output <dir>/` writes a timestamped archive inside the directory.
+- **Why:** Issues #7/#9 existed because every test stub encoded an unvalidated assumption about the CLI's `--output` contract; the contract is now verified from openclaw@2026.7.1-2 dist source, and a live guard catches future CLI changes.
+- **Context:** `createBackupStubRunner` (tests/live/live-helpers.js) stubs backup in the live tier; contract notes in the #7/#9 fix PR.
+- **Completed:** v0.9.45 (2026-08-29) — shipped in the #32 wave as `tests/live/openclaw-live-backup.e2e.test.js` Suite 1 (Case A: a nonexistent `--output` path IS the archive; Case B: an existing `--output` path is refused with a nonzero exit; Case C: an existing directory gets a timestamped archive inside it) against the real pinned CLI. Noticed still open during the v0.9.71 (#54) documentation pass; the same file now also hosts the #54 live backup harness.
 
 ## Mobile drawer doesn't close on external nav items
 - **What:** The generic `item.href` branch in `renderNavItem` (lib/public/js/components/sidebar.js) — used by the gated Dashboards link — never closes the mobile drawer, leaving the drawer and overlay covering the app while the new tab opens.

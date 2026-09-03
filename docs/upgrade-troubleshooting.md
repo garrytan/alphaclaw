@@ -128,14 +128,29 @@ mutated. The contract covers every pairing write (`POST
 /api/pairings/:id/approve` and `/reject`, `POST /api/devices/:id/approve`
 and `/reject` — a pairing write during the pause would put a live
 `openclaw` process on the state DB, exactly the traffic the barrier
-suppresses), auth-profile saves and channel-account deletes. Status readers
-serve last-known data, the cron store falls back to `jobs.json`, and
-notification flushes are held (never dropped) until the barrier releases.
-Two writers finish instead of refusing when the barrier begins *mid-flight*
-(config already changed): a channel delete clears the account's pairing
-rows after release and reports `pairingRowsCleanupDeferred: true`; the
-Codex OAuth exchange keeps the redeemed tokens and answers `202 { deferred:
-true }`. `GET /api/models/config`, `/api/models/auth` and
+suppresses), channel-account adds (`POST /api/channels/accounts` clears the
+id's stale pairing rows first, so the 409 lands before any env or config
+change) and deletes, model-config and auth-profile saves (`PUT
+/api/models/config`, `PUT`/`DELETE /api/models/auth/:profileId`), cron job
+writes (run now, enable/disable, prompt and routing edits), the Codex
+disconnect, and the watchdog test notification (`POST
+/api/watchdog/test-notification` — a raw send during the pause would read
+an empty pairing fallback and falsely report that nothing is paired).
+Readers that would shell out to the CLI hold back too: `GET
+/api/agent/sessions` serves the last-known list (even past its TTL) or
+answers the same 409 instead of spawning `openclaw sessions`, whose open
+state-DB handle would make the offline copy refuse the paused box. The
+agent-admin CLI (`alphaclaw admin …`) sees the same 409 + `Retry-After`.
+Status readers serve last-known data, the cron store falls back to
+`jobs.json`, and notification flushes are held (never dropped) until the
+barrier releases. Two writers finish instead of refusing when the barrier
+begins *mid-flight* (config already changed): a channel delete clears the
+account's pairing rows after release and reports
+`pairingRowsCleanupDeferred: true`; the Codex OAuth exchange keeps the
+redeemed tokens and answers `202 { deferred: true }` (the browser callback
+checks the barrier before consuming its one-use state, so it renders a
+"backup in progress" page and the login attempt stays valid to reopen).
+`GET /api/models/config`, `/api/models/auth` and
 `/api/codex/status` carry `unavailable: true, reason: "backup_in_progress"`
 so configured credentials render as unavailable, not deleted. Retry after
 the pause. Kill switch: `OPENCLAW_STATE_DB_QUIET=off` (deployment env only)

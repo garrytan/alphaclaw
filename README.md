@@ -388,10 +388,12 @@ If you need OpenClaw's full security posture (manual pairing codes, no query-str
 Release history lives in [CHANGELOG.md](CHANGELOG.md); contributor setup and
 test tiers are in [CONTRIBUTING.md](CONTRIBUTING.md); open work is tracked in
 [TODOS.md](TODOS.md); design documents (Agent Administration, chat reliability, gateway state
-model, the OpenClaw context contract, Telegram topics discovery) live in
+model, the OpenClaw context contract, Telegram topics discovery, the AlphaClaw
+offline-copy backup format) live in
 [docs/designs/](docs/designs/);
-the operator runbook for upgrade failure states (held gateways, blocked
-restores, rollback fencing) is
+the operator runbook for upgrade failure states (held gateways, backup
+contention and the offline copy, restoring a backup, consented backup reuse,
+incumbent gateways, the prelaunch hook, rollback fencing) is
 [docs/upgrade-troubleshooting.md](docs/upgrade-troubleshooting.md);
 architecture notes and conventions for coding agents are in
 [AGENTS.md](AGENTS.md).
@@ -406,9 +408,13 @@ npm run test:coverage   # Coverage report
 
 # Live e2e tiers (opt-in; hit the REAL npm registry / GitHub API and install
 # real OpenClaw releases — catch upstream drift the hermetic suite can't):
-npm run test:live       # catalog + real stable/beta package applies, plus a
-                        # real-gateway memory-leak e2e against the newest beta
-                        # (network). Needs a supported Node FIRST on PATH (the
+npm run test:live       # catalog + real stable/beta package applies, a
+                        # real-gateway memory-leak e2e against the newest beta,
+                        # and the #54 backup suites (state-lock contention
+                        # reproduction, real beta→stable downgrade, 12-cell
+                        # restore drill, gateway-stop contract) against the real
+                        # pin/stable/beta packages (network). Needs a supported
+                        # Node FIRST on PATH (the
                         # real npm installs resolve `node` from PATH). Stages GBs
                         # under $TMPDIR: roots are swept per file; between
                         # interrupted runs `rm -rf /tmp/alphaclaw-live-*
