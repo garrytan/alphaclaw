@@ -27,6 +27,13 @@ export default async function setupRunTmpdir() {
   // TMP/TEMP are read by nothing on POSIX but cost nothing and keep the
   // three conventional names consistent for any child process the tests spawn.
   for (const key of ["TMPDIR", "TMP", "TEMP"]) process.env[key] = runDir;
+  // No session-bus autolaunch from the suite. Tests that execute real host
+  // binaries (the bin/ CLI tests run `alphaclaw`, which shells out to `gog`
+  // when it is installed) otherwise make libdbus/GLib fork a
+  // `dbus-daemon --session` per call that outlives the run: 1 327 orphaned
+  // daemons and their /tmp/dbus-* sockets were counted on one dev box.
+  // An address with an unknown transport fails fast and never autolaunches.
+  if (!process.env.DBUS_SESSION_BUS_ADDRESS) process.env.DBUS_SESSION_BUS_ADDRESS = "disabled:";
   return () => {
     if (process.env[kKeepEnv] === "1") {
       process.stderr.write(`[setup-tmpdir] kept ${runDir} (${kKeepEnv}=1)\n`);

@@ -373,7 +373,7 @@ offline copy refuses to run when the stop was not confirmed.
 (deployment env only) runs an operator-installed executable before **every**
 gateway launch and aborts the launch when the hook is refused or fails
 (`GatewayPrelaunchHookError`, codes such as `not_root_owned`, `in_tree`,
-`symlink`, `writable`, `nonzero_exit`, `timeout`). The watchdog records a
+`symlink`, `writable_by_others`, `nonzero_exit`, `timeout`). The watchdog records a
 `prelaunch_hook` event, an important notification is sent, and the gateway
 stays down with `degradedReason: prelaunch_hook_failed` until the next
 successful launch.

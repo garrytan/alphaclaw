@@ -297,7 +297,7 @@ the directory exists but could not be scanned (a missing directory is an
 empty inventory, not an error); `entries` is newest-first and capped at 50
 (`truncated: true` when more exist). Each entry carries `{ file, producer,
 sizeBytes, mtimeMs, at, verified, partial, partialReasons, reused, sha256,
-exists, eligible, ineligibleReason }` with provenance from the run ledger /
+exists, eligible, ineligibleReason, name, mode, operationId }` (`mode` is `"0600"`, `"default"` or null; `operationId` links the producing update run) with provenance from the run ledger /
 channel state. Symlinks (`symlink`), files outside the directory
 (`outside_dir`), files nothing recorded (`no_provenance`), unverified
 (`unverified`) or partial (`partial`) archives, records dated in the future
