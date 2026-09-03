@@ -63,6 +63,7 @@ import {
   kCodexDeferredSaveNotFoundReason,
   kCodexDeferredSaveRecheckMs,
 } from "../../lib/public/js/lib/codex-status.js";
+import { kStoreUnavailableRecheckMs } from "../../lib/public/js/lib/store-availability.js";
 import { useWelcomeCodex } from "../../lib/public/js/components/onboarding/use-welcome-codex.js";
 
 const harness = preactHooks.__harness;
@@ -282,6 +283,44 @@ describe("frontend/use-welcome-codex status check semantics", () => {
       expect(hook.codexDeferredSaveFailedReason).toBe(kCodexDeferredSaveNotFoundReason);
       await vi.advanceTimersByTimeAsync(kCodexDeferredSaveRecheckMs * 3);
       expect(fetchCodexStatus.mock.calls.length).toBe(readsBefore + 1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // D14: onboarding never remounts, so an unavailable read must re-read on
+  // its own — ONE bounded timer per unavailable read, dropped once readable.
+  it("D14: an unavailable status read arms ONE bounded recheck, re-arms while still unavailable, and stops once a readable read lands", async () => {
+    vi.useFakeTimers();
+    try {
+      const kUnavailable = { connected: false, unavailable: true, reason: "backup_in_progress" };
+      fetchCodexStatus.mockResolvedValue(kUnavailable);
+      let hook = renderHook();
+      harness.effects[0]();
+      await vi.advanceTimersByTimeAsync(0);
+      hook = renderHook();
+      expect(hook.codexStatus.unavailable).toBe(true);
+      expect(fetchCodexStatus).toHaveBeenCalledTimes(1);
+
+      // Nothing before the bound, exactly one read at it.
+      await vi.advanceTimersByTimeAsync(kStoreUnavailableRecheckMs - 1);
+      expect(fetchCodexStatus).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(fetchCodexStatus).toHaveBeenCalledTimes(2);
+
+      // Still unavailable → re-armed once more (never two timers).
+      await vi.advanceTimersByTimeAsync(kStoreUnavailableRecheckMs - 1);
+      expect(fetchCodexStatus).toHaveBeenCalledTimes(2);
+      fetchCodexStatus.mockResolvedValue({ connected: true });
+      await vi.advanceTimersByTimeAsync(1);
+      expect(fetchCodexStatus).toHaveBeenCalledTimes(3);
+      hook = renderHook();
+      expect(hook.codexStatus).toEqual({ connected: true });
+      expect(hook.codexStatusKnown).toBe(true);
+
+      // Readable: no further rechecks — a healthy store is never polled.
+      await vi.advanceTimersByTimeAsync(kStoreUnavailableRecheckMs * 3);
+      expect(fetchCodexStatus).toHaveBeenCalledTimes(3);
     } finally {
       vi.useRealTimers();
     }

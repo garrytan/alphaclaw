@@ -78,6 +78,7 @@ import { showToast } from "../../lib/public/js/components/toast.js";
 import { invalidateCache, invalidateCachePrefix } from "../../lib/public/js/lib/api-cache.js";
 import { openCodexAuthWindow } from "../../lib/public/js/lib/codex-oauth-window.js";
 import { kCodexDeferredSaveRecheckMs } from "../../lib/public/js/lib/codex-status.js";
+import { kStoreUnavailableRecheckMs } from "../../lib/public/js/lib/store-availability.js";
 import { SecretInput } from "../../lib/public/js/components/secret-input.js";
 import { ActionButton } from "../../lib/public/js/components/action-button.js";
 import { InlineErrorChip } from "../../lib/public/js/components/inline-error-chip.js";
@@ -449,6 +450,46 @@ describe("frontend/providers component", () => {
       // No further rechecks once the claim is decided.
       await vi.advanceTimersByTimeAsync(kCodexDeferredSaveRecheckMs * 3);
       expect(api.fetchCodexStatus.mock.calls.length).toBe(readsBefore + 1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // D14: the "Unavailable during backup" badge must clear on its own once
+  // the barrier lifts — ONE bounded status re-read per unavailable read.
+  it("D14: an unavailable status read arms ONE bounded recheck, re-arms while still unavailable, and stops once readable", async () => {
+    vi.useFakeTimers();
+    try {
+      api.fetchCodexStatus.mockResolvedValue({
+        connected: false,
+        unavailable: true,
+        reason: "backup_in_progress",
+      });
+      renderProviders();
+      harness.effects[0]?.();
+      await vi.advanceTimersByTimeAsync(0);
+      let tree = renderProviders();
+      expect(collectText(tree).join(" ")).toContain("Unavailable during backup");
+      const readsAfterMount = api.fetchCodexStatus.mock.calls.length;
+
+      await vi.advanceTimersByTimeAsync(kStoreUnavailableRecheckMs - 1);
+      expect(api.fetchCodexStatus.mock.calls.length).toBe(readsAfterMount);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(api.fetchCodexStatus.mock.calls.length).toBe(readsAfterMount + 1);
+      // Only the status is re-read — never the whole tab.
+      expect(api.fetchEnvVars).toHaveBeenCalledTimes(1);
+
+      // Still unavailable → re-armed; the barrier lifts before the next one.
+      api.fetchCodexStatus.mockResolvedValue({ connected: true });
+      await vi.advanceTimersByTimeAsync(kStoreUnavailableRecheckMs);
+      expect(api.fetchCodexStatus.mock.calls.length).toBe(readsAfterMount + 2);
+      tree = renderProviders();
+      const text = collectText(tree).join(" ");
+      expect(text).not.toContain("Unavailable during backup");
+      expect(text).toContain("Connected");
+
+      await vi.advanceTimersByTimeAsync(kStoreUnavailableRecheckMs * 3);
+      expect(api.fetchCodexStatus.mock.calls.length).toBe(readsAfterMount + 2);
     } finally {
       vi.useRealTimers();
     }

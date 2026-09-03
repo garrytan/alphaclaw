@@ -91,6 +91,7 @@ import {
   kCodexStatusCacheKey,
 } from "../../lib/public/js/components/models-tab/use-models.js";
 import { kModelsConfigCacheKey } from "../../lib/public/js/lib/cache-keys.js";
+import { kStoreUnavailableRecheckMs } from "../../lib/public/js/lib/store-availability.js";
 import { kModelCatalogCacheKey } from "../../lib/public/js/lib/model-catalog.js";
 
 const harness = preactHooks.__harness;
@@ -486,6 +487,87 @@ describe("frontend/models-tab use-models", () => {
     });
     expect(hook.result().codexStatusKnown).toBe(true);
     expect(hook.result().codexStatusError).toBe("");
+  });
+
+  // D14: the "Credential store unavailable" line and the codex badge must
+  // clear on their own once the barrier lifts — ONE bounded full re-read per
+  // unavailable read (config OR codex), dropped once both are readable.
+  it("D14: an unavailable config read arms ONE bounded recheck that re-reads the store; readable reads stop it", async () => {
+    vi.useFakeTimers();
+    try {
+      const hook = renderHook();
+      const { catalog, config, codex } = fetchStates();
+      catalog.refresh.mockResolvedValue(kCatalog);
+      codex.refresh.mockResolvedValue({ connected: true });
+      config.refresh.mockResolvedValue(
+        configPayload({ authProfiles: [], authOrder: {}, unavailable: true, reason: "backup_in_progress" }),
+      );
+      await hook.runRefreshEffect();
+      hook.render();
+      expect(hook.result().authStoreUnavailable).toEqual({ reason: "backup_in_progress" });
+      expect(config.refresh).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(kStoreUnavailableRecheckMs - 1);
+      expect(config.refresh).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(config.refresh).toHaveBeenCalledTimes(2);
+      hook.render();
+      expect(hook.result().authStoreUnavailable).toEqual({ reason: "backup_in_progress" });
+
+      // Still unavailable → re-armed exactly once; then the barrier lifts.
+      config.refresh.mockResolvedValue(configPayload());
+      await vi.advanceTimersByTimeAsync(kStoreUnavailableRecheckMs);
+      expect(config.refresh).toHaveBeenCalledTimes(3);
+      hook.render();
+      expect(hook.result().authStoreUnavailable).toBeNull();
+      expect(hook.result().authProfiles).toHaveLength(2);
+
+      await vi.advanceTimersByTimeAsync(kStoreUnavailableRecheckMs * 3);
+      expect(config.refresh).toHaveBeenCalledTimes(3);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("D14: a codex-only unavailable read (refreshCodexStatus) arms the same recheck; a readable full refresh drops a pending one", async () => {
+    vi.useFakeTimers();
+    try {
+      const hook = renderHook();
+      const { catalog, config, codex } = fetchStates();
+      catalog.refresh.mockResolvedValue(kCatalog);
+      config.refresh.mockResolvedValue(configPayload());
+      codex.refresh.mockResolvedValue({ connected: true });
+      await hook.runRefreshEffect();
+      hook.render();
+
+      codex.refresh.mockResolvedValue({ connected: true, unavailable: true, reason: "backup_in_progress" });
+      await hook.result().refreshCodexStatus();
+      hook.render();
+      expect(hook.result().codexStatus.unavailable).toBe(true);
+      const configReads = config.refresh.mock.calls.length;
+      const codexReads = codex.refresh.mock.calls.length;
+
+      // The recheck is the FULL refresh (config may be unavailable too).
+      codex.refresh.mockResolvedValue({ connected: true });
+      await vi.advanceTimersByTimeAsync(kStoreUnavailableRecheckMs);
+      expect(config.refresh.mock.calls.length).toBe(configReads + 1);
+      expect(codex.refresh.mock.calls.length).toBe(codexReads + 1);
+      hook.render();
+      expect(hook.result().codexStatus).toEqual({ connected: true });
+      await vi.advanceTimersByTimeAsync(kStoreUnavailableRecheckMs * 3);
+      expect(config.refresh.mock.calls.length).toBe(configReads + 1);
+
+      // Armed by an unavailable read, then a readable manual refresh lands
+      // before it fires: the pending timer is dropped, not fired later.
+      codex.refresh.mockResolvedValue({ connected: true, unavailable: true, reason: "backup_in_progress" });
+      await hook.result().refreshCodexStatus();
+      expect(vi.getTimerCount()).toBe(1);
+      codex.refresh.mockResolvedValue({ connected: true });
+      await hook.result().refresh();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   // Kept last: the only UNSCOPED test — it is the one mode that writes the
