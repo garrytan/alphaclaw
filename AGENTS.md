@@ -342,3 +342,5 @@ Use these conventions for all UI work under `lib/public/js` and `lib/public/css`
 - All standalone `localStorage` keys are defined in `lib/public/js/lib/storage-keys.js`. Import keys from this file — never define raw localStorage key strings inline in components.
 - Use the naming convention `alphaclaw.<area>.<purpose>` for new keys (e.g. `alphaclaw.doctor.lastSessionKey`).
 - Keys that live inside the `alphaclaw.ui.settings` JSON blob (e.g. `browseLastPath`, `doctorWarningDismissedUntilMs`) are sub-keys, not standalone localStorage entries — those stay in their consuming file.
+
+`npm test` runs under a private per-run `TMPDIR` (`tests/setup-tmpdir.js`, a Vitest `globalSetup` that the forked workers inherit and that is removed at teardown): tests create scratch dirs via `os.tmpdir()` / `fs.mkdtempSync`, never a hard-coded `/tmp`, and a test that must keep its scratch files for inspection is run with `ALPHACLAW_KEEP_TEST_TMPDIR=1` rather than by skipping its cleanup.
