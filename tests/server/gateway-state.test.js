@@ -417,7 +417,7 @@ describe("server/gateway-state reducer", () => {
     expect(result.actions.some((a) => a.id === "restart")).toBe(true);
   });
 
-  it("starting: Restart is disabled with a reason under a leased operation, enabled for a watchdog-owned relaunch", () => {
+  it("starting: Restart is disabled under a leased operation AND during a watchdog-owned relaunch, enabled once the launch is just waiting on health", () => {
     const leased = reduceGatewayState(
       inputs({
         tcp: { running: false, observedAt: kNow },
@@ -425,18 +425,76 @@ describe("server/gateway-state reducer", () => {
       }),
     );
     expect(leased.state).toBe("starting");
-    expect(leased.actions.find((a) => a.id === "restart")?.disabledReason).toBeTruthy();
+    expect(leased.actions.find((a) => a.id === "restart")?.disabledReason).toBe(
+      kLifecycleActionBlockReasons.operation,
+    );
 
-    const watchdogRelaunch = reduceGatewayState(
+    // Crash relaunch / exit-78 auto-retry release the lifecycle lock right
+    // after spawn (or never take it): only the lifecycle says a relaunch is in
+    // flight, and a user restart here would stop the child just spawned.
+    for (const lifecycle of ["restarting", "crashed"]) {
+      const relaunch = reduceGatewayState(
+        inputs({
+          tcp: { running: false, observedAt: kNow },
+          watchdog: { lifecycle, health: "unknown", safeMode: false, crashCountInWindow: 0 },
+        }),
+      );
+      expect(relaunch.state, lifecycle).toBe("starting");
+      expect(relaunch.actions.find((a) => a.id === "restart")?.disabledReason, lifecycle).toBe(
+        kLifecycleActionBlockReasons.relaunch,
+      );
+    }
+    const opInProgress = reduceGatewayState(
       inputs({
         tcp: { running: false, observedAt: kNow },
-        watchdog: { lifecycle: "restarting", health: "unknown", safeMode: false, crashCountInWindow: 0 },
+        watchdog: { lifecycle: "running", health: "unknown", safeMode: false, crashCountInWindow: 0, operationInProgress: true },
       }),
     );
-    expect(watchdogRelaunch.state).toBe("starting");
-    const restart = watchdogRelaunch.actions.find((a) => a.id === "restart");
-    expect(restart).toBeTruthy();
-    expect(restart.disabledReason).toBeUndefined();
+    expect(opInProgress.actions.find((a) => a.id === "restart")?.disabledReason).toBe(
+      kLifecycleActionBlockReasons.relaunch,
+    );
+
+    // Launched, healthy-unknown, nothing else in flight: Restart is live.
+    const waitingOnHealth = reduceGatewayState(
+      inputs({
+        tcp: { running: true, observedAt: kNow },
+        watchdog: { lifecycle: "running", health: "unknown", safeMode: false, crashCountInWindow: 0 },
+      }),
+    );
+    expect(waitingOnHealth.state).toBe("starting");
+    expect(waitingOnHealth.actions.find((a) => a.id === "restart")?.disabledReason).toBeUndefined();
+  });
+
+  it("an unreadable/corrupted hold state fails closed: Restart, Retry and Repair are disabled with the unreadable reason", () => {
+    const result = reduceGatewayState(inputs({ gatewayHoldUnreadable: true }));
+    expect(result.actions.find((a) => a.id === "restart").disabledReason).toBe(
+      kLifecycleActionBlockReasons.gatewayHoldUnreadable,
+    );
+    const down = actionsForState("down", {
+      operationActive: false,
+      inStabilizationWindow: false,
+      gatewayHoldUnreadable: true,
+    });
+    for (const id of ["retry", "repair"]) {
+      expect(down.find((a) => a.id === id).disabledReason).toBe(
+        kLifecycleActionBlockReasons.gatewayHoldUnreadable,
+      );
+    }
+    // Precedence: operation > relaunch > unreadable > held.
+    const both = actionsForState("running", {
+      operationActive: false,
+      inStabilizationWindow: false,
+      gatewayHeld: true,
+      gatewayHoldUnreadable: true,
+    });
+    expect(both[0].disabledReason).toBe(kLifecycleActionBlockReasons.gatewayHoldUnreadable);
+    const relaunchWins = actionsForState("running", {
+      operationActive: false,
+      inStabilizationWindow: false,
+      gatewayHeld: true,
+      relaunchActive: true,
+    });
+    expect(relaunchWins[0].disabledReason).toBe(kLifecycleActionBlockReasons.relaunch);
   });
 
   it("disables the restart action with a reason while an operation is active", () => {

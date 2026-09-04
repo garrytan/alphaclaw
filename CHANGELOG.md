@@ -53,6 +53,28 @@ the reconciler had just held.
   hooks report a hold — forced/manual included — and `POST /api/watchdog/repair`
   maps that one skip to 409 with the Upgrade-page message. Other skips keep
   their legacy 200 shape (see TODOS "Manual repair should queue").
+- **Pre-landing review hardening (same wave).** Hold reads fail CLOSED
+  everywhere: an unreadable or corrupted release-channel state file refuses
+  restart and repair with `gateway_hold_unreadable` and disables the card's
+  lifecycle actions with a reason (`getChannelInfo` now exposes
+  `stateCorrupted`). `starting` disables Restart while a watchdog relaunch is
+  in flight (`lifecycle` restarting/crashed or `operationInProgress`) —
+  crash relaunches release the lifecycle lock right after spawn and the
+  exit-78 auto-retry never takes it, so a user restart there would stop the
+  child just spawned. The restart route refuses `booting` up front while boot
+  holds the lock (the server now enforces the card's exemption), every 409
+  carries a `hint`, and a joiner attached to a queued restart that is then
+  refused gets the same 409 + code as the initiator. Policy refusals stamp the
+  restart record with their `code`, so the client clears the progress card
+  and toasts the remedy on BOTH delivery paths (fast-gate 409 and the
+  post-lock terminal SSE event) and never resurrects a refusal as a failed
+  restart after reload. `tryAcquire` yields to a pending queued acquire; the
+  banner step counter accounts for the optional `waiting_for_lock` step; the
+  status badge labels every lifecycle-lock kind (reconcile retry, medic,
+  crash relaunch, memory mitigation, autotune, env sync, backup quiesce)
+  instead of "Working…"; the agent-admin manifest documents the 409 codes for
+  `system.gateway-restart` and `watchdog.repair`; hold copy lives in one
+  export (`kGatewayHoldCopy`).
 - **Honest copy.** `safe_mode` glossary: "Restart relaunches the gateway but
   does not resume paused channels" (OpenClaw's crash-loop breaker re-applies
   the suppression at gateway startup; only Resume channels lifts it).

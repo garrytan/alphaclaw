@@ -144,6 +144,21 @@ describe("server/routes/watchdog", () => {
     expect(res.body.result.reason).toBe("gateway_held");
   });
 
+  it("maps a gateway_hold_unreadable repair refusal to 409 with the fail-closed hint", async () => {
+    const deps = createDeps();
+    deps.watchdog.triggerRepair.mockResolvedValue({
+      ok: false,
+      skipped: true,
+      reason: "gateway_hold_unreadable",
+    });
+    const app = createApp(deps);
+    const res = await request(app).post("/api/watchdog/repair");
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe("gateway_hold_unreadable");
+    expect(res.body.error).toContain("could not read the gateway hold state");
+    expect(res.body.hint).toContain("release-channel state file");
+  });
+
   it("triggers repair and returns result on POST /api/watchdog/repair", async () => {
     const deps = createDeps();
     deps.watchdog.triggerRepair.mockResolvedValue({

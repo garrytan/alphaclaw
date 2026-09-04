@@ -270,6 +270,26 @@ describe("frontend/global-restart-banner (demoted)", () => {
     ).toBeNull();
   });
 
+  it("buildRestartBannerProgress widens the total for a leading waiting_for_lock step (queued restart) so the counter never runs ahead", () => {
+    const queued = {
+      ...kRunningOperation,
+      steps: [
+        { name: "waiting_for_lock", label: "Waiting for the current operation to finish", status: "done" },
+        { name: "preparing_plugins", label: "Checking plugins", status: "skipped" },
+        ...kRunningOperation.steps,
+      ],
+    };
+    // waiting + preparing + stopping + launching started = step 4 of 6.
+    expect(buildRestartBannerProgress(queued)).toEqual({ step: 4, of: 6 });
+    const queuedNoPrepare = {
+      ...kRunningOperation,
+      steps: [
+        { name: "waiting_for_lock", label: "Waiting for the current operation to finish", status: "running" },
+      ],
+    };
+    expect(buildRestartBannerProgress(queuedNoPrepare)).toEqual({ step: 1, of: 5 });
+  });
+
   it("buildRestartBannerProgress counts server steps (optional preparing_plugins widens the total)", () => {
     expect(buildRestartBannerProgress(kRunningOperation)).toEqual({
       step: 2,

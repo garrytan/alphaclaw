@@ -206,6 +206,53 @@ describe("server/restart-required-state (operation lifecycle)", () => {
     expect(snapshot.activeOperation).toBeNull();
   });
 
+  it("completeRestart stamps a policy-refusal code on the record and the last-operation read returns it", async () => {
+    let nowMs = 10_000;
+    const store = makeStore({ now: () => nowMs, getBootId: () => "boot-A" });
+    store.markRequired("env_vars_changed");
+
+    const { operationId, reasonsSnapshot } = store.beginRestart();
+    expect(operationId).toMatch(/[0-9a-f-]{36}/);
+    expect(reasonsSnapshot).toEqual(["env_vars_changed"]);
+
+    const active = store.getActiveRestartOperation();
+    expect(active).toMatchObject({
+      operationId,
+      kind: "gateway_restart",
+      startedAt: 10_000,
+      bootId: "boot-A",
+      // Initial lifetime = the shared restart-operation budget (the route
+      // keepalive extends it while queued/running).
+      expiresAt: 10_000 + kGatewayRestartOperationBudgetMs,
+      status: "running",
+      lastStep: null,
+      errorSummary: null,
+    });
+    expect((await store.getSnapshot()).restartInProgress).toBe(true);
+    expect((await store.getSnapshot()).activeOperation.operationId).toBe(
+      operationId,
+    );
+
+    const updated = store.updateRestartOperation({
+      operationId,
+      lastStep: "stopping",
+    });
+    expect(updated.lastStep).toBe("stopping");
+    expect(store.updateRestartOperation({ operationId: "nope" })).toBeNull();
+
+    nowMs = 20_000;
+    const record = store.completeRestart({
+      operationId,
+      ok: false,
+      errorSummary: "held",
+      code: "gateway_held",
+    });
+    expect(record).toMatchObject({ operationId, status: "failed", code: "gateway_held", errorSummary: "held" });
+    expect(store.getLastRestartOperation()).toMatchObject({ operationId, code: "gateway_held" });
+    // A non-string / empty code normalizes to null.
+    expect(record.code).toBe("gateway_held");
+  });
+
   it("clears only the reasons snapshot: mid-restart reasons survive", async () => {
     const store = makeStore();
     store.markRequired("env_vars_changed");

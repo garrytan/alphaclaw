@@ -70,6 +70,22 @@ describe("server/gateway-lifecycle-lock", () => {
     r4();
   });
 
+  it("tryAcquire skips while a queued user acquire is pending, even in the gap after the holder released", async () => {
+    const lock = createGatewayLifecycleLock({ leaseMs: 10_000 });
+    const releaseBoot = await lock.acquire("boot");
+    const queued = lock.acquire("restart");
+    releaseBoot();
+    // `active` is momentarily null, but a turn is pending: a same-tick
+    // background try must not jump the queued user restart.
+    expect(lock.getActiveOperation()).toBeNull();
+    expect(lock.tryAcquire("crash_restart")).toBeNull();
+    (await queued)();
+    // Fully idle again: try succeeds.
+    const releaseTry = lock.tryAcquire("crash_restart");
+    expect(releaseTry).toBeTypeOf("function");
+    releaseTry();
+  });
+
   it("a throwing onQueued handler is contained and logged, never poisoning the queue", async () => {
     const warn = vi.fn();
     const lock = createGatewayLifecycleLock({ leaseMs: 10_000, logger: { warn } });

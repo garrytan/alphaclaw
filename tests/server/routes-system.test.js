@@ -1260,6 +1260,8 @@ describe("server/routes/system", () => {
       // Issue #20: the restart-handoff verdict banner reads this to avoid a
       // green "activation verified" while the reconciler holds the gateway.
       gatewayHold: null,
+      // Read-time corruption flag from getChannelInfo (fail-closed hold gates).
+      stateCorrupted: false,
     });
   });
 
@@ -2820,7 +2822,8 @@ describe("server/routes/system", () => {
 
   it("re-validates the reconciler hold AFTER acquiring the lifecycle lock — a hold set while queued blocks the launch (sync 409, ledger 'skipped')", async () => {
     const h = createQueuedRestartHarness();
-    const releaseBoot = await h.deps.gatewayLifecycleLock.acquire("boot");
+    // A reconcile retry holds the lock (boot itself is refused up front now).
+    const releaseBoot = await h.deps.gatewayLifecycleLock.acquire("reconcile_retry");
 
     const pending = h.send("/api/gateway/restart");
     // The request queued behind boot: the lock-owned onQueued fired and the
@@ -2831,7 +2834,7 @@ describe("server/routes/system", () => {
     );
     expect(h.deps.restartGateway).not.toHaveBeenCalled();
 
-    // Boot's reconciler now HOLDS the gateway (config failed migration) and
+    // The reconcile retry now HOLDS the gateway (config failed migration) and
     // releases the lock. The queued restart must not launch on that config.
     h.world.hold = { reason: "settings migration failed", blamedKeys: ["mystery"] };
     releaseBoot();
@@ -2842,6 +2845,9 @@ describe("server/routes/system", () => {
     expect(res.body.error).toContain("Upgrade page");
     expect(h.deps.restartGateway).not.toHaveBeenCalled();
     expect(h.deps.watchdog.onExpectedRestart).not.toHaveBeenCalled();
+    // A refusal never opened the expected-restart window, so it must not
+    // "settle" one either (that would fire an operation_end health probe).
+    expect(h.deps.watchdog.onExpectedRestartSettled).not.toHaveBeenCalled();
     // UI: terminal event carrying the blocker code + hint.
     expect(h.deps.operationEvents.fail).toHaveBeenCalledWith(
       "op-queued",
@@ -2849,7 +2855,7 @@ describe("server/routes/system", () => {
     );
     // Record closes not-ok; ledger books a SKIP, never a failed restart.
     expect(h.deps.restartRequiredState.completeRestart).toHaveBeenCalledWith(
-      expect.objectContaining({ operationId: "op-queued", ok: false }),
+      expect.objectContaining({ operationId: "op-queued", ok: false, code: "gateway_held" }),
     );
     expect(h.deps.restartRequiredState.markRestartComplete).toHaveBeenCalled();
     expect(h.deps.watchdog.recordOperationEvent).toHaveBeenCalledWith({
@@ -2890,7 +2896,8 @@ describe("server/routes/system", () => {
 
   it("async callers get 202 immediately and the blocker surfaces as the operation's terminal fail event", async () => {
     const h = createQueuedRestartHarness();
-    const releaseBoot = await h.deps.gatewayLifecycleLock.acquire("boot");
+    // A reconcile retry holds the lock (boot itself is refused up front now).
+    const releaseBoot = await h.deps.gatewayLifecycleLock.acquire("reconcile_retry");
     const res = await h.send("/api/gateway/restart?async=1");
     expect(res.status).toBe(202);
     expect(res.body).toEqual({ ok: true, operationId: "op-queued" });
@@ -2925,15 +2932,22 @@ describe("server/routes/system", () => {
 
   it("a joiner attached to a queued restart that is then blocked gets the same 409 + code as the initiator", async () => {
     const h = createQueuedRestartHarness();
-    const releaseBoot = await h.deps.gatewayLifecycleLock.acquire("boot");
+    // A reconcile retry holds the lock (boot itself is refused up front now).
+    const releaseBoot = await h.deps.gatewayLifecycleLock.acquire("reconcile_retry");
     const first = h.send("/api/gateway/restart");
     await h.waitUntil(
       () => h.stepEvents().includes("waiting_for_lock:running"),
       "waiting_for_lock step",
     );
+    const onboardedCallsBefore = h.deps.isOnboarded.mock.calls.length;
     const second = h.send("/api/gateway/restart");
-    // Let the second request reach the attach branch before the outcome lands.
-    await new Promise((resolve) => setTimeout(resolve, 25));
+    // isOnboarded() is the handler's first statement: once it has run for the
+    // second request, that request is past the fast gate and in the attach
+    // branch (deterministic — no wall-clock sleep).
+    await h.waitUntil(
+      () => h.deps.isOnboarded.mock.calls.length > onboardedCallsBefore,
+      "second request to enter the handler",
+    );
     h.world.hold = { reason: "settings migration failed", blamedKeys: [] };
     releaseBoot();
     const [r1, r2] = await Promise.all([first, second]);
@@ -2949,7 +2963,7 @@ describe("server/routes/system", () => {
     expect(waiting[1].data.label).toBe("Waiting for the current operation to finish");
   });
 
-  it("a channel-info read failure is treated as no hold: the restart proceeds and the card keeps Restart enabled", async () => {
+  it("a hold state that cannot be READ fails closed: 409 gateway_hold_unreadable and the card disables Restart with the unreadable reason", async () => {
     const deps = createSystemDeps();
     deps.openclawChannelService = {
       getChannelInfo: vi.fn(() => {
@@ -2960,13 +2974,70 @@ describe("server/routes/system", () => {
     deps.gatewayLifecycleLock = { acquire: vi.fn(async () => () => {}), getActiveOperation: vi.fn(() => null) };
     deps.restartGateway = vi.fn(async () => ({ durationMs: 1, downtimeMs: 1 }));
     const app = createApp(deps);
+    // The card agrees with the route: a read that THROWS disables Restart
+    // with the unreadable reason (no channel summary is available at all).
     const status = await request(app).get("/api/status");
     expect(status.status).toBe(200);
+    expect(status.body.openclawChannel).toBeNull();
     const restart = status.body.state.actions.find((a) => a.id === "restart" || a.id === "retry");
-    expect(restart?.disabledReason).toBeUndefined();
+    expect(restart.disabledReason).toContain("could not be read");
     const res = await request(app).post("/api/gateway/restart");
-    expect(res.status).toBe(200);
-    expect(deps.restartGateway).toHaveBeenCalledTimes(1);
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe("gateway_hold_unreadable");
+    expect(res.body.error).toContain("state file unreadable");
+    expect(res.body.hint).toContain("release-channel state file");
+    expect(deps.restartGateway).not.toHaveBeenCalled();
+    expect(deps.restartRequiredState.markRestartInProgress).not.toHaveBeenCalled();
+  });
+
+  it("a corrupted release-channel state file fails closed for restarts and disables the card's lifecycle actions", async () => {
+    const deps = createSystemDeps();
+    deps.openclawChannelService = {
+      getChannelInfo: vi.fn(() => ({ gatewayHold: null, stateCorrupted: true })),
+      isApplyInProgress: vi.fn(() => false),
+    };
+    deps.gatewayLifecycleLock = { acquire: vi.fn(async () => () => {}), getActiveOperation: vi.fn(() => null) };
+    deps.restartGateway = vi.fn(async () => ({ durationMs: 1, downtimeMs: 1 }));
+    const app = createApp(deps);
+    const status = await request(app).get("/api/status");
+    expect(status.status).toBe(200);
+    expect(status.body.openclawChannel.stateCorrupted).toBe(true);
+    const restart = status.body.state.actions.find((a) => a.id === "restart" || a.id === "retry");
+    expect(restart.disabledReason).toContain("could not be read");
+    const res = await request(app).post("/api/gateway/restart");
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe("gateway_hold_unreadable");
+    expect(deps.restartGateway).not.toHaveBeenCalled();
+  });
+
+  it("while boot holds the lifecycle lock a manual restart is refused up front (409 booting) instead of queued", async () => {
+    const h = createQueuedRestartHarness();
+    const releaseBoot = await h.deps.gatewayLifecycleLock.acquire("boot");
+    const res = await h.send("/api/gateway/restart");
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe("booting");
+    expect(res.body.hint).toBeTruthy();
+    // Nothing was admitted: no record, no operation, no waiting step.
+    expect(h.deps.restartRequiredState.beginRestart).not.toHaveBeenCalled();
+    expect(h.deps.operationEvents.createOperation).not.toHaveBeenCalled();
+    expect(h.stepEvents()).toEqual([]);
+    releaseBoot();
+    // Boot over: the same request proceeds.
+    const next = await h.send("/api/gateway/restart");
+    expect(next.status).toBe(200);
+    expect(h.deps.restartGateway).toHaveBeenCalledTimes(1);
+  });
+
+  it("the fast-gate refusal carries the same hint as the post-lock refusal", async () => {
+    const deps = createSystemDeps();
+    deps.openclawChannelService = {
+      getChannelInfo: vi.fn(() => ({ gatewayHold: { reason: "settings migration failed", blamedKeys: [] } })),
+      isApplyInProgress: vi.fn(() => false),
+    };
+    const app = createApp(deps);
+    const res = await request(app).post("/api/gateway/restart");
+    expect(res.status).toBe(409);
+    expect(res.body.hint).toContain("Upgrade page");
   });
 
   it("status frames mark Restart/Retry/Repair disabled with the hold reason while the reconciler holds the gateway", async () => {

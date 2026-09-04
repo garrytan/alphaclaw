@@ -1461,6 +1461,34 @@ describe("server/watchdog", () => {
     );
   });
 
+  it("a hold state that cannot be read fails closed for repair too: skipped gateway_hold_unreadable, no doctor run", async () => {
+    for (const hooks of [
+      { getInfo: () => { throw new Error("state file unreadable"); } },
+      { getInfo: () => ({ gatewayHold: null, stateCorrupted: true }) },
+    ]) {
+      const clawCalls = [];
+      const { watchdog, launchGatewayProcess, insertWatchdogEvent } = createHarness({
+        autoRepair: true,
+        clawCmdImpl: async (cmd) => {
+          clawCalls.push(String(cmd));
+          return { ok: true, stdout: JSON.stringify({ ok: true }) };
+        },
+        releaseChannelHooks: hooks,
+      });
+      const result = await watchdog.triggerRepair();
+      expect(result).toEqual({ ok: false, skipped: true, reason: "gateway_hold_unreadable" });
+      expect(clawCalls.some((cmd) => cmd.includes("doctor"))).toBe(false);
+      expect(launchGatewayProcess).not.toHaveBeenCalled();
+      expect(insertWatchdogEvent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          eventType: "repair",
+          status: "skipped",
+          details: expect.objectContaining({ reason: "gateway_hold_unreadable" }),
+        }),
+      );
+    }
+  });
+
   it("start() preserves a latched configuration_error instead of clobbering it to running", async () => {
     const { watchdog } = createHarness({ autoRepair: false });
 
