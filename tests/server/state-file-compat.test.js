@@ -162,7 +162,11 @@ describe("state-file compat: openclaw-channel-state.json", () => {
       acceptedAt: 1_690_000_120_000,
       acceptedSource: "acceptance",
       operationId: null,
+      // Pin-window fields (PR #57) default the same way for a pre-change file.
+      reason: null,
     });
+    expect(state.previousPin).toBeNull();
+    expect(state.pinWindow).toBeNull();
     // The consumer-side defaults channel-sync applies to an old backup record.
     const backup = state.lastUpdateRun.backup;
     expect(backup.reused === true).toBe(false);

@@ -3,6 +3,9 @@ const { promisify } = require("node:util");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+// Same prerelease classifier the Upgrade page's catalog uses, so the journey
+// targets exactly what the Beta section offers.
+const { classifyPrerelease } = require("../../lib/server/openclaw-releases");
 
 // Shared plumbing for the CONTAINER e2e tier (tests/container/**). This tier
 // builds a real image from the local checkout (npm pack → docker build),
@@ -12,9 +15,9 @@ const path = require("node:path");
 // and runs through `npm run test:container`.
 const enabled = process.env.OPENCLAW_CONTAINER_E2E === "1";
 
-// STRICT mode (CI pull_request runs): registry sanity problems (no beta
-// dist-tag, beta not newer than the pin) FAIL the suite instead of skipping
-// it, so a PR cannot go green on a silently skipped journey.
+// STRICT mode (CI pull_request runs): registry sanity problems (no prerelease
+// newer than the stable pin) FAIL the suite instead of skipping it, so a PR
+// cannot go green on a silently skipped journey.
 const strict = process.env.OPENCLAW_CONTAINER_E2E_STRICT === "1";
 
 // `describe` comes from vitest's globals (vitest.config.js `globals: true`),
@@ -247,6 +250,41 @@ const compareLooseVersions = (a, b) => {
   return 0;
 };
 
+// The "beta" the stable→beta journey drives toward is what AlphaClaw's Beta
+// catalog section offers: the newest PRERELEASE whose core version is above
+// the stable pin's. It is deliberately NOT the raw `beta` dist-tag — upstream
+// re-points that tag at the promoted stable release when a beta line ships
+// (2026-09-03: beta = latest = 2026.9.1), a stable version is never listed
+// under Beta, and the journey then applied 2026.9.1-beta.1 while every
+// assertion waited for "2026.9.1" (PR #57, run 33897935310). When the tag is
+// the newest eligible prerelease the result is unchanged (source "dist-tag").
+// A prerelease of the pin's own core (2026.7.1-beta.6 vs the 2026.7.1-2
+// hotfix) is older than the pin, not an upgrade, so cores are compared.
+const kVersionCorePattern = /^[^-]+/;
+const coreVersion = (version) =>
+  (String(version || "").match(kVersionCorePattern) || [""])[0];
+
+const resolveBetaTarget = ({ distTags, versions, stablePin }) => {
+  const tagged =
+    distTags && distTags.beta != null ? String(distTags.beta) : null;
+  const pool = new Set(Object.keys(versions || {}));
+  if (tagged) pool.add(tagged);
+  const pinCore = coreVersion(stablePin);
+  const eligible = [...pool].filter(
+    (version) =>
+      classifyPrerelease(version) &&
+      compareLooseVersions(coreVersion(version), pinCore) > 0,
+  );
+  if (eligible.length === 0) return { version: null, source: "none", tagged };
+  eligible.sort(compareLooseVersions);
+  const version = eligible[eligible.length - 1];
+  return {
+    version,
+    source: version === tagged ? "dist-tag" : "newest-prerelease",
+    tagged,
+  };
+};
+
 // Login against the real server with the shared setup password and return a
 // Cookie header value for subsequent authenticated fetches.
 const loginForCookie = async (baseUrl, password) => {
@@ -303,6 +341,7 @@ module.exports = {
   sleep,
   waitFor,
   compareLooseVersions,
+  resolveBetaTarget,
   loginForCookie,
   fetchJsonWithCookie,
 };
