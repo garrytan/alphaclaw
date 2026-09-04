@@ -5,6 +5,25 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.9.73] - 2026-09-04
+
+Fix wave, PR 2a — the wrapAsync sweep. Express 4 does not catch async handler
+rejections: an unwrapped rejection leaves the request hanging forever AND lands
+as an unhandledRejection that feeds the server's rejection-storm exit brake.
+
+### Fixed
+- All 98 remaining `async` route handlers across 20 route modules are wrapped
+  in `wrapAsync` (audit F203/F207), so a throw before `res.json` reaches the
+  terminal JSON error middleware — a `500 {"ok":false,"error":"Internal server
+  error"}` (or the error's own 4xx status) instead of an endless spinner. Purely
+  mechanical: no handler body changed.
+
+### Added
+- The `route-async-wrap` guard test's allowlist is now empty and must stay
+  empty — a new unwrapped async handler fails CI.
+- `tests/server/wrap-async-terminal.test.js` pins the end-to-end contract
+  (rejection → JSON 500 without leaking the message; explicit 4xx honored).
+
 ## [0.9.72] - 2026-09-04
 
 Fix wave, PR 1 of the series — server boundary hardening. A read-only audit
