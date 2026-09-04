@@ -448,3 +448,73 @@ describe("server/webhooks coverage", () => {
     });
   });
 });
+
+describe("server/webhooks fail-closed, shape-preserving config writes (fix wave F150)", () => {
+  it("refuses to rewrite an unparseable openclaw.json (code OPENCLAW_CONFIG_UNREADABLE, bytes untouched)", () => {
+    const torn = '{"agents":{"list":[{"id":"main","default":true}]},"hooks":{"mappings":[';
+    const fs = createMemoryFs({ [configPath]: torn });
+    expect(() =>
+      createWebhook({ fs, constants, name: "alerts", mapping: { action: "agent" } }),
+    ).toThrow(expect.objectContaining({ code: "OPENCLAW_CONFIG_UNREADABLE" }));
+    expect(fs.files.get(configPath)).toBe(torn);
+    expect(() => ensureWebhookMappingIds({ fs, constants })).toThrow(
+      expect.objectContaining({ code: "OPENCLAW_CONFIG_UNREADABLE" }),
+    );
+    expect(() => deleteWebhook({ fs, constants, name: "alerts" })).toThrow(
+      expect.objectContaining({ code: "OPENCLAW_CONFIG_UNREADABLE" }),
+    );
+    expect(fs.files.get(configPath)).toBe(torn);
+  });
+
+  it("a missing openclaw.json is still the onboarding error, never created from {}", () => {
+    const fs = createMemoryFs();
+    expect(() =>
+      createWebhook({ fs, constants, name: "alerts", mapping: { action: "agent" } }),
+    ).toThrow("Could not read openclaw.json");
+    expect(fs.files.has(configPath)).toBe(false);
+  });
+
+  it("keeps a beta agents.entries config in the entries shape across create/update/delete", () => {
+    const fs = createMemoryFs({
+      [configPath]: JSON.stringify({
+        agents: { entries: { main: { default: true, name: "Main" } } },
+      }),
+    });
+    createWebhook({ fs, constants, name: "alerts", mapping: { action: "agent" } });
+    let stored = readStoredConfig(fs);
+    expect(stored.agents.entries).toEqual({ main: { default: true, name: "Main" } });
+    expect(stored.agents.list).toBeUndefined();
+    expect(stored.hooks.mappings.map((m) => m.id)).toEqual(["alerts"]);
+
+    updateWebhookDestination({
+      fs,
+      constants,
+      name: "alerts",
+      destination: { channel: "telegram", to: "123456" },
+    });
+    stored = readStoredConfig(fs);
+    expect(stored.agents.entries).toBeTruthy();
+    expect(stored.hooks.mappings[0].channel).toBe("telegram");
+
+    expect(deleteWebhook({ fs, constants, name: "alerts" })).toEqual(
+      expect.objectContaining({ removed: true }),
+    );
+    stored = readStoredConfig(fs);
+    expect(stored.agents.entries).toBeTruthy();
+    expect(stored.hooks.mappings).toEqual([]);
+  });
+
+  it("an unchanged mutation does not round-trip the file", () => {
+    const original = JSON.stringify({ agents: { list: [{ id: "main", default: true }] }, hooks: { mappings: [{ id: "x", name: "x", action: "agent" }] } });
+    const fs = createMemoryFs({ [configPath]: original });
+    const writes = [];
+    const rawWrite = fs.writeFileSync;
+    fs.writeFileSync = (target, contents) => {
+      writes.push(target);
+      rawWrite(target, contents);
+    };
+    expect(ensureWebhookMappingIds({ fs, constants })).toEqual({ changed: false, updatedIds: [] });
+    expect(writes).toEqual([]);
+    expect(fs.files.get(configPath)).toBe(original);
+  });
+});

@@ -1019,15 +1019,21 @@ describe("server/gmail-watch service", () => {
       });
     });
 
-    it("recovers from malformed or non-object configs", () => {
+    it("leaves a malformed existing config UNTOUCHED (fix wave F190) and still recovers non-object fields", () => {
+      // gog owns other keys in config.json; rebuilding a file this code cannot
+      // parse from {} dropped them silently and permanently (the boot sentinel
+      // never re-seeds an existing file).
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
       const malformed = createEnv({
         state: singleAccountState(),
         gogConfig: "{not json",
       });
       malformed.service.getConfig({ req: {} });
-      expect(
-        JSON.parse(fsReal.readFileSync(malformed.gogConfigPath, "utf8")),
-      ).toEqual({ account_clients: { "ops@corp.com": "work" } });
+      expect(fsReal.readFileSync(malformed.gogConfigPath, "utf8")).toBe("{not json");
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining("refusing to rewrite unparseable config"),
+      );
+      warn.mockRestore();
 
       const arrayClients = createEnv({
         state: singleAccountState(),
@@ -1070,6 +1076,42 @@ describe("server/gmail-watch service", () => {
       const before = configWrites();
       env.service.getConfig({ req: {} });
       expect(configWrites()).toBe(before);
+    });
+  });
+});
+
+describe("server/gmail-watch-service hooks preset (fix wave F096)", () => {
+
+  describe("ensureHooksPreset: one locked, fail-closed, shape-preserving write (fix wave F096)", () => {
+    afterEach(() => {
+      delete process.env.WEBHOOK_TOKEN;
+    });
+
+    it("keeps a beta agents.entries config in the entries shape while wiring the gmail preset", () => {
+      process.env.WEBHOOK_TOKEN = "env-token";
+      const env = createEnv({
+        state: singleAccountState(),
+        openclawJson: { agents: { entries: { main: { default: true, name: "Main" } } } },
+      });
+      const result = env.service.ensureHookWiring();
+      expect(result.changed).toBe(true);
+      const cfg = JSON.parse(fsReal.readFileSync(env.openclawConfigPath, "utf8"));
+      expect(cfg.agents.entries).toEqual({ main: { default: true, name: "Main" } });
+      expect(cfg.agents.list).toBeUndefined();
+      expect(cfg.hooks.presets).toContain("gmail");
+      expect(cfg.hooks.mappings.map((m) => m.id)).toContain("gmail");
+    });
+
+    it("refuses an unparseable openclaw.json (OPENCLAW_CONFIG_UNREADABLE) and leaves the bytes alone", () => {
+      process.env.WEBHOOK_TOKEN = "env-token";
+      const env = createEnv({ state: singleAccountState(), openclawJson: wiredOpenclawJson() });
+      const torn = '{"hooks":{"enabled":true';
+      fsReal.writeFileSync(env.openclawConfigPath, torn);
+      expect(() => env.service.ensureHookWiring()).toThrow(
+        expect.objectContaining({ code: "OPENCLAW_CONFIG_UNREADABLE" }),
+      );
+      expect(fsReal.readFileSync(env.openclawConfigPath, "utf8")).toBe(torn);
+      expect(env.markRequired).not.toHaveBeenCalled();
     });
   });
 });

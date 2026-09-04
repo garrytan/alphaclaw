@@ -10,15 +10,6 @@ const { scanConfigWriters } = require("./scanners");
 // Every entry is a KNOWN raw writer with the fix-wave PR that removes it.
 // Add a new entry only with a why-comment; prefer routing through the helper.
 const kKnownOffenders = {
-  // PR 7 — webhooks config writer (also downgrades agents.entries).
-  "lib/server/webhooks.js::configPath": "PR 7: writeConfig → updateOpenclawConfig",
-  // PR 7 — gmail-watch hooks preset.
-  "lib/server/gmail-watch.js::configPath": "PR 7: ensureHooksPreset → updateOpenclawConfig",
-  // PR 7 — onboarding writers (import + sanitize + codex plugin).
-  "lib/server/onboarding/index.js::configPath": "PR 7: import config write → updateOpenclawConfig",
-  "lib/server/onboarding/openclaw.js::configPath": "PR 7: sanitize/ensure writers → updateOpenclawConfig",
-  // PR 7 — exec-approvals file-era writer.
-  "lib/server/exec-defaults-config.js::filePath": "PR 7: exec-approvals.json → writeFileAtomic",
   // Deliberate: the CLI restore copies the git-tracked bytes verbatim into a
   // MISSING openclaw.json — there is nothing to fail closed on. Keep raw.
   "lib/cli/openclaw-config-restore.js::configPath": "intentional: verbatim restore of a missing file",

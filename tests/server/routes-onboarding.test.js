@@ -1230,6 +1230,13 @@ describe("server/routes/onboarding", () => {
       files.set(targetPath, String(contents));
     });
     deps.fs.renameSync.mockImplementation((sourcePath, targetPath) => {
+      // writeFileAtomic (fix wave PR 7): `<path>.<pid>.tmp` → path replays the
+      // temp write at its final path, like the default mock does.
+      if (/\.tmp$/.test(String(sourcePath)) && files.has(sourcePath)) {
+        files.set(targetPath, files.get(sourcePath));
+        files.delete(sourcePath);
+        return;
+      }
       if (sourcePath === tempDir && targetPath === deps.constants.OPENCLAW_DIR) {
         directories.delete(tempDir);
         directories.add(targetPath);
@@ -1374,6 +1381,13 @@ describe("server/routes/onboarding", () => {
       files.set(targetPath, String(contents));
     });
     deps.fs.renameSync.mockImplementation((sourcePath, targetPath) => {
+      // writeFileAtomic (fix wave PR 7): `<path>.<pid>.tmp` → path replays the
+      // temp write at its final path, like the default mock does.
+      if (/\.tmp$/.test(String(sourcePath)) && files.has(sourcePath)) {
+        files.set(targetPath, files.get(sourcePath));
+        files.delete(sourcePath);
+        return;
+      }
       if (sourcePath === tempDir && targetPath === deps.constants.OPENCLAW_DIR) {
         for (const directoryPath of [...directories]) {
           if (
@@ -1509,6 +1523,13 @@ describe("server/routes/onboarding", () => {
       files.set(targetPath, String(contents));
     });
     deps.fs.renameSync.mockImplementation((sourcePath, targetPath) => {
+      // writeFileAtomic (fix wave PR 7): `<path>.<pid>.tmp` → path replays the
+      // temp write at its final path, like the default mock does.
+      if (/\.tmp$/.test(String(sourcePath)) && files.has(sourcePath)) {
+        files.set(targetPath, files.get(sourcePath));
+        files.delete(sourcePath);
+        return;
+      }
       if (sourcePath === tempDir && targetPath === deps.constants.OPENCLAW_DIR) {
         directories.delete(tempDir);
         directories.add(targetPath);
@@ -1588,6 +1609,13 @@ describe("server/routes/onboarding", () => {
       files.set(targetPath, String(contents));
     });
     deps.fs.renameSync.mockImplementation((sourcePath, targetPath) => {
+      // writeFileAtomic (fix wave PR 7): `<path>.<pid>.tmp` → path replays the
+      // temp write at its final path, like the default mock does.
+      if (/\.tmp$/.test(String(sourcePath)) && files.has(sourcePath)) {
+        files.set(targetPath, files.get(sourcePath));
+        files.delete(sourcePath);
+        return;
+      }
       if (sourcePath === tempDir && targetPath === deps.constants.OPENCLAW_DIR) {
         directories.delete(tempDir);
         directories.add(targetPath);
