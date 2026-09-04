@@ -311,4 +311,27 @@ describe("frontend/google tab component", () => {
     await addModal.props.onSubmit({ email: "x@y.com", setError });
     expect(setError).toHaveBeenCalledWith("save blew up");
   });
+
+  it("starts the OAuth popup for a JUST-CREATED account even though it is not in this render's list (F165)", async () => {
+    api.saveGoogleAccount.mockResolvedValue({ ok: true, accountId: "new-1" });
+    const open = vi.fn(() => ({ closed: false }));
+    const previousOpen = globalThis.window.open;
+    globalThis.window.open = open;
+    try {
+      const r = renderGoogle();
+      const setError = vi.fn();
+      const addModal = collectRawNodes(r.tree).find(
+        (node) => node.props?.title === "Add Company Account" && node.props?.onSubmit,
+      );
+      await addModal.props.onSubmit({ email: "new@corp.com", setError });
+      expect(setError).not.toHaveBeenCalled();
+      expect(accountsHook.refreshAccounts).toHaveBeenCalled();
+      // Before the fix startAuth bailed on `getAccountById("new-1")` (stale closure) and
+      // the operator saw a saved-but-never-signed-in account.
+      expect(open).toHaveBeenCalledTimes(1);
+      expect(open.mock.calls[0][0]).toMatch(/^\/auth\/google\/start\?accountId=new-1&services=/);
+    } finally {
+      globalThis.window.open = previousOpen;
+    }
+  });
 });

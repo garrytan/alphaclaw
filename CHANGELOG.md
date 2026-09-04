@@ -5,6 +5,53 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.9.79] - 2026-09-04
+
+Fix wave, PR 8a — Google / Gmail and the public origin.
+
+### Fixed
+- **One public-origin resolver** (audit critic gap, eng review E12). Three
+  resolvers disagreed about "the URL operators reach this dashboard at", and
+  two of them trusted `X-Forwarded-Host` verbatim — a header any client can set
+  when no proxy fronts the process, and one `trust proxy` never vets. Every
+  URL AlphaClaw persists or hands out (OAuth `redirect_uri`, the Gmail push
+  endpoint, webhook callbacks, `gateway.controlUi.allowedOrigins`, invite links,
+  connect-info) now comes from `lib/server/public-origin.js`: the configured
+  canonical origin (`ALPHACLAW_SETUP_URL`, then the platform variables) wins;
+  otherwise the request through Express's trust-proxy view — forwarded headers
+  count only from a trusted hop (first hop value), else the Host header.
+- **`gog serve` spawn failures crashed the boot** (F093, P1). The child had no
+  `error` listener, so a missing/unexecutable `gog` (fail-open installer) became
+  an `uncaughtException` → exit 1 → a `--restart=always` crash loop whenever any
+  Gmail watch was enabled. The serve manager settles once across `error`/`exit`,
+  reports the error, uptime and a stderr tail, and the watch service logs the
+  exit reason instead of silently respawning.
+- **Respawn storm and orphaned respawns** (F205, F099). A fast-dying serve
+  child was restarted every 5s forever with no log line and a locked
+  google-state write per cycle; a drain that outlived the untracked timer
+  respawned into an orphan. Restarts now back off (5s → 10s → … → 5 min,
+  reset after a healthy minute), timers are tracked per account, and `stop()`
+  latches so nothing respawns during a drain.
+- **OAuth callback verifies who consented** (F095). Google lets the user pick
+  any signed-in account on the consent screen; the callback imported that
+  account's refresh token and labeled it with the flow's email. The consenting
+  identity is checked against the expected email and a mismatch is rejected
+  with clear copy (nothing saved, flow consumed).
+- **Revoked grants no longer show "Connected" forever** (F098). The live
+  `gog auth list --check` probe now wins over the sticky state flag; the flag
+  stands in only when gog itself did not answer for that client.
+- `GET /api/gmail/config` rewrote `gogcli/state.json` under the lock on every
+  dashboard mount even when nothing changed (F100); a renew with an explicit
+  account re-enabled a stopped watch (F101).
+- UI: post-save auto sign-in never fired for a NEW Google account (F165); the
+  Buzz wizard's "Pause setup" toasted "paused" over a failed cancel (F169).
+
+### Notes
+- README documents `ALPHACLAW_SETUP_URL` as the canonical origin. Tests: new
+  `public-origin.test.js`; extended `helpers`, `routes-nodes-coverage`,
+  `gmail-serve`, `gmail-watch-service`, `routes-oauth-binding`,
+  `google-tab-component`; new `buzz-wizard.test.js`. `npm run build:ui`.
+
 ## [0.9.78] - 2026-09-04
 
 Fix wave, PR 7 — config-layer writers and fail-closed readers.
