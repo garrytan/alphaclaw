@@ -173,6 +173,10 @@ const kIntervalRe = /\b(?:window\.|globalThis\.|self\.)?setInterval\(/g;
 const kPrimitiveFiles = new Set([
   "lib/public/js/hooks/usePolling.js",
   "lib/public/js/hooks/use-now-ms.js",
+  "lib/public/js/hooks/use-visible-interval.js",
+  // Imperative popup-closed watcher: click-lifecycle interval, no network,
+  // must run while hidden (the user is in the popup). See its header comment.
+  "lib/public/js/lib/popup-watch.js",
 ]);
 
 // One hit per file, keyed with the count, so the allowlist reads

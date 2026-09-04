@@ -10,25 +10,10 @@ const { scanUiIntervals } = require("./scanners");
 // file → number of raw intervals still allowed. PR 11 (polling sweep) drives
 // every count to zero; an ADDED interval changes the key and goes red.
 const kKnownOffenders = {
-  "lib/public/js/components/chat/index.js::1": "PR 11: heartbeat tick → useNowMs",
-  "lib/public/js/components/chat/use-chat-connection.js::1": "PR 11: ws ping keeps its own timer or moves under the connection hook",
-  "lib/public/js/components/chat/use-chat-store.js::1": "PR 11: outbox flush tick",
-  "lib/public/js/components/cron-tab/cron-calendar.js::1": "PR 11: now ticker → useNowMs",
-  "lib/public/js/components/file-tree.js::1": "PR 11: tree refresh → usePolling (F202)",
-  "lib/public/js/components/file-viewer/use-file-loader.js::1": "PR 11: disk refresh → usePolling (F202)",
-  "lib/public/js/components/gateway.js::2": "PR 11: 1s tickers → useNowMs (F160)",
-  "lib/public/js/components/models-tab/provider-auth-card.js::1": "PR 11: popup poll",
-  "lib/public/js/components/nodes-tab/connected-nodes/use-connected-nodes-card.js::1": "PR 11: browser poll → usePolling (F202)",
-  "lib/public/js/components/nodes-tab/setup-wizard/use-setup-wizard.js::1": "PR 11: discovery poll → usePolling",
-  "lib/public/js/components/onboarding/use-welcome-codex.js::1": "PR 11: popup poll",
-  "lib/public/js/components/onboarding/welcome-setup-step.js::3": "PR 11: progress polls → usePolling",
-  "lib/public/js/components/providers.js::1": "PR 11: popup poll",
-  "lib/public/js/components/sidebar-git-panel.js::1": "PR 11: git summary poll → usePolling (F202)",
-  "lib/public/js/components/team-tab/use-team-tab.js::2": "PR 11: presence/devices polls → usePolling (F170)",
-  "lib/public/js/components/upgrade-tab/use-upgrade-tab.js::1": "PR 11: now ticker → useNowMs",
-  "lib/public/js/hooks/use-app-shell-controller.js::3": "PR 11: restart-status 2s poll + stale checks → usePolling (F143)",
-  "lib/public/js/hooks/use-claude-code-local.js::1": "PR 11: status poll → usePolling",
-  "lib/public/js/hooks/useAgentSessions.js::1": "PR 11: sessions poll → usePolling",
+  // PR 11 converted every other raw interval onto usePolling / useNowMs /
+  // useVisibleInterval. This file is edited by open PR #64 (restart banner
+  // work) — it follows once #64 lands, to avoid a rival branch on the same file.
+  "lib/public/js/hooks/use-app-shell-controller.js::3": "after PR #64: restart-status 2s poll + stale checks → usePolling (F143)",
 };
 
 describe("guard: the UI polls through usePolling/useNowMs, never raw setInterval", () => {
