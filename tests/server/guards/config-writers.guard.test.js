@@ -19,8 +19,6 @@ const kKnownOffenders = {
   "lib/server/onboarding/openclaw.js::configPath": "PR 7: sanitize/ensure writers → updateOpenclawConfig",
   // PR 7 — exec-approvals file-era writer.
   "lib/server/exec-defaults-config.js::filePath": "PR 7: exec-approvals.json → writeFileAtomic",
-  // PR 4 — gateway token→${ENV} scrub and channel sync (F013).
-  "lib/server/gateway.js::configPath": "PR 4: syncChannelConfig scrub → updateOpenclawConfig",
   // Deliberate: the CLI restore copies the git-tracked bytes verbatim into a
   // MISSING openclaw.json — there is nothing to fail closed on. Keep raw.
   "lib/cli/openclaw-config-restore.js::configPath": "intentional: verbatim restore of a missing file",

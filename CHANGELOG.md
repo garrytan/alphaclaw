@@ -5,6 +5,51 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.9.77] - 2026-09-04
+
+Fix wave, PR 4 — gateway lifecycle.
+
+### Fixed
+- **Cold restarts dropped the operator's heap cap** (audit F011). The
+  `gateway --force` restart path spawned the new daemon with the CLI env
+  instead of the daemon launch env, so `ALPHACLAW_GATEWAY_MAX_OLD_SPACE_SIZE`
+  applied to the first launch only and vanished after the first restart —
+  while the autotune stamp kept recording the cap the gateway no longer had.
+  The restart spawn now uses the launch env.
+- **A throwing pre-gateway boot step skipped the gateway launch** (F008).
+  `doSyncPromptFiles`, `reloadEnv`, and `ensureGatewayProxyConfig` ran
+  unguarded between the swallow-and-log steps; an exception (the bare
+  `gogcli/` mkdir inside the prompt-file sync was the live example) fell to
+  the outer catch and `startGateway()` never ran — the one boot path with no
+  watchdog self-heal. Each step is now logged and skipped on failure, and the
+  `gogcli/` mkdir itself is non-fatal.
+- **Channel token scrub wrote openclaw.json unlocked and non-atomically**
+  (F013). After `openclaw channels add`, the token → `${ENV}` rewrite was a
+  raw `readFileSync`/`writeFileSync` pair outside the shared file lock; the
+  proxy-config writer held the lock but still wrote in place. Both now write
+  atomically under the lock, and `lib/server/gateway.js` leaves the
+  config-writers guard allowlist.
+- **Restart cause line defeated by lowercase prose** (F048). The severity
+  pattern was case-insensitive, so any trailing line containing "error" in
+  running text ("last error was a connection error") outranked the real
+  `ERROR …` blocker line, and that prose became the persisted incident
+  summary. Severity tags are now case-sensitive (upper-case words, or an
+  `Error:`-style prefix); the error-shaped-word fallback is unchanged.
+
+### Removed
+- Dead lifecycle code (F007, F014): `attachGatewaySignalHandlers` (superseded
+  by `installCrashGuards` in the lifecycle orchestrator since #8), and the
+  `restartGatewayLight` → `runGatewayLifecycleRestart` light-restart chain
+  (imported by `lib/server.js`, never called). Their unit tests go with them;
+  `stampOpenclawConfigConsumed` stays in autotune.
+
+### Notes
+- Tests: `gateway.test.js` (heap cap on cold restart; atomic config writes
+  through a rename-aware fs mock), `startup.test.js` (throwing steps never
+  skip the gateway), `onboarding-workspace.test.js` (unwritable gogcli dir),
+  `restart-hardening-units.test.js` (F048 cases), config-writers guard
+  allowlist shrinks by one.
+
 ## [0.9.76] - 2026-09-04
 
 Fix wave, PR 3 — the agent-admin manifest and what the agent is allowed to see.
