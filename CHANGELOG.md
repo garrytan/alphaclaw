@@ -5,7 +5,7 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
-## [0.9.74] - 2026-09-04
+## [0.9.75] - 2026-09-04
 
 Fix wave, PR 2 — the boot spine (`bin/alphaclaw.js` and the CLI git-sync).
 
@@ -55,8 +55,7 @@ Fix wave, PR 2 — the boot spine (`bin/alphaclaw.js` and the CLI git-sync).
 - Two more entries leave the shell-string guard and one leaves the raw
   config-writer guard.
 
-## [0.9.73] - 2026-09-04
-<<<<<<< HEAD
+## [0.9.74] - 2026-09-04
 
 Fix wave, PR 2a — the wrapAsync sweep. Express 4 does not catch async handler
 rejections: an unwrapped rejection leaves the request hanging forever AND lands
@@ -75,9 +74,7 @@ as an unhandledRejection that feeds the server's rejection-storm exit brake.
 - `tests/server/wrap-async-terminal.test.js` pins the end-to-end contract
   (rejection → JSON 500 without leaking the message; explicit 4xx honored).
 
-## [0.9.72] - 2026-09-04
-=======
->>>>>>> kolkata-v4
+## [0.9.73] - 2026-09-04
 
 Fix wave, PR 1 of the series — server boundary hardening. A read-only audit
 (31 finders, 253 findings, each verified by two independent reviewers → 221
