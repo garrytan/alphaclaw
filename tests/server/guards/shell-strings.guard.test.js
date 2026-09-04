@@ -22,10 +22,6 @@ const kKnownOffenders = {
   // the already-built command. Callers are what the guard polices.
   "lib/server/commands.js::exec(`openclaw…`)": "intentional: the shell wrapper itself",
   "lib/server/commands.js::exec(`gog…`)": "intentional: the shell wrapper itself",
-  // PR 1 c9 — onboarding clone + git-sync (F102); removed later in this PR.
-  "lib/server/onboarding/github.js::shellCmd(`git clone --depth=1 \"https://github.com/…`)": "PR 1 c9: execFileCmd git clone",
-  "lib/server/onboarding/index.js::shellCmd(`alphaclaw git-sync -m \"…`)": "PR 1 c9: execFileCmd git-sync",
-  "lib/server/routes/webhooks.js::shellCmd(`alphaclaw git-sync -m \"…`)": "PR 1 c9: execFileCmd git-sync",
   // PR 7 — the H1 fix quotes these through shellEscapeArg (single-quote
   // escaping); still a shell string, converted to argv with the other
   // onboarding writers.

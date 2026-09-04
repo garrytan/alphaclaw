@@ -54,6 +54,24 @@ describe("server/helpers", () => {
     );
   });
 
+  // Fix wave F102: exactly owner/repo — a fragment, query, extra segment or
+  // dot-segment used to pass the GitHub API pre-checks and reach a shell string.
+  it("rejects slugs that are not exactly owner/repo", () => {
+    for (const bad of [
+      "owner/repo#$(touch pwned)",
+      "owner/repo?x=1",
+      "owner/repo/extra",
+      "../x/y",
+      "owner/..",
+      "owner/repo x",
+      "owner//repo",
+      "-owner/repo",
+    ]) {
+      expect(() => resolveGithubRepoUrl(bad), bad).toThrow(/owner\/repo/);
+    }
+    expect(resolveGithubRepoUrl("My-Org/my.repo_v2")).toBe("My-Org/my.repo_v2");
+  });
+
   it("parses JWT payload and extracts Codex account id", () => {
     const token = makeJwt({
       [CODEX_JWT_CLAIM_PATH]: { chatgpt_account_id: "acct_123" },

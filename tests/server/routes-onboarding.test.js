@@ -490,8 +490,9 @@ describe("server/routes/onboarding", () => {
       expect.stringContaining('"reason": "onboarding_complete"'),
     );
 
-    const initialPushCall = deps.shellCmd.mock.calls.find(([cmd]) =>
-      cmd.includes('alphaclaw git-sync -m "initial setup"'),
+    const initialPushCall = deps.execFileCmd.mock.calls.find(
+      ([file, args]) =>
+        file === "alphaclaw" && Array.isArray(args) && args.join(" ") === "git-sync -m initial setup",
     );
     expect(initialPushCall).toBeTruthy();
 
@@ -942,8 +943,10 @@ describe("server/routes/onboarding", () => {
       ),
     ).toBe(true);
     expect(
-      deps.shellCmd.mock.calls.some(([cmd]) =>
-        cmd.includes('alphaclaw git-sync -m "imported existing setup via AlphaClaw"'),
+      deps.execFileCmd.mock.calls.some(([file, args]) =>
+        file === "alphaclaw" &&
+        Array.isArray(args) &&
+        args.join(" ").includes("git-sync -m imported existing setup via AlphaClaw"),
       ),
     ).toBe(true);
   });
@@ -1792,7 +1795,10 @@ describe("server/routes/onboarding additional coverage", () => {
 
   it("returns clone failures from existing-mode github verification", async () => {
     const deps = createBaseDeps();
-    deps.shellCmd.mockRejectedValueOnce(new Error("clone blew up"));
+    deps.execFileCmd.mockImplementationOnce(async (file) => {
+      if (file === "git") throw new Error("clone blew up");
+      return "";
+    });
     global.fetch
       .mockResolvedValueOnce({
         ok: true,

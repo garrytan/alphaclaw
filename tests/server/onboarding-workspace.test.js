@@ -1079,6 +1079,53 @@ describe("server/onboarding/workspace bootstrap prompt sync", () => {
     expect(findConfigWrite(secondFs)).toBeUndefined();
   });
 
+  // Fix wave F106: a full-root import promotes the repo's committed .env OVER
+  // the managed symlink; the next artifact sync must move it aside and re-link.
+  it("moves a regular imported .env aside and restores the managed symlink", () => {
+    const openclawDir = "/tmp/alphaclaw-artifacts";
+    const envFilePath = "/tmp/alphaclaw-env-file";
+    const linkPath = path.join(openclawDir, ".env");
+    let linkExists = true;
+    const mockFs = {
+      existsSync: vi.fn((target) => {
+        if (target === linkPath) return linkExists;
+        if (target === envFilePath) return true;
+        if (target === path.join(openclawDir, "gogcli", "config.json")) return true;
+        return false;
+      }),
+      lstatSync: vi.fn(() => ({ isSymbolicLink: () => false, isFile: () => true })),
+      renameSync: vi.fn(() => {
+        linkExists = false;
+      }),
+      symlinkSync: vi.fn(),
+      mkdirSync: vi.fn(),
+    };
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    ensureOpenclawRuntimeArtifacts({ fs: mockFs, openclawDir, envFilePath });
+
+    expect(mockFs.renameSync).toHaveBeenCalledTimes(1);
+    expect(mockFs.renameSync.mock.calls[0][0]).toBe(linkPath);
+    expect(mockFs.renameSync.mock.calls[0][1]).toMatch(/\.env\.imported-/);
+    expect(mockFs.symlinkSync).toHaveBeenCalledWith(envFilePath, linkPath);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("was a regular file"));
+  });
+
+  it("leaves an existing managed symlink alone", () => {
+    const openclawDir = "/tmp/alphaclaw-artifacts";
+    const envFilePath = "/tmp/alphaclaw-env-file";
+    const mockFs = {
+      existsSync: vi.fn((target) => target !== path.join(openclawDir, "gogcli", "config.json") || true),
+      lstatSync: vi.fn(() => ({ isSymbolicLink: () => true, isFile: () => false })),
+      renameSync: vi.fn(),
+      symlinkSync: vi.fn(),
+      mkdirSync: vi.fn(),
+    };
+    ensureOpenclawRuntimeArtifacts({ fs: mockFs, openclawDir, envFilePath });
+    expect(mockFs.renameSync).not.toHaveBeenCalled();
+    expect(mockFs.symlinkSync).not.toHaveBeenCalled();
+  });
+
   it("symlinks the env file into the openclaw dir when missing", () => {
     const openclawDir = "/tmp/alphaclaw-artifacts";
     const envFilePath = "/tmp/alphaclaw-env-file";
