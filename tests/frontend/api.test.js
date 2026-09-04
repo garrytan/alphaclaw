@@ -1456,6 +1456,17 @@ describe("frontend/api behaviors", () => {
     expect(result).toEqual({ ok: true, status: "stale" });
   });
 
+  it("verifyTelegramTopic passes a named account through as ?accountId (F166) and omits the default", async () => {
+    global.fetch.mockResolvedValue(mockJsonResponse(200, { ok: true, status: "ok" }));
+    const api = await loadApiModule();
+    await api.verifyTelegramTopic("-100123", 42, { accountId: "work" });
+    expect(global.fetch.mock.calls[0][0]).toBe(
+      "/api/telegram/groups/-100123/topics/42/verify?accountId=work",
+    );
+    await api.verifyTelegramTopic("-100123", 42, { accountId: "default" });
+    expect(global.fetch.mock.calls[1][0]).toBe("/api/telegram/groups/-100123/topics/42/verify");
+  });
+
   it("parseJsonOrThrow rejects when the payload marks ok false", async () => {
     global.fetch.mockResolvedValue(mockJsonResponse(200, { ok: false, error: "nope" }));
     const api = await loadApiModule();

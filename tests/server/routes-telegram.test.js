@@ -1244,7 +1244,13 @@ describe("server/routes/telegram", () => {
 
       const res = await request(app).get("/api/telegram/workspace");
 
-      expect(res.body).toEqual({ ok: false, error: "admins boom" });
+      // Fix wave F089: one group's Telegram failure no longer fails the whole
+      // read — the workspace renders and the failure is a visible warning.
+      expect(res.body.ok).toBe(true);
+      expect(res.body.groups.map((g) => g.groupId)).toEqual(["-100"]);
+      expect(res.body.repairWarnings).toEqual([
+        { groupId: "-100", warning: expect.stringContaining("admins boom") },
+      ]);
     });
   });
 
@@ -1422,6 +1428,90 @@ describe("server/routes/telegram", () => {
       const res = await request(app).post("/api/telegram/workspace/reset");
 
       expect(res.body).toEqual({ ok: false, error: "prompt sync failed" });
+    });
+  });
+
+  describe("fix wave PR 8b: topic PUT registers discovered topics; workspace repair is quiet without an admin", () => {
+    it("naming a DISCOVERED topic clears discovered + cache nameSource and syncs its routing into openclaw.json (F090)", async () => {
+      writeOpenclawJson({
+        channels: { telegram: { groups: { "-100": { requireMention: true } } } },
+      });
+      writeRegistryFile({
+        version: 2,
+        meta: { sweepWatermark: 0 },
+        groups: {
+          "-100": {
+            name: "G",
+            topics: { 5: { name: "cached name", discovered: true, nameSource: "cache" } },
+          },
+        },
+      });
+      const { app } = createApp();
+
+      const res = await request(app)
+        .put("/api/telegram/groups/-100/topics/5")
+        .send({ name: "Ops", systemInstructions: "Handle ops only.", agentId: "ops" });
+      expect(res.body.ok).toBe(true);
+
+      const stored = readRegistryFile().groups["-100"].topics["5"];
+      expect(stored).toEqual({
+        name: "Ops",
+        systemInstructions: "Handle ops only.",
+        agentId: "ops",
+        discovered: false,
+      });
+      expect(stored.nameSource).toBeUndefined();
+      // The registered topic's routing reached the gateway config.
+      expect(readOpenclawJson().channels.telegram.groups["-100"].topics).toEqual({
+        "5": { systemPrompt: "Handle ops only.", agentId: "ops" },
+      });
+    });
+
+    it("GET workspace does not rewrite openclaw.json or git-sync when no human admin resolves (F089)", async () => {
+      writeOpenclawJson({
+        channels: { telegram: { groups: { "-100": { requireMention: false } } } },
+      });
+      const telegramApi = makeTelegramApi({
+        getChatAdministrators: vi.fn(async () => [
+          { status: "administrator", user: { id: 42, is_bot: true } },
+        ]),
+      });
+      const { app, shellCmd } = createApp({ telegramApi });
+      const before = fs.readFileSync(kOpenclawJsonPath, "utf8");
+
+      const res = await request(app).get("/api/telegram/workspace");
+      expect(res.status).toBe(200);
+      expect(res.body.ok).toBe(true);
+      expect(res.body.groups.map((g) => g.groupId)).toEqual(["-100"]);
+      expect(fs.readFileSync(kOpenclawJsonPath, "utf8")).toBe(before);
+      expect(shellCmd).not.toHaveBeenCalledWith(
+        expect.stringContaining("repair-group-allow-from"),
+        expect.anything(),
+      );
+      expect(res.body.repairWarnings).toEqual([
+        { groupId: "-100", warning: expect.stringContaining("No human admin found") },
+      ]);
+    });
+
+    it("GET workspace survives a Telegram failure for one group's admin lookup (F089)", async () => {
+      writeOpenclawJson({
+        channels: { telegram: { groups: { "-100": {}, "-200": {} } } },
+      });
+      const telegramApi = makeTelegramApi({
+        getChatAdministrators: vi.fn(async (groupId) => {
+          if (String(groupId) === "-100") throw new Error("Bad Request: CHAT_ADMIN_REQUIRED");
+          return [{ status: "creator", user: { id: 7, is_bot: false } }];
+        }),
+      });
+      const { app } = createApp({ telegramApi });
+
+      const res = await request(app).get("/api/telegram/workspace");
+      expect(res.status).toBe(200);
+      expect(res.body.ok).toBe(true);
+      expect(res.body.groups.map((g) => g.groupId).sort()).toEqual(["-100", "-200"]);
+      expect(res.body.repairWarnings).toEqual([
+        { groupId: "-100", warning: expect.stringContaining("CHAT_ADMIN_REQUIRED") },
+      ]);
     });
   });
 });
