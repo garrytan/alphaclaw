@@ -1101,3 +1101,48 @@ describe("auth-profiles agent id boundary", () => {
     expect(() => ap.listProfiles("ops-2")).not.toThrow();
   });
 });
+
+// Fix wave F213 (P1): every openclaw.json write in this module goes through
+// the locked, fail-closed updateOpenclawConfig. An existing-but-unparseable
+// file (openclaw accepts JSON5) is REFUSED, never rewritten from `{}`.
+describe("auth-profiles openclaw.json writers fail closed", () => {
+  const configPath = () => path.join(tmpDir, ".openclaw", "openclaw.json");
+  const json5 = '{\n  // operator comment\n  agents: { defaults: { model: { primary: "anthropic/claude-opus-4-6" }, models: {} } },\n  gateway: { port: 18789 },\n}\n';
+
+  it("setModelConfig refuses a JSON5 config and leaves the bytes untouched", () => {
+    fs.writeFileSync(configPath(), json5);
+    let caught = null;
+    try {
+      ap.setModelConfig({ primary: "openai/gpt-5", configuredModels: { "openai/gpt-5": {} } });
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught?.code).toBe("OPENCLAW_CONFIG_UNREADABLE");
+    expect(fs.readFileSync(configPath(), "utf8")).toBe(json5);
+    expect(fs.readdirSync(path.dirname(configPath())).filter((n) => n.endsWith(".tmp"))).toEqual([]);
+  });
+
+  it("getModelConfig on a JSON5 config answers leniently and never rewrites the file", () => {
+    fs.writeFileSync(configPath(), json5);
+    const result = ap.getModelConfig();
+    // Lenient read of an unparseable file yields the empty defaults…
+    expect(result).toEqual({ primary: null, configuredModels: {} });
+    // …and the old `saveOpenclawConfig({plugins:…})` normalization write no
+    // longer replaces the operator's file with a stub.
+    expect(fs.readFileSync(configPath(), "utf8")).toBe(json5);
+  });
+
+  it("setModelConfig still creates a missing config and writes atomically", () => {
+    fs.rmSync(configPath());
+    ap.setModelConfig({ primary: "openai/gpt-5" });
+    const written = readJson("openclaw.json");
+    expect(written.agents.defaults.model.primary).toBe("openai/gpt-5");
+    expect(fs.readdirSync(path.dirname(configPath())).filter((n) => n.endsWith(".tmp"))).toEqual([]);
+  });
+
+  it("garbage text is refused too", () => {
+    fs.writeFileSync(configPath(), "not json at all");
+    expect(() => ap.setModelConfig({ primary: "openai/gpt-5" })).toThrow(/Refusing to overwrite/);
+    expect(fs.readFileSync(configPath(), "utf8")).toBe("not json at all");
+  });
+});

@@ -90,6 +90,26 @@ describe("admin-manifest engine", () => {
     expect(op.tier).toBe("safe");
   });
 
+  it("escalates notifications.update to dangerous whenever the routing itself changes (F065)", () => {
+    const op = manifest.findOp("PUT", "/api/openclaw/notifications");
+    expect(op?.id).toBe("notifications.update");
+    expect(op.tier).toBe("write");
+    expect(manifest.resolveTier(op, { body: { adminTargets: [] } })).toBe("dangerous");
+    expect(
+      manifest.resolveTier(op, {
+        body: { adminTargets: [{ channel: "telegram", target: "1" }] },
+      }),
+    ).toBe("dangerous");
+    expect(manifest.resolveTier(op, { body: { preferredChannel: "telegram" } })).toBe("dangerous");
+    expect(manifest.resolveTier(op, { body: { preferredChannel: null } })).toBe("dangerous");
+    // Bodies that leave the routing alone stay at write tier; primitives fall
+    // back to the base tier and let the route 400.
+    expect(manifest.resolveTier(op, { body: {} })).toBe("write");
+    for (const body of [true, 1, "x", null, undefined, ["a"]]) {
+      expect(manifest.resolveTier(op, { body })).toBe("write");
+    }
+  });
+
   it("tier resolver survives primitive JSON bodies instead of throwing", () => {
     const op = manifest.findOp("PUT", "/api/watchdog/settings");
     for (const body of [true, 1, "x", null, undefined, ["a"]]) {

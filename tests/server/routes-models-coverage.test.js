@@ -562,3 +562,39 @@ describe("server/routes/models agentId boundary", () => {
     expect(warn).not.toHaveBeenCalled();
   });
 });
+
+describe("server/routes/models config_unreadable mapping (F213)", () => {
+  it("answers 503 config_unreadable when the config writer refuses, and never git-syncs", async () => {
+    const deps = createModelDeps();
+    deps.authProfiles.setModelConfig = vi.fn(() => {
+      throw Object.assign(new Error("Refusing to overwrite openclaw.json"), {
+        code: "OPENCLAW_CONFIG_UNREADABLE",
+      });
+    });
+    const shellCmd = vi.fn(async () => ({ ok: true }));
+    const app = createApp({ ...deps, shellCmd });
+    const res = await request(app)
+      .put("/api/models/config")
+      .send({ primary: "openai/gpt-5" });
+    expect(res.status).toBe(503);
+    expect(res.body.code).toBe("config_unreadable");
+    expect(res.body.error).toMatch(/will not rewrite openclaw\.json/);
+    expect(shellCmd).not.toHaveBeenCalled();
+  });
+
+  it("maps the same refusal on profile upsert and removal", async () => {
+    const deps = createModelDeps();
+    const refuse = () => {
+      throw Object.assign(new Error("Refusing"), { code: "OPENCLAW_CONFIG_UNREADABLE" });
+    };
+    deps.authProfiles.upsertProfile = vi.fn(refuse);
+    deps.authProfiles.removeProfile = vi.fn(refuse);
+    const app = createApp(deps);
+    const up = await request(app)
+      .put("/api/models/auth/p1")
+      .send({ type: "api_key", provider: "openai", key: "k" });
+    expect(up.status).toBe(503);
+    const del = await request(app).delete("/api/models/auth/p1");
+    expect(del.status).toBe(503);
+  });
+});

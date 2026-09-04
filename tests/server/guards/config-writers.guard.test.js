@@ -10,8 +10,6 @@ const { scanConfigWriters } = require("./scanners");
 // Every entry is a KNOWN raw writer with the fix-wave PR that removes it.
 // Add a new entry only with a why-comment; prefer routing through the helper.
 const kKnownOffenders = {
-  // PR 7 — auth-profiles JSON-file fallback + openclaw.json auth refs.
-  "lib/server/auth-profiles.js::configPath": "PR 7: syncConfigAuthReferences → updateOpenclawConfig",
   // PR 7 — webhooks config writer (also downgrades agents.entries).
   "lib/server/webhooks.js::configPath": "PR 7: writeConfig → updateOpenclawConfig",
   // PR 7 — gmail-watch hooks preset.
