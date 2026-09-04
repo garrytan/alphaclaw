@@ -81,6 +81,18 @@ the reconciler had just held.
   instead of "Working…"; the agent-admin manifest documents the 409 codes for
   `system.gateway-restart` and `watchdog.repair`; hold copy lives in one
   export (`kGatewayHoldCopy`).
+- **Boot sync no longer skipped by a stale pidfile after container replacement
+  (container e2e durability leg A).** The single-instance guard for the
+  destructive boot sync trusted a bare pid: the pidfile outlives its writer on
+  the volume, and a fresh container (or `docker restart`) reuses the same small
+  pid for an unrelated process, so `process.kill(pid, 0)` said "live", the sync
+  was skipped, the just-applied overlay never activated, and the old pin
+  crash-looped against a state DB the new build had already migrated. The claim
+  now records the writer's hostname and `/proc` start ticks; a claim from
+  another container/host is stale, a reused pid with a different start time is
+  stale, and a legacy identity-less claim is trusted only when the live process
+  looks like an alphaclaw server. Regression tests cover the replaced-container
+  case at the store and boot-sync layers.
 - **Honest copy.** `safe_mode` glossary: "Restart relaunches the gateway but
   does not resume paused channels" (OpenClaw's crash-loop breaker re-applies
   the suppression at gateway startup; only Resume channels lifts it).
