@@ -1115,3 +1115,111 @@ describe("server/gmail-watch-service hooks preset (fix wave F096)", () => {
     });
   });
 });
+
+describe("server/gmail-watch-service serve respawn hygiene (fix wave F205/F099/F100/F101)", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    delete process.env.WEBHOOK_TOKEN;
+  });
+
+  it("backs off a fast-dying child (5s, 10s, 20s…) and logs the exit reason", async () => {
+    vi.useFakeTimers();
+    process.env.WEBHOOK_TOKEN = "env-token";
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const env = createEnv({
+      state: singleAccountState({ gmailWatch: { enabled: true, port: 18801 } }),
+    });
+    // Dead-pid children: the serve manager reuses a live-looking entry instead
+    // of spawning, and every FakeChild defaults to process.pid.
+    spawnState.impl = () => new FakeChild({ pid: 2147483647 });
+    env.onServeExit({ accountId: "acct-1", email: "ops@corp.com", code: 1, signal: null, uptimeMs: 200, stderrTail: "boom" });
+    await vi.advanceTimersByTimeAsync(4999);
+    expect(spawnState.calls).toHaveLength(0);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(spawnState.calls).toHaveLength(1);
+    expect(warn).toHaveBeenCalledWith(expect.stringMatching(/exited after 0s \(code 1, signal null\); restarting in 5s — stderr: boom/));
+
+    // Second quick death → 10s.
+    env.onServeExit({ accountId: "acct-1", code: 1, signal: null, uptimeMs: 300 });
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(spawnState.calls).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(spawnState.calls).toHaveLength(2);
+
+    // A healthy minute resets the ladder back to 5s.
+    env.onServeExit({ accountId: "acct-1", code: 0, signal: null, uptimeMs: 61_000 });
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(spawnState.calls).toHaveLength(3);
+    warn.mockRestore();
+  });
+
+  it("a spawn error is reported like an exit (no throw) and still schedules a backoff restart", async () => {
+    vi.useFakeTimers();
+    process.env.WEBHOOK_TOKEN = "env-token";
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const env = createEnv({
+      state: singleAccountState({ gmailWatch: { enabled: true, port: 18801 } }),
+    });
+    expect(() =>
+      env.onServeExit({ accountId: "acct-1", code: null, signal: null, error: "spawn gog ENOENT", uptimeMs: 0 }),
+    ).not.toThrow();
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("spawn error: spawn gog ENOENT"));
+    expect(vi.getTimerCount()).toBe(1);
+    warn.mockRestore();
+  });
+
+  it("stop() cancels pending respawns and latches: exits during the drain never respawn", async () => {
+    vi.useFakeTimers();
+    process.env.WEBHOOK_TOKEN = "env-token";
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const env = createEnv({
+      state: singleAccountState({ gmailWatch: { enabled: true, port: 18801 } }),
+    });
+    env.onServeExit({ accountId: "acct-1", code: 1, signal: null, uptimeMs: 100 });
+    const armed = vi.getTimerCount();
+    expect(armed).toBeGreaterThan(0);
+    await env.service.stop();
+    // The pending respawn is gone…
+    expect(vi.getTimerCount()).toBe(armed - 1);
+    // …and an exit fired by stopAll's SIGTERM (or any late exit) schedules nothing.
+    env.onServeExit({ accountId: "acct-1", code: null, signal: "SIGTERM", uptimeMs: 100 });
+    expect(vi.getTimerCount()).toBe(armed - 1);
+    // start() re-arms respawns.
+    env.service.start();
+    const afterStart = vi.getTimerCount();
+    env.onServeExit({ accountId: "acct-1", code: 1, signal: null, uptimeMs: 100 });
+    expect(vi.getTimerCount()).toBe(afterStart + 1);
+    await env.service.stop();
+  });
+
+  it("getConfig does not rewrite google state when the push token already exists (F100)", () => {
+    const env = createEnv({
+      state: {
+        version: 2,
+        accounts: [baseStateAccount()],
+        gmailPush: { token: "push-token", topics: {} },
+      },
+    });
+    // First read may normalize the fixture on disk; the SECOND read must not write.
+    env.service.getConfig({ req: {} });
+    const before = env.writes.length;
+    env.service.getConfig({ req: {} });
+    expect(env.writes.slice(before).filter((p) => p.endsWith("state.json"))).toEqual([]);
+    // …and DOES persist when it has to mint one.
+    const minted = createEnv({
+      state: { version: 2, accounts: [baseStateAccount()], gmailPush: { topics: {} } },
+    });
+    minted.service.getConfig({ req: {} });
+    expect(minted.writes.some((p) => p.endsWith("state.json"))).toBe(true);
+    expect(minted.readStateFile().gmailPush.token).toBeTruthy();
+  });
+
+  it("renewWatch with an explicit accountId never re-enables a stopped watch (F101)", async () => {
+    const env = createEnv({
+      state: singleAccountState({ gmailWatch: { enabled: false, port: 18801, expiration: 1 } }),
+    });
+    const result = await env.service.renewWatch({ accountId: "acct-1", force: true });
+    expect(result.results).toEqual([{ accountId: "acct-1", skipped: true, reason: "disabled" }]);
+    expect(env.readStateFile().accounts[0].gmailWatch.enabled).toBe(false);
+  });
+});
