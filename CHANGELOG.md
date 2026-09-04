@@ -5,6 +5,97 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.9.85] - 2026-09-04
+
+Fix wave, PR 11 — Setup UI shell, tabs, and polling.
+
+### Fixed
+- **Browse `?view=diff` / `?line=` deep links work again** (audit F138, P1).
+  The hash router stripped the query at the router, so `parseBrowseRoute`
+  only ever saw the path (dead since v0.9.42). `useHashLocation` still routes
+  on the path; the new `useHashQuery` hands the query to the browse parser.
+- **A dropped SSE connection reaches `onError`** (F139). A data-less `error`
+  event (the transport failing) was parsed as a server `event: error` frame,
+  so operations read as "failed" with an empty message and the real error
+  path never fired.
+- **Redirects and the first-agent auto-select `replace` the history entry**
+  (F140) instead of pushing one — Back no longer bounces forward again.
+- **`fetchOnboardStatus` rejects on a non-OK response** (F141). A JSON-bodied
+  proxy 502 resolved as data, read as `onboarded: false`, and dropped an
+  onboarded operator into the Welcome wizard; the shell's retry/backoff now
+  gets the failure it was written for.
+- **Logout failure is surfaced** (F144) with a toast instead of a silent
+  console line.
+- **Terminal socket handlers are bound to the socket that owns them**
+  (F156/F201): a superseded WebSocket's late `close`/`error`/`message` could
+  flip the live terminal's state or write into the wrong buffer. The reuse
+  path rebinds handlers and restores the connected state.
+- **Environment variables: no in-place mutation of the cached `/api/env`
+  rows** (F164). Editing an existing key's value wrote into the cached object,
+  so an UNSAVED value read as saved after a remount and was silently reverted.
+- **Cron calendar honors each job's `schedule.tz`** (F167). Cron fields were
+  evaluated with the browser's local `Date` getters, so a job scheduled in
+  another zone rendered at the wrong hour. Fields now come from a cached
+  zone-aware reader (`readZonedDateParts` in `lib/format.js`); grid rows stay
+  on the browser's hour axis. The calendar also cross-checks its first
+  computed future occurrence against the store's authoritative
+  `state.nextRunAtMs` and shows a "Schedule preview may be inaccurate" note
+  instead of silently drifting.
+- **Cron calendar day headers step by calendar day** (F168): the 24h step
+  duplicated a header across a DST fall-back and dropped the window's last day.
+- **Team page: a failed device-queue poll is an error, not an empty queue**
+  (F170). `devicesError` is exposed by `useTeamTab`.
+- **Google account sign-in from the Google tab starts for a NEW account**
+  (F165, follow-through) and the Buzz wizard's pause only toasts on success.
+
+### Changed
+- **One polling primitive.** Every raw `setInterval` in the Setup UI outside
+  `usePolling`/`useNowMs` moved onto the new `useVisibleInterval` hook
+  (`lib/public/js/hooks/use-visible-interval.js`): gateway/cron/upgrade
+  clocks, the setup wizard and welcome step probes, the sidebar git panel,
+  the file tree and file-viewer disk refresh, agent sessions, team presence
+  and device polls, the rescue-session status poll, connected-nodes browser
+  poll, and the console's delta poll. Hidden tabs stop polling and refresh
+  once on return; the chat keepalive ping and outbox flush opt out
+  (`pauseWhenHidden: false`) because a hidden tab must keep its socket alive.
+  OAuth popup "did it close?" checks use the imperative `watchPopupClosed`
+  (`lib/public/js/lib/popup-watch.js`): a click-lifecycle watcher, no
+  network, keeps running while the user is in the popup. The ui-intervals
+  structural guard's allowlist shrinks to the single file owned by open PR
+  #64 (`use-app-shell-controller.js`).
+- **Startup medic and incident overseer toggles run on `useSavedSetting` +
+  `SavedToggle`** (F158): "Loading..." until hydrated, a Retry chip when the
+  GET fails (never the default presented as fact), optimistic flip, and a
+  revert with an inline chip on a failed save instead of an error toast with
+  the switch left wherever the DOM put it. `useSavedSetting` gains
+  `reload()` (silent payload refresh, used by the overseer availability
+  probe).
+- **`localStorage` keys live in `lib/public/js/lib/storage-keys.js`** (F145);
+  the What's-next card and the env-vars secrets banner import theirs.
+- **Agent manifest:** the watchdog terminal ops' `hint` now says where the
+  terminal lives (Setup UI → Watchdog → Terminal over the terminal WebSocket).
+
+### Removed
+- **19 unused `api.js` wrappers** (F226): `fetchGoogleStatus`,
+  `fetchDoctorRun`, `fetchDoctorRunCards`, `fetchUsageSessionTimeSeries`,
+  `createWatchdogTerminalSession`, `fetchWatchdogTerminalOutput`,
+  `sendWatchdogTerminalInput`, `fetchSyncCron`, `approveNode`,
+  `fetchAuthProfiles`, `upsertAuthProfile`, `deleteAuthProfile`,
+  `getTopicDiscoveryStatus`, `fetchAgent`, `addAgentBinding`,
+  `removeAgentBinding`, `fetchOpenclawRun`, `createWebhookOauthCallback`,
+  `deleteWebhookOauthCallback` — no caller in `lib/public/js`; the server
+  routes are unchanged. A dead `useEffect` in the welcome form step (F146)
+  and the stale `TOOLS.md` pointer in Telegram onboarding copy (F171) go too.
+
+### Notes
+- F128/F129-style review-only items here: the terminal rebind (no component
+  harness drives a real WebSocket) and the env-vars copy-on-edit are covered
+  by code review and the surrounding tests; everything else in this entry
+  carries a regression test.
+- `use-app-shell-controller.js` (F142 persisted restart-failure ack, F143
+  restart-status poll) is deferred until open PR #64 merges — it rewrites
+  that file.
+
 ## [0.9.84] - 2026-09-04
 
 Fix wave, PR 10 — local Claude Code rescue session.
