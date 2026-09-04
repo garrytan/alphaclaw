@@ -94,20 +94,25 @@ describe("claude-code-local tmux driver", () => {
         env: kEnv,
       });
       expect(result.code).toBe(0);
-      expect(execFileImpl).toHaveBeenCalledTimes(3);
+      expect(result.warning).toBeUndefined();
+      expect(execFileImpl).toHaveBeenCalledTimes(4);
       expect(execFileImpl.mock.calls[0][0]).toBe("tmux");
-      // history-limit is raised GLOBALLY first (before the pane exists) so the
+      // The server must exist before set-option can land (fix wave F132):
+      // set-option is not a server-starting command and failed silently,
+      // leaving the pane at tmux's 2000-line default.
+      expect(execFileImpl.mock.calls[0][1]).toEqual([...kSocketPrefix, "start-server"]);
+      // The scrubbed env must reach the server-starting call too.
+      expect(execFileImpl.mock.calls[0][2].env).toBe(kEnv);
+      // history-limit is raised GLOBALLY next (before the pane exists) so the
       // rescue pane inherits it — a -t session set afterward would not apply.
-      expect(execFileImpl.mock.calls[0][1]).toEqual([
+      expect(execFileImpl.mock.calls[1][1]).toEqual([
         ...kSocketPrefix,
         "set-option",
         "-g",
         "history-limit",
         "50000",
       ]);
-      // The scrubbed env must reach the server-starting call too.
-      expect(execFileImpl.mock.calls[0][2].env).toBe(kEnv);
-      expect(execFileImpl.mock.calls[1][1]).toEqual([
+      expect(execFileImpl.mock.calls[2][1]).toEqual([
         ...kSocketPrefix,
         "new-session",
         "-d",
@@ -122,7 +127,7 @@ describe("claude-code-local tmux driver", () => {
         "--",
         ...kCommandArgv,
       ]);
-      expect(execFileImpl.mock.calls[2][1]).toEqual([
+      expect(execFileImpl.mock.calls[3][1]).toEqual([
         ...kSocketPrefix,
         "set-option",
         "-t",
@@ -130,6 +135,38 @@ describe("claude-code-local tmux driver", () => {
         "remain-on-exit",
         "on",
       ]);
+    });
+
+    it("surfaces a failed history-limit as a warning and stops early when the server cannot start (F132)", async () => {
+      const limitFails = createDriver((args) =>
+        args.includes("history-limit")
+          ? { error: kExitOneError("bad option"), stderr: "unknown option: history-limit" }
+          : { code: 0 },
+      );
+      const limited = await limitFails.driver.newSession({
+        sessionName: kSessionName,
+        cwd: kWorkspace,
+        commandArgv: kCommandArgv,
+        env: kEnv,
+      });
+      expect(limited.code).toBe(0);
+      expect(limited.warning).toMatch(/history-limit not applied/);
+      // start-server, set-option, new-session, remain-on-exit still ran.
+      expect(limitFails.execFileImpl).toHaveBeenCalledTimes(4);
+
+      const serverFails = createDriver((args) =>
+        args.includes("start-server")
+          ? { error: kExitOneError("no socket"), stderr: "error connecting" }
+          : { code: 0 },
+      );
+      const failed = await serverFails.driver.newSession({
+        sessionName: kSessionName,
+        cwd: kWorkspace,
+        commandArgv: kCommandArgv,
+        env: kEnv,
+      });
+      expect(failed.code).toBe(1);
+      expect(serverFails.execFileImpl).toHaveBeenCalledTimes(1);
     });
 
     it("skips remain-on-exit when creation fails", async () => {
@@ -145,8 +182,9 @@ describe("claude-code-local tmux driver", () => {
         env: kEnv,
       });
       expect(result.code).toBe(1);
-      // global set-option + failed new-session, but NO remain-on-exit follow-up.
-      expect(execFileImpl).toHaveBeenCalledTimes(2);
+      // start-server + global set-option + failed new-session, but NO
+      // remain-on-exit follow-up.
+      expect(execFileImpl).toHaveBeenCalledTimes(3);
     });
   });
 
