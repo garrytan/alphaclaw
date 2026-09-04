@@ -45,6 +45,14 @@ describe("server/doctor/deterministic-checks", () => {
       ...overrides,
     });
 
+  // F109 split the key into :near (P2) / :over (P1) so a dismissed nudge never
+
+  // hides the escalation; tests that only care "did the bloat card fire" use this.
+
+  const findSkillsBloatCard = (cards) =>
+
+    cards.find((card) => String(card.sourceKey).startsWith("det:skills-bloat:"));
+
   const findCard = (cards, sourceKey) =>
     cards.find((card) => card.sourceKey === sourceKey);
 
@@ -437,7 +445,7 @@ describe("server/doctor/deterministic-checks", () => {
       );
     }
     const overCards = build({});
-    expect(findCard(overCards, "det:skills-bloat")).toMatchObject({
+    expect(findSkillsBloatCard(overCards)).toMatchObject({
       priority: "P1",
       category: "skills",
     });
@@ -451,13 +459,13 @@ describe("server/doctor/deterministic-checks", () => {
         `---\nname: small-${index}\ndescription: tiny\n---\nbody`,
       );
     }
-    expect(findCard(build({}), "det:skills-bloat")).toBeUndefined();
+    expect(findCard(build({}), "det:skills-bloat:over")).toBeUndefined();
 
     // Custom lower limits via config overrides push the small set over.
     expect(
       findCard(
         build({ skillsLimits: { maxSkillsInPrompt: 3 } }),
-        "det:skills-bloat",
+        "det:skills-bloat:over",
       ),
     ).toMatchObject({ priority: "P1" });
   });
@@ -487,7 +495,7 @@ describe("server/doctor/deterministic-checks", () => {
     // marker-only parse estimated 118 chars and emitted nothing.
     const card = findCard(
       build({ skillsLimits: { maxSkillsPromptChars: 3000 } }),
-      "det:skills-bloat",
+      "det:skills-bloat:over",
     );
     expect(card).toMatchObject({ priority: "P1", category: "skills" });
     expect(card.evidence[0].text).toContain("skills/literal: description 3002 chars");
@@ -512,7 +520,7 @@ describe("server/doctor/deterministic-checks", () => {
     );
     const card = findCard(
       build({ skillsLimits: { maxSkillsPromptChars: 3000 } }),
-      "det:skills-bloat",
+      "det:skills-bloat:over",
     );
     // Exactly 3,001 chars (2 x 1,500 + the joining newline): the name: line
     // is NOT swallowed into the description.
@@ -527,7 +535,7 @@ describe("server/doctor/deterministic-checks", () => {
       "skills/a/b/c/d/e/f/g/SKILL.md",
       "---\nname: deep\ndescription: x\n---\n",
     );
-    expect(findCard(build({}), "det:skills-bloat")).toBeUndefined();
+    expect(findCard(build({}), "det:skills-bloat:over")).toBeUndefined();
   });
 
   it("bounds the skills scan by visited dirents on a wide tree and stays an estimate", () => {
@@ -545,7 +553,7 @@ describe("server/doctor/deterministic-checks", () => {
       skillsLimits: { maxSkillsInPrompt: 2 },
       skillsScanMaxVisitedDirents: 50,
     });
-    const card = findCard(cards, "det:skills-bloat");
+    const card = findSkillsBloatCard(cards);
     expect(card).toMatchObject({ priority: "P1" });
     expect(card.summary).toContain("Scan hit its safety cap; the real count is higher.");
     // The budget stopped the walk well before all 300 skills were counted.
@@ -555,7 +563,7 @@ describe("server/doctor/deterministic-checks", () => {
     // Production default budget: the same tree scans completely — no
     // truncation note, full count.
     const fullCards = build({ skillsLimits: { maxSkillsInPrompt: 2 } });
-    const fullCard = findCard(fullCards, "det:skills-bloat");
+    const fullCard = findSkillsBloatCard(fullCards);
     expect(fullCard.summary).toContain("~300 workspace skills");
     expect(fullCard.summary).not.toContain("Scan hit its safety cap");
   });
@@ -729,6 +737,35 @@ describe("server/doctor/deterministic-checks", () => {
       expect(card.sourceKey.startsWith("det:")).toBe(true);
       expect(card.fixPrompt.length).toBeGreaterThan(0);
     }
+  });
+
+  it("uses distinct sourceKeys for the P2 near-limit nudge and the P1 over-limit escalation (F109)", () => {
+    // 10 skills x (97 overhead + 1500 desc + name/location) ≈ 16.1k: past the
+    // 85% band of the 18k default, below the limit → near.
+    for (let index = 0; index < 10; index += 1) {
+      write(
+        workspaceRoot,
+        `skills/near-${index}/SKILL.md`,
+        `---\nname: near-${index}\ndescription: ${"d".repeat(1500)}\n---\nbody`,
+      );
+    }
+    const nearCards = build({});
+    expect(findCard(nearCards, "det:skills-bloat:near")).toMatchObject({ priority: "P2" });
+    expect(findCard(nearCards, "det:skills-bloat:over")).toBeUndefined();
+    expect(findCard(nearCards, "det:skills-bloat")).toBeUndefined();
+
+    // Push over the limit: the escalation carries the OTHER key, so a
+    // dismissed nudge can never suppress it.
+    for (let index = 0; index < 4; index += 1) {
+      write(
+        workspaceRoot,
+        `skills/over-${index}/SKILL.md`,
+        `---\nname: over-${index}\ndescription: ${"d".repeat(1500)}\n---\nbody`,
+      );
+    }
+    const overCards = build({});
+    expect(findCard(overCards, "det:skills-bloat:over")).toMatchObject({ priority: "P1" });
+    expect(findCard(overCards, "det:skills-bloat:near")).toBeUndefined();
   });
 });
 
