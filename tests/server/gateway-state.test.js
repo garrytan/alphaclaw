@@ -477,6 +477,26 @@ describe("server/gateway-state reducer", () => {
     expect(waitingOnHealth.actions.find((a) => a.id === "restart")?.disabledReason).toBeUndefined();
   });
 
+  it("the relaunch guard is scoped to starting: a stale 'restarting' lifecycle with the port up never locks the degraded/Unstable card out of Restart", () => {
+    // An externally driven restart past its expected window that never
+    // reported a launch leaves lifecycle "restarting" while the port answers.
+    const degraded = reduceGatewayState(
+      inputs({
+        watchdog: { lifecycle: "restarting", health: "degraded", safeMode: false, crashCountInWindow: 0 },
+      }),
+    );
+    expect(degraded.state).toBe("degraded");
+    expect(degraded.actions.find((a) => a.id === "restart").disabledReason).toBeUndefined();
+    const flapping = reduceGatewayState(
+      inputs({
+        watchdog: { lifecycle: "restarting", health: "healthy", safeMode: false, crashCountInWindow: 2, operationInProgress: true },
+      }),
+    );
+    expect(flapping.state).toBe("flapping");
+    expect(flapping.actions.find((a) => a.id === "restart").disabledReason).toBeUndefined();
+    expect(flapping.actions.find((a) => a.id === "repair").disabledReason).toBeUndefined();
+  });
+
   it("an unreadable/corrupted hold state fails closed: Restart, Retry and Repair are disabled with the unreadable reason", () => {
     const result = reduceGatewayState(inputs({ gatewayHoldUnreadable: true }));
     expect(result.actions.find((a) => a.id === "restart").disabledReason).toBe(

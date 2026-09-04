@@ -166,7 +166,7 @@ Binding rules: at most one primary action per state (§6); `restart-required.rea
 | not_onboarded | Not set up yet | gray | — | Set up |
 | booting | AlphaClaw starting | cyan pulse | current phase | — (deliberate: boot IS the launch; a restart queued behind the boot hold would recycle a gateway that just came up — `boot_failed` carries Retry) |
 | booting(failed) | Startup failed | red | error summary | **Retry** · View logs |
-| starting | Starting | cyan pulse | "usually under 30s (0:34 / 2:00 max)"; past typical: "taking longer than usual" — no fake progress | View logs · Restart (disabled with reason under a leased operation AND while a watchdog relaunch is in flight — `lifecycle` restarting/crashed or `operationInProgress`, since crash relaunches release the lock at spawn and the exit-78 auto-retry never takes it; enabled once the launch is only waiting on its first health check) |
+| starting | Starting | cyan pulse | "usually under 30s (0:34 / 2:00 max)"; past typical: "taking longer than usual" — no fake progress | View logs · Restart (disabled with reason under a leased operation AND while a watchdog relaunch is in flight — `lifecycle` restarting, `crashed` with an active backoff, or `operationInProgress`, since crash relaunches release the lock at spawn and the exit-78 auto-retry never takes it; the relaunch guard applies only to this TCP-down state; enabled once the launch is only waiting on its first health check) |
 | running | Running | green steady | "up 3h 12m" | Restart |
 | degraded | Running with issues | yellow steady | last probe error + observedAt | View logs · Restart |
 | flapping | Unstable | red steady | "3 restarts detected in 5 min — up 40s" (+detail: "estimated — gateway runs outside AlphaClaw's supervision" when probe-inferred) | **Repair** · Restart · View logs · Roll back (confirm via `confirm-dialog.js`; only in stabilization window) |
@@ -193,14 +193,14 @@ One shared status-icon treatment (icon + text + color); error states carry an ic
 |---|---|---|
 | Not set up yet | AlphaClaw hasn't completed onboarding | Run Set up |
 | AlphaClaw starting | The AlphaClaw server itself is still booting | Wait; Retry if it fails |
-| Starting | The gateway was launched and hasn't answered a health check yet | Wait up to 2 min; View logs if it stalls |
+| Starting | The gateway was launched and hasn't answered a health check yet | Wait up to 2 min; View logs; Restart if it stalls |
 | Running | Port open and last health check passed | — |
 | Running with issues | Port open but the health check is failing | View logs; Restart if it persists |
 | Unstable | The gateway keeps crashing and being brought back | Repair; Restart relaunches without diagnosis; Roll back if a recent upgrade caused it |
 | Channels paused | Gateway healthy but some channels are suppressed (safe mode) | Resume channels (Restart relaunches but does not resume them — OpenClaw's crash-loop breaker re-applies the suppression at startup) |
 | Configuration error | The gateway refused to start because its config is invalid (exit 78) | View config error, fix the file, Retry |
 | Down | The gateway is not running and automatic recovery has stopped | Retry; Repair |
-| Status unavailable | AlphaClaw can't currently confirm gateway state | Refresh; check that AlphaClaw itself is reachable |
+| Status unavailable | AlphaClaw can't currently confirm gateway state | Refresh; check that AlphaClaw itself is reachable; Restart is still available |
 
 ---
 

@@ -63,7 +63,8 @@ the reconciler had just held.
   Not covered (pre-existing, filed in TODOS): the channel-create / WhatsApp /
   team-transition restart wrappers still relaunch without consulting the
   hold. `starting` disables Restart while a watchdog relaunch is
-  in flight (`lifecycle` restarting/crashed or `operationInProgress`) —
+  in flight (`lifecycle` restarting, `crashed` with an active backoff, or
+  `operationInProgress`; the guard applies only to that TCP-down state) —
   crash relaunches release the lifecycle lock right after spawn and the
   exit-78 auto-retry never takes it, so a user restart there would stop the
   child just spawned. The restart route refuses `booting` up front while boot

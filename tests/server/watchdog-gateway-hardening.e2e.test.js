@@ -376,6 +376,41 @@ describe("server/watchdog gateway hardening (e2e)", () => {
       stack.watchdog.stop();
     });
 
+    it("fails closed while the release-channel state is corrupted: no retry that tick, retry once the store recovers", async () => {
+      // A corrupted state file reads as gatewayHold:null — that is NOT
+      // evidence of "no hold". getChannelInfo flags it (stateCorrupted) and
+      // the auto-retry must treat the flag like a hold until it clears.
+      const mtimeRef = { value: 100 };
+      const corruptRef = { value: true };
+      const stack = createStack({
+        readConfigMtimeMs: () => mtimeRef.value,
+        releaseChannelHooks: {
+          getInfo: vi.fn(() => ({
+            isPin: true,
+            inStabilizationWindow: false,
+            gatewayHold: null,
+            stateCorrupted: corruptRef.value,
+          })),
+          requestRollback: vi.fn(),
+        },
+      });
+      latchWithExit78(stack);
+      await flushMicrotasks();
+      expect(stack.watchdog.getStatus().lifecycle).toBe("configuration_error");
+
+      mtimeRef.value = 200;
+      await stack.watchdog.runHealthCheck({ source: "health_timer" });
+      expect(stack.launchGatewayProcess).not.toHaveBeenCalled();
+      expect(stack.watchdog.getStatus().lifecycle).toBe("configuration_error");
+
+      corruptRef.value = false;
+      stack.gateway.healthy = true;
+      await stack.watchdog.runHealthCheck({ source: "health_timer" });
+      await flushMicrotasks();
+      expect(stack.launchGatewayProcess).toHaveBeenCalledTimes(1);
+      stack.watchdog.stop();
+    });
+
     it("keeps the latch inert under a recorded gateway hold and retries once it clears", async () => {
       // Recovery from a hold goes through reconcile-retry, which validates
       // before launching — the mtime auto-retry must not race the doctor.

@@ -587,7 +587,8 @@ describe("frontend/app-shell controller (shared status feed)", () => {
         operationId: "op-3",
         status: "failed",
         code: "gateway_held",
-        errorSummary: null,
+        // The server persists the refusal message as the record's summary.
+        errorSummary: "The gateway is held after a failed settings migration — use Retry migration on the Upgrade page instead of restarting.",
         startedAt: 1000,
       },
     });

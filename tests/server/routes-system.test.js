@@ -3060,21 +3060,30 @@ describe("server/routes/system", () => {
   it("every lifecycle-lock kind acquired anywhere in lib/server has a badge label (never the 'Working…' fallback)", async () => {
     const fs = require("fs");
     const path = require("path");
-    const root = path.join(__dirname, "..", "..", "lib", "server");
+    const libDir = path.join(__dirname, "..", "..", "lib");
     const kinds = new Set();
+    const scan = (file) => {
+      const src = fs.readFileSync(file, "utf8");
+      // Direct lock calls plus the known wrappers (acquireLock / runLocked /
+      // acquireLifecycleLock) — a new wrapper name must be added here.
+      for (const m of src.matchAll(/(?:acquire|tryAcquire|acquireLock|acquireLifecycleLock|runLocked)\(\s*"([a-z_]+)"/g)) {
+        kinds.add(m[1]);
+      }
+    };
     const walk = (dir) => {
       for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
         const full = path.join(dir, entry.name);
         if (entry.isDirectory()) walk(full);
-        else if (entry.name.endsWith(".js")) {
-          const src = fs.readFileSync(full, "utf8");
-          for (const m of src.matchAll(/(?:acquire|tryAcquire|acquireLock|acquireLifecycleLock)\("([a-z_]+)"/g)) kinds.add(m[1]);
-        }
+        else if (entry.name.endsWith(".js")) scan(full);
       }
     };
-    walk(root);
+    scan(path.join(libDir, "server.js"));
+    walk(path.join(libDir, "server"));
     kinds.delete("boot"); // expressed through bootPhase, never the badge
-    expect(kinds.size).toBeGreaterThan(5);
+    // The enumeration itself is pinned: these kinds must all be discovered.
+    for (const expected of ["restart", "repair", "crash_restart", "medic", "memory_mitigation", "autotune_resize", "env_sync", "backup_quiesce", "autotune_settings", "autotune_reapply", "reconcile_retry"]) {
+      expect(kinds.has(expected), expected).toBe(true);
+    }
     for (const kind of kinds) {
       const deps = createSystemDeps();
       deps.gatewayLifecycleLock = {
