@@ -1,5 +1,11 @@
 # TODOS
 
+## P3 — Promote `test (24)` to a required check once it has been green for a week (2026-09-04, fix wave PR 12)
+- **What:** ci.yml now runs the suite on Node 22 AND 24; the Node 24 lane is `continue-on-error` because the `main` ruleset only lists `test (22)` and `gate` as required. Once `test (24)` has passed on every PR for a week, add it to the ruleset's required checks and drop the `continue-on-error` expression (and the matching `workflow-contract.test.js` pin).
+- **Why:** Node 24 is the next LTS the launcher will meet on user boxes; a non-blocking lane surfaces breakage early without holding merges hostage to a lane nobody has watched yet.
+- **Context:** `.github/workflows/ci.yml` (`continue-on-error: ${{ matrix.node-version == 24 }}`), `tests/ci/workflow-contract.test.js`, AGENTS.md merge-gate section.
+- **Effort:** XS (human ~15min / CC ~2min, needs ruleset admin). **Priority:** P3.
+
 ## P2 — OOM attribution behind the adopted launcher (2026-09-02, from issue #56)
 - **What:** After a cold restart the managed child is the `openclaw.mjs` compile-cache launcher (v0.9.70 adoption). It exits with the gateway's code, but a gateway killed by an UNFORWARDED signal (kernel OOM SIGKILL) surfaces as launcher exit code 1 — so `classifyOomExit` (137/SIGKILL) never fires for the exact incident class the memory monitor exists for; only the V8 heap-OOM stderr signature still classifies. Options: read the cgroup `memory.events` `oom_kill` counter delta (or `dmesg`) on a code-1 exit of an adopted supervisor with a recent critical trend; or map the launcher's exit to the child's signal if upstream exposes it.
 - **Why:** `state.lastExit` shows a generic code 1 and the OOM remedy notification is skipped, hiding the memory incident from the operator. Flagged by the v0.9.70 adversarial review (Claude + Codex agreed).

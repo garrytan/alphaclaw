@@ -5,6 +5,51 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.9.86] - 2026-09-04
+
+Fix wave, PR 12 — CI workflows, container filter, smoke scripts, live tiers.
+
+### Fixed
+- **Live CLI-contract tier: `--json` reads hold a single-document contract**
+  (audit F222/F115). `JSON.parse(String(execFileSync(...)))` swallowed both
+  ways upstream drift shows up — a banner line before the document and an
+  EMPTY stdout (the beta silences itself when it inherits `VITEST`) — as a
+  bare parse error. `runCliJson` (`tests/live/live-helpers.js`) captures
+  stdout and stderr separately, scrubs the test-runner env, and fails with
+  the command, exit status and stderr when stdout is not exactly one JSON
+  document (`parseSingleJsonDocument`; hermetic tests in
+  `tests/server/live-helpers-cli-json.test.js`).
+- **Container OOM fixture proves a V8 abort** (F220/F223). The 1 MiB-buffer
+  base64 strings were above Node's `EXTERN_APEX` and lived outside the V8
+  heap, so `--max-old-space-size` never tripped and the container was
+  cgroup-killed (exit 137, empty stderr). The fixture now retains 256 KiB
+  chunks (on-heap) and asserts the heap-OOM signature AND a non-137,
+  non-SIGKILL exit, so a kernel kill can never masquerade as a pass.
+- **Browser smoke scripts never `kill 0`** (F181): the `${kServerPid:-0}`
+  fallback in the EXIT traps killed the caller's whole process group when
+  no server pid had been recorded.
+
+### Changed
+- **CI: read-only token** (`permissions: contents: read`) on ci.yml (F177),
+  matching container-e2e.yml and live-e2e.yml.
+- **CI: Node 22 + 24 matrix** (F178). `test (24)` is a non-blocking
+  early-warning lane (`continue-on-error`) until the `main` ruleset lists it
+  as required (TODOS.md); `test (22)` and `gate` stay the required checks.
+  The version guard runs once per PR (on the 22 lane).
+- **Container E2E filter** (F173): a pin bump is detected as a CONTENT
+  change on the `"openclaw":` dependency line of `package.json` (never the
+  bare path, which every version bump touches), and the browser-driven
+  surfaces the journey exercises (`lib/public/login.html`,
+  `lib/public/js/components/upgrade-tab/`) are part of the path filter.
+- `tests/ci/workflow-contract.test.js` pins all of the above.
+
+### Notes
+- `.dockerignore` already excludes `*.tgz` (F176 landed earlier); no change.
+- The live tiers (`npm run test:live`, the Docker-bound autotune fixture)
+  are not runnable in the sandbox that produced this release; the helper
+  and parser are covered hermetically, the fixture change is covered by the
+  container tier in CI.
+
 ## [0.9.85] - 2026-09-04
 
 Fix wave, PR 11 — Setup UI shell, tabs, and polling.
