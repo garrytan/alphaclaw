@@ -3,7 +3,23 @@ const path = require("path");
 const {
   createWatchdogNotifier,
   resolveTelegramBotToken,
+  sendTelegramRendered,
+  formatSlackMessage,
+  kTelegramTargetSourcePairing,
+  kTelegramTargetSourceAllowFrom,
+  kTelegramTargetSourceAdmin,
 } = require("../../lib/server/watchdog-notify");
+
+// Telegram API errors as telegram-api.js throws them (error_code attached).
+const telegramError = (message, errorCode) =>
+  Object.assign(new Error(message), { telegramErrorCode: errorCode });
+const kParseError = () =>
+  telegramError(
+    "Bad Request: can't parse entities: Can't find end of the entity starting at byte offset 12",
+    400,
+  );
+const kPlainOpts = { disableWebPagePreview: true };
+const kHtmlOpts = { parseMode: "HTML", disableWebPagePreview: true };
 
 // `entries` = pairing files under <openclawDir>/credentials; `openclawJson`
 // (object or raw string, for unparseable-config cases) is served as
@@ -314,15 +330,29 @@ describe("server/watchdog-notify", () => {
       failed: 1,
       skipped: false,
       targets: 2,
+      formatFallback: 0,
     });
+    // The house format is rendered to Telegram HTML at the transport
+    // (WI-3.1) — never parse_mode=Markdown, whose entity parser died on every
+    // runtime value in #54.
     expect(telegramApi.sendMessage).toHaveBeenCalledWith(
       "100",
-      "*Gateway crashed*",
-      { parseMode: "Markdown", disableWebPagePreview: true },
+      "<b>Gateway crashed</b>",
+      { parseMode: "HTML", disableWebPagePreview: true },
     );
     expect(consoleErrorSpy).toHaveBeenCalledWith(
       "[watchdog] telegram notification failed for 200: blocked by user",
     );
+    // A generic throw (no telegramErrorCode) is a transient failure record.
+    expect(result.failures).toEqual([
+      {
+        channel: "telegram",
+        target: "200",
+        reason: "blocked by user",
+        errorCode: null,
+        deterministic: false,
+      },
+    ]);
   });
 
   it("sends discord DMs with bold markdown conversion and counts failures", async () => {
@@ -501,12 +531,15 @@ describe("server/watchdog-notify", () => {
       failed: 0,
       reason: "no_channels_delivered",
       channels: {
-        telegram: { sent: 0, failed: 0, skipped: true, targets: 0 },
+        telegram: { sent: 0, failed: 0, skipped: true, targets: 0, formatFallback: 0 },
         discord: { sent: 0, failed: 0, skipped: true, targets: 0 },
         slack: { sent: 0, failed: 0, skipped: true, targets: 0 },
         whatsapp: { sent: 0, failed: 0, skipped: true, targets: 0 },
         webhook: { sent: 0, failed: 0, skipped: true, targets: 0 },
       },
+      // Zero resolvable targets = zero failures: the routing layer keeps this
+      // TRANSIENT (pairing/tokens may appear later) — never terminal.
+      failures: [],
     });
   });
 
@@ -572,6 +605,7 @@ describe("server/watchdog-notify", () => {
         failed: 0,
         skipped: false,
         targets: 2,
+        formatFallback: 0,
       });
       expect(telegramApi.sendMessage.mock.calls.map((call) => call[0])).toEqual(
         ["123456", "-100987"],
@@ -664,7 +698,7 @@ describe("server/watchdog-notify", () => {
       expect(telegramApi.sendMessage).toHaveBeenCalledWith(
         "111",
         "Upgrade failed",
-        { parseMode: "Markdown", disableWebPagePreview: true },
+        { parseMode: "HTML", disableWebPagePreview: true },
       );
     });
 
@@ -714,6 +748,7 @@ describe("server/watchdog-notify", () => {
         failed: 0,
         skipped: true,
         targets: 0,
+        formatFallback: 0,
       });
       expect(telegramApi.sendMessage).not.toHaveBeenCalled();
     });
@@ -819,7 +854,7 @@ describe("server/watchdog-notify", () => {
       expect(telegramApi.sendMessage).toHaveBeenCalledWith(
         "12345",
         "Upgrade failed",
-        { parseMode: "Markdown", disableWebPagePreview: true },
+        { parseMode: "HTML", disableWebPagePreview: true },
       );
 
       delete process.env.TELEGRAM_BOT_TOKEN;
@@ -827,7 +862,12 @@ describe("server/watchdog-notify", () => {
         { channel: "telegram", target: "12345" },
         "Upgrade failed",
       );
-      expect(unconfigured).toEqual({ ok: false, reason: "telegram_unconfigured" });
+      expect(unconfigured).toEqual({
+        ok: false,
+        reason: "telegram_unconfigured",
+        errorCode: null,
+        deterministic: false,
+      });
     });
 
     it("derives the named-account Slack env key and reports it when missing", async () => {
@@ -856,7 +896,12 @@ describe("server/watchdog-notify", () => {
         { channel: "slack", target: "U_ADMIN", accountId: "ops" },
         "Upgrade failed",
       );
-      expect(missing).toEqual({ ok: false, reason: "missing SLACK_BOT_TOKEN_OPS" });
+      expect(missing).toEqual({
+        ok: false,
+        reason: "missing SLACK_BOT_TOKEN_OPS",
+        errorCode: null,
+        deterministic: false,
+      });
     });
 
     it("delivers to a discord target and reports unconfigured without a bot token", async () => {
@@ -885,7 +930,12 @@ describe("server/watchdog-notify", () => {
         { channel: "discord", target: "999" },
         "Upgrade failed",
       );
-      expect(unconfigured).toEqual({ ok: false, reason: "discord_unconfigured" });
+      expect(unconfigured).toEqual({
+        ok: false,
+        reason: "discord_unconfigured",
+        errorCode: null,
+        deterministic: false,
+      });
     });
 
     it("uses the injected slackApi for the default-account token", async () => {
@@ -919,17 +969,20 @@ describe("server/watchdog-notify", () => {
         openclawDir: "/tmp/openclaw",
       });
 
+      // Every failure carries the uniform shape (errorCode + deterministic)
+      // so the routing layer never has to special-case a reason string.
+      const kTransient = { ok: false, errorCode: null, deterministic: false };
       expect(await notifier.sendToTarget({ channel: "telegram" }, "m")).toEqual({
-        ok: false,
+        ...kTransient,
         reason: "invalid_target",
       });
       expect(await notifier.sendToTarget({}, "m")).toEqual({
-        ok: false,
+        ...kTransient,
         reason: "invalid_target",
       });
       expect(
         await notifier.sendToTarget({ channel: "smoke", target: "x" }, "m"),
-      ).toEqual({ ok: false, reason: "unsupported channel smoke" });
+      ).toEqual({ ...kTransient, reason: "unsupported channel smoke" });
     });
 
     it("routes whatsapp through clawCmd with a quoted target and surfaces failures", async () => {
@@ -955,7 +1008,12 @@ describe("server/watchdog-notify", () => {
         { channel: "whatsapp", target: "+15550001111" },
         "Upgrade failed",
       );
-      expect(failed).toEqual({ ok: false, reason: "no session" });
+      expect(failed).toEqual({
+        ok: false,
+        reason: "no session",
+        errorCode: null,
+        deterministic: false,
+      });
 
       const unconfigured = createWatchdogNotifier({
         fsImpl: kEmptyFsMock,
@@ -966,10 +1024,15 @@ describe("server/watchdog-notify", () => {
           { channel: "whatsapp", target: "+15550001111" },
           "m",
         ),
-      ).toEqual({ ok: false, reason: "whatsapp_unconfigured" });
+      ).toEqual({
+        ok: false,
+        reason: "whatsapp_unconfigured",
+        errorCode: null,
+        deterministic: false,
+      });
     });
 
-    it("a thrown provider error becomes { ok:false, reason } instead of rejecting", async () => {
+    it("a thrown provider error becomes { ok:false, reason, errorCode } instead of rejecting", async () => {
       process.env.DISCORD_BOT_TOKEN = "dc-token";
       const discordApi = {
         sendDirectMessage: vi.fn(async () => {
@@ -986,7 +1049,27 @@ describe("server/watchdog-notify", () => {
         { channel: "discord", target: "999" },
         "Upgrade failed",
       );
-      expect(result).toEqual({ ok: false, reason: "discord down" });
+      expect(result).toEqual({
+        ok: false,
+        reason: "discord down",
+        errorCode: null,
+        deterministic: false,
+      });
+
+      // discord-api.js attaches the HTTP status as discordStatusCode — it
+      // rides along as errorCode but never makes a Discord failure terminal.
+      const rateLimited = Object.assign(new Error("You are being rate limited."), {
+        discordStatusCode: 429,
+      });
+      discordApi.sendDirectMessage.mockRejectedValueOnce(rateLimited);
+      expect(
+        await notifier.sendToTarget({ channel: "discord", target: "999" }, "m"),
+      ).toEqual({
+        ok: false,
+        reason: "You are being rate limited.",
+        errorCode: 429,
+        deterministic: false,
+      });
     });
 
     it("stamps getLastDeliveredAt on every channel's successful delivery", async () => {
@@ -1051,7 +1134,12 @@ describe("server/watchdog-notify", () => {
         { channel: "telegram", target: "1" },
         "m",
       );
-      expect(failed).toEqual({ ok: false, reason: "blocked by user" });
+      expect(failed).toEqual({
+        ok: false,
+        reason: "blocked by user",
+        errorCode: null,
+        deterministic: false,
+      });
       expect(notifier.getLastDeliveredAt()).toBe(stamped);
     });
   });
@@ -1128,5 +1216,656 @@ describe("watchdog-notify sqlite pairing store", () => {
     );
     const targets = getPairedTargetsByAccount({ channel: "telegram", openclawDir });
     expect(targets.get("default")).toEqual(["444"]);
+  });
+});
+
+// ── Telegram HTML transport (WI-3.1/3.2) ─────────────────────────────────────
+// The #54 operator never saw an alert: parse_mode=Markdown rejected every
+// message carrying a runtime value. The ONE send helper renders the house
+// format to HTML, falls back to plain text on a parse 400, and classifies
+// every failure with errorCode + deterministic for the routing layer.
+describe("watchdog-notify telegram HTML transport", () => {
+  let consoleWarnSpy = null;
+  let consoleErrorSpy = null;
+  const kOriginalTelegramToken = process.env.TELEGRAM_BOT_TOKEN;
+  const kEmptyFsMock = {
+    existsSync: vi.fn(() => false),
+    readdirSync: vi.fn(() => []),
+    readFileSync: vi.fn(() => {
+      throw new Error("unexpected read");
+    }),
+  };
+
+  beforeEach(() => {
+    consoleWarnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    process.env.TELEGRAM_BOT_TOKEN = "tg-token";
+  });
+
+  afterEach(() => {
+    consoleWarnSpy.mockRestore();
+    consoleErrorSpy.mockRestore();
+    if (kOriginalTelegramToken === undefined) delete process.env.TELEGRAM_BOT_TOKEN;
+    else process.env.TELEGRAM_BOT_TOKEN = kOriginalTelegramToken;
+  });
+
+  describe("sendTelegramRendered", () => {
+    const kNotice =
+      "🐺 *AlphaClaw Watchdog*\n🔴 Backup failed - [View logs](https://claw.example/#/watchdog)\nError: `lease migration.legacy-audit/filesystem-sqlite-boundary was lost`";
+    const kNoticeHtml =
+      '🐺 <b>AlphaClaw Watchdog</b>\n🔴 Backup failed - <a href="https://claw.example/#/watchdog">View logs</a>\nError: <code>lease migration.legacy-audit/filesystem-sqlite-boundary was lost</code>';
+
+    it("sends the HTML render with parse_mode=HTML and no link preview", async () => {
+      const api = { sendMessage: vi.fn(async () => ({ ok: true })) };
+      const result = await sendTelegramRendered({ api, chatId: "100", text: kNotice });
+      expect(result).toEqual({ ok: true, formatFallback: false });
+      expect(api.sendMessage).toHaveBeenCalledTimes(1);
+      expect(api.sendMessage).toHaveBeenCalledWith("100", kNoticeHtml, kHtmlOpts);
+      expect(consoleWarnSpy).not.toHaveBeenCalled();
+    });
+
+    it("a parse 400 resends the SAME house-format text with no parse_mode — delivered, formatFallback", async () => {
+      const api = {
+        sendMessage: vi.fn(async (_chatId, _text, opts) => {
+          if (opts?.parseMode) throw kParseError();
+          return { ok: true };
+        }),
+      };
+      const result = await sendTelegramRendered({ api, chatId: "100", text: kNotice });
+      expect(result).toEqual({ ok: true, formatFallback: true });
+      expect(api.sendMessage).toHaveBeenCalledTimes(2);
+      expect(api.sendMessage.mock.calls[0]).toEqual(["100", kNoticeHtml, kHtmlOpts]);
+      expect(api.sendMessage.mock.calls[1]).toEqual(["100", kNotice, kPlainOpts]);
+      expect(consoleWarnSpy).toHaveBeenCalledWith(
+        expect.stringContaining("rejected the HTML render for 100"),
+      );
+    });
+
+    it.each([
+      ["can't parse entities", "Bad Request: can't parse entities: unexpected end"],
+      ["unsupported start tag", 'Bad Request: unsupported start tag "x" at byte offset 3'],
+      ["can't find end of the entity", "Bad Request: can't find end of the entity starting at byte offset 1"],
+    ])("treats a 400 mentioning %s as a parse rejection", async (_label, message) => {
+      const api = {
+        sendMessage: vi.fn(async (_chatId, _text, opts) => {
+          if (opts?.parseMode) throw telegramError(message, 400);
+          return { ok: true };
+        }),
+      };
+      const result = await sendTelegramRendered({ api, chatId: "1", text: "*x*" });
+      expect(result).toEqual({ ok: true, formatFallback: true });
+      expect(api.sendMessage).toHaveBeenCalledTimes(2);
+    });
+
+    it("a non-parse 400 fails once with its errorCode and stays transient (no plain resend)", async () => {
+      const api = {
+        sendMessage: vi.fn(async () => {
+          throw telegramError("Bad Request: message is too long", 400);
+        }),
+      };
+      const result = await sendTelegramRendered({ api, chatId: "100", text: "*x*" });
+      expect(result).toEqual({
+        ok: false,
+        reason: "Bad Request: message is too long",
+        errorCode: 400,
+        deterministic: false,
+      });
+      expect(api.sendMessage).toHaveBeenCalledTimes(1);
+      expect(consoleWarnSpy).not.toHaveBeenCalled();
+    });
+
+    it("403 (bot blocked/kicked) is deterministic", async () => {
+      const api = {
+        sendMessage: vi.fn(async () => {
+          throw telegramError("Forbidden: bot was blocked by the user", 403);
+        }),
+      };
+      expect(await sendTelegramRendered({ api, chatId: "100", text: "x" })).toEqual({
+        ok: false,
+        reason: "Forbidden: bot was blocked by the user",
+        errorCode: 403,
+        deterministic: true,
+      });
+      expect(api.sendMessage).toHaveBeenCalledTimes(1);
+    });
+
+    // Adversarial review (e): a bare 403 used to be deterministic. Only the
+    // descriptions that need a human on the Telegram side qualify.
+    it.each([
+      "Forbidden: bot was blocked by the user",
+      "Forbidden: bot was kicked from the group chat",
+      "Forbidden: bot was kicked from the supergroup chat",
+      "Forbidden: user is deactivated",
+    ])("403 %s is deterministic (never retried)", async (message) => {
+      const api = {
+        sendMessage: vi.fn(async () => {
+          throw telegramError(message, 403);
+        }),
+      };
+      expect(await sendTelegramRendered({ api, chatId: "100", text: "x" })).toMatchObject({
+        ok: false,
+        errorCode: 403,
+        deterministic: true,
+      });
+    });
+
+    it.each([
+      "Forbidden: bot can't initiate conversation with a user",
+      "Forbidden: bot is not a member of the supergroup chat",
+      "Forbidden: bot can't send messages to bots",
+      "Forbidden",
+    ])("403 %s stays TRANSIENT (pairing/starting the bot can fix it)", async (message) => {
+      const api = {
+        sendMessage: vi.fn(async () => {
+          throw telegramError(message, 403);
+        }),
+      };
+      expect(await sendTelegramRendered({ api, chatId: "100", text: "x" })).toEqual({
+        ok: false,
+        reason: message,
+        errorCode: 403,
+        deterministic: false,
+      });
+      expect(api.sendMessage).toHaveBeenCalledTimes(1);
+    });
+
+    // C30 (source-aware chat-not-found): Telegram answers `400 chat not
+    // found` both for a dead chat AND for a numeric id the bot has never
+    // exchanged a message with. Only a pairing-store target has a proven
+    // prior interaction, so only there is the shape final.
+    describe("400 chat not found is deterministic ONLY for a pairing-store target", () => {
+      const kChatNotFoundApi = () => ({
+        sendMessage: vi.fn(async () => {
+          throw telegramError("Bad Request: chat not found", 400);
+        }),
+      });
+
+      it("pairing target → deterministic (the chat is gone)", async () => {
+        const api = kChatNotFoundApi();
+        expect(
+          await sendTelegramRendered({
+            api,
+            chatId: "100",
+            text: "x",
+            source: kTelegramTargetSourcePairing,
+          }),
+        ).toEqual({
+          ok: false,
+          reason: "Bad Request: chat not found",
+          errorCode: 400,
+          deterministic: true,
+        });
+        expect(api.sendMessage).toHaveBeenCalledTimes(1);
+      });
+
+      it.each([
+        ["allowFrom-fallback", kTelegramTargetSourceAllowFrom],
+        ["admin", kTelegramTargetSourceAdmin],
+        ["omitted (unproven)", undefined],
+      ])(
+        "%s target → RETRYABLE (the user may simply never have messaged the bot)",
+        async (_label, source) => {
+          const api = kChatNotFoundApi();
+          expect(
+            await sendTelegramRendered({ api, chatId: "100", text: "x", source }),
+          ).toEqual({
+            ok: false,
+            reason: "Bad Request: chat not found",
+            errorCode: 400,
+            deterministic: false,
+          });
+          // No plain resend: this is not a parse rejection.
+          expect(api.sendMessage).toHaveBeenCalledTimes(1);
+        },
+      );
+
+      it("provenance never softens a 403 blocked/kicked/deactivated verdict", async () => {
+        for (const source of [
+          kTelegramTargetSourceAllowFrom,
+          kTelegramTargetSourceAdmin,
+          undefined,
+        ]) {
+          const api = {
+            sendMessage: vi.fn(async () => {
+              throw telegramError("Forbidden: bot was blocked by the user", 403);
+            }),
+          };
+          expect(
+            await sendTelegramRendered({ api, chatId: "100", text: "x", source }),
+          ).toMatchObject({ ok: false, errorCode: 403, deterministic: true });
+        }
+      });
+
+      it("a 403 whose description says chat not found is NOT proven deterministic (no longer in the 403 pattern)", async () => {
+        const api = {
+          sendMessage: vi.fn(async () => {
+            throw telegramError("Forbidden: chat not found", 403);
+          }),
+        };
+        expect(
+          await sendTelegramRendered({
+            api,
+            chatId: "100",
+            text: "x",
+            source: kTelegramTargetSourceAdmin,
+          }),
+        ).toMatchObject({ ok: false, errorCode: 403, deterministic: false });
+      });
+    });
+
+    it.each([
+      ["pairing", kTelegramTargetSourcePairing],
+      ["allowFrom", kTelegramTargetSourceAllowFrom],
+      ["admin", kTelegramTargetSourceAdmin],
+      ["omitted", undefined],
+    ])(
+      "a parse 400 that survives the plain-text fallback is deterministic (source %s)",
+      async (_label, source) => {
+        const api = {
+          sendMessage: vi.fn(async () => {
+            throw kParseError();
+          }),
+        };
+        const result = await sendTelegramRendered({ api, chatId: "100", text: "*x*", source });
+        expect(result).toEqual({
+          ok: false,
+          reason: expect.stringContaining("can't parse entities"),
+          errorCode: 400,
+          deterministic: true,
+        });
+        expect(api.sendMessage).toHaveBeenCalledTimes(2);
+        expect(api.sendMessage.mock.calls[1][2]).toEqual(kPlainOpts);
+      },
+    );
+
+    it("a plain-text fallback that fails transiently (429) stays transient with its errorCode", async () => {
+      const api = {
+        sendMessage: vi.fn(async (_chatId, _text, opts) => {
+          if (opts?.parseMode) throw kParseError();
+          throw telegramError("Too Many Requests: retry after 7", 429);
+        }),
+      };
+      expect(await sendTelegramRendered({ api, chatId: "100", text: "*x*" })).toEqual({
+        ok: false,
+        reason: "Too Many Requests: retry after 7",
+        errorCode: 429,
+        deterministic: false,
+      });
+    });
+
+    it("a 5xx / network error (no error_code) is transient with errorCode null", async () => {
+      const api = {
+        sendMessage: vi.fn(async () => {
+          throw new Error("fetch failed");
+        }),
+      };
+      expect(await sendTelegramRendered({ api, chatId: "100", text: "x" })).toEqual({
+        ok: false,
+        reason: "fetch failed",
+        errorCode: null,
+        deterministic: false,
+      });
+    });
+
+    it("a render the local validator rejects goes out as plain text only (formatFallback)", async () => {
+      const api = { sendMessage: vi.fn(async () => ({ ok: true })) };
+      const render = vi.fn((text) => ({ html: null, plain: text }));
+      const result = await sendTelegramRendered({ api, chatId: "100", text: "*x*", render });
+      expect(result).toEqual({ ok: true, formatFallback: true });
+      expect(api.sendMessage).toHaveBeenCalledTimes(1);
+      expect(api.sendMessage).toHaveBeenCalledWith("100", "*x*", kPlainOpts);
+      expect(consoleWarnSpy).toHaveBeenCalledWith(
+        expect.stringContaining("failed local validation"),
+      );
+    });
+
+    it("a plain-only send that fails is classified like any other failure", async () => {
+      const api = {
+        sendMessage: vi.fn(async () => {
+          throw telegramError("Forbidden: bot was kicked from the group chat", 403);
+        }),
+      };
+      const render = (text) => ({ html: null, plain: text });
+      expect(await sendTelegramRendered({ api, chatId: "-1", text: "x", render })).toEqual({
+        ok: false,
+        reason: "Forbidden: bot was kicked from the group chat",
+        errorCode: 403,
+        deterministic: true,
+      });
+    });
+  });
+
+  describe("both send sites use the helper", () => {
+    it("fan-out: a parse 400 falls back to plain text, counts as sent, and tallies formatFallback", async () => {
+      const fsMock = buildCredentialsFsMock({
+        "telegram-default-allowFrom.json": ["100", "200"],
+      });
+      const telegramApi = {
+        sendMessage: vi.fn(async (chatId, _text, opts) => {
+          if (chatId === "200" && opts?.parseMode) throw kParseError();
+          return { ok: true };
+        }),
+      };
+      const notifier = createWatchdogNotifier({
+        telegramApi,
+        fsImpl: fsMock,
+        openclawDir: "/tmp/openclaw",
+      });
+
+      const result = await notifier.notify("*Backup failed*: `lease_lost`");
+
+      expect(result.ok).toBe(true);
+      expect(result.channels.telegram).toEqual({
+        sent: 2,
+        failed: 0,
+        skipped: false,
+        targets: 2,
+        formatFallback: 1,
+      });
+      expect(result.failures).toEqual([]);
+      expect(telegramApi.sendMessage).toHaveBeenCalledTimes(3);
+      expect(telegramApi.sendMessage.mock.calls[0]).toEqual([
+        "100",
+        "<b>Backup failed</b>: <code>lease_lost</code>",
+        kHtmlOpts,
+      ]);
+      expect(telegramApi.sendMessage.mock.calls[2]).toEqual([
+        "200",
+        "*Backup failed*: `lease_lost`",
+        kPlainOpts,
+      ]);
+      expect(consoleErrorSpy).not.toHaveBeenCalled();
+    });
+
+    it("fan-out: deterministic failures ride the failures list with errorCode (pairing-store targets — chat not found IS final here)", async () => {
+      const fsMock = buildCredentialsFsMock({
+        "telegram-default-allowFrom.json": ["100", "200"],
+      });
+      const telegramApi = {
+        sendMessage: vi.fn(async (chatId) => {
+          if (chatId === "100") throw telegramError("Forbidden: bot was blocked by the user", 403);
+          throw telegramError("Bad Request: chat not found", 400);
+        }),
+      };
+      const notifier = createWatchdogNotifier({
+        telegramApi,
+        fsImpl: fsMock,
+        openclawDir: "/tmp/openclaw",
+      });
+
+      const result = await notifier.notify("Upgrade failed");
+
+      expect(result.ok).toBe(false);
+      expect(result.reason).toBe("no_channels_delivered");
+      expect(result.channels.telegram).toEqual({
+        sent: 0,
+        failed: 2,
+        skipped: false,
+        targets: 2,
+        formatFallback: 0,
+      });
+      expect(result.failures).toEqual([
+        {
+          channel: "telegram",
+          target: "100",
+          reason: "Forbidden: bot was blocked by the user",
+          errorCode: 403,
+          deterministic: true,
+        },
+        {
+          channel: "telegram",
+          target: "200",
+          reason: "Bad Request: chat not found",
+          errorCode: 400,
+          deterministic: true,
+        },
+      ]);
+      expect(consoleErrorSpy).toHaveBeenCalledWith(
+        "[watchdog] telegram notification failed for 100: Forbidden: bot was blocked by the user",
+      );
+    });
+
+    // C30: the allowFrom fallback hands the send helper ids copied into
+    // openclaw.json by hand — Telegram says "chat not found" for any of them
+    // the user has not yet messaged. That is fixable (the user opens the
+    // bot), so the outbox must keep retrying instead of abandoning on the
+    // first flush. A 403 blocked stays final regardless.
+    it("fan-out: allowFrom-fallback targets keep 400 chat not found RETRYABLE (403 blocked stays deterministic)", async () => {
+      const fsMock = buildCredentialsFsMock(
+        {},
+        { openclawJson: { channels: { telegram: { allowFrom: ["100", "200"] } } } },
+      );
+      const telegramApi = {
+        sendMessage: vi.fn(async (chatId) => {
+          if (chatId === "100") throw telegramError("Forbidden: bot was blocked by the user", 403);
+          throw telegramError("Bad Request: chat not found", 400);
+        }),
+      };
+      const notifier = createWatchdogNotifier({
+        telegramApi,
+        fsImpl: fsMock,
+        openclawDir: "/tmp/openclaw",
+      });
+
+      const result = await notifier.notify("Upgrade failed");
+
+      expect(result.ok).toBe(false);
+      expect(result.channels.telegram).toMatchObject({ sent: 0, failed: 2, targets: 2 });
+      expect(result.failures).toEqual([
+        {
+          channel: "telegram",
+          target: "100",
+          reason: "Forbidden: bot was blocked by the user",
+          errorCode: 403,
+          deterministic: true,
+        },
+        {
+          channel: "telegram",
+          target: "200",
+          reason: "Bad Request: chat not found",
+          errorCode: 400,
+          deterministic: false,
+        },
+      ]);
+    });
+
+    it("fan-out: the webhook failure record never carries the (secret-bearing) URL", async () => {
+      process.env.ALPHACLAW_NOTIFY_WEBHOOK_URL = "https://hooks.example/secret-path";
+      try {
+        const notifier = createWatchdogNotifier({
+          fsImpl: kEmptyFsMock,
+          openclawDir: "/tmp/openclaw",
+          fetchImpl: vi.fn(async () => ({ ok: false, status: 500 })),
+        });
+        const result = await notifier.notify("hello");
+        expect(result.failures).toEqual([
+          {
+            channel: "webhook",
+            target: null,
+            reason: "webhook POST did not succeed",
+            errorCode: null,
+            deterministic: false,
+          },
+        ]);
+      } finally {
+        delete process.env.ALPHACLAW_NOTIFY_WEBHOOK_URL;
+      }
+    });
+
+    it("sendToTarget: a parse 400 falls back to plain text and reports ok", async () => {
+      const telegramApi = {
+        sendMessage: vi.fn(async (_chatId, _text, opts) => {
+          if (opts?.parseMode) throw kParseError();
+          return { ok: true };
+        }),
+      };
+      const notifier = createWatchdogNotifier({
+        telegramApi,
+        fsImpl: kEmptyFsMock,
+        openclawDir: "/tmp/openclaw",
+      });
+
+      const result = await notifier.sendToTarget(
+        { channel: "telegram", target: "12345" },
+        "*Upgrade failed* - [View](https://claw.example/#/upgrade)",
+      );
+
+      expect(result).toEqual({ ok: true });
+      expect(notifier.getLastDeliveredAt()).not.toBeNull();
+      expect(telegramApi.sendMessage.mock.calls).toEqual([
+        [
+          "12345",
+          '<b>Upgrade failed</b> - <a href="https://claw.example/#/upgrade">View</a>',
+          kHtmlOpts,
+        ],
+        ["12345", "*Upgrade failed* - [View](https://claw.example/#/upgrade)", kPlainOpts],
+      ]);
+    });
+
+    // C30: an admin target is operator-typed — never proven to have messaged
+    // the bot — so its chat-not-found stays on the retry ladder.
+    it("sendToTarget: an admin target's 400 chat not found fails RETRYABLE with errorCode and does not stamp delivery", async () => {
+      const telegramApi = {
+        sendMessage: vi.fn(async () => {
+          throw telegramError("Bad Request: chat not found", 400);
+        }),
+      };
+      const notifier = createWatchdogNotifier({
+        telegramApi,
+        fsImpl: kEmptyFsMock,
+        openclawDir: "/tmp/openclaw",
+      });
+
+      const result = await notifier.sendToTarget(
+        { channel: "telegram", target: "12345" },
+        "Upgrade failed",
+      );
+
+      expect(result).toEqual({
+        ok: false,
+        reason: "Bad Request: chat not found",
+        errorCode: 400,
+        deterministic: false,
+      });
+      expect(telegramApi.sendMessage).toHaveBeenCalledTimes(1);
+      expect(notifier.getLastDeliveredAt()).toBeNull();
+    });
+
+    it("sendToTarget: a caller that vouches source=pairing gets the deterministic chat-not-found verdict", async () => {
+      const telegramApi = {
+        sendMessage: vi.fn(async () => {
+          throw telegramError("Bad Request: chat not found", 400);
+        }),
+      };
+      const notifier = createWatchdogNotifier({
+        telegramApi,
+        fsImpl: kEmptyFsMock,
+        openclawDir: "/tmp/openclaw",
+      });
+      expect(
+        await notifier.sendToTarget(
+          { channel: "telegram", target: "12345", source: kTelegramTargetSourcePairing },
+          "Upgrade failed",
+        ),
+      ).toMatchObject({ ok: false, errorCode: 400, deterministic: true });
+    });
+
+    it("sendToTarget: an admin target's 403 blocked stays deterministic", async () => {
+      const telegramApi = {
+        sendMessage: vi.fn(async () => {
+          throw telegramError("Forbidden: bot was blocked by the user", 403);
+        }),
+      };
+      const notifier = createWatchdogNotifier({
+        telegramApi,
+        fsImpl: kEmptyFsMock,
+        openclawDir: "/tmp/openclaw",
+      });
+      expect(
+        await notifier.sendToTarget({ channel: "telegram", target: "12345" }, "Upgrade failed"),
+      ).toMatchObject({ ok: false, errorCode: 403, deterministic: true });
+    });
+  });
+
+  // WI-3.6: Slack mrkdwn spells links <url|label>; bold is already shared.
+  describe("slack link rendering", () => {
+    it("formatSlackMessage rewrites http(s) house links only", () => {
+      expect(
+        formatSlackMessage(
+          "🔴 Crash loop - [View logs](https://claw.example/#/watchdog) see [docs](ftp://x/y) and *bold*",
+        ),
+      ).toBe(
+        "🔴 Crash loop - <https://claw.example/#/watchdog|View logs> see [docs](ftp://x/y) and *bold*",
+      );
+      expect(formatSlackMessage("")).toBe("");
+      expect(formatSlackMessage(null)).toBe("");
+    });
+
+    // Adversarial review P3 (10): the Slack renderer duplicated the link regex
+    // and truncated at the first `)` exactly like Telegram did. Both now share
+    // renderHouseLinks.
+    it("a url with balanced parentheses renders whole; a trailing `)` outside the link stays text", () => {
+      expect(formatSlackMessage("[X](https://a.b/c_(paren)_d) tail")).toBe(
+        "<https://a.b/c_(paren)_d|X> tail",
+      );
+      expect(formatSlackMessage("(see [X](https://a.b/c))")).toBe("(see <https://a.b/c|X>)");
+      expect(formatSlackMessage("(see [X](https://a.b/c_(p)))")).toBe(
+        "(see <https://a.b/c_(p)|X>)",
+      );
+    });
+
+    // Adversarial review (f): Slack mrkdwn escapes & < > in text, and `|`
+    // ends the url part of <url|label>.
+    it("escapes & < > in the minted label and percent-encodes | < > in the url", () => {
+      expect(formatSlackMessage("[a<b&c>d](https://x.y/p)")).toBe(
+        "<https://x.y/p|a&lt;b&amp;c&gt;d>",
+      );
+      expect(formatSlackMessage("[label](https://x.y/p|q)")).toBe(
+        "<https://x.y/p%7Cq|label>",
+      );
+      expect(formatSlackMessage("[label](https://x.y/?a=<1>&b=2)")).toBe(
+        "<https://x.y/?a=%3C1%3E&b=2|label>",
+      );
+      // Literal runs outside links are the compose site's text — untouched.
+      expect(formatSlackMessage("a & b < c [x](https://y.z)")).toBe(
+        "a & b < c <https://y.z|x>",
+      );
+      // Non-http targets stay exactly as authored (no escaping either).
+      expect(formatSlackMessage("[a<b](ftp://x|y)")).toBe("[a<b](ftp://x|y)");
+    });
+
+    it("fan-out and sendToTarget both post the Slack-rendered link", async () => {
+      const kOriginalSlackToken = process.env.SLACK_BOT_TOKEN;
+      process.env.SLACK_BOT_TOKEN = "xoxb-default";
+      try {
+        const slackApi = {
+          postMessage: vi.fn(async () => ({ ts: "1", channel: "dm" })),
+          addReaction: vi.fn(async () => ({ ok: true })),
+        };
+        const fsMock = buildCredentialsFsMock({
+          "slack-default-allowFrom.json": ["U_ADMIN"],
+        });
+        const notifier = createWatchdogNotifier({
+          slackApi,
+          fsImpl: fsMock,
+          openclawDir: "/tmp/openclaw",
+          readEnvFile: () => [{ key: "SLACK_BOT_TOKEN", value: "xoxb-default" }],
+        });
+        const message = "🔴 Crash loop - [View logs](https://claw.example/#/watchdog)";
+
+        await notifier.notify(message, { eventType: "crash" });
+        await notifier.sendToTarget({ channel: "slack", target: "U_ADMIN" }, message);
+
+        expect(slackApi.postMessage).toHaveBeenCalledTimes(2);
+        for (const call of slackApi.postMessage.mock.calls) {
+          expect(call[1]).toBe(
+            "🔴 Crash loop - <https://claw.example/#/watchdog|View logs>",
+          );
+        }
+      } finally {
+        if (kOriginalSlackToken === undefined) delete process.env.SLACK_BOT_TOKEN;
+        else process.env.SLACK_BOT_TOKEN = kOriginalSlackToken;
+      }
+    });
   });
 });

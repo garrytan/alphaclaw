@@ -112,7 +112,20 @@ const writeCheckoutFixture = (rootDir, { sha, bin = true } = {}) => {
   return checkoutDir;
 };
 
+// The usable-backup check (issue #54, WI-6.1) runs `gzip -t` + manifest
+// extraction through the same runner seam; answer like a real archive does.
+const kStubManifestTail = `${JSON.stringify({
+  schemaVersion: 1,
+  assets: [{ kind: "sqlite", sourcePath: "/data/.openclaw/state/openclaw.sqlite", archivePath: "state/openclaw.sqlite" }],
+})}\n`;
+
 const defaultRunnerImpl = async (opts) => {
+  if (opts.command === "gzip" && opts.args?.[0] === "-t") {
+    return { ok: true, code: 0, tail: "", timedOut: false };
+  }
+  if (opts.command === "tar" && opts.args?.[0] === "-xzOf") {
+    return { ok: true, code: 0, tail: kStubManifestTail, timedOut: false };
+  }
   // Faithful model of the real CLI's --output contract (verified against the
   // pinned openclaw 2026.7.1-2 source, dist/backup-create resolveOutputPath):
   // an existing directory (or trailing separator) gets a timestamped archive
@@ -672,6 +685,58 @@ describe("server/openclaw-channel apply flow (e2e)", { retry: 1 }, () => {
     expect(sync.isApplyInProgress()).toBe(true);
     const releasedRes = await request(guardApp).post("/api/alphaclaw/update");
     expect(releasedRes.status).toBe(409);
+  });
+
+  it("reads the updater's UpdateRunResult out of a build log whose EARLIER lines also parse as JSON (build:completed, never a false warning)", async () => {
+    // Live-verified 2026-09-02: a real from-source dev build logs brace/bracket
+    // noise before the updater's final report, and a first-JSON-value parse
+    // read `status` as unknown → build:warning on every real dev build.
+    const harness = createHarness({
+      pin: "1.0.0",
+      installedVersion: "1.0.0",
+      sentinelVersion: "1.0.0",
+      runnerImpl: async (opts, fallback) => {
+        if (opts.command === "openclaw" && opts.args?.[0] === "update") {
+          return {
+            ok: true,
+            code: 0,
+            timedOut: false,
+            // The runner's tail interleaves stderr ahead of the stdout report.
+            // The first two lines are VERBATIM from the pinned CLI's doctor
+            // output (captured 2026-09-02): the shell hint carries a valid
+            // JSON array, which is exactly what the first-value parse returned.
+            tail: [
+              "[warning] core/doctor/node-hosting-preconditions gateway.bind - Gateway is only bound to loopback.",
+              "│  openclaw config set commands.ownerAllowFrom '[\"telegram:123456789\"]'   │",
+              '{"level":"info","msg":"pnpm build starting"}',
+              "compiled 1200 files {ok}",
+              '{"status":"ok","steps":[{"name":"build","status":"ok"}],"plugins":{"status":"ok"}}',
+              "",
+            ].join("\n"),
+          };
+        }
+        return fallback(opts);
+      },
+    });
+    writeCheckoutFixture(harness.rootDir, { sha: kDevSha });
+
+    const applyRes = await request(harness.app)
+      .post("/api/openclaw/apply")
+      .send({ channel: "dev", devHead: true });
+    expect(applyRes.status).toBe(202);
+    await waitFor(
+      () => harness.store.readState().lastUpdateRun?.finishedAt != null,
+    );
+
+    const run = harness.store.readState().lastUpdateRun;
+    const stepNames = run.steps.map((step) => `${step.name}:${step.status}`);
+    expect(stepNames, stepNames.join(", ")).toContain("build:completed");
+    expect(stepNames).not.toContain("build:warning");
+    const build = run.steps.find((step) => step.name === "build" && step.status === "completed");
+    expect(JSON.stringify(build)).toContain('"updaterStatus":"ok"');
+    expect(harness.store.readState().applied).toEqual(
+      expect.objectContaining({ channel: "dev", sha: kDevSha }),
+    );
   });
 
   it("streams multi-MB dev-build output over SSE and records the checkout sha", async () => {

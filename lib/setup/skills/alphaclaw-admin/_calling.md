@@ -20,6 +20,7 @@ alphaclaw admin manifest [--domain <name>] [--op <id>]
 | `denied` | Operation is operator-only | Point the user to the dashboard. |
 | `confirm_required` (HTTP 428) | Dangerous op needs approval | Relay the summary; ask an admin for the code sent to them; retry with `--confirm`. |
 | `no_admin_targets` | No admin channel configured | Ask the operator to set one (Setup UI → Notifications) before dangerous ops. |
+| `backup_in_progress` (HTTP 409 + `Retry-After`) | A pre-update backup is pausing the gateway and holding AlphaClaw's own state-database writes quiet | Nothing was changed. Wait the `Retry-After` seconds (120), then retry the same call. |
 | `restart_required` in a response | Change applied, not yet live | Tell the user a gateway restart is needed. |
 | `server_unreachable` / `timeout` | Server not responding | The gateway may be mid-restart; check the Watchdog tab and retry shortly. |
 
