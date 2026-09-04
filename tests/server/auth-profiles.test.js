@@ -1083,3 +1083,21 @@ describe("server/auth-profiles state-DB quiet period", () => {
     expect(Object.keys(recovered.profiles)).toEqual(["anthropic:default"]);
   });
 });
+
+// Fix wave F074: the path builder is the last line before path.join —
+// it fails closed on anything that is not an agent-id slug.
+describe("auth-profiles agent id boundary", () => {
+  it("refuses a traversal agentId on every store operation and writes nothing", () => {
+    for (const bad of ["../../escape", "__proto__", "Main", "a/b", ""]) {
+      expect(() => ap.upsertProfile("p1", { type: "api_key", key: "k" }, bad), bad).toThrow(/Invalid agent id/);
+      expect(() => ap.listProfiles(bad), bad).toThrow(/Invalid agent id/);
+      expect(() => ap.loadAuthStore(bad), bad).toThrow(/Invalid agent id/);
+    }
+    expect(fs.existsSync(path.join(tmpDir, "escape"))).toBe(false);
+    expect(fs.existsSync(path.join(tmpDir, ".openclaw", "agents", "escape"))).toBe(false);
+  });
+
+  it("still accepts slug agent ids", () => {
+    expect(() => ap.listProfiles("ops-2")).not.toThrow();
+  });
+});

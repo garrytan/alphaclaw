@@ -1749,3 +1749,66 @@ describe("server/routes/pairings sqlite reject", () => {
     expect(clawCmd).toHaveBeenCalledWith("pairing approve 'telegram' 'ABCD1234'");
   });
 });
+
+// Fix wave F087: reject path-joined an unvalidated body.channel into
+// credentials/<channel>-pairing.json (approve already allowlisted it). Both
+// now read the one shared allowlist and validate the account id.
+describe("server/routes/pairings reject input boundary", () => {
+  const spyFs = () => ({
+    existsSync: vi.fn(() => false),
+    readFileSync: vi.fn(() => "[]"),
+    writeFileSync: vi.fn(),
+    renameSync: vi.fn(),
+    unlinkSync: vi.fn(),
+    mkdirSync: vi.fn(),
+  });
+
+  it("rejects a traversal channel with 400 and never touches the filesystem", async () => {
+    const fsModule = spyFs();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const app = createApp({
+      clawCmd: vi.fn(async () => ({ ok: true, stdout: "", stderr: "" })),
+      isOnboarded: () => true,
+      fsModule,
+    });
+    const res = await request(app)
+      .post("/api/pairings/abc123/reject")
+      .send({ channel: "../../../tmp/evil" });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/Unsupported pairing channel/);
+    expect(fsModule.existsSync).not.toHaveBeenCalled();
+    expect(fsModule.readFileSync).not.toHaveBeenCalled();
+    expect(fsModule.writeFileSync).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("field=channel reason=unsupported_channel"));
+  });
+
+  it("rejects an invalid account id on reject with 400", async () => {
+    const fsModule = spyFs();
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const app = createApp({
+      clawCmd: vi.fn(async () => ({ ok: true, stdout: "", stderr: "" })),
+      isOnboarded: () => true,
+      fsModule,
+    });
+    const res = await request(app)
+      .post("/api/pairings/abc123/reject")
+      .send({ channel: "telegram", accountId: "__proto__" });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe("Invalid account id");
+    expect(fsModule.readFileSync).not.toHaveBeenCalled();
+  });
+
+  it("normalizes channel case on reject like approve does", async () => {
+    const fsModule = spyFs();
+    const app = createApp({
+      clawCmd: vi.fn(async () => ({ ok: true, stdout: "", stderr: "" })),
+      isOnboarded: () => true,
+      fsModule,
+    });
+    const res = await request(app)
+      .post("/api/pairings/abc123/reject")
+      .send({ channel: "Telegram" });
+    // Not found (no store), but past the allowlist — no 400.
+    expect(res.status).toBe(404);
+  });
+});

@@ -510,3 +510,55 @@ describe("server/routes/models coverage", () => {
     expect(deleteRes.body).toEqual({ ok: false, error: "Missing profileId" });
   });
 });
+
+// Fix wave F074: agentId reaches path.join in auth-profiles (agents/<id>/…),
+// so every models route validates it at the boundary — traversal shapes and
+// array coercion (repeated query keys) are a 400 + audit line, never a 500 or
+// an escaped path.
+describe("server/routes/models agentId boundary", () => {
+  let warn;
+  beforeEach(() => {
+    warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+
+  it("rejects a traversal agentId on PUT /api/models/config before any store write", async () => {
+    const deps = createModelDeps();
+    const app = createApp(deps);
+    const res = await request(app)
+      .put("/api/models/config?agentId=../../evil")
+      .send({ profiles: [{ id: "p1", type: "api_key", key: "k" }] });
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({ ok: false, error: "Invalid agentId" });
+    expect(deps.authProfiles.upsertProfile).not.toHaveBeenCalled();
+    expect(deps.authProfiles.setModelConfig).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledWith(expect.stringMatching(/\[input\] rejected PUT \/api\/models\/config field=agentId reason=invalid_shape/));
+  });
+
+  it("rejects an array agentId (repeated query key) with 400, not 500", async () => {
+    const deps = createModelDeps();
+    const app = createApp(deps);
+    const res = await request(app).get("/api/models/config?agentId=a&agentId=b");
+    expect(res.status).toBe(400);
+    expect(deps.authProfiles.listProfiles).not.toHaveBeenCalled();
+  });
+
+  it("rejects prototype-key and uppercase agentIds", async () => {
+    const deps = createModelDeps();
+    const app = createApp(deps);
+    for (const bad of ["__proto__", "Main", "a b", "a/b", "."]) {
+      const res = await request(app).get(`/api/models/auth?agentId=${encodeURIComponent(bad)}`);
+      expect(res.status, bad).toBe(400);
+    }
+    expect(deps.authProfiles.loadAuthStore).not.toHaveBeenCalled();
+  });
+
+  it("still scopes to a valid agentId and defaults when absent", async () => {
+    const deps = createModelDeps();
+    const app = createApp(deps);
+    expect((await request(app).get("/api/models/auth?agentId=ops-2")).status).toBe(200);
+    expect(deps.authProfiles.listProfiles).toHaveBeenCalledWith("ops-2");
+    expect((await request(app).get("/api/models/auth")).status).toBe(200);
+    expect(deps.authProfiles.listProfiles).toHaveBeenLastCalledWith(undefined);
+    expect(warn).not.toHaveBeenCalled();
+  });
+});

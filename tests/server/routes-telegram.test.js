@@ -1425,3 +1425,41 @@ describe("server/routes/telegram", () => {
     });
   });
 });
+
+// Fix wave F084: accountId is a config KEY (channels.telegram.accounts[id])
+// and a path segment; `__proto__` made Object.prototype the write target.
+describe("server/routes/telegram accountId boundary", () => {
+  it("rejects a prototype-key accountId on every telegram route and leaves Object.prototype clean", async () => {
+    const { app } = createApp();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    writeOpenclawJson({ channels: { telegram: { accounts: { default: {} } } } });
+    const viaQuery = await request(app).get("/api/telegram/bot?accountId=__proto__");
+    expect(viaQuery.status).toBe(400);
+    expect(viaQuery.body).toEqual({ ok: false, error: "Invalid account id" });
+    const viaBody = await request(app)
+      .post("/api/telegram/groups/verify")
+      .send({ groupId: "-100", accountId: "constructor" });
+    expect(viaBody.status).toBe(400);
+    const viaConfigure = await request(app)
+      .post("/api/telegram/groups/-100/configure")
+      .send({ accountId: "__proto__", userId: "1" });
+    expect(viaConfigure.status).toBe(400);
+    expect(({}).groups).toBeUndefined();
+    expect(({}).groupPolicy).toBeUndefined();
+    expect(Object.prototype.hasOwnProperty.call(Object.prototype, "groups")).toBe(false);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("field=accountId reason=invalid_shape"));
+  });
+
+  it("rejects malformed account ids (uppercase, spaces, slashes) but accepts slugs and the default", async () => {
+    const { app } = createApp();
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    for (const bad of ["Work", "a b", "a/b", "..", "a_b"]) {
+      const res = await request(app).get(`/api/telegram/bot?accountId=${encodeURIComponent(bad)}`);
+      expect(res.status, bad).toBe(400);
+    }
+    for (const good of ["work", "work-2", "default"]) {
+      const res = await request(app).get(`/api/telegram/bot?accountId=${good}`);
+      expect(res.status, good).not.toBe(400);
+    }
+  });
+});
