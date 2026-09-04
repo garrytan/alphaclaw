@@ -56,4 +56,15 @@ describe("frontend/browse-draft-state", () => {
     expect(storedIndexRaw).toBeTruthy();
     expect(JSON.parse(storedIndexRaw)).toEqual(["docs/a.txt", "src/b.txt"]);
   });
+
+  it("tells an emptied draft apart from no draft (F154)", async () => {
+    const storage = createStorage();
+    const draftState = await loadDraftState();
+    expect(draftState.hasStoredFileDraft("workspace/e.md", storage)).toBe(false);
+    draftState.writeStoredFileDraft("workspace/e.md", "", storage);
+    expect(draftState.hasStoredFileDraft("workspace/e.md", storage)).toBe(true);
+    expect(draftState.readStoredFileDraft("workspace/e.md", storage)).toBe("");
+    draftState.clearStoredFileDraft("workspace/e.md", storage);
+    expect(draftState.hasStoredFileDraft("workspace/e.md", storage)).toBe(false);
+  });
 });
