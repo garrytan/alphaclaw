@@ -1933,8 +1933,10 @@ describe("server/gateway restart behavior", () => {
         ["gateway", "--force"],
         expect.objectContaining({ env: expect.any(Object) }),
       );
+      // Issue #56: the live supervisor is adopted as the managed child, so the
+      // launch handler (and the watchdog memory monitor) get a real pid.
       expect(launchHandler).toHaveBeenCalledWith(
-        expect.objectContaining({ pid: null }),
+        expect.objectContaining({ pid: 1234 }),
       );
 
       const onStdout = supervisor.stdout.on.mock.calls.find((c) => c[0] === "data")[1];
@@ -1944,6 +1946,289 @@ describe("server/gateway restart behavior", () => {
       onStderr("supervisor err\n");
       onExit(0, null);
       onExit(null, "SIGTERM");
+      gateway.setGatewayLaunchHandler(null);
+    });
+
+    it("adopts a live restart supervisor as the managed child so its exit reaches the watchdog (issue #56)", async () => {
+      const supervisor = createChild();
+      childProcess.spawn = vi.fn(() => supervisor);
+      childProcess.execSync = vi.fn(() => "");
+      fs.existsSync = vi.fn(() => false);
+      net.createConnection = vi.fn(() => createSocket(true));
+      delete require.cache[modulePath];
+      const gateway = require(modulePath);
+      vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+      vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+      const exitHandler = vi.fn();
+      gateway.setGatewayExitHandler(exitHandler);
+
+      await gateway.runGatewayCmd("--force");
+
+      // Adopted: the supervisor IS the managed gateway process now, so a
+      // shutdown/backup stop can reap it (before: stopGatewayChild had
+      // nothing to signal after a cold restart).
+      expect(gateway.stopGatewayChild()).toBe(true);
+      expect(supervisor.kill).toHaveBeenCalledWith("SIGTERM");
+
+      // The OpenClaw launcher exits 143 after forwarding a SIGTERM that AlphaClaw
+      // did NOT send (an on-box recycle script) — an UNEXPECTED exit the
+      // watchdog must classify and relaunch. Before #56 this exit was invisible.
+      const onStderr = supervisor.stderr.on.mock.calls.find((c) => c[0] === "data")[1];
+      const onClose = supervisor.on.mock.calls.find((c) => c[0] === "close")[1];
+      onStderr("received SIGTERM; shutting down\n");
+      supervisor.exitCode = 143;
+      onClose(143, null);
+      expect(exitHandler).toHaveBeenCalledTimes(1);
+      expect(exitHandler).toHaveBeenCalledWith(
+        expect.objectContaining({
+          code: 143,
+          signal: null,
+          pid: 1234,
+          expectedExit: false,
+        }),
+      );
+      expect(exitHandler.mock.calls[0][0].stderrTail).toContain(
+        "received SIGTERM; shutting down",
+      );
+      // The managed slot is released for the relaunch.
+      expect(gateway.stopGatewayChild()).toBe(false);
+      gateway.setGatewayExitHandler(null);
+    });
+
+    it("a second cold restart marks the adopted supervisor expected and replaces it without nulling the successor", async () => {
+      const first = createChild();
+      const second = { ...createChild(), pid: 5678, stdout: { on: vi.fn() }, stderr: { on: vi.fn() }, on: vi.fn(), kill: vi.fn() };
+      let gatewayPortOpen = true;
+      childProcess.spawn = vi.fn((file, args) => {
+        if (args?.[0] === "gateway" && args?.[1] === "--force") {
+          queueMicrotask(() => {
+            gatewayPortOpen = true;
+          });
+          return childProcess.spawn.mock.calls.length === 1 ? first : second;
+        }
+        return first;
+      });
+      childProcess.execFile = vi.fn((file, args, opts, cb) => {
+        if (args?.[0] === "gateway" && args?.[1] === "stop") gatewayPortOpen = false;
+        cb(null, "", "");
+      });
+      childProcess.execSync = vi.fn(() => "");
+      fs.existsSync = vi.fn(() => false);
+      fs.readdirSync = vi.fn(() => []);
+      net.createConnection = vi.fn(() => createSocket(() => gatewayPortOpen));
+      delete require.cache[modulePath];
+      const gateway = require(modulePath);
+      vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+      vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+      const exitHandler = vi.fn();
+      gateway.setGatewayExitHandler(exitHandler);
+
+      await gateway.runGatewayCmd("--force"); // adopts `first` (pid 1234)
+      expect(gateway.isManagedGatewayChildSupervisor()).toBe(true);
+
+      // Cold restart: the adopted child is marked expected + SIGTERMed before
+      // the new supervisor spawns — the same contract as a `gateway run` child.
+      await gateway.restartGateway(vi.fn());
+      expect(first.kill).toHaveBeenCalledWith("SIGTERM");
+      expect(gateway.stopGatewayChild()).toBe(true); // the SUCCESSOR is managed now
+      expect(second.kill).toHaveBeenCalledWith("SIGTERM");
+
+      // The old launcher drains for minutes and exits long after the successor
+      // was adopted: classified as an EXPECTED exit of pid 1234, and its stale
+      // finalize must not null the successor's slot.
+      const onCloseFirst = first.on.mock.calls.find((c) => c[0] === "close")[1];
+      first.exitCode = 143;
+      onCloseFirst(143, null);
+      expect(exitHandler).toHaveBeenCalledWith(
+        expect.objectContaining({ pid: 1234, expectedExit: true, code: 143 }),
+      );
+      expect(gateway.isManagedGatewayChildSupervisor()).toBe(true);
+      gateway.setGatewayExitHandler(null);
+    });
+
+    it("stopGatewayChildAndWait never SIGKILLs an adopted supervisor (SIGKILL would orphan the draining gateway)", async () => {
+      const supervisor = createChild();
+      childProcess.spawn = vi.fn(() => supervisor);
+      childProcess.execSync = vi.fn(() => "");
+      fs.existsSync = vi.fn(() => false);
+      fs.readdirSync = vi.fn(() => []);
+      net.createConnection = vi.fn(() => createSocket(true));
+      delete require.cache[modulePath];
+      const gateway = require(modulePath);
+      vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+      vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+
+      await gateway.runGatewayCmd("--force");
+      expect(gateway.isManagedGatewayChildSupervisor()).toBe(true);
+
+      // Still alive after the grace: report NOT stopped, but no SIGKILL — the
+      // launcher exits with its gateway; the callers' `openclaw gateway stop`
+      // + port-release wait own the rest.
+      const stopped = await gateway.stopGatewayChildAndWait({ graceMs: 20 });
+      expect(stopped).toBe(false);
+      expect(supervisor.kill).toHaveBeenCalledWith("SIGTERM");
+      expect(supervisor.kill).not.toHaveBeenCalledWith("SIGKILL");
+    });
+
+    it("killManagedGatewayChildNow (shutdown-deadline reap) skips an adopted supervisor but SIGKILLs a direct child", async () => {
+      const supervisor = createChild();
+      childProcess.spawn = vi.fn(() => supervisor);
+      childProcess.execSync = vi.fn(() => "");
+      fs.existsSync = vi.fn(() => false);
+      fs.readdirSync = vi.fn(() => []);
+      net.createConnection = vi.fn(() => createSocket(true));
+      delete require.cache[modulePath];
+      const gateway = require(modulePath);
+      vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+      vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+
+      await gateway.runGatewayCmd("--force");
+      expect(gateway.killManagedGatewayChildNow()).toBe(false);
+      expect(supervisor.kill).not.toHaveBeenCalled();
+
+      // A direct `gateway run` child is still reaped hard.
+      const direct = createChild();
+      childProcess.spawn = vi.fn(() => direct);
+      delete require.cache[modulePath];
+      const gateway2 = require(modulePath);
+      await gateway2.launchGatewayProcess();
+      expect(gateway2.killManagedGatewayChildNow()).toBe(true);
+      expect(direct.kill).toHaveBeenCalledWith("SIGKILL");
+    });
+
+    it("stopGatewayChildAndWait still escalates to SIGKILL for a direct gateway run child", async () => {
+      const child = createChild();
+      childProcess.spawn = vi.fn(() => child);
+      fs.existsSync = vi.fn(() => false);
+      delete require.cache[modulePath];
+      const gateway = require(modulePath);
+      vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+      vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+
+      await gateway.launchGatewayProcess();
+      expect(gateway.isManagedGatewayChildSupervisor()).toBe(false);
+      const stopped = await gateway.stopGatewayChildAndWait({ graceMs: 20 });
+      expect(stopped).toBe(false); // the mock never exits
+      expect(child.kill).toHaveBeenCalledWith("SIGTERM");
+      expect(child.kill).toHaveBeenCalledWith("SIGKILL");
+    });
+
+    it("resolves the adopted supervisor's gateway child pid from /proc and carries it into exit classification", async () => {
+      const supervisor = createChild();
+      childProcess.spawn = vi.fn(() => supervisor);
+      childProcess.execSync = vi.fn(() => "");
+      fs.existsSync = vi.fn(() => false);
+      // A fake /proc: 5678 is the launcher's child, 9999 belongs to someone else.
+      fs.readdirSync = vi.fn((dir) => (dir === "/proc" ? ["1", "1234", "5678", "9999", "self"] : []));
+      fs.readFileSync = vi.fn((targetPath, ...args) => {
+        if (targetPath === "/proc/5678/status") return "Name:\topenclaw-gateway\nPPid:\t1234\nVmRSS:\t  2048 kB\n";
+        if (targetPath === "/proc/9999/status") return "Name:\tnode\nPPid:\t1\n";
+        if (targetPath === "/proc/1/status") return "Name:\tinit\nPPid:\t0\n";
+        return originalReadFileSync(targetPath, ...args);
+      });
+      net.createConnection = vi.fn(() => createSocket(true));
+      delete require.cache[modulePath];
+      const gateway = require(modulePath);
+      vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+      vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+      const exitHandler = vi.fn();
+      gateway.setGatewayExitHandler(exitHandler);
+
+      await gateway.runGatewayCmd("--force");
+      expect(gateway.getManagedGatewayWorkerPid()).toBe(5678);
+
+      const onClose = supervisor.on.mock.calls.find((c) => c[0] === "close")[1];
+      supervisor.exitCode = 0;
+      onClose(0, null);
+      // The handoff row is keyed by the GATEWAY's pid — the watchdog consumes with workerPid.
+      expect(exitHandler).toHaveBeenCalledWith(
+        expect.objectContaining({ pid: 1234, workerPid: 5678, code: 0, supervisor: true }),
+      );
+      expect(gateway.getManagedGatewayWorkerPid()).toBe(null);
+      gateway.setGatewayExitHandler(null);
+    });
+
+    it("ignores a launcher child that is not an OpenClaw process when resolving the worker pid (no-launcher shape: helpers are not the gateway)", async () => {
+      const supervisor = createChild();
+      childProcess.spawn = vi.fn(() => supervisor);
+      childProcess.execSync = vi.fn(() => "");
+      fs.existsSync = vi.fn(() => false);
+      fs.readdirSync = vi.fn((dir) => (dir === "/proc" ? ["1234", "7777"] : []));
+      fs.readFileSync = vi.fn((targetPath, ...args) => {
+        if (targetPath === "/proc/7777/status") return "Name:\tsh\nPPid:\t1234\n";
+        return originalReadFileSync(targetPath, ...args);
+      });
+      net.createConnection = vi.fn(() => createSocket(true));
+      delete require.cache[modulePath];
+      const gateway = require(modulePath);
+      vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+      vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+
+      await gateway.runGatewayCmd("--force");
+      expect(gateway.isManagedGatewayChildSupervisor()).toBe(true);
+      // No OpenClaw-named child → null: the consume falls back to the launcher pid.
+      expect(gateway.getManagedGatewayWorkerPid()).toBe(null);
+    });
+
+    it("does not adopt a supervisor that returns during the post-ready quiet period (daemonize-and-return)", async () => {
+      const supervisor = createChild();
+      childProcess.spawn = vi.fn(() => {
+        // Alive when the port answers, gone 200ms later — the CLI daemonized.
+        setTimeout(() => {
+          supervisor.exitCode = 0;
+          const onExit = supervisor.on.mock.calls.find((c) => c[0] === "exit")?.[1];
+          onExit?.(0, null);
+        }, 200);
+        return supervisor;
+      });
+      childProcess.execSync = vi.fn(() => "");
+      fs.existsSync = vi.fn(() => false);
+      net.createConnection = vi.fn(() => createSocket(true));
+      delete require.cache[modulePath];
+      const gateway = require(modulePath);
+      vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+      vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+      const launchHandler = vi.fn();
+      gateway.setGatewayLaunchHandler(launchHandler);
+
+      await gateway.runGatewayCmd("--force");
+
+      expect(launchHandler).toHaveBeenCalledWith(expect.objectContaining({ pid: null }));
+      expect(gateway.isManagedGatewayChildSupervisor()).toBe(false);
+      expect(supervisor.on.mock.calls.some((c) => c[0] === "close")).toBe(false);
+      gateway.setGatewayLaunchHandler(null);
+    });
+
+    it("does not adopt a supervisor that already exited (daemonizing builds stay TCP-tracked)", async () => {
+      const supervisor = createChild();
+      childProcess.spawn = vi.fn(() => {
+        // Daemonize-and-return: the supervisor exits 0 right after spawn while
+        // the gateway keeps the port.
+        queueMicrotask(() => {
+          supervisor.exitCode = 0;
+          const onExit = supervisor.on.mock.calls.find((c) => c[0] === "exit")?.[1];
+          onExit?.(0, null);
+        });
+        return supervisor;
+      });
+      childProcess.execSync = vi.fn(() => "");
+      fs.existsSync = vi.fn(() => false);
+      net.createConnection = vi.fn(() => createSocket(true));
+      delete require.cache[modulePath];
+      const gateway = require(modulePath);
+      vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+      vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+      const launchHandler = vi.fn();
+      gateway.setGatewayLaunchHandler(launchHandler);
+
+      await gateway.runGatewayCmd("--force");
+
+      expect(launchHandler).toHaveBeenCalledWith(
+        expect.objectContaining({ pid: null }),
+      );
+      expect(gateway.stopGatewayChild()).toBe(false);
+      // No exit classification was attached to a dead supervisor.
+      expect(supervisor.on.mock.calls.some((c) => c[0] === "close")).toBe(false);
       gateway.setGatewayLaunchHandler(null);
     });
 

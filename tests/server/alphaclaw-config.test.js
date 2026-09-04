@@ -97,7 +97,12 @@ describe("server/alphaclaw-config", () => {
       },
       watchdog: {
         overseer: { enabled: false },
-        memory: { enabled: true, autoRestart: false },
+        memory: {
+          enabled: true,
+          autoRestart: false,
+          budgetMb: null,
+          maxRestartsPerDay: 2,
+        },
       },
       doctor: {
         autoRun: { enabled: false },
@@ -147,7 +152,12 @@ describe("server/alphaclaw-config", () => {
       },
       watchdog: {
         overseer: { enabled: false },
-        memory: { enabled: true, autoRestart: false },
+        memory: {
+          enabled: true,
+          autoRestart: false,
+          budgetMb: null,
+          maxRestartsPerDay: 2,
+        },
       },
       doctor: {
         autoRun: { enabled: false },
@@ -558,6 +568,8 @@ describe("server/alphaclaw-config", () => {
       enabled: true,
       autoRestart: false,
       effectiveAutoRestart: false,
+      budgetMb: null,
+      maxRestartsPerDay: 2,
     });
 
     // Truthy junk must never enable the enforcement half.
@@ -597,6 +609,8 @@ describe("server/alphaclaw-config", () => {
       enabled: false,
       autoRestart: false,
       effectiveAutoRestart: false,
+      budgetMb: null,
+      maxRestartsPerDay: 2,
       configUnreadable: true,
     });
   });
@@ -629,6 +643,8 @@ describe("server/alphaclaw-config", () => {
       enabled: true,
       autoRestart: true,
       effectiveAutoRestart: true,
+      budgetMb: null,
+      maxRestartsPerDay: 2,
     });
 
     // Detection off: enforcement is effectively off, but the stored
@@ -638,6 +654,8 @@ describe("server/alphaclaw-config", () => {
       enabled: false,
       autoRestart: true,
       effectiveAutoRestart: false,
+      budgetMb: null,
+      maxRestartsPerDay: 2,
     });
     updateWatchdogMemorySettings({ openclawDir, enabled: true });
     expect(readWatchdogMemorySettings({ openclawDir }).effectiveAutoRestart).toBe(
@@ -659,6 +677,8 @@ describe("server/alphaclaw-config", () => {
       enabled: true,
       autoRestart: true,
       effectiveAutoRestart: true,
+      budgetMb: null,
+      maxRestartsPerDay: 2,
     });
 
     const again = updateWatchdogMemorySettings({ openclawDir, autoRestart: true });
@@ -671,6 +691,101 @@ describe("server/alphaclaw-config", () => {
     expect(persisted.watchdog.memory.note).toBe("keep");
     // Per-field narrow: the autoRestart write never touched enabled.
     expect(persisted.watchdog.memory.enabled).toBe(true);
+  });
+
+  it("fast-leak profile (issue #56): budgetMb/maxRestartsPerDay persist per-field, null clears, out-of-bounds normalizes to defaults", () => {
+    const openclawDir = createTempOpenclawDir();
+
+    const budget = updateWatchdogMemorySettings({ openclawDir, budgetMb: 2800 });
+    expect(budget.changed).toBe(true);
+    expect(budget.settings).toMatchObject({ budgetMb: 2800, maxRestartsPerDay: 2 });
+
+    const brake = updateWatchdogMemorySettings({ openclawDir, maxRestartsPerDay: 8 });
+    expect(brake.changed).toBe(true);
+    // Per-field narrow: the brake write left the budget alone.
+    expect(brake.settings).toMatchObject({ budgetMb: 2800, maxRestartsPerDay: 8 });
+    expect(readWatchdogMemorySettings({ openclawDir })).toMatchObject({
+      budgetMb: 2800,
+      maxRestartsPerDay: 8,
+    });
+
+    const cleared = updateWatchdogMemorySettings({ openclawDir, budgetMb: null });
+    expect(cleared.changed).toBe(true);
+    expect(cleared.settings.budgetMb).toBe(null);
+    expect(updateWatchdogMemorySettings({ openclawDir, budgetMb: null }).changed).toBe(false);
+
+    // Hand-edited junk normalizes to the default instead of reaching the
+    // detector (a 1 MB budget would restart the gateway every tick).
+    for (const [budgetMb, maxRestartsPerDay] of [
+      [1, 0],
+      [-5, 25],
+      ["nope", 2.5],
+      [Infinity, "3.5"],
+      [10 ** 9, null],
+      // Whole numbers only: a fraction is rejected, never rounded.
+      [2800.4, 2.5],
+      [255.6, 1.5],
+    ]) {
+      fs.writeFileSync(
+        path.join(openclawDir, "alphaclaw.json"),
+        JSON.stringify({ watchdog: { memory: { budgetMb, maxRestartsPerDay } } }),
+        "utf8",
+      );
+      const read = readWatchdogMemorySettings({ openclawDir });
+      expect(read.budgetMb).toBe(null);
+      expect(read.maxRestartsPerDay).toBe(2);
+    }
+    // In-bounds strings from a hand edit are accepted.
+    fs.writeFileSync(
+      path.join(openclawDir, "alphaclaw.json"),
+      JSON.stringify({ watchdog: { memory: { budgetMb: "4096", maxRestartsPerDay: "6" } } }),
+      "utf8",
+    );
+    expect(readWatchdogMemorySettings({ openclawDir })).toMatchObject({
+      budgetMb: 4096,
+      maxRestartsPerDay: 6,
+    });
+  });
+
+  it("fast-leak profile bounds are inclusive; non-numeric junk and direct out-of-bounds updater writes normalize to defaults", () => {
+    const openclawDir = createTempOpenclawDir();
+    // Inclusive edges survive a round trip at the storage layer.
+    for (const [budgetMb, maxRestartsPerDay] of [[256, 1], [1048576, 24]]) {
+      fs.writeFileSync(
+        path.join(openclawDir, "alphaclaw.json"),
+        JSON.stringify({ watchdog: { memory: { budgetMb, maxRestartsPerDay } } }),
+        "utf8",
+      );
+      expect(readWatchdogMemorySettings({ openclawDir })).toMatchObject({
+        budgetMb,
+        maxRestartsPerDay,
+      });
+    }
+    // Non-string, non-number junk never reaches the detector.
+    for (const [budgetMb, maxRestartsPerDay] of [
+      [true, true],
+      [{}, {}],
+      [[], []],
+      ["", ""],
+      ["  ", "  "],
+    ]) {
+      fs.writeFileSync(
+        path.join(openclawDir, "alphaclaw.json"),
+        JSON.stringify({ watchdog: { memory: { budgetMb, maxRestartsPerDay } } }),
+        "utf8",
+      );
+      const read = readWatchdogMemorySettings({ openclawDir });
+      expect(read.budgetMb).toBe(null);
+      expect(read.maxRestartsPerDay).toBe(2);
+    }
+    // The updater is the last line of defense when a caller bypasses the
+    // route: an out-of-bounds write stores the default and `changed` reflects
+    // what was actually stored.
+    updateWatchdogMemorySettings({ openclawDir, budgetMb: 2800, maxRestartsPerDay: 6 });
+    const oob = updateWatchdogMemorySettings({ openclawDir, budgetMb: 1, maxRestartsPerDay: 99 });
+    expect(oob.settings).toMatchObject({ budgetMb: null, maxRestartsPerDay: 2 });
+    expect(oob.changed).toBe(true);
+    expect(updateWatchdogMemorySettings({ openclawDir, budgetMb: 1 }).changed).toBe(false);
   });
 });
 
