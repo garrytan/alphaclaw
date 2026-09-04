@@ -598,3 +598,14 @@ describe("server/routes/models config_unreadable mapping (F213)", () => {
     expect(del.status).toBe(503);
   });
 });
+
+describe("server/routes/models credential responses are never cacheable (F080)", () => {
+  it("sets Cache-Control: no-store on GET /api/models/config and /api/models/auth", async () => {
+    const app = createApp(createModelDeps());
+    for (const url of ["/api/models/config", "/api/models/auth"]) {
+      const res = await request(app).get(url);
+      expect(res.status, url).toBe(200);
+      expect(res.headers["cache-control"], url).toBe("no-store");
+    }
+  });
+});
