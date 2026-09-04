@@ -199,7 +199,10 @@ describe("admin-manifest route coverage", () => {
 
   it("classifies every /api route in the route modules", () => {
     const unclassified = [];
-    for (const file of collectRouteFiles(routesDir)) {
+    // lib/server.js registers a handful of /api routes inline (capabilities,
+    // chat history); they are subject to the same classification rule (F070).
+    const serverEntry = path.join(__dirname, "../../lib/server.js");
+    for (const file of [...collectRouteFiles(routesDir), serverEntry]) {
       // admin.js + proxy.js register the meta/catch-all surface, not tiered ops.
       if (file.endsWith("routes/proxy.js")) continue;
       const source = fs.readFileSync(file, "utf8");
@@ -446,5 +449,126 @@ describe("admin-manifest browse read tierResolver (A21 secret-path guard)", () =
 
   it("normalizes leading ./ and duplicate slashes before matching (B1)", () => {
     expect(resolveBrowseRead(".//.alphaclaw/agent-admin-token")).toBe("denied");
+  });
+});
+
+// F064: agent browse MUTATIONS on config/secret paths are denied outright — a
+// confirm code is not the right gate for "rewrite the gateway config".
+describe("admin-manifest browse mutation tierResolver (F064 config/secret deny)", () => {
+  const manifest = require("../../lib/server/admin-manifest");
+  const resolve = (method, routePath, body) => {
+    const op = manifest.findOp(method, routePath);
+    expect(op).toBeTruthy();
+    return manifest.resolveTier(op, { body });
+  };
+
+  const mutations = [
+    ["PUT", "/api/browse/write", "write"],
+    ["POST", "/api/browse/create-file", "write"],
+    ["POST", "/api/browse/create-folder", "write"],
+    ["POST", "/api/browse/restore", "write"],
+    ["DELETE", "/api/browse/delete", "dangerous"],
+  ];
+
+  it.each(mutations)("%s %s keeps its base tier for ordinary workspace paths", (method, routePath, base) => {
+    expect(resolve(method, routePath, { path: "skills/notes.md" })).toBe(base);
+    expect(resolve(method, routePath, { path: "exports/2026-08/report.md" })).toBe(base);
+  });
+
+  it.each(mutations)("%s %s denies AlphaClaw/gateway config files and the device store", (method, routePath) => {
+    for (const target of [
+      "openclaw.json",
+      "alphaclaw.json",
+      "devices/paired.json",
+      "./openclaw.json",
+      "/alphaclaw.json",
+      "OPENCLAW.JSON",
+      "openclaw.json.bak",
+      "alphaclaw.json.bak.2",
+      "skills/../openclaw.json",
+      "a/b/../../alphaclaw.json",
+    ]) {
+      expect(resolve(method, routePath, { path: target }), target).toBe("denied");
+    }
+  });
+
+  it.each(mutations)("%s %s denies the A21 secret-bearing paths too", (method, routePath) => {
+    for (const target of [
+      ".alphaclaw/agent-admin-token",
+      ".alphaclaw/operators.json",
+      "gogcli/credentials/x.json",
+      "credentials/client_secret.json",
+      "agents/main/agent/auth-profiles.json",
+      "devices/anything.json",
+      "../outside",
+    ]) {
+      expect(resolve(method, routePath, { path: target }), target).toBe("denied");
+    }
+  });
+
+  it("move denies when EITHER end names a protected or secret path", () => {
+    expect(resolve("POST", "/api/browse/move", { from: "a.md", to: "b.md" })).toBe("write");
+    expect(resolve("POST", "/api/browse/move", { from: "openclaw.json", to: "b.md" })).toBe("denied");
+    expect(resolve("POST", "/api/browse/move", { from: "a.md", to: "openclaw.json" })).toBe("denied");
+    expect(resolve("POST", "/api/browse/move", { from: "a.md", to: "devices/paired.json" })).toBe(
+      "denied",
+    );
+    expect(
+      resolve("POST", "/api/browse/move", { from: "skills/x", to: "skills/../.alphaclaw/y" }),
+    ).toBe("denied");
+  });
+
+  it("falls back to the descriptor tier for missing or non-string paths (route 400s them)", () => {
+    expect(resolve("PUT", "/api/browse/write", {})).toBe("write");
+    expect(resolve("PUT", "/api/browse/write", { path: 42 })).toBe("write");
+    expect(resolve("PUT", "/api/browse/write", null)).toBe("write");
+    expect(resolve("DELETE", "/api/browse/delete", "openclaw.json")).toBe("dangerous");
+  });
+
+  it("does not deny a sibling that merely shares a prefix with a protected file", () => {
+    expect(resolve("PUT", "/api/browse/write", { path: "openclaw.json.md" })).toBe("write");
+    expect(resolve("PUT", "/api/browse/write", { path: "notes/alphaclaw.json" })).toBe("write");
+    expect(resolve("PUT", "/api/browse/write", { path: "devices-notes.md" })).toBe("write");
+  });
+
+  it("read guard also covers openclaw.json, its rotations, and devices/ (F066)", () => {
+    const read = manifest.findOp("GET", "/api/browse/read");
+    for (const target of [
+      "openclaw.json",
+      "openclaw.json.bak",
+      "openclaw.json.bak.3",
+      "devices/paired.json",
+    ]) {
+      expect(manifest.resolveTier(read, { query: { path: target } }), target).toBe("denied");
+    }
+    expect(manifest.resolveTier(read, { query: { path: "openclaw.json.md" } })).toBe("safe");
+  });
+});
+
+describe("admin-manifest stale entries and inline routes (F068, F069, F070, F225)", () => {
+  const manifest = require("../../lib/server/admin-manifest");
+
+  it("channel account add/add-job/remove declare that they restart the gateway themselves", () => {
+    const byId = Object.fromEntries(manifest.listOps().map((op) => [op.id, op]));
+    expect(byId["channels.account-add"].restart).toBe("restarts");
+    expect(byId["channels.account-add-job"].restart).toBe("restarts");
+    expect(byId["channels.account-remove"].restart).toBe("restarts");
+    // Update/login only mark restart-required; the operator restarts.
+    expect(byId["channels.account-update"].restart).toBe("marks");
+    expect(byId["channels.account-login"].restart).toBe("marks");
+  });
+
+  it("no longer advertises the phantom /api/gateway-status route", () => {
+    expect(manifest.listOps().some((op) => op.id === "system.gateway-status")).toBe(false);
+    expect(manifest.findOp("GET", "/api/gateway-status")).toBeNull();
+  });
+
+  it("no longer allowlists the deleted GET /api/team/login-info route", () => {
+    expect(manifest.kUnmanifestedRoutes.has("GET /api/team/login-info")).toBe(false);
+  });
+
+  it("classifies the inline GET /api/openclaw/capabilities probe as a safe read", () => {
+    const op = manifest.findOp("GET", "/api/openclaw/capabilities");
+    expect(op).toMatchObject({ id: "updates.capabilities", tier: "safe", domain: "updates" });
   });
 });
