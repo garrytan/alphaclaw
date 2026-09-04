@@ -5,6 +5,56 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.9.74] - 2026-09-04
+
+Fix wave, PR 2 — the boot spine (`bin/alphaclaw.js` and the CLI git-sync).
+
+### Fixed
+- **Root shell strings at boot.** Section 10 interpolated `GITHUB_WORKSPACE_REPO`
+  (loaded from the agent-writable `.env`) and the `.git/config` origin into a
+  double-quoted `git remote set-url` shell string, and section 8 interpolated
+  `GOG_VERSION` into a root `curl | tar | mv` pipeline — both ran on every
+  boot with the full launcher env (audit F001, F002). The remote URL is now
+  slug-validated and handed to git as argv behind `--`; the gog installer is
+  data end to end: a validated version, an argv download into a private temp
+  dir, an archive listing that must name exactly the `gog` member (no
+  traversal, no symlinks), extraction of that member only, a regular-file and
+  size check, sha256 against the release `checksums.txt` when one is
+  published (otherwise the boot log says "unsigned"), then a copy into place.
+  The pending self-update `npm install` runs argv-form too.
+- **git-sync had no conflict recovery** (F103, F104). Any `pull --rebase
+  --autostash` failure was logged as "remote branch not found" and swallowed,
+  a stopped rebase was left in place (a permanent wedge on a detached HEAD),
+  and an autostash re-apply conflict exited 0 so conflict-marked
+  `openclaw.json` and workspace files were committed and pushed as a
+  successful sync. The verb now lives in `lib/cli/git-sync.js` with a
+  fake-able argv runner: a repo already mid-rebase or with unmerged paths
+  stops the sync before touching anything; a failed pull aborts ONLY the
+  rebase the sync started and reports the real reason (nothing committed or
+  pushed); conflicts left by the autostash stop the sync; and a fresh local
+  repo against a remote that already has history (the "existing empty repo"
+  GitHub boilerplate case) adopts the remote branch as its base instead of
+  pushing an unrelated root that the remote rejects.
+- `alphaclaw start --port <n>` was ignored by the real server: `constants.js`
+  snapshots `PORT` at first require, before section 1 applied the flag, so the
+  placeholder and the agent shell targeted the flag port while Express bound
+  the env/default port (F193). The flag now lands in the env before any
+  `lib/` require.
+- A second `alphaclaw start` against a root a live server already owns ran
+  `lib/server.js` module-init side effects against the live databases before
+  dying on `EADDRINUSE` (F004); it now refuses to start (exit 1) when the boot
+  sync reports a live owner.
+- The login-shell env snippet writer overwrote ANY pre-existing file at
+  `ALPHACLAW_PROFILE_SNIPPET_PATH` (a path honored from `.env`); it now keeps
+  the wrapper's managed-marker guard and records `skipped: existing
+  non-managed file` (F003).
+- Boot-time `openclaw.json` rewrites (sections 10/11) are atomic (F005); the
+  boot `.env` loader trims keys like the server's parser does (F006).
+
+### Notes
+- Two more entries leave the shell-string guard and one leaves the raw
+  config-writer guard.
+
 ## [0.9.73] - 2026-09-04
 
 Fix wave, PR 2a — the wrapAsync sweep. Express 4 does not catch async handler

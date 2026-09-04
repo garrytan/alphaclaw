@@ -831,4 +831,172 @@ Module._load = function patchedLoad(request, parent, isMain) {
     expect(fs.lstatSync(compatPath).isDirectory()).toBe(true);
     expect(fs.existsSync(path.join(compatPath, "config.json"))).toBe(true);
   });
+
+  // Fix wave PR 2 — boot spine. One `start` boot per case, driven through the
+  // same preload idiom as ISSUE-002: child_process is stubbed and recorded,
+  // writes to /usr/local/bin and /etc/cron.d are swallowed, and lib/server.js
+  // is intercepted so the capture describes exactly what the real server
+  // would run with.
+  const writeBootSpinePreload = () => {
+    const preloadPath = path.join(tmpDir, "capture-boot-spine.js");
+    fs.writeFileSync(
+      preloadPath,
+      `
+const fs = require("fs");
+const os = require("os");
+const path = require("path");
+const Module = require("module");
+const childProcess = require("child_process");
+
+const capturePath = process.env.ALPHACLAW_CAPTURE_ENV_PATH;
+const testHome = process.env.ALPHACLAW_TEST_HOME;
+if (testHome) os.homedir = () => testHome;
+
+const recorded = { execSync: [], execFileSync: [] };
+const realExecFileSync = childProcess.execFileSync;
+childProcess.execSync = (command) => {
+  recorded.execSync.push(String(command || ""));
+  return "";
+};
+childProcess.execFileSync = (file, args, options) => {
+  const argv = Array.isArray(args) ? args.map(String) : [];
+  recorded.execFileSync.push([String(file), ...argv].join(" "));
+  // Keep the real git for the origin scrub probe (get-url) so §10 behaves as
+  // in production; everything else (set-url, npm, curl, tar) is recorded only.
+  if (String(file) === "git" && argv[1] === "get-url") {
+    try { return realExecFileSync(file, args, options); } catch { return ""; }
+  }
+  return "";
+};
+
+for (const [name, real] of [["copyFileSync", fs.copyFileSync], ["writeFileSync", fs.writeFileSync], ["unlinkSync", fs.unlinkSync], ["chmodSync", fs.chmodSync]]) {
+  fs[name] = (targetPath, ...rest) => {
+    const target = String(targetPath || "");
+    if (target.startsWith("/usr/local/bin/") || target.startsWith("/etc/cron.d/")) return;
+    return real.call(fs, targetPath, ...rest);
+  };
+}
+
+const realLoad = Module._load;
+Module._load = function patchedLoad(request, parent, isMain) {
+  const parentFile = String(parent && parent.filename ? parent.filename : "");
+  if (
+    (request === "../lib/server.js" || String(request || "").endsWith("/lib/server.js")) &&
+    parentFile.endsWith(path.join("bin", "alphaclaw.js"))
+  ) {
+    const constants = realLoad.call(
+      this,
+      path.join(path.dirname(parentFile), "..", "lib", "server", "constants.js"),
+      parent,
+      false,
+    );
+    fs.writeFileSync(
+      capturePath,
+      JSON.stringify({
+        constantsPort: constants.PORT,
+        portEnv: process.env.PORT,
+        recorded,
+        githubRepoEnv: process.env.GITHUB_WORKSPACE_REPO || "",
+      }),
+    );
+    return {};
+  }
+  return realLoad.apply(this, arguments);
+};
+      `.trim(),
+    );
+    return preloadPath;
+  };
+
+  const runBootSpine = ({ rootDir, extraArgs = "", env = {} }) => {
+    const preloadPath = writeBootSpinePreload();
+    const capturePath = path.join(tmpDir, `captured-boot-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}.json`);
+    const childEnv = {
+      ...process.env,
+      SETUP_PASSWORD: "test-password",
+      ALPHACLAW_TEST_HOME: tmpHome,
+      ALPHACLAW_CAPTURE_ENV_PATH: capturePath,
+      ALPHACLAW_ROOT_DIR: rootDir,
+      ALPHACLAW_OPENCLAW_WRAPPER_PATH: path.join(rootDir, "wrapper-openclaw.sh"),
+      NODE_OPTIONS: `--require=${preloadPath}`,
+      ...env,
+    };
+    delete childEnv.PORT;
+    delete childEnv.GITHUB_WORKSPACE_REPO;
+    if (env.PORT !== undefined) childEnv.PORT = env.PORT;
+    if (env.GITHUB_WORKSPACE_REPO !== undefined) childEnv.GITHUB_WORKSPACE_REPO = env.GITHUB_WORKSPACE_REPO;
+    // spawnSync via a shell so the preload flag string is honored verbatim;
+    // both streams are captured (boot warnings go to stderr).
+    const result = require("child_process").spawnSync(
+      `node ${supportedNodePreload()} "${binPath}" start --root-dir "${rootDir}" ${extraArgs}`,
+      { shell: true, encoding: "utf8", env: childEnv },
+    );
+    if (result.status !== 0) {
+      throw new Error(`boot exited ${result.status}: ${result.stderr}\n${result.stdout}`);
+    }
+    const output = `${result.stdout}\n${result.stderr}`;
+    return { captured: JSON.parse(fs.readFileSync(capturePath, "utf8")), output };
+  };
+
+  it("honors `start --port <n>` in the constants snapshot the real server uses (F193)", () => {
+    const rootDir = fs.mkdtempSync(path.join(tmpDir, "port-root-"));
+    const { captured } = runBootSpine({ rootDir, extraArgs: "--port 3999" });
+    expect(captured.constantsPort).toBe(3999);
+    expect(captured.portEnv).toBe("3999");
+    const fromEnv = runBootSpine({ rootDir, env: { PORT: "3001" } });
+    expect(fromEnv.captured.constantsPort).toBe(3001);
+  });
+
+  it("never lets a shell-injected GITHUB_WORKSPACE_REPO from .env reach a shell, and refuses the malformed slug (F001)", () => {
+    const rootDir = fs.mkdtempSync(path.join(tmpDir, "inject-root-"));
+    const openclawDir = path.join(rootDir, ".openclaw");
+    fs.mkdirSync(path.join(openclawDir, ".git"), { recursive: true });
+    const pwned = path.join(tmpDir, "pwned-marker");
+    fs.writeFileSync(
+      path.join(rootDir, ".env"),
+      `GITHUB_WORKSPACE_REPO=owner/repo"$(touch ${pwned})"\n`,
+    );
+    const { captured, output } = runBootSpine({ rootDir });
+    expect(fs.existsSync(pwned)).toBe(false);
+    // The value was loaded (the loader itself is unchanged)…
+    expect(captured.githubRepoEnv).toContain("$(touch");
+    // …but no child process ever saw a `$(`, and the malformed slug never
+    // reached `git remote set-url` at all.
+    const everything = [...captured.recorded.execSync, ...captured.recorded.execFileSync].join("\n");
+    expect(everything).not.toContain("$(");
+    expect(everything).not.toContain("set-url");
+    expect(output).toContain("is not owner/repo");
+
+    // A well-formed slug goes to git as argv behind `--`.
+    fs.writeFileSync(path.join(rootDir, ".env"), "GITHUB_WORKSPACE_REPO=owner/repo\n");
+    const good = runBootSpine({ rootDir });
+    expect(good.captured.recorded.execFileSync).toContain(
+      "git remote set-url origin -- https://github.com/owner/repo.git",
+    );
+    expect(good.captured.recorded.execSync.some((cmd) => cmd.includes("set-url"))).toBe(false);
+  });
+
+  it("never overwrites a non-managed file at ALPHACLAW_PROFILE_SNIPPET_PATH and records the skip (F003)", () => {
+    const rootDir = fs.mkdtempSync(path.join(tmpDir, "snippet-root-"));
+    const snippetPath = path.join(rootDir, "operator-profile.sh");
+    fs.writeFileSync(snippetPath, "# operator's own profile snippet\nexport FOO=bar\n");
+    runBootSpine({ rootDir, env: { ALPHACLAW_PROFILE_SNIPPET_PATH: snippetPath } });
+    expect(fs.readFileSync(snippetPath, "utf8")).toBe("# operator's own profile snippet\nexport FOO=bar\n");
+    const outcome = JSON.parse(
+      fs.readFileSync(path.join(rootDir, ".openclaw", ".alphaclaw", "operator-shell-env.json"), "utf8"),
+    );
+    expect(outcome.profileSnippet).toBe("skipped: existing non-managed file");
+
+    // A managed snippet (marker present) is still regenerated.
+    fs.writeFileSync(snippetPath, "# alphaclaw-managed openclaw environment — stale\n");
+    runBootSpine({ rootDir, env: { ALPHACLAW_PROFILE_SNIPPET_PATH: snippetPath } });
+    expect(fs.readFileSync(snippetPath, "utf8")).toContain("export OPENCLAW_STATE_DIR=");
+  });
+
+  it("trims .env keys like the server parser (F006)", () => {
+    const rootDir = fs.mkdtempSync(path.join(tmpDir, "trim-root-"));
+    fs.writeFileSync(path.join(rootDir, ".env"), "GITHUB_WORKSPACE_REPO =owner/trimmed\n");
+    const { captured } = runBootSpine({ rootDir });
+    expect(captured.githubRepoEnv).toBe("owner/trimmed");
+  });
 });

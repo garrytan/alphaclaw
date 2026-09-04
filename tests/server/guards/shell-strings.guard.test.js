@@ -10,11 +10,6 @@ const { scanShellStrings } = require("./scanners");
 // Content-keyed (callee + command prefix). Every entry names the fix-wave PR
 // that removes it, or why the shell string is deliberate.
 const kKnownOffenders = {
-  // PR 2 — boot spine: self-update npm install, gog installer, git remote set-url.
-  "bin/alphaclaw.js::execSync(`npm install…`)": "PR 2: argv npm install",
-  "bin/alphaclaw.js::execSync(`curl -fsSL \"…`)": "PR 2: argv curl/tar with containment",
-  "bin/alphaclaw.js::execSync(`git remote set-url origin \"…`)": "PR 2: execFileSync git argv (F001)",
-  "bin/alphaclaw.js::execSync(`git remote set-url origin \"…`)#2": "PR 2: execFileSync git argv (F001, scrub path)",
   // PR 6 — self-update install (F038/F039).
   "lib/server/alphaclaw-version.js::childProcess.exec(`cp -af \"…`)": "PR 6: argv copy of the staged install (F038/F039)",
   // Deliberate: commands.js IS the shell wrapper (shellCmd/clawCmd) that every

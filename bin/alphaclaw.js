@@ -39,6 +39,20 @@ const resolveRootDirFromArgv = (argv) => {
   );
 };
 process.env.ALPHACLAW_ROOT_DIR = resolveRootDirFromArgv(process.argv.slice(2));
+// constants.js snapshots PORT at first require too, so `--port` must land in
+// the env BEFORE the ../lib requires below (fix wave F193: the flag used to
+// be applied only in section 1, after the requires — the placeholder, the
+// agent shell and `alphaclaw admin` targeted the flag port while Express
+// bound the env/default port). Same helper shape as the root-dir resolution;
+// section 1 re-applies it idempotently.
+const resolvePortFlagFromArgv = (argv) => {
+  const flagIndex = argv.indexOf("--port");
+  return flagIndex !== -1 && flagIndex + 1 < argv.length
+    ? String(argv[flagIndex + 1]).trim()
+    : "";
+};
+const kPortFlagPreRequire = resolvePortFlagFromArgv(process.argv.slice(2));
+if (kPortFlagPreRequire) process.env.PORT = kPortFlagPreRequire;
 
 const {
   shouldSkipSystemCronInstall,
@@ -59,7 +73,9 @@ const {
   writeGitAskpassScript,
   kGitAskpassScript,
 } = require("../lib/git-askpass-script");
-const { buildSecretReplacements } = require("../lib/server/helpers");
+const { buildSecretReplacements, kGithubRepoSlugPattern } = require("../lib/server/helpers");
+const { writeFileAtomic } = require("../lib/server/utils/safe-file");
+const { performGitSync } = require("../lib/cli/git-sync");
 const { resolveSelfDependency } = require("../lib/server/self-dependency");
 const {
   migrateLegacyTelegramStreamingConfig,
@@ -204,7 +220,6 @@ if (command === "start") {
   }
 }
 
-const quoteArg = (value) => `'${String(value || "").replace(/'/g, "'\"'\"'")}'`;
 const resolveGithubRepoPath = (value) =>
   String(value || "")
     .trim()
@@ -336,8 +351,9 @@ if (fs.existsSync(pendingUpdateMarker)) {
       `[alphaclaw] Pending update detected, installing ${selfUpdatePackageName}@latest...`,
     );
     try {
-      execSync(
-        `npm install ${selfUpdatePackageName}@latest --omit=dev --prefer-online`,
+      execFileSync(
+        "npm",
+        ["install", `${selfUpdatePackageName}@latest`, "--omit=dev", "--prefer-online"],
         {
           cwd: selfDep.installDir,
           stdio: "inherit",
@@ -427,8 +443,11 @@ if (fs.existsSync(envFilePath)) {
     if (!trimmed || trimmed.startsWith("#")) continue;
     const eqIdx = trimmed.indexOf("=");
     if (eqIdx === -1) continue;
-    const key = trimmed.slice(0, eqIdx);
+    // Trim the key like lib/server/env.js does (fix wave F006): "FOO =bar"
+    // used to load as the key "FOO " here and "FOO" in the server.
+    const key = trimmed.slice(0, eqIdx).trim();
     const value = trimmed.slice(eqIdx + 1);
+    if (!key) continue;
     // Deployment-only keys must come from the real deployment environment
     // ONLY. The agent can write this .env (HOME=rootDir, exec full), so
     // honoring them here would let it self-grant broader gateway-child env
@@ -505,80 +524,40 @@ const runGitSync = () => {
     return 1;
   }
 
+  if (!kGithubRepoSlugPattern.test(githubRepo)) {
+    console.error(
+      `[alphaclaw] GITHUB_WORKSPACE_REPO ${JSON.stringify(githubRepo)} is not owner/repo — refusing git-sync`,
+    );
+    return 1;
+  }
   const originUrl = `https://github.com/${githubRepo}.git`;
-  let branch = "main";
-  try {
-    branch =
-      String(
-        execSync("git symbolic-ref --short HEAD", {
-          cwd: openclawDir,
-          encoding: "utf8",
-          stdio: ["ignore", "pipe", "ignore"],
-        }),
-      ).trim() || "main";
-  } catch {}
   // Shared hardened askpass (H9 host-parse) in a private mkdtemp dir (H14 —
   // no predictable ${pid} path a symlink can hijack, since git executes it).
   const { scriptPath: askPassPath } = writeGitAskpassScript();
-  const runGit = (gitCommand, { withAuth = false } = {}) => {
-    const cmd = withAuth
-      ? `GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=${quoteArg(askPassPath)} ${quoteArg(realGitPath)} ${gitCommand}`
-      : `${quoteArg(realGitPath)} ${gitCommand}`;
-    return execSync(cmd, {
+  // argv runner: no shell, no quoting — the sync engine (lib/cli/git-sync.js,
+  // fix wave F103/F104) owns the conflict-recovery logic and is unit-tested
+  // against a fake runner.
+  const git = (gitArgs, { withAuth = false } = {}) =>
+    execFileSync(realGitPath, gitArgs, {
       cwd: openclawDir,
       stdio: "pipe",
       encoding: "utf8",
       env: {
         ...process.env,
         GITHUB_TOKEN: githubToken,
+        ...(withAuth ? { GIT_TERMINAL_PROMPT: "0", GIT_ASKPASS: askPassPath } : {}),
       },
     });
-  };
-
   try {
-    runGit(`remote set-url origin ${quoteArg(originUrl)}`);
-    runGit(`config user.name ${quoteArg("AlphaClaw Agent")}`);
-    runGit(`config user.email ${quoteArg("agent@alphaclaw.md")}`);
-    try {
-      runGit(`ls-remote --exit-code --heads origin ${quoteArg(branch)}`, {
-        withAuth: true,
-      });
-      runGit(`pull --rebase --autostash origin ${quoteArg(branch)}`, {
-        withAuth: true,
-      });
-    } catch {
-      console.log(
-        `[alphaclaw] Remote branch "${branch}" not found, skipping pull`,
-      );
-    }
-    if (normalizedFilePath) {
-      runGit(`add -A -- ${quoteArg(normalizedFilePath)}`);
-    } else {
-      runGit("add -A");
-    }
-    try {
-      runGit("diff --cached --quiet");
-      console.log("[alphaclaw] No changes to commit");
-      return 0;
-    } catch {}
-    if (normalizedFilePath) {
-      runGit(
-        `commit -m ${quoteArg(commitMessage)} -- ${quoteArg(normalizedFilePath)}`,
-      );
-    } else {
-      runGit(`commit -m ${quoteArg(commitMessage)}`);
-    }
-    runGit(`push origin ${quoteArg(branch)}`, { withAuth: true });
-    const hash = String(runGit("rev-parse --short HEAD")).trim();
-    console.log(`[alphaclaw] Git sync complete (${hash})`);
-    console.log(
-      `[alphaclaw] Commit URL: https://github.com/${githubRepo}/commit/${hash}`,
-    );
-    return 0;
-  } catch (e) {
-    const details = String(e.stderr || e.stdout || e.message || "").trim();
-    console.error(`[alphaclaw] git-sync failed: ${details.slice(0, 400)}`);
-    return 1;
+    return performGitSync({
+      git,
+      fsModule: fs,
+      openclawDir,
+      githubRepo,
+      originUrl,
+      commitMessage,
+      filePath: normalizedFilePath,
+    });
   } finally {
     try {
       // Remove the private mkdtemp dir, not just the script (H14).
@@ -1058,7 +1037,21 @@ try {
   const {
     runOpenclawChannelBootSync,
   } = require("../lib/server/openclaw-channel-sync");
-  runOpenclawChannelBootSync({});
+  const bootSyncResult = runOpenclawChannelBootSync({});
+  if (bootSyncResult?.action === "skipped_concurrent") {
+    // A live AlphaClaw server already owns this state directory (its pidfile
+    // is fresh). Loading lib/server.js next would run its module-init side
+    // effects against the live databases before dying on EADDRINUSE (fix
+    // wave F004) — refuse here instead. The placeholder child self-exits on
+    // the ppid check; kill it eagerly anyway.
+    console.error(
+      `[alphaclaw] Another AlphaClaw server (pid ${bootSyncResult.livePid}) already owns ${rootDir}. Refusing to start a second instance against its live databases — stop it first, or pass a different --root-dir.`,
+    );
+    try {
+      bootPlaceholder?.kill();
+    } catch {}
+    process.exit(1);
+  }
 } catch (e) {
   console.log(`[openclaw-channel] boot sync failed (fail-open): ${e.message}`);
 }
@@ -1107,21 +1100,90 @@ const gogInstalled = (() => {
 
 if (!gogInstalled) {
   console.log("[alphaclaw] Installing gog CLI...");
-  try {
-    const gogVersion = process.env.GOG_VERSION || "0.11.0";
-    const platform = os.platform() === "darwin" ? "darwin" : "linux";
-    const arch = os.arch() === "arm64" ? "arm64" : "amd64";
-    const tarball = `gogcli_${gogVersion}_${platform}_${arch}.tar.gz`;
-    const url = `https://github.com/steipete/gogcli/releases/download/v${gogVersion}/${tarball}`;
-    execSync(
-      `curl -fsSL "${url}" -o /tmp/gog.tar.gz && tar -xzf /tmp/gog.tar.gz -C /tmp/ && mv /tmp/gog /usr/local/bin/gog && chmod +x /usr/local/bin/gog && rm -f /tmp/gog.tar.gz`,
-      // A hung download must not stall boot forever (the placeholder page is
-      // covering the port, but /health flips to 503 after 15min).
-      { stdio: "inherit", timeout: 120000 },
+  // Fix wave F002: this used to be one root `curl … | tar … | mv` shell string
+  // with the agent-writable GOG_VERSION interpolated into it, extracting the
+  // whole archive into /tmp. Every step is now data: a validated version, an
+  // argv download into a private temp dir, an archive listing that must name
+  // exactly the `gog` member (no traversal), extraction of that member only,
+  // a regular-file/size check, sha256 against checksums.txt when the release
+  // publishes one, then a copy into place.
+  const {
+    resolveGogVersion,
+    buildGogDownloadPlan,
+    selectArchiveMember,
+    parseChecksumsFile,
+    sha256File,
+    verifyExtractedBinary,
+  } = require("../lib/cli/gog-install");
+  const resolvedGog = resolveGogVersion(process.env.GOG_VERSION);
+  if (resolvedGog.rejected) {
+    console.log(
+      `[alphaclaw] GOG_VERSION ${JSON.stringify(resolvedGog.rejected)} is not a version — using ${resolvedGog.version}`,
     );
-    console.log("[alphaclaw] gog CLI installed");
+  }
+  let gogTmpDir = null;
+  try {
+    gogTmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "alphaclaw-gog-"));
+    const plan = buildGogDownloadPlan({
+      version: resolvedGog.version,
+      platform: os.platform(),
+      arch: os.arch(),
+    });
+    const archivePath = path.join(gogTmpDir, plan.tarball);
+    // A hung download must not stall boot forever (the placeholder page is
+    // covering the port, but /health flips to 503 after 15min).
+    execFileSync("curl", ["-fsSL", "--max-time", "110", "-o", archivePath, plan.url], {
+      stdio: "inherit",
+      timeout: 120000,
+    });
+    let checksumNote = "unsigned download: the release publishes no checksums.txt";
+    try {
+      const checksumsText = execFileSync(
+        "curl",
+        ["-fsSL", "--max-time", "30", plan.checksumsUrl],
+        { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 40000 },
+      );
+      const expected = parseChecksumsFile(checksumsText, plan.tarball);
+      if (expected) {
+        const actual = sha256File(archivePath);
+        if (actual !== expected) {
+          throw new Error(`sha256 mismatch for ${plan.tarball} (expected ${expected}, got ${actual})`);
+        }
+        checksumNote = "sha256 verified against checksums.txt";
+      }
+    } catch (checksumError) {
+      if (/sha256 mismatch/.test(String(checksumError?.message))) throw checksumError;
+      // No checksums published (or unreachable): keep the historical
+      // unsigned behavior, but say so in the boot log.
+    }
+    const listing = execFileSync("tar", ["-tzf", archivePath], {
+      encoding: "utf8",
+      timeout: 30000,
+    });
+    const member = selectArchiveMember(listing, plan.memberName);
+    if (!member.ok) {
+      throw new Error(
+        `archive listing rejected (${member.reason}${member.entry ? `: ${member.entry}` : ""})`,
+      );
+    }
+    execFileSync("tar", ["-xzf", archivePath, "-C", gogTmpDir, "--no-same-owner", member.member], {
+      stdio: "inherit",
+      timeout: 60000,
+    });
+    const extractedPath = path.join(gogTmpDir, plan.memberName);
+    const verified = verifyExtractedBinary(extractedPath);
+    if (!verified.ok) throw new Error(`extracted gog binary rejected (${verified.reason})`);
+    fs.copyFileSync(extractedPath, "/usr/local/bin/gog");
+    fs.chmodSync("/usr/local/bin/gog", 0o755);
+    console.log(`[alphaclaw] gog CLI ${resolvedGog.version} installed (${checksumNote})`);
   } catch (e) {
     console.log(`[alphaclaw] gog install skipped: ${e.message}`);
+  } finally {
+    if (gogTmpDir) {
+      try {
+        fs.rmSync(gogTmpDir, { recursive: true, force: true });
+      } catch {}
+    }
   }
 }
 
@@ -1357,11 +1419,21 @@ if (String(process.env.ALPHACLAW_SKIP_PROFILE_ENV || "") === "1") {
     const existing = fs.existsSync(profileSnippetPath)
       ? fs.readFileSync(profileSnippetPath, "utf8")
       : null;
-    if (existing !== profileContent) {
-      fs.writeFileSync(profileSnippetPath, profileContent, { mode: 0o644 });
-      console.log(`[alphaclaw] login-shell env snippet installed at ${profileSnippetPath}`);
+    if (existing !== null && !existing.includes(kManagedSnippetMarker)) {
+      // Same guard as the wrapper (fix wave F003): the path is honored from
+      // the agent-writable .env, so an existing file we did not author is
+      // never overwritten — the documented "never overwrites" invariant.
+      operatorShellEnvOutcome.profileSnippet = "skipped: existing non-managed file";
+      console.log(
+        `[alphaclaw] login-shell env snippet NOT installed: ${profileSnippetPath} exists and is not alphaclaw-managed`,
+      );
+    } else {
+      if (existing !== profileContent) {
+        fs.writeFileSync(profileSnippetPath, profileContent, { mode: 0o644 });
+        console.log(`[alphaclaw] login-shell env snippet installed at ${profileSnippetPath}`);
+      }
+      operatorShellEnvOutcome.profileSnippet = `installed: ${profileSnippetPath}`;
     }
-    operatorShellEnvOutcome.profileSnippet = `installed: ${profileSnippetPath}`;
   } catch (e) {
     operatorShellEnvOutcome.profileSnippet = `failed: ${e.message}`;
     console.log(`[alphaclaw] login-shell env snippet NOT installed (${e.message})`);
@@ -1392,18 +1464,24 @@ const githubRepo = process.env.GITHUB_WORKSPACE_REPO;
 
 if (fs.existsSync(path.join(openclawDir, ".git"))) {
   if (githubRepo) {
-    const repoUrl = githubRepo
-      .replace(/^git@github\.com:/, "")
-      .replace(/^https:\/\/github\.com\//, "")
-      .replace(/\.git$/, "");
-    const remoteUrl = `https://github.com/${repoUrl}.git`;
-    try {
-      execSync(`git remote set-url origin "${remoteUrl}"`, {
-        cwd: openclawDir,
-        stdio: "ignore",
-      });
-      console.log("[alphaclaw] Repo ready");
-    } catch {}
+    const repoUrl = resolveGithubRepoPath(githubRepo);
+    // GITHUB_WORKSPACE_REPO comes from the agent-writable .env; it used to be
+    // interpolated into a double-quoted root shell string (fix wave F001).
+    // Slug-validate it and hand git argv with `--` before the URL.
+    if (!kGithubRepoSlugPattern.test(repoUrl)) {
+      console.warn(
+        `[alphaclaw] GITHUB_WORKSPACE_REPO ${JSON.stringify(githubRepo)} is not owner/repo — leaving the git remote unchanged`,
+      );
+    } else {
+      const remoteUrl = `https://github.com/${repoUrl}.git`;
+      try {
+        execFileSync("git", ["remote", "set-url", "origin", "--", remoteUrl], {
+          cwd: openclawDir,
+          stdio: "ignore",
+        });
+        console.log("[alphaclaw] Repo ready");
+      } catch {}
+    }
   }
 
   // Migration path: scrub persisted PATs from existing GitHub origin URLs.
@@ -1416,8 +1494,11 @@ if (fs.existsSync(path.join(openclawDir, ".git"))) {
     const match = existingOrigin.match(/^https:\/\/[^/@]+@github\.com\/(.+)$/i);
     if (match?.[1]) {
       const cleanedPath = String(match[1]).replace(/\.git$/i, "");
+      if (!kGithubRepoSlugPattern.test(cleanedPath)) {
+        throw new Error(`origin path ${JSON.stringify(cleanedPath)} is not owner/repo`);
+      }
       const cleanedOrigin = `https://github.com/${cleanedPath}.git`;
-      execSync(`git remote set-url origin "${cleanedOrigin}"`, {
+      execFileSync("git", ["remote", "set-url", "origin", "--", cleanedOrigin], {
         cwd: openclawDir,
         stdio: "ignore",
       });
@@ -1454,7 +1535,7 @@ if (fs.existsSync(configPath)) {
           .split(JSON.stringify(secret))
           .join(JSON.stringify(envRef));
       }
-      fs.writeFileSync(configPath, content, "utf8");
+      writeFileAtomic(configPath, content);
       console.log("[alphaclaw] Migrated legacy Telegram streaming config");
     }
   } catch (error) {
@@ -1574,7 +1655,7 @@ if (fs.existsSync(configPath)) {
           );
         }
       }
-      fs.writeFileSync(configPath, content);
+      writeFileAtomic(configPath, content);
       console.log("[alphaclaw] Config updated and sanitized");
     }
   } catch (e) {

@@ -328,8 +328,9 @@ Failure semantics: a refused check (wrong owner/mode/location, symlink, missing)
 | `ALPHACLAW_NOTIFY_WEBHOOK_URL`    | Optional | Extra out-of-band notification channel: watchdog/upgrade alerts are also POSTed here as `{"text": ...}` JSON — delivered even straight from the boot process when no server is up |
 | `ALPHACLAW_ALLOW_LEGACY_LOGIN`    | Optional | `1` re-admits shared-password login while team lockdown is on or `alphaclaw.json` is unreadable (emergency hatch). Deployment env only |
 | `PORT`                            | Optional | Server port (default `3000`)                       |
-| `ALPHACLAW_ROOT_DIR`              | Optional | Data directory (default `/data`)                   |
+| `ALPHACLAW_ROOT_DIR`              | Optional | Data directory (default `~/.alphaclaw`; the Docker image sets `/data`). A second `alphaclaw start` against a root a live server already owns refuses to start (exit 1) instead of touching its databases |
 | `ALPHACLAW_SKIP_SYSTEM_CRON_INSTALL` | Optional | Skip writes to `/etc/cron.d` while keeping cron config (`true`/`false`); the managed hourly script still exits when sync is disabled |
+| `GOG_VERSION`                     | Optional | gog CLI release to install at boot when `gog` is missing (default `0.11.0`). Must be a plain version (`1.2.3`); anything else falls back to the default with a boot-log note. The download is verified against the release `checksums.txt` when one is published, otherwise recorded as unsigned |
 | `ALPHACLAW_GIT_SHIM_PATH`         | Optional | Install the managed git auth shim at this path and prepend its directory to runtime `PATH` (default `/usr/local/bin/git`) |
 | `ALPHACLAW_GIT_ASKPASS_PATH`      | Optional | Install the git askpass helper at this path (default `$TMPDIR/alphaclaw-git-askpass.sh`) |
 | `ALPHACLAW_AUTOTUNE_DISABLED`     | Optional | Kill-switch: set `1` to disable resource autotune and restore built-in defaults — works mid-crash-loop from your platform's environment settings |
