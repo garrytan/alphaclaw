@@ -253,7 +253,7 @@ live/container tiers + docs.
 - **Incumbent-restart notification link hardened.** The "View logs" link prefers the configured public URL and otherwise embeds the request-derived base only when it is a plain `http(s)://host[:port]` origin — a spoofed `X-Forwarded-Host` drops the link, never the message.
 - **A symlinked prelaunch-hook path is refused before it is resolved.** The configured path is `lstat`ed first and must be canonical (a symlink, or a symlinked path component, is refused with code `symlink`); previously `realpath` resolved the link before the `O_NOFOLLOW` open, so a link the deployed agent could repoint at any root-owned executable passed every later check.
 - **A missing backups directory is the empty state, not an error.** The inventory scan folded ENOENT into `readable:false`, and with the Backups card now rendering that as an error every fresh box read "Couldn't read backups" until its first update; a directory that does not exist yet is an empty, readable inventory (EACCES/ENOTDIR stay unreadable). Caught by the browser QA steps added to `tests/browser/upgrade-ui-smoke.sh` (Backups card empty state; the cross-channel confirm's consent toggle present, unchecked and disabled with its reason, cancel starts no apply; Watchdog test-notification honesty).
-- **Docs.** Prelaunch hook runbook says `/proc/<pid>/fd/<fd>` (parent pid) with the fixed system `PATH`; the `409 backup_in_progress` contract names every covered write and the mid-flight deferrals; `OPENCLAW_STATE_DB_QUIET` in the README env table; GNU tar documented as a hard requirement (with a TODOS entry for a bsdtar-compatible extraction); version floors corrected to v0.9.71 (the version this PR claims; PR #57 holds v0.9.70).
+- **Docs.** Prelaunch hook runbook says `/proc/<pid>/fd/<fd>` (parent pid) with the fixed system `PATH`; the `409 backup_in_progress` contract names every covered write and the mid-flight deferrals; `OPENCLAW_STATE_DB_QUIET` in the README env table; GNU tar documented as a hard requirement (with a TODOS entry for a bsdtar-compatible extraction); version floors corrected to v0.9.71 (the version this PR claims; v0.9.70 landed as PR #58).
 
 ### Notes
 - **Review adjudication:** an adversarial review of the merged server lanes
@@ -292,6 +292,98 @@ live/container tiers + docs.
 - **Backups card copy.** The `future_dated` ineligibility reads "not reusable — dated in the future — check the box's clock" instead of the raw enum; the unreadable-backups error no longer suggests the directory "may not exist yet" (a missing directory is an empty inventory server-side) and points at permissions or a stray file at the path.
 - **Store-unavailable badges clear on their own.** While `GET /api/models/config` / `GET /api/codex/status` answer `unavailable: true` (state-DB backup barrier), the Models tab, Providers tab and onboarding Codex step arm ONE bounded re-read (`kStoreUnavailableRecheckMs`, 30 s; re-armed only while still unavailable, dropped once readable, cleared on unmount) so "Unavailable during backup" no longer outlives the barrier until the operator acts.
 - **The hermetic suite no longer litters `/tmp`.** Hundreds of tests `mkdtemp` under `os.tmpdir()` and many never clean up (a throw before the cleanup, an `afterAll` a SIGTERMed fork never reaches); measured after ~45 full runs on one dev box: 139 770 entries and 7 GB. A Vitest `globalSetup` (`tests/setup-tmpdir.js`) now gives every run a private `TMPDIR` (`alphaclaw-vitest-run-*`) that the forked workers inherit and removes it at teardown, with a fail-closed path guard on the recursive delete; `ALPHACLAW_KEEP_TEST_TMPDIR=1` keeps it for inspection. Verified: a full run adds zero test directories to the shared `/tmp`. The same setup sets `DBUS_SESSION_BUS_ADDRESS=disabled:` for the run: tests that execute real host binaries (the CLI shells out to `gog` when it is installed) otherwise make GLib autolaunch a `dbus-daemon --session` per call that outlives the suite — 1 327 orphaned daemons were counted on one box; a full run now leaves none. Four documentation inaccuracies surfaced by the release documentation pass were fixed (hook error code `writable_by_others`, the Telegram 403/400 determinism sentence, the literal `state_db_quiet` status names, the inventory entry's `name`/`mode`/`operationId` fields).
+
+#### Merge note
+
+- Container tier harness: when the registry's `beta` dist-tag is not a row in the catalog's Beta section (it moved to the GA release 2026.9.1 on 2026-09-03, which the Stable section lists), the journey applies the first Beta-section row and binds every later wait to that row's version instead of the dist-tag — run 8 on the merged tree waited ten minutes for `2026.9.1` after installing `2026.9.1-beta.1`.
+- Rebased over v0.9.70 (#58, supervisor adoption for `--force` cold restarts): the incumbent-restart verdict now runs before the autotune stamp and the supervisor adoption, so a restart the old gateway answered adopts nothing and stamps nothing; on that honest failure the adoption bookkeeping is reset with the managed-child slot. Everything else from #58 is kept as landed.
+
+## [0.9.70] - 2026-09-02
+
+Gateway thrash follow-up (issue #56, AlphaClaw half). Root-caused against the
+OpenClaw 2026.9.1-beta.1 dist: the "parent" process on the box is the
+`openclaw.mjs` compile-cache launcher — a signal-forwarding passthrough that
+exits with the gateway's code and never respawns (it does not read
+`OPENCLAW_NO_RESPAWN`). After a cold restart (`openclaw gateway --force`)
+AlphaClaw forgot that launcher (`gatewayChild = null`), so every later
+gateway exit was invisible to the watchdog: no crash relaunch, no
+restart-handoff consume, and a memory monitor with no pid to sample — a
+gateway that drained and exited stayed down until a human clicked Restart.
+
+### Fixed
+- **Cold-restart supervisor adoption** (`lib/server/gateway.js`): once the
+  gateway is proven ready, a still-alive `gateway --force` supervisor becomes
+  the managed child — same exit classification as a `gateway run` launch
+  (`attachManagedGatewayExitClassification`, one owner), so an unexpected
+  exit runs the normal crash-relaunch path regardless of auto-repair, an
+  expected stop is booked as such, shutdown/backup stops can reap it, and the
+  launch handler carries a real pid (the memory monitor samples the process
+  subtree again). A supervisor that already exited (daemonizing builds) is
+  not adopted — that gateway stays TCP-tracked as before, and adoption waits a
+  one-second quiet period after ready so a CLI that daemonizes-and-returns a
+  beat late is not adopted either.
+- **Adopted-supervisor stop semantics:** the OpenClaw launcher runs its own
+  backstop on a forwarded SIGTERM (re-SIGTERM at 1s, SIGKILL the gateway at
+  2s, exit 1 at 3s), so AlphaClaw stops SIGTERM the launcher but never SIGKILL
+  it — that would race the backstop and orphan the gateway on the port — and
+  an EXPECTED exit of an adopted supervisor with code 1 (the backstop reaped a
+  still-draining gateway) is classified as the managed stop it is, not a
+  crash. The launch-time exit logger is detached on adoption (one log line,
+  one classification), the managed slot is released BEFORE the watchdog
+  classifies, and the adopted launcher's gateway child (matched by process
+  name) is resolved from /proc and handed to the restart-handoff consume (the
+  handoff row is keyed by the gateway's pid, not the launcher's).
+- **Shutdown-deadline reap is supervisor-aware too:** the last-ditch
+  `killGatewayNow` used by the server lifecycle's abandoned-drain escape
+  hatches now goes through `killManagedGatewayChildNow`, which skips an
+  adopted launcher for the same reason (it reaps its own gateway).
+- **`capSource: "budget"` downstream:** the incident overseer's trusted
+  projection keeps the new cap source instead of dropping it, and the critical
+  alert names the operator budget (`watchdog.memory.budgetMb`) rather than
+  calling it the container limit.
+- **Stale predecessor exits** (`lib/server/watchdog.js`): an EXPECTED late
+  exit of a pid that is no longer the supervised gateway (the old launcher
+  finishing a minutes-long drain after a cold restart adopted its successor)
+  is recorded (`stalePredecessor: true`) and never rewrites the live
+  gateway's lifecycle or arms an expected-restart window over it.
+- **Mitigation brake TOCTOU:** the pre-restart re-check now re-derives the
+  brake from the freshly re-read settings too (not just the arm/disarm veto),
+  so a `maxRestartsPerDay` lowered during the notify await re-brakes the
+  restart and refunds the stamp instead of being honored one restart late.
+- **Watchdog settings UI:** the number fields' validation and failed-save
+  chips now render (the inline chip takes `headline`/`error`; the first cut
+  passed a prop it ignores), a rejected draft is re-seeded from server truth,
+  and the fields pick up the autotune card's input width, numeric keypad,
+  disabled affordance, and a helper line explaining why a field is inert.
+
+### Added
+- **Memory fast-leak profile** (`watchdog.memory.budgetMb`,
+  `watchdog.memory.maxRestartsPerDay`): an operator RSS budget joins the
+  heap/container cap derivation (tightest wins, `capSource: "budget"`), and
+  the pre-OOM auto-restart brake budget is configurable (1–24 per rolling
+  24h; spacing min(6h, 24h ÷ 2×budget), so the default keeps the original
+  2/24h ≥6h posture). Surfaced on Watchdog → Settings (two number fields),
+  `GET/PUT /api/watchdog/memory` (with `bounds`), and the agent-admin
+  manifest — both knobs ALWAYS escalate to the dangerous tier for the agent
+  actor (they decide how soon and how often the gateway restarts, and a
+  disarmed pre-stage would go live on a later operator arm-confirm). Values
+  are whole numbers only (fractions are rejected, never rounded), a budget at
+  or below the gateway's current RSS is rejected as a restart loop
+  (`budget_below_current_rss`), and the UI reads the live bounds from
+  `GET /api/watchdog/memory`. Rationale: on the issue #56 box (100 GB cgroup,
+  8 GB heap) the derived cap never binds before OpenClaw's own 6 GiB drain,
+  and a ~10 MB/min leak turns critical every few hours.
+
+### Notes
+- Bugs 2–4 of issue #56 (wedge detector counting, poison-message recycle,
+  heartbeat `comm=="node"`) live in the wintermute workspace scripts, not
+  here. `diagnostics.memoryPressureSnapshot` is a retired key on OpenClaw
+  ≥2026.8 and the beta hardcodes the critical bundle off — no AlphaClaw
+  config can enable it.
+- Known blind spot (TODOS.md): behind the launcher, a gateway killed by an
+  unforwarded signal (kernel OOM SIGKILL) surfaces as launcher exit code 1,
+  so the 137/SIGKILL OOM classifier does not fire for it; the V8 heap-OOM
+  stderr signature still does.
 
 ## [0.9.69] - 2026-09-02
 

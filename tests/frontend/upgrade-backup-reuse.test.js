@@ -816,6 +816,17 @@ describe("frontend/upgrade-tab hook — consent + reuse retry + fence fields", (
     return state;
   };
 
+  // Pin Date (only Date — flushAsync and the hook's intervals stay real) to
+  // the fixture epoch: the hook builds the reuse consent model with
+  // Date.now(), so kNow-relative archives silently aged past the 24 h reuse
+  // window once the wall clock moved beyond 2026-09-03 (a time bomb in the
+  // fixtures, not a product change).
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ["Date"], now: kNow });
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
   beforeEach(() => {
     harness.reset();
     invalidateCache("/api/openclaw/channel");
@@ -1433,6 +1444,11 @@ describe("frontend/upgrade-tab hook — consent + reuse retry + fence fields", (
     api.fetchOpenclawChannel.mockClear();
     expect(api.fetchOpenclawBackups).not.toHaveBeenCalled();
     vi.useFakeTimers();
+    // Pin the faked clock to the fixture epoch: fake timers start at the REAL
+    // now by default, and the hook's Date.now()-based 24 h reuse window aged
+    // the kNow-relative archives out of eligibility once the wall clock passed
+    // 2026-09-03 (a time bomb, not a product change).
+    vi.setSystemTime(kNow);
     let stopPoll = null;
     try {
       // Effect #6 is the resume poll: the four page effects (mount load,

@@ -559,12 +559,30 @@ describeContainer("container E2E: stable→beta upgrade in the production image"
         );
         applyButton = row.getByRole("button", { name: /^(Upgrade|Switch|Try again)$/ });
       } catch {
-        console.warn(
-          `[container-e2e] no catalog row with exact text ${ctx.beta} — falling back to the first Beta-section row`,
-        );
+        // The registry's `beta` dist-tag can point at a GA release (it moved
+        // to 2026.9.1 on 2026-09-03, which the catalog lists under Stable),
+        // so the Beta section's first actionable row is the newest
+        // pre-release, not the dist-tag. Every later wait — the progress
+        // heading, /api/status openclawVersion, the verdict banner, the run
+        // record's target, `openclaw --version` — must key off the version
+        // this journey actually applies, so rebind ctx.beta to the row.
         applyButton = betaSection
           .getByRole("button", { name: /^(Upgrade|Switch|Try again)$/ })
           .first();
+        const fallbackRow = applyButton.locator(
+          'xpath=ancestor::div[contains(@class,"py-2.5")][1]',
+        );
+        const rowText = await fallbackRow.innerText({ timeout: 60_000 });
+        const rowVersion = rowText.match(/\b\d{4}\.\d{1,2}\.\d{1,2}(?:-[0-9A-Za-z.]+)?\b/)?.[0] || null;
+        if (!rowVersion) {
+          throw new Error(
+            `[container-e2e] no catalog row with exact text ${ctx.beta} and the first Beta-section row carries no version: ${JSON.stringify(rowText.slice(0, 200))}`,
+          );
+        }
+        console.warn(
+          `[container-e2e] no catalog row with exact text ${ctx.beta} — applying the first Beta-section row instead: ${rowVersion}`,
+        );
+        ctx.beta = rowVersion;
       }
       await applyButton.first().click({ timeout: 60_000 });
 

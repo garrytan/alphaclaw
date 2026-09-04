@@ -93,7 +93,7 @@ Defects to carry into M2 (all current code):
 
 - **`onExpectedRestart()` is dead code** (`watchdog.js:1155-1165`). Nothing calls it; manual restarts never open the expected-restart suppression window, so probes during a restart read as real failures.
 - **15s expected window vs 120s ready budget.** `kExpectedRestartWindowMs = 15s` (`watchdog.js:13`) but `waitForGatewayReady` budgets 120s (`gateway.js:43`). Even where the window *is* opened (expected exit path), it expires 8× before the restart budget, producing false `degraded` mid-restart — which can trip the channel-rollback hook (`watchdog.js:870-897`, 10-min degraded rollback).
-- **Detached-supervision blind spot.** `runGatewayRestartCmd` discards the child on success (`gatewayChild = null`, `gateway.js:348`). After the first manual restart the watchdog owns no process: no exit events, so `crashed`/`crash_loop`/`configuration_error` transitions are unreachable until the next managed launch; `gatewayPid` is lost and uptime goes stale.
+- **Detached-supervision blind spot.** `runGatewayRestartCmd` discards the child on success (`gatewayChild = null`, `gateway.js:348`). After the first manual restart the watchdog owns no process: no exit events, so `crashed`/`crash_loop`/`configuration_error` transitions are unreachable until the next managed launch; `gatewayPid` is lost and uptime goes stale. *Closed in v0.9.70:* the ready branch now adopts a still-alive supervisor as the managed child — see the §9 update.
 - **Probe skips.** `runHealthCheck` returns immediately while the config-error latch is set (`watchdog.js:701`) and while `operationInProgress` unless explicitly allowed (`:708`) — the exact moments the UI most needs fresh truth.
 
 ---
@@ -298,7 +298,27 @@ Step labels are human ("Checking plugins", "Stopping gateway", "Starting gateway
 
 ## 9. Supervision modes — detection documentation
 
-| signal | managed child (AlphaClaw spawned it) | detached / supervisor mode (post-manual-restart today) |
+> **2026-09-02 update (v0.9.70, issue #56).** The left column now also covers the
+> post-cold-restart case. `runGatewayRestartCmd` spawns OpenClaw's `openclaw.mjs`
+> compile-cache launcher (a signal-forwarding passthrough that exits with the
+> gateway's code and never respawns); once the gateway is proven ready and the
+> launcher is still alive one second later, it is ADOPTED as the managed child
+> (`attachManagedGatewayExitClassification`, `supervisor: true`, gateway pid
+> resolved from /proc as `workerPid` for the restart-handoff consume). Two shape
+> differences from a `gateway run` child: the graceful stop path
+> (`stopGatewayChildAndWait`) SIGTERMs the launcher and skips its SIGKILL
+> escalation (its own backstop re-SIGTERMs at 1s, SIGKILLs the gateway at 2s,
+> exits 1 at 3s; the shutdown last-ditch `killGatewayNow` reap goes through
+> `killManagedGatewayChildNow`, which returns false for an adopted launcher for
+> the same reason), and an EXPECTED exit with code 1 is booked as a
+> managed stop.
+> An expected late exit of a pid that is no longer `state.gatewayPid` is recorded
+> `stalePredecessor: true` and never rewrites the live lifecycle. The right column
+> applies only when the launcher has already exited by ready (daemonizing builds).
+> Known gap: behind the launcher a kernel-OOM SIGKILL of the gateway surfaces as
+> launcher exit 1, so the 137/SIGKILL OOM classifier does not fire (TODOS.md).
+
+| signal | managed child (AlphaClaw spawned it, incl. an adopted cold-restart supervisor) | detached mode (supervisor already exited by ready — daemonizing builds; the post-manual-restart default before v0.9.70) |
 |---|---|---|
 | gateway death | **exit-based**: child `exit` event, immediate | **poll-based**: 10s always-on TCP watcher (M2.3) |
 | exit codes / EX_CONFIG latch | exit-based, reliable (`onGatewayExit`, code 78 latch) | unavailable — inferred from log/stderr tail evidence only |

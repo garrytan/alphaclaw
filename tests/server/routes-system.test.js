@@ -531,7 +531,12 @@ describe("server/routes/system", () => {
           },
           watchdog: {
             overseer: { enabled: false },
-            memory: { enabled: true, autoRestart: false },
+            memory: {
+              enabled: true,
+              autoRestart: false,
+              budgetMb: null,
+              maxRestartsPerDay: 2,
+            },
           },
           autotune: {
             enabled: true,
@@ -928,7 +933,12 @@ describe("server/routes/system", () => {
         },
         watchdog: {
           overseer: { enabled: false },
-          memory: { enabled: true, autoRestart: false },
+          memory: {
+            enabled: true,
+            autoRestart: false,
+            budgetMb: null,
+            maxRestartsPerDay: 2,
+          },
         },
         autotune: {
           enabled: true,
@@ -978,7 +988,12 @@ describe("server/routes/system", () => {
           },
           watchdog: {
             overseer: { enabled: false },
-            memory: { enabled: true, autoRestart: false },
+            memory: {
+              enabled: true,
+              autoRestart: false,
+              budgetMb: null,
+              maxRestartsPerDay: 2,
+            },
           },
           autotune: {
             enabled: true,
