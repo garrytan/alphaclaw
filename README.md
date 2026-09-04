@@ -298,7 +298,7 @@ The built-in watchdog monitors gateway health and recovers from failures automat
 
 ### Gateway prelaunch hook
 
-Opt-in: `ALPHACLAW_GATEWAY_PRELAUNCH_HOOK=/absolute/path/to/executable` (deployment environment only — never honored from `.env`). When set, AlphaClaw runs the hook and waits for it to exit **before every gateway launch** — the boot start, manual/API restarts, watchdog relaunches and repairs, the in-place light restart — strictly before the plugin preflight or the gateway child import the OpenClaw bundle. Use case: containers whose image cannot bake in a change — restore a runtime patch to the installed OpenClaw, start a sidecar the gateway needs, re-apply a file the platform resets on redeploy.
+Opt-in: `ALPHACLAW_GATEWAY_PRELAUNCH_HOOK=/absolute/path/to/executable` (deployment environment only — never honored from `.env`). When set, AlphaClaw runs the hook and waits for it to exit **before every gateway launch** — the boot start, manual/API restarts, watchdog relaunches and repairs — strictly before the plugin preflight or the gateway child import the OpenClaw bundle. Use case: containers whose image cannot bake in a change — restore a runtime patch to the installed OpenClaw, start a sidecar the gateway needs, re-apply a file the platform resets on redeploy.
 
 Requirements (all enforced, any miss aborts the launch):
 
