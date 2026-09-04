@@ -254,6 +254,28 @@ describe("server/operation-events", () => {
     });
   });
 
+  it("forwards a digest-bearing reusableBackup offer into the error event, and nothing else shaped like one", () => {
+    const sha256 = "a".repeat(64);
+    const offer = { file: "/data/backups/openclaw/x.tar.gz", at: 1, ageMs: 5, sha256, producer: "openclaw" };
+    const service = createOperationEventsService();
+    const { operationId } = service.createOperation();
+    service.fail(
+      operationId,
+      Object.assign(new Error("backup failed"), { code: "backup_failed", reusableBackup: offer }),
+    );
+    expect(service.getOperation(operationId).events[0].data).toEqual({
+      error: "backup failed",
+      code: "backup_failed",
+      reusableBackup: offer,
+    });
+
+    for (const bad of [true, "sha", { sha256: "not-hex" }, [sha256], { file: "/x" }]) {
+      const { operationId: other } = service.createOperation();
+      service.fail(other, Object.assign(new Error("nope"), { reusableBackup: bad }));
+      expect(service.getOperation(other).events[0].data).toEqual({ error: "nope" });
+    }
+  });
+
   it("marks operations completed with a done event payload", () => {
     const service = createOperationEventsService();
     const { operationId } = service.createOperation({ type: "  spaced  " });

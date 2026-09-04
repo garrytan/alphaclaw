@@ -49,6 +49,7 @@ vi.mock("preact/hooks", () => {
 vi.mock("../../lib/public/js/lib/api.js", () => ({
   applyOpenclawVersion: vi.fn(),
   clearOpenclawBlocklist: vi.fn(),
+  fetchOpenclawBackups: vi.fn(),
   fetchOpenclawCatalog: vi.fn(),
   fetchOpenclawChannel: vi.fn(),
   fetchOpenclawRun: vi.fn(),

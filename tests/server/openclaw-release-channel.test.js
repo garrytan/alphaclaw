@@ -76,6 +76,7 @@ describe("server/openclaw-release-channel", () => {
         acceptedAt: 222,
         acceptedSource: null,
         reason: null,
+        operationId: null,
       });
       expect(written.previousPin).toEqual({ version: "2026.7.1-1", at: 333 });
       expect(written.pinWindow).toEqual({
@@ -88,6 +89,37 @@ describe("server/openclaw-release-channel", () => {
       const onDisk = JSON.parse(fs.readFileSync(store.statePath, "utf8"));
       expect(onDisk.futureKey).toEqual({ keep: true });
       expect(fs.readFileSync(store.statePath, "utf8").endsWith("\n")).toBe(true);
+    });
+
+    it("persists applied.operationId through normalization (apply-accepted-<operationId> dedupe key) and drops non-string values", () => {
+      const { store } = createStore();
+      const kOperationId = "2f8c1f2e-0d2a-4b1e-9a11-6f2f8c1f2e0d";
+
+      // applyUpdate stamps the operation onto the applied record it writes;
+      // the normalizer must carry it across write → disk → read.
+      const written = store.writeState({
+        applied: {
+          channel: "beta",
+          version: "2026.8.1",
+          at: 111,
+          acceptedAt: null,
+          operationId: kOperationId,
+        },
+      });
+      expect(written.applied.operationId).toBe(kOperationId);
+      expect(store.readState().applied.operationId).toBe(kOperationId);
+      // updateState's return (what markGoodNow / the acceptance hook read)
+      // carries it too.
+      const updated = store.updateState((s) => {
+        s.applied.acceptedAt = 333;
+        return s;
+      });
+      expect(updated.applied).toMatchObject({ acceptedAt: 333, operationId: kOperationId });
+
+      // Non-string shapes normalize to null rather than leaking into the id.
+      for (const bogus of [42, { id: "x" }, ["a"], true]) {
+        expect(normalizeState({ applied: { channel: "beta", operationId: bogus } }).applied.operationId).toBe(null);
+      }
     });
 
     it("normalizes missing/invalid shapes to the empty state", () => {

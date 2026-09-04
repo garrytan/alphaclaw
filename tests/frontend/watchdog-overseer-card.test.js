@@ -994,3 +994,32 @@ describe("WatchdogOverseerCard rendering", () => {
     ).toBe(false);
   });
 });
+
+// Regression pin: on main the button was `disabled = !!availability &&
+// availability.available !== true` — a FAILED settings load (availability
+// null) left "Review now" clickable and let the server refuse it. The lifted
+// card gates on `availability?.available === true`, so null now disables the
+// button with the same waiting title the incidents row action uses.
+describe("WatchdogOverseerCard rendering — availability not known", () => {
+  beforeEach(() => {
+    harness.reset();
+  });
+
+  it("settings load failure (availability null) disables the button with the waiting title; probing does the same", () => {
+    for (const availability of [null, { available: null, reason: "probing", message: "" }]) {
+      harness.reset();
+      const tree = renderCard({ availability });
+      const button = findAllByType(tree, ActionButton).find(
+        (node) => node.props.idleLabel === "Review current situation",
+      );
+      expect(button, JSON.stringify(availability)).toBeTruthy();
+      expect(button.props.disabled).toBe(true);
+      expect(button.props.loading).toBe(false);
+      expect(button.props.title).toBe("Waiting for claude availability");
+      expect(textOf(tree)).not.toContain("Scope:");
+    }
+    expect(textOf(renderCard({ availability: null }))).toContain(
+      "Availability: unknown — overseer settings couldn't be loaded.",
+    );
+  });
+});

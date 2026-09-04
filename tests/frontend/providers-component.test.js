@@ -74,8 +74,11 @@ vi.mock("../../lib/public/js/lib/codex-oauth-window.js", () => ({
 
 import * as preactHooks from "preact/hooks";
 import * as api from "../../lib/public/js/lib/api.js";
+import { showToast } from "../../lib/public/js/components/toast.js";
 import { invalidateCache, invalidateCachePrefix } from "../../lib/public/js/lib/api-cache.js";
 import { openCodexAuthWindow } from "../../lib/public/js/lib/codex-oauth-window.js";
+import { kCodexDeferredSaveRecheckMs } from "../../lib/public/js/lib/codex-status.js";
+import { kStoreUnavailableRecheckMs } from "../../lib/public/js/lib/store-availability.js";
 import { SecretInput } from "../../lib/public/js/components/secret-input.js";
 import { ActionButton } from "../../lib/public/js/components/action-button.js";
 import { InlineErrorChip } from "../../lib/public/js/components/inline-error-chip.js";
@@ -209,6 +212,38 @@ describe("frontend/providers component", () => {
     expect(collectText(tree).join(" ")).toContain("Loading model catalog...");
   });
 
+  // NOTE: runs second, while the tab cache still has no codex status — the
+  // FIRST read of the session is the quiet-period placeholder.
+  it("a FIRST status read that is unavailable is not a checked status: unknown-until-it-finishes, never 'Not connected', and the tab cache does not seed it as checked", async () => {
+    api.fetchCodexStatus.mockResolvedValue({
+      connected: false,
+      unavailable: true,
+      reason: "backup_in_progress",
+    });
+    let tree = await hydrateProviders();
+
+    let text = collectText(tree).join(" ");
+    expect(text).toContain("Unavailable during backup");
+    expect(text).toContain(
+      "Credential store unavailable during a backup — Codex status unknown until it finishes.",
+    );
+    expect(text).not.toContain("showing the last known");
+    expect(text).not.toContain("Not connected");
+    // Not a failed check: no retry chip, and the connect entry point is live.
+    expect(findAllByType(tree, InlineErrorChip).length).toBe(0);
+    expect(findButtonByText(tree, "Connect Codex OAuth")).toBeTruthy();
+
+    // Next mount seeds from the tab cache: an unavailable placeholder must
+    // not read as a checked status there either (that would render "Not
+    // connected" over a live auth the moment the tab is reopened).
+    harness.reset();
+    tree = renderProviders();
+    text = collectText(tree).join(" ");
+    expect(text).toContain("Status unknown");
+    expect(text).not.toContain("Not connected");
+    expect(text).not.toContain("Unavailable during backup");
+  });
+
   it("Reconnect Codex actually starts the OAuth flow while connected (no connected-guard no-op)", async () => {
     api.fetchCodexStatus.mockResolvedValue({ connected: true });
     const tree = await hydrateProviders();
@@ -276,6 +311,188 @@ describe("frontend/providers component", () => {
     tree = renderProviders();
     expect(findAllByType(tree, InlineErrorChip).length).toBe(0);
     expect(collectText(tree).join(" ")).not.toContain("Status check failed");
+  });
+
+  it("a quiet-period codex status (unavailable: true) keeps the last-known 'Connected' under an 'Unavailable during backup' badge — never 'Not connected'", async () => {
+    api.fetchCodexStatus.mockResolvedValue({ connected: true });
+    let tree = await hydrateProviders();
+    expect(collectText(tree).join(" ")).toContain("Connected");
+
+    api.fetchCodexStatus.mockResolvedValue({
+      connected: false,
+      unavailable: true,
+      reason: "backup_in_progress",
+    });
+    // Disconnect's follow-up status read is the quiet-period one.
+    api.disconnectCodex.mockResolvedValue({ ok: true });
+    await findActionButtonByLabel(tree, "Disconnect").props.onClick();
+    tree = renderProviders();
+
+    const text = collectText(tree).join(" ");
+    expect(text).toContain("Unavailable during backup");
+    expect(text).toContain(
+      "Credential store unavailable during a backup — showing the last known Codex status (connected).",
+    );
+    expect(text).not.toContain("Not connected");
+    // Not a failed check: no error chip.
+    expect(findAllByType(tree, InlineErrorChip).length).toBe(0);
+  });
+
+  it("a deferred manual exchange (202 deferred:true) toasts the honest message and badges the pending save", async () => {
+    api.fetchCodexStatus.mockResolvedValue({
+      connected: false,
+      unavailable: true,
+      reason: "backup_in_progress",
+    });
+    api.exchangeCodexOAuth.mockResolvedValue({
+      ok: true,
+      deferred: true,
+      reason: "backup_in_progress",
+    });
+    let tree = await hydrateProviders();
+    // The tab cache may carry a last-known "connected" from an earlier test
+    // (kept under the unavailable marker — that is the point), so the entry
+    // point is either Connect or Reconnect; both start the same flow.
+    (
+      findButtonByText(tree, "Connect Codex OAuth") ||
+      findButtonByText(tree, "Reconnect Codex")
+    ).props.onclick();
+    tree = renderProviders();
+    findAllByType(tree, "input")
+      .find((vnode) => String(vnode.props.placeholder || "").includes("auth/callback"))
+      .props.onInput({
+        target: { value: "http://localhost:1455/auth/callback?code=abc&state=def" },
+      });
+    tree = renderProviders();
+    await findActionButtonByLabel(tree, "Complete Codex OAuth").props.onClick();
+    tree = renderProviders();
+
+    expect(showToast).toHaveBeenCalledWith(
+      "Codex connected — saved after the backup finishes",
+      "success",
+    );
+    const text = collectText(tree).join(" ");
+    expect(text).toContain("Connected — saved after the backup finishes");
+    expect(text).not.toContain("Not connected");
+  });
+
+  // Drives the deferred manual exchange while the status read answers with
+  // `firstRead`, then returns the rendered tree. `beforeComplete` runs right
+  // before the Complete click (fake timers must not start before hydrate's
+  // setTimeout(0) flush, or it never resolves).
+  const completeDeferredExchange = async (firstRead, beforeComplete = () => {}) => {
+    api.fetchCodexStatus.mockResolvedValue({
+      connected: false,
+      unavailable: true,
+      reason: "backup_in_progress",
+    });
+    api.exchangeCodexOAuth.mockResolvedValue({ ok: true, deferred: true, reason: "backup_in_progress" });
+    let tree = await hydrateProviders();
+    (
+      findButtonByText(tree, "Connect Codex OAuth") ||
+      findButtonByText(tree, "Reconnect Codex")
+    ).props.onclick();
+    tree = renderProviders();
+    findAllByType(tree, "input")
+      .find((vnode) => String(vnode.props.placeholder || "").includes("auth/callback"))
+      .props.onInput({
+        target: { value: "http://localhost:1455/auth/callback?code=abc&state=def" },
+      });
+    tree = renderProviders();
+    api.fetchCodexStatus.mockResolvedValue(firstRead);
+    beforeComplete();
+    await findActionButtonByLabel(tree, "Complete Codex OAuth").props.onClick();
+    return renderProviders();
+  };
+
+  it("X7: the server's deferredWrite:failed verdict ends the pending badge and says the connection was not saved", async () => {
+    let tree = await completeDeferredExchange({
+      connected: false,
+      unavailable: true,
+      reason: "backup_in_progress",
+    });
+    expect(collectText(tree).join(" ")).toContain("Connected — saved after the backup finishes");
+
+    // The barrier lifted; the held write failed. The next read says so.
+    api.fetchCodexStatus.mockResolvedValue({
+      connected: false,
+      deferredWrite: { state: "failed", reason: "store closed for a second backup" },
+    });
+    harness.effects[0]();
+    await flushAsync();
+    tree = renderProviders();
+    const text = collectText(tree).join(" ");
+    expect(text).toContain(
+      "Codex connection was not saved (store closed for a second backup) — reconnect",
+    );
+    expect(text).not.toContain("saved after the backup finishes");
+    expect(text).toContain("Not connected");
+  });
+
+  it("X7: without a server verdict, a readable connected:false read schedules ONE recheck; a second such read ends the claim", async () => {
+    // First read after the exchange is READABLE and still disconnected: one
+    // strike — the badge stays pending and a follow-up read is scheduled.
+    try {
+      let tree = await completeDeferredExchange({ connected: false }, () => vi.useFakeTimers());
+      let text = collectText(tree).join(" ");
+      expect(text).toContain("Connected — saved after the backup finishes");
+      expect(text).not.toContain("was not saved");
+      const readsBefore = api.fetchCodexStatus.mock.calls.length;
+
+      await vi.advanceTimersByTimeAsync(kCodexDeferredSaveRecheckMs);
+      expect(api.fetchCodexStatus.mock.calls.length).toBe(readsBefore + 1);
+      tree = renderProviders();
+      text = collectText(tree).join(" ");
+      expect(text).toContain(
+        "Codex connection was not saved (the saved connection did not appear after the backup) — reconnect",
+      );
+      expect(text).not.toContain("saved after the backup finishes");
+      // No further rechecks once the claim is decided.
+      await vi.advanceTimersByTimeAsync(kCodexDeferredSaveRecheckMs * 3);
+      expect(api.fetchCodexStatus.mock.calls.length).toBe(readsBefore + 1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // D14: the "Unavailable during backup" badge must clear on its own once
+  // the barrier lifts — ONE bounded status re-read per unavailable read.
+  it("D14: an unavailable status read arms ONE bounded recheck, re-arms while still unavailable, and stops once readable", async () => {
+    vi.useFakeTimers();
+    try {
+      api.fetchCodexStatus.mockResolvedValue({
+        connected: false,
+        unavailable: true,
+        reason: "backup_in_progress",
+      });
+      renderProviders();
+      harness.effects[0]?.();
+      await vi.advanceTimersByTimeAsync(0);
+      let tree = renderProviders();
+      expect(collectText(tree).join(" ")).toContain("Unavailable during backup");
+      const readsAfterMount = api.fetchCodexStatus.mock.calls.length;
+
+      await vi.advanceTimersByTimeAsync(kStoreUnavailableRecheckMs - 1);
+      expect(api.fetchCodexStatus.mock.calls.length).toBe(readsAfterMount);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(api.fetchCodexStatus.mock.calls.length).toBe(readsAfterMount + 1);
+      // Only the status is re-read — never the whole tab.
+      expect(api.fetchEnvVars).toHaveBeenCalledTimes(1);
+
+      // Still unavailable → re-armed; the barrier lifts before the next one.
+      api.fetchCodexStatus.mockResolvedValue({ connected: true });
+      await vi.advanceTimersByTimeAsync(kStoreUnavailableRecheckMs);
+      expect(api.fetchCodexStatus.mock.calls.length).toBe(readsAfterMount + 2);
+      tree = renderProviders();
+      const text = collectText(tree).join(" ");
+      expect(text).not.toContain("Unavailable during backup");
+      expect(text).toContain("Connected");
+
+      await vi.advanceTimersByTimeAsync(kStoreUnavailableRecheckMs * 3);
+      expect(api.fetchCodexStatus.mock.calls.length).toBe(readsAfterMount + 2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("saving env vars and the primary model invalidates the affected caches", async () => {

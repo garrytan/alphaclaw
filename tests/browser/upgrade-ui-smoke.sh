@@ -119,4 +119,43 @@ assert_page "($overseer_input)?.checked === true" "overseer toggle still on afte
 sleep 2
 assert_page "($overseer_input)?.checked === false" "overseer toggle disabled again"
 
+echo "== #54 QA: Backups card renders its honest empty state =="
+assert_page "document.body.textContent.includes('Backups') && document.body.textContent.includes('No backups yet — the next OpenClaw update takes one before installing')" "Backups card empty state (a pre-update backup runs on every apply)"
+"$B" screenshot /tmp/ui-smoke-qa-backups-card.png >/dev/null 2>&1 || true
+
+echo "== #54 QA: hard-gated confirm shows the reuse consent — unchecked, disabled, with its reason — and cancels without applying =="
+"$B" js "[...document.querySelectorAll('button')].find(b => b.textContent.trim()==='Beta')?.click(); true" >/dev/null
+sleep 3
+"$B" js "[...document.querySelectorAll('button')].find(b => b.textContent.trim().startsWith('Update to '))?.click(); true" >/dev/null
+sleep 2
+assert_page "document.body.textContent.includes(\"If a fresh backup can't be made, proceed with the most recent verified backup\")" "consent toggle present in the cross-channel confirm"
+assert_page "document.body.textContent.includes('No eligible backup to reuse')" "consent disabled reason: no eligible backup"
+consent_input="[...document.querySelectorAll('label')].find(l => l.textContent.includes('most recent verified backup'))?.querySelector('input')"
+assert_page "(i => !!i && i.checked === false && i.disabled === true)($consent_input)" "consent toggle is unchecked and disabled (never pre-checked)"
+"$B" screenshot /tmp/ui-smoke-qa-consent-dialog.png >/dev/null 2>&1 || true
+"$B" js "[...document.querySelectorAll('button')].find(b => b.textContent.trim()==='Cancel')?.click(); true" >/dev/null
+sleep 1
+assert_page "!document.body.textContent.includes(\"If a fresh backup can't be made\")" "confirm dismissed"
+grep -q '"lastUpdateRun"' "$kScratch/.openclaw/.alphaclaw/openclaw-channel.json" 2>/dev/null && fail "cancelling the confirm must not start an apply"
+echo "  ok: no apply started"
+"$B" js "[...document.querySelectorAll('button')].find(b => b.textContent.trim()==='Back to stable')?.click(); true" >/dev/null
+sleep 3
+grep -q '"releaseChannel": "stable"' "$kScratch/.openclaw/alphaclaw.json" || fail "channel not restored to stable after the consent check"
+echo "  ok: restored to stable"
+
+echo "== #54 QA: Watchdog test notification reports honestly (nothing configured → the server's 502 renders inline, never a false success) =="
+"$B" goto "http://127.0.0.1:$kPort/#/watchdog" >/dev/null
+sleep 3
+test_button="[...document.querySelectorAll('button')].find(b => b.textContent.trim()==='Test' && b.getAttribute('aria-hidden') !== 'true')"
+visible=$("$B" js "!!($test_button)" 2>&1 | tail -1)
+if [ "$visible" = "true" ]; then
+  "$B" js "($test_button)?.click(); true" >/dev/null
+  sleep 3
+  assert_page "document.body.textContent.includes('nothing is configured or paired')" "test notification: honest 'nothing is configured or paired'"
+  assert_page "!document.body.textContent.includes('Test notification sent')" "test notification: no false success"
+  "$B" screenshot /tmp/ui-smoke-qa-test-notification.png >/dev/null 2>&1 || true
+else
+  echo "  skipped: notifications are disabled in this fixture (Test button hidden)"
+fi
+
 echo "PASS: upgrade UI smoke"

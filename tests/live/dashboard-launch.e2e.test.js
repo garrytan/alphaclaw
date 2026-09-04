@@ -9,6 +9,7 @@ const {
   mkTemp,
   repoOpenclawBin,
   repoBinDir,
+  scrubTestRunnerEnv,
   waitFor,
 } = require("./live-helpers");
 
@@ -188,7 +189,7 @@ describeLive("live: dashboard launcher credential chain", () => {
     // (lib/server/onboarding/openclaw.js buildOnboardArgs), no provider auth.
     gatewayToken = `live-launch-${Date.now().toString(36)}-token`;
     const onboardEnv = {
-      ...process.env,
+      ...scrubTestRunnerEnv(),
       HOME: rootDir,
       OPENCLAW_HOME: rootDir,
       OPENCLAW_CONFIG_PATH: path.join(openclawDir, "openclaw.json"),
@@ -196,7 +197,6 @@ describeLive("live: dashboard launcher credential chain", () => {
       XDG_CONFIG_HOME: openclawDir,
       OPENCLAW_NO_AUTO_UPDATE: "1",
     };
-    delete onboardEnv.NODE_OPTIONS;
     const onboard = spawnSync(
       process.execPath,
       [
@@ -241,14 +241,13 @@ describeLive("live: dashboard launcher credential chain", () => {
 
     // Boot the REAL server: it supervises the real gateway as a child.
     const serverEnv = {
-      ...process.env,
+      ...scrubTestRunnerEnv(),
       ALPHACLAW_ROOT_DIR: rootDir,
       SETUP_PASSWORD: kSetupPassword,
       PORT: String(port),
       ALPHACLAW_SETUP_URL: baseUrl,
       PATH: `${repoBinDir()}${path.delimiter}${process.env.PATH || ""}`,
     };
-    delete serverEnv.NODE_OPTIONS;
     serverChild = spawn(
       process.execPath,
       [path.resolve(__dirname, "../../bin/alphaclaw.js"), "start"],

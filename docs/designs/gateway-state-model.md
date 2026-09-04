@@ -308,8 +308,9 @@ Step labels are human ("Checking plugins", "Stopping gateway", "Starting gateway
 > differences from a `gateway run` child: the graceful stop path
 > (`stopGatewayChildAndWait`) SIGTERMs the launcher and skips its SIGKILL
 > escalation (its own backstop re-SIGTERMs at 1s, SIGKILLs the gateway at 2s,
-> exits 1 at 3s; the shutdown last-ditch `killGatewayNow` reap is not yet
-> supervisor-aware — TODOS.md), and an EXPECTED exit with code 1 is booked as a
+> exits 1 at 3s; the shutdown last-ditch `killGatewayNow` reap goes through
+> `killManagedGatewayChildNow`, which returns false for an adopted launcher for
+> the same reason), and an EXPECTED exit with code 1 is booked as a
 > managed stop.
 > An expected late exit of a pid that is no longer `state.gatewayPid` is recorded
 > `stalePredecessor: true` and never rewrites the live lifecycle. The right column

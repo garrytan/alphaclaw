@@ -81,7 +81,9 @@ import { showToast } from "../../lib/public/js/components/toast.js";
 import {
   kOverseerReviewCopy,
   useWatchdogOverseer,
+  useWatchdogTab,
 } from "../../lib/public/js/components/watchdog-tab/use-watchdog-tab.js";
+import { useWatchdogIncidents } from "../../lib/public/js/components/watchdog-tab/incidents/use-incidents.js";
 
 const harness = preactHooks.__harness;
 const poll = pollingModule.__poll;
@@ -441,5 +443,92 @@ describe("frontend/watchdog-tab useWatchdogOverseer (lifted review state)", () =
     state = renderHook();
     expect(state.situation).toBe(null);
     expect(state.situationError).toBe(poll.error);
+  });
+});
+
+// Regression pin: the overseer slice moved out of the card and into the tab
+// hook on this branch. WatchdogTab tolerates a missing slice
+// (`state.overseer || {}`), so a dropped wire in useWatchdogTab would not
+// throw — the card would just sit on "Loading overseer status..." forever.
+// Nothing else calls useWatchdogTab directly (the tab test stubs it).
+describe("frontend/watchdog-tab useWatchdogTab wires the overseer slice to the incidents hook", () => {
+  const kReviewed = (id, at) => ({
+    id,
+    status: "resolved",
+    overseer: { v: 1, current: { state: "done", verdict: "resolved", at } },
+  });
+  let refreshEvents;
+
+  const renderTab = (props = {}) => {
+    harness.beginRender();
+    return useWatchdogTab(props);
+  };
+
+  beforeEach(() => {
+    harness.reset();
+    poll.data = null;
+    poll.error = null;
+    poll.refresh.mockClear();
+    showToast.mockClear();
+    api.requestWatchdogOverseerReview.mockReset();
+    api.fetchWatchdogOverseer.mockResolvedValue({
+      ok: true,
+      enabled: true,
+      availability: { available: true, reason: null, message: "ok" },
+    });
+    refreshEvents = vi.fn();
+    useWatchdogIncidents.mockReturnValue({
+      incidents: [kReviewed(5, kNow - 60_000)],
+      refreshEvents,
+    });
+  });
+
+  afterEach(() => {
+    useWatchdogIncidents.mockImplementation(() => ({}));
+  });
+
+  it("returns the overseer slice, and both review paths refresh through the incidents hook's own refreshEvents", async () => {
+    const state = renderTab({ watchdogStatus: { health: "degraded" } });
+    expect(state.overseer).toBeTruthy();
+    expect(state.overseer).toMatchObject({
+      enabled: false,
+      settingsLoaded: false,
+      saving: false,
+      reviewInFlight: null,
+      ephemeral: null,
+      reviewStatus: null,
+      incidentReviewError: null,
+      primaryKind: "auto",
+    });
+    for (const fn of ["onToggle", "onReviewSituation", "onReviewIncident", "onSelectPrimaryKind"]) {
+      expect(typeof state.overseer[fn], fn).toBe("function");
+    }
+
+    api.requestWatchdogOverseerReview.mockResolvedValue(okReview());
+    await state.overseer.onReviewSituation();
+    expect(api.requestWatchdogOverseerReview).toHaveBeenCalledTimes(1);
+    expect(refreshEvents).toHaveBeenCalledTimes(1);
+    expect(poll.refresh).toHaveBeenCalledWith({ force: true });
+
+    api.requestWatchdogOverseerReview.mockResolvedValue({
+      ok: true,
+      result: { ran: true, mode: "incident", incidentId: 5, record: record(), persisted: true },
+    });
+    await renderTab().overseer.onReviewIncident(5);
+    expect(api.requestWatchdogOverseerReview).toHaveBeenLastCalledWith({ incidentId: 5 });
+    expect(refreshEvents).toHaveBeenCalledTimes(2);
+  });
+
+  it("feeds the incidents hook's list into the slice: a newer incident review drops a pinned primary kind", () => {
+    poll.data = { ok: true, current: null, lastVerdict: record({ at: kNow - 120_000 }) };
+    renderTab().overseer.onSelectPrimaryKind("situation");
+    expect(renderTab().overseer.primaryKind).toBe("situation");
+    // Newest record now lives on an incident row — only visible to the slice
+    // if useWatchdogTab threads incidents.incidents through.
+    useWatchdogIncidents.mockReturnValue({
+      incidents: [kReviewed(6, kNow), kReviewed(5, kNow - 60_000)],
+      refreshEvents,
+    });
+    expect(renderTab().overseer.primaryKind).toBe("auto");
   });
 });

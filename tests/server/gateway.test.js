@@ -9,6 +9,7 @@ process.env.GATEWAY_RESTART_READY_TIMEOUT = "120";
 const childProcess = require("child_process");
 const fs = require("fs");
 const net = require("net");
+const os = require("os");
 const path = require("path");
 const {
   ALPHACLAW_DIR,
@@ -43,7 +44,34 @@ const originalReaddirSync = fs.readdirSync;
 const originalReadFileSync = fs.readFileSync;
 const originalRmSync = fs.rmSync;
 const originalWriteFileSync = fs.writeFileSync;
+const originalFstatSync = fs.fstatSync;
 const originalCreateConnection = net.createConnection;
+const originalPrelaunchHookEnv = process.env.ALPHACLAW_GATEWAY_PRELAUNCH_HOOK;
+// Namespace-required by gateway.js so the live-process scan can be pinned.
+const lockContention = require("../../lib/server/openclaw-lock-contention");
+const autotune = require("../../lib/server/autotune");
+// The capabilities factory lazy-requires this on first probe; warm the module
+// cache so a test's fs.readFileSync mock never serves it as module source.
+require("../../lib/server/doctor/classify-doctor-cli");
+
+// `openclaw gateway stop --help` contract pins (tarball-verified): --force
+// ("Allow stop from a non-interactive shell") exists on 2026.8.2 and
+// 2026.9.1-beta.1 and is ABSENT on the 2026.7.1-2 pin.
+const kStopHelpWithForce =
+  "Usage: openclaw gateway stop [options]\n\nOptions:\n  --force     Allow stop from a non-interactive shell\n  -h, --help  display help for command\n";
+const kStopHelpWithoutForce =
+  "Usage: openclaw gateway stop [options]\n\nOptions:\n  -h, --help  display help for command\n";
+// The CLI's NON_INTERACTIVE guard text (exit 1) when --force is missing.
+const kStopRefusal =
+  "This stops the operator's running gateway service. Use an isolated dev gateway (openclaw gateway run --dev, or --profile <name> with a free port) for testing, or re-run with --force\n";
+const isStopHelpProbe = (args) =>
+  Array.isArray(args) && args[0] === "gateway" && args.includes("--help");
+const refusedStopError = () =>
+  Object.assign(new Error("Command failed: openclaw gateway stop"), {
+    code: 1,
+    stdout: "",
+    stderr: kStopRefusal,
+  });
 
 const createSocket = (isRunning) => {
   const running =
@@ -77,6 +105,20 @@ const createChild = () => ({
 });
 
 describe("server/gateway restart behavior", () => {
+  beforeEach(() => {
+    // Hermetic by default: the incumbent verdict scans the REAL /proc for
+    // openclaw processes; a developer's own gateway must never leak into a
+    // drill's pid evidence. Tests that need pids override this spy.
+    vi.spyOn(lockContention, "listLiveOpenclawProcesses").mockReturnValue([]);
+    // Hermetic by default (C13): a managed launch fires the `gateway stop
+    // --help` capability probe through execFile; gateway.js binds execFile at
+    // require time, so a fresh require in a test that never installed its own
+    // mock would run the REAL pinned openclaw CLI, unawaited, outliving the
+    // test. Tests that need a specific probe answer install their own mock
+    // before their require (afterEach restores the real one).
+    childProcess.execFile = execFileOk("");
+  });
+
   afterEach(() => {
     childProcess.spawn = originalSpawn;
     childProcess.execSync = originalExecSync;
@@ -88,7 +130,13 @@ describe("server/gateway restart behavior", () => {
     fs.readFileSync = originalReadFileSync;
     fs.rmSync = originalRmSync;
     fs.writeFileSync = originalWriteFileSync;
+    fs.fstatSync = originalFstatSync;
     net.createConnection = originalCreateConnection;
+    if (originalPrelaunchHookEnv === undefined) {
+      delete process.env.ALPHACLAW_GATEWAY_PRELAUNCH_HOOK;
+    } else {
+      process.env.ALPHACLAW_GATEWAY_PRELAUNCH_HOOK = originalPrelaunchHookEnv;
+    }
     delete require.cache[modulePath];
   });
 
@@ -2244,9 +2292,12 @@ describe("server/gateway restart behavior", () => {
         },
         (cb) => cb(new Error("plain failure"), "", ""),
       ];
-      childProcess.execFile = vi.fn((file, args, opts, cb) =>
-        behaviors.shift()(cb),
-      );
+      childProcess.execFile = vi.fn((file, args, opts, cb) => {
+        // The one-time --force capability probe answers on its own; the
+        // scripted behaviors are the actual stop commands.
+        if (isStopHelpProbe(args)) return cb(null, kStopHelpWithoutForce, "");
+        return behaviors.shift()(cb);
+      });
       delete require.cache[modulePath];
       const gateway = require(modulePath);
       const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
@@ -2295,23 +2346,175 @@ describe("server/gateway restart behavior", () => {
       exitSpy.mockRestore();
     });
 
-    it("stopGatewayForShutdown reaps the child and best-effort stops external gateways", async () => {
+    it("stopGatewayForShutdown reaps the child and best-effort stops external gateways through the shared stop runner", async () => {
       // The lifecycle orchestrator awaits this during graceful shutdown
-      // (instead of the plain SIGTERM/SIGINT handlers).
-      childProcess.exec = vi.fn((cmd, opts, cb) => {
-        cb(null, "", "");
-        return {};
+      // (instead of the plain SIGTERM/SIGINT handlers). The former raw
+      // `exec("openclaw gateway stop")` is unified onto runGatewayShortCmd:
+      // argv form, the 5s shutdown budget, and NO abort signal (the
+      // module-level abort has already fired by then).
+      childProcess.exec = vi.fn();
+      childProcess.execFile = vi.fn((file, args, opts, cb) => {
+        if (isStopHelpProbe(args)) return cb(null, kStopHelpWithForce, "");
+        return cb(null, "", "");
       });
       delete require.cache[modulePath];
       const gateway = require(modulePath);
+      // Warm the probe the way startGateway does, so the shutdown stop can
+      // consult the cached answer after the abort.
+      await gateway.runGatewayCmd("stop");
+      childProcess.execFile.mockClear();
 
       await gateway.stopGatewayForShutdown();
 
-      expect(childProcess.exec).toHaveBeenCalledWith(
-        "openclaw gateway stop",
-        expect.objectContaining({ encoding: "utf8", timeout: 5000 }),
-        expect.any(Function),
-      );
+      expect(childProcess.exec).not.toHaveBeenCalled();
+      expect(childProcess.execFile).toHaveBeenCalledTimes(1);
+      const [file, args, opts] = childProcess.execFile.mock.calls[0];
+      expect(file).toBe("openclaw");
+      expect(args).toEqual(["gateway", "stop", "--force"]);
+      // The stop keeps whatever the 5 s shutdown budget has left after the
+      // (cached, here instant) --force probe — never more, never below the floor.
+      expect(opts).toMatchObject({ encoding: "utf8" });
+      expect(opts.timeout).toBeGreaterThanOrEqual(1000);
+      expect(opts.timeout).toBeLessThanOrEqual(5000);
+      expect(opts.signal).toBeUndefined();
+    });
+
+    // Real execFile with an ALREADY-aborted AbortSignal never spawns: it
+    // rejects at once with AbortError (no `killed`, empty output). The mocks
+    // below reproduce that so a probe still riding the module abort signal
+    // reads "unknown" — exactly the pre-fix failure.
+    const execFileHonoringAbort = (impl) =>
+      vi.fn((file, args, opts, cb) => {
+        if (opts?.signal?.aborted) {
+          const error = Object.assign(new Error("The operation was aborted"), {
+            name: "AbortError",
+            code: "ABORT_ERR",
+          });
+          return cb(error, "", "");
+        }
+        return impl(file, args, opts, cb);
+      });
+
+    it("stopGatewayForShutdown with a COLD capability cache still probes `gateway stop --help` after the module abort fired (non-abortable, inside the 5s shutdown budget) and appends --force when advertised (P3 review fix)", async () => {
+      // The common cold-cache shape: startGateway skipped its boot warm-up
+      // because the gateway was already listening (an externally-supervised
+      // gateway — precisely what the shutdown CLI stop exists for).
+      childProcess.execFile = execFileHonoringAbort((file, args, opts, cb) => {
+        if (isStopHelpProbe(args)) return cb(null, kStopHelpWithForce, "");
+        return cb(null, "", "");
+      });
+      delete require.cache[modulePath];
+      const gateway = require(modulePath);
+      vi.spyOn(console, "log").mockImplementation(() => {});
+
+      await gateway.stopGatewayForShutdown();
+
+      expect(childProcess.execFile).toHaveBeenCalledTimes(2);
+      const [probeCall, stopCall] = childProcess.execFile.mock.calls;
+      // The probe ran with NO abort signal and a SHORT slice of the shutdown
+      // stop's budget (not the probe's 10s default, and not the whole 5 s:
+      // probe + stop must both fit inside the 10 s process shutdown deadline)...
+      expect(probeCall[0]).toBe("openclaw");
+      expect(probeCall[1]).toEqual(["gateway", "stop", "--help"]);
+      expect(probeCall[2].signal).toBeUndefined();
+      expect(probeCall[2].timeout).toBe(gateway.kGatewayShutdownProbeTimeoutMs);
+      expect(gateway.kGatewayShutdownProbeTimeoutMs).toBe(1500);
+      // ...so the stop carried --force (a 2026.8.x+ CLI refuses without it)
+      // and kept the remainder of the budget.
+      expect(stopCall[1]).toEqual(["gateway", "stop", "--force"]);
+      expect(stopCall[2]).toMatchObject({ encoding: "utf8" });
+      expect(stopCall[2].timeout).toBeGreaterThanOrEqual(1000);
+      expect(stopCall[2].timeout).toBeLessThanOrEqual(5000);
+      expect(stopCall[2].signal).toBeUndefined();
+    });
+
+    it("stopGatewayForShutdown never appends --force on the pin (2026.7.1-2: no --force in the stop usage) — cold cache, abort fired", async () => {
+      childProcess.execFile = execFileHonoringAbort((file, args, opts, cb) => {
+        if (isStopHelpProbe(args)) return cb(null, kStopHelpWithoutForce, "");
+        return cb(null, "", "");
+      });
+      delete require.cache[modulePath];
+      const gateway = require(modulePath);
+      vi.spyOn(console, "log").mockImplementation(() => {});
+
+      await gateway.stopGatewayForShutdown();
+
+      expect(childProcess.execFile).toHaveBeenCalledTimes(2);
+      const [probeCall, stopCall] = childProcess.execFile.mock.calls;
+      expect(probeCall[1]).toEqual(["gateway", "stop", "--help"]);
+      expect(probeCall[2].signal).toBeUndefined();
+      expect(stopCall[1]).toEqual(["gateway", "stop"]);
+      expect(stopCall[2].signal).toBeUndefined();
+    });
+
+    it("the non-shutdown stop keeps its abortable probe (module abort signal, probe default timeout)", async () => {
+      childProcess.execFile = execFileHonoringAbort((file, args, opts, cb) => {
+        if (isStopHelpProbe(args)) return cb(null, kStopHelpWithForce, "");
+        return cb(null, "", "");
+      });
+      delete require.cache[modulePath];
+      const gateway = require(modulePath);
+      vi.spyOn(console, "log").mockImplementation(() => {});
+
+      await gateway.runGatewayCmd("stop");
+
+      const [probeCall, stopCall] = childProcess.execFile.mock.calls;
+      expect(probeCall[1]).toEqual(["gateway", "stop", "--help"]);
+      expect(probeCall[2].signal).toBeInstanceOf(AbortSignal);
+      expect(probeCall[2].signal.aborted).toBe(false);
+      expect(probeCall[2].timeout).toBe(10000);
+      expect(stopCall[1]).toEqual(["gateway", "stop", "--force"]);
+      expect(stopCall[2].signal).toBeInstanceOf(AbortSignal);
+    });
+
+    // The shutdown stop's timeout used to be a flat 5 s on a raw exec(); it is
+    // now the REMAINDER of that budget after the cold --force probe (capped at
+    // its 1.5 s slice). The pins above only see an instant probe — this one
+    // lets the probe run to its slice and checks the arithmetic the 10 s
+    // process shutdown deadline depends on.
+    it("stopGatewayForShutdown: a cold probe that runs to its 1.5s slice leaves the CLI stop the REMAINDER of the 5s budget (3.5s), and the inconclusive answer never adds --force", async () => {
+      vi.useFakeTimers();
+      try {
+        childProcess.execFile = execFileHonoringAbort((file, args, opts, cb) => {
+          if (isStopHelpProbe(args)) {
+            // `gateway stop --help` hangs (a lease-blocked CLI startup); the
+            // probe's own timeout kills it — execFile reports `killed`.
+            setTimeout(
+              () =>
+                cb(
+                  Object.assign(new Error("probe timed out"), { killed: true, code: null }),
+                  "",
+                  "",
+                ),
+              opts.timeout,
+            );
+            return;
+          }
+          return cb(null, "", "");
+        });
+        delete require.cache[modulePath];
+        const gateway = require(modulePath);
+        vi.spyOn(console, "log").mockImplementation(() => {});
+        vi.spyOn(console, "warn").mockImplementation(() => {});
+
+        const pending = gateway.stopGatewayForShutdown();
+        await vi.advanceTimersByTimeAsync(gateway.kGatewayShutdownProbeTimeoutMs);
+        await pending;
+
+        expect(childProcess.execFile).toHaveBeenCalledTimes(2);
+        const [probeCall, stopCall] = childProcess.execFile.mock.calls;
+        expect(probeCall[1]).toEqual(["gateway", "stop", "--help"]);
+        expect(probeCall[2].timeout).toBe(1500);
+        expect(probeCall[2].signal).toBeUndefined();
+        // A timed-out probe reads "unknown", never "supported": no blind --force.
+        expect(stopCall[1]).toEqual(["gateway", "stop"]);
+        // 5000 budget - 1500 spent on the probe (fake clock: exact) = 3500,
+        // comfortably above the 1 s floor — probe + stop stay inside 5 s.
+        expect(stopCall[2].timeout).toBe(3500);
+        expect(stopCall[2].signal).toBeUndefined();
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it("stopGatewayForBackup marks the exit expected, swallows CLI stop failures, and reports the stop verdict", async () => {
@@ -2326,6 +2529,7 @@ describe("server/gateway restart behavior", () => {
       childProcess.spawn = vi.fn(() => child);
       let stopCalls = 0;
       childProcess.execFile = vi.fn((file, args, opts, cb) => {
+        if (isStopHelpProbe(args)) return cb(null, kStopHelpWithoutForce, "");
         if (args?.[0] === "gateway" && args?.[1] === "stop") {
           stopCalls += 1;
           // The external best-effort stop fails — quiesce must proceed on
@@ -2344,12 +2548,24 @@ describe("server/gateway restart behavior", () => {
       gateway.setGatewayExitHandler(exitHandler);
 
       await gateway.launchGatewayProcess();
+      expect(gateway.getLastGatewayStopEvidence()).toBeNull();
       const verdict = await gateway.stopGatewayForBackup();
 
       // The port released → waitForGatewayStopped's verdict rides through.
       expect(verdict).toBe(true);
-      // The CLI stop ran once and its failure was swallowed (best-effort).
+      // The CLI stop ran once and its failure was swallowed (best-effort)...
       expect(stopCalls).toBe(1);
+      // ...but no longer silently: the quiesce evidence records the managed
+      // child as the stop method, the reaped child, the released port, and
+      // the CLI's (non-refusal) failure exit code.
+      expect(gateway.getLastGatewayStopEvidence()).toEqual({
+        at: expect.any(String),
+        method: "managed_child",
+        childExited: true,
+        portReleased: true,
+        cliRefused: false,
+        cliExitCode: 1,
+      });
 
       // The managed exit was marked expected BEFORE the kill: the watchdog
       // must not count the quiesce as a crash. The exit report finalizes on
@@ -2887,9 +3103,14 @@ describe("server/gateway restart behavior", () => {
         const gateway = require(modulePath);
         const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
 
-        const pending = gateway.restartGateway(vi.fn());
+        const onStep = vi.fn();
+        // The incumbent verdict REJECTS (P1 review fix): settle the handler
+        // up front so the fake-timer advance cannot leave it unhandled.
+        const pending = gateway
+          .restartGateway(vi.fn(), { onStep })
+          .then(() => null, (error) => error);
         await vi.advanceTimersByTimeAsync(16000);
-        const result = await pending;
+        const error = await pending;
 
         // The bounded stop-settle wait gave up loudly instead of declaring a
         // false instant success against the old process...
@@ -2902,8 +3123,25 @@ describe("server/gateway restart behavior", () => {
           ["gateway", "--force"],
           expect.objectContaining({ env: expect.any(Object) }),
         );
-        // Downtime measurement includes the full 15s stop-settle wait.
-        expect(result.downtimeMs).toBeGreaterThanOrEqual(15000);
+        // The stop CLI itself succeeded, so the stopping step stays "done"
+        // (the warning status is reserved for a refused/failed stop)...
+        expect(onStep).toHaveBeenCalledWith({ step: "stopping", status: "done" });
+        // ...but "ready" from a port that NEVER released is the incumbent
+        // answering, not a restarted gateway: this pin moved from a claimed
+        // success to an honest incumbent verdict (WI-5.2), and from a RETURNED
+        // { ok:false, incumbent:true } to a THROWN GatewayIncumbentRestartError
+        // (P1 review fix: every caller relies on "restartGateway throws when
+        // the gateway did not restart"). No downtimeMs rides on a failure.
+        expect(error).toBeInstanceOf(gateway.GatewayIncumbentRestartError);
+        expect(error).toBeInstanceOf(gateway.GatewayRestartError);
+        expect(error.incumbent).toBe(true);
+        expect(error.evidence).toEqual(
+          expect.objectContaining({
+            wasRunningBefore: true,
+            stopConfirmed: false,
+            cliRefused: false,
+          }),
+        );
       } finally {
         vi.useRealTimers();
       }
@@ -3017,6 +3255,1146 @@ describe("server/gateway restart behavior", () => {
       await gateway.startGateway();
 
       expect(childProcess.spawn).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("capability-gated `gateway stop --force` and stop honesty (WI-5.1)", () => {
+    // C13: the managed launch primes the probe (fire-and-forget) so a later
+    // stop — including the 5 s shutdown budget — consults the cache instead
+    // of spending its budget on `gateway stop --help`.
+    it("a managed launch warms the --force capability probe exactly once; the later shutdown stop consults the cache", async () => {
+      const child = createChild();
+      childProcess.spawn = vi.fn(() => child);
+      childProcess.execSync = vi.fn(() => "");
+      const calls = [];
+      childProcess.execFile = vi.fn((file, args, opts, cb) => {
+        calls.push(args);
+        if (isStopHelpProbe(args)) return cb(null, kStopHelpWithForce, "");
+        return cb(null, "", "");
+      });
+      fs.existsSync = vi.fn(() => true);
+      net.createConnection = vi.fn(() => createSocket(false));
+      delete require.cache[modulePath];
+      const gateway = require(modulePath);
+      vi.spyOn(console, "log").mockImplementation(() => {});
+      fs.readFileSync = vi.fn(() =>
+        JSON.stringify({
+          agents: { defaults: { model: { primary: "openai/gpt-5.1-codex" } } },
+        }),
+      );
+
+      await gateway.startGateway();
+      expect(childProcess.spawn).toHaveBeenCalledTimes(1);
+      // The warm-up is not awaited by the launch; let it settle.
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(calls).toEqual([["gateway", "stop", "--help"]]);
+
+      await gateway.stopGatewayForShutdown();
+      // No second probe: the cached answer drove the --force stop.
+      expect(calls.filter(isStopHelpProbe)).toHaveLength(1);
+      expect(calls.at(-1)).toEqual(["gateway", "stop", "--force"]);
+    });
+
+    it("appends --force to managed stops only when the installed CLI advertises it, probing once per version", async () => {
+      const calls = [];
+      childProcess.execFile = vi.fn((file, args, opts, cb) => {
+        calls.push(args);
+        if (isStopHelpProbe(args)) return cb(null, kStopHelpWithForce, "");
+        return cb(null, "", "");
+      });
+      delete require.cache[modulePath];
+      const gateway = require(modulePath);
+      vi.spyOn(console, "log").mockImplementation(() => {});
+
+      await gateway.runGatewayCmd("stop");
+      await gateway.runGatewayCmd("stop");
+
+      expect(calls.filter(isStopHelpProbe)).toEqual([
+        ["gateway", "stop", "--help"],
+      ]);
+      expect(calls.filter((args) => !isStopHelpProbe(args))).toEqual([
+        ["gateway", "stop", "--force"],
+        ["gateway", "stop", "--force"],
+      ]);
+    });
+
+    it("never passes --force on a CLI without it (the 2026.7.1-2 pin) and does not re-probe a determinate answer", async () => {
+      const calls = [];
+      childProcess.execFile = vi.fn((file, args, opts, cb) => {
+        calls.push(args);
+        if (isStopHelpProbe(args)) return cb(null, kStopHelpWithoutForce, "");
+        return cb(null, "", "");
+      });
+      delete require.cache[modulePath];
+      const gateway = require(modulePath);
+      vi.spyOn(console, "log").mockImplementation(() => {});
+
+      await gateway.runGatewayCmd("stop");
+      await gateway.runGatewayCmd("stop");
+
+      expect(calls.filter(isStopHelpProbe)).toHaveLength(1);
+      expect(calls.filter((args) => !isStopHelpProbe(args))).toEqual([
+        ["gateway", "stop"],
+        ["gateway", "stop"],
+      ]);
+    });
+
+    it("honors an injected shared capabilities instance instead of building its own probe", async () => {
+      childProcess.execFile = vi.fn((file, args, opts, cb) => cb(null, "", ""));
+      delete require.cache[modulePath];
+      const gateway = require(modulePath);
+      const get = vi.fn(async () => "supported");
+      gateway.setGatewayCapabilities({ get });
+      vi.spyOn(console, "log").mockImplementation(() => {});
+
+      await gateway.runGatewayCmd("stop");
+
+      expect(get).toHaveBeenCalledWith("gatewayStopForce");
+      expect(childProcess.execFile).toHaveBeenCalledTimes(1);
+      expect(childProcess.execFile).toHaveBeenCalledWith(
+        "openclaw",
+        ["gateway", "stop", "--force"],
+        expect.objectContaining({ signal: expect.any(AbortSignal) }),
+        expect.any(Function),
+      );
+    });
+
+    it("treats a throwing capability probe as unsupported (warns) and still runs the stop", async () => {
+      childProcess.execFile = vi.fn((file, args, opts, cb) => cb(null, "", ""));
+      delete require.cache[modulePath];
+      const gateway = require(modulePath);
+      gateway.setGatewayCapabilities({
+        get: vi.fn(async () => {
+          throw new Error("probe exploded");
+        }),
+      });
+      vi.spyOn(console, "log").mockImplementation(() => {});
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      await gateway.runGatewayCmd("stop");
+
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining("capability probe failed: probe exploded"),
+      );
+      expect(childProcess.execFile).toHaveBeenCalledWith(
+        "openclaw",
+        ["gateway", "stop"],
+        expect.anything(),
+        expect.any(Function),
+      );
+    });
+
+    it("classifies the CLI's non-interactive refusal as refused (not swallowed) and records it in the backup stop evidence", async () => {
+      childProcess.execFile = vi.fn((file, args, opts, cb) => {
+        if (isStopHelpProbe(args)) return cb(null, kStopHelpWithoutForce, "");
+        if (args?.[0] === "gateway" && args?.[1] === "stop") {
+          return cb(refusedStopError(), "", kStopRefusal);
+        }
+        return cb(null, "", "");
+      });
+      fs.existsSync = vi.fn(() => false);
+      net.createConnection = vi.fn(() => createSocket(false));
+      delete require.cache[modulePath];
+      const gateway = require(modulePath);
+      vi.spyOn(console, "log").mockImplementation(() => {});
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      // No managed child: the CLI was the only stop method, and it refused.
+      const verdict = await gateway.stopGatewayForBackup({ timeoutMs: 1 });
+
+      // Boolean contract intact — the port IS down, so the quiesce proceeds.
+      expect(verdict).toBe(true);
+      expect(gateway.getLastGatewayStopEvidence()).toEqual({
+        at: expect.any(String),
+        method: "none",
+        childExited: false,
+        portReleased: true,
+        cliRefused: true,
+        cliExitCode: 1,
+      });
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining("REFUSED by the OpenClaw CLI"),
+      );
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining("backup quiesce: the OpenClaw CLI refused"),
+      );
+    });
+
+    it("records method \"cli\" when no managed child existed and the CLI stop succeeded", async () => {
+      childProcess.execFile = vi.fn((file, args, opts, cb) => {
+        if (isStopHelpProbe(args)) return cb(null, kStopHelpWithForce, "");
+        return cb(null, "stopped\n", "");
+      });
+      fs.existsSync = vi.fn(() => false);
+      net.createConnection = vi.fn(() => createSocket(false));
+      delete require.cache[modulePath];
+      const gateway = require(modulePath);
+      vi.spyOn(console, "log").mockImplementation(() => {});
+
+      expect(await gateway.stopGatewayForBackup({ timeoutMs: 1 })).toBe(true);
+
+      expect(gateway.getLastGatewayStopEvidence()).toMatchObject({
+        method: "cli",
+        childExited: false,
+        portReleased: true,
+        cliRefused: false,
+        cliExitCode: 0,
+      });
+      expect(childProcess.execFile).toHaveBeenCalledWith(
+        "openclaw",
+        ["gateway", "stop", "--force"],
+        expect.anything(),
+        expect.any(Function),
+      );
+    });
+
+    it("stopGatewayForBackup reports false with portReleased:false evidence when the port never releases", async () => {
+      childProcess.execFile = vi.fn((file, args, opts, cb) => {
+        if (isStopHelpProbe(args)) return cb(null, kStopHelpWithoutForce, "");
+        return cb(null, "", "");
+      });
+      fs.existsSync = vi.fn(() => false);
+      net.createConnection = vi.fn(() => createSocket(true));
+      delete require.cache[modulePath];
+      const gateway = require(modulePath);
+      vi.spyOn(console, "log").mockImplementation(() => {});
+
+      expect(await gateway.stopGatewayForBackup({ timeoutMs: 1 })).toBe(false);
+      expect(gateway.getLastGatewayStopEvidence()).toMatchObject({
+        portReleased: false,
+        cliRefused: false,
+      });
+    });
+  });
+
+  describe("incumbent-aware cold restart (WI-5.2)", () => {
+    // C12: the pid snapshot used to take the human-evidence scan (12
+    // openclaw-ish entries, ascending pid) and filter for gateways AFTER the
+    // cap — on a busy host the newest pids (the swapped-in gateway) fell off
+    // and a real swap with no port-down sample was recorded incumbent.
+    it("the gateway pid snapshot filters inside the scan and is uncapped: 14 openclaw-ish processes with the new gateway at the highest pid still prove pid replacement", async () => {
+      vi.useFakeTimers();
+      try {
+        const doctors = Array.from({ length: 12 }, (_, i) => ({
+          pid: 100 + i,
+          argv: ["node", "/app/node_modules/openclaw/dist/entry.js", "doctor", "--json"],
+        }));
+        let oldGatewayAlive = true;
+        const procTable = () => [
+          ...doctors,
+          ...(oldGatewayAlive
+            ? [{ pid: 777, argv: ["node", "/app/node_modules/openclaw/dist/entry.js", "gateway", "run"] }]
+            : [{ pid: 5000, argv: ["openclaw", "gateway", "--force"] }]),
+        ];
+        // Honors match/limit exactly like the real /proc scan (see the
+        // openclaw-lock-contention unit pins): pid order, cap AFTER match.
+        lockContention.listLiveOpenclawProcesses.mockImplementation(
+          ({ match = null, limit = 12 } = {}) => {
+            const found = [];
+            for (const proc of procTable()) {
+              if (typeof match === "function" && !match(proc.argv)) continue;
+              found.push({ pid: proc.pid, cmdline: proc.argv.join(" ") });
+              if (found.length >= limit) break;
+            }
+            return found;
+          },
+        );
+        const stampSpy = vi.spyOn(autotune, "stampGatewayEnvApplied").mockReturnValue(null);
+        const supervisor = { ...createChild(), pid: 5000 };
+        childProcess.spawn = vi.fn(() => supervisor);
+        childProcess.execFile = vi.fn((file, args, opts, cb) => {
+          if (isStopHelpProbe(args)) return cb(null, kStopHelpWithForce, "");
+          if (args?.[0] === "gateway" && args?.[1] === "stop") {
+            // The swap happens between two port polls: no down sample ever.
+            oldGatewayAlive = false;
+            return cb(null, "", "");
+          }
+          return cb(null, "", "");
+        });
+        fs.existsSync = vi.fn(() => false);
+        net.createConnection = vi.fn(() => createSocket(true));
+        delete require.cache[modulePath];
+        const gateway = require(modulePath);
+        vi.spyOn(console, "log").mockImplementation(() => {});
+        vi.spyOn(console, "warn").mockImplementation(() => {});
+
+        const pending = gateway.restartGateway(vi.fn()).then(
+          (value) => ({ value }),
+          (error) => ({ error }),
+        );
+        // Port-release wait (~15 s) + issue #56's 1 s supervisor-adoption quiet
+        // period must both elapse inside the advanced window, else the adoption
+        // sleep is scheduled after the advance and the promise never settles.
+        await vi.advanceTimersByTimeAsync(30000);
+        const settled = await pending;
+
+        expect(settled.error).toBeUndefined();
+        expect(settled.value).toMatchObject({ ok: true });
+        expect(stampSpy).toHaveBeenCalledTimes(1);
+        // The snapshot asked the scan for gateways only, uncapped.
+        expect(lockContention.listLiveOpenclawProcesses).toHaveBeenCalledWith(
+          expect.objectContaining({ match: expect.any(Function), limit: Infinity }),
+        );
+        const { match } = lockContention.listLiveOpenclawProcesses.mock.calls.find(
+          ([opts]) => typeof opts?.match === "function",
+        )[0];
+        expect(match(["openclaw", "gateway", "--force"])).toBe(true);
+        expect(match(["node", "/app/node_modules/openclaw/dist/entry.js", "gateway", "run"])).toBe(true);
+        expect(match(["/opt/x/openclaw-gateway"])).toBe(true);
+        expect(match(["openclaw", "doctor", "--json"])).toBe(false);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    const evidence = ({ stopConfirmed, wasRunningBefore, preStopPids = [] }) => ({
+      stopConfirmed,
+      wasRunningBefore,
+      preStopPids,
+      cliRefused: false,
+      cliExitCode: 0,
+      cliForced: false,
+      managedChildPid: null,
+    });
+
+    // stopConfirmed × wasRunningBefore × pid evidence. Success requires
+    // (stopConfirmed ∨ ¬wasRunningBefore) ∧ (new pid ∨ every pre-stop pid gone).
+    it.each([
+      ["port released, old pid gone", true, true, [10], [], true],
+      ["port released, old pid gone, new pid up", true, true, [10], [20], true],
+      ["port released, old pid survives, new pid up", true, true, [10], [10, 20], true],
+      ["port released, old pid survives, NO new pid", true, true, [10], [10], false],
+      ["nothing was running, nothing survives", false, false, [], [], true],
+      ["nothing was running, new pid up", false, false, [], [20], true],
+      ["nothing was running but a pre-stop pid survives with no new pid", false, false, [10], [10], false],
+      ["port never released, new pid up (incumbent still answers)", false, true, [10], [10, 20], false],
+      // An external supervisor swapped the process between two 500 ms port
+      // polls: no "port down" sample, but every pre-stop pid is gone and a
+      // NEW pid answers — the old gateway is provably gone.
+      ["port never observed down, old pid gone, NEW pid up (fast external swap)", false, true, [10], [20], true],
+      ["port never released, old pid gone (no pid evidence off-Linux)", false, true, [], [], false],
+      ["port never released, old pid survives, no new pid", false, true, [10], [10], false],
+    ])(
+      "matrix: %s → ok=%s",
+      (label, stopConfirmed, wasRunningBefore, preStopPids, postReadyPids, expectedOk) => {
+        const gateway = require(modulePath);
+        const verdict = gateway.assessRestartIncumbent({
+          stopEvidence: evidence({ stopConfirmed, wasRunningBefore, preStopPids }),
+          postReadyPids,
+          supervisorPid: 99,
+        });
+        expect(verdict.ok).toBe(expectedOk);
+        expect(verdict.evidence).toMatchObject({
+          stopConfirmed,
+          wasRunningBefore,
+          preStopPids,
+          postReadyPids,
+          supervisorPid: 99,
+          newPids: postReadyPids.filter((pid) => !preStopPids.includes(pid)),
+          survivingPids: postReadyPids.filter((pid) => preStopPids.includes(pid)),
+        });
+        if (expectedOk) expect(verdict.detail).toBeNull();
+        else expect(verdict.detail).toContain("the previous gateway is still running");
+      },
+    );
+
+    it("names both failing conditions (and the CLI refusal) in the incumbent detail", () => {
+      const gateway = require(modulePath);
+      const verdict = gateway.assessRestartIncumbent({
+        stopEvidence: {
+          ...evidence({ stopConfirmed: false, wasRunningBefore: true, preStopPids: [10] }),
+          cliRefused: true,
+          cliExitCode: 1,
+        },
+        postReadyPids: [10],
+      });
+      expect(verdict.ok).toBe(false);
+      expect(verdict.detail).toContain("port never released");
+      expect(verdict.detail).toContain("refused the non-interactive stop");
+      expect(verdict.detail).toContain("1 pre-restart gateway process(es) still alive (pid 10)");
+    });
+
+    it("streams stopping: warning and REJECTS with GatewayIncumbentRestartError (no autotune stamp, no launch notice) when the stop is refused and the incumbent keeps the port", async () => {
+      vi.useFakeTimers();
+      try {
+        lockContention.listLiveOpenclawProcesses.mockReturnValue([
+          { pid: 777, cmdline: "node /app/node_modules/openclaw/dist/entry.js gateway run" },
+          // Not a gateway: a one-shot CLI invocation must not count as evidence.
+          { pid: 778, cmdline: "openclaw doctor --json" },
+        ]);
+        const stampSpy = vi
+          .spyOn(autotune, "stampGatewayEnvApplied")
+          .mockReturnValue(null);
+        const supervisor = createChild();
+        childProcess.spawn = vi.fn(() => supervisor);
+        childProcess.execFile = vi.fn((file, args, opts, cb) => {
+          if (isStopHelpProbe(args)) return cb(null, kStopHelpWithoutForce, "");
+          if (args?.[0] === "gateway" && args?.[1] === "stop") {
+            return cb(refusedStopError(), "", kStopRefusal);
+          }
+          return cb(null, "", "");
+        });
+        fs.existsSync = vi.fn(() => false);
+        // The incumbent answers the port before, during, and after the stop.
+        net.createConnection = vi.fn(() => createSocket(true));
+        delete require.cache[modulePath];
+        const gateway = require(modulePath);
+        vi.spyOn(console, "log").mockImplementation(() => {});
+        const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+        const launchHandler = vi.fn();
+        gateway.setGatewayLaunchHandler(launchHandler);
+        const onStep = vi.fn();
+
+        // Rejection handler attached up front (see the never-releases pin).
+        const pending = gateway
+          .restartGateway(vi.fn(), { onStep })
+          .then(() => null, (error) => error);
+        await vi.advanceTimersByTimeAsync(16000);
+        const error = await pending;
+
+        // THROWN, not returned: the class every restartGateway() caller can
+        // catch (a GatewayRestartError subclass), carrying the verdict.
+        expect(error).toBeInstanceOf(gateway.GatewayIncumbentRestartError);
+        expect(error).toBeInstanceOf(gateway.GatewayRestartError);
+        expect(error).toMatchObject({
+          name: "GatewayIncumbentRestartError",
+          code: "restart_incumbent",
+          reason: "incumbent_gateway_still_running",
+          incumbent: true,
+          detail: expect.stringContaining("the previous gateway is still running"),
+          evidence: expect.objectContaining({
+            wasRunningBefore: true,
+            stopConfirmed: false,
+            cliRefused: true,
+            cliExitCode: 1,
+            cliForced: false,
+            preStopPids: [777],
+            postReadyPids: [777],
+            newPids: [],
+            survivingPids: [777],
+            supervisorPid: 1234,
+            stderrTail: expect.any(Array),
+            stdoutTail: expect.any(Array),
+          }),
+        });
+        expect(error.message).toContain("Gateway restart did not take effect");
+        expect(error.message).toContain("refused the non-interactive stop");
+        const stopping = onStep.mock.calls
+          .map(([step]) => step)
+          .filter((step) => step.step === "stopping");
+        expect(stopping).toEqual([
+          { step: "stopping", status: "running" },
+          {
+            step: "stopping",
+            status: "warning",
+            detail: expect.stringContaining("was refused by the CLI"),
+          },
+        ]);
+        expect(onStep).toHaveBeenCalledWith(
+          expect.objectContaining({ step: "waiting_ready", status: "warning" }),
+        );
+        expect(warnSpy).toHaveBeenCalledWith(
+          expect.stringContaining("did NOT take effect"),
+        );
+        // The --force supervisor still ran (it may still win the race)...
+        expect(childProcess.spawn).toHaveBeenCalledWith(
+          "openclaw",
+          ["gateway", "--force"],
+          expect.anything(),
+        );
+        // ...but nothing claimed success: no autotune stamp, no launch notice.
+        expect(stampSpy).not.toHaveBeenCalled();
+        expect(launchHandler).not.toHaveBeenCalled();
+        gateway.setGatewayLaunchHandler(null);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("streams stopping: warning (not done) when the stop FAILED (non-refusal exit) and the port never released", async () => {
+      vi.useFakeTimers();
+      try {
+        const supervisor = createChild();
+        childProcess.spawn = vi.fn(() => supervisor);
+        childProcess.execFile = vi.fn((file, args, opts, cb) => {
+          if (isStopHelpProbe(args)) return cb(null, kStopHelpWithForce, "");
+          if (args?.[0] === "gateway" && args?.[1] === "stop") {
+            return cb(Object.assign(new Error("boom"), { code: 3 }), "", "boom");
+          }
+          return cb(null, "", "");
+        });
+        fs.existsSync = vi.fn(() => false);
+        net.createConnection = vi.fn(() => createSocket(true));
+        delete require.cache[modulePath];
+        const gateway = require(modulePath);
+        vi.spyOn(console, "log").mockImplementation(() => {});
+        vi.spyOn(console, "warn").mockImplementation(() => {});
+        const onStep = vi.fn();
+
+        const pending = gateway
+          .restartGateway(vi.fn(), { onStep })
+          .then(() => null, (error) => error);
+        await vi.advanceTimersByTimeAsync(16000);
+        const error = await pending;
+
+        expect(onStep).toHaveBeenCalledWith({
+          step: "stopping",
+          status: "warning",
+          detail: expect.stringContaining("failed (exit 3)"),
+        });
+        expect(onStep).not.toHaveBeenCalledWith({ step: "stopping", status: "done" });
+        expect(error).toBeInstanceOf(gateway.GatewayIncumbentRestartError);
+        expect(error.incumbent).toBe(true);
+        expect(error.evidence).toEqual(
+          expect.objectContaining({ cliRefused: false, cliExitCode: 3, cliForced: true }),
+        );
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("succeeds (ok:true, autotune stamped) when the port released and the pre-stop gateway pid is gone", async () => {
+      const managedChild = createChild();
+      const supervisor = { ...createChild(), pid: 2468 };
+      let portOpen = true;
+      let oldGatewayAlive = true;
+      lockContention.listLiveOpenclawProcesses.mockImplementation(() =>
+        oldGatewayAlive
+          ? [{ pid: 1234, cmdline: "openclaw gateway run" }]
+          : [{ pid: 2468, cmdline: "openclaw gateway --force" }],
+      );
+      const stampSpy = vi
+        .spyOn(autotune, "stampGatewayEnvApplied")
+        .mockReturnValue(null);
+      childProcess.spawn = vi.fn((file, args) => {
+        if (args?.[1] === "--force") {
+          queueMicrotask(() => {
+            portOpen = true;
+          });
+          return supervisor;
+        }
+        return managedChild;
+      });
+      childProcess.execFile = vi.fn((file, args, opts, cb) => {
+        if (isStopHelpProbe(args)) return cb(null, kStopHelpWithForce, "");
+        if (args?.[0] === "gateway" && args?.[1] === "stop") {
+          portOpen = false;
+          oldGatewayAlive = false;
+          return cb(null, "", "");
+        }
+        return cb(null, "", "");
+      });
+      fs.existsSync = vi.fn(() => false);
+      net.createConnection = vi.fn(() => createSocket(() => portOpen));
+      delete require.cache[modulePath];
+      const gateway = require(modulePath);
+      vi.spyOn(console, "log").mockImplementation(() => {});
+
+      await gateway.launchGatewayProcess();
+      // stampGatewayEnvApplied is also called at the managed spawn above.
+      stampSpy.mockClear();
+      const result = await gateway.restartGateway(vi.fn());
+
+      expect(result).toMatchObject({
+        ok: true,
+        durationMs: expect.any(Number),
+        downtimeMs: expect.any(Number),
+      });
+      expect(result.incumbent).toBeUndefined();
+      expect(stampSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it("does not judge a direct `gateway --force` (no stop, no evidence) against live pids", async () => {
+      lockContention.listLiveOpenclawProcesses.mockReturnValue([
+        { pid: 555, cmdline: "openclaw gateway run" },
+      ]);
+      const supervisor = createChild();
+      childProcess.spawn = vi.fn(() => supervisor);
+      childProcess.execFile = execFileOk("");
+      fs.existsSync = vi.fn(() => false);
+      net.createConnection = vi.fn(() => createSocket(true));
+      delete require.cache[modulePath];
+      const gateway = require(modulePath);
+      vi.spyOn(console, "log").mockImplementation(() => {});
+
+      await expect(gateway.runGatewayCmd("--force")).resolves.toBeUndefined();
+    });
+  });
+
+  describe("prelaunch hook — ALPHACLAW_GATEWAY_PRELAUNCH_HOOK (WI-5.3, absorbs #4)", () => {
+    const kHookPath = "/opt/alphaclaw/hooks/pre-gateway-launch";
+    const rootStat = (overrides = {}) => ({
+      isFile: () => true,
+      uid: 0,
+      mode: 0o100755,
+      ino: 7,
+      dev: 9,
+      ...overrides,
+    });
+    const hookDeps = (overrides = {}) => ({
+      hookPath: kHookPath,
+      realpathSync: vi.fn((target) => target),
+      lstatSync: vi.fn(() => ({ isSymbolicLink: () => false })),
+      openSync: vi.fn(() => 42),
+      fstatSync: vi.fn(() => rootStat()),
+      statSync: vi.fn(() => rootStat()),
+      closeSync: vi.fn(),
+      execFile: vi.fn((file, args, opts, cb) => cb(null, "hook ok\n", "")),
+      platform: "linux",
+      pid: 4321,
+      ...overrides,
+    });
+    const hookError = (deps) =>
+      require(modulePath)
+        .runGatewayPrelaunchHook(deps)
+        .then(
+          () => {
+            throw new Error("expected the hook to be refused");
+          },
+          (error) => error,
+        );
+
+    it("is skipped (returns false, one debug line, no handler event) when the env key is unset", async () => {
+      delete process.env.ALPHACLAW_GATEWAY_PRELAUNCH_HOOK;
+      const gateway = require(modulePath);
+      const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+      const handler = vi.fn();
+      gateway.setGatewayPrelaunchHookHandler(handler);
+
+      expect(await gateway.runGatewayPrelaunchHook()).toBe(false);
+      expect(await gateway.runGatewayPrelaunchHook()).toBe(false);
+
+      expect(
+        logSpy.mock.calls.filter(([line]) =>
+          String(line).includes("ALPHACLAW_GATEWAY_PRELAUNCH_HOOK unset"),
+        ),
+      ).toHaveLength(1);
+      expect(handler).not.toHaveBeenCalled();
+      expect(gateway.getLastGatewayPrelaunchHookOutcome()).toBeNull();
+      gateway.setGatewayPrelaunchHookHandler(null);
+    });
+
+    it("kills the hook's whole process group and fails the launch closed when the hook outlives its budget (hard deadline)", async () => {
+      const gateway = require(modulePath);
+      vi.spyOn(console, "log").mockImplementation(() => {});
+      const killProcess = vi.fn();
+      const deps = hookDeps();
+      // A hostile hook: it traps the signal, or leaves a descendant holding its
+      // stdout — execFile's own timeout never yields a callback.
+      deps.execFile = vi.fn(() => ({ pid: 777 }));
+
+      const error = await gateway
+        .runGatewayPrelaunchHook({ ...deps, timeoutMs: 20, graceMs: 30, killProcess })
+        .then(
+          () => {
+            throw new Error("expected the hook to fail");
+          },
+          (thrown) => thrown,
+        );
+
+      expect(error).toBeInstanceOf(gateway.GatewayPrelaunchHookError);
+      expect(error.code).toBe("timeout");
+      expect(error.message).toMatch(/timed out/);
+      // The group (negative pid) first, then the child itself as a backstop.
+      expect(killProcess).toHaveBeenCalledWith(-777, "SIGKILL");
+      expect(killProcess).toHaveBeenCalledWith(777, "SIGKILL");
+      expect(deps.execFile.mock.calls[0][2]).toEqual(
+        expect.objectContaining({ timeout: 20, killSignal: "SIGKILL", detached: true }),
+      );
+      expect(deps.closeSync).toHaveBeenCalledWith(42);
+    });
+
+    it("redacts secret-shaped values in the hook's stdout/stderr before they reach the platform log", async () => {
+      // Hooks read state/config and often run with shell tracing (`set -x`),
+      // so a provider key or bearer token echoes straight into the log line.
+      // redactSecretShapes is shape-based and substitutes `***`.
+      const rawKey = "sk-abcdefghijklmnopqrstuvwxyz123456";
+      const rawBearer = "Bearer eyJabcdefghijklmnop.qrstuvwxyz0123456789.ABCDEFGHIJKLMNOP";
+      const rawSlack = "xoxb-SECRET-abcdefghijklmnop";
+      const gateway = require(modulePath);
+      const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+      const deps = hookDeps({
+        execFile: vi.fn((file, args, opts, cb) =>
+          cb(
+            null,
+            `+ curl -H "Authorization: ${rawBearer}"\nOPENAI_API_KEY=${rawKey}\n`,
+            `warning: token ${rawSlack} still in env\n`,
+          ),
+        ),
+      });
+
+      expect(await gateway.runGatewayPrelaunchHook(deps)).toBe(true);
+
+      const lines = logSpy.mock.calls.map(([text]) => String(text));
+      const stdoutLine = lines.find((text) => text.includes("prelaunch hook stdout:"));
+      const stderrLine = lines.find((text) => text.includes("prelaunch hook stderr:"));
+      expect(stdoutLine).toContain("***");
+      expect(stdoutLine).not.toContain(rawKey);
+      expect(stdoutLine).not.toContain(rawBearer);
+      expect(stdoutLine).toContain("OPENAI_API_KEY=***");
+      expect(stderrLine).toContain("***");
+      expect(stderrLine).not.toContain(rawSlack);
+      expect(stderrLine).toContain("warning: token *** still in env");
+    });
+
+    it("runs an executable persistent prelaunch hook with the gateway environment", async () => {
+      // Ported from #4 — the env is now the MINIMAL projection, never
+      // gatewayEnv(): a secret in the process env must not reach the hook.
+      const previousToken = process.env.OPENCLAW_GATEWAY_TOKEN;
+      process.env.OPENCLAW_GATEWAY_TOKEN = "hook-must-not-see-this";
+      try {
+        const gateway = require(modulePath);
+        vi.spyOn(console, "log").mockImplementation(() => {});
+        const deps = hookDeps();
+
+        expect(await gateway.runGatewayPrelaunchHook(deps)).toBe(true);
+
+        expect(deps.openSync).toHaveBeenCalledWith(
+          kHookPath,
+          fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW,
+        );
+        expect(deps.fstatSync).toHaveBeenCalledWith(42);
+        // Exec by fd (the inspected inode), through the PARENT's /proc entry.
+        expect(deps.execFile).toHaveBeenCalledWith(
+          "/proc/4321/fd/42",
+          [],
+          expect.objectContaining({ timeout: 120_000, encoding: "utf8" }),
+          expect.any(Function),
+        );
+        const env = deps.execFile.mock.calls[0][2].env;
+        expect(env).toEqual({
+          // A fixed system PATH (sudo secure_path style), never the process's
+          // own: a writable dir on the inherited PATH would let a planted
+          // interpreter run under `#!/usr/bin/env …` on every launch.
+          PATH: gateway.kGatewayPrelaunchHookPath,
+          HOME: ALPHACLAW_DIR,
+          OPENCLAW_STATE_DIR: OPENCLAW_DIR,
+          OPENCLAW_CONFIG_PATH: `${OPENCLAW_DIR}/openclaw.json`,
+          ALPHACLAW_ROOT_DIR: ALPHACLAW_DIR,
+        });
+        expect(env).not.toHaveProperty("OPENCLAW_GATEWAY_TOKEN");
+        expect(gateway.minimalHookEnv()).toEqual(env);
+        // The fd stays open until the hook has exited (scripts reopen the
+        // /proc path through their interpreter), then is released.
+        expect(deps.closeSync).toHaveBeenCalledWith(42);
+        expect(deps.closeSync.mock.invocationCallOrder[0]).toBeGreaterThan(
+          deps.execFile.mock.invocationCallOrder[0],
+        );
+      } finally {
+        if (previousToken === undefined) delete process.env.OPENCLAW_GATEWAY_TOKEN;
+        else process.env.OPENCLAW_GATEWAY_TOKEN = previousToken;
+      }
+    });
+
+    it("refuses a non-executable prelaunch hook", async () => {
+      const deps = hookDeps({ fstatSync: vi.fn(() => rootStat({ mode: 0o100644 })) });
+      const error = await hookError(deps);
+      expect(error.message).toContain("must be an executable regular file");
+      expect(error).toMatchObject({
+        name: "GatewayPrelaunchHookError",
+        code: "not_executable",
+        status: "refused",
+        hookPath: kHookPath,
+      });
+      expect(deps.execFile).not.toHaveBeenCalled();
+      expect(deps.closeSync).toHaveBeenCalledWith(42);
+    });
+
+    it("refuses a symlinked configured path BEFORE resolving or opening it (lstat), and a path with a symlinked component", async () => {
+      const gateway = require(modulePath);
+      vi.spyOn(console, "log").mockImplementation(() => {});
+      // The link itself: realpath would happily resolve it to a valid target.
+      const linked = hookDeps({
+        lstatSync: vi.fn(() => ({ isSymbolicLink: () => true })),
+        realpathSync: vi.fn(() => "/usr/bin/true"),
+      });
+      const error = await hookError(linked);
+      expect(error).toBeInstanceOf(gateway.GatewayPrelaunchHookError);
+      expect(error.code).toBe("symlink");
+      expect(error.message).toContain("must not be a symlink");
+      expect(linked.realpathSync).not.toHaveBeenCalled();
+      expect(linked.openSync).not.toHaveBeenCalled();
+      expect(linked.execFile).not.toHaveBeenCalled();
+      // A symlinked directory component: lstat sees a regular file, realpath
+      // moves it — the path must be canonical.
+      // Argument-aware: the roots canonicalize to themselves, only the hook moves.
+      const component = hookDeps({
+        realpathSync: vi.fn((target) =>
+          target === kHookPath ? "/usr/local/lib/alphaclaw-hooks/pre-launch" : target,
+        ),
+      });
+      const componentError = await hookError(component);
+      expect(componentError.code).toBe("symlink");
+      expect(componentError.message).toContain("canonical");
+      expect(component.openSync).not.toHaveBeenCalled();
+    });
+
+    it("refuses a symlink (O_NOFOLLOW → ELOOP) without ever executing", async () => {
+      const deps = hookDeps({
+        openSync: vi.fn(() => {
+          throw Object.assign(new Error("ELOOP: too many symbolic links"), {
+            code: "ELOOP",
+          });
+        }),
+      });
+      const error = await hookError(deps);
+      expect(error).toMatchObject({
+        name: "GatewayPrelaunchHookError",
+        code: "symlink",
+        status: "refused",
+      });
+      expect(error.message).toContain("must not be a symlink");
+      expect(deps.execFile).not.toHaveBeenCalled();
+      expect(deps.closeSync).not.toHaveBeenCalled();
+    });
+
+    it("refuses a hook not owned by root (the deployed agent shares AlphaClaw's uid)", async () => {
+      const error = await hookError(
+        hookDeps({ fstatSync: vi.fn(() => rootStat({ uid: 1000 })) }),
+      );
+      expect(error).toMatchObject({ code: "not_root_owned", status: "refused" });
+      expect(error.message).toContain("must be owned by root (uid 0), found uid 1000");
+    });
+
+    it("refuses a group- or world-writable hook", async () => {
+      const groupWritable = await hookError(
+        hookDeps({ fstatSync: vi.fn(() => rootStat({ mode: 0o100775 })) }),
+      );
+      expect(groupWritable).toMatchObject({ code: "writable_by_others" });
+      expect(groupWritable.message).toContain("mode 775");
+      const worldWritable = await hookError(
+        hookDeps({ fstatSync: vi.fn(() => rootStat({ mode: 0o100757 })) }),
+      );
+      expect(worldWritable).toMatchObject({ code: "writable_by_others" });
+    });
+
+    it("refuses a non-regular file, a relative path, and a missing path", async () => {
+      expect(
+        await hookError(
+          hookDeps({ fstatSync: vi.fn(() => rootStat({ isFile: () => false })) }),
+        ),
+      ).toMatchObject({ code: "not_regular_file" });
+      expect(
+        await hookError(hookDeps({ hookPath: "hooks/pre-gateway-launch" })),
+      ).toMatchObject({ code: "not_absolute" });
+      const missing = await hookError(
+        hookDeps({
+          realpathSync: vi.fn(() => {
+            throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+          }),
+        }),
+      );
+      expect(missing).toMatchObject({ code: "not_found" });
+      expect(missing.message).toContain("ENOENT");
+    });
+
+    it("refuses a hook whose realpath lies inside the AlphaClaw root or the OpenClaw state dir", async () => {
+      const inRoot = await hookError(
+        hookDeps({
+          hookPath: path.join(ALPHACLAW_DIR, "hooks", "pre-gateway-launch"),
+        }),
+      );
+      expect(inRoot).toMatchObject({ code: "in_tree" });
+      expect(inRoot.message).toContain("the AlphaClaw root");
+      // A path OUTSIDE the tree whose realpath resolves INSIDE it is judged
+      // by the realpath (OPENCLAW_DIR sits under the root, so the root label
+      // is the one that fires here).
+      const viaRealpath = await hookError(
+        hookDeps({
+          hookPath: "/opt/alphaclaw/hooks/pre-gateway-launch",
+          realpathSync: vi.fn(() => path.join(OPENCLAW_DIR, "pre-gateway-launch")),
+        }),
+      );
+      expect(viaRealpath).toMatchObject({ code: "in_tree" });
+      expect(viaRealpath.message).toContain("must live outside");
+      // A state dir configured OUTSIDE the root is checked on its own.
+      const viaStateDir = await hookError(
+        hookDeps({
+          hookPath: "/srv/openclaw-state/hooks/pre-gateway-launch",
+          openclawDir: "/srv/openclaw-state",
+        }),
+      );
+      expect(viaStateDir).toMatchObject({ code: "in_tree" });
+      expect(viaStateDir.message).toContain("the OpenClaw state dir");
+    });
+
+    it("reports a non-zero exit as a FAILED hook with the exit code, releasing the fd", async () => {
+      const deps = hookDeps({
+        execFile: vi.fn((file, args, opts, cb) =>
+          cb(Object.assign(new Error("Command failed"), { code: 3 }), "", "patch missing\n"),
+        ),
+      });
+      const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+      const error = await hookError(deps);
+      expect(error).toMatchObject({
+        name: "GatewayPrelaunchHookError",
+        status: "failed",
+        code: "nonzero_exit",
+        exitCode: 3,
+        signal: null,
+      });
+      expect(error.message).toContain("exited with code 3");
+      expect(logSpy).toHaveBeenCalledWith(
+        expect.stringContaining("prelaunch hook stderr: patch missing"),
+      );
+      expect(deps.closeSync).toHaveBeenCalledWith(42);
+    });
+
+    it("reports a timeout (killed by the 120s budget) and a spawn failure distinctly", async () => {
+      const timedOut = await hookError(
+        hookDeps({
+          execFile: vi.fn((file, args, opts, cb) =>
+            cb(
+              Object.assign(new Error("killed"), { killed: true, signal: "SIGTERM", code: null }),
+              "",
+              "",
+            ),
+          ),
+        }),
+      );
+      expect(timedOut).toMatchObject({ status: "failed", code: "timeout", signal: "SIGTERM" });
+      expect(timedOut.message).toContain("timed out after 120s");
+      const spawnFailed = await hookError(
+        hookDeps({
+          execFile: vi.fn((file, args, opts, cb) =>
+            cb(Object.assign(new Error("spawn EACCES"), { code: "EACCES" }), "", ""),
+          ),
+        }),
+      );
+      expect(spawnFailed).toMatchObject({ status: "failed", code: "exec_failed", exitCode: null });
+      expect(spawnFailed.message).toContain("could not be executed (EACCES)");
+    });
+
+    it("off Linux, re-stats the path and executes the realpath only when the inode is unchanged", async () => {
+      const same = hookDeps({ platform: "darwin" });
+      expect(await require(modulePath).runGatewayPrelaunchHook(same)).toBe(true);
+      expect(same.execFile).toHaveBeenCalledWith(
+        kHookPath,
+        [],
+        expect.anything(),
+        expect.any(Function),
+      );
+      const swapped = hookDeps({
+        platform: "darwin",
+        statSync: vi.fn(() => rootStat({ ino: 8 })),
+      });
+      const error = await hookError(swapped);
+      expect(error).toMatchObject({ code: "changed_during_check", status: "refused" });
+      expect(swapped.execFile).not.toHaveBeenCalled();
+    });
+
+    describe("launch paths (env-driven, real realpath/open, fstat pinned)", () => {
+      let hookFile = null;
+      beforeEach(() => {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), "alphaclaw-hook-"));
+        hookFile = path.join(dir, "pre-gateway-launch");
+        fs.writeFileSync(hookFile, "#!/bin/sh\necho hook-ran\n", { mode: 0o755 });
+        process.env.ALPHACLAW_GATEWAY_PRELAUNCH_HOOK = hookFile;
+      });
+      afterEach(() => {
+        try {
+          fs.rmSync(path.dirname(hookFile), { recursive: true, force: true });
+        } catch {}
+      });
+      // uid is pinned explicitly so the verdict never depends on whether the
+      // suite happens to run as root.
+      const pinFstatUid = (uid) => {
+        fs.fstatSync = vi.fn((fd) => Object.assign(originalFstatSync(fd), { uid }));
+      };
+      const isHookExec = (file) => String(file).startsWith("/proc/");
+
+      it("launchGatewayProcess aborts (returns null, no spawn) and reports the refusal when the hook is not root-owned", async () => {
+        pinFstatUid(1000);
+        childProcess.spawn = vi.fn(() => createChild());
+        childProcess.execFile = vi.fn((file, args, opts, cb) => cb(null, "", ""));
+        fs.existsSync = vi.fn(() => false);
+        delete require.cache[modulePath];
+        const gateway = require(modulePath);
+        const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+        const handler = vi.fn();
+        gateway.setGatewayPrelaunchHookHandler(handler);
+
+        expect(await gateway.launchGatewayProcess()).toBeNull();
+
+        expect(childProcess.spawn).not.toHaveBeenCalled();
+        expect(childProcess.execFile).not.toHaveBeenCalled();
+        expect(handler).toHaveBeenCalledTimes(1);
+        expect(handler).toHaveBeenCalledWith({
+          status: "refused",
+          code: "not_root_owned",
+          hookPath: hookFile,
+          message: expect.stringContaining("must be owned by root"),
+          site: "managed launch",
+          durationMs: expect.any(Number),
+          exitCode: null,
+          signal: null,
+        });
+        expect(gateway.getLastGatewayPrelaunchHookOutcome()).toEqual(
+          handler.mock.calls[0][0],
+        );
+        expect(errorSpy).toHaveBeenCalledWith(
+          expect.stringContaining("gateway managed launch aborted"),
+        );
+        gateway.setGatewayPrelaunchHookHandler(null);
+      });
+
+      it("launchGatewayProcess AWAITS the hook (by fd, minimal env) before spawning and reports ran", async () => {
+        pinFstatUid(0);
+        const child = createChild();
+        childProcess.spawn = vi.fn(() => child);
+        let releaseHook = null;
+        childProcess.execFile = vi.fn((file, args, opts, cb) => {
+          if (isHookExec(file)) {
+            releaseHook = () => cb(null, "hook-ran\n", "");
+            return;
+          }
+          cb(null, "", "");
+        });
+        fs.existsSync = vi.fn(() => false);
+        delete require.cache[modulePath];
+        const gateway = require(modulePath);
+        vi.spyOn(console, "log").mockImplementation(() => {});
+        const handler = vi.fn();
+        gateway.setGatewayPrelaunchHookHandler(handler);
+
+        const pending = gateway.launchGatewayProcess();
+        await new Promise((resolve) => setImmediate(resolve));
+        // The hook is in flight: nothing has been spawned yet.
+        expect(typeof releaseHook).toBe("function");
+        expect(childProcess.spawn).not.toHaveBeenCalled();
+        const [execPath, execArgs, execOpts] = childProcess.execFile.mock.calls.find(
+          ([file]) => isHookExec(file),
+        );
+        expect(execPath).toMatch(new RegExp(`^/proc/${process.pid}/fd/\\d+$`));
+        expect(execArgs).toEqual([]);
+        expect(execOpts.env).toEqual(gateway.minimalHookEnv());
+        expect(execOpts.timeout).toBe(120_000);
+
+        releaseHook();
+        expect(await pending).toBe(child);
+        expect(childProcess.spawn).toHaveBeenCalledWith(
+          "openclaw",
+          ["gateway", "run"],
+          expect.anything(),
+        );
+        expect(handler).toHaveBeenCalledWith(
+          expect.objectContaining({
+            status: "ran",
+            code: null,
+            hookPath: hookFile,
+            site: "managed launch",
+            exitCode: 0,
+          }),
+        );
+        gateway.setGatewayPrelaunchHookHandler(null);
+      });
+
+      it("a cold restart aborts BEFORE stopping anything when the hook exits non-zero (named error surfaces to the caller)", async () => {
+        pinFstatUid(0);
+        childProcess.spawn = vi.fn(() => createChild());
+        childProcess.execFile = vi.fn((file, args, opts, cb) => {
+          if (isHookExec(file)) {
+            return cb(Object.assign(new Error("Command failed"), { code: 2 }), "", "no patch\n");
+          }
+          return cb(null, "", "");
+        });
+        fs.existsSync = vi.fn(() => false);
+        net.createConnection = vi.fn(() => createSocket(true));
+        delete require.cache[modulePath];
+        const gateway = require(modulePath);
+        vi.spyOn(console, "log").mockImplementation(() => {});
+        vi.spyOn(console, "error").mockImplementation(() => {});
+        const handler = vi.fn();
+        gateway.setGatewayPrelaunchHookHandler(handler);
+        const onStep = vi.fn();
+
+        await expect(gateway.restartGateway(vi.fn(), { onStep })).rejects.toMatchObject({
+          name: "GatewayPrelaunchHookError",
+          status: "failed",
+          code: "nonzero_exit",
+          exitCode: 2,
+        });
+
+        // Nothing was stopped or launched: the running gateway keeps serving.
+        expect(
+          childProcess.execFile.mock.calls.filter(([file]) => file === "openclaw"),
+        ).toEqual([]);
+        expect(childProcess.spawn).not.toHaveBeenCalled();
+        expect(onStep).not.toHaveBeenCalled();
+        expect(handler).toHaveBeenCalledWith(
+          expect.objectContaining({ status: "failed", code: "nonzero_exit", site: "restart" }),
+        );
+        gateway.setGatewayPrelaunchHookHandler(null);
+      });
+
+      it("runGatewayCmd('--force') and the in-place light restart are gated by the hook too", async () => {
+        pinFstatUid(1000);
+        childProcess.spawn = vi.fn(() => createChild());
+        childProcess.execFile = vi.fn((file, args, opts, cb) => cb(null, "", ""));
+        fs.existsSync = vi.fn(() => false);
+        net.createConnection = vi.fn(() => createSocket(true));
+        delete require.cache[modulePath];
+        const gateway = require(modulePath);
+        vi.spyOn(console, "log").mockImplementation(() => {});
+        vi.spyOn(console, "error").mockImplementation(() => {});
+        const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+        const handler = vi.fn();
+        gateway.setGatewayPrelaunchHookHandler(handler);
+
+        await expect(gateway.runGatewayCmd("--force")).rejects.toMatchObject({
+          name: "GatewayPrelaunchHookError",
+          code: "not_root_owned",
+        });
+        expect(childProcess.spawn).not.toHaveBeenCalled();
+
+        await gateway.restartGatewayLight(vi.fn());
+        expect(warnSpy).toHaveBeenCalledWith(
+          "[alphaclaw] Gateway light restart refused by the prelaunch hook",
+        );
+        expect(childProcess.execFile).not.toHaveBeenCalledWith(
+          "openclaw",
+          ["gateway", "restart"],
+          expect.anything(),
+          expect.any(Function),
+        );
+        expect(handler.mock.calls.map(([outcome]) => outcome.site)).toEqual([
+          "force restart",
+          "light restart",
+        ]);
+        gateway.setGatewayPrelaunchHookHandler(null);
+      });
+
+      it.skipIf(process.platform !== "linux")(
+        "REAL exec: a `#!/bin/sh` hook runs through /proc/<pid>/fd/<fd> with the minimal env",
+        async () => {
+          // Real realpath/open/fstat/execFile — only the owner uid is pinned
+          // (a non-root test user cannot create a root-owned file). The
+          // describe-level hermetic execFile mock is undone here on purpose:
+          // this pin exists to run the real binary.
+          pinFstatUid(0);
+          childProcess.execFile = originalExecFile;
+          fs.writeFileSync(
+            hookFile,
+            '#!/bin/sh\necho "hook-ran home=$HOME keys=$(env | wc -l)"\nexit 0\n',
+            { mode: 0o755 },
+          );
+          delete require.cache[modulePath];
+          const gateway = require(modulePath);
+          const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+
+          expect(await gateway.runGatewayPrelaunchHook()).toBe(true);
+
+          const line = logSpy.mock.calls
+            .map(([text]) => String(text))
+            .find((text) => text.includes("prelaunch hook stdout:"));
+          expect(line).toContain(`hook-ran home=${ALPHACLAW_DIR}`);
+          // Exactly the five projected keys reached the hook (sh adds PWD,
+          // SHLVL and _ of its own, so the bound is small, not zero).
+          const keys = Number(line.match(/keys=(\d+)/)[1]);
+          expect(keys).toBeGreaterThanOrEqual(5);
+          expect(keys).toBeLessThanOrEqual(8);
+        },
+      );
     });
   });
 

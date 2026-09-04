@@ -30,6 +30,11 @@ export default defineConfig({
     // socket can outlive its supertest server and answer a later test's
     // request bound to a reused ephemeral port — see tests/setup-agent.js.
     setupFiles: ["tests/setup-agent.js"],
+    // One private TMPDIR per run, removed at teardown: mkdtemp-heavy tests
+    // leaked ~3k directories per full run into the shared /tmp (measured:
+    // 139k entries / 7 GB on a dev box). Runs in the main process before any
+    // fork spawns, so every worker inherits it — see tests/setup-tmpdir.js.
+    globalSetup: ["tests/setup-tmpdir.js"],
     // Tests that touch the openclaw plugin-sdk pay a >5s dynamic-import cost
     // on first load per worker, which flakes under parallel machine load.
     testTimeout: 30000,

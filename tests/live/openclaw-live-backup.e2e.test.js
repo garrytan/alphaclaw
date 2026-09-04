@@ -19,21 +19,11 @@
 //   existing dir (trailing slash) → exit 0, timestamped archive INSIDE it:
 //     "Backup archive: /tmp/.../outdir/2026-08-29T18-13-52.011+00-00-openclaw-backup.tar.gz"
 //
-// Runtime-gate note (recorded reality, not a CLI behavior under test): the
-// pinned CLI refuses this sandbox's runtime twice before any backup code runs:
-//   launcher:      "openclaw: Node.js >=22.22.3 <23, >=24.15.0 <25, or >=25.9.0
-//                   is required (current: v24.14.1)."
-//   dist runtime guard + node:sqlite gate: "OpenClaw requires SQLite 3.51.3+
-//                   (or patched 3.50.7+/3.44.6+) for WAL safety; Node 24.15.0
-//                   embeds SQLite 3.51.2, which is affected by the upstream
-//                   WAL-reset database corruption bug."
-// Neither gate has an env escape hatch, and the machine has exactly one Node
-// (v24.14.1, SQLite 3.51.2). The suites inject a NODE_OPTIONS preload that
-// fakes ONLY those two version labels (process.versions.node and the result
-// of the CLI's `SELECT sqlite_version()` probe); the tar walk, --output
-// handling, --verify, and all real SQLite I/O run the CLI's untouched
-// implementation against throwaway fixtures where the WAL-reset data-safety
-// concern is moot.
+// Runtime note: the runtime-gate preload this file once injected (faking the
+// Node/SQLite version labels on a Node 24.14.1 box) is gone — the tier runs
+// on Node 22.23.2 / SQLite 3.51.3, which both upstream gates accept. The
+// harness lives in live-backup-harness.js and is shared with the #54
+// contention tier, which runs the same shape against the real beta.
 
 // Isolate module-level kRootDir BEFORE any lib/ module loads constants
 // (constants captures kRootDir at load — same pattern as the live-apply tier).
@@ -47,16 +37,15 @@ delete process.env.OPENCLAW_GIT_DIR;
 
 const crypto = require("crypto");
 const { execFile } = require("child_process");
-const { DatabaseSync } = require("node:sqlite");
-
 const {
-  createOpenclawChannelSync,
-} = require("../../lib/server/openclaw-channel-sync");
-const {
-  createOpenclawReleaseChannelStore,
-} = require("../../lib/server/openclaw-release-channel");
-const { createRunStream } = require("../../lib/server/openclaw-run-stream");
-const { kLiveEnabled, kSilentLogger, mkTemp, repoOpenclawBin } = liveHelpers;
+  kHardGateTarget,
+  buildCliEnv,
+  writeStateFixture,
+  createQuiesceFake,
+  createLiveBackupHarness,
+  readRunBackupRecord,
+} = require("./live-backup-harness");
+const { kLiveEnabled, mkTemp, repoOpenclawBin } = liveHelpers;
 
 const describeLive = kLiveEnabled ? describe : describe.skip;
 
@@ -66,129 +55,10 @@ const kContractTestTimeoutMs = 120_000;
 const kChurnTestTimeoutMs = 300_000;
 const kExecMaxBuffer = 16 * 1024 * 1024;
 
-// ---------------------------------------------------------------------------
-// Runtime-gate preload (see the header note). Written once; injected into
-// every CLI process via NODE_OPTIONS so the launcher's compile-cache respawns
-// inherit it too.
-// ---------------------------------------------------------------------------
-const kToolsDir = mkTemp("openclaw-live-backup-tools-");
-const kPreloadPath = path.join(kToolsDir, "runtime-gate-shim.cjs");
-fs.writeFileSync(
-  kPreloadPath,
-  [
-    "// Test-only runtime-gate shim: fake the two version labels the pinned",
-    "// openclaw CLI gates on. Everything else runs the real implementation.",
-    "try {",
-    '  Object.defineProperty(process.versions, "node", {',
-    '    value: "24.15.0", configurable: true, enumerable: true, writable: false,',
-    "  });",
-    "} catch {}",
-    "try {",
-    '  const sqlite = require("node:sqlite");',
-    "  const origPrepare = sqlite.DatabaseSync.prototype.prepare;",
-    "  sqlite.DatabaseSync.prototype.prepare = function (sql, ...rest) {",
-    "    const stmt = origPrepare.call(this, sql, ...rest);",
-    '    if (typeof sql === "string" && /sqlite_version\\s*\\(\\s*\\)/i.test(sql)) {',
-    "      const origGet = stmt.get.bind(stmt);",
-    "      try {",
-    '        Object.defineProperty(stmt, "get", {',
-    "          value: (...args) => {",
-    "            const row = origGet(...args);",
-    '            return row && typeof row === "object" && "version" in row',
-    '              ? { ...row, version: "3.51.3" }',
-    "              : row;",
-    "          },",
-    "          configurable: true,",
-    "        });",
-    "      } catch {}",
-    "    }",
-    "    return stmt;",
-    "  };",
-    "} catch {}",
-    "",
-  ].join("\n"),
-);
-
-// Env for real-CLI invocations, mirroring lib/server/gateway.js gatewayEnv's
-// shape (HOME/OPENCLAW_HOME at the data root, state dir + config pinned,
-// XDG_CONFIG_HOME, no auto-update) against an isolated fixture root.
-const buildCliEnv = ({ homeDir, stateDir, pathPrefix = null }) => {
-  const env = {
-    HOME: homeDir,
-    OPENCLAW_HOME: homeDir,
-    OPENCLAW_STATE_DIR: stateDir,
-    OPENCLAW_CONFIG_PATH: path.join(stateDir, "openclaw.json"),
-    XDG_CONFIG_HOME: stateDir,
-    OPENCLAW_NO_AUTO_UPDATE: "1",
-    NODE_OPTIONS: `--require ${kPreloadPath}`,
-    PATH: pathPrefix
-      ? `${pathPrefix}${path.delimiter}${process.env.PATH}`
-      : process.env.PATH,
-  };
-  for (const key of ["TMPDIR", "LANG", "LC_ALL", "TERM", "NO_COLOR"]) {
-    if (process.env[key] !== undefined) env[key] = process.env[key];
-  }
-  return env;
-};
-
-// Minimal state tree the CLI accepts (probed by running it): an empty-object
-// openclaw.json, session transcripts, a plugin catalog, and real sqlite state
-// DBs (both enumerateStateDbs shapes) so there is content to archive and the
-// fresh-install carve-out cannot mask a missing artifact.
-const writeStateFixture = (
-  homeDir,
-  { jsonlFiles = 6, lockFiles = 2 } = {},
-) => {
-  const stateDir = path.join(homeDir, ".openclaw");
-  const sessionsDir = path.join(stateDir, "agents", "main", "sessions");
-  const pluginDir = path.join(
-    stateDir,
-    "agents",
-    "main",
-    "agent",
-    "plugins",
-    "groq",
-  );
-  fs.mkdirSync(path.join(stateDir, "state"), { recursive: true });
-  fs.mkdirSync(sessionsDir, { recursive: true });
-  fs.mkdirSync(pluginDir, { recursive: true });
-  fs.writeFileSync(path.join(stateDir, "openclaw.json"), "{}\n");
-  const catalogPath = path.join(pluginDir, "catalog.json");
-  fs.writeFileSync(catalogPath, `${JSON.stringify({ plugins: ["groq"] })}\n`);
-  for (let i = 0; i < jsonlFiles; i += 1) {
-    fs.writeFileSync(
-      path.join(sessionsDir, `${String(i).padStart(4, "0")}-seed.jsonl`),
-      `{"role":"user","seq":${i}}\n`,
-    );
-  }
-  for (let i = 0; i < lockFiles; i += 1) {
-    fs.writeFileSync(
-      path.join(sessionsDir, `${String(i).padStart(4, "0")}-seed.jsonl.lock`),
-      `${process.pid}\n`,
-    );
-  }
-  const createDb = (dbPath) => {
-    fs.mkdirSync(path.dirname(dbPath), { recursive: true });
-    const db = new DatabaseSync(dbPath);
-    try {
-      db.exec(
-        "CREATE TABLE fixture (id INTEGER PRIMARY KEY, note TEXT); INSERT INTO fixture (note) VALUES ('live-backup-e2e');",
-      );
-    } finally {
-      db.close();
-    }
-  };
-  createDb(path.join(stateDir, "state", "openclaw.sqlite"));
-  createDb(
-    path.join(stateDir, "agents", "main", "agent", "openclaw-agent.sqlite"),
-  );
-  return { stateDir, sessionsDir, catalogPath };
-};
-
 const execCli = (args, env, timeoutMs = 90_000) =>
   new Promise((resolve) => {
     execFile(
-      "node",
+      process.execPath,
       [repoOpenclawBin(), ...args],
       { env, timeout: timeoutMs, maxBuffer: kExecMaxBuffer, encoding: "utf8" },
       (error, stdout, stderr) => {
@@ -306,41 +176,7 @@ describeLive("LIVE openclaw backup create --output contract (real pinned CLI)", 
 
 // ---------------------------------------------------------------------------
 // Suite 2 — runBackup vs the real CLI under live churn (issues #11/#18).
-// Harness mirrors tests/server/openclaw-channel-backup-retry.e2e.test.js's
-// createHarness, but the runner is the REAL createRunStream and
-// openclawSpawnEnv points the PATH-resolved `openclaw` at the real pinned
-// binary via a shim. Only installToTempDir is faked (the backup step is the
-// one under test; the download is the hermetic tier's business).
 // ---------------------------------------------------------------------------
-
-const kPin = "1.0.0";
-const kHardGateTarget = { channel: "beta", version: "1.1.0-beta.1" };
-
-// Like the hermetic writePackageFixture, but the bin echoes ITS OWN version:
-// with the real runner, verifyPackageArtifact genuinely executes
-// `node <bin> --version` and demands an exact token match (and db-preflight
-// runs `node <bin> database preflight ...`, where any exit-0 non-JSON output
-// classifies as "pass").
-const writeVersionedPackageFixture = (packageDir, { version }) => {
-  fs.mkdirSync(path.join(packageDir, "dist", "extensions"), {
-    recursive: true,
-  });
-  fs.writeFileSync(
-    path.join(packageDir, "package.json"),
-    `${JSON.stringify({ name: "openclaw", version, bin: { openclaw: "bin/entry.js" } }, null, 2)}\n`,
-  );
-  const binPath = path.join(packageDir, "bin", "entry.js");
-  fs.mkdirSync(path.dirname(binPath), { recursive: true });
-  fs.writeFileSync(
-    binPath,
-    `#!/usr/bin/env node\nconsole.log(${JSON.stringify(version)});\n`,
-  );
-  fs.writeFileSync(
-    path.join(packageDir, "dist", "thinking-levels.js"),
-    "exports.listThinkingLevelOptions = () => [];\n",
-  );
-  return packageDir;
-};
 
 // Live churner modeling the running gateway: every ~5ms it rotates session
 // *.jsonl.lock files (create one, delete a recent one) and cycles the plugin
@@ -385,107 +221,6 @@ const startChurner = ({ sessionsDir, catalogPath }) => {
   return churner;
 };
 
-const createLiveBackupHarness = ({
-  gatewayQuiesce = null,
-  onBackupSpawn = null,
-} = {}) => {
-  const rootDir = mkTemp("alphaclaw-live-backup-e2e-");
-  const openclawDir = path.join(rootDir, ".openclaw");
-  // ~2000 small files under agents/main/sessions: the .jsonl transcripts are
-  // volatile-skipped by the CLI without lstat; the .jsonl.lock files are
-  // walked and lstat'd — they widen the raceable readdir->lstat window.
-  const fixture = writeStateFixture(rootDir, {
-    jsonlFiles: 1000,
-    lockFiles: 1000,
-  });
-  const packageRoot = mkTemp("alphaclaw-live-backup-pkgroot-");
-  fs.writeFileSync(
-    path.join(packageRoot, "package.json"),
-    `${JSON.stringify({ name: "@live/alphaclaw", dependencies: { openclaw: kPin } })}\n`,
-  );
-  const installDir = mkTemp("alphaclaw-live-backup-install-");
-  writeVersionedPackageFixture(
-    path.join(installDir, "node_modules", "openclaw"),
-    { version: kPin },
-  );
-  const store = createOpenclawReleaseChannelStore({
-    rootDir,
-    openclawDir,
-    logger: kSilentLogger,
-  });
-  store.writeSentinel({ installDir, version: kPin });
-
-  // runBackup spawns command "openclaw" and lets PATH resolve it: give it a
-  // shim dir whose `openclaw` execs the real pinned launcher.
-  const shimDir = mkTemp("alphaclaw-live-backup-shim-");
-  fs.writeFileSync(
-    path.join(shimDir, "openclaw"),
-    `#!/bin/sh\nexec node "${repoOpenclawBin()}" "$@"\n`,
-    { mode: 0o755 },
-  );
-  const cliEnv = buildCliEnv({
-    homeDir: rootDir,
-    stateDir: openclawDir,
-    pathPrefix: shimDir,
-  });
-
-  const baseRunner = createRunStream({});
-  const backupSpawns = [];
-  const runner = {
-    runStreamed: (opts) => {
-      if (opts.command === "openclaw" && opts.args?.[0] === "backup") {
-        backupSpawns.push(opts.args.slice());
-        try {
-          onBackupSpawn?.(backupSpawns.length);
-        } catch {}
-      }
-      return baseRunner.runStreamed(opts);
-    },
-  };
-
-  const installToTempDir = async ({ versionSpec }) => {
-    const tmpDir = mkTemp("openclaw-live-fake-prepare-");
-    const openclawPackageDir = writeVersionedPackageFixture(
-      path.join(tmpDir, "node_modules", "openclaw"),
-      { version: versionSpec },
-    );
-    return { tmpDir, openclawPackageDir, cleanup: () => {} };
-  };
-
-  const sync = createOpenclawChannelSync({
-    rootDir,
-    openclawDir,
-    packageRoot,
-    store,
-    runStream: runner,
-    installToTempDir,
-    resolveInstallDir: () => installDir,
-    readReleaseChannel: () => "beta",
-    openclawSpawnEnv: () => cliEnv,
-    isOnboarded: () => true,
-    restartProcess: () => {},
-    clearVersionCache: () => {},
-    notify: async () => {},
-    logger: kSilentLogger,
-    backupsDir: path.join(rootDir, "backups", "openclaw"),
-    gatewayQuiesce,
-    backupTuning: { retryDelayMs: 100 },
-  });
-
-  return { sync, store, rootDir, openclawDir, fixture, backupSpawns };
-};
-
-const readRunBackupRecord = (openclawDir) => {
-  const runsDir = path.join(openclawDir, ".alphaclaw", "runs");
-  const names = fs.readdirSync(runsDir);
-  expect(names.length).toBeGreaterThan(0);
-  const records = names.map((name) =>
-    JSON.parse(fs.readFileSync(path.join(runsDir, name), "utf8")),
-  );
-  records.sort((a, b) => (b.startedAt ?? 0) - (a.startedAt ?? 0));
-  return records[0].backup;
-};
-
 const logRaceOutcome = (label, backupRecord) => {
   const raceFired =
     (backupRecord?.attempts ?? 1) > 1 ||
@@ -514,31 +249,14 @@ describeLive("LIVE runBackup vs real CLI under churn (issues #11/#18)", () => {
     "hard-gated apply quiesces the gateway (the churner goes quiet) and lands a verified backup",
     { timeout: kChurnTestTimeoutMs },
     async () => {
-      const quiesceCalls = [];
       let churner = null;
-      const gatewayQuiesce = {
-        acquireLock: async () => {
-          quiesceCalls.push("acquireLock");
-          return () => quiesceCalls.push("release");
-        },
-        isRunning: async () => {
-          quiesceCalls.push("isRunning");
-          return true;
-        },
-        suppress: () => quiesceCalls.push("suppress"),
-        unsuppress: () => quiesceCalls.push("unsuppress"),
-        // The real writer goes quiet when the gateway stops: stop() pauses
-        // the churner, start() resumes it.
-        stop: async () => {
-          quiesceCalls.push("stop");
-          churner?.pause();
-          return true;
-        },
-        start: async () => {
-          quiesceCalls.push("start");
-          churner?.resume();
-        },
-      };
+      // The real writer goes quiet when the gateway stops: stop() pauses the
+      // churner, start() resumes it.
+      const gatewayQuiesce = createQuiesceFake({
+        onStop: () => churner?.pause(),
+        onStart: () => churner?.resume(),
+      });
+      const quiesceCalls = gatewayQuiesce.calls;
       const harness = createLiveBackupHarness({
         gatewayQuiesce,
         onBackupSpawn: () => quiesceCalls.push("backup-cli"),
@@ -570,8 +288,11 @@ describeLive("LIVE runBackup vs real CLI under churn (issues #11/#18)", () => {
         expect(backupRecord.quiesced).toBe(true);
         expect(backupRecord.attempts).toBeGreaterThanOrEqual(1);
         // The verified artifact the REAL CLI wrote, at the exact per-run path
-        // runBackup asked for, inside the retention pattern.
+        // runBackup asked for, inside the retention pattern — and it passed
+        // the WI-6.1 usable check (gzip -t + manifest lists the state DBs).
         expect(backupRecord.verified).toBe(true);
+        expect(backupRecord.usableCheck).toBe("manifest_ok");
+        expect(backupRecord.producer).toBe("openclaw");
         expect(backupRecord.file).toMatch(/openclaw-backup-.*\.tar\.gz$/);
         expect(fs.statSync(backupRecord.file).size).toBeGreaterThan(0);
 
@@ -610,6 +331,7 @@ describeLive("LIVE runBackup vs real CLI under churn (issues #11/#18)", () => {
         expect(backupRecord.attempts).toBeGreaterThanOrEqual(1);
         expect(backupRecord.attempts).toBe(harness.backupSpawns.length);
         expect(backupRecord.verified).toBe(true);
+        expect(backupRecord.usableCheck).toBe("manifest_ok");
         expect(fs.statSync(backupRecord.file).size).toBeGreaterThan(0);
 
         logRaceOutcome("live-ladder", backupRecord);

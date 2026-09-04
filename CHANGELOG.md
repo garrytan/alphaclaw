@@ -5,7 +5,7 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
-## [0.9.71] - 2026-09-02
+## [0.9.72] - 2026-09-02
 
 A freshly bumped OpenClaw pin now gets the same 24-hour automatic-rollback
 watch as a channel apply: once the installed tree is on the new pin, a crash
@@ -50,6 +50,299 @@ shows the pin under watch the whole time.
   release when a beta line ships (beta = latest = 2026.9.1 since 2026-09-03).
   The fallback row path asserts the version it clicked. Hermetic tests pin the
   resolver.
+
+## [0.9.71] - 2026-09-02
+
+Fixes issue #54 — a beta → stable downgrade refused `409 backup_failed`
+after the quiesced pre-update backup lost OpenClaw's SQLite state lease
+(`SQLite transaction lock wait failed` → `…lease … was lost`) and nobody was
+told — and hardens every upgrade/downgrade and backup/restore flow around it.
+Absorbs PR #4 (gateway prelaunch hook) with a real trust boundary. One PR,
+per-subsystem commits: state-DB quiet period → notifications → gateway
+honesty → backup ladder / offline copy / consented reuse → UI → integration →
+live/container tiers + docs.
+
+### Fixed
+- **Backup ladder (#54).** Lease loss and raw SQLite busy signatures classify
+  as `lock_contention` (one shared pattern with the restart-evidence
+  diagnostic, `lib/server/openclaw-lock-contention.js`), a killed CLI as
+  `killed`, a CLI that never started as `spawn_error` (terminal, names the
+  cause); every classifier branch reads the last 20 output lines instead of
+  the final one. The quiesced driver retries lock contention in-quiesce
+  (budget-aware, ≤2, 15 s → 30 s, fixed deadline) and, when that is
+  exhausted or the CLI was killed, takes an **AlphaClaw offline copy** of the
+  still-paused state dir instead of giving up — see Added. Timeouts and
+  live-file races relaunch the gateway, wait for it to answer and settle,
+  then run the live ladder; the "retrying after a live-file race" label after
+  a timeout is gone. Fresh-install waiver of the hard gate now fails closed
+  (literally empty state tree only). Attempt wording is honest ("single
+  attempt, with the gateway paused" / "after N attempts, M with the gateway
+  paused"); `backup: running` is emitted once; a failed relaunch is its own
+  `gateway-relaunch: warning` step; every hard-gate refusal names the newest
+  surviving archive (age + producer). The contention pattern also matches the
+  lease-TIMEOUT/acquire lines whose label is several words (`timed out
+  waiting for legacy audit migration lease migration.legacy-audit/…`, the
+  real 2026.8.2 / beta wording), not only the mid-run `was lost` form — the
+  live #54 reproduction against the real beta caught the gap.
+- **Notifications.** Telegram sends no longer die on `Bad Request: can't
+  parse entities`: notices stay in the house format and the transport renders
+  them to validated HTML (`lib/server/utils/telegram-html.js`), falling back
+  to plain text locally and on a parse `400` (counted delivered). Delivery is
+  honest: per-target error codes, `terminal` only when every target failed
+  deterministically (403 blocked, chat not found for a pairing-store target, parse 400 surviving the
+  fallback) → immediate `notification_abandoned` instead of 48 h of retries;
+  zero resolvable targets stays transient; partial fan-out raises one
+  `notification_partial` event per outbox id; `POST
+  /api/watchdog/test-notification` reports real per-channel failures; Slack
+  renders `[label](url)` as `<url|label>`. The apply outcome notification is
+  always delivered (`apply-accepted-<operationId>`, no longer verbose). One
+  shared house-link grammar (`renderHouseLinks`, URLs with balanced
+  parentheses) drives both the Telegram and the Slack renderer; bold may
+  wrap a code span (`<b>…<code>…</code>…</b>`); Slack labels are `& < >`
+  escaped and URLs `| < >` percent-encoded; a Telegram `403` is deterministic only for blocked/kicked/deactivated descriptions, and `400 chat not found` only for a pairing-store target (a configured chat id keeps retrying); and outbox-unavailable direct sends arriving during the
+  state-DB quiet period are held in memory (max 50) and delivered when the
+  barrier lifts (`{ ok: true, held: true, reason: "state_db_quiet" }`), with
+  a shutdown mid-hold logging the undelivered count.
+- **Gateway stop/restart honesty.** The recovery restart that recorded
+  `succeeded` while the CLI refused `openclaw gateway stop` (non-interactive
+  guard, 2026.8.2+) is gone: `--force` is passed only when the installed CLI
+  advertises it (`gateway stop --help` capability probe — the 2026.7.1-2 pin
+  has no such flag), the shutdown stop is unified onto the same helper, and
+  a restart succeeds only when the old gateway is proven gone (port observed
+  down, or a new pid with every pre-stop pid exited); otherwise the operation
+  is recorded failed with `reason: "incumbent_gateway_still_running"`, event
+  `restart_incumbent`, an important notification, the restart-required banner
+  kept and no autotune stamp. `stopping: warning` when a stop was refused and
+  the port never released.
+- **Rollback fence** re-stats the referenced archive and says whether it
+  still exists, was partial (workspace excluded) or a consented reuse (with
+  its age) — the second-stage dialog renders the caveats.
+- Consecutive identical failed `health_check` rows inside an expected-restart
+  window are deduped (first logged + count).
+
+### Added
+- **State-DB quiet period** (`lib/server/state-db-quiet.js`): an awaited
+  barrier with an owner token held from confirmed gateway stop to just before
+  the relaunch. Status readers serve last-known data, the cron store falls
+  back to `jobs.json`, notification flushes are held (never dropped), and
+  AlphaClaw's own state-DB writers answer `409 { code: "backup_in_progress"
+  }` + `Retry-After: 120`. Expiry aborts the backup rather than silently
+  reopening. Kill switch `OPENCLAW_STATE_DB_QUIET=off` (deployment env only).
+- **Pre-backup diagnosis** (`backup_diagnosis` event, `record.backup.diagnosis`):
+  journal mode, filesystem type, state bytes, live openclaw processes, and a
+  prediction from the prior run. A rollback-journal DB over 256 MB (network
+  volumes) or a prediction over the remaining pause budget skips the upstream
+  attempt and goes straight to the offline copy.
+- **AlphaClaw offline copy** (`lib/server/openclaw-backup-offline-copy.js`,
+  format in `docs/designs/backup-offline-copy.md`): after exclusivity is
+  proven (stop confirmed, quiet barrier held, zero live openclaw processes,
+  zero in-process handles, Linux `/proc/*/fd` scan clean) every `*.sqlite`
+  is copied with SQLite's online backup API, integrity-checked, archived with
+  `tar -I 'gzip -1'` as `openclaw-backup-<ts>-<opId8>.alphaclaw.tar.gz` with
+  a manifest that shares upstream's core fields plus `producer:
+  "alphaclaw-offline-copy"`, `alphaclawFormatVersion`, `exclusivityEvidence`
+  and `diagnosis`. Workspaces ride along below 512 MiB (else `partial:
+  true`). Measured: a 526 MB state tree in 19 s. Both producers share
+  retention (keep-3), inventory and the fenced-run pin.
+- **Usable-backup definition** (WI-6.1): every verified artifact passes
+  `gzip -t` + a manifest check → `record.backup.usableCheck: "manifest_ok"`;
+  a failing check is a `verify` failure (terminal, quarantined
+  `.unverified`). The check judges **coverage**, not per-file listing: a
+  state DB counts when an asset names it (the offline copy's per-file
+  assets) or when an asset's `sourcePath` is the state dir or an ancestor of
+  it, resolved against `manifest.paths.stateDir` — real upstream manifests
+  (pin, 2026.8.2, beta) carry exactly ONE `kind: "state"` directory asset,
+  and the first container-tier run caught the per-file rule refusing a
+  genuine archive and failing the hard gate closed on a false verdict. The
+  manifest is read at depth 1 only (`--wildcards --no-wildcards-match-slash
+  '*/manifest.json' --occurrence=1`, so a workspace's own `manifest.json` is
+  never the one parsed; 9–14 ms on real archives), through a 16 MB tail with
+  a compact offline-copy manifest (the 64 KB default truncated it at ≳280
+  files), and the parsed object must carry a numeric `schemaVersion` and an
+  `assets[]` array.
+- **Backup inventory** — `GET /api/openclaw/backups` (5 s cache, tier
+  `safe`, never on the status path) and an Upgrade-tab Backups card with
+  producer, age, size, provenance and eligibility.
+- **Consented backup reuse** (WI-4.5): when the full fresh ladder fails with
+  a retryable class on a hard gate, the 409 carries `reusableBackup: {
+  file, at, ageMs, sha256, producer }` (newest verified non-partial ≤ 24 h
+  archive with nothing applied since, re-verified on an open fd); resending
+  with `allowBackupReuse: { sha256 }` (humans only — the agent actor is
+  denied) re-runs the full ladder and only then proceeds with that archive,
+  recorded as `backup.reused` with its age, announced, event
+  `backup_reused`, pinned against pruning while the run is fenced. The
+  confirm dialog shows the hard-gate/pause notes on every downgrade and an
+  opt-in checkbox that is never pre-checked.
+- **Gateway prelaunch hook** (absorbs PR #4): `ALPHACLAW_GATEWAY_PRELAUNCH_HOOK`
+  (deployment env only) runs a root-owned, out-of-tree, non-writable
+  executable by inode with a minimal env before every gateway launch; any
+  refusal or failure aborts the launch fail-closed (`GatewayPrelaunchHookError`,
+  event `prelaunch_hook`, important notification). README section.
+- **Integration of the gateway seams** (lane I): the shared capabilities
+  instance feeds the `--force` probe (`setGatewayCapabilities`), the
+  prelaunch-hook outcome reaches the watchdog (`onPrelaunchHook` →
+  `degradedReason: "prelaunch_hook_failed"`, `getStatus().prelaunchHook`, a
+  `prelaunch_hook` event and a house-format notification), the incumbent
+  verdict reaches the system routes' notifier, `applied.operationId` survives
+  the store normalizer, the offline copy under `OPENCLAW_STATE_DB_QUIET=off`
+  records `quiet: "disabled"` in its evidence (per stage), and state-file
+  compatibility tests pin that old channel-state/run files load under the new
+  normalizers and new fields load under the old code.
+- New watchdog event kinds: `backup_diagnosis`, `backup_quiesce`,
+  `backup_contention`, `backup_offline_copy`, `backup_reused`,
+  `state_db_quiet`, `notification_partial`, `restart_incumbent`,
+  `prelaunch_hook` (and `notification_abandoned` now fires immediately for
+  terminal failures).
+- **Live tier** (real npm installs of 2026.7.1-2 / 2026.8.2 / 2026.9.1-beta.1,
+  cached per version): the #54 reproduction against the real beta with a
+  held `BEGIN IMMEDIATE` (retry-succeeds and offline-copy paths), the same
+  shape under the pin (no lease — finishes under the lock), the
+  `gateway stop --help` `--force` contract across the three lines, the real
+  beta → 2026.8.2 downgrade through the hard gate to activation and a healthy
+  gateway (plus the reverse `incompatible` preflight block), the 12-cell
+  restore drill (producer × journal mode × target: extract, place assets per
+  manifest, target preflight, `integrity_check`, `gateway run` to `/healthz`)
+  with a 500 MB offline-copy calibration, and the offline-copy manifest
+  contract vs upstream. **Container tier:** a SQLite-contention holder
+  during the quiesce window plus `tar`/`gzip` presence in the image — run
+  for real on the sandbox's own dockerd (14/14 in 222 s on the final code paths: image build, rescue toolchain, stable
+  boot, hard gate armed, browser-driven stable→beta apply through quiesce →
+  backup → usable check → install, orchestrator restart, durability legs);
+  only `tests/live/autotune-container.e2e.test.js` needs a host whose docker
+  cgroup is not in threaded mode (memory-limited containers).
+- **Live-tier disk hygiene** (from the 2026-09-02 incident: 46 GB of `/tmp`
+  debris in one afternoon, `alphaclaw-live-downgrade-*` alone 21 GB over 15
+  runs, `/` at 100 %, 12 files red with ENOSPC). Root cause: vitest 4's
+  forks pool ends a worker with SIGTERM, which never emits `exit`, so the
+  helpers' exit-time sweep had never run — every live run leaked its whole
+  temp set, not only interrupted ones. `tests/live/live-helpers.js` now
+  sweeps every tracked root in an `afterAll` it registers on each live file
+  (plus best-effort SIGTERM/SIGINT/SIGHUP and `exit` sweeps), real installs
+  go through `stageTempInstall` (the `openclaw-prepare-*` dir is tracked the
+  moment npm starts) with `staged.cleanup()` in `finally` blocks, the
+  per-version install cache moved out of the sweep namespace to
+  `$TMPDIR/alphaclaw-openclaw-cache/<version>` (env override unchanged), and
+  the heavy suites call `assertFreeDiskBytes()` (4 GiB; 8 GiB for the dev
+  build) to fail fast with the sweep instruction (`rm -rf
+  /tmp/alphaclaw-live-* /tmp/openclaw-prepare-*`, check `df -h /`) instead
+  of dying mid-run.
+- Docs: `docs/upgrade-troubleshooting.md` gains "Backup blocked by
+  state-database contention", "Restoring a backup" (the runbook the UI links
+  to), "Reusing a recent backup (consent)", "Restart did not take effect
+  (incumbent gateway)" and "Gateway prelaunch hook"; AGENTS.md invariants
+  for the ladder, the quiet period, stop/restart honesty and the hook
+  boundary; the Telegram notice rule now says "author the house format, the
+  transport renders HTML" (one link grammar for Telegram and Slack, bold over
+  code spans); the `test:live` note carries the Node-22-first, sweep,
+  cache-dir and cgroup facts.
+
+### Fixed — final cross-model review round (gstack `/review`: 16 Claude finders + red team + per-finding refuters, and Codex adversarial passes over every scope)
+
+- **Dev channel: the updater's report is read by shape.** A real from-source dev build ended `build:warning` "updater output was not parseable" on every run: the runner's combined tail carries the doctor's stderr ahead of the updater's `--json` report, and the doctor's hint `openclaw config set commands.ownerAllowFrom '["telegram:123456789"]'` is a valid JSON array, so a first-JSON-value parse returned it and `status` read as unknown. The parse now scans for the object that carries a string `status` (live-verified: two red runs, then `build:completed` on the real build). The regression fixture carries the pinned CLI's verbatim stderr lines.
+- **Prelaunch hook boundary tightened.** The hook's `PATH` is a fixed system path (sudo `secure_path` style — a writable directory on the inherited `PATH` would let a planted interpreter run under `#!/usr/bin/env …` on every launch); the in-tree exclusion canonicalizes the AlphaClaw root and state dir too (a symlinked deployment root could hide an in-tree hook); the hook runs in its own process group with a hard deadline (`timeout` + 5 s grace → the whole group is SIGKILLed, so a signal-trapping hook or a descendant holding stdio can no longer hang every launch); its stdout/stderr are redacted before logging.
+- **Hook alerts cannot be silenced by their own id.** The `prelaunch-hook-<code>-<site>` outbox id gains an hour bucket: a delivered outbox entry never revives on the same id, so a time-free id would have muted every later independent failure at that site; a boot loop within the hour still collapses to one notice.
+- **Shutdown stop fits its budget.** With a cold capability cache the `--force` probe gets a 1.5 s slice and the CLI stop keeps the remainder of the 5 s shutdown budget (probe + stop must fit the 10 s process shutdown deadline, or the old gateway keeps the port for the successor).
+- **Restart verdict honours pid-proven replacement.** An external supervisor that swaps the gateway process between two 500 ms port polls never shows a "port down" sample; when every pre-stop pid is gone and a new pid answers, the old gateway is provably gone and the restart is a success, not an incumbent failure.
+- **`gatewayStopForce` probe.** A FAILED probe is read as help output only when it really is the `gateway stop` usage text; a crash whose diagnostic merely mentions options/`--help` stays `unknown` (retried) instead of caching `unsupported` for the installed version.
+- **Contention regex is lease-only.** The `<scope>/<key>` token must follow the word `lease`, so `timed out waiting for https://…` or `failed to acquire … /tmp/file` never classify as `lock_contention` (which would retry inside the quiesce and make the failure reuse-eligible).
+- **Live tiers.** The `openclaw backup` double writes a REAL upstream-layout archive (the product's usable check honestly refused the old plain-text stub with `not in gzip format`); every live spawn env goes through `scrubTestRunnerEnv()` (the pinned CLI prints nothing — not even its `--json` report — when it inherits `VITEST`), pinned by a hermetic convention test.
+
+#### Backup ladder hardening (Codex review B1–B9)
+- **Reuse verification binds to the opened inode.** The consented-reuse gate now hands `gzip -t` and the manifest extraction `/proc/<pid>/fd/<fd>` (Linux) so the usable check, the sha256 and the consent digest all describe the same archive; off Linux the path is re-stat'ed against the opened inode and a swap is refused (`changed_during_verify`).
+- **Fresh-install waiver is an allowlist.** A state tree waives the hard gate only when it holds nothing but AlphaClaw bookkeeping (`.alphaclaw`, `logs`, `backups`, `tmp`, the `.env` link), an absent/empty/`{}` `openclaw.json`, and empty directories. Credentials, identity, legacy `auth-profiles.json`, cron/pairing files, symlinks or any unknown file now defeat the waiver — at the backup gate and at the db-preflight blind spot.
+- **Offline copy: symlinked core assets are never silently absent.** A symlinked `openclaw.json` is followed when it resolves to a regular file (config-map mounts); a symlinked `credentials/`, `identity/`, `state/`, `agents/*/agent` or `*.sqlite` makes the copy `partial: true` with the reason (`partialReasons`), and `manifest.paths.configPath`/`oauthDir` reflect what is actually in the archive.
+- **Offline copy honours its deadline inside SQLite.** `backup()` is raced against the remaining budget (stage `budget`) and the quiet barrier is re-checked between backup steps (stage `quiet_lost`); the walk yields to the event loop and re-checks the budget every 500 entries (stage `budget` during `enumerate`).
+- **Manifest ceiling shared by producer and verifier.** The copy refuses (stage `manifest`) rather than write a manifest larger than the 16 MiB the usable check can read back (15 MiB producer limit).
+- **Archive permissions.** The backups directory is repaired to `0700`, the offline copy's archive is `0600` before it is published, and the upstream CLI's archive is tightened to `0600` after it verifies.
+- **Handle counter fails closed.** A state-DB handle whose native `close()` keeps throwing while the connection stays open remains counted (retry once, then `isOpen`), so the offline copy refuses honestly instead of seeing a false "exclusive"; a closed-underneath connection releases.
+- **Reuse window bounded on both sides.** Future-dated backup records (beyond a 5-minute clock-skew tolerance) are never offered for reuse and show as `future_dated` in the backup inventory.
+
+#### State-DB quiet barrier: never mutate-then-refuse (Codex review R1–R6, R8)
+- **Channel delete vs backup barrier.** `deleteChannelAccount` answers a held barrier (409 `backup_in_progress`) before anything mutates, and clears the account's state-db pairing rows LAST — after the `channels remove` CLI, `.env` and `openclaw.json` writes — so a CLI timeout, config-write failure or ENOSPC can no longer leave the account and token intact while permanently deleting its authorized users. A barrier that begins mid-delete is never re-thrown against an already-mutated config: the clear is deferred to the barrier's release (bounded retries, `SECURITY:` log) and the service returns `{ ok: true, pairingRowsCleanupDeferred: true }`.
+- **Model config vs backup barrier.** `PUT /api/models/config` refuses at entry and orders every quiet-gated store write before the `openclaw.json` model write — it can no longer rewrite the config and then answer 409.
+- **Rollback fence re-verification.** The "restore the verified pre-update backup first" fence now `lstat`s the recorded archive (a symlink swapped onto the path is never the verified backup), requires containment in the backups directory and the inventory's own vouching (provenance digest / size cross-check, never a hash on the request path), reports why via `backupFileCaveat`, and only ever names a surviving fallback that is on disk, eligible, verified and not partial.
+- **Backup inventory freshness.** `GET /api/openclaw/backups?force=1` bypasses the 5 s SWR cache; an apply settling invalidates it, so the Upgrade tab's post-apply refresh (and any reuse consent) binds to the current archive.
+- **Restart lock vs notification.** The incumbent-restart notification no longer runs under the gateway lifecycle lock / `restartInFlight`; an outbox-unavailable direct send can't hold a restart hostage.
+- **Codex OAuth vs backup barrier.** The callback and manual exchange refuse a held barrier BEFORE consuming the one-use OAuth state (the same URL/paste succeeds after the backup); a barrier that begins after the token exchange retains the redeemed credential and writes it when the barrier lifts — callback `postMessage({ codex: 'success', deferred: true })`, exchange `202 { ok: true, deferred: true, reason: 'backup_in_progress' }` — instead of discarding live tokens behind a 409 the retry could never satisfy.
+- **Unavailable ≠ removed.** During a backup `GET /api/models/config`, `GET /api/models/auth` and `GET /api/codex/status` carry an additive `unavailable: true, reason: "backup_in_progress"` marker (existing fields unchanged) so configured credentials render as unavailable, not deleted.
+- `state-db-quiet.js`: new `whenStateDbQuietReleased(fn)` one-shot release waiter (fires on release, expiry or a begin rollback, after listeners' `end()`), the primitive the deferred writes above need.
+
+#### Upgrade tab (Codex review R5, R7)
+- The "proceed with the most recent verified backup" consent now mirrors the server's reuse gate — only an archive at most 24 h old that postdates the last successful apply/settings migration/update run can be offered; otherwise the toggle is disabled with the honest reason ("No verified backup from the last 24 hours that postdates the last update — if a fresh backup fails, nothing is installed.") instead of promising a fallback the server refuses.
+- The backup inventory re-read after an apply settles asks the server to rescan (`GET /api/openclaw/backups?force=1`; servers without the knob ignore it) instead of caching its 5 s SWR copy as fresh for 60 s, and an open hard-gated confirm re-binds its reuse candidate when that re-read lands, so consent always names the archive that is newest now.
+
+#### Follow-ups from the review lanes
+- **Channel delete outcome flags reach the client.** `DELETE /api/channels/accounts` now forwards the service result (`gatewayRestartFailed`, `pairingRowsCleanupDeferred`) alongside the authoritative `ok: true`; previously the route dropped it and reported a clean delete even when the gateway restart failed or the pairing-row cleanup was deferred past a backup barrier.
+- **Backup reuse window published on the inventory.** `GET /api/openclaw/backups` now carries `reuseWindowStartMs` and `reuseMaxAgeMs`, computed by the same helper the reuse gate uses (`computeReuseWindowStartMs`), so the Upgrade tab's consent model binds to the bounds the server enforces — including run-ledger activations the channel payload never showed. The UI folds the server value in (max with its channel-payload mirror) and falls back to the mirror on older servers.
+- **Quiet-period honesty in the models/Codex UI.** While a backup holds the state-DB barrier, the Models tab, Providers tab and onboarding step keep the last-known credentials/Codex status and say "Credential store unavailable during a backup — showing the last known … / nothing to show until it finishes" instead of an empty profile list or "Not connected"; a Codex OAuth completion deferred past the barrier toasts and badges "Connected — saved after the backup finishes" until the store confirms.
+- **Partial backup reasons on the Backups card.** Rows render a partial archive's recorded `partialReasons` (workspace exclusion, skipped core symlinks such as credentials) instead of the fixed "workspace files excluded" label; reason-less legacy records keep the old label.
+
+#### Review round 2 — the `/review` workflow's confirmed findings (40 confirmed of 68 deduplicated; 23 refuted by the per-finding refuters)
+
+- **Quiesce leaves only the verdict inside the pause.** A quiesced success now runs only its usable check (gzip -t + manifest) and the 0600 chmod with the gateway stopped; the prune, the advisory sha256 and the run record are published after the state DB resumes, the gateway relaunches and the lifecycle lock releases. A usable check that times out (or fails) in-quiesce is finalized on that same deferred path, so the consented-reuse gate's per-candidate re-verification never again runs against a paused box. Recorder pins fix the order.
+- **`PRAGMA integrity_check` off the event loop.** The offline copy's per-DB integrity pass runs in a `node:worker_threads` worker (real `node:sqlite`, read-only on the copy), raced against the remaining offline-copy budget (`budget`) with the quiet checkpoint re-run every 250 ms (`quiet_lost`); a worker that dies without a verdict is an `integrity` failure. `/health`, the 2 s SSE tick, the barrier expiry and the lease keep firing during multi-GB checks on slow volumes.
+- **Offline-copy exclusivity: settle before refusing, and name the argv.** The driver re-samples the live `openclaw` process list for up to 5 s (250 ms polls, ≤ a quarter of the copy budget) so AlphaClaw's own transient CLI shell-out no longer turns the last-resort copy into a terminal `offline_copy_refused`; a holder that stays is refused with `pid (cmdline)`. The `/proc/*/fd` holder scan matches state DBs under both the configured and the realpath'd path.
+- **Incumbent-restart notification reaches the operator.** The `restart_incumbent` notification called the request-shaped `getBaseUrl()` without a request — a TypeError in production that dropped the notification; the "View logs" link is now resolved from the request and threaded through. The structured `incumbent evidence:` line rides at the very end of the merged evidence tail.
+- **Terminal outbox tombstones revive on a fresh same-id enqueue.** A deterministic delivery failure abandons after one attempt; that tombstone no longer silences every later re-enqueue of a stable id forever — a fresh enqueue gets a new attempt (`abandonedTerminal` persisted; one `notification_abandoned` per abandonment). 48 h age-out tombstones and delivered entries stay deduped; old outbox files load unchanged.
+- **Quiet-barrier honesty on more edges.** While the pre-update backup holds the state-DB quiet period: pairing approve and device approve/reject refuse with `409 backup_in_progress` + `Retry-After: 120` BEFORE spawning the CLI; every cron mutator (run/enable/disable/prompt/routing) answers the same 409 instead of the CLI's connection error or a false "unknown cron job id" from the `jobs.json` fallback; `POST /api/watchdog/test-notification` answers 409 instead of a false "nothing is configured or paired".
+- **Gateway pid evidence is uncapped.** The restart-incumbent verdict's pid snapshot filtered for gateway processes AFTER a 12-entry cap over every openclaw-ish process, so a busy host could hide the swapped-in gateway or a surviving one; the gateway snapshot now filters inside the scan with no cap (`listLiveOpenclawProcesses({ match, limit })`); the human evidence lines keep the cap.
+- **Upgrade tab honesty.** The 409 reuse offer keeps the archive's absolute timestamp and derives its "taken … ago" / loss-window strings at render time; "Run repair" clears a leftover reuse offer; a hard-gated confirm opened while the backup list is loading, failed, or `readable:false` says so (with "Retry reading backups") instead of "No eligible backup to reuse"; the Backups card renders `readable:false` as the ERROR state, prints the server's returned page size, and no longer implies only cross-channel updates create a backup. The unreachable "No channels configured" 200-path in the test-notification settings is gone (the server answers 502).
+- **Hermetic gateway tests** mock `execFile` by default so no hermetic test boots the real pinned CLI via the managed launch's `gateway stop --help` warm-up; `createSwrCache` moved to `lib/server/utils/swr-cache.js`; one exported `formatAge`; the `.offline-copy-` staging prefix is the producer's export; `parseMountInfoFsType` gains unit pins; a short-circuited refused copy no longer reads "(after 0 attempts)".
+- **Telegram `400 chat not found` is final only for a proven chat.** Target provenance (pairing store · `allowFrom` fallback · explicit admin target) now rides through the Telegram send; `400 chat not found` abandons after one attempt only for a pairing-store target (the bot has talked to that chat before), while an `allowFrom` id the bot has never exchanged a message with — Telegram answers the same 400 until the user messages the bot — keeps the 48 h retry ladder, the same human-fixable state the 403 "can't initiate conversation" shape already keeps retryable.
+- **Watchdog tab names a hook-aborted launch.** When the prelaunch hook refused or failed the launch, the Watchdog tab shows "Gateway launch aborted by the prelaunch hook" with the code, site and message and the fix (repair or unset the hook, then restart) instead of "Watchdog stopped / monitoring is not running"; the incidents list labels the `prelaunch_hook` event kind.
+- **Rollback fence vouches honestly.** Its digest cross-check compared the run record against the inventory's copy of the same record, so a same-size file swapped onto the recorded archive path passed as "verified"; the fence now checks the on-disk size and mtime against what the publish recorded (`content_changed`, `unverifiable_content` when the record has nothing to compare — no hashing on the request path) and its hint says only that the archive is present and unchanged since it was verified, with the restore runbook re-verifying it before use; a partial archive's caveat names the recorded reasons.
+- **Offline copy cancels its sqlite `backup()`; a stuck step is named.** A throw from node:sqlite's `progress` hook aborts the job at the next step boundary (closing the source alone does not); on a budget/quiet abort the copy throws into the job, closes the source, unlinks the destination, and only when a step never returns inside 2 s records `orphanedBackup: true` on the failure instead of releasing the barrier over a still-stepping backup silently. The artifact record now persists `partialReasons`, so the inventory and the Backups card name what a partial copy omitted.
+- **Fresh-install waiver checks shape, not name.** `.alphaclaw`/`logs`/`backups`/`tmp` must be real directories; `.env` must be the onboarding symlink to `<rootDir>/.env` or a regular file ≤ 4 KB with no `OPENCLAW_*`/TOKEN/SECRET/API_KEY/CREDENTIAL keys.
+- **Channel delete reports a failed pairing-row clear** (`pairingRowsCleanupFailed` + `pairingRowsCleanupError`, SECURITY log) instead of a clean delete over still-authorized allow entries. **Archive mode is recorded, never silent:** a refused `chmod` is recorded on the backup (`mode`, `modeError`), warned as a step and notified; the inventory projects `mode`.
+- **Codex deferred write has a visible outcome.** `GET /api/codex/status` carries `deferredWrite: { state: pending | saved | failed, reason, at }`; a failure after the barrier lifts notifies the operator, and the UI's "saved after the backup finishes" badge ends honestly (saved clears it, failed shows "Codex connection was not saved — reconnect"; without the field two readable `connected:false` reads end the claim).
+- **Backup-reuse consent binds to the digest the operator saw.** When the live backups re-read replaces or removes the archive a CHECKED consent was bound to, the consent is revoked and the dialog says so; an unchanged digest keeps it.
+- **Incumbent-restart notification link hardened.** The "View logs" link prefers the configured public URL and otherwise embeds the request-derived base only when it is a plain `http(s)://host[:port]` origin — a spoofed `X-Forwarded-Host` drops the link, never the message.
+- **A symlinked prelaunch-hook path is refused before it is resolved.** The configured path is `lstat`ed first and must be canonical (a symlink, or a symlinked path component, is refused with code `symlink`); previously `realpath` resolved the link before the `O_NOFOLLOW` open, so a link the deployed agent could repoint at any root-owned executable passed every later check.
+- **A missing backups directory is the empty state, not an error.** The inventory scan folded ENOENT into `readable:false`, and with the Backups card now rendering that as an error every fresh box read "Couldn't read backups" until its first update; a directory that does not exist yet is an empty, readable inventory (EACCES/ENOTDIR stay unreadable). Caught by the browser QA steps added to `tests/browser/upgrade-ui-smoke.sh` (Backups card empty state; the cross-channel confirm's consent toggle present, unchecked and disabled with its reason, cancel starts no apply; Watchdog test-notification honesty).
+- **Docs.** Prelaunch hook runbook says `/proc/<pid>/fd/<fd>` (parent pid) with the fixed system `PATH`; the `409 backup_in_progress` contract names every covered write and the mid-flight deferrals; `OPENCLAW_STATE_DB_QUIET` in the README env table; GNU tar documented as a hard requirement (with a TODOS entry for a bsdtar-compatible extraction); version floors corrected to v0.9.71 (the version this PR claims; v0.9.70 landed as PR #58).
+
+### Notes
+- **Review adjudication:** an adversarial review of the merged server lanes
+  (22 agents on the integrated tree) returned 26 findings — 15 confirmed and
+  fixed in this entry (manifest depth-1 extraction and tail size, incumbent
+  verdict contract, reuse gate outside the quiesce, `deleteChannelAccount`
+  ordering under the barrier, usable-check budget floor, upstream-only
+  prediction source, `applied.operationId` normalization, shared link
+  grammar, bold over code spans, stale `.offline-copy-*` sweep, bounded
+  reuse verification, shutdown-probe abortability, tracked auth-store
+  readers with `busy_timeout`, hook-outcome-aware `latchConfigError`), 3
+  refuted with a cited mechanism, 8 low-confidence items evaluated (the cheap
+  ones — Telegram 403 scope, Slack escaping, quiet-held direct sends — fixed;
+  the rest recorded in TODOS.md).
+- **Compatibility:** run records gain `backup.{quiescedAttempts,
+  contentionRetries, offlineCopy, diagnosis, producer, usableCheck,
+  exclusivityEvidence, reused}` and `applied.operationId`; old files load
+  under the new normalizers. State-DB writes during a backup pause return
+  `409 backup_in_progress` — retry after the pause. `--force` on `gateway
+  stop` is probed, never assumed. The offline-copy archive is
+  AlphaClaw-owned; restore is the same manual runbook as an upstream archive.
+- Upstream follow-ups filed from this wave are tracked in TODOS.md ("File
+  upstream", item 3: lease `busy_timeout 0` + lease held across the snapshot
+  read; rollback-journal self-block) with the AlphaClaw belts to retire once
+  fixed.
+
+#### Delta review — final fix round (14 confirmed of 30 deduped, 38 agents; 13 refuted, 3 low-confidence)
+
+- **Offline copy cancels its sqlite `backup()` instead of orphaning it.** node:sqlite has one cancel path — a throw from the `progress` hook aborts the job at that step boundary (verified on Node 22.23) — and the copy swallowed it: a budget/quiet abort left the native job stepping as an orphan that restarted from page 1 on every gateway write after the relaunch, livelocking on the libuv threadpool while holding a state-DB read lock and the unlinked destination's disk. The hook now rethrows the checkpoint's `quiet_lost`/`budget` error into node:sqlite, and once the deadline timer fires every later step throws the same error, so `backup()` rejects and no further step runs; the close/unlink/2 s orphan-settle path and `orphanedBackup: true` remain only for a single step that never returns. Pinned against the real node:sqlite module. (Replaces the earlier "Offline copy names its orphan" premise that the job could not be cancelled.)
+- **Consented reuse is never `unverifiable_content`.** The reuse path recorded no `bytes`/`mtimeMs` on its artifact, so the rollback fence classified every reused backup as unverifiable ("do not restore it") and then named the same archive as the survivor. `verifyReuseCandidate` now returns the verified inode's size + mtime and `tryReuseRecentBackup` records them, matching the fresh publish; the fence reports the reused archive present and unchanged, with its loss-window caveat.
+- **Our own sessions poll can no longer refuse the offline copy.** `GET /api/agent/sessions` serves the last-known list (or 409 `backup_in_progress` + Retry-After) under the quiet barrier instead of spawning the `sessions` CLI, and the offline copy re-samples the live `openclaw` process list AFTER the state walk, right before the `/proc/*/fd` scan, so a transient child that spawns during the walk is settled rather than refused as a foreign holder.
+- **Re-adding a channel account clears its stale pairing rows, and the SECURITY log names a remedy that works.** "Re-run the delete" 404'd (the account was already gone); the log now says re-add-then-delete or the by-hand row delete. `createChannelAccount` clears that provider/account's allow entries and pending requests first — quiet-gated (409 before any mutation) and fail-closed (a table it cannot clear refuses the add) — so a re-added id never inherits a deleted account's authorized users.
+- Test pin: prelaunch-hook stdout/stderr is shape-redacted (`***`) before it reaches the platform log.
+- **Channel delete is never toasted as clean when it wasn't.** Both delete surfaces (Channels tab, agent bindings section) now read the `DELETE /api/channels/accounts` result through one shared helper (`lib/public/js/lib/channel-delete-outcome.js`): a failed pairing-row clear is an **error** toast that says the deleted account's paired users are STILL authorized, names the reason and the real remedy (re-add the account and delete it again, or clear the rows by hand — a repeat delete would 404); a clear deferred past a backup barrier is a **warning** ("stay authorized until the running backup finishes"); a failed gateway restart is appended to the toast and raises the restart-required banner.
+- **Rollback fence dialog names why a present archive must not be restored.** `runRollback` now passes the fence's `backupFileCaveat` into the data-risk model, so a symlinked / content-changed / unverifiable archive renders "is on disk but failed verification — <why> — do not restore it" instead of the "pruned" wording (which is kept for a genuinely missing file).
+- **Backups card copy.** The `future_dated` ineligibility reads "not reusable — dated in the future — check the box's clock" instead of the raw enum; the unreadable-backups error no longer suggests the directory "may not exist yet" (a missing directory is an empty inventory server-side) and points at permissions or a stray file at the path.
+- **Store-unavailable badges clear on their own.** While `GET /api/models/config` / `GET /api/codex/status` answer `unavailable: true` (state-DB backup barrier), the Models tab, Providers tab and onboarding Codex step arm ONE bounded re-read (`kStoreUnavailableRecheckMs`, 30 s; re-armed only while still unavailable, dropped once readable, cleared on unmount) so "Unavailable during backup" no longer outlives the barrier until the operator acts.
+- **The hermetic suite no longer litters `/tmp`.** Hundreds of tests `mkdtemp` under `os.tmpdir()` and many never clean up (a throw before the cleanup, an `afterAll` a SIGTERMed fork never reaches); measured after ~45 full runs on one dev box: 139 770 entries and 7 GB. A Vitest `globalSetup` (`tests/setup-tmpdir.js`) now gives every run a private `TMPDIR` (`alphaclaw-vitest-run-*`) that the forked workers inherit and removes it at teardown, with a fail-closed path guard on the recursive delete; `ALPHACLAW_KEEP_TEST_TMPDIR=1` keeps it for inspection. Verified: a full run adds zero test directories to the shared `/tmp`. The same setup sets `DBUS_SESSION_BUS_ADDRESS=disabled:` for the run: tests that execute real host binaries (the CLI shells out to `gog` when it is installed) otherwise make GLib autolaunch a `dbus-daemon --session` per call that outlives the suite — 1 327 orphaned daemons were counted on one box; a full run now leaves none. Four documentation inaccuracies surfaced by the release documentation pass were fixed (hook error code `writable_by_others`, the Telegram 403/400 determinism sentence, the literal `state_db_quiet` status names, the inventory entry's `name`/`mode`/`operationId` fields).
+
+#### Merge note
+
+- Container tier harness: when the registry's `beta` dist-tag is not a row in the catalog's Beta section (it moved to the GA release 2026.9.1 on 2026-09-03, which the Stable section lists), the journey applies the first Beta-section row and binds every later wait to that row's version instead of the dist-tag — run 8 on the merged tree waited ten minutes for `2026.9.1` after installing `2026.9.1-beta.1`.
+- Rebased over v0.9.70 (#58, supervisor adoption for `--force` cold restarts): the incumbent-restart verdict now runs before the autotune stamp and the supervisor adoption, so a restart the old gateway answered adopts nothing and stamps nothing; on that honest failure the adoption bookkeeping is reset with the managed-child slot. Everything else from #58 is kept as landed.
 
 ## [0.9.70] - 2026-09-02
 

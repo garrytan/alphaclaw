@@ -880,6 +880,62 @@ describe("createWatchdogOverseer", () => {
       expect(fresh.overseer.getSituation().current.state).toBe("failed");
     });
 
+    // start() used to touch only the timers; it now also sweeps the INCIDENT
+    // records for an operator's re-review the restart cut off. The `manual`
+    // flag on the pending stamp is what separates that (rewrite as failed, in
+    // place) from an automatic pending (left alone for the stale-pending
+    // retry, which may notify — right for a review nobody asked for).
+    it("start() rewrites an operator's interrupted incident re-review as failed in place, and leaves an AUTOMATIC pending for the stale-pending retry", async () => {
+      const nowRef = { value: kNow };
+      const priorVerdict = { state: "done", verdict: "resolved", manual: false, at: kNow - 60_000 };
+      const { overseer, db } = createHarness({
+        nowRef,
+        seed: [
+          settledIncident(1, {
+            overseer: {
+              v: 1,
+              current: { state: "pending", manual: true, at: kNow - 30_000 },
+              history: [priorVerdict],
+            },
+          }),
+          settledIncident(2, {
+            overseer: {
+              v: 1,
+              current: { state: "pending", manual: false, at: kNow - 30_000 },
+              history: [],
+            },
+          }),
+        ],
+      });
+      overseer.start();
+      overseer.stop();
+
+      const interrupted = db.getIncidentById(1).overseer;
+      expect(interrupted.current).toEqual({
+        state: "failed",
+        manual: true,
+        reason: "interrupted",
+        summary: "Interrupted by a server restart.",
+        at: kNow,
+      });
+      // In place (no supersede): the failed attempt replaces its own pending
+      // stamp, so the earlier verdict is neither rotated nor lost.
+      expect(interrupted.history).toEqual([priorVerdict]);
+      expect(db.getIncidentById(2).overseer.current).toEqual({
+        state: "pending",
+        manual: false,
+        at: kNow - 30_000,
+      });
+
+      // The untouched automatic pending is exactly what the 10-minute
+      // stale-pending retry re-runs; the interrupted manual one is settled.
+      nowRef.value = kNow + 11 * 60_000;
+      const retried = await overseer.maybeReviewNext();
+      expect(retried).toMatchObject({ ran: true, incidentId: 2 });
+      expect(db.getIncidentById(2).overseer.current.state).toBe("done");
+      expect(db.getIncidentById(1).overseer.current.state).toBe("failed");
+    });
+
     it("returns the report even when persistence fails, and marks the stored attempt honestly", async () => {
       const runner = createFakeRunner({ verdict: kSituationVerdict });
       const { overseer, db } = createHarness({ runner });
