@@ -5,6 +5,46 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.9.82] - 2026-09-04
+
+Fix wave, PR 9a — Doctor.
+
+### Fixed
+- **Dismissing the skills-bloat nudge hid the escalation** (audit F109). The
+  P2 near-limit warning and the P1 over-limit card shared one `sourceKey`, so
+  a dismissed nudge permanently suppressed the later escalation. The keys are
+  now `det:skills-bloat:near` / `det:skills-bloat:over` (same doctrine as the
+  memory-budget cards). A previously dismissed nudge resurfaces once under its
+  new key.
+- **`GET /api/doctor/runs` parsed multi-MB manifests on every poll** (F110).
+  The Doctor tab polls it every 15s (2s during a run) and reads only `id`,
+  `status`, and counts; the endpoint now serves the lean run summaries
+  (`/api/doctor/runs/:id` keeps the full model with `workspaceManifest` and
+  `rawResult`).
+- **Doctor prompt history grew without bound** (F111). Every historical
+  dismissed/fixed card row (cloned by each reuse run, never pruned) was
+  rendered into the LLM prompt with no dedupe or cap, and the `--params` exec
+  argument had no byte budget unlike the fix dispatcher. History is deduped by
+  status+title+category and capped at 40 per status; the run refuses with a
+  clear error only if the prompt still exceeds the argument budget with history
+  dropped.
+- **Fingerprint worker stayed disabled until restart** (F112). Three
+  consecutive request timeouts (an environmental stall, not a worker defect)
+  tripped the respawn cap for the rest of the process, blinding the scheduled
+  drift trigger. The budget re-opens after a 10-minute cooldown.
+- **Spurious scheduled scans on restart** (F113). The env signature hashed the
+  model catalog's `source` label (`openclaw` vs `cache`), which flips on every
+  restart and Models-tab refresh; only the model rows are hashed now.
+- **Forged evidence snippets** (F114). Evidence items passed arbitrary keys
+  through, and a pre-existing `snippet` was never cleared, so an LLM- or
+  import-supplied excerpt rendered as a server-read "snapshot" block. Evidence
+  is whitelisted to `type/text/path/startLine/endLine`, and `snippet` is always
+  set by the server or absent.
+
+### Notes
+- Tests: extended `doctor-deterministic-checks`, `routes-doctor`,
+  `doctor-service`, `doctor-normalize`, `fix-batch-regressions`.
+
 ## [0.9.81] - 2026-09-04
 
 Fix wave, PR 8c — server odds and ends.

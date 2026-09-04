@@ -151,5 +151,44 @@ describe("diff-review fix-batch regressions", () => {
         fs.rmSync(hangingWorkerPath, { force: true });
       }
     });
+
+    it("re-opens the respawn budget after the cooldown instead of staying dark until restart (F112)", async () => {
+      const {
+        createWorkspaceSnapshotWorkerClient,
+        kMaxSnapshotWorkerRespawns,
+      } = require("../../lib/server/doctor/workspace-fingerprint");
+      const alwaysHangPath = path.join(os.tmpdir(), `hang-forever-worker-${process.pid}.js`);
+      fs.writeFileSync(
+        alwaysHangPath,
+        `const { parentPort } = require("worker_threads"); parentPort.on("message", () => {});`,
+      );
+      let nowMs = 1_000_000;
+      const client = createWorkspaceSnapshotWorkerClient({
+        workerScriptPath: alwaysHangPath,
+        requestTimeoutMs: 40,
+        respawnCooldownMs: 1000,
+        now: () => nowMs,
+      });
+      try {
+        for (let i = 0; i < kMaxSnapshotWorkerRespawns; i += 1) {
+          await expect(client.computeWorkspaceSnapshotAsync("/hang")).rejects.toThrow(
+            "Workspace snapshot worker timed out",
+          );
+        }
+        // Cap tripped: an immediate request is refused up front…
+        await expect(client.computeWorkspaceSnapshotAsync("/hang")).rejects.toThrow(
+          "respawn cap reached",
+        );
+        // …but once the cooldown has passed the client spawns again (and this
+        // worker still hangs, so it times out rather than being refused).
+        nowMs += 1001;
+        await expect(client.computeWorkspaceSnapshotAsync("/hang")).rejects.toThrow(
+          "Workspace snapshot worker timed out",
+        );
+      } finally {
+        await client.terminate();
+        fs.rmSync(alwaysHangPath, { force: true });
+      }
+    });
   });
 });
