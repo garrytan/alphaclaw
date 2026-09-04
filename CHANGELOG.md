@@ -5,6 +5,73 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.9.76] - 2026-09-04
+
+Fix wave, PR 3 — the agent-admin manifest and what the agent is allowed to see.
+
+### Fixed
+- **`requireAdmin` now admits the agent actor only through an enforcement
+  grant** (audit F067). Team and buzz routes guard on `requireAdmin`, which
+  checked `identity.role === "admin"` — a role the bearer-authenticated agent
+  never has — so every manifested `team.*`/`channels.buzz.*` op the agent was
+  promised failed 403 `admin_required` behind the tier gate. The enforcement
+  layer now attaches a frozen, Symbol-keyed grant after the manifest tier and
+  confirm gate pass, bound to the request's method, path, and sha256 digests
+  of query and body; `requireAdmin` re-derives the digests and admits the
+  agent only on an exact match. Human sessions are unchanged. A route mounted
+  without enforcement in front, a forged plain request property, or a body
+  rewritten after the grant all stay 403.
+- **Browse mutations on config and secret paths are denied outright** (F064).
+  `browse.write/create-file/create-folder/move/restore` sat at write tier and
+  `browse.delete` at dangerous, so an agent could overwrite `openclaw.json`
+  (gateway auth mode, channel secrets), `alphaclaw.json` (team roster), or
+  `devices/paired.json`, or delete `.alphaclaw/agent-admin-token`, with at
+  most a confirm code between it and the change. A shared `tierResolver` now
+  resolves any request naming those paths — after the same `../`-collapsing
+  normalization the server applies, case-insensitively, `.bak` rotations
+  included — to `denied`. The read guard covers `openclaw.json`, its backups,
+  and `devices/` as well (F066).
+- **Channel account add/remove report the restart they perform** (F068). The
+  handlers call `restartGateway` themselves but the manifest said
+  `restart: "marks"`, so the generated skill told the agent "restart required
+  after" and it would issue a second, dangerous-tier restart. The descriptors
+  now say `restarts`, the skill renders "restarts gateway (ends your session)",
+  and the recipe says not to restart again.
+- **Stale manifest entries removed** (F069, F225). `system.gateway-status`
+  pointed at `/api/gateway-status`, a route that does not exist (the agent got a
+  404 for a "safe" op); the `GET /api/team/login-info` allowlist entry named a
+  route that was deleted with the operator picker. `GET
+  /api/openclaw/capabilities`, registered inline in `lib/server.js`, was never
+  classified and therefore denied to the agent as `op_not_in_manifest`; it is
+  now `updates.capabilities` (safe), and the route-coverage test scans
+  `lib/server.js` too so inline routes cannot slip past again (F070).
+- **Confirm copy on a repeat attempt was wrong** (F073). A second unconfirmed
+  attempt for the same op re-used the pending code (by design) but the 428
+  body still said "A code was sent to your admin channel" although the
+  notifier de-duplicates the re-send. The `delivery` field now says the
+  earlier code is still valid and was not re-sent.
+
+### Changed
+- **Agent-visible error text is sanitized** (audit critic gap). Route handlers
+  pass `err.message` straight to the envelope — right for the dashboard, but
+  147 sites let an agent transcript collect `execSync` command lines, absolute
+  paths, and the occasional token-shaped substring. For the agent actor a 5xx
+  `error` is now a fixed sentence ("details are in the server log"); a 4xx
+  `error` is kept as validation feedback but scrubbed of secret shapes,
+  `token=` parameters, and control characters, and clamped to 400 chars.
+  `code` and `hint` are never touched. Humans see exactly what they saw before.
+- The generated skill's error-code table documents `admin_required`,
+  `confirm_invalid`, `confirm_expired`, `confirm_attempts_exhausted`,
+  `confirm_backlog_full`, and `dangerous_op_requires_confirmation` with the
+  next action for each (F072); `browse.md` names the denied path set.
+
+### Notes
+- Docs: AGENTS.md (grant rule, browse denied set, error-text rule),
+  `docs/designs/agent-admin.md` (pipeline + component notes). New tests:
+  `tests/server/agent-admin-grant.test.js`; extended `admin-manifest`,
+  `agent-admin-e2e`, `agent-admin-enforcement-e2e`, `agent-admin-redact`,
+  `agent-admin-confirm`.
+
 ## [0.9.75] - 2026-09-04
 
 Fix wave, PR 2 — the boot spine (`bin/alphaclaw.js` and the CLI git-sync).

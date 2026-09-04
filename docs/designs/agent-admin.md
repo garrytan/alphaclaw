@@ -45,7 +45,10 @@ exists to (a) keep secrets out of chat transcripts, (b) attribute actions
                                      ▼
                      enforcement middleware (agent actor only)
                      manifest lookup → tier gate → confirm gate → redact res.json
-                                     │
+                                     │  passed → req[Symbol grant] = frozen
+                                     │           {opId, method, path, digests}
+                                     ▼
+                  requireAdmin (admin role, OR a grant matching this exact request)
                                      ▼
                   existing route handlers (validation, side effects, restart marking)
                        │                 │                    │
@@ -56,8 +59,8 @@ exists to (a) keep secrets out of chat transcripts, (b) attribute actions
 ```
 
 ## Key components (as built)
-- **Operation manifest** (`lib/server/admin-manifest/`): 20 domain modules, 182
-  ops. Single source of truth for agent-facing POLICY (tier, redaction, docs,
+- **Operation manifest** (`lib/server/admin-manifest/`): 22 domain modules, 220
+  ops (0.9.76). Single source of truth for agent-facing POLICY (tier, redaction, docs,
   hints) — route handlers keep owning validation. Matching is on `req.baseUrl +
   req.path` (Express trims the mount prefix). A route-coverage test fails CI if
   any `/api` route is neither classified nor in `kUnmanifestedRoutes`.
@@ -79,7 +82,16 @@ exists to (a) keep secrets out of chat transcripts, (b) attribute actions
   deny-outside-manifest for the agent actor across ALL of `/api` incl. GETs
   (never falls through to the gateway proxy, A20); two-phase audit (durable
   INTENT before self-restarting ops, OUTCOME via res `finish`/`close`, A26);
-  redaction fails CLOSED.
+  redaction fails CLOSED. Agent-visible error text is sanitized after
+  redaction (5xx → fixed sentence, 4xx → secret shapes/`token=`/control chars
+  scrubbed; `code`/`hint` untouched). After the tier + confirm gate pass, the
+  layer attaches an **enforcement grant** (`agent-admin/grant.js`): a frozen
+  record under a module-private Symbol carrying opId, method, path and sha256
+  digests of query and body. `requireAdmin` (routes/auth.js) admits the agent
+  only with a grant that still matches the request — human sessions keep
+  passing on role — so a route mounted without enforcement in front, a forged
+  plain property, or a body rewritten after the grant fail closed (F067).
+  Browse mutations resolve to `denied` for config/secret paths (F064/F066).
 - **Confirm service** (`agent-admin/confirm-service.js` + `db/agent-admin/`):
   8-char base32 codes, plaintext in a 0600 DB so the dashboard can display them,
   10-min expiry, single-use atomic redemption, params-bound (method+path+query+
