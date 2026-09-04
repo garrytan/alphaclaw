@@ -5,6 +5,8 @@ const {
   reduceGatewayState,
   createGatewayStateTracker,
   kGatewayStateCatalog,
+  actionsForState,
+  kLifecycleActionBlockReasons,
 } = require("../../lib/server/gateway-state");
 
 const kNow = 1_800_000_000_000;
@@ -267,6 +269,145 @@ describe("server/gateway-state reducer", () => {
     const result = reduceGatewayState(inputs({ operation }));
     expect(result.state).toBe("running");
     expect(result.operation).toEqual(operation);
+  });
+
+  it("offers a restart-class action (Restart or Retry) in every onboarded state except booting", () => {
+    // Repair / Resume channels / Refresh are the recommended move in their
+    // states, never the only one: an operator must be able to relaunch the
+    // gateway from the card without running doctor first. Two exemptions,
+    // both deliberate: not_onboarded has no gateway (the route 400s), and
+    // booting IS the launch — a restart queued behind the boot hold would
+    // only recycle a gateway that just came up (boot_failed carries Retry).
+    for (const state of Object.keys(kGatewayStateCatalog)) {
+      const actions = actionsForState(state, {
+        operationActive: false,
+        inStabilizationWindow: false,
+        gatewayHeld: false,
+      });
+      const restartClass = actions.filter(
+        (a) => a.id === "restart" || a.id === "retry",
+      );
+      if (state === "not_onboarded") {
+        expect(restartClass, state).toHaveLength(0);
+        continue;
+      }
+      if (state === "booting") {
+        expect(actions, state).toEqual([]);
+        continue;
+      }
+      expect(restartClass.length, state).toBeGreaterThanOrEqual(1);
+      for (const a of restartClass) {
+        expect(a.disabledReason, state).toBeUndefined();
+      }
+    }
+  });
+
+  it("a reconciler gateway hold disables Restart/Retry AND Repair with the Upgrade-page reason, leaving the rest enabled", () => {
+    for (const state of ["running", "config_error", "down", "flapping", "boot_failed", "degraded", "safe_mode", "unknown", "starting"]) {
+      const actions = actionsForState(state, {
+        operationActive: false,
+        inStabilizationWindow: false,
+        gatewayHeld: true,
+      });
+      for (const a of actions) {
+        if (["restart", "retry", "repair"].includes(a.id)) {
+          expect(a.disabledReason, `${state}/${a.id}`).toBe(
+            kLifecycleActionBlockReasons.gatewayHeld,
+          );
+        } else {
+          expect(a.disabledReason, `${state}/${a.id}`).toBeUndefined();
+        }
+      }
+    }
+    // Copy is generic on purpose: the Upgrade page picks the remedy.
+    expect(kLifecycleActionBlockReasons.gatewayHeld).toContain("Upgrade page");
+    expect(kLifecycleActionBlockReasons.gatewayHeld).not.toContain("Retry migration");
+  });
+
+  it("precedence: a live operation outranks a hold in the disabled reason", () => {
+    const held = reduceGatewayState(
+      inputs({
+        gatewayHeld: true,
+        operation: { kind: "repair", label: "Repairing", startedAt: kNow },
+      }),
+    );
+    expect(held.actions.find((a) => a.id === "restart").disabledReason).toBe(
+      kLifecycleActionBlockReasons.operation,
+    );
+    const heldIdle = reduceGatewayState(inputs({ gatewayHeld: true }));
+    expect(heldIdle.actions.find((a) => a.id === "restart").disabledReason).toBe(
+      kLifecycleActionBlockReasons.gatewayHeld,
+    );
+    const clear = reduceGatewayState(inputs({}));
+    expect(clear.actions.find((a) => a.id === "restart").disabledReason).toBeUndefined();
+  });
+
+  it("safe_mode glossary tells the truth: Restart does not resume paused channels", () => {
+    expect(kGatewayStateCatalog.safe_mode.glossary).toContain("does not resume");
+    // And booting's glossary no longer advertises a restart it does not offer.
+    expect(kGatewayStateCatalog.booting.glossary.toLowerCase()).not.toContain("restart");
+  });
+
+  it("flapping keeps Repair primary but no longer makes it the only remedy", () => {
+    const result = reduceGatewayState(
+      inputs({
+        watchdog: {
+          lifecycle: "running",
+          health: "healthy",
+          safeMode: false,
+          crashCountInWindow: 2,
+          crashLoopWindowMs: 300000,
+        },
+      }),
+    );
+    expect(result.state).toBe("flapping");
+    const primary = result.actions.find((a) => a.kind === "primary");
+    expect(primary?.id).toBe("repair");
+    const restart = result.actions.find((a) => a.id === "restart");
+    expect(restart).toBeTruthy();
+    expect(restart.kind).toBe("secondary");
+    expect(restart.disabledReason).toBeUndefined();
+  });
+
+  it("safe_mode offers Restart alongside Resume channels", () => {
+    const result = reduceGatewayState(
+      inputs({
+        watchdog: {
+          lifecycle: "running",
+          health: "healthy",
+          safeMode: true,
+          suppressedChannels: ["telegram"],
+          crashCountInWindow: 0,
+        },
+      }),
+    );
+    expect(result.state).toBe("safe_mode");
+    expect(result.actions.find((a) => a.kind === "primary")?.id).toBe(
+      "resume_channels",
+    );
+    expect(result.actions.some((a) => a.id === "restart")).toBe(true);
+  });
+
+  it("starting: Restart is disabled with a reason under a leased operation, enabled for a watchdog-owned relaunch", () => {
+    const leased = reduceGatewayState(
+      inputs({
+        tcp: { running: false, observedAt: kNow },
+        operation: { kind: "gateway_repair", label: "Repairing", startedAt: kNow },
+      }),
+    );
+    expect(leased.state).toBe("starting");
+    expect(leased.actions.find((a) => a.id === "restart")?.disabledReason).toBeTruthy();
+
+    const watchdogRelaunch = reduceGatewayState(
+      inputs({
+        tcp: { running: false, observedAt: kNow },
+        watchdog: { lifecycle: "restarting", health: "unknown", safeMode: false, crashCountInWindow: 0 },
+      }),
+    );
+    expect(watchdogRelaunch.state).toBe("starting");
+    const restart = watchdogRelaunch.actions.find((a) => a.id === "restart");
+    expect(restart).toBeTruthy();
+    expect(restart.disabledReason).toBeUndefined();
   });
 
   it("disables the restart action with a reason while an operation is active", () => {
