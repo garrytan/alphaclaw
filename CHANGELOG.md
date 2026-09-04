@@ -5,6 +5,125 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.9.72] - 2026-09-04
+
+Fix wave, PR 1 of the series — server boundary hardening. A read-only audit
+(31 finders, 253 findings, each verified by two independent reviewers → 221
+confirmed) found four defect classes; this PR closes every P1 security and
+data-loss instance and lands regression tripwires so the classes cannot come
+back silently. Nothing here changes the UI beyond honest error copy.
+
+### Fixed
+- **Browse root delete wiped the state directory.** `DELETE /api/browse/delete`
+  with an empty, `.` or `/` path resolved to `OPENCLAW_DIR` itself and
+  recursively removed it; every browse mutation now refuses the root (400).
+  Moving or deleting an ANCESTOR of a locked/protected path (`skills`,
+  `hooks/bootstrap`, `.alphaclaw`) walked past the 403s — move and delete are
+  now ancestor-aware, including an on-disk walk for protected entries inside a
+  folder. Browse writes are atomic (temp + fsync + rename) and keep the file
+  mode; a symlink to a locked file cannot be deleted through the link.
+- **Unauthenticated WebSocket-upgrade crash.** A malformed `Host` header or
+  request-target (`a b`, `[::1`, `//[`) threw out of the `upgrade` listener
+  before any auth check — an uncaught exception that took AlphaClaw and the
+  gateway down on one request. It now answers 400; a client resetting
+  mid-handshake (EPIPE) is no longer fatal either.
+- **`/hooks` dot-segment traversal.** The webhook forwarder normalized the
+  inbound path and sent it on, so `/hooks/../tools/invoke` reached arbitrary
+  gateway endpoints pre-auth. The ingress now validates one to three decoded
+  slug segments from the RAW request-target (double-encoding, `/`, `\`, NUL
+  and `..` refused) and REBUILDS the gateway path from them. Malformed
+  percent-encoding is a 400 instead of a 500. The documented `x-openclaw-token`
+  (and the Telegram secret header) is redacted from the stored request log,
+  which the agent can read at the safe tier. The forwarder gained a gateway
+  timeout (504), client-abort (499) and upstream-abort handling — a stalled
+  gateway can no longer park deliveries forever with no request-log row.
+- **Path traversal via identifiers.** `agentId` on the models routes reached
+  `agents/<id>/…` (auth-store read AND write); pairing `reject` path-joined an
+  unvalidated `channel`; the Google `client` slot name landed in the gog
+  credentials filename (`../../openclaw/openclaw` could overwrite
+  openclaw.json); a Telegram `accountId` of `__proto__` made
+  `Object.prototype` the config write target. All four are slug-validated at
+  the boundary (400 + one audit line naming route, field, reason and actor),
+  and `__proto__`/`constructor`/`prototype` are never valid identifiers.
+- **openclaw.json rewritten from scratch.** `PUT /api/models/config` (and the
+  GET's normalization branch and the auth-reference sync) parsed the config
+  with a `{}` fallback and wrote raw, so a JSON5-commented or torn file was
+  replaced by a stub. Every write in auth-profiles is one locked
+  `updateOpenclawConfig` call that refuses an unparseable existing file; the
+  routes answer `503 config_unreadable` with repair copy.
+- **Agent could redirect its own confirm codes.** `notifications.update` sat
+  at write tier, so the agent could repoint (or wipe) the admin targets that
+  receive its dangerous-tier confirm codes. Any body touching `adminTargets`
+  or `preferredChannel` now needs a confirm delivered to the CURRENT targets.
+- **Auth hygiene.** The shared password was compared with `!==` (now
+  constant-time, and only a string body can match — `["secret"]` no longer
+  coerces to the secret); an unknown or disabled member email skipped the
+  scrypt work (login latency revealed which addresses exist — a decoy row is
+  verified instead); the session cookie gains `Secure` behind a TLS proxy via
+  `req.secure` under the configured trust-proxy hops; credential-bearing
+  responses (`/api/models/config`, `/api/models/auth`,
+  `/api/nodes/connect-info`) answer `Cache-Control: no-store`; a dead
+  prefix-based OAuth-callback exemption was removed.
+- **Onboarding import.** The GitHub clone interpolated the request-supplied
+  repo slug into a shell string (`owner/repo#$(cmd)` passed the API checks) —
+  the slug is now exactly `owner/repo` and the clone, and both
+  `alphaclaw git-sync` calls, run argv-form. Imported `.env` files can no
+  longer write deployment-controlled keys (`SETUP_PASSWORD`,
+  `OPENCLAW_GATEWAY_TOKEN`, `WEBHOOK_TOKEN`, `WATCHDOG_*`, deployment-only
+  knobs); skipped keys are reported. A full-root import that displaced the
+  managed `<state>/.env` symlink with the repo's file is now moved aside
+  (`.env.imported-<ts>`) and re-linked. Failed pairing-allowlist clears are
+  logged instead of swallowed.
+- **Durable atomic writes and honest locks.** `writeFileAtomic` fsyncs the
+  temp file before the rename and the directory after it; the advisory lock
+  records `{pid, token, start}` and breaks a stale lock by rename-claim (two
+  waiters can no longer both acquire), never steals from a live holder, and
+  detects a recycled PID. Secret-bearing writers (`.env`, agent-admin token,
+  `team-operators.json`, Google client_secret) land at 0600 on a fresh inode.
+
+### Changed
+- **Fail closed on a corrupt `alphaclaw.json`.** The auth boundary used to
+  merge an existing-but-unparseable file onto defaults, which silently
+  RE-ENABLED shared-password login and dropped member sessions. Sign-in now
+  answers `503 config_unreadable` and existing sessions are refused until the
+  file is fixed; `ALPHACLAW_ALLOW_LEGACY_LOGIN=1` remains the emergency hatch
+  (README env table row added). A missing file is still a fresh install.
+- **Restart-required for explorer edits is recorded server-side** after a
+  successful write/create/move/delete/restore of `openclaw.json` or
+  `hooks/transforms/**`, from ONE shared rules file
+  (`lib/public/shared/browse-restart-rules.json`) the client mirrors — the
+  banner now survives reloads, shows in every tab and fires for agent writes.
+  Responses carry `restartRequired: true` when it applies.
+- The advisory file-lock default wait drops from 5000ms to 1000ms (the sync
+  loop spins the event loop; a contended lock now surfaces as a fast
+  `ELOCKTIMEOUT` naming the holder pid instead of a multi-second stall).
+- `/api/telegram/*` rejects any `accountId` that is not a lowercase slug with
+  400 (`Work`, `a b`, `a/b` were previously accepted as config keys).
+
+### Added
+- Structural guard tests under `tests/server/guards/` — four scanners with
+  `kKnownOffenders` allowlists (why-comment per entry) and planted-offender
+  self-tests: raw managed-config writers (8 known, PRs 2/4/7 drive to zero),
+  shell strings built from data (9 known), unwrapped async route handlers
+  (98 known, PR 2a), raw UI `setInterval` (19 files, PR 11). A new offender
+  fails CI; a fixed offender still listed fails CI.
+- `lib/server/utils/input-audit.js` — one injection-safe audit line per
+  rejected boundary identifier, with the actor type (agent bearer vs human).
+
+### Notes
+- **Reconciliation with main.** The branch fast-forwarded onto v0.9.71 before
+  any edit; `routes/models.js`, `routes/pairings.js`, `auth-profiles.js` and
+  `alphaclaw-config.js` (touched by v0.9.69–0.9.71) were edited on top of
+  main's versions — no semantic conflicts.
+- **Supersedes recent work:** none. The removed `withFileLock` (async),
+  `resolveHookName`/`resolveGatewayPath` and the prefix OAuth exemption all
+  predate the 7-day window (2026-08-25, 2026-03-01, 2026-02-26).
+- Remaining fix-wave PRs (2a wrapAsync sweep, 2 boot spine, 3 agent-admin
+  tiers, 4 gateway, 5 watchdog, 6 release channel, 7 config writers/readers,
+  8a-c Google/Telegram/misc, 9a-b doctor/chat, 10 rescue session, 11 UI,
+  12 CI/live tiers, 13 docs) follow one at a time; the guard allowlists name
+  the PR that retires each entry.
+
 ## [0.9.71] - 2026-09-02
 
 Fixes issue #54 — a beta → stable downgrade refused `409 backup_failed`

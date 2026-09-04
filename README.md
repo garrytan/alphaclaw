@@ -237,6 +237,7 @@ How it works:
 - **Permission boundary.** Members can chat and view status. Updates, secrets, terminals, agents, webhooks, and team management stay admin-only — enforced on every API route, WebSocket, and OAuth callback, with a role-aware nav that hides admin pages.
 - **Safe enable + rollback.** The enable wizard explains the security boundary up front, applies the gateway change, restarts, verifies the login handshake end to end, and restores the previous setup automatically if the check fails. Optional lockdown turns off shared-password login once your own account works (a break-glass env var is included).
 - **Off means off.** Turning team access off fully ends member access: member sessions and logins stop, and existing shared-password sessions end the moment shared-password login is disabled.
+- **Fail closed on a broken config.** If `alphaclaw.json` exists but cannot be parsed, sign-in answers `503 config_unreadable` and every existing session (shared-password and member) is refused until the file is fixed or restored — a corrupt file never silently re-enables shared-password login. `ALPHACLAW_ALLOW_LEGACY_LOGIN=1` on the server is the emergency hatch for shared-password access meanwhile.
 
 Team endpoints live under `/api/team` (`enable`, `disable`, `invites`, `members`, `presence`); all mutations are admin-only.
 
@@ -325,6 +326,7 @@ Failure semantics: a refused check (wrong owner/mode/location, symlink, missing)
 | `WATCHDOG_NOTIFICATIONS_DISABLED` | Optional | Disable watchdog notifications (`true`/`false`). Deliberate exemptions that still deliver: the settings-card Test button, agent-admin audit notices, and the boot webhook |
 | `WATCHDOG_NOTIFICATIONS_QUIET`    | Optional | Important-only notifications (`true` = suppress informational/green notices; absent = verbose ON). Note: a platform-level env var applies only until the first dashboard save writes the key into `.env` — from then on (including after restarts) the `.env` value wins for all watchdog toggles |
 | `ALPHACLAW_NOTIFY_WEBHOOK_URL`    | Optional | Extra out-of-band notification channel: watchdog/upgrade alerts are also POSTed here as `{"text": ...}` JSON — delivered even straight from the boot process when no server is up |
+| `ALPHACLAW_ALLOW_LEGACY_LOGIN`    | Optional | `1` re-admits shared-password login while team lockdown is on or `alphaclaw.json` is unreadable (emergency hatch). Deployment env only |
 | `PORT`                            | Optional | Server port (default `3000`)                       |
 | `ALPHACLAW_ROOT_DIR`              | Optional | Data directory (default `/data`)                   |
 | `ALPHACLAW_SKIP_SYSTEM_CRON_INSTALL` | Optional | Skip writes to `/etc/cron.d` while keeping cron config (`true`/`false`); the managed hourly script still exits when sync is disabled |
@@ -381,6 +383,7 @@ AlphaClaw is a convenience wrapper — it intentionally trades some of OpenClaw'
 | **Auto CLI approval**   | The first CLI device pairing is auto-approved so you can connect without a second screen. Subsequent requests appear in the UI.       | Removes the manual pairing step for the initial CLI connection.                                        |
 | **Query-string tokens** | Webhook URLs support `?token=<WEBHOOK_TOKEN>` for providers that don't support `Authorization` headers. Warnings are shown in the UI. | Tokens may appear in server logs and referrer headers. Use header auth when your provider supports it. |
 | **Gateway token**       | `OPENCLAW_GATEWAY_TOKEN` is auto-generated and injected into the environment so the proxy can authenticate with the gateway.          | The token lives in the `.env` file on the server — standard for managed deployments but worth noting.  |
+| **Webhook ingress**     | `/hooks/<name>` is unauthenticated by design (providers call it). The hook name is validated as a single slug segment and the gateway path is rebuilt from it — dot segments, encoded slashes or extra segments never reach the gateway; every hook auth header is redacted from the stored request log. | A provider that needs a nested hook path gets at most three validated segments. |
 
 If you need OpenClaw's full security posture (manual pairing codes, no query-string tokens, no auto-approval), use OpenClaw directly without AlphaClaw.
 
