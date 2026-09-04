@@ -2742,6 +2742,178 @@ describe("server/routes/system", () => {
     expect(deps.restartGateway).not.toHaveBeenCalled();
   });
 
+  // Post-lock re-validation: these run against the REAL lifecycle lock with a
+  // deferred holder — flipping state inside an acquire mock would only test
+  // call order, not the queue.
+  const createQueuedRestartHarness = ({ hold = null, applyInProgress = false } = {}) => {
+    const { createGatewayLifecycleLock } = require("../../lib/server/gateway-lifecycle-lock");
+    const deps = createSystemDeps();
+    const world = { hold, applyInProgress };
+    deps.openclawChannelService = {
+      getChannelInfo: vi.fn(() => ({ gatewayHold: world.hold })),
+      isApplyInProgress: vi.fn(() => world.applyInProgress),
+    };
+    deps.gatewayLifecycleLock = createGatewayLifecycleLock({ leaseMs: 60_000 });
+    deps.operationEvents = {
+      createOperation: vi.fn(),
+      publish: vi.fn(),
+      complete: vi.fn(),
+      fail: vi.fn(),
+    };
+    deps.restartRequiredState.beginRestart = vi.fn(() => ({ operationId: "op-queued" }));
+    deps.restartRequiredState.completeRestart = vi.fn();
+    deps.restartRequiredState.updateRestartOperation = vi.fn();
+    deps.restartRequiredState.getActiveRestartOperation = vi.fn(() => null);
+    deps.watchdog = {
+      getStatus: vi.fn(() => ({ lifecycle: "running" })),
+      onExpectedRestart: vi.fn(),
+      onExpectedRestartSettled: vi.fn(),
+      recordOperationEvent: vi.fn(),
+    };
+    deps.restartGateway = vi.fn(async () => ({ durationMs: 10, downtimeMs: 5 }));
+    const app = createApp(deps);
+    const stepEvents = () =>
+      deps.operationEvents.publish.mock.calls
+        .filter(([, evt]) => evt?.event === "step")
+        .map(([, evt]) => `${evt.data.name}:${evt.data.status}`);
+    const waitUntil = async (pred, label) => {
+      for (let i = 0; i < 400; i += 1) {
+        if (pred()) return;
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      throw new Error(`timed out waiting for ${label}`);
+    };
+    const send = (path) =>
+      new Promise((resolve, reject) => {
+        request(app)
+          .post(path)
+          .end((err, res) => (err ? reject(err) : resolve(res)));
+      });
+    return { deps, app, world, stepEvents, waitUntil, send };
+  };
+
+  it("re-validates the reconciler hold AFTER acquiring the lifecycle lock — a hold set while queued blocks the launch (sync 409, ledger 'skipped')", async () => {
+    const h = createQueuedRestartHarness();
+    const releaseBoot = await h.deps.gatewayLifecycleLock.acquire("boot");
+
+    const pending = h.send("/api/gateway/restart");
+    // The request queued behind boot: the lock-owned onQueued fired and the
+    // waiting step is visible to the UI.
+    await h.waitUntil(
+      () => h.stepEvents().includes("waiting_for_lock:running"),
+      "waiting_for_lock step",
+    );
+    expect(h.deps.restartGateway).not.toHaveBeenCalled();
+
+    // Boot's reconciler now HOLDS the gateway (config failed migration) and
+    // releases the lock. The queued restart must not launch on that config.
+    h.world.hold = { reason: "settings migration failed", blamedKeys: ["mystery"] };
+    releaseBoot();
+
+    const res = await pending;
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe("gateway_held");
+    expect(res.body.error).toContain("Upgrade page");
+    expect(h.deps.restartGateway).not.toHaveBeenCalled();
+    expect(h.deps.watchdog.onExpectedRestart).not.toHaveBeenCalled();
+    // UI: terminal event carrying the blocker code + hint.
+    expect(h.deps.operationEvents.fail).toHaveBeenCalledWith(
+      "op-queued",
+      expect.objectContaining({ code: "gateway_held", hint: expect.stringContaining("Upgrade page") }),
+    );
+    // Record closes not-ok; ledger books a SKIP, never a failed restart.
+    expect(h.deps.restartRequiredState.completeRestart).toHaveBeenCalledWith(
+      expect.objectContaining({ operationId: "op-queued", ok: false }),
+    );
+    expect(h.deps.restartRequiredState.markRestartComplete).toHaveBeenCalled();
+    expect(h.deps.watchdog.recordOperationEvent).toHaveBeenCalledWith({
+      kind: "gateway_restart",
+      status: "skipped",
+      details: { operationId: "op-queued", trigger: "manual", reason: "gateway_held" },
+    });
+    expect(h.deps.watchdog.recordOperationEvent).not.toHaveBeenCalledWith(
+      expect.objectContaining({ status: "failed" }),
+    );
+    expect(h.stepEvents()).toEqual(["waiting_for_lock:running", "waiting_for_lock:done"]);
+    // The lock was released: a later restart proceeds normally.
+    h.world.hold = null;
+    const next = await h.send("/api/gateway/restart");
+    expect(next.status).toBe(200);
+    expect(h.deps.restartGateway).toHaveBeenCalledTimes(1);
+  });
+
+  it("an apply that began while the restart was queued wins — the queued restart is refused with apply_in_progress", async () => {
+    const h = createQueuedRestartHarness();
+    const releaseHolder = await h.deps.gatewayLifecycleLock.acquire("repair");
+    const pending = h.send("/api/gateway/restart");
+    await h.waitUntil(
+      () => h.stepEvents().includes("waiting_for_lock:running"),
+      "waiting_for_lock step",
+    );
+    h.world.applyInProgress = true;
+    releaseHolder();
+    const res = await pending;
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe("apply_in_progress");
+    expect(h.deps.restartGateway).not.toHaveBeenCalled();
+    expect(h.deps.operationEvents.fail).toHaveBeenCalledWith(
+      "op-queued",
+      expect.objectContaining({ code: "apply_in_progress" }),
+    );
+  });
+
+  it("async callers get 202 immediately and the blocker surfaces as the operation's terminal fail event", async () => {
+    const h = createQueuedRestartHarness();
+    const releaseBoot = await h.deps.gatewayLifecycleLock.acquire("boot");
+    const res = await h.send("/api/gateway/restart?async=1");
+    expect(res.status).toBe(202);
+    expect(res.body).toEqual({ ok: true, operationId: "op-queued" });
+    await h.waitUntil(
+      () => h.stepEvents().includes("waiting_for_lock:running"),
+      "waiting_for_lock step",
+    );
+    h.world.hold = { reason: "settings migration failed", blamedKeys: [] };
+    releaseBoot();
+    await h.waitUntil(
+      () => h.deps.operationEvents.fail.mock.calls.length > 0,
+      "operation fail event",
+    );
+    expect(h.deps.operationEvents.fail).toHaveBeenCalledWith(
+      "op-queued",
+      expect.objectContaining({ code: "gateway_held" }),
+    );
+    expect(h.deps.restartGateway).not.toHaveBeenCalled();
+  });
+
+  it("an uncontended restart emits no waiting_for_lock step and runs straight through", async () => {
+    const h = createQueuedRestartHarness();
+    const res = await h.send("/api/gateway/restart");
+    expect(res.status).toBe(200);
+    expect(h.deps.restartGateway).toHaveBeenCalledTimes(1);
+    expect(h.stepEvents().some((s) => s.startsWith("waiting_for_lock"))).toBe(false);
+    expect(h.deps.operationEvents.fail).not.toHaveBeenCalled();
+    expect(h.deps.watchdog.recordOperationEvent).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "gateway_restart", status: "ok" }),
+    );
+  });
+
+  it("status frames mark Restart/Retry/Repair disabled with the hold reason while the reconciler holds the gateway", async () => {
+    const deps = createSystemDeps();
+    deps.openclawChannelService = {
+      getChannelInfo: vi.fn(() => ({
+        gatewayHold: { reason: "settings migration failed", blamedKeys: ["mystery"] },
+      })),
+      isApplyInProgress: vi.fn(() => false),
+    };
+    deps.gatewayLifecycleLock = { acquire: vi.fn(), getActiveOperation: vi.fn(() => null) };
+    const app = createApp(deps);
+    const res = await request(app).get("/api/status");
+    expect(res.status).toBe(200);
+    const restart = res.body.state.actions.find((a) => a.id === "restart" || a.id === "retry");
+    expect(restart, JSON.stringify(res.body.state)).toBeTruthy();
+    expect(restart.disabledReason).toContain("Upgrade page");
+  });
+
   it("rejects a restart while the reconciler holds the gateway (issue #20)", async () => {
     // A manual restart during a hold would launch the gateway on the exact
     // config the reconciler just rejected — and dissolve the watchdog latch

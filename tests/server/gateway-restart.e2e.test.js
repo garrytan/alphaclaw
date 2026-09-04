@@ -755,9 +755,15 @@ describe("server/gateway restart drills (e2e)", () => {
       // lease (not the fixed default) and completes with its real outcome.
       releaseHold();
       await vi.advanceTimersByTimeAsync(30_000);
-      expect(acquireSpy).toHaveBeenCalledWith("restart", {
-        leaseMs: kGatewayRestartOperationBudgetMs,
-      });
+      // v0.9.72: the acquire also carries the lock-owned queue callback that
+      // drives the waiting_for_lock step — the lease is what this drill pins.
+      expect(acquireSpy).toHaveBeenCalledWith(
+        "restart",
+        expect.objectContaining({
+          leaseMs: kGatewayRestartOperationBudgetMs,
+          onQueued: expect.any(Function),
+        }),
+      );
       expect(
         harness.restartRequiredState.getLastRestartOperation(),
       ).toMatchObject({ operationId, status: "succeeded" });
