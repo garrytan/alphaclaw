@@ -32,10 +32,36 @@ name the exact config keys the migration blamed. From the banner choose:
 - **Strip blamed keys and retry** — AlphaClaw removes the named keys
   (backing up the original config first) and re-runs the migration.
 
-While the hold is set, a manual **restart is refused** (`409 gateway_held`
-from `POST /api/gateway/restart`): restarting would launch the gateway on
-the exact config the reconciler just rejected. Recover through the retry
-actions above instead.
+While the hold is set, every manual relaunch path fails closed (v0.9.72):
+
+- The gateway card in the Setup UI still *offers* Restart, Retry and Repair
+  but renders them disabled with "Gateway held after a failed settings
+  migration — resolve it on the Upgrade page." Repair is blocked too:
+  `doctor --fix` would rewrite the held config. If another lifecycle
+  operation is running, its "Another operation is in progress" reason is
+  shown instead of the hold reason.
+- A manual **restart is refused** (`409 gateway_held` from
+  `POST /api/gateway/restart`, with a `hint`): restarting would launch the
+  gateway on the exact config the reconciler just rejected. The same check
+  runs again once the restart holds the lifecycle lock, so a hold that
+  appeared while the restart was queued behind another operation fails it
+  with the same code — the operation's terminal event carries
+  `code: gateway_held`, and the Watchdog event log books the row as
+  `skipped`, never as a failed restart. This route's other refusal codes
+  are `409 apply_in_progress` (a channel update is running), `409 booting`
+  (AlphaClaw itself is still starting the gateway — refused up front, never
+  queued) and `409 gateway_hold_unreadable` (below).
+- A manual **repair is refused** the same way (`409 gateway_held` from
+  `POST /api/watchdog/repair`); automatic repairs skip with one event-log
+  row per distinct refusal.
+- An **unreadable or corrupted** release-channel state file
+  (`<root>/.openclaw/.alphaclaw/openclaw-channel-state.json`) is treated as
+  held: restart and repair answer `409 gateway_hold_unreadable`, the card
+  disables the same actions with "Gateway hold state could not be read…",
+  and the exit-78 config-change auto-retry and the memory-pressure restart
+  stop relaunching. Check the file and the server log.
+
+Recover through the retry actions above instead.
 
 The retry endpoint (`POST /api/openclaw/reconcile/retry`) answers `409`
 with one of:
