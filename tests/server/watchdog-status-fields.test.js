@@ -219,4 +219,66 @@ describe("getStatus() additive fields", () => {
     expect(status.doctorFixSuppressed).toBe(false);
     expect(status.stabilization).toEqual({ active: false, until: null });
   });
+
+  it("reads the stabilization deadline from stabilization.endsAt for a pin window", () => {
+    const acceptedAt = Date.now() - 60 * 60 * 1000;
+    const endsAt = acceptedAt + kOpenclawStabilizationWindowMs;
+    const { watchdog } = createHarness({
+      releaseChannelHooks: {
+        getInfo: () => ({
+          isPin: true,
+          applied: null,
+          inStabilizationWindow: true,
+          acceptedAt,
+          stabilization: {
+            source: "pin",
+            inWindow: true,
+            acceptedAt,
+            acceptedSource: "acceptance",
+            endsAt,
+            blockedId: "2026.9.1",
+            target: { kind: "package", channel: "stable", version: "2026.8.1" },
+          },
+        }),
+        requestRollback: () => null,
+        onHealthy: () => {},
+        onUnhealthy: () => {},
+      },
+    });
+    watchdog.start();
+    const status = watchdog.getStatus();
+    expect(status.doctorFixSuppressed).toBe(true);
+    expect(status.doctorFixSuppressedReason).toBe("stabilization_window");
+    expect(status.stabilization.active).toBe(true);
+    expect(Date.parse(status.stabilization.until)).toBe(endsAt);
+  });
+
+  it("leaves the deadline null while a window is open but not yet armed", () => {
+    const acceptedAt = Date.now() - 60 * 60 * 1000;
+    const { watchdog } = createHarness({
+      releaseChannelHooks: {
+        getInfo: () => ({
+          isPin: false,
+          inStabilizationWindow: true,
+          acceptedAt,
+          applied: { acceptedSource: "manual" },
+          stabilization: {
+            source: "channel",
+            inWindow: true,
+            acceptedAt,
+            acceptedSource: "manual",
+            endsAt: null,
+            blockedId: "beta:2026.9.1-beta.2",
+            target: { kind: "pin" },
+          },
+        }),
+        requestRollback: () => null,
+        onHealthy: () => {},
+        onUnhealthy: () => {},
+      },
+    });
+    watchdog.start();
+    const status = watchdog.getStatus();
+    expect(status.stabilization).toEqual({ active: true, until: null });
+  });
 });

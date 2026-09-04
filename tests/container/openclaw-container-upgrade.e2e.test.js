@@ -22,9 +22,9 @@ const {
   removeVolume,
   sleep,
   waitFor,
-  compareLooseVersions,
   loginForCookie,
   fetchJsonWithCookie,
+  resolveBetaTarget,
 } = require("./container-helpers.js");
 
 // -----------------------------------------------------------------------------
@@ -248,19 +248,28 @@ describeContainer("container E2E: stable→beta upgrade in the production image"
     });
     if (!res.ok) throw new Error(`npm registry returned ${res.status} for openclaw`);
     const doc = await res.json();
-    ctx.beta = doc["dist-tags"]?.beta || null;
+    // The newest prerelease above the pin — what the Beta catalog section
+    // offers — not the raw `beta` dist-tag, which upstream re-points at the
+    // promoted stable release when a beta line ships (see resolveBetaTarget).
+    const resolved = resolveBetaTarget({
+      distTags: doc["dist-tags"],
+      versions: doc.versions,
+      stablePin: ctx.stablePin,
+    });
+    ctx.beta = resolved.version;
 
-    const betaIsNewer =
-      Boolean(ctx.beta) && compareLooseVersions(ctx.beta, ctx.stablePin) > 0;
-    if (!betaIsNewer) {
+    if (!ctx.beta) {
       const message =
-        `registry sanity failed: beta dist-tag ${JSON.stringify(ctx.beta)} is not newer ` +
-        `than the stable pin ${ctx.stablePin} — the stable→beta journey cannot run`;
+        `registry sanity failed: no prerelease newer than the stable pin ${ctx.stablePin} ` +
+        `(beta dist-tag ${JSON.stringify(resolved.tagged)}) — the stable→beta journey cannot run`;
       if (strict) throw new Error(`[STRICT] ${message}`);
       skipReason = message;
       console.warn(`[container-e2e] ${message} — skipping the journey (non-strict)`);
     } else {
-      console.log(`[container-e2e] stable pin ${ctx.stablePin} → beta ${ctx.beta}`);
+      console.log(
+        `[container-e2e] stable pin ${ctx.stablePin} → beta ${ctx.beta} ` +
+          `(${resolved.source}; beta dist-tag ${resolved.tagged})`,
+      );
     }
   }, 2 * kMin);
 

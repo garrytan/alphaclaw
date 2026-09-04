@@ -58,6 +58,13 @@ describe("server/openclaw-release-channel", () => {
           acceptedAt: 222,
         },
         pinVersion: "2026.7.1-2",
+        previousPin: { version: "2026.7.1-1", at: 333 },
+        pinWindow: {
+          version: "2026.7.1-2",
+          openedAt: 444,
+          acceptedAt: 555,
+          acceptedSource: "acceptance",
+        },
         futureKey: { keep: true },
       });
 
@@ -68,7 +75,15 @@ describe("server/openclaw-release-channel", () => {
         at: 111,
         acceptedAt: 222,
         acceptedSource: null,
+        reason: null,
         operationId: null,
+      });
+      expect(written.previousPin).toEqual({ version: "2026.7.1-1", at: 333 });
+      expect(written.pinWindow).toEqual({
+        version: "2026.7.1-2",
+        openedAt: 444,
+        acceptedAt: 555,
+        acceptedSource: "acceptance",
       });
       expect(store.readState()).toEqual(written);
       const onDisk = JSON.parse(fs.readFileSync(store.statePath, "utf8"));
@@ -123,6 +138,8 @@ describe("server/openclaw-release-channel", () => {
         rollbackRefused: null,
         forwardRecovery: null,
         noBootableVersion: null,
+        previousPin: null,
+        pinWindow: null,
       };
       expect(store.readState()).toEqual(expectedEmpty);
       expect(normalizeState("not an object")).toEqual(expectedEmpty);
@@ -135,8 +152,73 @@ describe("server/openclaw-release-channel", () => {
           lastUpdateRun: [],
           lastBoot: 7,
           backups: {},
+          previousPin: "2026.7.1-1",
+          pinWindow: ["2026.7.1-2"],
         }),
       ).toEqual(expectedEmpty);
+    });
+
+    it("keeps applied.reason only when it is a string", () => {
+      expect(
+        normalizeState({ applied: { reason: "pin_rollback" } }).applied.reason,
+      ).toBe("pin_rollback");
+      expect(normalizeState({ applied: { reason: 7 } }).applied.reason).toBeNull();
+      expect(normalizeState({ applied: {} }).applied.reason).toBeNull();
+    });
+
+    it("rejects malformed previousPin/pinWindow shapes (string, array, missing version)", () => {
+      expect(normalizeState({ previousPin: "2026.7.1-1" }).previousPin).toBeNull();
+      expect(normalizeState({ previousPin: ["2026.7.1-1"] }).previousPin).toBeNull();
+      expect(normalizeState({ previousPin: { at: 1 } }).previousPin).toBeNull();
+      expect(normalizeState({ previousPin: { version: "" } }).previousPin).toBeNull();
+      expect(normalizeState({ previousPin: { version: 42 } }).previousPin).toBeNull();
+
+      expect(normalizeState({ pinWindow: "2026.7.1-2" }).pinWindow).toBeNull();
+      expect(normalizeState({ pinWindow: ["2026.7.1-2"] }).pinWindow).toBeNull();
+      expect(normalizeState({ pinWindow: { openedAt: 1 } }).pinWindow).toBeNull();
+      expect(normalizeState({ pinWindow: { version: "" } }).pinWindow).toBeNull();
+      expect(normalizeState({ pinWindow: { version: 42 } }).pinWindow).toBeNull();
+    });
+
+    it("sanitizes previousPin/pinWindow fields to explicit nulls", () => {
+      expect(normalizeState({ previousPin: { version: "2026.7.1-1" } }).previousPin).toEqual({
+        version: "2026.7.1-1",
+        at: null,
+      });
+
+      expect(normalizeState({ pinWindow: { version: "2026.7.1-2" } }).pinWindow).toEqual({
+        version: "2026.7.1-2",
+        openedAt: null,
+        acceptedAt: null,
+        acceptedSource: null,
+      });
+      // Non-numeric timestamps and unknown sources never survive — consumers
+      // compare these against Date.now() and a closed enum.
+      expect(
+        normalizeState({
+          pinWindow: {
+            version: "2026.7.1-2",
+            openedAt: "444",
+            acceptedAt: Number.NaN,
+            acceptedSource: "auto",
+          },
+        }).pinWindow,
+      ).toEqual({
+        version: "2026.7.1-2",
+        openedAt: null,
+        acceptedAt: null,
+        acceptedSource: null,
+      });
+      expect(
+        normalizeState({
+          pinWindow: { version: "2026.7.1-2", openedAt: 444, acceptedSource: "manual" },
+        }).pinWindow,
+      ).toEqual({
+        version: "2026.7.1-2",
+        openedAt: 444,
+        acceptedAt: null,
+        acceptedSource: "manual",
+      });
     });
 
     it("rejects malformed gatewayHold shapes (string, array, empty reason)", () => {

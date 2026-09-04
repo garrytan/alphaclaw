@@ -642,6 +642,169 @@ describe("frontend/upgrade-helpers status card", () => {
     expect(model.runningLabel).toBe("2026.7.1-2");
   });
 
+  const makePinWindowInfo = (overrides = {}) => ({
+    releaseChannel: "stable",
+    installedVersion: "2026.8.1",
+    pinVersion: "2026.8.1",
+    applied: null,
+    appliedId: null,
+    isPin: true,
+    acceptedAt: null,
+    inStabilizationWindow: true,
+    stabilizationEndsAt: null,
+    previousPin: { version: "2026.7.1-2", at: kNow - 60_000 },
+    pinWindow: {
+      version: "2026.8.1",
+      openedAt: kNow - 60_000,
+      acceptedAt: null,
+      acceptedSource: null,
+    },
+    stabilization: {
+      source: "pin",
+      inWindow: true,
+      acceptedAt: null,
+      acceptedSource: null,
+      endsAt: null,
+      blockedId: "2026.8.1",
+      target: { kind: "package", channel: "stable", version: "2026.7.1-2" },
+    },
+    lastKnownGood: null,
+    lastBoot: null,
+    ...overrides,
+  });
+
+  it("arms the STABILIZING block for an open pin window, naming the previous pin", async () => {
+    const { buildStatusCardModel } = await loadUpgradeHelpers();
+
+    const model = buildStatusCardModel(makePinWindowInfo(), kNow);
+
+    expect(model.stabilizationSource).toBe("pin");
+    expect(model.isPin).toBe(true);
+    expect(model.stabilization.badge).toBe("STABILIZING");
+    expect(model.stabilization.line).toBe(
+      "New pinned version under 24-hour watch — automatic rollback to 2026.7.1-2 stays armed",
+    );
+    expect(model.stabilization.caption).toBe(
+      "Mark as good now — otherwise auto-rollback reverts this version if it crash-loops in its first 24h.",
+    );
+    expect(model.showStabilizationActions).toBe(true);
+    expect(model.autoAcceptedNote).toBeNull();
+    // Pins never pay the channel-apply first-restart cost.
+    expect(model.bootCostNote).toBeNull();
+    expect(model.runningLabel).toBe("2026.8.1");
+
+    // The stabilization object is authoritative: no resolvable target means
+    // the copy must not promise a rollback (the request would refuse).
+    const base = makePinWindowInfo();
+    const noTarget = buildStatusCardModel(
+      makePinWindowInfo({
+        previousPin: null,
+        stabilization: { ...base.stabilization, target: null },
+      }),
+      kNow,
+    );
+    expect(noTarget.stabilization.line).toBe(
+      "New pinned version under 24-hour watch — no earlier version is available locally to roll back to; keep the newest backup archive handy",
+    );
+
+    // Legacy info shape (no stabilization object) keeps the generic fallback.
+    const legacy = makePinWindowInfo({ previousPin: null });
+    delete legacy.stabilization;
+    const legacyModel = buildStatusCardModel(legacy, kNow);
+    expect(legacyModel.stabilization.line).toBe(
+      "New pinned version under 24-hour watch — automatic rollback to the previous version stays armed",
+    );
+  });
+
+  it("keeps the auto-accepted note for an auto-accepted pin window (no STABILIZING block)", async () => {
+    const { buildStatusCardModel, kAutoAcceptedNote } = await loadUpgradeHelpers();
+
+    const acceptedAt = kNow - 3_600_000;
+    const endsAt = kNow + 23 * 3_600_000;
+    const model = buildStatusCardModel(
+      makePinWindowInfo({
+        acceptedAt,
+        stabilizationEndsAt: endsAt,
+        pinWindow: {
+          version: "2026.8.1",
+          openedAt: kNow - 3_720_000,
+          acceptedAt,
+          acceptedSource: "acceptance",
+        },
+        stabilization: {
+          source: "pin",
+          inWindow: true,
+          acceptedAt,
+          acceptedSource: "acceptance",
+          endsAt,
+          blockedId: "2026.8.1",
+          target: { kind: "package", channel: "stable", version: "2026.7.1-2" },
+        },
+      }),
+      kNow,
+    );
+
+    expect(model.stabilizationSource).toBe("pin");
+    expect(model.stabilization).toBeNull();
+    expect(model.showStabilizationActions).toBe(true);
+    expect(model.autoAcceptedNote).toBe(`${kAutoAcceptedNote} ~23h left`);
+    expect(model.bootCostNote).toBeNull();
+  });
+
+  it("derives the same model from legacy fields when the stabilization object is absent", async () => {
+    const { buildStatusCardModel } = await loadUpgradeHelpers();
+
+    const legacyChannel = {
+      releaseChannel: "beta",
+      installedVersion: "2026.7.3-beta.1",
+      pinVersion: "2026.7.1-2",
+      applied: { channel: "beta", version: "2026.7.3-beta.1" },
+      appliedId: "2026.7.3-beta.1",
+      isPin: false,
+      acceptedAt: null,
+      inStabilizationWindow: true,
+      stabilizationEndsAt: null,
+      lastKnownGood: { package: "2026.7.2", dev: null },
+      lastBoot: null,
+    };
+    const fromLegacy = buildStatusCardModel(legacyChannel, kNow);
+    const fromContract = buildStatusCardModel(
+      {
+        ...legacyChannel,
+        stabilization: {
+          source: "channel",
+          inWindow: true,
+          acceptedAt: null,
+          acceptedSource: null,
+          endsAt: null,
+          blockedId: "2026.7.3-beta.1",
+          target: null,
+        },
+      },
+      kNow,
+    );
+
+    expect(fromLegacy.stabilizationSource).toBe("channel");
+    expect(fromLegacy.stabilization.line).toBe(
+      "Post-upgrade monitoring period — auto-rollback armed → last known good: 2026.7.2",
+    );
+    expect(fromContract).toEqual(fromLegacy);
+
+    // A settled pin with neither a window nor an applied build has no source.
+    const idlePin = buildStatusCardModel({
+      releaseChannel: "stable",
+      installedVersion: "2026.7.1-2",
+      pinVersion: "2026.7.1-2",
+      applied: null,
+      isPin: true,
+      acceptedAt: null,
+      inStabilizationWindow: false,
+    });
+    expect(idlePin.stabilizationSource).toBeNull();
+    expect(idlePin.stabilization).toBeNull();
+    expect(idlePin.showStabilizationActions).toBe(false);
+  });
+
   it("leads with the dev commit identity, keeping installedVersion as the dormant pin (U8)", async () => {
     const { buildStatusCardModel, kDriftNotice } = await loadUpgradeHelpers();
 
