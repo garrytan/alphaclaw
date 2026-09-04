@@ -7,12 +7,19 @@ import {
   getRollingRange,
   mapRunStatusesToSlots,
 } from "../../lib/public/js/components/cron-tab/cron-calendar-helpers.js";
+import { readZonedDateParts } from "../../lib/public/js/lib/format.js";
 
 const kMinuteMs = 60 * 1000;
 const kHourMs = 60 * kMinuteMs;
 const kDayMs = 24 * kHourMs;
 // Local-time noon so day boundaries are stable regardless of timezone.
 const kNowMs = new Date(2026, 5, 15, 12, 0, 0, 0).getTime();
+
+const toLocalDayKeyForTest = (ms) => {
+  const date = new Date(ms);
+  const pad = (value) => String(value).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+};
 
 describe("frontend/cron-calendar-helpers (extended)", () => {
   it("classifies schedule kinds and malformed cron expressions", () => {
@@ -196,6 +203,74 @@ describe("frontend/cron-calendar-helpers (extended)", () => {
       expect(day.dayKey).toBe(
         `${dayStart.getFullYear()}-${pad(dayStart.getMonth() + 1)}-${pad(dayStart.getDate())}`,
       );
+    }
+  });
+  it("evaluates cron fields in the job's schedule.tz (F167) while grid rows stay on the browser's hour axis", () => {
+    const { slots } = expandJobsToRollingSlots({
+      jobs: [
+        { id: "tokyo", schedule: { kind: "cron", expr: "0 9 * * *", tz: "Asia/Tokyo" } },
+        { id: "la", schedule: { kind: "cron", expr: "30 17 * * *", timezone: "America/Los_Angeles" } },
+      ],
+      nowMs: kNowMs,
+      pastDays: 1,
+      futureDays: 1,
+    });
+    const tokyo = slots.filter((slot) => slot.jobId === "tokyo");
+    const la = slots.filter((slot) => slot.jobId === "la");
+    expect(tokyo.length).toBeGreaterThan(0);
+    expect(la.length).toBeGreaterThan(0);
+    for (const slot of tokyo) {
+      expect(readZonedDateParts(slot.scheduledAtMs, "Asia/Tokyo")).toMatchObject({ hour: 9, minute: 0 });
+      expect(slot.hourOfDay).toBe(new Date(slot.scheduledAtMs).getHours());
+      expect(slot.dayKey).toBe(toLocalDayKeyForTest(slot.scheduledAtMs));
+    }
+    for (const slot of la) {
+      expect(readZonedDateParts(slot.scheduledAtMs, "America/Los_Angeles")).toMatchObject({ hour: 17, minute: 30 });
+    }
+  });
+
+  it("flags a job whose authoritative nextRunAtMs disagrees with the preview by more than a minute (F167 cross-check)", () => {
+    const job = (id, nextRunAtMs) => ({
+      id,
+      schedule: { kind: "cron", expr: "0 * * * *" },
+      state: { nextRunAtMs },
+    });
+    // kNowMs is exactly 12:00 local: the first FUTURE top-of-hour is 13:00.
+    const nextTop = kNowMs + kHourMs;
+    const result = expandJobsToRollingSlots({
+      jobs: [
+        job("agree", nextTop),
+        job("agree-jitter", nextTop + 30 * 1000),
+        job("drift", nextTop + 2 * kHourMs),
+        job("past", kNowMs - kHourMs),
+        job("outside-window", kNowMs + 10 * kDayMs),
+        job("no-state", 0),
+        { id: "unparseable", schedule: { kind: "cron", expr: "nope" }, state: { nextRunAtMs: nextTop } },
+      ],
+      nowMs: kNowMs,
+      pastDays: 1,
+      futureDays: 2,
+    });
+    expect(result.scheduleMismatchJobIds).toEqual(["drift"]);
+  });
+
+  it("day headers: one per calendar day, unique keys, local-midnight starts (F168 DST-safe stepping)", () => {
+    const { days, range } = expandJobsToRollingSlots({
+      jobs: [],
+      nowMs: kNowMs,
+      pastDays: 3,
+      futureDays: 10,
+    });
+    expect(days).toHaveLength(range.dayCount);
+    expect(new Set(days.map((day) => day.dayKey)).size).toBe(days.length);
+    for (const day of days) {
+      const start = new Date(day.dayStartMs);
+      expect([start.getHours(), start.getMinutes()]).toEqual([0, 0]);
+    }
+    for (let index = 1; index < days.length; index += 1) {
+      const previous = new Date(days[index - 1].dayStartMs);
+      const expected = new Date(previous.getFullYear(), previous.getMonth(), previous.getDate() + 1);
+      expect(new Date(days[index].dayStartMs).getTime()).toBe(expected.getTime());
     }
   });
 });
