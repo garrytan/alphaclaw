@@ -5,650 +5,26 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
-## [0.9.86] - 2026-09-04
+## [0.9.73] - 2026-09-05
 
-Fix wave, PR 12 — CI workflows, container filter, smoke scripts, live tiers.
+Fix wave — the 2026-09-02 codebase audit (221 confirmed findings, 13
+sequenced batches) remediated and shipped as ONE pull request (#60). Each
+batch keeps its own Fixed / Changed / Notes below; the batch numbers match
+the "fix wave PR N" labels that appear in code comments, test names and
+commit messages (they are wave batches, not GitHub PR numbers). Batches 5
+(watchdog core + satellites) and 6 (release channel + self-update) are
+deferred behind the owner's open PR #64 — see TODOS.md.
 
-### Fixed
-- **Live CLI-contract tier: `--json` reads hold a single-document contract**
-  (audit F222/F115). `JSON.parse(String(execFileSync(...)))` swallowed both
-  ways upstream drift shows up — a banner line before the document and an
-  EMPTY stdout (the beta silences itself when it inherits `VITEST`) — as a
-  bare parse error. `runCliJson` (`tests/live/live-helpers.js`) captures
-  stdout and stderr separately, scrubs the test-runner env, and fails with
-  the command, exit status and stderr when stdout is not exactly one JSON
-  document (`parseSingleJsonDocument`; hermetic tests in
-  `tests/server/live-helpers-cli-json.test.js`).
-- **Container OOM fixture proves a V8 abort** (F220/F223). The 1 MiB-buffer
-  base64 strings were above Node's `EXTERN_APEX` and lived outside the V8
-  heap, so `--max-old-space-size` never tripped and the container was
-  cgroup-killed (exit 137, empty stderr). The fixture now retains 256 KiB
-  chunks (on-heap) and asserts the heap-OOM signature AND a non-137,
-  non-SIGKILL exit, so a kernel kill can never masquerade as a pass.
-- **Browser smoke scripts never `kill 0`** (F181): the `${kServerPid:-0}`
-  fallback in the EXIT traps killed the caller's whole process group when
-  no server pid had been recorded.
+### Batch 1 — server boundary hardening
 
-### Changed
-- **CI: read-only token** (`permissions: contents: read`) on ci.yml (F177),
-  matching container-e2e.yml and live-e2e.yml.
-- **CI: Node 22 + 24 matrix** (F178). `test (24)` is a non-blocking
-  early-warning lane (`continue-on-error`) until the `main` ruleset lists it
-  as required (TODOS.md); `test (22)` and `gate` stay the required checks.
-  The version guard runs once per PR (on the 22 lane).
-- **Container E2E filter** (F173): a pin bump is detected as a CONTENT
-  change on the `"openclaw":` dependency line of `package.json` (never the
-  bare path, which every version bump touches), and the browser-driven
-  surfaces the journey exercises (`lib/public/login.html`,
-  `lib/public/js/components/upgrade-tab/`) are part of the path filter.
-- `tests/ci/workflow-contract.test.js` pins all of the above.
+A read-only audit
 
-### Notes
-- `.dockerignore` already excludes `*.tgz` (F176 landed earlier); no change.
-- The live tiers (`npm run test:live`, the Docker-bound autotune fixture)
-  are not runnable in the sandbox that produced this release; the helper
-  and parser are covered hermetically, the fixture change is covered by the
-  container tier in CI.
-
-## [0.9.85] - 2026-09-04
-
-Fix wave, PR 11 — Setup UI shell, tabs, and polling.
-
-### Fixed
-- **Browse `?view=diff` / `?line=` deep links work again** (audit F138, P1).
-  The hash router stripped the query at the router, so `parseBrowseRoute`
-  only ever saw the path (dead since v0.9.42). `useHashLocation` still routes
-  on the path; the new `useHashQuery` hands the query to the browse parser.
-- **A dropped SSE connection reaches `onError`** (F139). A data-less `error`
-  event (the transport failing) was parsed as a server `event: error` frame,
-  so operations read as "failed" with an empty message and the real error
-  path never fired.
-- **Redirects and the first-agent auto-select `replace` the history entry**
-  (F140) instead of pushing one — Back no longer bounces forward again.
-- **`fetchOnboardStatus` rejects on a non-OK response** (F141). A JSON-bodied
-  proxy 502 resolved as data, read as `onboarded: false`, and dropped an
-  onboarded operator into the Welcome wizard; the shell's retry/backoff now
-  gets the failure it was written for.
-- **Logout failure is surfaced** (F144) with a toast instead of a silent
-  console line.
-- **Terminal socket handlers are bound to the socket that owns them**
-  (F156/F201): a superseded WebSocket's late `close`/`error`/`message` could
-  flip the live terminal's state or write into the wrong buffer. The reuse
-  path rebinds handlers and restores the connected state.
-- **Environment variables: no in-place mutation of the cached `/api/env`
-  rows** (F164). Editing an existing key's value wrote into the cached object,
-  so an UNSAVED value read as saved after a remount and was silently reverted.
-- **Cron calendar honors each job's `schedule.tz`** (F167). Cron fields were
-  evaluated with the browser's local `Date` getters, so a job scheduled in
-  another zone rendered at the wrong hour. Fields now come from a cached
-  zone-aware reader (`readZonedDateParts` in `lib/format.js`); grid rows stay
-  on the browser's hour axis. The calendar also cross-checks its first
-  computed future occurrence against the store's authoritative
-  `state.nextRunAtMs` and shows a "Schedule preview may be inaccurate" note
-  instead of silently drifting.
-- **Cron calendar day headers step by calendar day** (F168): the 24h step
-  duplicated a header across a DST fall-back and dropped the window's last day.
-- **Team page: a failed device-queue poll is an error, not an empty queue**
-  (F170). `devicesError` is exposed by `useTeamTab`.
-- **Google account sign-in from the Google tab starts for a NEW account**
-  (F165, follow-through) and the Buzz wizard's pause only toasts on success.
-
-### Changed
-- **One polling primitive.** Every raw `setInterval` in the Setup UI outside
-  `usePolling`/`useNowMs` moved onto the new `useVisibleInterval` hook
-  (`lib/public/js/hooks/use-visible-interval.js`): gateway/cron/upgrade
-  clocks, the setup wizard and welcome step probes, the sidebar git panel,
-  the file tree and file-viewer disk refresh, agent sessions, team presence
-  and device polls, the rescue-session status poll, connected-nodes browser
-  poll, and the console's delta poll. Hidden tabs stop polling and refresh
-  once on return; the chat keepalive ping and outbox flush opt out
-  (`pauseWhenHidden: false`) because a hidden tab must keep its socket alive.
-  OAuth popup "did it close?" checks use the imperative `watchPopupClosed`
-  (`lib/public/js/lib/popup-watch.js`): a click-lifecycle watcher, no
-  network, keeps running while the user is in the popup. The ui-intervals
-  structural guard's allowlist shrinks to the single file owned by open PR
-  #64 (`use-app-shell-controller.js`).
-- **Startup medic and incident overseer toggles run on `useSavedSetting` +
-  `SavedToggle`** (F158): "Loading..." until hydrated, a Retry chip when the
-  GET fails (never the default presented as fact), optimistic flip, and a
-  revert with an inline chip on a failed save instead of an error toast with
-  the switch left wherever the DOM put it. `useSavedSetting` gains
-  `reload()` (silent payload refresh, used by the overseer availability
-  probe).
-- **`localStorage` keys live in `lib/public/js/lib/storage-keys.js`** (F145);
-  the What's-next card and the env-vars secrets banner import theirs.
-- **Agent manifest:** the watchdog terminal ops' `hint` now says where the
-  terminal lives (Setup UI → Watchdog → Terminal over the terminal WebSocket).
-
-### Removed
-- **19 unused `api.js` wrappers** (F226): `fetchGoogleStatus`,
-  `fetchDoctorRun`, `fetchDoctorRunCards`, `fetchUsageSessionTimeSeries`,
-  `createWatchdogTerminalSession`, `fetchWatchdogTerminalOutput`,
-  `sendWatchdogTerminalInput`, `fetchSyncCron`, `approveNode`,
-  `fetchAuthProfiles`, `upsertAuthProfile`, `deleteAuthProfile`,
-  `getTopicDiscoveryStatus`, `fetchAgent`, `addAgentBinding`,
-  `removeAgentBinding`, `fetchOpenclawRun`, `createWebhookOauthCallback`,
-  `deleteWebhookOauthCallback` — no caller in `lib/public/js`; the server
-  routes are unchanged. A dead `useEffect` in the welcome form step (F146)
-  and the stale `TOOLS.md` pointer in Telegram onboarding copy (F171) go too.
-
-### Notes
-- F128/F129-style review-only items here: the terminal rebind (no component
-  harness drives a real WebSocket) and the env-vars copy-on-edit are covered
-  by code review and the surrounding tests; everything else in this entry
-  carries a regression test.
-- `use-app-shell-controller.js` (F142 persisted restart-failure ack, F143
-  restart-status poll) is deferred until open PR #64 merges — it rewrites
-  that file.
-
-## [0.9.84] - 2026-09-04
-
-Fix wave, PR 10 — local Claude Code rescue session.
-
-### Fixed
-- **Stop was missing exactly when the copy said to press it** (audit F130).
-  A session kept for diagnosis (`running_no_url` / `adopted_without_url`)
-  rendered the Error state without a Stop button while the server message
-  read "view the output tail, then Stop to retry". Stop renders for any
-  retained session.
-- **Auth gate collapsed the card to "Probing…"** (F131). A refused Remote
-  Control start nulled the login probe memo, so the status read `probing`
-  (hiding `needs_login`/`error`) until the 60-second probe timer fired. The
-  gate now marks the memo logged-out instead.
-- **Rescue pane scrollback was the 2000-line tmux default** (F132).
-  `set-option -g history-limit 50000` ran before any tmux server existed and
-  failed silently (set-option does not start a server), so adoption's
-  10k/50k re-extraction escalation was inert. `start-server` runs first; a
-  failed limit is surfaced on the result.
-- **A restart mid-URL-wait showed a healthy session as Error** (F134). Boot
-  adoption ignored the persisted `starting` phase and marked the pane
-  `adopted_without_url` without resuming the watcher. An identity-matched pane
-  still inside the URL budget resumes the watcher.
-- **Disabling hid a still-live session after a restart** (F135). Boot
-  reconcile skipped adoption when `CLAUDE_CODE_LOCAL_ENABLED=0`, so the live
-  pane had no warning, no Stop, and a 404 rescue link. Adoption (read-only)
-  runs regardless; only autostart is gated.
-- **Liveness reap could null a successor session** (F136). The reaper
-  re-checks the session generation after its await before clearing state.
-- The raw Remote Control `sessionId` (which reconstructs the account-gated
-  URL) no longer appears in the agent-readable process log (F133).
-
-### Notes
-- Tests: extended `claude-code-local-service`, `claude-code-local-tmux`,
-  `rescue-session-card`.
-
-## [0.9.83] - 2026-09-04
-
-Fix wave, PR 9b — chat server and chat UI.
-
-### Fixed
-- **Binary transcript parts scraped into chat rows** (audit F116). Image,
-  audio and file parts fell through to the unknown-shape scraper, so the `type`
-  literal, MIME type and base64 payload landed in the history row text (and in
-  live tool-result text). Typed parts are text-only now; known binary types
-  yield nothing.
-- **A runId-less chat error failed a pending send** (F119). The `chat`
-  `state:error` branch lacked the lifecycle-end guard, so a session-routed
-  error from a FOREIGN run during our send window persisted a non-retryable
-  failure and orphan-aborted our own run. Only started records take error
-  terminals.
-- **Never-sent queued messages deleted by the history merge** (F122). The
-  outbox confirm matched a queued item against an older identical user row
-  inside the skew window; only items that were actually sent can confirm.
-- **Acked user bubble rendered below the streaming reply** (F123). Sent
-  optimistic bubbles now render above the live rows of the run they started;
-  unsent ones stay at the bottom.
-- **Ack timeout wedged the session as "Queued" with typing dots** (F124). The
-  outbox requeued the item but nothing left `pendingSend`, so it never
-  auto-flushed until Stop. An `ACK_TIMEOUT` event returns the session to idle.
-- **Navigating away from /chat re-ran restoreOnLoad** (F125). Every route
-  change relabelled queued messages "pending when the page closed" and stopped
-  auto-sending them; the outbox is now one per page load.
-- **Reconnect merge could drop the still-streaming reply** (F126).
-  `RESUME_ATTACH` cleared `activeMessageId`; `hello.activeRuns` and the
-  `resumed` frame now carry the live row's `messageId` and the reducer never
-  clears a known one.
-- **Blind re-send of acked messages after a socket drop** (F127). Acked items
-  were re-queued on a 5s timer with no history gate — a duplicate turn past the
-  bridge's 10-minute dedupe window. They now wait for the reconnect's history
-  merge (30s staleness fallback).
-- Composer said "Queue" in Limited (legacy) mode although sends fire
-  immediately (F128); the message list re-arms auto-scroll on session switch
-  (F129).
-
-### Notes
-- Tests: new `chat-history.test.js`; extended `chat-send-outbox`,
-  `chat-run-state`, `chat-transcript-store`, `chat-ws-bridge` (F119 guard;
-  the stale "cleans up run targets" test now asserts persist-through-close).
-  `docs/designs/chat-reliability.md` records the new invariants. Composer and
-  message-list changes are covered by review only (no component harness).
-
-## [0.9.82] - 2026-09-04
-
-Fix wave, PR 9a — Doctor.
-
-### Fixed
-- **Dismissing the skills-bloat nudge hid the escalation** (audit F109). The
-  P2 near-limit warning and the P1 over-limit card shared one `sourceKey`, so
-  a dismissed nudge permanently suppressed the later escalation. The keys are
-  now `det:skills-bloat:near` / `det:skills-bloat:over` (same doctrine as the
-  memory-budget cards). A previously dismissed nudge resurfaces once under its
-  new key.
-- **`GET /api/doctor/runs` parsed multi-MB manifests on every poll** (F110).
-  The Doctor tab polls it every 15s (2s during a run) and reads only `id`,
-  `status`, and counts; the endpoint now serves the lean run summaries
-  (`/api/doctor/runs/:id` keeps the full model with `workspaceManifest` and
-  `rawResult`).
-- **Doctor prompt history grew without bound** (F111). Every historical
-  dismissed/fixed card row (cloned by each reuse run, never pruned) was
-  rendered into the LLM prompt with no dedupe or cap, and the `--params` exec
-  argument had no byte budget unlike the fix dispatcher. History is deduped by
-  status+title+category and capped at 40 per status; the run refuses with a
-  clear error only if the prompt still exceeds the argument budget with history
-  dropped.
-- **Fingerprint worker stayed disabled until restart** (F112). Three
-  consecutive request timeouts (an environmental stall, not a worker defect)
-  tripped the respawn cap for the rest of the process, blinding the scheduled
-  drift trigger. The budget re-opens after a 10-minute cooldown.
-- **Spurious scheduled scans on restart** (F113). The env signature hashed the
-  model catalog's `source` label (`openclaw` vs `cache`), which flips on every
-  restart and Models-tab refresh; only the model rows are hashed now.
-- **Forged evidence snippets** (F114). Evidence items passed arbitrary keys
-  through, and a pre-existing `snippet` was never cleared, so an LLM- or
-  import-supplied excerpt rendered as a server-read "snapshot" block. Evidence
-  is whitelisted to `type/text/path/startLine/endLine`, and `snippet` is always
-  set by the server or absent.
-
-### Notes
-- Tests: extended `doctor-deterministic-checks`, `routes-doctor`,
-  `doctor-service`, `doctor-normalize`, `fix-batch-regressions`.
-
-## [0.9.81] - 2026-09-04
-
-Fix wave, PR 8c — server odds and ends.
-
-### Fixed
-- **Usage tab issued 1+N full-table scans** (audit F076). `getSessionsList`
-  re-prepared and ran an unindexable per-session events query for every row
-  (up to 200 per open), blocking the event loop in proportion to install age.
-  One events read now serves every selected session (per-event costing kept —
-  tiered pricing depends on each event's token count), and the session-ref
-  predicate has an expression index.
-- **Webhook request log grew without bound** (F155). Pruning was age-only
-  (boot + 12h) while the summary query ranked the whole table on every 15s
-  list poll. Inserts now keep the newest 500 rows per hook; the age prune still
-  runs.
-- **`PUT /api/models/config` validated after writing** (F078, F212). Arrays
-  passed the `configuredModels`/`authOrder` object guards and landed in
-  openclaw.json; a `null` profile entry 500ed after the model config was
-  already written (partial apply, catalog cache not marked stale); `type` was
-  never checked. The whole payload is validated first: 400 names the offending
-  `profiles[i]` field, nothing is written.
-- **Autotune revert ignored a crash-window stale intent** (F082). The enable
-  path recovers "our write landed, the confirm did not"; the disable/kill-switch
-  revert did not, so it left autotune's own `maxConcurrent` in openclaw.json
-  and deleted its provenance. Both paths now treat a matching stale intent as
-  autotune-owned.
-- **Cache-read tokens billed at $0** for the static fallback models that omit
-  `cacheRead` (F083); they now fall back to 10% of the input rate (the
-  provider-documented ratio), matching the existing cache-write fallback.
-- `/auth/google/start` 500ed on a repeated/bracketed `services` query key
-  (F209); `PATCH /api/team/members/:id` disabled a member on the string
-  `"false"` (F210) — `disabled` must be a boolean, `displayName` a string.
-
-### Notes
-- Deferred behind PR #64 (same file, `routes/system.js`): F077 (`/api/agent/
-  message` 15s timeout), F081 (`fetchGitHubRelease` never settles on a
-  mid-body close), F208 (`PUT /api/env` null element).
-- Tests: extended `webhooks-db`, `usage-db`, `routes-models-coverage`,
-  `autotune`, `cost-utils`, `routes-oauth-binding`, `routes-team`.
-
-## [0.9.80] - 2026-09-04
-
-Fix wave, PR 8b — Telegram, channel accounts, pairings.
-
-### Fixed
-- **Renaming a discovered Telegram topic never registered it** (audit F090,
-  P1). The topic PUT route spread the existing registry row into its patch,
-  re-asserting `discovered: true` and the cache `nameSource`, which defeated
-  the registry's discovered→registered transition — so a topic the operator
-  named and gave instructions or an agent to stayed "discovered", and its
-  `systemPrompt`/`agentId` never reached openclaw.json. The route now sends a
-  real patch; naming registers the topic and its routing is synced.
-- **Adding a channel account rolled the account back on a slow gateway
-  boot** (F086). `createChannelAccount` treated a ready-timeout from the
-  restart as a failed add and removed the account, restored `.env`, and wrote
-  back a stale whole-config snapshot — while `deleteChannelAccount` already
-  treated the same error as non-fatal. The add now reports
-  `gatewayRestartFailed: true` and keeps the correctly configured account.
-- **Orphaned-token dedupe deleted unrelated env vars** (F091). The "orphaned
-  channel env var" check matched ANY `.env` key by value; a non-channel key
-  holding the same secret was silently dropped. Only channel-shaped keys for
-  that provider qualify now.
-- **Workspace repair loop wrote and git-synced on every load** (F089). With no
-  resolvable human admin the group allow-from repair rewrote openclaw.json and
-  spawned a git-sync per group per page load while changing nothing, and one
-  group's Telegram failure failed the whole read. The repair is skipped with a
-  reason when no admin resolves, and a per-group Telegram error is reported,
-  not thrown.
-- **"Verify now" probed named-account groups with the default bot** (F166).
-  The topic verify API call omitted the account, so a live topic in a
-  named-account group read as stale. The UI passes the account through.
-- **Pairing approve / device reject echoed CLI failures as 200** (F224). The
-  raw `{ ok:false, stdout, stderr }` had no `error` key, so the UI toasted raw
-  JSON or discarded the stderr. Failures answer 502 with the CLI's own words
-  under `error` (`code: cli_failed` / `cli_timeout`).
-
-### Notes
-- Tests: extended `routes-telegram` (F090, F089), `agents-service` (F086,
-  F091), `routes-pairings` (F224), frontend `api` + `telegram-workspace-manage`
-  (F166). `npm run build:ui`.
-
-## [0.9.79] - 2026-09-04
-
-Fix wave, PR 8a — Google / Gmail and the public origin.
-
-### Fixed
-- **One public-origin resolver** (audit critic gap, eng review E12). Three
-  resolvers disagreed about "the URL operators reach this dashboard at", and
-  two of them trusted `X-Forwarded-Host` verbatim — a header any client can set
-  when no proxy fronts the process, and one `trust proxy` never vets. Every
-  URL AlphaClaw persists or hands out (OAuth `redirect_uri`, the Gmail push
-  endpoint, webhook callbacks, `gateway.controlUi.allowedOrigins`, invite links,
-  connect-info) now comes from `lib/server/public-origin.js`: the configured
-  canonical origin (`ALPHACLAW_SETUP_URL`, then the platform variables) wins;
-  otherwise the request through Express's trust-proxy view — forwarded headers
-  count only from a trusted hop (first hop value), else the Host header.
-- **`gog serve` spawn failures crashed the boot** (F093, P1). The child had no
-  `error` listener, so a missing/unexecutable `gog` (fail-open installer) became
-  an `uncaughtException` → exit 1 → a `--restart=always` crash loop whenever any
-  Gmail watch was enabled. The serve manager settles once across `error`/`exit`,
-  reports the error, uptime and a stderr tail, and the watch service logs the
-  exit reason instead of silently respawning.
-- **Respawn storm and orphaned respawns** (F205, F099). A fast-dying serve
-  child was restarted every 5s forever with no log line and a locked
-  google-state write per cycle; a drain that outlived the untracked timer
-  respawned into an orphan. Restarts now back off (5s → 10s → … → 5 min,
-  reset after a healthy minute), timers are tracked per account, and `stop()`
-  latches so nothing respawns during a drain.
-- **OAuth callback verifies who consented** (F095). Google lets the user pick
-  any signed-in account on the consent screen; the callback imported that
-  account's refresh token and labeled it with the flow's email. The consenting
-  identity is checked against the expected email and a mismatch is rejected
-  with clear copy (nothing saved, flow consumed).
-- **Revoked grants no longer show "Connected" forever** (F098). The live
-  `gog auth list --check` probe now wins over the sticky state flag; the flag
-  stands in only when gog itself did not answer for that client.
-- `GET /api/gmail/config` rewrote `gogcli/state.json` under the lock on every
-  dashboard mount even when nothing changed (F100); a renew with an explicit
-  account re-enabled a stopped watch (F101).
-- UI: post-save auto sign-in never fired for a NEW Google account (F165); the
-  Buzz wizard's "Pause setup" toasted "paused" over a failed cancel (F169).
-
-### Notes
-- README documents `ALPHACLAW_SETUP_URL` as the canonical origin. Tests: new
-  `public-origin.test.js`; extended `helpers`, `routes-nodes-coverage`,
-  `gmail-serve`, `gmail-watch-service`, `routes-oauth-binding`,
-  `google-tab-component`; new `buzz-wizard.test.js`. `npm run build:ui`.
-
-## [0.9.78] - 2026-09-04
-
-Fix wave, PR 7 — config-layer writers and fail-closed readers.
-
-### Fixed
-- **Config wipes from fail-open reads** (audit F214, F215, F085, F183, F184,
-  F190). Several state files were read leniently — a corrupt-but-existing
-  file parsed as "empty" — and the next save persisted the emptiness:
-  `gogcli/state.json` (every Google account + the Gmail push token, from the
-  `GET /api/gmail/config` the dashboard issues on mount), `exec-approvals.json`
-  (the file-era allowlist, rebuilt from `{ version: 1 }` by POST/DELETE),
-  `topic-registry.json` (per-topic agentId/systemPrompt pins wiped from
-  openclaw.json by the Telegram sync), the agent auth store (a busy or corrupt
-  `openclaw-agent.sqlite` row read as "no store", so a mutator overwrote it
-  with a near-empty store, and a sqlite write failure silently wrote an
-  `auth-profiles.json` nothing reads), and gog's `config.json` (rebuilt from
-  `{}`, dropping gog's own keys permanently). Every write path now goes
-  through a strict reader that refuses an existing-but-unparseable file
-  (`readGoogleStateForWrite`, `readExecApprovalsConfigForWrite`,
-  `topicRegistry.getGroupStrict`/`getActiveTopicCountStrict`, the sqlite
-  store's read/write failures), `writeGoogleState` refuses on its own before
-  overwriting a torn file, and gog's config is left alone with a warning. A
-  MISSING file is still the documented empty state. Display reads stay lenient.
-- **Raw openclaw.json writers** (F096, F150, F050, F051). `gmail-watch`'s
-  hooks preset and `webhooks.js` (create/update/delete/ensure-ids) wrote the
-  gateway config with a bare `writeFileSync` outside the shared lock;
-  `webhooks.js` additionally rewrote a beta `agents.entries` install in the
-  legacy `agents.list` shape on every mutation. Both now run ONE
-  `updateOpenclawConfig` read-modify-write each (locked, fail-closed, atomic,
-  shape-preserving, no round-trip when unchanged). The onboarding import
-  sanitizers, the codex migration (which now refuses an unparseable file with
-  the shared message instead of a bare SyntaxError), the `.gitignore` append,
-  and the exec-approvals writer are atomic. The config-writers guard allowlist
-  shrinks by five entries.
-- **Onboarding cron writer was the last non-atomic `/etc/cron.d` writer**
-  (F079).
-
-### Added
-- **One refusal vocabulary** (`lib/server/utils/config-unreadable.js`): every
-  `*_UNREADABLE` code maps to the same `config_unreadable` envelope ("AlphaClaw
-  will not rewrite <file> because it cannot parse it…", `hint`, `file`) —
-  503 on models/team/telegram routes, 409 on google/gmail/nodes — and records
-  ONE `config_unreadable` watchdog event per file per process, so the refusal
-  shows in the incidents timeline.
-- **Doctor card `det:config-unreadable:<file>`** (P1, category config) for
-  openclaw.json, gogcli/state.json, gogcli/config.json, exec-approvals.json,
-  cron/system-sync.json and topic-registry.json: byte-level evidence (size,
-  mtime, parse error), the list of `.bak` siblings, and the recovery copy —
-  it never parses or repairs the file itself. The UI error envelope carries a
-  default hint for `config_unreadable` when the server sends only the code.
-
-### Notes
-- Deferred to after PR #64 lands (it edits the same files): F189
-  (`cron/system-sync.json` fails open in `routes/system.js`/boot) and F191
-  (`restart-required-state.js` persist warnings).
-- Tests: new `config-unreadable.test.js`; extended `google-state`,
-  `exec-defaults-config`, `webhooks-coverage`, `topic-registry`,
-  `telegram-workspace`, `routes-nodes-coverage`, `doctor-deterministic-checks`,
-  `gmail-watch-service`, `auth-profiles`. `npm run build:ui` (error-envelope).
-
-## [0.9.77] - 2026-09-04
-
-Fix wave, PR 4 — gateway lifecycle.
-
-### Fixed
-- **Cold restarts dropped the operator's heap cap** (audit F011). The
-  `gateway --force` restart path spawned the new daemon with the CLI env
-  instead of the daemon launch env, so `ALPHACLAW_GATEWAY_MAX_OLD_SPACE_SIZE`
-  applied to the first launch only and vanished after the first restart —
-  while the autotune stamp kept recording the cap the gateway no longer had.
-  The restart spawn now uses the launch env.
-- **A throwing pre-gateway boot step skipped the gateway launch** (F008).
-  `doSyncPromptFiles`, `reloadEnv`, and `ensureGatewayProxyConfig` ran
-  unguarded between the swallow-and-log steps; an exception (the bare
-  `gogcli/` mkdir inside the prompt-file sync was the live example) fell to
-  the outer catch and `startGateway()` never ran — the one boot path with no
-  watchdog self-heal. Each step is now logged and skipped on failure, and the
-  `gogcli/` mkdir itself is non-fatal.
-- **Channel token scrub wrote openclaw.json unlocked and non-atomically**
-  (F013). After `openclaw channels add`, the token → `${ENV}` rewrite was a
-  raw `readFileSync`/`writeFileSync` pair outside the shared file lock; the
-  proxy-config writer held the lock but still wrote in place. Both now write
-  atomically under the lock, and `lib/server/gateway.js` leaves the
-  config-writers guard allowlist.
-- **Restart cause line defeated by lowercase prose** (F048). The severity
-  pattern was case-insensitive, so any trailing line containing "error" in
-  running text ("last error was a connection error") outranked the real
-  `ERROR …` blocker line, and that prose became the persisted incident
-  summary. Severity tags are now case-sensitive (upper-case words, or an
-  `Error:`-style prefix); the error-shaped-word fallback is unchanged.
-
-### Removed
-- Dead lifecycle code (F007, F014): `attachGatewaySignalHandlers` (superseded
-  by `installCrashGuards` in the lifecycle orchestrator since #8), and the
-  `restartGatewayLight` → `runGatewayLifecycleRestart` light-restart chain
-  (imported by `lib/server.js`, never called). Their unit tests go with them;
-  `stampOpenclawConfigConsumed` stays in autotune.
-
-### Notes
-- Tests: `gateway.test.js` (heap cap on cold restart; atomic config writes
-  through a rename-aware fs mock), `startup.test.js` (throwing steps never
-  skip the gateway), `onboarding-workspace.test.js` (unwritable gogcli dir),
-  `restart-hardening-units.test.js` (F048 cases), config-writers guard
-  allowlist shrinks by one.
-
-## [0.9.76] - 2026-09-04
-
-Fix wave, PR 3 — the agent-admin manifest and what the agent is allowed to see.
-
-### Fixed
-- **`requireAdmin` now admits the agent actor only through an enforcement
-  grant** (audit F067). Team and buzz routes guard on `requireAdmin`, which
-  checked `identity.role === "admin"` — a role the bearer-authenticated agent
-  never has — so every manifested `team.*`/`channels.buzz.*` op the agent was
-  promised failed 403 `admin_required` behind the tier gate. The enforcement
-  layer now attaches a frozen, Symbol-keyed grant after the manifest tier and
-  confirm gate pass, bound to the request's method, path, and sha256 digests
-  of query and body; `requireAdmin` re-derives the digests and admits the
-  agent only on an exact match. Human sessions are unchanged. A route mounted
-  without enforcement in front, a forged plain request property, or a body
-  rewritten after the grant all stay 403.
-- **Browse mutations on config and secret paths are denied outright** (F064).
-  `browse.write/create-file/create-folder/move/restore` sat at write tier and
-  `browse.delete` at dangerous, so an agent could overwrite `openclaw.json`
-  (gateway auth mode, channel secrets), `alphaclaw.json` (team roster), or
-  `devices/paired.json`, or delete `.alphaclaw/agent-admin-token`, with at
-  most a confirm code between it and the change. A shared `tierResolver` now
-  resolves any request naming those paths — after the same `../`-collapsing
-  normalization the server applies, case-insensitively, `.bak` rotations
-  included — to `denied`. The read guard covers `openclaw.json`, its backups,
-  and `devices/` as well (F066).
-- **Channel account add/remove report the restart they perform** (F068). The
-  handlers call `restartGateway` themselves but the manifest said
-  `restart: "marks"`, so the generated skill told the agent "restart required
-  after" and it would issue a second, dangerous-tier restart. The descriptors
-  now say `restarts`, the skill renders "restarts gateway (ends your session)",
-  and the recipe says not to restart again.
-- **Stale manifest entries removed** (F069, F225). `system.gateway-status`
-  pointed at `/api/gateway-status`, a route that does not exist (the agent got a
-  404 for a "safe" op); the `GET /api/team/login-info` allowlist entry named a
-  route that was deleted with the operator picker. `GET
-  /api/openclaw/capabilities`, registered inline in `lib/server.js`, was never
-  classified and therefore denied to the agent as `op_not_in_manifest`; it is
-  now `updates.capabilities` (safe), and the route-coverage test scans
-  `lib/server.js` too so inline routes cannot slip past again (F070).
-- **Confirm copy on a repeat attempt was wrong** (F073). A second unconfirmed
-  attempt for the same op re-used the pending code (by design) but the 428
-  body still said "A code was sent to your admin channel" although the
-  notifier de-duplicates the re-send. The `delivery` field now says the
-  earlier code is still valid and was not re-sent.
-
-### Changed
-- **Agent-visible error text is sanitized** (audit critic gap). Route handlers
-  pass `err.message` straight to the envelope — right for the dashboard, but
-  147 sites let an agent transcript collect `execSync` command lines, absolute
-  paths, and the occasional token-shaped substring. For the agent actor a 5xx
-  `error` is now a fixed sentence ("details are in the server log"); a 4xx
-  `error` is kept as validation feedback but scrubbed of secret shapes,
-  `token=` parameters, and control characters, and clamped to 400 chars.
-  `code` and `hint` are never touched. Humans see exactly what they saw before.
-- The generated skill's error-code table documents `admin_required`,
-  `confirm_invalid`, `confirm_expired`, `confirm_attempts_exhausted`,
-  `confirm_backlog_full`, and `dangerous_op_requires_confirmation` with the
-  next action for each (F072); `browse.md` names the denied path set.
-
-### Notes
-- Docs: AGENTS.md (grant rule, browse denied set, error-text rule),
-  `docs/designs/agent-admin.md` (pipeline + component notes). New tests:
-  `tests/server/agent-admin-grant.test.js`; extended `admin-manifest`,
-  `agent-admin-e2e`, `agent-admin-enforcement-e2e`, `agent-admin-redact`,
-  `agent-admin-confirm`.
-
-## [0.9.75] - 2026-09-04
-
-Fix wave, PR 2 — the boot spine (`bin/alphaclaw.js` and the CLI git-sync).
-
-### Fixed
-- **Root shell strings at boot.** Section 10 interpolated `GITHUB_WORKSPACE_REPO`
-  (loaded from the agent-writable `.env`) and the `.git/config` origin into a
-  double-quoted `git remote set-url` shell string, and section 8 interpolated
-  `GOG_VERSION` into a root `curl | tar | mv` pipeline — both ran on every
-  boot with the full launcher env (audit F001, F002). The remote URL is now
-  slug-validated and handed to git as argv behind `--`; the gog installer is
-  data end to end: a validated version, an argv download into a private temp
-  dir, an archive listing that must name exactly the `gog` member (no
-  traversal, no symlinks), extraction of that member only, a regular-file and
-  size check, sha256 against the release `checksums.txt` when one is
-  published (otherwise the boot log says "unsigned"), then a copy into place.
-  The pending self-update `npm install` runs argv-form too.
-- **git-sync had no conflict recovery** (F103, F104). Any `pull --rebase
-  --autostash` failure was logged as "remote branch not found" and swallowed,
-  a stopped rebase was left in place (a permanent wedge on a detached HEAD),
-  and an autostash re-apply conflict exited 0 so conflict-marked
-  `openclaw.json` and workspace files were committed and pushed as a
-  successful sync. The verb now lives in `lib/cli/git-sync.js` with a
-  fake-able argv runner: a repo already mid-rebase or with unmerged paths
-  stops the sync before touching anything; a failed pull aborts ONLY the
-  rebase the sync started and reports the real reason (nothing committed or
-  pushed); conflicts left by the autostash stop the sync; and a fresh local
-  repo against a remote that already has history (the "existing empty repo"
-  GitHub boilerplate case) adopts the remote branch as its base instead of
-  pushing an unrelated root that the remote rejects.
-- `alphaclaw start --port <n>` was ignored by the real server: `constants.js`
-  snapshots `PORT` at first require, before section 1 applied the flag, so the
-  placeholder and the agent shell targeted the flag port while Express bound
-  the env/default port (F193). The flag now lands in the env before any
-  `lib/` require.
-- A second `alphaclaw start` against a root a live server already owns ran
-  `lib/server.js` module-init side effects against the live databases before
-  dying on `EADDRINUSE` (F004); it now refuses to start (exit 1) when the boot
-  sync reports a live owner — but only a CORROBORATED one. The pidfile now
-  records the owner's kernel start time (`/proc/<pid>/stat`), and a live pid
-  whose start time differs is a recycled pid, not an owner: a container
-  hard-killed with `docker rm -f` leaves its pidfile on the volume and the
-  replacement container's early processes reuse the same low pid numbers,
-  which the first cut of this fix turned into a `--restart=always` crash loop
-  (caught by the container E2E durability leg). A live pid that cannot be
-  verified (legacy record, no `/proc`) skips the destructive sync and boots
-  on with a warning, as before.
-- The login-shell env snippet writer overwrote ANY pre-existing file at
-  `ALPHACLAW_PROFILE_SNIPPET_PATH` (a path honored from `.env`); it now keeps
-  the wrapper's managed-marker guard and records `skipped: existing
-  non-managed file` (F003).
-- Boot-time `openclaw.json` rewrites (sections 10/11) are atomic (F005); the
-  boot `.env` loader trims keys like the server's parser does (F006).
-
-### Notes
-- Two more entries leave the shell-string guard and one leaves the raw
-  config-writer guard.
-
-## [0.9.74] - 2026-09-04
-
-Fix wave, PR 2a — the wrapAsync sweep. Express 4 does not catch async handler
-rejections: an unwrapped rejection leaves the request hanging forever AND lands
-as an unhandledRejection that feeds the server's rejection-storm exit brake.
-
-### Fixed
-- All 98 remaining `async` route handlers across 20 route modules are wrapped
-  in `wrapAsync` (audit F203/F207), so a throw before `res.json` reaches the
-  terminal JSON error middleware — a `500 {"ok":false,"error":"Internal server
-  error"}` (or the error's own 4xx status) instead of an endless spinner. Purely
-  mechanical: no handler body changed.
-
-### Added
-- The `route-async-wrap` guard test's allowlist is now empty and must stay
-  empty — a new unwrapped async handler fails CI.
-- `tests/server/wrap-async-terminal.test.js` pins the end-to-end contract
-  (rejection → JSON 500 without leaking the message; explicit 4xx honored).
-
-## [0.9.73] - 2026-09-04
-
-Fix wave, PR 1 of the series — server boundary hardening. A read-only audit
 (31 finders, 253 findings, each verified by two independent reviewers → 221
 confirmed) found four defect classes; this PR closes every P1 security and
 data-loss instance and lands regression tripwires so the classes cannot come
 back silently. Nothing here changes the UI beyond honest error copy.
 
-### Fixed
+#### Fixed
 - **Browse root delete wiped the state directory.** `DELETE /api/browse/delete`
   with an empty, `.` or `/` path resolved to `OPENCLAW_DIR` itself and
   recursively removed it; every browse mutation now refuses the root (400).
@@ -716,7 +92,7 @@ back silently. Nothing here changes the UI beyond honest error copy.
   detects a recycled PID. Secret-bearing writers (`.env`, agent-admin token,
   `team-operators.json`, Google client_secret) land at 0600 on a fresh inode.
 
-### Changed
+#### Changed
 - **Fail closed on a corrupt `alphaclaw.json`.** The auth boundary used to
   merge an existing-but-unparseable file onto defaults, which silently
   RE-ENABLED shared-password login and dropped member sessions. Sign-in now
@@ -735,7 +111,7 @@ back silently. Nothing here changes the UI beyond honest error copy.
 - `/api/telegram/*` rejects any `accountId` that is not a lowercase slug with
   400 (`Work`, `a b`, `a/b` were previously accepted as config keys).
 
-### Added
+#### Added
 - Structural guard tests under `tests/server/guards/` — four scanners with
   `kKnownOffenders` allowlists (why-comment per entry) and planted-offender
   self-tests: raw managed-config writers (8 known, PRs 2/4/7 drive to zero),
@@ -745,7 +121,7 @@ back silently. Nothing here changes the UI beyond honest error copy.
 - `lib/server/utils/input-audit.js` — one injection-safe audit line per
   rejected boundary identifier, with the actor type (agent bearer vs human).
 
-### Notes
+#### Notes
 - **Reconciliation with main.** The branch fast-forwarded onto v0.9.71 before
   any edit; `routes/models.js`, `routes/pairings.js`, `auth-profiles.js` and
   `alphaclaw-config.js` (touched by v0.9.69–0.9.71) were edited on top of
@@ -758,6 +134,619 @@ back silently. Nothing here changes the UI beyond honest error copy.
   8a-c Google/Telegram/misc, 9a-b doctor/chat, 10 rescue session, 11 UI,
   12 CI/live tiers, 13 docs) follow one at a time; the guard allowlists name
   the PR that retires each entry.
+
+### Batch 2a — the wrapAsync sweep
+
+Express 4 does not catch async handler
+
+rejections: an unwrapped rejection leaves the request hanging forever AND lands
+as an unhandledRejection that feeds the server's rejection-storm exit brake.
+
+#### Fixed
+- All 98 remaining `async` route handlers across 20 route modules are wrapped
+  in `wrapAsync` (audit F203/F207), so a throw before `res.json` reaches the
+  terminal JSON error middleware — a `500 {"ok":false,"error":"Internal server
+  error"}` (or the error's own 4xx status) instead of an endless spinner. Purely
+  mechanical: no handler body changed.
+
+#### Added
+- The `route-async-wrap` guard test's allowlist is now empty and must stay
+  empty — a new unwrapped async handler fails CI.
+- `tests/server/wrap-async-terminal.test.js` pins the end-to-end contract
+  (rejection → JSON 500 without leaking the message; explicit 4xx honored).
+
+### Batch 2 — the boot spine (`bin/alphaclaw.js` and the CLI git-sync)
+
+#### Fixed
+- **Root shell strings at boot.** Section 10 interpolated `GITHUB_WORKSPACE_REPO`
+  (loaded from the agent-writable `.env`) and the `.git/config` origin into a
+  double-quoted `git remote set-url` shell string, and section 8 interpolated
+  `GOG_VERSION` into a root `curl | tar | mv` pipeline — both ran on every
+  boot with the full launcher env (audit F001, F002). The remote URL is now
+  slug-validated and handed to git as argv behind `--`; the gog installer is
+  data end to end: a validated version, an argv download into a private temp
+  dir, an archive listing that must name exactly the `gog` member (no
+  traversal, no symlinks), extraction of that member only, a regular-file and
+  size check, sha256 against the release `checksums.txt` when one is
+  published (otherwise the boot log says "unsigned"), then a copy into place.
+  The pending self-update `npm install` runs argv-form too.
+- **git-sync had no conflict recovery** (F103, F104). Any `pull --rebase
+  --autostash` failure was logged as "remote branch not found" and swallowed,
+  a stopped rebase was left in place (a permanent wedge on a detached HEAD),
+  and an autostash re-apply conflict exited 0 so conflict-marked
+  `openclaw.json` and workspace files were committed and pushed as a
+  successful sync. The verb now lives in `lib/cli/git-sync.js` with a
+  fake-able argv runner: a repo already mid-rebase or with unmerged paths
+  stops the sync before touching anything; a failed pull aborts ONLY the
+  rebase the sync started and reports the real reason (nothing committed or
+  pushed); conflicts left by the autostash stop the sync; and a fresh local
+  repo against a remote that already has history (the "existing empty repo"
+  GitHub boilerplate case) adopts the remote branch as its base instead of
+  pushing an unrelated root that the remote rejects.
+- `alphaclaw start --port <n>` was ignored by the real server: `constants.js`
+  snapshots `PORT` at first require, before section 1 applied the flag, so the
+  placeholder and the agent shell targeted the flag port while Express bound
+  the env/default port (F193). The flag now lands in the env before any
+  `lib/` require.
+- A second `alphaclaw start` against a root a live server already owns ran
+  `lib/server.js` module-init side effects against the live databases before
+  dying on `EADDRINUSE` (F004); it now refuses to start (exit 1) when the boot
+  sync reports a live owner — but only a CORROBORATED one. The pidfile now
+  records the owner's kernel start time (`/proc/<pid>/stat`), and a live pid
+  whose start time differs is a recycled pid, not an owner: a container
+  hard-killed with `docker rm -f` leaves its pidfile on the volume and the
+  replacement container's early processes reuse the same low pid numbers,
+  which the first cut of this fix turned into a `--restart=always` crash loop
+  (caught by the container E2E durability leg). A live pid that cannot be
+  verified (legacy record, no `/proc`) skips the destructive sync and boots
+  on with a warning, as before.
+- The login-shell env snippet writer overwrote ANY pre-existing file at
+  `ALPHACLAW_PROFILE_SNIPPET_PATH` (a path honored from `.env`); it now keeps
+  the wrapper's managed-marker guard and records `skipped: existing
+  non-managed file` (F003).
+- Boot-time `openclaw.json` rewrites (sections 10/11) are atomic (F005); the
+  boot `.env` loader trims keys like the server's parser does (F006).
+
+#### Notes
+- Two more entries leave the shell-string guard and one leaves the raw
+  config-writer guard.
+
+### Batch 3 — the agent-admin manifest and what the agent is allowed to see
+
+#### Fixed
+- **`requireAdmin` now admits the agent actor only through an enforcement
+  grant** (audit F067). Team and buzz routes guard on `requireAdmin`, which
+  checked `identity.role === "admin"` — a role the bearer-authenticated agent
+  never has — so every manifested `team.*`/`channels.buzz.*` op the agent was
+  promised failed 403 `admin_required` behind the tier gate. The enforcement
+  layer now attaches a frozen, Symbol-keyed grant after the manifest tier and
+  confirm gate pass, bound to the request's method, path, and sha256 digests
+  of query and body; `requireAdmin` re-derives the digests and admits the
+  agent only on an exact match. Human sessions are unchanged. A route mounted
+  without enforcement in front, a forged plain request property, or a body
+  rewritten after the grant all stay 403.
+- **Browse mutations on config and secret paths are denied outright** (F064).
+  `browse.write/create-file/create-folder/move/restore` sat at write tier and
+  `browse.delete` at dangerous, so an agent could overwrite `openclaw.json`
+  (gateway auth mode, channel secrets), `alphaclaw.json` (team roster), or
+  `devices/paired.json`, or delete `.alphaclaw/agent-admin-token`, with at
+  most a confirm code between it and the change. A shared `tierResolver` now
+  resolves any request naming those paths — after the same `../`-collapsing
+  normalization the server applies, case-insensitively, `.bak` rotations
+  included — to `denied`. The read guard covers `openclaw.json`, its backups,
+  and `devices/` as well (F066).
+- **Channel account add/remove report the restart they perform** (F068). The
+  handlers call `restartGateway` themselves but the manifest said
+  `restart: "marks"`, so the generated skill told the agent "restart required
+  after" and it would issue a second, dangerous-tier restart. The descriptors
+  now say `restarts`, the skill renders "restarts gateway (ends your session)",
+  and the recipe says not to restart again.
+- **Stale manifest entries removed** (F069, F225). `system.gateway-status`
+  pointed at `/api/gateway-status`, a route that does not exist (the agent got a
+  404 for a "safe" op); the `GET /api/team/login-info` allowlist entry named a
+  route that was deleted with the operator picker. `GET
+  /api/openclaw/capabilities`, registered inline in `lib/server.js`, was never
+  classified and therefore denied to the agent as `op_not_in_manifest`; it is
+  now `updates.capabilities` (safe), and the route-coverage test scans
+  `lib/server.js` too so inline routes cannot slip past again (F070).
+- **Confirm copy on a repeat attempt was wrong** (F073). A second unconfirmed
+  attempt for the same op re-used the pending code (by design) but the 428
+  body still said "A code was sent to your admin channel" although the
+  notifier de-duplicates the re-send. The `delivery` field now says the
+  earlier code is still valid and was not re-sent.
+
+#### Changed
+- **Agent-visible error text is sanitized** (audit critic gap). Route handlers
+  pass `err.message` straight to the envelope — right for the dashboard, but
+  147 sites let an agent transcript collect `execSync` command lines, absolute
+  paths, and the occasional token-shaped substring. For the agent actor a 5xx
+  `error` is now a fixed sentence ("details are in the server log"); a 4xx
+  `error` is kept as validation feedback but scrubbed of secret shapes,
+  `token=` parameters, and control characters, and clamped to 400 chars.
+  `code` and `hint` are never touched. Humans see exactly what they saw before.
+- The generated skill's error-code table documents `admin_required`,
+  `confirm_invalid`, `confirm_expired`, `confirm_attempts_exhausted`,
+  `confirm_backlog_full`, and `dangerous_op_requires_confirmation` with the
+  next action for each (F072); `browse.md` names the denied path set.
+
+#### Notes
+- Docs: AGENTS.md (grant rule, browse denied set, error-text rule),
+  `docs/designs/agent-admin.md` (pipeline + component notes). New tests:
+  `tests/server/agent-admin-grant.test.js`; extended `admin-manifest`,
+  `agent-admin-e2e`, `agent-admin-enforcement-e2e`, `agent-admin-redact`,
+  `agent-admin-confirm`.
+
+### Batch 4 — gateway lifecycle
+
+#### Fixed
+- **Cold restarts dropped the operator's heap cap** (audit F011). The
+  `gateway --force` restart path spawned the new daemon with the CLI env
+  instead of the daemon launch env, so `ALPHACLAW_GATEWAY_MAX_OLD_SPACE_SIZE`
+  applied to the first launch only and vanished after the first restart —
+  while the autotune stamp kept recording the cap the gateway no longer had.
+  The restart spawn now uses the launch env.
+- **A throwing pre-gateway boot step skipped the gateway launch** (F008).
+  `doSyncPromptFiles`, `reloadEnv`, and `ensureGatewayProxyConfig` ran
+  unguarded between the swallow-and-log steps; an exception (the bare
+  `gogcli/` mkdir inside the prompt-file sync was the live example) fell to
+  the outer catch and `startGateway()` never ran — the one boot path with no
+  watchdog self-heal. Each step is now logged and skipped on failure, and the
+  `gogcli/` mkdir itself is non-fatal.
+- **Channel token scrub wrote openclaw.json unlocked and non-atomically**
+  (F013). After `openclaw channels add`, the token → `${ENV}` rewrite was a
+  raw `readFileSync`/`writeFileSync` pair outside the shared file lock; the
+  proxy-config writer held the lock but still wrote in place. Both now write
+  atomically under the lock, and `lib/server/gateway.js` leaves the
+  config-writers guard allowlist.
+- **Restart cause line defeated by lowercase prose** (F048). The severity
+  pattern was case-insensitive, so any trailing line containing "error" in
+  running text ("last error was a connection error") outranked the real
+  `ERROR …` blocker line, and that prose became the persisted incident
+  summary. Severity tags are now case-sensitive (upper-case words, or an
+  `Error:`-style prefix); the error-shaped-word fallback is unchanged.
+
+#### Removed
+- Dead lifecycle code (F007, F014): `attachGatewaySignalHandlers` (superseded
+  by `installCrashGuards` in the lifecycle orchestrator since #8), and the
+  `restartGatewayLight` → `runGatewayLifecycleRestart` light-restart chain
+  (imported by `lib/server.js`, never called). Their unit tests go with them;
+  `stampOpenclawConfigConsumed` stays in autotune.
+
+#### Notes
+- Tests: `gateway.test.js` (heap cap on cold restart; atomic config writes
+  through a rename-aware fs mock), `startup.test.js` (throwing steps never
+  skip the gateway), `onboarding-workspace.test.js` (unwritable gogcli dir),
+  `restart-hardening-units.test.js` (F048 cases), config-writers guard
+  allowlist shrinks by one.
+
+### Batch 7 — config-layer writers and fail-closed readers
+
+#### Fixed
+- **Config wipes from fail-open reads** (audit F214, F215, F085, F183, F184,
+  F190). Several state files were read leniently — a corrupt-but-existing
+  file parsed as "empty" — and the next save persisted the emptiness:
+  `gogcli/state.json` (every Google account + the Gmail push token, from the
+  `GET /api/gmail/config` the dashboard issues on mount), `exec-approvals.json`
+  (the file-era allowlist, rebuilt from `{ version: 1 }` by POST/DELETE),
+  `topic-registry.json` (per-topic agentId/systemPrompt pins wiped from
+  openclaw.json by the Telegram sync), the agent auth store (a busy or corrupt
+  `openclaw-agent.sqlite` row read as "no store", so a mutator overwrote it
+  with a near-empty store, and a sqlite write failure silently wrote an
+  `auth-profiles.json` nothing reads), and gog's `config.json` (rebuilt from
+  `{}`, dropping gog's own keys permanently). Every write path now goes
+  through a strict reader that refuses an existing-but-unparseable file
+  (`readGoogleStateForWrite`, `readExecApprovalsConfigForWrite`,
+  `topicRegistry.getGroupStrict`/`getActiveTopicCountStrict`, the sqlite
+  store's read/write failures), `writeGoogleState` refuses on its own before
+  overwriting a torn file, and gog's config is left alone with a warning. A
+  MISSING file is still the documented empty state. Display reads stay lenient.
+- **Raw openclaw.json writers** (F096, F150, F050, F051). `gmail-watch`'s
+  hooks preset and `webhooks.js` (create/update/delete/ensure-ids) wrote the
+  gateway config with a bare `writeFileSync` outside the shared lock;
+  `webhooks.js` additionally rewrote a beta `agents.entries` install in the
+  legacy `agents.list` shape on every mutation. Both now run ONE
+  `updateOpenclawConfig` read-modify-write each (locked, fail-closed, atomic,
+  shape-preserving, no round-trip when unchanged). The onboarding import
+  sanitizers, the codex migration (which now refuses an unparseable file with
+  the shared message instead of a bare SyntaxError), the `.gitignore` append,
+  and the exec-approvals writer are atomic. The config-writers guard allowlist
+  shrinks by five entries.
+- **Onboarding cron writer was the last non-atomic `/etc/cron.d` writer**
+  (F079).
+
+#### Added
+- **One refusal vocabulary** (`lib/server/utils/config-unreadable.js`): every
+  `*_UNREADABLE` code maps to the same `config_unreadable` envelope ("AlphaClaw
+  will not rewrite <file> because it cannot parse it…", `hint`, `file`) —
+  503 on models/team/telegram routes, 409 on google/gmail/nodes — and records
+  ONE `config_unreadable` watchdog event per file per process, so the refusal
+  shows in the incidents timeline.
+- **Doctor card `det:config-unreadable:<file>`** (P1, category config) for
+  openclaw.json, gogcli/state.json, gogcli/config.json, exec-approvals.json,
+  cron/system-sync.json and topic-registry.json: byte-level evidence (size,
+  mtime, parse error), the list of `.bak` siblings, and the recovery copy —
+  it never parses or repairs the file itself. The UI error envelope carries a
+  default hint for `config_unreadable` when the server sends only the code.
+
+#### Notes
+- Deferred to after PR #64 lands (it edits the same files): F189
+  (`cron/system-sync.json` fails open in `routes/system.js`/boot) and F191
+  (`restart-required-state.js` persist warnings).
+- Tests: new `config-unreadable.test.js`; extended `google-state`,
+  `exec-defaults-config`, `webhooks-coverage`, `topic-registry`,
+  `telegram-workspace`, `routes-nodes-coverage`, `doctor-deterministic-checks`,
+  `gmail-watch-service`, `auth-profiles`. `npm run build:ui` (error-envelope).
+
+### Batch 8a — Google / Gmail and the public origin
+
+#### Fixed
+- **One public-origin resolver** (audit critic gap, eng review E12). Three
+  resolvers disagreed about "the URL operators reach this dashboard at", and
+  two of them trusted `X-Forwarded-Host` verbatim — a header any client can set
+  when no proxy fronts the process, and one `trust proxy` never vets. Every
+  URL AlphaClaw persists or hands out (OAuth `redirect_uri`, the Gmail push
+  endpoint, webhook callbacks, `gateway.controlUi.allowedOrigins`, invite links,
+  connect-info) now comes from `lib/server/public-origin.js`: the configured
+  canonical origin (`ALPHACLAW_SETUP_URL`, then the platform variables) wins;
+  otherwise the request through Express's trust-proxy view — forwarded headers
+  count only from a trusted hop (first hop value), else the Host header.
+- **`gog serve` spawn failures crashed the boot** (F093, P1). The child had no
+  `error` listener, so a missing/unexecutable `gog` (fail-open installer) became
+  an `uncaughtException` → exit 1 → a `--restart=always` crash loop whenever any
+  Gmail watch was enabled. The serve manager settles once across `error`/`exit`,
+  reports the error, uptime and a stderr tail, and the watch service logs the
+  exit reason instead of silently respawning.
+- **Respawn storm and orphaned respawns** (F205, F099). A fast-dying serve
+  child was restarted every 5s forever with no log line and a locked
+  google-state write per cycle; a drain that outlived the untracked timer
+  respawned into an orphan. Restarts now back off (5s → 10s → … → 5 min,
+  reset after a healthy minute), timers are tracked per account, and `stop()`
+  latches so nothing respawns during a drain.
+- **OAuth callback verifies who consented** (F095). Google lets the user pick
+  any signed-in account on the consent screen; the callback imported that
+  account's refresh token and labeled it with the flow's email. The consenting
+  identity is checked against the expected email and a mismatch is rejected
+  with clear copy (nothing saved, flow consumed).
+- **Revoked grants no longer show "Connected" forever** (F098). The live
+  `gog auth list --check` probe now wins over the sticky state flag; the flag
+  stands in only when gog itself did not answer for that client.
+- `GET /api/gmail/config` rewrote `gogcli/state.json` under the lock on every
+  dashboard mount even when nothing changed (F100); a renew with an explicit
+  account re-enabled a stopped watch (F101).
+- UI: post-save auto sign-in never fired for a NEW Google account (F165); the
+  Buzz wizard's "Pause setup" toasted "paused" over a failed cancel (F169).
+
+#### Notes
+- README documents `ALPHACLAW_SETUP_URL` as the canonical origin. Tests: new
+  `public-origin.test.js`; extended `helpers`, `routes-nodes-coverage`,
+  `gmail-serve`, `gmail-watch-service`, `routes-oauth-binding`,
+  `google-tab-component`; new `buzz-wizard.test.js`. `npm run build:ui`.
+
+### Batch 8b — Telegram, channel accounts, pairings
+
+#### Fixed
+- **Renaming a discovered Telegram topic never registered it** (audit F090,
+  P1). The topic PUT route spread the existing registry row into its patch,
+  re-asserting `discovered: true` and the cache `nameSource`, which defeated
+  the registry's discovered→registered transition — so a topic the operator
+  named and gave instructions or an agent to stayed "discovered", and its
+  `systemPrompt`/`agentId` never reached openclaw.json. The route now sends a
+  real patch; naming registers the topic and its routing is synced.
+- **Adding a channel account rolled the account back on a slow gateway
+  boot** (F086). `createChannelAccount` treated a ready-timeout from the
+  restart as a failed add and removed the account, restored `.env`, and wrote
+  back a stale whole-config snapshot — while `deleteChannelAccount` already
+  treated the same error as non-fatal. The add now reports
+  `gatewayRestartFailed: true` and keeps the correctly configured account.
+- **Orphaned-token dedupe deleted unrelated env vars** (F091). The "orphaned
+  channel env var" check matched ANY `.env` key by value; a non-channel key
+  holding the same secret was silently dropped. Only channel-shaped keys for
+  that provider qualify now.
+- **Workspace repair loop wrote and git-synced on every load** (F089). With no
+  resolvable human admin the group allow-from repair rewrote openclaw.json and
+  spawned a git-sync per group per page load while changing nothing, and one
+  group's Telegram failure failed the whole read. The repair is skipped with a
+  reason when no admin resolves, and a per-group Telegram error is reported,
+  not thrown.
+- **"Verify now" probed named-account groups with the default bot** (F166).
+  The topic verify API call omitted the account, so a live topic in a
+  named-account group read as stale. The UI passes the account through.
+- **Pairing approve / device reject echoed CLI failures as 200** (F224). The
+  raw `{ ok:false, stdout, stderr }` had no `error` key, so the UI toasted raw
+  JSON or discarded the stderr. Failures answer 502 with the CLI's own words
+  under `error` (`code: cli_failed` / `cli_timeout`).
+
+#### Notes
+- Tests: extended `routes-telegram` (F090, F089), `agents-service` (F086,
+  F091), `routes-pairings` (F224), frontend `api` + `telegram-workspace-manage`
+  (F166). `npm run build:ui`.
+
+### Batch 8c — server odds and ends
+
+#### Fixed
+- **Usage tab issued 1+N full-table scans** (audit F076). `getSessionsList`
+  re-prepared and ran an unindexable per-session events query for every row
+  (up to 200 per open), blocking the event loop in proportion to install age.
+  One events read now serves every selected session (per-event costing kept —
+  tiered pricing depends on each event's token count), and the session-ref
+  predicate has an expression index.
+- **Webhook request log grew without bound** (F155). Pruning was age-only
+  (boot + 12h) while the summary query ranked the whole table on every 15s
+  list poll. Inserts now keep the newest 500 rows per hook; the age prune still
+  runs.
+- **`PUT /api/models/config` validated after writing** (F078, F212). Arrays
+  passed the `configuredModels`/`authOrder` object guards and landed in
+  openclaw.json; a `null` profile entry 500ed after the model config was
+  already written (partial apply, catalog cache not marked stale); `type` was
+  never checked. The whole payload is validated first: 400 names the offending
+  `profiles[i]` field, nothing is written.
+- **Autotune revert ignored a crash-window stale intent** (F082). The enable
+  path recovers "our write landed, the confirm did not"; the disable/kill-switch
+  revert did not, so it left autotune's own `maxConcurrent` in openclaw.json
+  and deleted its provenance. Both paths now treat a matching stale intent as
+  autotune-owned.
+- **Cache-read tokens billed at $0** for the static fallback models that omit
+  `cacheRead` (F083); they now fall back to 10% of the input rate (the
+  provider-documented ratio), matching the existing cache-write fallback.
+- `/auth/google/start` 500ed on a repeated/bracketed `services` query key
+  (F209); `PATCH /api/team/members/:id` disabled a member on the string
+  `"false"` (F210) — `disabled` must be a boolean, `displayName` a string.
+
+#### Notes
+- Deferred behind PR #64 (same file, `routes/system.js`): F077 (`/api/agent/
+  message` 15s timeout), F081 (`fetchGitHubRelease` never settles on a
+  mid-body close), F208 (`PUT /api/env` null element).
+- Tests: extended `webhooks-db`, `usage-db`, `routes-models-coverage`,
+  `autotune`, `cost-utils`, `routes-oauth-binding`, `routes-team`.
+
+### Batch 9a — Doctor
+
+#### Fixed
+- **Dismissing the skills-bloat nudge hid the escalation** (audit F109). The
+  P2 near-limit warning and the P1 over-limit card shared one `sourceKey`, so
+  a dismissed nudge permanently suppressed the later escalation. The keys are
+  now `det:skills-bloat:near` / `det:skills-bloat:over` (same doctrine as the
+  memory-budget cards). A previously dismissed nudge resurfaces once under its
+  new key.
+- **`GET /api/doctor/runs` parsed multi-MB manifests on every poll** (F110).
+  The Doctor tab polls it every 15s (2s during a run) and reads only `id`,
+  `status`, and counts; the endpoint now serves the lean run summaries
+  (`/api/doctor/runs/:id` keeps the full model with `workspaceManifest` and
+  `rawResult`).
+- **Doctor prompt history grew without bound** (F111). Every historical
+  dismissed/fixed card row (cloned by each reuse run, never pruned) was
+  rendered into the LLM prompt with no dedupe or cap, and the `--params` exec
+  argument had no byte budget unlike the fix dispatcher. History is deduped by
+  status+title+category and capped at 40 per status; the run refuses with a
+  clear error only if the prompt still exceeds the argument budget with history
+  dropped.
+- **Fingerprint worker stayed disabled until restart** (F112). Three
+  consecutive request timeouts (an environmental stall, not a worker defect)
+  tripped the respawn cap for the rest of the process, blinding the scheduled
+  drift trigger. The budget re-opens after a 10-minute cooldown.
+- **Spurious scheduled scans on restart** (F113). The env signature hashed the
+  model catalog's `source` label (`openclaw` vs `cache`), which flips on every
+  restart and Models-tab refresh; only the model rows are hashed now.
+- **Forged evidence snippets** (F114). Evidence items passed arbitrary keys
+  through, and a pre-existing `snippet` was never cleared, so an LLM- or
+  import-supplied excerpt rendered as a server-read "snapshot" block. Evidence
+  is whitelisted to `type/text/path/startLine/endLine`, and `snippet` is always
+  set by the server or absent.
+
+#### Notes
+- Tests: extended `doctor-deterministic-checks`, `routes-doctor`,
+  `doctor-service`, `doctor-normalize`, `fix-batch-regressions`.
+
+### Batch 9b — chat server and chat UI
+
+#### Fixed
+- **Binary transcript parts scraped into chat rows** (audit F116). Image,
+  audio and file parts fell through to the unknown-shape scraper, so the `type`
+  literal, MIME type and base64 payload landed in the history row text (and in
+  live tool-result text). Typed parts are text-only now; known binary types
+  yield nothing.
+- **A runId-less chat error failed a pending send** (F119). The `chat`
+  `state:error` branch lacked the lifecycle-end guard, so a session-routed
+  error from a FOREIGN run during our send window persisted a non-retryable
+  failure and orphan-aborted our own run. Only started records take error
+  terminals.
+- **Never-sent queued messages deleted by the history merge** (F122). The
+  outbox confirm matched a queued item against an older identical user row
+  inside the skew window; only items that were actually sent can confirm.
+- **Acked user bubble rendered below the streaming reply** (F123). Sent
+  optimistic bubbles now render above the live rows of the run they started;
+  unsent ones stay at the bottom.
+- **Ack timeout wedged the session as "Queued" with typing dots** (F124). The
+  outbox requeued the item but nothing left `pendingSend`, so it never
+  auto-flushed until Stop. An `ACK_TIMEOUT` event returns the session to idle.
+- **Navigating away from /chat re-ran restoreOnLoad** (F125). Every route
+  change relabelled queued messages "pending when the page closed" and stopped
+  auto-sending them; the outbox is now one per page load.
+- **Reconnect merge could drop the still-streaming reply** (F126).
+  `RESUME_ATTACH` cleared `activeMessageId`; `hello.activeRuns` and the
+  `resumed` frame now carry the live row's `messageId` and the reducer never
+  clears a known one.
+- **Blind re-send of acked messages after a socket drop** (F127). Acked items
+  were re-queued on a 5s timer with no history gate — a duplicate turn past the
+  bridge's 10-minute dedupe window. They now wait for the reconnect's history
+  merge (30s staleness fallback).
+- Composer said "Queue" in Limited (legacy) mode although sends fire
+  immediately (F128); the message list re-arms auto-scroll on session switch
+  (F129).
+
+#### Notes
+- Tests: new `chat-history.test.js`; extended `chat-send-outbox`,
+  `chat-run-state`, `chat-transcript-store`, `chat-ws-bridge` (F119 guard;
+  the stale "cleans up run targets" test now asserts persist-through-close).
+  `docs/designs/chat-reliability.md` records the new invariants. Composer and
+  message-list changes are covered by review only (no component harness).
+
+### Batch 10 — local Claude Code rescue session
+
+#### Fixed
+- **Stop was missing exactly when the copy said to press it** (audit F130).
+  A session kept for diagnosis (`running_no_url` / `adopted_without_url`)
+  rendered the Error state without a Stop button while the server message
+  read "view the output tail, then Stop to retry". Stop renders for any
+  retained session.
+- **Auth gate collapsed the card to "Probing…"** (F131). A refused Remote
+  Control start nulled the login probe memo, so the status read `probing`
+  (hiding `needs_login`/`error`) until the 60-second probe timer fired. The
+  gate now marks the memo logged-out instead.
+- **Rescue pane scrollback was the 2000-line tmux default** (F132).
+  `set-option -g history-limit 50000` ran before any tmux server existed and
+  failed silently (set-option does not start a server), so adoption's
+  10k/50k re-extraction escalation was inert. `start-server` runs first; a
+  failed limit is surfaced on the result.
+- **A restart mid-URL-wait showed a healthy session as Error** (F134). Boot
+  adoption ignored the persisted `starting` phase and marked the pane
+  `adopted_without_url` without resuming the watcher. An identity-matched pane
+  still inside the URL budget resumes the watcher.
+- **Disabling hid a still-live session after a restart** (F135). Boot
+  reconcile skipped adoption when `CLAUDE_CODE_LOCAL_ENABLED=0`, so the live
+  pane had no warning, no Stop, and a 404 rescue link. Adoption (read-only)
+  runs regardless; only autostart is gated.
+- **Liveness reap could null a successor session** (F136). The reaper
+  re-checks the session generation after its await before clearing state.
+- The raw Remote Control `sessionId` (which reconstructs the account-gated
+  URL) no longer appears in the agent-readable process log (F133).
+
+#### Notes
+- Tests: extended `claude-code-local-service`, `claude-code-local-tmux`,
+  `rescue-session-card`.
+
+### Batch 11 — Setup UI shell, tabs, and polling
+
+#### Fixed
+- **Browse `?view=diff` / `?line=` deep links work again** (audit F138, P1).
+  The hash router stripped the query at the router, so `parseBrowseRoute`
+  only ever saw the path (dead since v0.9.42). `useHashLocation` still routes
+  on the path; the new `useHashQuery` hands the query to the browse parser.
+- **A dropped SSE connection reaches `onError`** (F139). A data-less `error`
+  event (the transport failing) was parsed as a server `event: error` frame,
+  so operations read as "failed" with an empty message and the real error
+  path never fired.
+- **Redirects and the first-agent auto-select `replace` the history entry**
+  (F140) instead of pushing one — Back no longer bounces forward again.
+- **`fetchOnboardStatus` rejects on a non-OK response** (F141). A JSON-bodied
+  proxy 502 resolved as data, read as `onboarded: false`, and dropped an
+  onboarded operator into the Welcome wizard; the shell's retry/backoff now
+  gets the failure it was written for.
+- **Logout failure is surfaced** (F144) with a toast instead of a silent
+  console line.
+- **Terminal socket handlers are bound to the socket that owns them**
+  (F156/F201): a superseded WebSocket's late `close`/`error`/`message` could
+  flip the live terminal's state or write into the wrong buffer. The reuse
+  path rebinds handlers and restores the connected state.
+- **Environment variables: no in-place mutation of the cached `/api/env`
+  rows** (F164). Editing an existing key's value wrote into the cached object,
+  so an UNSAVED value read as saved after a remount and was silently reverted.
+- **Cron calendar honors each job's `schedule.tz`** (F167). Cron fields were
+  evaluated with the browser's local `Date` getters, so a job scheduled in
+  another zone rendered at the wrong hour. Fields now come from a cached
+  zone-aware reader (`readZonedDateParts` in `lib/format.js`); grid rows stay
+  on the browser's hour axis. The calendar also cross-checks its first
+  computed future occurrence against the store's authoritative
+  `state.nextRunAtMs` and shows a "Schedule preview may be inaccurate" note
+  instead of silently drifting.
+- **Cron calendar day headers step by calendar day** (F168): the 24h step
+  duplicated a header across a DST fall-back and dropped the window's last day.
+- **Team page: a failed device-queue poll is an error, not an empty queue**
+  (F170). `devicesError` is exposed by `useTeamTab`.
+- **Google account sign-in from the Google tab starts for a NEW account**
+  (F165, follow-through) and the Buzz wizard's pause only toasts on success.
+
+#### Changed
+- **One polling primitive.** Every raw `setInterval` in the Setup UI outside
+  `usePolling`/`useNowMs` moved onto the new `useVisibleInterval` hook
+  (`lib/public/js/hooks/use-visible-interval.js`): gateway/cron/upgrade
+  clocks, the setup wizard and welcome step probes, the sidebar git panel,
+  the file tree and file-viewer disk refresh, agent sessions, team presence
+  and device polls, the rescue-session status poll, connected-nodes browser
+  poll, and the console's delta poll. Hidden tabs stop polling and refresh
+  once on return; the chat keepalive ping and outbox flush opt out
+  (`pauseWhenHidden: false`) because a hidden tab must keep its socket alive.
+  OAuth popup "did it close?" checks use the imperative `watchPopupClosed`
+  (`lib/public/js/lib/popup-watch.js`): a click-lifecycle watcher, no
+  network, keeps running while the user is in the popup. The ui-intervals
+  structural guard's allowlist shrinks to the single file owned by open PR
+  #64 (`use-app-shell-controller.js`).
+- **Startup medic and incident overseer toggles run on `useSavedSetting` +
+  `SavedToggle`** (F158): "Loading..." until hydrated, a Retry chip when the
+  GET fails (never the default presented as fact), optimistic flip, and a
+  revert with an inline chip on a failed save instead of an error toast with
+  the switch left wherever the DOM put it. `useSavedSetting` gains
+  `reload()` (silent payload refresh, used by the overseer availability
+  probe).
+- **`localStorage` keys live in `lib/public/js/lib/storage-keys.js`** (F145);
+  the What's-next card and the env-vars secrets banner import theirs.
+- **Agent manifest:** the watchdog terminal ops' `hint` now says where the
+  terminal lives (Setup UI → Watchdog → Terminal over the terminal WebSocket).
+
+#### Removed
+- **19 unused `api.js` wrappers** (F226): `fetchGoogleStatus`,
+  `fetchDoctorRun`, `fetchDoctorRunCards`, `fetchUsageSessionTimeSeries`,
+  `createWatchdogTerminalSession`, `fetchWatchdogTerminalOutput`,
+  `sendWatchdogTerminalInput`, `fetchSyncCron`, `approveNode`,
+  `fetchAuthProfiles`, `upsertAuthProfile`, `deleteAuthProfile`,
+  `getTopicDiscoveryStatus`, `fetchAgent`, `addAgentBinding`,
+  `removeAgentBinding`, `fetchOpenclawRun`, `createWebhookOauthCallback`,
+  `deleteWebhookOauthCallback` — no caller in `lib/public/js`; the server
+  routes are unchanged. A dead `useEffect` in the welcome form step (F146)
+  and the stale `TOOLS.md` pointer in Telegram onboarding copy (F171) go too.
+
+#### Notes
+- F128/F129-style review-only items here: the terminal rebind (no component
+  harness drives a real WebSocket) and the env-vars copy-on-edit are covered
+  by code review and the surrounding tests; everything else in this entry
+  carries a regression test.
+- `use-app-shell-controller.js` (F142 persisted restart-failure ack, F143
+  restart-status poll) is deferred until open PR #64 merges — it rewrites
+  that file.
+
+### Batch 12 — CI workflows, container filter, smoke scripts, live tiers
+
+#### Fixed
+- **Live CLI-contract tier: `--json` reads hold a single-document contract**
+  (audit F222/F115). `JSON.parse(String(execFileSync(...)))` swallowed both
+  ways upstream drift shows up — a banner line before the document and an
+  EMPTY stdout (the beta silences itself when it inherits `VITEST`) — as a
+  bare parse error. `runCliJson` (`tests/live/live-helpers.js`) captures
+  stdout and stderr separately, scrubs the test-runner env, and fails with
+  the command, exit status and stderr when stdout is not exactly one JSON
+  document (`parseSingleJsonDocument`; hermetic tests in
+  `tests/server/live-helpers-cli-json.test.js`).
+- **Container OOM fixture proves a V8 abort** (F220/F223). The 1 MiB-buffer
+  base64 strings were above Node's `EXTERN_APEX` and lived outside the V8
+  heap, so `--max-old-space-size` never tripped and the container was
+  cgroup-killed (exit 137, empty stderr). The fixture now retains 256 KiB
+  chunks (on-heap) and asserts the heap-OOM signature AND a non-137,
+  non-SIGKILL exit, so a kernel kill can never masquerade as a pass.
+- **Browser smoke scripts never `kill 0`** (F181): the `${kServerPid:-0}`
+  fallback in the EXIT traps killed the caller's whole process group when
+  no server pid had been recorded.
+
+#### Changed
+- **CI: read-only token** (`permissions: contents: read`) on ci.yml (F177),
+  matching container-e2e.yml and live-e2e.yml.
+- **CI: Node 22 + 24 matrix** (F178). `test (24)` is a non-blocking
+  early-warning lane (`continue-on-error`) until the `main` ruleset lists it
+  as required (TODOS.md); `test (22)` and `gate` stay the required checks.
+  The version guard runs once per PR (on the 22 lane).
+- **Container E2E filter** (F173): a pin bump is detected as a CONTENT
+  change on the `"openclaw":` dependency line of `package.json` (never the
+  bare path, which every version bump touches), and the browser-driven
+  surfaces the journey exercises (`lib/public/login.html`,
+  `lib/public/js/components/upgrade-tab/`) are part of the path filter.
+- `tests/ci/workflow-contract.test.js` pins all of the above.
+
+#### Notes
+- `.dockerignore` already excludes `*.tgz` (F176 landed earlier); no change.
+- The live tiers (`npm run test:live`, the Docker-bound autotune fixture)
+  are not runnable in the sandbox that produced this release; the helper
+  and parser are covered hermetically, the fixture change is covered by the
+  container tier in CI.
+
 ## [0.9.72] - 2026-09-02
 
 A freshly bumped OpenClaw pin now gets the same 24-hour automatic-rollback
