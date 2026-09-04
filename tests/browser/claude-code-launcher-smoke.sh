@@ -35,7 +35,11 @@ fi
 
 kScratch="$(mktemp -d /tmp/alphaclaw-cc-smoke-XXXXXX)"
 cleanup() {
-  kill "${kServerPid:-0}" 2>/dev/null || true
+  # Never `kill 0` (fix wave F181): with no server pid recorded the old
+  # `${kServerPid:-0}` fallback killed the caller's whole process group.
+  if [ -n "${kServerPid:-}" ] && [ "${kServerPid}" != "0" ]; then
+    kill "${kServerPid}" 2>/dev/null || true
+  fi
   wait "${kServerPid:-0}" 2>/dev/null || true
   rm -rf "$kScratch" 2>/dev/null || true
 }
