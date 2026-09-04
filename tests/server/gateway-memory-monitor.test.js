@@ -102,6 +102,49 @@ describe("pure helpers", () => {
     expect(containerBound.capBytes).toBe(mb(512));
   });
 
+  it("computeEffectiveCap honors an operator budget when it is the tightest bound (issue #56)", () => {
+    const base = {
+      rssBytes: mb(100),
+      cgroupUsedBytes: mb(100),
+      containerLimitBytes: mb(4096),
+      activeHeapMb: 512,
+      overheadMb: 192,
+    };
+    // Budget below heap+overhead (704) wins and names its source.
+    expect(computeEffectiveCap({ ...base, budgetBytes: mb(600) })).toEqual({
+      capBytes: mb(600),
+      capSource: "budget",
+    });
+    // A looser budget never widens the cap.
+    expect(computeEffectiveCap({ ...base, budgetBytes: mb(9000) })).toEqual({
+      capBytes: mb(704),
+      capSource: "heap",
+    });
+    // Ties keep the earlier source (heap) — the budget is only reported when
+    // it is strictly the binding constraint.
+    expect(computeEffectiveCap({ ...base, budgetBytes: mb(704) }).capSource).toBe(
+      "heap",
+    );
+    // A budget alone is a real cap on a capless box (the issue #56 shape: 100 GB
+    // cgroup and an 8 GB heap never bind before OpenClaw's own 6 GiB drain).
+    expect(
+      computeEffectiveCap({
+        rssBytes: mb(100),
+        cgroupUsedBytes: null,
+        containerLimitBytes: null,
+        activeHeapMb: null,
+        overheadMb: 192,
+        budgetBytes: mb(2800),
+      }),
+    ).toEqual({ capBytes: mb(2800), capSource: "budget" });
+    // Junk budgets are ignored.
+    for (const junk of [0, -1, Number.NaN, null, undefined]) {
+      expect(computeEffectiveCap({ ...base, budgetBytes: junk }).capSource).toBe(
+        "heap",
+      );
+    }
+  });
+
   it("computeEffectiveCap reports none when no bound exists", () => {
     expect(
       computeEffectiveCap({
