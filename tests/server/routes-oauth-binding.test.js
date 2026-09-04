@@ -398,6 +398,18 @@ describe("server/routes OAuth callback binding (E-C11 / PR #114 pattern)", () =>
     expect(calls.some((url) => url.includes("userinfo"))).toBe(true);
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
+
+  it("a repeated/bracketed `services` query key does not 500 the start route (F209)", async () => {
+    const { app, tmpDir } = buildGoogleApp();
+    // startFlow asserts the 302 redirect itself; before the fix `.split` threw
+    // on the array Express parses from `services[]=…` and the terminal handler
+    // answered 500.
+    const state = await startFlow(app, { query: "?services[]=gmail&services[]=calendar" });
+    expect(state).toMatch(/^[0-9a-f]{32}$/);
+    const nested = await request(app).get("/auth/google/start?services[a]=gmail");
+    expect(nested.status).toBe(302);
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
 });
 
 describe("server/watchdog-terminal-ws admin gate (4.6)", () => {

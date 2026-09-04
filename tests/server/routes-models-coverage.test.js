@@ -509,6 +509,62 @@ describe("server/routes/models coverage", () => {
     expect(deleteRes.statusCode).toBe(400);
     expect(deleteRes.body).toEqual({ ok: false, error: "Missing profileId" });
   });
+
+  describe("PUT /api/models/config validates the whole payload before any write (F078, F212)", () => {
+    it("rejects arrays for configuredModels and authOrder with 400 and writes nothing", async () => {
+      const deps = createModelDeps();
+      const app = createApp(deps);
+      const arrays = await request(app)
+        .put("/api/models/config")
+        .send({ configuredModels: ["openai/gpt-5.6"] });
+      expect(arrays.status).toBe(400);
+      expect(arrays.body.error).toBe("Invalid configuredModels");
+      const order = await request(app)
+        .put("/api/models/config")
+        .send({ authOrder: [["openai:default"]] });
+      expect(order.status).toBe(400);
+      expect(order.body.error).toBe("Invalid authOrder");
+      expect(deps.authProfiles.setModelConfig).not.toHaveBeenCalled();
+      expect(deps.authProfiles.upsertProfile).not.toHaveBeenCalled();
+    });
+
+    it("a null or malformed profile entry is a 400 naming the index — never a 500 after the config was written", async () => {
+      const deps = createModelDeps();
+      const app = createApp(deps);
+      const nullEntry = await request(app)
+        .put("/api/models/config")
+        .send({ primary: "openai/gpt-5.6", profiles: [null] });
+      expect(nullEntry.status).toBe(400);
+      expect(nullEntry.body.error).toBe("profiles[0] must be an object");
+
+      const badType = await request(app)
+        .put("/api/models/config")
+        .send({ profiles: [{ id: "openai:default", type: "password", provider: "openai", key: "sk" }] });
+      expect(badType.status).toBe(400);
+      expect(badType.body.error).toBe("profiles[0].type must be api_key, token, or oauth");
+
+      const badProvider = await request(app)
+        .put("/api/models/config")
+        .send({ profiles: [{ id: "openai:default", type: "api_key", provider: ["openai"], key: "sk" }] });
+      expect(badProvider.status).toBe(400);
+      expect(badProvider.body.error).toBe("profiles[0].provider must be a string");
+      const badId = await request(app)
+        .put("/api/models/config")
+        .send({ profiles: [{ id: { nested: true }, type: "api_key", provider: "openai", key: "sk" }] });
+      expect(badId.status).toBe(400);
+      expect(badId.body.error).toBe("profiles[0].id must be a string");
+
+      const notArray = await request(app)
+        .put("/api/models/config")
+        .send({ profiles: { id: "x" } });
+      expect(notArray.status).toBe(400);
+      expect(notArray.body.error).toBe("profiles must be an array");
+
+      // The model config was never written on any of the rejected requests.
+      expect(deps.authProfiles.setModelConfig).not.toHaveBeenCalled();
+      expect(deps.authProfiles.upsertProfile).not.toHaveBeenCalled();
+    });
+  });
 });
 
 // Fix wave F074: agentId reaches path.join in auth-profiles (agents/<id>/…),
