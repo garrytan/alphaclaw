@@ -370,7 +370,10 @@ describe("server/agents/service coverage", () => {
     it("overwrites orphaned env vars that duplicate a new slack app token", async () => {
       const writeEnvFile = vi.fn();
       const { fsMock, service, restartGateway } = buildService({
-        readEnvFile: () => [{ key: "LEGACY_APP_TOKEN", value: "xapp-orphan" }],
+        // A stale channel-shaped key (e.g. left by a removed named account) is an
+        // orphan; an unrelated key holding the same token is NOT (fix wave F091,
+        // see agents-service.test.js).
+        readEnvFile: () => [{ key: "SLACK_APP_TOKEN_LEGACY", value: "xapp-orphan" }],
         writeEnvFile,
       });
 
