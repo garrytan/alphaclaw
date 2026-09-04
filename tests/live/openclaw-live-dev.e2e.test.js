@@ -35,6 +35,7 @@ const {
   parseJsonObjectFromNoisyOutput,
 } = require("../../lib/server/utils/json");
 const {
+  assertFreeDiskBytes,
   kLiveEnabled,
   kLiveDevEnabled,
   kSilentLogger,
@@ -43,6 +44,7 @@ const {
   kFixturePin,
   writePinFixture,
   createBackupStubRunner,
+  scrubTestRunnerEnv,
   repoBinDir,
   repoOpenclawBin,
   waitFor,
@@ -98,6 +100,9 @@ describeLiveDev("LIVE openclaw dev-head build (real from-source pipeline)", () =
     "builds real main from source via the updater, boot-activates the shim, and executes it",
     { timeout: kDevBuildTimeoutMs + 5 * 60 * 1000 },
     async () => {
+      // A from-source build needs ~5 GB (git clone + pnpm store + dist):
+      // fail fast with the sweep instruction rather than 20 min in.
+      assertFreeDiskBytes(8 * 1024 ** 3, { label: "the live dev source build" });
       const rootDir = mkTemp("alphaclaw-live-dev-e2e-");
       fs.mkdirSync(path.join(rootDir, "logs"), { recursive: true });
       const openclawDir = path.join(rootDir, ".openclaw");
@@ -127,7 +132,7 @@ describeLiveDev("LIVE openclaw dev-head build (real from-source pipeline)", () =
         return s;
       });
 
-      const runner = createBackupStubRunner(createRunStream({}));
+      const runner = createBackupStubRunner(createRunStream({}), { stateDir: openclawDir });
 
       const restartProcess = vi.fn();
       const buildSync = () =>
@@ -141,8 +146,12 @@ describeLiveDev("LIVE openclaw dev-head build (real from-source pipeline)", () =
           // The updater clones to $OPENCLAW_HOME/openclaw — pointed at this
           // harness's rootDir so the checkout lands where channel-sync looks.
           // The repo's node_modules/.bin supplies the real pinned `openclaw`.
+          // Scrubbed: the pinned CLI prints NOTHING (not even its --json
+          // report) when it inherits vitest's VITEST variable — live-verified
+          // 2026-09-02 (705 bytes of dry-run JSON without it, 0 with it) —
+          // which read as build:warning "updater output was not parseable".
           openclawSpawnEnv: () => ({
-            ...process.env,
+            ...scrubTestRunnerEnv(),
             PATH: `${repoBinDir()}${path.delimiter}${process.env.PATH}`,
             OPENCLAW_HOME: rootDir,
             OPENCLAW_NO_AUTO_UPDATE: "1",

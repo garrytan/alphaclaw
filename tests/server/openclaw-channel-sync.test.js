@@ -78,9 +78,28 @@ const writeCheckoutFixture = (rootDir, { sha, bin = true } = {}) => {
   return checkoutDir;
 };
 
+// The usable-backup check (WI-6.1) runs `gzip -t` and extracts manifest.json
+// through the same runner seam; the stub answers with a manifest that lists
+// the global state DB (what a real `backup create` archive carries).
+const kStubManifestTail = `${JSON.stringify({
+  schemaVersion: 1,
+  assets: [{ kind: "sqlite", sourcePath: "/data/.openclaw/state/openclaw.sqlite", archivePath: "state/openclaw.sqlite" }],
+})}\n`;
+const answerArchiveTool = (opts) => {
+  if (opts.command === "gzip" && opts.args?.[0] === "-t") {
+    return { ok: true, code: 0, tail: "", timedOut: false };
+  }
+  if (opts.command === "tar" && opts.args?.[0] === "-xzOf") {
+    return { ok: true, code: 0, tail: kStubManifestTail, timedOut: false };
+  }
+  return null;
+};
+
 // Default runner: everything succeeds; `node <bin> --version` reports the
 // version of the package.json two levels above the bin, like the real CLI.
 const defaultRunnerImpl = async (opts) => {
+  const archiveTool = answerArchiveTool(opts);
+  if (archiveTool) return archiveTool;
   // Faithful model of the real CLI's --output contract (verified against the
   // pinned openclaw 2026.7.1-2 source, dist/backup-create resolveOutputPath):
   // an existing directory (or trailing separator) gets a timestamped archive
@@ -1147,6 +1166,68 @@ describe("server/openclaw-channel-sync", () => {
           ...options,
         });
 
+      // X5: the 0600 chmod is best-effort (network filesystems may refuse
+      // modes) but was silent — a 0644 archive recorded as verified with no
+      // trace. The record now carries mode/modeError, the step warns, and the
+      // operator is notified; the normal path records mode "0600" + mtime.
+      it("records mode '0600' and the archive's mtime on a normal publish (the fence's record-vs-disk facts)", async () => {
+        const harness = mkHarness();
+        const result = await harness.sync.applyUpdate(hardGateTarget);
+        expect(result.status).toBe(202);
+        const recorded = harness.store.readState().backups[0];
+        expect(recorded.mode).toBe("0600");
+        expect(recorded.modeError).toBeUndefined();
+        expect(recorded.mtimeMs).toBe(fs.statSync(recorded.file).mtimeMs);
+        expect(recorded.bytes).toBe(fs.statSync(recorded.file).size);
+        expect(harness.store.readState().lastUpdateRun.steps).not.toContainEqual(
+          expect.objectContaining({
+            name: "backup",
+            detail: expect.stringMatching(/default mode/),
+          }),
+        );
+        // The inventory projects the mode.
+        const entry = harness.sync
+          .listBackupInventory()
+          .entries.find((candidate) => candidate.file === recorded.file);
+        expect(entry.mode).toBe("0600");
+      });
+
+      it("a refused chmod 0600 still records the verified backup, but as mode 'default' with modeError, a backup warning step and a notification", async () => {
+        const failingFs = {
+          ...fs,
+          promises: fs.promises,
+          chmodSync: (target, mode) => {
+            if (String(target).endsWith(".tar.gz")) {
+              throw new Error("EPERM: operation not permitted, chmod");
+            }
+            return fs.chmodSync(target, mode);
+          },
+        };
+        const harness = mkHarness({ extraSyncOptions: { fsModule: failingFs } });
+        const result = await harness.sync.applyUpdate(hardGateTarget);
+        expect(result.status).toBe(202);
+        const recorded = harness.store.readState().backups[0];
+        expect(recorded.verified).toBe(true);
+        expect(recorded.mode).toBe("default");
+        expect(recorded.modeError).toMatch(/EPERM/);
+        expect(harness.store.readState().lastUpdateRun.steps).toContainEqual(
+          expect.objectContaining({
+            name: "backup",
+            status: "warning",
+            detail: expect.stringMatching(/archive left at the filesystem's default mode — chmod 0600 failed \(EPERM/),
+          }),
+        );
+        expect(
+          notifyMessages(harness.notify).some((message) =>
+            /permissions could not be tightened: archive left at the filesystem's default mode/.test(message),
+          ),
+        ).toBe(true);
+        const entry = harness.sync
+          .listBackupInventory()
+          .entries.find((candidate) => candidate.file === recorded.file);
+        expect(entry.mode).toBe("default");
+      });
+
       it("#9: first hard-gated apply writes a unique archive and records it", async () => {
         const harness = mkHarness();
         const backupsDir = backupsDirOf(harness);
@@ -1560,6 +1641,48 @@ describe("server/openclaw-channel-sync", () => {
         // Operator files are never retention's business.
         expect(names).toContain("unrelated.txt");
         expect(names).toContain("openclaw-backup-notes.txt");
+      });
+
+      // Regression pin for the archive-class predicate (isBackupArchiveName):
+      // the pre-#54 pattern was unanchored (/openclaw-backup.*\.tar\.gz$/), so
+      // an operator's own "copy-of-openclaw-backup-….tar.gz" in the directory
+      // counted as an archive and keep-3 could DELETE it. The anchored
+      // predicate spares it, while the AlphaClaw offline-copy suffix
+      // (.alphaclaw.tar.gz) stays inside retention.
+      it("retention classifies by the anchored archive name: an operator's copy-of-… file is spared, an .alphaclaw.tar.gz counts toward keep-3", async () => {
+        const harness = mkHarness();
+        const backupsDir = backupsDirOf(harness);
+        fs.mkdirSync(backupsDir, { recursive: true, mode: 0o700 });
+        const seed = (name, mtimeSec) => {
+          const full = path.join(backupsDir, name);
+          fs.writeFileSync(full, `seed ${name}\n`);
+          fs.utimesSync(full, mtimeSec, mtimeSec);
+        };
+        // Oldest of everything: the unanchored pattern would evict it first.
+        seed("copy-of-openclaw-backup-a.tar.gz", 900);
+        seed("openclaw-backup-a.tar.gz", 1000);
+        seed("openclaw-backup-b.tar.gz", 2000);
+        seed("openclaw-backup-c.tar.gz", 3000);
+        seed("openclaw-backup-e.alphaclaw.tar.gz", 3500);
+        seed("openclaw-backup-d.tar.gz", 4000);
+
+        const result = await harness.sync.applyUpdate(hardGateTarget);
+        expect(result.status).toBe(202);
+
+        const names = fs.readdirSync(backupsDir).sort();
+        // Never retention's business — it does not start with the producer prefix.
+        expect(names).toContain("copy-of-openclaw-backup-a.tar.gz");
+        // keep-3 by mtime among archive-class files: this run's fresh archive,
+        // d, and the offline-copy-suffixed e; a, b, c are evicted.
+        expect(names).toContain("openclaw-backup-d.tar.gz");
+        expect(names).toContain("openclaw-backup-e.alphaclaw.tar.gz");
+        expect(names).not.toContain("openclaw-backup-a.tar.gz");
+        expect(names).not.toContain("openclaw-backup-b.tar.gz");
+        expect(names).not.toContain("openclaw-backup-c.tar.gz");
+        const archiveClass = names.filter((name) =>
+          /^openclaw-backup-[^/]*\.(alphaclaw\.)?tar\.gz$/.test(name),
+        );
+        expect(archiveClass).toHaveLength(3);
       });
     });
 
@@ -2365,6 +2488,350 @@ describe("server/openclaw-channel-sync", () => {
       expect(store.readState().backups || []).toHaveLength(0);
     });
 
+    // WI-1.7: the fresh-install waiver fails CLOSED — only a literally empty
+    // state tree waives the hard gate; a box with sessions, a populated
+    // config, or an applied/LKG history that gets exit 0 + no artifact is a
+    // phantom backup, not a fresh install.
+    describe("fresh-install waiver fails closed (WI-1.7)", () => {
+      const noArtifactRunner = async (opts, fallback) => {
+        if (opts.command === "openclaw" && opts.args?.[0] === "backup") {
+          return { ok: true, code: 0, tail: "nothing to back up\n", timedOut: false };
+        }
+        return fallback(opts);
+      };
+      const mkFresh = () =>
+        createHarness({
+          pin: "1.0.0",
+          installedVersion: "1.0.0",
+          sentinelVersion: "1.0.0",
+          runnerImpl: noArtifactRunner,
+        });
+      const hardGateTarget = { channel: "beta", version: "1.1.0-beta.1" };
+
+      it("refuses (no_artifact 409) when openclaw.json has content", async () => {
+        const harness = mkFresh();
+        fs.mkdirSync(harness.openclawDir, { recursive: true });
+        fs.writeFileSync(path.join(harness.openclawDir, "openclaw.json"), '{"agents":{"list":[]}}\n');
+        const result = await harness.sync.applyUpdate(hardGateTarget);
+        expect(result.status).toBe(409);
+        expect(result.body.code).toBe("backup_failed");
+        expect(result.body.message).toMatch(/reported success but produced no backup file/);
+        expect(result.body.hint).toMatch(/No earlier backup archive exists/);
+      });
+
+      it("refuses when a session transcript exists, even with no database and an empty config", async () => {
+        const harness = mkFresh();
+        const sessions = path.join(harness.openclawDir, "agents", "main", "sessions");
+        fs.mkdirSync(sessions, { recursive: true });
+        fs.writeFileSync(path.join(sessions, "abc.jsonl"), "{}\n");
+        fs.writeFileSync(path.join(harness.openclawDir, "openclaw.json"), "{}\n");
+        const result = await harness.sync.applyUpdate(hardGateTarget);
+        expect(result.status).toBe(409);
+        expect(result.body.code).toBe("backup_failed");
+      });
+
+      it("refuses when the channel state carries an applied/last-known-good history", async () => {
+        const harness = mkFresh();
+        harness.store.updateState((s) => {
+          s.lastKnownGood.package = "0.9.9";
+          return s;
+        });
+        const result = await harness.sync.applyUpdate(hardGateTarget);
+        expect(result.status).toBe(409);
+        expect(result.body.code).toBe("backup_failed");
+      });
+
+      it("still waives for a literally empty tree — an empty `{}` config and the pin's own LKG self-promotion are not history", async () => {
+        const harness = mkFresh();
+        fs.mkdirSync(harness.openclawDir, { recursive: true });
+        fs.writeFileSync(path.join(harness.openclawDir, "openclaw.json"), "{}\n");
+        harness.store.updateState((s) => {
+          s.pinVersion = "1.0.0";
+          s.lastKnownGood.package = "1.0.0";
+          return s;
+        });
+        const result = await harness.sync.applyUpdate(hardGateTarget);
+        expect(result.body.code).not.toBe("backup_failed");
+        const steps = harness.store.readState().lastUpdateRun.steps;
+        expect(steps).toContainEqual(
+          expect.objectContaining({
+            name: "backup",
+            status: "warning",
+            detail: "no state to back up yet — nothing a migration could lose",
+          }),
+        );
+      });
+
+      it("treats an unreadable config as NOT fresh (fs error fails closed)", async () => {
+        const harness = mkFresh();
+        fs.mkdirSync(path.join(harness.openclawDir, "openclaw.json"), { recursive: true });
+        const result = await harness.sync.applyUpdate(hardGateTarget);
+        expect(result.status).toBe(409);
+        expect(result.body.code).toBe("backup_failed");
+      });
+
+      // "Fresh" is an allowlist: anything outside AlphaClaw's own bookkeeping
+      // is state a migration could lose, whether or not this code knows its
+      // name — credentials, identity, legacy auth profiles, cron, pairing.
+      it.each([
+        [
+          "a credentials store",
+          (dir) => {
+            fs.mkdirSync(path.join(dir, "credentials"), { recursive: true });
+            fs.writeFileSync(path.join(dir, "credentials", "telegram.json"), "{}\n");
+          },
+        ],
+        [
+          "a legacy auth-profiles.json",
+          (dir) => {
+            fs.mkdirSync(path.join(dir, "agents", "main", "agent"), { recursive: true });
+            fs.writeFileSync(
+              path.join(dir, "agents", "main", "agent", "auth-profiles.json"),
+              '{"profiles":[]}\n',
+            );
+          },
+        ],
+        [
+          "an identity dir",
+          (dir) => {
+            fs.mkdirSync(path.join(dir, "identity"), { recursive: true });
+            fs.writeFileSync(path.join(dir, "identity", "device.json"), "{}\n");
+          },
+        ],
+        [
+          "cron state",
+          (dir) => {
+            fs.mkdirSync(path.join(dir, "cron"), { recursive: true });
+            fs.writeFileSync(path.join(dir, "cron", "jobs.json"), "[]\n");
+          },
+        ],
+        [
+          "a file this code has no name for",
+          (dir) => fs.writeFileSync(path.join(dir, "pairing-telegram.json"), "{}\n"),
+        ],
+        [
+          "a symlink where a directory would be",
+          (dir) => fs.symlinkSync("/etc", path.join(dir, "credentials")),
+        ],
+      ])(
+        "refuses (no_artifact 409) when the tree holds %s and nothing else — no database, no config, no sessions",
+        async (_label, plant) => {
+          const harness = mkFresh();
+          fs.mkdirSync(harness.openclawDir, { recursive: true });
+          plant(harness.openclawDir);
+          const result = await harness.sync.applyUpdate(hardGateTarget);
+          expect(result.status).toBe(409);
+          expect(result.body.code).toBe("backup_failed");
+          expect(result.body.message).toMatch(/reported success but produced no backup file/);
+        },
+      );
+
+      it("still waives with AlphaClaw's own bookkeeping and empty directories around an empty config (.alphaclaw, logs, backups, tmp, the .env link, empty state/ and agents/main/sessions/)", async () => {
+        const harness = mkFresh();
+        const dir = harness.openclawDir;
+        fs.mkdirSync(path.join(dir, ".alphaclaw", "runs"), { recursive: true });
+        fs.writeFileSync(path.join(dir, ".alphaclaw", "runs", "r.json"), "{}\n");
+        fs.mkdirSync(path.join(dir, "logs"), { recursive: true });
+        fs.writeFileSync(path.join(dir, "logs", "gateway.log"), "log\n");
+        fs.mkdirSync(path.join(dir, "backups"), { recursive: true });
+        fs.mkdirSync(path.join(dir, "tmp"), { recursive: true });
+        fs.symlinkSync(path.join(harness.rootDir, ".env"), path.join(dir, ".env"));
+        fs.mkdirSync(path.join(dir, "state"), { recursive: true });
+        fs.mkdirSync(path.join(dir, "agents", "main", "sessions"), { recursive: true });
+        fs.writeFileSync(path.join(dir, "openclaw.json"), "{}\n");
+        const result = await harness.sync.applyUpdate(hardGateTarget);
+        expect(result.body.code).not.toBe("backup_failed");
+        expect(harness.store.readState().lastUpdateRun.steps).toContainEqual(
+          expect.objectContaining({
+            name: "backup",
+            status: "warning",
+            detail: "no state to back up yet — nothing a migration could lose",
+          }),
+        );
+      });
+
+      // X3: the allowlist used to `continue` on the NAME before looking at
+      // the entry — a symlink named `.env`/`logs`, a special file named `tmp`
+      // or a credentials dump renamed `.env` all counted as fresh. The names
+      // are accepted only in their expected shape.
+      describe("allowlisted names are checked by SHAPE, not name (X3)", () => {
+        const expectNotFresh = async (harness) => {
+          const result = await harness.sync.applyUpdate(hardGateTarget);
+          expect(result.status).toBe(409);
+          expect(result.body.code).toBe("backup_failed");
+          expect(result.body.message).toMatch(/reported success but produced no backup file/);
+        };
+        const expectFresh = async (harness) => {
+          const result = await harness.sync.applyUpdate(hardGateTarget);
+          expect(result.body.code).not.toBe("backup_failed");
+          expect(harness.store.readState().lastUpdateRun.steps).toContainEqual(
+            expect.objectContaining({
+              name: "backup",
+              status: "warning",
+              detail: "no state to back up yet — nothing a migration could lose",
+            }),
+          );
+        };
+
+        it("a `.env` symlink that points anywhere but <rootDir>/.env is NOT fresh", async () => {
+          const harness = mkFresh();
+          fs.mkdirSync(harness.openclawDir, { recursive: true });
+          fs.symlinkSync("/etc/passwd", path.join(harness.openclawDir, ".env"));
+          await expectNotFresh(harness);
+        });
+
+        it("a `.env` symlink to <rootDir>/.env whose target is not a regular file is NOT fresh", async () => {
+          const harness = mkFresh();
+          fs.mkdirSync(harness.openclawDir, { recursive: true });
+          fs.mkdirSync(path.join(harness.rootDir, ".env"));
+          fs.symlinkSync(path.join(harness.rootDir, ".env"), path.join(harness.openclawDir, ".env"));
+          await expectNotFresh(harness);
+        });
+
+        it("the onboarding `.env` link to an existing regular <rootDir>/.env stays fresh (secrets in AlphaClaw's own env are not OpenClaw state)", async () => {
+          const harness = mkFresh();
+          fs.mkdirSync(harness.openclawDir, { recursive: true });
+          fs.writeFileSync(path.join(harness.rootDir, ".env"), "SETUP_PASSWORD=pw\nTELEGRAM_BOT_TOKEN=1:a\n");
+          fs.symlinkSync(path.join(harness.rootDir, ".env"), path.join(harness.openclawDir, ".env"));
+          await expectFresh(harness);
+        });
+
+        it("a small regular `.env` with only bookkeeping keys is fresh; one carrying OPENCLAW_*/TOKEN-shaped keys is NOT", async () => {
+          const bookkeeping = mkFresh();
+          fs.mkdirSync(bookkeeping.openclawDir, { recursive: true });
+          fs.writeFileSync(path.join(bookkeeping.openclawDir, ".env"), "# planted by setup\nSETUP_PASSWORD=pw\n");
+          await expectFresh(bookkeeping);
+
+          const secretful = mkFresh();
+          fs.mkdirSync(secretful.openclawDir, { recursive: true });
+          fs.writeFileSync(
+            path.join(secretful.openclawDir, ".env"),
+            "SETUP_PASSWORD=pw\nOPENCLAW_GATEWAY_TOKEN=abc\n",
+          );
+          await expectNotFresh(secretful);
+
+          const oversized = mkFresh();
+          fs.mkdirSync(oversized.openclawDir, { recursive: true });
+          fs.writeFileSync(path.join(oversized.openclawDir, ".env"), `# ${"x".repeat(5000)}\n`);
+          await expectNotFresh(oversized);
+        });
+
+        it.each([".alphaclaw", "logs", "backups", "tmp"])(
+          "a symlink named %s where a bookkeeping directory would be is NOT fresh",
+          async (name) => {
+            const harness = mkFresh();
+            fs.mkdirSync(harness.openclawDir, { recursive: true });
+            const elsewhere = path.join(harness.rootDir, "elsewhere");
+            fs.mkdirSync(elsewhere, { recursive: true });
+            fs.symlinkSync(elsewhere, path.join(harness.openclawDir, name));
+            await expectNotFresh(harness);
+          },
+        );
+
+        it("a regular file named `logs` is NOT fresh", async () => {
+          const harness = mkFresh();
+          fs.mkdirSync(harness.openclawDir, { recursive: true });
+          fs.writeFileSync(path.join(harness.openclawDir, "logs"), "not a dir\n");
+          await expectNotFresh(harness);
+        });
+      });
+    });
+
+    it("db-preflight: no database + a credentials store alone → warning step (same allowlist predicate), never a silent 'no state database' pass", async () => {
+      const harness = createHarness({
+        pin: "1.0.0",
+        installedVersion: "1.0.0",
+        sentinelVersion: "1.0.0",
+      });
+      fs.mkdirSync(path.join(harness.openclawDir, "credentials"), { recursive: true });
+      fs.writeFileSync(path.join(harness.openclawDir, "credentials", "telegram.json"), "{}\n");
+      const result = await harness.sync.applyUpdate({ channel: "beta", version: "1.1.0" });
+      expect(result.status).toBe(202);
+      const steps = harness.store.readState().lastUpdateRun.steps;
+      expect(steps).toContainEqual(
+        expect.objectContaining({
+          name: "db-preflight",
+          status: "warning",
+          detail: expect.stringMatching(/no state database to probe — the state tree is not empty/),
+        }),
+      );
+      expect(steps).not.toContainEqual(
+        expect.objectContaining({ name: "db-preflight", detail: "no state database" }),
+      );
+    });
+
+    // Same predicate at the db-preflight blind spot: no database to probe is
+    // "compatible" only for a fresh tree; otherwise the step says it could
+    // not check, instead of claiming a pass.
+    it("db-preflight: no database + non-empty state tree → warning step, never a silent pass", async () => {
+      const harness = createHarness({
+        pin: "1.0.0",
+        installedVersion: "1.0.0",
+        sentinelVersion: "1.0.0",
+      });
+      fs.mkdirSync(harness.openclawDir, { recursive: true });
+      fs.writeFileSync(path.join(harness.openclawDir, "openclaw.json"), '{"agents":{}}\n');
+      const result = await harness.sync.applyUpdate({ channel: "beta", version: "1.1.0" });
+      expect(result.status).toBe(202);
+      const steps = harness.store.readState().lastUpdateRun.steps;
+      expect(steps).toContainEqual(
+        expect.objectContaining({
+          name: "db-preflight",
+          status: "warning",
+          detail: expect.stringMatching(/no state database to probe — the state tree is not empty/),
+        }),
+      );
+      expect(steps).not.toContainEqual(
+        expect.objectContaining({ name: "db-preflight", detail: "no state database" }),
+      );
+    });
+
+    it("db-preflight: no database on a fresh tree still completes as 'no state database'", async () => {
+      const harness = createHarness({
+        pin: "1.0.0",
+        installedVersion: "1.0.0",
+        sentinelVersion: "1.0.0",
+      });
+      const result = await harness.sync.applyUpdate({ channel: "beta", version: "1.1.0" });
+      expect(result.status).toBe(202);
+      expect(harness.store.readState().lastUpdateRun.steps).toContainEqual(
+        expect.objectContaining({ name: "db-preflight", status: "completed", detail: "no state database" }),
+      );
+    });
+
+    it("enumerateStateDbs honors OPENCLAW_STATE_DIR from the installed CLI's spawn env", async () => {
+      const { DatabaseSync } = require("node:sqlite");
+      const stateDir = mkTemp("alphaclaw-alt-state-dir-");
+      fs.mkdirSync(path.join(stateDir, "state"), { recursive: true });
+      const db = new DatabaseSync(path.join(stateDir, "state", "openclaw.sqlite"));
+      db.exec("CREATE TABLE t(x INTEGER)");
+      db.close();
+      const preflightCalls = [];
+      const harness = createHarness({
+        pin: "1.0.0",
+        installedVersion: "1.0.0",
+        sentinelVersion: "1.0.0",
+        runnerImpl: async (opts, fallback) => {
+          if (Array.isArray(opts.args) && opts.args.includes("preflight")) {
+            preflightCalls.push(opts.args);
+            return { ok: true, code: 0, tail: '{"status":"ok"}\n', timedOut: false };
+          }
+          return fallback(opts);
+        },
+        extraSyncOptions: {
+          openclawSpawnEnv: () => ({ ...process.env, OPENCLAW_STATE_DIR: stateDir }),
+        },
+      });
+
+      const result = await harness.sync.applyUpdate({ channel: "beta", version: "1.1.0" });
+
+      expect(result.status).toBe(202);
+      // The preflight snapshotted the DB found under OPENCLAW_STATE_DIR, not
+      // under the harness openclawDir (which has none).
+      expect(preflightCalls).toHaveLength(1);
+      expect(preflightCalls[0].some((arg) => /openclaw\.sqlite$/.test(String(arg)))).toBe(true);
+    });
+
     it("aborts the apply when the pin rollback floor cannot be persisted", async () => {
       const { sync, rootDir, store } = createHarness({
         pin: "1.0.0",
@@ -2725,6 +3192,109 @@ describe("server/openclaw-channel-sync", () => {
       expect(
         notifyMessages(notify).some((message) => /healthy/i.test(message)),
       ).toBe(true);
+    });
+
+    // WI-3.4: the apply OUTCOME is important-class, never verbose — under
+    // "Important only" (WATCHDOG_NOTIFICATIONS_QUIET) the operator still
+    // hears that the activation was verified. The id is keyed to the
+    // operation that produced the build so a boot loop dedupes.
+    describe("auto-acceptance notification (WI-3.4)", () => {
+      const kOperationId = "2f8c1f2e-0d2a-4b1e-9a11-6f2f8c1f2e0d";
+      afterEach(() => {
+        delete process.env.WATCHDOG_NOTIFICATIONS_QUIET;
+      });
+
+      it("is not verbose and carries apply-accepted-<operationId> when the applied record names its operation", async () => {
+        process.env.WATCHDOG_NOTIFICATIONS_QUIET = "true";
+        const { sync, store, nowRef, notify } = createHarness({
+          pin: "1.0.0",
+          installedVersion: "1.1.0",
+          sentinelVersion: "1.1.0",
+          acceptanceHoldMs: 0,
+          // Simulates the release-channel normalizer preserving operationId
+          // on both read paths (markGoodNow reads updateState's return).
+          storeWrap: (inner) => {
+            const withOperationId = (state) =>
+              state?.applied ? { ...state, applied: { ...state.applied, operationId: kOperationId } } : state;
+            return {
+              ...inner,
+              readState: () => withOperationId(inner.readState()),
+              updateState: (mutator) => withOperationId(inner.updateState(mutator)),
+            };
+          },
+        });
+        store.updateState((s) => {
+          s.pinVersion = "1.0.0";
+          s.applied = { channel: "beta", version: "1.1.0", at: 1, acceptedAt: null };
+          return s;
+        });
+
+        sync.onGatewayHealthy();
+        nowRef.now += 1;
+        sync.onGatewayHealthy();
+        await flushAsync();
+
+        const call = notify.mock.calls.find(([message]) => /healthy — activation verified/.test(String(message)));
+        expect(call).toBeTruthy();
+        expect(call[1]).toEqual({
+          eventType: "recovery",
+          id: `apply-accepted-${kOperationId}`,
+          operationId: kOperationId,
+        });
+        expect(call[1].verbose).toBeUndefined();
+      });
+
+      it("falls back to apply-accepted-<appliedId>-<acceptedAt> for state files without an operationId (still not verbose)", async () => {
+        process.env.WATCHDOG_NOTIFICATIONS_QUIET = "true";
+        const { sync, store, nowRef, notify } = createHarness({
+          pin: "1.0.0",
+          installedVersion: "1.1.0",
+          sentinelVersion: "1.1.0",
+          acceptanceHoldMs: 0,
+        });
+        store.updateState((s) => {
+          s.pinVersion = "1.0.0";
+          s.applied = { channel: "beta", version: "1.1.0", at: 1, acceptedAt: null };
+          return s;
+        });
+
+        sync.onGatewayHealthy();
+        nowRef.now += 1;
+        sync.onGatewayHealthy();
+        await flushAsync();
+
+        const acceptedAt = store.readState().applied.acceptedAt;
+        const call = notify.mock.calls.find(([message]) => /healthy — activation verified/.test(String(message)));
+        expect(call).toBeTruthy();
+        expect(call[1]).toEqual({
+          eventType: "recovery",
+          id: `apply-accepted-1.1.0-${acceptedAt}`,
+        });
+      });
+
+      it("applyUpdate stamps operationId onto the applied record it writes", async () => {
+        const harness = createHarness({
+          pin: "1.0.0",
+          installedVersion: "1.0.0",
+          sentinelVersion: "1.0.0",
+        });
+        const written = [];
+        const originalUpdate = harness.store.updateState.bind(harness.store);
+        harness.store.updateState = (mutator) =>
+          originalUpdate((s) => {
+            const next = mutator(s) || s;
+            if (next.applied?.operationId) written.push(next.applied.operationId);
+            return next;
+          });
+        const result = await harness.sync.applyUpdate({
+          channel: "beta",
+          version: "1.1.0",
+          operationId: kOperationId,
+        });
+        expect(result.status).toBe(202);
+        // Stamped at record time (the normalizer decides whether it persists).
+        expect(written).toContain(kOperationId);
+      });
     });
 
     it("markGoodNow without an applied build fails; getChannelInfo tracks the window", async () => {

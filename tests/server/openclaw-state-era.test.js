@@ -460,3 +460,130 @@ describe("server/openclaw-state-era pairing store", () => {
     }
   });
 });
+
+describe("server/openclaw-state-era state-DB quiet period", () => {
+  const { withReadonlyStateDb } = require("../../lib/server/openclaw-state-era");
+  const {
+    StateDbQuietError,
+    beginStateDbQuiet,
+    getStateDbHandleCount,
+    resetStateDbQuietForTests,
+  } = require("../../lib/server/state-db-quiet");
+
+  let token = null;
+
+  beforeEach(() => {
+    resetStateDbQuietForTests();
+    token = null;
+  });
+
+  afterEach(() => {
+    token?.release();
+    resetStateDbQuietForTests();
+  });
+
+  const holdQuiet = async () => {
+    ({ token } = await beginStateDbQuiet({ owner: "backup", maxMs: 60_000 }));
+  };
+
+  it("read-only checks ALWAYS arm busy_timeout = 2000 and are counted while open", () => {
+    const openclawDir = createTempOpenclawDir();
+    createStateDb(openclawDir, { row: true });
+    const observed = withReadonlyStateDb(
+      { openclawDir },
+      "pragma-pin",
+      (db) => ({
+        busyTimeout: db.prepare("PRAGMA busy_timeout").get().timeout,
+        openHandles: getStateDbHandleCount(),
+      }),
+      null,
+    );
+    expect(observed).toEqual({ busyTimeout: 2000, openHandles: 1 });
+    expect(getStateDbHandleCount()).toBe(0);
+  });
+
+  it("readers return their fallback while quiet WITHOUT opening the db — and without a warning", async () => {
+    const openclawDir = createTempOpenclawDir();
+    createStateDb(openclawDir, { row: true });
+    const logger = quietLogger();
+    expect(hasExecApprovalsRow({ openclawDir, logger })).toBe(true);
+
+    await holdQuiet();
+    const fn = vi.fn(() => "opened");
+    expect(withReadonlyStateDb({ openclawDir, logger }, "quiet-probe", fn, "fallback")).toBe(
+      "fallback",
+    );
+    expect(fn).not.toHaveBeenCalled();
+    expect(hasExecApprovalsRow({ openclawDir, logger })).toBe(false);
+    expect(
+      readChannelAllowEntriesByAccount({ openclawDir, channel: "telegram", logger }).size,
+    ).toBe(0);
+    expect(logger.warn).not.toHaveBeenCalled();
+    expect(getStateDbHandleCount()).toBe(0);
+
+    token.release();
+    token = null;
+    expect(hasExecApprovalsRow({ openclawDir, logger })).toBe(true);
+  });
+
+  it("the auth.sharedStore flag reads 'unreadable' (writers fail closed, readers fall back) while quiet", async () => {
+    const openclawDir = createTempOpenclawDir();
+    withStateDb(openclawDir, (db) => {
+      db.exec(
+        "CREATE TABLE config_machine_state (state_key TEXT NOT NULL PRIMARY KEY, value_json TEXT NOT NULL)",
+      );
+      db.prepare(
+        "INSERT INTO config_machine_state (state_key, value_json) VALUES ('auth.sharedStore', ?)",
+      ).run(JSON.stringify({ location: "state-db" }));
+    });
+    expect(readAuthSharedStoreLocation({ openclawDir })).toBe("state-db");
+    await holdQuiet();
+    const logger = quietLogger();
+    expect(readAuthSharedStoreLocation({ openclawDir, logger })).toBe("unreadable");
+    expect(logger.warn).not.toHaveBeenCalled();
+  });
+
+  it("pairing writers THROW StateDbQuietError while quiet and leave every row in place", async () => {
+    const openclawDir = createTempOpenclawDir();
+    const databasePath = withStateDb(openclawDir, (db) => {
+      createPairingTables(db);
+      db.prepare(
+        "INSERT INTO channel_pairing_allow_entries (channel_key, account_id, entry) VALUES (?, ?, ?)",
+      ).run("telegram", "default", "111");
+      db.prepare(
+        "INSERT INTO channel_pairing_requests (channel_key, account_id, request_id, code) VALUES (?, ?, ?, ?)",
+      ).run("telegram", "default", "r1", "ABCD1234");
+    });
+    await holdQuiet();
+    const logger = quietLogger();
+
+    expect(() =>
+      deletePairingRequestByCode({ openclawDir, channel: "telegram", code: "ABCD1234", logger }),
+    ).toThrow(StateDbQuietError);
+    expect(() => deleteChannelPairingRows({ openclawDir, channel: "telegram", logger })).toThrow(
+      StateDbQuietError,
+    );
+    let caught = null;
+    try {
+      deleteChannelPairingRows({ openclawDir, channel: "telegram", logger });
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toMatchObject({ name: "StateDbQuietError", code: "backup_in_progress" });
+    expect(logger.warn).not.toHaveBeenCalled();
+
+    const db = new DatabaseSync(databasePath, { readOnly: true });
+    try {
+      expect(db.prepare("SELECT COUNT(*) AS n FROM channel_pairing_allow_entries").get().n).toBe(1);
+      expect(db.prepare("SELECT COUNT(*) AS n FROM channel_pairing_requests").get().n).toBe(1);
+    } finally {
+      db.close();
+    }
+
+    token.release();
+    token = null;
+    expect(
+      deletePairingRequestByCode({ openclawDir, channel: "telegram", code: "ABCD1234" }),
+    ).toEqual({ ok: true, deleted: 1 });
+  });
+});

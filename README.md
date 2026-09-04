@@ -189,7 +189,7 @@ How it works:
 
 - **Explicit updates only.** Nothing installs on its own. Pick a version (last 5 stable, last 5 beta, or recent `main` commits), review its release notes, click once. Every restart deterministically re-loads the version you chose — offline, from a persisted copy on your data volume.
 - **`npm ls` reporting the `openclaw` dependency as "invalid" is expected while a channel pick is active.** `package.json` keeps the exact stable pin (it is the safety fallback every recovery path boots from), while the applied build is overlaid onto `node_modules/openclaw` at startup — so npm's checker sees a version that doesn't match the declared spec. The boot log prints `running <version> (<channel> channel) over declared pin <pin> — expected…`, and the channel status APIs expose `pinDiverged`/`appliedVersion` so tooling can tell this expected state from real drift (foreign tampering is separately detected and reverted).
-- **Backed up before every switch.** AlphaClaw runs `openclaw backup create --verify` first, writing a per-run timestamped archive under `<root>/backups/openclaw/` (the last 3 are retained); downgrades and dev builds are blocked unless the backup verifies (older versions — and the pin you'd roll back to — may not read migrated state). Downgrades and cross-channel switches pause the gateway briefly so the backup captures a consistent state database — the confirm dialog says so — with a retry ladder for vanished-file races when pausing isn't possible.
+- **Backed up before every switch.** AlphaClaw runs `openclaw backup create --verify` first, writing a per-run timestamped archive under `<root>/backups/openclaw/` (the last 3 are retained); downgrades and dev builds are blocked unless the backup verifies (older versions — and the pin you'd roll back to — may not read migrated state). Downgrades and cross-channel switches pause the gateway briefly so the backup captures a consistent state database — the confirm dialog says so. While the gateway is paused AlphaClaw also holds its own state-database readers and writers quiet (writes answer `409 backup_in_progress` for those seconds), retries the upstream backup when OpenClaw's own migration lease contends for the database, and falls back to an AlphaClaw offline copy (SQLite online backup of every state database, `.alphaclaw.tar.gz`) when the upstream tool cannot finish; an archive from either producer counts as verified only after its manifest is read and shown to cover this box's databases. If the fresh backup still fails, the Upgrade page can offer a verified backup from the last 24 hours — proceeding on it is an explicit, human-only consent bound to that archive's digest, and the run record says state written since it is not included. The Upgrade tab's Backups card lists every archive (producer, age, size, provenance) and links to the restore runbook in [docs/upgrade-troubleshooting.md](docs/upgrade-troubleshooting.md#restoring-a-backup).
 - **Database compatibility check.** Before an update applies, the target version's own binary verifies it can read snapshots of your state databases; incompatible updates are blocked before anything changes, and rollbacks that can't be verified say so honestly.
 - **Settings migration at boot.** After a version change, OpenClaw's own doctor migrates your settings once (keeping a per-version pre-migration backup); downgrades restore the exact settings saved for that version, and the Upgrade page shows the last migration result. The migration is fail-closed: it runs BEFORE the new build's gateway can start, and on failure AlphaClaw reverts to a preflight-proven older build when that is safe — otherwise it holds the gateway with one-click "Retry migration" / "Strip blamed keys and retry" actions (see [docs/upgrade-troubleshooting.md](docs/upgrade-troubleshooting.md)).
 - **What's new, per channel.** A curated card highlights each OpenClaw line's changes, with security-default flips called out separately — and those same security changes reappear in the apply confirmation before you commit to a cross-channel switch.
@@ -289,9 +289,24 @@ The built-in watchdog monitors gateway health and recovers from failures automat
 | **Incident overseer**    | Optional (default off): a local Claude Code read of what is happening — "Review current situation" works in any watchdog state (current status, the live incident, recent logs with their real coverage, doctor output) and each settled incident is reviewed automatically; advisory verdict + suggested next action, deterministic recovery stays in charge. When enabled, redacted incident evidence and recent logs are sent to the Anthropic API |
 | **Resize & OOM awareness** | Detects live container resizes on the watchdog tick (event + notification + retune) and classifies gateway heap-OOM vs container-OOM exits as distinct events with machine-derived remediation |
 | **Memory-leak detection** | Default on: samples the gateway's memory (whole process tree) once a minute and confirms a leak with a noise-resistant trend test — one calm notification per episode with projected time to the limit, a distinct alert if it turns critical, a live trend row on the Resources card, and a Drift Doctor finding with a guided fix runbook. Disable from Watchdog → Settings |
-| **Pre-OOM auto-restart** | Strictly opt-in (default off): when a confirmed leak turns critical, attempts a graceful gateway restart before the crash — through the same lifecycle lock and interlocks as a manual restart, never during an update's stabilization window, capped at 2 restarts per 24 hours. Arming it via the agent-admin CLI requires an operator confirm |
+| **Pre-OOM auto-restart** | Strictly opt-in (default off): when a confirmed leak turns critical, attempts a graceful gateway restart before the crash — through the same lifecycle lock and interlocks as a manual restart, never during an update's stabilization window, capped at `maxRestartsPerDay` restarts per 24 hours (default 2, spaced at least min(6h, 24h ÷ 2×budget) apart). Arming it via the agent-admin CLI requires an operator confirm |
+| **Memory budget (fast-leak profile)** | Optional `watchdog.memory.budgetMb`: an operator RSS cap (whole MB, above the gateway's current usage) for the gateway process tree, for a *diagnosed* fast leak on a box whose derived cap (heap or container) sits above OpenClaw's own 6 GiB pressure drain. Critical fires at 90% of the tightest cap. Set from Watchdog → Settings or `PUT /api/watchdog/memory`; via the agent-admin CLI both profile knobs always require an operator confirm |
 | **Notifications**        | Telegram, Discord, Slack, and WhatsApp alerts for crashes, repairs, recovery, automatic fixes, and memory-leak warnings (one per episode, plus a distinct critical alert), with links to the Watchdog page (the optional overseer's verdict notification deep-links to the exact incident) — plus a Verbose/Important-only toggle that mutes informational notices without hiding problems |
 | **Event log**            | SQLite-backed incident + event history with API and UI access          |
+| **Honest restarts**      | A gateway restart only reports success once the OLD gateway is proven gone (port observed down, or a new gateway process with the pre-restart ones exited). When the OpenClaw CLI refuses the non-interactive `gateway stop` (2026.8.2+ without `--force`) or the incumbent keeps the port, the restart is recorded as failed with reason `incumbent_gateway_still_running`, the restart-required banner stays up, and an important notification is sent. `--force` is passed only when the installed CLI advertises it (probed via `gateway stop --help`, never assumed — the 2026.7.1 pin has no such flag) |
+
+### Gateway prelaunch hook
+
+Opt-in: `ALPHACLAW_GATEWAY_PRELAUNCH_HOOK=/absolute/path/to/executable` (deployment environment only — never honored from `.env`). When set, AlphaClaw runs the hook and waits for it to exit **before every gateway launch** — the boot start, manual/API restarts, watchdog relaunches and repairs, the in-place light restart — strictly before the plugin preflight or the gateway child import the OpenClaw bundle. Use case: containers whose image cannot bake in a change — restore a runtime patch to the installed OpenClaw, start a sidecar the gateway needs, re-apply a file the platform resets on redeploy.
+
+Requirements (all enforced, any miss aborts the launch):
+
+- **Root-owned, out-of-tree, executable regular file.** The path must be absolute and canonical (a symlink, or a path with a symlinked component, is refused before it is resolved); its realpath must lie outside the AlphaClaw root (`ALPHACLAW_ROOT_DIR`) and the OpenClaw state dir; it must be owned by `uid 0`, have an execute bit, and must not be group- or world-writable; symlinks are refused (`O_NOFOLLOW`). Why root and out-of-tree: the deployed agent runs as AlphaClaw's own uid and can write anywhere under the tree, so "owned by the AlphaClaw user" proves nothing — only a file the operator (or the image build) installed as root, outside the agent-writable tree, is a trustworthy pre-launch step. Install it in your Dockerfile (`COPY --chown=0:0 --chmod=0755 hooks/pre-gateway-launch /opt/alphaclaw/hooks/`) or as root on the host.
+- **Inode-pinned execution.** AlphaClaw opens the file, inspects the open descriptor, and on Linux executes that exact inode by descriptor (`/proc/<pid>/fd/<fd>`), so a file swapped between the check and the exec never runs; elsewhere the path is re-checked against the inspected inode.
+- **Minimal environment.** The hook receives only `PATH`, `HOME`, `OPENCLAW_STATE_DIR`, `OPENCLAW_CONFIG_PATH`, and `ALPHACLAW_ROOT_DIR` — never the gateway's environment (no tokens, passwords, or API keys). `PATH` is a fixed system path (`/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`, like sudo's `secure_path`), never AlphaClaw's own, so a `#!/usr/bin/env …` shebang cannot resolve to a planted interpreter.
+- **Budget:** 120 s, enforced as a hard deadline: the hook runs in its own process group, and 5 s after the budget the whole group is killed, so a hook that traps signals or leaves a child holding its output still fails the launch closed instead of hanging it. Its stdout/stderr are logged to the AlphaClaw process log with token-, key- and signed-URL-shaped values redacted.
+
+Failure semantics: a refused check (wrong owner/mode/location, symlink, missing) or a failed run (non-zero exit, timeout, cannot execute) is a named error (`GatewayPrelaunchHookError`, with a machine code such as `not_root_owned`, `in_tree`, `symlink`, `nonzero_exit`, `timeout`). The launch is **aborted, fail-closed**: a manual restart fails with that error before anything is stopped (the running gateway keeps serving), a boot or watchdog relaunch starts no gateway, and the outcome (`ran` / `refused` / `failed`) is reported to the watchdog. Unset the variable to turn the hook off; there is no in-tree fallback path.
 
 ## Environment Variables
 
@@ -318,6 +333,8 @@ The built-in watchdog monitors gateway health and recovers from failures automat
 | `ALPHACLAW_AUTOTUNE_DISABLED`     | Optional | Kill-switch: set `1` to disable resource autotune and restore built-in defaults — works mid-crash-loop from your platform's environment settings |
 | `ALPHACLAW_GATEWAY_ENV_PASSTHROUGH` | Optional | Extra env keys (or `PREFIX*` globs, comma/space separated) to pass to the OpenClaw gateway/CLI children beyond the built-in allowlist. Internal secrets (`SETUP_PASSWORD`, etc.) can never be passed this way — the deny list always wins. Read from the deployment environment only. |
 | `ALPHACLAW_GATEWAY_ENV_UNRESTRICTED` | Optional | Break-glass: set `1` to restore the legacy full-`process.env` spread to the gateway child (minus the absolute deny list). Deprecated; deployment env only. Use only if a needed var is being withheld and the passthrough list is impractical, then report it. |
+| `ALPHACLAW_GATEWAY_PRELAUNCH_HOOK` | Optional | Absolute path of a root-owned, out-of-tree executable run (and awaited, 120 s budget) before every gateway launch with a minimal env — see [Gateway prelaunch hook](#gateway-prelaunch-hook). Any check or run failure aborts the launch. Deployment env only — never honored from `.env`. |
+| `OPENCLAW_STATE_DB_QUIET`         | Optional | Kill switch: set `off` to disable the state-database quiet period AlphaClaw holds while the gateway is paused for a pre-update backup (writes then no longer answer `409 backup_in_progress`; the offline copy records `quiet: "disabled"` in its evidence) — see [docs/upgrade-troubleshooting.md](docs/upgrade-troubleshooting.md). Deployment env only — never honored from `.env`. |
 | `GATEWAY_RESTART_READY_TIMEOUT`   | Optional | Seconds a gateway restart waits for the port to answer before failing (default `300`, clamped `30`–`480`). Raise on slow boxes with many plugins — the wait returns the instant the gateway is up, so a generous value costs nothing on healthy restarts. Read at process start (restart AlphaClaw to change); deployment env only — never honored from `.env`. |
 | `WATCHDOG_CHECK_INTERVAL`         | Optional | Seconds between regular gateway health probes (default `120`, clamped `30`–`3600`). Read at process start (restart AlphaClaw to change); deployment env only — never honored from `.env`. |
 | `WATCHDOG_DEGRADED_CHECK_INTERVAL` | Optional | First degraded retry delay in seconds; each further retry doubles it (default `5`, clamped `2`–`120`). Read at process start (restart AlphaClaw to change); deployment env only — never honored from `.env`. |
@@ -372,10 +389,12 @@ If you need OpenClaw's full security posture (manual pairing codes, no query-str
 Release history lives in [CHANGELOG.md](CHANGELOG.md); contributor setup and
 test tiers are in [CONTRIBUTING.md](CONTRIBUTING.md); open work is tracked in
 [TODOS.md](TODOS.md); design documents (Agent Administration, chat reliability, gateway state
-model, the OpenClaw context contract, Telegram topics discovery) live in
+model, the OpenClaw context contract, Telegram topics discovery, the AlphaClaw
+offline-copy backup format) live in
 [docs/designs/](docs/designs/);
-the operator runbook for upgrade failure states (held gateways, blocked
-restores, rollback fencing) is
+the operator runbook for upgrade failure states (held gateways, backup
+contention and the offline copy, restoring a backup, consented backup reuse,
+incumbent gateways, the prelaunch hook, rollback fencing) is
 [docs/upgrade-troubleshooting.md](docs/upgrade-troubleshooting.md);
 architecture notes and conventions for coding agents are in
 [AGENTS.md](AGENTS.md).
@@ -390,9 +409,20 @@ npm run test:coverage   # Coverage report
 
 # Live e2e tiers (opt-in; hit the REAL npm registry / GitHub API and install
 # real OpenClaw releases — catch upstream drift the hermetic suite can't):
-npm run test:live       # catalog + real stable/beta package applies, plus a
-                        # real-gateway memory-leak e2e against the newest beta
-                        # (network)
+npm run test:live       # catalog + real stable/beta package applies, a
+                        # real-gateway memory-leak e2e against the newest beta,
+                        # and the #54 backup suites (state-lock contention
+                        # reproduction, real beta→stable downgrade, 12-cell
+                        # restore drill, gateway-stop contract) against the real
+                        # pin/stable/beta packages (network). Needs a supported
+                        # Node FIRST on PATH (the
+                        # real npm installs resolve `node` from PATH). Stages GBs
+                        # under $TMPDIR: roots are swept per file; between
+                        # interrupted runs `rm -rf /tmp/alphaclaw-live-*
+                        # /tmp/openclaw-prepare-*` and check `df -h /` — the
+                        # per-version install cache lives outside that prefix
+                        # ($TMPDIR/alphaclaw-openclaw-cache; override with
+                        # ALPHACLAW_LIVE_OPENCLAW_CACHE)
 npm run test:live:dev   # dev-channel source build only (20-35 min, ~5 GB disk);
                         # does not re-run the catalog/apply tiers above
 npm run test:container  # full production-container journey: builds the image,

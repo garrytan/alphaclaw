@@ -65,6 +65,31 @@ describe("admin-manifest engine", () => {
     ).toBe("dangerous");
   });
 
+  // WI-4.5: backup-reuse consent is humans-only — the agent is DENIED (not
+  // merely escalated) for any body carrying the field, valid or not.
+  it("denies the agent's updates.apply whenever the body carries allowBackupReuse", () => {
+    const op = manifest.findOp("POST", "/api/openclaw/apply");
+    expect(op?.id).toBe("updates.apply");
+    expect(manifest.resolveTier(op, { body: { channel: "beta", version: "1.0.0" } })).toBe(
+      "dangerous",
+    );
+    for (const allowBackupReuse of [{ sha256: "a".repeat(64) }, true, "true", null, {}]) {
+      expect(
+        manifest.resolveTier(op, { body: { channel: "beta", version: "1.0.0", allowBackupReuse } }),
+      ).toBe("denied");
+    }
+    // Primitive/array bodies never throw and stay at the base tier.
+    for (const body of [true, 1, "x", null, undefined, ["allowBackupReuse"]]) {
+      expect(manifest.resolveTier(op, { body })).toBe("dangerous");
+    }
+  });
+
+  it("classifies the backup inventory as a safe read", () => {
+    const op = manifest.findOp("GET", "/api/openclaw/backups");
+    expect(op?.id).toBe("updates.backups");
+    expect(op.tier).toBe("safe");
+  });
+
   it("tier resolver survives primitive JSON bodies instead of throwing", () => {
     const op = manifest.findOp("PUT", "/api/watchdog/settings");
     for (const body of [true, 1, "x", null, undefined, ["a"]]) {

@@ -676,6 +676,147 @@ describe("server/watchdog", () => {
     );
   });
 
+  describe("expected-restart window health_check dedupe (WI-6.4)", () => {
+    // The skipped rows the window writes: first-of-run rows and summaries.
+    const windowRows = (insertWatchdogEvent) =>
+      insertWatchdogEvent.mock.calls
+        .map(([row]) => row)
+        .filter(
+          (row) =>
+            row.eventType === "health_check" &&
+            row.details?.skipped === true &&
+            row.details?.expectedRestartActive === true,
+        );
+    // Bootstrap cadence while health is unknown (kBootstrapHealthCheckMs).
+    const kBootstrapProbeMs = 5_000;
+
+    it("logs the FIRST failing probe of the window, counts identical repeats in memory, and writes ONE summary row when the window closes", async () => {
+      vi.useFakeTimers();
+      try {
+        const { watchdog, insertWatchdogEvent } = createHarness({
+          autoRepair: false,
+          fetchImpl: async () => {
+            throw new Error("connect ECONNREFUSED 127.0.0.1:18789");
+          },
+        });
+        watchdog.onExpectedRestart({ expiresAt: Date.now() + 120_000 });
+        await vi.advanceTimersByTimeAsync(10);
+        expect(windowRows(insertWatchdogEvent)).toHaveLength(1);
+        expect(windowRows(insertWatchdogEvent)[0]).toMatchObject({
+          status: "ok",
+          details: {
+            skipped: true,
+            expectedRestartActive: true,
+            reason: "connect ECONNREFUSED 127.0.0.1:18789",
+          },
+        });
+        // Four more identical 5s probes: zero new rows (used to be one each).
+        await vi.advanceTimersByTimeAsync(4 * kBootstrapProbeMs);
+        expect(windowRows(insertWatchdogEvent)).toHaveLength(1);
+        expect(watchdog.getStatus()).toMatchObject({
+          lifecycle: "restarting",
+          health: "unknown",
+        });
+
+        // The operation settles → the window closes → one summary row.
+        watchdog.onExpectedRestartSettled();
+        const rows = windowRows(insertWatchdogEvent);
+        expect(rows).toHaveLength(2);
+        expect(rows[1]).toMatchObject({
+          status: "ok",
+          details: {
+            skipped: true,
+            expectedRestartActive: true,
+            reason: "connect ECONNREFUSED 127.0.0.1:18789",
+            repeatedProbes: 4,
+          },
+        });
+        expect(Date.parse(rows[1].details.firstAt)).not.toBeNaN();
+        expect(Date.parse(rows[1].details.lastAt)).toBeGreaterThanOrEqual(
+          Date.parse(rows[1].details.firstAt),
+        );
+        await vi.advanceTimersByTimeAsync(10);
+        watchdog.stop();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("a changed probe reason inside the window flushes the previous run's summary and logs the new reason's first row; a run of one writes no summary", async () => {
+      vi.useFakeTimers();
+      try {
+        let reason = "gateway health request failed: a";
+        const { watchdog, insertWatchdogEvent } = createHarness({
+          autoRepair: false,
+          fetchImpl: async () => {
+            throw new Error(reason);
+          },
+        });
+        watchdog.onExpectedRestart({ expiresAt: Date.now() + 120_000 });
+        await vi.advanceTimersByTimeAsync(10);
+        await vi.advanceTimersByTimeAsync(2 * kBootstrapProbeMs);
+        expect(windowRows(insertWatchdogEvent)).toHaveLength(1);
+
+        reason = "gateway health request failed: b";
+        await vi.advanceTimersByTimeAsync(kBootstrapProbeMs);
+        const afterSwitch = windowRows(insertWatchdogEvent);
+        expect(afterSwitch.map((row) => row.details.reason)).toEqual([
+          "gateway health request failed: a",
+          "gateway health request failed: a",
+          "gateway health request failed: b",
+        ]);
+        // Summary for "a" (first + 2 repeats), then the first row for "b".
+        expect(afterSwitch[1].details.repeatedProbes).toBe(2);
+        expect(afterSwitch[2].details.repeatedProbes).toBeUndefined();
+
+        // "b" was probed exactly once: closing the window adds no summary.
+        watchdog.onExpectedRestartSettled();
+        expect(windowRows(insertWatchdogEvent)).toHaveLength(3);
+        await vi.advanceTimersByTimeAsync(10);
+        watchdog.stop();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("a launch inside the window (onGatewayLaunch) closes the run with its summary and later windows start a fresh count", async () => {
+      vi.useFakeTimers();
+      try {
+        const { watchdog, insertWatchdogEvent } = createHarness({
+          autoRepair: false,
+          fetchImpl: async () => {
+            throw new Error("down");
+          },
+        });
+        watchdog.onExpectedRestart({ expiresAt: Date.now() + 120_000 });
+        await vi.advanceTimersByTimeAsync(10);
+        await vi.advanceTimersByTimeAsync(3 * kBootstrapProbeMs);
+        expect(windowRows(insertWatchdogEvent)).toHaveLength(1);
+
+        // The relaunch lands: the window clears and the run is summarized.
+        watchdog.onGatewayLaunch({ pid: 77, startedAt: Date.now() });
+        expect(windowRows(insertWatchdogEvent)).toHaveLength(2);
+        expect(windowRows(insertWatchdogEvent)[1].details.repeatedProbes).toBe(3);
+
+        // A second window counts from zero again (the post-launch bootstrap
+        // cadence is already armed, so probes land on its 5s ticks): two
+        // probes → one first row + a summary of exactly one repeat.
+        watchdog.onExpectedRestart({ expiresAt: Date.now() + 120_000 });
+        await vi.advanceTimersByTimeAsync(10);
+        await vi.advanceTimersByTimeAsync(2 * kBootstrapProbeMs);
+        watchdog.onExpectedRestartSettled();
+        const rows = windowRows(insertWatchdogEvent);
+        expect(rows).toHaveLength(4);
+        expect(rows[2].details.repeatedProbes).toBeUndefined();
+        expect(rows[3].details.repeatedProbes).toBe(1);
+        await vi.advanceTimersByTimeAsync(10);
+        watchdog.stop();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
+
   it("treats non-zero expected exits as crashes", () => {
     const { watchdog, insertWatchdogEvent } = createHarness({
       autoRepair: false,

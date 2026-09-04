@@ -44,6 +44,7 @@ vi.mock("preact/hooks", () => {
 vi.mock("../../lib/public/js/lib/api.js", () => ({
   applyOpenclawVersion: vi.fn(),
   clearOpenclawBlocklist: vi.fn(),
+  fetchOpenclawBackups: vi.fn(),
   fetchOpenclawCatalog: vi.fn(),
   fetchOpenclawChannel: vi.fn(),
   fetchOpenclawRun: vi.fn(),
@@ -74,7 +75,10 @@ import { showToast } from "../../lib/public/js/components/toast.js";
 import { gatewayShellStore } from "../../lib/public/js/components/restart-progress-card.js";
 import { UpgradeTabView } from "../../lib/public/js/components/upgrade-tab/index.js";
 import { useUpgradeTab } from "../../lib/public/js/components/upgrade-tab/use-upgrade-tab.js";
-import { buildChannelSaveErrorModel } from "../../lib/public/js/components/upgrade-tab/helpers.js";
+import {
+  buildChannelSaveErrorModel,
+  buildRollbackDataRiskLine,
+} from "../../lib/public/js/components/upgrade-tab/helpers.js";
 import { ActionButton } from "../../lib/public/js/components/action-button.js";
 import { SegmentedControl } from "../../lib/public/js/components/segmented-control.js";
 import { Tooltip } from "../../lib/public/js/components/tooltip.js";
@@ -2080,10 +2084,17 @@ describe("frontend/upgrade-tab hook", () => {
     expect(state.actionError).toBeNull();
     expect(state.operation).toBeNull();
     expect(state.rollingBack).toBe(false);
+    // Pin updated (WI-4.1): the fence model now carries the re-stat caveat
+    // fields; an older server that omits them yields the neutral shape.
     expect(state.rollbackDataRisk).toEqual({
       message:
         "This update migrated your state databases — the rollback target may not be able to read them.",
       backupFile: "backup-2026-08-29.tar.gz",
+      backupFileExists: undefined,
+      backupPartial: false,
+      backupReused: false,
+      reusedAgeMs: null,
+      newestSurvivingBackup: null,
     });
 
     // Confirming re-sends the rollback WITH consent and hands off to the
@@ -2113,16 +2124,65 @@ describe("frontend/upgrade-tab hook", () => {
     state = renderHook({});
     await state.onRollback();
     state = renderHook({});
-    expect(state.rollbackDataRisk).toEqual({
-      message: "migrated",
-      backupFile: null,
-    });
+    expect(state.rollbackDataRisk).toEqual(
+      expect.objectContaining({ message: "migrated", backupFile: null }),
+    );
 
     state.onCancelRollbackDataRisk();
     state = renderHook({});
     expect(state.rollbackDataRisk).toBeNull();
     expect(api.rollbackOpenclaw).toHaveBeenCalledTimes(1);
     expect(state.operation).toBeNull();
+  });
+
+  // D9: the fence's `backupFileCaveat` (why a PRESENT archive must not be
+  // restored) has to reach the dialog model — without it every non-missing
+  // verdict rendered as "no longer on disk — pruned".
+  it("the fence's backupFileCaveat reaches the dialog model: the line says 'do not restore it', never 'pruned' (D9)", async () => {
+    api.rollbackOpenclaw.mockRejectedValueOnce(
+      Object.assign(new Error("migrated"), {
+        code: "rollback_requires_confirmation",
+        status: 409,
+        backupFile: "/data/backups/openclaw/openclaw-backup-1.tar.gz",
+        backupFileExists: false,
+        backupFileCaveat: "symlink",
+        newestSurvivingBackup: {
+          file: "/data/backups/openclaw/openclaw-backup-0.tar.gz",
+          at: 1,
+          producer: "openclaw",
+        },
+      }),
+    );
+    let state = await hydrate();
+    state.onRequestRollback();
+    state = renderHook({});
+    await state.onRollback();
+    state = renderHook({});
+
+    expect(state.rollbackDataRisk.backupFileCaveat).toBe("symlink");
+    const line = buildRollbackDataRiskLine(state.rollbackDataRisk);
+    expect(line).toContain("is on disk but failed verification");
+    expect(line).toContain("it is a symlink, not the recorded file");
+    expect(line).toContain("do not restore it");
+    expect(line).not.toContain("pruned");
+    expect(line).not.toContain("no longer on disk");
+
+    // Absent (older server / genuinely missing) → undefined, so the existing
+    // neutral-shape pin and the "pruned" wording still hold.
+    state.onCancelRollbackDataRisk();
+    api.rollbackOpenclaw.mockRejectedValueOnce(
+      Object.assign(new Error("migrated"), {
+        code: "rollback_requires_confirmation",
+        status: 409,
+        backupFile: "/data/backups/openclaw/openclaw-backup-1.tar.gz",
+        backupFileExists: false,
+      }),
+    );
+    state = renderHook({});
+    await state.onRollback();
+    state = renderHook({});
+    expect(state.rollbackDataRisk.backupFileCaveat).toBeUndefined();
+    expect(buildRollbackDataRiskLine(state.rollbackDataRisk)).toContain("pruned");
   });
 
   it("surfaces a rejected rollback as a persistent inline action error (never toast-only)", async () => {

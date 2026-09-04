@@ -9,7 +9,13 @@ const path = require("path");
 const kTempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "watchdog-memory-"));
 process.env.ALPHACLAW_ROOT_DIR = kTempRoot;
 
-const { createWatchdog } = require("../../lib/server/watchdog");
+const {
+  createWatchdog,
+  resolveMemoryMitigationBrake,
+} = require("../../lib/server/watchdog");
+// The incumbent verdict gateway.js THROWS from a cold restart (P1 review fix):
+// the mitigation must treat it as the failed restart it is.
+const { GatewayIncumbentRestartError } = require("../../lib/server/gateway");
 
 const kMb = 1024 * 1024;
 const kStartMs = 1_700_000_000_000;
@@ -191,6 +197,28 @@ describe("server/watchdog memory monitor", () => {
     expect(harness.watchdog.getStatus().memory.trendState).toBe("critical");
   });
 
+  it("budget-capped critical pressure names the operator budget, never the container or heap advice (issue #56)", async () => {
+    const harness = createHarness({
+      settings: { enabled: true, autoRestart: false, effectiveAutoRestart: false, budgetMb: 400 },
+    });
+    launchGateway(harness);
+    // 100 GB box: only the operator budget binds.
+    await driveTicks(harness, {
+      ticks: 8,
+      sampleAt: (i) => ({
+        rssBytes: (365 + 4 * i) * kMb,
+        cgroupUsedBytes: (365 + 4 * i) * kMb,
+        containerLimitBytes: 100 * 1024 * kMb,
+      }),
+    });
+    expect(harness.watchdog.getMemoryTrend().capSource).toBe("budget");
+    const critical = notifications(harness.notifier).find((m) => m.includes("memory critical"));
+    expect(critical).toBeTruthy();
+    expect(critical).toContain("operator memory budget (400 MB, watchdog.memory.budgetMb)");
+    expect(critical).not.toContain("against the container limit");
+    expect(critical).not.toContain("resource autotune");
+  });
+
   it("heap-capped pressure (capSource heap) gets the shared heap remedy", async () => {
     const harness = createHarness();
     launchGateway(harness);
@@ -270,12 +298,16 @@ describe("server/watchdog memory monitor", () => {
   });
 
   describe("pre-OOM mitigation", () => {
-    const criticalScenario = (harness, extraTicks = 8) =>
+    // startTick advances the fake clock (one tick = 60s) so brake-spacing
+    // tests can jump hours ahead; the RSS ramp restarts from its base each
+    // scenario so a later scenario is still a rising critical episode.
+    const criticalScenario = (harness, extraTicks = 8, startTick = 0) =>
       driveTicks(harness, {
         ticks: extraTicks,
+        startTick,
         sampleAt: (i) => ({
-          rssBytes: (365 + 4 * i) * kMb,
-          cgroupUsedBytes: (365 + 4 * i) * kMb,
+          rssBytes: (365 + 4 * (i - startTick)) * kMb,
+          cgroupUsedBytes: (365 + 4 * (i - startTick)) * kMb,
           containerLimitBytes: 400 * kMb,
         }),
       });
@@ -340,6 +372,218 @@ describe("server/watchdog memory monitor", () => {
             e.details.reason === "rate_brake",
         ),
       ).toBe(true);
+    });
+
+    it("maxRestartsPerDay widens the brake and tightens spacing (fast-leak profile, issue #56)", async () => {
+      const restart = vi.fn(async () => ({ ok: true }));
+      const harness = createHarness({
+        // 4/day → spacing min(6h, 24h / 8) = 3h.
+        settings: {
+          enabled: true,
+          autoRestart: true,
+          effectiveAutoRestart: true,
+          maxRestartsPerDay: 4,
+        },
+        restartGatewayForMitigation: restart,
+      });
+      launchGateway(harness);
+      await criticalScenario(harness);
+      expect(restart).toHaveBeenCalledTimes(1);
+
+      // 2h later: still inside the 3h spacing → braked, and the event names
+      // the budget the brake enforced.
+      await criticalScenario(harness, 8, 120);
+      expect(restart).toHaveBeenCalledTimes(1);
+      const brakeEvent = memoryEvents(harness.insertWatchdogEvent).find(
+        (e) =>
+          e.details.kind === "mitigation_skipped" &&
+          e.details.reason === "rate_brake",
+      );
+      expect(brakeEvent.details).toMatchObject({
+        maxRestartsPerDay: 4,
+        minIntervalMs: 3 * 60 * 60 * 1000,
+        restartsInWindow: 1,
+      });
+
+      // 3h+ after the first restart (well inside the default 6h spacing that
+      // would still brake): the second restart is allowed.
+      await criticalScenario(harness, 8, 200);
+      expect(restart).toHaveBeenCalledTimes(2);
+    });
+
+    it("budgetMb caps a box whose derived cap is far away (the issue #56 shape)", async () => {
+      // 100 GB container, no heap cap: the derived cap never binds, so RSS
+      // climbing 365→400 MB is "normal" — until the operator budget says 400.
+      const bigBox = (i) => ({
+        rssBytes: (365 + 4 * i) * kMb,
+        cgroupUsedBytes: (365 + 4 * i) * kMb,
+        containerLimitBytes: 100 * 1024 * kMb,
+      });
+      const withoutBudget = createHarness({
+        settings: { enabled: true, autoRestart: true, effectiveAutoRestart: true },
+        restartGatewayForMitigation: vi.fn(async () => ({ ok: true })),
+      });
+      launchGateway(withoutBudget);
+      await driveTicks(withoutBudget, { ticks: 8, sampleAt: bigBox });
+      expect(withoutBudget.watchdog.getStatus().memory.trendState).not.toBe(
+        "critical",
+      );
+
+      const restart = vi.fn(async () => ({ ok: true }));
+      const withBudget = createHarness({
+        settings: {
+          enabled: true,
+          autoRestart: true,
+          effectiveAutoRestart: true,
+          budgetMb: 400,
+        },
+        restartGatewayForMitigation: restart,
+      });
+      launchGateway(withBudget);
+      await driveTicks(withBudget, { ticks: 8, sampleAt: bigBox });
+      expect(withBudget.watchdog.getMemoryTrend().capSource).toBe("budget");
+      expect(withBudget.watchdog.getMemoryTrend().effectiveCapMb).toBe(400);
+      expect(restart).toHaveBeenCalledTimes(1);
+    });
+
+    it.each([
+      [undefined, 2, 6 * 3600e3],
+      [0, 2, 6 * 3600e3],
+      [25, 2, 6 * 3600e3],
+      [2.5, 2, 6 * 3600e3],
+      ["4", 2, 6 * 3600e3],
+      [1, 1, 6 * 3600e3],
+      [2, 2, 6 * 3600e3],
+      [3, 3, 4 * 3600e3],
+      [4, 4, 3 * 3600e3],
+      [12, 12, 3600e3],
+      [24, 24, 1800e3],
+    ])(
+      "resolveMemoryMitigationBrake(%s) → { maxPerWindow: %s, minIntervalMs: %s }",
+      (input, maxPerWindow, minIntervalMs) => {
+        expect(resolveMemoryMitigationBrake(input)).toEqual({
+          maxPerWindow,
+          minIntervalMs,
+        });
+      },
+    );
+
+    it("a lowered maxRestartsPerDay brakes on stamps persisted under the wider budget", async () => {
+      const statePath = path.join(
+        fs.mkdtempSync(path.join(os.tmpdir(), "memory-mitigation-")),
+        "memory-mitigation-state.json",
+      );
+      fs.writeFileSync(
+        statePath,
+        JSON.stringify({ restarts: [kStartMs - 10 * 3600e3, kStartMs - 7 * 3600e3] }),
+      );
+      const restart = vi.fn(async () => ({ ok: true }));
+      const harness = createHarness({
+        settings: { enabled: true, autoRestart: true, effectiveAutoRestart: true, maxRestartsPerDay: 1 },
+        restartGatewayForMitigation: restart,
+        mitigationStatePath: statePath,
+      });
+      launchGateway(harness);
+      await criticalScenario(harness);
+      expect(restart).not.toHaveBeenCalled();
+      const brake = memoryEvents(harness.insertWatchdogEvent).find(
+        (e) => e.details.kind === "mitigation_skipped" && e.details.reason === "rate_brake",
+      );
+      expect(brake.details).toMatchObject({ restartsInWindow: 2, maxRestartsPerDay: 1 });
+    });
+
+    it("a widened budget still enforces its COUNT cap inside the 24h window", async () => {
+      const restart = vi.fn(async () => ({ ok: true }));
+      const harness = createHarness({
+        settings: { enabled: true, autoRestart: true, effectiveAutoRestart: true, maxRestartsPerDay: 3 },
+        restartGatewayForMitigation: restart,
+      });
+      launchGateway(harness);
+      // 3/day → 4h spacing. Restarts at t=0, 5h, 10h; the fourth at 15h is count-braked.
+      for (const start of [0, 300, 600]) {
+        // eslint-disable-next-line no-await-in-loop
+        await criticalScenario(harness, 8, start);
+      }
+      expect(restart).toHaveBeenCalledTimes(3);
+      await criticalScenario(harness, 8, 900);
+      expect(restart).toHaveBeenCalledTimes(3);
+      const brakeEvent = memoryEvents(harness.insertWatchdogEvent)
+        .filter((e) => e.details.kind === "mitigation_skipped" && e.details.reason === "rate_brake")
+        .pop();
+      expect(brakeEvent.details).toMatchObject({ restartsInWindow: 3, maxRestartsPerDay: 3 });
+    });
+
+    it("a maxRestartsPerDay LOWERED during the notify await re-brakes the restart and refunds the stamp (TOCTOU re-check)", async () => {
+      const statePath = path.join(
+        fs.mkdtempSync(path.join(os.tmpdir(), "memory-mitigation-")),
+        "memory-mitigation-state.json",
+      );
+      // One restart 3h ago: allowed under 4/day (3h spacing), braked under 2/day (6h).
+      fs.writeFileSync(statePath, JSON.stringify({ restarts: [kStartMs - 3 * 3600e3 - 60e3] }));
+      let maxRestartsPerDay = 4;
+      const restart = vi.fn(async () => ({ ok: true }));
+      const harness = createHarness({
+        readMemorySettings: () => ({
+          enabled: true,
+          autoRestart: true,
+          effectiveAutoRestart: true,
+          maxRestartsPerDay,
+        }),
+        restartGatewayForMitigation: restart,
+        mitigationStatePath: statePath,
+      });
+      // The operator's PUT lands while the mitigation notification is in flight.
+      harness.notifier.notify.mockImplementation(async (message) => {
+        if (String(message).includes("Restarting gateway before it runs out of memory")) {
+          maxRestartsPerDay = 2;
+        }
+        return { ok: true };
+      });
+      launchGateway(harness);
+      await criticalScenario(harness);
+      expect(restart).not.toHaveBeenCalled();
+      const recheck = memoryEvents(harness.insertWatchdogEvent).find(
+        (e) => e.details.kind === "mitigation_skipped" && e.details.recheck === true,
+      );
+      expect(recheck.details).toMatchObject({ reason: "rate_brake", maxRestartsPerDay: 2, restartsInWindow: 1 });
+      // The stamp was refunded: only the pre-seeded restart remains persisted.
+      expect(JSON.parse(fs.readFileSync(statePath, "utf8")).restarts).toHaveLength(1);
+    });
+
+    it("injected junk budgetMb never becomes a cap; a throwing read keeps the last-good budget for detection but fails enforcement closed", async () => {
+      const bigBox = (i) => ({
+        rssBytes: (365 + 4 * i) * kMb,
+        cgroupUsedBytes: (365 + 4 * i) * kMb,
+        containerLimitBytes: 100 * 1024 * kMb,
+      });
+      for (const junk of [0, -1, "400", Number.NaN]) {
+        const harness = createHarness({
+          settings: { enabled: true, autoRestart: false, effectiveAutoRestart: false, budgetMb: junk },
+        });
+        launchGateway(harness);
+        // eslint-disable-next-line no-await-in-loop
+        await driveTicks(harness, { ticks: 8, sampleAt: bigBox });
+        expect(harness.watchdog.getMemoryTrend().capSource).not.toBe("budget");
+      }
+
+      let shouldThrow = false;
+      const restart = vi.fn(async () => ({ ok: true }));
+      const harness = createHarness({
+        readMemorySettings: () => {
+          if (shouldThrow) throw new Error("corrupt config");
+          return { enabled: true, autoRestart: true, effectiveAutoRestart: true, budgetMb: 400 };
+        },
+        restartGatewayForMitigation: restart,
+      });
+      launchGateway(harness);
+      await driveTicks(harness, { ticks: 1, sampleAt: () => ({ rssBytes: 100 * kMb }) });
+      shouldThrow = true;
+      await driveTicks(harness, { startTick: 1, ticks: 8, sampleAt: bigBox });
+      // Detection still uses the operator budget (last-known-good)...
+      expect(harness.watchdog.getMemoryTrend().capSource).toBe("budget");
+      expect(harness.watchdog.getMemoryTrend().effectiveCapMb).toBe(400);
+      // ...but enforcement failed closed.
+      expect(restart).not.toHaveBeenCalled();
     });
 
     it("a pre-seeded persisted brake blocks the restart and notifies once", async () => {
@@ -565,6 +809,91 @@ describe("server/watchdog memory monitor", () => {
       expect(
         JSON.parse(fs.readFileSync(statePath, "utf8")).restarts,
       ).toHaveLength(1);
+    });
+
+    it("an INCUMBENT verdict thrown by the restart (gateway.js GatewayIncumbentRestartError) is a FAILED mitigation: failed gateway_restart event naming the reason, budget stamp refunded, anti-thrash cooldown, loud notification", async () => {
+      // Pre-fix, gateway.js RETURNED { ok:false, incumbent:true } and this
+      // path recorded gateway_restart:ok, kept the brake stamp, and left the
+      // leaking gateway running with no notification (the #54 class).
+      let incumbent = true;
+      const restart = vi.fn(async () => {
+        if (incumbent) {
+          throw new GatewayIncumbentRestartError(
+            "the previous gateway is still running: the gateway port never released after stop (the OpenClaw CLI refused the non-interactive stop); 1 pre-restart gateway process(es) still alive (pid 777) and no new gateway process observed",
+            {
+              wasRunningBefore: true,
+              stopConfirmed: false,
+              cliRefused: true,
+              cliExitCode: 1,
+              cliForced: false,
+              preStopPids: [777],
+              postReadyPids: [777],
+              newPids: [],
+              survivingPids: [777],
+            },
+          );
+        }
+        return { ok: true };
+      });
+      const statePath = path.join(
+        fs.mkdtempSync(path.join(os.tmpdir(), "memory-mitigation-")),
+        "memory-mitigation-state.json",
+      );
+      const harness = createHarness({
+        settings: { enabled: true, autoRestart: true, effectiveAutoRestart: true },
+        restartGatewayForMitigation: restart,
+        mitigationStatePath: statePath,
+      });
+      launchGateway(harness);
+      await criticalScenario(harness);
+      expect(restart).toHaveBeenCalledTimes(1);
+
+      // Ledger: started → FAILED with the reason; never ok.
+      const restartRows = harness.insertWatchdogEvent.mock.calls
+        .map(([row]) => row)
+        .filter(
+          (row) => row.eventType === "operation" && row.source === "gateway_restart",
+        );
+      expect(restartRows.map((row) => row.status)).toEqual(["started", "failed"]);
+      expect(restartRows[1].details).toEqual({
+        trigger: "memory_mitigation",
+        error: expect.stringContaining("Gateway restart did not take effect"),
+        reason: "incumbent_gateway_still_running",
+      });
+      const failedEvent = memoryEvents(harness.insertWatchdogEvent).find(
+        (e) => e.details.kind === "mitigation_restart_failed",
+      );
+      expect(failedEvent.details).toMatchObject({
+        reason: "incumbent_gateway_still_running",
+        message: expect.stringContaining("the previous gateway is still running"),
+      });
+      // Loud, with the reason: the leak was NOT mitigated.
+      const failureNotice = notifications(harness.notifier).find((m) =>
+        m.includes("Pre-OOM gateway restart failed"),
+      );
+      expect(failureNotice).toContain("Reason: `incumbent_gateway_still_running`");
+      expect(failureNotice).toContain("The previous gateway is still running");
+      // The window settled: the failure is never hidden as "expected".
+      expect(harness.watchdog.getStatus().expectedRestartUntil).toBeNull();
+
+      // The 2-per-24h budget stamp was refunded (nothing was mitigated)...
+      expect(JSON.parse(fs.readFileSync(statePath, "utf8")).restarts).toHaveLength(0);
+      // ...and the short anti-thrash cooldown holds the next ticks exactly
+      // like every other failed restart.
+      incumbent = false;
+      await criticalScenario(harness, 3);
+      expect(restart).toHaveBeenCalledTimes(1);
+      await driveTicks(harness, {
+        startTick: 20, // 20 min after kStartMs > 15-min cooldown
+        ticks: 3,
+        sampleAt: (i) => ({
+          rssBytes: (365 + 4 * i) * kMb,
+          cgroupUsedBytes: (365 + 4 * i) * kMb,
+          containerLimitBytes: 400 * kMb,
+        }),
+      });
+      expect(restart).toHaveBeenCalledTimes(2);
+      expect(JSON.parse(fs.readFileSync(statePath, "utf8")).restarts).toHaveLength(1);
     });
 
     it("a held critical verdict without a fresh sample never restarts (evidence-backed enforcement)", async () => {
@@ -821,6 +1150,38 @@ describe("server/watchdog memory monitor", () => {
       sampleAt: () => ({ rssBytes: 999 * kMb }),
     });
     expect(harness.readMemorySample.mock.calls.length).toBe(12); // unchanged
+  });
+
+  it("an EXPECTED late exit of a stale predecessor pid never rewrites the live successor's lifecycle (issue #56)", async () => {
+    const harness = createHarness();
+    launchGateway(harness, 4242);
+    expect(harness.watchdog.getStatus().lifecycle).toBe("running");
+    // The old cold-restart supervisor (pid 1111) drained for minutes and only
+    // now exits 143 — expected, but not the process we supervise anymore.
+    harness.watchdog.onGatewayExit({ code: 143, signal: null, expectedExit: true, pid: 1111 });
+    expect(harness.watchdog.getStatus().lifecycle).toBe("running");
+    expect(harness.watchdog.getStatus().expectedRestartUntil).toBeNull();
+    const stale = harness.insertWatchdogEvent.mock.calls
+      .map(([e]) => e)
+      .find((e) => e.details?.stalePredecessor === true);
+    expect(stale.details).toMatchObject({ pid: 1111, currentPid: 4242, expectedExit: true, code: 143 });
+    // The SAME exit for the live pid IS the managed restart path.
+    harness.watchdog.onGatewayExit({ code: 143, signal: null, expectedExit: true, pid: 4242 });
+    expect(harness.watchdog.getStatus().lifecycle).toBe("restarting");
+  });
+
+  it("an EXPECTED code-1 exit of an adopted supervisor is a managed stop, never a crash (launcher hard-kill backstop, issue #56)", async () => {
+    const harness = createHarness();
+    launchGateway(harness, 4242);
+    harness.watchdog.onGatewayExit({ code: 1, signal: null, expectedExit: true, pid: 4242, supervisor: true });
+    expect(harness.watchdog.getStatus().lifecycle).toBe("restarting");
+    expect(harness.watchdog.getStatus().crashCountInWindow).toBe(0);
+    expect(notifications(harness.notifier).some((m) => m.includes("went down"))).toBe(false);
+    // The same code from a direct `gateway run` child keeps today's crash classification.
+    const direct = createHarness();
+    launchGateway(direct, 4243);
+    direct.watchdog.onGatewayExit({ code: 1, signal: null, expectedExit: true, pid: 4243 });
+    expect(direct.watchdog.getStatus().lifecycle).toBe("crashed");
   });
 
   it("start() runs an immediate first tick — no 60s no_gateway blind window", async () => {

@@ -385,6 +385,67 @@ describe("server/routes/agents", () => {
     });
   });
 
+  // X4: the failed-clear outcome must reach the client exactly like the
+  // deferred one — the delete succeeded, the allow entries did not go away.
+  it("DELETE /api/channels/accounts forwards pairingRowsCleanupFailed + pairingRowsCleanupError with ok:true authoritative", async () => {
+    const agentsService = createAgentsServiceMock();
+    agentsService.deleteChannelAccount.mockResolvedValue({
+      ok: true,
+      pairingRowsCleanupFailed: true,
+      pairingRowsCleanupError: "pairing tables schema is unsupported (upstream changed it)",
+    });
+    const app = createApp(agentsService);
+
+    const response = await request(app).delete("/api/channels/accounts").send({
+      provider: "telegram",
+      accountId: "alerts",
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual({
+      ok: true,
+      pairingRowsCleanupFailed: true,
+      pairingRowsCleanupError: "pairing tables schema is unsupported (upstream changed it)",
+    });
+  });
+
+  it("DELETE /api/channels/accounts forwards the service's outcome flags (gatewayRestartFailed, pairingRowsCleanupDeferred) with ok:true authoritative", async () => {
+    const agentsService = createAgentsServiceMock();
+    agentsService.deleteChannelAccount.mockResolvedValue({
+      ok: true,
+      gatewayRestartFailed: true,
+      pairingRowsCleanupDeferred: true,
+    });
+    const app = createApp(agentsService);
+
+    const response = await request(app).delete("/api/channels/accounts").send({
+      provider: "telegram",
+      accountId: "alerts",
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual({
+      ok: true,
+      gatewayRestartFailed: true,
+      pairingRowsCleanupDeferred: true,
+    });
+
+    // A service result without flags (or none at all) is still a plain ok.
+    agentsService.deleteChannelAccount.mockResolvedValue(undefined);
+    const bare = await request(app)
+      .delete("/api/channels/accounts")
+      .send({ provider: "telegram", accountId: "alerts" });
+    expect(bare.status).toBe(200);
+    expect(bare.body).toEqual({ ok: true });
+
+    // `ok` from the service can never demote the successful delete.
+    agentsService.deleteChannelAccount.mockResolvedValue({ ok: false, gatewayRestartFailed: true });
+    const demoted = await request(app)
+      .delete("/api/channels/accounts")
+      .send({ provider: "telegram", accountId: "alerts" });
+    expect(demoted.body).toEqual({ ok: true, gatewayRestartFailed: true });
+  });
+
   it("maps an invalid-accountId rejection to HTTP 400 on DELETE /api/channels/accounts", async () => {
     const agentsService = createAgentsServiceMock();
     agentsService.deleteChannelAccount.mockRejectedValue(
@@ -604,6 +665,25 @@ describe("server/routes/agents", () => {
     expect(agentsService.removeBinding).toHaveBeenCalledWith("main", {
       channel: "telegram",
       accountId: "default",
+    });
+  });
+
+  it("DELETE /api/channels/accounts maps a state-DB quiet-period refusal to 409 backup_in_progress", async () => {
+    const { StateDbQuietError } = require("../../lib/server/state-db-quiet");
+    const agentsService = createAgentsServiceMock();
+    agentsService.deleteChannelAccount.mockRejectedValue(new StateDbQuietError());
+    const app = createApp(agentsService);
+
+    const res = await request(app)
+      .delete("/api/channels/accounts")
+      .send({ provider: "telegram", accountId: "work" });
+
+    expect(res.status).toBe(409);
+    expect(res.headers["retry-after"]).toBe("120");
+    expect(res.body).toEqual({
+      ok: false,
+      code: "backup_in_progress",
+      error: "A backup is in progress; retry in about two minutes.",
     });
   });
 });

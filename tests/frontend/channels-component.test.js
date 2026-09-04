@@ -72,6 +72,7 @@ import { ConfirmDialog } from "../../lib/public/js/components/confirm-dialog.js"
 import { InlineErrorChip } from "../../lib/public/js/components/inline-error-chip.js";
 import { useCachedFetch } from "../../lib/public/js/hooks/use-cached-fetch.js";
 import * as api from "../../lib/public/js/lib/api.js";
+import { showToast } from "../../lib/public/js/components/toast.js";
 import * as preactHooks from "preact/hooks";
 
 const harness = preactHooks.__harness;
@@ -208,4 +209,80 @@ describe("frontend/channels component", () => {
       collectNodes(tree).find((vnode) => vnode.type === InlineErrorChip),
     ).toBeUndefined();
   });
+
+  // D3/D5/D7: DELETE /api/channels/accounts rides `pairingRowsCleanupFailed`,
+  // `pairingRowsCleanupDeferred` and `gatewayRestartFailed` beside ok:true.
+  // AGENTS.md: a failed pairing-row clear is reported, never a clean delete.
+  const confirmDelete = async () => {
+    renderChannels();
+    harness.slots[kDeletingAccountSlot] = {
+      id: "default",
+      provider: "telegram",
+      name: "Telegram",
+    };
+    const tree = renderChannels();
+    const dialog = collectNodes(tree).find(
+      (vnode) =>
+        vnode.type === ConfirmDialog && vnode.props?.title === "Delete channel?",
+    );
+    await dialog.props.onConfirm();
+    await flushAsync();
+  };
+
+  it("a delete whose pairing-row clear FAILED toasts an error naming the reason and the remedy — never 'Channel deleted' success", async () => {
+    api.deleteChannelAccount.mockResolvedValue({
+      ok: true,
+      pairingRowsCleanupFailed: true,
+      pairingRowsCleanupError: "no such table: channel_pairings",
+    });
+    await confirmDelete();
+
+    expect(showToast).toHaveBeenCalledTimes(1);
+    const [message, level] = showToast.mock.calls[0];
+    expect(level).toBe("error");
+    expect(message).toContain("STILL authorized");
+    expect(message).toContain("no such table: channel_pairings");
+    expect(message).toContain("Re-add the account and delete it again");
+    expect(showToast).not.toHaveBeenCalledWith("Channel deleted", "success");
+    // The delete itself succeeded: the dialog closes and the list reloads.
+    expect(harness.slots[kDeletingAccountSlot]).toBeNull();
+  });
+
+  it("a delete whose pairing-row clear was DEFERRED past a backup barrier toasts a warning (authorized until the backup finishes)", async () => {
+    api.deleteChannelAccount.mockResolvedValue({ ok: true, pairingRowsCleanupDeferred: true });
+    await confirmDelete();
+
+    expect(showToast).toHaveBeenCalledTimes(1);
+    const [message, level] = showToast.mock.calls[0];
+    expect(level).toBe("warning");
+    expect(message).toContain("stay authorized until the running backup finishes");
+  });
+
+  it("gatewayRestartFailed on a delete raises the restart-required banner and says so in the toast", async () => {
+    const originalWindow = globalThis.window;
+    globalThis.window = { dispatchEvent: vi.fn() };
+    try {
+      api.deleteChannelAccount.mockResolvedValue({ ok: true, gatewayRestartFailed: true });
+      await confirmDelete();
+
+      expect(globalThis.window.dispatchEvent).toHaveBeenCalledTimes(1);
+      expect(globalThis.window.dispatchEvent.mock.calls[0][0].type).toBe(
+        "alphaclaw:restart-required",
+      );
+      const [message, level] = showToast.mock.calls[0];
+      expect(level).toBe("warning");
+      expect(message).toContain("gateway restart also failed");
+
+      // A clean delete never raises the banner.
+      globalThis.window.dispatchEvent.mockClear();
+      showToast.mockClear();
+      api.deleteChannelAccount.mockResolvedValue({ ok: true });
+      await confirmDelete();
+      expect(globalThis.window.dispatchEvent).not.toHaveBeenCalled();
+      expect(showToast).toHaveBeenCalledWith("Channel deleted", "success");
+    } finally {
+      globalThis.window = originalWindow;
+    }
+  });
+
 });

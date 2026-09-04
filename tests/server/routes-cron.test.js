@@ -398,6 +398,39 @@ describe("server/routes/cron", () => {
     }
   });
 
+  // C11: a mutator refused by the state-DB quiet barrier answers the repo-wide
+  // 409 backup_in_progress + Retry-After, never a 400 with the raw message.
+  it("maps StateDbQuietError from every cron mutator to 409 backup_in_progress with Retry-After", async () => {
+    const { StateDbQuietError } = require("../../lib/server/state-db-quiet");
+    const deps = createDeps();
+    const quiet = async () => {
+      throw new StateDbQuietError();
+    };
+    deps.cronService.runJobNow = vi.fn(quiet);
+    deps.cronService.setJobEnabled = vi.fn(quiet);
+    deps.cronService.updateJobPrompt = vi.fn(quiet);
+    deps.cronService.updateJobRouting = vi.fn(quiet);
+    const app = createApp(deps);
+
+    const mutators = [
+      { method: "post", url: "/api/cron/jobs/job-a/run" },
+      { method: "post", url: "/api/cron/jobs/job-a/enable" },
+      { method: "post", url: "/api/cron/jobs/job-a/disable" },
+      { method: "put", url: "/api/cron/jobs/job-a/prompt" },
+      { method: "put", url: "/api/cron/jobs/job-a/routing" },
+    ];
+    for (const { method, url } of mutators) {
+      const response = await request(app)[method](url).send({});
+      expect(response.status).toBe(409);
+      expect(response.headers["retry-after"]).toBe("120");
+      expect(response.body).toEqual({
+        ok: false,
+        code: "backup_in_progress",
+        error: "A backup is in progress; retry in about two minutes.",
+      });
+    }
+  });
+
   it("handles prompt and routing requests with missing bodies", async () => {
     const deps = createDeps();
     const app = createApp(deps);

@@ -64,6 +64,157 @@ describe("server/openclaw-capabilities", () => {
     );
   });
 
+  describe("gatewayStopForce (capability-gated `gateway stop --force`)", () => {
+    // Tarball-verified usage text: --force ("Allow stop from a non-interactive
+    // shell") on 2026.8.2 / 2026.9.1-beta.1; absent on the 2026.7.1-2 pin.
+    const kHelpWithForce =
+      "Usage: openclaw gateway stop [options]\n\nOptions:\n  --force     Allow stop from a non-interactive shell\n  -h, --help  display help for command\n";
+    const kHelpWithoutForce =
+      "Usage: openclaw gateway stop [options]\n\nOptions:\n  -h, --help  display help for command\n";
+
+    it("is in the capability catalog", () => {
+      expect(kCapabilityKeys).toContain("gatewayStopForce");
+    });
+
+    it("a FAILED probe is read as help output only when it really is the `gateway stop` usage text — a crash that merely mentions options/--help stays unknown (retried), never a cached unsupported", async () => {
+      const answers = [
+        fail("", "Error: could not parse options; run with --help"),
+        fail("", "Usage: openclaw gateway stop [options]\n\nOptions:\n  -h, --help  display help for command\n"),
+        fail("", kHelpWithForce),
+      ];
+      const clawCmd = vi.fn(async () => answers.shift());
+      const caps = createOpenclawCapabilities({
+        clawCmd,
+        getInstalledVersion: () => "2026.8.2",
+      });
+      expect(await caps.get("gatewayStopForce")).toBe("unknown");
+      // "unknown" is the falsy (negative) value: it is NOT cached for the
+      // version, so the next read probes again.
+      caps.invalidate("gatewayStopForce");
+      expect(await caps.get("gatewayStopForce")).toBe("unsupported");
+      caps.invalidate("gatewayStopForce");
+      expect(await caps.get("gatewayStopForce")).toBe("supported");
+      expect(clawCmd).toHaveBeenCalledTimes(3);
+    });
+
+    it("reports supported when the stop usage text advertises --force, probing `gateway stop --help` once per version", async () => {
+      const clawCmd = vi.fn(async () => ok(kHelpWithForce));
+      const caps = createOpenclawCapabilities({
+        clawCmd,
+        getInstalledVersion: () => "2026.8.2",
+      });
+      expect(await caps.get("gatewayStopForce")).toBe("supported");
+      expect(await caps.get("gatewayStopForce")).toBe("supported");
+      expect(clawCmd).toHaveBeenCalledTimes(1);
+      expect(clawCmd).toHaveBeenCalledWith("gateway stop --help", {
+        quiet: true,
+        timeoutMs: 10000,
+      });
+    });
+
+    it("per-call cmdOpts ride over the probe's own clawCmd options for THAT run only, and never bypass a fresh cache (the shutdown stop's non-abortable, budgeted probe)", async () => {
+      const clawCmd = vi.fn(async () => ok(kHelpWithForce));
+      const caps = createOpenclawCapabilities({
+        clawCmd,
+        getInstalledVersion: () => "2026.8.2",
+      });
+      expect(
+        await caps.get("gatewayStopForce", {
+          cmdOpts: { abortable: false, timeoutMs: 5000 },
+        }),
+      ).toBe("supported");
+      expect(clawCmd).toHaveBeenCalledTimes(1);
+      expect(clawCmd).toHaveBeenCalledWith("gateway stop --help", {
+        quiet: true,
+        timeoutMs: 5000,
+        abortable: false,
+      });
+      // Cache-first: a fresh answer is served without a spawn, whatever the
+      // per-call options say.
+      expect(
+        await caps.get("gatewayStopForce", { cmdOpts: { timeoutMs: 1 } }),
+      ).toBe("supported");
+      expect(clawCmd).toHaveBeenCalledTimes(1);
+      // Without cmdOpts the probe's own defaults are untouched.
+      caps.invalidate("gatewayStopForce");
+      expect(await caps.get("gatewayStopForce")).toBe("supported");
+      expect(clawCmd).toHaveBeenLastCalledWith("gateway stop --help", {
+        quiet: true,
+        timeoutMs: 10000,
+      });
+    });
+
+    it("reports unsupported on the pin (usage text without --force) and CACHES it — never re-spawns for a legitimate negative", async () => {
+      let now = 1_000_000;
+      const clawCmd = vi.fn(async () => ok(kHelpWithoutForce));
+      const caps = createOpenclawCapabilities({
+        clawCmd,
+        getInstalledVersion: () => "2026.7.1-2",
+        nowFn: () => now,
+      });
+      expect(await caps.get("gatewayStopForce")).toBe("unsupported");
+      now += kNegativeTtlMs * 100;
+      expect(await caps.get("gatewayStopForce")).toBe("unsupported");
+      expect(clawCmd).toHaveBeenCalledTimes(1);
+    });
+
+    it("does not read `--force` from an unrelated substring (word boundary)", async () => {
+      const caps = createOpenclawCapabilities({
+        clawCmd: async () => ok("Usage: openclaw gateway stop\n  --forceful-mode  nope\n  --no-force-x"),
+        getInstalledVersion: () => "v",
+      });
+      expect(await caps.get("gatewayStopForce")).toBe("unsupported");
+    });
+
+    it("classifies an unknown subcommand as unsupported", async () => {
+      const caps = createOpenclawCapabilities({
+        clawCmd: async () => fail("", "unknown command 'stop'"),
+        getInstalledVersion: () => "v",
+      });
+      expect(await caps.get("gatewayStopForce")).toBe("unsupported");
+    });
+
+    it("reports unknown (short negative TTL) on a timed-out or failed probe, then re-probes", async () => {
+      let now = 5_000_000;
+      const clawCmd = vi
+        .fn()
+        .mockResolvedValueOnce({ ok: false, stdout: "", stderr: "", timedOut: true })
+        .mockResolvedValueOnce(fail("", "Could not spawn"))
+        .mockResolvedValueOnce(ok(kHelpWithForce));
+      const caps = createOpenclawCapabilities({
+        clawCmd,
+        getInstalledVersion: () => "2026.8.2",
+        nowFn: () => now,
+      });
+      expect(await caps.get("gatewayStopForce")).toBe("unknown");
+      // Timed-out negative: retried on the shorter TTL.
+      now += kTimedOutTtlMs + 1;
+      expect(await caps.get("gatewayStopForce")).toBe("unknown");
+      // Plain failure: retried on the standard negative TTL.
+      now += kTimedOutTtlMs + 1;
+      expect(await caps.get("gatewayStopForce")).toBe("unknown");
+      expect(clawCmd).toHaveBeenCalledTimes(2);
+      now += kNegativeTtlMs + 1;
+      expect(await caps.get("gatewayStopForce")).toBe("supported");
+      expect(clawCmd).toHaveBeenCalledTimes(3);
+    });
+
+    it("re-probes when the installed version changes (apply/rollback)", async () => {
+      let version = "2026.7.1-2";
+      const clawCmd = vi.fn(async () =>
+        ok(version === "2026.7.1-2" ? kHelpWithoutForce : kHelpWithForce),
+      );
+      const caps = createOpenclawCapabilities({
+        clawCmd,
+        getInstalledVersion: () => version,
+      });
+      expect(await caps.get("gatewayStopForce")).toBe("unsupported");
+      version = "2026.8.2";
+      expect(await caps.get("gatewayStopForce")).toBe("supported");
+      expect(clawCmd).toHaveBeenCalledTimes(2);
+    });
+  });
+
   it("detects clickclack guided setup via the --code flag", async () => {
     const withCode = createOpenclawCapabilities({
       clawCmd: async () => ok("Options:\n  --code <value>  setup code\n  --token"),
