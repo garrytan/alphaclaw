@@ -246,18 +246,45 @@ describe("server/helpers", () => {
     });
   });
 
-  it("builds base URLs from forwarded headers with fallbacks", () => {
+  it("builds base URLs through the shared public-origin resolver (forwarded headers only from a trusted hop)", () => {
+    const trustedApp = { get: (key) => (key === "trust proxy fn" ? () => true : undefined) };
+    // Forwarded headers are request-controlled: without a trusted proxy hop
+    // they are ignored in favor of Host (fix wave PR 8a).
     expect(
       getBaseUrl({
         headers: {
+          host: "internal:3000",
           "x-forwarded-proto": "https",
           "x-forwarded-host": "app.example.com",
         },
+        protocol: "http",
+      }),
+    ).toBe("http://internal:3000");
+    expect(
+      getBaseUrl({
+        headers: {
+          host: "internal:3000",
+          "x-forwarded-proto": "https",
+          "x-forwarded-host": "app.example.com, hop2",
+        },
+        protocol: "https",
+        app: trustedApp,
       }),
     ).toBe("https://app.example.com");
     expect(
       getBaseUrl({ headers: { host: "localhost:3000" }, protocol: "http" }),
     ).toBe("http://localhost:3000");
+    // A configured canonical origin wins over anything the request says.
+    const previous = process.env.ALPHACLAW_SETUP_URL;
+    process.env.ALPHACLAW_SETUP_URL = "https://canon.example/";
+    try {
+      expect(getBaseUrl({ headers: { host: "other.example" }, protocol: "http" })).toBe(
+        "https://canon.example",
+      );
+    } finally {
+      if (previous === undefined) delete process.env.ALPHACLAW_SETUP_URL;
+      else process.env.ALPHACLAW_SETUP_URL = previous;
+    }
   });
 
   it("builds Google API enable URLs", () => {

@@ -410,15 +410,29 @@ describe("server/routes/nodes coverage", { retry: 1 }, () => {
       );
     });
 
-    it("uses forwarded proto and host headers", async () => {
+    it("uses forwarded proto and host headers from a TRUSTED proxy hop", async () => {
       await withEnv(clearBaseUrlEnv, async () => {
         const app = createApp();
+        app.set("trust proxy", true);
         const res = await request(app)
           .get("/api/nodes/connect-info")
           .set("x-forwarded-proto", "https")
           .set("x-forwarded-host", "proxy.example.com");
         expect(res.body.baseUrl).toBe("https://proxy.example.com");
         expect(res.body.tls).toBe(true);
+      });
+    });
+
+    it("ignores forwarded headers from an untrusted peer (fix wave PR 8a)", async () => {
+      await withEnv(clearBaseUrlEnv, async () => {
+        const app = createApp();
+        const res = await request(app)
+          .get("/api/nodes/connect-info")
+          .set("host", "real.example.com:4567")
+          .set("x-forwarded-proto", "https")
+          .set("x-forwarded-host", "evil.example.com");
+        expect(res.body.baseUrl).toBe("http://real.example.com:4567");
+        expect(res.body.tls).toBe(false);
       });
     });
 
