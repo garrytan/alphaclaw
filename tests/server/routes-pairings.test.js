@@ -1430,6 +1430,57 @@ describe("server/routes/pairings", () => {
     expect(res.body).toEqual({ ok: true, requestId: "req-fallback", device: null });
   });
 
+
+  describe("CLI failures surface as errors, never as a 200 with raw stdout/stderr (F224)", () => {
+    it("pairing approve: a failed CLI answers 502 with the CLI's words under `error`", async () => {
+      const clawCmd = vi.fn(async () => ({
+        ok: false,
+        stdout: "",
+        stderr: "Error: pairing request ABCD1234 not found",
+        code: 1,
+      }));
+      const fsModule = { existsSync: vi.fn(() => false), mkdirSync: vi.fn(), writeFileSync: vi.fn() };
+      const app = createApp({ clawCmd, isOnboarded: () => true, fsModule });
+
+      const res = await request(app)
+        .post("/api/pairings/ABCD1234/approve")
+        .send({ channel: "discord" });
+
+      expect(res.status).toBe(502);
+      expect(res.body).toEqual({
+        ok: false,
+        error: "Error: pairing request ABCD1234 not found",
+        code: "cli_failed",
+        exitCode: 1,
+      });
+    });
+
+    it("pairing approve: a timed-out CLI is code cli_timeout with a fallback message", async () => {
+      const clawCmd = vi.fn(async () => ({ ok: false, stdout: "", stderr: "", timedOut: true, code: null }));
+      const fsModule = { existsSync: vi.fn(() => false), mkdirSync: vi.fn(), writeFileSync: vi.fn() };
+      const app = createApp({ clawCmd, isOnboarded: () => true, fsModule });
+      const res = await request(app)
+        .post("/api/pairings/ABCD1234/approve")
+        .send({ channel: "discord" });
+      expect(res.status).toBe(502);
+      expect(res.body).toMatchObject({ ok: false, error: "pairing approve failed", code: "cli_timeout" });
+    });
+
+    it("device reject: a failed CLI answers 502 with `error`; success still echoes the CLI result", async () => {
+      const failing = vi.fn(async () => ({ ok: false, stdout: "", stderr: "no such request", code: 2 }));
+      const fsModule = { existsSync: vi.fn(() => false), mkdirSync: vi.fn(), writeFileSync: vi.fn() };
+      const failApp = createApp({ clawCmd: failing, isOnboarded: () => true, fsModule });
+      const failed = await request(failApp).post(`/api/devices/${"ABCD1234"}/reject`);
+      expect(failed.status).toBe(502);
+      expect(failed.body).toMatchObject({ ok: false, error: "no such request", code: "cli_failed", exitCode: 2 });
+
+      const okCmd = vi.fn(async () => ({ ok: true, stdout: "rejected", stderr: "" }));
+      const okApp = createApp({ clawCmd: okCmd, isOnboarded: () => true, fsModule });
+      const ok = await request(okApp).post(`/api/devices/${"ABCD1234"}/reject`);
+      expect(ok.status).toBe(200);
+      expect(ok.body).toMatchObject({ ok: true, stdout: "rejected" });
+    });
+  });
 });
 
 describe("server/routes/pairings removeAccountRequestsFromPairingStore", () => {

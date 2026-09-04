@@ -5,6 +5,47 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.9.80] - 2026-09-04
+
+Fix wave, PR 8b — Telegram, channel accounts, pairings.
+
+### Fixed
+- **Renaming a discovered Telegram topic never registered it** (audit F090,
+  P1). The topic PUT route spread the existing registry row into its patch,
+  re-asserting `discovered: true` and the cache `nameSource`, which defeated
+  the registry's discovered→registered transition — so a topic the operator
+  named and gave instructions or an agent to stayed "discovered", and its
+  `systemPrompt`/`agentId` never reached openclaw.json. The route now sends a
+  real patch; naming registers the topic and its routing is synced.
+- **Adding a channel account rolled the account back on a slow gateway
+  boot** (F086). `createChannelAccount` treated a ready-timeout from the
+  restart as a failed add and removed the account, restored `.env`, and wrote
+  back a stale whole-config snapshot — while `deleteChannelAccount` already
+  treated the same error as non-fatal. The add now reports
+  `gatewayRestartFailed: true` and keeps the correctly configured account.
+- **Orphaned-token dedupe deleted unrelated env vars** (F091). The "orphaned
+  channel env var" check matched ANY `.env` key by value; a non-channel key
+  holding the same secret was silently dropped. Only channel-shaped keys for
+  that provider qualify now.
+- **Workspace repair loop wrote and git-synced on every load** (F089). With no
+  resolvable human admin the group allow-from repair rewrote openclaw.json and
+  spawned a git-sync per group per page load while changing nothing, and one
+  group's Telegram failure failed the whole read. The repair is skipped with a
+  reason when no admin resolves, and a per-group Telegram error is reported,
+  not thrown.
+- **"Verify now" probed named-account groups with the default bot** (F166).
+  The topic verify API call omitted the account, so a live topic in a
+  named-account group read as stale. The UI passes the account through.
+- **Pairing approve / device reject echoed CLI failures as 200** (F224). The
+  raw `{ ok:false, stdout, stderr }` had no `error` key, so the UI toasted raw
+  JSON or discarded the stderr. Failures answer 502 with the CLI's own words
+  under `error` (`code: cli_failed` / `cli_timeout`).
+
+### Notes
+- Tests: extended `routes-telegram` (F090, F089), `agents-service` (F086,
+  F091), `routes-pairings` (F224), frontend `api` + `telegram-workspace-manage`
+  (F166). `npm run build:ui`.
+
 ## [0.9.79] - 2026-09-04
 
 Fix wave, PR 8a — Google / Gmail and the public origin.
