@@ -126,6 +126,24 @@ describe("server/routes/watchdog", () => {
     expect(res.headers["content-type"]).toContain("text/plain");
   });
 
+  it("maps a gateway_held repair refusal to 409 (fail-closed like the restart route)", async () => {
+    const deps = createDeps();
+    deps.watchdog.triggerRepair.mockResolvedValue({
+      ok: false,
+      skipped: true,
+      reason: "gateway_held",
+    });
+    const app = createApp(deps);
+
+    const res = await request(app).post("/api/watchdog/repair");
+
+    expect(res.status).toBe(409);
+    expect(res.body.ok).toBe(false);
+    expect(res.body.code).toBe("gateway_held");
+    expect(res.body.error).toContain("Upgrade page");
+    expect(res.body.result.reason).toBe("gateway_held");
+  });
+
   it("triggers repair and returns result on POST /api/watchdog/repair", async () => {
     const deps = createDeps();
     deps.watchdog.triggerRepair.mockResolvedValue({
