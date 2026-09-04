@@ -18,7 +18,6 @@ deferred behind the owner's open PR #64 — see TODOS.md.
 ### Batch 1 — server boundary hardening
 
 A read-only audit
-
 (31 finders, 253 findings, each verified by two independent reviewers → 221
 confirmed) found four defect classes; this PR closes every P1 security and
 data-loss instance and lands regression tripwires so the classes cannot come
@@ -138,7 +137,6 @@ back silently. Nothing here changes the UI beyond honest error copy.
 ### Batch 2a — the wrapAsync sweep
 
 Express 4 does not catch async handler
-
 rejections: an unwrapped rejection leaves the request hanging forever AND lands
 as an unhandledRejection that feeds the server's rejection-storm exit brake.
 
