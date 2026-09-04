@@ -5,6 +5,52 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.9.83] - 2026-09-04
+
+Fix wave, PR 9b — chat server and chat UI.
+
+### Fixed
+- **Binary transcript parts scraped into chat rows** (audit F116). Image,
+  audio and file parts fell through to the unknown-shape scraper, so the `type`
+  literal, MIME type and base64 payload landed in the history row text (and in
+  live tool-result text). Typed parts are text-only now; known binary types
+  yield nothing.
+- **A runId-less chat error failed a pending send** (F119). The `chat`
+  `state:error` branch lacked the lifecycle-end guard, so a session-routed
+  error from a FOREIGN run during our send window persisted a non-retryable
+  failure and orphan-aborted our own run. Only started records take error
+  terminals.
+- **Never-sent queued messages deleted by the history merge** (F122). The
+  outbox confirm matched a queued item against an older identical user row
+  inside the skew window; only items that were actually sent can confirm.
+- **Acked user bubble rendered below the streaming reply** (F123). Sent
+  optimistic bubbles now render above the live rows of the run they started;
+  unsent ones stay at the bottom.
+- **Ack timeout wedged the session as "Queued" with typing dots** (F124). The
+  outbox requeued the item but nothing left `pendingSend`, so it never
+  auto-flushed until Stop. An `ACK_TIMEOUT` event returns the session to idle.
+- **Navigating away from /chat re-ran restoreOnLoad** (F125). Every route
+  change relabelled queued messages "pending when the page closed" and stopped
+  auto-sending them; the outbox is now one per page load.
+- **Reconnect merge could drop the still-streaming reply** (F126).
+  `RESUME_ATTACH` cleared `activeMessageId`; `hello.activeRuns` and the
+  `resumed` frame now carry the live row's `messageId` and the reducer never
+  clears a known one.
+- **Blind re-send of acked messages after a socket drop** (F127). Acked items
+  were re-queued on a 5s timer with no history gate — a duplicate turn past the
+  bridge's 10-minute dedupe window. They now wait for the reconnect's history
+  merge (30s staleness fallback).
+- Composer said "Queue" in Limited (legacy) mode although sends fire
+  immediately (F128); the message list re-arms auto-scroll on session switch
+  (F129).
+
+### Notes
+- Tests: new `chat-history.test.js`; extended `chat-send-outbox`,
+  `chat-run-state`, `chat-transcript-store`, `chat-ws-bridge` (F119 guard;
+  the stale "cleans up run targets" test now asserts persist-through-close).
+  `docs/designs/chat-reliability.md` records the new invariants. Composer and
+  message-list changes are covered by review only (no component harness).
+
 ## [0.9.82] - 2026-09-04
 
 Fix wave, PR 9a — Doctor.
