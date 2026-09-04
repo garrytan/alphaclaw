@@ -1111,6 +1111,25 @@ describe("server/onboarding/workspace bootstrap prompt sync", () => {
     expect(warn).toHaveBeenCalledWith(expect.stringContaining("was a regular file"));
   });
 
+  it("an unwritable gogcli dir is logged, never thrown (F008 — it used to abort the gateway launch)", () => {
+    const openclawDir = "/tmp/alphaclaw-artifacts";
+    const envFilePath = "/tmp/alphaclaw-env-file";
+    const mockFs = {
+      existsSync: vi.fn((target) => target === path.join(openclawDir, ".env") || target === envFilePath),
+      lstatSync: vi.fn(() => ({ isSymbolicLink: () => true, isFile: () => false })),
+      renameSync: vi.fn(),
+      symlinkSync: vi.fn(),
+      mkdirSync: vi.fn(() => {
+        throw Object.assign(new Error("EACCES: permission denied, mkdir"), { code: "EACCES" });
+      }),
+    };
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    expect(() => ensureOpenclawRuntimeArtifacts({ fs: mockFs, openclawDir, envFilePath })).not.toThrow();
+    expect(mockFs.mkdirSync).toHaveBeenCalledWith(path.join(openclawDir, "gogcli"), { recursive: true });
+    expect(log).toHaveBeenCalledWith(expect.stringContaining("gogcli dir skipped: EACCES"));
+    log.mockRestore();
+  });
+
   it("leaves an existing managed symlink alone", () => {
     const openclawDir = "/tmp/alphaclaw-artifacts";
     const envFilePath = "/tmp/alphaclaw-env-file";

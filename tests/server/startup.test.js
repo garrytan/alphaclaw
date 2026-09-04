@@ -163,6 +163,36 @@ describe("server/startup", () => {
     ...overrides,
   });
 
+  it("a throwing prompt-file sync, env reload, or proxy-config step never skips the gateway launch (F008)", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const deps = createBootDeps({
+      doSyncPromptFiles: vi.fn(() => {
+        throw new Error("EACCES: mkdir gogcli");
+      }),
+      reloadEnv: vi.fn(() => {
+        throw new Error("env reload broke");
+      }),
+      ensureGatewayProxyConfig: vi.fn(() => {
+        throw new Error("proxy config broke");
+      }),
+    });
+
+    await runOnboardedBootSequence(deps);
+
+    expect(deps.syncChannelConfig).toHaveBeenCalledTimes(1);
+    expect(deps.startGateway).toHaveBeenCalledTimes(1);
+    expect(deps.watchdog.start).toHaveBeenCalledTimes(1);
+    expect(errorSpy).toHaveBeenCalledWith(
+      "[alphaclaw] Boot prompt-file sync failed: EACCES: mkdir gogcli",
+    );
+    expect(errorSpy).toHaveBeenCalledWith("[alphaclaw] Boot env reload failed: env reload broke");
+    expect(errorSpy).toHaveBeenCalledWith(
+      "[alphaclaw] Boot gateway proxy config failed: proxy config broke",
+    );
+    expect(errorSpy).not.toHaveBeenCalledWith(expect.stringContaining("Boot sequence failed"));
+    errorSpy.mockRestore();
+  });
+
   it("logs and continues when the ensure steps fail", async () => {
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     const deps = createBootDeps({
