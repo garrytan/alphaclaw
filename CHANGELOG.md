@@ -44,6 +44,12 @@ shows the pin under watch the whole time.
   target is treated as blocked — the automatic path is block, refusal latch,
   and notification (the newest `openclaw-backup` archive is the manual
   recovery path), not a rollback.
+- Container e2e: the stable→beta journey now targets the newest prerelease
+  above the pin — what the Beta catalog section actually offers — instead of
+  the raw npm `beta` dist-tag, which upstream re-points at the promoted stable
+  release when a beta line ships (beta = latest = 2026.9.1 since 2026-09-03).
+  The fallback row path asserts the version it clicked. Hermetic tests pin the
+  resolver.
 
 ## [0.9.70] - 2026-09-02
 

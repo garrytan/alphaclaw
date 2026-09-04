@@ -22,9 +22,9 @@ const {
   removeVolume,
   sleep,
   waitFor,
-  compareLooseVersions,
   loginForCookie,
   fetchJsonWithCookie,
+  resolveBetaTarget,
 } = require("./container-helpers.js");
 
 // -----------------------------------------------------------------------------
@@ -224,6 +224,10 @@ const loginThroughBrowser = async (page) => {
   await page.waitForURL((url) => !url.pathname.includes("login"), { timeout: 60_000 });
 };
 
+// A catalog row's version as rendered: YYYY.M.P with an optional prerelease or
+// hotfix suffix (2026.9.1-beta.1, 2026.7.1-2). Dates (2026-09-02) never match.
+const kCatalogVersionPattern = /\b\d{4}\.\d{1,2}\.\d+(?:-[0-9A-Za-z]+(?:\.[0-9A-Za-z]+)*)?/;
+
 describeContainer("container E2E: stable→beta upgrade in the production image", () => {
   beforeAll(async () => {
     await assertDockerAvailable();
@@ -238,19 +242,28 @@ describeContainer("container E2E: stable→beta upgrade in the production image"
     });
     if (!res.ok) throw new Error(`npm registry returned ${res.status} for openclaw`);
     const doc = await res.json();
-    ctx.beta = doc["dist-tags"]?.beta || null;
+    // The newest prerelease above the pin — what the Beta catalog section
+    // offers — not the raw `beta` dist-tag, which upstream re-points at the
+    // promoted stable release when a beta line ships (see resolveBetaTarget).
+    const resolved = resolveBetaTarget({
+      distTags: doc["dist-tags"],
+      versions: doc.versions,
+      stablePin: ctx.stablePin,
+    });
+    ctx.beta = resolved.version;
 
-    const betaIsNewer =
-      Boolean(ctx.beta) && compareLooseVersions(ctx.beta, ctx.stablePin) > 0;
-    if (!betaIsNewer) {
+    if (!ctx.beta) {
       const message =
-        `registry sanity failed: beta dist-tag ${JSON.stringify(ctx.beta)} is not newer ` +
-        `than the stable pin ${ctx.stablePin} — the stable→beta journey cannot run`;
+        `registry sanity failed: no prerelease newer than the stable pin ${ctx.stablePin} ` +
+        `(beta dist-tag ${JSON.stringify(resolved.tagged)}) — the stable→beta journey cannot run`;
       if (strict) throw new Error(`[STRICT] ${message}`);
       skipReason = message;
       console.warn(`[container-e2e] ${message} — skipping the journey (non-strict)`);
     } else {
-      console.log(`[container-e2e] stable pin ${ctx.stablePin} → beta ${ctx.beta}`);
+      console.log(
+        `[container-e2e] stable pin ${ctx.stablePin} → beta ${ctx.beta} ` +
+          `(${resolved.source}; beta dist-tag ${resolved.tagged})`,
+      );
     }
   }, 2 * kMin);
 
@@ -433,12 +446,30 @@ describeContainer("container E2E: stable→beta upgrade in the production image"
         );
         applyButton = row.getByRole("button", { name: /^(Upgrade|Switch|Try again)$/ });
       } catch {
-        console.warn(
-          `[container-e2e] no catalog row with exact text ${ctx.beta} — falling back to the first Beta-section row`,
-        );
-        applyButton = betaSection
+        // The journey must assert the version it actually applies: read the
+        // version off the row we are about to click and re-point the target,
+        // so a trimmed catalog never leaves the waits chasing a version the
+        // box was never asked to run.
+        const fallbackButton = betaSection
           .getByRole("button", { name: /^(Upgrade|Switch|Try again)$/ })
           .first();
+        const fallbackRow = fallbackButton.locator(
+          'xpath=ancestor::div[contains(@class,"py-2.5")][1]',
+        );
+        const rowText = await fallbackRow.innerText({ timeout: 60_000 });
+        const rowVersion = (rowText.match(kCatalogVersionPattern) || [])[0] || null;
+        if (!rowVersion) {
+          throw new Error(
+            `[container-e2e] no catalog row with exact text ${ctx.beta}, and the first ` +
+              `Beta-section row carries no version: ${JSON.stringify(rowText.slice(0, 200))}`,
+          );
+        }
+        console.warn(
+          `[container-e2e] no catalog row with exact text ${ctx.beta} — applying the first ` +
+            `Beta-section row instead: ${rowVersion}`,
+        );
+        ctx.beta = rowVersion;
+        applyButton = fallbackButton;
       }
       await applyButton.first().click({ timeout: 60_000 });
 
