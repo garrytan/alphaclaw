@@ -5,6 +5,46 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.9.81] - 2026-09-04
+
+Fix wave, PR 8c — server odds and ends.
+
+### Fixed
+- **Usage tab issued 1+N full-table scans** (audit F076). `getSessionsList`
+  re-prepared and ran an unindexable per-session events query for every row
+  (up to 200 per open), blocking the event loop in proportion to install age.
+  One events read now serves every selected session (per-event costing kept —
+  tiered pricing depends on each event's token count), and the session-ref
+  predicate has an expression index.
+- **Webhook request log grew without bound** (F155). Pruning was age-only
+  (boot + 12h) while the summary query ranked the whole table on every 15s
+  list poll. Inserts now keep the newest 500 rows per hook; the age prune still
+  runs.
+- **`PUT /api/models/config` validated after writing** (F078, F212). Arrays
+  passed the `configuredModels`/`authOrder` object guards and landed in
+  openclaw.json; a `null` profile entry 500ed after the model config was
+  already written (partial apply, catalog cache not marked stale); `type` was
+  never checked. The whole payload is validated first: 400 names the offending
+  `profiles[i]` field, nothing is written.
+- **Autotune revert ignored a crash-window stale intent** (F082). The enable
+  path recovers "our write landed, the confirm did not"; the disable/kill-switch
+  revert did not, so it left autotune's own `maxConcurrent` in openclaw.json
+  and deleted its provenance. Both paths now treat a matching stale intent as
+  autotune-owned.
+- **Cache-read tokens billed at $0** for the static fallback models that omit
+  `cacheRead` (F083); they now fall back to 10% of the input rate (the
+  provider-documented ratio), matching the existing cache-write fallback.
+- `/auth/google/start` 500ed on a repeated/bracketed `services` query key
+  (F209); `PATCH /api/team/members/:id` disabled a member on the string
+  `"false"` (F210) — `disabled` must be a boolean, `displayName` a string.
+
+### Notes
+- Deferred behind PR #64 (same file, `routes/system.js`): F077 (`/api/agent/
+  message` 15s timeout), F081 (`fetchGitHubRelease` never settles on a
+  mid-body close), F208 (`PUT /api/env` null element).
+- Tests: extended `webhooks-db`, `usage-db`, `routes-models-coverage`,
+  `autotune`, `cost-utils`, `routes-oauth-binding`, `routes-team`.
+
 ## [0.9.80] - 2026-09-04
 
 Fix wave, PR 8b — Telegram, channel accounts, pairings.
