@@ -55,10 +55,19 @@ jobs:
           # routes/* module load. The original filter covered only the
           # upgrade/gateway surface, so PRs changing watchdog/doctor/routes/
           # server-core (which the boot journey exercises) skipped it.
-          pattern='^(lib/server/openclaw-|lib/server/gateway|lib/server/watchdog|lib/server/doctor|lib/server/routes/|lib/server/startup\.js|lib/server/boot-phase\.js|lib/server\.js|lib/server/gateway-env-policy\.js|bin/alphaclaw\.js|Dockerfile|tests/container/|lib/boot-placeholder)'
+          # The journey is browser-driven: it logs in through login.html and
+          # applies the beta from the Upgrade tab, so those UI surfaces are
+          # part of the filter too (fix wave F173).
+          pattern='^(lib/server/openclaw-|lib/server/gateway|lib/server/watchdog|lib/server/doctor|lib/server/routes/|lib/server/startup\.js|lib/server/boot-phase\.js|lib/server\.js|lib/server/gateway-env-policy\.js|bin/alphaclaw\.js|Dockerfile|tests/container/|lib/boot-placeholder|lib/public/js/components/upgrade-tab/|lib/public/login\.html)'
           if echo "$changed" | grep -qE "$pattern"; then
             echo "run_heavy=true" >> "$GITHUB_OUTPUT"
             echo "upgrade/gateway/container surface touched → heavy job runs"
+          # A pin bump is a CONTENT change inside package.json (fix wave
+          # F173): match the `"openclaw":` dependency line in the diff, never
+          # the bare file name (every version bump touches package.json).
+          elif git diff "origin/${BASE_REF}...HEAD" -- package.json | grep -qE '^[-+]\s*"openclaw":'; then
+            echo "run_heavy=true" >> "$GITHUB_OUTPUT"
+            echo "openclaw pin changed in package.json → heavy job runs"
           else
             echo "run_heavy=false" >> "$GITHUB_OUTPUT"
             echo "no matching paths → heavy job skipped (gate reports success)"

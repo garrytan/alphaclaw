@@ -6,13 +6,26 @@ on:
   pull_request:
     branches: [main]
 
+# Read-only token (fix wave F177): the job runs third-party code (npm
+# lifecycle scripts, the UI build, the test suite) with GITHUB_TOKEN in the
+# step env; nothing here needs to write to the repo.
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
+    # The branch ruleset requires the context "test (22)" plus the container
+    # `gate`. Node 24 runs as an early-warning lane (fix wave F178): its
+    # failure is reported but does not block the merge until the ruleset lists
+    # "test (24)" as required (promote it once it has been green for a week —
+    # see TODOS.md).
+    continue-on-error: ${{ matrix.node-version == 24 }}
 
     strategy:
+      fail-fast: false
       matrix:
-        node-version: [22]
+        node-version: [22, 24]
 
     steps:
       - uses: actions/checkout@v4
@@ -29,7 +42,8 @@ jobs:
       # slip through (the renumber races the v0.9.3x–v0.9.6x wave hit). Every
       # PR bumps, including reverts. See CLAUDE.md "Merge unification safety".
       - name: Version guard
-        if: github.event_name == 'pull_request'
+        # Once per PR is enough — the guard is not Node-version dependent.
+        if: github.event_name == 'pull_request' && matrix.node-version == 22
         env:
           BASE_REF: ${{ github.base_ref }}
         run: |
