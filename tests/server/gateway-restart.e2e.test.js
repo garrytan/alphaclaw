@@ -984,7 +984,7 @@ describe("server/gateway restart drills (e2e)", () => {
       // lease (not the fixed default) and completes with its real outcome.
       releaseHold();
       await vi.advanceTimersByTimeAsync(30_000);
-      // v0.9.72: the acquire also carries the lock-owned queue callback that
+      // v0.9.73: the acquire also carries the lock-owned queue callback that
       // drives the waiting_for_lock step — the lease is what this drill pins.
       expect(acquireSpy).toHaveBeenCalledWith(
         "restart",

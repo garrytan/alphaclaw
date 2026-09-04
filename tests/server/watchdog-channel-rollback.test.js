@@ -12,15 +12,47 @@ const kOriginalAutoRepair = process.env.WATCHDOG_AUTO_REPAIR;
 const kOriginalNotificationsDisabled = process.env.WATCHDOG_NOTIFICATIONS_DISABLED;
 const kOriginalFetch = global.fetch;
 
+// Mirrors getChannelInfo().stabilization: "channel" whenever a non-pin build
+// is applied, "pin" only while a freshly bumped pin's window is open/armed.
+const stabilizationFor = ({ isPin, inStabilizationWindow }) => ({
+  source: isPin ? (inStabilizationWindow ? "pin" : null) : "channel",
+  inWindow: inStabilizationWindow,
+  acceptedAt: null,
+  acceptedSource: null,
+  endsAt: null,
+  blockedId: inStabilizationWindow
+    ? isPin
+      ? "2026.9.1"
+      : "beta:2026.9.1-beta.2"
+    : null,
+  target: null,
+});
+
+// `stabilization: null` yields the pre-contract info shape (no stabilization
+// object at all) so the legacy-tolerance path stays covered.
 const createReleaseChannelHooks = ({
   isPin = false,
   inStabilizationWindow = true,
+  stabilization = stabilizationFor({ isPin, inStabilizationWindow }),
 } = {}) => ({
-  getInfo: vi.fn(() => ({ isPin, inStabilizationWindow })),
+  getInfo: vi.fn(() => ({
+    isPin,
+    inStabilizationWindow,
+    ...(stabilization ? { stabilization } : {}),
+  })),
   requestRollback: vi.fn(() => ({ ok: true })),
   onHealthy: vi.fn(),
   onUnhealthy: vi.fn(),
 });
+
+const crashLoop = async (watchdog) => {
+  watchdog.onGatewayExit({ code: 1, expectedExit: false });
+  await flushMicrotasks();
+  watchdog.onGatewayExit({ code: 1, expectedExit: false });
+  await flushMicrotasks();
+  watchdog.onGatewayExit({ code: 1, expectedExit: false });
+  await flushMicrotasks();
+};
 
 const createHarness = ({
   autoRepair = true,
@@ -230,10 +262,10 @@ describe("server/watchdog release-channel rollback hooks", () => {
       ),
     ).toBe(true);
 
-    // Pin builds always latch, even inside the stabilization window.
+    // A pin with no open window latches.
     const pinHooks = createReleaseChannelHooks({
       isPin: true,
-      inStabilizationWindow: true,
+      inStabilizationWindow: false,
     });
     const pin = createHarness({
       autoRepair: false,
@@ -243,6 +275,96 @@ describe("server/watchdog release-channel rollback hooks", () => {
     await flushMicrotasks();
     expect(pinHooks.requestRollback).not.toHaveBeenCalled();
     expect(pin.watchdog.getStatus().lifecycle).toBe("configuration_error");
+
+    // A freshly bumped pin inside its own window rolls back instead.
+    const pinWindowHooks = createReleaseChannelHooks({
+      isPin: true,
+      inStabilizationWindow: true,
+    });
+    const pinWindow = createHarness({
+      autoRepair: false,
+      releaseChannelHooks: pinWindowHooks,
+    });
+    pinWindow.watchdog.onGatewayExit({ code: 78, expectedExit: false });
+    await flushMicrotasks();
+    expect(pinWindowHooks.requestRollback).toHaveBeenCalledWith({
+      reason: "config_error",
+      exitCode: 78,
+    });
+    expect(pinWindow.watchdog.getStatus().lifecycle).toBe("crashed");
+  });
+
+  it("requests a channel rollback for a crash loop inside a freshly bumped pin's window", async () => {
+    const hooks = createReleaseChannelHooks({
+      isPin: true,
+      inStabilizationWindow: true,
+    });
+    expect(hooks.getInfo().stabilization).toEqual(
+      expect.objectContaining({ source: "pin", inWindow: true }),
+    );
+    const { watchdog, notifier } = createHarness({
+      autoRepair: false,
+      releaseChannelHooks: hooks,
+    });
+
+    await crashLoop(watchdog);
+
+    expect(hooks.requestRollback).toHaveBeenCalledTimes(1);
+    expect(hooks.requestRollback).toHaveBeenCalledWith({
+      reason: "crash_loop",
+      exitCode: 1,
+    });
+    expect(crashLoopNotices(notifier)).toHaveLength(0);
+  });
+
+  it("keeps legacy crash-loop behavior for a pin with no stabilization window", async () => {
+    const hooks = createReleaseChannelHooks({
+      isPin: true,
+      inStabilizationWindow: false,
+    });
+    expect(hooks.getInfo().stabilization).toEqual(
+      expect.objectContaining({ source: null, inWindow: false }),
+    );
+    const { watchdog, notifier } = createHarness({
+      autoRepair: false,
+      releaseChannelHooks: hooks,
+    });
+
+    await crashLoop(watchdog);
+
+    expect(hooks.requestRollback).not.toHaveBeenCalled();
+    expect(watchdog.getStatus().lifecycle).toBe("crash_loop");
+    expect(crashLoopNotices(notifier)).toHaveLength(1);
+  });
+
+  it("tolerates the legacy info shape without a stabilization object", async () => {
+    // Non-pin in-window: still rolls back.
+    const inWindowHooks = createReleaseChannelHooks({
+      isPin: false,
+      inStabilizationWindow: true,
+      stabilization: null,
+    });
+    expect(inWindowHooks.getInfo()).not.toHaveProperty("stabilization");
+    const inWindow = createHarness({
+      autoRepair: false,
+      releaseChannelHooks: inWindowHooks,
+    });
+    await crashLoop(inWindow.watchdog);
+    expect(inWindowHooks.requestRollback).toHaveBeenCalledTimes(1);
+
+    // Legacy pins never rolled back, whatever the window flag said.
+    const pinHooks = createReleaseChannelHooks({
+      isPin: true,
+      inStabilizationWindow: true,
+      stabilization: null,
+    });
+    const pin = createHarness({
+      autoRepair: false,
+      releaseChannelHooks: pinHooks,
+    });
+    await crashLoop(pin.watchdog);
+    expect(pinHooks.requestRollback).not.toHaveBeenCalled();
+    expect(pin.watchdog.getStatus().lifecycle).toBe("crash_loop");
   });
 
   it("suspends crash accounting during a managed operation", async () => {

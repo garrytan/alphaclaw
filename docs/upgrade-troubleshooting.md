@@ -32,7 +32,7 @@ name the exact config keys the migration blamed. From the banner choose:
 - **Strip blamed keys and retry** — AlphaClaw removes the named keys
   (backing up the original config first) and re-runs the migration.
 
-While the hold is set, every manual relaunch path fails closed (v0.9.72):
+While the hold is set, every manual relaunch path fails closed (v0.9.73):
 
 - The gateway card in the Setup UI still *offers* Restart, Retry and Repair
   but renders them disabled with "Gateway held after a failed settings
