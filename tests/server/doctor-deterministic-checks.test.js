@@ -890,3 +890,72 @@ describe("server/doctor/dashboard-token-check", () => {
     }
   });
 });
+
+describe("server/doctor/deterministic-checks det:config-unreadable cards (fix wave PR 7 recovery path)", () => {
+  let workspaceRoot;
+  let managedRoot;
+  beforeEach(() => {
+    workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-det-cfg-ws-"));
+    managedRoot = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-det-cfg-managed-"));
+  });
+  afterEach(() => {
+    fs.rmSync(workspaceRoot, { recursive: true, force: true });
+    fs.rmSync(managedRoot, { recursive: true, force: true });
+  });
+  const write = (rootDir, relativePath, content) => {
+    const fullPath = path.join(rootDir, relativePath);
+    fs.mkdirSync(path.dirname(fullPath), { recursive: true });
+    fs.writeFileSync(fullPath, content, "utf8");
+  };
+  const build = () =>
+    buildDeterministicCards({
+      workspaceRoot,
+      managedRoot,
+      profile: kStableProfile,
+      bootstrapContext: analyzeBootstrapContext({ workspaceRoot, profile: kStableProfile }),
+      onboarded: true,
+      releaseChannel: "stable",
+    });
+  const findCard = (cards, sourceKey) => cards.find((card) => card.sourceKey === sourceKey);
+
+  it("emits a P1 card per unparseable guarded file, naming backups, without parsing anything else", () => {
+    write(managedRoot, "openclaw.json", '{"gateway":{"auth":{"token":"${OPENCLAW_GATEWAY_TOKEN}"}');
+    write(managedRoot, "openclaw.json.bak", "{}");
+    write(managedRoot, "openclaw.json.bak.1", "{}");
+    write(managedRoot, "gogcli/state.json", JSON.stringify({ version: 2, accounts: [] }));
+    write(managedRoot, "exec-approvals.json", "[1,2]");
+    write(workspaceRoot, "topic-registry.json", "{ not json");
+
+    const cards = build();
+    const openclaw = findCard(cards, "det:config-unreadable:openclaw.json");
+    expect(openclaw).toBeTruthy();
+    expect(openclaw.priority).toBe("P1");
+    expect(openclaw.category).toBe("config");
+    expect(openclaw.title).toMatch(/openclaw\.json cannot be parsed/);
+    expect(openclaw.summary).toMatch(/config_unreadable/);
+    expect(openclaw.recommendation).toMatch(/openclaw\.json\.bak, openclaw\.json\.bak\.1/);
+    expect(openclaw.recommendation).toMatch(/intentionally JSON5/);
+    expect(openclaw.evidence.map((e) => e.text)).toEqual(
+      expect.arrayContaining([expect.stringContaining("backup candidate: openclaw.json.bak")]),
+    );
+    // Managed-root files are not agent-editable through the browser → no fix prompt.
+    expect(openclaw.fixPrompt).toBeUndefined();
+    expect(openclaw.targetPaths).toEqual([]);
+
+    expect(findCard(cards, "det:config-unreadable:gogcli/state.json")).toBeUndefined();
+
+    const approvals = findCard(cards, "det:config-unreadable:exec-approvals.json");
+    expect(approvals.summary).toMatch(/root is not a JSON object/);
+
+    const registry = findCard(cards, "det:config-unreadable:topic-registry.json");
+    expect(registry).toBeTruthy();
+    expect(registry.targetPaths).toEqual([{ path: "topic-registry.json" }]);
+    expect(registry.fixPrompt).toMatch(/Repair the syntax in place/);
+  });
+
+  it("emits nothing for missing or healthy files", () => {
+    write(managedRoot, "openclaw.json", JSON.stringify({ agents: { list: [] } }));
+    const cards = build();
+    expect(cards.some((card) => String(card.sourceKey).startsWith("det:config-unreadable:"))).toBe(false);
+  });
+});

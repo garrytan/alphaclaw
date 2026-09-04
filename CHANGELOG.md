@@ -5,6 +5,66 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.9.78] - 2026-09-04
+
+Fix wave, PR 7 — config-layer writers and fail-closed readers.
+
+### Fixed
+- **Config wipes from fail-open reads** (audit F214, F215, F085, F183, F184,
+  F190). Several state files were read leniently — a corrupt-but-existing
+  file parsed as "empty" — and the next save persisted the emptiness:
+  `gogcli/state.json` (every Google account + the Gmail push token, from the
+  `GET /api/gmail/config` the dashboard issues on mount), `exec-approvals.json`
+  (the file-era allowlist, rebuilt from `{ version: 1 }` by POST/DELETE),
+  `topic-registry.json` (per-topic agentId/systemPrompt pins wiped from
+  openclaw.json by the Telegram sync), the agent auth store (a busy or corrupt
+  `openclaw-agent.sqlite` row read as "no store", so a mutator overwrote it
+  with a near-empty store, and a sqlite write failure silently wrote an
+  `auth-profiles.json` nothing reads), and gog's `config.json` (rebuilt from
+  `{}`, dropping gog's own keys permanently). Every write path now goes
+  through a strict reader that refuses an existing-but-unparseable file
+  (`readGoogleStateForWrite`, `readExecApprovalsConfigForWrite`,
+  `topicRegistry.getGroupStrict`/`getActiveTopicCountStrict`, the sqlite
+  store's read/write failures), `writeGoogleState` refuses on its own before
+  overwriting a torn file, and gog's config is left alone with a warning. A
+  MISSING file is still the documented empty state. Display reads stay lenient.
+- **Raw openclaw.json writers** (F096, F150, F050, F051). `gmail-watch`'s
+  hooks preset and `webhooks.js` (create/update/delete/ensure-ids) wrote the
+  gateway config with a bare `writeFileSync` outside the shared lock;
+  `webhooks.js` additionally rewrote a beta `agents.entries` install in the
+  legacy `agents.list` shape on every mutation. Both now run ONE
+  `updateOpenclawConfig` read-modify-write each (locked, fail-closed, atomic,
+  shape-preserving, no round-trip when unchanged). The onboarding import
+  sanitizers, the codex migration (which now refuses an unparseable file with
+  the shared message instead of a bare SyntaxError), the `.gitignore` append,
+  and the exec-approvals writer are atomic. The config-writers guard allowlist
+  shrinks by five entries.
+- **Onboarding cron writer was the last non-atomic `/etc/cron.d` writer**
+  (F079).
+
+### Added
+- **One refusal vocabulary** (`lib/server/utils/config-unreadable.js`): every
+  `*_UNREADABLE` code maps to the same `config_unreadable` envelope ("AlphaClaw
+  will not rewrite <file> because it cannot parse it…", `hint`, `file`) —
+  503 on models/team/telegram routes, 409 on google/gmail/nodes — and records
+  ONE `config_unreadable` watchdog event per file per process, so the refusal
+  shows in the incidents timeline.
+- **Doctor card `det:config-unreadable:<file>`** (P1, category config) for
+  openclaw.json, gogcli/state.json, gogcli/config.json, exec-approvals.json,
+  cron/system-sync.json and topic-registry.json: byte-level evidence (size,
+  mtime, parse error), the list of `.bak` siblings, and the recovery copy —
+  it never parses or repairs the file itself. The UI error envelope carries a
+  default hint for `config_unreadable` when the server sends only the code.
+
+### Notes
+- Deferred to after PR #64 lands (it edits the same files): F189
+  (`cron/system-sync.json` fails open in `routes/system.js`/boot) and F191
+  (`restart-required-state.js` persist warnings).
+- Tests: new `config-unreadable.test.js`; extended `google-state`,
+  `exec-defaults-config`, `webhooks-coverage`, `topic-registry`,
+  `telegram-workspace`, `routes-nodes-coverage`, `doctor-deterministic-checks`,
+  `gmail-watch-service`, `auth-profiles`. `npm run build:ui` (error-envelope).
+
 ## [0.9.77] - 2026-09-04
 
 Fix wave, PR 4 — gateway lifecycle.
