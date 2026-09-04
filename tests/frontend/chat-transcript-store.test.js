@@ -347,3 +347,44 @@ describe("frontend/chat transcript-store markerCopy", () => {
     expect(markerCopy({ kind: "someday-new" })).toBe("This message failed");
   });
 });
+
+describe("frontend/chat transcript-store fix wave PR 9b (F122 confirm gate, F123 ordering)", () => {
+  it("mergeHistory never confirms a NEVER-SENT queued item against an older identical user row (F122)", () => {
+    const confirmed = [];
+    const rows = [historyRow("h1", "user", "deploy it", 1_000)];
+    const queued = { clientMsgId: "q1", content: "deploy it", createdAt: 1_500, status: "queued" };
+    mergeHistory({ current: [], rows, outboxItems: [queued], onConfirmed: (id) => confirmed.push(id) });
+    expect(confirmed).toEqual([]);
+
+    // The same item once actually SENT (sentAt/ackedAt) confirms as before.
+    const sent = { ...queued, status: "acked", sentAt: 1_600, ackedAt: 1_650 };
+    mergeHistory({ current: [], rows, outboxItems: [sent], onConfirmed: (id) => confirmed.push(id) });
+    expect(confirmed).toEqual(["q1"]);
+  });
+
+  it("composeVisibleMessages places sent bubbles above the live rows of their run and unsent ones below (F123)", () => {
+    const messages = [
+      historyRow("h1", "assistant", "welcome", 50),
+      { id: "live:m1", live: true, streamMessageId: "m1", role: "assistant", content: "Hel", createdAt: 300 },
+      { id: "live-tool:1", live: true, role: "tool", content: "Tool call: read", createdAt: 310 },
+    ];
+    const outboxItems = [
+      { clientMsgId: "acked", content: "hi", createdAt: 200, status: "acked", sentAt: 210, ackedAt: 220 },
+      { clientMsgId: "queued", content: "and then?", createdAt: 400, status: "queued" },
+      { clientMsgId: "failed", content: "retry me", createdAt: 350, status: "failed" },
+    ];
+    const visible = composeVisibleMessages({ messages, outboxItems });
+    expect(visible.map((m) => m.id)).toEqual([
+      "h1",
+      "c:acked",
+      "live:m1",
+      "live-tool:1",
+      "c:failed",
+      "c:queued",
+    ]);
+    // No live rows: unchanged append-in-creation-order behavior.
+    const flat = composeVisibleMessages({ messages: [messages[0]], outboxItems });
+    expect(flat.map((m) => m.id)).toEqual(["h1", "c:acked", "c:failed", "c:queued"]);
+    expect(composeVisibleMessages({ messages, outboxItems: [] })).toBe(messages);
+  });
+});
