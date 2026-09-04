@@ -152,7 +152,7 @@ The reducer evaluates rows in order; the first true predicate wins. Every input 
 | 9 | `safe_mode` | `tcp.up === true` AND health ok AND `/readyz` reports suppressed channels. Reason = suppressed channel names. |
 | 10 | `running` | `tcp.up === true` AND health ∈ {healthy, unknown-within-startup-grace} AND none of the above. |
 
-Binding rules: exactly one primary action per state (§6); `restart-required.reasons[]` renders as banner regardless of headline; the headline never renders a raw enum name (§5 labels only).
+Binding rules: at most one primary action per state (§6); `restart-required.reasons[]` renders as banner regardless of headline; the headline never renders a raw enum name (§5 labels only). **Restart always offered (v0.9.72):** every onboarded state except `booting` carries a restart-class action (Restart or Retry). Repair, Resume channels and Refresh are the *recommended* move in their states, never the *only* one — a repair-only Unstable card had left operators with no way to relaunch the gateway from the admin UI without running doctor first. `booting` is exempt because boot IS the launch. "Offered" is not "always runnable": the action is disabled with a `disabledReason` while another leased operation holds the lifecycle lock (precedence 1) or while a reconciler gateway hold is set after a failed settings migration (precedence 2; Repair is blocked too, since `doctor --fix` would rewrite the held config), and the route refuses with an actionable 409 during a channel apply or a hold. `POST /api/gateway/restart` queues on the lock (§7) and **re-validates both blockers once it holds it** — a hold set while the restart was queued fails the operation (terminal event with `code: gateway_held`, ledger entry `skipped`, never a "failed restart"), and a queued acquire surfaces a `waiting_for_lock` step via the lock's own `onQueued` callback so a wait is never silent.
 
 ---
 
@@ -164,16 +164,16 @@ Binding rules: exactly one primary action per state (§6); `restart-required.rea
 |---|---|---|---|---|
 | (no data yet) | "Connecting to AlphaClaw…" | gray | client-owned, only pre-first-frame | none; Restart disabled |
 | not_onboarded | Not set up yet | gray | — | Set up |
-| booting | AlphaClaw starting | cyan pulse | current phase | — |
+| booting | AlphaClaw starting | cyan pulse | current phase | — (deliberate: boot IS the launch; a restart queued behind the boot hold would recycle a gateway that just came up — `boot_failed` carries Retry) |
 | booting(failed) | Startup failed | red | error summary | **Retry** · View logs |
-| starting | Starting | cyan pulse | "usually under 30s (0:34 / 2:00 max)"; past typical: "taking longer than usual" — no fake progress | View logs |
+| starting | Starting | cyan pulse | "usually under 30s (0:34 / 2:00 max)"; past typical: "taking longer than usual" — no fake progress | View logs · Restart (disabled with reason under a leased operation; enabled for a watchdog-owned relaunch — the route serializes on the lifecycle lock) |
 | running | Running | green steady | "up 3h 12m" | Restart |
 | degraded | Running with issues | yellow steady | last probe error + observedAt | View logs · Restart |
-| flapping | Unstable | red steady | "3 restarts detected in 5 min — up 40s" (+detail: "estimated — gateway runs outside AlphaClaw's supervision" when probe-inferred) | **Repair** · View logs · Roll back (confirm via `confirm-dialog.js`; only in stabilization window) |
-| safe_mode | Channels paused | yellow steady | suppressed channel names | **Resume channels** |
+| flapping | Unstable | red steady | "3 restarts detected in 5 min — up 40s" (+detail: "estimated — gateway runs outside AlphaClaw's supervision" when probe-inferred) | **Repair** · Restart · View logs · Roll back (confirm via `confirm-dialog.js`; only in stabilization window) |
+| safe_mode | Channels paused | yellow steady | suppressed channel names | **Resume channels** · Restart |
 | config_error | Configuration error | red steady | first redacted stderr lines | **View config error** · Retry · View logs |
 | down | Down | red steady | reason + last evidence + since | **Retry** · Repair · View logs |
-| unknown >30s | Status unavailable | gray hollow | "Last confirmed running 42s ago — reconnecting" | Refresh · View logs |
+| unknown >30s | Status unavailable | gray hollow | "Last confirmed running 42s ago — reconnecting" | Refresh · Restart · View logs |
 | staleness <30s | (keep last state) | subdued | "as of 12s ago" stamp | unchanged, Restart disabled |
 
 ### Dot / motion
@@ -196,8 +196,8 @@ One shared status-icon treatment (icon + text + color); error states carry an ic
 | Starting | The gateway was launched and hasn't answered a health check yet | Wait up to 2 min; View logs if it stalls |
 | Running | Port open and last health check passed | — |
 | Running with issues | Port open but the health check is failing | View logs; Restart if it persists |
-| Unstable | The gateway keeps crashing and being brought back | Repair; Roll back if a recent upgrade caused it |
-| Channels paused | Gateway healthy but some channels are suppressed (safe mode) | Resume channels |
+| Unstable | The gateway keeps crashing and being brought back | Repair; Restart relaunches without diagnosis; Roll back if a recent upgrade caused it |
+| Channels paused | Gateway healthy but some channels are suppressed (safe mode) | Resume channels (Restart relaunches but does not resume them — OpenClaw's crash-loop breaker re-applies the suppression at startup) |
 | Configuration error | The gateway refused to start because its config is invalid (exit 78) | View config error, fix the file, Retry |
 | Down | The gateway is not running and automatic recovery has stopped | Retry; Repair |
 | Status unavailable | AlphaClaw can't currently confirm gateway state | Refresh; check that AlphaClaw itself is reachable |
@@ -212,7 +212,8 @@ Each status frame's `state.actions[]` entry:
 { id, label, kind: "primary" | "secondary" | "danger", needsConfirm?, disabledReason?, description? }
 ```
 
-- **Exactly one `kind:"primary"` per state**, bound in §4/§5 (bold entries).
+- **At most one `kind:"primary"` per state**, bound in §4/§5 (bold entries); `booting` and `starting` have none.
+- **Every onboarded state except `booting` carries a restart-class action** (`restart` or `retry`) — see the "Restart always offered" rule under §4. `disabledReason` copy lives in `kLifecycleActionBlockReasons` (`gateway-state.js`): operation-in-progress outranks gateway-held.
 - `description` = "what this does + expected duration"; rendered as the tooltip and as the confirm-dialog body when `needsConfirm` is set.
 - `disabledReason` renders the action disabled with a tooltip (e.g. Restart while an operation badge shows).
 - **The client renders, never derives.** The client-side label derivation in `components/gateway.js:31-68` is deleted in M2.2; the sole exception is the version-skew adapter rendering the legacy presentation when `state` is absent (old server).

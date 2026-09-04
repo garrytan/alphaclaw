@@ -299,6 +299,14 @@
 - **Context:** lib/server/watchdog.js runRepair (tryAcquire), lib/server/routes/watchdog.js repair handler, lib/server/gateway-lifecycle-lock.js contract comment.
 - **Effort:** S.
 
+
+## P3 — Hold-aware "Retry migration" primary action on the gateway card (2026-09-04, from the always-restartable wave)
+- **What:** When the status frame carries a reconciler `gatewayHold`, the gateway card should offer a `retry_migration` PRIMARY action that dispatches to the Upgrade tab's existing reconcile-retry flow (`routes/openclaw-channel.js` reconcile retry; client `components/gateway.js` `runAction`), instead of only disabling Restart/Retry/Repair with the "resolve it on the Upgrade page" reason (v0.9.72).
+- **Why:** v0.9.72 tells the operator what they cannot do from the card; this tells them what to do, in one click, without hunting for the Upgrade page. Raised by the Codex outside voice during the v0.9.72 eng review (hold is structured state with retry AND strip-consent remedies; the card should route to the surface that owns them rather than invent one).
+- **Pros:** closes the loop from the card; reuses the existing retry flow and its consent gates. **Cons:** a new client action id + tab routing that must stay coherent with the Upgrade page's own retry / strip-consent actions; the card must not duplicate the consent UI.
+- **Context:** `lib/server/gateway-state.js` (`actionsForState`, `kLifecycleActionBlockReasons.gatewayHeld`, `gatewayHeld` input wired from `status.openclawChannel.gatewayHold` in `routes/system.js`), `lib/public/js/components/gateway.js` (`runAction` switch), `lib/server/routes/openclaw-channel.js:1103-1152` (reconcile retry under `acquireLock("reconcile_retry")`).
+- **Effort:** M (CC: S). **Priority:** P3. **Depends on:** nothing further (v0.9.72's `gatewayHeld` plumbing is the prerequisite and has landed).
+
 ## P3 — Watchdog status gatewayPid stays null
 - **What:** `GET /api/watchdog/status` reports `gatewayPid: null` after boot and after a managed restart while lifecycle is `running`. Both gateway.js launch emit sites pass `pid: child.pid`, so some path drops it before/after the watchdog's `state.gatewayPid = pid` (launch-handler destructure, an exit-time reset racing the relaunch, or the restart-cmd path). Trace and fix; add a status assertion to the launch tests.
 - **Why:** Display/diagnostic gap only — the restart-handoff consume reads the EXIT payload's own pid (verified present live), so behavior is unaffected; but a null pid in status misleads operators and weakens the `?? state.gatewayPid` fallback.
