@@ -53,11 +53,16 @@ the reconciler had just held.
   hooks report a hold — forced/manual included — and `POST /api/watchdog/repair`
   maps that one skip to 409 with the Upgrade-page message. Other skips keep
   their legacy 200 shape (see TODOS "Manual repair should queue").
-- **Pre-landing review hardening (same wave).** Hold reads fail CLOSED
-  everywhere: an unreadable or corrupted release-channel state file refuses
-  restart and repair with `gateway_hold_unreadable` and disables the card's
-  lifecycle actions with a reason (`getChannelInfo` now exposes
-  `stateCorrupted`). `starting` disables Restart while a watchdog relaunch is
+- **Pre-landing review hardening (same wave).** Hold reads fail CLOSED on
+  the manual paths: an unreadable or corrupted release-channel state file
+  refuses the restart route and manual repair with `gateway_hold_unreadable`,
+  disables the card's lifecycle actions with a reason, and stops the exit-78
+  config-change auto-retry and the memory-mitigation restart from relaunching
+  (`getChannelInfo` now exposes `stateCorrupted`; the refusal code is
+  persisted on the restart record and reloaded after an AlphaClaw restart).
+  Not covered (pre-existing, filed in TODOS): the channel-create / WhatsApp /
+  team-transition restart wrappers still relaunch without consulting the
+  hold. `starting` disables Restart while a watchdog relaunch is
   in flight (`lifecycle` restarting/crashed or `operationInProgress`) —
   crash relaunches release the lifecycle lock right after spawn and the
   exit-78 auto-retry never takes it, so a user restart there would stop the

@@ -432,18 +432,30 @@ describe("server/gateway-state reducer", () => {
     // Crash relaunch / exit-78 auto-retry release the lifecycle lock right
     // after spawn (or never take it): only the lifecycle says a relaunch is in
     // flight, and a user restart here would stop the child just spawned.
-    for (const lifecycle of ["restarting", "crashed"]) {
+    for (const watchdog of [
+      { lifecycle: "restarting", health: "unknown", safeMode: false, crashCountInWindow: 0 },
+      { lifecycle: "crashed", health: "unknown", safeMode: false, crashCountInWindow: 1, backoff: { active: true, untilMs: kNow + 4000, attempt: 2 } },
+    ]) {
       const relaunch = reduceGatewayState(
-        inputs({
-          tcp: { running: false, observedAt: kNow },
-          watchdog: { lifecycle, health: "unknown", safeMode: false, crashCountInWindow: 0 },
-        }),
+        inputs({ tcp: { running: false, observedAt: kNow }, watchdog }),
       );
-      expect(relaunch.state, lifecycle).toBe("starting");
-      expect(relaunch.actions.find((a) => a.id === "restart")?.disabledReason, lifecycle).toBe(
+      expect(relaunch.state, watchdog.lifecycle).toBe("starting");
+      expect(relaunch.actions.find((a) => a.id === "restart")?.disabledReason, watchdog.lifecycle).toBe(
         kLifecycleActionBlockReasons.relaunch,
       );
     }
+    // A bare "crashed" with no backoff and no operation means the relaunch
+    // was SKIPPED (lock held by a non-relaunching op, or stop requested):
+    // nothing is coming, so Restart stays live instead of a false "relaunch
+    // in progress" dead end.
+    const skipped = reduceGatewayState(
+      inputs({
+        tcp: { running: false, observedAt: kNow },
+        watchdog: { lifecycle: "crashed", health: "unknown", safeMode: false, crashCountInWindow: 1, backoff: { active: false, untilMs: 0, attempt: 0 } },
+      }),
+    );
+    expect(skipped.state).toBe("starting");
+    expect(skipped.actions.find((a) => a.id === "restart")?.disabledReason).toBeUndefined();
     const opInProgress = reduceGatewayState(
       inputs({
         tcp: { running: false, observedAt: kNow },

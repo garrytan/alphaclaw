@@ -2843,6 +2843,7 @@ describe("server/routes/system", () => {
     expect(res.status).toBe(409);
     expect(res.body.code).toBe("gateway_held");
     expect(res.body.error).toContain("Upgrade page");
+    expect(res.body.hint).toContain("Upgrade page");
     expect(h.deps.restartGateway).not.toHaveBeenCalled();
     expect(h.deps.watchdog.onExpectedRestart).not.toHaveBeenCalled();
     // A refusal never opened the expected-restart window, so it must not
@@ -2955,6 +2956,7 @@ describe("server/routes/system", () => {
     expect(r1.body.code).toBe("gateway_held");
     expect(r2.status).toBe(409);
     expect(r2.body).toMatchObject({ ok: false, attached: true, code: "gateway_held" });
+    expect(r2.body.hint).toContain("Upgrade page");
     expect(h.deps.restartGateway).not.toHaveBeenCalled();
     // The waiting step carries its human label, not the raw id.
     const waiting = h.deps.operationEvents.publish.mock.calls.find(
@@ -3026,6 +3028,64 @@ describe("server/routes/system", () => {
     const next = await h.send("/api/gateway/restart");
     expect(next.status).toBe(200);
     expect(h.deps.restartGateway).toHaveBeenCalledTimes(1);
+  });
+
+  it("a transient channel-info read failure clears on the next good read: the card re-enables Restart", async () => {
+    const deps = createSystemDeps();
+    let fail = true;
+    deps.openclawChannelService = {
+      getChannelInfo: vi.fn(() => {
+        if (fail) throw new Error("EIO");
+        return { gatewayHold: null };
+      }),
+      isApplyInProgress: vi.fn(() => false),
+    };
+    deps.gatewayLifecycleLock = { acquire: vi.fn(async () => () => {}), getActiveOperation: vi.fn(() => null) };
+    deps.restartGateway = vi.fn(async () => ({ durationMs: 1, downtimeMs: 1 }));
+    const app = createApp(deps);
+    const findRestart = (body) => body.state.actions.find((a) => a.id === "restart" || a.id === "retry");
+    const first = await request(app).get("/api/status");
+    expect(findRestart(first.body).disabledReason).toContain("could not be read");
+    fail = false;
+    // The status snapshot stays fresh for kStatusSnapshotFreshnessMs (2.5s);
+    // the next compute after that window re-reads channel info and must
+    // clear the sticky read-failure flag.
+    await new Promise((resolve) => setTimeout(resolve, 2700));
+    const second = await request(app).get("/api/status");
+    expect(findRestart(second.body).disabledReason).toBeUndefined();
+    const res = await request(app).post("/api/gateway/restart");
+    expect(res.status).toBe(200);
+  }, 10_000);
+
+  it("every lifecycle-lock kind acquired anywhere in lib/server has a badge label (never the 'Working…' fallback)", async () => {
+    const fs = require("fs");
+    const path = require("path");
+    const root = path.join(__dirname, "..", "..", "lib", "server");
+    const kinds = new Set();
+    const walk = (dir) => {
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        const full = path.join(dir, entry.name);
+        if (entry.isDirectory()) walk(full);
+        else if (entry.name.endsWith(".js")) {
+          const src = fs.readFileSync(full, "utf8");
+          for (const m of src.matchAll(/(?:acquire|tryAcquire|acquireLock|acquireLifecycleLock)\("([a-z_]+)"/g)) kinds.add(m[1]);
+        }
+      }
+    };
+    walk(root);
+    kinds.delete("boot"); // expressed through bootPhase, never the badge
+    expect(kinds.size).toBeGreaterThan(5);
+    for (const kind of kinds) {
+      const deps = createSystemDeps();
+      deps.gatewayLifecycleLock = {
+        acquire: vi.fn(),
+        getActiveOperation: vi.fn(() => ({ kind, startedAt: 1 })),
+      };
+      const app = createApp(deps);
+      const res = await request(app).get("/api/status");
+      expect(res.body.state.operation?.label, kind).toBeTruthy();
+      expect(res.body.state.operation.label, kind).not.toBe("Working…");
+    }
   });
 
   it("the fast-gate refusal carries the same hint as the post-lock refusal", async () => {

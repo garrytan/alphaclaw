@@ -249,8 +249,42 @@ describe("server/restart-required-state (operation lifecycle)", () => {
     });
     expect(record).toMatchObject({ operationId, status: "failed", code: "gateway_held", errorSummary: "held" });
     expect(store.getLastRestartOperation()).toMatchObject({ operationId, code: "gateway_held" });
-    // A non-string / empty code normalizes to null.
-    expect(record.code).toBe("gateway_held");
+    // A non-string / empty / absent code normalizes to null.
+    for (const code of [123, "", undefined, null, { nope: true }]) {
+      const next = store.beginRestart();
+      const closed = store.completeRestart({ operationId: next.operationId, ok: false, errorSummary: "x", code });
+      expect(closed.code, String(code)).toBeNull();
+    }
+  });
+
+  it("the policy-refusal code survives a fresh instance over the same dir (reload) — a refusal must never resurrect as a failed restart after an AlphaClaw restart", () => {
+    let nowMs = 100_000;
+    const stateDir = makeStateDir();
+    const storeA = createRestartRequiredState({
+      isGatewayRunning: async () => true,
+      flagStore: nullFlagStore(),
+      stateDir,
+      now: () => nowMs,
+    });
+    const { operationId } = storeA.beginRestart();
+    storeA.completeRestart({
+      operationId,
+      ok: false,
+      errorSummary: "The gateway is held after a failed settings migration",
+      code: "gateway_held",
+    });
+    const storeB = createRestartRequiredState({
+      isGatewayRunning: async () => true,
+      flagStore: nullFlagStore(),
+      stateDir,
+      now: () => nowMs,
+    });
+    storeB.reconcileOnBoot();
+    expect(storeB.getLastRestartOperation()).toMatchObject({
+      operationId,
+      status: "failed",
+      code: "gateway_held",
+    });
   });
 
   it("clears only the reasons snapshot: mid-restart reasons survive", async () => {

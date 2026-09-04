@@ -771,6 +771,25 @@ describe("server/openclaw-channel-sync", () => {
       );
     });
 
+    it("getChannelInfo reports stateCorrupted while the state file is unparseable, and clears it once the store recovers", async () => {
+      const { sync, store } = createHarness({
+        pin: "1.0.0",
+        installedVersion: "1.0.0",
+        sentinelVersion: "1.0.0",
+      });
+      fs.mkdirSync(path.dirname(store.statePath), { recursive: true });
+      fs.writeFileSync(store.statePath, "{definitely not json", "utf8");
+      // The hold gates read this flag: a corrupted file must never read as
+      // "no hold".
+      const info = sync.getChannelInfo();
+      expect(info.stateCorrupted).toBe(true);
+      expect(info.gatewayHold).toBeNull();
+
+      sync.syncAtBoot();
+      await flushAsync();
+      expect(sync.getChannelInfo().stateCorrupted).toBe(false);
+    });
+
     it("recovers from a corrupted state file and notifies about the reset", async () => {
       const { sync, store, notify } = createHarness({
         pin: "1.0.0",

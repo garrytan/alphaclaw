@@ -566,6 +566,38 @@ describe("frontend/app-shell controller (shared status feed)", () => {
     expect(showToast).toHaveBeenCalledWith(expect.stringContaining("Upgrade page"), "error");
   });
 
+  it("SSE drop → resolve from the server: a terminal record carrying a policy code clears the card and toasts the fallback copy", async () => {
+    let restartHandlers = null;
+    api.subscribeGatewayRestartEvents.mockImplementation((options) => {
+      restartHandlers = options;
+      return vi.fn();
+    });
+    api.restartGatewayAsync.mockResolvedValue({ ok: true, operationId: "op-3" });
+    let state = await settle();
+    await state.actions.handleGatewayRestart();
+    await flushMicrotasks();
+    state = await settle();
+    expect(state.state.restartOperation?.phase).toBe("running");
+
+    api.fetchRestartStatus.mockResolvedValue({
+      restartRequired: false,
+      restartInProgress: false,
+      reasons: [],
+      lastOperation: {
+        operationId: "op-3",
+        status: "failed",
+        code: "gateway_held",
+        errorSummary: null,
+        startedAt: 1000,
+      },
+    });
+    restartHandlers.onError();
+    await flushMicrotasks();
+    state = renderController({});
+    expect(state.state.restartOperation).toBeNull();
+    expect(showToast).toHaveBeenCalledWith(expect.stringContaining("Upgrade page"), "error");
+  });
+
   it("a persisted lastOperation that was a policy refusal (code stamped) is not resurrected as a failed card on reload", async () => {
     api.fetchRestartStatus.mockResolvedValue({
       restartRequired: false,
