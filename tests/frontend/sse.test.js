@@ -83,10 +83,12 @@ describe("frontend/sse", () => {
   it("normalizes missing, blank, non-string, and invalid payloads to empty objects", async () => {
     const { subscribeToSse } = await loadSseModule();
     const messages = [];
+    const onError = vi.fn();
 
     subscribeToSse({
       url: "/api/x",
       onMessage: (message) => messages.push(message),
+      onError,
     });
 
     const source = FakeEventSource.instances[0];
@@ -94,7 +96,12 @@ describe("frontend/sse", () => {
     source.emit("phase", { data: "   " });
     source.emit("phase", { data: 42 });
     source.emit("done", { data: "not json" });
-    source.emit("error");
+    // A data-less `error` is the EventSource transport failing (fix wave
+    // F139): it belongs to onError, never to the message stream as a fake
+    // "the operation failed" frame.
+    const transportError = { type: "error" };
+    source.emit("error", transportError);
+    source.emit("error", { data: "not json" });
 
     expect(messages).toEqual([
       { event: "phase", data: {} },
@@ -103,6 +110,8 @@ describe("frontend/sse", () => {
       { event: "done", data: {} },
       { event: "error", data: {} },
     ]);
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onError).toHaveBeenCalledWith(transportError);
   });
 
   it("invokes onError for transport errors and defaults callbacks", async () => {
