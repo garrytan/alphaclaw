@@ -405,6 +405,27 @@ describe("frontend/app-shell controller (shared status feed)", () => {
     expect(state.state.restartOperation).toBeNull();
   });
 
+  it("gateway_held rejection clears the operation and toasts the Upgrade-page remedy (same shape as apply_in_progress)", async () => {
+    api.restartGatewayAsync.mockRejectedValue(
+      Object.assign(
+        new Error("The gateway is held after a failed settings migration — use Retry migration on the Upgrade page instead of restarting."),
+        { code: "gateway_held", status: 409 },
+      ),
+    );
+
+    let state = await settle();
+    await state.actions.handleGatewayRestart();
+    state = renderController({});
+
+    expect(state.state.restartOperation).toBeNull();
+    expect(gatewayShellStore.get().restartOperation).toBeNull();
+    expect(api.subscribeGatewayRestartEvents).not.toHaveBeenCalled();
+    expect(showToast).toHaveBeenCalledWith(
+      expect.stringContaining("Upgrade page"),
+      "error",
+    );
+  });
+
   it("apply_in_progress rejection clears the operation (no permanently spinning card) and toasts", async () => {
     api.restartGatewayAsync.mockRejectedValue(
       Object.assign(new Error("A channel update is in progress"), {
