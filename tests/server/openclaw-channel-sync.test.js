@@ -506,6 +506,8 @@ describe("server/openclaw-channel-sync", () => {
         expect(skipped.ok).toBe(false);
         expect(skipped.action).toBe("skipped_concurrent");
         expect(skipped.livePid).toBe(child.pid);
+        // Legacy record (no startTicks): alive but unverifiable → NOT corroborated.
+        expect(skipped.corroborated).toBe(false);
         // Nothing was mutated: applied still recorded, no lastBoot rewrite.
         expect(store.readState().applied).toEqual(
           expect.objectContaining({ version: "1.1.0" }),
@@ -517,6 +519,45 @@ describe("server/openclaw-channel-sync", () => {
       await new Promise((resolve) => child.once("exit", resolve));
       const proceeded = sync.syncAtBoot();
       expect(proceeded.ok).toBe(true);
+    });
+
+    it("marks the skip corroborated only when /proc confirms the pid's identity; a recycled pid does not skip", () => {
+      const { spawn } = require("child_process");
+      const { readProcStartTicks } = require("../../lib/server/utils/safe-file");
+      const hasProc = process.platform === "linux" && fs.existsSync(`/proc/${process.pid}/stat`);
+      if (!hasProc) return;
+      const { sync, store } = createHarness({
+        pin: "1.0.0",
+        channel: "beta",
+        installedVersion: "1.0.0",
+      });
+      const child = spawn(process.execPath, ["-e", "setTimeout(() => {}, 30000)"], {
+        stdio: "ignore",
+      });
+      try {
+        const ticks = readProcStartTicks(child.pid, fs);
+        fs.mkdirSync(path.dirname(store.serverPidPath), { recursive: true });
+        fs.writeFileSync(
+          store.serverPidPath,
+          JSON.stringify({ pid: child.pid, at: 1, startTicks: ticks }),
+        );
+        const corroborated = sync.syncAtBoot();
+        expect(corroborated.action).toBe("skipped_concurrent");
+        expect(corroborated.corroborated).toBe(true);
+
+        // Same pid number, different start time = the pid was recycled after a
+        // hard kill; the sync must proceed as if no owner existed.
+        fs.writeFileSync(
+          store.serverPidPath,
+          JSON.stringify({ pid: child.pid, at: 1, startTicks: ticks - 4242 }),
+        );
+        const proceeded = sync.syncAtBoot();
+        expect(proceeded.action).not.toBe("skipped_concurrent");
+        // ...and the surviving process now owns the claim.
+        expect(JSON.parse(fs.readFileSync(store.serverPidPath, "utf8")).pid).toBe(process.pid);
+      } finally {
+        child.kill("SIGKILL");
+      }
     });
 
     it("delivers bin-process boot notifications once via flushBootNotifications", async () => {

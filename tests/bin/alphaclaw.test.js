@@ -999,4 +999,92 @@ Module._load = function patchedLoad(request, parent, isMain) {
     const { captured } = runBootSpine({ rootDir });
     expect(captured.githubRepoEnv).toBe("owner/trimmed");
   });
+
+  // F004 follow-up: the single-instance refusal needs evidence. A hard-killed
+  // predecessor leaves its pidfile on the volume, and a fresh container's early
+  // processes reuse low pid numbers, so kill(pid, 0) alone says "alive" — the
+  // container-e2e durability leg caught exactly that as a boot crash loop.
+  const spawnBootSpine = ({ rootDir }) => {
+    const preloadPath = writeBootSpinePreload();
+    const capturePath = path.join(
+      tmpDir,
+      `captured-boot-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}.json`,
+    );
+    const childEnv = {
+      ...process.env,
+      SETUP_PASSWORD: "test-password",
+      ALPHACLAW_TEST_HOME: tmpHome,
+      ALPHACLAW_CAPTURE_ENV_PATH: capturePath,
+      ALPHACLAW_ROOT_DIR: rootDir,
+      ALPHACLAW_OPENCLAW_WRAPPER_PATH: path.join(rootDir, "wrapper-openclaw.sh"),
+      NODE_OPTIONS: `--require=${preloadPath}`,
+    };
+    delete childEnv.PORT;
+    delete childEnv.GITHUB_WORKSPACE_REPO;
+    return require("child_process").spawnSync(
+      `node ${supportedNodePreload()} "${binPath}" start --root-dir "${rootDir}"`,
+      { shell: true, encoding: "utf8", env: childEnv },
+    );
+  };
+  const writeServerPidRecord = (rootDir, record) => {
+    const managedDir = path.join(rootDir, ".openclaw", ".alphaclaw");
+    fs.mkdirSync(managedDir, { recursive: true });
+    fs.writeFileSync(path.join(managedDir, "alphaclaw-server.pid"), JSON.stringify(record));
+  };
+  const spawnSleeper = () =>
+    require("child_process").spawn(process.execPath, ["-e", "setTimeout(() => {}, 60000)"], {
+      stdio: "ignore",
+    });
+  const hasProc = process.platform === "linux" && fs.existsSync(`/proc/${process.pid}/stat`);
+
+  it("boots on (with a warning) when the pidfile names a live pid it cannot verify — legacy record (F004 follow-up)", () => {
+    const rootDir = fs.mkdtempSync(path.join(tmpDir, "stale-pid-root-"));
+    const child = spawnSleeper();
+    try {
+      writeServerPidRecord(rootDir, { pid: child.pid, at: 1 });
+      const result = spawnBootSpine({ rootDir });
+      expect(result.status, result.stderr).toBe(0);
+      expect(`${result.stdout}\n${result.stderr}`).toMatch(
+        /could not be verified — boot sync skipped, continuing/,
+      );
+    } finally {
+      child.kill("SIGKILL");
+    }
+  });
+
+  it.skipIf(!hasProc)("refuses to start (exit 1) when the live pid is corroborated by its kernel start time (F004)", () => {
+    const { readProcStartTicks } = require("../../lib/server/utils/safe-file");
+    const rootDir = fs.mkdtempSync(path.join(tmpDir, "live-pid-root-"));
+    const child = spawnSleeper();
+    try {
+      writeServerPidRecord(rootDir, {
+        pid: child.pid,
+        at: 1,
+        startTicks: readProcStartTicks(child.pid, fs),
+      });
+      const result = spawnBootSpine({ rootDir });
+      expect(result.status).toBe(1);
+      expect(result.stderr).toMatch(/Refusing to start a second instance/);
+    } finally {
+      child.kill("SIGKILL");
+    }
+  });
+
+  it.skipIf(!hasProc)("boots normally when the recorded pid was recycled (start time differs)", () => {
+    const { readProcStartTicks } = require("../../lib/server/utils/safe-file");
+    const rootDir = fs.mkdtempSync(path.join(tmpDir, "recycled-pid-root-"));
+    const child = spawnSleeper();
+    try {
+      writeServerPidRecord(rootDir, {
+        pid: child.pid,
+        at: 1,
+        startTicks: readProcStartTicks(child.pid, fs) - 777,
+      });
+      const result = spawnBootSpine({ rootDir });
+      expect(result.status, result.stderr).toBe(0);
+      expect(`${result.stdout}\n${result.stderr}`).not.toMatch(/boot sync skipped: another/);
+    } finally {
+      child.kill("SIGKILL");
+    }
+  });
 });
