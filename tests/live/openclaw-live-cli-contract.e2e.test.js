@@ -138,6 +138,11 @@ describeLive(
                 ...(input === null ? {} : { input }),
               }),
             );
+          // `--json` reads: stdout must be exactly ONE JSON document (fix wave
+          // F222/F115) — a banner or a second object FAILS the contract with
+          // the command, exit status and stderr instead of a bare parse error.
+          const runCliJson = (args) =>
+            liveHelpers.runCliJson(betaBin, args, { env: cliEnv, label: "beta" });
           const docPath = path.join(stateDir, "seed-doc.json");
           fs.writeFileSync(
             docPath,
@@ -151,7 +156,7 @@ describeLive(
             }),
           );
           runCli(["approvals", "set", "--file", docPath]);
-          const wrapped = JSON.parse(runCli(["approvals", "get", "--json"]));
+          const wrapped = runCliJson(["approvals", "get", "--json"]);
           expect(wrapped.file).toBeTruthy();
           // The get output redacts the socket token…
           expect(wrapped.file.socket.token).toBeUndefined();
@@ -160,7 +165,7 @@ describeLive(
           mutated.agents["*"].allowlist.push({ pattern: "git status", id: "a2" });
           fs.writeFileSync(docPath, JSON.stringify(mutated));
           runCli(["approvals", "set", "--file", docPath]);
-          const roundTripped = JSON.parse(runCli(["approvals", "get", "--json"]));
+          const roundTripped = runCliJson(["approvals", "get", "--json"]);
           expect(
             roundTripped.file.agents["*"].allowlist.map((entry) => entry.pattern),
           ).toEqual(["ls *", "git status"]);
@@ -211,7 +216,7 @@ describeLive(
             JSON.stringify({ mode: "ask", host: "gateway", node: "", strictInlineEval: false }),
             "--strict-json",
           ]);
-          const execCfg = JSON.parse(runCli(["config", "get", "tools.exec", "--json"]));
+          const execCfg = runCliJson(["config", "get", "tools.exec", "--json"]);
           expect(execCfg.mode).toBe("ask");
           // 7. Pairing-store propagation (X5, CLI-level): a direct row write
           // is visible to openclaw's own pairing tooling, and our direct
@@ -296,11 +301,13 @@ describeLive(
                 env: pinEnv,
               }),
             );
+          const runPinCliJson = (args) =>
+            liveHelpers.runCliJson(pinBin, args, { env: pinEnv, label: "pin" });
           // Any successful CLI call materializes the pin's v1 state db (all
           // tables, no rows). `approvals get --json` is the one the routes
           // depend on and exits 0 on an empty config — `config get <missing
           // path>` exits 1 on the pin ("Config path not found"), verified live.
-          const pinApprovals = JSON.parse(runPinCli(["approvals", "get", "--json"]));
+          const pinApprovals = runPinCliJson(["approvals", "get", "--json"]);
           expect(pinApprovals.file).toBeTruthy();
           expect(
             fs.existsSync(path.join(pinStateDir, "state", "openclaw.sqlite")),
@@ -339,7 +346,7 @@ describeLive(
             JSON.stringify({ mode: "full", strictInlineEval: false }),
             "--strict-json",
           ]);
-          const pinExecCfg = JSON.parse(runPinCli(["config", "get", "tools.exec", "--json"]));
+          const pinExecCfg = runPinCliJson(["config", "get", "tools.exec", "--json"]);
           expect(pinExecCfg.mode).toBe("full");
         } finally {
           try {
