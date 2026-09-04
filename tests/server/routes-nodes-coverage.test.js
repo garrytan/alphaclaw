@@ -1282,4 +1282,38 @@ describe("server/routes/nodes coverage", { retry: 1 }, () => {
       });
     });
   });
+
+  describe("exec approvals file fallback fails closed on an unparseable file (fix wave F215)", () => {
+    const torn = '{"version":1,"agents":{"*":{"allowlist":[{"pattern":"rm -rf *","id":"keep-me"';
+
+    it("POST answers 409 config_unreadable and leaves the file byte-identical", async () => {
+      const fsModule = createMemoryFs({ [approvalsPath]: torn });
+      const app = createApp({ fsModule });
+      const res = await request(app)
+        .post("/api/nodes/exec-approvals/allowlist")
+        .send({ pattern: "ls *" });
+      expect(res.status).toBe(409);
+      expect(res.body).toMatchObject({ ok: false, code: "config_unreadable", file: "exec-approvals.json" });
+      expect(res.body.error).toMatch(/will not rewrite exec-approvals\.json/);
+      expect(fsModule.files.get(approvalsPath)).toBe(torn);
+    });
+
+    it("DELETE answers 409 config_unreadable and leaves the file byte-identical", async () => {
+      const fsModule = createMemoryFs({ [approvalsPath]: torn });
+      const app = createApp({ fsModule });
+      const res = await request(app).delete("/api/nodes/exec-approvals/allowlist/keep-me");
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe("config_unreadable");
+      expect(fsModule.files.get(approvalsPath)).toBe(torn);
+    });
+
+    it("GET stays lenient (display) — wildcard defaults, no write", async () => {
+      const fsModule = createMemoryFs({ [approvalsPath]: torn });
+      const app = createApp({ fsModule });
+      const res = await request(app).get("/api/nodes/exec-approvals");
+      expect(res.status).toBe(200);
+      expect(res.body.allowlist).toEqual([]);
+      expect(fsModule.files.get(approvalsPath)).toBe(torn);
+    });
+  });
 });

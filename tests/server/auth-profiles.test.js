@@ -1146,3 +1146,72 @@ describe("auth-profiles openclaw.json writers fail closed", () => {
     expect(fs.readFileSync(configPath(), "utf8")).toBe("not json at all");
   });
 });
+
+describe("server/auth-profiles agent sqlite store fail-closed (fix wave F183/F184)", () => {
+  const agentDbPath = () =>
+    path.join(tmpDir, ".openclaw", "agents", "main", "agent", "openclaw-agent.sqlite");
+  const jsonStorePath = () =>
+    path.join(tmpDir, ".openclaw", "agents", "main", "agent", "auth-profiles.json");
+  const createTables = (database, { storeJsonColumn = "store_json TEXT NOT NULL" } = {}) => {
+    database.exec(`
+      CREATE TABLE auth_profile_store (
+        store_key TEXT NOT NULL PRIMARY KEY,
+        ${storeJsonColumn},
+        updated_at INTEGER NOT NULL
+      );
+      CREATE TABLE auth_profile_state (
+        state_key TEXT NOT NULL PRIMARY KEY,
+        state_json TEXT NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+    `);
+  };
+
+  it("a corrupt store row is a READ FAILURE: lenient reads show empty, strict reads and mutators refuse", () => {
+    fs.mkdirSync(path.dirname(agentDbPath()), { recursive: true });
+    const database = new DatabaseSync(agentDbPath());
+    createTables(database);
+    database
+      .prepare("INSERT INTO auth_profile_store (store_key, store_json, updated_at) VALUES (?, ?, ?)")
+      .run("primary", '{"version":1,"profiles":{"anthropic:default":{"type":"api_key","key":"sk-', 1);
+    database.close();
+
+    expect(ap.loadAuthStore("main")).toEqual({ version: 1, profiles: {} });
+    expect(() => ap.loadAuthStore("main", { strict: true })).toThrow(
+      expect.objectContaining({ code: "AUTH_STORE_UNREADABLE" }),
+    );
+    expect(() =>
+      ap.upsertProfile("anthropic:default", {
+        type: "api_key",
+        provider: "anthropic",
+        key: "sk-ant-new",
+      }),
+    ).toThrow(expect.objectContaining({ code: "AUTH_STORE_UNREADABLE" }));
+    // Nothing was rebuilt: the row is untouched and no JSON store appeared.
+    const check = new DatabaseSync(agentDbPath(), { readOnly: true });
+    expect(
+      check.prepare("SELECT store_json FROM auth_profile_store WHERE store_key = ?").get("primary")
+        .store_json,
+    ).toMatch(/^\{"version":1,"profiles":\{"anthropic:default"/);
+    check.close();
+    expect(fs.existsSync(jsonStorePath())).toBe(false);
+  });
+
+  it("a sqlite WRITE failure other than 'no such table' throws instead of silently writing auth-profiles.json", () => {
+    fs.mkdirSync(path.dirname(agentDbPath()), { recursive: true });
+    const database = new DatabaseSync(agentDbPath());
+    // No row yet (load falls through to the empty JSON store), but the store
+    // column rejects every real payload — models a damaged/foreign schema.
+    createTables(database, { storeJsonColumn: "store_json TEXT NOT NULL CHECK(length(store_json) < 4)" });
+    database.close();
+
+    expect(() =>
+      ap.upsertProfile("anthropic:default", {
+        type: "api_key",
+        provider: "anthropic",
+        key: "sk-ant-new",
+      }),
+    ).toThrow(expect.objectContaining({ code: "AUTH_STORE_UNREADABLE" }));
+    expect(fs.existsSync(jsonStorePath())).toBe(false);
+  });
+});

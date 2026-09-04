@@ -56,6 +56,49 @@ describe("server/telegram-workspace", () => {
     fs.rmSync(kTempRoot, { recursive: true, force: true });
   });
 
+  it("aborts the sync (config untouched) when the registry read is fail-closed — never wipes topic pins (F085)", () => {
+    const original = {
+      channels: {
+        telegram: {
+          groups: {
+            "-1001234567890": {
+              requireMention: true,
+              topics: { "3": { systemPrompt: "Handle ops requests only.", agentId: "ops" } },
+            },
+          },
+        },
+      },
+      agents: { defaults: { maxConcurrent: 24 } },
+    };
+    writeOpenclawConfig({ dir: openclawDir, config: original });
+    const registryError = new topicRegistryModule.TopicRegistryReadError(
+      "Refusing to touch topic-registry.json: invalid JSON",
+    );
+    const topicRegistry = {
+      // The lenient accessors read "no topics" — exactly what used to wipe the pins.
+      getGroup: () => null,
+      getTotalTopicCount: () => 0,
+      getActiveTopicCount: () => 0,
+      getGroupStrict: () => {
+        throw registryError;
+      },
+      getActiveTopicCountStrict: () => {
+        throw registryError;
+      },
+    };
+    expect(() =>
+      syncConfigForTelegram({
+        fs,
+        openclawDir,
+        topicRegistry,
+        groupId: "-1001234567890",
+        requireMention: true,
+        resolvedUserId: "",
+      }),
+    ).toThrow(expect.objectContaining({ code: "TOPIC_REGISTRY_UNREADABLE" }));
+    expect(readOpenclawConfig({ dir: openclawDir })).toEqual(original);
+  });
+
   it("writes topic agentId to openclaw group topic config", () => {
     writeOpenclawConfig({
       dir: openclawDir,
