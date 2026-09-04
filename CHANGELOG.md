@@ -43,7 +43,15 @@ Fix wave, PR 2 — the boot spine (`bin/alphaclaw.js` and the CLI git-sync).
 - A second `alphaclaw start` against a root a live server already owns ran
   `lib/server.js` module-init side effects against the live databases before
   dying on `EADDRINUSE` (F004); it now refuses to start (exit 1) when the boot
-  sync reports a live owner.
+  sync reports a live owner — but only a CORROBORATED one. The pidfile now
+  records the owner's kernel start time (`/proc/<pid>/stat`), and a live pid
+  whose start time differs is a recycled pid, not an owner: a container
+  hard-killed with `docker rm -f` leaves its pidfile on the volume and the
+  replacement container's early processes reuse the same low pid numbers,
+  which the first cut of this fix turned into a `--restart=always` crash loop
+  (caught by the container E2E durability leg). A live pid that cannot be
+  verified (legacy record, no `/proc`) skips the destructive sync and boots
+  on with a warning, as before.
 - The login-shell env snippet writer overwrote ANY pre-existing file at
   `ALPHACLAW_PROFILE_SNIPPET_PATH` (a path honored from `.env`); it now keeps
   the wrapper's managed-marker guard and records `skipped: existing

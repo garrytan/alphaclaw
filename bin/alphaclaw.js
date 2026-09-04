@@ -1038,12 +1038,13 @@ try {
     runOpenclawChannelBootSync,
   } = require("../lib/server/openclaw-channel-sync");
   const bootSyncResult = runOpenclawChannelBootSync({});
-  if (bootSyncResult?.action === "skipped_concurrent") {
-    // A live AlphaClaw server already owns this state directory (its pidfile
-    // is fresh). Loading lib/server.js next would run its module-init side
-    // effects against the live databases before dying on EADDRINUSE (fix
-    // wave F004) — refuse here instead. The placeholder child self-exits on
-    // the ppid check; kill it eagerly anyway.
+  if (bootSyncResult?.action === "skipped_concurrent" && bootSyncResult.corroborated) {
+    // A live AlphaClaw server provably owns this state directory: its pidfile
+    // names a live pid whose kernel start time matches the record. Loading
+    // lib/server.js next would run its module-init side effects against the
+    // live databases before dying on EADDRINUSE (fix wave F004) — refuse
+    // here instead. The placeholder child self-exits on the ppid check; kill
+    // it eagerly anyway.
     console.error(
       `[alphaclaw] Another AlphaClaw server (pid ${bootSyncResult.livePid}) already owns ${rootDir}. Refusing to start a second instance against its live databases — stop it first, or pass a different --root-dir.`,
     );
@@ -1051,6 +1052,16 @@ try {
       bootPlaceholder?.kill();
     } catch {}
     process.exit(1);
+  } else if (bootSyncResult?.action === "skipped_concurrent") {
+    // Alive pid but unverifiable (legacy pidfile without a start time, no
+    // /proc, or a hard-killed predecessor whose pid number a fresh container
+    // reused). Refusing here would wedge a `--restart=always` container in a
+    // crash loop on a stale file, so keep the pre-F004 posture: the
+    // destructive sync was skipped, boot continues, EADDRINUSE still stops a
+    // true duplicate.
+    console.warn(
+      `[alphaclaw] pidfile names live pid ${bootSyncResult.livePid} but its identity could not be verified — boot sync skipped, continuing (a stale pidfile from a hard-killed predecessor looks like this).`,
+    );
   }
 } catch (e) {
   console.log(`[openclaw-channel] boot sync failed (fail-open): ${e.message}`);
