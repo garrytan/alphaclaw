@@ -1431,7 +1431,7 @@ describe("server/watchdog", () => {
 
   it("a manual repair refuses under a reconciler gateway hold — no doctor run, no launch (issue #20 fail-closed)", async () => {
     const clawCalls = [];
-    const { watchdog, launchGatewayProcess } = createHarness({
+    const { watchdog, launchGatewayProcess, insertWatchdogEvent } = createHarness({
       autoRepair: true,
       clawCmdImpl: async (cmd) => {
         clawCalls.push(String(cmd));
@@ -1450,6 +1450,15 @@ describe("server/watchdog", () => {
     expect(result).toEqual({ ok: false, skipped: true, reason: "gateway_held" });
     expect(clawCalls.some((cmd) => cmd.includes("doctor"))).toBe(false);
     expect(launchGatewayProcess).not.toHaveBeenCalled();
+    // The refusal is a ledger row (skipped, with the reason), never a failure.
+    expect(insertWatchdogEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        eventType: "repair",
+        source: "manual",
+        status: "skipped",
+        details: expect.objectContaining({ reason: "gateway_held" }),
+      }),
+    );
   });
 
   it("start() preserves a latched configuration_error instead of clobbering it to running", async () => {

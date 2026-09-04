@@ -53,6 +53,23 @@ describe("server/gateway-lifecycle-lock", () => {
     expect(lock.getActiveOperation()).toBeNull();
   });
 
+  it("pendingTurns drains: after a contended cycle an idle acquire's onQueued stays silent", async () => {
+    const lock = createGatewayLifecycleLock({ leaseMs: 10_000 });
+    const r1 = await lock.acquire("boot");
+    const p2 = lock.acquire("restart", { onQueued: vi.fn() });
+    const p3 = lock.acquire("repair", { onQueued: vi.fn() });
+    r1();
+    (await p2)();
+    (await p3)();
+    expect(lock.getActiveOperation()).toBeNull();
+    // A leaked pending count here would put a phantom "waiting" step on every
+    // later restart — the whole point of lock-owned detection.
+    const quiet = vi.fn();
+    const r4 = await lock.acquire("restart", { onQueued: quiet });
+    expect(quiet).not.toHaveBeenCalled();
+    r4();
+  });
+
   it("a throwing onQueued handler is contained and logged, never poisoning the queue", async () => {
     const warn = vi.fn();
     const lock = createGatewayLifecycleLock({ leaseMs: 10_000, logger: { warn } });

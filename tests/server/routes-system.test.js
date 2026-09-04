@@ -2923,6 +2923,52 @@ describe("server/routes/system", () => {
     );
   });
 
+  it("a joiner attached to a queued restart that is then blocked gets the same 409 + code as the initiator", async () => {
+    const h = createQueuedRestartHarness();
+    const releaseBoot = await h.deps.gatewayLifecycleLock.acquire("boot");
+    const first = h.send("/api/gateway/restart");
+    await h.waitUntil(
+      () => h.stepEvents().includes("waiting_for_lock:running"),
+      "waiting_for_lock step",
+    );
+    const second = h.send("/api/gateway/restart");
+    // Let the second request reach the attach branch before the outcome lands.
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    h.world.hold = { reason: "settings migration failed", blamedKeys: [] };
+    releaseBoot();
+    const [r1, r2] = await Promise.all([first, second]);
+    expect(r1.status).toBe(409);
+    expect(r1.body.code).toBe("gateway_held");
+    expect(r2.status).toBe(409);
+    expect(r2.body).toMatchObject({ ok: false, attached: true, code: "gateway_held" });
+    expect(h.deps.restartGateway).not.toHaveBeenCalled();
+    // The waiting step carries its human label, not the raw id.
+    const waiting = h.deps.operationEvents.publish.mock.calls.find(
+      ([, evt]) => evt?.event === "step" && evt.data.name === "waiting_for_lock",
+    );
+    expect(waiting[1].data.label).toBe("Waiting for the current operation to finish");
+  });
+
+  it("a channel-info read failure is treated as no hold: the restart proceeds and the card keeps Restart enabled", async () => {
+    const deps = createSystemDeps();
+    deps.openclawChannelService = {
+      getChannelInfo: vi.fn(() => {
+        throw new Error("state file unreadable");
+      }),
+      isApplyInProgress: vi.fn(() => false),
+    };
+    deps.gatewayLifecycleLock = { acquire: vi.fn(async () => () => {}), getActiveOperation: vi.fn(() => null) };
+    deps.restartGateway = vi.fn(async () => ({ durationMs: 1, downtimeMs: 1 }));
+    const app = createApp(deps);
+    const status = await request(app).get("/api/status");
+    expect(status.status).toBe(200);
+    const restart = status.body.state.actions.find((a) => a.id === "restart" || a.id === "retry");
+    expect(restart?.disabledReason).toBeUndefined();
+    const res = await request(app).post("/api/gateway/restart");
+    expect(res.status).toBe(200);
+    expect(deps.restartGateway).toHaveBeenCalledTimes(1);
+  });
+
   it("status frames mark Restart/Retry/Repair disabled with the hold reason while the reconciler holds the gateway", async () => {
     const deps = createSystemDeps();
     deps.openclawChannelService = {

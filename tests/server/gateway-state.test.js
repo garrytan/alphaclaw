@@ -324,6 +324,35 @@ describe("server/gateway-state reducer", () => {
     expect(kLifecycleActionBlockReasons.gatewayHeld).not.toContain("Retry migration");
   });
 
+  it("a hold never blocks Roll back: flapping inside the stabilization window keeps the danger action enabled", () => {
+    const actions = actionsForState("flapping", {
+      operationActive: false,
+      inStabilizationWindow: true,
+      gatewayHeld: true,
+    });
+    const rollBack = actions.find((a) => a.id === "roll_back");
+    expect(rollBack).toBeTruthy();
+    expect(rollBack.kind).toBe("danger");
+    expect(rollBack.disabledReason).toBeUndefined();
+    expect(actions.find((a) => a.id === "repair").disabledReason).toBe(
+      kLifecycleActionBlockReasons.gatewayHeld,
+    );
+  });
+
+  it("unknown (Status unavailable): Refresh stays primary, Restart is offered and enabled", () => {
+    const result = reduceGatewayState(
+      inputs({ tcp: { running: true, observedAt: kNow - 10 * 60_000 } }),
+    );
+    expect(result.state).toBe("unknown");
+    expect(result.actions.find((a) => a.kind === "primary")?.id).toBe("refresh");
+    const restart = result.actions.find((a) => a.id === "restart");
+    expect(restart?.kind).toBe("secondary");
+    expect(restart?.disabledReason).toBeUndefined();
+    expect(kGatewayStateCatalog.unknown.glossary).toContain("Restart is still available");
+    expect(kGatewayStateCatalog.starting.glossary).toContain("if the launch stalls");
+    expect(kGatewayStateCatalog.flapping.glossary).toContain("relaunches without diagnosis");
+  });
+
   it("precedence: a live operation outranks a hold in the disabled reason", () => {
     const held = reduceGatewayState(
       inputs({
