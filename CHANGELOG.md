@@ -5,6 +5,42 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.9.84] - 2026-09-04
+
+Fix wave, PR 10 — local Claude Code rescue session.
+
+### Fixed
+- **Stop was missing exactly when the copy said to press it** (audit F130).
+  A session kept for diagnosis (`running_no_url` / `adopted_without_url`)
+  rendered the Error state without a Stop button while the server message
+  read "view the output tail, then Stop to retry". Stop renders for any
+  retained session.
+- **Auth gate collapsed the card to "Probing…"** (F131). A refused Remote
+  Control start nulled the login probe memo, so the status read `probing`
+  (hiding `needs_login`/`error`) until the 60-second probe timer fired. The
+  gate now marks the memo logged-out instead.
+- **Rescue pane scrollback was the 2000-line tmux default** (F132).
+  `set-option -g history-limit 50000` ran before any tmux server existed and
+  failed silently (set-option does not start a server), so adoption's
+  10k/50k re-extraction escalation was inert. `start-server` runs first; a
+  failed limit is surfaced on the result.
+- **A restart mid-URL-wait showed a healthy session as Error** (F134). Boot
+  adoption ignored the persisted `starting` phase and marked the pane
+  `adopted_without_url` without resuming the watcher. An identity-matched pane
+  still inside the URL budget resumes the watcher.
+- **Disabling hid a still-live session after a restart** (F135). Boot
+  reconcile skipped adoption when `CLAUDE_CODE_LOCAL_ENABLED=0`, so the live
+  pane had no warning, no Stop, and a 404 rescue link. Adoption (read-only)
+  runs regardless; only autostart is gated.
+- **Liveness reap could null a successor session** (F136). The reaper
+  re-checks the session generation after its await before clearing state.
+- The raw Remote Control `sessionId` (which reconstructs the account-gated
+  URL) no longer appears in the agent-readable process log (F133).
+
+### Notes
+- Tests: extended `claude-code-local-service`, `claude-code-local-tmux`,
+  `rescue-session-card`.
+
 ## [0.9.83] - 2026-09-04
 
 Fix wave, PR 9b — chat server and chat UI.
