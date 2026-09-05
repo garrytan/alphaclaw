@@ -345,6 +345,41 @@ describe("frontend/gateway card (server-state matrix)", () => {
     expect(restart).toHaveBeenCalledTimes(1);
   });
 
+  it("flapping (Unstable) offers Restart next to Repair and dispatches it to the shell pipeline", () => {
+    // Regression: the Unstable card used to be repair-only, leaving no way
+    // to relaunch the gateway from the admin UI in that state.
+    const restart = vi.fn();
+    const state = makeServerState({
+      watchdog: { ...kHealthyWatchdog, crashCountInWindow: 2 },
+    });
+    expect(state.state).toBe("flapping");
+    publishShell({ statusState: state });
+    gatewayShellStore.publish({
+      actions: { ...gatewayShellStore.get().actions, restart },
+    });
+    const tree = renderGateway({});
+    const buttons = findAllByType(tree, ActionButton);
+    const repairButton = buttons.find((vnode) => vnode.props.idleLabel === "Repair");
+    expect(repairButton.props.tone).toBe("primary");
+    const restartButton = buttons.find((vnode) => vnode.props.idleLabel === "Restart");
+    expect(restartButton).toBeTruthy();
+    expect(restartButton.props.disabled).toBe(false);
+    restartButton.props.onClick();
+    expect(restart).toHaveBeenCalledTimes(1);
+  });
+
+  it("safe_mode (Channels paused) offers Restart next to Resume channels", () => {
+    const state = makeServerState({
+      watchdog: { ...kHealthyWatchdog, safeMode: true, suppressedChannels: ["telegram"] },
+    });
+    expect(state.state).toBe("safe_mode");
+    publishShell({ statusState: state });
+    const tree = renderGateway({});
+    const buttons = findAllByType(tree, ActionButton);
+    expect(buttons.find((vnode) => vnode.props.idleLabel === "Resume channels").props.tone).toBe("primary");
+    expect(buttons.find((vnode) => vnode.props.idleLabel === "Restart")).toBeTruthy();
+  });
+
   it("not_onboarded's Set up action dispatches to the shell onboarding surface (never a silent no-op)", () => {
     const openSetup = vi.fn();
     // Reachable in-app: the client's onboarded flag reads the onboarding

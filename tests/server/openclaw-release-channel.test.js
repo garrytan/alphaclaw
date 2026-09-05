@@ -626,17 +626,44 @@ describe("server/openclaw-release-channel", () => {
   });
 
   describe("server pid guard", () => {
-    it("never clobbers a live foreign owner and clears only its own claim", () => {
-      const { spawn } = require("child_process");
+    const os = require("os");
+    const { spawn } = require("child_process");
+    // A live child standing in for a foreign alphaclaw server. `argvTag`
+    // lands in /proc/<pid>/cmdline so the legacy (identity-less) claim path
+    // can tell an alphaclaw entry from an unrelated process.
+    const spawnHolder = (argvTag = null) =>
+      spawn(
+        process.execPath,
+        ["-e", "setTimeout(() => {}, 30000)", ...(argvTag ? [argvTag] : [])],
+        { stdio: "ignore" },
+      );
+    const waitForProc = async (pid) => {
+      // /proc/<pid>/stat is readable as soon as spawn returns; the loop only
+      // guards a racing kernel on slow CI hosts.
+      for (let i = 0; i < 50; i += 1) {
+        try {
+          fs.readFileSync(`/proc/${pid}/stat`, "utf8");
+          return;
+        } catch {
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+      }
+    };
+    const fullClaim = (store, pid) => ({
+      pid,
+      at: 1,
+      host: os.hostname(),
+      startTicks: store.readProcessStartTicks(pid),
+    });
+
+    it("never clobbers a live foreign owner (identity matches) and clears only its own claim", () => {
       const { store } = createStore();
-      const child = spawn(process.execPath, ["-e", "setTimeout(() => {}, 30000)"], {
-        stdio: "ignore",
-      });
+      const child = spawnHolder();
       try {
         fs.mkdirSync(path.dirname(store.serverPidPath), { recursive: true });
         fs.writeFileSync(
           store.serverPidPath,
-          JSON.stringify({ pid: child.pid, at: 1 }),
+          JSON.stringify(fullClaim(store, child.pid)),
         );
         // A live foreign owner is sacred — a second start must not replace it
         // (it would clear the claim on exit, leaving the live server unguarded).
@@ -650,6 +677,93 @@ describe("server/openclaw-release-channel", () => {
       } finally {
         child.kill("SIGKILL");
       }
+    });
+  });
+
+  describe("server pid guard — identity, not just a pid", () => {
+    const os = require("os");
+    const { spawn } = require("child_process");
+    const spawnHolder = (argvTag = null) =>
+      spawn(
+        process.execPath,
+        ["-e", "setTimeout(() => {}, 30000)", ...(argvTag ? [argvTag] : [])],
+        { stdio: "ignore" },
+      );
+    const writeClaim = (store, claim) => {
+      fs.mkdirSync(path.dirname(store.serverPidPath), { recursive: true });
+      fs.writeFileSync(store.serverPidPath, JSON.stringify(claim));
+    };
+
+    it("a claim written by another container/host is stale even when the pid is alive here (fresh container on the same volume)", () => {
+      const { store } = createStore();
+      const child = spawnHolder();
+      try {
+        // The old container's server had this pid; in OUR pid namespace the
+        // same number is a different, live process.
+        writeClaim(store, {
+          pid: child.pid,
+          at: 1,
+          host: "b7f0c0ffee11",
+          startTicks: store.readProcessStartTicks(child.pid),
+        });
+        expect(store.readLiveServerPid()).toBeNull();
+        // ...so the boot may claim the file for itself.
+        store.writeServerPid();
+        const written = JSON.parse(fs.readFileSync(store.serverPidPath, "utf8"));
+        expect(written.pid).toBe(process.pid);
+        expect(written.host).toBe(os.hostname());
+      } finally {
+        child.kill("SIGKILL");
+      }
+    });
+
+    it("a reused pid (same host, different process start time) is stale", () => {
+      const { store } = createStore();
+      const liveTicks = store.readProcessStartTicks(process.pid);
+      if (liveTicks == null) return; // no /proc on this platform — legacy path covered below
+      const child = spawnHolder();
+      try {
+        const childTicks = store.readProcessStartTicks(child.pid);
+        expect(childTicks).not.toBeNull();
+        writeClaim(store, {
+          pid: child.pid,
+          at: 1,
+          host: os.hostname(),
+          startTicks: childTicks - 1, // the process that wrote this started earlier and is gone
+        });
+        expect(store.readLiveServerPid()).toBeNull();
+        // Matching identity: live.
+        writeClaim(store, { pid: child.pid, at: 1, host: os.hostname(), startTicks: childTicks });
+        expect(store.readLiveServerPid()).toBe(child.pid);
+      } finally {
+        child.kill("SIGKILL");
+      }
+    });
+
+    it("a legacy identity-less claim is trusted only if the live process looks like an alphaclaw server", () => {
+      const { store } = createStore();
+      if (store.readProcessStartTicks(process.pid) == null) return; // needs /proc
+      const stranger = spawnHolder();
+      const server = spawnHolder("/opt/alphaclaw/bin/alphaclaw.js");
+      try {
+        writeClaim(store, { pid: stranger.pid, at: 1 });
+        expect(store.readLiveServerPid()).toBeNull();
+        writeClaim(store, { pid: server.pid, at: 1 });
+        expect(store.readLiveServerPid()).toBe(server.pid);
+      } finally {
+        stranger.kill("SIGKILL");
+        server.kill("SIGKILL");
+      }
+    });
+
+    it("a dead pid and a self pid are never live", () => {
+      const { store } = createStore();
+      const child = spawnHolder();
+      child.kill("SIGKILL");
+      writeClaim(store, { pid: process.pid, at: 1, host: os.hostname() });
+      expect(store.readLiveServerPid()).toBeNull();
+      writeClaim(store, { pid: 999999, at: 1, host: os.hostname() });
+      expect(store.readLiveServerPid()).toBeNull();
     });
   });
 

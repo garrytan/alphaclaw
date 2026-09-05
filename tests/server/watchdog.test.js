@@ -45,6 +45,7 @@ const createHarness = ({
   updateEnvFile = null,
   getRescueSessionLine,
   collectAdvisoryDoctorJson = null,
+  releaseChannelHooks = null,
 } = {}) => {
   process.env.WATCHDOG_AUTO_REPAIR = autoRepair ? "true" : "false";
   process.env.WATCHDOG_NOTIFICATIONS_DISABLED = notificationsDisabled
@@ -96,6 +97,7 @@ const createHarness = ({
     ...(consumeRestartHandoffImpl ? { consumeRestartHandoffImpl } : {}),
     ...(updateEnvFile ? { updateEnvFile } : {}),
     ...(getRescueSessionLine ? { getRescueSessionLine } : {}),
+    ...(releaseChannelHooks ? { releaseChannelHooks } : {}),
   });
 
   return {
@@ -1425,6 +1427,66 @@ describe("server/watchdog", () => {
     expect(doctorCalls).toHaveLength(1);
     expect(launchGatewayProcess).toHaveBeenCalledTimes(1);
     expect(watchdog.getStatus().lifecycle).toBe("running");
+  });
+
+  it("a manual repair refuses under a reconciler gateway hold — no doctor run, no launch (issue #20 fail-closed)", async () => {
+    const clawCalls = [];
+    const { watchdog, launchGatewayProcess, insertWatchdogEvent } = createHarness({
+      autoRepair: true,
+      clawCmdImpl: async (cmd) => {
+        clawCalls.push(String(cmd));
+        return { ok: true, stdout: JSON.stringify({ ok: true }) };
+      },
+      releaseChannelHooks: {
+        getInfo: () => ({
+          gatewayHold: { reason: "settings migration failed", blamedKeys: ["mystery"] },
+        }),
+      },
+    });
+
+    // Forced (manual) repair is normally the operator's escape hatch — but a
+    // hold means doctor --fix would rewrite the very config the hold protects.
+    const result = await watchdog.triggerRepair();
+    expect(result).toEqual({ ok: false, skipped: true, reason: "gateway_held" });
+    expect(clawCalls.some((cmd) => cmd.includes("doctor"))).toBe(false);
+    expect(launchGatewayProcess).not.toHaveBeenCalled();
+    // The refusal is a ledger row (skipped, with the reason), never a failure.
+    expect(insertWatchdogEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        eventType: "repair",
+        source: "manual",
+        status: "skipped",
+        details: expect.objectContaining({ reason: "gateway_held" }),
+      }),
+    );
+  });
+
+  it("a hold state that cannot be read fails closed for repair too: skipped gateway_hold_unreadable, no doctor run", async () => {
+    for (const hooks of [
+      { getInfo: () => { throw new Error("state file unreadable"); } },
+      { getInfo: () => ({ gatewayHold: null, stateCorrupted: true }) },
+    ]) {
+      const clawCalls = [];
+      const { watchdog, launchGatewayProcess, insertWatchdogEvent } = createHarness({
+        autoRepair: true,
+        clawCmdImpl: async (cmd) => {
+          clawCalls.push(String(cmd));
+          return { ok: true, stdout: JSON.stringify({ ok: true }) };
+        },
+        releaseChannelHooks: hooks,
+      });
+      const result = await watchdog.triggerRepair();
+      expect(result).toEqual({ ok: false, skipped: true, reason: "gateway_hold_unreadable" });
+      expect(clawCalls.some((cmd) => cmd.includes("doctor"))).toBe(false);
+      expect(launchGatewayProcess).not.toHaveBeenCalled();
+      expect(insertWatchdogEvent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          eventType: "repair",
+          status: "skipped",
+          details: expect.objectContaining({ reason: "gateway_hold_unreadable" }),
+        }),
+      );
+    }
   });
 
   it("start() preserves a latched configuration_error instead of clobbering it to running", async () => {

@@ -5,15 +5,20 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
-## [0.9.73] - 2026-09-05
+## [0.9.74] - 2026-09-05
 
 Fix wave — the 2026-09-02 codebase audit (221 confirmed findings, 13
 sequenced batches) remediated and shipped as ONE pull request (#60). Each
 batch keeps its own Fixed / Changed / Notes below; the batch numbers match
 the "fix wave PR N" labels that appear in code comments, test names and
 commit messages (they are wave batches, not GitHub PR numbers). Batches 5
-(watchdog core + satellites) and 6 (release channel + self-update) are
-deferred behind the owner's open PR #64 — see TODOS.md.
+(watchdog core + satellites) and 6 (release channel + self-update) were
+deferred behind PR #64 while it was open — see TODOS.md. Reconciled with
+v0.9.73 (#64), which fixed the same stale-pidfile bug as batch 2's F004:
+main's identity-bearing claim (`host` + `startTicks`, argv sanity check for
+legacy claims) is the base, and batch 2's `corroborated` flag rides on it so
+the launcher refuses to start only on a VERIFIED live owner and boots on
+(sync skipped) when the pid cannot be verified.
 
 ### Batch 1 — server boundary hardening
 
@@ -744,6 +749,108 @@ as an unhandledRejection that feeds the server's rejection-storm exit brake.
   are not runnable in the sandbox that produced this release; the helper
   and parser are covered hermetically, the fixture change is covered by the
   container tier in CI.
+## [0.9.73] - 2026-09-04
+
+Restart is offered from the gateway card in every onboarded state. The unified
+card's action catalog (`lib/server/gateway-state.js`) had states with no
+restart-class action at all: Unstable (`flapping`) was Repair-only, Channels
+paused (`safe_mode`) was Resume-channels-only, and Starting / Status
+unavailable had no relaunch. An operator looking at a crash-prone gateway had
+no way to simply relaunch it without running `doctor --fix` first. Closing that
+also surfaced a real gap in the restart route: it checked the reconciler's
+gateway hold and channel-apply state BEFORE waiting on the lifecycle lock, so a
+restart that queued behind boot or a migration retry could launch on a config
+the reconciler had just held.
+
+### Fixed
+
+- **Restart offered everywhere it makes sense.** Every state except
+  `not_onboarded` and `booting` now carries Restart or Retry; Repair, Resume
+  channels and Refresh stay the recommended (primary) move. `booting` is exempt
+  on purpose — boot IS the launch, and a restart queued behind the boot hold
+  would only recycle a gateway that just came up (`boot_failed` carries Retry).
+  Matrix: `flapping` Repair · Restart · View logs · Roll back; `safe_mode`
+  Resume channels · Restart; `unknown` Refresh · Restart · View logs;
+  `starting` View logs · Restart.
+- **Hold-aware card.** The reducer now takes the reconciler `gatewayHold`
+  from the status frame: Restart, Retry and Repair render disabled with
+  "Gateway held after a failed settings migration — resolve it on the Upgrade
+  page." instead of 409ing on click (Repair is blocked too: `doctor --fix`
+  would rewrite the held config). A live operation's "Another operation is in
+  progress" outranks the hold reason.
+- **Restart route re-validates after the lock (issue #20 gap).** One
+  `readRestartBlocker()` policy runs at the fast 409 gate AND again once the
+  lifecycle lock is held. A hold or apply that appeared while the restart was
+  queued now fails the operation with the blocker's code and hint (terminal
+  operation event, record closed not-ok, sync callers get the same 409 shape)
+  and books a `skipped` ledger entry — never a "failed restart" incident. An
+  apply that began while the restart was queued wins (it carries its own
+  restart step).
+- **Queued restarts are visible.** `gatewayLifecycleLock.acquire` gained an
+  `{ onQueued }` callback that fires synchronously only when the acquire will
+  actually wait (lock-owned detection — a pending turn ahead counts even while
+  `active` is momentarily null). The restart operation emits a
+  `waiting_for_lock` step ("Waiting for the current operation to finish") from
+  it, so an uncontended restart never shows a phantom wait.
+- **Manual Repair refuses under a hold.** `runRepair` returns
+  `{ skipped: true, reason: "gateway_held" }` (logged) when the release-channel
+  hooks report a hold — forced/manual included — and `POST /api/watchdog/repair`
+  maps that one skip to 409 with the Upgrade-page message. Other skips keep
+  their legacy 200 shape (see TODOS "Manual repair should queue").
+- **Pre-landing review hardening (same wave).** Hold reads fail CLOSED on
+  the manual paths: an unreadable or corrupted release-channel state file
+  refuses the restart route and manual repair with `gateway_hold_unreadable`,
+  disables the card's lifecycle actions with a reason, and stops the exit-78
+  config-change auto-retry and the memory-mitigation restart from relaunching
+  (`getChannelInfo` now exposes `stateCorrupted`; the refusal code is
+  persisted on the restart record and reloaded after an AlphaClaw restart).
+  Not covered (pre-existing, filed in TODOS): the channel-create / WhatsApp /
+  team-transition restart wrappers still relaunch without consulting the
+  hold. `starting` disables Restart while a watchdog relaunch is
+  in flight (`lifecycle` restarting, `crashed` with an active backoff, or
+  `operationInProgress`; the guard applies only to that TCP-down state) —
+  crash relaunches release the lifecycle lock right after spawn and the
+  exit-78 auto-retry never takes it, so a user restart there would stop the
+  child just spawned. The restart route refuses `booting` up front while boot
+  holds the lock (the server now enforces the card's exemption), every 409
+  carries a `hint`, and a joiner attached to a queued restart that is then
+  refused gets the same 409 + code as the initiator. Policy refusals stamp the
+  restart record with their `code`, so the client clears the progress card
+  and toasts the remedy on BOTH delivery paths (fast-gate 409 and the
+  post-lock terminal SSE event) and never resurrects a refusal as a failed
+  restart after reload. `tryAcquire` yields to a pending queued acquire; the
+  banner step counter accounts for the optional `waiting_for_lock` step; the
+  status badge labels every lifecycle-lock kind (reconcile retry, medic,
+  crash relaunch, memory mitigation, autotune, env sync, backup quiesce)
+  instead of "Working…"; the agent-admin manifest documents the 409 codes for
+  `system.gateway-restart` and `watchdog.repair`; hold copy lives in one
+  export (`kGatewayHoldCopy`).
+- **Boot sync no longer skipped by a stale pidfile after container replacement
+  (container e2e durability leg A).** The single-instance guard for the
+  destructive boot sync trusted a bare pid: the pidfile outlives its writer on
+  the volume, and a fresh container (or `docker restart`) reuses the same small
+  pid for an unrelated process, so `process.kill(pid, 0)` said "live", the sync
+  was skipped, the just-applied overlay never activated, and the old pin
+  crash-looped against a state DB the new build had already migrated. The claim
+  now records the writer's hostname and `/proc` start ticks; a claim from
+  another container/host is stale, a reused pid with a different start time is
+  stale, and a legacy identity-less claim is trusted only when the live process
+  looks like an alphaclaw server. Regression tests cover the replaced-container
+  case at the store and boot-sync layers.
+- **Honest copy.** `safe_mode` glossary: "Restart relaunches the gateway but
+  does not resume paused channels" (OpenClaw's crash-loop breaker re-applies
+  the suppression at gateway startup; only Resume channels lifts it).
+  `starting`: "Restart is available if the launch stalls."
+- Tests: reducer invariant (restart-class action in every onboarded,
+  non-booting state; `booting` → no actions), hold precedence and copy, card
+  render + dispatch for flapping/safe_mode, lock `onQueued` (idle / active /
+  tryAcquire holder / pending-turn / throwing handler), restart route against
+  the REAL lifecycle lock with a deferred holder (hold appears while queued →
+  sync 409 + skipped ledger; apply appears → `apply_in_progress`; async 202 →
+  terminal fail event; uncontended → no waiting step), status frame carries the
+  hold reason, watchdog manual repair refuses under hold, repair route 409.
+  Design doc §4–§6 updated. Container tier not runnable in this environment
+  (no Docker) — hermetic `npm test` is the recorded result.
 
 ## [0.9.72] - 2026-09-02
 
