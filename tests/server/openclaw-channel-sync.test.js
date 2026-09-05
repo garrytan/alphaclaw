@@ -494,13 +494,20 @@ describe("server/openclaw-channel-sync", () => {
       });
       // A live foreign pid in the server pidfile = another instance is
       // serving from this tree; the sync must no-op (fail open), not mutate.
+      // The claim carries the writer's identity (this host, this process's
+      // start time) — that is what makes it "the same process", not the pid.
       const child = spawn(process.execPath, ["-e", "setTimeout(() => {}, 30000)"], {
         stdio: "ignore",
       });
       try {
         fs.writeFileSync(
           store.serverPidPath,
-          JSON.stringify({ pid: child.pid, at: 1 }),
+          JSON.stringify({
+            pid: child.pid,
+            at: 1,
+            host: require("os").hostname(),
+            startTicks: store.readProcessStartTicks(child.pid),
+          }),
         );
         const skipped = sync.syncAtBoot();
         expect(skipped.ok).toBe(false);
@@ -517,6 +524,43 @@ describe("server/openclaw-channel-sync", () => {
       await new Promise((resolve) => child.once("exit", resolve));
       const proceeded = sync.syncAtBoot();
       expect(proceeded.ok).toBe(true);
+    });
+
+    it("a stale pidfile from a REPLACED container does not block the boot sync (durability leg A regression)", async () => {
+      // The pidfile lives on the volume and outlives its writer. In a fresh
+      // container the same small pid is alive again as an unrelated process
+      // (placeholder child / gateway launcher). Trusting the pid alone
+      // skipped the sync, so the applied overlay never activated and the old
+      // pin crash-looped against the migrated state DB.
+      const { spawn } = require("child_process");
+      const { sync, store } = createHarness({
+        pin: "1.0.0",
+        channel: "beta",
+        installedVersion: "1.0.0",
+      });
+      const child = spawn(process.execPath, ["-e", "setTimeout(() => {}, 30000)"], {
+        stdio: "ignore",
+      });
+      try {
+        fs.mkdirSync(path.dirname(store.serverPidPath), { recursive: true });
+        fs.writeFileSync(
+          store.serverPidPath,
+          JSON.stringify({
+            pid: child.pid, // alive HERE — but the claim came from another container
+            at: 1,
+            host: "0ldc0ntainer1d",
+            startTicks: store.readProcessStartTicks(child.pid),
+          }),
+        );
+        const result = sync.syncAtBoot();
+        expect(result.action).not.toBe("skipped_concurrent");
+        // The boot re-claimed the pidfile for this process.
+        const claim = JSON.parse(fs.readFileSync(store.serverPidPath, "utf8"));
+        expect(claim.pid).toBe(process.pid);
+        expect(claim.host).toBe(require("os").hostname());
+      } finally {
+        child.kill("SIGKILL");
+      }
     });
 
     it("delivers bin-process boot notifications once via flushBootNotifications", async () => {
@@ -770,6 +814,25 @@ describe("server/openclaw-channel-sync", () => {
       expect(betaState.applied).toEqual(
         expect.objectContaining({ channel: "beta", version: "2.0.0-beta.1" }),
       );
+    });
+
+    it("getChannelInfo reports stateCorrupted while the state file is unparseable, and clears it once the store recovers", async () => {
+      const { sync, store } = createHarness({
+        pin: "1.0.0",
+        installedVersion: "1.0.0",
+        sentinelVersion: "1.0.0",
+      });
+      fs.mkdirSync(path.dirname(store.statePath), { recursive: true });
+      fs.writeFileSync(store.statePath, "{definitely not json", "utf8");
+      // The hold gates read this flag: a corrupted file must never read as
+      // "no hold".
+      const info = sync.getChannelInfo();
+      expect(info.stateCorrupted).toBe(true);
+      expect(info.gatewayHold).toBeNull();
+
+      sync.syncAtBoot();
+      await flushAsync();
+      expect(sync.getChannelInfo().stateCorrupted).toBe(false);
     });
 
     it("recovers from a corrupted state file and notifies about the reset", async () => {

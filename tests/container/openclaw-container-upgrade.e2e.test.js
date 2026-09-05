@@ -284,12 +284,15 @@ describeContainer("container E2E: stable→beta upgrade in the production image"
         kContentionControlPath,
       ]);
     } catch {}
-    // Preserve evidence before teardown when the journey broke.
+    // Preserve evidence before teardown when the journey broke. The tail must
+    // reach back past a restart loop: durability leg A (2026-09-04) failed on
+    // a fresh container whose FIRST boot — the one that mattered — had already
+    // scrolled out of a 600-line window behind ~12 crash/restart cycles.
     if (journeyBroken) {
       const dir = ensureArtifactsDir();
       for (const name of [kContainerA, kContainerB]) {
         try {
-          const logs = await containerLogs(name, { tail: 600 });
+          const logs = await containerLogs(name, { tail: 5000 });
           fs.writeFileSync(path.join(dir, `${name}-logs.txt`), logs);
         } catch {}
       }

@@ -405,6 +405,27 @@ describe("frontend/app-shell controller (shared status feed)", () => {
     expect(state.state.restartOperation).toBeNull();
   });
 
+  it("gateway_held rejection clears the operation and toasts the Upgrade-page remedy (same shape as apply_in_progress)", async () => {
+    api.restartGatewayAsync.mockRejectedValue(
+      Object.assign(
+        new Error("The gateway is held after a failed settings migration — use Retry migration on the Upgrade page instead of restarting."),
+        { code: "gateway_held", status: 409 },
+      ),
+    );
+
+    let state = await settle();
+    await state.actions.handleGatewayRestart();
+    state = renderController({});
+
+    expect(state.state.restartOperation).toBeNull();
+    expect(gatewayShellStore.get().restartOperation).toBeNull();
+    expect(api.subscribeGatewayRestartEvents).not.toHaveBeenCalled();
+    expect(showToast).toHaveBeenCalledWith(
+      expect.stringContaining("Upgrade page"),
+      "error",
+    );
+  });
+
   it("apply_in_progress rejection clears the operation (no permanently spinning card) and toasts", async () => {
     api.restartGatewayAsync.mockRejectedValue(
       Object.assign(new Error("A channel update is in progress"), {
@@ -515,6 +536,84 @@ describe("frontend/app-shell controller (shared status feed)", () => {
         resumed: true,
       }),
     );
+  });
+
+  it("a queued-then-refused restart (SSE error with a policy code) clears the card and toasts — never a failed restart", async () => {
+    let handlers = null;
+    api.subscribeGatewayRestartEvents.mockImplementation((options) => {
+      handlers = options && typeof options.onMessage === "function" ? options : null;
+      return vi.fn();
+    });
+    api.restartGatewayAsync.mockResolvedValue({ ok: true, operationId: "op-q" });
+
+    let state = await settle();
+    await state.actions.handleGatewayRestart();
+    state = renderController({});
+    expect(state.state.restartOperation?.phase).toBe("running");
+    expect(handlers).toBeTruthy();
+
+    handlers.onMessage({
+      event: "error",
+      data: {
+        error: "The gateway is held after a failed settings migration — use Retry migration on the Upgrade page instead of restarting.",
+        hint: "Resolve the settings migration on the Upgrade page.",
+        code: "gateway_held",
+      },
+    });
+    state = renderController({});
+    expect(state.state.restartOperation).toBeNull();
+    expect(gatewayShellStore.get().restartOperation).toBeNull();
+    expect(showToast).toHaveBeenCalledWith(expect.stringContaining("Upgrade page"), "error");
+  });
+
+  it("SSE drop → resolve from the server: a terminal record carrying a policy code clears the card and toasts the fallback copy", async () => {
+    let restartHandlers = null;
+    api.subscribeGatewayRestartEvents.mockImplementation((options) => {
+      restartHandlers = options;
+      return vi.fn();
+    });
+    api.restartGatewayAsync.mockResolvedValue({ ok: true, operationId: "op-3" });
+    let state = await settle();
+    await state.actions.handleGatewayRestart();
+    await flushMicrotasks();
+    state = await settle();
+    expect(state.state.restartOperation?.phase).toBe("running");
+
+    api.fetchRestartStatus.mockResolvedValue({
+      restartRequired: false,
+      restartInProgress: false,
+      reasons: [],
+      lastOperation: {
+        operationId: "op-3",
+        status: "failed",
+        code: "gateway_held",
+        // The server persists the refusal message as the record's summary.
+        errorSummary: "The gateway is held after a failed settings migration — use Retry migration on the Upgrade page instead of restarting.",
+        startedAt: 1000,
+      },
+    });
+    restartHandlers.onError();
+    await flushMicrotasks();
+    state = renderController({});
+    expect(state.state.restartOperation).toBeNull();
+    expect(showToast).toHaveBeenCalledWith(expect.stringContaining("Upgrade page"), "error");
+  });
+
+  it("a persisted lastOperation that was a policy refusal (code stamped) is not resurrected as a failed card on reload", async () => {
+    api.fetchRestartStatus.mockResolvedValue({
+      restartRequired: false,
+      restartInProgress: false,
+      reasons: [],
+      lastOperation: {
+        operationId: "op-refused",
+        status: "failed",
+        code: "gateway_held",
+        errorSummary: "The gateway is held after a failed settings migration",
+        startedAt: 1000,
+      },
+    });
+    const state = await settle();
+    expect(state.state.restartOperation).toBeNull();
   });
 
   it("an unacknowledged failed lastOperation survives the reload; dismissing acknowledges it for good", async () => {

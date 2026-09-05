@@ -3,6 +3,104 @@ const {
 } = require("../../lib/server/gateway-lifecycle-lock");
 
 describe("server/gateway-lifecycle-lock", () => {
+  it("acquire({onQueued}) fires synchronously only when the caller will actually wait", async () => {
+    const lock = createGatewayLifecycleLock({ leaseMs: 10_000 });
+
+    // Idle lock: no wait, no callback.
+    const idleQueued = vi.fn();
+    const release1 = await lock.acquire("restart", { onQueued: idleQueued });
+    expect(idleQueued).not.toHaveBeenCalled();
+
+    // Active holder (a user acquire): the second acquire will wait — the
+    // callback fires before acquire() returns, naming the active operation.
+    const queued = vi.fn();
+    const pending = lock.acquire("restart", { onQueued: queued });
+    expect(queued).toHaveBeenCalledTimes(1);
+    expect(queued).toHaveBeenCalledWith(expect.objectContaining({ kind: "restart" }));
+    release1();
+    const release2 = await pending;
+
+    // A watchdog tryAcquire holder counts as contention too.
+    release2();
+    const releaseTry = lock.tryAcquire("crash_restart");
+    expect(releaseTry).toBeTypeOf("function");
+    const queuedBehindTry = vi.fn();
+    const pending2 = lock.acquire("restart", { onQueued: queuedBehindTry });
+    expect(queuedBehindTry).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "crash_restart" }),
+    );
+    releaseTry();
+    (await pending2)();
+    expect(lock.getActiveOperation()).toBeNull();
+  });
+
+  it("acquire({onQueued}) sees a pending turn ahead of it even while `active` is momentarily null", async () => {
+    const lock = createGatewayLifecycleLock({ leaseMs: 10_000 });
+    const releaseFirst = await lock.acquire("boot");
+    const secondQueued = vi.fn();
+    const second = lock.acquire("restart", { onQueued: secondQueued });
+    expect(secondQueued).toHaveBeenCalledTimes(1);
+    // Release the holder: `active` clears, but the second acquire has not
+    // taken the lock yet (its turn resolves on a later microtask). A third
+    // acquire issued right now still waits — and must know it.
+    releaseFirst();
+    expect(lock.getActiveOperation()).toBeNull();
+    const thirdQueued = vi.fn();
+    const third = lock.acquire("repair", { onQueued: thirdQueued });
+    expect(thirdQueued).toHaveBeenCalledTimes(1);
+    (await second)();
+    (await third)();
+    expect(lock.getActiveOperation()).toBeNull();
+  });
+
+  it("pendingTurns drains: after a contended cycle an idle acquire's onQueued stays silent", async () => {
+    const lock = createGatewayLifecycleLock({ leaseMs: 10_000 });
+    const r1 = await lock.acquire("boot");
+    const p2 = lock.acquire("restart", { onQueued: vi.fn() });
+    const p3 = lock.acquire("repair", { onQueued: vi.fn() });
+    r1();
+    (await p2)();
+    (await p3)();
+    expect(lock.getActiveOperation()).toBeNull();
+    // A leaked pending count here would put a phantom "waiting" step on every
+    // later restart — the whole point of lock-owned detection.
+    const quiet = vi.fn();
+    const r4 = await lock.acquire("restart", { onQueued: quiet });
+    expect(quiet).not.toHaveBeenCalled();
+    r4();
+  });
+
+  it("tryAcquire skips while a queued user acquire is pending, even in the gap after the holder released", async () => {
+    const lock = createGatewayLifecycleLock({ leaseMs: 10_000 });
+    const releaseBoot = await lock.acquire("boot");
+    const queued = lock.acquire("restart");
+    releaseBoot();
+    // `active` is momentarily null, but a turn is pending: a same-tick
+    // background try must not jump the queued user restart.
+    expect(lock.getActiveOperation()).toBeNull();
+    expect(lock.tryAcquire("crash_restart")).toBeNull();
+    (await queued)();
+    // Fully idle again: try succeeds.
+    const releaseTry = lock.tryAcquire("crash_restart");
+    expect(releaseTry).toBeTypeOf("function");
+    releaseTry();
+  });
+
+  it("a throwing onQueued handler is contained and logged, never poisoning the queue", async () => {
+    const warn = vi.fn();
+    const lock = createGatewayLifecycleLock({ leaseMs: 10_000, logger: { warn } });
+    const release1 = await lock.acquire("restart");
+    const pending = lock.acquire("restart", {
+      onQueued: () => {
+        throw new Error("boom");
+      },
+    });
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("onQueued handler threw: boom"));
+    release1();
+    (await pending)();
+    expect(lock.getActiveOperation()).toBeNull();
+  });
+
   it("force-releases an expired lease and hands the lock to the queued waiter", async () => {
     vi.useFakeTimers();
     try {
