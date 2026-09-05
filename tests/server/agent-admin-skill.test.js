@@ -61,11 +61,13 @@ describe("agent-admin skill builder", () => {
 
   // On-demand skills are NOT under the 20k/150k always-injected bootstrap
   // budget; this guard just keeps context cost bounded as domains grow. A
-  // typical deployment renders ~27-35k; the maximal fixture (all 18 domains,
-  // 10 admins, every channel) is ~56.3k with the doctor.settings ops, the
-  // overseer situation-report op (v0.9.69) and the updates.backups inventory
-  // row (issue #54). 59k leaves headroom without
-  // cutting the op tables, which are the load-bearing content.
+  // typical deployment renders ~27-35k; the maximal fixture (all 22 domains,
+  // 10 admins, every channel) is ~60.2k with the doctor.settings ops, the
+  // overseer situation-report op (v0.9.69), the updates.backups inventory
+  // row (issue #54), and the fix-wave PR 3 additions (error-code rows for the
+  // confirm/admin codes, the browse config-path deny hints, updates.capabilities).
+  // 62k leaves headroom without cutting the op tables, which are the
+  // load-bearing content.
   it("stays within the on-demand size budget on a maximal fixture", () => {
     const adminTargets = Array.from({ length: 10 }, (_, i) => ({
       channel: "telegram",
@@ -97,7 +99,7 @@ describe("agent-admin skill builder", () => {
     expect(content).toContain(
       "- Resource autotune: on (agent concurrency cap 32) — details: `alphaclaw admin GET /api/autotune`",
     );
-    expect(content.length).toBeLessThan(59000);
+    expect(content.length).toBeLessThan(62000);
   });
 
   it("renders no-GPU/autotune-off machine state and omits the lines when machine is absent", () => {

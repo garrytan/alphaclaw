@@ -346,6 +346,70 @@ describe("server/routes OAuth callback binding (E-C11 / PR #114 pattern)", () =>
     expect(accounts[0].id).not.toBe("planted-target");
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
+
+  it("rejects a consenting Google identity that differs from the flow's email — nothing saved (F095)", async () => {
+    const { app, tmpDir } = buildGoogleApp();
+    const state = await startFlow(app, { query: "?email=expected%40example.com&services=gmail" });
+
+    const calls = [];
+    global.fetch = async (url) => {
+      calls.push(String(url));
+      if (String(url).includes("oauth2.googleapis.com/token")) {
+        return { ok: true, json: async () => ({ access_token: "at-1", refresh_token: "rt-1" }) };
+      }
+      if (String(url).includes("userinfo")) {
+        return { ok: true, json: async () => ({ email: "someone.else@example.com" }) };
+      }
+      return { ok: true, json: async () => ({}) };
+    };
+    const res = await request(app).get(`/auth/google/callback?code=c&state=${state}`);
+    expect(res.status).toBe(200);
+    expect(res.text).toContain("google: 'error'");
+    expect(res.text).toContain("account_mismatch");
+    expect(res.text).toContain("someone.else@example.com");
+    expect(calls.some((url) => url.includes("userinfo"))).toBe(true);
+    // No account was persisted for either identity.
+    const statePath = path.join(tmpDir, "google-state.json");
+    if (fs.existsSync(statePath)) {
+      const saved = JSON.parse(fs.readFileSync(statePath, "utf8"));
+      expect((saved.accounts || []).filter((a) => a.authenticated)).toEqual([]);
+    }
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("verifies identity on every exchange (userinfo is fetched even when the flow carries an email)", async () => {
+    const { app, tmpDir } = buildGoogleApp();
+    const state = await startFlow(app, { query: "?email=expected%40example.com&services=gmail" });
+    const calls = [];
+    global.fetch = async (url) => {
+      calls.push(String(url));
+      if (String(url).includes("oauth2.googleapis.com/token")) {
+        return { ok: true, json: async () => ({ access_token: "at-1", refresh_token: "rt-1" }) };
+      }
+      if (String(url).includes("userinfo")) {
+        return { ok: true, json: async () => ({ email: "Expected@Example.com" }) };
+      }
+      return { ok: true, json: async () => ({}) };
+    };
+    const res = await request(app).get(`/auth/google/callback?code=c&state=${state}`);
+    // Case-insensitive match passes the identity gate (the rest of the import
+    // runs against the stub gog and may still fail later, but never as a mismatch).
+    expect(res.text).not.toContain("account_mismatch");
+    expect(calls.some((url) => url.includes("userinfo"))).toBe(true);
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("a repeated/bracketed `services` query key does not 500 the start route (F209)", async () => {
+    const { app, tmpDir } = buildGoogleApp();
+    // startFlow asserts the 302 redirect itself; before the fix `.split` threw
+    // on the array Express parses from `services[]=…` and the terminal handler
+    // answered 500.
+    const state = await startFlow(app, { query: "?services[]=gmail&services[]=calendar" });
+    expect(state).toMatch(/^[0-9a-f]{32}$/);
+    const nested = await request(app).get("/auth/google/start?services[a]=gmail");
+    expect(nested.status).toBe(302);
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
 });
 
 describe("server/watchdog-terminal-ws admin gate (4.6)", () => {

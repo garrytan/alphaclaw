@@ -175,6 +175,92 @@ const scrubTestRunnerEnv = (base = process.env) => {
   return env;
 };
 
+// `<cli> ... --json` contract (fix wave F222/F115): stdout must be EXACTLY one
+// JSON document. The old `JSON.parse(String(execFileSync(...)))` swallowed the
+// two ways upstream drift shows up — a banner/log line before the document
+// (parse error with no context) and an EMPTY stdout (the beta silences stdout
+// when it inherits `VITEST`) — and could never tell them apart from a broken
+// contract. This parser names the failure and quotes the evidence.
+const kStdoutQuoteBytes = 600;
+const kStderrQuoteBytes = 1200;
+const quoteHead = (text, bytes) => {
+  const value = String(text || "");
+  return value.length > bytes ? `${value.slice(0, bytes)}…(+${value.length - bytes} more)` : value;
+};
+const quoteTail = (text, bytes) => {
+  const value = String(text || "");
+  return value.length > bytes ? `…(${value.length - bytes} earlier)${value.slice(-bytes)}` : value;
+};
+const countJsonDocuments = (text) => {
+  // Cheap diagnosis only (never used to pick a "winner"): how many
+  // whitespace-separated lines parse as JSON on their own.
+  let count = 0;
+  for (const line of String(text).split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    try {
+      JSON.parse(trimmed);
+      count += 1;
+    } catch {}
+  }
+  return count;
+};
+const parseSingleJsonDocument = (stdout, { label = "cli", stderr = "" } = {}) => {
+  const raw = String(stdout ?? "");
+  const trimmed = raw.trim();
+  const evidence = () =>
+    `stdout(${raw.length}B): ${JSON.stringify(quoteHead(raw, kStdoutQuoteBytes))}` +
+    (stderr ? `\nstderr: ${JSON.stringify(quoteTail(stderr, kStderrQuoteBytes))}` : "");
+  if (!trimmed) {
+    throw new Error(
+      `${label}: expected exactly one JSON document on stdout but stdout was EMPTY ` +
+        `(a CLI that inherits VITEST/NODE_OPTIONS silences itself — spawn through scrubTestRunnerEnv()).\n${evidence()}`,
+    );
+  }
+  try {
+    return JSON.parse(trimmed);
+  } catch (error) {
+    const documents = countJsonDocuments(trimmed);
+    const shape =
+      documents >= 2
+        ? `${documents} JSON documents (the CLI printed more than one object)`
+        : documents === 1
+          ? "a JSON document surrounded by non-JSON text (a banner or log line leaked onto stdout)"
+          : "no parseable JSON document";
+    throw new Error(
+      `${label}: stdout is not a single JSON document — found ${shape}: ${error?.message || error}.\n${evidence()}`,
+    );
+  }
+};
+
+// Spawn `node <bin> ...args` with stdout and stderr captured SEPARATELY, the
+// test-runner env scrubbed, and the stdout held to the single-document
+// contract above. A non-zero exit fails with the command, status/signal and
+// the stderr tail — never a bare parse error.
+// `env` is the caller's base env (defaults to the process env INSIDE
+// scrubTestRunnerEnv — never spread raw here; live-tier-conventions.test.js
+// scans for that).
+const runCliJson = (bin, args, { env = undefined, input = null, timeoutMs = 120_000, label = "openclaw" } = {}) => {
+  const result = spawnSync(process.execPath, [bin, ...args], {
+    encoding: "utf8",
+    timeout: timeoutMs,
+    env: scrubTestRunnerEnv(env),
+    ...(input === null ? {} : { input }),
+  });
+  const command = `${label}: node ${path.basename(String(bin))} ${args.join(" ")}`;
+  if (result.error) {
+    throw new Error(`${command} failed to spawn: ${result.error.message}`);
+  }
+  if (result.status !== 0) {
+    throw new Error(
+      `${command} exited ${result.status === null ? `on signal ${result.signal}` : `with status ${result.status}`}.\n` +
+        `stderr: ${JSON.stringify(quoteTail(result.stderr, kStderrQuoteBytes))}\n` +
+        `stdout: ${JSON.stringify(quoteHead(result.stdout, kStdoutQuoteBytes))}`,
+    );
+  }
+  return parseSingleJsonDocument(result.stdout, { label: command, stderr: result.stderr });
+};
+
 const waitFor = async (predicate, timeoutMs, label = "condition") => {
   const startedAt = Date.now();
   while (!(await predicate())) {
@@ -450,5 +536,7 @@ module.exports = {
   repoOpenclawBin,
   repoBinDir,
   scrubTestRunnerEnv,
+  parseSingleJsonDocument,
+  runCliJson,
   waitFor,
 };

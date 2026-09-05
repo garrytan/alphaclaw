@@ -1083,3 +1083,135 @@ describe("server/auth-profiles state-DB quiet period", () => {
     expect(Object.keys(recovered.profiles)).toEqual(["anthropic:default"]);
   });
 });
+
+// Fix wave F074: the path builder is the last line before path.join —
+// it fails closed on anything that is not an agent-id slug.
+describe("auth-profiles agent id boundary", () => {
+  it("refuses a traversal agentId on every store operation and writes nothing", () => {
+    for (const bad of ["../../escape", "__proto__", "Main", "a/b", ""]) {
+      expect(() => ap.upsertProfile("p1", { type: "api_key", key: "k" }, bad), bad).toThrow(/Invalid agent id/);
+      expect(() => ap.listProfiles(bad), bad).toThrow(/Invalid agent id/);
+      expect(() => ap.loadAuthStore(bad), bad).toThrow(/Invalid agent id/);
+    }
+    expect(fs.existsSync(path.join(tmpDir, "escape"))).toBe(false);
+    expect(fs.existsSync(path.join(tmpDir, ".openclaw", "agents", "escape"))).toBe(false);
+  });
+
+  it("still accepts slug agent ids", () => {
+    expect(() => ap.listProfiles("ops-2")).not.toThrow();
+  });
+});
+
+// Fix wave F213 (P1): every openclaw.json write in this module goes through
+// the locked, fail-closed updateOpenclawConfig. An existing-but-unparseable
+// file (openclaw accepts JSON5) is REFUSED, never rewritten from `{}`.
+describe("auth-profiles openclaw.json writers fail closed", () => {
+  const configPath = () => path.join(tmpDir, ".openclaw", "openclaw.json");
+  const json5 = '{\n  // operator comment\n  agents: { defaults: { model: { primary: "anthropic/claude-opus-4-6" }, models: {} } },\n  gateway: { port: 18789 },\n}\n';
+
+  it("setModelConfig refuses a JSON5 config and leaves the bytes untouched", () => {
+    fs.writeFileSync(configPath(), json5);
+    let caught = null;
+    try {
+      ap.setModelConfig({ primary: "openai/gpt-5", configuredModels: { "openai/gpt-5": {} } });
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught?.code).toBe("OPENCLAW_CONFIG_UNREADABLE");
+    expect(fs.readFileSync(configPath(), "utf8")).toBe(json5);
+    expect(fs.readdirSync(path.dirname(configPath())).filter((n) => n.endsWith(".tmp"))).toEqual([]);
+  });
+
+  it("getModelConfig on a JSON5 config answers leniently and never rewrites the file", () => {
+    fs.writeFileSync(configPath(), json5);
+    const result = ap.getModelConfig();
+    // Lenient read of an unparseable file yields the empty defaults…
+    expect(result).toEqual({ primary: null, configuredModels: {} });
+    // …and the old `saveOpenclawConfig({plugins:…})` normalization write no
+    // longer replaces the operator's file with a stub.
+    expect(fs.readFileSync(configPath(), "utf8")).toBe(json5);
+  });
+
+  it("setModelConfig still creates a missing config and writes atomically", () => {
+    fs.rmSync(configPath());
+    ap.setModelConfig({ primary: "openai/gpt-5" });
+    const written = readJson("openclaw.json");
+    expect(written.agents.defaults.model.primary).toBe("openai/gpt-5");
+    expect(fs.readdirSync(path.dirname(configPath())).filter((n) => n.endsWith(".tmp"))).toEqual([]);
+  });
+
+  it("garbage text is refused too", () => {
+    fs.writeFileSync(configPath(), "not json at all");
+    expect(() => ap.setModelConfig({ primary: "openai/gpt-5" })).toThrow(/Refusing to overwrite/);
+    expect(fs.readFileSync(configPath(), "utf8")).toBe("not json at all");
+  });
+});
+
+describe("server/auth-profiles agent sqlite store fail-closed (fix wave F183/F184)", () => {
+  const agentDbPath = () =>
+    path.join(tmpDir, ".openclaw", "agents", "main", "agent", "openclaw-agent.sqlite");
+  const jsonStorePath = () =>
+    path.join(tmpDir, ".openclaw", "agents", "main", "agent", "auth-profiles.json");
+  const createTables = (database, { storeJsonColumn = "store_json TEXT NOT NULL" } = {}) => {
+    database.exec(`
+      CREATE TABLE auth_profile_store (
+        store_key TEXT NOT NULL PRIMARY KEY,
+        ${storeJsonColumn},
+        updated_at INTEGER NOT NULL
+      );
+      CREATE TABLE auth_profile_state (
+        state_key TEXT NOT NULL PRIMARY KEY,
+        state_json TEXT NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+    `);
+  };
+
+  it("a corrupt store row is a READ FAILURE: lenient reads show empty, strict reads and mutators refuse", () => {
+    fs.mkdirSync(path.dirname(agentDbPath()), { recursive: true });
+    const database = new DatabaseSync(agentDbPath());
+    createTables(database);
+    database
+      .prepare("INSERT INTO auth_profile_store (store_key, store_json, updated_at) VALUES (?, ?, ?)")
+      .run("primary", '{"version":1,"profiles":{"anthropic:default":{"type":"api_key","key":"sk-', 1);
+    database.close();
+
+    expect(ap.loadAuthStore("main")).toEqual({ version: 1, profiles: {} });
+    expect(() => ap.loadAuthStore("main", { strict: true })).toThrow(
+      expect.objectContaining({ code: "AUTH_STORE_UNREADABLE" }),
+    );
+    expect(() =>
+      ap.upsertProfile("anthropic:default", {
+        type: "api_key",
+        provider: "anthropic",
+        key: "sk-ant-new",
+      }),
+    ).toThrow(expect.objectContaining({ code: "AUTH_STORE_UNREADABLE" }));
+    // Nothing was rebuilt: the row is untouched and no JSON store appeared.
+    const check = new DatabaseSync(agentDbPath(), { readOnly: true });
+    expect(
+      check.prepare("SELECT store_json FROM auth_profile_store WHERE store_key = ?").get("primary")
+        .store_json,
+    ).toMatch(/^\{"version":1,"profiles":\{"anthropic:default"/);
+    check.close();
+    expect(fs.existsSync(jsonStorePath())).toBe(false);
+  });
+
+  it("a sqlite WRITE failure other than 'no such table' throws instead of silently writing auth-profiles.json", () => {
+    fs.mkdirSync(path.dirname(agentDbPath()), { recursive: true });
+    const database = new DatabaseSync(agentDbPath());
+    // No row yet (load falls through to the empty JSON store), but the store
+    // column rejects every real payload — models a damaged/foreign schema.
+    createTables(database, { storeJsonColumn: "store_json TEXT NOT NULL CHECK(length(store_json) < 4)" });
+    database.close();
+
+    expect(() =>
+      ap.upsertProfile("anthropic:default", {
+        type: "api_key",
+        provider: "anthropic",
+        key: "sk-ant-new",
+      }),
+    ).toThrow(expect.objectContaining({ code: "AUTH_STORE_UNREADABLE" }));
+    expect(fs.existsSync(jsonStorePath())).toBe(false);
+  });
+});

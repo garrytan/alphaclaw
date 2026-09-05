@@ -3648,3 +3648,86 @@ describe("server/agents/service", () => {
     });
   });
 });
+
+describe("server/agents-service channel add: restart failure is not a failed add; env dedupe stays in its lane (F086, F091)", () => {
+  const buildService = ({ initialEnv, restartGateway }) => {
+    const fsMock = buildFsMock({
+      initialConfig: { agents: { list: [{ id: "main", default: true }] } },
+    });
+    const writes = [];
+    const readEnvFile = vi.fn(() => initialEnv.map((entry) => ({ ...entry })));
+    const writeEnvFile = vi.fn((next) => writes.push(next.map((entry) => ({ ...entry }))));
+    const clawCmd = vi.fn(async () => ({ ok: true, stdout: "", stderr: "" }));
+    const service = createAgentsService({
+      fs: fsMock,
+      OPENCLAW_DIR: "/tmp/openclaw",
+      readEnvFile,
+      writeEnvFile,
+      reloadEnv: vi.fn(),
+      restartGateway,
+      clawCmd,
+    });
+    return { service, fsMock, writes, clawCmd, writeEnvFile };
+  };
+
+  it("keeps the configured account and reports gatewayRestartFailed when the gateway never becomes ready (F086)", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const restartGateway = vi.fn(async () => {
+      throw new Error("Gateway --force did not become ready within 120s");
+    });
+    const { service, fsMock, writes, clawCmd } = buildService({
+      initialEnv: [{ key: "OPENAI_API_KEY", value: "sk-test" }],
+      restartGateway,
+    });
+
+    const result = await service.createChannelAccount({
+      provider: "telegram",
+      name: "Telegram",
+      accountId: "default",
+      token: "123:abc",
+      agentId: "main",
+    });
+
+    expect(result).toMatchObject({ channel: "telegram", gatewayRestartFailed: true });
+    // No rollback: the account stays in openclaw.json, the env keeps the token,
+    // and `channels remove` was never issued.
+    expect(fsMock.readConfig().channels.telegram.accounts.default.botToken).toBe("${TELEGRAM_BOT_TOKEN}");
+    expect(writes.at(-1)).toEqual(
+      expect.arrayContaining([{ key: "TELEGRAM_BOT_TOKEN", value: "123:abc" }]),
+    );
+    expect(clawCmd.mock.calls.some(([cmd]) => String(cmd).startsWith("channels remove"))).toBe(false);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("gateway restart failed after channel add"));
+    warn.mockRestore();
+  });
+
+  it("a non-channel env var holding the same token is NOT treated as an orphan (F091)", async () => {
+    const { service, writes } = buildService({
+      initialEnv: [
+        { key: "OPENAI_API_KEY", value: "sk-test" },
+        // Same secret value under an unrelated key — must survive the add.
+        { key: "MY_BACKUP_OF_THE_BOT_TOKEN", value: "123:abc" },
+        // A stale channel-shaped key for the same provider IS an orphan.
+        { key: "TELEGRAM_BOT_TOKEN_OLDACCOUNT", value: "123:abc" },
+      ],
+      restartGateway: vi.fn(async () => {}),
+    });
+
+    await service.createChannelAccount({
+      provider: "telegram",
+      name: "Telegram",
+      accountId: "default",
+      token: "123:abc",
+      agentId: "main",
+    });
+
+    const finalEnv = writes.at(-1);
+    expect(finalEnv).toEqual(
+      expect.arrayContaining([
+        { key: "OPENAI_API_KEY", value: "sk-test" },
+        { key: "MY_BACKUP_OF_THE_BOT_TOKEN", value: "123:abc" },
+        { key: "TELEGRAM_BOT_TOKEN", value: "123:abc" },
+      ]),
+    );
+    expect(finalEnv.some((entry) => entry.key === "TELEGRAM_BOT_TOKEN_OLDACCOUNT")).toBe(false);
+  });
+});

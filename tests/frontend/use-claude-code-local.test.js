@@ -178,16 +178,13 @@ describe("useClaudeCodeLocal visibility pause", () => {
     await vi.advanceTimersByTimeAsync(10_000);
     expect(fetchClaudeCodeStatusDirect).not.toHaveBeenCalled();
 
-    // The visibilitychange handler flips the reactive flag; the interval
-    // effect re-run on the next render polls immediately.
+    // The shared useVisibleInterval primitive resumes on visibilitychange and
+    // polls immediately — no re-render or effect re-run needed (PR 11).
     const handler = global.document.addEventListener.mock.calls.find(
       (call) => call[0] === "visibilitychange",
     )[1];
     global.document.hidden = false;
     handler();
-    cleanup();
-    renderHook();
-    cleanup = runEffects();
     await vi.advanceTimersByTimeAsync(0);
     expect(fetchClaudeCodeStatusDirect).toHaveBeenCalledTimes(1);
     await vi.advanceTimersByTimeAsync(5_000);

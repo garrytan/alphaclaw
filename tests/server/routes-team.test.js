@@ -559,4 +559,38 @@ describe("server/routes/team (4.5)", () => {
     expect(failing.body.identityProbe.ok).toBe(false);
     expect(failing.body.identityProbe.error).toContain("rejected the credential");
   });
+
+  it("PATCH member rejects a non-boolean `disabled` (the string \"false\" used to disable the member) — F210", async () => {
+    const adminCookie = await legacyCookie();
+    await enableTeam(adminCookie);
+    const invite = await request(app)
+      .post("/api/team/invites")
+      .set("Cookie", adminCookie)
+      .send({});
+    const accept = await request(app).post("/api/auth/accept-invite").send({
+      token: invite.body.token,
+      email: "member@example.com",
+      password: "member password",
+    });
+    const memberCookie = cookieOf(accept);
+    const memberRow = membersStore.getMemberByEmail("member@example.com");
+
+    const res = await request(app)
+      .patch(`/api/team/members/${memberRow.id}`)
+      .set("Cookie", adminCookie)
+      .send({ disabled: "false" });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe("disabled must be a boolean");
+    // Nothing changed: the member's session still works.
+    expect(
+      (await request(app).get("/api/team").set("Cookie", memberCookie)).status,
+    ).toBe(200);
+
+    const badName = await request(app)
+      .patch(`/api/team/members/${memberRow.id}`)
+      .set("Cookie", adminCookie)
+      .send({ displayName: ["x"] });
+    expect(badName.status).toBe(400);
+    expect(badName.body.error).toBe("displayName must be a string");
+  });
 });

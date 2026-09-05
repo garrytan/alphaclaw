@@ -2,7 +2,10 @@ const http = require("http");
 const express = require("express");
 const request = require("supertest");
 
-const { createWebhookMiddleware } = require("../../lib/server/webhook-middleware");
+const {
+  createWebhookMiddleware,
+  resolveHookIngress,
+} = require("../../lib/server/webhook-middleware");
 
 const createGatewaySpyServer = async () => {
   const calls = [];
@@ -322,5 +325,303 @@ describe("server/webhook-middleware", () => {
     } finally {
       await new Promise((resolve) => server.close(resolve));
     }
+  });
+});
+
+// Fix wave F058/F149/F151/F211 — the ingress is unauthenticated, so it is
+// exercised here exactly as production mounts it (routes/proxy.js:
+// app.all(/^\/hooks\/.+/) + express.raw) with RAW http requests, because
+// supertest/superagent normalize dot segments client-side and would hide the
+// traversal.
+const kHooksPathPattern = /^\/hooks\/.+/;
+const kWebhookPathPattern = /^\/webhook\/.+/;
+
+const createProductionShapedApp = ({ gatewayUrl, insertRequest = () => {}, gatewayTimeoutMs }) => {
+  const app = express();
+  app.use(["/webhook", "/hooks"], express.raw({ type: "*/*", limit: "5mb" }));
+  const middleware = createWebhookMiddleware({
+    gatewayUrl,
+    insertRequest,
+    maxPayloadBytes: 1024 * 64,
+    ...(gatewayTimeoutMs ? { gatewayTimeoutMs } : {}),
+  });
+  app.all(kHooksPathPattern, middleware);
+  app.all(kWebhookPathPattern, middleware);
+  // Distinguish the middleware's own 404 from Express falling through.
+  app.use((req, res) => res.status(404).json({ error: "fallthrough" }));
+  return app;
+};
+
+const listen = (server) =>
+  new Promise((resolve) => server.listen(0, "127.0.0.1", () => resolve(server.address().port)));
+
+const rawRequest = ({ port, method = "POST", path, headers = {}, body = "{}" }) =>
+  new Promise((resolve, reject) => {
+    const req = http.request(
+      {
+        host: "127.0.0.1",
+        port,
+        method,
+        path,
+        headers: {
+          "content-type": "application/json",
+          "content-length": Buffer.byteLength(body),
+          ...headers,
+        },
+      },
+      (res) => {
+        const chunks = [];
+        res.on("data", (chunk) => chunks.push(chunk));
+        res.on("end", () =>
+          resolve({ status: res.statusCode, body: Buffer.concat(chunks).toString("utf8"), headers: res.headers }),
+        );
+        res.on("aborted", () => resolve({ status: res.statusCode, body: null, aborted: true }));
+      },
+    );
+    req.on("error", reject);
+    req.end(body);
+  });
+
+describe("server/webhook-middleware ingress containment (raw request-targets)", () => {
+  let gateway;
+  let appServer;
+  let port;
+  let rows;
+  let warn;
+
+  beforeEach(async () => {
+    gateway = await createGatewaySpyServer();
+    rows = [];
+    warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    appServer = http.createServer(
+      createProductionShapedApp({
+        gatewayUrl: gateway.gatewayUrl,
+        insertRequest: (row) => rows.push(row),
+      }),
+    );
+    port = await listen(appServer);
+  });
+
+  afterEach(async () => {
+    await new Promise((resolve) => appServer.close(resolve));
+    await new Promise((resolve) => gateway.server.close(resolve));
+  });
+
+  const rejected = [
+    ["dot-segment traversal", "/hooks/../tools/invoke", 404],
+    ["percent-encoded dot segment", "/hooks/%2e%2e/tools/invoke", 404],
+    ["double-encoded dot segment", "/hooks/%252e%252e/x", 404],
+    ["nested traversal", "/hooks/a/../../v1/chat/completions", 404],
+    ["encoded slash", "/hooks/a%2Fb", 404],
+    ["encoded backslash", "/hooks/a%5Cb", 404],
+    ["NUL byte", "/hooks/a%00b", 404],
+    ["empty segment (double slash)", "/hooks//gmail", 404],
+    ["too many segments", "/hooks/a/b/c/d", 404],
+    ["single dot", "/hooks/./x", 404],
+    ["malformed percent encoding", "/hooks/%zz", 400],
+  ];
+
+  for (const [label, path, status] of rejected) {
+    it(`rejects ${label} (${path} → ${status}) without touching the gateway`, async () => {
+      const response = await rawRequest({ port, path: `${path}?token=SECRET_QS` });
+      expect(response.status).toBe(status);
+      expect(response.body).not.toBe(JSON.stringify({ error: "fallthrough" }));
+      expect(gateway.calls).toHaveLength(0);
+      expect(rows).toHaveLength(0);
+      // One audit line, with the path but never the query string.
+      expect(warn).toHaveBeenCalledTimes(1);
+      const line = String(warn.mock.calls[0][0]);
+      expect(line).toContain("[hooks] rejected ingress reason=");
+      expect(line).not.toContain("SECRET_QS");
+    });
+  }
+
+  it("strips control characters from the audited path (no log injection)", async () => {
+    await rawRequest({ port, path: "/hooks/%0a%0d[alphaclaw]%20forged%20line/../x" });
+    const line = String(warn.mock.calls[0][0]);
+    expect(line).not.toMatch(/[\r\n]/);
+    expect(line).toContain("reason=");
+  });
+
+  it("forwards a valid hook, rebuilding the gateway path from the validated segment", async () => {
+    const response = await rawRequest({ port, path: "/hooks/gmail?x=1" });
+    expect(response.status).toBe(200);
+    expect(gateway.calls).toHaveLength(1);
+    expect(gateway.calls[0].url).toBe("/hooks/gmail?x=1");
+    expect(rows).toHaveLength(1);
+    expect(rows[0].hookName).toBe("gmail");
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it("maps the legacy /webhook prefix and keeps bounded nested segments", async () => {
+    await rawRequest({ port, path: "/webhook/schwab-oauth" });
+    await rawRequest({ port, path: "/hooks/agent/wake" });
+    expect(gateway.calls.map((call) => call.url)).toEqual(["/hooks/schwab-oauth", "/hooks/agent/wake"]);
+  });
+
+  it("re-encodes a segment that decodes cleanly (encoded hyphen round-trips)", async () => {
+    await rawRequest({ port, path: "/hooks/schwab%2Doauth" });
+    expect(gateway.calls[0].url).toBe("/hooks/schwab-oauth");
+  });
+
+  it("redacts x-openclaw-token and the Telegram secret header in the stored request log (F149)", async () => {
+    await rawRequest({
+      port,
+      path: "/hooks/telegram",
+      headers: {
+        "x-openclaw-token": "hook-token-plaintext",
+        "x-telegram-bot-api-secret-token": "tg-secret",
+        "x-webhook-token": "legacy",
+      },
+    });
+    expect(rows).toHaveLength(1);
+    expect(rows[0].headers["x-openclaw-token"]).toBe("[REDACTED]");
+    expect(rows[0].headers["x-telegram-bot-api-secret-token"]).toBe("[REDACTED]");
+    expect(rows[0].headers["x-webhook-token"]).toBe("[REDACTED]");
+    expect(JSON.stringify(rows[0])).not.toContain("hook-token-plaintext");
+    // The gateway still receives the real header — only the LOG is redacted.
+    expect(gateway.calls[0].headers["x-openclaw-token"]).toBe("hook-token-plaintext");
+  });
+});
+
+describe("server/webhook-middleware forwarder robustness (F151)", () => {
+  const withSockets = (server) => {
+    const sockets = new Set();
+    server.on("connection", (socket) => {
+      sockets.add(socket);
+      socket.on("close", () => sockets.delete(socket));
+    });
+    return () => {
+      for (const socket of sockets) socket.destroy();
+    };
+  };
+
+  it("answers 504 and logs a row when the gateway is listening but never responds", async () => {
+    const stalled = http.createServer(() => {
+      /* hold the request open forever */
+    });
+    const destroySockets = withSockets(stalled);
+    const gatewayPort = await listen(stalled);
+    const rows = [];
+    const appServer = http.createServer(
+      createProductionShapedApp({
+        gatewayUrl: `http://127.0.0.1:${gatewayPort}`,
+        insertRequest: (row) => rows.push(row),
+        gatewayTimeoutMs: 150,
+      }),
+    );
+    const port = await listen(appServer);
+    try {
+      const response = await rawRequest({ port, path: "/hooks/slow" });
+      expect(response.status).toBe(504);
+      expect(rows).toHaveLength(1);
+      expect(rows[0].gatewayStatus).toBe(504);
+      expect(rows[0].gatewayBody).toContain("did not answer within 150ms");
+    } finally {
+      destroySockets();
+      await new Promise((resolve) => appServer.close(resolve));
+      await new Promise((resolve) => stalled.close(resolve));
+    }
+  });
+
+  it("logs a 499 row and drops the upstream request when the caller hangs up first", async () => {
+    let upstreamAborted = false;
+    const slow = http.createServer((req) => {
+      req.on("aborted", () => {
+        upstreamAborted = true;
+      });
+      req.on("close", () => {
+        upstreamAborted = true;
+      });
+      // never answers within the test window
+    });
+    const destroySockets = withSockets(slow);
+    const gatewayPort = await listen(slow);
+    const rows = [];
+    const appServer = http.createServer(
+      createProductionShapedApp({
+        gatewayUrl: `http://127.0.0.1:${gatewayPort}`,
+        insertRequest: (row) => rows.push(row),
+        gatewayTimeoutMs: 5000,
+      }),
+    );
+    const port = await listen(appServer);
+    try {
+      const body = "{}";
+      const req = http.request({
+        host: "127.0.0.1",
+        port,
+        method: "POST",
+        path: "/hooks/abandoned",
+        headers: { "content-type": "application/json", "content-length": body.length },
+      });
+      req.on("error", () => {});
+      req.end(body);
+      await new Promise((resolve) => setTimeout(resolve, 60));
+      req.destroy();
+      await vi.waitFor(() => expect(rows).toHaveLength(1), { timeout: 2000 });
+      expect(rows[0].gatewayStatus).toBe(499);
+      expect(rows[0].gatewayBody).toContain("client closed");
+      await vi.waitFor(() => expect(upstreamAborted).toBe(true), { timeout: 2000 });
+    } finally {
+      destroySockets();
+      await new Promise((resolve) => appServer.close(resolve));
+      await new Promise((resolve) => slow.close(resolve));
+    }
+  });
+
+  it("logs an upstream-abort row when the gateway dies mid-response", async () => {
+    const flaky = http.createServer((req, res) => {
+      req.on("data", () => {});
+      req.on("end", () => {
+        res.writeHead(200, { "content-type": "application/json", "content-length": "1000" });
+        res.write('{"partial":');
+        setTimeout(() => res.socket.destroy(), 20);
+      });
+    });
+    const gatewayPort = await listen(flaky);
+    const rows = [];
+    const appServer = http.createServer(
+      createProductionShapedApp({
+        gatewayUrl: `http://127.0.0.1:${gatewayPort}`,
+        insertRequest: (row) => rows.push(row),
+      }),
+    );
+    const port = await listen(appServer);
+    try {
+      await rawRequest({ port, path: "/hooks/flaky" }).catch(() => null);
+      await vi.waitFor(() => expect(rows).toHaveLength(1), { timeout: 2000 });
+      expect(rows[0].gatewayBody).toMatch(/\[UPSTREAM (ABORTED|ERROR)\]/);
+    } finally {
+      await new Promise((resolve) => appServer.close(resolve));
+      await new Promise((resolve) => flaky.close(resolve));
+    }
+  });
+});
+
+describe("server/webhook-middleware resolveHookIngress (unit)", () => {
+  it("accepts one to three clean segments and rebuilds the gateway path", () => {
+    expect(resolveHookIngress("/hooks/gmail?x=1")).toMatchObject({
+      ok: true,
+      hookName: "gmail",
+      gatewayPath: "/hooks/gmail",
+    });
+    expect(resolveHookIngress("/webhook/a/b_c/d.e")).toMatchObject({
+      ok: true,
+      hookName: "a",
+      gatewayPath: "/hooks/a/b_c/d.e",
+    });
+  });
+
+  it("names a distinct reason per rejection class", () => {
+    expect(resolveHookIngress("/hooks/../x").reason).toBe("dot_segment");
+    expect(resolveHookIngress("/hooks/%2e%2e/x").reason).toBe("dot_segment");
+    expect(resolveHookIngress("/hooks/%252e%252e/x").reason).toBe("double_encoded");
+    expect(resolveHookIngress("/hooks/a%2Fb").reason).toBe("segment_chars");
+    expect(resolveHookIngress("/hooks/a/b/c/d").reason).toBe("too_many_segments");
+    expect(resolveHookIngress("/hooks//x").reason).toBe("empty_segment");
+    expect(resolveHookIngress("/hooks/%zz")).toMatchObject({ status: 400, reason: "bad_percent_encoding" });
+    expect(resolveHookIngress("/api/status").reason).toBe("prefix");
+    expect(resolveHookIngress("hooks/x").reason).toBe("shape");
   });
 });

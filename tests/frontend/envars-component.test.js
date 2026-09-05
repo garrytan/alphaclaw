@@ -217,4 +217,58 @@ describe("frontend/envars component", () => {
     tree = renderEnvars();
     expect(findAllByType(tree, InlineErrorChip).length).toBe(0);
   });
+  it("editing an existing key's value copies the row — the cached /api/env object is never mutated (F164)", async () => {
+    const cachedRow = {
+      key: "FOO",
+      value: "1",
+      label: "FOO",
+      group: "custom",
+      hint: "",
+      source: "env_file",
+      editable: true,
+    };
+    const cached = { vars: [cachedRow], reservedKeys: [], capabilities: { secretsStore: false } };
+    useCachedFetch.mockReturnValue({
+      data: cached,
+      error: null,
+      loading: false,
+      refresh: vi.fn(async () => cached),
+    });
+
+    renderEnvars();
+    // The payload-apply effect seeds `vars` from the cached rows.
+    for (const effect of [...harness.effects]) {
+      try {
+        effect?.();
+      } catch {}
+    }
+    let tree = renderEnvars();
+    const keyInput = collectNodes(tree).find(
+      (vnode) => vnode.type === "input" && vnode.props.placeholder === "KEY",
+    );
+    const valueInput = collectNodes(tree).find(
+      (vnode) => vnode.type === "input" && vnode.props.placeholder === "value",
+    );
+    expect(keyInput).toBeTruthy();
+    expect(valueInput).toBeTruthy();
+    // htm lowercases the input handler name on plain elements.
+    (keyInput.props.oninput || keyInput.props.onInput)({ target: { value: "FOO" } });
+    (valueInput.props.oninput || valueInput.props.onInput)({ target: { value: "2" } });
+
+    tree = renderEnvars();
+    const addButton = collectNodes(tree).find(
+      (vnode) =>
+        vnode.type === "button" &&
+        JSON.stringify(vnode.props.children || "").includes("+ Add"),
+    );
+    expect(addButton).toBeTruthy();
+    addButton.props.onclick();
+
+    tree = renderEnvars();
+    // The draft shows the new value...
+    expect(collectNodes(tree).some((vnode) => vnode.props?.value === "2")).toBe(true);
+    // ...while the cached row (what a remount re-reads) still holds the saved one.
+    expect(cachedRow.value).toBe("1");
+    expect(cached.vars[0]).toBe(cachedRow);
+  });
 });

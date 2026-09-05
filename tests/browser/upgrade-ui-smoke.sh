@@ -27,7 +27,11 @@ kScratch="$(mktemp -d /tmp/alphaclaw-ui-smoke-XXXXXX)"
 cleanup() {
   pkill -f "alphaclaw.js start.*$kScratch" 2>/dev/null || true
   pkill -f "ALPHACLAW_UI_SMOKE=$kScratch" 2>/dev/null || true
-  kill "${kServerPid:-0}" 2>/dev/null || true
+  # Never `kill 0` (fix wave F181): with no server pid recorded the old
+  # `${kServerPid:-0}` fallback killed the caller's whole process group.
+  if [ -n "${kServerPid:-}" ] && [ "${kServerPid}" != "0" ]; then
+    kill "${kServerPid}" 2>/dev/null || true
+  fi
   rm -rf "$kScratch"
 }
 trap cleanup EXIT

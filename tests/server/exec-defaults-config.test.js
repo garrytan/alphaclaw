@@ -708,3 +708,51 @@ describe("server/exec-defaults-config stray-merge remediation", () => {
     expect(live.defaults).toEqual({ security: "full", ask: "off", askFallback: "full" });
   });
 });
+
+describe("server/exec-defaults-config strict reader + atomic writer (fix wave F215/F051)", () => {
+  const {
+    readExecApprovalsConfig,
+    readExecApprovalsConfigForWrite,
+    writeExecApprovalsConfig,
+    ExecApprovalsReadError,
+  } = require("../../lib/server/exec-defaults-config");
+
+  it("readExecApprovalsConfigForWrite: missing file → fallback, unparseable existing file → refusal", () => {
+    const openclawDir = createTempOpenclawDir();
+    expect(readExecApprovalsConfigForWrite({ openclawDir })).toEqual({ version: 1 });
+    expect(readExecApprovalsConfigForWrite({ openclawDir, fallback: { version: 1, agents: {} } })).toEqual({
+      version: 1,
+      agents: {},
+    });
+
+    const filePath = path.join(openclawDir, "exec-approvals.json");
+    fs.writeFileSync(filePath, '{"version":1,"agents":{"*":{"allowlist":[{"pattern":"ls *"');
+    expect(() => readExecApprovalsConfigForWrite({ openclawDir })).toThrow(ExecApprovalsReadError);
+    try {
+      readExecApprovalsConfigForWrite({ openclawDir });
+    } catch (error) {
+      expect(error.code).toBe("EXEC_APPROVALS_UNREADABLE");
+      expect(error.filePath).toBe(filePath);
+    }
+    // The lenient reader keeps its documented fallback for display paths.
+    expect(readExecApprovalsConfig({ openclawDir })).toEqual({ version: 1 });
+
+    fs.writeFileSync(filePath, "[1,2]");
+    expect(() => readExecApprovalsConfigForWrite({ openclawDir })).toThrow(/root is not an object/);
+    fs.rmSync(openclawDir, { recursive: true, force: true });
+  });
+
+  it("writeExecApprovalsConfig writes atomically (no temp file left, content exact)", () => {
+    const openclawDir = createTempOpenclawDir();
+    const filePath = writeExecApprovalsConfig({
+      openclawDir,
+      file: { version: 1, agents: { "*": { allowlist: [] } } },
+    });
+    expect(JSON.parse(fs.readFileSync(filePath, "utf8"))).toEqual({
+      version: 1,
+      agents: { "*": { allowlist: [] } },
+    });
+    expect(fs.readdirSync(openclawDir).filter((name) => name.endsWith(".tmp"))).toEqual([]);
+    fs.rmSync(openclawDir, { recursive: true, force: true });
+  });
+});

@@ -308,8 +308,11 @@ describe("server/webhook-middleware coverage", { retry: 1 }, () => {
   });
 
   describe("hook name resolution and path rewriting", () => {
-    it("resolves hook names from route params", async () => {
-      const { server, gatewayUrl } = await createGatewaySpyServer();
+    // Fix wave F058: the hook name comes from the RAW request-target, never
+    // from route params — a caller (or a mis-mounted route) cannot pick the
+    // hook the gateway sees by supplying params.
+    it("derives the hook name from the request target and ignores route params", async () => {
+      const { server, calls, gatewayUrl } = await createGatewaySpyServer();
       const logged = [];
       const middleware = createWebhookMiddleware({
         gatewayUrl,
@@ -318,61 +321,16 @@ describe("server/webhook-middleware coverage", { retry: 1 }, () => {
       });
       const app = express();
       app.use((req, res) => {
-        req.params = { path: "param-hook/sub" };
+        req.params = { path: "param-hook/sub", 0: "zero-hook/x", "*": "star%2Dhook/x" };
         middleware(req, res);
       });
 
       try {
-        const res = await request(app).get("/hooks/ignored");
+        const res = await request(app).get("/hooks/real-hook");
         expect(res.status).toBe(200);
         await vi.waitFor(() => expect(logged).toHaveLength(1));
-        expect(logged[0].hookName).toBe("param-hook");
-      } finally {
-        await closeServer(server);
-      }
-    });
-
-    it("resolves hook names from wildcard params", async () => {
-      const { server, gatewayUrl } = await createGatewaySpyServer();
-      const logged = [];
-      const middleware = createWebhookMiddleware({
-        gatewayUrl,
-        insertRequest: (entry) => logged.push(entry),
-        maxPayloadBytes: 1024,
-      });
-      const app = express();
-      app.use((req, res) => {
-        req.params = { 0: "zero-hook/x" };
-        middleware(req, res);
-      });
-
-      try {
-        await request(app).get("/hooks/ignored");
-        await vi.waitFor(() => expect(logged).toHaveLength(1));
-        expect(logged[0].hookName).toBe("zero-hook");
-      } finally {
-        await closeServer(server);
-      }
-    });
-
-    it("resolves hook names from star params", async () => {
-      const { server, gatewayUrl } = await createGatewaySpyServer();
-      const logged = [];
-      const middleware = createWebhookMiddleware({
-        gatewayUrl,
-        insertRequest: (entry) => logged.push(entry),
-        maxPayloadBytes: 1024,
-      });
-      const app = express();
-      app.use((req, res) => {
-        req.params = { "*": "star%2Dhook/x" };
-        middleware(req, res);
-      });
-
-      try {
-        await request(app).get("/hooks/ignored");
-        await vi.waitFor(() => expect(logged).toHaveLength(1));
-        expect(logged[0].hookName).toBe("star-hook");
+        expect(logged[0].hookName).toBe("real-hook");
+        expect(calls[0].url).toBe("/hooks/real-hook");
       } finally {
         await closeServer(server);
       }
@@ -397,29 +355,28 @@ describe("server/webhook-middleware coverage", { retry: 1 }, () => {
       }
     });
 
-    it("leaves non-hook paths untouched with an empty hook name", async () => {
+    it("answers 404 for a non-hook path instead of forwarding it to the gateway", async () => {
       const { server, calls, gatewayUrl } = await createGatewaySpyServer();
       const logged = [];
+      const middleware = createWebhookMiddleware({
+        gatewayUrl,
+        insertRequest: (entry) => logged.push(entry),
+        maxPayloadBytes: 1024,
+      });
       const app = express();
-      app.use(
-        createWebhookMiddleware({
-          gatewayUrl,
-          insertRequest: (entry) => logged.push(entry),
-          maxPayloadBytes: 1024,
-        }),
-      );
+      app.use(middleware);
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
 
       try {
         const res = await request(app).get("/other/path");
-        expect(res.status).toBe(200);
-        expect(calls[0].url).toBe("/other/path");
-        await vi.waitFor(() => expect(logged).toHaveLength(1));
-        expect(logged[0].hookName).toBe("");
+        expect(res.status).toBe(404);
+        expect(calls).toHaveLength(0);
+        expect(logged).toHaveLength(0);
+        expect(warn).toHaveBeenCalledWith(expect.stringContaining("reason=prefix"));
       } finally {
         await closeServer(server);
       }
     });
-
     it("resolves the gateway URL lazily via getGatewayUrl", async () => {
       const { server, calls, gatewayUrl } = await createGatewaySpyServer();
       const app = createHookApp({

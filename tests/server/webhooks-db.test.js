@@ -264,4 +264,52 @@ describe("server/webhooks-db", () => {
       expect.any(String),
     );
   });
+
+  it("keeps only the newest kMaxRequestsPerHook rows per hook on insert (fix wave F155)", () => {
+    const { insertRequest, getHookSummaries, kMaxRequestsPerHook } =
+      createWebhooksDbContext("webhooks-db-keepn-");
+    expect(kMaxRequestsPerHook).toBe(500);
+    const total = kMaxRequestsPerHook + 20;
+    for (let index = 0; index < total; index += 1) {
+      insertRequest({
+        hookName: "chatty",
+        method: "POST",
+        headers: {},
+        payload: `{"index":${index}}`,
+        payloadTruncated: false,
+        payloadSize: 12,
+        sourceIp: "127.0.0.1",
+        gatewayStatus: 200,
+        gatewayBody: "",
+      });
+    }
+    for (let index = 0; index < 3; index += 1) {
+      insertRequest({
+        hookName: "quiet",
+        method: "POST",
+        headers: {},
+        payload: `{"index":${index}}`,
+        payloadTruncated: false,
+        payloadSize: 12,
+        sourceIp: "127.0.0.1",
+        gatewayStatus: 200,
+        gatewayBody: "",
+      });
+    }
+    const summaries = getHookSummaries();
+    expect(summaries.find((item) => item.hookName === "chatty").totalCount).toBe(kMaxRequestsPerHook);
+    // Another hook's retention is independent.
+    expect(summaries.find((item) => item.hookName === "quiet").totalCount).toBe(3);
+    // The NEWEST rows survive.
+    const database = new DatabaseSync(currentDbPath, { readOnly: true });
+    const oldest = database
+      .prepare("SELECT MIN(payload) AS p FROM webhook_requests WHERE hook_name = 'chatty' AND payload LIKE '{\"index\":%'")
+      .get();
+    const kept = database
+      .prepare("SELECT payload FROM webhook_requests WHERE hook_name = 'chatty' ORDER BY id ASC LIMIT 1")
+      .get();
+    database.close();
+    expect(JSON.parse(kept.payload).index).toBe(20);
+    expect(oldest.p).toBeTruthy();
+  });
 });

@@ -329,6 +329,29 @@ describe("WatchdogRescueSessionCard render states", () => {
     expect(buttonLabels(tree)).toContain("Retry start");
   });
 
+  it("error with a RETAINED live session renders Stop next to Retry (F130)", () => {
+    // running_no_url / adopted_without_url keep the pane for diagnosis and the
+    // server copy says "then Stop to retry" — Stop must actually be there.
+    const tree = renderCard(
+      baseLocal({
+        state: "error",
+        startedAt: Date.now() - 30_000,
+        error: {
+          code: "url_extract_timeout",
+          message: "No Remote Control URL after 90s — the session is kept for diagnosis (view the output tail, then Stop to retry).",
+          tailSanitized: "raw tail",
+        },
+      }),
+    );
+    const labels = buttonLabels(tree);
+    expect(labels).toContain("Stop session");
+    expect(labels).toContain("Retry start");
+    // A plain error with no retained session keeps the old shape.
+    const plain = buttonLabels(renderCard(baseLocal({ state: "error", startedAt: null, error: { code: "spawn_failed", message: "x" } })));
+    expect(plain).not.toContain("Stop session");
+    expect(plain).toContain("Retry start");
+  });
+
   it("disabled with a live session collapses to stop-only", () => {
     // E2: the kill switch hides the launch path but must never cut off an
     // operator mid-rescue.

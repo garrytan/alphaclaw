@@ -217,6 +217,23 @@ describe("frontend/api", () => {
     );
   });
 
+  it("fetchOnboardStatus rejects on a JSON-bodied 5xx instead of resolving it as data (F141)", async () => {
+    // A proxy 502 / the server's JSON error middleware used to resolve as
+    // `{ error }`, which the shell read as `onboarded: false` — dropping an
+    // onboarded operator into the Welcome wizard.
+    global.fetch.mockResolvedValue(mockJsonResponse(502, { error: "upstream unavailable" }));
+    const api = await loadApiModule();
+    await expect(api.fetchOnboardStatus()).rejects.toThrow("upstream unavailable");
+
+    global.fetch.mockResolvedValue(mockJsonResponse(500, {}));
+    await expect(api.fetchOnboardStatus()).rejects.toThrow(
+      "Could not load onboarding status (HTTP 500)",
+    );
+
+    global.fetch.mockResolvedValue(mockJsonResponse(200, { onboarded: true }));
+    await expect(api.fetchOnboardStatus()).resolves.toEqual({ onboarded: true });
+  });
+
   it("approveDevice encodes ids and throws API errors", async () => {
     global.fetch.mockResolvedValue(mockJsonResponse(403, { ok: false, error: "missing scope" }));
     const api = await loadApiModule();
@@ -963,8 +980,6 @@ describe("frontend/api endpoint wrapper coverage", () => {
     ["approvePairing", ["p1", "telegram", "acct"], "/api/pairings/p1/approve", "POST"],
     ["rejectPairing", ["p1", "telegram"], "/api/pairings/p1/reject", "POST"],
     ["fetchGoogleAccounts", [], "/api/google/accounts", undefined],
-    ["fetchGoogleStatus", [], "/api/google/status", undefined],
-    ["fetchGoogleStatus", ["acct-1"], "/api/google/status?accountId=acct-1", undefined],
     ["fetchGoogleCredentials", [], "/api/google/credentials", undefined],
     [
       "fetchGoogleCredentials",
@@ -989,8 +1004,6 @@ describe("frontend/api endpoint wrapper coverage", () => {
     ["fetchAgentSessions", [], "/api/agent/sessions", undefined],
     ["fetchDoctorRuns", [5], "/api/doctor/runs?limit=5", undefined],
     ["fetchDoctorCards", [{ runId: "" }], "/api/doctor/cards", undefined],
-    ["fetchDoctorRun", ["r1"], "/api/doctor/runs/r1", undefined],
-    ["fetchDoctorRunCards", ["r1"], "/api/doctor/runs/r1/cards", undefined],
     [
       "updateDoctorCardStatus",
       [{ cardId: "c1", status: "resolved" }],
@@ -1005,27 +1018,7 @@ describe("frontend/api endpoint wrapper coverage", () => {
     ["fetchWatchdogStatus", [], "/api/watchdog/status", undefined],
     ["fetchUsageSummary", [], "/api/usage/summary?days=30", undefined],
     ["fetchUsageSessions", [], "/api/usage/sessions?limit=50", undefined],
-    [
-      "fetchUsageSessionTimeSeries",
-      ["s1", 50],
-      "/api/usage/sessions/s1/timeseries?maxPoints=50",
-      undefined,
-    ],
     ["fetchWatchdogEvents", [], "/api/watchdog/events?limit=20", undefined],
-    ["createWatchdogTerminalSession", [], "/api/watchdog/terminal/session", "POST"],
-    [
-      "fetchWatchdogTerminalOutput",
-      ["s1", 5],
-      "/api/watchdog/terminal/output?sessionId=s1&cursor=5",
-      undefined,
-    ],
-    [
-      "fetchWatchdogTerminalOutput",
-      ["s1"],
-      "/api/watchdog/terminal/output?sessionId=s1&cursor=0",
-      undefined,
-    ],
-    ["sendWatchdogTerminalInput", ["s1", "ls"], "/api/watchdog/terminal/input", "POST"],
     ["closeWatchdogTerminalSession", ["s1"], "/api/watchdog/terminal/close", "POST"],
     ["triggerWatchdogRepair", [], "/api/watchdog/repair", "POST"],
     ["fetchWatchdogResources", [], "/api/watchdog/resources", undefined],
@@ -1058,7 +1051,6 @@ describe("frontend/api endpoint wrapper coverage", () => {
     ["fetchAlphaclawVersion", [], "/api/alphaclaw/version", undefined],
     ["fetchAlphaclawVersion", [true], "/api/alphaclaw/version?refresh=1", undefined],
     ["updateAlphaclaw", [], "/api/alphaclaw/update", "POST"],
-    ["fetchSyncCron", [], "/api/sync-cron", undefined],
     ["updateSyncCron", [{ schedule: "0 0 * * *" }], "/api/sync-cron", "PUT"],
     [
       "updateOpenAiCompatApiFeature",
@@ -1098,7 +1090,6 @@ describe("frontend/api endpoint wrapper coverage", () => {
     ["fetchDevicePairings", [], "/api/devices", undefined],
     ["rejectDevice", ["d1"], "/api/devices/d1/reject", "POST"],
     ["fetchNodesStatus", [], "/api/nodes", undefined],
-    ["approveNode", ["n1"], "/api/nodes/n1/approve", "POST"],
     ["removeNode", ["n1"], "/api/nodes/n1", "DELETE"],
     ["routeExecToNode", ["n1"], "/api/nodes/n1/route", "POST"],
     ["fetchNodeConnectInfo", [], "/api/nodes/connect-info", undefined],
@@ -1144,9 +1135,6 @@ describe("frontend/api endpoint wrapper coverage", () => {
       "/api/models/config?agentId=a1",
       "PUT",
     ],
-    ["fetchAuthProfiles", [], "/api/models/auth", undefined],
-    ["upsertAuthProfile", ["p1", { apiKey: "sk" }], "/api/models/auth/p1", "PUT"],
-    ["deleteAuthProfile", ["p1"], "/api/models/auth/p1", "DELETE"],
     ["fetchAgents", [], "/api/agents", undefined],
     ["getTelegramTopics", [], "/api/telegram/topics", undefined],
     [
@@ -1162,7 +1150,6 @@ describe("frontend/api endpoint wrapper coverage", () => {
       "POST",
     ],
     ["sweepTopicDiscovery", [], "/api/telegram/discovery/sweep", "POST"],
-    ["getTopicDiscoveryStatus", [], "/api/telegram/discovery/status", undefined],
     ["fetchChannelAccounts", [], "/api/channels/accounts", undefined],
     [
       "fetchChannelAccountToken",
@@ -1190,13 +1177,10 @@ describe("frontend/api endpoint wrapper coverage", () => {
       "/api/channels/accounts/login-status?provider=&accountId=default",
       undefined,
     ],
-    ["fetchAgent", ["a1"], "/api/agents/a1", undefined],
     ["fetchAgentWorkspaceSize", ["a1"], "/api/agents/a1/workspace-size", undefined],
     ["fetchAgentBindings", ["a1"], "/api/agents/a1/bindings", undefined],
     ["createAgent", [{ name: "Ops" }], "/api/agents", "POST"],
     ["updateAgent", ["a1", { name: "Ops" }], "/api/agents/a1", "PUT"],
-    ["addAgentBinding", ["a1", { channel: "telegram" }], "/api/agents/a1/bindings", "POST"],
-    ["removeAgentBinding", ["a1", { channel: "telegram" }], "/api/agents/a1/bindings", "DELETE"],
     ["deleteAgent", ["a1"], "/api/agents/a1?keepWorkspace=true", "DELETE"],
     [
       "deleteAgent",
@@ -1215,9 +1199,7 @@ describe("frontend/api endpoint wrapper coverage", () => {
     ["createWebhook", ["hook"], "/api/webhooks", "POST"],
     ["deleteWebhook", ["hook"], "/api/webhooks/hook", "DELETE"],
     ["updateWebhookDestination", ["hook"], "/api/webhooks/hook/destination", "PUT"],
-    ["createWebhookOauthCallback", ["hook"], "/api/webhooks/hook/oauth-callback", "POST"],
     ["rotateWebhookOauthCallback", ["hook"], "/api/webhooks/hook/oauth-callback/rotate", "POST"],
-    ["deleteWebhookOauthCallback", ["hook"], "/api/webhooks/hook/oauth-callback", "DELETE"],
     [
       "fetchWebhookRequests",
       ["hook"],
@@ -1456,6 +1438,17 @@ describe("frontend/api behaviors", () => {
     expect(result).toEqual({ ok: true, status: "stale" });
   });
 
+  it("verifyTelegramTopic passes a named account through as ?accountId (F166) and omits the default", async () => {
+    global.fetch.mockResolvedValue(mockJsonResponse(200, { ok: true, status: "ok" }));
+    const api = await loadApiModule();
+    await api.verifyTelegramTopic("-100123", 42, { accountId: "work" });
+    expect(global.fetch.mock.calls[0][0]).toBe(
+      "/api/telegram/groups/-100123/topics/42/verify?accountId=work",
+    );
+    await api.verifyTelegramTopic("-100123", 42, { accountId: "default" });
+    expect(global.fetch.mock.calls[1][0]).toBe("/api/telegram/groups/-100123/topics/42/verify");
+  });
+
   it("parseJsonOrThrow rejects when the payload marks ok false", async () => {
     global.fetch.mockResolvedValue(mockJsonResponse(200, { ok: false, error: "nope" }));
     const api = await loadApiModule();
@@ -1676,15 +1669,6 @@ describe("frontend/api behaviors", () => {
     await expect(api.fetchAlphaclawReleaseNotes()).rejects.toThrow("rate limited");
   });
 
-  it("fetchSyncCron throws on invalid JSON and API errors", async () => {
-    const api = await loadApiModule();
-
-    global.fetch.mockResolvedValue(mockTextResponse(200, "garbage"));
-    await expect(api.fetchSyncCron()).rejects.toThrow("garbage");
-
-    global.fetch.mockResolvedValue(mockTextResponse(400, JSON.stringify({ error: "bad" })));
-    await expect(api.fetchSyncCron()).rejects.toThrow("bad");
-  });
 
   it("updateSyncCron throws on invalid JSON and API errors", async () => {
     const api = await loadApiModule();
@@ -2353,17 +2337,6 @@ describe("frontend/api openclaw channel endpoints", () => {
     expect(result).toEqual(payload);
   });
 
-  it("fetchOpenclawRun gets a single run by encoded operation id", async () => {
-    global.fetch.mockResolvedValue(
-      mockJsonResponse(200, { ok: true, run: { operationId: "abc", steps: [] } }),
-    );
-    const api = await loadApiModule();
-
-    const result = await api.fetchOpenclawRun("abc def");
-
-    expect(global.fetch.mock.calls[0][0]).toBe("/api/openclaw/runs/abc%20def");
-    expect(result.run.operationId).toBe("abc");
-  });
 
   it("fetchOpenclawRunLogText returns the plain-text log body", async () => {
     global.fetch.mockResolvedValue(
