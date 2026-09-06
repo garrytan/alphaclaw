@@ -1260,3 +1260,147 @@ describe("claude-code-local service", () => {
     });
   });
 });
+
+
+describe("claude-code-local service — fix wave PR 10 (F131, F133, F134, F135)", () => {
+  const kBanner =
+    "Continue coding in the Claude mobile app or https://claude.ai/code?environment=env_01REALBANNER";
+
+  const buildService = ({ env = {}, driver, fsModule, timers } = {}) => {
+    const fakeDriver = driver || createFakeDriver();
+    const fakeFs = fsModule || createFakeFs();
+    const logger = { log: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    const service = createClaudeCodeLocalService({
+      env,
+      fsModule: fakeFs,
+      tmux: fakeDriver,
+      runStream: createFakeRunStream(),
+      logger,
+      paths: kPaths,
+      timers: timers || kFastTimers,
+    });
+    return { service, driver: fakeDriver, fsModule: fakeFs, logger };
+  };
+
+  it("the auth gate reports needs_login IMMEDIATELY instead of collapsing to probing (F131)", async () => {
+    const { service, driver } = buildService({});
+    await service.refreshProbes({ force: true });
+    await service.startSession({ confirmed: true, source: "click" });
+    driver.state.buffer =
+      "Error: You must be logged in to use Remote Control.\nRemote Control is only available with claude.ai subscriptions.";
+    await flush(60);
+    const snapshot = service.getStatusSnapshot();
+    expect(snapshot.state).toBe("needs_login");
+    expect(snapshot.state).not.toBe("probing");
+    expect(driver.killSession).toHaveBeenCalled();
+  });
+
+  it("never writes the full Remote Control sessionId to the process log (F133)", async () => {
+    const { service, driver, logger } = buildService({});
+    await service.refreshProbes({ force: true });
+    await service.startSession({ confirmed: true, source: "click" });
+    driver.state.buffer = "https://claude.ai/code/sess_abcdef123456SECRETTAIL";
+    await flush(60);
+    expect(service.getStatusSnapshot().state).toBe("running");
+    const logged = logger.log.mock.calls.map((call) => String(call[0])).join("\n");
+    expect(logged).toMatch(/running — session sess_abc…/);
+    expect(logged).not.toContain("sess_abcdef123456SECRETTAIL");
+  });
+
+  it("boot adoption RESUMES the URL wait for a pane persisted as `starting` (F134)", async () => {
+    const { driver, fsModule } = buildService({});
+    driver.state.sessionAlive = true;
+    driver.state.panePid = 4242;
+    driver.state.buffer = "claude is starting up…"; // no URL yet
+    fsModule.files.set(
+      kPaths.stateFile,
+      JSON.stringify({
+        sessionName: "alphaclaw-rescue",
+        phase: "starting",
+        hosting: "tmux",
+        panePid: 4242,
+        startedAt: Date.now() - 1_000,
+        spawnedBy: "click",
+        mode: "acceptEdits",
+      }),
+    );
+    const { service } = buildService({ driver, fsModule, timers: { ...kFastTimers, urlDeadlineMs: 5_000 } });
+    service.reconcileOnBoot();
+    await flush(60);
+    // Healthy pane inside its URL budget: still starting, NOT adopted_without_url.
+    let snapshot = service.getStatusSnapshot();
+    expect(snapshot.state).toBe("starting");
+    expect(snapshot.error).toBeFalsy();
+    // The URL appears: the resumed watcher promotes the session to running.
+    driver.state.buffer = kBanner;
+    await flush(80);
+    snapshot = service.getStatusSnapshot();
+    expect(snapshot.state).toBe("running");
+    expect(snapshot.sessionUrl).toMatch(/^\/rescue\/[0-9a-f]{64}$/);
+  });
+
+  it("boot adoption still marks a pane adopted_without_url when its URL budget has elapsed (F134 bound)", async () => {
+    const { driver, fsModule } = buildService({});
+    driver.state.sessionAlive = true;
+    driver.state.panePid = 4242;
+    driver.state.buffer = "no url here";
+    fsModule.files.set(
+      kPaths.stateFile,
+      JSON.stringify({
+        sessionName: "alphaclaw-rescue",
+        phase: "starting",
+        hosting: "tmux",
+        panePid: 4242,
+        startedAt: Date.now() - 10 * 60_000,
+      }),
+    );
+    const { service } = buildService({ driver, fsModule, timers: { ...kFastTimers, urlDeadlineMs: 5_000 } });
+    service.reconcileOnBoot();
+    await flush(60);
+    const snapshot = service.getStatusSnapshot();
+    expect(snapshot.state).toBe("error");
+    expect(snapshot.error.code).toBe("adopted_without_url");
+  });
+
+  it("boot adoption runs while the feature is DISABLED so a live session stays visible and stoppable (F135)", async () => {
+    const { driver, fsModule } = buildService({});
+    driver.state.sessionAlive = true;
+    driver.state.panePid = 4242;
+    driver.state.buffer = kBanner;
+    fsModule.files.set(
+      kPaths.stateFile,
+      JSON.stringify({
+        sessionName: "alphaclaw-rescue",
+        phase: "running",
+        hosting: "tmux",
+        panePid: 4242,
+        startedAt: Date.now() - 60_000,
+        sessionUrl: "https://claude.ai/code?environment=env_01REALBANNER",
+      }),
+    );
+    const env = { CLAUDE_CODE_LOCAL_ENABLED: "0" };
+    const { service } = buildService({ env, driver, fsModule });
+    service.reconcileOnBoot();
+    await flush(60);
+    const snapshot = service.getStatusSnapshot();
+    expect(snapshot.state).toBe("disabled");
+    expect(snapshot.startedAt).toBeTruthy();
+    expect(snapshot.warnings.join(" ")).toContain("still live");
+    // Disabled still means "no new spawns": autostart did not fire, nothing was killed.
+    expect(driver.newSession).not.toHaveBeenCalled();
+    expect(driver.killSession).not.toHaveBeenCalled();
+    // Re-enabling (hot-reloaded .env) reveals the adopted session with a
+    // working revocable link — proof the adoption really happened.
+    env.CLAUDE_CODE_LOCAL_ENABLED = "";
+    const live = service.getStatusSnapshot();
+    expect(live.state).toBe("running");
+    expect(live.sessionUrl).toMatch(/^\/rescue\/[0-9a-f]{64}$/);
+    expect(
+      service.resolveRescueRedirect(live.sessionUrl.slice("/rescue/".length)),
+    ).toBe("https://claude.ai/code?environment=env_01REALBANNER");
+    env.CLAUDE_CODE_LOCAL_ENABLED = "0";
+    const stopped = await service.stopSession();
+    expect(stopped.ok).toBe(true);
+    expect(driver.killSession).toHaveBeenCalled();
+  });
+});

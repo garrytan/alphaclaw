@@ -509,4 +509,159 @@ describe("server/routes/models coverage", () => {
     expect(deleteRes.statusCode).toBe(400);
     expect(deleteRes.body).toEqual({ ok: false, error: "Missing profileId" });
   });
+
+  describe("PUT /api/models/config validates the whole payload before any write (F078, F212)", () => {
+    it("rejects arrays for configuredModels and authOrder with 400 and writes nothing", async () => {
+      const deps = createModelDeps();
+      const app = createApp(deps);
+      const arrays = await request(app)
+        .put("/api/models/config")
+        .send({ configuredModels: ["openai/gpt-5.6"] });
+      expect(arrays.status).toBe(400);
+      expect(arrays.body.error).toBe("Invalid configuredModels");
+      const order = await request(app)
+        .put("/api/models/config")
+        .send({ authOrder: [["openai:default"]] });
+      expect(order.status).toBe(400);
+      expect(order.body.error).toBe("Invalid authOrder");
+      expect(deps.authProfiles.setModelConfig).not.toHaveBeenCalled();
+      expect(deps.authProfiles.upsertProfile).not.toHaveBeenCalled();
+    });
+
+    it("a null or malformed profile entry is a 400 naming the index — never a 500 after the config was written", async () => {
+      const deps = createModelDeps();
+      const app = createApp(deps);
+      const nullEntry = await request(app)
+        .put("/api/models/config")
+        .send({ primary: "openai/gpt-5.6", profiles: [null] });
+      expect(nullEntry.status).toBe(400);
+      expect(nullEntry.body.error).toBe("profiles[0] must be an object");
+
+      const badType = await request(app)
+        .put("/api/models/config")
+        .send({ profiles: [{ id: "openai:default", type: "password", provider: "openai", key: "sk" }] });
+      expect(badType.status).toBe(400);
+      expect(badType.body.error).toBe("profiles[0].type must be api_key, token, or oauth");
+
+      const badProvider = await request(app)
+        .put("/api/models/config")
+        .send({ profiles: [{ id: "openai:default", type: "api_key", provider: ["openai"], key: "sk" }] });
+      expect(badProvider.status).toBe(400);
+      expect(badProvider.body.error).toBe("profiles[0].provider must be a string");
+      const badId = await request(app)
+        .put("/api/models/config")
+        .send({ profiles: [{ id: { nested: true }, type: "api_key", provider: "openai", key: "sk" }] });
+      expect(badId.status).toBe(400);
+      expect(badId.body.error).toBe("profiles[0].id must be a string");
+
+      const notArray = await request(app)
+        .put("/api/models/config")
+        .send({ profiles: { id: "x" } });
+      expect(notArray.status).toBe(400);
+      expect(notArray.body.error).toBe("profiles must be an array");
+
+      // The model config was never written on any of the rejected requests.
+      expect(deps.authProfiles.setModelConfig).not.toHaveBeenCalled();
+      expect(deps.authProfiles.upsertProfile).not.toHaveBeenCalled();
+    });
+  });
+});
+
+// Fix wave F074: agentId reaches path.join in auth-profiles (agents/<id>/…),
+// so every models route validates it at the boundary — traversal shapes and
+// array coercion (repeated query keys) are a 400 + audit line, never a 500 or
+// an escaped path.
+describe("server/routes/models agentId boundary", () => {
+  let warn;
+  beforeEach(() => {
+    warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+
+  it("rejects a traversal agentId on PUT /api/models/config before any store write", async () => {
+    const deps = createModelDeps();
+    const app = createApp(deps);
+    const res = await request(app)
+      .put("/api/models/config?agentId=../../evil")
+      .send({ profiles: [{ id: "p1", type: "api_key", key: "k" }] });
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({ ok: false, error: "Invalid agentId" });
+    expect(deps.authProfiles.upsertProfile).not.toHaveBeenCalled();
+    expect(deps.authProfiles.setModelConfig).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledWith(expect.stringMatching(/\[input\] rejected PUT \/api\/models\/config field=agentId reason=invalid_shape/));
+  });
+
+  it("rejects an array agentId (repeated query key) with 400, not 500", async () => {
+    const deps = createModelDeps();
+    const app = createApp(deps);
+    const res = await request(app).get("/api/models/config?agentId=a&agentId=b");
+    expect(res.status).toBe(400);
+    expect(deps.authProfiles.listProfiles).not.toHaveBeenCalled();
+  });
+
+  it("rejects prototype-key and uppercase agentIds", async () => {
+    const deps = createModelDeps();
+    const app = createApp(deps);
+    for (const bad of ["__proto__", "Main", "a b", "a/b", "."]) {
+      const res = await request(app).get(`/api/models/auth?agentId=${encodeURIComponent(bad)}`);
+      expect(res.status, bad).toBe(400);
+    }
+    expect(deps.authProfiles.loadAuthStore).not.toHaveBeenCalled();
+  });
+
+  it("still scopes to a valid agentId and defaults when absent", async () => {
+    const deps = createModelDeps();
+    const app = createApp(deps);
+    expect((await request(app).get("/api/models/auth?agentId=ops-2")).status).toBe(200);
+    expect(deps.authProfiles.listProfiles).toHaveBeenCalledWith("ops-2");
+    expect((await request(app).get("/api/models/auth")).status).toBe(200);
+    expect(deps.authProfiles.listProfiles).toHaveBeenLastCalledWith(undefined);
+    expect(warn).not.toHaveBeenCalled();
+  });
+});
+
+describe("server/routes/models config_unreadable mapping (F213)", () => {
+  it("answers 503 config_unreadable when the config writer refuses, and never git-syncs", async () => {
+    const deps = createModelDeps();
+    deps.authProfiles.setModelConfig = vi.fn(() => {
+      throw Object.assign(new Error("Refusing to overwrite openclaw.json"), {
+        code: "OPENCLAW_CONFIG_UNREADABLE",
+      });
+    });
+    const shellCmd = vi.fn(async () => ({ ok: true }));
+    const app = createApp({ ...deps, shellCmd });
+    const res = await request(app)
+      .put("/api/models/config")
+      .send({ primary: "openai/gpt-5" });
+    expect(res.status).toBe(503);
+    expect(res.body.code).toBe("config_unreadable");
+    expect(res.body.error).toMatch(/will not rewrite openclaw\.json/);
+    expect(shellCmd).not.toHaveBeenCalled();
+  });
+
+  it("maps the same refusal on profile upsert and removal", async () => {
+    const deps = createModelDeps();
+    const refuse = () => {
+      throw Object.assign(new Error("Refusing"), { code: "OPENCLAW_CONFIG_UNREADABLE" });
+    };
+    deps.authProfiles.upsertProfile = vi.fn(refuse);
+    deps.authProfiles.removeProfile = vi.fn(refuse);
+    const app = createApp(deps);
+    const up = await request(app)
+      .put("/api/models/auth/p1")
+      .send({ type: "api_key", provider: "openai", key: "k" });
+    expect(up.status).toBe(503);
+    const del = await request(app).delete("/api/models/auth/p1");
+    expect(del.status).toBe(503);
+  });
+});
+
+describe("server/routes/models credential responses are never cacheable (F080)", () => {
+  it("sets Cache-Control: no-store on GET /api/models/config and /api/models/auth", async () => {
+    const app = createApp(createModelDeps());
+    for (const url of ["/api/models/config", "/api/models/auth"]) {
+      const res = await request(app).get(url);
+      expect(res.status, url).toBe(200);
+      expect(res.headers["cache-control"], url).toBe("no-store");
+    }
+  });
 });

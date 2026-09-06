@@ -76,6 +76,7 @@ vi.mock("../../lib/public/js/components/watchdog-tab/settings/use-settings.js", 
 
 import * as preactHooks from "preact/hooks";
 import * as api from "../../lib/public/js/lib/api.js";
+import { invalidateCache } from "../../lib/public/js/lib/api-cache.js";
 import * as pollingModule from "../../lib/public/js/hooks/usePolling.js";
 import { showToast } from "../../lib/public/js/components/toast.js";
 import {
@@ -142,6 +143,9 @@ const runEffects = () => {
 describe("frontend/watchdog-tab useWatchdogOverseer (lifted review state)", () => {
   beforeEach(() => {
     harness.reset();
+    // useSavedSetting seeds from the shared api cache: a previous test's load
+    // must not hydrate this test's hook.
+    invalidateCache("/api/watchdog/overseer");
     poll.data = null;
     poll.error = null;
     poll.refresh.mockClear();
@@ -150,7 +154,8 @@ describe("frontend/watchdog-tab useWatchdogOverseer (lifted review state)", () =
       enabled: true,
       availability: { available: true, reason: null, message: "ok" },
     });
-    api.updateWatchdogOverseer.mockResolvedValue({ ok: true, enabled: true });
+    // The server echoes the saved value; the setting loop adopts it as canonical.
+    api.updateWatchdogOverseer.mockImplementation(async (next) => ({ ok: true, enabled: next }));
   });
 
   afterEach(() => {
@@ -190,13 +195,19 @@ describe("frontend/watchdog-tab useWatchdogOverseer (lifted review state)", () =
       enabled: true,
       availability: { available: true, reason: null, message: "ok" },
     });
-    // Skip the mount effect (index 0) — only the probe effect is under test.
+    // Skip the setting's load effect (index 0) — only the probe effect is under test.
     const probeEffect = harness.effects[1];
     const cleanup = probeEffect();
     expect(api.fetchWatchdogOverseer).not.toHaveBeenCalled();
     await vi.advanceTimersByTimeAsync(3000);
-    expect(api.fetchWatchdogOverseer).toHaveBeenCalledTimes(1);
+    // The probe asks the setting loop for a silent reload; Preact re-runs the
+    // load effect on the next render (the control stays interactive meanwhile).
     cleanup?.();
+    state = renderHook();
+    expect(state.settingsLoaded).toBe(true);
+    harness.effects[0]();
+    await flush();
+    expect(api.fetchWatchdogOverseer).toHaveBeenCalledTimes(1);
     state = renderHook();
     expect(state.availability).toEqual({ available: true, reason: null, message: "ok" });
   });
@@ -326,18 +337,24 @@ describe("frontend/watchdog-tab useWatchdogOverseer (lifted review state)", () =
     expect(state.ephemeral).toBe(null);
   });
 
-  it("a failed settings load still unblocks the card; a failed toggle save toasts and keeps the switch", async () => {
+  it("a failed settings load still unblocks the card (Retry chip); a failed toggle save reverts the switch with an inline chip, no toast (F158)", async () => {
     api.fetchWatchdogOverseer.mockRejectedValue(new Error("offline"));
     renderHook();
     runEffects();
     await flush();
-    expect(renderHook()).toMatchObject({ settingsLoaded: true, enabled: false, availability: null });
+    const loaded = renderHook();
+    expect(loaded).toMatchObject({ settingsLoaded: true, enabled: false, availability: null });
+    expect(loaded.setting.loadError?.message).toBe("offline");
+    api.fetchWatchdogOverseer.mockResolvedValue({ ok: true, enabled: false, availability: null });
     api.updateWatchdogOverseer.mockRejectedValue(new Error("nope"));
     await renderHook().onToggle(true);
-    expect(showToast).toHaveBeenCalledWith("nope", "error");
+    expect(showToast).not.toHaveBeenCalledWith("nope", "error");
+    expect(showToast).not.toHaveBeenCalledWith(kOverseerReviewCopy.toggleOn, "info");
     const after = renderHook();
     expect(after.enabled).toBe(false);
     expect(after.saving).toBe(false);
+    expect(after.setting.saveError).toMatchObject({ attempted: true });
+    expect(after.setting.saveError.error.message).toBe("nope");
   });
 
   it("onReviewIncident(null) never posts; an old server's incident-mode answer to the situation POST gets the generic toast", async () => {
@@ -466,6 +483,9 @@ describe("frontend/watchdog-tab useWatchdogTab wires the overseer slice to the i
 
   beforeEach(() => {
     harness.reset();
+    // useSavedSetting seeds from the shared api cache: a previous test's load
+    // must not hydrate this test's hook.
+    invalidateCache("/api/watchdog/overseer");
     poll.data = null;
     poll.error = null;
     poll.refresh.mockClear();

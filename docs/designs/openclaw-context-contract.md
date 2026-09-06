@@ -465,9 +465,17 @@ Run this on EVERY upstream release adoption (stable pin bump, beta adoption, cha
    update them together with the profile, never independently.
 4. Update this document: adjust the version table above, and re-confirm or amend each cited
    dist filename/symbol.
-5. Live tier (`OPENCLAW_LIVE_E2E=1`) re-runs the CLI-contract assertions:
-   `doctor --lint --json` schema, `backup sqlite create → verify` cycle,
-   `gateway restart-handoff capabilities --json` protocol.
+5. Live tier (`OPENCLAW_LIVE_E2E=1`) re-runs the CLI-contract assertions that exist today:
+   `gateway restart-handoff capabilities --json` protocol and `database preflight --json`
+   (`tests/live/openclaw-live-gateway.e2e.test.js`); `backup create --no-include-workspace`
+   flag naming, `database preflight` presence and the `approvals` help/`get --json` shape on
+   the pin and the newest beta (`tests/live/openclaw-live-cli-contract.e2e.test.js`); and
+   `backup create --output … --verify` archives
+   (`tests/live/openclaw-live-backup.e2e.test.js`,
+   `tests/live/openclaw-live-restore-drill.e2e.test.js`). The `doctor --lint --json` payload
+   shape is exercised hermetically only, against a mocked document
+   (`tests/server/doctor-openclaw-doctor.test.js`); no live test drives
+   `doctor --lint --json` or the `backup sqlite create → verify` cycle yet.
 6. Control UI auth handoff facts (§6): re-grep the new dist for the query-token warning
    literal ("Query parameters may appear in server logs"), the storage-key literals
    (`openclaw.control.token.v1`, `openclaw.control.settings.v1`), and the symbols

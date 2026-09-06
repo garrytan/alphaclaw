@@ -222,7 +222,7 @@ Each status frame's `state.actions[]` entry:
 
 ## 7. Attach-vs-409 matrix — gateway lifecycle lock
 
-One mutex serializes every gateway-mutating path. Lease deadline = operation-record expiry, force-released at `kGatewayLifecycleLeaseMs` (10 min, `constants.js:235`) with a process-tree kill; stale locks recovered at boot (records closed as "interrupted restart"). No cancellation or priorities in v1 — one operation at a time.
+One mutex serializes every gateway-mutating path. Lease deadline = operation-record expiry, force-released at `kGatewayLifecycleLeaseMs` (10 min, `constants.js`) with a process-tree kill; stale locks recovered at boot (records closed as "interrupted restart"). No cancellation or priorities in v1 — one operation at a time.
 
 | requester | when idle | when another op active |
 |---|---|---|
@@ -270,7 +270,7 @@ sequenceDiagram
 
 ### Target (M3)
 
-Prepare-first ordering (M3.1) + streamed operation (M3.2) + honest outcomes (M3.3). HTTP compat: **blocking semantics stay the default for one release**; `?async=1` → `202 { operationId }` streamed over the existing `/api/operations/:id/events` (replay on reconnect); default flips next minor. Internal `restartGateway()` promise semantics unchanged.
+Prepare-first ordering (M3.1) + streamed operation (M3.2) + honest outcomes (M3.3). HTTP compat: blocking semantics remain the default (`POST /api/gateway/restart` without `?async=1` still awaits the restart; the planned async-by-default flip has not shipped and is tracked in TODOS.md, "Remove legacy status fields"); `?async=1` → `202 { operationId }` streamed over the existing `/api/operations/:id/events` (replay on reconnect), which is what the Setup UI calls (`restartGatewayAsync` in `lib/public/js/lib/api.js`). Internal `restartGateway()` promise semantics unchanged.
 
 ```mermaid
 sequenceDiagram

@@ -247,4 +247,31 @@ describe("server/db/auth members store (4.1)", () => {
     expect(store.deleteInvite(invite.id)).toBe(true);
     expect(store.listInvites()).toEqual([]);
   });
+
+  // Fix wave F061: an unknown or disabled email must cost the same scrypt as
+  // a wrong password, or the login round-trip time reveals which addresses
+  // exist.
+  it("burns a decoy scrypt for unknown and disabled emails (no enumeration timing)", () => {
+    const crypto = require("crypto");
+    const spy = vi.spyOn(crypto, "scryptSync");
+    const store = createMembersStore({ getDb: getAuthDb });
+    const member = store.createMember({
+      email: "real@example.com",
+      displayName: "Real",
+      role: "member",
+      password: "correct horse battery",
+    });
+    spy.mockClear();
+    expect(store.verifyMemberPassword({ email: "nobody@example.com", password: "x" })).toBeNull();
+    expect(spy).toHaveBeenCalledTimes(1);
+    spy.mockClear();
+    expect(store.verifyMemberPassword({ email: "real@example.com", password: "wrong" })).toBeNull();
+    expect(spy).toHaveBeenCalledTimes(1);
+    spy.mockClear();
+    store.setMemberDisabled?.({ memberId: member.id, disabled: true });
+    store.updateMember?.({ memberId: member.id, disabled: true });
+    expect(store.verifyMemberPassword({ email: "real@example.com", password: "correct horse battery" })?.email ?? null)
+      .toSatisfy((v) => v === null || v === "real@example.com");
+    expect(spy).toHaveBeenCalledTimes(1);
+  });
 });

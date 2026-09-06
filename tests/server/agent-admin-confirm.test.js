@@ -180,3 +180,47 @@ describe("agent-admin confirm service", () => {
     expect(overflow.body.code).toBe("confirm_backlog_full");
   });
 });
+
+describe("agent-admin confirm service delivery copy (F073)", () => {
+  let rootDir;
+  let deliver;
+  let service;
+
+  beforeEach(() => {
+    rootDir = fs.mkdtempSync(path.join(os.tmpdir(), "alphaclaw-confirm-copy-"));
+    fs.mkdirSync(path.join(rootDir, "db"), { recursive: true });
+    initAgentAdminDb({ rootDir });
+    deliver = vi.fn();
+    service = createConfirmService({
+      now: () => 1_700_000_000_000,
+      hasAdminTargets: () => true,
+      deliver,
+    });
+  });
+
+  afterEach(() => {
+    closeAgentAdminDb();
+    fs.rmSync(rootDir, { recursive: true, force: true });
+  });
+
+  it("says a code was sent on first contact, and that the EARLIER code still stands on a dedup repeat", () => {
+    const first = service.gate({ req: makeReq(), op: kOp });
+    expect(first.status).toBe(428);
+    expect(first.body.delivery).toMatch(/^A code was sent to your admin channel/);
+
+    const repeat = service.gate({ req: makeReq(), op: kOp });
+    expect(repeat.status).toBe(428);
+    expect(repeat.confirmId).toBe(first.confirmId);
+    expect(repeat.body.delivery).toMatch(/earlier code is still valid \(not re-sent\)/);
+    expect(repeat.body.delivery).not.toMatch(/^A code was sent/);
+  });
+
+  it("names the dashboard as the only source when delivery throws on first contact", () => {
+    deliver.mockImplementationOnce(() => {
+      throw new Error("channel down");
+    });
+    const first = service.gate({ req: makeReq(), op: kOp });
+    expect(first.status).toBe(428);
+    expect(first.body.delivery).toMatch(/^The code appears in the dashboard/);
+  });
+});

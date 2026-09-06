@@ -326,7 +326,7 @@ asset, not assets of their own.
    `node -e 'const {DatabaseSync}=require("node:sqlite");const d=new DatabaseSync(process.argv[1],{readOnly:true});console.log(d.prepare("PRAGMA integrity_check").get())' /data/.openclaw/state/openclaw.sqlite`
    — expect `ok`. Remove the empty `-wal`/`-shm` files this open leaves.
 7. **Start the gateway** (Watchdog tab → Restart, or restart AlphaClaw) and
-   watch `/healthz` (120 s budget) plus the Watchdog tab; the boot
+   watch `/healthz` (restart ready budget: 5 min by default — `GATEWAY_RESTART_READY_TIMEOUT`, 30–480 s) plus the Watchdog tab; the boot
    reconciler runs the official migration when the preflight said one is
    required.
 8. Keep the aside tree until the box has been healthy through one full

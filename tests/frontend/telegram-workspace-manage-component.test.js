@@ -311,6 +311,8 @@ describe("frontend/telegram-workspace manage component", () => {
     expect(verifyButton).toBeTruthy();
     await verifyButton.props.onclick();
     expect(harness.slots[kRegistryRowsSlot][0].stale).toBe(false);
+    // The probe runs with the group's own bot account (F166).
+    expect(api.verifyTelegramTopic).toHaveBeenCalledWith("-100123", "42", { accountId: "alerts" });
 
     // ...and resolves after it with the pre-mutation snapshot: discarded.
     registryResolvers[0]({ ok: true, topics: [staleRow], discovery: null });

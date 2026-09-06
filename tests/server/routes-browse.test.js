@@ -1888,3 +1888,174 @@ describe("server/routes/browse preview size gates", () => {
     expect(res.body.content.startsWith("a".repeat(512))).toBe(true);
   });
 });
+
+// Fix wave F147/F148/F152/F153: root-path mutations, ancestor moves/deletes,
+// atomic writes, and server-side restart marking.
+describe("server/routes/browse fix-wave hardening", () => {
+  const createHardenedApp = (kRootDir) => {
+    const marked = [];
+    const app = express();
+    app.use(express.json());
+    registerBrowseRoutes({
+      app,
+      fs,
+      kRootDir,
+      restartRequiredState: { markRequired: (reason) => marked.push(reason) },
+    });
+    return { app, marked };
+  };
+
+  const seedRoot = () => {
+    const root = createTestRoot();
+    fs.mkdirSync(path.join(root, "skills", "gog-cli"), { recursive: true });
+    fs.writeFileSync(path.join(root, "skills", "gog-cli", "SKILL.md"), "locked");
+    fs.mkdirSync(path.join(root, "skills", "notes"), { recursive: true });
+    fs.writeFileSync(path.join(root, "skills", "notes", "a.md"), "note");
+    fs.mkdirSync(path.join(root, "hooks", "bootstrap"), { recursive: true });
+    fs.writeFileSync(path.join(root, "hooks", "bootstrap", "AGENTS.md"), "locked");
+    fs.mkdirSync(path.join(root, ".alphaclaw"), { recursive: true });
+    fs.writeFileSync(path.join(root, ".alphaclaw", "agent-admin-token"), "tok");
+    fs.writeFileSync(path.join(root, "openclaw.json"), "{}");
+    fs.mkdirSync(path.join(root, "drafts"), { recursive: true });
+    fs.writeFileSync(path.join(root, "drafts", "d.md"), "d");
+    return root;
+  };
+
+  let warn;
+  beforeEach(() => {
+    warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+
+  for (const rootValue of [undefined, "", ".", "./", "/"]) {
+    it(`refuses to delete the root itself (path=${JSON.stringify(rootValue)}) and leaves the state dir intact`, async () => {
+      const root = seedRoot();
+      const { app } = createHardenedApp(root);
+      const res = await request(app)
+        .delete("/api/browse/delete")
+        .send(rootValue === undefined ? {} : { path: rootValue });
+      expect(res.status).toBe(400);
+      expect(res.body).toEqual({ ok: false, error: "path is required" });
+      expect(fs.existsSync(path.join(root, "openclaw.json"))).toBe(true);
+      expect(fs.existsSync(path.join(root, "skills", "notes", "a.md"))).toBe(true);
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining("field=path reason=root_path"));
+    });
+  }
+
+  it("refuses to move or write the root itself", async () => {
+    const root = seedRoot();
+    const { app } = createHardenedApp(root);
+    expect((await request(app).post("/api/browse/move").send({ from: ".", to: "x" })).status).toBe(400);
+    expect((await request(app).post("/api/browse/move").send({ from: "drafts", to: "/" })).status).toBe(400);
+    expect((await request(app).put("/api/browse/write").send({ path: ".", content: "x" })).status).toBe(400);
+    expect(fs.existsSync(path.join(root, "drafts", "d.md"))).toBe(true);
+  });
+
+  it("refuses to move or delete an ANCESTOR of a locked or protected path", async () => {
+    const root = seedRoot();
+    const { app } = createHardenedApp(root);
+    for (const target of ["skills", "hooks", "hooks/bootstrap", ".alphaclaw"]) {
+      const moved = await request(app).post("/api/browse/move").send({ from: target, to: "pub" });
+      expect(moved.status, `move ${target}`).toBe(403);
+      const deleted = await request(app).delete("/api/browse/delete").send({ path: target });
+      expect(deleted.status, `delete ${target}`).toBe(403);
+    }
+    expect(fs.existsSync(path.join(root, ".alphaclaw", "agent-admin-token"))).toBe(true);
+    expect(fs.existsSync(path.join(root, "skills", "gog-cli", "SKILL.md"))).toBe(true);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("reason=source_locked_or_protected"));
+  });
+
+  it("finds a protected entry inside an unrelated-looking folder via the on-disk walk", async () => {
+    const root = seedRoot();
+    // A nested copy of a locked path name under a folder that lexically
+    // carries nothing (workspace/skills/gog-cli matches by suffix).
+    fs.mkdirSync(path.join(root, "workspace", "skills", "gog-cli"), { recursive: true });
+    fs.writeFileSync(path.join(root, "workspace", "skills", "gog-cli", "SKILL.md"), "x");
+    const { app } = createHardenedApp(root);
+    const res = await request(app).delete("/api/browse/delete").send({ path: "workspace" });
+    expect(res.status).toBe(403);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("reason=contains_policy_path"));
+  });
+
+  it("still moves and deletes ordinary folders", async () => {
+    const root = seedRoot();
+    const { app, marked } = createHardenedApp(root);
+    const moved = await request(app).post("/api/browse/move").send({ from: "drafts", to: "archive" });
+    expect(moved.status).toBe(200);
+    expect(moved.body).toEqual({ ok: true, from: "drafts", to: "archive" });
+    const deleted = await request(app).delete("/api/browse/delete").send({ path: "archive" });
+    expect(deleted.status).toBe(200);
+    expect(marked).toEqual([]);
+  });
+
+  it("refuses a move onto a protected path or into a locked path", async () => {
+    const root = seedRoot();
+    fs.rmSync(path.join(root, "openclaw.json"));
+    const { app } = createHardenedApp(root);
+    const onto = await request(app).post("/api/browse/move").send({ from: "drafts/d.md", to: "openclaw.json" });
+    expect(onto.status).toBe(403);
+    expect(onto.body.error).toBe("Cannot move onto a protected path.");
+    const into = await request(app).post("/api/browse/move").send({ from: "drafts/d.md", to: "skills/gog-cli/d.md" });
+    expect(into.status).toBe(403);
+    expect(into.body.error).toBe("Cannot move into a locked path.");
+    expect(fs.existsSync(path.join(root, "openclaw.json"))).toBe(false);
+  });
+
+  it("resolves symlinks before the policy check (a link to a locked file cannot be deleted through the link)", async () => {
+    const root = seedRoot();
+    fs.symlinkSync(
+      path.join(root, ".alphaclaw", "agent-admin-token"),
+      path.join(root, "drafts", "innocent.txt"),
+    );
+    const { app } = createHardenedApp(root);
+    const res = await request(app).delete("/api/browse/delete").send({ path: "drafts/innocent.txt" });
+    expect(res.status).toBe(403);
+    expect(fs.existsSync(path.join(root, ".alphaclaw", "agent-admin-token"))).toBe(true);
+  });
+
+  it("writes atomically (no temp left behind) and preserves the file mode", async () => {
+    const root = seedRoot();
+    const target = path.join(root, "drafts", "secret.md");
+    fs.writeFileSync(target, "old", { mode: 0o600 });
+    const { app } = createHardenedApp(root);
+    const res = await request(app)
+      .put("/api/browse/write")
+      .send({ path: "drafts/secret.md", content: "new" });
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ ok: true, path: "drafts/secret.md" });
+    expect(fs.readFileSync(target, "utf8")).toBe("new");
+    if (process.platform !== "win32") {
+      expect(fs.statSync(target).mode & 0o777).toBe(0o600);
+    }
+    expect(fs.readdirSync(path.join(root, "drafts")).filter((n) => n.endsWith(".tmp"))).toEqual([]);
+  });
+
+  it("records restart-required server-side for config and hook edits, only after success", async () => {
+    const root = seedRoot();
+    fs.mkdirSync(path.join(root, "hooks", "transforms"), { recursive: true });
+    fs.writeFileSync(path.join(root, "hooks", "transforms", "t.js"), "x");
+    const { app, marked } = createHardenedApp(root);
+
+    const write = await request(app)
+      .put("/api/browse/write")
+      .send({ path: "openclaw.json", content: '{"a":1}' });
+    expect(write.status).toBe(200);
+    expect(write.body).toEqual({ ok: true, path: "openclaw.json", restartRequired: true });
+    expect(marked).toEqual(["browse_edit"]);
+
+    const del = await request(app).delete("/api/browse/delete").send({ path: "hooks/transforms/t.js" });
+    expect(del.body.restartRequired).toBe(true);
+    expect(marked).toHaveLength(2);
+
+    // A plain note does not require a restart…
+    const note = await request(app)
+      .put("/api/browse/write")
+      .send({ path: "skills/notes/a.md", content: "n2" });
+    expect(note.body.restartRequired).toBeUndefined();
+    // …and a FAILED config write never marks anything.
+    const failed = await request(app)
+      .put("/api/browse/write")
+      .send({ path: "openclaw.json", content: 42 });
+    expect(failed.status).toBe(400);
+    expect(marked).toHaveLength(2);
+  });
+});

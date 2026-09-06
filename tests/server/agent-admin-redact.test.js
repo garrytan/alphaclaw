@@ -132,3 +132,64 @@ describe("server/agent-admin/redact", () => {
     });
   });
 });
+
+describe("sanitizeAgentErrorBody (agent-visible error hygiene, PR 3)", () => {
+  const {
+    sanitizeAgentErrorBody,
+    kGenericServerError,
+  } = require("../../lib/server/agent-admin/redact");
+
+  it("replaces a 5xx error message with the fixed sentence, keeping code and hint", () => {
+    const body = {
+      ok: false,
+      error:
+        "Command failed: /usr/bin/openclaw status --json\n/root/.openclaw/openclaw.json: ENOENT",
+      code: "status_failed",
+      hint: "Check the Watchdog tab.",
+    };
+    const out = sanitizeAgentErrorBody(body, 500);
+    expect(out).toEqual({
+      ok: false,
+      error: kGenericServerError,
+      code: "status_failed",
+      hint: "Check the Watchdog tab.",
+    });
+    expect(out.error).not.toMatch(/openclaw|\/root\//);
+    // Not mutated in place — the dashboard path still sees the raw message.
+    expect(body.error).toMatch(/Command failed/);
+  });
+
+  it("keeps a 4xx message as validation feedback but scrubs secret shapes, token params, and control chars", () => {
+    const out = sanitizeAgentErrorBody(
+      {
+        ok: false,
+        error:
+          "Invalid key sk-live-abcdefghijklmnop for https://x.test/?token=abc123 with Bearer eyJhbGciOi.eyJzdWIiOi.c2lnbmF0dXJl[31m!",
+      },
+      400,
+    );
+    expect(out.error).not.toMatch(/sk-live-abcdefghijklmnop|abc123|eyJ|/);
+    expect(out.error).toMatch(/^Invalid key \*\*\* for https:\/\/x\.test\/\?token=\*\*\* with \*\*\*/);
+  });
+
+  it("clamps an oversized 4xx message", () => {
+    const out = sanitizeAgentErrorBody({ ok: false, error: "x".repeat(2000) }, 422);
+    expect(out.error).toHaveLength(400);
+  });
+
+  it("leaves success bodies, non-string errors, arrays and primitives untouched", () => {
+    const ok = { ok: true, error: "not an error field" };
+    expect(sanitizeAgentErrorBody(ok, 200)).toBe(ok);
+    const objErr = { ok: false, error: { code: "x" } };
+    expect(sanitizeAgentErrorBody(objErr, 500)).toBe(objErr);
+    const arr = [{ error: "a" }];
+    expect(sanitizeAgentErrorBody(arr, 500)).toBe(arr);
+    expect(sanitizeAgentErrorBody("oops", 500)).toBe("oops");
+    expect(sanitizeAgentErrorBody(null, 500)).toBeNull();
+  });
+
+  it("treats a missing status as success (never rewrites a body it cannot classify)", () => {
+    const body = { ok: false, error: "raw" };
+    expect(sanitizeAgentErrorBody(body, undefined)).toBe(body);
+  });
+});

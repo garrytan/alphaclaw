@@ -478,6 +478,79 @@ describe("server/usage-db", () => {
     expect(usage.totals.runCount).toBe(2);
     expect(usage.totals.totalTokens).toBe(200_000);
   });
+
+  it("getSessionsList reads every selected session's events in ONE query and keeps per-event costing (fix wave F076)", () => {
+    const { database } = createUsageDbContext("usage-db-sessions-1n-");
+    const sessions = require("../../lib/server/db/usage/sessions");
+    const insertUsageEvent = database.prepare(`
+      INSERT INTO usage_events (
+        timestamp, session_id, session_key, run_id, provider, model,
+        input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, total_tokens
+      ) VALUES (
+        $timestamp, $session_id, $session_key, $run_id, $provider, $model,
+        $input_tokens, $output_tokens, $cache_read_tokens, $cache_write_tokens, $total_tokens
+      )
+    `);
+    const now = Date.now();
+    const events = [
+      { session_key: "s-a", session_id: "", model: "anthropic/claude-opus-4.7", input: 1000, output: 100, ts: now - 5000 },
+      { session_key: "s-a", session_id: "", model: "openai/gpt-5.6", input: 500, output: 50, ts: now - 4000 },
+      { session_key: "", session_id: "raw-b", model: "anthropic/claude-opus-4.7", input: 200, output: 20, ts: now - 3000 },
+      { session_key: "s-c", session_id: "raw-c", model: "openai/gpt-5.6", input: 300, output: 30, ts: now - 2000 },
+    ];
+    for (const event of events) {
+      insertUsageEvent.run({
+        $timestamp: event.ts,
+        $session_id: event.session_id,
+        $session_key: event.session_key,
+        $run_id: "run",
+        $provider: event.model.split("/")[0],
+        $model: event.model,
+        $input_tokens: event.input,
+        $output_tokens: event.output,
+        $cache_read_tokens: 0,
+        $cache_write_tokens: 0,
+        $total_tokens: event.input + event.output,
+      });
+    }
+
+    const prepareSpy = vi.spyOn(database, "prepare");
+    const list = sessions.getSessionsList({ database, limit: 10 });
+    // One aggregate query + one events query — never one per session row.
+    expect(prepareSpy).toHaveBeenCalledTimes(2);
+    prepareSpy.mockRestore();
+
+    expect(list.map((row) => row.sessionId)).toEqual(["s-c", "raw-b", "s-a"]);
+    const sessionA = list.find((row) => row.sessionId === "s-a");
+    expect(sessionA.turnCount).toBe(2);
+    expect(sessionA.totalTokens).toBe(1650);
+    expect(sessionA.dominantModel).toBe("anthropic/claude-opus-4.7");
+    const expectedCostA =
+      deriveCostBreakdown({ provider: "anthropic", model: "anthropic/claude-opus-4.7", inputTokens: 1000, outputTokens: 100 }).totalCost +
+      deriveCostBreakdown({ provider: "openai", model: "openai/gpt-5.6", inputTokens: 500, outputTokens: 50 }).totalCost;
+    expect(sessionA.totalCost).toBeCloseTo(expectedCostA, 10);
+    const sessionB = list.find((row) => row.sessionId === "raw-b");
+    expect(sessionB.rawSessionId).toBe("raw-b");
+    expect(sessionB.turnCount).toBe(1);
+  });
+
+  it("getSessionsList with no sessions issues a single query and returns []", () => {
+    const { database } = createUsageDbContext("usage-db-sessions-empty-");
+    const sessions = require("../../lib/server/db/usage/sessions");
+    const prepareSpy = vi.spyOn(database, "prepare");
+    expect(sessions.getSessionsList({ database, limit: 10 })).toEqual([]);
+    expect(prepareSpy).toHaveBeenCalledTimes(1);
+    prepareSpy.mockRestore();
+  });
+
+  it("the schema carries the session-ref expression index (fix wave F076)", () => {
+    const { database } = createUsageDbContext("usage-db-sessions-index-");
+    const indexes = database
+      .prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'usage_events'")
+      .all()
+      .map((row) => row.name);
+    expect(indexes).toContain("idx_usage_events_session_ref");
+  });
 });
 
 // withStaleOnBusy: reads that hit SQLITE_BUSY after the 250ms busy_timeout

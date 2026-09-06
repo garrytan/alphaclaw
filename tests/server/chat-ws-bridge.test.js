@@ -1037,7 +1037,37 @@ describe("server/chat-ws bridge", () => {
       );
     });
 
-    it("cleans up run targets and pending sends when the browser disconnects", async () => {
+    it("a runId-less, session-routed chat error during the send window does NOT fail the pending send (F119)", async () => {
+      const harness = await startGatewayHarness();
+      const service = createService(harness);
+      const browser = await openBrowser(service);
+
+      let pendingFrame = null;
+      harness.onRequest = (frame) => {
+        if (frame.method === "chat.send") pendingFrame = frame;
+      };
+      browser.send({ type: "message", sessionKey: "pend-1", content: "slow one" });
+      await waitUntil(() => pendingFrame !== null, "pending chat.send");
+
+      // A FOREIGN run finishing badly in the same session, routed by key only.
+      harness.emit({
+        type: "event",
+        event: "chat",
+        payload: { meta: { sessionKey: "pend-1" }, state: "error" },
+      });
+      await new Promise((resolve) => setTimeout(resolve, 60));
+      expect(browser.messages.some((m) => m.type === "error" && m.sessionKey === "pend-1")).toBe(false);
+
+      // Our send still completes normally when the RPC resolves.
+      harness.respond(pendingFrame.id, { runId: "run-pend-1" });
+      const started = await browser.waitFor(
+        (m) => m.type === "started" && m.sessionKey === "pend-1",
+        "started pend-1",
+      );
+      expect(started.runId).toBe("run-pend-1");
+    });
+
+    it("browser disconnect keeps run records alive (persist-through-close) and the bridge survives late events", async () => {
       const harness = await startGatewayHarness();
       const service = createService(harness);
       const browser = await openBrowser(service);
@@ -1075,9 +1105,27 @@ describe("server/chat-ws bridge", () => {
 
       harness.onRequest = respondEmptyHistory(harness);
       const survivor = await openBrowser(service);
+      // Persist-through-close (fix wave F120, pinned here too): the runs the
+      // dead browser started are still live records, advertised to the next
+      // socket so it can resume them.
+      const survivorHello = await survivor.waitFor((m) => m.type === "hello", "survivor hello");
+      expect(survivorHello.activeRuns.map((run) => run.runId).sort()).toEqual(["run-g1", "run-g2"]);
+      // Their live rows carry the stream id the client needs (F126).
+      for (const run of survivorHello.activeRuns) expect(typeof run.messageId).toBe("string");
       survivor.send({ type: "history", sessionKey: "still-alive" });
       const history = await survivor.waitFor((m) => m.type === "history", "history");
       expect(history.messages).toEqual([]);
+
+      // A lifecycle end for one run finalizes it; the other stays resumable.
+      harness.emit({
+        type: "event",
+        event: "agent",
+        payload: { runId: "run-g1", stream: "lifecycle", data: { phase: "end" } },
+      });
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      const latecomer = await openBrowser(service);
+      const lateHello = await latecomer.waitFor((m) => m.type === "hello", "late hello");
+      expect(lateHello.activeRuns.map((run) => run.runId)).toEqual(["run-g2"]);
     });
   });
 

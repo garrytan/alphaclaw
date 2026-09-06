@@ -22,7 +22,7 @@ Six components, each detailed in the implementation plan:
    (usage/status labelers) are upserted into the registry as discovered/unnamed.
 2. **Always-on guidance** — the Topic Registry section + Sync Rules render
    even with zero topics (today an empty registry renders nothing). *(Since the
-   v0.9.40 hardening merge this section renders into the single merged
+   v0.9.48 hardening merge this section renders into the single merged
    `hooks/bootstrap/AGENTS.md`, not a standalone TOOLS.md — see
    `lib/server/topic-registry.js`.)*
 3. **CLI fix + topic create** — `alphaclaw telegram topic add` is broken in Telegram

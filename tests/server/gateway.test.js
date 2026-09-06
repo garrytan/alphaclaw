@@ -45,6 +45,41 @@ const originalReadFileSync = fs.readFileSync;
 const originalRmSync = fs.rmSync;
 const originalWriteFileSync = fs.writeFileSync;
 const originalFstatSync = fs.fstatSync;
+const originalOpenSync = fs.openSync;
+const originalFsyncSync = fs.fsyncSync;
+const originalCloseSync = fs.closeSync;
+const originalUnlinkSync = fs.unlinkSync;
+const originalRenameSync = fs.renameSync;
+
+// Fix wave F013: openclaw.json writers go through writeFileAtomic (temp file →
+// fsync → rename). Tests that used to capture `fs.writeFileSync(configPath)`
+// now capture the RENAME onto configPath; every other fs call delegates to the
+// real module so the shared file lock keeps working. Returns the write spy.
+const kAtomicMockFd = 987654321;
+const mockAtomicConfigWrites = (onWrite = () => {}) => {
+  const pending = new Map();
+  const configWrite = vi.fn(onWrite);
+  fs.mkdirSync = vi.fn();
+  fs.writeFileSync = vi.fn((targetPath, contents) => {
+    pending.set(String(targetPath), contents);
+  });
+  fs.openSync = vi.fn((targetPath, ...rest) =>
+    pending.has(String(targetPath)) ? kAtomicMockFd : originalOpenSync(targetPath, ...rest),
+  );
+  fs.fsyncSync = vi.fn((fd) => (fd === kAtomicMockFd ? undefined : originalFsyncSync(fd)));
+  fs.closeSync = vi.fn((fd) => (fd === kAtomicMockFd ? undefined : originalCloseSync(fd)));
+  fs.unlinkSync = vi.fn((targetPath) => {
+    if (pending.delete(String(targetPath))) return undefined;
+    return originalUnlinkSync(targetPath);
+  });
+  fs.renameSync = vi.fn((from, to) => {
+    if (!pending.has(String(from))) return originalRenameSync(from, to);
+    const contents = pending.get(String(from));
+    pending.delete(String(from));
+    return configWrite(String(to), contents);
+  });
+  return configWrite;
+};
 const originalCreateConnection = net.createConnection;
 const originalPrelaunchHookEnv = process.env.ALPHACLAW_GATEWAY_PRELAUNCH_HOOK;
 // Namespace-required by gateway.js so the live-process scan can be pinned.
@@ -131,6 +166,11 @@ describe("server/gateway restart behavior", () => {
     fs.rmSync = originalRmSync;
     fs.writeFileSync = originalWriteFileSync;
     fs.fstatSync = originalFstatSync;
+    fs.openSync = originalOpenSync;
+    fs.fsyncSync = originalFsyncSync;
+    fs.closeSync = originalCloseSync;
+    fs.unlinkSync = originalUnlinkSync;
+    fs.renameSync = originalRenameSync;
     net.createConnection = originalCreateConnection;
     if (originalPrelaunchHookEnv === undefined) {
       delete process.env.ALPHACLAW_GATEWAY_PRELAUNCH_HOOK;
@@ -485,6 +525,44 @@ describe("server/gateway restart behavior", () => {
     );
   });
 
+  it("keeps ALPHACLAW_GATEWAY_MAX_OLD_SPACE_SIZE on the cold-restart spawn (F011)", async () => {
+    const previousCap = process.env.ALPHACLAW_GATEWAY_MAX_OLD_SPACE_SIZE;
+    process.env.ALPHACLAW_GATEWAY_MAX_OLD_SPACE_SIZE = "4096";
+    try {
+      const restartSupervisor = createChild();
+      let gatewayPortOpen = false;
+      const spawnMock = vi.fn((file, args) => {
+        if (args?.[0] === "gateway" && args?.[1] === "--force") {
+          queueMicrotask(() => {
+            gatewayPortOpen = true;
+          });
+        }
+        return restartSupervisor;
+      });
+      childProcess.spawn = spawnMock;
+      childProcess.execSync = vi.fn(() => "");
+      fs.existsSync = vi.fn(() => true);
+      net.createConnection = vi.fn(() => createSocket(() => gatewayPortOpen));
+      delete require.cache[modulePath];
+      const gateway = require(modulePath);
+      fs.readFileSync = vi.fn(() =>
+        JSON.stringify({ agents: { defaults: { model: { primary: "openai/gpt-5.1-codex" } } } }),
+      );
+
+      await gateway.restartGateway(vi.fn());
+
+      const forceCall = spawnMock.mock.calls.find(([, args]) => args?.[1] === "--force");
+      expect(forceCall).toBeTruthy();
+      // The daemon spawned by the cold restart carries the operator's cap...
+      expect(forceCall[2].env.NODE_OPTIONS).toMatch(/--max-old-space-size=4096/);
+      // ...while the short-lived CLI env stays uncapped.
+      expect(gateway.gatewayEnv().NODE_OPTIONS ?? "").not.toMatch(/max-old-space-size=4096/);
+    } finally {
+      if (previousCap === undefined) delete process.env.ALPHACLAW_GATEWAY_MAX_OLD_SPACE_SIZE;
+      else process.env.ALPHACLAW_GATEWAY_MAX_OLD_SPACE_SIZE = previousCap;
+    }
+  });
+
   it("retries channel plugin preflight after cleaning stale install stages", async () => {
     const firstError = new Error(
       "ENOTEMPTY: directory not empty, rmdir '/app/node_modules/openclaw/dist/extensions/telegram/.openclaw-install-stage/node_modules/typebox/build/type/engine'",
@@ -798,7 +876,7 @@ describe("server/gateway restart behavior", () => {
       gateway: {},
     };
     fs.existsSync = vi.fn((targetPath) => targetPath === kOnboardingMarkerPath);
-    fs.writeFileSync = vi.fn((targetPath, contents) => {
+    const configWrite = mockAtomicConfigWrites((targetPath, contents) => {
       if (targetPath === `${OPENCLAW_DIR}/openclaw.json`) {
         currentConfig = JSON.parse(contents);
       }
@@ -815,7 +893,7 @@ describe("server/gateway restart behavior", () => {
     const changed = gateway.ensureGatewayProxyConfig("https://setup.example.com");
 
     expect(changed).toBe(true);
-    expect(fs.writeFileSync).toHaveBeenCalledWith(
+    expect(configWrite).toHaveBeenCalledWith(
       `${OPENCLAW_DIR}/openclaw.json`,
       expect.any(String),
     );
@@ -836,7 +914,7 @@ describe("server/gateway restart behavior", () => {
       },
     };
     fs.existsSync = vi.fn((targetPath) => targetPath === kOnboardingMarkerPath);
-    fs.writeFileSync = vi.fn((targetPath, contents) => {
+    const configWrite = mockAtomicConfigWrites((targetPath, contents) => {
       if (targetPath === `${OPENCLAW_DIR}/openclaw.json`) {
         currentConfig = JSON.parse(contents);
       }
@@ -860,7 +938,7 @@ describe("server/gateway restart behavior", () => {
       "https://setup.example.com",
     ]);
     expect(currentConfig.gateway.http).toBeUndefined();
-    expect(fs.writeFileSync).toHaveBeenCalledTimes(1);
+    expect(configWrite).toHaveBeenCalledTimes(1);
   });
 
   it("preserves existing gateway endpoint options while enabling opted-in public API endpoints", () => {
@@ -883,7 +961,7 @@ describe("server/gateway restart behavior", () => {
       },
     };
     fs.existsSync = vi.fn((targetPath) => targetPath === kOnboardingMarkerPath);
-    fs.writeFileSync = vi.fn((targetPath, contents) => {
+    const configWrite = mockAtomicConfigWrites((targetPath, contents) => {
       if (targetPath === `${OPENCLAW_DIR}/openclaw.json`) {
         currentConfig = JSON.parse(contents);
       }
@@ -944,7 +1022,7 @@ describe("server/gateway restart behavior", () => {
       let currentConfig = initial;
       let lastRawContents = null;
       fs.existsSync = vi.fn((targetPath) => targetPath === kOnboardingMarkerPath);
-      fs.writeFileSync = vi.fn((targetPath, contents) => {
+      const configWrite = mockAtomicConfigWrites((targetPath, contents) => {
         if (targetPath === `${OPENCLAW_DIR}/openclaw.json`) {
           lastRawContents = contents;
           currentConfig = JSON.parse(contents);
@@ -960,6 +1038,7 @@ describe("server/gateway restart behavior", () => {
       });
       return {
         gateway,
+        configWrite,
         getConfig: () => currentConfig,
         getRawContents: () => lastRawContents,
       };
@@ -1114,7 +1193,7 @@ describe("server/gateway restart behavior", () => {
 
           expect(firstChanged).toBe(true);
           expect(secondChanged).toBe(false);
-          expect(fs.writeFileSync).toHaveBeenCalledTimes(1);
+          expect(io.configWrite).toHaveBeenCalledTimes(1);
         },
       );
     });
@@ -2319,33 +2398,6 @@ describe("server/gateway restart behavior", () => {
       );
     });
 
-    it("attaches signal handlers that stop the gateway and exit", async () => {
-      childProcess.execFile = execFileOk("");
-      delete require.cache[modulePath];
-      const gateway = require(modulePath);
-      const onSpy = vi.spyOn(process, "on").mockImplementation(() => process);
-      const exitSpy = vi.spyOn(process, "exit").mockImplementation(() => undefined);
-
-      gateway.attachGatewaySignalHandlers();
-
-      const sigterm = onSpy.mock.calls.find((c) => c[0] === "SIGTERM")[1];
-      const sigint = onSpy.mock.calls.find((c) => c[0] === "SIGINT")[1];
-      // Handlers stop the gateway asynchronously before exiting.
-      await sigterm();
-      await sigint();
-
-      expect(exitSpy).toHaveBeenCalledTimes(2);
-      expect(exitSpy).toHaveBeenCalledWith(0);
-      expect(childProcess.execFile).toHaveBeenCalledWith(
-        "openclaw",
-        ["gateway", "stop"],
-        expect.objectContaining({ encoding: "utf8" }),
-        expect.any(Function),
-      );
-      onSpy.mockRestore();
-      exitSpy.mockRestore();
-    });
-
     it("stopGatewayForShutdown reaps the child and best-effort stops external gateways through the shared stop runner", async () => {
       // The lifecycle orchestrator awaits this during graceful shutdown
       // (instead of the plain SIGTERM/SIGINT handlers). The former raw
@@ -2629,58 +2681,6 @@ describe("server/gateway restart behavior", () => {
 
       expect(signals).toEqual(["SIGTERM", "SIGKILL"]);
       expect(reaped).toBe(true);
-    });
-
-    it("uses lifecycle restart for light restarts while the gateway is up", async () => {
-      const behaviors = [
-        (cb) => cb(null, "restarted ok\n", ""),
-        (cb) => {
-          const error = new Error("restart failed");
-          cb(error, "", "restart failed hard");
-        },
-      ];
-      const execFileMock = vi.fn((file, args, opts, cb) =>
-        behaviors.shift()(cb),
-      );
-      childProcess.execFile = execFileMock;
-      net.createConnection = vi.fn(() => createSocket(true));
-      delete require.cache[modulePath];
-      const gateway = require(modulePath);
-      const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
-      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
-      const reloadEnv = vi.fn();
-
-      await gateway.restartGatewayLight(reloadEnv);
-      await gateway.restartGatewayLight(reloadEnv);
-
-      expect(reloadEnv).toHaveBeenCalledTimes(2);
-      expect(execFileMock).toHaveBeenCalledWith(
-        "openclaw",
-        ["gateway", "restart"],
-        expect.objectContaining({ timeout: 90000 }),
-        expect.any(Function),
-      );
-      expect(logSpy).toHaveBeenCalledWith(
-        "[alphaclaw] Gateway light restart complete",
-      );
-      expect(warnSpy).toHaveBeenCalledWith("[alphaclaw] Gateway light restart failed");
-    });
-
-    it("launches a managed process for light restarts when nothing is running", async () => {
-      const child = createChild();
-      childProcess.spawn = vi.fn(() => child);
-      childProcess.execFile = execFileOk("");
-      fs.existsSync = vi.fn(() => false);
-      net.createConnection = vi.fn(() => createSocket(false));
-      delete require.cache[modulePath];
-      const gateway = require(modulePath);
-
-      await gateway.restartGatewayLight(vi.fn());
-      expect(childProcess.spawn).toHaveBeenCalledTimes(1);
-
-      // The managed child is still active, so a second light restart is a no-op.
-      await gateway.restartGatewayLight(vi.fn());
-      expect(childProcess.spawn).toHaveBeenCalledTimes(1);
     });
 
     it("stops the supervisor when a restart never becomes ready", async () => {
@@ -4327,7 +4327,7 @@ describe("server/gateway restart behavior", () => {
         gateway.setGatewayPrelaunchHookHandler(null);
       });
 
-      it("runGatewayCmd('--force') and the in-place light restart are gated by the hook too", async () => {
+      it("runGatewayCmd('--force') is gated by the hook too", async () => {
         pinFstatUid(1000);
         childProcess.spawn = vi.fn(() => createChild());
         childProcess.execFile = vi.fn((file, args, opts, cb) => cb(null, "", ""));
@@ -4346,20 +4346,11 @@ describe("server/gateway restart behavior", () => {
           code: "not_root_owned",
         });
         expect(childProcess.spawn).not.toHaveBeenCalled();
-
-        await gateway.restartGatewayLight(vi.fn());
-        expect(warnSpy).toHaveBeenCalledWith(
-          "[alphaclaw] Gateway light restart refused by the prelaunch hook",
-        );
-        expect(childProcess.execFile).not.toHaveBeenCalledWith(
-          "openclaw",
-          ["gateway", "restart"],
-          expect.anything(),
-          expect.any(Function),
+        expect(warnSpy).not.toHaveBeenCalledWith(
+          expect.stringContaining("light restart"),
         );
         expect(handler.mock.calls.map(([outcome]) => outcome.site)).toEqual([
           "force restart",
-          "light restart",
         ]);
         gateway.setGatewayPrelaunchHookHandler(null);
       });
@@ -4556,7 +4547,7 @@ describe("server/gateway restart behavior", () => {
         if (targetPath === configPath) return state.raw;
         return originalReadFileSync(targetPath, ...args);
       });
-      fs.writeFileSync = vi.fn((targetPath, contents) => {
+      mockAtomicConfigWrites((targetPath, contents) => {
         if (targetPath === configPath) state.raw = contents;
       });
       return state;

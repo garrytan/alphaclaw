@@ -1,6 +1,6 @@
 ---
 title: fix(channels): resolve false WhatsApp unpaired status and feat(cost): add model pricing
-status: active
+status: completed
 created_at: "2026-06-05"
 type: fix
 ---

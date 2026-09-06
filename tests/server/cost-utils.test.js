@@ -317,4 +317,22 @@ describe("server/cost-utils openclaw dist pricing scraper", () => {
 
     expect(pricingMap.size).toBe(0);
   });
+
+  it("bills cache-read tokens at 10% of the input rate when a static entry omits cacheRead (F083)", () => {
+    patchOpenclawResolution(null);
+    const costUtils = loadFreshCostUtils();
+    // claude-haiku-4-6 is a static entry with input/output only.
+    const breakdown = costUtils.deriveCostBreakdown({
+      provider: "anthropic",
+      model: "claude-haiku-4-6",
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadTokens: 1_000_000,
+      cacheWriteTokens: 0,
+    });
+    expect(breakdown.pricingFound).toBe(true);
+    expect(breakdown.cacheReadCost).toBeGreaterThan(0);
+    expect(breakdown.cacheReadCost).toBeCloseTo(0.8 * 0.1, 8);
+    expect(breakdown.totalCost).toBeCloseTo(0.08, 8);
+  });
 });

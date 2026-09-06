@@ -8,14 +8,20 @@ Do not deflect actionable requests to the Setup UI. If a command or tool is avai
 
 ### Tabs
 
-| Tab       | URL                          | What it helps with                                                                                                                                                                         |
-| --------- | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| General   | `{{SETUP_UI_URL}}#general`   | Gateway status & restart, channel health (Telegram/Discord), pending pairings, feature health (Embeddings/Audio), Google Workspace connection, repo auto-sync schedule, OpenClaw dashboard |
-| Watchdog  | `{{SETUP_UI_URL}}#watchdog`  | Gateway watchdog lifecycle, crash-loop visibility, restart diagnostics, and auto-repair feature                                                                                            |
-| Providers | `{{SETUP_UI_URL}}#providers` | AI provider credentials (Anthropic, OpenAI, Gemini, Mistral, Voyage, Groq, Deepgram), feature capabilities, Codex OAuth                                                                    |
-| Envars    | `{{SETUP_UI_URL}}#envars`    | View/edit/add environment variables (saved to `{{ENV_FILE}}`), gateway restart to apply changes                                                                                            |
-| Webhooks  | `{{SETUP_UI_URL}}#webhooks`  | Webhook endpoint visibility, create flow, request history, and gateway delivery debugging                                                                                                  |
-| Browse    | `{{SETUP_UI_URL}}#browse`    | File browser and editor rooted at `.openclaw`, markdown preview/edit flow, and git-aware save workflow                                                                                     |
+| Tab      | URL                         | What it helps with |
+| -------- | --------------------------- | ------------------ |
+| General  | `{{SETUP_UI_URL}}#general`  | Gateway status & restart, channel health (Telegram/Discord/Slack/WhatsApp/Signal), pending chat pairings & device approvals, feature health, Google Workspace connection, OpenAI-compatible API and Agent Administration toggles, repo auto-sync schedule, OpenClaw dashboard launch |
+| Cron     | `{{SETUP_UI_URL}}#cron`     | Scheduled jobs — scheduler status, enable/disable, run now, prompt and delivery-routing edits, rolling calendar, run history, trends and per-run usage |
+| Usage    | `{{SETUP_UI_URL}}#usage`    | Token and cost reporting — daily summary plus per-session and per-agent breakdowns and time series |
+| Doctor   | `{{SETUP_UI_URL}}#doctor`   | Drift Doctor workspace health scans — finding cards, deterministic environment and model-drift checks, context-injection budget meter, scheduled scans, fixes dispatched to the agent |
+| Watchdog | `{{SETUP_UI_URL}}#watchdog` | Gateway supervision — live status narrative, incidents and optional AI overseer, auto-repair, notification channel and admin targets, memory-leak detection and resource-autotune settings, event log, log tail, terminal, Claude Code rescue session |
+| Models   | `{{SETUP_UI_URL}}#models`   | Available Models list with primary-model selection, and Provider Authentication — API keys / auth profiles per provider (Anthropic, OpenAI, Gemini, Mistral, Voyage, Groq, Deepgram and others), Codex OAuth, auth-profile ordering |
+| Envars   | `{{SETUP_UI_URL}}#envars`   | View/edit/add environment variables (saved to `{{ENV_FILE}}`), gateway restart prompt to apply changes |
+| Webhooks | `{{SETUP_UI_URL}}#webhooks` | Webhook endpoints — create flow, transform modules, request history and payload inspection, OAuth callback aliases, Gmail watch delivery |
+| Nodes    | `{{SETUP_UI_URL}}#nodes`    | Worker nodes — Node Setup Wizard and pairing approval, connected-node list, browser attach, exec policy (host, security, ask) and the command allowlist |
+| Team     | `{{SETUP_UI_URL}}#team`     | Team access (needs OpenClaw 2026.8+, beta channel) — member accounts, invites, roles, who's online; the enable wizard switches gateway auth to trusted-proxy |
+| Upgrade  | `{{SETUP_UI_URL}}#upgrade`  | OpenClaw versions & release channels (stable/beta/dev) — catalog, release notes, apply with backup + auto-rollback, backups inventory, medic and overseer settings |
+| Browse   | `{{SETUP_UI_URL}}#browse`   | File browser and editor rooted at `.openclaw` (opened from the sidebar file tree), markdown preview/edit, diff review and git-aware save/sync |
 
 ### Environment variables
 

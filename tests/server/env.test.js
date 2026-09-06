@@ -130,6 +130,19 @@ describe("server/env", () => {
     expect(fs.readFileSync(path.join(tmpDir, ".env"), "utf8")).toBe(
       "BRIGHTDATA_API_KEY=bright\nOPENAI_API_KEY=second",
     );
+    // Secret-bearing file: 0600 on a fresh inode, even over a looser pre-existing one.
+    if (process.platform !== "win32") {
+      expect(fs.statSync(path.join(tmpDir, ".env")).mode & 0o777).toBe(0o600);
+    }
+  });
+
+  it("tightens a pre-existing world-readable .env to 0600 on rewrite", () => {
+    const env = loadEnvModule(tmpDir);
+    fs.writeFileSync(path.join(tmpDir, ".env"), "OLD=1", { mode: 0o644 });
+    env.writeEnvFile([{ key: "NEW", value: "2" }]);
+    if (process.platform !== "win32") {
+      expect(fs.statSync(path.join(tmpDir, ".env")).mode & 0o777).toBe(0o600);
+    }
   });
 
   it("strips line breaks from keys and values before writing (issue #26 hardening)", () => {

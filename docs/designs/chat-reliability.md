@@ -173,6 +173,21 @@ fallback keeps history readable when the socket can't connect.
 - **H13** foreign-run event buffer caps (64 runs × 200 events, FIFO evict).
 - **MW5** realtime latch semantics (connection.js httpFallback).
 - **C2** browser socket 'error' handling (close quietly, never crash).
+- **Fix wave PR 9b (v0.9.83)** — outbox and transcript invariants pinned by
+  `tests/frontend/chat-*.test.js`: (1) only an item that was actually SENT
+  (`sentAt`/`ackedAt`) can be confirmed against a history row — a never-sent
+  queued item is never deleted by the merge; (2) sent (inflight/acked)
+  optimistic bubbles render ABOVE the live assistant/tool rows of the run they
+  started, unsent ones below; (3) an ack timeout exits `pendingSend`
+  (`ACK_TIMEOUT` → idle) so the requeued item auto-flushes; (4) the outbox is
+  one per page load, not per `/chat` mount (`restoreOnLoad` runs once); (5)
+  acked items whose socket died wait for the reconnect's history merge
+  (`awaitingHistoryAt` → `releaseAwaitingHistory`, 30s staleness fallback)
+  before any re-send — never a blind 5s timer; (6) `RESUME_ATTACH` carries the
+  live row's `messageId` (from `hello.activeRuns` and the `resumed` frame) and
+  never clears a known one. Server side: typed non-text history parts are never
+  scraped for text; a runId-less session-routed `chat` error does not finalize
+  a pending send (same guard as lifecycle end).
 - Old-bundle compat: legacy `message` frames (no clientMsgId) work — the
   bridge mints an id; validation/errors surface as plain `error` frames;
   `done.stopped === true` stays on stop terminals permanently.

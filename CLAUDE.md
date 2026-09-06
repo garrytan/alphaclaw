@@ -47,11 +47,19 @@ these rules on every branch:
   test:container` when the change touches the gateway/upgrade/boot spine; record
   "container tier not runnable here" if Docker is unavailable), then describe
   the reconciliation file-by-file in the PR body.
-- **Version numbers are claimed at merge time, not branch time.** After merging
-  `main`, renumber `package.json`/`package-lock.json`/`CHANGELOG.md` to the next
-  free version and stack your CHANGELOG entry above the ones that landed while
-  you were out. `VERSION` is not a tracked file — `package.json` is the source
-  of truth.
+- **Version numbers are claimed at merge time, not branch time.** Renumber
+  `package.json`/`package-lock.json`/`CHANGELOG.md` to the next free version in
+  the FINAL pre-merge commit — after the last `git merge origin/main`, so CI
+  re-runs on that push against the number you actually claim — and stack your
+  CHANGELOG entry above the ones that landed while you were out. The CI version
+  guard (`scripts/ci/assert-version-advances.mjs`) requires a strict advance
+  over `main`, so every PR bumps — a revert PR too. `VERSION` is not a tracked
+  file — `package.json` is the source of truth.
+- **The merge step is serialized.** Branches on disjoint subsystems may be
+  developed in parallel workspaces, but the final merge-main → renumber →
+  lockfile → merge sequence runs for one PR at a time: the next PR merges
+  `main`, renumbers and pushes only after the previous one has landed
+  (`tag-release.yml` fails loudly when two merges claim one version).
 - **Deleting or rewriting code merged within the last 7 days requires a
   "Supersedes recent work" section in the PR body:** name the prior PR, each
   file removed or rewritten, and why replacement beats extension.

@@ -1,0 +1,6 @@
+{
+  "rules": [
+    { "type": "file", "path": "openclaw.json" },
+    { "type": "directory", "path": "hooks/transforms" }
+  ]
+}

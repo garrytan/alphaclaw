@@ -813,4 +813,30 @@ describe("server/alphaclaw-config combined doctor settings write (adversarial C-
       maxFileMb: 25,
     });
   });
+
+  // Fix wave F049: the auth boundary's team reader fails closed on a corrupt file.
+  describe("readTeamSettingsStrict", () => {
+    it("flags an existing-but-unparseable file and answers defaults for a missing one", () => {
+      const { readTeamSettingsStrict } = require("../../lib/server/alphaclaw-config");
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ac-team-strict-"));
+      try {
+        const missing = readTeamSettingsStrict({ openclawDir: dir });
+        expect(missing.configUnreadable).toBeUndefined();
+        expect(missing.enabled).toBe(false);
+        fs.writeFileSync(path.join(dir, "alphaclaw.json"), "{ not json");
+        const corrupt = readTeamSettingsStrict({ openclawDir: dir });
+        expect(corrupt.configUnreadable).toBe(true);
+        expect(corrupt.enabled).toBe(false);
+        fs.writeFileSync(
+          path.join(dir, "alphaclaw.json"),
+          JSON.stringify({ team: { enabled: true, disableLegacyLogin: true } }),
+        );
+        const good = readTeamSettingsStrict({ openclawDir: dir });
+        expect(good).toMatchObject({ enabled: true, disableLegacyLogin: true });
+        expect(good.configUnreadable).toBeUndefined();
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    });
+  });
 });

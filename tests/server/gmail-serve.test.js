@@ -251,15 +251,25 @@ describe("server/gmail-serve", () => {
       port: 18801,
       webhookToken: "tok",
     });
+    child.stderr.emit("data", Buffer.from("last words"));
     child.emit("exit", 0, null);
-    expect(onServeExit).toHaveBeenCalledWith({
-      accountId: "acct-1",
-      email: "ops@example.com",
-      client: "default",
-      port: 18801,
-      code: 0,
-      signal: null,
-    });
+    expect(onServeExit).toHaveBeenCalledTimes(1);
+    expect(onServeExit).toHaveBeenCalledWith(
+      expect.objectContaining({
+        accountId: "acct-1",
+        email: "ops@example.com",
+        client: "default",
+        port: 18801,
+        code: 0,
+        signal: null,
+        error: null,
+        uptimeMs: expect.any(Number),
+        stderrTail: "last words",
+      }),
+    );
+    // A late duplicate signal never reports twice.
+    child.emit("exit", 0, null);
+    expect(onServeExit).toHaveBeenCalledTimes(1);
     expect(manager.getServeStatus("acct-1")).toMatchObject({
       running: false,
       pid: null,
@@ -470,5 +480,31 @@ describe("server/gmail-serve", () => {
     expect(manager.isPidRunning("abc")).toBe(false);
     expect(manager.isPidRunning(0)).toBe(false);
     expect(manager.isPidRunning(null)).toBe(false);
+  });
+
+  it("a spawn 'error' (gog missing) is reported like an exit instead of becoming an uncaughtException (F093)", async () => {
+    let child;
+    spawnState.impl = () => {
+      child = new FakeChild({ pid: undefined });
+      return child;
+    };
+    const onServeExit = vi.fn();
+    const manager = createGmailServeManager({ constants: baseConstants, onServeExit });
+    await manager.startServe({ account: baseAccount, port: 18801, webhookToken: "tok" });
+    const error = Object.assign(new Error("spawn gog ENOENT"), { code: "ENOENT" });
+    expect(() => child.emit("error", error)).not.toThrow();
+    expect(onServeExit).toHaveBeenCalledTimes(1);
+    expect(onServeExit).toHaveBeenCalledWith(
+      expect.objectContaining({
+        accountId: "acct-1",
+        code: null,
+        signal: null,
+        error: "spawn gog ENOENT",
+      }),
+    );
+    expect(manager.getServeStatus("acct-1")).toMatchObject({ running: false });
+    // Some Node versions emit "exit" after "error" — still one report.
+    child.emit("exit", null, null);
+    expect(onServeExit).toHaveBeenCalledTimes(1);
   });
 });

@@ -4341,3 +4341,44 @@ describe("server/doctor-service hardening transition log", () => {
     expect(hardeningWarnCalls(warnSpy)).toHaveLength(0);
   });
 });
+
+describe("doctor prompt history dedupe (fix wave F111)", () => {
+  const {
+    dedupeResolvedCards,
+    kDoctorHistoryMaxPerStatus,
+  } = require("../../lib/server/doctor/service");
+
+  it("collapses reuse-run clones to one line per status+title+category, newest first", () => {
+    const cards = [
+      { status: "dismissed", title: "Cleanup docs", category: "workspace" },
+      { status: "dismissed", title: "Cleanup docs", category: "workspace" },
+      { status: "fixed", title: "Cleanup docs", category: "workspace" },
+      { status: "dismissed", title: "Cleanup docs", category: "skills" },
+      { status: "dismissed", title: "Cleanup docs", category: "workspace" },
+    ];
+    expect(dedupeResolvedCards(cards)).toEqual([
+      { status: "dismissed", title: "Cleanup docs", category: "workspace" },
+      { status: "fixed", title: "Cleanup docs", category: "workspace" },
+      { status: "dismissed", title: "Cleanup docs", category: "skills" },
+    ]);
+  });
+
+  it("caps each status at kDoctorHistoryMaxPerStatus, keeping the earliest (newest) rows", () => {
+    const many = Array.from({ length: kDoctorHistoryMaxPerStatus + 15 }, (_, i) => ({
+      status: "dismissed",
+      title: `Finding ${i}`,
+      category: "workspace",
+    }));
+    const fixed = Array.from({ length: 5 }, (_, i) => ({ status: "fixed", title: `Fixed ${i}`, category: "" }));
+    const out = dedupeResolvedCards([...many, ...fixed]);
+    expect(out.filter((c) => c.status === "dismissed")).toHaveLength(kDoctorHistoryMaxPerStatus);
+    expect(out.filter((c) => c.status === "fixed")).toHaveLength(5);
+    expect(out[0].title).toBe("Finding 0");
+    expect(out.some((c) => c.title === `Finding ${kDoctorHistoryMaxPerStatus + 14}`)).toBe(false);
+  });
+
+  it("tolerates an empty or missing list", () => {
+    expect(dedupeResolvedCards([])).toEqual([]);
+    expect(dedupeResolvedCards()).toEqual([]);
+  });
+});
