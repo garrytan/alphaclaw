@@ -608,6 +608,89 @@ describe("frontend/gateway card (server-state matrix)", () => {
     ).toBeUndefined();
   });
 
+  // The Details disclosure is closed by default; toggling it through its own
+  // onclick and re-rendering exercises the real open path (hook slots are
+  // keyed by call order, which is identical across the two renders).
+  const renderWithDetailsOpen = (props) => {
+    const closed = renderGateway(props);
+    const toggle = findAllByType(closed, "button").find((vnode) =>
+      collectText(vnode).join("").includes("Details"),
+    );
+    expect(toggle).toBeTruthy();
+    toggle.props.onclick();
+    return renderGateway(props);
+  };
+
+  it("adopted supervision (Codex 14 / D8): renders the adopted label, the serving pid, and the estimated hedge when flapping", () => {
+    const state = makeServerState({
+      watchdog: {
+        ...kHealthyWatchdog,
+        gatewayPid: null,
+        supervisionMode: "adopted",
+        servingPid: 777,
+        crashCountInWindow: 2,
+      },
+    });
+    expect(state.state).toBe("flapping");
+    expect(state.supervision).toBe("adopted");
+    publishShell({ statusState: state });
+    const tree = renderWithDetailsOpen({
+      watchdogStatus: { gatewayPid: null, servingPid: 777, health: "healthy", lifecycle: "running" },
+    });
+    const text = treeText(tree);
+    expect(text).toContain(
+      "adopted (started outside AlphaClaw; health and memory monitored, exit events unavailable)",
+    );
+    expect(text).not.toContain("managed by AlphaClaw");
+    expect(text).not.toContain("detached (running outside");
+    expect(text).toContain("estimated — gateway runs outside AlphaClaw's supervision");
+    // The serving pid stands in for the missing launch pid.
+    expect(text).toContain("Gateway PID: 777");
+    expect(text).not.toContain("Replacement:");
+  });
+
+  it("supervision labels: managed and detached keep their copy", () => {
+    publishShell({ statusState: makeServerState({}) });
+    expect(treeText(renderWithDetailsOpen({}))).toContain("managed by AlphaClaw");
+
+    harness.reset();
+    publishShell({
+      statusState: makeServerState({ watchdog: { ...kHealthyWatchdog, gatewayPid: null } }),
+    });
+    expect(treeText(renderWithDetailsOpen({}))).toContain(
+      "detached (running outside AlphaClaw's supervision)",
+    );
+  });
+
+  it("renders the replacement-pending line (pid + since) from the server state while a relaunch is unverified", () => {
+    const since = new Date(kNow - 15000).toISOString();
+    const state = makeServerState({
+      watchdog: {
+        ...kHealthyWatchdog,
+        replacementPending: {
+          pid: 4242,
+          source: "exit_event",
+          intent: "relaunch_if_absent",
+          since,
+          deadline: new Date(kNow + 105000).toISOString(),
+        },
+      },
+    });
+    expect(state.replacementPending?.pid).toBe(4242);
+    publishShell({ statusState: state });
+    const text = treeText(renderWithDetailsOpen({}));
+    expect(text).toContain("Replacement:");
+    expect(text).toMatch(/pending \(pid 4242, since .+\)/);
+    expect(text).toContain("not yet confirmed");
+  });
+
+  it("no replacement-pending line when the server reports none", () => {
+    publishShell({ statusState: makeServerState({}) });
+    const text = treeText(renderWithDetailsOpen({}));
+    expect(text).not.toContain("Replacement:");
+    expect(text).not.toContain("pending (pid");
+  });
+
   it("the fixture matrix covers every state in the server catalog (a new state cannot ship unrendered)", () => {
     const fixtureNames = new Set(kStateFixtures.map((fixture) => fixture.name));
     const catalogStates = Object.keys(kGatewayStateCatalog);

@@ -634,6 +634,145 @@ describe("server/gateway-state reducer", () => {
     expect(detachedDown.supervision).toBe("detached");
     expect(detachedDown.detail).toContain("estimated");
   });
+  describe("three-valued supervision (managed / adopted / detached)", () => {
+    const running = (watchdog) =>
+      reduceGatewayState(
+        inputs({
+          watchdog: {
+            lifecycle: "running",
+            health: "healthy",
+            safeMode: false,
+            crashCountInWindow: 0,
+            ...watchdog,
+          },
+        }),
+      );
+
+    it.each([
+      ["launch pid, no mode field (older watchdog)", { gatewayPid: 123 }, "managed", "managed"],
+      ["launch pid + managed mode", { gatewayPid: 123, supervisionMode: "managed" }, "managed", "managed"],
+      ["no pid, no mode field", { gatewayPid: null }, "detached", "detached"],
+      ["no pid, detached mode", { gatewayPid: null, supervisionMode: "detached" }, "detached", "detached"],
+      ["adopted incumbent (no launch pid)", { gatewayPid: null, supervisionMode: "adopted", servingPid: 777 }, "adopted", "adopted"],
+      // A retained launch pid never outranks the watchdog's adopted verdict.
+      ["adopted after a relaunch retained gatewayPid", { gatewayPid: 123, supervisionMode: "adopted" }, "adopted", "adopted"],
+      // Garbage mode strings degrade to the derived axis, never leak through.
+      ["unknown mode string", { gatewayPid: 123, supervisionMode: "weird" }, "managed", "managed"],
+    ])("%s → supervision %s / supervisionMode %s", (_name, watchdog, supervision, mode) => {
+      const result = running(watchdog);
+      expect(result.supervision).toBe(supervision);
+      expect(result.supervisionMode).toBe(mode);
+    });
+
+    it("passes the serving pid through (null when the watchdog has none)", () => {
+      expect(running({ gatewayPid: null, supervisionMode: "adopted", servingPid: 777 }).servingPid).toBe(777);
+      expect(running({ gatewayPid: 123 }).servingPid).toBeNull();
+    });
+
+    it("no watchdog → null supervision axes", () => {
+      const result = reduceGatewayState(inputs({ watchdog: null }));
+      expect(result.supervision).toBeNull();
+      expect(result.supervisionMode).toBeNull();
+      expect(result.servingPid).toBeNull();
+      expect(result.replacementPending).toBeNull();
+    });
+
+    it("adopted gateways carry the estimated hedge when flapping (no exit events reach the watchdog)", () => {
+      const adopted = running({
+        gatewayPid: null,
+        supervisionMode: "adopted",
+        servingPid: 777,
+        crashCountInWindow: 2,
+      });
+      expect(adopted.state).toBe("flapping");
+      expect(adopted.supervision).toBe("adopted");
+      expect(adopted.detail).toContain("estimated");
+      // Healthy adopted gateway: no hedge without crash evidence.
+      expect(running({ gatewayPid: null, supervisionMode: "adopted" }).detail).toBeNull();
+    });
+  });
+
+  it("degraded reason names the failing readiness components when /health is green but readiness is not", () => {
+    const notReady = reduceGatewayState(
+      inputs({
+        watchdog: {
+          lifecycle: "running",
+          health: "degraded",
+          safeMode: false,
+          crashCountInWindow: 0,
+          gatewayPid: 123,
+          readiness: "not_ready",
+          readinessReason: "secrets, event loop",
+        },
+      }),
+    );
+    expect(notReady.state).toBe("degraded");
+    expect(notReady.reason).toBe(
+      "The port answers and /health is green, but readiness checks are failing (secrets, event loop).",
+    );
+
+    const noReason = reduceGatewayState(
+      inputs({
+        watchdog: {
+          lifecycle: "running",
+          health: "degraded",
+          safeMode: false,
+          gatewayPid: 123,
+          readiness: "not_ready",
+          readinessReason: null,
+        },
+      }),
+    );
+    expect(noReason.reason).toBe(
+      "The port answers and /health is green, but readiness checks are failing.",
+    );
+
+    // Liveness degradation (readiness ready or unknown) keeps the generic copy.
+    for (const readiness of ["ready", "unknown", undefined]) {
+      const liveness = reduceGatewayState(
+        inputs({
+          watchdog: {
+            lifecycle: "running",
+            health: "degraded",
+            safeMode: false,
+            gatewayPid: 123,
+            readiness,
+          },
+        }),
+      );
+      expect(liveness.reason).toBe("The port answers but health checks are failing.");
+    }
+  });
+
+  it("passes replacementPending through verbatim (stable values for the SSE dedupe) and drops non-objects", () => {
+    const pending = {
+      pid: 4242,
+      source: "exit_event",
+      intent: "relaunch_if_absent",
+      since: "2027-01-15T00:00:00.000Z",
+      deadline: "2027-01-15T00:02:00.000Z",
+    };
+    const result = reduceGatewayState(
+      inputs({
+        watchdog: {
+          lifecycle: "running",
+          health: "healthy",
+          safeMode: false,
+          gatewayPid: 4242,
+          replacementPending: pending,
+        },
+      }),
+    );
+    expect(result.replacementPending).toEqual(pending);
+    expect(
+      reduceGatewayState(
+        inputs({
+          watchdog: { lifecycle: "running", health: "healthy", safeMode: false, gatewayPid: 1, replacementPending: "yes" },
+        }),
+      ).replacementPending,
+    ).toBeNull();
+    expect(reduceGatewayState(inputs()).replacementPending).toBeNull();
+  });
 });
 
 describe("server/gateway-state tracker (temporal truth)", () => {

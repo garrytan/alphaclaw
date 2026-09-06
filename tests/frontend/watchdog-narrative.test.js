@@ -19,6 +19,8 @@ const loadHelpers = () =>
 const loadCard = () =>
   import("../../lib/public/js/components/watchdog-tab/narrative-card.js");
 const loadUseNowMs = () => import("../../lib/public/js/hooks/use-now-ms.js");
+const loadIncidentHelpers = () =>
+  import("../../lib/public/js/components/watchdog-tab/incidents/helpers.js");
 
 const collectText = (node, out = []) => {
   if (typeof node === "string" || typeof node === "number") {
@@ -564,5 +566,137 @@ describe("formatCountdownRemaining", () => {
     ).toBe("imminent");
     expect(formatCountdownRemaining("garbage", kNow)).toBe(null);
     expect(formatCountdownRemaining(null, kNow)).toBe(null);
+  });
+});
+
+// Eng review 8A: relaunch rows now write `requested` at spawn and `ok
+// {verified: true}` once the child is proven to answer the port; green probes
+// while readiness or an unverified replacement is pending are "up", not
+// recoveries. The timeline must say so instead of rendering the raw status.
+describe("incidents timeline outcome labels (eng review 8A)", () => {
+  const kCases = [
+    {
+      name: "health_check ok {readinessPending}",
+      event: {
+        eventType: "health_check",
+        source: "tick",
+        status: "ok",
+        details: { readinessPending: true, readinessReason: "secrets" },
+      },
+      phrase: "up, not ready",
+      tone: "warning",
+      dotLabel: "Up, not ready",
+      detail: "up, not ready · secrets",
+    },
+    {
+      name: "health_check ok {replacementPending}",
+      event: {
+        eventType: "health_check",
+        source: "tick",
+        status: "ok",
+        details: { replacementPending: true },
+      },
+      phrase: "up, replacement unverified",
+      tone: "warning",
+      dotLabel: "Up, replacement unverified",
+      detail: "up, replacement unverified",
+    },
+    {
+      name: "restart requested",
+      event: {
+        eventType: "restart",
+        source: "repair",
+        status: "requested",
+        details: { pid: 4242 },
+      },
+      phrase: "relaunch requested",
+      tone: "info",
+      dotLabel: "Relaunch requested",
+      detail: "relaunch requested · pid 4242",
+    },
+    {
+      name: "restart ok {verified: true}",
+      event: {
+        eventType: "restart",
+        source: "exit_event",
+        status: "ok",
+        details: { verified: true, pid: 4242 },
+      },
+      phrase: "replacement verified",
+      tone: "success",
+      dotLabel: "Replacement verified",
+      detail: "replacement verified · pid 4242",
+    },
+    {
+      name: "crash detected by probe (no exit event)",
+      event: {
+        eventType: "crash",
+        source: "probe_death",
+        status: "failed",
+        details: { pid: 4242 },
+      },
+      phrase: "process vanished without an exit event",
+      tone: "danger",
+      // The status dot keeps "Failed" for any failed row; the phrase is the
+      // row detail.
+      dotLabel: "Failed",
+      detail: "process vanished without an exit event · pid 4242",
+    },
+  ];
+
+  it.each(kCases)(
+    "$name renders its outcome phrase, not the raw status",
+    async ({ event, phrase, tone, dotLabel, detail }) => {
+      const { describeEvent, describeEventOutcome } = await loadIncidentHelpers();
+      const { getIncidentStatusTone } = await loadHelpers();
+      expect(describeEventOutcome(event)).toEqual({ phrase, tone });
+      const described = describeEvent(event);
+      expect(described.detail).toBe(detail);
+      expect(described.tone).toBe(tone);
+      expect(described.summary).toContain(phrase);
+      expect(described.summary.toLowerCase()).not.toMatch(/\bok\b/);
+      const dot = getIncidentStatusTone(event);
+      expect(dot.label).toBe(dotLabel);
+      expect(dot.label).not.toBe("Unknown");
+      expect(dot.label).not.toBe("Healthy");
+    },
+  );
+
+  it("plain rows are untouched: a green probe is Healthy, a legacy restart ok stays Unknown, other requested statuses keep their tone", async () => {
+    const { describeEvent, describeEventOutcome } = await loadIncidentHelpers();
+    const { getIncidentStatusTone } = await loadHelpers();
+    const healthy = { eventType: "health_check", status: "ok", details: {} };
+    expect(describeEventOutcome(healthy)).toBeNull();
+    expect(getIncidentStatusTone(healthy).label).toBe("Healthy");
+    expect(describeEvent(healthy).tone).toBe("success");
+
+    const legacyRestartOk = { eventType: "restart", status: "ok", details: { pid: 1 } };
+    expect(describeEventOutcome(legacyRestartOk)).toBeNull();
+    expect(getIncidentStatusTone(legacyRestartOk).label).toBe("Unknown");
+    expect(describeEvent(legacyRestartOk).detail).toBe("pid 1");
+
+    // "requested" is also written by channel_rollback / forward_recovery rows —
+    // they must not be relabelled as relaunches.
+    const rollback = { eventType: "channel_rollback", status: "requested", details: { reason: "crash_loop" } };
+    expect(describeEventOutcome(rollback)).toBeNull();
+    expect(describeEvent(rollback).detail).toBe("crash_loop");
+    expect(describeEvent(rollback).tone).toBe("info");
+
+    // A normal exit-event crash keeps the plain crash label.
+    const crash = { eventType: "crash", source: "exit_event", status: "failed", details: { code: 1 } };
+    expect(describeEventOutcome(crash)).toBeNull();
+    expect(describeEvent(crash).detail).toBe("exit code 1");
+  });
+
+  it("labels the new event types readiness_probe_error and serving_identity_lost", async () => {
+    const { kWatchdogEventLabels, describeEvent } = await loadIncidentHelpers();
+    expect(kWatchdogEventLabels.readiness_probe_error).toBe("Readiness probe error");
+    expect(kWatchdogEventLabels.serving_identity_lost).toBe("Serving identity lost");
+    expect(
+      describeEvent({ eventType: "serving_identity_lost", status: "warn", details: { reason: "start_ticks_mismatch" } }).summary,
+    ).toBe("Serving identity lost — start_ticks_mismatch");
+    expect(
+      describeEvent({ eventType: "readiness_probe_error", status: "warn", details: { reason: "fetch failed" } }).label,
+    ).toBe("Readiness probe error");
   });
 });
