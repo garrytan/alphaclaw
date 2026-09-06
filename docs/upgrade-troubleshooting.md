@@ -498,10 +498,12 @@ the successor's operation proceeds alone. Before this change the expired
 holder would have launched a second gateway into the successor's restart.
 
 **Why it happens:** the repair hold is leased at the Doctor ceiling plus the
-restart budget (about 15 minutes by default), so expiry during a repair
-should be rare; the common cause is a very slow `doctor --fix` (plugin
-preflight against an unreachable registry) coinciding with a manual restart
-or apply. The work already underway is not cancelled — a Doctor that
+restart budget (about 20 minutes by default: the 10-minute `doctor --fix`
+ceiling plus the ~10.5-minute restart operation budget derived from
+`GATEWAY_RESTART_READY_TIMEOUT`), so expiry during a repair should be
+rare; the common cause is a very slow `doctor --fix` (plugin preflight
+against an unreachable registry) coinciding with a manual restart or
+apply. The work already underway is not cancelled — a Doctor that
 outlives its lease still finishes writing `openclaw.json` (cancellation
 signals into the Doctor runner are a TODOS item).
 
@@ -570,7 +572,19 @@ data written by the newer version may be unreadable.
   `backup_diagnosis`, `backup_quiesce`, `backup_contention`,
   `backup_offline_copy`, `backup_reused`, `state_db_quiet`,
   `notification_partial`, `notification_abandoned`, `restart_incumbent`,
-  `prelaunch_hook`).
+  `prelaunch_hook`; since v0.9.75 also `readiness_degraded`,
+  `readiness_probe_error`, `serving_identity_lost`, the
+  `restart/<source>/requested` → `ok {verified: true}` pair a verified
+  relaunch leaves behind, and the `repair/<source>/skipped` reasons
+  `awaiting_sustained_failure`, `incumbent_startup_grace`, `lease_expired`
+  and `state_writer_conflict`).
+- **Watchdog status:** `GET /api/watchdog/status` — `readiness` /
+  `readinessReason`, `servingPid` / `servingRootPid` / `supervisionMode`,
+  `replacementPending`, `lastRepairVerdict`, `degradedRepairThreshold`,
+  `incumbentConflict` (kind, holder pid/role) and `incumbentGraceUntil`. The
+  repair response (`POST /api/watchdog/repair`) carries `ok`, `verdict`,
+  `pending`, `replacementPending` and, on `ok: false`, `error` plus an
+  operator `message`.
 - **Update logs:** the update log files linked from the Upgrade tab's
   "Technical details" toggle on the progress card — the CLI's own output
   (the contention lines above appear verbatim there).

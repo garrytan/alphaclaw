@@ -293,7 +293,7 @@ The built-in watchdog monitors gateway health and recovers from failures automat
 | **Health checks**        | Periodic HTTP probes of the gateway's `/health` and `/readyz` (120s cadence; degraded retries back off 5s→10s→20s→30s) |
 | **Crash detection**      | Gateway exit events plus an always-on 10s TCP port watcher, with immediate re-checks after every restart/repair |
 | **Crash-loop detection** | Threshold-based (default: 3 crashes in 300s)                           |
-| **Auto-repair**          | Runs `openclaw doctor --fix --yes`, relaunches gateway. Refused (`409 gateway_held`) while the gateway is held after a failed settings migration — the fix would rewrite the held config; recover from the Upgrade page instead |
+| **Auto-repair**          | After `WATCHDOG_DEGRADED_REPAIR_THRESHOLD` consecutive failed liveness probes (default 3; a proven-dead gateway process skips straight to a relaunch) runs `openclaw doctor --fix --yes`, then replaces a still-unhealthy gateway through the verified relaunch path — a gateway that answers healthy after Doctor is kept, never cold-restarted (see *Verified relaunches* below). Refused (`409 gateway_held`) while the gateway is held after a failed settings migration — the fix would rewrite the held config; recover from the Upgrade page instead |
 | **Restart handoff**      | OpenClaw-requested restarts (config writes, `/restart`, plugin changes) are consumed as a verified handoff and relaunched promptly without crash accounting — rate-braked at 5 handoff relaunches per hour, after which the normal crash flow takes over (OpenClaw 2026.8.1-beta) |
 | **Live narration**       | Plain-language "what is happening / why / what happens next" with live countdowns (backoff, grace windows, the 10-min rollback clock) and honest suppression chips |
 | **Incident history**     | Persisted, grouped incidents (open → resolved/abandoned) with humanized event timelines, plus the raw SQLite event feed |
@@ -436,7 +436,9 @@ offline-copy backup format) live in
 [docs/designs/](docs/designs/);
 the operator runbook for upgrade failure states (held gateways, backup
 contention and the offline copy, restoring a backup, consented backup reuse,
-incumbent gateways, the prelaunch hook, rollback fencing) is
+incumbent gateways, a gateway that is up but not ready, state-directory
+ownership conflicts, expired repair leases, the prelaunch hook, rollback
+fencing) is
 [docs/upgrade-troubleshooting.md](docs/upgrade-troubleshooting.md);
 architecture notes and conventions for coding agents are in
 [AGENTS.md](AGENTS.md).
