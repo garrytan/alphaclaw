@@ -251,6 +251,17 @@ describe("server/routes/watchdog", () => {
     expect(failed.body.message).not.toContain("launch_failed");
   });
 
+  it("a Doctor failure (ok:false, no skip, no verdict) is named doctor_failed, not a relaunch failure (POST /api/watchdog/repair)", async () => {
+    const deps = createDeps();
+    deps.watchdog.getStatus.mockReturnValue({ lifecycle: "running", replacementPending: null });
+    deps.watchdog.triggerRepair.mockResolvedValue({ ok: false, result: { ok: false, stderr: "doctor: cannot fix" } });
+    const res = await request(createApp(deps)).post("/api/watchdog/repair");
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ ok: false, verdict: null, pending: false, error: "doctor_failed" });
+    expect(res.body.message).toMatch(/doctor --fix did not fix/);
+    expect(res.body.message).not.toMatch(/relaunch failed/);
+  });
+
   it("a pending repair response carries operator copy and a healthy-incumbent verdict carries none (POST /api/watchdog/repair)", async () => {
     const deps = createDeps();
     deps.watchdog.getStatus.mockReturnValue({ lifecycle: "running", replacementPending: null });
