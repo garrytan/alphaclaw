@@ -5,6 +5,75 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.9.76] - 2026-09-06
+
+Pins OpenClaw to 2026.9.2 — npm's `latest` tag and the newest published
+version — moving the stable pin off 2026.7.1-2. `package.json`'s
+`dependencies.openclaw` is the pin's only source of truth, so the remaining
+`2026.7.1-2` mentions in docs and tests stay as the historical evidence stamps
+they are. The full suite is green on the supported platform (7501/7501 in a
+Linux container); the macOS host's failures are the documented bsdtar and
+case-insensitive-filesystem gaps and are unchanged by this release.
+
+### Changed
+
+- **OpenClaw pin: 2026.7.1-2 to 2026.9.2.** Express 5 is not required — both
+  the old and new pin vendor `express@5.2.1` under `node_modules/openclaw`
+  while AlphaClaw stays on 4.22.1 — and `engines` already matched 2026.9.2's
+  requirement exactly, so it is unchanged.
+- **Eight feature gates open** that were closed at the old pin: `multiUser`,
+  `sessionDashboards`, `sqliteBackup`, `supervisorMode`,
+  `trustedProxyPairing`, `secretEgressBinding`, `bootstrapContractV2` and
+  `execApprovalsSqlite`. Operators upgrading should note `execApprovalsSqlite`
+  makes a legacy `exec-approvals.json` existence-fatal (issue #23).
+- **"What's new" gains the 2026.9 line.** Highlights come from the 2026.9.2
+  package's own changelog. The three security-default flips were verified in
+  both versions' shipped docs rather than assumed, because each renders as an
+  operator warning: `tools.sessions.visibility` `tree` to `all`,
+  `tools.agentToAgent.enabled` `false` to `true`, and `tools.swarm.enabled`
+  (absent at 2026.7, enabled by default at 2026.9, so agents spawn concurrent
+  sub-agents unless opted out).
+
+### Fixed
+
+- **Retired upstream migration exports no longer break the boot migration.**
+  2026.9 removed `maybeRepairOpenAICodexAuthProfileStores` from
+  `doctor-auth-flat-profiles-*.js`, and `loadOpenclawMigrationApi` failed the
+  whole migration on any absent name. It now accepts
+  `optionalFunctionNames` — loaded when present, feature-detected at the call
+  site — while the other three names stay required so a real contract break
+  still fails loudly. The retired step rewrote a legacy flat
+  `auth-profiles.json` store's provider in place; the JSON store does not
+  survive the run either way, since the SQLite migration that follows moves
+  and renames those profiles.
+- **The backup inventory's newest archive is deterministic.**
+  `scanBackupArchives` sorted by mtime alone, and `sort` is stable, so two
+  archives written in the same millisecond fell through to `readdirSync`
+  order — inode order on ext4/overlayfs, near-alphabetical on APFS — making
+  `newestArchive` filesystem-dependent. That value is load-bearing: every
+  backup refusal names it as the manual recovery artifact. The archive name
+  embeds its timestamp, so it is now the secondary key.
+
+### Known
+
+- **The container tier's stable-to-beta journey self-skips.** The journey
+  drives toward the newest prerelease whose core is above the stable pin, and
+  a pin at the head of the release line has none: npm re-points the `beta`
+  dist-tag at the promoted stable release when a beta line ships, so it is
+  2026.9.1 while `latest` is 2026.9.2. The nine upgrade-journey cases —
+  browser-driven apply, the issue #54 contention shape, the orchestrator
+  restart and both durability legs — do not run until upstream opens the next
+  beta line, at which point they resume with no code change. Tracked as a P2
+  in `TODOS.md`; the scheduled non-strict run is what will notice first.
+- **`OPENCLAW_CONTAINER_E2E_STRICT` no longer fails a current pin.** On pull
+  requests the container tier turned "no prerelease above the pin" into a hard
+  failure, which made *every* pin at the head of the release line unmergeable.
+  It now forgives exactly that case (the pin is published, is at or above
+  `dist-tags.latest`, and a `beta` tag exists) and still fails on a
+  missing/malformed `beta` tag, an unpublished or future-dated pin, and a
+  stale pin with no beta above it — pinning 2026.9.1 while 2026.9.2 is latest
+  still fails, because that is not the head of the line.
+
 ## [0.9.75] - 2026-09-05
 
 Honest restart outcomes for the watchdog's automatic relaunch paths. An
