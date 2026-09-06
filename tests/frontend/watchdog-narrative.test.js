@@ -700,3 +700,41 @@ describe("incidents timeline outcome labels (eng review 8A)", () => {
     ).toBe("Readiness probe error");
   });
 });
+
+describe("describeDegradedReason (v0.9.75: internal enums never render)", () => {
+  it("maps the repair-contract degradedReason enums to operator copy (readiness names its components) and keeps free-text probe reasons as 'Probe said'", async () => {
+    const { describeDegradedReason, buildWatchdogNarrative } = await loadHelpers();
+    expect(
+      describeDegradedReason({ degradedReason: "readiness_failing", readinessReason: "secrets, eventLoop" }),
+    ).toBe("Readiness checks are failing (secrets, eventLoop); the port answers and /health is green.");
+    expect(describeDegradedReason({ degradedReason: "readiness_failing" })).toBe(
+      "Readiness checks are failing; the port answers and /health is green.",
+    );
+    for (const [reason, needle] of [
+      ["gateway_conflict_unhealthy", "Another gateway holds the state directory"],
+      ["state_writer_conflict", "Another OpenClaw process holds the state directory"],
+      ["incumbent_unhealthy", "is not healthy"],
+      ["replacement_not_ready", "never became ready"],
+    ]) {
+      const text = describeDegradedReason({ degradedReason: reason });
+      expect(text).toContain(needle);
+      expect(text).not.toContain(reason);
+    }
+    expect(describeDegradedReason({ degradedReason: "gateway health returned HTTP 503" })).toBe(
+      "Probe said: gateway health returned HTTP 503.",
+    );
+    const narrative = buildWatchdogNarrative(
+      {
+        ...baseStatus,
+        phase: "degraded_retrying",
+        health: "degraded",
+        degradedSince: new Date(kNow - 60_000).toISOString(),
+        degradedReason: "readiness_failing",
+        readinessReason: "secrets",
+      },
+      kNow,
+    );
+    expect(narrative.detail).toContain("Readiness checks are failing (secrets)");
+    expect(narrative.detail).not.toContain("readiness_failing");
+  });
+});

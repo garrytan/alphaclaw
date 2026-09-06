@@ -192,6 +192,7 @@ describe("lib/server.js composition pins (lane C / lane A hand-offs)", () => {
       "discoverServingIdentity: resolveServingIdentity,",
       "readProcStartTicks: lockContention.readProcStartTicks,",
       "classifyOwnershipConflict: lockContention.classifyOwnershipConflict,",
+      "pidAlive: lockContention.pidAlive,",
       "getLaunchGeneration,",
       // `(options) => restartGateway(options)`: the watchdog's { shouldAbort }
       // must reach runGatewayColdStart, so a bare `() => restartGateway()`
@@ -213,7 +214,7 @@ describe("lib/server.js composition pins (lane C / lane A hand-offs)", () => {
     for (const name of ["requestGatewayLaunch", "resolveServingIdentity", "getLaunchGeneration"]) {
       expect(typeof gateway[name]).toBe("function");
     }
-    for (const name of ["readProcStartTicks", "classifyOwnershipConflict"]) {
+    for (const name of ["readProcStartTicks", "classifyOwnershipConflict", "pidAlive"]) {
       expect(typeof lockContention[name]).toBe("function");
     }
   });

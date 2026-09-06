@@ -87,7 +87,7 @@ incumbent-verified restart (#59) rather than replacing them.
   gateway → degraded + incident + one notice naming the pid/role. A wedged
   gateway holder is later replaced by repair; a state-writer holder (embedded
   agent, backup, migration) gets backoff relaunches only — never `doctor
-  --fix`, never `gateway stop`, because neither can free that lock.
+  --fix`, never `gateway stop`, because neither can free that lock. A state-writer conflict is latched across its own backoff relaunches (a contender that re-exits outside the 60 s startup window, or hangs on the lock until the pending deadline, stays on the relaunch ladder; `runRepair` refuses with `state_writer_conflict` instead of running Doctor); those relaunches count in their own window, so `crashCountInWindow` and the "flapping" headline never rise without a `crash` row; the conflict arms the degraded clock immediately. The watchdog narrative renders operator copy for the new `degradedReason` enums (readiness names its failing components) — internal enum names never reach the card.
 - **Lease-expired holders cannot mutate lifecycle.** The lifecycle lock's
   `release` function now carries `holdId`, `isValid()`, `isExpired()`,
   `kind` and `startedAt`. Repair, the crash relaunch, the medic and the

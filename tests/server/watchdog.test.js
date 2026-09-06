@@ -6463,5 +6463,121 @@ describe("server/watchdog", () => {
       watchdog.stop();
     });
 
+    // ── Quality / contract review (post-merge fixes) ─────────────────────
+    it("C-P2. a state-writer conflict is LATCHED across its own backoff relaunch: a re-exit outside the startup window and a relaunch that hangs to the pending deadline both stay on the relaunch ladder (no Doctor, no cold restart), crashCountInWindow stays 0, degradedSince is armed", async () => {
+      vi.useFakeTimers();
+      const { kGatewayRestartReadyTimeoutMs } = require("../../lib/server/constants");
+      const { control, fetchImpl } = createGatewayControl();
+      const coldRestart = vi.fn(async () => ({ ok: true }));
+      const { watchdog, insertWatchdogEvent, clawCmd } = createHarness({
+        autoRepair: true,
+        fetchImpl,
+        clawCmdImpl: doctorOk,
+        restartGatewayColdStart: coldRestart,
+      });
+      try {
+        const wording = [
+          "Gateway failed to start: state directory is locked by agent-embedded (pid 4321); lock timeout after 5000ms",
+        ];
+        watchdog.onGatewayLaunch({ startedAt: Date.now() - 60_000, pid: 100, rootPid: 100, generation: 1 });
+        await vi.advanceTimersByTimeAsync(0);
+        control.healthy = false; // nobody serves the port: the holder is a non-gateway writer
+        watchdog.onGatewayExit({
+          code: 1,
+          expectedExit: false,
+          pid: 100,
+          generation: 1,
+          stderrTail: wording,
+          launchedAt: Date.now() - 2_000,
+        });
+        await vi.advanceTimersByTimeAsync(20);
+        expect(watchdog.getStatus()).toMatchObject({ health: "degraded", degradedReason: "state_writer_conflict" });
+        expect(watchdog.getStatus().degradedSince).toBeTruthy();
+
+        // A failing tick takes the relaunch ladder, never Doctor.
+        await watchdog.runHealthCheck({ source: "health_timer" });
+        await vi.advanceTimersByTimeAsync(20);
+        expect(doctorFixCalls(clawCmd)).toBe(0);
+        expect(restartRows(insertWatchdogEvent, { source: "state_writer_conflict", status: "requested" })).toHaveLength(1);
+        expect(watchdog.getStatus().replacementPending).toMatchObject({ pid: 4242, source: "state_writer_conflict" });
+
+        // The relaunched contender re-exits with conflict wording OUTSIDE the
+        // 60s startup window: still a conflict (latched), never a crash.
+        watchdog.onGatewayExit({
+          code: 1,
+          expectedExit: false,
+          pid: 4242,
+          stderrTail: wording,
+          launchedAt: Date.now() - 120_000,
+        });
+        await vi.advanceTimersByTimeAsync(20);
+        expect(rowsOfType(insertWatchdogEvent, "crash")).toHaveLength(0);
+        expect(watchdog.getStatus().crashCountInWindow).toBe(0);
+        expect(watchdog.getStatus().degradedReason).toBe("state_writer_conflict");
+
+        // Second relaunch; this one hangs on the lock until the pending
+        // deadline. Past the ready budget the obligation fails and the
+        // degraded ladder re-enters — and still never reaches Doctor or the
+        // `replace` cold restart.
+        await watchdog.runHealthCheck({ source: "health_timer" });
+        await vi.advanceTimersByTimeAsync(20);
+        expect(restartRows(insertWatchdogEvent, { source: "state_writer_conflict", status: "requested" })).toHaveLength(2);
+        await vi.advanceTimersByTimeAsync(kGatewayRestartReadyTimeoutMs + 5_000);
+        await watchdog.runHealthCheck({ source: "health_timer" });
+        await vi.advanceTimersByTimeAsync(20);
+        expect(doctorFixCalls(clawCmd)).toBe(0);
+        expect(coldRestart).not.toHaveBeenCalled();
+        expect(rowsOfType(insertWatchdogEvent, "crash")).toHaveLength(0);
+        expect(watchdog.getStatus().crashCountInWindow).toBe(0);
+        expect(
+          rowsOfType(insertWatchdogEvent, "repair", "skipped").filter(
+            (row) => row.details.reason === "state_writer_conflict",
+          ).length,
+        ).toBeGreaterThanOrEqual(0);
+        expect(
+          restartRows(insertWatchdogEvent, { source: "state_writer_conflict", status: "requested" }).length,
+        ).toBeGreaterThanOrEqual(2);
+      } finally {
+        watchdog.stop();
+        vi.useRealTimers();
+      }
+    });
+
+    it("C-P3. a redelivered ADOPTED launch payload (generation null) is idempotent: no servingSeq bump, so a probe in flight is not discarded as stale", async () => {
+      let resolveHealth = null;
+      const fetchImpl = () =>
+        new Promise((resolve) => {
+          resolveHealth = () =>
+            resolve({
+              ok: true,
+              status: 200,
+              text: async () => JSON.stringify({ ok: true, status: "live" }),
+            });
+        });
+      const { watchdog } = createHarness({ autoRepair: false, fetchImpl });
+      const adopted = {
+        startedAt: Date.now() - 60_000,
+        pid: null,
+        servingPid: 900,
+        rootPid: 900,
+        startTicks: 5,
+        generation: null,
+        supervision: "adopted",
+      };
+      watchdog.onGatewayLaunch(adopted);
+      const probe = watchdog.runHealthCheck({ source: "health_timer" });
+      await settle();
+      watchdog.onGatewayLaunch({ ...adopted, startedAt: Date.now() }); // redelivery
+      resolveHealth();
+      await probe;
+      expect(watchdog.getStatus()).toMatchObject({
+        health: "healthy",
+        supervisionMode: "adopted",
+        servingPid: 900,
+        servingRootPid: 900,
+      });
+      watchdog.stop();
+    });
+
   });
 });

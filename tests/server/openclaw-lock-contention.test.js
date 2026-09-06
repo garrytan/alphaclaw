@@ -390,3 +390,20 @@ describe("readProcStartTicks / readProcParentPid (/proc/<pid>/stat field 22 and 
     expect(readProcParentPid(process.pid)).toBe(process.ppid);
   });
 });
+
+describe("pidAlive (probe-death evidence)", () => {
+  it("is true when signal 0 succeeds or is refused with EPERM (alive, not ours), false on ESRCH or a non-pid", () => {
+    const { pidAlive } = require("../../lib/server/openclaw-lock-contention");
+    expect(pidAlive(process.pid)).toBe(true);
+    const throwing = (code) => () => {
+      throw Object.assign(new Error(code), { code });
+    };
+    expect(pidAlive(123, { kill: throwing("ESRCH") })).toBe(false);
+    expect(pidAlive(123, { kill: throwing("EPERM") })).toBe(true);
+    expect(pidAlive(123, { kill: throwing("EINVAL") })).toBe(true);
+    expect(pidAlive(0)).toBe(false);
+    expect(pidAlive(-1)).toBe(false);
+    expect(pidAlive(null)).toBe(false);
+    expect(pidAlive("4242", { kill: () => undefined })).toBe(true);
+  });
+});
