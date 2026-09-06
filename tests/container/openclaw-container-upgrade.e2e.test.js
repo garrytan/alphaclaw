@@ -25,6 +25,7 @@ const {
   loginForCookie,
   fetchJsonWithCookie,
   resolveBetaTarget,
+  compareLooseVersions,
 } = require("./container-helpers.js");
 
 // -----------------------------------------------------------------------------
@@ -262,9 +263,41 @@ describeContainer("container E2E: stable→beta upgrade in the production image"
       const message =
         `registry sanity failed: no prerelease newer than the stable pin ${ctx.stablePin} ` +
         `(beta dist-tag ${JSON.stringify(resolved.tagged)}) — the stable→beta journey cannot run`;
-      if (strict) throw new Error(`[STRICT] ${message}`);
+      // A pin sitting at the HEAD of the release line has no prerelease above
+      // it BY DEFINITION, and will not until upstream opens the next beta
+      // line. Failing PRs for that punishes the correct act of pinning the
+      // newest stable: every pin >= the `latest` dist-tag is unmergeable,
+      // which is how 2026.9.2 first tripped this (beta dist-tag 2026.9.1 sits
+      // BELOW latest, so nothing is eligible). That is an upstream registry
+      // state, not a regression here — the same reasoning the workflow already
+      // applies to schedule/dispatch runs.
+      //
+      // Strict still fails the cases it was written for, because those hide a
+      // real problem behind a green tier: a missing/malformed `beta` dist-tag,
+      // and a pin no published release can ever sit above (a typo'd or
+      // future-dated pin), which would disable this tier forever. A registry
+      // that cannot be reached already threw above.
+      const betaTagPublished = resolved.tagged != null;
+      const pinPublished = Object.prototype.hasOwnProperty.call(
+        doc.versions || {},
+        ctx.stablePin,
+      );
+      const latestTag = doc["dist-tags"] && doc["dist-tags"].latest;
+      const pinAtHeadOfLine =
+        pinPublished &&
+        latestTag != null &&
+        compareLooseVersions(ctx.stablePin, String(latestTag)) >= 0;
+      const headOfLine = betaTagPublished && pinAtHeadOfLine;
+      if (strict && !headOfLine) throw new Error(`[STRICT] ${message}`);
       skipReason = message;
-      console.warn(`[container-e2e] ${message} — skipping the journey (non-strict)`);
+      console.warn(
+        `[container-e2e] ${message} — skipping the journey (${
+          headOfLine
+            ? `pin ${ctx.stablePin} is at the head of the release line (latest ${latestTag}); ` +
+              "the journey resumes once upstream opens the next beta line"
+            : "non-strict"
+        })`,
+      );
     } else {
       console.log(
         `[container-e2e] stable pin ${ctx.stablePin} → beta ${ctx.beta} ` +
