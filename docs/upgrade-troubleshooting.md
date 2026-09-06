@@ -451,7 +451,11 @@ it with an incumbent probe. Two cases:
   cold-restart path (`intent: "replace"`, the same `gateway stop` →
   `--force` → ready-wait that manual restarts use, with the
   incumbent-still-running verdict above). A refused stop counts as a repair
-  attempt and the automatic ladder waits for a recovery before trying again.
+  attempt and the automatic ladder waits for a recovery before trying again —
+  if you stop the wedged gateway yourself (the notice names its pid), the
+  watchdog sees there is nothing left to replace and relaunches on its next
+  probe (`repair/<source>/ok {latchLifted: true}`); the grace ends early the
+  same way when the holder is gone.
 - **State-writer conflict** (`state_writer_conflict`: "state directory is
   locked by <role> (pid N)", "another embedded OpenClaw state writer is
   active", "failed to acquire gateway state ownership"). The holder is not a

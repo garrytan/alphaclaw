@@ -76,10 +76,21 @@ incumbent-verified restart (#59) rather than replacing them.
   never success; a failed or aborted replacement counts as a repair attempt
   and (automatic sources) waits for a recovery before another repair, so a
   wedged incumbent that refuses `gateway stop` is not re-stopped on every
-  failing tick. An EXTERNAL incumbent that holds the port or state directory
-  but is not green yet gets a cold-boot grace (`kGatewayRestartReadyTimeoutMs`,
-  `incumbentGraceUntil` in status, one `repair/<source>/skipped
-  {incumbent_startup_grace}` row) before repair may replace it. Crash
+  failing tick — and that wait lifts itself (`repair/<source>/ok
+  {latchLifted, nothing_left_to_replace}`) once the incumbent it could not
+  stop is gone or the port closed, so an operator who kills the wedged
+  gateway gets a relaunch on the next probe, not a stalled ladder. "Healthy"
+  for the pre-replace check means every probe of the run answered: a
+  flapping incumbent is replaced, not retained. An EXTERNAL incumbent that
+  holds the port or state directory but is not green yet gets a cold-boot
+  grace (`kGatewayRestartReadyTimeoutMs`, `incumbentGraceUntil` in status,
+  one `repair/<source>/skipped {incumbent_startup_grace}` row, a `runRepair`
+  gate so crash-loop repairs honour it too) before repair may replace it;
+  the grace is not armed for a draining corpse or an unidentifiable port,
+  and ends early when the holder pid is gone. A planned restart (route,
+  memory mitigation) supersedes an open pending replacement
+  (`replacement_superseded {supersededBy: expected_restart}`), and a pending
+  child's expected late exit still ends its obligation. Crash
   relaunches, the medic and the config retry keep `relaunch_if_absent`: a
   healthy incumbent (whose root is not the pid that just exited) is adopted;
   an unhealthy one is left to the degraded ladder rather than blindly
