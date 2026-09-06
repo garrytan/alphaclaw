@@ -12,6 +12,10 @@ const kCadenceKeys = [
   "WATCHDOG_DEGRADED_CHECK_INTERVAL",
   "WATCHDOG_DEGRADED_CHECK_MAX_INTERVAL",
 ];
+// The sustained-failure gate is a count, not a cadence, but it is read the
+// same way (module load, clamped, deployment-only) and guards the same loop.
+const kRepairGateKey = "WATCHDOG_DEGRADED_REPAIR_THRESHOLD";
+const kDeploymentOnlyWatchdogKeys = [...kCadenceKeys, kRepairGateKey];
 
 // Constants are read at module load, so every case re-requires a fresh copy
 // against the process.env it just arranged (same pattern as env.test.js:
@@ -35,10 +39,12 @@ const watchdogWarnLines = (warnSpy) =>
 
 // Save the cadence knobs, clear them for the case, and hand back a restore.
 const snapshotCadenceEnv = () => {
-  const saved = Object.fromEntries(kCadenceKeys.map((k) => [k, process.env[k]]));
-  for (const key of kCadenceKeys) delete process.env[key];
+  const saved = Object.fromEntries(
+    kDeploymentOnlyWatchdogKeys.map((k) => [k, process.env[k]]),
+  );
+  for (const key of kDeploymentOnlyWatchdogKeys) delete process.env[key];
   return () => {
-    for (const key of kCadenceKeys) {
+    for (const key of kDeploymentOnlyWatchdogKeys) {
       if (saved[key] === undefined) delete process.env[key];
       else process.env[key] = saved[key];
     }
@@ -140,6 +146,87 @@ describe("readClampedEnvSeconds", () => {
   });
 });
 
+describe("readClampedEnvCount", () => {
+  const kName = "ALPHACLAW_TEST_CLAMPED_COUNT";
+  const kOpts = { fallback: 3, min: 1, max: 20 };
+  let readClampedEnvCount;
+  let warnSpy;
+
+  beforeEach(() => {
+    ({ readClampedEnvCount } = require(numberModulePath));
+    warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    delete process.env[kName];
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    delete process.env[kName];
+  });
+
+  it("returns the fallback without warning when unset, empty, or whitespace-only", () => {
+    expect(readClampedEnvCount(kName, kOpts)).toBe(3);
+    process.env[kName] = "";
+    expect(readClampedEnvCount(kName, kOpts)).toBe(3);
+    process.env[kName] = "   ";
+    expect(readClampedEnvCount(kName, kOpts)).toBe(3);
+    expect(warnSpy).not.toHaveBeenCalled();
+  });
+
+  it("returns an in-range count without warning", () => {
+    process.env[kName] = "5";
+    expect(readClampedEnvCount(kName, kOpts)).toBe(5);
+    expect(warnSpy).not.toHaveBeenCalled();
+  });
+
+  it("clamps to the ceiling and warns WITHOUT a unit suffix", () => {
+    process.env[kName] = "25";
+    expect(readClampedEnvCount(kName, kOpts)).toBe(20);
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    // A bare count: "20", never "20s".
+    expect(warnSpy).toHaveBeenCalledWith(
+      `[alphaclaw] ${kName}=25 clamped to 20 (valid range 1-20)`,
+    );
+  });
+
+  it.each(["abc", "0", "-5"])(
+    "falls back on junk %j with the unit-less junk message",
+    (raw) => {
+      process.env[kName] = raw;
+      expect(readClampedEnvCount(kName, kOpts)).toBe(3);
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+      expect(warnSpy).toHaveBeenCalledWith(
+        `[alphaclaw] ${kName}=${raw} not a positive integer — falling back to 3 (valid range 1-20)`,
+      );
+    },
+  );
+
+  it("normalizes a float to its integer part with the unit-less message", () => {
+    process.env[kName] = "2.9";
+    expect(readClampedEnvCount(kName, kOpts)).toBe(2);
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    expect(warnSpy).toHaveBeenCalledWith(
+      `[alphaclaw] ${kName}=2.9 normalized to 2 (valid range 1-20)`,
+    );
+  });
+
+  it("does not call surrounding whitespace a normalization", () => {
+    process.env[kName] = " 4 ";
+    expect(readClampedEnvCount(kName, kOpts)).toBe(4);
+    expect(warnSpy).not.toHaveBeenCalled();
+  });
+
+  it("is the same reader as readClampedEnvSeconds apart from the unit suffix", () => {
+    const { readClampedEnvNumber, readClampedEnvSeconds } = require(numberModulePath);
+    process.env[kName] = "25";
+    readClampedEnvSeconds(kName, kOpts);
+    readClampedEnvNumber(kName, { ...kOpts, unit: "" });
+    expect(warnSpy.mock.calls.map(([line]) => line)).toEqual([
+      `[alphaclaw] ${kName}=25 clamped to 20s (valid range 1-20)`,
+      `[alphaclaw] ${kName}=25 clamped to 20 (valid range 1-20)`,
+    ]);
+  });
+});
+
 describe("watchdog cadence constants", () => {
   let restoreCadenceEnv;
   let warnSpy;
@@ -227,6 +314,54 @@ describe("watchdog cadence constants", () => {
   });
 });
 
+describe("kWatchdogDegradedRepairThreshold", () => {
+  let restoreCadenceEnv;
+  let warnSpy;
+
+  beforeEach(() => {
+    restoreCadenceEnv = snapshotCadenceEnv();
+    warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    restoreCadenceEnv();
+    purgeModuleCache();
+  });
+
+  it("defaults to 3 consecutive failures with no warning", () => {
+    const constants = loadConstants();
+    expect(constants.kWatchdogDegradedRepairThreshold).toBe(3);
+    expect(watchdogWarnLines(warnSpy)).toEqual([]);
+  });
+
+  it("honors an in-range override as a bare count (no seconds multiply)", () => {
+    process.env[kRepairGateKey] = "5";
+    expect(loadConstants().kWatchdogDegradedRepairThreshold).toBe(5);
+    expect(watchdogWarnLines(warnSpy)).toEqual([]);
+  });
+
+  it("=1 is the kill switch: repair on the first steady-state failure, silently", () => {
+    process.env[kRepairGateKey] = "1";
+    expect(loadConstants().kWatchdogDegradedRepairThreshold).toBe(1);
+    expect(watchdogWarnLines(warnSpy)).toEqual([]);
+  });
+
+  it("clamps to 1..20 and warns without a unit suffix", () => {
+    process.env[kRepairGateKey] = "0";
+    expect(loadConstants().kWatchdogDegradedRepairThreshold).toBe(3);
+    expect(watchdogWarnLines(warnSpy)).toEqual([
+      "[alphaclaw] WATCHDOG_DEGRADED_REPAIR_THRESHOLD=0 not a positive integer — falling back to 3 (valid range 1-20)",
+    ]);
+    warnSpy.mockClear();
+    process.env[kRepairGateKey] = "99";
+    expect(loadConstants().kWatchdogDegradedRepairThreshold).toBe(20);
+    expect(watchdogWarnLines(warnSpy)).toEqual([
+      "[alphaclaw] WATCHDOG_DEGRADED_REPAIR_THRESHOLD=99 clamped to 20 (valid range 1-20)",
+    ]);
+  });
+});
+
 describe("watchdog cadence knobs are deployment-only", () => {
   let tmpDir;
   let previousRootDir;
@@ -247,9 +382,9 @@ describe("watchdog cadence knobs are deployment-only", () => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  it("lists all three keys in kDeploymentOnlyEnvKeys", () => {
+  it("lists the three cadence keys AND the repair-threshold key in kDeploymentOnlyEnvKeys", () => {
     const { kDeploymentOnlyEnvKeys } = require(deploymentOnlyModulePath);
-    for (const key of kCadenceKeys) {
+    for (const key of kDeploymentOnlyWatchdogKeys) {
       expect(kDeploymentOnlyEnvKeys).toContain(key);
     }
   });
@@ -262,6 +397,9 @@ describe("watchdog cadence knobs are deployment-only", () => {
         "WATCHDOG_CHECK_INTERVAL=30",
         "WATCHDOG_DEGRADED_CHECK_INTERVAL=2",
         "WATCHDOG_DEGRADED_CHECK_MAX_INTERVAL=5",
+        // An agent raising the repair gate to the ceiling would keep its own
+        // wedged gateway from ever being repaired.
+        "WATCHDOG_DEGRADED_REPAIR_THRESHOLD=20",
       ].join("\n"),
     );
     purgeModuleCache();
@@ -272,7 +410,7 @@ describe("watchdog cadence knobs are deployment-only", () => {
     try {
       env.reloadEnv();
       expect(process.env.OPENAI_API_KEY).toBe("ok");
-      for (const key of kCadenceKeys) {
+      for (const key of kDeploymentOnlyWatchdogKeys) {
         expect(process.env[key]).toBeUndefined();
       }
     } finally {

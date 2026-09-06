@@ -248,6 +248,7 @@ describe("server/gateway-lifecycle-lock", () => {
     expect(lock.getActiveOperation()).toEqual({
       kind: "boot",
       startedAt: expect.any(Number),
+      holdId: releaseBoot.holdId,
     });
 
     const queued = lock.acquire("restart");
@@ -259,9 +260,113 @@ describe("server/gateway-lifecycle-lock", () => {
     expect(lock.getActiveOperation()).toEqual({
       kind: "restart",
       startedAt: expect.any(Number),
+      holdId: releaseRestart.holdId,
     });
 
     releaseRestart();
     expect(lock.getActiveOperation()).toBeNull();
+  });
+  describe("hold accessors (holdId / isValid / isExpired)", () => {
+    it("exposes kind, startedAt and a monotonic holdId on every release fn, across acquire and tryAcquire", async () => {
+      const lock = createGatewayLifecycleLock({
+        leaseMs: 10_000,
+        now: () => 1234,
+        logger: { warn: vi.fn() },
+      });
+      const first = await lock.acquire("boot");
+      expect(first.kind).toBe("boot");
+      expect(first.startedAt).toBe(1234);
+      expect(first.holdId).toBe(1);
+      expect(lock.getActiveOperation()).toMatchObject({ kind: "boot", holdId: 1 });
+      first();
+
+      const second = lock.tryAcquire("repair");
+      expect(second.kind).toBe("repair");
+      expect(second.holdId).toBe(2);
+      second();
+
+      // Ids are never reused, even for a hold of the same kind.
+      const third = await lock.acquire("boot");
+      expect(third.holdId).toBe(3);
+      expect(third.holdId).toBeGreaterThan(first.holdId);
+      third();
+    });
+
+    it("isValid() is true while held and false after the holder's own release; isExpired() stays false", async () => {
+      const lock = createGatewayLifecycleLock({ leaseMs: 10_000, logger: { warn: vi.fn() } });
+      const release = lock.tryAcquire("repair");
+      expect(release.isValid()).toBe(true);
+      expect(release.isExpired()).toBe(false);
+      release();
+      expect(release.isValid()).toBe(false);
+      // A normal end is not an expiry: the ledger must not call it one.
+      expect(release.isExpired()).toBe(false);
+      // Idempotent: a second release() changes nothing.
+      release();
+      expect(release.isValid()).toBe(false);
+      expect(release.isExpired()).toBe(false);
+    });
+
+    it("isValid() flips to false and isExpired() to true when the lease fires, and a stale late release leaves the successor valid", async () => {
+      vi.useFakeTimers();
+      try {
+        const warn = vi.fn();
+        const lock = createGatewayLifecycleLock({ leaseMs: 50, logger: { warn } });
+
+        // The repair-outlives-its-lease shape: a tryAcquire holder still
+        // running (doctor --fix past its ceiling) while a user restart queues.
+        const stale = lock.tryAcquire("repair");
+        const queued = lock.acquire("restart");
+        expect(stale.isValid()).toBe(true);
+        expect(stale.isExpired()).toBe(false);
+
+        await vi.advanceTimersByTimeAsync(51);
+
+        // The holder can now see it lost the lock — and WHY.
+        expect(stale.isValid()).toBe(false);
+        expect(stale.isExpired()).toBe(true);
+        expect(warn).toHaveBeenCalledWith(expect.stringContaining('lease expired for "repair"'));
+
+        const successor = await queued;
+        expect(successor.isValid()).toBe(true);
+        expect(successor.isExpired()).toBe(false);
+        expect(successor.holdId).toBeGreaterThan(stale.holdId);
+        expect(lock.getActiveOperation()).toMatchObject({
+          kind: "restart",
+          holdId: successor.holdId,
+        });
+
+        // The stale holder's late release() is a no-op for the successor.
+        stale();
+        expect(successor.isValid()).toBe(true);
+        expect(lock.getActiveOperation()).toMatchObject({ holdId: successor.holdId });
+        // ...and does not rewrite the stale hold's own history either.
+        expect(stale.isValid()).toBe(false);
+        expect(stale.isExpired()).toBe(true);
+
+        successor();
+        expect(successor.isValid()).toBe(false);
+        expect(successor.isExpired()).toBe(false);
+        expect(lock.getActiveOperation()).toBeNull();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("a hold released before its lease never reports expired, even after the lease time passes", async () => {
+      vi.useFakeTimers();
+      try {
+        const warn = vi.fn();
+        const lock = createGatewayLifecycleLock({ leaseMs: 50, logger: { warn } });
+        const release = await lock.acquire("restart");
+        release();
+        await vi.advanceTimersByTimeAsync(100);
+        expect(release.isExpired()).toBe(false);
+        expect(release.isValid()).toBe(false);
+        expect(warn).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
   });
 });
