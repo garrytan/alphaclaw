@@ -47,7 +47,6 @@ vi.mock("../../lib/public/js/lib/api.js", () => ({
   fetchOpenclawBackups: vi.fn(),
   fetchOpenclawCatalog: vi.fn(),
   fetchOpenclawChannel: vi.fn(),
-  fetchOpenclawRun: vi.fn(),
   fetchOpenclawRunLogText: vi.fn(),
   fetchOpenclawRuns: vi.fn(),
   fetchStatus: vi.fn(),

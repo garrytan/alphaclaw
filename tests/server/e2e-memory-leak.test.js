@@ -1,7 +1,12 @@
 // Real-process memory-leak detection e2e: a REAL Node child that leaks
-// HEAP-RESIDENT strings (Buffer.alloc(..).toString("base64") — raw Buffers
-// are external memory outside V8 old-space and would prove nothing about a
-// heap cap), launched through the REAL lib/server/gateway.js PATH-shim path,
+// strings (Buffer.alloc(1 << 20).toString("base64"), retained in a module
+// array). At 1 MiB the base64 result (1.4 M chars) exceeds Node's EXTERN_APEX
+// (0xFBEE9), so these are EXTERNAL one-byte strings, not V8 heap — which is
+// fine here: nothing in this suite asserts a heap cap. It watches RSS via
+// /proc, and external strings inflate RSS just like heap would. (Fixtures
+// that must trip --max-old-space-size live in
+// tests/live/autotune-container.e2e.test.js and use 256 KiB chunks.) The
+// child is launched through the REAL lib/server/gateway.js PATH-shim path,
 // sampled through the REAL /proc reader (system-resources.getProcessUsage),
 // detected by the REAL watchdog memory tick with a shrunk detector config.
 // This is the whole chain — spawn → /proc → detector → event/notification →
@@ -39,7 +44,7 @@ const loadGateway = () => {
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-// Leaks ~10MB/s of V8 HEAP (base64 strings retained in a module array) and
+// Leaks ~14 MB/s of RSS (external 1.4 MB base64 strings retained in a module array) and
 // prints the "listening on" line the gateway launcher scans for. Markers via
 // fs.writeSync(1, ...) — console.log to a pipe is async and can be lost.
 const kLeakerSource = `
