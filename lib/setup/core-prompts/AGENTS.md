@@ -37,7 +37,7 @@ For plugins and other durable artifacts:
 - If you must stage or unpack a local plugin first, stage it under `$OPENCLAW_STATE_DIR/...`, not `/tmp/...`.
 - Never persist `plugins.load.paths` entries that point at temp directories.
 
-Anytime you add, edit, or remove workspace files, openclaw.json, cron.json, skills, or external resources (third-party pages, databases, integrations), **commit and push your changes to git**. Never force push; always pull first if there might be remote changes.
+Anytime you add, edit, or remove workspace files, openclaw.json, cron/jobs.json, skills, or external resources (third-party pages, databases, integrations), **commit and push your changes to git**. Never force push; always pull first if there might be remote changes.
 
 Whenever you do this, end your message with a **Changes committed** summary. Use workspace-relative paths for local files.
 
