@@ -749,6 +749,95 @@ as an unhandledRejection that feeds the server's rejection-storm exit brake.
   are not runnable in the sandbox that produced this release; the helper
   and parser are covered hermetically, the fixture change is covered by the
   container tier in CI.
+### Batch 13 — docs drift, dead artifacts, TODOS
+
+The wave's last batch describes the tree as it is. Every edit below came out
+of a two-stage sweep (eight modality-specific finders over README, AGENTS.md,
+docs/, the agent-facing prompts and skill fragments, TODOS.md, dead artifacts
+and the policy docs; every candidate then re-derived by two independent
+verifiers — "is the claim about the code true?" and "is the replacement
+accurate and complete?" — before it was applied).
+
+#### Fixed
+- **README environment-variable table** now covers every operator-facing knob
+  the code reads (rollback / stabilization / acceptance-hold and catalog-cache
+  knobs, the crash-loop, repair-budget, startup-failure and log-retention
+  watchdog knobs, the local Claude Code rescue-session keys, the gateway heap
+  cap, the gog keyring password, the proxy timeout, the topic-discovery and
+  profile-install switches, `WEBHOOK_TOKEN`, `OPENCLAW_GATEWAY_PASSWORD`,
+  `OPENCLAW_SUPERVISOR_MODE`, `ALPHACLAW_DEBUG`, `ALPHACLAW_BASE_URL`), and
+  rows that were wrong are corrected: the git askpass helper has no fixed
+  `$TMPDIR` default any more (private `mkdtemp`, exclusive `0700` write), and
+  the public-origin fallback chain below `ALPHACLAW_SETUP_URL` is spelled out.
+- **README prose**: the Agent Administration pointer stanza lives in the
+  merged `hooks/bootstrap/AGENTS.md`, not a `TOOLS.md` (retired on OpenClaw
+  2026.8.1+); the gatewayEnv allowlist pointer names the release that shipped
+  it (v0.9.63) instead of a TODO that no longer exists; the Local / Docker
+  recipe describes the real Dockerfile (tmux + pinned Claude Code layers);
+  rescue-session, watchdog, release-channel, team, CLI and development
+  sections re-pinned to current behavior (Stop on retained error sessions,
+  adoption while disabled, Node 22 + 24 CI lanes).
+- **AGENTS.md, CONTRIBUTING.md, docs/**: stale identifiers and behaviors
+  corrected (bearer-auth caller, removed gateway helpers, the phantom
+  `v0.9.60` → v0.9.63 in `docs/designs/agent-admin.md` and TODOS.md, test-tier
+  descriptions, the container filter's real scope, the live `--json` CLI
+  contract, the UI bundle build step, `scripts/` and `docs/plans/` in the
+  project map).
+- **Agent-facing prompts**: `core-prompts/TOOLS.md`'s Tabs table regenerated
+  from the nav registry (General, Cron, Usage, Doctor, Watchdog, Models,
+  Envars, Webhooks, Nodes, Team, Upgrade, plus the Browse route) — it listed
+  six tabs, one of them (`Providers`) gone; skill fragments (`_calling.md`,
+  `_recipes.md`, `agents.md`, `browse.md`, `channels.md`, `nodes.md`,
+  `team.md`, `webhooks.md`) re-pinned to the manifest's op ids, tiers and
+  restart semantics; the skill's "no admin targets" hint names the real
+  Setup UI path.
+- **CLAUDE.md merge-safety policy** states that the renumber happens in the
+  FINAL pre-merge commit, that every PR — a revert too — bumps the version
+  (the CI guard requires a strict advance), and that the merge step is
+  serialized even when branches were developed in parallel.
+
+#### Removed
+- Dead artifacts, none referenced anywhere: `lib/public/js/tailwind-config.js`
+  (CDN-era twin of `tailwind.config.cjs` that shipped in the npm tarball),
+  the orphaned UI modules `agents-tab/agent-identity-section.js`,
+  `lib/file-highlighting.js`, `nodes-tab/exec-allowlist/*` and
+  `nodes-tab/exec-config/*`, the unwired `lib/server/openclaw-restart-handoff.js`
+  and its test, the `kOpenclawDoctorMigrationTimeoutCapMs` /
+  `kOpenclawDoctorMigrationBytesPerSec` constants (dead since the 30-minute
+  migration ceiling), and `fetchOpenclawRun` stubs in three test mock
+  factories (the wrapper was removed in batch 11).
+
+#### Changed
+- Comments that made false claims now tell the truth: the boot heavy-ops
+  budget is drawn only by the rollback preflights (the doctor migration is
+  sized separately, 30-minute ceiling since v0.9.45); the hermetic and live
+  memory-leak fixtures retain EXTERNAL base64 strings (above Node's
+  `EXTERN_APEX`) and assert RSS trend, not a V8 heap abort — the abort
+  signature is pinned by the autotune container fixture.
+- **TODOS.md**: entries already shipped are struck through with the shipping
+  version and evidence (the self-update `exiting` latch — v0.9.43; the
+  upgrade-ui-smoke password selector — v0.9.45; the autotune OOM fixture and
+  the restart-handoff stub — this release), partially shipped entries carry a
+  PARTIAL note, wrong facts inside open entries are corrected, five open
+  entries that sat under "Completed" moved back above it, and new entries
+  record the fix wave's deferrals: F075 verify-first, the seven findings that
+  waited for #64 (now unblocked), batches 5 and 6, ClickClack pairing parity,
+  the Claude Code pin split, the remaining onboarding parses, the eng-review
+  follow-ups, the npm-name / GitHub-org decision, deployment-only enforcement
+  for `ALPHACLAW_ALLOW_LEGACY_LOGIN` / `ALPHACLAW_SETUP_URL`, and the phantom
+  `/api/gateway-status` prefix.
+
+#### Notes
+- Two docs-lint tests keep the drift from returning:
+  `tests/docs/env-table-coverage.test.js` (every deployment-only knob has a
+  README row, every row names a variable the code still reads, no duplicate
+  rows) and `tests/docs/agent-tabs-table.test.js` (the agent-facing Tabs
+  table names every routed tab and nothing else).
+- Owner decisions the sweep surfaced but did not make (see TODOS.md): the
+  published npm name (`@chrysb/alphaclaw`) vs `package.json`'s `alphaclaw`,
+  and the GitHub org split (`chrysb` in package.json/CONTRIBUTING/docs vs
+  `garrytan` in the remote and release checks).
+
 ## [0.9.73] - 2026-09-04
 
 Restart is offered from the gateway card in every onboarded state. The unified
