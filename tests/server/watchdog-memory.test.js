@@ -816,6 +816,43 @@ describe("server/watchdog memory monitor", () => {
       ).toHaveLength(1);
     });
 
+    it("the mitigation cold restart carries the lifecycle-lock lease fence (shouldAbort), and a caller abort — the lease lost mid-restart — is a FAILED mitigation with reason lease_expired, never ok (no budget stamp consumed)", async () => {
+      const restart = vi.fn(async ({ shouldAbort } = {}) => {
+        // The fence rides through the same option the repair path passes; a
+        // live hold reads valid (the harness has no lock, so nothing expired).
+        expect(typeof shouldAbort).toBe("function");
+        expect(shouldAbort()).toBe(false);
+        throw Object.assign(new Error("Gateway --force aborted: aborted_by_caller"), {
+          aborted: true,
+          reason: "aborted_by_caller",
+        });
+      });
+      const statePath = path.join(
+        fs.mkdtempSync(path.join(os.tmpdir(), "memory-mitigation-")),
+        "memory-mitigation-state.json",
+      );
+      const harness = createHarness({
+        settings: { enabled: true, autoRestart: true, effectiveAutoRestart: true },
+        restartGatewayForMitigation: restart,
+        mitigationStatePath: statePath,
+      });
+      launchGateway(harness);
+      await criticalScenario(harness);
+      expect(restart).toHaveBeenCalledTimes(1);
+      const failed = harness.insertWatchdogEvent.mock.calls
+        .map(([row]) => row)
+        .filter((row) => row.details?.kind === "mitigation_restart_failed");
+      expect(failed).toHaveLength(1);
+      expect(failed[0].details.reason).toBe("lease_expired");
+      expect(JSON.parse(fs.readFileSync(statePath, "utf8")).restarts).toHaveLength(0);
+      const notice = harness.notifier.notify.mock.calls.find(([text]) =>
+        String(text).includes("Pre-OOM gateway restart failed"),
+      );
+      expect(notice).toBeTruthy();
+      expect(String(notice[0])).toContain("lease_expired");
+      expect(String(notice[0])).toContain("lost its lifecycle-lock lease");
+    });
+
     it("an INCUMBENT verdict thrown by the restart (gateway.js GatewayIncumbentRestartError) is a FAILED mitigation: failed gateway_restart event naming the reason, budget stamp refunded, anti-thrash cooldown, loud notification", async () => {
       // Pre-fix, gateway.js RETURNED { ok:false, incumbent:true } and this
       // path recorded gateway_restart:ok, kept the brake stamp, and left the

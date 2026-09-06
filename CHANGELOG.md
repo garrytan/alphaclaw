@@ -100,7 +100,7 @@ incumbent-verified restart (#59) rather than replacing them.
   is leased at the Doctor ceiling plus the restart budget so a 10-minute
   `doctor --fix` followed by a cold restart never outlives it. The
   config-change retry takes the lock (`config_retry`) before moving its
-  mtime baseline and books one deduped skip per hold when it cannot.
+  mtime baseline and books one deduped skip per hold when it cannot. The pre-OOM memory mitigation's cold restart carries the same fence: a lease lost mid-restart stands down as `lease_expired` (a failed mitigation — budget stamp refunded, anti-thrash cooldown, loud notice), never a second `gateway --force` into the successor's operation. The verifier resolves only the replacement obligation it captured and still owns, so concurrent green probes book one `ok` and a relaunch that replaced nothing (aborted, failed, retained, adopted) leaves an earlier in-flight obligation intact; the crash-loop repair retry ladder treats `replacement_pending` and `lease_expired` as transient like `operation_in_progress`.
 - **One transient timeout no longer triggers `doctor --fix`.** For an
   established gateway the first failed probe still sets `degraded` and starts
   the 5s→30s retry ladder, but auto-repair fires only after
