@@ -18,6 +18,7 @@ const {
 const {
   createOperationEventsService,
 } = require("../../lib/server/operation-events");
+const { getProcessBootId } = require("../../lib/server/boot-id");
 
 // End-to-end coverage for the watchdog x release-channel contract: the REAL
 // watchdog wired (exactly like lib/server.js) to a REAL channel-sync service
@@ -663,5 +664,179 @@ describe("server/watchdog gateway + release channel (e2e)", { retry: 1 }, () => 
     } finally {
       delete process.env.OPENCLAW_FORWARD_RECOVERY;
     }
+  });
+
+  // ── Issue #76 RC4: the ladder judges the INSTALLED tree ──────────────────
+
+  it("refuses to blocklist an applied build that is not the running tree (installed_diverged), and never touches the recorded build", async () => {
+    // The #76 shape: 2.0.0 was applied (overlay complete) but a skipped boot
+    // sync left the pin 1.0.0 installed; the pin crash-loops inside 2.0.0's
+    // stabilization window.
+    const channel = createChannelHarness({
+      pin: "1.0.0",
+      installedVersion: "1.0.0",
+      sentinelVersion: "1.0.0",
+      applied: { channel: "beta", version: "2.0.0", at: 1, acceptedAt: null },
+      overlays: ["1.0.0", "2.0.0"],
+    });
+    expect(channel.service.getChannelInfo()).toEqual(
+      expect.objectContaining({
+        isPin: false,
+        installedVersion: "1.0.0",
+        expectedVersion: "2.0.0",
+        expectedKind: "applied",
+        installedIsPin: true,
+        installedDiverged: true,
+        inStabilizationWindow: true,
+      }),
+    );
+    const stack = createStack({ autoRepair: false, channel });
+
+    // The request itself names both builds and blocklists neither.
+    const refused = channel.service.requestChannelRollback({
+      reason: "crash_loop",
+      exitCode: 1,
+    });
+    expect(refused).toEqual(
+      expect.objectContaining({
+        ok: false,
+        code: "installed_diverged",
+        installedVersion: "1.0.0",
+        expectedVersion: "2.0.0",
+      }),
+    );
+    expect(refused.message).toContain("(1.0.0)");
+    expect(refused.message).toContain("(2.0.0)");
+
+    stack.watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    await flushMicrotasks();
+    stack.watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    await flushMicrotasks();
+    stack.watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    await flushMicrotasks();
+
+    // Unhandled by the rollback path → legacy crash-loop handling; 2.0.0 is
+    // NOT blocklisted, no marker, no rollback notice.
+    expect(channel.store.readMarker()).toBeNull();
+    expect(channel.store.isBlocklisted("2.0.0")).toBe(false);
+    expect(channel.store.isBlocklisted("1.0.0")).toBe(false);
+    expect(channel.store.readState().blocklist).toHaveLength(0);
+    expect(channel.store.readState().applied).toEqual(
+      expect.objectContaining({ channel: "beta", version: "2.0.0" }),
+    );
+    expect(channel.notify).not.toHaveBeenCalled();
+    expect(crashLoopNotices(stack.notifier)).toHaveLength(1);
+    expect(stack.watchdog.getStatus().lifecycle).toBe("crash_loop");
+    expect(channel.restartProcess).not.toHaveBeenCalled();
+  });
+
+  it("forward recovery fires on installedIsPin even with a recorded apply that never activated", async () => {
+    // Same divergence, but a blocklisted NEWER overlay owns the migrated
+    // state: the running pin exits 78 → rollback refuses (diverged) → the
+    // pin moves forward, because the pin's tree is what is actually running.
+    const channel = createChannelHarness({
+      pin: "1.0.0",
+      installedVersion: "1.0.0",
+      sentinelVersion: "1.0.0",
+      applied: { channel: "beta", version: "2.0.0", at: 1, acceptedAt: null },
+      overlays: ["1.0.0", "2.0.0", "3.0.0"],
+    });
+    channel.store.addBlocklist({
+      id: "3.0.0",
+      reason: "config_error",
+      exitCode: 78,
+    });
+    const stack = createStack({ autoRepair: false, channel });
+    stack.gateway.healthy = false;
+
+    stack.watchdog.onGatewayLaunch({ startedAt: Date.now(), pid: 1234 });
+    stack.watchdog.onGatewayExit({
+      code: 78,
+      expectedExit: false,
+      stderrTail: ["state database uses newer schema version 12"],
+    });
+    await flushMicrotasks();
+
+    const marker = channel.store.readMarker();
+    expect(marker).toEqual(
+      expect.objectContaining({
+        reason: "forward_recovery",
+        target: expect.objectContaining({ kind: "package", version: "3.0.0" }),
+      }),
+    );
+    const state = channel.store.readState();
+    expect(state.forwardRecovery).toEqual(
+      expect.objectContaining({ attemptedId: "3.0.0" }),
+    );
+    // Neither the recorded build nor the running pin was blocklisted.
+    expect(channel.store.isBlocklisted("2.0.0")).toBe(false);
+    expect(channel.store.isBlocklisted("1.0.0")).toBe(false);
+    expect(state.blocklist).toHaveLength(0);
+    expect(stack.watchdog.getStatus().lifecycle).toBe("restarting");
+    expect(
+      channelNotifyMessages(channel).some((message) =>
+        message.includes("moving forward to 3.0.0"),
+      ),
+    ).toBe(true);
+  });
+
+  it("a pin-bump lag boot sets neither installedDiverged nor a divergence warning, and its rollback is not refused as diverged", async () => {
+    // AlphaClaw self-update moved the declared pin 1.0.0 → 1.0.1; npm has
+    // not reinstalled yet, so 1.0.0 is still on disk.
+    const channel = createChannelHarness({
+      pin: "1.0.1",
+      installedVersion: "1.0.0",
+      sentinelVersion: "1.0.0",
+      applied: null,
+      overlays: ["1.0.0"],
+    });
+    channel.store.updateState((s) => {
+      s.pinVersion = "1.0.0";
+      return s;
+    });
+    const boot = channel.service.syncAtBoot();
+    await flushMicrotasks();
+    expect(boot.ok).toBe(true);
+    expect(boot.action).toBe("pin_reconciled");
+    expect(
+      boot.warnings.some((w) => w.includes("lags the new pin 1.0.1")),
+    ).toBe(true);
+    expect(boot.warnings.some((w) => /diverge|mismatch/i.test(w))).toBe(false);
+
+    const state = channel.store.readState();
+    expect(state.pinLag).toEqual({
+      pin: "1.0.1",
+      installed: "1.0.0",
+      at: channel.nowRef.now,
+      bootId: getProcessBootId(),
+      bootsSeen: 1,
+    });
+    expect(channel.service.getChannelInfo()).toEqual(
+      expect.objectContaining({
+        pinVersion: "1.0.1",
+        installedVersion: "1.0.0",
+        expectedVersion: "1.0.1",
+        expectedKind: "pin",
+        installedIsPin: false,
+        installedDiverged: false,
+        pinLag: state.pinLag,
+      }),
+    );
+    // No window is open for a pin that is not yet installed: the rollback
+    // request is the ordinary "nothing to roll back", never installed_diverged.
+    expect(
+      channel.service.requestChannelRollback({ reason: "crash_loop", exitCode: 1 })
+        .code,
+    ).toBe("nothing_to_roll_back");
+    const stack = createStack({ autoRepair: false, channel });
+    stack.watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    await flushMicrotasks();
+    stack.watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    await flushMicrotasks();
+    stack.watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    await flushMicrotasks();
+    expect(channel.store.readMarker()).toBeNull();
+    expect(channel.store.readState().blocklist).toHaveLength(0);
+    expect(channel.store.readState().pinLag).toEqual(state.pinLag);
   });
 });

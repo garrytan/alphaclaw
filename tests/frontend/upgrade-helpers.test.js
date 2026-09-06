@@ -1784,6 +1784,37 @@ describe("frontend/upgrade-helpers gateway hold model", () => {
     });
   });
 
+  it("renders a structural hold's detail prose, never its class token", async () => {
+    const { buildGatewayHoldModel } = await loadUpgradeHelpers();
+    const model = buildGatewayHoldModel({
+      gatewayHold: {
+        reason: "version_mismatch",
+        at: kNow,
+        operationId: null,
+        blamedKeys: [],
+        detail:
+          "OpenClaw 1.0.0 is installed but 2.0.0 is the recorded build and its overlay is complete — the gateway is held",
+        installed: "1.0.0",
+        expected: "2.0.0",
+        bootId: "boot-1",
+      },
+    });
+    expect(model).toEqual({
+      reason:
+        "OpenClaw 1.0.0 is installed but 2.0.0 is the recorded build and its overlay is complete — the gateway is held",
+      blamedKeys: [],
+      keyCount: 0,
+      canStrip: false,
+    });
+    // A migration-class hold has no detail: its reason IS the prose. A
+    // non-string detail never wins over it.
+    expect(
+      buildGatewayHoldModel({
+        gatewayHold: { reason: "doctor exited 1", detail: 7, blamedKeys: [] },
+      }).reason,
+    ).toBe("doctor exited 1");
+  });
+
   it("cannot strip when the validator parsed no keys, and a missing reason gets a fallback", async () => {
     const { buildGatewayHoldModel } = await loadUpgradeHelpers();
     const model = buildGatewayHoldModel({

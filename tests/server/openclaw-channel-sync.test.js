@@ -6,10 +6,13 @@ const path = require("path");
 
 const {
   createOpenclawChannelSync,
+  kPinLagMaxBoots,
+  kPinLagMaxAgeMs,
 } = require("../../lib/server/openclaw-channel-sync");
 const {
   createOpenclawReleaseChannelStore,
 } = require("../../lib/server/openclaw-release-channel");
+const { getProcessBootId } = require("../../lib/server/boot-id");
 
 const kSilentLogger = { log() {}, warn() {}, error() {} };
 const kDevSha = "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0";
@@ -19,8 +22,29 @@ const mkTemp = (prefix) => fs.mkdtempSync(path.join(os.tmpdir(), prefix));
 
 const flushAsync = () => new Promise((resolve) => process.nextTick(resolve));
 
+// Declared schema constants the way upstream's dist chunks carry them
+// (openclaw-{agent,state}-db-contract-<hash>.js, issue #78). Only the kinds
+// given are written, so `{ agent: 19 }` alone leaves the state line unknown.
+const writeSchemaContractFixture = (packageDir, { state, agent } = {}) => {
+  const distDir = path.join(packageDir, "dist");
+  fs.mkdirSync(distDir, { recursive: true });
+  if (Number.isInteger(state)) {
+    fs.writeFileSync(
+      path.join(distDir, "openclaw-state-db-contract-test.js"),
+      `const OPENCLAW_STATE_SCHEMA_VERSION = ${state};\nexport { OPENCLAW_STATE_SCHEMA_VERSION as O };\n`,
+    );
+  }
+  if (Number.isInteger(agent)) {
+    fs.writeFileSync(
+      path.join(distDir, "openclaw-agent-db-contract-test.js"),
+      `const OPENCLAW_AGENT_SCHEMA_VERSION = ${agent};\nexport { OPENCLAW_AGENT_SCHEMA_VERSION as O };\n`,
+    );
+  }
+};
+
 // Builds a plausible openclaw npm-package tree: package.json (+bin file),
-// dist/ with the thinking module sentinel and dist/extensions.
+// dist/ with the thinking module sentinel and dist/extensions, and — when
+// `schema` is given — the declared schema-constant chunks.
 const writePackageFixture = (
   packageDir,
   {
@@ -28,6 +52,7 @@ const writePackageFixture = (
     bin = { openclaw: "bin/entry.js" },
     thinking = true,
     extensions = true,
+    schema = null,
   } = {},
 ) => {
   fs.mkdirSync(path.join(packageDir, "dist"), { recursive: true });
@@ -52,7 +77,32 @@ const writePackageFixture = (
       recursive: true,
     });
   }
+  if (schema) writeSchemaContractFixture(packageDir, schema);
   return packageDir;
+};
+
+// A real SQLite file with an explicit PRAGMA user_version — the schema line
+// the #78 agent arm reads (same shape as openclaw-schema-versions.test.js).
+const writeSqliteDb = (file, { userVersion = 0 } = {}) => {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const db = new DatabaseSync(file);
+  db.exec("CREATE TABLE t(x INTEGER)");
+  db.exec(`PRAGMA user_version = ${userVersion}`);
+  db.close();
+  return file;
+};
+const writeStateDb = (stateRoot, options) =>
+  writeSqliteDb(path.join(stateRoot, "state", "openclaw.sqlite"), options);
+const writeAgentDb = (stateRoot, agentId, options) =>
+  writeSqliteDb(
+    path.join(stateRoot, "agents", agentId, "agent", "openclaw-agent.sqlite"),
+    options,
+  );
+const readRunRecords = (openclawDir) => {
+  const runsDir = path.join(openclawDir, ".alphaclaw", "runs");
+  return fs
+    .readdirSync(runsDir)
+    .map((name) => JSON.parse(fs.readFileSync(path.join(runsDir, name), "utf8")));
 };
 
 const writeInstallFixture = (installDir, options) =>
@@ -470,6 +520,20 @@ describe("server/openclaw-channel-sync", () => {
       expect(result.ok).toBe(true);
       expect(result.action).toBe("pin_reconciled");
       expect(store.readState().pinVersion).toBe("1.0.1");
+      // Intent stamp (#76 RC3): a pin bump is a chosen transition from what
+      // ran before — a pin that moves backwards restores its settings at boot
+      // instead of reading as drift.
+      expect(store.readState().lastTransition).toEqual(
+        expect.objectContaining({
+          from: "1.0.0",
+          to: "1.0.1",
+          kind: "upgrade",
+          source: "pin_bump",
+          reason: "declared_pin_changed",
+          ok: true,
+          consumedAt: null,
+        }),
+      );
       expect(
         result.warnings.some((warning) => warning.includes("lags the new pin")),
       ).toBe(true);
@@ -496,6 +560,10 @@ describe("server/openclaw-channel-sync", () => {
       // serving from this tree; the sync must no-op (fail open), not mutate.
       // The claim carries the writer's identity (this host, this process's
       // start time) — that is what makes it "the same process", not the pid.
+      // The applied build's overlay is complete on disk while the installed
+      // tree is still the pin — exactly the contradiction a skipped sync
+      // hides (#76: the applied overlay never activated for 45 minutes).
+      saveOverlayFixture(store, "1.1.0");
       const child = spawn(process.execPath, ["-e", "setTimeout(() => {}, 30000)"], {
         stdio: "ignore",
       });
@@ -516,10 +584,19 @@ describe("server/openclaw-channel-sync", () => {
         // The claim carries host + start time and both match: a VERIFIED live
         // owner — the launcher refuses to start a second instance on this.
         expect(skipped.corroborated).toBe(true);
+        // The skip path carries the judge's record and names the contradiction
+        // (read-only: no state.lastBoot write beside a live sibling).
+        expect(skipped.pidDecision).toEqual(
+          expect.objectContaining({ decision: "skip", reason: "corroborated", pid: child.pid }),
+        );
+        expect(skipped.warnings).toEqual([
+          expect.stringMatching(/installed openclaw 1\.0\.0 ≠ applied 1\.1\.0 with a complete overlay while a live sibling \(pid \d+\) is claimed/),
+        ]);
         // Nothing was mutated: applied still recorded, no lastBoot rewrite.
         expect(store.readState().applied).toEqual(
           expect.objectContaining({ version: "1.1.0" }),
         );
+        expect(store.readState().lastBoot).toBeNull();
       } finally {
         child.kill("SIGKILL");
       }
@@ -602,6 +679,106 @@ describe("server/openclaw-channel-sync", () => {
         expect(proceeded.action).not.toBe("skipped_concurrent");
         // ...and the surviving process now owns the claim.
         expect(JSON.parse(fs.readFileSync(store.serverPidPath, "utf8")).pid).toBe(process.pid);
+      } finally {
+        child.kill("SIGKILL");
+      }
+    });
+
+    // Issue #76 RC1: a pid number can name a THREAD. kill(tid, 0) succeeds
+    // and /proc/<tid>/cmdline is the leader's argv, so a stale legacy claim
+    // colliding with one of a live server's (or our own) threads used to skip
+    // the sync — and with it the activation of the applied overlay.
+    it("a legacy pidfile naming a THREAD of a live lookalike server never skips the sync; the boot re-claims the file as format 2 (#76 RC1)", async () => {
+      const { spawn } = require("child_process");
+      const hasProc = process.platform === "linux" && fs.existsSync(`/proc/${process.pid}/status`);
+      if (!hasProc) return;
+      const { sync, store } = createHarness({
+        pin: "1.0.0",
+        channel: "beta",
+        installedVersion: "1.0.0",
+      });
+      const child = spawn(
+        process.execPath,
+        ["-e", "setTimeout(() => {}, 30000)", "/opt/alphaclaw/bin/alphaclaw.js", "start"],
+        { stdio: "ignore" },
+      );
+      try {
+        let tids = [];
+        for (let i = 0; i < 100 && tids.length < 2; i += 1) {
+          try {
+            tids = fs.readdirSync(`/proc/${child.pid}/task`).map(Number);
+          } catch {}
+          if (tids.length < 2) await new Promise((resolve) => setTimeout(resolve, 20));
+        }
+        expect(tids.length).toBeGreaterThan(1); // CEO 6.1: the fixture is really multi-threaded
+        const tid = tids.find((candidate) => candidate !== child.pid);
+        fs.mkdirSync(path.dirname(store.serverPidPath), { recursive: true });
+        fs.writeFileSync(store.serverPidPath, JSON.stringify({ pid: tid, at: Date.now() }));
+        const result = sync.syncAtBoot();
+        expect(result.action).not.toBe("skipped_concurrent");
+        expect(result.ok).toBe(true);
+        expect(result.warnings).toEqual(expect.any(Array));
+        expect(result.pidDecision).toEqual(
+          expect.objectContaining({ evidence: null, decision: "proceed", reason: "thread", pid: tid, tgid: child.pid }),
+        );
+        // The boot claimed the file for this process, in the current format.
+        const claim = JSON.parse(fs.readFileSync(store.serverPidPath, "utf8"));
+        expect(claim).toEqual(
+          expect.objectContaining({ pid: process.pid, format: 2, startTicks: expect.any(Number), containerStartTicks: expect.any(Number) }),
+        );
+        expect(claim.legacyClaim).toBeUndefined();
+      } finally {
+        child.kill("SIGKILL");
+      }
+    });
+
+    it("syncAtBoot converges a positively identified legacy claim ONCE (format 2 + legacyClaim, never startTicks) and still skips uncorroborated (#76 RC2)", () => {
+      const { spawn } = require("child_process");
+      const { readProcStartTicks } = require("../../lib/server/openclaw-lock-contention");
+      const hasProc = process.platform === "linux" && fs.existsSync(`/proc/${process.pid}/status`);
+      if (!hasProc) return;
+      const { sync, store } = createHarness({
+        pin: "1.0.0",
+        channel: "beta",
+        installedVersion: "1.0.0",
+      });
+      const child = spawn(
+        process.execPath,
+        ["-e", "setTimeout(() => {}, 30000)", "/opt/alphaclaw/bin/alphaclaw.js", "start"],
+        { stdio: "ignore" },
+      );
+      try {
+        const claimedAt = Date.now() - 60 * 1000;
+        fs.mkdirSync(path.dirname(store.serverPidPath), { recursive: true });
+        fs.writeFileSync(store.serverPidPath, JSON.stringify({ pid: child.pid, at: claimedAt }));
+        const first = sync.syncAtBoot();
+        expect(first.action).toBe("skipped_concurrent");
+        expect(first.corroborated).toBe(false); // a legacy claim can never refuse the boot
+        expect(first.pidDecision).toEqual(
+          expect.objectContaining({ decision: "skip", reason: "legacy_argv_match", record: expect.objectContaining({ format: "legacy", legacyClaim: true }) }),
+        );
+        const converged = JSON.parse(fs.readFileSync(store.serverPidPath, "utf8"));
+        expect(converged).toEqual({
+          pid: child.pid,
+          at: claimedAt,
+          upgradedAt: expect.any(Number),
+          host: require("os").hostname(),
+          observedTicks: readProcStartTicks(child.pid),
+          containerStartTicks: readProcStartTicks(1),
+          format: 2,
+          legacyClaim: true,
+        });
+        expect(converged.startTicks).toBeUndefined();
+        expect(store.readState().lastBoot).toBeNull();
+        // The next boot on the same live process: still skipped, still
+        // uncorroborated, and the file is NOT rewritten (identity stays).
+        const mtime = fs.statSync(store.serverPidPath).mtimeMs;
+        const second = sync.syncAtBoot();
+        expect(second.action).toBe("skipped_concurrent");
+        expect(second.corroborated).toBe(false);
+        expect(second.pidDecision.record).toEqual(expect.objectContaining({ format: 2, legacyClaim: true }));
+        expect(fs.statSync(store.serverPidPath).mtimeMs).toBe(mtime);
+        expect(JSON.parse(fs.readFileSync(store.serverPidPath, "utf8"))).toEqual(converged);
       } finally {
         child.kill("SIGKILL");
       }
@@ -1132,6 +1309,19 @@ describe("server/openclaw-channel-sync", () => {
         expect.objectContaining({ channel: "beta", version: "1.1.0" }),
       );
       expect(state.applied.acceptedAt).toBeNull();
+      // Intent stamp (#76 RC3): the operator chose this transition and it
+      // landed — the boot config gate reads this, never `applied.reason`.
+      expect(state.lastTransition).toEqual({
+        at: expect.any(Number),
+        from: "1.0.0",
+        to: "1.1.0",
+        kind: "upgrade",
+        source: "operator_apply",
+        reason: null,
+        operationId: state.lastUpdateRun.operationId,
+        ok: true,
+        consumedAt: null,
+      });
       expect(clearVersionCache).toHaveBeenCalled();
       const stepNames = state.lastUpdateRun.steps.map((step) => step.name);
       for (const expected of ["preflight", "backup", "download", "verify", "record"]) {
@@ -1196,6 +1386,39 @@ describe("server/openclaw-channel-sync", () => {
         }),
       );
       expect(record.dbPreflight.dbSizesBytes).toBeGreaterThan(0);
+      // Per-kind breakdown (#78): the state line carries the CLI's numbers;
+      // no agent DB exists here, so the agent tally is empty and inert.
+      expect(record.dbPreflight.byKind.state).toEqual(
+        expect.objectContaining({
+          dbCount: 1,
+          foundVersion: 1,
+          targetVersion: 12,
+          migrationRequired: true,
+          unsupported: false,
+        }),
+      );
+      expect(record.dbPreflight.byKind.state.bytes).toBeGreaterThan(0);
+      expect(record.dbPreflight.byKind.agent).toEqual(
+        expect.objectContaining({
+          dbCount: 0,
+          bytes: 0,
+          foundVersion: null,
+          migrationRequired: false,
+        }),
+      );
+      // Two oracles on one snapshot: the fixture DB is at user_version 0 but
+      // the fake CLI reported foundVersion 1 — the CLI stays authoritative
+      // (the verdict above is its numbers) and the disagreement is ONE
+      // warning step, never a block.
+      expect(record.steps).toContainEqual(
+        expect.objectContaining({
+          name: "db-preflight",
+          status: "warning",
+          detail: expect.stringMatching(
+            /state\/openclaw\.sqlite: PRAGMA user_version is 0 but the target's preflight reported foundVersion 1/,
+          ),
+        }),
+      );
       // The step timeline names the consequence for the operator.
       expect(record.steps).toContainEqual(
         expect.objectContaining({
@@ -1227,6 +1450,18 @@ describe("server/openclaw-channel-sync", () => {
       });
       expect(downgradeResult.status).toBe(409);
       expect(downgradeResult.body.code).toBe("backup_failed");
+      // A failed apply never authorizes a settings restore (#76 Codex D10):
+      // the stamp is written up front and settled to ok:false by finish().
+      expect(downgrade.store.readState().lastTransition).toEqual(
+        expect.objectContaining({
+          from: "1.2.0",
+          to: "1.1.0",
+          kind: "downgrade",
+          source: "operator_apply",
+          ok: false,
+          consumedAt: null,
+        }),
+      );
       // The CLI's actual last output line reaches the user-facing message —
       // the old catch-all claimed every failure "failed to verify" (#7).
       expect(downgradeResult.body.message).toMatch(/boom/);
@@ -2914,6 +3149,9 @@ describe("server/openclaw-channel-sync", () => {
       const db = new DatabaseSync(path.join(stateDir, "state", "openclaw.sqlite"));
       db.exec("CREATE TABLE t(x INTEGER)");
       db.close();
+      // An agent DB under the same state dir: enumerated (it counts toward
+      // dbSizesBytes) but NEVER handed to the state-schema verb (#78).
+      writeAgentDb(stateDir, "main", { userVersion: 17 });
       const preflightCalls = [];
       const harness = createHarness({
         pin: "1.0.0",
@@ -2935,9 +3173,16 @@ describe("server/openclaw-channel-sync", () => {
 
       expect(result.status).toBe(202);
       // The preflight snapshotted the DB found under OPENCLAW_STATE_DIR, not
-      // under the harness openclawDir (which has none).
+      // under the harness openclawDir (which has none) — and only the STATE
+      // DB reached the CLI: the agent DB's snapshot never did.
       expect(preflightCalls).toHaveLength(1);
       expect(preflightCalls[0].some((arg) => /openclaw\.sqlite$/.test(String(arg)))).toBe(true);
+      expect(
+        preflightCalls[0].some((arg) => /openclaw-agent\.sqlite/.test(String(arg))),
+      ).toBe(false);
+      const [record] = readRunRecords(harness.openclawDir);
+      expect(record.dbPreflight.byKind.agent.dbCount).toBe(1);
+      expect(record.dbPreflight.byKind.state.dbCount).toBe(1);
     });
 
     it("aborts the apply when the pin rollback floor cannot be persisted", async () => {
@@ -3016,6 +3261,249 @@ describe("server/openclaw-channel-sync", () => {
       expect(seen[0].OPENCLAW_HOME).toBe("/data");
       expect(seen[0].OPENCLAW_GATEWAY_TOKEN).toBeUndefined();
       expect(seen[0].OPENCLAW_TWITCH_ACCESS_TOKEN).toBeUndefined();
+    });
+  });
+
+  // Issue #78: upstream's `database preflight` compares a file with the
+  // release's STATE schema only. Agent DBs carry their own schema line and
+  // must be judged against the target's declared OPENCLAW_AGENT_SCHEMA_VERSION,
+  // never fed to the verb.
+  describe("db-preflight agent arm (issue #78)", () => {
+    // The fake target CLI answers the state-schema verb with the given
+    // verdict and records every invocation.
+    const stateVerbRunner = (verdict, preflightCalls) => async (opts, fallback) => {
+      if (Array.isArray(opts.args) && opts.args.includes("preflight")) {
+        preflightCalls.push(opts.args);
+        return { ok: true, code: 0, tail: `${JSON.stringify(verdict)}\n`, timedOut: false };
+      }
+      return fallback(opts);
+    };
+    const sawAgentSnapshot = (preflightCalls) =>
+      preflightCalls.some((args) =>
+        args.some((arg) => /openclaw-agent\.sqlite/.test(String(arg))),
+      );
+
+    it("a lagging agent schema is a migration, not a block: the agent DB never reaches the CLI and byKind carries both lines", async () => {
+      const preflightCalls = [];
+      const harness = createHarness({
+        pin: "1.0.0",
+        installedVersion: "1.0.0",
+        sentinelVersion: "1.0.0",
+        // The target (2026.9.1 shape) declares {state 15, agent 19}.
+        installFixture: { schema: { state: 15, agent: 19 } },
+        runnerImpl: stateVerbRunner(
+          { status: "migration-required", foundVersion: 12, targetVersion: 15 },
+          preflightCalls,
+        ),
+      });
+      // The box (2026.9.1-beta.1 shape) sits at {state 12, agent 17}.
+      writeStateDb(harness.openclawDir, { userVersion: 12 });
+      writeAgentDb(harness.openclawDir, "main", { userVersion: 17 });
+
+      const result = await harness.sync.applyUpdate({ channel: "beta", version: "1.1.0" });
+
+      expect(result.status).toBe(202);
+      // ONE CLI invocation — the state DB. The agent DB was judged in-process.
+      expect(preflightCalls).toHaveLength(1);
+      expect(sawAgentSnapshot(preflightCalls)).toBe(false);
+      const [record] = readRunRecords(harness.openclawDir);
+      expect(record.dbPreflight).toEqual(
+        expect.objectContaining({
+          migrationRequired: true,
+          // Top-level numbers stay the STATE line's (issue #20 consumers).
+          foundVersion: 12,
+          targetVersion: 15,
+        }),
+      );
+      expect(record.dbPreflight.byKind.agent).toEqual(
+        expect.objectContaining({
+          dbCount: 1,
+          foundVersion: 17,
+          targetVersion: 19,
+          migrationRequired: true,
+          unknownTarget: false,
+        }),
+      );
+      expect(record.dbPreflight.byKind.state).toEqual(
+        expect.objectContaining({
+          dbCount: 1,
+          foundVersion: 12,
+          userVersion: 12,
+          targetVersion: 15,
+          migrationRequired: true,
+        }),
+      );
+      // dbSizesBytes sums BOTH kinds (the boot migration budget scales on it).
+      expect(record.dbPreflight.dbSizesBytes).toBe(
+        record.dbPreflight.byKind.state.bytes + record.dbPreflight.byKind.agent.bytes,
+      );
+      // No warning step at all: the oracles agree (user_version 12 = foundVersion 12)
+      // and the target's agent schema was declared.
+      const preflightSteps = record.steps.filter((step) => step.name === "db-preflight");
+      expect(preflightSteps.some((step) => step.status === "warning")).toBe(false);
+      expect(preflightSteps.some((step) => step.status === "failed")).toBe(false);
+      expect(preflightSteps.at(-1)).toEqual(
+        expect.objectContaining({
+          status: "completed",
+          detail: "schema migration will run at the next start",
+        }),
+      );
+      // The apply learned the target's declared schema into the table the
+      // moment its overlay was durable.
+      const table = JSON.parse(
+        fs.readFileSync(
+          path.join(harness.openclawDir, ".alphaclaw", "openclaw-schema-versions.json"),
+          "utf8",
+        ),
+      );
+      expect(table.byVersion["1.1.0"]).toEqual(
+        expect.objectContaining({ state: 15, agent: 19, source: "declared" }),
+      );
+    });
+
+    it("an agent DB NEWER than the target supports hard-blocks the apply, naming the kind and both numbers", async () => {
+      const preflightCalls = [];
+      const harness = createHarness({
+        pin: "1.0.0",
+        installedVersion: "1.0.0",
+        sentinelVersion: "1.0.0",
+        installFixture: { schema: { state: 15, agent: 19 } },
+        // The state line alone would PASS — the block must come from the agent arm.
+        runnerImpl: stateVerbRunner(
+          { status: "exact", foundVersion: 15, targetVersion: 15 },
+          preflightCalls,
+        ),
+      });
+      writeStateDb(harness.openclawDir, { userVersion: 15 });
+      writeAgentDb(harness.openclawDir, "main", { userVersion: 21 });
+
+      const result = await harness.sync.applyUpdate({ channel: "beta", version: "1.1.0" });
+
+      expect(result.status).toBe(409);
+      expect(result.body.code).toBe("db_preflight_failed");
+      expect(result.body.message).toBe(
+        "OpenClaw 1.1.0 cannot read your agent database agents/main/agent/openclaw-agent.sqlite: it is at agent schema 21 and this build supports up to 19.",
+      );
+      expect(result.body).toEqual(
+        expect.objectContaining({
+          dbKind: "agent",
+          agentId: "main",
+          foundVersion: 21,
+          targetVersion: 19,
+        }),
+      );
+      expect(result.body.hint).toMatch(/stopped before anything changed/);
+      expect(sawAgentSnapshot(preflightCalls)).toBe(false);
+      // Blocked BEFORE record: nothing to activate at the next boot.
+      expect(harness.store.readState().applied).toBeNull();
+      const [record] = readRunRecords(harness.openclawDir);
+      expect(record.steps).toContainEqual(
+        expect.objectContaining({
+          name: "db-preflight",
+          status: "failed",
+          detail: expect.stringMatching(/agent schema 21 is newer than the 19/),
+        }),
+      );
+    });
+
+    it("a target that declares no agent schema fails open with one warning step (never a guess)", async () => {
+      const preflightCalls = [];
+      const harness = createHarness({
+        pin: "1.0.0",
+        installedVersion: "1.0.0",
+        sentinelVersion: "1.0.0",
+        // No contract chunks in the target's dist; "1.1.0" is not seeded either.
+        runnerImpl: stateVerbRunner(
+          { status: "exact", foundVersion: 15, targetVersion: 15 },
+          preflightCalls,
+        ),
+      });
+      writeStateDb(harness.openclawDir, { userVersion: 15 });
+      writeAgentDb(harness.openclawDir, "main", { userVersion: 17 });
+
+      const result = await harness.sync.applyUpdate({ channel: "beta", version: "1.1.0" });
+
+      expect(result.status).toBe(202);
+      expect(sawAgentSnapshot(preflightCalls)).toBe(false);
+      const [record] = readRunRecords(harness.openclawDir);
+      const warnings = record.steps.filter(
+        (step) => step.name === "db-preflight" && step.status === "warning",
+      );
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0].detail).toBe(
+        "agent database compatibility not checked — the target build's agent schema version could not be determined",
+      );
+      expect(record.dbPreflight.byKind.agent).toEqual(
+        expect.objectContaining({
+          dbCount: 1,
+          foundVersion: 17,
+          targetVersion: null,
+          migrationRequired: false,
+          unknownTarget: true,
+        }),
+      );
+      // The state line still delivered a verdict, so the hint is a real false.
+      expect(record.dbPreflight.migrationRequired).toBe(false);
+      // Nothing to learn: a null declaration never shadows the seeds.
+      expect(
+        fs.existsSync(
+          path.join(harness.openclawDir, ".alphaclaw", "openclaw-schema-versions.json"),
+        ),
+      ).toBe(false);
+    });
+
+    it("dev applies probe the checkout's declared schema and persist the verdict as the boot hint", async () => {
+      const preflightCalls = [];
+      const harness = createHarness({
+        pin: "1.0.0",
+        installedVersion: "1.0.0",
+        sentinelVersion: "1.0.0",
+        runnerImpl: async (opts, fallback) => {
+          if (opts.command === "openclaw" && opts.args?.[0] === "update") {
+            return { ok: true, code: 0, tail: '{"status":"ok"}\n', timedOut: false };
+          }
+          // Dev applies hard-gate on a usable backup (WI-6.1): the archive
+          // manifest must list EVERY state DB, agent DBs included.
+          if (opts.command === "tar" && opts.args?.[0] === "-xzOf") {
+            return {
+              ok: true,
+              code: 0,
+              tail: `${JSON.stringify({
+                schemaVersion: 1,
+                assets: [
+                  { kind: "sqlite", sourcePath: "/data/.openclaw/state/openclaw.sqlite", archivePath: "state/openclaw.sqlite" },
+                  { kind: "sqlite", sourcePath: "/data/.openclaw/agents/main/agent/openclaw-agent.sqlite", archivePath: "agents/main/agent/openclaw-agent.sqlite" },
+                ],
+              })}\n`,
+              timedOut: false,
+            };
+          }
+          return stateVerbRunner(
+            { status: "exact", foundVersion: 15, targetVersion: 15 },
+            preflightCalls,
+          )(opts, fallback);
+        },
+      });
+      // The just-built checkout declares agent 19; a dev build has no overlay,
+      // so packageDirOverride must point the scan at the checkout.
+      const checkoutDir = writeCheckoutFixture(harness.rootDir, { sha: kDevSha });
+      writeSchemaContractFixture(checkoutDir, { state: 15, agent: 19 });
+      writeStateDb(harness.openclawDir, { userVersion: 15 });
+      writeAgentDb(harness.openclawDir, "main", { userVersion: 17 });
+
+      const result = await harness.sync.applyUpdate({ channel: "dev", devHead: true });
+
+      expect(result.status).toBe(202);
+      expect(preflightCalls).toHaveLength(1);
+      expect(sawAgentSnapshot(preflightCalls)).toBe(false);
+      const [record] = readRunRecords(harness.openclawDir);
+      // The dev branch persists the verdict exactly like the package branch.
+      expect(record.dbPreflight).toEqual(
+        expect.objectContaining({ migrationRequired: true, foundVersion: 15, targetVersion: 15 }),
+      );
+      expect(record.dbPreflight.byKind.agent).toEqual(
+        expect.objectContaining({ foundVersion: 17, targetVersion: 19, migrationRequired: true }),
+      );
     });
   });
 
@@ -3177,10 +3665,13 @@ describe("server/openclaw-channel-sync", () => {
       const backupGate = new Promise((resolve) => {
         releaseBackup = resolve;
       });
+      // The applied build IS the installed tree: a rollback only blocklists
+      // a build that was running (#76 RC4 — installed ≠ applied is refused
+      // as installed_diverged, covered separately).
       const { sync, store, restartProcess } = createHarness({
         pin: "1.0.0",
-        installedVersion: "1.0.0",
-        sentinelVersion: "1.0.0",
+        installedVersion: "1.0.5",
+        sentinelVersion: "1.0.5",
         runnerImpl: async (opts, fallback) => {
           if (opts.command === "openclaw" && opts.args?.[0] === "backup") {
             await backupGate;
@@ -3191,7 +3682,7 @@ describe("server/openclaw-channel-sync", () => {
       });
       store.updateState((s) => {
         s.pinVersion = "1.0.0";
-        s.applied = { channel: "beta", version: "1.2.0", at: 1, acceptedAt: null };
+        s.applied = { channel: "beta", version: "1.0.5", at: 1, acceptedAt: null };
         return s;
       });
 
@@ -4191,5 +4682,351 @@ describe("pinDiverged legibility (post-incident 2026-09-01)", () => {
       return s;
     });
     expect(dev.sync.getChannelInfo().pinDiverged).toBe(false);
+  });
+});
+
+describe("getChannelInfo installed-tree predicates (#76 RC4 / Stage 1d)", () => {
+  // getChannelInfo is the single owner of expectedVersion / installedIsPin /
+  // installedDiverged: values it already reads, on the injected clock.
+  const infoFor = ({ installedVersion, pin = "1.0.0", mutate = (s) => s, now }) => {
+    const harness = createHarness({
+      pin,
+      installedVersion,
+      sentinelVersion: installedVersion,
+    });
+    harness.store.updateState((s) => {
+      s.pinVersion = pin;
+      return mutate(s) || s;
+    });
+    if (now !== undefined) harness.nowRef.now = now;
+    return { info: harness.sync.getChannelInfo(), harness };
+  };
+  const liveLag = (harness, extra = {}) => ({
+    pin: "1.0.1",
+    installed: "1.0.0",
+    at: harness.nowRef.now,
+    bootId: "1:1",
+    bootsSeen: 1,
+    ...extra,
+  });
+
+  it("truth table: applied / pin / dev / pinLag / expired pinLag", () => {
+    const rows = [
+      [
+        "pin only, installed IS the pin",
+        { installedVersion: "1.0.0" },
+        { expectedVersion: "1.0.0", expectedKind: "pin", installedIsPin: true, installedDiverged: false, pinLag: null },
+      ],
+      [
+        "pin only, installed is something else (no lag recorded)",
+        { installedVersion: "1.0.5" },
+        { expectedVersion: "1.0.0", expectedKind: "pin", installedIsPin: false, installedDiverged: true },
+      ],
+      [
+        "applied package matches installed",
+        {
+          installedVersion: "2.0.0",
+          mutate: (s) => {
+            s.applied = { channel: "beta", version: "2.0.0", at: 1, acceptedAt: null };
+          },
+        },
+        { expectedVersion: "2.0.0", expectedKind: "applied", installedIsPin: false, installedDiverged: false },
+      ],
+      [
+        "applied recorded but the pin is what is installed (the #76 shape)",
+        {
+          installedVersion: "1.0.0",
+          mutate: (s) => {
+            s.applied = { channel: "beta", version: "2.0.0", at: 1, acceptedAt: null };
+          },
+        },
+        { expectedVersion: "2.0.0", expectedKind: "applied", installedIsPin: true, installedDiverged: true },
+      ],
+      [
+        "dev apply: no expected version, never the pin, never diverged",
+        {
+          installedVersion: "1.0.0",
+          mutate: (s) => {
+            s.applied = { channel: "dev", sha: kDevSha, at: 1, acceptedAt: null };
+          },
+        },
+        { expectedVersion: null, expectedKind: "dev", installedIsPin: false, installedDiverged: false },
+      ],
+      [
+        "no pin and no apply: nothing is expected",
+        {
+          installedVersion: "1.0.0",
+          mutate: (s) => {
+            s.pinVersion = null;
+          },
+        },
+        { expectedVersion: null, expectedKind: null, installedIsPin: false, installedDiverged: false },
+      ],
+    ];
+    for (const [label, setup, expected] of rows) {
+      expect(infoFor(setup).info, label).toEqual(expect.objectContaining(expected));
+    }
+  });
+
+  it("a live pinLag excuses exactly the lagging (pin, installed) pair; it stops excusing after 24 h or 3 boots on the injected clock", () => {
+    const lagging = ({ mutateLag = (lag) => lag, advanceMs = 0 } = {}) => {
+      const harness = createHarness({
+        pin: "1.0.1",
+        installedVersion: "1.0.0",
+        sentinelVersion: "1.0.0",
+      });
+      harness.store.updateState((s) => {
+        s.pinVersion = "1.0.1";
+        s.pinLag = mutateLag(liveLag(harness));
+        return s;
+      });
+      harness.nowRef.now += advanceMs;
+      return harness.sync.getChannelInfo();
+    };
+    expect(lagging()).toEqual(
+      expect.objectContaining({
+        expectedVersion: "1.0.1",
+        expectedKind: "pin",
+        installedIsPin: false,
+        installedDiverged: false,
+        pinLag: expect.objectContaining({ pin: "1.0.1", installed: "1.0.0", bootsSeen: 1 }),
+      }),
+    );
+    expect(lagging({ advanceMs: kPinLagMaxAgeMs }).installedDiverged).toBe(false);
+    expect(lagging({ advanceMs: kPinLagMaxAgeMs + 1 }).installedDiverged).toBe(true);
+    expect(
+      lagging({ mutateLag: (lag) => ({ ...lag, bootsSeen: kPinLagMaxBoots }) }).installedDiverged,
+    ).toBe(false);
+    expect(
+      lagging({ mutateLag: (lag) => ({ ...lag, bootsSeen: kPinLagMaxBoots + 1 }) }).installedDiverged,
+    ).toBe(true);
+    expect(
+      lagging({ mutateLag: (lag) => ({ ...lag, installed: "0.9.0" }) }).installedDiverged,
+    ).toBe(true);
+  });
+
+  describe("syncAtBoot pin-lag bookkeeping (Codex D12)", () => {
+    const laggingBump = () => {
+      const harness = createHarness({
+        pin: "1.0.1",
+        channel: "stable",
+        installedVersion: "1.0.0",
+        sentinelVersion: "1.0.0",
+      });
+      harness.store.updateState((s) => {
+        s.pinVersion = "1.0.0";
+        return s;
+      });
+      return harness;
+    };
+
+    it("the pin_reconciled lag boot records pinLag with this process's bootId; later lagging boots count; the record dies after kPinLagMaxBoots boots", async () => {
+      const { sync, store, nowRef } = laggingBump();
+      const boot = sync.syncAtBoot();
+      await flushAsync();
+      expect(boot.action).toBe("pin_reconciled");
+      expect(boot.warnings.some((w) => w.includes("lags the new pin 1.0.1"))).toBe(true);
+      expect(store.readState().pinLag).toEqual({
+        pin: "1.0.1",
+        installed: "1.0.0",
+        at: nowRef.now,
+        bootId: getProcessBootId(),
+        bootsSeen: 1,
+      });
+      expect(sync.getChannelInfo()).toEqual(
+        expect.objectContaining({ installedDiverged: false, installedIsPin: false }),
+      );
+
+      // Boots 2..kPinLagMaxBoots still lag: each counts once, the excuse holds.
+      for (let boot = 2; boot <= kPinLagMaxBoots; boot += 1) {
+        nowRef.now += 60_000;
+        expect(sync.syncAtBoot().ok).toBe(true);
+        await flushAsync();
+        expect(store.readState().pinLag).toEqual(
+          expect.objectContaining({ pin: "1.0.1", installed: "1.0.0", bootsSeen: boot }),
+        );
+        expect(sync.getChannelInfo().installedDiverged).toBe(false);
+      }
+      // One boot too many: the record is dropped and divergence is visible.
+      nowRef.now += 60_000;
+      expect(sync.syncAtBoot().ok).toBe(true);
+      await flushAsync();
+      expect(store.readState().pinLag).toBeNull();
+      expect(sync.getChannelInfo().installedDiverged).toBe(true);
+    });
+
+    it("a lag older than 24 h is dropped at the next boot", async () => {
+      const { sync, store, nowRef } = laggingBump();
+      expect(sync.syncAtBoot().action).toBe("pin_reconciled");
+      await flushAsync();
+      nowRef.now += kPinLagMaxAgeMs + 1;
+      expect(sync.getChannelInfo().installedDiverged).toBe(true);
+      expect(sync.syncAtBoot().ok).toBe(true);
+      await flushAsync();
+      expect(store.readState().pinLag).toBeNull();
+    });
+
+    it("the lag clears the moment the installed tree is the pin", async () => {
+      const { sync, store, installDir, nowRef } = laggingBump();
+      expect(sync.syncAtBoot().action).toBe("pin_reconciled");
+      await flushAsync();
+      expect(store.readState().pinLag).not.toBeNull();
+
+      writeInstallFixture(installDir, { version: "1.0.1" });
+      store.writeSentinel({ installDir, version: "1.0.1" });
+      nowRef.now += 60_000;
+      expect(sync.syncAtBoot().ok).toBe(true);
+      await flushAsync();
+      expect(store.readState().pinLag).toBeNull();
+      expect(sync.getChannelInfo()).toEqual(
+        expect.objectContaining({
+          installedVersion: "1.0.1",
+          installedIsPin: true,
+          installedDiverged: false,
+          pinLag: null,
+        }),
+      );
+    });
+  });
+
+  describe("requestChannelRollback judges the installed tree", () => {
+    it("refuses installed_diverged before blocklisting when the applied build is not what runs; the recorded build survives", () => {
+      const { sync, store, notify } = createHarness({
+        pin: "1.0.0",
+        installedVersion: "1.0.0",
+        sentinelVersion: "1.0.0",
+      });
+      store.updateState((s) => {
+        s.pinVersion = "1.0.0";
+        s.applied = { channel: "beta", version: "2.0.0", at: 1, acceptedAt: null };
+        return s;
+      });
+      const result = sync.requestChannelRollback({ reason: "crash_loop", exitCode: 1 });
+      expect(result).toEqual(
+        expect.objectContaining({
+          ok: false,
+          code: "installed_diverged",
+          installedVersion: "1.0.0",
+          expectedVersion: "2.0.0",
+        }),
+      );
+      expect(result.message).toBe(
+        "The crashing build (1.0.0) is not the recorded applied build (2.0.0) — refusing to blocklist a build that was not running.",
+      );
+      expect(store.readState().blocklist).toHaveLength(0);
+      expect(store.readMarker()).toBeNull();
+      expect(store.readState().applied.version).toBe("2.0.0");
+      expect(notify).not.toHaveBeenCalled();
+    });
+
+    it("a dev apply still rolls back (its pin tree is the dormant fallback, not divergence)", async () => {
+      vi.useFakeTimers();
+      const { sync, store } = createHarness({
+        pin: "1.0.0",
+        installedVersion: "1.0.0",
+        sentinelVersion: "1.0.0",
+      });
+      store.updateState((s) => {
+        s.pinVersion = "1.0.0";
+        s.applied = { channel: "dev", sha: kDevSha, at: 1, acceptedAt: null };
+        return s;
+      });
+      expect(sync.getChannelInfo()).toEqual(
+        expect.objectContaining({ expectedKind: "dev", installedDiverged: false }),
+      );
+      const result = sync.requestChannelRollback({ reason: "crash_loop", exitCode: 1 });
+      expect(result.ok).toBe(true);
+      expect(store.isBlocklisted(kDevSha)).toBe(true);
+    });
+
+    it("a pin-window rollback with a tampered tree is refused as installed_diverged, naming the pinned build", () => {
+      const { sync, store, nowRef } = createHarness({
+        pin: "1.0.1",
+        installedVersion: "0.9.9",
+        sentinelVersion: "0.9.9",
+      });
+      store.updateState((s) => {
+        s.pinVersion = "1.0.1";
+        s.previousPin = { version: "1.0.0", at: 1 };
+        s.pinWindow = {
+          version: "1.0.1",
+          openedAt: nowRef.now,
+          acceptedAt: null,
+          acceptedSource: null,
+        };
+        return s;
+      });
+      expect(saveOverlayFixture(store, "1.0.0")).toEqual({ ok: true });
+      const result = sync.requestChannelRollback({ reason: "crash_loop", exitCode: 1 });
+      expect(result).toEqual(
+        expect.objectContaining({ ok: false, code: "installed_diverged" }),
+      );
+      expect(result.message).toContain("recorded pinned build (1.0.1)");
+      expect(store.isBlocklisted("1.0.1")).toBe(false);
+      expect(store.readMarker()).toBeNull();
+    });
+  });
+
+  describe("requestForwardRecovery judges the installed tree", () => {
+    const withCandidate = (options) => {
+      const harness = createHarness({
+        pin: "1.0.0",
+        ...options,
+      });
+      harness.store.updateState((s) => {
+        s.pinVersion = "1.0.0";
+        return s;
+      });
+      expect(saveOverlayFixture(harness.store, "3.0.0")).toEqual({ ok: true });
+      harness.store.addBlocklist({ id: "3.0.0", reason: "config_error", exitCode: 78 });
+      return harness;
+    };
+
+    it("moves forward when the pin is installed even though a recorded apply never activated", () => {
+      vi.useFakeTimers();
+      const { sync, store } = withCandidate({
+        installedVersion: "1.0.0",
+        sentinelVersion: "1.0.0",
+      });
+      store.updateState((s) => {
+        s.applied = { channel: "beta", version: "2.0.0", at: 1, acceptedAt: null };
+        return s;
+      });
+      const result = sync.requestForwardRecovery({ exitCode: 78, installedVersion: "1.0.0" });
+      expect(result.ok).toBe(true);
+      expect(store.readMarker()).toEqual(
+        expect.objectContaining({
+          reason: "forward_recovery",
+          target: expect.objectContaining({ version: "3.0.0" }),
+        }),
+      );
+      expect(store.readState().forwardRecovery.attemptedId).toBe("3.0.0");
+    });
+
+    it("refuses not_pin for a dev apply, and for a pin that is recorded but not installed", () => {
+      const dev = withCandidate({
+        installedVersion: "1.0.0",
+        sentinelVersion: "1.0.0",
+      });
+      dev.store.updateState((s) => {
+        s.applied = { channel: "dev", sha: kDevSha, at: 1, acceptedAt: null };
+        return s;
+      });
+      expect(dev.sync.requestForwardRecovery({ exitCode: 78 })).toEqual(
+        expect.objectContaining({ ok: false, code: "not_pin" }),
+      );
+      expect(dev.store.readMarker()).toBeNull();
+      expect(dev.store.isBlocklisted("3.0.0")).toBe(true);
+
+      const lagging = withCandidate({
+        installedVersion: "0.9.9",
+        sentinelVersion: "0.9.9",
+      });
+      const result = lagging.sync.requestForwardRecovery({ exitCode: 78 });
+      expect(result).toEqual(expect.objectContaining({ ok: false, code: "not_pin" }));
+      expect(result.message).toContain("installed 0.9.9, pin 1.0.0");
+      expect(lagging.store.readMarker()).toBeNull();
+      expect(lagging.store.isBlocklisted("3.0.0")).toBe(true);
+    });
   });
 });

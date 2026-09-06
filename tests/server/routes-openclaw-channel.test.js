@@ -1388,6 +1388,37 @@ describe("server/routes/openclaw-channel", () => {
       expect(deps.gatewayHoldActions.acquireLock).toHaveBeenCalledTimes(1);
     });
 
+    it("renders a structural hold's detail (not its class token) in the 409, with a hint that is not about blamed keys", async () => {
+      const deps = holdDeps();
+      const detail =
+        "OpenClaw 1.0.0 is installed but 2.0.0 is the recorded build and its overlay is complete — the gateway is held";
+      deps.openclawChannelService.reconcileBootConfig = vi.fn(async () => ({
+        status: "held",
+        hold: {
+          reason: "version_mismatch",
+          blamedKeys: [],
+          detail,
+          installed: "1.0.0",
+          expected: "2.0.0",
+        },
+        warnings: [],
+      }));
+      const app = createApp(deps);
+
+      const res = await request(app)
+        .post("/api/openclaw/reconcile/retry")
+        .send({});
+
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe("reconcile_still_held");
+      expect(res.body.message).toBe(detail);
+      expect(res.body.hint).not.toContain("stripBlamedKeys");
+      expect(res.body.hint).toContain("retrying the migration cannot clear it");
+      expect(res.body.outcome.hold.reason).toBe("version_mismatch");
+      expect(deps.gatewayHoldActions.clearLatch).not.toHaveBeenCalled();
+      expect(deps.gatewayHoldActions.startGateway).not.toHaveBeenCalled();
+    });
+
     it("treats a skipped outcome as a 409, never as recovery", async () => {
       // A skipped run left the hold exactly as it was — clearing the latch or
       // relaunching on it would boot the config the reconciler just refused.

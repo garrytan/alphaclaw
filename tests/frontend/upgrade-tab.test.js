@@ -2929,6 +2929,33 @@ describe("frontend/upgrade-tab gateway-hold recovery", () => {
     expect(state.reconcileError).toBeNull();
   });
 
+  it("a 409 still-held structural hold surfaces its detail prose, not the class token", async () => {
+    api.retryOpenclawReconcile.mockRejectedValue(
+      Object.assign(new Error("Could not retry the settings migration"), {
+        code: "reconcile_still_held",
+        status: 409,
+        outcome: {
+          status: "held",
+          hold: {
+            reason: "version_mismatch",
+            blamedKeys: [],
+            detail: "OpenClaw 1.0.0 is installed but 2.0.0 is the recorded build",
+          },
+        },
+      }),
+    );
+    let state = await hydrate();
+
+    await state.onRetryReconcile();
+
+    state = renderHook({});
+    expect(state.reconcileError).toEqual({
+      headline:
+        "Migration is still held: OpenClaw 1.0.0 is installed but 2.0.0 is the recorded build",
+      error: null,
+    });
+  });
+
   it("a non-409 retry failure keeps the error envelope for the inline chip", async () => {
     const err = Object.assign(new Error("network down"), {
       code: "reconcile_unavailable",

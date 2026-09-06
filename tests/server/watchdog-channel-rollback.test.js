@@ -29,18 +29,33 @@ const stabilizationFor = ({ isPin, inStabilizationWindow }) => ({
 });
 
 // `stabilization: null` yields the pre-contract info shape (no stabilization
-// object at all) so the legacy-tolerance path stays covered.
+// object at all) so the legacy-tolerance path stays covered. The #76 RC4
+// fields mirror getChannelInfo(): `installedIsPin` (the pin's tree is what
+// runs — defaults to the legacy isPin), `installedDiverged` (the live tree is
+// not the recorded build), `expectedVersion`/`expectedKind`, `installedVersion`.
 const createReleaseChannelHooks = ({
   isPin = false,
   inStabilizationWindow = true,
   stabilization = stabilizationFor({ isPin, inStabilizationWindow }),
+  installedIsPin = isPin,
+  installedDiverged = false,
+  expectedVersion = isPin ? "2026.9.1" : "2026.9.1-beta.2",
+  expectedKind = isPin ? "pin" : "applied",
+  installedVersion = expectedVersion,
+  requestForwardRecovery = undefined,
 } = {}) => ({
   getInfo: vi.fn(() => ({
     isPin,
     inStabilizationWindow,
+    installedIsPin,
+    installedDiverged,
+    expectedVersion,
+    expectedKind,
+    installedVersion,
     ...(stabilization ? { stabilization } : {}),
   })),
   requestRollback: vi.fn(() => ({ ok: true })),
+  ...(requestForwardRecovery ? { requestForwardRecovery } : {}),
   onHealthy: vi.fn(),
   onUnhealthy: vi.fn(),
 });
@@ -843,5 +858,127 @@ describe("server/watchdog release-channel rollback hooks", () => {
           String(call?.[0] || "").includes("automatic gateway restart is paused"),
       ),
     ).toBe(true);
+  });
+
+  // ── Issue #76 RC4: predicates on the INSTALLED tree ──────────────────────
+
+  it("forward recovery gates on installedIsPin: a recorded apply that never activated still moves the pin forward, and installedVersion travels with the request", async () => {
+    // The #76 shape: `applied` is set (isPin false) but the pin's tree is
+    // what crashed. Out of window, exit 78 → no rollback, forward recovery.
+    const forward = vi.fn(() => ({ ok: true }));
+    const hooks = createReleaseChannelHooks({
+      isPin: false,
+      inStabilizationWindow: false,
+      installedIsPin: true,
+      installedVersion: "1.0.0",
+      expectedVersion: "2.0.0",
+      installedDiverged: true,
+      requestForwardRecovery: forward,
+    });
+    const { watchdog } = createHarness({
+      autoRepair: false,
+      releaseChannelHooks: hooks,
+    });
+    watchdog.onGatewayExit({ code: 78, expectedExit: false });
+    await flushMicrotasks();
+    expect(hooks.requestRollback).not.toHaveBeenCalled();
+    expect(forward).toHaveBeenCalledTimes(1);
+    expect(forward).toHaveBeenCalledWith({
+      exitCode: 78,
+      installedVersion: "1.0.0",
+    });
+    expect(watchdog.getStatus().lifecycle).toBe("restarting");
+  });
+
+  it("forward recovery is refused when the pin is merely RECORDED (isPin) but not the running tree", async () => {
+    const forward = vi.fn(() => ({ ok: true }));
+    const hooks = createReleaseChannelHooks({
+      isPin: true,
+      inStabilizationWindow: false,
+      installedIsPin: false,
+      installedVersion: "0.9.0",
+      expectedVersion: "1.0.0",
+      requestForwardRecovery: forward,
+    });
+    const { watchdog } = createHarness({
+      autoRepair: false,
+      releaseChannelHooks: hooks,
+    });
+    watchdog.onGatewayExit({ code: 78, expectedExit: false });
+    await flushMicrotasks();
+    expect(forward).not.toHaveBeenCalled();
+    expect(watchdog.getStatus().lifecycle).toBe("configuration_error");
+  });
+
+  it("legacy info shapes without installedIsPin keep the isPin gate for forward recovery", async () => {
+    const forward = vi.fn(() => ({ ok: true }));
+    const hooks = {
+      getInfo: vi.fn(() => ({ isPin: true, inStabilizationWindow: false })),
+      requestRollback: vi.fn(() => ({ ok: true })),
+      requestForwardRecovery: forward,
+      onHealthy: vi.fn(),
+      onUnhealthy: vi.fn(),
+    };
+    const { watchdog } = createHarness({
+      autoRepair: false,
+      releaseChannelHooks: hooks,
+    });
+    watchdog.onGatewayExit({ code: 78, expectedExit: false });
+    await flushMicrotasks();
+    expect(forward).toHaveBeenCalledWith({ exitCode: 78, installedVersion: null });
+    expect(watchdog.getStatus().lifecycle).toBe("restarting");
+  });
+
+  it("an installed_diverged refusal is unhandled: one rollback request, forward recovery tried, then the legacy crash-loop path", async () => {
+    const forward = vi.fn(() => ({ ok: false, code: "no_forward_candidate" }));
+    const hooks = createReleaseChannelHooks({
+      isPin: false,
+      inStabilizationWindow: true,
+      installedIsPin: true,
+      installedDiverged: true,
+      installedVersion: "1.0.0",
+      expectedVersion: "2.0.0",
+      requestForwardRecovery: forward,
+    });
+    hooks.requestRollback = vi.fn(() => ({
+      ok: false,
+      code: "installed_diverged",
+      message:
+        "The crashing build (1.0.0) is not the recorded applied build (2.0.0) — refusing to blocklist a build that was not running.",
+    }));
+    const { watchdog, notifier } = createHarness({
+      autoRepair: false,
+      releaseChannelHooks: hooks,
+    });
+    await crashLoop(watchdog);
+    expect(hooks.requestRollback).toHaveBeenCalledTimes(1);
+    expect(forward).toHaveBeenCalledTimes(1);
+    expect(forward).toHaveBeenCalledWith({ exitCode: 1, installedVersion: "1.0.0" });
+    // Unhandled → the legacy crash-loop notice, not a phantom rollback.
+    expect(crashLoopNotices(notifier)).toHaveLength(1);
+    expect(watchdog.getStatus().lifecycle).toBe("crash_loop");
+  });
+
+  it("a dev apply still rolls back: its info never reports divergence (expectedKind dev, no expectedVersion)", async () => {
+    const hooks = createReleaseChannelHooks({
+      isPin: false,
+      inStabilizationWindow: true,
+      installedIsPin: false,
+      installedDiverged: false,
+      expectedVersion: null,
+      expectedKind: "dev",
+      installedVersion: "1.0.0",
+    });
+    const { watchdog, notifier } = createHarness({
+      autoRepair: false,
+      releaseChannelHooks: hooks,
+    });
+    await crashLoop(watchdog);
+    expect(hooks.requestRollback).toHaveBeenCalledTimes(1);
+    expect(hooks.requestRollback).toHaveBeenCalledWith({
+      reason: "crash_loop",
+      exitCode: 1,
+    });
+    expect(crashLoopNotices(notifier)).toHaveLength(0);
   });
 });

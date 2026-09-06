@@ -918,6 +918,10 @@ Module._load = function patchedLoad(request, parent, isMain) {
       ALPHACLAW_CAPTURE_ENV_PATH: capturePath,
       ALPHACLAW_ROOT_DIR: rootDir,
       ALPHACLAW_OPENCLAW_WRAPPER_PATH: path.join(rootDir, "wrapper-openclaw.sh"),
+      // Both operator-shell paths point INTO the temp root: without the snippet
+      // override the real bin falls back to /etc/profile.d and every later shell
+      // on the box inherits this test's OPENCLAW_* vars (observed 2026-09-06).
+      ALPHACLAW_PROFILE_SNIPPET_PATH: path.join(rootDir, "profile-openclaw.sh"),
       NODE_OPTIONS: `--require=${preloadPath}`,
       ...env,
     };
@@ -1017,6 +1021,10 @@ Module._load = function patchedLoad(request, parent, isMain) {
       ALPHACLAW_CAPTURE_ENV_PATH: capturePath,
       ALPHACLAW_ROOT_DIR: rootDir,
       ALPHACLAW_OPENCLAW_WRAPPER_PATH: path.join(rootDir, "wrapper-openclaw.sh"),
+      // Both operator-shell paths point INTO the temp root: without the snippet
+      // override the real bin falls back to /etc/profile.d and every later shell
+      // on the box inherits this test's OPENCLAW_* vars (observed 2026-09-06).
+      ALPHACLAW_PROFILE_SNIPPET_PATH: path.join(rootDir, "profile-openclaw.sh"),
       NODE_OPTIONS: `--require=${preloadPath}`,
     };
     delete childEnv.PORT;
@@ -1044,7 +1052,9 @@ Module._load = function patchedLoad(request, parent, isMain) {
     // only when the live process's argv names the alphaclaw entry (#64), and
     // even then it is UNverified — the sync is skipped but boot continues.
     const rootDir = fs.mkdtempSync(path.join(tmpDir, "stale-pid-root-"));
-    const child = spawnSleeper(["--", "alphaclaw.js"]);
+    // The lookalike carries the `start` verb: the argv test is verb-scoped
+    // since #76 (an `alphaclaw diagnose` is live, alphaclaw-ish and no server).
+    const child = spawnSleeper(["--", "alphaclaw.js", "start"]);
     try {
       writeServerPidRecord(rootDir, { pid: child.pid, at: 1 });
       const result = spawnBootSpine({ rootDir });
@@ -1083,6 +1093,71 @@ Module._load = function patchedLoad(request, parent, isMain) {
       const result = spawnBootSpine({ rootDir });
       expect(result.status).toBe(1);
       expect(result.stderr).toMatch(/Refusing to start a second instance/);
+    } finally {
+      child.kill("SIGKILL");
+    }
+  });
+
+  // Issue #76 RC1: the incident's stale legacy claim collided with a THREAD id
+  // of the new alphaclaw process — kill(tid, 0) succeeds and the tid's cmdline
+  // is the leader's argv, so the boot sync was skipped and the applied
+  // overlay never activated. The Tgid check settles it before argv.
+  it.skipIf(!hasProc)("boots on with NO pidfile warning when a legacy claim names a THREAD of a live lookalike, and re-claims the file as format 2 (#76 RC1)", async () => {
+    const rootDir = fs.mkdtempSync(path.join(tmpDir, "thread-pid-root-"));
+    const child = spawnSleeper(["--", "alphaclaw.js", "start"]);
+    try {
+      let tids = [];
+      for (let i = 0; i < 100 && tids.length < 2; i += 1) {
+        try {
+          tids = fs.readdirSync(`/proc/${child.pid}/task`).map(Number);
+        } catch {}
+        if (tids.length < 2) await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      expect(tids.length).toBeGreaterThan(1); // CEO 6.1: the fixture is really multi-threaded
+      const tid = tids.find((candidate) => candidate !== child.pid);
+      writeServerPidRecord(rootDir, { pid: tid, at: Date.now() });
+      const result = spawnBootSpine({ rootDir });
+      const output = `${result.stdout}\n${result.stderr}`;
+      expect(result.status, result.stderr).toBe(0);
+      expect(output).not.toMatch(/could not be verified/);
+      expect(output).not.toMatch(/boot sync skipped: another/);
+      expect(output).toMatch(/pidfile: format=legacy pid=\d+ kill=ok tgid=\d+ .*→ thread \(proceed\)/);
+      const claim = JSON.parse(
+        fs.readFileSync(path.join(rootDir, ".openclaw", ".alphaclaw", "alphaclaw-server.pid"), "utf8"),
+      );
+      expect(claim.pid).not.toBe(tid);
+      expect(claim).toEqual(expect.objectContaining({ format: 2, startTicks: expect.any(Number) }));
+    } finally {
+      child.kill("SIGKILL");
+    }
+  });
+
+  it.skipIf(!hasProc)("boots on (never exit 1) when a CONVERGED legacy claim names the same live lookalike — a claim AlphaClaw manufactured is never corroborated (#76 RC2)", () => {
+    const { readProcStartTicks } = require("../../lib/server/openclaw-lock-contention");
+    const rootDir = fs.mkdtempSync(path.join(tmpDir, "converged-pid-root-"));
+    const child = spawnSleeper(["--", "alphaclaw.js", "start"]);
+    try {
+      const record = {
+        pid: child.pid,
+        at: Date.now() - 60 * 1000,
+        upgradedAt: Date.now() - 30 * 1000,
+        host: os.hostname(),
+        observedTicks: readProcStartTicks(child.pid),
+        containerStartTicks: readProcStartTicks(1),
+        format: 2,
+        legacyClaim: true,
+      };
+      writeServerPidRecord(rootDir, record);
+      const result = spawnBootSpine({ rootDir });
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.stderr).not.toMatch(/Refusing to start a second instance/);
+      expect(`${result.stdout}\n${result.stderr}`).toMatch(
+        /could not be verified — boot sync skipped, continuing/,
+      );
+      // Identity stays: no re-claim, no second convergence.
+      expect(
+        JSON.parse(fs.readFileSync(path.join(rootDir, ".openclaw", ".alphaclaw", "alphaclaw-server.pid"), "utf8")),
+      ).toEqual(record);
     } finally {
       child.kill("SIGKILL");
     }

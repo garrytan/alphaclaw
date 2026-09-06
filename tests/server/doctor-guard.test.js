@@ -251,6 +251,116 @@ describe("server/doctor-guard", () => {
     expect(result.ok).toBe(true);
   });
 
+  describe("pre-doctor copy + key-path counts (issue #76 A5)", () => {
+    // doctor --fix rewrites openclaw.json in place. A tripwire miss must still
+    // leave a byte-exact pre-fix copy, and the guard result must say how much
+    // doctor changed — as key-path COUNTS (identifiers only, never values).
+    const preDoctorBackups = (openclawDir) =>
+      fs
+        .readdirSync(openclawDir)
+        .filter((name) => /^openclaw\.json\.pre-doctor-\d+\.bak$/.test(name))
+        .sort();
+
+    it("writes openclaw.json.pre-doctor-<ts>.bak with the exact pre-fix bytes and reports what doctor changed", async () => {
+      const openclawDir = mkOpenclawDir();
+      writeJson(openclawDir, "openclaw.json", kLiveConfig);
+      const preBytes = fs.readFileSync(path.join(openclawDir, "openclaw.json"));
+      const guard = createDoctorGuard({
+        openclawDir,
+        nowFn: () => 1_700_000_000_000,
+        logger: kSilentLogger,
+      });
+
+      const result = await guard.withDoctorRestoreGuard({
+        operationId: "abcd1234",
+        run: async () => {
+          // An honest forward migration: one key added, one subtree removed,
+          // one leaf changed.
+          const { wizard, ...rest } = kLiveConfig;
+          writeJson(openclawDir, "openclaw.json", {
+            ...rest,
+            meta: { lastTouchedAt: "2026-08-29T17:00:00Z" },
+            migratedField: true,
+          });
+          return { ok: true, tail: "Doctor complete\n" };
+        },
+      });
+
+      expect(result.ok).toBe(true);
+      expect(result.guard).toEqual({
+        quarantined: false,
+        preDoctorBackup: "openclaw.json.pre-doctor-1700000000000.bak",
+        configDiff: { added: 1, removed: 1, changed: 1 },
+      });
+      // Byte-exact copy of what doctor was about to rewrite.
+      expect(
+        fs.readFileSync(
+          path.join(openclawDir, "openclaw.json.pre-doctor-1700000000000.bak"),
+        ),
+      ).toEqual(preBytes);
+      // The counts never carry values: the result serializes without any
+      // config value in it.
+      const serialized = JSON.stringify(result.guard);
+      expect(serialized).not.toContain("example.com");
+      expect(serialized).not.toContain("TOGETHER_API_KEY");
+    });
+
+    it("keeps only the newest 3 pre-doctor copies", async () => {
+      const openclawDir = mkOpenclawDir();
+      writeJson(openclawDir, "openclaw.json", kLiveConfig);
+      const clock = { now: 1_700_000_000_000 };
+      const guard = createDoctorGuard({
+        openclawDir,
+        nowFn: () => clock.now,
+        logger: kSilentLogger,
+      });
+      for (let i = 0; i < 5; i += 1) {
+        clock.now += 1000;
+        // Distinct mtimes for the retention sort.
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        await guard.withDoctorRestoreGuard({
+          operationId: `op${i}`,
+          run: async () => ({ ok: true, tail: "Doctor complete\n" }),
+        });
+      }
+      expect(preDoctorBackups(openclawDir)).toEqual([
+        "openclaw.json.pre-doctor-1700000003000.bak",
+        "openclaw.json.pre-doctor-1700000004000.bak",
+        "openclaw.json.pre-doctor-1700000005000.bak",
+      ]);
+    });
+
+    it("carries the counts on the restore-detected path too, and reports no copy when there is no config", async () => {
+      const openclawDir = mkOpenclawDir();
+      writeJson(openclawDir, "openclaw.json", kLiveConfig);
+      const guard = createDoctorGuard({ openclawDir, logger: kSilentLogger });
+      const tripped = await guard.withDoctorRestoreGuard({
+        operationId: "abcd1234",
+        run: async () => {
+          writeJson(openclawDir, "openclaw.json", kStaleConfig);
+          return { ok: true, tail: "Doctor complete\n" };
+        },
+      });
+      expect(tripped.ok).toBe(false);
+      expect(tripped.code).toBe("doctor_restored_stale_config");
+      expect(tripped.guard.preDoctorBackup).toMatch(/^openclaw\.json\.pre-doctor-\d+\.bak$/);
+      // Stale swap: 2 servers dropped, meta/wizard leaves changed, provider key changed.
+      expect(tripped.guard.configDiff).toEqual({ added: 0, removed: 3, changed: 3 });
+
+      const fresh = mkOpenclawDir();
+      const freshGuard = createDoctorGuard({ openclawDir: fresh, logger: kSilentLogger });
+      const created = await freshGuard.withDoctorRestoreGuard({
+        run: async () => ({ ok: true, tail: "created default config\n" }),
+      });
+      expect(created.guard).toEqual({
+        quarantined: false,
+        preDoctorBackup: null,
+        configDiff: { added: 0, removed: 0, changed: 0 },
+      });
+      expect(preDoctorBackups(fresh)).toEqual([]);
+    });
+  });
+
   describe("buildDoctorRestoreBlockedNotification", () => {
     // Single source for the operator copy: the watchdog-repair path and the
     // boot reconciler both fire it — key-path COUNTS only, never values.

@@ -9,6 +9,7 @@ const {
   createOpenclawReleaseChannelStore,
 } = require("../../lib/server/openclaw-release-channel");
 const { createRunLedger } = require("../../lib/server/openclaw-run-ledger");
+const { getProcessBootId } = require("../../lib/server/boot-id");
 
 // End-to-end coverage for syncAtBoot: the real channel-sync service + real
 // store recovering real on-disk trees, with the environment poisoned so any
@@ -24,6 +25,26 @@ const mkTemp = (prefix) => fs.mkdtempSync(path.join(os.tmpdir(), prefix));
 
 const flushAsync = () => new Promise((resolve) => process.nextTick(resolve));
 
+// Declared schema constants the way upstream's dist chunks carry them
+// (openclaw-{agent,state}-db-contract-<hash>.js, issue #78). Only the kinds
+// given are written.
+const writeSchemaContractFixture = (packageDir, { state, agent } = {}) => {
+  const distDir = path.join(packageDir, "dist");
+  fs.mkdirSync(distDir, { recursive: true });
+  if (Number.isInteger(state)) {
+    fs.writeFileSync(
+      path.join(distDir, "openclaw-state-db-contract-test.js"),
+      `const OPENCLAW_STATE_SCHEMA_VERSION = ${state};\nexport { OPENCLAW_STATE_SCHEMA_VERSION as O };\n`,
+    );
+  }
+  if (Number.isInteger(agent)) {
+    fs.writeFileSync(
+      path.join(distDir, "openclaw-agent-db-contract-test.js"),
+      `const OPENCLAW_AGENT_SCHEMA_VERSION = ${agent};\nexport { OPENCLAW_AGENT_SCHEMA_VERSION as O };\n`,
+    );
+  }
+};
+
 const writePackageFixture = (
   packageDir,
   {
@@ -31,6 +52,7 @@ const writePackageFixture = (
     bin = { openclaw: "bin/entry.js" },
     thinking = true,
     extensions = true,
+    schema = null,
   } = {},
 ) => {
   fs.mkdirSync(path.join(packageDir, "dist"), { recursive: true });
@@ -55,7 +77,27 @@ const writePackageFixture = (
       recursive: true,
     });
   }
+  if (schema) writeSchemaContractFixture(packageDir, schema);
   return packageDir;
+};
+
+// A per-agent data-plane DB at an explicit agent schema (PRAGMA
+// user_version) — the line the #78 agent arm judges.
+const writeAgentDb = (openclawDir, agentId, { userVersion }) => {
+  const { DatabaseSync } = require("node:sqlite");
+  const file = path.join(
+    openclawDir,
+    "agents",
+    agentId,
+    "agent",
+    "openclaw-agent.sqlite",
+  );
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const db = new DatabaseSync(file);
+  db.exec("CREATE TABLE t(x INTEGER)");
+  db.exec(`PRAGMA user_version = ${userVersion}`);
+  db.close();
+  return file;
 };
 
 const writeInstallFixture = (installDir, options) =>
@@ -82,11 +124,11 @@ const writeCheckoutFixture = (rootDir, { sha, bin = true } = {}) => {
   return checkoutDir;
 };
 
-const saveOverlayFixture = (store, version) =>
+const saveOverlayFixture = (store, version, fixture = {}) =>
   store.saveOverlayFromTempInstall({
     openclawPackageDir: writePackageFixture(
       path.join(mkTemp("alphaclaw-boot-overlay-src-"), "openclaw"),
-      { version },
+      { version, ...fixture },
     ),
     version,
   });
@@ -99,6 +141,9 @@ const createHarness = ({
   channel = "stable",
   installedVersion = null,
   sentinelVersion = null,
+  // Extra writePackageFixture options for the INSTALLED tree (e.g. the
+  // declared schema constants its dist carries).
+  installFixture = {},
   storeWrap = (store) => store,
   execFileSyncImpl = undefined,
   fsModule = undefined,
@@ -118,7 +163,10 @@ const createHarness = ({
   );
   const installDir = mkTemp("alphaclaw-boot-e2e-install-");
   if (installedVersion) {
-    writeInstallFixture(installDir, { version: installedVersion });
+    writeInstallFixture(installDir, {
+      version: installedVersion,
+      ...installFixture,
+    });
   }
 
   const nowRef = { now: 1_000_000 };
@@ -1026,64 +1074,618 @@ describe("server/openclaw-channel boot sync (e2e)", () => {
       });
     });
 
-    it("restores a pre-fix backup on a genuine downgrade, once, consuming the snapshot", async () => {
-      const doctorCalls = [];
+    // Issue #76 RC3 shape: a migration COMPLETED for the newer 2026.8.1 and the
+    // box is back on 2026.7.1-2 with that version's pre-migration backup on
+    // disk. Whether that is a chosen downgrade (restore) or drift (hands off)
+    // is decided by the intent evidence `seed` puts into the state file.
+    const kRegressionBak = "openclaw.json.pre-fix-2026.7.1-2.bak";
+    const seedRegression = ({ seed = null, doctorCalls = [] } = {}) => {
+      const insertEvent = vi.fn();
       const harness = createHarness({
+        pin: "2026.7.1-2",
         installedVersion: "2026.7.1-2",
         sentinelVersion: "2026.7.1-2",
         runnerImpl: doctorRunner({ doctorCalls }),
+        extraSyncOptions: { insertEvent },
       });
-      // Genuine regression: a migration COMPLETED for the newer 2026.8.1 and
-      // we are back on 2026.7.1-2 with its pre-migration backup on disk.
       harness.store.updateState((s) => {
         s.configMigration = {
           completedForVersion: "2026.8.1",
           lastAttempt: { version: "2026.8.1", at: 1, ok: true },
         };
+        if (seed) seed(s, harness);
         return s;
       });
-      const bakPath = path.join(
-        harness.openclawDir,
-        "openclaw.json.pre-fix-2026.7.1-2.bak",
-      );
+      const bakPath = path.join(harness.openclawDir, kRegressionBak);
       fs.mkdirSync(harness.openclawDir, { recursive: true });
       fs.writeFileSync(bakPath, JSON.stringify({ restored: true }, null, 2));
       writeConfig(harness.openclawDir, { migrated: "beta-shape" });
+      const configPath = path.join(harness.openclawDir, "openclaw.json");
+      return { harness, bakPath, configPath, doctorCalls, insertEvent };
+    };
+    // The stamp applyUpdate leaves behind for a landed downgrade.
+    const landedDowngradeStamp = (harness, extra = {}) => ({
+      at: harness.nowRef.now,
+      from: "2026.8.1",
+      to: "2026.7.1-2",
+      kind: "downgrade",
+      source: "operator_apply",
+      reason: null,
+      operationId: "op-downgrade",
+      ok: true,
+      consumedAt: null,
+      ...extra,
+    });
+    const preRestoreCopies = (openclawDir) =>
+      fs
+        .readdirSync(openclawDir)
+        .filter((name) => /^openclaw\.json\.pre-restore-\d+\.bak$/.test(name));
+    const gateEvents = (insertEvent) =>
+      insertEvent.mock.calls
+        .map((call) => call[0])
+        .filter((event) => event?.eventType === "config_migration_gate");
+
+    it("restores a pre-fix backup on a genuine downgrade, once, consuming the snapshot and the intent stamp", async () => {
+      const { harness, bakPath, configPath, doctorCalls, insertEvent } = seedRegression({
+        // The operator applied the downgrade (applyUpdate's stamp, landed).
+        seed: (s, h) => {
+          s.lastTransition = landedDowngradeStamp(h);
+        },
+      });
 
       harness.sync.syncAtBoot();
+      const liveBefore = fs.readFileSync(configPath);
       const outcome = await harness.sync.reconcileBootConfig();
 
       // The backup was restored (migrated shape gone, restored key present);
-      // doctor was NOT run. (reconcileOpenclawJsonMirror later adds update.* keys.)
+      // doctor was NOT run. (reconcileOpenclawJsonMirror ran in syncAtBoot,
+      // so the live file carried update.* keys the restore dropped.)
       expect(outcome.status).toBe("ok");
       expect(outcome.reason).toBe("round-trip-restore");
+      expect(outcome.intent).toBe("lastTransition");
       expect(doctorCalls).toHaveLength(0);
-      const onDisk = JSON.parse(
-        fs.readFileSync(path.join(harness.openclawDir, "openclaw.json"), "utf8"),
+      // Byte copy (Codex D13): the live file IS the backup's bytes, never a
+      // re-serialization of them.
+      expect(fs.readFileSync(configPath, "utf8")).toBe(
+        JSON.stringify({ restored: true }, null, 2),
       );
-      expect(onDisk.restored).toBe(true);
-      expect("migrated" in onDisk).toBe(false);
-      expect(harness.store.readState().configMigration.completedForVersion).toBe(
-        "2026.7.1-2",
-      );
-      // The snapshot was CONSUMED: it can never fire a second restore.
+      const state = harness.store.readState();
+      expect(state.configMigration.completedForVersion).toBe("2026.7.1-2");
+      // The snapshot was CONSUMED: it can never fire a second restore …
       expect(fs.existsSync(bakPath)).toBe(false);
+      // … and so was the stamp: one restore per transition (Codex D10).
+      expect(state.lastTransition.consumedAt).toBe(harness.nowRef.now);
+
+      // A5 evidence. The pre-restore copy is the live file's exact bytes …
+      const copies = preRestoreCopies(harness.openclawDir);
+      expect(copies).toEqual([`openclaw.json.pre-restore-${harness.nowRef.now}.bak`]);
+      expect(fs.readFileSync(path.join(harness.openclawDir, copies[0]))).toEqual(liveBefore);
+      // … lastRestore names the copy, the diff and the boot that did it …
+      const { lastRestore } = state.configMigration;
+      expect(lastRestore).toEqual({
+        at: harness.nowRef.now,
+        from: kRegressionBak,
+        previousCompletedForVersion: "2026.8.1",
+        diffPath: path.join(
+          harness.store.managedDir,
+          "config-gate",
+          `${harness.nowRef.now}.json`,
+        ),
+        preRestorePath: path.join(harness.openclawDir, copies[0]),
+        bootId: getProcessBootId(),
+        source: "round_trip",
+      });
+      // … and the persisted diff holds key PATHS and counts only, never values.
+      const diff = JSON.parse(fs.readFileSync(lastRestore.diffPath, "utf8"));
+      expect(diff.added).toEqual(["restored"]);
+      expect(diff.removed).toContain("migrated");
+      expect(diff.counts).toEqual({
+        added: 1,
+        removed: diff.removed.length,
+        changed: 0,
+      });
+      expect(diff).toEqual(
+        expect.objectContaining({
+          source: "round_trip",
+          from: kRegressionBak,
+          previousCompletedForVersion: "2026.8.1",
+          diffAvailable: true,
+        }),
+      );
+      expect(JSON.stringify(diff)).not.toContain("beta-shape");
+      expect(gateEvents(insertEvent)).toEqual([
+        expect.objectContaining({
+          status: "round_trip_restore",
+          details: expect.objectContaining({
+            installedVersion: "2026.7.1-2",
+            from: kRegressionBak,
+            counts: diff.counts,
+            diffPath: lastRestore.diffPath,
+          }),
+        }),
+      ]);
 
       // A later forced retry must not restore again — the live config (edited
       // since the restore) survives.
       writeConfig(harness.openclawDir, { restored: true, edited: "since" });
       const retried = await harness.sync.reconcileBootConfig({ force: true });
       expect(retried.reason).not.toBe("round-trip-restore");
-      const afterRetry = JSON.parse(
-        fs.readFileSync(path.join(harness.openclawDir, "openclaw.json"), "utf8"),
-      );
+      const afterRetry = JSON.parse(fs.readFileSync(configPath, "utf8"));
       expect(afterRetry.edited).toBe("since");
 
-      // The restore notification carries its stable outbox id.
+      // The restore notification carries a stable, DAY-BUCKETED outbox id
+      // (#76 RC3: the outbox dedupes a delivered id forever, and a later
+      // genuine downgrade to the same version must still notify).
       await flushAsync();
-      expect(notifyIds(harness.notify)).toContain(
-        "config-restore-2026.7.1-2",
+      expect(
+        notifyIds(harness.notify).filter((id) =>
+          /^config-restore-2026\.7\.1-2-\d{8}$/.test(id),
+        ),
+      ).toHaveLength(1);
+    });
+
+    it("leaves a regressed config untouched when nothing recorded the downgrade (drift, #76 RC3)", async () => {
+      const { harness, bakPath, configPath, doctorCalls, insertEvent } = seedRegression();
+      harness.sync.syncAtBoot();
+      const liveBefore = fs.readFileSync(configPath);
+      const bakBefore = fs.readFileSync(bakPath);
+
+      const outcome = await harness.sync.reconcileBootConfig();
+
+      expect(outcome).toEqual(
+        expect.objectContaining({ status: "skipped", reason: "version_drift" }),
       );
+      expect(
+        outcome.warnings.some((warning) =>
+          /regressed from the migrated 2026\.8\.1 without a recorded update, rollback or pin change/.test(warning),
+        ),
+      ).toBe(true);
+      // Hands off: config bytes identical, the .bak kept, no doctor — no
+      // spawn of any kind — no pre-restore copy, no migration record change.
+      expect(fs.readFileSync(configPath)).toEqual(liveBefore);
+      expect(fs.readFileSync(bakPath)).toEqual(bakBefore);
+      expect(doctorCalls).toHaveLength(0);
+      expect(harness.runner.runStreamed).not.toHaveBeenCalled();
+      expect(preRestoreCopies(harness.openclawDir)).toEqual([]);
+      const state = harness.store.readState();
+      expect(state.configMigration.completedForVersion).toBe("2026.8.1");
+      expect(state.configMigration.lastRestore).toBe(null);
+      expect(state.gatewayHold).toBe(null);
+      // Evidence: one event with the versions and the kept backup, and a
+      // day-bucketed notification (no restore notification).
+      expect(gateEvents(insertEvent)).toEqual([
+        expect.objectContaining({
+          status: "drift_detected",
+          details: expect.objectContaining({
+            installedVersion: "2026.7.1-2",
+            completedForVersion: "2026.8.1",
+            backup: kRegressionBak,
+            checked: expect.arrayContaining([
+              { source: "lastTransition", matched: false },
+              { source: "pendingRun", matched: false },
+            ]),
+          }),
+        }),
+      ]);
+      await flushAsync();
+      const ids = notifyIds(harness.notify);
+      expect(
+        ids.filter((id) => /^config-drift-2026\.7\.1-2-2026\.8\.1-\d{8}$/.test(id)),
+      ).toHaveLength(1);
+      expect(ids.some((id) => id.startsWith("config-restore-"))).toBe(false);
+
+      // Nothing was consumed, so the next boot says the same thing again
+      // (the day bucket dedupes the notification in the outbox).
+      const again = await harness.sync.reconcileBootConfig();
+      expect(again.reason).toBe("version_drift");
+      expect(fs.existsSync(bakPath)).toBe(true);
+    });
+
+    it("resolves the pending restart_expected run on the drift exit, like every other exit", async () => {
+      const kDriftOpId = "dddd1111-2222-3333-4444-555566667777";
+      const { harness, configPath } = seedRegression({
+        // `applied` names the installed build so syncAtBoot reports
+        // already_active and leaves the run for the reconciler.
+        seed: (s) => {
+          s.applied = { channel: "stable", version: "2026.7.1-2", at: 1, acceptedAt: null };
+        },
+      });
+      const ledger = createRunLedger({
+        openclawDir: harness.openclawDir,
+        nowFn: () => harness.nowRef.now,
+        logger: kSilentLogger,
+      });
+      // The run that restarted us targeted the NEWER build: not intent for
+      // 2026.7.1-2.
+      ledger.createRun({
+        operationId: kDriftOpId,
+        target: { kind: "package", channel: "stable", version: "2026.8.1" },
+      });
+      ledger.updateRun(kDriftOpId, (record) => {
+        record.state = "restart_expected";
+        return record;
+      });
+      harness.sync.syncAtBoot();
+      expect(ledger.readRun(kDriftOpId).state).toBe("restart_expected");
+
+      const outcome = await harness.sync.reconcileBootConfig();
+      expect(outcome.reason).toBe("version_drift");
+      const record = ledger.readRun(kDriftOpId);
+      expect(record.state).not.toBe("restart_expected");
+      expect(record.steps).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ name: "config-migrate", status: "warning", detail: "version drift" }),
+        ]),
+      );
+      expect(JSON.parse(fs.readFileSync(configPath, "utf8")).migrated).toBe("beta-shape");
+    });
+
+    it("reports held — never skipped — when drift is found under a persisted gateway hold (exit contract)", async () => {
+      const hold = {
+        reason: "settings migration for 2026.8.1 failed: doctor did not repair the config",
+        at: 1,
+        operationId: null,
+        blamedKeys: ["mystery"],
+      };
+      const { harness, configPath, doctorCalls } = seedRegression({
+        seed: (s) => {
+          s.gatewayHold = hold;
+        },
+      });
+      harness.sync.syncAtBoot();
+      const outcome = await harness.sync.reconcileBootConfig();
+      expect(outcome.status).toBe("held");
+      expect(outcome.hold).toEqual(
+        expect.objectContaining({ reason: hold.reason, blamedKeys: ["mystery"] }),
+      );
+      expect(doctorCalls).toHaveLength(0);
+      expect(JSON.parse(fs.readFileSync(configPath, "utf8")).migrated).toBe("beta-shape");
+    });
+
+    it("force (operator retry) never replays the downgrade restore and never takes the drift exit", async () => {
+      // Even WITH a valid intent stamp: the operator is present and asked for
+      // the forward migration; live edits win.
+      const { harness, bakPath, configPath, doctorCalls } = seedRegression({
+        seed: (s, h) => {
+          s.lastTransition = landedDowngradeStamp(h);
+        },
+      });
+      harness.sync.syncAtBoot();
+      const outcome = await harness.sync.reconcileBootConfig({ force: true });
+      expect(outcome.status).toBe("ok");
+      expect(outcome.reason).not.toBe("round-trip-restore");
+      expect(outcome.reason).not.toBe("version_drift");
+      // The forward migration ran instead (doctor once), the live settings
+      // stayed, the downgrade snapshot and the stamp are untouched.
+      expect(doctorCalls).toHaveLength(1);
+      expect(JSON.parse(fs.readFileSync(configPath, "utf8")).migrated).toBe("beta-shape");
+      expect(fs.existsSync(bakPath)).toBe(true);
+      expect(preRestoreCopies(harness.openclawDir)).toEqual([]);
+      expect(harness.store.readState().lastTransition.consumedAt).toBe(null);
+    });
+
+    it("honours each intent source in table order and refuses a consumed, failed or expired stamp", async () => {
+      const kDay = 24 * 60 * 60 * 1000;
+      const kRunOpId = "eeee1111-2222-3333-4444-555566667777";
+      const cases = [
+        {
+          name: "pending restart_expected run targets this version",
+          pendingRun: true,
+          seed: (s) => {
+            s.applied = { channel: "stable", version: "2026.7.1-2", at: 1, acceptedAt: null };
+          },
+          intent: "pendingRun",
+        },
+        {
+          name: "update run finished < 24h ago targets this version",
+          seed: (s, h) => {
+            s.lastUpdateRun = {
+              operationId: "r1",
+              target: { channel: "stable", version: "2026.7.1-2" },
+              startedAt: h.nowRef.now - 2 * 3_600_000,
+              finishedAt: h.nowRef.now - 3_600_000,
+              ok: true,
+              steps: [],
+            };
+          },
+          intent: "recentUpdateRun",
+        },
+        {
+          name: "update run older than 24h",
+          seed: (s, h) => {
+            s.lastUpdateRun = {
+              operationId: "r1",
+              target: { channel: "stable", version: "2026.7.1-2" },
+              startedAt: h.nowRef.now - 26 * 3_600_000,
+              finishedAt: h.nowRef.now - 25 * 3_600_000,
+              ok: true,
+              steps: [],
+            };
+          },
+          intent: null,
+        },
+        {
+          name: "rollback stamp",
+          seed: (s, h) => {
+            s.lastTransition = landedDowngradeStamp(h, { source: "rollback", reason: "crash_loop" });
+          },
+          intent: "lastTransition",
+        },
+        {
+          name: "pin-bump stamp",
+          seed: (s, h) => {
+            s.lastTransition = landedDowngradeStamp(h, { source: "pin_bump", reason: "declared_pin_changed" });
+          },
+          intent: "lastTransition",
+        },
+        {
+          name: "consumed stamp",
+          seed: (s, h) => {
+            s.lastTransition = landedDowngradeStamp(h, { consumedAt: h.nowRef.now - 1 });
+          },
+          intent: null,
+        },
+        {
+          name: "failed apply stamp",
+          seed: (s, h) => {
+            s.lastTransition = landedDowngradeStamp(h, { ok: false });
+          },
+          intent: null,
+        },
+        {
+          name: "in-flight apply stamp",
+          seed: (s, h) => {
+            s.lastTransition = landedDowngradeStamp(h, { ok: null });
+          },
+          intent: null,
+        },
+        {
+          name: "expired stamp (8 days)",
+          seed: (s, h) => {
+            s.lastTransition = landedDowngradeStamp(h, { at: h.nowRef.now - 8 * kDay });
+          },
+          intent: null,
+        },
+      ];
+      for (const testCase of cases) {
+        const { harness, bakPath, doctorCalls } = seedRegression({ seed: testCase.seed });
+        if (testCase.pendingRun) {
+          const ledger = createRunLedger({
+            openclawDir: harness.openclawDir,
+            nowFn: () => harness.nowRef.now,
+            logger: kSilentLogger,
+          });
+          ledger.createRun({
+            operationId: kRunOpId,
+            target: { kind: "package", channel: "stable", version: "2026.7.1-2" },
+          });
+          ledger.updateRun(kRunOpId, (record) => {
+            record.state = "restart_expected";
+            return record;
+          });
+        }
+        harness.sync.syncAtBoot();
+        const outcome = await harness.sync.reconcileBootConfig();
+        if (testCase.intent) {
+          expect(outcome.reason, testCase.name).toBe("round-trip-restore");
+          expect(outcome.intent, testCase.name).toBe(testCase.intent);
+          expect(fs.existsSync(bakPath), testCase.name).toBe(false);
+        } else {
+          expect(outcome.reason, testCase.name).toBe("version_drift");
+          expect(fs.existsSync(bakPath), testCase.name).toBe(true);
+        }
+        // Neither branch ever runs doctor.
+        expect(doctorCalls, testCase.name).toHaveLength(0);
+      }
+    });
+
+    it("holds with version_mismatch before any doctor when the installed tree is not the recorded build, and never re-arms doctor on it (#76 first guard)", async () => {
+      const doctorCalls = [];
+      const insertEvent = vi.fn();
+      const harness = createHarness({
+        pin: "1.0.0",
+        installedVersion: "1.0.0",
+        sentinelVersion: "1.0.0",
+        runnerImpl: doctorRunner({ doctorCalls }),
+        extraSyncOptions: { insertEvent },
+      });
+      harness.store.updateState((s) => {
+        s.pinVersion = "1.0.0";
+        s.applied = { channel: "beta", version: "2.0.0", at: 1, acceptedAt: 2 };
+        return s;
+      });
+      expect(saveOverlayFixture(harness.store, "2.0.0")).toEqual({ ok: true });
+      writeConfig(harness.openclawDir, { audit: { enabled: true } });
+      const configPath = path.join(harness.openclawDir, "openclaw.json");
+      const configBefore = fs.readFileSync(configPath);
+
+      // The boot sync never ran (the #76 shape: it skipped behind a stale
+      // pidfile), so the server phase meets a tree that is not the recorded
+      // build while that build's overlay is complete on disk.
+      const outcome = await harness.sync.reconcileBootConfig();
+      expect(outcome.status).toBe("held");
+      expect(outcome.hold).toEqual({
+        reason: "version_mismatch",
+        at: harness.nowRef.now,
+        operationId: null,
+        blamedKeys: [],
+        detail: expect.stringContaining(
+          "OpenClaw 1.0.0 is installed but 2.0.0 is the recorded build",
+        ),
+        installed: "1.0.0",
+        expected: "2.0.0",
+        bootId: getProcessBootId(),
+      });
+      expect(harness.store.readState().gatewayHold).toEqual(outcome.hold);
+      // NOTHING ran or changed: no doctor, no spawn, no snapshot, no attempt
+      // record; config bytes identical.
+      expect(doctorCalls).toHaveLength(0);
+      expect(harness.runner.runStreamed).not.toHaveBeenCalled();
+      expect(fs.readFileSync(configPath)).toEqual(configBefore);
+      expect(fs.readdirSync(harness.openclawDir).filter((name) => name.endsWith(".bak"))).toEqual([]);
+      expect(harness.store.readState().configMigration).toBe(null);
+      expect(insertEvent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          eventType: "config_migration_gate",
+          status: "version_mismatch",
+          details: { installed: "1.0.0", expected: "2.0.0" },
+        }),
+      );
+      await flushAsync();
+      expect(notifyIds(harness.notify)).toContain("version-mismatch-held-1.0.0-2.0.0");
+
+      // The next reconcile — and an operator force — keep the hold without
+      // ever arming doctor (Codex 6: only migration-class holds re-arm it).
+      const again = await harness.sync.reconcileBootConfig();
+      expect(again.status).toBe("held");
+      expect(again.hold.reason).toBe("version_mismatch");
+      const forced = await harness.sync.reconcileBootConfig({ force: true });
+      expect(forced.status).toBe("held");
+      expect(forced.hold.reason).toBe("version_mismatch");
+      expect(doctorCalls).toHaveLength(0);
+      expect(harness.runner.runStreamed).not.toHaveBeenCalled();
+
+      // Once the recorded build IS active (the boot sync ran), the reconciler
+      // clears the hold it set and the normal migration proceeds.
+      expect(harness.sync.syncAtBoot().action).toBe("activated");
+      expect(installedPackageJsonVersion(harness.installDir)).toBe("2.0.0");
+      const healed = await harness.sync.reconcileBootConfig();
+      expect(healed.status).toBe("ok");
+      expect(
+        healed.warnings.some((warning) => warning.includes("cleared the version_mismatch hold")),
+      ).toBe(true);
+      expect(harness.store.readState().gatewayHold).toBe(null);
+      expect(doctorCalls).toHaveLength(1);
+    });
+
+    it("keeps the version_mismatch hold while the tree is still diverged and the recorded build's overlay is no longer complete — doctor never runs", async () => {
+      const doctorCalls = [];
+      const harness = createHarness({
+        pin: "1.0.0",
+        installedVersion: "1.0.0",
+        sentinelVersion: "1.0.0",
+        runnerImpl: doctorRunner({ doctorCalls }),
+      });
+      harness.store.updateState((s) => {
+        s.pinVersion = "1.0.0";
+        s.applied = { channel: "beta", version: "2.0.0", at: 1, acceptedAt: 2 };
+        return s;
+      });
+      expect(saveOverlayFixture(harness.store, "2.0.0")).toEqual({ ok: true });
+      writeConfig(harness.openclawDir, { audit: { enabled: true } });
+      const configPath = path.join(harness.openclawDir, "openclaw.json");
+      const configBefore = fs.readFileSync(configPath);
+
+      const first = await harness.sync.reconcileBootConfig();
+      expect(first.status).toBe("held");
+      expect(first.hold.reason).toBe("version_mismatch");
+      const setAt = first.hold.at;
+
+      // The overlay's completion sentinel is gone (pruneOverlays tombstones
+      // it FIRST, so a crash mid-prune leaves exactly this; so does a partial
+      // volume restore) while `applied` still names 2.0.0: the first guard no
+      // longer fires, but the tree is still not the recorded build — the
+      // hold stays and NOTHING migrates.
+      fs.rmSync(harness.store.overlayCompletePath("2.0.0"));
+      expect(harness.store.hasOverlay("2.0.0")).toBe(false);
+      expect(harness.sync.getChannelInfo().installedDiverged).toBe(true);
+      harness.nowRef.now += 60_000;
+
+      for (const options of [{}, { force: true }]) {
+        const outcome = await harness.sync.reconcileBootConfig(options);
+        expect(outcome.status, JSON.stringify(options)).toBe("held");
+        // The prose now says why a restart cannot heal it; at/bootId still
+        // name the boot that set the hold.
+        expect(outcome.hold, JSON.stringify(options)).toEqual({
+          reason: "version_mismatch",
+          at: setAt,
+          operationId: null,
+          blamedKeys: [],
+          detail: expect.stringContaining(
+            "2.0.0 is the recorded build and its overlay is no longer complete",
+          ),
+          installed: "1.0.0",
+          expected: "2.0.0",
+          bootId: getProcessBootId(),
+        });
+        expect(
+          outcome.warnings.some((warning) => warning.includes("cleared the version_mismatch hold")),
+        ).toBe(false);
+        expect(harness.store.readState().gatewayHold).toEqual(outcome.hold);
+      }
+      expect(doctorCalls).toHaveLength(0);
+      expect(harness.runner.runStreamed).not.toHaveBeenCalled();
+      expect(fs.readFileSync(configPath)).toEqual(configBefore);
+      expect(fs.readdirSync(harness.openclawDir).filter((name) => name.endsWith(".bak"))).toEqual([]);
+      expect(harness.store.readState().configMigration).toBe(null);
+    });
+
+    it("clears a persisted version_mismatch hold once the installed tree IS the recorded build, then migrates normally", async () => {
+      const doctorCalls = [];
+      const harness = createHarness({
+        pin: "1.0.0",
+        installedVersion: "1.0.0",
+        sentinelVersion: "1.0.0",
+        runnerImpl: doctorRunner({ doctorCalls }),
+      });
+      // A hold from an earlier boot; since then the recorded build became the
+      // installed one (no applied → expected is the pin), so the divergence
+      // is gone and the reconciler that set the hold owns clearing it.
+      harness.store.updateState((s) => {
+        s.pinVersion = "1.0.0";
+        s.gatewayHold = {
+          reason: "version_mismatch",
+          at: 1,
+          operationId: null,
+          blamedKeys: [],
+          detail: "OpenClaw 1.0.0 is installed but 2.0.0 is the recorded build",
+          installed: "1.0.0",
+          expected: "2.0.0",
+          bootId: "boot-earlier",
+        };
+        return s;
+      });
+      writeConfig(harness.openclawDir, { audit: { enabled: true } });
+      harness.sync.syncAtBoot();
+      expect(harness.sync.getChannelInfo().installedDiverged).toBe(false);
+
+      const outcome = await harness.sync.reconcileBootConfig();
+      expect(outcome.status).toBe("ok");
+      expect(outcome.warnings).toContain(
+        "cleared the version_mismatch hold: 1.0.0 is the recorded build again",
+      );
+      expect(harness.store.readState().gatewayHold).toBe(null);
+      expect(doctorCalls).toHaveLength(1);
+    });
+
+    it("keeps a structural hold it does not own (state_db_unreadable) without running doctor, even on force", async () => {
+      const doctorCalls = [];
+      const harness = createHarness({
+        pin: "1.0.0",
+        installedVersion: "1.0.0",
+        sentinelVersion: "1.0.0",
+        runnerImpl: doctorRunner({ doctorCalls }),
+      });
+      harness.store.updateState((s) => {
+        s.gatewayHold = {
+          reason: "state_db_unreadable",
+          at: 1,
+          operationId: null,
+          blamedKeys: [],
+          detail: "state/openclaw.sqlite: SQLITE_NOTADB",
+        };
+        return s;
+      });
+      writeConfig(harness.openclawDir, { audit: { enabled: true } });
+      harness.sync.syncAtBoot();
+      for (const options of [{}, { force: true }]) {
+        const outcome = await harness.sync.reconcileBootConfig(options);
+        expect(outcome.status).toBe("held");
+        expect(outcome.hold.reason).toBe("state_db_unreadable");
+      }
+      expect(doctorCalls).toHaveLength(0);
+      expect(harness.runner.runStreamed).not.toHaveBeenCalled();
+      expect(harness.store.readState().gatewayHold.reason).toBe("state_db_unreadable");
     });
 
     it("never fires the round-trip restore on a forced same-version retry (red-team #1)", async () => {
@@ -1748,6 +2350,116 @@ describe("server/openclaw-channel boot sync (e2e)", () => {
       );
     });
 
+    // Issue #78 at the boot probe: agent DBs are judged against the INSTALLED
+    // tree's declared agent schema. A DB NEWER than the build supports is a
+    // hard gate — never `null` (which would coerce to "run doctor --fix" from
+    // the very binary that cannot read the database).
+    it("holds the gateway (no doctor) when an agent DB is at a newer schema than the installed build declares (#78)", async () => {
+      const doctorCalls = [];
+      let harness;
+      harness = createHarness({
+        installedVersion: "2026.9.1-beta.1",
+        sentinelVersion: "2026.9.1-beta.1",
+        installFixture: { schema: { state: 12, agent: 17 } },
+        runnerImpl: validateAwareRunner({
+          openclawDirRef: () => harness.openclawDir,
+          doctorCalls,
+          dbPreflight: { ok: true, compatible: true },
+        }),
+      });
+      writeConfig(harness.openclawDir, { clean: true });
+      const agentDb = writeAgentDb(harness.openclawDir, "main", { userVersion: 21 });
+      // No apply-time hint → the live probe decides.
+      seedRestartExpectedRun(harness);
+      harness.sync.syncAtBoot();
+
+      const outcome = await harness.sync.reconcileBootConfig();
+
+      expect(outcome.status).toBe("held");
+      expect(outcome.hold.reason).toBe(
+        "agent database agents/main/agent/openclaw-agent.sqlite is at agent schema 21 and OpenClaw 2026.9.1-beta.1 supports up to 17 — the gateway is held so this build never opens a database it cannot read",
+      );
+      expect(harness.store.readState().gatewayHold).toEqual(
+        expect.objectContaining({ reason: outcome.hold.reason }),
+      );
+      // Fail CLOSED: no doctor from the incompatible binary, and the agent DB
+      // never reached the state-schema verb.
+      expect(doctorCalls).toHaveLength(0);
+      const preflightCalls = harness.runner.runStreamed.mock.calls.filter(
+        (call) => (call[0]?.args || []).includes("preflight"),
+      );
+      expect(
+        preflightCalls.some((call) =>
+          call[0].args.some((arg) => /openclaw-agent/.test(String(arg))),
+        ),
+      ).toBe(false);
+      const record = readRunRecord(harness);
+      expect(lastStepNamed(record, "db-migrate")).toEqual(
+        expect.objectContaining({
+          status: "failed",
+          detail: expect.stringMatching(/agent schema 21 is newer than the 17/),
+        }),
+      );
+      expect(lastStepNamed(record, "config-migrate")).toEqual(
+        expect.objectContaining({ status: "failed" }),
+      );
+      expect(record.state).not.toBe("restart_expected");
+      // Nothing was modified: the live DB still carries its schema.
+      const { DatabaseSync } = require("node:sqlite");
+      const db = new DatabaseSync(agentDb, { readOnly: true });
+      expect(db.prepare("PRAGMA user_version").get().user_version).toBe(21);
+      db.close();
+      // The next boot must re-probe (a replaced DB does not change the config
+      // hash): the failed attempt carries no gateHash.
+      expect(harness.store.readState().configMigration.lastAttempt).toEqual(
+        expect.objectContaining({ ok: false, error: "db-incompatible" }),
+      );
+      expect(
+        harness.store.readState().configMigration.lastAttempt.gateHash ?? null,
+      ).toBe(null);
+      await flushAsync();
+      expect(notifyIds(harness.notify)).toContain("db-incompatible-held-2026.9.1-beta.1");
+      expect(
+        notifyMessages(harness.notify).some((m) =>
+          /agent schema 21 and this build supports up to 17/.test(m),
+        ),
+      ).toBe(true);
+    });
+
+    it("runs doctor when an agent DB LAGS the installed build's declared agent schema (#78 migration path)", async () => {
+      const doctorCalls = [];
+      let harness;
+      harness = createHarness({
+        installedVersion: "2026.9.1-beta.1",
+        sentinelVersion: "2026.9.1-beta.1",
+        installFixture: { schema: { state: 12, agent: 17 } },
+        runnerImpl: validateAwareRunner({
+          openclawDirRef: () => harness.openclawDir,
+          doctorCalls,
+          dbPreflight: { ok: true, compatible: true },
+        }),
+      });
+      writeConfig(harness.openclawDir, { clean: true });
+      writeAgentDb(harness.openclawDir, "main", { userVersion: 12 });
+      seedRestartExpectedRun(harness);
+      harness.sync.syncAtBoot();
+
+      const outcome = await harness.sync.reconcileBootConfig();
+
+      expect(outcome.status).toBe("ok");
+      // The config validated clean and there is no state DB: ONLY the agent
+      // arm's migration-required verdict drove the doctor run.
+      expect(doctorCalls).toHaveLength(1);
+      const preflightCalls = harness.runner.runStreamed.mock.calls.filter(
+        (call) => (call[0]?.args || []).includes("preflight"),
+      );
+      expect(preflightCalls).toHaveLength(0);
+      expect(harness.store.readState().gatewayHold).toBe(null);
+      expect(lastStepNamed(readRunRecord(harness), "db-migrate")).toEqual(
+        expect.objectContaining({ status: "completed" }),
+      );
+    });
+
     it("holds on a doctor timeout with the sized-budget warning and an honest post-kill db verdict", async () => {
       const { DatabaseSync } = require("node:sqlite");
       const timeoutDoctor = async () => ({
@@ -2355,6 +3067,31 @@ describe("server/openclaw-channel boot sync (e2e)", () => {
       expect(notifyIds(harness.notify)).toContain(
         "config-restore-rollback-1.0.0",
       );
+      // #76 A5/RC3 evidence: the restore left a pre-restore copy and a
+      // lastRestore record (source rollback), and consuming the marker
+      // stamped the transition the rollback chose.
+      const after = harness.store.readState();
+      expect(after.configMigration.lastRestore).toEqual(
+        expect.objectContaining({
+          from: "openclaw.json.pre-fix-1.0.0.bak",
+          previousCompletedForVersion: "1.0.0",
+          source: "rollback",
+          bootId: getProcessBootId(),
+        }),
+      );
+      expect(fs.existsSync(after.configMigration.lastRestore.preRestorePath)).toBe(true);
+      expect(fs.existsSync(after.configMigration.lastRestore.diffPath)).toBe(true);
+      expect(after.lastTransition).toEqual(
+        expect.objectContaining({
+          from: "2026.9.1-beta.1",
+          to: "1.0.0",
+          kind: "downgrade",
+          source: "rollback",
+          reason: "config_error",
+          ok: true,
+          consumedAt: null,
+        }),
+      );
 
       // A FORCED retry (the operator's Retry-migration button) must never
       // replay the stale rollback restore over live edits.
@@ -2653,6 +3390,17 @@ describe("server/openclaw-channel boot sync (e2e)", () => {
       ]);
       // The migration trigger stays armed for a retry after Clear.
       expect(state.configMigration.completedForVersion).toBe("2026.7.1-2");
+      // #76 A5: the gate's restore leaves the same evidence as every other
+      // whole-file restore (pre-restore copy + lastRestore, source
+      // migration_gate).
+      expect(state.configMigration.lastRestore).toEqual(
+        expect.objectContaining({
+          from: "openclaw.json.pre-fix-2026.7.1-2.bak",
+          source: "migration_gate",
+          bootId: getProcessBootId(),
+        }),
+      );
+      expect(fs.existsSync(state.configMigration.lastRestore.preRestorePath)).toBe(true);
       const cfg = JSON.parse(
         fs.readFileSync(path.join(harness.openclawDir, "openclaw.json"), "utf8"),
       );
@@ -2927,6 +3675,142 @@ describe("server/openclaw-channel boot sync (e2e)", () => {
       );
     });
 
+    // Issue #78 at the boot rollback prober: agent DBs are judged against
+    // each CANDIDATE's declared agent schema, never fed to its state-schema
+    // verb (which would read them as incompatible and refuse every target).
+    const agentSnapshotReachedCli = (impl) =>
+      impl.mock.calls.some(([, args]) =>
+        (args || []).some((arg) => /openclaw-agent/.test(String(arg))),
+      );
+
+    it("prober (#78): an agent DB at schema 17 is eligible for a candidate declaring agent 19", async () => {
+      const impl = vi.fn(() => "");
+      const harness = createHarness({
+        pin: "1.0.0",
+        installedVersion: "3.0.0",
+        sentinelVersion: "3.0.0",
+        execFileSyncImpl: impl,
+      });
+      saveOverlayFixture(harness.store, "2.0.0", { schema: { state: 15, agent: 19 } });
+      saveOverlayFixture(harness.store, "1.0.0", { schema: { state: 15, agent: 19 } });
+      writeConfig(harness.openclawDir, { audit: {} });
+      writeStateDb(harness.openclawDir);
+      writeAgentDb(harness.openclawDir, "main", { userVersion: 17 });
+      harness.store.updateState((s) => {
+        s.pinVersion = "1.0.0";
+        s.configMigration = {
+          completedForVersion: "3.0.0",
+          lastAttempt: { version: "3.0.0", at: 1, ok: true, error: null },
+        };
+        return s;
+      });
+      harness.store.writeMarker({
+        target: { kind: "package", channel: "stable", version: "2.0.0" },
+        blockedId: "3.0.0",
+        reason: "config_error",
+        exitCode: 78,
+        at: 1,
+      });
+
+      const result = harness.sync.syncAtBoot();
+
+      expect(result.action).toBe("rollback");
+      expect(installedPackageJsonVersion(harness.installDir)).toBe("2.0.0");
+      expect(result.warnings.some((w) => /rollback target 2\.0\.0/.test(w))).toBe(false);
+      // Only the STATE snapshot copy was handed to the candidate's CLI.
+      expect(impl.mock.calls.some(([, args]) => args.includes("preflight"))).toBe(true);
+      expect(agentSnapshotReachedCli(impl)).toBe(false);
+    });
+
+    it("prober (#78): an agent DB at schema 17 blocks a candidate declaring agent 15 and reroutes to the pin", async () => {
+      const impl = vi.fn(() => "");
+      const harness = createHarness({
+        pin: "1.0.0",
+        installedVersion: "3.0.0",
+        sentinelVersion: "3.0.0",
+        execFileSyncImpl: impl,
+      });
+      // The target's agent schema (15) is OLDER than the DB (17): blocked.
+      // The pin declares 19: eligible.
+      saveOverlayFixture(harness.store, "2.0.0", { schema: { state: 12, agent: 15 } });
+      saveOverlayFixture(harness.store, "1.0.0", { schema: { state: 15, agent: 19 } });
+      writeConfig(harness.openclawDir, { audit: {} });
+      writeStateDb(harness.openclawDir);
+      writeAgentDb(harness.openclawDir, "main", { userVersion: 17 });
+      harness.store.updateState((s) => {
+        s.pinVersion = "1.0.0";
+        s.configMigration = {
+          completedForVersion: "3.0.0",
+          lastAttempt: { version: "3.0.0", at: 1, ok: true, error: null },
+        };
+        return s;
+      });
+      harness.store.writeMarker({
+        target: { kind: "package", channel: "stable", version: "2.0.0" },
+        blockedId: "3.0.0",
+        reason: "config_error",
+        exitCode: 78,
+        at: 1,
+      });
+
+      const result = harness.sync.syncAtBoot();
+
+      expect(result.action).toBe("rollback");
+      expect(installedPackageJsonVersion(harness.installDir)).toBe("1.0.0");
+      expect(
+        result.warnings.some((w) =>
+          w.includes(
+            "rollback target 2.0.0 reports it cannot safely read the current database",
+          ),
+        ),
+      ).toBe(true);
+      expect(agentSnapshotReachedCli(impl)).toBe(false);
+      await flushAsync();
+      expect(notifyIds(harness.notify)).toContain("boot-rollback-preflight-2.0.0");
+    });
+
+    it("prober (#78): a candidate declaring no agent schema keeps the existing unverified-rollback warning", async () => {
+      const impl = vi.fn(() => "");
+      const harness = createHarness({
+        pin: "1.0.0",
+        installedVersion: "3.0.0",
+        sentinelVersion: "3.0.0",
+        execFileSyncImpl: impl,
+      });
+      // No contract chunks and "2.0.0" is not seeded: agent schema unknown.
+      saveOverlayFixture(harness.store, "2.0.0");
+      saveOverlayFixture(harness.store, "1.0.0");
+      writeConfig(harness.openclawDir, { audit: {} });
+      writeStateDb(harness.openclawDir);
+      writeAgentDb(harness.openclawDir, "main", { userVersion: 17 });
+      harness.store.updateState((s) => {
+        s.pinVersion = "1.0.0";
+        s.configMigration = {
+          completedForVersion: "3.0.0",
+          lastAttempt: { version: "3.0.0", at: 1, ok: true, error: null },
+        };
+        return s;
+      });
+      harness.store.writeMarker({
+        target: { kind: "package", channel: "stable", version: "2.0.0" },
+        blockedId: "3.0.0",
+        reason: "config_error",
+        exitCode: 78,
+        at: 1,
+      });
+
+      const result = harness.sync.syncAtBoot();
+
+      // Unknown fails open onto the target, with the verbatim C1 wording.
+      expect(result.action).toBe("rollback");
+      expect(installedPackageJsonVersion(harness.installDir)).toBe("2.0.0");
+      expect(result.warnings).toContain(
+        "rollback target 2.0.0 cannot verify state written by the newer version — " +
+          "the backup taken before the update is the recovery path if anything looks wrong",
+      );
+      expect(agentSnapshotReachedCli(impl)).toBe(false);
+    });
+
     it("refuses the rollback and keeps the blocked build when every target preflight-blocks", async () => {
       process.env.ALPHACLAW_NOTIFY_WEBHOOK_URL = "http://127.0.0.1:9/hook";
       const webhookFetch = vi.fn(async () => ({ ok: true, status: 200 }));
@@ -3064,7 +3948,9 @@ describe("server/openclaw-channel boot sync (e2e)", () => {
       ).toBe(true);
 
       // Second cycle: the forward build failed too and the box rolled back
-      // to the pin again — nothing bootable remains.
+      // to the pin again — nothing bootable remains. The pin's TREE is back
+      // on disk as well: forward recovery judges the installed tree, not the
+      // record (#76 RC4) — with 2.0.0 still installed this would be not_pin.
       harness.store.addBlocklist({
         id: "2.0.0",
         reason: "config_error",
@@ -3074,6 +3960,13 @@ describe("server/openclaw-channel boot sync (e2e)", () => {
         s.applied = null;
         return s;
       });
+      writeInstallFixture(harness.installDir, { version: "1.0.0" });
+      harness.store.writeSentinel({
+        installDir: harness.installDir,
+        version: "1.0.0",
+      });
+      const backOnPin = harness.sync.getChannelInfo();
+      expect(backOnPin.installedIsPin).toBe(true);
       const second = harness.sync.requestForwardRecovery({ exitCode: 78 });
       expect(second.ok).toBe(false);
       expect(second.code).toBe("forward_already_attempted");
