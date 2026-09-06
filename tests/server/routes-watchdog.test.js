@@ -172,13 +172,74 @@ describe("server/routes/watchdog", () => {
 
     expect(res.status).toBe(200);
     expect(deps.watchdog.triggerRepair).toHaveBeenCalledTimes(1);
+    // v0.9.74 repair contract: verdict/pending/replacementPending ride beside
+    // the raw result (a skip has no verdict and nothing pending).
     expect(res.body).toEqual({
       ok: false,
+      verdict: null,
+      pending: false,
+      replacementPending: null,
       result: {
         ok: false,
         skipped: true,
         reason: "operation_in_progress",
       },
+    });
+  });
+
+  it("surfaces the relaunch verdict, the pending flag and the watchdog's replacementPending on POST /api/watchdog/repair", async () => {
+    const deps = createDeps();
+    const replacementPending = {
+      pid: 4242,
+      source: "repair",
+      intent: "replace",
+      since: "2026-09-05T10:00:00.000Z",
+      deadline: "2026-09-05T10:05:00.000Z",
+    };
+    deps.watchdog.getStatus.mockReturnValue({
+      lifecycle: "running",
+      health: "unknown",
+      replacementPending,
+    });
+    deps.watchdog.triggerRepair.mockResolvedValue({
+      ok: true,
+      verifiedHealthy: false,
+      launchedGateway: true,
+      pending: true,
+      verdict: "replacement_pending",
+      result: { ok: true },
+    });
+    const app = createApp(deps);
+
+    const res = await request(app).post("/api/watchdog/repair");
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      ok: true,
+      verdict: "replacement_pending",
+      pending: true,
+      replacementPending,
+      result: { ok: true, verdict: "replacement_pending", pending: true },
+    });
+
+    // A failed relaunch is an honest failure: ok false, verdict named,
+    // nothing pending.
+    deps.watchdog.getStatus.mockReturnValue({ lifecycle: "running", health: "unhealthy", replacementPending: null });
+    deps.watchdog.triggerRepair.mockResolvedValue({
+      ok: false,
+      reason: "launch_failed",
+      verdict: "launch_failed",
+      launchedGateway: false,
+      pending: false,
+      result: { ok: true },
+    });
+    const failed = await request(createApp(deps)).post("/api/watchdog/repair");
+    expect(failed.status).toBe(200);
+    expect(failed.body).toMatchObject({
+      ok: false,
+      verdict: "launch_failed",
+      pending: false,
+      replacementPending: null,
     });
   });
 

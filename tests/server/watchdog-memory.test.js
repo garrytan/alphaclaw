@@ -44,6 +44,9 @@ const createHarness = ({
   restartGatewayForMitigation = null,
   isMitigationRestartBlocked = null,
   mitigationStatePath,
+  // v0.9.74 identity seams (pid-reuse guard for the serving root).
+  readProcStartTicks = null,
+  discoverServingIdentity = null,
 } = {}) => {
   process.env.WATCHDOG_AUTO_REPAIR = "false";
   process.env.WATCHDOG_NOTIFICATIONS_DISABLED = "false";
@@ -68,6 +71,8 @@ const createHarness = ({
     memoryMonitorConfig: kMonitorConfig,
     restartGatewayForMitigation,
     isMitigationRestartBlocked,
+    ...(readProcStartTicks ? { readProcStartTicks } : {}),
+    ...(discoverServingIdentity ? { discoverServingIdentity } : {}),
     memoryMitigationStatePath:
       mitigationStatePath ||
       path.join(
@@ -1182,6 +1187,86 @@ describe("server/watchdog memory monitor", () => {
     launchGateway(direct, 4243);
     direct.watchdog.onGatewayExit({ code: 1, signal: null, expectedExit: true, pid: 4243 });
     expect(direct.watchdog.getStatus().lifecycle).toBe("crashed");
+  });
+
+  it("an ADOPTED incumbent (boot around a gateway AlphaClaw did not spawn) is sampled at its tree root — memory-leak detection is no longer inert for it (acceptance a)", async () => {
+    const readProcStartTicks = vi.fn(() => 123456);
+    const harness = createHarness({ readProcStartTicks });
+    harness.watchdog.onGatewayLaunch({
+      startedAt: Date.now(),
+      pid: null,
+      servingPid: 701,
+      rootPid: 700,
+      startTicks: 123456,
+      generation: null,
+      supervision: "adopted",
+    });
+    expect(harness.watchdog.getStatus()).toMatchObject({
+      gatewayPid: null,
+      servingPid: 701,
+      servingRootPid: 700,
+      supervisionMode: "adopted",
+    });
+    await driveTicks(harness, {
+      ticks: 2,
+      sampleAt: () => ({ rssBytes: 100 * kMb }),
+    });
+    // The subtree root (launcher/supervisor), not the worker: the sampler
+    // walks the tree from the root exactly as it does for a managed child.
+    expect(harness.readMemorySample).toHaveBeenCalledTimes(2);
+    expect(harness.readMemorySample).toHaveBeenCalledWith(700);
+    expect(harness.watchdog.getMemoryTrend().state).not.toBe("no_gateway");
+    // The identity check re-read the root's start ticks before each sample.
+    expect(readProcStartTicks).toHaveBeenCalledWith(700);
+  });
+
+  it("a serving root whose /proc start ticks changed is a REUSED pid: no_gateway, identity cleared, one serving_identity_lost row, the stranger never sampled (13A)", async () => {
+    let ticks = 5;
+    const readProcStartTicks = vi.fn(() => ticks);
+    const harness = createHarness({ readProcStartTicks });
+    harness.watchdog.onGatewayLaunch({
+      startedAt: Date.now(),
+      pid: null,
+      servingPid: 701,
+      rootPid: 700,
+      startTicks: 5,
+      generation: null,
+      supervision: "adopted",
+    });
+    await driveTicks(harness, { ticks: 1, sampleAt: () => ({ rssBytes: 100 * kMb }) });
+    expect(harness.readMemorySample).toHaveBeenCalledTimes(1);
+
+    // pid 700 exited and the kernel handed the number to another process.
+    ticks = 6;
+    await driveTicks(harness, {
+      startTick: 1,
+      ticks: 2,
+      sampleAt: () => ({ rssBytes: 900 * kMb }),
+    });
+    // Never sampled the reused pid: the stranger's RSS must not enter the trend.
+    expect(harness.readMemorySample).toHaveBeenCalledTimes(1);
+    expect(harness.watchdog.getMemoryTrend().state).toBe("no_gateway");
+    expect(harness.watchdog.getStatus()).toMatchObject({
+      servingPid: null,
+      servingRootPid: null,
+      supervisionMode: "detached",
+      memory: expect.objectContaining({ trendState: "no_gateway" }),
+    });
+    const lostRows = harness.insertWatchdogEvent.mock.calls
+      .map(([row]) => row)
+      .filter((row) => row.eventType === "serving_identity_lost");
+    expect(lostRows).toHaveLength(1);
+    expect(lostRows[0]).toMatchObject({
+      source: "memory-monitor",
+      status: "failed",
+      details: { pid: 700, expectedStartTicks: 5, observedStartTicks: 6 },
+    });
+    // The MANAGED path is untouched by the guard when the ticks still match.
+    const managed = createHarness({ readProcStartTicks: () => 9 });
+    managed.watchdog.onGatewayLaunch({ pid: 4242, rootPid: 4242, startTicks: 9, startedAt: Date.now() });
+    await driveTicks(managed, { ticks: 2, sampleAt: () => ({ rssBytes: 100 * kMb }) });
+    expect(managed.readMemorySample).toHaveBeenCalledTimes(2);
+    expect(managed.watchdog.getStatus().supervisionMode).toBe("managed");
   });
 
   it("start() runs an immediate first tick — no 60s no_gateway blind window", async () => {

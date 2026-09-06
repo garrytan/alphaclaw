@@ -53,6 +53,17 @@ describe("getStatus() additive fields", () => {
     expect(status.awaitingAutoRepairRecovery).toBe(false);
     expect(typeof status.serverNow).toBe("number");
     expect(status.repairAttemptLimit).toBeGreaterThan(0);
+    // Serving identity + readiness axis (v0.9.74): nothing is known about who
+    // serves until a launch notification arrives, /readyz has not been asked,
+    // no relaunch obligation is open, and the repair path has no verdict yet.
+    expect(status.servingPid).toBe(null);
+    expect(status.servingRootPid).toBe(null);
+    expect(status.supervisionMode).toBe("detached");
+    expect(status.readiness).toBe("unknown");
+    expect(status.readinessReason).toBe(null);
+    expect(status.replacementPending).toBe(null);
+    expect(status.lastRepairVerdict).toBe(null);
+    expect(status.degradedRepairThreshold).toBe(3);
     // Memory monitor: latched enum + ISO + boolean only — the 2s SSE frame-
     // dedupe projection must never see an always-changing numeric here.
     expect(status.memory).toEqual({
@@ -115,6 +126,56 @@ describe("getStatus() additive fields", () => {
     watchdog.onGatewayExit({ code: 0, expectedExit: true });
     expect(watchdog.getStatus().lastExit).toBe(null);
     expect(watchdog.getStatus().phase).toBe("expected_restart");
+  });
+
+  it("start() reads detached/unknown until a launch notification names the serving process; an adopted payload fills the identity without a gatewayPid", () => {
+    const { watchdog } = createHarness();
+    watchdog.start();
+    try {
+      expect(watchdog.getStatus()).toMatchObject({
+        supervisionMode: "detached",
+        readiness: "unknown",
+        servingPid: null,
+        gatewayPid: null,
+      });
+      // Boot around an incumbent AlphaClaw did not spawn (gateway.js
+      // notifyGatewayLaunch with a discovered identity).
+      watchdog.onGatewayLaunch({
+        startedAt: Date.now(),
+        pid: null,
+        servingPid: 701,
+        rootPid: 700,
+        startTicks: 123456,
+        generation: null,
+        supervision: "adopted",
+      });
+      expect(watchdog.getStatus()).toMatchObject({
+        gatewayPid: null,
+        servingPid: 701,
+        servingRootPid: 700,
+        supervisionMode: "adopted",
+        lifecycle: "running",
+      });
+      // A null identity is DETACHED, never adopted (Codex point 10).
+      const { watchdog: detached } = createHarness();
+      detached.onGatewayLaunch({
+        startedAt: Date.now(),
+        pid: null,
+        servingPid: null,
+        rootPid: null,
+        startTicks: null,
+        generation: null,
+        supervision: "detached",
+      });
+      expect(detached.getStatus()).toMatchObject({
+        gatewayPid: null,
+        servingPid: null,
+        servingRootPid: null,
+        supervisionMode: "detached",
+      });
+    } finally {
+      watchdog.stop();
+    }
   });
 
   it("reports startup grace window after start()", () => {

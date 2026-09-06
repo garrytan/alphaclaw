@@ -5,6 +5,7 @@ const { DatabaseSync } = require("node:sqlite");
 const {
   createWatchdogIncidentTracker,
   classifyEvent,
+  kIncidentKeyByTrigger,
 } = require("../../lib/server/watchdog-incidents");
 
 const loadWatchdogDb = () => {
@@ -104,6 +105,133 @@ describe("classifyEvent transition table", () => {
     ]) {
       expect(classifyEvent({ eventType, status: "ok" })).toBe("append");
     }
+    // v0.9.74: a green /health over a failing /readyz is an incident of its
+    // own (gateway_readiness); its recovery row is append-only — the eventual
+    // health_check ok / recovery closes it.
+    expect(classifyEvent({ eventType: "readiness_degraded", status: "failed" })).toBe(
+      "open",
+    );
+    expect(
+      classifyEvent({
+        eventType: "readiness_degraded",
+        status: "ok",
+        details: { recovered: true },
+      }),
+    ).toBe("append");
+    expect(kIncidentKeyByTrigger.readiness_degraded).toBe("gateway_readiness");
+    // "Up" is not recovery while readiness fails or a relaunched child is
+    // unverified: these ok rows must NEVER close the incident they did not
+    // resolve (checked before the plain-ok close rule).
+    expect(
+      classifyEvent({
+        eventType: "health_check",
+        status: "ok",
+        details: { readinessPending: true, readinessReason: "secrets" },
+      }),
+    ).toBe("append");
+    expect(
+      classifyEvent({
+        eventType: "health_check",
+        status: "ok",
+        details: { replacementPending: true, pid: 4242 },
+      }),
+    ).toBe("append");
+    // Probe-proven death of an adopted gateway is a crash like any other.
+    expect(
+      classifyEvent({ eventType: "crash", source: "probe_death", status: "failed" }),
+    ).toBe("open");
+    for (const eventType of ["readiness_probe_error", "serving_identity_lost"]) {
+      expect(classifyEvent({ eventType, status: "failed" })).toBe("append");
+    }
+  });
+});
+
+describe("readiness incidents (v0.9.74)", () => {
+  it("a readiness_degraded failure opens a gateway_readiness incident that not-ready ok rows keep open and a plain ok closes", () => {
+    initContext();
+    const tracker = createTracker();
+    const insert = wrapped(tracker);
+
+    insert({
+      eventType: "readiness_degraded",
+      source: "health_timer",
+      status: "failed",
+      details: { eventLoopDegraded: false, failing: ["secrets"] },
+      correlationId: "r1",
+    });
+    const openId = tracker.getActiveIncidentId();
+    expect(openId).toBeGreaterThan(0);
+    expect(db.listIncidents()[0].incidentKey).toBe("gateway_readiness");
+
+    // Liveness-only rows while readiness still fails: stamped, never closing.
+    insert({
+      eventType: "health_check",
+      source: "health_timer",
+      status: "ok",
+      details: { ok: true, readinessPending: true, readinessReason: "secrets" },
+      correlationId: "r2",
+    });
+    insert({
+      eventType: "health_check",
+      source: "degraded_retry",
+      status: "ok",
+      details: { ok: true, readinessPending: true, readinessReason: "secrets", repeatedProbes: 3 },
+      correlationId: "r3",
+    });
+    expect(tracker.getActiveIncidentId()).toBe(openId);
+
+    // Readiness clears: the recovery row appends, the plain ok closes.
+    insert({
+      eventType: "readiness_degraded",
+      source: "health_timer",
+      status: "ok",
+      details: { recovered: true },
+      correlationId: "r4",
+    });
+    expect(tracker.getActiveIncidentId()).toBe(openId);
+    insert({
+      eventType: "health_check",
+      source: "health_timer",
+      status: "ok",
+      details: { ok: true },
+      correlationId: "r5",
+    });
+    expect(tracker.getActiveIncidentId()).toBe(null);
+    const [incident] = db.listIncidents();
+    expect(incident.status).toBe("resolved");
+    expect(incident.incidentKey).toBe("gateway_readiness");
+    expect(incident.summary.severity).toBe("warning");
+    expect(incident.eventCount).toBe(5);
+  });
+
+  it("a crash incident stays open across an unverified replacement's green probes and closes only on the verified recovery", () => {
+    initContext();
+    const tracker = createTracker();
+    const insert = wrapped(tracker);
+    insert(crashEvent());
+    const openId = tracker.getActiveIncidentId();
+    insert({
+      eventType: "restart",
+      source: "exit_event",
+      status: "requested",
+      details: { pid: 4242, generation: 2, intent: "relaunch_if_absent" },
+    });
+    insert({
+      eventType: "health_check",
+      source: "operation_end",
+      status: "ok",
+      details: { ok: true, replacementPending: true, pid: 4242, generation: 2 },
+    });
+    expect(tracker.getActiveIncidentId()).toBe(openId);
+    insert(recoveryEvent());
+    insert({
+      eventType: "restart",
+      source: "exit_event",
+      status: "ok",
+      details: { pid: 4242, generation: 2, verified: true },
+    });
+    expect(tracker.getActiveIncidentId()).toBe(null);
+    expect(db.listIncidents()[0].summary.actions).toContain("restart");
   });
 });
 
