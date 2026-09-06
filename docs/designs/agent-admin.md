@@ -17,7 +17,7 @@ curl the entire dashboard API with the SETUP_PASSWORD it inherits via
 pattern and replaces it with a paved, tiered, audited road.
 
 ## Threat model (honest — do not soften)
-As of v0.9.60, `gatewayEnv()` (lib/server/gateway.js) no longer spreads the full
+As of v0.9.63, `gatewayEnv()` (lib/server/gateway.js) no longer spreads the full
 `process.env` into the agent's shell: `filterGatewayChildEnv`
 (lib/server/gateway-env-policy.js) applies an explicit allowlist with an
 absolute deny list, so `SETUP_PASSWORD`, webhook/platform secrets, and
@@ -120,9 +120,12 @@ D1 default OFF + UI toggle · D2 server-enforced confirm codes · D3 secret writ
 allowed with one-time-use guidance · D4 alphaclaw.json git-synced.
 
 ## Deferred (see TODOS.md)
-gatewayEnv narrowing (P1); MCP export (E1); server-side dry-run (E3); scoped
+MCP export (E1); server-side dry-run (E3); scoped
 undo (E6 — routes dormant behind `if (undoService)`); scheduled restarts (E5);
 activity UI panel (E7); per-domain CLI sugar verbs; doctor-token expiry backport.
+gatewayEnv narrowing (formerly P1) shipped in v0.9.63 (see Threat model above);
+its remaining follow-up from that work is the GOG_KEYRING_PASSWORD runtime
+verification (TODOS.md, P3).
 
 ## Review record
 CEO (SELECTIVE_EXPANSION, 4 of 9 expansions accepted) + Eng (12 issues, 0
