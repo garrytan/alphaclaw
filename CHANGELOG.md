@@ -129,7 +129,9 @@ incumbent-verified restart (#59) rather than replacing them.
   default constant even for overridden leases, is replaced). The repair hold
   is leased at the Doctor ceiling plus the restart budget so a 10-minute
   `doctor --fix` followed by a cold restart never outlives it. The
-  config-change retry takes the lock (`config_retry`) before moving its
+  config-change retry takes the lock (`config_retry`, a new operation kind
+  on `/api/status` with the badge "Retrying start after config change")
+  before moving its
   mtime baseline and books one deduped skip per hold when it cannot. The pre-OOM memory mitigation's cold restart carries the same fence: a lease lost mid-restart stands down as `lease_expired` (a failed mitigation — budget stamp refunded, anti-thrash cooldown, loud notice), never a second `gateway --force` into the successor's operation. The verifier resolves only the replacement obligation it captured and still owns, so concurrent green probes book one `ok` and a relaunch that replaced nothing (aborted, failed, retained, adopted) leaves an earlier in-flight obligation intact; the crash-loop repair retry ladder treats `replacement_pending` and `lease_expired` as transient like `operation_in_progress`.
 - **One transient timeout no longer triggers `doctor --fix`.** For an
   established gateway the first failed probe still sets `degraded` and starts
@@ -148,7 +150,9 @@ incumbent-verified restart (#59) rather than replacing them.
   `servingRootPid`, `supervisionMode`, `readiness`, `readinessReason`,
   `replacementPending`, `lastRepairVerdict`, `degradedRepairThreshold`,
   `incumbentConflict` (kind, holder pid/role) and `incumbentGraceUntil`; the
-  reducer's `supervision` is three-valued (`managed` / `adopted` /
+  reducer's output gains `supervisionMode`, `servingPid` and
+  `replacementPending` (gateway card, `/api/status`) and its
+  `supervision` is three-valued (`managed` / `adopted` /
   `detached`, the "estimated" detail fires for both non-managed modes); the
   incidents timeline labels the new rows ("relaunch requested", "replacement
   verified", "up, not ready", "up, replacement unverified", "Gateway process
@@ -179,13 +183,14 @@ incumbent-verified restart (#59) rather than replacing them.
   sustained-failure gate).
 - `gateway.js` exports `requestGatewayLaunch`, `kGatewayLaunchOutcomes`,
   `isCallerAbortError`, `resolveServingIdentity`, `getLaunchGeneration`,
-  `listGatewayPids`; `watchdog.js` exports `kDegradedReasons` (drift-pinned
-  against the UI copy map); the cold-start pipeline checks the caller's lease
+  `listGatewayPids`; `watchdog.js` exports `kRestartVerdicts` and
+  `kDegradedReasons` (the latter drift-pinned against the UI copy map); the cold-start pipeline checks the caller's lease
   fence before the prelaunch hook and before `gateway stop`, not only before
   the spawn;
   `openclaw-lock-contention.js` gains `readProcStartTicks`,
   `kGatewayServingCmdlinePattern`, `kGatewayOwnershipConflictPattern`,
-  `classifyOwnershipConflict` and now co-hosts `kGatewayProcessPattern`
+  `classifyOwnershipConflict`, `pidAlive`, `parseProcStat`,
+  `readProcParentPid` and now co-hosts `kGatewayProcessPattern`
   (evidence pattern) beside the serving pattern; `utils/number.js` gains
   `readClampedEnvNumber` / `readClampedEnvCount` (`readClampedEnvSeconds`
   warn strings byte-identical). `launchGatewayProcess` stays as a
@@ -196,7 +201,7 @@ incumbent-verified restart (#59) rather than replacing them.
   pending-replacement lifecycle (verified ok, exited, not ready, superseded,
   early launch handler, deadline-after-probe, dedupe), wedged-incumbent
   replace through the real cold restart (incl. the refused-stop variant),
-  readiness-gated recovery and its incident, the six ownership-conflict
+  readiness-gated recovery and its incident, the seven ownership-conflict
   wordings with healthy/unhealthy incumbents, generation fence, sustained
   gate and `degraded_retry` escalation, probe-detected death, lease-expired
   repair, production wiring pin, timeline labels; ship-review regressions

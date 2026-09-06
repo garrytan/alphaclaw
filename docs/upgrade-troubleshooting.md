@@ -572,7 +572,7 @@ data written by the newer version may be unreadable.
   `backup_diagnosis`, `backup_quiesce`, `backup_contention`,
   `backup_offline_copy`, `backup_reused`, `state_db_quiet`,
   `notification_partial`, `notification_abandoned`, `restart_incumbent`,
-  `prelaunch_hook`; since v0.9.75 also `readiness_degraded`,
+  `prelaunch_hook`, `readiness_degraded`; since v0.9.75 also
   `readiness_probe_error`, `serving_identity_lost`, the
   `restart/<source>/requested` → `ok {verified: true}` pair a verified
   relaunch leaves behind, and the `repair/<source>/skipped` reasons
