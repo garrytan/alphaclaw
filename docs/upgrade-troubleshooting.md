@@ -326,7 +326,7 @@ asset, not assets of their own.
    `node -e 'const {DatabaseSync}=require("node:sqlite");const d=new DatabaseSync(process.argv[1],{readOnly:true});console.log(d.prepare("PRAGMA integrity_check").get())' /data/.openclaw/state/openclaw.sqlite`
    — expect `ok`. Remove the empty `-wal`/`-shm` files this open leaves.
 7. **Start the gateway** (Watchdog tab → Restart, or restart AlphaClaw) and
-   watch `/healthz` (120 s budget) plus the Watchdog tab; the boot
+   watch `/healthz` (restart ready budget: 5 min by default — `GATEWAY_RESTART_READY_TIMEOUT`, 30–480 s) plus the Watchdog tab; the boot
    reconciler runs the official migration when the preflight said one is
    required.
 8. Keep the aside tree until the box has been healthy through one full
@@ -402,7 +402,7 @@ offline copy refuses to run when the stop was not confirmed.
 count, notification "🟡 Gateway is up but not ready — <components>" once per
 incident). The port answers and `/health` is green, but OpenClaw's `/readyz`
 says one or more components (secrets, a channel, a plugin) have not come up.
-Since v0.9.74 AlphaClaw treats this as degraded, not recovered: no "Gateway
+Since v0.9.75 AlphaClaw treats this as degraded, not recovered: no "Gateway
 running again" notice, the incident stays open (a `gateway_readiness`
 incident opens when none is), the release-channel acceptance hook is NOT
 credited (a green-`/health`, failing-`/readyz` build cannot be promoted to
@@ -425,7 +425,7 @@ with a `readiness_probe_error` row and does not block recovery.
 ## Another process owns the state directory
 
 **What it means:** a gateway AlphaClaw launched exited with code 1 and its
-stderr carried OpenClaw's ownership wording. Since v0.9.74 the watchdog
+stderr carried OpenClaw's ownership wording. Since v0.9.75 the watchdog
 classifies that exit (`classifyOwnershipConflict`, pattern verified against
 2026.7.1-2 and 2026.9.1-beta.1) instead of booking a crash, and corroborates
 it with an incumbent probe. Two cases:
@@ -479,7 +479,7 @@ lifecycle-lock hold that the repair, crash relaunch, medic or config-change
 retry was running under expired — or was force-released — while `doctor
 --fix` or a ready-wait was still in flight, and by the time the holder
 reached its launch step another operation (a user restart, a channel apply,
-boot) had taken the lock. Since v0.9.74 the holder asks the lock whether it
+boot) had taken the lock. Since v0.9.75 the holder asks the lock whether it
 still owns it (`release.isValid()`) after every await and immediately before
 every spawn, and when it does not it books this row and stops: nothing is
 launched, lifecycle, repair attempts and crash timestamps are untouched, and

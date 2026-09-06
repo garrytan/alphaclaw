@@ -48,7 +48,7 @@ const createHarness = ({
   getRescueSessionLine,
   collectAdvisoryDoctorJson = null,
   releaseChannelHooks = null,
-  // v0.9.74 relaunch / identity seams (all optional; the legacy shim over
+  // v0.9.75 relaunch / identity seams (all optional; the legacy shim over
   // launchGatewayProcess stays in force when requestGatewayLaunch is absent).
   requestGatewayLaunch = null,
   discoverServingIdentity = null,
@@ -2234,7 +2234,7 @@ describe("server/watchdog", () => {
     launchGatewayProcess.mockReturnValue(null);
     const noChildResult = await watchdog.triggerRepair();
     // Doctor ran but nothing replaced the gateway: an honest failure, never
-    // "ok, awaiting health check" (v0.9.74 runRepair contract).
+    // "ok, awaiting health check" (v0.9.75 runRepair contract).
     expect(noChildResult).toMatchObject({
       ok: false,
       reason: "launch_aborted",
@@ -4160,7 +4160,7 @@ describe("server/watchdog", () => {
       // Each retry sees a green /health (which clears the timer) and then a
       // failing /readyz (which re-degrades and re-arms in the same tick): the
       // counter must survive that round trip. Not-ready ticks collapse into
-      // ONE health_check {readinessPending} row plus a count (v0.9.74), so the
+      // ONE health_check {readinessPending} row plus a count (v0.9.75), so the
       // cadence is observed on the readyz probes themselves, not on rows.
       const readyzProbes = () =>
         global.fetch.mock.calls.filter(([url]) => String(url).includes("readyz"))
@@ -4663,7 +4663,7 @@ describe("server/watchdog", () => {
     });
   });
 
-  describe("relaunch outcomes, serving identity, readiness gating (v0.9.74)", () => {
+  describe("relaunch outcomes, serving identity, readiness gating (v0.9.75)", () => {
     const kReadyzUrl = "http://127.0.0.1:18789/readyz";
     const rows = (insertWatchdogEvent) =>
       insertWatchdogEvent.mock.calls.map(([event]) => event);

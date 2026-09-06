@@ -94,22 +94,34 @@ describe.skipIf(!dockerAvailable)(
     );
 
     it(
-      "forced heap exhaustion emits the exact stderr the OOM classifier matches",
+      "forced heap exhaustion emits the exact stderr the OOM classifier matches — a V8 abort, never a cgroup kill",
       { timeout: 300000 },
       () => {
+        // Fix wave F220/F223: the retained strings must be HEAP-resident.
+        // Node externalizes Buffer#toString results larger than EXTERN_APEX
+        // (0xFBEE9 ≈ 1 MB, src/string_bytes.cc) — the old 1 MiB-buffer
+        // fixture produced 1.4 MB base64 strings that lived OUTSIDE the V8
+        // heap, so --max-old-space-size never tripped: the container was
+        // cgroup-killed (exit 137, empty stderr) and the test passed for the
+        // wrong reason or flaked. 256 KiB buffers → ~350 KB strings: on-heap,
+        // counted against the cap, so V8 itself aborts with its signature.
         const result = runInContainer({
           memory: "512m",
           nodeArgs: ["--max-old-space-size=128"],
           script: `
             const hog = [];
-            for (;;) hog.push(Buffer.alloc(1048576).toString("base64"));
+            for (;;) hog.push(Buffer.alloc(256 * 1024).toString("base64"));
           `,
         });
         expect(result.status).not.toBe(0);
-        // The watchdog classifier's pattern, against real V8 output.
+        // Positive proof of a V8 abort: the classifier's pattern on stderr AND
+        // an exit that is not the cgroup OOM-killer's (137 / SIGKILL). A kernel
+        // kill can never masquerade as a pass again.
         expect(String(result.stderr)).toMatch(
           /JavaScript heap out of memory|Reached heap limit/i,
         );
+        expect(result.status).not.toBe(137);
+        expect(result.signal).not.toBe("SIGKILL");
       },
     );
   },

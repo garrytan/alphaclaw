@@ -59,6 +59,7 @@ const createApp = ({
   fs,
   webhooksDb,
   shellCmd,
+  execFileCmd,
   restartRequiredState,
   omitWebhooksDb = false,
   omitRestartState = false,
@@ -72,6 +73,7 @@ const createApp = ({
     getBaseUrl: () => "https://alphaclaw.example.com",
     webhooksDb: omitWebhooksDb ? undefined : webhooksDb || {},
     shellCmd,
+    execFileCmd,
     restartRequiredState: omitRestartState
       ? undefined
       : restartRequiredState || {
@@ -272,12 +274,14 @@ describe("server/routes/webhooks coverage", () => {
       expect(res.body.syncWarning).toBe(null);
     });
 
-    it("runs git sync and reports restart state", async () => {
+    it("runs git sync via argv and reports restart state", async () => {
+      const execFileCmd = vi.fn(async () => "");
       const shellCmd = vi.fn(async () => ({ stdout: "", stderr: "" }));
       const markRequired = vi.fn();
       const app = createApp({
         fs: createConfigFs(),
         shellCmd,
+        execFileCmd,
         restartRequiredState: {
           markRequired,
           getSnapshot: async () => ({ restartRequired: true }),
@@ -292,8 +296,22 @@ describe("server/routes/webhooks coverage", () => {
       expect(res.body.syncWarning).toBe(null);
       expect(res.body.restartRequired).toBe(true);
       expect(markRequired).toHaveBeenCalledWith("webhooks");
+      // argv form — the message is one operand, never shell-parsed.
+      expect(execFileCmd).toHaveBeenCalledWith(
+        "alphaclaw",
+        ["git-sync", "-m", "webhooks: create sync-hook"],
+        { timeout: 30000 },
+      );
+      expect(shellCmd).not.toHaveBeenCalled();
+    });
+
+    it("falls back to a single-quote-escaped shell command when only shellCmd is injected", async () => {
+      const shellCmd = vi.fn(async () => ({ stdout: "", stderr: "" }));
+      const app = createApp({ fs: createConfigFs(), shellCmd });
+      const res = await request(app).post("/api/webhooks").send({ name: "sync-hook" });
+      expect(res.status).toBe(201);
       expect(shellCmd).toHaveBeenCalledWith(
-        'alphaclaw git-sync -m "webhooks: create sync-hook"',
+        "alphaclaw git-sync -m 'webhooks: create sync-hook'",
         { timeout: 30000 },
       );
     });

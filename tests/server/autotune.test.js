@@ -850,4 +850,63 @@ describe("server/autotune", () => {
       restartTarget: "gateway",
     });
   });
+
+  it("the disable/kill-switch revert recovers a crash-window stale intent like the enable path (F082)", async () => {
+    const { openclawDir, managedDir } = makeTempDirs();
+    setLiveProfile({ memMb: 2048, cores: 1 });
+    resetAutotuneForTests({ managedDir });
+    // Crash window: intent persisted, openclaw.json written (adopted from
+    // absent), confirm never landed — then the operator disables autotune
+    // before another enable boot could confirm it.
+    fs.writeFileSync(
+      path.join(managedDir, "autotune-ledger.json"),
+      JSON.stringify({
+        ownedKeys: {
+          "agents.defaults.maxConcurrent": { intent: { value: 8, at: 1 } },
+        },
+      }),
+    );
+    const { store, fn } = makeConfigStore({
+      agents: { defaults: { maxConcurrent: 8 } },
+    });
+    await applyResourceAutotune({
+      deps: {
+        openclawDir,
+        updateOpenclawConfigFn: fn,
+        env: { ALPHACLAW_AUTOTUNE_DISABLED: "1" },
+      },
+    });
+    // The autotune-written value is reverted (deleted: adopted from absent)…
+    expect(store.config.agents.defaults.maxConcurrent).toBeUndefined();
+    // …and the provenance is cleared only because the revert actually ran.
+    const persisted = JSON.parse(
+      fs.readFileSync(path.join(managedDir, "autotune-ledger.json"), "utf8"),
+    );
+    expect(persisted.ownedKeys["agents.defaults.maxConcurrent"]).toBeUndefined();
+  });
+
+  it("a stale intent whose value does NOT match the config is not attributable on revert (operator wins)", async () => {
+    const { openclawDir, managedDir } = makeTempDirs();
+    setLiveProfile({ memMb: 2048, cores: 1 });
+    resetAutotuneForTests({ managedDir });
+    fs.writeFileSync(
+      path.join(managedDir, "autotune-ledger.json"),
+      JSON.stringify({
+        ownedKeys: {
+          "agents.defaults.maxConcurrent": { intent: { value: 8, at: 1 } },
+        },
+      }),
+    );
+    const { store, fn } = makeConfigStore({
+      agents: { defaults: { maxConcurrent: 96 } },
+    });
+    await applyResourceAutotune({
+      deps: {
+        openclawDir,
+        updateOpenclawConfigFn: fn,
+        env: { ALPHACLAW_AUTOTUNE_DISABLED: "1" },
+      },
+    });
+    expect(store.config.agents.defaults.maxConcurrent).toBe(96);
+  });
 });

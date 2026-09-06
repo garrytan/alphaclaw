@@ -371,3 +371,46 @@ describe("run-state: STARTED while stopping", () => {
     expect(state.phase).toBe("idle");
   });
 });
+
+describe("frontend/chat run-state fix wave PR 9b (F124 ack timeout, F126 resume messageId)", () => {
+  it("ACK_TIMEOUT returns a pendingSend session to idle so the requeued item can auto-flush", () => {
+    const pending = reduceAll([{ type: "OUTBOX_INFLIGHT", clientMsgId: "c1" }]);
+    expect(pending.phase).toBe(kPendingSend);
+    expect(canAutoFlush(pending)).toBe(false);
+    const idle = reduceRunState(pending, { type: "ACK_TIMEOUT", clientMsgId: "c1" });
+    expect(idle.phase).toBe(kIdle);
+    expect(idle.lastTerminal).toMatchObject({ failureCode: "ack_timeout" });
+    expect(canAutoFlush(idle)).toBe(true);
+    expect(idle.holdFlush).not.toBe(true);
+  });
+
+  it("ACK_TIMEOUT for another clientMsgId, or outside pendingSend, is ignored", () => {
+    const pending = reduceAll([{ type: "OUTBOX_INFLIGHT", clientMsgId: "c1" }]);
+    expect(reduceRunState(pending, { type: "ACK_TIMEOUT", clientMsgId: "other" })).toBe(pending);
+    const running = reduceAll([
+      { type: "OUTBOX_INFLIGHT", clientMsgId: "c1" },
+      { type: "STARTED", clientMsgId: "c1", runId: "r1", messageId: "m1" },
+    ]);
+    expect(reduceRunState(running, { type: "ACK_TIMEOUT", clientMsgId: "c1" })).toBe(running);
+  });
+
+  it("RESUME_ATTACH carries the live row's messageId and never clears a known one", () => {
+    const attached = reduceRunState(createSessionRunState(), {
+      type: "RESUME_ATTACH",
+      runId: "r1",
+      messageId: "m1",
+    });
+    expect(attached).toMatchObject({ phase: kRunning, activeRunId: "r1", activeMessageId: "m1" });
+    // A hello-time attach without the id keeps a previously known id…
+    const known = { ...createSessionRunState(), activeMessageId: "m1" };
+    expect(reduceRunState(known, { type: "RESUME_ATTACH", runId: "r1" }).activeMessageId).toBe("m1");
+    // …and a later `resumed` frame fills an empty one in while already running.
+    const idless = reduceRunState(createSessionRunState(), { type: "RESUME_ATTACH", runId: "r1" });
+    expect(idless.activeMessageId).toBe("");
+    const filled = reduceRunState(idless, { type: "RESUME_ATTACH", runId: "r1", messageId: "m1" });
+    expect(filled).toMatchObject({ phase: kRunning, activeRunId: "r1", activeMessageId: "m1" });
+    // Identity-stable when nothing changes; a different run is still ignored while running.
+    expect(reduceRunState(filled, { type: "RESUME_ATTACH", runId: "r1", messageId: "m1" })).toBe(filled);
+    expect(reduceRunState(filled, { type: "RESUME_ATTACH", runId: "r2", messageId: "m2" })).toBe(filled);
+  });
+});

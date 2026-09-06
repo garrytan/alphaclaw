@@ -1430,6 +1430,57 @@ describe("server/routes/pairings", () => {
     expect(res.body).toEqual({ ok: true, requestId: "req-fallback", device: null });
   });
 
+
+  describe("CLI failures surface as errors, never as a 200 with raw stdout/stderr (F224)", () => {
+    it("pairing approve: a failed CLI answers 502 with the CLI's words under `error`", async () => {
+      const clawCmd = vi.fn(async () => ({
+        ok: false,
+        stdout: "",
+        stderr: "Error: pairing request ABCD1234 not found",
+        code: 1,
+      }));
+      const fsModule = { existsSync: vi.fn(() => false), mkdirSync: vi.fn(), writeFileSync: vi.fn() };
+      const app = createApp({ clawCmd, isOnboarded: () => true, fsModule });
+
+      const res = await request(app)
+        .post("/api/pairings/ABCD1234/approve")
+        .send({ channel: "discord" });
+
+      expect(res.status).toBe(502);
+      expect(res.body).toEqual({
+        ok: false,
+        error: "Error: pairing request ABCD1234 not found",
+        code: "cli_failed",
+        exitCode: 1,
+      });
+    });
+
+    it("pairing approve: a timed-out CLI is code cli_timeout with a fallback message", async () => {
+      const clawCmd = vi.fn(async () => ({ ok: false, stdout: "", stderr: "", timedOut: true, code: null }));
+      const fsModule = { existsSync: vi.fn(() => false), mkdirSync: vi.fn(), writeFileSync: vi.fn() };
+      const app = createApp({ clawCmd, isOnboarded: () => true, fsModule });
+      const res = await request(app)
+        .post("/api/pairings/ABCD1234/approve")
+        .send({ channel: "discord" });
+      expect(res.status).toBe(502);
+      expect(res.body).toMatchObject({ ok: false, error: "pairing approve failed", code: "cli_timeout" });
+    });
+
+    it("device reject: a failed CLI answers 502 with `error`; success still echoes the CLI result", async () => {
+      const failing = vi.fn(async () => ({ ok: false, stdout: "", stderr: "no such request", code: 2 }));
+      const fsModule = { existsSync: vi.fn(() => false), mkdirSync: vi.fn(), writeFileSync: vi.fn() };
+      const failApp = createApp({ clawCmd: failing, isOnboarded: () => true, fsModule });
+      const failed = await request(failApp).post(`/api/devices/${"ABCD1234"}/reject`);
+      expect(failed.status).toBe(502);
+      expect(failed.body).toMatchObject({ ok: false, error: "no such request", code: "cli_failed", exitCode: 2 });
+
+      const okCmd = vi.fn(async () => ({ ok: true, stdout: "rejected", stderr: "" }));
+      const okApp = createApp({ clawCmd: okCmd, isOnboarded: () => true, fsModule });
+      const ok = await request(okApp).post(`/api/devices/${"ABCD1234"}/reject`);
+      expect(ok.status).toBe(200);
+      expect(ok.body).toMatchObject({ ok: true, stdout: "rejected" });
+    });
+  });
 });
 
 describe("server/routes/pairings removeAccountRequestsFromPairingStore", () => {
@@ -1747,5 +1798,68 @@ describe("server/routes/pairings sqlite reject", () => {
       .send({ channel: "telegram" });
     expect(after.status).toBe(200);
     expect(clawCmd).toHaveBeenCalledWith("pairing approve 'telegram' 'ABCD1234'");
+  });
+});
+
+// Fix wave F087: reject path-joined an unvalidated body.channel into
+// credentials/<channel>-pairing.json (approve already allowlisted it). Both
+// now read the one shared allowlist and validate the account id.
+describe("server/routes/pairings reject input boundary", () => {
+  const spyFs = () => ({
+    existsSync: vi.fn(() => false),
+    readFileSync: vi.fn(() => "[]"),
+    writeFileSync: vi.fn(),
+    renameSync: vi.fn(),
+    unlinkSync: vi.fn(),
+    mkdirSync: vi.fn(),
+  });
+
+  it("rejects a traversal channel with 400 and never touches the filesystem", async () => {
+    const fsModule = spyFs();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const app = createApp({
+      clawCmd: vi.fn(async () => ({ ok: true, stdout: "", stderr: "" })),
+      isOnboarded: () => true,
+      fsModule,
+    });
+    const res = await request(app)
+      .post("/api/pairings/abc123/reject")
+      .send({ channel: "../../../tmp/evil" });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/Unsupported pairing channel/);
+    expect(fsModule.existsSync).not.toHaveBeenCalled();
+    expect(fsModule.readFileSync).not.toHaveBeenCalled();
+    expect(fsModule.writeFileSync).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("field=channel reason=unsupported_channel"));
+  });
+
+  it("rejects an invalid account id on reject with 400", async () => {
+    const fsModule = spyFs();
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const app = createApp({
+      clawCmd: vi.fn(async () => ({ ok: true, stdout: "", stderr: "" })),
+      isOnboarded: () => true,
+      fsModule,
+    });
+    const res = await request(app)
+      .post("/api/pairings/abc123/reject")
+      .send({ channel: "telegram", accountId: "__proto__" });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe("Invalid account id");
+    expect(fsModule.readFileSync).not.toHaveBeenCalled();
+  });
+
+  it("normalizes channel case on reject like approve does", async () => {
+    const fsModule = spyFs();
+    const app = createApp({
+      clawCmd: vi.fn(async () => ({ ok: true, stdout: "", stderr: "" })),
+      isOnboarded: () => true,
+      fsModule,
+    });
+    const res = await request(app)
+      .post("/api/pairings/abc123/reject")
+      .send({ channel: "Telegram" });
+    // Not found (no store), but past the allowlist — no 400.
+    expect(res.status).toBe(404);
   });
 });

@@ -53,7 +53,7 @@ describe("getStatus() additive fields", () => {
     expect(status.awaitingAutoRepairRecovery).toBe(false);
     expect(typeof status.serverNow).toBe("number");
     expect(status.repairAttemptLimit).toBeGreaterThan(0);
-    // Serving identity + readiness axis (v0.9.74): nothing is known about who
+    // Serving identity + readiness axis (v0.9.75): nothing is known about who
     // serves until a launch notification arrives, /readyz has not been asked,
     // no relaunch obligation is open, and the repair path has no verdict yet.
     expect(status.servingPid).toBe(null);

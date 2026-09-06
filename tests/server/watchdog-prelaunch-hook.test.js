@@ -615,7 +615,7 @@ describe("crash/repair relaunch ledger rows name a hook-aborted launch (noChildD
       hookOutcome: refusedOutcome({ site: "managed launch" }),
     });
     const result = await aborted.watchdog.triggerRepair();
-    // v0.9.74: a relaunch the hook aborted is a FAILED repair (nothing
+    // v0.9.75: a relaunch the hook aborted is a FAILED repair (nothing
     // replaced the gateway), never "ok, awaiting health check".
     expect(result).toMatchObject({
       ok: false,

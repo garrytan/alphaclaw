@@ -549,4 +549,74 @@ describe("server/routes/auth team mode (4.2/4.6)", () => {
       expect(authApi.resolveProxyIdentity(undefined)).toBeNull();
     });
   });
+
+  // Fix wave F049/F060/F061/F063 — auth hygiene.
+  describe("fix-wave auth hygiene", () => {
+    it("fails CLOSED when alphaclaw.json is unreadable: no shared-password login, no legacy cookie, no member session", async () => {
+      createAdmin();
+      const legacyCookie = cookieOf(
+        await request(app).post("/api/auth/login").send({ password: "owner-secret" }),
+      );
+      const memberCookie = cookieOf(await loginMember("admin@example.com", "admin password"));
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      teamSettings = { enabled: true, disableLegacyLogin: false, configUnreadable: true };
+
+      const legacyLogin = await request(app).post("/api/auth/login").send({ password: "owner-secret" });
+      expect(legacyLogin.status).toBe(503);
+      expect(legacyLogin.body.code).toBe("config_unreadable");
+      const memberLogin = await loginMember("admin@example.com", "admin password");
+      expect(memberLogin.status).toBe(503);
+      expect((await request(app).get("/api/status").set("Cookie", legacyCookie)).status).toBe(401);
+      expect((await request(app).get("/api/status").set("Cookie", memberCookie)).status).toBe(401);
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining("alphaclaw.json is unreadable"));
+      expect(warn).toHaveBeenCalledTimes(1); // once per transition, not per request
+
+      // Fixed file: everything comes back without a restart.
+      teamSettings = { enabled: true, disableLegacyLogin: false };
+      expect((await request(app).get("/api/status").set("Cookie", memberCookie)).status).toBe(200);
+      expect((await request(app).get("/api/status").set("Cookie", legacyCookie)).status).toBe(200);
+    });
+
+    it("keeps the documented emergency hatch: ALPHACLAW_ALLOW_LEGACY_LOGIN=1 admits the shared password while the file is unreadable", async () => {
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+      teamSettings = { enabled: true, disableLegacyLogin: true, configUnreadable: true };
+      process.env.ALPHACLAW_ALLOW_LEGACY_LOGIN = "1";
+      const res = await request(app).post("/api/auth/login").send({ password: "owner-secret" });
+      expect(res.status).toBe(200);
+      expect(cookieOf(res)).toMatch(/^setup_token=/);
+    });
+
+    it("compares the shared password in constant time and answers 401 (not 500) to a non-string body", async () => {
+      for (const password of [{ toString: () => "owner-secret" }, ["owner-secret"], 12345, null]) {
+        const res = await request(app).post("/api/auth/login").send({ password });
+        expect(res.status, JSON.stringify(password)).toBe(401);
+      }
+      expect((await request(app).post("/api/auth/login").send({ password: "owner-secret" })).status).toBe(200);
+    });
+
+    it("sets the Secure cookie flag only for a TLS request as seen through the configured trust-proxy hops", async () => {
+      const plain = await request(app).post("/api/auth/login").send({ password: "owner-secret" });
+      expect(plain.headers["set-cookie"][0]).not.toMatch(/;\s*Secure/i);
+      // The raw header alone is NOT trusted…
+      const spoofed = await request(app)
+        .post("/api/auth/login")
+        .set("X-Forwarded-Proto", "https")
+        .send({ password: "owner-secret" });
+      expect(spoofed.headers["set-cookie"][0]).not.toMatch(/;\s*Secure/i);
+      // …only under app-level trust proxy (lib/server.js sets kTrustProxyHops).
+      app.set("trust proxy", 1);
+      const proxied = await request(app)
+        .post("/api/auth/login")
+        .set("X-Forwarded-Proto", "https")
+        .send({ password: "owner-secret" });
+      expect(proxied.headers["set-cookie"][0]).toMatch(/;\s*Secure/i);
+    });
+
+    it("no longer carries a prefix-based OAuth callback exemption in isAuthorizedRequest", () => {
+      expect(
+        authApi.isAuthorizedRequest({ path: "/auth/google/callback-evil", headers: {} }),
+      ).toBe(false);
+      expect(authApi.isAuthorizedRequest({ path: "/auth/google/callback", headers: {} })).toBe(false);
+    });
+  });
 });

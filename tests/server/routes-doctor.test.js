@@ -544,6 +544,18 @@ describe("server/routes/doctor", () => {
     expect(res.status).toBe(200);
     expect(res.body.settings.autoRunEnabled).toBe(false);
   });
+
+  it("GET /api/doctor/runs prefers the lean summaries reader when the service exposes it (F110)", async () => {
+    const doctorService = createDoctorService();
+    doctorService.listDoctorRunSummaries = vi.fn(() => [{ id: 7, status: "completed", cardCount: 2 }]);
+    const app = createApp(doctorService);
+    const res = await request(app).get("/api/doctor/runs?limit=3");
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ ok: true, runs: [{ id: 7, status: "completed", cardCount: 2 }] });
+    expect(doctorService.listDoctorRunSummaries).toHaveBeenCalledWith({ limit: 3 });
+    // The full-model reader (manifest + rawResult parse per row) is not used for the poll.
+    expect(doctorService.listDoctorRuns).not.toHaveBeenCalled();
+  });
 });
 
 describe("server/routes/doctor review-batch regressions", () => {

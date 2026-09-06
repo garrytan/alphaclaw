@@ -632,3 +632,66 @@ describe("server/google-state updateGoogleState (locked read-modify-write)", () 
     expect(result.accounts.map((a) => a.id)).toEqual(["acct-2"]);
   });
 });
+
+describe("server/google-state fail-closed writes (fix wave F214)", () => {
+  const {
+    readGoogleStateForWrite,
+    GoogleStateReadError,
+  } = require("../../lib/server/google-state");
+  const statePath = "/tmp/state.json";
+  const torn = '{"version":2,"accounts":[{"id":"a1","email":"ops@corp.com"';
+
+  it("readGoogleStateForWrite: missing file is empty state, unparseable existing file throws", () => {
+    expect(readGoogleStateForWrite({ fs: createRecordingFs(), statePath })).toEqual(
+      createEmptyGoogleState(),
+    );
+    const mockFs = createRecordingFs({ [statePath]: torn });
+    expect(() => readGoogleStateForWrite({ fs: mockFs, statePath })).toThrow(GoogleStateReadError);
+    try {
+      readGoogleStateForWrite({ fs: mockFs, statePath });
+    } catch (error) {
+      expect(error.code).toBe("GOOGLE_STATE_UNREADABLE");
+      expect(error.filePath).toBe(statePath);
+    }
+    expect(mockFs.writes).toEqual([]);
+  });
+
+  it("updateGoogleState refuses to run the mutator against a torn file (nothing persisted)", () => {
+    const mockFs = createRecordingFs({ [statePath]: torn });
+    const mutator = vi.fn((state) => state);
+    expect(() => updateGoogleState({ fs: mockFs, statePath, mutator })).toThrow(
+      /Refusing to overwrite/,
+    );
+    expect(mutator).not.toHaveBeenCalled();
+    expect(mockFs.writes).toEqual([]);
+    expect(mockFs.files.get(statePath)).toBe(torn);
+  });
+
+  it("writeGoogleState refuses to overwrite a torn file even when the caller read leniently", () => {
+    const mockFs = createRecordingFs({ [statePath]: torn });
+    // The dashboard-mount path: lenient read → empty state → save.
+    const stale = readGoogleState({ fs: mockFs, statePath });
+    expect(stale).toEqual(createEmptyGoogleState());
+    expect(() => writeGoogleState({ fs: mockFs, statePath, state: stale })).toThrow(
+      GoogleStateReadError,
+    );
+    expect(mockFs.files.get(statePath)).toBe(torn);
+  });
+
+  it("a non-object root is a refusal too, and a parseable file still writes", () => {
+    const arrayFs = createRecordingFs({ [statePath]: "[1,2,3]" });
+    expect(() => writeGoogleState({ fs: arrayFs, statePath, state: createEmptyGoogleState() })).toThrow(
+      /not JSON alphaclaw can parse/,
+    );
+    const okFs = createRecordingFs({
+      [statePath]: JSON.stringify({ version: 2, accounts: [], gmailPush: {} }),
+    });
+    const written = writeGoogleState({
+      fs: okFs,
+      statePath,
+      state: { version: 2, accounts: [baseAccount()], gmailPush: { token: "t" } },
+    });
+    expect(written.accounts).toHaveLength(1);
+    expect(JSON.parse(okFs.files.get(statePath)).accounts).toHaveLength(1);
+  });
+});

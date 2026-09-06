@@ -172,7 +172,7 @@ describe("server/routes/watchdog", () => {
 
     expect(res.status).toBe(200);
     expect(deps.watchdog.triggerRepair).toHaveBeenCalledTimes(1);
-    // v0.9.74 repair contract: verdict/pending/replacementPending ride beside
+    // v0.9.75 repair contract: verdict/pending/replacementPending ride beside
     // the raw result (a skip has no verdict and nothing pending).
     expect(res.body).toEqual({
       ok: false,

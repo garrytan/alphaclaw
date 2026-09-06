@@ -58,7 +58,7 @@ const {
 // fake gateway supplies spawn/execFile behavior and the gateway-port TCP
 // probe (following the gateway.test.js execFile/socket idioms).
 //
-// The repair drills (v0.9.74) add the REAL watchdog on top: its `replace`
+// The repair drills (v0.9.75) add the REAL watchdog on top: its `replace`
 // relaunch runs the same cold-restart pipeline under the real lifecycle lock,
 // with only /health + /readyz (global.fetch) faked alongside the process
 // boundary.
@@ -1225,7 +1225,7 @@ describe("server/gateway restart drills (e2e)", () => {
     );
   });
 
-  // ── Watchdog repair `replace` through the real cold restart (v0.9.74) ─────
+  // ── Watchdog repair `replace` through the real cold restart (v0.9.75) ─────
   //
   //   boot around incumbent (adopted) ─▶ /health wedges ─▶ probe ✗ ✗ ✗ (sustained gate)
   //     ─▶ runRepair: doctor --fix ─▶ requestGatewayLaunch → incumbent_present

@@ -955,4 +955,100 @@ describe("server/openclaw-release-channel", () => {
       );
     });
   });
+
+  // F004 follow-up: the single-instance refusal must be backed by evidence.
+  // A hard-killed predecessor (`docker rm -f`) leaves its pidfile on the
+  // volume and a fresh container's early processes reuse low pid numbers, so
+  // kill(pid, 0) alone says "alive". The record now carries the owner's
+  // kernel start time; a mismatch means the pid was recycled.
+  describe("server pid guard evidence (recycled pid after a hard kill)", () => {
+    const { spawn } = require("child_process");
+    const { readProcStartTicks } = require("../../lib/server/utils/safe-file");
+    const spawnSleeper = () =>
+      spawn(process.execPath, ["-e", "setTimeout(() => {}, 30000)"], { stdio: "ignore" });
+    const writePidRecord = (store, record) => {
+      fs.mkdirSync(path.dirname(store.serverPidPath), { recursive: true });
+      fs.writeFileSync(store.serverPidPath, JSON.stringify(record));
+    };
+    const hasProc = process.platform === "linux" && fs.existsSync(`/proc/${process.pid}/stat`);
+
+    it("records the owner's kernel start time alongside the pid", () => {
+      const { store } = createStore();
+      fs.mkdirSync(path.dirname(store.serverPidPath), { recursive: true });
+      store.writeServerPid();
+      const record = JSON.parse(fs.readFileSync(store.serverPidPath, "utf8"));
+      expect(record.pid).toBe(process.pid);
+      if (hasProc) {
+        expect(record.startTicks).toBe(readProcStartTicks(process.pid, fs));
+      } else {
+        expect(record.startTicks).toBeNull();
+      }
+    });
+
+    it.skipIf(!hasProc)("corroborates a live owner whose start time matches the record", () => {
+      const child = spawnSleeper();
+      try {
+        const { store } = createStore();
+        writePidRecord(store, { pid: child.pid, at: 1, startTicks: readProcStartTicks(child.pid, fs) });
+        expect(store.readLiveServerPidEvidence()).toEqual({ pid: child.pid, corroborated: true });
+        expect(store.readLiveServerPid()).toBe(child.pid);
+      } finally {
+        child.kill("SIGKILL");
+      }
+    });
+
+    it.skipIf(!hasProc)("treats a live pid with a DIFFERENT start time as recycled — no owner, claim replaceable", () => {
+      const child = spawnSleeper();
+      try {
+        const { store } = createStore();
+        writePidRecord(store, {
+          pid: child.pid,
+          at: 1,
+          startTicks: readProcStartTicks(child.pid, fs) - 12345,
+        });
+        expect(store.readLiveServerPidEvidence()).toBeNull();
+        expect(store.readLiveServerPid()).toBeNull();
+        store.writeServerPid();
+        expect(JSON.parse(fs.readFileSync(store.serverPidPath, "utf8")).pid).toBe(process.pid);
+      } finally {
+        child.kill("SIGKILL");
+      }
+    });
+
+    it("a legacy record (no startTicks) naming a live alphaclaw-looking process is live but UNcorroborated; a stranger is stale", () => {
+      // Reconciled with #64: identity-less claims are trusted only when the
+      // live process's argv names the alphaclaw entry, and even then the
+      // launcher gets corroborated:false (skip the sync, keep booting).
+      const { spawn } = require("child_process");
+      const lookalike = spawn(
+        process.execPath,
+        ["-e", "setTimeout(() => {}, 30000)", "/opt/alphaclaw/bin/alphaclaw.js"],
+        { stdio: "ignore" },
+      );
+      const stranger = spawnSleeper();
+      try {
+        const { store } = createStore();
+        writePidRecord(store, { pid: lookalike.pid, at: 1 });
+        expect(store.readLiveServerPidEvidence()).toEqual({ pid: lookalike.pid, corroborated: false });
+        expect(store.readLiveServerPid()).toBe(lookalike.pid);
+        if (hasProc) {
+          writePidRecord(store, { pid: stranger.pid, at: 1 });
+          expect(store.readLiveServerPidEvidence()).toBeNull();
+        }
+      } finally {
+        lookalike.kill("SIGKILL");
+        stranger.kill("SIGKILL");
+      }
+    });
+
+    it("returns null for this process, a dead pid, or garbage", () => {
+      const { store } = createStore();
+      writePidRecord(store, { pid: process.pid, at: 1 });
+      expect(store.readLiveServerPidEvidence()).toBeNull();
+      writePidRecord(store, { pid: 2 ** 22 - 1, at: 1 }); // above default pid_max → ESRCH
+      expect(store.readLiveServerPidEvidence()).toBeNull();
+      fs.writeFileSync(store.serverPidPath, "not json");
+      expect(store.readLiveServerPidEvidence()).toBeNull();
+    });
+  });
 });

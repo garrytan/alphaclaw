@@ -81,7 +81,11 @@ vi.mock("../../lib/public/js/components/toast.js", () => ({
 }));
 
 import * as preactHooks from "preact/hooks";
-import { fetchTeam, fetchTeamPresence } from "../../lib/public/js/lib/api.js";
+import {
+  fetchDevicePairings,
+  fetchTeam,
+  fetchTeamPresence,
+} from "../../lib/public/js/lib/api.js";
 import { useTeamTab } from "../../lib/public/js/components/team-tab/use-team-tab.js";
 import { PresenceCard } from "../../lib/public/js/components/team-tab/index.js";
 
@@ -189,6 +193,30 @@ describe("frontend/team-tab presence refresh failures", () => {
     await intervalCallbacks.at(-1)();
     const hook = renderHook();
     expect(hook.presenceUnavailable).toBe("unknown error");
+  });
+
+  it("a failed device-queue poll is devicesError, never an empty queue; it clears on recovery (F170)", async () => {
+    fetchTeam.mockResolvedValue(makeTeam({ me: { role: "admin" } }));
+    fetchDevicePairings.mockRejectedValueOnce(new Error("pairings offline"));
+
+    renderHook();
+    harness.flushEffects();
+    await flushAsync();
+    renderHook();
+    // Registers the presence poll AND the device poll; the device poll runs
+    // immediately (immediate: true) — and fails.
+    harness.flushEffects();
+    await flushAsync();
+    let hook = renderHook();
+    expect(hook.devicesError).toBe("pairings offline");
+    expect(hook.devicePending).toEqual([]);
+    expect(intervalCallbacks.length).toBe(2);
+
+    fetchDevicePairings.mockResolvedValueOnce({ pending: [{ id: "req-1" }] });
+    await intervalCallbacks.at(-1)(); // the device poll registered last
+    hook = renderHook();
+    expect(hook.devicesError).toBe(null);
+    expect(hook.devicePending).toEqual([{ id: "req-1" }]);
   });
 });
 

@@ -187,7 +187,7 @@ preflight vocabulary and the "restart did not take effect" cross-check) is
    `migration-required` verdict means the version you are about to run will
    migrate the restored state at its next start; an `incompatible` verdict
    means pick a version that can read it.
-6. **Start the gateway** and watch `/healthz` (120 s budget) plus the Watchdog
+6. **Start the gateway** and watch `/healthz` (restart ready budget: 5 min by default, `GATEWAY_RESTART_READY_TIMEOUT`) plus the Watchdog
    tab; the boot reconciler runs the official migration if the preflight said
    one is required.
 7. Keep the aside tree until the box has been healthy through one full

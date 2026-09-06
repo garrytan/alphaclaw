@@ -38,14 +38,21 @@ const { getProcessTreeUsage } = require("../../lib/server/system-resources");
 //      signature regression lives in tests/live/autotune-container.e2e.
 //
 // Fixture notes (outside-voice C6/C7/F13): the plugin retains
-// Buffer.alloc(1<<20).toString("base64") STRINGS — heap-resident, counted
-// against --max-old-space-size. Raw Buffers are external memory and would
-// kernel-OOM instead of tripping the V8 cap (tests/live/
-// autotune-container.e2e.test.js encodes the same fact). The heap cap rides
-// NODE_OPTIONS (see gatewayEnv), NOT launcher argv: `gateway run` can fork a
-// worker child that holds the plugin's heap, and only NODE_OPTIONS propagates
-// to it — exactly how production caps the gateway (autotune's suffix). At
-// 256MB the V8 abort lands within ~1-2 min of leaking, inside the budget.
+// Buffer.alloc(1<<20).toString("base64") STRINGS rather than raw Buffers
+// (Buffers are external memory and never count against
+// --max-old-space-size). At 1 MiB the base64 result (~1.4 MB) exceeds Node's
+// EXTERN_APEX (0xFBEE9), so these are EXTERNAL strings too: V8 accounts them
+// only between mark-compacts, so they inflate RSS (what stage 2 measures)
+// but do not trip the heap cap deterministically. The V8-abort signature is
+// pinned instead by tests/live/autotune-container.e2e.test.js with 256 KiB
+// chunks (fix wave F220/F223). The heap cap rides NODE_OPTIONS (see
+// gatewayEnv), NOT launcher argv: `gateway run` can fork a worker child that
+// holds the plugin's heap, and only NODE_OPTIONS propagates to it — exactly
+// how production caps the gateway (autotune's suffix). 256MB is kept so that
+// a single-isolate gateway (some versions) can still surface the V8 abort
+// inside the budget if it fires; on the verified beta the run ends at the
+// critical-pressure log line or a container/kernel OOM (stage 3), never a
+// V8 abort.
 const describeLive = kLiveEnabled ? describe : describe.skip;
 
 const kInstallTimeoutMs = 8 * 60 * 1000;

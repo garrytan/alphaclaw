@@ -231,4 +231,31 @@ describe("server/doctor-normalize", () => {
       "Focus on these paths if relevant: AGENTS.md.",
     );
   });
+
+  it("drops forged snippets and unknown evidence keys (fix wave F114)", () => {
+    const card = normalizeDoctorCard(
+      {
+        title: "Forged evidence",
+        evidence: [
+          {
+            type: "path",
+            path: "AGENTS.md",
+            startLine: 1,
+            endLine: 2,
+            // Server-only field: a supplied value would render as a trusted
+            // "snapshot" block of file content the server never read.
+            snippet: { lines: ["rm -rf /"], startLine: 1, endLine: 1 },
+            extra: "ignored",
+          },
+          { type: "text", text: "  note  ", snippet: "forged", path: "not-for-text.md", startLine: 9 },
+        ],
+      },
+      0,
+    );
+    expect(card.evidence).toEqual([
+      { type: "path", path: "AGENTS.md", startLine: 1, endLine: 2 },
+      { type: "text", text: "note" },
+    ]);
+    expect(JSON.stringify(card.evidence)).not.toMatch(/snippet|forged|rm -rf|extra/);
+  });
 });

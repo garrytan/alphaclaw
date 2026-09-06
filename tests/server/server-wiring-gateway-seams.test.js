@@ -183,7 +183,7 @@ describe("lib/server.js composition pins (lane C / lane A hand-offs)", () => {
     }
   });
 
-  it("createWatchdog receives the v0.9.74 relaunch/identity seams (requestGatewayLaunch, discoverServingIdentity, readProcStartTicks, classifyOwnershipConflict, getLaunchGeneration) and a cold-restart dep that forwards its options (the lease fence)", () => {
+  it("createWatchdog receives the v0.9.75 relaunch/identity seams (requestGatewayLaunch, discoverServingIdentity, readProcStartTicks, classifyOwnershipConflict, getLaunchGeneration) and a cold-restart dep that forwards its options (the lease fence)", () => {
     const start = serverSource.indexOf("const watchdog = createWatchdog({");
     expect(start).toBeGreaterThan(-1);
     const block = serverSource.slice(start, serverSource.indexOf("\n});", start));
@@ -195,7 +195,7 @@ describe("lib/server.js composition pins (lane C / lane A hand-offs)", () => {
       "getLaunchGeneration,",
       // `(options) => restartGateway(options)`: the watchdog's { shouldAbort }
       // must reach runGatewayColdStart, so a bare `() => restartGateway()`
-      // wrapper (the pre-0.9.74 shape) is a wiring regression.
+      // wrapper (the pre-0.9.75 shape) is a wiring regression.
       "restartGatewayColdStart: (options) => restartGateway(options),",
     ]) {
       expect(block).toContain(line);

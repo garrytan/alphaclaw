@@ -449,12 +449,11 @@ describe("send-outbox: socket-death requeue and live-eviction warning", () => {
     expect(outbox.nextEligible("s2")?.clientMsgId).toBe(b.clientMsgId);
   });
 
-  it("requeueAllInflight also requeues ACKED items, with a hold for history confirmation", async () => {
-    // The socket died after ack but before a terminal: the run's outcome went
-    // to the dead socket and pending runs are never advertised in
-    // hello.activeRuns — NOT requeueing strands the item as "sent, never
-    // settled". The short hold lets the reconnect history merge confirm
-    // delivery (removing the item) before any dedupe-safe resend fires.
+  it("requeueAllInflight holds ACKED items for history confirmation; releaseAwaitingHistory re-queues the unconfirmed (F127)", async () => {
+    // The socket died after ack but before a terminal. A blind close-relative
+    // timer re-sent past the bridge's 10-minute dedupe window — a duplicate
+    // turn. Acked items now wait for the reconnect's history merge: confirmed
+    // ones are removed by the merge, only the rest go back to queued.
     const { createSendOutbox } = await import(
       "../../lib/public/js/components/chat/send-outbox.js"
     );
@@ -468,13 +467,65 @@ describe("send-outbox: socket-death requeue and live-eviction warning", () => {
       random: () => 0.5,
     });
     const item = outbox.enqueue({ sessionKey: "s1", content: "acked one" });
+    const other = outbox.enqueue({ sessionKey: "s2", content: "acked two" });
     outbox.markInflight(item.clientMsgId);
     outbox.markAcked(item.clientMsgId);
+    outbox.markInflight(other.clientMsgId);
+    outbox.markAcked(other.clientMsgId);
     outbox.requeueAllInflight();
-    expect(outbox.listAll()[0].status).toBe("queued");
+    // Still acked (not queued), stamped as awaiting history; nothing eligible.
+    expect(outbox.listAll().map((i) => i.status)).toEqual(["acked", "acked"]);
+    expect(outbox.listAll()[0].awaitingHistoryAt).toBe(nowRef.now);
     expect(outbox.nextEligible("s1")).toBeNull();
-    nowRef.now += 5_000;
+    nowRef.now += 60_000;
+    expect(outbox.nextEligible("s1")).toBeNull();
+
+    // History for s1 merged and did NOT confirm the item → re-queued now.
+    expect(outbox.releaseAwaitingHistory("s1")).toBe(true);
     expect(outbox.nextEligible("s1")?.clientMsgId).toBe(item.clientMsgId);
+    expect(outbox.listAll().find((i) => i.clientMsgId === item.clientMsgId).awaitingHistoryAt).toBeUndefined();
+    // s2 is untouched until ITS history answers…
+    expect(outbox.nextEligible("s2")).toBeNull();
+    // …or the staleness fallback releases everything older than the bound.
+    expect(outbox.releaseAwaitingHistory("", { force: true, olderThanMs: 120_000 })).toBe(false);
+    nowRef.now += 60_001;
+    expect(outbox.releaseAwaitingHistory("", { force: true, olderThanMs: 120_000 })).toBe(true);
+    expect(outbox.nextEligible("s2")?.clientMsgId).toBe(other.clientMsgId);
+    // Confirmed delivery beats the gate: a confirmed item simply disappears.
+    outbox.confirmDelivered(item.clientMsgId);
+    expect(outbox.listAll().map((i) => i.clientMsgId)).toEqual([other.clientMsgId]);
+  });
+
+  it("sweepAckTimeouts reports each timed-out item so the run state can leave pendingSend (F124)", async () => {
+    const { createSendOutbox, kAckTimeoutMs } = await import(
+      "../../lib/public/js/components/chat/send-outbox.js"
+    );
+    const nowRef = { now: 1_000_000 };
+    let uuidCounter = 0;
+    const outbox = createSendOutbox({
+      storage: null,
+      storageKey: "t",
+      now: () => nowRef.now,
+      uuid: () => `to-${(uuidCounter += 1)}`,
+      random: () => 0.5,
+    });
+    const item = outbox.enqueue({ sessionKey: "s9", content: "lost ack" });
+    outbox.markInflight(item.clientMsgId);
+    const timeouts = [];
+    nowRef.now += kAckTimeoutMs;
+    expect(outbox.sweepAckTimeouts({ onTimeout: (info) => timeouts.push(info) })).toBe(true);
+    expect(timeouts).toEqual([{ clientMsgId: item.clientMsgId, sessionKey: "s9" }]);
+    // A throwing callback never breaks the sweep.
+    outbox.markInflight(item.clientMsgId);
+    nowRef.now += kAckTimeoutMs;
+    expect(() =>
+      outbox.sweepAckTimeouts({
+        onTimeout: () => {
+          throw new Error("boom");
+        },
+      }),
+    ).not.toThrow();
+    expect(outbox.listAll()[0].status).toBe("queued");
   });
 
   it("warns loudly when the byte cap is forced to evict a LIVE item from storage", async () => {

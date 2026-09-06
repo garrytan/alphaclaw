@@ -105,7 +105,7 @@ describe("classifyEvent transition table", () => {
     ]) {
       expect(classifyEvent({ eventType, status: "ok" })).toBe("append");
     }
-    // v0.9.74: a green /health over a failing /readyz is an incident of its
+    // v0.9.75: a green /health over a failing /readyz is an incident of its
     // own (gateway_readiness); its recovery row is append-only — the eventual
     // health_check ok / recovery closes it.
     expect(classifyEvent({ eventType: "readiness_degraded", status: "failed" })).toBe(
@@ -146,7 +146,7 @@ describe("classifyEvent transition table", () => {
   });
 });
 
-describe("readiness incidents (v0.9.74)", () => {
+describe("readiness incidents (v0.9.75)", () => {
   it("a readiness_degraded failure opens a gateway_readiness incident that not-ready ok rows keep open and a plain ok closes", () => {
     initContext();
     const tracker = createTracker();

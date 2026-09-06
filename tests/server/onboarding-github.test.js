@@ -11,27 +11,60 @@ describe("server/onboarding/github", () => {
     global.fetch = vi.fn();
   });
 
-  it("clones without embedding the github token in the command line", async () => {
-    const shellCmd = vi.fn(async (cmd, opts = {}) => {
-      expect(cmd).toContain('git clone --depth=1 "https://github.com/my-org/source-repo.git"');
-      expect(cmd).not.toContain("ghp_secret_token_value");
+  it("clones via argv (never a shell string) without embedding the github token", async () => {
+    const execFileCmd = vi.fn(async (file, args, opts = {}) => {
+      expect(file).toBe("git");
+      // `--` before the operands: the URL can never become a git option.
+      expect(args.slice(0, 3)).toEqual(["clone", "--depth=1", "--"]);
+      expect(args[3]).toBe("https://github.com/my-org/source-repo.git");
+      expect(args).toHaveLength(5);
+      expect(JSON.stringify(args)).not.toContain("ghp_secret_token_value");
       // The shared hardened askpass reads GITHUB_TOKEN (H9); never on the CLI.
       expect(opts.env?.GITHUB_TOKEN).toBe("ghp_secret_token_value");
       expect(typeof opts.env?.GIT_ASKPASS).toBe("string");
       expect(fs.existsSync(opts.env.GIT_ASKPASS)).toBe(true);
       return "";
     });
+    const shellCmd = vi.fn();
 
     const result = await cloneRepoToTemp({
       repoUrl: "my-org/source-repo",
       githubToken: "ghp_secret_token_value",
       shellCmd,
+      execFileCmd,
     });
 
     expect(result.ok).toBe(true);
-    expect(shellCmd).toHaveBeenCalledTimes(1);
-    const [, opts] = shellCmd.mock.calls[0];
+    expect(execFileCmd).toHaveBeenCalledTimes(1);
+    expect(shellCmd).not.toHaveBeenCalled();
+    const [, , opts] = execFileCmd.mock.calls[0];
     expect(fs.existsSync(opts.env.GIT_ASKPASS)).toBe(false);
+  });
+
+  it("falls back to a single-quote-escaped command for legacy callers without execFileCmd", async () => {
+    const shellCmd = vi.fn(async (cmd) => {
+      expect(cmd).toMatch(/^git clone --depth=1 -- 'https:\/\/github\.com\/my-org\/source-repo\.git' '/);
+      return "";
+    });
+    const result = await cloneRepoToTemp({
+      repoUrl: "my-org/source-repo",
+      githubToken: "ghp_secret_token_value",
+      shellCmd,
+    });
+    expect(result.ok).toBe(true);
+    expect(shellCmd).toHaveBeenCalledTimes(1);
+  });
+
+  it("refuses a repo slug with a fragment/query/extra segment before spawning anything (F102)", async () => {
+    const execFileCmd = vi.fn(async () => "");
+    const shellCmd = vi.fn(async () => "");
+    for (const repoUrl of ["owner/repo#$(touch pwned)", "owner/repo?x=1", "owner/repo/extra", "../x/y", "owner"]) {
+      const result = await cloneRepoToTemp({ repoUrl, githubToken: "t", shellCmd, execFileCmd });
+      expect(result.ok, repoUrl).toBe(false);
+      expect(result.error).toMatch(/owner\/repo/);
+    }
+    expect(execFileCmd).not.toHaveBeenCalled();
+    expect(shellCmd).not.toHaveBeenCalled();
   });
 
   it("allows org-owned new repos when github token verification succeeds", async () => {

@@ -44,7 +44,7 @@ const createHarness = ({
   restartGatewayForMitigation = null,
   isMitigationRestartBlocked = null,
   mitigationStatePath,
-  // v0.9.74 identity seams (pid-reuse guard for the serving root).
+  // v0.9.75 identity seams (pid-reuse guard for the serving root).
   readProcStartTicks = null,
   discoverServingIdentity = null,
 } = {}) => {

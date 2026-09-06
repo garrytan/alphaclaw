@@ -1733,7 +1733,7 @@ describe("pickTrustedResources memory-trend projection (field-wise validation)",
   });
 });
 
-describe("pickTrustedStatus serving-identity / readiness projection (v0.9.74)", () => {
+describe("pickTrustedStatus serving-identity / readiness projection (v0.9.75)", () => {
   const { pickTrustedStatus } = require("../../lib/server/watchdog-overseer");
 
   it("forwards servingPid, supervisionMode and readiness; readinessReason (gateway-echoed component names) never rides the trusted tier", () => {

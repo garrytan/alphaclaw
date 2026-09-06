@@ -45,6 +45,14 @@ describe("server/doctor/deterministic-checks", () => {
       ...overrides,
     });
 
+  // F109 split the key into :near (P2) / :over (P1) so a dismissed nudge never
+
+  // hides the escalation; tests that only care "did the bloat card fire" use this.
+
+  const findSkillsBloatCard = (cards) =>
+
+    cards.find((card) => String(card.sourceKey).startsWith("det:skills-bloat:"));
+
   const findCard = (cards, sourceKey) =>
     cards.find((card) => card.sourceKey === sourceKey);
 
@@ -437,7 +445,7 @@ describe("server/doctor/deterministic-checks", () => {
       );
     }
     const overCards = build({});
-    expect(findCard(overCards, "det:skills-bloat")).toMatchObject({
+    expect(findSkillsBloatCard(overCards)).toMatchObject({
       priority: "P1",
       category: "skills",
     });
@@ -451,13 +459,13 @@ describe("server/doctor/deterministic-checks", () => {
         `---\nname: small-${index}\ndescription: tiny\n---\nbody`,
       );
     }
-    expect(findCard(build({}), "det:skills-bloat")).toBeUndefined();
+    expect(findCard(build({}), "det:skills-bloat:over")).toBeUndefined();
 
     // Custom lower limits via config overrides push the small set over.
     expect(
       findCard(
         build({ skillsLimits: { maxSkillsInPrompt: 3 } }),
-        "det:skills-bloat",
+        "det:skills-bloat:over",
       ),
     ).toMatchObject({ priority: "P1" });
   });
@@ -487,7 +495,7 @@ describe("server/doctor/deterministic-checks", () => {
     // marker-only parse estimated 118 chars and emitted nothing.
     const card = findCard(
       build({ skillsLimits: { maxSkillsPromptChars: 3000 } }),
-      "det:skills-bloat",
+      "det:skills-bloat:over",
     );
     expect(card).toMatchObject({ priority: "P1", category: "skills" });
     expect(card.evidence[0].text).toContain("skills/literal: description 3002 chars");
@@ -512,7 +520,7 @@ describe("server/doctor/deterministic-checks", () => {
     );
     const card = findCard(
       build({ skillsLimits: { maxSkillsPromptChars: 3000 } }),
-      "det:skills-bloat",
+      "det:skills-bloat:over",
     );
     // Exactly 3,001 chars (2 x 1,500 + the joining newline): the name: line
     // is NOT swallowed into the description.
@@ -527,7 +535,7 @@ describe("server/doctor/deterministic-checks", () => {
       "skills/a/b/c/d/e/f/g/SKILL.md",
       "---\nname: deep\ndescription: x\n---\n",
     );
-    expect(findCard(build({}), "det:skills-bloat")).toBeUndefined();
+    expect(findCard(build({}), "det:skills-bloat:over")).toBeUndefined();
   });
 
   it("bounds the skills scan by visited dirents on a wide tree and stays an estimate", () => {
@@ -545,7 +553,7 @@ describe("server/doctor/deterministic-checks", () => {
       skillsLimits: { maxSkillsInPrompt: 2 },
       skillsScanMaxVisitedDirents: 50,
     });
-    const card = findCard(cards, "det:skills-bloat");
+    const card = findSkillsBloatCard(cards);
     expect(card).toMatchObject({ priority: "P1" });
     expect(card.summary).toContain("Scan hit its safety cap; the real count is higher.");
     // The budget stopped the walk well before all 300 skills were counted.
@@ -555,7 +563,7 @@ describe("server/doctor/deterministic-checks", () => {
     // Production default budget: the same tree scans completely — no
     // truncation note, full count.
     const fullCards = build({ skillsLimits: { maxSkillsInPrompt: 2 } });
-    const fullCard = findCard(fullCards, "det:skills-bloat");
+    const fullCard = findSkillsBloatCard(fullCards);
     expect(fullCard.summary).toContain("~300 workspace skills");
     expect(fullCard.summary).not.toContain("Scan hit its safety cap");
   });
@@ -730,6 +738,35 @@ describe("server/doctor/deterministic-checks", () => {
       expect(card.fixPrompt.length).toBeGreaterThan(0);
     }
   });
+
+  it("uses distinct sourceKeys for the P2 near-limit nudge and the P1 over-limit escalation (F109)", () => {
+    // 10 skills x (97 overhead + 1500 desc + name/location) ≈ 16.1k: past the
+    // 85% band of the 18k default, below the limit → near.
+    for (let index = 0; index < 10; index += 1) {
+      write(
+        workspaceRoot,
+        `skills/near-${index}/SKILL.md`,
+        `---\nname: near-${index}\ndescription: ${"d".repeat(1500)}\n---\nbody`,
+      );
+    }
+    const nearCards = build({});
+    expect(findCard(nearCards, "det:skills-bloat:near")).toMatchObject({ priority: "P2" });
+    expect(findCard(nearCards, "det:skills-bloat:over")).toBeUndefined();
+    expect(findCard(nearCards, "det:skills-bloat")).toBeUndefined();
+
+    // Push over the limit: the escalation carries the OTHER key, so a
+    // dismissed nudge can never suppress it.
+    for (let index = 0; index < 4; index += 1) {
+      write(
+        workspaceRoot,
+        `skills/over-${index}/SKILL.md`,
+        `---\nname: over-${index}\ndescription: ${"d".repeat(1500)}\n---\nbody`,
+      );
+    }
+    const overCards = build({});
+    expect(findCard(overCards, "det:skills-bloat:over")).toMatchObject({ priority: "P1" });
+    expect(findCard(overCards, "det:skills-bloat:near")).toBeUndefined();
+  });
 });
 
 describe("server/doctor/dashboard-token-check", () => {
@@ -888,5 +925,74 @@ describe("server/doctor/dashboard-token-check", () => {
         process.env.OPENCLAW_GATEWAY_TOKEN = previousEnvToken;
       }
     }
+  });
+});
+
+describe("server/doctor/deterministic-checks det:config-unreadable cards (fix wave PR 7 recovery path)", () => {
+  let workspaceRoot;
+  let managedRoot;
+  beforeEach(() => {
+    workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-det-cfg-ws-"));
+    managedRoot = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-det-cfg-managed-"));
+  });
+  afterEach(() => {
+    fs.rmSync(workspaceRoot, { recursive: true, force: true });
+    fs.rmSync(managedRoot, { recursive: true, force: true });
+  });
+  const write = (rootDir, relativePath, content) => {
+    const fullPath = path.join(rootDir, relativePath);
+    fs.mkdirSync(path.dirname(fullPath), { recursive: true });
+    fs.writeFileSync(fullPath, content, "utf8");
+  };
+  const build = () =>
+    buildDeterministicCards({
+      workspaceRoot,
+      managedRoot,
+      profile: kStableProfile,
+      bootstrapContext: analyzeBootstrapContext({ workspaceRoot, profile: kStableProfile }),
+      onboarded: true,
+      releaseChannel: "stable",
+    });
+  const findCard = (cards, sourceKey) => cards.find((card) => card.sourceKey === sourceKey);
+
+  it("emits a P1 card per unparseable guarded file, naming backups, without parsing anything else", () => {
+    write(managedRoot, "openclaw.json", '{"gateway":{"auth":{"token":"${OPENCLAW_GATEWAY_TOKEN}"}');
+    write(managedRoot, "openclaw.json.bak", "{}");
+    write(managedRoot, "openclaw.json.bak.1", "{}");
+    write(managedRoot, "gogcli/state.json", JSON.stringify({ version: 2, accounts: [] }));
+    write(managedRoot, "exec-approvals.json", "[1,2]");
+    write(workspaceRoot, "topic-registry.json", "{ not json");
+
+    const cards = build();
+    const openclaw = findCard(cards, "det:config-unreadable:openclaw.json");
+    expect(openclaw).toBeTruthy();
+    expect(openclaw.priority).toBe("P1");
+    expect(openclaw.category).toBe("config");
+    expect(openclaw.title).toMatch(/openclaw\.json cannot be parsed/);
+    expect(openclaw.summary).toMatch(/config_unreadable/);
+    expect(openclaw.recommendation).toMatch(/openclaw\.json\.bak, openclaw\.json\.bak\.1/);
+    expect(openclaw.recommendation).toMatch(/intentionally JSON5/);
+    expect(openclaw.evidence.map((e) => e.text)).toEqual(
+      expect.arrayContaining([expect.stringContaining("backup candidate: openclaw.json.bak")]),
+    );
+    // Managed-root files are not agent-editable through the browser → no fix prompt.
+    expect(openclaw.fixPrompt).toBeUndefined();
+    expect(openclaw.targetPaths).toEqual([]);
+
+    expect(findCard(cards, "det:config-unreadable:gogcli/state.json")).toBeUndefined();
+
+    const approvals = findCard(cards, "det:config-unreadable:exec-approvals.json");
+    expect(approvals.summary).toMatch(/root is not a JSON object/);
+
+    const registry = findCard(cards, "det:config-unreadable:topic-registry.json");
+    expect(registry).toBeTruthy();
+    expect(registry.targetPaths).toEqual([{ path: "topic-registry.json" }]);
+    expect(registry.fixPrompt).toMatch(/Repair the syntax in place/);
+  });
+
+  it("emits nothing for missing or healthy files", () => {
+    write(managedRoot, "openclaw.json", JSON.stringify({ agents: { list: [] } }));
+    const cards = build();
+    expect(cards.some((card) => String(card.sourceKey).startsWith("det:config-unreadable:"))).toBe(false);
   });
 });

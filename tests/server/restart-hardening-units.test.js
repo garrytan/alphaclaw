@@ -117,6 +117,27 @@ describe("pickCauseLine (no last-line fallback)", () => {
     );
     expect(pickCauseLine("open /data/x: EACCES")).toBe("open /data/x: EACCES");
   });
+
+  it("a trailing lowercase 'error' in prose does not outrank the real ERROR blocker (F048)", () => {
+    const tail = [
+      "ERROR: stale state-lifecycle lock held by pid 4242",
+      "restart attempt 2 did not finish before the deadline; last error was a connection error",
+    ].join("\n");
+    expect(pickCauseLine(tail)).toBe("ERROR: stale state-lifecycle lock held by pid 4242");
+  });
+
+  it("still treats 'Error:'/'error:' prefixes as severity tags, and falls back to error-shaped words", () => {
+    expect(
+      pickCauseLine("ERROR first blocker\nError: listen EADDRINUSE :18789"),
+    ).toBe("Error: listen EADDRINUSE :18789");
+    expect(pickCauseLine("ERR! npm failed\nfatal: not a git repository")).toBe(
+      "fatal: not a git repository",
+    );
+    // No severity tag anywhere → the last error-shaped line still wins.
+    expect(pickCauseLine("warming up\nconnection refused by upstream")).toBe(
+      "connection refused by upstream",
+    );
+  });
 });
 
 describe("evidence redaction composition", () => {
