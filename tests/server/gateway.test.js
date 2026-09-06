@@ -3258,6 +3258,540 @@ describe("server/gateway restart behavior", () => {
     });
   });
 
+  describe("requestGatewayLaunch outcomes + serving identity (v0.9.74)", () => {
+    // Fake /proc for the identity walk: `procs` = [{ pid, ppid, argv, comm,
+    // startTicks }]. The live-process scan spy honours `match` like the real
+    // one; /proc/<pid>/stat feeds readProcStartTicks/readProcParentPid and
+    // /proc/<pid>/status + readdirSync("/proc") feed resolveFirstChildPid.
+    // Every other path falls through to the real fs.
+    const installFakeProc = (procs) => {
+      const byPid = new Map(procs.map((proc) => [proc.pid, proc]));
+      lockContention.listLiveOpenclawProcesses.mockImplementation(({ match = null } = {}) =>
+        procs
+          .filter((proc) => typeof match !== "function" || match(proc.argv))
+          .map((proc) => ({ pid: proc.pid, cmdline: proc.argv.join(" ") })),
+      );
+      fs.readdirSync = vi.fn((target, ...rest) =>
+        String(target) === "/proc"
+          ? procs.map((proc) => String(proc.pid))
+          : originalReaddirSync(target, ...rest),
+      );
+      fs.readFileSync = vi.fn((target, ...rest) => {
+        const match = /^\/proc\/(\d+)\/(stat|status)$/.exec(String(target));
+        if (!match) return originalReadFileSync(target, ...rest);
+        const proc = byPid.get(Number(match[1]));
+        if (!proc) throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+        if (match[2] === "status") {
+          return `Name:\t${proc.comm}\nState:\tS (sleeping)\nPPid:\t${proc.ppid}\n`;
+        }
+        return `${proc.pid} (${proc.comm}) S ${proc.ppid} 1 1 0 -1 4194304 1 0 0 0 0 0 0 0 20 0 1 0 ${proc.startTicks} 1 1 0\n`;
+      });
+    };
+    const kEntry = "/app/node_modules/openclaw/dist/entry.js";
+    // One serving tree (launcher root 700 → worker 701) plus an operator's
+    // one-shot `gateway status` (702) that must never be mistaken for it.
+    const kIncumbentTree = [
+      { pid: 700, ppid: 1, argv: ["openclaw", "gateway", "--force"], comm: "openclaw", startTicks: 123456 },
+      { pid: 701, ppid: 700, argv: ["node", kEntry, "gateway", "run"], comm: "openclaw-gatewa", startTicks: 123460 },
+      { pid: 702, ppid: 1, argv: ["openclaw", "gateway", "status"], comm: "openclaw", startTicks: 200000 },
+    ];
+    const kTwoRoots = [
+      { pid: 700, ppid: 1, argv: ["openclaw", "gateway", "run"], comm: "openclaw", startTicks: 1 },
+      { pid: 800, ppid: 1, argv: ["node", kEntry, "gateway", "run"], comm: "node", startTicks: 2 },
+    ];
+    const kOutcomeShape = {
+      outcome: expect.any(String),
+      child: null,
+      pid: null,
+      generation: null,
+      serving: null,
+      error: null,
+      detail: null,
+    };
+    const closeChild = (child, code = 1) => {
+      child.exitCode = code;
+      child.on.mock.calls.find((c) => c[0] === "close")[1](code, null);
+    };
+    let quiet = [];
+    beforeEach(() => {
+      quiet = [
+        vi.spyOn(console, "log").mockImplementation(() => {}),
+        vi.spyOn(console, "warn").mockImplementation(() => {}),
+        vi.spyOn(process.stdout, "write").mockImplementation(() => true),
+        vi.spyOn(process.stderr, "write").mockImplementation(() => true),
+      ];
+    });
+    afterEach(() => {
+      for (const spy of quiet) spy.mockRestore();
+    });
+
+    // Acceptance a (gateway half): the boot path around an incumbent.
+    it("startGateway around a running incumbent spawns nothing and notifies an ADOPTED identity (servingPid, rootPid, startTicks)", async () => {
+      installFakeProc(kIncumbentTree);
+      childProcess.spawn = vi.fn(() => createChild());
+      fs.existsSync = vi.fn((target) => target === kOnboardingMarkerPath);
+      net.createConnection = vi.fn(() => createSocket(true));
+      delete require.cache[modulePath];
+      const gateway = require(modulePath);
+      const launchHandler = vi.fn();
+      gateway.setGatewayLaunchHandler(launchHandler);
+
+      await gateway.startGateway();
+
+      expect(childProcess.spawn).not.toHaveBeenCalled();
+      expect(launchHandler).toHaveBeenCalledTimes(1);
+      expect(launchHandler).toHaveBeenCalledWith({
+        startedAt: expect.any(Number),
+        // `pid` keeps meaning "the child AlphaClaw spawned" — none here.
+        pid: null,
+        servingPid: 701,
+        rootPid: 700,
+        startTicks: 123456,
+        generation: null,
+        supervision: "adopted",
+      });
+      gateway.setGatewayLaunchHandler(null);
+    });
+
+    it("an ambiguous scan (two serving roots) notifies DETACHED with a null identity — never a guess", async () => {
+      installFakeProc(kTwoRoots);
+      childProcess.spawn = vi.fn(() => createChild());
+      fs.existsSync = vi.fn((target) => target === kOnboardingMarkerPath);
+      net.createConnection = vi.fn(() => createSocket(true));
+      delete require.cache[modulePath];
+      const gateway = require(modulePath);
+      const launchHandler = vi.fn();
+      gateway.setGatewayLaunchHandler(launchHandler);
+
+      await gateway.startGateway();
+
+      expect(childProcess.spawn).not.toHaveBeenCalled();
+      expect(launchHandler).toHaveBeenCalledWith({
+        startedAt: expect.any(Number),
+        pid: null,
+        servingPid: null,
+        rootPid: null,
+        startTicks: null,
+        generation: null,
+        supervision: "detached",
+      });
+      gateway.setGatewayLaunchHandler(null);
+    });
+
+    it("a throwing /proc scan degrades the boot notification to DETACHED instead of failing startGateway", async () => {
+      lockContention.listLiveOpenclawProcesses.mockImplementation(() => {
+        throw new Error("proc-boom");
+      });
+      childProcess.spawn = vi.fn(() => createChild());
+      fs.existsSync = vi.fn((target) => target === kOnboardingMarkerPath);
+      net.createConnection = vi.fn(() => createSocket(true));
+      delete require.cache[modulePath];
+      const gateway = require(modulePath);
+      const launchHandler = vi.fn();
+      gateway.setGatewayLaunchHandler(launchHandler);
+
+      await expect(gateway.startGateway()).resolves.toBeUndefined();
+
+      expect(launchHandler).toHaveBeenCalledWith(
+        expect.objectContaining({ pid: null, servingPid: null, supervision: "detached" }),
+      );
+      gateway.setGatewayLaunchHandler(null);
+    });
+
+    // Codex 5A: the identity filter.
+    it("resolveServingIdentity picks the serving tree root, resolves its worker, excludes CLI verbs, and fails safe on ambiguity", () => {
+      installFakeProc(kIncumbentTree);
+      delete require.cache[modulePath];
+      const gateway = require(modulePath);
+
+      expect(gateway.resolveServingIdentity()).toEqual({
+        rootPid: 700,
+        workerPid: 701,
+        startTicks: 123456,
+        pids: [700, 701],
+      });
+      // The EVIDENCE snapshot (restart verdicts) still lists the CLI verb —
+      // the two patterns are deliberately different.
+      expect(gateway.listGatewayPids()).toEqual([700, 701, 702]);
+
+      // Two independent roots: ambiguous → null.
+      installFakeProc(kTwoRoots);
+      expect(gateway.resolveServingIdentity()).toBeNull();
+      // A lone CLI verb is not a serving gateway.
+      installFakeProc([kIncumbentTree[2]]);
+      expect(gateway.resolveServingIdentity()).toBeNull();
+      expect(gateway.listGatewayPids()).toEqual([702]);
+      // Nothing gateway-ish at all.
+      installFakeProc([]);
+      expect(gateway.resolveServingIdentity()).toBeNull();
+    });
+
+    it("launch_requested stamps increasing generations; a live child is child_retained; the exit payload carries the generation", async () => {
+      const first = createChild();
+      const second = { ...createChild(), pid: 5678 };
+      const children = [first, second];
+      childProcess.spawn = vi.fn(() => children.shift());
+      fs.existsSync = vi.fn(() => false);
+      net.createConnection = vi.fn(() => createSocket(false));
+      delete require.cache[modulePath];
+      const gateway = require(modulePath);
+      const exitHandler = vi.fn();
+      gateway.setGatewayExitHandler(exitHandler);
+
+      expect(gateway.kGatewayLaunchOutcomes).toEqual({
+        INCUMBENT_PRESENT: "incumbent_present",
+        CHILD_RETAINED: "child_retained",
+        LAUNCH_REQUESTED: "launch_requested",
+        LAUNCH_ABORTED: "launch_aborted",
+        LAUNCH_FAILED: "launch_failed",
+      });
+      expect(gateway.getLaunchGeneration()).toBe(0);
+
+      const requested = await gateway.requestGatewayLaunch({ site: "repair" });
+      expect(requested).toEqual({
+        ...kOutcomeShape,
+        outcome: "launch_requested",
+        child: first,
+        pid: 1234,
+        generation: 1,
+      });
+      expect(gateway.getLaunchGeneration()).toBe(1);
+      expect(childProcess.spawn).toHaveBeenCalledWith(
+        "openclaw",
+        ["gateway", "run"],
+        expect.objectContaining({ env: expect.any(Object) }),
+      );
+
+      // The same live child again: retained, no second spawn, same generation.
+      const retained = await gateway.requestGatewayLaunch();
+      expect(retained).toEqual({
+        ...kOutcomeShape,
+        outcome: "child_retained",
+        child: first,
+        pid: 1234,
+        generation: 1,
+      });
+      expect(childProcess.spawn).toHaveBeenCalledTimes(1);
+      expect(gateway.getLaunchGeneration()).toBe(1);
+
+      closeChild(first, 1);
+      expect(exitHandler).toHaveBeenCalledTimes(1);
+      expect(exitHandler).toHaveBeenCalledWith(
+        expect.objectContaining({ pid: 1234, code: 1, generation: 1 }),
+      );
+
+      const relaunched = await gateway.requestGatewayLaunch();
+      expect(relaunched).toMatchObject({
+        outcome: "launch_requested",
+        child: second,
+        pid: 5678,
+        generation: 2,
+      });
+      expect(gateway.getLaunchGeneration()).toBe(2);
+      gateway.setGatewayExitHandler(null);
+    });
+
+    it("the stdout 'listening on' sniff notifies servingPid/rootPid/startTicks/generation for a MANAGED child", async () => {
+      installFakeProc([
+        { pid: 1234, ppid: process.pid, argv: ["openclaw", "gateway", "run"], comm: "openclaw", startTicks: 4242 },
+      ]);
+      const child = createChild();
+      childProcess.spawn = vi.fn(() => child);
+      fs.existsSync = vi.fn(() => false);
+      delete require.cache[modulePath];
+      const gateway = require(modulePath);
+      const launchHandler = vi.fn();
+      gateway.setGatewayLaunchHandler(launchHandler);
+
+      await gateway.requestGatewayLaunch({ reconcileIncumbent: false });
+      const onStdout = child.stdout.on.mock.calls.find((c) => c[0] === "data")[1];
+      onStdout(Buffer.from("Gateway listening on ws://127.0.0.1:18789\n"));
+
+      expect(launchHandler).toHaveBeenCalledWith({
+        startedAt: expect.any(Number),
+        pid: 1234,
+        servingPid: 1234,
+        rootPid: 1234,
+        startTicks: 4242,
+        generation: 1,
+        supervision: "managed",
+      });
+      gateway.setGatewayLaunchHandler(null);
+    });
+
+    it("a port that answers with no live child is incumbent_present: identity returned, nothing spawned, NO launch handler", async () => {
+      installFakeProc(kIncumbentTree);
+      const child = createChild();
+      childProcess.spawn = vi.fn(() => child);
+      fs.existsSync = vi.fn(() => false);
+      net.createConnection = vi.fn(() => createSocket(true));
+      delete require.cache[modulePath];
+      const gateway = require(modulePath);
+      const launchHandler = vi.fn();
+      gateway.setGatewayLaunchHandler(launchHandler);
+
+      const incumbent = await gateway.requestGatewayLaunch({ site: "crash restart" });
+      expect(incumbent).toEqual({
+        ...kOutcomeShape,
+        outcome: "incumbent_present",
+        pid: 700,
+        serving: { rootPid: 700, workerPid: 701, startTicks: 123456, pids: [700, 701] },
+      });
+      expect(childProcess.spawn).not.toHaveBeenCalled();
+      // The watchdog owns intent (adopt vs replace) — gateway.js does not
+      // decide for it by firing the handler.
+      expect(launchHandler).not.toHaveBeenCalled();
+      expect(gateway.getLaunchGeneration()).toBe(0);
+
+      // Ambiguous identity still reports the incumbent, with serving null.
+      installFakeProc(kTwoRoots);
+      expect(await gateway.requestGatewayLaunch()).toMatchObject({
+        outcome: "incumbent_present",
+        pid: null,
+        serving: null,
+      });
+      expect(childProcess.spawn).not.toHaveBeenCalled();
+
+      // The compat wrapper does NOT reconcile (its callers probed the port
+      // themselves): it spawns exactly as before.
+      expect(await gateway.launchGatewayProcess()).toBe(child);
+      expect(childProcess.spawn).toHaveBeenCalledTimes(1);
+      expect(launchHandler).not.toHaveBeenCalled();
+      gateway.setGatewayLaunchHandler(null);
+    });
+
+    it("re-checks the port AFTER the preflight awaits: an incumbent that appeared meanwhile is incumbent_present, not a duplicate spawn", async () => {
+      installFakeProc(kIncumbentTree);
+      childProcess.spawn = vi.fn(() => createChild());
+      fs.existsSync = vi.fn(() => false);
+      let probes = 0;
+      // Port closed on the first probe (before the preflight), answering on
+      // every later one.
+      net.createConnection = vi.fn(() => createSocket(() => ++probes > 1));
+      delete require.cache[modulePath];
+      const gateway = require(modulePath);
+
+      const result = await gateway.requestGatewayLaunch();
+
+      expect(probes).toBe(2);
+      expect(result).toMatchObject({ outcome: "incumbent_present", pid: 700 });
+      expect(childProcess.spawn).not.toHaveBeenCalled();
+    });
+
+    // Codex point 5: the spawn fence.
+    it("shouldAbort true immediately before the spawn is launch_aborted {lease_expired} — nothing spawned, no handler", async () => {
+      childProcess.spawn = vi.fn(() => createChild());
+      fs.existsSync = vi.fn(() => false);
+      net.createConnection = vi.fn(() => createSocket(false));
+      delete require.cache[modulePath];
+      const gateway = require(modulePath);
+      const launchHandler = vi.fn();
+      gateway.setGatewayLaunchHandler(launchHandler);
+      const shouldAbort = vi.fn(() => true);
+
+      const result = await gateway.requestGatewayLaunch({ shouldAbort });
+
+      expect(result).toEqual({
+        ...kOutcomeShape,
+        outcome: "launch_aborted",
+        detail: "lease_expired",
+      });
+      expect(shouldAbort).toHaveBeenCalled();
+      expect(childProcess.spawn).not.toHaveBeenCalled();
+      expect(launchHandler).not.toHaveBeenCalled();
+      expect(gateway.getLaunchGeneration()).toBe(0);
+
+      // A predicate that stays false lets the spawn through.
+      expect(await gateway.requestGatewayLaunch({ shouldAbort: () => false })).toMatchObject({
+        outcome: "launch_requested",
+        generation: 1,
+      });
+      gateway.setGatewayLaunchHandler(null);
+    });
+
+    it("a shutdown abort during the preflight is launch_aborted {shutdown}", async () => {
+      childProcess.spawn = vi.fn(() => createChild());
+      fs.existsSync = vi.fn(() => false);
+      net.createConnection = vi.fn(() => createSocket(false));
+      delete require.cache[modulePath];
+      const gateway = require(modulePath);
+      gateway.abortGatewayWaits("shutdown");
+
+      expect(await gateway.requestGatewayLaunch()).toEqual({
+        ...kOutcomeShape,
+        outcome: "launch_aborted",
+        detail: "shutdown",
+      });
+      expect(childProcess.spawn).not.toHaveBeenCalled();
+      // Compat: the wrapper still answers null for an aborted launch.
+      expect(await gateway.launchGatewayProcess()).toBeNull();
+    });
+
+    it("a refused prelaunch hook is launch_aborted {prelaunch_hook} (the hook handler was already told)", async () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), "alphaclaw-hook-"));
+      const hookFile = path.join(dir, "pre-gateway-launch");
+      fs.writeFileSync(hookFile, "#!/bin/sh\necho hook-ran\n", { mode: 0o755 });
+      process.env.ALPHACLAW_GATEWAY_PRELAUNCH_HOOK = hookFile;
+      try {
+        // Not root-owned → refused (uid pinned so the verdict never depends
+        // on whether the suite runs as root).
+        fs.fstatSync = vi.fn((fd) => Object.assign(originalFstatSync(fd), { uid: 1000 }));
+        childProcess.spawn = vi.fn(() => createChild());
+        fs.existsSync = vi.fn(() => false);
+        net.createConnection = vi.fn(() => createSocket(false));
+        delete require.cache[modulePath];
+        const gateway = require(modulePath);
+        const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+        const hookHandler = vi.fn();
+        gateway.setGatewayPrelaunchHookHandler(hookHandler);
+
+        const result = await gateway.requestGatewayLaunch({ site: "medic relaunch" });
+
+        expect(result).toEqual({
+          ...kOutcomeShape,
+          outcome: "launch_aborted",
+          detail: "prelaunch_hook",
+        });
+        expect(childProcess.spawn).not.toHaveBeenCalled();
+        expect(hookHandler).toHaveBeenCalledWith(
+          expect.objectContaining({ status: "refused", site: "medic relaunch" }),
+        );
+        expect(errorSpy).toHaveBeenCalledWith(
+          expect.stringContaining("gateway medic relaunch aborted"),
+        );
+        gateway.setGatewayPrelaunchHookHandler(null);
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("a throwing spawn is launch_failed {error} — RETURNED to the outcome caller, re-THROWN by the compat wrapper", async () => {
+      const boom = Object.assign(new Error("spawn ENOENT"), { code: "ENOENT" });
+      childProcess.spawn = vi.fn(() => {
+        throw boom;
+      });
+      fs.existsSync = vi.fn(() => false);
+      net.createConnection = vi.fn(() => createSocket(false));
+      delete require.cache[modulePath];
+      const gateway = require(modulePath);
+
+      const result = await gateway.requestGatewayLaunch();
+      expect(result).toEqual({
+        ...kOutcomeShape,
+        outcome: "launch_failed",
+        error: boom,
+        detail: "spawn ENOENT",
+      });
+      // A failed spawn never consumes a generation.
+      expect(gateway.getLaunchGeneration()).toBe(0);
+      await expect(gateway.launchGatewayProcess()).rejects.toBe(boom);
+    });
+
+    it("notifyGatewayLaunch for a live MANAGED child carries the worker as servingPid and the child's generation", async () => {
+      const supervisor = { ...createChild(), pid: 900 };
+      childProcess.spawn = vi.fn(() => supervisor);
+      childProcess.execSync = vi.fn(() => "");
+      fs.existsSync = vi.fn(() => false);
+      net.createConnection = vi.fn(() => createSocket(true));
+      installFakeProc([
+        { pid: 900, ppid: process.pid, argv: ["openclaw", "gateway", "--force"], comm: "openclaw", startTicks: 777 },
+        { pid: 901, ppid: 900, argv: ["node", kEntry, "gateway", "run"], comm: "openclaw-gatewa", startTicks: 780 },
+      ]);
+      delete require.cache[modulePath];
+      const gateway = require(modulePath);
+      const launchHandler = vi.fn();
+      gateway.setGatewayLaunchHandler(launchHandler);
+      const exitHandler = vi.fn();
+      gateway.setGatewayExitHandler(exitHandler);
+
+      // The cold-restart supervisor stays alive → adopted as the managed
+      // child (issue #56) and notified with the full identity.
+      await gateway.runGatewayCmd("--force");
+
+      expect(launchHandler).toHaveBeenCalledWith({
+        startedAt: expect.any(Number),
+        pid: 900,
+        servingPid: 901,
+        rootPid: 900,
+        startTicks: 777,
+        generation: 1,
+        supervision: "managed",
+      });
+      expect(gateway.getLaunchGeneration()).toBe(1);
+      // A live managed child is child_retained for the outcome API too.
+      expect(await gateway.requestGatewayLaunch()).toMatchObject({
+        outcome: "child_retained",
+        pid: 900,
+        generation: 1,
+      });
+      // …and its exit payload names the same generation.
+      closeChild(supervisor, 0);
+      expect(exitHandler).toHaveBeenCalledWith(
+        expect.objectContaining({ pid: 900, workerPid: 901, supervisor: true, generation: 1 }),
+      );
+      gateway.setGatewayLaunchHandler(null);
+      gateway.setGatewayExitHandler(null);
+    });
+
+    // Codex point 5 (cold-restart half): the same predicate fences the
+    // `gateway --force` spawn and the ready wait.
+    it("cold restart shouldAbort: true before the spawn skips `gateway --force`; flipping true mid-wait ends the ready poll (aborted_by_caller)", async () => {
+      vi.useFakeTimers();
+      try {
+        childProcess.spawn = vi.fn(() => createChild());
+        childProcess.execFile = execFileOk("");
+        fs.existsSync = vi.fn(() => false);
+        // Port down throughout: the stop settles at once and the ready wait
+        // would otherwise burn the whole 120s budget.
+        net.createConnection = vi.fn(() => createSocket(false));
+        delete require.cache[modulePath];
+        const gateway = require(modulePath);
+        const launchHandler = vi.fn();
+        gateway.setGatewayLaunchHandler(launchHandler);
+
+        const early = gateway
+          .restartGateway(vi.fn(), { shouldAbort: () => true })
+          .then(() => null, (error) => error);
+        await vi.advanceTimersByTimeAsync(2000);
+        const earlyError = await early;
+        expect(earlyError).toBeInstanceOf(gateway.GatewayRestartError);
+        expect(earlyError.message).toContain("aborted by caller");
+        expect(earlyError.evidence).toMatchObject({ aborted: true, reason: "aborted_by_caller" });
+        expect(childProcess.spawn).not.toHaveBeenCalled();
+        expect(gateway.getLaunchGeneration()).toBe(0);
+
+        let abort = false;
+        const late = gateway
+          .restartGateway(vi.fn(), { shouldAbort: () => abort })
+          .then(() => null, (error) => error);
+        await vi.advanceTimersByTimeAsync(3000);
+        expect(childProcess.spawn).toHaveBeenCalledWith(
+          "openclaw",
+          ["gateway", "--force"],
+          expect.anything(),
+        );
+        expect(gateway.getLaunchGeneration()).toBe(1);
+        abort = true;
+        await vi.advanceTimersByTimeAsync(1000);
+        const lateError = await late;
+        // Ended within a poll tick — not the 120s "did not become ready".
+        expect(lateError).toBeInstanceOf(gateway.GatewayRestartError);
+        expect(lateError.message).toContain("aborted by caller");
+        expect(lateError.evidence).toMatchObject({
+          aborted: true,
+          reason: "aborted_by_caller",
+          stderrTail: expect.any(Array),
+          stdoutTail: expect.any(Array),
+        });
+        // Nothing claimed success.
+        expect(launchHandler).not.toHaveBeenCalled();
+        gateway.setGatewayLaunchHandler(null);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
+
   describe("capability-gated `gateway stop --force` and stop honesty (WI-5.1)", () => {
     // C13: the managed launch primes the probe (fire-and-forget) so a later
     // stop — including the 5 s shutdown budget — consults the cache instead

@@ -3,6 +3,13 @@
 // an exclusive SQLite transaction held by a LIVE process — never a stale file).
 const {
   kStateContentionPattern,
+  kGatewayProcessPattern,
+  kGatewayServingCmdlinePattern,
+  kGatewayOwnershipConflictPattern,
+  classifyOwnershipConflict,
+  parseProcStat,
+  readProcStartTicks,
+  readProcParentPid,
   describeLockContention,
   listLiveOpenclawProcesses,
   listLockDirs,
@@ -200,5 +207,186 @@ describe("looksLikeLockContention", () => {
     expect(kStateContentionPattern.flags).toContain("i");
     expect(kStateContentionPattern.test("sqlite TRANSACTION LOCK WAIT FAILED")).toBe(true);
     expect(kStateContentionPattern.test("Another OpenClaw Process Owns State-Lifecycle")).toBe(true);
+  });
+});
+
+describe("gateway process patterns (evidence vs serving)", () => {
+  const kServing = [
+    "openclaw gateway run",
+    "node /app/node_modules/openclaw/dist/entry.js gateway run --dev",
+    "openclaw gateway --force",
+    "/opt/x/openclaw-gateway",
+  ];
+  const kCliVerbs = [
+    "openclaw gateway status",
+    "openclaw gateway stop --force",
+    "openclaw gateway restart",
+    "openclaw gateway call health",
+    "openclaw gateway --help",
+  ];
+
+  it("the EVIDENCE pattern matches every gateway-ish process, CLI verbs included (unchanged after the move from gateway.js)", () => {
+    expect(kGatewayProcessPattern.source).toBe("(^|\\s)gateway(\\s|$)|openclaw-gateway");
+    for (const cmdline of [...kServing, ...kCliVerbs]) {
+      expect(kGatewayProcessPattern.test(cmdline), cmdline).toBe(true);
+    }
+    expect(kGatewayProcessPattern.test("openclaw doctor --json")).toBe(false);
+    expect(kGatewayProcessPattern.test("node /app/bin/alphaclaw.js start")).toBe(false);
+  });
+
+  it("the SERVING pattern accepts only processes that can own the port and rejects the CLI verbs", () => {
+    for (const cmdline of kServing) {
+      expect(kGatewayServingCmdlinePattern.test(cmdline), cmdline).toBe(true);
+    }
+    for (const cmdline of kCliVerbs) {
+      expect(kGatewayServingCmdlinePattern.test(cmdline), cmdline).toBe(false);
+    }
+    expect(kGatewayServingCmdlinePattern.test("openclaw doctor --fix --yes")).toBe(false);
+  });
+});
+
+describe("classifyOwnershipConflict (exit-1 wording of a losing gateway contender)", () => {
+  // Wording table verified against the 2026.7.1-2 and 2026.9.1-beta.1 tarballs.
+  const rows = [
+    {
+      text: "another gateway instance is already listening on ws://127.0.0.1:18789",
+      kind: "gateway_conflict",
+      holderPid: null,
+      holderRole: null,
+    },
+    {
+      text: "gateway already running (pid 4321); lock timeout after 5000ms",
+      kind: "gateway_conflict",
+      holderPid: 4321,
+      holderRole: null,
+    },
+    {
+      text: "failed to acquire gateway lock at /tmp/openclaw-gateway.lock",
+      kind: "gateway_conflict",
+      holderPid: null,
+      holderRole: null,
+    },
+    {
+      text: "another OpenClaw process owns state-lifecycle: retry later",
+      kind: "gateway_conflict",
+      holderPid: null,
+      holderRole: null,
+    },
+    {
+      text: "gateway already running under external; existing gateway did not become healthy after 30000ms",
+      kind: "gateway_conflict",
+      holderPid: null,
+      holderRole: null,
+    },
+    {
+      text: "state directory is locked by agent-embedded (pid 777)",
+      kind: "state_writer_conflict",
+      holderPid: 777,
+      holderRole: "agent-embedded",
+    },
+    {
+      text: "another embedded OpenClaw state writer is active (pid 9)",
+      kind: "state_writer_conflict",
+      holderPid: 9,
+      holderRole: null,
+    },
+    {
+      text: "failed to acquire gateway state ownership",
+      kind: "state_writer_conflict",
+      holderPid: null,
+      holderRole: null,
+    },
+  ];
+
+  it.each(rows)("$text → $kind", ({ text, kind, holderPid, holderRole }) => {
+    expect(kGatewayOwnershipConflictPattern.test(text)).toBe(true);
+    expect(classifyOwnershipConflict(text)).toEqual({ kind, holderPid, holderRole });
+  });
+
+  it("is case-insensitive and reads the wording out of a multi-line stderr tail", () => {
+    const tail = [
+      "[gateway] starting",
+      "Error: STATE DIRECTORY IS LOCKED BY Migration-Runner (PID 55)",
+    ].join("\n");
+    expect(classifyOwnershipConflict(tail)).toEqual({
+      kind: "state_writer_conflict",
+      holderPid: 55,
+      holderRole: "Migration-Runner",
+    });
+  });
+
+  it("returns null for anything else (a crash, EADDRINUSE, the state-lease texts, empty input)", () => {
+    for (const text of [
+      "TypeError: cannot read properties of undefined",
+      "bind: address already in use",
+      "OPENCLAW_STATE_LEASE_LOST",
+      "Gateway listening on ws://127.0.0.1:18789",
+      "",
+      null,
+      undefined,
+    ]) {
+      expect(classifyOwnershipConflict(text), String(text)).toBeNull();
+      expect(kGatewayOwnershipConflictPattern.test(String(text ?? "")), String(text)).toBe(false);
+    }
+  });
+});
+
+describe("readProcStartTicks / readProcParentPid (/proc/<pid>/stat field 22 and 4)", () => {
+  // Real shape (this sandbox): `91393 (bash) S 872 91393 91393 0 -1 4194304 …`
+  // — 17 more fields between ppid and starttime, so starttime is index 19
+  // after the last ")".
+  const statLine = (pid, comm, ppid, startTicks) =>
+    `${pid} (${comm}) S ${ppid} ${pid} ${pid} 0 -1 4194304 623 1997 0 0 0 0 0 0 20 0 1 0 ${startTicks} 4558848 825 18446744073709551615 94524456087552 0\n`;
+  const fakeFs = (table) => ({
+    readFileSync: (target) => {
+      const match = /^\/proc\/(\d+)\/stat$/.exec(String(target));
+      const entry = match ? table[match[1]] : undefined;
+      if (entry === undefined) throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+      return entry;
+    },
+  });
+
+  it("parses start ticks and the parent pid, including a comm with spaces and parentheses", () => {
+    const fsModule = fakeFs({
+      57: statLine(57, "openclaw", 1, 8239873),
+      58: statLine(58, "node (gateway) run", 57, 8239901),
+      59: "garbage without a paren",
+    });
+    expect(readProcStartTicks(57, { fsModule })).toBe(8239873);
+    expect(readProcParentPid(57, { fsModule })).toBe(1);
+    // The comm is split AFTER the last ")": inner parens and spaces do not
+    // shift the field indexes.
+    expect(readProcStartTicks(58, { fsModule })).toBe(8239901);
+    expect(readProcParentPid(58, { fsModule })).toBe(57);
+    expect(parseProcStat(statLine(58, "node (gateway) run", 57, 8239901))).toEqual({
+      parentPid: 57,
+      startTicks: 8239901,
+    });
+    expect(readProcStartTicks(59, { fsModule })).toBeNull();
+    expect(parseProcStat("")).toBeNull();
+  });
+
+  it("returns null (never throws) for an exited pid, junk pids, or a non-Linux fs", () => {
+    const fsModule = fakeFs({});
+    expect(readProcStartTicks(12345, { fsModule })).toBeNull();
+    expect(readProcParentPid(12345, { fsModule })).toBeNull();
+    for (const pid of [0, -1, 1.5, "57", null, undefined]) {
+      expect(readProcStartTicks(pid, { fsModule }), String(pid)).toBeNull();
+    }
+    expect(
+      readProcStartTicks(1, {
+        fsModule: {
+          readFileSync: () => {
+            throw new Error("EPERM");
+          },
+        },
+      }),
+    ).toBeNull();
+  });
+
+  it("reads the live /proc for this very process (start ticks and the real parent)", () => {
+    if (process.platform !== "linux") return;
+    expect(readProcStartTicks(process.pid)).toEqual(expect.any(Number));
+    expect(readProcParentPid(process.pid)).toBe(process.ppid);
   });
 });
