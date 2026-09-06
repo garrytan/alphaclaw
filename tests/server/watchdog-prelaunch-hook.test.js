@@ -615,7 +615,13 @@ describe("crash/repair relaunch ledger rows name a hook-aborted launch (noChildD
       hookOutcome: refusedOutcome({ site: "managed launch" }),
     });
     const result = await aborted.watchdog.triggerRepair();
-    expect(result).toMatchObject({ ok: true, launchedGateway: false });
+    // v0.9.75: a relaunch the hook aborted is a FAILED repair (nothing
+    // replaced the gateway), never "ok, awaiting health check".
+    expect(result).toMatchObject({
+      ok: false,
+      reason: "launch_aborted",
+      launchedGateway: false,
+    });
     expect(aborted.relaunchFailures("repair")).toHaveLength(1);
     expect(aborted.relaunchFailures("repair")[0].details).toEqual({
       reason: "launchGatewayProcess returned no child",

@@ -44,6 +44,9 @@ const createHarness = ({
   restartGatewayForMitigation = null,
   isMitigationRestartBlocked = null,
   mitigationStatePath,
+  // v0.9.75 identity seams (pid-reuse guard for the serving root).
+  readProcStartTicks = null,
+  discoverServingIdentity = null,
 } = {}) => {
   process.env.WATCHDOG_AUTO_REPAIR = "false";
   process.env.WATCHDOG_NOTIFICATIONS_DISABLED = "false";
@@ -68,6 +71,8 @@ const createHarness = ({
     memoryMonitorConfig: kMonitorConfig,
     restartGatewayForMitigation,
     isMitigationRestartBlocked,
+    ...(readProcStartTicks ? { readProcStartTicks } : {}),
+    ...(discoverServingIdentity ? { discoverServingIdentity } : {}),
     memoryMitigationStatePath:
       mitigationStatePath ||
       path.join(
@@ -811,6 +816,43 @@ describe("server/watchdog memory monitor", () => {
       ).toHaveLength(1);
     });
 
+    it("the mitigation cold restart carries the lifecycle-lock lease fence (shouldAbort), and a caller abort — the lease lost mid-restart — is a FAILED mitigation with reason lease_expired, never ok (no budget stamp consumed)", async () => {
+      const restart = vi.fn(async ({ shouldAbort } = {}) => {
+        // The fence rides through the same option the repair path passes; a
+        // live hold reads valid (the harness has no lock, so nothing expired).
+        expect(typeof shouldAbort).toBe("function");
+        expect(shouldAbort()).toBe(false);
+        throw Object.assign(new Error("Gateway --force aborted: aborted_by_caller"), {
+          aborted: true,
+          reason: "aborted_by_caller",
+        });
+      });
+      const statePath = path.join(
+        fs.mkdtempSync(path.join(os.tmpdir(), "memory-mitigation-")),
+        "memory-mitigation-state.json",
+      );
+      const harness = createHarness({
+        settings: { enabled: true, autoRestart: true, effectiveAutoRestart: true },
+        restartGatewayForMitigation: restart,
+        mitigationStatePath: statePath,
+      });
+      launchGateway(harness);
+      await criticalScenario(harness);
+      expect(restart).toHaveBeenCalledTimes(1);
+      const failed = harness.insertWatchdogEvent.mock.calls
+        .map(([row]) => row)
+        .filter((row) => row.details?.kind === "mitigation_restart_failed");
+      expect(failed).toHaveLength(1);
+      expect(failed[0].details.reason).toBe("lease_expired");
+      expect(JSON.parse(fs.readFileSync(statePath, "utf8")).restarts).toHaveLength(0);
+      const notice = harness.notifier.notify.mock.calls.find(([text]) =>
+        String(text).includes("Pre-OOM gateway restart failed"),
+      );
+      expect(notice).toBeTruthy();
+      expect(String(notice[0])).toContain("lease_expired");
+      expect(String(notice[0])).toContain("lost its lifecycle-lock lease");
+    });
+
     it("an INCUMBENT verdict thrown by the restart (gateway.js GatewayIncumbentRestartError) is a FAILED mitigation: failed gateway_restart event naming the reason, budget stamp refunded, anti-thrash cooldown, loud notification", async () => {
       // Pre-fix, gateway.js RETURNED { ok:false, incumbent:true } and this
       // path recorded gateway_restart:ok, kept the brake stamp, and left the
@@ -1182,6 +1224,86 @@ describe("server/watchdog memory monitor", () => {
     launchGateway(direct, 4243);
     direct.watchdog.onGatewayExit({ code: 1, signal: null, expectedExit: true, pid: 4243 });
     expect(direct.watchdog.getStatus().lifecycle).toBe("crashed");
+  });
+
+  it("an ADOPTED incumbent (boot around a gateway AlphaClaw did not spawn) is sampled at its tree root — memory-leak detection is no longer inert for it (acceptance a)", async () => {
+    const readProcStartTicks = vi.fn(() => 123456);
+    const harness = createHarness({ readProcStartTicks });
+    harness.watchdog.onGatewayLaunch({
+      startedAt: Date.now(),
+      pid: null,
+      servingPid: 701,
+      rootPid: 700,
+      startTicks: 123456,
+      generation: null,
+      supervision: "adopted",
+    });
+    expect(harness.watchdog.getStatus()).toMatchObject({
+      gatewayPid: null,
+      servingPid: 701,
+      servingRootPid: 700,
+      supervisionMode: "adopted",
+    });
+    await driveTicks(harness, {
+      ticks: 2,
+      sampleAt: () => ({ rssBytes: 100 * kMb }),
+    });
+    // The subtree root (launcher/supervisor), not the worker: the sampler
+    // walks the tree from the root exactly as it does for a managed child.
+    expect(harness.readMemorySample).toHaveBeenCalledTimes(2);
+    expect(harness.readMemorySample).toHaveBeenCalledWith(700);
+    expect(harness.watchdog.getMemoryTrend().state).not.toBe("no_gateway");
+    // The identity check re-read the root's start ticks before each sample.
+    expect(readProcStartTicks).toHaveBeenCalledWith(700);
+  });
+
+  it("a serving root whose /proc start ticks changed is a REUSED pid: no_gateway, identity cleared, one serving_identity_lost row, the stranger never sampled (13A)", async () => {
+    let ticks = 5;
+    const readProcStartTicks = vi.fn(() => ticks);
+    const harness = createHarness({ readProcStartTicks });
+    harness.watchdog.onGatewayLaunch({
+      startedAt: Date.now(),
+      pid: null,
+      servingPid: 701,
+      rootPid: 700,
+      startTicks: 5,
+      generation: null,
+      supervision: "adopted",
+    });
+    await driveTicks(harness, { ticks: 1, sampleAt: () => ({ rssBytes: 100 * kMb }) });
+    expect(harness.readMemorySample).toHaveBeenCalledTimes(1);
+
+    // pid 700 exited and the kernel handed the number to another process.
+    ticks = 6;
+    await driveTicks(harness, {
+      startTick: 1,
+      ticks: 2,
+      sampleAt: () => ({ rssBytes: 900 * kMb }),
+    });
+    // Never sampled the reused pid: the stranger's RSS must not enter the trend.
+    expect(harness.readMemorySample).toHaveBeenCalledTimes(1);
+    expect(harness.watchdog.getMemoryTrend().state).toBe("no_gateway");
+    expect(harness.watchdog.getStatus()).toMatchObject({
+      servingPid: null,
+      servingRootPid: null,
+      supervisionMode: "detached",
+      memory: expect.objectContaining({ trendState: "no_gateway" }),
+    });
+    const lostRows = harness.insertWatchdogEvent.mock.calls
+      .map(([row]) => row)
+      .filter((row) => row.eventType === "serving_identity_lost");
+    expect(lostRows).toHaveLength(1);
+    expect(lostRows[0]).toMatchObject({
+      source: "memory-monitor",
+      status: "failed",
+      details: { pid: 700, expectedStartTicks: 5, observedStartTicks: 6 },
+    });
+    // The MANAGED path is untouched by the guard when the ticks still match.
+    const managed = createHarness({ readProcStartTicks: () => 9 });
+    managed.watchdog.onGatewayLaunch({ pid: 4242, rootPid: 4242, startTicks: 9, startedAt: Date.now() });
+    await driveTicks(managed, { ticks: 2, sampleAt: () => ({ rssBytes: 100 * kMb }) });
+    expect(managed.readMemorySample).toHaveBeenCalledTimes(2);
+    expect(managed.watchdog.getStatus().supervisionMode).toBe("managed");
   });
 
   it("start() runs an immediate first tick — no 60s no_gateway blind window", async () => {

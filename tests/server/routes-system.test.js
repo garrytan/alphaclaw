@@ -3081,7 +3081,7 @@ describe("server/routes/system", () => {
     walk(path.join(libDir, "server"));
     kinds.delete("boot"); // expressed through bootPhase, never the badge
     // The enumeration itself is pinned: these kinds must all be discovered.
-    for (const expected of ["restart", "repair", "crash_restart", "medic", "memory_mitigation", "autotune_resize", "env_sync", "backup_quiesce", "autotune_settings", "autotune_reapply", "reconcile_retry"]) {
+    for (const expected of ["restart", "repair", "crash_restart", "medic", "memory_mitigation", "autotune_resize", "env_sync", "backup_quiesce", "autotune_settings", "autotune_reapply", "reconcile_retry", "config_retry"]) {
       expect(kinds.has(expected), expected).toBe(true);
     }
     for (const kind of kinds) {

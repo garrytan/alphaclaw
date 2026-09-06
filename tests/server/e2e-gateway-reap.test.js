@@ -12,6 +12,9 @@
 //   3. runGatewayRestartCmd abort wiring: a SIGTERM-trapping restart
 //      supervisor spawn must be reaped by the 3s SIGKILL escalation timer
 //      after shutdown aborts the lifecycle signal.
+//   4. resolveServingIdentity against the REAL /proc: a launcher→worker tree
+//      resolves to its root, worker and start ticks, and the ticks change
+//      when the child is replaced (the watchdog's pid-reuse guard).
 //
 // gatewayEnv() spreads process.env at spawn/exec time, so prepending a tmp
 // bin dir holding an executable `openclaw` script to process.env.PATH makes
@@ -26,6 +29,10 @@ const kTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "alphaclaw-gw-reap-"));
 process.env.ALPHACLAW_ROOT_DIR = kTmpRoot;
 
 const { OPENCLAW_DIR } = require("../../lib/server/constants");
+const {
+  readProcStartTicks,
+  readProcParentPid,
+} = require("../../lib/server/openclaw-lock-contention");
 
 if (!OPENCLAW_DIR.startsWith(kTmpRoot)) {
   // constants.js was already loaded with a different root — the tests below
@@ -297,5 +304,92 @@ describe("gateway reap e2e (real child processes via PATH-shimmed openclaw)", ()
       intervalMs: 100,
       label: "supervisor reaped by SIGKILL escalation",
     });
+  });
+
+  it("resolveServingIdentity sees the real launcher→worker tree with start ticks, and the ticks change when the child is replaced", async () => {
+    if (process.platform !== "linux") return;
+    // The fake `gateway run` mirrors the real launcher shape: the shim (sh,
+    // argv "…/bin/openclaw gateway run" — a serving-pattern root) stays alive
+    // as the process-tree root and forwards TERM to its worker, a second
+    // shell script also NAMED `openclaw` (argv "…/worker/openclaw gateway
+    // run"), so the worker satisfies both the serving-pattern scan and
+    // resolveFirstChildPid's kernel-comm filter (`Name: openclaw` — a shebang
+    // script's comm is its basename; a node worker would read `MainThread`).
+    const workerDir = path.join(caseDir, "worker");
+    fs.mkdirSync(workerDir, { recursive: true });
+    const workerScript = path.join(workerDir, "openclaw");
+    const pidFile = path.join(caseDir, "worker.pid");
+    fs.writeFileSync(
+      workerScript,
+      [
+        "#!/bin/sh",
+        `echo $$ > ${JSON.stringify(pidFile)}`,
+        "sleep 60 &",
+        "trap 'kill $! 2>/dev/null; exit 0' TERM INT",
+        "wait",
+        "",
+      ].join("\n"),
+      { mode: 0o755 },
+    );
+    installOpenclawShim(
+      [
+        "#!/bin/sh",
+        'if [ "$1" = "gateway" ] && [ "$2" = "run" ]; then',
+        `  ${JSON.stringify(workerScript)} gateway run &`,
+        "  worker=$!",
+        "  trap 'kill $worker 2>/dev/null' TERM INT",
+        "  wait $worker",
+        "  exit 0",
+        "fi",
+        "exit 0",
+        "",
+      ].join("\n"),
+    );
+    const launchAndResolve = async () => {
+      fs.rmSync(pidFile, { force: true });
+      const child = await gateway.launchGatewayProcess();
+      expect(child).toBeTruthy();
+      trackPid(child.pid);
+      await pollUntil(() => readPid(pidFile) !== null, { label: "worker pidfile" });
+      const workerPid = trackPid(readPid(pidFile));
+      return { child, workerPid, identity: gateway.resolveServingIdentity() };
+    };
+
+    gateway = loadGateway();
+    const first = await launchAndResolve();
+
+    expect(first.identity).toEqual({
+      rootPid: first.child.pid,
+      workerPid: first.workerPid,
+      startTicks: expect.any(Number),
+      pids: expect.arrayContaining([first.child.pid, first.workerPid]),
+    });
+    expect(first.identity.pids).toHaveLength(2);
+    // The root's ticks come from the real /proc/<pid>/stat; the worker's
+    // parent really is the launcher.
+    expect(readProcStartTicks(first.child.pid)).toBe(first.identity.startTicks);
+    expect(readProcParentPid(first.workerPid)).toBe(first.child.pid);
+    // A managed launch through the compat wrapper consumed generation 1.
+    expect(gateway.getLaunchGeneration()).toBe(1);
+
+    // Replace: SIGTERM the launcher (its trap takes the worker down), then
+    // launch again. ≥ one 100 Hz clock tick apart so the successor's start
+    // ticks are strictly greater — a reused pid number could never pass as
+    // the same process.
+    expect(await gateway.stopGatewayChildAndWait({ graceMs: 2000 })).toBe(true);
+    await pollUntil(() => !isPidAlive(first.workerPid), {
+      label: "worker reaped through the launcher's TERM trap",
+    });
+    expect(readProcStartTicks(first.child.pid)).toBeNull();
+    await sleep(50);
+
+    const second = await launchAndResolve();
+    expect(second.child.pid).not.toBe(first.child.pid);
+    expect(second.identity).toMatchObject({
+      rootPid: second.child.pid,
+      workerPid: second.workerPid,
+    });
+    expect(second.identity.startTicks).toBeGreaterThan(first.identity.startTicks);
+    expect(gateway.getLaunchGeneration()).toBe(2);
   });
 });

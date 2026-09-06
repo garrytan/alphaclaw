@@ -183,6 +183,42 @@ describe("lib/server.js composition pins (lane C / lane A hand-offs)", () => {
     }
   });
 
+  it("createWatchdog receives the v0.9.75 relaunch/identity seams (requestGatewayLaunch, discoverServingIdentity, readProcStartTicks, classifyOwnershipConflict, getLaunchGeneration) and a cold-restart dep that forwards its options (the lease fence)", () => {
+    const start = serverSource.indexOf("const watchdog = createWatchdog({");
+    expect(start).toBeGreaterThan(-1);
+    const block = serverSource.slice(start, serverSource.indexOf("\n});", start));
+    for (const line of [
+      "requestGatewayLaunch,",
+      "discoverServingIdentity: resolveServingIdentity,",
+      "readProcStartTicks: lockContention.readProcStartTicks,",
+      "classifyOwnershipConflict: lockContention.classifyOwnershipConflict,",
+      "pidAlive: lockContention.pidAlive,",
+      "getLaunchGeneration,",
+      // `(options) => restartGateway(options)`: the watchdog's { shouldAbort }
+      // must reach runGatewayColdStart, so a bare `() => restartGateway()`
+      // wrapper (the pre-0.9.75 shape) is a wiring regression.
+      "restartGatewayColdStart: (options) => restartGateway(options),",
+    ]) {
+      expect(block).toContain(line);
+    }
+    expect(block).not.toContain("restartGatewayForMitigation");
+    // The seams are pulled from the modules that own them.
+    expect(serverSource).toMatch(
+      /const \{[^}]*requestGatewayLaunch,[^}]*resolveServingIdentity,[^}]*getLaunchGeneration,[^}]*\} = require\("\.\/server\/gateway"\)/s,
+    );
+    expect(serverSource).toContain(
+      'const lockContention = require("./server/openclaw-lock-contention");',
+    );
+    delete require.cache[gatewayModulePath];
+    const gateway = require(gatewayModulePath);
+    for (const name of ["requestGatewayLaunch", "resolveServingIdentity", "getLaunchGeneration"]) {
+      expect(typeof gateway[name]).toBe("function");
+    }
+    for (const name of ["readProcStartTicks", "classifyOwnershipConflict", "pidAlive"]) {
+      expect(typeof lockContention[name]).toBe("function");
+    }
+  });
+
   it("register-server-routes passes the outbox-backed notify into registerSystemRoutes (the incumbent-restart notification's carrier)", () => {
     const source = readSource("lib", "server", "init", "register-server-routes.js");
     const start = source.indexOf("registerSystemRoutes({");
@@ -380,6 +416,103 @@ describe("gateway seam contracts + behaviour through the installed handler", () 
       );
     } finally {
       gateway.setGatewayPrelaunchHookHandler(null);
+    }
+  });
+
+  it("a REAL crash relaunch flows watchdog → gateway.requestGatewayLaunch → spawn → `restart requested {generation}`, and the child's 'listening on' sniff through the installed launch handler is what lets a green + ready probe book `ok {verified: true}`", async () => {
+    const child = createChild();
+    childProcess.spawn = vi.fn(() => child);
+    childProcess.execFile = vi.fn((file, args, opts, cb) => cb(null, "", ""));
+    fs.existsSync = vi.fn(() => false);
+    // Nothing answers the port before the spawn (reconcile point) — the
+    // relaunch must spawn, not adopt.
+    net.createConnection = vi.fn(() => createSocket(false));
+    delete process.env.ALPHACLAW_GATEWAY_PRELAUNCH_HOOK;
+    delete require.cache[gatewayModulePath];
+    const gateway = require(gatewayModulePath);
+    const originalFetch = global.fetch;
+    global.fetch = vi.fn(async (url) => ({
+      ok: true,
+      status: 200,
+      text: async () =>
+        String(url).includes("readyz")
+          ? JSON.stringify({ ready: true, failing: [], eventLoop: { degraded: false } })
+          : JSON.stringify({ ok: true, status: "live" }),
+    }));
+    const insertWatchdogEvent = vi.fn();
+    // Exactly the seams lib/server.js wires (pinned above), on a real watchdog.
+    const watchdog = createWatchdog({
+      clawCmd: vi.fn(async () => ({ ok: true })),
+      launchGatewayProcess: gateway.launchGatewayProcess,
+      requestGatewayLaunch: gateway.requestGatewayLaunch,
+      discoverServingIdentity: gateway.resolveServingIdentity,
+      getLaunchGeneration: gateway.getLaunchGeneration,
+      readProcStartTicks: lockContention.readProcStartTicks,
+      classifyOwnershipConflict: lockContention.classifyOwnershipConflict,
+      insertWatchdogEvent,
+      notifier: { notify: vi.fn(async () => ({ ok: true })) },
+      readEnvFile: vi.fn(() => ""),
+      writeEnvFile: vi.fn(),
+      reloadEnv: vi.fn(),
+      resolveSetupUrl: () => "http://localhost",
+      resolveGatewayHealthUrl: () => "http://gateway/health",
+      resolveGatewayReadyzUrl: () => "http://gateway/readyz",
+      sleepImpl: () => Promise.resolve(),
+      supervisorModeActive: () => false,
+    });
+    gateway.setGatewayLaunchHandler((payload) => watchdog.onGatewayLaunch(payload));
+    const rows = () => insertWatchdogEvent.mock.calls.map(([row]) => row);
+    const restartRows = (status) =>
+      rows().filter((row) => row.eventType === "restart" && row.status === status);
+    try {
+      process.env.WATCHDOG_AUTO_REPAIR = "false";
+      watchdog.onGatewayLaunch({ startedAt: Date.now() - 60_000, pid: 100, rootPid: 100, generation: 0 });
+      await new Promise((resolve) => setImmediate(resolve));
+      watchdog.onGatewayExit({ code: 1, expectedExit: false, pid: 100, generation: 0 });
+      for (let i = 0; i < 6; i += 1) await new Promise((resolve) => setImmediate(resolve));
+
+      expect(childProcess.spawn).toHaveBeenCalledWith(
+        "openclaw",
+        ["gateway", "run"],
+        expect.objectContaining({ env: expect.any(Object) }),
+      );
+      expect(gateway.getLaunchGeneration()).toBe(1);
+      expect(restartRows("requested")).toHaveLength(1);
+      expect(restartRows("requested")[0]).toMatchObject({
+        source: "exit_event",
+        details: { pid: 1234, generation: 1, intent: "relaunch_if_absent" },
+      });
+      // The relaunch's operation-end probe was green, but the child has not
+      // reported in and no /proc scan can vouch for pid 1234 here: liveness
+      // only, no ok row.
+      expect(restartRows("ok")).toHaveLength(0);
+      expect(watchdog.getStatus().replacementPending).toMatchObject({
+        pid: 1234,
+        source: "exit_event",
+      });
+
+      // The child's "listening on" line → gateway launch handler → watchdog
+      // identity (generation 1 > watermark 0 = observed).
+      const onStdout = child.stdout.on.mock.calls.find((call) => call[0] === "data")[1];
+      onStdout(Buffer.from("Gateway listening on ws://127.0.0.1:18789\n"));
+      for (let i = 0; i < 6; i += 1) await new Promise((resolve) => setImmediate(resolve));
+      expect(watchdog.getStatus()).toMatchObject({
+        gatewayPid: 1234,
+        servingRootPid: 1234,
+        supervisionMode: "managed",
+        replacementPending: null,
+      });
+      expect(restartRows("ok")).toHaveLength(1);
+      expect(restartRows("ok")[0]).toMatchObject({
+        source: "exit_event",
+        details: expect.objectContaining({ pid: 1234, generation: 1, verified: true }),
+      });
+    } finally {
+      delete process.env.WATCHDOG_AUTO_REPAIR;
+      gateway.setGatewayLaunchHandler(null);
+      watchdog.stop();
+      if (originalFetch == null) delete global.fetch;
+      else global.fetch = originalFetch;
     }
   });
 

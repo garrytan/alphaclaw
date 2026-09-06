@@ -172,14 +172,126 @@ describe("server/routes/watchdog", () => {
 
     expect(res.status).toBe(200);
     expect(deps.watchdog.triggerRepair).toHaveBeenCalledTimes(1);
+    // v0.9.75 repair contract: verdict/pending/replacementPending ride beside
+    // the raw result (a skip has no verdict and nothing pending); an ok:false
+    // body always carries `error` (machine code) + `message` (operator copy)
+    // so api.js's toast never renders a JSON blob.
     expect(res.body).toEqual({
       ok: false,
+      verdict: null,
+      pending: false,
+      replacementPending: null,
+      error: "operation_in_progress",
+      message: "Repair skipped (operation_in_progress).",
       result: {
         ok: false,
         skipped: true,
         reason: "operation_in_progress",
       },
     });
+  });
+
+  it("surfaces the relaunch verdict, the pending flag and the watchdog's replacementPending on POST /api/watchdog/repair", async () => {
+    const deps = createDeps();
+    const replacementPending = {
+      pid: 4242,
+      source: "repair",
+      intent: "replace",
+      since: "2026-09-05T10:00:00.000Z",
+      deadline: "2026-09-05T10:05:00.000Z",
+    };
+    deps.watchdog.getStatus.mockReturnValue({
+      lifecycle: "running",
+      health: "unknown",
+      replacementPending,
+    });
+    deps.watchdog.triggerRepair.mockResolvedValue({
+      ok: true,
+      verifiedHealthy: false,
+      launchedGateway: true,
+      pending: true,
+      verdict: "replacement_pending",
+      result: { ok: true },
+    });
+    const app = createApp(deps);
+
+    const res = await request(app).post("/api/watchdog/repair");
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      ok: true,
+      verdict: "replacement_pending",
+      pending: true,
+      replacementPending,
+      result: { ok: true, verdict: "replacement_pending", pending: true },
+    });
+
+    // A failed relaunch is an honest failure: ok false, verdict named,
+    // nothing pending.
+    deps.watchdog.getStatus.mockReturnValue({ lifecycle: "running", health: "unhealthy", replacementPending: null });
+    deps.watchdog.triggerRepair.mockResolvedValue({
+      ok: false,
+      reason: "launch_failed",
+      verdict: "launch_failed",
+      launchedGateway: false,
+      pending: false,
+      result: { ok: true },
+    });
+    const failed = await request(createApp(deps)).post("/api/watchdog/repair");
+    expect(failed.status).toBe(200);
+    expect(failed.body).toMatchObject({
+      ok: false,
+      verdict: "launch_failed",
+      pending: false,
+      replacementPending: null,
+      // Honest failure copy for the toast (the 200 status says "doctor ran").
+      error: "launch_failed",
+      message: "Doctor finished, but the gateway relaunch failed. Check the watchdog events.",
+    });
+    expect(failed.body.message).not.toContain("launch_failed");
+  });
+
+  it("a Doctor failure (ok:false, no skip, no verdict) is named doctor_failed, not a relaunch failure (POST /api/watchdog/repair)", async () => {
+    const deps = createDeps();
+    deps.watchdog.getStatus.mockReturnValue({ lifecycle: "running", replacementPending: null });
+    deps.watchdog.triggerRepair.mockResolvedValue({ ok: false, result: { ok: false, stderr: "doctor: cannot fix" } });
+    const res = await request(createApp(deps)).post("/api/watchdog/repair");
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ ok: false, verdict: null, pending: false, error: "doctor_failed" });
+    expect(res.body.message).toMatch(/doctor --fix did not fix/);
+    expect(res.body.message).not.toMatch(/relaunch failed/);
+  });
+
+  it("a pending repair response carries operator copy and a healthy-incumbent verdict carries none (POST /api/watchdog/repair)", async () => {
+    const deps = createDeps();
+    deps.watchdog.getStatus.mockReturnValue({ lifecycle: "running", replacementPending: null });
+    deps.watchdog.triggerRepair.mockResolvedValue({
+      ok: true,
+      verifiedHealthy: false,
+      launchedGateway: true,
+      pending: true,
+      verdict: "replacement_pending",
+      result: { ok: true },
+    });
+    const pending = await request(createApp(deps)).post("/api/watchdog/repair");
+    expect(pending.status).toBe(200);
+    expect(pending.body).toMatchObject({ ok: true, pending: true, verdict: "replacement_pending" });
+    expect(pending.body.message).toMatch(/not yet confirmed/);
+    expect(pending.body.error).toBeUndefined();
+
+    // Doctor ran and the gateway answered healthy: retained, no restart.
+    deps.watchdog.triggerRepair.mockResolvedValue({
+      ok: true,
+      verifiedHealthy: true,
+      launchedGateway: false,
+      pending: false,
+      verdict: "child_retained",
+      result: { ok: true },
+    });
+    const retained = await request(createApp(deps)).post("/api/watchdog/repair");
+    expect(retained.body).toMatchObject({ ok: true, pending: false, verdict: "child_retained" });
+    expect(retained.body.message).toBeUndefined();
+    expect(retained.body.error).toBeUndefined();
   });
 
   it("resumes suppressed channels on POST /api/watchdog/resume-channels", async () => {
@@ -465,6 +577,23 @@ describe("server/routes/watchdog", () => {
     const errRes = await request(app).get("/api/watchdog/settings");
     expect(errRes.status).toBe(500);
     expect(errRes.body).toEqual({ ok: false, error: "settings unavailable" });
+  });
+
+  it("samples the SERVING pid for an adopted incumbent and falls back to gatewayPid (GET /api/watchdog/resources)", async () => {
+    const deps = createDeps();
+    deps.watchdog.getStatus.mockReturnValue({
+      lifecycle: "running",
+      gatewayPid: null,
+      servingPid: process.pid,
+      supervisionMode: "adopted",
+    });
+    const adopted = await request(createApp(deps)).get("/api/watchdog/resources");
+    expect(adopted.status).toBe(200);
+    expect(adopted.body.resources.processes.gateway.pid).toBe(process.pid);
+
+    deps.watchdog.getStatus.mockReturnValue({ lifecycle: "running", gatewayPid: process.pid, servingPid: null });
+    const managed = await request(createApp(deps)).get("/api/watchdog/resources");
+    expect(managed.body.resources.processes.gateway.pid).toBe(process.pid);
   });
 
   it("returns live system resources on GET /api/watchdog/resources", async () => {

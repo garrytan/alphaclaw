@@ -29,7 +29,12 @@ const request = require("supertest");
 const {
   kDefaultGatewayPort,
   GATEWAY_HOST,
+  kGatewayRestartReadyTimeoutMs,
+  kOnboardingMarkerPath,
 } = require("../../lib/server/constants");
+// The REAL watchdog for the repair drills below (wired like lib/server.js
+// against the drill's fresh gateway instance and its real lifecycle lock).
+const { createWatchdog } = require("../../lib/server/watchdog");
 // routes/system.js binds gateway.js's GatewayIncumbentRestartError at ITS
 // load time (the class the restart route catches by instanceof). Each drill
 // fresh-requires gateway.js, so the routes module is fresh-required against
@@ -52,6 +57,11 @@ const {
 // persistence. Only the process/exec/TCP boundary is faked: a controllable
 // fake gateway supplies spawn/execFile behavior and the gateway-port TCP
 // probe (following the gateway.test.js execFile/socket idioms).
+//
+// The repair drills (v0.9.75) add the REAL watchdog on top: its `replace`
+// relaunch runs the same cold-restart pipeline under the real lifecycle lock,
+// with only /health + /readyz (global.fetch) faked alongside the process
+// boundary.
 
 const kGatewayModulePath = require.resolve("../../lib/server/gateway");
 // Namespace-required by gateway.js: the incumbent verdict's live-pid scan is
@@ -70,8 +80,19 @@ const kStopRefusal =
 const originalSpawn = childProcess.spawn;
 const originalExecFile = childProcess.execFile;
 const originalCreateConnection = net.createConnection;
+const kOriginalFetch = global.fetch;
+const kOriginalAutoRepair = process.env.WATCHDOG_AUTO_REPAIR;
 
 const kSilentLogger = { log() {}, warn() {}, error() {} };
+
+// The fake `gateway --force` supervisor's pid (every spawn), and the pid of a
+// gateway AlphaClaw did not start (the incumbent the repair drills replace).
+const kFakeSupervisorPid = 4242;
+const kIncumbentPid = 31337;
+const kIncumbentCmdline =
+  "node /app/node_modules/openclaw/dist/entry.js gateway run";
+const kSupervisorCmdline =
+  "node /app/node_modules/openclaw/dist/entry.js gateway --force";
 
 const kTempDirs = [];
 const mkStateDir = () => {
@@ -119,6 +140,15 @@ const createFakeGateway = ({
   stopRefused = false,
   // Live openclaw processes the incumbent verdict sees (pre AND post stop).
   livePids = [],
+  // The /proc view once `gateway --force` (or `gateway run`) was spawned: a
+  // successfully stopped incumbent is gone and the new supervisor tree is
+  // visible. null = unchanged (the stop-refused incumbent keeps its pid).
+  livePidsAfterLaunch = null,
+  // Issue #56 launcher shape: the `--force` supervisor stays alive as the
+  // gateway's process-tree root, so the cold restart adopts it as the managed
+  // child and the launch notification carries its pid + generation. Default
+  // off = the older daemonizing CLI (supervisor gone before the port answers).
+  supervisorLingers = false,
 } = {}) => {
   const fake = {
     portOpen,
@@ -172,10 +202,13 @@ const createFakeGateway = ({
 
   childProcess.spawn = vi.fn((file, args) => {
     const child = new EventEmitter();
-    child.pid = 4242;
+    child.pid = kFakeSupervisorPid;
     child.stdout = new EventEmitter();
     child.stderr = new EventEmitter();
     child.exitCode = null;
+    // The adoption check reads `signalCode === null`; a child without the
+    // field reads as an already-exited supervisor (the pre-#56 shape).
+    if (supervisorLingers) child.signalCode = null;
     child.killed = false;
     child.kill = vi.fn();
     fake.spawnCalls.push({ file, args });
@@ -186,6 +219,9 @@ const createFakeGateway = ({
       queueMicrotask(() => {
         fake.portOpen = true;
       });
+    }
+    if (args?.[0] === "gateway" && livePidsAfterLaunch) {
+      fake.livePids = livePidsAfterLaunch;
     }
     if (fake.stderrLines.length) {
       // The restart supervisor attaches its stderr handler synchronously right
@@ -397,6 +433,139 @@ const stepTuple = (event) => [
   event.data?.status ?? null,
 ];
 
+// ── Watchdog repair drills: helpers ─────────────────────────────────────────
+
+// /health + /readyz seam for the REAL watchdog (global.fetch): /readyz always
+// reads ready; /health answers `{ ok, status: "live" }` while `isHealthy()`
+// holds and otherwise fails the way a wedged gateway does (TCP accepts, the
+// HTTP answer never comes — the probe's own timeout).
+const createGatewayHealthFetch =
+  ({ isHealthy }) =>
+  async (url) => {
+    const json = (body) => ({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify(body),
+    });
+    if (String(url).includes("/readyz")) {
+      return json({ ready: true, failing: [], eventLoop: { degraded: false } });
+    }
+    if (!isHealthy()) throw new Error("gateway health timed out after 5000ms");
+    return json({ ok: true, status: "live" });
+  };
+
+// The REAL watchdog wired exactly like lib/server.js against the drill's
+// gateway instance and the harness's real lifecycle lock: the outcome-shaped
+// relaunch primitive, the serving-identity scan, the launch-generation
+// counter, and the cold restart (`(options) => restartGateway(options)`,
+// observed here for the lock kind it runs under). Auto-repair on.
+const createDrillWatchdog = ({ fake, harness, isHealthy }) => {
+  process.env.WATCHDOG_AUTO_REPAIR = "true";
+  global.fetch = vi.fn(createGatewayHealthFetch({ isHealthy }));
+  const insertWatchdogEvent = vi.fn();
+  const notifier = { notify: vi.fn(async () => ({ ok: true })) };
+  const clawCmd = vi.fn(async (command) =>
+    command === "doctor --fix --yes"
+      ? { ok: true, stdout: "fixed" }
+      : { ok: true, stdout: JSON.stringify({ ok: true }) },
+  );
+  const coldRestartHolds = [];
+  const watchdog = createWatchdog({
+    clawCmd,
+    launchGatewayProcess: fake.gateway.launchGatewayProcess,
+    probeGatewayTcp: fake.gateway.probeGatewayTcp,
+    gatewayLifecycleLock: harness.gatewayLifecycleLock,
+    insertWatchdogEvent,
+    notifier,
+    readEnvFile: vi.fn(() => []),
+    writeEnvFile: vi.fn(),
+    reloadEnv: vi.fn(),
+    resolveSetupUrl: () => "https://setup.example.com",
+    resolveGatewayHealthUrl: () => `${fake.gateway.getGatewayUrl()}/health`,
+    resolveGatewayReadyzUrl: () => `${fake.gateway.getGatewayUrl()}/readyz`,
+    sleepImpl: () => Promise.resolve(),
+    supervisorModeActive: () => false,
+    restartGatewayColdStart: (options) => {
+      coldRestartHolds.push(
+        harness.gatewayLifecycleLock.getActiveOperation()?.kind ?? null,
+      );
+      return harness.deps.restartGateway(options);
+    },
+    requestGatewayLaunch: fake.gateway.requestGatewayLaunch,
+    discoverServingIdentity: fake.gateway.resolveServingIdentity,
+    getLaunchGeneration: fake.gateway.getLaunchGeneration,
+    getLastGatewayPrelaunchHookOutcome:
+      fake.gateway.getLastGatewayPrelaunchHookOutcome,
+    classifyOwnershipConflict: lockContention.classifyOwnershipConflict,
+    // The fake's pids are not OS processes: liveness follows the fake's /proc
+    // view and start ticks are unreadable. The production defaults
+    // (process.kill(pid, 0), /proc/<pid>/stat) would read the alive-but-wedged
+    // incumbent as DEAD and take the probe-death fast path instead of the
+    // sustained ladder → repair → replace path these drills exercise.
+    pidAlive: (pid) => fake.livePids.some((proc) => proc.pid === pid),
+    readProcStartTicks: () => null,
+  });
+  fake.gateway.setGatewayExitHandler((payload) => watchdog.onGatewayExit(payload));
+  fake.gateway.setGatewayLaunchHandler((payload) => watchdog.onGatewayLaunch(payload));
+  return { watchdog, insertWatchdogEvent, clawCmd, notifier, coldRestartHolds };
+};
+
+// Boot around an already-running gateway through the REAL path: with the
+// onboarding marker present, startGateway() finds the port answering, skips
+// the launch and notifies the discovered (adopted) identity — the fake's
+// /proc view, walked by the real resolveServingIdentity().
+const bootAroundIncumbent = async (fake) => {
+  fs.writeFileSync(kOnboardingMarkerPath, JSON.stringify({ drill: true }));
+  await fake.gateway.startGateway();
+};
+
+const ledgerRows = (insertWatchdogEvent) =>
+  insertWatchdogEvent.mock.calls.map(([row]) => row);
+const restartRows = (insertWatchdogEvent, { source = null, status = null } = {}) =>
+  ledgerRows(insertWatchdogEvent).filter(
+    (row) =>
+      row.eventType === "restart" &&
+      (source == null || row.source === source) &&
+      (status == null || row.status === status),
+  );
+const repairSkipReasons = (insertWatchdogEvent) =>
+  ledgerRows(insertWatchdogEvent)
+    .filter((row) => row.eventType === "repair" && row.status === "skipped")
+    .map((row) => row.details);
+const operationRows = (insertWatchdogEvent) =>
+  ledgerRows(insertWatchdogEvent).filter(
+    (row) => row.eventType === "operation" && row.source === "gateway_restart",
+  );
+const doctorFixCalls = (clawCmd) =>
+  clawCmd.mock.calls.filter(([command]) => command === "doctor --fix --yes").length;
+const noticesIncluding = (notifier, text) =>
+  notifier.notify.mock.calls
+    .map((call) => String(call?.[0] || ""))
+    .filter((message) => message.includes(text));
+
+// Under fake timers: flush microtasks and due timers a few turns.
+const settleFakeTimers = async (turns = 4) => {
+  for (let i = 0; i < turns; i += 1) await vi.advanceTimersByTimeAsync(0);
+};
+
+// Drives the wedged incumbent to the sustained-failure gate: the fake's
+// /health stops answering and the health timer fires twice — degraded, two
+// awaiting_sustained_failure skips, no Doctor, nothing stopped. The third
+// probe (the caller's) is the one that repairs.
+const wedgeIncumbentToTheGate = async ({ incumbent, watchdog, insertWatchdogEvent, clawCmd, fake }) => {
+  incumbent.healthy = false;
+  await watchdog.runHealthCheck({ source: "health_timer" });
+  await watchdog.runHealthCheck({ source: "health_timer" });
+  expect(watchdog.getStatus().health).toBe("degraded");
+  expect(repairSkipReasons(insertWatchdogEvent)).toEqual([
+    expect.objectContaining({ reason: "awaiting_sustained_failure", failures: 1, threshold: 3 }),
+    expect.objectContaining({ reason: "awaiting_sustained_failure", failures: 2, threshold: 3 }),
+  ]);
+  expect(doctorFixCalls(clawCmd)).toBe(0);
+  expect(fake.stopCalls).toEqual([]);
+  expect(fake.spawnCalls).toEqual([]);
+};
+
 describe("server/gateway restart drills (e2e)", () => {
   afterEach(() => {
     childProcess.spawn = originalSpawn;
@@ -405,6 +574,13 @@ describe("server/gateway restart drills (e2e)", () => {
     delete require.cache[kGatewayModulePath];
     delete require.cache[kSystemRoutesModulePath];
     vi.useRealTimers();
+    // Repair-drill seams: the /health fetch, the auto-repair env the watchdog
+    // reads at construction, and the onboarding marker the boot path checks.
+    if (kOriginalFetch == null) delete global.fetch;
+    else global.fetch = kOriginalFetch;
+    if (kOriginalAutoRepair == null) delete process.env.WATCHDOG_AUTO_REPAIR;
+    else process.env.WATCHDOG_AUTO_REPAIR = kOriginalAutoRepair;
+    fs.rmSync(kOnboardingMarkerPath, { force: true });
   });
 
   afterAll(() => {
@@ -1047,5 +1223,258 @@ describe("server/gateway restart drills (e2e)", () => {
     expect(status.body.lastOperation.errorSummary).toContain(
       "last gateway error:",
     );
+  });
+
+  // ── Watchdog repair `replace` through the real cold restart (v0.9.75) ─────
+  //
+  //   boot around incumbent (adopted) ─▶ /health wedges ─▶ probe ✗ ✗ ✗ (sustained gate)
+  //     ─▶ runRepair: doctor --fix ─▶ requestGatewayLaunch → incumbent_present
+  //     ─▶ replace: `gateway stop` → `gateway --force` → ready → #59 verdict
+  //          ├ new tree answers ─▶ requested {replace} … ok {verified: true}   (REPLACE DRILL)
+  //          └ incumbent survives ─▶ failed {incumbent_gateway_still_running}  (REPLACE-INCUMBENT)
+  //   lock lease expires mid ready-wait ─▶ aborted_by_caller, poll ends       (LEASE-FENCE DRILL)
+  describe("watchdog repair `replace` through the real cold restart", () => {
+    it("replaces a wedged incumbent after three failed probes: doctor once, `gateway stop` + `gateway --force` on the fake, restart/repair/requested {intent: replace} then ok {verified: true} once the new supervisor's tree answers (REPLACE DRILL)", async () => {
+      const fake = createFakeGateway({
+        portOpen: true,
+        supervisorLingers: true,
+        livePids: [{ pid: kIncumbentPid, cmdline: kIncumbentCmdline }],
+        livePidsAfterLaunch: [{ pid: kFakeSupervisorPid, cmdline: kSupervisorCmdline }],
+      });
+      const harness = createDrillHarness({ fake });
+      const incumbent = { healthy: true };
+      const { watchdog, insertWatchdogEvent, clawCmd, notifier, coldRestartHolds } =
+        createDrillWatchdog({
+          fake,
+          harness,
+          // The replacement answers as soon as its tree is what /proc shows;
+          // before that the port belongs to the incumbent.
+          isHealthy: () =>
+            fake.livePids.some((proc) => proc.pid === kFakeSupervisorPid) ||
+            incumbent.healthy,
+        });
+      try {
+        await bootAroundIncumbent(fake);
+        expect(fake.spawnCalls).toEqual([]);
+        // Liveness lands before the readiness await inside the same probe:
+        // wait for the whole bootstrap verdict, not just the green /health.
+        await waitUntil(() => watchdog.getStatus().readiness === "ready");
+        expect(watchdog.getStatus()).toMatchObject({
+          lifecycle: "running",
+          supervisionMode: "adopted",
+          servingPid: kIncumbentPid,
+          servingRootPid: kIncumbentPid,
+          gatewayPid: null,
+          readiness: "ready",
+        });
+
+        await wedgeIncumbentToTheGate({ incumbent, watchdog, insertWatchdogEvent, clawCmd, fake });
+
+        // Third consecutive failure: repair in-tick, intent replace.
+        await watchdog.runHealthCheck({ source: "health_timer" });
+        await waitUntil(
+          () => restartRows(insertWatchdogEvent, { source: "repair", status: "ok" }).length > 0,
+        );
+
+        expect(doctorFixCalls(clawCmd)).toBe(1);
+        // The pin's CLI has no --force on stop; the relaunch is the cold
+        // restart's `gateway --force` — never a `gateway run` alongside.
+        expect(fake.stopCalls).toEqual([["gateway", "stop"]]);
+        expect(fake.spawnCalls.map((call) => [call.file, ...call.args])).toEqual([
+          ["openclaw", "gateway", "--force"],
+        ]);
+        expect(coldRestartHolds).toEqual(["repair"]);
+
+        const repairRows = restartRows(insertWatchdogEvent, { source: "repair" });
+        expect(repairRows.map((row) => row.status)).toEqual(["requested", "ok"]);
+        expect(repairRows[0].details).toMatchObject({
+          intent: "replace",
+          coldRestart: true,
+          incumbent: "incumbent_present",
+          incumbentPid: kIncumbentPid,
+        });
+        expect(repairRows[1].details).toEqual({
+          pid: kFakeSupervisorPid,
+          servingPid: kFakeSupervisorPid,
+          generation: 1,
+          intent: "replace",
+          verified: true,
+        });
+        expect(repairRows[0].correlationId).toBe(repairRows[1].correlationId);
+        // Under `replace` the incumbent is never adopted.
+        expect(
+          ledgerRows(insertWatchdogEvent).some(
+            (row) => row.details?.reason === "incumbent_adopted",
+          ),
+        ).toBe(false);
+        expect(operationRows(insertWatchdogEvent).map((row) => row.status)).toEqual([
+          "started",
+          "ok",
+        ]);
+        expect(operationRows(insertWatchdogEvent)[0].details).toMatchObject({
+          trigger: "repair",
+          source: "repair",
+        });
+
+        // The adopted supervisor IS the new managed gateway (issue #56 shape).
+        expect(fake.gateway.isManagedGatewayChildSupervisor()).toBe(true);
+        expect(fake.gateway.getLaunchGeneration()).toBe(1);
+        expect(watchdog.getStatus()).toMatchObject({
+          lifecycle: "running",
+          health: "healthy",
+          readiness: "ready",
+          supervisionMode: "managed",
+          servingRootPid: kFakeSupervisorPid,
+          servingPid: kFakeSupervisorPid,
+          gatewayPid: kFakeSupervisorPid,
+          lastRepairVerdict: "replacement_ready",
+          replacementPending: null,
+        });
+        expect(noticesIncluding(notifier, "Auto-repair complete, gateway healthy")).toHaveLength(1);
+        expect(noticesIncluding(notifier, "Auto-repair failed")).toHaveLength(0);
+        expect(harness.gatewayLifecycleLock.getActiveOperation()).toBeNull();
+      } finally {
+        watchdog.stop();
+      }
+    });
+
+    it("an incumbent that refuses the stop and keeps the port is a FAILED replacement: restart/repair/failed {incumbent_gateway_still_running}, no ok row, identity untouched (REPLACE-INCUMBENT DRILL)", async () => {
+      const fake = createFakeGateway({
+        portOpen: true,
+        stopRefused: true,
+        livePids: [{ pid: kIncumbentPid, cmdline: kIncumbentCmdline }],
+      });
+      const harness = createDrillHarness({ fake });
+      const incumbent = { healthy: true };
+      const { watchdog, insertWatchdogEvent, clawCmd, notifier, coldRestartHolds } =
+        createDrillWatchdog({ fake, harness, isHealthy: () => incumbent.healthy });
+      // Fake timers step the 15s stop-settle window the refused stop burns.
+      vi.useFakeTimers();
+      try {
+        await bootAroundIncumbent(fake);
+        await settleFakeTimers();
+        expect(watchdog.getStatus()).toMatchObject({
+          health: "healthy",
+          supervisionMode: "adopted",
+          servingRootPid: kIncumbentPid,
+        });
+
+        await wedgeIncumbentToTheGate({ incumbent, watchdog, insertWatchdogEvent, clawCmd, fake });
+
+        const third = watchdog.runHealthCheck({ source: "health_timer" });
+        for (let i = 0; i < 40; i += 1) {
+          if (restartRows(insertWatchdogEvent, { source: "repair", status: "failed" }).length) {
+            break;
+          }
+          await vi.advanceTimersByTimeAsync(1_000);
+        }
+        await third;
+        await settleFakeTimers();
+
+        expect(doctorFixCalls(clawCmd)).toBe(1);
+        expect(fake.stopCalls).toEqual([["gateway", "stop"]]);
+        expect(fake.spawnCalls.map((call) => call.args)).toEqual([["gateway", "--force"]]);
+        expect(coldRestartHolds).toEqual(["repair"]);
+
+        const repairRows = restartRows(insertWatchdogEvent, { source: "repair" });
+        expect(repairRows.map((row) => row.status)).toEqual(["requested", "failed"]);
+        expect(repairRows[0].details).toMatchObject({ intent: "replace", coldRestart: true });
+        expect(repairRows[1].details).toMatchObject({
+          reason: "incumbent_gateway_still_running",
+          intent: "replace",
+        });
+        expect(repairRows[1].details.error).toContain("port never released");
+        expect(restartRows(insertWatchdogEvent, { status: "ok" })).toHaveLength(0);
+        expect(operationRows(insertWatchdogEvent).map((row) => row.status)).toEqual([
+          "started",
+          "failed",
+        ]);
+        expect(operationRows(insertWatchdogEvent)[1].details).toMatchObject({
+          trigger: "repair",
+          reason: "incumbent_gateway_still_running",
+        });
+
+        // Nothing new is running: no adoption, no generation-bearing launch
+        // notice, the incumbent's identity is what the watchdog still tracks.
+        expect(fake.gateway.isManagedGatewayChildSupervisor()).toBe(false);
+        expect(fake.gateway.getManagedGatewayWorkerPid()).toBeNull();
+        const status = watchdog.getStatus();
+        expect(status.health).not.toBe("healthy");
+        expect(status).toMatchObject({
+          supervisionMode: "adopted",
+          servingRootPid: kIncumbentPid,
+          lastRepairVerdict: "replacement_failed",
+          replacementPending: null,
+        });
+        expect(noticesIncluding(notifier, "Auto-repair failed")).toHaveLength(1);
+        expect(noticesIncluding(notifier, "Auto-repair complete")).toHaveLength(0);
+        expect(harness.gatewayLifecycleLock.getActiveOperation()).toBeNull();
+      } finally {
+        watchdog.stop();
+        vi.useRealTimers();
+      }
+    });
+
+    it("a cold restart under a lifecycle hold whose lease expires mid ready-wait stops polling through the hold's isValid() fence — aborted_by_caller within a poll tick, never the 120s budget (LEASE-FENCE DRILL)", async () => {
+      const fake = createFakeGateway({ portOpen: true });
+      fake.neverReady = true;
+      const harness = createDrillHarness({ fake });
+      const launchHandler = vi.fn();
+      fake.gateway.setGatewayLaunchHandler(launchHandler);
+      vi.useFakeTimers();
+      try {
+        const kLeaseMs = 5_000;
+        const hold = harness.gatewayLifecycleLock.tryAcquire("repair", { leaseMs: kLeaseMs });
+        expect(hold.isValid()).toBe(true);
+        const startedAt = Date.now();
+        let outcome;
+        // The watchdog's fence, verbatim: `() => !hold.isValid()`.
+        const run = harness.deps
+          .restartGateway({ shouldAbort: () => !hold.isValid() })
+          .then(
+            () => {
+              outcome = { ok: true };
+            },
+            (error) => {
+              outcome = { error };
+            },
+          );
+
+        // Stop settles at once (port released), `--force` is spawned, and the
+        // ready wait polls a port that never answers — while the lease holds.
+        await vi.advanceTimersByTimeAsync(1_000);
+        expect(fake.stopCalls).toEqual([["gateway", "stop"]]);
+        expect(fake.spawnCalls.map((call) => call.args)).toEqual([["gateway", "--force"]]);
+        expect(hold.isValid()).toBe(true);
+        expect(outcome).toBeUndefined();
+
+        for (let i = 0; i < 10 && outcome === undefined; i += 1) {
+          await vi.advanceTimersByTimeAsync(1_000);
+        }
+        await run;
+        const elapsedMs = Date.now() - startedAt;
+        expect(hold.isExpired()).toBe(true);
+        expect(hold.isValid()).toBe(false);
+        expect(harness.gatewayLifecycleLock.getActiveOperation()).toBeNull();
+        // Ended one poll tick after the lease fired — not at the ready budget.
+        expect(elapsedMs).toBeLessThan(kLeaseMs + 2_000);
+        expect(elapsedMs).toBeLessThan(kGatewayRestartReadyTimeoutMs);
+        expect(outcome.error).toBeInstanceOf(fake.gateway.GatewayRestartError);
+        expect(outcome.error).not.toBeInstanceOf(fake.gateway.GatewayIncumbentRestartError);
+        expect(outcome.error.message).toContain("aborted by caller");
+        expect(outcome.error.evidence).toMatchObject({
+          aborted: true,
+          reason: "aborted_by_caller",
+        });
+        // Nothing claimed success: one spawn, no launch notice, and the
+        // generation counter records the one spawn that happened.
+        expect(fake.spawnCalls).toHaveLength(1);
+        expect(launchHandler).not.toHaveBeenCalled();
+        expect(fake.gateway.getLaunchGeneration()).toBe(1);
+      } finally {
+        fake.gateway.setGatewayLaunchHandler(null);
+        vi.useRealTimers();
+      }
+    });
   });
 });

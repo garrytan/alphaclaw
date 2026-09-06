@@ -1015,32 +1015,101 @@ describe("server/watchdog gateway hardening (e2e)", () => {
       watchdog.stop();
     });
 
-    it("skips the relaunch and latches when the lease expired during the fix", async () => {
-      // Only Date is faked: the medic's own async flow keeps real timers, but
-      // the lease check reads Date.now().
-      vi.useFakeTimers({ toFake: ["Date"] });
+    it("skips the relaunch and latches when the lock's lease expired during the fix (ownership asked of the lock, never inferred from elapsed time)", async () => {
+      const {
+        createGatewayLifecycleLock,
+      } = require("../../lib/server/gateway-lifecycle-lock");
+      // A tiny lease the medic's fix outlives: the hold is force-released
+      // (release.isValid() false) before the relaunch decision.
+      const lock = createGatewayLifecycleLock({
+        leaseMs: 30,
+        logger: { warn: () => {} },
+      });
       const configMedic = {
         isEnabled: () => true,
         run: vi.fn(async () => {
-          vi.setSystemTime(Date.now() + 11 * 60 * 1000); // past the 10-min lease
+          await new Promise((resolve) => setTimeout(resolve, 80));
           return { fixed: true, tier: "managed_key", actions: ["removed x"] };
         }),
       };
-      const { watchdog, launchGatewayProcess, notifier } = createStack({
+      const { watchdog, launchGatewayProcess, notifier, insertWatchdogEvent } =
+        createStack({ configMedic, gatewayLifecycleLock: lock });
+
+      watchdog.onGatewayExit({ code: 78, expectedExit: false, stderrTail: [] });
+      // Bounded poll, not a fixed sleep: the medic's 80ms fix must outlive the
+      // 30ms lease and the latch must land — on a loaded runner that can take
+      // longer than a fixed slack allows.
+      const medicRowLanded = () =>
+        insertWatchdogEvent.mock.calls.some(
+          (call) => call[0]?.eventType === "restart" && call[0]?.source === "medic",
+        );
+      const latchDeadline = Date.now() + 3_000;
+      while (!medicRowLanded() && Date.now() < latchDeadline) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      await flushMicrotasks();
+
+      // The lock was force-released to whoever comes next — a launch here
+      // would race that operation. Latch instead, with the ledger naming why.
+      expect(launchGatewayProcess).not.toHaveBeenCalled();
+      expect(watchdog.getStatus().lifecycle).toBe("configuration_error");
+      expect(insertWatchdogEvent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          eventType: "restart",
+          source: "medic",
+          status: "skipped",
+          details: expect.objectContaining({ reason: "lease_expired" }),
+        }),
+      );
+      const messages = notifier.notify.mock.calls.map((call) => call[0]);
+      expect(messages.some((m) => m.includes("restart is paused"))).toBe(true);
+      expect(messages.some((m) => m.includes("Restarting the gateway"))).toBe(false);
+      watchdog.stop();
+    });
+
+    it("relaunches after a fix that outlives the DEFAULT lease when the hold's overridden lease still covers it (11A: the old elapsed-time check would have latched)", async () => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      const {
+        createGatewayLifecycleLock,
+      } = require("../../lib/server/gateway-lifecycle-lock");
+      const { kGatewayLifecycleLeaseMs } = require("../../lib/server/constants");
+      // A day-long lease: valid throughout, however far Date.now() moves.
+      const lock = createGatewayLifecycleLock({ leaseMs: 24 * 60 * 60 * 1000 });
+      const configMedic = {
+        isEnabled: () => true,
+        run: vi.fn(async () => {
+          vi.setSystemTime(Date.now() + kGatewayLifecycleLeaseMs + 60_000);
+          return { fixed: true, tier: "managed_key", actions: ["removed x"] };
+        }),
+      };
+      const { watchdog, launchGatewayProcess, insertWatchdogEvent } = createStack({
         configMedic,
+        gatewayLifecycleLock: lock,
       });
 
       watchdog.onGatewayExit({ code: 78, expectedExit: false, stderrTail: [] });
       await flushMicrotasks();
       await flushMicrotasks();
+      await flushMicrotasks();
 
-      // The lock may have been force-released to another operation — a launch
-      // here would race it. Latch instead.
-      expect(launchGatewayProcess).not.toHaveBeenCalled();
-      expect(watchdog.getStatus().lifecycle).toBe("configuration_error");
-      const messages = notifier.notify.mock.calls.map((call) => call[0]);
-      expect(messages.some((m) => m.includes("restart is paused"))).toBe(true);
-      expect(messages.some((m) => m.includes("Restarting the gateway"))).toBe(false);
+      expect(launchGatewayProcess).toHaveBeenCalledTimes(1);
+      expect(insertWatchdogEvent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          eventType: "restart",
+          source: "medic",
+          status: "requested",
+          details: expect.objectContaining({ intent: "relaunch_if_absent" }),
+        }),
+      );
+      expect(insertWatchdogEvent).not.toHaveBeenCalledWith(
+        expect.objectContaining({
+          eventType: "restart",
+          source: "medic",
+          status: "skipped",
+        }),
+      );
+      expect(watchdog.getStatus().lifecycle).toBe("restarting");
+      expect(lock.getActiveOperation()).toBeNull(); // released after the run
       vi.useRealTimers();
       watchdog.stop();
     });
