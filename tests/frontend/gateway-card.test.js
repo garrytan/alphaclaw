@@ -638,9 +638,10 @@ describe("frontend/gateway card (server-state matrix)", () => {
       watchdogStatus: { gatewayPid: null, servingPid: 777, health: "healthy", lifecycle: "running" },
     });
     const text = treeText(tree);
-    expect(text).toContain(
-      "adopted (started outside AlphaClaw; health and memory monitored, exit events unavailable)",
-    );
+    // Short state phrase like its siblings; the monitoring caveat rides on the
+    // "estimated" crash-evidence detail below, not in the dd.
+    expect(text).toContain("adopted (started outside AlphaClaw)");
+    expect(text).not.toContain("exit events unavailable");
     expect(text).not.toContain("managed by AlphaClaw");
     expect(text).not.toContain("detached (running outside");
     expect(text).toContain("estimated — gateway runs outside AlphaClaw's supervision");

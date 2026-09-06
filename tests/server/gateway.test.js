@@ -3759,6 +3759,14 @@ describe("server/gateway restart behavior", () => {
         expect(earlyError.evidence).toMatchObject({ aborted: true, reason: "aborted_by_caller" });
         expect(childProcess.spawn).not.toHaveBeenCalled();
         expect(gateway.getLaunchGeneration()).toBe(0);
+        // The fence fires BEFORE `gateway stop`: a holder that lost its lease
+        // must not stop the serving gateway for its successor.
+        expect(
+          childProcess.execFile.mock.calls.some((call) =>
+            (Array.isArray(call[1]) ? call[1] : []).includes("stop"),
+          ),
+        ).toBe(false);
+        expect(earlyError.evidence).toMatchObject({ phase: "prelaunch_hook" });
 
         let abort = false;
         const late = gateway

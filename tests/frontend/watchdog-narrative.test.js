@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createRequire } from "node:module";
+import { readFileSync } from "node:fs";
 
 // Card-level cases call WatchdogNarrativeCard as a plain function (no DOM
 // renderer). It only touches useMemo from preact/hooks, and useNowMs is
@@ -691,10 +692,11 @@ describe("incidents timeline outcome labels (eng review 8A)", () => {
   it("labels the new event types readiness_probe_error and serving_identity_lost", async () => {
     const { kWatchdogEventLabels, describeEvent } = await loadIncidentHelpers();
     expect(kWatchdogEventLabels.readiness_probe_error).toBe("Readiness probe error");
-    expect(kWatchdogEventLabels.serving_identity_lost).toBe("Serving identity lost");
+    // Operator-readable, not the internal "serving identity" vocabulary.
+    expect(kWatchdogEventLabels.serving_identity_lost).toBe("Gateway process lost");
     expect(
       describeEvent({ eventType: "serving_identity_lost", status: "warn", details: { reason: "start_ticks_mismatch" } }).summary,
-    ).toBe("Serving identity lost — start_ticks_mismatch");
+    ).toBe("Gateway process lost — start_ticks_mismatch");
     expect(
       describeEvent({ eventType: "readiness_probe_error", status: "warn", details: { reason: "fetch failed" } }).label,
     ).toBe("Readiness probe error");
@@ -704,9 +706,10 @@ describe("incidents timeline outcome labels (eng review 8A)", () => {
 describe("describeDegradedReason (v0.9.75: internal enums never render)", () => {
   it("maps the repair-contract degradedReason enums to operator copy (readiness names its components) and keeps free-text probe reasons as 'Probe said'", async () => {
     const { describeDegradedReason, buildWatchdogNarrative } = await loadHelpers();
+    // /readyz component ids are code case; the narrative renders words.
     expect(
       describeDegradedReason({ degradedReason: "readiness_failing", readinessReason: "secrets, eventLoop" }),
-    ).toBe("Readiness checks are failing (secrets, eventLoop); the port answers and /health is green.");
+    ).toBe("Readiness checks are failing (secrets, event loop); the port answers and /health is green.");
     expect(describeDegradedReason({ degradedReason: "readiness_failing" })).toBe(
       "Readiness checks are failing; the port answers and /health is green.",
     );
@@ -736,5 +739,88 @@ describe("describeDegradedReason (v0.9.75: internal enums never render)", () => 
     );
     expect(narrative.detail).toContain("Readiness checks are failing (secrets)");
     expect(narrative.detail).not.toContain("readiness_failing");
+  });
+});
+
+describe("drift pins (v0.9.75 ship review): vocabularies the UI mirrors by hand", () => {
+  it("kDegradedReasonCopy covers every kDegradedReasons value the watchdog writes (an internal enum never renders)", async () => {
+    const { kDegradedReasonCopy, describeDegradedReason } = await loadHelpers();
+    const source = readFileSync(new URL("../../lib/server/watchdog.js", import.meta.url), "utf8");
+    const block = source.match(/const kDegradedReasons = Object\.freeze\(\{([\s\S]*?)\}\);/)?.[1];
+    expect(block).toBeTruthy();
+    const values = [...block.matchAll(/:\s*"([a-z_]+)"/g)].map((m) => m[1]);
+    // PRELAUNCH_HOOK_FAILED is referenced by name (kPrelaunchHookFailedReason).
+    values.push("prelaunch_hook_failed");
+    expect(values.length).toBeGreaterThanOrEqual(6);
+    for (const value of values) {
+      expect(Object.keys(kDegradedReasonCopy), value).toContain(value);
+      expect(describeDegradedReason({ degradedReason: value })).not.toContain(value);
+    }
+  });
+
+  it("kTriggerTitles covers every incident key the server tracker opens (incl. gateway_readiness)", async () => {
+    const { kTriggerTitles } = await loadIncidentHelpers();
+    const source = readFileSync(new URL("../../lib/server/watchdog-incidents.js", import.meta.url), "utf8");
+    const block = source.match(/const kIncidentKeyByTrigger = \{([\s\S]*?)\n\};/)?.[1];
+    expect(block).toBeTruthy();
+    const keys = new Set([...block.matchAll(/:\s*"([a-z_]+)"/g)].map((m) => m[1]));
+    expect(keys.has("gateway_readiness")).toBe(true);
+    for (const key of keys) expect(kTriggerTitles[key], key).toBeTruthy();
+    expect(kTriggerTitles.gateway_readiness).toBe("Gateway not ready");
+  });
+
+  it("the watchdog-tab status dot and the incidents timeline share ONE tone table", async () => {
+    const { getIncidentStatusTone } = await loadHelpers();
+    const { kDotClassByTone } = await loadIncidentHelpers();
+    const dot = getIncidentStatusTone({
+      eventType: "restart",
+      status: "requested",
+      details: { pid: 1, intent: "relaunch_if_absent" },
+    });
+    expect(Object.values(kDotClassByTone)).toContain(dot.dotClass);
+    expect(kDotClassByTone).toEqual({
+      success: "bg-green-500/90",
+      danger: "bg-red-500/90",
+      warning: "bg-yellow-400/90",
+      info: "bg-cyan-400/90",
+      neutral: "bg-gray-500/60",
+    });
+  });
+
+  it("a crash_loop phase under a latched state-writer conflict names the blocker instead of promising doctor repair", async () => {
+    const { buildWatchdogNarrative } = await loadHelpers();
+    const narrative = buildWatchdogNarrative(
+      {
+        ...baseStatus,
+        phase: "crash_loop_repair_ladder",
+        lifecycle: "crash_loop",
+        health: "unhealthy",
+        incumbentConflict: { kind: "state_writer_conflict", holderPid: 4321, holderRole: "agent-embedded" },
+      },
+      kNow,
+    );
+    expect(narrative.headline).toBe("Blocked by another OpenClaw process");
+    expect(narrative.detail).toContain("agent-embedded, pid 4321");
+    expect(narrative.detail.toLowerCase()).not.toContain("doctor");
+    // A plain crash loop keeps its copy.
+    const plain = buildWatchdogNarrative(
+      { ...baseStatus, phase: "crash_loop_repair_ladder", lifecycle: "crash_loop", health: "unhealthy" },
+      kNow,
+    );
+    expect(plain.headline).toBe("Crash loop detected");
+  });
+
+  it("the status-detail PID chip reads the serving pid for an adopted gateway and falls back to gatewayPid", async () => {
+    const { buildWatchdogStatusDetails } = await loadHelpers();
+    const adopted = buildWatchdogStatusDetails(
+      { ...baseStatus, phase: "healthy", health: "healthy", gatewayPid: null, servingPid: 777, supervisionMode: "adopted" },
+      kNow,
+    );
+    expect(adopted.find((d) => d.key === "pid")?.label).toBe("PID 777 (adopted)");
+    const managed = buildWatchdogStatusDetails(
+      { ...baseStatus, phase: "healthy", health: "healthy", gatewayPid: 123, servingPid: null, supervisionMode: "managed" },
+      kNow,
+    );
+    expect(managed.find((d) => d.key === "pid")?.label).toBe("PID 123");
   });
 });

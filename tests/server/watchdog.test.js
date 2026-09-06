@@ -4829,12 +4829,17 @@ describe("server/watchdog", () => {
       watchdog.stop();
     });
 
-    it("b′. under `replace` child_retained is never a verdict: repair recycles the retained child through the cold restart and the #59 verdict + green/ready probe certify it", async () => {
+    it("b′. under `replace` an UNHEALTHY retained child is never a verdict: repair recycles it through the cold restart and the #59 verdict + green/ready probe certify it", async () => {
       const { control, fetchImpl } = createGatewayControl();
       const requestGatewayLaunch = vi.fn(async () =>
         launchOutcome("child_retained", { child: { pid: 4242 }, pid: 4242, generation: 1 }),
       );
-      const restartGatewayColdStart = vi.fn(async () => ({ ok: true }));
+      // The child is wedged (not answering) at repair time; the cold restart
+      // brings a gateway back on the port.
+      const restartGatewayColdStart = vi.fn(async () => {
+        control.healthy = true;
+        return { ok: true };
+      });
       const { watchdog, insertWatchdogEvent, clawCmd, launchGatewayProcess } = createHarness({
         autoRepair: true,
         fetchImpl,
@@ -4845,6 +4850,7 @@ describe("server/watchdog", () => {
       });
       watchdog.onGatewayLaunch({ startedAt: Date.now() - 60_000, pid: 4242, rootPid: 4242, generation: 1 });
       await settle();
+      control.healthy = false;
       const result = await watchdog.triggerRepair();
       await settle();
 
@@ -5740,6 +5746,324 @@ describe("server/watchdog", () => {
       watchdog.stop();
     });
 
+    // ── ship-review fixes (v0.9.75) ───────────────────────────────────────
+    it("review R1. `replace` re-probes before `gateway stop`: a child that answers healthy after Doctor is retained (child_retained), never cold-restarted; manual repair on a healthy gateway is Doctor only", async () => {
+      const { control, fetchImpl } = createGatewayControl();
+      const requestGatewayLaunch = vi.fn(async () =>
+        launchOutcome("child_retained", { child: { pid: 4242 }, pid: 4242, generation: 1 }),
+      );
+      const restartGatewayColdStart = vi.fn(async () => ({ ok: true }));
+      // Doctor "fixes" the gateway: it answers again by the time the relaunch runs.
+      const clawCmdImpl = async (command) => {
+        control.healthy = true;
+        return doctorOk(command);
+      };
+      const { watchdog, insertWatchdogEvent, clawCmd, launchGatewayProcess } = createHarness({
+        autoRepair: true,
+        fetchImpl,
+        resolveGatewayReadyzUrl: () => kReadyzUrl,
+        clawCmdImpl,
+        requestGatewayLaunch,
+        restartGatewayColdStart,
+      });
+      watchdog.onGatewayLaunch({ startedAt: Date.now() - 60_000, pid: 4242, rootPid: 4242, generation: 1 });
+      await settle();
+      control.healthy = false;
+      for (let i = 0; i < 3; i += 1) await watchdog.runHealthCheck({ source: "health_timer" });
+      await settle();
+
+      expect(doctorFixCalls(clawCmd)).toBe(1);
+      expect(restartGatewayColdStart).not.toHaveBeenCalled();
+      expect(launchGatewayProcess).not.toHaveBeenCalled();
+      expect(restartRows(insertWatchdogEvent, { source: "repair", status: "requested" })).toHaveLength(0);
+      expect(restartRows(insertWatchdogEvent, { source: "repair", status: "skipped" })).toEqual([
+        expect.objectContaining({
+          details: expect.objectContaining({
+            reason: "child_retained",
+            recoveredBeforeReplace: true,
+            intent: "replace",
+            pid: 4242,
+          }),
+        }),
+      ]);
+      expect(watchdog.getStatus()).toMatchObject({
+        lastRepairVerdict: "child_retained",
+        replacementPending: null,
+        health: "healthy",
+        lifecycle: "running",
+        repairAttempts: 0,
+      });
+
+      // Manual "Run repair" on a healthy gateway: Doctor, no restart.
+      const manual = await watchdog.triggerRepair();
+      await settle();
+      expect(manual).toMatchObject({ ok: true, launchedGateway: false, pending: false, verdict: "child_retained" });
+      expect(restartGatewayColdStart).not.toHaveBeenCalled();
+      expect(doctorFixCalls(clawCmd)).toBe(2);
+      watchdog.stop();
+    });
+
+    it("review P1. a replacement that FAILS (incumbent refuses `gateway stop`) counts as a repair attempt and the automatic ladder waits for a recovery: later failing ticks never re-run doctor --fix + stop", async () => {
+      const { control, fetchImpl } = createGatewayControl();
+      const identity = { rootPid: 800, workerPid: 801, startTicks: 1, pids: [800, 801] };
+      const requestGatewayLaunch = vi.fn(async () =>
+        launchOutcome("incumbent_present", { pid: 800, serving: identity }),
+      );
+      const restartGatewayColdStart = vi.fn(async () => {
+        const err = new Error("incumbent gateway still running");
+        err.incumbent = true;
+        err.reason = "incumbent_gateway_still_running";
+        throw err;
+      });
+      const { watchdog, clawCmd, insertWatchdogEvent } = createHarness({
+        autoRepair: true,
+        fetchImpl,
+        resolveGatewayReadyzUrl: () => kReadyzUrl,
+        clawCmdImpl: doctorOk,
+        requestGatewayLaunch,
+        restartGatewayColdStart,
+        pidAlive: () => true,
+        readProcStartTicks: () => 1,
+      });
+      watchdog.onGatewayLaunch(adoptedPayload(identity));
+      await settle();
+      control.healthy = false;
+      for (let i = 0; i < 3; i += 1) await watchdog.runHealthCheck({ source: "health_timer" });
+      await settle();
+
+      expect(doctorFixCalls(clawCmd)).toBe(1);
+      expect(restartGatewayColdStart).toHaveBeenCalledTimes(1);
+      expect(restartRows(insertWatchdogEvent, { source: "repair", status: "failed" })).toEqual([
+        expect.objectContaining({
+          details: expect.objectContaining({ reason: "incumbent_gateway_still_running" }),
+        }),
+      ]);
+      // (The op-end resync probe fails too and re-degrades health; the
+      // contract fields are what this pins.)
+      expect(watchdog.getStatus()).toMatchObject({
+        repairAttempts: 1,
+        awaitingAutoRepairRecovery: true,
+        lastRepairVerdict: "replacement_failed",
+      });
+
+      // Five more failing ticks: no second Doctor, no second `gateway stop`.
+      for (let i = 0; i < 5; i += 1) await watchdog.runHealthCheck({ source: "health_timer" });
+      await settle();
+      expect(doctorFixCalls(clawCmd)).toBe(1);
+      expect(restartGatewayColdStart).toHaveBeenCalledTimes(1);
+
+      // A recovery lifts the latch; the attempt counter waits for a verified
+      // replacement, as before.
+      control.healthy = true;
+      await watchdog.runHealthCheck({ source: "health_timer" });
+      expect(watchdog.getStatus()).toMatchObject({ health: "healthy", awaitingAutoRepairRecovery: false });
+      watchdog.stop();
+    });
+
+    it("review R2. an ownership-conflict exit whose holder is NOT healthy yet gets a cold-boot grace (kGatewayRestartReadyTimeoutMs): sustained failures inside it book one repair/skipped {incumbent_startup_grace} row and never Doctor, the latched reason survives probe prose, and past the budget the ladder repairs", async () => {
+      vi.useFakeTimers();
+      try {
+        const { control, fetchImpl } = createGatewayControl();
+        control.healthy = false;
+        const requestGatewayLaunch = vi.fn(async () =>
+          launchOutcome("incumbent_present", { pid: 4321, serving: null }),
+        );
+        const restartGatewayColdStart = vi.fn(async () => {
+          control.healthy = true;
+          return { ok: true };
+        });
+        const { watchdog, clawCmd, insertWatchdogEvent } = createHarness({
+          autoRepair: true,
+          fetchImpl,
+          resolveGatewayReadyzUrl: () => kReadyzUrl,
+          clawCmdImpl: doctorOk,
+          requestGatewayLaunch,
+          restartGatewayColdStart,
+        });
+        // Launched past the startup grace (failures inside it are skipped
+        // rows, not ladder input); the exit's own launchedAt keeps the
+        // step-aside classification window open.
+        watchdog.onGatewayLaunch({ startedAt: Date.now() - 60_000, pid: 100, rootPid: 100, generation: 1 });
+        watchdog.onGatewayExit({
+          code: 1,
+          expectedExit: false,
+          pid: 100,
+          generation: 1,
+          stderrTail: ["gateway already running (pid 4321); lock timeout after 5000ms"],
+          launchedAt: Date.now(),
+        });
+        await vi.advanceTimersByTimeAsync(20);
+        expect(watchdog.getStatus()).toMatchObject({
+          health: "degraded",
+          degradedReason: "gateway_conflict_unhealthy",
+          incumbentConflict: { kind: "gateway_conflict", holderPid: 4321, holderRole: null },
+        });
+        expect(watchdog.getStatus().incumbentGraceUntil).toEqual(expect.any(String));
+
+        // Well past the sustained gate, inside the grace: no Doctor, one row.
+        for (let i = 0; i < 4; i += 1) await watchdog.runHealthCheck({ source: "health_timer" });
+        await vi.advanceTimersByTimeAsync(20);
+        expect(doctorFixCalls(clawCmd)).toBe(0);
+        expect(restartGatewayColdStart).not.toHaveBeenCalled();
+        const graceRows = () =>
+          rowsOfType(insertWatchdogEvent, "repair", "skipped").filter(
+            (row) => row.details.reason === "incumbent_startup_grace",
+          );
+        expect(graceRows()).toHaveLength(1);
+        // Probe prose does not overwrite the latched conflict reason.
+        expect(watchdog.getStatus().degradedReason).toBe("gateway_conflict_unhealthy");
+        expect(watchdog.getStatus().readiness).toBe("unknown");
+
+        // Past the budget the ladder repairs (replace → cold restart).
+        await vi.advanceTimersByTimeAsync(kGatewayRestartReadyTimeoutMs + 1_000);
+        await watchdog.runHealthCheck({ source: "health_timer" });
+        await vi.advanceTimersByTimeAsync(50);
+        expect(doctorFixCalls(clawCmd)).toBe(1);
+        expect(restartGatewayColdStart).toHaveBeenCalledTimes(1);
+        expect(graceRows()).toHaveLength(1);
+        watchdog.stop();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("review R3. a pending needs OUR generation once known: a foreign launch with a higher generation (boot / restart route) never verifies it, and the pending child's exit still ends the obligation even when the generation fence marks it a stale predecessor", async () => {
+      const { fetchImpl } = createGatewayControl();
+      const requestGatewayLaunch = vi.fn(async () => launchRequested(4242, 5));
+      const { watchdog, insertWatchdogEvent } = createHarness({
+        fetchImpl,
+        resolveGatewayReadyzUrl: () => kReadyzUrl,
+        requestGatewayLaunch,
+      });
+      watchdog.onGatewayLaunch({ startedAt: Date.now() - 60_000, pid: 100, rootPid: 100, generation: 4 });
+      await settle();
+      watchdog.onGatewayExit({ code: 1, expectedExit: false, pid: 100, generation: 4, stderrTail: ["boom"] });
+      await settle();
+      expect(watchdog.getStatus().replacementPending).toMatchObject({ pid: 4242 });
+
+      // A foreign launch (generation 6 ≠ ours 5) answers green: liveness only.
+      watchdog.onGatewayLaunch({ startedAt: Date.now(), pid: 9000, rootPid: 9000, generation: 6 });
+      await settle();
+      await watchdog.runHealthCheck({ source: "health_timer" });
+      expect(
+        restartRows(insertWatchdogEvent, { status: "ok" }).filter((row) => row.details.verified === true),
+      ).toHaveLength(0);
+      expect(watchdog.getStatus().replacementPending).toMatchObject({ pid: 4242 });
+
+      // Our child (gen 5 < serving gen 6) dies: fenced as a stale predecessor,
+      // but its obligation ends now — not after a 300s deadline.
+      watchdog.onGatewayExit({ code: 1, expectedExit: false, pid: 4242, generation: 5, stderrTail: ["EADDRINUSE"] });
+      await settle();
+      expect(
+        restartRows(insertWatchdogEvent, { source: "exit_event", status: "failed" }).filter(
+          (row) => row.details.reason === "replacement_exited",
+        ),
+      ).toEqual([
+        expect.objectContaining({ details: expect.objectContaining({ stalePredecessor: true }) }),
+      ]);
+      expect(watchdog.getStatus().replacementPending).toBeNull();
+      expect(rowsOfType(insertWatchdogEvent, "crash")).toHaveLength(1);
+      watchdog.stop();
+    });
+
+    it("review R4. runRepair settles a pending replacement that outlived its ready budget while probes were failing: the ladder's repair proceeds (replacement_not_ready booked) instead of skipping {replacement_pending} for the rest of the budget", async () => {
+      vi.useFakeTimers();
+      try {
+        const { control, fetchImpl } = createGatewayControl();
+        let launches = 0;
+        const requestGatewayLaunch = vi.fn(async () => {
+          launches += 1;
+          return launchRequested(4240 + launches, launches);
+        });
+        const { watchdog, insertWatchdogEvent, clawCmd } = createHarness({
+          autoRepair: true,
+          fetchImpl,
+          resolveGatewayReadyzUrl: () => kReadyzUrl,
+          clawCmdImpl: doctorOk,
+          requestGatewayLaunch,
+        });
+        watchdog.onGatewayLaunch({ startedAt: Date.now() - 60_000, pid: 100, rootPid: 100, generation: 0 });
+        await vi.advanceTimersByTimeAsync(20);
+        // The relaunched child never comes up: every probe fails from here.
+        control.healthy = false;
+        watchdog.onGatewayExit({ code: 1, expectedExit: false, pid: 100, generation: 0, stderrTail: ["boom"] });
+        await vi.advanceTimersByTimeAsync(50);
+        expect(watchdog.getStatus().replacementPending).toMatchObject({ pid: 4241 });
+
+        // Inside the budget: the sustained ladder reaches runRepair, which
+        // skips on the pending obligation.
+        for (let i = 0; i < 4; i += 1) await watchdog.runHealthCheck({ source: "health_timer" });
+        await vi.advanceTimersByTimeAsync(20);
+        expect(doctorFixCalls(clawCmd)).toBe(0);
+        expect(
+          rowsOfType(insertWatchdogEvent, "repair", "skipped").filter(
+            (row) => row.details.reason === "replacement_pending",
+          ).length,
+        ).toBeGreaterThanOrEqual(1);
+
+        // Past the budget, still failing: the pending is settled at the head
+        // of runRepair and Doctor runs.
+        await vi.advanceTimersByTimeAsync(kGatewayRestartReadyTimeoutMs + 1_000);
+        await watchdog.runHealthCheck({ source: "health_timer" });
+        await vi.advanceTimersByTimeAsync(50);
+        expect(
+          restartRows(insertWatchdogEvent, { source: "exit_event", status: "failed" }).filter(
+            (row) => row.details.reason === "replacement_not_ready",
+          ),
+        ).toHaveLength(1);
+        expect(doctorFixCalls(clawCmd)).toBe(1);
+        watchdog.stop();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("review R5. `replace` with no cold-restart dependency wired is an honest failed replacement {cold_restart_unavailable}: runRepair ok:false, nothing pending, counted as an attempt", async () => {
+      const { control, fetchImpl } = createGatewayControl();
+      const identity = { rootPid: 800, workerPid: 801, startTicks: 1, pids: [800, 801] };
+      const requestGatewayLaunch = vi.fn(async () =>
+        launchOutcome("incumbent_present", { pid: 800, serving: identity }),
+      );
+      const { watchdog, insertWatchdogEvent, clawCmd } = createHarness({
+        autoRepair: true,
+        fetchImpl,
+        clawCmdImpl: doctorOk,
+        requestGatewayLaunch,
+        pidAlive: () => true,
+        readProcStartTicks: () => 1,
+      });
+      watchdog.onGatewayLaunch(adoptedPayload(identity));
+      await settle();
+      control.healthy = false;
+      const result = await watchdog.triggerRepair();
+      await settle();
+      expect(doctorFixCalls(clawCmd)).toBe(1);
+      expect(result).toMatchObject({ ok: false, verdict: "replacement_failed", reason: "replacement_failed", launchedGateway: false });
+      expect(restartRows(insertWatchdogEvent, { source: "repair", status: "failed" })).toEqual([
+        expect.objectContaining({
+          details: expect.objectContaining({ reason: "cold_restart_unavailable", intent: "replace" }),
+        }),
+      ]);
+      expect(watchdog.getStatus()).toMatchObject({
+        lastRepairVerdict: "replacement_failed",
+        replacementPending: null,
+        repairAttempts: 1,
+      });
+      watchdog.stop();
+    });
+
+    it("review R6. a failed liveness probe resets the readiness axis: readiness 'ready' never sits beside a degraded health", async () => {
+      const { control, fetchImpl } = createGatewayControl();
+      const { watchdog } = createHarness({ fetchImpl, resolveGatewayReadyzUrl: () => kReadyzUrl });
+      watchdog.onGatewayLaunch({ startedAt: Date.now() - 60_000, pid: 100 });
+      await settle();
+      expect(watchdog.getStatus()).toMatchObject({ health: "healthy", readiness: "ready" });
+      control.healthy = false;
+      await watchdog.runHealthCheck({ source: "health_timer" });
+      expect(watchdog.getStatus()).toMatchObject({ health: "degraded", readiness: "unknown", readinessReason: null });
+      watchdog.stop();
+    });
+
     // ── 1A wedged incumbent → replace ─────────────────────────────────────
     it("1A. a wedged ADOPTED incumbent (alive, not answering) is replaced through the verified cold-restart path after the sustained gate: Doctor once, the cold restart once under the repair hold with the lease fence, requested {intent: replace} → ok {verified: true}, operation ledger trigger 'repair'; adoption while watched never resets health", async () => {
       const { control, fetchImpl } = createGatewayControl();
@@ -6529,14 +6853,17 @@ describe("server/watchdog", () => {
         expect(coldRestart).not.toHaveBeenCalled();
         expect(rowsOfType(insertWatchdogEvent, "crash")).toHaveLength(0);
         expect(watchdog.getStatus().crashCountInWindow).toBe(0);
+        // The ladder routes a latched state-writer conflict to the backoff
+        // relaunch BEFORE runRepair, so no repair row of any kind exists here
+        // (the runRepair refusal itself is pinned by the manual/crash_loop
+        // test below).
+        expect(rowsOfType(insertWatchdogEvent, "repair")).toHaveLength(0);
+        // Third backoff relaunch once the pending failed: the ready-budget
+        // advance also aged the first relaunch out of the 5-minute window, so
+        // the cap (kWatchdogCrashLoopThreshold) is not yet reached.
         expect(
-          rowsOfType(insertWatchdogEvent, "repair", "skipped").filter(
-            (row) => row.details.reason === "state_writer_conflict",
-          ).length,
-        ).toBeGreaterThanOrEqual(0);
-        expect(
-          restartRows(insertWatchdogEvent, { source: "state_writer_conflict", status: "requested" }).length,
-        ).toBeGreaterThanOrEqual(2);
+          restartRows(insertWatchdogEvent, { source: "state_writer_conflict", status: "requested" }),
+        ).toHaveLength(3);
       } finally {
         watchdog.stop();
         vi.useRealTimers();

@@ -439,12 +439,19 @@ it with an incumbent probe. Two cases:
   `supervisionMode: "adopted"`). If nothing healthy answers, the watchdog goes
   `degraded` with `degradedReason: gateway_conflict_unhealthy`, opens an
   incident and sends one notice ("🔴 Another gateway (pid N) holds the state
-  directory but is not healthy — not relaunching into the conflict"). Repair
-  then treats the incumbent as the problem: after the sustained-failure gate
-  it runs `doctor --fix` and replaces the holder through the verified
+  directory but is not healthy — not relaunching into the conflict"). The
+  holder then gets a cold-boot grace (`GATEWAY_RESTART_READY_TIMEOUT`, the
+  same budget a relaunch gets to become ready; `incumbentGraceUntil` in the
+  status, one `repair/<source>/skipped {incumbent_startup_grace}` row) —
+  OpenClaw takes the lock before `/health` is green, and a cold boot can run
+  minutes. If it is still not healthy after that, repair treats it as the
+  problem: after the sustained-failure gate it runs `doctor --fix`,
+  re-probes the port (a holder that answers healthy by then is adopted, not
+  stopped) and replaces a still-unhealthy holder through the verified
   cold-restart path (`intent: "replace"`, the same `gateway stop` →
   `--force` → ready-wait that manual restarts use, with the
-  incumbent-still-running verdict above).
+  incumbent-still-running verdict above). A refused stop counts as a repair
+  attempt and the automatic ladder waits for a recovery before trying again.
 - **State-writer conflict** (`state_writer_conflict`: "state directory is
   locked by <role> (pid N)", "another embedded OpenClaw state writer is
   active", "failed to acquire gateway state ownership"). The holder is not a

@@ -315,6 +315,35 @@ describe("classifyOwnershipConflict (exit-1 wording of a losing gateway contende
     });
   });
 
+  it("reads the holder from the LINE that carries the conflict wording (not the first `(pid N)` in the tail) and refuses a role that is not a plain token", () => {
+    // The gateway's own startup line names ITS pid first; the holder is on the
+    // conflict line.
+    const tail = [
+      "[gateway] starting (pid 100)",
+      "[gateway] gateway already running (pid 4321); lock timeout after 5000ms",
+    ].join("\n");
+    expect(classifyOwnershipConflict(tail)).toEqual({
+      kind: "gateway_conflict",
+      holderPid: 4321,
+      holderRole: null,
+    });
+    // Untrusted stderr reaches operator notices: a URL / markup-shaped "role"
+    // is dropped (the pid still parses), a long token is dropped too.
+    expect(
+      classifyOwnershipConflict(
+        ["[gateway] starting (pid 100)", "state directory is locked by https://evil.example/reset (pid 4321)"].join("\n"),
+      ),
+    ).toEqual({ kind: "state_writer_conflict", holderPid: 4321, holderRole: null });
+    expect(
+      classifyOwnershipConflict(
+        "state directory is locked by a_role_name_far_longer_than_thirty_two_characters_total (pid 7)",
+      ),
+    ).toEqual({ kind: "state_writer_conflict", holderPid: 7, holderRole: null });
+    expect(
+      classifyOwnershipConflict("state directory is locked by agent-embedded (pid 4321)").holderRole,
+    ).toBe("agent-embedded");
+  });
+
   it("returns null for anything else (a crash, EADDRINUSE, the state-lease texts, empty input)", () => {
     for (const text of [
       "TypeError: cannot read properties of undefined",

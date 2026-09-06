@@ -1036,7 +1036,17 @@ describe("server/watchdog gateway hardening (e2e)", () => {
         createStack({ configMedic, gatewayLifecycleLock: lock });
 
       watchdog.onGatewayExit({ code: 78, expectedExit: false, stderrTail: [] });
-      await new Promise((resolve) => setTimeout(resolve, 150));
+      // Bounded poll, not a fixed sleep: the medic's 80ms fix must outlive the
+      // 30ms lease and the latch must land — on a loaded runner that can take
+      // longer than a fixed slack allows.
+      const medicRowLanded = () =>
+        insertWatchdogEvent.mock.calls.some(
+          (call) => call[0]?.eventType === "restart" && call[0]?.source === "medic",
+        );
+      const latchDeadline = Date.now() + 3_000;
+      while (!medicRowLanded() && Date.now() < latchDeadline) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
       await flushMicrotasks();
 
       // The lock was force-released to whoever comes next — a launch here

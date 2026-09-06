@@ -1008,3 +1008,33 @@ Under `npm test`, a burst of ~20 `gog` invocations per run was traced (via the o
 - **Why:** Ledger readers (incidents timeline, overseer) should see the vocabulary the design doc's Repair contract table documents; kept as-is in v0.9.75 because the plan sanctioned today's row shape.
 - **Context:** `noChildDetails` / `prelaunchHookAbortedLaunch` in lib/server/watchdog.js; the row is consumed by tests only today (the UI humanizes unknown reasons).
 - **Effort:** S. **Priority:** P3. **Depends on:** None.
+
+## P3 — Corroborate the exit-1 state-writer classification before latching it (2026-09-06, from the v0.9.75 ship review)
+- **What:** `classifyConflictSafe` (lib/server/watchdog.js) classifies the whole stderr tail; a matching phrase anywhere in the last 50 lines (an INFO retry line the coordinator later resolved, or text the gateway echoes) reclassifies an exit-1 crash, and `state_writer_conflict` then latches `runRepair` shut for every non-forced source and routes recovery to the capped backoff ladder. The holder pid/role now come from the conflict line itself and the role is a closed token, but the holder claim is never checked against `/proc`. Before latching: require `pidAlive(holderPid)` and an openclaw argv for that pid (both helpers live in lib/server/openclaw-lock-contention.js), and match the wording against the last few lines rather than the full window; otherwise fall through to the crash flow.
+- **Why:** deployment-only-env.js treats the agent as an adversary against self-repair; steering the watchdog with stderr text is a denial-of-recovery path the env guard does not cover (security specialist + adversarial finding 3, v0.9.75 ship review). Kept out of v0.9.75 because the corroboration changes the classification contract the acceptance tests pin.
+- **Effort:** M. **Priority:** P3. **Depends on:** None.
+
+## P3 — Same-uid check before adopting a serving identity from `/proc` (2026-09-06, from the v0.9.75 ship review)
+- **What:** `resolveServingIdentity` (lib/server/gateway.js) adopts the single serving-pattern tree root by argv alone (`isOpenclawArgv` accepts any token containing `/openclaw/` or ending in `openclaw.js`). On a shared host any same-machine process can present `node /tmp/openclaw/x.js gateway run`, become `servingRootPid`, feed its RSS into the memory trend and book a `crash` when it exits; two such roots make the real gateway "detached". Read `/proc/<pid>/status` `Uid` and require it to equal `process.getuid()` (a mismatch is ambiguity → `null`, today's behaviour); optionally require the root's exe/cwd under the managed OpenClaw install.
+- **Why:** the adopted identity now drives privileged actions (memory-mitigation cold restart, probe-death relaunch) from an uncorroborated process (security specialist finding, adversarial finding 12).
+- **Effort:** S. **Priority:** P3. **Depends on:** None.
+
+## P3 — One `/proc` pass for `resolveServingIdentity` (2026-09-06, from the v0.9.75 ship review)
+- **What:** `resolveServingIdentity` walks `/proc` twice synchronously (`listGatewayPids` reads every cmdline, `resolveFirstChildPid` re-reads up to 8192 status files) plus a stat per candidate, and runs on every green probe while a pending replacement is unobserved (5 s cadence, up to the ready budget), on incumbent reconcile, on benign-exit classification and on `notifyGatewayLaunch`. Collapse to one readdir + one `/proc/<pid>/stat` per pid (comm/ppid/starttime) and cmdline only for comm matches; memoize per tick.
+- **Why:** tens of ms of blocking fs I/O per call on busy hosts, on the event loop that the watchdog itself measures (`kEventLoopLagWarnMs`). Bounded today (per relaunch/exit/boot/probe), not critical (performance specialist + adversarial finding 7).
+- **Effort:** S. **Priority:** P3. **Depends on:** None.
+
+## P3 — Probe-detected death vs an external supervisor's own restart (2026-09-06, from the v0.9.75 ship review)
+- **What:** `handleProbeDetectedDeath` relaunches an ADOPTED gateway on the first failing probe whose pid evidence says the root is gone. An operator `systemctl restart openclaw` produces exactly that evidence, so the watchdog books a `crash` (counting toward `crash_loop`) and spawns its own `gateway run` into the lock race; three external restarts in five minutes latch `crash_loop`. Consider one probe of grace (re-check the port on the next tick before booking the crash) or a provenance hint that the identity is externally supervised.
+- **Why:** adversarial finding 6. The conflict path now gives the external gateway a cold-boot grace before repair, so the exposure is a spurious crash row and one lock-race relaunch, not a `gateway stop`.
+- **Effort:** S. **Priority:** P3. **Depends on:** None.
+
+## P3 — A caller abort mid ready-wait leaves the `--force` supervisor untracked (2026-09-06, from the v0.9.75 ship review)
+- **What:** `runGatewayRestartCmd` (lib/server/gateway.js) throws `aborted_by_caller` when the fence fires during `waitForGatewayReady`, deliberately without reaping the supervisor it spawned (the successor holder owns the port from there). That supervisor has no exit classification attached and its later launch is never notified; the watchdog only learns about the gateway through the incumbent path on its next relaunch or probe. Either attach `attachManagedGatewayExitClassification` before throwing, or notify the launch handler with the supervisor's identity so adoption is immediate.
+- **Why:** adversarial finding 9 (second half). The fence now also fires before the hook and before `gateway stop`, so the window is the ready wait only.
+- **Effort:** S. **Priority:** P3. **Depends on:** None.
+
+## P3 — Repair hold length vs a queued user restart (2026-09-06, from the v0.9.75 ship review)
+- **What:** the repair hold is leased at `kRepairTimeoutMs + kGatewayRestartOperationBudgetMs` (~20 min at the defaults) so a full-length Doctor run plus a cold restart never outlives it; a user "Restart gateway" (`acquire`) queues behind a background repair for up to that long. Consider surfacing the queued position/ETA in the restart route's 409/queued response, or letting a manual restart pre-empt a repair that is still inside Doctor.
+- **Why:** adversarial finding 13b. `conflictRelaunchTimestamps.push` in `relaunchAfterStateWriterConflict` also fires before `restartAfterCrash` decides anything (lock skip, backoff sleep), so the latched notice's "Relaunch attempts: N" can overstate real relaunches — move the push to the `launch_requested` verdict.
+- **Effort:** S. **Priority:** P3. **Depends on:** None.
