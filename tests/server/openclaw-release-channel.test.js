@@ -1015,15 +1015,29 @@ describe("server/openclaw-release-channel", () => {
       }
     });
 
-    it("reports a live pid from a legacy record (no startTicks) as UNcorroborated", () => {
-      const child = spawnSleeper();
+    it("a legacy record (no startTicks) naming a live alphaclaw-looking process is live but UNcorroborated; a stranger is stale", () => {
+      // Reconciled with #64: identity-less claims are trusted only when the
+      // live process's argv names the alphaclaw entry, and even then the
+      // launcher gets corroborated:false (skip the sync, keep booting).
+      const { spawn } = require("child_process");
+      const lookalike = spawn(
+        process.execPath,
+        ["-e", "setTimeout(() => {}, 30000)", "/opt/alphaclaw/bin/alphaclaw.js"],
+        { stdio: "ignore" },
+      );
+      const stranger = spawnSleeper();
       try {
         const { store } = createStore();
-        writePidRecord(store, { pid: child.pid, at: 1 });
-        expect(store.readLiveServerPidEvidence()).toEqual({ pid: child.pid, corroborated: false });
-        expect(store.readLiveServerPid()).toBe(child.pid);
+        writePidRecord(store, { pid: lookalike.pid, at: 1 });
+        expect(store.readLiveServerPidEvidence()).toEqual({ pid: lookalike.pid, corroborated: false });
+        expect(store.readLiveServerPid()).toBe(lookalike.pid);
+        if (hasProc) {
+          writePidRecord(store, { pid: stranger.pid, at: 1 });
+          expect(store.readLiveServerPidEvidence()).toBeNull();
+        }
       } finally {
-        child.kill("SIGKILL");
+        lookalike.kill("SIGKILL");
+        stranger.kill("SIGKILL");
       }
     });
 

@@ -1031,15 +1031,20 @@ Module._load = function patchedLoad(request, parent, isMain) {
     fs.mkdirSync(managedDir, { recursive: true });
     fs.writeFileSync(path.join(managedDir, "alphaclaw-server.pid"), JSON.stringify(record));
   };
-  const spawnSleeper = () =>
-    require("child_process").spawn(process.execPath, ["-e", "setTimeout(() => {}, 60000)"], {
-      stdio: "ignore",
-    });
+  const spawnSleeper = (extraArgv = []) =>
+    require("child_process").spawn(
+      process.execPath,
+      ["-e", "setTimeout(() => {}, 60000)", ...extraArgv],
+      { stdio: "ignore" },
+    );
   const hasProc = process.platform === "linux" && fs.existsSync(`/proc/${process.pid}/stat`);
 
-  it("boots on (with a warning) when the pidfile names a live pid it cannot verify — legacy record (F004 follow-up)", () => {
+  it("boots on (with a warning) when a LEGACY pidfile names a live process that looks like an alphaclaw server (F004 follow-up)", () => {
+    // A {pid, at} claim (pre-v0.9.73) carries no identity. The store trusts it
+    // only when the live process's argv names the alphaclaw entry (#64), and
+    // even then it is UNverified — the sync is skipped but boot continues.
     const rootDir = fs.mkdtempSync(path.join(tmpDir, "stale-pid-root-"));
-    const child = spawnSleeper();
+    const child = spawnSleeper(["--", "alphaclaw.js"]);
     try {
       writeServerPidRecord(rootDir, { pid: child.pid, at: 1 });
       const result = spawnBootSpine({ rootDir });
@@ -1047,6 +1052,19 @@ Module._load = function patchedLoad(request, parent, isMain) {
       expect(`${result.stdout}\n${result.stderr}`).toMatch(
         /could not be verified — boot sync skipped, continuing/,
       );
+    } finally {
+      child.kill("SIGKILL");
+    }
+  });
+
+  it.skipIf(!hasProc)("boots normally when a LEGACY pidfile names a live process that is NOT an alphaclaw server (stale claim, #64)", () => {
+    const rootDir = fs.mkdtempSync(path.join(tmpDir, "legacy-stale-pid-root-"));
+    const child = spawnSleeper();
+    try {
+      writeServerPidRecord(rootDir, { pid: child.pid, at: 1 });
+      const result = spawnBootSpine({ rootDir });
+      expect(result.status, result.stderr).toBe(0);
+      expect(`${result.stdout}\n${result.stderr}`).not.toMatch(/boot sync skipped: another/);
     } finally {
       child.kill("SIGKILL");
     }

@@ -513,8 +513,9 @@ describe("server/openclaw-channel-sync", () => {
         expect(skipped.ok).toBe(false);
         expect(skipped.action).toBe("skipped_concurrent");
         expect(skipped.livePid).toBe(child.pid);
-        // Legacy record (no startTicks): alive but unverifiable → NOT corroborated.
-        expect(skipped.corroborated).toBe(false);
+        // The claim carries host + start time and both match: a VERIFIED live
+        // owner — the launcher refuses to start a second instance on this.
+        expect(skipped.corroborated).toBe(true);
         // Nothing was mutated: applied still recorded, no lastBoot rewrite.
         expect(store.readState().applied).toEqual(
           expect.objectContaining({ version: "1.1.0" }),
