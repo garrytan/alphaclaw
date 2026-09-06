@@ -78,7 +78,7 @@ incumbent-verified restart (#59) rather than replacing them.
   wedged incumbent that refuses `gateway stop` is not re-stopped on every
   failing tick — and that wait lifts itself (`repair/<source>/ok
   {latchLifted, nothing_left_to_replace}`) once the incumbent it could not
-  stop is gone or the port closed, so an operator who kills the wedged
+  stop is gone (pid evidence), so an operator who kills the wedged
   gateway gets a relaunch on the next probe, not a stalled ladder. "Healthy"
   for the pre-replace check means every probe of the run answered: a
   flapping incumbent is replaced, not retained. An EXTERNAL incumbent that
