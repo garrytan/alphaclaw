@@ -393,6 +393,114 @@ Watchdog tab. The backup quiesce records the same evidence
 (`stopEvidence: { method, childExited, portReleased, cliRefused }`) and the
 offline copy refuses to run when the stop was not confirmed.
 
+## Gateway is up but not ready
+
+**What it means:** the watchdog reports `readiness: "not_ready"` with a
+`readinessReason` naming the failing components (event
+`readiness_degraded`, `degradedReason: readiness_failing`, ledger rows
+`health_check/ok {readinessPending: true}` collapsed into one row plus a
+count, notification "🟡 Gateway is up but not ready — <components>" once per
+incident). The port answers and `/health` is green, but OpenClaw's `/readyz`
+says one or more components (secrets, a channel, a plugin) have not come up.
+Since v0.9.74 AlphaClaw treats this as degraded, not recovered: no "Gateway
+running again" notice, the incident stays open (a `gateway_readiness`
+incident opens when none is), the release-channel acceptance hook is NOT
+credited (a green-`/health`, failing-`/readyz` build cannot be promoted to
+last-known-good), and a pending replacement is not verified. Readiness alone
+never triggers `doctor --fix` or a restart — the degraded-repair counter
+counts liveness failures only.
+
+**Why it happens:** a channel token that fails auth, a plugin whose
+provider is unreachable, a secrets backend that is slow to answer. Upstream
+keeps serving the rest of the gateway meanwhile, which is why the port and
+`/health` look fine.
+
+**Next steps:** read `readinessReason` on `GET /api/watchdog/status` (or the
+gateway card's reason line) and check the named component in the gateway log.
+The incident closes on its own on the first probe where `/readyz` is green
+again — that tick emits the normal recovery row and notice. An unreachable
+`/readyz` (transport error, thrown evaluation) is `readiness: "unknown"`
+with a `readiness_probe_error` row and does not block recovery.
+
+## Another process owns the state directory
+
+**What it means:** a gateway AlphaClaw launched exited with code 1 and its
+stderr carried OpenClaw's ownership wording. Since v0.9.74 the watchdog
+classifies that exit (`classifyOwnershipConflict`, pattern verified against
+2026.7.1-2 and 2026.9.1-beta.1) instead of booking a crash, and corroborates
+it with an incumbent probe. Two cases:
+
+- **Gateway conflict** (`gateway_conflict`: "another gateway instance is
+  already listening", "gateway already running (pid N)", "failed to acquire
+  gateway lock at", "owns state-lifecycle", "existing gateway did not become
+  healthy"). If the incumbent on the port answers `/health`, the contender's
+  exit is benign (`incumbentConflict: true` row, no crash count, no "went
+  down" notice) and the incumbent's identity is adopted (`servingPid`,
+  `supervisionMode: "adopted"`). If nothing healthy answers, the watchdog goes
+  `degraded` with `degradedReason: gateway_conflict_unhealthy`, opens an
+  incident and sends one notice ("🔴 Another gateway (pid N) holds the state
+  directory but is not healthy — not relaunching into the conflict"). Repair
+  then treats the incumbent as the problem: after the sustained-failure gate
+  it runs `doctor --fix` and replaces the holder through the verified
+  cold-restart path (`intent: "replace"`, the same `gateway stop` →
+  `--force` → ready-wait that manual restarts use, with the
+  incumbent-still-running verdict above).
+- **State-writer conflict** (`state_writer_conflict`: "state directory is
+  locked by <role> (pid N)", "another embedded OpenClaw state writer is
+  active", "failed to acquire gateway state ownership"). The holder is not a
+  gateway — an embedded agent, a backup, a migration — so neither Doctor nor
+  a cold restart can free it. The watchdog goes `degraded` with
+  `degradedReason: state_writer_conflict`, notifies once ("🟡 Another
+  OpenClaw process (<role>, pid N) holds the state directory — the gateway
+  will be relaunched once it releases") and relaunches on the crash-restart
+  backoff ladder only; it never runs `doctor --fix` or `gateway stop` for
+  this case.
+
+**Why it happens:** OpenClaw acquires the state-ownership lock BEFORE the
+port bind, so a losing contender emits lock wording, never `EADDRINUSE` —
+the port-only duplicate-launch detector could not see it. Typical triggers:
+an externally supervised gateway (systemd, a manual `openclaw gateway run`),
+a backup or migration running under a different uid, or two AlphaClaw
+containers sharing one volume.
+
+**Next steps:** the ledger row carries the classification, pid and role
+(stderr stays in the row, out of the notification). Find the holder
+(`ps -o pid,ppid,cmd -p <pid>`; the evidence also lists live openclaw
+processes), stop it if it should not be there, and the next degraded retry or
+backoff relaunch recovers. Upstream does not name the coordinator holder
+itself (TODOS "File the two upstream openclaw reports").
+
+## Repair skipped: lease expired
+
+**What it means:** a ledger row `repair/<source>/skipped` or
+`restart/<source>/skipped` with `reason: "lease_expired"` (launch detail
+`lease_expired` when the abort happened immediately before the spawn). The
+lifecycle-lock hold that the repair, crash relaunch, medic or config-change
+retry was running under expired — or was force-released — while `doctor
+--fix` or a ready-wait was still in flight, and by the time the holder
+reached its launch step another operation (a user restart, a channel apply,
+boot) had taken the lock. Since v0.9.74 the holder asks the lock whether it
+still owns it (`release.isValid()`) after every await and immediately before
+every spawn, and when it does not it books this row and stops: nothing is
+launched, lifecycle, repair attempts and crash timestamps are untouched, and
+the successor's operation proceeds alone. Before this change the expired
+holder would have launched a second gateway into the successor's restart.
+
+**Why it happens:** the repair hold is leased at the Doctor ceiling plus the
+restart budget (about 15 minutes by default), so expiry during a repair
+should be rare; the common cause is a very slow `doctor --fix` (plugin
+preflight against an unreachable registry) coinciding with a manual restart
+or apply. The work already underway is not cancelled — a Doctor that
+outlives its lease still finishes writing `openclaw.json` (cancellation
+signals into the Doctor runner are a TODOS item).
+
+**Next steps:** nothing to repair — the row is informational. Check the
+operation that took the lock (the Watchdog tab's operation badge or
+`GET /api/watchdog/status`), and if the gateway is still down after it
+finishes, the next degraded probe re-arms repair normally. If the rows
+recur, raise `GATEWAY_RESTART_READY_TIMEOUT` (the restart budget half of the
+lease) or look at why Doctor is slow.
+
 ## Gateway prelaunch hook
 
 **What it means:** `ALPHACLAW_GATEWAY_PRELAUNCH_HOOK=<absolute path>`

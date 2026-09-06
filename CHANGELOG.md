@@ -5,6 +5,159 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.9.74] - 2026-09-05
+
+Honest restart outcomes for the watchdog's automatic relaunch paths. An
+external audit of the installed 0.9.68 against `main` found that the watchdog
+could announce a successful restart the moment `launchGatewayProcess()`
+returned a child handle — an unchanged live child, or a fresh spawn that never
+became ready while the old gateway kept answering `/health` — could announce
+recovery and close an incident before `/readyz` was evaluated, could book a
+contender that lost OpenClaw's state-directory lock as a crash, and could let a
+`doctor --fix` that outlived its lifecycle-lock lease launch a second gateway
+into a successor's restart. Boot around an already-running gateway also stored
+no identity at all, so memory-leak detection was inert for the incumbent's
+lifetime. This entry extends the cold-restart supervisor (#58) and the
+incumbent-verified restart (#59) rather than replacing them.
+
+### Fixed
+
+- **Boot adopts the incumbent's identity.** When AlphaClaw starts while a
+  gateway is already serving the port, the launch handler now discovers the
+  serving process tree from `/proc` (root whose cmdline is a serving verb —
+  `gateway run`, `gateway --force`, `openclaw-gateway` — its worker, and the
+  root's start ticks) and the watchdog stores it as `servingPid` /
+  `servingRootPid` with `supervisionMode: "adopted"`; the gateway card labels
+  it "adopted (started outside AlphaClaw; health and memory monitored, exit
+  events unavailable)". Memory-leak protection now covers a gateway AlphaClaw
+  did not spawn; the memory tick re-reads the root's start ticks before every
+  sample and treats a mismatch as pid reuse (`no_gateway`, one
+  `serving_identity_lost` row) instead of attributing a stranger's RSS. Zero
+  or more than one candidate root stays `detached` (today's behaviour).
+  `gatewayPid` keeps its meaning — set only by launches AlphaClaw made.
+- **Relaunch outcomes are explicit; `restart ok` means a verified
+  replacement.** One primitive (`runVerifiedRelaunch`) now serves repair, the
+  crash relaunch, the startup medic and the config-change retry, over a new
+  `gateway.requestGatewayLaunch()` with five outcomes (`incumbent_present`,
+  `child_retained`, `launch_requested`, `launch_aborted`, `launch_failed`;
+  the incumbent check is re-run after the preflight awaits, and every spawn
+  stamps a launch `generation`). A relaunch books `restart/<source>/requested`
+  and installs a pending replacement; `restart/<source>/ok {verified: true}`
+  is written only when a later healthy + ready probe observes the new
+  identity (a matching launch payload, or a serving-pid snapshot containing
+  only our launcher/worker). A green answer from the OLD gateway records
+  liveness only (`health_check/ok {replacementPending: true}`) — no recovery
+  notice, no incident close, no counter reset. The pending replacement fails
+  honestly on the child's exit (`replacement_exited`), on the ready budget
+  (`replacement_not_ready`) or when a newer relaunch supersedes it, and it
+  blocks further relaunches until it resolves. Late exits of a superseded
+  launcher generation are `stalePredecessor` and never re-arm the crash
+  window. `runRepair().ok` is false when the relaunch failed or aborted;
+  `POST /api/watchdog/repair` surfaces `verdict`, `pending` and
+  `replacementPending`.
+- **Repair replaces an unhealthy incumbent instead of adopting it.** After
+  sustained degradation the incumbent IS the problem: `intent: "replace"`
+  recycles it through the verified cold-restart path (`gateway stop` →
+  `--force` → ready wait, #59's incumbent verdict) under the held lock,
+  bracketed by the expected-restart window exactly like the memory
+  mitigation. A refused stop is `replacement_failed
+  {incumbent_gateway_still_running}`, never success. Crash relaunches, the
+  medic and the config retry keep `relaunch_if_absent`: a healthy incumbent
+  (whose root is not the pid that just exited) is adopted; an unhealthy one
+  is left to the degraded ladder rather than blindly relaunched into a lock
+  conflict. Repair operation events record `trigger: "repair"`.
+- **Readiness gates recovery.** The health tick now runs liveness →
+  readiness → identity → recovery → incident close → `onHealthy` → verified
+  `ok`. A green `/health` over a failing `/readyz` is `readiness:
+  "not_ready"` with `readinessReason` and `degradedReason:
+  readiness_failing`: no "Gateway running again", the incident stays open (a
+  `gateway_readiness` incident opens when none is), one "🟡 Gateway is up but
+  not ready — <components>" notice per incident, `health_check/ok
+  {readinessPending: true}` rows collapse into one plus a count, and the
+  release-channel acceptance hook is told `onUnhealthy` so the build cannot
+  be promoted. An unreachable `/readyz` or a thrown evaluation is
+  `readiness: "unknown"` (one `readiness_probe_error` row) and does not block
+  recovery. Readiness alone never triggers repair.
+- **State-directory ownership exits are not crashes.** An exit-1 whose
+  stderr carries OpenClaw's ownership wording is classified
+  (`gateway_conflict` vs `state_writer_conflict`, pattern verified against
+  2026.7.1-2 and 2026.9.1-beta.1) and corroborated by an incumbent probe: a
+  healthy incumbent makes the contender's exit benign (`incumbentConflict`
+  row, identity adopted, no crash count, no "went down" notice); no healthy
+  gateway → degraded + incident + one notice naming the pid/role. A wedged
+  gateway holder is later replaced by repair; a state-writer holder (embedded
+  agent, backup, migration) gets backoff relaunches only — never `doctor
+  --fix`, never `gateway stop`, because neither can free that lock.
+- **Lease-expired holders cannot mutate lifecycle.** The lifecycle lock's
+  `release` function now carries `holdId`, `isValid()`, `isExpired()`,
+  `kind` and `startedAt`. Repair, the crash relaunch, the medic and the
+  config-change retry re-check `isValid()` after every await and
+  `requestGatewayLaunch({ shouldAbort })` / `runGatewayColdStart({
+  shouldAbort })` evaluate it immediately before the spawn and inside the
+  ready wait: an expired holder books `skipped {reason: "lease_expired"}` and
+  launches nothing (the medic's hand-rolled elapsed-time check, which used the
+  default constant even for overridden leases, is replaced). The repair hold
+  is leased at the Doctor ceiling plus the restart budget so a 10-minute
+  `doctor --fix` followed by a cold restart never outlives it. The
+  config-change retry takes the lock (`config_retry`) before moving its
+  mtime baseline and books one deduped skip per hold when it cannot.
+- **One transient timeout no longer triggers `doctor --fix`.** For an
+  established gateway the first failed probe still sets `degraded` and starts
+  the 5s→30s retry ladder, but auto-repair fires only after
+  `WATCHDOG_DEGRADED_REPAIR_THRESHOLD` consecutive liveness failures
+  (default 3) — the ladder's own retries may escalate, so a real outage
+  reaches repair about 15 s after the first miss, while a single `AbortError`
+  books `repair/<source>/skipped {reason: "awaiting_sustained_failure"}` and
+  nothing else. A serving pid proven dead (`ESRCH`, or changed `/proc` start
+  ticks) skips Doctor entirely and relaunches under the crash-restart
+  discipline (`crash/probe_death`); a port-down observation alone is not
+  death. The startup 3-strike gate is unchanged.
+- Status and UI: `GET /api/watchdog/status` adds `servingPid`,
+  `servingRootPid`, `supervisionMode`, `readiness`, `readinessReason`,
+  `replacementPending`, `lastRepairVerdict`, `degradedRepairThreshold`; the
+  reducer's `supervision` is three-valued (`managed` / `adopted` /
+  `detached`, the "estimated" detail fires for both non-managed modes); the
+  incidents timeline labels the new rows ("relaunch requested", "replacement
+  verified", "up, not ready", "up, replacement unverified") instead of raw
+  "ok"; the resources card samples `servingPid ?? gatewayPid`; the overseer
+  projection carries the identity and readiness fields. Design doc §4 row 8
+  now states the real gate, §5 gains the `degraded (readiness)` variant, §7's
+  force-release claim is corrected (ownership query, no process-tree kill),
+  §9 gains the identity fence and a "Repair contract" section; three runbook
+  entries added to docs/upgrade-troubleshooting.md.
+
+### Added
+
+- **`WATCHDOG_DEGRADED_REPAIR_THRESHOLD`** — consecutive failed liveness
+  probes on an established gateway before auto-repair runs (default `3`,
+  clamped `1`–`20`, parsed through the shared `readClampedEnvCount` with one
+  boot warn on clamp). Read at process start; deployment env only — never
+  honored from `.env` (member of `kDeploymentOnlyEnvKeys`). **Migration:**
+  before this release repair ran on the FIRST steady-state failure; set the
+  variable to `1` to restore that behaviour (it is the kill switch for the
+  sustained-failure gate).
+- `gateway.js` exports `requestGatewayLaunch`, `kGatewayLaunchOutcomes`,
+  `resolveServingIdentity`, `getLaunchGeneration`, `listGatewayPids`;
+  `openclaw-lock-contention.js` gains `readProcStartTicks`,
+  `kGatewayServingCmdlinePattern`, `kGatewayOwnershipConflictPattern`,
+  `classifyOwnershipConflict` and now co-hosts `kGatewayProcessPattern`
+  (evidence pattern) beside the serving pattern; `utils/number.js` gains
+  `readClampedEnvNumber` / `readClampedEnvCount` (`readClampedEnvSeconds`
+  warn strings byte-identical). `launchGatewayProcess` stays as a
+  compatibility wrapper with unchanged behaviour.
+- Tests: launch outcomes and the post-preflight re-check, serving-identity
+  filter (root vs worker vs CLI verb; two roots → null), spawn-time abort,
+  lock hold accessors, adopted boot identity in status/reducer/memory tick,
+  pending-replacement lifecycle (verified ok, exited, not ready, superseded,
+  early launch handler, deadline-after-probe, dedupe), wedged-incumbent
+  replace through the real cold restart (incl. the refused-stop variant),
+  readiness-gated recovery and its incident, the six ownership-conflict
+  wordings with healthy/unhealthy incumbents, generation fence, sustained
+  gate and `degraded_retry` escalation, probe-detected death, lease-expired
+  repair, production wiring pin, timeline labels. Container tier not runnable
+  in this environment (no Docker) — hermetic `npm test` is the recorded
+  result; the container cases are filed in TODOS.
+
 ## [0.9.73] - 2026-09-04
 
 Restart is offered from the gateway card in every onboarded state. The unified
