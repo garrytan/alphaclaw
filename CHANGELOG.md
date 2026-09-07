@@ -5,6 +5,48 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.9.78] - 2026-09-07
+
+Follow-up to 0.9.77: the live e2e tier was run for real against the released
+branch (in a Conductor cloud sandbox — Node 22 first on `PATH`,
+`ALPHACLAW_LIVE_OPENCLAW_CACHE` set, 19.7 min). One red cell was ours.
+
+### Fixed
+
+- **`tests/live/openclaw-live-downgrade.e2e.test.js` pinned the pre-D1a
+  backup ladder.** The "beta-written state → stable" cell still expected
+  `producer: "openclaw"` and one paused upstream attempt. Since 0.9.77 the
+  AlphaClaw offline copy is the FIRST rung of every quiesce and succeeds on
+  the paused state dir, so the record is `producer: alphaclaw-offline-copy`,
+  `attempts: 0`, `attemptsDetail: [offline_copy/primary]`, `offlineCopy.ok`
+  with no hand-over, and a `*.alphaclaw.tar.gz` archive. Re-stamped and
+  re-run green against the real 2026.9.1-beta.1 → 2026.8.2 pair.
+
+### Known
+
+- **The rest of the live tier's reds are pin drift, not this code.** 7 files
+  green (including the copy-first / format-2 cells of
+  `openclaw-live-backup-contention.e2e.test.js`), 2 self-skipped (Docker;
+  the billed claude.ai session), 5 files / 20 tests red on assertions
+  stamped against pin 2026.7.1-2 that the 2026.9.2 pin (0.9.76) invalidated:
+  `approvals --help` lists `pending` and `gateway stop --help` lists
+  `--force` on the pin; the pin has `database preflight` and materializes
+  `user_version 15` (the restore drill's 12 cells expect `unsupported` /
+  `migration-required` from a `user_version 1` fixture); the pin takes the
+  legacy-audit lease under a held RESERVED lock like 2026.8.2 (contention
+  cell 4); and ≥ 2026.8.2 `backup create` refuses the harness's
+  metadata-less agent-DB fixture (all 5 `openclaw-live-backup` cases).
+  `main`'s nightly `live-e2e.yml` has failed on exactly these since
+  2026-09-06. Tracked as the P1 TODOS entry "Live tier: re-stamp every
+  pin-2026.7.1-2 assumption", which also records that the per-version
+  install cache defaults to a path inside vitest's per-run `TMPDIR` (deleted
+  at teardown) and the Conductor cloud run recipe.
+- **The container tier ran in CI, not here.** 0.9.77's Known note said the
+  first green container run on `main` would be the confirmation; the PR's
+  `container-e2e` job ran the boot-durability leg on real Docker and is
+  green after the one fix it surfaced (the bin phase's dangling-record
+  closures were missing from `boot-report.json`).
+
 ## [0.9.77] - 2026-09-07
 
 Boot-spine, repair and backup fixes for the 2026-09-06 incident (issue #76)
