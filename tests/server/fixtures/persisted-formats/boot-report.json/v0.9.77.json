@@ -1,0 +1,123 @@
+{
+  "schema": "alphaclaw.boot-report.v1",
+  "bootId": "7:1788681600000",
+  "at": 1788681600000,
+  "alphaclaw": {
+    "version": "0.9.77",
+    "commit": "a1b2c3d",
+    "previousVersion": "0.9.76",
+    "firstBootOfVersion": true
+  },
+  "container": {
+    "pid1StartTicks": 3431,
+    "startMs": 1788681540000
+  },
+  "pidfile": {
+    "evidence": null,
+    "decision": "proceed",
+    "reason": "absent",
+    "record": {
+      "raw": null,
+      "format": null,
+      "legacyClaim": false
+    },
+    "pid": null,
+    "killOk": null,
+    "tgid": null,
+    "selfPid": 7,
+    "recordedTicks": null,
+    "liveTicks": null,
+    "recordedContainerTicks": null,
+    "liveContainerTicks": 3431,
+    "containerStartMs": null,
+    "claimAt": null,
+    "cmdline": null,
+    "argvMatched": null
+  },
+  "openclaw": {
+    "declaredPin": "2026.9.2",
+    "channelApplied": "2026.9.2",
+    "lastKnownGood": "2026.9.2",
+    "expected": "2026.9.2",
+    "installedAtBoot": "2026.7.1-2",
+    "resolvedForLaunch": "2026.7.1-2",
+    "installedDiverged": true,
+    "overlayPresent": false,
+    "overlayComplete": false,
+    "sentinelMatches": false,
+    "bootSync": {
+      "action": "noop",
+      "reason": null,
+      "warnings": [
+        "installed 2026.7.1-2 is not the recorded build 2026.9.2 and no overlay is stored"
+      ]
+    }
+  },
+  "binPhase": {
+    "status": "ok"
+  },
+  "serverPhase": {
+    "status": "recorded",
+    "installedVersion": "2026.7.1-2",
+    "stateDb": [
+      {
+        "path": "/data/.openclaw/openclaw.sqlite",
+        "kind": "state",
+        "agentId": null,
+        "userVersion": 15,
+        "status": "ok"
+      },
+      {
+        "path": "/data/.openclaw/agents/main/agent.sqlite",
+        "kind": "agent",
+        "agentId": "main",
+        "userVersion": 19,
+        "status": "ok"
+      }
+    ],
+    "supportedSchema": {
+      "state": 1,
+      "agent": null,
+      "source": "seeded"
+    },
+    "config": {
+      "sha256": "9e107d9d372bb6826bd81d3542a419d6f4c3e2a1b0c9d8e7f6a5b4c3d2e1f0a9",
+      "lastTouchedVersion": "2026.9.2",
+      "sha256AfterReconcile": "9e107d9d372bb6826bd81d3542a419d6f4c3e2a1b0c9d8e7f6a5b4c3d2e1f0a9",
+      "migrationGate": {
+        "status": "held",
+        "reason": "version_mismatch",
+        "hold": "version_mismatch"
+      },
+      "restoredFrom": null
+    },
+    "channelInfo": {
+      "installedVersion": "2026.7.1-2",
+      "expectedVersion": "2026.9.2",
+      "installedDiverged": true
+    },
+    "legacyExecApprovalsPresent": false,
+    "danglingRecords": {
+      "closedRuns": [
+        "9b1f6c2e-3d4a-4f5b-8c6d-7e8f9a0b1c2d"
+      ],
+      "closedLastUpdateRun": true
+    },
+    "at": 1788681605000,
+    "reconcile": {
+      "status": "held",
+      "reason": "version_mismatch",
+      "hold": "version_mismatch"
+    },
+    "compat": {
+      "compatible": false,
+      "hold": "version_mismatch"
+    },
+    "gatewayHeld": true,
+    "legacyExecApprovalsReaped": false,
+    "verdict": [
+      "installed_not_expected",
+      "state_schema_too_new"
+    ]
+  }
+}

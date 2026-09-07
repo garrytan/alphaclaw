@@ -159,6 +159,50 @@ describe("server/routes/watchdog", () => {
     expect(res.body.hint).toContain("release-channel state file");
   });
 
+  it("Stage 3: `force: true` in the body is the one-shot pause resume passed to triggerRepair; a body without it repairs normally; a non-boolean force is a 400", async () => {
+    const deps = createDeps();
+    const app = createApp(deps);
+    await request(app).post("/api/watchdog/repair").send({ force: true });
+    expect(deps.watchdog.triggerRepair).toHaveBeenLastCalledWith({ force: true });
+    await request(app).post("/api/watchdog/repair");
+    expect(deps.watchdog.triggerRepair).toHaveBeenLastCalledWith({ force: false });
+    const bad = await request(app).post("/api/watchdog/repair").send({ force: "yes" });
+    expect(bad.status).toBe(400);
+    expect(bad.body).toEqual({ ok: false, error: "Expected force to be a boolean" });
+    expect(deps.watchdog.triggerRepair).toHaveBeenCalledTimes(2);
+  });
+
+  it("maps an auto_repair_paused refusal to 409 with the catalog copy, the force hint and the pause record (Stage 3 B1.3)", async () => {
+    const { kAutoRepairPauseCopy } = require("../../lib/server/gateway-state");
+    const deps = createDeps();
+    const pause = {
+      at: "2026-09-06T08:05:00.000Z",
+      cause: "state_schema_too_new",
+      fingerprint: "63e47a67df1b",
+      installedVersion: "2026.7.1-2",
+      attempts: 1,
+      lastPlan: { rung: "recover_bootable", outcome: "no_bootable_version" },
+      reason: "structural_repair_failed",
+    };
+    deps.watchdog.triggerRepair.mockResolvedValue({
+      ok: false,
+      skipped: true,
+      reason: "auto_repair_paused",
+      pause,
+    });
+    const res = await request(createApp(deps)).post("/api/watchdog/repair");
+    expect(res.status).toBe(409);
+    expect(res.body).toEqual({
+      ok: false,
+      code: "auto_repair_paused",
+      error: kAutoRepairPauseCopy.repairRefusal,
+      hint: kAutoRepairPauseCopy.hint,
+      pause,
+      result: { ok: false, skipped: true, reason: "auto_repair_paused", pause },
+    });
+    expect(res.body.hint).toContain('"force": true');
+  });
+
   it("triggers repair and returns result on POST /api/watchdog/repair", async () => {
     const deps = createDeps();
     deps.watchdog.triggerRepair.mockResolvedValue({

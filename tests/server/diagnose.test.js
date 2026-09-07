@@ -107,6 +107,28 @@ const populate = ({ rootDir, openclawDir, installDir, managedDir, store }) => {
       serverPhase: { status: "recorded", verdict: ["installed_not_expected", "pidfile_contradiction"] },
     }),
   );
+  // The last REFUSED start (boot-report-refused.json): a second instance the
+  // pidfile guard turned away for a corroborated live owner — bin half only,
+  // server phase not_reached, kept OUT of the ring by the writer.
+  writeJson(
+    path.join(managedDir, "boot-report-refused.json"),
+    bootReport("41:1", {
+      pidfile: {
+        evidence: { pid: 21, corroborated: true },
+        decision: "skip",
+        reason: "corroborated",
+        record: { raw: { pid: 21, at: 1, startTicks: 5 }, format: 2, legacyClaim: false },
+      },
+      openclaw: {
+        expected: "2026.9.2",
+        installedAtBoot: "2026.7.1-2",
+        resolvedForLaunch: "2026.7.1-2",
+        installedDiverged: true,
+        bootSync: { action: "skipped_concurrent", reason: "live_server_corroborated", warnings: [] },
+      },
+      serverPhase: { status: "not_reached", reason: "pidfile_skip", at: kNow - 500, verdict: ["installed_not_expected"] },
+    }),
+  );
 
   store.writeState({
     pinVersion: "2026.9.2",
@@ -262,13 +284,18 @@ describe("diagnose: collectDiagnose over a populated root (disk path)", () => {
     expect(data.record).toMatchObject({ version: "0.9.77", commit: "abc123", bootCount: 3, previous: { version: "0.9.76" } });
   });
 
-  it("bootReports: current, rotated previous, pinned incident and the current verdict", () => {
+  it("bootReports: current, rotated previous, pinned incident, the last refused start and the current verdict", () => {
     const { source, data } = bundle.sections.bootReports;
     expect(source).toBe("disk");
     expect(data.current.bootId).toBe("40:1");
     expect(data.previous.map((r) => r.bootId)).toEqual(["39:1"]);
     expect(data.incident.bootId).toBe("38:1");
     expect(data.incident.serverPhase.verdict).toEqual(["installed_not_expected", "pidfile_contradiction"]);
+    // The refused start is its own entry — never a ring slot, never the
+    // current boot, never the verdict the summary reports.
+    expect(data.refused.bootId).toBe("41:1");
+    expect(data.refused.serverPhase).toMatchObject({ status: "not_reached", reason: "pidfile_skip", verdict: ["installed_not_expected"] });
+    expect(data.previous.map((r) => r.bootId)).not.toContain("41:1");
     expect(data.verdict).toEqual([]);
     expect(data.unreadable).toEqual([]);
     expect(bundle.summary.bootVerdict).toEqual([]);
@@ -446,6 +473,25 @@ describe("diagnose: collectDiagnose over a populated root (disk path)", () => {
     expect(md).toContain("corrupt (SQLITE_NOTADB)");
     expect(md).toContain("cause: `state_schema_too_new`");
     expect(md).toContain("INCONSISTENT — `installed_not_expected`, `pidfile_contradiction`");
+    // "installed" is the tree the gateway RUNS (resolvedForLaunch, the
+    // report's one reader); the pinned incident's bin half only knows the
+    // pre-sync read and is labelled so instead of passing it off as the
+    // launch tree. The old "installed at boot … resolved for launch …" pair
+    // is gone.
+    expect(md).toContain("expected 2026.9.2, installed 2026.9.2, diverged false");
+    expect(md).toContain("openclaw expected 2026.9.2 / installed 2026.9.2; sync none; pidfile proceed/absent");
+    expect(md).toContain("expected 2026.9.2, installed 2026.7.1-2 (at boot), diverged n/a");
+    expect(md).not.toContain("installed at boot");
+    expect(md).not.toContain("resolved for launch");
+    // The refused start renders under its own heading, outside the ring,
+    // with the bin-half verdict and the not_reached server phase.
+    expect(md).toContain("### Last refused start");
+    expect(md).toContain("boot-report-refused.json — a second instance");
+    expect(md).toContain("boot `41:1` at 2023-11-14T22:13:19.000Z — INCONSISTENT — `installed_not_expected`");
+    expect(md).toContain("expected 2026.9.2, installed 2026.7.1-2, diverged true");
+    expect(md).toContain("- server phase: not_reached (pidfile_skip) at 2023-11-14T22:13:19.500Z");
+    expect(md).toContain("- pidfile: skip (corroborated)");
+    expect(md).toContain("- boot sync: skipped_concurrent (live_server_corroborated)");
     expect(md).toContain("gateway hold: config_migration_failed since 2023-11-14T22:13:10.000Z");
     expect(md).toContain("- blocklist: `beta:2026.9.1-beta.1 (crash_loop)`");
     expect(md).toContain("- last known good: package 2026.9.1, dev none");
@@ -472,7 +518,7 @@ describe("diagnose: a fresh root (nothing written yet)", () => {
     expect(bundle.sections.incidents.reason).toContain("watchdog.db");
     expect(bundle.sections.incidents.reason).toContain("not found");
     expect(bundle.sections.selfVersion.data).toEqual({ path: path.join(ctx.managedDir, "alphaclaw-version.json"), present: false, record: null });
-    expect(bundle.sections.bootReports.data).toMatchObject({ current: null, previous: [], incident: null, unreadable: [], verdict: null });
+    expect(bundle.sections.bootReports.data).toMatchObject({ current: null, previous: [], incident: null, refused: null, unreadable: [], verdict: null });
     expect(bundle.sections.channelState.data).toMatchObject({ stateCorrupted: false, pinVersion: null, applied: null, gatewayHold: null, installedVersion: null });
     expect(bundle.sections.pidfile.data.decision).toMatchObject({ decision: "proceed", reason: "absent" });
     expect(bundle.sections.stateDb.data.entries).toEqual([]);
@@ -494,6 +540,7 @@ describe("diagnose: a fresh root (nothing written yet)", () => {
     expect(md).toContain("## Incidents (unavailable)");
     expect(md).toContain("- no stamp at");
     expect(md).toContain("- no boot-report.json under");
+    expect(md).toContain("- none (no start has been refused for a corroborated live owner)");
     expect(md).toContain("- no databases found");
     expect(md).toContain("- no backups directory at");
     expect(md).toContain("- last known good: none");
@@ -511,6 +558,7 @@ describe("diagnose: corrupt artifacts are reported explicitly", () => {
     fs.writeFileSync(ctx.store.statePath, "{ this is not json");
     fs.writeFileSync(path.join(ctx.managedDir, "boot-report.json"), "garbage");
     fs.writeFileSync(path.join(ctx.managedDir, "boot-report-incident.json"), "[1,2]");
+    fs.writeFileSync(path.join(ctx.managedDir, "boot-report-refused.json"), '{"bootId":');
     fs.writeFileSync(path.join(ctx.managedDir, "alphaclaw-version.json"), "{{");
     fs.writeFileSync(path.join(ctx.rootDir, "gateway-state.json"), "nope");
     fs.writeFileSync(path.join(ctx.openclawDir, "alphaclaw-restart-operation.json"), "");
@@ -540,9 +588,11 @@ describe("diagnose: corrupt artifacts are reported explicitly", () => {
     expect(data.current).toBeNull();
     expect(data.previous.map((r) => r.bootId)).toEqual(["39:1"]);
     expect(data.incident).toBeNull();
-    expect(data.unreadable.sort()).toEqual(["boot-report-incident.json", "boot-report.json"]);
+    expect(data.refused).toBeNull();
+    expect(data.unreadable.sort()).toEqual(["boot-report-incident.json", "boot-report-refused.json", "boot-report.json"]);
     expect(warnings.some((w) => w.includes("boot-report.json is unreadable"))).toBe(true);
-    expect(renderDiagnoseMarkdown(bundle)).toContain("- unreadable files: `boot-report-incident.json`, `boot-report.json`");
+    expect(warnings.some((w) => w.includes("boot-report-refused.json is unreadable"))).toBe(true);
+    expect(renderDiagnoseMarkdown(bundle)).toContain("- unreadable files: `boot-report-incident.json`, `boot-report-refused.json`, `boot-report.json`");
   });
 
   it("a corrupt version stamp, gateway-state and restart-op file are present-but-unreadable with a warning each", () => {
@@ -683,6 +733,8 @@ describe("diagnose: live seams (server path)", () => {
       { id: 8, incidentKey: "crash_loop", status: "resolved", openedAt: "2026-09-06T12:00:00.000Z", resolvedAt: "2026-09-06T12:01:00.000Z", cause: null, eventCount: 3, summary: null },
     ]);
     expect(bundle.sections.bootReports.data.current.bootId).toBe("live:1");
+    // A reader that predates the refused file yields the documented empty state.
+    expect(bundle.sections.bootReports.data.refused).toBeNull();
     expect(bundle.summary.bootVerdict).toEqual(["state_schema_too_new"]);
     expect(bundle.sections.selfVersion.data.record.version).toBe("0.9.77");
     // readLogTail text: complete lines only, then the tag filter.
@@ -773,5 +825,38 @@ describe("diagnose: render helpers", () => {
     expect(md).toContain("## Watchdog (unavailable)\n_Unavailable: no section_");
     expect(md).toContain("## State databases (disk)");
     expect(md).toContain("- generated: 2023-11-14T22:13:20.000Z");
+  });
+
+  it("boot-report 'installed' follows describeReportVersions: the launch tree with the pre-sync read beside it when they differ, the server phase's read when the bin half is missing, and '(at boot)' only when nothing but the pre-sync read is known", () => {
+    const report = (bootId, openclaw, serverPhase = { status: "recorded", verdict: [] }) => ({ bootId, at: kNow, openclaw, serverPhase });
+    const md = renderDiagnoseMarkdown({
+      sections: {
+        bootReports: {
+          source: "disk",
+          warnings: [],
+          data: {
+            // An activation boot: the sync moved the tree from 2026.7.1-2 to 2026.9.2.
+            current: report("50:1", { expected: "2026.9.2", installedAtBoot: "2026.7.1-2", resolvedForLaunch: "2026.9.2", installedDiverged: false }),
+            previous: [
+              // No bin phase (the server phase created the report): its own read counts.
+              report("49:1", null, { status: "recorded", verdict: [], installedVersion: "2026.9.1", channelInfo: { expectedVersion: "2026.9.2", installedDiverged: true } }),
+              // Only the pre-sync read is known.
+              report("48:1", { expected: "2026.9.2", installedAtBoot: "2026.8.2" }),
+              // Nothing known at all.
+              report("47:1", {}),
+            ],
+            incident: null,
+            refused: null,
+            unreadable: [],
+            verdict: [],
+          },
+        },
+      },
+    });
+    expect(md).toContain("expected 2026.9.2, installed 2026.9.2 (at boot 2026.7.1-2), diverged false");
+    expect(md).toContain("openclaw expected 2026.9.2 / installed 2026.9.1; sync n/a");
+    expect(md).toContain("openclaw expected 2026.9.2 / installed 2026.8.2 (at boot); sync n/a");
+    expect(md).toContain("openclaw expected n/a / installed n/a; sync n/a");
+    expect(md).toContain("- none (no start has been refused for a corroborated live owner)");
   });
 });

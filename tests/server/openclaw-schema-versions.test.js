@@ -1,8 +1,11 @@
 // OpenClaw schema-version oracles (#76/#78): PRAGMA user_version against real
 // node:sqlite files (corrupt, busy, missing), the never-executing dist scan
 // for the declared OPENCLAW_{STATE,AGENT}_SCHEMA_VERSION constants (two
-// passes, agreement rule, read budget), compareSchema, and the seeded/learned
-// schema table (declared > seeded; observed is evidence only).
+// passes, agreement rule, read budget), compareSchema, the seeded/learned
+// schema table (declared > seeded; observed is evidence only), the launch
+// compatibility gate (C1 belt / C2: declared / table / verb / all-null /
+// corrupt / exec-approvals matrix) and the bootable-candidate chooser (B1.4:
+// ordering, table pre-filter, prober confirmation, cap).
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
@@ -19,7 +22,14 @@ const {
   resolveDeclaredSchemaVersionsAsync,
   compareSchema,
   createSchemaVersionTable,
+  kLaunchCompatReasons,
+  assessLaunchCompatibility,
+  kChooserMaxCandidates,
+  lacksDatabasePreflightVerb,
+  chooseBootableVersion,
 } = require("../../lib/server/openclaw-schema-versions");
+const { kBootVerdicts } = require("../../lib/server/boot-report");
+const { kGatewayCrashCauses } = require("../../lib/server/gateway-crash-cause");
 
 const mkTemp = (prefix) => fs.mkdtempSync(path.join(os.tmpdir(), prefix));
 
@@ -610,5 +620,761 @@ describe("openclaw-schema-versions: schema table", () => {
       at: 100,
       observed: { state: 16, agent: 19, at: 200 },
     });
+  });
+});
+
+// ── launch compatibility (C1 belt / C2) ────────────────────────────────────
+
+const kStateDbPath = "/data/.openclaw/state/openclaw.sqlite";
+const kAgentDbPath = (id) => `/data/.openclaw/agents/${id}/agent/openclaw-agent.sqlite`;
+const stateEntry = () => ({ path: kStateDbPath, kind: "state" });
+const agentEntry = (id = "main") => ({ path: kAgentDbPath(id), kind: "agent" });
+const okRead = (userVersion) => ({ userVersion, status: "ok" });
+// A reader seam keyed by path: `reads[path]` is the readSqliteUserVersion
+// result that DB yields (a missing key reads as a missing file).
+const readerFor = (reads) =>
+  vi.fn((dbPath) => (Object.hasOwn(reads, dbPath) ? reads[dbPath] : { userVersion: null, status: "missing" }));
+
+describe("openclaw-schema-versions: assessLaunchCompatibility", () => {
+  const kReasons = kLaunchCompatReasons;
+
+  it("pins the reason vocabulary to the boot verdicts and crash causes it shares words with", () => {
+    expect(Object.isFrozen(kReasons)).toBe(true);
+    expect(kReasons).toEqual({
+      stateSchemaTooNew: "state_schema_too_new",
+      agentSchemaTooNew: "agent_schema_too_new",
+      stateDbUnreadable: "state_db_unreadable",
+      stateDbPreflightBlocked: "state_db_preflight_blocked",
+      legacyExecApprovalsPresent: "legacy_exec_approvals_present",
+      stateDbBusy: "state_db_busy",
+      stateDbIndeterminate: "state_db_indeterminate",
+      supportedSchemaUnknown: "supported_schema_unknown",
+    });
+    // One word per defect across the gate, the boot report and the classifier.
+    expect(kReasons.stateSchemaTooNew).toBe(kBootVerdicts.stateSchemaTooNew);
+    expect(kReasons.agentSchemaTooNew).toBe(kBootVerdicts.agentSchemaTooNew);
+    expect(kReasons.stateDbUnreadable).toBe(kBootVerdicts.stateDbUnreadable);
+    expect(kReasons.legacyExecApprovalsPresent).toBe(kBootVerdicts.legacyExecApprovalsPresent);
+    expect(kGatewayCrashCauses).toEqual(expect.arrayContaining([kReasons.stateSchemaTooNew, kReasons.agentSchemaTooNew]));
+  });
+
+  it("declared: every DB at or below the supported schema is compatible, without probing", async () => {
+    const readUserVersion = readerFor({
+      [kStateDbPath]: okRead(15),
+      [kAgentDbPath("main")]: okRead(19),
+      [kAgentDbPath("ops")]: okRead(17),
+    });
+    const probeState = vi.fn();
+    const result = await assessLaunchCompatibility({
+      entries: [stateEntry(), agentEntry("main"), agentEntry("ops")],
+      supported: { state: 15, agent: 19 },
+      readUserVersion,
+      probeState,
+    });
+    expect(result.compatible).toBe(true);
+    expect(result.reasons).toEqual([]);
+    expect(result.perDb).toEqual([
+      { path: kStateDbPath, kind: "state", userVersion: 15, status: "ok", verdict: "exact", supported: 15 },
+      { path: kAgentDbPath("main"), kind: "agent", userVersion: 19, status: "ok", verdict: "exact", supported: 19 },
+      { path: kAgentDbPath("ops"), kind: "agent", userVersion: 17, status: "ok", verdict: "migration-required", supported: 19 },
+    ]);
+    expect(probeState).not.toHaveBeenCalled();
+    // user_version is read fresh per DB (Eng 1A: never cached by the gate).
+    expect(readUserVersion).toHaveBeenCalledTimes(3);
+    expect(readUserVersion).toHaveBeenCalledWith(kStateDbPath);
+  });
+
+  it("declared: a state DB newer than the build supports is fail-closed (the #76 shape)", async () => {
+    const result = await assessLaunchCompatibility({
+      entries: [stateEntry(), agentEntry()],
+      supported: { state: 1, agent: null },
+      readUserVersion: readerFor({ [kStateDbPath]: okRead(12), [kAgentDbPath("main")]: okRead(17) }),
+      lacksVerb: true,
+    });
+    expect(result.compatible).toBe(false);
+    // The blocking reason leads; the agent line's unknown is still reported.
+    expect(result.reasons).toEqual([kReasons.stateSchemaTooNew, kReasons.supportedSchemaUnknown]);
+    expect(result.perDb[0]).toMatchObject({ kind: "state", userVersion: 12, verdict: "incompatible", supported: 1 });
+    expect(result.perDb[1]).toMatchObject({ kind: "agent", userVersion: 17, verdict: "unknown", supported: null });
+  });
+
+  it("declared: an agent DB newer than the build supports blocks on its own (#78's agent line)", async () => {
+    const result = await assessLaunchCompatibility({
+      entries: [stateEntry(), agentEntry("main"), agentEntry("ops")],
+      supported: { state: 15, agent: 19 },
+      readUserVersion: readerFor({
+        [kStateDbPath]: okRead(15),
+        [kAgentDbPath("main")]: okRead(21),
+        [kAgentDbPath("ops")]: okRead(21),
+      }),
+    });
+    expect(result.compatible).toBe(false);
+    // Two agent DBs too new → one deduped reason.
+    expect(result.reasons).toEqual([kReasons.agentSchemaTooNew]);
+    expect(result.perDb.filter((row) => row.verdict === "incompatible")).toHaveLength(2);
+  });
+
+  it("table: the caller's table-resolved numbers are judged the same way as declared ones", async () => {
+    const table = createSchemaVersionTable({ managedDir: mkTemp("alphaclaw-compat-table-"), logger: { warn: vi.fn() } });
+    const supported = table.supportedFor("2026.9.1-beta.1");
+    expect(supported).toEqual({ state: 12, agent: 17, source: "seeded" });
+    const reads = { [kStateDbPath]: okRead(15), [kAgentDbPath("main")]: okRead(19) };
+    const result = await assessLaunchCompatibility({
+      entries: [stateEntry(), agentEntry()],
+      supported,
+      readUserVersion: readerFor(reads),
+    });
+    expect(result.compatible).toBe(false);
+    expect(result.reasons).toEqual([kReasons.stateSchemaTooNew, kReasons.agentSchemaTooNew]);
+    const fits = await assessLaunchCompatibility({
+      entries: [stateEntry(), agentEntry()],
+      supported: table.supportedFor("2026.9.2"),
+      readUserVersion: readerFor(reads),
+    });
+    expect(fits).toMatchObject({ compatible: true, reasons: [] });
+    fs.rmSync(path.dirname(table.filePath), { recursive: true, force: true });
+  });
+
+  it("verb: an unknown state schema is settled by the prober — pass is compatible", async () => {
+    const probeState = vi.fn(async () => "pass");
+    const result = await assessLaunchCompatibility({
+      entries: [stateEntry(), agentEntry()],
+      supported: { state: null, agent: 19 },
+      readUserVersion: readerFor({ [kStateDbPath]: okRead(15), [kAgentDbPath("main")]: okRead(19) }),
+      lacksVerb: false,
+      probeState,
+    });
+    expect(result.compatible).toBe(true);
+    expect(result.reasons).toEqual([]);
+    expect(probeState).toHaveBeenCalledTimes(1);
+    expect(result.perDb[0]).toMatchObject({ kind: "state", verdict: "unknown", supported: null, probe: "pass" });
+    // The agent row was judged by the numbers, not the probe.
+    expect(result.perDb[1]).toMatchObject({ kind: "agent", verdict: "exact" });
+    expect(result.perDb[1]).not.toHaveProperty("probe");
+  });
+
+  it("verb: a prober block is fail-closed with its own reason", async () => {
+    const result = await assessLaunchCompatibility({
+      entries: [stateEntry()],
+      supported: null,
+      readUserVersion: readerFor({ [kStateDbPath]: okRead(15) }),
+      probeState: async () => "block",
+    });
+    expect(result).toMatchObject({ compatible: false, reasons: [kReasons.stateDbPreflightBlocked] });
+    expect(result.perDb[0].probe).toBe("block");
+  });
+
+  it.each([["unsupported"], ["budget_exhausted"], [null], [undefined]])(
+    "verb: a prober answer of %j proves nothing → indeterminate",
+    async (answer) => {
+      const result = await assessLaunchCompatibility({
+        entries: [stateEntry()],
+        supported: { state: null, agent: 19 },
+        readUserVersion: readerFor({ [kStateDbPath]: okRead(15) }),
+        probeState: async () => answer,
+      });
+      expect(result.compatible).toBeNull();
+      expect(result.reasons).toEqual([kReasons.supportedSchemaUnknown]);
+      expect(result.perDb[0].probe).toBe(answer ?? null);
+    },
+  );
+
+  it("verb: a throwing prober reads as no answer, never as a throw out of the gate", async () => {
+    const result = await assessLaunchCompatibility({
+      entries: [stateEntry()],
+      supported: null,
+      readUserVersion: readerFor({ [kStateDbPath]: okRead(15) }),
+      probeState: async () => {
+        throw new Error("spawn failed");
+      },
+    });
+    expect(result).toMatchObject({ compatible: null, reasons: [kReasons.supportedSchemaUnknown] });
+  });
+
+  it("verb: a build without the verb is never probed (lacksVerb) and stays unknown", async () => {
+    const probeState = vi.fn(async () => "pass");
+    const result = await assessLaunchCompatibility({
+      entries: [stateEntry()],
+      supported: { state: null, agent: null },
+      readUserVersion: readerFor({ [kStateDbPath]: okRead(1) }),
+      lacksVerb: true,
+      probeState,
+    });
+    expect(result).toMatchObject({ compatible: null, reasons: [kReasons.supportedSchemaUnknown] });
+    expect(probeState).not.toHaveBeenCalled();
+    expect(result.perDb[0]).not.toHaveProperty("probe");
+  });
+
+  it("verb: the prober is not spent once the verdict is already false", async () => {
+    const probeState = vi.fn(async () => "pass");
+    const result = await assessLaunchCompatibility({
+      entries: [stateEntry(), agentEntry()],
+      supported: { state: null, agent: 19 },
+      readUserVersion: readerFor({ [kStateDbPath]: okRead(15), [kAgentDbPath("main")]: okRead(21) }),
+      probeState,
+    });
+    expect(result.compatible).toBe(false);
+    expect(result.reasons).toEqual([kReasons.agentSchemaTooNew, kReasons.supportedSchemaUnknown]);
+    expect(probeState).not.toHaveBeenCalled();
+  });
+
+  it("all-null: no oracle and no prober → null with a loud, specific reason", async () => {
+    const result = await assessLaunchCompatibility({
+      entries: [stateEntry(), agentEntry()],
+      supported: null,
+      readUserVersion: readerFor({ [kStateDbPath]: okRead(15), [kAgentDbPath("main")]: okRead(19) }),
+    });
+    expect(result.compatible).toBeNull();
+    expect(result.reasons).toEqual([kReasons.supportedSchemaUnknown]);
+    expect(result.perDb.map((row) => row.verdict)).toEqual(["unknown", "unknown"]);
+  });
+
+  it("all-null: a resolved state line does not vouch for an unknown agent line", async () => {
+    const result = await assessLaunchCompatibility({
+      entries: [stateEntry(), agentEntry()],
+      supported: { state: null, agent: null },
+      readUserVersion: readerFor({ [kStateDbPath]: okRead(15), [kAgentDbPath("main")]: okRead(19) }),
+      probeState: async () => "pass",
+    });
+    expect(result).toMatchObject({ compatible: null, reasons: [kReasons.supportedSchemaUnknown] });
+  });
+
+  it("corrupt: a corrupt DB is fail-closed as state_db_unreadable even when the other DB is fine", async () => {
+    const probeState = vi.fn(async () => "pass");
+    const result = await assessLaunchCompatibility({
+      entries: [stateEntry(), agentEntry()],
+      supported: { state: null, agent: 19 },
+      readUserVersion: readerFor({
+        [kStateDbPath]: { userVersion: null, status: "corrupt", error: { code: "SQLITE_NOTADB", errcode: 26, message: "file is not a database" } },
+        [kAgentDbPath("main")]: okRead(19),
+      }),
+      probeState,
+    });
+    expect(result.compatible).toBe(false);
+    expect(result.reasons).toEqual([kReasons.stateDbUnreadable]);
+    expect(result.perDb[0]).toEqual({
+      path: kStateDbPath,
+      kind: "state",
+      userVersion: null,
+      status: "corrupt",
+      verdict: "unknown",
+      supported: null,
+    });
+    expect(probeState).not.toHaveBeenCalled();
+  });
+
+  it("corrupt: an agent DB that is not a database is the same fail-closed word", async () => {
+    const result = await assessLaunchCompatibility({
+      entries: [stateEntry(), agentEntry()],
+      supported: { state: 15, agent: 19 },
+      readUserVersion: readerFor({
+        [kStateDbPath]: okRead(15),
+        [kAgentDbPath("main")]: { userVersion: null, status: "corrupt", error: { code: "SQLITE_CORRUPT" } },
+      }),
+    });
+    expect(result).toMatchObject({ compatible: false, reasons: [kReasons.stateDbUnreadable] });
+    expect(result.perDb[1]).toMatchObject({ kind: "agent", status: "corrupt" });
+  });
+
+  it("busy: a locked DB is indeterminate, not a refusal", async () => {
+    const result = await assessLaunchCompatibility({
+      entries: [stateEntry(), agentEntry()],
+      supported: { state: 15, agent: 19 },
+      readUserVersion: readerFor({
+        [kStateDbPath]: { userVersion: null, status: "busy", error: { code: "SQLITE_BUSY" } },
+        [kAgentDbPath("main")]: okRead(19),
+      }),
+    });
+    expect(result).toMatchObject({ compatible: null, reasons: [kReasons.stateDbBusy] });
+    expect(result.perDb[0]).toMatchObject({ status: "busy", userVersion: null, verdict: "unknown" });
+  });
+
+  it("error: any other unreadable status (EACCES, a throwing reader, garbage) is indeterminate", async () => {
+    const result = await assessLaunchCompatibility({
+      entries: [stateEntry(), agentEntry("a"), agentEntry("b")],
+      supported: { state: 15, agent: 19 },
+      readUserVersion: vi.fn((dbPath) => {
+        if (dbPath === kStateDbPath) return { userVersion: null, status: "error", error: { code: "EACCES" } };
+        if (dbPath === kAgentDbPath("a")) throw new Error("reader exploded");
+        return { userVersion: "nineteen", status: "ok" };
+      }),
+    });
+    expect(result).toMatchObject({ compatible: null, reasons: [kReasons.stateDbIndeterminate] });
+    expect(result.perDb.map((row) => row.status)).toEqual(["error", "error", "error"]);
+    expect(result.perDb[1].userVersion).toBeNull();
+  });
+
+  it("missing: a DB that vanished is skipped silently (row kept, no reason)", async () => {
+    const result = await assessLaunchCompatibility({
+      entries: [stateEntry(), agentEntry()],
+      supported: { state: 15, agent: 19 },
+      readUserVersion: readerFor({ [kAgentDbPath("main")]: okRead(19) }),
+    });
+    expect(result).toMatchObject({ compatible: true, reasons: [] });
+    expect(result.perDb[0]).toMatchObject({ kind: "state", status: "missing", userVersion: null, verdict: "unknown" });
+  });
+
+  it("fresh box: no databases at all is trivially compatible", async () => {
+    const readUserVersion = vi.fn();
+    await expect(assessLaunchCompatibility({ entries: [], supported: null, readUserVersion })).resolves.toEqual({
+      compatible: true,
+      reasons: [],
+      perDb: [],
+    });
+    await expect(assessLaunchCompatibility()).resolves.toEqual({ compatible: true, reasons: [], perDb: [] });
+    expect(readUserVersion).not.toHaveBeenCalled();
+  });
+
+  it("exec-approvals: a legacy exec-approvals.json is fail-closed on its own, ahead of the DB reasons", async () => {
+    const clean = await assessLaunchCompatibility({
+      entries: [stateEntry()],
+      supported: { state: 15, agent: 19 },
+      readUserVersion: readerFor({ [kStateDbPath]: okRead(15) }),
+      legacyExecApprovalsPresent: true,
+    });
+    expect(clean).toMatchObject({ compatible: false, reasons: [kReasons.legacyExecApprovalsPresent] });
+    const combined = await assessLaunchCompatibility({
+      entries: [stateEntry()],
+      supported: { state: 1, agent: null },
+      readUserVersion: readerFor({ [kStateDbPath]: okRead(12) }),
+      legacyExecApprovalsPresent: true,
+    });
+    expect(combined.compatible).toBe(false);
+    expect(combined.reasons).toEqual([kReasons.legacyExecApprovalsPresent, kReasons.stateSchemaTooNew]);
+    // Only the literal boolean counts — a truthy string from a sloppy caller does not refuse.
+    const sloppy = await assessLaunchCompatibility({
+      entries: [],
+      legacyExecApprovalsPresent: "yes",
+    });
+    expect(sloppy.compatible).toBe(true);
+  });
+
+  it("ignores malformed entries instead of reading them", async () => {
+    const readUserVersion = readerFor({ [kStateDbPath]: okRead(15) });
+    const result = await assessLaunchCompatibility({
+      entries: [null, { kind: "state" }, { path: "", kind: "state" }, { path: "/x", kind: "workspace" }, stateEntry()],
+      supported: { state: 15, agent: 19 },
+      readUserVersion,
+    });
+    expect(result.compatible).toBe(true);
+    expect(result.perDb).toHaveLength(1);
+    expect(readUserVersion).toHaveBeenCalledTimes(1);
+  });
+
+  it("reads real databases through the default readSqliteUserVersion seam", async () => {
+    const tempDir = mkTemp("alphaclaw-compat-real-");
+    try {
+      const stateDb = path.join(tempDir, "state", "openclaw.sqlite");
+      const agentDb = path.join(tempDir, "agents", "main", "agent", "openclaw-agent.sqlite");
+      const corruptDb = path.join(tempDir, "agents", "ops", "agent", "openclaw-agent.sqlite");
+      writeDb(stateDb, { userVersion: 15 });
+      writeDb(agentDb, { userVersion: 19 });
+      const fits = await assessLaunchCompatibility({
+        entries: [
+          { path: stateDb, kind: "state" },
+          { path: agentDb, kind: "agent" },
+        ],
+        supported: { state: 15, agent: 19 },
+      });
+      expect(fits).toMatchObject({ compatible: true, reasons: [] });
+      expect(fits.perDb.map((row) => row.userVersion)).toEqual([15, 19]);
+      fs.mkdirSync(path.dirname(corruptDb), { recursive: true });
+      fs.writeFileSync(corruptDb, Buffer.from("not a sqlite database; ".repeat(40)));
+      const broken = await assessLaunchCompatibility({
+        entries: [
+          { path: stateDb, kind: "state" },
+          { path: corruptDb, kind: "agent" },
+        ],
+        supported: { state: 15, agent: 19 },
+      });
+      expect(broken).toMatchObject({ compatible: false, reasons: [kReasons.stateDbUnreadable] });
+      expect(broken.perDb[1]).toMatchObject({ path: corruptDb, status: "corrupt" });
+    } finally {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+});
+
+// ── bootable-candidate chooser (B1.4) ──────────────────────────────────────
+
+describe("openclaw-schema-versions: lacksDatabasePreflightVerb", () => {
+  it.each([
+    ["2026.7.1-2", true],
+    ["2026.7.1", true],
+    ["2026.8.0", false],
+    ["2026.8.2", false],
+    ["2026.9.1-beta.1", false],
+    ["2026.9.2", false],
+    ["", false],
+    [null, false],
+  ])("lacksDatabasePreflightVerb(%j) → %s", (version, expected) => {
+    expect(lacksDatabasePreflightVerb(version)).toBe(expected);
+  });
+});
+
+describe("openclaw-schema-versions: chooseBootableVersion", () => {
+  // A table seam over a { version: { state, agent } } map; a version outside
+  // the map is unknown (source null), like supportedFor on a real table.
+  const tableOf = (byVersion) => ({
+    supportedFor: vi.fn((version) =>
+      Object.hasOwn(byVersion, version)
+        ? { ...byVersion[version], source: "seeded" }
+        : { state: null, agent: null, source: null },
+    ),
+  });
+  const kRealTable = createSchemaVersionTable({ managedDir: mkTemp("alphaclaw-chooser-table-"), logger: { warn: vi.fn() } });
+  afterAll(() => {
+    fs.rmSync(path.dirname(kRealTable.filePath), { recursive: true, force: true });
+  });
+
+  it("exposes the cap the plan fixed (three newest overlays / three probes)", () => {
+    expect(kChooserMaxCandidates).toBe(3);
+  });
+
+  it("ordering: expected first when the table permits it (unconfirmed without a prober)", async () => {
+    await expect(
+      chooseBootableVersion({
+        expected: "2026.9.2",
+        lastKnownGood: "2026.9.1",
+        overlays: ["2026.8.2", "2026.9.1", "2026.9.2"],
+        userVersions: { state: 15, agent: 19 },
+        table: kRealTable,
+      }),
+    ).resolves.toEqual({ version: "2026.9.2", source: "expected", confirmed: false });
+  });
+
+  it("ordering: lastKnownGood when expected cannot read the DB", async () => {
+    await expect(
+      chooseBootableVersion({
+        expected: "2026.9.1-beta.1",
+        lastKnownGood: "2026.9.1",
+        overlays: ["2026.9.2", "2026.9.1", "2026.9.1-beta.1"],
+        userVersions: { state: 15, agent: 19 },
+        table: kRealTable,
+      }),
+    ).resolves.toEqual({ version: "2026.9.1", source: "lastKnownGood", confirmed: false });
+  });
+
+  it("ordering: then the NEWEST permitted overlay, whatever order the store listed them in", async () => {
+    await expect(
+      chooseBootableVersion({
+        expected: "2026.9.1-beta.1",
+        lastKnownGood: "2026.7.1-2",
+        overlays: ["2026.8.2", "2026.9.2", "2026.9.1"],
+        userVersions: { state: 15, agent: 19 },
+        table: kRealTable,
+      }),
+    ).resolves.toEqual({ version: "2026.9.2", source: "overlay", confirmed: false });
+  });
+
+  it("ordering: a prerelease sorts below its base release", async () => {
+    // beta.1 supports {12,17}; the DB is at {12,17}: both 2026.9.1 and beta.1
+    // are permitted, and 2026.9.1 is the newer of the two.
+    await expect(
+      chooseBootableVersion({
+        overlays: ["2026.9.1-beta.1", "2026.9.1"],
+        userVersions: { state: 12, agent: 17 },
+        table: kRealTable,
+      }),
+    ).resolves.toEqual({ version: "2026.9.1", source: "overlay", confirmed: false });
+    await expect(
+      chooseBootableVersion({
+        overlays: ["2026.9.1-beta.1"],
+        userVersions: { state: 12, agent: 17 },
+        table: kRealTable,
+      }),
+    ).resolves.toEqual({ version: "2026.9.1-beta.1", source: "overlay", confirmed: false });
+  });
+
+  it("ordering: an expected build that is also an overlay keeps the source expected and is probed once", async () => {
+    const confirm = vi.fn(async () => "pass");
+    await expect(
+      chooseBootableVersion({
+        expected: "2026.9.2",
+        overlays: ["2026.9.2", "2026.9.1"],
+        userVersions: { state: 15, agent: 19 },
+        table: kRealTable,
+        confirm,
+      }),
+    ).resolves.toEqual({ version: "2026.9.2", source: "expected", confirmed: true });
+    expect(confirm).toHaveBeenCalledTimes(1);
+    expect(confirm).toHaveBeenCalledWith("2026.9.2");
+  });
+
+  it("pre-filter: a candidate whose supported schema is below the DB's is never shortlisted", async () => {
+    const confirm = vi.fn(async () => "pass");
+    // state 15 > beta.1's 12; agent 19 > beta.1's 17; 2026.7.1-2 supports state 1.
+    await expect(
+      chooseBootableVersion({
+        expected: "2026.9.1-beta.1",
+        lastKnownGood: "2026.7.1-2",
+        overlays: ["2026.9.1-beta.1", "2026.7.1-2"],
+        userVersions: { state: 15, agent: 19 },
+        table: kRealTable,
+        confirm,
+      }),
+    ).resolves.toBeNull();
+    expect(confirm).not.toHaveBeenCalled();
+  });
+
+  it("pre-filter: a kind with a known user_version needs a KNOWN supported number (no guessing)", async () => {
+    const table = tableOf({ "2026.10.0": { state: 16, agent: null }, "2026.9.2": { state: 15, agent: 19 } });
+    // 2026.10.0 would be newest, but its agent line is unknown while the box
+    // has agent DBs → skipped in favour of a fully known candidate.
+    await expect(
+      chooseBootableVersion({
+        overlays: ["2026.10.0", "2026.9.2"],
+        userVersions: { state: 15, agent: 19 },
+        table,
+      }),
+    ).resolves.toEqual({ version: "2026.9.2", source: "overlay", confirmed: false });
+    // A version the table has never heard of is not a candidate either.
+    await expect(
+      chooseBootableVersion({ expected: "2026.11.0", userVersions: { state: 15, agent: 19 }, table }),
+    ).resolves.toBeNull();
+  });
+
+  it("pre-filter: a kind with no DB on the box is not compared (a 2026.7 box has no agent DBs)", async () => {
+    await expect(
+      chooseBootableVersion({
+        expected: "2026.7.1-2",
+        userVersions: { state: 1, agent: null },
+        table: kRealTable,
+      }),
+    ).resolves.toEqual({ version: "2026.7.1-2", source: "expected", confirmed: false });
+  });
+
+  it("pre-filter: migration-required is permitted (the candidate upgrades the DB), too-new is not", async () => {
+    const table = tableOf({ "2026.9.2": { state: 15, agent: 19 } });
+    await expect(
+      chooseBootableVersion({ expected: "2026.9.2", userVersions: { state: 12, agent: 17 }, table }),
+    ).resolves.toMatchObject({ version: "2026.9.2" });
+    await expect(
+      chooseBootableVersion({ expected: "2026.9.2", userVersions: { state: 16, agent: 19 }, table }),
+    ).resolves.toBeNull();
+  });
+
+  it("pre-filter: the dist scan (resolveSupported) runs only for versions the table does not know", async () => {
+    const table = tableOf({ "2026.9.2": { state: 15, agent: 19 } });
+    const resolveSupported = vi.fn(async (version) => (version === "2026.10.0" ? { state: 16, agent: 20 } : null));
+    await expect(
+      chooseBootableVersion({
+        expected: "2026.10.0",
+        overlays: ["2026.9.2", "2026.10.0", "2026.10.1"],
+        userVersions: { state: 16, agent: 20 },
+        table,
+        resolveSupported,
+      }),
+    ).resolves.toEqual({ version: "2026.10.0", source: "expected", confirmed: false });
+    expect(resolveSupported).toHaveBeenCalledTimes(1);
+    expect(resolveSupported).toHaveBeenCalledWith("2026.10.0");
+    expect(table.supportedFor).toHaveBeenCalledWith("2026.10.0");
+    // A known version never triggers the scan, even when a line is null (2026.7.1-2's agent).
+    resolveSupported.mockClear();
+    await chooseBootableVersion({
+      expected: "2026.7.1-2",
+      userVersions: { state: 1, agent: null },
+      table: kRealTable,
+      resolveSupported,
+    });
+    expect(resolveSupported).not.toHaveBeenCalled();
+    // A throwing scan reads as unknown.
+    await expect(
+      chooseBootableVersion({
+        expected: "2026.10.1",
+        userVersions: { state: 16, agent: 20 },
+        table,
+        resolveSupported: async () => {
+          throw new Error("dist unreadable");
+        },
+      }),
+    ).resolves.toBeNull();
+  });
+
+  it("confirm: pass chooses the candidate as confirmed; block skips to the next permitted one", async () => {
+    const confirm = vi.fn(async (version) => (version === "2026.9.2" ? "block" : "pass"));
+    await expect(
+      chooseBootableVersion({
+        expected: "2026.9.2",
+        lastKnownGood: "2026.9.1",
+        overlays: ["2026.8.2"],
+        userVersions: { state: 15, agent: 19 },
+        table: kRealTable,
+        confirm,
+      }),
+    ).resolves.toEqual({ version: "2026.9.1", source: "lastKnownGood", confirmed: true });
+    expect(confirm.mock.calls.map(([version]) => version)).toEqual(["2026.9.2", "2026.9.1"]);
+  });
+
+  it("confirm: every permitted candidate blocked → null, and the table-rejected ones were never probed", async () => {
+    const confirm = vi.fn(async () => "block");
+    await expect(
+      chooseBootableVersion({
+        expected: "2026.9.2",
+        overlays: ["2026.9.1", "2026.9.1-beta.1"],
+        userVersions: { state: 15, agent: 19 },
+        table: kRealTable,
+        confirm,
+      }),
+    ).resolves.toBeNull();
+    expect(confirm.mock.calls.map(([version]) => version)).toEqual(["2026.9.2", "2026.9.1"]);
+  });
+
+  it.each([["unsupported"], ["budget_exhausted"], [null]])(
+    "confirm: %j on a build that has the verb proves nothing → skipped",
+    async (answer) => {
+      const confirm = vi.fn(async (version) => (version === "2026.9.2" ? answer : "pass"));
+      await expect(
+        chooseBootableVersion({
+          expected: "2026.9.2",
+          lastKnownGood: "2026.9.1",
+          userVersions: { state: 15, agent: 19 },
+          table: kRealTable,
+          confirm,
+        }),
+      ).resolves.toEqual({ version: "2026.9.1", source: "lastKnownGood", confirmed: true });
+    },
+  );
+
+  it("confirm: a pre-2026.8 candidate the verb cannot judge rests on the seeded table (unconfirmed)", async () => {
+    const confirm = vi.fn(async () => "unsupported");
+    await expect(
+      chooseBootableVersion({
+        expected: "2026.7.1-2",
+        userVersions: { state: 1, agent: null },
+        table: kRealTable,
+        confirm,
+      }),
+    ).resolves.toEqual({ version: "2026.7.1-2", source: "expected", confirmed: false });
+    // ...but a block from the prober (the config-shape guard) still skips it.
+    await expect(
+      chooseBootableVersion({
+        expected: "2026.7.1-2",
+        userVersions: { state: 1, agent: null },
+        table: kRealTable,
+        confirm: async () => "block",
+      }),
+    ).resolves.toBeNull();
+    // The verb rule is injectable for callers that already know the answer.
+    await expect(
+      chooseBootableVersion({
+        expected: "2026.9.2",
+        userVersions: { state: 15, agent: 19 },
+        table: kRealTable,
+        confirm,
+        lacksVerb: () => true,
+      }),
+    ).resolves.toEqual({ version: "2026.9.2", source: "expected", confirmed: false });
+  });
+
+  it("confirm: a throwing prober reads as no answer", async () => {
+    await expect(
+      chooseBootableVersion({
+        expected: "2026.9.2",
+        lastKnownGood: "2026.9.1",
+        userVersions: { state: 15, agent: 19 },
+        table: kRealTable,
+        confirm: async (version) => {
+          if (version === "2026.9.2") throw new Error("spawn failed");
+          return "pass";
+        },
+      }),
+    ).resolves.toEqual({ version: "2026.9.1", source: "lastKnownGood", confirmed: true });
+  });
+
+  it("cap: at most maxCandidates shortlisted candidates are probed, newest overlays first", async () => {
+    const table = tableOf({
+      "2026.12.0": { state: 15, agent: 19 },
+      "2026.11.0": { state: 15, agent: 19 },
+      "2026.10.0": { state: 15, agent: 19 },
+      "2026.9.2": { state: 15, agent: 19 },
+      "2026.9.1": { state: 15, agent: 19 },
+    });
+    const confirm = vi.fn(async () => "block");
+    await expect(
+      chooseBootableVersion({
+        overlays: ["2026.9.1", "2026.10.0", "2026.12.0", "2026.9.2", "2026.11.0"],
+        userVersions: { state: 15, agent: 19 },
+        table,
+        confirm,
+      }),
+    ).resolves.toBeNull();
+    expect(confirm.mock.calls.map(([version]) => version)).toEqual(["2026.12.0", "2026.11.0", "2026.10.0"]);
+    // Only the newest maxCandidates overlays are candidates at all, even
+    // without a prober: an older compatible overlay outside the window is
+    // not found (the plan's bound; the caller's pause + notice is the exit).
+    const narrow = tableOf({ "2026.9.1": { state: 15, agent: 19 } });
+    await expect(
+      chooseBootableVersion({
+        overlays: ["2026.9.1", "2026.10.0", "2026.12.0", "2026.9.2", "2026.11.0"],
+        userVersions: { state: 15, agent: 19 },
+        table: narrow,
+      }),
+    ).resolves.toBeNull();
+    expect(narrow.supportedFor.mock.calls.map(([version]) => version)).toEqual(["2026.12.0", "2026.11.0", "2026.10.0"]);
+  });
+
+  it("cap: maxCandidates is overridable and bounds expected/lastKnownGood probes too", async () => {
+    const confirm = vi.fn(async () => "block");
+    await expect(
+      chooseBootableVersion({
+        expected: "2026.9.2",
+        lastKnownGood: "2026.9.1",
+        overlays: ["2026.8.2"],
+        userVersions: { state: 15, agent: 19 },
+        table: kRealTable,
+        maxCandidates: 1,
+        confirm,
+      }),
+    ).resolves.toBeNull();
+    expect(confirm).toHaveBeenCalledTimes(1);
+    expect(confirm).toHaveBeenCalledWith("2026.9.2");
+    // A nonsense cap falls back to the default rather than probing nothing or everything.
+    confirm.mockClear();
+    await chooseBootableVersion({
+      expected: "2026.9.2",
+      lastKnownGood: "2026.9.1",
+      overlays: ["2026.8.2", "2026.7.1-2"],
+      userVersions: { state: 15, agent: 19 },
+      table: kRealTable,
+      maxCandidates: 0,
+      confirm,
+    });
+    expect(confirm).toHaveBeenCalledTimes(3);
+  });
+
+  it("null: nothing supplied, nothing permitted, or junk versions → null without touching the table", async () => {
+    const table = tableOf({});
+    await expect(chooseBootableVersion()).resolves.toBeNull();
+    await expect(chooseBootableVersion({ userVersions: { state: 15, agent: 19 }, table })).resolves.toBeNull();
+    await expect(
+      chooseBootableVersion({ expected: 2026, lastKnownGood: "", overlays: [null, "  ", 7], userVersions: { state: 15, agent: 19 }, table }),
+    ).resolves.toBeNull();
+    expect(table.supportedFor).not.toHaveBeenCalled();
+    // No table at all is "unknown" for every candidate, never a throw.
+    await expect(chooseBootableVersion({ expected: "2026.9.2", userVersions: { state: 15, agent: 19 } })).resolves.toBeNull();
+    // A table that throws is unknown too.
+    await expect(
+      chooseBootableVersion({
+        expected: "2026.9.2",
+        userVersions: { state: 15, agent: 19 },
+        table: {
+          supportedFor: () => {
+            throw new Error("table exploded");
+          },
+        },
+      }),
+    ).resolves.toBeNull();
+  });
+
+  it("unknown DB: with no user_version known the table cannot exclude, so expected is taken first", async () => {
+    await expect(
+      chooseBootableVersion({
+        expected: "2026.9.2",
+        overlays: ["2026.9.1"],
+        userVersions: null,
+        table: kRealTable,
+      }),
+    ).resolves.toEqual({ version: "2026.9.2", source: "expected", confirmed: false });
   });
 });

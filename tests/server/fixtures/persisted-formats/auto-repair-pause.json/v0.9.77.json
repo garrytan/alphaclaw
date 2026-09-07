@@ -1,0 +1,12 @@
+{
+  "at": 1788681900000,
+  "cause": "state_schema_too_new",
+  "fingerprint": "63e47a67df1b",
+  "installedVersion": "2026.7.1-2",
+  "attempts": 3,
+  "lastPlan": {
+    "rung": "reconcile_installed",
+    "outcome": "overlay_missing"
+  },
+  "reason": "structural_repair_failed"
+}

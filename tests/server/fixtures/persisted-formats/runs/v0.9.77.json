@@ -1,0 +1,30 @@
+{
+  "operationId": "c4d5e6f7-a8b9-4c0d-9e1f-2a3b4c5d6e7f",
+  "target": {
+    "kind": "reconcile",
+    "version": "2026.9.2"
+  },
+  "state": "running",
+  "startedAt": 1788681580000,
+  "finishedAt": null,
+  "ok": null,
+  "result": null,
+  "steps": [
+    {
+      "detail": "gateway stopped (confirmed)",
+      "name": "stop",
+      "status": "done",
+      "at": 1788681582000
+    },
+    {
+      "detail": "staging node_modules/.openclaw-staging-7:1788681600000",
+      "name": "activate",
+      "status": "running",
+      "at": 1788681585000
+    }
+  ],
+  "backup": null,
+  "dbPreflight": null,
+  "overseer": null,
+  "hasLog": false
+}

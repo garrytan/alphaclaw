@@ -45,6 +45,8 @@ describe("getStatus() additive fields", () => {
     expect(status.lastExit).toBe(null);
     // #76 A4: latched scalar object, null until a mismatch is detected.
     expect(status.versionMismatch).toBe(null);
+    // Stage 3 (#76 B1.3): the scoped auto-repair pause, null while armed.
+    expect(status.autoRepairPaused).toBe(null);
     expect(status.backoff).toEqual({ active: false, untilMs: null, attempt: 0 });
     expect(status.rollbackDeadlineAt).toBe(null);
     expect(status.stabilization).toEqual({ active: false, until: null });

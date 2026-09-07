@@ -76,6 +76,33 @@ describe("server/doctor-fix-runner", () => {
     });
   });
 
+  it("#76 C6: a caller-resolved bin runs under the current node (process.execPath <bin> doctor --fix --yes — the pre-update backup's shape); an empty or null bin keeps the PATH default", async () => {
+    const openclawDir = mkOpenclawDir();
+    writeJson(openclawDir, "openclaw.json", { keep: 1 });
+    const { run, runStream, doctorGuard } = createRunner(openclawDir);
+    const bin = "/root/openclaw-overlay/2026.9.2/node_modules/openclaw/openclaw.mjs";
+
+    expect((await run({ bin })).ok).toBe(true);
+
+    expect(runStream.runStreamed).toHaveBeenLastCalledWith({
+      command: process.execPath,
+      args: [bin, "doctor", "--fix", "--yes"],
+      env: kGatewayEnv,
+      timeoutMs: 10 * 60 * 1000,
+    });
+    // Still inside the restore guard, still with the rolling backup.
+    expect(doctorGuard.withDoctorRestoreGuard).toHaveBeenCalledTimes(1);
+    expect(readJson(openclawDir, "openclaw.json.pre-doctor.bak")).toEqual({ keep: 1 });
+
+    for (const noBin of [{ bin: "   " }, { bin: null }, {}]) {
+      await run(noBin);
+      expect(runStream.runStreamed.mock.calls.at(-1)[0]).toMatchObject({
+        command: "openclaw",
+        args: ["doctor", "--fix", "--yes"],
+      });
+    }
+  });
+
   it("forwards a caller timeout and never aborts on a missing config (backup is best-effort)", async () => {
     const openclawDir = mkOpenclawDir(); // no openclaw.json written
     const { run, runStream } = createRunner(openclawDir);

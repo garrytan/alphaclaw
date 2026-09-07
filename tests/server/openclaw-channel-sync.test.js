@@ -5566,3 +5566,920 @@ describe("getChannelInfo installed-tree predicates (#76 RC4 / Stage 1d)", () => 
     });
   });
 });
+
+// ── Installed-tree reconcile (#76 B1.2 / B1.4 / B1.5 / C6) ───────────────────
+describe("reconcileInstalled (#76 B1.2)", () => {
+  const { beginStateDbQuiet } = require("../../lib/server/state-db-quiet");
+  const kReconcileLease = require("../../lib/server/constants").kOpenclawReconcileLifecycleLeaseMs;
+
+  // A lifecycle-lock double with the real release() contract (callable,
+  // isValid()/isExpired() accessors) so the re-entrancy and lease-fence rules
+  // can be pinned without the real lock.
+  const makeLock = () => {
+    const acquires = [];
+    const releases = [];
+    const acquireLifecycleLock = vi.fn(async (kind, options) => {
+      acquires.push({ kind, options });
+      let valid = true;
+      const release = Object.assign(
+        vi.fn(() => {
+          valid = false;
+        }),
+        { kind, isValid: () => valid, isExpired: () => false },
+      );
+      releases.push(release);
+      return release;
+    });
+    return { acquires, releases, acquireLifecycleLock };
+  };
+  const makeHold = ({ valid = true } = {}) =>
+    Object.assign(vi.fn(), {
+      kind: "structural_repair",
+      isValid: () => valid,
+      isExpired: () => !valid,
+    });
+  // Like the real seam, a confirmed stop flips isRunning() to false; a stop
+  // that fails (stopped: false) leaves the gateway reported running.
+  const makeQuiesce = ({ running = true, stopped = true } = {}) => {
+    let live = running;
+    return {
+      isRunning: vi.fn(async () => live),
+      stop: vi.fn(async () => {
+        if (stopped) live = false;
+        return stopped;
+      }),
+      suppress: vi.fn(),
+      unsuppress: vi.fn(),
+      acquireLock: vi.fn(),
+      start: vi.fn(),
+    };
+  };
+  const saveOverlayWithSchema = (store, version, schema) =>
+    store.saveOverlayFromTempInstall({
+      openclawPackageDir: writePackageFixture(
+        path.join(mkTemp("alphaclaw-overlay-src-"), "openclaw"),
+        { version, schema },
+      ),
+      version,
+    });
+
+  // Installed 1.0.0 (the pin) with a recorded, overlay-complete beta 2.0.0 —
+  // the #76 shape: installedDiverged is true, nothing has activated.
+  const divergedHarness = ({
+    expected = "2.0.0",
+    installed = "1.0.0",
+    overlay = true,
+    schema = null,
+    extra = {},
+  } = {}) => {
+    const lock = makeLock();
+    const insertEvent = vi.fn();
+    const harness = createHarness({
+      pin: "1.0.0",
+      installedVersion: installed,
+      sentinelVersion: installed,
+      extraSyncOptions: {
+        insertEvent,
+        acquireLifecycleLock: lock.acquireLifecycleLock,
+        // Hermetic: never scan this box's /proc for the exclusivity sample,
+        // and never wait the 5 s settle in a test.
+        backupProbes: { listProcesses: () => [] },
+        backupTuning: { exclusivitySettleMs: 0 },
+        ...extra,
+      },
+    });
+    harness.store.updateState((s) => {
+      s.pinVersion = "1.0.0";
+      s.applied = { channel: "beta", version: expected, at: 1, acceptedAt: null };
+      return s;
+    });
+    if (overlay) {
+      expect(saveOverlayWithSchema(harness.store, expected, schema)).toEqual({ ok: true });
+    }
+    return { ...harness, lock, insertEvent };
+  };
+  const installedVersionOf = (installDir) =>
+    JSON.parse(
+      fs.readFileSync(path.join(installDir, "node_modules", "openclaw", "package.json"), "utf8"),
+    ).version;
+  const eventsOf = (insertEvent, type) =>
+    insertEvent.mock.calls.map((call) => call[0]).filter((event) => event.eventType === type);
+  const stepNames = (run) => run.steps.map((step) => `${step.name}:${step.status}`);
+
+  afterEach(() => {
+    delete process.env.OPENCLAW_RUNTIME_RECONCILE;
+  });
+
+  it("happy path: confirmed stop → activate (sentinel last) → verify; run steps, hold clearing, cache invalidation, event + notification", async () => {
+    const quiesce = makeQuiesce();
+    const h = divergedHarness({ extra: { gatewayQuiesce: quiesce } });
+    // A structural hold this path owns (set by the boot config gate).
+    h.store.updateState((s) => {
+      s.gatewayHold = {
+        reason: "version_mismatch",
+        at: 5,
+        blamedKeys: [],
+        detail: "held",
+        installed: "1.0.0",
+        expected: "2.0.0",
+        bootId: "boot-x",
+      };
+      return s;
+    });
+    expect(h.sync.getChannelInfo().installedDiverged).toBe(true);
+
+    const result = await h.sync.reconcileInstalled({ source: "operator", relaunch: true });
+
+    expect(result).toEqual(
+      expect.objectContaining({
+        ok: true,
+        action: "activated",
+        from: "1.0.0",
+        to: "2.0.0",
+        schemaRecovery: false,
+      }),
+    );
+    expect(typeof result.runId).toBe("string");
+    // The tree flipped and the sentinel names the new build (written LAST).
+    expect(installedVersionOf(h.installDir)).toBe("2.0.0");
+    expect(h.store.readSentinel({ installDir: h.installDir })).toEqual(
+      expect.objectContaining({ version: "2.0.0" }),
+    );
+    expect(h.sync.getChannelInfo().installedDiverged).toBe(false);
+    // Its own lock (no hold passed), the reconcile lease, released after.
+    expect(h.lock.acquires).toEqual([
+      { kind: "reconcile_installed", options: { leaseMs: kReconcileLease } },
+    ]);
+    expect(h.lock.releases[0]).toHaveBeenCalledTimes(1);
+    // Stop was confirmed through the quiesce seam with the watchdog suppressed.
+    expect(quiesce.stop).toHaveBeenCalledTimes(1);
+    expect(quiesce.suppress).toHaveBeenCalledTimes(1);
+    expect(quiesce.unsuppress).toHaveBeenCalledTimes(1);
+    // The ledger run: target kind reconcile, steps stop → activate → verify,
+    // left `running` for the CALLER's relaunch step (Codex 7).
+    const run = h.sync.runLedger.listRuns().find((r) => r.operationId === result.runId);
+    expect(run.target).toEqual({ kind: "reconcile", version: "2.0.0", from: "1.0.0" });
+    expect(run.state).toBe("running");
+    expect(stepNames(run)).toEqual([
+      "stop:running",
+      "stop:completed",
+      "activate:running",
+      "activate:completed",
+      "verify:running",
+      "verify:completed",
+    ]);
+    // Only the structural hold this path owns was cleared.
+    expect(h.store.readState().gatewayHold).toBeNull();
+    // The apply record-step invalidation hook ran.
+    expect(h.clearVersionCache).toHaveBeenCalledTimes(1);
+    expect(eventsOf(h.insertEvent, "reconcile_installed")).toEqual([
+      expect.objectContaining({
+        status: "activated",
+        details: expect.objectContaining({
+          source: "operator",
+          from: "1.0.0",
+          to: "2.0.0",
+          relaunch: true,
+          operationId: result.runId,
+        }),
+      }),
+    ]);
+    await flushAsync();
+    expect(notifyMessages(h.notify).some((m) => m.includes("re-activated OpenClaw 2.0.0"))).toBe(true);
+
+    // The caller books the relaunch and completes the run.
+    h.sync.completeReconcileRun({
+      runId: result.runId,
+      relaunch: { ok: true, verdict: "replacement_ready" },
+    });
+    const completed = h.sync.runLedger.listRuns().find((r) => r.operationId === result.runId);
+    expect(completed.state).toBe("activated");
+    expect(completed.ok).toBe(true);
+    expect(stepNames(completed).slice(-1)).toEqual(["relaunch:completed"]);
+    // A relaunch that did not verify is an honest failure, not a silent success.
+    const again = await h.sync.reconcileInstalled({ source: "test" });
+    expect(again).toEqual(expect.objectContaining({ ok: true, action: "none", runId: null }));
+  });
+
+  it("a passed hold is used as-is: never re-acquired, never released here (lock re-entrancy, Codex 1)", async () => {
+    const h = divergedHarness();
+    const hold = makeHold();
+    const result = await h.sync.reconcileInstalled({ hold, source: "structural_repair" });
+    expect(result.ok).toBe(true);
+    expect(result.action).toBe("activated");
+    expect(h.lock.acquireLifecycleLock).not.toHaveBeenCalled();
+    expect(hold).not.toHaveBeenCalled();
+    expect(installedVersionOf(h.installDir)).toBe("2.0.0");
+  });
+
+  it("an expired hold refuses lease_expired before anything is touched", async () => {
+    const h = divergedHarness();
+    const result = await h.sync.reconcileInstalled({ hold: makeHold({ valid: false }) });
+    expect(result).toEqual(expect.objectContaining({ ok: false, code: "lease_expired", action: "none" }));
+    expect(installedVersionOf(h.installDir)).toBe("1.0.0");
+    expect(h.sync.runLedger.listRuns()).toEqual([]);
+  });
+
+  it("nothing to do: installed === expected with a matching sentinel is action none, no lock, no run", async () => {
+    const h = divergedHarness({ expected: "1.0.0", overlay: false });
+    const result = await h.sync.reconcileInstalled();
+    expect(result).toEqual({ ok: true, action: "none", from: "1.0.0", to: "1.0.0", runId: null });
+    expect(h.lock.acquireLifecycleLock).not.toHaveBeenCalled();
+  });
+
+  it("refusal codes: disabled (kill switch), overlay_missing, dev_channel, gateway_held (migration-class only), state_corrupted, state_db_quiet", async () => {
+    process.env.OPENCLAW_RUNTIME_RECONCILE = "off";
+    const off = divergedHarness();
+    expect(await off.sync.reconcileInstalled()).toEqual(
+      expect.objectContaining({ ok: false, code: "disabled", action: "none" }),
+    );
+    expect(eventsOf(off.insertEvent, "reconcile_installed")).toEqual([
+      expect.objectContaining({ status: "skipped", details: expect.objectContaining({ code: "disabled" }) }),
+    ]);
+    // The switch is a RUNTIME lever (README: "boot-time activation is
+    // unaffected"): the boot C1 belt — source "boot", under the boot lock —
+    // is exempt, so a diverged box with the switch set still boots the
+    // recorded build instead of being held. Any other source is refused.
+    const boot = divergedHarness();
+    expect(await boot.sync.reconcileInstalled({ source: "boot", relaunch: false })).toEqual(
+      expect.objectContaining({ ok: true, action: "activated", from: "1.0.0", to: "2.0.0" }),
+    );
+    expect(installedVersionOf(boot.installDir)).toBe("2.0.0");
+    const structuralOff = divergedHarness();
+    expect(await structuralOff.sync.reconcileInstalled({ source: "repair/structural" })).toEqual(
+      expect.objectContaining({ ok: false, code: "disabled", action: "none" }),
+    );
+    expect(installedVersionOf(structuralOff.installDir)).toBe("1.0.0");
+    delete process.env.OPENCLAW_RUNTIME_RECONCILE;
+
+    const missing = divergedHarness({ overlay: false });
+    expect(await missing.sync.reconcileInstalled()).toEqual(
+      expect.objectContaining({ ok: false, code: "overlay_missing", expected: "2.0.0", installed: "1.0.0" }),
+    );
+
+    const dev = divergedHarness();
+    dev.store.updateState((s) => {
+      s.applied = { channel: "dev", sha: kDevSha, at: 1, acceptedAt: null };
+      return s;
+    });
+    expect(await dev.sync.reconcileInstalled()).toEqual(
+      expect.objectContaining({ ok: false, code: "dev_channel" }),
+    );
+
+    // A MIGRATION-class hold refuses; a structural one does not (it is what
+    // this path clears).
+    const held = divergedHarness();
+    held.store.updateState((s) => {
+      s.gatewayHold = { reason: "settings migration for 2.0.0 failed: doctor exited 1", at: 1, blamedKeys: ["x"] };
+      return s;
+    });
+    expect(await held.sync.reconcileInstalled()).toEqual(
+      expect.objectContaining({ ok: false, code: "gateway_held" }),
+    );
+    expect(installedVersionOf(held.installDir)).toBe("1.0.0");
+    expect(held.store.readState().gatewayHold?.reason).toContain("doctor exited 1");
+    const structural = divergedHarness();
+    structural.store.updateState((s) => {
+      s.gatewayHold = { reason: "activation_failed", at: 1, blamedKeys: [], error: "ENOSPC" };
+      return s;
+    });
+    expect((await structural.sync.reconcileInstalled()).action).toBe("activated");
+    expect(structural.store.readState().gatewayHold).toBeNull();
+
+    const corrupt = divergedHarness();
+    fs.writeFileSync(corrupt.store.statePath, "{ not json");
+    expect(await corrupt.sync.reconcileInstalled()).toEqual(
+      expect.objectContaining({ ok: false, code: "state_corrupted" }),
+    );
+
+    const quiet = divergedHarness();
+    const barrier = await beginStateDbQuiet({ owner: "reconcile-test", maxMs: 30_000 });
+    try {
+      expect(await quiet.sync.reconcileInstalled()).toEqual(
+        expect.objectContaining({ ok: false, code: "state_db_quiet" }),
+      );
+    } finally {
+      barrier.release();
+    }
+    expect(installedVersionOf(quiet.installDir)).toBe("1.0.0");
+  });
+
+  it("refuses incumbent_running when a serving identity or a live openclaw process survives the stop — nothing is changed", async () => {
+    const serving = divergedHarness({
+      extra: {
+        gatewayQuiesce: makeQuiesce(),
+        discoverServingIdentity: () => ({ rootPid: 4242, workerPid: 4243, pids: [4242, 4243] }),
+      },
+    });
+    const result = await serving.sync.reconcileInstalled({ source: "operator" });
+    expect(result).toEqual(
+      expect.objectContaining({
+        ok: false,
+        code: "incumbent_running",
+        incumbent: { kind: "serving_identity", pids: [4242, 4243] },
+      }),
+    );
+    expect(installedVersionOf(serving.installDir)).toBe("1.0.0");
+    expect(serving.store.readSentinel({ installDir: serving.installDir })).toEqual(
+      expect.objectContaining({ version: "1.0.0" }),
+    );
+    const run = serving.sync.runLedger.listRuns()[0];
+    expect(run.state).toBe("failed");
+    expect(stepNames(run)).toEqual(["stop:running", "stop:failed"]);
+    expect(run.result).toEqual(expect.objectContaining({ code: "incumbent_running" }));
+    await flushAsync();
+    expect(notifyMessages(serving.notify).some((m) => m.includes("still running"))).toBe(true);
+
+    const live = divergedHarness({
+      extra: { backupProbes: { listProcesses: () => [{ pid: 77, cmdline: "openclaw gateway run" }] } },
+    });
+    expect(await live.sync.reconcileInstalled()).toEqual(
+      expect.objectContaining({
+        ok: false,
+        code: "incumbent_running",
+        incumbent: { kind: "live_processes", pids: [77] },
+      }),
+    );
+    // A stop the quiesce seam could not confirm is an incumbent too.
+    const unstopped = divergedHarness({
+      extra: { gatewayQuiesce: makeQuiesce({ running: true, stopped: false }) },
+    });
+    expect((await unstopped.sync.reconcileInstalled()).code).toBe("incumbent_running");
+    expect(installedVersionOf(unstopped.installDir)).toBe("1.0.0");
+  });
+
+  it("refuses insufficient_disk from the injected probe (1.2 × overlay bytes, beside node_modules) before any rm", async () => {
+    const diskSpace = vi.fn(() => ({ ok: false, free: 1024 }));
+    const h = divergedHarness({ extra: { diskSpace } });
+    const result = await h.sync.reconcileInstalled();
+    expect(result).toEqual(expect.objectContaining({ ok: false, code: "insufficient_disk", freeBytes: 1024 }));
+    expect(diskSpace).toHaveBeenCalledTimes(1);
+    const [required, dir] = diskSpace.mock.calls[0];
+    expect(dir).toBe(path.join(h.installDir, "node_modules"));
+    expect(required).toBe(result.requiredBytes);
+    // 1.2 × the overlay's bytes, rounded up (the fixture is a handful of files).
+    const overlayDir = h.store.overlayPackageDir("2.0.0");
+    const bytes = (dir) =>
+      fs.readdirSync(dir, { withFileTypes: true }).reduce((sum, entry) => {
+        const full = path.join(dir, entry.name);
+        return sum + (entry.isDirectory() ? bytes(full) : fs.statSync(full).size);
+      }, 0);
+    expect(required).toBe(Math.ceil(bytes(overlayDir) * 1.2));
+    expect(installedVersionOf(h.installDir)).toBe("1.0.0");
+    expect(h.sync.runLedger.listRuns()[0].state).toBe("failed");
+  });
+
+  it("target compatibility FIRST: an expected build whose declared schema is below the live user_version is skipped for the newest compatible overlay (schema_recovery)", async () => {
+    const h = divergedHarness({ schema: { state: 12, agent: 19 } });
+    writeStateDb(h.openclawDir, { userVersion: 15 });
+    expect(saveOverlayWithSchema(h.store, "3.0.0", { state: 15, agent: 19 })).toEqual({ ok: true });
+    // Blocklisted overlays are never candidates.
+    expect(saveOverlayWithSchema(h.store, "4.0.0", { state: 16, agent: 19 })).toEqual({ ok: true });
+    h.store.addBlocklist({ id: "4.0.0", reason: "crash_loop", exitCode: 1 });
+
+    const result = await h.sync.reconcileInstalled({ source: "structural_repair" });
+
+    expect(result).toEqual(
+      expect.objectContaining({ ok: true, action: "activated", to: "3.0.0", expected: "2.0.0", schemaRecovery: true }),
+    );
+    expect(installedVersionOf(h.installDir)).toBe("3.0.0");
+    const state = h.store.readState();
+    expect(state.applied).toEqual(
+      expect.objectContaining({ channel: "stable", version: "3.0.0", reason: "schema_recovery", operationId: result.runId }),
+    );
+    expect(eventsOf(h.insertEvent, "reconcile_installed").map((e) => e.status)).toEqual([
+      "target_incompatible",
+      "activated",
+    ]);
+    expect(eventsOf(h.insertEvent, "reconcile_installed")[0].details.reasons).toEqual(["state_schema_too_new"]);
+    const run = h.sync.runLedger.listRuns().find((r) => r.operationId === result.runId);
+    expect(run.target).toEqual(
+      expect.objectContaining({ kind: "reconcile", version: "3.0.0", expected: "2.0.0", schemaRecovery: true }),
+    );
+  });
+
+  it("target incompatible and nothing else bootable → no_bootable_version, tree untouched", async () => {
+    const h = divergedHarness({ schema: { state: 12, agent: 19 } });
+    writeStateDb(h.openclawDir, { userVersion: 15 });
+    const result = await h.sync.reconcileInstalled();
+    expect(result).toEqual(
+      expect.objectContaining({ ok: false, code: "no_bootable_version", reasons: ["state_schema_too_new"] }),
+    );
+    expect(installedVersionOf(h.installDir)).toBe("1.0.0");
+    expect(h.sync.runLedger.listRuns()[0]).toEqual(
+      expect.objectContaining({ state: "failed", result: expect.objectContaining({ code: "no_bootable_version" }) }),
+    );
+  });
+
+  // Stage 3 I3 (#76 B1.1 rung 3): `recover: true` — the watchdog's structural
+  // repair on a NON-diverged tree that cannot read the databases.
+  const recoverHarness = ({ installedSchema = { state: 12, agent: 19 }, userVersion = 15 } = {}) => {
+    const lock = makeLock();
+    const insertEvent = vi.fn();
+    const harness = createHarness({
+      pin: "1.0.0",
+      installedVersion: "1.0.0",
+      sentinelVersion: "1.0.0",
+      extraSyncOptions: {
+        insertEvent,
+        acquireLifecycleLock: lock.acquireLifecycleLock,
+        backupProbes: { listProcesses: () => [] },
+        backupTuning: { exclusivitySettleMs: 0 },
+      },
+    });
+    // The pin is recorded in state (syncAtBoot's job on a real box); the
+    // installed pin declares its schema; the live DB is ahead of it.
+    harness.store.updateState((s) => {
+      s.pinVersion = "1.0.0";
+      s.applied = null;
+      return s;
+    });
+    writeSchemaContractFixture(path.join(harness.installDir, "node_modules", "openclaw"), installedSchema);
+    writeStateDb(harness.openclawDir, { userVersion });
+    return { ...harness, lock, insertEvent };
+  };
+
+  it("recover: a non-diverged tree that is compatible (or unknown) is `none` with a reason — the operator's build is never swapped on a guess; without `recover` it is plain `none`", async () => {
+    const h = recoverHarness({ installedSchema: { state: 15, agent: 19 }, userVersion: 15 });
+    expect(h.sync.getChannelInfo().installedDiverged).toBe(false);
+    expect(await h.sync.reconcileInstalled({ source: "structural_repair" })).toEqual(
+      expect.objectContaining({ ok: true, action: "none", from: "1.0.0", to: "1.0.0", runId: null }),
+    );
+    const result = await h.sync.reconcileInstalled({ source: "structural_repair", recover: true });
+    expect(result).toEqual(
+      expect.objectContaining({ ok: true, action: "none", reason: "target_compatible", runId: null }),
+    );
+    expect(installedVersionOf(h.installDir)).toBe("1.0.0");
+    expect(h.lock.acquireLifecycleLock).not.toHaveBeenCalled(); // decided before the lock
+    expect(eventsOf(h.insertEvent, "reconcile_installed").at(-1)).toEqual(
+      expect.objectContaining({ status: "skipped", details: expect.objectContaining({ code: "target_compatible", recover: true }) }),
+    );
+    // Unknown line (no declared schema, no table entry): still `none`.
+    const unknown = recoverHarness({ installedSchema: {}, userVersion: 15 });
+    expect(await unknown.sync.reconcileInstalled({ recover: true })).toEqual(
+      expect.objectContaining({ ok: true, action: "none", reason: "compatibility_unknown" }),
+    );
+  });
+
+  it("recover: a non-diverged pin whose declared schema is below the live user_version activates the newest compatible overlay as schema_recovery under the caller's hold (no own acquire), records applied.reason and completes the run's stop → activate → verify", async () => {
+    const h = recoverHarness({ installedSchema: { state: 12, agent: 19 }, userVersion: 15 });
+    expect(saveOverlayWithSchema(h.store, "3.0.0", { state: 15, agent: 19 })).toEqual({ ok: true });
+    const hold = makeHold();
+    const result = await h.sync.reconcileInstalled({ hold, source: "structural_repair", relaunch: true, recover: true });
+    expect(result).toEqual(
+      expect.objectContaining({
+        ok: true,
+        action: "activated",
+        from: "1.0.0",
+        to: "3.0.0",
+        expected: "1.0.0",
+        schemaRecovery: true,
+      }),
+    );
+    expect(installedVersionOf(h.installDir)).toBe("3.0.0");
+    expect(h.lock.acquireLifecycleLock).not.toHaveBeenCalled();
+    expect(hold).not.toHaveBeenCalled();
+    expect(h.store.readState().applied).toEqual(
+      expect.objectContaining({ version: "3.0.0", reason: "schema_recovery", operationId: result.runId }),
+    );
+    expect(eventsOf(h.insertEvent, "reconcile_installed").map((e) => e.status)).toEqual([
+      "target_incompatible",
+      "activated",
+    ]);
+    const run = h.sync.runLedger.listRuns().find((r) => r.operationId === result.runId);
+    expect(run.state).toBe("running"); // the caller books the relaunch (Codex 7)
+    expect(stepNames(run)).toEqual([
+      "stop:running",
+      "stop:completed",
+      "activate:running",
+      "activate:completed",
+      "verify:running",
+      "verify:completed",
+    ]);
+    // Nothing else bootable: the refusal names it and the tree is untouched.
+    const stuck = recoverHarness({ installedSchema: { state: 12, agent: 19 }, userVersion: 15 });
+    expect(await stuck.sync.reconcileInstalled({ recover: true })).toEqual(
+      expect.objectContaining({ ok: false, code: "no_bootable_version" }),
+    );
+    expect(installedVersionOf(stuck.installDir)).toBe("1.0.0");
+  });
+
+  it("a failure AFTER the rm writes no sentinel, sets an activation_failed hold carrying the error, notifies, and tries the chooser once", async () => {
+    // Fail the swap for 2.0.0 only (delegating everything else to the real
+    // store) after gutting the live tree the way a real swap failure leaves it.
+    const failSwapFor = (version) => (store) => ({
+      ...store,
+      activateOverlayAsync: async (args) => {
+        if (args.version !== version) return store.activateOverlayAsync(args);
+        fs.rmSync(store.sentinelPath({ installDir: args.installDir }), { force: true });
+        fs.rmSync(path.join(args.installDir, "node_modules", "openclaw"), { recursive: true, force: true });
+        return { ok: false, stage: "swap", error: "ENOSPC: no space left on device, rename" };
+      },
+    });
+    const gutted = divergedHarness({ extra: { storeWrap: failSwapFor("2.0.0") } });
+    // createHarness applies storeWrap itself; re-create through the option.
+    const lock = makeLock();
+    const insertEvent = vi.fn();
+    const h = createHarness({
+      pin: "1.0.0",
+      installedVersion: "1.0.0",
+      sentinelVersion: "1.0.0",
+      storeWrap: failSwapFor("2.0.0"),
+      extraSyncOptions: {
+        insertEvent,
+        acquireLifecycleLock: lock.acquireLifecycleLock,
+        backupProbes: { listProcesses: () => [] },
+        backupTuning: { exclusivitySettleMs: 0 },
+      },
+    });
+    void gutted;
+    h.store.updateState((s) => {
+      s.pinVersion = "1.0.0";
+      s.applied = { channel: "beta", version: "2.0.0", at: 1, acceptedAt: null };
+      return s;
+    });
+    expect(saveOverlayFixture(h.store, "2.0.0")).toEqual({ ok: true });
+
+    const result = await h.sync.reconcileInstalled({ source: "operator" });
+    expect(result).toEqual(expect.objectContaining({ ok: false, code: "activation_failed", stage: "swap" }));
+    expect(fs.existsSync(h.store.sentinelPath({ installDir: h.installDir }))).toBe(false);
+    expect(h.store.readState().gatewayHold).toEqual(
+      expect.objectContaining({
+        reason: "activation_failed",
+        error: "ENOSPC: no space left on device, rename",
+        expected: "2.0.0",
+        installed: "1.0.0",
+      }),
+    );
+    expect(h.watchdogLatch).toHaveBeenCalled();
+    await flushAsync();
+    expect(notifyMessages(h.notify).some((m) => m.includes("HELD"))).toBe(true);
+    const run = h.sync.runLedger.listRuns()[0];
+    expect(run.state).toBe("activation_failed");
+    expect(stepNames(run)).toEqual(["stop:running", "stop:completed", "activate:running", "activate:failed"]);
+
+    // With another local build that can read the DBs, the chooser retry
+    // activates it and the hold this path set is cleared again.
+    const rescued = createHarness({
+      pin: "1.0.0",
+      installedVersion: "1.0.0",
+      sentinelVersion: "1.0.0",
+      storeWrap: failSwapFor("2.0.0"),
+      extraSyncOptions: {
+        acquireLifecycleLock: makeLock().acquireLifecycleLock,
+        backupProbes: { listProcesses: () => [] },
+        backupTuning: { exclusivitySettleMs: 0 },
+      },
+    });
+    rescued.store.updateState((s) => {
+      s.pinVersion = "1.0.0";
+      s.applied = { channel: "beta", version: "2.0.0", at: 1, acceptedAt: null };
+      return s;
+    });
+    expect(saveOverlayFixture(rescued.store, "2.0.0")).toEqual({ ok: true });
+    expect(saveOverlayFixture(rescued.store, "1.5.0")).toEqual({ ok: true });
+    const second = await rescued.sync.reconcileInstalled();
+    expect(second).toEqual(expect.objectContaining({ ok: true, action: "activated", to: "1.5.0", schemaRecovery: true }));
+    expect(installedVersionOf(rescued.installDir)).toBe("1.5.0");
+    expect(rescued.store.readState().gatewayHold).toBeNull();
+    expect(rescued.store.readSentinel({ installDir: rescued.installDir })).toEqual(
+      expect.objectContaining({ version: "1.5.0" }),
+    );
+  });
+
+  it("a pre-rm failure (verify stage) leaves the live tree intact with no hold", async () => {
+    const h = createHarness({
+      pin: "1.0.0",
+      installedVersion: "1.0.0",
+      sentinelVersion: "1.0.0",
+      storeWrap: (store) => ({
+        ...store,
+        activateOverlayAsync: async () => ({ ok: false, stage: "verify", error: "staged bin missing" }),
+      }),
+      extraSyncOptions: {
+        acquireLifecycleLock: makeLock().acquireLifecycleLock,
+        backupProbes: { listProcesses: () => [] },
+        backupTuning: { exclusivitySettleMs: 0 },
+      },
+    });
+    h.store.updateState((s) => {
+      s.pinVersion = "1.0.0";
+      s.applied = { channel: "beta", version: "2.0.0", at: 1, acceptedAt: null };
+      return s;
+    });
+    expect(saveOverlayFixture(h.store, "2.0.0")).toEqual({ ok: true });
+    const result = await h.sync.reconcileInstalled();
+    expect(result).toEqual(expect.objectContaining({ ok: false, code: "activation_failed", stage: "verify" }));
+    expect(installedVersionOf(h.installDir)).toBe("1.0.0");
+    expect(h.store.readState().gatewayHold).toBeNull();
+    expect(h.store.readSentinel({ installDir: h.installDir })).toEqual(expect.objectContaining({ version: "1.0.0" }));
+  });
+
+  describe("which binary (#76 C6 / Codex 8)", () => {
+    // Route a `node <bin> backup ...` spawn to the stub's `openclaw backup`
+    // model so the archive contract stays faithful while the command is pinned.
+    const binAwareRunner = (seen) => (opts, fallback) => {
+      if (opts.command === process.execPath && opts.args?.[1] === "backup") {
+        seen.push(opts);
+        return fallback({ ...opts, command: "openclaw", args: opts.args.slice(1) });
+      }
+      if (opts.command === "openclaw" && opts.args?.[0] === "backup") seen.push(opts);
+      return fallback(opts);
+    };
+
+    it("the pre-update backup runs the recorded build's bin under node while the tree diverges (the operator's re-apply keeps working)", async () => {
+      const seen = [];
+      const lock = makeLock();
+      const h = createHarness({
+        pin: "1.0.0",
+        installedVersion: "1.0.0",
+        sentinelVersion: "1.0.0",
+        runnerImpl: binAwareRunner(seen),
+        extraSyncOptions: {
+          acquireLifecycleLock: lock.acquireLifecycleLock,
+          backupProbes: { listProcesses: () => [] },
+          backupTuning: { exclusivitySettleMs: 0 },
+        },
+      });
+      h.store.updateState((s) => {
+        s.pinVersion = "1.0.0";
+        s.applied = { channel: "beta", version: "2.0.0", at: 1, acceptedAt: null };
+        return s;
+      });
+      expect(saveOverlayWithSchema(h.store, "2.0.0", { state: 15, agent: 19 })).toEqual({ ok: true });
+      writeStateDb(h.openclawDir, { userVersion: 15 });
+      // Read before the apply: recording the new target prunes the 2.0.0 overlay.
+      const expectedBin = h.store.resolvePackageBin(h.store.overlayPackageDir("2.0.0"));
+      expect(expectedBin).toBeTruthy();
+      expect(h.sync.resolveExpectedBin()).toBe(expectedBin);
+      // Cross-channel target → hard-gated backup.
+      const result = await h.sync.applyUpdate({ channel: "beta", version: "1.1.0-beta.1" });
+      const backupSpawn = seen.find((opts) => opts.command === process.execPath);
+      expect(backupSpawn).toBeTruthy();
+      expect(backupSpawn.args.slice(0, 3)).toEqual([expectedBin, "backup", "create"]);
+      expect(seen.some((opts) => opts.command === "openclaw")).toBe(false);
+      expect(result.body?.code).not.toBe("version_mismatch");
+    });
+
+    it("the backup refuses version_mismatch on a hard gate only when NO local bin can read the databases; the same-channel soft gate warns and continues", async () => {
+      const seen = [];
+      const mk = (extra = {}) => {
+        const h = createHarness({
+          pin: "1.0.0",
+          installedVersion: "1.0.0",
+          sentinelVersion: "1.0.0",
+          runnerImpl: binAwareRunner(seen),
+          extraSyncOptions: extra,
+        });
+        // Both trees declare a schema below the live user_version.
+        writeSchemaContractFixture(path.join(h.installDir, "node_modules", "openclaw"), {
+          state: 10,
+          agent: 19,
+        });
+        h.store.updateState((s) => {
+          s.pinVersion = "1.0.0";
+          s.applied = { channel: "beta", version: "2.0.0", at: 1, acceptedAt: null };
+          return s;
+        });
+        expect(saveOverlayWithSchema(h.store, "2.0.0", { state: 12, agent: 19 })).toEqual({ ok: true });
+        writeStateDb(h.openclawDir, { userVersion: 15 });
+        return h;
+      };
+      const hard = mk();
+      const refused = await hard.sync.applyUpdate({ channel: "beta", version: "1.1.0-beta.1" });
+      expect(refused.status).toBeGreaterThanOrEqual(400);
+      expect(refused.body).toEqual(expect.objectContaining({ ok: false, code: "version_mismatch" }));
+      expect(refused.body.hint).toContain("Re-activate recorded build");
+      expect(seen.length).toBe(0);
+      expect(hard.store.readState().lastUpdateRun.steps).toContainEqual(
+        expect.objectContaining({ name: "backup", status: "failed", error: "version_mismatch" }),
+      );
+
+      const soft = mk();
+      const warned = await soft.sync.applyUpdate({ channel: "stable", version: "1.0.1" });
+      expect(warned.body?.code).not.toBe("version_mismatch");
+      expect(soft.store.readState().lastUpdateRun.steps).toContainEqual(
+        expect.objectContaining({ name: "backup", status: "warning", error: "version_mismatch" }),
+      );
+      expect(seen.length).toBe(0);
+    });
+
+    it("resolveExpectedBin names the recorded build's overlay bin while the tree diverges, null for dev or no overlay", () => {
+      const h = divergedHarness();
+      expect(h.sync.resolveExpectedBin()).toBe(
+        h.store.resolvePackageBin(h.store.overlayPackageDir("2.0.0")),
+      );
+      const missing = divergedHarness({ overlay: false });
+      expect(missing.sync.resolveExpectedBin()).toBeNull();
+      const dev = divergedHarness();
+      dev.store.updateState((s) => {
+        s.applied = { channel: "dev", sha: kDevSha, at: 1, acceptedAt: null };
+        return s;
+      });
+      expect(dev.sync.resolveExpectedBin()).toBeNull();
+      // The pin's own complete tree IS the expected bin when nothing is applied.
+      const pinned = divergedHarness({ expected: "1.0.0", overlay: false });
+      expect(pinned.sync.resolveExpectedBin()).toBe(
+        h.store.resolvePackageBin(path.join(pinned.installDir, "node_modules", "openclaw")),
+      );
+    });
+
+    it("compatibleBinForCurrentDb prefers the expected bin, falls back to the installed tree when the expected build cannot read the DBs, and is null when neither can", async () => {
+      const preferred = divergedHarness({ schema: { state: 15, agent: 19 } });
+      writeStateDb(preferred.openclawDir, { userVersion: 15 });
+      expect(await preferred.sync.compatibleBinForCurrentDb()).toEqual(
+        expect.objectContaining({ version: "2.0.0", source: "overlay", compatible: true }),
+      );
+
+      const fallback = divergedHarness({ schema: { state: 12, agent: 19 } });
+      writeStateDb(fallback.openclawDir, { userVersion: 15 });
+      // The installed tree declares nothing → unknown → fail-open pick.
+      expect(await fallback.sync.compatibleBinForCurrentDb()).toEqual(
+        expect.objectContaining({ version: "1.0.0", source: "installed", compatible: null }),
+      );
+
+      const neither = createHarness({
+        pin: "1.0.0",
+        installedVersion: "1.0.0",
+        sentinelVersion: "1.0.0",
+      });
+      // The INSTALLED tree declares a schema too old for the DB as well.
+      writeSchemaContractFixture(path.join(neither.installDir, "node_modules", "openclaw"), {
+        state: 10,
+        agent: 19,
+      });
+      neither.store.updateState((s) => {
+        s.pinVersion = "1.0.0";
+        s.applied = { channel: "beta", version: "2.0.0", at: 1, acceptedAt: null };
+        return s;
+      });
+      expect(saveOverlayWithSchema(neither.store, "2.0.0", { state: 12, agent: 19 })).toEqual({ ok: true });
+      writeStateDb(neither.openclawDir, { userVersion: 15 });
+      expect(await neither.sync.compatibleBinForCurrentDb()).toBeNull();
+    });
+  });
+
+  describe("undoLastConfigRestore (#76 B1.5)", () => {
+    const bootId = getProcessBootId();
+    const managedDir = (h) => h.store.managedDir;
+    const withRestore = (h, { restoreBootId = bootId, verdict = ["installed_not_expected"], report = true } = {}) => {
+      const configPath = path.join(h.openclawDir, "openclaw.json");
+      const preRestorePath = path.join(h.openclawDir, "openclaw.json.pre-restore-500.bak");
+      fs.mkdirSync(h.openclawDir, { recursive: true });
+      fs.writeFileSync(configPath, '{"live":true}\n');
+      fs.writeFileSync(preRestorePath, '{"preRestore":true}\n');
+      h.store.updateState((s) => {
+        s.configMigration = {
+          completedForVersion: "2.0.0",
+          lastAttempt: { version: "2.0.0", at: 1, ok: true, error: null },
+          lastRestore: {
+            at: 500,
+            from: "openclaw.json.pre-fix-1.0.0.bak",
+            previousCompletedForVersion: "1.0.0",
+            diffPath: null,
+            preRestorePath,
+            bootId: restoreBootId,
+            source: "crash_rollback",
+          },
+        };
+        return s;
+      });
+      if (report) {
+        fs.mkdirSync(managedDir(h), { recursive: true });
+        fs.writeFileSync(
+          path.join(managedDir(h), "boot-report.json"),
+          `${JSON.stringify({ bootId, serverPhase: { verdict } })}\n`,
+        );
+      }
+      return { configPath, preRestorePath };
+    };
+
+    it("undoes a restore THIS inconsistent boot performed: byte copy back, completedForVersion reset, record cleared, event + notification", async () => {
+      const insertEvent = vi.fn();
+      const h = createHarness({ pin: "1.0.0", installedVersion: "1.0.0", extraSyncOptions: { insertEvent } });
+      const { configPath, preRestorePath } = withRestore(h);
+      const result = h.sync.undoLastConfigRestore({ bootId });
+      expect(result).toEqual(
+        expect.objectContaining({ ok: true, restoredFrom: preRestorePath, completedForVersion: "1.0.0" }),
+      );
+      expect(fs.readFileSync(configPath, "utf8")).toBe('{"preRestore":true}\n');
+      const migration = h.store.readState().configMigration;
+      expect(migration.completedForVersion).toBe("1.0.0");
+      expect(migration.lastRestore).toBeNull();
+      expect(migration.lastAttempt).toEqual(expect.objectContaining({ version: "2.0.0", ok: true }));
+      expect(insertEvent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          eventType: "config_migration_gate",
+          status: "restore_undone",
+          details: expect.objectContaining({ bootId, completedForVersion: "1.0.0" }),
+        }),
+      );
+      await flushAsync();
+      expect(notifyMessages(h.notify).some((m) => m.includes("was undone"))).toBe(true);
+    });
+
+    it("declines for a consistent boot, a foreign boot, a missing record, and a missing pre-restore copy; an explicit inconsistent=true skips the report", () => {
+      const consistent = createHarness({ pin: "1.0.0", installedVersion: "1.0.0" });
+      const { configPath } = withRestore(consistent, { verdict: [] });
+      expect(consistent.sync.undoLastConfigRestore({ bootId })).toEqual(
+        expect.objectContaining({ ok: false, code: "boot_consistent" }),
+      );
+      expect(fs.readFileSync(configPath, "utf8")).toBe('{"live":true}\n');
+
+      const foreign = createHarness({ pin: "1.0.0", installedVersion: "1.0.0" });
+      withRestore(foreign, { restoreBootId: "999:1" });
+      expect(foreign.sync.undoLastConfigRestore({ bootId })).toEqual(
+        expect.objectContaining({ ok: false, code: "foreign_boot", restoreBootId: "999:1" }),
+      );
+
+      const none = createHarness({ pin: "1.0.0", installedVersion: "1.0.0" });
+      expect(none.sync.undoLastConfigRestore({ bootId })).toEqual({ ok: false, code: "no_restore" });
+
+      const gone = createHarness({ pin: "1.0.0", installedVersion: "1.0.0" });
+      const files = withRestore(gone);
+      fs.rmSync(files.preRestorePath);
+      expect(gone.sync.undoLastConfigRestore({ bootId })).toEqual(
+        expect.objectContaining({ ok: false, code: "pre_restore_missing" }),
+      );
+
+      // No report on disk, but the caller (structural repair) already holds
+      // the verdict.
+      const told = createHarness({ pin: "1.0.0", installedVersion: "1.0.0" });
+      const toldFiles = withRestore(told, { report: false });
+      expect(told.sync.undoLastConfigRestore({ bootId })).toEqual(
+        expect.objectContaining({ ok: false, code: "boot_consistent" }),
+      );
+      expect(told.sync.undoLastConfigRestore({ bootId, inconsistent: true }).ok).toBe(true);
+      expect(fs.readFileSync(toldFiles.configPath, "utf8")).toBe('{"preRestore":true}\n');
+    });
+  });
+
+  describe("requestForwardRecoveryAsync — schema-driven second path (#76 B1.4)", () => {
+    const pinHarness = () => {
+      const insertEvent = vi.fn();
+      const h = createHarness({
+        pin: "1.0.0",
+        installedVersion: "1.0.0",
+        sentinelVersion: "1.0.0",
+        extraSyncOptions: { insertEvent },
+      });
+      h.store.updateState((s) => {
+        s.pinVersion = "1.0.0";
+        return s;
+      });
+      return { ...h, insertEvent };
+    };
+
+    it("moves forward to the newest complete overlay whose declared schema can read the migrated state, without a blocklist entry", async () => {
+      vi.useFakeTimers();
+      const h = pinHarness();
+      writeStateDb(h.openclawDir, { userVersion: 15 });
+      expect(saveOverlayWithSchema(h.store, "2.0.0", { state: 12, agent: 19 })).toEqual({ ok: true });
+      expect(saveOverlayWithSchema(h.store, "3.0.0", { state: 15, agent: 19 })).toEqual({ ok: true });
+      const result = await h.sync.requestForwardRecoveryAsync({ exitCode: 78, installedVersion: "1.0.0" });
+      expect(result).toEqual({ ok: true, target: { kind: "package", channel: "stable", version: "3.0.0" } });
+      expect(h.store.readMarker()).toEqual(
+        expect.objectContaining({ reason: "forward_recovery", target: expect.objectContaining({ version: "3.0.0" }) }),
+      );
+      expect(h.store.readState().forwardRecovery).toEqual(
+        expect.objectContaining({ attemptedId: "3.0.0", clearedEntry: null, selection: "schema" }),
+      );
+      expect(h.insertEvent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          eventType: "forward_recovery",
+          status: "requested",
+          details: expect.objectContaining({ selection: "schema", installedVersion: "1.0.0" }),
+        }),
+      );
+      // Second cycle latches exactly like the blocklist path.
+      const again = await h.sync.requestForwardRecoveryAsync({ exitCode: 78 });
+      expect(again).toEqual(expect.objectContaining({ ok: false, code: "forward_already_attempted" }));
+      expect(h.store.readState().noBootableVersion).toEqual(expect.objectContaining({ attemptedId: "3.0.0" }));
+    });
+
+    it("prefers the blocklist path when it qualifies, and reports no_forward_candidate when no overlay can read the state", async () => {
+      vi.useFakeTimers();
+      const blocklisted = pinHarness();
+      expect(saveOverlayFixture(blocklisted.store, "2.5.0")).toEqual({ ok: true });
+      blocklisted.store.addBlocklist({ id: "2.5.0", reason: "config_error", exitCode: 78 });
+      const first = await blocklisted.sync.requestForwardRecoveryAsync({ exitCode: 78 });
+      expect(first.ok).toBe(true);
+      expect(blocklisted.store.readState().forwardRecovery).toEqual(
+        expect.objectContaining({ attemptedId: "2.5.0", selection: "blocklist" }),
+      );
+      expect(blocklisted.store.isBlocklisted("2.5.0")).toBe(false);
+
+      const none = pinHarness();
+      writeStateDb(none.openclawDir, { userVersion: 15 });
+      expect(saveOverlayWithSchema(none.store, "2.0.0", { state: 12, agent: 19 })).toEqual({ ok: true });
+      expect(await none.sync.requestForwardRecoveryAsync({ exitCode: 78 })).toEqual(
+        expect.objectContaining({ ok: false, code: "no_forward_candidate" }),
+      );
+      expect(none.store.readMarker()).toBeNull();
+      // The sync entry point is unchanged for the watchdog's inline call.
+      expect(none.sync.requestForwardRecovery({ exitCode: 78 })).toEqual(
+        expect.objectContaining({ ok: false, code: "no_forward_candidate" }),
+      );
+    });
+  });
+});

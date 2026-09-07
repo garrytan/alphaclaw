@@ -1,0 +1,14 @@
+{
+  "schema": "alphaclaw.boot-report.v1",
+  "bootId": "7:1788681600000",
+  "at": 1788681600000,
+  "alphaclaw": {
+    "version": "0.9.77",
+    "commit": "a1b2c3d",
+    "previousVersion": "0.9.76",
+    "firstBootOfVersion": true
+  },
+  "container": {
+    "pid1StartTicks": 3431,
+    "startMs": 1788681540000
+  },

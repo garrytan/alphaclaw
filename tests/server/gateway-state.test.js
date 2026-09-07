@@ -1048,3 +1048,85 @@ describe("server/gateway-state tracker annotations: cause + versionMismatch (#76
     expect(tracker.track(reduceGatewayState(inputs())).state).toBe("running");
   });
 });
+
+describe("Stage 3 (#76 B1.3 / F015): the `down` reason names a latched auto-repair pause or an exhausted Doctor budget", () => {
+  const {
+    reduceGatewayState: reduce,
+    kAutoRepairPauseCopy,
+    kRepairAttemptsExhaustedCopy,
+  } = require("../../lib/server/gateway-state");
+  const now = 1_788_681_900_000;
+  const downInputs = (watchdog) => ({
+    configExists: true,
+    tcp: { running: false, observedAt: now },
+    watchdog: {
+      lifecycle: "crashed",
+      health: "unhealthy",
+      safeMode: false,
+      suppressedChannels: [],
+      crashCountInWindow: 1,
+      crashLoopThreshold: 3,
+      crashLoopWindowMs: 300000,
+      gatewayPid: null,
+      operationInProgress: false,
+      backoff: { active: false, untilMs: null, attempt: 0 },
+      repairAttempts: 0,
+      repairAttemptLimit: 2,
+      autoRepairPaused: null,
+      ...watchdog,
+    },
+    operation: null,
+    bootPhase: { phase: "ready", error: null },
+    now,
+  });
+
+  it("a paused box reads `down` with the pause copy (cause + installed version, suspected wording when uncorroborated); Retry/Repair stay offered", () => {
+    const pause = {
+      at: "2026-09-06T08:05:00.000Z",
+      cause: "state_schema_too_new",
+      fingerprint: "63e47a67df1b",
+      installedVersion: "2026.7.1-2",
+      attempts: 1,
+      lastPlan: { rung: "recover_bootable", outcome: "no_bootable_version" },
+      reason: "structural_repair_failed",
+      corroborated: true,
+    };
+    const paused = reduce(downInputs({ autoRepairPaused: pause }));
+    expect(paused.state).toBe("down");
+    expect(paused.reason).toBe(kAutoRepairPauseCopy.downReason(pause));
+    expect(paused.reason).toContain("Automatic repair is paused — cause state_schema_too_new on OpenClaw 2026.7.1-2");
+    expect(paused.reason).toContain("forced Repair");
+    expect(paused.actions.map((a) => a.id)).toEqual(["retry", "repair", "view_logs"]);
+    const suspected = reduce(downInputs({ autoRepairPaused: { ...pause, corroborated: false } }));
+    expect(suspected.reason).toContain("suspected cause state_schema_too_new");
+    // The route copy never renders an enum bare.
+    expect(kAutoRepairPauseCopy.repairRefusal).toContain("force: true");
+    expect(kAutoRepairPauseCopy.hint).toContain("alphaclaw diagnose");
+  });
+
+  it("an exhausted Doctor budget reads `down` with the F015 copy; the pause outranks it; below the cap the legacy copy stands", () => {
+    const exhausted = reduce(downInputs({ lifecycle: "crash_loop", repairAttempts: 2, repairAttemptLimit: 2 }));
+    expect(exhausted.state).toBe("down");
+    expect(exhausted.reason).toBe(
+      kRepairAttemptsExhaustedCopy.downReason({ repairAttempts: 2, repairAttemptLimit: 2 }),
+    );
+    expect(exhausted.reason).toContain("Doctor repair failed 2/2 times");
+    expect(exhausted.reason).toContain("crash relaunches continue with backoff");
+    const both = reduce(
+      downInputs({
+        repairAttempts: 2,
+        repairAttemptLimit: 2,
+        autoRepairPaused: { cause: "legacy_exec_approvals", installedVersion: "2026.9.2", corroborated: true },
+      }),
+    );
+    expect(both.reason).toContain("Automatic repair is paused");
+    expect(reduce(downInputs({ lifecycle: "crash_loop", repairAttempts: 1 })).reason).toBe(
+      "Crashed repeatedly — automatic restarts are paused.",
+    );
+    expect(reduce(downInputs({ lifecycle: "stopped", repairAttempts: 1 })).reason).toBe(
+      "The gateway is not running.",
+    );
+    // Without a pause a bare "crashed" is still the imminent relaunch (`starting`).
+    expect(reduce(downInputs({ repairAttempts: 1 })).state).toBe("starting");
+  });
+});

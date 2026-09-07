@@ -1,0 +1,42 @@
+{
+  "operationId": "9b1f6c2e-3d4a-4f5b-8c6d-7e8f9a0b1c2d",
+  "target": {
+    "channel": "stable",
+    "version": "2026.9.2"
+  },
+  "state": "running",
+  "startedAt": 1788681480000,
+  "finishedAt": null,
+  "ok": null,
+  "result": null,
+  "steps": [
+    {
+      "name": "preflight",
+      "status": "done",
+      "detail": "2026.9.2 resolved"
+    },
+    {
+      "name": "backup",
+      "status": "done",
+      "detail": "offline copy verified"
+    },
+    {
+      "name": "install",
+      "status": "running"
+    }
+  ],
+  "backup": {
+    "ok": true,
+    "file": "/data/.openclaw/backups/openclaw/openclaw-backup-1788422400000-9b1f6c2e.alphaclaw.tar.gz",
+    "sha256": "3f786850e387550fdab836ed7e6dc881de23001b1e2a1d4c1b3c5e7f9a0b2c4d",
+    "bytes": 1048576
+  },
+  "dbPreflight": {
+    "migrationRequired": false,
+    "foundVersion": 15,
+    "targetVersion": 15,
+    "dbSizesBytes": 40960
+  },
+  "overseer": null,
+  "hasLog": false
+}

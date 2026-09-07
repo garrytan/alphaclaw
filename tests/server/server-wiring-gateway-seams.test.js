@@ -247,6 +247,24 @@ describe("lib/server.js composition pins (lane C / lane A hand-offs)", () => {
     );
   });
 
+  it("createWatchdog receives the #76 C6 doctor-binary seams: clawCmdWithBin from commands.js and releaseChannelHooks.compatibleBinForCurrentDb from the channel service (runRepair never runs doctor from PATH under a latched mismatch)", () => {
+    const start = serverSource.indexOf("const watchdog = createWatchdog({");
+    expect(start).toBeGreaterThan(-1);
+    const block = serverSource.slice(start, serverSource.indexOf("\n});", start));
+    expect(block).toContain("clawCmdWithBin,");
+    expect(block).toContain(
+      "compatibleBinForCurrentDb: () => openclawChannelService.compatibleBinForCurrentDb(),",
+    );
+    // The same execFileCmd-backed primitive the capability probes use, from
+    // the one createCommands() instance lib/server.js builds.
+    expect(serverSource).toMatch(
+      /const \{[^}]*clawCmdWithBin,[^}]*\} =\s*createCommands\(/s,
+    );
+    const commandsSource = readSource("lib", "server", "commands.js");
+    expect(commandsSource).toContain("const clawCmdWithBin = async (");
+    expect(commandsSource).toMatch(/return \{[^}]*clawCmdWithBin,[^}]*\}/s);
+  });
+
   it("register-server-routes passes the outbox-backed notify into registerSystemRoutes (the incumbent-restart notification's carrier)", () => {
     const source = readSource("lib", "server", "init", "register-server-routes.js");
     const start = source.indexOf("registerSystemRoutes({");

@@ -107,6 +107,9 @@ const createChannelHarness = ({
   overlays = ["1.0.0"],
   stabilizationWindowMs = undefined,
   acceptanceHoldMs = undefined,
+  // Escape hatch for sync seams the named options do not cover (Stage 3:
+  // hermetic exclusivity probes for reconcileInstalled).
+  extraSyncOptions = {},
 } = {}) => {
   delete process.env.OPENCLAW_GIT_DIR;
   const rootDir = mkTemp("alphaclaw-wg-channel-root-");
@@ -168,6 +171,7 @@ const createChannelHarness = ({
     backupsDir: path.join(rootDir, "backups", "openclaw"),
     ...(stabilizationWindowMs !== undefined ? { stabilizationWindowMs } : {}),
     ...(acceptanceHoldMs !== undefined ? { acceptanceHoldMs } : {}),
+    ...extraSyncOptions,
   });
 
   return {
@@ -184,7 +188,15 @@ const createChannelHarness = ({
 const createFakeGateway = () => ({ healthy: true });
 
 // Real watchdog wired to the real channel service, exactly like lib/server.js.
-const createStack = ({ autoRepair = false, channel, fakeGateway } = {}) => {
+const createStack = ({
+  autoRepair = false,
+  channel,
+  fakeGateway,
+  // Stage 3 (#76 B1): the structural hooks lib/server.js wires beside the
+  // rollback ones, plus the crash classifier + facts reader (extraWatchdog).
+  extraHooks = {},
+  extraWatchdog = {},
+} = {}) => {
   process.env.WATCHDOG_AUTO_REPAIR = autoRepair ? "true" : "false";
   process.env.WATCHDOG_NOTIFICATIONS_DISABLED = "false";
 
@@ -223,7 +235,9 @@ const createStack = ({ autoRepair = false, channel, fakeGateway } = {}) => {
         channel.service.requestForwardRecovery(payload),
       onHealthy: () => channel.service.onGatewayHealthy(),
       onUnhealthy: () => channel.service.onGatewayUnhealthy(),
+      ...extraHooks,
     },
+    ...extraWatchdog,
   });
   channel.watchdogRef.current = watchdog;
 
@@ -838,5 +852,113 @@ describe("server/watchdog gateway + release channel (e2e)", { retry: 1 }, () => 
     expect(channel.store.readMarker()).toBeNull();
     expect(channel.store.readState().blocklist).toHaveLength(0);
     expect(channel.store.readState().pinLag).toEqual(state.pinLag);
+  });
+  it("#76 RC4 (Stage 3): a corroborated state_schema_too_new crash on a diverged tree re-activates the RECORDED build through reconcileInstalled under the ladder's hold and relaunches it — the applied build is never blocklisted, no marker, no doctor, no relaunch of the crashed pin", async () => {
+    const { classifyGatewayCrash } = require("../../lib/server/gateway-crash-cause");
+    const {
+      createGatewayLifecycleLock,
+    } = require("../../lib/server/gateway-lifecycle-lock");
+    const { kStructuralRelaunchSource } = require("../../lib/server/watchdog-structural-repair");
+    // Installed pin 1.0.0, applied 2.0.0 with a complete overlay: the exact
+    // incident shape (a skipped boot sync left the pin on disk).
+    const channel = createChannelHarness({
+      pin: "1.0.0",
+      installedVersion: "1.0.0",
+      sentinelVersion: "1.0.0",
+      applied: { channel: "beta", version: "2.0.0", at: 1, acceptedAt: null },
+      overlays: ["1.0.0", "2.0.0"],
+      extraSyncOptions: {
+        // Hermetic: never scan this box's /proc for the exclusivity sample.
+        backupProbes: { listProcesses: () => [] },
+        backupTuning: { exclusivitySettleMs: 0 },
+      },
+    });
+    expect(channel.service.getChannelInfo()).toEqual(
+      expect.objectContaining({ installedVersion: "1.0.0", expectedVersion: "2.0.0", installedDiverged: true }),
+    );
+    const kStateDbPath = path.join(channel.service.getChannelInfo().openclawDir || "/data/.openclaw", "state", "openclaw.sqlite");
+    const stderrTail = [
+      `OpenClaw state database ${kStateDbPath} uses newer schema version 15; this OpenClaw build supports 12.`,
+      "Refused by openclaw 1.0.0.",
+    ];
+    const lock = createGatewayLifecycleLock();
+    const stack = createStack({
+      autoRepair: true,
+      channel,
+      extraHooks: {
+        reconcileInstalled: (payload) => channel.service.reconcileInstalled(payload),
+        completeReconcileRun: (payload) => channel.service.completeReconcileRun(payload),
+        undoLastConfigRestore: (payload) => channel.service.undoLastConfigRestore(payload),
+        recoverBootable: (payload) => channel.service.reconcileInstalled({ ...payload, recover: true }),
+        renameStrayExecApprovals: () => ({ reaped: false }),
+      },
+      extraWatchdog: {
+        gatewayLifecycleLock: lock,
+        classifyGatewayCrash,
+        // The independent fact: the named DB IS at user_version 15.
+        readCrashFacts: async () => ({
+          userVersionsByPath: { [kStateDbPath]: 15 },
+          supportedSchema: { state: 12, agent: null, source: "declared" },
+          installedDiverged: channel.service.getChannelInfo().installedDiverged,
+          legacyExecApprovalsPresent: false,
+        }),
+      },
+    });
+
+    stack.gateway.healthy = false;
+    stack.watchdog.onGatewayExit({ code: 1, expectedExit: false, stderrTail });
+    // The real reconcile copies the overlay through the fs threadpool: wait
+    // (real time, bounded) for the ladder's one structured row.
+    const structuralRowLanded = () =>
+      stack.insertWatchdogEvent.mock.calls.some(
+        (call) => call[0]?.eventType === "repair" && call[0]?.source === "structural" && call[0]?.status !== "skipped",
+      );
+    for (let waited = 0; waited < 10_000 && !structuralRowLanded(); waited += 25) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    for (let i = 0; i < 10; i += 1) await flushMicrotasks();
+
+    // The recorded build is live on disk; the pin was NOT relaunched.
+    const installed = JSON.parse(
+      fs.readFileSync(path.join(channel.installDir, "node_modules", "openclaw", "package.json"), "utf8"),
+    ).version;
+    expect(installed).toBe("2.0.0");
+    expect(channel.service.getChannelInfo()).toEqual(
+      expect.objectContaining({ installedVersion: "2.0.0", installedDiverged: false }),
+    );
+    expect(channel.store.isBlocklisted("2.0.0")).toBe(false);
+    expect(channel.store.isBlocklisted("1.0.0")).toBe(false);
+    expect(channel.store.readMarker()).toBeNull();
+    expect(channel.restartProcess).not.toHaveBeenCalled();
+    expect(stack.clawCmd).not.toHaveBeenCalledWith("doctor --fix --yes", expect.anything());
+    // Exactly one launch — the corrected tree — after the activation.
+    expect(stack.launchGatewayProcess).toHaveBeenCalledTimes(1);
+    const rows = stack.insertWatchdogEvent.mock.calls.map((call) => call[0]);
+    const requested = rows.filter((r) => r.eventType === "restart" && r.status === "requested");
+    expect(requested).toHaveLength(1);
+    expect(requested[0].source).toBe(kStructuralRelaunchSource);
+    const structural = rows.filter((r) => r.eventType === "repair" && r.source === "structural");
+    expect(structural).toHaveLength(1);
+    expect(structural[0].status).toBe("ok");
+    expect(structural[0].details.plan.map((p) => `${p.step}:${p.outcome}`)).toEqual([
+      "reconcile_installed:activated",
+      "undo_config_restore:no_restore",
+      "relaunch:replacement_pending",
+    ]);
+    expect(rows.some((r) => r.eventType === "crash_loop")).toBe(false);
+    expect(rows.some((r) => r.eventType === "channel_rollback")).toBe(false);
+    // Codex 7: the reconcile ledger run was completed by the caller with the
+    // relaunch step.
+    const run = channel.service.runLedger.listRuns().find((r) => r.target?.kind === "reconcile");
+    expect(run).toEqual(expect.objectContaining({ state: "activated", ok: true }));
+    expect(run.steps.map((step) => `${step.name}:${step.status}`)).toEqual(
+      expect.arrayContaining(["stop:completed", "activate:completed", "verify:completed", "relaunch:completed"]),
+    );
+    expect(channelNotifyMessages(channel).some((m) => m.includes("re-activated OpenClaw 2.0.0"))).toBe(true);
+    expect(stack.watchdog.getStatus().autoRepairPaused).toBe(null);
+    expect(stack.watchdog.getStatus().versionMismatch).toEqual(
+      expect.objectContaining({ expected: "2.0.0", running: "1.0.0", source: "crash" }),
+    );
+    stack.watchdog.stop();
   });
 });

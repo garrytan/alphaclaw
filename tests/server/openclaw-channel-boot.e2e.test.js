@@ -7,10 +7,15 @@ const {
 } = require("../../lib/server/openclaw-channel-sync");
 const {
   createOpenclawReleaseChannelStore,
+  kOpenclawStagingDirPrefix,
 } = require("../../lib/server/openclaw-release-channel");
 const { createRunLedger } = require("../../lib/server/openclaw-run-ledger");
 const { getProcessBootId } = require("../../lib/server/boot-id");
 const { createBootReportWriter, computeVerdict } = require("../../lib/server/boot-report");
+const { runOnboardedBootSequence } = require("../../lib/server/startup");
+const { setBootPhase } = require("../../lib/server/boot-phase");
+const { createBootLaunchSteps } = require("../../lib/server/boot-launch-steps");
+const { utcDayBucket } = require("../../lib/server/notification-policy");
 
 // End-to-end coverage for syncAtBoot: the real channel-sync service + real
 // store recovering real on-disk trees, with the environment poisoned so any
@@ -321,6 +326,56 @@ describe("server/openclaw-channel boot sync (e2e)", () => {
     expect(store.readState().lastBoot).toEqual(
       expect.objectContaining({ action: "activated" }),
     );
+    assertOffline(harness);
+  });
+
+  it("staging-rename crash case (#76 Codex 3 / Eng 3B): a stale `.openclaw-staging-*` copy beside a gutted live tree is swept by the boot sync and the recorded build re-activates cleanly, fully offline; a young sibling is left alone", () => {
+    const harness = createHarness({
+      pin: "1.0.0",
+      channel: "beta",
+      // No live tree at all: a previous boot's activation died between
+      // `rm(old tree)` and `rename(staging)` — no package.json, no sentinel.
+      installedVersion: null,
+    });
+    const { sync, store, installDir } = harness;
+    store.updateState((s) => {
+      s.pinVersion = "1.0.0";
+      s.applied = { channel: "beta", version: "1.1.0", at: 1, acceptedAt: 2 };
+      return s;
+    });
+    expect(saveOverlayFixture(store, "1.1.0")).toEqual({ ok: true });
+    const nodeModules = path.join(installDir, "node_modules");
+    fs.mkdirSync(nodeModules, { recursive: true });
+    // The dead boot's complete staging copy, old enough to be debris.
+    const stale = path.join(nodeModules, `${kOpenclawStagingDirPrefix}9:9`);
+    fs.cpSync(store.overlayPackageDir("1.1.0"), stale, { recursive: true });
+    const seconds = (Date.now() - 11 * 60 * 1000) / 1000;
+    fs.utimesSync(stale, seconds, seconds);
+    // A young sibling (possibly another process mid-copy) is never touched.
+    const young = path.join(nodeModules, `${kOpenclawStagingDirPrefix}8:8`);
+    fs.mkdirSync(young);
+    expect(store.readInstalledVersion({ installDir })).toBeNull();
+
+    const result = sync.syncAtBoot();
+
+    expect(result.ok).toBe(true);
+    expect(result.action).toBe("activated");
+    expect(result.warnings).toContain("removed 1 stale activation staging dir");
+    expect(installedPackageJsonVersion(installDir)).toBe("1.1.0");
+    expect(store.readSentinel({ installDir })).toEqual(
+      expect.objectContaining({ version: "1.1.0" }),
+    );
+    expect(fs.existsSync(stale)).toBe(false);
+    expect(fs.existsSync(young)).toBe(true);
+    expect(
+      fs.readdirSync(nodeModules).filter((name) => name.startsWith(kOpenclawStagingDirPrefix)),
+    ).toEqual([`${kOpenclawStagingDirPrefix}8:8`]);
+    // A second boot on the converged tree sweeps nothing (the young sibling
+    // is still young) and is the steady-state already_active no-op.
+    const again = sync.syncAtBoot();
+    expect(again.action).toBe("already_active");
+    expect((again.warnings ?? []).some((line) => line.includes("staging"))).toBe(false);
+    expect(fs.existsSync(young)).toBe(true);
     assertOffline(harness);
   });
 
@@ -4415,5 +4470,618 @@ describe("server/openclaw-channel boot sync (e2e)", () => {
       expect(state.applied).toBe(null);
       expect(harness.store.hasOverlay("1.0.0")).toBe(true);
     });
+  });
+});
+
+// ── Runtime installed-tree reconcile over a REAL store (#76 B1.2) ────────────
+// The C1 belt's engine: the same offline guarantees as syncAtBoot (no fetch,
+// no spawn) while it swaps the recorded build's overlay under a diverged tree.
+describe("server/openclaw-channel reconcileInstalled (e2e, real store)", () => {
+  beforeEach(() => {
+    global.fetch = vi.fn(() => {
+      throw new Error("network poisoned: reconcile must be offline");
+    });
+  });
+  afterEach(() => {
+    if (kOriginalFetch == null) delete global.fetch;
+    else global.fetch = kOriginalFetch;
+  });
+
+  const kHermetic = {
+    backupProbes: { listProcesses: () => [] },
+    backupTuning: { exclusivitySettleMs: 0 },
+  };
+  const runOf = (harness, runId) =>
+    createRunLedger({ openclawDir: harness.openclawDir, logger: kSilentLogger })
+      .listRuns()
+      .find((run) => run.operationId === runId);
+
+  it("flips a diverged tree to the recorded build fully offline: tree, bin and sentinel (written last) all name the applied build; the run records stop → activate → verify", async () => {
+    const harness = createHarness({
+      pin: "1.0.0",
+      installedVersion: "1.0.0",
+      sentinelVersion: "1.0.0",
+      extraSyncOptions: kHermetic,
+    });
+    harness.store.updateState((s) => {
+      s.applied = { channel: "beta", version: "2.0.0-beta.1", at: 1, acceptedAt: null };
+      return s;
+    });
+    expect(saveOverlayFixture(harness.store, "2.0.0-beta.1")).toEqual({ ok: true });
+    expect(harness.sync.getChannelInfo().installedDiverged).toBe(true);
+
+    const result = await harness.sync.reconcileInstalled({ source: "boot", relaunch: false });
+
+    expect(result).toEqual(
+      expect.objectContaining({ ok: true, action: "activated", from: "1.0.0", to: "2.0.0-beta.1" }),
+    );
+    expect(installedPackageJsonVersion(harness.installDir)).toBe("2.0.0-beta.1");
+    expect(fs.existsSync(installedBinPath(harness.installDir))).toBe(true);
+    expect(harness.store.readSentinel({ installDir: harness.installDir })).toEqual(
+      expect.objectContaining({ version: "2.0.0-beta.1" }),
+    );
+    // No staging debris left beside the live tree.
+    expect(
+      fs.readdirSync(path.join(harness.installDir, "node_modules")).filter((name) =>
+        name.startsWith(".openclaw-staging-"),
+      ),
+    ).toEqual([]);
+    expect(harness.sync.getChannelInfo().installedDiverged).toBe(false);
+    const run = runOf(harness, result.runId);
+    expect(run.target).toEqual({ kind: "reconcile", version: "2.0.0-beta.1", from: "1.0.0" });
+    expect(run.steps.map((step) => `${step.name}:${step.status}`)).toEqual([
+      "stop:running",
+      "stop:completed",
+      "activate:running",
+      "activate:completed",
+      "verify:running",
+      "verify:completed",
+    ]);
+    // The boot caller books its own relaunch step (Codex 7).
+    expect(run.state).toBe("running");
+    harness.sync.completeReconcileRun({ runId: result.runId, relaunch: { ok: true, verdict: "started" } });
+    expect(runOf(harness, result.runId)).toEqual(expect.objectContaining({ state: "activated", ok: true }));
+    assertOffline(harness);
+  });
+
+  it("chaos: a gutted live tree (rm done, cp never finished, no sentinel) beside a complete overlay is re-activated", async () => {
+    const harness = createHarness({
+      pin: "1.0.0",
+      installedVersion: "1.0.0",
+      sentinelVersion: "1.0.0",
+      extraSyncOptions: kHermetic,
+    });
+    harness.store.updateState((s) => {
+      s.applied = { channel: "beta", version: "2.0.0", at: 1, acceptedAt: null };
+      return s;
+    });
+    expect(saveOverlayFixture(harness.store, "2.0.0")).toEqual({ ok: true });
+    fs.rmSync(path.join(harness.installDir, "node_modules", "openclaw"), { recursive: true, force: true });
+    fs.rmSync(harness.store.sentinelPath({ installDir: harness.installDir }), { force: true });
+
+    const result = await harness.sync.reconcileInstalled({ source: "boot" });
+    expect(result).toEqual(expect.objectContaining({ ok: true, action: "activated", from: null, to: "2.0.0" }));
+    expect(installedPackageJsonVersion(harness.installDir)).toBe("2.0.0");
+    expect(harness.store.readSentinel({ installDir: harness.installDir })).toEqual(
+      expect.objectContaining({ version: "2.0.0" }),
+    );
+    assertOffline(harness);
+  });
+
+  it("a complete pin tree that only lost its sentinel is repaired by writing the sentinel — no copy, no rm", async () => {
+    const harness = createHarness({
+      pin: "1.0.0",
+      installedVersion: "1.0.0",
+      // No sentinel: needsActivation is true although the tree IS the pin.
+      extraSyncOptions: kHermetic,
+    });
+    // The bin phase's syncAtBoot records the declared pin before the server
+    // phase runs; a bare store has no pinVersion to reconcile against.
+    harness.store.updateState((s) => {
+      s.pinVersion = "1.0.0";
+      return s;
+    });
+    const before = fs.statSync(path.join(harness.installDir, "node_modules", "openclaw", "package.json")).ino;
+    const result = await harness.sync.reconcileInstalled({ source: "boot" });
+    expect(result).toEqual(expect.objectContaining({ ok: true, action: "activated", from: "1.0.0", to: "1.0.0" }));
+    expect(fs.statSync(path.join(harness.installDir, "node_modules", "openclaw", "package.json")).ino).toBe(before);
+    expect(harness.store.readSentinel({ installDir: harness.installDir })).toEqual(
+      expect.objectContaining({ version: "1.0.0" }),
+    );
+    expect((await harness.sync.reconcileInstalled({ source: "boot" })).action).toBe("none");
+    assertOffline(harness);
+  });
+});
+
+// Boot steps (3) + (4) of runOnboardedBootSequence (#76 C1 belt / C2): the
+// REAL startup.js order driving the real channel sync + real store + real
+// SQLite files, with boot-launch-steps.js as the glue lib/server.js wires. Only
+// the gateway launch and the doctor spawn are fakes.
+describe("server/openclaw-channel launch compatibility gate at boot (e2e, real store)", () => {
+  beforeEach(() => {
+    global.fetch = vi.fn(() => {
+      throw new Error("network poisoned: the boot gate must be offline");
+    });
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(console, "log").mockImplementation(() => {});
+  });
+  afterEach(() => {
+    if (kOriginalFetch == null) delete global.fetch;
+    else global.fetch = kOriginalFetch;
+    delete process.env.OPENCLAW_LAUNCH_COMPAT_GATE;
+    delete process.env.OPENCLAW_RUNTIME_RECONCILE;
+    setBootPhase("ready");
+    vi.restoreAllMocks();
+  });
+
+  const kHermetic = {
+    backupProbes: { listProcesses: () => [] },
+    backupTuning: { exclusivitySettleMs: 0 },
+  };
+  const writeConfig = (openclawDir, obj) => {
+    fs.mkdirSync(openclawDir, { recursive: true });
+    fs.writeFileSync(path.join(openclawDir, "openclaw.json"), JSON.stringify(obj, null, 2));
+  };
+  const doctorRunner = ({ doctorCalls = [] } = {}) =>
+    async (opts) => {
+      const args = Array.isArray(opts.args) ? opts.args : [];
+      if (args.includes("doctor")) {
+        doctorCalls.push(args);
+        return { ok: true, code: 0, tail: "Doctor complete\n", timedOut: false };
+      }
+      return { ok: false, code: 1, tail: "error: unknown command\n", timedOut: false };
+    };
+  // A file SQLite refuses to open as a database (SQLITE_NOTADB → corrupt).
+  const writeCorruptStateDb = (openclawDir) => {
+    const file = path.join(openclawDir, "state", "openclaw.sqlite");
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, Buffer.alloc(4096, 0x78));
+    return file;
+  };
+  const eventsOf = (insertEvent, type) =>
+    insertEvent.mock.calls.map((call) => call[0]).filter((event) => event.eventType === type);
+  // The server-phase doctor legitimately spawns through the runner; the gate
+  // and the reconcile themselves must never reach the network or npm.
+  const assertNoNetwork = (harness) => {
+    expect(harness.installToTempDir).not.toHaveBeenCalled();
+    expect(global.fetch).not.toHaveBeenCalled();
+  };
+  const runOf = (harness, runId) =>
+    createRunLedger({ openclawDir: harness.openclawDir, logger: kSilentLogger })
+      .listRuns()
+      .find((run) => run.operationId === runId);
+
+  // One harness per case: the real sync (with the raw `insertEvent` ledger
+  // sink), the glue with a FAKE wrapped sink (no watchdog → the glue writes
+  // the version_mismatch row itself), and the boot driver.
+  const createGateHarness = (options = {}) => {
+    const insertEvent = vi.fn();
+    const logger = { log: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    const doctorCalls = [];
+    const harness = createHarness({
+      pin: "1.0.0",
+      installedVersion: "1.0.0",
+      sentinelVersion: "1.0.0",
+      runnerImpl: doctorRunner({ doctorCalls }),
+      ...options,
+      extraSyncOptions: { ...kHermetic, insertEvent, logger, ...(options.extraSyncOptions || {}) },
+    });
+    harness.store.updateState((s) => {
+      s.pinVersion = "1.0.0";
+      return s;
+    });
+    const insertWatchdogEvent = vi.fn();
+    const steps = createBootLaunchSteps({
+      openclawChannelService: harness.sync,
+      insertWatchdogEvent,
+      getWatchdog: () => null,
+      logger: kSilentLogger,
+    });
+    const startGateway = vi.fn(async () => {});
+    const watchdogStart = vi.fn();
+    const finalizeOutcomes = [];
+    const boot = () =>
+      runOnboardedBootSequence({
+        reportLockContentionAtBoot: () => ({ live: [], lockDirs: [], lines: [] }),
+        ensureManagedExecDefaults: async () => {},
+        ensureUsageTrackerPluginConfig: () => {},
+        ensureWebhookMappingIds: () => ({ changed: false, updatedIds: [] }),
+        doSyncPromptFiles: () => {},
+        reloadEnv: () => {},
+        syncChannelConfig: async () => {},
+        readEnvFile: () => [],
+        ensureGatewayProxyConfig: () => {},
+        resolveSetupUrl: () => "https://setup.example.com",
+        reconcileInstalledAtBoot: (args) => steps.reconcileInstalledAtBoot(args),
+        assessLaunchCompatibilityAtBoot: (args) => steps.assessLaunchCompatibilityAtBoot(args),
+        reconcileBootConfig: () => harness.sync.reconcileBootConfig(),
+        finalizeBootReport: async (outcome) => {
+          steps.onBootReportFinalize(outcome);
+          finalizeOutcomes.push(outcome);
+        },
+        startGateway: steps.wrapStartGateway(startGateway),
+        watchdog: { start: watchdogStart },
+        gmailWatchService: { start: () => {} },
+      });
+    return {
+      ...harness,
+      insertEvent,
+      insertWatchdogEvent,
+      logger,
+      doctorCalls,
+      steps,
+      startGateway,
+      watchdogStart,
+      finalizeOutcomes,
+      boot,
+    };
+  };
+
+  it("diverged tree + compatible overlay: step 3 re-activates the recorded build, the gate judges the NEW tree, the doctor runs from it, the gateway launches and the boot books the relaunch step on the reconcile run", async () => {
+    const h = createGateHarness({ installFixture: { schema: { state: 1 } } });
+    h.store.updateState((s) => {
+      s.applied = { channel: "beta", version: "2.0.0", at: 1, acceptedAt: null };
+      return s;
+    });
+    expect(saveOverlayFixture(h.store, "2.0.0", { schema: { state: 15, agent: 19 } })).toEqual({ ok: true });
+    // The DB was migrated by 2.0.0 (state 15); the 1.0.0 tree on disk declares 1.
+    writeStateDb(h.openclawDir, { userVersion: 15 });
+    writeConfig(h.openclawDir, { audit: { enabled: true } });
+    expect(h.sync.getChannelInfo().installedDiverged).toBe(true);
+
+    await h.boot();
+
+    expect(installedPackageJsonVersion(h.installDir)).toBe("2.0.0");
+    expect(h.sync.getChannelInfo().installedDiverged).toBe(false);
+    expect(h.store.readState().gatewayHold).toBe(null);
+    // Doctor ran ONCE, after the activation — from the corrected tree.
+    expect(h.doctorCalls).toHaveLength(1);
+    expect(h.startGateway).toHaveBeenCalledTimes(1);
+    expect(h.watchdogStart).toHaveBeenCalledTimes(1);
+    expect(h.finalizeOutcomes).toEqual([
+      expect.objectContaining({
+        gatewayHeld: false,
+        compat: expect.objectContaining({ compatible: true, hold: null, installed: "2.0.0", expected: "2.0.0" }),
+      }),
+    ]);
+    // No refusal → no version_mismatch through the wrapped sink, no hold row.
+    expect(h.insertWatchdogEvent).not.toHaveBeenCalled();
+    expect(eventsOf(h.insertEvent, "launch_compat_gate")).toEqual([]);
+    // Codex 7: the reconcile run is completed by the boot's launch.
+    const activated = eventsOf(h.insertEvent, "reconcile_installed").find((e) => e.status === "activated");
+    expect(activated).toEqual(expect.objectContaining({ details: expect.objectContaining({ source: "boot", from: "1.0.0", to: "2.0.0" }) }));
+    const run = runOf(h, activated.details.operationId);
+    expect(run.state).toBe("activated");
+    expect(run.steps.map((step) => `${step.name}:${step.status}`)).toEqual([
+      "stop:running", "stop:completed", "activate:running", "activate:completed",
+      "verify:running", "verify:completed", "relaunch:completed",
+    ]);
+    expect(run.steps.at(-1).detail).toBe("launched");
+    assertNoNetwork(h);
+  });
+
+  it("found > supported on the recorded build itself: held with reason version_mismatch, NO doctor, no launch — the incident opens through the wrapped sink and the operator is told; Retry cannot bypass it, fixing the DB clears it", async () => {
+    const h = createGateHarness({ installFixture: { schema: { state: 1 } } });
+    writeStateDb(h.openclawDir, { userVersion: 15 });
+    writeConfig(h.openclawDir, { audit: { enabled: true } });
+    expect(h.sync.getChannelInfo().installedDiverged).toBe(false);
+
+    await h.boot();
+
+    const hold = h.store.readState().gatewayHold;
+    expect(hold).toEqual(
+      expect.objectContaining({
+        reason: "version_mismatch",
+        installed: "1.0.0",
+        expected: "1.0.0",
+        bootId: getProcessBootId(),
+        detail: expect.stringContaining("state/openclaw.sqlite is at state schema 15, newer than the 1 this build supports"),
+      }),
+    );
+    expect(h.startGateway).not.toHaveBeenCalled();
+    expect(h.doctorCalls).toHaveLength(0);
+    // Supervision and the ready phase still come up (the admin UI is the remedy).
+    expect(h.watchdogStart).toHaveBeenCalledTimes(1);
+    expect(h.finalizeOutcomes).toEqual([
+      expect.objectContaining({
+        gatewayHeld: true,
+        compat: expect.objectContaining({ compatible: false, hold: expect.objectContaining({ reason: "version_mismatch" }), reasons: ["state_schema_too_new"] }),
+        // The config gate saw the structural hold and returned `held` before any snapshot or doctor.
+        reconcile: expect.objectContaining({ status: "held", hold: expect.objectContaining({ reason: "version_mismatch" }) }),
+      }),
+    ]);
+    // ONE version_mismatch row through the WRAPPED sink (opens an incident).
+    expect(h.insertWatchdogEvent).toHaveBeenCalledTimes(1);
+    expect(h.insertWatchdogEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        eventType: "version_mismatch",
+        source: "launch_compat_gate",
+        status: "failed",
+        details: expect.objectContaining({ running: "1.0.0", expected: "1.0.0", reason: "version_mismatch", reasons: ["state_schema_too_new"] }),
+      }),
+    );
+    // The gate's own ledger rows: the held verdict with per-DB evidence, and the hold row.
+    expect(eventsOf(h.insertEvent, "launch_compat_gate")).toEqual([
+      expect.objectContaining({
+        status: "held",
+        details: expect.objectContaining({
+          reason: "version_mismatch",
+          supported: { state: 1, agent: null },
+          stateDb: [expect.objectContaining({ path: "state/openclaw.sqlite", kind: "state", userVersion: 15, verdict: "incompatible" })],
+        }),
+      }),
+    ]);
+    expect(eventsOf(h.insertEvent, "reconciler")).toEqual([
+      expect.objectContaining({ status: "hold", details: expect.objectContaining({ reason: "version_mismatch" }) }),
+    ]);
+    // Always-send operator notice with a stable, day-bucketed id.
+    expect(notifyIds(h.notify)).toContain(`launch-compat-held-version_mismatch-1.0.0-${utcDayBucket(h.nowRef.now)}`);
+    expect(notifyMessages(h.notify).some((m) => m.includes("cannot open the state databases") && m.includes("HELD"))).toBe(true);
+
+    // Retry migration (force) re-judges the LIVE tree and keeps the hold: an
+    // operator retry cannot bypass a binary that cannot read the DB.
+    const retried = await h.sync.reconcileBootConfig({ force: true });
+    expect(retried.status).toBe("held");
+    expect(retried.hold.reason).toBe("version_mismatch");
+    expect(h.doctorCalls).toHaveLength(0);
+
+    // The operator restores a database this build can read → the config gate
+    // clears the hold and migrates normally.
+    fs.rmSync(path.join(h.openclawDir, "state", "openclaw.sqlite"));
+    writeStateDb(h.openclawDir, { userVersion: 1 });
+    const healed = await h.sync.reconcileBootConfig();
+    expect(healed.status).toBe("ok");
+    expect(healed.warnings).toContain("cleared the version_mismatch hold: 1.0.0 is the recorded build again");
+    expect(h.store.readState().gatewayHold).toBe(null);
+    expect(h.doctorCalls).toHaveLength(1);
+    assertNoNetwork(h);
+  });
+
+  it("an agent DB newer than the build's declared agent schema holds the same way (#78: agent DBs are judged by their own line)", async () => {
+    const h = createGateHarness({ installFixture: { schema: { state: 15, agent: 19 } } });
+    writeStateDb(h.openclawDir, { userVersion: 15 });
+    writeAgentDb(h.openclawDir, "main", { userVersion: 21 });
+
+    const result = await h.sync.assessLaunchCompatibilityAtBoot();
+
+    expect(result).toEqual(
+      expect.objectContaining({
+        compatible: false,
+        reasons: ["agent_schema_too_new"],
+        hold: expect.objectContaining({
+          reason: "version_mismatch",
+          detail: expect.stringContaining("agents/main/agent/openclaw-agent.sqlite is at agent schema 21, newer than the 19 this build supports"),
+        }),
+      }),
+    );
+  });
+
+  it("a corrupt state DB is fail-closed: held with reason state_db_unreadable, no doctor, no launch; once the DB reads again the gate (its owner) clears the hold", async () => {
+    const h = createGateHarness({ installFixture: { schema: { state: 15, agent: 19 } } });
+    writeCorruptStateDb(h.openclawDir);
+    writeConfig(h.openclawDir, { audit: { enabled: true } });
+
+    await h.boot();
+
+    expect(h.store.readState().gatewayHold).toEqual(
+      expect.objectContaining({
+        reason: "state_db_unreadable",
+        installed: "1.0.0",
+        expected: "1.0.0",
+        bootId: getProcessBootId(),
+        detail: expect.stringContaining("state/openclaw.sqlite is unreadable (corrupt)"),
+      }),
+    );
+    expect(h.startGateway).not.toHaveBeenCalled();
+    expect(h.doctorCalls).toHaveLength(0);
+    expect(h.watchdogStart).toHaveBeenCalledTimes(1);
+    // The config gate keeps a structural hold it does not own — no doctor.
+    expect(h.finalizeOutcomes[0].reconcile).toEqual(expect.objectContaining({ status: "held", hold: expect.objectContaining({ reason: "state_db_unreadable" }) }));
+    expect(h.insertWatchdogEvent).toHaveBeenCalledWith(
+      expect.objectContaining({ eventType: "version_mismatch", details: expect.objectContaining({ reason: "state_db_unreadable", reasons: ["state_db_unreadable"] }) }),
+    );
+    expect(notifyIds(h.notify)).toContain(`launch-compat-held-state_db_unreadable-1.0.0-${utcDayBucket(h.nowRef.now)}`);
+    expect(notifyMessages(h.notify).some((m) => m.includes("Restore the newest verified backup"))).toBe(true);
+
+    // A restored, readable DB at a schema this build supports → the gate
+    // clears the one hold class it owns outright.
+    fs.rmSync(path.join(h.openclawDir, "state", "openclaw.sqlite"));
+    writeStateDb(h.openclawDir, { userVersion: 15 });
+    const again = await h.sync.assessLaunchCompatibilityAtBoot();
+    expect(again).toEqual(expect.objectContaining({ compatible: true, hold: null }));
+    expect(h.store.readState().gatewayHold).toBe(null);
+    expect(eventsOf(h.insertEvent, "launch_compat_gate").map((e) => e.status)).toEqual(["held", "hold_cleared"]);
+    assertOffline(h);
+  });
+
+  it("every oracle null (no declared constants, version absent from the table, no preflight verb): a LOUD warning and the gateway launches — fail open, no hold", async () => {
+    // 1.0.0 predates `database preflight` and declares nothing; the DB exists
+    // and is readable, so nothing blocks and nothing resolves.
+    const h = createGateHarness();
+    writeStateDb(h.openclawDir, { userVersion: 15 });
+
+    await h.boot();
+
+    expect(h.store.readState().gatewayHold).toBe(null);
+    expect(h.startGateway).toHaveBeenCalledTimes(1);
+    expect(h.finalizeOutcomes[0]).toEqual(
+      expect.objectContaining({
+        gatewayHeld: false,
+        compat: expect.objectContaining({ compatible: null, hold: null, reasons: ["supported_schema_unknown"] }),
+      }),
+    );
+    expect(h.logger.warn).toHaveBeenCalledWith(expect.stringContaining("UNKNOWN"));
+    expect(h.logger.warn).toHaveBeenCalledWith(expect.stringContaining("launching anyway (fail-open)"));
+    expect(eventsOf(h.insertEvent, "launch_compat_gate")).toEqual([
+      expect.objectContaining({ status: "unknown", details: expect.objectContaining({ reasons: ["supported_schema_unknown"], installed: "1.0.0" }) }),
+    ]);
+    expect(h.insertWatchdogEvent).not.toHaveBeenCalled();
+    expect(h.notify).not.toHaveBeenCalled();
+    assertOffline(h);
+  });
+
+  it("a fresh box (no state database at all) is trivially compatible: no hold, no warning, the gateway launches", async () => {
+    const h = createGateHarness({ installFixture: { schema: { state: 15, agent: 19 } } });
+    await h.boot();
+    expect(h.startGateway).toHaveBeenCalledTimes(1);
+    expect(h.finalizeOutcomes[0].compat).toEqual(expect.objectContaining({ compatible: true, hold: null, reasons: [] }));
+    expect(h.store.readState().gatewayHold).toBe(null);
+  });
+
+  it("kill switch: OPENCLAW_LAUNCH_COMPAT_GATE=off skips the gate — found > supported launches (pre-0.9.77 behaviour) with one skipped row and no hold", async () => {
+    process.env.OPENCLAW_LAUNCH_COMPAT_GATE = "off";
+    const h = createGateHarness({ installFixture: { schema: { state: 1 } } });
+    writeStateDb(h.openclawDir, { userVersion: 15 });
+
+    await h.boot();
+
+    expect(h.finalizeOutcomes[0].compat).toEqual(
+      expect.objectContaining({ compatible: null, hold: null, skipped: "disabled" }),
+    );
+    expect(h.store.readState().gatewayHold).toBe(null);
+    expect(h.startGateway).toHaveBeenCalledTimes(1);
+    expect(eventsOf(h.insertEvent, "launch_compat_gate")).toEqual([
+      expect.objectContaining({ status: "skipped", details: { reason: "disabled" } }),
+    ]);
+    expect(h.insertWatchdogEvent).not.toHaveBeenCalled();
+    expect(h.logger.warn).toHaveBeenCalledWith(expect.stringContaining("OPENCLAW_LAUNCH_COMPAT_GATE=off"));
+  });
+
+  it("unknown verdict on a diverged tree whose recorded build has a complete overlay: the gate prefers reconciliation — ONE reconcileInstalled under the boot hold, then the NEW tree is judged (memoized declared schema follows the version)", async () => {
+    const h = createGateHarness();
+    h.store.updateState((s) => {
+      s.applied = { channel: "beta", version: "2.0.0", at: 1, acceptedAt: null };
+      return s;
+    });
+    expect(saveOverlayFixture(h.store, "2.0.0", { schema: { state: 15, agent: 19 } })).toEqual({ ok: true });
+    writeStateDb(h.openclawDir, { userVersion: 15 });
+    expect(await h.sync.getSupportedSchemaForInstalled()).toEqual(
+      expect.objectContaining({ state: null, agent: null }),
+    );
+    const hold = Object.assign(vi.fn(), { isValid: () => true });
+
+    const result = await h.sync.assessLaunchCompatibilityAtBoot({ hold });
+
+    expect(result).toEqual(
+      expect.objectContaining({
+        compatible: true,
+        hold: null,
+        installed: "2.0.0",
+        expected: "2.0.0",
+        reconcile: expect.objectContaining({ ok: true, action: "activated", from: "1.0.0", to: "2.0.0" }),
+      }),
+    );
+    expect(installedPackageJsonVersion(h.installDir)).toBe("2.0.0");
+    // The boot lease was passed through, never released by the reconcile.
+    expect(hold).not.toHaveBeenCalled();
+    expect(await h.sync.getSupportedSchemaForInstalled()).toEqual(
+      expect.objectContaining({ state: 15, agent: 19 }),
+    );
+    expect(h.store.readState().gatewayHold).toBe(null);
+    assertOffline(h);
+  });
+
+  it("…and when that reconcile is refused (a live incumbent the stop cannot confirm), unknown is treated as false: held version_mismatch under the config gate's notification id (one notice per boot for one condition)", async () => {
+    // CEO 1.2: an openclaw process that survives the stop refuses the tree
+    // swap (`incumbent_running`) — a boot-time refusal the kill switch can
+    // no longer stand in for (source "boot" is exempt from it, see below).
+    const h = createGateHarness({
+      extraSyncOptions: { backupProbes: { listProcesses: () => [{ pid: 4242 }] } },
+    });
+    h.store.updateState((s) => {
+      s.applied = { channel: "beta", version: "2.0.0", at: 1, acceptedAt: null };
+      return s;
+    });
+    expect(saveOverlayFixture(h.store, "2.0.0", { schema: { state: 15, agent: 19 } })).toEqual({ ok: true });
+    writeStateDb(h.openclawDir, { userVersion: 15 });
+    writeConfig(h.openclawDir, { audit: { enabled: true } });
+
+    await h.boot();
+
+    expect(installedPackageJsonVersion(h.installDir)).toBe("1.0.0");
+    // The gate's own hold names the refused re-activation; the config gate's
+    // first guard (same reason, same boot) then re-stamps the persisted prose
+    // with its divergence wording — one reason, two writers, no doctor.
+    expect(h.finalizeOutcomes[0].compat).toEqual(
+      expect.objectContaining({
+        compatible: false,
+        reasons: ["supported_schema_unknown"],
+        reconcile: expect.objectContaining({ ok: false, code: "incumbent_running" }),
+        hold: expect.objectContaining({
+          reason: "version_mismatch",
+          installed: "1.0.0",
+          expected: "2.0.0",
+          bootId: getProcessBootId(),
+          detail: expect.stringContaining("re-activation incumbent_running"),
+        }),
+      }),
+    );
+    expect(h.store.readState().gatewayHold).toEqual(
+      expect.objectContaining({ reason: "version_mismatch", installed: "1.0.0", expected: "2.0.0" }),
+    );
+    expect(h.finalizeOutcomes[0].reconcile).toEqual(
+      expect.objectContaining({ status: "held", hold: expect.objectContaining({ reason: "version_mismatch" }) }),
+    );
+    expect(h.startGateway).not.toHaveBeenCalled();
+    expect(h.doctorCalls).toHaveLength(0);
+    // Deduped with the config gate's first-guard notice: same id.
+    const ids = notifyIds(h.notify);
+    expect(ids.filter((id) => id === "version-mismatch-held-1.0.0-2.0.0")).toHaveLength(2);
+    expect(ids.some((id) => id.startsWith("launch-compat-held-"))).toBe(false);
+    expect(h.insertWatchdogEvent).toHaveBeenCalledWith(
+      expect.objectContaining({ eventType: "version_mismatch", details: expect.objectContaining({ running: "1.0.0", expected: "2.0.0" }) }),
+    );
+  });
+
+  it("kill switch: OPENCLAW_RUNTIME_RECONCILE=off never reaches the boot C1 belt — the diverged tree still flips to the recorded build at boot and the gateway launches (the README row / rollback-flowchart contract); the RUNTIME reconcile stays refused", async () => {
+    process.env.OPENCLAW_RUNTIME_RECONCILE = "off";
+    const h = createGateHarness({ installFixture: { schema: { state: 1 } } });
+    h.store.updateState((s) => {
+      s.applied = { channel: "beta", version: "2.0.0", at: 1, acceptedAt: null };
+      return s;
+    });
+    expect(saveOverlayFixture(h.store, "2.0.0", { schema: { state: 15, agent: 19 } })).toEqual({ ok: true });
+    writeStateDb(h.openclawDir, { userVersion: 15 });
+    writeConfig(h.openclawDir, { audit: { enabled: true } });
+    expect(h.sync.getChannelInfo().installedDiverged).toBe(true);
+
+    await h.boot();
+
+    // Pre-0.9.77 this box launched the diverged tree; with the switch set it
+    // must not be HELD instead — the belt re-activates and the gateway starts.
+    expect(installedPackageJsonVersion(h.installDir)).toBe("2.0.0");
+    expect(h.sync.getChannelInfo().installedDiverged).toBe(false);
+    expect(h.store.readState().gatewayHold).toBe(null);
+    expect(h.startGateway).toHaveBeenCalledTimes(1);
+    expect(h.finalizeOutcomes[0].compat).toEqual(
+      expect.objectContaining({ compatible: true, hold: null, installed: "2.0.0", expected: "2.0.0" }),
+    );
+    expect(h.doctorCalls).toHaveLength(1);
+    const reconcileEvents = eventsOf(h.insertEvent, "reconcile_installed");
+    expect(reconcileEvents.some((e) => e.details?.code === "disabled")).toBe(false);
+    expect(reconcileEvents.find((e) => e.status === "activated")?.details).toEqual(
+      expect.objectContaining({ source: "boot", from: "1.0.0", to: "2.0.0" }),
+    );
+    expect(h.insertWatchdogEvent).not.toHaveBeenCalled();
+    // The switch still means what it says for every runtime caller.
+    expect(await h.sync.reconcileInstalled({ source: "manual" })).toEqual(
+      expect.objectContaining({ ok: false, code: "disabled", action: "none" }),
+    );
+    expect(await h.sync.reconcileInstalled({ source: "repair/structural" })).toEqual(
+      expect.objectContaining({ ok: false, code: "disabled", action: "none" }),
+    );
+    assertNoNetwork(h);
+  });
+
+  it("the gate reads user_version FRESH every call (Eng 1A): a DB migrated between two calls flips the verdict without any cache to invalidate", async () => {
+    const h = createGateHarness({ installFixture: { schema: { state: 15, agent: 19 } } });
+    writeStateDb(h.openclawDir, { userVersion: 15 });
+    expect((await h.sync.assessLaunchCompatibilityAtBoot()).compatible).toBe(true);
+    fs.rmSync(path.join(h.openclawDir, "state", "openclaw.sqlite"));
+    writeStateDb(h.openclawDir, { userVersion: 16 });
+    const second = await h.sync.assessLaunchCompatibilityAtBoot();
+    expect(second.compatible).toBe(false);
+    expect(second.hold.reason).toBe("version_mismatch");
   });
 });

@@ -5,10 +5,16 @@ const path = require("path");
 const {
   createOpenclawReleaseChannelStore,
   formatServerPidDecision,
+  isMigrationClassHold,
   kManagedDirName,
+  kMigrationHoldReasons,
   kOpenclawActivationSentinelName,
+  kOpenclawStagingDirPrefix,
+  kOpenclawStagingMaxAgeMs,
+  kStructuralHoldReasons,
   normalizeState,
 } = require("../../lib/server/openclaw-release-channel");
+const { getProcessBootId } = require("../../lib/server/boot-id");
 
 const kSilentLogger = { log() {}, warn() {}, error() {} };
 
@@ -398,6 +404,77 @@ describe("server/openclaw-release-channel", () => {
         expect(
           normalizeState({ gatewayHold: { reason: "version_mismatch", installed: 1, expected: {}, bootId: [], detail: 0 } }).gatewayHold,
         ).toMatchObject({ installed: null, expected: null, bootId: null, detail: null });
+      });
+
+      it("ONE hold model: a pre-#76 free-text {reason} hold round-trips unchanged and stays migration-class", () => {
+        const { store } = createStore();
+        // The shape the boot reconciler wrote before structural holds existed
+        // (and still writes today for its doctor/snapshot/gateway-running holds).
+        const legacy = {
+          reason: "settings migration for 2026.9.2 failed: doctor exit 1",
+          at: 1_700_000_000_000,
+          operationId: "2f8c1f2e-0d2a-4b1e-9a11-6f2f8c1f2e0d",
+          blamedKeys: ["gateway.controlUi.legacy"],
+        };
+        store.writeState({ gatewayHold: legacy });
+        const hold = store.readState().gatewayHold;
+        expect(hold).toEqual({ ...legacy, detail: null, installed: null, expected: null, bootId: null });
+        // No `error` key materializes for a hold written without one — the
+        // reconciler compares the hold it set with the one it reads back.
+        expect(Object.prototype.hasOwnProperty.call(hold, "error")).toBe(false);
+        expect(isMigrationClassHold(hold)).toBe(true);
+        // The bare {reason} shape (nothing else) normalizes the same way.
+        expect(
+          normalizeState({ gatewayHold: { reason: "config snapshot failed: EACCES" } }).gatewayHold,
+        ).toEqual({
+          reason: "config snapshot failed: EACCES",
+          at: null,
+          operationId: null,
+          blamedKeys: [],
+          detail: null,
+          installed: null,
+          expected: null,
+          bootId: null,
+        });
+      });
+
+      it("round-trips the structured activation_failed hold ({ reason, at, installed, expected, bootId, error }) and drops a non-string error", () => {
+        const { store } = createStore();
+        const structured = {
+          reason: "activation_failed",
+          at: 1_700_000_000_500,
+          operationId: null,
+          blamedKeys: [],
+          detail: "OpenClaw 2026.9.2 could not be activated: the copy failed after the old tree was removed",
+          installed: "2026.7.1-2",
+          expected: "2026.9.2",
+          bootId: "123:1700000000000",
+          error: "ENOSPC: no space left on device, copyfile",
+        };
+        store.writeState({ gatewayHold: structured });
+        expect(store.readState().gatewayHold).toEqual(structured);
+        expect(isMigrationClassHold(structured)).toBe(false);
+        for (const bogus of [new Error("x"), 42, null, ""]) {
+          const hold = normalizeState({ gatewayHold: { ...structured, error: bogus } }).gatewayHold;
+          expect(Object.prototype.hasOwnProperty.call(hold, "error"), String(bogus)).toBe(false);
+          expect(hold).toMatchObject({ reason: "activation_failed", installed: "2026.7.1-2", expected: "2026.9.2" });
+        }
+      });
+
+      it("kMigrationHoldReasons / kStructuralHoldReasons partition isMigrationClassHold; garbage is never a hold", () => {
+        expect(kMigrationHoldReasons).toEqual(["config_migration_failed", "migration_gate_error", "doctor_failed"]);
+        expect(kStructuralHoldReasons).toEqual(["version_mismatch", "state_db_unreadable", "activation_failed"]);
+        expect(Object.isFrozen(kMigrationHoldReasons)).toBe(true);
+        expect(Object.isFrozen(kStructuralHoldReasons)).toBe(true);
+        for (const reason of kMigrationHoldReasons) {
+          expect(isMigrationClassHold({ reason, at: 1 }), reason).toBe(true);
+        }
+        for (const reason of kStructuralHoldReasons) {
+          expect(isMigrationClassHold({ reason, at: 1 }), reason).toBe(false);
+        }
+        for (const garbage of [null, undefined, {}, { reason: "" }, { reason: 42 }, "held", ["held"]]) {
+          expect(isMigrationClassHold(garbage)).toBe(false);
+        }
       });
     });
 
@@ -792,6 +869,311 @@ describe("server/openclaw-release-channel", () => {
       expect(store.readSentinel({ installDir })).toBeNull();
       // The existing live tree is untouched on this failure path.
       expect(store.readInstalledVersion({ installDir })).toBe("1.0.0");
+    });
+  });
+
+  describe("listOverlays (#76 B1.4)", () => {
+    it("lists complete entries only, newest first; a missing store is []", () => {
+      const { store } = createStore();
+      expect(store.listOverlays()).toEqual([]);
+      for (const version of ["2026.7.1-2", "2026.9.2", "2026.9.1-beta.1", "2026.8.2"]) {
+        store.saveOverlayFromTempInstall({
+          openclawPackageDir: writeOpenclawPackageFixture(path.join(createTempRoot(), "openclaw"), { version }),
+          version,
+        });
+      }
+      // A half-saved entry (no completion file) and a stray file are not overlays.
+      fs.mkdirSync(path.join(store.overlayDir("2026.10.0"), "openclaw"), { recursive: true });
+      fs.writeFileSync(path.join(store.overlayStoreDir, ".DS_Store"), "");
+      // A completion file naming another version is a torn entry, too.
+      store.saveOverlayFromTempInstall({
+        openclawPackageDir: writeOpenclawPackageFixture(path.join(createTempRoot(), "openclaw"), { version: "2026.6.0" }),
+        version: "2026.6.0",
+      });
+      fs.writeFileSync(store.overlayCompletePath("2026.6.0"), JSON.stringify({ version: "2026.5.0" }));
+
+      expect(store.listOverlays()).toEqual(["2026.9.2", "2026.9.1-beta.1", "2026.8.2", "2026.7.1-2"]);
+      expect(store.listOverlays().every((version) => store.hasOverlay(version))).toBe(true);
+    });
+  });
+
+  describe("activateOverlayAsync — staged, verified, atomic swap (#76 B1.2 / Codex 3)", () => {
+    const kBin = { openclaw: "dist/entry.js" };
+    const saveOverlay = (store, version, { bin = kBin, mutate = null } = {}) => {
+      const packageDir = writeOpenclawPackageFixture(path.join(createTempRoot(), "openclaw"), { version, bin });
+      if (mutate) mutate(packageDir);
+      expect(store.saveOverlayFromTempInstall({ openclawPackageDir: packageDir, version })).toEqual({ ok: true });
+    };
+    const stagingEntries = (installDir) =>
+      fs.readdirSync(path.join(installDir, "node_modules")).filter((name) => name.startsWith(kOpenclawStagingDirPrefix));
+    const sentinelFile = (installDir) => path.join(installDir, "node_modules", kOpenclawActivationSentinelName);
+    const kBootId = "77:1700000000000";
+
+    it("happy path: stages beside the live tree, swaps by rename, writes the sentinel, leaves no staging dir", async () => {
+      const { store } = createStore({ nowFn: () => 42 });
+      const installDir = createTempRoot();
+      const liveDir = writeInstallFixture(installDir, { version: "1.0.0" });
+      fs.writeFileSync(path.join(liveDir, "old-file.js"), "// stale\n");
+      store.writeSentinel({ installDir, version: "1.0.0" });
+      saveOverlay(store, "2.0.0");
+
+      await expect(store.activateOverlayAsync({ installDir, version: "2.0.0", bootId: kBootId })).resolves.toEqual({ ok: true });
+
+      expect(fs.existsSync(path.join(liveDir, "old-file.js"))).toBe(false);
+      expect(store.readInstalledVersion({ installDir })).toBe("2.0.0");
+      expect(fs.existsSync(path.join(liveDir, "dist", "entry.js"))).toBe(true);
+      expect(JSON.parse(fs.readFileSync(sentinelFile(installDir), "utf8"))).toEqual({ version: "2.0.0", completedAt: 42 });
+      expect(store.needsActivation({ installDir, expectedVersion: "2.0.0" })).toBe(false);
+      expect(stagingEntries(installDir)).toEqual([]);
+      expect(store.overlayStagingDir({ installDir, bootId: kBootId })).toBe(
+        path.join(installDir, "node_modules", `${kOpenclawStagingDirPrefix}${kBootId}`),
+      );
+      // The overlay itself is untouched: a later rollback can re-activate it.
+      expect(store.hasOverlay("2.0.0")).toBe(true);
+      expect(kOpenclawStagingMaxAgeMs).toBe(10 * 60 * 1000);
+    });
+
+    it("orders the swap: copy → verify → sentinel unlink → rm old tree → rename → sentinel LAST", async () => {
+      const ops = [];
+      const note = (name, target) => ops.push(`${name}:${path.basename(String(target))}`);
+      const fsModule = new Proxy(fs, {
+        get(target, prop) {
+          if (prop === "promises") {
+            return new Proxy(target.promises, {
+              get(promises, method) {
+                const fn = Reflect.get(promises, method);
+                if (!["cp", "rm", "rename", "unlink"].includes(method)) return fn;
+                return (...args) => {
+                  note(method, args[0]);
+                  return fn.apply(promises, args);
+                };
+              },
+            });
+          }
+          if (prop === "writeFileSync") {
+            return (file, ...rest) => {
+              note("writeFileSync", file);
+              return target.writeFileSync(file, ...rest);
+            };
+          }
+          return Reflect.get(target, prop);
+        },
+      });
+      const { store } = createStore({ fsModule });
+      const installDir = createTempRoot();
+      writeInstallFixture(installDir, { version: "1.0.0" });
+      store.writeSentinel({ installDir, version: "1.0.0" });
+      saveOverlay(store, "2.0.0");
+      ops.length = 0;
+
+      await expect(store.activateOverlayAsync({ installDir, version: "2.0.0", bootId: kBootId })).resolves.toEqual({ ok: true });
+
+      const staging = `${kOpenclawStagingDirPrefix}${kBootId}`;
+      expect(ops).toEqual([
+        `rm:${staging}`, // a leftover from an earlier attempt by this boot
+        "cp:openclaw", // overlay package → staging (verify reads follow, not recorded)
+        `unlink:${kOpenclawActivationSentinelName}`,
+        "rm:openclaw", // the OLD live tree, only after verification passed
+        `rename:${staging}`,
+        expect.stringMatching(new RegExp(`^writeFileSync:\\.${kOpenclawActivationSentinelName.replace(/\./g, "\\.")}\\.\\d+\\.tmp$`)),
+      ]);
+    });
+
+    it("verify failure (version disagrees, bin missing, bin unresolvable) leaves the old tree, its sentinel and the overlay intact — nothing is removed before verification", async () => {
+      const { store } = createStore({ nowFn: () => 7 });
+      const installDir = createTempRoot();
+      const liveDir = writeInstallFixture(installDir, { version: "1.0.0" });
+      fs.writeFileSync(path.join(liveDir, "old-file.js"), "// still here\n");
+      store.writeSentinel({ installDir, version: "1.0.0" });
+      const expectUntouched = () => {
+        expect(store.readInstalledVersion({ installDir })).toBe("1.0.0");
+        expect(fs.existsSync(path.join(liveDir, "old-file.js"))).toBe(true);
+        expect(store.readSentinel({ installDir })).toEqual({ version: "1.0.0", completedAt: 7 });
+        expect(stagingEntries(installDir)).toEqual([]);
+      };
+
+      // Completion file says 2.0.0, package.json says 2.0.1 (a torn or tampered entry).
+      saveOverlay(store, "2.0.0");
+      fs.writeFileSync(
+        path.join(store.overlayPackageDir("2.0.0"), "package.json"),
+        JSON.stringify({ name: "openclaw", version: "2.0.1", bin: kBin }),
+      );
+      await expect(store.activateOverlayAsync({ installDir, version: "2.0.0", bootId: kBootId })).resolves.toEqual({
+        ok: false,
+        stage: "verify",
+        error: expect.stringContaining("openclaw@2.0.1, expected 2.0.0"),
+      });
+      expectUntouched();
+      expect(store.hasOverlay("2.0.0")).toBe(true);
+
+      // No bin at all.
+      saveOverlay(store, "3.0.0", { bin: null });
+      await expect(store.activateOverlayAsync({ installDir, version: "3.0.0", bootId: kBootId })).resolves.toEqual({
+        ok: false,
+        stage: "verify",
+        error: expect.stringContaining("no resolvable bin"),
+      });
+      expectUntouched();
+
+      // A bin entry that names a file the tree does not contain.
+      saveOverlay(store, "4.0.0", { bin: { openclaw: "dist/missing.js" } });
+      await expect(store.activateOverlayAsync({ installDir, version: "4.0.0", bootId: kBootId })).resolves.toEqual({
+        ok: false,
+        stage: "verify",
+        error: expect.stringContaining("no resolvable bin"),
+      });
+      expectUntouched();
+    });
+
+    it("refuses a missing overlay, an install-guard overlay and a traversal-shaped name before staging anything", async () => {
+      const { store } = createStore();
+      const installDir = createTempRoot();
+      writeInstallFixture(installDir, { version: "1.0.0" });
+      store.writeSentinel({ installDir, version: "1.0.0" });
+
+      await expect(store.activateOverlayAsync({ installDir, version: "9.9.9", bootId: kBootId })).resolves.toEqual({
+        ok: false,
+        stage: "overlay",
+        error: expect.stringContaining("no complete overlay for openclaw@9.9.9"),
+      });
+      saveOverlay(store, "2.0.0", {
+        mutate: (dir) => fs.writeFileSync(path.join(dir, "dist", "openclaw-install-guard"), "OpenClaw package preinstall has not completed."),
+      });
+      await expect(store.activateOverlayAsync({ installDir, version: "2.0.0", bootId: kBootId })).resolves.toEqual({
+        ok: false,
+        stage: "overlay",
+        error: expect.stringMatching(/incomplete \(install guard present\)/),
+      });
+      await expect(store.activateOverlayAsync({ installDir, version: "../x", bootId: kBootId })).resolves.toEqual(
+        expect.objectContaining({ ok: false, stage: "overlay" }),
+      );
+
+      expect(stagingEntries(installDir)).toEqual([]);
+      expect(store.readInstalledVersion({ installDir })).toBe("1.0.0");
+      expect(store.readSentinel({ installDir })).toEqual(expect.objectContaining({ version: "1.0.0" }));
+    });
+
+    it("a sentinel write failure after the swap leaves the NEW tree without a sentinel (the next boot re-activates) — the sentinel is last", async () => {
+      const fsModule = new Proxy(fs, {
+        get(target, prop) {
+          if (prop !== "writeFileSync") return Reflect.get(target, prop);
+          return (file, ...rest) => {
+            if (String(file).includes(kOpenclawActivationSentinelName)) {
+              throw Object.assign(new Error("EROFS: read-only file system"), { code: "EROFS" });
+            }
+            return target.writeFileSync(file, ...rest);
+          };
+        },
+      });
+      const { store } = createStore({ fsModule });
+      const installDir = createTempRoot();
+      writeInstallFixture(installDir, { version: "1.0.0" });
+      saveOverlay(store, "2.0.0");
+
+      await expect(store.activateOverlayAsync({ installDir, version: "2.0.0", bootId: kBootId })).resolves.toEqual({
+        ok: false,
+        stage: "sentinel",
+        error: expect.stringContaining("EROFS"),
+      });
+
+      expect(store.readInstalledVersion({ installDir })).toBe("2.0.0");
+      expect(store.readSentinel({ installDir })).toBeNull();
+      expect(store.needsActivation({ installDir, expectedVersion: "2.0.0" })).toBe(true);
+      expect(stagingEntries(installDir)).toEqual([]);
+    });
+
+    it("a caller-supplied bootId is sanitized (separators can never move the staging dir out of node_modules); the default is this process's boot id", async () => {
+      const { store } = createStore();
+      const installDir = createTempRoot();
+      writeInstallFixture(installDir, { version: "1.0.0" });
+      saveOverlay(store, "2.0.0");
+      saveOverlay(store, "3.0.0");
+
+      expect(store.overlayStagingDir({ installDir, bootId: "../../escape/12:34" })).toBe(
+        path.join(installDir, "node_modules", `${kOpenclawStagingDirPrefix}..-..-escape-12:34`),
+      );
+      expect(() => store.overlayStagingDir({ installDir, bootId: "" })).toThrow(/unsafe staging boot id/);
+      expect(store.overlayStagingDir({ installDir, bootId: getProcessBootId() })).toBe(
+        path.join(installDir, "node_modules", `${kOpenclawStagingDirPrefix}${getProcessBootId()}`),
+      );
+
+      await expect(store.activateOverlayAsync({ installDir, version: "2.0.0", bootId: "../../escape/12:34" })).resolves.toEqual({ ok: true });
+      expect(fs.existsSync(path.join(installDir, "escape"))).toBe(false);
+      expect(fs.existsSync(path.join(path.dirname(installDir), "escape"))).toBe(false);
+      expect(store.readInstalledVersion({ installDir })).toBe("2.0.0");
+
+      await expect(store.activateOverlayAsync({ installDir, version: "3.0.0", bootId: "" })).resolves.toEqual({
+        ok: false,
+        stage: "staging",
+        error: expect.stringContaining("unsafe staging boot id"),
+      });
+      expect(store.readInstalledVersion({ installDir })).toBe("2.0.0");
+
+      // No bootId → getProcessBootId().
+      await expect(store.activateOverlayAsync({ installDir, version: "3.0.0" })).resolves.toEqual({ ok: true });
+      expect(store.readInstalledVersion({ installDir })).toBe("3.0.0");
+      expect(stagingEntries(installDir)).toEqual([]);
+    });
+
+    it("sweepStaleStagingDirs removes staging dirs older than 10 min, keeps young ones and this boot's own, and never touches the live tree or sentinel", () => {
+      const { store } = createStore();
+      const installDir = createTempRoot();
+      writeInstallFixture(installDir, { version: "1.0.0" });
+      store.writeSentinel({ installDir, version: "1.0.0" });
+      const nodeModules = path.join(installDir, "node_modules");
+      const plant = (name, ageMs) => {
+        const dir = path.join(nodeModules, name);
+        fs.mkdirSync(path.join(dir, "dist"), { recursive: true });
+        fs.writeFileSync(path.join(dir, "package.json"), "{}");
+        const seconds = (Date.now() - ageMs) / 1000;
+        fs.utimesSync(dir, seconds, seconds);
+      };
+      const own = `${kOpenclawStagingDirPrefix}${getProcessBootId()}`;
+      plant(`${kOpenclawStagingDirPrefix}11:1000`, 11 * 60 * 1000); // a dead boot's copy: rename never ran
+      plant(`${kOpenclawStagingDirPrefix}12:2000`, 60 * 1000); // young: possibly a sibling mid-copy
+      plant(own, 11 * 60 * 1000); // this boot's in-flight copy: never swept, whatever its age
+      plant(".other-dotdir", 11 * 60 * 1000); // not ours
+
+      // Missing node_modules → empty, never a throw.
+      expect(store.sweepStaleStagingDirs({ installDir: createTempRoot() })).toEqual({ removed: [], kept: [] });
+
+      const result = store.sweepStaleStagingDirs({ installDir });
+      expect(result.removed).toEqual([`${kOpenclawStagingDirPrefix}11:1000`]);
+      expect([...result.kept].sort()).toEqual([`${kOpenclawStagingDirPrefix}12:2000`, own].sort());
+      expect(fs.existsSync(path.join(nodeModules, `${kOpenclawStagingDirPrefix}11:1000`))).toBe(false);
+      expect(fs.existsSync(path.join(nodeModules, `${kOpenclawStagingDirPrefix}12:2000`))).toBe(true);
+      expect(fs.existsSync(path.join(nodeModules, own))).toBe(true);
+      expect(fs.existsSync(path.join(nodeModules, ".other-dotdir"))).toBe(true);
+      expect(store.readInstalledVersion({ installDir })).toBe("1.0.0");
+      expect(store.readSentinel({ installDir })).toEqual(expect.objectContaining({ version: "1.0.0" }));
+
+      // Clock seam: once the young dir ages past the limit it goes too; the own dir still stays.
+      const later = store.sweepStaleStagingDirs({ installDir, nowMs: Date.now() + kOpenclawStagingMaxAgeMs });
+      expect(later.removed).toEqual([`${kOpenclawStagingDirPrefix}12:2000`]);
+      expect(later.kept).toEqual([own]);
+    });
+
+    it("staging-rename crash case: a stale staging dir beside a gutted live tree is swept and the overlay re-activates cleanly", async () => {
+      const { store } = createStore();
+      const installDir = createTempRoot();
+      saveOverlay(store, "2.0.0");
+      // Crash after rm(old tree), before rename: no live tree, no sentinel, a
+      // complete staging copy owned by a boot that is gone.
+      const nodeModules = path.join(installDir, "node_modules");
+      const stale = path.join(nodeModules, `${kOpenclawStagingDirPrefix}9:9`);
+      fs.mkdirSync(nodeModules, { recursive: true });
+      fs.cpSync(store.overlayPackageDir("2.0.0"), stale, { recursive: true });
+      const seconds = (Date.now() - 11 * 60 * 1000) / 1000;
+      fs.utimesSync(stale, seconds, seconds);
+      expect(store.readInstalledVersion({ installDir })).toBeNull();
+      expect(store.needsActivation({ installDir, expectedVersion: "2.0.0" })).toBe(true);
+
+      expect(store.sweepStaleStagingDirs({ installDir }).removed).toEqual([`${kOpenclawStagingDirPrefix}9:9`]);
+      await expect(store.activateOverlayAsync({ installDir, version: "2.0.0", bootId: "10:10" })).resolves.toEqual({ ok: true });
+
+      expect(store.readInstalledVersion({ installDir })).toBe("2.0.0");
+      expect(store.needsActivation({ installDir, expectedVersion: "2.0.0" })).toBe(false);
+      expect(stagingEntries(installDir)).toEqual([]);
     });
   });
 
@@ -1600,6 +1982,65 @@ describe("server/openclaw-release-channel", () => {
       expect(formatServerPidDecision(null)).toBe("format=– pid=– kill=– tgid=– self=– ticks=–/– container=–/– → – (–)");
       procs[21].tgid = 18;
       expect(formatServerPidDecision(store.describeServerPidDecision())).toMatch(/tgid=18 .*→ thread \(proceed\)$/);
+    });
+
+    it("persisted-format fixtures (C5): every alphaclaw-server.pid era is classified by format/legacyClaim and judged on its own evidence", () => {
+      const procs = { 21: { tgid: 21, ticks: 5000, cmdline: kLookalikeCmdline } };
+      const host = os.hostname();
+      const at = kNow - 60 * 1000;
+      const eras = [
+        {
+          era: "pre-v0.9.73 legacy {pid, at}",
+          raw: { pid: 21, at },
+          format: "legacy", legacyClaim: true, reason: "legacy_argv_match", evidence: { pid: 21, corroborated: false },
+        },
+        {
+          era: "v0.9.73 identity (format 1: host + startTicks)",
+          raw: { pid: 21, at, host, startTicks: 5000 },
+          format: 1, legacyClaim: false, reason: "corroborated", evidence: { pid: 21, corroborated: true },
+        },
+        {
+          era: "v0.9.73 identity, recycled pid",
+          raw: { pid: 21, at, host, startTicks: 4999 },
+          format: 1, legacyClaim: false, reason: "recycled", evidence: null,
+        },
+        {
+          era: "v0.9.77 format 2, server-written (startTicks + containerStartTicks)",
+          raw: { pid: 21, at, host, startTicks: 5000, containerStartTicks: 3431, format: 2 },
+          format: 2, legacyClaim: false, reason: "corroborated", evidence: { pid: 21, corroborated: true },
+        },
+        {
+          era: "v0.9.77 format 2, converged legacy claim (observedTicks, never startTicks)",
+          raw: { pid: 21, at, upgradedAt: kNow - 30 * 1000, host, observedTicks: 5000, containerStartTicks: 3431, format: 2, legacyClaim: true },
+          format: 2, legacyClaim: true, reason: "legacy_argv_match", evidence: { pid: 21, corroborated: false },
+        },
+        {
+          era: "v0.9.77 converged claim from a previous container",
+          raw: { pid: 21, at, upgradedAt: kNow - 30 * 1000, host, observedTicks: 5000, containerStartTicks: 1111, format: 2, legacyClaim: true },
+          format: 2, legacyClaim: true, reason: "other_container", evidence: null,
+        },
+        {
+          era: "v0.9.77 converged claim, recycled pid",
+          raw: { pid: 21, at, upgradedAt: kNow - 30 * 1000, host, observedTicks: 4000, containerStartTicks: 3431, format: 2, legacyClaim: true },
+          format: 2, legacyClaim: true, reason: "recycled", evidence: null,
+        },
+      ];
+      for (const fixture of eras) {
+        const { store } = createFakeStore({ procs, pid1Ticks: 3431 });
+        writePidRecord(store, fixture.raw);
+        const decision = store.describeServerPidDecision();
+        expect(decision.record, fixture.era).toEqual({ raw: fixture.raw, format: fixture.format, legacyClaim: fixture.legacyClaim });
+        expect(decision.reason, fixture.era).toBe(fixture.reason);
+        expect(decision.evidence, fixture.era).toEqual(fixture.evidence);
+      }
+      // The record THIS version writes is the v0.9.77 shape, key for key — a
+      // change here is a persisted-format change and needs a new era above.
+      const { store } = createFakeStore({ procs, pid1Ticks: 3431 });
+      store.writeServerPid();
+      const written = JSON.parse(fs.readFileSync(store.serverPidPath, "utf8"));
+      expect(Object.keys(written).sort()).toEqual(["at", "containerStartTicks", "format", "host", "pid", "startTicks"]);
+      expect(written).toEqual(expect.objectContaining({ pid: process.pid, host, format: 2, containerStartTicks: 3431 }));
+      expect(written.legacyClaim).toBeUndefined();
     });
   });
 });

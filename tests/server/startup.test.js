@@ -665,6 +665,32 @@ describe("server/startup", () => {
     }
   });
 
+  it("hands the boot lifecycle lease to reconcileInstalledAtBoot and the compat gate as { hold } — the lock is not re-entrant, so neither step may acquire its own", async () => {
+    const release = Object.assign(vi.fn(), { isValid: () => true });
+    const acquireLifecycleLock = vi.fn(async () => release);
+    const deps = mkOrderedDeps([], { acquireLifecycleLock });
+
+    await runOnboardedBootSequence(deps);
+
+    expect(deps.reconcileInstalledAtBoot).toHaveBeenCalledTimes(1);
+    expect(deps.reconcileInstalledAtBoot).toHaveBeenCalledWith({ hold: release });
+    expect(deps.assessLaunchCompatibilityAtBoot).toHaveBeenCalledTimes(1);
+    expect(deps.assessLaunchCompatibilityAtBoot).toHaveBeenCalledWith({ hold: release });
+    // Both ran INSIDE the lease: the boot's release comes after them.
+    expect(release).toHaveBeenCalledTimes(1);
+    expect(deps.reconcileInstalledAtBoot.mock.invocationCallOrder[0]).toBeLessThan(
+      release.mock.invocationCallOrder[0],
+    );
+    expect(deps.assessLaunchCompatibilityAtBoot.mock.invocationCallOrder[0]).toBeLessThan(
+      release.mock.invocationCallOrder[0],
+    );
+    // No lock wired (tests, legacy) → { hold: null }, never undefined args.
+    const unlocked = mkOrderedDeps([]);
+    await runOnboardedBootSequence(unlocked);
+    expect(unlocked.reconcileInstalledAtBoot).toHaveBeenCalledWith({ hold: null });
+    expect(unlocked.assessLaunchCompatibilityAtBoot).toHaveBeenCalledWith({ hold: null });
+  });
+
   it("without the new steps injected, the legacy boot is byte-for-byte unchanged (null defaults)", async () => {
     const callOrder = [];
     const deps = mkOrderedDeps(callOrder, {

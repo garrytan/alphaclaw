@@ -1,0 +1,10 @@
+{
+  "pid": 47,
+  "at": 1788681600000,
+  "upgradedAt": 1788681645000,
+  "host": "srv-d3f9a1c2",
+  "observedTicks": 15532,
+  "containerStartTicks": 3431,
+  "format": 2,
+  "legacyClaim": true
+}

@@ -1,0 +1,15 @@
+{
+  "operationId": "5e6f7a8b-9c0d-4e1f-8a2b-3c4d5e6f7a8b",
+  "kind": "gateway_restart",
+  "startedAt": 1788681572000,
+  "bootId": "7:1788681590000",
+  "expiresAt": 1788682202000,
+  "status": "running",
+  "lastStep": "stopping_gateway",
+  "errorSummary": null,
+  "completedAt": null,
+  "reasonsSnapshot": [
+    "env_vars_changed",
+    "channel_token_updated"
+  ]
+}

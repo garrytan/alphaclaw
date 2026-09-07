@@ -1,0 +1,21 @@
+{
+  "byVersion": {
+    "2026.9.2": {
+      "state": 15,
+      "agent": 19,
+      "source": "declared",
+      "at": 1788422400000,
+      "observed": {
+        "state": 15,
+        "agent": 19,
+        "at": 1788422800000
+      }
+    },
+    "2026.9.3": {
+      "state": 16,
+      "agent": 20,
+      "source": "declared",
+      "at": 1788681000000
+    }
+  }
+}

@@ -1,0 +1,79 @@
+{
+  "applied": {
+    "channel": "stable",
+    "version": "2026.9.2",
+    "sha": null,
+    "at": 1788422400000,
+    "acceptedAt": 1788422530000,
+    "acceptedSource": "acceptance",
+    "reason": "operator_apply",
+    "operationId": "9b1f6c2e-3d4a-4f5b-8c6d-7e8f9a0b1c2d"
+  },
+  "pinVersion": "2026.9.2",
+  "lastKnownGood": {
+    "package": "2026.9.2",
+    "dev": null
+  },
+  "blocklist": [
+    {
+      "id": "2026.9.1-beta.1",
+      "reason": "crash_loop",
+      "exitCode": 1,
+      "at": 1787817600000
+    }
+  ],
+  "lastUpdateRun": {
+    "operationId": "9b1f6c2e-3d4a-4f5b-8c6d-7e8f9a0b1c2d",
+    "startedAt": 1788422310000,
+    "finishedAt": 1788422400000,
+    "ok": true,
+    "backup": {
+      "ok": true,
+      "file": "/data/.openclaw/backups/openclaw/openclaw-backup-1788422400000-9b1f6c2e.alphaclaw.tar.gz",
+      "sha256": "3f786850e387550fdab836ed7e6dc881de23001b1e2a1d4c1b3c5e7f9a0b2c4d",
+      "bytes": 1048576
+    }
+  },
+  "lastBoot": {
+    "at": 1788681000000,
+    "action": "noop",
+    "warnings": [],
+    "notifications": [],
+    "rollbackTargetVersion": null,
+    "previousInstalledVersion": null
+  },
+  "configMigration": {
+    "completedForVersion": "2026.9.2",
+    "lastAttempt": {
+      "version": "2026.9.2",
+      "at": 1788422420000,
+      "ok": true,
+      "error": null,
+      "gateHash": "7c9d1e2f3a4b5c6d",
+      "tail": null
+    }
+  },
+  "gatewayHold": null,
+  "backups": [
+    {
+      "file": "/data/.openclaw/backups/openclaw/openclaw-backup-1788422400000-9b1f6c2e.alphaclaw.tar.gz",
+      "sha256": "3f786850e387550fdab836ed7e6dc881de23001b1e2a1d4c1b3c5e7f9a0b2c4d",
+      "bytes": 1048576,
+      "at": 1788422340000,
+      "operationId": "9b1f6c2e-3d4a-4f5b-8c6d-7e8f9a0b1c2d"
+    }
+  ],
+  "rollbackRefused": null,
+  "forwardRecovery": null,
+  "noBootableVersion": null,
+  "previousPin": {
+    "version": "2026.8.2",
+    "at": 1788249600000
+  },
+  "pinWindow": {
+    "version": "2026.9.2",
+    "openedAt": 1788422400000,
+    "acceptedAt": 1788422530000,
+    "acceptedSource": "acceptance"
+  }
+}

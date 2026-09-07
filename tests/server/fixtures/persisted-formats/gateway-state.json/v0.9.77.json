@@ -1,0 +1,1 @@
+{"state":"down","since":1788681480000,"cause":"state_schema_too_new","versionMismatch":{"expected":"2026.9.2","running":"2026.7.1-2","source":"boot","detectedAt":"2026-09-06T07:58:00.000Z"},"bootId":"7:1788681600000"}
