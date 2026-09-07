@@ -205,6 +205,103 @@ describe("server/init/server-lifecycle", () => {
     expect(exitCalls).toEqual([]);
   });
 
+  // ── #76 A7/A1: the not-onboarded listening hook ──────────────────────────
+  const flushTicks = async (count = 3) => {
+    for (let index = 0; index < count; index += 1) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+  };
+
+  it("runs the onListening hook from the NOT-onboarded listening path (after the port bind) and never the boot sequence", async () => {
+    const server = trackServer(http.createServer(() => {}));
+    const calls = [];
+    const runOnboardedBootSequence = vi.fn();
+    const lifecycle = createServerLifecycle({
+      server,
+      PORT: 0,
+      isOnboarded: () => false,
+      runOnboardedBootSequence,
+      onListening: vi.fn((context) => {
+        // The port is bound by the time the hook runs: single-instance proved,
+        // so the dangling-record closers may act.
+        calls.push({ ...context, listening: server.listening });
+      }),
+      exitImpl: vi.fn(),
+      logger: createSilentLogger(),
+      listenRetryDelayMs: 1,
+      shutdownDeadlineMs: 200,
+    });
+
+    lifecycle.startListening();
+    await new Promise((resolve) => server.on("listening", resolve));
+    await flushTicks();
+
+    expect(calls).toEqual([{ onboarded: false, listening: true }]);
+    expect(runOnboardedBootSequence).not.toHaveBeenCalled();
+  });
+
+  it("an onboarded box runs the boot sequence, not the hook (its closers are the boot sequence's first steps)", async () => {
+    const server = trackServer(http.createServer(() => {}));
+    const onListening = vi.fn();
+    const runOnboardedBootSequence = vi.fn();
+    const lifecycle = createServerLifecycle({
+      server,
+      PORT: 0,
+      isOnboarded: () => true,
+      runOnboardedBootSequence,
+      onListening,
+      exitImpl: vi.fn(),
+      logger: createSilentLogger(),
+      listenRetryDelayMs: 1,
+      shutdownDeadlineMs: 200,
+    });
+
+    lifecycle.startListening();
+    await new Promise((resolve) => server.on("listening", resolve));
+    await flushTicks();
+
+    expect(runOnboardedBootSequence).toHaveBeenCalledTimes(1);
+    expect(onListening).not.toHaveBeenCalled();
+  });
+
+  it("a throwing or rejecting onListening hook is logged and never disturbs listening or the storm brake", async () => {
+    const server = trackServer(http.createServer(() => {}));
+    const logger = createSilentLogger();
+    const unhandled = vi.fn();
+    process.once("unhandledRejection", unhandled);
+    const exitCalls = [];
+    const lifecycle = createServerLifecycle({
+      server,
+      PORT: 0,
+      isOnboarded: () => false,
+      onListening: async () => {
+        throw new Error("hook exploded");
+      },
+      exitImpl: (code) => exitCalls.push(code),
+      logger,
+      listenRetryDelayMs: 1,
+      shutdownDeadlineMs: 200,
+    });
+
+    lifecycle.startListening();
+    await new Promise((resolve) => server.on("listening", resolve));
+    await flushTicks();
+
+    expect(server.listening).toBe(true);
+    expect(exitCalls).toEqual([]);
+    expect(unhandled).not.toHaveBeenCalled();
+    expect(
+      logger.error.mock.calls.some((call) =>
+        String(call[0]).includes("Listening hook error: hook exploded"),
+      ),
+    ).toBe(true);
+    // The "awaiting onboarding" line still prints — the hook is additive.
+    expect(
+      logger.log.mock.calls.some((call) => String(call[0]).includes("Awaiting onboarding")),
+    ).toBe(true);
+    process.removeListener("unhandledRejection", unhandled);
+  });
+
   it("a second gracefulExit while draining exits immediately without re-draining", async () => {
     let releaseStop;
     const stopGateway = vi.fn(

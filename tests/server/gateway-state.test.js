@@ -905,3 +905,146 @@ describe("server/gateway-state tracker (temporal truth)", () => {
     expect(fs.existsSync(persistPath)).toBe(false);
   });
 });
+
+describe("server/gateway-state tracker annotations: cause + versionMismatch (#76 A3/A4)", () => {
+  const makeTmp = () => fs.mkdtempSync(path.join(os.tmpdir(), "gwstate-ann-"));
+  const readDisk = (persistPath) => JSON.parse(fs.readFileSync(persistPath, "utf8"));
+  const kMismatch = {
+    expected: "2026.9.2",
+    running: "2026.7.1-2",
+    source: "boot",
+    detectedAt: "2026-09-06T12:00:00.000Z",
+  };
+
+  it("persists a cause change with NO state change (same since), and clears it the same way", () => {
+    const persistPath = path.join(makeTmp(), "state.json");
+    let now = kNow;
+    const tracker = createGatewayStateTracker({ persistPath, now: () => now, bootId: "boot-1" });
+    tracker.track(reduceGatewayState(inputs({ now })));
+    expect(readDisk(persistPath)).toEqual({
+      state: "running",
+      since: kNow,
+      cause: null,
+      versionMismatch: null,
+      bootId: "boot-1",
+    });
+    now += 2_000;
+    expect(tracker.setCause("state_schema_too_new")).toBe("state_schema_too_new");
+    expect(readDisk(persistPath)).toMatchObject({
+      state: "running",
+      since: kNow,
+      cause: "state_schema_too_new",
+    });
+    // The reduced output shape is unchanged: annotations live on disk, not in
+    // the public state object.
+    const reduced = tracker.track(reduceGatewayState(inputs({ now })));
+    expect(reduced.since).toBe(kNow);
+    expect(reduced).not.toHaveProperty("cause");
+    expect(reduced).not.toHaveProperty("versionMismatch");
+    tracker.setCause(null);
+    expect(readDisk(persistPath).cause).toBeNull();
+    // Non-string junk normalizes to null.
+    tracker.setCause(42);
+    expect(readDisk(persistPath).cause).toBeNull();
+  });
+
+  it("does not rewrite the file when the annotation is unchanged (it rides the 2s tick)", () => {
+    const persistPath = path.join(makeTmp(), "state.json");
+    const tracker = createGatewayStateTracker({ persistPath, now: () => kNow, bootId: "boot-1" });
+    tracker.track(reduceGatewayState(inputs()));
+    tracker.setVersionMismatch(kMismatch);
+    const writeSpy = vi.spyOn(fs, "writeFileSync");
+    try {
+      tracker.setVersionMismatch({ ...kMismatch });
+      tracker.setCause(null);
+      tracker.setCause(undefined);
+      expect(writeSpy).not.toHaveBeenCalled();
+    } finally {
+      writeSpy.mockRestore();
+    }
+  });
+
+  it("round-trips both annotations through persist → restore and carries them through a state transition", () => {
+    const persistPath = path.join(makeTmp(), "state.json");
+    let now = kNow;
+    const a = createGatewayStateTracker({ persistPath, now: () => now, bootId: "boot-1" });
+    a.track(reduceGatewayState(inputs({ now })));
+    a.setCause("legacy_exec_approvals");
+    a.setVersionMismatch(kMismatch);
+
+    now += 60_000;
+    const b = createGatewayStateTracker({ persistPath, now: () => now, bootId: "boot-2" });
+    // An identical annotation after restore is a no-op (file still names boot-1).
+    expect(b.setVersionMismatch(kMismatch)).toEqual(kMismatch);
+    expect(b.setCause("legacy_exec_approvals")).toBe("legacy_exec_approvals");
+    expect(readDisk(persistPath).bootId).toBe("boot-1");
+    // Same state → since preserved; the first track of the process stamps bootId.
+    const restored = b.track(reduceGatewayState(inputs({ now, tcp: { running: true, observedAt: now } })));
+    expect(restored.since).toBe(kNow);
+    expect(readDisk(persistPath)).toEqual({
+      state: "running",
+      since: kNow,
+      cause: "legacy_exec_approvals",
+      versionMismatch: kMismatch,
+      bootId: "boot-2",
+    });
+    // A transition replaces state+since but carries the annotations.
+    now += 5_000;
+    const down = b.track(
+      reduceGatewayState(inputs({ now, tcp: { running: false, observedAt: now } })),
+    );
+    expect(down.state).toBe("down");
+    expect(readDisk(persistPath)).toMatchObject({
+      state: "down",
+      since: now,
+      cause: "legacy_exec_approvals",
+      versionMismatch: kMismatch,
+    });
+  });
+
+  it("restores the pre-#76 {state, since, bootId} shape with null annotations and drops unknown/invalid keys", () => {
+    const persistPath = path.join(makeTmp(), "state.json");
+    fs.writeFileSync(
+      persistPath,
+      JSON.stringify({ state: "running", since: kNow, bootId: "old", extra: "dropped" }),
+      "utf8",
+    );
+    const tracker = createGatewayStateTracker({ persistPath, now: () => kNow + 10, bootId: "boot-2" });
+    const result = tracker.track(reduceGatewayState(inputs({ now: kNow + 10 })));
+    expect(result.since).toBe(kNow);
+    expect(readDisk(persistPath)).toEqual({
+      state: "running",
+      since: kNow,
+      cause: null,
+      versionMismatch: null,
+      bootId: "boot-2",
+    });
+
+    // Invalid annotation shapes are normalized, never trusted verbatim.
+    fs.writeFileSync(
+      persistPath,
+      JSON.stringify({
+        state: "running",
+        since: kNow,
+        cause: { nested: true },
+        versionMismatch: { expected: 5, running: "2026.7.1-2", source: null, junk: 1 },
+      }),
+      "utf8",
+    );
+    const trackerB = createGatewayStateTracker({ persistPath, now: () => kNow, bootId: "boot-3" });
+    trackerB.track(reduceGatewayState(inputs()));
+    expect(readDisk(persistPath)).toMatchObject({
+      cause: null,
+      versionMismatch: { expected: null, running: "2026.7.1-2", source: null, detectedAt: null },
+    });
+    expect(trackerB.setVersionMismatch("junk")).toBeNull();
+    expect(readDisk(persistPath).versionMismatch).toBeNull();
+  });
+
+  it("annotation setters work without a persist path and before any track()", () => {
+    const tracker = createGatewayStateTracker({ now: () => kNow, bootId: "boot-1" });
+    expect(tracker.setCause("oom")).toBe("oom");
+    expect(tracker.setVersionMismatch(kMismatch)).toEqual(kMismatch);
+    expect(tracker.track(reduceGatewayState(inputs())).state).toBe("running");
+  });
+});

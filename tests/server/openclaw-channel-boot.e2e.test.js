@@ -10,6 +10,7 @@ const {
 } = require("../../lib/server/openclaw-release-channel");
 const { createRunLedger } = require("../../lib/server/openclaw-run-ledger");
 const { getProcessBootId } = require("../../lib/server/boot-id");
+const { createBootReportWriter, computeVerdict } = require("../../lib/server/boot-report");
 
 // End-to-end coverage for syncAtBoot: the real channel-sync service + real
 // store recovering real on-disk trees, with the environment poisoned so any
@@ -92,6 +93,18 @@ const writeAgentDb = (openclawDir, agentId, { userVersion }) => {
     "agent",
     "openclaw-agent.sqlite",
   );
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const db = new DatabaseSync(file);
+  db.exec("CREATE TABLE t(x INTEGER)");
+  db.exec(`PRAGMA user_version = ${userVersion}`);
+  db.close();
+  return file;
+};
+
+// The global control-plane DB (kind "state") at an explicit user_version.
+const writeStateDb = (openclawDir, { userVersion }) => {
+  const { DatabaseSync } = require("node:sqlite");
+  const file = path.join(openclawDir, "state", "openclaw.sqlite");
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const db = new DatabaseSync(file);
   db.exec("CREATE TABLE t(x INTEGER)");
@@ -308,6 +321,203 @@ describe("server/openclaw-channel boot sync (e2e)", () => {
     expect(store.readState().lastBoot).toEqual(
       expect.objectContaining({ action: "activated" }),
     );
+    assertOffline(harness);
+  });
+
+  // Issue #76 A1: the bin phase leaves boot-report.json behind (serverPhase
+  // pending) on the SAME offline boot — the writer runOpenclawChannelBootSync
+  // constructs, injected here through extraSyncOptions over a temp managed
+  // dir. The report is reads only: the offline/spawn-free pins still hold.
+  it("writes the bin-phase boot-report.json on the re-activation boot, fully offline", () => {
+    const managedDir = path.join(mkTemp("alphaclaw-boot-e2e-report-"), ".alphaclaw");
+    const bootReport = createBootReportWriter({
+      managedDir,
+      bootId: "40:1700000000000",
+      nowFn: () => 1_000_000,
+      logger: kSilentLogger,
+    });
+    const harness = createHarness({
+      pin: "1.0.0",
+      channel: "beta",
+      installedVersion: "1.0.0",
+      extraSyncOptions: {
+        bootReport,
+        selfVersion: {
+          changed: false,
+          previousVersion: "0.9.77",
+          record: { version: "0.9.77", commit: "abc123", bootCount: 2, previous: { version: "0.9.76" } },
+        },
+      },
+    });
+    const { sync, store, installDir } = harness;
+    store.updateState((s) => {
+      s.pinVersion = "1.0.0";
+      s.applied = { channel: "beta", version: "1.1.0", at: 1, acceptedAt: 2 };
+      return s;
+    });
+    expect(saveOverlayFixture(store, "1.1.0")).toEqual({ ok: true });
+    expect(fs.existsSync(bootReport.reportPath)).toBe(false);
+
+    const result = sync.syncAtBoot();
+
+    expect(result.action).toBe("activated");
+    expect(installedPackageJsonVersion(installDir)).toBe("1.1.0");
+    const report = JSON.parse(fs.readFileSync(bootReport.reportPath, "utf8"));
+    expect(report).toEqual(
+      expect.objectContaining({
+        schema: "alphaclaw.boot-report.v1",
+        bootId: "40:1700000000000",
+        at: 1_000_000,
+        alphaclaw: {
+          version: "0.9.77",
+          commit: "abc123",
+          previousVersion: "0.9.77",
+          firstBootOfVersion: false,
+        },
+        pidfile: expect.objectContaining({ decision: "proceed", reason: "absent" }),
+        openclaw: {
+          declaredPin: "1.0.0",
+          channelApplied: "beta:1.1.0",
+          lastKnownGood: { package: null, dev: null },
+          expected: "1.1.0",
+          // Before the sync the container woke up on the pin; after it the
+          // applied build is what the gateway will run.
+          installedAtBoot: "1.0.0",
+          resolvedForLaunch: "1.1.0",
+          installedDiverged: false,
+          overlayPresent: true,
+          overlayComplete: true,
+          sentinelMatches: true,
+          bootSync: { action: "activated", reason: null, warnings: [] },
+        },
+        binPhase: { status: "ok" },
+        serverPhase: { status: "pending" },
+      }),
+    );
+    // The report is the diagnostic superset; state.lastBoot stays the
+    // authority for the boot ACTION and both agree.
+    expect(store.readState().lastBoot.action).toBe(report.openclaw.bootSync.action);
+    // A HEALTHY activation is a consistent boot: the verdict judges the tree
+    // the gateway will run (resolvedForLaunch), never the pre-sync tree —
+    // otherwise every activation would latch a version mismatch in the
+    // watchdog (review finding on computeVerdict).
+    expect(
+      computeVerdict({ ...report, serverPhase: { status: "recorded", installedVersion: "1.1.0", legacyExecApprovalsPresent: false } }),
+    ).toEqual([]);
+    expect(fs.readdirSync(managedDir)).toEqual(["boot-report.json"]);
+    assertOffline(harness);
+  });
+
+  it("writes the bin-phase boot-report.json on a failed boot too, naming the error, still offline", () => {
+    const managedDir = path.join(mkTemp("alphaclaw-boot-e2e-report-"), ".alphaclaw");
+    const bootReport = createBootReportWriter({
+      managedDir,
+      bootId: "40:1700000000000",
+      nowFn: () => 1_000_000,
+      logger: kSilentLogger,
+    });
+    const harness = createHarness({
+      pin: "1.0.0",
+      installedVersion: "1.0.0",
+      sentinelVersion: "1.0.0",
+      // The rollback-marker read blows up AFTER the pin was recorded in the
+      // state (so `expected` is known) → the inner catch returns "failed".
+      storeWrap: (store) => ({
+        ...store,
+        readMarker: () => {
+          throw new Error("marker exploded");
+        },
+      }),
+      extraSyncOptions: { bootReport },
+    });
+
+    const result = harness.sync.syncAtBoot();
+
+    expect(result).toEqual(
+      expect.objectContaining({ ok: false, action: "failed", error: "marker exploded" }),
+    );
+    const report = JSON.parse(fs.readFileSync(bootReport.reportPath, "utf8"));
+    expect(report.openclaw).toEqual(
+      expect.objectContaining({
+        declaredPin: "1.0.0",
+        expected: "1.0.0",
+        installedAtBoot: "1.0.0",
+        resolvedForLaunch: "1.0.0",
+        sentinelMatches: true,
+        bootSync: { action: "failed", reason: "marker exploded", warnings: ["marker exploded"] },
+      }),
+    );
+    expect(report.serverPhase).toEqual({ status: "pending" });
+    expect(harness.store.readState().lastBoot).toEqual(
+      expect.objectContaining({ action: "failed" }),
+    );
+    assertOffline(harness);
+  });
+
+  // Issue #76 A7: the server phase re-runs the closers from the LISTENING
+  // path (port bind = single instance). A ledger run still `running` and a
+  // lastUpdateRun with finishedAt == null (the client's "in-flight" predicate,
+  // use-upgrade-tab.js) both close as interrupted; finished records and
+  // restart_expected runs are untouched; the call is idempotent.
+  it("closeDanglingRecordsAtBoot closes a running ledger run and an unfinished lastUpdateRun, idempotently, offline", () => {
+    const harness = createHarness({
+      pin: "1.0.0",
+      installedVersion: "1.0.0",
+      sentinelVersion: "1.0.0",
+    });
+    const { sync, store } = harness;
+    const kRunningOpId = "11111111-2222-4333-8444-555555555555";
+    const kExpectedOpId = "66666666-7777-4888-9999-aaaaaaaaaaaa";
+    const kDoneOpId = "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff";
+    sync.runLedger.createRun({
+      operationId: kRunningOpId,
+      target: { kind: "package", channel: "stable", version: "1.1.0" },
+    });
+    sync.runLedger.createRun({
+      operationId: kExpectedOpId,
+      target: { kind: "package", channel: "stable", version: "1.1.0" },
+    });
+    sync.runLedger.updateRun(kExpectedOpId, (record) => {
+      record.state = "restart_expected";
+      return record;
+    });
+    sync.runLedger.createRun({
+      operationId: kDoneOpId,
+      target: { kind: "package", channel: "stable", version: "1.0.0" },
+    });
+    sync.runLedger.completeRun(kDoneOpId, { state: "activated", ok: true, result: { ok: true } });
+    store.updateState((s) => {
+      s.lastUpdateRun = { startedAt: 1, finishedAt: null, ok: null, steps: [] };
+      return s;
+    });
+
+    const first = sync.closeDanglingRecordsAtBoot();
+
+    expect(first).toEqual({
+      closedRuns: [kRunningOpId],
+      closedLastUpdateRun: true,
+      warnings: ["closed an update run interrupted by a restart"],
+    });
+    expect(sync.runLedger.readRun(kRunningOpId)).toEqual(
+      expect.objectContaining({
+        state: "interrupted",
+        ok: false,
+        result: expect.objectContaining({ code: "interrupted" }),
+      }),
+    );
+    expect(sync.runLedger.readRun(kExpectedOpId).state).toBe("restart_expected");
+    expect(sync.runLedger.readRun(kDoneOpId).state).toBe("activated");
+    const run = store.readState().lastUpdateRun;
+    // The client predicate: finishedAt != null means nothing is in flight.
+    expect(run.finishedAt).toBe(harness.nowRef.now);
+    expect(run.ok).toBe(false);
+    expect(run.result).toEqual(expect.objectContaining({ ok: false, code: "interrupted" }));
+
+    // Idempotent: a second call (the bin phase already ran it, or the
+    // onboarding-completed boot runs it again) closes nothing new.
+    const second = sync.closeDanglingRecordsAtBoot();
+    expect(second).toEqual({ closedRuns: [], closedLastUpdateRun: false, warnings: [] });
+    expect(store.readState().lastUpdateRun).toEqual(run);
     assertOffline(harness);
   });
 
@@ -666,6 +876,86 @@ describe("server/openclaw-channel boot sync (e2e)", () => {
       const second = await harness.sync.reconcileBootConfig();
       expect(second.status).toBe("ok");
       expect(doctorCalls).toHaveLength(1);
+    });
+
+    // #78 / Codex D7: after a successful doctor migration the DBs carry the
+    // schema this build migrated them to — recorded in the learned table as
+    // `observed` evidence only (never consulted by supportedFor).
+    it("records the observed state/agent user_version for the installed version after a successful migration", async () => {
+      const { createSchemaVersionTable } = require("../../lib/server/openclaw-schema-versions");
+      const doctorCalls = [];
+      const harness = createHarness({
+        installedVersion: "2026.8.1",
+        sentinelVersion: "2026.8.1",
+        // The installed dist declares its schema line (#78): the supported
+        // schema the report records resolves from it, not from a guess.
+        installFixture: { schema: { state: 14, agent: 18 } },
+        runnerImpl: doctorRunner({ doctorCalls }),
+      });
+      writeConfig(harness.openclawDir, { audit: { enabled: true } });
+      writeStateDb(harness.openclawDir, { userVersion: 14 });
+      writeAgentDb(harness.openclawDir, "main", { userVersion: 18 });
+      writeAgentDb(harness.openclawDir, "second", { userVersion: 17 });
+      harness.sync.syncAtBoot();
+      const table = createSchemaVersionTable({
+        managedDir: harness.store.managedDir,
+        logger: kSilentLogger,
+      });
+      expect(table.read().byVersion["2026.8.1"]?.observed ?? null).toBeNull();
+
+      const outcome = await harness.sync.reconcileBootConfig();
+      expect(outcome.status).toBe("ok");
+      expect(doctorCalls).toHaveLength(1);
+
+      // Highest agent version wins (agent DBs share one line); observed is
+      // evidence, so supportedFor still answers from declared/seeded only.
+      const entry = table.read().byVersion["2026.8.1"];
+      expect(entry.observed).toEqual({ state: 14, agent: 18, at: harness.nowRef.now });
+      expect(table.supportedFor("2026.8.1")).toEqual(
+        expect.objectContaining({ source: expect.not.stringMatching(/observed/) }),
+      );
+
+      // The same facts the boot report's server phase records (#76 A1):
+      // tracked read-only reads, one entry per DB, plus the launch-record
+      // shape every relaunch / restart-op record persists (#76 A2).
+      const versions = await harness.sync.readStateDbVersions();
+      expect(versions).toEqual(
+        expect.objectContaining({ userVersion: 14, agentUserVersions: expect.arrayContaining([18, 17]) }),
+      );
+      const schema = await harness.sync.describeStateDbSchema();
+      expect(schema.installedVersion).toBe("2026.8.1");
+      expect(schema.stateDb).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ kind: "state", userVersion: 14, status: "ok" }),
+          expect.objectContaining({ kind: "agent", agentId: "main", userVersion: 18, status: "ok" }),
+          expect.objectContaining({ kind: "agent", agentId: "second", userVersion: 17, status: "ok" }),
+        ]),
+      );
+      expect(schema.supportedSchema).toEqual({
+        state: 14,
+        agent: 18,
+        source: { state: "declared", agent: "declared" },
+      });
+    });
+
+    it("a failed migration records nothing as observed", async () => {
+      const { createSchemaVersionTable } = require("../../lib/server/openclaw-schema-versions");
+      const harness = createHarness({
+        installedVersion: "2026.8.1",
+        sentinelVersion: "2026.8.1",
+        runnerImpl: doctorRunner({ doctorOk: false }),
+      });
+      writeConfig(harness.openclawDir, { audit: { enabled: true } });
+      writeStateDb(harness.openclawDir, { userVersion: 14 });
+      harness.sync.syncAtBoot();
+
+      const outcome = await harness.sync.reconcileBootConfig();
+      expect(outcome.status).toBe("held");
+      const table = createSchemaVersionTable({
+        managedDir: harness.store.managedDir,
+        logger: kSilentLogger,
+      });
+      expect(table.read().byVersion["2026.8.1"]?.observed ?? null).toBeNull();
     });
 
     it("holds the gateway after a failed migration and re-runs only on change or operator force", async () => {
@@ -1498,6 +1788,22 @@ describe("server/openclaw-channel boot sync (e2e)", () => {
       writeConfig(harness.openclawDir, { audit: { enabled: true } });
       const configPath = path.join(harness.openclawDir, "openclaw.json");
       const configBefore = fs.readFileSync(configPath);
+      // The apply that recorded 2.0.0 left its run waiting for the restart
+      // to activate it — the ledger record the Upgrade tab rehydrates from.
+      const kMismatchOpId = "76767676-1111-4222-8333-444455556666";
+      const ledger = createRunLedger({
+        openclawDir: harness.openclawDir,
+        nowFn: () => harness.nowRef.now,
+        logger: kSilentLogger,
+      });
+      ledger.createRun({
+        operationId: kMismatchOpId,
+        target: { kind: "package", channel: "beta", version: "2.0.0" },
+      });
+      ledger.updateRun(kMismatchOpId, (record) => {
+        record.state = "restart_expected";
+        return record;
+      });
 
       // The boot sync never ran (the #76 shape: it skipped behind a stale
       // pidfile), so the server phase meets a tree that is not the recorded
@@ -1507,7 +1813,7 @@ describe("server/openclaw-channel boot sync (e2e)", () => {
       expect(outcome.hold).toEqual({
         reason: "version_mismatch",
         at: harness.nowRef.now,
-        operationId: null,
+        operationId: kMismatchOpId,
         blamedKeys: [],
         detail: expect.stringContaining(
           "OpenClaw 1.0.0 is installed but 2.0.0 is the recorded build",
@@ -1517,6 +1823,28 @@ describe("server/openclaw-channel boot sync (e2e)", () => {
         bootId: getProcessBootId(),
       });
       expect(harness.store.readState().gatewayHold).toEqual(outcome.hold);
+      // The honest ledger state: the run's target did NOT activate
+      // (activated:false — the one exit that may say so, because nothing
+      // launched on the recorded build), with the guard's own words.
+      const run = ledger.readRun(kMismatchOpId);
+      expect(run.state).toBe("activation_failed");
+      expect(run.ok).toBe(false);
+      expect(run.result).toEqual(
+        expect.objectContaining({
+          ok: false,
+          code: "activation_failed",
+          message: expect.stringContaining(
+            "OpenClaw 1.0.0 is installed but 2.0.0 is the recorded build and its overlay is complete",
+          ),
+        }),
+      );
+      expect(run.steps).toContainEqual(
+        expect.objectContaining({
+          name: "config-migrate",
+          status: "failed",
+          detail: "installed build differs from the recorded build",
+        }),
+      );
       // NOTHING ran or changed: no doctor, no spawn, no snapshot, no attempt
       // record; config bytes identical.
       expect(doctorCalls).toHaveLength(0);
@@ -2458,6 +2786,65 @@ describe("server/openclaw-channel boot sync (e2e)", () => {
       expect(lastStepNamed(readRunRecord(harness), "db-migrate")).toEqual(
         expect.objectContaining({ status: "completed" }),
       );
+    });
+
+    it("an agent DB whose bytes are not a database leaves the probe inconclusive: doctor runs, nothing is held, one log line names the DB and SQLITE_NOTADB (#78 fail-open)", async () => {
+      const doctorCalls = [];
+      const logs = [];
+      let harness;
+      harness = createHarness({
+        installedVersion: "2026.9.1-beta.1",
+        sentinelVersion: "2026.9.1-beta.1",
+        installFixture: { schema: { state: 12, agent: 17 } },
+        runnerImpl: validateAwareRunner({
+          openclawDirRef: () => harness.openclawDir,
+          doctorCalls,
+          dbPreflight: { ok: true, compatible: true },
+        }),
+        extraSyncOptions: {
+          logger: { log: (message) => logs.push(String(message)), warn() {}, error() {} },
+        },
+      });
+      writeConfig(harness.openclawDir, { clean: true });
+      const agentDb = path.join(
+        harness.openclawDir,
+        "agents",
+        "main",
+        "agent",
+        "openclaw-agent.sqlite",
+      );
+      fs.mkdirSync(path.dirname(agentDb), { recursive: true });
+      const garbage = "not a sqlite database — just bytes ".repeat(64);
+      fs.writeFileSync(agentDb, garbage);
+      seedRestartExpectedRun(harness);
+      harness.sync.syncAtBoot();
+
+      const outcome = await harness.sync.reconcileBootConfig();
+
+      // Inconclusive, not incompatible: the agent arm could not read a schema
+      // line, so it delivers no verdict; with no state DB either the probe
+      // is inconclusive and the conservative path runs doctor.
+      expect(outcome.status).toBe("ok");
+      expect(harness.store.readState().gatewayHold).toBe(null);
+      expect(doctorCalls).toHaveLength(1);
+      // The garbage never reached the state-schema verb.
+      const preflightCalls = harness.runner.runStreamed.mock.calls.filter(
+        (call) => (call[0]?.args || []).includes("preflight"),
+      );
+      expect(preflightCalls).toHaveLength(0);
+      // ONE log line names the file and SQLite's primary code.
+      expect(
+        logs.filter((line) =>
+          line.includes(
+            "boot db probe: could not read the schema version of agents/main/agent/openclaw-agent.sqlite (SQLITE_NOTADB)",
+          ),
+        ),
+      ).toHaveLength(1);
+      expect(lastStepNamed(readRunRecord(harness), "db-migrate")).toEqual(
+        expect.objectContaining({ status: "completed" }),
+      );
+      // The probe is read-only: the bytes are exactly what the operator had.
+      expect(fs.readFileSync(agentDb, "utf8")).toBe(garbage);
     });
 
     it("holds on a doctor timeout with the sized-budget warning and an honest post-kill db verdict", async () => {

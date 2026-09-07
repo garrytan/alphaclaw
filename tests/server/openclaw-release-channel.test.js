@@ -136,6 +136,7 @@ describe("server/openclaw-release-channel", () => {
         lastBoot: null,
         configMigration: null,
         lastTransition: null,
+        pinLag: null,
         gatewayHold: null,
         backups: [],
         rollbackRefused: null,
@@ -301,6 +302,38 @@ describe("server/openclaw-release-channel", () => {
         }
         // `at` must be a finite number.
         expect(normalizeState({ lastTransition: { ...stamp, at: "now" } }).lastTransition.at).toBe(null);
+        // A dev apply has no version order: kind "dev" is vocabulary, not junk.
+        expect(normalizeState({ lastTransition: { ...stamp, kind: "dev", to: "a1b2c3d" } }).lastTransition).toMatchObject({ kind: "dev", to: "a1b2c3d" });
+      });
+
+      it("round-trips pinLag through its whitelist and nulls anything that cannot name the lagging pair", () => {
+        const { store } = createStore();
+        const pinLag = {
+          pin: "2026.9.2",
+          installed: "2026.7.1-2",
+          at: 1_700_000_000_000,
+          bootId: "123:1700000000000",
+          bootsSeen: 2,
+        };
+        store.writeState({ pinLag });
+        expect(store.readState().pinLag).toEqual(pinLag);
+        // Pre-#76 state files have no pinLag: explicit null, never undefined.
+        expect(normalizeState({}).pinLag).toBe(null);
+        // Whitelist: unknown keys are dropped, wrong-typed fields null out.
+        expect(
+          normalizeState({ pinLag: { ...pinLag, extra: "x", at: "now", bootId: 7, bootsSeen: "2" } }).pinLag,
+        ).toEqual({ pin: "2026.9.2", installed: "2026.7.1-2", at: null, bootId: null, bootsSeen: null });
+        // A record that cannot name both the pin and the lagging tree can
+        // never excuse a divergence — it is null, not a half-record.
+        expect(normalizeState({ pinLag: { ...pinLag, pin: "" } }).pinLag).toBe(null);
+        expect(normalizeState({ pinLag: { ...pinLag, installed: 42 } }).pinLag).toBe(null);
+        expect(normalizeState({ pinLag: { at: 1, bootsSeen: 1 } }).pinLag).toBe(null);
+        for (const bogus of ["yes", ["2026.9.2"], 42, null, true]) {
+          expect(normalizeState({ pinLag: bogus }).pinLag).toBe(null);
+        }
+        // Malformed on disk → null after a read/write round trip, not junk.
+        store.writeState({ pinLag: "yes" });
+        expect(store.readState().pinLag).toBe(null);
       });
 
       it("keeps configMigration.lastRestore through normalization and nulls a malformed one", () => {

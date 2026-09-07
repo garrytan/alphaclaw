@@ -90,6 +90,17 @@ describe("admin-manifest engine", () => {
     expect(op.tier).toBe("safe");
   });
 
+  it("classifies GET /api/diagnose as the safe watchdog.diagnose read (#76 A9)", () => {
+    const op = manifest.findOp("GET", "/api/diagnose");
+    expect(op?.id).toBe("watchdog.diagnose");
+    expect(op.tier).toBe("safe");
+    expect(op.tierResolver).toBeUndefined();
+    // The one query knob the route accepts; the text form is not a JSON envelope.
+    expect(op.params.fields.map((field) => [field.name, field.location])).toEqual([
+      ["format", "query"],
+    ]);
+  });
+
   it("escalates notifications.update to dangerous whenever the routing itself changes (F065)", () => {
     const op = manifest.findOp("PUT", "/api/openclaw/notifications");
     expect(op?.id).toBe("notifications.update");

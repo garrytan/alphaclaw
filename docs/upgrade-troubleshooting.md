@@ -558,8 +558,62 @@ second-stage confirm dialog naming that backup with those caveats;
 confirming (`confirmDataRisk: true`) proceeds with the rollback anyway —
 data written by the newer version may be unreadable.
 
+## `alphaclaw diagnose`
+
+The first move on a sick box. `alphaclaw diagnose` (run in the container,
+server up or down) prints one markdown bundle of every piece of boot
+evidence on the volume: the AlphaClaw version stamp, the last three boot
+reports plus the pinned incident report and their verdicts, the channel-state
+summary, a fresh pidfile decision, every state DB's `user_version` against
+the installed build's supported schema, the last three incidents with their
+classified `cause`, recent update runs, the restart-operation record,
+`gateway-state.json`, the backups directory (including `.tmp` /
+`.unverified` debris) and the boot-spine lines of `process.log`. Each
+section is stamped `live` (computed in this process), `disk` (read from
+the volume) or `unavailable` with the reason, so a corrupt file never hides
+the rest, and the bundle is secret-redacted before it is printed. `--json`
+prints the same bundle as one JSON line. It creates nothing on the volume.
+
+The running server serves the same bundle at `GET /api/diagnose` (JSON
+envelope `{ ok, bundle }`; `?format=text` for the markdown) with the live
+watchdog status, channel info and incident rows the CLI cannot see; the
+agent-admin op is `watchdog.diagnose` (tier `safe`). Paste the markdown
+into the incident. A `current boot verdict` other than `consistent` names
+the inconsistency (`installed_not_expected`, `pidfile_contradiction`,
+`state_db_unreadable`, …) and the boot report that carries it is described
+below.
+
 ## Where the evidence lives
 
+- **Boot reports:** `boot-report.json` under the OpenClaw managed dir
+  (`<root>/.openclaw/.alphaclaw/`), rotated to `boot-report.1.json` /
+  `boot-report.2.json` by each boot's bin phase — what the bin phase saw
+  (declared pin, applied channel build, installed tree, overlay, pidfile
+  decision, sync action) and what the server phase recorded (state DB schema,
+  config hash, reconcile outcome, `verdict[]`). `boot-report-incident.json`
+  pins the first report with a non-empty verdict so a restart loop cannot
+  rotate it away. `boot-report-refused.json` holds the last start that exited
+  because a live server provably owned the directory — written outside the
+  ring so a refused second instance never evicts the live server's report.
+  The report is the diagnostic superset; the channel state's `lastBoot` stays
+  the authority for the action the boot took.
+- **AlphaClaw version stamp:** `alphaclaw-version.json` (same dir) — the
+  AlphaClaw version and commit that booted, first/last boot time, boot count
+  and the previous version; the boot banner (`[alphaclaw] AlphaClaw <version>
+  …`) is the first line of every boot log.
+- **Schema table:** `openclaw-schema-versions.json` (same dir) — which
+  `{ state, agent }` schema each OpenClaw version supports (declared
+  constants recorded at apply time over the built-in seeds) plus observed
+  `user_version` evidence; the compat gates and the diagnose bundle read it.
+- **Config-gate evidence:** `config-gate/<ms>.json` (same dir; newest 10
+  kept) — key-path-only diffs of every restore over `openclaw.json` (paths
+  and counts, never values), beside the byte-exact
+  `openclaw.json.pre-restore-<ms>.bak` copies (newest 3) next to the config;
+  `configMigration.lastRestore` in the channel state names both and the boot
+  that did it.
+- **Rescue bundle:** `INCIDENT-<id>.md` in the AlphaClaw-owned Claude Code
+  rescue workspace — the inert incident attachment (classified cause,
+  versions, fenced stderr lines) a spawned rescue session reads first.
 - **Run ledger:** `GET /api/openclaw/runs/:id` (also on disk as
   `runs/<opId>.json` under the OpenClaw managed dir) — step timeline,
   blamed keys, verdicts, and the full `backup` record (attempts, pause,

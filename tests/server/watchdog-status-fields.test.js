@@ -43,6 +43,8 @@ describe("getStatus() additive fields", () => {
     expect(status.phase).toBe("stopped");
     expect(status.degradedReason).toBe(null);
     expect(status.lastExit).toBe(null);
+    // #76 A4: latched scalar object, null until a mismatch is detected.
+    expect(status.versionMismatch).toBe(null);
     expect(status.backoff).toEqual({ active: false, untilMs: null, attempt: 0 });
     expect(status.rollbackDeadlineAt).toBe(null);
     expect(status.stabilization).toEqual({ active: false, until: null });
@@ -118,6 +120,10 @@ describe("getStatus() additive fields", () => {
     const status = watchdog.getStatus();
     expect(status.lastExit).toMatchObject({ code: 1, signal: null });
     expect(typeof status.lastExit.at).toBe("string");
+    // #76 A3: the cause slots exist even without an injected classifier so the
+    // shape is stable for the SSE projection and the diagnose whitelist.
+    expect(status.lastExit).toMatchObject({ cause: null, corroborated: null });
+    expect(status.versionMismatch).toBe(null);
   });
 
   it("does not record lastExit for expected restarts", () => {
