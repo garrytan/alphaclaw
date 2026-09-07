@@ -996,3 +996,123 @@ describe("server/doctor/deterministic-checks det:config-unreadable cards (fix wa
     expect(cards.some((card) => String(card.sourceKey).startsWith("det:config-unreadable:"))).toBe(false);
   });
 });
+
+describe("server/doctor/deterministic-checks det:plugin-api-mismatch (issue #76 A4 doctor evidence)", () => {
+  const { detectPluginApiMismatch, kPluginApiMismatchPattern } = require(
+    "../../lib/server/doctor/deterministic-checks",
+  );
+  let workspaceRoot;
+  let managedRoot;
+  beforeEach(() => {
+    workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-det-plugin-ws-"));
+    managedRoot = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-det-plugin-managed-"));
+  });
+  afterEach(() => {
+    fs.rmSync(workspaceRoot, { recursive: true, force: true });
+    fs.rmSync(managedRoot, { recursive: true, force: true });
+  });
+  const build = (overrides = {}) =>
+    buildDeterministicCards({
+      workspaceRoot,
+      managedRoot,
+      profile: kStableProfile,
+      bootstrapContext: analyzeBootstrapContext({ workspaceRoot, profile: kStableProfile }),
+      onboarded: true,
+      releaseChannel: "stable",
+      ...overrides,
+    });
+  const findPluginCard = (cards) =>
+    cards.find((card) => String(card.sourceKey).startsWith("det:plugin-api-mismatch:"));
+  // The 2026.7.1-2 host's wording for a beta-era plugin (the #76 incident box).
+  const kLine =
+    "plugin requires plugin API >=2026.9.0, but this host is 2026.7.1-2; skipping openclaw-telegram-plus";
+
+  it("emits ONE P1 config card keyed by the host version when the latest doctor run's raw payload carries the loader refusal", () => {
+    const cards = build({
+      readLatestDoctorRun: () => ({
+        id: 17,
+        rawResult: `[doctor] ${kLine}\n{"cards":[]}`,
+      }),
+    });
+    const card = findPluginCard(cards);
+    expect(card).toMatchObject({
+      sourceKey: "det:plugin-api-mismatch:2026.7.1-2",
+      priority: "P1",
+      category: "config",
+      status: "open",
+      source: "deterministic",
+      targetPaths: [],
+    });
+    expect(card.summary).toContain(">=2026.9.0");
+    expect(card.summary).toContain("2026.7.1-2");
+    expect(card.summary).toMatch(/version mismatch/);
+    expect(card.recommendation).toMatch(/Upgrade page/);
+    expect(card.evidence.map((e) => e.text)).toEqual([
+      expect.stringContaining("plugin requires plugin API >=2026.9.0, but this host is 2026.7.1-2"),
+      "source: doctor run #17",
+    ]);
+    expect(card.fixPrompt).toContain(">=2026.9.0");
+    expect(card.fixPrompt).toContain("2026.7.1-2");
+    expect(cards.filter((c) => String(c.sourceKey).startsWith("det:plugin-api-mismatch:"))).toHaveLength(1);
+  });
+
+  it("reads a JSON raw payload and the run's error text too", () => {
+    const fromObject = findPluginCard(
+      build({
+        readLatestDoctorRun: () => ({ id: 3, rawResult: { notes: [`loader said: ${kLine}`] } }),
+      }),
+    );
+    expect(fromObject?.sourceKey).toBe("det:plugin-api-mismatch:2026.7.1-2");
+    const fromError = findPluginCard(
+      build({ readLatestDoctorRun: () => ({ id: 4, rawResult: null, error: kLine }) }),
+    );
+    expect(fromError?.sourceKey).toBe("det:plugin-api-mismatch:2026.7.1-2");
+  });
+
+  it("emits nothing when the run does not match, is absent, or the reader throws — and never touches an uninitialized doctor db", () => {
+    expect(findPluginCard(build({ readLatestDoctorRun: () => ({ id: 1, rawResult: "all good" }) }))).toBeUndefined();
+    expect(findPluginCard(build({ readLatestDoctorRun: () => null }))).toBeUndefined();
+    expect(
+      findPluginCard(
+        build({
+          readLatestDoctorRun: () => {
+            throw new Error("db closed");
+          },
+        }),
+      ),
+    ).toBeUndefined();
+    // Default reader: the doctor db is not initialized in this process → no card, no throw.
+    expect(findPluginCard(build())).toBeUndefined();
+  });
+
+  it("keeps CLI-echoed version tokens out of the card unless they look like versions, and routes display text through the sanitizer", () => {
+    const hostile = "plugin requires plugin API >=2026.9.0, but this host is 1.0;$(rm) skipping";
+    const cards = build({
+      readLatestDoctorRun: () => ({ id: 9, rawResult: hostile }),
+      sanitize: (text) => String(text).toUpperCase(),
+    });
+    const card = findPluginCard(cards);
+    expect(card.sourceKey).toBe("det:plugin-api-mismatch:unknown");
+    expect(card.summary).toContain("exposes unknown");
+    expect(card.fixPrompt).not.toContain("$(");
+    expect(card.evidence[0].text).toBe(card.evidence[0].text.toUpperCase());
+    expect(card.evidence[0].text.length).toBeLessThanOrEqual(300);
+  });
+
+  it("detectPluginApiMismatch is the pure reader: versions, matched line and run id; trailing punctuation stripped", () => {
+    expect(kPluginApiMismatchPattern.test(kLine)).toBe(true);
+    expect(
+      detectPluginApiMismatch(() => ({ id: 2, rawResult: "plugin requires plugin API >= 2026.9.0, but this host is 2026.7.1-2." })),
+    ).toEqual({
+      requires: "2026.9.0",
+      host: "2026.7.1-2",
+      matchedLine: "plugin requires plugin API >= 2026.9.0, but this host is 2026.7.1-2.",
+      runId: 2,
+    });
+    expect(detectPluginApiMismatch(() => ({ rawResult: "nothing" }))).toBeNull();
+    expect(detectPluginApiMismatch(undefined)).toBeNull();
+    // Bounded scan: a refusal buried past 256 KB of payload is not read.
+    const far = `${"x".repeat(300 * 1024)}${kLine}`;
+    expect(detectPluginApiMismatch(() => ({ id: 5, rawResult: far }))).toBeNull();
+  });
+});

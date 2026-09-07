@@ -65,9 +65,10 @@ describe("admin-manifest engine", () => {
     ).toBe("dangerous");
   });
 
-  // WI-4.5: backup-reuse consent is humans-only — the agent is DENIED (not
-  // merely escalated) for any body carrying the field, valid or not.
-  it("denies the agent's updates.apply whenever the body carries allowBackupReuse", () => {
+  // WI-4.5 / #79 (b): both backup consents are humans-only — the agent is
+  // DENIED (not merely escalated) for any body carrying either field, valid
+  // or not.
+  it("denies the agent's updates.apply whenever the body carries allowBackupReuse or confirmNoBackup", () => {
     const op = manifest.findOp("POST", "/api/openclaw/apply");
     expect(op?.id).toBe("updates.apply");
     expect(manifest.resolveTier(op, { body: { channel: "beta", version: "1.0.0" } })).toBe(
@@ -78,6 +79,19 @@ describe("admin-manifest engine", () => {
         manifest.resolveTier(op, { body: { channel: "beta", version: "1.0.0", allowBackupReuse } }),
       ).toBe("denied");
     }
+    for (const confirmNoBackup of [true, false, "true", null, {}]) {
+      expect(
+        manifest.resolveTier(op, { body: { channel: "stable", version: "1.0.0", confirmNoBackup } }),
+      ).toBe("denied");
+    }
+    // The manifest documents the param as a strict humans-only boolean.
+    const field = op.params.fields.find((entry) => entry.name === "confirmNoBackup");
+    expect(field).toEqual(
+      expect.objectContaining({ location: "body", type: "boolean", required: false }),
+    );
+    expect(field.description).toMatch(/HUMANS ONLY/);
+    expect(field.description).toMatch(/backup_required_for_migration/);
+    expect(field.description).toMatch(/never relaxes a 409 backup_failed/);
     // Primitive/array bodies never throw and stay at the base tier.
     for (const body of [true, 1, "x", null, undefined, ["allowBackupReuse"]]) {
       expect(manifest.resolveTier(op, { body })).toBe("dangerous");
@@ -88,6 +102,17 @@ describe("admin-manifest engine", () => {
     const op = manifest.findOp("GET", "/api/openclaw/backups");
     expect(op?.id).toBe("updates.backups");
     expect(op.tier).toBe("safe");
+  });
+
+  it("classifies GET /api/diagnose as the safe watchdog.diagnose read (#76 A9)", () => {
+    const op = manifest.findOp("GET", "/api/diagnose");
+    expect(op?.id).toBe("watchdog.diagnose");
+    expect(op.tier).toBe("safe");
+    expect(op.tierResolver).toBeUndefined();
+    // The one query knob the route accepts; the text form is not a JSON envelope.
+    expect(op.params.fields.map((field) => [field.name, field.location])).toEqual([
+      ["format", "query"],
+    ]);
   });
 
   it("escalates notifications.update to dangerous whenever the routing itself changes (F065)", () => {

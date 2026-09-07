@@ -1,43 +1,80 @@
 # AlphaClaw Offline Copy — backup archive format and restore runbook
 
-> **Status (2026-09-02):** ships with the issue #54 hardening. The offline copy
-> is the fallback the quiesced pre-update backup takes when the upstream
-> `openclaw backup create` cannot finish while the gateway is paused. The
-> format is **AlphaClaw-owned**: it mirrors the core fields of upstream's
-> schemaVersion-1 manifest so the same restore steps apply, and it does not
-> claim compatibility with upstream restore tooling beyond those shared
-> fields. Producer code: `lib/server/openclaw-backup-offline-copy.js`.
+> **Status (2026-09-07):** shipped with the issue #54 hardening as the
+> fallback behind the upstream CLI; since issue #79 (Stage 4c, decision D1a)
+> the offline copy is the **first rung of every quiesced pre-update backup**
+> — soft and hard gates alike — and the upstream `openclaw backup create`
+> runs only after a failed copy (paused, when `chooseBackupRung` predicts it
+> fits; otherwise live). The format is **AlphaClaw-owned**: it mirrors the
+> core fields of upstream's schemaVersion-1 manifest so the same restore
+> steps apply, and it does not claim compatibility with upstream restore
+> tooling beyond those shared fields. Producer code:
+> `lib/server/openclaw-backup-offline-copy.js`; ladder policy:
+> `lib/server/openclaw-backup-ladder.js`.
 
-## 1. Why a second producer exists
+## 1. Why a second producer exists — and why it now runs first
 
-The mandatory pre-update backup for downgrades, dev switches and prerelease
-targets runs the upstream CLI with the gateway paused. Issue #54 showed the
-upstream backup can still die while paused: its legacy-audit state lease was
-lost to AlphaClaw's own state-database traffic (`SQLite transaction lock wait
-failed` → `lease migration.legacy-audit/filesystem-sqlite-boundary was lost`).
-Two further shapes have the same effect — a CLI killed from outside (OOM,
-platform restart) and a rollback-journal state database large enough to
-self-block the upstream snapshot on network volumes.
+The pre-update backup used to run the upstream CLI with the gateway paused,
+and only for the hard gates (downgrades, dev switches, prerelease targets).
+Issue #54 showed the upstream backup can still die while paused: its
+legacy-audit state lease was lost to AlphaClaw's own state-database traffic
+(`SQLite transaction lock wait failed` → `lease
+migration.legacy-audit/filesystem-sqlite-boundary was lost`). Two further
+shapes have the same effect — a CLI killed from outside (OOM, platform
+restart) and a rollback-journal state database large enough to self-block
+the upstream snapshot on network volumes. The offline copy was born as the
+fallback behind those failures.
 
-Rather than give up on the hard gate, AlphaClaw takes its own consistent copy
-of the still-paused state directory. It runs strictly inside the same quiesce
-transaction (lifecycle lock held, gateway stopped and confirmed, state-DB quiet
-barrier held) and only after proving exclusivity.
+Issue #79 (the 2026-09 incident: an 8 GB workspace `node_modules` tarred
+inside the pause) inverted the order. The upstream CLI takes no excludes and
+gives no progress; the copy sizes its set before the pause, excludes debris
+(§2.1), reports progress and fits its own budget. So since Stage 4c
+(decision D1a) **every apply that can pause the gateway does — soft gates
+included — and the offline copy is the first rung of the pause,
+unconditionally.** It runs strictly inside the quiesce transaction
+(lifecycle lock held, gateway stopped and confirmed, state-DB quiet barrier
+held) and only after proving exclusivity. `hardGate` decides only whether a
+failure is fatal, never whether the copy runs.
 
 ```
- upstream attempt(s) fail (lock_contention / killed / short-circuit)
+ runBackupDiagnosis (before the pause, ≤ kOpenclawBackupDiagnosisBudgetMs):
+   journal mode · fs type · ONE walk with the policy excludes → copy set /
+   tar set / excluded bytes → predicted copy ms + upstream ms
    │
    ▼
- assessExclusivity ─ any HARD miss ─▶ no copy, honest 409 (names the newest surviving archive)
-   │ stop confirmed · quiet barrier held · 0 live openclaw processes
-   │ 0 in-process state-db handles · /proc/*/fd holders (Linux; else "partial")
+ quiesce: lock → stop CONFIRMED → quiet barrier
+   (busy lock / no barrier: hard gate → honest 409 · soft gate → warning + LIVE ladder)
+   │
+   ▼
+ OFFLINE COPY FIRST (bounded by min(offlineCopyBudgetMs, quiesce remaining))
+   assessExclusivity ─ any HARD miss ─▶ offline_copy_refused: no copy, hand over to
+   │ stop confirmed · quiet held         the LIVE ladder (the live upstream runs
+   │ 0 live openclaw processes           against a running gateway and needs no
+   │ 0 in-process state-db handles       exclusivity); the refusal rides the record
+   │ /proc/*/fd holders (Linux;          and is appended to the eventual failure
+   │   else "partial")                   message — never a one-rung terminal
    ▼
  sqlite backup() per DB ──▶ integrity_check + user_version ──▶ verbatim assets
-   ▼
+   ▼                        (workspaces minus the policy excludes, §2.1)
  manifest.json ──▶ tar -I 'gzip -1' ──▶ gzip -t + manifest extraction ──▶ publish
-   │
-   └─ any other stage failure ─▶ relaunch gateway, live ladder takes over
+   │                                                                (after the unwind)
+   └─ any other stage failure ─▶ describeUpstreamVeto / chooseBackupRung:
+        upstream predicted to fit the remaining pause (and its tar set under
+        kOpenclawBackupUpstreamMaxBytes) ─▶ in-quiesce `backup create`
+        (kQuiescedOutcomePolicy: lock_contention retries ≤ 2, else hand over)
+        anything else ─▶ relaunch gateway, settle, LIVE ladder (≤ 2 attempts)
+   the copy never runs twice in one pause
 ```
+
+Every rung — the copy, each paused upstream attempt, each live attempt — is
+one `run.backup.attemptsDetail[]` entry `{ rung, reason, quiesced,
+startedAt, elapsedMs, bytes, kind, ok }` and one `backup_rung` event, and a
+failed copy records what followed it as `offlineCopy.next { rung, reason }`.
+A soft-gated apply that ends with no backup is still stopped at the
+post-preflight checkpoint when the target migrates the databases (`409
+backup_required_for_migration`, overridable only by the operator's
+`confirmNoBackup: true`); the hard gate's `409 backup_failed` is never
+overridable.
 
 ## 2. Archive layout
 
@@ -51,7 +88,8 @@ barrier held) and only after proving exclusivity.
     ├── agents/<id>/agent/…                 (auth profiles etc., verbatim)
     ├── agents/<id>/sessions/…              (verbatim)
     ├── credentials/…, identity/…           (verbatim)
-    └── workspace…/…                        (only when total < 512 MiB)
+    └── workspace…/…                        (only when the POST-exclude total ≤ 512 MiB;
+                                             minus the policy excludes, §2.1)
 ```
 
 The `.alphaclaw.tar.gz` suffix is what distinguishes the producer on disk.
@@ -67,14 +105,63 @@ run (`backup.mode`, `backup.modeError`), warned and notified.
 |---|---|---|
 | `*.sqlite` (anywhere in the walk) | `node:sqlite` `backup(sourceDb, dest)` with the source opened `readOnly` and `PRAGMA busy_timeout = 30000` | Consistent single-file copy; `-wal`/`-shm`/`-journal` sidecars are **skipped** and listed under `skipped[]` with `coveredBy`. Each copy passes `PRAGMA integrity_check` and records `user_version`. |
 | Regular files | `copyFile` verbatim | `openclaw.json` is `kind: config`, everything else `kind: file`. |
-| Workspace dirs (`workspace`, `workspace-*`) | verbatim, **only** when their total size ≤ `kOpenclawBackupWorkspaceInlineBytes` (512 MiB) | Otherwise excluded → `options.includeWorkspace: false`, the run records `partial: true`, and the archive is never a reuse candidate. |
+| Workspace dirs (`workspace`, `workspace-*`) | verbatim, **only** when their **post-exclude** total size ≤ `kOpenclawBackupWorkspaceInlineBytes` (512 MiB) | The size is judged after the policy excludes (§2.1) are taken out — the junk no longer decides. Otherwise the workspace is omitted → `options.includeWorkspace: false`, `coverage.workspace: "omitted"`, the run records `partial: true`, and the archive is never a reuse candidate (unchanged since #54). |
+| Policy excludes inside workspaces (§2.1) | skipped, **measured** | Each excluded entry is one `skipped[]` row `{ kind: "policy_exclude", pattern, files, bytes }` (a directory is one row for the whole subtree); the manifest's `excludes[]` tallies per pattern and `coverage.workspace` reads `"policy_excluded"`. Never sets `partial`. |
 | Symlinks | `openclaw.json` is followed when it resolves to a regular file (`viaSymlink`); every other symlink is skipped and listed in `skipped[]` (`kind: "symlink"`, directory symlinks are never followed) | A skipped symlink at a **core asset** path (`openclaw.json`, `credentials/**`, `identity/**`, `state/**`, `agents/<id>/agent/**`, any `*.sqlite`) is appended to `partialReasons` and makes the run `partial: true` (never a reuse candidate); a symlink elsewhere is just skipped. |
 | Special files | skipped | Listed in `skipped[]`. |
-| `.alphaclaw/`, `logs/`, `tmp/`, `node_modules/`, `backups/` | skipped | AlphaClaw bookkeeping and non-state trees. |
+| `.alphaclaw/`, `logs/`, `tmp/`, `node_modules/`, `backups/` | skipped | AlphaClaw bookkeeping and non-state trees — **outside** workspaces only. |
+
+### 2.1 Policy excludes inside workspaces (issue #79)
+
+The upstream backup includes workspace dirs wholesale, and until #79 so did
+the offline copy: a workspace's `node_modules` (8 GB in the 2026-09 incident)
+was copied inside the quiesce and blew the budget. Inside a workspace the
+copy now applies a policy exclude list; outside a workspace nothing changes
+(a `.tmp` under `agents/<id>/sessions/` is state and is copied).
+
+- **Default set** (`kOfflineCopyPolicyExcludes`, unambiguous debris only):
+  `node_modules`, `*.heapsnapshot`, `*.tmp`, `logs/**/*.gz`. `tmp`, `.cache`
+  and `caches` are deliberately **not** default — an operator opts in.
+- **Matching is gitignore-style, case-insensitive:** a pattern without `/`
+  matches any entry's basename at any depth; one with `/` matches the
+  workspace-relative path anchored at the workspace root (`**` spans
+  segments, `*`/`?` never cross `/`); a trailing `/` matches directories
+  only. A matched directory is excluded whole.
+- **Override (module-level only, not yet an operator control):**
+  `createOfflineCopy({ excludes })` **replaces** the default list (`[]`
+  turns the policy off); at most 64 patterns, each ≤ 256 characters, no
+  absolute paths, no `.`/`..` segments, no backslashes. **No `alphaclaw.json`
+  key is read today** — the driver (`runOfflineCopy` in
+  `openclaw-channel-sync.js`) passes no `excludes`, so production always
+  runs the default set, and `runBackupDiagnosis`'s sizing walk uses the same
+  defaults. The planned `updates.openclaw.backup.excludes` wiring (config
+  normalizer, `dangerous` agent tier, one list threaded into BOTH
+  `createOfflineCopy` and the diagnosis walk so the two walks cannot
+  disagree) is deferred; until it lands the module-level option is exercised
+  by `tests/server/openclaw-backup-offline-copy.test.js` only.
+- **Core assets are never excludable, whatever the config says.** A pattern
+  that could match a core asset — the config file, `credentials/**`,
+  `identity/**`, `state/**`, `agents/<id>/agent/**` or any `*.sqlite` (so
+  `*`, `**`, `*.json`, `*.sqlite`, `credentials`, `state/`, `agents/*`, …) —
+  is **refused**: reported on the result (`refusedExcludes[{ pattern,
+  reason }]`) and in the backup log, never applied, never fatal. Excludes
+  apply only inside workspaces in the first place; the refusal is defence in
+  depth so no config can widen them onto the data a restore cannot do
+  without.
+- **Measured, not silent.** Every excluded entry is listed in `skipped[]`
+  with its size; excluded directories are walked in a tolerant measuring
+  pass (an unreadable corner of a tree we are not copying never fails the
+  backup) that yields to the budget like the rest of the walk but does not
+  count against the 200k copy-set entry cap.
+- **Never `partial`.** `partial` / `partialReasons` keep their meaning — a
+  missing **core** asset (§2 symlink rule) or the over-limit workspace
+  omission — so reuse eligibility (§6) is unchanged. The excludes are
+  reported through `excludes[]` and `coverage` (§3).
 
 ## 3. `manifest.json`
 
-Upstream core fields (schemaVersion 1) plus AlphaClaw's additions:
+Upstream core fields (schemaVersion 1) plus AlphaClaw's additions
+(`alphaclawFormatVersion: 2` since issue #79; the reader accepts 1 and 2, §4):
 
 ```json
 {
@@ -97,11 +184,19 @@ Upstream core fields (schemaVersion 1) plus AlphaClaw's additions:
     { "kind": "config", "sourcePath": "/data/.openclaw/openclaw.json", "archivePath": "openclaw.json" }
   ],
   "skipped": [
-    { "kind": "sqlite-sidecar", "sourcePath": "/data/.openclaw/state/openclaw.sqlite-wal", "reason": "covered by the online sqlite copy", "coveredBy": "/data/.openclaw/state/openclaw.sqlite" }
+    { "kind": "sqlite-sidecar", "sourcePath": "/data/.openclaw/state/openclaw.sqlite-wal", "reason": "covered by the online sqlite copy", "coveredBy": "/data/.openclaw/state/openclaw.sqlite" },
+    { "kind": "policy_exclude", "sourcePath": "/data/.openclaw/workspace/node_modules", "reason": "excluded by backup policy (node_modules)", "pattern": "node_modules", "files": 48213, "bytes": 812345678 }
   ],
   "partialReasons": [],
   "producer": "alphaclaw-offline-copy",
-  "alphaclawFormatVersion": 1,
+  "alphaclawFormatVersion": 2,
+  "excludes": [
+    { "pattern": "node_modules", "files": 48213, "bytes": 812345678 },
+    { "pattern": "*.heapsnapshot", "files": 0, "bytes": 0 },
+    { "pattern": "*.tmp", "files": 0, "bytes": 0 },
+    { "pattern": "logs/**/*.gz", "files": 0, "bytes": 0 }
+  ],
+  "coverage": { "core": "complete", "workspace": "policy_excluded" },
   "exclusivityEvidence": {
     "stopConfirmed": true,
     "stopEvidence": { "...": "gateway stop record when the gateway module provides one" },
@@ -125,8 +220,29 @@ concurrent access. Any **hard** miss (stop not confirmed, barrier not held,
 live openclaw processes, open in-process handles, foreign fd holders) refuses
 the copy before a byte is written.
 
+`excludes[]` lists every policy pattern that was in force (one row per
+pattern, zero-match rows included, so the reader sees the policy, not only
+its hits) with the files and bytes it dropped. `coverage` is the honest
+summary a restore or the inventory reads first:
+
+| Field | Values | Meaning |
+|---|---|---|
+| `coverage.core` | `"complete"` / `"partial"` | Every core asset (config, `credentials/**`, `identity/**`, `state/**`, `agents/<id>/agent/**`, every `*.sqlite`) is in the archive / at least one was skipped (symlink rule) — the latter is exactly what `partial: true` + `partialReasons` name. |
+| `coverage.workspace` | `"complete"` / `"policy_excluded"` / `"omitted"` | The workspaces are in whole / in minus the `excludes[]` / left out over the inline limit (`options.includeWorkspace: false`, also `partial: true`). A box with no workspace reads `"complete"`. |
+
+`partial` stays reserved for a missing core asset and the over-limit
+omission; a policy exclude never sets it (reuse eligibility, §6, is
+unchanged). Refused operator patterns are **not** in the manifest — they
+changed nothing about the archive — but are on the copy result
+(`refusedExcludes`) and in the backup log.
+
 `alphaclawFormatVersion` bumps whenever the layout or the field set changes in
-a way a restore runbook must know about.
+a way a restore runbook must know about. History: **1** (2026-09-02, issue
+#54) — the shape above without `excludes`/`coverage`; **2** (issue #79) —
+adds `excludes[]`, `coverage{}` and the `policy_exclude` skipped kind. The
+reader (`verifyArchiveManifest`) accepts every version in
+`kOfflineCopyReadableFormatVersions` (`[1, 2]`); both share the restore
+runbook in §5.
 
 ## 4. Verification ("usable" definition, WI-6.1)
 
@@ -142,7 +258,14 @@ An archive from either producer counts as verified only when:
    offline-copy manifest at ≳280 files, which is why the producer writes
    compact JSON), and the parsed object must carry a numeric `schemaVersion`
    and an `assets[]` array (9–14 ms on real archives);
-3. that manifest **covers** this box's state databases
+3. when the producer is `alphaclaw-offline-copy`, its `alphaclawFormatVersion`
+   is one this build can read — `1` or `2` (`kOfflineCopyReadableFormatVersions`).
+   An archive written by a **newer** AlphaClaw in a format this one does not
+   know fails the check honestly at stage `format` rather than being judged
+   "usable" on fields it does not understand. Upstream manifests carry no
+   such version and are not gated. The verdict reports `formatVersion`
+   (`null` for upstream);
+4. that manifest **covers** this box's state databases
    (`state/openclaw.sqlite`, or the per-agent DB set when there is no global
    DB) — by `archivePath` / `sourcePath` suffix (per-file assets, the offline
    copy) OR by an asset whose `sourcePath` is the state dir or an ancestor of
@@ -154,7 +277,10 @@ An archive from either producer counts as verified only when:
 The run record carries `backup.usableCheck: "manifest_ok"`; a failing check is
 treated as a `verify` failure (terminal, quarantined as `.unverified`). Both
 producers are judged by this one check — the offline copy's own `gzip -t` +
-manifest step after publish is the same function.
+manifest step after publish is the same function. A policy exclude never
+affects the verdict: the databases are never inside a workspace's exclude
+scope, and `coverage.workspace: "policy_excluded"` is information for the
+inventory and the restore, not a usability defect.
 
 ## 5. Restore runbook (manual — the same steps as an upstream archive)
 
@@ -175,8 +301,10 @@ preflight vocabulary and the "restart did not take effect" cross-check) is
    whole state dir under `payload/posix<stateDir>`) inside the extracted
    root, and `sourcePath` is where it belongs; place each at `sourcePath`
    relative to `paths.stateDir`. Check `producer`, `createdAt`,
-   `options.includeWorkspace` and `skipped[]` so you know what is NOT in the
-   archive (excluded workspaces, sidecars).
+   `options.includeWorkspace`, `coverage` and `skipped[]` so you know what is
+   NOT in the archive (an omitted workspace, sidecars, and — format 2 — the
+   `excludes[]` policy drops such as a workspace's `node_modules`, which a
+   restore reinstalls rather than recovers).
 4. **Move the current state dir aside** (`mv /data/.openclaw
    /data/.openclaw.pre-restore-<ts>`) and **place assets** per the manifest:
    `openclaw.json`, then every `sqlite` asset, then the remaining files. Do
@@ -199,8 +327,11 @@ go back.
 
 ## 6. Consented reuse of an earlier archive (WI-4.5)
 
-When the fresh ladder (quiesced retries → offline copy → live ladder) is
-exhausted by a retryable failure on a hard gate, the 409 `backup_failed` may
+When the fresh ladder (offline copy first → in-quiesce upstream attempts
+when predicted to fit → live ladder; a refused copy hands over to the live
+ladder rather than ending it) is exhausted by a retryable failure on a hard
+gate (`kReuseEligibleKinds`: `lock_contention`, `killed`, `timeout`,
+`vanished_file`, `window_exhausted`), the 409 `backup_failed` may
 carry `reusableBackup: { file, at, ageMs, sha256, producer }` — the newest
 verified, non-partial, ≤ 24 h archive with no apply/activation recorded since
 it was taken, re-verified on an open fd (gzip -t, manifest, sha256). The
@@ -235,8 +366,9 @@ key); every other core key (`schemaVersion`, `createdAt`, `archiveRoot`,
 onlyConfig}`, `paths.{stateDir,configPath,oauthDir,workspaceDirs}`, `assets[]`,
 `skipped[] { kind, sourcePath, reason }`) is identical. The offline-copy
 manifest carries the same core set plus `producer`, `alphaclawFormatVersion`, `partialReasons`,
-`exclusivityEvidence`, `diagnosis` — and lists databases per file (`kind:
-"sqlite"`, `archivePath` relative to `<archiveRoot>/`).
+`exclusivityEvidence`, `diagnosis` and (format 2) `excludes`, `coverage` — and
+lists databases per file (`kind: "sqlite"`, `archivePath` relative to
+`<archiveRoot>/`).
 
 **Consequence for the usable check (§4, WI-6.1):** "the manifest lists this
 box's state databases" must accept a required DB when an asset's

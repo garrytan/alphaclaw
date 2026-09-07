@@ -6,10 +6,19 @@ const path = require("path");
 
 const {
   createOpenclawChannelSync,
+  kPinLagMaxBoots,
+  kPinLagMaxAgeMs,
 } = require("../../lib/server/openclaw-channel-sync");
 const {
   createOpenclawReleaseChannelStore,
 } = require("../../lib/server/openclaw-release-channel");
+const { getProcessBootId } = require("../../lib/server/boot-id");
+const {
+  kBootReportSchema,
+  kPidfileSkipReason,
+  computeVerdict,
+  createBootReportWriter,
+} = require("../../lib/server/boot-report");
 
 const kSilentLogger = { log() {}, warn() {}, error() {} };
 const kDevSha = "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0";
@@ -19,8 +28,29 @@ const mkTemp = (prefix) => fs.mkdtempSync(path.join(os.tmpdir(), prefix));
 
 const flushAsync = () => new Promise((resolve) => process.nextTick(resolve));
 
+// Declared schema constants the way upstream's dist chunks carry them
+// (openclaw-{agent,state}-db-contract-<hash>.js, issue #78). Only the kinds
+// given are written, so `{ agent: 19 }` alone leaves the state line unknown.
+const writeSchemaContractFixture = (packageDir, { state, agent } = {}) => {
+  const distDir = path.join(packageDir, "dist");
+  fs.mkdirSync(distDir, { recursive: true });
+  if (Number.isInteger(state)) {
+    fs.writeFileSync(
+      path.join(distDir, "openclaw-state-db-contract-test.js"),
+      `const OPENCLAW_STATE_SCHEMA_VERSION = ${state};\nexport { OPENCLAW_STATE_SCHEMA_VERSION as O };\n`,
+    );
+  }
+  if (Number.isInteger(agent)) {
+    fs.writeFileSync(
+      path.join(distDir, "openclaw-agent-db-contract-test.js"),
+      `const OPENCLAW_AGENT_SCHEMA_VERSION = ${agent};\nexport { OPENCLAW_AGENT_SCHEMA_VERSION as O };\n`,
+    );
+  }
+};
+
 // Builds a plausible openclaw npm-package tree: package.json (+bin file),
-// dist/ with the thinking module sentinel and dist/extensions.
+// dist/ with the thinking module sentinel and dist/extensions, and — when
+// `schema` is given — the declared schema-constant chunks.
 const writePackageFixture = (
   packageDir,
   {
@@ -28,6 +58,7 @@ const writePackageFixture = (
     bin = { openclaw: "bin/entry.js" },
     thinking = true,
     extensions = true,
+    schema = null,
   } = {},
 ) => {
   fs.mkdirSync(path.join(packageDir, "dist"), { recursive: true });
@@ -52,7 +83,32 @@ const writePackageFixture = (
       recursive: true,
     });
   }
+  if (schema) writeSchemaContractFixture(packageDir, schema);
   return packageDir;
+};
+
+// A real SQLite file with an explicit PRAGMA user_version — the schema line
+// the #78 agent arm reads (same shape as openclaw-schema-versions.test.js).
+const writeSqliteDb = (file, { userVersion = 0 } = {}) => {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const db = new DatabaseSync(file);
+  db.exec("CREATE TABLE t(x INTEGER)");
+  db.exec(`PRAGMA user_version = ${userVersion}`);
+  db.close();
+  return file;
+};
+const writeStateDb = (stateRoot, options) =>
+  writeSqliteDb(path.join(stateRoot, "state", "openclaw.sqlite"), options);
+const writeAgentDb = (stateRoot, agentId, options) =>
+  writeSqliteDb(
+    path.join(stateRoot, "agents", agentId, "agent", "openclaw-agent.sqlite"),
+    options,
+  );
+const readRunRecords = (openclawDir) => {
+  const runsDir = path.join(openclawDir, ".alphaclaw", "runs");
+  return fs
+    .readdirSync(runsDir)
+    .map((name) => JSON.parse(fs.readFileSync(path.join(runsDir, name), "utf8")));
 };
 
 const writeInstallFixture = (installDir, options) =>
@@ -470,6 +526,20 @@ describe("server/openclaw-channel-sync", () => {
       expect(result.ok).toBe(true);
       expect(result.action).toBe("pin_reconciled");
       expect(store.readState().pinVersion).toBe("1.0.1");
+      // Intent stamp (#76 RC3): a pin bump is a chosen transition from what
+      // ran before — a pin that moves backwards restores its settings at boot
+      // instead of reading as drift.
+      expect(store.readState().lastTransition).toEqual(
+        expect.objectContaining({
+          from: "1.0.0",
+          to: "1.0.1",
+          kind: "upgrade",
+          source: "pin_bump",
+          reason: "declared_pin_changed",
+          ok: true,
+          consumedAt: null,
+        }),
+      );
       expect(
         result.warnings.some((warning) => warning.includes("lags the new pin")),
       ).toBe(true);
@@ -482,11 +552,17 @@ describe("server/openclaw-channel-sync", () => {
 
     it("skips the destructive boot sync while another alphaclaw server is live", async () => {
       const { spawn } = require("child_process");
+      const logs = [];
       const { sync, store, installDir } = createHarness({
         pin: "1.0.0",
         channel: "beta",
         installedVersion: "1.0.0",
+        extraSyncOptions: {
+          logger: { log: (message) => logs.push(String(message)), warn() {}, error() {} },
+        },
       });
+      const pidfileAuditLines = () =>
+        logs.filter((line) => /^\[openclaw-channel\] pidfile: format=/.test(line));
       store.updateState((s) => {
         s.pinVersion = "1.0.0";
         s.applied = { channel: "beta", version: "1.1.0", at: 1, acceptedAt: 2 };
@@ -496,6 +572,10 @@ describe("server/openclaw-channel-sync", () => {
       // serving from this tree; the sync must no-op (fail open), not mutate.
       // The claim carries the writer's identity (this host, this process's
       // start time) — that is what makes it "the same process", not the pid.
+      // The applied build's overlay is complete on disk while the installed
+      // tree is still the pin — exactly the contradiction a skipped sync
+      // hides (#76: the applied overlay never activated for 45 minutes).
+      saveOverlayFixture(store, "1.1.0");
       const child = spawn(process.execPath, ["-e", "setTimeout(() => {}, 30000)"], {
         stdio: "ignore",
       });
@@ -516,10 +596,29 @@ describe("server/openclaw-channel-sync", () => {
         // The claim carries host + start time and both match: a VERIFIED live
         // owner — the launcher refuses to start a second instance on this.
         expect(skipped.corroborated).toBe(true);
+        // The skip path carries the judge's record and names the contradiction
+        // (read-only: no state.lastBoot write beside a live sibling).
+        expect(skipped.pidDecision).toEqual(
+          expect.objectContaining({ decision: "skip", reason: "corroborated", pid: child.pid }),
+        );
+        expect(skipped.warnings).toEqual([
+          expect.stringMatching(/installed openclaw 1\.0\.0 ≠ applied 1\.1\.0 with a complete overlay while a live sibling \(pid \d+\) is claimed/),
+        ]);
         // Nothing was mutated: applied still recorded, no lastBoot rewrite.
         expect(store.readState().applied).toEqual(
           expect.objectContaining({ version: "1.1.0" }),
         );
+        expect(store.readState().lastBoot).toBeNull();
+        // ONE audit line for the whole boot, on the skip path too — the
+        // judge's reasoning, not "pid N is live" (#76 RC1). The formatter is
+        // unit-tested; this pins that the skip path emits it exactly once.
+        expect(pidfileAuditLines()).toEqual([
+          expect.stringMatching(
+            new RegExp(
+              `^\\[openclaw-channel\\] pidfile: format=1 pid=${child.pid} kill=ok tgid=${child.pid} self=${process.pid} ticks=\\d+/\\d+ container=.+ → corroborated \\(skip\\)$`,
+            ),
+          ),
+        ]);
       } finally {
         child.kill("SIGKILL");
       }
@@ -527,6 +626,11 @@ describe("server/openclaw-channel-sync", () => {
       await new Promise((resolve) => child.once("exit", resolve));
       const proceeded = sync.syncAtBoot();
       expect(proceeded.ok).toBe(true);
+      // The second boot adds its own single line — a proceed verdict — and
+      // never re-emits the skip.
+      expect(pidfileAuditLines()).toHaveLength(2);
+      expect(pidfileAuditLines()[1]).toMatch(/→ dead \(proceed\)$/);
+      expect(pidfileAuditLines().filter((line) => /\(skip\)$/.test(line))).toHaveLength(1);
     });
 
     it("a stale pidfile from a REPLACED container does not block the boot sync (durability leg A regression)", async () => {
@@ -602,6 +706,106 @@ describe("server/openclaw-channel-sync", () => {
         expect(proceeded.action).not.toBe("skipped_concurrent");
         // ...and the surviving process now owns the claim.
         expect(JSON.parse(fs.readFileSync(store.serverPidPath, "utf8")).pid).toBe(process.pid);
+      } finally {
+        child.kill("SIGKILL");
+      }
+    });
+
+    // Issue #76 RC1: a pid number can name a THREAD. kill(tid, 0) succeeds
+    // and /proc/<tid>/cmdline is the leader's argv, so a stale legacy claim
+    // colliding with one of a live server's (or our own) threads used to skip
+    // the sync — and with it the activation of the applied overlay.
+    it("a legacy pidfile naming a THREAD of a live lookalike server never skips the sync; the boot re-claims the file as format 2 (#76 RC1)", async () => {
+      const { spawn } = require("child_process");
+      const hasProc = process.platform === "linux" && fs.existsSync(`/proc/${process.pid}/status`);
+      if (!hasProc) return;
+      const { sync, store } = createHarness({
+        pin: "1.0.0",
+        channel: "beta",
+        installedVersion: "1.0.0",
+      });
+      const child = spawn(
+        process.execPath,
+        ["-e", "setTimeout(() => {}, 30000)", "/opt/alphaclaw/bin/alphaclaw.js", "start"],
+        { stdio: "ignore" },
+      );
+      try {
+        let tids = [];
+        for (let i = 0; i < 100 && tids.length < 2; i += 1) {
+          try {
+            tids = fs.readdirSync(`/proc/${child.pid}/task`).map(Number);
+          } catch {}
+          if (tids.length < 2) await new Promise((resolve) => setTimeout(resolve, 20));
+        }
+        expect(tids.length).toBeGreaterThan(1); // CEO 6.1: the fixture is really multi-threaded
+        const tid = tids.find((candidate) => candidate !== child.pid);
+        fs.mkdirSync(path.dirname(store.serverPidPath), { recursive: true });
+        fs.writeFileSync(store.serverPidPath, JSON.stringify({ pid: tid, at: Date.now() }));
+        const result = sync.syncAtBoot();
+        expect(result.action).not.toBe("skipped_concurrent");
+        expect(result.ok).toBe(true);
+        expect(result.warnings).toEqual(expect.any(Array));
+        expect(result.pidDecision).toEqual(
+          expect.objectContaining({ evidence: null, decision: "proceed", reason: "thread", pid: tid, tgid: child.pid }),
+        );
+        // The boot claimed the file for this process, in the current format.
+        const claim = JSON.parse(fs.readFileSync(store.serverPidPath, "utf8"));
+        expect(claim).toEqual(
+          expect.objectContaining({ pid: process.pid, format: 2, startTicks: expect.any(Number), containerStartTicks: expect.any(Number) }),
+        );
+        expect(claim.legacyClaim).toBeUndefined();
+      } finally {
+        child.kill("SIGKILL");
+      }
+    });
+
+    it("syncAtBoot converges a positively identified legacy claim ONCE (format 2 + legacyClaim, never startTicks) and still skips uncorroborated (#76 RC2)", () => {
+      const { spawn } = require("child_process");
+      const { readProcStartTicks } = require("../../lib/server/openclaw-lock-contention");
+      const hasProc = process.platform === "linux" && fs.existsSync(`/proc/${process.pid}/status`);
+      if (!hasProc) return;
+      const { sync, store } = createHarness({
+        pin: "1.0.0",
+        channel: "beta",
+        installedVersion: "1.0.0",
+      });
+      const child = spawn(
+        process.execPath,
+        ["-e", "setTimeout(() => {}, 30000)", "/opt/alphaclaw/bin/alphaclaw.js", "start"],
+        { stdio: "ignore" },
+      );
+      try {
+        const claimedAt = Date.now() - 60 * 1000;
+        fs.mkdirSync(path.dirname(store.serverPidPath), { recursive: true });
+        fs.writeFileSync(store.serverPidPath, JSON.stringify({ pid: child.pid, at: claimedAt }));
+        const first = sync.syncAtBoot();
+        expect(first.action).toBe("skipped_concurrent");
+        expect(first.corroborated).toBe(false); // a legacy claim can never refuse the boot
+        expect(first.pidDecision).toEqual(
+          expect.objectContaining({ decision: "skip", reason: "legacy_argv_match", record: expect.objectContaining({ format: "legacy", legacyClaim: true }) }),
+        );
+        const converged = JSON.parse(fs.readFileSync(store.serverPidPath, "utf8"));
+        expect(converged).toEqual({
+          pid: child.pid,
+          at: claimedAt,
+          upgradedAt: expect.any(Number),
+          host: require("os").hostname(),
+          observedTicks: readProcStartTicks(child.pid),
+          containerStartTicks: readProcStartTicks(1),
+          format: 2,
+          legacyClaim: true,
+        });
+        expect(converged.startTicks).toBeUndefined();
+        expect(store.readState().lastBoot).toBeNull();
+        // The next boot on the same live process: still skipped, still
+        // uncorroborated, and the file is NOT rewritten (identity stays).
+        const mtime = fs.statSync(store.serverPidPath).mtimeMs;
+        const second = sync.syncAtBoot();
+        expect(second.action).toBe("skipped_concurrent");
+        expect(second.corroborated).toBe(false);
+        expect(second.pidDecision.record).toEqual(expect.objectContaining({ format: 2, legacyClaim: true }));
+        expect(fs.statSync(store.serverPidPath).mtimeMs).toBe(mtime);
+        expect(JSON.parse(fs.readFileSync(store.serverPidPath, "utf8"))).toEqual(converged);
       } finally {
         child.kill("SIGKILL");
       }
@@ -1132,6 +1336,19 @@ describe("server/openclaw-channel-sync", () => {
         expect.objectContaining({ channel: "beta", version: "1.1.0" }),
       );
       expect(state.applied.acceptedAt).toBeNull();
+      // Intent stamp (#76 RC3): the operator chose this transition and it
+      // landed — the boot config gate reads this, never `applied.reason`.
+      expect(state.lastTransition).toEqual({
+        at: expect.any(Number),
+        from: "1.0.0",
+        to: "1.1.0",
+        kind: "upgrade",
+        source: "operator_apply",
+        reason: null,
+        operationId: state.lastUpdateRun.operationId,
+        ok: true,
+        consumedAt: null,
+      });
       expect(clearVersionCache).toHaveBeenCalled();
       const stepNames = state.lastUpdateRun.steps.map((step) => step.name);
       for (const expected of ["preflight", "backup", "download", "verify", "record"]) {
@@ -1196,6 +1413,39 @@ describe("server/openclaw-channel-sync", () => {
         }),
       );
       expect(record.dbPreflight.dbSizesBytes).toBeGreaterThan(0);
+      // Per-kind breakdown (#78): the state line carries the CLI's numbers;
+      // no agent DB exists here, so the agent tally is empty and inert.
+      expect(record.dbPreflight.byKind.state).toEqual(
+        expect.objectContaining({
+          dbCount: 1,
+          foundVersion: 1,
+          targetVersion: 12,
+          migrationRequired: true,
+          unsupported: false,
+        }),
+      );
+      expect(record.dbPreflight.byKind.state.bytes).toBeGreaterThan(0);
+      expect(record.dbPreflight.byKind.agent).toEqual(
+        expect.objectContaining({
+          dbCount: 0,
+          bytes: 0,
+          foundVersion: null,
+          migrationRequired: false,
+        }),
+      );
+      // Two oracles on one snapshot: the fixture DB is at user_version 0 but
+      // the fake CLI reported foundVersion 1 — the CLI stays authoritative
+      // (the verdict above is its numbers) and the disagreement is ONE
+      // warning step, never a block.
+      expect(record.steps).toContainEqual(
+        expect.objectContaining({
+          name: "db-preflight",
+          status: "warning",
+          detail: expect.stringMatching(
+            /state\/openclaw\.sqlite: PRAGMA user_version is 0 but the target's preflight reported foundVersion 1/,
+          ),
+        }),
+      );
       // The step timeline names the consequence for the operator.
       expect(record.steps).toContainEqual(
         expect.objectContaining({
@@ -1227,6 +1477,18 @@ describe("server/openclaw-channel-sync", () => {
       });
       expect(downgradeResult.status).toBe(409);
       expect(downgradeResult.body.code).toBe("backup_failed");
+      // A failed apply never authorizes a settings restore (#76 Codex D10):
+      // the stamp is written up front and settled to ok:false by finish().
+      expect(downgrade.store.readState().lastTransition).toEqual(
+        expect.objectContaining({
+          from: "1.2.0",
+          to: "1.1.0",
+          kind: "downgrade",
+          source: "operator_apply",
+          ok: false,
+          consumedAt: null,
+        }),
+      );
       // The CLI's actual last output line reaches the user-facing message —
       // the old catch-all claimed every failure "failed to verify" (#7).
       expect(downgradeResult.body.message).toMatch(/boom/);
@@ -1243,7 +1505,7 @@ describe("server/openclaw-channel-sync", () => {
         runnerImpl: failBackupRunner,
       });
       const upgradeResult = await upgrade.sync.applyUpdate({
-        channel: "beta",
+        channel: "stable", // stable pin → stable: a stable→beta move is a channel-boundary HARD gate since #79 (a)
         version: "1.1.0",
       });
       await flushAsync();
@@ -1601,7 +1863,7 @@ describe("server/openclaw-channel-sync", () => {
 
         // Non-prerelease upgrade → soft gate: warn and continue.
         const result = await harness.sync.applyUpdate({
-          channel: "beta",
+          channel: "stable", // stable pin → stable: a stable→beta move is a channel-boundary HARD gate since #79 (a)
           version: "1.1.0",
         });
         await flushAsync();
@@ -1852,6 +2114,20 @@ describe("server/openclaw-channel-sync", () => {
       expect(store.readState().applied).toEqual(
         expect.objectContaining({ channel: "dev", sha: kDevSha }),
       );
+      // Intent stamp (#76 RC3): a dev apply has no version order — kind
+      // "dev", so it can never read as a "downgrade" that authorizes a
+      // settings restore. A HEAD apply stamps before the sha is known.
+      expect(store.readState().lastTransition).toEqual({
+        at: expect.any(Number),
+        from: "1.0.0",
+        to: "dev",
+        kind: "dev",
+        source: "operator_apply",
+        reason: null,
+        operationId: store.readState().lastUpdateRun.operationId,
+        ok: true,
+        consumedAt: null,
+      });
 
       // Updater-reported failure: nothing recorded.
       const failing = createHarness({
@@ -1943,6 +2219,10 @@ describe("server/openclaw-channel-sync", () => {
       expect(result.status).toBe(202);
       expect(store.readState().applied).toEqual(
         expect.objectContaining({ channel: "dev", sha: kDevSha }),
+      );
+      // A pinned-sha dev apply names the sha as its `to`; still kind "dev".
+      expect(store.readState().lastTransition).toEqual(
+        expect.objectContaining({ from: "1.0.0", to: kDevSha, kind: "dev", source: "operator_apply", ok: true }),
       );
       const checkoutBin = path.join(checkoutDir, "bin", "entry.js");
       const checkoutCalls = runner.runStreamed.mock.calls
@@ -2914,6 +3194,9 @@ describe("server/openclaw-channel-sync", () => {
       const db = new DatabaseSync(path.join(stateDir, "state", "openclaw.sqlite"));
       db.exec("CREATE TABLE t(x INTEGER)");
       db.close();
+      // An agent DB under the same state dir: enumerated (it counts toward
+      // dbSizesBytes) but NEVER handed to the state-schema verb (#78).
+      writeAgentDb(stateDir, "main", { userVersion: 17 });
       const preflightCalls = [];
       const harness = createHarness({
         pin: "1.0.0",
@@ -2931,13 +3214,21 @@ describe("server/openclaw-channel-sync", () => {
         },
       });
 
-      const result = await harness.sync.applyUpdate({ channel: "beta", version: "1.1.0" });
+      // A routine same-channel apply (stable pin → stable: a stable→beta move is a channel-boundary HARD gate since #79 (a)).
+      const result = await harness.sync.applyUpdate({ channel: "stable", version: "1.1.0" });
 
       expect(result.status).toBe(202);
       // The preflight snapshotted the DB found under OPENCLAW_STATE_DIR, not
-      // under the harness openclawDir (which has none).
+      // under the harness openclawDir (which has none) — and only the STATE
+      // DB reached the CLI: the agent DB's snapshot never did.
       expect(preflightCalls).toHaveLength(1);
       expect(preflightCalls[0].some((arg) => /openclaw\.sqlite$/.test(String(arg)))).toBe(true);
+      expect(
+        preflightCalls[0].some((arg) => /openclaw-agent\.sqlite/.test(String(arg))),
+      ).toBe(false);
+      const [record] = readRunRecords(harness.openclawDir);
+      expect(record.dbPreflight.byKind.agent.dbCount).toBe(1);
+      expect(record.dbPreflight.byKind.state.dbCount).toBe(1);
     });
 
     it("aborts the apply when the pin rollback floor cannot be persisted", async () => {
@@ -3016,6 +3307,324 @@ describe("server/openclaw-channel-sync", () => {
       expect(seen[0].OPENCLAW_HOME).toBe("/data");
       expect(seen[0].OPENCLAW_GATEWAY_TOKEN).toBeUndefined();
       expect(seen[0].OPENCLAW_TWITCH_ACCESS_TOKEN).toBeUndefined();
+    });
+  });
+
+  // Issue #78: upstream's `database preflight` compares a file with the
+  // release's STATE schema only. Agent DBs carry their own schema line and
+  // must be judged against the target's declared OPENCLAW_AGENT_SCHEMA_VERSION,
+  // never fed to the verb.
+  describe("db-preflight agent arm (issue #78)", () => {
+    // The fake target CLI answers the state-schema verb with the given
+    // verdict and records every invocation.
+    const stateVerbRunner = (verdict, preflightCalls) => async (opts, fallback) => {
+      if (Array.isArray(opts.args) && opts.args.includes("preflight")) {
+        preflightCalls.push(opts.args);
+        return { ok: true, code: 0, tail: `${JSON.stringify(verdict)}\n`, timedOut: false };
+      }
+      return fallback(opts);
+    };
+    const sawAgentSnapshot = (preflightCalls) =>
+      preflightCalls.some((args) =>
+        args.some((arg) => /openclaw-agent\.sqlite/.test(String(arg))),
+      );
+
+    it("a lagging agent schema is a migration, not a block: the agent DB never reaches the CLI and byKind carries both lines", async () => {
+      const preflightCalls = [];
+      const harness = createHarness({
+        pin: "1.0.0",
+        installedVersion: "1.0.0",
+        sentinelVersion: "1.0.0",
+        // The target (2026.9.1 shape) declares {state 15, agent 19}.
+        installFixture: { schema: { state: 15, agent: 19 } },
+        runnerImpl: stateVerbRunner(
+          { status: "migration-required", foundVersion: 12, targetVersion: 15 },
+          preflightCalls,
+        ),
+      });
+      // The box (2026.9.1-beta.1 shape) sits at {state 12, agent 17}.
+      writeStateDb(harness.openclawDir, { userVersion: 12 });
+      writeAgentDb(harness.openclawDir, "main", { userVersion: 17 });
+
+      // A routine same-channel apply (stable pin → stable: a stable→beta move is a channel-boundary HARD gate since #79 (a)).
+      // This harness takes no usable backup, and the verdict below says the
+      // target MIGRATES the databases — the #79 (b) post-preflight checkpoint
+      // would refuse that (409 backup_required_for_migration) without the
+      // operator's explicit consent; the consent keeps this test about the
+      // preflight verdict (the checkpoint has its own suite).
+      const result = await harness.sync.applyUpdate({
+        channel: "stable",
+        version: "1.1.0",
+        confirmNoBackup: true,
+      });
+
+      expect(result.status).toBe(202);
+      // ONE CLI invocation — the state DB. The agent DB was judged in-process.
+      expect(preflightCalls).toHaveLength(1);
+      expect(sawAgentSnapshot(preflightCalls)).toBe(false);
+      const [record] = readRunRecords(harness.openclawDir);
+      expect(record.dbPreflight).toEqual(
+        expect.objectContaining({
+          migrationRequired: true,
+          // Top-level numbers stay the STATE line's (issue #20 consumers).
+          foundVersion: 12,
+          targetVersion: 15,
+        }),
+      );
+      expect(record.dbPreflight.byKind.agent).toEqual(
+        expect.objectContaining({
+          dbCount: 1,
+          foundVersion: 17,
+          targetVersion: 19,
+          migrationRequired: true,
+          unknownTarget: false,
+        }),
+      );
+      expect(record.dbPreflight.byKind.state).toEqual(
+        expect.objectContaining({
+          dbCount: 1,
+          foundVersion: 12,
+          userVersion: 12,
+          targetVersion: 15,
+          migrationRequired: true,
+        }),
+      );
+      // dbSizesBytes sums BOTH kinds (the boot migration budget scales on it).
+      expect(record.dbPreflight.dbSizesBytes).toBe(
+        record.dbPreflight.byKind.state.bytes + record.dbPreflight.byKind.agent.bytes,
+      );
+      // No warning step at all: the oracles agree (user_version 12 = foundVersion 12)
+      // and the target's agent schema was declared.
+      const preflightSteps = record.steps.filter((step) => step.name === "db-preflight");
+      expect(preflightSteps.some((step) => step.status === "warning")).toBe(false);
+      expect(preflightSteps.some((step) => step.status === "failed")).toBe(false);
+      expect(preflightSteps.at(-1)).toEqual(
+        expect.objectContaining({
+          status: "completed",
+          detail: "schema migration will run at the next start",
+        }),
+      );
+      // The apply learned the target's declared schema into the table the
+      // moment its overlay was durable.
+      const table = JSON.parse(
+        fs.readFileSync(
+          path.join(harness.openclawDir, ".alphaclaw", "openclaw-schema-versions.json"),
+          "utf8",
+        ),
+      );
+      expect(table.byVersion["1.1.0"]).toEqual(
+        expect.objectContaining({ state: 15, agent: 19, source: "declared" }),
+      );
+    });
+
+    it("an agent DB NEWER than the target supports hard-blocks the apply, naming the kind and both numbers", async () => {
+      const preflightCalls = [];
+      const harness = createHarness({
+        pin: "1.0.0",
+        installedVersion: "1.0.0",
+        sentinelVersion: "1.0.0",
+        installFixture: { schema: { state: 15, agent: 19 } },
+        // The state line alone would PASS — the block must come from the agent arm.
+        runnerImpl: stateVerbRunner(
+          { status: "exact", foundVersion: 15, targetVersion: 15 },
+          preflightCalls,
+        ),
+      });
+      writeStateDb(harness.openclawDir, { userVersion: 15 });
+      writeAgentDb(harness.openclawDir, "main", { userVersion: 21 });
+
+      // A routine same-channel apply (stable pin → stable: a stable→beta move is a channel-boundary HARD gate since #79 (a)).
+      const result = await harness.sync.applyUpdate({ channel: "stable", version: "1.1.0" });
+
+      expect(result.status).toBe(409);
+      expect(result.body.code).toBe("db_preflight_failed");
+      expect(result.body.message).toBe(
+        "OpenClaw 1.1.0 cannot read your agent database agents/main/agent/openclaw-agent.sqlite: it is at agent schema 21 and this build supports up to 19.",
+      );
+      expect(result.body).toEqual(
+        expect.objectContaining({
+          dbKind: "agent",
+          agentId: "main",
+          foundVersion: 21,
+          targetVersion: 19,
+        }),
+      );
+      expect(result.body.hint).toMatch(/stopped before anything changed/);
+      expect(sawAgentSnapshot(preflightCalls)).toBe(false);
+      // Blocked BEFORE record: nothing to activate at the next boot.
+      expect(harness.store.readState().applied).toBeNull();
+      const [record] = readRunRecords(harness.openclawDir);
+      expect(record.steps).toContainEqual(
+        expect.objectContaining({
+          name: "db-preflight",
+          status: "failed",
+          detail: expect.stringMatching(/agent schema 21 is newer than the 19/),
+        }),
+      );
+    });
+
+    it("a target that declares no agent schema fails open with one warning step (never a guess)", async () => {
+      const preflightCalls = [];
+      const harness = createHarness({
+        pin: "1.0.0",
+        installedVersion: "1.0.0",
+        sentinelVersion: "1.0.0",
+        // No contract chunks in the target's dist; "1.1.0" is not seeded either.
+        runnerImpl: stateVerbRunner(
+          { status: "exact", foundVersion: 15, targetVersion: 15 },
+          preflightCalls,
+        ),
+      });
+      writeStateDb(harness.openclawDir, { userVersion: 15 });
+      writeAgentDb(harness.openclawDir, "main", { userVersion: 17 });
+
+      // A routine same-channel apply (stable pin → stable: a stable→beta move is a channel-boundary HARD gate since #79 (a)).
+      const result = await harness.sync.applyUpdate({ channel: "stable", version: "1.1.0" });
+
+      expect(result.status).toBe(202);
+      expect(sawAgentSnapshot(preflightCalls)).toBe(false);
+      const [record] = readRunRecords(harness.openclawDir);
+      const warnings = record.steps.filter(
+        (step) => step.name === "db-preflight" && step.status === "warning",
+      );
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0].detail).toBe(
+        "agent database compatibility not checked — the target build's agent schema version could not be determined",
+      );
+      expect(record.dbPreflight.byKind.agent).toEqual(
+        expect.objectContaining({
+          dbCount: 1,
+          foundVersion: 17,
+          targetVersion: null,
+          migrationRequired: false,
+          unknownTarget: true,
+        }),
+      );
+      // The state line still delivered a verdict, so the hint is a real false.
+      expect(record.dbPreflight.migrationRequired).toBe(false);
+      // Nothing to learn: a null declaration never shadows the seeds.
+      expect(
+        fs.existsSync(
+          path.join(harness.openclawDir, ".alphaclaw", "openclaw-schema-versions.json"),
+        ),
+      ).toBe(false);
+    });
+
+    it("an agent DB whose bytes are not a database fails open: 202 with ONE warning step naming it, never a 409 (#78)", async () => {
+      const preflightCalls = [];
+      const harness = createHarness({
+        pin: "1.0.0",
+        installedVersion: "1.0.0",
+        sentinelVersion: "1.0.0",
+        installFixture: { schema: { state: 15, agent: 19 } },
+        runnerImpl: stateVerbRunner(
+          { status: "exact", foundVersion: 15, targetVersion: 15 },
+          preflightCalls,
+        ),
+      });
+      writeStateDb(harness.openclawDir, { userVersion: 15 });
+      const agentDb = path.join(
+        harness.openclawDir,
+        "agents",
+        "main",
+        "agent",
+        "openclaw-agent.sqlite",
+      );
+      fs.mkdirSync(path.dirname(agentDb), { recursive: true });
+      const garbage = "not a sqlite database — just bytes ".repeat(64);
+      fs.writeFileSync(agentDb, garbage);
+
+      // A routine same-channel apply (stable pin → stable: a stable→beta move is a channel-boundary HARD gate since #79 (a)).
+      const result = await harness.sync.applyUpdate({ channel: "stable", version: "1.1.0" });
+
+      // Fail OPEN: an unreadable agent DB is our snapshot's problem, not the
+      // target's incompatibility — the apply proceeds and says so once.
+      expect(result.status).toBe(202);
+      expect(harness.store.readState().applied).toEqual(
+        expect.objectContaining({ version: "1.1.0" }),
+      );
+      // The state line alone reached the CLI; garbage never did.
+      expect(preflightCalls).toHaveLength(1);
+      expect(sawAgentSnapshot(preflightCalls)).toBe(false);
+      const [record] = readRunRecords(harness.openclawDir);
+      const preflightSteps = record.steps.filter((step) => step.name === "db-preflight");
+      expect(preflightSteps.some((step) => step.status === "failed")).toBe(false);
+      const warnings = preflightSteps.filter((step) => step.status === "warning");
+      expect(warnings).toHaveLength(1);
+      // The read-only snapshot (VACUUM INTO) is the first thing that touches
+      // the bytes, so it is the step that names the file and SQLite's verdict.
+      expect(warnings[0].detail).toMatch(
+        /^snapshot of openclaw-agent\.sqlite failed: .*not a database/,
+      );
+      expect(preflightSteps.at(-1)).toEqual(expect.objectContaining({ status: "completed" }));
+      // The agent line recorded the DB it could not judge; the state line's
+      // verdict still stands, so the boot hint is a real false.
+      expect(record.dbPreflight.byKind.agent).toEqual(
+        expect.objectContaining({
+          dbCount: 1,
+          foundVersion: null,
+          targetVersion: 19,
+          migrationRequired: false,
+          unknownTarget: false,
+        }),
+      );
+      expect(record.dbPreflight.migrationRequired).toBe(false);
+      // Read-only throughout: the bytes are exactly what the operator had.
+      expect(fs.readFileSync(agentDb, "utf8")).toBe(garbage);
+    });
+
+    it("dev applies probe the checkout's declared schema and persist the verdict as the boot hint", async () => {
+      const preflightCalls = [];
+      const harness = createHarness({
+        pin: "1.0.0",
+        installedVersion: "1.0.0",
+        sentinelVersion: "1.0.0",
+        runnerImpl: async (opts, fallback) => {
+          if (opts.command === "openclaw" && opts.args?.[0] === "update") {
+            return { ok: true, code: 0, tail: '{"status":"ok"}\n', timedOut: false };
+          }
+          // Dev applies hard-gate on a usable backup (WI-6.1): the archive
+          // manifest must list EVERY state DB, agent DBs included.
+          if (opts.command === "tar" && opts.args?.[0] === "-xzOf") {
+            return {
+              ok: true,
+              code: 0,
+              tail: `${JSON.stringify({
+                schemaVersion: 1,
+                assets: [
+                  { kind: "sqlite", sourcePath: "/data/.openclaw/state/openclaw.sqlite", archivePath: "state/openclaw.sqlite" },
+                  { kind: "sqlite", sourcePath: "/data/.openclaw/agents/main/agent/openclaw-agent.sqlite", archivePath: "agents/main/agent/openclaw-agent.sqlite" },
+                ],
+              })}\n`,
+              timedOut: false,
+            };
+          }
+          return stateVerbRunner(
+            { status: "exact", foundVersion: 15, targetVersion: 15 },
+            preflightCalls,
+          )(opts, fallback);
+        },
+      });
+      // The just-built checkout declares agent 19; a dev build has no overlay,
+      // so packageDirOverride must point the scan at the checkout.
+      const checkoutDir = writeCheckoutFixture(harness.rootDir, { sha: kDevSha });
+      writeSchemaContractFixture(checkoutDir, { state: 15, agent: 19 });
+      writeStateDb(harness.openclawDir, { userVersion: 15 });
+      writeAgentDb(harness.openclawDir, "main", { userVersion: 17 });
+
+      const result = await harness.sync.applyUpdate({ channel: "dev", devHead: true });
+
+      expect(result.status).toBe(202);
+      expect(preflightCalls).toHaveLength(1);
+      expect(sawAgentSnapshot(preflightCalls)).toBe(false);
+      const [record] = readRunRecords(harness.openclawDir);
+      // The dev branch persists the verdict exactly like the package branch.
+      expect(record.dbPreflight).toEqual(
+        expect.objectContaining({ migrationRequired: true, foundVersion: 15, targetVersion: 15 }),
+      );
+      expect(record.dbPreflight.byKind.agent).toEqual(
+        expect.objectContaining({ foundVersion: 17, targetVersion: 19, migrationRequired: true }),
+      );
     });
   });
 
@@ -3177,10 +3786,13 @@ describe("server/openclaw-channel-sync", () => {
       const backupGate = new Promise((resolve) => {
         releaseBackup = resolve;
       });
+      // The applied build IS the installed tree: a rollback only blocklists
+      // a build that was running (#76 RC4 — installed ≠ applied is refused
+      // as installed_diverged, covered separately).
       const { sync, store, restartProcess } = createHarness({
         pin: "1.0.0",
-        installedVersion: "1.0.0",
-        sentinelVersion: "1.0.0",
+        installedVersion: "1.0.5",
+        sentinelVersion: "1.0.5",
         runnerImpl: async (opts, fallback) => {
           if (opts.command === "openclaw" && opts.args?.[0] === "backup") {
             await backupGate;
@@ -3191,7 +3803,7 @@ describe("server/openclaw-channel-sync", () => {
       });
       store.updateState((s) => {
         s.pinVersion = "1.0.0";
-        s.applied = { channel: "beta", version: "1.2.0", at: 1, acceptedAt: null };
+        s.applied = { channel: "beta", version: "1.0.5", at: 1, acceptedAt: null };
         return s;
       });
 
@@ -4191,5 +4803,1760 @@ describe("pinDiverged legibility (post-incident 2026-09-01)", () => {
       return s;
     });
     expect(dev.sync.getChannelInfo().pinDiverged).toBe(false);
+  });
+});
+
+// Issue #76 A1 — the bin-phase boot report. syncAtBoot leaves ONE
+// boot-report.json (serverPhase pending) on EVERY return path when a writer
+// is injected; the report is evidence about the sync and can never change its
+// outcome. The writer is the real createBootReportWriter over the store's
+// managed dir (what runOpenclawChannelBootSync constructs in production).
+describe("syncAtBoot bin-phase boot report (#76 A1)", () => {
+  const kBootId = "40:1700000000000";
+  const hasProc = process.platform === "linux" && fs.existsSync("/proc/1/stat");
+  const readReport = (store) =>
+    JSON.parse(fs.readFileSync(path.join(store.managedDir, "boot-report.json"), "utf8"));
+  const readRefusedReport = (store) =>
+    JSON.parse(fs.readFileSync(path.join(store.managedDir, "boot-report-refused.json"), "utf8"));
+
+  // createHarness builds the store and the sync in one call, so the injected
+  // `bootReport` is a thin delegate bound to the real writer over the
+  // harness store's managed dir once that store exists.
+  const createReportingHarness = (harnessOptions = {}, { selfVersion = null } = {}) => {
+    let writer = null;
+    const bootReport = {
+      bootId: kBootId,
+      writeBinPhase: (report) => writer.writeBinPhase(report),
+      writeRefusedBinPhase: (report, reason) => writer.writeRefusedBinPhase(report, reason),
+    };
+    const harness = createHarness({
+      ...harnessOptions,
+      extraSyncOptions: {
+        ...(harnessOptions.extraSyncOptions || {}),
+        ...(selfVersion ? { selfVersion } : {}),
+        bootReport,
+      },
+    });
+    writer = createBootReportWriter({
+      managedDir: harness.store.managedDir,
+      bootId: kBootId,
+      nowFn: () => harness.nowRef.now,
+      logger: kSilentLogger,
+    });
+    return { ...harness, bootReport: writer };
+  };
+
+  it("a normal pin boot writes the report: stamp facts, pin/expected/installed/resolved, sentinel, pending server phase", () => {
+    const { sync, store, runner, installToTempDir, packageRoot } = createReportingHarness(
+      { pin: "1.0.0", installedVersion: "1.0.0", sentinelVersion: "1.0.0" },
+      {
+        selfVersion: {
+          changed: true,
+          previousVersion: "0.9.76",
+          record: { version: "0.9.77", commit: "abc123", bootCount: 1, previous: { version: "0.9.76" } },
+        },
+      },
+    );
+
+    const result = sync.syncAtBoot();
+
+    expect(result).toEqual(expect.objectContaining({ ok: true, action: "none" }));
+    const report = readReport(store);
+    expect(report).toEqual({
+      schema: kBootReportSchema,
+      bootId: kBootId,
+      at: 1_000_000,
+      alphaclaw: { version: "0.9.77", commit: "abc123", previousVersion: "0.9.76", firstBootOfVersion: true },
+      // /proc-derived container identity; null where there is no /proc.
+      container: {
+        pid1StartTicks: hasProc ? expect.any(Number) : null,
+        startMs: hasProc ? expect.any(Number) : null,
+      },
+      pidfile: expect.objectContaining({ decision: "proceed", reason: "absent" }),
+      openclaw: {
+        declaredPin: "1.0.0",
+        channelApplied: null,
+        lastKnownGood: { package: null, dev: null },
+        expected: "1.0.0",
+        installedAtBoot: "1.0.0",
+        resolvedForLaunch: "1.0.0",
+        installedDiverged: false,
+        overlayPresent: false,
+        overlayComplete: false,
+        sentinelMatches: true,
+        bootSync: {
+          action: "none",
+          reason: null,
+          warnings: [],
+          // The bin-phase closer ran (nothing to close on a fresh box).
+          danglingRecords: { closedRuns: [], closedLastUpdateRun: false },
+        },
+      },
+      binPhase: { status: "ok" },
+      serverPhase: { status: "pending" },
+    });
+    expect(
+      JSON.parse(fs.readFileSync(path.join(packageRoot, "package.json"), "utf8")).dependencies.openclaw,
+    ).toBe(report.openclaw.declaredPin);
+    // Offline and spawn-free: the report is reads only.
+    expect(runner.runStreamed).not.toHaveBeenCalled();
+    expect(installToTempDir).not.toHaveBeenCalled();
+  });
+
+  it("an applied build activated at boot records installedAtBoot (before) and resolvedForLaunch (after) as different versions", () => {
+    const { sync, store, installDir, runner } = createReportingHarness({
+      pin: "1.0.0",
+      channel: "beta",
+      installedVersion: "1.0.0",
+    });
+    store.updateState((s) => {
+      s.pinVersion = "1.0.0";
+      s.applied = { channel: "beta", version: "1.1.0", at: 1, acceptedAt: 2 };
+      s.lastKnownGood.package = "1.0.0";
+      return s;
+    });
+    expect(saveOverlayFixture(store, "1.1.0")).toEqual({ ok: true });
+
+    const result = sync.syncAtBoot();
+
+    expect(result.action).toBe("activated");
+    expect(store.readInstalledVersion({ installDir })).toBe("1.1.0");
+    const report = readReport(store);
+    expect(report.openclaw).toEqual({
+      declaredPin: "1.0.0",
+      channelApplied: "beta:1.1.0",
+      lastKnownGood: { package: "1.0.0", dev: null },
+      expected: "1.1.0",
+      installedAtBoot: "1.0.0",
+      resolvedForLaunch: "1.1.0",
+      // The canonical predicate over the tree that will RUN: activated = not
+      // diverged, so the server phase's verdict stays empty for this boot.
+      installedDiverged: false,
+      overlayPresent: true,
+      overlayComplete: true,
+      sentinelMatches: true,
+      bootSync: {
+        action: "activated",
+        reason: null,
+        warnings: [],
+        danglingRecords: { closedRuns: [], closedLastUpdateRun: false },
+      },
+    });
+    expect(computeVerdict({ ...report, serverPhase: { status: "recorded", installedVersion: "1.1.0" } })).toEqual([]);
+    // No stamp passed and none on disk: the alphaclaw block is null-shaped,
+    // never a throw.
+    expect(report.alphaclaw).toEqual({
+      version: null,
+      commit: null,
+      previousVersion: null,
+      firstBootOfVersion: null,
+    });
+    expect(runner.runStreamed).not.toHaveBeenCalled();
+  });
+
+  it("reads the stamp file when the bin did not pass one (bootCount 1 = first boot of that version)", () => {
+    const { sync, store } = createReportingHarness({
+      pin: "1.0.0",
+      installedVersion: "1.0.0",
+      sentinelVersion: "1.0.0",
+    });
+    fs.mkdirSync(store.managedDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(store.managedDir, "alphaclaw-version.json"),
+      JSON.stringify({
+        version: "0.9.77",
+        commit: null,
+        firstBootAt: 1,
+        lastBootAt: 2,
+        bootCount: 4,
+        previous: { version: "0.9.75", commit: "f00", lastBootAt: 0 },
+      }),
+    );
+    sync.syncAtBoot();
+    expect(readReport(store).alphaclaw).toEqual({
+      version: "0.9.77",
+      commit: null,
+      previousVersion: "0.9.75",
+      firstBootOfVersion: false,
+    });
+  });
+
+  it("a run left `running` by a dead process is closed by the bin phase and NAMED in bootSync.danglingRecords (#76 A7 — the server phase's closer finds nothing left, so this is the list the report must carry)", () => {
+    const { sync, store } = createReportingHarness({
+      pin: "1.0.0",
+      installedVersion: "1.0.0",
+      sentinelVersion: "1.0.0",
+    });
+    const danglingRunId = "0f76b007-e2e0-4c0d-9a1e-000000000076";
+    const runsDir = path.join(store.managedDir, "runs");
+    fs.mkdirSync(runsDir, { recursive: true });
+    // openclaw-run-ledger.js record shape: `running`, no finishedAt.
+    fs.writeFileSync(
+      path.join(runsDir, `${danglingRunId}.json`),
+      JSON.stringify({
+        operationId: danglingRunId,
+        target: { version: "1.0.0", channel: "stable", kind: "apply" },
+        state: "running",
+        startedAt: 900_000,
+        finishedAt: null,
+        ok: null,
+        result: null,
+        steps: [{ name: "download", status: "running", at: 900_000 }],
+        backup: null,
+        dbPreflight: null,
+        overseer: null,
+        hasLog: false,
+      }),
+    );
+
+    const result = sync.syncAtBoot();
+
+    expect(result).toEqual(expect.objectContaining({ ok: true, action: "none" }));
+    expect(readReport(store).openclaw.bootSync.danglingRecords).toEqual({
+      closedRuns: [danglingRunId],
+      closedLastUpdateRun: false,
+    });
+    const run = JSON.parse(fs.readFileSync(path.join(runsDir, `${danglingRunId}.json`), "utf8"));
+    expect(run.state).toBe("interrupted");
+    expect(run.ok).toBe(false);
+    expect(run.result?.code).toBe("interrupted");
+    // Idempotent: a second closer pass (what the server phase does) closes
+    // nothing more — which is exactly why the report must carry THIS list.
+    expect(sync.closeDanglingRecordsAtBoot()).toEqual(
+      expect.objectContaining({ closedRuns: [], closedLastUpdateRun: false }),
+    );
+  });
+
+  it("the CORROBORATED skipped_concurrent path (bin refuses to start) writes boot-report-refused.json — serverPhase not_reached/pidfile_skip — and leaves the live sibling's boot-report.json and ring untouched", async () => {
+    const { spawn } = require("child_process");
+    const { sync, store, installDir } = createReportingHarness({
+      pin: "1.0.0",
+      channel: "beta",
+      installedVersion: "1.0.0",
+    });
+    store.updateState((s) => {
+      s.pinVersion = "1.0.0";
+      s.applied = { channel: "beta", version: "1.1.0", at: 1, acceptedAt: 2 };
+      return s;
+    });
+    saveOverlayFixture(store, "1.1.0");
+    // The live sibling's COMPLETED report at slot 0 and one rotated predecessor.
+    fs.mkdirSync(store.managedDir, { recursive: true });
+    const liveReport = JSON.stringify({ schema: kBootReportSchema, bootId: "1:1", serverPhase: { status: "recorded", verdict: [] } });
+    const rotatedReport = JSON.stringify({ schema: kBootReportSchema, bootId: "0:1", serverPhase: { status: "recorded", verdict: [] } });
+    fs.writeFileSync(path.join(store.managedDir, "boot-report.json"), liveReport);
+    fs.writeFileSync(path.join(store.managedDir, "boot-report.1.json"), rotatedReport);
+    const child = spawn(process.execPath, ["-e", "setTimeout(() => {}, 30000)"], {
+      stdio: "ignore",
+    });
+    try {
+      fs.writeFileSync(
+        store.serverPidPath,
+        JSON.stringify({
+          pid: child.pid,
+          at: 1,
+          host: require("os").hostname(),
+          startTicks: store.readProcessStartTicks(child.pid),
+        }),
+      );
+      const skipped = sync.syncAtBoot();
+      expect(skipped.action).toBe("skipped_concurrent");
+      expect(skipped.corroborated).toBe(true);
+
+      // No rotation, no slot-0 write: three refused starts could otherwise
+      // empty the ring of every report a live server ever completed.
+      expect(fs.readFileSync(path.join(store.managedDir, "boot-report.json"), "utf8")).toBe(liveReport);
+      expect(fs.readFileSync(path.join(store.managedDir, "boot-report.1.json"), "utf8")).toBe(rotatedReport);
+      expect(fs.existsSync(path.join(store.managedDir, "boot-report.2.json"))).toBe(false);
+      const report = readRefusedReport(store);
+      expect(report.bootId).toBe(kBootId);
+      expect(report.pidfile).toEqual(
+        expect.objectContaining({ decision: "skip", reason: "corroborated", pid: child.pid }),
+      );
+      // The decision record is persisted AS-IS (raw pidfile included: pid,
+      // host, ticks — no secrets).
+      expect(report.pidfile.record.raw).toEqual(expect.objectContaining({ pid: child.pid }));
+      expect(report.openclaw).toEqual(
+        expect.objectContaining({
+          channelApplied: "beta:1.1.0",
+          expected: "1.1.0",
+          // Nothing activated behind the claim: both reads see the pin tree,
+          // and the running tree IS diverged from the applied build.
+          installedAtBoot: "1.0.0",
+          resolvedForLaunch: "1.0.0",
+          installedDiverged: true,
+          overlayPresent: true,
+          overlayComplete: true,
+          sentinelMatches: false,
+          bootSync: {
+            action: "skipped_concurrent",
+            reason: "live_server_corroborated",
+            warnings: [
+              expect.stringMatching(
+                /installed openclaw 1\.0\.0 ≠ applied 1\.1\.0 with a complete overlay/,
+              ),
+            ],
+            // A skipped boot never runs the dangling-record closer (it must not
+            // close a live sibling's run), so the report says null — not [].
+            danglingRecords: null,
+          },
+        }),
+      );
+      // The process exits right after the sync: the server phase is closed
+      // here, with the verdict over the bin half (never pidfile_contradiction).
+      expect(report.serverPhase).toEqual({
+        status: "not_reached",
+        reason: kPidfileSkipReason,
+        at: expect.any(Number),
+        verdict: ["installed_not_expected"],
+      });
+      // The skip path still never writes state.lastBoot (a live sibling may
+      // be writing the state file) — the report is the only new file.
+      expect(store.readState().lastBoot).toBeNull();
+      expect(store.readInstalledVersion({ installDir })).toBe("1.0.0");
+    } finally {
+      child.kill("SIGKILL");
+    }
+    await new Promise((resolve) => child.once("exit", resolve));
+  });
+
+  it.skipIf(!hasProc)("an UNVERIFIED skipped_concurrent (legacy claim, live lookalike) boots on, so its report takes slot 0 with serverPhase pending — the server phase or pidfile_contradiction is still to come", async () => {
+    const { spawn } = require("child_process");
+    const { sync, store } = createReportingHarness({
+      pin: "1.0.0",
+      installedVersion: "1.0.0",
+      sentinelVersion: "1.0.0",
+    });
+    // A lookalike carrying the server verb: the legacy argv path trusts it,
+    // UNverified (no start time to corroborate).
+    const child = spawn(process.execPath, ["-e", "setTimeout(() => {}, 30000)", "--", "alphaclaw.js", "start"], {
+      stdio: "ignore",
+    });
+    try {
+      fs.mkdirSync(store.managedDir, { recursive: true });
+      fs.writeFileSync(store.serverPidPath, JSON.stringify({ pid: child.pid, at: 1 }));
+      const skipped = sync.syncAtBoot();
+      expect(skipped.action).toBe("skipped_concurrent");
+      expect(skipped.corroborated).toBe(false);
+      const report = readReport(store);
+      expect(report.bootId).toBe(kBootId);
+      expect(report.serverPhase).toEqual({ status: "pending" });
+      expect(report.openclaw.bootSync).toEqual(
+        expect.objectContaining({ action: "skipped_concurrent", reason: "live_server_unverified" }),
+      );
+      expect(fs.existsSync(path.join(store.managedDir, "boot-report-refused.json"))).toBe(false);
+    } finally {
+      child.kill("SIGKILL");
+    }
+    await new Promise((resolve) => child.once("exit", resolve));
+  });
+
+  it("a pin-lag boot (AlphaClaw self-update, npm not yet reconciled) records installedDiverged false — the same excuse getChannelInfo gives — so the boot-report verdict stays empty", async () => {
+    const { sync, store } = createReportingHarness({
+      pin: "1.0.1",
+      channel: "stable",
+      installedVersion: "1.0.0",
+      sentinelVersion: "1.0.0",
+    });
+    store.updateState((s) => {
+      s.pinVersion = "1.0.0";
+      return s;
+    });
+    const boot = sync.syncAtBoot();
+    await flushAsync();
+    expect(boot.action).toBe("pin_reconciled");
+    expect(store.readState().pinLag).toEqual(expect.objectContaining({ pin: "1.0.1", installed: "1.0.0" }));
+    const report = readReport(store);
+    expect(report.openclaw).toEqual(
+      expect.objectContaining({
+        expected: "1.0.1",
+        installedAtBoot: "1.0.0",
+        resolvedForLaunch: "1.0.0",
+        installedDiverged: false,
+      }),
+    );
+    expect(sync.getChannelInfo().installedDiverged).toBe(report.openclaw.installedDiverged);
+    expect(computeVerdict({ ...report, serverPhase: { status: "recorded", installedVersion: "1.0.0" } })).toEqual([]);
+  });
+
+  it("the failed path writes the report with the error as the reason", () => {
+    const { sync, store } = createReportingHarness({
+      pin: "1.0.0",
+      installedVersion: "1.0.0",
+      sentinelVersion: "1.0.0",
+      // The shim validation blows up → the inner catch returns "failed".
+      storeWrap: (store) => ({
+        ...store,
+        validateBinShim: () => {
+          throw new Error("shim exploded");
+        },
+      }),
+    });
+    const result = sync.syncAtBoot();
+    expect(result).toEqual(
+      expect.objectContaining({ ok: false, action: "failed", error: "shim exploded" }),
+    );
+    expect(readReport(store).openclaw.bootSync).toEqual({
+      action: "failed",
+      reason: "shim exploded",
+      warnings: ["shim exploded"],
+      // The closer runs BEFORE the shim check, so even a failed boot reports it.
+      danglingRecords: { closedRuns: [], closedLastUpdateRun: false },
+    });
+    expect(readReport(store).pidfile).toEqual(expect.objectContaining({ decision: "proceed" }));
+  });
+
+  it("a throwing writer never changes the outcome (one log line); no writer → no file", () => {
+    const logs = [];
+    const exploding = createHarness({
+      pin: "1.0.0",
+      installedVersion: "1.0.0",
+      sentinelVersion: "1.0.0",
+      extraSyncOptions: {
+        logger: { log: (m) => logs.push(String(m)), warn() {}, error() {} },
+        bootReport: {
+          bootId: kBootId,
+          writeBinPhase: () => {
+            throw new Error("disk full");
+          },
+        },
+      },
+    });
+    expect(exploding.sync.syncAtBoot()).toEqual(
+      expect.objectContaining({ ok: true, action: "none" }),
+    );
+    expect(
+      logs.filter((line) => line.includes("boot report not written (disk full)")),
+    ).toHaveLength(1);
+    expect(fs.existsSync(path.join(exploding.store.managedDir, "boot-report.json"))).toBe(false);
+
+    // Default (no writer): server-side instances and the other harnesses
+    // write nothing.
+    const plain = createHarness({ pin: "1.0.0", installedVersion: "1.0.0", sentinelVersion: "1.0.0" });
+    expect(plain.sync.syncAtBoot().ok).toBe(true);
+    expect(fs.existsSync(path.join(plain.store.managedDir, "boot-report.json"))).toBe(false);
+  });
+});
+
+describe("getChannelInfo installed-tree predicates (#76 RC4 / Stage 1d)", () => {
+  // getChannelInfo is the single owner of expectedVersion / installedIsPin /
+  // installedDiverged: values it already reads, on the injected clock.
+  const infoFor = ({ installedVersion, pin = "1.0.0", mutate = (s) => s, now }) => {
+    const harness = createHarness({
+      pin,
+      installedVersion,
+      sentinelVersion: installedVersion,
+    });
+    harness.store.updateState((s) => {
+      s.pinVersion = pin;
+      return mutate(s) || s;
+    });
+    if (now !== undefined) harness.nowRef.now = now;
+    return { info: harness.sync.getChannelInfo(), harness };
+  };
+  const liveLag = (harness, extra = {}) => ({
+    pin: "1.0.1",
+    installed: "1.0.0",
+    at: harness.nowRef.now,
+    bootId: "1:1",
+    bootsSeen: 1,
+    ...extra,
+  });
+
+  it("truth table: applied / pin / dev / pinLag / expired pinLag", () => {
+    const rows = [
+      [
+        "pin only, installed IS the pin",
+        { installedVersion: "1.0.0" },
+        { expectedVersion: "1.0.0", expectedKind: "pin", installedIsPin: true, installedDiverged: false, pinLag: null },
+      ],
+      [
+        "pin only, installed is something else (no lag recorded)",
+        { installedVersion: "1.0.5" },
+        { expectedVersion: "1.0.0", expectedKind: "pin", installedIsPin: false, installedDiverged: true },
+      ],
+      [
+        "applied package matches installed",
+        {
+          installedVersion: "2.0.0",
+          mutate: (s) => {
+            s.applied = { channel: "beta", version: "2.0.0", at: 1, acceptedAt: null };
+          },
+        },
+        { expectedVersion: "2.0.0", expectedKind: "applied", installedIsPin: false, installedDiverged: false },
+      ],
+      [
+        "applied recorded but the pin is what is installed (the #76 shape)",
+        {
+          installedVersion: "1.0.0",
+          mutate: (s) => {
+            s.applied = { channel: "beta", version: "2.0.0", at: 1, acceptedAt: null };
+          },
+        },
+        { expectedVersion: "2.0.0", expectedKind: "applied", installedIsPin: true, installedDiverged: true },
+      ],
+      [
+        "dev apply: no expected version, never the pin, never diverged",
+        {
+          installedVersion: "1.0.0",
+          mutate: (s) => {
+            s.applied = { channel: "dev", sha: kDevSha, at: 1, acceptedAt: null };
+          },
+        },
+        { expectedVersion: null, expectedKind: "dev", installedIsPin: false, installedDiverged: false },
+      ],
+      [
+        "no pin and no apply: nothing is expected",
+        {
+          installedVersion: "1.0.0",
+          mutate: (s) => {
+            s.pinVersion = null;
+          },
+        },
+        { expectedVersion: null, expectedKind: null, installedIsPin: false, installedDiverged: false },
+      ],
+    ];
+    for (const [label, setup, expected] of rows) {
+      expect(infoFor(setup).info, label).toEqual(expect.objectContaining(expected));
+    }
+  });
+
+  it("a live pinLag excuses exactly the lagging (pin, installed) pair; it stops excusing after 24 h or 3 boots on the injected clock", () => {
+    const lagging = ({ mutateLag = (lag) => lag, advanceMs = 0 } = {}) => {
+      const harness = createHarness({
+        pin: "1.0.1",
+        installedVersion: "1.0.0",
+        sentinelVersion: "1.0.0",
+      });
+      harness.store.updateState((s) => {
+        s.pinVersion = "1.0.1";
+        s.pinLag = mutateLag(liveLag(harness));
+        return s;
+      });
+      harness.nowRef.now += advanceMs;
+      return harness.sync.getChannelInfo();
+    };
+    expect(lagging()).toEqual(
+      expect.objectContaining({
+        expectedVersion: "1.0.1",
+        expectedKind: "pin",
+        installedIsPin: false,
+        installedDiverged: false,
+        pinLag: expect.objectContaining({ pin: "1.0.1", installed: "1.0.0", bootsSeen: 1 }),
+      }),
+    );
+    expect(lagging({ advanceMs: kPinLagMaxAgeMs }).installedDiverged).toBe(false);
+    expect(lagging({ advanceMs: kPinLagMaxAgeMs + 1 }).installedDiverged).toBe(true);
+    expect(
+      lagging({ mutateLag: (lag) => ({ ...lag, bootsSeen: kPinLagMaxBoots }) }).installedDiverged,
+    ).toBe(false);
+    expect(
+      lagging({ mutateLag: (lag) => ({ ...lag, bootsSeen: kPinLagMaxBoots + 1 }) }).installedDiverged,
+    ).toBe(true);
+    expect(
+      lagging({ mutateLag: (lag) => ({ ...lag, installed: "0.9.0" }) }).installedDiverged,
+    ).toBe(true);
+  });
+
+  describe("syncAtBoot pin-lag bookkeeping (Codex D12)", () => {
+    const laggingBump = () => {
+      const harness = createHarness({
+        pin: "1.0.1",
+        channel: "stable",
+        installedVersion: "1.0.0",
+        sentinelVersion: "1.0.0",
+      });
+      harness.store.updateState((s) => {
+        s.pinVersion = "1.0.0";
+        return s;
+      });
+      return harness;
+    };
+
+    it("the pin_reconciled lag boot records pinLag with this process's bootId; later lagging boots count; the record dies after kPinLagMaxBoots boots", async () => {
+      const { sync, store, nowRef } = laggingBump();
+      const boot = sync.syncAtBoot();
+      await flushAsync();
+      expect(boot.action).toBe("pin_reconciled");
+      expect(boot.warnings.some((w) => w.includes("lags the new pin 1.0.1"))).toBe(true);
+      expect(store.readState().pinLag).toEqual({
+        pin: "1.0.1",
+        installed: "1.0.0",
+        at: nowRef.now,
+        bootId: getProcessBootId(),
+        bootsSeen: 1,
+      });
+      expect(sync.getChannelInfo()).toEqual(
+        expect.objectContaining({ installedDiverged: false, installedIsPin: false }),
+      );
+
+      // Boots 2..kPinLagMaxBoots still lag: each counts once, the excuse holds.
+      for (let boot = 2; boot <= kPinLagMaxBoots; boot += 1) {
+        nowRef.now += 60_000;
+        expect(sync.syncAtBoot().ok).toBe(true);
+        await flushAsync();
+        expect(store.readState().pinLag).toEqual(
+          expect.objectContaining({ pin: "1.0.1", installed: "1.0.0", bootsSeen: boot }),
+        );
+        expect(sync.getChannelInfo().installedDiverged).toBe(false);
+      }
+      // One boot too many: the record is dropped and divergence is visible.
+      nowRef.now += 60_000;
+      expect(sync.syncAtBoot().ok).toBe(true);
+      await flushAsync();
+      expect(store.readState().pinLag).toBeNull();
+      expect(sync.getChannelInfo().installedDiverged).toBe(true);
+    });
+
+    it("a lag older than 24 h is dropped at the next boot", async () => {
+      const { sync, store, nowRef } = laggingBump();
+      expect(sync.syncAtBoot().action).toBe("pin_reconciled");
+      await flushAsync();
+      nowRef.now += kPinLagMaxAgeMs + 1;
+      expect(sync.getChannelInfo().installedDiverged).toBe(true);
+      expect(sync.syncAtBoot().ok).toBe(true);
+      await flushAsync();
+      expect(store.readState().pinLag).toBeNull();
+    });
+
+    it("the lag clears the moment the installed tree is the pin", async () => {
+      const { sync, store, installDir, nowRef } = laggingBump();
+      expect(sync.syncAtBoot().action).toBe("pin_reconciled");
+      await flushAsync();
+      expect(store.readState().pinLag).not.toBeNull();
+
+      writeInstallFixture(installDir, { version: "1.0.1" });
+      store.writeSentinel({ installDir, version: "1.0.1" });
+      nowRef.now += 60_000;
+      expect(sync.syncAtBoot().ok).toBe(true);
+      await flushAsync();
+      expect(store.readState().pinLag).toBeNull();
+      expect(sync.getChannelInfo()).toEqual(
+        expect.objectContaining({
+          installedVersion: "1.0.1",
+          installedIsPin: true,
+          installedDiverged: false,
+          pinLag: null,
+        }),
+      );
+    });
+  });
+
+  describe("requestChannelRollback judges the installed tree", () => {
+    it("refuses installed_diverged before blocklisting when the applied build is not what runs; the recorded build survives", () => {
+      const { sync, store, notify } = createHarness({
+        pin: "1.0.0",
+        installedVersion: "1.0.0",
+        sentinelVersion: "1.0.0",
+      });
+      store.updateState((s) => {
+        s.pinVersion = "1.0.0";
+        s.applied = { channel: "beta", version: "2.0.0", at: 1, acceptedAt: null };
+        return s;
+      });
+      const result = sync.requestChannelRollback({ reason: "crash_loop", exitCode: 1 });
+      expect(result).toEqual(
+        expect.objectContaining({
+          ok: false,
+          code: "installed_diverged",
+          installedVersion: "1.0.0",
+          expectedVersion: "2.0.0",
+        }),
+      );
+      expect(result.message).toBe(
+        "The crashing build (1.0.0) is not the recorded applied build (2.0.0) — refusing to blocklist a build that was not running.",
+      );
+      expect(store.readState().blocklist).toHaveLength(0);
+      expect(store.readMarker()).toBeNull();
+      expect(store.readState().applied.version).toBe("2.0.0");
+      expect(notify).not.toHaveBeenCalled();
+    });
+
+    it("a dev apply still rolls back (its pin tree is the dormant fallback, not divergence)", async () => {
+      vi.useFakeTimers();
+      const { sync, store } = createHarness({
+        pin: "1.0.0",
+        installedVersion: "1.0.0",
+        sentinelVersion: "1.0.0",
+      });
+      store.updateState((s) => {
+        s.pinVersion = "1.0.0";
+        s.applied = { channel: "dev", sha: kDevSha, at: 1, acceptedAt: null };
+        return s;
+      });
+      expect(sync.getChannelInfo()).toEqual(
+        expect.objectContaining({ expectedKind: "dev", installedDiverged: false }),
+      );
+      const result = sync.requestChannelRollback({ reason: "crash_loop", exitCode: 1 });
+      expect(result.ok).toBe(true);
+      expect(store.isBlocklisted(kDevSha)).toBe(true);
+    });
+
+    it("a pin-window rollback with a tampered tree is refused as installed_diverged, naming the pinned build", () => {
+      const { sync, store, nowRef } = createHarness({
+        pin: "1.0.1",
+        installedVersion: "0.9.9",
+        sentinelVersion: "0.9.9",
+      });
+      store.updateState((s) => {
+        s.pinVersion = "1.0.1";
+        s.previousPin = { version: "1.0.0", at: 1 };
+        s.pinWindow = {
+          version: "1.0.1",
+          openedAt: nowRef.now,
+          acceptedAt: null,
+          acceptedSource: null,
+        };
+        return s;
+      });
+      expect(saveOverlayFixture(store, "1.0.0")).toEqual({ ok: true });
+      const result = sync.requestChannelRollback({ reason: "crash_loop", exitCode: 1 });
+      expect(result).toEqual(
+        expect.objectContaining({ ok: false, code: "installed_diverged" }),
+      );
+      expect(result.message).toContain("recorded pinned build (1.0.1)");
+      expect(store.isBlocklisted("1.0.1")).toBe(false);
+      expect(store.readMarker()).toBeNull();
+    });
+  });
+
+  describe("requestForwardRecovery judges the installed tree", () => {
+    const withCandidate = (options) => {
+      const harness = createHarness({
+        pin: "1.0.0",
+        ...options,
+      });
+      harness.store.updateState((s) => {
+        s.pinVersion = "1.0.0";
+        return s;
+      });
+      expect(saveOverlayFixture(harness.store, "3.0.0")).toEqual({ ok: true });
+      harness.store.addBlocklist({ id: "3.0.0", reason: "config_error", exitCode: 78 });
+      return harness;
+    };
+
+    it("moves forward when the pin is installed even though a recorded apply never activated", () => {
+      vi.useFakeTimers();
+      const insertEvent = vi.fn();
+      const { sync, store } = withCandidate({
+        installedVersion: "1.0.0",
+        sentinelVersion: "1.0.0",
+        extraSyncOptions: { insertEvent },
+      });
+      store.updateState((s) => {
+        s.applied = { channel: "beta", version: "2.0.0", at: 1, acceptedAt: null };
+        return s;
+      });
+      const result = sync.requestForwardRecovery({ exitCode: 78, installedVersion: "1.0.0" });
+      expect(result.ok).toBe(true);
+      expect(store.readMarker()).toEqual(
+        expect.objectContaining({
+          reason: "forward_recovery",
+          target: expect.objectContaining({ version: "3.0.0" }),
+        }),
+      );
+      expect(store.readState().forwardRecovery.attemptedId).toBe("3.0.0");
+      // The audit event carries BOTH views of the tree (#76 RC4): the
+      // authoritative read the gate used and the caller's observation.
+      expect(insertEvent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          eventType: "forward_recovery",
+          status: "requested",
+          details: expect.objectContaining({
+            reason: "forward_recovery",
+            exitCode: 78,
+            target: expect.objectContaining({ version: "3.0.0" }),
+            installedVersion: "1.0.0",
+            observedInstalledVersion: "1.0.0",
+          }),
+        }),
+      );
+    });
+
+    it("records the caller's stale view beside the authoritative read, and gates on the read (#76 RC4)", () => {
+      vi.useFakeTimers();
+      const insertEvent = vi.fn();
+      const { sync, store } = withCandidate({
+        installedVersion: "1.0.0",
+        sentinelVersion: "1.0.0",
+        extraSyncOptions: { insertEvent },
+      });
+      // The watchdog's view lags (it cached the tree before an activation);
+      // the gate re-reads the installed tree itself and still moves forward.
+      const result = sync.requestForwardRecovery({ exitCode: 78, installedVersion: "0.9.9" });
+      expect(result.ok).toBe(true);
+      expect(store.readState().forwardRecovery.attemptedId).toBe("3.0.0");
+      const requested = insertEvent.mock.calls
+        .map((call) => call[0])
+        .find((event) => event.eventType === "forward_recovery" && event.status === "requested");
+      expect(requested.details).toEqual(
+        expect.objectContaining({
+          installedVersion: "1.0.0",
+          observedInstalledVersion: "0.9.9",
+        }),
+      );
+      // No caller view at all is recorded as null, never dropped.
+      const silentInsertEvent = vi.fn();
+      const silent = withCandidate({
+        installedVersion: "1.0.0",
+        sentinelVersion: "1.0.0",
+        extraSyncOptions: { insertEvent: silentInsertEvent },
+      });
+      expect(silent.sync.requestForwardRecovery({ exitCode: 78 }).ok).toBe(true);
+      expect(silentInsertEvent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          eventType: "forward_recovery",
+          status: "requested",
+          details: expect.objectContaining({
+            installedVersion: "1.0.0",
+            observedInstalledVersion: null,
+          }),
+        }),
+      );
+    });
+
+    it("refuses not_pin for a dev apply, and for a pin that is recorded but not installed", () => {
+      const dev = withCandidate({
+        installedVersion: "1.0.0",
+        sentinelVersion: "1.0.0",
+      });
+      dev.store.updateState((s) => {
+        s.applied = { channel: "dev", sha: kDevSha, at: 1, acceptedAt: null };
+        return s;
+      });
+      expect(dev.sync.requestForwardRecovery({ exitCode: 78 })).toEqual(
+        expect.objectContaining({ ok: false, code: "not_pin" }),
+      );
+      expect(dev.store.readMarker()).toBeNull();
+      expect(dev.store.isBlocklisted("3.0.0")).toBe(true);
+
+      const lagging = withCandidate({
+        installedVersion: "0.9.9",
+        sentinelVersion: "0.9.9",
+      });
+      const result = lagging.sync.requestForwardRecovery({ exitCode: 78 });
+      expect(result).toEqual(expect.objectContaining({ ok: false, code: "not_pin" }));
+      expect(result.message).toContain("installed 0.9.9, pin 1.0.0");
+      expect(lagging.store.readMarker()).toBeNull();
+      expect(lagging.store.isBlocklisted("3.0.0")).toBe(true);
+    });
+  });
+});
+
+// ── Installed-tree reconcile (#76 B1.2 / B1.4 / B1.5 / C6) ───────────────────
+describe("reconcileInstalled (#76 B1.2)", () => {
+  const { beginStateDbQuiet } = require("../../lib/server/state-db-quiet");
+  const kReconcileLease = require("../../lib/server/constants").kOpenclawReconcileLifecycleLeaseMs;
+
+  // A lifecycle-lock double with the real release() contract (callable,
+  // isValid()/isExpired() accessors) so the re-entrancy and lease-fence rules
+  // can be pinned without the real lock.
+  const makeLock = () => {
+    const acquires = [];
+    const releases = [];
+    const acquireLifecycleLock = vi.fn(async (kind, options) => {
+      acquires.push({ kind, options });
+      let valid = true;
+      const release = Object.assign(
+        vi.fn(() => {
+          valid = false;
+        }),
+        { kind, isValid: () => valid, isExpired: () => false },
+      );
+      releases.push(release);
+      return release;
+    });
+    return { acquires, releases, acquireLifecycleLock };
+  };
+  const makeHold = ({ valid = true } = {}) =>
+    Object.assign(vi.fn(), {
+      kind: "structural_repair",
+      isValid: () => valid,
+      isExpired: () => !valid,
+    });
+  // Like the real seam, a confirmed stop flips isRunning() to false; a stop
+  // that fails (stopped: false) leaves the gateway reported running.
+  const makeQuiesce = ({ running = true, stopped = true } = {}) => {
+    let live = running;
+    return {
+      isRunning: vi.fn(async () => live),
+      stop: vi.fn(async () => {
+        if (stopped) live = false;
+        return stopped;
+      }),
+      suppress: vi.fn(),
+      unsuppress: vi.fn(),
+      acquireLock: vi.fn(),
+      start: vi.fn(),
+    };
+  };
+  const saveOverlayWithSchema = (store, version, schema) =>
+    store.saveOverlayFromTempInstall({
+      openclawPackageDir: writePackageFixture(
+        path.join(mkTemp("alphaclaw-overlay-src-"), "openclaw"),
+        { version, schema },
+      ),
+      version,
+    });
+
+  // Installed 1.0.0 (the pin) with a recorded, overlay-complete beta 2.0.0 —
+  // the #76 shape: installedDiverged is true, nothing has activated.
+  const divergedHarness = ({
+    expected = "2.0.0",
+    installed = "1.0.0",
+    overlay = true,
+    schema = null,
+    extra = {},
+  } = {}) => {
+    const lock = makeLock();
+    const insertEvent = vi.fn();
+    const harness = createHarness({
+      pin: "1.0.0",
+      installedVersion: installed,
+      sentinelVersion: installed,
+      extraSyncOptions: {
+        insertEvent,
+        acquireLifecycleLock: lock.acquireLifecycleLock,
+        // Hermetic: never scan this box's /proc for the exclusivity sample,
+        // and never wait the 5 s settle in a test.
+        backupProbes: { listProcesses: () => [] },
+        backupTuning: { exclusivitySettleMs: 0 },
+        ...extra,
+      },
+    });
+    harness.store.updateState((s) => {
+      s.pinVersion = "1.0.0";
+      s.applied = { channel: "beta", version: expected, at: 1, acceptedAt: null };
+      return s;
+    });
+    if (overlay) {
+      expect(saveOverlayWithSchema(harness.store, expected, schema)).toEqual({ ok: true });
+    }
+    return { ...harness, lock, insertEvent };
+  };
+  const installedVersionOf = (installDir) =>
+    JSON.parse(
+      fs.readFileSync(path.join(installDir, "node_modules", "openclaw", "package.json"), "utf8"),
+    ).version;
+  const eventsOf = (insertEvent, type) =>
+    insertEvent.mock.calls.map((call) => call[0]).filter((event) => event.eventType === type);
+  const stepNames = (run) => run.steps.map((step) => `${step.name}:${step.status}`);
+
+  afterEach(() => {
+    delete process.env.OPENCLAW_RUNTIME_RECONCILE;
+  });
+
+  it("happy path: confirmed stop → activate (sentinel last) → verify; run steps, hold clearing, cache invalidation, event + notification", async () => {
+    const quiesce = makeQuiesce();
+    const h = divergedHarness({ extra: { gatewayQuiesce: quiesce } });
+    // A structural hold this path owns (set by the boot config gate).
+    h.store.updateState((s) => {
+      s.gatewayHold = {
+        reason: "version_mismatch",
+        at: 5,
+        blamedKeys: [],
+        detail: "held",
+        installed: "1.0.0",
+        expected: "2.0.0",
+        bootId: "boot-x",
+      };
+      return s;
+    });
+    expect(h.sync.getChannelInfo().installedDiverged).toBe(true);
+
+    const result = await h.sync.reconcileInstalled({ source: "operator", relaunch: true });
+
+    expect(result).toEqual(
+      expect.objectContaining({
+        ok: true,
+        action: "activated",
+        from: "1.0.0",
+        to: "2.0.0",
+        schemaRecovery: false,
+      }),
+    );
+    expect(typeof result.runId).toBe("string");
+    // The tree flipped and the sentinel names the new build (written LAST).
+    expect(installedVersionOf(h.installDir)).toBe("2.0.0");
+    expect(h.store.readSentinel({ installDir: h.installDir })).toEqual(
+      expect.objectContaining({ version: "2.0.0" }),
+    );
+    expect(h.sync.getChannelInfo().installedDiverged).toBe(false);
+    // Its own lock (no hold passed), the reconcile lease, released after.
+    expect(h.lock.acquires).toEqual([
+      { kind: "reconcile_installed", options: { leaseMs: kReconcileLease } },
+    ]);
+    expect(h.lock.releases[0]).toHaveBeenCalledTimes(1);
+    // Stop was confirmed through the quiesce seam with the watchdog suppressed.
+    expect(quiesce.stop).toHaveBeenCalledTimes(1);
+    expect(quiesce.suppress).toHaveBeenCalledTimes(1);
+    expect(quiesce.unsuppress).toHaveBeenCalledTimes(1);
+    // The ledger run: target kind reconcile, steps stop → activate → verify,
+    // left `running` for the CALLER's relaunch step (Codex 7).
+    const run = h.sync.runLedger.listRuns().find((r) => r.operationId === result.runId);
+    expect(run.target).toEqual({ kind: "reconcile", version: "2.0.0", from: "1.0.0" });
+    expect(run.state).toBe("running");
+    expect(stepNames(run)).toEqual([
+      "stop:running",
+      "stop:completed",
+      "activate:running",
+      "activate:completed",
+      "verify:running",
+      "verify:completed",
+    ]);
+    // Only the structural hold this path owns was cleared.
+    expect(h.store.readState().gatewayHold).toBeNull();
+    // The apply record-step invalidation hook ran.
+    expect(h.clearVersionCache).toHaveBeenCalledTimes(1);
+    expect(eventsOf(h.insertEvent, "reconcile_installed")).toEqual([
+      expect.objectContaining({
+        status: "activated",
+        details: expect.objectContaining({
+          source: "operator",
+          from: "1.0.0",
+          to: "2.0.0",
+          relaunch: true,
+          operationId: result.runId,
+        }),
+      }),
+    ]);
+    await flushAsync();
+    expect(notifyMessages(h.notify).some((m) => m.includes("re-activated OpenClaw 2.0.0"))).toBe(true);
+
+    // The caller books the relaunch and completes the run.
+    h.sync.completeReconcileRun({
+      runId: result.runId,
+      relaunch: { ok: true, verdict: "replacement_ready" },
+    });
+    const completed = h.sync.runLedger.listRuns().find((r) => r.operationId === result.runId);
+    expect(completed.state).toBe("activated");
+    expect(completed.ok).toBe(true);
+    expect(stepNames(completed).slice(-1)).toEqual(["relaunch:completed"]);
+    // A relaunch that did not verify is an honest failure, not a silent success.
+    const again = await h.sync.reconcileInstalled({ source: "test" });
+    expect(again).toEqual(expect.objectContaining({ ok: true, action: "none", runId: null }));
+  });
+
+  it("a passed hold is used as-is: never re-acquired, never released here (lock re-entrancy, Codex 1)", async () => {
+    const h = divergedHarness();
+    const hold = makeHold();
+    const result = await h.sync.reconcileInstalled({ hold, source: "structural_repair" });
+    expect(result.ok).toBe(true);
+    expect(result.action).toBe("activated");
+    expect(h.lock.acquireLifecycleLock).not.toHaveBeenCalled();
+    expect(hold).not.toHaveBeenCalled();
+    expect(installedVersionOf(h.installDir)).toBe("2.0.0");
+  });
+
+  it("an expired hold refuses lease_expired before anything is touched", async () => {
+    const h = divergedHarness();
+    const result = await h.sync.reconcileInstalled({ hold: makeHold({ valid: false }) });
+    expect(result).toEqual(expect.objectContaining({ ok: false, code: "lease_expired", action: "none" }));
+    expect(installedVersionOf(h.installDir)).toBe("1.0.0");
+    expect(h.sync.runLedger.listRuns()).toEqual([]);
+  });
+
+  it("nothing to do: installed === expected with a matching sentinel is action none, no lock, no run", async () => {
+    const h = divergedHarness({ expected: "1.0.0", overlay: false });
+    const result = await h.sync.reconcileInstalled();
+    expect(result).toEqual({ ok: true, action: "none", from: "1.0.0", to: "1.0.0", runId: null });
+    expect(h.lock.acquireLifecycleLock).not.toHaveBeenCalled();
+  });
+
+  it("refusal codes: disabled (kill switch), overlay_missing, dev_channel, gateway_held (migration-class only), state_corrupted, state_db_quiet", async () => {
+    process.env.OPENCLAW_RUNTIME_RECONCILE = "off";
+    const off = divergedHarness();
+    expect(await off.sync.reconcileInstalled()).toEqual(
+      expect.objectContaining({ ok: false, code: "disabled", action: "none" }),
+    );
+    expect(eventsOf(off.insertEvent, "reconcile_installed")).toEqual([
+      expect.objectContaining({ status: "skipped", details: expect.objectContaining({ code: "disabled" }) }),
+    ]);
+    // The switch is a RUNTIME lever (README: "boot-time activation is
+    // unaffected"): the boot C1 belt — source "boot", under the boot lock —
+    // is exempt, so a diverged box with the switch set still boots the
+    // recorded build instead of being held. Any other source is refused.
+    const boot = divergedHarness();
+    expect(await boot.sync.reconcileInstalled({ source: "boot", relaunch: false })).toEqual(
+      expect.objectContaining({ ok: true, action: "activated", from: "1.0.0", to: "2.0.0" }),
+    );
+    expect(installedVersionOf(boot.installDir)).toBe("2.0.0");
+    const structuralOff = divergedHarness();
+    expect(await structuralOff.sync.reconcileInstalled({ source: "repair/structural" })).toEqual(
+      expect.objectContaining({ ok: false, code: "disabled", action: "none" }),
+    );
+    expect(installedVersionOf(structuralOff.installDir)).toBe("1.0.0");
+    delete process.env.OPENCLAW_RUNTIME_RECONCILE;
+
+    const missing = divergedHarness({ overlay: false });
+    expect(await missing.sync.reconcileInstalled()).toEqual(
+      expect.objectContaining({ ok: false, code: "overlay_missing", expected: "2.0.0", installed: "1.0.0" }),
+    );
+
+    const dev = divergedHarness();
+    dev.store.updateState((s) => {
+      s.applied = { channel: "dev", sha: kDevSha, at: 1, acceptedAt: null };
+      return s;
+    });
+    expect(await dev.sync.reconcileInstalled()).toEqual(
+      expect.objectContaining({ ok: false, code: "dev_channel" }),
+    );
+
+    // A MIGRATION-class hold refuses; a structural one does not (it is what
+    // this path clears).
+    const held = divergedHarness();
+    held.store.updateState((s) => {
+      s.gatewayHold = { reason: "settings migration for 2.0.0 failed: doctor exited 1", at: 1, blamedKeys: ["x"] };
+      return s;
+    });
+    expect(await held.sync.reconcileInstalled()).toEqual(
+      expect.objectContaining({ ok: false, code: "gateway_held" }),
+    );
+    expect(installedVersionOf(held.installDir)).toBe("1.0.0");
+    expect(held.store.readState().gatewayHold?.reason).toContain("doctor exited 1");
+    const structural = divergedHarness();
+    structural.store.updateState((s) => {
+      s.gatewayHold = { reason: "activation_failed", at: 1, blamedKeys: [], error: "ENOSPC" };
+      return s;
+    });
+    expect((await structural.sync.reconcileInstalled()).action).toBe("activated");
+    expect(structural.store.readState().gatewayHold).toBeNull();
+
+    const corrupt = divergedHarness();
+    fs.writeFileSync(corrupt.store.statePath, "{ not json");
+    expect(await corrupt.sync.reconcileInstalled()).toEqual(
+      expect.objectContaining({ ok: false, code: "state_corrupted" }),
+    );
+
+    const quiet = divergedHarness();
+    const barrier = await beginStateDbQuiet({ owner: "reconcile-test", maxMs: 30_000 });
+    try {
+      expect(await quiet.sync.reconcileInstalled()).toEqual(
+        expect.objectContaining({ ok: false, code: "state_db_quiet" }),
+      );
+    } finally {
+      barrier.release();
+    }
+    expect(installedVersionOf(quiet.installDir)).toBe("1.0.0");
+  });
+
+  it("refuses incumbent_running when a serving identity or a live openclaw process survives the stop — nothing is changed", async () => {
+    const serving = divergedHarness({
+      extra: {
+        gatewayQuiesce: makeQuiesce(),
+        discoverServingIdentity: () => ({ rootPid: 4242, workerPid: 4243, pids: [4242, 4243] }),
+      },
+    });
+    const result = await serving.sync.reconcileInstalled({ source: "operator" });
+    expect(result).toEqual(
+      expect.objectContaining({
+        ok: false,
+        code: "incumbent_running",
+        incumbent: { kind: "serving_identity", pids: [4242, 4243] },
+      }),
+    );
+    expect(installedVersionOf(serving.installDir)).toBe("1.0.0");
+    expect(serving.store.readSentinel({ installDir: serving.installDir })).toEqual(
+      expect.objectContaining({ version: "1.0.0" }),
+    );
+    const run = serving.sync.runLedger.listRuns()[0];
+    expect(run.state).toBe("failed");
+    expect(stepNames(run)).toEqual(["stop:running", "stop:failed"]);
+    expect(run.result).toEqual(expect.objectContaining({ code: "incumbent_running" }));
+    await flushAsync();
+    expect(notifyMessages(serving.notify).some((m) => m.includes("still running"))).toBe(true);
+
+    const live = divergedHarness({
+      extra: { backupProbes: { listProcesses: () => [{ pid: 77, cmdline: "openclaw gateway run" }] } },
+    });
+    expect(await live.sync.reconcileInstalled()).toEqual(
+      expect.objectContaining({
+        ok: false,
+        code: "incumbent_running",
+        incumbent: { kind: "live_processes", pids: [77] },
+      }),
+    );
+    // A stop the quiesce seam could not confirm is an incumbent too.
+    const unstopped = divergedHarness({
+      extra: { gatewayQuiesce: makeQuiesce({ running: true, stopped: false }) },
+    });
+    expect((await unstopped.sync.reconcileInstalled()).code).toBe("incumbent_running");
+    expect(installedVersionOf(unstopped.installDir)).toBe("1.0.0");
+  });
+
+  it("refuses insufficient_disk from the injected probe (1.2 × overlay bytes, beside node_modules) before any rm", async () => {
+    const diskSpace = vi.fn(() => ({ ok: false, free: 1024 }));
+    const h = divergedHarness({ extra: { diskSpace } });
+    const result = await h.sync.reconcileInstalled();
+    expect(result).toEqual(expect.objectContaining({ ok: false, code: "insufficient_disk", freeBytes: 1024 }));
+    expect(diskSpace).toHaveBeenCalledTimes(1);
+    const [required, dir] = diskSpace.mock.calls[0];
+    expect(dir).toBe(path.join(h.installDir, "node_modules"));
+    expect(required).toBe(result.requiredBytes);
+    // 1.2 × the overlay's bytes, rounded up (the fixture is a handful of files).
+    const overlayDir = h.store.overlayPackageDir("2.0.0");
+    const bytes = (dir) =>
+      fs.readdirSync(dir, { withFileTypes: true }).reduce((sum, entry) => {
+        const full = path.join(dir, entry.name);
+        return sum + (entry.isDirectory() ? bytes(full) : fs.statSync(full).size);
+      }, 0);
+    expect(required).toBe(Math.ceil(bytes(overlayDir) * 1.2));
+    expect(installedVersionOf(h.installDir)).toBe("1.0.0");
+    expect(h.sync.runLedger.listRuns()[0].state).toBe("failed");
+  });
+
+  it("target compatibility FIRST: an expected build whose declared schema is below the live user_version is skipped for the newest compatible overlay (schema_recovery)", async () => {
+    const h = divergedHarness({ schema: { state: 12, agent: 19 } });
+    writeStateDb(h.openclawDir, { userVersion: 15 });
+    expect(saveOverlayWithSchema(h.store, "3.0.0", { state: 15, agent: 19 })).toEqual({ ok: true });
+    // Blocklisted overlays are never candidates.
+    expect(saveOverlayWithSchema(h.store, "4.0.0", { state: 16, agent: 19 })).toEqual({ ok: true });
+    h.store.addBlocklist({ id: "4.0.0", reason: "crash_loop", exitCode: 1 });
+
+    const result = await h.sync.reconcileInstalled({ source: "structural_repair" });
+
+    expect(result).toEqual(
+      expect.objectContaining({ ok: true, action: "activated", to: "3.0.0", expected: "2.0.0", schemaRecovery: true }),
+    );
+    expect(installedVersionOf(h.installDir)).toBe("3.0.0");
+    const state = h.store.readState();
+    expect(state.applied).toEqual(
+      expect.objectContaining({ channel: "stable", version: "3.0.0", reason: "schema_recovery", operationId: result.runId }),
+    );
+    expect(eventsOf(h.insertEvent, "reconcile_installed").map((e) => e.status)).toEqual([
+      "target_incompatible",
+      "activated",
+    ]);
+    expect(eventsOf(h.insertEvent, "reconcile_installed")[0].details.reasons).toEqual(["state_schema_too_new"]);
+    const run = h.sync.runLedger.listRuns().find((r) => r.operationId === result.runId);
+    expect(run.target).toEqual(
+      expect.objectContaining({ kind: "reconcile", version: "3.0.0", expected: "2.0.0", schemaRecovery: true }),
+    );
+  });
+
+  it("target incompatible and nothing else bootable → no_bootable_version, tree untouched", async () => {
+    const h = divergedHarness({ schema: { state: 12, agent: 19 } });
+    writeStateDb(h.openclawDir, { userVersion: 15 });
+    const result = await h.sync.reconcileInstalled();
+    expect(result).toEqual(
+      expect.objectContaining({ ok: false, code: "no_bootable_version", reasons: ["state_schema_too_new"] }),
+    );
+    expect(installedVersionOf(h.installDir)).toBe("1.0.0");
+    expect(h.sync.runLedger.listRuns()[0]).toEqual(
+      expect.objectContaining({ state: "failed", result: expect.objectContaining({ code: "no_bootable_version" }) }),
+    );
+  });
+
+  // Stage 3 I3 (#76 B1.1 rung 3): `recover: true` — the watchdog's structural
+  // repair on a NON-diverged tree that cannot read the databases.
+  const recoverHarness = ({ installedSchema = { state: 12, agent: 19 }, userVersion = 15 } = {}) => {
+    const lock = makeLock();
+    const insertEvent = vi.fn();
+    const harness = createHarness({
+      pin: "1.0.0",
+      installedVersion: "1.0.0",
+      sentinelVersion: "1.0.0",
+      extraSyncOptions: {
+        insertEvent,
+        acquireLifecycleLock: lock.acquireLifecycleLock,
+        backupProbes: { listProcesses: () => [] },
+        backupTuning: { exclusivitySettleMs: 0 },
+      },
+    });
+    // The pin is recorded in state (syncAtBoot's job on a real box); the
+    // installed pin declares its schema; the live DB is ahead of it.
+    harness.store.updateState((s) => {
+      s.pinVersion = "1.0.0";
+      s.applied = null;
+      return s;
+    });
+    writeSchemaContractFixture(path.join(harness.installDir, "node_modules", "openclaw"), installedSchema);
+    writeStateDb(harness.openclawDir, { userVersion });
+    return { ...harness, lock, insertEvent };
+  };
+
+  it("recover: a non-diverged tree that is compatible (or unknown) is `none` with a reason — the operator's build is never swapped on a guess; without `recover` it is plain `none`", async () => {
+    const h = recoverHarness({ installedSchema: { state: 15, agent: 19 }, userVersion: 15 });
+    expect(h.sync.getChannelInfo().installedDiverged).toBe(false);
+    expect(await h.sync.reconcileInstalled({ source: "structural_repair" })).toEqual(
+      expect.objectContaining({ ok: true, action: "none", from: "1.0.0", to: "1.0.0", runId: null }),
+    );
+    const result = await h.sync.reconcileInstalled({ source: "structural_repair", recover: true });
+    expect(result).toEqual(
+      expect.objectContaining({ ok: true, action: "none", reason: "target_compatible", runId: null }),
+    );
+    expect(installedVersionOf(h.installDir)).toBe("1.0.0");
+    expect(h.lock.acquireLifecycleLock).not.toHaveBeenCalled(); // decided before the lock
+    expect(eventsOf(h.insertEvent, "reconcile_installed").at(-1)).toEqual(
+      expect.objectContaining({ status: "skipped", details: expect.objectContaining({ code: "target_compatible", recover: true }) }),
+    );
+    // Unknown line (no declared schema, no table entry): still `none`.
+    const unknown = recoverHarness({ installedSchema: {}, userVersion: 15 });
+    expect(await unknown.sync.reconcileInstalled({ recover: true })).toEqual(
+      expect.objectContaining({ ok: true, action: "none", reason: "compatibility_unknown" }),
+    );
+  });
+
+  it("recover: a non-diverged pin whose declared schema is below the live user_version activates the newest compatible overlay as schema_recovery under the caller's hold (no own acquire), records applied.reason and completes the run's stop → activate → verify", async () => {
+    const h = recoverHarness({ installedSchema: { state: 12, agent: 19 }, userVersion: 15 });
+    expect(saveOverlayWithSchema(h.store, "3.0.0", { state: 15, agent: 19 })).toEqual({ ok: true });
+    const hold = makeHold();
+    const result = await h.sync.reconcileInstalled({ hold, source: "structural_repair", relaunch: true, recover: true });
+    expect(result).toEqual(
+      expect.objectContaining({
+        ok: true,
+        action: "activated",
+        from: "1.0.0",
+        to: "3.0.0",
+        expected: "1.0.0",
+        schemaRecovery: true,
+      }),
+    );
+    expect(installedVersionOf(h.installDir)).toBe("3.0.0");
+    expect(h.lock.acquireLifecycleLock).not.toHaveBeenCalled();
+    expect(hold).not.toHaveBeenCalled();
+    expect(h.store.readState().applied).toEqual(
+      expect.objectContaining({ version: "3.0.0", reason: "schema_recovery", operationId: result.runId }),
+    );
+    expect(eventsOf(h.insertEvent, "reconcile_installed").map((e) => e.status)).toEqual([
+      "target_incompatible",
+      "activated",
+    ]);
+    const run = h.sync.runLedger.listRuns().find((r) => r.operationId === result.runId);
+    expect(run.state).toBe("running"); // the caller books the relaunch (Codex 7)
+    expect(stepNames(run)).toEqual([
+      "stop:running",
+      "stop:completed",
+      "activate:running",
+      "activate:completed",
+      "verify:running",
+      "verify:completed",
+    ]);
+    // Nothing else bootable: the refusal names it and the tree is untouched.
+    const stuck = recoverHarness({ installedSchema: { state: 12, agent: 19 }, userVersion: 15 });
+    expect(await stuck.sync.reconcileInstalled({ recover: true })).toEqual(
+      expect.objectContaining({ ok: false, code: "no_bootable_version" }),
+    );
+    expect(installedVersionOf(stuck.installDir)).toBe("1.0.0");
+  });
+
+  it("a failure AFTER the rm writes no sentinel, sets an activation_failed hold carrying the error, notifies, and tries the chooser once", async () => {
+    // Fail the swap for 2.0.0 only (delegating everything else to the real
+    // store) after gutting the live tree the way a real swap failure leaves it.
+    const failSwapFor = (version) => (store) => ({
+      ...store,
+      activateOverlayAsync: async (args) => {
+        if (args.version !== version) return store.activateOverlayAsync(args);
+        fs.rmSync(store.sentinelPath({ installDir: args.installDir }), { force: true });
+        fs.rmSync(path.join(args.installDir, "node_modules", "openclaw"), { recursive: true, force: true });
+        return { ok: false, stage: "swap", error: "ENOSPC: no space left on device, rename" };
+      },
+    });
+    const gutted = divergedHarness({ extra: { storeWrap: failSwapFor("2.0.0") } });
+    // createHarness applies storeWrap itself; re-create through the option.
+    const lock = makeLock();
+    const insertEvent = vi.fn();
+    const h = createHarness({
+      pin: "1.0.0",
+      installedVersion: "1.0.0",
+      sentinelVersion: "1.0.0",
+      storeWrap: failSwapFor("2.0.0"),
+      extraSyncOptions: {
+        insertEvent,
+        acquireLifecycleLock: lock.acquireLifecycleLock,
+        backupProbes: { listProcesses: () => [] },
+        backupTuning: { exclusivitySettleMs: 0 },
+      },
+    });
+    void gutted;
+    h.store.updateState((s) => {
+      s.pinVersion = "1.0.0";
+      s.applied = { channel: "beta", version: "2.0.0", at: 1, acceptedAt: null };
+      return s;
+    });
+    expect(saveOverlayFixture(h.store, "2.0.0")).toEqual({ ok: true });
+
+    const result = await h.sync.reconcileInstalled({ source: "operator" });
+    expect(result).toEqual(expect.objectContaining({ ok: false, code: "activation_failed", stage: "swap" }));
+    expect(fs.existsSync(h.store.sentinelPath({ installDir: h.installDir }))).toBe(false);
+    expect(h.store.readState().gatewayHold).toEqual(
+      expect.objectContaining({
+        reason: "activation_failed",
+        error: "ENOSPC: no space left on device, rename",
+        expected: "2.0.0",
+        installed: "1.0.0",
+      }),
+    );
+    expect(h.watchdogLatch).toHaveBeenCalled();
+    await flushAsync();
+    expect(notifyMessages(h.notify).some((m) => m.includes("HELD"))).toBe(true);
+    const run = h.sync.runLedger.listRuns()[0];
+    expect(run.state).toBe("activation_failed");
+    expect(stepNames(run)).toEqual(["stop:running", "stop:completed", "activate:running", "activate:failed"]);
+
+    // With another local build that can read the DBs, the chooser retry
+    // activates it and the hold this path set is cleared again.
+    const rescued = createHarness({
+      pin: "1.0.0",
+      installedVersion: "1.0.0",
+      sentinelVersion: "1.0.0",
+      storeWrap: failSwapFor("2.0.0"),
+      extraSyncOptions: {
+        acquireLifecycleLock: makeLock().acquireLifecycleLock,
+        backupProbes: { listProcesses: () => [] },
+        backupTuning: { exclusivitySettleMs: 0 },
+      },
+    });
+    rescued.store.updateState((s) => {
+      s.pinVersion = "1.0.0";
+      s.applied = { channel: "beta", version: "2.0.0", at: 1, acceptedAt: null };
+      return s;
+    });
+    expect(saveOverlayFixture(rescued.store, "2.0.0")).toEqual({ ok: true });
+    expect(saveOverlayFixture(rescued.store, "1.5.0")).toEqual({ ok: true });
+    const second = await rescued.sync.reconcileInstalled();
+    expect(second).toEqual(expect.objectContaining({ ok: true, action: "activated", to: "1.5.0", schemaRecovery: true }));
+    expect(installedVersionOf(rescued.installDir)).toBe("1.5.0");
+    expect(rescued.store.readState().gatewayHold).toBeNull();
+    expect(rescued.store.readSentinel({ installDir: rescued.installDir })).toEqual(
+      expect.objectContaining({ version: "1.5.0" }),
+    );
+  });
+
+  it("a pre-rm failure (verify stage) leaves the live tree intact with no hold", async () => {
+    const h = createHarness({
+      pin: "1.0.0",
+      installedVersion: "1.0.0",
+      sentinelVersion: "1.0.0",
+      storeWrap: (store) => ({
+        ...store,
+        activateOverlayAsync: async () => ({ ok: false, stage: "verify", error: "staged bin missing" }),
+      }),
+      extraSyncOptions: {
+        acquireLifecycleLock: makeLock().acquireLifecycleLock,
+        backupProbes: { listProcesses: () => [] },
+        backupTuning: { exclusivitySettleMs: 0 },
+      },
+    });
+    h.store.updateState((s) => {
+      s.pinVersion = "1.0.0";
+      s.applied = { channel: "beta", version: "2.0.0", at: 1, acceptedAt: null };
+      return s;
+    });
+    expect(saveOverlayFixture(h.store, "2.0.0")).toEqual({ ok: true });
+    const result = await h.sync.reconcileInstalled();
+    expect(result).toEqual(expect.objectContaining({ ok: false, code: "activation_failed", stage: "verify" }));
+    expect(installedVersionOf(h.installDir)).toBe("1.0.0");
+    expect(h.store.readState().gatewayHold).toBeNull();
+    expect(h.store.readSentinel({ installDir: h.installDir })).toEqual(expect.objectContaining({ version: "1.0.0" }));
+  });
+
+  describe("which binary (#76 C6 / Codex 8)", () => {
+    // Route a `node <bin> backup ...` spawn to the stub's `openclaw backup`
+    // model so the archive contract stays faithful while the command is pinned.
+    const binAwareRunner = (seen) => (opts, fallback) => {
+      if (opts.command === process.execPath && opts.args?.[1] === "backup") {
+        seen.push(opts);
+        return fallback({ ...opts, command: "openclaw", args: opts.args.slice(1) });
+      }
+      if (opts.command === "openclaw" && opts.args?.[0] === "backup") seen.push(opts);
+      return fallback(opts);
+    };
+
+    it("the pre-update backup runs the recorded build's bin under node while the tree diverges (the operator's re-apply keeps working)", async () => {
+      const seen = [];
+      const lock = makeLock();
+      const h = createHarness({
+        pin: "1.0.0",
+        installedVersion: "1.0.0",
+        sentinelVersion: "1.0.0",
+        runnerImpl: binAwareRunner(seen),
+        extraSyncOptions: {
+          acquireLifecycleLock: lock.acquireLifecycleLock,
+          backupProbes: { listProcesses: () => [] },
+          backupTuning: { exclusivitySettleMs: 0 },
+        },
+      });
+      h.store.updateState((s) => {
+        s.pinVersion = "1.0.0";
+        s.applied = { channel: "beta", version: "2.0.0", at: 1, acceptedAt: null };
+        return s;
+      });
+      expect(saveOverlayWithSchema(h.store, "2.0.0", { state: 15, agent: 19 })).toEqual({ ok: true });
+      writeStateDb(h.openclawDir, { userVersion: 15 });
+      // Read before the apply: recording the new target prunes the 2.0.0 overlay.
+      const expectedBin = h.store.resolvePackageBin(h.store.overlayPackageDir("2.0.0"));
+      expect(expectedBin).toBeTruthy();
+      expect(h.sync.resolveExpectedBin()).toBe(expectedBin);
+      // Cross-channel target → hard-gated backup.
+      const result = await h.sync.applyUpdate({ channel: "beta", version: "1.1.0-beta.1" });
+      const backupSpawn = seen.find((opts) => opts.command === process.execPath);
+      expect(backupSpawn).toBeTruthy();
+      expect(backupSpawn.args.slice(0, 3)).toEqual([expectedBin, "backup", "create"]);
+      expect(seen.some((opts) => opts.command === "openclaw")).toBe(false);
+      expect(result.body?.code).not.toBe("version_mismatch");
+    });
+
+    it("the backup refuses version_mismatch on a hard gate only when NO local bin can read the databases; the same-channel soft gate warns and continues", async () => {
+      const seen = [];
+      const mk = (extra = {}) => {
+        const h = createHarness({
+          pin: "1.0.0",
+          installedVersion: "1.0.0",
+          sentinelVersion: "1.0.0",
+          runnerImpl: binAwareRunner(seen),
+          extraSyncOptions: extra,
+        });
+        // Both trees declare a schema below the live user_version.
+        writeSchemaContractFixture(path.join(h.installDir, "node_modules", "openclaw"), {
+          state: 10,
+          agent: 19,
+        });
+        h.store.updateState((s) => {
+          s.pinVersion = "1.0.0";
+          s.applied = { channel: "beta", version: "2.0.0", at: 1, acceptedAt: null };
+          return s;
+        });
+        expect(saveOverlayWithSchema(h.store, "2.0.0", { state: 12, agent: 19 })).toEqual({ ok: true });
+        writeStateDb(h.openclawDir, { userVersion: 15 });
+        return h;
+      };
+      const hard = mk();
+      const refused = await hard.sync.applyUpdate({ channel: "beta", version: "1.1.0-beta.1" });
+      expect(refused.status).toBeGreaterThanOrEqual(400);
+      expect(refused.body).toEqual(expect.objectContaining({ ok: false, code: "version_mismatch" }));
+      expect(refused.body.hint).toContain("Re-activate recorded build");
+      expect(seen.length).toBe(0);
+      expect(hard.store.readState().lastUpdateRun.steps).toContainEqual(
+        expect.objectContaining({ name: "backup", status: "failed", error: "version_mismatch" }),
+      );
+
+      const soft = mk();
+      // Same channel as the applied beta record — beta→stable would cross the boundary (#79 (a)).
+      const warned = await soft.sync.applyUpdate({ channel: "beta", version: "2.0.1" });
+      expect(warned.body?.code).not.toBe("version_mismatch");
+      expect(soft.store.readState().lastUpdateRun.steps).toContainEqual(
+        expect.objectContaining({ name: "backup", status: "warning", error: "version_mismatch" }),
+      );
+      expect(seen.length).toBe(0);
+    });
+
+    it("resolveExpectedBin names the recorded build's overlay bin while the tree diverges, null for dev or no overlay", () => {
+      const h = divergedHarness();
+      expect(h.sync.resolveExpectedBin()).toBe(
+        h.store.resolvePackageBin(h.store.overlayPackageDir("2.0.0")),
+      );
+      const missing = divergedHarness({ overlay: false });
+      expect(missing.sync.resolveExpectedBin()).toBeNull();
+      const dev = divergedHarness();
+      dev.store.updateState((s) => {
+        s.applied = { channel: "dev", sha: kDevSha, at: 1, acceptedAt: null };
+        return s;
+      });
+      expect(dev.sync.resolveExpectedBin()).toBeNull();
+      // The pin's own complete tree IS the expected bin when nothing is applied.
+      const pinned = divergedHarness({ expected: "1.0.0", overlay: false });
+      expect(pinned.sync.resolveExpectedBin()).toBe(
+        h.store.resolvePackageBin(path.join(pinned.installDir, "node_modules", "openclaw")),
+      );
+    });
+
+    it("compatibleBinForCurrentDb prefers the expected bin, falls back to the installed tree when the expected build cannot read the DBs, and is null when neither can", async () => {
+      const preferred = divergedHarness({ schema: { state: 15, agent: 19 } });
+      writeStateDb(preferred.openclawDir, { userVersion: 15 });
+      expect(await preferred.sync.compatibleBinForCurrentDb()).toEqual(
+        expect.objectContaining({ version: "2.0.0", source: "overlay", compatible: true }),
+      );
+
+      const fallback = divergedHarness({ schema: { state: 12, agent: 19 } });
+      writeStateDb(fallback.openclawDir, { userVersion: 15 });
+      // The installed tree declares nothing → unknown → fail-open pick.
+      expect(await fallback.sync.compatibleBinForCurrentDb()).toEqual(
+        expect.objectContaining({ version: "1.0.0", source: "installed", compatible: null }),
+      );
+
+      const neither = createHarness({
+        pin: "1.0.0",
+        installedVersion: "1.0.0",
+        sentinelVersion: "1.0.0",
+      });
+      // The INSTALLED tree declares a schema too old for the DB as well.
+      writeSchemaContractFixture(path.join(neither.installDir, "node_modules", "openclaw"), {
+        state: 10,
+        agent: 19,
+      });
+      neither.store.updateState((s) => {
+        s.pinVersion = "1.0.0";
+        s.applied = { channel: "beta", version: "2.0.0", at: 1, acceptedAt: null };
+        return s;
+      });
+      expect(saveOverlayWithSchema(neither.store, "2.0.0", { state: 12, agent: 19 })).toEqual({ ok: true });
+      writeStateDb(neither.openclawDir, { userVersion: 15 });
+      expect(await neither.sync.compatibleBinForCurrentDb()).toBeNull();
+    });
+  });
+
+  describe("undoLastConfigRestore (#76 B1.5)", () => {
+    const bootId = getProcessBootId();
+    const managedDir = (h) => h.store.managedDir;
+    const withRestore = (h, { restoreBootId = bootId, verdict = ["installed_not_expected"], report = true } = {}) => {
+      const configPath = path.join(h.openclawDir, "openclaw.json");
+      const preRestorePath = path.join(h.openclawDir, "openclaw.json.pre-restore-500.bak");
+      fs.mkdirSync(h.openclawDir, { recursive: true });
+      fs.writeFileSync(configPath, '{"live":true}\n');
+      fs.writeFileSync(preRestorePath, '{"preRestore":true}\n');
+      h.store.updateState((s) => {
+        s.configMigration = {
+          completedForVersion: "2.0.0",
+          lastAttempt: { version: "2.0.0", at: 1, ok: true, error: null },
+          lastRestore: {
+            at: 500,
+            from: "openclaw.json.pre-fix-1.0.0.bak",
+            previousCompletedForVersion: "1.0.0",
+            diffPath: null,
+            preRestorePath,
+            bootId: restoreBootId,
+            source: "crash_rollback",
+          },
+        };
+        return s;
+      });
+      if (report) {
+        fs.mkdirSync(managedDir(h), { recursive: true });
+        fs.writeFileSync(
+          path.join(managedDir(h), "boot-report.json"),
+          `${JSON.stringify({ bootId, serverPhase: { verdict } })}\n`,
+        );
+      }
+      return { configPath, preRestorePath };
+    };
+
+    it("undoes a restore THIS inconsistent boot performed: byte copy back, completedForVersion reset, record cleared, event + notification", async () => {
+      const insertEvent = vi.fn();
+      const h = createHarness({ pin: "1.0.0", installedVersion: "1.0.0", extraSyncOptions: { insertEvent } });
+      const { configPath, preRestorePath } = withRestore(h);
+      const result = h.sync.undoLastConfigRestore({ bootId });
+      expect(result).toEqual(
+        expect.objectContaining({ ok: true, restoredFrom: preRestorePath, completedForVersion: "1.0.0" }),
+      );
+      expect(fs.readFileSync(configPath, "utf8")).toBe('{"preRestore":true}\n');
+      const migration = h.store.readState().configMigration;
+      expect(migration.completedForVersion).toBe("1.0.0");
+      expect(migration.lastRestore).toBeNull();
+      expect(migration.lastAttempt).toEqual(expect.objectContaining({ version: "2.0.0", ok: true }));
+      expect(insertEvent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          eventType: "config_migration_gate",
+          status: "restore_undone",
+          details: expect.objectContaining({ bootId, completedForVersion: "1.0.0" }),
+        }),
+      );
+      await flushAsync();
+      expect(notifyMessages(h.notify).some((m) => m.includes("was undone"))).toBe(true);
+    });
+
+    it("declines for a consistent boot, a foreign boot, a missing record, and a missing pre-restore copy; an explicit inconsistent=true skips the report", () => {
+      const consistent = createHarness({ pin: "1.0.0", installedVersion: "1.0.0" });
+      const { configPath } = withRestore(consistent, { verdict: [] });
+      expect(consistent.sync.undoLastConfigRestore({ bootId })).toEqual(
+        expect.objectContaining({ ok: false, code: "boot_consistent" }),
+      );
+      expect(fs.readFileSync(configPath, "utf8")).toBe('{"live":true}\n');
+
+      const foreign = createHarness({ pin: "1.0.0", installedVersion: "1.0.0" });
+      withRestore(foreign, { restoreBootId: "999:1" });
+      expect(foreign.sync.undoLastConfigRestore({ bootId })).toEqual(
+        expect.objectContaining({ ok: false, code: "foreign_boot", restoreBootId: "999:1" }),
+      );
+
+      const none = createHarness({ pin: "1.0.0", installedVersion: "1.0.0" });
+      expect(none.sync.undoLastConfigRestore({ bootId })).toEqual({ ok: false, code: "no_restore" });
+
+      const gone = createHarness({ pin: "1.0.0", installedVersion: "1.0.0" });
+      const files = withRestore(gone);
+      fs.rmSync(files.preRestorePath);
+      expect(gone.sync.undoLastConfigRestore({ bootId })).toEqual(
+        expect.objectContaining({ ok: false, code: "pre_restore_missing" }),
+      );
+
+      // No report on disk, but the caller (structural repair) already holds
+      // the verdict.
+      const told = createHarness({ pin: "1.0.0", installedVersion: "1.0.0" });
+      const toldFiles = withRestore(told, { report: false });
+      expect(told.sync.undoLastConfigRestore({ bootId })).toEqual(
+        expect.objectContaining({ ok: false, code: "boot_consistent" }),
+      );
+      expect(told.sync.undoLastConfigRestore({ bootId, inconsistent: true }).ok).toBe(true);
+      expect(fs.readFileSync(toldFiles.configPath, "utf8")).toBe('{"preRestore":true}\n');
+    });
+  });
+
+  describe("requestForwardRecoveryAsync — schema-driven second path (#76 B1.4)", () => {
+    const pinHarness = () => {
+      const insertEvent = vi.fn();
+      const h = createHarness({
+        pin: "1.0.0",
+        installedVersion: "1.0.0",
+        sentinelVersion: "1.0.0",
+        extraSyncOptions: { insertEvent },
+      });
+      h.store.updateState((s) => {
+        s.pinVersion = "1.0.0";
+        return s;
+      });
+      return { ...h, insertEvent };
+    };
+
+    it("moves forward to the newest complete overlay whose declared schema can read the migrated state, without a blocklist entry", async () => {
+      vi.useFakeTimers();
+      const h = pinHarness();
+      writeStateDb(h.openclawDir, { userVersion: 15 });
+      expect(saveOverlayWithSchema(h.store, "2.0.0", { state: 12, agent: 19 })).toEqual({ ok: true });
+      expect(saveOverlayWithSchema(h.store, "3.0.0", { state: 15, agent: 19 })).toEqual({ ok: true });
+      const result = await h.sync.requestForwardRecoveryAsync({ exitCode: 78, installedVersion: "1.0.0" });
+      expect(result).toEqual({ ok: true, target: { kind: "package", channel: "stable", version: "3.0.0" } });
+      expect(h.store.readMarker()).toEqual(
+        expect.objectContaining({ reason: "forward_recovery", target: expect.objectContaining({ version: "3.0.0" }) }),
+      );
+      expect(h.store.readState().forwardRecovery).toEqual(
+        expect.objectContaining({ attemptedId: "3.0.0", clearedEntry: null, selection: "schema" }),
+      );
+      expect(h.insertEvent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          eventType: "forward_recovery",
+          status: "requested",
+          details: expect.objectContaining({ selection: "schema", installedVersion: "1.0.0" }),
+        }),
+      );
+      // Second cycle latches exactly like the blocklist path.
+      const again = await h.sync.requestForwardRecoveryAsync({ exitCode: 78 });
+      expect(again).toEqual(expect.objectContaining({ ok: false, code: "forward_already_attempted" }));
+      expect(h.store.readState().noBootableVersion).toEqual(expect.objectContaining({ attemptedId: "3.0.0" }));
+    });
+
+    it("prefers the blocklist path when it qualifies, and reports no_forward_candidate when no overlay can read the state", async () => {
+      vi.useFakeTimers();
+      const blocklisted = pinHarness();
+      expect(saveOverlayFixture(blocklisted.store, "2.5.0")).toEqual({ ok: true });
+      blocklisted.store.addBlocklist({ id: "2.5.0", reason: "config_error", exitCode: 78 });
+      const first = await blocklisted.sync.requestForwardRecoveryAsync({ exitCode: 78 });
+      expect(first.ok).toBe(true);
+      expect(blocklisted.store.readState().forwardRecovery).toEqual(
+        expect.objectContaining({ attemptedId: "2.5.0", selection: "blocklist" }),
+      );
+      expect(blocklisted.store.isBlocklisted("2.5.0")).toBe(false);
+
+      const none = pinHarness();
+      writeStateDb(none.openclawDir, { userVersion: 15 });
+      expect(saveOverlayWithSchema(none.store, "2.0.0", { state: 12, agent: 19 })).toEqual({ ok: true });
+      expect(await none.sync.requestForwardRecoveryAsync({ exitCode: 78 })).toEqual(
+        expect.objectContaining({ ok: false, code: "no_forward_candidate" }),
+      );
+      expect(none.store.readMarker()).toBeNull();
+      // The sync entry point is unchanged for the watchdog's inline call.
+      expect(none.sync.requestForwardRecovery({ exitCode: 78 })).toEqual(
+        expect.objectContaining({ ok: false, code: "no_forward_candidate" }),
+      );
+    });
   });
 });

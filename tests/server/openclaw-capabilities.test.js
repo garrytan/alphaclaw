@@ -548,3 +548,253 @@ describe("server/openclaw-capabilities buzz probe (5.2)", () => {
     });
   });
 });
+
+// Issue #76 C6: while the watchdog has a versionMismatch latched, probes must
+// run the EXPECTED overlay's bin (the one that can read the current DBs), not
+// the diverged `openclaw` on PATH. The layer takes a `resolveBin()` seam plus
+// commands.js's `clawCmdWithBin`; the cache key and the CLI-unavailable
+// suppression window are scoped to the bin so the two binaries never share an
+// answer or a blackout.
+describe("server/openclaw-capabilities alternate binary while a version mismatch is latched (#76 C6)", () => {
+  const {
+    createOpenclawCapabilities,
+    kCliUnavailableTtlMs,
+    kAllTimedOutTtlMs,
+    kTimedOutTtlMs,
+  } = require("../../lib/server/openclaw-capabilities");
+  const ok = (stdout = "", stderr = "") => ({ ok: true, stdout, stderr });
+  const fail = (stdout = "", stderr = "") => ({ ok: false, stdout, stderr, code: 1 });
+  const kExpectedBin = "/opt/alphaclaw/openclaw-overlays/2026.9.2/bin/openclaw.js";
+  const kCrash =
+    "Could not start the CLI.\nReason: Unable to resolve bundled plugin public surface codex/api.js";
+
+  it("requires clawCmdWithBin alongside resolveBin, and a function-typed resolveBin", () => {
+    expect(() =>
+      createOpenclawCapabilities({ clawCmd: async () => ok(), resolveBin: () => null }),
+    ).toThrow(/requires a clawCmdWithBin/);
+    expect(() =>
+      createOpenclawCapabilities({
+        clawCmd: async () => ok(),
+        resolveBin: kExpectedBin,
+        clawCmdWithBin: async () => ok(),
+      }),
+    ).toThrow(/resolveBin must be a function/);
+    // Without the seam the layer is exactly today's: clawCmdWithBin alone is
+    // inert.
+    expect(() =>
+      createOpenclawCapabilities({ clawCmd: async () => ok(), clawCmdWithBin: async () => ok() }),
+    ).not.toThrow();
+  });
+
+  it("with no mismatch (resolveBin → null) every probe goes through clawCmd; clawCmdWithBin is never called", async () => {
+    const clawCmd = vi.fn(async () => ok("Usage: openclaw backup sqlite ..."));
+    const clawCmdWithBin = vi.fn(async () => ok("Usage: ..."));
+    const caps = createOpenclawCapabilities({
+      clawCmd,
+      clawCmdWithBin,
+      resolveBin: () => null,
+      getInstalledVersion: () => "2026.9.1",
+    });
+    expect(await caps.get("backupSqlite")).toBe(true);
+    expect(clawCmd).toHaveBeenCalledTimes(1);
+    expect(clawCmdWithBin).not.toHaveBeenCalled();
+  });
+
+  it("while the seam names a bin, probes run through clawCmdWithBin(bin, cmd, opts) with the probe's own options (and per-call cmdOpts); clawCmd is untouched", async () => {
+    const clawCmd = vi.fn(async () => fail("", kCrash));
+    const clawCmdWithBin = vi.fn(async () =>
+      ok("Usage: openclaw gateway stop [options]\n\nOptions:\n  --force     Allow stop from a non-interactive shell\n"),
+    );
+    const caps = createOpenclawCapabilities({
+      clawCmd,
+      clawCmdWithBin,
+      resolveBin: () => kExpectedBin,
+      getInstalledVersion: () => "2026.9.1",
+    });
+    expect(await caps.get("gatewayStopForce")).toBe("supported");
+    expect(clawCmdWithBin).toHaveBeenCalledWith(kExpectedBin, "gateway stop --help", {
+      quiet: true,
+      timeoutMs: 10000,
+    });
+    expect(clawCmd).not.toHaveBeenCalled();
+    // Per-call cmdOpts (the shutdown stop's budget) still ride over the
+    // probe's options on the alternate bin.
+    caps.invalidate("gatewayStopForce");
+    await caps.get("gatewayStopForce", { cmdOpts: { abortable: false, timeoutMs: 5000 } });
+    expect(clawCmdWithBin).toHaveBeenLastCalledWith(kExpectedBin, "gateway stop --help", {
+      quiet: true,
+      timeoutMs: 5000,
+      abortable: false,
+    });
+  });
+
+  it("the cache key includes the bin: a PATH answer is never served for the expected bin at the same installed version, and the redirected answer is dropped when the mismatch clears", async () => {
+    // The incident shape: the diverged PATH tree reports the version the
+    // cache is keyed on, and its answers differ from the expected bin's.
+    let bin = null;
+    const clawCmd = vi.fn(async () => ok("Usage: openclaw approvals [options]\n  get\n  set\n"));
+    const clawCmdWithBin = vi.fn(async () =>
+      ok("Usage: openclaw approvals [options]\n  get\n  set\n  pending [options]\n"),
+    );
+    const caps = createOpenclawCapabilities({
+      clawCmd,
+      clawCmdWithBin,
+      resolveBin: () => bin,
+      getInstalledVersion: () => "2026.9.1",
+    });
+    // Determinate answer cached for (version, PATH).
+    expect(await caps.get("execApprovalsSqlite")).toBe("file");
+    expect(await caps.get("execApprovalsSqlite")).toBe("file");
+    expect(clawCmd).toHaveBeenCalledTimes(1);
+    // Mismatch latches: same version string, different bin → re-probed there.
+    bin = kExpectedBin;
+    expect(await caps.get("execApprovalsSqlite")).toBe("sqlite");
+    expect(await caps.get("execApprovalsSqlite")).toBe("sqlite");
+    expect(clawCmdWithBin).toHaveBeenCalledTimes(1);
+    expect(clawCmd).toHaveBeenCalledTimes(1);
+    // Mismatch clears (tree reconciled, or the latch dropped): the alternate
+    // bin's answer is not served for PATH — probed again through clawCmd.
+    bin = null;
+    expect(await caps.get("execApprovalsSqlite")).toBe("file");
+    expect(clawCmd).toHaveBeenCalledTimes(2);
+    expect(clawCmdWithBin).toHaveBeenCalledTimes(1);
+    // One slot per capability key regardless of how many bins answered it.
+    expect(caps._cacheSize()).toBe(1);
+  });
+
+  it("a startup-crash suppression armed by the PATH binary does not silence probes against the expected bin — and stays in force for PATH", async () => {
+    // Exactly #76: the wrong binary on PATH dies with a plugin-API mismatch
+    // (arming the 30-min window), the mismatch latches, and the rescue path
+    // redirects probes to the expected bin. Without bin scoping every probe
+    // there would serve falsy for half an hour.
+    let clock = 0;
+    let bin = null;
+    const clawCmd = vi.fn(async () => fail("", kCrash));
+    const clawCmdWithBin = vi.fn(async () => ok("Usage: openclaw backup sqlite ..."));
+    const warn = vi.fn();
+    const caps = createOpenclawCapabilities({
+      clawCmd,
+      clawCmdWithBin,
+      resolveBin: () => bin,
+      getInstalledVersion: () => "2026.9.1",
+      nowFn: () => clock,
+      logger: { warn },
+    });
+    expect(await caps.get("backupSqlite")).toBe(false); // arms the PATH window
+    expect(await caps.get("secretsStore")).toBe(false); // suppressed: no spawn
+    expect(clawCmd).toHaveBeenCalledTimes(1);
+
+    bin = kExpectedBin;
+    expect(await caps.get("backupSqlite")).toBe(true);
+    expect(await caps.get("secretsStore")).toBe(true);
+    expect(clawCmdWithBin).toHaveBeenCalledTimes(2);
+
+    // Back on PATH inside the window: still suppressed (the alternate bin's
+    // positives are not served for PATH; the miss serves falsy, no spawn).
+    bin = null;
+    clock += kCliUnavailableTtlMs - 1;
+    expect(await caps.get("backupSqlite")).toBe(false);
+    expect(await caps.get("updateRepair")).toBe(false);
+    expect(clawCmd).toHaveBeenCalledTimes(1);
+    // A full invalidation (channel apply/rollback) resets the window and its
+    // bin scope.
+    caps.invalidate();
+    clawCmd.mockResolvedValue(ok("Usage: ..."));
+    expect(await caps.get("updateRepair")).toBe(true);
+    expect(clawCmd).toHaveBeenCalledTimes(2);
+  });
+
+  it("the hang-class all-timeout window is scoped to the bin that hung", async () => {
+    let clock = 0;
+    let bin = kExpectedBin;
+    const timedOut = { ok: false, stdout: "", stderr: "", code: null, timedOut: true };
+    const clawCmdWithBin = vi.fn(async () => timedOut);
+    const clawCmd = vi.fn(async () => ok("Usage: ..."));
+    const caps = createOpenclawCapabilities({
+      clawCmd,
+      clawCmdWithBin,
+      resolveBin: () => bin,
+      getInstalledVersion: () => "2026.9.1",
+      nowFn: () => clock,
+      logger: { warn: vi.fn() },
+    });
+    await caps.getAll(); // every probe on the alternate bin times out → window
+    const spawnsOnBin = clawCmdWithBin.mock.calls.length;
+    expect(spawnsOnBin).toBeGreaterThan(0);
+    clock += kTimedOutTtlMs + 1;
+    await caps.getAll();
+    expect(clawCmdWithBin.mock.calls.length).toBe(spawnsOnBin);
+    expect(clock).toBeLessThan(kAllTimedOutTtlMs);
+    // PATH openclaw was never observed hanging: probes there spawn.
+    bin = null;
+    expect(await caps.get("backupSqlite")).toBe(true);
+    expect(clawCmd).toHaveBeenCalledTimes(1);
+  });
+
+  it("windows for the two binaries coexist: arming one never clears the other", async () => {
+    let clock = 0;
+    let bin = null;
+    const timedOut = { ok: false, stdout: "", stderr: "", code: null, timedOut: true };
+    const clawCmd = vi.fn(async () => fail("", kCrash));
+    const clawCmdWithBin = vi.fn(async () => timedOut);
+    const caps = createOpenclawCapabilities({
+      clawCmd,
+      clawCmdWithBin,
+      resolveBin: () => bin,
+      getInstalledVersion: () => "2026.9.1",
+      nowFn: () => clock,
+      logger: { warn: vi.fn() },
+    });
+    await caps.get("backupSqlite"); // PATH: startup crash → 30-min window
+    bin = kExpectedBin;
+    await caps.getAll(); // expected bin: every probe hangs → 5-min window
+    const binSpawns = clawCmdWithBin.mock.calls.length;
+    const pathSpawns = clawCmd.mock.calls.length;
+    // Both windows hold at once.
+    clock += kTimedOutTtlMs + 1;
+    await caps.get("secretsStore");
+    bin = null;
+    await caps.get("secretsStore");
+    expect(clawCmdWithBin.mock.calls.length).toBe(binSpawns);
+    expect(clawCmd.mock.calls.length).toBe(pathSpawns);
+    // The shorter (hang) window expires first — only ITS bin resumes probing.
+    clock += kAllTimedOutTtlMs;
+    bin = kExpectedBin;
+    await caps.get("secretsStore");
+    expect(clawCmdWithBin.mock.calls.length).toBe(binSpawns + 1);
+    bin = null;
+    await caps.get("updateRepair");
+    expect(clawCmd.mock.calls.length).toBe(pathSpawns);
+    expect(clock).toBeLessThan(kCliUnavailableTtlMs);
+  });
+
+  it("a throwing resolveBin is logged and degrades to the PATH openclaw", async () => {
+    const warn = vi.fn();
+    const clawCmd = vi.fn(async () => ok("Usage: ..."));
+    const clawCmdWithBin = vi.fn();
+    const caps = createOpenclawCapabilities({
+      clawCmd,
+      clawCmdWithBin,
+      resolveBin: () => {
+        throw new Error("channel state unreadable");
+      },
+      getInstalledVersion: () => "2026.9.1",
+      logger: { warn },
+    });
+    expect(await caps.get("secretsStore")).toBe(true);
+    expect(clawCmd).toHaveBeenCalledTimes(1);
+    expect(clawCmdWithBin).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringMatching(/resolveBin failed \(channel state unreadable\)/),
+    );
+    // A non-string / blank answer is "no alternate", not a bin named "".
+    const blank = createOpenclawCapabilities({
+      clawCmd,
+      clawCmdWithBin,
+      resolveBin: () => "   ",
+      getInstalledVersion: () => "2026.9.1",
+    });
+    expect(await blank.get("secretsStore")).toBe(true);
+    expect(clawCmdWithBin).not.toHaveBeenCalled();
+  });
+});

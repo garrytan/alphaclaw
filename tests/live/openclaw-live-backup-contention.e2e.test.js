@@ -1,4 +1,5 @@
-// LIVE TIER — issue #54 reproduced against the REAL upstream CLIs.
+// LIVE TIER — issue #54 reproduced against the REAL upstream CLIs, on the
+// copy-first ladder of issue #79.
 //
 // The incident: a downgrade's quiesced pre-update backup died when OpenClaw's
 // legacy-audit migration lost its SQLite state lease to a concurrent writer
@@ -7,17 +8,28 @@
 // attempt. This tier drives runBackup (lib/server/openclaw-channel-sync.js)
 // through the real quiesced ladder while THIS process holds SQLite's RESERVED
 // lock (BEGIN IMMEDIATE) on state/openclaw.sqlite — the exact shape of the
-// writer that cost #54 its lease — and asserts the run record:
-//   1. real 2026.9.1-beta.1, lock released when the RETRY spawns →
-//      `lock_contention` classified, one in-quiesce retry, verified UPSTREAM
-//      artifact that passes the usable check;
-//   2. real beta, lock held for the whole step → retries exhausted (2), then
-//      the AlphaClaw OFFLINE COPY stands in (producer alphaclaw-offline-copy,
-//      exclusivity evidence, verified);
-//   3. the pin 2026.7.1-2 under the same held lock → no lease, no contention:
-//      it finishes on attempt 1 (the container tier's journey runs the pin's
-//      backup, so its contention assertion is calibrated on this fact);
-//   4. the offline-copy manifest's core field set matches upstream's (beta).
+// writer that cost #54 its lease — and asserts the run record.
+//
+// Since #79 (c) the AlphaClaw OFFLINE COPY is the FIRST rung of every pause
+// and, against a held RESERVED lock, it simply succeeds (sqlite backup()
+// reads under that lock), so the real upstream CLI runs paused only when the
+// harness fails the copy's archive step (`failOfflineCopy`) and the
+// prediction says the upstream fits — the same arm the hermetic tier's
+// `failCopyArchive` exercises. The cells:
+//   1. real 2026.9.1-beta.1, copy failed at `archive`, lock released when the
+//      in-quiesce upstream RETRY spawns → `lock_contention` classified, one
+//      in-quiesce retry, verified UPSTREAM artifact that passes the usable
+//      check; `offlineCopy.next` names the hand-over (`predicted_fits`);
+//   2. real beta, lock held for the whole step, copy NOT failed → the copy
+//      stands in on its own with ZERO upstream attempts (producer
+//      alphaclaw-offline-copy, format 2, exclusivity evidence, verified) —
+//      the incident's fix in its purest form;
+//   3. the pin 2026.7.1-2 under the same held lock, copy failed → no lease,
+//      no contention: the paused upstream finishes on attempt 1 (the
+//      container tier's journey runs the pin's backup, so its contention
+//      assertion is calibrated on this fact);
+//   4. the offline-copy manifest's core field set matches upstream's (beta)
+//      plus exactly the documented AlphaClaw keys (format 2).
 //
 // Verified upstream facts these tests encode (dist read + live probes,
 // 2026-09-02): the lease engages ONLY when a legacy audit source exists
@@ -61,8 +73,8 @@ const describeLive = kLiveEnabled ? describe : describe.skip;
 
 const kInstallTimeoutMs = 8 * 60 * 1000;
 const kSetupTimeoutMs = 12 * 60 * 1000;
-// One beta attempt under contention is ~11 s; the ladder here runs up to
-// three of them plus a shortened backoff and the offline copy.
+// One beta attempt under contention is ~11 s; cell 1 runs two of them plus
+// a shortened backoff after the (failed) offline copy's walk.
 const kContentionTestTimeoutMs = 6 * 60 * 1000;
 // Shrunk from the production 15 s → 30 s so the tier stays minutes, not
 // tens of minutes; the verdict logic (contentionRetryVerdict) is unchanged.
@@ -102,9 +114,11 @@ const backupStepDetails = (harness) =>
     .filter((step) => step.name === "backup")
     .map((step) => `${step.status}: ${step.detail || step.error || ""}`);
 
-// Artifacts handed from the ladder tests to the manifest-contract test; a
-// missing one FAILS that test with the cause instead of skipping it.
-const produced = { upstream: null, offlineCopy: null, offlineCopyLog: null };
+// Artifacts handed from the ladder tests to the manifest-contract and the
+// lease-line tests; a missing one FAILS that test with the cause instead of
+// skipping it. `contentionLog` is cell 1's run log (the only cell whose real
+// CLI attempts ran under the lock and printed the lease text).
+const produced = { upstream: null, offlineCopy: null, contentionLog: null };
 
 describeLive("LIVE #54 reproduction: runBackup vs real CLIs under SQLite lock contention", () => {
   let beta;
@@ -129,13 +143,16 @@ describeLive("LIVE #54 reproduction: runBackup vs real CLIs under SQLite lock co
     });
 
   it(
-    "real beta: a held RESERVED lock costs attempt 1 its lease; the in-quiesce retry lands a verified upstream archive once the lock is released",
+    "real beta: copy failed at archive → the paused upstream runs; a held RESERVED lock costs attempt 1 its lease; the in-quiesce retry lands a verified upstream archive once the lock is released",
     { timeout: kContentionTestTimeoutMs },
     async () => {
       let lock = null;
       const gatewayQuiesce = createQuiesceFake();
       const harness = betaHarness({
         gatewayQuiesce,
+        // Copy-first: fail the copy's archive step so the REAL upstream runs
+        // paused (a fixture-sized tree predicts a fit).
+        failOfflineCopy: true,
         // Release the lock the moment the RETRY spawns: attempt 1 fails on
         // the lease, attempt 2 must succeed. Never released before that.
         onBackupSpawn: (count) => {
@@ -154,15 +171,32 @@ describeLive("LIVE #54 reproduction: runBackup vs real CLIs under SQLite lock co
         console.log(
           `[live-contention beta/retry] ${elapsedMs} ms; attempts=${record.attempts} quiescedAttempts=${record.quiescedAttempts} contentionRetries=${record.contentionRetries} producer=${record.producer}`,
         );
-        // Hand the artifact to the manifest-contract test first: a later
-        // assertion failing here must not turn that test into a false miss.
+        // Hand the artifact and the log to the contract tests first: a later
+        // assertion failing here must not turn those into a false miss.
         if (record.file) produced.upstream = record.file;
+        produced.contentionLog = readRunLog(harness.openclawDir);
         expect(record.noBackup).toBe(false);
         expect(record.quiesced).toBe(true);
         expect(record.attempts).toBe(2);
         expect(record.quiescedAttempts).toBe(2);
         expect(record.contentionRetries).toBe(1);
-        expect(record.offlineCopy).toBeNull();
+        // The copy ran FIRST, failed at its archive step (the harness arm),
+        // and handed over to the paused upstream because it was predicted to
+        // fit; `next` is the hand-over on the record.
+        expect(harness.offlineCopyArchiveSpawns).toHaveLength(1);
+        expect(record.offlineCopy).toEqual(
+          expect.objectContaining({
+            ok: false,
+            reason: "primary",
+            stage: "archive",
+            next: { rung: "upstream", reason: "predicted_fits" },
+          }),
+        );
+        expect(record.attemptsDetail.map((a) => [a.rung, a.reason, a.quiesced, a.ok])).toEqual([
+          ["offline_copy", "primary", true, false],
+          ["upstream", "predicted_fits", true, false],
+          ["upstream", "contention_retry", true, true],
+        ]);
         expect(record.verified).toBe(true);
         expect(record.usableCheck).toBe("manifest_ok");
         expect(record.producer).toBe(kUpstreamProducer);
@@ -173,9 +207,16 @@ describeLive("LIVE #54 reproduction: runBackup vs real CLIs under SQLite lock co
         expect(record.diagnosis.dbCount).toBe(1);
         expect(record.diagnosis.journalMode).toBe("wal");
 
-        // The step stream told the operator WHY it retried, in the wording
-        // WI-1.8/1.9 fixed, and the retry ran with the gateway still paused.
+        // The step stream told the operator WHY each paused rung ran, in the
+        // wording WI-1.8/1.9 fixed: the first upstream row names the failed
+        // copy, the retry ran with the gateway still paused.
         const details = backupStepDetails(harness);
+        expect(details.join("\n")).toMatch(
+          /pausing the gateway for a consistent backup \(AlphaClaw offline copy first\)/,
+        );
+        expect(details.join("\n")).toMatch(
+          /offline copy failed \(archive\) — upstream backup predicted to fit the pause, gateway still paused/,
+        );
         expect(details.join("\n")).toMatch(
           /retrying after state-database lock contention \(gateway still paused\)/,
         );
@@ -201,7 +242,7 @@ describeLive("LIVE #54 reproduction: runBackup vs real CLIs under SQLite lock co
   );
 
   it(
-    "real beta: a lock held for the whole step exhausts both in-quiesce retries and the AlphaClaw offline copy stands in (verified, exclusivity evidence)",
+    "real beta: a lock held for the whole step never reaches the upstream CLI — the AlphaClaw offline copy is the FIRST rung and stands in on its own (verified, format 2, exclusivity evidence)",
     { timeout: kContentionTestTimeoutMs },
     async () => {
       const gatewayQuiesce = createQuiesceFake();
@@ -218,19 +259,28 @@ describeLive("LIVE #54 reproduction: runBackup vs real CLIs under SQLite lock co
           `[live-contention beta/offline-copy] ${elapsedMs} ms; attempts=${record.attempts} contentionRetries=${record.contentionRetries} offlineCopy=${JSON.stringify(record.offlineCopy)} bytes=${record.bytes}`,
         );
         if (record.file) produced.offlineCopy = record.file;
-        produced.offlineCopyLog = readRunLog(harness.openclawDir);
         expect(record.noBackup).toBe(false);
         expect(record.quiesced).toBe(true);
-        // 1 attempt + kOpenclawBackupContentionRetries (2) retries, all paused.
-        expect(record.attempts).toBe(3);
-        expect(record.quiescedAttempts).toBe(3);
-        expect(record.contentionRetries).toBe(2);
-        expect(harness.backupSpawns).toHaveLength(3);
-        // Then the offline copy — still quiesced, on the still-locked DB:
-        // SQLite's online backup() reads under a held RESERVED lock.
+        // Copy-first: the lock that cost #54 its lease is never even met by
+        // the upstream — no CLI attempt ran, paused or live.
+        expect(record.attempts).toBe(0);
+        expect(record.quiescedAttempts).toBe(0);
+        expect(record.contentionRetries).toBe(0);
+        expect(harness.backupSpawns).toHaveLength(0);
+        expect(record.attemptsDetail).toEqual([
+          expect.objectContaining({ rung: "offline_copy", reason: "primary", quiesced: true, ok: true }),
+        ]);
+        // The offline copy — quiesced, on the still-locked DB: SQLite's
+        // online backup() reads under a held RESERVED lock.
         expect(record.offlineCopy).toEqual(
-          expect.objectContaining({ ok: true, reason: "lock_contention", partial: false }),
+          expect.objectContaining({
+            ok: true,
+            reason: "primary",
+            partial: false,
+            coverage: { core: "complete", workspace: "complete" },
+          }),
         );
+        expect(record.offlineCopy.next).toBeUndefined();
         expect(record.producer).toBe(kOfflineCopyProducer);
         expect(record.file).toMatch(/openclaw-backup-.*\.alphaclaw\.tar\.gz$/);
         expect(record.verified).toBe(true);
@@ -253,17 +303,21 @@ describeLive("LIVE #54 reproduction: runBackup vs real CLIs under SQLite lock co
             platform: "linux",
           }),
         );
+        // WI-1.9: ONE initial running row (it names the copy-first path) and
+        // a success detail WITHOUT an attempt clause — "after 0 upstream
+        // attempts" would misread as "nothing was attempted".
         const details = backupStepDetails(harness).join("\n");
-        expect(details).toMatch(/taking an AlphaClaw offline copy of the paused state/);
         expect(details).toMatch(
-          /succeeded via AlphaClaw offline copy after 3 upstream attempts \(gateway paused\)/,
+          /running: pausing the gateway for a consistent backup \(AlphaClaw offline copy first\)/,
         );
-        // The archive is the documented format: manifest with producer +
+        expect(details).toMatch(/completed: succeeded via AlphaClaw offline copy \(gateway paused\)/);
+        expect(details).not.toMatch(/upstream attempts?/);
+        // The archive is the documented format 2: manifest with producer +
         // format version, the state DB listed as a sqlite asset, the
-        // evidence embedded.
+        // evidence embedded, the policy and the coverage stated.
         const manifest = readArchiveManifest(record.file);
         expect(manifest.producer).toBe(kOfflineCopyProducer);
-        expect(manifest.alphaclawFormatVersion).toBe(1);
+        expect(manifest.alphaclawFormatVersion).toBe(2);
         expect(manifest.schemaVersion).toBe(1);
         expect(
           manifest.assets.some(
@@ -272,13 +326,17 @@ describeLive("LIVE #54 reproduction: runBackup vs real CLIs under SQLite lock co
         ).toBe(true);
         expect(manifest.exclusivityEvidence.fdScan).toBe("clean");
         expect(manifest.diagnosis.dbCount).toBe(1);
-        // Every failed attempt printed the real lease text (three attempts,
-        // three timeouts, lock-wait heartbeats above each).
-        const timeoutLines = produced.offlineCopyLog
-          .split(/\r?\n/)
-          .filter((line) => kLeaseTimeoutLinePattern.test(line));
-        expect(timeoutLines).toHaveLength(3);
-        expect(produced.offlineCopyLog).toMatch(kLockWaitLinePattern);
+        expect(manifest.coverage).toEqual({ core: "complete", workspace: "complete" });
+        expect(manifest.excludes.map((row) => row.pattern)).toEqual([
+          "node_modules",
+          "*.heapsnapshot",
+          "*.tmp",
+          "logs/**/*.gz",
+        ]);
+        // No upstream ran: the run log carries no lease text at all.
+        const log = readRunLog(harness.openclawDir);
+        expect(log).not.toMatch(kLeaseTimeoutLinePattern);
+        expect(log).not.toMatch(kLockWaitLinePattern);
       } finally {
         lock.release();
       }
@@ -288,15 +346,15 @@ describeLive("LIVE #54 reproduction: runBackup vs real CLIs under SQLite lock co
   it(
     "the upstream lease-TIMEOUT line classifies as contention ON ITS OWN (its label has spaces)",
     () => {
-      // Attempts 1-3 above fail with the same three shapes: N×"SQLite
+      // Cell 1's failed paused attempt prints the three shapes: N×"SQLite
       // transaction lock wait failed", "Warning: the backup outcome could
       // not be recorded: database is locked", and the lease-timeout line.
       // The 20-line classifier window catches the first two today, so the
       // ladder retried — but a run whose lock clears between the lease wait
       // and the outcome write leaves ONLY the timeout line, and that must
       // classify too, or #54's class (terminal `generic`) comes back.
-      expect(produced.offlineCopyLog, "the offline-copy test did not record a log").toBeTruthy();
-      const lines = produced.offlineCopyLog.split(/\r?\n/);
+      expect(produced.contentionLog, "the contention retry test did not record a log").toBeTruthy();
+      const lines = produced.contentionLog.split(/\r?\n/);
       const timeoutLine = lines.find((line) => kLeaseTimeoutLinePattern.test(line));
       expect(timeoutLine, "the real CLI did not print the lease-timeout line").toBeTruthy();
       expect(kStateContentionPattern.test(timeoutLine)).toBe(true);
@@ -311,14 +369,16 @@ describeLive("LIVE #54 reproduction: runBackup vs real CLIs under SQLite lock co
   );
 
   it(
-    `the pin ${kOpenclawLines.pin} under the same held lock takes no lease: attempt 1 succeeds, no contention retry`,
+    `the pin ${kOpenclawLines.pin} under the same held lock takes no lease: the paused attempt 1 (after a failed copy) succeeds, no contention retry`,
     { timeout: kContentionTestTimeoutMs },
     async () => {
       const gatewayQuiesce = createQuiesceFake();
       // Pin fixture: both DBs (the pin archives any SQLite file) and the
-      // legacy audit log (which the pin ignores — no lease code).
+      // legacy audit log (which the pin ignores — no lease code). The copy
+      // is failed at its archive step so the pin's REAL CLI runs paused.
       const harness = createLiveBackupHarness({
         gatewayQuiesce,
+        failOfflineCopy: true,
         fixture: { jsonlFiles: 20, lockFiles: 0, legacyAuditLog: true },
         backupTuning: { contentionBackoffBaseMs: kFastContentionBackoffMs },
       });
@@ -335,7 +395,13 @@ describeLive("LIVE #54 reproduction: runBackup vs real CLIs under SQLite lock co
         expect(record.attempts).toBe(1);
         expect(record.quiescedAttempts).toBe(1);
         expect(record.contentionRetries).toBe(0);
-        expect(record.offlineCopy).toBeNull();
+        expect(record.offlineCopy).toEqual(
+          expect.objectContaining({
+            ok: false,
+            stage: "archive",
+            next: { rung: "upstream", reason: "predicted_fits" },
+          }),
+        );
         expect(record.producer).toBe(kUpstreamProducer);
         expect(record.verified).toBe(true);
         expect(record.usableCheck).toBe("manifest_ok");
@@ -359,8 +425,9 @@ describeLive("LIVE #54 reproduction: runBackup vs real CLIs under SQLite lock co
       const offline = readArchiveManifest(produced.offlineCopy);
 
       // Upstream (2026.9.1-beta.1) schemaVersion-1 core: every key it writes
-      // is present in ours; ours adds exactly the documented five
-      // (docs/designs/backup-offline-copy.md §3).
+      // is present in ours; ours adds exactly the documented seven — format
+      // 2 added `excludes` and `coverage` (docs/designs/backup-offline-copy.md
+      // §3, §7).
       expect(upstream.schemaVersion).toBe(1);
       expect(offline.schemaVersion).toBe(1);
       const upstreamKeys = Object.keys(upstream).sort();
@@ -369,7 +436,15 @@ describeLive("LIVE #54 reproduction: runBackup vs real CLIs under SQLite lock co
       expect(missingInOffline, `upstream manifest keys missing from the offline copy: ${missingInOffline}`).toEqual([]);
       const alphaclawOnly = offlineKeys.filter((key) => !upstreamKeys.includes(key)).sort();
       expect(alphaclawOnly).toEqual(
-        ["alphaclawFormatVersion", "diagnosis", "exclusivityEvidence", "partialReasons", "producer"].sort(),
+        [
+          "alphaclawFormatVersion",
+          "coverage",
+          "diagnosis",
+          "excludes",
+          "exclusivityEvidence",
+          "partialReasons",
+          "producer",
+        ].sort(),
       );
       // paths.* and options.* core keys.
       const upstreamPathKeys = Object.keys(upstream.paths).sort();

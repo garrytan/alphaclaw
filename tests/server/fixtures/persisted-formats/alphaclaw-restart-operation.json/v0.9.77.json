@@ -1,0 +1,24 @@
+{
+  "operationId": "0a1b2c3d-4e5f-4a6b-8c7d-8e9f0a1b2c3d",
+  "kind": "gateway_restart",
+  "startedAt": 1788681570000,
+  "bootId": "7:1788681600000",
+  "expiresAt": 1788682200000,
+  "status": "failed",
+  "lastStep": "waiting_for_gateway",
+  "errorSummary": "gateway exited (code 1) before becoming healthy",
+  "completedAt": 1788681590000,
+  "reasonsSnapshot": [
+    "env_vars_changed"
+  ],
+  "stateDb": {
+    "userVersion": 15,
+    "agentUserVersions": [
+      19,
+      19
+    ]
+  },
+  "code": null,
+  "evidenceTail": "[state-db] user_version 15 is newer than this build supports (1)\n",
+  "cause": "state_schema_too_new"
+}

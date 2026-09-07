@@ -382,3 +382,114 @@ describe("server/watchdog-db", () => {
     expect(remaining).toBe(1);
   });
 });
+
+describe("server/watchdog-db incident cause/severity columns (#76 A3/A4)", () => {
+  const legacyIncidentsSchema = `
+    CREATE TABLE watchdog_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      event_type TEXT NOT NULL,
+      source TEXT NOT NULL,
+      status TEXT NOT NULL,
+      details TEXT,
+      correlation_id TEXT,
+      created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+      incident_id INTEGER
+    );
+    CREATE TABLE watchdog_incidents (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      incident_key TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'open',
+      opened_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+      resolved_at TEXT,
+      summary_json TEXT,
+      overseer_json TEXT
+    );
+    INSERT INTO watchdog_incidents (incident_key, status) VALUES ('gateway_crash', 'open');
+  `;
+
+  const incidentColumns = (dbPath) => {
+    const probe = new DatabaseSync(dbPath, { readOnly: true });
+    try {
+      return probe
+        .prepare("SELECT name FROM pragma_table_info('watchdog_incidents')")
+        .all()
+        .map((row) => row.name);
+    } finally {
+      probe.close();
+    }
+  };
+
+  it("adds cause_json and severity to a pre-#76 incidents table, idempotently, and legacy rows read null", () => {
+    currentRootDir = fs.mkdtempSync(path.join(os.tmpdir(), "watchdog-db-cause-"));
+    const dbDir = path.join(currentRootDir, "db");
+    fs.mkdirSync(dbDir, { recursive: true });
+    const dbPath = path.join(dbDir, "watchdog.db");
+    const legacy = new DatabaseSync(dbPath);
+    legacy.exec(legacyIncidentsSchema);
+    legacy.close();
+    expect(incidentColumns(dbPath)).not.toContain("cause_json");
+
+    currentWatchdogDb = loadWatchdogDb();
+    currentWatchdogDb.initWatchdogDb({ rootDir: currentRootDir, pruneDays: 30 });
+    expect(incidentColumns(dbPath)).toEqual(
+      expect.arrayContaining(["cause_json", "severity"]),
+    );
+    // Re-init on the migrated file: ALTER TABLE is pragma-guarded, no throw.
+    currentWatchdogDb.initWatchdogDb({ rootDir: currentRootDir, pruneDays: 30 });
+    expect(incidentColumns(dbPath).filter((name) => name === "severity")).toHaveLength(1);
+
+    // The legacy open row reads null for both (never undefined, never a throw).
+    const open = currentWatchdogDb.getOpenIncident();
+    expect(open).toMatchObject({ incidentKey: "gateway_crash", severity: null, cause: null });
+    expect(currentWatchdogDb.getIncidentById(open.id)).toMatchObject({
+      cause: null,
+      severity: null,
+    });
+    expect(currentWatchdogDb.listIncidents()[0]).toMatchObject({ cause: null, severity: null });
+  });
+
+  it("updateIncidentCause / updateIncidentSeverity write the columns and every read surface exposes them", () => {
+    const db = createWatchdogDbContext("watchdog-db-cause-rw-");
+    const incidentId = db.insertIncident({ incidentKey: "gateway_crash" });
+    const cause = {
+      cause: "state_schema_too_new",
+      fingerprint: "0123456789ab",
+      corroborated: true,
+      by: "user_version",
+      suspectedCause: null,
+      at: "2026-09-06T12:00:00.000Z",
+    };
+    expect(db.updateIncidentCause(incidentId, cause)).toBe(true);
+    expect(db.updateIncidentSeverity(incidentId, "critical")).toBe(true);
+
+    expect(db.getOpenIncident()).toMatchObject({ id: incidentId, severity: "critical", cause });
+    expect(db.getIncidentById(incidentId)).toMatchObject({ severity: "critical", cause });
+    expect(db.listIncidents()[0]).toMatchObject({ severity: "critical", cause });
+
+    // Unknown ids change nothing; null clears the cause.
+    expect(db.updateIncidentCause(999_999, cause)).toBe(false);
+    expect(db.updateIncidentSeverity(999_999, "warning")).toBe(false);
+    expect(db.updateIncidentCause(incidentId, null)).toBe(true);
+    expect(db.getIncidentById(incidentId).cause).toBeNull();
+
+    // The severity vocabulary is closed: free text is rejected, not stored.
+    expect(() => db.updateIncidentSeverity(incidentId, "bogus")).toThrow(TypeError);
+    expect(db.getIncidentById(incidentId).severity).toBe("critical");
+    expect([...db.kIncidentSeverities]).toEqual(["warning", "critical"]);
+  });
+
+  it("a corrupt cause_json blob reads as unreadable (never a throw) and an out-of-vocabulary severity reads null", () => {
+    const db = createWatchdogDbContext("watchdog-db-cause-corrupt-");
+    const incidentId = db.insertIncident({ incidentKey: "gateway_crash" });
+    currentDatabase = new DatabaseSync(db.path);
+    currentDatabase
+      .prepare("UPDATE watchdog_incidents SET cause_json = $c, severity = $s WHERE id = $id")
+      .run({ $c: "{ not json", $s: "shrug", $id: incidentId });
+    currentDatabase.close();
+    currentDatabase = null;
+    expect(db.getIncidentById(incidentId)).toMatchObject({
+      cause: { unreadable: true },
+      severity: null,
+    });
+  });
+});

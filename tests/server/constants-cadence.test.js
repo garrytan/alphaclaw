@@ -419,3 +419,147 @@ describe("watchdog cadence knobs are deployment-only", () => {
     }
   });
 });
+
+// Issue #79 (f) / Codex 16: the pre-update backup step runs on ONE clock (the
+// phase envelope), so each path through the step must fit it in the worst
+// case. These are relations between constants, not values — a future change
+// to any term must keep both true or lower the term it raised.
+describe("backup envelope relations (issue #79 (f), Codex 16)", () => {
+  const ladderModulePath = "../../lib/server/openclaw-backup-ladder";
+  let constants;
+  let ladder;
+
+  beforeEach(() => {
+    // Fresh copies: other suites purge the constants cache, and the ladder
+    // module must read the same constants instance this suite asserts on.
+    constants = loadConstants();
+    delete require.cache[require.resolve(ladderModulePath)];
+    ladder = require(ladderModulePath);
+  });
+
+  afterEach(() => {
+    delete require.cache[require.resolve(ladderModulePath)];
+    purgeModuleCache();
+  });
+
+  it("quiesced path: diagnosis + lock wait + quiesce + offline copy + usable check + relaunch ready + settle ≤ the phase envelope", () => {
+    const {
+      kOpenclawBackupDiagnosisBudgetMs,
+      kOpenclawBackupQuiesceLockTimeoutMs,
+      kOpenclawBackupQuiesceTimeoutMs,
+      kOpenclawBackupOfflineCopyBudgetMs,
+      kOpenclawBackupUsableCheckReserveMs,
+      kOpenclawBackupPostQuiesceReadyTimeoutMs,
+      kOpenclawBackupPostQuiesceSettleMs,
+      kOpenclawBackupPhaseEnvelopeMs,
+    } = constants;
+    const totalMs =
+      kOpenclawBackupDiagnosisBudgetMs +
+      kOpenclawBackupQuiesceLockTimeoutMs +
+      kOpenclawBackupQuiesceTimeoutMs +
+      kOpenclawBackupOfflineCopyBudgetMs +
+      kOpenclawBackupUsableCheckReserveMs +
+      kOpenclawBackupPostQuiesceReadyTimeoutMs +
+      kOpenclawBackupPostQuiesceSettleMs;
+    expect(totalMs).toBeLessThanOrEqual(kOpenclawBackupPhaseEnvelopeMs);
+    // Documented values: 2 + 1.5 + 7 + 8 + 1 + 1/3 + 1/6 minutes = 20 ≤ 25.
+    expect(kOpenclawBackupDiagnosisBudgetMs).toBe(2 * 60_000);
+    expect(totalMs).toBe(20 * 60_000);
+    expect(kOpenclawBackupPhaseEnvelopeMs).toBe(25 * 60_000);
+  });
+
+  it("live ladder: liveAttempts × the CLI ceiling + the usable-check reserve ≤ the phase envelope — which is why the cap is 2, not 3", () => {
+    const {
+      kOpenclawBackupLiveAttempts,
+      kOpenclawBackupTimeoutMs,
+      kOpenclawBackupUsableCheckReserveMs,
+      kOpenclawBackupPhaseEnvelopeMs,
+    } = constants;
+    expect(kOpenclawBackupLiveAttempts).toBe(2);
+    expect(
+      kOpenclawBackupLiveAttempts * kOpenclawBackupTimeoutMs + kOpenclawBackupUsableCheckReserveMs,
+    ).toBeLessThanOrEqual(kOpenclawBackupPhaseEnvelopeMs);
+    // The former cap of 3 never fit (31 min > 25): its third attempt existed
+    // only on paper — the envelope refused it as window_exhausted.
+    expect(3 * kOpenclawBackupTimeoutMs + kOpenclawBackupUsableCheckReserveMs).toBeGreaterThan(
+      kOpenclawBackupPhaseEnvelopeMs,
+    );
+  });
+
+  it("backupBudgetPins evaluates both relations over the default budget table and names every term", () => {
+    const pins = ladder.backupBudgetPins();
+    expect(Object.isFrozen(pins)).toBe(true);
+    expect(pins.map((pin) => pin.name)).toEqual([
+      "quiesced_path_fits_envelope",
+      "live_ladder_fits_envelope",
+    ]);
+    for (const pin of pins) {
+      expect(pin.ok).toBe(true);
+      expect(pin.missing).toEqual([]);
+      expect(pin.envelopeMs).toBe(constants.kOpenclawBackupPhaseEnvelopeMs);
+      expect(pin.totalMs).toBeLessThanOrEqual(pin.envelopeMs);
+      expect(pin.relation).toContain("≤ phaseEnvelopeMs");
+    }
+    const [quiesced, live] = pins;
+    expect(quiesced.totalMs).toBe(20 * 60_000);
+    expect(quiesced.terms).toEqual({
+      diagnosisBudgetMs: constants.kOpenclawBackupDiagnosisBudgetMs,
+      quiesceLockTimeoutMs: constants.kOpenclawBackupQuiesceLockTimeoutMs,
+      quiesceTimeoutMs: constants.kOpenclawBackupQuiesceTimeoutMs,
+      offlineCopyBudgetMs: constants.kOpenclawBackupOfflineCopyBudgetMs,
+      usableCheckReserveMs: constants.kOpenclawBackupUsableCheckReserveMs,
+      postQuiesceReadyTimeoutMs: constants.kOpenclawBackupPostQuiesceReadyTimeoutMs,
+      postQuiesceSettleMs: constants.kOpenclawBackupPostQuiesceSettleMs,
+    });
+    expect(live.totalMs).toBe(21 * 60_000);
+    expect(live.terms).toEqual({
+      liveAttempts: 2,
+      cliTimeoutMs: constants.kOpenclawBackupTimeoutMs,
+      usableCheckReserveMs: constants.kOpenclawBackupUsableCheckReserveMs,
+    });
+    // The default argument IS the shared default table.
+    expect(ladder.backupBudgetPins(ladder.kDefaultBackupBudget)).toEqual(pins);
+  });
+
+  it("backupBudgetPins fails closed on a tuning override that breaks a relation or drops a term", () => {
+    const base = ladder.kDefaultBackupBudget;
+    const [, liveThree] = ladder.backupBudgetPins({ ...base, liveAttempts: 3 });
+    expect(liveThree.ok).toBe(false);
+    expect(liveThree.totalMs).toBe(31 * 60_000);
+    const [quiescedFat] = ladder.backupBudgetPins({ ...base, offlineCopyBudgetMs: 14 * 60_000 });
+    expect(quiescedFat.ok).toBe(false);
+    expect(quiescedFat.totalMs).toBe(26 * 60_000);
+    // A raised envelope makes the same override fit again — the relation is
+    // between the terms, not a fixed value.
+    const [, liveThreeRoomy] = ladder.backupBudgetPins({
+      ...base,
+      liveAttempts: 3,
+      phaseEnvelopeMs: 31 * 60_000,
+    });
+    expect(liveThreeRoomy.ok).toBe(true);
+    // Missing terms cannot be shown to fit and are named.
+    const [missingQuiesced, missingLive] = ladder.backupBudgetPins({ phaseEnvelopeMs: 1 });
+    expect(missingQuiesced.ok).toBe(false);
+    expect(missingQuiesced.totalMs).toBeNull();
+    expect(missingQuiesced.missing).toEqual([
+      "diagnosisBudgetMs",
+      "quiesceLockTimeoutMs",
+      "quiesceTimeoutMs",
+      "offlineCopyBudgetMs",
+      "usableCheckReserveMs",
+      "postQuiesceReadyTimeoutMs",
+      "postQuiesceSettleMs",
+    ]);
+    expect(missingLive.ok).toBe(false);
+    expect(missingLive.missing).toEqual(["liveAttempts", "cliTimeoutMs", "usableCheckReserveMs"]);
+    const [noEnvelope] = ladder.backupBudgetPins({ ...base, phaseEnvelopeMs: undefined });
+    expect(noEnvelope.ok).toBe(false);
+    expect(noEnvelope.envelopeMs).toBeNull();
+    expect(noEnvelope.missing).toEqual(["phaseEnvelopeMs"]);
+    for (const junk of [null, "budget", 42]) {
+      expect(ladder.backupBudgetPins(junk).every((pin) => pin.ok === false)).toBe(true);
+    }
+    // `undefined` is "no table given" — the defaults, not junk.
+    expect(ladder.backupBudgetPins(undefined)).toEqual(ladder.backupBudgetPins());
+  });
+});

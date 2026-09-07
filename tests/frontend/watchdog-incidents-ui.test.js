@@ -56,6 +56,102 @@ describe("describeEvent", () => {
     expect(described.tone).toBe("danger");
   });
 
+  // The boot-verdict row is written once per boot by lib/server/
+  // boot-report-steps.js through the wrapped incident sink (CEO 8.1), not by
+  // a watchdog.js logEvent literal — pin the label and the verdict phrase by
+  // hand, like prelaunch_hook. Details shape: { bootId, verdict, pidfile:
+  // { decision, reason }, installed, expected }.
+  it("labels boot rows (written outside the logEvent literal the drift pin scans) and names the verdict", async () => {
+    const { kWatchdogEventLabels, describeEvent } = await loadIncidentHelpers();
+    expect(kWatchdogEventLabels.boot).toBe("Boot verdict");
+    const consistent = describeEvent({
+      eventType: "boot",
+      status: "ok",
+      details: {
+        bootId: "40:1700000000000",
+        verdict: [],
+        pidfile: { decision: "proceed", reason: "absent" },
+        installed: "2026.9.2",
+        expected: "2026.9.2",
+      },
+    });
+    expect(consistent).toMatchObject({ label: "Boot verdict", detail: "consistent", tone: "success" });
+    const inconsistent = describeEvent({
+      eventType: "boot",
+      status: "failed",
+      details: {
+        bootId: "40:1700000000000",
+        verdict: ["installed_not_expected", "pidfile_contradiction"],
+        pidfile: { decision: "skip", reason: "legacy_argv_match" },
+        installed: "2026.7.1-2",
+        expected: "2026.8.1",
+      },
+    });
+    expect(inconsistent).toMatchObject({
+      label: "Boot verdict",
+      detail: "inconsistent: installed not expected, pidfile contradiction",
+      tone: "danger",
+    });
+    // A boot row with no details still renders (older or hand-edited rows).
+    expect(describeEvent({ eventType: "boot", status: "ok" }).label).toBe("Boot verdict");
+  });
+
+  // Issue #76 A3/A4: the classifier's follow-up row and the latched mismatch
+  // are logEvent literals in watchdog.js (the drift pin above sees them);
+  // their outcome phrases are hand-pinned here because the status column
+  // alone misleads (a corroborated cause is the danger, a suspected one is
+  // only a warning).
+  it("labels crash_cause rows and says whether the cause was corroborated", async () => {
+    const { kWatchdogEventLabels, describeEvent } = await loadIncidentHelpers();
+    expect(kWatchdogEventLabels.crash_cause).toBe("Crash cause");
+    const corroborated = describeEvent({
+      eventType: "crash_cause",
+      source: "crash_classifier",
+      status: "failed",
+      details: {
+        cause: "state_schema_too_new",
+        fingerprint: "0123456789ab",
+        corroborated: true,
+        by: "user_version",
+        code: 1,
+      },
+    });
+    expect(corroborated).toMatchObject({
+      label: "Crash cause",
+      tone: "danger",
+    });
+    expect(corroborated.detail).toContain("confirmed: state schema too new (by user version)");
+    const suspected = describeEvent({
+      eventType: "crash_cause",
+      source: "crash_classifier",
+      status: "info",
+      details: { cause: "plugin_api_too_old", corroborated: false, by: null, suspectedCause: "plugin_api_too_old" },
+    });
+    expect(suspected).toMatchObject({ label: "Crash cause", tone: "warning" });
+    expect(suspected.detail).toContain("suspected: plugin api too old — not corroborated");
+    // No details still renders.
+    expect(describeEvent({ eventType: "crash_cause", status: "info" }).detail).toContain("suspected: unknown");
+  });
+
+  it("labels version_mismatch rows with the running/expected pair", async () => {
+    const { kWatchdogEventLabels, describeEvent } = await loadIncidentHelpers();
+    expect(kWatchdogEventLabels.version_mismatch).toBe("Version mismatch");
+    const described = describeEvent({
+      eventType: "version_mismatch",
+      source: "boot",
+      status: "failed",
+      details: { expected: "2026.9.2", running: "2026.7.1-2", source: "boot" },
+    });
+    expect(described).toMatchObject({
+      label: "Version mismatch",
+      detail: "running 2026.7.1-2, expected 2026.9.2",
+      tone: "danger",
+    });
+    expect(describeEvent({ eventType: "version_mismatch", status: "failed" }).detail).toBe(
+      "running unknown, expected unknown",
+    );
+  });
+
   it("labels overseer audit rows and surfaces their verdict or refusal as the detail", async () => {
     const { kWatchdogEventLabels, describeEvent } = await loadIncidentHelpers();
     expect(kWatchdogEventLabels.overseer_review).toBe("Overseer review");

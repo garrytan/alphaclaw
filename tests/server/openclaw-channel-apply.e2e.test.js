@@ -421,8 +421,12 @@ describe("server/openclaw-channel apply flow (e2e)", { retry: 1 }, () => {
       sentinelVersion: "1.0.0",
       runnerImpl: async (opts, fallback) => {
         if (opts.command === "openclaw" && opts.args?.[0] === "backup") {
+          // Hold the step until the SSE collector is attached, then let the
+          // faithful stub WRITE the archive: stable→beta crosses a channel
+          // boundary (#79 (a)), so the backup is hard-gated and an exit 0
+          // with no artifact is a phantom backup the gate refuses.
           await backupGate.promise;
-          return { ok: true, code: 0, tail: "", timedOut: false };
+          return fallback(opts);
         }
         return fallback(opts);
       },

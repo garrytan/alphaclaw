@@ -60,6 +60,23 @@ const createHarness = ({
   restartGatewayForMitigation = null,
   getLaunchGeneration = null,
   readConfigMtimeMs = null,
+  // #76 A2: async state-DB schema reader stamped onto `requested` rows.
+  readStateDbVersions = null,
+  // #76 A3: pure stderr crash classifier + async corroboration-facts reader.
+  classifyGatewayCrash = null,
+  readCrashFacts = null,
+  // Stage 3 (#76 B1 / C2): structural repair instance, persisted-pause seams,
+  // the relaunch compat step and the pause's acceptance hold.
+  structuralRepair = null,
+  readPersistedPause = null,
+  writePersistedPause = null,
+  assessLaunchCompatibility = null,
+  acceptanceHoldMs = null,
+  // #76 C6: the explicit-bin command primitive and the streamed doctor
+  // runner — runRepair's doctor step routes through one of them while a
+  // version mismatch is latched.
+  clawCmdWithBin = null,
+  repairRunner = null,
 } = {}) => {
   process.env.WATCHDOG_AUTO_REPAIR = autoRepair ? "true" : "false";
   process.env.WATCHDOG_NOTIFICATIONS_DISABLED = notificationsDisabled
@@ -122,6 +139,16 @@ const createHarness = ({
     ...(restartGatewayForMitigation ? { restartGatewayForMitigation } : {}),
     ...(getLaunchGeneration ? { getLaunchGeneration } : {}),
     ...(readConfigMtimeMs ? { readConfigMtimeMs } : {}),
+    ...(readStateDbVersions ? { readStateDbVersions } : {}),
+    ...(classifyGatewayCrash ? { classifyGatewayCrash } : {}),
+    ...(readCrashFacts ? { readCrashFacts } : {}),
+    ...(structuralRepair ? { structuralRepair } : {}),
+    ...(readPersistedPause ? { readPersistedPause } : {}),
+    ...(writePersistedPause ? { writePersistedPause } : {}),
+    ...(assessLaunchCompatibility ? { assessLaunchCompatibility } : {}),
+    ...(acceptanceHoldMs != null ? { acceptanceHoldMs } : {}),
+    ...(clawCmdWithBin ? { clawCmdWithBin } : {}),
+    ...(repairRunner ? { repairRunner } : {}),
   });
 
   return {
@@ -1540,6 +1567,317 @@ describe("server/watchdog", () => {
     }
   });
 
+  it("a structural version_mismatch hold (#76 C2 launch gate) refuses repair for EVERY source — manual included — no doctor run, no launch; the ledger row names the hold class", async () => {
+    const clawCalls = [];
+    const { watchdog, launchGatewayProcess, insertWatchdogEvent } = createHarness({
+      autoRepair: true,
+      clawCmdImpl: async (cmd) => {
+        clawCalls.push(String(cmd));
+        return { ok: true, stdout: JSON.stringify({ ok: true }) };
+      },
+      releaseChannelHooks: {
+        getInfo: () => ({
+          gatewayHold: {
+            reason: "version_mismatch",
+            blamedKeys: [],
+            installed: "2026.7.1-2",
+            expected: "2026.9.1-beta.1",
+            bootId: "boot-1",
+          },
+        }),
+      },
+    });
+
+    // doctor --fix from a binary that cannot read the DB is the exact #76
+    // mutation the hold exists to prevent; a forced manual repair is no
+    // escape hatch either.
+    expect(await watchdog.triggerRepair()).toEqual({ ok: false, skipped: true, reason: "gateway_held" });
+    expect(await watchdog.runRepair({ source: "crash_loop", correlationId: "c-1" })).toEqual({
+      ok: false,
+      skipped: true,
+      reason: "gateway_held",
+    });
+    expect(clawCalls.some((cmd) => cmd.includes("doctor"))).toBe(false);
+    expect(launchGatewayProcess).not.toHaveBeenCalled();
+    expect(insertWatchdogEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        eventType: "repair",
+        source: "manual",
+        status: "skipped",
+        details: { reason: "gateway_held", hold: "version_mismatch" },
+      }),
+    );
+  });
+
+  it("only a caller that OWNS the hold's reason (ownedHoldReasons — Stage 3's structural repair) repairs under it; a hold with another reason still refuses", async () => {
+    const mkHooks = (reason) => ({
+      getInfo: () => ({
+        gatewayHold: { reason, blamedKeys: [], installed: "2026.9.1-beta.1", expected: "2026.9.1-beta.1", bootId: "boot-1" },
+      }),
+    });
+    const owned = createHarness({
+      autoRepair: true,
+      clawCmdImpl: async (command) =>
+        command === "doctor --fix --yes"
+          ? { ok: true, stdout: "fixed" }
+          : { ok: true, stdout: JSON.stringify({ ok: true }) },
+      releaseChannelHooks: mkHooks("version_mismatch"),
+    });
+    const repaired = await owned.watchdog.runRepair({
+      source: "repair/structural",
+      correlationId: "c-2",
+      force: true,
+      ownedHoldReasons: ["version_mismatch"],
+    });
+    expect(repaired.ok).toBe(true);
+    expect(owned.clawCmd.mock.calls.some((call) => String(call[0]).includes("doctor"))).toBe(true);
+    expect(owned.launchGatewayProcess).toHaveBeenCalledTimes(1);
+
+    // Owning version_mismatch says nothing about a corrupt-DB hold.
+    const foreign = createHarness({ autoRepair: true, releaseChannelHooks: mkHooks("state_db_unreadable") });
+    expect(
+      await foreign.watchdog.runRepair({
+        source: "repair/structural",
+        correlationId: "c-3",
+        force: true,
+        ownedHoldReasons: ["version_mismatch"],
+      }),
+    ).toEqual({ ok: false, skipped: true, reason: "gateway_held" });
+    expect(foreign.launchGatewayProcess).not.toHaveBeenCalled();
+
+    // An unreadable hold state refuses regardless of what the caller owns.
+    const unreadable = createHarness({
+      autoRepair: true,
+      releaseChannelHooks: { getInfo: () => ({ gatewayHold: null, stateCorrupted: true }) },
+    });
+    expect(
+      await unreadable.watchdog.runRepair({
+        source: "repair/structural",
+        correlationId: "c-4",
+        force: true,
+        ownedHoldReasons: ["version_mismatch"],
+      }),
+    ).toEqual({ ok: false, skipped: true, reason: "gateway_hold_unreadable" });
+  });
+
+  describe("which binary runs doctor (#76 C6 / Codex 8)", () => {
+    const kExpectedBin = "/root/openclaw-overlay/2026.9.2/node_modules/openclaw/openclaw.mjs";
+    const kResolved = {
+      bin: kExpectedBin,
+      version: "2026.9.2",
+      packageDir: "/root/openclaw-overlay/2026.9.2/node_modules/openclaw",
+      source: "overlay",
+      compatible: true,
+      reasons: [],
+    };
+    const okClaw = async () => ({ ok: true, stdout: JSON.stringify({ ok: true }) });
+    const latchBootMismatch = (watchdog) =>
+      watchdog.setBootVerdict({
+        bootId: "40:1700000000000",
+        serverPhase: { verdict: ["installed_not_expected"] },
+        openclaw: { expected: "2026.9.2", installedAtBoot: "2026.7.1-2", resolvedForLaunch: "2026.7.1-2" },
+      });
+    const repairRows = (insertWatchdogEvent) =>
+      insertWatchdogEvent.mock.calls.map((call) => call[0]).filter((row) => row.eventType === "repair");
+    const doctorFromPath = (clawCmd) =>
+      clawCmd.mock.calls.some(([command]) => String(command).includes("doctor --fix"));
+
+    it("with a version mismatch latched, the clawCmd fallback runs doctor through clawCmdWithBin on the bin compatibleBinForCurrentDb resolves — never `openclaw` on PATH — the relaunch proceeds and the ledger row names the build", async () => {
+      const compatibleBinForCurrentDb = vi.fn(async () => kResolved);
+      const clawCmdWithBin = vi.fn(async () => ({ ok: true, stdout: "fixed", stderr: "" }));
+      const { watchdog, clawCmd, launchGatewayProcess, insertWatchdogEvent } = createHarness({
+        autoRepair: true,
+        clawCmdImpl: okClaw,
+        clawCmdWithBin,
+        releaseChannelHooks: {
+          getInfo: () => ({ gatewayHold: null, installedDiverged: false }),
+          compatibleBinForCurrentDb,
+        },
+      });
+      expect(latchBootMismatch(watchdog)).toMatchObject({ source: "boot" });
+
+      const result = await watchdog.triggerRepair();
+
+      expect(result.ok).toBe(true);
+      expect(compatibleBinForCurrentDb).toHaveBeenCalledTimes(1);
+      expect(clawCmdWithBin).toHaveBeenCalledTimes(1);
+      const [bin, command, options] = clawCmdWithBin.mock.calls[0];
+      expect(bin).toBe(kExpectedBin);
+      expect(command).toBe("doctor --fix --yes");
+      expect(options).toEqual(expect.objectContaining({ quiet: true, timeoutMs: expect.any(Number) }));
+      expect(doctorFromPath(clawCmd)).toBe(false);
+      expect(launchGatewayProcess).toHaveBeenCalledTimes(1);
+      const okRow = repairRows(insertWatchdogEvent).find((row) => row.status === "ok");
+      expect(okRow.source).toBe("manual");
+      expect(okRow.details).toMatchObject({
+        ok: true,
+        stdout: "fixed",
+        doctorBin: { version: "2026.9.2", source: "overlay" },
+      });
+    });
+
+    it("the channel info's installedDiverged alone (no boot/crash latch, no status tick to run the channel memo) routes the same way — read from the hold gate's own hooks snapshot", async () => {
+      const compatibleBinForCurrentDb = vi.fn(async () => kResolved);
+      const clawCmdWithBin = vi.fn(async () => ({ ok: true, stdout: "fixed", stderr: "" }));
+      const getInfo = vi.fn(() => ({
+        gatewayHold: null,
+        installedDiverged: true,
+        installedVersion: "2026.7.1-2",
+        expectedVersion: "2026.9.2",
+      }));
+      const { watchdog, clawCmd } = createHarness({
+        autoRepair: true,
+        clawCmdImpl: okClaw,
+        clawCmdWithBin,
+        releaseChannelHooks: { getInfo, compatibleBinForCurrentDb },
+      });
+      // No getStatus() before the repair: the 5 s channel memo (which would
+      // latch a channel-sourced mismatch) has not run — the gate must see
+      // the divergence from the hooks read runRepair itself performs.
+      expect(getInfo).not.toHaveBeenCalled();
+
+      const result = await watchdog.runRepair({ source: "crash_loop", correlationId: "c-6" });
+
+      expect(result.ok).toBe(true);
+      expect(compatibleBinForCurrentDb).toHaveBeenCalledTimes(1);
+      expect(clawCmdWithBin).toHaveBeenCalledTimes(1);
+      expect(clawCmdWithBin.mock.calls[0][0]).toBe(kExpectedBin);
+      expect(doctorFromPath(clawCmd)).toBe(false);
+    });
+
+    it("nothing resolvable → repair/<source>/skipped {version_mismatch, expected, running}: no doctor from ANY binary, no launch, no lock; one row per automatic source, every manual attempt logs; a throwing resolver is the same refusal with the error on the row", async () => {
+      const compatibleBinForCurrentDb = vi.fn(async () => null);
+      const clawCmdWithBin = vi.fn();
+      const lockAcquire = vi.fn(() => () => {});
+      const { watchdog, clawCmd, launchGatewayProcess, insertWatchdogEvent } = createHarness({
+        autoRepair: true,
+        clawCmdImpl: okClaw,
+        clawCmdWithBin,
+        gatewayLifecycleLock: { tryAcquire: lockAcquire },
+        releaseChannelHooks: {
+          getInfo: () => ({ gatewayHold: null, installedDiverged: false }),
+          compatibleBinForCurrentDb,
+        },
+      });
+      latchBootMismatch(watchdog);
+
+      expect(await watchdog.triggerRepair()).toEqual({ ok: false, skipped: true, reason: "version_mismatch" });
+      expect(await watchdog.triggerRepair()).toEqual({ ok: false, skipped: true, reason: "version_mismatch" });
+      expect(await watchdog.runRepair({ source: "crash_loop", correlationId: "c-7" })).toEqual({
+        ok: false,
+        skipped: true,
+        reason: "version_mismatch",
+      });
+      expect(await watchdog.runRepair({ source: "crash_loop", correlationId: "c-8" })).toEqual({
+        ok: false,
+        skipped: true,
+        reason: "version_mismatch",
+      });
+
+      expect(compatibleBinForCurrentDb).toHaveBeenCalledTimes(4);
+      expect(clawCmdWithBin).not.toHaveBeenCalled();
+      expect(doctorFromPath(clawCmd)).toBe(false);
+      expect(launchGatewayProcess).not.toHaveBeenCalled();
+      expect(lockAcquire).not.toHaveBeenCalled();
+      expect(watchdog.getStatus().repairAttempts).toBe(0);
+      const skips = repairRows(insertWatchdogEvent).filter(
+        (row) => row.status === "skipped" && row.details?.reason === "version_mismatch",
+      );
+      // manual ×2 (the operator asked, both log), crash_loop ×1 (deduped).
+      expect(skips.map((row) => row.source)).toEqual(["manual", "manual", "crash_loop"]);
+      expect(skips[0].details).toEqual({
+        reason: "version_mismatch",
+        expected: "2026.9.2",
+        running: "2026.7.1-2",
+      });
+      expect(skips[2].correlationId).toBe("c-7");
+
+      const throwing = createHarness({
+        autoRepair: true,
+        clawCmdImpl: okClaw,
+        clawCmdWithBin: vi.fn(),
+        releaseChannelHooks: {
+          getInfo: () => ({ gatewayHold: null, installedDiverged: true }),
+          compatibleBinForCurrentDb: async () => {
+            throw new Error("state db busy");
+          },
+        },
+      });
+      expect(await throwing.watchdog.triggerRepair()).toEqual({
+        ok: false,
+        skipped: true,
+        reason: "version_mismatch",
+      });
+      expect(doctorFromPath(throwing.clawCmd)).toBe(false);
+      expect(repairRows(throwing.insertWatchdogEvent).at(-1).details).toEqual({
+        reason: "version_mismatch",
+        expected: null,
+        running: null,
+        error: "state db busy",
+      });
+    });
+
+    it("without a latched mismatch or a diverged tree the resolver is never consulted and doctor runs from PATH as before", async () => {
+      const compatibleBinForCurrentDb = vi.fn(async () => kResolved);
+      const clawCmdWithBin = vi.fn();
+      const { watchdog, clawCmd, launchGatewayProcess } = createHarness({
+        autoRepair: true,
+        clawCmdImpl: okClaw,
+        clawCmdWithBin,
+        releaseChannelHooks: {
+          getInfo: () => ({ gatewayHold: null, installedDiverged: false }),
+          compatibleBinForCurrentDb,
+        },
+      });
+
+      expect((await watchdog.triggerRepair()).ok).toBe(true);
+
+      expect(compatibleBinForCurrentDb).not.toHaveBeenCalled();
+      expect(clawCmdWithBin).not.toHaveBeenCalled();
+      expect(clawCmd).toHaveBeenCalledWith("doctor --fix --yes", expect.objectContaining({ quiet: true }));
+      expect(launchGatewayProcess).toHaveBeenCalledTimes(1);
+    });
+
+    it("the streamed repairRunner (production wiring) receives the resolved bin — null while PATH is fine, the compatible bin once a mismatch is latched", async () => {
+      const repairRunner = vi.fn(async () => ({ ok: true, stdout: "", stderr: "" }));
+      const compatibleBinForCurrentDb = vi.fn(async () => kResolved);
+      const { watchdog, clawCmd } = createHarness({
+        autoRepair: true,
+        clawCmdImpl: okClaw,
+        repairRunner,
+        releaseChannelHooks: {
+          getInfo: () => ({ gatewayHold: null, installedDiverged: false }),
+          compatibleBinForCurrentDb,
+        },
+      });
+
+      expect((await watchdog.triggerRepair()).ok).toBe(true);
+      expect(repairRunner).toHaveBeenLastCalledWith({ correlationId: expect.any(String), bin: null });
+      expect(compatibleBinForCurrentDb).not.toHaveBeenCalled();
+
+      latchBootMismatch(watchdog);
+      expect((await watchdog.triggerRepair()).ok).toBe(true);
+      expect(repairRunner).toHaveBeenLastCalledWith({ correlationId: expect.any(String), bin: kExpectedBin });
+      expect(compatibleBinForCurrentDb).toHaveBeenCalledTimes(1);
+      expect(doctorFromPath(clawCmd)).toBe(false);
+    });
+
+    it("a wiring that can NAME the compatible bin but not RUN it is refused at construction (never a silent fallback to PATH)", () => {
+      expect(() =>
+        createHarness({
+          releaseChannelHooks: { getInfo: () => ({}), compatibleBinForCurrentDb: async () => null },
+        }),
+      ).toThrow(/compatibleBinForCurrentDb requires clawCmdWithBin or repairRunner/);
+      // Either runner satisfies it.
+      expect(() =>
+        createHarness({
+          repairRunner: async () => ({ ok: true }),
+          releaseChannelHooks: { getInfo: () => ({}), compatibleBinForCurrentDb: async () => null },
+        }),
+      ).not.toThrow();
+    });
+  });
+
   it("start() preserves a latched configuration_error instead of clobbering it to running", async () => {
     const { watchdog } = createHarness({ autoRepair: false });
 
@@ -2479,7 +2817,7 @@ describe("server/watchdog", () => {
     expect(notifier.notify).not.toHaveBeenCalled();
   });
 
-  it("pauses manual repair after repeated doctor failures", async () => {
+  it("notifies once the Doctor budget is exhausted after repeated manual failures (manual repairs themselves keep running — the cap gates automatic sources only)", async () => {
     const { watchdog, notifier, insertWatchdogEvent } = createHarness({
       autoRepair: false,
       clawCmdImpl: async (command) => {
@@ -2515,11 +2853,22 @@ describe("server/watchdog", () => {
     const secondResult = await watchdog.triggerRepair();
     expect(secondResult.ok).toBe(false);
     expect(watchdog.getStatus().repairAttempts).toBe(2);
-    expect(
-      notifier.notify.mock.calls.some((call) =>
-        String(call?.[0] || "").includes("Auto-repair failed repeatedly"),
-      ),
-    ).toBe(true);
+    // Stage 3 (F015): the notice says what actually stops — Doctor for the
+    // automatic sources — and never claims a pause (crash relaunches go on).
+    const exhausted = notifier.notify.mock.calls.find((call) =>
+      String(call?.[0] || "").includes("Auto-repair attempts exhausted (2/2)"),
+    );
+    expect(exhausted).toBeTruthy();
+    expect(String(exhausted[0])).toContain("crash relaunches continue with backoff");
+    expect(String(exhausted[0])).toContain("Use Repair from the Watchdog tab");
+    expect(String(exhausted[0])).not.toContain("Auto-repair paused");
+    expect(exhausted[1]).toEqual(
+      expect.objectContaining({ id: expect.stringMatching(/^repair-attempts-exhausted-2-\d{8}$/) }),
+    );
+    // A third MANUAL repair still runs Doctor (force bypasses the cap).
+    const third = await watchdog.triggerRepair();
+    expect(third.skipped).toBeUndefined();
+    expect(watchdog.getStatus().repairAttempts).toBe(3);
   });
 
   it("notifies auto-repair failures with attempt counts in crash loops", async () => {
@@ -4791,6 +5140,7 @@ describe("server/watchdog", () => {
         LAUNCH_ABORTED: "launch_aborted",
         LAUNCH_FAILED: "launch_failed",
         LEASE_EXPIRED: "lease_expired",
+        VERSION_MISMATCH: "version_mismatch",
       });
     });
 
@@ -5458,6 +5808,80 @@ describe("server/watchdog", () => {
       expect(watchdog.getStatus().operationInProgress).toBe(false);
       expect(watchdog.getStatus().degradedRetry?.inFlight ?? false).toBe(false);
       watchdog.stop();
+    });
+
+    // ── #76 A2: the `requested` row names the state DBs' schema ───────────
+    it("the restart/<source>/requested row carries stateDb { userVersion, agentUserVersions } read ONCE at request time, before the launch", async () => {
+      const { control, fetchImpl } = createGatewayControl();
+      const order = [];
+      const requestGatewayLaunch = vi.fn(async () => {
+        order.push("launch");
+        return launchRequested(4242, 2);
+      });
+      const readStateDbVersions = vi.fn(async () => {
+        order.push("stateDb");
+        // Extra keys / non-integers are normalized away; integers kept.
+        return { userVersion: 15, agentUserVersions: [19, "x", 19], entries: [{}] };
+      });
+      const { watchdog, insertWatchdogEvent } = createHarness({
+        autoRepair: false,
+        fetchImpl,
+        resolveGatewayReadyzUrl: () => kReadyzUrl,
+        requestGatewayLaunch,
+        getLaunchGeneration: () => 1,
+        readStateDbVersions,
+      });
+      watchdog.onGatewayLaunch({ startedAt: Date.now() - 60_000, pid: 100, rootPid: 100, generation: 1 });
+      await settle();
+      watchdog.onGatewayExit({ code: 1, expectedExit: false, pid: 100, generation: 1 });
+      await settle();
+
+      expect(readStateDbVersions).toHaveBeenCalledTimes(1);
+      expect(order).toEqual(["stateDb", "launch"]);
+      expect(restartRows(insertWatchdogEvent, { source: "exit_event", status: "requested" })).toEqual([
+        expect.objectContaining({
+          details: {
+            pid: 4242,
+            generation: 2,
+            intent: "relaunch_if_absent",
+            stateDb: { userVersion: 15, agentUserVersions: [19, 19] },
+          },
+        }),
+      ]);
+      control.healthy = true;
+      watchdog.stop();
+    });
+
+    it("a throwing or empty stateDb reader never blocks the relaunch and leaves the row without stateDb", async () => {
+      for (const readStateDbVersions of [
+        vi.fn(async () => {
+          throw new Error("sqlite exploded");
+        }),
+        vi.fn(async () => null),
+        vi.fn(async () => ({ userVersion: null, agentUserVersions: [] })),
+      ]) {
+        const { control, fetchImpl } = createGatewayControl();
+        const requestGatewayLaunch = vi.fn(async () => launchRequested(4242, 2));
+        const { watchdog, insertWatchdogEvent } = createHarness({
+          autoRepair: false,
+          fetchImpl,
+          resolveGatewayReadyzUrl: () => kReadyzUrl,
+          requestGatewayLaunch,
+          getLaunchGeneration: () => 1,
+          readStateDbVersions,
+        });
+        watchdog.onGatewayLaunch({ startedAt: Date.now() - 60_000, pid: 100, rootPid: 100, generation: 1 });
+        await settle();
+        watchdog.onGatewayExit({ code: 1, expectedExit: false, pid: 100, generation: 1 });
+        await settle();
+
+        expect(requestGatewayLaunch).toHaveBeenCalledTimes(1);
+        expect(restartRows(insertWatchdogEvent, { source: "exit_event", status: "requested" })).toEqual([
+          expect.objectContaining({ details: { pid: 4242, generation: 2, intent: "relaunch_if_absent" } }),
+        ]);
+        control.healthy = true;
+        watchdog.stop();
+      }
     });
 
     // ── acceptance g / h / 7A ─────────────────────────────────────────────
@@ -7135,5 +7559,1139 @@ describe("server/watchdog", () => {
       watchdog.stop();
     });
 
+  });
+
+  describe("crash-cause classification + version mismatch (#76 A3/A4, recording only)", () => {
+    const {
+      classifyGatewayCrash: realClassify,
+      fingerprintGatewayCrash,
+    } = require("../../lib/server/gateway-crash-cause");
+    const kStateDbPath = "/data/.openclaw/state/openclaw.sqlite";
+    // 2026.7.1-2 wording from the #76 incident box (issue #76 A3 header table).
+    const kSchemaTooNewTail = [
+      "[gateway] starting",
+      `OpenClaw state database ${kStateDbPath} uses newer schema version 15; this OpenClaw build supports 12.`,
+      "Refused by openclaw 2026.7.1-2.",
+    ];
+    const kLegacyApprovalsTail = [
+      "Legacy exec approvals exist at /data/.openclaw/exec-approvals.json. Run `openclaw doctor --fix` before using exec approvals.",
+    ];
+    const kHeapOomTail = [
+      "FATAL ERROR: Reached heap limit Allocation failed - JavaScript heap out of memory",
+    ];
+    const flushAll = async () => {
+      for (let i = 0; i < 4; i += 1) await flushMicrotasks();
+    };
+    const rowsOf = (insertWatchdogEvent, eventType) =>
+      insertWatchdogEvent.mock.calls
+        .map((call) => call[0])
+        .filter((row) => row?.eventType === eventType);
+    const noticesOf = (notifier) => notifier.notify.mock.calls.map((call) => String(call[0]));
+    const failingFetch = async () => {
+      throw new Error("gateway unavailable");
+    };
+    const pinnedInfo = (overrides = {}) => ({
+      isPin: true,
+      inStabilizationWindow: false,
+      installedVersion: "2026.7.1-2",
+      expectedVersion: "2026.9.2",
+      installedDiverged: false,
+      ...overrides,
+    });
+    const crashHarness = (overrides = {}) =>
+      createHarness({
+        autoRepair: false,
+        fetchImpl: failingFetch,
+        classifyGatewayCrash: realClassify,
+        ...overrides,
+      });
+    const crashOnce = (watchdog, { code = 1, stderrTail = kSchemaTooNewTail } = {}) => {
+      watchdog.onGatewayLaunch({ startedAt: Date.now(), pid: 1234 });
+      watchdog.onGatewayExit({ code, signal: null, expectedExit: false, stderrTail });
+    };
+
+    it("consults the injected classifier with the exit shape and stamps cause/fingerprint/suspectedCause on the crash row; lastExit carries the cause with corroboration pending", async () => {
+      const classifier = vi.fn((input) => realClassify(input));
+      const { watchdog, insertWatchdogEvent, notifier } = crashHarness({
+        classifyGatewayCrash: classifier,
+        // Facts that never arrive: corroboration stays pending.
+        readCrashFacts: () => new Promise(() => {}),
+      });
+      crashOnce(watchdog);
+      await flushAll();
+      expect(classifier).toHaveBeenCalledWith({ code: 1, signal: null, stderrTail: kSchemaTooNewTail });
+      const [crashRow] = rowsOf(insertWatchdogEvent, "crash");
+      const expectedFingerprint = fingerprintGatewayCrash({
+        cause: "state_schema_too_new",
+        code: 1,
+        matchedLine: kSchemaTooNewTail[1],
+      });
+      expect(crashRow.details).toMatchObject({
+        code: 1,
+        stderrTail: kSchemaTooNewTail,
+        cause: "state_schema_too_new",
+        fingerprint: expectedFingerprint,
+        suspectedCause: "state_schema_too_new",
+      });
+      expect(expectedFingerprint).toMatch(/^[a-f0-9]{12}$/);
+      const status = watchdog.getStatus();
+      expect(status.lastExit).toMatchObject({ code: 1, cause: "state_schema_too_new", corroborated: null });
+      expect(status.versionMismatch).toBe(null);
+      expect(rowsOf(insertWatchdogEvent, "crash_cause")).toHaveLength(0);
+      // The operator hears the suspicion, never a claim.
+      const down = noticesOf(notifier).find((m) => m.includes("🔴 Gateway went down"));
+      expect(down).toContain("Suspected cause: `state_schema_too_new`");
+      watchdog.stop();
+    });
+
+    it("corroborated facts write ONE crash_cause row, latch the version mismatch (source crash) from the channel info, name the degradation and log version_mismatch once", async () => {
+      const readCrashFacts = vi.fn(async () => ({
+        userVersionsByPath: { [kStateDbPath]: 15 },
+        supportedSchema: { state: 12, agent: 17, source: "declared" },
+        installedDiverged: false,
+        legacyExecApprovalsPresent: false,
+      }));
+      const { watchdog, insertWatchdogEvent } = crashHarness({
+        readCrashFacts,
+        releaseChannelHooks: { getInfo: () => pinnedInfo(), requestRollback: () => null },
+      });
+      crashOnce(watchdog);
+      expect(readCrashFacts).not.toHaveBeenCalled(); // never on the synchronous ladder
+      await flushAll();
+      expect(readCrashFacts).toHaveBeenCalledTimes(1);
+      const causeRows = rowsOf(insertWatchdogEvent, "crash_cause");
+      expect(causeRows).toHaveLength(1);
+      expect(causeRows[0]).toMatchObject({
+        source: "crash_classifier",
+        status: "failed",
+        details: {
+          cause: "state_schema_too_new",
+          corroborated: true,
+          by: "user_version",
+          suspectedCause: null,
+          versions: { found: 15, supports: 12 },
+          dbPath: kStateDbPath,
+          code: 1,
+        },
+      });
+      expect(causeRows[0].details.fingerprint).toMatch(/^[a-f0-9]{12}$/);
+      // The crash row's correlation id ties the follow-up to its crash.
+      expect(causeRows[0].correlationId).toBe(rowsOf(insertWatchdogEvent, "crash")[0].correlationId);
+      const mismatchRows = rowsOf(insertWatchdogEvent, "version_mismatch");
+      expect(mismatchRows).toHaveLength(1);
+      expect(mismatchRows[0]).toMatchObject({
+        source: "crash",
+        status: "failed",
+        details: {
+          expected: "2026.9.2",
+          running: "2026.7.1-2",
+          source: "crash",
+          cause: "state_schema_too_new",
+          by: "user_version",
+        },
+      });
+      const status = watchdog.getStatus();
+      expect(status.versionMismatch).toMatchObject({
+        expected: "2026.9.2",
+        running: "2026.7.1-2",
+        source: "crash",
+      });
+      expect(typeof status.versionMismatch.detectedAt).toBe("string");
+      expect(status.degradedReason).toBe("version_mismatch");
+      expect(status.lastExit).toMatchObject({ cause: "state_schema_too_new", corroborated: true });
+      // The latched scalar is frame-stable and the same mismatch never re-logs.
+      const again = watchdog.getStatus().versionMismatch;
+      expect(JSON.stringify(again)).toBe(JSON.stringify(status.versionMismatch));
+      crashOnce(watchdog);
+      await flushAll();
+      expect(rowsOf(insertWatchdogEvent, "version_mismatch")).toHaveLength(1);
+      expect(rowsOf(insertWatchdogEvent, "crash_cause")).toHaveLength(2);
+      watchdog.stop();
+    });
+
+    it("uncorroborated facts (or a throwing reader) record a SUSPECTED cause only: info row, no latch, degradation untouched", async () => {
+      const { watchdog, insertWatchdogEvent } = crashHarness({
+        // The DB really carries 12 (stderr's 15 is not what is on disk) and
+        // 12 is not above the supported 15: nothing independent agrees.
+        readCrashFacts: async () => ({
+          userVersionsByPath: { [kStateDbPath]: 12 },
+          supportedSchema: { state: 15, agent: 19 },
+          installedDiverged: false,
+          legacyExecApprovalsPresent: false,
+        }),
+        releaseChannelHooks: { getInfo: () => pinnedInfo(), requestRollback: () => null },
+      });
+      crashOnce(watchdog);
+      await flushAll();
+      const [row] = rowsOf(insertWatchdogEvent, "crash_cause");
+      expect(row).toMatchObject({
+        status: "info",
+        details: {
+          cause: "state_schema_too_new",
+          corroborated: false,
+          by: null,
+          suspectedCause: "state_schema_too_new",
+        },
+      });
+      expect(row.details).not.toHaveProperty("factsUnavailable");
+      const status = watchdog.getStatus();
+      expect(status.versionMismatch).toBe(null);
+      // The relaunch's failing probe owns degradedReason here; the suspected
+      // cause must not overwrite it with version_mismatch.
+      expect(status.degradedReason).not.toBe("version_mismatch");
+      expect(status.lastExit).toMatchObject({ cause: "state_schema_too_new", corroborated: false });
+      expect(rowsOf(insertWatchdogEvent, "version_mismatch")).toHaveLength(0);
+      watchdog.stop();
+
+      const throwing = crashHarness({
+        readCrashFacts: async () => {
+          throw new Error("state db busy");
+        },
+      });
+      crashOnce(throwing.watchdog);
+      await flushAll();
+      const [thrownRow] = rowsOf(throwing.insertWatchdogEvent, "crash_cause");
+      expect(thrownRow.details).toMatchObject({
+        corroborated: false,
+        factsUnavailable: true,
+        factsError: "state db busy",
+      });
+      expect(throwing.watchdog.getStatus().versionMismatch).toBe(null);
+      throwing.watchdog.stop();
+
+      // No facts reader wired at all: still a suspected cause, still honest.
+      const bare = crashHarness();
+      crashOnce(bare.watchdog);
+      await flushAll();
+      expect(rowsOf(bare.insertWatchdogEvent, "crash_cause")[0].details).toMatchObject({
+        corroborated: false,
+        factsUnavailable: true,
+      });
+      bare.watchdog.stop();
+    });
+
+    it("a cause with no corroborator stamps the crash row (no suspectedCause) and writes no crash_cause row; `unknown` adds no Suspected-cause line", async () => {
+      const oom = crashHarness({ readCrashFacts: vi.fn(async () => ({})) });
+      crashOnce(oom.watchdog, { code: 134, stderrTail: kHeapOomTail });
+      await flushAll();
+      const [crashRow] = rowsOf(oom.insertWatchdogEvent, "crash");
+      expect(crashRow.details).toMatchObject({ cause: "oom", fingerprint: expect.stringMatching(/^[a-f0-9]{12}$/) });
+      expect(crashRow.details).not.toHaveProperty("suspectedCause");
+      expect(rowsOf(oom.insertWatchdogEvent, "crash_cause")).toHaveLength(0);
+      expect(oom.watchdog.getStatus().lastExit).toMatchObject({ cause: "oom", corroborated: null });
+      expect(noticesOf(oom.notifier).find((m) => m.includes("🔴 Gateway went down"))).toContain(
+        "Suspected cause: `oom`",
+      );
+      oom.watchdog.stop();
+
+      const unknown = crashHarness();
+      crashOnce(unknown.watchdog, { stderrTail: ["something odd happened"] });
+      await flushAll();
+      expect(rowsOf(unknown.insertWatchdogEvent, "crash")[0].details).toMatchObject({ cause: "unknown" });
+      expect(noticesOf(unknown.notifier).find((m) => m.includes("🔴 Gateway went down"))).not.toContain(
+        "Suspected cause",
+      );
+      unknown.watchdog.stop();
+    });
+
+    it("the crash_loop row carries the same cause + fingerprint and the crash-loop notice names the suspicion", async () => {
+      const { watchdog, insertWatchdogEvent, notifier } = crashHarness();
+      for (let i = 0; i < 3; i += 1) crashOnce(watchdog);
+      await flushAll();
+      const [loopRow] = rowsOf(insertWatchdogEvent, "crash_loop");
+      expect(loopRow.details).toMatchObject({
+        crashesInWindow: 3,
+        cause: "state_schema_too_new",
+        suspectedCause: "state_schema_too_new",
+        fingerprint: rowsOf(insertWatchdogEvent, "crash")[0].details.fingerprint,
+      });
+      const loopNotice = noticesOf(notifier).find((m) => m.includes("crash loop detected"));
+      expect(loopNotice).toContain("Suspected cause: `state_schema_too_new`");
+      watchdog.stop();
+    });
+
+    it("a throwing classifier — or none injected — leaves the legacy row shape and the ladder untouched", async () => {
+      const throwing = crashHarness({
+        classifyGatewayCrash: () => {
+          throw new Error("classifier bug");
+        },
+        readCrashFacts: vi.fn(async () => ({})),
+      });
+      crashOnce(throwing.watchdog);
+      await flushAll();
+      const [row] = rowsOf(throwing.insertWatchdogEvent, "crash");
+      expect(row.details).toMatchObject({ code: 1, stderrTail: kSchemaTooNewTail });
+      expect(row.details).not.toHaveProperty("cause");
+      expect(row.details).not.toHaveProperty("fingerprint");
+      expect(throwing.watchdog.getStatus().lastExit).toMatchObject({ code: 1, cause: null, corroborated: null });
+      expect(throwing.launchGatewayProcess).toHaveBeenCalled(); // relaunch still happened
+      expect(rowsOf(throwing.insertWatchdogEvent, "crash_cause")).toHaveLength(0);
+      throwing.watchdog.stop();
+
+      const legacy = createHarness({ autoRepair: false, fetchImpl: failingFetch });
+      crashOnce(legacy.watchdog);
+      await flushAll();
+      expect(rowsOf(legacy.insertWatchdogEvent, "crash")[0].details).not.toHaveProperty("cause");
+      expect(legacy.watchdog.getStatus().lastExit).toMatchObject({ cause: null, corroborated: null });
+      expect(legacy.watchdog.getStatus().versionMismatch).toBe(null);
+      legacy.watchdog.stop();
+    });
+
+    it("exit 78: the config_error row stamps the cause; a legacy exec-approvals file on a sqlite-era box corroborates legacy_exec_approvals (issue #23) and latches the mismatch", async () => {
+      const { watchdog, insertWatchdogEvent } = crashHarness({
+        readCrashFacts: async () => ({
+          userVersionsByPath: {},
+          supportedSchema: { state: 15, agent: 19 },
+          installedDiverged: false,
+          legacyExecApprovalsPresent: true,
+        }),
+      });
+      watchdog.onGatewayLaunch({ startedAt: Date.now(), pid: 1234 });
+      watchdog.onGatewayExit({ code: 78, signal: null, expectedExit: false, stderrTail: kLegacyApprovalsTail });
+      await flushAll();
+      const [configRow] = rowsOf(insertWatchdogEvent, "config_error");
+      expect(configRow.details).toMatchObject({
+        code: 78,
+        cause: "legacy_exec_approvals",
+        suspectedCause: "legacy_exec_approvals",
+      });
+      const [causeRow] = rowsOf(insertWatchdogEvent, "crash_cause");
+      expect(causeRow).toMatchObject({
+        status: "failed",
+        details: { cause: "legacy_exec_approvals", corroborated: true, by: "legacy_exec_approvals_file", code: 78 },
+      });
+      expect(watchdog.getStatus()).toMatchObject({
+        lifecycle: "configuration_error",
+        lastExit: { code: 78, cause: "legacy_exec_approvals", corroborated: true },
+        versionMismatch: { source: "crash", expected: null, running: null },
+      });
+      watchdog.stop();
+    });
+
+    it("setBootVerdict latches installed_not_expected (source boot) with ONE version_mismatch event, naming the tree the gateway RUNS (describeReportVersions: resolvedForLaunch, never the pre-sync installedAtBoot); consistent verdicts and repeats are no-ops", () => {
+      const { watchdog, insertWatchdogEvent } = createHarness({ autoRepair: false });
+      expect(typeof watchdog.setBootVerdict).toBe("function");
+      // An activation boot: the pre-sync tree differs from the launch tree
+      // and the verdict is silent — no latch, whatever installedAtBoot says.
+      const consistent = {
+        bootId: "40:1700000000000",
+        serverPhase: { verdict: [] },
+        openclaw: { expected: "2026.9.2", installedAtBoot: "2026.7.1-2", resolvedForLaunch: "2026.9.2" },
+      };
+      expect(watchdog.setBootVerdict(consistent)).toBe(null);
+      expect(rowsOf(insertWatchdogEvent, "version_mismatch")).toHaveLength(0);
+      expect(watchdog.getStatus().versionMismatch).toBe(null);
+
+      // The #76 shape: the applied build never activated, so the tree the
+      // gateway will run (resolvedForLaunch) is the stale one. installedAtBoot
+      // and the server phase's own read are set to THIRD versions so a latch
+      // built on either would be visibly wrong: the bin phase's post-sync
+      // read outranks both (describeReportVersions' order).
+      const inconsistent = {
+        bootId: "40:1700000000000",
+        serverPhase: { verdict: ["installed_not_expected", "pidfile_contradiction"], installedVersion: "2026.9.1" },
+        openclaw: { expected: "2026.9.2", installedAtBoot: "2026.8.2", resolvedForLaunch: "2026.7.1-2" },
+      };
+      const latched = watchdog.setBootVerdict(inconsistent);
+      expect(latched).toMatchObject({ expected: "2026.9.2", running: "2026.7.1-2", source: "boot" });
+      expect(watchdog.getStatus().versionMismatch).toEqual(latched);
+      const rows = rowsOf(insertWatchdogEvent, "version_mismatch");
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({
+        source: "boot",
+        status: "failed",
+        details: {
+          expected: "2026.9.2",
+          running: "2026.7.1-2",
+          source: "boot",
+          bootId: "40:1700000000000",
+          verdict: ["installed_not_expected", "pidfile_contradiction"],
+        },
+      });
+      // Same verdict again (a re-run of the finalize step): nothing new.
+      expect(watchdog.setBootVerdict(inconsistent)).toEqual(latched);
+      expect(rowsOf(insertWatchdogEvent, "version_mismatch")).toHaveLength(1);
+      // A top-level verdict[] (an older report shape) is accepted too; a
+      // non-string entry is ignored rather than thrown on.
+      const other = createHarness({ autoRepair: false });
+      other.watchdog.setBootVerdict({
+        verdict: ["installed_not_expected", 42],
+        openclaw: { expected: "b", installedAtBoot: "z", resolvedForLaunch: "a" },
+      });
+      expect(other.watchdog.getStatus().versionMismatch).toMatchObject({ expected: "b", running: "a", source: "boot" });
+      // A report with no bin phase (openclaw: null — the server phase created
+      // it) falls back to the server phase's own read and its channel
+      // snapshot, the same order describeReportVersions gives the verdict.
+      const serverOnly = createHarness({ autoRepair: false });
+      serverOnly.watchdog.setBootVerdict({
+        bootId: "41:1",
+        openclaw: null,
+        serverPhase: {
+          verdict: ["installed_not_expected"],
+          installedVersion: "2026.7.1-2",
+          channelInfo: { installedVersion: "2026.9.1", expectedVersion: "2026.9.2", installedDiverged: true },
+        },
+      });
+      expect(serverOnly.watchdog.getStatus().versionMismatch).toMatchObject({ expected: "2026.9.2", running: "2026.7.1-2", source: "boot" });
+      // A bin phase that only knows the PRE-sync tree names no running
+      // version: installedAtBoot is evidence about the sync, not the launch,
+      // and the latch must never claim a tree nothing is running.
+      const preSyncOnly = createHarness({ autoRepair: false });
+      preSyncOnly.watchdog.setBootVerdict({
+        bootId: "42:1",
+        serverPhase: { verdict: ["installed_not_expected"] },
+        openclaw: { installedAtBoot: "2026.7.1-2", expected: "2026.9.2" },
+      });
+      expect(preSyncOnly.watchdog.getStatus().versionMismatch).toMatchObject({ expected: "2026.9.2", running: null, source: "boot" });
+      expect(rowsOf(preSyncOnly.insertWatchdogEvent, "version_mismatch")[0].details).toMatchObject({ running: null, expected: "2026.9.2" });
+      // A junk report never throws.
+      expect(() => other.watchdog.setBootVerdict(null)).not.toThrow();
+      expect(() => other.watchdog.setBootVerdict("nonsense")).not.toThrow();
+    });
+
+    it("the channel memo latches installedDiverged (source channel, event deferred off the status tick) and clears itself when the tree converges — a boot latch is never cleared by it", async () => {
+      vi.useFakeTimers();
+      try {
+        const info = pinnedInfo({ installedDiverged: true });
+        const getInfo = vi.fn(() => info);
+        const { watchdog, insertWatchdogEvent } = createHarness({
+          autoRepair: false,
+          releaseChannelHooks: { getInfo, requestRollback: () => null },
+        });
+        const status = watchdog.getStatus();
+        expect(status.versionMismatch).toMatchObject({
+          expected: "2026.9.2",
+          running: "2026.7.1-2",
+          source: "channel",
+        });
+        // getStatus() itself wrote nothing: the row lands on the next turn.
+        expect(rowsOf(insertWatchdogEvent, "version_mismatch")).toHaveLength(0);
+        await vi.advanceTimersByTimeAsync(0);
+        const rows = rowsOf(insertWatchdogEvent, "version_mismatch");
+        expect(rows).toHaveLength(1);
+        expect(rows[0]).toMatchObject({
+          source: "channel",
+          details: { expected: "2026.9.2", running: "2026.7.1-2", source: "channel", installedDiverged: true },
+        });
+        // One channel read per 5s memo window, whatever the tick rate.
+        watchdog.getStatus();
+        watchdog.getStatus();
+        expect(getInfo).toHaveBeenCalledTimes(1);
+
+        // The tree converges: the channel-sourced latch clears on the next read.
+        info.installedDiverged = false;
+        vi.advanceTimersByTime(6_000);
+        expect(watchdog.getStatus().versionMismatch).toBe(null);
+        expect(getInfo).toHaveBeenCalledTimes(2);
+
+        // A boot verdict latch is evidence about THIS boot; the channel memo
+        // saying "not diverged" does not erase it.
+        watchdog.setBootVerdict({
+          bootId: "b",
+          serverPhase: { verdict: ["installed_not_expected"] },
+          openclaw: { expected: "2026.9.2", installedAtBoot: "2026.7.1-2", resolvedForLaunch: "2026.7.1-2" },
+        });
+        vi.advanceTimersByTime(6_000);
+        expect(watchdog.getStatus().versionMismatch).toMatchObject({ source: "boot" });
+        // And an equal channel mismatch on top keeps the boot latch (first
+        // detection wins; no duplicate event).
+        info.installedDiverged = true;
+        vi.advanceTimersByTime(6_000);
+        expect(watchdog.getStatus().versionMismatch).toMatchObject({ source: "boot" });
+        await vi.advanceTimersByTimeAsync(0);
+        expect(rowsOf(insertWatchdogEvent, "version_mismatch")).toHaveLength(2);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("while a mismatch is latched every notice carries the ⚠️ line — right after the house header, or prepended when the message has none", async () => {
+      const { watchdog, notifier } = crashHarness();
+      watchdog.setBootVerdict({
+        bootId: "b",
+        serverPhase: { verdict: ["installed_not_expected"] },
+        openclaw: { expected: "2026.9.2", installedAtBoot: "2026.7.1-2", resolvedForLaunch: "2026.7.1-2" },
+      });
+      // A header-bearing notice (the crash notice) and a header-less one (the
+      // OOM classifier's remedy line) from the same exit.
+      crashOnce(watchdog, { code: 134, stderrTail: kHeapOomTail });
+      await flushAll();
+      const notices = noticesOf(notifier);
+      const down = notices.find((m) => m.includes("🔴 Gateway went down"));
+      expect(down.split("\n").slice(0, 3)).toEqual([
+        "🐺 *AlphaClaw Watchdog*",
+        "⚠️ Version mismatch: running 2026.7.1-2, expected 2026.9.2",
+        expect.stringContaining("🔴 Gateway went down"),
+      ]);
+      const oomNotice = notices.find((m) => m.includes("Gateway ran out of JavaScript heap"));
+      expect(oomNotice.startsWith("⚠️ Version mismatch: running 2026.7.1-2, expected 2026.9.2\nGateway ran out of JavaScript heap")).toBe(true);
+      // Exactly one line per notice, never doubled.
+      expect(down.match(/⚠️ Version mismatch/g)).toHaveLength(1);
+      watchdog.stop();
+
+      // Without a latch the notices are byte-identical to before.
+      const plain = crashHarness();
+      crashOnce(plain.watchdog, { code: 134, stderrTail: kHeapOomTail });
+      await flushAll();
+      expect(noticesOf(plain.notifier).some((m) => m.includes("Version mismatch"))).toBe(false);
+      plain.watchdog.stop();
+    });
+  });
+  describe("cause-keyed structural ladder + scoped pause (#76 B1 / B3 / C2 runtime, Stage 3 I3)", () => {
+    const {
+      classifyGatewayCrash: realClassify,
+      fingerprintGatewayCrash,
+    } = require("../../lib/server/gateway-crash-cause");
+    const {
+      kAutoRepairPauseReasons,
+      kCrashCauseLadderEnvKey,
+      kLaunchCompatGateEnvKey,
+      kStructuralRelaunchSource,
+    } = require("../../lib/server/watchdog-structural-repair");
+    const { createGatewayLifecycleLock } = require("../../lib/server/gateway-lifecycle-lock");
+    const kStateDbPath = "/data/.openclaw/state/openclaw.sqlite";
+    const kSchemaTooNewTail = [
+      "[gateway] starting",
+      `OpenClaw state database ${kStateDbPath} uses newer schema version 15; this OpenClaw build supports 12.`,
+      "Refused by openclaw 2026.7.1-2.",
+    ];
+    const kFingerprint = fingerprintGatewayCrash({
+      cause: "state_schema_too_new",
+      code: 1,
+      signal: null,
+      matchedLine: kSchemaTooNewTail[1],
+    });
+    // Independent facts that corroborate the stderr line (user_version 15 on
+    // the named DB; the running build declares 12).
+    const corroboratingFacts = {
+      userVersionsByPath: { [kStateDbPath]: 15 },
+      supportedSchema: { state: 12, agent: null, source: "declared" },
+      installedDiverged: true,
+      legacyExecApprovalsPresent: false,
+    };
+    const uncorroboratedFacts = {
+      userVersionsByPath: { [kStateDbPath]: 12 },
+      supportedSchema: null,
+      installedDiverged: false,
+      legacyExecApprovalsPresent: false,
+    };
+    const flushAll = async (turns = 12) => {
+      for (let i = 0; i < turns; i += 1) await flushMicrotasks();
+    };
+    const rowsOf = (insertWatchdogEvent, eventType, status = null) =>
+      insertWatchdogEvent.mock.calls
+        .map((call) => call[0])
+        .filter((row) => row?.eventType === eventType && (status == null || row.status === status));
+    const noticesOf = (notifier) => notifier.notify.mock.calls;
+    const noticeText = (notifier, needle) =>
+      noticesOf(notifier).find((call) => String(call[0]).includes(needle)) ?? null;
+    const doctorCalls = (clawCmd) =>
+      clawCmd.mock.calls.filter((call) => call[0] === "doctor --fix --yes").length;
+    const failingFetch = async () => {
+      throw new Error("gateway unavailable");
+    };
+    const healthyFetch = async () => ({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({ ok: true, status: "live" }),
+    });
+    const activated = (to) => ({ ok: true, action: "activated", from: "2026.7.1-2", to, runId: "run-1" });
+    const refused = (code) => ({ ok: false, code, action: "none", message: code });
+    // Hooks shaped like lib/server.js's releaseChannelHooks; `info` is mutable
+    // so a rung can flip the installed version like the real reconcile does.
+    const makeHooks = ({
+      installedVersion = "2026.7.1-2",
+      expectedVersion = "2026.9.2",
+      installedDiverged = true,
+      reconcile = null,
+      recover = null,
+    } = {}) => {
+      const info = {
+        isPin: false,
+        installedIsPin: true,
+        inStabilizationWindow: false,
+        stabilization: { inWindow: false },
+        installedVersion,
+        expectedVersion,
+        installedDiverged,
+        gatewayHold: null,
+        stateCorrupted: false,
+      };
+      const hooks = {
+        info,
+        getInfo: vi.fn(() => ({ ...info })),
+        requestRollback: vi.fn(() => null),
+        requestForwardRecovery: vi.fn(() => ({ ok: false, code: "not_pin" })),
+        reconcileInstalled: vi.fn(
+          reconcile ||
+            (async () => {
+              info.installedVersion = info.expectedVersion;
+              info.installedDiverged = false;
+              return activated(info.expectedVersion);
+            }),
+        ),
+        recoverBootable: vi.fn(recover || (async () => refused("no_bootable_version"))),
+        renameStrayExecApprovals: vi.fn(() => ({ reaped: false })),
+        undoLastConfigRestore: vi.fn(() => ({ ok: false, code: "no_restore" })),
+        completeReconcileRun: vi.fn(),
+      };
+      return hooks;
+    };
+    const ladderHarness = ({ hooks, facts = corroboratingFacts, ...overrides } = {}) =>
+      createHarness({
+        autoRepair: true,
+        fetchImpl: failingFetch,
+        classifyGatewayCrash: realClassify,
+        readCrashFacts: vi.fn(async () => facts),
+        releaseChannelHooks: hooks,
+        readStateDbVersions: async () => ({ userVersion: 15, agentUserVersions: [17] }),
+        writePersistedPause: vi.fn(),
+        ...overrides,
+      });
+    const crash = (watchdog, { code = 1, stderrTail = kSchemaTooNewTail } = {}) => {
+      watchdog.onGatewayExit({ code, signal: null, expectedExit: false, stderrTail });
+    };
+    // A harness whose structural repair cannot help: reconcile refuses
+    // (overlay_missing) and the chooser finds nothing → the pause latches.
+    const pausedHarness = async (overrides = {}) => {
+      const hooks = makeHooks({
+        reconcile: async () => refused("overlay_missing"),
+        recover: async () => refused("no_bootable_version"),
+      });
+      const h = ladderHarness({ hooks, ...overrides });
+      crash(h.watchdog);
+      await flushAll();
+      expect(h.watchdog.getStatus().autoRepairPaused).toMatchObject({ cause: "state_schema_too_new" });
+      return { ...h, hooks };
+    };
+
+    afterEach(() => {
+      delete process.env[kCrashCauseLadderEnvKey];
+      delete process.env[kLaunchCompatGateEnvKey];
+    });
+
+    it("a corroborated state_schema_too_new crash on a diverged tree runs reconcileInstalled under the ladder's own lifecycle hold, then relaunches ONCE (replace) — no doctor, no rollback, no relaunch of the crashed binary, the reconcile run completed with the relaunch verdict", async () => {
+      const lock = createGatewayLifecycleLock();
+      const hooks = makeHooks();
+      const { watchdog, insertWatchdogEvent, clawCmd, launchGatewayProcess, notifier } = ladderHarness({
+        hooks,
+        gatewayLifecycleLock: lock,
+      });
+      crash(watchdog);
+      // Synchronous half: the crash row carries the cause, nothing launched.
+      expect(rowsOf(insertWatchdogEvent, "crash")[0].details).toMatchObject({
+        cause: "state_schema_too_new",
+        fingerprint: kFingerprint,
+        suspectedCause: "state_schema_too_new",
+      });
+      expect(launchGatewayProcess).not.toHaveBeenCalled();
+      await flushAll();
+
+      expect(hooks.reconcileInstalled).toHaveBeenCalledTimes(1);
+      const [reconcileArgs] = hooks.reconcileInstalled.mock.calls[0];
+      expect(reconcileArgs).toMatchObject({ source: "structural_repair", relaunch: true });
+      expect(typeof reconcileArgs.hold).toBe("function");
+      expect(reconcileArgs.hold.kind).toBe("structural_repair");
+      expect(hooks.undoLastConfigRestore).toHaveBeenCalledTimes(1);
+      expect(hooks.recoverBootable).not.toHaveBeenCalled();
+      expect(hooks.requestRollback).not.toHaveBeenCalled();
+      expect(doctorCalls(clawCmd)).toBe(0);
+      // Exactly one launch: the corrected tree, after the activation.
+      expect(launchGatewayProcess).toHaveBeenCalledTimes(1);
+      expect(launchGatewayProcess.mock.invocationCallOrder[0]).toBeGreaterThan(
+        hooks.reconcileInstalled.mock.invocationCallOrder[0],
+      );
+      expect(rowsOf(insertWatchdogEvent, "restart", "requested")[0]).toMatchObject({
+        source: kStructuralRelaunchSource,
+        details: { intent: "replace", stateDb: { userVersion: 15, agentUserVersions: [17] } },
+      });
+      expect(hooks.completeReconcileRun).toHaveBeenCalledWith({
+        runId: "run-1",
+        relaunch: { ok: true, verdict: "replacement_pending" },
+      });
+      const repairRows = rowsOf(insertWatchdogEvent, "repair");
+      expect(repairRows).toHaveLength(1);
+      expect(repairRows[0]).toMatchObject({
+        source: "structural",
+        status: "ok",
+        details: {
+          cause: "state_schema_too_new",
+          fingerprint: kFingerprint,
+          corroborated: true,
+          by: "user_version",
+          verdict: "replacement_pending",
+          runId: "run-1",
+          paused: null,
+        },
+      });
+      expect(repairRows[0].details.plan.map((p) => `${p.step}:${p.outcome}`)).toEqual([
+        "reconcile_installed:activated",
+        "undo_config_restore:no_restore",
+        "relaunch:replacement_pending",
+      ]);
+      expect(rowsOf(insertWatchdogEvent, "version_mismatch")).toHaveLength(1);
+      expect(rowsOf(insertWatchdogEvent, "crash_loop")).toHaveLength(0);
+      const status = watchdog.getStatus();
+      expect(status.autoRepairPaused).toBe(null);
+      expect(status.replacementPending).toMatchObject({ source: kStructuralRelaunchSource, intent: "replace" });
+      expect(status.operationInProgress).toBe(false);
+      expect(lock.tryAcquire("test")).toBeTruthy(); // the ladder released its hold
+      const down = noticeText(notifier, "Gateway stopped");
+      expect(String(down[0])).toContain(
+        "cause `state_schema_too_new` confirmed; AlphaClaw is fixing the installed build instead of relaunching it",
+      );
+      expect(noticeText(notifier, "will retry automatically")).toBe(null);
+      watchdog.stop();
+    });
+
+    it("three schema crashes with nothing to activate: launchGatewayProcess frozen, no doctor, the pause latches ONCE (persisted through writePersistedPause with the fixture shape), later crashes are skipped {auto_repair_paused}, and the B3 notice names cause / versions / DB schema / last plan / diagnose", async () => {
+      const { watchdog, insertWatchdogEvent, clawCmd, launchGatewayProcess, notifier, hooks } =
+        await pausedHarness();
+      crash(watchdog);
+      await flushAll();
+      crash(watchdog);
+      await flushAll();
+
+      expect(launchGatewayProcess).not.toHaveBeenCalled();
+      expect(doctorCalls(clawCmd)).toBe(0);
+      expect(hooks.requestRollback).not.toHaveBeenCalled();
+      expect(hooks.requestForwardRecovery).not.toHaveBeenCalled();
+      // One ladder run, then two refusals while paused.
+      expect(hooks.reconcileInstalled).toHaveBeenCalledTimes(1);
+      expect(hooks.recoverBootable).toHaveBeenCalledTimes(1);
+      expect(rowsOf(insertWatchdogEvent, "repair", "failed")).toHaveLength(1);
+      expect(rowsOf(insertWatchdogEvent, "repair", "skipped").map((r) => r.details.reason)).toEqual([
+        "auto_repair_paused",
+        "auto_repair_paused",
+      ]);
+      expect(rowsOf(insertWatchdogEvent, "crash")).toHaveLength(3);
+      expect(rowsOf(insertWatchdogEvent, "crash_loop")).toHaveLength(0);
+
+      const paused = rowsOf(insertWatchdogEvent, "auto_repair_paused");
+      expect(paused).toHaveLength(1);
+      expect(paused[0]).toMatchObject({
+        source: "structural",
+        status: "failed",
+        details: {
+          cause: "state_schema_too_new",
+          fingerprint: kFingerprint,
+          reason: kAutoRepairPauseReasons.STRUCTURAL_REPAIR_FAILED,
+          attempts: 1,
+          installedVersion: "2026.7.1-2",
+          expected: "2026.9.2",
+          corroborated: true,
+          lastPlan: { rung: "recover_bootable", outcome: "no_bootable_version" },
+        },
+      });
+      const status = watchdog.getStatus();
+      expect(status.autoRepairPaused).toEqual({
+        at: expect.any(String),
+        cause: "state_schema_too_new",
+        fingerprint: kFingerprint,
+        installedVersion: "2026.7.1-2",
+        attempts: 1,
+        lastPlan: { rung: "recover_bootable", outcome: "no_bootable_version" },
+        reason: "structural_repair_failed",
+        corroborated: true,
+        expected: "2026.9.2",
+      });
+      expect(new Date(status.autoRepairPaused.at).toISOString()).toBe(status.autoRepairPaused.at);
+      expect(status.lifecycle).toBe("crashed");
+      expect(status.degradedReason).toBe("version_mismatch");
+
+      const notice = noticeText(notifier, "🔴 Auto-repair paused");
+      expect(notice).toBeTruthy();
+      const lines = String(notice[0]).split("\n");
+      expect(lines[0]).toBe("🐺 *AlphaClaw Watchdog*");
+      expect(lines[1]).toBe("⚠️ Version mismatch: running 2026.7.1-2, expected 2026.9.2");
+      expect(lines[2]).toContain("🔴 Auto-repair paused");
+      expect(lines[2]).toContain("[View logs](");
+      expect(lines[3]).toBe("Cause: `state_schema_too_new`");
+      expect(lines[4]).toBe("Running: 2026.7.1-2 · Expected: 2026.9.2");
+      expect(lines[5]).toBe("DB schema: state 15 (running build supports 12) · agent 17 (—)");
+      expect(lines[6]).toBe("Last plan: recover_bootable → no bootable version");
+      expect(lines[7]).toBe(
+        "Next: Retry · Repair · View logs from the Watchdog tab — a Repair sent with force resumes automatic repair once.",
+      );
+      expect(lines[8]).toBe("Details: `alphaclaw diagnose`");
+      expect(notice[1]).toEqual(
+        expect.objectContaining({
+          eventType: "crash",
+          id: expect.stringMatching(new RegExp(`^auto-repair-paused-${kFingerprint}-\\d{8}$`)),
+        }),
+      );
+      expect(noticesOf(notifier).filter((call) => String(call[0]).includes("Auto-repair paused"))).toHaveLength(1);
+      watchdog.stop();
+    });
+
+    it("the pause is persisted through writePersistedPause with exactly the fixture's keys (at ms, cause, fingerprint, installedVersion, attempts, lastPlan {rung, outcome}, reason)", async () => {
+      const writePersistedPause = vi.fn();
+      const { watchdog } = await pausedHarness({ writePersistedPause });
+      expect(writePersistedPause).toHaveBeenCalledTimes(1);
+      const [persisted] = writePersistedPause.mock.calls[0];
+      expect(persisted).toEqual({
+        at: expect.any(Number),
+        cause: "state_schema_too_new",
+        fingerprint: kFingerprint,
+        installedVersion: "2026.7.1-2",
+        attempts: 1,
+        lastPlan: { rung: "recover_bootable", outcome: "no_bootable_version" },
+        reason: "structural_repair_failed",
+      });
+      expect(Object.keys(persisted)).toHaveLength(7);
+      watchdog.stop();
+    });
+
+    it("a paused box still recovers when the gateway comes back on its own: one green probe does not clear the pause, the acceptance hold does; an unhealthy tick in between resets the clock; the clear unlinks the persisted record", async () => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(new Date("2026-09-06T08:05:00.000Z"));
+      const writePersistedPause = vi.fn();
+      const { watchdog, insertWatchdogEvent } = await pausedHarness({
+        writePersistedPause,
+        acceptanceHoldMs: 5000,
+      });
+      writePersistedPause.mockClear();
+      global.fetch = vi.fn(healthyFetch);
+
+      await watchdog.runHealthCheck({ source: "test" });
+      expect(watchdog.getStatus().health).toBe("healthy");
+      expect(watchdog.getStatus().autoRepairPaused).not.toBe(null); // one green probe is not acceptance
+
+      vi.setSystemTime(Date.now() + 3000);
+      global.fetch = vi.fn(failingFetch);
+      await watchdog.runHealthCheck({ source: "test" }); // resets the clock
+      global.fetch = vi.fn(healthyFetch);
+      vi.setSystemTime(Date.now() + 3000);
+      await watchdog.runHealthCheck({ source: "test" }); // 6 s since the FIRST green, 0 since the reset
+      expect(watchdog.getStatus().autoRepairPaused).not.toBe(null);
+
+      vi.setSystemTime(Date.now() + 5000);
+      await watchdog.runHealthCheck({ source: "test" });
+      expect(watchdog.getStatus().autoRepairPaused).toBe(null);
+      expect(writePersistedPause).toHaveBeenCalledWith(null);
+      expect(rowsOf(insertWatchdogEvent, "repair", "ok").at(-1)).toMatchObject({
+        source: "health_check",
+        details: { pauseCleared: "healthy_acceptance", cause: "state_schema_too_new", fingerprint: kFingerprint },
+      });
+      watchdog.stop();
+    });
+
+    it("operator resume is one-shot: a plain manual repair while paused is refused (skipped auto_repair_paused, 409-shaped), triggerRepair({ force: true }) clears the pause for that attempt and runs Doctor, and the same fingerprint re-latches with attempts 2", async () => {
+      const writePersistedPause = vi.fn();
+      const { watchdog, insertWatchdogEvent, clawCmd, hooks } = await pausedHarness({ writePersistedPause });
+      const refusedRepair = await watchdog.triggerRepair();
+      expect(refusedRepair).toMatchObject({
+        ok: false,
+        skipped: true,
+        reason: "auto_repair_paused",
+        pause: { cause: "state_schema_too_new", fingerprint: kFingerprint },
+      });
+      expect(rowsOf(insertWatchdogEvent, "repair", "skipped").at(-1)).toMatchObject({
+        source: "manual",
+        details: { reason: "auto_repair_paused", pauseReason: "structural_repair_failed" },
+      });
+      expect(doctorCalls(clawCmd)).toBe(0);
+
+      const resumed = await watchdog.triggerRepair({ force: true });
+      expect(resumed.skipped).toBeUndefined();
+      expect(doctorCalls(clawCmd)).toBe(1);
+      expect(rowsOf(insertWatchdogEvent, "repair", "ok").some(
+        (row) => row.source === "manual" && row.details?.pauseCleared === "operator_resume",
+      )).toBe(true);
+      expect(writePersistedPause).toHaveBeenLastCalledWith(null);
+      expect(watchdog.getStatus().autoRepairPaused).toBe(null);
+
+      // Same fingerprint again, the structure still cannot be fixed → re-latch.
+      crash(watchdog);
+      await flushAll();
+      expect(hooks.reconcileInstalled).toHaveBeenCalledTimes(2);
+      expect(watchdog.getStatus().autoRepairPaused).toMatchObject({ fingerprint: kFingerprint, attempts: 2 });
+      expect(rowsOf(insertWatchdogEvent, "auto_repair_paused")).toHaveLength(2);
+      watchdog.stop();
+    });
+
+    it("plain repairAttempts exhaustion is NOT a pause: past kWatchdogMaxRepairAttempts runRepair books repair/<source>/skipped {repair_attempts_exhausted} while restartAfterCrash keeps relaunching", async () => {
+      const { watchdog, insertWatchdogEvent, clawCmd, launchGatewayProcess } = createHarness({
+        autoRepair: true,
+        clawCmdImpl: async (command) =>
+          command === "doctor --fix --yes" ? { ok: false, stderr: "doctor exploded" } : { ok: true, stdout: "" },
+        fetchImpl: failingFetch,
+      });
+      // Two failed Doctor runs exhaust the (default 2) budget.
+      await watchdog.triggerRepair();
+      await watchdog.triggerRepair();
+      expect(watchdog.getStatus().repairAttempts).toBe(2);
+      expect(doctorCalls(clawCmd)).toBe(2);
+
+      crash(watchdog, { stderrTail: [] });
+      await flushMicrotasks();
+      crash(watchdog, { stderrTail: [] });
+      await flushMicrotasks();
+      expect(launchGatewayProcess).toHaveBeenCalledTimes(2); // backoff relaunches continue
+      crash(watchdog, { stderrTail: [] });
+      await flushAll();
+      expect(watchdog.getStatus().lifecycle).toBe("crash_loop");
+      expect(doctorCalls(clawCmd)).toBe(2); // the crash-loop repair did not run Doctor again
+      expect(rowsOf(insertWatchdogEvent, "repair", "skipped").at(-1)).toMatchObject({
+        source: "crash_loop",
+        details: { reason: "repair_attempts_exhausted", attempts: 2, limit: 2 },
+      });
+      expect(watchdog.getStatus().autoRepairPaused).toBe(null);
+      expect(rowsOf(insertWatchdogEvent, "auto_repair_paused")).toHaveLength(0);
+      watchdog.stop();
+    });
+
+    it("runtime compat step (C2): a relaunch against a binary that cannot read the databases books restart/<source>/skipped {version_mismatch, expected, running, intent}, clears the pending replacement, latches the mismatch and hands the cause to the structural ladder; OPENCLAW_LAUNCH_COMPAT_GATE=off launches as before", async () => {
+      const hooks = makeHooks();
+      let installedCompatible = false;
+      const assessLaunchCompatibility = vi.fn(async () =>
+        installedCompatible
+          ? { compatible: true, reasons: [], installedVersion: hooks.info.installedVersion, holdReason: null }
+          : {
+              compatible: false,
+              reasons: ["state_schema_too_new"],
+              installedVersion: "2026.7.1-2",
+              holdReason: "version_mismatch",
+            },
+      );
+      hooks.reconcileInstalled.mockImplementation(async () => {
+        hooks.info.installedVersion = "2026.9.2";
+        hooks.info.installedDiverged = false;
+        installedCompatible = true;
+        return activated("2026.9.2");
+      });
+      const { watchdog, insertWatchdogEvent, launchGatewayProcess } = createHarness({
+        autoRepair: false,
+        fetchImpl: failingFetch,
+        releaseChannelHooks: hooks,
+        assessLaunchCompatibility,
+      });
+      // A plain crash (no classifier): the legacy ladder asks for a relaunch.
+      watchdog.onGatewayExit({ code: 1, expectedExit: false, stderrTail: [] });
+      await flushMicrotasks();
+      await flushMicrotasks();
+      const skipped = rowsOf(insertWatchdogEvent, "restart", "skipped");
+      expect(skipped[0]).toMatchObject({
+        source: "exit_event",
+        details: {
+          reason: "version_mismatch",
+          expected: "2026.9.2",
+          running: "2026.7.1-2",
+          intent: "relaunch_if_absent",
+          reasons: ["state_schema_too_new"],
+          holdReason: "version_mismatch",
+        },
+      });
+      expect(rowsOf(insertWatchdogEvent, "restart", "failed")).toHaveLength(0);
+      const status = watchdog.getStatus();
+      expect(status.versionMismatch).toMatchObject({ expected: "2026.9.2", running: "2026.7.1-2", source: "relaunch" });
+      expect(status.degradedReason).toBe("version_mismatch");
+      // The structural ladder took over: reconcile, then the ONE launch of the
+      // corrected tree (its own compat step now passes).
+      await flushAll();
+      expect(hooks.reconcileInstalled).toHaveBeenCalledWith(
+        expect.objectContaining({ source: "structural_repair", relaunch: true }),
+      );
+      expect(launchGatewayProcess).toHaveBeenCalledTimes(1);
+      expect(rowsOf(insertWatchdogEvent, "restart", "requested")[0].source).toBe(kStructuralRelaunchSource);
+      expect(watchdog.getStatus().replacementPending).toMatchObject({ source: kStructuralRelaunchSource });
+      expect(rowsOf(insertWatchdogEvent, "repair", "ok")[0].details.plan[0]).toEqual({
+        step: "reconcile_installed",
+        outcome: "activated",
+        detail: "2026.7.1-2 → 2026.9.2",
+      });
+      watchdog.stop();
+
+      // Kill switch: the seam is never consulted, the launch proceeds.
+      process.env[kLaunchCompatGateEnvKey] = "off";
+      const compat = vi.fn(async () => ({ compatible: false, reasons: ["state_schema_too_new"] }));
+      const off = createHarness({
+        autoRepair: false,
+        fetchImpl: failingFetch,
+        releaseChannelHooks: makeHooks(),
+        assessLaunchCompatibility: compat,
+      });
+      off.watchdog.onGatewayExit({ code: 1, expectedExit: false, stderrTail: [] });
+      await flushAll();
+      expect(compat).not.toHaveBeenCalled();
+      expect(off.launchGatewayProcess).toHaveBeenCalledTimes(1);
+      expect(rowsOf(off.insertWatchdogEvent, "restart", "requested")[0].source).toBe("exit_event");
+      off.watchdog.stop();
+    });
+
+    it("compat step inside runRepair: Doctor ran, the relaunch was refused → skipped {version_mismatch}, no repair attempt counted, no 'Auto-repair failed' notice", async () => {
+      const assessLaunchCompatibility = vi.fn(async () => ({
+        compatible: false,
+        reasons: ["agent_schema_too_new"],
+        installedVersion: "2026.7.1-2",
+      }));
+      const { watchdog, clawCmd, notifier, insertWatchdogEvent } = createHarness({
+        autoRepair: true,
+        fetchImpl: failingFetch,
+        releaseChannelHooks: makeHooks(),
+        assessLaunchCompatibility,
+      });
+      const result = await watchdog.triggerRepair();
+      expect(doctorCalls(clawCmd)).toBe(1);
+      expect(result).toMatchObject({
+        ok: false,
+        skipped: true,
+        reason: "version_mismatch",
+        verdict: kRestartVerdicts.VERSION_MISMATCH,
+        launchedGateway: false,
+      });
+      expect(watchdog.getStatus().repairAttempts).toBe(0);
+      expect(watchdog.getStatus().lastRepairVerdict).toBe("version_mismatch");
+      expect(noticeText(notifier, "Auto-repair failed")).toBe(null);
+      expect(rowsOf(insertWatchdogEvent, "restart", "skipped")[0]).toMatchObject({
+        source: "repair",
+        details: { reason: "version_mismatch", intent: "replace" },
+      });
+      watchdog.stop();
+    });
+
+    it("kill switch OPENCLAW_CRASH_CAUSE_LADDER=off: classification and corroboration still record, but the legacy ladder relaunches and nothing structural or pausing acts", async () => {
+      process.env[kCrashCauseLadderEnvKey] = "off";
+      const hooks = makeHooks();
+      const { watchdog, insertWatchdogEvent, launchGatewayProcess } = ladderHarness({ hooks });
+      crash(watchdog);
+      await flushAll();
+      expect(rowsOf(insertWatchdogEvent, "crash")[0].details.cause).toBe("state_schema_too_new");
+      expect(rowsOf(insertWatchdogEvent, "crash_cause")[0].details.corroborated).toBe(true);
+      expect(rowsOf(insertWatchdogEvent, "version_mismatch")).toHaveLength(1);
+      expect(launchGatewayProcess).toHaveBeenCalledTimes(1);
+      expect(rowsOf(insertWatchdogEvent, "restart", "requested")[0].source).toBe("exit_event");
+      expect(hooks.reconcileInstalled).not.toHaveBeenCalled();
+      expect(rowsOf(insertWatchdogEvent, "repair")).toHaveLength(0);
+      expect(watchdog.getStatus().autoRepairPaused).toBe(null);
+      watchdog.stop();
+    });
+
+    it("hooks without reconcileInstalled (legacy wiring) keep the pre-Stage-3 ladder byte-for-byte: corroborated cause, legacy relaunch", async () => {
+      const { watchdog, insertWatchdogEvent, launchGatewayProcess } = ladderHarness({
+        hooks: { getInfo: () => makeHooks().info, requestRollback: vi.fn(() => null) },
+      });
+      crash(watchdog);
+      await flushAll();
+      expect(launchGatewayProcess).toHaveBeenCalledTimes(1);
+      expect(rowsOf(insertWatchdogEvent, "repair")).toHaveLength(0);
+      expect(watchdog.getStatus().autoRepairPaused).toBe(null);
+      watchdog.stop();
+    });
+
+    it("re-arms a persisted pause at construction for the same installedVersion (one skipped row, repairs refused) and drops it for a different one; a throwing reader is one warning", () => {
+      const persisted = {
+        at: 1788681900000,
+        cause: "state_schema_too_new",
+        fingerprint: kFingerprint,
+        installedVersion: "2026.7.1-2",
+        attempts: 3,
+        lastPlan: { rung: "reconcile_installed", outcome: "overlay_missing" },
+        reason: "structural_repair_failed",
+      };
+      const sameWrite = vi.fn();
+      const same = ladderHarness({
+        hooks: makeHooks(),
+        readPersistedPause: () => ({ ...persisted }),
+        writePersistedPause: sameWrite,
+      });
+      expect(same.watchdog.getStatus().autoRepairPaused).toEqual({
+        ...persisted,
+        at: "2026-09-06T08:05:00.000Z",
+        corroborated: null,
+        expected: "2026.9.2",
+      });
+      expect(rowsOf(same.insertWatchdogEvent, "repair", "skipped")[0]).toMatchObject({
+        source: "structural",
+        details: { reason: "auto_repair_paused", rearmed: true, attempts: 3 },
+      });
+      expect(sameWrite).not.toHaveBeenCalled();
+      same.watchdog.stop();
+
+      const changedWrite = vi.fn();
+      const changed = ladderHarness({
+        hooks: makeHooks({ installedVersion: "2026.9.2", installedDiverged: false }),
+        readPersistedPause: () => ({ ...persisted }),
+        writePersistedPause: changedWrite,
+      });
+      expect(changed.watchdog.getStatus().autoRepairPaused).toBe(null);
+      expect(changedWrite).toHaveBeenCalledWith(null);
+      changed.watchdog.stop();
+
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const throwing = ladderHarness({
+        hooks: makeHooks(),
+        readPersistedPause: () => {
+          throw new Error("EIO");
+        },
+      });
+      expect(throwing.watchdog.getStatus().autoRepairPaused).toBe(null);
+      expect(warn.mock.calls.some((call) => String(call[0]).includes("persisted auto-repair pause unreadable"))).toBe(true);
+      throwing.watchdog.stop();
+    });
+
+    it("an installedVersion change observed on the channel clears the pause (a manual restart or a blocklist Clear alone never does)", async () => {
+      const writePersistedPause = vi.fn();
+      const { watchdog, hooks, insertWatchdogEvent } = await pausedHarness({ writePersistedPause });
+      // Manual restart-shaped events: the pause survives.
+      watchdog.onExpectedRestart({ expiresAt: Date.now() + 60_000 });
+      watchdog.onExpectedRestartSettled();
+      await flushAll();
+      expect(watchdog.getStatus().autoRepairPaused).not.toBe(null);
+      // The operator applied a compatible build: the tree changed.
+      hooks.info.installedVersion = "2026.9.2";
+      hooks.info.installedDiverged = false;
+      const refusedRepair = await watchdog.triggerRepair();
+      expect(refusedRepair.reason).not.toBe("auto_repair_paused");
+      expect(watchdog.getStatus().autoRepairPaused).toBe(null);
+      expect(writePersistedPause).toHaveBeenLastCalledWith(null);
+      expect(rowsOf(insertWatchdogEvent, "repair", "ok").some(
+        (row) => row.details?.pauseCleared === "installed_version_changed",
+      )).toBe(true);
+      watchdog.stop();
+    });
+
+    it("rule (b): an UNcorroborated version-family fingerprint whose relaunched child exits inside its launch window twice latches the pause with 'Suspected cause' wording", async () => {
+      const hooks = makeHooks({ installedDiverged: false });
+      const { watchdog, insertWatchdogEvent, launchGatewayProcess, notifier } = ladderHarness({
+        hooks,
+        facts: uncorroboratedFacts,
+        autoRepair: false,
+      });
+      crash(watchdog); // no pending yet → legacy relaunch (pid 4242)
+      await flushAll();
+      expect(launchGatewayProcess).toHaveBeenCalledTimes(1);
+      crash(watchdog); // the pending child died inside its window → count 1 → relaunch again
+      await flushAll();
+      expect(launchGatewayProcess).toHaveBeenCalledTimes(2);
+      expect(watchdog.getStatus().autoRepairPaused).toBe(null);
+      crash(watchdog); // count 2 → pause
+      await flushAll();
+      expect(launchGatewayProcess).toHaveBeenCalledTimes(2);
+      expect(hooks.reconcileInstalled).not.toHaveBeenCalled();
+      expect(watchdog.getStatus().autoRepairPaused).toMatchObject({
+        cause: "state_schema_too_new",
+        fingerprint: kFingerprint,
+        reason: kAutoRepairPauseReasons.REPLACEMENT_EXITED_TWICE,
+        corroborated: false,
+        lastPlan: null,
+      });
+      expect(rowsOf(insertWatchdogEvent, "restart", "failed").filter((r) => r.details.reason === "replacement_exited")).toHaveLength(2);
+      const notice = noticeText(notifier, "🔴 Auto-repair paused");
+      expect(String(notice[0])).toContain("Suspected cause: `state_schema_too_new`");
+      expect(String(notice[0])).toContain("Last plan: relaunched build exited twice inside its launch window");
+      // A further crash relaunches nothing: four crashes in the window put the
+      // legacy path on its crash-loop branch, which the pause stops cold (no
+      // rollback, no doctor).
+      crash(watchdog);
+      await flushAll();
+      expect(launchGatewayProcess).toHaveBeenCalledTimes(2);
+      expect(rowsOf(insertWatchdogEvent, "repair", "skipped").at(-1)?.details).toMatchObject({
+        reason: "auto_repair_paused",
+        fingerprint: kFingerprint,
+      });
+      expect(hooks.requestRollback).not.toHaveBeenCalled();
+      watchdog.stop();
+    });
   });
 });

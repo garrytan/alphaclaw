@@ -1,7 +1,12 @@
 const { EventEmitter } = require("events");
 const {
   createClaudeCodeLocalService,
+  composeOperatorPrompt,
 } = require("../../lib/server/claude-code-local");
+const {
+  writeIncidentBundle,
+  kManagedClaudeMdMarker,
+} = require("../../lib/server/claude-code-local/incident-bundle");
 
 // ---------------------------------------------------------------- fakes ----
 
@@ -132,7 +137,7 @@ const kFastTimers = {
 
 const flush = (ms = 25) => new Promise((r) => setTimeout(r, ms));
 
-const createService = ({ env = {}, driver, fsModule, runStream, spawnImpl, getResources, timers, resolveExternalBaseUrl } = {}) => {
+const createService = ({ env = {}, driver, fsModule, runStream, spawnImpl, getResources, timers, resolveExternalBaseUrl, incidentEvidence } = {}) => {
   const fakeDriver = driver || createFakeDriver();
   const fakeFs = fsModule || createFakeFs();
   return {
@@ -146,6 +151,7 @@ const createService = ({ env = {}, driver, fsModule, runStream, spawnImpl, getRe
       spawnImpl,
       getResources,
       resolveExternalBaseUrl,
+      incidentEvidence,
       logger: { log: vi.fn(), warn: vi.fn(), error: vi.fn() },
       paths: kPaths,
       timers: timers || kFastTimers,
@@ -1402,5 +1408,318 @@ describe("claude-code-local service — fix wave PR 10 (F131, F133, F134, F135)"
     const stopped = await service.stopSession();
     expect(stopped.ok).toBe(true);
     expect(driver.killSession).toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #76 B4 — the rescue session starts informed. The incident hook writes the
+// managed CLAUDE.md + INCIDENT-<id>.md into the MANAGED workspace before the
+// spawn, keys the session by the crash fingerprint (state.json contextKey),
+// appends `## Boot <n>` for the same fingerprint while a session is live, and
+// never writes into an operator-chosen cwd — the notification line is the
+// only pointer (Codex 13: nothing is ever typed into the pane).
+// ---------------------------------------------------------------------------
+const kFingerprint = "abc123def456";
+const kBundlePath = `${kPaths.workspace}/INCIDENT-9.md`;
+const kClaudeMdPath = `${kPaths.workspace}/CLAUDE.md`;
+const kSecretValue = "hunter2secret";
+const kEvidenceContext = () => ({
+  kind: "open",
+  eventType: "crash",
+  incidentId: 9,
+  fingerprint: kFingerprint,
+  cause: "state_schema_too_new",
+  corroborated: true,
+  crash: {
+    cause: "state_schema_too_new",
+    detail: "state DB carries schema 12; the exited build supports 1",
+    code: 1,
+    signal: null,
+  },
+  stderrLines: [
+    "gateway booting",
+    "OpenClaw state database /data/.openclaw/openclaw.sqlite uses newer schema version 12; this build supports 1.",
+    `Authorization: ${kSecretValue}`,
+  ],
+  versions: { running: "2026.7.1-2", expected: "2026.9.1-beta.1", diverged: true, found: 12, supports: 1 },
+  plan: {
+    paused: true,
+    reason: "structural_repair_failed",
+    attempts: 1,
+    lastPlan: { rung: "reconcile_installed", outcome: "overlay_missing" },
+  },
+  exit: { code: 1, signal: null },
+});
+const kBootReport = (bootId) => ({
+  current: { bootId, serverPhase: { verdict: ["state_schema_too_new"] } },
+  previous: [],
+  incident: null,
+});
+const createEvidenceSeams = ({ bootId = "40:1700000000000" } = {}) => ({
+  readBootReports: vi.fn(() => kBootReport(bootId)),
+  collectDiagnoseMarkdown: vi.fn(async () => `# AlphaClaw diagnose\n\n- token ${kSecretValue} must never leak\n`),
+  buildRedactor: vi.fn(() => (text) => String(text).split(kSecretValue).join("***")),
+});
+const reachRunning = async (service, driver) => {
+  driver.state.buffer = "ready!\nhttps://claude.ai/code/sess_abcdef123456?from=cli\n";
+  await flush(60);
+  expect(service.getStatusSnapshot().state).toBe("running");
+};
+
+describe("incident evidence (#76 B4)", () => {
+  it("writes the managed CLAUDE.md and INCIDENT-<id>.md into the managed workspace BEFORE newSession, redacted, and persists contextKey = fingerprint", async () => {
+    const incidentEvidence = createEvidenceSeams();
+    const { service, driver, fsModule } = createService({ incidentEvidence });
+    await service.refreshProbes({ force: true });
+    const seenAtSpawn = [];
+    driver.newSession.mockImplementation(async () => {
+      seenAtSpawn.push({
+        bundle: fsModule.files.has(kBundlePath),
+        claudeMd: fsModule.files.has(kClaudeMdPath),
+      });
+      driver.state.sessionAlive = true;
+      return { code: 0, stdout: "", stderr: "" };
+    });
+
+    service.ensureForIncident(kEvidenceContext());
+    await flush(80);
+
+    expect(driver.newSession).toHaveBeenCalledTimes(1);
+    expect(seenAtSpawn).toEqual([{ bundle: true, claudeMd: true }]);
+    expect(driver.newSession.mock.calls[0][0].cwd).toBe(kPaths.workspace);
+    // The seams were consulted exactly once for the one write.
+    expect(incidentEvidence.readBootReports).toHaveBeenCalledTimes(1);
+    expect(incidentEvidence.collectDiagnoseMarkdown).toHaveBeenCalledTimes(1);
+    expect(incidentEvidence.buildRedactor).toHaveBeenCalledTimes(1);
+
+    const bundle = fsModule.files.get(kBundlePath);
+    expect(bundle.startsWith("# AlphaClaw incident 9\n")).toBe(true);
+    expect(bundle).toContain(`- Fingerprint: \`${kFingerprint}\``);
+    // Operator prompt composed from cause / versions / plan.
+    expect(bundle).toContain("Cause: `state_schema_too_new` (corroborated");
+    expect(bundle).toContain("Running OpenClaw 2026.7.1-2 · expected 2026.9.1-beta.1 — the installed tree DIVERGES");
+    expect(bundle).toContain("Database schema: found 12, the exited build supports 1.");
+    expect(bundle).toContain("Automatic repair is PAUSED (structural repair failed, attempt 1); last plan: reconcile_installed → overlay missing.");
+    expect(bundle).toContain("Do NOT run `doctor --fix` with the older binary");
+    // Evidence sections: the stderr tail (fenced), the boot report, the diagnose.
+    expect(bundle).toContain("uses newer schema version 12; this build supports 1.");
+    expect(bundle).toContain('"bootId": "40:1700000000000"');
+    expect(bundle).toContain("# AlphaClaw diagnose");
+    // The injected value redactor ran over every input (stderr AND diagnose).
+    expect(bundle).not.toContain(kSecretValue);
+    expect(bundle).toContain("Authorization: ***");
+    expect(bundle).toContain("token *** must never leak");
+    // CLAUDE.md is the static managed text — nothing incident-derived.
+    const claudeMd = fsModule.files.get(kClaudeMdPath);
+    expect(claudeMd.startsWith(kManagedClaudeMdMarker)).toBe(true);
+    expect(claudeMd).not.toContain("state_schema_too_new");
+    expect(claudeMd).not.toContain(kFingerprint);
+    // contextKey rides state.json so the same fingerprint appends later.
+    const persisted = JSON.parse(fsModule.files.get(kPaths.stateFile));
+    expect(persisted.contextKey).toBe(kFingerprint);
+    expect(persisted.spawnedBy).toBe("incident:9");
+  });
+
+  it("names the bundle file on the notification line once the session is running (managed workspace)", async () => {
+    const { service, driver } = createService({ incidentEvidence: createEvidenceSeams() });
+    await service.refreshProbes({ force: true });
+    service.ensureForIncident(kEvidenceContext());
+    await flush(80);
+    expect(service.getNotificationLine()).toBeNull(); // no URL yet — no line at all
+    await reachRunning(service, driver);
+    const line = service.getNotificationLine();
+    expect(line).toContain("https://claude.ai/code/sess_abcdef123456");
+    expect(line).toContain(" · Evidence: `INCIDENT-9.md`");
+    expect(line).not.toContain(kPaths.workspace);
+    expect(line).not.toContain("(updated)");
+  });
+
+  it("operator-chosen cwd: nothing is written there, the bundle lands in the managed workspace and the line carries its absolute path", async () => {
+    const { service, driver, fsModule } = createService({
+      env: { CLAUDE_CODE_LOCAL_CWD: "/srv/project" },
+      incidentEvidence: createEvidenceSeams(),
+    });
+    await service.refreshProbes({ force: true });
+    service.ensureForIncident(kEvidenceContext());
+    await flush(80);
+    expect(driver.newSession).toHaveBeenCalledTimes(1);
+    expect(driver.newSession.mock.calls[0][0].cwd).toBe("/srv/project");
+    // Not one file under the operator's directory.
+    expect([...fsModule.files.keys()].filter((file) => file.startsWith("/srv/project"))).toEqual([]);
+    expect(fsModule.files.has(kBundlePath)).toBe(true);
+    expect(fsModule.files.has(kClaudeMdPath)).toBe(true);
+    await reachRunning(service, driver);
+    expect(service.getNotificationLine()).toContain(` · Evidence: \`${kBundlePath}\``);
+  });
+
+  it("live session + same fingerprint → appends ## Boot <n> with the newest boot report; no respawn, nothing typed into the pane", async () => {
+    const incidentEvidence = createEvidenceSeams();
+    const { service, driver, fsModule } = createService({ incidentEvidence });
+    await service.refreshProbes({ force: true });
+    service.ensureForIncident(kEvidenceContext());
+    await flush(80);
+    await reachRunning(service, driver);
+    driver.sendKeys.mockClear();
+    incidentEvidence.readBootReports.mockImplementation(() => kBootReport("41:1700000099999"));
+
+    service.ensureForIncident({ ...kEvidenceContext(), kind: "escalation", eventType: "crash_loop" });
+    await flush(80);
+
+    expect(driver.newSession).toHaveBeenCalledTimes(1);
+    expect(driver.sendKeys).not.toHaveBeenCalled();
+    const bundle = fsModule.files.get(kBundlePath);
+    expect(bundle).toContain("## Boot 2 · ");
+    expect(bundle).toContain('"bootId": "41:1700000099999"');
+    // The append path carries the boot report only — no second operator prompt.
+    const bootSection = bundle.slice(bundle.indexOf("## Boot 2"));
+    expect(bootSection).toContain("### Boot reports");
+    expect(bootSection).not.toContain("### Operator prompt");
+    // The diagnose collector is NOT re-run for an append (one call from the spawn).
+    expect(incidentEvidence.collectDiagnoseMarkdown).toHaveBeenCalledTimes(1);
+    expect(service.getNotificationLine()).toContain(" · Evidence: `INCIDENT-9.md` (updated)");
+  });
+
+  it("live session + a DIFFERENT fingerprint → a full bundle for that incident and the session is re-keyed", async () => {
+    const incidentEvidence = createEvidenceSeams();
+    const { service, driver, fsModule } = createService({ incidentEvidence });
+    await service.refreshProbes({ force: true });
+    service.ensureForIncident(kEvidenceContext());
+    await flush(80);
+    await reachRunning(service, driver);
+
+    service.ensureForIncident({
+      ...kEvidenceContext(),
+      incidentId: 10,
+      fingerprint: "feedface0001",
+      cause: "port_in_use",
+      corroborated: false,
+    });
+    await flush(80);
+
+    expect(driver.newSession).toHaveBeenCalledTimes(1);
+    expect(driver.sendKeys).not.toHaveBeenCalled();
+    const second = fsModule.files.get(`${kPaths.workspace}/INCIDENT-10.md`);
+    expect(second).toContain("Suspected cause: `port_in_use`");
+    expect(second).toContain("Another process holds the gateway port.");
+    expect(JSON.parse(fsModule.files.get(kPaths.stateFile)).contextKey).toBe("feedface0001");
+    expect(service.getNotificationLine()).toContain(" · Evidence: `INCIDENT-10.md`");
+  });
+
+  it("adoption restores contextKey on pane-identity match only, so a same-fingerprint boot appends across an AlphaClaw restart", async () => {
+    const { driver, fsModule } = createService({});
+    // The bundle a previous AlphaClaw process wrote for this incident.
+    writeIncidentBundle({
+      incidentId: 9,
+      fingerprint: kFingerprint,
+      operatorPrompt: "earlier hypothesis",
+      dirs: { workspace: kPaths.workspace },
+      fsModule,
+      logger: { warn: vi.fn() },
+    });
+    fsModule.files.set(
+      kPaths.stateFile,
+      JSON.stringify({
+        sessionName: "alphaclaw-rescue",
+        phase: "running",
+        sessionId: "sess_persisted01",
+        sessionUrl: "https://claude.ai/code/sess_persisted01",
+        linkToken: "ab".repeat(32),
+        panePid: 4242,
+        spawnedBy: "incident:9",
+        startedAt: 111,
+        mode: "acceptEdits",
+        cwd: kPaths.workspace,
+        contextKey: kFingerprint,
+      }),
+    );
+    driver.state.sessionAlive = true;
+    driver.state.panePid = 4242;
+    const incidentEvidence = createEvidenceSeams({ bootId: "42:1700000123456" });
+    const { service } = createService({ driver, fsModule, incidentEvidence });
+    service.reconcileOnBoot();
+    await flush(60);
+    expect(service.getStatusSnapshot().state).toBe("running");
+
+    service.ensureForIncident(kEvidenceContext());
+    await flush(80);
+    expect(driver.newSession).not.toHaveBeenCalled();
+    expect(driver.sendKeys).not.toHaveBeenCalled();
+    const bundle = fsModule.files.get(kBundlePath);
+    expect(bundle).toContain("earlier hypothesis");
+    expect(bundle).toContain("## Boot 2 · ");
+    expect(bundle).toContain('"bootId": "42:1700000123456"');
+    expect(bundle.slice(bundle.indexOf("## Boot 2"))).not.toContain("### Operator prompt");
+    expect(JSON.parse(fsModule.files.get(kPaths.stateFile)).contextKey).toBe(kFingerprint);
+
+    // Identity MISMATCH: the persisted contextKey is not trusted.
+    const mismatch = createService({});
+    mismatch.fsModule.files.set(
+      kPaths.stateFile,
+      JSON.stringify({ panePid: 1111, contextKey: kFingerprint, linkToken: "cd".repeat(32) }),
+    );
+    mismatch.driver.state.sessionAlive = true;
+    mismatch.driver.state.panePid = 4242;
+    mismatch.driver.state.buffer = "https://claude.ai/code/sess_fresh0000?from=cli";
+    const adopted = createService({ driver: mismatch.driver, fsModule: mismatch.fsModule });
+    adopted.service.reconcileOnBoot();
+    await flush(60);
+    expect(JSON.parse(mismatch.fsModule.files.get(kPaths.stateFile)).contextKey).toBeNull();
+  });
+
+  it("refuses a non-hex fingerprint as contextKey and still spawns", async () => {
+    const { service, driver, fsModule } = createService({ incidentEvidence: createEvidenceSeams() });
+    await service.refreshProbes({ force: true });
+    service.ensureForIncident({ ...kEvidenceContext(), fingerprint: "../etc/passwd" });
+    await flush(80);
+    expect(driver.newSession).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(fsModule.files.get(kPaths.stateFile)).contextKey).toBeNull();
+    expect(fsModule.files.get(kBundlePath)).toContain("- Fingerprint: `n/a`");
+  });
+
+  it("writes evidence even without the seams (placeholders) and skips nothing else", async () => {
+    const { service, driver, fsModule } = createService({});
+    await service.refreshProbes({ force: true });
+    service.ensureForIncident({ kind: "open", eventType: "crash", incidentId: 3 });
+    await flush(60);
+    expect(driver.newSession).toHaveBeenCalledTimes(1);
+    const bundle = fsModule.files.get(`${kPaths.workspace}/INCIDENT-3.md`);
+    expect(bundle).toContain("No crash cause was classified");
+    expect(bundle).toContain("_No boot report was available._");
+    expect(bundle).toContain("_`alphaclaw diagnose` output was not available._");
+  });
+
+  describe("composeOperatorPrompt", () => {
+    it("distinguishes a corroborated cause from a suspected one and keys the hint by cause", () => {
+      const corroborated = composeOperatorPrompt({
+        incidentId: 1,
+        kind: "open",
+        eventType: "crash",
+        cause: "agent_schema_too_new",
+        corroborated: true,
+      });
+      expect(corroborated).toContain("Watchdog incident 1 opened on a `crash` event.");
+      expect(corroborated).toContain("Cause: `agent_schema_too_new` (corroborated");
+      expect(corroborated).toContain("openclaw-agent.sqlite");
+      const suspected = composeOperatorPrompt({ incidentId: 2, kind: "escalation", cause: "oom", corroborated: null });
+      expect(suspected).toContain("Watchdog incident 2 escalated.");
+      expect(suspected).toContain("Suspected cause: `oom`");
+      expect(suspected).toContain("OOM killer");
+      const suspectedOnly = composeOperatorPrompt({ suspectedCause: "legacy_exec_approvals" });
+      expect(suspectedOnly).toContain("Suspected cause: `legacy_exec_approvals`");
+      expect(suspectedOnly).toContain(".stray-<ts>");
+    });
+
+    it("falls back to the generic hint and never carries evidence text", () => {
+      const prompt = composeOperatorPrompt({ incidentId: 5, cause: "unknown", exit: { code: 137, signal: "SIGKILL" } });
+      expect(prompt).toContain("No crash cause was classified");
+      expect(prompt).toContain("Last exit: code 137, signal SIGKILL.");
+      expect(prompt).toContain("Read the Crash evidence section first");
+      expect(prompt).toContain("No structural repair has run");
+      // Structural plan steps render when a ladder ran without pausing.
+      const ran = composeOperatorPrompt({
+        plan: { steps: [{ step: "reconcile_installed", outcome: "activated" }, { step: "relaunch", outcome: "replacement_ready" }] },
+      });
+      expect(ran).toContain("Structural repair already ran: reconcile_installed → activated; relaunch → replacement ready.");
+    });
   });
 });

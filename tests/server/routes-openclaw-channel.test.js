@@ -112,6 +112,7 @@ const kRoutes = [
   { method: "post", path: "/api/openclaw/rollback", body: {} },
   { method: "post", path: "/api/openclaw/mark-good", body: {} },
   { method: "post", path: "/api/openclaw/blocklist/clear", body: {} },
+  { method: "post", path: "/api/openclaw/reconcile-installed", body: {} },
 ];
 
 describe("server/routes/openclaw-channel", () => {
@@ -247,6 +248,8 @@ describe("server/routes/openclaw-channel", () => {
       operationId: "op-1",
       // No consent carried → the service sees null (never undefined/true).
       allowBackupReuse: null,
+      // #79 (b): the no-backup consent defaults to an explicit false.
+      confirmNoBackup: false,
     });
 
     const slowDeps = createDeps();
@@ -1093,6 +1096,74 @@ describe("server/routes/openclaw-channel", () => {
     });
   });
 
+  // #79 (b): the no-backup consent (409 backup_required_for_migration) is a
+  // STRICT boolean and humans-only — same two belts as allowBackupReuse.
+  describe("POST /api/openclaw/apply confirmNoBackup consent", () => {
+    it("passes a boolean through to the service; absent → false (never undefined)", async () => {
+      const deps = createDeps();
+      const app = createApp(deps);
+      const res = await request(app)
+        .post("/api/openclaw/apply")
+        .send({ channel: "stable", version: "1.1.0", confirmNoBackup: true });
+      expect(res.status).toBe(200);
+      expect(deps.openclawChannelService.applyUpdate).toHaveBeenCalledWith(
+        expect.objectContaining({ confirmNoBackup: true, allowBackupReuse: null }),
+      );
+      const explicitFalse = await request(app)
+        .post("/api/openclaw/apply")
+        .send({ channel: "stable", version: "1.1.0", confirmNoBackup: false });
+      expect(explicitFalse.status).toBe(200);
+      expect(deps.openclawChannelService.applyUpdate).toHaveBeenLastCalledWith(
+        expect.objectContaining({ confirmNoBackup: false }),
+      );
+    });
+
+    it.each([
+      ['the string "true"', "true"],
+      ["the number 1", 1],
+      ["null", null],
+      ["an object", { confirm: true }],
+      ["an array", [true]],
+    ])("400s invalid_body for %s and never calls the service", async (_label, confirmNoBackup) => {
+      const deps = createDeps();
+      const app = createApp(deps);
+      const res = await request(app)
+        .post("/api/openclaw/apply")
+        .send({ channel: "stable", version: "1.1.0", confirmNoBackup });
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe("invalid_body");
+      expect(res.body.message).toMatch(/confirmNoBackup must be a boolean/);
+      expect(deps.openclawChannelService.applyUpdate).not.toHaveBeenCalled();
+    });
+
+    it("403s an agent actor carrying the field (true, false or malformed) before validation; a plain agent body still applies", async () => {
+      const deps = createDeps();
+      const app = express();
+      app.use(express.json());
+      app.use((req, _res, next) => {
+        req.alphaclawActor = { type: "agent" };
+        next();
+      });
+      registerOpenclawChannelRoutes({ app, ...deps });
+      for (const confirmNoBackup of [true, false, "true"]) {
+        const res = await request(app)
+          .post("/api/openclaw/apply")
+          .send({ channel: "stable", version: "1.1.0", confirmNoBackup });
+        expect(res.status).toBe(403);
+        expect(res.body.code).toBe("humans_only");
+        expect(res.body.message).toMatch(/confirmNoBackup is an operator-only consent/);
+      }
+      expect(deps.openclawChannelService.applyUpdate).not.toHaveBeenCalled();
+      const plain = await request(app)
+        .post("/api/openclaw/apply")
+        .send({ channel: "stable", version: "1.1.0" });
+      expect(plain.status).toBe(200);
+      expect(deps.openclawChannelService.applyUpdate).toHaveBeenCalledWith(
+        expect.objectContaining({ confirmNoBackup: false }),
+      );
+    });
+  });
+
   // WI-4.3: inventory rides its own SWR cache, never getChannelInfo().
   describe("GET /api/openclaw/backups", () => {
     it("returns the service inventory and serves it from the 5s cache on the next read", async () => {
@@ -1388,6 +1459,37 @@ describe("server/routes/openclaw-channel", () => {
       expect(deps.gatewayHoldActions.acquireLock).toHaveBeenCalledTimes(1);
     });
 
+    it("renders a structural hold's detail (not its class token) in the 409, with a hint that is not about blamed keys", async () => {
+      const deps = holdDeps();
+      const detail =
+        "OpenClaw 1.0.0 is installed but 2.0.0 is the recorded build and its overlay is complete — the gateway is held";
+      deps.openclawChannelService.reconcileBootConfig = vi.fn(async () => ({
+        status: "held",
+        hold: {
+          reason: "version_mismatch",
+          blamedKeys: [],
+          detail,
+          installed: "1.0.0",
+          expected: "2.0.0",
+        },
+        warnings: [],
+      }));
+      const app = createApp(deps);
+
+      const res = await request(app)
+        .post("/api/openclaw/reconcile/retry")
+        .send({});
+
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe("reconcile_still_held");
+      expect(res.body.message).toBe(detail);
+      expect(res.body.hint).not.toContain("stripBlamedKeys");
+      expect(res.body.hint).toContain("retrying the migration cannot clear it");
+      expect(res.body.outcome.hold.reason).toBe("version_mismatch");
+      expect(deps.gatewayHoldActions.clearLatch).not.toHaveBeenCalled();
+      expect(deps.gatewayHoldActions.startGateway).not.toHaveBeenCalled();
+    });
+
     it("treats a skipped outcome as a 409, never as recovery", async () => {
       // A skipped run left the hold exactly as it was — clearing the latch or
       // relaunching on it would boot the config the reconciler just refused.
@@ -1564,6 +1666,254 @@ describe("server/routes/openclaw-channel", () => {
         blocklist: info.blocklist,
       },
     );
+  });
+
+  // Issue #76 B1.2 / CEO 3.2: the installed-tree reconcile lever.
+  describe("POST /api/openclaw/reconcile-installed", () => {
+    const {
+      kReconcileInstalledCopy,
+      kLifecycleActionBlockReasons,
+    } = require("../../lib/server/gateway-state");
+    const kReconcileLease = require("../../lib/server/constants")
+      .kOpenclawReconcileLifecycleLeaseMs;
+
+    const makeRelease = () =>
+      Object.assign(vi.fn(), { kind: "reconcile_installed", isValid: () => true });
+    const reconcileDeps = ({ info = {}, result = null } = {}) => {
+      const deps = createDeps();
+      deps.openclawChannelService.getChannelInfo = vi.fn(() =>
+        createChannelInfo({
+          installedVersion: "1.0.0",
+          expectedVersion: "2.0.0",
+          installedDiverged: true,
+          gatewayHold: null,
+          stateCorrupted: false,
+          ...info,
+        }),
+      );
+      deps.openclawChannelService.isApplyInProgress = vi.fn(() => false);
+      deps.openclawChannelService.reconcileInstalled = vi.fn(
+        async () =>
+          result || {
+            ok: true,
+            action: "activated",
+            from: "1.0.0",
+            to: "2.0.0",
+            runId: "run-1",
+          },
+      );
+      deps.openclawChannelService.completeReconcileRun = vi.fn();
+      const release = makeRelease();
+      deps.gatewayHoldActions = {
+        acquireLock: vi.fn(async () => release),
+        clearLatch: vi.fn(),
+        getActiveOperation: vi.fn(() => null),
+        relaunch: vi.fn(async () => ({ ok: true, verdict: "replacement_ready" })),
+        startGateway: vi.fn(),
+        isGatewayRunning: vi.fn(async () => false),
+        readGatewayHold: vi.fn(() => null),
+      };
+      return { deps, release };
+    };
+
+    it("acquires the lock with the reconcile lease, reconciles under THAT hold, relaunches under the same hold, completes the run, clears the latch", async () => {
+      const { deps, release } = reconcileDeps();
+      const app = createApp(deps);
+      const res = await request(app).post("/api/openclaw/reconcile-installed").send({});
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual(
+        expect.objectContaining({
+          ok: true,
+          action: "activated",
+          from: "1.0.0",
+          to: "2.0.0",
+          runId: "run-1",
+          relaunch: { ok: true, verdict: "replacement_ready" },
+        }),
+      );
+      expect(deps.gatewayHoldActions.acquireLock).toHaveBeenCalledWith("reconcile_installed", {
+        leaseMs: kReconcileLease,
+      });
+      expect(deps.openclawChannelService.reconcileInstalled).toHaveBeenCalledWith({
+        hold: release,
+        source: "operator",
+        relaunch: true,
+      });
+      expect(deps.gatewayHoldActions.relaunch).toHaveBeenCalledWith({ hold: release });
+      expect(deps.openclawChannelService.completeReconcileRun).toHaveBeenCalledWith({
+        runId: "run-1",
+        relaunch: { ok: true, verdict: "replacement_ready" },
+      });
+      expect(deps.gatewayHoldActions.clearLatch).toHaveBeenCalledTimes(1);
+      // Released exactly once, after the relaunch (the lock is not re-entrant).
+      expect(release).toHaveBeenCalledTimes(1);
+      expect(release.mock.invocationCallOrder[0]).toBeGreaterThan(
+        deps.gatewayHoldActions.relaunch.mock.invocationCallOrder[0],
+      );
+    });
+
+    it("403s an agent actor (humans only) before any gate or lock", async () => {
+      const { deps } = reconcileDeps();
+      const app = express();
+      app.use(express.json());
+      app.use((req, _res, next) => {
+        req.alphaclawActor = { type: "agent" };
+        next();
+      });
+      registerOpenclawChannelRoutes({ app, ...deps });
+      const res = await request(app).post("/api/openclaw/reconcile-installed").send({});
+      expect(res.status).toBe(403);
+      expect(res.body.code).toBe("humans_only");
+      expect(res.body.message).toBe(kReconcileInstalledCopy.humansOnlyRefusal);
+      expect(deps.gatewayHoldActions.acquireLock).not.toHaveBeenCalled();
+      expect(deps.openclawChannelService.reconcileInstalled).not.toHaveBeenCalled();
+    });
+
+    it("409 booting / apply_in_progress / gateway_held (migration-class) / gateway_hold_unreadable — each with code + hint, before the lock", async () => {
+      const booting = reconcileDeps();
+      booting.deps.gatewayHoldActions.getActiveOperation = vi.fn(() => ({ kind: "boot" }));
+      let res = await request(createApp(booting.deps)).post("/api/openclaw/reconcile-installed").send({});
+      expect(res.status).toBe(409);
+      expect(res.body).toEqual(
+        expect.objectContaining({
+          ok: false,
+          code: "booting",
+          message: kReconcileInstalledCopy.bootingRefusal,
+          hint: kReconcileInstalledCopy.bootingHint,
+        }),
+      );
+      expect(booting.deps.gatewayHoldActions.acquireLock).not.toHaveBeenCalled();
+
+      const applying = reconcileDeps();
+      applying.deps.openclawChannelService.isApplyInProgress = vi.fn(() => true);
+      res = await request(createApp(applying.deps)).post("/api/openclaw/reconcile-installed").send({});
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe("apply_in_progress");
+      expect(res.body.hint).toBeTruthy();
+
+      const held = reconcileDeps({
+        info: { gatewayHold: { reason: "settings migration failed", blamedKeys: ["x"] } },
+      });
+      res = await request(createApp(held.deps)).post("/api/openclaw/reconcile-installed").send({});
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe("gateway_held");
+      expect(res.body.hint).toBe(kReconcileInstalledCopy.heldHint);
+      expect(held.deps.openclawChannelService.reconcileInstalled).not.toHaveBeenCalled();
+
+      const unreadable = reconcileDeps({ info: { stateCorrupted: true } });
+      res = await request(createApp(unreadable.deps)).post("/api/openclaw/reconcile-installed").send({});
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe("gateway_hold_unreadable");
+      expect(res.body.hint).toBeTruthy();
+
+      // A STRUCTURAL hold is exactly what the reconcile clears — it proceeds.
+      const structural = reconcileDeps({
+        info: { gatewayHold: { reason: "version_mismatch", blamedKeys: [], detail: "held" } },
+      });
+      res = await request(createApp(structural.deps)).post("/api/openclaw/reconcile-installed").send({});
+      expect(res.status).toBe(200);
+      expect(structural.deps.openclawChannelService.reconcileInstalled).toHaveBeenCalledTimes(1);
+    });
+
+    it("re-validates the blockers once it holds the lock (an apply that started while queued wins)", async () => {
+      const { deps, release } = reconcileDeps();
+      let applying = false;
+      deps.openclawChannelService.isApplyInProgress = vi.fn(() => applying);
+      deps.gatewayHoldActions.acquireLock = vi.fn(async () => {
+        applying = true;
+        return release;
+      });
+      const res = await request(createApp(deps)).post("/api/openclaw/reconcile-installed").send({});
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe("apply_in_progress");
+      expect(deps.openclawChannelService.reconcileInstalled).not.toHaveBeenCalled();
+      expect(release).toHaveBeenCalledTimes(1);
+    });
+
+    it("passes the sync's refusals through with their codes: 409 by default, 507 insufficient_disk, 500 activation_failed; no relaunch, lock released", async () => {
+      const cases = [
+        [{ ok: false, code: "incumbent_running", message: "still running", hint: "stop it", action: "none" }, 409],
+        [{ ok: false, code: "no_bootable_version", message: "nothing", action: "none" }, 409],
+        [{ ok: false, code: "insufficient_disk", message: "no space", freeBytes: 12, action: "none" }, 507],
+        [{ ok: false, code: "activation_failed", message: "swap failed", stage: "swap", action: "none" }, 500],
+      ];
+      for (const [result, status] of cases) {
+        const { deps, release } = reconcileDeps({ result });
+        const res = await request(createApp(deps)).post("/api/openclaw/reconcile-installed").send({});
+        expect(res.status, result.code).toBe(status);
+        expect(res.body).toEqual(expect.objectContaining({ ok: false, code: result.code }));
+        expect(deps.gatewayHoldActions.relaunch).not.toHaveBeenCalled();
+        expect(deps.gatewayHoldActions.clearLatch).not.toHaveBeenCalled();
+        expect(deps.openclawChannelService.completeReconcileRun).not.toHaveBeenCalled();
+        expect(release).toHaveBeenCalledTimes(1);
+      }
+    });
+
+    it("action none is a 200 with no relaunch; a failed relaunch is reported honestly and still completes the run", async () => {
+      const none = reconcileDeps({
+        result: { ok: true, action: "none", from: "2.0.0", to: "2.0.0", runId: null },
+      });
+      let res = await request(createApp(none.deps)).post("/api/openclaw/reconcile-installed").send({});
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual(expect.objectContaining({ ok: true, action: "none" }));
+      expect(none.deps.gatewayHoldActions.relaunch).not.toHaveBeenCalled();
+
+      const failing = reconcileDeps();
+      failing.deps.gatewayHoldActions.relaunch = vi.fn(async () => {
+        throw new Error("spawn EACCES");
+      });
+      res = await request(createApp(failing.deps)).post("/api/openclaw/reconcile-installed").send({});
+      expect(res.status).toBe(200);
+      expect(res.body.relaunch).toEqual({ ok: false, error: "spawn EACCES" });
+      expect(failing.deps.openclawChannelService.completeReconcileRun).toHaveBeenCalledWith({
+        runId: "run-1",
+        relaunch: { ok: false, error: "spawn EACCES" },
+      });
+    });
+
+    it("501 reconcile_unavailable when the service has no reconcileInstalled", async () => {
+      const { deps } = reconcileDeps();
+      delete deps.openclawChannelService.reconcileInstalled;
+      const res = await request(createApp(deps)).post("/api/openclaw/reconcile-installed").send({});
+      expect(res.status).toBe(501);
+      expect(res.body.code).toBe("reconcile_unavailable");
+    });
+
+    it("GET /api/openclaw/channel advertises the action only while installedDiverged, with the blocker verdict and the catalog copy", async () => {
+      const diverged = reconcileDeps();
+      let res = await request(createApp(diverged.deps)).get("/api/openclaw/channel");
+      expect(res.status).toBe(200);
+      expect(res.body.reconcileInstalled).toEqual({
+        available: true,
+        blocked: null,
+        copy: kReconcileInstalledCopy,
+      });
+
+      const blocked = reconcileDeps();
+      blocked.deps.openclawChannelService.isApplyInProgress = vi.fn(() => true);
+      res = await request(createApp(blocked.deps)).get("/api/openclaw/channel");
+      expect(res.body.reconcileInstalled.blocked).toEqual({
+        code: "apply_in_progress",
+        disabledReason: kLifecycleActionBlockReasons.operation,
+      });
+
+      const held = reconcileDeps({
+        info: { gatewayHold: { reason: "settings migration failed", blamedKeys: [] } },
+      });
+      res = await request(createApp(held.deps)).get("/api/openclaw/channel");
+      expect(res.body.reconcileInstalled.blocked).toEqual({
+        code: "gateway_held",
+        disabledReason: kLifecycleActionBlockReasons.gatewayHeld,
+      });
+
+      const converged = reconcileDeps({ info: { installedDiverged: false } });
+      res = await request(createApp(converged.deps)).get("/api/openclaw/channel");
+      expect(res.body.reconcileInstalled).toEqual({
+        available: false,
+        blocked: null,
+        copy: kReconcileInstalledCopy,
+      });
+    });
   });
 
   describe("notifications routes", () => {

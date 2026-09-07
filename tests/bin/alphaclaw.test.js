@@ -54,7 +54,9 @@ describe("bin/alphaclaw port check", () => {
       execSync(`node --require="${preloadPath}" "${binPath}" git-sync`, {
         stdio: "pipe",
         encoding: "utf8",
-        env: { ...process.env, ALPHACLAW_ROOT_DIR: tmpDir },
+        // HOME pinned: verbs dispatch AFTER the bin's ~/.openclaw symlink
+        // (section 3), so a real HOME here linked the runner's home.
+        env: { ...process.env, ALPHACLAW_ROOT_DIR: tmpDir, HOME: tmpHome },
       });
     } catch (error) {
       status = error.status;
@@ -213,7 +215,8 @@ process.on("exit", () => {
       execSync(`ALPHACLAW_ROOT_DIR="${tmpDir}" node ${supportedNodePreload()} "${binPath}" start`, {
         stdio: "pipe",
         encoding: "utf8",
-        env: { ...process.env, PORT: "18789", ALPHACLAW_ROOT_DIR: tmpDir }
+        // HOME pinned: the bin symlinks <home>/.openclaw during `start`.
+        env: { ...process.env, PORT: "18789", ALPHACLAW_ROOT_DIR: tmpDir, HOME: tmpHome }
       });
     } catch (e) {
       status = e.status;
@@ -232,7 +235,7 @@ process.on("exit", () => {
       execSync(`ALPHACLAW_ROOT_DIR="${tmpDir}" node ${supportedNodePreload()} "${binPath}" start --port 18789`, {
         stdio: "pipe",
         encoding: "utf8",
-        env: { ...process.env, PORT: "3000", ALPHACLAW_ROOT_DIR: tmpDir }
+        env: { ...process.env, PORT: "3000", ALPHACLAW_ROOT_DIR: tmpDir, HOME: tmpHome }
       });
     } catch (e) {
       status = e.status;
@@ -252,7 +255,9 @@ process.on("exit", () => {
       execSync(`ALPHACLAW_ROOT_DIR="${tmpDir}" node ${supportedNodePreload()} "${binPath}" start`, {
         stdio: "pipe",
         encoding: "utf8",
-        env: { ...process.env, PORT: "3001", ALPHACLAW_ROOT_DIR: tmpDir, SETUP_PASSWORD: "" }
+        // This run gets PAST the port guard and through the ~/.openclaw
+        // symlink (bin section 3): without HOME pinned it linked the REAL home.
+        env: { ...process.env, PORT: "3001", ALPHACLAW_ROOT_DIR: tmpDir, SETUP_PASSWORD: "", HOME: tmpHome }
       });
     } catch (e) {
       status = e.status;
@@ -918,6 +923,15 @@ Module._load = function patchedLoad(request, parent, isMain) {
       ALPHACLAW_CAPTURE_ENV_PATH: capturePath,
       ALPHACLAW_ROOT_DIR: rootDir,
       ALPHACLAW_OPENCLAW_WRAPPER_PATH: path.join(rootDir, "wrapper-openclaw.sh"),
+      // Both operator-shell paths point INTO the temp root: without the snippet
+      // override the real bin falls back to /etc/profile.d and every later shell
+      // on the box inherits this test's OPENCLAW_* vars (observed 2026-09-06).
+      ALPHACLAW_PROFILE_SNIPPET_PATH: path.join(rootDir, "profile-openclaw.sh"),
+      // The home too: `start` symlinks ~/.openclaw and hoists XDG_CONFIG_HOME,
+      // and anything reading $HOME before the bin's own hoist would otherwise
+      // land in the runner's real home (Stage 1 review).
+      HOME: rootDir,
+      XDG_CONFIG_HOME: path.join(rootDir, ".config"),
       NODE_OPTIONS: `--require=${preloadPath}`,
       ...env,
     };
@@ -1000,6 +1014,85 @@ Module._load = function patchedLoad(request, parent, isMain) {
     expect(captured.githubRepoEnv).toBe("owner/trimmed");
   });
 
+  it("leaves ~/.openclaw in the REAL home untouched: a boot-spine run lives entirely in the temp root", () => {
+    // `start` symlinks <home>/.openclaw → <root>/.openclaw (bin section 3);
+    // both env blocks pin HOME/XDG_CONFIG_HOME into rootDir so no run can
+    // reach the runner's home. Snapshot the real link around one boot.
+    const realHomeLink = path.join(os.homedir(), ".openclaw");
+    const existedBefore = fs.existsSync(realHomeLink);
+    const rootDir = fs.mkdtempSync(path.join(tmpDir, "real-home-root-"));
+    runBootSpine({ rootDir });
+    expect(fs.existsSync(realHomeLink)).toBe(existedBefore);
+  });
+
+  // Issue #76 A8/A1: a `start` boot names WHICH AlphaClaw booted — on the
+  // console (the banner, first line of the boot spine) and on the volume
+  // (alphaclaw-version.json) — and the boot sync leaves the bin-phase
+  // boot-report.json behind with serverPhase pending for the server to merge.
+  it("prints the self-version banner and writes alphaclaw-version.json + boot-report.json on a start boot", () => {
+    const pkg = JSON.parse(fs.readFileSync(path.resolve(__dirname, "../../package.json"), "utf8"));
+    const rootDir = fs.mkdtempSync(path.join(tmpDir, "stamp-root-"));
+    const managedDir = path.join(rootDir, ".openclaw", ".alphaclaw");
+    const first = runBootSpine({ rootDir });
+
+    // The banner: version, commit (n/a for a plain checkout/npm install or the
+    // git ref), previous (none on a fresh box), root, node.
+    const bannerLine = first.output.split("\n").find((line) => line.startsWith("[alphaclaw] AlphaClaw "));
+    expect(bannerLine).toMatch(
+      new RegExp(`^\\[alphaclaw\\] AlphaClaw ${pkg.version.replace(/\./g, "\\.")} \\(commit [^;]+; previous none\\) root=${rootDir} node=v\\d+`),
+    );
+    // The banner precedes the release-channel boot sync — first line of the spine.
+    const bannerAt = first.output.indexOf(bannerLine);
+    const syncAt = first.output.indexOf("[openclaw-channel] pidfile:");
+    expect(syncAt).toBeGreaterThan(bannerAt);
+
+    const stamp = JSON.parse(fs.readFileSync(path.join(managedDir, "alphaclaw-version.json"), "utf8"));
+    // commit is the '#<ref>' of a git dependency spec, null for a checkout/npm install.
+    expect(stamp.commit === null || typeof stamp.commit === "string").toBe(true);
+    expect(stamp).toEqual({
+      version: pkg.version,
+      commit: stamp.commit,
+      firstBootAt: expect.any(Number),
+      lastBootAt: expect.any(Number),
+      bootCount: 1,
+      previous: null,
+    });
+
+    // The bin-phase boot report: this boot's id, the stamp's facts, the pin
+    // from package.json, the pidfile verdict, and a pending server phase.
+    const report = JSON.parse(fs.readFileSync(path.join(managedDir, "boot-report.json"), "utf8"));
+    expect(report).toEqual(
+      expect.objectContaining({
+        schema: "alphaclaw.boot-report.v1",
+        bootId: expect.stringMatching(/^\d+:\d+$/),
+        alphaclaw: { version: pkg.version, commit: stamp.commit, previousVersion: null, firstBootOfVersion: true },
+        binPhase: { status: "ok" },
+        serverPhase: { status: "pending" },
+      }),
+    );
+    expect(report.openclaw.declaredPin).toBe(pkg.dependencies.openclaw);
+    expect(report.openclaw.bootSync).toEqual(
+      expect.objectContaining({ action: expect.any(String), warnings: expect.any(Array) }),
+    );
+    expect(report.pidfile).toEqual(expect.objectContaining({ decision: "proceed" }));
+
+    // A second boot of the same version: the banner names no previous
+    // version (identity is the version), the stamp counts the boot, and the
+    // ring rotates the first report under .1.
+    const second = runBootSpine({ rootDir });
+    expect(second.output).toContain(`[alphaclaw] AlphaClaw ${pkg.version} (commit `);
+    expect(second.output).toContain("; previous none)");
+    const restamped = JSON.parse(fs.readFileSync(path.join(managedDir, "alphaclaw-version.json"), "utf8"));
+    expect(restamped.bootCount).toBe(2);
+    expect(restamped.firstBootAt).toBe(stamp.firstBootAt);
+    expect(restamped.previous).toBeNull();
+    const rotated = JSON.parse(fs.readFileSync(path.join(managedDir, "boot-report.1.json"), "utf8"));
+    expect(rotated.bootId).toBe(report.bootId);
+    const current = JSON.parse(fs.readFileSync(path.join(managedDir, "boot-report.json"), "utf8"));
+    expect(current.bootId).not.toBe(report.bootId);
+    expect(current.alphaclaw.firstBootOfVersion).toBe(false);
+  });
+
   // F004 follow-up: the single-instance refusal needs evidence. A hard-killed
   // predecessor leaves its pidfile on the volume, and a fresh container's early
   // processes reuse low pid numbers, so kill(pid, 0) alone says "alive" — the
@@ -1017,6 +1110,15 @@ Module._load = function patchedLoad(request, parent, isMain) {
       ALPHACLAW_CAPTURE_ENV_PATH: capturePath,
       ALPHACLAW_ROOT_DIR: rootDir,
       ALPHACLAW_OPENCLAW_WRAPPER_PATH: path.join(rootDir, "wrapper-openclaw.sh"),
+      // Both operator-shell paths point INTO the temp root: without the snippet
+      // override the real bin falls back to /etc/profile.d and every later shell
+      // on the box inherits this test's OPENCLAW_* vars (observed 2026-09-06).
+      ALPHACLAW_PROFILE_SNIPPET_PATH: path.join(rootDir, "profile-openclaw.sh"),
+      // The home too: `start` symlinks ~/.openclaw and hoists XDG_CONFIG_HOME,
+      // and anything reading $HOME before the bin's own hoist would otherwise
+      // land in the runner's real home (Stage 1 review).
+      HOME: rootDir,
+      XDG_CONFIG_HOME: path.join(rootDir, ".config"),
       NODE_OPTIONS: `--require=${preloadPath}`,
     };
     delete childEnv.PORT;
@@ -1044,7 +1146,9 @@ Module._load = function patchedLoad(request, parent, isMain) {
     // only when the live process's argv names the alphaclaw entry (#64), and
     // even then it is UNverified — the sync is skipped but boot continues.
     const rootDir = fs.mkdtempSync(path.join(tmpDir, "stale-pid-root-"));
-    const child = spawnSleeper(["--", "alphaclaw.js"]);
+    // The lookalike carries the `start` verb: the argv test is verb-scoped
+    // since #76 (an `alphaclaw diagnose` is live, alphaclaw-ish and no server).
+    const child = spawnSleeper(["--", "alphaclaw.js", "start"]);
     try {
       writeServerPidRecord(rootDir, { pid: child.pid, at: 1 });
       const result = spawnBootSpine({ rootDir });
@@ -1070,9 +1174,10 @@ Module._load = function patchedLoad(request, parent, isMain) {
     }
   });
 
-  it.skipIf(!hasProc)("refuses to start (exit 1) when the live pid is corroborated by its kernel start time (F004)", () => {
+  it.skipIf(!hasProc)("refuses to start (exit 1) when the live pid is corroborated by its kernel start time (F004); the live sibling's boot-report.json survives and the refused attempt lands in boot-report-refused.json as not_reached", () => {
     const { readProcStartTicks } = require("../../lib/server/utils/safe-file");
     const rootDir = fs.mkdtempSync(path.join(tmpDir, "live-pid-root-"));
+    const managedDir = path.join(rootDir, ".openclaw", ".alphaclaw");
     const child = spawnSleeper();
     try {
       writeServerPidRecord(rootDir, {
@@ -1080,9 +1185,93 @@ Module._load = function patchedLoad(request, parent, isMain) {
         at: 1,
         startTicks: readProcStartTicks(child.pid, fs),
       });
+      // The live server's COMPLETED report is what `alphaclaw diagnose` must
+      // keep describing — a doomed second instance never rotates it away.
+      const liveReport = JSON.stringify({
+        schema: "alphaclaw.boot-report.v1",
+        bootId: "1:1",
+        serverPhase: { status: "recorded", verdict: [] },
+      });
+      fs.writeFileSync(path.join(managedDir, "boot-report.json"), liveReport);
       const result = spawnBootSpine({ rootDir });
       expect(result.status).toBe(1);
       expect(result.stderr).toMatch(/Refusing to start a second instance/);
+      expect(fs.readFileSync(path.join(managedDir, "boot-report.json"), "utf8")).toBe(liveReport);
+      expect(fs.existsSync(path.join(managedDir, "boot-report.1.json"))).toBe(false);
+      const refused = JSON.parse(fs.readFileSync(path.join(managedDir, "boot-report-refused.json"), "utf8"));
+      expect(refused.bootId).not.toBe("1:1");
+      expect(refused.pidfile).toEqual(expect.objectContaining({ decision: "skip", reason: "corroborated", pid: child.pid }));
+      expect(refused.openclaw.bootSync).toEqual(
+        expect.objectContaining({ action: "skipped_concurrent", reason: "live_server_corroborated" }),
+      );
+      expect(refused.serverPhase).toEqual(
+        expect.objectContaining({ status: "not_reached", reason: "pidfile_skip", verdict: expect.any(Array) }),
+      );
+    } finally {
+      child.kill("SIGKILL");
+    }
+  });
+
+  // Issue #76 RC1: the incident's stale legacy claim collided with a THREAD id
+  // of the new alphaclaw process — kill(tid, 0) succeeds and the tid's cmdline
+  // is the leader's argv, so the boot sync was skipped and the applied
+  // overlay never activated. The Tgid check settles it before argv.
+  it.skipIf(!hasProc)("boots on with NO pidfile warning when a legacy claim names a THREAD of a live lookalike, and re-claims the file as format 2 (#76 RC1)", async () => {
+    const rootDir = fs.mkdtempSync(path.join(tmpDir, "thread-pid-root-"));
+    const child = spawnSleeper(["--", "alphaclaw.js", "start"]);
+    try {
+      let tids = [];
+      for (let i = 0; i < 100 && tids.length < 2; i += 1) {
+        try {
+          tids = fs.readdirSync(`/proc/${child.pid}/task`).map(Number);
+        } catch {}
+        if (tids.length < 2) await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      expect(tids.length).toBeGreaterThan(1); // CEO 6.1: the fixture is really multi-threaded
+      const tid = tids.find((candidate) => candidate !== child.pid);
+      writeServerPidRecord(rootDir, { pid: tid, at: Date.now() });
+      const result = spawnBootSpine({ rootDir });
+      const output = `${result.stdout}\n${result.stderr}`;
+      expect(result.status, result.stderr).toBe(0);
+      expect(output).not.toMatch(/could not be verified/);
+      expect(output).not.toMatch(/boot sync skipped: another/);
+      expect(output).toMatch(/pidfile: format=legacy pid=\d+ kill=ok tgid=\d+ .*→ thread \(proceed\)/);
+      const claim = JSON.parse(
+        fs.readFileSync(path.join(rootDir, ".openclaw", ".alphaclaw", "alphaclaw-server.pid"), "utf8"),
+      );
+      expect(claim.pid).not.toBe(tid);
+      expect(claim).toEqual(expect.objectContaining({ format: 2, startTicks: expect.any(Number) }));
+    } finally {
+      child.kill("SIGKILL");
+    }
+  });
+
+  it.skipIf(!hasProc)("boots on (never exit 1) when a CONVERGED legacy claim names the same live lookalike — a claim AlphaClaw manufactured is never corroborated (#76 RC2)", () => {
+    const { readProcStartTicks } = require("../../lib/server/openclaw-lock-contention");
+    const rootDir = fs.mkdtempSync(path.join(tmpDir, "converged-pid-root-"));
+    const child = spawnSleeper(["--", "alphaclaw.js", "start"]);
+    try {
+      const record = {
+        pid: child.pid,
+        at: Date.now() - 60 * 1000,
+        upgradedAt: Date.now() - 30 * 1000,
+        host: os.hostname(),
+        observedTicks: readProcStartTicks(child.pid),
+        containerStartTicks: readProcStartTicks(1),
+        format: 2,
+        legacyClaim: true,
+      };
+      writeServerPidRecord(rootDir, record);
+      const result = spawnBootSpine({ rootDir });
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.stderr).not.toMatch(/Refusing to start a second instance/);
+      expect(`${result.stdout}\n${result.stderr}`).toMatch(
+        /could not be verified — boot sync skipped, continuing/,
+      );
+      // Identity stays: no re-claim, no second convergence.
+      expect(
+        JSON.parse(fs.readFileSync(path.join(rootDir, ".openclaw", ".alphaclaw", "alphaclaw-server.pid"), "utf8")),
+      ).toEqual(record);
     } finally {
       child.kill("SIGKILL");
     }

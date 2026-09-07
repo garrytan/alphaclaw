@@ -845,3 +845,223 @@ describe("incident queries", () => {
     expect(trend.lastEpisodeSummary).toBeNull();
   });
 });
+
+describe("version_mismatch signal + fingerprint escalation + persisted cause (#76 A3/A4)", () => {
+  const {
+    kCriticalEventTypes,
+    kFingerprintCriticalCount,
+  } = require("../../lib/server/watchdog-incidents");
+
+  const versionMismatchEvent = (overrides = {}) => ({
+    eventType: "version_mismatch",
+    source: "boot",
+    status: "failed",
+    details: { expected: "2026.9.2", running: "2026.7.1-2", source: "boot" },
+    correlationId: "vm1",
+    ...overrides,
+  });
+
+  it("classifies version_mismatch as an OPEN trigger and lists it (plus auto_repair_paused) as critical", () => {
+    expect(classifyEvent(versionMismatchEvent())).toBe("open");
+    expect(kIncidentKeyByTrigger.version_mismatch).toBe("version_mismatch");
+    expect(kCriticalEventTypes.has("version_mismatch")).toBe(true);
+    expect(kCriticalEventTypes.has("auto_repair_paused")).toBe(true);
+    expect(kFingerprintCriticalCount).toBe(3);
+  });
+
+  it("with no incident open, version_mismatch opens a critical `version_mismatch` incident and persists the severity at once", () => {
+    initContext();
+    const onIncidentActivity = vi.fn();
+    const insert = wrapped(createTracker({ onIncidentActivity }));
+    insert(versionMismatchEvent());
+    const open = db.getOpenIncident();
+    expect(open).toMatchObject({ incidentKey: "version_mismatch", severity: "critical" });
+    expect(onIncidentActivity).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "open", eventType: "version_mismatch" }),
+    );
+    insert(recoveryEvent());
+    const [incident] = db.listIncidents();
+    expect(incident).toMatchObject({
+      incidentKey: "version_mismatch",
+      status: "resolved",
+      severity: "critical",
+    });
+    expect(incident.summary.severity).toBe("critical");
+    expect(incident.summary.trigger).toBe("version_mismatch");
+  });
+
+  it("on an already-open crash incident, version_mismatch escalates it to critical (persisted mid-incident) and fires the escalation hook", () => {
+    initContext();
+    const onIncidentActivity = vi.fn();
+    const insert = wrapped(createTracker({ onIncidentActivity }));
+    insert(crashEvent());
+    const incidentId = db.getOpenIncident().id;
+    expect(db.getIncidentById(incidentId).severity).toBeNull();
+    insert(versionMismatchEvent({ source: "crash" }));
+    // Same incident, now critical on disk before any close.
+    expect(db.getOpenIncident().id).toBe(incidentId);
+    expect(db.getIncidentById(incidentId).severity).toBe("critical");
+    expect(onIncidentActivity).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "escalation", eventType: "version_mismatch", incidentId }),
+    );
+    // auto_repair_paused (Stage 3's member, registered now) escalates too.
+    initContext();
+    const insertB = wrapped(createTracker());
+    insertB(crashEvent());
+    insertB({ eventType: "auto_repair_paused", source: "structural_repair", status: "failed", details: {} });
+    expect(db.getIncidentById(db.getOpenIncident().id).severity).toBe("critical");
+  });
+
+  it("three crashes with the SAME fingerprint escalate to critical (persisted mid-incident, one escalation hook); two-and-two do not", () => {
+    initContext();
+    const onIncidentActivity = vi.fn();
+    const insert = wrapped(createTracker({ onIncidentActivity }));
+    const fp = "abcdef012345";
+    insert(crashEvent({ details: { code: 1, cause: "unknown", fingerprint: fp } }));
+    insert(crashEvent({ details: { code: 1, cause: "unknown", fingerprint: fp } }));
+    const incidentId = db.getOpenIncident().id;
+    expect(db.getIncidentById(incidentId).severity).toBeNull();
+    expect(onIncidentActivity.mock.calls.filter((c) => c[0].kind === "escalation")).toHaveLength(0);
+
+    insert(crashEvent({ details: { code: 1, cause: "unknown", fingerprint: fp } }));
+    expect(db.getIncidentById(incidentId).severity).toBe("critical");
+    const escalations = onIncidentActivity.mock.calls.filter((c) => c[0].kind === "escalation");
+    expect(escalations).toHaveLength(1);
+    expect(escalations[0][0]).toMatchObject({ eventType: "crash", incidentId });
+    // A fourth identical crash does not re-fire the hook.
+    insert(crashEvent({ details: { code: 1, cause: "unknown", fingerprint: fp } }));
+    expect(onIncidentActivity.mock.calls.filter((c) => c[0].kind === "escalation")).toHaveLength(1);
+
+    insert(recoveryEvent());
+    const [incident] = db.listIncidents();
+    expect(incident.summary.severity).toBe("critical");
+    expect(incident.summary.fingerprints).toEqual({ [fp]: 4 });
+
+    // Distinct fingerprints, two each: warning stays.
+    initContext();
+    const insertB = wrapped(createTracker());
+    insertB(crashEvent({ details: { fingerprint: "aaaaaaaaaaaa" } }));
+    insertB(crashEvent({ details: { fingerprint: "bbbbbbbbbbbb" } }));
+    insertB(crashEvent({ details: { fingerprint: "aaaaaaaaaaaa" } }));
+    insertB(crashEvent({ details: { fingerprint: "bbbbbbbbbbbb" } }));
+    expect(db.getIncidentById(db.getOpenIncident().id).severity).toBeNull();
+    // Garbage fingerprints are ignored rather than counted.
+    insertB(crashEvent({ details: { fingerprint: "not a fingerprint" } }));
+    insertB(crashEvent({ details: { fingerprint: 42 } }));
+    insertB(recoveryEvent());
+    expect(db.listIncidents()[0].summary.severity).toBe("warning");
+  });
+
+  it("persists the classifier's cause on the incident row: a suspected cause first, then the corroborated verdict, never downgraded by a later suspicion", () => {
+    initContext();
+    const insert = wrapped(createTracker({ nowFn: () => Date.parse("2026-09-06T12:00:00Z") }));
+    insert(
+      crashEvent({
+        details: {
+          code: 1,
+          cause: "state_schema_too_new",
+          fingerprint: "0123456789ab",
+          suspectedCause: "state_schema_too_new",
+        },
+      }),
+    );
+    const incidentId = db.getOpenIncident().id;
+    expect(db.getIncidentById(incidentId).cause).toEqual({
+      cause: "state_schema_too_new",
+      fingerprint: "0123456789ab",
+      corroborated: false,
+      by: null,
+      suspectedCause: "state_schema_too_new",
+      at: "2026-09-06T12:00:00.000Z",
+    });
+    // The async follow-up row confirms it.
+    insert({
+      eventType: "crash_cause",
+      source: "crash_classifier",
+      status: "failed",
+      details: {
+        cause: "state_schema_too_new",
+        fingerprint: "0123456789ab",
+        corroborated: true,
+        by: "user_version",
+        suspectedCause: null,
+      },
+    });
+    expect(db.getIncidentById(incidentId).cause).toMatchObject({
+      corroborated: true,
+      by: "user_version",
+      suspectedCause: null,
+    });
+    // A later merely-suspected crash never overwrites a corroborated cause.
+    insert(crashEvent({ details: { cause: "unknown", fingerprint: "ffffffffffff" } }));
+    expect(db.getIncidentById(incidentId).cause).toMatchObject({
+      cause: "state_schema_too_new",
+      corroborated: true,
+    });
+    insert(recoveryEvent());
+    const [incident] = db.listIncidents();
+    expect(incident.summary.cause).toMatchObject({ cause: "state_schema_too_new", by: "user_version" });
+    expect(incident.cause).toMatchObject({ cause: "state_schema_too_new" });
+  });
+
+  it("the close-time rollup reads the persisted severity back (an escalation written by a previous process is the floor)", () => {
+    initContext();
+    const insert = wrapped(createTracker());
+    insert(crashEvent());
+    const incidentId = db.getOpenIncident().id;
+    // Simulate an escalation persisted outside this tracker's memory.
+    db.updateIncidentSeverity(incidentId, "critical");
+    insert(recoveryEvent());
+    expect(db.listIncidents()[0].summary.severity).toBe("critical");
+  });
+
+  it("adopting an orphaned open row reseeds its persisted severity and cause", () => {
+    initContext();
+    const insertA = wrapped(createTracker());
+    insertA(
+      crashEvent({
+        details: { code: 1, cause: "legacy_exec_approvals", fingerprint: "0123456789ab", suspectedCause: "legacy_exec_approvals" },
+      }),
+    );
+    const orphanId = db.getOpenIncident().id;
+    db.updateIncidentSeverity(orphanId, "critical");
+    // A fresh tracker (no in-memory rollup) sees the next crash and adopts.
+    const insertB = wrapped(createTracker());
+    insertB(crashEvent({ correlationId: "c-adopt" }));
+    insertB(recoveryEvent());
+    const [incident] = db.listIncidents();
+    expect(incident.id).toBe(orphanId);
+    expect(incident.summary.severity).toBe("critical");
+    expect(incident.summary.cause).toMatchObject({ cause: "legacy_exec_approvals" });
+  });
+
+  it("a throwing severity/cause writer is fail-open: the event still lands and the in-memory rollup still escalates", () => {
+    initContext();
+    const realUpdateSeverity = db.updateIncidentSeverity;
+    const realUpdateCause = db.updateIncidentCause;
+    const logger = { error: vi.fn() };
+    const tracker = createWatchdogIncidentTracker({
+      db: {
+        ...db,
+        updateIncidentSeverity: () => {
+          throw new Error("disk full");
+        },
+        updateIncidentCause: () => {
+          throw new Error("disk full");
+        },
+      },
+      logger,
+    });
+    const insert = tracker.wrapInsertEvent(db.insertWatchdogEvent);
+    insert(crashEvent({ details: { cause: "unknown", fingerprint: "0123456789ab" } }));
+    insert({ eventType: "crash_loop", source: "exit_event", status: "failed", details: {} });
+    expect(db.getOpenIncident()).toMatchObject({ severity: null });
+    expect(logger.error).toHaveBeenCalledWith(expect.stringContaining("severity persist failed"));
+    expect(logger.error).toHaveBeenCalledWith(expect.stringContaining("cause persist failed"));
+    insert(recoveryEvent());
+    expect(db.listIncidents()[0].summary.severity).toBe("critical");
+    expect(db.getIncidentEvents(db.listIncidents()[0].id).totalCount).toBe(3);
+    void realUpdateSeverity;
+    void realUpdateCause;
+  });
+});

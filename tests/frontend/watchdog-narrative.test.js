@@ -758,6 +758,20 @@ describe("drift pins (v0.9.75 ship review): vocabularies the UI mirrors by hand"
     }
   });
 
+  it("version_mismatch copy names the running/expected pair from status.versionMismatch (#76 A4)", async () => {
+    const { describeDegradedReason, kDegradedReasonCopy } = await loadHelpers();
+    expect(kDegradedReasonCopy.version_mismatch).toBeTypeOf("function");
+    const withVersions = describeDegradedReason({
+      degradedReason: "version_mismatch",
+      versionMismatch: { expected: "2026.9.2", running: "2026.7.1-2", source: "crash", detectedAt: null },
+    });
+    expect(withVersions).toContain("running 2026.7.1-2, expected 2026.9.2");
+    expect(withVersions).toContain("Upgrade page");
+    const bare = describeDegradedReason({ degradedReason: "version_mismatch" });
+    expect(bare).not.toContain("version_mismatch");
+    expect(bare).not.toContain("unknown");
+  });
+
   it("kTriggerTitles covers every incident key the server tracker opens (incl. gateway_readiness)", async () => {
     const { kTriggerTitles } = await loadIncidentHelpers();
     const source = readFileSync(new URL("../../lib/server/watchdog-incidents.js", import.meta.url), "utf8");
@@ -767,6 +781,8 @@ describe("drift pins (v0.9.75 ship review): vocabularies the UI mirrors by hand"
     expect(keys.has("gateway_readiness")).toBe(true);
     for (const key of keys) expect(kTriggerTitles[key], key).toBeTruthy();
     expect(kTriggerTitles.gateway_readiness).toBe("Gateway not ready");
+    expect(keys.has("version_mismatch")).toBe(true);
+    expect(kTriggerTitles.version_mismatch).toBe("Version mismatch");
   });
 
   it("the watchdog-tab status dot and the incidents timeline share ONE tone table", async () => {

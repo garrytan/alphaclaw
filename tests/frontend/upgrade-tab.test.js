@@ -51,6 +51,7 @@ vi.mock("../../lib/public/js/lib/api.js", () => ({
   fetchOpenclawRuns: vi.fn(),
   fetchStatus: vi.fn(),
   markOpenclawGood: vi.fn(),
+  reconcileInstalledOpenclaw: vi.fn(),
   retryOpenclawReconcile: vi.fn(),
   rollbackOpenclaw: vi.fn(),
   runOpenclawRepair: vi.fn(),
@@ -2929,6 +2930,33 @@ describe("frontend/upgrade-tab gateway-hold recovery", () => {
     expect(state.reconcileError).toBeNull();
   });
 
+  it("a 409 still-held structural hold surfaces its detail prose, not the class token", async () => {
+    api.retryOpenclawReconcile.mockRejectedValue(
+      Object.assign(new Error("Could not retry the settings migration"), {
+        code: "reconcile_still_held",
+        status: 409,
+        outcome: {
+          status: "held",
+          hold: {
+            reason: "version_mismatch",
+            blamedKeys: [],
+            detail: "OpenClaw 1.0.0 is installed but 2.0.0 is the recorded build",
+          },
+        },
+      }),
+    );
+    let state = await hydrate();
+
+    await state.onRetryReconcile();
+
+    state = renderHook({});
+    expect(state.reconcileError).toEqual({
+      headline:
+        "Migration is still held: OpenClaw 1.0.0 is installed but 2.0.0 is the recorded build",
+      error: null,
+    });
+  });
+
   it("a non-409 retry failure keeps the error envelope for the inline chip", async () => {
     const err = Object.assign(new Error("network down"), {
       code: "reconcile_unavailable",
@@ -3008,5 +3036,143 @@ describe("frontend/upgrade-tab gateway-hold recovery", () => {
     state = renderHook({});
     expect(state.retryingReconcile).toBeNull();
     expect(state.actionsDisabled).toBe(false);
+  });
+});
+
+// ── Installed-tree reconcile (#76 B1.2 / CEO 11.1) ──────────────────────────
+describe("frontend/upgrade-tab reconcile-installed action", () => {
+  const kCopy = {
+    title: "Installed build differs from the recorded build",
+    description: "desc",
+    actionLabel: "Re-activate recorded build",
+    loadingLabel: "Re-activating...",
+    successToast: "Recorded build re-activated — the gateway is relaunching",
+    noopToast: "Nothing to reconcile — the recorded build is already active",
+    errorHeadline: "Couldn't re-activate the recorded build.",
+    relaunchFailedHeadline: "The recorded build was re-activated, but the gateway did not come back.",
+  };
+  const divergedInfo = (block = {}) =>
+    makeChannelInfo({
+      installedVersion: "2026.7.1-2",
+      expectedVersion: "2026.9.1-beta.1",
+      installedDiverged: true,
+      reconcileInstalled: { available: true, blocked: null, copy: kCopy, ...block },
+    });
+  const flushAsync = async () => {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  };
+  const renderHook = (props = {}) => {
+    harness.beginRender();
+    return useUpgradeTab(props);
+  };
+  const hydrate = async (props = {}) => {
+    let state = renderHook(props);
+    harness.effects[0]();
+    await flushAsync();
+    state = renderHook(props);
+    return state;
+  };
+
+  beforeEach(() => {
+    harness.reset();
+    invalidateCache("/api/openclaw/channel");
+    invalidateCache("/api/openclaw/catalog");
+    api.fetchOpenclawChannel.mockResolvedValue(divergedInfo());
+    api.fetchOpenclawCatalog.mockResolvedValue({
+      ok: true,
+      catalog: makeCatalog(),
+      channel: { releaseChannel: "stable" },
+    });
+    api.fetchOpenclawRuns.mockResolvedValue({ ok: true, runs: [] });
+    api.subscribeOpenclawApplyEvents.mockImplementation(() => () => {});
+  });
+
+  afterEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("view: the card renders only while installedDiverged with the server's copy, and is hidden otherwise", () => {
+    const shown = renderView({ channelInfo: divergedInfo() });
+    expect(treeText(shown)).toContain(kCopy.title);
+    expect(treeText(shown)).toContain(kCopy.actionLabel);
+    const hidden = renderView({ channelInfo: makeChannelInfo({ installedDiverged: false }) });
+    expect(treeText(hidden)).not.toContain(kCopy.title);
+    // Blocked: the server's disabledReason renders verbatim.
+    const blocked = renderView({
+      channelInfo: divergedInfo({
+        blocked: { code: "apply_in_progress", disabledReason: "Another operation is in progress" },
+      }),
+    });
+    expect(treeText(blocked)).toContain("Another operation is in progress");
+  });
+
+  it("success: POSTs, toasts the server's success copy, reloads the channel and refreshes the shared statuses", async () => {
+    const onRefreshStatuses = vi.fn();
+    api.reconcileInstalledOpenclaw.mockResolvedValue({
+      ok: true,
+      action: "activated",
+      from: "2026.7.1-2",
+      to: "2026.9.1-beta.1",
+      runId: "run-1",
+      relaunch: { ok: true, verdict: "replacement_ready" },
+    });
+    api.fetchOpenclawChannel
+      .mockResolvedValueOnce(divergedInfo())
+      .mockResolvedValueOnce(makeChannelInfo({ installedVersion: "2026.9.1-beta.1", installedDiverged: false }));
+    let state = await hydrate({ onRefreshStatuses });
+    expect(state.reconcilingInstalled).toBe(false);
+
+    await state.onReconcileInstalled();
+
+    expect(api.reconcileInstalledOpenclaw).toHaveBeenCalledTimes(1);
+    expect(showToast).toHaveBeenCalledWith(kCopy.successToast, "success");
+    expect(api.fetchOpenclawChannel).toHaveBeenCalledTimes(2);
+    expect(onRefreshStatuses).toHaveBeenCalledTimes(1);
+    state = renderHook({ onRefreshStatuses });
+    expect(state.reconcilingInstalled).toBe(false);
+    expect(state.reconcileInstalledError).toBeNull();
+    expect(state.channelInfo.installedDiverged).toBe(false);
+  });
+
+  it("a relaunch that did not verify is NOT a silent success: inline error with the relaunch headline, no toast", async () => {
+    api.reconcileInstalledOpenclaw.mockResolvedValue({
+      ok: true,
+      action: "activated",
+      runId: "run-2",
+      relaunch: { ok: false, verdict: "launch_failed" },
+    });
+    let state = await hydrate();
+    await state.onReconcileInstalled();
+    state = renderHook({});
+    expect(showToast).not.toHaveBeenCalled();
+    expect(state.reconcileInstalledError).toEqual({
+      headline: kCopy.relaunchFailedHeadline,
+      error: { message: "launch_failed" },
+    });
+  });
+
+  it("failure: the server envelope lands in a persistent inline error (dismissable) and the channel is re-read", async () => {
+    const err = Object.assign(new Error("A gateway process is still running"), {
+      code: "incumbent_running",
+      hint: "Stop the process, then retry.",
+      status: 409,
+    });
+    api.reconcileInstalledOpenclaw.mockRejectedValue(err);
+    let state = await hydrate();
+    await state.onReconcileInstalled();
+    state = renderHook({});
+    expect(state.reconcileInstalledError).toEqual({ headline: kCopy.errorHeadline, error: err });
+    expect(state.reconcilingInstalled).toBe(false);
+    expect(api.fetchOpenclawChannel).toHaveBeenCalledTimes(2);
+    expect(showToast).not.toHaveBeenCalled();
+    state.onDismissReconcileInstalledError();
+    state = renderHook({});
+    expect(state.reconcileInstalledError).toBeNull();
+    // The pending flag disables the page's other actions while it runs.
+    api.reconcileInstalledOpenclaw.mockImplementation(() => new Promise(() => {}));
+    state.onReconcileInstalled();
+    state = renderHook({});
+    expect(state.reconcilingInstalled).toBe(true);
+    expect(state.actionsDisabled).toBe(true);
   });
 });

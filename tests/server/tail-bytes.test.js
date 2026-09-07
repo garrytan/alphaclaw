@@ -5,6 +5,7 @@ const path = require("path");
 const {
   tailBytes,
   tailLines,
+  filterLogLines,
   kTailAbsoluteMaxBytes,
 } = require("../../lib/server/utils/tail-bytes");
 
@@ -101,5 +102,44 @@ describe("server/utils/tail-bytes", () => {
     // whole file, no truncation.
     expect(garbage.text.length).toBe(3000);
     expect(garbage.truncated).toBe(false);
+  });
+});
+
+describe("server/utils/tail-bytes filterLogLines", () => {
+  const lines = [
+    "[alphaclaw] boot",
+    "2026-09-06T00:00:00.000Z [watchdog] health probe failed",
+    "[cron] unrelated",
+    "prefix [gateway] exit code 1",
+    "plain noise",
+    "[openclaw-channel] boot sync: none",
+  ];
+
+  it("matches a RegExp anywhere in the line (substring semantics, not startsWith)", () => {
+    const kept = filterLogLines(lines, /\[(alphaclaw|openclaw-channel|gateway|watchdog)\]/);
+    expect(kept).toEqual([
+      "[alphaclaw] boot",
+      "2026-09-06T00:00:00.000Z [watchdog] health probe failed",
+      "prefix [gateway] exit code 1",
+      "[openclaw-channel] boot sync: none",
+    ]);
+    // A timestamp-prefixed tag must not be lost to an anchored/startsWith rule.
+    expect(kept).toContain("2026-09-06T00:00:00.000Z [watchdog] health probe failed");
+  });
+
+  it("treats a string pattern as a literal substring", () => {
+    expect(filterLogLines(lines, "[gateway]")).toEqual(["prefix [gateway] exit code 1"]);
+    expect(filterLogLines(lines, "")).toEqual(lines);
+  });
+
+  it("judges every line independently under a /g regex (no lastIndex carry-over)", () => {
+    const repeated = ["[watchdog] a", "[watchdog] b", "[watchdog] c", "[watchdog] d"];
+    expect(filterLogLines(repeated, /\[watchdog\]/g)).toEqual(repeated);
+  });
+
+  it("drops non-string entries and returns [] for a non-array", () => {
+    expect(filterLogLines(["[alphaclaw] ok", null, 42, undefined], /alphaclaw/)).toEqual(["[alphaclaw] ok"]);
+    expect(filterLogLines(null, /x/)).toEqual([]);
+    expect(filterLogLines("not an array", /x/)).toEqual([]);
   });
 });

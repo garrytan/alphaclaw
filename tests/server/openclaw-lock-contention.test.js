@@ -1,6 +1,7 @@
 // Read-only lock-contention diagnostics (replaces the destructive stale-lock
 // sweep after the openclaw 2026.9.1-beta.1 tarball showed the coordinator is
 // an exclusive SQLite transaction held by a LIVE process — never a stale file).
+const fs = require("fs");
 const {
   kStateContentionPattern,
   kGatewayProcessPattern,
@@ -10,6 +11,10 @@ const {
   parseProcStat,
   readProcStartTicks,
   readProcParentPid,
+  readProcTgid,
+  isProcessThreadGroupLeader,
+  readContainerStartTicks,
+  readContainerStartMs,
   describeLockContention,
   listLiveOpenclawProcesses,
   listLockDirs,
@@ -17,6 +22,12 @@ const {
   isOpenclawArgv,
   parseProcCmdline,
 } = require("../../lib/server/openclaw-lock-contention");
+
+const hasProc = process.platform === "linux" && fs.existsSync(`/proc/${process.pid}/status`);
+// A Node process always has V8/libuv sibling threads, but the real-TID cases
+// are only meaningful when /proc/self/task lists more than the leader (CEO
+// amendment 1b/6.1): skip, never fake, when it does not.
+const hasSiblingThreads = hasProc && fs.readdirSync("/proc/self/task").length > 1;
 
 const fakeProc = (table) => ({
   fsModule: {
@@ -417,6 +428,186 @@ describe("readProcStartTicks / readProcParentPid (/proc/<pid>/stat field 22 and 
     if (process.platform !== "linux") return;
     expect(readProcStartTicks(process.pid)).toEqual(expect.any(Number));
     expect(readProcParentPid(process.pid)).toBe(process.ppid);
+  });
+});
+
+// Issue #76 RC1: a thread id passes kill(tid, 0) AND /proc/<tid>/cmdline
+// (the leader's argv), so the pidfile guard needs the Tgid line to tell a
+// thread of our own process from another live alphaclaw server.
+describe("readProcTgid / isProcessThreadGroupLeader (/proc/<pid>/status Tgid line)", () => {
+  // Real shape (this sandbox): the Tgid line precedes Pid; a thread's Tgid is
+  // its leader's pid.
+  const statusText = (pid, tgid, name = "node") =>
+    `Name:\t${name}\nUmask:\t0022\nState:\tS (sleeping)\nTgid:\t${tgid}\nNgid:\t0\nPid:\t${pid}\nPPid:\t1\nThreads:\t7\n`;
+  const fakeFs = (table) => ({
+    readFileSync: (target) => {
+      const match = /^\/proc\/(\d+)\/status$/.exec(String(target));
+      const entry = match ? table[match[1]] : undefined;
+      if (entry === undefined) throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+      return entry;
+    },
+  });
+
+  it("reads the leader's own Tgid and a thread's leader pid", () => {
+    const fsModule = fakeFs({
+      57: statusText(57, 57),
+      58: statusText(58, 57, "node (worker)"),
+    });
+    expect(readProcTgid(57, { fsModule })).toBe(57);
+    expect(readProcTgid(58, { fsModule })).toBe(57);
+    expect(isProcessThreadGroupLeader(57, { fsModule })).toBe(true);
+    expect(isProcessThreadGroupLeader(58, { fsModule })).toBe(false);
+  });
+
+  it("returns null (never throws) for an exited pid, a status file without a Tgid line, junk pids, or an unreadable /proc", () => {
+    const fsModule = fakeFs({
+      57: statusText(57, 57),
+      59: "Name:\tgarbage\nState:\tR (running)\n",
+      60: "Tgid:\tnot-a-number\n",
+    });
+    expect(readProcTgid(12345, { fsModule })).toBeNull();
+    expect(isProcessThreadGroupLeader(12345, { fsModule })).toBeNull();
+    expect(readProcTgid(59, { fsModule })).toBeNull();
+    expect(isProcessThreadGroupLeader(59, { fsModule })).toBeNull();
+    expect(readProcTgid(60, { fsModule })).toBeNull();
+    for (const pid of [0, -1, 1.5, "57", null, undefined]) {
+      expect(readProcTgid(pid, { fsModule }), String(pid)).toBeNull();
+      expect(isProcessThreadGroupLeader(pid, { fsModule }), String(pid)).toBeNull();
+    }
+    const eperm = {
+      readFileSync: () => {
+        throw Object.assign(new Error("EPERM"), { code: "EPERM" });
+      },
+    };
+    expect(readProcTgid(1, { fsModule: eperm })).toBeNull();
+    expect(isProcessThreadGroupLeader(1, { fsModule: eperm })).toBeNull();
+  });
+
+  it.skipIf(!hasSiblingThreads)("on the live /proc: every sibling thread of this process resolves to our pid and is NOT a leader, while kill(tid, 0) and /proc/<tid>/cmdline cannot tell it apart", () => {
+    const tids = fs.readdirSync("/proc/self/task").map(Number);
+    expect(tids.length).toBeGreaterThan(1);
+    expect(readProcTgid(process.pid)).toBe(process.pid);
+    expect(isProcessThreadGroupLeader(process.pid)).toBe(true);
+    const leaderArgv = fs.readFileSync("/proc/self/cmdline", "utf8");
+    let checked = 0;
+    for (const tid of tids) {
+      if (tid === process.pid) continue;
+      const tgid = readProcTgid(tid);
+      if (tgid == null) continue; // a transient thread that exited between readdir and read
+      checked += 1;
+      expect(tgid, `tid ${tid}`).toBe(process.pid);
+      expect(isProcessThreadGroupLeader(tid), `tid ${tid}`).toBe(false);
+      // The two checks the pre-#76 guard relied on both pass for a thread id.
+      expect(() => process.kill(tid, 0), `tid ${tid}`).not.toThrow();
+      expect(fs.readFileSync(`/proc/${tid}/cmdline`, "utf8"), `tid ${tid}`).toBe(leaderArgv);
+    }
+    expect(checked).toBeGreaterThan(0);
+  });
+});
+
+// Container identity from /proc/1 (a stable Render hostname survives a
+// redeploy; pid 1's start ticks do not). containerStartMs dates the container
+// in wall-clock ms so a legacy pidfile claim older than that is provably from
+// a previous container.
+describe("readContainerStartTicks / readContainerStartMs (/proc/1/stat + /proc/uptime)", () => {
+  const kNow = 1_757_000_000_000;
+  // Real shapes (this sandbox): `/proc/uptime` = "7287.34 57329.26", pid 1's
+  // stat = "1 (sandbox-init) S 0 1 1 0 -1 4194560 … 3431 …" (starttime 3431).
+  const pid1Stat = (startTicks) =>
+    `1 (sandbox-init) S 0 1 1 0 -1 4194560 12139 61757 0 167 284 148 97 43 20 0 14 0 ${startTicks} 1266630656 3799 18446744073709551615 4194304 8421073\n`;
+  const fakeFs = (files) => ({
+    readFileSync: (target) => {
+      const entry = files[String(target)];
+      if (entry === undefined) throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+      return entry;
+    },
+  });
+
+  it("computes now − uptime×1000 + pid1Ticks×10 (USER_HZ = 100) to the millisecond", () => {
+    const fsModule = fakeFs({
+      "/proc/uptime": "1234.56 4567.89\n",
+      "/proc/1/stat": pid1Stat(3431),
+    });
+    expect(readContainerStartTicks({ fsModule })).toBe(3431);
+    const startMs = readContainerStartMs({ fsModule, nowFn: () => kNow });
+    expect(startMs).toBe(kNow - 1_234_560 + 34_310);
+    expect(startMs).toBe(1_756_998_799_750);
+    // The container started after the host booted and before now.
+    expect(startMs).toBeGreaterThan(kNow - 1_234_560);
+    expect(startMs).toBeLessThan(kNow);
+    // A pid 1 that started at the very boot instant collapses to the boot time.
+    expect(
+      readContainerStartMs({
+        fsModule: fakeFs({ "/proc/uptime": "1234.56 4567.89\n", "/proc/1/stat": pid1Stat(0) }),
+        nowFn: () => kNow,
+      }),
+    ).toBe(kNow - 1_234_560);
+  });
+
+  it("returns an integer (whole ms) even when the float arithmetic does not land on one", () => {
+    const fsModule = fakeFs({
+      "/proc/uptime": "0.07 0.14\n",
+      "/proc/1/stat": pid1Stat(3),
+    });
+    const startMs = readContainerStartMs({ fsModule, nowFn: () => kNow + 0.5 });
+    expect(Number.isInteger(startMs)).toBe(true);
+    expect(startMs).toBe(Math.round(kNow + 0.5 - 70 + 30));
+  });
+
+  it("is null (never throws) when /proc/uptime or /proc/1/stat is missing, unparseable, or the clock is junk", () => {
+    const uptimeOnly = fakeFs({ "/proc/uptime": "1234.56 4567.89\n" });
+    const statOnly = fakeFs({ "/proc/1/stat": pid1Stat(3431) });
+    expect(readContainerStartTicks({ fsModule: uptimeOnly })).toBeNull();
+    expect(readContainerStartMs({ fsModule: uptimeOnly, nowFn: () => kNow })).toBeNull();
+    expect(readContainerStartTicks({ fsModule: statOnly })).toBe(3431);
+    expect(readContainerStartMs({ fsModule: statOnly, nowFn: () => kNow })).toBeNull();
+    expect(
+      readContainerStartMs({
+        fsModule: fakeFs({ "/proc/uptime": "garbage\n", "/proc/1/stat": pid1Stat(3431) }),
+        nowFn: () => kNow,
+      }),
+    ).toBeNull();
+    expect(
+      readContainerStartMs({
+        fsModule: fakeFs({ "/proc/uptime": "-5 1\n", "/proc/1/stat": pid1Stat(3431) }),
+        nowFn: () => kNow,
+      }),
+    ).toBeNull();
+    expect(
+      readContainerStartMs({
+        fsModule: fakeFs({ "/proc/uptime": "1234.56 4567.89\n", "/proc/1/stat": "no paren here" }),
+        nowFn: () => kNow,
+      }),
+    ).toBeNull();
+    expect(
+      readContainerStartMs({
+        fsModule: fakeFs({ "/proc/uptime": "1234.56 4567.89\n", "/proc/1/stat": pid1Stat(3431) }),
+        nowFn: () => Number.NaN,
+      }),
+    ).toBeNull();
+    const eperm = {
+      readFileSync: () => {
+        throw Object.assign(new Error("EPERM"), { code: "EPERM" });
+      },
+    };
+    expect(readContainerStartTicks({ fsModule: eperm })).toBeNull();
+    expect(readContainerStartMs({ fsModule: eperm, nowFn: () => kNow })).toBeNull();
+  });
+
+  it.skipIf(!hasProc)("on the live /proc: pid 1's ticks are a non-negative integer and the estimate lies between the host boot and now", () => {
+    const ticks = readContainerStartTicks();
+    expect(Number.isInteger(ticks)).toBe(true);
+    expect(ticks).toBeGreaterThanOrEqual(0);
+    expect(ticks).toBe(readProcStartTicks(1));
+    const uptimeSeconds = Number.parseFloat(fs.readFileSync("/proc/uptime", "utf8").split(/\s+/)[0]);
+    const before = Date.now();
+    const startMs = readContainerStartMs();
+    const after = Date.now();
+    expect(Number.isInteger(startMs)).toBe(true);
+    // Within the read window, allowing a second of uptime drift between the
+    // test's own /proc/uptime read and the module's.
+    expect(startMs).toBeGreaterThanOrEqual(before - uptimeSeconds * 1000 - 1000);
+    expect(startMs).toBeLessThanOrEqual(after);
   });
 });
 

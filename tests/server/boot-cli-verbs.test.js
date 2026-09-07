@@ -10,6 +10,9 @@ describe("boot-cli-verbs isEarlyExitCliCommand", () => {
     { command: "git-sync" },
     { command: "admin" },
     { command: "admin", commandScope: "manifest" },
+    // `alphaclaw diagnose [--json]` (#76 A9): commandArgs[1] is the flag.
+    { command: "diagnose" },
+    { command: "diagnose", commandScope: "--json" },
     { command: "doctor", commandScope: "finding", commandAction: "complete" },
     { command: "telegram", commandScope: "topic", commandAction: "add" },
     { command: "telegram", commandScope: "topic", commandAction: "create" },

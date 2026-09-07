@@ -162,6 +162,7 @@ Commands:
   telegram topic add  Add/update Telegram topic mapping by thread ID
   telegram topic create  Create a Telegram forum topic and register it
   telegram topics list  List registered, discovered, and stale Telegram topics
+  diagnose  Print a read-only diagnostic bundle from the data volume (boot reports, channel state, pidfile, state DB schema, incidents, backups, log tail)
   admin <METHOD> <path>  Administer AlphaClaw via the local API (requires features.agentAdmin)
   admin manifest  Print the agent-admin operation catalog
   version   Print version
@@ -199,6 +200,9 @@ doctor finding complete options:
   --run <run-id>      Queued fix run ID
   --token <token>     One-time completion token
 
+diagnose options:
+  --json              One JSON line instead of markdown (the bundle is redacted either way)
+
 Examples:
   alphaclaw git-sync --message "sync workspace"
   alphaclaw git-sync --message "update config" --file "workspace/app/config.json"
@@ -207,6 +211,8 @@ Examples:
   alphaclaw telegram topic add --thread 12 --name "Ops" --agent ops
   alphaclaw telegram topic create --group -1001234567890 --name "Launch"
   alphaclaw telegram topics list --group -1001234567890 --json
+  alphaclaw diagnose
+  alphaclaw diagnose --json > diagnose.json
 `);
   process.exit(0);
 }
@@ -262,6 +268,40 @@ if (kPort === "18789") {
     ].join("\n"),
   );
   process.exit(1);
+}
+
+// ---------------------------------------------------------------------------
+// 1a'. `alphaclaw diagnose [--json]` — read-only evidence bundle (#76 A9)
+// ---------------------------------------------------------------------------
+// The operator's first move on a sick box, so it runs from HERE: rootDir and
+// PORT are resolved, nothing has been spawned, and section 2's mkdir has not
+// run. It derives the openclaw dir itself (the store derives the managed dir
+// from it), reads .env only as a redaction source, opens watchdog.db
+// read-only through the collector, and never creates a file or directory —
+// a diagnose run on an empty root leaves it empty. Default output IS the
+// markdown (paste it into the incident); --json is one line for tooling.
+// Listed in lib/boot-cli-verbs.js so no placeholder binds the port for it.
+if (command === "diagnose") {
+  const asJson = commandArgs.includes("--json");
+  const { readEnvFile } = require("../lib/server/env");
+  const { collectDiagnose } = require("../lib/server/diagnose/collect");
+  const { renderDiagnoseMarkdown } = require("../lib/server/diagnose/render");
+  collectDiagnose({
+    rootDir,
+    openclawDir: path.join(rootDir, ".openclaw"),
+    envFileVars: readEnvFile(),
+  })
+    .then((bundle) => {
+      process.stdout.write(
+        asJson ? `${JSON.stringify(bundle)}\n` : `${renderDiagnoseMarkdown(bundle)}\n`,
+      );
+      process.exit(0);
+    })
+    .catch((error) => {
+      console.error(`[alphaclaw] diagnose failed: ${error?.stack || error}`);
+      process.exit(1);
+    });
+  return;
 }
 
 // ---------------------------------------------------------------------------
@@ -1021,13 +1061,43 @@ try {
 }
 
 // ---------------------------------------------------------------------------
+// 7a. AlphaClaw self-version stamp + boot banner (issue #76, plan A8)
+// ---------------------------------------------------------------------------
+// The first line of the boot SPINE names WHICH AlphaClaw is booting — version,
+// git ref when installed from git, and the version that ran before — and the
+// same facts land in <managedDir>/alphaclaw-version.json so a restart loop or
+// a post-deploy incident can be read off the volume. Start path only: every
+// CLI verb exited above. The managed dir name comes from the store module
+// (no module recomputes `<openclawDir>/.alphaclaw` on its own). Fail-open:
+// the stamp is evidence, never a gate.
+let selfVersionStamp = null;
+try {
+  const { kManagedDirName } = require("../lib/server/openclaw-release-channel");
+  const {
+    stampSelfVersionAtBoot,
+    formatBootBanner,
+  } = require("../lib/server/alphaclaw-self-version");
+  selfVersionStamp = stampSelfVersionAtBoot({
+    version: pkg.version,
+    spec: resolveSelfDependency({ fsImpl: fs }).spec,
+    managedDir: path.join(openclawDir, kManagedDirName),
+    logger: console,
+  });
+  console.log(formatBootBanner(selfVersionStamp.record, { rootDir }));
+} catch (e) {
+  console.warn(`[alphaclaw] self-version stamp failed (fail-open): ${e.message}`);
+}
+
+// ---------------------------------------------------------------------------
 // 7b. OpenClaw release-channel boot sync (offline, synchronous, fail-open)
 // ---------------------------------------------------------------------------
 // Re-applies the explicitly selected OpenClaw version (overlay store / dev
 // checkout shim) BEFORE anything below shells `openclaw`. Runs only in the
-// `start` path — CLI subcommands (git-sync, doctor, telegram) exited earlier,
-// so hourly cron processes can never race an activation. Any failure must fall
-// back to the image's pinned install; startup itself is never blocked.
+// `start` path — CLI subcommands (diagnose, git-sync, doctor, telegram, admin)
+// exited earlier, so hourly cron processes can never race an activation. Any
+// failure must fall back to the image's pinned install; startup itself is
+// never blocked. Every return path also leaves the bin-phase boot-report.json
+// behind (plan A1; the writer is built inside runOpenclawChannelBootSync).
 try {
   const { kOpenclawBinShimDir } = require("../lib/server/constants");
   const shimPathPrefix = `${kOpenclawBinShimDir}${path.delimiter}`;
@@ -1037,14 +1107,19 @@ try {
   const {
     runOpenclawChannelBootSync,
   } = require("../lib/server/openclaw-channel-sync");
-  const bootSyncResult = runOpenclawChannelBootSync({});
+  // The stamp rides along so the bin-phase boot-report.json (plan A1) names
+  // this AlphaClaw version without re-reading the file it just wrote.
+  const bootSyncResult = runOpenclawChannelBootSync({ selfVersion: selfVersionStamp });
   if (bootSyncResult?.action === "skipped_concurrent" && bootSyncResult.corroborated) {
     // A live AlphaClaw server provably owns this state directory: its pidfile
     // names a live pid whose kernel start time matches the record. Loading
     // lib/server.js next would run its module-init side effects against the
     // live databases before dying on EADDRINUSE (fix wave F004) — refuse
     // here instead. The placeholder child self-exits on the ppid check; kill
-    // it eagerly anyway.
+    // it eagerly anyway. The sync already wrote this attempt's boot report
+    // to boot-report-refused.json with serverPhase not_reached (plan A1,
+    // "bin-exit paths") WITHOUT rotating the ring, so the live server's
+    // completed boot-report.json stays current — nothing to mark here.
     console.error(
       `[alphaclaw] Another AlphaClaw server (pid ${bootSyncResult.livePid}) already owns ${rootDir}. Refusing to start a second instance against its live databases — stop it first, or pass a different --root-dir.`,
     );

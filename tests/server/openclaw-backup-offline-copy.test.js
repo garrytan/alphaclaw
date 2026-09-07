@@ -1,7 +1,9 @@
 // AlphaClaw offline copy (issue #54): exclusivity evidence, per-stage named
 // failures, quiet_lost abort, manifest shape, gzip -1 archiving, and the
-// shared usable-check. The happy path runs the REAL tar/gzip on this box; the
-// stage-failure cases drive a scripted runner so they stay hermetic.
+// shared usable-check; (issue #79) workspace policy excludes, honest
+// coverage, the format-2 manifest with its v1 reader, and the progress feed.
+// The happy path runs the REAL tar/gzip on this box; the stage-failure cases
+// drive a scripted runner so they stay hermetic.
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
@@ -11,6 +13,10 @@ const { DatabaseSync } = require("node:sqlite");
 const {
   kOfflineCopyProducer,
   kOfflineCopyFormatVersion,
+  kOfflineCopyReadableFormatVersions,
+  kOfflineCopyPolicyExcludes,
+  kOfflineCopyExcludeMaxPatterns,
+  kCoreAssetProbePaths,
   kOfflineCopyArchiveSuffix,
   kOfflineCopyTempDirPrefix,
   kIntegrityCheckpointIntervalMs,
@@ -20,6 +26,9 @@ const {
   OfflineCopyError,
   isOfflineCopyArchiveName,
   producerOfArchiveName,
+  isCoreAssetPath,
+  compileExcludePattern,
+  resolveExcludes,
   assessExclusivity,
   defaultListFdHolders,
   defaultSpawnIntegrityWorker,
@@ -71,6 +80,29 @@ const makeStateDir = ({ workspaceBytes = 64 } = {}) => {
   fs.writeFileSync(path.join(stateDir, "logs", "gateway.log"), "log\n");
   fs.symlinkSync("/etc/hostname", path.join(stateDir, "hostname-link"));
   return stateDir;
+};
+
+// Reproducible debris inside the workspace — what the default policy drops —
+// beside files it must keep (a log that is not gzipped, a sqlite file, a
+// nested `.cache` an operator may opt in to). `junkBytes` sizes the
+// node_modules payload so the inline-limit decision can be probed.
+const addWorkspaceJunk = (stateDir, { junkBytes = 4096 } = {}) => {
+  const ws = path.join(stateDir, "workspace");
+  fs.mkdirSync(path.join(ws, "node_modules", "left-pad"), { recursive: true });
+  fs.writeFileSync(path.join(ws, "node_modules", "index.js"), "x".repeat(junkBytes));
+  fs.writeFileSync(path.join(ws, "node_modules", "left-pad", "index.js"), "y".repeat(100));
+  fs.writeFileSync(path.join(ws, "Heap-20260907.heapsnapshot"), "z".repeat(300));
+  fs.writeFileSync(path.join(ws, "scratch.tmp"), "t".repeat(50));
+  fs.mkdirSync(path.join(ws, "logs", "app"), { recursive: true });
+  fs.writeFileSync(path.join(ws, "logs", "app", "old.log.gz"), "g".repeat(70));
+  fs.writeFileSync(path.join(ws, "logs", "app", "current.log"), "keep\n");
+  fs.mkdirSync(path.join(ws, ".cache"), { recursive: true });
+  fs.writeFileSync(path.join(ws, ".cache", "blob"), "c".repeat(40));
+  fs.writeFileSync(path.join(ws, "notes.sqlite"), "not a db, a workspace file\n");
+  return {
+    junkBytes: junkBytes + 100 + 300 + 50 + 70,
+    junkFiles: 5,
+  };
 };
 
 const heldToken = { id: "quiet-1", owner: "quiesced-backup", disabled: false };
@@ -833,7 +865,9 @@ describe("server/openclaw-backup-offline-copy", () => {
       });
       expect(checkpoints).toBe(Math.floor(5001 / kWalkCheckpointEvery));
       expect(tree.workspaces.get(path.join(stateDir, "workspace")).files).toHaveLength(5000);
-      // node_modules inside a workspace is payload (upstream parity), so it counts too.
+      // Plain workspace files match no policy exclude, so every one of them
+      // is payload and counts toward the cadence (excluded entries count
+      // toward the cadence too — see the policy-excludes describe).
       expect(walkStateTree({ stateDir, fsModule }).workspaces.size).toBe(1);
 
       let now = 0;
@@ -1457,6 +1491,533 @@ describe("server/openclaw-backup-offline-copy", () => {
       });
       expect(timeouts[0]).toBeLessThanOrEqual(1000);
       expect(timeouts[1]).toBeLessThan(timeouts[0]);
+    });
+  });
+
+  // ── Issue #79: policy excludes inside workspaces ─────────────────────────
+  describe("policy excludes (issue #79)", () => {
+    describe("compileExcludePattern / resolveExcludes", () => {
+      it("the default set is exactly the unambiguous debris (Codex 17): node_modules, *.heapsnapshot, *.tmp, logs/**/*.gz", () => {
+        expect([...kOfflineCopyPolicyExcludes]).toEqual(["node_modules", "*.heapsnapshot", "*.tmp", "logs/**/*.gz"]);
+        for (const optIn of ["tmp", ".cache", "caches"]) expect(kOfflineCopyPolicyExcludes).not.toContain(optIn);
+        const { applied, refused } = resolveExcludes(undefined);
+        expect(applied.map((rule) => rule.pattern)).toEqual([...kOfflineCopyPolicyExcludes]);
+        expect(refused).toEqual([]);
+      });
+
+      it("matches gitignore-style: basename at any depth, anchored paths with **, trailing / for directories only, case-insensitive", () => {
+        const node = compileExcludePattern("node_modules").compiled;
+        expect(node.test("node_modules", { isDirectory: true })).toBe(true);
+        expect(node.test("packages/app/node_modules", { isDirectory: true })).toBe(true);
+        expect(node.test("Node_Modules", { isDirectory: true })).toBe(true);
+        expect(node.test("node_modules_backup", { isDirectory: true })).toBe(false);
+        const gz = compileExcludePattern("logs/**/*.gz").compiled;
+        expect(gz.test("logs/x.gz")).toBe(true);
+        expect(gz.test("logs/app/2026/x.GZ")).toBe(true);
+        expect(gz.test("sub/logs/x.gz")).toBe(false);
+        expect(gz.test("logs/x.gzip")).toBe(false);
+        const tmp = compileExcludePattern("tmp/").compiled;
+        expect(tmp.test("a/tmp", { isDirectory: true })).toBe(true);
+        expect(tmp.test("a/tmp", { isDirectory: false })).toBe(false);
+        const dist = compileExcludePattern("dist/**").compiled;
+        expect(dist.test("dist/a/b.js")).toBe(true);
+        expect(dist.test("dist")).toBe(false);
+        expect(compileExcludePattern("*.heap?napshot").compiled.test("x/y.heapsnapshot")).toBe(true);
+        // Regex specials in a pattern are literal.
+        expect(compileExcludePattern("a.b").compiled.test("aXb")).toBe(false);
+      });
+
+      it("refuses every pattern that could name a core asset, whatever the config says", () => {
+        const refusedPatterns = ["*", "**", "**/*", "*.sqlite", "*.json", "openclaw.json", "credentials", "identity/", "state/", "state/**", "agents/*", "agents/**", "agent", "openclaw-agent.sqlite", "auth-profiles.json", "credentials/*.json"];
+        for (const pattern of refusedPatterns) {
+          const outcome = compileExcludePattern(pattern);
+          expect(outcome.compiled, pattern).toBeUndefined();
+          expect(outcome.refused).toEqual({ pattern, reason: expect.stringMatching(/could match the core asset "[^"]+" — core assets are never excludable/) });
+        }
+        // Every probe the refusal uses is itself a core asset path, or an
+        // ancestor directory of one — the guard cannot drift away from
+        // isCoreAssetPath.
+        for (const probe of kCoreAssetProbePaths) {
+          const coreOrAncestor =
+            isCoreAssetPath(probe) ||
+            kCoreAssetProbePaths.some((other) => other.startsWith(`${probe}/`) && isCoreAssetPath(other));
+          expect(coreOrAncestor, probe).toBe(true);
+        }
+        expect(kCoreAssetProbePaths).toEqual(expect.arrayContaining(["openclaw.json", "credentials", "identity", "state/openclaw.sqlite", "agents/main/agent/openclaw-agent.sqlite", "openclaw.sqlite"]));
+        // An agent ID is not a core name; operator opt-ins compile.
+        for (const pattern of ["main", ".cache", "caches", "tmp", "tmp/", "dist/**", "*.log", "build"]) {
+          expect(compileExcludePattern(pattern).compiled, pattern).toBeDefined();
+        }
+      });
+
+      it("refuses malformed patterns with a reason: non-string, empty, absolute, dot segments, backslash, NUL, over-long", () => {
+        const reasons = Object.fromEntries(
+          [42, "", "   ", "/abs/path", "a/../b", "./x", "a//b", "a\\b", "a\0b", "x".repeat(300)].map((raw) => [
+            JSON.stringify(raw),
+            compileExcludePattern(raw).refused?.reason ?? "ACCEPTED",
+          ]),
+        );
+        expect(reasons).toEqual({
+          "42": "not a string",
+          '""': "empty pattern",
+          '"   "': "empty pattern",
+          '"/abs/path"': expect.stringMatching(/absolute paths are not allowed/),
+          '"a/../b"': expect.stringMatching(/'\.' and '\.\.' segments/),
+          '"./x"': expect.stringMatching(/'\.' and '\.\.' segments/),
+          '"a//b"': "empty path segment (//)",
+          '"a\\\\b"': expect.stringMatching(/backslashes are not supported/),
+          '"a\\u0000b"': "contains a NUL byte",
+          [JSON.stringify("x".repeat(300))]: "longer than 256 characters",
+        });
+      });
+
+      it("an operator list REPLACES the defaults, dedupes, caps at kOfflineCopyExcludeMaxPatterns, and a non-array is refused whole", () => {
+        const custom = resolveExcludes([".cache", " node_modules ", "node_modules", "*.sqlite"]);
+        expect(custom.applied.map((rule) => rule.pattern)).toEqual([".cache", "node_modules"]);
+        expect(custom.refused).toEqual([{ pattern: "*.sqlite", reason: expect.stringMatching(/core asset/) }]);
+        expect(resolveExcludes([]).applied).toEqual([]);
+        const many = resolveExcludes(Array.from({ length: kOfflineCopyExcludeMaxPatterns + 2 }, (_, i) => `junk-${i}`));
+        expect(many.applied).toHaveLength(kOfflineCopyExcludeMaxPatterns);
+        expect(many.refused).toEqual([
+          { pattern: `junk-${kOfflineCopyExcludeMaxPatterns}`, reason: expect.stringMatching(/more than 64 patterns/) },
+          { pattern: `junk-${kOfflineCopyExcludeMaxPatterns + 1}`, reason: expect.stringMatching(/more than 64 patterns/) },
+        ]);
+        const notArray = resolveExcludes("node_modules");
+        expect(notArray.applied).toEqual([]);
+        expect(notArray.refused).toEqual([{ pattern: "node_modules", reason: "excludes must be an array of patterns" }]);
+      });
+    });
+
+    describe("walkStateTree with excludes", () => {
+      it("drops the default debris inside the workspace, measures it, and leaves everything outside the workspace alone", () => {
+        const stateDir = makeStateDir();
+        const junk = addWorkspaceJunk(stateDir);
+        // The same names OUTSIDE a workspace are state and stay: a session
+        // file ending in .tmp, a heap snapshot under an agent dir.
+        fs.writeFileSync(path.join(stateDir, "agents", "main", "sessions", "draft.tmp"), "s");
+        fs.writeFileSync(path.join(stateDir, "agents", "main", "sessions", "dump.heapsnapshot"), "h");
+
+        const tree = walkStateTree({ stateDir, fsModule: fs });
+
+        const ws = tree.workspaces.get(path.join(stateDir, "workspace"));
+        expect(ws.files.map((f) => f.archivePath).sort()).toEqual([
+          "workspace/.cache/blob",
+          "workspace/logs/app/current.log",
+          "workspace/notes.md",
+          "workspace/notes.sqlite",
+        ]);
+        expect(ws.bytes).toBe(40 + 5 + 64 + "not a db, a workspace file\n".length);
+        expect(ws.excludedBytes).toBe(junk.junkBytes);
+        expect(ws.excludedFiles).toBe(junk.junkFiles);
+        expect(tree.files.map((f) => f.archivePath)).toEqual(
+          expect.arrayContaining(["agents/main/sessions/draft.tmp", "agents/main/sessions/dump.heapsnapshot"]),
+        );
+        // One skipped row per excluded entry — a directory is one row with
+        // the whole subtree measured — each naming the pattern that hit.
+        const policyRows = tree.skipped.filter((entry) => entry.kind === "policy_exclude");
+        expect(policyRows.map((row) => [path.relative(stateDir, row.sourcePath), row.pattern, row.files, row.bytes]).sort()).toEqual(
+          [
+            ["workspace/Heap-20260907.heapsnapshot", "*.heapsnapshot", 1, 300],
+            ["workspace/logs/app/old.log.gz", "logs/**/*.gz", 1, 70],
+            ["workspace/node_modules", "node_modules", 2, 4096 + 100],
+            ["workspace/scratch.tmp", "*.tmp", 1, 50],
+          ].sort(),
+        );
+        for (const row of policyRows) {
+          expect(row.reason).toBe(`excluded by backup policy (${row.pattern})`);
+          expect(row.core).toBeUndefined();
+        }
+        // Per-pattern tallies, defaults order, zero-match rows included.
+        expect(tree.excludes).toEqual([
+          { pattern: "node_modules", files: 2, bytes: 4196 },
+          { pattern: "*.heapsnapshot", files: 1, bytes: 300 },
+          { pattern: "*.tmp", files: 1, bytes: 50 },
+          { pattern: "logs/**/*.gz", files: 1, bytes: 70 },
+        ]);
+        expect(tree.refusedExcludes).toEqual([]);
+      });
+
+      it("an operator list replaces the defaults; a refused pattern is reported and NOT applied; [] turns the policy off", () => {
+        const stateDir = makeStateDir();
+        addWorkspaceJunk(stateDir);
+        const relFiles = (tree) =>
+          tree.workspaces
+            .get(path.join(stateDir, "workspace"))
+            .files.map((f) => f.archivePath)
+            .sort();
+
+        const custom = walkStateTree({ stateDir, fsModule: fs, excludes: [".cache", "*.sqlite", "openclaw.json"] });
+        // node_modules is back in (the operator did not list it); .cache is out;
+        // the refused *.sqlite left the workspace's sqlite-named file in place.
+        expect(relFiles(custom)).toEqual(
+          expect.arrayContaining(["workspace/node_modules/index.js", "workspace/notes.sqlite", "workspace/scratch.tmp"]),
+        );
+        expect(relFiles(custom)).not.toContain("workspace/.cache/blob");
+        expect(custom.excludes).toEqual([{ pattern: ".cache", files: 1, bytes: 40 }]);
+        expect(custom.refusedExcludes).toEqual([
+          { pattern: "*.sqlite", reason: expect.stringMatching(/core asset "openclaw\.sqlite"/) },
+          { pattern: "openclaw.json", reason: expect.stringMatching(/core asset "openclaw\.json"/) },
+        ]);
+
+        const off = walkStateTree({ stateDir, fsModule: fs, excludes: [] });
+        expect(off.excludes).toEqual([]);
+        expect(off.skipped.filter((entry) => entry.kind === "policy_exclude")).toEqual([]);
+        expect(relFiles(off)).toContain("workspace/node_modules/left-pad/index.js");
+      });
+
+      it("an excluded tree never counts against the copy-set cap, still yields to the budget, and an unreadable corner of it is tolerated", async () => {
+        const stateDir = "/synthetic-alphaclaw-state";
+        const dirent = (name, type) => ({
+          name,
+          isSymbolicLink: () => type === "link",
+          isDirectory: () => type === "dir",
+          isFile: () => type === "file",
+        });
+        const wsDir = path.join(stateDir, "workspace");
+        const nm = path.join(wsDir, "node_modules");
+        const fsModule = {
+          readdirSync: (dir) => {
+            if (dir === stateDir) return [dirent("workspace", "dir")];
+            if (dir === wsDir) return [dirent("node_modules", "dir"), dirent("keep.txt", "file")];
+            if (dir === nm) {
+              return [
+                ...Array.from({ length: 200_500 }, (_, i) => dirent(`f${i}.js`, "file")),
+                dirent("broken", "dir"),
+                dirent("link", "link"),
+              ];
+            }
+            if (dir === path.join(nm, "broken")) throw new Error("EACCES");
+            throw new Error(`unexpected readdir ${dir}`);
+          },
+          statSync: (file) => {
+            if (file.endsWith("f7.js")) throw new Error("ENOENT raced");
+            return { size: 3 };
+          },
+        };
+        let checkpoints = 0;
+        const tree = await walkStateTreeAsync({
+          stateDir,
+          fsModule,
+          checkpoint: () => {
+            checkpoints += 1;
+          },
+        });
+        const ws = tree.workspaces.get(wsDir);
+        expect(ws.files.map((f) => f.archivePath)).toEqual(["workspace/keep.txt"]);
+        // 200_499 measurable files × 3 bytes (one stat raced, one subdir
+        // unreadable, one symlink not followed) — reported, never fatal.
+        expect(ws.excludedFiles).toBe(200_499);
+        expect(ws.excludedBytes).toBe(200_499 * 3);
+        expect(tree.excludes[0]).toEqual({ pattern: "node_modules", files: 200_499, bytes: 200_499 * 3 });
+        // Well over the 200k copy-set cap in visited entries, yet no throw —
+        // and the cadence covered the measured tree (≥ 400 yields).
+        expect(checkpoints).toBeGreaterThanOrEqual(400);
+      });
+    });
+
+    describe("createOfflineCopy with excludes (real tar + gzip)", () => {
+      it("junk excluded, databases present, partial:false, manifest v2 with excludes[] + coverage, inline limit judged on post-exclude bytes", async () => {
+        const stateDir = makeStateDir();
+        const junk = addWorkspaceJunk(stateDir, { junkBytes: 8192 });
+        const logs = [];
+        // Pre-exclude the workspace is ~8.7 KB; post-exclude ~140 B. A 1 KiB
+        // inline limit therefore INCLUDES it — the junk no longer decides.
+        const args = makeCopyArgs({ stateDir, workspaceInlineBytes: 1024, log: (line) => logs.push(line) });
+
+        const result = await createOfflineCopy(args);
+
+        expect(result.ok).toBe(true);
+        expect(result.partial).toBe(false);
+        expect(result.partialReasons).toEqual([]);
+        expect(result.coverage).toEqual({ core: "complete", workspace: "policy_excluded" });
+        expect(result.excludedBytes).toBe(junk.junkBytes);
+        expect(result.refusedExcludes).toEqual([]);
+        expect(result.excludes).toEqual([
+          { pattern: "node_modules", files: 2, bytes: 8192 + 100 },
+          { pattern: "*.heapsnapshot", files: 1, bytes: 300 },
+          { pattern: "*.tmp", files: 1, bytes: 50 },
+          { pattern: "logs/**/*.gz", files: 1, bytes: 70 },
+        ]);
+        const { manifest } = result;
+        expect(manifest.alphaclawFormatVersion).toBe(2);
+        expect(kOfflineCopyFormatVersion).toBe(2);
+        expect(manifest.options).toEqual({ includeWorkspace: true, onlyConfig: false });
+        expect(manifest.excludes).toEqual(result.excludes);
+        expect(manifest.coverage).toEqual(result.coverage);
+        expect(manifest.partialReasons).toEqual([]);
+        expect(manifest.skipped.filter((entry) => entry.kind === "policy_exclude")).toHaveLength(4);
+        expect(manifest.skipped.some((entry) => entry.kind === "workspace")).toBe(false);
+
+        const root = "openclaw-backup-1000-abcdef12";
+        const listed = listArchive(args.outputFile);
+        expect(listed).toEqual(
+          expect.arrayContaining([
+            `${root}/state/openclaw.sqlite`,
+            `${root}/agents/main/agent/openclaw-agent.sqlite`,
+            `${root}/workspace/notes.md`,
+            `${root}/workspace/logs/app/current.log`,
+            `${root}/workspace/.cache/blob`,
+            `${root}/workspace/notes.sqlite`,
+          ]),
+        );
+        for (const absent of ["node_modules", ".heapsnapshot", "scratch.tmp", "old.log.gz"]) {
+          expect(listed.some((entry) => entry.includes(absent)), absent).toBe(false);
+        }
+        expect(logs.some((line) => /policy excluded 5 workspace file\(s\)/.test(line))).toBe(true);
+
+        // The usable check reads the v2 manifest back and reports the format.
+        const verdict = await verifyArchiveManifest({
+          file: args.outputFile,
+          runCommand: realRunCommand,
+          requiredArchivePaths: ["state/openclaw.sqlite", "agents/main/agent/openclaw-agent.sqlite"],
+          stateDir,
+        });
+        expect(verdict.ok).toBe(true);
+        expect(verdict.formatVersion).toBe(2);
+        expect(verdict.manifest.coverage).toEqual({ core: "complete", workspace: "policy_excluded" });
+      });
+
+      it("coverage is honest in every shape: clean → complete/complete; over the limit → omitted (still partial, reuse unchanged); core symlink → core partial", async () => {
+        const clean = await createOfflineCopy(makeCopyArgs());
+        expect(clean.coverage).toEqual({ core: "complete", workspace: "complete" });
+        expect(clean.manifest.excludes).toEqual([...kOfflineCopyPolicyExcludes].map((pattern) => ({ pattern, files: 0, bytes: 0 })));
+
+        const omitted = await createOfflineCopy(
+          makeCopyArgs({ stateDir: makeStateDir({ workspaceBytes: 4096 }), workspaceInlineBytes: 1024 }),
+        );
+        expect(omitted.coverage).toEqual({ core: "complete", workspace: "omitted" });
+        expect(omitted.partial).toBe(true);
+        expect(omitted.manifest.options.includeWorkspace).toBe(false);
+
+        const stateDir = makeStateDir();
+        addWorkspaceJunk(stateDir);
+        const elsewhere = mkTemp("alphaclaw-offline-copy-creds-");
+        fs.rmSync(path.join(stateDir, "credentials"), { recursive: true });
+        fs.symlinkSync(elsewhere, path.join(stateDir, "credentials"));
+        const coreMissing = await createOfflineCopy(makeCopyArgs({ stateDir }));
+        expect(coreMissing.coverage).toEqual({ core: "partial", workspace: "policy_excluded" });
+        expect(coreMissing.partial).toBe(true);
+        expect(coreMissing.partialReasons).toEqual(["credentials: core asset is a symlink (not followed)"]);
+      });
+
+      it("a workspace emptied by the policy is still includeWorkspace:true with coverage policy_excluded — never a bogus over-the-limit skip", async () => {
+        const stateDir = makeStateDir();
+        fs.rmSync(path.join(stateDir, "workspace", "notes.md"));
+        fs.mkdirSync(path.join(stateDir, "workspace", "node_modules"), { recursive: true });
+        fs.writeFileSync(path.join(stateDir, "workspace", "node_modules", "a.js"), "aaaa");
+        const result = await createOfflineCopy(makeCopyArgs({ stateDir }));
+        expect(result.partial).toBe(false);
+        expect(result.coverage).toEqual({ core: "complete", workspace: "policy_excluded" });
+        expect(result.manifest.options.includeWorkspace).toBe(true);
+        expect(result.manifest.skipped.some((entry) => entry.kind === "workspace")).toBe(false);
+        expect(listArchive(result.file).some((entry) => entry.includes("workspace/"))).toBe(false);
+      });
+
+      it("a refused operator pattern is reported on the result and in the log, never applied; the valid ones replace the defaults", async () => {
+        const stateDir = makeStateDir();
+        addWorkspaceJunk(stateDir);
+        const logs = [];
+        const result = await createOfflineCopy(
+          makeCopyArgs({ stateDir, excludes: [".cache", "*.sqlite", "**"], log: (line) => logs.push(line) }),
+        );
+        expect(result.ok).toBe(true);
+        expect(result.excludes).toEqual([{ pattern: ".cache", files: 1, bytes: 40 }]);
+        expect(result.refusedExcludes).toEqual([
+          { pattern: "*.sqlite", reason: expect.stringMatching(/core asset/) },
+          { pattern: "**", reason: expect.stringMatching(/core asset/) },
+        ]);
+        expect(result.manifest.excludes).toEqual(result.excludes);
+        // Refusals do not travel in the manifest (they changed nothing about
+        // the archive); they are on the result and in the log.
+        expect(result.manifest.refusedExcludes).toBeUndefined();
+        expect(logs.some((line) => /refused 2 exclude pattern\(s\), not applied: "\*\.sqlite" \(.*core asset.*\); "\*\*"/.test(line))).toBe(true);
+        const listed = listArchive(result.file);
+        expect(listed.some((entry) => entry.endsWith("workspace/notes.sqlite"))).toBe(true);
+        expect(listed.some((entry) => entry.includes("workspace/node_modules/"))).toBe(true);
+        expect(listed.some((entry) => entry.includes("workspace/.cache/"))).toBe(false);
+      });
+    });
+
+    describe("verifyArchiveManifest accepts alphaclawFormatVersion 1 AND 2", () => {
+      // A v1 manifest exactly as the 2026-09-02 producer wrote it: per-file
+      // sqlite assets, no excludes[]/coverage{}. Older archives on disk must
+      // stay usable (and reusable) after the format bump.
+      const v1Manifest = {
+        schemaVersion: 1,
+        createdAt: "2026-09-02T18:00:00.000Z",
+        archiveRoot: "openclaw-backup-1756836000000-2f8c1f2e",
+        runtimeVersion: "2026.9.1-beta.1",
+        platform: "linux",
+        nodeVersion: "v22.23.2",
+        options: { includeWorkspace: true, onlyConfig: false },
+        paths: {
+          stateDir: "/data/.openclaw",
+          configPath: "/data/.openclaw/openclaw.json",
+          oauthDir: "/data/.openclaw/credentials",
+          workspaceDirs: ["/data/.openclaw/workspace"],
+          agentRoots: [{ agentId: "main", sourcePath: "/data/.openclaw/agents/main" }],
+        },
+        assets: [
+          { kind: "sqlite", sourcePath: "/data/.openclaw/state/openclaw.sqlite", archivePath: "state/openclaw.sqlite" },
+          { kind: "sqlite", sourcePath: "/data/.openclaw/agents/main/agent/openclaw-agent.sqlite", archivePath: "agents/main/agent/openclaw-agent.sqlite" },
+          { kind: "config", sourcePath: "/data/.openclaw/openclaw.json", archivePath: "openclaw.json" },
+        ],
+        skipped: [],
+        partialReasons: [],
+        producer: kOfflineCopyProducer,
+        alphaclawFormatVersion: 1,
+        exclusivityEvidence: { stopConfirmed: true, quiet: "held", liveProcesses: 0, handleCount: 0, fdScan: "clean", fdHolders: [], completeness: "full", platform: "linux" },
+        diagnosis: { journalMode: "wal", fsType: "ext4", stateBytes: 734003200 },
+      };
+      const scripted = (manifest) => async (spec) =>
+        spec.command === "gzip" ? { ok: true, tail: "" } : { ok: true, tail: `${JSON.stringify(manifest)}\n` };
+      const required = ["state/openclaw.sqlite", "agents/main/agent/openclaw-agent.sqlite"];
+
+      it("a v1 fixture verifies and reports formatVersion 1", async () => {
+        const verdict = await verifyArchiveManifest({ file: "/x.alphaclaw.tar.gz", runCommand: scripted(v1Manifest), requiredArchivePaths: required });
+        expect(verdict).toEqual(expect.objectContaining({ ok: true, producer: kOfflineCopyProducer, formatVersion: 1 }));
+        expect(verdict.manifest.excludes).toBeUndefined();
+        expect(verdict.manifest.coverage).toBeUndefined();
+      });
+
+      it("a v2 fixture verifies and reports formatVersion 2; the readable set is exactly [1, 2]", async () => {
+        const v2 = { ...v1Manifest, alphaclawFormatVersion: 2, excludes: [{ pattern: "node_modules", files: 3, bytes: 999 }], coverage: { core: "complete", workspace: "policy_excluded" } };
+        const verdict = await verifyArchiveManifest({ file: "/x.alphaclaw.tar.gz", runCommand: scripted(v2), requiredArchivePaths: required });
+        expect(verdict).toEqual(expect.objectContaining({ ok: true, formatVersion: 2 }));
+        expect([...kOfflineCopyReadableFormatVersions]).toEqual([1, 2]);
+        expect(kOfflineCopyReadableFormatVersions).toContain(kOfflineCopyFormatVersion);
+      });
+
+      it("an offline copy in a format this build does not know (newer AlphaClaw, or no version) fails the usable check at stage format — honest, not a throw", async () => {
+        const newer = await verifyArchiveManifest({ file: "/x.alphaclaw.tar.gz", runCommand: scripted({ ...v1Manifest, alphaclawFormatVersion: 3 }), requiredArchivePaths: required });
+        expect(newer).toEqual(expect.objectContaining({ ok: false, stage: "format", reason: "alphaclawFormatVersion 3 is not one this AlphaClaw can read (1, 2)" }));
+        const { alphaclawFormatVersion: _dropped, ...unversioned } = v1Manifest;
+        const missing = await verifyArchiveManifest({ file: "/x.alphaclaw.tar.gz", runCommand: scripted(unversioned), requiredArchivePaths: required });
+        expect(missing).toEqual(expect.objectContaining({ ok: false, stage: "format", reason: expect.stringMatching(/^alphaclawFormatVersion undefined is not one/) }));
+      });
+
+      it("upstream manifests carry no format version and are not gated (formatVersion null)", async () => {
+        const upstream = { schemaVersion: 1, paths: { stateDir: "/data/.openclaw" }, assets: [{ kind: "state", sourcePath: "/data/.openclaw", archivePath: "r/payload/posix/data/.openclaw" }] };
+        const verdict = await verifyArchiveManifest({ file: "/x.tar.gz", runCommand: scripted(upstream), requiredArchivePaths: required });
+        expect(verdict).toEqual(expect.objectContaining({ ok: true, producer: "openclaw", formatVersion: null }));
+      });
+    });
+  });
+
+  // ── Issue #79 (h): progress feed for the caller's ticker ─────────────────
+  describe("onProgress", () => {
+    const sqlite = require("node:sqlite");
+    const growStateDb = (stateDir) => {
+      const db = new DatabaseSync(path.join(stateDir, "state", "openclaw.sqlite"));
+      db.exec("CREATE TABLE big(x TEXT)");
+      const insert = db.prepare("INSERT INTO big VALUES (?)");
+      db.exec("BEGIN");
+      for (let i = 0; i < 3000; i += 1) insert.run("x".repeat(400));
+      db.exec("COMMIT");
+      db.close();
+    };
+    // The real module, stepping 5 pages at a time so backup() reports many
+    // times; module identity differs from `node:sqlite`, so integrity runs
+    // in-process (irrelevant here).
+    const steppingSqlite = ({ onStep = () => {} } = {}) => ({
+      DatabaseSync: sqlite.DatabaseSync,
+      backup: (src, dest, options) =>
+        sqlite.backup(src, dest, {
+          ...options,
+          rate: 5,
+          progress: (info) => {
+            onStep(info);
+            options.progress(info);
+          },
+        }),
+    });
+    const kStages = ["sqlite_backup", "integrity", "copy_assets", "archive", "verify"];
+
+    it("reports { stage, doneBytes, totalBytes } from the per-file loop AND copyDatabase's step hook: monotonic, bounded, ending at totalBytes", async () => {
+      const stateDir = makeStateDir();
+      growStateDb(stateDir);
+      addWorkspaceJunk(stateDir);
+      const events = [];
+      const args = makeCopyArgs({ stateDir, sqliteModule: steppingSqlite(), onProgress: (event) => events.push({ ...event }) });
+
+      const result = await createOfflineCopy(args);
+
+      expect(result.ok).toBe(true);
+      expect(events.length).toBeGreaterThan(10);
+      const totals = new Set(events.map((event) => event.totalBytes));
+      expect(totals.size).toBe(1);
+      const totalBytes = [...totals][0];
+      // The copy set: databases + assets + the inlined (post-exclude) workspace.
+      const tree = walkStateTree({ stateDir, fsModule: fs });
+      const expectedTotal =
+        tree.dbs.reduce((sum, db) => sum + db.bytes, 0) +
+        tree.files.reduce((sum, file) => sum + file.bytes, 0) +
+        [...tree.workspaces.values()].reduce((sum, ws) => sum + ws.bytes, 0);
+      expect(totalBytes).toBe(expectedTotal);
+      for (let i = 1; i < events.length; i += 1) {
+        expect(events[i].doneBytes).toBeGreaterThanOrEqual(events[i - 1].doneBytes);
+      }
+      for (const event of events) {
+        expect(kStages).toContain(event.stage);
+        expect(event.doneBytes).toBeLessThanOrEqual(totalBytes);
+        expect(Number.isInteger(event.doneBytes)).toBe(true);
+      }
+      // Intra-database progress: several strictly increasing sqlite_backup
+      // readings between 0 and the big DB's size, not just start/end.
+      const dbSteps = events.filter((event) => event.stage === "sqlite_backup").map((event) => event.doneBytes);
+      expect(new Set(dbSteps).size).toBeGreaterThan(3);
+      expect(events.filter((event) => event.stage === "copy_assets").length).toBe(tree.files.length + [...tree.workspaces.values()].reduce((n, ws) => n + ws.files.length, 0));
+      expect(events.at(-1)).toEqual({ stage: "verify", doneBytes: totalBytes, totalBytes });
+      expect(events.find((event) => event.stage === "archive").doneBytes).toBe(totalBytes);
+    });
+
+    it("an observer that throws is disarmed and logged once; the copy still completes", async () => {
+      const logs = [];
+      let calls = 0;
+      const args = makeCopyArgs({
+        onProgress: () => {
+          calls += 1;
+          throw new Error("ticker exploded");
+        },
+        log: (line) => logs.push(line),
+      });
+      const result = await createOfflineCopy(args);
+      expect(result.ok).toBe(true);
+      expect(calls).toBe(1);
+      expect(logs.filter((line) => /progress observer threw \(ticker exploded\)/.test(line))).toHaveLength(1);
+    });
+
+    it("cancel-by-throw is untouched: a quiet barrier lost between steps still aborts the job through the hook, and no progress is reported after the abort", async () => {
+      const stateDir = makeStateDir();
+      growStateDb(stateDir);
+      let quiet = true;
+      let steps = 0;
+      const events = [];
+      const sqliteModule = steppingSqlite({
+        onStep: () => {
+          steps += 1;
+          if (steps === 2) quiet = false;
+        },
+      });
+      const args = makeCopyArgs({ stateDir, sqliteModule, isQuiet: () => quiet, onProgress: (event) => events.push({ ...event }) });
+
+      const error = await createOfflineCopy(args).catch((caught) => caught);
+
+      expect(error).toMatchObject({ stage: "quiet_lost", message: expect.stringMatching(/ended during sqlite_backup/) });
+      expect(error.orphanedBackup).toBeUndefined();
+      expect(steps).toBe(2);
+      // The abort landed in the database stage: the last reading is a
+      // sqlite_backup one (step 2's checkpoint threw BEFORE the observer ran,
+      // so it reported nothing), no later stage was ever reached, and the
+      // dead job reports nothing more.
+      const reported = events.length;
+      expect(reported).toBeGreaterThanOrEqual(2);
+      expect(events.at(-1).stage).toBe("sqlite_backup");
+      expect(events.some((event) => ["copy_assets", "archive", "verify"].includes(event.stage))).toBe(false);
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      expect(steps).toBe(2);
+      expect(events.length).toBe(reported);
+      expect(fs.readdirSync(args.backupsDir)).toEqual([]);
     });
   });
 });

@@ -219,6 +219,52 @@ describe("lib/server.js composition pins (lane C / lane A hand-offs)", () => {
     }
   });
 
+  it("createWatchdog receives the #76 A3 crash-cause seams (classifyGatewayCrash from gateway-crash-cause.js, readCrashFacts) and the restart-op record reads the watchdog's lastExit.cause", () => {
+    const start = serverSource.indexOf("const watchdog = createWatchdog({");
+    const block = serverSource.slice(start, serverSource.indexOf("\n});", start));
+    expect(block).toContain("classifyGatewayCrash,");
+    expect(block).toContain("readCrashFacts,");
+    expect(serverSource).toContain(
+      'const { classifyGatewayCrash } = require("./server/gateway-crash-cause");',
+    );
+    // The corroboration facts come from the channel service's tracked
+    // read-only DB reader + the installed tree's schema, never from stderr.
+    const factsStart = serverSource.indexOf("const readCrashFacts = async () => {");
+    expect(factsStart).toBeGreaterThan(-1);
+    const facts = serverSource.slice(factsStart, serverSource.indexOf("\n};", factsStart));
+    expect(facts).toContain("openclawChannelService.describeStateDbSchema()");
+    expect(facts).toContain("installedDiverged");
+    expect(facts).toContain("resolveExecApprovalsConfigPath");
+    const rrsStart = serverSource.indexOf("const restartRequiredState = createRestartRequiredState({");
+    const rrs = serverSource.slice(rrsStart, serverSource.indexOf("\n});", rrsStart));
+    expect(rrs).toContain("readLastExitCause:");
+    // routes/system.js feeds the gateway-state tracker's annotations from the
+    // same watchdog status snapshot the reducer reads (no extra I/O).
+    const systemSource = readSource("lib", "server", "routes", "system.js");
+    expect(systemSource).toContain("gatewayStateTracker.setCause?.(watchdogStatus?.lastExit?.cause ?? null);");
+    expect(systemSource).toContain(
+      "gatewayStateTracker.setVersionMismatch?.(watchdogStatus?.versionMismatch ?? null);",
+    );
+  });
+
+  it("createWatchdog receives the #76 C6 doctor-binary seams: clawCmdWithBin from commands.js and releaseChannelHooks.compatibleBinForCurrentDb from the channel service (runRepair never runs doctor from PATH under a latched mismatch)", () => {
+    const start = serverSource.indexOf("const watchdog = createWatchdog({");
+    expect(start).toBeGreaterThan(-1);
+    const block = serverSource.slice(start, serverSource.indexOf("\n});", start));
+    expect(block).toContain("clawCmdWithBin,");
+    expect(block).toContain(
+      "compatibleBinForCurrentDb: () => openclawChannelService.compatibleBinForCurrentDb(),",
+    );
+    // The same execFileCmd-backed primitive the capability probes use, from
+    // the one createCommands() instance lib/server.js builds.
+    expect(serverSource).toMatch(
+      /const \{[^}]*clawCmdWithBin,[^}]*\} =\s*createCommands\(/s,
+    );
+    const commandsSource = readSource("lib", "server", "commands.js");
+    expect(commandsSource).toContain("const clawCmdWithBin = async (");
+    expect(commandsSource).toMatch(/return \{[^}]*clawCmdWithBin,[^}]*\}/s);
+  });
+
   it("register-server-routes passes the outbox-backed notify into registerSystemRoutes (the incumbent-restart notification's carrier)", () => {
     const source = readSource("lib", "server", "init", "register-server-routes.js");
     const start = source.indexOf("registerSystemRoutes({");

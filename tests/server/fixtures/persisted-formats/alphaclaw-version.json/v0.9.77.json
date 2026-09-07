@@ -1,0 +1,12 @@
+{
+  "version": "0.9.77",
+  "commit": "a1b2c3d",
+  "firstBootAt": 1788681600000,
+  "lastBootAt": 1788685200000,
+  "bootCount": 2,
+  "previous": {
+    "version": "0.9.76",
+    "commit": "01d3b66",
+    "lastBootAt": 1788595200000
+  }
+}

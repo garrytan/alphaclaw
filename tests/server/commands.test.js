@@ -344,3 +344,313 @@ describe("server/commands", () => {
     }
   });
 });
+
+// Issue #76 C6: while the watchdog has a versionMismatch latched, the repair
+// doctor step and the capability probes must run the EXPECTED overlay's bin,
+// never whatever `openclaw` resolves to on PATH. clawCmdWithBin is clawCmd's
+// argv-form twin for that: `process.execPath [bin, ...args]`, caller env, same
+// result object.
+describe("server/commands clawCmdWithBin (#76 C6)", () => {
+  const fs = require("fs");
+  const os = require("os");
+  const path = require("path");
+  const kBin = "/opt/alphaclaw/openclaw-overlays/2026.9.2/bin/openclaw.js";
+  const originalExecFile = childProcess.execFile;
+
+  const loadWithExecFile = (execFileMock) => {
+    childProcess.execFile = execFileMock;
+    childProcess.exec = vi.fn(() => {
+      throw new Error("clawCmdWithBin must never reach the shell exec");
+    });
+    delete require.cache[modulePath];
+    return require(modulePath);
+  };
+
+  afterEach(() => {
+    childProcess.execFile = originalExecFile;
+    childProcess.exec = originalExec;
+    delete require.cache[modulePath];
+    vi.restoreAllMocks();
+  });
+
+  it("runs the bin under the CURRENT node as argv with the caller's env, and mirrors clawCmd's result shape — stderr survives on exit 0", async () => {
+    const execFileMock = vi.fn((file, args, opts, callback) =>
+      callback(null, "Usage: openclaw gateway stop [options]\n  --force\n", " deprecation warning \n"),
+    );
+    const { createCommands } = loadWithExecFile(execFileMock);
+    const { clawCmdWithBin } = createCommands({ gatewayEnv: () => ({ FROM: "gateway" }) });
+    const env = { OPENCLAW_STATE_DIR: "/data/openclaw", HOME: "/data" };
+
+    const result = await clawCmdWithBin(kBin, "gateway stop --help", {
+      quiet: true,
+      timeoutMs: 1234,
+      env,
+    });
+
+    expect(execFileMock).toHaveBeenCalledTimes(1);
+    const [file, args, opts] = execFileMock.mock.calls[0];
+    expect(file).toBe(process.execPath);
+    expect(args).toEqual([kBin, "gateway", "stop", "--help"]);
+    expect(opts).toEqual(
+      expect.objectContaining({ env, timeout: 1234, killSignal: "SIGTERM" }),
+    );
+    // The caller-supplied env is used verbatim — never merged with the
+    // gateway env (an UNVERIFIED candidate is probed under probeEnv()).
+    expect(opts.env).toBe(env);
+    // Same shape as clawCmd's success: ok + trimmed stdout/stderr (the help
+    // probes read `${stdout}\n${stderr}`, so stderr must not be dropped).
+    expect(result).toEqual({
+      ok: true,
+      stdout: "Usage: openclaw gateway stop [options]\n  --force",
+      stderr: "deprecation warning",
+    });
+    expect(childProcess.exec).not.toHaveBeenCalled();
+  });
+
+  it("defaults to clawCmd's 15s SIGTERM timeout and the gateway env when the caller supplies none", async () => {
+    const execFileMock = vi.fn((file, args, opts, callback) => callback(null, "", ""));
+    const { createCommands } = loadWithExecFile(execFileMock);
+    const gatewayEnvValue = { OPENCLAW_GATEWAY_TOKEN: "token", HOME: "/data" };
+    const { clawCmdWithBin } = createCommands({ gatewayEnv: () => gatewayEnvValue });
+
+    await clawCmdWithBin(kBin, "doctor --json", { quiet: true });
+
+    const [, , opts] = execFileMock.mock.calls[0];
+    expect(opts.timeout).toBe(15000);
+    expect(opts.killSignal).toBe("SIGTERM");
+    expect(opts.env).toBe(gatewayEnvValue);
+  });
+
+  it("reports a clean nonzero exit like clawCmd (code, killed:false, signal:null, timedOut:false) and logs the scrubbed stderr when not quiet", async () => {
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    const execFileMock = vi.fn((file, args, opts, callback) =>
+      callback(
+        Object.assign(new Error("Command failed"), { code: 2 }),
+        "",
+        "could not open http://127.0.0.1:18789/#token=leaky-shared-token\n",
+      ),
+    );
+    const { createCommands } = loadWithExecFile(execFileMock);
+    const { clawCmdWithBin } = createCommands({ gatewayEnv: () => ({}) });
+
+    const result = await clawCmdWithBin(kBin, "dashboard --no-open");
+
+    expect(result).toEqual({
+      ok: false,
+      stdout: "",
+      stderr: "could not open http://127.0.0.1:18789/#token=leaky-shared-token",
+      code: 2,
+      killed: false,
+      signal: null,
+      timedOut: false,
+    });
+    expect(logSpy).toHaveBeenCalledWith(
+      `[alphaclaw] Running: ${kBin} dashboard --no-open`,
+    );
+    const errorLines = logSpy.mock.calls
+      .map((call) => String(call[0]))
+      .filter((line) => line.startsWith("[alphaclaw] Error:"));
+    expect(errorLines).toHaveLength(1);
+    expect(errorLines[0]).toContain("#token=***");
+    expect(errorLines[0]).not.toContain("leaky-shared-token");
+  });
+
+  it("quiet suppresses both the Running and the Error log lines", async () => {
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    const execFileMock = vi.fn((file, args, opts, callback) =>
+      callback(Object.assign(new Error("fail"), { code: 1 }), "", "bad\n"),
+    );
+    const { createCommands } = loadWithExecFile(execFileMock);
+    const { clawCmdWithBin } = createCommands({ gatewayEnv: () => ({}) });
+
+    const result = await clawCmdWithBin(kBin, "bad command", { quiet: true });
+
+    expect(result.ok).toBe(false);
+    expect(logSpy).not.toHaveBeenCalled();
+  });
+
+  it("preserves timeout metadata (killed by the configured killSignal → timedOut) like clawCmd", async () => {
+    const execFileMock = vi.fn((file, args, opts, callback) =>
+      callback(
+        Object.assign(new Error("Command failed"), {
+          code: null,
+          killed: true,
+          signal: "SIGKILL",
+        }),
+        "",
+        "",
+      ),
+    );
+    const { createCommands } = loadWithExecFile(execFileMock);
+    const { clawCmdWithBin } = createCommands({ gatewayEnv: () => ({}) });
+
+    const result = await clawCmdWithBin(kBin, "nodes status --json", {
+      quiet: true,
+      timeoutMs: 50,
+      killSignal: "SIGKILL",
+    });
+
+    expect(execFileMock.mock.calls[0][2]).toEqual(
+      expect.objectContaining({ timeout: 50, killSignal: "SIGKILL" }),
+    );
+    expect(result).toMatchObject({
+      ok: false,
+      code: null,
+      killed: true,
+      signal: "SIGKILL",
+      timedOut: true,
+    });
+  });
+
+  it("splits the trusted command text without a shell (quotes group, nothing expands) and passes an argv array through untouched", async () => {
+    const execFileMock = vi.fn((file, args, opts, callback) => callback(null, "", ""));
+    const { createCommands } = loadWithExecFile(execFileMock);
+    const { clawCmdWithBin } = createCommands({ gatewayEnv: () => ({}) });
+
+    const payload = "a/b$(touch /tmp/pwn);rm -rf ~";
+    await clawCmdWithBin(kBin, `models set --name "two words" -- ${payload}`, {
+      quiet: true,
+    });
+    expect(execFileMock.mock.calls[0][1]).toEqual([
+      kBin,
+      "models",
+      "set",
+      "--name",
+      "two words",
+      "--",
+      "a/b$(touch",
+      "/tmp/pwn);rm",
+      "-rf",
+      "~",
+    ]);
+
+    await clawCmdWithBin(kBin, ["config", "get", "gateway.auth mode", "--json"], {
+      quiet: true,
+    });
+    expect(execFileMock.mock.calls[1][1]).toEqual([
+      kBin,
+      "config",
+      "get",
+      "gateway.auth mode",
+      "--json",
+    ]);
+    expect(childProcess.exec).not.toHaveBeenCalled();
+  });
+
+  it("rejects a missing bin path instead of silently falling back to PATH openclaw", async () => {
+    const execFileMock = vi.fn();
+    const { createCommands } = loadWithExecFile(execFileMock);
+    const { clawCmdWithBin } = createCommands({ gatewayEnv: () => ({}) });
+
+    await expect(clawCmdWithBin("", "gateway stop --help")).rejects.toThrow(TypeError);
+    await expect(clawCmdWithBin(null, "gateway stop --help")).rejects.toThrow(
+      /requires a bin path/,
+    );
+    expect(execFileMock).not.toHaveBeenCalled();
+  });
+
+  it("really executes a JS bin under process.execPath with ONLY the supplied env (no shebang, no +x needed)", async () => {
+    // Real spawn, hermetic: a throwaway "bin" in a private tmpdir echoes what
+    // it received. No mocks — the original child_process.execFile.
+    delete require.cache[modulePath];
+    const { createCommands } = require(modulePath);
+    const { clawCmdWithBin } = createCommands({
+      gatewayEnv: () => {
+        throw new Error("gatewayEnv must not be consulted when env is supplied");
+      },
+    });
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "alphaclaw-clawcmd-bin-"));
+    try {
+      const bin = path.join(dir, "openclaw.js");
+      // Deliberately NOT executable and without a shebang: the node runner is
+      // what makes it runnable, exactly as for an overlay's bin.
+      fs.writeFileSync(
+        bin,
+        [
+          "process.stdout.write(JSON.stringify({",
+          "  argv: process.argv.slice(2),",
+          "  marker: process.env.ALPHACLAW_TEST_MARKER ?? null,",
+          "  leaked: Object.keys(process.env).filter((k) => k.startsWith('ALPHACLAW_TEST_LEAK')),",
+          "}));",
+          "process.stderr.write('warned\\n');",
+          "process.exit(Number(process.env.ALPHACLAW_TEST_EXIT || 0));",
+        ].join("\n"),
+        { mode: 0o644 },
+      );
+      const env = { ALPHACLAW_TEST_MARKER: "m1", ALPHACLAW_TEST_EXIT: "0" };
+      process.env.ALPHACLAW_TEST_LEAK_PARENT = "1";
+      try {
+        const ok = await clawCmdWithBin(bin, "gateway stop --help", {
+          quiet: true,
+          env,
+          timeoutMs: 20000,
+        });
+        expect(ok.ok).toBe(true);
+        expect(ok.stderr).toBe("warned");
+        expect(JSON.parse(ok.stdout)).toEqual({
+          argv: ["gateway", "stop", "--help"],
+          marker: "m1",
+          leaked: [],
+        });
+
+        const failed = await clawCmdWithBin(bin, ["doctor", "--json"], {
+          quiet: true,
+          env: { ...env, ALPHACLAW_TEST_EXIT: "3" },
+          timeoutMs: 20000,
+        });
+        expect(failed).toMatchObject({
+          ok: false,
+          code: 3,
+          killed: false,
+          signal: null,
+          timedOut: false,
+          stderr: "warned",
+        });
+        expect(JSON.parse(failed.stdout).argv).toEqual(["doctor", "--json"]);
+      } finally {
+        delete process.env.ALPHACLAW_TEST_LEAK_PARENT;
+      }
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // execFileCmd now shares the argv primitive with clawCmdWithBin; its
+  // rejection contract (Error with trimmed stdout/stderr attached) is pinned
+  // so the refactor cannot regress the callers that catch it.
+  it("execFileCmd still rejects with trimmed stdout/stderr attached to the error", async () => {
+    const execFileMock = vi.fn((file, args, opts, callback) =>
+      callback(Object.assign(new Error("boom"), { code: 7 }), ' {"ok":false} \n', " nope \n"),
+    );
+    const { createCommands } = loadWithExecFile(execFileMock);
+    const { execFileCmd } = createCommands({ gatewayEnv: () => ({}) });
+
+    await expect(execFileCmd("openclaw", ["models", "list"], { timeoutMs: 999 })).rejects.toMatchObject({
+      message: "boom",
+      code: 7,
+      stdout: '{"ok":false}',
+      stderr: "nope",
+    });
+    expect(execFileMock.mock.calls[0][2]).toEqual(
+      expect.objectContaining({ timeout: 999 }),
+    );
+  });
+
+  describe("splitCommandLine", () => {
+    const { splitCommandLine } = require("../../lib/server/commands");
+
+    it.each([
+      ["gateway stop --help", ["gateway", "stop", "--help"]],
+      ["  leading   and  trailing  ", ["leading", "and", "trailing"]],
+      ['config set a "two words" \'single quoted\'', ["config", "set", "a", "two words", "single quoted"]],
+      ['--name="glued value" tail', ["--name=glued value", "tail"]],
+      ['"" empty-arg-kept', ["", "empty-arg-kept"]],
+      ["$HOME `id` ; && || > out", ["$HOME", "`id`", ";", "&&", "||", ">", "out"]],
+      ['unterminated "runs to end', ["unterminated", "runs to end"]],
+      ["", []],
+      [null, []],
+    ])("splits %j", (input, expected) => {
+      expect(splitCommandLine(input)).toEqual(expected);
+    });
+  });
+});

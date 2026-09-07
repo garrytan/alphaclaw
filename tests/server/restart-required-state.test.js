@@ -384,6 +384,139 @@ describe("server/restart-required-state (operation lifecycle)", () => {
   });
 });
 
+describe("server/restart-required-state (state DB schema stamp, #76 A2)", () => {
+  const flushAsync = async () => {
+    for (let index = 0; index < 3; index += 1) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+  };
+
+  it("beginRestart reads the schema ONCE at request time; completeRestart's record carries stateDb and it survives a reload", async () => {
+    const stateDir = makeStateDir();
+    const readStateDbVersions = vi.fn(async () => ({
+      userVersion: 15,
+      agentUserVersions: [19, 19, "junk"],
+      entries: [{ path: "/x" }],
+    }));
+    const storeA = createRestartRequiredState({
+      isGatewayRunning: async () => true,
+      flagStore: nullFlagStore(),
+      stateDir,
+      readStateDbVersions,
+    });
+
+    const { operationId } = storeA.beginRestart();
+    // Synchronous contract for the route: the read is detached.
+    expect(readStateDbVersions).toHaveBeenCalledTimes(1);
+    await flushAsync();
+    expect(storeA.getActiveRestartOperation()).toMatchObject({
+      operationId,
+      stateDb: { userVersion: 15, agentUserVersions: [19, 19] },
+    });
+
+    const record = storeA.completeRestart({ operationId, ok: true });
+    expect(record).toMatchObject({
+      status: "succeeded",
+      stateDb: { userVersion: 15, agentUserVersions: [19, 19] },
+    });
+    // Never re-read on complete or on status reads: request time only.
+    await storeA.getSnapshot();
+    expect(readStateDbVersions).toHaveBeenCalledTimes(1);
+
+    const storeB = createRestartRequiredState({
+      isGatewayRunning: async () => true,
+      flagStore: nullFlagStore(),
+      stateDir,
+    });
+    expect(storeB.getLastRestartOperation()).toMatchObject({
+      operationId,
+      stateDb: { userVersion: 15, agentUserVersions: [19, 19] },
+    });
+  });
+
+  it("a slow read that resolves after completion still stamps THAT operation, never a newer one", async () => {
+    let resolveRead;
+    const readStateDbVersions = vi.fn(
+      () =>
+        new Promise((resolve) => {
+          resolveRead = resolve;
+        }),
+    );
+    const store = makeStore({ readStateDbVersions });
+
+    const first = store.beginRestart();
+    store.completeRestart({ operationId: first.operationId, ok: false, errorSummary: "x" });
+    expect(store.getLastRestartOperation().stateDb).toBeUndefined();
+    resolveRead({ userVersion: 14, agentUserVersions: [] });
+    await flushAsync();
+    // Completed, but the same operation: evidence lands.
+    expect(store.getLastRestartOperation()).toMatchObject({
+      operationId: first.operationId,
+      stateDb: { userVersion: 14, agentUserVersions: [] },
+    });
+
+    // A read that outlives its operation must not stamp the successor.
+    const second = store.beginRestart();
+    const pendingResolve = resolveRead;
+    store.completeRestart({ operationId: second.operationId, ok: true });
+    const third = store.beginRestart();
+    pendingResolve({ userVersion: 99, agentUserVersions: [99] });
+    await flushAsync();
+    expect(store.getActiveRestartOperation()).toMatchObject({ operationId: third.operationId });
+    expect(store.getActiveRestartOperation().stateDb).toBeUndefined();
+  });
+
+  it("a missing, throwing, rejecting or empty reader leaves the record without stateDb (never a throw out of beginRestart)", async () => {
+    for (const readStateDbVersions of [
+      undefined,
+      vi.fn(() => {
+        throw new Error("sync boom");
+      }),
+      vi.fn(async () => {
+        throw new Error("async boom");
+      }),
+      vi.fn(async () => null),
+      vi.fn(async () => ({ userVersion: "15", agentUserVersions: "19" })),
+    ]) {
+      const store = makeStore(readStateDbVersions ? { readStateDbVersions } : {});
+      const { operationId } = store.beginRestart();
+      await flushAsync();
+      const record = store.completeRestart({ operationId, ok: true });
+      expect(record.stateDb).toBeUndefined();
+      expect(store.getLastRestartOperation().stateDb).toBeUndefined();
+    }
+  });
+
+  it("reload guards stateDb against corrupted files: non-object or non-integer values are dropped, integers kept", () => {
+    const stateDir = makeStateDir();
+    const operationPath = path.join(stateDir, "alphaclaw-restart-operation.json");
+    const base = {
+      operationId: "op-1",
+      kind: "gateway_restart",
+      startedAt: 1,
+      bootId: "boot-A",
+      expiresAt: 2,
+      status: "failed",
+      lastStep: null,
+      errorSummary: "boom",
+      completedAt: 3,
+      reasonsSnapshot: [],
+    };
+    // A logical clock just past completedAt keeps the record inside retention.
+    const reload = () => makeStore({ stateDir, now: () => 10 });
+    fs.writeFileSync(operationPath, JSON.stringify({ ...base, stateDb: "garbage" }));
+    expect(reload().getLastRestartOperation().stateDb).toBeUndefined();
+    fs.writeFileSync(
+      operationPath,
+      JSON.stringify({ ...base, stateDb: { userVersion: 15.5, agentUserVersions: [19, -1, null, 20] } }),
+    );
+    expect(reload().getLastRestartOperation().stateDb).toEqual({
+      userVersion: null,
+      agentUserVersions: [19, 20],
+    });
+  });
+});
+
 describe("server/restart-required-state (boot reconciliation)", () => {
   it("closes a running record from another boot as interrupted", () => {
     const stateDir = makeStateDir();
@@ -682,5 +815,93 @@ describe("server/restart-required-state (boot reconciliation)", () => {
     });
     storeB.reconcileOnBoot();
     expect(storeB.getLastRestartOperation()).toBeNull();
+  });
+});
+
+describe("server/restart-required-state (crash cause on the record, #76 A3)", () => {
+  it("a FAILED restart reads the watchdog's lastExit.cause once at completion and the cause survives a reload", () => {
+    const stateDir = makeStateDir();
+    const readLastExitCause = vi.fn(() => "state_schema_too_new");
+    const storeA = createRestartRequiredState({
+      isGatewayRunning: async () => true,
+      flagStore: nullFlagStore(),
+      stateDir,
+      readLastExitCause,
+    });
+    const { operationId } = storeA.beginRestart();
+    expect(readLastExitCause).not.toHaveBeenCalled();
+    const record = storeA.completeRestart({ operationId, ok: false, errorSummary: "boom" });
+    expect(readLastExitCause).toHaveBeenCalledTimes(1);
+    expect(record).toMatchObject({ status: "failed", cause: "state_schema_too_new" });
+
+    const storeB = createRestartRequiredState({
+      isGatewayRunning: async () => true,
+      flagStore: nullFlagStore(),
+      stateDir,
+    });
+    expect(storeB.getLastRestartOperation()).toMatchObject({
+      operationId,
+      cause: "state_schema_too_new",
+    });
+  });
+
+  it("a succeeded restart and a policy refusal never consult the reader and carry no cause", () => {
+    const readLastExitCause = vi.fn(() => "oom");
+    const store = makeStore({ readLastExitCause });
+    const ok = store.beginRestart();
+    const done = store.completeRestart({ operationId: ok.operationId, ok: true });
+    expect(done).not.toHaveProperty("cause");
+    const refused = store.beginRestart();
+    const closed = store.completeRestart({
+      operationId: refused.operationId,
+      ok: false,
+      errorSummary: "held",
+      code: "gateway_held",
+    });
+    expect(closed).not.toHaveProperty("cause");
+    expect(readLastExitCause).not.toHaveBeenCalled();
+  });
+
+  it("an explicit cause wins over the reader; a missing, throwing or empty reader leaves the record without one", () => {
+    const store = makeStore({
+      readLastExitCause: () => {
+        throw new Error("no watchdog yet");
+      },
+    });
+    const first = store.beginRestart();
+    expect(
+      store.completeRestart({ operationId: first.operationId, ok: false, errorSummary: "x", cause: "legacy_exec_approvals" }),
+    ).toMatchObject({ cause: "legacy_exec_approvals" });
+    const second = store.beginRestart();
+    expect(
+      store.completeRestart({ operationId: second.operationId, ok: false, errorSummary: "x" }),
+    ).not.toHaveProperty("cause");
+    const storeEmpty = makeStore({ readLastExitCause: () => null });
+    const third = storeEmpty.beginRestart();
+    expect(
+      storeEmpty.completeRestart({ operationId: third.operationId, ok: false, errorSummary: "x" }),
+    ).not.toHaveProperty("cause");
+    const storeNone = makeStore();
+    const fourth = storeNone.beginRestart();
+    expect(
+      storeNone.completeRestart({ operationId: fourth.operationId, ok: false, errorSummary: "x" }),
+    ).not.toHaveProperty("cause");
+  });
+
+  it("reload guards cause against corrupted files: non-string dropped, overlong string capped at 64 chars", () => {
+    const stateDir = makeStateDir();
+    const store = makeStore({ stateDir });
+    const { operationId } = store.beginRestart();
+    store.completeRestart({ operationId, ok: false, errorSummary: "boom", cause: "x".repeat(200) });
+    const filePath = path.join(stateDir, "alphaclaw-restart-operation.json");
+    const persisted = JSON.parse(fs.readFileSync(filePath, "utf8"));
+    expect(persisted.cause).toHaveLength(64);
+    fs.writeFileSync(filePath, JSON.stringify({ ...persisted, cause: { nested: true } }));
+    const reloaded = createRestartRequiredState({
+      isGatewayRunning: async () => true,
+      flagStore: nullFlagStore(),
+      stateDir,
+    });
+    expect(reloaded.getLastRestartOperation()).not.toHaveProperty("cause");
   });
 });

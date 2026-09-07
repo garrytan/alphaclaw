@@ -6,6 +6,16 @@ const path = require("path");
 
 const binPath = path.resolve(__dirname, "../../bin/alphaclaw.js");
 
+// HOME/XDG pinned INTO the temp root for EVERY bin spawn: the bin's section 3
+// symlinks ~/.openclaw -> <root>/.openclaw, so an unpinned spawn leaves a
+// dangling symlink in the developer's real home (vitest debris, 2026-09-07).
+const childEnv = (rootDir) => ({
+  ...process.env,
+  ALPHACLAW_ROOT_DIR: rootDir,
+  HOME: rootDir,
+  XDG_CONFIG_HOME: path.join(rootDir, ".config"),
+});
+
 const loadDoctorDb = () => {
   const modulePath = require.resolve("../../lib/server/db/doctor");
   delete require.cache[modulePath];
@@ -72,7 +82,7 @@ describe("alphaclaw doctor finding complete", () => {
         "--token",
         token,
       ],
-      { encoding: "utf8", env: { ...process.env, ALPHACLAW_ROOT_DIR: rootDir } },
+      { encoding: "utf8", env: childEnv(rootDir) },
     );
 
     expect(output).toContain(`Doctor finding ${card.id} marked fixed`);
@@ -98,7 +108,7 @@ describe("alphaclaw doctor finding complete", () => {
           "--token",
           token,
         ],
-        { stdio: "pipe", env: { ...process.env, ALPHACLAW_ROOT_DIR: rootDir } },
+        { stdio: "pipe", env: childEnv(rootDir) },
       ),
     ).toThrow();
   });

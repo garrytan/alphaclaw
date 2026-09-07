@@ -1002,4 +1002,305 @@ describe("server/gateway-medic", () => {
       ai: { available: false, reason: "no_api_key" },
     });
   });
+  // #76 C6 / Codex 8 — which binary runs the medic's doctor_fix remedy. The
+  // watchdog's runRepair gained this seam in Stage 3; the medic is the other
+  // `doctor --fix` trigger on an EX_CONFIG exit and could still run it from
+  // the diverged `openclaw` on PATH before the watchdog latched a mismatch.
+  describe("doctor_fix binary routing (resolveDoctorBin)", () => {
+    const kDivergedInfo = {
+      installedDiverged: true,
+      installedVersion: "2026.7.1-2",
+      expectedVersion: "2026.9.1-beta.1",
+    };
+    const kOverlayBin = {
+      bin: "/data/.openclaw/managed/overlays/2026.9.1-beta.1/node_modules/openclaw/openclaw.mjs",
+      version: "2026.9.1-beta.1",
+      source: "overlay",
+      compatible: null,
+      reasons: [],
+    };
+
+    it("runs doctor --fix through the resolved DB-compatible bin on a diverged tree, naming the build", async () => {
+      const openclawDir = mkOpenclawDir();
+      writeConfig(openclawDir, { audit: { legacy: true } });
+      const runDoctorFix = vi.fn(async () => ({ ok: true }));
+      const resolveDoctorBin = vi.fn(async () => kOverlayBin);
+      const medic = createMedic(openclawDir, {
+        runDoctorFix,
+        resolveDoctorBin,
+        getChannelInfo: () => kDivergedInfo,
+      });
+
+      const outcome = await medic.run({
+        exitCode: 78,
+        stderrTail: ['Unrecognized key: "audit"'],
+        allowDoctorFix: true,
+        budgetMs: 120_000,
+      });
+
+      expect(resolveDoctorBin).toHaveBeenCalledTimes(1);
+      expect(runDoctorFix).toHaveBeenCalledTimes(1);
+      const [call] = runDoctorFix.mock.calls[0];
+      expect(call.bin).toBe(kOverlayBin.bin);
+      expect(call.timeoutMs).toBeGreaterThan(0);
+      expect(call.timeoutMs).toBeLessThanOrEqual(120_000);
+      expect(outcome).toMatchObject({
+        fixed: true,
+        tier: "doctor_fix",
+        doctorBin: { version: "2026.9.1-beta.1", source: "overlay" },
+      });
+      // The action line reaches the operator's auto-repaired notification.
+      expect(outcome.actions).toEqual([
+        "ran openclaw doctor --fix --yes from the overlay build 2026.9.1-beta.1",
+      ]);
+      expect(listMedicBackups(openclawDir)).toHaveLength(1);
+    });
+
+    it("skips the remedy as version_mismatch when the tree is diverged and nothing resolves — no doctor, no backup, no config write", async () => {
+      const openclawDir = mkOpenclawDir();
+      writeConfig(openclawDir, { gateway: { port: 18789 } });
+      const rawBefore = fs.readFileSync(path.join(openclawDir, "openclaw.json"), "utf8");
+      const runDoctorFix = vi.fn(async () => ({ ok: true }));
+      const resolveDoctorBin = vi.fn(async () => null);
+      const medic = createMedic(openclawDir, {
+        runDoctorFix,
+        resolveDoctorBin,
+        getChannelInfo: () => kDivergedInfo,
+      });
+
+      // No blamed key: nothing for the deterministic strip to backstop with,
+      // so the doctor skip IS the run's outcome.
+      const outcome = await medic.run({
+        exitCode: 78,
+        stderrTail: [],
+        allowDoctorFix: true,
+      });
+
+      expect(resolveDoctorBin).toHaveBeenCalledTimes(1);
+      expect(runDoctorFix).not.toHaveBeenCalled();
+      expect(outcome).toMatchObject({
+        fixed: false,
+        tier: "none",
+        skipped: true,
+        reason: "version_mismatch",
+        running: "2026.7.1-2",
+        expected: "2026.9.1-beta.1",
+      });
+      // The watchdog's medic ledger row forwards only `error`: the code and
+      // both versions must be legible there.
+      expect(outcome.error).toContain("version_mismatch");
+      expect(outcome.error).toContain("2026.7.1-2");
+      expect(outcome.error).toContain("2026.9.1-beta.1");
+      expect(fs.readFileSync(path.join(openclawDir, "openclaw.json"), "utf8")).toBe(rawBefore);
+      expect(listMedicBackups(openclawDir)).toHaveLength(0);
+    });
+
+    it("treats a throwing resolver on a diverged tree as nothing resolved (skip, error named) — never a guess from PATH", async () => {
+      const openclawDir = mkOpenclawDir();
+      writeConfig(openclawDir, { gateway: { port: 18789 } });
+      const runDoctorFix = vi.fn(async () => ({ ok: true }));
+      const medic = createMedic(openclawDir, {
+        runDoctorFix,
+        resolveDoctorBin: async () => {
+          throw new Error("state file unreadable");
+        },
+        getChannelInfo: () => kDivergedInfo,
+      });
+
+      const outcome = await medic.run({
+        exitCode: 78,
+        stderrTail: [],
+        allowDoctorFix: true,
+      });
+
+      expect(runDoctorFix).not.toHaveBeenCalled();
+      expect(outcome).toMatchObject({
+        fixed: false,
+        skipped: true,
+        reason: "version_mismatch",
+      });
+      expect(outcome.error).toContain("state file unreadable");
+      expect(listMedicBackups(openclawDir)).toHaveLength(0);
+    });
+
+    it("the deterministic blamed-key strip still backstops a version_mismatch skip", async () => {
+      const openclawDir = mkOpenclawDir();
+      writeConfig(openclawDir, { audit: { legacy: true } });
+      const runDoctorFix = vi.fn(async () => ({ ok: true }));
+      const medic = createMedic(openclawDir, {
+        runDoctorFix,
+        resolveDoctorBin: async () => null,
+        getChannelInfo: () => kDivergedInfo,
+      });
+
+      const outcome = await medic.run({
+        exitCode: 78,
+        stderrTail: ['Unrecognized key: "audit"'],
+        allowDoctorFix: true,
+      });
+
+      expect(runDoctorFix).not.toHaveBeenCalled();
+      expect(outcome).toMatchObject({
+        fixed: true,
+        tier: "blamed_key_strip",
+        note: "after doctor --fix was skipped (version_mismatch)",
+      });
+      expect(readConfig(openclawDir).audit).toBeUndefined();
+    });
+
+    it("never consults the resolver on a non-diverged tree: today's PATH invocation (bin null) is unchanged", async () => {
+      const openclawDir = mkOpenclawDir();
+      writeConfig(openclawDir, { audit: { legacy: true } });
+      const runDoctorFix = vi.fn(async () => ({ ok: true }));
+      const resolveDoctorBin = vi.fn(async () => kOverlayBin);
+      const medic = createMedic(openclawDir, {
+        runDoctorFix,
+        resolveDoctorBin,
+        getChannelInfo: () => ({
+          installedDiverged: false,
+          installedVersion: "2026.9.2",
+          expectedVersion: "2026.9.2",
+        }),
+      });
+
+      const outcome = await medic.run({
+        exitCode: 78,
+        stderrTail: ['Unrecognized key: "audit"'],
+        allowDoctorFix: true,
+      });
+
+      expect(resolveDoctorBin).not.toHaveBeenCalled();
+      expect(runDoctorFix).toHaveBeenCalledTimes(1);
+      expect(runDoctorFix.mock.calls[0][0].bin).toBeNull();
+      expect(outcome).toMatchObject({ fixed: true, tier: "doctor_fix" });
+      expect(outcome.actions).toEqual(["ran openclaw doctor --fix --yes"]);
+      expect(outcome.doctorBin).toBeUndefined();
+    });
+
+    it("falls back to today's behaviour when no resolver is wired, even on a diverged tree", async () => {
+      const openclawDir = mkOpenclawDir();
+      writeConfig(openclawDir, { audit: { legacy: true } });
+      const runDoctorFix = vi.fn(async () => ({ ok: true }));
+      const medic = createMedic(openclawDir, {
+        runDoctorFix,
+        getChannelInfo: () => kDivergedInfo,
+      });
+
+      const outcome = await medic.run({
+        exitCode: 78,
+        stderrTail: ['Unrecognized key: "audit"'],
+        allowDoctorFix: true,
+      });
+
+      expect(runDoctorFix).toHaveBeenCalledTimes(1);
+      expect(runDoctorFix.mock.calls[0][0].bin).toBeNull();
+      expect(outcome).toMatchObject({ fixed: true, tier: "doctor_fix" });
+    });
+
+    it("the AI tier's doctor_fix pick is routed the same way: skipped version_mismatch with the model's diagnosis kept", async () => {
+      const openclawDir = mkOpenclawDir();
+      writeConfig(openclawDir, { gateway: { port: 18789 } });
+      const runDoctorFix = vi.fn(async () => ({ ok: true }));
+      const medic = createMedic(openclawDir, {
+        llmClient: {
+          getAvailability: () => ({ available: true, provider: "anthropic", model: "m" }),
+          complete: vi.fn(async () => ({
+            ok: true,
+            provider: "anthropic",
+            model: "m",
+            text: JSON.stringify({
+              diagnosis: "Schema drift; let doctor repair it.",
+              remedy: "doctor_fix",
+              confidence: "high",
+            }),
+          })),
+        },
+        runDoctorFix,
+        resolveDoctorBin: async () => null,
+        getChannelInfo: () => kDivergedInfo,
+      });
+
+      const outcome = await medic.run({
+        exitCode: 78,
+        stderrTail: [],
+        allowDoctorFix: true,
+      });
+
+      expect(runDoctorFix).not.toHaveBeenCalled();
+      expect(outcome).toMatchObject({
+        fixed: false,
+        skipped: true,
+        reason: "version_mismatch",
+        model: "anthropic/m",
+        diagnosis: "Schema drift; let doctor repair it.",
+      });
+      expect(listMedicBackups(openclawDir)).toHaveLength(0);
+    });
+
+    it("the AI tier's doctor_fix pick runs through the resolved bin on a diverged tree", async () => {
+      const openclawDir = mkOpenclawDir();
+      writeConfig(openclawDir, { gateway: { port: 18789 } });
+      const runDoctorFix = vi.fn(async () => ({ ok: true }));
+      const medic = createMedic(openclawDir, {
+        llmClient: {
+          getAvailability: () => ({ available: true, provider: "anthropic", model: "m" }),
+          complete: vi.fn(async () => ({
+            ok: true,
+            provider: "anthropic",
+            model: "m",
+            text: JSON.stringify({ diagnosis: "d", remedy: "doctor_fix", confidence: "high" }),
+          })),
+        },
+        runDoctorFix,
+        resolveDoctorBin: async () => kOverlayBin,
+        getChannelInfo: () => kDivergedInfo,
+      });
+
+      const outcome = await medic.run({
+        exitCode: 78,
+        stderrTail: [],
+        allowDoctorFix: true,
+      });
+
+      expect(runDoctorFix).toHaveBeenCalledTimes(1);
+      expect(runDoctorFix.mock.calls[0][0].bin).toBe(kOverlayBin.bin);
+      expect(outcome).toMatchObject({
+        fixed: true,
+        tier: "ai_doctor_fix",
+        model: "anthropic/m",
+        doctorBin: { version: "2026.9.1-beta.1", source: "overlay" },
+      });
+    });
+
+    // Composition pin (the server-wiring-gateway-seams.test.js idiom):
+    // lib/server.js boots the process on require, so the wiring is asserted
+    // at the source level — the medic and the watchdog's runRepair share ONE
+    // resolver, and the streamed runner both feed accepts the `bin`.
+    it("lib/server.js wires resolveDoctorBin to the channel service's compatibleBinForCurrentDb — the same hook the watchdog's runRepair uses — over the streamed runner that takes a bin", () => {
+      const kRepoRoot = path.join(__dirname, "..", "..");
+      const serverSource = fs.readFileSync(path.join(kRepoRoot, "lib", "server.js"), "utf8");
+      const start = serverSource.indexOf("const gatewayMedic = createGatewayMedic({");
+      expect(start).toBeGreaterThan(-1);
+      const block = serverSource.slice(start, serverSource.indexOf("\n});", start));
+      expect(block).toContain("runDoctorFix: runStreamedDoctorFix,");
+      expect(block).toContain(
+        "resolveDoctorBin: () => openclawChannelService.compatibleBinForCurrentDb(),",
+      );
+      const watchdogStart = serverSource.indexOf("const watchdog = createWatchdog({");
+      expect(watchdogStart).toBeGreaterThan(-1);
+      const watchdogBlock = serverSource.slice(
+        watchdogStart,
+        serverSource.indexOf("\n});", watchdogStart),
+      );
+      expect(watchdogBlock).toContain(
+        "compatibleBinForCurrentDb: () => openclawChannelService.compatibleBinForCurrentDb(),",
+      );
+      const runnerSource = fs.readFileSync(
+        path.join(kRepoRoot, "lib", "server", "doctor-fix-runner.js"),
+        "utf8",
+      );
+      expect(runnerSource).toMatch(/runStreamedDoctorFix = async \(\{[^}]*bin = null/s);
+    });
+  });
+
 });
