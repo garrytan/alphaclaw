@@ -183,8 +183,13 @@ the pause. Kill switch: `OPENCLAW_STATE_DB_QUIET=off` (deployment env only)
 — the barrier then no-ops and the offline copy records `quiet: "disabled"`
 in its evidence.
 
-**Still failing?** `offline_copy_refused` means another process holds a
-state database open (the 409 names the pid); stop it and retry. A
+**Still failing?** `offline_copy_refused` on the run record
+(`backup.offlineCopy.stage: "exclusivity"`, `attemptsDetail[0].kind`) means
+another process held a state database open while the gateway was paused —
+the record and the failure message name its `pid (argv)`. Since the
+copy-first ladder (#79) a refusal is never terminal on its own: the ladder
+fell through to the live upstream attempt, so the 409 you see names THAT
+failure first and the refusal after it; stop the holder and retry. A
 `spawn_error` means the backup CLI never ran (PATH/permissions). Repeated
 `lock_contention` with nothing else on the box points at the hypothesis
 below.
@@ -340,10 +345,12 @@ accepts).
 
 ## Reusing a recent backup (consent)
 
-**What it means:** the fresh backup ladder (quiesced retries → offline copy
-→ live ladder) failed with a *retryable-class* cause (`lock_contention`,
-`killed`, `timeout`, `vanished_file`, `offline_copy_refused`,
-`window_exhausted`) on a hard gate, but a verified, non-partial archive from
+**What it means:** the fresh backup ladder (offline copy first → in-quiesce
+upstream attempts when predicted to fit → live ladder) failed with a
+*retryable-class* cause (`lock_contention`, `killed`, `timeout`,
+`vanished_file`, `window_exhausted`; a refused copy hands over to the live
+ladder rather than ending it, so `offline_copy_refused` is never the cause
+an offer follows) on a hard gate, but a verified, non-partial archive from
 the last 24 h exists and nothing has been applied, activated or migrated
 since it was taken. The `409 backup_failed` then carries
 `reusableBackup: { file, at, ageMs, sha256, producer }` and the Upgrade tab

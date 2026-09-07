@@ -452,8 +452,9 @@ describe("server/startup", () => {
     expect(getBootPhase()).toEqual({ phase: "ready", error: null });
   });
 
-  // ── #76 boot order: closers → report → reconcileInstalled → compat gate →
-  // ensure steps → reconcileBootConfig → finalizeBootReport → startGateway ──
+  // ── #76 boot order: closers → backup-debris sweep (#79 (g)) → report →
+  // reconcileInstalled → compat gate → ensure steps → reconcileBootConfig →
+  // finalizeBootReport → startGateway ──
   const mkOrderedDeps = (callOrder, overrides = {}) => {
     const step = (name, ret) =>
       vi.fn(async () => {
@@ -470,6 +471,13 @@ describe("server/startup", () => {
         closedLastUpdateRun: false,
       }),
       reconcileRestartOperationAtBoot: step("reconcileRestartOperationAtBoot"),
+      sweepBackupDebrisAtBoot: step("sweepBackupDebrisAtBoot", {
+        mode: "boot",
+        removed: [],
+        removedBytes: 0,
+        kept: [],
+        errors: [],
+      }),
       recordBootReportServerPhase: step("recordBootReportServerPhase", { serverPhase: {} }),
       reconcileInstalledAtBoot: step("reconcileInstalledAtBoot", { ok: true }),
       assessLaunchCompatibilityAtBoot: step("assessLaunchCompatibilityAtBoot", {
@@ -503,7 +511,7 @@ describe("server/startup", () => {
     });
   };
 
-  it("runs the #76 boot steps in the fixed order: closers → report → reconcileInstalled → compat gate → ensure steps → reconcileBootConfig → finalizeBootReport → startGateway", async () => {
+  it("runs the #76/#79 boot steps in the fixed order: closers → backup-debris sweep → report → reconcileInstalled → compat gate → ensure steps → reconcileBootConfig → finalizeBootReport → startGateway", async () => {
     const callOrder = [];
     const deps = mkOrderedDeps(callOrder);
 
@@ -512,10 +520,13 @@ describe("server/startup", () => {
     // Strict: Stage 3 fills reconcileInstalled / the compat gate in; the
     // ORDER is the contract (no doctor --fix from a wrong binary, no launch
     // before the verdict, the report finalized on every reconcile outcome).
+    // The debris sweep (#79 (g), Codex 18) sits right after the closers:
+    // under the boot lock, before anything that could spawn a backup.
     expect(callOrder).toEqual([
       "reportLockContentionAtBoot",
       "closeDanglingRecordsAtBoot",
       "reconcileRestartOperationAtBoot",
+      "sweepBackupDebrisAtBoot",
       "recordBootReportServerPhase",
       "reconcileInstalledAtBoot",
       "assessLaunchCompatibilityAtBoot",
@@ -534,6 +545,44 @@ describe("server/startup", () => {
       "watchdog.start",
       "gmailWatchService.start",
     ]);
+    expect(getBootPhase()).toEqual({ phase: "ready", error: null });
+  });
+
+  it("runs the backup-debris sweep SYNCHRONOUSLY under the boot lifecycle lock, after both closers and before startGateway — never in a post-boot timer (#79 (g), Codex 18)", async () => {
+    const callOrder = [];
+    const release = vi.fn(() => callOrder.push("release"));
+    const acquireLifecycleLock = vi.fn(async () => {
+      callOrder.push("acquireLock");
+      return release;
+    });
+    const observed = {};
+    const deps = mkOrderedDeps(callOrder, {
+      acquireLifecycleLock,
+      sweepBackupDebrisAtBoot: vi.fn(async () => {
+        callOrder.push("sweepBackupDebrisAtBoot");
+        // Snapshot the world at sweep time: the lock is held (acquired, not
+        // released), the gateway has not been launched, both closers ran.
+        observed.lockHeld = acquireLifecycleLock.mock.calls.length === 1 && release.mock.calls.length === 0;
+        observed.gatewayStarted = deps.startGateway.mock.calls.length;
+        observed.closersDone = [
+          deps.closeDanglingRecordsAtBoot.mock.calls.length,
+          deps.reconcileRestartOperationAtBoot.mock.calls.length,
+        ];
+        return { mode: "boot", removed: [{ name: "x.tmp", bytes: 1, why: "boot" }] };
+      }),
+    });
+
+    await runOnboardedBootSequence(deps);
+
+    expect(observed).toEqual({ lockHeld: true, gatewayStarted: 0, closersDone: [1, 1] });
+    expect(callOrder.indexOf("acquireLock")).toBeLessThan(callOrder.indexOf("sweepBackupDebrisAtBoot"));
+    expect(callOrder.indexOf("sweepBackupDebrisAtBoot")).toBeLessThan(
+      callOrder.indexOf("recordBootReportServerPhase"),
+    );
+    expect(callOrder.indexOf("sweepBackupDebrisAtBoot")).toBeLessThan(callOrder.indexOf("startGateway"));
+    expect(callOrder.indexOf("startGateway")).toBeLessThan(callOrder.indexOf("release"));
+    // Awaited, not fire-and-forget: the sweep resolved before the next step ran.
+    expect(deps.sweepBackupDebrisAtBoot).toHaveBeenCalledTimes(1);
     expect(getBootPhase()).toEqual({ phase: "ready", error: null });
   });
 
@@ -599,6 +648,7 @@ describe("server/startup", () => {
     const deps = mkOrderedDeps([], {
       closeDanglingRecordsAtBoot: boom("closers"),
       reconcileRestartOperationAtBoot: boom("restart-op"),
+      sweepBackupDebrisAtBoot: boom("sweep"),
       recordBootReportServerPhase: boom("report"),
       reconcileInstalledAtBoot: boom("reconcileInstalled"),
       // The compat gate THROWING is not a verdict: fail open.
@@ -615,6 +665,7 @@ describe("server/startup", () => {
     for (const label of [
       "Boot dangling-record close failed: closers exploded",
       "Boot restart-operation reconcile failed: restart-op exploded",
+      "Boot backup-debris sweep failed: sweep exploded",
       "Boot report server phase failed: report exploded",
       "Boot installed-tree reconcile failed: reconcileInstalled exploded",
       "Boot launch compatibility gate failed: compat exploded",
@@ -696,6 +747,7 @@ describe("server/startup", () => {
     const deps = mkOrderedDeps(callOrder, {
       closeDanglingRecordsAtBoot: null,
       reconcileRestartOperationAtBoot: null,
+      sweepBackupDebrisAtBoot: null,
       recordBootReportServerPhase: null,
       reconcileInstalledAtBoot: null,
       assessLaunchCompatibilityAtBoot: null,

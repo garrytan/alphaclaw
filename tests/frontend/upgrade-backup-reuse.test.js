@@ -83,6 +83,9 @@ import {
 import {
   buildApplyConfirmModel,
   buildBackupReuseOfferModel,
+  buildNoBackupConsentOfferModel,
+  crossesChannelBoundary,
+  kBackupHardGateNote,
   kBackupReuseCandidateChangedNotice,
   kBackupReuseConsentLabel,
   kBackupReuseInventoryErrorReason,
@@ -93,8 +96,13 @@ import {
   kBackupsEmptyLabel,
   kBackupsRunbookUrl,
   kBackupsUnreadableMessage,
+  kNoBackupConsentConfirmLabel,
+  kNoBackupConsentCtaLabel,
+  kNoBackupConsentLabel,
 } from "../../lib/public/js/components/upgrade-tab/helpers.js";
 import { kBackupReuseRetryInventoryLabel } from "../../lib/public/js/components/upgrade-tab/dialogs.js";
+// The server-side predicate the confirm's hard-gate copy must share (#79 (a)).
+import { crossesChannelBoundary as kSharedBoundaryPredicate } from "../../lib/channel-boundary.js";
 import { ActionButton } from "../../lib/public/js/components/action-button.js";
 import { InlineErrorChip } from "../../lib/public/js/components/inline-error-chip.js";
 import { ToggleSwitch } from "../../lib/public/js/components/toggle-switch.js";
@@ -252,6 +260,24 @@ const findConsentToggle = (tree) =>
     (vnode) => vnode.props.label === kBackupReuseConsentLabel,
   );
 
+// #79 (b) fixtures: a routine same-channel target whose db-preflight said the
+// target migrates the databases while the (soft-gated) backup failed — the
+// server's 409 backup_required_for_migration envelope, verbatim shape.
+const kSoftTarget = { channel: "stable", version: "2026.7.2" };
+const kMigrationError = {
+  code: "backup_required_for_migration",
+  message:
+    "OpenClaw 2026.7.2 will migrate your database (state 12→15, agent 17→19) and no backup exists — the running 2026.7.1-2 cannot read the migrated database, so there would be no rollback path.",
+  hint:
+    "Fix the backup and retry, or resend with confirmNoBackup: true to continue without one — there is then no way back to 2026.7.1-2.",
+};
+const makeNoBackupOffer = () =>
+  buildNoBackupConsentOfferModel({ error: kMigrationError, target: kSoftTarget, label: "2026.7.2" });
+const findNoBackupToggle = (tree) =>
+  findAllByType(tree, ToggleSwitch).find(
+    (vnode) => vnode.props.label === kNoBackupConsentLabel,
+  );
+
 describe("frontend/upgrade-tab apply confirm — backup reuse consent (WI-4.4)", () => {
   beforeEach(() => {
     harness.reset();
@@ -352,6 +378,178 @@ describe("frontend/upgrade-tab apply confirm — backup reuse consent (WI-4.4)",
     });
     expect(findConsentToggle(tree)).toBeUndefined();
     expect(treeText(tree)).not.toContain(kBackupReuseConsentLabel);
+  });
+});
+
+describe("frontend/upgrade-tab 409 backup_required_for_migration → no-backup consent (#79 (b), Codex 20 view)", () => {
+  beforeEach(() => {
+    harness.reset();
+  });
+
+  it("the offer model exists for the overridable code ONLY: backup_failed (even with a reusableBackup) and every other code yield null", () => {
+    expect(makeNoBackupOffer()).toEqual({
+      code: "backup_required_for_migration",
+      message: kMigrationError.message,
+      hint: kMigrationError.hint,
+      target: kSoftTarget,
+      label: "2026.7.2",
+    });
+    expect(
+      buildNoBackupConsentOfferModel({
+        error: { code: "backup_failed", reusableBackup: kReusableBackup },
+        target: kDowngradeTarget,
+        label: "2026.7.0",
+      }),
+    ).toBeNull();
+    expect(buildNoBackupConsentOfferModel({ error: { code: "db_preflight_failed" } })).toBeNull();
+    expect(buildNoBackupConsentOfferModel({})).toBeNull();
+  });
+
+  it("the quick-failure card offers the CTA; the second-stage dialog renders the server message, a default-OFF checkbox with the exact consent copy, and a confirm that stays inert until it is checked", () => {
+    const onToggleNoBackupConsent = vi.fn();
+    const tree = renderView({
+      channelInfo: makeChannelInfo(),
+      applyError: kMigrationError,
+      noBackupConsentOffer: makeNoBackupOffer(),
+      noBackupConsentPrompt: true,
+      noBackupConsentChecked: false,
+      onToggleNoBackupConsent,
+    });
+    const text = treeText(tree).replace(/\s+/g, " ");
+    expect(findActionButtonByLabel(tree, kNoBackupConsentCtaLabel)).toBeTruthy();
+    expect(text).toContain(
+      "No backup could be taken and this update migrates your database — continuing has no rollback path.",
+    );
+    expect(text).toContain("Continue without a backup?");
+    expect(text).toContain(kMigrationError.message);
+    expect(text).toContain("there is no backup to restore from");
+    // The consent copy the plan pins.
+    expect(kNoBackupConsentLabel).toBe(
+      "I understand: no backup exists; the previous build cannot read the migrated database",
+    );
+    const toggle = findNoBackupToggle(tree);
+    expect(toggle).toBeTruthy();
+    expect(toggle.props.checked).toBe(false);
+    // Never disabled: unlike the reuse toggle there is no candidate to bind.
+    expect(Boolean(toggle.props.disabled)).toBe(false);
+    const input = findAllByType(toggle, "input")[0];
+    input.props.onchange({ target: { checked: true } });
+    expect(onToggleNoBackupConsent).toHaveBeenCalledWith(true);
+    // Unchecked → the confirm is disabled.
+    const confirm = findActionButtonByLabel(tree, kNoBackupConsentConfirmLabel);
+    expect(confirm).toBeTruthy();
+    expect(confirm.props.disabled).toBe(true);
+    // This dialog is the ONLY consent surface for this code — no reuse toggle.
+    expect(findConsentToggle(tree)).toBeUndefined();
+
+    const checked = renderView({
+      channelInfo: makeChannelInfo(),
+      applyError: kMigrationError,
+      noBackupConsentOffer: makeNoBackupOffer(),
+      noBackupConsentPrompt: true,
+      noBackupConsentChecked: true,
+    });
+    expect(findNoBackupToggle(checked).props.checked).toBe(true);
+    expect(findActionButtonByLabel(checked, kNoBackupConsentConfirmLabel).props.disabled).toBe(false);
+
+    // Prompt closed → no dialog, the CTA remains.
+    const closed = renderView({
+      channelInfo: makeChannelInfo(),
+      applyError: kMigrationError,
+      noBackupConsentOffer: makeNoBackupOffer(),
+      noBackupConsentPrompt: false,
+    });
+    expect(findNoBackupToggle(closed)).toBeUndefined();
+    expect(findActionButtonByLabel(closed, kNoBackupConsentCtaLabel)).toBeTruthy();
+  });
+
+  it("a 409 backup_failed shows the reuse CTA and NO no-backup consent — the checkbox belongs to the overridable code alone (Codex 20)", () => {
+    const tree = renderView({
+      channelInfo: makeChannelInfo(),
+      applyError: { code: "backup_failed", message: "Backup failed: state lease lost", hint: null },
+      backupReuseOffer: makeOffer(),
+      noBackupConsentOffer: buildNoBackupConsentOfferModel({
+        error: { code: "backup_failed", reusableBackup: kReusableBackup },
+        target: kDowngradeTarget,
+        label: "2026.7.0",
+      }),
+      noBackupConsentPrompt: true,
+    });
+    expect(findActionButtonByLabel(tree, "Retry using the backup taken 2 hours ago")).toBeTruthy();
+    expect(findActionButtonByLabel(tree, kNoBackupConsentCtaLabel)).toBeUndefined();
+    expect(findNoBackupToggle(tree)).toBeUndefined();
+    expect(treeText(tree)).not.toContain(kNoBackupConsentLabel);
+  });
+
+  it("the streamed failure (progress card) offers the same CTA and caption", () => {
+    const tree = renderView({
+      channelInfo: makeChannelInfo(),
+      operation: {
+        operationId: "op-9",
+        resumed: false,
+        target: kSoftTarget,
+        label: "2026.7.2",
+        startedAt: kNow - 60_000,
+        finishedAt: kNow,
+        steps: [],
+        output: "",
+        phase: "failed",
+        error: kMigrationError,
+      },
+      noBackupConsentOffer: makeNoBackupOffer(),
+    });
+    expect(findActionButtonByLabel(tree, kNoBackupConsentCtaLabel)).toBeTruthy();
+    expect(treeText(tree)).toContain("continuing has no rollback path");
+  });
+
+  it("the apply confirm's hard-gate copy comes from the SHARED server predicate (#79 (a)): beta→stable and a same-channel prerelease→base both carry the backup hard gate; stable→stable base→base carries neither gate nor consent line", () => {
+    // ONE function, re-exported — the confirm cannot drift from the gate.
+    expect(crossesChannelBoundary).toBe(kSharedBoundaryPredicate);
+    const betaBox = makeChannelInfo({
+      releaseChannel: "beta",
+      installedVersion: "2026.9.1-beta.1",
+      applied: { channel: "beta", version: "2026.9.1-beta.1" },
+      appliedId: "2026.9.1-beta.1",
+      isPin: false,
+    });
+    const betaToStable = buildApplyConfirmModel({
+      payload: { channel: "stable", version: "2026.9.2" },
+      label: "2026.9.2",
+      // The hook passes the PERSISTED applied channel (Codex 19).
+      currentChannel: betaBox.applied.channel,
+      channelInfo: betaBox,
+      backupInventory: makeInventory(),
+      nowMs: kNow,
+    });
+    expect(betaToStable.isBreaking).toBe(true);
+    expect(betaToStable.hardGate).toBe(true);
+    expect(betaToStable.lines).toContain(kBackupHardGateNote);
+    expect(betaToStable.backupReuse).toEqual(expect.objectContaining({ available: true }));
+    // prerelease → base on the beta channel: the version arm alone.
+    const betaBase = buildApplyConfirmModel({
+      payload: { channel: "beta", version: "2026.9.2" },
+      label: "2026.9.2",
+      currentChannel: "beta",
+      channelInfo: betaBox,
+      backupInventory: makeInventory(),
+      nowMs: kNow,
+    });
+    expect(betaBase.isBreaking).toBe(true);
+    expect(betaBase.hardGate).toBe(true);
+    expect(betaBase.lines).toContain(kBackupHardGateNote);
+    // stable → stable, base → base: no gate.
+    const routine = buildApplyConfirmModel({
+      payload: kSoftTarget,
+      label: "2026.7.2",
+      currentChannel: "stable",
+      channelInfo: makeChannelInfo(),
+      backupInventory: makeInventory(),
+      nowMs: kNow,
+    });
+    expect(routine.isBreaking).toBe(false);
+    expect(routine.hardGate).toBe(false);
+    expect(routine.lines).not.toContain(kBackupHardGateNote);
+    expect(routine.backupReuse).toBeNull();
   });
 });
 
@@ -1003,6 +1201,126 @@ describe("frontend/upgrade-tab hook — consent + reuse retry + fence fields", (
     expect(state.operation).toEqual(
       expect.objectContaining({ phase: "running", operationId: "op-2", target: kDowngradeTarget }),
     );
+  });
+
+  it("a quick 409 backup_required_for_migration offers the no-backup consent; the confirm is inert until checked, then resends the bare target with confirmNoBackup: true only (#79 (b))", async () => {
+    let state = await hydrate();
+    api.applyOpenclawVersion.mockRejectedValueOnce(
+      Object.assign(new Error(kMigrationError.message), {
+        code: kMigrationError.code,
+        hint: kMigrationError.hint,
+      }),
+    );
+    state.onRequestApply({ payload: kSoftTarget, label: "2026.7.2", isDowngrade: false });
+    state = renderHook({});
+    // A routine same-channel confirm: no reuse consent line at all.
+    expect(state.pendingApply.confirm.hardGate).toBe(false);
+    expect(state.pendingApply.confirm.backupReuse).toBeNull();
+    await state.onConfirmApply();
+    state = renderHook({});
+
+    expect(state.operation).toBeNull();
+    expect(state.applyError).toEqual(
+      expect.objectContaining({ code: "backup_required_for_migration", hint: kMigrationError.hint }),
+    );
+    // The overridable code offers the no-backup consent, never the reuse offer.
+    expect(state.backupReuseOffer).toBeNull();
+    expect(state.noBackupConsentOffer).toEqual(
+      expect.objectContaining({
+        code: "backup_required_for_migration",
+        message: kMigrationError.message,
+        target: kSoftTarget,
+        label: "2026.7.2",
+      }),
+    );
+    expect(state.noBackupConsentPrompt).toBe(false);
+    expect(state.noBackupConsentChecked).toBe(false);
+
+    // The CTA only opens the dialog, checkbox OFF.
+    state.onRequestNoBackupConsent();
+    state = renderHook({});
+    expect(state.noBackupConsentPrompt).toBe(true);
+    expect(state.noBackupConsentChecked).toBe(false);
+    // Unchecked: the confirm does nothing.
+    await state.onConfirmNoBackupConsent();
+    expect(api.applyOpenclawVersion).toHaveBeenCalledTimes(1);
+    state = renderHook({});
+    expect(state.noBackupConsentPrompt).toBe(true);
+
+    state.onToggleNoBackupConsent(true);
+    state = renderHook({});
+    expect(state.noBackupConsentChecked).toBe(true);
+    api.applyOpenclawVersion.mockResolvedValueOnce({
+      ok: true,
+      operationId: "op-3",
+      events: "/api/operations/op-3/events",
+    });
+    await state.onConfirmNoBackupConsent();
+    expect(api.applyOpenclawVersion).toHaveBeenCalledTimes(2);
+    expect(api.applyOpenclawVersion).toHaveBeenLastCalledWith({
+      channel: "stable",
+      version: "2026.7.2",
+      confirmNoBackup: true,
+    });
+    expect("allowBackupReuse" in api.applyOpenclawVersion.mock.calls[1][0]).toBe(false);
+    state = renderHook({});
+    expect(state.noBackupConsentOffer).toBeNull();
+    expect(state.noBackupConsentPrompt).toBe(false);
+    expect(state.noBackupConsentChecked).toBe(false);
+    expect(state.applyError).toBeNull();
+    // The recorded operation target stays the BARE payload — a later
+    // "Re-stage version" never inherits this attempt's consent.
+    expect(state.operation).toEqual(
+      expect.objectContaining({ phase: "running", operationId: "op-3", target: kSoftTarget }),
+    );
+  });
+
+  it("cancelling the no-backup dialog or dismissing the error retires the checkbox and the offer without calling the API; a 409 backup_failed never offers the consent", async () => {
+    let state = await hydrate();
+    api.applyOpenclawVersion.mockRejectedValueOnce(
+      Object.assign(new Error(kMigrationError.message), { code: kMigrationError.code }),
+    );
+    state.onRequestApply({ payload: kSoftTarget, label: "2026.7.2", isDowngrade: false });
+    state = renderHook({});
+    await state.onConfirmApply();
+    state = renderHook({});
+    state.onRequestNoBackupConsent();
+    state = renderHook({});
+    state.onToggleNoBackupConsent(true);
+    state = renderHook({});
+    expect(state.noBackupConsentChecked).toBe(true);
+
+    state.onCancelNoBackupConsent();
+    state = renderHook({});
+    expect(state.noBackupConsentPrompt).toBe(false);
+    expect(state.noBackupConsentChecked).toBe(false);
+    // The offer survives a cancel (the CTA can be reopened)…
+    expect(state.noBackupConsentOffer).toBeTruthy();
+    // …but reopening starts unchecked again — never remembered.
+    state.onRequestNoBackupConsent();
+    state = renderHook({});
+    expect(state.noBackupConsentChecked).toBe(false);
+
+    state.onDismissApplyError();
+    state = renderHook({});
+    expect(state.applyError).toBeNull();
+    expect(state.noBackupConsentOffer).toBeNull();
+    expect(state.noBackupConsentPrompt).toBe(false);
+    expect(api.applyOpenclawVersion).toHaveBeenCalledTimes(1);
+
+    // backup_failed (hard gate, not overridable): no consent offer.
+    api.applyOpenclawVersion.mockRejectedValueOnce(
+      Object.assign(new Error("Backup failed"), {
+        code: "backup_failed",
+        reusableBackup: kReusableBackup,
+      }),
+    );
+    requestDowngrade(state);
+    state = renderHook({});
+    await state.onConfirmApply();
+    state = renderHook({});
+    expect(state.backupReuseOffer).toBeTruthy();
+    expect(state.noBackupConsentOffer).toBeNull();
   });
 
   it("cancelling the second-stage dialog or dismissing the error clears without calling the API", async () => {

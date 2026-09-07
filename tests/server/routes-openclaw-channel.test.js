@@ -248,6 +248,8 @@ describe("server/routes/openclaw-channel", () => {
       operationId: "op-1",
       // No consent carried → the service sees null (never undefined/true).
       allowBackupReuse: null,
+      // #79 (b): the no-backup consent defaults to an explicit false.
+      confirmNoBackup: false,
     });
 
     const slowDeps = createDeps();
@@ -1091,6 +1093,74 @@ describe("server/routes/openclaw-channel", () => {
         .post("/api/openclaw/apply")
         .send({ channel: "beta", version: "1.1.0" });
       expect(plain.status).toBe(200);
+    });
+  });
+
+  // #79 (b): the no-backup consent (409 backup_required_for_migration) is a
+  // STRICT boolean and humans-only — same two belts as allowBackupReuse.
+  describe("POST /api/openclaw/apply confirmNoBackup consent", () => {
+    it("passes a boolean through to the service; absent → false (never undefined)", async () => {
+      const deps = createDeps();
+      const app = createApp(deps);
+      const res = await request(app)
+        .post("/api/openclaw/apply")
+        .send({ channel: "stable", version: "1.1.0", confirmNoBackup: true });
+      expect(res.status).toBe(200);
+      expect(deps.openclawChannelService.applyUpdate).toHaveBeenCalledWith(
+        expect.objectContaining({ confirmNoBackup: true, allowBackupReuse: null }),
+      );
+      const explicitFalse = await request(app)
+        .post("/api/openclaw/apply")
+        .send({ channel: "stable", version: "1.1.0", confirmNoBackup: false });
+      expect(explicitFalse.status).toBe(200);
+      expect(deps.openclawChannelService.applyUpdate).toHaveBeenLastCalledWith(
+        expect.objectContaining({ confirmNoBackup: false }),
+      );
+    });
+
+    it.each([
+      ['the string "true"', "true"],
+      ["the number 1", 1],
+      ["null", null],
+      ["an object", { confirm: true }],
+      ["an array", [true]],
+    ])("400s invalid_body for %s and never calls the service", async (_label, confirmNoBackup) => {
+      const deps = createDeps();
+      const app = createApp(deps);
+      const res = await request(app)
+        .post("/api/openclaw/apply")
+        .send({ channel: "stable", version: "1.1.0", confirmNoBackup });
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe("invalid_body");
+      expect(res.body.message).toMatch(/confirmNoBackup must be a boolean/);
+      expect(deps.openclawChannelService.applyUpdate).not.toHaveBeenCalled();
+    });
+
+    it("403s an agent actor carrying the field (true, false or malformed) before validation; a plain agent body still applies", async () => {
+      const deps = createDeps();
+      const app = express();
+      app.use(express.json());
+      app.use((req, _res, next) => {
+        req.alphaclawActor = { type: "agent" };
+        next();
+      });
+      registerOpenclawChannelRoutes({ app, ...deps });
+      for (const confirmNoBackup of [true, false, "true"]) {
+        const res = await request(app)
+          .post("/api/openclaw/apply")
+          .send({ channel: "stable", version: "1.1.0", confirmNoBackup });
+        expect(res.status).toBe(403);
+        expect(res.body.code).toBe("humans_only");
+        expect(res.body.message).toMatch(/confirmNoBackup is an operator-only consent/);
+      }
+      expect(deps.openclawChannelService.applyUpdate).not.toHaveBeenCalled();
+      const plain = await request(app)
+        .post("/api/openclaw/apply")
+        .send({ channel: "stable", version: "1.1.0" });
+      expect(plain.status).toBe(200);
+      expect(deps.openclawChannelService.applyUpdate).toHaveBeenCalledWith(
+        expect.objectContaining({ confirmNoBackup: false }),
+      );
     });
   });
 

@@ -257,6 +257,14 @@ const createLiveBackupHarness = ({
   // "fixture" = node:sqlite table (what the churn tiers always used);
   // "materialize" = the selected CLI writes its real schema (see above).
   stateDb = "fixture",
+  // Copy-first (#79 (c)): the AlphaClaw offline copy is the FIRST rung of
+  // every quiesce and, against a held RESERVED lock, it simply succeeds
+  // (sqlite backup() reads under that lock) — so a tier that wants the REAL
+  // upstream CLI to run paused must fail the copy at a non-exclusivity
+  // stage. This fails its archive step (`tar -I 'gzip -1'` on the
+  // `.alphaclaw.` staging path) with an I/O error, the same arm the hermetic
+  // tier's `failCopyArchive` uses; everything else runs for real.
+  failOfflineCopy = false,
 } = {}) => {
   const rootDir = mkTemp("alphaclaw-live-backup-e2e-");
   const openclawDir = path.join(rootDir, ".openclaw");
@@ -300,6 +308,7 @@ const createLiveBackupHarness = ({
 
   const baseRunner = createRunStream({});
   const backupSpawns = [];
+  const offlineCopyArchiveSpawns = [];
   const runner = {
     runStreamed: (opts) => {
       if (opts.command === "openclaw" && opts.args?.[0] === "backup") {
@@ -307,6 +316,20 @@ const createLiveBackupHarness = ({
         try {
           onBackupSpawn?.(backupSpawns.length);
         } catch {}
+      }
+      if (
+        failOfflineCopy &&
+        opts.command === "tar" &&
+        opts.args?.[0] === "-I" &&
+        (opts.args || []).some((arg) => String(arg).includes(".alphaclaw."))
+      ) {
+        offlineCopyArchiveSpawns.push(opts.args.slice());
+        return Promise.resolve({
+          ok: false,
+          code: 2,
+          tail: "tar: write error: Input/output error\n",
+          timedOut: false,
+        });
       }
       return baseRunner.runStreamed(opts);
     },
@@ -357,6 +380,7 @@ const createLiveBackupHarness = ({
     openclawDir,
     fixture,
     backupSpawns,
+    offlineCopyArchiveSpawns,
     cliEnv,
     backupsDir: path.join(rootDir, "backups", "openclaw"),
   };

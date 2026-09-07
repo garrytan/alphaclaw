@@ -1505,7 +1505,7 @@ describe("server/openclaw-channel-sync", () => {
         runnerImpl: failBackupRunner,
       });
       const upgradeResult = await upgrade.sync.applyUpdate({
-        channel: "beta",
+        channel: "stable", // stable pin → stable: a stable→beta move is a channel-boundary HARD gate since #79 (a)
         version: "1.1.0",
       });
       await flushAsync();
@@ -1863,7 +1863,7 @@ describe("server/openclaw-channel-sync", () => {
 
         // Non-prerelease upgrade → soft gate: warn and continue.
         const result = await harness.sync.applyUpdate({
-          channel: "beta",
+          channel: "stable", // stable pin → stable: a stable→beta move is a channel-boundary HARD gate since #79 (a)
           version: "1.1.0",
         });
         await flushAsync();
@@ -3214,7 +3214,8 @@ describe("server/openclaw-channel-sync", () => {
         },
       });
 
-      const result = await harness.sync.applyUpdate({ channel: "beta", version: "1.1.0" });
+      // A routine same-channel apply (stable pin → stable: a stable→beta move is a channel-boundary HARD gate since #79 (a)).
+      const result = await harness.sync.applyUpdate({ channel: "stable", version: "1.1.0" });
 
       expect(result.status).toBe(202);
       // The preflight snapshotted the DB found under OPENCLAW_STATE_DIR, not
@@ -3345,7 +3346,17 @@ describe("server/openclaw-channel-sync", () => {
       writeStateDb(harness.openclawDir, { userVersion: 12 });
       writeAgentDb(harness.openclawDir, "main", { userVersion: 17 });
 
-      const result = await harness.sync.applyUpdate({ channel: "beta", version: "1.1.0" });
+      // A routine same-channel apply (stable pin → stable: a stable→beta move is a channel-boundary HARD gate since #79 (a)).
+      // This harness takes no usable backup, and the verdict below says the
+      // target MIGRATES the databases — the #79 (b) post-preflight checkpoint
+      // would refuse that (409 backup_required_for_migration) without the
+      // operator's explicit consent; the consent keeps this test about the
+      // preflight verdict (the checkpoint has its own suite).
+      const result = await harness.sync.applyUpdate({
+        channel: "stable",
+        version: "1.1.0",
+        confirmNoBackup: true,
+      });
 
       expect(result.status).toBe(202);
       // ONE CLI invocation — the state DB. The agent DB was judged in-process.
@@ -3422,7 +3433,8 @@ describe("server/openclaw-channel-sync", () => {
       writeStateDb(harness.openclawDir, { userVersion: 15 });
       writeAgentDb(harness.openclawDir, "main", { userVersion: 21 });
 
-      const result = await harness.sync.applyUpdate({ channel: "beta", version: "1.1.0" });
+      // A routine same-channel apply (stable pin → stable: a stable→beta move is a channel-boundary HARD gate since #79 (a)).
+      const result = await harness.sync.applyUpdate({ channel: "stable", version: "1.1.0" });
 
       expect(result.status).toBe(409);
       expect(result.body.code).toBe("db_preflight_failed");
@@ -3466,7 +3478,8 @@ describe("server/openclaw-channel-sync", () => {
       writeStateDb(harness.openclawDir, { userVersion: 15 });
       writeAgentDb(harness.openclawDir, "main", { userVersion: 17 });
 
-      const result = await harness.sync.applyUpdate({ channel: "beta", version: "1.1.0" });
+      // A routine same-channel apply (stable pin → stable: a stable→beta move is a channel-boundary HARD gate since #79 (a)).
+      const result = await harness.sync.applyUpdate({ channel: "stable", version: "1.1.0" });
 
       expect(result.status).toBe(202);
       expect(sawAgentSnapshot(preflightCalls)).toBe(false);
@@ -3521,7 +3534,8 @@ describe("server/openclaw-channel-sync", () => {
       const garbage = "not a sqlite database — just bytes ".repeat(64);
       fs.writeFileSync(agentDb, garbage);
 
-      const result = await harness.sync.applyUpdate({ channel: "beta", version: "1.1.0" });
+      // A routine same-channel apply (stable pin → stable: a stable→beta move is a channel-boundary HARD gate since #79 (a)).
+      const result = await harness.sync.applyUpdate({ channel: "stable", version: "1.1.0" });
 
       // Fail OPEN: an unreadable agent DB is our snapshot's problem, not the
       // target's incompatibility — the apply proceeds and says so once.
@@ -6256,7 +6270,8 @@ describe("reconcileInstalled (#76 B1.2)", () => {
       );
 
       const soft = mk();
-      const warned = await soft.sync.applyUpdate({ channel: "stable", version: "1.0.1" });
+      // Same channel as the applied beta record — beta→stable would cross the boundary (#79 (a)).
+      const warned = await soft.sync.applyUpdate({ channel: "beta", version: "2.0.1" });
       expect(warned.body?.code).not.toBe("version_mismatch");
       expect(soft.store.readState().lastUpdateRun.steps).toContainEqual(
         expect.objectContaining({ name: "backup", status: "warning", error: "version_mismatch" }),
