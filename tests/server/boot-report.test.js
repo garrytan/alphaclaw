@@ -82,7 +82,12 @@ describe("boot-report: buildBinPhaseReport", () => {
         overlayPresent: null,
         overlayComplete: null,
         sentinelMatches: null,
-        bootSync: { action: "skipped_concurrent", reason: "pid_live", warnings: ["w1", "42"] },
+        bootSync: {
+          action: "skipped_concurrent",
+          reason: "pid_live",
+          warnings: ["w1", "42"],
+          danglingRecords: null,
+        },
       },
       binPhase: { status: kBinPhaseStatuses.ok },
       serverPhase: { status: kServerPhaseStatuses.pending },
@@ -96,7 +101,7 @@ describe("boot-report: buildBinPhaseReport", () => {
     expect(report.bootId).toBeNull();
     expect(report.at).toBeNull();
     expect(report.pidfile).toBeNull();
-    expect(report.openclaw.bootSync).toEqual({ action: null, reason: null, warnings: [] });
+    expect(report.openclaw.bootSync).toEqual({ action: null, reason: null, warnings: [], danglingRecords: null });
     expect(buildBinPhaseReport({ alphaclaw: "garbage", openclaw: [] }).alphaclaw.version).toBeNull();
   });
 });
@@ -936,5 +941,54 @@ describe("boot-report: never throws into the boot", () => {
     });
     expect(() => writer.writeBinPhase(binReport())).not.toThrow();
     expect(writer.writeBinPhase(binReport())).toBeNull();
+  });
+});
+
+describe("boot-report: bootSync.danglingRecords + readOwnReport (#76 A7 — the bin phase's closures reach the server phase)", () => {
+  const mkManaged = () => path.join(mkTemp(), ".alphaclaw");
+  const silentLogger = () => ({ log() {}, warn() {}, error() {} });
+
+  it("buildBinPhaseReport carries danglingRecords normalized: ids as strings, flag as boolean, garbage → null", () => {
+    const shaped = buildBinPhaseReport({
+      bootId: "1:1",
+      bootSync: {
+        action: "none",
+        danglingRecords: { closedRuns: ["run-a", 42, "", null, "run-b"], closedLastUpdateRun: "yes" },
+      },
+    });
+    expect(shaped.openclaw.bootSync.danglingRecords).toEqual({
+      closedRuns: ["run-a", "run-b"],
+      closedLastUpdateRun: false,
+    });
+    expect(buildBinPhaseReport({ bootSync: { action: "none" } }).openclaw.bootSync.danglingRecords).toBeNull();
+    expect(
+      buildBinPhaseReport({ bootSync: { action: "none", danglingRecords: "nope" } }).openclaw.bootSync.danglingRecords,
+    ).toBeNull();
+    expect(
+      buildBinPhaseReport({ bootSync: { action: "none", danglingRecords: { closedLastUpdateRun: true } } }).openclaw
+        .bootSync.danglingRecords,
+    ).toEqual({ closedRuns: [], closedLastUpdateRun: true });
+  });
+
+  it("readOwnReport returns the report THIS boot wrote, and null for a missing, unreadable or foreign-boot file", () => {
+    const managedDir = mkManaged();
+    const writer = createBootReportWriter({ managedDir, bootId: "77:1", nowFn: () => 1000, logger: silentLogger() });
+    expect(writer.readOwnReport()).toBeNull();
+    writer.writeBinPhase(
+      buildBinPhaseReport({
+        bootId: "77:1",
+        bootSync: { action: "none", danglingRecords: { closedRuns: ["run-a"], closedLastUpdateRun: false } },
+      }),
+    );
+    expect(writer.readOwnReport()?.openclaw?.bootSync?.danglingRecords).toEqual({
+      closedRuns: ["run-a"],
+      closedLastUpdateRun: false,
+    });
+    // Another boot's file is never returned as our own.
+    const other = createBootReportWriter({ managedDir, bootId: "78:1", nowFn: () => 2000, logger: silentLogger() });
+    expect(other.readOwnReport()).toBeNull();
+    // Unreadable → null, never a throw.
+    fs.writeFileSync(writer.reportPath, "{not json");
+    expect(writer.readOwnReport()).toBeNull();
   });
 });

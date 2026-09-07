@@ -443,7 +443,7 @@ describe("server/openclaw-channel boot sync (e2e)", () => {
           overlayPresent: true,
           overlayComplete: true,
           sentinelMatches: true,
-          bootSync: { action: "activated", reason: null, warnings: [] },
+          bootSync: { action: "activated", reason: null, warnings: [], danglingRecords: { closedRuns: [], closedLastUpdateRun: false } },
         },
         binPhase: { status: "ok" },
         serverPhase: { status: "pending" },
@@ -499,7 +499,14 @@ describe("server/openclaw-channel boot sync (e2e)", () => {
         installedAtBoot: "1.0.0",
         resolvedForLaunch: "1.0.0",
         sentinelMatches: true,
-        bootSync: { action: "failed", reason: "marker exploded", warnings: ["marker exploded"] },
+        bootSync: {
+          action: "failed",
+          reason: "marker exploded",
+          warnings: ["marker exploded"],
+          // The dangling-record closer runs BEFORE the rollback-marker read, so
+          // even this failed boot reports (an empty) list rather than null.
+          danglingRecords: { closedRuns: [], closedLastUpdateRun: false },
+        },
       }),
     );
     expect(report.serverPhase).toEqual({ status: "pending" });

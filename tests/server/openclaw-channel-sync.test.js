@@ -4884,7 +4884,13 @@ describe("syncAtBoot bin-phase boot report (#76 A1)", () => {
         overlayPresent: false,
         overlayComplete: false,
         sentinelMatches: true,
-        bootSync: { action: "none", reason: null, warnings: [] },
+        bootSync: {
+          action: "none",
+          reason: null,
+          warnings: [],
+          // The bin-phase closer ran (nothing to close on a fresh box).
+          danglingRecords: { closedRuns: [], closedLastUpdateRun: false },
+        },
       },
       binPhase: { status: "ok" },
       serverPhase: { status: "pending" },
@@ -4929,7 +4935,12 @@ describe("syncAtBoot bin-phase boot report (#76 A1)", () => {
       overlayPresent: true,
       overlayComplete: true,
       sentinelMatches: true,
-      bootSync: { action: "activated", reason: null, warnings: [] },
+      bootSync: {
+        action: "activated",
+        reason: null,
+        warnings: [],
+        danglingRecords: { closedRuns: [], closedLastUpdateRun: false },
+      },
     });
     expect(computeVerdict({ ...report, serverPhase: { status: "recorded", installedVersion: "1.1.0" } })).toEqual([]);
     // No stamp passed and none on disk: the alphaclaw block is null-shaped,
@@ -4968,6 +4979,52 @@ describe("syncAtBoot bin-phase boot report (#76 A1)", () => {
       previousVersion: "0.9.75",
       firstBootOfVersion: false,
     });
+  });
+
+  it("a run left `running` by a dead process is closed by the bin phase and NAMED in bootSync.danglingRecords (#76 A7 — the server phase's closer finds nothing left, so this is the list the report must carry)", () => {
+    const { sync, store } = createReportingHarness({
+      pin: "1.0.0",
+      installedVersion: "1.0.0",
+      sentinelVersion: "1.0.0",
+    });
+    const danglingRunId = "0f76b007-e2e0-4c0d-9a1e-000000000076";
+    const runsDir = path.join(store.managedDir, "runs");
+    fs.mkdirSync(runsDir, { recursive: true });
+    // openclaw-run-ledger.js record shape: `running`, no finishedAt.
+    fs.writeFileSync(
+      path.join(runsDir, `${danglingRunId}.json`),
+      JSON.stringify({
+        operationId: danglingRunId,
+        target: { version: "1.0.0", channel: "stable", kind: "apply" },
+        state: "running",
+        startedAt: 900_000,
+        finishedAt: null,
+        ok: null,
+        result: null,
+        steps: [{ name: "download", status: "running", at: 900_000 }],
+        backup: null,
+        dbPreflight: null,
+        overseer: null,
+        hasLog: false,
+      }),
+    );
+
+    const result = sync.syncAtBoot();
+
+    expect(result).toEqual(expect.objectContaining({ ok: true, action: "none" }));
+    expect(readReport(store).openclaw.bootSync.danglingRecords).toEqual({
+      closedRuns: [danglingRunId],
+      closedLastUpdateRun: false,
+    });
+    const run = JSON.parse(fs.readFileSync(path.join(runsDir, `${danglingRunId}.json`), "utf8"));
+    expect(run.state).toBe("interrupted");
+    expect(run.ok).toBe(false);
+    expect(run.result?.code).toBe("interrupted");
+    // Idempotent: a second closer pass (what the server phase does) closes
+    // nothing more — which is exactly why the report must carry THIS list.
+    expect(sync.closeDanglingRecordsAtBoot()).toEqual(
+      expect.objectContaining({ closedRuns: [], closedLastUpdateRun: false }),
+    );
   });
 
   it("the CORROBORATED skipped_concurrent path (bin refuses to start) writes boot-report-refused.json — serverPhase not_reached/pidfile_skip — and leaves the live sibling's boot-report.json and ring untouched", async () => {
@@ -5039,6 +5096,9 @@ describe("syncAtBoot bin-phase boot report (#76 A1)", () => {
                 /installed openclaw 1\.0\.0 ≠ applied 1\.1\.0 with a complete overlay/,
               ),
             ],
+            // A skipped boot never runs the dangling-record closer (it must not
+            // close a live sibling's run), so the report says null — not [].
+            danglingRecords: null,
           },
         }),
       );
@@ -5140,6 +5200,8 @@ describe("syncAtBoot bin-phase boot report (#76 A1)", () => {
       action: "failed",
       reason: "shim exploded",
       warnings: ["shim exploded"],
+      // The closer runs BEFORE the shim check, so even a failed boot reports it.
+      danglingRecords: { closedRuns: [], closedLastUpdateRun: false },
     });
     expect(readReport(store).pidfile).toEqual(expect.objectContaining({ decision: "proceed" }));
   });

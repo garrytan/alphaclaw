@@ -75,6 +75,7 @@ const kSchema = {
 const createFixture = ({
   withBinPhase = true,
   openclaw = {},
+  binExtra = {},
   schema = kSchema,
   channelInfo = { installedVersion: "2026.9.2", expectedVersion: "2026.9.2", installedDiverged: false },
   lastRestore = null,
@@ -99,7 +100,7 @@ const createFixture = ({
   const bootReport = withWriter
     ? createBootReportWriter({ managedDir, bootId: kBootId, nowFn: () => kNow, logger })
     : null;
-  if (withBinPhase && bootReport) bootReport.writeBinPhase(binReport(openclaw));
+  if (withBinPhase && bootReport) bootReport.writeBinPhase(binReport(openclaw, binExtra));
   const service = {
     closeDanglingRecordsAtBoot: vi.fn(() => ({
       closedRuns: ["11111111-2222-4333-8444-555555555555"],
@@ -182,6 +183,47 @@ describe("boot-report-steps: recordBootReportServerPhase", () => {
       legacyExecApprovalsPresent: false,
       danglingRecords: { closedRuns: ["11111111-2222-4333-8444-555555555555"], closedLastUpdateRun: true },
       verdict: [],
+    });
+  });
+
+  it("serverPhase.danglingRecords is the UNION of the bin phase's closures and the server phase's (#76 A7: the bin-phase syncAtBoot closes first, so the server closer normally finds nothing)", async () => {
+    const binClosed = "0f76b007-e2e0-4c0d-9a1e-000000000076";
+    const { steps, service, bootReport } = createFixture({
+      binExtra: {
+        bootSync: {
+          action: "none",
+          reason: null,
+          warnings: [],
+          danglingRecords: { closedRuns: [binClosed], closedLastUpdateRun: false },
+        },
+      },
+    });
+    // The server-phase closer finds nothing left (the incident shape).
+    service.closeDanglingRecordsAtBoot.mockImplementation(() => ({ closedRuns: [], closedLastUpdateRun: false, warnings: [] }));
+    steps.closeDanglingRecordsAtBoot();
+    const report = await steps.recordBootReportServerPhase();
+    expect(report.serverPhase.danglingRecords).toEqual({ closedRuns: [binClosed], closedLastUpdateRun: false });
+    expect(bootReport.readOwnReport().serverPhase.danglingRecords.closedRuns).toEqual([binClosed]);
+
+    // Both phases closed something: ids are unioned (bin first, de-duplicated) and the flag ORed.
+    service.closeDanglingRecordsAtBoot.mockImplementation(() => ({
+      closedRuns: [binClosed, "11111111-2222-4333-8444-555555555555"],
+      closedLastUpdateRun: true,
+      warnings: [],
+    }));
+    steps.closeDanglingRecordsAtBoot();
+    expect((await steps.recordBootReportServerPhase()).serverPhase.danglingRecords).toEqual({
+      closedRuns: [binClosed, "11111111-2222-4333-8444-555555555555"],
+      closedLastUpdateRun: true,
+    });
+  });
+
+  it("with no bin-phase file the server phase's own closures are reported alone; a null-shaped bin bootSync never throws", async () => {
+    const { steps } = createFixture({ withBinPhase: false });
+    steps.closeDanglingRecordsAtBoot();
+    expect((await steps.recordBootReportServerPhase()).serverPhase.danglingRecords).toEqual({
+      closedRuns: ["11111111-2222-4333-8444-555555555555"],
+      closedLastUpdateRun: true,
     });
   });
 
