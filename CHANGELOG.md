@@ -5,6 +5,433 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.9.77] - 2026-09-07
+
+Boot-spine, repair and backup fixes for the 2026-09-06 incident (issue #76)
+and the two defects recovering it surfaced (#78, #79). A redeploy of 0.9.75
+onto a box with a `/data` volume left the OpenClaw gateway down for 45+
+minutes through 13 blind auto-repair attempts: a stale legacy pidfile whose
+pid collided with a thread of the new AlphaClaw process made every boot
+conclude "another AlphaClaw owns the state directory" and skip the sync that
+would have activated the recorded build; the config gate read the resulting
+version drift as an operator downgrade and copied a stale
+`openclaw.json.pre-fix-*.bak` over the live config; and the watchdog
+relaunched — and ran `doctor --fix` from — a binary that provably could not
+read the migrated database, then gave up with a notice that named nothing.
+Recovering the box showed that agent databases were being fed to upstream's
+state-only `database preflight` (#78, a false 409 on a valid apply) and that
+the pre-apply backup succeeded in 1 of 5 runs and soft-gated `noBackup` on a
+migrating apply (#79). Shipped as one branch in four staged commits — Stage 1
+boot spine, Stage 2 observability, Stage 3 repair, Stage 4 backup — each
+leaving `npm test` green. This entry extends the identity-based pidfile guard
+(v0.9.73), the fail-closed config gate (#20/#21), the verified-relaunch
+contract (v0.9.75) and the #54 backup ladder rather than replacing them.
+
+### Fixed
+
+- **A thread id can no longer pass as a live sibling server (#76 RC1/RC2,
+  Stage 1).** `describeServerPidDecision()` (`openclaw-release-channel.js`) is
+  the one read-only judge of `alphaclaw-server.pid`: after `kill(pid, 0)` it
+  requires `/proc/<pid>/status` `Tgid === pid` (a thread of this process or
+  of any leader is `own_thread` / `thread`, never a server), records and
+  compares the container's pid-1 start ticks (`other_container`), treats a
+  legacy `{pid, at}` claim older than this container's start as
+  `predates_container`, and scopes the argv test to the `start` verb (an
+  `alphaclaw diagnose` lookalike is `null`). A legacy claim that survives
+  every check is permanently `corroborated: false` — the bin's refuse-to-start
+  can never fire on evidence AlphaClaw manufactured — and is converged ONCE
+  per boot by `syncAtBoot` (`convergeLegacyServerPidClaim`) into a format-2
+  record carrying `observedTicks` / `containerStartTicks`, never `startTicks`,
+  so the next boot disproves a recycled pid instead of skipping forever.
+  `syncAtBoot` logs one `pidfile:` audit line on both paths, returns
+  `warnings` + `pidDecision` on every path, and no longer writes
+  `state.lastBoot` on the skip path (a whole-file rewrite of a file the live
+  sibling owns); the skip record goes to `boot-report.json`.
+- **The config gate distinguishes intent from drift (#76 RC3, Stage 1).**
+  `applyUpdate` stamps `state.lastTransition = { at, from, to, kind, source,
+  operationId, ok }` (consumed once via `consumedAt`, ignored after 7 days;
+  rollback and pin-bump transitions stamp their own `source`), and the
+  round-trip restore in `reconcileBootConfigInner` runs only when the
+  table-driven `describeVersionRegressionIntent` (rows `lastTransition` →
+  `pendingRun` → boot-scoped rollback → recent `lastUpdateRun`; no
+  `applied.reason === "pin_rollback"` fallback, which fires exactly on drift)
+  says the downgrade was intended. Drift leaves `openclaw.json` byte-identical
+  and the `.bak` in place, logs `[config-gate] DRIFT`, books
+  `config_migration_gate/drift_detected`, notifies under a day-bucketed id
+  (`config-drift-<installed>-<completed>-<day>` — the fixed
+  `config-restore-<v>` id was deduped forever by the outbox), resolves the
+  pending run and returns `held` when a persisted `gatewayHold` exists. An
+  intentional restore first copies `openclaw.json.pre-restore-<ts>.bak`
+  (newest 3, `utils/file-retention.js`) under the config lock, restores as a
+  byte copy through `writeFileAtomic`, persists a key-paths-only diff
+  (`utils/config-key-diff.js` → `<managedDir>/config-gate/<ts>.json`, newest
+  10) and stamps `configMigration.lastRestore = { at, from,
+  previousCompletedForVersion, diffPath, bootId }`; `doctor-guard.js` keeps
+  an `openclaw.json.pre-doctor-<ts>.bak` and reports key-path counts. A tree
+  that is not the recorded build (`installedDiverged`) returns `held` before
+  any doctor or config mutation.
+- **Rollback and forward recovery judge the tree that was running (#76 RC4,
+  Stage 1).** `getChannelInfo()` owns `expectedVersion`
+  (`applied?.version ?? pinVersion`, `null` for dev), `installedIsPin` and
+  `installedDiverged` (dev-safe and pin-lag-safe: the `pin_reconciled` boot
+  records `state.pinLag = { pin, installed, at, bootId, bootsSeen }`, expiring
+  after 3 boots or 24 h). `tryForwardRecovery` / `requestForwardRecovery` gate
+  on the installed tree, not `!applied`; `requestChannelRollback` refuses
+  `installed_diverged` instead of blocklisting a build that was not running.
+- **Agent databases are judged by their own schema (#78, Stage 1).**
+  `enumerateStateDbEntries()` yields `{ path, kind: "state" | "agent",
+  agentId }`; `runDatabasePreflight` feeds only `kind: "state"` to upstream's
+  `database preflight` and judges every agent DB by `PRAGMA user_version`
+  against the target build's declared `OPENCLAW_AGENT_SCHEMA_VERSION`
+  (`lib/server/openclaw-schema-versions.js`: `readSqliteUserVersion` with
+  distinct `null`s — corrupt vs busy vs absent — `resolveDeclaredSchemaVersions`
+  greps the constant from the build's own dist chunks and never executes
+  candidate code, the tarball-verified `kSeededSchemaVersions` seed and the
+  learned `<managedDir>/openclaw-schema-versions.json`; `compareSchema`).
+  `incompatible` is a 409 `db_preflight_failed` naming the kind and both
+  numbers, `migration-required` sets `migrationRequired`, an unresolvable
+  target warns and fails open; the verdict gains `byKind`. The boot probes
+  (`probeDbMigrationNeeded`, `createBootPreflightProber`) split the same way —
+  an incompatible agent DB takes the hold path, never a `doctor --fix` from the
+  incompatible binary.
+- **`kWatchdogMaxRepairAttempts` is enforced (TODOS F015, Stage 3).**
+  `runRepair` refuses past the cap for automatic sources with one
+  `repair/<source>/skipped {reason: "repair_attempts_exhausted", attempts,
+  limit}` row per count, while `restartAfterCrash`'s backoff relaunches
+  continue and the counter still resets only on a verified replacement;
+  gateway-state-model §4 row 5 is reachable and reads
+  `kRepairAttemptsExhaustedCopy`.
+- **Dangling records never survive a boot (#76 A7, Stage 2).**
+  `openclawChannelService.closeDanglingRecordsAtBoot()` (interrupted ledger
+  runs + `lastUpdateRun`) and `restartRequiredState.reconcileOnBoot()` run
+  from the listening path — the first steps of `runOnboardedBootSequence`,
+  plus an `onListening` hook in `init/server-lifecycle.js` for non-onboarded
+  boxes — never at module scope before the port bind, where a doomed second
+  instance could close a live sibling's run.
+- **A refused offline copy hands over instead of ending the ladder (#79 (c),
+  Stage 4).** Behaviour change: an exclusivity refusal (`offline_copy_refused`
+  — a foreign holder, a lost barrier, an unconfirmed stop) now records
+  `offlineCopy.next = { rung: "live", reason: "offline_copy_refused" }`, books
+  `backup_rung/handed_over` and continues into the live upstream ladder,
+  which needs no exclusivity. A hard gate whose live upstream then succeeds
+  answers 202 with an upstream archive where 0.9.76 returned 409
+  `offline_copy_refused`; a soft gate with a stray `openclaw` process on the
+  box now loses only the copy rung. The eventual failure message appends
+  "…refused first because …", and `offline_copy_refused` left
+  `kReuseEligibleKinds` — a refusal never ends the ladder, so consented reuse
+  can never be offered after a one-rung ladder.
+- **The two in-quiesce 409s honour the gate (#79 (c)).** The lifecycle-lock
+  timeout and the quiet-barrier failure inside `runQuiescedBackup` become
+  `{ fallback: true }` + a `backup/warning` for soft gates (only the backup
+  rung degrades; the apply's own serialization is unchanged); `hardGate` keeps
+  deciding fatality independently of `willQuiesce`.
+- **`.tmp` debris is swept (#79 (g)).** `sweepBackupDebris({ mode })`: boot
+  mode runs synchronously inside `runOnboardedBootSequence` under the boot
+  lock before `startGateway`, only when the pidfile decision found no live
+  owner, and removes EVERY `.tmp` (the incident's 8 GB file was < 20 min old
+  at boot), every `.unverified` but the newest and stale `.offline-copy-*`
+  staging dirs; in-run mode (age-gated on `cliTimeoutMs +
+  kOpenclawBackupStaleTempDirSlackMs`) runs from the failure finishers and
+  after the quiesce unwinds, never inside it; `pruneBackups` folds
+  `.tmp`/`.unverified` bytes into the advisory budget warning.
+
+### Added
+
+- **`boot-report.json` and the AlphaClaw self-version stamp (#76 A1/A8,
+  Stage 2).** `lib/server/boot-report.js` writes one machine-readable
+  statement per boot: the bin phase (inside `syncAtBoot`, on EVERY return
+  path including `skipped_concurrent`) records `bootId`, the AlphaClaw
+  version/commit, the container's pid-1 start, the full pidfile decision and
+  `openclaw { declaredPin, channelApplied, lastKnownGood, expected,
+  installedAtBoot, resolvedForLaunch, overlayPresent, overlayComplete,
+  sentinelMatches, bootSync }`; the server phase merges state-DB
+  `user_version`s, the supported schema, the config sha256 /
+  `lastTouchedVersion`, exec-approvals presence and a `verdict[]`
+  (`installed_not_expected`, `state_schema_too_new`, `agent_schema_too_new`,
+  `legacy_exec_approvals_present`, `pidfile_contradiction`,
+  `state_db_unreadable`) judged on the resolved tree, guarded by `bootId`.
+  Ring of 3 rotated only in the single-threaded bin phase, plus a pinned
+  `boot-report-incident.json` (the first INCONSISTENT report; replaced when
+  the installed version changes, the verdict set differs or it is 7+ days
+  old) and `boot-report-refused.json` (a refused second instance, kept out of
+  the ring so it cannot evict the live server's report). INCONSISTENT goes
+  out via `postBootWebhook` and as one `boot` watchdog event per report.
+  `alphaclaw-version.json` (`lib/server/alphaclaw-self-version.js`) stamps
+  `{ version, commit, firstBootAt, lastBootAt, bootCount, previous }` and the
+  boot banner is the first `[alphaclaw]` line of every boot log; one memoized
+  `getProcessBootId()` (`lib/server/boot-id.js`) is shared by the report,
+  the restart-op record and `configMigration.lastRestore`.
+- **A crash has a cause, and a version mismatch is a first-class signal (#76
+  A2/A3/A4, Stage 2).** `lib/server/gateway-crash-cause.js`
+  `classifyGatewayCrash({ code, signal, stderrTail })` reads the last 20
+  lines and delegates to the existing detectors → `{ cause, detail,
+  matchedLine, versions }` over `kGatewayCrashCauses` (`state_schema_too_new`,
+  `agent_schema_too_new`, `state_schema_migration_failed`,
+  `legacy_exec_approvals`, `plugin_api_too_old`, `cli_startup_crash`,
+  `port_in_use`, `state_dir_owned`, `oom`, `config_invalid`, `unknown`) plus
+  `fingerprintGatewayCrash`; the wording table is stamped against 2026.9.2 /
+  2026.9.1-beta.1 / 2026.7.1-2. The cause is recorded on `crash` /
+  `crash_loop` / `config_error` rows, the incident (`cause_json` and a new
+  pragma-guarded `severity` column), the restart-op record and
+  `gateway-state.json` (`restore()`/`track()` now carry `cause` and
+  `versionMismatch`), with a `crash_cause/crash_classifier` follow-up row
+  once the disk-side corroboration lands. Every `restart/<source>/requested`
+  row and the restart-op record carry `stateDb: { userVersion,
+  agentUserVersions[] }` read at request time. `watchdog.state.versionMismatch
+  = { expected, running, source, detectedAt } | null` is latched from the boot
+  verdict (`setBootVerdict`), a corroborated cause or the 5 s
+  `memoizedChannelInfo()`; `degradedReason: "version_mismatch"`, incident
+  kind `version_mismatch` (in `kIncidentKeyByTrigger`, `kCriticalEventTypes`
+  and `classifyEvent`'s open arm), the `⚠️ Version mismatch: running <r>,
+  expected <e>` notify prefix and the `det:plugin-api-mismatch` doctor card
+  follow.
+- **`alphaclaw diagnose` and `GET /api/diagnose` (#76 A9, Stage 2).** One
+  collector (`lib/server/diagnose/collect.js`), two callers: the CLI verb
+  (dispatched right after root/port resolution, read-only, server down OK;
+  markdown by default, one JSON line with `--json`) and the route
+  (`lib/server/routes/diagnose.js`, `?format=text`, agent-admin op
+  `watchdog.diagnose` tier safe, `/api/diagnose` a local-only proxy prefix).
+  Sections — boot reports and the pinned/refused ones, the version stamp, the
+  channel-state summary, a fresh pidfile decision, per-DB `user_version` vs
+  the supported schema and the table, the last 3 incidents with `cause`,
+  runs, the restart-op record, `gateway-state.json`, backups debris,
+  `process.log` filtered through `filterLogLines` — are each try/caught and
+  stamped `live | disk | unavailable`; the bundle passes `redactSecrets`
+  before rendering (`diagnose/render.js`, reused by the pause notice and the
+  rescue bundle).
+- **Runtime `reconcileInstalled()` and its operator lever (#76 B1.2/B1.4/B1.5,
+  Stage 3).** `openclaw-channel-sync.js` re-activates the recorded build onto
+  a diverged tree under the lifecycle lock (the caller's hold or its own, never
+  both — the lock is not re-entrant), only after the TARGET overlay's declared
+  schema is judged against the live `user_version`s (`target_incompatible` →
+  `chooseBootableVersion`: schema-table shortlist of ≤ 3 overlays, each
+  confirmed by the existing rollback prober; `applied.reason:
+  "schema_recovery"`), a CONFIRMED stop of any serving identity
+  (`incumbent_running` otherwise) and a disk precheck (`insufficient_disk`
+  under 1.2 × the overlay), through the store's new `activateOverlayAsync`
+  (copy to `node_modules/.openclaw-staging-<bootId>` → verify → rm → rename →
+  sentinel LAST; a stale staging dir is swept at boot); it is a ledger run
+  (`stop → activate → verify`, the caller appends `relaunch`), clears only the
+  holds it owns, and `undoLastConfigRestore` reverts a round-trip restore
+  made by a boot whose report was INCONSISTENT. Exposed as
+  `POST /api/openclaw/reconcile-installed` (humans only, tier `dangerous`,
+  through `readRestartBlocker`) and the Upgrade tab's "Re-activate recorded
+  build" (`reconcile-installed-card.js`, copy from `kReconcileInstalledCopy`,
+  rendered only while `channelInfo.installedDiverged`). Store additions:
+  `managedDir`, `overlayPresent`, `listOverlays`, `normalizeLastTransition`,
+  `normalizePinLag`.
+- **Cause-keyed structural repair and a scoped, persisted pause (#76 B1/B3,
+  Stage 3).** `lib/server/watchdog-structural-repair.js` (`runStructuralRepair`,
+  DI'd into the watchdog like the medic) acts only on a CORROBORATED
+  version-family cause — the stderr's found version equals the named DB's
+  observed `user_version` (or `assessLaunchCompatibility` agrees),
+  `installedDiverged` for the plugin/CLI causes, the file on disk for
+  `legacy_exec_approvals` — and never relaunches the same binary, never runs
+  `doctor --fix` first and never calls `requestChannelRollback`: rungs
+  `reconcile_installed` → `undo_config_restore` → `recover_bootable` /
+  `rename_exec_approvals` (→ `.stray-<ts>`) → `relaunch`
+  (`runVerifiedRelaunch({ source: "repair/structural", intent: "replace" })`),
+  one `repair/structural/{ok|failed|skipped}` row with `plan[]`; an
+  uncorroborated match rides the rows as `suspectedCause` while the legacy
+  ladder runs. `state.autoRepairPaused` latches only when every rung failed
+  (`structural_repair_failed`) or a replacement child died inside its 60 s
+  launch window twice with the same fingerprint (`replacement_exited_twice`),
+  is persisted to `<managedDir>/auto-repair-pause.json` and re-armed by
+  `createWatchdog`, emits `auto_repair_paused` (critical), and clears ONLY on
+  an installed-version change, the acceptance hold or the one-shot
+  `POST /api/watchdog/repair { force: true }`. `notifyAutoRepairPaused`
+  replaces "Auto-repair failed repeatedly" with `🔴 Auto-repair paused` +
+  `Cause:` / `Suspected cause:`, running vs expected, DB schema vs supported,
+  `Last plan:` and remediation labels, deduped per fingerprint per UTC day;
+  `trackEvent` escalates an open incident to `critical` at ≥ 3 identical
+  fingerprints (`updateIncidentSeverity`).
+- **The rescue session starts informed (#76 B4, Stage 3).**
+  `lib/server/claude-code-local/incident-bundle.js` writes `INCIDENT-<id>.md`
+  (the operator prompt, the matched stderr line plus a 20-line tail fenced as
+  data, the boot reports, the diagnose markdown) and a STATIC managed
+  `CLAUDE.md` into the AlphaClaw-owned rescue workspace before `startSession`;
+  stripAnsi → stripControlChars → value redaction → shape floor → marker
+  neutralization, one untrusted-content block, 256 KB cap; a second boot for
+  the same fingerprint appends `## Boot <n>` and is announced through the
+  notification line — never typed into a live session.
+- **No binary launches against a database it cannot open (#76 C1/C2/C6,
+  Stage 3).** `runOnboardedBootSequence` order is now dangling-record close →
+  backup-debris sweep → boot-report server phase → `reconcileInstalledAtBoot`
+  (the C1 belt) → `assessLaunchCompatibilityAtBoot` (declared schema vs every
+  DB's fresh `user_version`; `false` or proven corruption → structural
+  `gatewayHold` `version_mismatch` / `state_db_unreadable` +
+  `launch_compat_gate/held`; `null` ∧ diverged ∧ complete overlay → one more
+  reconcile; pure `null` fails open loudly; the RETURN decides, a throw is
+  swallow-and-log) → `reconcileBootConfig` → `finalizeBootReport` →
+  `startGateway` unless held. `runVerifiedRelaunch` runs the same gate before
+  `requestGatewayLaunch` (declared schema memoized per installedVersion,
+  `user_version` read fresh) and books `restart/<source>/skipped {reason:
+  version_mismatch, expected, running, intent}` — never `failed
+  {launchGatewayProcess returned no child}` — clearing the pending
+  replacement. `compatibleBinForCurrentDb()` / `clawCmdWithBin` /
+  `resolveExpectedBin` route `doctor --fix` (repair AND the startup medic's
+  injected `resolveDoctorBin`), the capability probes and the backup step
+  through a build that can read the CURRENT databases while a mismatch is
+  latched, skipping `version_mismatch` when none resolves — never the
+  `openclaw` on PATH.
+- **Copy-first backup ladder with honest coverage (#79 (a)–(f)/(h), Stage 4).**
+  Decision D1a: every apply that can pause the gateway does (`willQuiesce =
+  Boolean(gatewayQuiesce)`), soft gates included, and the AlphaClaw offline
+  copy is the FIRST in-quiesce rung; an in-quiesce upstream `backup create`
+  runs only after a copy that failed at a non-exclusivity stage and only when
+  `chooseBackupRung` (pure, fail-closed) predicts it fits the remaining pause;
+  `kQuiescedOutcomePolicy.timeout` is `offline_copy`. Policy tables,
+  `chooseBackupRung`, `predictTransferMs`, `contentionRetryVerdict`,
+  `kReuseEligibleKinds` and the two relational envelope pins
+  (`backupBudgetPins`, pinned by `constants-cadence.test.js`) move to
+  `lib/server/openclaw-backup-ladder.js` (re-exported by channel-sync);
+  `kOpenclawBackupLiveAttempts = 2`. `runBackupDiagnosis` walks the state tree
+  once with the policy excludes (bounded by `kOpenclawBackupDiagnosisBudgetMs`;
+  the phase deadline is stamped after it) and predicts upstream vs copy from
+  prior-run rates. The offline copy applies `kOfflineCopyPolicyExcludes`
+  (`node_modules`, `*.heapsnapshot`, `*.tmp`, `logs/**/*.gz` — inside
+  workspaces only, gitignore-style, core-asset patterns refused) and writes
+  manifest `alphaclawFormatVersion: 2` with `excludes[]` and `coverage {
+  core: complete | partial, workspace: complete | policy_excluded | omitted }`
+  (`partial` stays reserved for a missing core asset; the reader accepts 1 and
+  2). Every rung is one `run.backup.attemptsDetail[]` entry and one
+  `backup_rung` event; a `progressIntervalMs` ticker feeds the backup log, the
+  SSE output pane and the live step row (`stepRecorder.updateDetail`).
+  `crossesChannelBoundary` (`lib/channel-boundary.js`, persisted
+  `state.applied.channel` as provenance) joins the hard gate and is the SAME
+  predicate the Upgrade confirm renders from.
+- **A migrating apply without a backup asks first (#79 (b), Stage 4).** The
+  post-preflight checkpoint refuses `migrationRequired && noBackup` with
+  `409 backup_required_for_migration` (distinct from the hard gate's
+  non-overridable `backup_failed`), overridable only by the operator's
+  `confirmNoBackup: true` (strict boolean, humans only — agent 403 — a manifest
+  param validated beside `parseBackupReuseConsent`), recorded as
+  `backup.noBackupConfirmed` (`"unused"` when a satisfied `allowBackupReuse`
+  made it moot — reuse is evaluated first) and named in the outcome
+  notification; the Upgrade tab renders the consent checkbox only for the
+  overridable code.
+- **Kill switches (deployment env only, README rows):**
+  `OPENCLAW_CRASH_CAUSE_LADDER=off` (classification and fingerprints still
+  record; the ladder and the pause never act), `OPENCLAW_LAUNCH_COMPAT_GATE=off`
+  (boot and runtime gate skipped), `OPENCLAW_RUNTIME_RECONCILE=off` (runtime
+  `reconcileInstalled` callers refuse; the boot belt keeps running).
+- **Persisted-format fixtures (#76 C5).** `tests/server/fixtures/persisted-formats/<file>/<era>.json`
+  + README, exercised by `state-file-compat.test.js` for
+  `alphaclaw-server.pid` (legacy / v0.9.73 / v0.9.77), the channel state, runs,
+  the restart-op record (foreign `bootId` → `interrupted`), `gateway-state.json`
+  (old shape without `cause` round-trips), `boot-report.json`,
+  `alphaclaw-version.json`, `auto-repair-pause.json` and
+  `openclaw-schema-versions.json` (corrupt → lenient).
+- **Container leg.** `tests/container/openclaw-container-boot-durability.e2e.test.js`
+  reproduces the incident deterministically: boot container A, read a REAL
+  thread id of its server process from `/proc/<pid>/task`, remove A, seed the
+  volume with `{ pid: <tid>, at: <old> }` plus a `running` run, a foreign-boot
+  restart operation and a `.tmp` archive, boot container B and assert via
+  `boot-report.json` that the pidfile decision was `thread` / `own_thread`,
+  the recorded build activated, the pidfile is `format: 2`, the records are
+  closed, the `.tmp` is gone and the gateway is healthy.
+
+### Changed
+
+- **One reason-aware `gatewayHold` (Codex 6).** `state.gatewayHold` stays the
+  only hold key; `kStructuralHoldReasons` (`version_mismatch`,
+  `state_db_unreadable`, `activation_failed`, written by `setStructuralHold`
+  with `detail` / `installed` / `expected` / `bootId`) vs migration-class
+  reasons, `isMigrationClassHold` exported by both the store and channel-sync.
+  `reconcileBootConfigInner`'s migration branches act only on a migration-class
+  hold — a structural hold returns `held` before any snapshot or `doctor --fix`
+  — and `readRestartBlocker`, `runRepair`, the retry route and the reducer
+  honour it generically. The plan's separate `versionMismatchHold` was not
+  built.
+- **`/proc` reasoning has one home.** `readProcTgid`, `readContainerStartTicks`
+  and `readContainerStartMs` live in `openclaw-lock-contention.js` (the module
+  that carries the belt stamps) and are imported by the store; the store's
+  options gain `killFn` and `readContainerStartMs` seams. The `describeSelf()`
+  claim is `format: 2` with `containerStartTicks`.
+- **Notification ids and copy.** `config-restore-<v>` is day-bucketed
+  (`config-restore-<v>-<day>`); the give-up notice is `🔴 Auto-repair paused`
+  with a cause line; the apply outcome names `confirmNoBackup` consent;
+  `kAutoRepairPauseCopy` / `kRepairAttemptsExhaustedCopy` /
+  `kReconcileInstalledCopy` in `gateway-state.js` are the single homes for the
+  new operator copy.
+- **Test hygiene.** The bin boot-spine tests point the operator-shell
+  `profile.d` snippet into the temp root (the real bin used to write
+  `/etc/profile.d` during tests — a structural refusal is a TODO), pin
+  `HOME`/`XDG_*` in bin-spawning tests, and the lookalike fixtures append
+  `start` (one fixture without it asserts `null`).
+- **Tests added and docs touched.** New suites:
+  `tests/server/{openclaw-schema-versions,gateway-crash-cause,boot-report,boot-report-steps,boot-launch-steps,boot-id,alphaclaw-self-version,diagnose,routes-diagnose,config-key-diff,config-gate-intent,file-retention,channel-boundary,watchdog-structural-repair,claude-code-local-incident-bundle}.test.js`,
+  `tests/bin/diagnose-cli.test.js`, `tests/frontend/upgrade-reconcile-installed.test.js`,
+  the persisted-format fixtures and the container leg; extended:
+  `openclaw-release-channel`, `openclaw-channel-sync`,
+  `openclaw-channel-boot.e2e`, `openclaw-channel-apply.e2e`,
+  `openclaw-channel-backup-retry.e2e`, `watchdog`, `watchdog-incidents`,
+  `watchdog-channel-rollback`, `watchdog-gateway-channel.e2e`,
+  `watchdog-status-fields`, `startup`, `server-lifecycle`, `gateway-state`,
+  `gateway-medic`, `doctor-guard`, `restart-required-state`,
+  `state-file-compat`, `constants-cadence`, `openclaw-backup-offline-copy`,
+  `openclaw-lock-contention`, `admin-manifest`, `routes-openclaw-channel`,
+  `routes-watchdog`, `tests/bin/alphaclaw`, the live-tier contention test and
+  `tests/browser/claude-code-launcher-smoke.sh`. Docs: AGENTS.md release-channel
+  invariants (activation-at-boot exception, the one-hold model, pidfile
+  identity, the backup ladder for copy-first / excludes / coverage / consent,
+  repair contract (4) and (8)–(10), exec approvals, the medic's doctor-bin
+  routing, runbook steps 0 and 9); `docs/designs/gateway-state-model.md`
+  header, §4 row 5 and §9; `docs/designs/backup-offline-copy.md` §1–§4;
+  `docs/upgrade-troubleshooting.md` "`alphaclaw diagnose`", "Version mismatch
+  — running ≠ expected", "Auto-repair paused", "Backup: continue without a
+  backup (consent)", the copy-first rewrites of "Still failing?" and "Reusing
+  a recent backup", and "Where the evidence lives"; README (diagnose verb,
+  release-channel and watchdog rows, three env rows); TODOS.md (closed F015,
+  the F004 `writeServerPid` half, the diagnostic bundle, the rescue-session
+  seed and the P0 red-suites item; amended the `WATCHDOG_*` clamp, the belt
+  inventory and the stderr-corroboration item; nine new entries from the
+  plan's Deferred list and the Stage 4 review).
+
+### Known
+
+- **The container tier was not runnable here.** `npm run test:container`
+  (including the new boot-durability leg and the copy-first / format-2
+  update to `tests/live/openclaw-live-backup-contention.e2e.test.js`) needs
+  Docker, which the sandbox that shipped this release does not have; the
+  hermetic suite is green (baseline `main` 458 files / 7501 tests → 475 /
+  8296 after Stage 4, Node 22.23.2). The first green container run on `main`
+  is the confirmation.
+- **The true AlphaClaw self-upgrade container leg is deferred.** Booting the
+  0.9.76 image on a seeded volume and then the branch build on the SAME
+  volume — the exact shape of the incident — needs a two-image harness; the
+  single-image durability leg reproduces the pidfile mechanism instead.
+  Tracked in TODOS.md beside C4 (protected first boot after a self-upgrade),
+  with the B2 LLM plan step, the `claude remote-control` initial-prompt probe,
+  the Copy-diagnostics rewire, the live-tier `kOpenclawLines` update and the
+  kernel-advisory-lock evaluation.
+- **TODOS:1050's red suites were an environment artifact.** The sandbox's
+  default `node` 24.14.1 fails OpenClaw 2026.9.2's `engines` check
+  (`>=22.22.3 <23 || >=24.15.0 <25 || >=25.9.0`), so every test that spawned
+  the real pinned CLI failed; under Node 22 untouched `main` was green and the
+  item is closed.
+
+### Rollback
+
+- **Kill switches first, revert second.** If the new machinery misbehaves,
+  set `OPENCLAW_CRASH_CAUSE_LADDER=off` (structural repair + pause never
+  act; classification still records), `OPENCLAW_LAUNCH_COMPAT_GATE=off`
+  (no boot/relaunch hold on schema compatibility) and/or
+  `OPENCLAW_RUNTIME_RECONCILE=off` (no runtime re-activation) in the
+  deployment environment and restart. Only if that is not enough,
+  `git revert` the squash commit and redeploy 0.9.76: it ignores every
+  artifact 0.9.77 leaves behind — `boot-report*.json`,
+  `alphaclaw-version.json`, `openclaw-schema-versions.json`,
+  `auto-repair-pause.json`, `config-gate/`, `INCIDENT-*.md` are unknown
+  files; `lastTransition`, `pinLag` and a structural `gatewayHold.reason`
+  survive `normalizeState`'s rest-spread and are never read;
+  `gateway-state.json`'s `cause` / `versionMismatch` are dropped by 0.9.76's
+  `restore()` whitelist; the `watchdog.db` columns `cause_json` / `severity`
+  are additive and unread; a converged pidfile (`format: 2`,
+  `legacyClaim: true`, no `startTicks`) reads as a legacy claim (skip-and-boot,
+  today's behaviour). Manifest format-2 archives stay restorable by hand
+  (the manifest is a superset of format 1). Time to roll back: one redeploy.
+
 ## [0.9.76] - 2026-09-06
 
 Pins OpenClaw to 2026.9.2 — npm's `latest` tag and the newest published

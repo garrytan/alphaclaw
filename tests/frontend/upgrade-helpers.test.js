@@ -942,7 +942,7 @@ describe("frontend/upgrade-helpers confirm models (U1/U3/U9)", () => {
     expect(model.steps.join(" → ")).toContain("Backup → Download → Verify");
   });
 
-  it("states the gateway backup pause on breaking applies only", async () => {
+  it("states the gateway backup pause on every apply — after the hard-gate note when there is one (#79 D1a)", async () => {
     const { buildApplyConfirmModel, kBackupPauseNote } =
       await loadUpgradeHelpers();
 
@@ -963,14 +963,18 @@ describe("frontend/upgrade-helpers confirm models (U1/U3/U9)", () => {
     expect(gateIndex).toBeGreaterThan(-1);
     expect(breaking.lines[gateIndex + 1]).toBe(kBackupPauseNote);
 
-    // A same-channel non-prerelease apply never pauses the gateway — no note.
+    // A same-channel non-prerelease apply is soft-gated (no hard-gate note)
+    // but since #79 (D1a) it pauses the gateway too: the copy-first backup
+    // runs inside the pause for EVERY apply, so the confirm says so.
     const routine = buildApplyConfirmModel({
       payload: { channel: "stable", version: "2026.7.2" },
       label: "2026.7.2",
       currentChannel: "stable",
       notesAvailable: true,
     });
-    expect(routine.lines.join(" ")).not.toContain(kBackupPauseNote);
+    expect(routine.hardGate).toBe(false);
+    expect(routine.lines).not.toContain("If the backup fails, nothing is installed.");
+    expect(routine.lines).toContain(kBackupPauseNote);
   });
 
   it("marks degraded release-notes availability in the breaking confirm", async () => {
