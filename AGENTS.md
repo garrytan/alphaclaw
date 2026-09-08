@@ -26,7 +26,7 @@ Runtime model:
 
 ### Key Technologies
 
-- Node.js 22.22.3+ runtime (or a supported Node 24.15+/25.9+ release).
+- Node.js 24.16.0+ runtime (or Node 26.1.0+). Node 22 and 25 are no longer supported: OpenClaw 2026.9.3 requires `>=24.16.0 <25 || >=26.1.0` and older runtimes truncate SQLite text. `package.json` `engines.node`, `lib/node-runtime.js` (`kAlphaclawNodeEngines`) and the `node:24-slim` image move together.
 - Express-based HTTP API server.
 - `http-proxy-3` (pinned in `package.json`) for gateway proxy behavior, with `lil-http-terminator` for graceful HTTP drain on shutdown.
 - OpenClaw CLI/gateway process orchestration.
@@ -104,7 +104,7 @@ The Agent Administration feature (default OFF) lets the deployed OpenClaw agent 
 
 A GitHub ruleset protects `main`: PRs required (no direct pushes), squash-only,
 required conversation resolution, strict up-to-date, and required status checks
-`test (22)` and `gate` (the always-running container-e2e aggregator). `test (24)` runs on every PR as a non-blocking early-warning lane (`continue-on-error` in ci.yml, fix wave F178); promote it to required in the ruleset once it has been green for a week (TODOS.md).
+`test (24)` and `gate` (the always-running container-e2e aggregator). `test (26)` runs on every PR as a non-blocking early-warning lane (`continue-on-error` in ci.yml); promote it to required in the ruleset once it has been green for a week. (Until v0.9.80 the required lane was `test (22)`; the Node 24 runtime bump moved it.)
 There are 0 required approvals — this is a solo repo where any higher count
 deadlocks; the gate is CI, not human sign-off. Details:
 
@@ -143,7 +143,7 @@ Use this release flow when promoting tested beta builds to production:
    `main` (do NOT run `npm version`; `tag-release.yml` created the `v<version>`
    tag on merge):
    - `npm publish` (publishes to `latest`)
-   - Pin all deployment templates on `main` to that release: set `@chrysb/alphaclaw` in `~/Projects/openclaw-railway-template`, `~/Projects/openclaw-render-template`, and `~/Projects/openclaw-apex-template` to the released version. The Render checkout must track `render-examples/openclaw-render-template`; verify `gh api repos/render-examples/openclaw-render-template --jq '.permissions.push'` returns `true` before publishing, and stop if write access is missing. Templates rely on AlphaClaw’s declared `openclaw` dependency — do not add `package.json` `overrides` for `openclaw` unless you have a one-off debug reason. Run `npm install` in each repo, confirm `npm ls openclaw` matches AlphaClaw’s `package.json` pin, commit `package.json` and `package-lock.json`, and push. Skipping a template leaves it stale relative to the others.
+   - Pin all deployment templates on `main` to that release: set `@chrysb/alphaclaw` in `~/Projects/openclaw-railway-template`, `~/Projects/openclaw-render-template`, and `~/Projects/openclaw-apex-template` to the released version. The Render checkout must track `render-examples/openclaw-render-template`; verify `gh api repos/render-examples/openclaw-render-template --jq '.permissions.push'` returns `true` before publishing, and stop if write access is missing. Templates rely on AlphaClaw’s declared `openclaw` dependency — do not add `package.json` `overrides` for `openclaw` unless you have a one-off debug reason. Run `npm install` in each repo, confirm `npm ls openclaw` matches AlphaClaw’s `package.json` pin, commit `package.json` and `package-lock.json`, and push. Skipping a template leaves it stale relative to the others. **Base image:** each template's Dockerfile must run the Node line AlphaClaw's `engines.node` allows — since v0.9.80 (OpenClaw 2026.9.3) that is `node:24-slim` (Node ≥ 24.16), not `node:22-slim`; a template left on Node 22 boots an AlphaClaw whose `assertSupportedNodeVersion` refuses to start.
 5. Return templates to production channel:
    - `@chrysb/alphaclaw: "latest"`
 6. Optionally keep beta branch/tag flows active for next release cycle.

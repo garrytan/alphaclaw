@@ -4,8 +4,18 @@
     {
       "minor": "2026.9",
       "channel": "beta",
-      "lastVerifiedVersion": "2026.9.2",
+      "lastVerifiedVersion": "2026.9.3",
       "highlights": [
+        {
+          "title": "Node 24.16 or newer required",
+          "body": "OpenClaw 2026.9.3 no longer runs on Node 22 or 25 — it needs Node 24.16+ (or 26.1+) because older runtimes can truncate SQLite text. AlphaClaw v0.9.80 moves its image to Node 24; an AlphaClaw still on the Node 22 image cannot install this release and the catalog row says so.",
+          "tone": "info"
+        },
+        {
+          "title": "Safer updates",
+          "body": "Updates rehearse core and plugin changes in an isolated candidate state before activating, migrate eligible 2026.9.2 state, and recover abandoned update records without stopping a healthy gateway.",
+          "tone": "info"
+        },
         {
           "title": "Faster chat and dashboards",
           "body": "Long transcripts, dashboards and session lists stay responsive: conversations load sooner and heavy transcript and disk work no longer blocks the agent.",
@@ -55,6 +65,12 @@
           "from": "off",
           "to": "on",
           "warning": "Agents can spawn concurrent sub-agents (Swarm) by default, which multiplies the work — and the token spend — one request can trigger. Set it to false after upgrading to keep sub-agents opt-in."
+        },
+        {
+          "key": "gateway.cliAgents.enabled",
+          "from": "off",
+          "to": "on",
+          "warning": "Since 2026.9.3 the new-session model picker shows supported CLI agents and can create native CLI sessions without a separate opt-in. Set it to false after upgrading if this box should not launch CLI agents."
         }
       ]
     },

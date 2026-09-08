@@ -316,7 +316,7 @@ describeContainer("container E2E: stable→beta upgrade in the production image"
   step("image carries tar + gzip (the offline copy and the usable check need them)", 2 * kMin, async () => {
     // The #54 offline copy archives with `tar -I 'gzip -1'` and every
     // verified artifact passes `gzip -t` + `tar -xzOf … manifest.json`
-    // (WI-6.1). node:22-slim ships both, but a slimmer base or a stripped
+    // (WI-6.1). node:24-slim ships both, but a slimmer base or a stripped
     // layer would turn every hard-gated backup into a verify failure — so
     // the image itself is asserted, not assumed. `command -v` exits 1 when a
     // tool is missing, which docker() surfaces as a rejection.

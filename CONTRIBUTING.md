@@ -43,7 +43,7 @@ For big changes, open an issue describing what you want to build, why, and your 
 
 ### Prerequisites
 
-- Node.js >= 22.22.3 on Node 22, >= 24.15.0 on Node 24, or >= 25.9.0
+- Node.js >= 24.16.0 on Node 24, or >= 26.1.0 on Node 26 (Node 22 and 25 are no longer supported: OpenClaw 2026.9.3 requires 24.16+/26.1+)
 - Git
 
 ### Setup
@@ -76,7 +76,7 @@ AlphaClaw uses [Vitest](https://vitest.dev/) for testing. `npm test` is hermetic
 
 The moving-target live tier requires Node 24.16+ in the 24.x line for current OpenClaw releases; put that runtime first on `PATH` so its child installs use it. The dev test uses a disposable global npm installation; it does not cover the production nested-dependency bootstrap, which upstream currently refuses. The container tier also covers a deterministic thread-ID collision and an immutable AlphaClaw v0.9.76 → candidate upgrade on one persistent volume. See [cloud testing](docs/cloud-testing.md) for commands, measured evidence, and remaining registry/dev coverage gaps.
 
-CI (`.github/workflows/ci.yml`) runs `npm test` on Node 22 and Node 24. The `main` ruleset's required checks are `test (22)` and `gate` (the always-running container-e2e aggregator in `.github/workflows/container-e2e.yml`); `test (24)` is a non-blocking early-warning lane (`continue-on-error`) until the ruleset lists it as required (tracked in TODOS.md).
+CI (`.github/workflows/ci.yml`) runs `npm test` on Node 24 and Node 26. The `main` ruleset's required checks are `test (24)` and `gate` (the always-running container-e2e aggregator in `.github/workflows/container-e2e.yml`); `test (26)` is a non-blocking early-warning lane (`continue-on-error`) until the ruleset lists it as required.
 
 ### Project Structure
 
@@ -92,7 +92,7 @@ CI (`.github/workflows/ci.yml`) runs `npm test` on Node 22 and Node 24. The `mai
 
 1. Fork the repo and create a branch from `main`.
 2. Make your changes. Write tests if applicable.
-3. Run `npm test` and make sure everything passes. CI runs the suite on Node 22 (the required check) and Node 24 (an advisory, non-blocking lane).
+3. Run `npm test` and make sure everything passes. CI runs the suite on Node 24 (the required check) and Node 26 (an advisory, non-blocking lane).
 4. Bump the version. CI's version guard (`scripts/ci/assert-version-advances.mjs`) fails any PR whose `package.json` version does not strictly advance `main`'s — every PR bumps, reverts included. Claim the next free number in your final pre-merge commit, keep `package-lock.json` in step, and add a matching `CHANGELOG.md` entry (see "Merge unification safety" in `CLAUDE.md`).
 5. Write a clear PR description: what changed, why, and how to test it.
 6. Sign off your commits (see DCO below).

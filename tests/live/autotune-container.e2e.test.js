@@ -24,7 +24,7 @@ const dockerAvailable = (() => {
   }
 })();
 
-const kImage = "node:22-slim";
+const kImage = "node:24-slim";
 const kMb = 1024 * 1024;
 
 const runInContainer = ({ memory, nodeArgs = [], script, timeoutMs = 120000 }) =>

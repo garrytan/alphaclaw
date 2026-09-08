@@ -12,17 +12,30 @@ const wf = (name) =>
   );
 
 describe("ci/merge-gate workflow contract", () => {
-  it("ci.yml keeps the required check name 'test (22)', runs Node 24 as a non-blocking lane, and runs the version guard on PRs", () => {
+  it("ci.yml keeps the required check name 'test (24)', runs Node 26 as a non-blocking lane, and runs the version guard on PRs", () => {
     const ci = wf("ci.yml");
-    // The ruleset requires the context "test (22)" (job `test`, node matrix
-    // leading with 22). Node 24 is an early-warning lane (fix wave F178): it
-    // must stay non-blocking until the ruleset lists "test (24)" as required.
+    // The ruleset requires the context "test (24)" (job `test`, node matrix
+    // leading with 24 — v0.9.80 moved the runtime floor to Node 24.16 for the
+    // OpenClaw 2026.9.3 pin; Node 22 left the matrix). Node 26 is the
+    // early-warning lane (fix wave F178 pattern): it must stay non-blocking
+    // until the ruleset lists "test (26)" as required.
     expect(ci).toMatch(/job.*\n\s*test:|^\s{2}test:/m);
-    expect(ci).toMatch(/node-version:\s*\[22,\s*24\]/);
-    expect(ci).toMatch(/continue-on-error:\s*\$\{\{\s*matrix\.node-version == 24\s*\}\}/);
+    expect(ci).toMatch(/node-version:\s*\[24,\s*26\]/);
+    expect(ci).not.toMatch(/node-version:\s*\[22/);
+    expect(ci).toMatch(/continue-on-error:\s*\$\{\{\s*matrix\.node-version == 26\s*\}\}/);
     expect(ci).toMatch(/fail-fast:\s*false/);
     expect(ci).toContain("assert-version-advances.mjs");
-    expect(ci).toMatch(/if:\s*github\.event_name == 'pull_request' && matrix\.node-version == 22/);
+    expect(ci).toMatch(/if:\s*github\.event_name == 'pull_request' && matrix\.node-version == 24/);
+  });
+
+  it("every live/container workflow runs the Node the pinned OpenClaw requires (>=24.16)", () => {
+    // OpenClaw 2026.9.3 declares `>=24.16.0 <25 || >=26.1.0`; a Node 22 lane
+    // would spawn a CLI that refuses to start and fail every real install.
+    for (const name of ["container-e2e.yml", "live-e2e.yml"]) {
+      const text = wf(name);
+      expect(text, name).not.toMatch(/node-version:\s*22\b/);
+      expect(text, name).toMatch(/node-version:\s*24\b/);
+    }
   });
 
   it("every workflow that runs third-party code holds a read-only token (fix wave F177)", () => {

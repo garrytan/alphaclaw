@@ -279,7 +279,7 @@ The "usable" check every archive must pass (`backup.usableCheck:
 `tar -xzOf … --wildcards --no-wildcards-match-slash --occurrence=1
 '*/manifest.json'`. Those are **GNU tar** long options; busybox tar and
 BSD `bsdtar` (Alpine, macOS) reject them, and the check has no fallback.
-The production image (`node:22-slim`, Debian) ships GNU tar and gzip, and
+The production image (`node:24-slim`, Debian) ships GNU tar and gzip, and
 the container tier asserts it (`tar --version` must report `GNU tar`) so
 the image is checked rather than assumed. Only the offline copy's *write*
 step has a portable `tar | gzip -1` pipe — that path is dead-ended on a

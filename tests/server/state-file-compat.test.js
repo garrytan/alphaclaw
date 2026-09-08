@@ -1208,7 +1208,8 @@ describe("persisted-format fixtures: openclaw-schema-versions.json (v0.9.77, tor
 
     expect(table.read()).toEqual({ byVersion: seededView(), origin: "unreadable" });
     expect(table.supportedFor("2026.9.2")).toEqual({ state: 15, agent: 19, source: "seeded" });
-    expect(table.supportedFor("2026.9.3")).toEqual({ state: null, agent: null, source: null });
+    // 2026.9.9 is not seeded (2026.9.3 has been since v0.9.80): an unknown version answers nulls.
+    expect(table.supportedFor("2026.9.9")).toEqual({ state: null, agent: null, source: null });
     expect(logger.warn).toHaveBeenCalledTimes(1);
     expect(logger.warn.mock.calls[0][0]).toContain("seeded");
 

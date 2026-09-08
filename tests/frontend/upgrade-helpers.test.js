@@ -2648,3 +2648,81 @@ describe("frontend/upgrade-helpers backup reuse consent (WI-4.4/4.5)", () => {
     expect(buildBackupPartialReasonText({ partialReasons: ["  a ", 7, "b"] })).toBe("a; b");
   });
 });
+
+describe("frontend/upgrade-helpers engines gate (v0.9.80 — OpenClaw 2026.9.3 needs Node 24.16+)", () => {
+  const kSpec = ">=24.16.0 <25 || >=26.1.0";
+
+  it("blocks a row whose engines the running Node fails, with a note naming both", async () => {
+    const { buildEnginesGateModel } = await loadUpgradeHelpers();
+    const gate = buildEnginesGateModel({
+      row: { version: "2026.9.3", engines: { node: kSpec } },
+      nodeVersion: "v22.22.3",
+    });
+    expect(gate.blocked).toBe(true);
+    expect(gate.spec).toBe(kSpec);
+    expect(gate.note).toContain(`Needs Node.js ${kSpec}`);
+    expect(gate.note).toContain("runs Node 22.22.3");
+    expect(gate.note).not.toContain("v22");
+  });
+
+  it("passes a satisfied requirement, a missing requirement, an unknown runtime and an exotic spec", async () => {
+    const { buildEnginesGateModel } = await loadUpgradeHelpers();
+    expect(buildEnginesGateModel({ row: { engines: { node: kSpec } }, nodeVersion: "24.16.0" }).blocked).toBe(false);
+    expect(buildEnginesGateModel({ row: { engines: { node: kSpec } }, nodeVersion: "26.1.0" }).blocked).toBe(false);
+    expect(buildEnginesGateModel({ row: { engines: null }, nodeVersion: "22.22.3" })).toEqual({ blocked: false, spec: null, note: null });
+    expect(buildEnginesGateModel({ row: {}, nodeVersion: "22.22.3" }).blocked).toBe(false);
+    // Unknown runtime (older server without channelInfo.nodeVersion): never block.
+    expect(buildEnginesGateModel({ row: { engines: { node: kSpec } }, nodeVersion: null }).blocked).toBe(false);
+    // Outside the published grammar: npm's warn-only posture.
+    expect(buildEnginesGateModel({ row: { engines: { node: "^20 || ~18.17" } }, nodeVersion: "22.22.3" }).blocked).toBe(false);
+  });
+
+  it("agrees with the server's evaluator (one module, two consumers)", async () => {
+    const { buildEnginesGateModel } = await loadUpgradeHelpers();
+    const { satisfiesEngines } = require("../../lib/engines-range");
+    for (const version of ["22.22.3", "24.14.1", "24.16.0", "25.9.0", "26.0.0", "26.1.0"]) {
+      expect(
+        buildEnginesGateModel({ row: { engines: { node: kSpec } }, nodeVersion: version }).blocked,
+        version,
+      ).toBe(!satisfiesEngines(kSpec, version));
+    }
+  });
+
+  it("never makes an engines-blocked row the 'Update to latest' target", async () => {
+    const { getLatestApplicableTarget } = await loadUpgradeHelpers();
+    const catalog = {
+      stable: [
+        {
+          version: "2026.9.3",
+          isDistTagLatest: true,
+          engines: { node: kSpec },
+          current: false,
+          blocklisted: null,
+          applyPayload: { channel: "stable", version: "2026.9.3" },
+        },
+        {
+          version: "2026.9.2",
+          isDistTagLatest: false,
+          engines: { node: ">=22.22.3 <23 || >=24.15.0 <25 || >=25.9.0" },
+          current: false,
+          blocklisted: null,
+          applyPayload: { channel: "stable", version: "2026.9.2" },
+        },
+        { version: "2026.9.1", current: true, blocklisted: null },
+      ],
+      beta: [],
+      dev: { commits: [] },
+    };
+    // On Node 22 the 2026.9.3 row is blocked; the CTA falls to the newest row
+    // this box can actually run.
+    expect(
+      getLatestApplicableTarget({ catalog, releaseChannel: "stable", nodeVersion: "22.22.3" }).label,
+    ).toBe("2026.9.2");
+    // On Node 24.16 the dist-tag latest is eligible again.
+    expect(
+      getLatestApplicableTarget({ catalog, releaseChannel: "stable", nodeVersion: "24.16.0" }).label,
+    ).toBe("2026.9.3");
+    // Unknown runtime: no gate (older server), dist-tag latest wins as before.
+    expect(getLatestApplicableTarget({ catalog, releaseChannel: "stable" }).label).toBe("2026.9.3");
+  });
+});

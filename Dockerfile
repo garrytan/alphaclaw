@@ -15,7 +15,7 @@
 # to what production runs: tini as PID 1, ALPHACLAW_ROOT_DIR on the /data
 # volume, port 3000, and `alphaclaw start` (restartProcess() exits the
 # process inside a container and relies on the orchestrator restart policy).
-FROM node:22-slim
+FROM node:24-slim
 # tmux hosts the local Claude Code rescue session in a detached session that
 # survives AlphaClaw process restarts (a human can also attach over SSH).
 RUN apt-get update && apt-get install -y --no-install-recommends git curl procps cron tini tmux ca-certificates && rm -rf /var/lib/apt/lists/*

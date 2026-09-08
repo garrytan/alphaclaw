@@ -4692,10 +4692,26 @@ describe("server/openclaw-channel-sync", () => {
     it("gates on a >=major floor and passes everything unparseable or empty", () => {
       expect(enginesSatisfied(">=22", "20.0.0")).toBe(false);
       expect(enginesSatisfied(">=22", "22.1.0")).toBe(true);
-      // No >=N floor to enforce: warn-only posture, like npm engines.
+      // Outside the published grammar: warn-only posture, like npm engines.
       expect(enginesSatisfied("^20 || ~18.17", "20.0.0")).toBe(true);
       expect(enginesSatisfied("", "20.0.0")).toBe(true);
       expect(enginesSatisfied(undefined, "20.0.0")).toBe(true);
+    });
+
+    it("judges the full range, not the major alone (v0.9.80 — OpenClaw 2026.9.3)", () => {
+      // The old major-only gate waved Node 24.14 through to a build that
+      // refuses to start, and Node 25 through although the range excludes it.
+      const spec = ">=24.16.0 <25 || >=26.1.0";
+      expect(enginesSatisfied(spec, "22.22.3")).toBe(false);
+      expect(enginesSatisfied(spec, "24.14.1")).toBe(false);
+      expect(enginesSatisfied(spec, "24.16.0")).toBe(true);
+      expect(enginesSatisfied(spec, "v24.20.0")).toBe(true);
+      expect(enginesSatisfied(spec, "25.9.0")).toBe(false);
+      expect(enginesSatisfied(spec, "26.0.0")).toBe(false);
+      expect(enginesSatisfied(spec, "26.1.0")).toBe(true);
+      // Same evaluator as the boot floor and the UI rows.
+      const { satisfiesEngines } = require("../../lib/engines-range");
+      expect(enginesSatisfied(spec, "24.14.1")).toBe(satisfiesEngines(spec, "24.14.1"));
     });
   });
 

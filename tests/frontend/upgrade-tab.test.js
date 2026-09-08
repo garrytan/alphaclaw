@@ -1229,6 +1229,57 @@ describe("frontend/upgrade-tab view", () => {
     expect(onCheckNow).toHaveBeenCalledTimes(1);
   });
 
+  it("names a catalog row this Node cannot run and disables its Apply (v0.9.80 engines gate)", () => {
+    const spec = ">=24.16.0 <25 || >=26.1.0";
+    const tree = renderView({
+      channelInfo: makeChannelInfo({ nodeVersion: "22.22.3" }),
+      catalog: makeCatalog({
+        distTags: { latest: "2026.9.3" },
+        stable: [
+          makeStableRow({
+            version: "2026.9.3",
+            engines: { node: spec },
+            applyPayload: { channel: "stable", version: "2026.9.3" },
+          }),
+          makeStableRow({
+            version: "2026.7.1-2",
+            isDistTagLatest: false,
+            current: true,
+            lastKnownGood: true,
+            applyPayload: { channel: "stable", version: "2026.7.1-2" },
+          }),
+        ],
+      }),
+    });
+    const text = treeText(tree);
+    expect(text).toContain(`Needs Node.js ${spec}`);
+    expect(text).toContain("runs Node 22.22.3");
+    // The row's own action is disabled, and the blocked row is not the
+    // "Update to latest stable" target either (only the current row remains).
+    const rowAction = findActionButtonByLabel(tree, "Upgrade");
+    expect(rowAction).toBeTruthy();
+    expect(rowAction.props.disabled).toBe(true);
+    expect(findActionButtonByLabel(tree, "Update to latest stable")).toBeUndefined();
+
+    // Same catalog on a supported runtime: no note, Apply enabled, CTA back.
+    const supported = renderView({
+      channelInfo: makeChannelInfo({ nodeVersion: "24.16.0" }),
+      catalog: makeCatalog({
+        distTags: { latest: "2026.9.3" },
+        stable: [
+          makeStableRow({
+            version: "2026.9.3",
+            engines: { node: spec },
+            applyPayload: { channel: "stable", version: "2026.9.3" },
+          }),
+        ],
+      }),
+    });
+    expect(treeText(supported)).not.toContain("Needs Node.js");
+    expect(findActionButtonByLabel(supported, "Upgrade").props.disabled).toBe(false);
+    expect(findActionButtonByLabel(supported, "Update to latest stable")).toBeTruthy();
+  });
+
   it("cross-links to the AlphaClaw update dialog as plain guidance (U16)", () => {
     const tree = renderView({
       channelInfo: makeChannelInfo(),

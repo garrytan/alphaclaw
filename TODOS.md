@@ -119,7 +119,8 @@
 - **Why:** Raised by the fix wave's engineering review as class-level hardening beyond the audit's confirmed instances.
 - **Effort:** varies (XS–M). **Priority:** as listed.
 
-## P3 — Promote `test (24)` to a required check once it has been green for a week (2026-09-04, fix wave PR 12)
+## ~~P3 — Promote `test (24)` to a required check once it has been green for a week (2026-09-04, fix wave PR 12)~~
+- **Completed:** v0.9.80 (2026-09-08) — overtaken by the Node 24.16 runtime bump for the OpenClaw 2026.9.3 pin: Node 22 left `ci.yml`'s matrix (`[24, 26]`), so `test (24)` is now the required lane and `test (26)` the non-blocking early-warning lane (`continue-on-error: ${{ matrix.node-version == 26 }}`). The ruleset's required status check must be renamed `test (22)` → `test (24)` in the same sitting as that PR's merge (`gh api --method PUT repos/<owner>/<repo>/rulesets/<id>`), or the PR cannot merge because the `test (22)` context never reports. Promoting `test (26)` later follows the same week-green rule.
 - **What:** ci.yml now runs the suite on Node 22 AND 24; the Node 24 lane is `continue-on-error` because the `main` ruleset only lists `test (22)` and `gate` as required. Once `test (24)` has passed on every PR for a week, add it to the ruleset's required checks and drop the `continue-on-error` expression (and the matching `workflow-contract.test.js` pin).
 - **Why:** Node 24 is the next LTS the launcher will meet on user boxes; a non-blocking lane surfaces breakage early without holding merges hostage to a lane nobody has watched yet.
 - **Context:** `.github/workflows/ci.yml` (`continue-on-error: ${{ matrix.node-version == 24 }}`), `tests/ci/workflow-contract.test.js`, AGENTS.md merge-gate section.

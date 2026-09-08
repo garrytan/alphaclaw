@@ -15,17 +15,17 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
-    # The branch ruleset requires the context "test (22)" plus the container
-    # `gate`. Node 24 runs as an early-warning lane (fix wave F178): its
+    # The branch ruleset requires the context "test (24)" plus the container
+    # `gate`. Node 26 runs as an early-warning lane (fix wave F178 pattern): its
     # failure is reported but does not block the merge until the ruleset lists
-    # "test (24)" as required (promote it once it has been green for a week —
-    # see TODOS.md).
-    continue-on-error: ${{ matrix.node-version == 24 }}
+    # "test (26)" as required (promote it once it has been green for a week).
+    # Node 22 left the matrix in v0.9.80: OpenClaw 2026.9.3 requires >=24.16.
+    continue-on-error: ${{ matrix.node-version == 26 }}
 
     strategy:
       fail-fast: false
       matrix:
-        node-version: [22, 24]
+        node-version: [24, 26]
 
     steps:
       - uses: actions/checkout@v4
@@ -43,7 +43,7 @@ jobs:
       # PR bumps, including reverts. See CLAUDE.md "Merge unification safety".
       - name: Version guard
         # Once per PR is enough — the guard is not Node-version dependent.
-        if: github.event_name == 'pull_request' && matrix.node-version == 22
+        if: github.event_name == 'pull_request' && matrix.node-version == 24
         env:
           BASE_REF: ${{ github.base_ref }}
         run: |
