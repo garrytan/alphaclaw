@@ -11,9 +11,11 @@ Pins OpenClaw **2026.9.3** (npm `latest` since 2026-09-07) and moves the
 AlphaClaw runtime to **Node 24.16+** to be able to. Upstream's release drops
 Node 22 and 25 (`engines.node: ">=24.16.0 <25 || >=26.1.0"`; "upgrade Node
 before OpenClaw to prevent SQLite text truncation"), so the pin, the image and
-the CI matrix move together. A box whose runtime fails the requirement (a custom
-image on Node 24.14, say — an unrebuilt `node:22-slim` box cannot run 0.9.80 at
-all) sees why on the catalog row instead of failing after the download.
+the CI matrix move together. An unrebuilt `node:22-slim` box cannot run 0.9.80
+at all (its boot refuses with the new floor), so today's catalog row for
+2026.9.3 is always applicable from a running 0.9.80; the engines gate below is
+forward-looking — the first FUTURE release whose requirement outgrows this
+AlphaClaw's Node is named on its row instead of failing after the download.
 
 ### Changed
 

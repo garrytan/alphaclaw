@@ -36,7 +36,7 @@
 // "timed out waiting for legacy audit migration lease
 // migration.legacy-audit/filesystem-sqlite-boundary" after ~11 s, with
 // "[sqlite/transaction] SQLite transaction lock wait failed" lines above it;
-// 2026.8.2 and the current 2026.9.2 pin carry the same lease.
+// 2026.8.2 and the 2026.9.x stable line (2026.9.2 recorded; the 2026.9.3 pin re-records on the next live run) carry the same lease.
 //
 // Requires: network (one real beta install, cached across live files) and a
 // supported Node. Runtime: ~2-4 min.

@@ -70,7 +70,7 @@ describeLive("LIVE `gateway stop --help` contract (capability-gated --force, WI-
       expect(text).not.toMatch(kUnknownCommandPattern);
       expect(text).toMatch(/Usage: openclaw gateway stop/);
       // Capability probing remains required for older installed builds.
-      // The current 2026.9.2 pin supports non-interactive forced stop.
+      // The current pin (kOpenclawLines.pin = the declared package.json pin) supports non-interactive forced stop.
       expect(text).toMatch(kForceFlagPattern);
     },
   );
