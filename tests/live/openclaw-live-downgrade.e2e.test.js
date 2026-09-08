@@ -36,6 +36,7 @@ const request = require("supertest");
 const {
   createOpenclawChannelSync,
 } = require("../../lib/server/openclaw-channel-sync");
+const { kOfflineCopyProducer } = require("../../lib/server/openclaw-backup-offline-copy");
 const {
   createOpenclawReleaseChannelStore,
 } = require("../../lib/server/openclaw-release-channel");
@@ -387,29 +388,40 @@ describeLive("LIVE #54 downgrade: real 2026.9.1-beta.1 → 2026.8.2 through the 
       );
       expect(preflightStep.detail).toMatch(/schema migration will run at the next start/);
 
-      // The durable record: verified upstream artifact, usable, quiesced, one
-      // attempt (no writer raced the paused backup here), and the structured
-      // preflight verdict boot will size its migration from.
+      // The durable record (#79 D1a, copy-first): the AlphaClaw offline copy
+      // is the FIRST rung of every quiesce and succeeded on the paused, quiet
+      // state dir, so the upstream CLI was never attempted — zero attempts,
+      // paused or live — and the record is a verified, usable format-2 copy
+      // plus the structured preflight verdict boot will size its migration
+      // from. (Before D1a this cell pinned `producer: "openclaw"`, one paused
+      // upstream attempt; the copy was only the fallback.)
       const record = readLedgerRun(harness, operationId);
       expect(record.backup).toEqual(
         expect.objectContaining({
           noBackup: false,
           verified: true,
           usableCheck: "manifest_ok",
-          producer: "openclaw",
+          producer: kOfflineCopyProducer,
           quiesced: true,
-          attempts: 1,
-          quiescedAttempts: 1,
+          attempts: 0,
+          quiescedAttempts: 0,
           contentionRetries: 0,
         }),
       );
-      expect(record.backup.file).toMatch(/openclaw-backup-.*\.tar\.gz$/);
+      expect(record.backup.attemptsDetail).toEqual([
+        expect.objectContaining({ rung: "offline_copy", reason: "primary", quiesced: true, ok: true }),
+      ]);
+      expect(record.backup.offlineCopy).toEqual(
+        expect.objectContaining({ ok: true, reason: "primary", partial: false }),
+      );
+      expect(record.backup.offlineCopy.next).toBeUndefined();
+      expect(record.backup.file).toMatch(/openclaw-backup-.*\.alphaclaw\.tar\.gz$/);
       expect(fs.statSync(record.backup.file).size).toBeGreaterThan(0);
       expect(record.dbPreflight).toEqual(
         expect.objectContaining({ migrationRequired: true, foundVersion: 12, targetVersion: 15 }),
       );
       expect(readRunBackupRecord(harness.openclawDir).file).toBe(record.backup.file);
-      // Quiesce transaction ran for real: stop → CLI → start → release.
+      // Quiesce transaction ran for real: stop → offline copy → start → release.
       expect(harness.gatewayQuiesce.calls.indexOf("stop")).toBeGreaterThanOrEqual(0);
       expect(harness.gatewayQuiesce.calls.indexOf("start")).toBeGreaterThan(
         harness.gatewayQuiesce.calls.indexOf("stop"),
