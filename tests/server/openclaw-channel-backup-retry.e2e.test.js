@@ -2004,6 +2004,42 @@ describe("server/openclaw-channel-backup-retry", () => {
       expect(readRunBackupRecord(plain.harness).noBackupConfirmed).toBeUndefined();
     });
 
+    it.each(["backed-up write", "schema change", "consented write"])("rechecks queued %s with the appropriate admission facts", async (scenario) => {
+      const lock = createGatewayLifecycleLock({ logger: kSilentLogger });
+      let harness, writer, lease;
+      const policy = createGatewayMutationPolicy({ lock,
+        getChannelInfo: () => harness.sync.getChannelInfo(),
+        isApplyInProgress: () => harness.sync.isApplyInProgress() });
+      const acquire = async (kind, options) => {
+        const predecessor = lock.tryAcquire("restart");
+        const queued = lock.acquire(kind, options);
+        writer.exec(scenario === "schema change"
+          ? "PRAGMA user_version = 16" : "INSERT INTO admission_writes VALUES (1)");
+        predecessor();
+        lease = await queued;
+        return lease;
+      };
+      ({ harness } = createMigratingBox({
+        script: scenario === "consented write" ? kRacedOut : [], agentUserVersion: null,
+        extraSyncOptions: { acquireLifecycleLock: acquire, gatewayMutationPolicy: policy },
+      }));
+      writer = new DatabaseSync(path.join(harness.openclawDir, "state/openclaw.sqlite"));
+      writer.exec("PRAGMA journal_mode=WAL; CREATE TABLE admission_writes (id INTEGER)");
+      try {
+        const target = scenario === "consented write" ? await approveFailedApply(harness) : kSoftGateTarget;
+        const result = await harness.sync.applyUpdate(target);
+        if (scenario === "backed-up write") {
+          expect(result.status).toBe(202);
+          expect(readRunBackupRecord(harness)).toMatchObject({ verified: true, noBackup: false });
+          expect(harness.store.readState().applied.version).toBe("1.1.0");
+        } else {
+          expect(result).toMatchObject({ status: 409, body: { code: scenario === "schema change" ? "db_preflight_failed" : "apply_facts_changed" } });
+          expect(harness.store.readState().applied).toBeNull();
+          expect(harness.restartProcess).not.toHaveBeenCalled();
+        }
+      } finally { lease?.(); writer.close(); }
+    });
+
     it.each(["version_mismatch", "config_migration_failed"])("a verified backed-up apply can recover the existing %s hold through its owned commit and restart", async (reason) => {
       const lock = createGatewayLifecycleLock({ logger: kSilentLogger });
       let harness;
