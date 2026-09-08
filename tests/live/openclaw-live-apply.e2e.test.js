@@ -6,8 +6,10 @@
 // backup step (needs a live gateway), restartProcess (spied), and the pin
 // (a tiny fixture — the shipped pin tree is not present in a test sandbox).
 //
-// Requires: network, a supported Node (the repo gate applies — the real
-// installer and the real CLI both enforce it). Runtime: ~2-6 min.
+// Requires: network and a Node supported by BOTH AlphaClaw and the selected
+// upstream targets. Current latest 2026.9.3 needs Node >=24.16; this tier must
+// execute that real latest release, so an older runtime's correct refusal
+// remains a failure instead of selecting an older package. Runtime: ~2-6 min.
 
 // Isolate the module-level kRootDir (the real installer keeps its npm cache
 // under it) BEFORE any lib/ module loads constants.
@@ -44,6 +46,7 @@ const { createRunStream } = require("../../lib/server/openclaw-run-stream");
 const {
   readOpenclawReleaseChannel,
 } = require("../../lib/server/alphaclaw-config");
+const { resolveThinkingModulePath } = require("../../lib/server/openclaw-thinking");
 const {
   assertFreeDiskBytes,
   kLiveEnabled,
@@ -53,6 +56,7 @@ const {
   createBackupStubRunner,
   mkTemp,
   stageTempInstall,
+  runCliJson,
   waitFor,
 } = liveHelpers;
 
@@ -176,6 +180,33 @@ const runActivatedBinary = (store, installDir) => {
   });
 };
 
+const assertActivatedThinkingApi = (installDir) => {
+  const modulePath = resolveThinkingModulePath(path.join(installDir, "node_modules", "openclaw", "dist"));
+  const probeRoot = mkTemp("openclaw-live-thinking-probe-");
+  const probePath = path.join(probeRoot, "probe.cjs");
+  const source = `
+    const { pathToFileURL } = require('node:url');
+    import(pathToFileURL(process.argv[2]).href).then((mod) => {
+      const list = mod.listThinkingLevelOptions || mod.i;
+      const resolveDefault = mod.resolveThinkingDefaultForModel || mod.s;
+      if (typeof list !== 'function' || typeof resolveDefault !== 'function') throw new Error('Thinking API exports are missing');
+      const provider = 'anthropic', model = 'claude-opus-4-7';
+      const catalog = [{ provider, id: model, reasoning: true }];
+      console.log(JSON.stringify({ levels: list(provider, model, catalog), modelDefault: resolveDefault({ provider, model, catalog }) }));
+    }).catch((error) => { console.error(error); process.exitCode = 1; });
+  `;
+  const env = {
+    PATH: process.env.PATH,
+    OPENCLAW_HOME: probeRoot,
+    OPENCLAW_NO_AUTO_UPDATE: "1",
+  };
+  fs.writeFileSync(probePath, source);
+  const report = runCliJson(probePath, [modulePath], { env, label: "activated thinking API" });
+  expect(report.levels.length).toBeGreaterThan(0);
+  expect(report.levels.every((entry) => typeof entry.id === "string" && typeof entry.label === "string")).toBe(true);
+  expect(report.levels.map((entry) => entry.id)).toContain(report.modelDefault);
+};
+
 const applyAndActivate = async (harness, { channel, version }) => {
   const { app, store, buildSync, restartProcess, operationEvents } = harness;
 
@@ -288,6 +319,7 @@ describeLive("LIVE openclaw package apply (real npm artifacts)", () => {
       // The activated tree is the real upstream artifact — run it.
       const output = runActivatedBinary(harness.store, harness.installDir);
       expect(output).toContain(version);
+      assertActivatedThinkingApi(harness.installDir);
 
       // Idempotence against the REAL activated version: re-apply is a noop.
       const again = await bootSync.applyUpdate({ channel: "stable", version });
@@ -319,6 +351,7 @@ describeLive("LIVE openclaw package apply (real npm artifacts)", () => {
 
       const output = runActivatedBinary(harness.store, harness.installDir);
       expect(output).toContain(version);
+      assertActivatedThinkingApi(harness.installDir);
     },
   );
 });

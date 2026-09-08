@@ -2,11 +2,10 @@
 // and runBackup (lib/server/openclaw-channel-sync.js) driving that real CLI
 // under live file churn. Closes the TODOS.md:198-203 debt: every hermetic
 // backup stub encoded an unvalidated assumption about the CLI's --output
-// contract; this tier records what the pinned binary (openclaw 2026.7.1-2)
-// actually does. Offline by design: no registry, no GitHub — the pinned
+// contract; this tier records what the current pinned binary actually does. Offline by design: no registry, no GitHub — the pinned
 // package in node_modules is the entire upstream surface.
 //
-// Observed contract (openclaw 2026.7.1-2, recorded 2026-08-29 in this sandbox):
+// Contract first observed on 2026.7.1-2, revalidated on the 2026.9.2 pin:
 //   exact nonexistent path → exit 0, archive at EXACTLY that path, stdout:
 //     "Created /tmp/.../exact-name.tar.gz"
 //     "Archive verification: passed"
@@ -86,7 +85,7 @@ describeLive("LIVE openclaw backup create --output contract (real pinned CLI)", 
     const { stateDir } = writeStateFixture(homeDir);
     cliEnv = buildCliEnv({ homeDir, stateDir });
     scratchDir = mkTemp("openclaw-live-backup-contract-out-");
-  });
+  }, kContractTestTimeoutMs);
 
   it(
     "Case A: a nonexistent --output path IS the archive file (exit 0, verified, non-empty)",
@@ -270,30 +269,26 @@ describeLive("LIVE runBackup vs real CLI under churn (issues #11/#18)", () => {
         expect(result.status, JSON.stringify(result.body)).toBe(202);
         expect(result.body.restarting).toBe(true);
 
-        // Quiesce ordering: the gateway stopped before the first real CLI
-        // backup ran, and was relaunched afterwards; the lock was released.
+        // Copy-first: a successful quiesced copy never invokes upstream.
+        // The churner stops before copying and resumes after the artifact
+        // is verified; lock release must still happen exactly once.
         expect(quiesceCalls.indexOf("stop")).toBeGreaterThanOrEqual(0);
-        expect(quiesceCalls.indexOf("stop")).toBeLessThan(
-          quiesceCalls.indexOf("backup-cli"),
-        );
-        expect(quiesceCalls.indexOf("start")).toBeGreaterThan(
-          quiesceCalls.indexOf("stop"),
-        );
-        expect(
-          quiesceCalls.filter((c) => c === "release"),
-        ).toHaveLength(1);
+        expect(quiesceCalls.indexOf("start")).toBeGreaterThan(quiesceCalls.indexOf("stop"));
+        expect(quiesceCalls.filter((c) => c === "release")).toHaveLength(1);
+        expect(quiesceCalls).not.toContain("backup-cli");
+        expect(harness.backupSpawns).toHaveLength(0);
 
         const backupRecord = readRunBackupRecord(harness.openclawDir);
         expect(backupRecord.noBackup).toBe(false);
         expect(backupRecord.quiesced).toBe(true);
-        expect(backupRecord.attempts).toBeGreaterThanOrEqual(1);
-        // The verified artifact the REAL CLI wrote, at the exact per-run path
-        // runBackup asked for, inside the retention pattern — and it passed
-        // the WI-6.1 usable check (gzip -t + manifest lists the state DBs).
+        expect(backupRecord.attempts).toBe(0);
         expect(backupRecord.verified).toBe(true);
         expect(backupRecord.usableCheck).toBe("manifest_ok");
-        expect(backupRecord.producer).toBe("openclaw");
-        expect(backupRecord.file).toMatch(/openclaw-backup-.*\.tar\.gz$/);
+        expect(backupRecord.producer).toBe("alphaclaw-offline-copy");
+        expect(backupRecord.attemptsDetail).toEqual([
+          expect.objectContaining({ rung: "offline_copy", reason: "primary", quiesced: true, ok: true }),
+        ]);
+        expect(backupRecord.file).toMatch(/openclaw-backup-.*\.alphaclaw\.tar\.gz$/);
         expect(fs.statSync(backupRecord.file).size).toBeGreaterThan(0);
 
         logRaceOutcome("quiesced", backupRecord);

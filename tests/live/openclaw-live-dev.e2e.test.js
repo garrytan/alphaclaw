@@ -6,11 +6,17 @@
 //   2. Full dev-head build (OPENCLAW_LIVE_E2E_DEV=1 additionally): a real
 //      `openclaw update --channel dev` — git clone of openclaw/openclaw main,
 //      pnpm install, from-source build, doctor — driven through the real
-//      channel-sync apply flow, then boot-activated (bin shim) and EXECUTED.
+//      channel-sync apply flow from a globally owned CLI, then boot-activated
+//      (bin shim) and EXECUTED. This checks upstream updater integration;
+//      it does not prove production's nested-package bootstrap, which the
+//      2026.9.2 updater refuses with "package manager owner is unknown".
 //      20-35 minutes, ~5 GB disk, build-grade RAM. Nightly/manual tier only.
 //
-// Requires: network, git, pnpm, a supported Node, the repo's pinned openclaw
-// CLI in node_modules.
+// Requires: network, git, pnpm, a Node supported by both AlphaClaw AND current
+// upstream main (which can advance beyond the stable pin's requirements),
+// and the repo's pinned openclaw CLI in node_modules. The full build
+// bootstraps that same exact pin in a
+// disposable npm global prefix, as required by upstream's ownership gate.
 
 const fs = require("fs");
 const path = require("path");
@@ -26,6 +32,7 @@ const { execFileSync } = require("child_process");
 
 const {
   createOpenclawChannelSync,
+  buildDevUpdateEnv,
 } = require("../../lib/server/openclaw-channel-sync");
 const {
   createOpenclawReleaseChannelStore,
@@ -45,7 +52,6 @@ const {
   writePinFixture,
   createBackupStubRunner,
   scrubTestRunnerEnv,
-  repoBinDir,
   repoOpenclawBin,
   waitFor,
 } = liveHelpers;
@@ -54,6 +60,8 @@ const describeLive = kLiveEnabled ? describe : describe.skip;
 const describeLiveDev = kLiveEnabled && kLiveDevEnabled ? describe : describe.skip;
 
 const kDevBuildTimeoutMs = 35 * 60 * 1000;
+const kBootstrapTimeoutMs = 10 * 60 * 1000;
+const kBootstrapVersion = require("../../package.json").dependencies.openclaw;
 
 
 describeLive("LIVE openclaw updater JSON contract (real pinned CLI)", () => {
@@ -95,15 +103,37 @@ describeLive("LIVE openclaw updater JSON contract (real pinned CLI)", () => {
   );
 });
 
-describeLiveDev("LIVE openclaw dev-head build (real from-source pipeline)", () => {
+describeLiveDev("LIVE openclaw dev-head build (real global-updater integration)", () => {
+  let buildRoot = null;
+  let completed = false;
+  afterAll(() => {
+    if (completed || !buildRoot) return;
+    const artifactsDir = path.join(__dirname, "artifacts", path.basename(buildRoot));
+    fs.mkdirSync(artifactsDir, { recursive: true });
+    for (const relative of [
+      "logs/bootstrap.log",
+      "logs/openclaw-dev-update.log",
+      ".openclaw/.alphaclaw/openclaw-channel-state.json",
+    ]) {
+      const source = path.join(buildRoot, relative);
+      if (fs.existsSync(source)) {
+        fs.writeFileSync(
+          path.join(artifactsDir, path.basename(relative)),
+          fs.readFileSync(source).subarray(-5 * 1024 * 1024),
+        );
+      }
+    }
+    console.warn(`[live-dev] failure artifacts: ${artifactsDir}`);
+  });
   it(
-    "builds real main from source via the updater, boot-activates the shim, and executes it",
-    { timeout: kDevBuildTimeoutMs + 5 * 60 * 1000 },
+    "builds real main through a globally owned updater, boot-activates the shim, and executes it",
+    { timeout: kBootstrapTimeoutMs + kDevBuildTimeoutMs + 5 * 60 * 1000, retry: 0 },
     async () => {
       // A from-source build needs ~5 GB (git clone + pnpm store + dist):
       // fail fast with the sweep instruction rather than 20 min in.
       assertFreeDiskBytes(8 * 1024 ** 3, { label: "the live dev source build" });
       const rootDir = mkTemp("alphaclaw-live-dev-e2e-");
+      buildRoot = rootDir;
       fs.mkdirSync(path.join(rootDir, "logs"), { recursive: true });
       const openclawDir = path.join(rootDir, ".openclaw");
       const packageRoot = mkTemp("alphaclaw-live-dev-pkgroot-");
@@ -134,6 +164,40 @@ describeLiveDev("LIVE openclaw dev-head build (real from-source pipeline)", () =
 
       const runner = createBackupStubRunner(createRunStream({}), { stateDir: openclawDir });
 
+      // Current upstream only switches a package install to git when its
+      // active global package manager owns the invoking build. A dependency
+      // in this repo is deliberately not such an install. Give the real
+      // updater a genuine, disposable global installation: its final global
+      // replacement must never rewrite this checkout or the user's tooling.
+      const globalPrefix = mkTemp("alphaclaw-live-dev-global-");
+      const globalBinDir = process.platform === "win32" ? globalPrefix : path.join(globalPrefix, "bin");
+      const globalPackageDir = path.join(
+        globalPrefix,
+        process.platform === "win32" ? "node_modules" : "lib/node_modules",
+        "openclaw",
+      );
+      const updaterEnv = buildDevUpdateEnv({
+        ...scrubTestRunnerEnv(),
+        HOME: rootDir,
+        PATH: `${globalBinDir}${path.delimiter}${process.env.PATH}`,
+        OPENCLAW_HOME: rootDir,
+        OPENCLAW_NO_AUTO_UPDATE: "1",
+        npm_config_prefix: globalPrefix,
+      });
+      const bootstrap = await runner.runStreamed({
+        command: "npm",
+        args: [
+          "install", "--global", "--prefix", globalPrefix,
+          "--no-audit", "--no-fund", `openclaw@${kBootstrapVersion}`,
+        ],
+        env: updaterEnv,
+        timeoutMs: kBootstrapTimeoutMs,
+        logFile: path.join(rootDir, "logs", "bootstrap.log"),
+      });
+      expect(bootstrap.ok, bootstrap.tail).toBe(true);
+      const bootstrapManifest = JSON.parse(fs.readFileSync(path.join(globalPackageDir, "package.json"), "utf8"));
+      expect(bootstrapManifest.version).toBe(kBootstrapVersion);
+
       const restartProcess = vi.fn();
       const buildSync = () =>
         createOpenclawChannelSync({
@@ -145,17 +209,12 @@ describeLiveDev("LIVE openclaw dev-head build (real from-source pipeline)", () =
           resolveInstallDir: () => installDir,
           // The updater clones to $OPENCLAW_HOME/openclaw — pointed at this
           // harness's rootDir so the checkout lands where channel-sync looks.
-          // The repo's node_modules/.bin supplies the real pinned `openclaw`.
+          // The isolated global bin supplies the real pinned `openclaw`.
           // Scrubbed: the pinned CLI prints NOTHING (not even its --json
           // report) when it inherits vitest's VITEST variable — live-verified
           // 2026-09-02 (705 bytes of dry-run JSON without it, 0 with it) —
           // which read as build:warning "updater output was not parseable".
-          openclawSpawnEnv: () => ({
-            ...scrubTestRunnerEnv(),
-            PATH: `${repoBinDir()}${path.delimiter}${process.env.PATH}`,
-            OPENCLAW_HOME: rootDir,
-            OPENCLAW_NO_AUTO_UPDATE: "1",
-          }),
+          openclawSpawnEnv: () => updaterEnv,
           releases: null,
           isOnboarded: () => true,
           restartProcess,
@@ -183,9 +242,16 @@ describeLiveDev("LIVE openclaw dev-head build (real from-source pipeline)", () =
       );
       const applied = await applyPromise;
       const run = store.readState().lastUpdateRun;
+      const updateLogPath = path.join(rootDir, "logs", "openclaw-dev-update.log");
       expect(
         applied.status,
-        JSON.stringify(run?.result || run?.steps || applied.body),
+        JSON.stringify({
+          result: run?.result || applied.body,
+          steps: run?.steps,
+          updaterLog: applied.status !== 202 && fs.existsSync(updateLogPath)
+            ? fs.readFileSync(updateLogPath, "utf8").slice(-16_000)
+            : undefined,
+        }),
       ).toBe(202);
       expect(run.ok).toBe(true);
       const stepNames = run.steps.map((step) => `${step.name}:${step.status}`);
@@ -238,6 +304,7 @@ describeLiveDev("LIVE openclaw dev-head build (real from-source pipeline)", () =
         },
       });
       expect(output).toMatch(/\d{4}\.\d+\.\d+/);
+      completed = true;
     },
   );
 });

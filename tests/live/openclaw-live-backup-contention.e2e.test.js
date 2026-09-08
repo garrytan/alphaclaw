@@ -24,10 +24,8 @@
 //      stands in on its own with ZERO upstream attempts (producer
 //      alphaclaw-offline-copy, format 2, exclusivity evidence, verified) —
 //      the incident's fix in its purest form;
-//   3. the pin 2026.7.1-2 under the same held lock, copy failed → no lease,
-//      no contention: the paused upstream finishes on attempt 1 (the
-//      container tier's journey runs the pin's backup, so its contention
-//      assertion is calibrated on this fact);
+//   3. the current pin under the same held lock also takes the lease:
+//      one classified retry succeeds when the writer releases.
 //   4. the offline-copy manifest's core field set matches upstream's (beta)
 //      plus exactly the documented AlphaClaw keys (format 2).
 //
@@ -38,8 +36,7 @@
 // "timed out waiting for legacy audit migration lease
 // migration.legacy-audit/filesystem-sqlite-boundary" after ~11 s, with
 // "[sqlite/transaction] SQLite transaction lock wait failed" lines above it;
-// 2026.8.2 behaves identically (it carries the same lease); the pin has no
-// lease and logs only "Config health-state write failed: database is locked".
+// 2026.8.2 and the current 2026.9.2 pin carry the same lease.
 //
 // Requires: network (one real beta install, cached across live files) and a
 // supported Node. Runtime: ~2-4 min.
@@ -86,7 +83,6 @@ const kFastContentionBackoffMs = 2_000;
 const kLeaseTimeoutLinePattern =
   /timed out waiting for legacy audit migration lease migration\.legacy-audit\/filesystem-sqlite-boundary/;
 const kLockWaitLinePattern = /SQLite transaction lock wait failed/;
-const kPinLockedWarningPattern = /Config health-state write failed: database is locked/;
 
 const readRunLog = (openclawDir) => {
   const logsDir = path.join(openclawDir, ".alphaclaw", "logs");
@@ -369,20 +365,21 @@ describeLive("LIVE #54 reproduction: runBackup vs real CLIs under SQLite lock co
   );
 
   it(
-    `the pin ${kOpenclawLines.pin} under the same held lock takes no lease: the paused attempt 1 (after a failed copy) succeeds, no contention retry`,
+    `the pin ${kOpenclawLines.pin} also takes the legacy-audit lease: a held lock causes a classified retry, then succeeds after release`,
     { timeout: kContentionTestTimeoutMs },
     async () => {
       const gatewayQuiesce = createQuiesceFake();
-      // Pin fixture: both DBs (the pin archives any SQLite file) and the
-      // legacy audit log (which the pin ignores — no lease code). The copy
-      // is failed at its archive step so the pin's REAL CLI runs paused.
+      // Current pin and beta both take the lease. Keep both real schema
+      // databases here; release the writer only when the second CLI starts.
+      let lock;
       const harness = createLiveBackupHarness({
         gatewayQuiesce,
         failOfflineCopy: true,
+        onBackupSpawn: (attempt) => { if (attempt === 2) lock.release(); },
         fixture: { jsonlFiles: 20, lockFiles: 0, legacyAuditLog: true },
         backupTuning: { contentionBackoffBaseMs: kFastContentionBackoffMs },
       });
-      const lock = holdReservedLock(harness.fixture.stateDbPath);
+      lock = holdReservedLock(harness.fixture.stateDbPath);
       try {
         const result = await harness.sync.applyUpdate(kHardGateTarget);
         expect(result.status, JSON.stringify(result.body)).toBe(202);
@@ -392,9 +389,9 @@ describeLive("LIVE #54 reproduction: runBackup vs real CLIs under SQLite lock co
         );
         expect(record.noBackup).toBe(false);
         expect(record.quiesced).toBe(true);
-        expect(record.attempts).toBe(1);
-        expect(record.quiescedAttempts).toBe(1);
-        expect(record.contentionRetries).toBe(0);
+        expect(record.attempts).toBe(2);
+        expect(record.quiescedAttempts).toBe(2);
+        expect(record.contentionRetries).toBe(1);
         expect(record.offlineCopy).toEqual(
           expect.objectContaining({
             ok: false,
@@ -405,11 +402,9 @@ describeLive("LIVE #54 reproduction: runBackup vs real CLIs under SQLite lock co
         expect(record.producer).toBe(kUpstreamProducer);
         expect(record.verified).toBe(true);
         expect(record.usableCheck).toBe("manifest_ok");
-        expect(harness.backupSpawns).toHaveLength(1);
-        // The pin noticed the lock only when writing its config health
-        // state — a warning, not a failure: exactly why the container tier's
-        // pin→beta journey expects a verified backup with zero retries.
-        expect(readRunLog(harness.openclawDir)).toMatch(kPinLockedWarningPattern);
+        expect(harness.backupSpawns).toHaveLength(2);
+        expect(readRunLog(harness.openclawDir)).toMatch(kLeaseTimeoutLinePattern);
+        expect(readRunLog(harness.openclawDir)).toMatch(kLockWaitLinePattern);
       } finally {
         lock.release();
       }

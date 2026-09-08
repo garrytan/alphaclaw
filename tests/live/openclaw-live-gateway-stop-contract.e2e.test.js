@@ -2,7 +2,7 @@
 // `--force` (WI-5.1, lib/server/openclaw-capabilities.js gatewayStopForce)
 // depends on, pinned against the REAL binaries of the three lines AlphaClaw
 // supports today:
-//   pin    2026.7.1-2       → no --force (a blind flag would break every stop)
+//   pin    2026.9.2         → --force present
 //   stable 2026.8.2         → --force present ("Allow stop from a non-interactive shell")
 //   beta   2026.9.1-beta.1  → --force present
 // Recorded 2026-09-02 in this sandbox; when this tier fails but the hermetic
@@ -63,15 +63,15 @@ const helpText = (bin, args) => {
 
 describeLive("LIVE `gateway stop --help` contract (capability-gated --force, WI-5.1)", () => {
   it(
-    `the pin ${kOpenclawLines.pin} has gateway stop but NO --force`,
+    `the pin ${kOpenclawLines.pin} advertises gateway stop --force`,
     { timeout: kTestTimeoutMs },
     () => {
       const text = helpText(repoOpenclawBin(), ["gateway", "stop", "--help"]);
       expect(text).not.toMatch(kUnknownCommandPattern);
       expect(text).toMatch(/Usage: openclaw gateway stop/);
-      // The whole point of probing: a blind `--force` on the pin would be an
-      // unknown option on every managed stop.
-      expect(text).not.toMatch(kForceFlagPattern);
+      // Capability probing remains required for older installed builds.
+      // The current 2026.9.2 pin supports non-interactive forced stop.
+      expect(text).toMatch(kForceFlagPattern);
     },
   );
 

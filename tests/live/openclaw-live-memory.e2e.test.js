@@ -1,6 +1,10 @@
 const fs = require("fs");
 const path = require("path");
-const { spawn } = require("child_process");
+const {
+  kHeapOomPattern, kCriticalPressurePattern, kStartupConvergenceRefusal,
+  startGatewayCapture, waitForGatewayReady, isStartupConvergenceRefusal,
+  stopGatewayCapture, saveGatewayEvidence,
+} = require("./memory-gateway");
 
 const {
   assertFreeDiskBytes,
@@ -57,7 +61,6 @@ const describeLive = kLiveEnabled ? describe : describe.skip;
 
 const kInstallTimeoutMs = 8 * 60 * 1000;
 const kTestTimeoutMs = 12 * 60 * 1000;
-const kHeapOomPattern = /JavaScript heap out of memory|Reached heap limit/i;
 
 const resolveNewestBeta = async () => {
   const res = await fetch("https://registry.npmjs.org/openclaw", {
@@ -102,6 +105,7 @@ describeLive("live: gateway memory leak via a real plugin", () => {
   let openclawDir;
   let installDir;
   let overlayBin;
+  let betaVersion;
 
   const gatewayEnv = () => {
     return withOpenclawStartupEnv({
@@ -116,8 +120,8 @@ describeLive("live: gateway memory leak via a real plugin", () => {
       // `gateway run` can fork a worker child (the one holding the plugin's
       // heap); a launcher-only argv cap does NOT propagate to it, but
       // NODE_OPTIONS DOES — which is exactly how production caps the gateway
-      // (autotune's NODE_OPTIONS suffix). 256MB → the V8 abort lands in
-      // ~60-120s of leaking.
+      // (autotune's NODE_OPTIONS suffix). Separate plugin isolates can reach
+      // critical process pressure while the main heap stays below this cap.
       NODE_OPTIONS: "--max-old-space-size=256",
     });
   };
@@ -132,7 +136,7 @@ describeLive("live: gateway memory leak via a real plugin", () => {
     fs.mkdirSync(path.join(installDir, "node_modules"), { recursive: true });
     fs.mkdirSync(path.join(openclawDir, "state"), { recursive: true });
 
-    const betaVersion = await resolveNewestBeta();
+    betaVersion = await resolveNewestBeta();
     const staged = await stageTempInstall({
       versionSpec: betaVersion,
       timeoutMs: kInstallTimeoutMs,
@@ -163,7 +167,8 @@ describeLive("live: gateway memory leak via a real plugin", () => {
   }, kTestTimeoutMs);
 
   it(
-    "a leak-probe plugin leaks the REAL gateway heap: RSS climbs, then V8 aborts with the classifier's signature",
+    "a real leak-probe plugin grows gateway RSS, then reaches critical pressure or an abnormal exit",
+    { timeout: kTestTimeoutMs, retry: 0 },
     async () => {
       // 1. Write the leak plugin where plugins.load.paths will find it.
       const pluginDir = mkTemp("leak-probe-plugin-");
@@ -198,59 +203,42 @@ describeLive("live: gateway memory leak via a real plugin", () => {
       // 3. Boot. The heap cap rides NODE_OPTIONS (gatewayEnv above), which the
       //    forked gateway worker inherits — an argv-only cap would not reach
       //    it, so the leaking worker would never hit the V8 abort.
-      const child = spawn(
-        process.execPath,
-        [
-          overlayBin,
-          "gateway",
-          "run",
-          "--port",
-          String(port),
-        ],
-        {
-          env: { ...gatewayEnv(), OPENCLAW_GATEWAY_PORT: String(port) },
-          stdio: "pipe",
-        },
-      );
-      let output = "";
-      child.stdout.on("data", (chunk) => (output += chunk.toString()));
-      child.stderr.on("data", (chunk) => (output += chunk.toString()));
-      let exitCode = null;
-      let exitSignal = null;
-      const exited = new Promise((resolve) => {
-        child.on("exit", (code, signal) => {
-          exitCode = code;
-          exitSignal = signal;
-          resolve();
-        });
-      });
+      let gateway = startGatewayCapture({ bin: overlayBin, port, env: gatewayEnv() });
+      let stage = "startup";
+      const samples = [];
 
       try {
-        // 4. Healthy first (plugin sidecars cold-start on the beta).
-        await waitFor(
-          async () => {
-            try {
-              const res = await fetch(`http://127.0.0.1:${port}/healthz`);
-              return res.status > 0;
-            } catch {
-              return false;
-            }
-          },
-          150000,
-          "gateway /healthz",
-        );
+        // 4. Complete the cold fixture's documented plugin migration before
+        // measuring its leak. Only one exit-1 restart is allowed, and only
+        // with both the exact upstream refusal and actual Doctor changes.
+        // Any other startup failure, or a second refusal, fails immediately.
+        for (let boot = 0; boot < 2; boot += 1) {
+          try {
+            await waitForGatewayReady(gateway, port);
+            break;
+          } catch (error) {
+            if (boot !== 0 || !isStartupConvergenceRefusal(gateway, error)) throw error;
+            const artifactsDir = saveGatewayEvidence({
+              rootDir, betaVersion, capture: gateway,
+              stage: "startup-convergence", samples, error,
+            });
+            console.warn(`[live-memory] ${kStartupConvergenceRefusal}\nCompleting the fixture with one startup restart. Evidence: ${artifactsDir}`);
+            await stopGatewayCapture(gateway);
+            gateway = startGatewayCapture({ bin: overlayBin, port, env: gatewayEnv() });
+          }
+        }
 
         // 5. Slope stage: REAL /proc reads through AlphaClaw's own sampler.
         //    Direction only, never absolute RSS. ~2.8MB/s expected; assert a
         //    conservative ≥30MB climb across ~60s unless the abort already
         //    landed (a fast abort is stage-6 success arriving early).
-        const samples = [];
-        for (let i = 0; i < 13 && exitCode === null && exitSignal === null; i += 1) {
-          const usage = getProcessTreeUsage(child.pid);
+        stage = "rss-growth";
+        for (let i = 0; i < 13 && gateway.exitCode === null && gateway.exitSignal === null; i += 1) {
+          const usage = getProcessTreeUsage(gateway.child.pid);
           if (usage?.rssBytes) samples.push(usage.rssBytes);
           await new Promise((resolve) => setTimeout(resolve, 5000));
         }
-        if (exitCode === null && exitSignal === null) {
+        if (gateway.exitCode === null && gateway.exitSignal === null) {
           expect(samples.length).toBeGreaterThanOrEqual(5);
           const growthMb =
             (samples[samples.length - 1] - samples[0]) / (1024 * 1024);
@@ -273,26 +261,25 @@ describeLive("live: gateway memory leak via a real plugin", () => {
         //    tests/live/autotune-container.e2e.test.js (main-isolate leaks —
         //    e.g. session/config growth — still abort with it).
         const startRss = samples[0] ?? null;
-        const kCriticalPressurePattern =
-          /\[diagnostics\/memory\] memory pressure: level=critical/;
+        stage = "terminal-pressure";
         await waitFor(
           async () =>
-            exitCode !== null ||
-            exitSignal !== null ||
-            kCriticalPressurePattern.test(output),
+            gateway.exitCode !== null ||
+            gateway.exitSignal !== null ||
+            gateway.criticalPressureLine,
           4 * 60 * 1000,
           "critical memory pressure or abnormal exit",
         );
-        if (exitCode !== null || exitSignal !== null) {
+        if (gateway.exitCode !== null || gateway.exitSignal !== null) {
           // Died first: must be abnormal, and if V8 did abort (single-isolate
           // topology on some versions), the classifier signature must match.
-          expect(exitCode === 0 && exitSignal === null).toBe(false);
-          if (kHeapOomPattern.test(output)) {
-            expect(output).toMatch(kHeapOomPattern);
+          expect(gateway.exitCode === 0 && gateway.exitSignal === null).toBe(false);
+          if (kHeapOomPattern.test(gateway.output)) {
+            expect(gateway.output).toMatch(kHeapOomPattern);
           }
         } else {
-          expect(output).toMatch(kCriticalPressurePattern);
-          const usage = getProcessTreeUsage(child.pid);
+          expect(gateway.criticalPressureLine).toMatch(kCriticalPressurePattern);
+          const usage = getProcessTreeUsage(gateway.child.pid);
           if (startRss && usage?.rssBytes) {
             // Corroborating runaway check: the pressure line is the primary
             // terminal evidence and fires EARLY by design (measured: ~2.8x
@@ -301,16 +288,16 @@ describeLive("live: gateway memory leak via a real plugin", () => {
             expect(usage.rssBytes).toBeGreaterThan(startRss * 1.5);
           }
         }
+      } catch (error) {
+        const artifactsDir = saveGatewayEvidence({ rootDir, betaVersion, capture: gateway, stage, samples, error });
+        error.message += `\nFailure artifacts: ${artifactsDir}`;
+        console.warn(
+          `[live-memory] failed during ${stage} (Node ${process.version}, OpenClaw ${betaVersion}, code ${gateway.exitCode}, signal ${gateway.exitSignal})\n${error.message.slice(-2000)}\nGateway output tail:\n${gateway.output.slice(-4000)}\nFailure artifacts: ${artifactsDir}`,
+        );
+        throw error;
       } finally {
-        try {
-          child.kill("SIGTERM");
-        } catch {}
-        await new Promise((resolve) => setTimeout(resolve, 500));
-        try {
-          child.kill("SIGKILL");
-        } catch {}
+        await stopGatewayCapture(gateway);
       }
     },
-    kTestTimeoutMs,
   );
 });

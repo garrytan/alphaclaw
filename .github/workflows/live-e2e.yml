@@ -12,7 +12,7 @@ name: Live E2E (real OpenClaw releases)
 
 on:
   schedule:
-    # Nightly: catalog + real stable/beta package applies (~5 min).
+    # Nightly: full live catalog/apply, memory, restore and downgrade tier (~18 min).
     - cron: "17 9 * * *"
     # Weekly (Sunday): additionally the full dev source build (20-35 min).
     # NOTE: this exact string is byte-matched by live-dev-build's `if:` gate
@@ -33,16 +33,17 @@ permissions:
 jobs:
   live-catalog-and-apply:
     runs-on: ubuntu-latest
-    # Budgets: 3 catalog tests (90s each) + 2 package applies (12 min each)
-    # + setup; the job limit must exceed the tests' own worst case so vitest
-    # can report a timeout instead of the runner killing the process.
+    # Full live coverage includes catalog/apply, memory, restore, downgrade,
+    # backup contention and gateway tests (~18 min measured). Leave room for
+    # their own timeouts to report failures before the runner kills the job.
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          # Moving latest is 2026.9.3+, requiring Node >=24.16; hermetic CI still covers 22.
+          node-version: 24
           cache: npm
 
       - run: npm ci
@@ -53,6 +54,14 @@ jobs:
           # shared per runner IP and flakes.
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      # Preserve the exact cold-start convergence refusal and any later failure.
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: live-release-artifacts
+          path: tests/live/artifacts/
+          if-no-files-found: ignore
+
   live-dev-build:
     # Weekly schedule or explicit dispatch opt-in only: a real git clone +
     # pnpm install + from-source build of openclaw main (~5 GB, build RAM).
@@ -61,8 +70,9 @@ jobs:
       (github.event_name == 'schedule' && github.event.schedule == '47 9 * * 0') ||
       (github.event_name == 'workflow_dispatch' && inputs.run_dev_build)
     runs-on: ubuntu-latest
-    # Dry-run contract (5 min) + full build (35-min test timeout) + setup. The
-    # script runs ONLY the dev file — the same weekly cron already triggers
+    # Dry-run contract (5 min) + global bootstrap (10 min) + source build
+    # (35 min) + verification and setup. The stateful build never auto-retries.
+    # This script runs ONLY the dev file — the same weekly cron already triggers
     # the nightly job for catalog/apply, and stacking their ~3 GB of temp
     # trees under the dev build's 5 GB disk preflight would starve it.
     timeout-minutes: 75
@@ -71,7 +81,8 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          # Current upstream main requires Node >=24.16, beyond the bundled pin's minimum.
+          node-version: 24
           cache: npm
 
       - run: npm ci
@@ -83,3 +94,9 @@ jobs:
       - run: npm run test:live:dev
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: live-dev-build-artifacts
+          path: tests/live/artifacts/
