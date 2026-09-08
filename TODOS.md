@@ -124,10 +124,6 @@
 - **Why:** a path-filtered or missing required context pends forever (see the container-e2e `gate` design); leaving `test (22)` required after the matrix change blocks every future merge, not just this one.
 - **Context:** `.github/workflows/ci.yml`, `tests/ci/workflow-contract.test.js` (pins the `[24, 26]` matrix and lane names), AGENTS.md merge-gate section, CHANGELOG 0.9.80.
 - **Effort:** XS (human ~15min / CC ~2min, needs ruleset admin). **Priority:** P1 (blocks the v0.9.80 merge).
-- **What:** ci.yml now runs the suite on Node 22 AND 24; the Node 24 lane is `continue-on-error` because the `main` ruleset only lists `test (22)` and `gate` as required. Once `test (24)` has passed on every PR for a week, add it to the ruleset's required checks and drop the `continue-on-error` expression (and the matching `workflow-contract.test.js` pin).
-- **Why:** Node 24 is the next LTS the launcher will meet on user boxes; a non-blocking lane surfaces breakage early without holding merges hostage to a lane nobody has watched yet.
-- **Context:** `.github/workflows/ci.yml` (`continue-on-error: ${{ matrix.node-version == 24 }}`), `tests/ci/workflow-contract.test.js`, AGENTS.md merge-gate section.
-- **Effort:** XS (human ~15min / CC ~2min, needs ruleset admin). **Priority:** P3.
 
 ## P2 — OOM attribution behind the adopted launcher (2026-09-02, from issue #56)
 - **What:** After a cold restart the managed child is the `openclaw.mjs` compile-cache launcher (v0.9.70 adoption). It exits with the gateway's code, but a gateway killed by an UNFORWARDED signal (kernel OOM SIGKILL) surfaces as launcher exit code 1 — so `classifyOomExit` (137/SIGKILL) never fires for the exact incident class the memory monitor exists for; only the V8 heap-OOM stderr signature still classifies. Options: read the cgroup `memory.events` `oom_kill` counter delta (or `dmesg`) on a code-1 exit of an adopted supervisor with a recent critical trend; or map the launcher's exit to the child's signal if upstream exposes it.

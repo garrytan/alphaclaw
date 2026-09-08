@@ -115,7 +115,12 @@ describeContainer("container E2E: immutable v0.9.76 → candidate self-upgrade p
               }
               db.close();
             }
-            store.updateState((state) => ({ ...state, pinVersion: ${JSON.stringify(candidate.dependencies.openclaw)}, applied: { channel: 'stable', version: ${JSON.stringify(kRecordedVersion)}, at: Date.now(), acceptedAt: Date.now(), reason: 'self_upgrade_fixture' } }));
+            // The baseline image must see ITS OWN declared pin (v0.9.80 moved
+            // the candidate's pin to 2026.9.3, so seeding the candidate's pin
+            // here would make the OLD release read a backwards pin change on
+            // its first boot). The candidate's pin is written onto the volume
+            // right before the candidate boots, below.
+            store.updateState((state) => ({ ...state, pinVersion: require(path.join(root, 'package.json')).dependencies.openclaw, applied: { channel: 'stable', version: ${JSON.stringify(kRecordedVersion)}, at: Date.now(), acceptedAt: Date.now(), reason: 'self_upgrade_fixture' } }));
           } finally { staged.cleanup(); }
         })().catch((error) => { console.error(error); process.exitCode = 1; });
       `;
@@ -154,7 +159,16 @@ describeContainer("container E2E: immutable v0.9.76 → candidate self-upgrade p
       // Keep a legacy format claim to exercise convergence across the real
       // image replacement. The deterministic TID collision remains a
       // separate same-image test, where PID allocation is controlled.
-      await seedVolume(kVolume, { [`${kManaged}/alphaclaw-server.pid`]: JSON.stringify({ pid: baselineClaim.pid, at: Date.now() - 2 * 86400_000 }) });
+      // The channel state carries the CANDIDATE's declared pin from here on,
+      // so neither image reads a pin change: this journey proves recorded-
+      // build activation across an AlphaClaw upgrade, not pin-bump handling
+      // (the pin moved 2026.9.2 → 2026.9.3 in v0.9.80).
+      const stateForCandidate = JSON.parse(baselineArtifacts.get(`${kContainers[0]}-openclaw-channel-state.json`));
+      stateForCandidate.pinVersion = candidate.dependencies.openclaw;
+      await seedVolume(kVolume, {
+        [`${kManaged}/alphaclaw-server.pid`]: JSON.stringify({ pid: baselineClaim.pid, at: Date.now() - 2 * 86400_000 }),
+        [`${kManaged}/openclaw-channel-state.json`]: JSON.stringify(stateForCandidate),
+      });
       await runContainer({ name: kContainers[1], image: kImages[1], volume: kVolume, env });
       await waitReady(kContainers[1], kRecordedVersion);
       const report = await waitFor(async () => {

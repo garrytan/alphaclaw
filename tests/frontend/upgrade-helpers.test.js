@@ -2831,3 +2831,81 @@ describe("frontend/upgrade-helpers availability line names an engines block (v0.
     expect(buildAvailabilityLine({ catalog, releaseChannel: "stable", installedVersion: "2026.9.2" })).toBe(plain);
   });
 });
+
+describe("frontend/upgrade-helpers latest applicable target is an UPGRADE or nothing (v0.9.80)", () => {
+  const spec = ">=24.16.0 <25 || >=26.1.0";
+  const row = (version, extra = {}) => ({
+    version,
+    current: false,
+    blocklisted: null,
+    isDistTagLatest: false,
+    applyPayload: { channel: "stable", version },
+    ...extra,
+  });
+
+  it("returns null when the installed version IS the newest row instead of the next-older release", async () => {
+    // The screenshot bug: installed 2026.9.2 = dist-tag latest; the old
+    // fallback offered 2026.9.1 as "Update to latest stable".
+    const { getLatestApplicableTarget } = await loadUpgradeHelpers();
+    const catalog = {
+      stable: [row("2026.9.2", { current: true, isDistTagLatest: true }), row("2026.9.1")],
+      beta: [],
+      dev: { commits: [] },
+    };
+    expect(getLatestApplicableTarget({ catalog, releaseChannel: "stable" })).toBeNull();
+    expect(getLatestApplicableTarget({ catalog, releaseChannel: "stable", installedVersion: "2026.9.2" })).toBeNull();
+  });
+
+  it("returns null — not the older release — when the only newer row needs a newer Node", async () => {
+    const { getLatestApplicableTarget } = await loadUpgradeHelpers();
+    const catalog = {
+      stable: [
+        row("2026.9.3", { isDistTagLatest: true, engines: { node: spec } }),
+        row("2026.9.2", { current: true }),
+        row("2026.9.1"),
+      ],
+      beta: [],
+      dev: { commits: [] },
+    };
+    expect(
+      getLatestApplicableTarget({ catalog, releaseChannel: "stable", nodeVersion: "22.22.3", installedVersion: "2026.9.2" }),
+    ).toBeNull();
+    // Same catalog on a supported runtime: the newer row is the target.
+    expect(
+      getLatestApplicableTarget({ catalog, releaseChannel: "stable", nodeVersion: "24.16.0", installedVersion: "2026.9.2" }).label,
+    ).toBe("2026.9.3");
+  });
+
+  it("never returns a version older than or equal to the installed one, whatever the catalog shape", async () => {
+    const { getLatestApplicableTarget, compareVersions } = await loadUpgradeHelpers();
+    const versions = ["2026.8.2", "2026.9.1", "2026.9.2", "2026.9.3"];
+    for (const installed of versions) {
+      for (const latestTag of versions) {
+        for (const blocked of [null, "2026.9.3", "2026.9.2"]) {
+          const catalog = {
+            stable: versions.map((v) =>
+              row(v, {
+                current: v === installed,
+                isDistTagLatest: v === latestTag,
+                ...(v === blocked ? { engines: { node: spec } } : {}),
+              }),
+            ),
+            beta: [],
+            dev: { commits: [] },
+          };
+          const target = getLatestApplicableTarget({ catalog, releaseChannel: "stable", nodeVersion: "22.22.3", installedVersion: installed });
+          if (target) {
+            expect(compareVersions(target.label, installed), `${installed}/${latestTag}/${blocked}`).toBeGreaterThan(0);
+            expect(target.label, `${installed}/${latestTag}/${blocked}`).not.toBe(blocked);
+          }
+        }
+      }
+    }
+  });
+
+  it("with no installed version known and no current row, still picks the dist-tag latest (cold catalog)", async () => {
+    const { getLatestApplicableTarget } = await loadUpgradeHelpers();
+    const catalog = { stable: [row("2026.9.3", { isDistTagLatest: true }), row("2026.9.2")], beta: [], dev: { commits: [] } };
+    expect(getLatestApplicableTarget({ catalog, releaseChannel: "stable" }).label).toBe("2026.9.3");
+  });
+});

@@ -51,6 +51,16 @@ all) sees why on the catalog row instead of failing after the download.
   `lib/engines-range.js` (`satisfiesEngines`, exactly upstream's published
   `>= < > <= = ||` grammar; anything else stays warn-only like npm), now serves
   the preflight, AlphaClaw's own boot floor and the Upgrade tab.
+- **"Update to latest" is an upgrade or nothing.** `getLatestApplicableTarget`
+  dropped the `current` row and then fell back to "the newest of what is
+  left", so on a box already running the newest row it offered the
+  next-OLDER release as an update with the downgrade warning off (the
+  2026-09-08 incident: 2026.9.2 → "Update to latest stable" → 2026.9.1). The
+  engines gate would have made that reachable on every up-to-date box whose
+  Node fails the newest row, so the fix lands here: a target must be strictly
+  newer than the installed version (from `channelInfo`, else the `current`
+  row) or there is no target. The catalog rows keep their explicit
+  Downgrade buttons.
 - **Catalog rows this box cannot run are now named before the click.** Every
   row already carried `engines.node`; the UI never read it. `channelInfo` and
   the catalog payload carry `nodeVersion`, and a row whose requirement the
