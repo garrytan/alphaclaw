@@ -13,7 +13,7 @@ const kKnownOffenders = {
   // PR 11 converted every other raw interval onto usePolling / useNowMs /
   // useVisibleInterval. This file is edited by open PR #64 (restart banner
   // work) — it follows once #64 lands, to avoid a rival branch on the same file.
-  "lib/public/js/hooks/use-app-shell-controller.js::3": "after PR #64: restart-status 2s poll + stale checks → usePolling (F143)",
+  "lib/public/js/hooks/use-app-shell-controller.js::2": "after PR #64: remaining restart-status and version polls → usePolling (F143); status freshness uses useVisibleInterval",
 };
 
 describe("guard: the UI polls through usePolling/useNowMs, never raw setInterval", () => {

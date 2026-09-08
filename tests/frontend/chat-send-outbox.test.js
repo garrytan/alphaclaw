@@ -143,7 +143,7 @@ describe("frontend/chat send-outbox (durable send)", () => {
     expect(outbox.nextEligible("s1")).toBeNull();
   });
 
-  it("ack timeout requeues with backoff until the cap, then parks failed", () => {
+  it("ack timeout requeues with backoff until the cap, then parks uncertainty", () => {
     const { outbox, nowRef } = makeOutbox();
     const item = outbox.enqueue({ sessionKey: "s1", content: "hi" });
 
@@ -166,8 +166,8 @@ describe("frontend/chat send-outbox (durable send)", () => {
     nowRef.now += kAckTimeoutMs;
     expect(outbox.sweepAckTimeouts()).toBe(true);
     const parked = outbox.listAll()[0];
-    expect(parked.status).toBe("failed");
-    expect(parked.lastError.code).toBe("ack_timeout");
+    expect(parked.status).toBe("unknown");
+    expect(parked.lastError.code).toBe("unknown_outcome");
     // Content still intact for the manual Retry chip.
     expect(parked.content).toBe("hi");
   });
@@ -178,7 +178,7 @@ describe("frontend/chat send-outbox (durable send)", () => {
     outbox.markInflight(item.clientMsgId);
     expect(outbox.listAll()[0].attempts).toBe(1);
 
-    outbox.markFailed(item.clientMsgId, { code: "session_busy", message: "busy" });
+    outbox.markFailed(item.clientMsgId, { code: "session_busy", message: "busy", notSubmitted: true });
     const busy = outbox.listAll()[0];
     expect(busy.status).toBe("queued");
     expect(busy.attempts).toBe(0);
@@ -203,7 +203,8 @@ describe("frontend/chat send-outbox (durable send)", () => {
     // dedupe window, which would turn the explicit Retry into a no-op loop.
     const originalId = String(item.clientMsgId);
     outbox.retry(originalId);
-    const retried = outbox.listAll()[0];
+    const retried = outbox.listAll()[1];
+    expect(outbox.listAll()[0]).toMatchObject({ clientMsgId: originalId, status: "unknown", resentAs: retried.clientMsgId });
     expect(retried.status).toBe("queued");
     expect(retried.attempts).toBe(0);
     expect(retried.nextAttemptAt).toBe(0);
@@ -217,7 +218,7 @@ describe("frontend/chat send-outbox (durable send)", () => {
     const { outbox } = makeOutbox();
     const item = outbox.enqueue({ sessionKey: "s1", content: "keep id" });
     outbox.markInflight(item.clientMsgId);
-    outbox.markFailed(item.clientMsgId, { code: "gateway_unavailable", retryable: false });
+    outbox.markFailed(item.clientMsgId, { code: "gateway_unavailable", notSubmitted: true, retryable: false });
     // Non-retryable classified failure parks as failed; explicit Retry reuses
     // the id — error terminals fall through to a fresh send server-side.
     const failedId = outbox.listAll()[0].clientMsgId;
@@ -234,7 +235,7 @@ describe("frontend/chat send-outbox (durable send)", () => {
     for (const backoff of expectedBackoffs) {
       outbox.markInflight(item.clientMsgId);
       outbox.markFailed(item.clientMsgId, {
-        code: "gateway_unavailable",
+        code: "gateway_unavailable", notSubmitted: true,
         retryable: true,
       });
       const current = outbox.listAll()[0];
@@ -246,7 +247,7 @@ describe("frontend/chat send-outbox (durable send)", () => {
     // Attempt 5 == kMaxAutoAttempts: even a retryable failure parks it.
     outbox.markInflight(item.clientMsgId);
     outbox.markFailed(item.clientMsgId, {
-      code: "gateway_unavailable",
+      code: "gateway_unavailable", notSubmitted: true,
       retryable: true,
     });
     expect(outbox.listAll()[0].status).toBe("failed");
@@ -255,7 +256,7 @@ describe("frontend/chat send-outbox (durable send)", () => {
     // Non-retryable fails immediately on the first attempt.
     const second = outbox.enqueue({ sessionKey: "s1", content: "hopeless" });
     outbox.markInflight(second.clientMsgId);
-    outbox.markFailed(second.clientMsgId, { code: "hard_stop", retryable: false });
+    outbox.markFailed(second.clientMsgId, { code: "hard_stop", retryable: false, notSubmitted: true });
     const failed = outbox.listAll().find((entry) => entry.clientMsgId === second.clientMsgId);
     expect(failed.status).toBe("failed");
     expect(failed.attempts).toBe(1);
@@ -271,7 +272,7 @@ describe("frontend/chat send-outbox (durable send)", () => {
 
     // Put s1's item into backoff: not eligible until nextAttemptAt passes.
     outbox.markInflight(a.clientMsgId);
-    outbox.markFailed(a.clientMsgId, { code: "session_busy" });
+    outbox.markFailed(a.clientMsgId, { code: "session_busy", notSubmitted: true });
     expect(outbox.listAll()[0].status).toBe("queued");
     expect(outbox.nextEligible("s1")).toBeNull();
     // Session scoping: s2 is unaffected by s1's backoff.
@@ -335,7 +336,7 @@ describe("frontend/chat send-outbox (durable send)", () => {
     );
   });
 
-  it("quota failure falls back to memory with one loud callback", () => {
+  it("quota failure retains unsent text in memory with one loud callback", () => {
     const onPersistError = vi.fn();
     const throwingStorage = {
       getItem: () => null,
@@ -350,15 +351,71 @@ describe("frontend/chat send-outbox (durable send)", () => {
     expect(onPersistError).toHaveBeenCalledTimes(1);
     expect(outbox.isMemoryOnly()).toBe(true);
 
-    // Further writes stay silent (loud exactly once) and fully functional.
+    // Further writes stay silent, but memory-only items cannot authorize a send.
     outbox.enqueue({ sessionKey: "s1", content: "second" });
-    outbox.markInflight(first.clientMsgId);
-    outbox.markAcked(first.clientMsgId);
+    expect(outbox.markInflight(first.clientMsgId)).toBeNull();
     expect(onPersistError).toHaveBeenCalledTimes(1);
     expect(outbox.listAll()).toHaveLength(2);
-    expect(outbox.listAll()[0].status).toBe("acked");
+    expect(outbox.listAll()[0]).toMatchObject({
+      status: "failed", possiblySubmitted: false, attempts: 0, sentAt: 0,
+      lastError: { code: "browser_storage_unavailable", notSubmitted: true },
+    });
     expect(outbox.listAll()[0].content).toBe("still safe");
     expect(outbox.nextEligible("s1").content).toBe("second");
+  });
+
+  it("a failed marker write preserves an unsent reload and permits explicit retry after storage recovers", () => {
+    const { outbox, storage } = makeOutbox();
+    const item = outbox.enqueue({ sessionKey: "s1", content: "execute once" });
+    const setItem = storage.setItem;
+    storage.setItem = () => { throw new Error("QuotaExceededError"); };
+
+    expect(outbox.markInflight(item.clientMsgId)).toBeNull();
+    expect(item).toMatchObject({ status: "failed", possiblySubmitted: false, attempts: 0, sentAt: 0 });
+    expect(readStored(storage)[0]).toMatchObject({ status: "queued", possiblySubmitted: false, attempts: 0 });
+    const reborn = makeOutbox({ storage }).outbox;
+    expect(reborn.restoreOnLoad()[0]).toMatchObject({ status: "failed", possiblySubmitted: false });
+    expect(reborn.nextEligible("s1")).toBeNull();
+
+    storage.setItem = setItem;
+    // Storage recovery does not resume automatic sends in the original tab.
+    expect(outbox.nextEligible("s1")).toBeNull();
+    expect(outbox.retry(item.clientMsgId)).toBe(item);
+    expect(outbox.markInflight(item.clientMsgId)).toBe(item);
+    expect(readStored(storage)[0]).toMatchObject({ clientMsgId: item.clientMsgId, possiblySubmitted: true });
+  });
+
+  it("a retransmission marker failure preserves prior submission uncertainty", () => {
+    const { outbox, storage } = makeOutbox();
+    const item = outbox.enqueue({ sessionKey: "s1", content: "lost acknowledgment" });
+    expect(outbox.markInflight(item.clientMsgId)).toBe(item);
+    outbox.requeueAllInflight();
+    storage.setItem = () => { throw new Error("QuotaExceededError"); };
+    expect(outbox.markInflight(item.clientMsgId)).toBeNull();
+    expect(item).toMatchObject({ status: "unknown", possiblySubmitted: true, attempts: 1,
+      lastError: { code: "unknown_outcome" } });
+    expect(makeOutbox({ storage }).outbox.restoreOnLoad()[0]).toMatchObject({ status: "unknown", possiblySubmitted: true });
+  });
+
+  it("unavailable browser storage never authorizes a memory-only send", () => {
+    const { outbox } = makeOutbox({ storage: null });
+    const item = outbox.enqueue({ sessionKey: "s1", content: "keep these words" });
+    expect(outbox.markInflight(item.clientMsgId)).toBeNull();
+    expect(item).toMatchObject({ status: "failed", content: "keep these words", possiblySubmitted: false });
+    outbox.retry(item.clientMsgId);
+    expect(outbox.markInflight(item.clientMsgId)).toBeNull();
+  });
+
+  it("a successful storage write cannot authorize an item evicted by the byte cap", () => {
+    const { outbox, storage, nowRef } = makeOutbox();
+    const older = outbox.enqueue({ sessionKey: "s1", content: "x".repeat(kOutboxMaxBytes / 2) });
+    nowRef.now += 1;
+    const newer = outbox.enqueue({ sessionKey: "s1", content: "y".repeat(kOutboxMaxBytes / 2) });
+    expect(readStored(storage).map((item) => item.clientMsgId)).toEqual([newer.clientMsgId]);
+    expect(outbox.markInflight(older.clientMsgId)).toBeNull();
+    expect(older).toMatchObject({ status: "failed", possiblySubmitted: false, attempts: 0 });
+    expect(outbox.markInflight(newer.clientMsgId)).toBe(newer);
+    expect(readStored(storage).find((item) => item.clientMsgId === newer.clientMsgId).possiblySubmitted).toBe(true);
   });
 
   it("requeue refunds the attempt after a synchronous send failure", () => {
@@ -384,7 +441,7 @@ describe("frontend/chat send-outbox (durable send)", () => {
     for (let i = 0; i < 3; i += 1) {
       const item = outbox.enqueue({ sessionKey: "s1", content: "f".repeat(3_000) });
       outbox.markInflight(item.clientMsgId);
-      outbox.markFailed(item.clientMsgId, { code: "evict_me", retryable: false });
+      outbox.markFailed(item.clientMsgId, { code: "evict_me", retryable: false, notSubmitted: true });
       failedItems.push(item);
       nowRef.now += 1_000;
     }
@@ -432,7 +489,7 @@ describe("send-outbox: socket-death requeue and live-eviction warning", () => {
     const nowRef = { now: 1_000_000 };
     let uuidCounter = 0;
     const outbox = createSendOutbox({
-      storage: null,
+      storage: makeStorage(),
       storageKey: "t",
       now: () => nowRef.now,
       uuid: () => `rq-${(uuidCounter += 1)}`,
@@ -460,7 +517,7 @@ describe("send-outbox: socket-death requeue and live-eviction warning", () => {
     const nowRef = { now: 1_000_000 };
     let uuidCounter = 0;
     const outbox = createSendOutbox({
-      storage: null,
+      storage: makeStorage(),
       storageKey: "t",
       now: () => nowRef.now,
       uuid: () => `ra-${(uuidCounter += 1)}`,
@@ -490,7 +547,8 @@ describe("send-outbox: socket-death requeue and live-eviction warning", () => {
     expect(outbox.releaseAwaitingHistory("", { force: true, olderThanMs: 120_000 })).toBe(false);
     nowRef.now += 60_001;
     expect(outbox.releaseAwaitingHistory("", { force: true, olderThanMs: 120_000 })).toBe(true);
-    expect(outbox.nextEligible("s2")?.clientMsgId).toBe(other.clientMsgId);
+    expect(outbox.nextEligible("s2")).toBeNull();
+    expect(other.status).toBe("unknown");
     // Confirmed delivery beats the gate: a confirmed item simply disappears.
     outbox.confirmDelivered(item.clientMsgId);
     expect(outbox.listAll().map((i) => i.clientMsgId)).toEqual([other.clientMsgId]);
@@ -503,7 +561,7 @@ describe("send-outbox: socket-death requeue and live-eviction warning", () => {
     const nowRef = { now: 1_000_000 };
     let uuidCounter = 0;
     const outbox = createSendOutbox({
-      storage: null,
+      storage: makeStorage(),
       storageKey: "t",
       now: () => nowRef.now,
       uuid: () => `to-${(uuidCounter += 1)}`,

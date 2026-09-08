@@ -48,14 +48,14 @@ Constants + validators: `lib/server/chat/protocol.js`; browser mirror
 `components/chat/chat-protocol.js` (drift pinned by
 `tests/frontend/chat-protocol-sync.test.js`).
 
-- Browser → server: `message {clientMsgId, sessionKey, content, sentAt}`,
+- Browser → server: `message {clientMsgId, sessionKey, content, sentAt, retry?}`,
   `stop {sessionKey, runId?}`, `history {sessionKey, reqId}`, `ping`,
   (`resume` — Phase 5).
-- Server → browser: `hello {protocolVersion, maxContentBytes, activeRuns}`
+- Server → browser: `hello {protocolVersion, maxContentBytes, activeRuns, safeRetry}`
   (first frame on every connection; `activeRuns` advertises resumable runs —
   Phase 5), `ack`, `started`, `chunk`, `tool`,
   `done {reason: complete|stopped|interrupted|error, confidence, stopped?}`,
-  `stopping`, `stop-failed`, `send-failed {code, retryable}`,
+  `stopping`, `stop-failed`, `send-failed {code, retryable, notSubmitted}`,
   `history {messages, markers, truncated}`, `desync`, `error`, `pong`,
   (`resumed`/`resume-failed` — Phase 5).
 - STREAM frames (`started/chunk/tool/done`) carry a per-run monotonic `seq`;
@@ -71,18 +71,32 @@ Constants + validators: `lib/server/chat/protocol.js`; browser mirror
 `classifyError` (`chat/errors.js`) → `{code, retryable, message}`; codes:
 `gateway_unavailable | gateway_timeout | gateway_auth | protocol_mismatch |
 protocol_invalid | session_busy | too_many_pending | unsupported | run_failed
-| payload_too_large | unknown_outcome | unknown`. Socket-close reasons map to
+| payload_too_large | storage_unavailable | unknown_outcome | unknown`. Socket-close reasons map to
 `gateway_unavailable`, not the generic bucket. Raw error text goes to the
 server log only.
 
 ## Idempotency + the ambiguity policy (unknown is unknown)
 
 - The client-generated `clientMsgId` IS the gateway `idempotencyKey`; the
-  bridge dedupes by `(sessionKey, clientMsgId)` — live records re-ack, recent
+  bridge dedupes by `(sessionKey, clientMsgId)` — live records re-ack, retained
   terminal store rows re-ack AND replay the stored terminal frame so a retried
   outbox item always settles. Dedupe binds the session: a client-controlled id
   can never replay another session's outcome (store UNIQUE(session_key,
   client_msg_id)).
+- Before every gateway dispatch, one SQLite transaction checks evidence,
+  reserves bounded capacity and claims `possibly_submitted`. A prior error is
+  reusable only with durable `not_submitted` proof; the claim invalidates that
+  proof before dispatch. Legacy rows default to `unknown`. Started-run errors
+  replay their terminal just like completed runs.
+- Browser `possiblySubmitted` is persisted before socket transmission;
+  `message.retry: true` requests reconciliation of that possibly submitted ID.
+  Missing/unavailable evidence produces `unknown_outcome` without dispatch.
+  Receiving an explicit `notSubmitted: true` refusal clears the marker. Losing
+  that refusal keeps the send ambiguous. Attempt counters are not evidence.
+- `hello.safeRetry` is scoped to the current socket and read synchronously
+  before an outbox flush. Without it, previously attempted sends are manual
+  only. Frames from replaced sockets are ignored. No exactly-once guarantee is
+  claimed for older clients that cannot identify retransmissions.
 - Each record tracks `rpcWritten` (the chat.send frame reached the gateway
   socket). Pre-write failures → retryable `send-failed`. Post-write
   timeout/disconnect (NOT an explicit gateway rejection — those carry
@@ -145,9 +159,12 @@ monolith is deleted). Pure, node-tested modules:
   dedupe-by-id, merge-on-fresh-read against other tabs, byte+count caps with
   terminal-first eviction, quota → in-memory fallback + loud chip, logout
   clear). Content is retained until history-confirmed or terminally failed —
-  ack/started are display states. Reload restores non-terminal items as
-  `failed` ("Not sent — Retry"), never auto-sends. `session_busy` waits on a
-  5s recheck without consuming attempts.
+  ack/started are display states. Reload parks attempted messages as `unknown`
+  and never-attempted queued messages as `failed`, never auto-sending either.
+  History failure/timeout parks uncertainty and holds queued followups. An
+  explicit “Send again” creates a new ID and retains the original for review;
+  “Send queued” may authorize followups without resending the uncertain item.
+  A definite `session_busy` refusal waits 5s without consuming attempts.
 - `transcript-store.js` — merge-by-stable-id history (server mints
   deterministic row ids; native row ids preferred when the gateway provides
   them), bounded one-shot outbox confirmation, marker interleaving, live-row
@@ -205,11 +222,19 @@ fallback keeps history readable when the socket can't connect.
 | "Messages can't be saved in this browser" | localStorage unavailable/full | in-session guarantees hold; don't close mid-send |
 | `?chatDebug=1` | raw history + inbound event log + outbox/run state | forensic view |
 
-Store failure is warn-once + counted in `getChatStats()`; sends never block on
-the store.
+Store failure is warn-once + counted in `getChatStats()`. New gateway dispatch
+requires durable admission. Failed outcome persistence never advertises safe
+non-submission; the existing pending claim continues preventing redispatch.
+History remains available with markers omitted when their read fails.
 
 ## Deliberate limits (recorded, not accidental)
 
+- Live registry: 128 records globally, 32 originated per browser window.
+  Reattachment consumes no new slot. Each replay buffer is byte-capped at
+  256 KiB (32 MiB aggregate), and terminalization releases it immediately.
+- Durable rows: 200/session, 5,000 globally, 90 days for terminal retention.
+  Pruning protects pending/running evidence. Admission evicts terminal rows
+  first and refuses with `too_many_pending` when protected rows fill a cap.
 - History window: newest 200 rows; `truncated` is honest (fetch 201, trim).
   Pagination needs an upstream cursor — TODOS.
 - Chat is not per-operator attributed in team mode (pre-existing; TODOS).

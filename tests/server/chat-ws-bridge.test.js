@@ -1,3 +1,4 @@
+const { createDurableTestStore } = require("./helpers/chat-gateway-harness");
 const fs = require("fs");
 const http = require("http");
 const os = require("os");
@@ -122,6 +123,7 @@ describe("server/chat-ws bridge", () => {
     return createChatWsService({
       fs,
       openclawDir: tempDir,
+      chatRunsStore: createDurableTestStore({ cleanups, rootDir: tempDir }),
       getGatewayPort: () =>
         typeof portOrHarness === "number" ? portOrHarness : portOrHarness.port,
     });

@@ -10,13 +10,13 @@ const createRecordingStore = () => {
   return {
     captured,
     chatRunsStore: {
-      recordSend() {},
+      claimSend() { return { claimed: true }; },
       markRunning() {},
       markStopRequested() {},
       markTerminal(call) {
         captured.push(call);
       },
-      findRecentTerminal() {
+      findRun() {
         return null;
       },
       listMarkers() {

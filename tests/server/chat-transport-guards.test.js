@@ -66,7 +66,7 @@ describe("server/chat transport guards", () => {
     expect(legit.client.readyState).toBe(1);
   });
 
-  it("a throwing chat-runs store never blocks a send, warns once, and is counted", async () => {
+  it("a throwing chat-runs store blocks dispatch, warns once, and is counted", async () => {
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
     const throwingStore = new Proxy(
       {},
@@ -90,17 +90,15 @@ describe("server/chat transport guards", () => {
       sessionKey: "s-store",
       content: "hi",
     });
-    await browser.waitFor((m) => m.type === "ack", "ack");
-    await browser.waitFor((m) => m.type === "started", "started");
-    harness.emit({
-      type: "event",
-      event: "agent",
-      payload: { runId: "r-store", stream: "lifecycle", data: { phase: "end" } },
-    });
-    await browser.waitFor((m) => m.type === "done", "done");
-
-    // Best-effort contract held end to end; degradation is loud-once and
-    // visible in the ops stats.
+    const failure = await browser.waitFor((m) => m.type === "send-failed", "storage refusal");
+    // Missing identity evidence cannot establish that even an unmarked frame
+    // is new: older clients and lost browser state omit retry information.
+    expect(failure).toMatchObject({ code: "unknown_outcome", notSubmitted: false });
+    expect(harness.requests.filter((f) => f.method === "chat.send")).toHaveLength(0);
+    // A retransmission with unavailable evidence cannot assert non-submission.
+    browser.send({ type: "message", clientMsgId: "retry", sessionKey: "s-store", content: "hi", retry: true });
+    const uncertain = await browser.waitFor((m) => m.clientMsgId === "retry", "unknown retry");
+    expect(uncertain).toMatchObject({ code: "unknown_outcome", notSubmitted: false });
     const storeWarnings = warnSpy.mock.calls.filter(([line]) =>
       String(line).includes("chat-runs store unavailable"),
     );
