@@ -16,9 +16,9 @@ const { classifyPrerelease } = require("../../lib/server/openclaw-releases");
 // and runs through `npm run test:container`.
 const enabled = process.env.OPENCLAW_CONTAINER_E2E === "1";
 
-// STRICT mode (CI pull_request runs): registry sanity problems (no prerelease
-// newer than the stable pin) FAIL the suite instead of skipping it, so a PR
-// cannot go green on a silently skipped journey.
+// Kept for existing container callers. The browser journey now requires a
+// published, executable pair in every mode: missing packages fail, and beta
+// release gaps select an explicit historical upgrade instead of a skip.
 const strict = process.env.OPENCLAW_CONTAINER_E2E_STRICT === "1";
 
 // `describe` comes from vitest's globals (vitest.config.js `globals: true`),
@@ -308,6 +308,28 @@ const resolveBetaTarget = ({ distTags, versions, stablePin }) => {
   };
 };
 
+// Registry timing must not disable the required browser journey. During a
+// beta gap, seed this published historical stable as a recorded overlay in
+// the unchanged production image. Its schema 1 can migrate to beta's 12/17;
+// 2026.8.x's 15/19 schemas cannot, despite the smaller package version.
+const kHistoricalUpgrade = Object.freeze({ stable: "2026.7.1-2", beta: "2026.9.1-beta.1" });
+const resolveUpgradeJourney = ({ distTags, versions, stablePin }) => {
+  const requirePublished = (version) => {
+    if (!version || !Object.prototype.hasOwnProperty.call(versions || {}, version)) {
+      throw new Error(`Container upgrade requires a published package: ${version || "missing dist-tag"}`);
+    }
+    if (versions[version]?.deprecated) throw new Error(`Container upgrade refuses deprecated package ${version}`);
+  };
+  for (const version of [stablePin, distTags?.latest, distTags?.beta]) requirePublished(version);
+  const resolved = resolveBetaTarget({ distTags, versions, stablePin });
+  if (resolved.version) {
+    requirePublished(resolved.version);
+    return { stable: stablePin, beta: resolved.version, source: resolved.source, tagged: resolved.tagged };
+  }
+  for (const version of Object.values(kHistoricalUpgrade)) requirePublished(version);
+  return { ...kHistoricalUpgrade, source: "historical-reference", tagged: resolved.tagged };
+};
+
 // Login against the real server with the shared setup password and return a
 // Cookie header value for subsequent authenticated fetches.
 const loginForCookie = async (baseUrl, password) => {
@@ -367,6 +389,7 @@ module.exports = {
   waitFor,
   compareLooseVersions,
   resolveBetaTarget,
+  resolveUpgradeJourney,
   loginForCookie,
   fetchJsonWithCookie,
 };

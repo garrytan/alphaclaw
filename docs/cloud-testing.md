@@ -141,12 +141,12 @@ Verified locally on September 8, 2026:
 The log links below refer to this workspace's gitignored `.context` directory;
 CI captures its own artifacts.
 
-- Full hermetic suite: **486 files / 8,472 tests passed** under Node 22.22.3
-  ([hermetic-final.log](../.context/ship/hermetic-final.log)).
-- Real Docker journeys: **2 files / 10 tests passed**, covering immutable
-  v0.9.76 → candidate activation and actual thread-ID recovery
-  ([container-final.log](../.context/ship/container-final.log)); the same strict
-  invocation reports the separate registry prerequisite failure described below.
+- Full hermetic suite: **487 files / 8,485 tests passed** under Node 22.22.3
+  ([hermetic-serial.log](../.context/ci-fix/hermetic-serial.log)).
+- Real Docker journeys: **3 files / 24 tests passed**, with no skipped steps:
+  the full browser upgrade, immutable v0.9.76 → candidate activation, and
+  actual thread-ID recovery
+  ([container-final.log](../.context/ci-fix/container-final.log)).
 - Real 512 MiB / 2 GiB resource limits and V8 exhaustion: **2 tests passed**
   ([autotune.log](../.context/docker/autotune.log)).
 - Real source build, full commit identity, offline activation and execution:
@@ -172,20 +172,27 @@ retries. The corrected fixture passed its focused run on the first test attempt
 in 300.81 seconds, retaining the 256 MiB heap cap and original RSS/pressure
 assertions ([live-memory-node24-final.log](../.context/docker/live-memory-node24-final.log)).
 
-The strict registry journey currently fails before browser execution: the
-recorded registry has `latest=2026.9.3`, the bundled pin is `2026.9.2`, and the
-`beta` tag is `2026.9.1`, with no eligible newer prerelease. This leaves that
-specific stable-to-beta journey uncovered: its suite failed setup and all 14
-cases were skipped. Keep the strict failure visible;
-changing to non-strict mode or lowering compatibility assertions would not
-prove it. The deterministic boot and immutable-image tests can run separately
-while that registry prerequisite is unresolved.
+The first strict run failed before browser execution: `latest=2026.9.3`,
+the bundled pin `2026.9.2`, and `beta=2026.9.1` offered no newer prerelease.
+The browser journey now selects an explicit historical upgrade during this
+registry gap: `2026.7.1-2 → 2026.9.1-beta.1`. It prepares the old stable as a
+recorded overlay before any gateway opens the fresh volume, keeping the
+production image and bundled pin unchanged. The old build's schema can migrate
+forward to that beta; using `2026.8.x` would be incompatible despite its lower
+package version. When a newer beta exists, the journey uses the shipped pin.
+All 14 steps remain required, including the exact catalog selection, verified
+backup under contention, orchestrator restart, live binary, readiness and both
+durability legs. Missing/deprecated packages or registry failures still fail.
+The restored journey also exposed an apply-admission defect: ordinary WAL
+writes invalidated a verified-backup upgrade. Normal apply admission now checks
+build and schema facts without requiring unchanged database bytes; human
+no-backup consent retains its stricter database identity checks.
 
 Failure captures go to [tests/container/artifacts](../tests/container/artifacts/);
 daemon output is in [daemon.log](../.context/docker/daemon.log). Test helpers
 remove their containers, named volumes, and staging directories. The immutable
-journey also removes its image tags; older suites retain theirs for explicit
-test-owned cleanup.
+and browser journeys also remove their image tags; the boot suite retains its
+tags for explicit test-owned cleanup.
 Inspect resources left by an interrupted run before removing only those
 owned by the test. Do not use a host-wide Docker prune. Real OpenClaw installs
 are intentionally retained in `~/.cache/alphaclaw-openclaw-cache` (or
