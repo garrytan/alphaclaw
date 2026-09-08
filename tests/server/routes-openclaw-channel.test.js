@@ -113,6 +113,7 @@ const kRoutes = [
   { method: "post", path: "/api/openclaw/mark-good", body: {} },
   { method: "post", path: "/api/openclaw/blocklist/clear", body: {} },
   { method: "post", path: "/api/openclaw/reconcile-installed", body: {} },
+  { method: "post", path: "/api/openclaw/runs/2f8c1f2e-0d2a-4b1e-9a11-6f2f8c1f2e0d/backup-risk-consent", body: {} },
 ];
 
 describe("server/routes/openclaw-channel", () => {
@@ -1099,12 +1100,95 @@ describe("server/routes/openclaw-channel", () => {
   // #79 (b): the no-backup consent (409 backup_required_for_migration) is a
   // STRICT boolean and humans-only — same two belts as allowBackupReuse.
   describe("POST /api/openclaw/apply confirmNoBackup consent", () => {
-    it("passes a boolean through to the service; absent → false (never undefined)", async () => {
+    const operationId = "2f8c1f2e-0d2a-4b1e-9a11-6f2f8c1f2e0d";
+    const consentPath = `/api/openclaw/runs/${operationId}/backup-risk-consent`;
+
+    it("issues uncached consent bound to the authenticated session, ignoring body identities", async () => {
+      const deps = createDeps();
+      deps.openclawChannelService.requestBackupRiskConsent = vi.fn(async () => ({
+        status: 200,
+        body: { ok: true, operationId, confirmNoBackupToken: "t".repeat(43), target: { channel: "stable", version: "1.1.0" } },
+      }));
+      const app = createAuthedApp(deps);
+      const login = await request(app).post("/api/auth/login").send({ password: "channel-test-secret" });
+      const cookie = String(login.headers["set-cookie"][0]).split(";")[0];
+      await request(app).post("/api/openclaw/apply").set("Cookie", cookie)
+        .send({ channel: "stable", version: "1.1.0", consentSessionId: "forged" });
+      const firstAttempt = deps.openclawChannelService.applyUpdate.mock.calls[0][0];
+      expect(firstAttempt).toMatchObject({ confirmNoBackup: false,
+        consentSessionId: expect.stringMatching(/^[a-f0-9]{64}$/) });
+      const issued = await request(app).post(consentPath).set("Cookie", cookie)
+        .send({ consentSessionId: "forged", operationId: "forged" });
+      expect(issued.status).toBe(200);
+      expect(issued.headers["cache-control"]).toBe("no-store");
+      const binding = deps.openclawChannelService.requestBackupRiskConsent.mock.calls[0][0];
+      expect(binding).toEqual({ operationId, consentSessionId: expect.stringMatching(/^[a-f0-9]{64}$/) });
+      expect(binding.consentSessionId).toBe(firstAttempt.consentSessionId);
+      expect(cookie).not.toContain(binding.consentSessionId);
+      await request(app).post("/api/openclaw/apply").set("Cookie", cookie)
+        .send({ channel: "stable", version: "1.1.0", confirmNoBackup: true, confirmNoBackupToken: issued.body.confirmNoBackupToken });
+      expect(deps.openclawChannelService.applyUpdate).toHaveBeenCalledWith(expect.objectContaining({
+        consentSessionId: binding.consentSessionId, confirmNoBackupToken: issued.body.confirmNoBackupToken,
+      }));
+      const changedSession = createApp(deps);
+      await request(changedSession).post(consentPath).set("Cookie", "setup_token=another-session").send({});
+      expect(deps.openclawChannelService.requestBackupRiskConsent.mock.calls[1][0].consentSessionId)
+        .not.toBe(binding.consentSessionId);
+    });
+
+    it("refuses bare waivers, absent sessions and malformed token combinations before apply", async () => {
+      const deps = createDeps();
+      const app = createApp(deps);
+      const base = { channel: "stable", version: "1.1.0" };
+      const bare = await request(app).post("/api/openclaw/apply").send({ ...base, confirmNoBackup: true });
+      expect(bare.status).toBe(409);
+      expect(bare.body.code).toBe("backup_consent_required");
+      const noSession = await request(app).post("/api/openclaw/apply")
+        .send({ ...base, confirmNoBackup: true, confirmNoBackupToken: "t".repeat(43) });
+      expect(noSession.status).toBe(401);
+      for (const body of [
+        { confirmNoBackupToken: "t".repeat(43) },
+        { confirmNoBackup: false, confirmNoBackupToken: "t".repeat(43) },
+        { confirmNoBackup: true, confirmNoBackupToken: null },
+        { confirmNoBackup: true, confirmNoBackupToken: "too-short" },
+      ]) {
+        const res = await request(app).post("/api/openclaw/apply")
+          .set("Cookie", "setup_token=human-session").send({ ...base, ...body });
+        expect(res.status).toBe(400);
+      }
+      expect(deps.openclawChannelService.applyUpdate).not.toHaveBeenCalled();
+      expect((await request(app).post(consentPath).send({})).status).toBe(401);
+      const malformed = await request(app).post("/api/openclaw/runs/bad-id/backup-risk-consent")
+        .set("Cookie", "setup_token=human-session").send({});
+      expect(malformed.status).toBe(400);
+    });
+
+    it("denies agents both issuance and token-bearing apply even for malformed tokens", async () => {
+      const deps = createDeps();
+      deps.openclawChannelService.requestBackupRiskConsent = vi.fn();
+      const app = express();
+      app.use(express.json());
+      app.use((req, _res, next) => { req.alphaclawActor = { type: "agent" }; next(); });
+      registerOpenclawChannelRoutes({ app, ...deps });
+      const issued = await request(app).post(consentPath).set("Cookie", "setup_token=human-session").send({});
+      expect(issued.status).toBe(403);
+      for (const confirmNoBackupToken of ["t".repeat(43), null, false, {}]) {
+        const res = await request(app).post("/api/openclaw/apply")
+          .send({ channel: "stable", version: "1.1.0", confirmNoBackupToken });
+        expect(res.status).toBe(403);
+        expect(res.body.code).toBe("humans_only");
+      }
+      expect(deps.openclawChannelService.applyUpdate).not.toHaveBeenCalled();
+      expect(deps.openclawChannelService.requestBackupRiskConsent).not.toHaveBeenCalled();
+    });
+
+    it("passes a token-bound human confirmation through; false retains ordinary behavior", async () => {
       const deps = createDeps();
       const app = createApp(deps);
       const res = await request(app)
         .post("/api/openclaw/apply")
-        .send({ channel: "stable", version: "1.1.0", confirmNoBackup: true });
+        .set("Cookie", "setup_token=human-session")
+        .send({ channel: "stable", version: "1.1.0", confirmNoBackup: true, confirmNoBackupToken: "t".repeat(43) });
       expect(res.status).toBe(200);
       expect(deps.openclawChannelService.applyUpdate).toHaveBeenCalledWith(
         expect.objectContaining({ confirmNoBackup: true, allowBackupReuse: null }),

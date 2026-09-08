@@ -84,14 +84,23 @@ describe("admin-manifest engine", () => {
         manifest.resolveTier(op, { body: { channel: "stable", version: "1.0.0", confirmNoBackup } }),
       ).toBe("denied");
     }
+    for (const confirmNoBackupToken of ["a".repeat(64), "", null, false, {}]) {
+      expect(
+        manifest.resolveTier(op, { body: { channel: "stable", version: "1.0.0", confirmNoBackupToken } }),
+      ).toBe("denied");
+    }
+    expect(op.secretFields).toContain("confirmNoBackupToken");
+    const issuance = manifest.findOp("POST", "/api/openclaw/runs/2f8c1f2e-0d2a-4b1e-9a11-6f2f8c1f2e0d/backup-risk-consent");
+    expect(issuance.id).toBe("updates.backup-risk-consent");
+    expect(issuance.tier).toBe("denied");
     // The manifest documents the param as a strict humans-only boolean.
     const field = op.params.fields.find((entry) => entry.name === "confirmNoBackup");
     expect(field).toEqual(
       expect.objectContaining({ location: "body", type: "boolean", required: false }),
     );
     expect(field.description).toMatch(/HUMANS ONLY/);
-    expect(field.description).toMatch(/backup_required_for_migration/);
-    expect(field.description).toMatch(/never relaxes a 409 backup_failed/);
+    expect(field.description).toMatch(/single-use confirmNoBackupToken/);
+    expect(field.description).toMatch(/never compatibility, ownership or lifecycle safety/);
     // Primitive/array bodies never throw and stay at the base tier.
     for (const body of [true, 1, "x", null, undefined, ["allowBackupReuse"]]) {
       expect(manifest.resolveTier(op, { body })).toBe("dangerous");

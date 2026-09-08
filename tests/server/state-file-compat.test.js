@@ -745,7 +745,8 @@ describe("persisted-format fixtures: openclaw-channel-state.json (v0.9.76 → v0
     expect(state.corrupted).toBeUndefined();
     expect(state.lastTransition).toBeNull();
     expect(state.pinLag).toBeNull();
-    expect(state.configMigration).toEqual({ ...fixture.configMigration, lastRestore: null });
+    expect(state.configMigration).toEqual({ ...fixture.configMigration, lastRestore: null,
+      completedForBuild: null, lastAttempt: { ...fixture.configMigration.lastAttempt, buildId: null } });
     expect(state).toMatchObject({
       applied: fixture.applied,
       pinVersion: "2026.9.2",
@@ -763,13 +764,14 @@ describe("persisted-format fixtures: openclaw-channel-state.json (v0.9.76 → v0
     store.writeState(state);
     expect(readJsonFile(store.statePath)).toEqual({
       ...fixture,
-      configMigration: { ...fixture.configMigration, lastRestore: null },
+      configMigration: { ...fixture.configMigration, lastRestore: null,
+        completedForBuild: null, lastAttempt: { ...fixture.configMigration.lastAttempt, buildId: null } },
       lastTransition: null,
       pinLag: null,
     });
   });
 
-  it("v0.9.77: lastTransition, pinLag and configMigration.lastRestore load intact and the file round-trips byte-for-byte", () => {
+  it("v0.9.77: adds null build identity slots and round-trips every historical field byte-for-byte", () => {
     const store = createStore();
     plantFixture(kFile, "v0.9.77", store.statePath);
     const fixture = fixtureJson(kFile, "v0.9.77");
@@ -791,7 +793,14 @@ describe("persisted-format fixtures: openclaw-channel-state.json (v0.9.76 → v0
     expect(state.configMigration.lastRestore).toMatchObject({ source: "round_trip", bootId: kFixtureBootId });
 
     store.writeState(state);
-    expect(fs.readFileSync(store.statePath, "utf8")).toBe(fixtureText(kFile, "v0.9.77"));
+    const rewritten = readJsonFile(store.statePath);
+    expect(rewritten).toEqual({ ...fixture, configMigration: { ...fixture.configMigration,
+      completedForBuild: null, lastAttempt: { ...fixture.configMigration.lastAttempt, buildId: null } } });
+    // The only forward-format change is those two explicitly unknown slots.
+    // Removing them must reproduce the historical fixture's exact bytes.
+    delete rewritten.configMigration.completedForBuild;
+    delete rewritten.configMigration.lastAttempt.buildId;
+    expect(`${JSON.stringify(rewritten, null, 2)}\n`).toBe(fixtureText(kFile, "v0.9.77"));
   });
 });
 

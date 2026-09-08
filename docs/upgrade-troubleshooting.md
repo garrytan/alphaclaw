@@ -430,31 +430,37 @@ an old archive would paper over.
 
 ## Backup: continue without a backup (consent)
 
-**What it means:** the apply reached the post-preflight checkpoint with
-`migrationRequired: true` — the target's `database preflight` answered
-`migration-required` for the state DB, or an agent DB's `PRAGMA user_version`
-is below the target build's declared `OPENCLAW_AGENT_SCHEMA_VERSION` — and no
-backup exists (`run.backup.noBackup`: a soft-gated ladder whose offline copy,
-any paused upstream attempt and the live attempts all failed, each named in
-`backup.attemptsDetail[]`). The apply is refused
-`409 backup_required_for_migration`: once the target migrates the databases
-the build you are on cannot read them, so without a backup there is no
-rollback path. This code is distinct from `backup_failed`, the hard gate's
-refusal (downgrade, dev switch, prerelease target or a channel-boundary
-crossing — `crossesChannelBoundary`, the same predicate the confirm dialog
-renders its copy from), which is never overridable.
+A failed apply can offer **Continue without a backup** when its target is
+already prepared and verified, and only backup availability failed. This
+includes eligible cross-channel changes, downgrades and migrating stable
+updates. A new or moving dev build still needs a verified backup before
+preparation; a waiver can reuse only an already built checkout at an exact
+verified commit.
 
-**Next steps:** fix the backup and retry — the 409 names the failure ("Backup
-blocked by state-database contention", "Still failing?") — or, knowingly,
-resend the apply with `confirmNoBackup: true`. The Upgrade tab renders a
-second checkbox for exactly this code ("I understand: no backup exists; the
-previous build cannot read the migrated database"). Humans only — the
-agent-admin actor gets `403`. The run record stores
-`backup.noBackupConfirmed: true` (`"unused"` when a satisfied
-`allowBackupReuse` made it moot — reuse is evaluated first), the apply
-outcome notification says the update continued WITHOUT a backup by operator
-consent, and the migrated databases' only recovery path from then on is a
-NEWER build. `confirmNoBackup` never relaxes a hard gate.
+Fixing the backup remains an option. To accept its absence, open the failed
+run's confirmation, review the target and check **I understand: no verified
+backup exists; changes may leave no safe rollback path**. The dashboard obtains
+a ten-minute, single-use confirmation bound to that failed run, your current
+sign-in session, the executing build, the prepared target and the database
+facts. It reuses that verified preparation instead of repeating the exhausted
+backup ladder. A changed build or database, an expired confirmation, or an
+AlphaClaw restart requires a fresh review; the UI never treats that refusal
+as a successful update.
+
+The human-only endpoint is
+`POST /api/openclaw/runs/:operationId/backup-risk-consent`. The next apply must
+carry both `confirmNoBackup: true` and the returned `confirmNoBackupToken`.
+A bare boolean does not authorize a waiver. Tokens never appear in run logs,
+event streams or agent responses, and agent requests cannot issue or use them.
+
+Consent waives missing recovery protection only. Another database owner,
+insufficient disk, incompatible or unverified schemas/builds, corrupt state,
+blocklists and gateway holds remain blockers. Lifecycle ownership and all
+bound facts are checked again before consuming the confirmation and recording
+the update. The run stores `backup.noBackupConfirmed: true` and its originating
+failed operation; the existing warning, notification and audit event record
+that the update proceeded without a verified backup. A migration may then
+leave no compatible build to roll back to.
 
 ## Restart did not take effect (incumbent gateway)
 
@@ -711,20 +717,11 @@ mismatch (`state.pinLag`, bounded to 3 boots / 24 h).
   `state_db_unreadable`, with the operator prose in `gatewayHold.detail` —
   instead of launched. The boot log line is `launch gate: …`; the event row
   is `launch_compat_gate/held`; the notification and `alphaclaw diagnose`
-  name the hold. Two caveats about what the UI says: the gateway card
-  disables Restart / Retry / Repair, and `POST /api/gateway/restart` and
-  `POST /api/watchdog/repair` refuse `409 gateway_held`, all with copy from
-  `kGatewayHoldCopy` (`gateway-state.js`), which is NOT reason-aware — for a
-  structural hold it still reads "Gateway held after a failed settings
-  migration … use Retry migration on the Upgrade page". Do not follow that
-  advice here: `POST /api/openclaw/reconcile/retry` runs the reconciler,
-  which returns `held` before any snapshot or doctor for a non-migration-class
-  reason, and the route answers `409 reconcile_still_held` with the hint
-  "This hold is not a settings-migration failure, so retrying the migration
-  cannot clear it." The Upgrade tab's held banner does render the structural
-  `detail`, and the remedies are **Re-activate recorded build** (refused
-  only for migration-class holds) and the diagnose bundle — Next steps
-  below. A reason-aware `kGatewayHoldCopy` is tracked in TODOS.md.
+  name the hold. The gateway card and restart/repair refusals use reason-aware
+  advice: migration holds point to **Retry migration**; structural holds point
+  to **Re-activate recorded build** and the diagnose bundle. Retrying a
+  migration cannot clear a structural hold. The Upgrade banner also shows the
+  hold's `detail`; follow the next steps below.
 - At runtime, a crash whose stderr names a version-family cause (`… uses newer
   schema version N; this build supports M`, `Legacy exec approvals exist at
   …`, `plugin requires plugin API …`) and is corroborated on disk (the DB's

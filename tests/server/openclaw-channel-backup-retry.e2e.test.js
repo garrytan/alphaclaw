@@ -15,6 +15,9 @@ const os = require("os");
 const path = require("path");
 const { DatabaseSync } = require("node:sqlite");
 const { createRunStream } = require("../../lib/server/openclaw-run-stream");
+const { createGatewayLifecycleLock } = require("../../lib/server/gateway-lifecycle-lock");
+const { createGatewayMutationPolicy } = require("../../lib/server/gateway-mutation-policy");
+const { kConsentTtlMs } = require("../../lib/server/backup-risk-consent");
 
 const {
   createOpenclawChannelSync,
@@ -585,6 +588,8 @@ const createHarness = ({
     nowRef,
     ledger,
     insertEvent,
+    installDir,
+    installToTempDir,
   };
 };
 
@@ -1871,17 +1876,29 @@ describe("server/openclaw-channel-backup-retry", () => {
       verdict = kMigrationVerdict,
       script = kRacedOut,
       agentUserVersion = 17,
+      extraSyncOptions = {},
     } = {}) => {
       const scripted = makeBackupRunner({ script });
       const harness = createHarness({
         runnerImpl: withPreflightVerdict(scripted.runnerImpl, verdict),
         targetSchema: { state: 15, agent: 19 },
+        extraSyncOptions,
       });
       seedStateDb(harness, { userVersion: 12 });
       if (agentUserVersion !== null) {
         seedAgentDb(harness, "main", { userVersion: agentUserVersion });
       }
       return { harness, backupCalls: scripted.backupCalls };
+    };
+    const kConsentSession = "human-test-session";
+    const approveFailedApply = async (harness, target = kSoftGateTarget) => {
+      const failed = await harness.sync.applyUpdate({ ...target, consentSessionId: kConsentSession });
+      expect(failed.status).toBe(409);
+      expect(failed.body.backupRiskEligible).toBe(true);
+      const issued = await harness.sync.requestBackupRiskConsent({ operationId: failed.body.operationId, consentSessionId: kConsentSession });
+      expect(issued.status).toBe(200);
+      harness.nowRef.now += 1;
+      return { ...target, confirmNoBackup: true, confirmNoBackupToken: issued.body.confirmNoBackupToken, consentSessionId: kConsentSession };
     };
 
     it("migrationRequired + noBackup without consent: 409 backup_required_for_migration BEFORE the record step — the message names both schema lines and the running version, the hint names confirmNoBackup, the run record says why", async () => {
@@ -1897,7 +1914,7 @@ describe("server/openclaw-channel-backup-retry", () => {
       expect(result.body.message).toBe(
         "OpenClaw 1.1.0 will migrate your database (state 12→15, agent 17→19) and no backup exists — the running 1.0.0 cannot read the migrated database, so there would be no rollback path.",
       );
-      expect(result.body.hint).toContain("Fix the backup and retry, or resend with confirmNoBackup: true");
+      expect(result.body.hint).toContain("review this failed update's backup risk");
       expect(result.body.migration).toEqual({
         state: { from: 12, to: 15 },
         agent: { from: 17, to: 19 },
@@ -1916,18 +1933,20 @@ describe("server/openclaw-channel-backup-retry", () => {
       // The failure notification carries the consent path.
       expect(
         notifyMessages(harness.notify).some(
-          (m) => /update to 1\.1\.0 failed/.test(m) && /confirmNoBackup: true/.test(m),
+          (m) => /update to 1\.1\.0 failed/.test(m) && /review this failed update's backup risk/.test(m),
         ),
       ).toBe(true);
     });
 
     it("with confirmNoBackup: true the same apply continues: noBackupConfirmed: true on the record, a backup warning row, the consent announced (health notification + event) and named in the acceptance outcome", async () => {
-      const { harness } = createMigratingBox();
+      const { harness, backupCalls } = createMigratingBox();
 
-      const result = await harness.sync.applyUpdate({ ...kSoftGateTarget, confirmNoBackup: true });
+      const approved = await approveFailedApply(harness);
+      const result = await harness.sync.applyUpdate(approved);
       await flushAsync();
 
       expect(result.status).toBe(202);
+      expect(backupCalls).toHaveLength(2);
       const record = readNewestRunRecord(harness);
       expect(record.backup).toEqual(expect.objectContaining({ noBackup: true, noBackupConfirmed: true }));
       expect(record.dbPreflight.migrationRequired).toBe(true);
@@ -1963,39 +1982,98 @@ describe("server/openclaw-channel-backup-retry", () => {
       );
     });
 
-    it('consent that was not needed is recorded as "unused": no migration (state exact, agent current) → the apply never checkpoints; a fresh backup that succeeded → the same; no flag → no field (old-shape records unchanged)', async () => {
-      // (a) no migration, backup raced out → soft noBackup, consent moot.
+    it('a bare consent flag never dispatches backup commands; ordinary applies keep their prior record shape', async () => {
       const exact = createMigratingBox({ verdict: kExactVerdict, agentUserVersion: 19 });
       const a = await exact.harness.sync.applyUpdate({ ...kSoftGateTarget, confirmNoBackup: true });
-      await flushAsync();
-      expect(a.status).toBe(202);
-      expect(readRunBackupRecord(exact.harness)).toEqual(
-        expect.objectContaining({ noBackup: true, noBackupConfirmed: "unused" }),
-      );
-      expect(readNewestRunRecord(exact.harness).dbPreflight.migrationRequired).toBe(false);
+      expect(a.status).toBe(409);
+      expect(a.body.code).toBe("backup_consent_required");
+      expect(exact.backupCalls).toHaveLength(0);
+      expect(exact.harness.installToTempDir).not.toHaveBeenCalled();
       expect(eventsOfType(exact.harness.insertEvent, "backup_no_backup_consented")).toHaveLength(0);
-      expect(
-        notifyMessages(exact.harness.notify).some((m) => /WITHOUT a backup by operator consent/.test(m)),
-      ).toBe(false);
-
-      // (b) migration (state line), but the fresh backup succeeded → nothing
-      // to consent to.
       const fresh = createMigratingBox({ script: [], agentUserVersion: null });
-      const b = await fresh.harness.sync.applyUpdate({ ...kSoftGateTarget, confirmNoBackup: true });
+      const b = await fresh.harness.sync.applyUpdate(kSoftGateTarget);
       await flushAsync();
       expect(b.status).toBe(202);
       expect(readRunBackupRecord(fresh.harness)).toEqual(
-        expect.objectContaining({ noBackup: false, verified: true, noBackupConfirmed: "unused" }),
+        expect.objectContaining({ noBackup: false, verified: true }),
       );
-
-      // (c) without the flag the field is simply absent.
+      expect(readRunBackupRecord(fresh.harness).noBackupConfirmed).toBeUndefined();
       const plain = createMigratingBox({ verdict: kExactVerdict, agentUserVersion: 19 });
       await plain.harness.sync.applyUpdate(kSoftGateTarget);
       await flushAsync();
       expect(readRunBackupRecord(plain.harness).noBackupConfirmed).toBeUndefined();
     });
 
-    it("the hard gate is NOT overridable (Codex 20 / ladder invariant (1)): a hard-gated backup_failed stays a 409 with its own hint even with confirmNoBackup: true — and never mentions the consent", async () => {
+    it.each(["version_mismatch", "config_migration_failed"])("a verified backed-up apply can recover the existing %s hold through its owned commit and restart", async (reason) => {
+      const lock = createGatewayLifecycleLock({ logger: kSilentLogger });
+      let harness;
+      const policy = createGatewayMutationPolicy({ lock,
+        getChannelInfo: () => harness.sync.getChannelInfo(),
+        isApplyInProgress: () => harness.sync.isApplyInProgress() });
+      ({ harness } = createMigratingBox({ script: [], agentUserVersion: null,
+        extraSyncOptions: { acquireLifecycleLock: lock.acquire, gatewayMutationPolicy: policy } }));
+      harness.store.updateState((state) => {
+        state.gatewayHold = { reason, at: harness.nowRef.now, installed: "1.0.0", expected: "1.0.0" };
+        return state;
+      });
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      try {
+        const result = await harness.sync.applyUpdate(kSoftGateTarget);
+        expect(result.status).toBe(202);
+        expect(readRunBackupRecord(harness)).toMatchObject({ noBackup: false, verified: true });
+        expect(readRunBackupRecord(harness).noBackupConfirmed).toBeUndefined();
+        expect(harness.store.readState().applied.version).toBe("1.1.0");
+        // Only boot may clear the original hold after activating/reconciling.
+        expect(harness.store.readState().gatewayHold.reason).toBe(reason);
+        expect(lock.getActiveOperation().kind).toBe("apply_commit");
+        await vi.advanceTimersByTimeAsync(1500);
+        expect(harness.restartProcess).toHaveBeenCalledTimes(1);
+        expect(lock.getActiveOperation()).toBeNull();
+      } finally { vi.useRealTimers(); }
+    });
+
+    it("a backed-up recovery refuses a replacement hold established while waiting for ownership", async () => {
+      const lock = createGatewayLifecycleLock({ logger: kSilentLogger });
+      let harness;
+      const policy = createGatewayMutationPolicy({ lock,
+        getChannelInfo: () => harness.sync.getChannelInfo(),
+        isApplyInProgress: () => harness.sync.isApplyInProgress() });
+      const acquire = async (kind, options) => {
+        const predecessor = lock.tryAcquire("restart");
+        const queued = lock.acquire(kind, options);
+        harness.store.updateState((state) => { state.gatewayHold.at += 1; return state; });
+        predecessor();
+        return queued;
+      };
+      ({ harness } = createMigratingBox({ script: [], agentUserVersion: null,
+        extraSyncOptions: { acquireLifecycleLock: acquire, gatewayMutationPolicy: policy } }));
+      harness.store.updateState((state) => {
+        state.gatewayHold = { reason: "version_mismatch", at: harness.nowRef.now };
+        return state;
+      });
+      const result = await harness.sync.applyUpdate(kSoftGateTarget);
+      expect(result).toMatchObject({ status: 409, body: { code: "gateway_held" } });
+      expect(readRunBackupRecord(harness).verified).toBe(true);
+      expect(harness.store.readState().applied).toBeNull();
+      expect(harness.restartProcess).not.toHaveBeenCalled();
+      expect(lock.getActiveOperation()).toBeNull();
+    });
+
+    it("a soft backup failure grants no authority to cross an existing hold", async () => {
+      const { harness } = createMigratingBox({ verdict: kExactVerdict, agentUserVersion: null });
+      harness.store.updateState((state) => {
+        state.gatewayHold = { reason: "version_mismatch", at: harness.nowRef.now };
+        return state;
+      });
+      const result = await harness.sync.applyUpdate({ ...kSoftGateTarget, consentSessionId: kConsentSession });
+      expect(result).toMatchObject({ status: 409, body: { code: "gateway_held" } });
+      expect(result.body.backupRiskEligible).toBeUndefined();
+      expect(readRunBackupRecord(harness).noBackup).toBe(true);
+      expect(harness.store.readState().applied).toBeNull();
+      expect(harness.restartProcess).not.toHaveBeenCalled();
+    });
+
+    it("a verified human approval can waive a hard-gate availability failure without repeating the ladder or preparation", async () => {
       const scripted = makeBackupRunner({ script: kRacedOut });
       const harness = createHarness({
         runnerImpl: withPreflightVerdict(scripted.runnerImpl, kMigrationVerdict),
@@ -2003,16 +2081,242 @@ describe("server/openclaw-channel-backup-retry", () => {
       });
       seedStateDb(harness, { userVersion: 12 });
 
-      const result = await harness.sync.applyUpdate({ ...kHardGateTarget, confirmNoBackup: true });
+      const approved = await approveFailedApply(harness, kHardGateTarget);
+      const result = await harness.sync.applyUpdate(approved);
+      expect(result.status).toBe(202);
+      expect(scripted.backupCalls).toHaveLength(2);
+      expect(harness.installToTempDir).toHaveBeenCalledTimes(1);
+      expect(readRunBackupRecord(harness).noBackupConfirmed).toBe(true);
+      expect(eventsOfType(harness.insertEvent, "backup_no_backup_consented")).toHaveLength(1);
+    });
 
+    it("binds issuance to the failed operation and human session, propagates the offer, and never persists the bearer", async () => {
+      const fail = vi.fn();
+      const { harness, backupCalls } = createMigratingBox({ extraSyncOptions: { operationEvents: { fail } } });
+      const failed = await harness.sync.applyUpdate({ ...kSoftGateTarget, consentSessionId: kConsentSession });
+      const { operationId } = failed.body;
+      expect(failed.body.backupRiskEligible).toBe(true);
+      expect(readNewestRunRecord(harness).result).toMatchObject({ backupRiskEligible: true, operationId });
+      expect(harness.sync.getChannelInfo().lastUpdateRun.result).toMatchObject({ backupRiskEligible: true, operationId });
+      expect(fail).toHaveBeenCalledWith(operationId, expect.objectContaining({ backupRiskEligible: true, operationId }));
+      expect((await harness.sync.requestBackupRiskConsent({ operationId, consentSessionId: "different-human" })).status).toBe(409);
+      expect((await harness.sync.requestBackupRiskConsent({ operationId: crypto.randomUUID(), consentSessionId: kConsentSession })).status).toBe(409);
+      const issued = await harness.sync.requestBackupRiskConsent({ operationId, consentSessionId: kConsentSession });
+      expect(issued.body.target).toEqual(kSoftGateTarget);
+      const request = { ...kSoftGateTarget, confirmNoBackup: true, confirmNoBackupToken: issued.body.confirmNoBackupToken, consentSessionId: kConsentSession };
+      expect((await harness.sync.applyUpdate({ ...request, consentSessionId: "different-human" })).body.code).toBe("backup_consent_required");
+      harness.nowRef.now += 1;
+      expect((await harness.sync.applyUpdate(request)).status).toBe(202);
+      expect((await harness.sync.applyUpdate(request)).body.code).toBe("backup_consent_required");
+      expect(backupCalls).toHaveLength(2);
+      const persisted = JSON.stringify([harness.store.readState(), harness.ledger.listRuns(), harness.insertEvent.mock.calls, fail.mock.calls, notifyMessages(harness.notify)]);
+      expect(persisted).not.toContain(issued.body.confirmNoBackupToken);
+      expect(persisted).not.toContain(kConsentSession);
+    });
+
+    it.each(["source", "target", "schema", "database", "wal"])("invalidates approved facts after a %s change without rerunning backup or install", async (changed) => {
+      const { harness, backupCalls } = createMigratingBox();
+      const approved = await approveFailedApply(harness);
+      let writer;
+      if (changed === "source") {
+        fs.appendFileSync(path.join(harness.installDir, "node_modules/openclaw/bin/entry.js"), "// changed\n");
+      } else if (changed === "target") {
+        fs.appendFileSync(path.join(harness.store.overlayPackageDir("1.1.0"), "bin/entry.js"), "// changed\n");
+      } else if (changed === "schema") {
+        fs.writeFileSync(path.join(harness.store.overlayPackageDir("1.1.0"), "dist/openclaw-agent-db-contract-test.js"), "const OPENCLAW_AGENT_SCHEMA_VERSION = 20;\n");
+      } else {
+        writer = new DatabaseSync(path.join(harness.openclawDir, "state/openclaw.sqlite"));
+        if (changed === "database") writer.exec("PRAGMA journal_mode=DELETE");
+        writer.exec("CREATE TABLE consent_change (id INTEGER); INSERT INTO consent_change VALUES (1)");
+        if (changed === "database") { writer.close(); writer = null; }
+      }
+      try {
+        const result = await harness.sync.applyUpdate(approved);
+        expect(result.status).toBe(409);
+        expect(result.body.code).toBe("backup_consent_required");
+        expect(result.body.backupRiskEligible).toBeUndefined();
+        expect(harness.store.readState().applied).toBeNull();
+        expect(harness.restartProcess).not.toHaveBeenCalled();
+        expect(backupCalls).toHaveLength(2);
+        expect(harness.installToTempDir).toHaveBeenCalledTimes(1);
+      } finally { writer?.close(); }
+    });
+
+    it.each(["expired", "changed", "lost lease", "gateway hold", "config", "torn config"])("rechecks %s after waiting for the actual lifecycle lock", async (race) => {
+      const lock = createGatewayLifecycleLock({ logger: kSilentLogger });
+      let harness;
+      const policy = createGatewayMutationPolicy({ lock, getChannelInfo: () => harness.sync.getChannelInfo(), isApplyInProgress: () => harness.sync.isApplyInProgress() });
+      const acquire = vi.fn(async (kind, options) => {
+        const predecessor = lock.tryAcquire("restart");
+        const queued = lock.acquire(kind, options);
+        expect(lock.getActiveOperation().kind).toBe("restart");
+        if (race === "expired") harness.nowRef.now += kConsentTtlMs;
+        if (race === "changed") fs.appendFileSync(path.join(harness.store.overlayPackageDir("1.1.0"), "bin/entry.js"), "// queued change\n");
+        if (race === "gateway hold") harness.store.updateState((state) => { state.gatewayHold = { reason: "config_migration_failed", version: "1.0.0", at: harness.nowRef.now }; return state; });
+        if (race === "config" || race === "torn config") fs.writeFileSync(path.join(harness.openclawDir, "openclaw.json"), race === "config" ? '{"gateway":{"mode":"local"}}' : '{"gateway":');
+        predecessor();
+        const hold = await queued;
+        if (race === "lost lease") hold();
+        return hold;
+      });
+      ({ harness } = createMigratingBox({ extraSyncOptions: { acquireLifecycleLock: acquire, gatewayMutationPolicy: policy } }));
+      const approved = await approveFailedApply(harness);
+      const result = await harness.sync.applyUpdate(approved);
+      expect(result.status).toBe(409);
+      expect(result.body.code).toBe({ expired: "backup_consent_required", changed: "apply_facts_changed", "lost lease": "lease_expired", "gateway hold": "gateway_held", config: "apply_facts_changed", "torn config": "config_unreadable" }[race]);
+      expect(acquire).toHaveBeenCalledTimes(1);
+      expect(harness.store.readState().applied).toBeNull();
+      expect(harness.restartProcess).not.toHaveBeenCalled();
+      expect(lock.getActiveOperation()).toBeNull();
+    });
+
+    it.each(["openclaw.json", "alphaclaw.json"])("binds %s content and identity between the offer, issuance, and consume", async (file) => {
+      for (const phase of ["issuance", "consume", "replacement"]) {
+        const { harness, backupCalls } = createMigratingBox();
+        const configPath = path.join(harness.openclawDir, file);
+        fs.writeFileSync(configPath, '{"privateConsentFixture":"first"}');
+        const failed = await harness.sync.applyUpdate({ ...kSoftGateTarget, consentSessionId: kConsentSession });
+        expect(failed.body.backupRiskEligible).toBe(true);
+        const approvalRequest = { operationId: failed.body.operationId, consentSessionId: kConsentSession };
+        const issued = phase !== "issuance" ? await harness.sync.requestBackupRiskConsent(approvalRequest) : null;
+        if (issued) expect(issued.status).toBe(200);
+        if (phase === "replacement") {
+          fs.writeFileSync(`${configPath}.replacement`, '{"privateConsentFixture":"first"}');
+          fs.renameSync(`${configPath}.replacement`, configPath);
+        } else fs.writeFileSync(configPath, '{"privateConsentFixture":"other"}');
+        const result = phase === "issuance"
+          ? await harness.sync.requestBackupRiskConsent(approvalRequest)
+          : await harness.sync.applyUpdate({ ...kSoftGateTarget, confirmNoBackup: true, confirmNoBackupToken: issued.body.confirmNoBackupToken, consentSessionId: kConsentSession });
+        expect(result.status).toBe(409);
+        expect(result.body.code).toBe(phase === "issuance" ? "backup_consent_stale" : "backup_consent_required");
+        expect(result.body.backupRiskEligible).toBeUndefined();
+        expect(harness.store.readState().applied).toBeNull();
+        expect(harness.restartProcess).not.toHaveBeenCalled();
+        expect(backupCalls).toHaveLength(2);
+        expect(harness.installToTempDir).toHaveBeenCalledTimes(1);
+        expect(JSON.stringify(harness.ledger.listRuns())).not.toContain("privateConsentFixture");
+      }
+    });
+
+    it.each(["openclaw.json", "alphaclaw.json"])("refuses torn %s with the shared config-unreadable envelope at every approval boundary", async (file) => {
+      for (const phase of ["offer", "issuance", "consume"]) {
+        const { harness } = createMigratingBox();
+        const configPath = path.join(harness.openclawDir, file);
+        let failed;
+        let issued;
+        if (phase !== "offer") {
+          failed = await harness.sync.applyUpdate({ ...kSoftGateTarget, consentSessionId: kConsentSession });
+          expect(failed.body.backupRiskEligible).toBe(true);
+          if (phase === "consume") issued = await harness.sync.requestBackupRiskConsent({ operationId: failed.body.operationId, consentSessionId: kConsentSession });
+        }
+        fs.writeFileSync(configPath, '{"privateConsentFixture":"do-not-log",');
+        const result = phase === "offer"
+          ? await harness.sync.applyUpdate({ ...kSoftGateTarget, consentSessionId: kConsentSession })
+          : phase === "issuance"
+            ? await harness.sync.requestBackupRiskConsent({ operationId: failed.body.operationId, consentSessionId: kConsentSession })
+            : await harness.sync.applyUpdate({ ...kSoftGateTarget, confirmNoBackup: true, confirmNoBackupToken: issued.body.confirmNoBackupToken, consentSessionId: kConsentSession });
+        expect(result.status).toBe(409);
+        expect(result.body).toMatchObject({ code: "config_unreadable", file, sourceCode: file === "openclaw.json" ? "OPENCLAW_CONFIG_UNREADABLE" : "ALPHACLAW_CONFIG_UNREADABLE" });
+        expect(result.body.message).toContain("Backup-risk confirmation is refused");
+        expect(result.body.backupRiskEligible).toBeUndefined();
+        expect(JSON.stringify([result, harness.ledger.listRuns(), harness.insertEvent.mock.calls])).not.toContain("do-not-log");
+        expect(fs.readFileSync(configPath, "utf8")).toBe('{"privateConsentFixture":"do-not-log",');
+        expect(harness.store.readState().applied).toBeNull();
+        expect(harness.restartProcess).not.toHaveBeenCalled();
+      }
+    });
+
+    it.each(['{ gateway: { mode: "local" } }', '{"$include":"outside-snapshot.json"}'])("refuses an unverifiable upstream config for a waiver while preserving ordinary apply behavior: %s", async (raw) => {
+      const { harness } = createMigratingBox();
+      fs.writeFileSync(path.join(harness.openclawDir, "openclaw.json"), raw);
+      const result = await harness.sync.applyUpdate({ ...kSoftGateTarget, consentSessionId: kConsentSession });
+      expect(result.body).toMatchObject({ code: "config_unreadable", sourceCode: "OPENCLAW_CONFIG_UNREADABLE" });
+      const ordinary = createMigratingBox({ verdict: kExactVerdict, agentUserVersion: 19 });
+      fs.writeFileSync(path.join(ordinary.harness.openclawDir, "openclaw.json"), raw);
+      expect((await ordinary.harness.sync.applyUpdate(kSoftGateTarget)).status).toBe(202);
+    });
+
+    it("refuses an approval when the agent database is unreadable", async () => {
+      const { harness } = createMigratingBox();
+      const approved = await approveFailedApply(harness);
+      fs.writeFileSync(path.join(harness.openclawDir, "agents/main/agent/openclaw-agent.sqlite"), "corrupt");
+      const result = await harness.sync.applyUpdate(approved);
+      expect(result.status).toBe(409);
+      expect(["state_db_unreadable", "state_db_unverified"]).toContain(result.body.code);
+      expect(harness.store.readState().applied).toBeNull();
+    });
+
+    it("cannot waive an unreadable self-update ownership probe", async () => {
+      const probe = vi.fn(() => false);
+      const { harness } = createMigratingBox({ extraSyncOptions: { isSelfUpdateInProgress: probe } });
+      const approved = await approveFailedApply(harness);
+      probe.mockImplementation(() => { throw new Error("probe unavailable"); });
+      const result = await harness.sync.applyUpdate(approved);
+      expect(result.status).toBe(409);
+      expect(result.body.code).toBe("self_update_unverified");
+      expect(harness.store.readState().applied).toBeNull();
+    });
+
+    it("does not create or rebuild a dev checkout after an availability failure", async () => {
+      const { harness, backupCalls } = createMigratingBox();
+      const result = await harness.sync.applyUpdate({ channel: "dev", sha: "a".repeat(40), consentSessionId: kConsentSession });
       expect(result.status).toBe(409);
       expect(result.body.code).toBe("backup_failed");
-      expect(result.body.hint).toContain("Fix the backup or choose a same-channel version");
-      expect(result.body.hint).not.toContain("confirmNoBackup");
-      expect(readRunBackupRecord(harness).noBackupConfirmed).toBeUndefined();
-      // The checkpoint never ran: the preflight is downstream of the gate.
-      expect(readNewestRunRecord(harness).dbPreflight).toBeNull();
-      expect(eventsOfType(harness.insertEvent, "backup_no_backup_consented")).toHaveLength(0);
+      expect(result.body.backupRiskEligible).toBeUndefined();
+      expect(backupCalls).toHaveLength(2);
+      expect(fs.existsSync(path.join(harness.rootDir, "openclaw"))).toBe(false);
+      expect(harness.runner.runStreamed.mock.calls.some(([call]) => call.args?.some((arg) => ["fetch", "checkout", "build", "install"].includes(arg)))).toBe(false);
+      expect(harness.installToTempDir).not.toHaveBeenCalled();
+    });
+
+    it("never records an activation when the durable consent audit write fails", async () => {
+      const { harness } = createMigratingBox();
+      const approved = await approveFailedApply(harness);
+      const update = harness.ledger.updateRun;
+      vi.spyOn(harness.ledger, "updateRun").mockImplementation((id, mutate) => update(id, (record) => {
+        const result = mutate(record);
+        if (result.backup?.noBackupConfirmed === true) throw new Error("audit write refused");
+        return result;
+      }));
+      expect((await harness.sync.applyUpdate(approved)).status).toBeGreaterThanOrEqual(400);
+      expect(harness.store.readState().applied).toBeNull();
+      expect(harness.restartProcess).not.toHaveBeenCalled();
+      expect((await harness.sync.applyUpdate(approved)).body.code).toBe("backup_consent_required");
+    });
+
+    it("records an honest availability warning for a same-schema hard-gate waiver", async () => {
+      const { harness } = createMigratingBox({ verdict: kExactVerdict, agentUserVersion: 19 });
+      const approved = await approveFailedApply(harness, kHardGateTarget);
+      expect((await harness.sync.applyUpdate(approved)).status).toBe(202);
+      expect(readNewestRunRecord(harness).dbPreflight.migrationRequired).toBe(false);
+      expect(lastStepDetail(harness, "backup", "warning").detail).toContain("no verified archive is available");
+      const notice = notifyMessages(harness.notify).find((value) => value.includes("continues WITHOUT a backup"));
+      expect(notice).not.toContain("migrates");
+      harness.sync.markGoodNow({ source: "acceptance" });
+      await flushAsync();
+      expect(notifyMessages(harness.notify).find((value) => value.includes("activation verified"))).not.toContain("was migrated");
+    });
+
+    it("clears the apply and watchdog latches and records deferred activation when a hold appears before the restart timer", async () => {
+      const managed = { begin: vi.fn(), end: vi.fn() };
+      const { harness } = createMigratingBox({ extraSyncOptions: { watchdogManagedOperation: managed } });
+      const approved = await approveFailedApply(harness);
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      try {
+        const result = await harness.sync.applyUpdate(approved);
+        expect(result.status).toBe(202);
+        expect(harness.sync.isApplyInProgress()).toBe(true);
+        harness.store.updateState((state) => { state.gatewayHold = { reason: "config_migration_failed", version: "1.0.0", at: harness.nowRef.now }; return state; });
+        await vi.advanceTimersByTimeAsync(1500);
+        expect(harness.restartProcess).not.toHaveBeenCalled();
+        expect(harness.sync.isApplyInProgress()).toBe(false);
+        expect(managed.end).toHaveBeenCalledTimes(2); // failed offer + deferred activation
+        const record = harness.ledger.readRun(result.body.operationId);
+        expect(record.state).toBe("activation_failed");
+        expect(record.result).toMatchObject({ code: "gateway_held", restartDeferred: true, restartRequired: true });
+        expect(harness.sync.getChannelInfo().lastUpdateRun.result.restartDeferred).toBe(true);
+        expect(harness.store.readState().lastTransition.ok).toBe(false);
+      } finally { vi.useRealTimers(); }
     });
   });
 
@@ -4432,7 +4736,7 @@ describe("server/openclaw-channel-backup-retry", () => {
       expect(readRunBackupRecord(harness)).toEqual(expect.objectContaining({ noBackup: true }));
     });
 
-    it('consent precedence (#79 (b), Eng 2D): allowBackupReuse AND confirmNoBackup on a migrating hard-gated apply — reuse is evaluated first (inside the ladder), the satisfied reuse leaves noBackup false, the post-preflight checkpoint never fires, and the record says noBackupConfirmed: "unused"', async () => {
+    it('a verified reusable backup satisfies the migrating hard gate without a no-backup waiver', async () => {
       const scripted = makeBackupRunner({ script: contentionScript });
       const harness = createHarness({
         runnerImpl: withPreflightVerdict(scripted.runnerImpl, {
@@ -4447,7 +4751,6 @@ describe("server/openclaw-channel-backup-retry", () => {
       const result = await harness.sync.applyUpdate({
         ...kHardGateTarget,
         allowBackupReuse: { sha256: seeded.sha256 },
-        confirmNoBackup: true,
       });
       await flushAsync();
 
@@ -4458,9 +4761,9 @@ describe("server/openclaw-channel-backup-retry", () => {
           noBackup: false,
           reused: true,
           file: seeded.file,
-          noBackupConfirmed: "unused",
         }),
       );
+      expect(record.noBackupConfirmed).toBeUndefined();
       expect(readNewestRunRecord(harness).dbPreflight.migrationRequired).toBe(true);
       expect(eventsOfType(harness.insertEvent, "backup_no_backup_consented")).toHaveLength(0);
       expect(eventsOfType(harness.insertEvent, "backup_reused")).toHaveLength(1);

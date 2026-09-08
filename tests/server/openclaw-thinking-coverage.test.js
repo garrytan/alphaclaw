@@ -1,9 +1,13 @@
 const fs = require("fs");
+const os = require("os");
+const path = require("path");
+const { pathToFileURL } = require("url");
 
 const {
   buildCatalogEntry,
   loadThinkingModule,
   normalizeThinkingDefaultValue,
+  resolveThinkingModulePath,
   resolveThinkingOptionsForModel,
   splitModelKey,
 } = require("../../lib/server/openclaw-thinking");
@@ -70,6 +74,24 @@ describe("server/openclaw-thinking coverage", () => {
     await expect(normalizeThinkingDefaultValue("medium")).resolves.toBe(
       "medium",
     );
+  });
+
+  it("resolves and loads a candidate's .mjs thinking API while rejecting unrelated chunks", async () => {
+    const distDir = fs.mkdtempSync(path.join(os.tmpdir(), "alphaclaw-thinking-mjs-"));
+    try {
+      const source = "export const listThinkingLevelOptions = () => [{ id: 'off', label: 'Off' }];";
+      fs.writeFileSync(path.join(distDir, "thinking-api.mjs"), source);
+      fs.writeFileSync(path.join(distDir, "thinking-policy.mjs"), source);
+      fs.writeFileSync(path.join(distDir, "thinking-noop.mjs"), "export const unrelated = true;");
+      expect(() => resolveThinkingModulePath(distDir)).toThrow("OpenClaw thinking module not found");
+      const modulePath = path.join(distDir, "thinking-runtime.mjs");
+      fs.writeFileSync(modulePath, source);
+      expect(resolveThinkingModulePath(distDir)).toBe(modulePath);
+      const loaded = await import(pathToFileURL(modulePath).href);
+      expect(loaded.listThinkingLevelOptions()).toEqual([{ id: "off", label: "Off" }]);
+    } finally {
+      fs.rmSync(distDir, { recursive: true, force: true });
+    }
   });
 
   it("throws when no OpenClaw thinking module can be resolved, then recovers", async () => {

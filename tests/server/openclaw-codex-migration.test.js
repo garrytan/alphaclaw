@@ -20,6 +20,30 @@ if (!kRuntimeSupported) {
 }
 
 describe.runIf(kRuntimeSupported)("server/openclaw-codex-migration", () => {
+  it("preserves an existing gateway config across repeated boots without activating implicit Codex defaults", async () => {
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "alphaclaw-codex-implicit-"));
+    const configPath = path.join(stateDir, "openclaw.json");
+    // Real immutable-image failure: startup created an empty agents shell
+    // after the first migration. On the next boot upstream Doctor interpreted
+    // its implicit model as Codex and enabled an uninstalled external plugin.
+    const bytes = `${JSON.stringify({
+      gateway: { mode: "local" },
+      agents: { entries: {} },
+      plugins: {
+        allow: ["usage-tracker"],
+        entries: { "usage-tracker": { enabled: true } },
+      },
+      messages: { ackReaction: "🧪" },
+    }, null, 2)}\n`;
+    fs.writeFileSync(configPath, bytes);
+    const env = { ...process.env, OPENCLAW_STATE_DIR: stateDir, OPENCLAW_CONFIG_PATH: configPath };
+    for (let boot = 0; boot < 2; boot += 1) {
+      const result = await migrateLegacyCodexState({ configPath, env });
+      expect(result.changed).toBe(false);
+      expect(fs.readFileSync(configPath, "utf8")).toBe(bytes);
+    }
+  });
+
   it("migrates legacy Codex routes and OAuth credentials into canonical SQLite state", async () => {
     const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "alphaclaw-codex-migration-"));
     const configPath = path.join(stateDir, "openclaw.json");
