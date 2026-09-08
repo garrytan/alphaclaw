@@ -832,10 +832,11 @@ and the pause never act).
   AlphaClaw version and commit that booted, first/last boot time, boot count
   and the previous version; the boot banner (`[alphaclaw] AlphaClaw <version>
   …`) is the first line of every boot log.
-- **Schema table:** `openclaw-schema-versions.json` (same dir) — which
-  `{ state, agent }` schema each OpenClaw version supports (declared
-  constants recorded at apply time over the built-in seeds) plus observed
-  `user_version` evidence; the compat gates and the diagnose bundle read it.
+- **Schema table:** `openclaw-schema-versions.json` (same dir) — supported
+  `{ state, agent }` schemas plus observed `user_version` evidence for compatibility gates and diagnostics.
+  Valid public `package.json` `openclaw.schemaVersions` metadata is authoritative; only its absence
+  permits legacy constants or historical fallback. Invalid metadata stays unknown.
+  Package entries use `byVersion`; dev entries use `byBuild`, keyed by the full commit.
 - **Config-gate evidence:** `config-gate/<ms>.json` (same dir; newest 10
   kept) — key-path-only diffs of every restore over `openclaw.json` (paths
   and counts, never values), beside the byte-exact

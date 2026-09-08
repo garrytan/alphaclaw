@@ -141,11 +141,12 @@ Verified locally on September 8, 2026:
 The log links below refer to this workspace's gitignored `.context` directory;
 CI captures its own artifacts.
 
-- Full hermetic suite: **486 files / 8,458 tests passed** under Node 24.16
-  ([hermetic-complete.log](../.context/docker/hermetic-complete.log)).
+- Full hermetic suite: **486 files / 8,472 tests passed** under Node 22.22.3
+  ([hermetic-final.log](../.context/ship/hermetic-final.log)).
 - Real Docker journeys: **2 files / 10 tests passed**, covering immutable
   v0.9.76 → candidate activation and actual thread-ID recovery
-  ([container-complete.log](../.context/docker/container-complete.log)).
+  ([container-final.log](../.context/ship/container-final.log)); the same strict
+  invocation reports the separate registry prerequisite failure described below.
 - Real 512 MiB / 2 GiB resource limits and V8 exhaustion: **2 tests passed**
   ([autotune.log](../.context/docker/autotune.log)).
 - Real source build, full commit identity, offline activation and execution:
@@ -154,14 +155,14 @@ CI captures its own artifacts.
   global installation; the production nested-bootstrap gap remains above.
 - Real latest 2026.9.3 and beta apply, including calls to the activated thinking
   APIs: **2 tests passed**
-  ([live-apply-node24.log](../.context/docker/live-apply-node24.log)).
+  ([live-apply-final.log](../.context/ship/live-apply-final.log)).
 - Full moving-target live tier: **14 files / 51 tests passed**, with four
   existing opt-in skips (the dev build was run separately; three paid Claude
   cases remain disabled)
   ([live-node24-final.log](../.context/docker/live-node24-final.log)).
 - UI build and three real Chromium/Preact checks passed
   ([build log](../.context/docker/build-ui-final.log),
-  [browser log](../.context/docker/browser-smokes.log)).
+  [browser log](../.context/ship/browser-final.log)).
 
 The full live run's memory case used its existing test retry. Its first start
 captured an upstream plugin-migration convergence refusal that explicitly
@@ -174,7 +175,8 @@ assertions ([live-memory-node24-final.log](../.context/docker/live-memory-node24
 The strict registry journey currently fails before browser execution: the
 recorded registry has `latest=2026.9.3`, the bundled pin is `2026.9.2`, and the
 `beta` tag is `2026.9.1`, with no eligible newer prerelease. This leaves that
-specific stable-to-beta journey uncovered. Keep the strict failure visible;
+specific stable-to-beta journey uncovered: its suite failed setup and all 14
+cases were skipped. Keep the strict failure visible;
 changing to non-strict mode or lowering compatibility assertions would not
 prove it. The deterministic boot and immutable-image tests can run separately
 while that registry prerequisite is unresolved.

@@ -154,7 +154,7 @@ The reducer evaluates rows in order; the first true predicate wins. Every input 
 |---|---|---|
 | 1 | `not_onboarded` | onboarding marker absent (`isOnboarded()` false, `gateway.js:209`). Local file read — never stale. |
 | 2 | `booting` | `bootPhase !== "ready"` — the boot sequence holds the lifecycle mutex. `bootPhase === "failed"` → `booting(failed)` variant with the captured boot error as reason. |
-| 3 | `unknown` (stale) | newest `observedAt` across {tcp, health, operation} older than `kGatewayStateStaleMs` (15s), or the snapshot compute error counter indicates consecutive failures. Server emits `unknown` at 15s; the **UI holds the last-known state with an "as of Xs ago" stamp for a further 30s grace**, then shows "Status unavailable". |
+| 3 | `unknown` (stale) | newest `observedAt` across {tcp, health, operation} older than `kGatewayStateStaleMs` (15s), or the snapshot compute error counter indicates consecutive failures. Independently, the UI marks a snapshot last-known when `snapshotStale` is true or its observation ages past 15s: a gray indicator, “Last known —” before the state label, “Status updates unavailable.” and an observation-age stamp. There is no additional 30s freshness grace. |
 | 4 | `config_error` | config-error latch set: last observed gateway exit code == 78 (`kOpenclawConfigErrorExitCode`) and not since cleared by a successful launch or config-fix retry. Current code (v0.9.39): the startup medic (default on) runs first under the lifecycle lock and may clear the latch itself by repairing openclaw.json and relaunching (`runConfigMedic`, watchdog.js); `config_error` settles only after the medic is disabled, rate-limited, or exhausted (2 attempts/incident). Detached mode: latch only from evidence (stderr tail), labeled estimated. |
 | 5 | `down` | `tcp.up === false` AND no active operation lease AND no relaunch pending — i.e. auto-restart paused (crash-loop threshold hit: `crashCountInWindow >= kWatchdogCrashLoopThreshold` (3)), repair attempts exhausted (`>= kWatchdogMaxRepairAttempts` (2) — **enforced from v0.9.77 (TODOS F015): `runRepair` books `repair/<source>/skipped {reason: "repair_attempts_exhausted"}` for automatic sources past the cap while `restartAfterCrash`'s backoff relaunches continue; the counter resets only on a verified replacement**), the **scoped auto-repair pause** (`watchdog.autoRepairPaused`, #76 B1.3 — a corroborated version-family crash whose structural repair failed, or a relaunched child that died inside its launch window twice with the same fingerprint; nothing relaunches until an operator resumes it, the installed build changes or the gateway passes the acceptance hold), or the last launch terminal-failed its ready budget. Reason carries last evidence + since; the pause and the exhausted budget each have their own reason copy (`kAutoRepairPauseCopy` / `kRepairAttemptsExhaustedCopy`, `gateway-state.js`). |
 | 6 | operation-in-flight (badge) | active lifecycle-mutex lease with a live operation record. Headline while the lease is held: `starting` when the current step is `launching`/`waiting_ready` and elapsed < ready budget; otherwise the operation kind labels the badge (`restarting` / `repairing` / `applying`) over the last settled headline. Transient `tcp.down` during a leased operation is expected and does **not** fall to row 5. |
@@ -185,8 +185,8 @@ Binding rules: at most one primary action per state (§6); `restart-required.rea
 | safe_mode | Channels paused | yellow steady | suppressed channel names | **Resume channels** · Restart |
 | config_error | Configuration error | red steady | first redacted stderr lines | **View config error** · Retry · View logs |
 | down | Down | red steady | reason + last evidence + since | **Retry** · Repair · View logs |
-| unknown >30s | Status unavailable | gray hollow | "Last confirmed running 42s ago — reconnecting" | Refresh · Restart · View logs |
-| staleness <30s | (keep last state) | subdued | "as of 12s ago" stamp | unchanged, Restart disabled |
+| unknown | Status unavailable | gray hollow | current state cannot be confirmed | Refresh · Restart · View logs |
+| stale snapshot or observation older than 15s | Last known — (last state label) | gray | “Status updates unavailable.” plus “as of” observation stamp; elapsed state time freezes at that observation | unchanged, Restart disabled |
 
 ### Dot / motion
 
@@ -195,7 +195,7 @@ Binding rules: at most one primary action per state (§6); `restart-required.rea
 | pulse | **operation in progress only**: booting, starting, restarting, repairing |
 | green steady | running — a healthy system doesn't animate |
 | steady (yellow/red) | all settled states: degraded, flapping, safe_mode, config_error, down |
-| gray hollow | unavailable (`unknown` past the 30s UI grace) |
+| gray | unavailable (`unknown`) or last-known evidence from a stale snapshot |
 
 One shared status-icon treatment (icon + text + color); error states carry an icon, never color alone. One global `prefers-reduced-motion` block covers all pulse keyframes.
 
@@ -373,7 +373,7 @@ Exit-1 ownership conflicts (`classifyOwnershipConflict` over `kGatewayOwnershipC
 
 - The reducer persists `{state, since, bootId}` **on transition only**; `since` never re-derives on read.
 - Every input source carries its own `observedAt`; the reducer output includes per-source freshness.
-- Initial missing observations remain unknown. The UI shows “Last known — status updates unavailable” when the server marks a snapshot stale or its observation ages past the existing 15s threshold; receiving a heartbeat alone cannot refresh that observation.
+- Initial missing observations remain unknown. When the server marks a snapshot stale or its observation ages past 15s, the UI prefixes the state label with “Last known —” and shows “Status updates unavailable.” Receiving a heartbeat alone cannot refresh that observation.
 - Elapsed/uptime is rendered **client-side** from `since` (reuse `formatDuration`) — frames never carry preformatted durations.
 - REST and SSE share `snapshotEpoch`, `snapshotRevision`, observation `timestamp` and `snapshotStale`. Successful observations and freshness transitions advance the revision. SSE change detection excludes volatile timestamps/revisions but includes freshness transitions; a ≥1 frame/10s heartbeat bounds transport staleness detection. Obsolete request/stream generations and older revisions cannot replace newer evidence; a new process epoch survives a wall-clock rollback.
 - Boot reconciliation: on start, operation records from a previous `bootId` are closed as "interrupted restart" so a reconnecting UI always gets a terminal answer.
