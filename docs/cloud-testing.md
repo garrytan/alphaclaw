@@ -145,7 +145,7 @@ Verified locally on September 8, 2026:
 The log links below refer to this workspace's gitignored `.context` directory;
 CI captures its own artifacts.
 
-- Full hermetic suite: **487 files / 8,485 tests passed** under Node 22.22.3
+- Full hermetic suite: **487 files / 8,485 tests passed** under Node 22.22.3 (historical, v0.9.79 — since v0.9.80 the suite requires Node 24.16+)
   ([hermetic-serial.log](../.context/ci-fix/hermetic-serial.log)).
 - Real Docker journeys: **3 files / 24 tests passed**, with no skipped steps:
   the full browser upgrade, immutable v0.9.76 → candidate activation, and

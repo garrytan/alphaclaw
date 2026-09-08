@@ -15,7 +15,7 @@ const { isSupportedNodeVersion } = require("../../lib/node-runtime");
 const kRuntimeSupported = isSupportedNodeVersion();
 if (!kRuntimeSupported) {
   console.warn(
-    `[openclaw-codex-migration.test] skipped: Node ${process.versions.node} is below AlphaClaw's supported matrix (OpenClaw refuses its embedded SQLite). Run under Node >=22.22.3 <23, >=24.15 <25, or >=25.9.`,
+    `[openclaw-codex-migration.test] skipped: Node ${process.versions.node} is below AlphaClaw's supported matrix (OpenClaw refuses its embedded SQLite). Run under Node ${kAlphaclawNodeEngines}.`,
   );
 }
 

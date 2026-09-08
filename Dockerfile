@@ -30,6 +30,10 @@ WORKDIR /app
 ARG ALPHACLAW_PKG=alphaclaw.tgz
 COPY ${ALPHACLAW_PKG} /tmp/alphaclaw.tgz
 RUN npm install --omit=dev /tmp/alphaclaw.tgz && rm /tmp/alphaclaw.tgz
+# The base tag floats within its major line. Fail the BUILD, not the first
+# boot, if the resolved Node is below the floor AlphaClaw and the pinned
+# OpenClaw require (lib/node-runtime.js kAlphaclawNodeEngines).
+RUN node -e "require('/app/node_modules/alphaclaw/lib/node-runtime').assertSupportedNodeVersion()"
 ENV PATH="/app/node_modules/.bin:$PATH"
 ENV ALPHACLAW_ROOT_DIR=/data
 EXPOSE 3000

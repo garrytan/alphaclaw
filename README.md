@@ -104,6 +104,9 @@ RUN npm install -g @anthropic-ai/claude-code@2.1.251
 WORKDIR /app
 COPY package.json ./
 RUN npm install --omit=dev
+# Fail the build, not the first boot, if the floating base tag resolved to a
+# Node below AlphaClaw's floor (>=24.16 since v0.9.80, the OpenClaw 2026.9.3 pin).
+RUN node -e "require('@chrysb/alphaclaw/lib/node-runtime').assertSupportedNodeVersion()"
 ENV PATH="/app/node_modules/.bin:$PATH"
 ENV ALPHACLAW_ROOT_DIR=/data
 EXPOSE 3000

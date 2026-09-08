@@ -42,7 +42,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          # Moving latest is 2026.9.3+, requiring Node >=24.16; hermetic CI still covers 22.
+          # Moving latest is 2026.9.3+, requiring Node >=24.16 (the runtime floor since v0.9.80; hermetic CI runs 24 and 26).
           node-version: 24
           cache: npm
 

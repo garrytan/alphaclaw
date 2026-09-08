@@ -11,9 +11,9 @@ Pins OpenClaw **2026.9.3** (npm `latest` since 2026-09-07) and moves the
 AlphaClaw runtime to **Node 24.16+** to be able to. Upstream's release drops
 Node 22 and 25 (`engines.node: ">=24.16.0 <25 || >=26.1.0"`; "upgrade Node
 before OpenClaw to prevent SQLite text truncation"), so the pin, the image and
-the CI matrix move together. Boxes still on the old `node:22-slim` image cannot
-install 2026.9.3 until their image is rebuilt — the Upgrade page now says so on
-the catalog row instead of failing after the download.
+the CI matrix move together. A box whose runtime fails the requirement (a custom
+image on Node 24.14, say — an unrebuilt `node:22-slim` box cannot run 0.9.80 at
+all) sees why on the catalog row instead of failing after the download.
 
 ### Changed
 
@@ -21,8 +21,9 @@ the catalog row instead of failing after the download.
   `FROM node:24-slim`; `package.json` `engines.node` and
   `lib/node-runtime.js` (`kAlphaclawNodeEngines`, pinned equal by a test) are
   `>=24.16.0 <25 || >=26.1.0`; the boot assert names the reason. CI's matrix is
-  `[24, 26]` — **`test (24)` is the required lane** (the ruleset's required
-  check is renamed from `test (22)` in the same sitting as this merge) and
+  `[24, 26]` — **`test (24)` is the required lane** (admin step at merge, not
+  in this diff: the `main` ruleset's required check must be renamed from
+  `test (22)`, which no longer reports, or the PR cannot merge) and
   `test (26)` the non-blocking early-warning lane; `container-e2e.yml`,
   `tests/container/container-helpers.js` (the volume-seeding helper image) and
   the autotune container smoke run Node 24 too (`live-e2e.yml` already did).
@@ -33,8 +34,10 @@ the catalog row instead of failing after the download.
 - **Pin: `openclaw` 2026.9.2 → 2026.9.3.** Its package.json publishes
   `openclaw.schemaVersions { state: 16, agent: 19 }` (the metadata-first
   authority from 0.9.79); the seed table gains the same row. The state schema
-  moved 15 → 16, so rolling back to 2026.9.2 is migration-class and hard-gated
-  on a verified backup. The v0.9.72 pin-bump safety net arms the 24 h
+  moved 15 → 16: the downgrade itself is hard-gated on a verified backup, and
+  once the state database is at schema 16 the older build reads it as
+  `incompatible` — restore that backup rather than expecting 2026.9.2 to boot
+  on migrated state. The v0.9.72 pin-bump safety net arms the 24 h
   automatic-rollback watch for the freshly bumped pin as before. The 2026.9
   "What's new" entry is re-verified against 2026.9.3 (Node requirement, safer
   updates) and gains the `gateway.cliAgents.enabled` default flip.

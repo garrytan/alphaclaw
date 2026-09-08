@@ -1075,6 +1075,8 @@ describe("server/openclaw-channel-sync", () => {
       // The hold gates read this flag: a corrupted file must never read as
       // "no hold".
       const info = sync.getChannelInfo();
+      // v0.9.80: the runtime the Upgrade tab judges catalog rows' engines against.
+      expect(info.nodeVersion).toBe(process.versions.node);
       expect(info.stateCorrupted).toBe(true);
       expect(info.gatewayHold).toBeNull();
 
@@ -2280,6 +2282,36 @@ describe("server/openclaw-channel-sync", () => {
 
       expect(result.status).toBe(409);
       expect(result.body.code).toBe("engines_unsupported");
+      expect(installToTempDir).not.toHaveBeenCalled();
+      expect(store.readState().applied).toBeNull();
+    });
+
+    it("refuses a REAL range the running major satisfies but the minor floor does not (v0.9.80)", async () => {
+      // The pre-0.9.80 gate compared majors only, so this spec — same major as
+      // the running Node, floor one minor above it — passed and the box
+      // downloaded a build that refuses to start. Built from the live runtime
+      // so it fails on every CI lane and every developer machine alike.
+      const [major, minor] = process.versions.node.split(".").map(Number);
+      const spec = `>=${major}.${minor + 1}.0 <${major + 1}`;
+      const releases = {
+        getCatalog: vi.fn(async () => ({
+          stable: [{ version: "1.1.0", engines: { node: spec } }],
+          beta: [],
+        })),
+      };
+      const { sync, store, installToTempDir } = createHarness({
+        pin: "1.0.0",
+        installedVersion: "1.0.0",
+        sentinelVersion: "1.0.0",
+        releases,
+      });
+
+      const result = await sync.applyUpdate({ channel: "stable", version: "1.1.0" });
+
+      expect(result.status).toBe(409);
+      expect(result.body.code).toBe("engines_unsupported");
+      expect(result.body.message).toContain(spec);
+      expect(result.body.message).toContain(process.versions.node);
       expect(installToTempDir).not.toHaveBeenCalled();
       expect(store.readState().applied).toBeNull();
     });

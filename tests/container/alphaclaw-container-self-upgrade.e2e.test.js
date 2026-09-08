@@ -9,8 +9,11 @@ const {
 } = require("./container-helpers");
 
 const kBaselineCommit = "01d3b66bf1caf00488b38d468590359de04b98fd";
-// This release has state 15 / agent 19, like the incoming 2026.9.2 pin,
-// while being a DISTINCT immutable package. Activation cannot be a no-op.
+// This release has state 15 / agent 19 (the schema every pin up to 2026.9.2
+// shared) while being a DISTINCT immutable package, so activation of the
+// candidate can never be a no-op. Since v0.9.80 the candidate pin (2026.9.3)
+// declares state 16, so this journey also exercises the boot-time state
+// migration from a 15-schema volume — the real self-upgrade path.
 const kRecordedVersion = "2026.8.2";
 const kId = crypto.randomUUID().slice(0, 8);
 const kImages = [`alphaclaw-self-upgrade-old:${kId}`, `alphaclaw-self-upgrade-new:${kId}`];
