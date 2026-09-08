@@ -1609,7 +1609,7 @@ describe("server/watchdog", () => {
     );
   });
 
-  it("only a caller that OWNS the hold's reason (ownedHoldReasons — Stage 3's structural repair) repairs under it; a hold with another reason still refuses", async () => {
+  it("a caller-supplied hold reason never grants Doctor permission to rewrite held configuration", async () => {
     const mkHooks = (reason) => ({
       getInfo: () => ({
         gatewayHold: { reason, blamedKeys: [], installed: "2026.9.1-beta.1", expected: "2026.9.1-beta.1", bootId: "boot-1" },
@@ -1629,9 +1629,9 @@ describe("server/watchdog", () => {
       force: true,
       ownedHoldReasons: ["version_mismatch"],
     });
-    expect(repaired.ok).toBe(true);
-    expect(owned.clawCmd.mock.calls.some((call) => String(call[0]).includes("doctor"))).toBe(true);
-    expect(owned.launchGatewayProcess).toHaveBeenCalledTimes(1);
+    expect(repaired).toEqual({ ok: false, skipped: true, reason: "gateway_held" });
+    expect(owned.clawCmd.mock.calls.some((call) => String(call[0]).includes("doctor"))).toBe(false);
+    expect(owned.launchGatewayProcess).not.toHaveBeenCalled();
 
     // Owning version_mismatch says nothing about a corrupt-DB hold.
     const foreign = createHarness({ autoRepair: true, releaseChannelHooks: mkHooks("state_db_unreadable") });
@@ -6048,7 +6048,7 @@ describe("server/watchdog", () => {
     });
 
     // ── acceptance i (lease) ──────────────────────────────────────────────
-    it("i. a repair whose Doctor run outlives the lock lease launches nothing: skipped {lease_expired}, lifecycle/attempts untouched, the queued successor holds the lock", async () => {
+    it("i. a repair whose Doctor run outlives the lock lease launches nothing: skipped {lease_expired}, lifecycle untouched and admitted attempt retained, the queued successor holds the lock", async () => {
       vi.useFakeTimers();
       const createGatewayLifecycleLock = requireLock();
       const lock = createGatewayLifecycleLock({ logger: { warn: () => {} } });
@@ -6100,7 +6100,7 @@ describe("server/watchdog", () => {
       expect(restartRows(insertWatchdogEvent, { source: "repair" })).toHaveLength(0);
       expect(watchdog.getStatus()).toMatchObject({
         lifecycle: "crash_loop",
-        repairAttempts: 0,
+        repairAttempts: 1,
         replacementPending: null,
       });
       expect(lock.getActiveOperation()).toMatchObject({ kind: "restart" });
@@ -8519,7 +8519,7 @@ describe("server/watchdog", () => {
       off.watchdog.stop();
     });
 
-    it("compat step inside runRepair: Doctor ran, the relaunch was refused → skipped {version_mismatch}, no repair attempt counted, no 'Auto-repair failed' notice", async () => {
+    it("compat step inside runRepair: Doctor ran, the relaunch was refused → skipped {version_mismatch}, admitted Doctor attempt counted, no 'Auto-repair failed' notice", async () => {
       const assessLaunchCompatibility = vi.fn(async () => ({
         compatible: false,
         reasons: ["agent_schema_too_new"],
@@ -8540,7 +8540,7 @@ describe("server/watchdog", () => {
         verdict: kRestartVerdicts.VERSION_MISMATCH,
         launchedGateway: false,
       });
-      expect(watchdog.getStatus().repairAttempts).toBe(0);
+      expect(watchdog.getStatus().repairAttempts).toBe(1);
       expect(watchdog.getStatus().lastRepairVerdict).toBe("version_mismatch");
       expect(noticeText(notifier, "Auto-repair failed")).toBe(null);
       expect(rowsOf(insertWatchdogEvent, "restart", "skipped")[0]).toMatchObject({
@@ -8693,5 +8693,166 @@ describe("server/watchdog", () => {
       expect(hooks.requestRollback).not.toHaveBeenCalled();
       watchdog.stop();
     });
+  });
+});
+
+
+describe("Doctor admission accounting", () => {
+  const { createGatewayLifecycleLock } = require("../../lib/server/gateway-lifecycle-lock");
+  afterEach(() => {
+    vi.useRealTimers();
+    global.fetch = kOriginalFetch;
+    if (kOriginalAutoRepair == null) delete process.env.WATCHDOG_AUTO_REPAIR;
+    else process.env.WATCHDOG_AUTO_REPAIR = kOriginalAutoRepair;
+  });
+  it("charges a throwing runner once and preserves the automatic cap", async () => {
+    const repairRunner = vi.fn(async () => { throw new Error("doctor process failed"); });
+    const { watchdog } = createHarness({ repairRunner, fetchImpl: async () => { throw new Error("offline"); } });
+    try {
+      const limit = watchdog.getStatus().repairAttemptLimit;
+      for (let i = 0; i < limit; i += 1) {
+        expect(await watchdog.runRepair({ source: "degraded_retry", correlationId: `throw-${i}` }))
+          .toMatchObject({ ok: false, reason: "repair_failed" });
+        await flushMicrotasks();
+      }
+      expect(await watchdog.runRepair({ source: "degraded_retry", correlationId: "over-cap" }))
+        .toMatchObject({ skipped: true, reason: "repair_attempts_exhausted" });
+      expect(repairRunner).toHaveBeenCalledTimes(limit);
+      expect(watchdog.getStatus().repairAttempts).toBe(limit);
+    } finally { watchdog.stop(); }
+  });
+
+  it("rechecks the automatic cap when concurrent binary reads finish on opposite sides of the last allowed attempt", async () => {
+    let suspect = false;
+    let delayLookup = true;
+    const lookups = [];
+    const binary = { bin: "/verified/doctor.js", version: "1.0.0" };
+    const repairRunner = vi.fn(async () => ({ ok: false }));
+    const lock = createGatewayLifecycleLock();
+    const { watchdog } = createHarness({ gatewayLifecycleLock: lock, repairRunner,
+      fetchImpl: async () => { throw new Error("offline"); },
+      releaseChannelHooks: {
+        getInfo: () => ({ installedDiverged: suspect }),
+        compatibleBinForCurrentDb: () => delayLookup
+          ? new Promise((resolve) => { lookups.push(resolve); }) : Promise.resolve(binary),
+      },
+    });
+    try {
+      const limit = watchdog.getStatus().repairAttemptLimit;
+      for (let i = 0; i < limit - 1; i += 1) {
+        await watchdog.runRepair({ source: "degraded_retry", correlationId: `prefill-${i}` });
+        await flushMicrotasks();
+      }
+      suspect = true;
+      const first = watchdog.runRepair({ source: "degraded_retry", correlationId: "first-lookup" });
+      const second = watchdog.runRepair({ source: "degraded_retry", correlationId: "second-lookup" });
+      expect(lookups).toHaveLength(2);
+      lookups[0](binary);
+      await first;
+      await flushMicrotasks();
+      lookups[1](binary);
+      expect(await second).toMatchObject({ skipped: true, reason: "repair_attempts_exhausted", attempts: limit });
+      expect(repairRunner).toHaveBeenCalledTimes(limit);
+      expect(watchdog.getStatus().repairAttempts).toBe(limit);
+      expect(lock.getActiveOperation()).toBeNull();
+      // The automatic cap must not turn into a ban on an operator's repair.
+      delayLookup = false;
+      await watchdog.runRepair({ source: "manual", correlationId: "operator", force: true });
+      expect(repairRunner).toHaveBeenCalledTimes(limit + 1);
+    } finally { watchdog.stop(); }
+  });
+
+  it.each([false, true])("honors an auto-repair disable during binary discovery while preserving manual force=%s", async (force) => {
+    let finishLookup;
+    const repairRunner = vi.fn(async () => ({ ok: false }));
+    const lock = createGatewayLifecycleLock();
+    const { watchdog } = createHarness({ gatewayLifecycleLock: lock, repairRunner,
+      fetchImpl: async () => { throw new Error("offline"); },
+      releaseChannelHooks: {
+        getInfo: () => ({ installedDiverged: true }),
+        compatibleBinForCurrentDb: () => new Promise((resolve) => { finishLookup = resolve; }),
+      },
+    });
+    try {
+      const pending = watchdog.runRepair({ source: force ? "manual" : "degraded_retry", correlationId: "disable-race", force });
+      expect(finishLookup).toBeTypeOf("function");
+      process.env.WATCHDOG_AUTO_REPAIR = "false";
+      watchdog.updateSettings({ autoRepair: false });
+      finishLookup({ bin: "/verified/doctor.js", version: "1.0.0" });
+      const result = await pending;
+      if (!force) expect(result).toMatchObject({ skipped: true, reason: "auto_repair_disabled" });
+      expect(repairRunner).toHaveBeenCalledTimes(force ? 1 : 0);
+      expect(watchdog.getStatus().repairAttempts).toBe(force ? 1 : 0);
+      expect(lock.getActiveOperation()).toBeNull();
+    } finally { watchdog.stop(); }
+  });
+
+  it("does not replace a newly pending gateway after an older automatic binary lookup finishes", async () => {
+    let finishOldLookup;
+    const binary = { bin: "/verified/doctor.js", version: "1.0.0" };
+    const lookup = vi.fn().mockImplementationOnce(() => new Promise((resolve) => { finishOldLookup = resolve; }))
+      .mockResolvedValue(binary);
+    const repairRunner = vi.fn(async () => ({ ok: true }));
+    const lock = createGatewayLifecycleLock();
+    const { watchdog } = createHarness({ gatewayLifecycleLock: lock, repairRunner,
+      fetchImpl: async () => { throw new Error("not ready"); },
+      releaseChannelHooks: { getInfo: () => ({ installedDiverged: true }), compatibleBinForCurrentDb: lookup },
+    });
+    try {
+      const pending = watchdog.runRepair({ source: "degraded_retry", correlationId: "old-lookup" });
+      const current = await watchdog.runRepair({ source: "manual", correlationId: "new-replacement", force: true });
+      expect(current).toMatchObject({ ok: true, pending: true });
+      finishOldLookup(binary);
+      expect(await pending).toMatchObject({ skipped: true, reason: "replacement_pending" });
+      expect(repairRunner).toHaveBeenCalledTimes(1);
+      expect(watchdog.getStatus().repairAttempts).toBe(1);
+      expect(lock.getActiveOperation()).toBeNull();
+    } finally { watchdog.stop(); }
+  });
+
+  it("Doctor success with an unverified replacement retains its admitted attempt", async () => {
+    const { watchdog } = createHarness({ autoRepair: false,
+      fetchImpl: async () => { throw new Error("not ready"); } });
+    try {
+      const result = await watchdog.runRepair({ source: "manual", correlationId: "pending", force: true });
+      expect(result).toMatchObject({ ok: true, pending: true });
+      expect(watchdog.getStatus().repairAttempts).toBe(1);
+      watchdog.onGatewayExit({ code: 1, expectedExit: true, pid: 4242 });
+      await flushMicrotasks();
+      expect(watchdog.getStatus().repairAttempts).toBe(1);
+      watchdog.onGatewayExit({ code: 1, expectedExit: true, pid: 4242 });
+      await flushMicrotasks();
+      expect(watchdog.getStatus().repairAttempts).toBe(1);
+    } finally { watchdog.stop(); }
+  });
+
+  it("a green probe begun before Doctor admission cannot erase the newly charged attempt", async () => {
+    let finishProbe;
+    let finishDoctor;
+    let firstProbe = true;
+    const repairRunner = vi.fn(() => new Promise((resolve) => { finishDoctor = resolve; }));
+    const { watchdog } = createHarness({ autoRepair: false, repairRunner,
+      fetchImpl: () => {
+        if (firstProbe) {
+          firstProbe = false;
+          return new Promise((resolve) => { finishProbe = resolve; });
+        }
+        return Promise.reject(new Error("offline"));
+      },
+    });
+    try {
+      const staleProbe = watchdog.runHealthCheck({ source: "before_doctor" });
+      await vi.waitFor(() => expect(finishProbe).toBeTypeOf("function"));
+      const repair = watchdog.runRepair({ source: "manual", correlationId: "new-attempt", force: true });
+      await vi.waitFor(() => expect(repairRunner).toHaveBeenCalledTimes(1));
+      expect(watchdog.getStatus().repairAttempts).toBe(1);
+      finishProbe({ ok: true, status: 200, text: async () => JSON.stringify({ ok: true, status: "live" }) });
+      expect(await staleProbe).toBe(false);
+      expect(watchdog.getStatus().repairAttempts).toBe(1);
+      finishDoctor({ ok: false });
+      await repair;
+      await flushMicrotasks();
+      expect(watchdog.getStatus().repairAttempts).toBe(1);
+    } finally { watchdog.stop(); }
   });
 });

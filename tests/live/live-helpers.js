@@ -298,76 +298,50 @@ const resolvePackageBin = (openclawPackageDir) => {
   return path.join(openclawPackageDir, rel);
 };
 
-// Real `npm install` of an exact upstream version, cached across live files
-// and runs under one per-version directory (the package is immutable on the
-// registry, so the cache key is the version). A cached tree is trusted only
-// when its bin actually runs and reports the version; anything else is
-// reinstalled. Set ALPHACLAW_LIVE_OPENCLAW_CACHE to relocate the cache. The
-// default, `$TMPDIR/alphaclaw-openclaw-cache/<version>`, is deliberately NOT
-// swept at exit and deliberately NOT under the `alphaclaw-live-*` prefix: the
-// operator's between-runs sweep (`rm -rf /tmp/alphaclaw-live-*
-// /tmp/openclaw-prepare-*`) must not throw away the ~0.7 GB-per-version cache
-// the whole tier warms once.
+// Exact immutable packages outlive Vitest's private TMPDIR. Publication and
+// validation are serialized across processes; verified entries are memoized
+// within a process so repeated fixtures do not each pay a CLI cold start.
 const kOpenclawVersionCacheDirName = "alphaclaw-openclaw-cache";
 const stageOpenclawVersion = async (
   version,
   { timeoutMs = 8 * 60 * 1000, logger = kSilentLogger } = {},
 ) => {
   const { execFileSync } = require("child_process");
+  const { populateImmutableCache } = require("./install-cache");
   if (!kVersionShape.test(String(version))) {
     throw new Error(`stageOpenclawVersion needs an exact version, got ${version}`);
   }
-  const cacheRoot =
-    process.env.ALPHACLAW_LIVE_OPENCLAW_CACHE ||
-    path.join(os.tmpdir(), kOpenclawVersionCacheDirName);
-  const cacheDir = path.join(cacheRoot, version);
-  const packageDir = path.join(cacheDir, "node_modules", "openclaw");
-  const runsAsVersion = () => {
-    try {
-      const out = String(
-        execFileSync(process.execPath, [resolvePackageBin(packageDir), "--version"], {
+  const cacheRoot = process.env.ALPHACLAW_LIVE_OPENCLAW_CACHE ||
+    path.join(os.homedir(), ".cache", kOpenclawVersionCacheDirName);
+  const result = await populateImmutableCache({
+    cacheRoot,
+    key: version,
+    timeoutMs: timeoutMs + 120_000,
+    validate: (dir) => {
+      try {
+        const packageDir = path.join(dir, "node_modules", "openclaw");
+        const pkg = JSON.parse(fs.readFileSync(path.join(packageDir, "package.json"), "utf8"));
+        if (pkg.version !== version) return false;
+        const out = String(execFileSync(process.execPath, [resolvePackageBin(packageDir), "--version"], {
           timeout: 60_000,
           stdio: "pipe",
           env: { ...scrubTestRunnerEnv(), OPENCLAW_NO_AUTO_UPDATE: "1" },
-        }),
-      );
-      return out
-        .split(/[\s()]+/)
-        .map((token) => token.replace(/^v/, ""))
-        .includes(version);
-    } catch {
-      return false;
-    }
-  };
-  if (fs.existsSync(packageDir) && runsAsVersion()) {
-    return { version, packageDir, bin: resolvePackageBin(packageDir), fromCache: true };
-  }
-  fs.rmSync(cacheDir, { recursive: true, force: true });
-  // Tracked install: an interruption mid-`npm install` leaves the prepare dir
-  // to the sweep instead of on disk; after the rename below the tracked path
-  // no longer exists, so the sweep never touches the cache.
-  const staged = await stageTempInstall({
-    versionSpec: version,
-    timeoutMs,
-    logger,
+        }));
+        return out.split(/[\s()]+/).map((token) => token.replace(/^v/, "")).includes(version);
+      } catch { return false; }
+    },
+    populate: async (staging) => {
+      trackTempDir(staging);
+      await stageTempInstall({
+        versionSpec: version,
+        timeoutMs,
+        logger,
+        fsModule: { ...fs, mkdtempSync: () => staging },
+      });
+    },
   });
-  fs.mkdirSync(cacheRoot, { recursive: true });
-  try {
-    fs.renameSync(staged.tmpDir, cacheDir);
-  } catch {
-    // Cross-device temp dirs: copy, then let the installer's cleanup run.
-    try {
-      fs.cpSync(staged.tmpDir, cacheDir, { recursive: true });
-    } finally {
-      staged.cleanup();
-    }
-  }
-  if (!runsAsVersion()) {
-    // Never leave a broken tree where the next run would trust-then-reject it.
-    fs.rmSync(cacheDir, { recursive: true, force: true });
-    throw new Error(`staged openclaw ${version} does not report its own version`);
-  }
-  return { version, packageDir, bin: resolvePackageBin(packageDir), fromCache: false };
+  const packageDir = path.join(result.cacheDir, "node_modules", "openclaw");
+  return { version, packageDir, bin: resolvePackageBin(packageDir), fromCache: result.fromCache };
 };
 
 // Shared pin fixture + backup stub used by the apply and dev tiers: a

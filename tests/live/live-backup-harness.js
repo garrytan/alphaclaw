@@ -1,6 +1,6 @@
 // Shared harness for the LIVE backup tiers: runBackup (lib/server/
 // openclaw-channel-sync.js) driving a REAL OpenClaw CLI against a throwaway
-// state dir. The CLI is selectable — the repo's pinned 2026.7.1-2, or any
+// state dir. The CLI is selectable — the repo's current pin, or any
 // exact version staged with liveHelpers.stageOpenclawVersion — so the same
 // harness pins the pin's contract (openclaw-live-backup.e2e.test.js) and
 // reproduces issue #54 against the real 2026.9.1-beta.1
@@ -19,7 +19,6 @@
 // run untouched.
 const fs = require("fs");
 const path = require("path");
-const { execFileSync } = require("child_process");
 const { DatabaseSync } = require("node:sqlite");
 const liveHelpers = require("./live-helpers");
 const {
@@ -33,6 +32,21 @@ const {
   listLiveOpenclawProcesses,
 } = require("../../lib/server/openclaw-lock-contention");
 const { kSilentLogger, mkTemp, repoOpenclawBin, scrubTestRunnerEnv } = liveHelpers;
+const { materializeDatabases } = require("./database-fixture");
+
+const installedVersion = (bin) => {
+  let dir = path.dirname(fs.realpathSync(bin));
+  for (;;) {
+    const file = path.join(dir, "package.json");
+    if (fs.existsSync(file)) {
+      const pkg = JSON.parse(fs.readFileSync(file, "utf8"));
+      if (pkg.name === "openclaw") return pkg.version;
+    }
+    const parent = path.dirname(dir);
+    if (parent === dir) throw new Error(`Cannot locate package for ${bin}`);
+    dir = parent;
+  }
+};
 
 const kPin = "1.0.0";
 const kHardGateTarget = Object.freeze({ channel: "beta", version: "1.1.0-beta.1" });
@@ -101,14 +115,13 @@ const writeLegacyAuditLog = (stateDir, { records = 5 } = {}) => {
 // DBs (both enumerateStateDbs shapes) so there is content to archive and the
 // fresh-install carve-out cannot mask a missing artifact.
 //
-// agentDb: the per-agent openclaw-agent.sqlite. The pin archives any SQLite
-// file; 2026.8.2+ refuses a fixture agent DB ("has no schema ownership
-// metadata … a direct file copy was refused") while accepting a fixture
-// GLOBAL state DB (it runs its own schema check on that one) — so the beta
-// fixtures omit the agent DB.
+// Materialize both canonical databases with the selected real CLI. The
+// agent database carries the schema ownership metadata backup requires.
+// Contention-only callers may omit agent state because they exercise the
+// global lease specifically.
 const writeStateFixture = (
   homeDir,
-  { jsonlFiles = 6, lockFiles = 2, legacyAuditLog = false, agentDb = true } = {},
+  { jsonlFiles = 6, lockFiles = 2, legacyAuditLog = false, agentDb = true, openclawBin = repoOpenclawBin(), realDatabases = true } = {},
 ) => {
   const stateDir = path.join(homeDir, ".openclaw");
   const sessionsDir = path.join(stateDir, "agents", "main", "sessions");
@@ -139,11 +152,12 @@ const writeStateFixture = (
     );
   }
   const stateDbPath = path.join(stateDir, "state", "openclaw.sqlite");
-  createFixtureDb(stateDbPath);
-  if (agentDb) {
-    createFixtureDb(
-      path.join(stateDir, "agents", "main", "agent", "openclaw-agent.sqlite"),
-    );
+  if (realDatabases) {
+    materializeDatabases({ openclawBin, stateDir, version: installedVersion(openclawBin), agentDb,
+      cliEnv: buildCliEnv({ homeDir, stateDir }) });
+  } else {
+    createFixtureDb(stateDbPath);
+    if (agentDb) createFixtureDb(path.join(stateDir, "agents", "main", "agent", "openclaw-agent.sqlite"));
   }
   if (legacyAuditLog) writeLegacyAuditLog(stateDir);
   return { stateDir, sessionsDir, catalogPath, stateDbPath };
@@ -226,28 +240,6 @@ const createQuiesceFake = ({ onStop = null, onStart = null } = {}) => {
   return fake;
 };
 
-// Replace the fixture's state DB with one the given CLI wrote itself:
-// `approvals get --json` materializes that line's real schema (74 tables on
-// the pin, 108/user_version 12 on the beta). Realistic for the #54 shape —
-// the beta's lease heartbeat only logs "[sqlite/transaction] SQLite
-// transaction lock wait failed" against a real-schema DB; a fixture DB takes
-// its "schema migration pending" path and prints only the timeout line.
-const materializeStateDb = ({ openclawBin, cliEnv, stateDir }) => {
-  const dbPath = path.join(stateDir, "state", "openclaw.sqlite");
-  for (const suffix of ["", "-wal", "-shm", "-journal"]) {
-    fs.rmSync(`${dbPath}${suffix}`, { force: true });
-  }
-  execFileSync(process.execPath, [openclawBin, "approvals", "get", "--json"], {
-    env: cliEnv,
-    stdio: "pipe",
-    timeout: 120_000,
-  });
-  if (!fs.existsSync(dbPath)) {
-    throw new Error(`${openclawBin} did not materialize ${dbPath}`);
-  }
-  return dbPath;
-};
-
 const createLiveBackupHarness = ({
   openclawBin = repoOpenclawBin(),
   gatewayQuiesce = null,
@@ -256,7 +248,7 @@ const createLiveBackupHarness = ({
   fixture: fixtureOptions = {},
   // "fixture" = node:sqlite table (what the churn tiers always used);
   // "materialize" = the selected CLI writes its real schema (see above).
-  stateDb = "fixture",
+  stateDb = "materialize",
   // Copy-first (#79 (c)): the AlphaClaw offline copy is the FIRST rung of
   // every quiesce and, against a held RESERVED lock, it simply succeeds
   // (sqlite backup() reads under that lock) — so a tier that wants the REAL
@@ -275,6 +267,8 @@ const createLiveBackupHarness = ({
   const fixture = writeStateFixture(rootDir, {
     jsonlFiles: 1000,
     lockFiles: 1000,
+    openclawBin,
+    realDatabases: stateDb === "materialize",
     ...fixtureOptions,
   });
   const packageRoot = mkTemp("alphaclaw-live-backup-pkgroot-");
@@ -300,9 +294,7 @@ const createLiveBackupHarness = ({
     stateDir: openclawDir,
     pathPrefix: shimDir,
   });
-  if (stateDb === "materialize") {
-    materializeStateDb({ openclawBin, cliEnv, stateDir: openclawDir });
-  } else if (stateDb !== "fixture") {
+  if (!["fixture", "materialize"].includes(stateDb)) {
     throw new Error(`createLiveBackupHarness: unknown stateDb "${stateDb}"`);
   }
 
@@ -432,7 +424,6 @@ module.exports = {
   writeVersionedPackageFixture,
   writeOpenclawShim,
   createQuiesceFake,
-  materializeStateDb,
   createLiveBackupHarness,
   readRunBackupRecord,
   holdReservedLock,

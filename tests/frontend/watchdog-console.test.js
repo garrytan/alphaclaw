@@ -109,6 +109,7 @@ vi.mock("preact/hooks", () => {
 });
 
 vi.mock("../../lib/public/js/lib/api.js", () => ({
+  authFetch: vi.fn(),
   fetchWatchdogLogs: vi.fn(),
   fetchWatchdogLogsDelta: vi.fn(),
 }));
@@ -134,6 +135,7 @@ vi.mock(
 
 import * as preactHooks from "preact/hooks";
 import * as api from "../../lib/public/js/lib/api.js";
+import { copyTextToClipboard } from "../../lib/public/js/lib/clipboard.js";
 import { readUiSettings } from "../../lib/public/js/lib/ui-settings.js";
 import { useWatchdogTerminal } from "../../lib/public/js/components/watchdog-tab/terminal/use-terminal.js";
 import {
@@ -203,6 +205,18 @@ describe("frontend/watchdog console hook (delta polling)", () => {
     harness.flushEffects();
     return result;
   };
+
+  it("exposes selectable report text when clipboard copy fails", async () => {
+    api.fetchWatchdogLogs.mockResolvedValue("");
+    api.authFetch.mockResolvedValue({ ok: true, text: async () => "# Diagnostic report\nGateway unavailable" });
+    copyTextToClipboard.mockResolvedValue(false);
+    let result = renderConsole();
+    await result.onCopyAll();
+    result = renderConsole();
+    expect(result.copyingAll).toBe(false);
+    expect(result.manualCopyText).toContain("Gateway unavailable");
+    expect(api.authFetch).toHaveBeenCalledWith("/api/diagnose?format=text", expect.objectContaining({ cache: "no-store" }));
+  });
 
   it("reset replaces, deltas append, and the cursor survives a Terminal-tab switch (poll paused) then resumes", async () => {
     api.fetchWatchdogLogs.mockResolvedValue("line1\nline2\n");

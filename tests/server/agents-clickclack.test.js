@@ -298,3 +298,17 @@ describe("server/agents clickclack beta toggles (5.1)", () => {
     expect(fsMock.readConfig().channels.clickclack.allowBots).toBe(false);
   });
 });
+
+
+it("preserves a spent ClickClack setup when gateway restart is held", async () => {
+  const { GatewayMutationBlockedError } = require("../../lib/server/gateway-mutation-policy");
+  const { service, restartGateway, clawCalls } = buildHarness();
+  restartGateway.mockRejectedValue(new GatewayMutationBlockedError({
+    code: "gateway_held", error: "held", hint: "Re-activate recorded build", statusCode: 409,
+  }));
+  const result = await service.createChannelAccount({ provider: "clickclack",
+    setupValue: "one-use-code", agentId: "main", name: "ClickClack" });
+  expect(result).toMatchObject({ channel: "clickclack", configSaved: true,
+    restartDeferred: true, restartRequired: true, code: "gateway_held" });
+  expect(clawCalls.some((cmd) => cmd.includes("channels remove"))).toBe(false);
+});

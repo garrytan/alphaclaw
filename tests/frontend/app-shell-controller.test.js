@@ -173,6 +173,8 @@ describe("frontend/app-shell controller (shared status feed)", () => {
     invalidateCache("/api/watchdog/status");
     invalidateCache("/api/doctor/status");
     globalThis.window = {
+      setInterval: globalThis.setInterval,
+      clearInterval: globalThis.clearInterval,
       addEventListener: vi.fn(),
       removeEventListener: vi.fn(),
       location: { reload: vi.fn() },
@@ -199,6 +201,47 @@ describe("frontend/app-shell controller (shared status feed)", () => {
     gatewayShellStore.reset();
     vi.useRealTimers();
     delete globalThis.window;
+  });
+
+  it("rejects an old REST response after a newer SSE epoch and retains the atomic companions", async () => {
+    let handlers;
+    api.subscribeStatusEvents.mockImplementation((value) => { handlers = value; return () => {}; });
+    let resolvePoll;
+    api.fetchStatus.mockImplementation(() => new Promise((resolve) => { resolvePoll = resolve; }));
+    let result = await settle();
+    result.actions.refreshSharedStatuses();
+    await flushMicrotasks();
+    handlers.onOpen();
+    handlers.onMessage({ status: { gateway: "running" }, snapshotEpoch: "new", snapshotRevision: 8,
+      timestamp: new Date().toISOString(), snapshotStale: false, watchdogStatus: { health: "healthy" }, doctorStatus: null });
+    result = await settle();
+    resolvePoll({ gateway: "stopped", snapshotEpoch: "old", snapshotRevision: 100,
+      timestamp: new Date().toISOString(), watchdogStatus: { health: "down" } });
+    result = await settle();
+    expect(result.state.sharedStatus.gateway).toBe("running");
+    expect(result.state.sharedWatchdogStatus.health).toBe("healthy");
+    expect(result.state.statusFreshness.mode).toBe("fresh");
+  });
+
+  it("stale heartbeats cannot refresh observation age and same-stamp recovery clears the warning", async () => {
+    let handlers;
+    api.subscribeStatusEvents.mockImplementation((value) => { handlers = value; return () => {}; });
+    await settle(); handlers.onOpen();
+    const timestamp = new Date().toISOString();
+    const frame = { status: { gateway: "running" }, snapshotEpoch: "boot", snapshotRevision: 1, timestamp };
+    handlers.onMessage(frame); await settle();
+    await vi.advanceTimersByTimeAsync(5000);
+    handlers.onMessage({ ...frame, snapshotRevision: 2, snapshotStale: true });
+    let result = await settle();
+    expect(result.state.statusFreshness.mode).toBe("stale");
+    const observedAt = result.state.statusFreshness.observedAtMs;
+    await vi.advanceTimersByTimeAsync(5000);
+    handlers.onMessage({ ...frame, snapshotRevision: 2, snapshotStale: true });
+    result = await settle();
+    expect(result.state.statusFreshness).toMatchObject({ mode: "stale", observedAtMs: observedAt });
+    handlers.onMessage({ ...frame, snapshotRevision: 3, snapshotStale: false });
+    result = await settle();
+    expect(result.state.statusFreshness.mode).toBe("fresh");
   });
 
   it("fresh polling-fallback data replaces a latched stream frame (stale SSE must not shadow polls)", async () => {

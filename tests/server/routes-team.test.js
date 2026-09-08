@@ -17,6 +17,7 @@ const {
   createTeamGatewayConfig,
 } = require("../../lib/server/team/gateway-config");
 const { createTeamService } = require("../../lib/server/team-service");
+const { GatewayMutationBlockedError } = require("../../lib/server/gateway-mutation-policy");
 const { createTeamPresence } = require("../../lib/server/team/presence");
 const { updateOpenclawConfig } = require("../../lib/server/openclaw-config");
 const {
@@ -46,6 +47,8 @@ describe("server/routes/team (4.5)", () => {
   let capability;
   let probeIdentityOk;
   let probeTokenOk;
+  let transitionBlocker;
+  let capabilityProbe;
 
   // The merged stack end to end over REAL files: routes -> teamService
   // (transition: snapshot -> write -> restart -> probe -> restore) ->
@@ -71,6 +74,8 @@ describe("server/routes/team (4.5)", () => {
     capability = true;
     probeIdentityOk = true;
     probeTokenOk = true;
+    transitionBlocker = null;
+    capabilityProbe = vi.fn(async () => ({ trustedProxyTeam: capability }));
 
     const teamStateStore = createTeamStateStore({ rootDir });
     const teamGatewayConfig = createTeamGatewayConfig({
@@ -98,9 +103,12 @@ describe("server/routes/team (4.5)", () => {
       openclawDir: rootDir,
       env: {},
       restartGateway,
+      withGatewayTransition: (run) => run({ restartGateway, assertCanMutate: () => {
+        if (transitionBlocker) throw transitionBlocker;
+      } }),
       getGatewayUrl: () => "http://127.0.0.1:18789",
       membersStore,
-      applyTeamGatewayConfig: () => teamGatewayConfig.applyTeamGatewayConfig(),
+      applyTeamGatewayConfig: (options) => teamGatewayConfig.applyTeamGatewayConfig(options),
       request: probeRequest,
       probeOptions: { healthAttempts: 1, healthRetryDelayMs: 0 },
       logger: { warn() {} },
@@ -116,9 +124,15 @@ describe("server/routes/team (4.5)", () => {
       // Mirrors lib/server.js wiring: invite acceptance reconciles the
       // gateway roster when team mode is on (E-C8).
       onMemberRosterChanged: async () => {
-        if (!teamSettings().enabled) return;
-        await teamGatewayConfig.applyTeamGatewayConfig();
-        restartReasons.push("team_member_accepted");
+        let restartRequired = false;
+        try {
+          restartRequired = await teamService.reconcileRoster();
+        } catch (error) {
+          restartRequired = error instanceof GatewayMutationBlockedError;
+          throw error;
+        } finally {
+          if (restartRequired) restartReasons.push("team_member_accepted");
+        }
       },
     });
     registerTeamRoutes({
@@ -140,7 +154,7 @@ describe("server/routes/team (4.5)", () => {
         markRequired: (reason) => restartReasons.push(reason),
       },
       openclawCapabilities: {
-        getAll: async () => ({ trustedProxyTeam: capability }),
+        getAll: () => capabilityProbe(),
       },
       insertWatchdogEvent: (event) => auditEvents.push(event),
       resolveSetupUrl: () => "https://claw.example.com/",
@@ -406,7 +420,7 @@ describe("server/routes/team (4.5)", () => {
     expect(res.body.ok).toBe(false);
     expect(res.body.code).toBe("team_enable_failed");
     expect(res.body.restored).toBe(true);
-    // The flag never flipped and the legacy-login lockdown never armed.
+    // Routing was restored and the legacy-login lockdown never armed.
     expect(teamSettings()).toEqual({ enabled: false, disableLegacyLogin: false });
     // The snapshot was restored verbatim, via a second restart.
     expect(configDoc().gateway.auth).toEqual({ mode: "token", token: "t" });
@@ -428,6 +442,155 @@ describe("server/routes/team (4.5)", () => {
     expect(teamSettings().enabled).toBe(false);
     // The restore CONFIG write still landed before the restart threw.
     expect(configDoc().gateway.auth).toEqual({ mode: "token", token: "t" });
+  });
+
+  it("a gateway hold refuses enable before creating any owner account", async () => {
+    const cookie = await legacyCookie();
+    transitionBlocker = new GatewayMutationBlockedError({ code: "gateway_held", statusCode: 409,
+      error: "Gateway recovery is held.", hint: "Review the Upgrade page." });
+    const res = await enableTeam(cookie);
+    expect(res.status).toBe(409);
+    expect(res.body).toMatchObject({ code: "gateway_held", configSaved: false, ownerCreated: false, enabled: false });
+    expect(membersStore.listMembers()).toEqual([]);
+    expect(configDoc().gateway.auth.mode).toBe("token");
+    expect(restartGateway).not.toHaveBeenCalled();
+  });
+
+  it("reports an owner saved before a later hold without claiming gateway auth was saved", async () => {
+    const cookie = await legacyCookie();
+    const createMember = membersStore.createMember;
+    membersStore.createMember = (options) => {
+      const result = createMember(options);
+      transitionBlocker = new GatewayMutationBlockedError({ code: "gateway_held", statusCode: 409,
+        error: "Gateway recovery is held.", hint: "Review the Upgrade page." });
+      return result;
+    };
+    const res = await enableTeam(cookie, { disableLegacyLogin: true });
+    expect(res.status).toBe(409);
+    expect(res.body).toMatchObject({ code: "gateway_held", ownerCreated: true,
+      owner: { email: "owner@example.com", role: "admin" }, configSaved: false, enabled: false });
+    expect(membersStore.getMemberByEmail("owner@example.com")).toBeTruthy();
+    expect(configDoc().gateway.auth.mode).toBe("token");
+    expect(teamSettings().disableLegacyLogin).toBe(false);
+    expect(restartGateway).not.toHaveBeenCalled();
+  });
+
+  it("preserves owner validation status codes under transition admission", async () => {
+    const cookie = await legacyCookie();
+    const malformed = await enableTeam(cookie, { ownerEmail: "invalid" });
+    expect(malformed.status).toBe(400);
+    membersStore.createMember({ email: "owner@example.com", role: "admin", password: "a different password" });
+    const unverified = await enableTeam(cookie);
+    expect(unverified.status).toBe(401);
+    expect(unverified.body.code).toBe("owner_verify_failed");
+    expect(teamSettings().enabled).toBe(false);
+    expect(restartGateway).not.toHaveBeenCalled();
+  });
+
+  it("a delayed capability result cannot create a second owner during an active transition", async () => {
+    const cookie = await legacyCookie();
+    let releaseCapability;
+    capabilityProbe.mockImplementationOnce(() => new Promise((resolve) => { releaseCapability = resolve; }));
+    const delayed = enableTeam(cookie, { ownerEmail: "another@example.com" });
+    await vi.waitFor(() => expect(capabilityProbe).toHaveBeenCalledTimes(1));
+    let releaseRestart;
+    restartGateway.mockImplementationOnce(() => new Promise((resolve) => { releaseRestart = resolve; }));
+    const first = enableTeam(cookie);
+    await vi.waitFor(() => expect(restartGateway).toHaveBeenCalledTimes(1));
+    releaseCapability({ trustedProxyTeam: true });
+    expect((await delayed).body.code).toBe("transition_in_flight");
+    expect(membersStore.getMemberByEmail("another@example.com")).toBeNull();
+    releaseRestart();
+    expect((await first).status).toBe(200);
+  });
+
+  it("a stored owner password that fails verification never applies auth or arms lockdown", async () => {
+    const cookie = await legacyCookie();
+    vi.spyOn(membersStore, "verifyMemberPassword").mockReturnValueOnce(null);
+    const res = await enableTeam(cookie, { disableLegacyLogin: true });
+    expect(res.status).toBe(500);
+    expect(res.body.code).toBe("owner_verify_failed");
+    expect(res.body.ownerCreated).toBe(!!membersStore.getMemberByEmail("owner@example.com"));
+    expect(teamSettings()).toEqual({ enabled: false, disableLegacyLogin: false });
+    expect(configDoc().gateway.auth.mode).toBe("token");
+    expect(restartGateway).not.toHaveBeenCalled();
+  });
+
+  it("a saved member update reports blocked gateway reconciliation as partial success", async () => {
+    const cookie = await legacyCookie();
+    await enableTeam(cookie);
+    const member = membersStore.createMember({ email: "member@example.com", role: "member", password: "member password" });
+    transitionBlocker = new GatewayMutationBlockedError({ code: "gateway_held", statusCode: 409,
+      error: "Gateway recovery is held.", hint: "Review the Upgrade page." });
+    const res = await request(app).patch(`/api/team/members/${member.id}`).set("Cookie", cookie)
+      .send({ disabled: true });
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ ok: true, memberSaved: true, configSaved: true,
+      gatewayConfigSaved: false, gatewayConfigDeferred: true, restartDeferred: true, code: "gateway_held" });
+    expect(res.body.hint).toMatch(/save member settings again/);
+    expect(membersStore.getMember(member.id).disabled).toBeTruthy();
+  });
+
+  it("accepts and consumes an invite while reporting blocked gateway auth reconciliation safely", async () => {
+    const cookie = await legacyCookie();
+    await enableTeam(cookie);
+    const invite = await request(app).post("/api/team/invites").set("Cookie", cookie).send({ role: "member" });
+    const beforeAuth = configDoc().gateway.auth;
+    transitionBlocker = new GatewayMutationBlockedError({ code: "gateway_held", statusCode: 409,
+      error: "Private diagnostic: never return this raw error", hint: "Review the Upgrade page." });
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    const accepted = await request(app).post("/api/auth/accept-invite").send({
+      token: invite.body.token, email: "deferred@example.com", password: "member password",
+    });
+    logged.mockRestore();
+    expect(accepted.status).toBe(200);
+    expect(accepted.body).toMatchObject({ ok: true, member: { email: "deferred@example.com", role: "member" },
+      memberSaved: true, configSaved: true, gatewayConfigSaved: false, gatewayConfigDeferred: true,
+      restartRequired: true, restartDeferred: true, code: "gateway_held" });
+    expect(accepted.body.hint).toMatch(/administrator.*save member settings again/);
+    expect(JSON.stringify(accepted.body)).not.toMatch(/Private diagnostic/);
+    expect(configDoc().gateway.auth).toEqual(beforeAuth);
+    expect(restartReasons).toContain("team_member_accepted");
+    const identity = await request(app).get("/api/auth/identity").set("Cookie", cookieOf(accepted));
+    expect(identity.body.identity.role).toBe("member");
+    const reused = await request(app).post("/api/auth/accept-invite").send({
+      token: invite.body.token, email: "other@example.com", password: "member password",
+    });
+    expect(reused.body.code).toBe("invite_invalid");
+  });
+
+  it("reports applied auth truthfully when ownership is lost before enable verification, without arming lockdown", async () => {
+    const cookie = await legacyCookie();
+    restartGateway.mockImplementationOnce(async () => {
+      transitionBlocker = new GatewayMutationBlockedError({ code: "lease_expired", statusCode: 409,
+        error: "Lifecycle ownership expired.", hint: "Wait for the current operation." });
+    });
+    const res = await enableTeam(cookie, { disableLegacyLogin: true });
+    expect(res.status).toBe(409);
+    expect(res.body).toMatchObject({ code: "lease_expired", enabled: true, changed: true,
+      configSaved: true, configApplied: true, gatewayApplied: true, configRestored: false,
+      gatewayRestored: false, restored: false, restartDeferred: true });
+    expect(teamSettings()).toEqual({ enabled: true, disableLegacyLogin: false });
+    expect(configDoc().gateway.auth.mode).toBe("trusted-proxy");
+    expect(restartReasons).toContain("team_restart_deferred");
+    expect(restartGateway).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports a saved disable separately from a newly blocked gateway restart", async () => {
+    const cookie = await legacyCookie();
+    await enableTeam(cookie);
+    restartGateway.mockImplementationOnce(async () => {
+      transitionBlocker = new GatewayMutationBlockedError({ code: "gateway_held", statusCode: 409,
+        error: "Gateway recovery is held.", hint: "Review the Upgrade page." });
+    });
+    const res = await request(app).post("/api/team/disable").set("Cookie", cookie).send({});
+    expect(res.status).toBe(409);
+    expect(res.body).toMatchObject({ code: "gateway_held", disabled: true, enabled: false,
+      changed: true, configSaved: true, configRestored: true, gatewayRestored: false,
+      restartDeferred: true, hint: "Review the Upgrade page." });
+    expect(teamSettings()).toEqual({ enabled: false, disableLegacyLogin: false });
+    expect(configDoc().gateway.auth.mode).toBe("token");
+    expect(restartReasons).toContain("team_restart_deferred");
   });
 
   it("a concurrent enable is rejected 409 transition_in_flight without a second transition", async () => {
@@ -472,9 +635,9 @@ describe("server/routes/team (4.5)", () => {
     const second = await disable();
     expect(second.status).toBe(409);
     expect(second.body.code).toBe("transition_in_flight");
-    // The early return skipped updateTeamSettings — the flag is still on
-    // while the first transition finishes.
-    expect(teamSettings().enabled).toBe(true);
+    // The first transition has restored token auth; the flag follows that
+    // write while gateway verification remains pending.
+    expect(teamSettings().enabled).toBe(false);
 
     releaseRestart();
     const firstRes = await first;

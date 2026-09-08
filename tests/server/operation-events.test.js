@@ -254,6 +254,22 @@ describe("server/operation-events", () => {
     });
   });
 
+  it("streams safe backup-risk eligibility and deferred-restart fields without credentials", () => {
+    const service = createOperationEventsService();
+    const { operationId } = service.createOperation({ type: "apply" });
+    service.fail(operationId, Object.assign(new Error("backup failed"), {
+      backupRiskEligible: true, operationId: "forged", confirmNoBackupToken: "secret-token",
+      consentSessionId: "secret-session", restartDeferred: true, restartRequired: true,
+    }));
+    const data = service.getOperation(operationId).events.at(-1).data;
+    expect(data).toEqual({ error: "backup failed", backupRiskEligible: true,
+      operationId, restartDeferred: true, restartRequired: true });
+    service.fail(operationId, Object.assign(new Error("no offer"), {
+      backupRiskEligible: "true", restartDeferred: "true", restartRequired: "true",
+    }));
+    expect(service.getOperation(operationId).events.at(-1).data).toEqual({ error: "no offer" });
+  });
+
   it("forwards a digest-bearing reusableBackup offer into the error event, and nothing else shaped like one", () => {
     const sha256 = "a".repeat(64);
     const offer = { file: "/data/backups/openclaw/x.tar.gz", at: 1, ageMs: 5, sha256, producer: "openclaw" };

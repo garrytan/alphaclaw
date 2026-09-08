@@ -1199,3 +1199,23 @@ describe("server/agents/service coverage", () => {
     });
   });
 });
+
+
+it("preserves WhatsApp credentials and binding when restart is deferred by a hold", async () => {
+  const { GatewayMutationBlockedError } = require("../../lib/server/gateway-mutation-policy");
+  const restartGateway = vi.fn(async () => { throw new GatewayMutationBlockedError({
+    code: "gateway_held", error: "held", hint: "Inspect Upgrade", statusCode: 409,
+  }); });
+  const { fsMock, service, clawCmd, writeEnvFile } = buildService({ restartGateway });
+  const result = await service.createChannelAccount({ provider: "whatsapp", agentId: "main",
+    token: "+15551230000", name: "WA" });
+  expect(result).toMatchObject({ configSaved: true, restartDeferred: true,
+    restartRequired: true, code: "gateway_held" });
+  expect(fsMock.readConfig().channels.whatsapp.accounts.default).toBeTruthy();
+  expect(fsMock.readConfig().bindings).toContainEqual({ agentId: "main",
+    match: { channel: "whatsapp", accountId: "default" } });
+  expect(clawCmd.mock.calls.some(([cmd]) => cmd.includes("channels remove"))).toBe(false);
+  expect(writeEnvFile).toHaveBeenLastCalledWith(expect.arrayContaining([
+    { key: "WHATSAPP_OWNER_NUMBER", value: "+15551230000" },
+  ]));
+});

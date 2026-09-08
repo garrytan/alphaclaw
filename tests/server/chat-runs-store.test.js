@@ -82,7 +82,7 @@ describe("server/db/chat-runs", () => {
     ).toBeNull();
   });
 
-  it("findRecentTerminal respects the dedupe window", () => {
+  it("terminal lookups retain evidence beyond a caller-supplied retry window", () => {
     recordSend({ sessionKey: "s1", clientMsgId: "cm1", messageId: "m1" });
     markTerminal({ sessionKey: "s1", clientMsgId: "cm1", status: "done" });
     const nowMs = Date.now();
@@ -97,15 +97,15 @@ describe("server/db/chat-runs", () => {
         windowMs: 60_000,
         now: nowMs + 10 * 60 * 1000,
       }),
-    ).toBeNull();
+    ).not.toBeNull();
   });
 
-  it("a retry of an old terminal row upserts back to a fresh pending attempt", () => {
+  it("only a proven non-submission may be claimed for another attempt", () => {
     recordSend({ sessionKey: "s1", clientMsgId: "cm1", messageId: "m1" });
-    markRunning({ sessionKey: "s1", clientMsgId: "cm1", runId: "r1" });
     markTerminal({
       sessionKey: "s1",
       clientMsgId: "cm1",
+      notSubmitted: true,
       status: "error",
       errorCode: "gateway_unavailable",
       error: "nope",
@@ -209,6 +209,7 @@ describe("server/db/chat-runs", () => {
         clientMsgId: "cm",
         messageId: `m-${index}`,
       });
+      markTerminal({ sessionKey: `flood-${index}`, clientMsgId: "cm", status: "done" });
     }
     pruneChatRuns();
     // markTerminal on a pruned row updates nothing — the oldest rows are

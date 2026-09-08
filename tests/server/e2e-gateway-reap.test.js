@@ -29,10 +29,11 @@ const kTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "alphaclaw-gw-reap-"));
 process.env.ALPHACLAW_ROOT_DIR = kTmpRoot;
 
 const { OPENCLAW_DIR } = require("../../lib/server/constants");
+const lockContention = require("../../lib/server/openclaw-lock-contention");
 const {
   readProcStartTicks,
   readProcParentPid,
-} = require("../../lib/server/openclaw-lock-contention");
+} = lockContention;
 
 if (!OPENCLAW_DIR.startsWith(kTmpRoot)) {
   // constants.js was already loaded with a different root — the tests below
@@ -308,6 +309,18 @@ describe("gateway reap e2e (real child processes via PATH-shimmed openclaw)", ()
 
   it("resolveServingIdentity sees the real launcher→worker tree with start ticks, and the ticks change when the child is replaced", async () => {
     if (process.platform !== "linux") return;
+    // Scope discovery to this fixture's real argv while retaining the real
+    // /proc scan, ancestry and start-tick reads. A user's gateway or the live
+    // memory suite may share the host: production correctly refuses their
+    // multiple roots, but they are not part of this isolated tree fixture.
+    const scanProcesses = lockContention.listLiveOpenclawProcesses;
+    vi.spyOn(lockContention, "listLiveOpenclawProcesses").mockImplementation((options = {}) =>
+      scanProcesses({
+        ...options,
+        match: (argv) => argv.some((arg) => arg.startsWith(`${caseDir}${path.sep}`)) &&
+          (!options.match || options.match(argv)),
+      }),
+    );
     // The fake `gateway run` mirrors the real launcher shape: the shim (sh,
     // argv "…/bin/openclaw gateway run" — a serving-pattern root) stays alive
     // as the process-tree root and forwards TERM to its worker, a second

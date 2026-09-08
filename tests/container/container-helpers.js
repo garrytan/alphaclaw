@@ -9,15 +9,16 @@ const { classifyPrerelease } = require("../../lib/server/openclaw-releases");
 
 // Shared plumbing for the CONTAINER e2e tier (tests/container/**). This tier
 // builds a real image from the local checkout (npm pack → docker build),
-// boots a real stable OpenClaw gateway inside it, and drives the real browser
-// UI through a stable→beta upgrade. It needs a running docker daemon and
+// boots real gateways across an immutable AlphaClaw self-upgrade, exercises
+// deterministic pidfile recovery, and drives the browser through a
+// stable→beta OpenClaw upgrade. It needs a running docker daemon and
 // outbound network, so it is excluded from `npm test` via vitest.config.js
 // and runs through `npm run test:container`.
 const enabled = process.env.OPENCLAW_CONTAINER_E2E === "1";
 
-// STRICT mode (CI pull_request runs): registry sanity problems (no prerelease
-// newer than the stable pin) FAIL the suite instead of skipping it, so a PR
-// cannot go green on a silently skipped journey.
+// Kept for existing container callers. The browser journey now requires a
+// published, executable pair in every mode: missing packages fail, and beta
+// release gaps select an explicit historical upgrade instead of a skip.
 const strict = process.env.OPENCLAW_CONTAINER_E2E_STRICT === "1";
 
 // `describe` comes from vitest's globals (vitest.config.js `globals: true`),
@@ -33,16 +34,18 @@ const kMaxBuffer = 64 * 1024 * 1024;
 const repoRoot = path.resolve(__dirname, "../..");
 const artifactsDir = path.join(__dirname, "artifacts");
 
-// Every temp dir is swept at process exit (build contexts hold a full
-// npm-pack tarball each).
+// Build contexts and historical checkouts are swept by Vitest afterAll;
+// process exit is a fallback for standalone helper invocations.
 const kCreatedTempDirs = [];
-process.once("exit", () => {
-  for (const dir of kCreatedTempDirs) {
+const sweepTempDirs = () => {
+  for (const dir of kCreatedTempDirs.splice(0)) {
     try {
       fs.rmSync(dir, { recursive: true, force: true });
     } catch {}
   }
-});
+};
+process.once("exit", sweepTempDirs);
+if (typeof globalThis.afterAll === "function") globalThis.afterAll(sweepTempDirs, 5 * 60_000);
 
 const mkTemp = (prefix) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -83,12 +86,12 @@ const assertDockerAvailable = async () => {
 // npm pack the local checkout (runs prepack → build:ui, exactly what a
 // publish would ship), stage the tarball + Dockerfile in a temp build
 // context, and docker build. Returns the tag.
-const buildImage = async ({ tag }) => {
+const buildImage = async ({ tag, sourceRoot = repoRoot }) => {
   const context = mkTemp("alphaclaw-container-e2e-build-");
   const { stdout } = await execFileAsync(
     "npm",
     ["pack", "--pack-destination", context],
-    { cwd: repoRoot, maxBuffer: kMaxBuffer, timeout: 10 * 60 * 1000 },
+    { cwd: sourceRoot, maxBuffer: kMaxBuffer, timeout: 10 * 60 * 1000 },
   );
   const lines = String(stdout).trim().split("\n").filter(Boolean);
   const tarballName = lines[lines.length - 1].trim();
@@ -97,9 +100,29 @@ const buildImage = async ({ tag }) => {
     throw new Error(`npm pack reported ${tarballName} but it is not in ${context}`);
   }
   fs.renameSync(tarballPath, path.join(context, "alphaclaw.tgz"));
-  fs.copyFileSync(path.join(repoRoot, "Dockerfile"), path.join(context, "Dockerfile"));
+  fs.copyFileSync(path.join(sourceRoot, "Dockerfile"), path.join(context, "Dockerfile"));
   await docker(["build", "-t", tag, context], { timeoutMs: 15 * 60 * 1000 });
   return { tag };
+};
+
+// An immutable historical image without switching or editing the workspace.
+// Only build tooling is shared: npm pack includes neither this symlink nor
+// dependencies, and the image installs the historical manifest itself.
+const sourceAtCommit = async (commit) => {
+  if (!/^[a-f0-9]{40}$/.test(commit)) throw new Error("Historical source requires a full immutable commit");
+  const root = mkTemp("alphaclaw-container-e2e-source-");
+  const archive = path.join(root, "source.tar");
+  const sourceRoot = path.join(root, "source");
+  fs.mkdirSync(sourceRoot);
+  await execFileAsync("git", ["archive", "--format=tar", `--output=${archive}`, commit], { cwd: repoRoot, maxBuffer: kMaxBuffer });
+  await execFileAsync("tar", ["-xf", archive, "-C", sourceRoot]);
+  fs.rmSync(archive);
+  fs.symlinkSync(path.join(repoRoot, "node_modules"), path.join(sourceRoot, "node_modules"), "dir");
+  return sourceRoot;
+};
+
+const removeImage = async (tag) => {
+  try { await docker(["image", "rm", "-f", tag]); } catch {}
 };
 
 const createVolume = async (name) => {
@@ -285,6 +308,28 @@ const resolveBetaTarget = ({ distTags, versions, stablePin }) => {
   };
 };
 
+// Registry timing must not disable the required browser journey. During a
+// beta gap, seed this published historical stable as a recorded overlay in
+// the unchanged production image. Its schema 1 can migrate to beta's 12/17;
+// 2026.8.x's 15/19 schemas cannot, despite the smaller package version.
+const kHistoricalUpgrade = Object.freeze({ stable: "2026.7.1-2", beta: "2026.9.1-beta.1" });
+const resolveUpgradeJourney = ({ distTags, versions, stablePin }) => {
+  const requirePublished = (version) => {
+    if (!version || !Object.prototype.hasOwnProperty.call(versions || {}, version)) {
+      throw new Error(`Container upgrade requires a published package: ${version || "missing dist-tag"}`);
+    }
+    if (versions[version]?.deprecated) throw new Error(`Container upgrade refuses deprecated package ${version}`);
+  };
+  for (const version of [stablePin, distTags?.latest, distTags?.beta]) requirePublished(version);
+  const resolved = resolveBetaTarget({ distTags, versions, stablePin });
+  if (resolved.version) {
+    requirePublished(resolved.version);
+    return { stable: stablePin, beta: resolved.version, source: resolved.source, tagged: resolved.tagged };
+  }
+  for (const version of Object.values(kHistoricalUpgrade)) requirePublished(version);
+  return { ...kHistoricalUpgrade, source: "historical-reference", tagged: resolved.tagged };
+};
+
 // Login against the real server with the shared setup password and return a
 // Cookie header value for subsequent authenticated fetches.
 const loginForCookie = async (baseUrl, password) => {
@@ -327,6 +372,8 @@ module.exports = {
   dockerAvailable,
   assertDockerAvailable,
   buildImage,
+  sourceAtCommit,
+  removeImage,
   createVolume,
   seedVolume,
   runContainer,
@@ -342,6 +389,7 @@ module.exports = {
   waitFor,
   compareLooseVersions,
   resolveBetaTarget,
+  resolveUpgradeJourney,
   loginForCookie,
   fetchJsonWithCookie,
 };

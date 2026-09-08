@@ -2,10 +2,10 @@
 // from EITHER producer can be restored by the documented runbook and that
 // every supported target line then reads and RUNS the restored state.
 //
-//   producer  ∈ { upstream (real pin CLI `backup create --verify`),
+//   producer  ∈ { upstream (real beta CLI `backup create --verify`),
 //                 alphaclaw-offline-copy (createOfflineCopy) }
 //   journal   ∈ { WAL, DELETE }   — PRAGMA journal_mode on the fixture DB
-//   target    ∈ { pin 2026.7.1-2, stable 2026.8.2, beta 2026.9.1-beta.1 }
+//   target    ∈ { current pin, stable 2026.8.2, beta 2026.9.1-beta.1 }
 //
 // Per cell (acceptance = all four; a failure is a finding, never a skip):
 //   1. extract the archive into an isolated dir and place every
@@ -13,15 +13,14 @@
 //      manifest's paths.stateDir), exactly as docs/upgrade-troubleshooting.md
 //      "Restoring a backup" tells the operator to;
 //   2. the TARGET CLI's `database preflight <db> --json` on each restored DB
-//      (standalone — no sidecars): pass ("exact" / "migration-required") or
-//      an honest classification (the pin has no such command → unsupported);
+//      (standalone state DB — no sidecars): pass ("exact" / "migration-required") or
+//      an honest refusal when the copied state is incompatible;
 //   3. PRAGMA integrity_check on every restored DB;
 //   4. `gateway run` on the restored state dir answers /healthz within 120 s
 //      (the live-gateway tier's loopback config).
-// The fixture is a REAL pin-era state dir (materialized by the pin CLI), the
-// oldest schema every target can read forward — so all 12 cells are
-// supported upgrades-or-same. Downgrade compatibility is the downgrade
-// tier's business (openclaw-live-downgrade.e2e.test.js).
+// The fixture is materialized by the immutable beta CLI (schema 12/17):
+// all 12 cells exercise real same-schema or forward-compatible restores.
+// A separate current-pin fixture proves refusal of its newer schemas.
 //
 // Calibration: ONE 500 MB cell records offline-copy duration + throughput
 // (log) and asserts only the plan's 8-minute budget.
@@ -54,7 +53,7 @@ const {
   kOpenclawBackupOfflineCopyBudgetMs,
 } = require("../../lib/server/constants");
 const { withOpenclawStartupEnv } = require("../../lib/server/openclaw-runtime-env");
-const { parseJsonObjectFromNoisyOutput } = require("../../lib/server/utils/json");
+const { materializeDatabases, kObservedSchemas, readDatabaseSchema } = require("./database-fixture");
 const { buildCliEnv } = require("./live-backup-harness");
 const {
   assertFreeDiskBytes,
@@ -87,13 +86,13 @@ const kTargets = ["pin", "stable", "beta"];
 
 // Mirror of the module-local classifyPreflight vocabulary in
 // openclaw-channel-sync.js, extended with the JSON `status` values the real
-// CLIs print (probed live 2026-09-02): exact | migration-required (exit 0),
-// incompatible | indeterminate (exit 1). The pin has no `database` command.
+// CLIs print: exact | migration-required (exit 0), incompatible |
+// indeterminate (exit 1). All three current targets expose this command.
 const kUnknownCliCommandPattern =
   /unknown (?:command|subcommand)|command not found|no such (?:command|subcommand)/i;
-const classifyDrillPreflight = ({ code, out }) => {
+const classifyDrillPreflight = ({ code, out, stdout, stderr }) => {
   if (kUnknownCliCommandPattern.test(out)) return { verdict: "unsupported", status: null };
-  const parsed = parseJsonObjectFromNoisyOutput(out);
+  const parsed = liveHelpers.parseSingleJsonDocument(stdout, { label: "database preflight", stderr });
   const status = parsed?.status ?? null;
   if (code === 0 && (status === "exact" || status === "migration-required")) {
     return { verdict: "pass", status, foundVersion: parsed.foundVersion, targetVersion: parsed.targetVersion };
@@ -108,7 +107,7 @@ const runCli = (bin, args, { homeDir, stateDir, timeoutMs = 120_000 }) => {
     encoding: "utf8",
     maxBuffer: 16 * 1024 * 1024,
   });
-  return { code: res.status, out: `${res.stdout || ""}\n${res.stderr || ""}` };
+  return { code: res.status, stdout: res.stdout, stderr: res.stderr, out: `${res.stdout || ""}\n${res.stderr || ""}` };
 };
 
 const setJournalMode = (dbPath, mode) => {
@@ -162,7 +161,7 @@ const walkSqlite = (dir) => {
     for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
       const full = path.join(current, entry.name);
       if (entry.isDirectory()) visit(full);
-      else if (entry.isFile() && /\.sqlite$/.test(entry.name)) found.push(full);
+      else if (entry.isFile() && ["openclaw.sqlite", "openclaw-agent.sqlite"].includes(entry.name)) found.push(full);
     }
   };
   visit(dir);
@@ -173,26 +172,17 @@ const loopbackConfig = (port) => ({
   gateway: { mode: "local", bind: "loopback", port, auth: { token: kGatewayToken } },
 });
 
-// A real pin-era state dir: the pin CLI materializes state/openclaw.sqlite
-// (user_version 1, 74 tables) beside a loopback gateway config and a session
-// transcript. Copied per cell so producers/journal modes never share a DB.
-const materializePinFixture = (pinBin) => {
+// Beta's schema 12/17 is older than the stable/current pin's 15/19,
+// despite its newer version label. The matrix therefore covers a real
+// same-schema restore AND forward migrations, retaining non-monotonicity.
+const materializeFixture = (bin, version) => {
   const homeDir = mkTemp("alphaclaw-live-drill-fixture-");
   const stateDir = path.join(homeDir, ".openclaw");
-  fs.mkdirSync(path.join(stateDir, "agents", "main", "sessions"), { recursive: true });
-  fs.writeFileSync(
-    path.join(stateDir, "openclaw.json"),
-    `${JSON.stringify(loopbackConfig(kBasePort), null, 2)}\n`,
-  );
-  fs.writeFileSync(
-    path.join(stateDir, "agents", "main", "sessions", "0001-seed.jsonl"),
-    '{"role":"user","seq":1,"text":"restore drill"}\n',
-  );
-  const r = runCli(pinBin, ["approvals", "get", "--json"], { homeDir, stateDir });
-  if (r.code !== 0) throw new Error(`pin could not materialize the fixture: ${r.out.slice(-600)}`);
-  const dbPath = path.join(stateDir, "state", "openclaw.sqlite");
-  if (!fs.existsSync(dbPath)) throw new Error(`no state DB at ${dbPath}`);
-  return { homeDir, stateDir, dbPath };
+  fs.mkdirSync(stateDir, { recursive: true });
+  fs.writeFileSync(path.join(stateDir, "openclaw.json"), `${JSON.stringify(loopbackConfig(kBasePort), null, 2)}\n`);
+  const paths = materializeDatabases({ openclawBin: bin, version, stateDir,
+    cliEnv: buildCliEnv({ homeDir, stateDir }) });
+  return { homeDir, stateDir, dbPath: paths.state, version };
 };
 
 const cloneFixture = (fixture, { journalMode }) => {
@@ -200,9 +190,11 @@ const cloneFixture = (fixture, { journalMode }) => {
   const stateDir = path.join(homeDir, ".openclaw");
   fs.cpSync(fixture.stateDir, stateDir, { recursive: true });
   const dbPath = path.join(stateDir, "state", "openclaw.sqlite");
-  for (const suffix of ["-wal", "-shm"]) fs.rmSync(`${dbPath}${suffix}`, { force: true });
-  setJournalMode(dbPath, journalMode);
-  if (journalMode === "wal") dropEmptySidecars(dbPath);
+  for (const file of walkSqlite(stateDir)) {
+    for (const suffix of ["-wal", "-shm"]) fs.rmSync(`${file}${suffix}`, { force: true });
+    setJournalMode(file, journalMode);
+    if (journalMode === "wal") dropEmptySidecars(file);
+  }
   return { homeDir, stateDir, dbPath };
 };
 
@@ -291,13 +283,18 @@ const restoreArchive = (file, { restoreRoot }) => {
   return { manifest, restoredStateDir, placed, archiveRoot: roots[0] };
 };
 
-const bootGateway = async ({ bin, homeDir, stateDir, port }) => {
+const bootGateway = async ({ bin, homeDir, stateDir, port, intentionalOlderBinary = false }) => {
   const configPath = path.join(stateDir, "openclaw.json");
   const current = fs.existsSync(configPath) ? JSON.parse(fs.readFileSync(configPath, "utf8")) : {};
   fs.writeFileSync(configPath, `${JSON.stringify({ ...current, ...loopbackConfig(port) }, null, 2)}\n`);
   const env = withOpenclawStartupEnv({
     ...buildCliEnv({ homeDir, stateDir }),
     OPENCLAW_GATEWAY_PORT: String(port),
+    // The stable cell is an intentional VERSION downgrade but a SCHEMA
+    // upgrade (12/17 -> 15/19). Both independent schema checks above have
+    // passed before this operator recovery consent is supplied. Without it
+    // upstream refuses the newer writer stamp even on compatible state.
+    ...(intentionalOlderBinary ? { OPENCLAW_ALLOW_OLDER_BINARY_DESTRUCTIVE_ACTIONS: "1" } : {}),
   });
   const child = spawn(process.execPath, [bin, "gateway", "run", "--port", String(port)], {
     env,
@@ -351,16 +348,16 @@ describeLive("LIVE restore drill (WI-6.2): producer × journal mode × target", 
     bins.pin = repoOpenclawBin();
     bins.stable = (await stageOpenclawVersion(kOpenclawLines.stable, { timeoutMs: kInstallTimeoutMs })).bin;
     bins.beta = (await stageOpenclawVersion(kOpenclawLines.beta, { timeoutMs: kInstallTimeoutMs })).bin;
-    fixture = materializePinFixture(bins.pin);
+    fixture = materializeFixture(bins.beta, kOpenclawLines.beta);
     for (const journalMode of kJournalModes) {
       const source = cloneFixture(fixture, { journalMode });
       expect(readJournalMode(source.dbPath)).toBe(journalMode);
       dropEmptySidecars(source.dbPath);
       archives[`upstream/${journalMode}`] = {
-        file: produceUpstream(bins.pin, source),
+        file: produceUpstream(bins.beta, source),
         source,
       };
-      const copy = await produceOfflineCopy(source);
+      const copy = await produceOfflineCopy(source, { runtimeVersion: fixture.version });
       expect(copy.ok).toBe(true);
       archives[`${kOfflineCopyProducer}/${journalMode}`] = { file: copy.file, source, copy };
     }
@@ -413,24 +410,33 @@ describeLive("LIVE restore drill (WI-6.2): producer × journal mode × target", 
             }
             expect(fs.existsSync(path.join(restored.restoredStateDir, "openclaw.json"))).toBe(true);
 
-            // 2. TARGET preflight on each restored DB (standalone file).
+            // 2. The public CLI preflights STATE databases only. Judge
+            // agent schemas by independent immutable-release observations,
+            // then prove the target really reads/migrates them during boot.
             const preflights = [];
+            expect(restoredDbs).toHaveLength(2);
             for (const db of restoredDbs) {
+              const kind = path.basename(db) === "openclaw-agent.sqlite" ? "agent" : "state";
+              const observed = readDatabaseSchema(db);
+              expect(observed.version).toBe(kObservedSchemas[kOpenclawLines.beta][kind]);
+              const supported = kObservedSchemas[kOpenclawLines[target]][kind];
+              if (kind === "agent") {
+                expect(observed.owner).toMatchObject({ role: "agent", agent_id: "main", schema_version: 17 });
+                expect(observed.version).toBeLessThanOrEqual(supported);
+                preflights.push({ status: observed.version === supported ? "agent-exact" : "agent-migration-required" });
+                continue;
+              }
+              dropEmptySidecars(db);
               const r = runCli(bins[target], ["database", "preflight", db, "--json"], {
                 homeDir: mkTemp("alphaclaw-live-drill-pf-home-"),
                 stateDir: mkTemp("alphaclaw-live-drill-pf-state-"),
               });
               const verdict = classifyDrillPreflight(r);
               preflights.push(verdict);
-              if (target === "pin") {
-                // Honest classification: the pin has no `database` command.
-                expect(verdict.verdict).toBe("unsupported");
-              } else {
-                expect(verdict.verdict, `preflight ${JSON.stringify(verdict)}`).toBe("pass");
-                // Pin-era schema 1 → 15 (stable) / 12 (beta): migration.
-                expect(verdict.status).toBe("migration-required");
-                expect(verdict.foundVersion).toBe(1);
-              }
+              expect(verdict.verdict, `preflight ${JSON.stringify(verdict)}`).toBe("pass");
+              expect(verdict.status).toBe(target === "beta" ? "exact" : "migration-required");
+              expect(verdict.foundVersion).toBe(12);
+              expect(verdict.targetVersion).toBe(supported);
             }
 
             // 3. integrity_check on every restored DB.
@@ -446,6 +452,7 @@ describeLive("LIVE restore drill (WI-6.2): producer × journal mode × target", 
               homeDir: restoreRoot,
               stateDir: restored.restoredStateDir,
               port,
+              intentionalOlderBinary: target === "stable",
             });
             expect(boot.readyMs).toBeLessThanOrEqual(kGatewayHealthTimeoutMs);
             results.push({
@@ -462,6 +469,19 @@ describeLive("LIVE restore drill (WI-6.2): producer × journal mode × target", 
       }
     }
   }
+
+  it("current pin materializes both declared schemas and its newer state is refused by the older beta", { timeout: kCellTimeoutMs }, () => {
+    const current = materializeFixture(bins.pin, kOpenclawLines.pin);
+    const before = fs.readFileSync(current.dbPath);
+    const result = classifyDrillPreflight(runCli(bins.beta, ["database", "preflight", current.dbPath, "--json"], {
+      homeDir: mkTemp("alphaclaw-live-drill-incompatible-home-"),
+      stateDir: mkTemp("alphaclaw-live-drill-incompatible-state-"),
+    }));
+    expect(result).toMatchObject({ verdict: "block", status: "incompatible" });
+    expect(fs.readFileSync(current.dbPath)).toEqual(before);
+    expect(readDatabaseSchema(current.dbPath).version).toBe(15);
+    expect(readDatabaseSchema(path.join(current.stateDir, "agents", "main", "agent", "openclaw-agent.sqlite")).version).toBe(19);
+  });
 
   it(
     "calibration: a 500 MB state tree offline-copies within the 8-minute budget (duration + throughput recorded)",
@@ -491,7 +511,7 @@ describeLive("LIVE restore drill (WI-6.2): producer × journal mode × target", 
       expect(stateBytes).toBeGreaterThanOrEqual(kCalibrationBytes);
 
       const startedAt = Date.now();
-      const copy = await produceOfflineCopy(source);
+      const copy = await produceOfflineCopy(source, { runtimeVersion: fixture.version });
       const wallMs = Date.now() - startedAt;
       const mbPerSecond = stateBytes / 1e6 / (copy.durationMs / 1000);
       console.log(

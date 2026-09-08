@@ -3,7 +3,6 @@ const fs = require("node:fs");
 const path = require("node:path");
 const {
   describeContainer,
-  strict,
   repoRoot,
   docker,
   ensureArtifactsDir,
@@ -24,8 +23,8 @@ const {
   waitFor,
   loginForCookie,
   fetchJsonWithCookie,
-  resolveBetaTarget,
-  compareLooseVersions,
+  resolveUpgradeJourney,
+  removeImage,
 } = require("./container-helpers.js");
 
 // -----------------------------------------------------------------------------
@@ -96,6 +95,8 @@ const containerEnv = () => {
   const env = {
     SETUP_PASSWORD: kSetupPassword,
     OPENCLAW_GATEWAY_TOKEN: kGatewayToken,
+    NESSIE_TOKEN: "container-e2e-nessie-fixture",
+    ALPHACLAW_GATEWAY_ENV_PASSTHROUGH: "NESSIE_TOKEN",
   };
   // Authenticated GitHub API calls (release notes) — the anonymous quota is
   // shared per runner IP and flakes in CI.
@@ -109,6 +110,7 @@ const containerEnv = () => {
 // ---------------------------------------------------------------------------
 const ctx = {
   stablePin: null,
+  sourceStable: null,
   beta: null,
   port: null,
   cookie: null,
@@ -119,10 +121,6 @@ const ctx = {
   activeContainer: kContainerA,
 };
 
-// Registry sanity outcome. Vitest cannot skip mid-suite, so the non-strict
-// "beta missing / not newer" outcome sets this flag and every step logs +
-// returns early — honest about the skip without failing the run.
-let skipReason = null;
 // When an earlier step fails, later steps of the ordered journey cannot mean
 // anything; they fail fast naming the broken step instead of green-lying.
 let journeyBroken = null;
@@ -132,10 +130,6 @@ const step = (name, timeoutMs, fn) => {
   // (re-clicking Apply, re-seeding) is never safe, and a broken journey must
   // fail deterministically.
   test(name, { timeout: timeoutMs, retry: 0 }, async () => {
-    if (skipReason) {
-      console.warn(`[container-e2e] SKIP "${name}" — ${skipReason}`);
-      return;
-    }
     if (journeyBroken) {
       throw new Error(`journey already broken at step "${journeyBroken}" — cannot run "${name}"`);
     }
@@ -249,61 +243,12 @@ describeContainer("container E2E: stable→beta upgrade in the production image"
     });
     if (!res.ok) throw new Error(`npm registry returned ${res.status} for openclaw`);
     const doc = await res.json();
-    // The newest prerelease above the pin — what the Beta catalog section
-    // offers — not the raw `beta` dist-tag, which upstream re-points at the
-    // promoted stable release when a beta line ships (see resolveBetaTarget).
-    const resolved = resolveBetaTarget({
-      distTags: doc["dist-tags"],
-      versions: doc.versions,
-      stablePin: ctx.stablePin,
+    const resolved = resolveUpgradeJourney({
+      distTags: doc["dist-tags"], versions: doc.versions, stablePin: ctx.stablePin,
     });
-    ctx.beta = resolved.version;
-
-    if (!ctx.beta) {
-      const message =
-        `registry sanity failed: no prerelease newer than the stable pin ${ctx.stablePin} ` +
-        `(beta dist-tag ${JSON.stringify(resolved.tagged)}) — the stable→beta journey cannot run`;
-      // A pin sitting at the HEAD of the release line has no prerelease above
-      // it BY DEFINITION, and will not until upstream opens the next beta
-      // line. Failing PRs for that punishes the correct act of pinning the
-      // newest stable: every pin >= the `latest` dist-tag is unmergeable,
-      // which is how 2026.9.2 first tripped this (beta dist-tag 2026.9.1 sits
-      // BELOW latest, so nothing is eligible). That is an upstream registry
-      // state, not a regression here — the same reasoning the workflow already
-      // applies to schedule/dispatch runs.
-      //
-      // Strict still fails the cases it was written for, because those hide a
-      // real problem behind a green tier: a missing/malformed `beta` dist-tag,
-      // and a pin no published release can ever sit above (a typo'd or
-      // future-dated pin), which would disable this tier forever. A registry
-      // that cannot be reached already threw above.
-      const betaTagPublished = resolved.tagged != null;
-      const pinPublished = Object.prototype.hasOwnProperty.call(
-        doc.versions || {},
-        ctx.stablePin,
-      );
-      const latestTag = doc["dist-tags"] && doc["dist-tags"].latest;
-      const pinAtHeadOfLine =
-        pinPublished &&
-        latestTag != null &&
-        compareLooseVersions(ctx.stablePin, String(latestTag)) >= 0;
-      const headOfLine = betaTagPublished && pinAtHeadOfLine;
-      if (strict && !headOfLine) throw new Error(`[STRICT] ${message}`);
-      skipReason = message;
-      console.warn(
-        `[container-e2e] ${message} — skipping the journey (${
-          headOfLine
-            ? `pin ${ctx.stablePin} is at the head of the release line (latest ${latestTag}); ` +
-              "the journey resumes once upstream opens the next beta line"
-            : "non-strict"
-        })`,
-      );
-    } else {
-      console.log(
-        `[container-e2e] stable pin ${ctx.stablePin} → beta ${ctx.beta} ` +
-          `(${resolved.source}; beta dist-tag ${resolved.tagged})`,
-      );
-    }
+    ctx.sourceStable = resolved.stable;
+    ctx.beta = resolved.beta;
+    console.log(`[container-e2e] ${ctx.sourceStable} → ${ctx.beta} (${resolved.source}; bundled pin ${ctx.stablePin})`);
   }, 2 * kMin);
 
   afterAll(async () => {
@@ -334,6 +279,7 @@ describeContainer("container E2E: stable→beta upgrade in the production image"
     await removeContainer(kContainerA);
     await removeContainer(kContainerB);
     await removeVolume(kVolume);
+    await removeImage(kImageTag);
   }, 5 * kMin);
 
   step("builds the production image from the local checkout", 15 * kMin, async () => {
@@ -402,6 +348,28 @@ describeContainer("container E2E: stable→beta upgrade in the production image"
       "/data/.openclaw/openclaw.json": JSON.stringify(buildSeedConfig(), null, 2),
     });
 
+    if (ctx.sourceStable !== ctx.stablePin) {
+      // Prepare a real recorded overlay before ANY gateway has opened the
+      // volume. Never downgrade databases produced by the bundled pin or
+      // edit the image's package manifest to impersonate an older pin.
+      const seed = `
+        const path = require('node:path');
+        const root = path.dirname(require.resolve('alphaclaw/package.json'));
+        const { installOpenclawVersionToTempDir } = require(path.join(root, 'lib/server/openclaw-version'));
+        const { createOpenclawReleaseChannelStore } = require(path.join(root, 'lib/server/openclaw-release-channel'));
+        (async () => {
+          const staged = await installOpenclawVersionToTempDir({ versionSpec: ${JSON.stringify(ctx.sourceStable)}, timeoutMs: 8 * 60_000 });
+          try {
+            const store = createOpenclawReleaseChannelStore({ rootDir: '/data', openclawDir: '/data/.openclaw' });
+            const saved = store.saveOverlayFromTempInstall({ version: ${JSON.stringify(ctx.sourceStable)}, openclawPackageDir: staged.openclawPackageDir });
+            if (!saved.ok) throw new Error(saved.error);
+            store.updateState((state) => ({ ...state, pinVersion: ${JSON.stringify(ctx.stablePin)}, applied: { channel: 'stable', version: ${JSON.stringify(ctx.sourceStable)}, at: Date.now(), acceptedAt: Date.now(), reason: 'container_upgrade_fixture' } }));
+          } finally { staged.cleanup(); }
+        })().catch((error) => { console.error(error); process.exitCode = 1; });
+      `;
+      await docker(["run", "--rm", "--entrypoint", "node", "-v", `${kVolume}:/data`, kImageTag, "-e", seed], { timeoutMs: 10 * kMin });
+    }
+
     // (c) Run with the production env shape and wait out first boot.
     await runContainer({
       name: kContainerA,
@@ -412,7 +380,7 @@ describeContainer("container E2E: stable→beta upgrade in the production image"
     await waitForUiUp(kContainerA, 3 * kMin);
 
     ctx.cookie = await loginForCookie(baseUrl(), kSetupPassword);
-    await waitForVersion(kContainerA, ctx.stablePin, 5 * kMin);
+    await waitForVersion(kContainerA, ctx.sourceStable, 5 * kMin);
 
     // The STABLE gateway must become healthy with every seed key present —
     // if this times out, check `docker logs` for exit-78 config rejections.
@@ -428,25 +396,17 @@ describeContainer("container E2E: stable→beta upgrade in the production image"
   step("arms the hard gate: a real sqlite state DB exists", 3 * kMin, async () => {
     // (d) The cross-channel apply's DB preflight/backup gates only engage
     // when a state DB exists — make sure one does.
-    const exists = await execInContainer(kContainerA, ["test", "-f", kStateDbPath])
-      .then(() => true)
-      .catch(() => false);
-    if (exists) {
-      console.log(`[container-e2e] state DB already present at ${kStateDbPath}`);
-      return;
-    }
-    await execInContainer(kContainerA, ["mkdir", "-p", path.posix.dirname(kStateDbPath)]);
-    const createScript = `const{DatabaseSync}=require('node:sqlite');new DatabaseSync(${JSON.stringify(
-      kStateDbPath,
-    )}).exec('CREATE TABLE IF NOT EXISTS t(x)');`;
-    // node:sqlite needs --experimental-sqlite on some 22.x lines and is
-    // unflagged on later ones — try both before giving up.
-    try {
-      await execInContainer(kContainerA, ["node", "-e", createScript]);
-    } catch {
-      await execInContainer(kContainerA, ["node", "--experimental-sqlite", "-e", createScript]);
-    }
+    // The gateway must author this database. An empty SQLite file with a
+    // synthetic table would bypass the ownership/schema migration contract.
     await execInContainer(kContainerA, ["test", "-f", kStateDbPath]);
+    const probe = `const { DatabaseSync } = require('node:sqlite'); const db = new DatabaseSync(${JSON.stringify(kStateDbPath)}, { readOnly: true }); console.log(JSON.stringify({ schema: db.prepare('PRAGMA user_version').get().user_version, integrity: db.prepare('PRAGMA integrity_check').get().integrity_check })); db.close();`;
+    const { stdout } = await execInContainer(kContainerA, ["node", "-e", probe]);
+    const observed = JSON.parse(stdout);
+    expect(observed.integrity).toBe("ok");
+    expect(observed.schema).toBeGreaterThan(0);
+    if (ctx.sourceStable === "2026.7.1-2") expect(observed.schema).toBe(1);
+    console.log(`[container-e2e] real ${ctx.sourceStable} state DB: schema ${observed.schema}, integrity ${observed.integrity}`);
+
   });
 
   step("starts the gateway-liveness-aware churner", 2 * kMin, async () => {
@@ -588,47 +548,13 @@ describeContainer("container E2E: stable→beta upgrade in the production image"
       // Catalog card renders version rows (catalog fetch hits the registry).
       await page.getByText("Version catalog").first().waitFor({ timeout: 3 * kMin });
 
-      // Prefer the exact resolved beta row (scoped to the Beta catalog
-      // section so version strings elsewhere on the page can't match); fall
-      // back to the first actionable Beta-section row if the catalog trimmed
-      // the exact version.
-      const betaSection = page
-        .locator("h3", { hasText: /^Beta$/ })
-        .locator("xpath=parent::div");
-      let applyButton = null;
+      // The selected package is the contract for every later assertion.
+      // Refuse a missing row rather than silently applying another build.
+      const betaSection = page.locator("h3", { hasText: /^Beta$/ }).locator("xpath=parent::div");
       const betaVersionText = betaSection.getByText(ctx.beta, { exact: true }).first();
-      try {
-        await betaVersionText.waitFor({ timeout: 2 * kMin });
-        const row = betaVersionText.locator(
-          'xpath=ancestor::div[contains(@class,"py-2.5")][1]',
-        );
-        applyButton = row.getByRole("button", { name: /^(Upgrade|Switch|Try again)$/ });
-      } catch {
-        // The registry's `beta` dist-tag can point at a GA release (it moved
-        // to 2026.9.1 on 2026-09-03, which the catalog lists under Stable),
-        // so the Beta section's first actionable row is the newest
-        // pre-release, not the dist-tag. Every later wait — the progress
-        // heading, /api/status openclawVersion, the verdict banner, the run
-        // record's target, `openclaw --version` — must key off the version
-        // this journey actually applies, so rebind ctx.beta to the row.
-        applyButton = betaSection
-          .getByRole("button", { name: /^(Upgrade|Switch|Try again)$/ })
-          .first();
-        const fallbackRow = applyButton.locator(
-          'xpath=ancestor::div[contains(@class,"py-2.5")][1]',
-        );
-        const rowText = await fallbackRow.innerText({ timeout: 60_000 });
-        const rowVersion = rowText.match(/\b\d{4}\.\d{1,2}\.\d{1,2}(?:-[0-9A-Za-z.]+)?\b/)?.[0] || null;
-        if (!rowVersion) {
-          throw new Error(
-            `[container-e2e] no catalog row with exact text ${ctx.beta} and the first Beta-section row carries no version: ${JSON.stringify(rowText.slice(0, 200))}`,
-          );
-        }
-        console.warn(
-          `[container-e2e] no catalog row with exact text ${ctx.beta} — applying the first Beta-section row instead: ${rowVersion}`,
-        );
-        ctx.beta = rowVersion;
-      }
+      await betaVersionText.waitFor({ timeout: 2 * kMin });
+      const row = betaVersionText.locator('xpath=ancestor::div[contains(@class,"py-2.5")][1]');
+      const applyButton = row.getByRole("button", { name: /^(Upgrade|Switch|Try again)$/ });
       await applyButton.first().click({ timeout: 60_000 });
 
       // U3 confirm dialog → the primary "Apply" button, scoped to the modal

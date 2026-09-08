@@ -51,6 +51,7 @@ vi.mock("preact/hooks", () => {
 
 vi.mock("../../lib/public/js/lib/api.js", () => ({
   applyOpenclawVersion: vi.fn(),
+  requestOpenclawBackupRiskConsent: vi.fn(),
   clearOpenclawBlocklist: vi.fn(),
   fetchOpenclawBackups: vi.fn(),
   fetchOpenclawCatalog: vi.fn(),
@@ -265,6 +266,8 @@ const findConsentToggle = (tree) =>
 // server's 409 backup_required_for_migration envelope, verbatim shape.
 const kSoftTarget = { channel: "stable", version: "2026.7.2" };
 const kMigrationError = {
+  backupRiskEligible: true,
+  operationId: "11111111-1111-4111-8111-111111111111",
   code: "backup_required_for_migration",
   message:
     "OpenClaw 2026.7.2 will migrate your database (state 12→15, agent 17→19) and no backup exists — the running 2026.7.1-2 cannot read the migrated database, so there would be no rollback path.",
@@ -389,6 +392,7 @@ describe("frontend/upgrade-tab 409 backup_required_for_migration → no-backup c
   it("the offer model exists for the overridable code ONLY: backup_failed (even with a reusableBackup) and every other code yield null", () => {
     expect(makeNoBackupOffer()).toEqual({
       code: "backup_required_for_migration",
+      operationId: kMigrationError.operationId,
       message: kMigrationError.message,
       hint: kMigrationError.hint,
       target: kSoftTarget,
@@ -418,14 +422,14 @@ describe("frontend/upgrade-tab 409 backup_required_for_migration → no-backup c
     const text = treeText(tree).replace(/\s+/g, " ");
     expect(findActionButtonByLabel(tree, kNoBackupConsentCtaLabel)).toBeTruthy();
     expect(text).toContain(
-      "No backup could be taken and this update migrates your database — continuing has no rollback path.",
+      "No verified backup could be taken — continuing may leave no safe rollback path.",
     );
     expect(text).toContain("Continue without a backup?");
     expect(text).toContain(kMigrationError.message);
-    expect(text).toContain("there is no backup to restore from");
+    expect(text).toContain("there is no verified backup from this attempt to restore");
     // The consent copy the plan pins.
     expect(kNoBackupConsentLabel).toBe(
-      "I understand: no backup exists; the previous build cannot read the migrated database",
+      "I understand: no verified backup exists; changes may leave no safe rollback path",
     );
     const toggle = findNoBackupToggle(tree);
     expect(toggle).toBeTruthy();
@@ -499,7 +503,7 @@ describe("frontend/upgrade-tab 409 backup_required_for_migration → no-backup c
       noBackupConsentOffer: makeNoBackupOffer(),
     });
     expect(findActionButtonByLabel(tree, kNoBackupConsentCtaLabel)).toBeTruthy();
-    expect(treeText(tree)).toContain("continuing has no rollback path");
+    expect(treeText(tree)).toContain("continuing may leave no safe rollback path");
   });
 
   it("the apply confirm's hard-gate copy comes from the SHARED server predicate (#79 (a)): beta→stable and a same-channel prerelease→base both carry the backup hard gate; stable→stable base→base carries neither gate nor consent line", () => {
@@ -1206,10 +1210,7 @@ describe("frontend/upgrade-tab hook — consent + reuse retry + fence fields", (
   it("a quick 409 backup_required_for_migration offers the no-backup consent; the confirm is inert until checked, then resends the bare target with confirmNoBackup: true only (#79 (b))", async () => {
     let state = await hydrate();
     api.applyOpenclawVersion.mockRejectedValueOnce(
-      Object.assign(new Error(kMigrationError.message), {
-        code: kMigrationError.code,
-        hint: kMigrationError.hint,
-      }),
+      Object.assign(new Error(kMigrationError.message), kMigrationError),
     );
     state.onRequestApply({ payload: kSoftTarget, label: "2026.7.2", isDowngrade: false });
     state = renderHook({});
@@ -1255,12 +1256,18 @@ describe("frontend/upgrade-tab hook — consent + reuse retry + fence fields", (
       operationId: "op-3",
       events: "/api/operations/op-3/events",
     });
+    api.requestOpenclawBackupRiskConsent.mockResolvedValueOnce({
+      ok: true, operationId: kMigrationError.operationId, target: kSoftTarget,
+      confirmNoBackupToken: "t".repeat(43), expiresAt: new Date(Date.now() + 600000).toISOString(),
+    });
     await state.onConfirmNoBackupConsent();
+    expect(api.requestOpenclawBackupRiskConsent).toHaveBeenCalledWith(kMigrationError.operationId);
     expect(api.applyOpenclawVersion).toHaveBeenCalledTimes(2);
     expect(api.applyOpenclawVersion).toHaveBeenLastCalledWith({
       channel: "stable",
       version: "2026.7.2",
       confirmNoBackup: true,
+      confirmNoBackupToken: "t".repeat(43),
     });
     expect("allowBackupReuse" in api.applyOpenclawVersion.mock.calls[1][0]).toBe(false);
     state = renderHook({});
@@ -1275,10 +1282,36 @@ describe("frontend/upgrade-tab hook — consent + reuse retry + fence fields", (
     );
   });
 
+  it.each(["onCancelNoBackupConsent", "onDismissApplyError"])("%s retires an in-flight token response and double submission cannot dispatch", async (cancelAction) => {
+    let state = await hydrate();
+    api.applyOpenclawVersion.mockRejectedValueOnce(Object.assign(new Error(kMigrationError.message), kMigrationError));
+    state.onRequestApply({ payload: kSoftTarget, label: "2026.7.2" });
+    state = renderHook({});
+    await state.onConfirmApply();
+    state = renderHook({});
+    state.onRequestNoBackupConsent();
+    state = renderHook({});
+    state.onToggleNoBackupConsent(true);
+    state = renderHook({});
+    let resolveConsent;
+    api.requestOpenclawBackupRiskConsent.mockImplementationOnce(() => new Promise((resolve) => { resolveConsent = resolve; }));
+    const confirm = state.onConfirmNoBackupConsent();
+    await state.onConfirmNoBackupConsent();
+    expect(api.requestOpenclawBackupRiskConsent).toHaveBeenCalledTimes(1);
+    state[cancelAction]();
+    resolveConsent({ operationId: kMigrationError.operationId, target: kSoftTarget, confirmNoBackupToken: "t".repeat(43) });
+    await confirm;
+    expect(api.applyOpenclawVersion).toHaveBeenCalledTimes(1);
+    state = renderHook({});
+    expect(state.noBackupConsentPrompt).toBe(false);
+    expect(state.noBackupConsentStarting).toBe(false);
+    expect(state.noBackupConsentChecked).toBe(false);
+  });
+
   it("cancelling the no-backup dialog or dismissing the error retires the checkbox and the offer without calling the API; a 409 backup_failed never offers the consent", async () => {
     let state = await hydrate();
     api.applyOpenclawVersion.mockRejectedValueOnce(
-      Object.assign(new Error(kMigrationError.message), { code: kMigrationError.code }),
+      Object.assign(new Error(kMigrationError.message), kMigrationError),
     );
     state.onRequestApply({ payload: kSoftTarget, label: "2026.7.2", isDowngrade: false });
     state = renderHook({});

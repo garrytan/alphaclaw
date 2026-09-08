@@ -3347,18 +3347,15 @@ describe("server/openclaw-channel-sync", () => {
       writeAgentDb(harness.openclawDir, "main", { userVersion: 17 });
 
       // A routine same-channel apply (stable pin → stable: a stable→beta move is a channel-boundary HARD gate since #79 (a)).
-      // This harness takes no usable backup, and the verdict below says the
-      // target MIGRATES the databases — the #79 (b) post-preflight checkpoint
-      // would refuse that (409 backup_required_for_migration) without the
-      // operator's explicit consent; the consent keeps this test about the
-      // preflight verdict (the checkpoint has its own suite).
+      // This harness takes no usable backup. The checkpoint refuses the
+      // migration, but must retain the independently computed agent verdict.
       const result = await harness.sync.applyUpdate({
         channel: "stable",
         version: "1.1.0",
-        confirmNoBackup: true,
       });
 
-      expect(result.status).toBe(202);
+      expect(result.status).toBe(409);
+      expect(result.body.code).toBe("backup_required_for_migration");
       // ONE CLI invocation — the state DB. The agent DB was judged in-process.
       expect(preflightCalls).toHaveLength(1);
       expect(sawAgentSnapshot(preflightCalls)).toBe(false);

@@ -39,6 +39,24 @@ describe("frontend/api", () => {
     expect(window.location.href).toBe("http://localhost/");
   });
 
+  it("preserves typed partial-transition facts on failures without copying tokens or arbitrary fields", async () => {
+    const payload = { ok: false, error: "Gateway not verified", code: "gateway_held", hint: "Review the hold",
+      disabled: true, enabled: false, configSaved: true, configRestored: true, gatewayRestored: false,
+      restartDeferred: true, gatewayConfigDeferred: true, memberSaved: true, ownerCreated: false,
+      changed: "true", restored: 1, gatewayApplied: null, confirmNoBackupToken: "private-consent-token",
+      sessionToken: "private-session-token", unknownField: true };
+    global.fetch.mockResolvedValue(mockJsonResponse(409, payload));
+    const api = await loadApiModule();
+    const error = await api.disableTeam().catch((value) => value);
+    expect(error).toBeInstanceOf(Error);
+    expect(error).toMatchObject({ code: "gateway_held", hint: "Review the hold", disabled: true, enabled: false,
+      configSaved: true, configRestored: true, gatewayRestored: false, restartDeferred: true,
+      gatewayConfigDeferred: true, memberSaved: true, ownerCreated: false });
+    for (const field of ["changed", "restored", "gatewayApplied", "confirmNoBackupToken", "sessionToken", "unknownField"]) {
+      expect(error).not.toHaveProperty(field);
+    }
+  });
+
   it("redirects to /setup and throws on 401", async () => {
     global.fetch.mockResolvedValue(mockJsonResponse(401, { error: "Unauthorized" }));
     const api = await loadApiModule();

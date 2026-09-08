@@ -3800,6 +3800,39 @@ describe("server/gateway restart behavior", () => {
     });
   });
 
+  describe("cold restart stop ownership", () => {
+    it("rechecks ownership after the asynchronous running probe before stopping a managed child", async () => {
+      let expired = false;
+      childProcess.spawn = vi.fn(() => createChild());
+      childProcess.execFile = execFileOk("");
+      fs.existsSync = vi.fn(() => false);
+      net.createConnection = vi.fn(() => { expired = true; return createSocket(false); });
+      delete require.cache[modulePath];
+      const gateway = require(modulePath);
+      await expect(gateway.restartGateway(vi.fn(), { shouldAbort: () => expired }))
+        .rejects.toMatchObject({ evidence: { reason: "aborted_by_caller", phase: "managed_stop" } });
+      expect(childProcess.spawn).not.toHaveBeenCalled();
+      expect(childProcess.execFile.mock.calls.some((call) => call[1]?.includes("stop"))).toBe(false);
+    });
+
+    it("rechecks ownership after a cold stop capability probe before dispatching the CLI stop", async () => {
+      let expired = false;
+      childProcess.spawn = vi.fn(() => createChild());
+      childProcess.execFile = vi.fn((file, args, options, callback) => {
+        if (isStopHelpProbe(args)) { expired = true; callback(null, kStopHelpWithForce, ""); }
+        else callback(null, "", "");
+      });
+      fs.existsSync = vi.fn(() => false);
+      net.createConnection = vi.fn(() => createSocket(false));
+      delete require.cache[modulePath];
+      const gateway = require(modulePath);
+      await expect(gateway.restartGateway(vi.fn(), { shouldAbort: () => expired }))
+        .rejects.toMatchObject({ evidence: { reason: "aborted_by_caller", phase: "stop_command" } });
+      expect(childProcess.execFile.mock.calls.filter((call) => call[1]?.includes("stop") && !call[1].includes("--help"))).toEqual([]);
+      expect(childProcess.spawn).not.toHaveBeenCalled();
+    });
+  });
+
   describe("capability-gated `gateway stop --force` and stop honesty (WI-5.1)", () => {
     // C13: the managed launch primes the probe (fire-and-forget) so a later
     // stop — including the 5 s shutdown budget — consults the cache instead

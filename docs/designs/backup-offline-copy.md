@@ -72,9 +72,11 @@ startedAt, elapsedMs, bytes, kind, ok }` and one `backup_rung` event, and a
 failed copy records what followed it as `offlineCopy.next { rung, reason }`.
 A soft-gated apply that ends with no backup is still stopped at the
 post-preflight checkpoint when the target migrates the databases (`409
-backup_required_for_migration`, overridable only by the operator's
-`confirmNoBackup: true`); the hard gate's `409 backup_failed` is never
-overridable.
+backup_required_for_migration`). Eligible backup-availability failures on
+either gate may offer a separate human confirmation bound to an already
+prepared, verified target. The retry needs both `confirmNoBackup: true` and
+a session-bound, single-use `confirmNoBackupToken`; ownership, compatibility
+and gateway holds remain blockers. See the [consent runbook](../upgrade-troubleshooting.md#backup-continue-without-a-backup-consent).
 
 ## 2. Archive layout
 

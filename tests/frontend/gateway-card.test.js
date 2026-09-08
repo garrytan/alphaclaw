@@ -462,6 +462,15 @@ describe("frontend/gateway card (server-state matrix)", () => {
     expect(treeText(tree)).toMatch(/as of\s+\d+s ago/);
   });
 
+  it("labels a stale healthy observation as last known even when transport is reachable", () => {
+    publishShell({ statusState: makeServerState({}), connectivityMode: "online", lastFrameAtMs: Date.now(),
+      statusFreshness: { mode: "stale", observedAtMs: Date.now() - 12000 } });
+    const tree = renderGateway({});
+    expect(treeText(tree)).toContain("Last known —");
+    expect(treeText(tree)).toContain("Status updates unavailable.");
+    expect(treeText(tree)).toMatch(/as of\s+\d+s ago/);
+  });
+
   it("renders no freeze stamp before the first frame (lastFrameAtMs 0 is not epoch 1970)", () => {
     // lastFrameAtMs starts at 0 (no frame yet) — 0 must stay "no stamp",
     // never a relative time computed against the 1970 epoch.

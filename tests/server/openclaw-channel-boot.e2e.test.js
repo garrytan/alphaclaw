@@ -904,6 +904,102 @@ describe("server/openclaw-channel boot sync (e2e)", () => {
         };
       };
 
+    it("uses the dev executable and full SHA for migration completion, including two builds with the same version and short SHA", async () => {
+      const doctorCalls = [];
+      const h = createHarness({ pin: "2026.9.2", installedVersion: "2026.9.2", channel: "dev", runnerImpl: doctorRunner({ doctorCalls }) });
+      const checkoutDir = writeCheckoutFixture(h.rootDir, { sha: kDevSha });
+      const pkgPath = path.join(checkoutDir, "package.json");
+      const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf8"));
+      fs.writeFileSync(pkgPath, JSON.stringify({ ...pkg, version: "2026.9.2" }));
+      h.store.updateState((state) => {
+        state.pinVersion = "2026.9.2";
+        state.applied = { channel: "dev", sha: kDevSha, at: 1 };
+        // Old version-only completion belongs to the dormant package, not
+        // this checkout merely because the versions happen to match.
+        state.configMigration = { completedForVersion: "2026.9.2" };
+        return state;
+      });
+      writeConfig(h.openclawDir, { audit: { enabled: true } });
+      expect(h.sync.syncAtBoot().action).toBe("dev_shim");
+      expect((await h.sync.reconcileBootConfig()).status).toBe("ok");
+      expect(doctorCalls).toHaveLength(1);
+      expect(doctorCalls[0][0]).toBe(path.join(checkoutDir, "bin", "entry.js"));
+      expect(h.store.readState().configMigration).toMatchObject({ completedForVersion: "2026.9.2", completedForBuild: kDevSha, lastAttempt: { buildId: kDevSha } });
+      expect((await h.sync.reconcileBootConfig()).reason).toBe("already-completed");
+      const secondSha = kDevSha.slice(0, -1) + "1";
+      fs.writeFileSync(path.join(checkoutDir, ".git", "HEAD"), secondSha);
+      h.store.updateState((state) => { state.applied.sha = secondSha; return state; });
+      expect((await h.sync.reconcileBootConfig()).status).toBe("ok");
+      expect(doctorCalls).toHaveLength(2);
+      expect(h.store.readState().configMigration.completedForBuild).toBe(secondSha);
+    });
+
+    it("checks dev metadata against live databases and invalidates its schema memo when the full SHA changes", async () => {
+      const h = createHarness({ pin: "2026.9.2", installedVersion: "2026.9.2", channel: "dev" });
+      const checkoutDir = writeCheckoutFixture(h.rootDir, { sha: kDevSha });
+      const pkgPath = path.join(checkoutDir, "package.json");
+      const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf8"));
+      const writeMetadata = (agent) => fs.writeFileSync(pkgPath, JSON.stringify({ ...pkg, version: "2026.9.2", openclaw: { schemaVersions: { state: 15, agent } } }));
+      writeMetadata(17);
+      h.store.updateState((state) => { state.pinVersion = "2026.9.2"; state.applied = { channel: "dev", sha: kDevSha, at: 1 }; return state; });
+      writeAgentDb(h.openclawDir, "main", { userVersion: 19 });
+      expect(h.sync.syncAtBoot().action).toBe("dev_shim");
+      expect(await h.sync.getExecutingBuild()).toMatchObject({ source: "dev", buildId: kDevSha, schemas: { state: 15, agent: 17 } });
+      expect(await h.sync.assessInstalledLaunchCompatibility()).toMatchObject({ compatible: false, supported: { agent: 17 } });
+      expect(await h.sync.describeStateDbSchema()).toMatchObject({ packageDir: checkoutDir, executingBuild: { buildId: kDevSha }, supportedSchema: { agent: 17 } });
+      const secondSha = kDevSha.slice(0, -1) + "1";
+      fs.writeFileSync(path.join(checkoutDir, ".git", "HEAD"), secondSha);
+      writeMetadata(21);
+      expect(await h.sync.getExecutingBuild()).toMatchObject({ buildId: secondSha, schemas: { agent: 21 } });
+      expect(await h.sync.assessInstalledLaunchCompatibility()).toMatchObject({ compatible: true, supported: { agent: 21 } });
+      // A stale checkout is removed at boot; diagnostics must then name the
+      // fallback executable and its public version, never the old dev SHA.
+      expect(h.sync.syncAtBoot().action).toBe("dev_unavailable");
+      expect(await h.sync.getExecutingBuild()).toMatchObject({ source: "installed", buildId: "2026.9.2", schemas: { agent: 19 } });
+    });
+
+    it.each(["installed", "dev"])("fresh public metadata defeats the populated %s schema memo without changing build identity", async (source) => {
+      const h = createHarness({ pin: "2026.9.2", installedVersion: "2026.9.2", channel: source === "dev" ? "dev" : "stable" });
+      const packageDir = source === "dev"
+        ? writeCheckoutFixture(h.rootDir, { sha: kDevSha })
+        : path.join(h.installDir, "node_modules", "openclaw");
+      const pkgPath = path.join(packageDir, "package.json");
+      const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf8"));
+      const writeMetadata = (schemaVersions) => fs.writeFileSync(pkgPath, JSON.stringify({ ...pkg, version: "2026.9.2", openclaw: { schemaVersions } }));
+      writeSchemaContractFixture(packageDir, { state: 15, agent: 19 });
+      writeMetadata({ state: 15, agent: 22 });
+      if (source === "dev") {
+        h.store.updateState((state) => { state.pinVersion = "2026.9.2"; state.applied = { channel: "dev", sha: kDevSha, at: 1 }; return state; });
+        expect(h.sync.syncAtBoot().action).toBe("dev_shim");
+      }
+      const buildId = source === "dev" ? kDevSha : "2026.9.2";
+      const scan = vi.spyOn(fs.promises, "readdir");
+      try {
+        expect(await h.sync.getExecutingBuild()).toMatchObject({ source, buildId, schemas: { state: 15, agent: 22 } });
+        for (const invalid of [{ state: 15, agent: "broken" }, { state: 15, agent: [19, 22] }]) {
+          writeMetadata(invalid);
+          expect(await h.sync.getExecutingBuild()).toMatchObject({ source, buildId, schemas: { state: null, agent: null, unknownKinds: ["state", "agent"] } });
+          expect(await h.sync.getSupportedSchemaForInstalled()).toMatchObject({ state: null, agent: null });
+          expect(await h.sync.describeStateDbSchema()).toMatchObject({ supportedSchema: { state: null, agent: null } });
+        }
+        writeMetadata({ state: 16, agent: 23 });
+        expect(await h.sync.getExecutingBuild()).toMatchObject({ buildId, schemas: { state: 16, agent: 23 } });
+        expect(scan).not.toHaveBeenCalled(); // valid/invalid public authority never scans dist
+      } finally { scan.mockRestore(); }
+    });
+
+    it("reuses the bounded legacy scan while public metadata remains absent", async () => {
+      const h = createHarness({ pin: "2026.9.2", installedVersion: "2026.9.2", installFixture: { schema: { state: 15, agent: 19 } } });
+      const scan = vi.spyOn(fs.promises, "readdir");
+      try {
+        expect((await h.sync.getExecutingBuild()).schemas).toMatchObject({ state: 15, agent: 19 });
+        const calls = scan.mock.calls.length;
+        expect(calls).toBeGreaterThan(0);
+        expect((await h.sync.getExecutingBuild()).schemas).toMatchObject({ state: 15, agent: 19 });
+        expect(scan).toHaveBeenCalledTimes(calls);
+      } finally { scan.mockRestore(); }
+    });
+
     it("reconciles config once per version with a guarded doctor run", async () => {
       const doctorCalls = [];
       const harness = createHarness({

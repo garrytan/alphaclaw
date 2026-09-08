@@ -14,6 +14,15 @@ const os = require("os");
 const path = require("path");
 const { WebSocketServer, WebSocket } = require("ws");
 
+const { createChatRunsStore } = require("../../../lib/server/db/chat-runs");
+
+const createDurableTestStore = ({ cleanups, rootDir }) => {
+  const store = createChatRunsStore();
+  store.initChatRunsDb({ rootDir, markInterruptedRuns: false });
+  cleanups.push(() => store.closeChatRunsDb());
+  return store;
+};
+
 const { createChatWsService } = require("../../../lib/server/chat-ws");
 
 const waitUntil = async (fn, label = "condition") => {
@@ -106,6 +115,7 @@ const createChatBridgeTestKit = ({ cleanups }) => {
     return createChatWsService({
       fs,
       openclawDir: tempDir,
+      chatRunsStore: createDurableTestStore({ cleanups, rootDir: tempDir }),
       getGatewayPort: () =>
         typeof portOrHarness === "number" ? portOrHarness : portOrHarness.port,
       ...serviceOptions,
@@ -206,4 +216,5 @@ const createChatBridgeTestKit = ({ cleanups }) => {
   };
 };
 
-module.exports = { createChatBridgeTestKit, waitUntil };
+module.exports = {
+  createDurableTestStore, createChatBridgeTestKit, waitUntil };

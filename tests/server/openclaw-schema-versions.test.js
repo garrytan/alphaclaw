@@ -231,6 +231,25 @@ describe.each(kResolvers)("openclaw-schema-versions: resolveDeclaredSchemaVersio
     fs.rmSync(packageDir, { recursive: true, force: true });
   });
 
+  it("uses public metadata without enumerating conflicting legacy chunks", async () => {
+    fs.writeFileSync(path.join(packageDir, "package.json"), JSON.stringify({ openclaw: { schemaVersions: { state: 15, agent: 19 } } }));
+    writeDist(packageDir, { "openclaw-agent-db-contract-old.js": agentContract(99) });
+    const readdirSync = vi.fn(() => { throw new Error("must not scan dist"); });
+    const readdir = vi.fn(async () => { throw new Error("must not scan dist"); });
+    const result = await resolve(packageDir, { fsModule: { ...fs, readdirSync, promises: { ...fs.promises, readdir } } });
+    expect(result).toMatchObject({ state: 15, agent: 19, metadata: "valid", files: ["package.json"] });
+    expect(readdirSync).not.toHaveBeenCalled();
+    expect(readdir).not.toHaveBeenCalled();
+  });
+
+  it.each([null, {}, { state: 15 }, { state: -1, agent: 19 }, { state: 15, agent: "19" }, { state: 1.5, agent: 19 }])(
+    "keeps malformed metadata %j explicitly unknown instead of scanning a usable legacy declaration", async (schemaVersions) => {
+      fs.writeFileSync(path.join(packageDir, "package.json"), JSON.stringify({ openclaw: { schemaVersions } }));
+      writeDist(packageDir, { "openclaw-agent-db-contract-old.js": agentContract(19) });
+      expect(await resolve(packageDir)).toMatchObject({ state: null, agent: null, metadata: "invalid", unknownKinds: ["state", "agent"] });
+    },
+  );
+
   it("reads one constant per contract chunk (the 2026.9.2 layout)", async () => {
     writeDist(packageDir, {
       "openclaw-agent-db-contract-CGTyjij4.js": agentContract(19),
@@ -502,6 +521,32 @@ describe("openclaw-schema-versions: schema table", () => {
     });
     expect(fs.existsSync(tablePath())).toBe(false);
     expect(table.supportedFor("2026.7.1-2")).toEqual({ state: 1, agent: null, source: "seeded" });
+  });
+
+  it("persists explicit unknown kinds over learned declarations and seeds across reopen", () => {
+    const table = makeTable();
+    table.recordDeclared("2026.9.2", { state: 16, agent: 20 });
+    table.recordDeclared("2026.9.2", { state: 15, agent: null, unknownKinds: ["agent"] });
+    expect(makeTable().supportedFor("2026.9.2")).toEqual({ state: 15, agent: null, source: "declared", unknownKinds: ["agent"] });
+    table.recordDeclared("2026.9.2", { state: null, agent: null });
+    expect(makeTable().supportedFor("2026.9.2").agent).toBeNull();
+    table.recordDeclared("2026.9.2", { state: null, agent: null, unknownKinds: ["state", "agent"] });
+    expect(makeTable().supportedFor("2026.9.2")).toMatchObject({ state: null, agent: null, unknownKinds: ["state", "agent"] });
+  });
+
+  it("keeps same-version dev declarations and observations under their full build identities", () => {
+    const table = makeTable();
+    const first = "a".repeat(40);
+    const second = "a".repeat(39) + "b";
+    table.recordDeclared("2026.9.2", { state: 12, agent: 17 }, { buildId: first });
+    table.recordDeclared("2026.9.2", { state: 15, agent: 21 }, { buildId: second });
+    table.recordObserved("2026.9.2", { state: 12, agent: 17 }, { buildId: first });
+    const reopened = makeTable();
+    expect(reopened.supportedFor("2026.9.2", { buildId: first })).toMatchObject({ state: 12, agent: 17 });
+    expect(reopened.supportedFor("2026.9.2", { buildId: second })).toMatchObject({ state: 15, agent: 21 });
+    expect(reopened.supportedFor("2026.9.2", { buildId: "c".repeat(40) })).toEqual({ state: null, agent: null, source: null });
+    expect(reopened.supportedFor("2026.9.2")).toMatchObject({ state: 15, agent: 19, source: "seeded" });
+    expect(reopened.read().byBuild[first].observed).toMatchObject({ agent: 17 });
   });
 
   it("recordDeclared merges per field over an earlier declaration of the same version", () => {
@@ -1154,7 +1199,7 @@ describe("openclaw-schema-versions: chooseBootableVersion", () => {
     ).resolves.toBeNull();
   });
 
-  it("pre-filter: the dist scan (resolveSupported) runs only for versions the table does not know", async () => {
+  it("pre-filter: the current candidate declaration is checked even when the table knows its version", async () => {
     const table = tableOf({ "2026.9.2": { state: 15, agent: 19 } });
     const resolveSupported = vi.fn(async (version) => (version === "2026.10.0" ? { state: 16, agent: 20 } : null));
     await expect(
@@ -1169,7 +1214,7 @@ describe("openclaw-schema-versions: chooseBootableVersion", () => {
     expect(resolveSupported).toHaveBeenCalledTimes(1);
     expect(resolveSupported).toHaveBeenCalledWith("2026.10.0");
     expect(table.supportedFor).toHaveBeenCalledWith("2026.10.0");
-    // A known version never triggers the scan, even when a line is null (2026.7.1-2's agent).
+    // A local public declaration can contradict a remembered version entry.
     resolveSupported.mockClear();
     await chooseBootableVersion({
       expected: "2026.7.1-2",
@@ -1177,7 +1222,7 @@ describe("openclaw-schema-versions: chooseBootableVersion", () => {
       table: kRealTable,
       resolveSupported,
     });
-    expect(resolveSupported).not.toHaveBeenCalled();
+    expect(resolveSupported).toHaveBeenCalledWith("2026.7.1-2");
     // A throwing scan reads as unknown.
     await expect(
       chooseBootableVersion({
@@ -1189,6 +1234,18 @@ describe("openclaw-schema-versions: chooseBootableVersion", () => {
         },
       }),
     ).resolves.toBeNull();
+  });
+
+  it("pre-filter: explicit unknown from a local declaration cannot resurrect a usable seeded candidate", async () => {
+    const confirm = vi.fn(async () => "pass");
+    expect(await chooseBootableVersion({
+      expected: "2026.9.2",
+      table: kRealTable,
+      userVersions: { state: 15, agent: 19 },
+      resolveSupported: async () => ({ state: 15, agent: null, unknownKinds: ["agent"] }),
+      confirm,
+    })).toBeNull();
+    expect(confirm).not.toHaveBeenCalled();
   });
 
   it("confirm: pass chooses the candidate as confirmed; block skips to the next permitted one", async () => {

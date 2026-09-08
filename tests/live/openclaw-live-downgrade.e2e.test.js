@@ -85,8 +85,8 @@ const kTestTimeoutMs = 14 * 60 * 1000;
 const kGatewayHealthTimeoutMs = 120_000;
 
 // The state DB the INSTALLED CLI actually wrote: `approvals get --json`
-// materializes the real schema for that line (74 tables/user_version 1 on
-// the pin, 104/15 on 2026.8.2, 108/12 on the beta — probed live).
+// materializes the real schema for that line (user_version 15 on 2026.8.2,
+// 12 on the beta — independently observed from these immutable packages).
 const materializeStateDir = ({ bin, homeDir, stateDir }) => {
   fs.mkdirSync(path.join(stateDir, "agents", "main", "sessions"), { recursive: true });
   fs.writeFileSync(path.join(stateDir, "openclaw.json"), "{}\n");

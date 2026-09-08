@@ -74,7 +74,7 @@ describe("server/team-auth-transition", () => {
       membersStore: { listMembers: () => kMembers },
       env: testEnv,
     });
-    return () => writer.applyTeamGatewayConfig();
+    return (options) => writer.applyTeamGatewayConfig(options);
   };
 
   it("enable happy path writes the trusted-proxy config and snapshots the old auth", async () => {
@@ -188,7 +188,7 @@ describe("server/team-auth-transition", () => {
     };
     writeConfig(openclawDir, originalConfig);
     const restartGateway = vi.fn(async () => {});
-    const request = createProbeRequest({ acceptInvoke: () => false });
+    const request = createProbeRequest({ acceptInvoke: (headers) => headers.authorization === "Bearer shared-token" });
     const notify = vi.fn(async () => ({ ok: true }));
 
     const result = await enableTeamMode({
@@ -281,7 +281,7 @@ describe("server/team-auth-transition", () => {
     });
 
     expect(result.ok).toBe(false);
-    expect(result.restored).toBe(true);
+    expect(result).toMatchObject({ restored: false, configRestored: true, gatewayRestored: false });
     expect(readConfig(openclawDir).gateway.auth).toEqual({ token: "abc" });
   });
 

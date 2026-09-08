@@ -5,6 +5,61 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.9.79] - 2026-09-08
+
+### Added
+
+- Human operators can explicitly continue an eligible upgrade after backup
+  protection fails, including channel changes. Confirmation expires after ten
+  minutes, works once, and is bound to the session, failed run and verified
+  build/database facts. It never overrides compatibility, ownership, disk,
+  corruption or lifecycle safety checks.
+
+### Fixed
+
+- Upgrade, boot, Doctor and diagnostic compatibility checks describe the
+  build that will execute. Full dev commits remain distinct even when their
+  package versions match; invalid schema metadata cannot inherit cached values.
+- Channel and team changes respect holds established while an operation waits.
+  Responses distinguish saved configuration from a deferred restart, and team
+  authentication changes retain lifecycle ownership through restoration.
+  A compatible upgrade with a verified backup can still recover the hold it
+  started with; a newly established hold refuses the transition.
+- Automatic Doctor attempts remain charged when a later replacement fails.
+  Ordinary crash relaunch backoff continues after Doctor exhaustion, while
+  persisted structural pauses retain their stronger recovery requirements.
+- Chat reconnects and lost acknowledgments no longer automatically redispatch
+  uncertain messages. Durable admission, socket fencing and retained outcomes
+  preserve uncertainty across browser/server restarts; an intentional resend
+  creates a new message identity. Browser storage failures prevent transmission
+  before the submission marker is saved. Active evidence and replay memory are
+  bounded.
+- Dashboard status distinguishes fresh observations, initial unknown state and
+  stale last-known health. Delayed requests cannot replace newer observations.
+  Copy diagnostics uses the fresh server export, with a redacted fallback and
+  selectable text when clipboard access fails.
+- Second boots no longer enable the Codex plugin solely because setup created
+  an empty agents shell. Real migrations still run from the executing build;
+  migration and thinking loaders also support newer OpenClaw `.mjs` bundles.
+
+### Changed
+
+- Live tests use genuine global/agent databases and persistent installations
+  with cross-process ownership and atomic cache publication. Docker journeys
+  exercise the immutable v0.9.76-to-candidate upgrade on one volume and an
+  independently corroborated thread-ID collision. Failure artifacts survive
+  cleanup, and memory tests handle one documented first-start convergence
+  restart before measuring the leak with test retries disabled.
+- Moving-release and dev live CI use Node 24 to meet current upstream runtime
+  requirements. The bundled OpenClaw pin remains 2026.9.2.
+
+### Known
+
+- Current upstream's dev updater can refuse AlphaClaw's nested dependency
+  installation because it cannot identify its package-manager owner. The real
+  source-build test uses a disposable global installation; it does not cover
+  that separate bootstrap limitation.
+
 ## [0.9.78] - 2026-09-07
 
 Follow-up to 0.9.77: the live e2e tier was run for real against the released

@@ -52,11 +52,11 @@ describe("server/chat send reliability", () => {
     return {
       calls,
       store: {
-        recordSend: (row) => calls.recordSend.push(row),
+        claimSend: (row) => { calls.recordSend.push(row); return { claimed: true }; },
         markRunning: (row) => calls.markRunning.push(row),
         markStopRequested: (row) => calls.markStopRequested.push(row),
         markTerminal: (row) => calls.markTerminal.push(row),
-        findRecentTerminal,
+        findRun: findRecentTerminal,
         listMarkers: () => [],
       },
     };
@@ -282,6 +282,7 @@ describe("server/chat send reliability", () => {
               sessionKey: "s-retry",
               clientMsgId: "cm-errored",
               status: "error",
+              submissionState: "not_submitted",
               errorCode: "gateway_unavailable",
             }
           : null,

@@ -112,8 +112,8 @@ describe("server/status-snapshot", () => {
     fail = true;
     await vi.advanceTimersByTimeAsync(4000);
 
-    // Failures keep the last good snapshot; no bogus frames are emitted.
-    expect(statusFramesOf(client)).toHaveLength(1);
+    // Stale transition is delivered immediately, retaining the old observation.
+    expect(statusFramesOf(client)).toHaveLength(2);
     // The re-served payload is honestly marked stale, stamped with the last
     // COMPUTE time — never presented as fresh.
     const payload = await service.getSnapshotPayload();
@@ -211,7 +211,7 @@ describe("server/status-snapshot", () => {
     await vi.advanceTimersByTimeAsync(3000);
     const fresh = await service.getSnapshotPayload();
     expect(fresh.status.gateway).toBe("recovered");
-    expect(fresh.snapshotStale).toBeUndefined();
+    expect(fresh.snapshotStale).toBe(false);
     expect(fresh.snapshotErrorCount).toBeUndefined();
   });
 
@@ -266,6 +266,30 @@ describe("server/status-snapshot", () => {
     const frames = statusFramesOf(client);
     expect(frames).toHaveLength(1);
     expect(frames[0].status.gateway).toBe("recovered");
-    expect(frames[0].snapshotStale).toBeUndefined();
+    expect(frames[0].snapshotStale).toBe(false);
   });
+  it("REST and SSE share epoch/revision, including stale recovery with an identical timestamp", async () => {
+    vi.useFakeTimers();
+    let fail = false;
+    const service = createStatusSnapshotService({
+      snapshotEpoch: "boot-identity", now: () => 1000,
+      compute: async () => { if (fail) throw new Error("failed"); return { status: { gateway: "running" } }; },
+      logger: { warn: vi.fn() },
+    });
+    const client = createClient();
+    await service.addClient(client);
+    const fresh = await service.getSnapshotPayload();
+    expect(fresh).toEqual(statusFramesOf(client)[0]);
+    expect(fresh).toMatchObject({ snapshotEpoch: "boot-identity", snapshotRevision: 1, snapshotStale: false });
+    fail = true;
+    await vi.advanceTimersByTimeAsync(2000);
+    const stale = statusFramesOf(client)[1];
+    expect(stale).toMatchObject({ timestamp: fresh.timestamp, snapshotStale: true, snapshotRevision: 2 });
+    fail = false;
+    await vi.advanceTimersByTimeAsync(2000);
+    const recovered = statusFramesOf(client)[2];
+    expect(recovered).toMatchObject({ timestamp: fresh.timestamp, snapshotStale: false, snapshotRevision: 3 });
+    expect(await service.getSnapshotPayload()).toEqual(recovered);
+  });
+
 });
