@@ -1681,6 +1681,7 @@ describe("pickTrustedResources memory-trend projection (field-wise validation)",
       capSource: "heap",
       pressureFraction: 0.79,
       projectedExhaustionAt: "2026-08-31T12:00:00.000Z",
+      projectedBudgetCrossingAt: "2026-08-31T12:00:00.000Z",
       episodeId: "4242-1700000000000",
       lastEpisodeSummary: {
         episodeId: "100-1699999999999",
@@ -1742,6 +1743,7 @@ describe("pickTrustedResources memory-trend projection (field-wise validation)",
       capSource: null,
       pressureFraction: null,
       projectedExhaustionAt: null,
+      projectedBudgetCrossingAt: null,
       episodeId: null,
       lastEpisodeSummary: {
         episodeId: null,
@@ -1753,6 +1755,67 @@ describe("pickTrustedResources memory-trend projection (field-wise validation)",
         mitigationCount: null,
       },
     });
+  });
+
+  it("keeps a container episode and freshness with no serving gateway", () => {
+    const container = {
+      state: "critical", since: "2026-09-09T12:00:00.000Z",
+      usedBytes: 950, limitBytes: 1000, pressureFraction: 0.95,
+      sampledAt: "2026-09-09T12:00:00.000Z", sampleStatus: "stale",
+      episodeId: "container-1700000000000", lastEpisodeSummary: null,
+    };
+    const projected = pickTrustedResources({ gatewayMemoryTrend: {
+      state: "no_gateway", container: { ...container, argv: "private command", path: "/private/path" },
+    } }).gatewayMemoryTrend;
+    expect(projected.container).toEqual(container);
+    expect(JSON.stringify(projected)).not.toContain("private");
+    projected.container.usedBytes = 0;
+    expect(container.usedBytes).toBe(950);
+  });
+
+  it("projects current and frozen scoped pressure fields with compatible crossing aliases", () => {
+    const crossing = "2026-09-09T12:00:00.000Z";
+    const projected = pickTrustedResources({ gatewayMemoryTrend: {
+      state: "critical", sampleStatus: "fresh", sampledAt: "2026-09-09T11:00:00.000Z",
+      capSource: "derived_group_budget", pressureSource: "container",
+      groupPressureFraction: 0.4, containerPressureFraction: 0.95,
+      projectedBudgetCrossingAt: crossing,
+      lastEpisodeSummary: { capSource: "budget", effectiveCapMb: 1024,
+        pressureSource: "container", trigger: "fast_pressure", groupPressureFraction: 0.4,
+        containerPressureFraction: 0.95, projectedBudgetCrossingAt: crossing },
+    } }).gatewayMemoryTrend;
+    expect(projected).toMatchObject({
+      capSource: "derived_group_budget", pressureSource: "container", sampleStatus: "fresh",
+      groupPressureFraction: 0.4, containerPressureFraction: 0.95,
+      projectedExhaustionAt: crossing, projectedBudgetCrossingAt: crossing,
+      lastEpisodeSummary: { trigger: "fast_pressure", groupPressureFraction: 0.4,
+        containerPressureFraction: 0.95, projectedBudgetCrossingAt: crossing },
+    });
+  });
+
+  it("rejects malformed container and scoped pressure fields on the trusted boundary", () => {
+    const projected = pickTrustedResources({ gatewayMemoryTrend: {
+      state: "normal", sampleStatus: "trust me", sampledAt: "September 9 (secret)",
+      groupPressureFraction: -1, containerPressureFraction: Infinity,
+      container: {
+        state: "unknown secret", since: "September 9 (secret)",
+        usedBytes: "secret", limitBytes: -1, pressureFraction: Infinity,
+        sampledAt: "secret", sampleStatus: "secret", episodeId: "container-secret",
+        lastEpisodeSummary: { episodeId: "container-secret", endedAt: "secret", reason: "secret" },
+      },
+      lastEpisodeSummary: { capSource: "budget", trigger: "secret", groupPressureFraction: -1,
+        containerPressureFraction: "secret", projectedBudgetCrossingAt: "secret" },
+    } }).gatewayMemoryTrend;
+    expect(projected.container).toEqual({
+      state: null, since: null, usedBytes: null, limitBytes: null, pressureFraction: null,
+      sampledAt: null, sampleStatus: null, episodeId: null,
+      lastEpisodeSummary: { episodeId: null, endedAt: null, reason: null },
+    });
+    expect(projected).toMatchObject({ sampleStatus: null, sampledAt: null,
+      groupPressureFraction: null, containerPressureFraction: null,
+      lastEpisodeSummary: { trigger: null, groupPressureFraction: null,
+        containerPressureFraction: null, projectedBudgetCrossingAt: null } });
+    expect(JSON.stringify(projected)).not.toContain("secret");
   });
 
   it("degrades to null when the trend is absent (legacy samples)", () => {

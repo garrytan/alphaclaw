@@ -82,7 +82,7 @@ describe("server/machine-summary gateway memory trend", () => {
     const summary = getMachineSummaryForPrompt();
     for (const [key, value] of Object.entries(summary)) {
       if (value === null || typeof value === "number") continue;
-      expect(["tier", "gatewayMemoryTrendState"]).toContain(key);
+      expect(["tier", "gatewayMemoryTrendState", "gatewayMemoryScope"]).toContain(key);
     }
     expect(summary).not.toHaveProperty("episodeId");
     expect(summary).not.toHaveProperty("freeText");

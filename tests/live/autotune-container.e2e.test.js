@@ -4,7 +4,8 @@ const { execFileSync, spawnSync } = require("child_process");
 // Validates against REAL cgroups + REAL V8 what the hermetic suite can only
 // mock:
 //   1. Inside `docker run --memory=<N>`, the cgroup files report the limit and
-//      the derived --max-old-space-size actually lands as V8's heap ceiling.
+//      the derived --max-old-space-size lands alongside a known young-space
+//      allowance in V8's total heap ceiling.
 //   2. A process driven past a small heap cap aborts with the exact stderr
 //      shape the watchdog's OOM classifier matches.
 //
@@ -49,7 +50,7 @@ describe.skipIf(!dockerAvailable)(
   "live: autotune constrained-container smoke",
   () => {
     it(
-      "cgroup limit is visible in-container and the derived heap flag sets V8's ceiling",
+      "cgroup limit is visible and V8's ceiling includes the derived old-space cap plus young space",
       { timeout: 300000 },
       () => {
         const { deriveTunings } = require("../../lib/server/autotune");
@@ -60,17 +61,30 @@ describe.skipIf(!dockerAvailable)(
           tier: memMb <= 640 ? "micro" : "small",
           environment: "container",
         });
-        for (const { memory, memMb } of [
+        for (const { memory, memMb, overrides = {} } of [
           { memory: "512m", memMb: 512 },
           { memory: "2g", memMb: 2048 },
+          // Default V8 old-space happens to match both derivations above.
+          // A distinct operator cap makes ignoring the flag fail this test.
+          { memory: "2g", memMb: 2048, overrides: { gatewayHeapMb: 768 } },
         ]) {
           // The REAL shipped derivation — never a re-implemented copy that
           // could silently drift from production.
-          const derivedHeapMb = deriveTunings(liveProfile(memMb), {}).values
+          const derivedHeapMb = deriveTunings(liveProfile(memMb), { overrides }).values
             .gatewayHeapMb;
+          // The flag caps OLD space; heap_size_limit includes young space.
+          // Node 24.20 reports 1120 MiB for --max-old-space-size=1024 in
+          // a 2 GiB container, so a fixed ±64 MiB tolerance is incorrect.
+          // Fix the fixture's semi-space size to make the documented 3×
+          // young-generation allowance explicit and assert exact bytes.
+          // https://nodejs.org/api/cli.html#--max-semi-space-sizesize-in-mib
+          const semiSpaceMb = 8;
           const result = runInContainer({
             memory,
-            nodeArgs: [`--max-old-space-size=${derivedHeapMb}`],
+            nodeArgs: [
+              `--max-old-space-size=${derivedHeapMb}`,
+              `--max-semi-space-size=${semiSpaceMb}`,
+            ],
             script: `
               const fs = require("fs");
               const v8 = require("v8");
@@ -78,17 +92,18 @@ describe.skipIf(!dockerAvailable)(
               console.log(JSON.stringify({
                 cgroupV2: read("/sys/fs/cgroup/memory.max"),
                 cgroupV1: read("/sys/fs/cgroup/memory/memory.limit_in_bytes"),
-                heapLimitMb: Math.round(v8.getHeapStatistics().heap_size_limit / 1048576),
+                heapLimitBytes: v8.getHeapStatistics().heap_size_limit,
               }));
             `,
           });
           expect(result.status, result.stderr).toBe(0);
-          const report = JSON.parse(String(result.stdout).trim().split("\n").pop());
+          const report = JSON.parse(String(result.stdout).trim());
           // The container sees ITS limit, not the host's.
           const limitBytes = Number.parseInt(report.cgroupV2 ?? report.cgroupV1, 10);
           expect(limitBytes).toBe(memMb * kMb);
-          // V8 grants the flag some bookkeeping headroom; ±64MB tolerance.
-          expect(Math.abs(report.heapLimitMb - derivedHeapMb)).toBeLessThanOrEqual(64);
+          expect(report.heapLimitBytes).toBe(
+            (derivedHeapMb + 3 * semiSpaceMb) * kMb,
+          );
         }
       },
     );

@@ -335,6 +335,19 @@ describe("server/system-resources", () => {
     }
   });
 
+  it("uses the authoritative root snapshot for the legacy RSS alias when identities are supplied", () => {
+    const resources = getSystemResources({
+      gatewayRootPid: process.pid,
+      gatewayPid: process.pid,
+      rootSource: "serving_pid",
+    });
+    expect(resources.gatewayMemory.root.pid).toBe(process.pid);
+    expect(resources.gatewayMemory.worker.pid).toBe(process.pid);
+    expect(resources.gatewayMemory.rootSource).toBe("serving_pid");
+    expect(resources.gatewayMemory.groupRssBytes).toBeGreaterThan(0);
+    expect(resources.processes.gateway.rssBytes).toBe(resources.gatewayMemory.groupRssBytes);
+  });
+
   it("handles empty ps output fields", () => {
     createFileSystem({});
     vi.spyOn(os, "cpus").mockReturnValue(new Array(2).fill({ model: "x" }));

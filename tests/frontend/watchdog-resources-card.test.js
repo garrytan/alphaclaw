@@ -106,7 +106,7 @@ describe("frontend/watchdog resources card", () => {
     expect(findAllByType(tree, AsyncSection).length).toBe(0);
   });
 
-  it("renders the expanded memory bar with process segments", () => {
+  it("keeps the container bar separate from process RSS", () => {
     const tree = renderCard({
       resources: {
         ...kResources,
@@ -117,11 +117,65 @@ describe("frontend/watchdog resources card", () => {
     const bars = findAllByType(tree, ResourceBar);
     expect(bars.length).toBe(1);
     expect(bars[0].props.expanded).toBe(true);
-    expect(bars[0].props.segments.map((segment) => segment.label)).toEqual([
-      "Gateway 256 B",
-      "AlphaClaw 128 B",
-      "Other 640 B",
-    ]);
+    expect(bars[0].props.segments).toBeUndefined();
+    expect(treeText(tree)).toContain("Process RSS counts shared pages");
+    expect(treeText(tree)).not.toContain("Other 640 B");
+  });
+
+  it("does not stack 4.9 GiB group RSS into 2.6 GiB container usage and PSS", () => {
+    const gb = 1024 ** 3;
+    const tree = renderCard({ memoryExpanded: true, resources: {
+      ...kResources, memory: { usedBytes: 2.6 * gb, totalBytes: 8 * gb, percent: 32.5 },
+      processes: { gateway: { rssBytes: 4.9 * gb }, alphaclaw: { rssBytes: 0.2 * gb } },
+      gatewayMemory: { process: { status: "fresh", atMs: Date.now(), groupRssBytes: 4.9 * gb,
+        workerRssBytes: 1.5 * gb, childRssBytes: 3.4 * gb, childCount: 18, launcherRssBytes: 0,
+        pss: { status: "fresh", pssBytes: 2.6 * gb, readCount: 19, processCount: 19, atMs: Date.now() } },
+        telemetry: { status: "unavailable" }, attribution: { state: "unknown" } },
+    } });
+    const bar = findAllByType(tree, ResourceBar)[0];
+    expect(bar.props.percent).toBe(32.5);
+    expect(bar.props.segments).toBeUndefined();
+    expect(treeText(tree)).toContain("4.9 GB");
+    expect(treeText(tree)).toContain("Group PSS:");
+    expect(treeText(tree)).toContain("Heap telemetry unavailable until next gateway launch");
+    expect(treeText(tree)).not.toContain("Other");
+  });
+
+  it("keeps container critical visible while collapsed and marks stale pressure", () => {
+    const tree = renderCard({ resources: { ...kResources, gatewayMemoryTrend: {
+      state: "no_gateway", container: { state: "critical", sampleStatus: "stale", usedBytes: 900, limitBytes: 1000 },
+    } } });
+    expect(treeText(tree)).toContain("Container memory critical");
+    expect(treeText(tree)).toContain("fresh evidence unavailable");
+  });
+
+  it("does not render a stale normal verdict as healthy", () => {
+    expect(buildMemoryTrendModel({ state: "normal", sampleStatus: "stale", rssMb: 100 }))
+      .toMatchObject({ tone: "neutral", label: "Evidence unavailable" });
+  });
+
+  it("ages cached fresh heap telemetry into explicitly stale evidence", () => {
+    const tree = renderCard({ memoryExpanded: true, resources: {
+      ...kResources,
+      gatewayMemory: { telemetry: { status: "fresh", atMs: Date.now() - 180_000,
+        heapUsedBytes: 512 * 1024 ** 2, heapLimitBytes: 2 * 1024 ** 3 } },
+    } });
+    const text = treeText(tree);
+    expect(text).toContain("Heap telemetry stale · last collected");
+    expect(text).not.toContain("Heap telemetry fresh");
+    expect(text).toContain("512 MB");
+  });
+
+  it("uses separate process and PSS freshness windows for cached evidence", () => {
+    const renderAtAge = (pssAgeMs) => treeText(renderCard({ memoryExpanded: true, resources: {
+      ...kResources,
+      gatewayMemory: { process: { status: "fresh", atMs: Date.now() - 180_000,
+        pss: { status: "fresh", atMs: Date.now() - pssAgeMs, readCount: 2, processCount: 2 } } },
+    } })).replace(/\s+/g, " ");
+    const currentPss = renderAtAge(5 * 60_000);
+    expect(currentPss).toContain("Process evidence: stale");
+    expect(currentPss).toContain("fresh ( 2 / 2 processes)");
+    expect(renderAtAge(7 * 60_000)).toContain("stale ( 2 / 2 processes)");
   });
 });
 
@@ -268,7 +322,7 @@ describe("buildMemoryTrendModel", () => {
     const model = buildMemoryTrendModel({ ...base, state: "normal" });
     expect(model.tone).toBe("success");
     expect(model.label).toBe("Stable");
-    expect(model.detail).toContain("812 MB of 1024 MB cap");
+    expect(model.detail).toContain("812 MB group RSS of 1024 MB group budget");
   });
 
   it("watch is a warning marked unconfirmed", () => {
@@ -288,10 +342,10 @@ describe("buildMemoryTrendModel", () => {
       { nowMs: kNow },
     );
     expect(model.tone).toBe("warning");
-    expect(model.label).toBe("Leak suspected");
+    expect(model.label).toBe("Sustained growth");
     expect(model.detail).toContain("Memory rising steadily");
     expect(model.detail).toContain("+65 MB/h");
-    expect(model.detail).toContain("projected to reach its limit in ~3h");
+    expect(model.detail).toContain("projected to cross its group budget in ~3h");
     expect(model.detail).not.toMatch(/LEAK DETECTED|!{2,}/);
     expect(model.alwaysVisible).toBe(true);
   });
@@ -338,7 +392,7 @@ describe("buildMemoryTrendModel", () => {
       { ...base, state: "normal", slopeMbPerHour: 0 },
       { nowMs: kNow },
     );
-    expect(noSlope.detail).toBe("812 MB of 1024 MB cap");
+    expect(noSlope.detail).toBe("812 MB group RSS of 1024 MB group budget");
     for (const model of [sparse, noSlope]) {
       expect(model.detail).not.toMatch(/·\s*$|^\s*·|·\s*·/);
     }

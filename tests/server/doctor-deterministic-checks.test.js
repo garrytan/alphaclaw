@@ -632,6 +632,52 @@ describe("server/doctor/deterministic-checks", () => {
       }
     });
 
+    const containerTrend = (extra = {}) => ({
+      state: "critical", episodeId: "container-1700000000000",
+      usedBytes: 950 * 1024 * 1024, limitBytes: 1000 * 1024 * 1024,
+      sampledAt: new Date(Date.now() - 10_000).toISOString(), sampleStatus: "fresh",
+      ...extra,
+    });
+
+    it.each(["normal", "no_gateway", "critical"])("retains the independent container finding when the gateway is %s", (state) => {
+      const cards = build({ memoryTrend: leakTrend(state, { container: containerTrend() }) });
+      const card = memCard(cards, "det:container-memory-critical:");
+      expect(card).toMatchObject({ priority: "P0", sourceKey: "det:container-memory-critical:container-1700000000000" });
+      expect(card.summary).toContain("Latest measured container usage: 950 MiB / 1000 MiB limit");
+      expect(card.recommendation).toContain("Container pressure alone does not authorize a gateway restart");
+      expect(card.fixPrompt).toContain("without subtracting summed RSS from container usage");
+      if (state === "critical") expect(memCard(cards, "det:gateway-memory-leak-critical:")).toBeTruthy();
+    });
+
+    it.each([
+      { sampleStatus: "stale" }, { sampleStatus: "unavailable" },
+      { sampledAt: new Date(Date.now() - 120_000).toISOString() },
+      { sampledAt: new Date(Date.now() + 120_000).toISOString() },
+      { sampledAt: "an arbitrary error /private/path" },
+    ])("keeps a latched container warning with explicit unavailable freshness (%j)", (extra) => {
+      const cards = build({ memoryTrend: leakTrend("no_gateway", { container: containerTrend(extra) }) });
+      const card = memCard(cards, "det:container-memory-critical:");
+      expect(card.summary).toContain("Last known container usage");
+      expect(card.summary).toContain("Fresh evidence unavailable");
+      expect(JSON.stringify(card)).not.toContain("/private/path");
+    });
+
+    it("removes the container card only after its detector clears, and rejects malformed identifiers", () => {
+      for (const extra of [{ state: "normal" }, { state: "disabled" }, { episodeId: "container-evil /private/path" }]) {
+        const cards = build({ memoryTrend: leakTrend("normal", { container: containerTrend(extra) }) });
+        expect(memCard(cards, "det:container-memory-critical:")).toBeUndefined();
+      }
+    });
+
+    it("does not echo nonnumeric container measurements into Doctor evidence", () => {
+      const cards = build({ memoryTrend: leakTrend("no_gateway", {
+        container: containerTrend({ usedBytes: "secret /private/path", limitBytes: Infinity }),
+      }) });
+      const card = memCard(cards, "det:container-memory-critical:");
+      expect(card.summary).toContain("unknown / unknown limit");
+      expect(JSON.stringify(card)).not.toContain("/private/path");
+    });
+
     it("emits an episode-scoped P1 card for leak_suspected with runtime numbers only", () => {
       const cards = build({ memoryTrend: leakTrend("leak_suspected") });
       const card = memCard(cards, "det:gateway-memory-leak:");
@@ -645,8 +691,8 @@ describe("server/doctor/deterministic-checks", () => {
       expect(card.evidence.every((item) => item.type === "text")).toBe(true);
       expect(card.targetPaths).toEqual([]);
       expect(card.fixPrompt).toContain("alphaclaw admin GET /api/watchdog/resources");
-      expect(card.fixPrompt).toContain("plugins.load.paths");
-      expect(card.fixPrompt).toContain("MITIGATION, not a fix");
+      expect(card.fixPrompt).toContain("child-process RSS/count");
+      expect(card.fixPrompt).toContain("preserve and continue the diagnosis");
     });
 
     it("critical emits ONLY the P0 card (exclusive severity, distinct key)", () => {
@@ -665,19 +711,19 @@ describe("server/doctor/deterministic-checks", () => {
       ).toBeUndefined();
     });
 
-    it("embeds the shared heap advice verbatim, and an honest fallback without it", () => {
+    it("does not apply V8 heap-raise advice to a group RSS warning", () => {
       const withAdvice = build({
         memoryTrend: leakTrend("leak_suspected"),
         heapAdvice:
           'Raise the gateway heap: `alphaclaw admin PUT /api/autotune/settings --data \'{"overrides":{"gatewayHeapMb":1280}}\'`',
       });
-      expect(memCard(withAdvice, "det:gateway-memory-leak:").fixPrompt).toContain(
+      expect(memCard(withAdvice, "det:gateway-memory-leak:").fixPrompt).not.toContain(
         'gatewayHeapMb":1280',
       );
       const withoutAdvice = build({ memoryTrend: leakTrend("leak_suspected") });
       expect(
         memCard(withoutAdvice, "det:gateway-memory-leak:").fixPrompt,
-      ).toContain("do not raise limits blindly");
+      ).toContain("do not raise the heap");
     });
 
     it("surfaces a recent episode as a P2 evidence card after the process was replaced", () => {

@@ -591,7 +591,7 @@ describe("frontend/watchdog memory settings hook (per-field narrow saves)", () =
       enabled: false,
     });
     expect(showToast).toHaveBeenCalledWith(
-      "Memory leak detection disabled",
+      "Memory growth detection disabled",
       "success",
     );
   });
@@ -722,7 +722,7 @@ describe("frontend/watchdog memory settings hook (per-field narrow saves)", () =
     });
     await hook.result().onCommitMemoryBudgetMb(null);
     expect(showToast).toHaveBeenCalledWith(
-      "Memory budget cleared — cap derived from heap and container again",
+      "Memory budget cleared; using the derived group RSS budget",
       "success",
     );
   });

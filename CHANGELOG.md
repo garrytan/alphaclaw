@@ -5,6 +5,33 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.9.82] - 2026-09-09
+
+### Fixed
+
+- **Memory warnings explain which process grew and which budget was crossed.**
+  Gateway heap, gateway RSS, child-process RSS, launcher RSS, and container usage
+  are shown separately. Group protection keeps its existing growth checks,
+  restart opt-in, locks, and brakes. Container pressure also stays visible when
+  the gateway is stopped, and cannot authorize a gateway restart on its own.
+- **Resources, Doctor, notifications, and incident reviews retain honest memory
+  evidence.** Explanations survive a gateway restart, missing or stale samples
+  stay visibly unknown, and shared pages no longer produce a negative “Other”
+  segment. Critical warnings remain visible while details are collapsed.
+- **Real container tests run in Conductor's cloud sandbox.** A checked setup
+  helper and runbook preserve Conductor's threaded workload while giving Docker
+  a separate domain cgroup. Heap-limit assertions account for V8's young
+  generation and verify that an operator's heap override is honored.
+
+### Added
+
+- **Optional heap and GC diagnostics on the next normal gateway launch.**
+  Bounded telemetry distinguishes child growth, child accumulation, possible
+  heap retention, and mixed or unknown causes. Bounded Linux PSS samples help
+  explain shared-page amplification. Both are advisory and cannot trigger or
+  suppress pressure enforcement. Set `ALPHACLAW_GATEWAY_MEMORY_TELEMETRY=off`
+  to disable heap instrumentation while ordinary memory monitoring continues.
+
 ## [0.9.81] - 2026-09-09
 
 The three Upgrade-tab defects an operator hit on 2026-09-08 (OpenClaw 2026.9.2,
