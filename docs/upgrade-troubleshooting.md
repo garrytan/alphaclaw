@@ -90,6 +90,50 @@ with one of:
   binary could not be resolved); the hold and watchdog latch are untouched
   and the gateway is not relaunched.
 
+## Version catalog and "Check now"
+
+**What it means:** the Version catalog card lists what is installable. Since
+v0.9.81 its rows are the **npm** abbreviated doc's versions (the install
+source of truth) — minus versions npm marks `deprecated` — each enriched with
+its **GitHub** release's notes and date when a release exists; a version that
+is on npm but not yet released on GitHub is still a row, badged `latest` when
+the dist-tag says so, with "release notes unavailable". Upstream publishes to
+npm first and creates the GitHub release hours later (2026.9.3 sat on npm
+~20 h before its release object existed), which is why a GitHub-first catalog
+never showed the newest installable version for most of a day. Rows sort by
+version; the dist-tag alone decides "latest".
+
+**Staleness:** "Catalog as of" is the oldest of the two ROW sources. The
+server serves a cached catalog for 10 minutes, then stale-while-revalidate;
+an npm cache older than 60 minutes is awaited instead (bounded by the 20 s
+fetch timeout, falling back to the stale copy flagged degraded). The stamp
+and the last fetch failure survive AlphaClaw's restarts (a sidecar
+`cache/openclaw-catalog/<file>.meta.json`), so "20 hours ago" after a
+restart means the fetches really have been failing — the degraded line names
+the source (`catalog.sources.{github,npm,dev}` on the payload). The page
+re-reads the catalog every 10 minutes while visible and follows up once when
+the server admits a stale answer.
+
+**Check now** is never disabled by a running or failed update — only while
+its own refresh is in flight. The toast says what happened: "Checked just
+now" (a real fetch), or "Checked moments ago — try again in N s" (the 30 s
+anti-hammer floor served the cached read; `refreshThrottledForMs` on the
+payload). A `?refresh=1` that still shows an old "as of" means the sources
+themselves failed — check the server's network access and `GITHUB_TOKEN`.
+
+**"Update to latest" and declared intent:** the CTA appears only when a row
+is strictly newer than the running version (never the next-older release —
+the v0.9.78 bug), and its apply declares `intent: "update"` with
+`expectLatest: true`. The server judges every stable/beta apply's `intent`
+(`update | downgrade | switch`) against the running version:
+`409 intent_mismatch` means the page's view of the running build or the
+row's direction was stale (it reloads both); `409 catalog_stale` (carrying
+`latest`) means a newer version appeared since the page loaded (it reloads
+the catalog once and re-opens the confirm on that version). Agent-admin
+callers of `updates.apply` must send `intent` too — a body without it is a
+`400 invalid_body` naming the three values. The run record's `intentCheck`
+says what was verified and what was skipped.
+
 ## Brief gateway pause during backup (quiesce)
 
 **Expected behavior**, not a failure: since issue #79 (Stage 4c, decision
@@ -239,13 +283,32 @@ in its evidence.
 **Still failing?** `offline_copy_refused` on the run record
 (`backup.offlineCopy.stage: "exclusivity"`, `attemptsDetail[0].kind`) means
 another process held a state database open while the gateway was paused —
-the record and the failure message name its `pid (argv)`. Since the
-copy-first ladder (#79) a refusal is never terminal on its own: the ladder
-fell through to the live upstream attempt, so the 409 you see names THAT
-failure first and the refusal after it; stop the holder and retry. A
-`spawn_error` means the backup CLI never ran (PATH/permissions). Repeated
-`lock_contention` with nothing else on the box points at the hypothesis
-below.
+the record and the failure message name its `pid (argv)`, followed since
+v0.9.81 by "argv names an OpenClaw executable or entry script". Before
+v0.9.81 the matcher also fired on any path ARGUMENT under an `/openclaw/`
+directory, so a log follower (`tail -c +1 -F
+/tmp/openclaw/openclaw-2026-09-08.log`) or a pager on a file there refused
+every copy in production; the matcher now judges the program position only
+(the CLI/gateway binary, a JS runtime's OpenClaw entry script, a shell
+wrapper named `openclaw`). If a refusal still names a process, it is a real
+OpenClaw process — stop it and retry. Since the copy-first ladder (#79) a
+refusal is never terminal on its own: the ladder fell through to the live
+upstream attempt, so the 409 you see names THAT failure first and the refusal
+after it. A `stalled` kind (v0.9.81) means the upstream `backup create`
+printed nothing and wrote nothing for 3 minutes and was stopped — the
+message quotes its last output lines and the run record keeps them
+(`backup.lastOutput`); a `timeout` is the same after the full 10-minute
+ceiling with bytes still moving. A `spawn_error` means the backup CLI never
+ran (PATH/permissions). Repeated `lock_contention` with nothing else on the
+box points at the hypothesis below.
+
+**Prove the backup works before the next update:** the Backups card's
+**Back up now** runs the same ladder on its own (`POST /api/openclaw/backup`;
+agent-admin `updates.backup`). It pauses the gateway like an update's backup
+step, writes the archive, relaunches, and records a `kind: "backup"` run the
+card summarizes as "Last manual backup: … — verified" (or the failure). A
+failed update's card offers **Retry backup** for exactly this; when the
+backup completes it offers **Retry update to X** with the original target.
 
 ### Rollback-journal / network-volume hypothesis
 
@@ -419,7 +482,7 @@ accepts).
 
 **What it means:** the fresh backup ladder (offline copy first → in-quiesce
 upstream attempts when predicted to fit → live ladder) failed with a
-*retryable-class* cause (`lock_contention`, `killed`, `timeout`,
+*retryable-class* cause (`lock_contention`, `killed`, `timeout`, `stalled`,
 `vanished_file`, `window_exhausted`; a refused copy hands over to the live
 ladder rather than ending it, so `offline_copy_refused` is never the cause
 an offer follows) on a hard gate, but a verified, non-partial archive from
@@ -875,9 +938,14 @@ and the pause never act).
   producer, usable check, reuse; since #79 also `attemptsDetail[] { rung,
   reason, quiesced, startedAt, elapsedMs, bytes, kind, ok }` — one row per
   backup rung, copy first — `offlineCopy.next` when a rung handed over, and
-  `noBackupConfirmed`). A `reconcile` run (`target.kind: "reconcile"`) is
-  the installed-tree re-activation with steps `stop → activate → verify →
-  relaunch`.
+  `noBackupConfirmed`; since v0.9.81 also `backupFailureKind` and
+  `lastOutput` — the upstream CLI's last three lines, secret-redacted — on a
+  failed ladder, and `intentCheck { direction, latest, … }` on every apply:
+  what the declared-intent belt verified or skipped). A `reconcile` run
+  (`target.kind: "reconcile"`) is the installed-tree re-activation with steps
+  `stop → activate → verify → relaunch`; a `backup` run (`target.kind:
+  "backup"`, v0.9.81 "Back up now") is the standalone ladder, terminal state
+  `completed` or `failed`, with `result.archive` on success.
 - **Backup inventory:** `GET /api/openclaw/backups` — every archive-class
   file in the backups directory with provenance and eligibility.
 - **Watchdog events:** Watchdog tab event log (restart causes, held states,

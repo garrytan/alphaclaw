@@ -49,7 +49,9 @@ failure is fatal, never whether the copy runs.
  OFFLINE COPY FIRST (bounded by min(offlineCopyBudgetMs, quiesce remaining))
    assessExclusivity ─ any HARD miss ─▶ offline_copy_refused: no copy, hand over to
    │ stop confirmed · quiet held         the LIVE ladder (the live upstream runs
-   │ 0 live openclaw processes           against a running gateway and needs no
+   │ 0 live OpenClaw executables/        against a running gateway and needs no
+   │   entry scripts (program position;
+   │   never a path argument)
    │ 0 in-process state-db handles       exclusivity); the refusal rides the record
    │ /proc/*/fd holders (Linux;          and is appended to the eventual failure
    │   else "partial")                   message — never a one-rung terminal
