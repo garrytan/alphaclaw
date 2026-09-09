@@ -1,14 +1,15 @@
 # Testing in the cloud workspace
 
-Real Docker works in the Amazon Linux 2023 cloud VM used for the September 8,
-2026 reliability wave. Docker 25.0.16 runs with `overlay2`, cgroup v2, and an
-isolated Unix socket and data directory. Memory limits are enforced by the
+Real Docker works in the Amazon Linux 2023 Conductor cloud VM, verified again
+on September 9, 2026 while implementing issue #85. Docker 25.0.16 runs with
+`overlay2`, cgroup v2, and an isolated Unix socket and data directory. Memory limits are enforced by the
 kernel; the autotune tests execute real Node processes inside containers.
 
 ## Use the prepared workspace
 
-Run these commands from the checkout. Use Node 24.16+ from `.context/node24` for
-everything: since v0.9.80 AlphaClaw's own `engines.node` is
+Run these commands from the checkout. Use supported Node from `.context/node24`
+or `/opt/alphaclaw-node` for the application and tests. Since v0.9.80,
+AlphaClaw's `engines.node` is
 `>=24.16.0 <25 || >=26.1.0` (the OpenClaw 2026.9.3 pin dropped Node 22 and 25),
 so Node 22 no longer runs the server or the pinned CLI, and the default system
 Node 24.14.1 does not satisfy the range either. Put the supported runtime first
@@ -19,7 +20,7 @@ shared between workspaces).
 
 ```bash
 cd /home/vercel-sandbox/alphaclaw
-export PATH="$PWD/.context/node24/bin:$PWD/.context/dev-build-toolchain/bin:$PATH"
+export PATH="$PWD/.context/node24/bin:/opt/alphaclaw-node/bin:$PWD/.context/dev-build-toolchain/bin:$PATH"
 export DOCKER_HOST="unix://$PWD/.context/docker/docker.sock"
 node --version
 docker info --format '{{.ServerVersion}} {{.Driver}} cgroup={{.CgroupVersion}}'
@@ -28,22 +29,45 @@ docker info --format '{{.ServerVersion}} {{.Driver}} cgroup={{.CgroupVersion}}'
 For a fresh checkout, install dependencies with `npm install`, then install the
 browser matching the repository's installed Playwright with
 `npx playwright install chromium`. A fresh VM also needs a supported Node
-runtime and Docker (`sudo dnf install -y docker` on Amazon Linux).
+runtime and Docker (`sudo dnf install -y docker` on Amazon Linux). In the
+September 9 checkout, Playwright 1.55 required Chromium revision 1187; the VM's
+existing revision 1234 did not satisfy that installation.
+
+If browser installation reaches 100% and hangs during extraction on Node
+24.16.0, this matches the upstream [Node extract-zip issue](https://github.com/nodejs/node/issues/63487)
+and [Playwright report](https://github.com/microsoft/playwright/issues/41000).
+Stop only the stuck installer and its download child, then run the repository's
+installer with the VM's preinstalled Node 24.14.1:
+
+```bash
+/usr/local/bin/node node_modules/playwright/cli.js install chromium
+```
+
+This downloads and installs the exact pinned browsers normally; it does not
+change dependencies or create cache completion markers by hand. The older
+runtime is used only for browser installation. Keep supported Node first on
+`PATH` for AlphaClaw, OpenClaw, npm installs, and every test. This workaround
+completed both Chromium and headless-shell installation in the September 9 VM.
 
 Check actual resource enforcement before running the container suites:
 
 ```bash
 docker run --rm --memory=512m --memory-swap=512m node:24-slim node -e '
   const fs = require("node:fs");
-  console.log(JSON.stringify({
-    memoryMax: fs.readFileSync("/sys/fs/cgroup/memory.max", "utf8").trim(),
-    swapMax: fs.readFileSync("/sys/fs/cgroup/memory.swap.max", "utf8").trim()
-  }));
+  const memoryMax = fs.readFileSync("/sys/fs/cgroup/memory.max", "utf8").trim();
+  const swapMax = fs.readFileSync("/sys/fs/cgroup/memory.swap.max", "utf8").trim();
+  if (memoryMax !== "536870912" || swapMax !== "0") throw Error("limits not enforced");
+  console.log(JSON.stringify({ node: process.version, memoryMax, swapMax }));
+  fetch("https://registry.npmjs.org/openclaw/latest")
+    .then(response => { if (!response.ok) throw Error(response.status); return response.json(); })
+    .then(pkg => console.log("container HTTPS: OpenClaw " + pkg.version));
 '
 ```
 
-The verified output in this VM is `{"memoryMax":"536870912","swapMax":"0"}`.
-`docker info` alone does not prove that a limited container can start.
+The September 9 probe reported Node **24.20.0**, `memoryMax: "536870912"`,
+`swapMax: "0"`, and a successful npm HTTPS response. `docker info` alone does
+not prove that a limited container can start. Pull `node:24-slim` again if a
+cached image contains a Node version below the supported range.
 
 ## The cgroup obstacle and the working topology
 
@@ -53,9 +77,8 @@ daemon, but runc refused a container requesting domain controllers. The memory
 controller cannot operate inside a threaded subtree. See the kernel's
 [cgroup v2 thread-mode documentation](https://www.kernel.org/doc/html/latest/admin-guide/cgroup-v2.html#threads).
 
-The session-specific repair moved the threaded domain down to `conductor`,
-restored its existing thread assignments and CPU limits, and gave Docker a
-separate domain:
+The repair moves the threaded domain down to `conductor`, restores its
+existing thread assignments and CPU limits, and gives Docker a separate domain:
 
 ```text
 /                         domain; domain controllers available
@@ -66,14 +89,37 @@ separate domain:
 └── alphaclaw-docker       domain; Docker's container cgroups
 ```
 
-The original layout and exact intervention are recorded locally in
-[cgroup-before.json](../.context/docker/cgroup-before.json) and
-[repair-cgroup-layout.py](../.context/docker/repair-cgroup-layout.py). These
-gitignored files are evidence for this VM, not a portable setup script. The
-repair assumes the inspected live topology and moves existing threads; do not
-add it to automatic workspace setup or replay it on a different host. Inspect
-that host's delegation and preserve its workload controls before choosing a
-repair. Removing resource limits would invalidate the autotune coverage.
+The reproducible helper is tracked at
+[scripts/dev/prepare-cloud-cgroups.py](../scripts/dev/prepare-cloud-cgroups.py).
+Run its read-only check first. On a fresh VM matching the original topology,
+stop any previously started Docker daemon and perform the explicit repair
+before starting test jobs:
+
+```bash
+python3 scripts/dev/prepare-cloud-cgroups.py --check
+sudo python3 scripts/dev/prepare-cloud-cgroups.py --apply
+```
+
+The helper refuses unknown layouts and active Docker during a repair. It saves
+original process/thread identities and controller settings in a new directory
+under `.context/docker/cgroup-repair-*`, preserving that evidence, then verifies
+the final topology and surviving thread placements. On an already prepared
+layout it only checks and exits, including with `--apply`. Do not add this
+manual host repair to automatic workspace setup or weaken its topology checks
+for an unfamiliar host.
+
+The kernel permits `domain → threaded` but not the reverse. The repair therefore
+moves Conductor processes temporarily, removes and recreates its groups, empties
+the namespace root into `/alphaclaw-host`, and then enables domain controllers.
+It moves complete processes into the rebuilt Conductor domain before restoring
+individual threads to their original children. The namespace root's existing
+memory and PID limits remain unchanged. Conductor's CPU quotas and weights
+are restored and verified after its groups are recreated; they are temporarily
+absent during migration, which is why this repair precedes long test jobs.
+The September 9 verification preserved `conductor` at **700000/100000**, weight
+**10**, and `workload` at **600000/100000**, weight **100**; these are observed
+values, not constants the helper imposes on another VM. Removing resource limits
+would invalidate the autotune coverage.
 
 The daemon itself runs in `/alphaclaw-host`, and uses
 `--cgroup-parent=/alphaclaw-docker` for containers. Both placements matter:
@@ -85,6 +131,7 @@ domain and runs it in a dedicated terminal. Do not start a second daemon while
 the existing socket responds.
 
 ```bash
+mkdir -p .context/docker
 sudo sh -c '
   set -e
   echo $$ > /sys/fs/cgroup/alphaclaw-host/cgroup.procs
@@ -99,8 +146,11 @@ sudo sh -c '
 ```
 
 From the test terminal, after the socket appears, grant the workspace user
-access with `sudo chown "$(id -u):$(id -g)" .context/docker/docker.sock` and
-repeat the enforcement probe. Tests run as the workspace user. The daemon has
+access with `sudo chown "$(id -u):$(id -g)" .context/docker/docker.sock`, export
+`DOCKER_HOST="unix://$PWD/.context/docker/docker.sock"`, and repeat the enforcement
+probe. Keep Docker's bridge and iptables support enabled: `--bridge=none` or
+`--iptables=false` prevents the full suite's published ports and outbound
+container networking from working. Tests run as the workspace user. The daemon has
 no TCP listener. Its state is confined to `.context/docker/data` and
 `.context/docker/run`; preserve those directories while it is running.
 
@@ -140,10 +190,36 @@ OPENCLAW_CONTAINER_E2E=1 npx vitest run tests/container/openclaw-container-boot-
 
 ## Evidence and remaining coverage
 
-Verified locally on September 8, 2026:
+Verified in the September 9, 2026 workspace:
 
-The log links below refer to this workspace's gitignored `.context` directory;
-CI captures its own artifacts.
+- Full strict container tier: **3 files / 24 tests passed**, with no skips,
+  in **465 seconds**. This includes the browser upgrade, real thread-ID boot
+  recovery, and immutable old-image self-upgrade
+  ([container log](../.context/docker/container.log)).
+- Real Docker memory/swap enforcement and outbound HTTPS passed on Node
+  **24.20.0** inside `node:24-slim`.
+- The guarded helper passed **10 hermetic Python tests** and an actual repair
+  in an isolated mount/PID/cgroup namespace. That kernel check preserved split
+  thread assignments, CPU quotas, a **512 MiB** root memory limit, and a
+  **256-task** PID limit; a second `--apply` made no changes
+  ([kernel log](../.context/docker/helper-kernel.log)). Run the helper's hermetic
+  checks with `python3 -B tests/scripts/test_prepare_cloud_cgroups.py`.
+- Both real autotune tests passed, including V8 exhaustion
+  ([autotune log](../.context/docker/autotune-final.log)). Node 24's total heap
+  includes young space: the old 64 MiB tolerance failed for a 1024 MiB old-space
+  cap with a 1120 MiB total. The fixture now controls semi-space and asserts
+  exact total bytes, following [Node's documented sizing](https://nodejs.org/api/cli.html#--max-semi-space-sizesize-in-mib).
+  An operator override additionally proves that ignoring the old-space flag
+  fails. Production tuning is unchanged.
+- The pinned Playwright browsers installed successfully using the installer
+  workaround above, then launched under supported Node **24.16.0**.
+
+These September 9 logs are local, gitignored artifacts. The September 8 links
+below are **historical artifacts from an earlier workspace** and may be absent
+in a fresh checkout; the tracked helper and commands above are the reusable
+procedure. CI captures its own artifacts.
+
+Verified locally on September 8, 2026:
 
 - Full hermetic suite: **487 files / 8,485 tests passed** under Node 22.22.3 (historical, v0.9.79 — since v0.9.80 the suite requires Node 24.16+)
   ([hermetic-serial.log](../.context/ci-fix/hermetic-serial.log)).

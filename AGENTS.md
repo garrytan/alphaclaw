@@ -50,6 +50,25 @@ Runtime model:
 
 `npm test` runs under a private per-run `TMPDIR` (`tests/setup-tmpdir.js`, a Vitest `globalSetup` that the forked workers inherit and that is removed at teardown): tests create scratch dirs via `os.tmpdir()` / `fs.mkdtempSync`, never a hard-coded `/tmp`, and a test that must keep its scratch files for inspection is run with `ALPHACLAW_KEEP_TEST_TMPDIR=1` rather than by skipping its cleanup.
 
+### Cloud container tests
+
+Docker is usable in the Conductor Amazon Linux VM. Follow [the cloud testing runbook](docs/cloud-testing.md) before declaring the container tier unavailable. `docker info` alone is insufficient: runc can still fail with `cannot enter cgroupv2 ... with domain controllers ... invalid state` when the namespace root is `domain threaded`.
+
+- Preserve Conductor's CPU quotas, weights, and thread assignments. The working layout has a **domain root**, a **domain-threaded `/conductor`** with its existing threaded children, and separate **`/alphaclaw-host`** and **`/alphaclaw-docker`** domains. The guarded, manual helper is [scripts/dev/prepare-cloud-cgroups.py](scripts/dev/prepare-cloud-cgroups.py); inspect first and use the runbook's commands. A threaded cgroup cannot be changed back to a domain in place. Do this before starting Docker or long test jobs, and never remove memory limits to make a test pass.
+- Launch `dockerd` itself inside `/alphaclaw-host`, with `--cgroup-parent=/alphaclaw-docker` and the isolated socket/data directories in `.context/docker`. Both placements matter for swap detection. Keep bridge networking and port publishing enabled: the browser journeys require them. Export `DOCKER_HOST` in the test terminal.
+- Prove enforcement with a real `--memory=512m --memory-swap=512m` container: `memory.max` must be `536870912` and `memory.swap.max` must be `0`. Also check outbound HTTPS and the container's supported Node version. The runbook includes the probe and daemon command.
+- Put supported Node **24.16+ or 26.1+** first on `PATH` for dependencies and all test runs. Install the repository's exact Playwright browser revision; an unrelated preinstalled Chromium cache does not satisfy it. See the runbook for the Node 24.16 browser-extraction workaround.
+- Run the two real autotune cases, then the full strict container tier serially. Preserve failures and inspect test-owned artifacts; do not disable strict mode, skip browser steps, or use host-wide Docker pruning.
+
+```bash
+export PATH="$PWD/.context/node24/bin:/opt/alphaclaw-node/bin:$PATH"
+export DOCKER_HOST="unix://$PWD/.context/docker/docker.sock"
+OPENCLAW_LIVE_E2E=1 npx vitest run tests/live/autotune-container.e2e.test.js --no-file-parallelism
+OPENCLAW_CONTAINER_E2E_STRICT=1 npm run test:container
+```
+
+Verified on September 9, 2026: **24/24 strict container tests**, **2/2 real autotune tests**, and **10/10 helper tests** passed; the helper also passed a real repair in an isolated cgroup namespace. Details and evidence are in the runbook.
+
 ### Code Structure
 
 - Avoid monolithic implementation files for new features. For new UI areas and new API areas, start with a decomposed structure (focused components/hooks/utilities for UI; focused route modules/services/helpers for server) rather than building one large file first and splitting later.
