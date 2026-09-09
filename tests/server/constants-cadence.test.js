@@ -468,6 +468,13 @@ describe("backup envelope relations (issue #79 (f), Codex 16)", () => {
     expect(kOpenclawBackupPhaseEnvelopeMs).toBe(25 * 60_000);
   });
 
+  it("v0.9.81 (D15): the upstream inactivity window is strictly below the CLI ceiling — it can only END an attempt earlier, never extend one", () => {
+    const { kOpenclawBackupUpstreamInactivityMs, kOpenclawBackupTimeoutMs } = constants;
+    expect(kOpenclawBackupUpstreamInactivityMs).toBe(3 * 60_000);
+    expect(kOpenclawBackupUpstreamInactivityMs).toBeLessThan(kOpenclawBackupTimeoutMs);
+    expect(ladder.kDefaultBackupBudget.upstreamInactivityMs).toBe(kOpenclawBackupUpstreamInactivityMs);
+  });
+
   it("live ladder: liveAttempts × the CLI ceiling + the usable-check reserve ≤ the phase envelope — which is why the cap is 2, not 3", () => {
     const {
       kOpenclawBackupLiveAttempts,

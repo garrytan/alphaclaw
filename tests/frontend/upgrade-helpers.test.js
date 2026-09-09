@@ -72,16 +72,25 @@ describe("frontend/upgrade-helpers row actions", () => {
   it("labels newer rows Upgrade and older rows Downgrade by list position", async () => {
     const { getRowActionModel } = await loadUpgradeHelpers();
 
+    // v0.9.81 (D13): the model also carries the direction the button will
+    // DECLARE to the server — the same word as its label.
     expect(getRowActionModel({ row: kRows[0], rows: kRows })).toEqual({
       label: "Upgrade",
       disabled: false,
       isDowngrade: false,
+      isUpgrade: true,
+      intent: "update",
     });
     expect(getRowActionModel({ row: kRows[2], rows: kRows })).toEqual({
       label: "Downgrade",
       disabled: false,
       isDowngrade: true,
+      isUpgrade: false,
+      intent: "downgrade",
     });
+    expect(
+      getRowActionModel({ row: { version: "2026.7.2-1" }, rows: [], installedVersion: null }),
+    ).toEqual({ label: "Switch", disabled: false, isDowngrade: false, isUpgrade: false, intent: "switch" });
   });
 
   it("disables the current row", async () => {
@@ -1678,7 +1687,7 @@ describe("frontend/upgrade-helpers misc models", () => {
         { version: "2026.7.1-2", isDistTagLatest: true, applyPayload: { channel: "stable", version: "2026.7.1-2" } },
       ],
     };
-    const target = getLatestApplicableTarget({ catalog, releaseChannel: "stable" });
+    const target = getLatestApplicableTarget({ catalog, releaseChannel: "stable", installedVersion: "2026.6.30" });
     expect(target.label).toBe("2026.7.1-2");
     const line = buildAvailabilityLine({ catalog, releaseChannel: "stable" });
     expect(line).toContain("2026.7.1-2");
@@ -2903,9 +2912,277 @@ describe("frontend/upgrade-helpers latest applicable target is an UPGRADE or not
     }
   });
 
-  it("with no installed version known and no current row, still picks the dist-tag latest (cold catalog)", async () => {
-    const { getLatestApplicableTarget } = await loadUpgradeHelpers();
+  it("with no installed version known and no current row there is NO target — never a guess (v0.9.81, D7); the notice says why", async () => {
+    const { getLatestApplicableTarget, buildNoTargetNotice, describeLatestTargetGap } = await loadUpgradeHelpers();
     const catalog = { stable: [row("2026.9.3", { isDistTagLatest: true }), row("2026.9.2")], beta: [], dev: { commits: [] } };
-    expect(getLatestApplicableTarget({ catalog, releaseChannel: "stable" }).label).toBe("2026.9.3");
+    expect(getLatestApplicableTarget({ catalog, releaseChannel: "stable" })).toBeNull();
+    expect(describeLatestTargetGap({ catalog, releaseChannel: "stable" })).toEqual({ reason: "not_on_channel" });
+    expect(buildNoTargetNotice({ catalog, releaseChannel: "stable" })).toMatch(/Can't tell which OpenClaw is running/);
+    // Known installed version → the dist-tag latest, declared as an upgrade.
+    const target = getLatestApplicableTarget({ catalog, releaseChannel: "stable", installedVersion: "2026.9.1" });
+    expect(target).toEqual(
+      expect.objectContaining({ label: "2026.9.3", direction: "upgrade", intent: "update", expectLatest: true }),
+    );
+  });
+});
+
+// v0.9.81 (D7/D8/D13): the shared latest-row rule, the upgrade-or-nothing
+// invariant of "Update to latest", the reason-coded no-target notice and the
+// row buttons' declared direction. CRITICAL regression pins for bug 2.
+describe("frontend/upgrade-helpers latest row + never-downgrade invariant (v0.9.81)", () => {
+  const row = (version, extra = {}) => ({
+    version,
+    applyPayload: { channel: extra.channel || (/-beta\./.test(version) ? "beta" : "stable"), version },
+    ...extra,
+  });
+
+  it("resolveChannelLatestRow: stable = the dist-tag row over a higher backport; beta = the highest prerelease; blocklist-agnostic; null when empty", async () => {
+    const { resolveChannelLatestRow } = await loadUpgradeHelpers();
+    const catalog = {
+      stable: [row("2026.6.34"), row("2026.7.1-2", { isDistTagLatest: true, blocklisted: { reason: "crash_loop" } }), row("2026.6.30")],
+      beta: [row("2026.7.2-beta.1"), row("2026.7.2-beta.3"), row("2026.7.1-beta.9")],
+    };
+    expect(resolveChannelLatestRow({ catalog, releaseChannel: "stable" }).version).toBe("2026.7.1-2");
+    expect(resolveChannelLatestRow({ catalog, releaseChannel: "beta" }).version).toBe("2026.7.2-beta.3");
+    // No dist-tag row → the highest version.
+    expect(
+      resolveChannelLatestRow({ catalog: { stable: [row("2026.6.34"), row("2026.7.1-1")] }, releaseChannel: "stable" }).version,
+    ).toBe("2026.7.1-1");
+    expect(resolveChannelLatestRow({ catalog: { stable: [] }, releaseChannel: "stable" })).toBeNull();
+    expect(resolveChannelLatestRow({ catalog, releaseChannel: "dev" })).toBeNull();
+    expect(resolveChannelLatestRow({ catalog: null })).toBeNull();
+  });
+
+  it("the availability line and the CTA target agree on the latest (D8) — the line names a blocklisted latest, the CTA skips it", async () => {
+    const { resolveChannelLatestRow, buildAvailabilityLine, getLatestApplicableTarget } = await loadUpgradeHelpers();
+    const catalog = {
+      stable: [
+        row("2026.9.3", { isDistTagLatest: true, blocklisted: { reason: "crash_loop" } }),
+        row("2026.9.2"),
+        row("2026.9.1", { current: true }),
+      ],
+    };
+    const latest = resolveChannelLatestRow({ catalog, releaseChannel: "stable" });
+    expect(latest.version).toBe("2026.9.3");
+    expect(buildAvailabilityLine({ catalog, releaseChannel: "stable", installedVersion: "2026.9.1" })).toContain("Latest stable: 2026.9.3");
+    // The CTA offers the newer non-blocklisted alternative, never the older row
+    // — and does NOT claim it is the channel's latest (the server would
+    // answer catalog_stale and re-offer the row this box cannot run).
+    const target = getLatestApplicableTarget({ catalog, releaseChannel: "stable", installedVersion: "2026.9.1" });
+    expect(target.label).toBe("2026.9.2");
+    expect(target.direction).toBe("upgrade");
+    expect(target.intent).toBe("update");
+    expect(target.expectLatest).toBe(false);
+    // The genuine latest DOES claim it.
+    const clean = { stable: [row("2026.9.3", { isDistTagLatest: true }), row("2026.9.1", { current: true })] };
+    expect(getLatestApplicableTarget({ catalog: clean, releaseChannel: "stable", installedVersion: "2026.9.1" }).expectLatest).toBe(true);
+  });
+
+  it("installed IS the dist-tag latest → no target (the screenshot's bug): never the next-older row", async () => {
+    const { getLatestApplicableTarget, buildNoTargetNotice, buildAvailabilityLine } = await loadUpgradeHelpers();
+    const catalog = {
+      distTags: { latest: "2026.9.2" },
+      degraded: { github: false, npm: false },
+      stable: [row("2026.9.2", { isDistTagLatest: true, current: true }), row("2026.9.1"), row("2026.8.9")],
+    };
+    expect(getLatestApplicableTarget({ catalog, releaseChannel: "stable", installedVersion: "2026.9.2" })).toBeNull();
+    expect(buildNoTargetNotice({ catalog, releaseChannel: "stable", installedVersion: "2026.9.2" })).toBe(
+      "You're already on the latest stable.",
+    );
+    expect(buildAvailabilityLine({ catalog, releaseChannel: "stable", installedVersion: "2026.9.2" })).toBe(
+      "You're on the latest stable version.",
+    );
+  });
+
+  it("installed newer than every row (publish lag) → null; dist-tag latest absent from rows with nothing newer → null", async () => {
+    const { getLatestApplicableTarget } = await loadUpgradeHelpers();
+    const lag = { stable: [row("2026.9.2", { isDistTagLatest: true }), row("2026.9.1")] };
+    expect(getLatestApplicableTarget({ catalog: lag, releaseChannel: "stable", installedVersion: "2026.9.3" })).toBeNull();
+    const noTag = { distTags: { latest: "2026.9.3" }, stable: [row("2026.9.2", { current: true }), row("2026.9.1")] };
+    expect(getLatestApplicableTarget({ catalog: noTag, releaseChannel: "stable", installedVersion: "2026.9.2" })).toBeNull();
+  });
+
+  it("buildNoTargetNotice: one sentence per reason", async () => {
+    const { buildNoTargetNotice, describeLatestTargetGap } = await loadUpgradeHelpers();
+    const blocklistedOnly = {
+      stable: [row("2026.9.3", { isDistTagLatest: true, blocklisted: { reason: "crash_loop" } }), row("2026.9.2", { current: true })],
+    };
+    expect(describeLatestTargetGap({ catalog: blocklistedOnly, releaseChannel: "stable", installedVersion: "2026.9.2" })).toEqual({
+      reason: "latest_blocklisted_no_alternative",
+      latest: "2026.9.3",
+    });
+    expect(buildNoTargetNotice({ catalog: blocklistedOnly, releaseChannel: "stable", installedVersion: "2026.9.2" })).toBe(
+      "Latest stable 2026.9.3 was rolled back on this box — clear its blocklist entry to retry.",
+    );
+    const enginesOnly = {
+      stable: [row("2026.9.3", { isDistTagLatest: true, engines: { node: ">=24.16.0 <25 || >=26.1.0" } }), row("2026.9.2", { current: true })],
+    };
+    expect(
+      describeLatestTargetGap({ catalog: enginesOnly, releaseChannel: "stable", installedVersion: "2026.9.2", nodeVersion: "22.22.3" }),
+    ).toEqual({ reason: "engines_unsupported", latest: "2026.9.3", spec: ">=24.16.0 <25 || >=26.1.0" });
+    expect(
+      buildNoTargetNotice({ catalog: enginesOnly, releaseChannel: "stable", installedVersion: "2026.9.2", nodeVersion: "22.22.3" }),
+    ).toBe("Latest stable 2026.9.3 needs Node.js >=24.16.0 <25 || >=26.1.0 — move this AlphaClaw to a newer Node first.");
+    const degraded = { degraded: { github: true, npm: true }, stable: [] };
+    expect(describeLatestTargetGap({ catalog: degraded, releaseChannel: "stable" })).toEqual({ reason: "degraded" });
+    expect(buildNoTargetNotice({ catalog: degraded, releaseChannel: "stable" })).toMatch(/^Catalog degraded/);
+    expect(describeLatestTargetGap({ catalog: null })).toEqual({ reason: "no_catalog" });
+    expect(describeLatestTargetGap({ catalog: { dev: {} }, releaseChannel: "dev" })).toEqual({ reason: "dev" });
+  });
+
+  it("beta: the CTA picks the highest prerelease newer than the running one; cross-channel (beta installed, stable older) → null", async () => {
+    const { getLatestApplicableTarget } = await loadUpgradeHelpers();
+    const catalog = {
+      stable: [row("2026.9.2", { isDistTagLatest: true })],
+      beta: [row("2026.9.3-beta.1"), row("2026.9.3-beta.2"), row("2026.9.2-beta.4")],
+    };
+    expect(getLatestApplicableTarget({ catalog, releaseChannel: "beta", installedVersion: "2026.9.2" }).label).toBe("2026.9.3-beta.2");
+    // Running the newest beta, browsing stable whose latest is older → nothing;
+    // the stable row keeps its explicit "Downgrade" button for that.
+    expect(getLatestApplicableTarget({ catalog, releaseChannel: "stable", installedVersion: "2026.9.3-beta.2" })).toBeNull();
+  });
+
+  it("EXHAUSTIVE: over every catalog × installed version, the target is null or strictly newer than what is installed", async () => {
+    const { getLatestApplicableTarget, compareVersions, resolveChannelLatestRow } = await loadUpgradeHelpers();
+    const versions = ["2026.6.34", "2026.7.1-2", "2026.8.1-beta.3", "2026.8.1", "2026.9.1", "2026.9.2", "2026.9.3", "2026.9.4-beta.1"];
+    const decorations = [
+      {},
+      { isDistTagLatest: true },
+      { blocklisted: { reason: "crash_loop" } },
+      { engines: { node: ">=24.16.0 <25 || >=26.1.0" } },
+    ];
+    const catalogs = [];
+    for (let mask = 1; mask < 1 << 5; mask += 1) {
+      const chosen = versions.filter((_, index) => mask & (1 << (index % 5)));
+      for (const decoration of decorations) {
+        const stable = chosen.filter((v) => !/-beta\./.test(v)).map((v, i) => row(v, i === 0 ? decoration : {}));
+        const beta = chosen.filter((v) => /-beta\./.test(v)).map((v) => row(v));
+        catalogs.push({ stable, beta, degraded: { github: false, npm: false } });
+      }
+    }
+    let checked = 0;
+    for (const catalog of catalogs) {
+      for (const installedVersion of [...versions, null]) {
+        for (const releaseChannel of ["stable", "beta"]) {
+          for (const nodeVersion of ["22.22.3", "24.16.0", null]) {
+            const target = getLatestApplicableTarget({ catalog, releaseChannel, installedVersion, nodeVersion });
+            checked += 1;
+            if (target === null) continue;
+            expect(installedVersion, "a target with an unknown installed version is a guess").not.toBeNull();
+            expect(
+              compareVersions(target.label, installedVersion),
+              `${releaseChannel}: ${target.label} offered while running ${installedVersion}`,
+            ).toBeGreaterThan(0);
+            expect(target.direction).toBe("upgrade");
+            expect(target.intent).toBe("update");
+            expect(target.row.blocklisted ?? null).toBeNull();
+            // The "latest" claim is made exactly when the target IS the
+            // channel's upstream latest row.
+            const upstream = resolveChannelLatestRow({ catalog, releaseChannel });
+            expect(target.expectLatest).toBe(Boolean(upstream) && upstream.version === target.label);
+          }
+        }
+      }
+    }
+    expect(checked).toBeGreaterThan(5000);
+  });
+});
+
+// v0.9.81 (C3/C4): every consumer of run.target tolerates kind: "backup"; the
+// failure CTA model; the ledger-derived last-manual-backup line.
+describe("frontend/upgrade-helpers standalone backup runs (v0.9.81)", () => {
+  const kNowMs = Date.parse("2026-09-09T12:00:00Z");
+
+  it("describeTarget / timeline / failure model / summary name a backup run honestly", async () => {
+    const { describeTarget, buildRunTimelineModel, buildRunFailureModel, isBackupRun, kRunStateMeta } =
+      await loadUpgradeHelpers();
+    expect(describeTarget({ kind: "backup" })).toBe("manual backup");
+    expect(isBackupRun({ target: { kind: "backup" } })).toBe(true);
+    expect(isBackupRun({ target: { channel: "stable", version: "1.0.0" } })).toBe(false);
+    expect(kRunStateMeta.completed).toEqual({ label: "completed", tone: "success" });
+    const [row] = buildRunTimelineModel(
+      [{ operationId: "b1", target: { kind: "backup" }, state: "completed", startedAt: kNowMs - 60_000, finishedAt: kNowMs - 30_000, hasLog: true }],
+      kNowMs,
+    );
+    expect(row).toEqual(expect.objectContaining({ targetLabel: "Manual backup", stateLabel: "completed", tone: "success", hasLog: true }));
+    const interrupted = buildRunFailureModel({
+      operationId: "b2",
+      target: { kind: "backup" },
+      state: "interrupted",
+      result: null,
+    });
+    expect(interrupted.title).toBe("Manual backup was interrupted");
+    expect(interrupted.error.message).toContain("backup was interrupted by a restart");
+    // An apply run is unchanged.
+    expect(buildRunFailureModel({ operationId: "a", target: { channel: "stable", version: "2.0.0" }, state: "interrupted" }).title).toBe(
+      "Update to 2.0.0 was interrupted",
+    );
+  });
+
+  it("buildFailureCtaModel: backup-class → Retry backup; install-class → Re-stage; a completed repair backup → Retry update with the original payload; no target → Dismiss only", async () => {
+    const { buildFailureCtaModel } = await loadUpgradeHelpers();
+    const target = { channel: "stable", version: "2026.9.3" };
+    expect(buildFailureCtaModel({ phase: "failed", target, error: { code: "backup_failed" } })).toEqual(
+      expect.objectContaining({ retryBackup: true, restage: false, retryUpdate: null }),
+    );
+    expect(buildFailureCtaModel({ phase: "failed", target, error: { code: "backup_required_for_migration" } }).retryBackup).toBe(true);
+    expect(buildFailureCtaModel({ phase: "failed", target, error: { code: "verify_failed" } })).toEqual(
+      expect.objectContaining({ retryBackup: false, restage: true, retryUpdate: null, hint: null }),
+    );
+    expect(buildFailureCtaModel({ phase: "failed", target: { kind: "backup" }, error: { code: "backup_failed" } })).toEqual(
+      expect.objectContaining({ retryBackup: true, restage: false }),
+    );
+    expect(buildFailureCtaModel({ phase: "failed", error: { code: "build_failed" } })).toEqual({
+      retryBackup: false,
+      restage: false,
+      retryUpdate: null,
+      hint: null,
+    });
+    expect(buildFailureCtaModel({ phase: "failed", target: { repair: true }, error: {} }).restage).toBe(false);
+    const retry = { payload: target, label: "2026.9.3", intent: "update" };
+    const completed = buildFailureCtaModel({ phase: "completed", target: { kind: "backup" }, retryUpdate: retry });
+    expect(completed.retryUpdate).toBe(retry);
+    expect(completed.hint).toContain("retry the update to 2026.9.3");
+    expect(buildFailureCtaModel({ phase: "completed", target: { kind: "backup" } }).retryUpdate).toBeNull();
+    expect(buildFailureCtaModel({ phase: "running", target }).restage).toBe(false);
+    expect(buildFailureCtaModel(null).restage).toBe(false);
+  });
+
+  it("buildLastManualBackupLine derives the Backups card line from the newest kind: backup run — running, verified, failed, interrupted, never from apply runs", async () => {
+    const { buildLastManualBackupLine } = await loadUpgradeHelpers();
+    const apply = { operationId: "a", target: { channel: "stable", version: "1" }, state: "activated", startedAt: kNowMs - 1000, finishedAt: kNowMs - 500 };
+    expect(buildLastManualBackupLine([apply], kNowMs)).toBeNull();
+    expect(buildLastManualBackupLine([], kNowMs)).toBeNull();
+    const running = { operationId: "b1", target: { kind: "backup" }, state: "running", startedAt: kNowMs - 20_000, finishedAt: null };
+    expect(buildLastManualBackupLine([apply, running], kNowMs)).toEqual(
+      expect.objectContaining({ state: "running", tone: "info", operationId: "b1" }),
+    );
+    expect(buildLastManualBackupLine([running], kNowMs).text).toMatch(/^Manual backup in progress/);
+    const done = {
+      operationId: "b2",
+      target: { kind: "backup" },
+      state: "completed",
+      startedAt: kNowMs - 3 * 60_000,
+      finishedAt: kNowMs - 3 * 60_000 + 5_000,
+      result: { ok: true, archive: { file: "/x.tar.gz", verified: true } },
+    };
+    expect(buildLastManualBackupLine([done, running], kNowMs)).toEqual(expect.objectContaining({ state: "running" }));
+    expect(buildLastManualBackupLine([done], kNowMs).text).toMatch(/^Last manual backup: .* — verified$/);
+    const failed = {
+      operationId: "b3",
+      target: { kind: "backup" },
+      state: "failed",
+      startedAt: kNowMs - 60_000,
+      finishedAt: kNowMs - 50_000,
+      result: { ok: false, code: "backup_failed", message: "The backup CLI made no progress for 3 minutes." },
+    };
+    // Newest by startedAt wins.
+    const line = buildLastManualBackupLine([done, failed, apply], kNowMs);
+    expect(line.tone).toBe("danger");
+    expect(line.text).toContain("failed: The backup CLI made no progress for 3 minutes.");
+    const interrupted = { ...failed, operationId: "b4", state: "interrupted", result: null, startedAt: kNowMs - 10 };
+    expect(buildLastManualBackupLine([interrupted, failed], kNowMs).text).toContain("interrupted by a restart");
+    const nothing = { ...done, operationId: "b5", startedAt: kNowMs - 5, result: { ok: true, noBackup: true } };
+    expect(buildLastManualBackupLine([nothing], kNowMs).text).toContain("nothing to back up");
   });
 });

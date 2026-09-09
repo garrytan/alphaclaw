@@ -297,4 +297,64 @@ describe("server/openclaw-run-ledger", () => {
       expect(out1 + out2 + out3).toBe("prefix [redacted] suffix");
     });
   });
+
+  // v0.9.81 (C3): a standalone backup run's terminal success.
+  it("keeps `completed` as a terminal state (never coerced to failed) and passes intentCheck through", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "run-ledger-completed-"));
+    const ledger = createRunLedger({ openclawDir: dir, nowFn: () => 5_000, logger: { log() {}, warn() {} } });
+    const operationId = "2f8c1f2e-0d2a-4b1e-9a11-6f2f8c1f2e0d";
+    ledger.createRun({ operationId, target: { kind: "backup" } });
+    ledger.updateRun(operationId, (record) => {
+      record.intentCheck = { direction: "not_applicable", latest: "not_applicable" };
+      return record;
+    });
+    const done = ledger.completeRun(operationId, { state: "completed", ok: true, result: { ok: true, archive: { file: "/x" } } });
+    expect(done.state).toBe("completed");
+    expect(done.ok).toBe(true);
+    expect(ledger.readRun(operationId)).toEqual(
+      expect.objectContaining({
+        state: "completed",
+        target: { kind: "backup" },
+        intentCheck: { direction: "not_applicable", latest: "not_applicable" },
+      }),
+    );
+    expect(ledger.completeRun(operationId, { state: "bogus", ok: false }).state).toBe("failed");
+  });
+
+  // v0.9.81 (review): backup runs have their own ring and their own
+  // interrupted copy.
+  it("prunes backup runs on their own ring so manual backups never evict update records, and closes a dangling backup run with backup wording", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "run-ledger-backup-ring-"));
+    let now = 10_000;
+    const ledger = createRunLedger({ openclawDir: dir, nowFn: () => now, logger: { log() {}, warn() {} }, keepRuns: 2, keepBackupRuns: 1 });
+    const ids = {
+      applyOld: "aaaaaaaa-1111-4bbb-8ccc-000000000001",
+      applyNew: "aaaaaaaa-1111-4bbb-8ccc-000000000002",
+      backupOld: "bbbbbbbb-1111-4bbb-8ccc-000000000001",
+      backupMid: "bbbbbbbb-1111-4bbb-8ccc-000000000002",
+      backupNew: "bbbbbbbb-1111-4bbb-8ccc-000000000003",
+      backupRunning: "bbbbbbbb-1111-4bbb-8ccc-000000000004",
+    };
+    const make = (operationId, target, state) => {
+      now += 1000;
+      ledger.createRun({ operationId, target });
+      if (state) ledger.completeRun(operationId, { state, ok: state === "completed" });
+    };
+    make(ids.applyOld, { channel: "stable", version: "1.0.0" }, "failed");
+    make(ids.backupOld, { kind: "backup" }, "completed");
+    make(ids.backupMid, { kind: "backup" }, "failed");
+    make(ids.applyNew, { channel: "stable", version: "1.1.0" }, "failed");
+    make(ids.backupNew, { kind: "backup" }, "completed");
+    make(ids.backupRunning, { kind: "backup" }, null);
+    ledger.pruneRuns();
+    const kept = ledger.listRuns().map((run) => run.operationId).sort();
+    // Both apply records survive (keep 2) although four backup runs are newer;
+    // the backup ring keeps only its newest (the running one).
+    expect(kept).toEqual([ids.applyNew, ids.applyOld, ids.backupRunning].sort());
+    const [closed] = ledger.closeInterruptedRuns();
+    expect(closed.operationId).toBe(ids.backupRunning);
+    expect(closed.state).toBe("interrupted");
+    expect(closed.result.message).toBe("AlphaClaw restarted before the backup finished.");
+    expect(closed.result.hint).toMatch(/Run Back up now again/);
+  });
 });

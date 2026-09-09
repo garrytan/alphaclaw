@@ -63,22 +63,27 @@ describeLive("LIVE openclaw release catalog (real GitHub + npm)", { retry: 1 }, 
       for (const row of catalog.stable) {
         expect(row.version).toMatch(kVersionShape);
         expect(classifyPrerelease(row.version)).toBe(false);
-        expect(Date.parse(row.publishedAt)).toBeGreaterThan(0);
+        // A row npm has but GitHub has not released yet carries no date.
+        if (row.publishedAt !== null) expect(Date.parse(row.publishedAt)).toBeGreaterThan(0);
+        else expect(row.notesUnavailable).toBe(true);
         expect(row.applyPayload).toEqual({
           channel: "stable",
           version: row.version,
         });
       }
-      // dist-tag latest USUALLY sits in the 5-row window, but two legit
-      // states move it out (a post-incident re-point to an older release; an
-      // npm publish that precedes its GitHub release object) — so the badge
-      // is asserted only when the row is present, and the npm-doc-backed
-      // checks run against a row that certainly exists.
+      // v0.9.81: rows are npm versions, so the dist-tag latest is ALWAYS a
+      // stable row — an npm publish that precedes its GitHub release object
+      // (2026.9.3 sat on npm ~20 h before its release existed) is a row with
+      // notesUnavailable, not a missing row. Only a post-incident re-point of
+      // `latest` to a release older than the 5-row window could move it out;
+      // upstream has never done that, so this is a hard assertion.
       const latestRow =
         catalog.stable.find((row) => row.isDistTagLatest) || null;
-      if (latestRow) {
-        expect(latestRow.version).toBe(catalog.distTags.latest);
-      }
+      expect(latestRow, "dist-tag latest must be a stable row").not.toBeNull();
+      expect(latestRow.version).toBe(catalog.distTags.latest);
+      expect(catalog.rowSource).toBe("npm");
+      // Version order: the newest installable version leads the window.
+      expect(catalog.stable[0].version).toBe(catalog.distTags.latest);
       expect(service.isKnownVersion(catalog.distTags.latest, "stable")).toBe(
         true,
       );

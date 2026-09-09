@@ -238,7 +238,7 @@ describe("server/routes/openclaw-channel", () => {
 
     const quick = await request(quickApp)
       .post("/api/openclaw/apply")
-      .send({ channel: "beta", version: "1.1.0" });
+      .send({ channel: "beta", version: "1.1.0", intent: "update" });
     expect(quick.status).toBe(200);
     expect(quick.body).toEqual({ ok: true, noop: true, operationId: "op-1" });
     expect(quickDeps.openclawChannelService.applyUpdate).toHaveBeenCalledWith({
@@ -247,6 +247,8 @@ describe("server/routes/openclaw-channel", () => {
       sha: null,
       devHead: false,
       operationId: "op-1",
+      // v0.9.81 (D13): the declared direction rides to the service.
+      intent: "update",
       // No consent carried → the service sees null (never undefined/true).
       allowBackupReuse: null,
       // #79 (b): the no-backup consent defaults to an explicit false.
@@ -261,7 +263,7 @@ describe("server/routes/openclaw-channel", () => {
 
     const slow = await request(slowApp)
       .post("/api/openclaw/apply")
-      .send({ channel: "beta", version: "1.1.0" });
+      .send({ channel: "beta", version: "1.1.0", intent: "update" });
     expect(slow.status).toBe(202);
     expect(slow.body).toEqual({
       ok: true,
@@ -285,7 +287,7 @@ describe("server/routes/openclaw-channel", () => {
 
     const res = await request(app)
       .post("/api/openclaw/apply")
-      .send({ channel: "beta", version: "1.1.0" });
+      .send({ channel: "beta", version: "1.1.0", intent: "update" });
 
     expect(res.status).toBe(500);
     expect(res.body).toEqual(
@@ -315,7 +317,7 @@ describe("server/routes/openclaw-channel", () => {
     const settledApp = createApp(settledDeps);
     const settledRes = await request(settledApp)
       .post("/api/openclaw/apply")
-      .send({ channel: "beta", version: "1.1.0" });
+      .send({ channel: "beta", version: "1.1.0", intent: "update" });
     expect(settledRes.status).toBe(409);
     await new Promise((resolve) => setImmediate(resolve));
     expect(settledDeps.operationEvents.fail).not.toHaveBeenCalled();
@@ -342,7 +344,7 @@ describe("server/routes/openclaw-channel", () => {
 
     const res = await request(app)
       .post("/api/openclaw/apply")
-      .send({ channel: "beta", version: "1.1.0" });
+      .send({ channel: "beta", version: "1.1.0", intent: "update" });
 
     expect(res.status).toBe(409);
     expect(res.body.code).toBe("self_update_in_progress");
@@ -1045,7 +1047,7 @@ describe("server/routes/openclaw-channel", () => {
       const app = createApp(deps);
       const res = await request(app)
         .post("/api/openclaw/apply")
-        .send({ channel: "beta", version: "1.1.0", allowBackupReuse: { sha256: kSha.toUpperCase() } });
+        .send({ channel: "beta", version: "1.1.0", intent: "update", allowBackupReuse: { sha256: kSha.toUpperCase() } });
       expect(res.status).toBe(200);
       expect(deps.openclawChannelService.applyUpdate).toHaveBeenCalledWith(
         expect.objectContaining({ allowBackupReuse: { sha256: kSha } }),
@@ -1065,7 +1067,7 @@ describe("server/routes/openclaw-channel", () => {
       const app = createApp(deps);
       const res = await request(app)
         .post("/api/openclaw/apply")
-        .send({ channel: "beta", version: "1.1.0", allowBackupReuse });
+        .send({ channel: "beta", version: "1.1.0", intent: "update", allowBackupReuse });
       expect(res.status).toBe(400);
       expect(res.body.code).toBe("invalid_body");
       expect(deps.openclawChannelService.applyUpdate).not.toHaveBeenCalled();
@@ -1084,7 +1086,7 @@ describe("server/routes/openclaw-channel", () => {
       for (const allowBackupReuse of [{ sha256: kSha }, true]) {
         const res = await request(app)
           .post("/api/openclaw/apply")
-          .send({ channel: "beta", version: "1.1.0", allowBackupReuse });
+          .send({ channel: "beta", version: "1.1.0", intent: "update", allowBackupReuse });
         expect(res.status).toBe(403);
         expect(res.body.code).toBe("humans_only");
       }
@@ -1092,7 +1094,7 @@ describe("server/routes/openclaw-channel", () => {
       // Without the consent field the agent's apply proceeds normally.
       const plain = await request(app)
         .post("/api/openclaw/apply")
-        .send({ channel: "beta", version: "1.1.0" });
+        .send({ channel: "beta", version: "1.1.0", intent: "update" });
       expect(plain.status).toBe(200);
     });
   });
@@ -1113,7 +1115,7 @@ describe("server/routes/openclaw-channel", () => {
       const login = await request(app).post("/api/auth/login").send({ password: "channel-test-secret" });
       const cookie = String(login.headers["set-cookie"][0]).split(";")[0];
       await request(app).post("/api/openclaw/apply").set("Cookie", cookie)
-        .send({ channel: "stable", version: "1.1.0", consentSessionId: "forged" });
+        .send({ channel: "stable", version: "1.1.0", intent: "update", consentSessionId: "forged" });
       const firstAttempt = deps.openclawChannelService.applyUpdate.mock.calls[0][0];
       expect(firstAttempt).toMatchObject({ confirmNoBackup: false,
         consentSessionId: expect.stringMatching(/^[a-f0-9]{64}$/) });
@@ -1126,7 +1128,7 @@ describe("server/routes/openclaw-channel", () => {
       expect(binding.consentSessionId).toBe(firstAttempt.consentSessionId);
       expect(cookie).not.toContain(binding.consentSessionId);
       await request(app).post("/api/openclaw/apply").set("Cookie", cookie)
-        .send({ channel: "stable", version: "1.1.0", confirmNoBackup: true, confirmNoBackupToken: issued.body.confirmNoBackupToken });
+        .send({ channel: "stable", version: "1.1.0", intent: "update", confirmNoBackup: true, confirmNoBackupToken: issued.body.confirmNoBackupToken });
       expect(deps.openclawChannelService.applyUpdate).toHaveBeenCalledWith(expect.objectContaining({
         consentSessionId: binding.consentSessionId, confirmNoBackupToken: issued.body.confirmNoBackupToken,
       }));
@@ -1139,7 +1141,7 @@ describe("server/routes/openclaw-channel", () => {
     it("refuses bare waivers, absent sessions and malformed token combinations before apply", async () => {
       const deps = createDeps();
       const app = createApp(deps);
-      const base = { channel: "stable", version: "1.1.0" };
+      const base = { channel: "stable", version: "1.1.0", intent: "update" };
       const bare = await request(app).post("/api/openclaw/apply").send({ ...base, confirmNoBackup: true });
       expect(bare.status).toBe(409);
       expect(bare.body.code).toBe("backup_consent_required");
@@ -1174,7 +1176,7 @@ describe("server/routes/openclaw-channel", () => {
       expect(issued.status).toBe(403);
       for (const confirmNoBackupToken of ["t".repeat(43), null, false, {}]) {
         const res = await request(app).post("/api/openclaw/apply")
-          .send({ channel: "stable", version: "1.1.0", confirmNoBackupToken });
+          .send({ channel: "stable", version: "1.1.0", intent: "update", confirmNoBackupToken });
         expect(res.status).toBe(403);
         expect(res.body.code).toBe("humans_only");
       }
@@ -1188,14 +1190,14 @@ describe("server/routes/openclaw-channel", () => {
       const res = await request(app)
         .post("/api/openclaw/apply")
         .set("Cookie", "setup_token=human-session")
-        .send({ channel: "stable", version: "1.1.0", confirmNoBackup: true, confirmNoBackupToken: "t".repeat(43) });
+        .send({ channel: "stable", version: "1.1.0", intent: "update", confirmNoBackup: true, confirmNoBackupToken: "t".repeat(43) });
       expect(res.status).toBe(200);
       expect(deps.openclawChannelService.applyUpdate).toHaveBeenCalledWith(
         expect.objectContaining({ confirmNoBackup: true, allowBackupReuse: null }),
       );
       const explicitFalse = await request(app)
         .post("/api/openclaw/apply")
-        .send({ channel: "stable", version: "1.1.0", confirmNoBackup: false });
+        .send({ channel: "stable", version: "1.1.0", intent: "update", confirmNoBackup: false });
       expect(explicitFalse.status).toBe(200);
       expect(deps.openclawChannelService.applyUpdate).toHaveBeenLastCalledWith(
         expect.objectContaining({ confirmNoBackup: false }),
@@ -1213,7 +1215,7 @@ describe("server/routes/openclaw-channel", () => {
       const app = createApp(deps);
       const res = await request(app)
         .post("/api/openclaw/apply")
-        .send({ channel: "stable", version: "1.1.0", confirmNoBackup });
+        .send({ channel: "stable", version: "1.1.0", intent: "update", confirmNoBackup });
       expect(res.status).toBe(400);
       expect(res.body.code).toBe("invalid_body");
       expect(res.body.message).toMatch(/confirmNoBackup must be a boolean/);
@@ -1232,7 +1234,7 @@ describe("server/routes/openclaw-channel", () => {
       for (const confirmNoBackup of [true, false, "true"]) {
         const res = await request(app)
           .post("/api/openclaw/apply")
-          .send({ channel: "stable", version: "1.1.0", confirmNoBackup });
+          .send({ channel: "stable", version: "1.1.0", intent: "update", confirmNoBackup });
         expect(res.status).toBe(403);
         expect(res.body.code).toBe("humans_only");
         expect(res.body.message).toMatch(/confirmNoBackup is an operator-only consent/);
@@ -1240,7 +1242,7 @@ describe("server/routes/openclaw-channel", () => {
       expect(deps.openclawChannelService.applyUpdate).not.toHaveBeenCalled();
       const plain = await request(app)
         .post("/api/openclaw/apply")
-        .send({ channel: "stable", version: "1.1.0" });
+        .send({ channel: "stable", version: "1.1.0", intent: "update" });
       expect(plain.status).toBe(200);
       expect(deps.openclawChannelService.applyUpdate).toHaveBeenCalledWith(
         expect.objectContaining({ confirmNoBackup: false }),
@@ -1317,7 +1319,7 @@ describe("server/routes/openclaw-channel", () => {
       // applyUpdate resolves quickly (noop) — the route sees it settle.
       const applied = await request(app)
         .post("/api/openclaw/apply")
-        .send({ channel: "beta", version: "1.1.0" });
+        .send({ channel: "beta", version: "1.1.0", intent: "update" });
       expect(applied.status).toBe(200);
       await new Promise((resolve) => setImmediate(resolve));
       const after = await request(app).get("/api/openclaw/backups");
@@ -1626,6 +1628,204 @@ describe("server/routes/openclaw-channel", () => {
       expect(res.status).toBe(200);
       expect(res.body.ok).toBe(true);
       expect(res.body.gatewayStart).toEqual({ ok: false, error: "spawn ENOENT" });
+    });
+  });
+
+  it("?refresh=1 forces the catalog refresh and the body forwards what the service did (refreshed / refreshThrottledForMs) (v0.9.81)", async () => {
+    const deps = createDeps();
+    deps.openclawReleasesService.getCatalog
+      .mockResolvedValueOnce({ ok: true, stable: [], beta: [], dev: {}, refreshed: true, sources: { npm: { stale: false } } })
+      .mockResolvedValueOnce({ ok: true, stable: [], beta: [], dev: {}, refreshed: false, refreshThrottledForMs: 12_000 });
+    const app = createApp(deps);
+
+    const forced = await request(app).get("/api/openclaw/catalog?refresh=1");
+    expect(forced.status).toBe(200);
+    expect(deps.openclawReleasesService.getCatalog).toHaveBeenLastCalledWith({ forceRefresh: true });
+    expect(forced.body.catalog.refreshed).toBe(true);
+    expect(forced.body.catalog.sources).toEqual({ npm: { stale: false } });
+
+    const throttled = await request(app).get("/api/openclaw/catalog?refresh=1");
+    expect(throttled.body.catalog.refreshed).toBe(false);
+    expect(throttled.body.catalog.refreshThrottledForMs).toBe(12_000);
+
+    await request(app).get("/api/openclaw/catalog");
+    expect(deps.openclawReleasesService.getCatalog).toHaveBeenLastCalledWith({ forceRefresh: false });
+  });
+
+  describe("declared intent on POST /api/openclaw/apply (v0.9.81, D13/D21)", () => {
+    // Fixture: the running version is 1.0.0 (createChannelInfo).
+    it("a stable/beta body without intent is a 400 invalid_body whose hint names the three values; the service is never called", async () => {
+      const deps = createDeps();
+      const app = createApp(deps);
+      for (const body of [
+        { channel: "stable", version: "1.1.0" },
+        { channel: "beta", version: "1.1.0", intent: "upgrade" },
+        { channel: "beta", version: "1.1.0", intent: null },
+      ]) {
+        const res = await request(app).post("/api/openclaw/apply").send(body);
+        expect(res.status).toBe(400);
+        expect(res.body.code).toBe("invalid_body");
+        expect(res.body.message).toContain("update, downgrade, switch");
+        expect(res.body.hint).toMatch(/update.*downgrade.*switch/);
+      }
+      expect(deps.openclawChannelService.applyUpdate).not.toHaveBeenCalled();
+      expect(deps.operationEvents.createOperation).not.toHaveBeenCalled();
+    });
+
+    it("intent on a dev body is a 400; a dev body without it is forwarded without an intent field", async () => {
+      const deps = createDeps();
+      const app = createApp(deps);
+      const refused = await request(app).post("/api/openclaw/apply").send({ channel: "dev", devHead: true, intent: "update" });
+      expect(refused.status).toBe(400);
+      expect(refused.body.code).toBe("invalid_body");
+      const ok = await request(app).post("/api/openclaw/apply").send({ channel: "dev", devHead: true });
+      expect(ok.status).toBe(200);
+      const forwarded = deps.openclawChannelService.applyUpdate.mock.calls.at(-1)[0];
+      expect(forwarded).not.toHaveProperty("intent");
+      expect(forwarded).not.toHaveProperty("expectLatest");
+    });
+
+    it("update to an older or equal version is a 409 intent_mismatch naming both versions; nothing is dispatched (the bug-2 regression pin)", async () => {
+      const deps = createDeps();
+      deps.openclawChannelService.getChannelInfo.mockReturnValue(createChannelInfo({ installedVersion: "1.2.0" }));
+      const app = createApp(deps);
+      for (const version of ["1.1.0", "1.2.0"]) {
+        const res = await request(app).post("/api/openclaw/apply").send({ channel: "stable", version, intent: "update" });
+        expect(res.status).toBe(409);
+        expect(res.body.code).toBe("intent_mismatch");
+        expect(res.body.message).toContain(version);
+        expect(res.body.message).toContain("1.2.0");
+        expect(res.body.installedVersion).toBe("1.2.0");
+      }
+      expect(deps.openclawChannelService.applyUpdate).not.toHaveBeenCalled();
+      expect(deps.operationEvents.createOperation).not.toHaveBeenCalled();
+    });
+
+    it("downgrade to an older version and switch to the same version are forwarded with their intent; each other combination is refused", async () => {
+      const deps = createDeps();
+      deps.openclawChannelService.getChannelInfo.mockReturnValue(createChannelInfo({ installedVersion: "1.2.0" }));
+      const app = createApp(deps);
+      const down = await request(app).post("/api/openclaw/apply").send({ channel: "stable", version: "1.1.0", intent: "downgrade" });
+      expect(down.status).toBe(200);
+      expect(deps.openclawChannelService.applyUpdate).toHaveBeenLastCalledWith(
+        expect.objectContaining({ channel: "stable", version: "1.1.0", intent: "downgrade" }),
+      );
+      const same = await request(app).post("/api/openclaw/apply").send({ channel: "stable", version: "1.2.0", intent: "switch" });
+      expect(same.status).toBe(200);
+      expect(deps.openclawChannelService.applyUpdate).toHaveBeenLastCalledWith(
+        expect.objectContaining({ version: "1.2.0", intent: "switch" }),
+      );
+      for (const [version, intent] of [["1.3.0", "downgrade"], ["1.3.0", "switch"], ["1.1.0", "switch"]]) {
+        const res = await request(app).post("/api/openclaw/apply").send({ channel: "stable", version, intent });
+        expect(res.status).toBe(409);
+        expect(res.body.code).toBe("intent_mismatch");
+      }
+    });
+
+    it("expectLatest: the route reads the NON-forced catalog and refuses catalog_stale (carrying `latest`) when a newer version exists; a plain update never reads the catalog", async () => {
+      const deps = createDeps();
+      deps.openclawReleasesService.getCatalog.mockResolvedValue({
+        ok: true,
+        degraded: { github: false, npm: false },
+        stable: [{ version: "1.3.0", isDistTagLatest: true }, { version: "1.1.0" }],
+        beta: [],
+        dev: {},
+      });
+      const app = createApp(deps);
+      const stale = await request(app)
+        .post("/api/openclaw/apply")
+        .send({ channel: "stable", version: "1.1.0", intent: "update", expectLatest: true });
+      expect(stale.status).toBe(409);
+      expect(stale.body.code).toBe("catalog_stale");
+      expect(stale.body.latest).toBe("1.3.0");
+      expect(deps.openclawReleasesService.getCatalog).toHaveBeenCalledTimes(1);
+      expect(deps.openclawReleasesService.getCatalog).toHaveBeenLastCalledWith();
+      expect(deps.openclawChannelService.applyUpdate).not.toHaveBeenCalled();
+
+      const fresh = await request(app)
+        .post("/api/openclaw/apply")
+        .send({ channel: "stable", version: "1.3.0", intent: "update", expectLatest: true });
+      expect(fresh.status).toBe(200);
+      expect(deps.openclawChannelService.applyUpdate).toHaveBeenLastCalledWith(
+        expect.objectContaining({ version: "1.3.0", intent: "update", expectLatest: true }),
+      );
+
+      deps.openclawReleasesService.getCatalog.mockClear();
+      const plain = await request(app)
+        .post("/api/openclaw/apply")
+        .send({ channel: "stable", version: "1.1.0", intent: "update" });
+      expect(plain.status).toBe(200);
+      expect(deps.openclawReleasesService.getCatalog).not.toHaveBeenCalled();
+      expect(deps.openclawChannelService.applyUpdate.mock.calls.at(-1)[0]).not.toHaveProperty("expectLatest");
+
+      const junk = await request(app)
+        .post("/api/openclaw/apply")
+        .send({ channel: "stable", version: "1.1.0", intent: "update", expectLatest: "yes" });
+      expect(junk.status).toBe(400);
+      expect(junk.body.code).toBe("invalid_body");
+    });
+
+    it("a catalog read that throws never blocks an update: the latest check is skipped", async () => {
+      const deps = createDeps();
+      deps.openclawReleasesService.getCatalog.mockRejectedValue(new Error("registry down"));
+      const app = createApp(deps);
+      const res = await request(app)
+        .post("/api/openclaw/apply")
+        .send({ channel: "stable", version: "1.1.0", intent: "update", expectLatest: true });
+      expect(res.status).toBe(200);
+    });
+  });
+
+  describe("POST /api/openclaw/backup (Back up now, v0.9.81)", () => {
+    it("a fast outcome answers inline with the operationId; a slow run hands off to the operation stream (202 + events)", async () => {
+      const deps = createDeps();
+      deps.openclawChannelService.runStandaloneBackup = vi.fn(async () => ({
+        status: 200,
+        body: { ok: true, archive: { file: "/b/openclaw-1.alphaclaw.tar.gz", verified: true } },
+      }));
+      const app = createApp(deps);
+      const quick = await request(app).post("/api/openclaw/backup").send({});
+      expect(quick.status).toBe(200);
+      expect(quick.body).toEqual(
+        expect.objectContaining({ ok: true, operationId: "op-1", archive: expect.objectContaining({ verified: true }) }),
+      );
+      expect(deps.openclawChannelService.runStandaloneBackup).toHaveBeenCalledWith({ operationId: "op-1" });
+      expect(deps.operationEvents.createOperation).toHaveBeenCalledWith({ type: "openclaw-backup" });
+
+      deps.openclawChannelService.runStandaloneBackup = vi.fn(() => new Promise(() => {}));
+      const slow = await request(app).post("/api/openclaw/backup").send({});
+      expect(slow.status).toBe(202);
+      expect(slow.body).toEqual({
+        ok: true,
+        operationId: "op-1",
+        events: "/api/operations/op-1/events",
+        streamUrl: "/api/operations/op-1/events",
+      });
+    });
+
+    it("a fast failure keeps the service's status and envelope (409 backup_failed) and terminates the operation stream", async () => {
+      const deps = createDeps();
+      deps.operationEvents.getOperation = vi.fn(() => ({ status: "pending" }));
+      deps.operationEvents.fail = vi.fn();
+      deps.openclawChannelService.runStandaloneBackup = vi.fn(async () => ({
+        status: 409,
+        body: { ok: false, code: "backup_failed", message: "no space", hint: "Fix the cause and retry the backup." },
+      }));
+      const app = createApp(deps);
+      const res = await request(app).post("/api/openclaw/backup").send({});
+      expect(res.status).toBe(409);
+      expect(res.body).toEqual(expect.objectContaining({ ok: false, code: "backup_failed", operationId: "op-1" }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(deps.operationEvents.fail).toHaveBeenCalledWith("op-1", expect.objectContaining({ code: "backup_failed" }));
+    });
+
+    it("503 backup_unavailable when the service does not expose the runner", async () => {
+      const deps = createDeps();
+      delete deps.openclawChannelService.runStandaloneBackup;
+      const app = createApp(deps);
+      const res = await request(app).post("/api/openclaw/backup").send({});
+      expect(res.status).toBe(503);
+      expect(res.body.code).toBe("backup_unavailable");
     });
   });
 

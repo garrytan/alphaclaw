@@ -84,6 +84,10 @@ const originalCreateConnection = net.createConnection;
 const originalPrelaunchHookEnv = process.env.ALPHACLAW_GATEWAY_PRELAUNCH_HOOK;
 // Namespace-required by gateway.js so the live-process scan can be pinned.
 const lockContention = require("../../lib/server/openclaw-lock-contention");
+// The REAL /proc scan, captured before any suite spies on it (v0.9.81 fixture
+// test below drives listGatewayPids through it over a fake /proc).
+const realListLiveOpenclawProcesses = lockContention.listLiveOpenclawProcesses;
+const { kOpenclawArgvFixtures } = require("./fixtures/openclaw-argv-fixtures");
 const autotune = require("../../lib/server/autotune");
 // The capabilities factory lazy-requires this on first probe; warm the module
 // cache so a test's fs.readFileSync mock never serves it as module source.
@@ -5391,5 +5395,46 @@ describe("server/gateway restart behavior", () => {
         "EIO",
       );
     });
+  });
+});
+
+// v0.9.81 (review amendment D3 / cross-model D16): the shared argv truth table
+// drives the gateway pid snapshot through the REAL process matcher. Every
+// `gateway: true` row must be a gateway pid; no other row may be — the tail
+// follower that refused production backups must be invisible here too.
+describe("listGatewayPids over the shared OpenClaw argv fixtures", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("resolves exactly the gateway: true rows through the real matcher", () => {
+    const table = {};
+    kOpenclawArgvFixtures.forEach((row, index) => {
+      table[String(2000 + index)] = row.argv.map((arg) => `${arg}\0`).join("");
+    });
+    vi.spyOn(lockContention, "listLiveOpenclawProcesses").mockImplementation((opts = {}) =>
+      realListLiveOpenclawProcesses({
+        ...opts,
+        fsModule: { readdirSync: (p) => (p === "/proc" ? [...Object.keys(table), "self"] : []) },
+        readCmdline: (pid) => table[String(pid)] ?? null,
+        isZombie: () => false,
+        selfPid: 1,
+      }),
+    );
+    delete require.cache[modulePath];
+    const gateway = require(modulePath);
+
+    const expected = kOpenclawArgvFixtures
+      .map((row, index) => (row.gateway ? 2000 + index : null))
+      .filter((pid) => pid !== null);
+    expect(expected.length).toBeGreaterThan(5);
+    expect([...gateway.listGatewayPids()].sort((a, b) => a - b)).toEqual(expected);
+    // The evidence pattern (default) is a superset of the serving pattern:
+    // every serving pid is in the evidence list.
+    const serving = gateway.listGatewayPids({
+      pattern: lockContention.kGatewayServingCmdlinePattern,
+    });
+    for (const pid of serving) expect(expected).toContain(pid);
+    expect(serving.length).toBeGreaterThan(0);
   });
 });

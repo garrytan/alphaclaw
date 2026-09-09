@@ -5,6 +5,147 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.9.81] - 2026-09-09
+
+The three Upgrade-tab defects an operator hit on 2026-09-08 (OpenClaw 2026.9.2,
+AlphaClaw v0.9.78): a 20-hour-stale catalog whose **Check now** was dead and
+which never listed the real npm `latest`; **Update to latest stable** that
+started a *downgrade*; and a pre-update backup that had never succeeded in
+production (an offline copy refused because a `tail -F` on OpenClaw's log
+counted as a live OpenClaw process, then an upstream `backup create` that idled
+the full ten minutes with nothing written and nothing said). Plus the missing
+piece that lets an operator prove backups work without attempting an update.
+
+### Added
+
+- **Back up now** (Backups card, `POST /api/openclaw/backup`, agent-admin op
+  `updates.backup`, tier dangerous): the pre-update backup ladder as a
+  standalone run — same entry gates and apply latch as an update (an update
+  and a backup never overlap: `409 operation_in_progress` both ways), the
+  gateway mutation policy asserted before the latch AND under the owned
+  `backup_quiesce` lease (new intent `kGatewayMutationIntents.backup`), a
+  ledger run with a first-class `target: { kind: "backup" }` that ends
+  `completed` (new run state) or `failed`. It never writes `lastUpdateRun`
+  and there is no `lastBackupRun` pointer: the Backups card's "Last manual
+  backup: … — verified / failed: …" line and the in-flight rehydration read
+  the runs list. A dangling backup run is closed `interrupted` at boot like
+  any other. Quick outcomes answer inline, long ones stream over the same
+  operation SSE as an update.
+- **Retry backup / Retry update to X** (progress card and the quick-failure
+  card): a BACKUP-class failure (`backup_failed`,
+  `backup_required_for_migration`, or a failed manual backup) offers "Retry
+  backup" — dismiss, run a standalone backup, remember the failed update — and
+  never "Re-stage version" (re-staging re-downloads the target and changes
+  nothing about the backup). When that backup completes, the card offers
+  "Retry update to X", which re-opens the confirm on the ORIGINAL payload and
+  declared intent. One click, one run — never an automatic chain.
+- **Declared intent on every stable/beta apply** (`intent` ∈ `update |
+  downgrade | switch`, **required** — a `400 invalid_body` names the field and
+  the three values; refused on dev): `lib/server/openclaw-update-intent.js`
+  judges it against the running version, and a disagreement is a
+  `409 intent_mismatch` — nothing installs. The "Update to latest" CTA also
+  claims `expectLatest: true`; when the catalog's channel latest is newer the
+  server answers `409 catalog_stale` carrying `latest` and the page reloads
+  the catalog once and re-opens the confirm on that version (a second stale
+  verdict is an error, never a loop). The verdict — including a skipped latest
+  check when the catalog was unavailable or degraded — is recorded on the run
+  as `intentCheck`. **Breaking for agent-admin callers of `updates.apply`:**
+  a stable/beta body without `intent` is refused.
+- **Bounded, self-describing upstream backup rung:** `runStreamed` gains an
+  inactivity policy (`inactivityTimeoutMs` + `progressProbe` → `stalled`);
+  the upstream `backup create` runs with `kOpenclawBackupUpstreamInactivityMs`
+  (3 min, pinned below the 10-min ceiling) and a staging-bytes probe, so a
+  hung CLI is stopped in minutes and classified `stalled` (offline-copy
+  fallback in the quiesce, reuse- and consent-eligible, never retried). A
+  3-line redacted ring of the CLI's last output rides the progress line
+  ("… — last output: …"), the `stalled`/`timeout` messages ("The CLI's last
+  output was: …") and the run record (`backup.lastOutput`, plus
+  `backup.backupFailureKind`), so the next production failure is diagnosable
+  from the ledger alone. The progress probe now reads every place a pinned
+  CLI stages bytes — the 2026.9.x CLI publishes through a
+  `.openclaw-backup-publish-*` dot-dir beside the archive and assembles under
+  `<tmpdir>/openclaw-backup-*`, which the old `<output>.<uuid>.tmp` probe
+  never saw (the operator's "nothing written yet" for ten minutes) — and a
+  final archive that already exists means the silent `--verify` phase, which
+  the stall policy never cuts. The failed-attempt cleanup and the debris sweep
+  remove the dot-dir a killed CLI leaves behind.
+- Catalog payload: per-source freshness (`sources.{github,npm,dev}`),
+  `rowSource`, and on a forced refresh `refreshed` / `refreshThrottledForMs`.
+
+### Changed
+
+- **Catalog rows are npm versions, enriched by GitHub.** The npm abbreviated
+  doc (the install source of truth) supplies the rows — minus versions npm
+  marks `deprecated` — each carrying its GitHub release's notes and date when
+  one exists (`notesUnavailable` otherwise). Upstream publishes to npm first
+  and creates the GitHub release hours later (2026.9.3: ~20 h), so a
+  GitHub-first catalog hid the newest installable version for most of a day.
+  GitHub-only rows are the fallback only when npm data is absent altogether
+  (flagged `degraded.npm`). Rows sort by **version** (the only key every row
+  has); the 5-row caps apply after the merge; the dist-tag still decides
+  "latest".
+- **Honest staleness.** "Catalog as of" is the oldest ROW source (dev commits
+  no longer drag it back); a sidecar `<cache>.meta.json` persists the
+  304-bumped `fetchedAt` and the last fetch failure across the process
+  restart every apply performs; an npm cache older than
+  `kOpenclawCatalogHardStaleMs` (60 min) is awaited, not served
+  stale-while-revalidate (GitHub stays SWR at every age). The Upgrade tab
+  re-reads the catalog every 10 minutes while visible and follows up ONCE,
+  directly, when the server served a stale catalog.
+- **Check now is always available** — disabled only while a refresh is in
+  flight, never by a running or failed operation ("Dismiss to re-enable
+  updates … Checking for new versions stays available."); its toast says
+  "Checked just now" or "Checked moments ago — try again in N s" instead of
+  silently serving a cached read inside the 30 s floor.
+- **"Update to latest" is an upgrade or nothing.** ONE
+  `resolveChannelLatestRow` (stable = the dist-tag row, beta = the highest
+  prerelease — the npm `beta` dist-tag has pointed at a stable release) is
+  shared by the availability line and the CTA target, so the card can never
+  say "you're on the latest" while its button resolves to something else.
+  With the installed version unknown there is no target (never a guess), and
+  the no-target notice says why: up to date, catalog degraded, running build
+  unknown, latest rolled back on this box, latest needs a newer Node. Catalog
+  row buttons post the direction their label shows.
+- **Process matcher (`isOpenclawArgv`) is program-position only:** argv[0] is
+  the CLI/gateway binary, a JS runtime's script operand is an OpenClaw entry
+  script, a shell wrapper's script is named `openclaw`, or (upstream parity) a
+  token ends with an entry script. A path ARGUMENT under an `/openclaw/`
+  directory — `tail -F /tmp/openclaw/openclaw-….log`, `less
+  /data/openclaw/x.log`, `sqlite3 …/openclaw.sqlite` — no longer counts as a
+  live OpenClaw process, so the offline copy is no longer refused by a log
+  follower. One shared fixture table
+  (`tests/server/fixtures/openclaw-argv-fixtures.js`, `openclaw` × `gateway`
+  expectations) drives the matcher, the `/proc` scan and `listGatewayPids`.
+  The exclusivity refusal now reads "… — argv names an OpenClaw executable or
+  entry script".
+- Gateway mutation policy latch copy: "A channel update **or backup** is in
+  progress — wait for it to finish before restarting."
+
+### Fixed
+
+- "Update to latest stable" could resolve to the next-older release when the
+  installed version was itself the dist-tag latest (2026.9.2 → 2026.9.1 in
+  the report), with the downgrade warning switched off. Three belts now
+  (helper, hook, server); an exhaustive helper test asserts the target is
+  null or strictly newer for every catalog × installed version.
+- The consented-reuse and no-backup-consent retries forward the failed run's
+  declared intent, so a token-bound re-apply is never refused `invalid_body`.
+- Review round (six lenses, two skeptics per finding): the process matcher
+  recognises the repo's OWN launcher shape (`node …/node_modules/.bin/openclaw
+  gateway run` — the npm bin shim AlphaClaw's PATH shim execs; the shared
+  fixture table carries it); the dev channel's "Update to latest dev" posts no
+  intent (a commit has no direction); the "latest" claim is made only when the
+  CTA's target IS the channel's upstream latest; `applyUpdate` judges intent
+  against the same installed version the route and the page use; catalog rows
+  never include a dist-tag target npm has not published or a deprecated one,
+  and the channel is the version suffix's alone (a GitHub prerelease flag on a
+  stable-shaped version is `flaggedPrerelease`); a forced refresh whose npm
+  fetch failed is not "refreshed"; a manual backup never raises the reuse-
+  window floor, never mirrors its steps into `lastUpdateRun`, never offers an
+  older archive, is skipped by the upgrade overseer, keeps its own 5-run
+  ledger ring and its own interrupted-run wording; the sibling
+  "update in progress" refusals say "update or backup".
+
 ## [0.9.80] - 2026-09-08
 
 Pins OpenClaw **2026.9.3** (npm `latest` since 2026-09-07) and moves the

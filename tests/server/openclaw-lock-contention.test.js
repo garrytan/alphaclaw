@@ -22,6 +22,7 @@ const {
   isOpenclawArgv,
   parseProcCmdline,
 } = require("../../lib/server/openclaw-lock-contention");
+const { kOpenclawArgvFixtures } = require("./fixtures/openclaw-argv-fixtures");
 
 const hasProc = process.platform === "linux" && fs.existsSync(`/proc/${process.pid}/status`);
 // A Node process always has V8/libuv sibling threads, but the real-TID cases
@@ -38,20 +39,39 @@ const fakeProc = (table) => ({
   isZombie: (pid) => table[String(pid)]?.zombie === true,
 });
 
-describe("isOpenclawArgv (mirrors upstream isOpenClawArgv)", () => {
-  it("recognizes the CLI, node-launched entry scripts, and the gateway binary", () => {
-    expect(isOpenclawArgv(["openclaw", "gateway", "run"])).toBe(true);
-    expect(isOpenclawArgv(["/usr/local/bin/openclaw", "doctor", "--fix"])).toBe(true);
-    expect(
-      isOpenclawArgv(["node", "/app/node_modules/openclaw/dist/entry.js", "gateway", "run"]),
-    ).toBe(true);
-    expect(isOpenclawArgv(["/opt/x/openclaw-gateway"])).toBe(true);
+describe("isOpenclawArgv (program-position rule, v0.9.81 — shared truth table)", () => {
+  // Every row of the shared table carries both expectations; gateway.test.js
+  // consumes the same rows for listGatewayPids so the four consumers of the
+  // one matcher cannot drift apart.
+  for (const row of kOpenclawArgvFixtures) {
+    it(`${row.openclaw ? "matches" : "does not match"}: ${row.name}`, () => {
+      expect(isOpenclawArgv(row.argv)).toBe(row.openclaw);
+    });
+  }
+  it("the table has both shapes and pins the production false positive", () => {
+    expect(kOpenclawArgvFixtures.some((row) => row.openclaw && row.gateway)).toBe(true);
+    expect(kOpenclawArgvFixtures.some((row) => row.openclaw && !row.gateway)).toBe(true);
+    const tail = kOpenclawArgvFixtures.find((row) => row.argv[0] === "tail");
+    expect(tail).toMatchObject({ openclaw: false, gateway: false });
+    expect(tail.argv.join(" ")).toContain("/tmp/openclaw/openclaw-2026-09-08.log");
+    // A `gateway: true` row is always an OpenClaw process — the table cannot
+    // describe a gateway that the matcher would not see.
+    for (const row of kOpenclawArgvFixtures) {
+      if (row.gateway) expect(row.openclaw).toBe(true);
+    }
   });
-  it("does not classify alphaclaw itself or unrelated node processes", () => {
-    expect(isOpenclawArgv(["node", "/app/bin/alphaclaw.js", "start"])).toBe(false);
-    expect(isOpenclawArgv(["node", "/srv/other/index.js"])).toBe(false);
-    expect(isOpenclawArgv(["/usr/sbin/crond", "-n"])).toBe(false);
-    expect(isOpenclawArgv([])).toBe(false);
+  it("skips the value of a space-separated value-taking runtime flag and honours `--`", () => {
+    expect(isOpenclawArgv(["node", "--import", "/opt/preload.mjs", "/srv/other/app.js"])).toBe(false);
+    expect(
+      isOpenclawArgv(["node", "--import", "/opt/preload.mjs", "/app/node_modules/openclaw/dist/entry.js"]),
+    ).toBe(true);
+    // Upstream parity (rule 3): the entry script anywhere in argv still counts
+    // — a wrapper that passes it as a flag value is an OpenClaw process.
+    expect(
+      isOpenclawArgv(["node", "--import", "/app/node_modules/openclaw/dist/entry.js", "/srv/other/app.js"]),
+    ).toBe(true);
+    expect(isOpenclawArgv(["node", "--", "/app/node_modules/openclaw/dist/entry.js", "status"])).toBe(true);
+    expect(isOpenclawArgv(["node", "--inspect", "/app/node_modules/openclaw/dist/entry.js"])).toBe(true);
   });
   it("parses NUL-separated /proc cmdline", () => {
     expect(parseProcCmdline("openclaw\0gateway\0run\0")).toEqual(["openclaw", "gateway", "run"]);
@@ -72,6 +92,29 @@ describe("listLiveOpenclawProcesses", () => {
     const live = listLiveOpenclawProcesses({ ...fakeProc(table), selfPid: 4242 });
     expect(live.map((p) => p.pid).sort()).toEqual([57, 91]);
     expect(live.find((p) => p.pid === 91).cmdline).toContain("doctor --fix --yes");
+  });
+  it("the production false positive: a `tail -F` on OpenClaw's log file is NOT a live openclaw process; a real gateway beside it is", () => {
+    const table = {
+      348161: { cmdline: "tail\0-c\0+1\0-F\0/tmp/openclaw/openclaw-2026-09-08.log\0" },
+      348200: { cmdline: "less\0/data/openclaw/x.log\0" },
+      348300: { cmdline: "openclaw\0gateway\0run\0" },
+    };
+    expect(listLiveOpenclawProcesses({ ...fakeProc(table), selfPid: 1 })).toEqual([
+      { pid: 348300, cmdline: "openclaw gateway run" },
+    ]);
+    delete table[348300];
+    expect(listLiveOpenclawProcesses({ ...fakeProc(table), selfPid: 1 })).toEqual([]);
+  });
+  it("over the shared fixture table, lists exactly the `openclaw: true` rows", () => {
+    const table = {};
+    kOpenclawArgvFixtures.forEach((row, index) => {
+      table[String(1000 + index)] = { cmdline: row.argv.map((a) => `${a}\0`).join("") };
+    });
+    const live = listLiveOpenclawProcesses({ ...fakeProc(table), selfPid: 1, limit: Infinity });
+    const expected = kOpenclawArgvFixtures
+      .map((row, index) => (row.openclaw ? 1000 + index : null))
+      .filter((pid) => pid !== null);
+    expect(live.map((p) => p.pid)).toEqual(expected);
   });
   it("returns [] when /proc is unavailable (non-Linux) — never throws", () => {
     expect(

@@ -65,6 +65,47 @@ describe("admin-manifest engine", () => {
     ).toBe("dangerous");
   });
 
+  // v0.9.81 (C3): Back up now is a dangerous async op with the ledger as its
+  // status source.
+  it("updates.backup is a dangerous async op whose terminal states are the backup run's", () => {
+    const op = manifest.findOp("POST", "/api/openclaw/backup");
+    expect(op?.id).toBe("updates.backup");
+    expect(op.tier).toBe("dangerous");
+    expect(op.async).toEqual({
+      statusOp: "updates.run-detail",
+      idField: "operationId",
+      terminalStates: ["completed", "failed", "interrupted"],
+    });
+    expect(op.readOp).toBe("updates.backups");
+    expect(op.notes).toMatch(/operation_in_progress/);
+  });
+
+  // v0.9.81 (D13): the declared direction is a REQUIRED body field for the
+  // agent too — a body without it is a 400 whose hint names the three values.
+  it("updates.apply requires `intent` and documents the optional `expectLatest` claim", () => {
+    const op = manifest.findOp("POST", "/api/openclaw/apply");
+    const intent = op.params.fields.find((field) => field.name === "intent");
+    // Channel-conditional like `version`: required for stable/beta, refused
+    // on dev — so the schema flag is false and the description carries the
+    // rule (an agent that marks it required would break its dev applies).
+    expect(intent).toEqual(
+      expect.objectContaining({ location: "body", type: "string", required: false }),
+    );
+    expect(intent.description).toMatch(/REQUIRED for stable\/beta/);
+    expect(intent.description).toMatch(/OMITTED for dev/);
+    expect(intent.description).toMatch(/update/);
+    expect(intent.description).toMatch(/downgrade/);
+    expect(intent.description).toMatch(/switch/);
+    expect(intent.description).toMatch(/intent_mismatch/);
+    const expectLatest = op.params.fields.find((field) => field.name === "expectLatest");
+    expect(expectLatest).toEqual(
+      expect.objectContaining({ location: "body", type: "boolean", required: false }),
+    );
+    expect(expectLatest.description).toMatch(/catalog_stale/);
+    expect(op.params.example).toContain('"intent"');
+    expect(op.notes).toMatch(/intent/);
+  });
+
   // WI-4.5 / #79 (b): both backup consents are humans-only — the agent is
   // DENIED (not merely escalated) for any body carrying either field, valid
   // or not.

@@ -1,5 +1,22 @@
 # TODOS
 
+## P2 — Why does 2026.9.2 `backup create` idle against a running gateway? (2026-09-09, from the v0.9.81 Upgrade-tab wave)
+- **What:** capture `run.backup.lastOutput` from the next production `stalled`/`timeout` failure (v0.9.81 records the CLI's last three lines, redacted) and read the coordinator-lock / legacy-audit-lease path in the 2026.9.x dist to explain a 10-minute silent live attempt with nothing written.
+- **Why:** the operator's 2026-09-08 run showed the upstream rung idle for the full ceiling ("nothing written yet — 10m 0s — timed out"). v0.9.81 BOUNDS and DESCRIBES that failure (3-min inactivity policy, output ring) but does not explain it; the #54 belts assume a fast lease failure, not a hang.
+- **Context:** `runBackupAttempt` (`openclaw-channel-sync.js`), `kStateContentionPattern`, the inactivity policy in `openclaw-run-stream.js`, TODOS #54 lease notes. Unverifiable in the hermetic tier (no real CLI); needs a production sample with v0.9.81 landed, or the live tier against 2026.9.2.
+- **Effort:** S (human ~2h / CC ~20min once a sample exists). **Priority:** P2.
+
+## P3 — Scheduled backups (daily "Back up now") (2026-09-09, from the v0.9.81 Upgrade-tab wave)
+- **What:** a cron-like daily `runStandaloneBackup` with its own keep-N and a failure notification, opt-in from the Backups card.
+- **Why:** Back up now (v0.9.81) makes backups possible outside an update; a schedule makes a fresh archive the norm, so the 24 h consented-reuse gate always has a candidate and a failed pre-update backup is never the first sign the ladder is broken on a box.
+- **Context:** `runStandaloneBackup`, `kOpenclawBackupKeepCount`, `pruneBackups`, the notify outbox, the gateway pause it costs (seconds to minutes — the schedule must avoid a running update and the quiet hours).
+- **Effort:** M (human ~1d / CC ~30min). **Priority:** P3. Depends on: a retention design (the advisory byte budget TODO).
+
+## P3 — Exclusivity: weigh a clean `/proc/*/fd` scan over an argv hit (2026-09-09, from the v0.9.81 Upgrade-tab wave)
+- **What:** when the fd scan is `clean` and the only live-process hit is not a gateway-serving argv (a one-shot CLI such as `openclaw sessions --json`), treat the argv hit as evidence rather than a refusal.
+- **Why:** the fd scan is the precise "who has a state DB open" signal; the argv scan is a heuristic. Deliberately NOT done in v0.9.81: a CLI that has not yet opened the DB can open it mid-copy, so the tightened program-position matcher plus the 5 s settle loop is the conservative fix. The container run of 2026-09-08 showed AlphaClaw's own `openclaw sessions --json --all-agents` shell-out (a real OpenClaw process, `openclaw: true` in the fixture table) coinciding with a sample; the settle loop tolerates it when it exits within 5 s.
+- **Context:** `assessExclusivity` (`openclaw-backup-offline-copy.js`), `settleLiveProcesses` (`openclaw-channel-sync.js`), `kOpenclawArgvFixtures`.
+- **Effort:** S (human ~3h / CC ~20min). **Priority:** P3. Depends on: a production sample of refusals after v0.9.81.
 ## P1 — Restore dev bootstrap from AlphaClaw's nested OpenClaw dependency (2026-09-08, real source-build verification)
 
 - **What:** Current OpenClaw refuses `update --channel dev` from AlphaClaw's nested dependency with `package manager owner is unknown`, before cloning. Design a managed bootstrap that preserves the bundled pin, lifecycle ownership, backup requirements and boot-only activation; do not disguise the dependency as a globally owned installation.
@@ -119,7 +136,7 @@
 - **Why:** Raised by the fix wave's engineering review as class-level hardening beyond the audit's confirmed instances.
 - **Effort:** varies (XS–M). **Priority:** as listed.
 
-## P1 — Rename the `main` ruleset's required check `test (22)` → `test (24)` at the v0.9.80 merge (2026-09-08; supersedes "Promote `test (24)` once green for a week", 2026-09-04)
+## ~~P1 — Rename the `main` ruleset's required check `test (22)` → `test (24)` at the v0.9.80 merge~~ (COMPLETED 2026-09-09: v0.9.80 merged with `test (24)` + `gate` required; `test (26)` stays advisory under the week-green rule)
 - **What:** v0.9.80 (the Node 24.16 runtime bump for the OpenClaw 2026.9.3 pin) drops Node 22 from `ci.yml`'s matrix (`[24, 26]`): `test (24)` is the lane the code now treats as required and `test (26)` the non-blocking early-warning lane (`continue-on-error: ${{ matrix.node-version == 26 }}`). The ruleset itself is admin state outside the repo and still lists `test (22)`, which no longer reports — so the v0.9.80 PR cannot merge until an admin renames the required status check (`gh api --method PUT repos/<owner>/<repo>/rulesets/<id>` with `test (24)` + `gate`). Do it in the same sitting as that merge; then promote `test (26)` later under the original week-green rule.
 - **Why:** a path-filtered or missing required context pends forever (see the container-e2e `gate` design); leaving `test (22)` required after the matrix change blocks every future merge, not just this one.
 - **Context:** `.github/workflows/ci.yml`, `tests/ci/workflow-contract.test.js` (pins the `[24, 26]` matrix and lane names), AGENTS.md merge-gate section, CHANGELOG 0.9.80.

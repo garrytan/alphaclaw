@@ -288,7 +288,7 @@ describe("FULL JOURNEY: stable → beta → restart → stays beta", () => {
     // Apply the beta over HTTP.
     const applied = await request(p1.app)
       .post("/api/openclaw/apply")
-      .send({ channel: "beta", version: kBetaVersion });
+      .send({ channel: "beta", version: kBetaVersion, intent: "update" });
     expect([200, 202]).toContain(applied.status);
     await waitFor(() => {
       const run = p1.sync.getChannelInfo().lastUpdateRun;
@@ -394,7 +394,7 @@ describe("FULL JOURNEY: stable → beta → restart → stays beta", () => {
     expect(p1.sync.syncAtBoot().ok).toBe(true);
     const first = await request(p1.app)
       .post("/api/openclaw/apply")
-      .send({ channel: "beta", version: kBetaVersion });
+      .send({ channel: "beta", version: kBetaVersion, intent: "update" });
     expect([200, 202]).toContain(first.status);
     await waitFor(() => {
       const run = p1.sync.getChannelInfo().lastUpdateRun;
@@ -411,7 +411,7 @@ describe("FULL JOURNEY: stable → beta → restart → stays beta", () => {
     expect(p2.sync.syncAtBoot().action).toBe("activated");
     const second = await request(p2.app)
       .post("/api/openclaw/apply")
-      .send({ channel: "beta", version: "1.1.0-beta.2" });
+      .send({ channel: "beta", version: "1.1.0-beta.2", intent: "update" });
     expect([200, 202]).toContain(second.status);
     await waitFor(() => {
       const run = p2.sync.getChannelInfo().lastUpdateRun;
@@ -427,7 +427,7 @@ describe("FULL JOURNEY: stable → beta → restart → stays beta", () => {
 
     const applied = await request(p1.app)
       .post("/api/openclaw/apply")
-      .send({ channel: "beta", version: kBetaVersion });
+      .send({ channel: "beta", version: kBetaVersion, intent: "update" });
     expect([202, 409]).toContain(applied.status);
     await waitFor(() => {
       const run = p1.sync.getChannelInfo().lastUpdateRun;
@@ -471,7 +471,7 @@ describe("FULL JOURNEY: stable → beta → restart → stays beta", () => {
       .send({ releaseChannel: "beta" });
     await request(p1.app)
       .post("/api/openclaw/apply")
-      .send({ channel: "beta", version: kBetaVersion });
+      .send({ channel: "beta", version: kBetaVersion, intent: "update" });
     await waitFor(() => {
       const run = p1.sync.getChannelInfo().lastUpdateRun;
       return run && run.finishedAt != null && run.ok === true;
@@ -527,7 +527,7 @@ describe("FULL JOURNEY: stable → beta → restart → stays beta", () => {
     expect(p5.sync.syncAtBoot().ok).toBe(true);
     const reapply = await request(p5.app)
       .post("/api/openclaw/apply")
-      .send({ channel: "beta", version: kBetaVersion });
+      .send({ channel: "beta", version: kBetaVersion, intent: "update" });
     expect(reapply.status).toBe(409);
     expect(reapply.body.code).toBe("version_blocklisted");
     expect(installedVersionAt(journey.installDir)).toBe("1.0.0");
@@ -547,7 +547,7 @@ describe("FULL JOURNEY: stable → beta → restart → stays beta", () => {
 
     const applied = await request(p1.app)
       .post("/api/openclaw/apply")
-      .send({ channel: "beta", version: kBetaVersion });
+      .send({ channel: "beta", version: kBetaVersion, intent: "update" });
     expect([202, 409]).toContain(applied.status);
     await waitFor(() => {
       const run = p1.sync.getChannelInfo().lastUpdateRun;

@@ -100,4 +100,39 @@ describe("gateway mutation admission", () => {
     });
     expect(restartDeferredFields(new Error("launch failed"))).toEqual({});
   });
+
+
+  // v0.9.81 (C3): the standalone backup's admission — its own intent, its own
+  // hold kind, and the shared "update or backup" latch copy.
+  it("the backup intent passes its own backup_quiesce lease through the apply latch; nothing else does", async () => {
+    const lock = createGatewayLifecycleLock();
+    const policy = createGatewayMutationPolicy({ lock, isApplyInProgress: () => true });
+    const hold = await lock.acquire("backup_quiesce");
+    try {
+      // The lease alone (a restart-shaped read) is refused with the new copy.
+      const blocker = policy.read({ hold });
+      expect(blocker.code).toBe("apply_in_progress");
+      expect(blocker.error).toBe("A channel update or backup is in progress — wait for it to finish before restarting.");
+      // The apply intent does not own a backup lease; the backup intent does.
+      expect(policy.read({ hold, intent: kGatewayMutationIntents.apply }).code).toBe("apply_in_progress");
+      expect(policy.read({ hold, intent: kGatewayMutationIntents.backup })).toBeNull();
+      // A backup intent under an APPLY lease is not an owner either.
+    } finally { hold(); }
+    const applyHold = await lock.acquire("apply_commit");
+    try {
+      expect(policy.read({ hold: applyHold, intent: kGatewayMutationIntents.backup }).code).toBe("apply_in_progress");
+    } finally { applyHold(); }
+    // Pre-latch (no hold, latch clear): admitted; a gateway hold refuses.
+    let info = {};
+    const idle = createGatewayMutationPolicy({ lock, getChannelInfo: () => info });
+    expect(idle.read({ intent: kGatewayMutationIntents.backup })).toBeNull();
+    info = { gatewayHold: { reason: "config_migration_failed" } };
+    expect(idle.read({ intent: kGatewayMutationIntents.backup }).code).toBe("gateway_held");
+    expect(() => idle.assert({ intent: kGatewayMutationIntents.backup })).toThrow(GatewayMutationBlockedError);
+    // A manual restart while a backup runs is refused with the shared copy.
+    const busy = createGatewayMutationPolicy({ lock, isApplyInProgress: () => true });
+    expect(busy.read({ preLock: true, intent: kGatewayMutationIntents.restart })).toEqual(
+      expect.objectContaining({ code: "apply_in_progress", statusCode: 409 }),
+    );
+  });
 });

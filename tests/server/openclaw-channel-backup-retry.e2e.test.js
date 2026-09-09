@@ -15,8 +15,9 @@ const os = require("os");
 const path = require("path");
 const { DatabaseSync } = require("node:sqlite");
 const { createRunStream } = require("../../lib/server/openclaw-run-stream");
+const { listLiveOpenclawProcesses } = require("../../lib/server/openclaw-lock-contention");
 const { createGatewayLifecycleLock } = require("../../lib/server/gateway-lifecycle-lock");
-const { createGatewayMutationPolicy } = require("../../lib/server/gateway-mutation-policy");
+const { createGatewayMutationPolicy, kGatewayMutationIntents } = require("../../lib/server/gateway-mutation-policy");
 const { kConsentTtlMs } = require("../../lib/server/backup-risk-consent");
 
 const {
@@ -59,6 +60,7 @@ const {
   kOpenclawStateDbQuietSlackMs,
   kOpenclawStateDbQuietMaxMs,
   kOpenclawBackupTimeoutMs,
+  kOpenclawBackupUpstreamInactivityMs,
   kOpenclawBackupLiveAttempts,
   kOpenclawBackupUpstreamMaxBytes,
   kOpenclawBackupPerFileOverheadMs,
@@ -430,6 +432,12 @@ const makeQuiesceRecorder = ({
   // Real sleep AFTER the barrier begins, before the token is handed back —
   // lets a tuned-down barrier expire before the copy's exclusivity check.
   dbQuietDelayMs = 0,
+  // v0.9.81: a REAL gateway lifecycle lock — the hold handed back is then the
+  // lock's own (kind "backup_quiesce", as lib/server.js wires it), which a
+  // mutation policy built over the same lock can judge (`owns`). The
+  // recorder cannot log "release" for a real hold (identity is ownership);
+  // assert lock.getActiveOperation() === null instead.
+  lock = null,
 } = {}) => {
   const releaseSpy = vi.fn(() => calls.push("release"));
   const recorder = {
@@ -441,6 +449,7 @@ const makeQuiesceRecorder = ({
       if (acquireReject) throw new Error("lock unavailable");
       if (acquireNever) await new Promise(() => {});
       if (acquireDelayMs) await sleep(acquireDelayMs);
+      if (lock) return lock.acquire("backup_quiesce", options);
       return releaseSpy;
     }),
     getStopEvidence: vi.fn(() => stopEvidence),
@@ -500,6 +509,14 @@ const kQuietProbes = {
   listProcesses: () => [],
   listFdHolders: () => [],
 };
+// A fake /proc for the REAL process matcher: { pid: "NUL-joined cmdline" }.
+const fakeProcScan = (table) => () =>
+  listLiveOpenclawProcesses({
+    fsModule: { readdirSync: (p) => (p === "/proc" ? [...Object.keys(table), "self"] : []) },
+    readCmdline: (pid) => table[String(pid)] ?? null,
+    isZombie: () => false,
+    selfPid: 1,
+  });
 
 const createHarness = ({
   pin = "1.0.0",
@@ -1736,7 +1753,7 @@ describe("server/openclaw-channel-backup-retry", () => {
           (m) =>
             /Pre-update backup failed — continuing/.test(m) &&
             /The pre-update backup failed — boom \(after 1 attempt\)\. The AlphaClaw offline copy of the paused state was refused first because/.test(m) &&
-            /4242 \(openclaw gateway run\)\./.test(m),
+            /4242 \(openclaw gateway run\) — argv names an OpenClaw executable or entry script\./.test(m),
         ),
       ).toBe(true);
       expect(readRunBackupRecord(harness)).toEqual(
@@ -2418,6 +2435,490 @@ describe("server/openclaw-channel-backup-retry", () => {
       expect(result.body.message).not.toContain("\u0007");
     });
   });
+  // ── v0.9.81 (D15/D19): bounded, self-describing upstream rung ────────────
+  describe("upstream inactivity policy + output ring (v0.9.81, cross-model D15/D19)", () => {
+    const logLines = (logger) => logger.log.mock.calls.map(([line]) => String(line));
+    const mkLogger = () => ({ log: vi.fn(), warn: vi.fn(), error: vi.fn() });
+    // The live ladder with no quiesce seam: the upstream CLI is the only rung,
+    // so what the runner returns is what the ladder must classify.
+    const stallRunner = ({ lines = [], stalled = true, tuning = {} } = {}) => {
+      const seen = { opts: null };
+      const { runnerImpl } = makeBackupRunner({});
+      const impl = async (opts) => {
+        if (opts.command === "openclaw" && opts.args?.[0] === "backup") {
+          seen.opts = opts;
+          for (const chunk of lines) opts.onOutput?.(chunk, "stdout");
+          await sleep(40);
+          return {
+            ok: false,
+            code: null,
+            signal: "SIGTERM",
+            killed: true,
+            timedOut: false,
+            stalled,
+            tail: lines.join(""),
+          };
+        }
+        return runnerImpl(opts);
+      };
+      return { impl, seen, tuning };
+    };
+
+    it("passes the inactivity window, a staging-bytes probe and an output observer to the runner; a `stalled` result is classified stalled, quotes the CLI's last lines, records them redacted and is offered the backup-risk consent", async () => {
+      const { impl, seen } = stallRunner({
+        // Two complete lines, one split across chunks, one secret from the
+        // spawn env (a secret-NAMED key is what collectSecretValues masks).
+        lines: ["Preparing backup…\n", "auth token=hunter2-secret-value ok\nwaiting for coord", "inator lock\n"],
+      });
+      const logger = mkLogger();
+      const harness = createHarness({
+        runnerImpl: impl,
+        backupTuning: { progressIntervalMs: 5, upstreamInactivityMs: 1234 },
+        extraSyncOptions: {
+          logger,
+          openclawSpawnEnv: () => ({ ...process.env, OPENCLAW_GATEWAY_TOKEN: "hunter2-secret-value" }),
+        },
+      });
+
+      // A human session on the request is what lets the v0.9.79 waiver be
+      // offered; the kind's eligibility is what this test pins.
+      const result = await harness.sync.applyUpdate({
+        ...kHardGateTarget,
+        consentSessionId: "human-test-session",
+      });
+
+      expect(result.status).toBe(409);
+      expect(result.body.code).toBe("backup_failed");
+      expect(seen.opts).toEqual(
+        expect.objectContaining({
+          inactivityTimeoutMs: 1234,
+          progressProbe: expect.any(Function),
+          onOutput: expect.any(Function),
+        }),
+      );
+      // The probe reads the CLI's staging bytes: nothing written → null.
+      expect(seen.opts.progressProbe()).toBe(null);
+      // The 2026.9.x CLI stages through `.openclaw-backup-publish-*/archive.
+      // tar.gz.tmp` in the output's parent (the old `<output>.<uuid>.tmp`
+      // layout saw NOTHING there — "nothing written yet" for ten minutes in
+      // production): bytes there ARE progress.
+      const outIdx = seen.opts.args.indexOf("--output");
+      const finalPath = seen.opts.args[outIdx + 1];
+      const publishDir = path.join(path.dirname(finalPath), ".openclaw-backup-publish-1111-abcdef");
+      fs.mkdirSync(publishDir, { recursive: true });
+      fs.writeFileSync(path.join(publishDir, "archive.tar.gz.tmp"), "s".repeat(2048));
+      try {
+        expect(seen.opts.progressProbe()).toBe(2048);
+        fs.appendFileSync(path.join(publishDir, "archive.tar.gz.tmp"), "s".repeat(1000));
+        expect(seen.opts.progressProbe()).toBe(3048);
+      } finally {
+        fs.rmSync(publishDir, { recursive: true, force: true });
+      }
+      // Once the FINAL archive exists the CLI is in its silent `--verify`
+      // phase: the probe keeps moving (wall clock) so a long verify of a big
+      // archive is never mistaken for a stall — only the ceiling bounds it.
+      fs.writeFileSync(finalPath, "archive");
+      try {
+        expect(String(seen.opts.progressProbe())).toMatch(/^verify:\d+$/);
+      } finally {
+        fs.rmSync(finalPath, { force: true });
+      }
+      // The verdict names the window and quotes the ring — redacted.
+      expect(result.body.message).toMatch(
+        /^The pre-update backup CLI made no progress for 1 seconds? \(no output, nothing written\) and was stopped\. The CLI's last output was: "Preparing backup…" \/ "auth token=\*\*\* ok" \/ "waiting for coordinator lock"\./,
+      );
+      expect(result.body.message).not.toContain("hunter2");
+      expect(result.body.backupFailureKind).toBe("stalled");
+      // A stall is consent-eligible exactly like a timeout (v0.9.79 waiver).
+      expect(result.body.backupRiskEligible).toBe(true);
+      const record = readRunBackupRecord(harness);
+      expect(record.backupFailureKind).toBe("stalled");
+      expect(record.lastOutput).toEqual([
+        "Preparing backup…",
+        "auth token=*** ok",
+        "waiting for coordinator lock",
+      ]);
+      expect(JSON.stringify(record)).not.toContain("hunter2");
+      // Not retried: one live attempt (kLiveRetryPolicy has no stalled row).
+      expect(record.attempts).toBe(1);
+      expect(record.attemptsDetail.map((a) => a.kind)).toEqual(["stalled"]);
+      // The ticker line carried the newest line while the CLI ran.
+      const progress = logLines(logger).filter((line) => /upstream backup create in progress/.test(line));
+      expect(progress.length).toBeGreaterThanOrEqual(1);
+      expect(progress[progress.length - 1]).toMatch(
+        /nothing written yet — last output: waiting for coordinator lock — /,
+      );
+      expect(progress.join("\n")).not.toContain("hunter2");
+      // The step row's failure detail names the stall too.
+      expect(lastStepDetail(harness, "backup", "failed").error).toBe("stalled: no progress for 1 seconds");
+    });
+
+    it("a timeout verdict quotes the ring as well; with no output the message says so; a SUCCESS leaves no lastOutput on the record", async () => {
+      const { runnerImpl } = makeBackupRunner({
+        script: [{ ok: false, timedOut: true, tail: "" }],
+      });
+      const harness = createHarness({ runnerImpl });
+      const result = await harness.sync.applyUpdate(kHardGateTarget);
+      expect(result.status).toBe(409);
+      expect(result.body.backupFailureKind).toBe("timeout");
+      expect(result.body.message).toMatch(/timed out after \d+ minutes\. The CLI printed nothing\./);
+      expect(readRunBackupRecord(harness).lastOutput).toBeUndefined();
+
+      const ok = createHarness({ runnerImpl: makeBackupRunner({}).runnerImpl });
+      const okResult = await ok.sync.applyUpdate(kHardGateTarget);
+      expect(okResult.status).toBe(202);
+      expect(readRunBackupRecord(ok).lastOutput).toBeUndefined();
+    });
+
+    it("the upstream rung's stall inside the quiesce hands over like a timeout: kQuiescedOutcomePolicy.stalled → offline_copy (already ran) → live ladder", async () => {
+      // Force the copy to fail at a non-exclusivity stage so the in-quiesce
+      // upstream attempt runs, and make THAT attempt stall.
+      const quiesce = makeQuiesceRecorder({});
+      let backupCalls = 0;
+      const { runnerImpl } = makeOfflineCopyRunner({ onArchiveTool: failCopyArchive });
+      const impl = async (opts) => {
+        if (opts.command === "openclaw" && opts.args?.[0] === "backup") {
+          backupCalls += 1;
+          if (backupCalls === 1) {
+            return { ok: false, code: null, signal: "SIGTERM", killed: true, timedOut: false, stalled: true, tail: "" };
+          }
+        }
+        return runnerImpl(opts);
+      };
+      const harness = createHarness({
+        runnerImpl: impl,
+        gatewayQuiesce: quiesce,
+        backupProbes: kQuietProbes,
+      });
+      seedStateDb(harness);
+
+      const result = await harness.sync.applyUpdate(kHardGateTarget);
+
+      expect(result.status).toBe(202);
+      const record = readRunBackupRecord(harness);
+      expect(record.producer).toBe("openclaw");
+      expect(record.attemptsDetail.map((a) => [a.rung, a.quiesced, a.kind ?? "ok"])).toEqual([
+        ["offline_copy", true, "offline_copy_failed"],
+        ["upstream", true, "stalled"],
+        ["upstream", false, "ok"],
+      ]);
+    });
+  });
+
+  // ── v0.9.81 (C3): "Back up now" — the ladder as a standalone run ─────────
+  describe("runStandaloneBackup (Back up now, v0.9.81)", () => {
+    const readRuns = (harness) => {
+      const runsDir = path.join(harness.openclawDir, ".alphaclaw", "runs");
+      if (!fs.existsSync(runsDir)) return [];
+      return fs
+        .readdirSync(runsDir)
+        .filter((name) => name.endsWith(".json"))
+        .map((name) => JSON.parse(fs.readFileSync(path.join(runsDir, name), "utf8")))
+        .sort((a, b) => (b.startedAt ?? 0) - (a.startedAt ?? 0));
+    };
+
+    // Production shape: ONE lifecycle lock shared by the quiesce seam and the
+    // mutation policy (lib/server.js), so the under-lease re-assert judges the
+    // very hold the quiesce acquired.
+    const withSharedLockPolicy = () => {
+      const lock = createGatewayLifecycleLock();
+      const ref = { sync: null };
+      const policy = createGatewayMutationPolicy({
+        lock,
+        getChannelInfo: () => ref.sync.getChannelInfo(),
+        isApplyInProgress: () => ref.sync.isApplyInProgress(),
+      });
+      const policyAssert = vi.fn((options) => policy.assert(options));
+      return { lock, ref, policyAssert, gatewayMutationPolicy: { assert: policyAssert } };
+    };
+
+    it("pauses, copies, relaunches and records a `kind: backup` run — nothing installs, nothing restarts, lastUpdateRun untouched", async () => {
+      const { lock, ref, policyAssert, gatewayMutationPolicy } = withSharedLockPolicy();
+      const quiesce = makeQuiesceRecorder({ lock });
+      const { runnerImpl, backupCalls } = makeOfflineCopyRunner({
+        onArchiveTool: markOfflineCopy(quiesce),
+      });
+      const harness = createHarness({
+        runnerImpl,
+        gatewayQuiesce: quiesce,
+        extraSyncOptions: { gatewayMutationPolicy },
+      });
+      ref.sync = harness.sync;
+      seedStateDb(harness);
+      // A REAL last update pointer with steps: the backup must not touch it
+      // (stepRecorder's mirror is off for a standalone run).
+      harness.store.updateState((state) => {
+        state.lastUpdateRun = {
+          operationId: "0f76b007-e2e0-4c0d-9a1e-000000000099",
+          target: { channel: "stable", version: "1.0.0" },
+          startedAt: 500_000,
+          finishedAt: 500_500,
+          ok: true,
+          steps: [{ name: "activate", status: "completed", at: 500_400 }],
+        };
+        return state;
+      });
+      const lastUpdateRunBefore = JSON.stringify(harness.store.readState().lastUpdateRun ?? null);
+      expect(lastUpdateRunBefore).toContain('"activate"');
+
+      const result = await harness.sync.runStandaloneBackup({});
+
+      expect(result.status).toBe(200);
+      expect(result.body.ok).toBe(true);
+      expect(typeof result.body.operationId).toBe("string");
+      expect(result.body.archive).toEqual(
+        expect.objectContaining({ producer: "alphaclaw-offline-copy", verified: true, partial: false }),
+      );
+      expect(fs.existsSync(result.body.archive.file)).toBe(true);
+      // The full quiesce transaction ran and unwound: stop → copy → relaunch
+      // → the real lease released (a real hold cannot log "release").
+      expect(quiesce.calls).toEqual([
+        "acquireLock",
+        "isRunning",
+        "suppress",
+        "stop",
+        "dbQuiet",
+        "offline-copy(quiet)",
+        "dbResume",
+        "start",
+        "unsuppress",
+      ]);
+      expect(lock.getActiveOperation()).toBeNull();
+      expect(isStateDbQuiet()).toBe(false);
+      expect(backupCalls).toHaveLength(0);
+      expect(harness.installToTempDir).not.toHaveBeenCalled();
+      expect(harness.restartProcess).not.toHaveBeenCalled();
+      expect(harness.sync.isApplyInProgress()).toBe(false);
+      // No lastUpdateRun, no lastBackupRun pointer: the ledger is the source.
+      expect(JSON.stringify(harness.store.readState().lastUpdateRun ?? null)).toBe(lastUpdateRunBefore);
+      expect(harness.store.readState().lastBackupRun).toBeUndefined();
+      const [run] = readRuns(harness);
+      expect(run).toEqual(
+        expect.objectContaining({
+          operationId: result.body.operationId,
+          target: { kind: "backup" },
+          state: "completed",
+          ok: true,
+          result: expect.objectContaining({ ok: true, archive: expect.objectContaining({ file: result.body.archive.file }) }),
+          backup: expect.objectContaining({ producer: "alphaclaw-offline-copy", noBackup: false, attempts: 0 }),
+        }),
+      );
+      expect(run.finishedAt).not.toBeNull();
+      // Admission (AGENTS.md): asserted BEFORE the latch (no hold) and again
+      // UNDER the owned backup_quiesce lease, with the backup intent both times.
+      expect(policyAssert).toHaveBeenCalledTimes(2);
+      expect(policyAssert.mock.calls[0][0]).toEqual({ intent: kGatewayMutationIntents.backup });
+      expect(policyAssert.mock.calls[1][0].intent).toBe(kGatewayMutationIntents.backup);
+      expect(policyAssert.mock.calls[1][0].hold).toBeTruthy();
+      expect(policyAssert.mock.calls[1][0].hold.kind).toBe("backup_quiesce");
+      // Announced like an apply outcome.
+      expect(notifyMessages(harness.notify).some((m) => /OpenClaw backup written/.test(m))).toBe(true);
+    });
+
+    it("a completed manual backup activates nothing: it never raises the reuse-window floor, so its own archive is exactly what a later failed update is offered (review P1)", async () => {
+      const { lock, ref, gatewayMutationPolicy } = withSharedLockPolicy();
+      const quiesce = makeQuiesceRecorder({ lock });
+      let failCopy = false;
+      const { runnerImpl } = makeOfflineCopyRunner({
+        // The later apply's whole fresh ladder fails: copy at the archive
+        // stage, every upstream attempt on lock contention.
+        script: Array.from({ length: 8 }, () => ({ ok: false, tail: kLeaseLostTail })),
+        onArchiveTool: (opts) => (failCopy ? failCopyArchive(opts) : null),
+      });
+      const harness = createHarness({
+        runnerImpl,
+        gatewayQuiesce: quiesce,
+        extraSyncOptions: { gatewayMutationPolicy },
+      });
+      ref.sync = harness.sync;
+      harness.nowRef.now = kRealisticNow;
+      seedStateDb(harness);
+
+      const backup = await harness.sync.runStandaloneBackup({});
+      expect(backup.status).toBe(200);
+      const manualArchive = backup.body.archive.file;
+      expect(harness.sync.listBackupInventory().reuseWindowStartMs).toBeLessThan(backup.body.archive.at);
+
+      failCopy = true;
+      harness.nowRef.now += 60_000;
+      const result = await harness.sync.applyUpdate({ ...kHardGateTarget, intent: "update" });
+      expect(result.status).toBe(409);
+      expect(result.body.code).toBe("backup_failed");
+      // The offer IS the manual archive. (Its `producer` here comes from the
+      // reuse verification's manifest read, which this harness answers with
+      // the scripted upstream stub for fd-path reads — a fixture artefact,
+      // not a claim about the copy's own manifest.)
+      expect(result.body.reusableBackup).toEqual(expect.objectContaining({ file: manualArchive }));
+      expect(result.body.reusableBackup.at).toBe(backup.body.archive.at);
+    });
+
+    it("a failed manual backup never offers an older archive for reuse (there is no update to wave through)", async () => {
+      const { runnerImpl } = makeBackupRunner({
+        script: Array.from({ length: 4 }, () => ({ ok: false, tail: kLeaseLostTail })),
+      });
+      const harness = createHarness({ runnerImpl });
+      harness.nowRef.now = kRealisticNow;
+      // A verified archive from an earlier run sits in the inventory.
+      const backupsDir = path.join(harness.rootDir, "backups", "openclaw");
+      fs.mkdirSync(backupsDir, { recursive: true, mode: 0o700 });
+      const at = harness.nowRef.now - 60 * 60 * 1000;
+      const file = path.join(backupsDir, `openclaw-backup-${at}-prev0000.tar.gz`);
+      fs.writeFileSync(file, "earlier archive\n");
+      const priorId = crypto.randomUUID();
+      harness.ledger.createRun({ operationId: priorId, target: { channel: "stable", version: "1.0.0" } });
+      harness.ledger.updateRun(priorId, (record) => {
+        record.startedAt = at - 1000;
+        record.finishedAt = at - 500;
+        record.state = "failed";
+        record.ok = false;
+        record.backup = { noBackup: false, file, verified: true, partial: false, at, producer: "openclaw", usableCheck: "manifest_ok" };
+        return record;
+      });
+      const result = await harness.sync.runStandaloneBackup({});
+      expect(result.status).toBe(409);
+      expect(result.body.code).toBe("backup_failed");
+      expect(result.body.backupFailureKind).toBe("lock_contention");
+      expect(result.body.reusableBackup).toBeUndefined();
+    });
+
+    it("a failing ladder ends the run `failed` with backup_failed and the manual gate hint; the record carries the classified kind", async () => {
+      const { runnerImpl } = makeBackupRunner({ script: [{ ok: false, tail: "ENOSPC: no space left on device\n" }] });
+      const harness = createHarness({ runnerImpl });
+      const result = await harness.sync.runStandaloneBackup({});
+      expect(result.status).toBe(409);
+      expect(result.body.code).toBe("backup_failed");
+      expect(result.body.hint).toContain("Fix the cause and retry the backup.");
+      expect(result.body.hint).not.toMatch(/same-channel version/);
+      // A manual run is not "pre-update" anything.
+      expect(result.body.message).toMatch(/^The backup failed: not enough disk space\./);
+      expect(result.body.message).not.toContain("pre-update");
+      const [run] = readRuns(harness);
+      expect(run).toEqual(
+        expect.objectContaining({
+          target: { kind: "backup" },
+          state: "failed",
+          ok: false,
+          result: expect.objectContaining({ code: "backup_failed" }),
+          backup: expect.objectContaining({ noBackup: true, backupFailureKind: "enospc", attempts: 1 }),
+        }),
+      );
+      expect(harness.sync.isApplyInProgress()).toBe(false);
+      expect(notifyMessages(harness.notify).some((m) => /OpenClaw backup failed/.test(m))).toBe(true);
+    });
+
+    it("an apply and a backup never overlap: each 409s operation_in_progress while the other runs", async () => {
+      let releaseCopy = null;
+      const gate = new Promise((resolve) => {
+        releaseCopy = resolve;
+      });
+      const { lock, ref, gatewayMutationPolicy } = withSharedLockPolicy();
+      const quiesce = makeQuiesceRecorder({ lock });
+      const { runnerImpl } = makeOfflineCopyRunner({
+        onArchiveTool: (opts) =>
+          opts.command === "tar" && opts.args[0] === "-I" ? gate.then(() => null) : null,
+      });
+      const harness = createHarness({
+        runnerImpl,
+        gatewayQuiesce: quiesce,
+        extraSyncOptions: { gatewayMutationPolicy },
+      });
+      ref.sync = harness.sync;
+      seedStateDb(harness);
+
+      const backupPromise = harness.sync.runStandaloneBackup({});
+      expect(await Promise.race([backupPromise, sleep(20).then(() => "pending")])).toBe("pending");
+      expect(harness.sync.isApplyInProgress()).toBe(true);
+      const apply = await harness.sync.applyUpdate({ ...kHardGateTarget, intent: "update" });
+      expect(apply.status).toBe(409);
+      expect(apply.body.code).toBe("operation_in_progress");
+      const second = await harness.sync.runStandaloneBackup({});
+      expect(second.status).toBe(409);
+      expect(second.body.code).toBe("operation_in_progress");
+      expect(second.body.message).toMatch(/update or backup/);
+      releaseCopy();
+      const first = await backupPromise;
+      expect(first.status).toBe(200);
+      expect(harness.sync.isApplyInProgress()).toBe(false);
+    });
+
+    it("entry gates: a running gateway operation, a migration holder, not onboarded, and a gateway hold all refuse before anything is paused", async () => {
+      const cases = [
+        [{ getActiveGatewayOperation: () => ({ kind: "restart" }) }, "gateway_operation_in_progress"],
+        [{ getActiveGatewayOperation: () => ({ kind: "boot" }) }, "gateway_busy"],
+        [{ isOnboarded: () => false }, "not_onboarded"],
+        [
+          {
+            gatewayMutationPolicy: {
+              assert: () => {
+                throw Object.assign(new Error("held"), {
+                  blocked: true,
+                  statusCode: 409,
+                  code: "gateway_held",
+                  error: "The gateway is held after a failed settings migration.",
+                  hint: "Use Retry migration first.",
+                  hold: "config_migration_failed",
+                });
+              },
+            },
+          },
+          "gateway_held",
+        ],
+      ];
+      for (const [extraSyncOptions, code] of cases) {
+        const quiesce = makeQuiesceRecorder({});
+        const { runnerImpl } = makeOfflineCopyRunner({});
+        const harness = createHarness({ runnerImpl, gatewayQuiesce: quiesce, extraSyncOptions });
+        const result = await harness.sync.runStandaloneBackup({});
+        expect(result.status, code).toBe(409);
+        expect(result.body.code).toBe(code);
+        expect(quiesce.calls).toEqual([]);
+        expect(readRuns(harness)).toEqual([]);
+        expect(harness.sync.isApplyInProgress()).toBe(false);
+        if (code === "gateway_held") {
+          expect(result.body.message).toContain("held");
+          expect(result.body.hint).toBe("Use Retry migration first.");
+          expect(result.body.hold).toBe("config_migration_failed");
+        }
+      }
+    });
+
+    it("a hold that appears while the lease was queued refuses UNDER the lease: lock released, gateway never stopped, run failed with the hold's code", async () => {
+      const quiesce = makeQuiesceRecorder({});
+      const { runnerImpl } = makeOfflineCopyRunner({});
+      let calls = 0;
+      const harness = createHarness({
+        runnerImpl,
+        gatewayQuiesce: quiesce,
+        extraSyncOptions: {
+          gatewayMutationPolicy: {
+            assert: ({ hold }) => {
+              calls += 1;
+              if (!hold) return; // pre-latch read passes
+              throw Object.assign(new Error("held"), {
+                blocked: true,
+                statusCode: 409,
+                code: "gateway_held",
+                error: "The gateway is held after a failed settings migration.",
+                hint: "Use Retry migration first.",
+              });
+            },
+          },
+        },
+      });
+      seedStateDb(harness);
+      const result = await harness.sync.runStandaloneBackup({});
+      expect(result.status).toBe(409);
+      expect(result.body.code).toBe("gateway_held");
+      expect(calls).toBe(2);
+      expect(quiesce.calls).toEqual(["acquireLock", "unsuppress", "release"]);
+      expect(quiesce.stop).not.toHaveBeenCalled();
+      expect(harness.sync.isApplyInProgress()).toBe(false);
+      const [run] = readRuns(harness);
+      expect(run).toEqual(expect.objectContaining({ target: { kind: "backup" }, state: "failed" }));
+      expect(run.result.code).toBe("gateway_held");
+    });
+  });
+
   // ── Issue #54: policy tables are data ────────────────────────────────────
   describe("policy tables (plan §6)", () => {
     it("pins the quiesced outcome policy, the live retry policy, and the reuse-eligible kinds", () => {
@@ -2426,6 +2927,10 @@ describe("server/openclaw-channel-backup-retry", () => {
         killed: "offline_copy",
         // #79: a timeout is a speed verdict — the copy is the rung that fits.
         timeout: "offline_copy",
+        // v0.9.81 (D15): a stall (no output, no staging bytes for the
+        // inactivity window) is a hung CLI — same rung as a timeout, never a
+        // replay of the hang.
+        stalled: "offline_copy",
         vanished_file: "fallback",
         workspace_discovery: "workspace_retry",
         default: "terminal",
@@ -2437,8 +2942,12 @@ describe("server/openclaw-channel-backup-retry", () => {
         killed: { retries: 1, delayMs: 15000 },
       });
       expect([...kReuseEligibleKinds].sort()).toEqual(
-        ["killed", "lock_contention", "timeout", "vanished_file", "window_exhausted"].sort(),
+        ["killed", "lock_contention", "stalled", "timeout", "vanished_file", "window_exhausted"].sort(),
       );
+      // Neither a timeout nor a stall is ever retried live: a second attempt
+      // would replay the same hang for another ceiling.
+      expect(kLiveRetryPolicy).not.toHaveProperty("timeout");
+      expect(kLiveRetryPolicy).not.toHaveProperty("stalled");
       for (const terminal of ["no_command", "refuse_overwrite", "enospc", "verify", "generic", "spawn_error", "no_artifact"]) {
         expect(kReuseEligibleKinds).not.toContain(terminal);
       }
@@ -2479,6 +2988,8 @@ describe("server/openclaw-channel-backup-retry", () => {
           perFileOverheadMs: kOpenclawBackupPerFileOverheadMs,
           // #79 (h): the progress ticker's cadence, harness-tunable like the rest.
           progressIntervalMs: 15_000,
+          // v0.9.81 (D15): the upstream rung's inactivity window.
+          upstreamInactivityMs: kOpenclawBackupUpstreamInactivityMs,
         }),
       );
       // The driver spreads it under the tuning override: the harness's
@@ -3192,7 +3703,7 @@ describe("server/openclaw-channel-backup-retry", () => {
       // generic has no live retry) before the gate refused.
       expect(backupCalls).toHaveLength(1);
       expect(result.body.message).toBe(
-        "The pre-update backup failed — boom (after 1 attempt). The AlphaClaw offline copy of the paused state was refused first because state dir is not exclusively ours: 1 live openclaw process(es): 4242 (openclaw gateway run).",
+        "The pre-update backup failed — boom (after 1 attempt). The AlphaClaw offline copy of the paused state was refused first because state dir is not exclusively ours: 1 live openclaw process(es): 4242 (openclaw gateway run) — argv names an OpenClaw executable or entry script.",
       );
       expect(result.body.message).not.toMatch(/after 0 attempts/);
       // The driver re-sampled (settle loop) before refusing a holder that stayed.
@@ -3415,6 +3926,59 @@ describe("server/openclaw-channel-backup-retry", () => {
       // This run records the CLI's own wall time for the NEXT calibration.
       expect(record.attemptMs).toBe(1234);
       expect(record.durationMs).toBeGreaterThanOrEqual(1234);
+    });
+
+    it("v0.9.81 (RC3a): a `tail -F` on OpenClaw's log file beside the paused gateway is NOT a live openclaw process — the REAL matcher over a fake /proc lets the copy run (attempts: 0); a real `gateway run` in the same table still refuses", async () => {
+      const table = {
+        348161: "tail\0-c\0+1\0-F\0/tmp/openclaw/openclaw-2026-09-08.log\0",
+        348170: "less\0/data/openclaw/x.log\0",
+        348180: "node\0/app/bin/alphaclaw.js\0start\0",
+      };
+      const quiesce = makeQuiesceRecorder({});
+      const { runnerImpl, backupCalls } = makeOfflineCopyRunner({});
+      const harness = createHarness({
+        runnerImpl,
+        gatewayQuiesce: quiesce,
+        backupProbes: { ...kQuietProbes, listProcesses: fakeProcScan(table) },
+      });
+      seedStateDb(harness);
+
+      const result = await harness.sync.applyUpdate(kHardGateTarget);
+
+      expect(result.status).toBe(202);
+      expect(backupCalls).toHaveLength(0);
+      const record = readRunBackupRecord(harness);
+      expect(record).toEqual(
+        expect.objectContaining({
+          producer: "alphaclaw-offline-copy",
+          attempts: 0,
+          quiescedAttempts: 0,
+          offlineCopy: expect.objectContaining({ ok: true, reason: "primary" }),
+        }),
+      );
+      expect(record.diagnosis.otherProcesses).toEqual([]);
+
+      // Same table plus a real gateway: refused, holder named with the reason
+      // the operator can act on.
+      const withGateway = { ...table, 348300: "openclaw\0gateway\0run\0" };
+      const refusedRunner = makeOfflineCopyRunner({});
+      const refused = createHarness({
+        runnerImpl: refusedRunner.runnerImpl,
+        gatewayQuiesce: makeQuiesceRecorder({}),
+        backupProbes: { ...kQuietProbes, listProcesses: fakeProcScan(withGateway) },
+      });
+      seedStateDb(refused);
+      const refusedResult = await refused.sync.applyUpdate(kHardGateTarget);
+      expect(refusedResult.status).toBe(202);
+      expect(refusedRunner.backupCalls).toHaveLength(1);
+      const refusedRecord = readRunBackupRecord(refused);
+      expect(refusedRecord.offlineCopy).toEqual(
+        expect.objectContaining({ ok: false, stage: "exclusivity" }),
+      );
+      expect(refusedRecord.offlineCopy.error).toMatch(
+        /1 live openclaw process\(es\): 348300 \(openclaw gateway run\) — argv names an OpenClaw executable or entry script/,
+      );
+      expect(refusedRecord.offlineCopy.error).not.toMatch(/tail/);
     });
 
     it("refuses the offline copy when the state dir is not exclusively ours (a live openclaw process) — and the hard gate is then satisfied by the LIVE upstream, which needs no exclusivity", async () => {
@@ -4542,7 +5106,7 @@ describe("server/openclaw-channel-backup-retry", () => {
       // preceded it.
       expect(result.body.message).toMatch(/lock/i);
       expect(result.body.message).toMatch(
-        /The AlphaClaw offline copy of the paused state was refused first because state dir is not exclusively ours: 1 live openclaw process\(es\): 4242 \(openclaw gateway run\)\.$/,
+        /The AlphaClaw offline copy of the paused state was refused first because state dir is not exclusively ours: 1 live openclaw process\(es\): 4242 \(openclaw gateway run\) — argv names an OpenClaw executable or entry script\.$/,
       );
       expect(result.body.reusableBackup).toEqual(
         expect.objectContaining({ file: seeded.file, sha256: seeded.sha256 }),
@@ -5099,6 +5663,35 @@ describe("server/openclaw-channel-backup-retry", () => {
   });
 
   // ── Issue #79 (g) `.tmp` hygiene + (h) progress ──────────────────────────
+  describe("backup debris sweep: the 2026.9.x CLI's publish staging dir (v0.9.81)", () => {
+    it("boot mode removes every `.openclaw-backup-publish-*` dir; in-run mode only one older than the CLI ceiling + slack; a failed attempt's cleanup removes the one it left", async () => {
+      const { runnerImpl } = makeBackupRunner({});
+      const harness = createHarness({ runnerImpl });
+      // The age rule compares real mtimes against the logical clock: give the
+      // clock a realistic epoch so "older than the ceiling" is representable.
+      harness.nowRef.now = kRealisticNow;
+      const backupsDir = path.join(harness.rootDir, "backups", "openclaw");
+      const stale = path.join(backupsDir, ".openclaw-backup-publish-aaaa-stale0");
+      const young = path.join(backupsDir, ".openclaw-backup-publish-bbbb-young0");
+      fs.mkdirSync(stale, { recursive: true });
+      fs.mkdirSync(young, { recursive: true });
+      fs.writeFileSync(path.join(stale, "archive.tar.gz.tmp"), "x".repeat(500));
+      fs.writeFileSync(path.join(young, "archive.tar.gz.tmp"), "y".repeat(300));
+      const oldMs = (harness.nowRef.now - kOpenclawBackupTimeoutMs - kOpenclawBackupStaleTempDirSlackMs - 60_000) / 1000;
+      fs.utimesSync(stale, oldMs, oldMs);
+
+      const inRun = await harness.sync.sweepBackupDebris({ mode: "in-run" });
+      expect(inRun.removed.map((r) => r.name)).toEqual([".openclaw-backup-publish-aaaa-stale0"]);
+      expect(inRun.removed[0]).toEqual(expect.objectContaining({ bytes: 500, why: "stale" }));
+      expect(inRun.kept).toContain(".openclaw-backup-publish-bbbb-young0");
+      expect(fs.existsSync(young)).toBe(true);
+
+      const boot = await harness.sync.sweepBackupDebris({ mode: "boot" });
+      expect(boot.removed.map((r) => r.name)).toContain(".openclaw-backup-publish-bbbb-young0");
+      expect(fs.existsSync(young)).toBe(false);
+    });
+  });
+
   describe("backup debris sweep (#79 (g), Codex 18) and the progress ticker (#79 (h))", () => {
     const kMinute = 60_000;
     // The in-run age rule: the CLI ceiling plus slack — a `.tmp` younger than
@@ -5401,7 +5994,7 @@ describe("server/openclaw-channel-backup-retry", () => {
         .map(progressText);
       expect(progressLines.length).toBeGreaterThanOrEqual(2);
       // Live (no pause marker), sized from the staging file, frozen clock.
-      expect(progressLines[0]).toBe("upstream backup create in progress: 3 MB written so far — 0s elapsed");
+      expect(progressLines[0]).toBe("upstream backup create in progress: 3 MB written so far — no output yet — 0s elapsed");
       const steps = harness.store.readState().lastUpdateRun.steps.filter((s) => s.name === "backup");
       expect(steps.map((s) => s.status)).toEqual(["running", "completed"]);
       expect(steps[0].detail).toMatch(/^upstream backup create in progress: 3 MB written so far/);

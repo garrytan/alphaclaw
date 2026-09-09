@@ -5072,6 +5072,49 @@ describe("syncAtBoot bin-phase boot report (#76 A1)", () => {
     );
   });
 
+  it("v0.9.81 (C3): a dangling `kind: backup` run (AlphaClaw died mid-backup) is closed `interrupted` at boot and the boot still proceeds to a normal pin sync", () => {
+    const { sync, store } = createReportingHarness({
+      pin: "1.0.0",
+      channel: "stable",
+      installedVersion: "1.0.0",
+    });
+    const danglingRunId = "0f76b007-e2e0-4c0d-9a1e-000000000081";
+    const runsDir = path.join(store.managedDir, "runs");
+    fs.mkdirSync(runsDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(runsDir, `${danglingRunId}.json`),
+      JSON.stringify({
+        operationId: danglingRunId,
+        target: { kind: "backup" },
+        state: "running",
+        startedAt: 900_000,
+        finishedAt: null,
+        ok: null,
+        result: null,
+        steps: [{ name: "backup", status: "running", at: 900_000 }],
+        backup: null,
+        dbPreflight: null,
+        overseer: null,
+        hasLog: false,
+      }),
+    );
+
+    const result = sync.syncAtBoot();
+
+    expect(result).toEqual(expect.objectContaining({ ok: true, action: "none" }));
+    expect(readReport(store).openclaw.bootSync.danglingRecords).toEqual({
+      closedRuns: [danglingRunId],
+      closedLastUpdateRun: false,
+    });
+    const run = JSON.parse(fs.readFileSync(path.join(runsDir, `${danglingRunId}.json`), "utf8"));
+    expect(run.state).toBe("interrupted");
+    expect(run.ok).toBe(false);
+    expect(run.result?.code).toBe("interrupted");
+    expect(run.target).toEqual({ kind: "backup" });
+    // lastUpdateRun was never written by the backup — nothing to close there.
+    expect(store.readState().lastUpdateRun ?? null).toBeNull();
+  });
+
   it("the CORROBORATED skipped_concurrent path (bin refuses to start) writes boot-report-refused.json — serverPhase not_reached/pidfile_skip — and leaves the live sibling's boot-report.json and ring untouched", async () => {
     const { spawn } = require("child_process");
     const { sync, store, installDir } = createReportingHarness({
