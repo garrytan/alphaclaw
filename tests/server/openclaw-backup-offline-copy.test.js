@@ -213,7 +213,9 @@ describe("server/openclaw-backup-offline-copy", () => {
         liveProcesses: [{ pid: 9 }],
       });
       expect(disabledButLive.ok).toBe(false);
-      expect(disabledButLive.failures).toEqual(["1 live openclaw process(es): 9"]);
+      expect(disabledButLive.failures).toEqual([
+        "1 live openclaw process(es): 9 — argv names an OpenClaw executable or entry script",
+      ]);
     });
 
     it("refuses on live openclaw processes and open in-process handles", () => {
@@ -226,7 +228,7 @@ describe("server/openclaw-backup-offline-copy", () => {
       // pid AND argv: the operator can tell a foreign holder from AlphaClaw's
       // own transient CLI shell-out that coincided with the sample.
       expect(report.failures).toEqual([
-        "1 live openclaw process(es): 57 (openclaw gateway run)",
+        "1 live openclaw process(es): 57 (openclaw gateway run) — argv names an OpenClaw executable or entry script",
         "2 in-process state-db handle(s) open",
       ]);
     });

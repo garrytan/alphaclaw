@@ -179,3 +179,97 @@ describe("server/openclaw-run-stream", () => {
     expect(fs.readFileSync(logFile, "utf8")).toContain("nested-log-line");
   });
 });
+
+// v0.9.81 (cross-model D15): the inactivity policy. A child that neither
+// prints nor moves the progress probe for `inactivityTimeoutMs` is stopped like
+// a timeout, but the result says `stalled`, not `timedOut`.
+describe("server/openclaw-run-stream inactivity policy", () => {
+  // Keeps the event loop alive without printing; exits on its own after `ms`.
+  const silentFor = (ms) => `setTimeout(() => process.exit(0), ${ms});`;
+
+  it("kills a silent child after the window and reports stalled (not timedOut)", async () => {
+    const started = Date.now();
+    const result = await runNodeScript(silentFor(10_000), {
+      options: { inactivityTimeoutMs: 200, killGraceMs: 500 },
+    });
+    expect(result.ok).toBe(false);
+    expect(result.stalled).toBe(true);
+    expect(result.timedOut).toBe(false);
+    expect(result.killed).toBe(true);
+    expect(result.signal).toBe("SIGTERM");
+    expect(Date.now() - started).toBeLessThan(5_000);
+  });
+
+  it("output chunks reset the window: a child that keeps talking is never cut", async () => {
+    const script = [
+      "let n = 0;",
+      "const t = setInterval(() => { process.stdout.write('tick ' + n + '\\n'); n += 1; if (n >= 8) { clearInterval(t); process.exit(0); } }, 60);",
+    ].join("\n");
+    const result = await runNodeScript(script, { options: { inactivityTimeoutMs: 250 } });
+    expect(result.ok).toBe(true);
+    expect(result.stalled).toBe(false);
+    expect(result.tail).toContain("tick 7");
+  });
+
+  it("a changing progressProbe value resets the window (a silent-but-writing child lives); once it stops changing the stall fires", async () => {
+    const started = Date.now();
+    let calls = 0;
+    // Grows for ~600 ms of polls, then freezes.
+    const probe = () => (Date.now() - started < 600 ? (calls += 1) : 999_999);
+    const result = await runNodeScript(silentFor(10_000), {
+      options: { inactivityTimeoutMs: 200, killGraceMs: 500, progressProbe: probe },
+    });
+    expect(result.stalled).toBe(true);
+    expect(result.timedOut).toBe(false);
+    // Lived through the growing phase: the kill came after it, not at 200 ms.
+    expect(result.durationMs).toBeGreaterThanOrEqual(600);
+    expect(calls).toBeGreaterThan(1);
+  });
+
+  it("a constant probe plus silence is a stall; a throwing probe counts as no change (never breaks the run)", async () => {
+    const constant = await runNodeScript(silentFor(10_000), {
+      options: { inactivityTimeoutMs: 150, killGraceMs: 500, progressProbe: () => 42 },
+    });
+    expect(constant.stalled).toBe(true);
+    const throwing = await runNodeScript(silentFor(10_000), {
+      options: {
+        inactivityTimeoutMs: 150,
+        killGraceMs: 500,
+        progressProbe: () => {
+          throw new Error("probe broke");
+        },
+      },
+    });
+    expect(throwing.stalled).toBe(true);
+    expect(throwing.error).toBeUndefined();
+  });
+
+  it("inactivityTimeoutMs: 0 (the default) turns the policy off — a silent child runs to its own exit", async () => {
+    const result = await runNodeScript(silentFor(300), { options: { inactivityTimeoutMs: 0 } });
+    expect(result.ok).toBe(true);
+    expect(result.stalled).toBe(false);
+    const implicit = await runNodeScript(silentFor(300));
+    expect(implicit.ok).toBe(true);
+    expect(implicit.stalled).toBe(false);
+  });
+
+  it("the hard ceiling still wins when it is the smaller bound: timedOut, not stalled", async () => {
+    const result = await runNodeScript(silentFor(10_000), {
+      options: { timeoutMs: 150, inactivityTimeoutMs: 5_000, killGraceMs: 500 },
+    });
+    expect(result.timedOut).toBe(true);
+    expect(result.stalled).toBe(false);
+    expect(result.ok).toBe(false);
+  });
+
+  it("a stall escalates SIGTERM → SIGKILL after killGraceMs when the child ignores SIGTERM", async () => {
+    const script = "process.on('SIGTERM', () => {}); setTimeout(() => {}, 20000);";
+    const started = Date.now();
+    const result = await runNodeScript(script, {
+      options: { inactivityTimeoutMs: 150, killGraceMs: 200 },
+    });
+    expect(result.stalled).toBe(true);
+    expect(result.signal).toBe("SIGKILL");
+    expect(Date.now() - started).toBeLessThan(5_000);
+  });
+});
