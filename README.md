@@ -94,7 +94,7 @@ npx alphaclaw start
 Or with Docker:
 
 ```dockerfile
-FROM node:22-slim
+FROM node:24-slim
 RUN apt-get update && apt-get install -y --no-install-recommends git curl procps cron tini tmux ca-certificates && rm -rf /var/lib/apt/lists/*
 # Optional but recommended: the local Claude Code rescue session needs tmux
 # (above) and the claude CLI. Keep this pin in step with the reference
@@ -104,6 +104,9 @@ RUN npm install -g @anthropic-ai/claude-code@2.1.251
 WORKDIR /app
 COPY package.json ./
 RUN npm install --omit=dev
+# Fail the build, not the first boot, if the floating base tag resolved to a
+# Node below AlphaClaw's floor (>=24.16 since v0.9.80, the OpenClaw 2026.9.3 pin).
+RUN node -e "require('@chrysb/alphaclaw/lib/node-runtime').assertSupportedNodeVersion()"
 ENV PATH="/app/node_modules/.bin:$PATH"
 ENV ALPHACLAW_ROOT_DIR=/data
 EXPOSE 3000
@@ -515,9 +518,9 @@ limited container and follow the tested setup in the [cloud testing runbook](doc
 CI or a Docker Desktop/Colima host can also run these checks. The immutable
 two-image journey must pass before considering self-upgrade risk covered.
 
-**Requirements:** Node.js ≥ 22.22.3 on Node 22, ≥ 24.15.0 on Node 24, or ≥ 25.9.0
+**Requirements:** Node.js ≥ 24.16.0 on Node 24, or ≥ 26.1.0 on Node 26 (OpenClaw 2026.9.3 dropped Node 22 and 25 — older runtimes truncate SQLite text)
 
-CI (`.github/workflows/ci.yml`) runs the hermetic suite on Node 22 and Node 24. The `main` ruleset requires `test (22)` plus the container-e2e `gate` aggregator; `test (24)` is an early-warning lane (`continue-on-error`) whose failures are reported but do not block a merge until the ruleset lists it as required.
+CI (`.github/workflows/ci.yml`) runs the hermetic suite on Node 24 and Node 26. The `main` ruleset requires `test (24)` plus the container-e2e `gate` aggregator; `test (26)` is an early-warning lane (`continue-on-error`) whose failures are reported but do not block a merge until the ruleset lists it as required.
 
 
 ## Official Website

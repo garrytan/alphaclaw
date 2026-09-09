@@ -316,7 +316,7 @@ describeContainer("container E2E: stable→beta upgrade in the production image"
   step("image carries tar + gzip (the offline copy and the usable check need them)", 2 * kMin, async () => {
     // The #54 offline copy archives with `tar -I 'gzip -1'` and every
     // verified artifact passes `gzip -t` + `tar -xzOf … manifest.json`
-    // (WI-6.1). node:22-slim ships both, but a slimmer base or a stripped
+    // (WI-6.1). node:24-slim ships both, but a slimmer base or a stripped
     // layer would turn every hard-gated backup into a verify failure — so
     // the image itself is asserted, not assumed. `command -v` exits 1 when a
     // tool is missing, which docker() surfaces as a rejection.
@@ -720,7 +720,17 @@ describeContainer("container E2E: stable→beta upgrade in the production image"
     expect(backup.usableCheck).toBe("manifest_ok");
     expect(["openclaw", "alphaclaw-offline-copy"]).toContain(backup.producer);
     expect(backup.quiesced).toBe(true);
-    expect(backup.attempts).toBeGreaterThanOrEqual(1);
+    // Copy-first ladder (v0.9.77+, D1a): the AlphaClaw offline copy is the
+    // first rung of the pause and its success records `attempts: 0` — never a
+    // fabricated 1. An upstream CLI attempt is counted only when the ladder
+    // actually ran one (a copy refused at exclusivity hands over to it).
+    // Until v0.9.80 this step passed only because AlphaClaw's own transient
+    // `openclaw sessions` shell-out made the copy refuse, so the CLI always ran.
+    if (backup.producer === "alphaclaw-offline-copy") {
+      expect(backup.offlineCopy?.ok, "offline copy record").toBe(true);
+    } else {
+      expect(backup.attempts).toBeGreaterThanOrEqual(1);
+    }
 
     // The holder's log proves a hold overlapped the backup step (both sides
     // are wall-clock ISO/epoch stamps from the same container clock).
@@ -762,10 +772,15 @@ describeContainer("container E2E: stable→beta upgrade in the production image"
     const contentionHandled =
       (backup.contentionRetries ?? 0) > 0 || backup.offlineCopy?.ok === true;
     if (contentionHandled) {
-      expect(backup.quiescedAttempts).toBeGreaterThanOrEqual(1);
       if (backup.offlineCopy?.ok) {
+        // The copy rode through the hold inside the pause (sqlite backup()
+        // under its 30 s busy_timeout, the quiet barrier held) — no paused
+        // CLI attempt is expected or counted.
         expect(backup.producer).toBe("alphaclaw-offline-copy");
         expect(backup.file).toMatch(/\.alphaclaw\.tar\.gz$/);
+      } else {
+        // Retries are in-quiesce upstream attempts by definition.
+        expect(backup.quiescedAttempts).toBeGreaterThanOrEqual(1);
       }
     } else {
       // The pin's CLI finished under the lock: no lease, no retry needed.

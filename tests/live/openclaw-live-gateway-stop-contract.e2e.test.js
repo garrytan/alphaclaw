@@ -2,7 +2,7 @@
 // `--force` (WI-5.1, lib/server/openclaw-capabilities.js gatewayStopForce)
 // depends on, pinned against the REAL binaries of the three lines AlphaClaw
 // supports today:
-//   pin    2026.9.2         → --force present
+//   pin    2026.9.3         → --force present (pin moved in v0.9.80; re-record on the next live run)
 //   stable 2026.8.2         → --force present ("Allow stop from a non-interactive shell")
 //   beta   2026.9.1-beta.1  → --force present
 // Recorded 2026-09-02 in this sandbox; when this tier fails but the hermetic
@@ -70,7 +70,7 @@ describeLive("LIVE `gateway stop --help` contract (capability-gated --force, WI-
       expect(text).not.toMatch(kUnknownCommandPattern);
       expect(text).toMatch(/Usage: openclaw gateway stop/);
       // Capability probing remains required for older installed builds.
-      // The current 2026.9.2 pin supports non-interactive forced stop.
+      // The current pin (kOpenclawLines.pin = the declared package.json pin) supports non-interactive forced stop.
       expect(text).toMatch(kForceFlagPattern);
     },
   );

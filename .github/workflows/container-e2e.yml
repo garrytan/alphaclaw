@@ -60,7 +60,7 @@ jobs:
           # The journey is browser-driven: it logs in through login.html and
           # applies the beta from the Upgrade tab, so those UI surfaces are
           # part of the filter too (fix wave F173).
-          pattern='^(lib/server/openclaw-|lib/server/backup-risk-consent\.js|lib/server/gateway|lib/server/watchdog|lib/server/doctor|lib/server/routes/|lib/server/startup\.js|lib/server/boot-phase\.js|lib/server\.js|lib/server/gateway-env-policy\.js|bin/alphaclaw\.js|Dockerfile|tests/container/|lib/boot-placeholder|lib/public/js/components/upgrade-tab/|lib/public/login\.html)'
+          pattern='^(lib/server/openclaw-|lib/server/backup-risk-consent\.js|lib/engines-range\.js|lib/node-runtime\.js|lib/server/gateway|lib/server/watchdog|lib/server/doctor|lib/server/routes/|lib/server/startup\.js|lib/server/boot-phase\.js|lib/server\.js|lib/server/gateway-env-policy\.js|bin/alphaclaw\.js|Dockerfile|tests/container/|lib/boot-placeholder|lib/public/js/components/upgrade-tab/|lib/public/login\.html)'
           if echo "$changed" | grep -qE "$pattern"; then
             echo "run_heavy=true" >> "$GITHUB_OUTPUT"
             echo "upgrade/gateway/container surface touched → heavy job runs"
@@ -92,7 +92,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
           cache: npm
 
       - run: npm ci

@@ -53,6 +53,7 @@ const {
   kOpenclawBackupOfflineCopyBudgetMs,
 } = require("../../lib/server/constants");
 const { withOpenclawStartupEnv } = require("../../lib/server/openclaw-runtime-env");
+const { kSeededSchemaVersions } = require("../../lib/server/openclaw-schema-versions");
 const { materializeDatabases, kObservedSchemas, readDatabaseSchema } = require("./database-fixture");
 const { buildCliEnv } = require("./live-backup-harness");
 const {
@@ -479,8 +480,11 @@ describeLive("LIVE restore drill (WI-6.2): producer × journal mode × target", 
     }));
     expect(result).toMatchObject({ verdict: "block", status: "incompatible" });
     expect(fs.readFileSync(current.dbPath)).toEqual(before);
-    expect(readDatabaseSchema(current.dbPath).version).toBe(15);
-    expect(readDatabaseSchema(path.join(current.stateDir, "agents", "main", "agent", "openclaw-agent.sqlite")).version).toBe(19);
+    // The pin's declared schema (2026.9.3: state 16 / agent 19 since v0.9.80), not a literal.
+    const pinSchema = kSeededSchemaVersions[kOpenclawLines.pin];
+    expect(pinSchema, `seed row for pin ${kOpenclawLines.pin}`).toBeDefined();
+    expect(readDatabaseSchema(current.dbPath).version).toBe(pinSchema.state);
+    expect(readDatabaseSchema(path.join(current.stateDir, "agents", "main", "agent", "openclaw-agent.sqlite")).version).toBe(pinSchema.agent);
   });
 
   it(

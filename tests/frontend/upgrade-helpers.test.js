@@ -1151,6 +1151,85 @@ describe("frontend/upgrade-helpers channel mismatch banner", () => {
     expect(model.backChannel).toBe("stable");
   });
 
+  it("never offers an Apply for a target this box's Node cannot run (v0.9.80 engines gate)", async () => {
+    const { buildChannelMismatchModel } = await loadUpgradeHelpers();
+    const spec = ">=24.16.0 <25 || >=26.1.0";
+    const catalog = makeCatalog({
+      beta: [
+        {
+          version: "2026.9.3-beta.1",
+          prerelease: true,
+          engines: { node: spec },
+          applyPayload: { channel: "beta", version: "2026.9.3-beta.1" },
+          current: false,
+          blocklisted: null,
+        },
+        {
+          version: "2026.8.1-beta.3",
+          prerelease: true,
+          engines: { node: ">=22.22.3 <23 || >=24.15.0 <25 || >=25.9.0" },
+          applyPayload: { channel: "beta", version: "2026.8.1-beta.3" },
+          current: false,
+          blocklisted: null,
+        },
+      ],
+    });
+
+    // Node 22: the newest beta is blocked, the banner offers the newest one
+    // this box CAN run — the same row the catalog leaves enabled.
+    const gated = buildChannelMismatchModel({
+      catalog,
+      channelInfo: makeInfo({ releaseChannel: "beta", nodeVersion: "22.22.3" }),
+      releaseChannel: "beta",
+    });
+    expect(gated.kind).toBe("update-available");
+    expect(gated.applyTarget.applyPayload).toEqual({ channel: "beta", version: "2026.8.1-beta.3" });
+
+    // Node 24.16: the newest beta is applicable again.
+    const supported = buildChannelMismatchModel({
+      catalog,
+      channelInfo: makeInfo({ releaseChannel: "beta", nodeVersion: "24.16.0" }),
+      releaseChannel: "beta",
+    });
+    expect(supported.applyTarget.applyPayload).toEqual({ channel: "beta", version: "2026.9.3-beta.1" });
+
+    // Unknown runtime (older server without channelInfo.nodeVersion): no gate.
+    const unknown = buildChannelMismatchModel({
+      catalog,
+      channelInfo: makeInfo({ releaseChannel: "beta" }),
+      releaseChannel: "beta",
+    });
+    expect(unknown.applyTarget.applyPayload.version).toBe("2026.9.3-beta.1");
+  });
+
+  it("says the newer release needs a newer Node instead of claiming nothing newer is published (v0.9.80)", async () => {
+    const { buildChannelMismatchModel } = await loadUpgradeHelpers();
+    const spec = ">=24.16.0 <25 || >=26.1.0";
+    const model = buildChannelMismatchModel({
+      catalog: makeCatalog({
+        beta: [
+          {
+            version: "2026.9.3-beta.1",
+            prerelease: true,
+            engines: { node: spec },
+            applyPayload: { channel: "beta", version: "2026.9.3-beta.1" },
+            current: false,
+            blocklisted: null,
+          },
+        ],
+      }),
+      channelInfo: makeInfo({ releaseChannel: "beta", nodeVersion: "v22.22.3" }),
+      releaseChannel: "beta",
+    });
+    expect(model.kind).toBe("engines-blocked");
+    expect(model.message).toBe(
+      `A newer beta (2026.9.3-beta.1) is published but needs Node.js ${spec} — this AlphaClaw runs Node 22.22.3. Still running stable 2026.7.1-2.`,
+    );
+    expect(model.applyTarget).toBeNull();
+    expect(model.applyLabel).toBeNull();
+    expect(model.backChannel).toBe("stable");
+  });
+
   it("distinguishes empty-because-degraded from genuinely current", async () => {
     const { buildChannelMismatchModel } = await loadUpgradeHelpers();
 
@@ -2646,5 +2725,187 @@ describe("frontend/upgrade-helpers backup reuse consent (WI-4.4/4.5)", () => {
     expect(buildBackupPartialReasonText(null)).toBe(kBackupIneligibleReasonLabels.partial);
     // Whitespace is trimmed; non-strings are dropped, never rendered.
     expect(buildBackupPartialReasonText({ partialReasons: ["  a ", 7, "b"] })).toBe("a; b");
+  });
+});
+
+describe("frontend/upgrade-helpers engines gate (v0.9.80 — OpenClaw 2026.9.3 needs Node 24.16+)", () => {
+  const kSpec = ">=24.16.0 <25 || >=26.1.0";
+
+  it("blocks a row whose engines the running Node fails, with a note naming both", async () => {
+    const { buildEnginesGateModel } = await loadUpgradeHelpers();
+    const gate = buildEnginesGateModel({
+      row: { version: "2026.9.3", engines: { node: kSpec } },
+      nodeVersion: "v22.22.3",
+    });
+    expect(gate.blocked).toBe(true);
+    expect(gate.spec).toBe(kSpec);
+    expect(gate.note).toContain(`Needs Node.js ${kSpec}`);
+    expect(gate.note).toContain("runs Node 22.22.3");
+    expect(gate.note).not.toContain("v22");
+  });
+
+  it("passes a satisfied requirement, a missing requirement, an unknown runtime and an exotic spec", async () => {
+    const { buildEnginesGateModel } = await loadUpgradeHelpers();
+    expect(buildEnginesGateModel({ row: { engines: { node: kSpec } }, nodeVersion: "24.16.0" }).blocked).toBe(false);
+    expect(buildEnginesGateModel({ row: { engines: { node: kSpec } }, nodeVersion: "26.1.0" }).blocked).toBe(false);
+    expect(buildEnginesGateModel({ row: { engines: null }, nodeVersion: "22.22.3" })).toEqual({ blocked: false, spec: null, note: null });
+    expect(buildEnginesGateModel({ row: {}, nodeVersion: "22.22.3" }).blocked).toBe(false);
+    // Unknown runtime (older server without channelInfo.nodeVersion): never block.
+    expect(buildEnginesGateModel({ row: { engines: { node: kSpec } }, nodeVersion: null }).blocked).toBe(false);
+    // Outside the published grammar: npm's warn-only posture.
+    expect(buildEnginesGateModel({ row: { engines: { node: "^20 || ~18.17" } }, nodeVersion: "22.22.3" }).blocked).toBe(false);
+  });
+
+  it("agrees with the server's evaluator (one module, two consumers)", async () => {
+    const { buildEnginesGateModel } = await loadUpgradeHelpers();
+    const { satisfiesEngines } = require("../../lib/engines-range");
+    for (const version of ["22.22.3", "24.14.1", "24.16.0", "25.9.0", "26.0.0", "26.1.0"]) {
+      expect(
+        buildEnginesGateModel({ row: { engines: { node: kSpec } }, nodeVersion: version }).blocked,
+        version,
+      ).toBe(!satisfiesEngines(kSpec, version));
+    }
+  });
+
+  it("never makes an engines-blocked row the 'Update to latest' target", async () => {
+    const { getLatestApplicableTarget } = await loadUpgradeHelpers();
+    const catalog = {
+      stable: [
+        {
+          version: "2026.9.3",
+          isDistTagLatest: true,
+          engines: { node: kSpec },
+          current: false,
+          blocklisted: null,
+          applyPayload: { channel: "stable", version: "2026.9.3" },
+        },
+        {
+          version: "2026.9.2",
+          isDistTagLatest: false,
+          engines: { node: ">=22.22.3 <23 || >=24.15.0 <25 || >=25.9.0" },
+          current: false,
+          blocklisted: null,
+          applyPayload: { channel: "stable", version: "2026.9.2" },
+        },
+        { version: "2026.9.1", current: true, blocklisted: null },
+      ],
+      beta: [],
+      dev: { commits: [] },
+    };
+    // On Node 22 the 2026.9.3 row is blocked; the CTA falls to the newest row
+    // this box can actually run.
+    expect(
+      getLatestApplicableTarget({ catalog, releaseChannel: "stable", nodeVersion: "22.22.3" }).label,
+    ).toBe("2026.9.2");
+    // On Node 24.16 the dist-tag latest is eligible again.
+    expect(
+      getLatestApplicableTarget({ catalog, releaseChannel: "stable", nodeVersion: "24.16.0" }).label,
+    ).toBe("2026.9.3");
+    // Unknown runtime: no gate (older server), dist-tag latest wins as before.
+    expect(getLatestApplicableTarget({ catalog, releaseChannel: "stable" }).label).toBe("2026.9.3");
+  });
+});
+
+describe("frontend/upgrade-helpers availability line names an engines block (v0.9.80)", () => {
+  const spec = ">=24.16.0 <25 || >=26.1.0";
+  const catalog = {
+    stable: [
+      { version: "2026.9.3", isDistTagLatest: true, engines: { node: spec }, current: false, blocklisted: null },
+      { version: "2026.9.2", isDistTagLatest: false, current: true, blocklisted: null },
+    ],
+    beta: [],
+    dev: { commits: [] },
+  };
+
+  it("appends the requirement and the running Node when the latest is blocked", async () => {
+    const { buildAvailabilityLine } = await loadUpgradeHelpers();
+    expect(
+      buildAvailabilityLine({ catalog, releaseChannel: "stable", installedVersion: "2026.9.2", nodeVersion: "v22.22.3" }),
+    ).toBe(`Latest stable: 2026.9.3 — 1 stable release behind — needs Node.js ${spec}; this AlphaClaw runs Node 22.22.3`);
+  });
+
+  it("stays the plain line on a supported or unknown runtime", async () => {
+    const { buildAvailabilityLine } = await loadUpgradeHelpers();
+    const plain = "Latest stable: 2026.9.3 — 1 stable release behind";
+    expect(buildAvailabilityLine({ catalog, releaseChannel: "stable", installedVersion: "2026.9.2", nodeVersion: "24.16.0" })).toBe(plain);
+    expect(buildAvailabilityLine({ catalog, releaseChannel: "stable", installedVersion: "2026.9.2" })).toBe(plain);
+  });
+});
+
+describe("frontend/upgrade-helpers latest applicable target is an UPGRADE or nothing (v0.9.80)", () => {
+  const spec = ">=24.16.0 <25 || >=26.1.0";
+  const row = (version, extra = {}) => ({
+    version,
+    current: false,
+    blocklisted: null,
+    isDistTagLatest: false,
+    applyPayload: { channel: "stable", version },
+    ...extra,
+  });
+
+  it("returns null when the installed version IS the newest row instead of the next-older release", async () => {
+    // The screenshot bug: installed 2026.9.2 = dist-tag latest; the old
+    // fallback offered 2026.9.1 as "Update to latest stable".
+    const { getLatestApplicableTarget } = await loadUpgradeHelpers();
+    const catalog = {
+      stable: [row("2026.9.2", { current: true, isDistTagLatest: true }), row("2026.9.1")],
+      beta: [],
+      dev: { commits: [] },
+    };
+    expect(getLatestApplicableTarget({ catalog, releaseChannel: "stable" })).toBeNull();
+    expect(getLatestApplicableTarget({ catalog, releaseChannel: "stable", installedVersion: "2026.9.2" })).toBeNull();
+  });
+
+  it("returns null — not the older release — when the only newer row needs a newer Node", async () => {
+    const { getLatestApplicableTarget } = await loadUpgradeHelpers();
+    const catalog = {
+      stable: [
+        row("2026.9.3", { isDistTagLatest: true, engines: { node: spec } }),
+        row("2026.9.2", { current: true }),
+        row("2026.9.1"),
+      ],
+      beta: [],
+      dev: { commits: [] },
+    };
+    expect(
+      getLatestApplicableTarget({ catalog, releaseChannel: "stable", nodeVersion: "22.22.3", installedVersion: "2026.9.2" }),
+    ).toBeNull();
+    // Same catalog on a supported runtime: the newer row is the target.
+    expect(
+      getLatestApplicableTarget({ catalog, releaseChannel: "stable", nodeVersion: "24.16.0", installedVersion: "2026.9.2" }).label,
+    ).toBe("2026.9.3");
+  });
+
+  it("never returns a version older than or equal to the installed one, whatever the catalog shape", async () => {
+    const { getLatestApplicableTarget, compareVersions } = await loadUpgradeHelpers();
+    const versions = ["2026.8.2", "2026.9.1", "2026.9.2", "2026.9.3"];
+    for (const installed of versions) {
+      for (const latestTag of versions) {
+        for (const blocked of [null, "2026.9.3", "2026.9.2"]) {
+          const catalog = {
+            stable: versions.map((v) =>
+              row(v, {
+                current: v === installed,
+                isDistTagLatest: v === latestTag,
+                ...(v === blocked ? { engines: { node: spec } } : {}),
+              }),
+            ),
+            beta: [],
+            dev: { commits: [] },
+          };
+          const target = getLatestApplicableTarget({ catalog, releaseChannel: "stable", nodeVersion: "22.22.3", installedVersion: installed });
+          if (target) {
+            expect(compareVersions(target.label, installed), `${installed}/${latestTag}/${blocked}`).toBeGreaterThan(0);
+            expect(target.label, `${installed}/${latestTag}/${blocked}`).not.toBe(blocked);
+          }
+        }
+      }
+    }
+  });
+
+  it("with no installed version known and no current row, still picks the dist-tag latest (cold catalog)", async () => {
+    const { getLatestApplicableTarget } = await loadUpgradeHelpers();
+    const catalog = { stable: [row("2026.9.3", { isDistTagLatest: true }), row("2026.9.2")], beta: [], dev: { commits: [] } };
+    expect(getLatestApplicableTarget({ catalog, releaseChannel: "stable" }).label).toBe("2026.9.3");
   });
 });

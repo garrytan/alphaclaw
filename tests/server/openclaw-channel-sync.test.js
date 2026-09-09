@@ -1075,6 +1075,8 @@ describe("server/openclaw-channel-sync", () => {
       // The hold gates read this flag: a corrupted file must never read as
       // "no hold".
       const info = sync.getChannelInfo();
+      // v0.9.80: the runtime the Upgrade tab judges catalog rows' engines against.
+      expect(info.nodeVersion).toBe(process.versions.node);
       expect(info.stateCorrupted).toBe(true);
       expect(info.gatewayHold).toBeNull();
 
@@ -2280,6 +2282,36 @@ describe("server/openclaw-channel-sync", () => {
 
       expect(result.status).toBe(409);
       expect(result.body.code).toBe("engines_unsupported");
+      expect(installToTempDir).not.toHaveBeenCalled();
+      expect(store.readState().applied).toBeNull();
+    });
+
+    it("refuses a REAL range the running major satisfies but the minor floor does not (v0.9.80)", async () => {
+      // The pre-0.9.80 gate compared majors only, so this spec — same major as
+      // the running Node, floor one minor above it — passed and the box
+      // downloaded a build that refuses to start. Built from the live runtime
+      // so it fails on every CI lane and every developer machine alike.
+      const [major, minor] = process.versions.node.split(".").map(Number);
+      const spec = `>=${major}.${minor + 1}.0 <${major + 1}`;
+      const releases = {
+        getCatalog: vi.fn(async () => ({
+          stable: [{ version: "1.1.0", engines: { node: spec } }],
+          beta: [],
+        })),
+      };
+      const { sync, store, installToTempDir } = createHarness({
+        pin: "1.0.0",
+        installedVersion: "1.0.0",
+        sentinelVersion: "1.0.0",
+        releases,
+      });
+
+      const result = await sync.applyUpdate({ channel: "stable", version: "1.1.0" });
+
+      expect(result.status).toBe(409);
+      expect(result.body.code).toBe("engines_unsupported");
+      expect(result.body.message).toContain(spec);
+      expect(result.body.message).toContain(process.versions.node);
       expect(installToTempDir).not.toHaveBeenCalled();
       expect(store.readState().applied).toBeNull();
     });
@@ -4692,10 +4724,26 @@ describe("server/openclaw-channel-sync", () => {
     it("gates on a >=major floor and passes everything unparseable or empty", () => {
       expect(enginesSatisfied(">=22", "20.0.0")).toBe(false);
       expect(enginesSatisfied(">=22", "22.1.0")).toBe(true);
-      // No >=N floor to enforce: warn-only posture, like npm engines.
+      // Outside the published grammar: warn-only posture, like npm engines.
       expect(enginesSatisfied("^20 || ~18.17", "20.0.0")).toBe(true);
       expect(enginesSatisfied("", "20.0.0")).toBe(true);
       expect(enginesSatisfied(undefined, "20.0.0")).toBe(true);
+    });
+
+    it("judges the full range, not the major alone (v0.9.80 — OpenClaw 2026.9.3)", () => {
+      // The old major-only gate waved Node 24.14 through to a build that
+      // refuses to start, and Node 25 through although the range excludes it.
+      const spec = ">=24.16.0 <25 || >=26.1.0";
+      expect(enginesSatisfied(spec, "22.22.3")).toBe(false);
+      expect(enginesSatisfied(spec, "24.14.1")).toBe(false);
+      expect(enginesSatisfied(spec, "24.16.0")).toBe(true);
+      expect(enginesSatisfied(spec, "v24.20.0")).toBe(true);
+      expect(enginesSatisfied(spec, "25.9.0")).toBe(false);
+      expect(enginesSatisfied(spec, "26.0.0")).toBe(false);
+      expect(enginesSatisfied(spec, "26.1.0")).toBe(true);
+      // Same evaluator as the boot floor and the UI rows.
+      const { satisfiesEngines } = require("../../lib/engines-range");
+      expect(enginesSatisfied(spec, "24.14.1")).toBe(satisfiesEngines(spec, "24.14.1"));
     });
   });
 

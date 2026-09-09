@@ -15,7 +15,7 @@
 # to what production runs: tini as PID 1, ALPHACLAW_ROOT_DIR on the /data
 # volume, port 3000, and `alphaclaw start` (restartProcess() exits the
 # process inside a container and relies on the orchestrator restart policy).
-FROM node:22-slim
+FROM node:24-slim
 # tmux hosts the local Claude Code rescue session in a detached session that
 # survives AlphaClaw process restarts (a human can also attach over SSH).
 RUN apt-get update && apt-get install -y --no-install-recommends git curl procps cron tini tmux ca-certificates && rm -rf /var/lib/apt/lists/*
@@ -30,6 +30,10 @@ WORKDIR /app
 ARG ALPHACLAW_PKG=alphaclaw.tgz
 COPY ${ALPHACLAW_PKG} /tmp/alphaclaw.tgz
 RUN npm install --omit=dev /tmp/alphaclaw.tgz && rm /tmp/alphaclaw.tgz
+# The base tag floats within its major line. Fail the BUILD, not the first
+# boot, if the resolved Node is below the floor AlphaClaw and the pinned
+# OpenClaw require (lib/node-runtime.js kAlphaclawNodeEngines).
+RUN node -e "require('/app/node_modules/alphaclaw/lib/node-runtime').assertSupportedNodeVersion()"
 ENV PATH="/app/node_modules/.bin:$PATH"
 ENV ALPHACLAW_ROOT_DIR=/data
 EXPOSE 3000

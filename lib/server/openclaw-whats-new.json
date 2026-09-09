@@ -4,8 +4,18 @@
     {
       "minor": "2026.9",
       "channel": "beta",
-      "lastVerifiedVersion": "2026.9.2",
+      "lastVerifiedVersion": "2026.9.3",
       "highlights": [
+        {
+          "title": "Node 24.16 or newer required",
+          "body": "OpenClaw 2026.9.3 no longer runs on Node 22 or 25 — it needs Node 24.16+ (or 26.1+) because older runtimes can truncate SQLite text. AlphaClaw v0.9.80 moves its image to Node 24.16+; if this AlphaClaw's own Node is older than that, the catalog row says so and the update is refused before anything downloads.",
+          "tone": "info"
+        },
+        {
+          "title": "Safer updates",
+          "body": "Updates rehearse core and plugin changes in an isolated candidate state before activating, migrate eligible 2026.9.2 state, and recover abandoned update records without stopping a healthy gateway.",
+          "tone": "info"
+        },
         {
           "title": "Faster chat and dashboards",
           "body": "Long transcripts, dashboards and session lists stay responsive: conversations load sooner and heavy transcript and disk work no longer blocks the agent.",
@@ -55,6 +65,85 @@
           "from": "off",
           "to": "on",
           "warning": "Agents can spawn concurrent sub-agents (Swarm) by default, which multiplies the work — and the token spend — one request can trigger. Set it to false after upgrading to keep sub-agents opt-in."
+        },
+        {
+          "key": "gateway.cliAgents.enabled",
+          "from": "off",
+          "to": "on",
+          "warning": "Since 2026.9.3 the new-session model picker shows supported CLI agents and can create native CLI sessions without a separate opt-in. Set it to false after upgrading if this box should not launch CLI agents."
+        }
+      ]
+    },
+    {
+      "minor": "2026.9",
+      "channel": "stable",
+      "lastVerifiedVersion": "2026.9.3",
+      "highlights": [
+        {
+          "title": "Node 24.16 or newer required",
+          "body": "OpenClaw 2026.9.3 no longer runs on Node 22 or 25 — it needs Node 24.16+ (or 26.1+) because older runtimes can truncate SQLite text. AlphaClaw v0.9.80 moves its image to Node 24.16+; if this AlphaClaw's own Node is older than that, the catalog row says so and the update is refused before anything downloads.",
+          "tone": "info"
+        },
+        {
+          "title": "Safer updates",
+          "body": "Updates rehearse core and plugin changes in an isolated candidate state before activating, migrate eligible 2026.9.2 state, and recover abandoned update records without stopping a healthy gateway.",
+          "tone": "info"
+        },
+        {
+          "title": "Faster chat and dashboards",
+          "body": "Long transcripts, dashboards and session lists stay responsive: conversations load sooner and heavy transcript and disk work no longer blocks the agent.",
+          "tone": "info"
+        },
+        {
+          "title": "Updates that keep your settings",
+          "body": "Automatic updates now preserve your active settings, enabled skills and default-agent ownership, restore gateway restarts after a Git-based update, and report the outcome with recovery guidance.",
+          "tone": "info"
+        },
+        {
+          "title": "Replies survive restarts",
+          "body": "Active, queued and delegated replies are recovered after a gateway restart instead of being dropped, and continuation instructions survive retries.",
+          "tone": "info"
+        },
+        {
+          "title": "GPT-6 Astra",
+          "body": "OpenAI's GPT-6 Astra can be selected with an OpenAI API-key profile or an eligible ChatGPT/Codex account, with text and image input and supported reasoning controls.",
+          "tone": "info"
+        },
+        {
+          "title": "Sturdier backups",
+          "body": "Backups keep text containing embedded NUL characters intact, support Nix-managed config and credential links, and reject a corrupt archive header instead of accepting an incomplete backup.",
+          "tone": "info"
+        },
+        {
+          "title": "Change settings without restarting",
+          "body": "More agent, model, tool, channel, browser, node, access and terminal settings apply to the running gateway; the ones that still need a restart stay marked in OpenClaw's configuration reference.",
+          "tone": "info"
+        }
+      ],
+      "securityFlips": [
+        {
+          "key": "tools.sessions.visibility",
+          "from": "tree",
+          "to": "all",
+          "warning": "Session tools can list, search and address sessions belonging to OTHER agents on this gateway by default. Set it to \"tree\", \"agent\" or \"self\" after upgrading to keep each agent's sessions to itself."
+        },
+        {
+          "key": "tools.agentToAgent.enabled",
+          "from": "off",
+          "to": "on",
+          "warning": "Ordinary agent-to-agent access is on by default, so one agent can send to and read another's sessions. Set enabled to false, or list the allowed agent pairs in allow, to restrict it."
+        },
+        {
+          "key": "tools.swarm.enabled",
+          "from": "off",
+          "to": "on",
+          "warning": "Agents can spawn concurrent sub-agents (Swarm) by default, which multiplies the work — and the token spend — one request can trigger. Set it to false after upgrading to keep sub-agents opt-in."
+        },
+        {
+          "key": "gateway.cliAgents.enabled",
+          "from": "off",
+          "to": "on",
+          "warning": "Since 2026.9.3 the new-session model picker shows supported CLI agents and can create native CLI sessions without a separate opt-in. Set it to false after upgrading if this box should not launch CLI agents."
         }
       ]
     },

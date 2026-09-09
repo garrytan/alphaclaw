@@ -1229,6 +1229,61 @@ describe("frontend/upgrade-tab view", () => {
     expect(onCheckNow).toHaveBeenCalledTimes(1);
   });
 
+  it("names a catalog row this Node cannot run and disables its Apply (v0.9.80 engines gate)", () => {
+    const spec = ">=24.16.0 <25 || >=26.1.0";
+    const tree = renderView({
+      channelInfo: makeChannelInfo({ nodeVersion: "22.22.3" }),
+      catalog: makeCatalog({
+        distTags: { latest: "2026.9.3" },
+        // No beta rows: the default beta fixture also renders an "Upgrade"
+        // button, which would make the label lookup below ambiguous.
+        beta: [],
+        stable: [
+          makeStableRow({
+            version: "2026.9.3",
+            engines: { node: spec },
+            applyPayload: { channel: "stable", version: "2026.9.3" },
+          }),
+          makeStableRow({
+            version: "2026.7.1-2",
+            isDistTagLatest: false,
+            current: true,
+            lastKnownGood: true,
+            applyPayload: { channel: "stable", version: "2026.7.1-2" },
+          }),
+        ],
+      }),
+    });
+    const text = treeText(tree);
+    expect(text).toContain(`Needs Node.js ${spec}`);
+    expect(text).toContain("runs Node 22.22.3");
+    // The row's own action is disabled, and the blocked row is not the
+    // "Update to latest stable" target either (only the current row remains).
+    const rowAction = findActionButtonByLabel(tree, "Upgrade");
+    expect(rowAction).toBeTruthy();
+    expect(rowAction.props.disabled).toBe(true);
+    expect(findActionButtonByLabel(tree, "Update to latest stable")).toBeUndefined();
+
+    // Same catalog on a supported runtime: no note, Apply enabled, CTA back.
+    const supported = renderView({
+      channelInfo: makeChannelInfo({ nodeVersion: "24.16.0" }),
+      catalog: makeCatalog({
+        distTags: { latest: "2026.9.3" },
+        beta: [],
+        stable: [
+          makeStableRow({
+            version: "2026.9.3",
+            engines: { node: spec },
+            applyPayload: { channel: "stable", version: "2026.9.3" },
+          }),
+        ],
+      }),
+    });
+    expect(treeText(supported)).not.toContain("Needs Node.js");
+    expect(findActionButtonByLabel(supported, "Upgrade").props.disabled).toBe(false);
+    expect(findActionButtonByLabel(supported, "Update to latest stable")).toBeTruthy();
+  });
+
   it("cross-links to the AlphaClaw update dialog as plain guidance (U16)", () => {
     const tree = renderView({
       channelInfo: makeChannelInfo(),
@@ -1744,6 +1799,54 @@ describe("frontend/upgrade-tab hook", () => {
       channel: "stable",
       version: "2026.7.2",
     });
+  });
+
+  it("the Update-to-latest click never resolves to a row the card marked as needing a newer Node (v0.9.80)", async () => {
+    const spec = ">=24.16.0 <25 || >=26.1.0";
+    const catalog = makeCatalog({
+      distTags: { latest: "2026.9.3" },
+      beta: [],
+      stable: [
+        makeStableRow({
+          version: "2026.9.3",
+          engines: { node: spec },
+          applyPayload: { channel: "stable", version: "2026.9.3" },
+        }),
+        makeStableRow({
+          version: "2026.9.2",
+          isDistTagLatest: false,
+          engines: { node: ">=22.22.3 <23 || >=24.15.0 <25 || >=25.9.0" },
+          applyPayload: { channel: "stable", version: "2026.9.2" },
+        }),
+        makeStableRow({
+          version: "2026.7.1-2",
+          isDistTagLatest: false,
+          current: true,
+          lastKnownGood: true,
+          applyPayload: { channel: "stable", version: "2026.7.1-2" },
+        }),
+      ],
+    });
+    api.fetchOpenclawCatalog.mockResolvedValue({ ok: true, catalog, channel: { releaseChannel: "stable" } });
+
+    // On a Node this box cannot upgrade to 2026.9.3 with, the click targets the
+    // newest row it CAN run — the same answer the view used to render the CTA.
+    api.fetchOpenclawChannel.mockResolvedValue(makeChannelInfo({ nodeVersion: "22.22.3" }));
+    let state = await hydrate();
+    state.onUpdateToLatest();
+    state = renderHook({});
+    expect(state.pendingApply.payload).toEqual({ channel: "stable", version: "2026.9.2" });
+    expect(api.applyOpenclawVersion).not.toHaveBeenCalled();
+
+    // On a supported runtime the dist-tag latest is the target again.
+    harness.reset();
+    invalidateCache("/api/openclaw/channel");
+    invalidateCache("/api/openclaw/catalog");
+    api.fetchOpenclawChannel.mockResolvedValue(makeChannelInfo({ nodeVersion: "24.16.0" }));
+    state = await hydrate();
+    state.onUpdateToLatest();
+    state = renderHook({});
+    expect(state.pendingApply.payload).toEqual({ channel: "stable", version: "2026.9.3" });
   });
 
   it("passes curated security flips into the apply confirm when the target crosses into beta (D5)", async () => {

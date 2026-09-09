@@ -146,7 +146,7 @@ const seedVolume = async (volume, files) => {
     "}",
   ].join("\n");
   await docker(
-    ["run", "--rm", "-v", `${volume}:/data`, "node:22-slim", "node", "-e", script, payload],
+    ["run", "--rm", "-v", `${volume}:/data`, "node:24-slim", "node", "-e", script, payload],
     { timeoutMs: 5 * 60 * 1000 },
   );
 };

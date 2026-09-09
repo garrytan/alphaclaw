@@ -4,7 +4,7 @@
 #
 # Opt-in like tests/live/**: needs the gstack browse CLI (or set BROWSE_BIN),
 # network for the version catalog, and Node from AlphaClaw's supported matrix
-# (>=22.22.3 <23, >=24.15 <25, >=25.9).
+# (>=24.16.0 <25 || >=26.1.0 since v0.9.80 — the OpenClaw 2026.9.3 pin).
 #
 #   BROWSE_BIN=~/.claude/skills/gstack/browse/dist/browse tests/browser/upgrade-ui-smoke.sh
 #

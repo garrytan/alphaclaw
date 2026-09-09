@@ -107,4 +107,28 @@ describe("server/openclaw-whats-new", () => {
     });
     expect(hasCurrent).toBe(true);
   });
+
+  it("keeps a curated STABLE entry for the pin's minor, verified against the pin itself (v0.9.80)", () => {
+    // The pin is a stable release, so the stable entry is what the shipped
+    // Upgrade page renders. A pin bump must re-verify it (lastVerifiedVersion
+    // moves with the pin) or this fails until openclaw-whats-new.json is
+    // refreshed — the beta-only guard above cannot see a stable entry go stale.
+    const { compareVersionParts } = require("../../lib/server/helpers");
+    const pin = require(`${kNpmPackageRoot}/package.json`).dependencies.openclaw;
+    const entry = kWhatsNewData.entries.find(
+      (e) => e.channel === "stable" && e.minor === minorOf(pin),
+    );
+    expect(entry, `stable What's-new entry for minor ${minorOf(pin)}`).toBeDefined();
+    expect(typeof entry.lastVerifiedVersion).toBe("string");
+    expect(
+      compareVersionParts(entry.lastVerifiedVersion, pin),
+      `lastVerifiedVersion ${entry.lastVerifiedVersion} must be >= the pin ${pin}`,
+    ).toBeGreaterThanOrEqual(0);
+    expect(entry.highlights.length).toBeGreaterThan(0);
+    // Every curated flip names a dotted config key the D5 filter can read.
+    for (const flip of entry.securityFlips) {
+      expect(flip.key).toMatch(/^[a-zA-Z]+(\.[a-zA-Z]+)+$/);
+      expect(typeof flip.warning).toBe("string");
+    }
+  });
 });

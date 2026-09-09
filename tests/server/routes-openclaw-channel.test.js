@@ -1629,6 +1629,25 @@ describe("server/routes/openclaw-channel", () => {
     });
   });
 
+  it("carries the running Node on the catalog payload so rows can be engines-gated (v0.9.80)", async () => {
+    const deps = createDeps();
+    deps.openclawChannelService.getChannelInfo.mockReturnValue(
+      createChannelInfo({ nodeVersion: "24.16.0" }),
+    );
+    const app = createApp(deps);
+    const res = await request(app).get("/api/openclaw/catalog");
+    expect(res.status).toBe(200);
+    expect(res.body.channel.nodeVersion).toBe("24.16.0");
+
+    // A channel info without the field (an older service double) falls back
+    // to the process runtime rather than dropping the key.
+    deps.openclawChannelService.getChannelInfo.mockReturnValue(
+      createChannelInfo({ nodeVersion: undefined }),
+    );
+    const fallback = await request(app).get("/api/openclaw/catalog");
+    expect(fallback.body.channel.nodeVersion).toBe(process.versions.node);
+  });
+
   it("maps rollback and mark-good service failures to 409 and successes to 200", async () => {
     const deps = createDeps();
     const app = createApp(deps);
@@ -1735,6 +1754,7 @@ describe("server/routes/openclaw-channel", () => {
     expect(okRes.body.channel).toEqual({
       releaseChannel: "stable",
       installedVersion: "1.0.0",
+      nodeVersion: process.versions.node,
       pinVersion: "1.0.0",
       appliedId: null,
       appliedVersion: null,

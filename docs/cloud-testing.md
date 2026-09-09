@@ -7,11 +7,15 @@ kernel; the autotune tests execute real Node processes inside containers.
 
 ## Use the prepared workspace
 
-Run these commands from the checkout. Use Node 24.16 from `.context/node24` for the full live tier: OpenClaw
-2026.9.3 and current dev require it. Node 22.22.3 remains installed in
-`.context/node` and passes the hermetic/pinned-build tests. The default system
-Node 24.14.1 does not satisfy `package.json`'s engine range. Put the supported runtime first on `PATH` so
-child processes and real upstream installs use it too.
+Run these commands from the checkout. Use Node 24.16+ from `.context/node24` for
+everything: since v0.9.80 AlphaClaw's own `engines.node` is
+`>=24.16.0 <25 || >=26.1.0` (the OpenClaw 2026.9.3 pin dropped Node 22 and 25),
+so Node 22 no longer runs the server or the pinned CLI, and the default system
+Node 24.14.1 does not satisfy the range either. Put the supported runtime first
+on `PATH` so child processes and real upstream installs use it too. A fresh
+workspace has no `.context/node24`: download the newest 24.x tarball from
+nodejs.org into it (the previous sessions' `.context/` directories are not
+shared between workspaces).
 
 ```bash
 cd /home/vercel-sandbox/alphaclaw
@@ -29,7 +33,7 @@ runtime and Docker (`sudo dnf install -y docker` on Amazon Linux).
 Check actual resource enforcement before running the container suites:
 
 ```bash
-docker run --rm --memory=512m --memory-swap=512m node:22-slim node -e '
+docker run --rm --memory=512m --memory-swap=512m node:24-slim node -e '
   const fs = require("node:fs");
   console.log(JSON.stringify({
     memoryMax: fs.readFileSync("/sys/fs/cgroup/memory.max", "utf8").trim(),
@@ -141,7 +145,7 @@ Verified locally on September 8, 2026:
 The log links below refer to this workspace's gitignored `.context` directory;
 CI captures its own artifacts.
 
-- Full hermetic suite: **487 files / 8,485 tests passed** under Node 22.22.3
+- Full hermetic suite: **487 files / 8,485 tests passed** under Node 22.22.3 (historical, v0.9.79 — since v0.9.80 the suite requires Node 24.16+)
   ([hermetic-serial.log](../.context/ci-fix/hermetic-serial.log)).
 - Real Docker journeys: **3 files / 24 tests passed**, with no skipped steps:
   the full browser upgrade, immutable v0.9.76 → candidate activation, and

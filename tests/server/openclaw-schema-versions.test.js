@@ -437,6 +437,9 @@ describe("openclaw-schema-versions: schema table", () => {
       "2026.9.1-beta.1": { state: 12, agent: 17 },
       "2026.9.1": { state: 15, agent: 19 },
       "2026.9.2": { state: 15, agent: 19 },
+      // v0.9.80 pin: declared in its package.json (openclaw.schemaVersions)
+      // and by its dist constants — state 15 → 16.
+      "2026.9.3": { state: 16, agent: 19 },
     });
     expect(Object.isFrozen(kSeededSchemaVersions)).toBe(true);
     expect(Object.isFrozen(kSeededSchemaVersions["2026.9.2"])).toBe(true);

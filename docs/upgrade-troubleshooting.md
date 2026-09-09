@@ -272,6 +272,23 @@ over to the live rung; the copy — which runs first regardless — is
 unaffected (SQLite's online backup API is consistent in either journal
 mode).
 
+### Update refused: "needs Node …" (engines gate)
+
+**What it means:** the target OpenClaw declares an `engines.node` range this
+AlphaClaw's runtime does not satisfy — since 2026.9.3 that range is
+`>=24.16.0 <25 || >=26.1.0` (Node 22 and 25 dropped; older runtimes truncate
+SQLite text). The catalog row shows "Needs Node.js … — this AlphaClaw runs
+Node …" with a disabled Apply, the "Update to latest" button skips that row,
+and a direct `POST /api/openclaw/apply` answers `409 engines_unsupported`
+naming the requirement and the running Node — all from ONE evaluator
+(`lib/engines-range.js`), so the three never disagree. **Fix:** move AlphaClaw
+to a runtime the range allows — rebuild the container image on `node:24-slim`
+(Node 24.16+, the base since v0.9.80) and redeploy, or upgrade the host's Node
+for an `npx alphaclaw` install; the row unlocks on the next catalog load. An
+`engines.node` outside the supported grammar (`^`, `~`, wildcards) is never
+enforced — npm's warn-only posture — so an exotic upstream spec cannot block
+an install.
+
 ### Platform requirement: GNU tar and gzip
 
 The "usable" check every archive must pass (`backup.usableCheck:
@@ -279,7 +296,7 @@ The "usable" check every archive must pass (`backup.usableCheck:
 `tar -xzOf … --wildcards --no-wildcards-match-slash --occurrence=1
 '*/manifest.json'`. Those are **GNU tar** long options; busybox tar and
 BSD `bsdtar` (Alpine, macOS) reject them, and the check has no fallback.
-The production image (`node:22-slim`, Debian) ships GNU tar and gzip, and
+The production image (`node:24-slim`, Debian) ships GNU tar and gzip, and
 the container tier asserts it (`tar --version` must report `GNU tar`) so
 the image is checked rather than assumed. Only the offline copy's *write*
 step has a portable `tar | gzip -1` pipe — that path is dead-ended on a
