@@ -65,6 +65,21 @@ describe("admin-manifest engine", () => {
     ).toBe("dangerous");
   });
 
+  // v0.9.81 (C3): Back up now is a dangerous async op with the ledger as its
+  // status source.
+  it("updates.backup is a dangerous async op whose terminal states are the backup run's", () => {
+    const op = manifest.findOp("POST", "/api/openclaw/backup");
+    expect(op?.id).toBe("updates.backup");
+    expect(op.tier).toBe("dangerous");
+    expect(op.async).toEqual({
+      statusOp: "updates.run-detail",
+      idField: "operationId",
+      terminalStates: ["completed", "failed", "interrupted"],
+    });
+    expect(op.readOp).toBe("updates.backups");
+    expect(op.notes).toMatch(/operation_in_progress/);
+  });
+
   // v0.9.81 (D13): the declared direction is a REQUIRED body field for the
   // agent too — a body without it is a 400 whose hint names the three values.
   it("updates.apply requires `intent` and documents the optional `expectLatest` claim", () => {

@@ -610,8 +610,11 @@ describe("frontend/upgrade-tab 409 backup_failed → retry-with-backup (WI-4.5 v
     expect(cta).toBeTruthy();
     cta.props.onClick();
     expect(onRequestBackupReuseRetry).toHaveBeenCalledTimes(1);
-    // Re-stage stays available next to it (a fresh attempt without consent).
-    expect(findActionButtonByLabel(tree, "Re-stage version")).toBeTruthy();
+    // v0.9.81 (C4, cross-model D18): a BACKUP-class failure offers "Retry
+    // backup" next to the consent — never "Re-stage version", which would
+    // re-download the target and change nothing about the backup.
+    expect(findActionButtonByLabel(tree, "Retry backup")).toBeTruthy();
+    expect(findActionButtonByLabel(tree, "Re-stage version")).toBeUndefined();
   });
 
   it("no offer → no CTA on either failure surface", () => {

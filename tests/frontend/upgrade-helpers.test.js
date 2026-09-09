@@ -3076,3 +3076,102 @@ describe("frontend/upgrade-helpers latest row + never-downgrade invariant (v0.9.
     expect(checked).toBeGreaterThan(5000);
   });
 });
+
+// v0.9.81 (C3/C4): every consumer of run.target tolerates kind: "backup"; the
+// failure CTA model; the ledger-derived last-manual-backup line.
+describe("frontend/upgrade-helpers standalone backup runs (v0.9.81)", () => {
+  const kNowMs = Date.parse("2026-09-09T12:00:00Z");
+
+  it("describeTarget / timeline / failure model / summary name a backup run honestly", async () => {
+    const { describeTarget, buildRunTimelineModel, buildRunFailureModel, isBackupRun, kRunStateMeta } =
+      await loadUpgradeHelpers();
+    expect(describeTarget({ kind: "backup" })).toBe("manual backup");
+    expect(isBackupRun({ target: { kind: "backup" } })).toBe(true);
+    expect(isBackupRun({ target: { channel: "stable", version: "1.0.0" } })).toBe(false);
+    expect(kRunStateMeta.completed).toEqual({ label: "completed", tone: "success" });
+    const [row] = buildRunTimelineModel(
+      [{ operationId: "b1", target: { kind: "backup" }, state: "completed", startedAt: kNowMs - 60_000, finishedAt: kNowMs - 30_000, hasLog: true }],
+      kNowMs,
+    );
+    expect(row).toEqual(expect.objectContaining({ targetLabel: "Manual backup", stateLabel: "completed", tone: "success", hasLog: true }));
+    const interrupted = buildRunFailureModel({
+      operationId: "b2",
+      target: { kind: "backup" },
+      state: "interrupted",
+      result: null,
+    });
+    expect(interrupted.title).toBe("Manual backup was interrupted");
+    expect(interrupted.error.message).toContain("backup was interrupted by a restart");
+    // An apply run is unchanged.
+    expect(buildRunFailureModel({ operationId: "a", target: { channel: "stable", version: "2.0.0" }, state: "interrupted" }).title).toBe(
+      "Update to 2.0.0 was interrupted",
+    );
+  });
+
+  it("buildFailureCtaModel: backup-class → Retry backup; install-class → Re-stage; a completed repair backup → Retry update with the original payload; no target → Dismiss only", async () => {
+    const { buildFailureCtaModel } = await loadUpgradeHelpers();
+    const target = { channel: "stable", version: "2026.9.3" };
+    expect(buildFailureCtaModel({ phase: "failed", target, error: { code: "backup_failed" } })).toEqual(
+      expect.objectContaining({ retryBackup: true, restage: false, retryUpdate: null }),
+    );
+    expect(buildFailureCtaModel({ phase: "failed", target, error: { code: "backup_required_for_migration" } }).retryBackup).toBe(true);
+    expect(buildFailureCtaModel({ phase: "failed", target, error: { code: "verify_failed" } })).toEqual(
+      expect.objectContaining({ retryBackup: false, restage: true, retryUpdate: null, hint: null }),
+    );
+    expect(buildFailureCtaModel({ phase: "failed", target: { kind: "backup" }, error: { code: "backup_failed" } })).toEqual(
+      expect.objectContaining({ retryBackup: true, restage: false }),
+    );
+    expect(buildFailureCtaModel({ phase: "failed", error: { code: "build_failed" } })).toEqual({
+      retryBackup: false,
+      restage: false,
+      retryUpdate: null,
+      hint: null,
+    });
+    expect(buildFailureCtaModel({ phase: "failed", target: { repair: true }, error: {} }).restage).toBe(false);
+    const retry = { payload: target, label: "2026.9.3", intent: "update" };
+    const completed = buildFailureCtaModel({ phase: "completed", target: { kind: "backup" }, retryUpdate: retry });
+    expect(completed.retryUpdate).toBe(retry);
+    expect(completed.hint).toContain("retry the update to 2026.9.3");
+    expect(buildFailureCtaModel({ phase: "completed", target: { kind: "backup" } }).retryUpdate).toBeNull();
+    expect(buildFailureCtaModel({ phase: "running", target }).restage).toBe(false);
+    expect(buildFailureCtaModel(null).restage).toBe(false);
+  });
+
+  it("buildLastManualBackupLine derives the Backups card line from the newest kind: backup run — running, verified, failed, interrupted, never from apply runs", async () => {
+    const { buildLastManualBackupLine } = await loadUpgradeHelpers();
+    const apply = { operationId: "a", target: { channel: "stable", version: "1" }, state: "activated", startedAt: kNowMs - 1000, finishedAt: kNowMs - 500 };
+    expect(buildLastManualBackupLine([apply], kNowMs)).toBeNull();
+    expect(buildLastManualBackupLine([], kNowMs)).toBeNull();
+    const running = { operationId: "b1", target: { kind: "backup" }, state: "running", startedAt: kNowMs - 20_000, finishedAt: null };
+    expect(buildLastManualBackupLine([apply, running], kNowMs)).toEqual(
+      expect.objectContaining({ state: "running", tone: "info", operationId: "b1" }),
+    );
+    expect(buildLastManualBackupLine([running], kNowMs).text).toMatch(/^Manual backup in progress/);
+    const done = {
+      operationId: "b2",
+      target: { kind: "backup" },
+      state: "completed",
+      startedAt: kNowMs - 3 * 60_000,
+      finishedAt: kNowMs - 3 * 60_000 + 5_000,
+      result: { ok: true, archive: { file: "/x.tar.gz", verified: true } },
+    };
+    expect(buildLastManualBackupLine([done, running], kNowMs)).toEqual(expect.objectContaining({ state: "running" }));
+    expect(buildLastManualBackupLine([done], kNowMs).text).toMatch(/^Last manual backup: .* — verified$/);
+    const failed = {
+      operationId: "b3",
+      target: { kind: "backup" },
+      state: "failed",
+      startedAt: kNowMs - 60_000,
+      finishedAt: kNowMs - 50_000,
+      result: { ok: false, code: "backup_failed", message: "The backup CLI made no progress for 3 minutes." },
+    };
+    // Newest by startedAt wins.
+    const line = buildLastManualBackupLine([done, failed, apply], kNowMs);
+    expect(line.tone).toBe("danger");
+    expect(line.text).toContain("failed: The backup CLI made no progress for 3 minutes.");
+    const interrupted = { ...failed, operationId: "b4", state: "interrupted", result: null, startedAt: kNowMs - 10 };
+    expect(buildLastManualBackupLine([interrupted, failed], kNowMs).text).toContain("interrupted by a restart");
+    const nothing = { ...done, operationId: "b5", startedAt: kNowMs - 5, result: { ok: true, noBackup: true } };
+    expect(buildLastManualBackupLine([nothing], kNowMs).text).toContain("nothing to back up");
+  });
+});

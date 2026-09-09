@@ -297,4 +297,27 @@ describe("server/openclaw-run-ledger", () => {
       expect(out1 + out2 + out3).toBe("prefix [redacted] suffix");
     });
   });
+
+  // v0.9.81 (C3): a standalone backup run's terminal success.
+  it("keeps `completed` as a terminal state (never coerced to failed) and passes intentCheck through", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "run-ledger-completed-"));
+    const ledger = createRunLedger({ openclawDir: dir, nowFn: () => 5_000, logger: { log() {}, warn() {} } });
+    const operationId = "2f8c1f2e-0d2a-4b1e-9a11-6f2f8c1f2e0d";
+    ledger.createRun({ operationId, target: { kind: "backup" } });
+    ledger.updateRun(operationId, (record) => {
+      record.intentCheck = { direction: "not_applicable", latest: "not_applicable" };
+      return record;
+    });
+    const done = ledger.completeRun(operationId, { state: "completed", ok: true, result: { ok: true, archive: { file: "/x" } } });
+    expect(done.state).toBe("completed");
+    expect(done.ok).toBe(true);
+    expect(ledger.readRun(operationId)).toEqual(
+      expect.objectContaining({
+        state: "completed",
+        target: { kind: "backup" },
+        intentCheck: { direction: "not_applicable", latest: "not_applicable" },
+      }),
+    );
+    expect(ledger.completeRun(operationId, { state: "bogus", ok: false }).state).toBe("failed");
+  });
 });

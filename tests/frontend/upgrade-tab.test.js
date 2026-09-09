@@ -43,6 +43,7 @@ vi.mock("preact/hooks", () => {
 
 vi.mock("../../lib/public/js/lib/api.js", () => ({
   applyOpenclawVersion: vi.fn(),
+  createOpenclawBackup: vi.fn(),
   clearOpenclawBlocklist: vi.fn(),
   fetchOpenclawBackups: vi.fn(),
   fetchOpenclawCatalog: vi.fn(),
@@ -2365,6 +2366,196 @@ describe("frontend/upgrade-tab hook", () => {
     expect(api.fetchOpenclawChannel.mock.calls.length).toBeGreaterThan(channelCalls);
     expect(api.fetchOpenclawCatalog).toHaveBeenLastCalledWith({ refresh: true });
     expect(state.pendingApply).toBeNull();
+  });
+
+  // ── v0.9.81 (C3/C4): Back up now, Retry backup, Retry update ──
+  const kBackupDone = { ok: true, archive: { file: "/data/backups/openclaw/openclaw-2026-09-09.alphaclaw.tar.gz", verified: true } };
+
+  it("Back up now: POSTs /api/openclaw/backup, shows a running backup card, and a 202 stream's `done` turns it into the completed card (inventory + runs re-read)", async () => {
+    let captured = null;
+    api.subscribeOpenclawApplyEvents.mockImplementation((options) => {
+      captured = options;
+      return () => {};
+    });
+    api.createOpenclawBackup.mockResolvedValue({ ok: true, operationId: "op-b1", events: "/api/operations/op-b1/events" });
+    let state = await hydrate();
+    const backupsCallsBefore = api.fetchOpenclawBackups.mock.calls.length;
+    const runsCallsBefore = api.fetchOpenclawRuns.mock.calls.length;
+
+    const pending = state.onBackupNow();
+    state = renderHook({});
+    expect(state.operation).toEqual(
+      expect.objectContaining({ target: { kind: "backup" }, label: "manual backup", phase: "running" }),
+    );
+    expect(state.actionsDisabled).toBe(true);
+    await pending;
+    expect(api.createOpenclawBackup).toHaveBeenCalledTimes(1);
+    expect(api.applyOpenclawVersion).not.toHaveBeenCalled();
+    state = renderHook({});
+    expect(state.operation.operationId).toBe("op-b1");
+    expect(captured.operationId).toBe("op-b1");
+
+    captured.onMessage({ event: "step", data: { name: "backup", status: "running", at: 1 } });
+    captured.onMessage({ event: "done", data: { ...kBackupDone, operationId: "op-b1" } });
+    state = renderHook({});
+    expect(state.operation.phase).toBe("completed");
+    expect(state.operation.result.archive.file).toContain("openclaw-2026-09-09.alphaclaw.tar.gz");
+    expect(showToast).toHaveBeenCalledWith("Backup written: openclaw-2026-09-09.alphaclaw.tar.gz", "success");
+    await flushAsync();
+    expect(api.fetchOpenclawBackups.mock.calls.length).toBeGreaterThan(backupsCallsBefore);
+    expect(api.fetchOpenclawRuns.mock.calls.length).toBeGreaterThan(runsCallsBefore);
+    // Dismiss clears the completed card like a failed one.
+    state.onDismissOperation();
+    state = renderHook({});
+    expect(state.operation).toBeNull();
+  });
+
+  it("Back up now: a quick 200 completes inline; an entry refusal (409 operation_in_progress) is a toast with no card; a quick 409 backup_failed leaves a failed backup card", async () => {
+    api.createOpenclawBackup.mockResolvedValueOnce({ ...kBackupDone, operationId: "op-q" });
+    let state = await hydrate();
+    await state.onBackupNow();
+    state = renderHook({});
+    expect(state.operation).toEqual(expect.objectContaining({ phase: "completed", operationId: "op-q" }));
+    state.onDismissOperation();
+    state = renderHook({});
+
+    api.createOpenclawBackup.mockRejectedValueOnce(
+      Object.assign(new Error("An OpenClaw update or backup is already running."), { code: "operation_in_progress" }),
+    );
+    await state.onBackupNow();
+    state = renderHook({});
+    expect(state.operation).toBeNull();
+    expect(showToast).toHaveBeenCalledWith("An OpenClaw update or backup is already running.", "error");
+
+    api.createOpenclawBackup.mockRejectedValueOnce(
+      Object.assign(new Error("The pre-update backup failed — no space left"), { code: "backup_failed", operationId: "op-f", hint: "Fix the cause and retry the backup." }),
+    );
+    await state.onBackupNow();
+    state = renderHook({});
+    expect(state.operation).toEqual(
+      expect.objectContaining({ phase: "failed", operationId: "op-f", target: { kind: "backup" } }),
+    );
+    expect(state.operation.error).toEqual(expect.objectContaining({ code: "backup_failed", hint: "Fix the cause and retry the backup." }));
+  });
+
+  it("a second click while a backup runs is a no-op — one POST", async () => {
+    api.createOpenclawBackup.mockImplementation(() => new Promise(() => {}));
+    let state = await hydrate();
+    state.onBackupNow();
+    state = renderHook({});
+    state.onBackupNow();
+    state.onBackupNow();
+    await flushAsync();
+    expect(api.createOpenclawBackup).toHaveBeenCalledTimes(1);
+  });
+
+  it("Retry backup on a failed apply (backup_failed) dismisses the card, starts a standalone backup remembering the update, and the completed card's Retry update re-opens the confirm with the ORIGINAL payload + intent", async () => {
+    api.applyOpenclawVersion.mockRejectedValue(
+      Object.assign(new Error("The pre-update backup failed"), { code: "backup_failed", operationId: "op-a" }),
+    );
+    api.createOpenclawBackup.mockResolvedValue({ ...kBackupDone, operationId: "op-b2" });
+    let state = await hydrate();
+    state.onRequestApply({ payload: { channel: "stable", version: "2026.7.2" }, label: "2026.7.2" });
+    state = renderHook({});
+    await state.onConfirmApply();
+    state = renderHook({});
+    // A quick 409 lands as applyError (no operation card) — Retry backup is
+    // offered there too and remembers the in-flight target.
+    expect(state.operation).toBeNull();
+    expect(state.applyError).toEqual(expect.objectContaining({ code: "backup_failed" }));
+
+    await state.onRetryBackup();
+    state = renderHook({});
+    expect(api.createOpenclawBackup).toHaveBeenCalledTimes(1);
+    expect(state.applyError).toBeNull();
+    expect(state.operation).toEqual(
+      expect.objectContaining({
+        phase: "completed",
+        target: { kind: "backup" },
+        retryUpdate: { payload: { channel: "stable", version: "2026.7.2" }, label: "2026.7.2", intent: "update" },
+      }),
+    );
+
+    api.applyOpenclawVersion.mockResolvedValue({ ok: true, operationId: "op-a2", events: "/api/operations/op-a2/events" });
+    state.onRetryUpdate();
+    state = renderHook({});
+    expect(state.operation).toBeNull();
+    expect(state.pendingApply).toEqual(
+      expect.objectContaining({ payload: { channel: "stable", version: "2026.7.2" }, intent: "update", isDowngrade: false }),
+    );
+    await state.onConfirmApply();
+    expect(api.applyOpenclawVersion).toHaveBeenLastCalledWith({ channel: "stable", version: "2026.7.2", intent: "update" });
+  });
+
+  it("Retry backup on a STREAMED backup failure of an apply carries the operation's declared intent into the retry-update offer; a failed standalone backup simply retries itself", async () => {
+    let captured = null;
+    api.subscribeOpenclawApplyEvents.mockImplementation((options) => {
+      captured = options;
+      return () => {};
+    });
+    api.applyOpenclawVersion.mockResolvedValue({ ok: true, operationId: "op-s", events: "/api/operations/op-s/events" });
+    api.createOpenclawBackup.mockResolvedValue({ ...kBackupDone, operationId: "op-b3" });
+    let state = await hydrate();
+    state.onRequestApply({ payload: { channel: "stable", version: "2026.7.0" }, label: "2026.7.0" });
+    state = renderHook({});
+    await state.onConfirmApply();
+    captured.onMessage({ event: "error", data: { error: "The pre-update backup failed", code: "backup_failed" } });
+    state = renderHook({});
+    expect(state.operation.phase).toBe("failed");
+    expect(state.operation.intent).toBe("downgrade");
+
+    await state.onRetryBackup();
+    state = renderHook({});
+    expect(state.operation.retryUpdate).toEqual({ payload: { channel: "stable", version: "2026.7.0" }, label: "2026.7.0", intent: "downgrade" });
+
+    // A failed standalone backup: Retry backup runs another backup, keeping
+    // the remembered update.
+    api.createOpenclawBackup.mockRejectedValueOnce(
+      Object.assign(new Error("The backup CLI made no progress for 3 minutes"), { code: "backup_failed", operationId: "op-b4" }),
+    );
+    state.onDismissOperation();
+    state = renderHook({});
+    await state.onBackupNow();
+    state = renderHook({});
+    expect(state.operation.phase).toBe("failed");
+    await state.onRetryBackup();
+    state = renderHook({});
+    expect(api.createOpenclawBackup).toHaveBeenCalledTimes(3);
+    expect(state.operation.phase).toBe("completed");
+  });
+
+  it("rehydrates an in-flight standalone backup from the runs list (lastUpdateRun never describes it) and finishes it from the ledger", async () => {
+    api.fetchOpenclawRuns.mockResolvedValue({
+      ok: true,
+      runs: [
+        { operationId: "op-r", target: { kind: "backup" }, state: "running", startedAt: kNow - 5_000, finishedAt: null, stepCount: 1 },
+      ],
+    });
+    let state = await hydrate();
+    // Effect #1 is the rehydration effect.
+    harness.effects[1]();
+    state = renderHook({});
+    expect(state.operation).toEqual(
+      expect.objectContaining({ operationId: "op-r", resumed: true, target: { kind: "backup" }, phase: "running", label: "manual backup" }),
+    );
+    // The Backups card line reflects the run too.
+    expect(state.lastManualBackup).toEqual(expect.objectContaining({ state: "running", operationId: "op-r" }));
+    api.fetchOpenclawRuns.mockResolvedValue({
+      ok: true,
+      runs: [
+        {
+          operationId: "op-r",
+          target: { kind: "backup" },
+          state: "completed",
+          startedAt: kNow - 5_000,
+          finishedAt: kNow,
+          ok: true,
+          result: kBackupDone,
+        },
+      ],
+    });
+    state = renderHook({});
+    expect(state.lastManualBackup).toBeTruthy();
   });
 
   it("Check now refreshes the catalog with refresh=1 (U15)", async () => {

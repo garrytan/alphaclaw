@@ -65,6 +65,18 @@ const kOpenclawArgvFixtures = [
   },
   { name: "gateway binary", argv: ["/opt/x/openclaw-gateway"], openclaw: true, gateway: true },
   {
+    name: "shebang wrapper named openclaw, run by the kernel as sh <script> (stays the launcher root of a gateway run)",
+    argv: ["/bin/sh", "/data/.openclaw/.alphaclaw/bin/openclaw", "gateway", "run"],
+    openclaw: true,
+    gateway: true,
+  },
+  {
+    name: "bash wrapper named openclaw with a shell flag before the script",
+    argv: ["bash", "-e", "/usr/local/bin/openclaw", "doctor"],
+    openclaw: true,
+    gateway: false,
+  },
+  {
     name: "Windows CLI shim",
     argv: ["C:\\Users\\op\\AppData\\Roaming\\npm\\openclaw.cmd", "gateway", "run"],
     openclaw: true,
@@ -100,6 +112,8 @@ const kOpenclawArgvFixtures = [
   { name: "another node app", argv: ["node", "/srv/other/index.js"], openclaw: false, gateway: false },
   { name: "node -e with the word in the code", argv: ["node", "-e", "console.log('openclaw')"], openclaw: false, gateway: false },
   { name: "a shell whose CWD argument is the package dir", argv: ["sh", "-c", "cd /app/node_modules/openclaw/ && ls"], openclaw: false, gateway: false },
+  { name: "sh -c invoking the CLI by name (the command string is -c's value, not a script)", argv: ["sh", "-c", "openclaw gateway run"], openclaw: false, gateway: false },
+  { name: "a shell running an unrelated script under an openclaw dir", argv: ["bash", "/opt/openclaw/scripts/rotate-logs.sh"], openclaw: false, gateway: false },
   { name: "the word gateway without OpenClaw", argv: ["node", "/srv/other/gateway.js", "gateway", "run"], openclaw: false, gateway: false },
   { name: "crond", argv: ["/usr/sbin/crond", "-n"], openclaw: false, gateway: false },
   { name: "empty argv (kernel thread)", argv: [], openclaw: false, gateway: false },

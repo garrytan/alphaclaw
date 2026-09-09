@@ -1776,6 +1776,59 @@ describe("server/routes/openclaw-channel", () => {
     });
   });
 
+  describe("POST /api/openclaw/backup (Back up now, v0.9.81)", () => {
+    it("a fast outcome answers inline with the operationId; a slow run hands off to the operation stream (202 + events)", async () => {
+      const deps = createDeps();
+      deps.openclawChannelService.runStandaloneBackup = vi.fn(async () => ({
+        status: 200,
+        body: { ok: true, archive: { file: "/b/openclaw-1.alphaclaw.tar.gz", verified: true } },
+      }));
+      const app = createApp(deps);
+      const quick = await request(app).post("/api/openclaw/backup").send({});
+      expect(quick.status).toBe(200);
+      expect(quick.body).toEqual(
+        expect.objectContaining({ ok: true, operationId: "op-1", archive: expect.objectContaining({ verified: true }) }),
+      );
+      expect(deps.openclawChannelService.runStandaloneBackup).toHaveBeenCalledWith({ operationId: "op-1" });
+      expect(deps.operationEvents.createOperation).toHaveBeenCalledWith({ type: "openclaw-backup" });
+
+      deps.openclawChannelService.runStandaloneBackup = vi.fn(() => new Promise(() => {}));
+      const slow = await request(app).post("/api/openclaw/backup").send({});
+      expect(slow.status).toBe(202);
+      expect(slow.body).toEqual({
+        ok: true,
+        operationId: "op-1",
+        events: "/api/operations/op-1/events",
+        streamUrl: "/api/operations/op-1/events",
+      });
+    });
+
+    it("a fast failure keeps the service's status and envelope (409 backup_failed) and terminates the operation stream", async () => {
+      const deps = createDeps();
+      deps.operationEvents.getOperation = vi.fn(() => ({ status: "pending" }));
+      deps.operationEvents.fail = vi.fn();
+      deps.openclawChannelService.runStandaloneBackup = vi.fn(async () => ({
+        status: 409,
+        body: { ok: false, code: "backup_failed", message: "no space", hint: "Fix the cause and retry the backup." },
+      }));
+      const app = createApp(deps);
+      const res = await request(app).post("/api/openclaw/backup").send({});
+      expect(res.status).toBe(409);
+      expect(res.body).toEqual(expect.objectContaining({ ok: false, code: "backup_failed", operationId: "op-1" }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(deps.operationEvents.fail).toHaveBeenCalledWith("op-1", expect.objectContaining({ code: "backup_failed" }));
+    });
+
+    it("503 backup_unavailable when the service does not expose the runner", async () => {
+      const deps = createDeps();
+      delete deps.openclawChannelService.runStandaloneBackup;
+      const app = createApp(deps);
+      const res = await request(app).post("/api/openclaw/backup").send({});
+      expect(res.status).toBe(503);
+      expect(res.body.code).toBe("backup_unavailable");
+    });
+  });
+
   it("carries the running Node on the catalog payload so rows can be engines-gated (v0.9.80)", async () => {
     const deps = createDeps();
     deps.openclawChannelService.getChannelInfo.mockReturnValue(

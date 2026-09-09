@@ -17,7 +17,7 @@ const { DatabaseSync } = require("node:sqlite");
 const { createRunStream } = require("../../lib/server/openclaw-run-stream");
 const { listLiveOpenclawProcesses } = require("../../lib/server/openclaw-lock-contention");
 const { createGatewayLifecycleLock } = require("../../lib/server/gateway-lifecycle-lock");
-const { createGatewayMutationPolicy } = require("../../lib/server/gateway-mutation-policy");
+const { createGatewayMutationPolicy, kGatewayMutationIntents } = require("../../lib/server/gateway-mutation-policy");
 const { kConsentTtlMs } = require("../../lib/server/backup-risk-consent");
 
 const {
@@ -432,6 +432,12 @@ const makeQuiesceRecorder = ({
   // Real sleep AFTER the barrier begins, before the token is handed back —
   // lets a tuned-down barrier expire before the copy's exclusivity check.
   dbQuietDelayMs = 0,
+  // v0.9.81: a REAL gateway lifecycle lock — the hold handed back is then the
+  // lock's own (kind "backup_quiesce", as lib/server.js wires it), which a
+  // mutation policy built over the same lock can judge (`owns`). The
+  // recorder cannot log "release" for a real hold (identity is ownership);
+  // assert lock.getActiveOperation() === null instead.
+  lock = null,
 } = {}) => {
   const releaseSpy = vi.fn(() => calls.push("release"));
   const recorder = {
@@ -443,6 +449,7 @@ const makeQuiesceRecorder = ({
       if (acquireReject) throw new Error("lock unavailable");
       if (acquireNever) await new Promise(() => {});
       if (acquireDelayMs) await sleep(acquireDelayMs);
+      if (lock) return lock.acquire("backup_quiesce", options);
       return releaseSpy;
     }),
     getStopEvidence: vi.fn(() => stopEvidence),
@@ -2570,6 +2577,237 @@ describe("server/openclaw-channel-backup-retry", () => {
         ["upstream", true, "stalled"],
         ["upstream", false, "ok"],
       ]);
+    });
+  });
+
+  // ── v0.9.81 (C3): "Back up now" — the ladder as a standalone run ─────────
+  describe("runStandaloneBackup (Back up now, v0.9.81)", () => {
+    const readRuns = (harness) => {
+      const runsDir = path.join(harness.openclawDir, ".alphaclaw", "runs");
+      if (!fs.existsSync(runsDir)) return [];
+      return fs
+        .readdirSync(runsDir)
+        .filter((name) => name.endsWith(".json"))
+        .map((name) => JSON.parse(fs.readFileSync(path.join(runsDir, name), "utf8")))
+        .sort((a, b) => (b.startedAt ?? 0) - (a.startedAt ?? 0));
+    };
+
+    // Production shape: ONE lifecycle lock shared by the quiesce seam and the
+    // mutation policy (lib/server.js), so the under-lease re-assert judges the
+    // very hold the quiesce acquired.
+    const withSharedLockPolicy = () => {
+      const lock = createGatewayLifecycleLock();
+      const ref = { sync: null };
+      const policy = createGatewayMutationPolicy({
+        lock,
+        getChannelInfo: () => ref.sync.getChannelInfo(),
+        isApplyInProgress: () => ref.sync.isApplyInProgress(),
+      });
+      const policyAssert = vi.fn((options) => policy.assert(options));
+      return { lock, ref, policyAssert, gatewayMutationPolicy: { assert: policyAssert } };
+    };
+
+    it("pauses, copies, relaunches and records a `kind: backup` run — nothing installs, nothing restarts, lastUpdateRun untouched", async () => {
+      const { lock, ref, policyAssert, gatewayMutationPolicy } = withSharedLockPolicy();
+      const quiesce = makeQuiesceRecorder({ lock });
+      const { runnerImpl, backupCalls } = makeOfflineCopyRunner({
+        onArchiveTool: markOfflineCopy(quiesce),
+      });
+      const harness = createHarness({
+        runnerImpl,
+        gatewayQuiesce: quiesce,
+        extraSyncOptions: { gatewayMutationPolicy },
+      });
+      ref.sync = harness.sync;
+      seedStateDb(harness);
+      const lastUpdateRunBefore = JSON.stringify(harness.store.readState().lastUpdateRun ?? null);
+
+      const result = await harness.sync.runStandaloneBackup({});
+
+      expect(result.status).toBe(200);
+      expect(result.body.ok).toBe(true);
+      expect(typeof result.body.operationId).toBe("string");
+      expect(result.body.archive).toEqual(
+        expect.objectContaining({ producer: "alphaclaw-offline-copy", verified: true, partial: false }),
+      );
+      expect(fs.existsSync(result.body.archive.file)).toBe(true);
+      // The full quiesce transaction ran and unwound: stop → copy → relaunch
+      // → the real lease released (a real hold cannot log "release").
+      expect(quiesce.calls).toEqual([
+        "acquireLock",
+        "isRunning",
+        "suppress",
+        "stop",
+        "dbQuiet",
+        "offline-copy(quiet)",
+        "dbResume",
+        "start",
+        "unsuppress",
+      ]);
+      expect(lock.getActiveOperation()).toBeNull();
+      expect(isStateDbQuiet()).toBe(false);
+      expect(backupCalls).toHaveLength(0);
+      expect(harness.installToTempDir).not.toHaveBeenCalled();
+      expect(harness.restartProcess).not.toHaveBeenCalled();
+      expect(harness.sync.isApplyInProgress()).toBe(false);
+      // No lastUpdateRun, no lastBackupRun pointer: the ledger is the source.
+      expect(JSON.stringify(harness.store.readState().lastUpdateRun ?? null)).toBe(lastUpdateRunBefore);
+      expect(harness.store.readState().lastBackupRun).toBeUndefined();
+      const [run] = readRuns(harness);
+      expect(run).toEqual(
+        expect.objectContaining({
+          operationId: result.body.operationId,
+          target: { kind: "backup" },
+          state: "completed",
+          ok: true,
+          result: expect.objectContaining({ ok: true, archive: expect.objectContaining({ file: result.body.archive.file }) }),
+          backup: expect.objectContaining({ producer: "alphaclaw-offline-copy", noBackup: false, attempts: 0 }),
+        }),
+      );
+      expect(run.finishedAt).not.toBeNull();
+      // Admission (AGENTS.md): asserted BEFORE the latch (no hold) and again
+      // UNDER the owned backup_quiesce lease, with the backup intent both times.
+      expect(policyAssert).toHaveBeenCalledTimes(2);
+      expect(policyAssert.mock.calls[0][0]).toEqual({ intent: kGatewayMutationIntents.backup });
+      expect(policyAssert.mock.calls[1][0].intent).toBe(kGatewayMutationIntents.backup);
+      expect(policyAssert.mock.calls[1][0].hold).toBeTruthy();
+      expect(policyAssert.mock.calls[1][0].hold.kind).toBe("backup_quiesce");
+      // Announced like an apply outcome.
+      expect(notifyMessages(harness.notify).some((m) => /OpenClaw backup written/.test(m))).toBe(true);
+    });
+
+    it("a failing ladder ends the run `failed` with backup_failed and the manual gate hint; the record carries the classified kind", async () => {
+      const { runnerImpl } = makeBackupRunner({ script: [{ ok: false, tail: "ENOSPC: no space left on device\n" }] });
+      const harness = createHarness({ runnerImpl });
+      const result = await harness.sync.runStandaloneBackup({});
+      expect(result.status).toBe(409);
+      expect(result.body.code).toBe("backup_failed");
+      expect(result.body.hint).toContain("Fix the cause and retry the backup.");
+      expect(result.body.hint).not.toMatch(/same-channel version/);
+      const [run] = readRuns(harness);
+      expect(run).toEqual(
+        expect.objectContaining({
+          target: { kind: "backup" },
+          state: "failed",
+          ok: false,
+          result: expect.objectContaining({ code: "backup_failed" }),
+          backup: expect.objectContaining({ noBackup: true, backupFailureKind: "enospc", attempts: 1 }),
+        }),
+      );
+      expect(harness.sync.isApplyInProgress()).toBe(false);
+      expect(notifyMessages(harness.notify).some((m) => /OpenClaw backup failed/.test(m))).toBe(true);
+    });
+
+    it("an apply and a backup never overlap: each 409s operation_in_progress while the other runs", async () => {
+      let releaseCopy = null;
+      const gate = new Promise((resolve) => {
+        releaseCopy = resolve;
+      });
+      const { lock, ref, gatewayMutationPolicy } = withSharedLockPolicy();
+      const quiesce = makeQuiesceRecorder({ lock });
+      const { runnerImpl } = makeOfflineCopyRunner({
+        onArchiveTool: (opts) =>
+          opts.command === "tar" && opts.args[0] === "-I" ? gate.then(() => null) : null,
+      });
+      const harness = createHarness({
+        runnerImpl,
+        gatewayQuiesce: quiesce,
+        extraSyncOptions: { gatewayMutationPolicy },
+      });
+      ref.sync = harness.sync;
+      seedStateDb(harness);
+
+      const backupPromise = harness.sync.runStandaloneBackup({});
+      expect(await Promise.race([backupPromise, sleep(20).then(() => "pending")])).toBe("pending");
+      expect(harness.sync.isApplyInProgress()).toBe(true);
+      const apply = await harness.sync.applyUpdate({ ...kHardGateTarget, intent: "update" });
+      expect(apply.status).toBe(409);
+      expect(apply.body.code).toBe("operation_in_progress");
+      const second = await harness.sync.runStandaloneBackup({});
+      expect(second.status).toBe(409);
+      expect(second.body.code).toBe("operation_in_progress");
+      expect(second.body.message).toMatch(/update or backup/);
+      releaseCopy();
+      const first = await backupPromise;
+      expect(first.status).toBe(200);
+      expect(harness.sync.isApplyInProgress()).toBe(false);
+    });
+
+    it("entry gates: a running gateway operation, a migration holder, not onboarded, and a gateway hold all refuse before anything is paused", async () => {
+      const cases = [
+        [{ getActiveGatewayOperation: () => ({ kind: "restart" }) }, "gateway_operation_in_progress"],
+        [{ getActiveGatewayOperation: () => ({ kind: "boot" }) }, "gateway_busy"],
+        [{ isOnboarded: () => false }, "not_onboarded"],
+        [
+          {
+            gatewayMutationPolicy: {
+              assert: () => {
+                throw Object.assign(new Error("held"), {
+                  blocked: true,
+                  statusCode: 409,
+                  code: "gateway_held",
+                  error: "The gateway is held after a failed settings migration.",
+                  hint: "Use Retry migration first.",
+                  hold: "config_migration_failed",
+                });
+              },
+            },
+          },
+          "gateway_held",
+        ],
+      ];
+      for (const [extraSyncOptions, code] of cases) {
+        const quiesce = makeQuiesceRecorder({});
+        const { runnerImpl } = makeOfflineCopyRunner({});
+        const harness = createHarness({ runnerImpl, gatewayQuiesce: quiesce, extraSyncOptions });
+        const result = await harness.sync.runStandaloneBackup({});
+        expect(result.status, code).toBe(409);
+        expect(result.body.code).toBe(code);
+        expect(quiesce.calls).toEqual([]);
+        expect(readRuns(harness)).toEqual([]);
+        expect(harness.sync.isApplyInProgress()).toBe(false);
+        if (code === "gateway_held") {
+          expect(result.body.message).toContain("held");
+          expect(result.body.hint).toBe("Use Retry migration first.");
+          expect(result.body.hold).toBe("config_migration_failed");
+        }
+      }
+    });
+
+    it("a hold that appears while the lease was queued refuses UNDER the lease: lock released, gateway never stopped, run failed with the hold's code", async () => {
+      const quiesce = makeQuiesceRecorder({});
+      const { runnerImpl } = makeOfflineCopyRunner({});
+      let calls = 0;
+      const harness = createHarness({
+        runnerImpl,
+        gatewayQuiesce: quiesce,
+        extraSyncOptions: {
+          gatewayMutationPolicy: {
+            assert: ({ hold }) => {
+              calls += 1;
+              if (!hold) return; // pre-latch read passes
+              throw Object.assign(new Error("held"), {
+                blocked: true,
+                statusCode: 409,
+                code: "gateway_held",
+                error: "The gateway is held after a failed settings migration.",
+                hint: "Use Retry migration first.",
+              });
+            },
+          },
+        },
+      });
+      seedStateDb(harness);
+      const result = await harness.sync.runStandaloneBackup({});
+      expect(result.status).toBe(409);
+      expect(result.body.code).toBe("gateway_held");
+      expect(calls).toBe(2);
+      expect(quiesce.calls).toEqual(["acquireLock", "unsuppress", "release"]);
+      expect(quiesce.stop).not.toHaveBeenCalled();
+      expect(harness.sync.isApplyInProgress()).toBe(false);
+      const [run] = readRuns(harness);
+      expect(run).toEqual(expect.objectContaining({ target: { kind: "backup" }, state: "failed" }));
+      expect(run.result.code).toBe("gateway_held");
     });
   });
 
