@@ -23,9 +23,11 @@ RSS counts shared pages in every process. It is not an additive decomposition of
 cgroup usage. The container bar therefore shows only measured usage/limit;
 process RSS is displayed separately. Linux `smaps_rollup` provides a paired RSS,
 PSS, and private-page sample on the first opportunity and then every five minutes.
-At most 128 processes and 16 KiB per file are read, with one chain in flight and a
-one-second scheduling deadline. Late results are rejected; an in-kernel read is
-allowed to finish before another chain starts. Coverage, timing, failures and
+At most 128 processes and 16 KiB per file are read, including every short read.
+A file that fills the buffer is rejected without reading an extra byte to check
+for end of file. There is one chain in flight and a one-second scheduling
+deadline. Late results are rejected; an in-kernel read is allowed to finish
+before another chain starts. Coverage, timing, failures and
 staleness are explicit. Six minutes or a membership change invalidates current
 PSS. Partial totals are not presented as complete group totals.
 
@@ -79,6 +81,12 @@ predicate. Container pressure also has its own two-read 90% latch and three-read
 recovery, independent of gateway presence. Container-only pressure never permits
 a gateway restart. Duplicate, stale, partial or out-of-order process evidence
 cannot confirm mitigation; missing evidence cannot clear a critical verdict.
+Mitigation rechecks the authoritative RSS timestamp and, when container pressure
+is the trigger, the cgroup timestamp both at admission and after awaited
+notification delivery. Evidence older than 90 seconds vetoes the restart,
+refunds the brake and notification dedupe, and releases the lifecycle lock so a
+fresh sample can retry. Settings, restart interlocks and rate brakes are also
+rechecked after notification delivery.
 
 Attribution uses a one-hour covered window and two fresh confirmations. Child
 growth is distinct from accumulation (count and RSS growth). Possible heap

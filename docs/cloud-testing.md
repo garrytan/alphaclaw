@@ -97,8 +97,12 @@ before starting test jobs:
 
 ```bash
 python3 scripts/dev/prepare-cloud-cgroups.py --check
+mkdir -p .context/docker
 sudo python3 scripts/dev/prepare-cloud-cgroups.py --apply
 ```
+
+Create `.context/docker` as the workspace user before the privileged repair so
+the later daemon and test log redirections remain writable by that user.
 
 The helper refuses unknown layouts and active Docker during a repair. It saves
 original process/thread identities and controller settings in a new directory
