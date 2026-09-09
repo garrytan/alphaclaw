@@ -277,7 +277,7 @@ describe("frontend/upgrade-tab view", () => {
       onDismissOperation,
     });
     const text = treeText(tree);
-    expect(text).toContain("Dismiss to re-enable the page");
+    expect(text).toContain("Dismiss to re-enable updates");
     const dismiss = findButtonByText(tree, "Dismiss");
     expect(dismiss).toBeTruthy();
     dismiss.props.onclick();
@@ -400,8 +400,14 @@ describe("frontend/upgrade-tab view", () => {
     expect(text).toContain("Technical details");
 
     const actionButtons = findAllByType(tree, ActionButton);
-    expect(actionButtons.length).toBeGreaterThan(0);
+    expect(actionButtons.length).toBeGreaterThan(1);
     for (const button of actionButtons) {
+      // v0.9.81 (RC1a): the read-only "Check now" refresh is the ONE action
+      // that stays live during an operation; every mutating button is gated.
+      if (button.props.idleLabel === "Check now") {
+        expect(button.props.disabled).toBe(false);
+        continue;
+      }
       expect(Boolean(button.props.disabled) || Boolean(button.props.loading)).toBe(
         true,
       );
@@ -1227,6 +1233,37 @@ describe("frontend/upgrade-tab view", () => {
     expect(treeText(tree)).toContain("Catalog as of 5 minutes ago");
     findActionButtonByLabel(tree, "Check now").props.onClick();
     expect(onCheckNow).toHaveBeenCalledTimes(1);
+  });
+
+  it("Check now stays clickable while a failed run holds the page's actions disabled (v0.9.81, RC1a)", () => {
+    const onCheckNow = vi.fn();
+    const tree = renderView({
+      channelInfo: makeChannelInfo(),
+      catalog: makeCatalog(),
+      actionsDisabled: true,
+      operation: {
+        operationId: "op-failed",
+        status: "failed",
+        target: { channel: "stable", version: "2026.7.2" },
+        steps: [{ name: "backup", status: "failed", at: kNow - 5_000 }],
+      },
+      onCheckNow,
+    });
+    const button = findActionButtonByLabel(tree, "Check now");
+    expect(button.props.disabled).toBe(false);
+    button.props.onClick();
+    expect(onCheckNow).toHaveBeenCalledTimes(1);
+    // Only an in-flight refresh disables it (and then it reads "Checking...").
+    const refreshing = renderView({
+      channelInfo: makeChannelInfo(),
+      catalog: makeCatalog(),
+      actionsDisabled: true,
+      refreshingCatalog: true,
+      onCheckNow,
+    });
+    expect(findActionButtonByLabel(refreshing, "Check now").props.disabled).toBe(true);
+    // The row Apply buttons are still gated by the page-wide disable.
+    expect(findActionButtonByLabel(tree, "Upgrade").props.disabled).toBe(true);
   });
 
   it("names a catalog row this Node cannot run and disables its Apply (v0.9.80 engines gate)", () => {
@@ -2106,6 +2143,74 @@ describe("frontend/upgrade-tab hook", () => {
     expect(state.channelInfo.blocklist).toEqual([]);
     // catalog reloaded to drop the row annotation
     expect(api.fetchOpenclawCatalog).toHaveBeenCalledTimes(2);
+  });
+
+  it("Check now tells the truth about what the server did: 'Checked just now' after a real refresh, 'try again in N s' when the 30 s floor applied (v0.9.81)", async () => {
+    let state = await hydrate();
+    api.fetchOpenclawCatalog.mockResolvedValueOnce({
+      ok: true,
+      catalog: { ...makeCatalog(), refreshed: true },
+      channel: { releaseChannel: "stable" },
+    });
+    await state.onCheckNow();
+    expect(showToast).toHaveBeenCalledWith("Checked just now", "success");
+
+    api.fetchOpenclawCatalog.mockResolvedValueOnce({
+      ok: true,
+      catalog: { ...makeCatalog(), refreshed: false, refreshThrottledForMs: 19_400 },
+      channel: { releaseChannel: "stable" },
+    });
+    state = renderHook({});
+    await state.onCheckNow();
+    expect(showToast).toHaveBeenCalledWith("Checked moments ago — try again in 20 s", "info");
+    // A plain (non-forced) answer says nothing.
+    showToast.mockClear();
+    api.fetchOpenclawCatalog.mockResolvedValueOnce({
+      ok: true,
+      catalog: { ...makeCatalog(), refreshed: false },
+      channel: { releaseChannel: "stable" },
+    });
+    state = renderHook({});
+    await state.onCheckNow();
+    expect(showToast).not.toHaveBeenCalled();
+  });
+
+  it("a catalog the server served STALE schedules exactly one direct follow-up read (never the 60 s client cache); a stale follow-up answer does not loop (v0.9.81, RC1c)", async () => {
+    api.fetchOpenclawCatalog
+      .mockResolvedValueOnce({
+        ok: true,
+        catalog: { ...makeCatalog(), stale: true, staleAsOf: kNow - 20 * 3_600_000 },
+        channel: { releaseChannel: "stable" },
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        catalog: { ...makeCatalog(), stale: true, staleAsOf: kNow - 20 * 3_600_000 },
+        channel: { releaseChannel: "stable" },
+      })
+      .mockResolvedValue({
+        ok: true,
+        catalog: { ...makeCatalog(), stale: false, staleAsOf: kNow },
+        channel: { releaseChannel: "stable" },
+      });
+    let state = await hydrate({ catalogStaleFollowUpMs: 1 });
+    expect(api.fetchOpenclawCatalog).toHaveBeenCalledTimes(1);
+    expect(state.catalog.stale).toBe(true);
+
+    await new Promise((resolve) => setTimeout(resolve, 15));
+    state = renderHook({ catalogStaleFollowUpMs: 1 });
+    // The follow-up went straight to the API (refresh: false — not a forced
+    // refresh, not the cached-fetch path), once.
+    expect(api.fetchOpenclawCatalog).toHaveBeenCalledTimes(2);
+    expect(api.fetchOpenclawCatalog).toHaveBeenLastCalledWith({ refresh: false });
+    // Its answer was stale again: no third read is scheduled.
+    await new Promise((resolve) => setTimeout(resolve, 15));
+    expect(api.fetchOpenclawCatalog).toHaveBeenCalledTimes(2);
+
+    // A later fresh load (Check now) lands the non-stale rows.
+    await state.onCheckNow();
+    expect(api.fetchOpenclawCatalog).toHaveBeenCalledTimes(3);
+    state = renderHook({ catalogStaleFollowUpMs: 1 });
+    expect(state.catalog.stale).toBe(false);
   });
 
   it("Check now refreshes the catalog with refresh=1 (U15)", async () => {

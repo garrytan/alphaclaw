@@ -95,7 +95,7 @@ describe("frontend/upgrade-tab progress-card failure affordances", () => {
     expect(onDismissOperation).toHaveBeenCalledTimes(1);
     const text = collectText(tree).join(" ");
     expect(text).toContain("Update to 2026.8.1 failed");
-    expect(text).toContain("Dismiss to re-enable the page");
+    expect(text).toContain("Dismiss to re-enable updates");
     expect(text).toContain("npm run build failed");
 
     // Still-running operations get no Dismiss affordance.
@@ -143,5 +143,35 @@ describe("frontend/upgrade-tab catalog-card refresh failure", () => {
     const noDataText = collectText(noData).join(" ");
     expect(noDataText).toContain("registry unreachable");
     expect(noDataText).not.toContain("Could not refresh the catalog");
+  });
+});
+
+describe("frontend/upgrade-tab catalog-card Check now availability (v0.9.81, RC1a)", () => {
+  const findCheckNow = (tree) =>
+    collectNodes(tree).find((vnode) => vnode?.props?.idleLabel === "Check now");
+
+  it("is never gated by actionsDisabled — only by an in-flight refresh", () => {
+    const catalog = { stable: [], beta: [], dev: null, staleAsOf: 0 };
+    const onCheckNow = vi.fn();
+    const disabledPage = findCheckNow(
+      expandTree(UpgradeCatalogCard({ catalog, actionsDisabled: true, onCheckNow, nowMs: 1_000 })),
+    );
+    expect(disabledPage).toBeTruthy();
+    expect(disabledPage.props.disabled).toBe(false);
+    expect(disabledPage.props.loading).toBe(false);
+
+    const refreshing = findCheckNow(
+      expandTree(
+        UpgradeCatalogCard({
+          catalog,
+          actionsDisabled: true,
+          refreshingCatalog: true,
+          onCheckNow,
+          nowMs: 1_000,
+        }),
+      ),
+    );
+    expect(refreshing.props.disabled).toBe(true);
+    expect(refreshing.props.loading).toBe(true);
   });
 });

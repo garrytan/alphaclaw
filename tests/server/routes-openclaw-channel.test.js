@@ -1629,6 +1629,27 @@ describe("server/routes/openclaw-channel", () => {
     });
   });
 
+  it("?refresh=1 forces the catalog refresh and the body forwards what the service did (refreshed / refreshThrottledForMs) (v0.9.81)", async () => {
+    const deps = createDeps();
+    deps.openclawReleasesService.getCatalog
+      .mockResolvedValueOnce({ ok: true, stable: [], beta: [], dev: {}, refreshed: true, sources: { npm: { stale: false } } })
+      .mockResolvedValueOnce({ ok: true, stable: [], beta: [], dev: {}, refreshed: false, refreshThrottledForMs: 12_000 });
+    const app = createApp(deps);
+
+    const forced = await request(app).get("/api/openclaw/catalog?refresh=1");
+    expect(forced.status).toBe(200);
+    expect(deps.openclawReleasesService.getCatalog).toHaveBeenLastCalledWith({ forceRefresh: true });
+    expect(forced.body.catalog.refreshed).toBe(true);
+    expect(forced.body.catalog.sources).toEqual({ npm: { stale: false } });
+
+    const throttled = await request(app).get("/api/openclaw/catalog?refresh=1");
+    expect(throttled.body.catalog.refreshed).toBe(false);
+    expect(throttled.body.catalog.refreshThrottledForMs).toBe(12_000);
+
+    await request(app).get("/api/openclaw/catalog");
+    expect(deps.openclawReleasesService.getCatalog).toHaveBeenLastCalledWith({ forceRefresh: false });
+  });
+
   it("carries the running Node on the catalog payload so rows can be engines-gated (v0.9.80)", async () => {
     const deps = createDeps();
     deps.openclawChannelService.getChannelInfo.mockReturnValue(

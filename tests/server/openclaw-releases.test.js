@@ -181,7 +181,7 @@ describe("server/openclaw-releases", () => {
   });
 
   describe("getCatalog", () => {
-    it("keeps rows date-sorted while the dist-tag decides isDistTagLatest", async () => {
+    it("keeps rows VERSION-sorted (rows are npm versions, v0.9.81) while the dist-tag decides isDistTagLatest", async () => {
       const { service } = createHarness();
 
       const catalog = await service.getCatalog();
@@ -196,23 +196,32 @@ describe("server/openclaw-releases", () => {
         latest: "2026.7.1-2",
         beta: "2026.7.2-beta.1",
       });
-      // 2026.6.34 was published after the 2026.7.1-2 hotfix → it sorts first,
-      // but only the dist-tag latest is flagged.
+      // 2026.6.34 was published AFTER the 2026.7.1-2 hotfix, but rows are npm
+      // versions (which carry no publish date) in version order — the hotfix
+      // sorts first AND is the dist-tag latest; the two are still decided
+      // separately (the isDistTagLatest column is the dist-tag's alone).
       expect(catalog.stable.map((row) => row.version)).toEqual([
-        "2026.6.34",
         "2026.7.1-2",
+        "2026.6.34",
         "2026.6.30",
       ]);
       expect(catalog.stable.map((row) => row.isDistTagLatest)).toEqual([
-        false,
         true,
         false,
+        false,
       ]);
+      expect(catalog.rowSource).toBe("npm");
+      expect(catalog.refreshed).toBe(false);
+      expect(catalog.sources).toEqual({
+        github: { fetchedAt: new Date(kNow).toISOString(), stale: false, degraded: false, rateLimited: false },
+        npm: { fetchedAt: new Date(kNow).toISOString(), stale: false, degraded: false, rateLimited: false },
+        dev: { fetchedAt: new Date(kNow).toISOString(), stale: false, degraded: false, rateLimited: false },
+      });
       expect(catalog.beta.map((row) => row.version)).toEqual([
         "2026.7.2-beta.1",
         "2026.7.1-beta.3",
       ]);
-      expect(catalog.stable[1]).toEqual({
+      expect(catalog.stable[0]).toEqual({
         version: "2026.7.1-2",
         publishedAt: "2026-07-10T00:00:00Z",
         prerelease: false,
@@ -254,8 +263,17 @@ describe("server/openclaw-releases", () => {
           prerelease: true,
         }),
       );
+      // Rows are npm versions: the doc must carry every version a row needs
+      // (listed in a scrambled order — the catalog sorts by version).
+      const versions = {};
+      for (const entry of releases.slice().reverse()) {
+        versions[entry.tag_name.slice(1)] = { engines: { node: ">=22" } };
+      }
       const { service } = createHarness({
-        handlers: standardHandlers({ releases }),
+        handlers: standardHandlers({
+          releases,
+          npmDoc: { "dist-tags": { latest: "2026.5.9" }, versions },
+        }),
       });
 
       const catalog = await service.getCatalog();
@@ -291,6 +309,10 @@ describe("server/openclaw-releases", () => {
       const { service } = createHarness({
         handlers: standardHandlers({
           releases,
+          npmDoc: {
+            "dist-tags": { latest: "2026.4.2" },
+            versions: { "2026.4.1": {}, "2026.4.2-beta.1": {}, "2026.4.2": {} },
+          },
           fallbackCommits: buildFallbackCommits(3),
         }),
       });
@@ -570,8 +592,8 @@ describe("server/openclaw-releases", () => {
       // GitHub-backed rows survive from the stale cache — notes intact.
       expect(second.stable).toEqual(first.stable);
       expect(second.beta).toEqual(first.beta);
-      expect(second.stable[1].notes).toBe("Notes for 2026.7.1-2");
-      expect(second.stable[1].notesUnavailable).toBe(false);
+      expect(second.stable[0].notes).toBe("Notes for 2026.7.1-2");
+      expect(second.stable[0].notesUnavailable).toBe(false);
       expect(second.dev).toEqual(first.dev);
       // staleAsOf is the oldest source used: the stale GitHub fetch time.
       expect(second.staleAsOf).toBe(new Date(kNow).toISOString());
@@ -614,16 +636,18 @@ describe("server/openclaw-releases", () => {
         githubRateLimited: false,
       });
       expect(catalog.distTags).toBe(null);
+      // GitHub-only fallback (npm absent altogether): version order too.
+      expect(catalog.rowSource).toBe("github");
       expect(catalog.stable.map((row) => row.version)).toEqual([
-        "2026.6.34",
         "2026.7.1-2",
+        "2026.6.34",
         "2026.6.30",
       ]);
       for (const row of [...catalog.stable, ...catalog.beta]) {
         expect(row.engines).toBe(null);
         expect(row.isDistTagLatest).toBe(false);
       }
-      expect(catalog.stable[0].notes).toBe("Notes for 2026.6.34");
+      expect(catalog.stable[0].notes).toBe("Notes for 2026.7.1-2");
     });
 
     it("resolves catalog_unavailable when both sources fail with a cold cache", async () => {
@@ -649,6 +673,310 @@ describe("server/openclaw-releases", () => {
       expect(catalog.message.length).toBeGreaterThan(0);
       expect(typeof catalog.hint).toBe("string");
       expect(catalog.hint.length).toBeGreaterThan(0);
+    });
+
+    // ── v0.9.81: npm is the row source; GitHub enriches (cross-model D14) ──
+    it("an npm version with NO GitHub release yet is a row — badged latest, notes unavailable — while released rows keep their notes (the 2026.9.3 publish lag)", async () => {
+      const npmDoc = {
+        "dist-tags": { latest: "2026.9.3", beta: "2026.9.1" },
+        versions: {
+          "2026.9.1": { engines: { node: ">=22" } },
+          "2026.9.2": { engines: { node: ">=22" } },
+          "2026.9.3": { engines: { node: ">=24.16.0 <25 || >=26.1.0" } },
+        },
+      };
+      const releases = [
+        release({ version: "2026.9.2", publishedAt: "2026-09-07T00:00:00Z" }),
+        release({ version: "2026.9.1", publishedAt: "2026-09-01T00:00:00Z" }),
+      ];
+      const { service } = createHarness({ handlers: standardHandlers({ releases, npmDoc }) });
+
+      const catalog = await service.getCatalog();
+
+      expect(catalog.stable.map((row) => row.version)).toEqual(["2026.9.3", "2026.9.2", "2026.9.1"]);
+      expect(catalog.stable[0]).toEqual(
+        expect.objectContaining({
+          version: "2026.9.3",
+          isDistTagLatest: true,
+          notesUnavailable: true,
+          notes: null,
+          publishedAt: null,
+          engines: { node: ">=24.16.0 <25 || >=26.1.0" },
+          applyPayload: { channel: "stable", version: "2026.9.3" },
+        }),
+      );
+      expect(catalog.stable[1]).toEqual(
+        expect.objectContaining({
+          notes: "Notes for 2026.9.2",
+          notesUnavailable: false,
+          publishedAt: "2026-09-07T00:00:00Z",
+          isDistTagLatest: false,
+        }),
+      );
+      expect(catalog.degraded).toEqual({ github: false, npm: false, githubRateLimited: false });
+    });
+
+    it("a GitHub release with no npm version is NOT a row (it cannot be installed); a version npm marks deprecated is skipped", async () => {
+      const npmDoc = {
+        "dist-tags": { latest: "2026.9.2" },
+        versions: {
+          "2026.9.0": { deprecated: "pulled: broken migration" },
+          "2026.9.1": {},
+          "2026.9.2": {},
+        },
+      };
+      const releases = [
+        release({ version: "2026.9.5", publishedAt: "2026-09-09T00:00:00Z" }), // tag pushed, never published
+        release({ version: "2026.9.2", publishedAt: "2026-09-07T00:00:00Z" }),
+        release({ version: "2026.9.1", publishedAt: "2026-09-01T00:00:00Z" }),
+        release({ version: "2026.9.0", publishedAt: "2026-08-25T00:00:00Z" }),
+      ];
+      const { service } = createHarness({ handlers: standardHandlers({ releases, npmDoc }) });
+
+      const catalog = await service.getCatalog();
+
+      expect(catalog.stable.map((row) => row.version)).toEqual(["2026.9.2", "2026.9.1"]);
+      expect(service.isKnownVersion("2026.9.5", "stable")).toBe(false);
+    });
+
+    it("prerelease classification merges the version suffix and the GitHub flag; a dist-tag target missing from `versions` is still a row", async () => {
+      const npmDoc = {
+        "dist-tags": { latest: "2026.9.2", next: "2026.9.9" },
+        versions: { "2026.9.1": {}, "2026.9.2": {}, "2026.9.3-beta.1": {} },
+      };
+      const releases = [
+        // Flagged prerelease on GitHub without a channel suffix → beta list.
+        release({ version: "2026.9.2", publishedAt: "2026-09-07T00:00:00Z", prerelease: true }),
+      ];
+      const { service } = createHarness({ handlers: standardHandlers({ releases, npmDoc }) });
+
+      const catalog = await service.getCatalog();
+
+      expect(catalog.stable.map((row) => row.version)).toEqual(["2026.9.9", "2026.9.1"]);
+      expect(catalog.beta.map((row) => row.version)).toEqual(["2026.9.3-beta.1", "2026.9.2"]);
+      expect(catalog.beta[1].prerelease).toBe(true);
+    });
+
+    // ── v0.9.81: honest staleness (RC1c / D6 / D20) ──
+    it("staleAsOf is the oldest ROW source (GitHub releases, npm) — a stale dev-commits fetch no longer drags the stamp back", async () => {
+      const { service, state } = createHarness();
+      await service.getCatalog();
+      // Only the dev compare fails from now on; releases + npm keep answering.
+      state.now = kNow + kTtlMs + 1000;
+      state.handlers = [
+        ({ url }) => (url.startsWith(kCompareUrlPrefix) ? jsonResponse({ message: "rate limited" }, { status: 403 }) : null),
+        ({ url }) => (url.startsWith(`${kOpenclawGithubApiBaseUrl}/commits`) ? jsonResponse({ message: "rate limited" }, { status: 403 }) : null),
+        ...standardHandlers(),
+      ];
+      await service.getCatalog();
+      await service.__awaitRevalidations();
+
+      const catalog = await service.getCatalog();
+      expect(catalog.staleAsOf).toBe(new Date(state.now).toISOString());
+      expect(catalog.sources.dev).toEqual(
+        expect.objectContaining({ fetchedAt: new Date(kNow).toISOString(), degraded: true, rateLimited: true }),
+      );
+      expect(catalog.degraded.github).toBe(true);
+      expect(catalog.degraded.githubRateLimited).toBe(true);
+    });
+
+    it("a hard-stale npm cache (≥ hardStaleMs) is AWAITED — the read returns the fresh rows, not the stale copy — while GitHub stays SWR", async () => {
+      const { service, state, calls } = createHarness();
+      const first = await service.getCatalog();
+      expect(first.stable[0].version).toBe("2026.7.1-2");
+
+      // 61 minutes later npm has a newer version; GitHub is unchanged.
+      state.now = kNow + 61 * 60_000;
+      state.handlers = standardHandlers({
+        npmDoc: {
+          "dist-tags": { latest: "2026.7.3" },
+          versions: { ...kDefaultNpmDoc.versions, "2026.7.3": { engines: { node: ">=22" } } },
+        },
+      });
+      const callsBefore = calls.length;
+      const second = await service.getCatalog();
+
+      expect(second.stable[0]).toEqual(expect.objectContaining({ version: "2026.7.3", isDistTagLatest: true, notesUnavailable: true }));
+      expect(second.sources.npm).toEqual(
+        expect.objectContaining({ awaited: true, stale: false, fetchedAt: new Date(state.now).toISOString() }),
+      );
+      // GitHub was served stale (SWR) and revalidated in the background.
+      expect(second.sources.github.stale).toBe(true);
+      expect(second.staleAsOf).toBe(new Date(kNow).toISOString());
+      expect(calls.slice(callsBefore).some((call) => call.url === kOpenclawRegistryUrl)).toBe(true);
+      await service.__awaitRevalidations();
+      const third = await service.getCatalog();
+      expect(third.staleAsOf).toBe(new Date(state.now).toISOString());
+    });
+
+    it("a hard-stale npm cache whose awaited fetch FAILS falls back to the stale copy, flagged degraded", async () => {
+      const { service, state } = createHarness();
+      const first = await service.getCatalog();
+      state.now = kNow + 61 * 60_000;
+      state.handlers = [
+        ({ url }) => (url === kOpenclawRegistryUrl ? jsonResponse({ message: "boom" }, { status: 503 }) : null),
+        ...standardHandlers(),
+      ];
+      const second = await service.getCatalog();
+      expect(second.ok).toBe(true);
+      expect(second.stable).toEqual(first.stable);
+      expect(second.degraded.npm).toBe(true);
+      expect(second.sources.npm).toEqual(
+        expect.objectContaining({ awaited: true, stale: true, degraded: true, fetchedAt: new Date(kNow).toISOString() }),
+      );
+      await service.__awaitRevalidations();
+    });
+
+    it("mildly stale (TTL < age < hardStaleMs) keeps SWR: the stale rows come back immediately and the revalidation runs in the background", async () => {
+      const { service, state } = createHarness();
+      await service.getCatalog();
+      state.now = kNow + 20 * 60_000;
+      state.handlers = standardHandlers({
+        npmDoc: {
+          "dist-tags": { latest: "2026.7.3" },
+          versions: { ...kDefaultNpmDoc.versions, "2026.7.3": {} },
+        },
+      });
+      const second = await service.getCatalog();
+      expect(second.stale).toBe(true);
+      expect(second.stable[0].version).toBe("2026.7.1-2");
+      expect(second.sources.npm.awaited).toBeUndefined();
+      await service.__awaitRevalidations();
+      const third = await service.getCatalog();
+      expect(third.stable[0].version).toBe("2026.7.3");
+    });
+
+    it("a 304 persists fetchedAt through the sidecar: a NEW service over the same cacheDir (a restart) reports the bumped stamp with zero fetches inside the TTL", async () => {
+      const etags = { releases: 'W/"rel-9"', npm: '"npm-9"', compare: 'W/"cmp-9"' };
+      const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-releases-restart-"));
+      const first = createHarness({ handlers: standardHandlers({ etags }) });
+      // Point the first service at a known cacheDir via a second instance
+      // sharing it: build both over the same directory.
+      const make = (now) => {
+        const calls = [];
+        const fetchImpl = async (url, options = {}) => {
+          const headers = { ...(options.headers || {}) };
+          calls.push({ url, headers });
+          for (const handler of standardHandlers({ etags })) {
+            const response = handler({ url, headers });
+            if (response) return response;
+          }
+          throw new Error(`Unrouted fetch: ${url}`);
+        };
+        const state = { now };
+        const service = createOpenclawReleasesService({
+          fetchImpl,
+          cacheDir,
+          cacheTtlMs: kTtlMs,
+          nowFn: () => state.now,
+          logger: { warn: vi.fn(), error: vi.fn(), log: vi.fn() },
+        });
+        return { service, calls, state };
+      };
+      void first;
+      const a = make(kNow);
+      await a.service.getCatalog();
+      // Past the TTL: a forced refresh answers 304 everywhere → stamp bumped.
+      a.state.now = kNow + kTtlMs + 5_000;
+      const refreshed = await a.service.getCatalog({ forceRefresh: true });
+      expect(refreshed.refreshed).toBe(true);
+      expect(refreshed.staleAsOf).toBe(new Date(a.state.now).toISOString());
+      expect(fs.existsSync(path.join(cacheDir, "npm-abbrev.json.meta.json"))).toBe(true);
+
+      // "Restart": a fresh service over the same directory, 1 s later.
+      const b = make(a.state.now + 1_000);
+      const afterRestart = await b.service.getCatalog();
+      expect(afterRestart.staleAsOf).toBe(new Date(a.state.now).toISOString());
+      expect(afterRestart.stale).toBe(false);
+      expect(b.calls).toHaveLength(0);
+    });
+
+    it("a fetch failure persists through the sidecar: after a restart the stale read still reports degraded (and rate-limited) until a fetch succeeds", async () => {
+      const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-releases-restart-"));
+      const make = (now, handlers) => {
+        const state = { now, handlers };
+        const service = createOpenclawReleasesService({
+          fetchImpl: async (url, options = {}) => {
+            const headers = { ...(options.headers || {}) };
+            for (const handler of state.handlers) {
+              const response = handler({ url, headers });
+              if (response) return response;
+            }
+            throw new Error(`Unrouted fetch: ${url}`);
+          },
+          cacheDir,
+          cacheTtlMs: kTtlMs,
+          nowFn: () => state.now,
+          logger: { warn: vi.fn(), error: vi.fn(), log: vi.fn() },
+        });
+        return { service, state };
+      };
+      const a = make(kNow, standardHandlers());
+      await a.service.getCatalog();
+      a.state.now = kNow + kTtlMs + 1_000;
+      a.state.handlers = [failingGithubHandler(403), npmOnlyHandler()];
+      await a.service.getCatalog();
+      await a.service.__awaitRevalidations();
+      expect((await a.service.getCatalog()).degraded).toEqual(
+        expect.objectContaining({ github: true, githubRateLimited: true }),
+      );
+
+      // Restart while still inside the (npm-refreshed) window: GitHub's cache
+      // is past the TTL, so the read is stale — and the flag must survive.
+      const b = make(a.state.now + 1_000, [failingGithubHandler(403), npmOnlyHandler()]);
+      const afterRestart = await b.service.getCatalog();
+      expect(afterRestart.degraded).toEqual(
+        expect.objectContaining({ github: true, githubRateLimited: true }),
+      );
+      await b.service.__awaitRevalidations();
+      // A later success clears it.
+      b.state.now += kTtlMs + 1_000;
+      b.state.handlers = standardHandlers();
+      await b.service.getCatalog();
+      await b.service.__awaitRevalidations();
+      expect((await b.service.getCatalog()).degraded.github).toBe(false);
+      const c = make(b.state.now + 1_000, standardHandlers());
+      expect((await c.service.getCatalog()).degraded.github).toBe(false);
+    });
+
+    it("reports what a forced refresh did: `refreshed: true` when it hit the network, `refreshThrottledForMs` inside the floor — and the throttled read still serves the SWR result", async () => {
+      const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-releases-floor-"));
+      const state = { now: kNow, handlers: standardHandlers() };
+      const calls = [];
+      const service = createOpenclawReleasesService({
+        fetchImpl: async (url, options = {}) => {
+          const headers = { ...(options.headers || {}) };
+          calls.push(url);
+          for (const handler of state.handlers) {
+            const response = handler({ url, headers });
+            if (response) return response;
+          }
+          throw new Error(`Unrouted fetch: ${url}`);
+        },
+        cacheDir,
+        cacheTtlMs: kTtlMs,
+        forceRefreshMinIntervalMs: 30_000,
+        nowFn: () => state.now,
+        logger: { warn: vi.fn(), error: vi.fn(), log: vi.fn() },
+      });
+      const plain = await service.getCatalog();
+      expect(plain.refreshed).toBe(false);
+      expect(plain.refreshThrottledForMs).toBeUndefined();
+
+      state.now += 1_000;
+      const forced = await service.getCatalog({ forceRefresh: true });
+      expect(forced.refreshed).toBe(true);
+      expect(forced.refreshThrottledForMs).toBeUndefined();
+
+      state.now += 10_000;
+      const throttled = await service.getCatalog({ forceRefresh: true });
+      expect(throttled.refreshed).toBe(false);
+      expect(throttled.refreshThrottledForMs).toBe(20_000);
+
+      // Past the floor, the next click refreshes again.
+      state.now += 20_000;
+      const again = await service.getCatalog({ forceRefresh: true });
+      expect(again.refreshed).toBe(true);
     });
 
     it("sends the GitHub token to GitHub only", async () => {
