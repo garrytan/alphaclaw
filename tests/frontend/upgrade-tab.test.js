@@ -1832,9 +1832,12 @@ describe("frontend/upgrade-tab hook", () => {
     expect(state.pendingApply.confirm.title).toBe("Switch to 2026.7.2?");
 
     await state.onConfirmApply();
+    // v0.9.81 (D13): the body declares its direction (2026.7.2 > the running
+    // 2026.7.1-2 → update); a row click never claims "latest".
     expect(api.applyOpenclawVersion).toHaveBeenCalledWith({
       channel: "stable",
       version: "2026.7.2",
+      intent: "update",
     });
   });
 
@@ -2211,6 +2214,157 @@ describe("frontend/upgrade-tab hook", () => {
     expect(api.fetchOpenclawCatalog).toHaveBeenCalledTimes(3);
     state = renderHook({ catalogStaleFollowUpMs: 1 });
     expect(state.catalog.stale).toBe(false);
+  });
+
+  // ── v0.9.81 (D13/D2): declared intent + "Update to latest" never downgrades ──
+  it("the 'Update to latest' CTA posts intent: update with the expectLatest claim (v0.9.81)", async () => {
+    api.applyOpenclawVersion.mockResolvedValue({ ok: true, operationId: "op-l", events: "/api/operations/op-l/events" });
+    let state = await hydrate();
+    state.onUpdateToLatest();
+    state = renderHook({});
+    expect(state.pendingApply.payload).toEqual({ channel: "stable", version: "2026.7.2" });
+    expect(state.pendingApply.intent).toBe("update");
+    expect(state.pendingApply.expectLatest).toBe(true);
+    expect(state.pendingApply.isDowngrade).toBe(false);
+    await state.onConfirmApply();
+    expect(api.applyOpenclawVersion).toHaveBeenCalledWith({
+      channel: "stable",
+      version: "2026.7.2",
+      intent: "update",
+      expectLatest: true,
+    });
+  });
+
+  it("when the installed version IS the dist-tag latest, 'Update to latest' toasts and never posts (the bug-2 regression, CRITICAL)", async () => {
+    api.fetchOpenclawCatalog.mockResolvedValue({
+      ok: true,
+      catalog: makeCatalog({
+        distTags: { latest: "2026.7.1-2" },
+        stable: [
+          makeStableRow({ version: "2026.7.1-2", isDistTagLatest: true, current: true, applyPayload: { channel: "stable", version: "2026.7.1-2" } }),
+          makeStableRow({ version: "2026.7.1", isDistTagLatest: false, applyPayload: { channel: "stable", version: "2026.7.1" } }),
+        ],
+        beta: [],
+      }),
+      channel: { releaseChannel: "stable" },
+    });
+    let state = await hydrate();
+    state.onUpdateToLatest();
+    state = renderHook({});
+    expect(state.pendingApply).toBeNull();
+    expect(api.applyOpenclawVersion).not.toHaveBeenCalled();
+    expect(showToast).toHaveBeenCalledWith("You're already on the latest stable.", "info");
+  });
+
+  it("view: no 'Update to latest stable' button when the current row is the dist-tag latest (CRITICAL)", () => {
+    const tree = renderView({
+      channelInfo: makeChannelInfo({ installedVersion: "2026.7.1-2" }),
+      catalog: makeCatalog({
+        distTags: { latest: "2026.7.1-2" },
+        stable: [
+          makeStableRow({ version: "2026.7.1-2", isDistTagLatest: true, current: true, applyPayload: { channel: "stable", version: "2026.7.1-2" } }),
+          makeStableRow({ version: "2026.7.1", isDistTagLatest: false, applyPayload: { channel: "stable", version: "2026.7.1" } }),
+        ],
+        beta: [],
+      }),
+    });
+    expect(findActionButtonByLabel(tree, "Update to latest stable")).toBeUndefined();
+    expect(treeText(tree)).toContain("You're on the latest stable version.");
+    // The older row keeps an explicit, honest "Downgrade" button.
+    expect(findActionButtonByLabel(tree, "Downgrade")).toBeTruthy();
+  });
+
+  it("view: a catalog row's button posts its own direction — Upgrade → update, Downgrade → downgrade", () => {
+    const onRequestApply = vi.fn();
+    const tree = renderView({
+      channelInfo: makeChannelInfo({ installedVersion: "2026.7.1-2" }),
+      catalog: makeCatalog({
+        stable: [
+          makeStableRow(),
+          makeStableRow({ version: "2026.7.1-2", isDistTagLatest: false, current: true, applyPayload: { channel: "stable", version: "2026.7.1-2" } }),
+          makeStableRow({ version: "2026.7.0", isDistTagLatest: false, applyPayload: { channel: "stable", version: "2026.7.0" } }),
+        ],
+        beta: [],
+      }),
+      onRequestApply,
+    });
+    findActionButtonByLabel(tree, "Upgrade").props.onClick();
+    expect(onRequestApply).toHaveBeenLastCalledWith(
+      expect.objectContaining({ payload: { channel: "stable", version: "2026.7.2" }, isDowngrade: false, intent: "update" }),
+    );
+    findActionButtonByLabel(tree, "Downgrade").props.onClick();
+    expect(onRequestApply).toHaveBeenLastCalledWith(
+      expect.objectContaining({ payload: { channel: "stable", version: "2026.7.0" }, isDowngrade: true, intent: "downgrade" }),
+    );
+  });
+
+  it("onRequestApply derives the direction itself: an older version with isDowngrade: false still opens 'Downgrade to …?' and posts intent: downgrade (belt 2)", async () => {
+    api.applyOpenclawVersion.mockResolvedValue({ ok: true, operationId: "op-d", events: "/api/operations/op-d/events" });
+    let state = await hydrate();
+    state.onRequestApply({ payload: { channel: "stable", version: "2026.7.0" }, label: "2026.7.0", isDowngrade: false });
+    state = renderHook({});
+    expect(state.pendingApply.isDowngrade).toBe(true);
+    expect(state.pendingApply.intent).toBe("downgrade");
+    expect(state.pendingApply.confirm.title).toBe("Downgrade to 2026.7.0?");
+    await state.onConfirmApply();
+    expect(api.applyOpenclawVersion).toHaveBeenCalledWith({ channel: "stable", version: "2026.7.0", intent: "downgrade" });
+  });
+
+  it("409 catalog_stale: the catalog is reloaded (forced) ONCE and the confirm re-opens on the server's `latest`; a second stale verdict is an error toast, never a third POST (D2)", async () => {
+    const stale = Object.assign(new Error("2026.7.3 is the latest stable release — 2026.7.2 is no longer the newest."), {
+      code: "catalog_stale",
+      latest: "2026.7.3",
+    });
+    api.applyOpenclawVersion.mockRejectedValue(stale);
+    let state = await hydrate();
+    const catalogCallsBefore = api.fetchOpenclawCatalog.mock.calls.length;
+    state.onUpdateToLatest();
+    state = renderHook({});
+    await state.onConfirmApply();
+    state = renderHook({});
+    // One forced reload, and the confirm is back — on the server's version.
+    expect(api.fetchOpenclawCatalog.mock.calls.length).toBe(catalogCallsBefore + 1);
+    expect(api.fetchOpenclawCatalog).toHaveBeenLastCalledWith({ refresh: true });
+    expect(state.pendingApply).toEqual(
+      expect.objectContaining({ payload: { channel: "stable", version: "2026.7.3" }, intent: "update", expectLatest: true, staleRetried: true }),
+    );
+    expect(state.operation).toBeNull();
+    expect(state.applyError).toBeNull();
+    expect(showToast).toHaveBeenCalledWith(expect.stringContaining("2026.7.3 is now the latest stable"), "info");
+
+    // The operator confirms again and the server STILL says stale.
+    showToast.mockClear();
+    await state.onConfirmApply();
+    state = renderHook({});
+    expect(api.applyOpenclawVersion).toHaveBeenCalledTimes(2);
+    expect(api.applyOpenclawVersion).toHaveBeenLastCalledWith(
+      expect.objectContaining({ version: "2026.7.3", intent: "update", expectLatest: true }),
+    );
+    expect(state.pendingApply).toBeNull();
+    expect(state.applyError).toEqual(expect.objectContaining({ code: "catalog_stale" }));
+    expect(showToast).toHaveBeenCalledWith(expect.stringContaining("no longer the newest"), "error");
+    await flushAsync();
+    expect(api.applyOpenclawVersion).toHaveBeenCalledTimes(2);
+  });
+
+  it("409 intent_mismatch: the channel and catalog are re-read and the envelope lands inline with an error toast", async () => {
+    const mismatch = Object.assign(new Error('intent "update" does not match the direction of this apply: 2026.7.2 is older than the running 2026.7.5.'), {
+      code: "intent_mismatch",
+      installedVersion: "2026.7.5",
+    });
+    api.applyOpenclawVersion.mockRejectedValue(mismatch);
+    let state = await hydrate();
+    const channelCalls = api.fetchOpenclawChannel.mock.calls.length;
+    state.onRequestApply({ payload: { channel: "stable", version: "2026.7.2" }, label: "2026.7.2" });
+    state = renderHook({});
+    await state.onConfirmApply();
+    await flushAsync();
+    state = renderHook({});
+    expect(state.applyError).toEqual(expect.objectContaining({ code: "intent_mismatch" }));
+    expect(showToast).toHaveBeenCalledWith(expect.stringContaining("does not match"), "error");
+    expect(api.fetchOpenclawChannel.mock.calls.length).toBeGreaterThan(channelCalls);
+    expect(api.fetchOpenclawCatalog).toHaveBeenLastCalledWith({ refresh: true });
+    expect(state.pendingApply).toBeNull();
   });
 
   it("Check now refreshes the catalog with refresh=1 (U15)", async () => {
@@ -2959,9 +3113,11 @@ describe("frontend/upgrade-tab repair (2.3)", () => {
 
     api.applyOpenclawVersion.mockClear();
     await state.onRetryApply();
+    // The re-stage carries the failed operation's own declared direction.
     expect(api.applyOpenclawVersion).toHaveBeenCalledWith({
       channel: "beta",
       version: "2026.7.3-beta.1",
+      intent: "update",
     });
   });
 

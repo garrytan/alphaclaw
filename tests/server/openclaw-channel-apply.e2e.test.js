@@ -446,7 +446,7 @@ describe("server/openclaw-channel apply flow (e2e)", { retry: 1 }, () => {
     const { port } = await listenApp(app);
     const applyRes = await request(app)
       .post("/api/openclaw/apply")
-      .send({ channel: "beta", version: "1.1.0" });
+      .send({ channel: "beta", version: "1.1.0", intent: "update" });
     expect(applyRes.status).toBe(202);
     expect(applyRes.body.ok).toBe(true);
     expect(typeof applyRes.body.operationId).toBe("string");
@@ -510,6 +510,103 @@ describe("server/openclaw-channel apply flow (e2e)", { retry: 1 }, () => {
     expect(restartProcess).toHaveBeenCalledTimes(1);
   });
 
+  // ── v0.9.81 (D13/D21): the service-side intent belt and its run record ──
+  describe("declared intent through applyUpdate (belt 3)", () => {
+    const readRuns = (harness) => {
+      const dir = path.join(harness.openclawDir, ".alphaclaw", "runs");
+      if (!fs.existsSync(dir)) return [];
+      return fs
+        .readdirSync(dir)
+        .filter((name) => name.endsWith(".json"))
+        .map((name) => JSON.parse(fs.readFileSync(path.join(dir, name), "utf8")));
+    };
+
+    it("an `update` to an older version is a 409 intent_mismatch: nothing is prepared, the ledger run fails with that code and records the check", async () => {
+      const harness = createHarness({ pin: "1.2.0", installedVersion: "1.2.0", sentinelVersion: "1.2.0" });
+      const result = await harness.sync.applyUpdate({ channel: "stable", version: "1.1.0", intent: "update" });
+      expect(result.status).toBe(409);
+      expect(result.body.code).toBe("intent_mismatch");
+      expect(result.body.message).toContain("1.1.0");
+      expect(result.body.message).toContain("1.2.0");
+      expect(harness.installToTempDir).not.toHaveBeenCalled();
+      expect(harness.restartProcess).not.toHaveBeenCalled();
+      const [run] = readRuns(harness);
+      expect(run).toEqual(
+        expect.objectContaining({
+          state: "failed",
+          target: expect.objectContaining({ channel: "stable", version: "1.1.0", intent: "update" }),
+          result: expect.objectContaining({ code: "intent_mismatch" }),
+        }),
+      );
+      expect(run.intentCheck).toBeUndefined();
+    });
+
+    it("the same body declared `downgrade` proceeds to the hard-gated backup step and records the verified direction", async () => {
+      const harness = createHarness({
+        pin: "1.2.0",
+        installedVersion: "1.2.0",
+        sentinelVersion: "1.2.0",
+        runnerImpl: async (opts, fallback) => {
+          if (opts.command === "openclaw" && opts.args?.[0] === "backup") {
+            return { ok: false, code: 1, tail: "disk full", timedOut: false };
+          }
+          return fallback(opts);
+        },
+      });
+      const result = await harness.sync.applyUpdate({ channel: "stable", version: "1.1.0", intent: "downgrade" });
+      expect(result.status).toBe(409);
+      expect(result.body.code).toBe("backup_failed");
+      const [run] = readRuns(harness);
+      expect(run.target.intent).toBe("downgrade");
+      expect(run.intentCheck).toEqual({ direction: "verified", installedVersion: "1.2.0", latest: "not_applicable" });
+    });
+
+    it("a successful `update` records the check; with expectLatest the catalog's agreement is recorded too, and a stale catalog refuses catalog_stale", async () => {
+      const harness = createHarness();
+      const ok = await harness.sync.applyUpdate({ channel: "beta", version: "1.1.0", intent: "update" });
+      expect(ok.status).toBe(202);
+      const [run] = readRuns(harness);
+      expect(run.intentCheck).toEqual({ direction: "verified", installedVersion: "1.0.0", latest: "not_claimed" });
+
+      const claimed = createHarness();
+      claimed.releases.getCatalog.mockResolvedValue({
+        ok: true,
+        degraded: { github: false, npm: false },
+        stable: [],
+        beta: [{ version: "1.1.0" }, { version: "1.0.0-beta.1" }],
+      });
+      const agreed = await claimed.sync.applyUpdate({ channel: "beta", version: "1.1.0", intent: "update", expectLatest: true });
+      expect(agreed.status).toBe(202);
+      expect(readRuns(claimed)[0].intentCheck).toEqual({
+        direction: "verified",
+        installedVersion: "1.0.0",
+        latest: "verified",
+        latestVersion: "1.1.0",
+      });
+
+      const stale = createHarness();
+      stale.releases.getCatalog.mockResolvedValue({
+        ok: true,
+        degraded: { github: false, npm: false },
+        stable: [],
+        beta: [{ version: "1.2.0-beta.1" }, { version: "1.1.0" }],
+      });
+      const refused = await stale.sync.applyUpdate({ channel: "beta", version: "1.1.0", intent: "update", expectLatest: true });
+      expect(refused.status).toBe(409);
+      expect(refused.body.code).toBe("catalog_stale");
+      expect(refused.body.latest).toBe("1.2.0-beta.1");
+      expect(stale.installToTempDir).not.toHaveBeenCalled();
+    });
+
+    it("a direct caller that omits intent is recorded as such (the HTTP route never lets that happen for stable/beta); dev records not_applicable", async () => {
+      const harness = createHarness();
+      const result = await harness.sync.applyUpdate({ channel: "beta", version: "1.1.0" });
+      expect(result.status).toBe(202);
+      expect(readRuns(harness)[0].intentCheck).toEqual({ direction: "caller_omitted", latest: "not_checked" });
+      expect(readRuns(harness)[0].target).not.toHaveProperty("intent");
+    });
+  });
+
   it("blocks a downgrade when the backup fails, with the full error envelope", async () => {
     const harness = createHarness({
       pin: "1.2.0",
@@ -525,7 +622,10 @@ describe("server/openclaw-channel apply flow (e2e)", { retry: 1 }, () => {
 
     const res = await request(harness.app)
       .post("/api/openclaw/apply")
-      .send({ channel: "stable", version: "1.1.0" });
+      // 1.1.0 below the running 1.2.0: the body declares the downgrade
+      // (v0.9.81 — an `update` here is refused intent_mismatch before the
+      // backup step ever runs; see the intent cases below).
+      .send({ channel: "stable", version: "1.1.0", intent: "downgrade" });
 
     expect(res.status).toBe(409);
     expect(res.body.ok).toBe(false);
@@ -548,7 +648,7 @@ describe("server/openclaw-channel apply flow (e2e)", { retry: 1 }, () => {
 
     const res = await request(harness.app)
       .post("/api/openclaw/apply")
-      .send({ channel: "beta", version: "1.1.0" });
+      .send({ channel: "beta", version: "1.1.0", intent: "update" });
 
     expect(res.status).toBe(409);
     expect(res.body.code).toBe("verify_failed");
@@ -606,7 +706,7 @@ describe("server/openclaw-channel apply flow (e2e)", { retry: 1 }, () => {
     const { port } = await listenApp(app);
     const applyRes = await request(app)
       .post("/api/openclaw/apply")
-      .send({ channel: "beta", version: "1.1.0" });
+      .send({ channel: "beta", version: "1.1.0", intent: "update" });
 
     if (applyRes.status === 409) {
       expect(applyRes.body.code).toBe("db_preflight_failed");
@@ -660,13 +760,13 @@ describe("server/openclaw-channel apply flow (e2e)", { retry: 1 }, () => {
 
     const firstRes = await request(app)
       .post("/api/openclaw/apply")
-      .send({ channel: "beta", version: "1.1.0" });
+      .send({ channel: "beta", version: "1.1.0", intent: "update" });
     expect(firstRes.status).toBe(202);
     expect(sync.isApplyInProgress()).toBe(true);
 
     const secondRes = await request(app)
       .post("/api/openclaw/apply")
-      .send({ channel: "beta", version: "1.1.0" });
+      .send({ channel: "beta", version: "1.1.0", intent: "update" });
     expect(secondRes.status).toBe(409);
     expect(secondRes.body.code).toBe("operation_in_progress");
 
