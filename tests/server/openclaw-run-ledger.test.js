@@ -320,4 +320,41 @@ describe("server/openclaw-run-ledger", () => {
     );
     expect(ledger.completeRun(operationId, { state: "bogus", ok: false }).state).toBe("failed");
   });
+
+  // v0.9.81 (review): backup runs have their own ring and their own
+  // interrupted copy.
+  it("prunes backup runs on their own ring so manual backups never evict update records, and closes a dangling backup run with backup wording", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "run-ledger-backup-ring-"));
+    let now = 10_000;
+    const ledger = createRunLedger({ openclawDir: dir, nowFn: () => now, logger: { log() {}, warn() {} }, keepRuns: 2, keepBackupRuns: 1 });
+    const ids = {
+      applyOld: "aaaaaaaa-1111-4bbb-8ccc-000000000001",
+      applyNew: "aaaaaaaa-1111-4bbb-8ccc-000000000002",
+      backupOld: "bbbbbbbb-1111-4bbb-8ccc-000000000001",
+      backupMid: "bbbbbbbb-1111-4bbb-8ccc-000000000002",
+      backupNew: "bbbbbbbb-1111-4bbb-8ccc-000000000003",
+      backupRunning: "bbbbbbbb-1111-4bbb-8ccc-000000000004",
+    };
+    const make = (operationId, target, state) => {
+      now += 1000;
+      ledger.createRun({ operationId, target });
+      if (state) ledger.completeRun(operationId, { state, ok: state === "completed" });
+    };
+    make(ids.applyOld, { channel: "stable", version: "1.0.0" }, "failed");
+    make(ids.backupOld, { kind: "backup" }, "completed");
+    make(ids.backupMid, { kind: "backup" }, "failed");
+    make(ids.applyNew, { channel: "stable", version: "1.1.0" }, "failed");
+    make(ids.backupNew, { kind: "backup" }, "completed");
+    make(ids.backupRunning, { kind: "backup" }, null);
+    ledger.pruneRuns();
+    const kept = ledger.listRuns().map((run) => run.operationId).sort();
+    // Both apply records survive (keep 2) although four backup runs are newer;
+    // the backup ring keeps only its newest (the running one).
+    expect(kept).toEqual([ids.applyNew, ids.applyOld, ids.backupRunning].sort());
+    const [closed] = ledger.closeInterruptedRuns();
+    expect(closed.operationId).toBe(ids.backupRunning);
+    expect(closed.state).toBe("interrupted");
+    expect(closed.result.message).toBe("AlphaClaw restarted before the backup finished.");
+    expect(closed.result.hint).toMatch(/Run Back up now again/);
+  });
 });

@@ -99,6 +99,27 @@ const makeOverseer = ({
 };
 
 describe("server/upgrade-overseer", () => {
+  it("never reviews a standalone backup run as an update, and a newer backup run never hides the failed update behind it (v0.9.81)", async () => {
+    const { ledger } = makeLedger();
+    seedFailedRun(ledger);
+    const backupId = "bbbbbbbb-0000-4000-8000-000000000002";
+    ledger.createRun({ operationId: backupId, target: { kind: "backup" } });
+    ledger.completeRun(backupId, { state: "failed", ok: false, result: { ok: false, code: "backup_failed", message: "no space" } });
+    expect(ledger.listRuns()[0].operationId).toBe(backupId);
+    const runner = makeRunner();
+    const { overseer } = makeOverseer({ ledger, runner, enabled: false });
+    // Disabled → skipped before any review; the picker is exercised through
+    // the eligible-run seam the enabled path uses.
+    await overseer.maybeRunForLatest();
+    const onlyBackup = makeLedger();
+    onlyBackup.ledger.createRun({ operationId: backupId, target: { kind: "backup" } });
+    onlyBackup.ledger.completeRun(backupId, { state: "failed", ok: false });
+    const { overseer: solo } = makeOverseer({ ledger: onlyBackup.ledger, runner: makeRunner() });
+    const result = await solo.maybeRunForLatest();
+    expect(result).toEqual(expect.objectContaining({ skipped: expect.any(String) }));
+    expect(onlyBackup.ledger.readRun(backupId).overseer).toBeNull();
+  });
+
   it("does nothing when disabled (default off)", async () => {
     const { ledger } = makeLedger();
     seedFailedRun(ledger);

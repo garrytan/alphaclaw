@@ -82,9 +82,27 @@ const kOpenclawArgvFixtures = [
     openclaw: true,
     gateway: true,
   },
+  // THE shape this repo launches (v0.9.81 review P1): gateway.js spawns
+  // `openclaw gateway run` via PATH → AlphaClaw's shim execs
+  // `node "<root>/node_modules/.bin/openclaw" "$@"` → the live gateway's argv
+  // is `node …/node_modules/.bin/openclaw gateway run` (the npm bin shim is a
+  // node script whose basename is `openclaw`). Every AlphaClaw CLI shell-out
+  // has the same prefix.
+  {
+    name: "the repo's own gateway launcher: node + npm bin shim + gateway run",
+    argv: ["/usr/local/bin/node", "/app/node_modules/.bin/openclaw", "gateway", "run"],
+    openclaw: true,
+    gateway: true,
+  },
+  {
+    name: "the repo's own gateway launcher under the overlay tree",
+    argv: ["node", "/data/.openclaw/openclaw-overlay/2026.9.3/node_modules/.bin/openclaw", "gateway", "--force"],
+    openclaw: true,
+    gateway: true,
+  },
   {
     name: "AlphaClaw's own transient sessions shell-out (a real OpenClaw process; the settle loop, not the matcher, tolerates it)",
-    argv: ["node", "/app/node_modules/.bin/../openclaw/dist/entry.js", "sessions", "--json", "--all-agents"],
+    argv: ["node", "/app/node_modules/.bin/openclaw", "sessions", "--json", "--all-agents"],
     openclaw: true,
     gateway: false,
   },

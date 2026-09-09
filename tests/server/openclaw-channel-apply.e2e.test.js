@@ -752,7 +752,7 @@ describe("server/openclaw-channel apply flow (e2e)", { retry: 1 }, () => {
         return res.status(409).json({
           ok: false,
           error:
-            "An OpenClaw version change is in progress — retry after it finishes.",
+            "An OpenClaw version change or backup is in progress — retry after it finishes.",
         });
       }
       res.json({ ok: true });
@@ -772,7 +772,7 @@ describe("server/openclaw-channel apply flow (e2e)", { retry: 1 }, () => {
 
     const guardedRes = await request(guardApp).post("/api/alphaclaw/update");
     expect(guardedRes.status).toBe(409);
-    expect(guardedRes.body.error).toMatch(/version change is in progress/);
+    expect(guardedRes.body.error).toMatch(/version change or backup is in progress/);
 
     backupGate.resolve();
     await waitFor(

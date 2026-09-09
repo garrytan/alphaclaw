@@ -37,12 +37,13 @@ describe("server/output-line-ring", () => {
     expect(long).not.toContain("hunter2");
   });
 
-  it("strips \\r redraws and control characters, accepts Buffers, ignores empty pushes", () => {
+  it("strips \\r redraws, WHOLE ANSI escape sequences and control characters, accepts Buffers, ignores empty pushes", () => {
     const ring = createOutputLineRing();
-    ring.push(Buffer.from("10%\r20%\r\x1b[2K30% done\n"));
+    ring.push(Buffer.from("10%\r20%\r\x1b[2K30% done\x1b[0m\n"));
+    ring.push("\x1b]0;title\x07plain \x1b(Bline\n");
     ring.push("");
     ring.push(null);
-    expect(ring.lines()).toEqual(["10%20%[2K30% done"]);
+    expect(ring.lines()).toEqual(["10%20%30% done", "plain line"]);
   });
 
   it("a child that never prints a newline cannot grow the carry without bound", () => {

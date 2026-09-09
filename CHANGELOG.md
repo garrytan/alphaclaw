@@ -61,7 +61,14 @@ piece that lets an operator prove backups work without attempting an update.
   ("… — last output: …"), the `stalled`/`timeout` messages ("The CLI's last
   output was: …") and the run record (`backup.lastOutput`, plus
   `backup.backupFailureKind`), so the next production failure is diagnosable
-  from the ledger alone.
+  from the ledger alone. The progress probe now reads every place a pinned
+  CLI stages bytes — the 2026.9.x CLI publishes through a
+  `.openclaw-backup-publish-*` dot-dir beside the archive and assembles under
+  `<tmpdir>/openclaw-backup-*`, which the old `<output>.<uuid>.tmp` probe
+  never saw (the operator's "nothing written yet" for ten minutes) — and a
+  final archive that already exists means the silent `--verify` phase, which
+  the stall policy never cuts. The failed-attempt cleanup and the debris sweep
+  remove the dot-dir a killed CLI leaves behind.
 - Catalog payload: per-source freshness (`sources.{github,npm,dev}`),
   `rowSource`, and on a forced refresh `refreshed` / `refreshThrottledForMs`.
 
@@ -123,6 +130,21 @@ piece that lets an operator prove backups work without attempting an update.
   null or strictly newer for every catalog × installed version.
 - The consented-reuse and no-backup-consent retries forward the failed run's
   declared intent, so a token-bound re-apply is never refused `invalid_body`.
+- Review round (six lenses, two skeptics per finding): the process matcher
+  recognises the repo's OWN launcher shape (`node …/node_modules/.bin/openclaw
+  gateway run` — the npm bin shim AlphaClaw's PATH shim execs; the shared
+  fixture table carries it); the dev channel's "Update to latest dev" posts no
+  intent (a commit has no direction); the "latest" claim is made only when the
+  CTA's target IS the channel's upstream latest; `applyUpdate` judges intent
+  against the same installed version the route and the page use; catalog rows
+  never include a dist-tag target npm has not published or a deprecated one,
+  and the channel is the version suffix's alone (a GitHub prerelease flag on a
+  stable-shaped version is `flaggedPrerelease`); a forced refresh whose npm
+  fetch failed is not "refreshed"; a manual backup never raises the reuse-
+  window floor, never mirrors its steps into `lastUpdateRun`, never offers an
+  older archive, is skipped by the upgrade overseer, keeps its own 5-run
+  ledger ring and its own interrupted-run wording; the sibling
+  "update in progress" refusals say "update or backup".
 
 ## [0.9.80] - 2026-09-08
 

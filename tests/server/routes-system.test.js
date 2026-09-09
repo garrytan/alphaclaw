@@ -1174,7 +1174,7 @@ describe("server/routes/system", () => {
 
     expect(res.status).toBe(409);
     expect(res.body.ok).toBe(false);
-    expect(res.body.error).toContain("OpenClaw version change is in progress");
+    expect(res.body.error).toContain("OpenClaw version change or backup is in progress");
     // A restartProcess() mid-overlay-write would corrupt the channel store:
     // the update must not even start.
     expect(deps.alphaclawVersionService.updateAlphaclaw).not.toHaveBeenCalled();

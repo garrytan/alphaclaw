@@ -298,7 +298,12 @@ after it. A `stalled` kind (v0.9.81) means the upstream `backup create`
 printed nothing and wrote nothing for 3 minutes and was stopped — the
 message quotes its last output lines and the run record keeps them
 (`backup.lastOutput`); a `timeout` is the same after the full 10-minute
-ceiling with bytes still moving. A `spawn_error` means the backup CLI never
+ceiling with bytes still moving. "Written so far" on the progress row is
+read from wherever the pinned CLI stages: `<output>.<uuid>.tmp`
+(2026.7.x/8.x), the `.openclaw-backup-publish-*` dot-dir and
+`<tmpdir>/openclaw-backup-*` assembly dir (2026.9.x); once the archive is at
+its final path the CLI is verifying it (silent by design) and the stall
+policy stands down. A `spawn_error` means the backup CLI never
 ran (PATH/permissions). Repeated `lock_contention` with nothing else on the
 box points at the hypothesis below.
 

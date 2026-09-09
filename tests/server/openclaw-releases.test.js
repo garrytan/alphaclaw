@@ -280,19 +280,23 @@ describe("server/openclaw-releases", () => {
 
       expect(catalog.stable).toHaveLength(5);
       expect(catalog.beta).toHaveLength(5);
+      // 2026.6.1 is flagged prerelease on GitHub but has a stable-shaped
+      // version: it is a STABLE row (flaggedPrerelease) — the channel is the
+      // suffix's, so its apply as stable is what isKnownVersion accepts.
       expect(catalog.stable.map((row) => row.version)).toEqual([
+        "2026.6.1",
         "2026.5.9",
         "2026.5.8",
         "2026.5.7",
         "2026.5.6",
-        "2026.5.5",
       ]);
+      expect(catalog.stable[0].flaggedPrerelease).toBe(true);
       expect(catalog.beta.map((row) => row.version)).toEqual([
-        "2026.6.1",
         "2026.6.0-beta.8",
         "2026.6.0-beta.7",
         "2026.6.0-beta.6",
         "2026.6.0-beta.5",
+        "2026.6.0-beta.4",
       ]);
       expect(catalog.beta[0].prerelease).toBe(true);
     });
@@ -739,22 +743,29 @@ describe("server/openclaw-releases", () => {
       expect(service.isKnownVersion("2026.9.5", "stable")).toBe(false);
     });
 
-    it("prerelease classification merges the version suffix and the GitHub flag; a dist-tag target missing from `versions` is still a row", async () => {
+    it("the channel is the version's own suffix (a GitHub prerelease flag on a stable-shaped version is kept as flaggedPrerelease, never a beta row the apply would refuse); a dist-tag target missing from `versions` is NOT a row; a deprecated dist-tag target stays skipped", async () => {
       const npmDoc = {
-        "dist-tags": { latest: "2026.9.2", next: "2026.9.9" },
-        versions: { "2026.9.1": {}, "2026.9.2": {}, "2026.9.3-beta.1": {} },
+        "dist-tags": { latest: "2026.9.0", next: "2026.9.9" },
+        versions: { "2026.9.0": { deprecated: "pulled" }, "2026.9.1": {}, "2026.9.2": {}, "2026.9.3-beta.1": {} },
       };
       const releases = [
-        // Flagged prerelease on GitHub without a channel suffix → beta list.
         release({ version: "2026.9.2", publishedAt: "2026-09-07T00:00:00Z", prerelease: true }),
       ];
       const { service } = createHarness({ handlers: standardHandlers({ releases, npmDoc }) });
 
       const catalog = await service.getCatalog();
 
-      expect(catalog.stable.map((row) => row.version)).toEqual(["2026.9.9", "2026.9.1"]);
-      expect(catalog.beta.map((row) => row.version)).toEqual(["2026.9.3-beta.1", "2026.9.2"]);
-      expect(catalog.beta[1].prerelease).toBe(true);
+      // 2026.9.9 (a tag with no published version) and 2026.9.0 (deprecated,
+      // even though `latest` points at it) are not rows; isKnownVersion agrees.
+      expect(catalog.stable.map((row) => row.version)).toEqual(["2026.9.2", "2026.9.1"]);
+      expect(catalog.beta.map((row) => row.version)).toEqual(["2026.9.3-beta.1"]);
+      expect(catalog.stable.every((row) => row.isDistTagLatest === false)).toBe(true);
+      expect(catalog.stable[0]).toEqual(expect.objectContaining({ prerelease: false, flaggedPrerelease: true }));
+      expect(catalog.stable[1]).not.toHaveProperty("flaggedPrerelease");
+      expect(service.isKnownVersion("2026.9.9", "stable")).toBe(false);
+      for (const row of [...catalog.stable, ...catalog.beta]) {
+        expect(service.isKnownVersion(row.version, row.applyPayload.channel)).toBe(true);
+      }
     });
 
     // ── v0.9.81: honest staleness (RC1c / D6 / D20) ──
@@ -977,6 +988,21 @@ describe("server/openclaw-releases", () => {
       state.now += 20_000;
       const again = await service.getCatalog({ forceRefresh: true });
       expect(again.refreshed).toBe(true);
+
+      // A forced refresh whose ROW source fails is NOT a refresh: the stale
+      // copy is served, flagged, and `refreshed` says false so the card never
+      // toasts "Checked just now" over cached rows.
+      state.now += 40_000;
+      state.handlers = [
+        ({ url }) => (url === kOpenclawRegistryUrl ? jsonResponse({ message: "boom" }, { status: 503 }) : null),
+        ...standardHandlers(),
+      ];
+      const failed = await service.getCatalog({ forceRefresh: true });
+      expect(failed.ok).toBe(true);
+      expect(failed.refreshed).toBe(false);
+      expect(failed.refreshThrottledForMs).toBeUndefined();
+      expect(failed.stale).toBe(true);
+      expect(failed.sources.npm).toEqual(expect.objectContaining({ degraded: true, stale: true }));
     });
 
     it("sends the GitHub token to GitHub only", async () => {

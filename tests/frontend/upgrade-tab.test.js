@@ -2177,6 +2177,77 @@ describe("frontend/upgrade-tab hook", () => {
     state = renderHook({});
     await state.onCheckNow();
     expect(showToast).not.toHaveBeenCalled();
+    // A forced refresh whose sources failed served the cached rows: a
+    // warning naming the age, never "Checked just now".
+    api.fetchOpenclawCatalog.mockResolvedValueOnce({
+      ok: true,
+      catalog: { ...makeCatalog(), refreshed: false, stale: true, staleAsOf: Date.now() - 20 * 3_600_000 },
+      channel: { releaseChannel: "stable" },
+    });
+    state = renderHook({});
+    await state.onCheckNow();
+    expect(showToast).toHaveBeenCalledWith(expect.stringMatching(/^Could not reach the version registry — showing the catalog as of /), "warning");
+  });
+
+  it("the dev channel's 'Update to latest dev (main HEAD)' posts NO intent and no latest claim (a commit has no version direction)", async () => {
+    api.applyOpenclawVersion.mockResolvedValue({ ok: true, operationId: "op-dev", events: "/api/operations/op-dev/events" });
+    let state = await hydrate();
+    // A dev commit row's "Switch" click posts no intent even when a caller
+    // claims one.
+    state.onRequestApply({ payload: { channel: "dev", sha: "abc1234def5678abc1234def5678abc1234def56" }, label: "dev abc1234", intent: "update" });
+    state = renderHook({});
+    expect(state.pendingApply.intent).toBeNull();
+    state.onCancelApply();
+    state = renderHook({});
+
+    await state.onSelectChannel("dev");
+    state = renderHook({});
+    expect(state.activeChannel).toBe("dev");
+    state.onUpdateToLatest();
+    state = renderHook({});
+    expect(state.pendingApply.payload).toEqual({ channel: "dev", devHead: true });
+    expect(state.pendingApply.intent).toBeNull();
+    expect(state.pendingApply.expectLatest).toBe(false);
+    await state.onConfirmApply();
+    expect(api.applyOpenclawVersion).toHaveBeenCalledWith({ channel: "dev", devHead: true });
+  });
+
+  it("a STREAMED standalone-backup failure never inherits the last apply's reuse or no-backup offers (v0.9.81 review)", async () => {
+    let captured = null;
+    api.subscribeOpenclawApplyEvents.mockImplementation((options) => {
+      captured = options;
+      return () => {};
+    });
+    api.applyOpenclawVersion.mockResolvedValue({ ok: true, operationId: "op-x", events: "/api/operations/op-x/events" });
+    api.createOpenclawBackup.mockResolvedValue({ ok: true, operationId: "op-bk", events: "/api/operations/op-bk/events" });
+    let state = await hydrate();
+    // An apply ran first (applyTargetRef now names it) and failed.
+    state.onRequestApply({ payload: { channel: "stable", version: "2026.7.2" }, label: "2026.7.2" });
+    state = renderHook({});
+    await state.onConfirmApply();
+    captured.onMessage({ event: "error", data: { error: "verify failed", code: "verify_failed" } });
+    state = renderHook({});
+    state.onDismissOperation();
+    state = renderHook({});
+    // The backup's streamed failure carries a reusableBackup the SERVER would
+    // never send for a manual run — but even if it did, no offer may bind it
+    // to the stale apply target.
+    await state.onBackupNow();
+    state = renderHook({});
+    captured.onMessage({
+      event: "error",
+      data: {
+        error: "The backup failed",
+        code: "backup_failed",
+        reusableBackup: { file: "/b/x.tar.gz", at: kNow - 1000, ageMs: 1000, sha256: "a".repeat(64), producer: "openclaw" },
+        backupRiskEligible: true,
+        operationId: "op-bk",
+      },
+    });
+    state = renderHook({});
+    expect(state.operation).toEqual(expect.objectContaining({ phase: "failed", target: { kind: "backup" } }));
+    expect(state.backupReuseOffer).toBeNull();
+    expect(state.noBackupConsentOffer).toBeNull();
   });
 
   it("a catalog the server served STALE schedules exactly one direct follow-up read (never the 60 s client cache); a stale follow-up answer does not loop (v0.9.81, RC1c)", async () => {

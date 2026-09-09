@@ -2965,10 +2965,17 @@ describe("frontend/upgrade-helpers latest row + never-downgrade invariant (v0.9.
     const latest = resolveChannelLatestRow({ catalog, releaseChannel: "stable" });
     expect(latest.version).toBe("2026.9.3");
     expect(buildAvailabilityLine({ catalog, releaseChannel: "stable", installedVersion: "2026.9.1" })).toContain("Latest stable: 2026.9.3");
-    // The CTA offers the newer non-blocklisted alternative, never the older row.
+    // The CTA offers the newer non-blocklisted alternative, never the older row
+    // — and does NOT claim it is the channel's latest (the server would
+    // answer catalog_stale and re-offer the row this box cannot run).
     const target = getLatestApplicableTarget({ catalog, releaseChannel: "stable", installedVersion: "2026.9.1" });
     expect(target.label).toBe("2026.9.2");
     expect(target.direction).toBe("upgrade");
+    expect(target.intent).toBe("update");
+    expect(target.expectLatest).toBe(false);
+    // The genuine latest DOES claim it.
+    const clean = { stable: [row("2026.9.3", { isDistTagLatest: true }), row("2026.9.1", { current: true })] };
+    expect(getLatestApplicableTarget({ catalog: clean, releaseChannel: "stable", installedVersion: "2026.9.1" }).expectLatest).toBe(true);
   });
 
   it("installed IS the dist-tag latest → no target (the screenshot's bug): never the next-older row", async () => {
@@ -3036,7 +3043,7 @@ describe("frontend/upgrade-helpers latest row + never-downgrade invariant (v0.9.
   });
 
   it("EXHAUSTIVE: over every catalog × installed version, the target is null or strictly newer than what is installed", async () => {
-    const { getLatestApplicableTarget, compareVersions } = await loadUpgradeHelpers();
+    const { getLatestApplicableTarget, compareVersions, resolveChannelLatestRow } = await loadUpgradeHelpers();
     const versions = ["2026.6.34", "2026.7.1-2", "2026.8.1-beta.3", "2026.8.1", "2026.9.1", "2026.9.2", "2026.9.3", "2026.9.4-beta.1"];
     const decorations = [
       {},
@@ -3069,6 +3076,10 @@ describe("frontend/upgrade-helpers latest row + never-downgrade invariant (v0.9.
             expect(target.direction).toBe("upgrade");
             expect(target.intent).toBe("update");
             expect(target.row.blocklisted ?? null).toBeNull();
+            // The "latest" claim is made exactly when the target IS the
+            // channel's upstream latest row.
+            const upstream = resolveChannelLatestRow({ catalog, releaseChannel });
+            expect(target.expectLatest).toBe(Boolean(upstream) && upstream.version === target.label);
           }
         }
       }

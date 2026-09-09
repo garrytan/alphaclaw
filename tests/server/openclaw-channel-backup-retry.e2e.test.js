@@ -2498,6 +2498,31 @@ describe("server/openclaw-channel-backup-retry", () => {
       );
       // The probe reads the CLI's staging bytes: nothing written → null.
       expect(seen.opts.progressProbe()).toBe(null);
+      // The 2026.9.x CLI stages through `.openclaw-backup-publish-*/archive.
+      // tar.gz.tmp` in the output's parent (the old `<output>.<uuid>.tmp`
+      // layout saw NOTHING there — "nothing written yet" for ten minutes in
+      // production): bytes there ARE progress.
+      const outIdx = seen.opts.args.indexOf("--output");
+      const finalPath = seen.opts.args[outIdx + 1];
+      const publishDir = path.join(path.dirname(finalPath), ".openclaw-backup-publish-1111-abcdef");
+      fs.mkdirSync(publishDir, { recursive: true });
+      fs.writeFileSync(path.join(publishDir, "archive.tar.gz.tmp"), "s".repeat(2048));
+      try {
+        expect(seen.opts.progressProbe()).toBe(2048);
+        fs.appendFileSync(path.join(publishDir, "archive.tar.gz.tmp"), "s".repeat(1000));
+        expect(seen.opts.progressProbe()).toBe(3048);
+      } finally {
+        fs.rmSync(publishDir, { recursive: true, force: true });
+      }
+      // Once the FINAL archive exists the CLI is in its silent `--verify`
+      // phase: the probe keeps moving (wall clock) so a long verify of a big
+      // archive is never mistaken for a stall — only the ceiling bounds it.
+      fs.writeFileSync(finalPath, "archive");
+      try {
+        expect(String(seen.opts.progressProbe())).toMatch(/^verify:\d+$/);
+      } finally {
+        fs.rmSync(finalPath, { force: true });
+      }
       // The verdict names the window and quotes the ring — redacted.
       expect(result.body.message).toMatch(
         /^The pre-update backup CLI made no progress for 1 seconds? \(no output, nothing written\) and was stopped\. The CLI's last output was: "Preparing backup…" \/ "auth token=\*\*\* ok" \/ "waiting for coordinator lock"\./,
@@ -2620,7 +2645,21 @@ describe("server/openclaw-channel-backup-retry", () => {
       });
       ref.sync = harness.sync;
       seedStateDb(harness);
+      // A REAL last update pointer with steps: the backup must not touch it
+      // (stepRecorder's mirror is off for a standalone run).
+      harness.store.updateState((state) => {
+        state.lastUpdateRun = {
+          operationId: "0f76b007-e2e0-4c0d-9a1e-000000000099",
+          target: { channel: "stable", version: "1.0.0" },
+          startedAt: 500_000,
+          finishedAt: 500_500,
+          ok: true,
+          steps: [{ name: "activate", status: "completed", at: 500_400 }],
+        };
+        return state;
+      });
       const lastUpdateRunBefore = JSON.stringify(harness.store.readState().lastUpdateRun ?? null);
+      expect(lastUpdateRunBefore).toContain('"activate"');
 
       const result = await harness.sync.runStandaloneBackup({});
 
@@ -2676,6 +2715,72 @@ describe("server/openclaw-channel-backup-retry", () => {
       expect(notifyMessages(harness.notify).some((m) => /OpenClaw backup written/.test(m))).toBe(true);
     });
 
+    it("a completed manual backup activates nothing: it never raises the reuse-window floor, so its own archive is exactly what a later failed update is offered (review P1)", async () => {
+      const { lock, ref, gatewayMutationPolicy } = withSharedLockPolicy();
+      const quiesce = makeQuiesceRecorder({ lock });
+      let failCopy = false;
+      const { runnerImpl } = makeOfflineCopyRunner({
+        // The later apply's whole fresh ladder fails: copy at the archive
+        // stage, every upstream attempt on lock contention.
+        script: Array.from({ length: 8 }, () => ({ ok: false, tail: kLeaseLostTail })),
+        onArchiveTool: (opts) => (failCopy ? failCopyArchive(opts) : null),
+      });
+      const harness = createHarness({
+        runnerImpl,
+        gatewayQuiesce: quiesce,
+        extraSyncOptions: { gatewayMutationPolicy },
+      });
+      ref.sync = harness.sync;
+      harness.nowRef.now = kRealisticNow;
+      seedStateDb(harness);
+
+      const backup = await harness.sync.runStandaloneBackup({});
+      expect(backup.status).toBe(200);
+      const manualArchive = backup.body.archive.file;
+      expect(harness.sync.listBackupInventory().reuseWindowStartMs).toBeLessThan(backup.body.archive.at);
+
+      failCopy = true;
+      harness.nowRef.now += 60_000;
+      const result = await harness.sync.applyUpdate({ ...kHardGateTarget, intent: "update" });
+      expect(result.status).toBe(409);
+      expect(result.body.code).toBe("backup_failed");
+      // The offer IS the manual archive. (Its `producer` here comes from the
+      // reuse verification's manifest read, which this harness answers with
+      // the scripted upstream stub for fd-path reads — a fixture artefact,
+      // not a claim about the copy's own manifest.)
+      expect(result.body.reusableBackup).toEqual(expect.objectContaining({ file: manualArchive }));
+      expect(result.body.reusableBackup.at).toBe(backup.body.archive.at);
+    });
+
+    it("a failed manual backup never offers an older archive for reuse (there is no update to wave through)", async () => {
+      const { runnerImpl } = makeBackupRunner({
+        script: Array.from({ length: 4 }, () => ({ ok: false, tail: kLeaseLostTail })),
+      });
+      const harness = createHarness({ runnerImpl });
+      harness.nowRef.now = kRealisticNow;
+      // A verified archive from an earlier run sits in the inventory.
+      const backupsDir = path.join(harness.rootDir, "backups", "openclaw");
+      fs.mkdirSync(backupsDir, { recursive: true, mode: 0o700 });
+      const at = harness.nowRef.now - 60 * 60 * 1000;
+      const file = path.join(backupsDir, `openclaw-backup-${at}-prev0000.tar.gz`);
+      fs.writeFileSync(file, "earlier archive\n");
+      const priorId = crypto.randomUUID();
+      harness.ledger.createRun({ operationId: priorId, target: { channel: "stable", version: "1.0.0" } });
+      harness.ledger.updateRun(priorId, (record) => {
+        record.startedAt = at - 1000;
+        record.finishedAt = at - 500;
+        record.state = "failed";
+        record.ok = false;
+        record.backup = { noBackup: false, file, verified: true, partial: false, at, producer: "openclaw", usableCheck: "manifest_ok" };
+        return record;
+      });
+      const result = await harness.sync.runStandaloneBackup({});
+      expect(result.status).toBe(409);
+      expect(result.body.code).toBe("backup_failed");
+      expect(result.body.backupFailureKind).toBe("lock_contention");
+      expect(result.body.reusableBackup).toBeUndefined();
+    });
+
     it("a failing ladder ends the run `failed` with backup_failed and the manual gate hint; the record carries the classified kind", async () => {
       const { runnerImpl } = makeBackupRunner({ script: [{ ok: false, tail: "ENOSPC: no space left on device\n" }] });
       const harness = createHarness({ runnerImpl });
@@ -2684,6 +2789,9 @@ describe("server/openclaw-channel-backup-retry", () => {
       expect(result.body.code).toBe("backup_failed");
       expect(result.body.hint).toContain("Fix the cause and retry the backup.");
       expect(result.body.hint).not.toMatch(/same-channel version/);
+      // A manual run is not "pre-update" anything.
+      expect(result.body.message).toMatch(/^The backup failed: not enough disk space\./);
+      expect(result.body.message).not.toContain("pre-update");
       const [run] = readRuns(harness);
       expect(run).toEqual(
         expect.objectContaining({
@@ -5555,6 +5663,35 @@ describe("server/openclaw-channel-backup-retry", () => {
   });
 
   // ── Issue #79 (g) `.tmp` hygiene + (h) progress ──────────────────────────
+  describe("backup debris sweep: the 2026.9.x CLI's publish staging dir (v0.9.81)", () => {
+    it("boot mode removes every `.openclaw-backup-publish-*` dir; in-run mode only one older than the CLI ceiling + slack; a failed attempt's cleanup removes the one it left", async () => {
+      const { runnerImpl } = makeBackupRunner({});
+      const harness = createHarness({ runnerImpl });
+      // The age rule compares real mtimes against the logical clock: give the
+      // clock a realistic epoch so "older than the ceiling" is representable.
+      harness.nowRef.now = kRealisticNow;
+      const backupsDir = path.join(harness.rootDir, "backups", "openclaw");
+      const stale = path.join(backupsDir, ".openclaw-backup-publish-aaaa-stale0");
+      const young = path.join(backupsDir, ".openclaw-backup-publish-bbbb-young0");
+      fs.mkdirSync(stale, { recursive: true });
+      fs.mkdirSync(young, { recursive: true });
+      fs.writeFileSync(path.join(stale, "archive.tar.gz.tmp"), "x".repeat(500));
+      fs.writeFileSync(path.join(young, "archive.tar.gz.tmp"), "y".repeat(300));
+      const oldMs = (harness.nowRef.now - kOpenclawBackupTimeoutMs - kOpenclawBackupStaleTempDirSlackMs - 60_000) / 1000;
+      fs.utimesSync(stale, oldMs, oldMs);
+
+      const inRun = await harness.sync.sweepBackupDebris({ mode: "in-run" });
+      expect(inRun.removed.map((r) => r.name)).toEqual([".openclaw-backup-publish-aaaa-stale0"]);
+      expect(inRun.removed[0]).toEqual(expect.objectContaining({ bytes: 500, why: "stale" }));
+      expect(inRun.kept).toContain(".openclaw-backup-publish-bbbb-young0");
+      expect(fs.existsSync(young)).toBe(true);
+
+      const boot = await harness.sync.sweepBackupDebris({ mode: "boot" });
+      expect(boot.removed.map((r) => r.name)).toContain(".openclaw-backup-publish-bbbb-young0");
+      expect(fs.existsSync(young)).toBe(false);
+    });
+  });
+
   describe("backup debris sweep (#79 (g), Codex 18) and the progress ticker (#79 (h))", () => {
     const kMinute = 60_000;
     // The in-run age rule: the CLI ceiling plus slack — a `.tmp` younger than

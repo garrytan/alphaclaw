@@ -85,9 +85,14 @@ describe("admin-manifest engine", () => {
   it("updates.apply requires `intent` and documents the optional `expectLatest` claim", () => {
     const op = manifest.findOp("POST", "/api/openclaw/apply");
     const intent = op.params.fields.find((field) => field.name === "intent");
+    // Channel-conditional like `version`: required for stable/beta, refused
+    // on dev — so the schema flag is false and the description carries the
+    // rule (an agent that marks it required would break its dev applies).
     expect(intent).toEqual(
-      expect.objectContaining({ location: "body", type: "string", required: true }),
+      expect.objectContaining({ location: "body", type: "string", required: false }),
     );
+    expect(intent.description).toMatch(/REQUIRED for stable\/beta/);
+    expect(intent.description).toMatch(/OMITTED for dev/);
     expect(intent.description).toMatch(/update/);
     expect(intent.description).toMatch(/downgrade/);
     expect(intent.description).toMatch(/switch/);

@@ -295,9 +295,19 @@ describe("frontend/upgrade-tab progress-card recovery CTAs (v0.9.81, C4)", () =>
         nowMs: 60_000,
       }),
     );
-    expect(collectText(failed).join(" ")).toContain("Backup failed");
+    const failedText = collectText(failed).join(" ");
+    expect(failedText).toContain("Backup failed");
     expect(findButton(failed, "Retry backup")).toBeTruthy();
     expect(findButton(failed, "Re-stage version")).toBeUndefined();
+    // Backup-specific dismiss hint and empty-step fallback — never "retry from
+    // the catalog or roll back" / "Starting update..." on a backup card.
+    expect(failedText).toContain("then retry the backup");
+    expect(failedText).not.toContain("roll back below");
+    const running = collectText(
+      expandTree(UpgradeProgressCard({ operation: { ...base, finishedAt: undefined, phase: "running", label: "manual backup", target: { kind: "backup" } }, nowMs: 60_000 })),
+    ).join(" ");
+    expect(running).toContain("Starting backup...");
+    expect(running).not.toContain("Starting update...");
 
     const completedRepair = expandTree(
       UpgradeProgressCard({
