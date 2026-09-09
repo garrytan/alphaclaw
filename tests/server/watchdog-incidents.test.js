@@ -815,6 +815,51 @@ describe("incident queries", () => {
     ).toMatchObject({ episodeId: "4242-1699999999999" });
   });
 
+  it("correlates a serving worker crash with its launcher-root memory episode", () => {
+    initContext();
+    const episode = {
+      episodeId: "777-1699999999999",
+      pid: 777,
+      endedAt: new Date(Date.now() - 2 * 60 * 1000).toISOString(),
+      reason: "process_exited",
+      evidence: {
+        process: { root: { pid: 777 }, worker: { pid: 4242 } },
+        attribution: { causes: ["child_growth"] },
+      },
+    };
+    const source = { gatewayMemoryTrend: { lastEpisodeSummary: episode } };
+    const tracker = createTracker({ getResourceSample: () => source });
+    const insert = wrapped(tracker);
+    insert(crashEvent({ details: { code: 1, pid: 4242 } }));
+    insert(recoveryEvent());
+    const [incident] = db.listIncidents();
+    const saved = db.getIncidentById(incident.id).summary.resourceSample;
+    expect(saved.gatewayMemoryTrend.lastEpisodeSummary).toEqual(episode);
+    saved.gatewayMemoryTrend.lastEpisodeSummary.evidence.attribution.causes.push("mixed");
+    expect(source.gatewayMemoryTrend.lastEpisodeSummary.evidence.attribution.causes)
+      .toEqual(["child_growth"]);
+  });
+
+  it("rejects unrelated episode evidence without mutating the shared resource sample", () => {
+    initContext();
+    const episode = {
+      episodeId: "777-1699999999999",
+      pid: 777,
+      endedAt: new Date(Date.now() - 2 * 60 * 1000).toISOString(),
+      evidence: { process: { worker: { pid: 888 } } },
+    };
+    const source = { gatewayMemoryTrend: { lastEpisodeSummary: episode } };
+    const tracker = createTracker({ getResourceSample: () => source });
+    const insert = wrapped(tracker);
+    insert(crashEvent({ details: { code: 1, pid: 4242 } }));
+    insert(recoveryEvent());
+    const [incident] = db.listIncidents();
+    const saved = db.getIncidentById(incident.id).summary.resourceSample;
+    expect(saved.gatewayMemoryTrend.lastEpisodeSummary).toBeNull();
+    expect(source.gatewayMemoryTrend.lastEpisodeSummary).toBe(episode);
+    expect(episode.evidence.process.worker.pid).toBe(888);
+  });
+
   it("omits an UNCORRELATED stale episode summary from the close sample", () => {
     initContext();
     const tracker = createTracker({

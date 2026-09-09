@@ -367,6 +367,7 @@ describe("server/gateway restart behavior", () => {
   });
 
   it("applies ALPHACLAW_GATEWAY_MAX_OLD_SPACE_SIZE to the daemon launch env only (issue #24)", () => {
+    const { stripTelemetryNodeOptions } = require("../../lib/server/gateway-memory/telemetry-bootstrap");
     const previousCap = process.env.ALPHACLAW_GATEWAY_MAX_OLD_SPACE_SIZE;
     const previousNodeOptions = process.env.NODE_OPTIONS;
     try {
@@ -376,22 +377,22 @@ describe("server/gateway restart behavior", () => {
       const gateway = require(modulePath);
 
       // The long-running daemon gets the operator's explicit cap…
-      expect(gateway.gatewayLaunchEnv().NODE_OPTIONS).toBe(
+      expect(stripTelemetryNodeOptions(gateway.gatewayLaunchEnv().NODE_OPTIONS)).toBe(
         "--max-old-space-size=8192",
       );
       // …but plain gatewayEnv (every short-lived openclaw CLI child) does not.
-      expect(gateway.gatewayEnv().NODE_OPTIONS).toBeUndefined();
+      expect(stripTelemetryNodeOptions(gateway.gatewayEnv().NODE_OPTIONS)).toBe("");
 
       // The cap appends to surviving (non-memory) inherited flags.
       process.env.NODE_OPTIONS = "--enable-source-maps --max-old-space-size=768";
-      expect(gateway.gatewayLaunchEnv().NODE_OPTIONS).toBe(
+      expect(stripTelemetryNodeOptions(gateway.gatewayLaunchEnv().NODE_OPTIONS)).toBe(
         "--enable-source-maps --max-old-space-size=8192",
       );
 
       // Invalid values are ignored — no flag, no crash.
       process.env.ALPHACLAW_GATEWAY_MAX_OLD_SPACE_SIZE = "lots";
       delete process.env.NODE_OPTIONS;
-      expect(gateway.gatewayLaunchEnv().NODE_OPTIONS).toBeUndefined();
+      expect(stripTelemetryNodeOptions(gateway.gatewayLaunchEnv().NODE_OPTIONS)).toBe("");
     } finally {
       if (previousCap === undefined) {
         delete process.env.ALPHACLAW_GATEWAY_MAX_OLD_SPACE_SIZE;

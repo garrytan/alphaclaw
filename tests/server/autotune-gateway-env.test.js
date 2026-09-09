@@ -10,6 +10,7 @@ process.env.ALPHACLAW_ROOT_DIR = kTempRoot;
 fs.mkdirSync(path.join(kTempRoot, ".openclaw", ".alphaclaw"), { recursive: true });
 
 const { gatewayEnv } = require("../../lib/server/gateway");
+const { stripTelemetryNodeOptions } = require("../../lib/server/gateway-memory/telemetry-bootstrap");
 const {
   resetMachineProfileForTests,
 } = require("../../lib/server/machine-profile");
@@ -56,7 +57,7 @@ describe("server/autotune gateway env integration", () => {
     delete process.env.UV_THREADPOOL_SIZE;
 
     const env = gatewayEnv();
-    expect(env.NODE_OPTIONS).toBe("--inspect");
+    expect(stripTelemetryNodeOptions(env.NODE_OPTIONS)).toBe("--inspect");
     expect(env.UV_THREADPOOL_SIZE).toBeUndefined();
   });
 
@@ -72,7 +73,7 @@ describe("server/autotune gateway env integration", () => {
 
     const env = gatewayEnv();
     // Admin heap (4096) stripped; gateway heap (50% of 2GB = 1024) installed.
-    expect(env.NODE_OPTIONS).toBe("--inspect --max-old-space-size=1024");
+    expect(stripTelemetryNodeOptions(env.NODE_OPTIONS)).toBe("--inspect --max-old-space-size=1024");
     expect(
       env.NODE_OPTIONS.match(/--max-old-space-size/g),
     ).toHaveLength(1);
@@ -100,7 +101,7 @@ describe("server/autotune gateway env integration", () => {
     resetMachineProfileForTests({ fsModule: containerFsModule });
 
     const env = gatewayEnv();
-    expect(env.NODE_OPTIONS).toBeUndefined();
+    expect(stripTelemetryNodeOptions(env.NODE_OPTIONS)).toBe("");
     expect(env.UV_THREADPOOL_SIZE).toBeUndefined();
   });
 });

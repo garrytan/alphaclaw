@@ -68,38 +68,18 @@ describe("pure helpers", () => {
     expect(bucketMinima(samples, 0, 6000, 6)).toBeNull();
   });
 
-  it("computeEffectiveCap subtracts co-resident usage from the container limit", () => {
-    const { capBytes, capSource } = computeEffectiveCap({
-      rssBytes: mb(300),
-      cgroupUsedBytes: mb(400),
-      containerLimitBytes: mb(1024),
+  it("does not turn physical container headroom into a group RSS budget", () => {
+    expect(computeEffectiveCap({
+      rssBytes: mb(4900), cgroupUsedBytes: mb(2600), containerLimitBytes: mb(4096),
       activeHeapMb: null,
-      overheadMb: 192,
-    });
-    // non-gateway usage = 400-300 = 100MB → cap = 1024-100 = 924MB.
-    expect(capBytes).toBe(mb(924));
-    expect(capSource).toBe("container");
+    })).toEqual({ capBytes: null, capSource: "none" });
   });
 
-  it("computeEffectiveCap picks the tighter of heap+overhead vs container", () => {
-    const heapBound = computeEffectiveCap({
-      rssBytes: mb(100),
-      cgroupUsedBytes: mb(100),
-      containerLimitBytes: mb(4096),
-      activeHeapMb: 512,
-      overheadMb: 192,
-    });
-    expect(heapBound.capBytes).toBe(mb(704));
-    expect(heapBound.capSource).toBe("heap");
-    const containerBound = computeEffectiveCap({
-      rssBytes: mb(100),
-      cgroupUsedBytes: mb(100),
-      containerLimitBytes: mb(512),
-      activeHeapMb: 2048,
-      overheadMb: 192,
-    });
-    expect(containerBound.capSource).toBe("container");
-    expect(containerBound.capBytes).toBe(mb(512));
+  it("preserves configured heap plus overhead strictly as a derived group policy", () => {
+    expect(computeEffectiveCap({
+      activeHeapMb: 512, overheadMb: 192, containerLimitBytes: mb(200),
+      heapLimitBytes: mb(1),
+    })).toEqual({ capBytes: mb(704), capSource: "derived_group_budget" });
   });
 
   it("computeEffectiveCap honors an operator budget when it is the tightest bound (issue #56)", () => {
@@ -118,12 +98,12 @@ describe("pure helpers", () => {
     // A looser budget never widens the cap.
     expect(computeEffectiveCap({ ...base, budgetBytes: mb(9000) })).toEqual({
       capBytes: mb(704),
-      capSource: "heap",
+      capSource: "derived_group_budget",
     });
     // Ties keep the earlier source (heap) — the budget is only reported when
     // it is strictly the binding constraint.
     expect(computeEffectiveCap({ ...base, budgetBytes: mb(704) }).capSource).toBe(
-      "heap",
+      "derived_group_budget",
     );
     // A budget alone is a real cap on a capless box (the issue #56 shape: 100 GB
     // cgroup and an 8 GB heap never bind before OpenClaw's own 6 GiB drain).
@@ -140,7 +120,7 @@ describe("pure helpers", () => {
     // Junk budgets are ignored.
     for (const junk of [0, -1, Number.NaN, null, undefined]) {
       expect(computeEffectiveCap({ ...base, budgetBytes: junk }).capSource).toBe(
-        "heap",
+        "derived_group_budget",
       );
     }
   });
@@ -211,7 +191,7 @@ describe("trend detection (default constants, synthetic hours)", () => {
     const latches = transitions.filter((t) => t.type === "latched");
     expect(latches).toHaveLength(1);
     expect(latches[0].effectiveCapMb).toBe(704); // 512 + 192 overhead
-    expect(latches[0].capSource).toBe("heap");
+    expect(latches[0].capSource).toBe("derived_group_budget");
     expect(latches[0].projectedExhaustionAt).toBeTruthy();
     expect(snapshot.state).toBe("leak_suspected");
   });
@@ -289,7 +269,7 @@ describe("trend detection (default constants, synthetic hours)", () => {
 describe("fast high-pressure path", () => {
   const cap = () => ({
     containerLimitBytes: mb(1100),
-    cgroupUsedBytes: mb(0),
+    cgroupUsedBytes: mb(1012),
     activeHeapMb: null,
   });
 
@@ -359,6 +339,7 @@ describe("fast high-pressure path", () => {
       ticks: 3,
       rssAt: (i) => mb(300 + i),
       capAt: () => ({
+        budgetBytes: mb(250),
         containerLimitBytes: mb(400),
         cgroupUsedBytes: mb(450),
         activeHeapMb: null,
@@ -640,5 +621,135 @@ describe("getTrend caching", () => {
     monitor.reset();
     expect(monitor.getTrend().state).toBe("no_gateway");
     expect(monitor.getTrend().lastEpisodeSummary).toBeNull();
+  });
+});
+
+describe("scoped policy, freshness and retained explanations", () => {
+  it("container pressure cannot make a flat process group restart eligible", () => {
+    const monitor = createGatewayMemoryMonitor({ config: { startupGraceMs: 0 } });
+    const { snapshot, transitions } = drive(monitor, {
+      ticks: 8, rssAt: () => mb(100),
+      capAt: (i) => ({ cgroupUsedBytes: mb(950 + i), containerLimitBytes: mb(1000) }),
+    });
+    expect(snapshot.containerPressureFraction).toBeGreaterThan(0.9);
+    expect(snapshot.effectiveCapMb).toBeNull();
+    expect(snapshot.capSource).toBe("none");
+    expect(snapshot.pressureFraction).toBeNull();
+    expect(snapshot.state).not.toBe("critical");
+    expect(transitions).toEqual([]);
+  });
+
+  it("rising group RSS can use direct container pressure without fabricating a group cap/projection", () => {
+    const monitor = createGatewayMemoryMonitor({ config: { startupGraceMs: 0 } });
+    const { snapshot, transitions } = drive(monitor, {
+      ticks: 4, rssAt: (i) => mb(100 + i),
+      capAt: (i) => ({ cgroupUsedBytes: mb(950 + i), containerLimitBytes: mb(1000) }),
+    });
+    expect(snapshot.state).toBe("critical");
+    expect(snapshot.pressureSource).toBe("container");
+    expect(snapshot.effectiveCapMb).toBeNull();
+    expect(snapshot.projectedBudgetCrossingAt).toBeNull();
+    expect(snapshot.projectedExhaustionAt).toBeNull();
+    expect(transitions.find((t) => t.type === "escalated_critical").pressureSource).toBe("container");
+  });
+
+  it("RSS shared-page amplification alone does not become physical container pressure", () => {
+    const monitor = createGatewayMemoryMonitor({ config: { startupGraceMs: 0 } });
+    const { snapshot, transitions } = drive(monitor, {
+      ticks: 4, rssAt: (i) => mb(4900 + i),
+      capAt: () => ({ cgroupUsedBytes: mb(2600), containerLimitBytes: mb(4096) }),
+    });
+    expect(snapshot.containerPressureFraction).toBeCloseTo(2600 / 4096, 3);
+    expect(snapshot.pressureFraction).toBeNull();
+    expect(snapshot.state).not.toBe("critical");
+    expect(transitions).toEqual([]);
+  });
+
+  it("stale or repeated cgroup evidence cannot confirm the pressure side", () => {
+    const monitor = createGatewayMemoryMonitor({ config: { startupGraceMs: 0 } });
+    const { snapshot, transitions } = drive(monitor, {
+      ticks: 5, rssAt: (i) => mb(100 + i),
+      capAt: () => ({ cgroupUsedBytes: mb(950), containerLimitBytes: mb(1000), cgroupAtMs: kStartMs }),
+    });
+    expect(snapshot.state).not.toBe("critical");
+    expect(snapshot.containerPressureFraction).toBeNull();
+    expect(transitions).toEqual([]);
+  });
+
+  it("forged diagnostic measurements cannot set, widen, clear or suppress a group policy", () => {
+    const monitor = createGatewayMemoryMonitor({ config: { startupGraceMs: 0 } });
+    const { snapshot } = drive(monitor, {
+      ticks: 4, rssAt: (i) => mb(300 + 5 * i),
+      capAt: () => ({ activeHeapMb: 128, evidence: {
+        telemetry: { status: "fresh", rssBytes: 0, heapUsedBytes: 0, heapLimitBytes: mb(100_000) },
+        attribution: { state: "transient", causes: [] },
+      } }),
+    });
+    expect(snapshot.state).toBe("critical");
+    expect(snapshot.capSource).toBe("derived_group_budget");
+    expect(snapshot.effectiveCapMb).toBe(320);
+    expect(snapshot.projectedBudgetCrossingAt).toBe(snapshot.projectedExhaustionAt);
+  });
+
+  it("duplicates, partial scans and aged samples hold the verdict without fresh enforcement evidence", () => {
+    const monitor = createGatewayMemoryMonitor({ config: { startupGraceMs: 0 } });
+    const { snapshot } = drive(monitor, {
+      ticks: 4, rssAt: (i) => mb(300 + 5 * i), capAt: () => ({ budgetBytes: mb(320) }),
+    });
+    const when = kStartMs + 3 * kTickMs;
+    monitor.addSample({ atMs: when, pid: 100, rssBytes: mb(316), budgetBytes: mb(320) });
+    const duplicate = monitor.evaluate(when);
+    expect(duplicate.snapshot.sampleStatus).toBe("stale");
+    expect(duplicate.snapshot.criticalEvalStreak).toBe(snapshot.criticalEvalStreak);
+    expect(duplicate.transitions).toEqual([]);
+    monitor.addSample({ atMs: when + kTickMs, pid: 100, rssBytes: mb(10), sampleStatus: "partial" });
+    const partial = monitor.evaluate(when + kTickMs);
+    expect(partial.snapshot.sampleStatus).toBe("partial");
+    expect(partial.snapshot.episodeId).toBe(snapshot.episodeId);
+    expect(partial.snapshot.state).toBe("critical");
+    expect(monitor.evaluate(when + 3 * kTickMs).snapshot.sampleStatus).toBe("stale");
+  });
+
+  it("a root identity-token change freezes predecessor evidence despite numeric PID reuse", () => {
+    const monitor = createGatewayMemoryMonitor({ config: kSmallConfig });
+    const { snapshot } = drive(monitor, {
+      ticks: 15, rssAt: (i) => mb(100 + 5 * i), capAt: () => ({ identityToken: "root-generation-1" }),
+    });
+    const nowMs = kStartMs + 16 * kTickMs;
+    monitor.addSample({ atMs: nowMs, pid: 100, identityToken: "root-generation-2", rssBytes: mb(100) });
+    const next = monitor.evaluate(nowMs).snapshot;
+    expect(next.episodeId).toBeNull();
+    expect(next.lastEpisodeSummary.episodeId).toBe(snapshot.episodeId);
+    expect(next.lastEpisodeSummary.reason).toBe("process_exited");
+  });
+
+  it("freezes bounded root/worker evidence through telemetry outage and protects nested copies", () => {
+    const monitor = createGatewayMemoryMonitor({ config: kSmallConfig });
+    const evidence = {
+      process: { status: "fresh", root: { pid: 100, startTicks: "1" }, worker: { pid: 101, startTicks: "2" },
+        groupRssBytes: mb(200), contributors: Array.from({ length: 150 }, (_, i) => ({ pid: 100 + i, role: "gateway_child", rssBytes: mb(1) })) },
+      telemetry: { status: "fresh", heapUsedBytes: mb(50), heapLimitBytes: mb(1000), records: [{ rssBytes: mb(50), secret: "never" }] },
+      attribution: { state: "attributed", causes: ["child_accumulation"] },
+    };
+    const { snapshot, transitions } = drive(monitor, {
+      ticks: 15, rssAt: (i) => mb(100 + 5 * i), capAt: () => ({ evidence }),
+    });
+    expect(transitions[0].evidence.attribution.causes).toEqual(["child_accumulation"]);
+    expect(snapshot.evidence.process.contributors).toHaveLength(8);
+    expect(JSON.stringify(snapshot.evidence)).not.toContain("secret");
+    snapshot.evidence.process.worker.pid = 999;
+    expect(monitor.getTrend().evidence.process.worker.pid).toBe(101);
+    monitor.addSample({ atMs: kStartMs + 15 * kTickMs, pid: 100, rssBytes: mb(180),
+      evidence: { attribution: { state: "unknown" }, telemetry: { status: "unavailable" } } });
+    monitor.evaluate(kStartMs + 15 * kTickMs);
+    monitor.addSample({ atMs: kStartMs + 16 * kTickMs, pid: 100, rssBytes: mb(185),
+      evidence: { attribution: { state: "observing", causes: [] }, telemetry: { status: "fresh" } } });
+    monitor.evaluate(kStartMs + 16 * kTickMs);
+    monitor.noteProcessExited(kStartMs + 17 * kTickMs, 100);
+    const frozen = monitor.getTrend().lastEpisodeSummary;
+    expect(frozen.evidence.attribution.causes).toEqual(["child_accumulation"]);
+    expect(frozen.evidence.process.worker).toEqual({ pid: 101, startTicks: "2" });
+    frozen.evidence.attribution.causes[0] = "edited";
+    expect(monitor.getTrend().lastEpisodeSummary.evidence.attribution.causes).toEqual(["child_accumulation"]);
   });
 });

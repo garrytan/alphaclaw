@@ -197,7 +197,8 @@ describe("server/watchdog memory monitor", () => {
       m.includes("memory critical"),
     );
     expect(critical).toBeTruthy();
-    expect(critical).toContain("raising the gateway heap will not help");
+    expect(critical).toContain("container");
+    expect(critical).not.toContain("Raise the gateway heap");
     expect(critical).not.toContain("resource autotune");
     expect(harness.watchdog.getStatus().memory.trendState).toBe("critical");
   });
@@ -224,7 +225,7 @@ describe("server/watchdog memory monitor", () => {
     expect(critical).not.toContain("resource autotune");
   });
 
-  it("heap-capped pressure (capSource heap) gets the shared heap remedy", async () => {
+  it("derived group budget pressure is not reported as V8 heap exhaustion", async () => {
     const harness = createHarness();
     launchGateway(harness);
     // activeHeapMb 128 → heap cap 320MB (128 + 192 overhead); container far
@@ -242,8 +243,9 @@ describe("server/watchdog memory monitor", () => {
       m.includes("memory critical"),
     );
     expect(critical).toBeTruthy();
-    // Autotune is kill-switched in tests: the shared remedy names the escape.
-    expect(critical).toContain("resource autotune");
+    expect(critical).toContain("derived group RSS budget");
+    expect(critical).toContain("does not establish V8 heap exhaustion");
+    expect(critical).not.toContain("resource autotune");
   });
 
   it("disabled settings idle the monitor without sampling", async () => {
@@ -260,8 +262,39 @@ describe("server/watchdog memory monitor", () => {
   it("no gateway pid reads as no_gateway, never as healthy", async () => {
     const harness = createHarness();
     await driveTicks(harness, { ticks: 2, sampleAt: () => ({ rssBytes: kMb }) });
-    expect(harness.readMemorySample).not.toHaveBeenCalled();
+    expect(harness.readMemorySample.mock.calls).toEqual([[null], [null]]); // container reads continue
     expect(harness.watchdog.getMemoryTrend().state).toBe("no_gateway");
+  });
+
+  it("retains container pressure without a gateway and never restarts a flat gateway for co-residents", async () => {
+    const restart = vi.fn(async () => ({ ok: true }));
+    const harness = createHarness({ settings: { enabled: true, autoRestart: true, effectiveAutoRestart: true },
+      restartGatewayForMitigation: restart });
+    const high = () => ({ rssBytes: 100 * kMb, cgroupUsedBytes: 950 * kMb, containerLimitBytes: 1000 * kMb });
+    await driveTicks(harness, { ticks: 3, sampleAt: high });
+    const first = harness.watchdog.getMemoryTrend().container;
+    expect(harness.watchdog.getMemoryTrend().state).toBe("no_gateway");
+    expect(first.state).toBe("critical");
+    launchGateway(harness);
+    await driveTicks(harness, { startTick: 3, ticks: 5, sampleAt: high });
+    expect(harness.watchdog.getMemoryTrend().container.episodeId).toBe(first.episodeId);
+    expect(restart).not.toHaveBeenCalled();
+    expect(notifications(harness.notifier).filter((m) => m.includes("Container memory critical"))).toHaveLength(1);
+    await driveTicks(harness, { startTick: 8, ticks: 3, sampleAt: () => ({ ...high(), cgroupUsedBytes: 700 * kMb }) });
+    expect(harness.watchdog.getMemoryTrend().container.state).toBe("normal");
+  });
+
+  it("does not restart from a repeated process sample even when its caller claims freshness", async () => {
+    const restart = vi.fn(async () => ({ ok: true }));
+    const harness = createHarness({ settings: { enabled: true, autoRestart: true, effectiveAutoRestart: true },
+      restartGatewayForMitigation: restart });
+    launchGateway(harness);
+    await driveTicks(harness, { ticks: 8, sampleAt: (i) => ({
+      atMs: kStartMs, sampleStatus: "fresh", rssBytes: (365 + i * 10) * kMb,
+      cgroupUsedBytes: 950 * kMb, containerLimitBytes: 1000 * kMb,
+    }) });
+    expect(restart).not.toHaveBeenCalled();
+    expect(harness.watchdog.getMemoryTrend().sampleStatus).toBe("stale");
   });
 
   it("a throwing settings read keeps last-known-good detection but forces autoRestart OFF", async () => {
@@ -306,16 +339,20 @@ describe("server/watchdog memory monitor", () => {
     // startTick advances the fake clock (one tick = 60s) so brake-spacing
     // tests can jump hours ahead; the RSS ramp restarts from its base each
     // scenario so a later scenario is still a rising critical episode.
-    const criticalScenario = (harness, extraTicks = 8, startTick = 0) =>
-      driveTicks(harness, {
-        ticks: extraTicks,
-        startTick,
+    const criticalScenario = async (harness, extraTicks = 8, startTick) => {
+      const first = startTick ?? harness.nextCriticalTick ?? 0;
+      const baseRss = startTick === undefined ? harness.nextCriticalRss ?? 365 : 365;
+      await driveTicks(harness, {
+        ticks: extraTicks, startTick: first,
         sampleAt: (i) => ({
-          rssBytes: (365 + 4 * (i - startTick)) * kMb,
-          cgroupUsedBytes: (365 + 4 * (i - startTick)) * kMb,
+          rssBytes: (baseRss + 4 * (i - first)) * kMb,
+          cgroupUsedBytes: (baseRss + 4 * (i - first)) * kMb,
           containerLimitBytes: 400 * kMb,
         }),
       });
+      harness.nextCriticalTick = first + extraTicks;
+      harness.nextCriticalRss = baseRss + 4 * extraTicks;
+    };
 
     it("default OFF: critical never restarts", async () => {
       const restart = vi.fn(async () => ({ ok: true }));
@@ -775,6 +812,69 @@ describe("server/watchdog memory monitor", () => {
       ).toHaveLength(2);
     });
 
+    it.each([
+      { label: "group RSS", delayMs: 90_001, cgroupOffsetMs: 0 },
+      { label: "container pressure while group RSS is still fresh", delayMs: 90_000, cgroupOffsetMs: 1000 },
+    ])("expired $label after notification vetoes mitigation, refunds it and permits a fresh retry", async ({ delayMs, cgroupOffsetMs }) => {
+      const restart = vi.fn(async () => ({ ok: true }));
+      const release = vi.fn();
+      const gatewayLifecycleLock = { tryAcquire: vi.fn(() => release) };
+      const statePath = path.join(
+        fs.mkdtempSync(path.join(os.tmpdir(), "memory-mitigation-")),
+        "memory-mitigation-state.json",
+      );
+      const harness = createHarness({
+        settings: { enabled: true, autoRestart: true, effectiveAutoRestart: true },
+        restartGatewayForMitigation: restart,
+        gatewayLifecycleLock,
+        mitigationStatePath: statePath,
+      });
+      let delayPending = true;
+      harness.notifier.notify.mockImplementation(async (message) => {
+        if (delayPending && message.includes("Restarting gateway before it runs out of memory")) {
+          delayPending = false;
+          vi.setSystemTime(Date.now() + delayMs);
+        }
+        return { ok: true };
+      });
+      launchGateway(harness);
+      await driveTicks(harness, {
+        ticks: 4,
+        sampleAt: (i) => ({
+          rssBytes: (365 + 4 * i) * kMb,
+          cgroupUsedBytes: (365 + 4 * i) * kMb,
+          containerLimitBytes: 400 * kMb,
+          cgroupAtMs: Date.now() - cgroupOffsetMs,
+        }),
+      });
+      expect(delayPending).toBe(false);
+      expect(restart).not.toHaveBeenCalled();
+      expect(release).toHaveBeenCalledTimes(1);
+      expect(JSON.parse(fs.readFileSync(statePath, "utf8")).restarts).toEqual([]);
+      expect(memoryEvents(harness.insertWatchdogEvent).some((event) =>
+        event.details.kind === "mitigation_skipped" && event.details.reason === "stale_memory_evidence",
+      )).toBe(true);
+      expect(harness.watchdog.getStatus().expectedRestartUntil).toBeNull();
+
+      // Advance past the delayed delivery and collect a new authoritative
+      // sample. Neither the brake nor the prior announcement suppresses it.
+      await driveTicks(harness, {
+        startTick: 5,
+        ticks: 1,
+        sampleAt: () => ({
+          rssBytes: 385 * kMb,
+          cgroupUsedBytes: 385 * kMb,
+          containerLimitBytes: 400 * kMb,
+        }),
+      });
+      expect(restart).toHaveBeenCalledTimes(1);
+      expect(release).toHaveBeenCalledTimes(2);
+      expect(JSON.parse(fs.readFileSync(statePath, "utf8")).restarts).toHaveLength(1);
+      expect(notifications(harness.notifier).filter((message) =>
+        message.includes("Restarting gateway before it runs out of memory"),
+      )).toHaveLength(2);
+    });
+
     it("a FAILED restart refunds the 24h budget and applies the short failure cooldown instead", async () => {
       let fail = true;
       const restart = vi.fn(async () => {
@@ -1191,7 +1291,8 @@ describe("server/watchdog memory monitor", () => {
       ticks: 1,
       sampleAt: () => ({ rssBytes: 999 * kMb }),
     });
-    expect(harness.readMemorySample.mock.calls.length).toBe(12); // unchanged
+    expect(harness.readMemorySample.mock.calls.length).toBe(13); // container-only read after exit
+    expect(harness.readMemorySample.mock.lastCall).toEqual([null]);
   });
 
   it("an EXPECTED late exit of a stale predecessor pid never rewrites the live successor's lifecycle (issue #56)", async () => {
@@ -1280,8 +1381,8 @@ describe("server/watchdog memory monitor", () => {
       ticks: 2,
       sampleAt: () => ({ rssBytes: 900 * kMb }),
     });
-    // Never sampled the reused pid: the stranger's RSS must not enter the trend.
-    expect(harness.readMemorySample).toHaveBeenCalledTimes(1);
+    // Subsequent reads are container-only; the reused PID is never sampled.
+    expect(harness.readMemorySample.mock.calls).toEqual([[700], [null], [null]]);
     expect(harness.watchdog.getMemoryTrend().state).toBe("no_gateway");
     expect(harness.watchdog.getStatus()).toMatchObject({
       servingPid: null,
@@ -1363,25 +1464,21 @@ describe("server/watchdog memory monitor", () => {
     });
   });
 
-  it("default sampler composes subtree RSS + cgroup + machine profile + active heap", async () => {
+  it("default sampler composes authoritative group RSS + actual cgroup + configured heap", async () => {
     const systemResources = require("../../lib/server/system-resources");
-    const machineProfile = require("../../lib/server/machine-profile");
+    const collector = require("../../lib/server/gateway-memory/process-snapshot");
     const autotune = require("../../lib/server/autotune");
     const original = {
-      getProcessTreeUsage: systemResources.getProcessTreeUsage,
+      getGatewayProcessSnapshot: collector.getGatewayProcessSnapshot,
       parseCgroupMemory: systemResources.parseCgroupMemory,
-      getMachineProfile: machineProfile.getMachineProfile,
       getActiveGatewayHeapMb: autotune.getActiveGatewayHeapMb,
     };
     const treeCalls = [];
-    systemResources.getProcessTreeUsage = (pid) => {
-      treeCalls.push(pid);
-      return { rssBytes: 321 * kMb };
+    collector.getGatewayProcessSnapshot = ({ rootPid }) => {
+      treeCalls.push(rootPid);
+      return { status: "fresh", atMs: Date.now(), root: { pid: rootPid, startTicks: "1" }, groupRssBytes: 321 * kMb };
     };
-    systemResources.parseCgroupMemory = () => ({ usedBytes: 500 * kMb });
-    machineProfile.getMachineProfile = () => ({
-      memory: { limitBytes: 2048 * kMb },
-    });
+    systemResources.parseCgroupMemory = () => ({ usedBytes: 500 * kMb, totalBytes: 2048 * kMb });
     autotune.getActiveGatewayHeapMb = () => 512;
     try {
       const harness = createHarness();
@@ -1410,14 +1507,12 @@ describe("server/watchdog memory monitor", () => {
       expect(treeCalls).toEqual([777]); // subtree read, launcher pid as root
       const trend = watchdog.getMemoryTrend();
       expect(trend.rssMb).toBe(321);
-      // Cap = min(heap 512 + overhead, limit − co-resident) — both bounded,
-      // so an effective cap and pressure fraction must be present.
+      // The configured heap derives a group policy; actual cgroup pressure is independent.
       expect(trend.effectiveCapMb).toBeGreaterThan(0);
       expect(trend.pressureFraction).toBeGreaterThan(0);
     } finally {
-      systemResources.getProcessTreeUsage = original.getProcessTreeUsage;
+      collector.getGatewayProcessSnapshot = original.getGatewayProcessSnapshot;
       systemResources.parseCgroupMemory = original.parseCgroupMemory;
-      machineProfile.getMachineProfile = original.getMachineProfile;
       autotune.getActiveGatewayHeapMb = original.getActiveGatewayHeapMb;
     }
   });
