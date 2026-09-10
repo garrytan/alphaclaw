@@ -112,6 +112,9 @@ const ctx = {
   stablePin: null,
   sourceStable: null,
   beta: null,
+  // "beta" | "stable": which catalog section lists the target (a beta gap
+  // upgrades the historical stable to the shipped pin — see container-helpers).
+  targetChannel: null,
   port: null,
   cookie: null,
   bootStartedAt: null,
@@ -229,7 +232,7 @@ const loginThroughBrowser = async (page) => {
   await page.waitForURL((url) => !url.pathname.includes("login"), { timeout: 60_000 });
 };
 
-describeContainer("container E2E: stable→beta upgrade in the production image", () => {
+describeContainer("container E2E: upgrade journey in the production image (pin→beta, or historical stable→pin during a beta gap)", () => {
   beforeAll(async () => {
     await assertDockerAvailable();
 
@@ -248,7 +251,8 @@ describeContainer("container E2E: stable→beta upgrade in the production image"
     });
     ctx.sourceStable = resolved.stable;
     ctx.beta = resolved.beta;
-    console.log(`[container-e2e] ${ctx.sourceStable} → ${ctx.beta} (${resolved.source}; bundled pin ${ctx.stablePin})`);
+    ctx.targetChannel = resolved.targetChannel;
+    console.log(`[container-e2e] ${ctx.sourceStable} → ${ctx.beta} [${ctx.targetChannel}] (${resolved.source}; bundled pin ${ctx.stablePin})`);
   }, 2 * kMin);
 
   afterAll(async () => {
@@ -536,7 +540,7 @@ describeContainer("container E2E: stable→beta upgrade in the production image"
     );
   });
 
-  step("drives the stable→beta apply through the real browser UI", 20 * kMin, async () => {
+  step("drives the apply to the resolved target through the real browser UI", 20 * kMin, async () => {
     // (f) Headless Chromium against the real served UI.
     const { chromium } = require("playwright");
     const browser = await chromium.launch();
@@ -550,10 +554,13 @@ describeContainer("container E2E: stable→beta upgrade in the production image"
 
       // The selected package is the contract for every later assertion.
       // Refuse a missing row rather than silently applying another build.
-      const betaSection = page.locator("h3", { hasText: /^Beta$/ }).locator("xpath=parent::div");
-      const betaVersionText = betaSection.getByText(ctx.beta, { exact: true }).first();
-      await betaVersionText.waitFor({ timeout: 2 * kMin });
-      const row = betaVersionText.locator('xpath=ancestor::div[contains(@class,"py-2.5")][1]');
+      // The catalog groups rows by channel; a beta-gap journey targets the
+      // pin, which lives under "Stable".
+      const sectionHeading = ctx.targetChannel === "stable" ? /^Stable$/ : /^Beta$/;
+      const targetSection = page.locator("h3", { hasText: sectionHeading }).locator("xpath=parent::div");
+      const targetVersionText = targetSection.getByText(ctx.beta, { exact: true }).first();
+      await targetVersionText.waitFor({ timeout: 2 * kMin });
+      const row = targetVersionText.locator('xpath=ancestor::div[contains(@class,"py-2.5")][1]');
       const applyButton = row.getByRole("button", { name: /^(Upgrade|Switch|Try again)$/ });
       await applyButton.first().click({ timeout: 60_000 });
 
@@ -610,7 +617,7 @@ describeContainer("container E2E: stable→beta upgrade in the production image"
     }
   });
 
-  step("container restarts under the orchestrator policy and comes back on beta", 15 * kMin, async () => {
+  step("container restarts under the orchestrator policy and comes back on the target", 15 * kMin, async () => {
     // (g) restartProcess() → process.exit(1) under /.dockerenv →
     // --restart=always brings the container back. Detect via RestartCount or
     // a StartedAt change.
@@ -656,7 +663,7 @@ describeContainer("container E2E: stable→beta upgrade in the production image"
     await waitForVersion(kContainerA, ctx.beta, 10 * kMin);
   });
 
-  step("browser shows the beta verdict after a fresh login", 8 * kMin, async () => {
+  step("browser shows the target verdict after a fresh login", 8 * kMin, async () => {
     // (h) The verdict banner may have expired after reloads — accept either
     // the banner or the status card's Running row showing the beta.
     const { chromium } = require("playwright");
@@ -795,7 +802,7 @@ describeContainer("container E2E: stable→beta upgrade in the production image"
     };
   });
 
-  step("live instance runs the beta and the #20 config seeds survived", 5 * kMin, async () => {
+  step("live instance runs the target and the #20 config seeds survived", 5 * kMin, async () => {
     // (i) The LIVE binary — not just the UI's opinion of it.
     const { stdout: versionOut } = await execInContainer(kContainerA, [
       "openclaw",
@@ -809,7 +816,7 @@ describeContainer("container E2E: stable→beta upgrade in the production image"
     await waitFor(() => gatewayHealthzOk(kContainerA), {
       timeoutMs: 4 * kMin,
       intervalMs: 3000,
-      label: "beta gateway healthz after the activation boot",
+      label: "target gateway healthz after the activation boot",
     });
 
     const { stdout: configOut } = await execInContainer(kContainerA, [
@@ -831,7 +838,7 @@ describeContainer("container E2E: stable→beta upgrade in the production image"
     );
   });
 
-  step("durability leg A: a FRESH container on the same volume boots the beta", 12 * kMin, async () => {
+  step("durability leg A: a FRESH container on the same volume boots the target", 12 * kMin, async () => {
     // (j) The upgrade must live in /data, not in the replaced container.
     await removeContainer(kContainerA);
     await runContainer({
@@ -851,7 +858,7 @@ describeContainer("container E2E: stable→beta upgrade in the production image"
     });
   });
 
-  step("durability leg B: docker restart boots the beta again", 12 * kMin, async () => {
+  step("durability leg B: docker restart boots the target again", 12 * kMin, async () => {
     // (k) And it survives a plain restart of the same container.
     await docker(["restart", kContainerB], { timeoutMs: 2 * kMin });
     ctx.cookie = null;

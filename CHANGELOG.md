@@ -34,6 +34,15 @@ Versions follow this repository's `package.json` release counter.
   before anything is forwarded; the gateway's WHATWG URL parsing would
   otherwise have collapsed them out of the Control UI namespace.
 
+- **Container tier: a beta gap upgrades the historical stable to the shipped
+  pin.** When no prerelease newer than the pin is published, the production-
+  image journey now runs 2026.7.1-2 → the bundled pin instead of the fixed
+  historical target 2026.9.1-beta.1, which stopped booting when its bundled
+  `@openclaw/voyage-provider@beta` began requiring plugin API >= 2026.9.3
+  (main's 2026-09-10 nightly failed on it). The self-upgrade journey also
+  accepts the managed `gateway.controlUi.basePath` as the one config key the
+  new boot adds.
+
 ### Added
 
 - **`ALPHACLAW_CONTROL_UI_MOUNT=legacy` kill switch** (deployment env only,
