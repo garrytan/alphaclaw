@@ -402,6 +402,9 @@ describe("server/routes/proxy createIsProxiedPath", () => {
 
   it("proxies /openclaw, /openclaw/*, /assets/*, and non-setup /api/*", () => {
     expect(isProxied(req("/openclaw"))).toBe(true);
+    // Trailing-slash form: Express matches "/openclaw" for both, so the JSON
+    // parser must skip it like every other proxied path.
+    expect(isProxied(req("/openclaw/"))).toBe(true);
     expect(isProxied(req("/openclaw/session"))).toBe(true);
     expect(isProxied(req("/assets/app.js"))).toBe(true);
     expect(isProxied(req("/api/foo"))).toBe(true);

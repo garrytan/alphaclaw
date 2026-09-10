@@ -5,6 +5,55 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.9.83] - 2026-09-10
+
+### Fixed
+
+- **Control UI "Styles failed to load" banner is gone.** The gateway now
+  serves the dashboard under `gateway.controlUi.basePath=/openclaw` — written
+  once by `ensureGatewayProxyConfig`, re-applied and verified after any
+  whole-file config restore — and AlphaClaw forwards `/openclaw*` to it
+  verbatim instead of stripping the prefix. Stripping made the gateway stamp
+  an empty base path into the page, so the UI fetched fonts, themes, `sw.js`,
+  its bootstrap config and avatars from AlphaClaw's root and 404'd; all of
+  them now load through `/openclaw/...`. Under OpenClaw's default `hybrid`
+  reload mode the gateway restarts itself when the key lands; an externally
+  supervised gateway needs one restart.
+- **Unauthenticated Control UI resources answer `401`, not the login page.**
+  Fonts, chunks, themes, `sw.js`, the bootstrap config, avatars and
+  `/assets/*` now get `401 {"error":"Unauthorized"}` on an expired session
+  instead of `302 /login.html`, so the browser never parses HTML as CSS and
+  the Control UI service worker — which caches any `ok` response under the
+  requested URL — can never cache a login page under an asset URL. Documents
+  and `HEAD` probes keep the redirect, so a stale tab still lands on login.
+- **`/openclaw/?query` keeps its query string.** The old exact-match handler
+  dropped it.
+- **Traversal guard on the gateway-UI proxies.** Dot and backslash segments
+  (`/openclaw/../v1/models`, `%2e%2e`, `..\v1`) on `/openclaw*` and
+  `/assets/*` — HTTP and WebSocket upgrades alike — are rejected with `404`
+  before anything is forwarded; the gateway's WHATWG URL parsing would
+  otherwise have collapsed them out of the Control UI namespace.
+
+- **Container tier: a beta gap upgrades the historical stable to the shipped
+  pin.** When no prerelease newer than the pin is published, the production-
+  image journey now runs 2026.7.1-2 → the bundled pin instead of the fixed
+  historical target 2026.9.1-beta.1, which stopped booting when its bundled
+  `@openclaw/voyage-provider@beta` began requiring plugin API >= 2026.9.3
+  (main's 2026-09-10 nightly failed on it). The self-upgrade journey also
+  accepts the managed `gateway.controlUi.basePath` as the one config key the
+  new boot adds.
+
+### Added
+
+- **`ALPHACLAW_CONTROL_UI_MOUNT=legacy` kill switch** (deployment env only,
+  never honored from `.env`, read at process start): restores the pre-0.9.83
+  prefix-strip mount and removes the managed `gateway.controlUi.basePath` at
+  boot so the proxy and the gateway agree again. Use it rather than a code
+  revert: old AlphaClaw strips `/openclaw/x` to `/x`, which a gateway still in
+  base-path mode answers with `404` — a revert alone 404s the dashboard. If
+  you must revert, also delete the key from `openclaw.json` and restart the
+  gateway.
+
 ## [0.9.82] - 2026-09-09
 
 ### Fixed

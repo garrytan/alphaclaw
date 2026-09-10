@@ -48,6 +48,23 @@ jobs:
 
       - run: npm ci
 
+      # tests/live/control-ui-styles.e2e.test.js drives a REAL Chromium through
+      # the /openclaw proxy (the "Styles failed to load" banner check). With
+      # CI set, that suite FAILS when no browser launches — never skips — so
+      # install one here. Cache keyed on the pinned Playwright version, same
+      # as container-e2e.yml.
+      - id: playwright-version
+        name: Resolve pinned Playwright version
+        run: |
+          echo "version=$(node -p "require('./package-lock.json').packages['node_modules/playwright'].version")" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ steps.playwright-version.outputs.version }}
+
+      - run: npx playwright install --with-deps chromium
+
       - run: npm run test:live
         env:
           # Authenticated GitHub API calls — the anonymous quota (60/hr) is

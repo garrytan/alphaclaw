@@ -906,6 +906,9 @@ describe("server/gateway restart behavior", () => {
     expect(currentConfig.gateway.controlUi.allowedOrigins).toEqual([
       "https://setup.example.com",
     ]);
+    // Control UI mount contract: the writer pins the base path the gateway
+    // stamps into index.html (control-ui-mount.js).
+    expect(currentConfig.gateway.controlUi.basePath).toBe("/openclaw");
     expect(currentConfig.gateway.http).toBeUndefined();
   });
 
@@ -942,8 +945,166 @@ describe("server/gateway restart behavior", () => {
       "https://existing.example.com",
       "https://setup.example.com",
     ]);
+    expect(currentConfig.gateway.controlUi.basePath).toBe("/openclaw");
     expect(currentConfig.gateway.http).toBeUndefined();
     expect(configWrite).toHaveBeenCalledTimes(1);
+  });
+
+  // ── Control UI mount contract (control-ui-mount.js) ──────────────────────
+  // ensureGatewayProxyConfig owns gateway.controlUi.basePath: the gateway
+  // stamps that path into index.html and the UI resolves fonts, themes,
+  // sw.js and its bootstrap config from it, so the writer must converge on
+  // the ONE canonical spelling the proxy and dashboard links are pinned to.
+  const kOpenclawConfigPath = `${OPENCLAW_DIR}/openclaw.json`;
+  const kSetupOrigin = "https://setup.example.com";
+  const kControlUiMountModulePath = require.resolve("../../lib/server/control-ui-mount");
+  const setupControlUiConfigIo = (initial) => {
+    let currentConfig = initial;
+    // Node's CJS loader reads module source through the PUBLIC fs.readFileSync,
+    // so a re-require while a previous call's mock is live would evaluate
+    // gateway.js as "{}". Restore it before the require (the legacy drill
+    // below builds several IO contexts inside one test).
+    fs.readFileSync = originalReadFileSync;
+    fs.existsSync = vi.fn((targetPath) => targetPath === kOnboardingMarkerPath);
+    const configWrite = mockAtomicConfigWrites((targetPath, contents) => {
+      if (targetPath === kOpenclawConfigPath) currentConfig = JSON.parse(contents);
+    });
+    delete require.cache[modulePath];
+    const gateway = require(modulePath);
+    fs.readFileSync = vi.fn((targetPath) =>
+      targetPath === kOpenclawConfigPath ? JSON.stringify(currentConfig) : "{}",
+    );
+    return { gateway, configWrite, getConfig: () => currentConfig };
+  };
+  // kControlUiMount is resolved ONCE at module load, so a mode drill sets the
+  // env and re-requires BOTH the leaf module and gateway.js; the finally
+  // block evicts both again so later cases load the default mode afresh.
+  const withControlUiMountEnv = (value, fn) => {
+    const saved = process.env.ALPHACLAW_CONTROL_UI_MOUNT;
+    process.env.ALPHACLAW_CONTROL_UI_MOUNT = value;
+    delete require.cache[kControlUiMountModulePath];
+    delete require.cache[modulePath];
+    try {
+      return fn();
+    } finally {
+      if (saved === undefined) delete process.env.ALPHACLAW_CONTROL_UI_MOUNT;
+      else process.env.ALPHACLAW_CONTROL_UI_MOUNT = saved;
+      delete require.cache[kControlUiMountModulePath];
+      delete require.cache[modulePath];
+    }
+  };
+  const withLogSpy = (fn) => {
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      return fn(() => logSpy.mock.calls.map((call) => String(call[0])));
+    } finally {
+      logSpy.mockRestore();
+    }
+  };
+  // A config every other managed key already satisfies, so `changed` below
+  // is decided by controlUi.basePath alone.
+  const convergedConfig = (controlUi) => ({
+    gateway: {
+      trustedProxies: ["127.0.0.1"],
+      controlUi: { allowedOrigins: [kSetupOrigin], ...controlUi },
+    },
+  });
+
+  it("leaves an already-canonical controlUi.basePath alone: no change, no write", () => {
+    const io = setupControlUiConfigIo(convergedConfig({ basePath: "/openclaw" }));
+
+    const changed = io.gateway.ensureGatewayProxyConfig(kSetupOrigin);
+
+    expect(changed).toBe(false);
+    expect(io.configWrite).not.toHaveBeenCalled();
+    expect(io.getConfig().gateway.controlUi.basePath).toBe("/openclaw");
+  });
+
+  it.each(["/dash", "openclaw/", "/openclaw/"])(
+    "rewrites a non-canonical controlUi.basePath %j to /openclaw and logs the replacement",
+    (stored) => {
+      withLogSpy((logLines) => {
+        const io = setupControlUiConfigIo(convergedConfig({ basePath: stored }));
+
+        const changed = io.gateway.ensureGatewayProxyConfig(kSetupOrigin);
+
+        expect(changed).toBe(true);
+        expect(io.configWrite).toHaveBeenCalledTimes(1);
+        expect(io.getConfig().gateway.controlUi.basePath).toBe("/openclaw");
+        // The other controlUi keys survive the rewrite.
+        expect(io.getConfig().gateway.controlUi.allowedOrigins).toEqual([kSetupOrigin]);
+        const lines = logLines();
+        expect(
+          lines.some(
+            (line) =>
+              line.includes("Replaced gateway.controlUi.basePath") && line.includes(stored),
+          ),
+        ).toBe(true);
+        // The boot log names the effective mode once per call.
+        expect(lines).toContain("[alphaclaw] control_ui_mount=basepath basePath=/openclaw");
+      });
+    },
+  );
+
+  it("writes controlUi.basePath even when no origin is given (boot and restore-repair callers)", () => {
+    const io = setupControlUiConfigIo({ gateway: { trustedProxies: ["127.0.0.1"] } });
+
+    const changed = io.gateway.ensureGatewayProxyConfig(undefined);
+
+    expect(changed).toBe(true);
+    expect(io.configWrite).toHaveBeenCalledTimes(1);
+    // No origin → no allowedOrigins is invented; only the mount key lands.
+    expect(io.getConfig().gateway.controlUi).toEqual({ basePath: "/openclaw" });
+  });
+
+  it("replaces a non-object gateway.controlUi with an object carrying basePath", () => {
+    withLogSpy((logLines) => {
+      const io = setupControlUiConfigIo({
+        gateway: { trustedProxies: ["127.0.0.1"], controlUi: "bogus" },
+      });
+
+      const changed = io.gateway.ensureGatewayProxyConfig(kSetupOrigin);
+
+      expect(changed).toBe(true);
+      expect(io.configWrite).toHaveBeenCalledTimes(1);
+      expect(io.getConfig().gateway.controlUi).toEqual({
+        basePath: "/openclaw",
+        allowedOrigins: [kSetupOrigin],
+      });
+      expect(
+        logLines().some(
+          (line) =>
+            line.includes("gateway.controlUi was bogus") && line.includes("not an object"),
+        ),
+      ).toBe(true);
+    });
+  });
+
+  it("legacy mount mode removes AlphaClaw's basePath (either spelling), keeps a hand-set path, and logs the mode", () => {
+    withControlUiMountEnv("legacy", () => {
+      withLogSpy((logLines) => {
+        for (const stored of ["/openclaw", "/openclaw/"]) {
+          const io = setupControlUiConfigIo(convergedConfig({ basePath: stored }));
+
+          const changed = io.gateway.ensureGatewayProxyConfig(kSetupOrigin);
+
+          expect(changed).toBe(true);
+          expect(io.configWrite).toHaveBeenCalledTimes(1);
+          expect(io.getConfig().gateway.controlUi).toEqual({ allowedOrigins: [kSetupOrigin] });
+          expect("basePath" in io.getConfig().gateway.controlUi).toBe(false);
+        }
+
+        // A path the operator chose is not ours to remove.
+        const handSet = setupControlUiConfigIo(convergedConfig({ basePath: "/dash" }));
+        expect(handSet.gateway.ensureGatewayProxyConfig(kSetupOrigin)).toBe(false);
+        expect(handSet.configWrite).not.toHaveBeenCalled();
+        expect(handSet.getConfig().gateway.controlUi.basePath).toBe("/dash");
+
+        const lines = logLines();
+        expect(lines).toContain("[alphaclaw] control_ui_mount=legacy basePath=(removed)");
+        expect(lines.some((line) => line.includes("control_ui_mount=basepath"))).toBe(false);
+      });
+    });
   });
 
   it("preserves existing gateway endpoint options while enabling opted-in public API endpoints", () => {

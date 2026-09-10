@@ -7,6 +7,7 @@ const WebSocket = require("ws");
 const {
   kLiveEnabled,
   mkTemp,
+  openclawCliUsable,
   repoOpenclawBin,
   repoBinDir,
   scrubTestRunnerEnv,
@@ -42,21 +43,6 @@ const kOperatorScopes = [
   "operator.approvals",
   "operator.pairing",
 ];
-
-// The pinned CLI enforces its Node engines at runtime (the vitest process may
-// satisfy AlphaClaw's floor but not OpenClaw's). Preflight it so an
-// incompatible runner skips loudly instead of failing on a boot timeout.
-const openclawCliUsable = () => {
-  try {
-    const res = spawnSync(process.execPath, [repoOpenclawBin(), "--version"], {
-      encoding: "utf8",
-      timeout: 60_000,
-    });
-    return res.status === 0;
-  } catch {
-    return false;
-  }
-};
 
 const findFreePort = () =>
   new Promise((resolve, reject) => {

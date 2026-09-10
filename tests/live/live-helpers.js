@@ -160,6 +160,23 @@ const repoOpenclawBin = () => {
 
 const repoBinDir = () => path.resolve(__dirname, "../../node_modules/.bin");
 
+// The pinned CLI enforces its Node engines at runtime (the vitest process may
+// satisfy AlphaClaw's floor but not OpenClaw's). Suites that boot the REAL
+// gateway preflight it so an incompatible runner skips loudly instead of
+// failing on a boot timeout. Shared by dashboard-launch and control-ui-styles.
+const openclawCliUsable = () => {
+  try {
+    const res = spawnSync(process.execPath, [repoOpenclawBin(), "--version"], {
+      encoding: "utf8",
+      timeout: 60_000,
+      env: scrubTestRunnerEnv(),
+    });
+    return res.status === 0;
+  } catch {
+    return false;
+  }
+};
+
 // Env for spawning the REAL openclaw CLI (or a real AlphaClaw server that
 // spawns it) from inside vitest. Verified against openclaw 2026.9.1-beta.1:
 // the CLI treats an inherited `VITEST` variable as "running under a test
@@ -509,6 +526,7 @@ module.exports = {
   createCountingFetch,
   repoOpenclawBin,
   repoBinDir,
+  openclawCliUsable,
   scrubTestRunnerEnv,
   parseSingleJsonDocument,
   runCliJson,

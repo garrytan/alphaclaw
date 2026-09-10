@@ -182,7 +182,20 @@ describeContainer("container E2E: immutable v0.9.76 → candidate self-upgrade p
       expect(report.openclaw.installedDiverged).not.toBe(true);
       expect(report.serverPhase.verdict).toEqual([]);
       expect(report.serverPhase.config.restoredFrom).toBeNull();
-      expect((await execInContainer(kContainers[1], ["cat", kConfig])).stdout).toBe(configBefore);
+      // The candidate boot may add exactly ONE managed key on top of what
+      // v0.9.76 left behind: gateway.controlUi.basePath=/openclaw (the v0.9.83
+      // Control UI mount, written by ensureGatewayProxyConfig at boot). Every
+      // other byte of the config — and the absence of any config restore,
+      // asserted above via restoredFrom — must survive the image swap intact.
+      const configAfter = JSON.parse(
+        (await execInContainer(kContainers[1], ["cat", kConfig])).stdout,
+      );
+      expect(configAfter.gateway?.controlUi?.basePath).toBe("/openclaw");
+      const { basePath: _mountKey, ...controlUiWithoutMount } = configAfter.gateway.controlUi;
+      expect({
+        ...configAfter,
+        gateway: { ...configAfter.gateway, controlUi: controlUiWithoutMount },
+      }).toEqual(JSON.parse(configBefore));
       const state = await readJson(kContainers[1], `${kManaged}/openclaw-channel-state.json`);
       expect(state.applied.version).toBe(kRecordedVersion);
       expect(state.gatewayHold).toBeNull();
