@@ -1,4 +1,3 @@
-const { describe, it, expect } = require("vitest");
 const {
   kA2aPathPattern,
   kAgentCardPathPattern,
