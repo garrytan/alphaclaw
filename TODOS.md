@@ -1,5 +1,17 @@
 # TODOS
 
+## P2 — Retire the legacy Control UI mount mode and the root `/assets/*` forward (2026-09-10, from the Control UI mount fix, v0.9.83)
+- **What:** delete the `legacy` branch in `lib/server/routes/proxy.js` (the prefix strip) and in `applyControlUiBasePath` (`lib/server/control-ui-mount.js`), drop the `kAssetsPathPattern` forward, and give AlphaClaw its own `/assets` namespace back — see `lib/public/js/components/icons.js:606` and `lib/public/js/lib/channel-registry.js:5`, which inline icons today because the forward shadows every `/assets/*` URL.
+- **Why:** `ALPHACLAW_CONTROL_UI_MOUNT=legacy` is the transitional rollback path for the v0.9.83 mount change, kept for two releases so a broken deployment can fall back without a code revert. Once every deployment has booted 0.9.83+ the gateway serves the Control UI under `gateway.controlUi.basePath=/openclaw` and answers root `/assets/*` with 404 anyway, so both are dead weight.
+- **Context:** `lib/server/control-ui-mount.js`, `lib/server/routes/proxy.js`, `lib/server/deployment-only-env.js` (the `ALPHACLAW_CONTROL_UI_MOUNT` entry), the README env-table row, the legacy-mode blocks in `tests/server/routes-proxy-coverage.test.js` and `tests/server/e2e-proxy-gateway.test.js`.
+- **Effort:** S. **Priority:** P2. **Depends on:** two releases past 0.9.83.
+
+## P3 — Doctor card when the gateway still serves the Control UI with an empty base path (2026-09-10, from the Control UI mount fix, v0.9.83)
+- **What:** a deterministic check that GETs `<gateway>/openclaw/` and parses `data-openclaw-control-ui-base-path` from the `<html>` tag; a warn card with a "restart the gateway" fix when the stamped value is not `/openclaw` while the mount is `basepath`.
+- **Why:** `ensureGatewayProxyConfig` writes the key and a gateway under OpenClaw's default `hybrid` reload restarts itself, but an externally supervised gateway that has not restarted keeps stamping `""` — the dashboard shows "Styles failed to load" with no explanation anywhere in AlphaClaw.
+- **Context:** `lib/server/doctor/deterministic-checks.js`, the `lib/server/doctor/dashboard-token-check.js` pattern, `controlUiMountSatisfied` / `kControlUiBasePath` in `lib/server/control-ui-mount.js`.
+- **Effort:** S. **Priority:** P3. **Depends on:** None.
+
 ## P2 — Why does 2026.9.2 `backup create` idle against a running gateway? (2026-09-09, from the v0.9.81 Upgrade-tab wave)
 - **What:** capture `run.backup.lastOutput` from the next production `stalled`/`timeout` failure (v0.9.81 records the CLI's last three lines, redacted) and read the coordinator-lock / legacy-audit-lease path in the 2026.9.x dist to explain a 10-minute silent live attempt with nothing written.
 - **Why:** the operator's 2026-09-08 run showed the upstream rung idle for the full ceiling ("nothing written yet — 10m 0s — timed out"). v0.9.81 BOUNDS and DESCRIBES that failure (3-min inactivity policy, output ring) but does not explain it; the #54 belts assume a fast lease failure, not a hang.
