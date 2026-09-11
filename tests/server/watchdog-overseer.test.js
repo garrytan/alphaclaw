@@ -11,6 +11,7 @@ const {
   kAutoReviewMaxAgeMs,
   kAutoReviewSkipReasons,
   kCriticalClassIncidentKeys,
+  kSkipMarkedMaxEntries,
 } = require("../../lib/server/watchdog-overseer");
 
 const kNow = Date.parse("2026-08-29T12:00:00Z");
@@ -1757,16 +1758,37 @@ describe("#87 overseer admission, quiet class, recheck-before-send", () => {
       expect(Object.isFrozen(kAutoReviewSkipReasons)).toBe(true);
     });
 
-    it("#87 recovered without action → recovered_no_action (a missing actions array counts as none)", () => {
+    it("#87 recovered without action → recovered_no_action ONLY for an explicit empty actions array; a missing or malformed `actions` cannot prove no-action → eligible (G7)", () => {
       expect(classifyAutoReviewEligibility(noAction(1), kNow)).toEqual({
         eligible: false,
         reason: "recovered_no_action",
       });
       const { actions, ...withoutActions } = noAction(1).summary;
       expect(actions).toEqual([]);
+      // Absent history is not proof of no action (consistent with summary == null → eligible).
+      expect(classifyAutoReviewEligibility({ ...noAction(1), summary: withoutActions }, kNow)).toEqual({
+        eligible: true,
+        reason: null,
+      });
       expect(
-        classifyAutoReviewEligibility({ ...noAction(1), summary: withoutActions }, kNow).reason,
-      ).toBe("recovered_no_action");
+        classifyAutoReviewEligibility(
+          { ...noAction(1), summary: { ...noAction(1).summary, actions: "restart" } },
+          kNow,
+        ),
+      ).toEqual({ eligible: true, reason: null });
+      expect(
+        classifyAutoReviewEligibility(
+          { ...noAction(1), summary: { ...noAction(1).summary, actions: null } },
+          kNow,
+        ),
+      ).toEqual({ eligible: true, reason: null });
+      // The other bounds still apply to those rows.
+      expect(
+        classifyAutoReviewEligibility(
+          { ...noAction(1, { resolvedAt: iso(kNow - 2 * 3_600_000) }), summary: withoutActions },
+          kNow,
+        ),
+      ).toEqual({ eligible: false, reason: "stale" });
     });
 
     it("#87 recovered WITH a restart stays eligible (the existing FIFO fixtures)", () => {
@@ -1909,6 +1931,70 @@ describe("#87 overseer admission, quiet class, recheck-before-send", () => {
       expect(db.getIncidentById(1).overseer).toBe(null);
       expect(runner.calls).toHaveLength(0);
       expect(notify).not.toHaveBeenCalled();
+    });
+
+    it("#87 G8. the failed-skip memory is bounded (kSkipMarkedMaxEntries = 500, DI skipMarkedMaxEntries): with a bound of 2 and three incidents whose marker writes fail, the oldest id is evicted and costs ONE more write attempt + log line on the next tick; the two remembered ids are not retried", async () => {
+      expect(kSkipMarkedMaxEntries).toBe(500);
+      const logger = { log: vi.fn(), error: vi.fn() };
+      const { overseer, db } = createHarness({
+        seed: [noAction(1), noAction(2), noAction(3)],
+        overrides: { logger, skipMarkedMaxEntries: 2 },
+      });
+      const realUpdate = db.updateIncidentOverseer;
+      let failWrites = true;
+      db.updateIncidentOverseer = vi.fn((id, record) => {
+        if (failWrites) throw new Error("SQLITE_READONLY: attempt to write a readonly database");
+        return realUpdate(id, record);
+      });
+      // Tick 1 walks 1 → 2 → 3 (oldest first): three attempts, id 1 evicted.
+      expect(await overseer.maybeReviewNext()).toEqual({ skipped: "no_eligible_incident" });
+      expect(db.updateIncidentOverseer.mock.calls.map(([id]) => id)).toEqual([1, 2, 3]);
+      expect(logger.log).toHaveBeenCalledTimes(3);
+      // Tick 2 (the db writable again): only the evicted id is attempted —
+      // and its marker now lands; the two remembered ids are not retried.
+      failWrites = false;
+      expect(await overseer.maybeReviewNext()).toEqual({ skipped: "no_eligible_incident" });
+      expect(db.updateIncidentOverseer.mock.calls.map(([id]) => id)).toEqual([1, 2, 3, 1]);
+      expect(logger.log).toHaveBeenCalledTimes(3);
+      expect(db.getIncidentById(1).overseer.current).toMatchObject({ state: "skipped", reason: "recovered_no_action" });
+      expect(db.getIncidentById(2).overseer).toBe(null);
+      expect(db.getIncidentById(3).overseer).toBe(null);
+      // Tick 3: #1 is terminal through its record, #2/#3 through the set.
+      expect(await overseer.maybeReviewNext()).toEqual({ skipped: "no_eligible_incident" });
+      expect(db.updateIncidentOverseer).toHaveBeenCalledTimes(4);
+      // A non-integer / non-positive bound falls back to the default (never an empty set).
+      const fallback = createHarness({
+        seed: [noAction(1)],
+        overrides: { logger: { log: vi.fn(), error: vi.fn() }, skipMarkedMaxEntries: 0 },
+      });
+      fallback.db.updateIncidentOverseer = vi.fn(() => {
+        throw new Error("SQLITE_READONLY");
+      });
+      await fallback.overseer.maybeReviewNext();
+      await fallback.overseer.maybeReviewNext();
+      expect(fallback.db.updateIncidentOverseer).toHaveBeenCalledTimes(1);
+    });
+
+    it("#87 G8. a SUCCESSFUL skip is remembered by the durable marker, not by the process set: with a bound of 1, a failing write for #1 followed by a successful one for #2 keeps #1 remembered (no retry), whereas adding #2 to the set would have evicted it", async () => {
+      const logger = { log: vi.fn(), error: vi.fn() };
+      const { overseer, db } = createHarness({
+        seed: [noAction(1), noAction(2)],
+        overrides: { logger, skipMarkedMaxEntries: 1 },
+      });
+      const realUpdate = db.updateIncidentOverseer;
+      db.updateIncidentOverseer = vi.fn((id, record) => {
+        if (id === 1) throw new Error("SQLITE_READONLY: attempt to write a readonly database");
+        return realUpdate(id, record);
+      });
+      expect(await overseer.maybeReviewNext()).toEqual({ skipped: "no_eligible_incident" });
+      expect(db.updateIncidentOverseer.mock.calls.map(([id]) => id)).toEqual([1, 2]);
+      expect(db.getIncidentById(1).overseer).toBe(null);
+      expect(db.getIncidentById(2).overseer.current).toMatchObject({ state: "skipped", reason: "recovered_no_action" });
+      expect(logger.log).toHaveBeenCalledTimes(1);
+      // Tick 2: #2 is terminal through its record; #1 is still remembered — no write, no second log line.
+      expect(await overseer.maybeReviewNext()).toEqual({ skipped: "no_eligible_incident" });
+      expect(db.updateIncidentOverseer.mock.calls.map(([id]) => id)).toEqual([1, 2]);
+      expect(logger.log).toHaveBeenCalledTimes(1);
     });
 
     it("#87 critical class is admitted regardless of age/no-action and notified NON-verbose even on monitoring/none (X5 cross-test)", async () => {

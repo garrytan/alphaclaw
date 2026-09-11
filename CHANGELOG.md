@@ -132,6 +132,38 @@ detection are untouched.
   silenced in quiet mode, a critical or `action_needed` notice is never
   dropped because a new outage began mid-review, and a `monitoring/none`
   verdict about a long-recovered incident no longer pages.
+- **Codex review follow-ups (#87 G1–G8).** Fence 4 (after the recovery
+  notice) now also latches on lifecycle: a crash exit that lands while the
+  "running again" notice is in flight leaves the incident the exit kept open
+  untouched — no incident close, no `health_check ok` row, no backoff reset
+  from the superseded green probe (G1). The safe-mode axis (`safeMode`,
+  `suppressedChannels`, the `safe_mode` row) is committed only by the probe
+  that owns state — post-claim, with both notices detached from the probe —
+  so an older probe's unsuppressed `/readyz` can no longer clear safe mode
+  and announce "channels resumed" over channels a newer probe saw suppressed
+  (G2). A Doctor hint turned away by the per-key or global floor is deferred,
+  not dropped: the episode's later same-key probes spawn the collector once
+  the floors allow (one `floor` console line per deferred episode), so a
+  degradation that begins inside a floor still gets its `readiness_advisory`
+  evidence (G3). A transitional `readiness_recheck` shot whose tick was
+  skipped (an operation in progress, a pending exit classification) re-arms
+  itself, so the 5 s cadence no longer drifts to the 120 s timer (G4).
+  Adopting a DIFFERENT gateway root pid while already running resets the
+  readiness generation (axis, episode key, transitional/hold clocks, floors —
+  health, counters and the incident untouched), so the new process is not
+  held against its predecessor's not-ready episode (G6). The Watchdog tab's
+  gateway-health card keys on the readiness verdict instead of the retained
+  `readyzFailing[]`: DEGRADED only for a native `not_ready` (component rows,
+  or one generic "OpenClaw reports the gateway not ready" signal when no
+  component is named); a transitional `starting` / `draining` phase renders
+  no readiness card; `ready` with failing components lists them as a neutral
+  "Reported by /readyz (telemetry)" list; `unknown` lists the stale components
+  as "readiness unverified (<probe>)"; older servers without a `readiness`
+  field keep the previous behaviour (G5). The overseer's `recovered_no_action`
+  skip now requires an EXPLICIT empty `actions` array — a missing or malformed
+  `actions` cannot prove no action and stays eligible (G7) — and the
+  failed-skip-write memory only remembers writes that actually failed,
+  bounded at 500 ids (`kSkipMarkedMaxEntries`, G8).
 
 ### Added
 
