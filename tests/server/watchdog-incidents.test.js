@@ -78,6 +78,16 @@ describe("classifyEvent transition table", () => {
         details: { skipped: true, startupGraceActive: true },
       }),
     ).toBe("append");
+    // #87 RT1: the mid-restart answer of the process about to be stopped
+    // (runHealthCheck inside an expected-restart window) carries skipped too
+    // — never a close, whatever else the row says.
+    expect(
+      classifyEvent({
+        eventType: "health_check",
+        status: "ok",
+        details: { ok: true, skipped: true, midRestart: true, expectedRestartActive: true },
+      }),
+    ).toBe("append");
     expect(classifyEvent({ eventType: "recovery", status: "ok" })).toBe("close");
     expect(
       classifyEvent({ eventType: "safe_mode", status: "failed", details: {} }),
@@ -143,6 +153,45 @@ describe("classifyEvent transition table", () => {
     for (const eventType of ["readiness_probe_error", "serving_identity_lost"]) {
       expect(classifyEvent({ eventType, status: "failed" })).toBe("append");
     }
+    // #87: the detached Doctor's structured evidence and the event-loop
+    // telemetry are append-only — evidence never opens or closes an incident.
+    expect(
+      classifyEvent({
+        eventType: "readiness_advisory",
+        status: "warn",
+        details: { finding: { checkId: "gateway.probe_auth_secretref_unavailable" }, episode: 1 },
+      }),
+    ).toBe("append");
+    expect(
+      classifyEvent({
+        eventType: "event_loop_pressure",
+        status: "warn",
+        details: { degraded: true, reasons: ["cpu"] },
+      }),
+    ).toBe("append");
+    expect(
+      classifyEvent({
+        eventType: "event_loop_pressure",
+        status: "ok",
+        details: { degraded: false, durationMs: 60_000 },
+      }),
+    ).toBe("append");
+    // The held-recovery and transitional markers ride health_check/ok with
+    // readinessPending, so they keep an incident open like any pending row.
+    expect(
+      classifyEvent({
+        eventType: "health_check",
+        status: "ok",
+        details: { readinessPending: true, readinessProbe: "timeout" },
+      }),
+    ).toBe("append");
+    expect(
+      classifyEvent({
+        eventType: "health_check",
+        status: "ok",
+        details: { readinessPending: true, readinessStatus: "starting" },
+      }),
+    ).toBe("append");
   });
 });
 

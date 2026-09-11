@@ -61,6 +61,7 @@ import {
   formatLocaleDateTimeWithTodayTime,
 } from "../../lib/public/js/lib/format.js";
 import { ActionButton } from "../../lib/public/js/components/action-button.js";
+import { Badge } from "../../lib/public/js/components/badge.js";
 import { InlineErrorChip } from "../../lib/public/js/components/inline-error-chip.js";
 
 const harness = preactHooks.__harness;
@@ -449,5 +450,43 @@ describe("frontend/watchdog incidents card", () => {
     );
     expect(refreshButton).toBeTruthy();
     expect(refreshButton.props.disabled).toBe(true);
+  });
+
+  it("#87 a skipped overseer record yields no overseer chip on the row (a verdict still does)", () => {
+    // Distinct labels: expandTree walks pass-through children under both the
+    // wrapper's props and its rendered output, so one vnode can be seen twice.
+    const overseerChips = (tree) => [
+      ...new Set(
+        findAllByType(tree, Badge)
+          .map((badge) => String(badge.props.children))
+          .filter((label) => label.startsWith("Overseer:")),
+      ),
+    ];
+    const skipped = {
+      ...kIncident,
+      id: 9,
+      overseer: {
+        v: 1,
+        current: {
+          state: "skipped",
+          reason: "recovered_no_action",
+          manual: false,
+          at: Date.parse("2026-08-28T10:06:00Z"),
+        },
+      },
+    };
+    const reviewed = {
+      ...kIncident,
+      id: 8,
+      overseer: {
+        v: 1,
+        current: { state: "done", verdict: "resolved", at: Date.parse("2026-08-28T10:06:00Z") },
+      },
+    };
+    const onlySkipped = renderCard({ incidents: [skipped], incidentsLoaded: true, incidentsError: null });
+    expect(treeText(onlySkipped)).toContain("Gateway crash");
+    expect(overseerChips(onlySkipped)).toEqual([]);
+    const both = renderCard({ incidents: [skipped, reviewed], incidentsLoaded: true, incidentsError: null });
+    expect(overseerChips(both)).toEqual(["Overseer: Resolved"]);
   });
 });

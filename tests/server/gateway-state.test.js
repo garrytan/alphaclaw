@@ -744,6 +744,70 @@ describe("server/gateway-state reducer", () => {
     }
   });
 
+  it("#87 running header names a transitional readiness (starting / draining) from watchdog.readinessStatus; a ready or absent status keeps the plain running copy; the degraded copy is unchanged", () => {
+    const running = (readinessStatus) =>
+      reduceGatewayState(
+        inputs({
+          watchdog: {
+            lifecycle: "running",
+            health: "healthy",
+            safeMode: false,
+            crashCountInWindow: 0,
+            gatewayPid: 123,
+            readiness: readinessStatus ? "not_ready" : "ready",
+            readinessStatus,
+          },
+        }),
+      );
+    expect(running("starting")).toMatchObject({
+      state: "running",
+      reason: "Up — channels still starting.",
+    });
+    expect(running("draining")).toMatchObject({ state: "running", reason: "Up — draining." });
+    expect(running("started").reason).toBe("");
+    expect(running(null).reason).toBe("");
+    expect(running(undefined).reason).toBe("");
+    // The copy keys on the readiness AXIS too: after a fail-open (readiness
+    // "unknown") a stale `starting` phase label keeps the plain running copy.
+    for (const readiness of ["unknown", "ready"]) {
+      for (const readinessStatus of ["starting", "draining"]) {
+        const failedOpen = reduceGatewayState(
+          inputs({
+            watchdog: {
+              lifecycle: "running",
+              health: "healthy",
+              safeMode: false,
+              crashCountInWindow: 0,
+              gatewayPid: 123,
+              readiness,
+              readinessStatus,
+            },
+          }),
+        );
+        expect(failedOpen, `${readiness}/${readinessStatus}`).toMatchObject({ state: "running", reason: "" });
+      }
+    }
+    // Degraded readiness keeps its own copy even when a status is present.
+    const degraded = reduceGatewayState(
+      inputs({
+        watchdog: {
+          lifecycle: "running",
+          health: "degraded",
+          safeMode: false,
+          crashCountInWindow: 0,
+          gatewayPid: 123,
+          readiness: "not_ready",
+          readinessReason: "secrets",
+          readinessStatus: "started",
+        },
+      }),
+    );
+    expect(degraded.state).toBe("degraded");
+    expect(degraded.reason).toBe(
+      "The port answers and /health is green, but readiness checks are failing (secrets).",
+    );
+  });
+
   it("passes replacementPending through verbatim (stable values for the SSE dedupe) and drops non-objects", () => {
     const pending = {
       pid: 4242,
