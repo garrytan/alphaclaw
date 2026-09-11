@@ -45,6 +45,7 @@ import {
   buildWatchdogOverseerModel,
   buildWatchdogScopeLine,
   kOverseerCardCopy,
+  kOverseerSkipReasonCopy,
   kOverseerVerdictBadge,
   WatchdogOverseerCard,
 } from "../../lib/public/js/components/watchdog-tab/overseer-card.js";
@@ -992,6 +993,70 @@ describe("WatchdogOverseerCard rendering", () => {
     expect(
       findAllByType(tree, ActionButton).some((node) => node.props.idleLabel === "Run repair"),
     ).toBe(false);
+  });
+});
+
+// #87: the deterministic admission gate declines an automatic review with a
+// persisted `skipped` record. The card explains it in one line — no verdict
+// badge, no CTA; the incident row's manual "Review this incident" is untouched.
+describe("#87 skipped incident reviews", () => {
+  beforeEach(() => {
+    harness.reset();
+  });
+
+  // A LIST row is slim (slimIncidentForList keeps overseer { v, current }
+  // minus transcriptTail — no history key); the card reads exactly that.
+  const skippedRow = (reason, at = kNow - min(3)) =>
+    incidentRow(5, {
+      overseer: { v: 1, current: { state: "skipped", reason, manual: false, at } },
+    });
+
+  it("#87 renders each reason's copy as a line — no verdict badge, no action", () => {
+    expect(kOverseerSkipReasonCopy).toEqual({
+      recovered_no_action: "Recovered without action — automatic review skipped.",
+      stale: "Settled too long ago for an automatic review.",
+      invalid_resolved_at: "Settle time unreadable — automatic review skipped.",
+    });
+    for (const [reason, line] of Object.entries(kOverseerSkipReasonCopy)) {
+      const report = model({ incidents: [skippedRow(reason)] }).incidentReport;
+      expect(report, reason).toMatchObject({
+        kind: "incident",
+        incidentId: 5,
+        state: "skipped",
+        shortLabel: "Skipped",
+        line,
+        kindLabel: "Post-incident review · incident #5 · 3m ago",
+      });
+      expect(report.badge).toBeUndefined();
+      expect(report.action).toBeUndefined();
+    }
+  });
+
+  it("#87 an unknown reason falls back to a generic line", () => {
+    expect(model({ incidents: [skippedRow("something_new")] }).incidentReport.line).toBe(
+      "Automatic review skipped.",
+    );
+  });
+
+  it("#87 the card shows the line with no Badge and no action button; the secondary line uses the short label", () => {
+    const tree = renderCard({ incidents: [skippedRow("stale")] });
+    expect(findAllByType(tree, Badge)).toHaveLength(0);
+    const text = textOf(tree);
+    expect(text).toContain("Settled too long ago for an automatic review.");
+    // The rendered card ticks on the real clock (useNowMs), so only the label
+    // prefix is pinned here; the exact "3m ago" is asserted on the model above.
+    expect(text).toContain("Post-incident review · incident #5 ·");
+    expect(findAllByType(tree, ActionButton).map((node) => node.props.idleLabel)).toEqual([
+      "Review current situation",
+    ]);
+    const m = model({
+      incidents: [skippedRow("recovered_no_action", kNow - min(20))],
+      situation: payload({ lastVerdict: situationRecord() }),
+    });
+    expect(m.primary.kind).toBe("situation");
+    expect(m.secondaryLine).toBe(
+      "Also: post-incident review for incident #5 — Skipped · 20m ago",
+    );
   });
 });
 

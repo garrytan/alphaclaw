@@ -6,6 +6,9 @@ const {
   parseVerdict,
   kSituationVerdicts,
   kLogEvidenceMaxChars,
+  isCriticalClassIncident,
+  classifyAutoReviewEligibility,
+  kAutoReviewMaxAgeMs,
 } = require("../../lib/server/watchdog-overseer");
 
 const kNow = Date.parse("2026-08-29T12:00:00Z");
@@ -1647,6 +1650,561 @@ describe("createWatchdogOverseer", () => {
     expect(availability.message).toContain("spawn EACCES");
   });
 });
+
+// --- #87: deterministic admission, quiet class, recheck-before-send ----------
+
+describe("#87 overseer admission, quiet class, recheck-before-send", () => {
+  // The issue's population: a readiness incident that recovered by itself
+  // (outcome recovered, zero actions) — nothing for a reviewer to review.
+  const noAction = (id, overrides = {}) =>
+    settledIncident(id, {
+      incidentKey: "gateway_readiness",
+      summary: {
+        ...settledIncident(id).summary,
+        trigger: "gateway_readiness",
+        actions: [],
+        eventCounts: { readiness_degraded: 1, recovery: 1 },
+      },
+      ...overrides,
+    });
+  const abandoned = (id, resolvedAt) =>
+    settledIncident(id, {
+      status: "abandoned",
+      resolvedAt,
+      summary: { ...settledIncident(id).summary, outcome: "abandoned", actions: [] },
+    });
+  const criticalSummary = (incident) => ({ ...incident.summary, severity: "critical" });
+  const kMonitoring = {
+    verdict: "monitoring",
+    action: "none",
+    headline: "Watching the next probes",
+    summary: "Readiness recovered.",
+    recommendation: "Nothing to do.",
+  };
+  // Runs `onReview` from inside the `-p` spawn: the world changes while the
+  // model is thinking.
+  const runnerThatMutates = ({ verdict = kMonitoring, onReview }) => {
+    const runner = createFakeRunner({ verdict });
+    const original = runner.runStreamed;
+    runner.runStreamed = async (options) => {
+      if (options.args?.[0] === "-p") onReview();
+      return original(options);
+    };
+    return runner;
+  };
+  const openIncident = (id) => settledIncident(id, { status: "open", resolvedAt: null });
+
+  describe("isCriticalClassIncident", () => {
+    it("#87 severity critical (column or summary-only fixture), the critical incident keys, and an OOM cause", () => {
+      expect(isCriticalClassIncident({ severity: "critical" })).toBe(true);
+      expect(isCriticalClassIncident({ summary: { severity: "critical" } })).toBe(true);
+      for (const incidentKey of ["crash_loop", "config_error", "channel_rollback", "version_mismatch"]) {
+        expect(
+          isCriticalClassIncident({ incidentKey, summary: { severity: "warning" } }),
+          incidentKey,
+        ).toBe(true);
+      }
+      expect(isCriticalClassIncident({ incidentKey: "gateway_crash", cause: { cause: "oom" } })).toBe(true);
+      expect(isCriticalClassIncident({ summary: { cause: { cause: "oom" } } })).toBe(true);
+    });
+
+    it("#87 false for warning crash/readiness rows, a non-OOM cause, and non-objects", () => {
+      expect(isCriticalClassIncident(settledIncident(1))).toBe(false);
+      expect(isCriticalClassIncident(noAction(1))).toBe(false);
+      expect(
+        isCriticalClassIncident({
+          incidentKey: "gateway_crash",
+          severity: "warning",
+          cause: { cause: "port_in_use", corroborated: true },
+        }),
+      ).toBe(false);
+      expect(isCriticalClassIncident(null)).toBe(false);
+      expect(isCriticalClassIncident("critical")).toBe(false);
+    });
+  });
+
+  describe("classifyAutoReviewEligibility", () => {
+    it("#87 recovered without action → recovered_no_action (a missing actions array counts as none)", () => {
+      expect(classifyAutoReviewEligibility(noAction(1), kNow)).toEqual({
+        eligible: false,
+        reason: "recovered_no_action",
+      });
+      const { actions, ...withoutActions } = noAction(1).summary;
+      expect(actions).toEqual([]);
+      expect(
+        classifyAutoReviewEligibility({ ...noAction(1), summary: withoutActions }, kNow).reason,
+      ).toBe("recovered_no_action");
+    });
+
+    it("#87 recovered WITH a restart stays eligible (the existing FIFO fixtures)", () => {
+      expect(classifyAutoReviewEligibility(settledIncident(1), kNow)).toEqual({
+        eligible: true,
+        reason: null,
+      });
+    });
+
+    it("#87 stale past kAutoReviewMaxAgeMs (60 min) on the clock, and past a DI'd maxAgeMs", () => {
+      expect(kAutoReviewMaxAgeMs).toBe(60 * 60_000);
+      expect(
+        classifyAutoReviewEligibility(settledIncident(1, { resolvedAt: iso(kNow - 61 * 60_000) }), kNow),
+      ).toEqual({ eligible: false, reason: "stale" });
+      expect(
+        classifyAutoReviewEligibility(settledIncident(1, { resolvedAt: iso(kNow - 59 * 60_000) }), kNow)
+          .eligible,
+      ).toBe(true);
+      // The fixture settled 5 min ago: a 60s bound makes it stale.
+      expect(classifyAutoReviewEligibility(settledIncident(1), kNow, { maxAgeMs: 60_000 })).toEqual({
+        eligible: false,
+        reason: "stale",
+      });
+    });
+
+    it("#87 unparseable or missing resolvedAt → invalid_resolved_at", () => {
+      expect(
+        classifyAutoReviewEligibility(settledIncident(1, { resolvedAt: "yesterday-ish" }), kNow),
+      ).toEqual({ eligible: false, reason: "invalid_resolved_at" });
+      expect(classifyAutoReviewEligibility(settledIncident(1, { resolvedAt: null }), kNow).reason).toBe(
+        "invalid_resolved_at",
+      );
+    });
+
+    it("#87 a null summary cannot prove no-action → eligible unless stale", () => {
+      expect(classifyAutoReviewEligibility(settledIncident(1, { summary: null }), kNow)).toEqual({
+        eligible: true,
+        reason: null,
+      });
+      expect(
+        classifyAutoReviewEligibility(
+          settledIncident(1, { summary: null, resolvedAt: iso(kNow - 2 * 3_600_000) }),
+          kNow,
+        ).reason,
+      ).toBe("stale");
+    });
+
+    it("#87 critical class ignores age, no-action, and a bad resolvedAt (X5: one predicate)", () => {
+      const bySeverity = noAction(1, { resolvedAt: "garbage" });
+      bySeverity.summary = criticalSummary(bySeverity);
+      expect(classifyAutoReviewEligibility(bySeverity, kNow)).toEqual({ eligible: true, reason: null });
+      expect(
+        classifyAutoReviewEligibility(
+          noAction(1, { incidentKey: "crash_loop", resolvedAt: iso(kNow - 5 * 3_600_000) }),
+          kNow,
+        ).eligible,
+      ).toBe(true);
+      expect(
+        classifyAutoReviewEligibility(noAction(1, { cause: { cause: "oom", corroborated: true } }), kNow)
+          .eligible,
+      ).toBe(true);
+    });
+
+    it("#87 abandoned rows follow the same rules: fresh eligible, old stale", () => {
+      expect(classifyAutoReviewEligibility(abandoned(1, iso(kNow - 5 * 60_000)), kNow).eligible).toBe(
+        true,
+      );
+      expect(classifyAutoReviewEligibility(abandoned(1, iso(kNow - 3 * 3_600_000)), kNow)).toEqual({
+        eligible: false,
+        reason: "stale",
+      });
+    });
+  });
+
+  describe("pickEligibleIncident admission", () => {
+    it("#87 persists a skipped marker for a recovered/no-action incident and never spawns or notifies", async () => {
+      const { overseer, db, notify, runner } = createHarness({ seed: [noAction(1)] });
+      expect(await overseer.maybeReviewNext()).toEqual({ skipped: "no_eligible_incident" });
+      expect(db.getIncidentById(1).overseer).toEqual({
+        v: 1,
+        current: { state: "skipped", reason: "recovered_no_action", manual: false, at: kNow },
+        history: [],
+      });
+      expect(runner.calls).toHaveLength(0);
+      expect(notify).not.toHaveBeenCalled();
+      // Terminal for automatic review: the next tick neither re-writes nor spawns.
+      const writes = vi.spyOn(db, "updateIncidentOverseer");
+      expect(await overseer.maybeReviewNext()).toEqual({ skipped: "no_eligible_incident" });
+      expect(writes).not.toHaveBeenCalled();
+      expect(runner.calls).toHaveLength(0);
+    });
+
+    it("#87 stale (> 60 min) and invalid-resolvedAt rows are skipped with their reason; a fresh recovered-with-restart row is still reviewed", async () => {
+      const { overseer, db } = createHarness({
+        seed: [
+          settledIncident(1, { resolvedAt: iso(kNow - 2 * 3_600_000) }),
+          settledIncident(2, { resolvedAt: "not-a-date" }),
+          settledIncident(3),
+        ],
+      });
+      expect(await overseer.maybeReviewNext()).toMatchObject({ ran: true, incidentId: 3 });
+      expect(db.getIncidentById(1).overseer.current).toMatchObject({ state: "skipped", reason: "stale" });
+      expect(db.getIncidentById(2).overseer.current).toMatchObject({
+        state: "skipped",
+        reason: "invalid_resolved_at",
+      });
+      expect(db.getIncidentById(3).overseer.current.state).toBe("done");
+    });
+
+    it("#87 the DI'd autoReviewMaxAgeMs bounds the picker", async () => {
+      const { overseer, db, runner } = createHarness({ overrides: { autoReviewMaxAgeMs: 60_000 } });
+      expect(await overseer.maybeReviewNext()).toEqual({ skipped: "no_eligible_incident" });
+      expect(db.getIncidentById(1).overseer.current).toMatchObject({ state: "skipped", reason: "stale" });
+      expect(runner.calls).toHaveLength(0);
+    });
+
+    it("#87 abandoned: a fresh one is reviewed, an old one is skipped stale", async () => {
+      const { overseer, db } = createHarness({
+        seed: [abandoned(1, iso(kNow - 3 * 3_600_000)), abandoned(2, iso(kNow - 5 * 60_000))],
+      });
+      expect(await overseer.maybeReviewNext()).toMatchObject({ ran: true, incidentId: 2 });
+      expect(db.getIncidentById(1).overseer.current).toMatchObject({ state: "skipped", reason: "stale" });
+      expect(db.getIncidentById(2).overseer.current.state).toBe("done");
+    });
+
+    it("#87 a failing skipped-marker write logs once and is not re-attempted this process", async () => {
+      const logger = { log: vi.fn(), error: vi.fn() };
+      const { overseer, db, notify, runner } = createHarness({
+        seed: [noAction(1)],
+        overrides: { logger },
+      });
+      db.updateIncidentOverseer = vi.fn(() => {
+        throw new Error("SQLITE_READONLY: attempt to write a readonly database");
+      });
+      expect(await overseer.maybeReviewNext()).toEqual({ skipped: "no_eligible_incident" });
+      expect(await overseer.maybeReviewNext()).toEqual({ skipped: "no_eligible_incident" });
+      expect(db.updateIncidentOverseer).toHaveBeenCalledTimes(1);
+      expect(logger.log).toHaveBeenCalledTimes(1);
+      expect(logger.log.mock.calls[0][0]).toMatch(/could not persist .*incident #1.*SQLITE_READONLY/);
+      expect(db.getIncidentById(1).overseer).toBe(null);
+      expect(runner.calls).toHaveLength(0);
+      expect(notify).not.toHaveBeenCalled();
+    });
+
+    it("#87 critical class is admitted regardless of age/no-action and notified NON-verbose even on monitoring/none (X5 cross-test)", async () => {
+      const critical = noAction(1, { resolvedAt: iso(kNow - 3 * 3_600_000) });
+      critical.summary = criticalSummary(critical);
+      const { overseer, notify, db } = createHarness({
+        seed: [critical],
+        runner: createFakeRunner({ verdict: kMonitoring }),
+      });
+      expect(await overseer.maybeReviewNext()).toMatchObject({ ran: true, incidentId: 1, notified: true });
+      expect(notify).toHaveBeenCalledTimes(1);
+      expect(notify.mock.calls[0][1]).toEqual({
+        eventType: "overseer",
+        id: "watchdog-overseer-1",
+        verbose: false,
+      });
+      expect(db.getIncidentById(1).overseer.current).toMatchObject({
+        state: "done",
+        verdict: "monitoring",
+        notifyDecision: "eligible",
+        notifyOutcome: "sent",
+      });
+    });
+
+    it("#87 the crash_loop key and an OOM cause are the same critical class for admission and notification", async () => {
+      const byKey = createHarness({
+        seed: [noAction(1, { incidentKey: "crash_loop", resolvedAt: iso(kNow - 3 * 3_600_000) })],
+        runner: createFakeRunner({ verdict: kMonitoring }),
+      });
+      expect(await byKey.overseer.maybeReviewNext()).toMatchObject({ ran: true, incidentId: 1, notified: true });
+      expect(byKey.notify.mock.calls[0][1].verbose).toBe(false);
+      const byCause = createHarness({
+        seed: [noAction(1, { cause: { cause: "oom", corroborated: true } })],
+        runner: createFakeRunner({ verdict: kMonitoring }),
+      });
+      expect(await byCause.overseer.maybeReviewNext()).toMatchObject({ ran: true, incidentId: 1, notified: true });
+      expect(byCause.notify.mock.calls[0][1].verbose).toBe(false);
+    });
+
+    it("#87 a manual review of a skipped incident supersedes the marker into history and never notifies", async () => {
+      const { overseer, db, notify } = createHarness({ seed: [noAction(1)] });
+      await overseer.maybeReviewNext();
+      expect(db.getIncidentById(1).overseer.current.state).toBe("skipped");
+      expect((await overseer.requestReview({ incidentId: 1 })).ok).toBe(true);
+      const record = db.getIncidentById(1).overseer;
+      expect(record.current).toMatchObject({
+        state: "done",
+        manual: true,
+        notifyDecision: "ineligible_now",
+        notifyOutcome: "not_attempted",
+      });
+      expect(record.history).toEqual([
+        { state: "skipped", reason: "recovered_no_action", manual: false, at: kNow },
+      ]);
+      expect(notify).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("quiet-mode class (C3) — decided by verdict content and incident class, never the label", () => {
+    const notifyOptsFor = async (verdict, seed = [settledIncident(1)]) => {
+      const { overseer, notify } = createHarness({
+        seed,
+        runner: createFakeRunner({ verdict: { ...kMonitoring, ...verdict } }),
+      });
+      await overseer.maybeReviewNext();
+      expect(notify).toHaveBeenCalledTimes(1);
+      return notify.mock.calls[0][1];
+    };
+
+    it("#87 warning incident + monitoring/none (or resolved/none) is informational", async () => {
+      expect((await notifyOptsFor({ verdict: "monitoring", action: "none" })).verbose).toBe(true);
+      expect((await notifyOptsFor({ verdict: "resolved", action: "none" })).verbose).toBe(true);
+    });
+
+    it("#87 action_needed, or any concrete action, is important whatever the label says", async () => {
+      expect((await notifyOptsFor({ verdict: "action_needed", action: "none" })).verbose).toBe(false);
+      expect((await notifyOptsFor({ verdict: "monitoring", action: "restart" })).verbose).toBe(false);
+      expect((await notifyOptsFor({ verdict: "resolved", action: "repair" })).verbose).toBe(false);
+    });
+
+    it("#87 critical class + monitoring/none is important (same predicate as admission)", async () => {
+      const critical = settledIncident(1);
+      critical.summary = criticalSummary(critical);
+      expect((await notifyOptsFor({ verdict: "monitoring", action: "none" }, [critical])).verbose).toBe(false);
+    });
+  });
+
+  describe("recheck-before-send (C2 / Y3)", () => {
+    it("#87 a NEW incident opening mid-spawn drops a warning incident's informational notice as not_steady_state", async () => {
+      let db = null;
+      const runner = runnerThatMutates({ onReview: () => db.incidents.set(2, openIncident(2)) });
+      const harness = createHarness({ runner });
+      db = harness.db;
+      const result = await harness.overseer.maybeReviewNext();
+      expect(result).toMatchObject({ ran: true, incidentId: 1 });
+      expect(result.notified).toBeUndefined();
+      expect(harness.notify).not.toHaveBeenCalled();
+      expect(db.getIncidentById(1).overseer.current).toMatchObject({
+        state: "done",
+        notifyDecision: "not_steady_state",
+        notifyOutcome: "not_attempted",
+      });
+    });
+
+    it("#87 Y3: in the same situation a critical-class incident is still notified (eligible, non-verbose)", async () => {
+      let db = null;
+      const critical = settledIncident(1);
+      critical.summary = criticalSummary(critical);
+      const runner = runnerThatMutates({ onReview: () => db.incidents.set(2, openIncident(2)) });
+      const harness = createHarness({ seed: [critical], runner });
+      db = harness.db;
+      expect(await harness.overseer.maybeReviewNext()).toMatchObject({ ran: true, notified: true });
+      expect(harness.notify).toHaveBeenCalledTimes(1);
+      expect(harness.notify.mock.calls[0][1].verbose).toBe(false);
+      expect(db.getIncidentById(1).overseer.current).toMatchObject({
+        notifyDecision: "eligible",
+        notifyOutcome: "sent",
+      });
+    });
+
+    it("#87 Y3: an action_needed verdict on a warning incident is also handed to the outbox mid-outage", async () => {
+      let db = null;
+      const runner = runnerThatMutates({
+        verdict: { ...kMonitoring, verdict: "action_needed", action: "repair" },
+        onReview: () => db.incidents.set(2, openIncident(2)),
+      });
+      const harness = createHarness({ runner });
+      db = harness.db;
+      expect(await harness.overseer.maybeReviewNext()).toMatchObject({ ran: true, notified: true });
+      expect(harness.notify.mock.calls[0][1].verbose).toBe(false);
+      expect(db.getIncidentById(1).overseer.current.notifyDecision).toBe("eligible");
+    });
+
+    it("#87 OVS-1: a concrete action (monitoring/restart) is actionable for the mid-outage gate exactly as it is for the quiet-mode class", async () => {
+      let db = null;
+      const runner = runnerThatMutates({
+        verdict: { ...kMonitoring, verdict: "monitoring", action: "restart" },
+        onReview: () => db.incidents.set(2, openIncident(2)),
+      });
+      const harness = createHarness({ runner });
+      db = harness.db;
+      expect(await harness.overseer.maybeReviewNext()).toMatchObject({ ran: true, notified: true });
+      // Same predicate on both sides: important (non-verbose) AND delivered.
+      expect(harness.notify.mock.calls[0][1].verbose).toBe(false);
+      expect(db.getIncidentById(1).overseer.current).toMatchObject({
+        notifyDecision: "eligible",
+        notifyOutcome: "sent",
+      });
+    });
+
+    it("#87 the age bound crossing during the spawn → ineligible_now, no notice", async () => {
+      const nowRef = { value: kNow };
+      const runner = runnerThatMutates({
+        onReview: () => {
+          nowRef.value = kNow + 3 * 60_000;
+        },
+      });
+      const { overseer, db, notify } = createHarness({
+        seed: [settledIncident(1, { resolvedAt: iso(kNow - 58 * 60_000) })],
+        runner,
+        nowRef,
+      });
+      expect(await overseer.maybeReviewNext()).toMatchObject({ ran: true, incidentId: 1 });
+      expect(notify).not.toHaveBeenCalled();
+      expect(db.getIncidentById(1).overseer.current).toMatchObject({
+        notifyDecision: "ineligible_now",
+        notifyOutcome: "not_attempted",
+      });
+    });
+
+    it("#87 the incident's own status changing mid-spawn → incident_changed, no notice", async () => {
+      let db = null;
+      const runner = runnerThatMutates({
+        onReview: () => {
+          db.incidents.get(1).status = "open";
+        },
+      });
+      const harness = createHarness({ runner });
+      db = harness.db;
+      expect(await harness.overseer.maybeReviewNext()).toMatchObject({ ran: true });
+      expect(harness.notify).not.toHaveBeenCalled();
+      expect(db.getIncidentById(1).overseer.current).toMatchObject({
+        notifyDecision: "incident_changed",
+        notifyOutcome: "not_attempted",
+      });
+    });
+
+    it("#87 getIncidentById throwing at the recheck falls back to the pre-spawn snapshot (one log line) and still notifies", async () => {
+      const logger = { log: vi.fn(), error: vi.fn() };
+      let db = null;
+      const runner = runnerThatMutates({
+        onReview: () => {
+          const original = db.getIncidentById;
+          let thrown = false;
+          db.getIncidentById = (id) => {
+            if (!thrown) {
+              thrown = true;
+              throw new Error("SQLITE_BUSY");
+            }
+            return original(id);
+          };
+        },
+      });
+      const harness = createHarness({ runner, overrides: { logger } });
+      db = harness.db;
+      expect(await harness.overseer.maybeReviewNext()).toMatchObject({
+        ran: true,
+        notified: true,
+        persisted: true,
+      });
+      expect(harness.notify).toHaveBeenCalledTimes(1);
+      const lines = logger.log.mock.calls
+        .map(([line]) => line)
+        .filter((line) => /recheck read failed/.test(line));
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toContain("pre-spawn snapshot");
+      expect(lines[0]).toContain("SQLITE_BUSY");
+      expect(db.getIncidentById(1).overseer.current).toMatchObject({
+        notifyDecision: "eligible",
+        notifyOutcome: "sent",
+      });
+    });
+  });
+
+  describe("notifyOutcome (Y5) — written from the notifier's actual return, after the send", () => {
+    it("#87 sent on {ok:true}; the completion re-persist keeps the same `at` and does not rotate history; neither field rides the API projection", async () => {
+      const { overseer, db } = createHarness();
+      const result = await overseer.maybeReviewNext();
+      const record = db.getIncidentById(1).overseer;
+      expect(record.current).toMatchObject({
+        state: "done",
+        at: kNow,
+        notifyDecision: "eligible",
+        notifyOutcome: "sent",
+      });
+      expect(record.history).toEqual([]);
+      expect(result.record.notifyDecision).toBeUndefined();
+      expect(result.record.notifyOutcome).toBeUndefined();
+    });
+
+    it("#87 suppressed:<reason> when the notifier declines ({ok:false, skipped:true, reason}) — quiet mode", async () => {
+      const notify = vi.fn(async () => ({
+        ok: false,
+        skipped: true,
+        reason: "verbose_notifications_disabled",
+      }));
+      const { overseer, db } = createHarness({ overrides: { notify } });
+      const result = await overseer.maybeReviewNext();
+      expect(result.ran).toBe(true);
+      expect(result.notified).toBeUndefined();
+      expect(notify).toHaveBeenCalledTimes(1);
+      expect(db.getIncidentById(1).overseer.current.notifyOutcome).toBe(
+        "suppressed:verbose_notifications_disabled",
+      );
+    });
+
+    it("#87 failed when the notifier throws or returns ok:false without skipped — and the throw is logged, never swallowed (INV-4)", async () => {
+      const logger = { log: vi.fn(), error: vi.fn() };
+      const throwing = createHarness({
+        overrides: {
+          logger,
+          notify: vi.fn(async () => {
+            throw new Error("network down");
+          }),
+        },
+      });
+      expect((await throwing.overseer.maybeReviewNext()).notified).toBeUndefined();
+      expect(throwing.db.getIncidentById(1).overseer.current.notifyOutcome).toBe("failed");
+      expect(
+        logger.log.mock.calls.some(([line]) => /notify failed for incident #1.*network down/.test(String(line))),
+      ).toBe(true);
+      const refused = createHarness({
+        overrides: { notify: vi.fn(async () => ({ ok: false, reason: "all_targets_failed" })) },
+      });
+      await refused.overseer.maybeReviewNext();
+      expect(refused.db.getIncidentById(1).overseer.current.notifyOutcome).toBe("failed");
+    });
+
+    it("#87 not_attempted for manual, stale, unparseable and kill-switch-off reviews; history rotates only on the manual supersede", async () => {
+      const nowRef = { value: kNow };
+      const manual = createHarness({ nowRef });
+      await manual.overseer.maybeReviewNext();
+      nowRef.value = kNow + 3 * 60_000;
+      expect((await manual.overseer.requestReview({ incidentId: 1 })).ok).toBe(true);
+      const record = manual.db.getIncidentById(1).overseer;
+      expect(record.current).toMatchObject({ manual: true, notifyOutcome: "not_attempted" });
+      expect(record.history).toHaveLength(1);
+      expect(record.history[0]).toMatchObject({ manual: false, notifyOutcome: "sent" });
+
+      const staleRunner = createFakeRunner();
+      const stale = createHarness({ runner: staleRunner });
+      const originalStale = staleRunner.runStreamed;
+      staleRunner.runStreamed = async (options) => {
+        if (options.args?.[0] === "-p") {
+          stale.db.__appendEvent(1, { id: 999, eventType: "crash", status: "failed", createdAt: iso(kNow) });
+        }
+        return originalStale(options);
+      };
+      await stale.overseer.maybeReviewNext();
+      expect(stale.db.getIncidentById(1).overseer.current).toMatchObject({
+        state: "stale",
+        notifyOutcome: "not_attempted",
+      });
+      expect(stale.notify).not.toHaveBeenCalled();
+
+      const garbage = createFakeRunner();
+      garbage.runStreamed = async (options) => {
+        if (options.args?.[0] === "--version") return { ok: true, tail: "claude" };
+        if (options.args?.[0] === "--help") return { ok: true, tail: "--disallowedTools" };
+        return { ok: true, tail: "probably fine" };
+      };
+      const unparseable = createHarness({ runner: garbage });
+      await unparseable.overseer.maybeReviewNext();
+      expect(unparseable.db.getIncidentById(1).overseer.current).toMatchObject({
+        verdict: "unparseable",
+        notifyOutcome: "not_attempted",
+      });
+
+      const off = createHarness({ notificationsEnabled: false });
+      await off.overseer.maybeReviewNext();
+      expect(off.db.getIncidentById(1).overseer.current).toMatchObject({
+        notifyDecision: "eligible",
+        notifyOutcome: "not_attempted",
+      });
+      expect(off.notify).not.toHaveBeenCalled();
+    });
+  });
+});
+
 describe("pickTrustedResources memory-trend projection (field-wise validation)", () => {
   const { pickTrustedResources } = require("../../lib/server/watchdog-overseer");
 
