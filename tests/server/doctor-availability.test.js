@@ -231,7 +231,7 @@ describe("createDoctorJsonCollector (single-flight, per-call budgets)", () => {
     expect(spawns).toBe(2);
   });
 
-  it("#87 collectWithMeta personal-budget expiry returns { stdout: null, spawnStartedAtMs } of the spawn it joined", async () => {
+  it("#87 collectWithMeta personal-budget expiry returns { stdout: null, spawnStartedAtMs, budgetExpired: true } of the spawn it joined (F8); settled results never carry the flag", async () => {
     vi.useFakeTimers();
     try {
       const gate = deferred();
@@ -246,10 +246,15 @@ describe("createDoctorJsonCollector (single-flight, per-call budgets)", () => {
       const short = collector.collectWithMeta({ timeoutMs: 5_000 });
       const long = collector.collectWithMeta({ timeoutMs: 60_000 });
       await vi.advanceTimersByTimeAsync(5_000);
-      expect(await short).toEqual({ stdout: null, spawnStartedAtMs: 42 });
+      // The flag tells the watchdog NOT to retry: the spawn is still running,
+      // so a re-call would only re-join it and wait the budget out again.
+      expect(await short).toEqual({ stdout: null, spawnStartedAtMs: 42, budgetExpired: true });
       gate.resolve();
-      expect(await long).toEqual({ stdout: "DOC", spawnStartedAtMs: 42 });
-      // Unusable output: stdout null, spawn stamp still reported.
+      const settled = await long;
+      expect(settled).toEqual({ stdout: "DOC", spawnStartedAtMs: 42 });
+      expect("budgetExpired" in settled).toBe(false);
+      // Unusable output: stdout null, spawn stamp still reported, no flag
+      // (the spawn settled — it was the classification that failed).
       const unusable = createDoctorJsonCollector({
         runLintJson: async () => ({
           ok: false,
@@ -259,7 +264,9 @@ describe("createDoctorJsonCollector (single-flight, per-call budgets)", () => {
         classify: (r) => r.classification,
         nowMs: () => 7,
       });
-      expect(await unusable.collectWithMeta()).toEqual({ stdout: null, spawnStartedAtMs: 7 });
+      const unusableResult = await unusable.collectWithMeta();
+      expect(unusableResult).toEqual({ stdout: null, spawnStartedAtMs: 7 });
+      expect("budgetExpired" in unusableResult).toBe(false);
     } finally {
       vi.useRealTimers();
     }

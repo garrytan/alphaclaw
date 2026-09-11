@@ -93,6 +93,48 @@ describe("#87 server/doctor/advisory-findings", () => {
     }
   });
 
+  it("#87 F6 a core/doctor gateway id needs a SecretRef mention AND an unavailability verb: 'could not be resolved' is runtime; 'consider a SecretRef' hygiene advice is not secret-related at all (no_finding, not hygiene)", () => {
+    const unresolved = extractSecretRuntimeFinding(
+      payloadOf({
+        checkId: "core/doctor/gateway-auth",
+        severity: "error",
+        message: "SecretRef env:GATEWAY_TOKEN could not be resolved",
+      }),
+    );
+    expect(unresolved).toMatchObject({
+      checkId: "core/doctor/gateway-auth",
+      kind: "runtime",
+      severity: "error",
+      message: "SecretRef env:GATEWAY_TOKEN could not be resolved",
+    });
+    for (const message of [
+      "SecretRef for gateway.auth.token is unavailable",
+      "secret ref unresolved",
+      "SecretRef lookup failed for gateway.auth.token",
+      "SecretRef provider cannot be reached",
+      "SecretRef could not resolve env:GATEWAY_TOKEN",
+      "SecretRef env:GATEWAY_TOKEN is missing",
+    ]) {
+      expect(
+        extractSecretRuntimeFinding(
+          payloadOf({ checkId: "core/doctor/gateway-config", severity: "warning", message }),
+        ),
+      ).toMatchObject({ kind: "runtime" });
+    }
+    for (const message of [
+      "consider a SecretRef for gateway.auth.token",
+      "Tip: move gateway.auth.token to a SecretRef",
+      "SecretRef support is available for hooks tokens",
+    ]) {
+      const result = classifySecretFindings(
+        payloadOf({ checkId: "core/doctor/gateway-config", severity: "warning", message }),
+      );
+      expect(result.finding).toBeNull();
+      expect(result.reason).toBe("no_finding");
+      expect(result.hygieneCheckIds).toEqual([]);
+    }
+  });
+
   it("#87 hygiene-only findings return null with reason hygiene_only and the structural ids", () => {
     const result = classifySecretFindings(
       payloadOf(plaintextSecrets, passwordInConfig, hooksTokenInConfig),

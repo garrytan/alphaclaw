@@ -132,9 +132,13 @@ describe("GET /api/watchdog/incidents/:id", () => {
     expect(res.status).toBe(200);
     const current = res.body.incident.overseer.current;
     expect(typeof current.notifyDecision).toBe("string");
-    expect(["eligible", "incident_changed", "ineligible_now", "not_steady_state"]).toContain(
-      current.notifyDecision,
-    );
+    expect([
+      "manual",
+      "eligible",
+      "incident_changed",
+      "ineligible_now",
+      "not_steady_state",
+    ]).toContain(current.notifyDecision);
     expect(typeof current.notifyOutcome).toBe("string");
     expect(current.notifyOutcome).toMatch(/^(sent|held|suppressed:[a-z_]+|failed|not_attempted)$/);
     // A skipped marker (no verdict) is exposed the same way.

@@ -1948,7 +1948,7 @@ describe("#87 overseer admission, quiet class, recheck-before-send", () => {
       expect(byCause.notify.mock.calls[0][1].verbose).toBe(false);
     });
 
-    it("#87 a manual review of a skipped incident supersedes the marker into history and never notifies", async () => {
+    it("#87 a manual review of a skipped incident supersedes the marker into history and never notifies — its notifyDecision is `manual` (F9: no eligibility recompute for a review that never pages)", async () => {
       const { overseer, db, notify } = createHarness({ seed: [noAction(1)] });
       await overseer.maybeReviewNext();
       expect(db.getIncidentById(1).overseer.current.state).toBe("skipped");
@@ -1957,7 +1957,7 @@ describe("#87 overseer admission, quiet class, recheck-before-send", () => {
       expect(record.current).toMatchObject({
         state: "done",
         manual: true,
-        notifyDecision: "ineligible_now",
+        notifyDecision: "manual",
         notifyOutcome: "not_attempted",
       });
       expect(record.history).toEqual([

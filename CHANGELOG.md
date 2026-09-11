@@ -22,7 +22,9 @@ detection are untouched.
 
 - **Native readiness is authoritative.** A green `/health` degrades readiness
   ONLY when OpenClaw's own `/readyz` says `ready: false` or names failing
-  components. The `eventLoop.degraded` diagnostic — which upstream documents
+  components — and an explicit `ready: true` is ready whatever else the body
+  says: a `starting` / `draining` `status` beside it is telemetry
+  (`readinessStatus`), never a phase. The `eventLoop.degraded` diagnostic — which upstream documents
   as "does not change the readiness result by itself" — no longer opens a
   `gateway_readiness` incident, degrades health, arms the retry ladder or
   withholds acceptance credit; it is telemetry (see Added). A `503` with a
@@ -47,9 +49,14 @@ detection are untouched.
   is detached from the tick, and its evidence attaches only while the SAME
   degradation episode is still open — not to a later same-component episode,
   not across a relaunch or a repair attempt, and not from a Doctor spawn that
-  started before the probe (`stale_doctor_job`). A late Doctor result can no
-  longer open a second incident or flip readiness to `not_ready` under a
-  healthy gateway; every dropped result is one console line with a reason.
+  started before the probe (`stale_doctor_job`); a liveness flap during the
+  Doctor run does not end the episode, so the evidence still attaches, and a
+  collector answer whose personal budget expired (`budgetExpired`) is
+  `unusable` rather than re-joined. A late Doctor result can no longer open a
+  second incident or flip readiness to `not_ready` under a healthy gateway;
+  every dropped result is one console line with a reason. A
+  pending-but-unobserved replacement whose `/readyz` names failing components
+  writes ONE opening row for its episode, not one per probe.
 - **Recovery is no longer assumed from a readiness probe error while the
   gateway is not ready.** When the last `/readyz` consumed in this gateway
   generation said not ready and the next one cannot be read (connection
@@ -61,8 +68,16 @@ detection are untouched.
   consumed readiness (the open degradation episode), not on the live
   readiness value, so it survives a liveness flap: one failed `/health`
   between two `/readyz` reads no longer lets the next probe error announce
-  recovery, and the hold's ready-budget clock survives the flap too. A 404
-  (`/readyz` unsupported) fails open at once. Every fail-open also closes the
+  recovery, and the hold's ready-budget clock survives the flap too. So does
+  the transitional phase: a gateway that was `starting` when `/health`
+  flapped keeps its hold on the next `/readyz` transport error (no degrade,
+  the 5 s cadence, the same bound), and the flap never restarts the
+  `starting` budget — the phase still expires at the budget counted from its
+  FIRST observation. A 404 (`/readyz` unsupported) fails open at once. An
+  assumed recovery — the hold bound, a 404, a thrown evaluation — announces
+  itself as "🟢 Gateway running again — readiness unverified" (same notice,
+  same quiet-mode class); a recovery certified by a ready body keeps the
+  plain text. Every fail-open also closes the
   open degradation episode with a `readiness_degraded ok {recovered, assumed,
   kind}` row and clears the episode key, so the same failing components
   afterwards open a NEW episode and incident instead of a silent "up but not
@@ -84,17 +99,23 @@ detection are untouched.
   both upstream shapes (security-audit and doctor-lint, verified read-only
   against OpenClaw 2026.9.3): only a RUNTIME secret failure
   (`gateway.probe_auth_secretref_unavailable`, or a `core/doctor/gateway-*`
-  finding naming a SecretRef) becomes evidence; plaintext-secret hygiene
-  findings never do. `checkId` must be structural and the message passes the
+  finding whose message names a SecretRef AND says it is unavailable —
+  unresolved / could not / failed / missing …) becomes evidence;
+  plaintext-secret hygiene findings and hygiene advice such as "consider a
+  SecretRef" never do. `checkId` must be structural and the message passes the
   Doctor text sanitizer (control characters stripped, secret values redacted)
   and the shape redactor (token-shaped values masked), then the 200-character
   cap. The fallback no longer spawns bare `doctor --json` (forbidden by the
   context contract) — it runs `doctor --lint --json` through the shared CLI
   classifier and keeps usable output only. One collector run per
-  failing-component key per 10 minutes (`kAdvisoryDoctorFloorMs`): a
-  same-key episode inside the floor applies its verdict as usual but logs
-  `readiness advisory dropped (floor)` instead of spawning; the floor resets
-  with the gateway generation.
+  failing-component key per 10 minutes (`kAdvisoryDoctorFloorMs`), and at
+  most one per 2 minutes per gateway generation regardless of key
+  (`kAdvisoryDoctorGlobalFloorMs` — the key is built from gateway-controlled
+  component names, so a rotating `failing[]` list cannot buy a Doctor per
+  probe): an episode inside a floor applies its verdict as usual but logs
+  `readiness advisory dropped (floor)` (suffixed `(global)` for the
+  generation-wide one) instead of spawning; both floors reset with the
+  gateway generation.
 - **Overseer reviews are admitted and classified from incident state, not
   from wording.** A settled incident that recovered with no watchdog action,
   or settled more than 60 minutes ago, is marked `skipped` (reason
@@ -147,7 +168,8 @@ detection are untouched.
 - **Overseer `skipped` records** on the incident (`{ state: "skipped",
   reason, manual: false, at }`; one write attempt per incident per process),
   the `kAutoReviewMaxAgeMs` (60 min) admission bound, and `notifyDecision`
-  (`eligible | incident_changed | ineligible_now | not_steady_state`) /
+  (`manual | eligible | incident_changed | ineligible_now | not_steady_state`
+  — `manual` for every manual review, which never notifies) /
   `notifyOutcome` (`sent | held | suppressed:<reason> | failed |
   not_attempted`; `sent` means accepted by the notifier — queued to the
   durable outbox, which owns delivery — `held` is a notice the notifier
