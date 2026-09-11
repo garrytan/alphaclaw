@@ -254,6 +254,48 @@ describe("describeEvent", () => {
     ).toEqual({ phrase: "up, not ready", tone: "warning" });
   });
 
+  it("#87 RT7 renders a fail-open readiness close {recovered, assumed, kind} as an assumed recovery (warning), never as the bare 'recovered' a real recovery renders", async () => {
+    const { describeEvent, describeEventOutcome } = await loadIncidentHelpers();
+    expect(
+      describeEvent({
+        eventType: "readiness_degraded",
+        status: "ok",
+        details: { recovered: true, assumed: true, kind: "unavailable" },
+      }),
+    ).toMatchObject({
+      label: "Readiness degraded",
+      detail: "recovery assumed — readiness unreadable (unavailable)",
+      tone: "warning",
+      toneLabel: "Warning",
+    });
+    expect(
+      describeEventOutcome({
+        eventType: "readiness_degraded",
+        status: "ok",
+        details: { recovered: true, assumed: true, kind: "unsupported" },
+      }),
+    ).toEqual({ phrase: "recovery assumed — readiness unreadable (unsupported)", tone: "warning" });
+    // A kind the server could not name still reads as assumed.
+    expect(
+      describeEventOutcome({
+        eventType: "readiness_degraded",
+        status: "ok",
+        details: { recovered: true, assumed: true, kind: null },
+      }),
+    ).toEqual({ phrase: "recovery assumed — readiness unreadable (unknown)", tone: "warning" });
+    // The plain {recovered} close is unchanged: a real recovery, success tone.
+    expect(
+      describeEvent({
+        eventType: "readiness_degraded",
+        status: "ok",
+        details: { recovered: true },
+      }),
+    ).toMatchObject({ label: "Readiness degraded", detail: "recovered", tone: "success" });
+    expect(
+      describeEventOutcome({ eventType: "readiness_degraded", status: "ok", details: { recovered: true } }),
+    ).toBeNull();
+  });
+
   it("humanizes unknown/foreign event types instead of failing", async () => {
     const { describeEvent } = await loadIncidentHelpers();
     const described = describeEvent({
