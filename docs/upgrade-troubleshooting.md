@@ -640,6 +640,75 @@ pressure: event loop delay") are a load signal, not a readiness failure:
 check recent gateway restarts and workspace size (README "Health checks" ops
 note).
 
+## Control UI shows "Styles failed to load"
+
+**What it means:** the OpenClaw Control UI (the dashboard AlphaClaw opens at
+`/openclaw`) shows the banner *"Styles failed to load, so the page may look
+broken"* with a Reload button, and text renders in system fonts. Upstream
+shows it when a `<link rel="stylesheet">` fired an `error` event before the
+page finished loading, or when the entry stylesheet's sentinel
+(`--openclaw-css-ok`) is missing at `load`. It tries one automatic reload per
+build first, which is the flash-reload users see before the banner.
+
+**Why it happens:** before v0.9.83 AlphaClaw mounted the gateway's
+ROOT-served UI under `/openclaw` by stripping the prefix off every proxied
+request. The gateway therefore stamped an empty base path into the page
+(`<html data-openclaw-control-ui-base-path="">`) and the UI — which resolves
+every resource URL from that attribute, not from the page URL — fetched its
+fonts, themes, `sw.js`, bootstrap config and avatars from AlphaClaw's root,
+where they 404'd. The font stylesheet's `error` event is what trips the
+banner. Since v0.9.83 `ensureGatewayProxyConfig` writes
+`gateway.controlUi.basePath: "/openclaw"` into `openclaw.json` at boot, the
+proxy forwards `/openclaw*` verbatim, and the gateway restarts itself when
+the key lands (OpenClaw's default `gateway.reload.mode: "hybrid"`).
+
+**How to check:**
+
+- `curl -I -b 'setup_token=…' https://<alphaclaw>/openclaw/fonts/instrument-sans.css`
+  answers `200` with `content-type: text/css`. A `404` means the gateway is
+  still serving the UI from its root; a `302 /login.html` means the cookie
+  is missing.
+- `GET /openclaw/` (with the cookie) returns HTML whose `<html>` tag carries
+  `data-openclaw-control-ui-base-path="/openclaw"`. The gateway stamps this,
+  not AlphaClaw — an empty value means the gateway has not picked up the key.
+- The boot log has `[alphaclaw] control_ui_mount=basepath basePath=/openclaw`
+  (or `control_ui_mount=legacy basePath=(removed)` under the kill switch).
+- `openclaw.json` has `gateway.controlUi.basePath: "/openclaw"`.
+
+**Next steps:** if the key is in `openclaw.json` but the page is still
+stamped with an empty base path, the gateway has not restarted since the key
+was written — an externally supervised gateway (systemd, a manual `openclaw
+gateway run`) with hot reload off is the usual case. Restart it once; the
+managed child is restarted by AlphaClaw.
+
+An expired AlphaClaw session behaves differently for resources and documents
+on purpose: a Control UI resource (font, chunk, theme, `sw.js`, bootstrap
+config, avatar, `/assets/*`) gets `401 {"error":"Unauthorized"}`, while a
+document navigation (and the UI's `HEAD` recovery probe) still gets the
+`302 /login.html` redirect. The pinned Control UI service worker caches any
+`ok` response under the requested URL — a redirected 200 login page for a
+font would be served for that font forever, even after logging in — and a
+browser refuses HTML as a stylesheet, which is the same banner by another
+route. So a font `401` on an expired session is expected; reload the page
+and log in.
+
+After a whole-file config restore (rollback, round-trip, migration gate) the
+key is re-applied and verified by re-reading `openclaw.json`. A miss is not
+fatal: the boot report / notification carries the warning *"control UI mount
+repair failed after the … config restore"* and the log has the fixed code
+`control_ui_mount_repair_failed source=<source>`; the next AlphaClaw boot
+re-applies it.
+
+**Kill switch:** `ALPHACLAW_CONTROL_UI_MOUNT=legacy` in the deployment
+environment (never `.env`; read at process start) restores the pre-0.9.83
+prefix-strip mount: boot removes the managed `gateway.controlUi.basePath`,
+the gateway restarts in root mode and the proxy strips the prefix again (the
+banner returns — that is the known legacy state). A plain code revert is NOT
+enough: old AlphaClaw strips `/openclaw/x` to `/x`, which a gateway still in
+base-path mode does not recognise as a Control UI path and answers `404` —
+the whole dashboard disappears. Set the switch, or also delete the key from
+`openclaw.json` and restart the gateway.
+
 ## Another process owns the state directory
 
 **What it means:** a gateway AlphaClaw launched exited with code 1 and its

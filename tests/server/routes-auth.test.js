@@ -39,12 +39,28 @@ const createTestApp = ({ setupPassword, loginThrottle, trustProxy } = {}) => {
   if (trustProxy !== undefined) app.set("trust proxy", trustProxy);
   app.use(express.json());
   const throttle = loginThrottle || createLoginThrottleMock();
-  registerAuthRoutes({ app, loginThrottle: throttle });
+  const { requireAuth } = registerAuthRoutes({ app, loginThrottle: throttle });
 
+  // /setup and /api are guarded by registerAuthRoutes' own app.use mounts.
   app.get("/api/protected", (req, res) => res.json({ ok: true }));
   app.get("/setup/protected", (req, res) => res.json({ ok: true }));
+  // The Control UI proxies are NOT — registerProxyRoutes wires requireAuth
+  // per-route (app.all(/^\/openclaw(?:\/.*)?$/, requireAuth, …)), so mirror
+  // that here to exercise the resource-vs-document response rule.
+  app.all(/^\/openclaw(?:\/.*)?$/, requireAuth, (req, res) =>
+    res.json({ ok: true, url: req.originalUrl }),
+  );
 
   return { app, throttle };
+};
+
+// Logs in and returns the "setup_token=…" cookie pair for authenticated cases.
+const loginCookie = async (app, password) => {
+  const login = await request(app).post("/api/auth/login").send({ password });
+  expect(login.status).toBe(200);
+  const setCookieHeader = login.headers["set-cookie"]?.[0] || "";
+  expect(setCookieHeader).toMatch(/setup_token=[^;]+/);
+  return setCookieHeader.split(";")[0];
 };
 
 describe("server/routes/auth", () => {
@@ -212,5 +228,105 @@ describe("server/routes/auth", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  describe("Control UI resources: 401 for resources, login redirect for documents", () => {
+    // Why (control-ui-mount.js classifier): the pinned Control UI service
+    // worker caches ANY `ok` response under the requested URL, and browsers
+    // refuse text/html as a stylesheet. A 302 → /login.html (200) for an
+    // expired-session font or chunk fetch would therefore be cached forever
+    // under the asset URL and trip "Styles failed to load"; a 401 is never
+    // `ok`. Documents keep the redirect so a stale tab lands on the login page.
+    const kUnauthorized = { error: "Unauthorized" };
+
+    it("answers 401 for an asset-shaped path with no headers at all", async () => {
+      const { app } = createTestApp({ setupPassword: "secret" });
+      const res = await request(app).get("/openclaw/fonts/x.css");
+      expect(res.status).toBe(401);
+      expect(res.body).toEqual(kUnauthorized);
+      expect(res.headers.location).toBeUndefined();
+    });
+
+    it("keeps 401 for an asset-shaped path even when Sec-Fetch-Dest says document", async () => {
+      // Rule 2 (asset namespace) beats fetch metadata: /openclaw/assets/* is
+      // never a document, so no header can make the redirect correct.
+      const { app } = createTestApp({ setupPassword: "secret" });
+      const res = await request(app)
+        .get("/openclaw/assets/c.js")
+        .set("Sec-Fetch-Dest", "document");
+      expect(res.status).toBe(401);
+      expect(res.body).toEqual(kUnauthorized);
+    });
+
+    it("redirects a document-shaped path fetched as a document", async () => {
+      const { app } = createTestApp({ setupPassword: "secret" });
+      const res = await request(app)
+        .get("/openclaw/dashboards")
+        .set("Sec-Fetch-Dest", "document");
+      expect(res.status).toBe(302);
+      expect(res.headers.location).toBe("/login.html");
+    });
+
+    it("answers 401 for a document-shaped path fetched as a non-document (fetch/XHR)", async () => {
+      const { app } = createTestApp({ setupPassword: "secret" });
+      const res = await request(app)
+        .get("/openclaw/dashboards")
+        .set("Sec-Fetch-Dest", "empty");
+      expect(res.status).toBe(401);
+      expect(res.body).toEqual(kUnauthorized);
+    });
+
+    it("redirects a document-shaped path with no fetch metadata (curl, Node, old browsers)", async () => {
+      const { app } = createTestApp({ setupPassword: "secret" });
+      const res = await request(app).get("/openclaw/dashboards");
+      expect(res.status).toBe(302);
+      expect(res.headers.location).toBe("/login.html");
+    });
+
+    it("answers 401 when Accept leads with a resource media type and no metadata is present", async () => {
+      const { app } = createTestApp({ setupPassword: "secret" });
+      const res = await request(app)
+        .get("/openclaw/dashboards")
+        .set("Accept", "text/css,*/*;q=0.1");
+      expect(res.status).toBe(401);
+      expect(res.body).toEqual(kUnauthorized);
+    });
+
+    it("always redirects HEAD — the UI's stale-chunk recovery probe must reach the login page", async () => {
+      // The UI probes its own URL with fetch(href, { method: "HEAD" })
+      // (Sec-Fetch-Dest: empty) before reloading; sw.js ignores non-GET, so
+      // the redirect can never poison its cache.
+      const { app } = createTestApp({ setupPassword: "secret" });
+      const res = await request(app)
+        .head("/openclaw/")
+        .set("Sec-Fetch-Dest", "empty");
+      expect(res.status).toBe(302);
+      expect(res.headers.location).toBe("/login.html");
+    });
+
+    it("leaves paths outside the Control UI namespace on the login redirect", async () => {
+      // The classifier only applies under /openclaw* and /assets/*; a
+      // resource-looking fetch elsewhere keeps today's behavior.
+      const { app } = createTestApp({ setupPassword: "secret" });
+      const plain = await request(app).get("/setup/protected");
+      expect(plain.status).toBe(302);
+      expect(plain.headers.location).toBe("/login.html");
+
+      const styled = await request(app)
+        .get("/setup/protected")
+        .set("Sec-Fetch-Dest", "style");
+      expect(styled.status).toBe(302);
+      expect(styled.headers.location).toBe("/login.html");
+    });
+
+    it("lets an authenticated session through to the Control UI resource handler", async () => {
+      const { app } = createTestApp({ setupPassword: "secret" });
+      const cookie = await loginCookie(app, "secret");
+      const res = await request(app)
+        .get("/openclaw/fonts/x.css")
+        .set("Cookie", cookie);
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ ok: true, url: "/openclaw/fonts/x.css" });
+    });
   });
 });

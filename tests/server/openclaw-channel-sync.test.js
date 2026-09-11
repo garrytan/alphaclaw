@@ -1230,6 +1230,268 @@ describe("server/openclaw-channel-sync", () => {
     });
   });
 
+  // ── Control UI mount contract (control-ui-mount.js) ──────────────────────
+  describe("Control UI mount key (gateway.controlUi.basePath)", () => {
+    const configPathOf = (openclawDir) => path.join(openclawDir, "openclaw.json");
+    const writeConfig = (openclawDir, config) => {
+      fs.mkdirSync(openclawDir, { recursive: true });
+      fs.writeFileSync(configPathOf(openclawDir), `${JSON.stringify(config, null, 2)}\n`);
+    };
+    const readConfig = (openclawDir) =>
+      JSON.parse(fs.readFileSync(configPathOf(openclawDir), "utf8"));
+    const kManagedStripe = { label: "BETA · 1.0.0", color: "amber" };
+
+    it("removing the managed environment stripe leaves controlUi.basePath in place", () => {
+      // The stripe remover prunes an EMPTY controlUi parent; with basePath
+      // beside the stripe that delete can never fire, so the mount key
+      // survives the beta → stable transition.
+      const stableHarness = () => {
+        const h = createHarness({
+          pin: "1.0.0",
+          channel: "stable",
+          installedVersion: "1.0.0",
+          sentinelVersion: "1.0.0",
+        });
+        h.store.updateState((s) => {
+          s.pinVersion = "1.0.0";
+          return s;
+        });
+        return h;
+      };
+
+      const withBasePath = stableHarness();
+      writeConfig(withBasePath.openclawDir, {
+        gateway: {
+          controlUi: { basePath: "/openclaw", environment: { ...kManagedStripe } },
+        },
+      });
+      expect(withBasePath.sync.syncAtBoot().ok).toBe(true);
+      const cfg = readConfig(withBasePath.openclawDir);
+      expect(cfg.gateway.controlUi.environment).toBeUndefined();
+      expect(cfg.gateway.controlUi.basePath).toBe("/openclaw");
+
+      // Control: the stripe alone still prunes the parent (existing
+      // behavior) — the two runs differ by exactly the mount key.
+      const stripeOnly = stableHarness();
+      writeConfig(stripeOnly.openclawDir, {
+        gateway: { controlUi: { environment: { ...kManagedStripe } } },
+      });
+      expect(stripeOnly.sync.syncAtBoot().ok).toBe(true);
+      expect(readConfig(stripeOnly.openclawDir).gateway.controlUi).toBeUndefined();
+    });
+
+    // The round-trip restore is the one whole-file restore reachable without
+    // a doctor run or a crash first (the rollback and migration-gate restores
+    // need one); all three go through the same restoreConfigFromBackup, so
+    // this path pins the repair for every restore source.
+    const kRestoredBackup = {
+      gateway: { controlUi: { allowedOrigins: ["https://setup.example.com"] } },
+      restoredMarker: true,
+    };
+    const kLiveNewerShape = {
+      gateway: {
+        controlUi: {
+          allowedOrigins: ["https://setup.example.com"],
+          basePath: "/openclaw",
+        },
+      },
+      migrated: "newer-shape",
+    };
+    const seedRoundTripRestore = ({ ensureGatewayProxyConfig } = {}) => {
+      const logger = { log: vi.fn(), warn: vi.fn(), error: vi.fn() };
+      const harness = createHarness({
+        pin: "1.0.0",
+        installedVersion: "1.0.0",
+        sentinelVersion: "1.0.0",
+        extraSyncOptions: {
+          logger,
+          ...(ensureGatewayProxyConfig ? { ensureGatewayProxyConfig } : {}),
+        },
+      });
+      harness.store.updateState((s) => {
+        s.pinVersion = "1.0.0";
+        // A migration completed for the newer 2.0.0 …
+        s.configMigration = {
+          completedForVersion: "2.0.0",
+          lastAttempt: { version: "2.0.0", at: 1, ok: true },
+        };
+        // … and the operator's landed, unconsumed downgrade stamp authorizes
+        // restoring 1.0.0's pre-fix backup (describeVersionRegressionIntent).
+        s.lastTransition = {
+          at: harness.nowRef.now,
+          from: "2.0.0",
+          to: "1.0.0",
+          kind: "downgrade",
+          source: "operator_apply",
+          reason: null,
+          operationId: "op-downgrade",
+          ok: true,
+          consumedAt: null,
+        };
+        return s;
+      });
+      writeConfig(harness.openclawDir, kLiveNewerShape);
+      const backupBytes = `${JSON.stringify(kRestoredBackup, null, 2)}\n`;
+      fs.writeFileSync(
+        path.join(harness.openclawDir, "openclaw.json.pre-fix-1.0.0.bak"),
+        backupBytes,
+      );
+      return {
+        harness,
+        configPath: configPathOf(harness.openclawDir),
+        backupBytes,
+        logLines: () => logger.log.mock.calls.map((call) => String(call[0])),
+      };
+    };
+    const mountRepairWarnings = (warnings) =>
+      warnings.filter((w) => String(w).includes("control UI mount repair failed"));
+
+    it("re-applies the gateway proxy config after a round-trip restore and verifies the key is back", async () => {
+      // Stands in for gateway.js ensureGatewayProxyConfig: a read-modify-write
+      // that puts the mount key into the live file.
+      const seen = [];
+      const ref = { configPath: null };
+      const ensureGatewayProxyConfig = vi.fn((origin) => {
+        const raw = fs.readFileSync(ref.configPath, "utf8");
+        seen.push({ origin, raw });
+        const cfg = JSON.parse(raw);
+        cfg.gateway.controlUi = { ...(cfg.gateway.controlUi || {}), basePath: "/openclaw" };
+        fs.writeFileSync(ref.configPath, `${JSON.stringify(cfg, null, 2)}\n`);
+        return true;
+      });
+      const seeded = seedRoundTripRestore({ ensureGatewayProxyConfig });
+      ref.configPath = seeded.configPath;
+
+      const outcome = await seeded.harness.sync.reconcileBootConfig();
+
+      expect(outcome).toEqual(
+        expect.objectContaining({ status: "ok", reason: "round-trip-restore" }),
+      );
+      // Called once, origin-less, AFTER the restore committed the backup
+      // bytes (the file lock is not re-entrant — the hook runs outside it).
+      expect(ensureGatewayProxyConfig).toHaveBeenCalledTimes(1);
+      expect(seen).toEqual([{ origin: undefined, raw: seeded.backupBytes }]);
+      const after = readConfig(seeded.harness.openclawDir);
+      expect(after.restoredMarker).toBe(true);
+      expect(after.migrated).toBeUndefined();
+      expect(after.gateway.controlUi.basePath).toBe("/openclaw");
+      expect(after.gateway.controlUi.allowedOrigins).toEqual(["https://setup.example.com"]);
+      // Postcondition satisfied: the success line, no failure code, no warning.
+      expect(mountRepairWarnings(outcome.warnings)).toEqual([]);
+      const lines = seeded.logLines();
+      expect(
+        lines.some((line) =>
+          line.includes(
+            "re-applied the gateway proxy config after the round_trip restore (control_ui_mount=basepath)",
+          ),
+        ),
+      ).toBe(true);
+      expect(lines.some((line) => line.includes("control_ui_mount_repair_failed"))).toBe(false);
+    });
+
+    it.each([
+      [
+        "throws",
+        () => {
+          throw new Error("disk full");
+        },
+        "(disk full)",
+      ],
+      ["is a no-op that leaves the key absent", () => false, null],
+    ])(
+      "reports a loud, non-fatal repair failure when the re-ensure hook %s",
+      async (_label, hookImpl, errorText) => {
+        const ensureGatewayProxyConfig = vi.fn(hookImpl);
+        const seeded = seedRoundTripRestore({ ensureGatewayProxyConfig });
+
+        const outcome = await seeded.harness.sync.reconcileBootConfig();
+
+        // The restore itself still lands and the boot goes on — a failed
+        // repair is a warning, never a throw.
+        expect(outcome).toEqual(
+          expect.objectContaining({ status: "ok", reason: "round-trip-restore" }),
+        );
+        expect(ensureGatewayProxyConfig).toHaveBeenCalledTimes(1);
+        expect(fs.readFileSync(seeded.configPath, "utf8")).toBe(seeded.backupBytes);
+        expect(
+          readConfig(seeded.harness.openclawDir).gateway.controlUi.basePath,
+        ).toBeUndefined();
+        // Postcondition unmet → the fixed, greppable code in the log …
+        const failureLines = seeded
+          .logLines()
+          .filter((line) =>
+            line.includes("control_ui_mount_repair_failed source=round_trip mount=basepath"),
+          );
+        expect(failureLines).toHaveLength(1);
+        expect(failureLines[0]).toContain("Styles failed to load");
+        if (errorText) expect(failureLines[0]).toContain(errorText);
+        else expect(failureLines[0]).not.toContain("disk full");
+        expect(
+          seeded.logLines().some((line) => line.includes("re-applied the gateway proxy config")),
+        ).toBe(false);
+        // … and ONE warning on the restore caller's warnings[] (the boot
+        // report / notification surface).
+        const warnings = mountRepairWarnings(outcome.warnings);
+        expect(warnings).toHaveLength(1);
+        expect(warnings[0]).toContain("after the round_trip config restore");
+        expect(warnings[0]).toContain("Styles failed to load");
+      },
+    );
+
+    it("treats an unparseable openclaw.json after the hook as a FAILED repair (strict verification read)", async () => {
+      // The verification must read the file strictly: the lenient reader's
+      // `fallback: {}` would make an unreadable file look satisfied in legacy
+      // mode ("no key" is exactly what legacy wants) and mask the failure. So
+      // a hook that corrupts the file — or a disk that hands back garbage —
+      // must surface as control_ui_mount_repair_failed, whatever the mode.
+      let configPath = null;
+      const ensureGatewayProxyConfig = vi.fn(() => {
+        fs.writeFileSync(configPath, "{ not json");
+        return true;
+      });
+      const seeded = seedRoundTripRestore({ ensureGatewayProxyConfig });
+      configPath = seeded.configPath;
+
+      const outcome = await seeded.harness.sync.reconcileBootConfig();
+
+      expect(outcome).toEqual(
+        expect.objectContaining({ status: "ok", reason: "round-trip-restore" }),
+      );
+      expect(ensureGatewayProxyConfig).toHaveBeenCalledTimes(1);
+      const failureLines = seeded
+        .logLines()
+        .filter((line) =>
+          line.includes("control_ui_mount_repair_failed source=round_trip mount=basepath"),
+        );
+      expect(failureLines).toHaveLength(1);
+      expect(
+        seeded.logLines().some((line) => line.includes("re-applied the gateway proxy config")),
+      ).toBe(false);
+      expect(mountRepairWarnings(outcome.warnings)).toHaveLength(1);
+    });
+
+    it("skips the repair entirely when no hook is injected (the bin boot-sync instance)", async () => {
+      const seeded = seedRoundTripRestore();
+
+      const outcome = await seeded.harness.sync.reconcileBootConfig();
+
+      expect(outcome).toEqual(
+        expect.objectContaining({ status: "ok", reason: "round-trip-restore" }),
+      );
+      expect(fs.readFileSync(seeded.configPath, "utf8")).toBe(seeded.backupBytes);
+      expect(mountRepairWarnings(outcome.warnings)).toEqual([]);
+      expect(
+        seeded
+          .logLines()
+          .some(
+            (line) =>
+              line.includes("control_ui_mount_repair_failed") ||
+              line.includes("re-applied the gateway proxy config"),
+          ),
+      ).toBe(false);
+    });
+  });
+
   describe("applyUpdate", () => {
     it("rejects when not onboarded, without running anything", async () => {
       const { sync, runner, installToTempDir } = createHarness({
