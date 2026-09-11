@@ -78,6 +78,16 @@ describe("classifyEvent transition table", () => {
         details: { skipped: true, startupGraceActive: true },
       }),
     ).toBe("append");
+    // #87 RT1: the mid-restart answer of the process about to be stopped
+    // (runHealthCheck inside an expected-restart window) carries skipped too
+    // — never a close, whatever else the row says.
+    expect(
+      classifyEvent({
+        eventType: "health_check",
+        status: "ok",
+        details: { ok: true, skipped: true, midRestart: true, expectedRestartActive: true },
+      }),
+    ).toBe("append");
     expect(classifyEvent({ eventType: "recovery", status: "ok" })).toBe("close");
     expect(
       classifyEvent({ eventType: "safe_mode", status: "failed", details: {} }),

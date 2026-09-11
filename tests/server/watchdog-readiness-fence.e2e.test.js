@@ -180,7 +180,7 @@ describe("#87 readiness fence end-to-end (real incident tracker over SQLite)", (
     expect(noticesIncluding(notifier, "running again")).toHaveLength(1);
     // 13s: Doctor A settles with a matching finding — the episode is closed.
     await vi.advanceTimersByTimeAsync(8_000);
-    resolveDoctor(doctorPayload([kRuntimeFinding]));
+    resolveDoctor({ stdout: doctorPayload([kRuntimeFinding]) });
     await vi.advanceTimersByTimeAsync(0);
     // 120s: the regular timer probes again.
     await vi.advanceTimersByTimeAsync(107_000);
@@ -352,6 +352,74 @@ describe("#87 readiness fence end-to-end (real incident tracker over SQLite)", (
       readiness: "not_ready",
       readinessReason: "secrets",
     });
+    watchdog.stop();
+  });
+
+  it("#87 RT1 (T-e) variant: a planned restart never closes the persisted incident — the old gateway's mid-restart answers are {skipped, midRestart} (stamped, not closing); the relaunched gateway failing on the SAME key appends a SECOND readiness_degraded/failed row to the SAME open incident; after a real recovery the same key opens a SECOND persisted incident", async () => {
+    vi.useFakeTimers();
+    const { control, fetchImpl } = createGatewayControl();
+    control.readyzFailing = ["secrets"];
+    const { watchdog, tracker, notifier } = createHarness({ fetchImpl });
+    watchdog.onGatewayLaunch({ startedAt: Date.now() - 60_000, pid: 100 });
+    await vi.advanceTimersByTimeAsync(0);
+    const openId = tracker.getActiveIncidentId();
+    expect(openId).toBeGreaterThan(0);
+    const openings = () => eventsOfType("readiness_degraded").filter((e) => e.status === "failed");
+    expect(openings()).toHaveLength(1);
+    // Planned restart: the old gateway is still on the port and answers the
+    // window's bootstrap probe plus one more.
+    watchdog.onExpectedRestart({ expiresAt: Date.now() + 60_000 });
+    await vi.advanceTimersByTimeAsync(0);
+    await watchdog.runHealthCheck({ source: "health_timer" });
+    const midRestartRows = incidentEvents(openId).filter(
+      (e) => e.eventType === "health_check" && e.details?.midRestart === true,
+    );
+    expect(midRestartRows.length).toBeGreaterThanOrEqual(1);
+    for (const row of midRestartRows) {
+      expect(row.details).toMatchObject({ ok: true, skipped: true, expectedRestartActive: true });
+    }
+    expect(incidents()).toHaveLength(1);
+    expect(incidents()[0]).toMatchObject({ id: openId, status: "open" });
+    expect(tracker.getActiveIncidentId()).toBe(openId);
+    expect(eventsOfType("recovery")).toHaveLength(0);
+    expect(noticesIncluding(notifier, "running again")).toHaveLength(0);
+    // The relaunched gateway fails on the same components: a NEW episode row
+    // (the key is generation-local) stamped onto the SAME open incident.
+    watchdog.onGatewayLaunch({ startedAt: Date.now(), pid: 4343 });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(openings()).toHaveLength(2);
+    expect(incidents()).toHaveLength(1);
+    expect(incidents()[0]).toMatchObject({ id: openId, status: "open" });
+    expect(tracker.getActiveIncidentId()).toBe(openId);
+    expect(
+      incidentEvents(openId).filter((e) => e.eventType === "readiness_degraded" && e.status === "failed"),
+    ).toHaveLength(2);
+    expect(eventsOfType("recovery")).toHaveLength(0);
+    expect(watchdog.getStatus()).toMatchObject({
+      health: "degraded",
+      degradedReason: "readiness_failing",
+      readiness: "not_ready",
+      readinessReason: "secrets",
+    });
+    // A real recovery resolves that one incident.
+    control.readyzFailing = [];
+    await watchdog.runHealthCheck({ source: "health_timer" });
+    expect(incidents()).toHaveLength(1);
+    expect(incidents()[0]).toMatchObject({ id: openId, status: "resolved" });
+    expect(incidents()[0].summary).toMatchObject({ outcome: "recovered", actions: [] });
+    expect(tracker.getActiveIncidentId()).toBe(null);
+    expect(eventsOfType("recovery")).toHaveLength(1);
+    expect(noticesIncluding(notifier, "running again")).toHaveLength(1);
+    // The SAME key degrading again after the recovery: a third opening row
+    // and a SECOND persisted incident (the resolved one is never re-used).
+    control.readyzFailing = ["secrets"];
+    await watchdog.runHealthCheck({ source: "health_timer" });
+    expect(openings()).toHaveLength(3);
+    const rows = incidents();
+    expect(rows).toHaveLength(2);
+    const second = rows.find((row) => row.id !== openId);
+    expect(second).toMatchObject({ incidentKey: "gateway_readiness", status: "open" });
+    expect(tracker.getActiveIncidentId()).toBe(second.id);
     watchdog.stop();
   });
 });

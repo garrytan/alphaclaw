@@ -51,19 +51,33 @@ detection are untouched.
   longer open a second incident or flip readiness to `not_ready` under a
   healthy gateway; every dropped result is one console line with a reason.
 - **Recovery is no longer assumed from a readiness probe error while the
-  gateway is not ready.** When the last `/readyz` accepted in this gateway
+  gateway is not ready.** When the last `/readyz` consumed in this gateway
   generation said not ready and the next one cannot be read (connection
   error, 5 s timeout, malformed body), the watchdog holds: no "Gateway
   running again", the incident stays open, health stays degraded and the
   5→30 s retry ladder keeps probing — bounded by the ready budget, then one
   `readiness_probe_error {kind, recoveryAssumed: true, heldMs}` row and the
-  old fail-open behaviour. A 404 (`/readyz` unsupported) fails open at once.
-  Every fail-open also closes the open degradation episode with a
-  `readiness_degraded ok {recovered, assumed, kind}` row and clears the
-  episode key, so the same failing components afterwards open a NEW episode
-  and incident instead of a silent "up but not ready" notice. Every launch,
-  exit (incl. benign step-aside exits and incumbent adoption) and stop resets
-  the readiness axis, so a fresh gateway never inherits a hold.
+  old fail-open behaviour. The hold is keyed on the generation's last
+  consumed readiness (the open degradation episode), not on the live
+  readiness value, so it survives a liveness flap: one failed `/health`
+  between two `/readyz` reads no longer lets the next probe error announce
+  recovery, and the hold's ready-budget clock survives the flap too. A 404
+  (`/readyz` unsupported) fails open at once. Every fail-open also closes the
+  open degradation episode with a `readiness_degraded ok {recovered, assumed,
+  kind}` row and clears the episode key, so the same failing components
+  afterwards open a NEW episode and incident instead of a silent "up but not
+  ready" notice. A relaunch starts a new readiness episode: every launch,
+  exit (incl. benign step-aside exits and incumbent adoption), expected
+  restart, relaunch request and stop resets the readiness axis AND the
+  episode key, so a fresh gateway never inherits a hold, and a relaunched
+  gateway failing on the same components writes its own
+  `readiness_degraded/failed` row (one opening row per generation). The
+  mid-restart `health_check/ok` row the old process answers inside a planned
+  restart window now carries `skipped: true`, so the incident tracker never
+  closes an incident on it. The advisory Doctor is collected only through the
+  injected collector (server.js's `collectWithMeta`); without one the hint is
+  dropped as `unconfigured` — the watchdog no longer spawns a `doctor --lint
+  --json` fallback of its own.
 - **The advisory Doctor is structured and contract-compliant.** The regex
   over Doctor prose (`/secret/` + `/fail|degrad/`) is replaced by the
   structured `findings[]` payload usable Doctor output carries, accepting
@@ -113,7 +127,9 @@ detection are untouched.
   The incident timeline phrases them
   ("doctor: <checkId> (<severity>)", "event loop under pressure: …", "event
   loop recovered") alongside the new liveness phrases "up, still starting",
-  "up, draining" and "up, readiness probe <kind>".
+  "up, draining" and "up, readiness probe <kind>". The Watchdog tab's
+  gateway-health card shows pressure under a neutral LOAD label — the
+  DEGRADED badge appears only when `/readyz` names failing components.
 - **`readinessProbe` and `readinessStatus` on `GET /api/watchdog/status`**:
   how the last `/readyz` read went (`ok | unconfigured | unsupported |
   unavailable | timeout | malformed`) and what the body said (`started |
