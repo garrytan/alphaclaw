@@ -197,4 +197,94 @@ describe("createDoctorJsonCollector (single-flight, per-call budgets)", () => {
       reason: "spawn_failed",
     });
   });
+
+  it("#87 collectWithMeta stamps ONE spawnStartedAtMs per spawn: starter and later joiner agree, a post-settle call gets a new one", async () => {
+    let now = 1_000;
+    let spawns = 0;
+    let gate = deferred();
+    const collector = createDoctorJsonCollector({
+      runLintJson: async () => {
+        spawns += 1;
+        await gate.promise;
+        return { ok: true, stdout: "DOC", classification: usable };
+      },
+      classify: (r) => r.classification,
+      nowMs: () => now,
+    });
+    const starter = collector.collectWithMeta();
+    now = 1_500; // the clock moves before the joiner arrives
+    const joiner = collector.collectWithMeta({ timeoutMs: 60_000 });
+    gate.resolve();
+    expect(await starter).toEqual({ stdout: "DOC", spawnStartedAtMs: 1_000 });
+    // The joiner is attached to the SAME spawn — it reports the spawn start,
+    // not its own call time (the watchdog compares it against probe start).
+    expect(await joiner).toEqual({ stdout: "DOC", spawnStartedAtMs: 1_000 });
+    expect(spawns).toBe(1);
+
+    gate = deferred();
+    gate.resolve();
+    now = 9_000;
+    expect(await collector.collectWithMeta()).toEqual({
+      stdout: "DOC",
+      spawnStartedAtMs: 9_000,
+    });
+    expect(spawns).toBe(2);
+  });
+
+  it("#87 collectWithMeta personal-budget expiry returns { stdout: null, spawnStartedAtMs } of the spawn it joined", async () => {
+    vi.useFakeTimers();
+    try {
+      const gate = deferred();
+      const collector = createDoctorJsonCollector({
+        runLintJson: async () => {
+          await gate.promise;
+          return { ok: true, stdout: "DOC", classification: usable };
+        },
+        classify: (r) => r.classification,
+        nowMs: () => 42,
+      });
+      const short = collector.collectWithMeta({ timeoutMs: 5_000 });
+      const long = collector.collectWithMeta({ timeoutMs: 60_000 });
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(await short).toEqual({ stdout: null, spawnStartedAtMs: 42 });
+      gate.resolve();
+      expect(await long).toEqual({ stdout: "DOC", spawnStartedAtMs: 42 });
+      // Unusable output: stdout null, spawn stamp still reported.
+      const unusable = createDoctorJsonCollector({
+        runLintJson: async () => ({
+          ok: false,
+          stdout: "partial…",
+          classification: { status: "unusable", reason: "timeout" },
+        }),
+        classify: (r) => r.classification,
+        nowMs: () => 7,
+      });
+      expect(await unusable.collectWithMeta()).toEqual({ stdout: null, spawnStartedAtMs: 7 });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("#87 collect() keeps its plain-string contract beside collectWithMeta (same single spawn)", async () => {
+    let spawns = 0;
+    const gate = deferred();
+    const collector = createDoctorJsonCollector({
+      runLintJson: async () => {
+        spawns += 1;
+        await gate.promise;
+        return { ok: true, stdout: "DOC", classification: usable };
+      },
+      classify: (r) => r.classification,
+    });
+    const plain = collector.collect({ timeoutMs: 60_000 });
+    const meta = collector.collectWithMeta();
+    gate.resolve();
+    expect(await plain).toBe("DOC"); // a string, never an object
+    expect(typeof (await plain)).toBe("string");
+    expect((await meta).stdout).toBe("DOC");
+    expect(typeof (await meta).spawnStartedAtMs).toBe("number");
+    expect(spawns).toBe(1);
+    // Default clock: a real epoch stamp when nowMs is not injected.
+    expect((await meta).spawnStartedAtMs).toBeGreaterThan(1_600_000_000_000);
+  });
 });
