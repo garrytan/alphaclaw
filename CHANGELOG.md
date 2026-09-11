@@ -5,7 +5,7 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
-## [Unreleased — claimed at merge] - 2026-09-10
+## [0.9.84] - 2026-09-11
 
 Issue #87: the watchdog manufactured `gateway_readiness` incidents while
 OpenClaw itself reported ready, and the incident overseer paged the operator
@@ -182,7 +182,8 @@ detection are untouched.
   loop recovered") alongside the new liveness phrases "up, still starting",
   "up, draining" and "up, readiness probe <kind>". The Watchdog tab's
   gateway-health card shows pressure under a neutral LOAD label — the
-  DEGRADED badge appears only when `/readyz` names failing components.
+  DEGRADED badge appears only for a native `not_ready` readiness verdict
+  (see Fixed, G5).
 - **`readinessProbe` and `readinessStatus` on `GET /api/watchdog/status`**:
   how the last `/readyz` read went (`ok | unconfigured | unsupported |
   unavailable | timeout | malformed`) and what the body said (`started |
