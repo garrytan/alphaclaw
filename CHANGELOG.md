@@ -105,9 +105,10 @@ detection are untouched.
   SecretRef" never do. `checkId` must be structural and the message passes the
   Doctor text sanitizer (control characters stripped, secret values redacted)
   and the shape redactor (token-shaped values masked), then the 200-character
-  cap. The fallback no longer spawns bare `doctor --json` (forbidden by the
-  context contract) — it runs `doctor --lint --json` through the shared CLI
-  classifier and keeps usable output only. One collector run per
+  cap. The watchdog no longer spawns a bare `doctor --json` of its own
+  (forbidden by the context contract): Doctor output arrives only through the
+  injected collector (`collectWithMeta`), which owns the `doctor --lint --json`
+  invocation. One collector run per
   failing-component key per 10 minutes (`kAdvisoryDoctorFloorMs`), and at
   most one per 2 minutes per gateway generation regardless of key
   (`kAdvisoryDoctorGlobalFloorMs` — the key is built from gateway-controlled
