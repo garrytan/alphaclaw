@@ -5,6 +5,124 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [Unreleased — claimed at merge] - 2026-09-10
+
+Issue #87: the watchdog manufactured `gateway_readiness` incidents while
+OpenClaw itself reported ready, and the incident overseer paged the operator
+about incidents that had recovered on their own long before. Three interacting
+defects: the `/readyz` body's event-loop diagnostic was read as a readiness
+failure; the advisory Doctor run was awaited INSIDE the readiness evaluation,
+so a stale probe could land its verdict (and a second incident) over a newer
+recovery; and automatic overseer reviews were admitted and classified from the
+verdict's wording alone. No change to restart, repair or rollback policy, no
+blanket alarm delays — liveness, startup, drain, channel, crash and OOM
+detection are untouched.
+
+### Fixed
+
+- **Native readiness is authoritative.** A green `/health` degrades readiness
+  ONLY when OpenClaw's own `/readyz` says `ready: false` or names failing
+  components. The `eventLoop.degraded` diagnostic — which upstream documents
+  as "does not change the readiness result by itself" — no longer opens a
+  `gateway_readiness` incident, degrades health, arms the retry ladder or
+  withholds acceptance credit; it is telemetry (see Added). A `503` with a
+  `starting` / `draining` body is no longer discarded as "unknown" (which
+  announced recovery for a gateway still coming up): it is a transitional
+  not-ready — up, no incident, no notice, no acceptance credit — re-probed on
+  a 5 s cadence (the bootstrap loop, or outside it one single-shot
+  `readiness_recheck` probe re-armed by each transitional observation) and
+  bounded by the ready budget
+  (`GATEWAY_RESTART_READY_TIMEOUT`, default 300 s), after which the same
+  observation becomes a real not-ready (`readinessReason: "starting did not
+  complete within 300s"`).
+- **An older probe can no longer overwrite a newer one.** Every health probe
+  carries a token (sequence, gateway generation, repair attempt) and a verdict
+  is applied only if no newer probe has completed ("newest completed wins")
+  and the gateway generation is unchanged — checked after `/health`, after
+  `/readyz`, before the readiness write and after the recovery notice. A
+  superseded probe writes nothing and logs one console line; the newest
+  completed probe owns BOTH axes, so `health: degraded` with
+  `readiness: ready` plus a recovery notice is impossible by construction.
+  The advisory Doctor run that used to defer a probe's verdict by up to 20 s
+  is detached from the tick, and its evidence attaches only while the SAME
+  degradation episode is still open — not to a later same-component episode,
+  not across a relaunch or a repair attempt, and not from a Doctor spawn that
+  started before the probe (`stale_doctor_job`). A late Doctor result can no
+  longer open a second incident or flip readiness to `not_ready` under a
+  healthy gateway; every dropped result is one console line with a reason.
+- **Recovery is no longer assumed from a readiness probe error while the
+  gateway is not ready.** When the last `/readyz` accepted in this gateway
+  generation said not ready and the next one cannot be read (connection
+  error, 5 s timeout, malformed body), the watchdog holds: no "Gateway
+  running again", the incident stays open, health stays degraded and the
+  5→30 s retry ladder keeps probing — bounded by the ready budget, then one
+  `readiness_probe_error {kind, recoveryAssumed: true, heldMs}` row and the
+  old fail-open behaviour. A 404 (`/readyz` unsupported) fails open at once.
+  Every fail-open also closes the open degradation episode with a
+  `readiness_degraded ok {recovered, assumed, kind}` row and clears the
+  episode key, so the same failing components afterwards open a NEW episode
+  and incident instead of a silent "up but not ready" notice. Every launch,
+  exit (incl. benign step-aside exits and incumbent adoption) and stop resets
+  the readiness axis, so a fresh gateway never inherits a hold.
+- **The advisory Doctor is structured and contract-compliant.** The regex
+  over Doctor prose (`/secret/` + `/fail|degrad/`) is replaced by the
+  structured `findings[]` payload usable Doctor output carries, accepting
+  both upstream shapes (security-audit and doctor-lint, verified read-only
+  against OpenClaw 2026.9.3): only a RUNTIME secret failure
+  (`gateway.probe_auth_secretref_unavailable`, or a `core/doctor/gateway-*`
+  finding naming a SecretRef) becomes evidence; plaintext-secret hygiene
+  findings never do. `checkId` must be structural and the message passes the
+  Doctor text sanitizer (control characters stripped, secret values redacted,
+  200-character cap). The fallback no longer spawns bare `doctor --json`
+  (forbidden by the context contract) — it runs `doctor --lint --json`
+  through the shared CLI classifier and keeps usable output only.
+- **Overseer reviews are admitted and classified from incident state, not
+  from wording.** A settled incident that recovered with no watchdog action,
+  or settled more than 60 minutes ago, is marked `skipped` (reason
+  `recovered_no_action` | `stale` | `invalid_resolved_at`) and never spawns a
+  model call — the overseer card says so, and "Review this incident" still
+  runs a manual review. Before sending, the review re-reads the incident and
+  records why it did or did not page (`notifyDecision`) and what actually
+  happened (`notifyOutcome`, from the notifier's real return — never
+  assumed). The quiet-mode class no longer depends on the verdict label: a
+  notice is informational unless the model asks for action or the incident
+  is critical class (`critical` severity, `crash_loop` / `config_error` /
+  `channel_rollback` / `version_mismatch`, or an OOM cause) — the SAME
+  predicate that admits it, so an incident admitted as critical can never be
+  silenced in quiet mode, a critical or `action_needed` notice is never
+  dropped because a new outage began mid-review, and a `monitoring/none`
+  verdict about a long-recovered incident no longer pages.
+
+### Added
+
+- **Readiness telemetry rows.** `readiness_advisory` — the detached Doctor's
+  structured finding for an OPEN readiness incident (`finding: { checkId,
+  severity, kind: "runtime", component: "secrets", message }`, `observedAt`,
+  `doctorStartedAt`, `doctorSettledAt`, `episode`; append-only, never opens
+  or closes an incident) — and `event_loop_pressure` (`warn {reasons[],
+  delayP99Ms}` once per episode with a 10-minute floor, `ok {durationMs}`
+  when a logged episode ends; reasons allowlisted to `event_loop_delay` /
+  `event_loop_utilization` / `cpu`). The incident timeline phrases them
+  ("doctor: <checkId> (<severity>)", "event loop under pressure: …", "event
+  loop recovered") alongside the new liveness phrases "up, still starting",
+  "up, draining" and "up, readiness probe <kind>".
+- **`readinessProbe` and `readinessStatus` on `GET /api/watchdog/status`**:
+  how the last `/readyz` read went (`ok | unconfigured | unsupported |
+  unavailable | timeout | malformed`) and what the body said (`started |
+  starting | draining`). `readiness_probe_error` rows are written once per
+  kind transition with a 5-minute per-kind floor instead of once per probe.
+  The gateway card reads "Up — channels still starting." / "Up — draining."
+  while readiness is transitional. Runbook: docs/upgrade-troubleshooting.md
+  "Gateway is up but not ready" now distinguishes unknown, starting/draining,
+  not ready and probe-error/hold.
+- **Overseer `skipped` records** on the incident (`{ state: "skipped",
+  reason, manual: false, at }`; one write attempt per incident per process),
+  the `kAutoReviewMaxAgeMs` (60 min) admission bound, and `notifyDecision`
+  (`eligible | incident_changed | ineligible_now | not_steady_state`) /
+  `notifyOutcome` (`sent | suppressed:<reason> | failed | not_attempted`) on
+  every automatic review record — enums, visible through
+  `GET /api/watchdog/incidents/:id`.
+
 ## [0.9.82] - 2026-09-09
 
 ### Fixed
