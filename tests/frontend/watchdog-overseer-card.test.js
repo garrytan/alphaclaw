@@ -1,3 +1,4 @@
+import { createRequire } from "node:module";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 // Hook harness (team-tab-component.test.js pattern): the card renders without
@@ -1036,6 +1037,12 @@ describe("#87 skipped incident reviews", () => {
     expect(model({ incidents: [skippedRow("something_new")] }).incidentReport.line).toBe(
       "Automatic review skipped.",
     );
+  });
+
+  it("#87 drift guard: the copy table carries exactly the server's skip-reason vocabulary (kAutoReviewSkipReasons)", () => {
+    const require = createRequire(import.meta.url);
+    const { kAutoReviewSkipReasons } = require("../../lib/server/watchdog-overseer.js");
+    expect(Object.keys(kOverseerSkipReasonCopy).sort()).toEqual([...kAutoReviewSkipReasons].sort());
   });
 
   it("#87 the card shows the line with no Badge and no action button; the secondary line uses the short label", () => {

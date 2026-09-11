@@ -36,6 +36,7 @@ const doctorPayload = (findings) => JSON.stringify({ ok: false, findings });
 
 const kOriginalAutoRepair = process.env.WATCHDOG_AUTO_REPAIR;
 const kOriginalNotificationsDisabled = process.env.WATCHDOG_NOTIFICATIONS_DISABLED;
+const kOriginalNotificationsQuiet = process.env.WATCHDOG_NOTIFICATIONS_QUIET;
 const kOriginalFetch = global.fetch;
 
 let db = null;
@@ -134,6 +135,8 @@ afterEach(() => {
   else process.env.WATCHDOG_AUTO_REPAIR = kOriginalAutoRepair;
   if (kOriginalNotificationsDisabled == null) delete process.env.WATCHDOG_NOTIFICATIONS_DISABLED;
   else process.env.WATCHDOG_NOTIFICATIONS_DISABLED = kOriginalNotificationsDisabled;
+  if (kOriginalNotificationsQuiet == null) delete process.env.WATCHDOG_NOTIFICATIONS_QUIET;
+  else process.env.WATCHDOG_NOTIFICATIONS_QUIET = kOriginalNotificationsQuiet;
   if (kOriginalFetch == null) delete global.fetch;
   else global.fetch = kOriginalFetch;
   vi.useRealTimers();

@@ -767,6 +767,26 @@ describe("server/gateway-state reducer", () => {
     expect(running("started").reason).toBe("");
     expect(running(null).reason).toBe("");
     expect(running(undefined).reason).toBe("");
+    // The copy keys on the readiness AXIS too: after a fail-open (readiness
+    // "unknown") a stale `starting` phase label keeps the plain running copy.
+    for (const readiness of ["unknown", "ready"]) {
+      for (const readinessStatus of ["starting", "draining"]) {
+        const failedOpen = reduceGatewayState(
+          inputs({
+            watchdog: {
+              lifecycle: "running",
+              health: "healthy",
+              safeMode: false,
+              crashCountInWindow: 0,
+              gatewayPid: 123,
+              readiness,
+              readinessStatus,
+            },
+          }),
+        );
+        expect(failedOpen, `${readiness}/${readinessStatus}`).toMatchObject({ state: "running", reason: "" });
+      }
+    }
     // Degraded readiness keeps its own copy even when a status is present.
     const degraded = reduceGatewayState(
       inputs({

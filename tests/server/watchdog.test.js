@@ -1,4 +1,11 @@
-const { createWatchdog, kRestartVerdicts } = require("../../lib/server/watchdog");
+const {
+  createWatchdog,
+  kRestartVerdicts,
+  kAdvisoryDoctorFloorMs,
+  kReadyzListMaxEntries,
+  kReadyzEntryMaxChars,
+  kReadyzBodyMaxChars,
+} = require("../../lib/server/watchdog");
 const {
   kGatewayTcpWatchIntervalMs,
   kWatchdogConnectedHealthCadenceMs,
@@ -8034,6 +8041,79 @@ describe("server/watchdog", () => {
         watchdog.stop();
       });
 
+      it("#87 4c′. T3: the relaunched replacement never leaves `starting`: the pending's ready budget expires on a transitional tick — restart failed {reason: replacement_not_ready, readiness: not_ready}, replacementPending null — and the X2 expiry that follows degrades with ONE readiness_degraded/failed row", async () => {
+        vi.useFakeTimers();
+        const { control, fetchImpl } = createGatewayControl();
+        const { watchdog, insertWatchdogEvent, notifier } = createHarness({
+          autoRepair: false,
+          fetchImpl,
+          resolveGatewayReadyzUrl: () => kReadyzUrl,
+        });
+        launchEstablished(watchdog);
+        await tick();
+        expect(watchdog.getStatus()).toMatchObject({ health: "healthy", readiness: "ready" });
+        control.readyzStatus = "starting";
+        control.ready = false;
+        control.readyzHttpStatus = 503;
+        watchdog.onGatewayExit({ code: 1, expectedExit: false, pid: 100 });
+        await tick();
+        watchdog.onGatewayLaunch({ startedAt: Date.now(), pid: 4242 });
+        await tick();
+        expect(watchdog.getStatus()).toMatchObject({
+          lifecycle: "running",
+          health: "healthy",
+          readiness: "not_ready",
+          readinessStatus: "starting",
+          replacementPending: expect.objectContaining({ pid: 4242 }),
+        });
+        const failedRestarts = () => restartRows(insertWatchdogEvent, { status: "failed" });
+        const openings = () => rowsOfType(insertWatchdogEvent, "readiness_degraded", "failed");
+        // Inside the budget: still pending, still transitional, no rows.
+        await vi.advanceTimersByTimeAsync(kGatewayRestartReadyTimeoutMs - 5_000);
+        expect(watchdog.getStatus()).toMatchObject({
+          health: "healthy",
+          readinessStatus: "starting",
+          replacementPending: expect.objectContaining({ pid: 4242 }),
+        });
+        expect(failedRestarts()).toHaveLength(0);
+        expect(openings()).toHaveLength(0);
+        // The budget tick (installed at the exit, T0 + budget): the pending
+        // deadline is met on this transitional observation
+        // (recordTransitionalReadiness → evaluatePendingReplacementDeadline)
+        // while the transitional clock, started by the first probe at T0,
+        // needs to EXCEED the budget — so the X2 expiry lands one 5s tick
+        // later. The two expiries are adjacent ticks, not the same probe.
+        await vi.advanceTimersByTimeAsync(5_000);
+        expect(failedRestarts()).toHaveLength(1);
+        expect(failedRestarts()[0].details).toMatchObject({
+          reason: "replacement_not_ready",
+          readiness: "not_ready",
+          identityObserved: true,
+        });
+        expect(watchdog.getStatus()).toMatchObject({
+          health: "healthy",
+          readiness: "not_ready",
+          readinessStatus: "starting",
+          replacementPending: null,
+        });
+        expect(openings()).toHaveLength(0);
+        await vi.advanceTimersByTimeAsync(5_000);
+        expect(openings()).toHaveLength(1);
+        expect(openings()[0].details).toMatchObject({ status: "starting", unreadyReason: "starting" });
+        expect(watchdog.getStatus()).toMatchObject({
+          health: "degraded",
+          degradedReason: "readiness_failing",
+          readiness: "not_ready",
+          readinessReason: expect.stringContaining("starting did not complete within"),
+          replacementPending: null,
+        });
+        expect(failedRestarts()).toHaveLength(1);
+        expect(noticesIncluding(notifier, "up but not ready")).toHaveLength(1);
+        expect(noticesIncluding(notifier, "running again")).toHaveLength(0);
+        expect(rowsOfType(insertWatchdogEvent, "recovery")).toHaveLength(0);
+        watchdog.stop();
+      });
+
       it("#87 4d. X2: `starting` past kGatewayRestartReadyTimeoutMs expires the transitional budget — a real not_ready: degraded, incident, notice, degraded-retry cadence instead of the 5s bootstrap loop; never a restart", async () => {
         vi.useFakeTimers();
         const { control, fetchImpl } = createGatewayControl();
@@ -8445,7 +8525,9 @@ describe("server/watchdog", () => {
         control.readyzFailing = [];
         await vi.advanceTimersByTimeAsync(5_000);
         expect(watchdog.getStatus()).toMatchObject({ health: "healthy", readiness: "ready" });
-        // Same key degrades again: a NEW episode, its own Doctor.
+        // Same key degrades again past the per-key Doctor floor (P2): a NEW
+        // episode, its own Doctor.
+        vi.setSystemTime(Date.now() + kAdvisoryDoctorFloorMs);
         control.readyzFailing = ["secrets"];
         await vi.advanceTimersByTimeAsync(5_000);
         await watchdog.runHealthCheck({ source: "health_timer" });
@@ -8504,10 +8586,12 @@ describe("server/watchdog", () => {
         await tick();
         expect(spawns).toHaveLength(1);
         expect(spawns[0].spawnStartedAtMs).toBe(t0);
-        // Recovery, then episode 2 degrades and its hint JOINS S1.
+        // Recovery, then episode 2 (past the per-key Doctor floor, P2)
+        // degrades and its hint JOINS S1.
         control.readyzFailing = [];
         await vi.advanceTimersByTimeAsync(5_000);
         expect(watchdog.getStatus().readiness).toBe("ready");
+        vi.setSystemTime(Date.now() + kAdvisoryDoctorFloorMs);
         control.readyzFailing = ["secrets"];
         await vi.advanceTimersByTimeAsync(5_000);
         await watchdog.runHealthCheck({ source: "health_timer" });
@@ -8739,6 +8823,55 @@ describe("server/watchdog", () => {
         expect(watchdog.getStatus()).toMatchObject({ health: "degraded", readiness: "unknown" });
         expect(rowsOfType(insertWatchdogEvent, "readiness_degraded")).toHaveLength(0);
         expect(consoleLines("superseded by #")).toHaveLength(1);
+        watchdog.stop();
+      });
+
+      it("#87 fence 4: a NEWER liveness failure during B's recovery notice discards B — B resolves false with one console line, health stays degraded, no onHealthy, no health_check/ok row", async () => {
+        const { control, fetchImpl } = createGatewayControl();
+        control.readyzFailing = ["secrets"];
+        const onHealthy = vi.fn();
+        const { watchdog, insertWatchdogEvent, notifier } = createHarness({
+          autoRepair: false,
+          fetchImpl,
+          resolveGatewayReadyzUrl: () => kReadyzUrl,
+          releaseChannelHooks: { onHealthy, onUnhealthy: vi.fn() },
+        });
+        launchEstablished(watchdog);
+        await settle();
+        expect(watchdog.getStatus()).toMatchObject({ health: "degraded", readiness: "not_ready" });
+        expect(noticesIncluding(notifier, "up but not ready")).toHaveLength(1);
+        onHealthy.mockClear();
+        // B: /health ok, /readyz ready → recovery row, then the recovery
+        // notice is HELD inside notifyOncePerIncident.
+        control.readyzFailing = [];
+        let releaseNotice = null;
+        notifier.notify.mockImplementationOnce(
+          () =>
+            new Promise((resolve) => {
+              releaseNotice = resolve;
+            }),
+        );
+        const { probe: b } = await startProbe(watchdog, "health_timer");
+        expect(typeof releaseNotice).toBe("function");
+        expect(noticesIncluding(notifier, "running again")).toHaveLength(1);
+        expect(rowsOfType(insertWatchdogEvent, "recovery")).toHaveLength(1);
+        expect(watchdog.getStatus()).toMatchObject({ health: "healthy", readiness: "ready" });
+        const okRowsBefore = rowsOfType(insertWatchdogEvent, "health_check", "ok").length;
+        // C (newer): /health fails and claims — degraded, readiness unknown.
+        control.healthy = false;
+        expect(await watchdog.runHealthCheck({ source: "tcp_transition" })).toBe(false);
+        expect(watchdog.getStatus()).toMatchObject({ health: "degraded", readiness: "unknown" });
+        control.healthy = true;
+        // B's notice completes: fence 4 discards B.
+        releaseNotice({ ok: true });
+        expect(await b).toBe(false);
+        expect(consoleLines("superseded by #")).toEqual([
+          expect.stringMatching(/probe #\d+ \(health_timer\) superseded by #\d+ — discarded/),
+        ]);
+        expect(watchdog.getStatus()).toMatchObject({ health: "degraded", readiness: "unknown" });
+        expect(onHealthy).not.toHaveBeenCalled();
+        expect(rowsOfType(insertWatchdogEvent, "health_check", "ok")).toHaveLength(okRowsBefore);
+        expect(rowsOfType(insertWatchdogEvent, "recovery")).toHaveLength(1);
         watchdog.stop();
       });
 
@@ -9036,7 +9169,9 @@ describe("server/watchdog", () => {
         expect(rowsOfType(insertWatchdogEvent, "recovery")).toHaveLength(1);
         expect(watchdog.getStatus()).toMatchObject({ health: "healthy", readiness: "unknown" });
         // The SAME components fail again in this generation: a NEW episode —
-        // second opening row, episode 2 on its advisory, degraded, notified.
+        // second opening row, episode 2 on its advisory (past the per-key
+        // Doctor floor, P2), degraded, notified.
+        vi.setSystemTime(Date.now() + kAdvisoryDoctorFloorMs);
         control.readyzThrow = null;
         await watchdog.runHealthCheck({ source: "health_timer" });
         await tick();
@@ -9057,7 +9192,9 @@ describe("server/watchdog", () => {
         expect(closings()[1].details).toEqual({ recovered: true, assumed: true, kind: "unsupported" });
         expect(rowsOfType(insertWatchdogEvent, "recovery")).toHaveLength(2);
         expect(watchdog.getStatus()).toMatchObject({ health: "healthy", readiness: "unknown", readinessProbe: "unsupported" });
-        // …and the same components afterwards are episode 3.
+        // …and the same components afterwards are episode 3 (again past the
+        // per-key Doctor floor).
+        vi.setSystemTime(Date.now() + kAdvisoryDoctorFloorMs);
         control.readyzHttpStatus = null;
         await watchdog.runHealthCheck({ source: "health_timer" });
         await tick();
@@ -9445,6 +9582,623 @@ describe("server/watchdog", () => {
         });
         expect(rowsOfType(insertWatchdogEvent, "readiness_degraded", "failed")).toHaveLength(1);
         expect(watchdog.getStatus().degradedRetry).not.toBeNull();
+        watchdog.stop();
+      });
+
+      it("#87 R7′. T2: the armed transitional recheck is cancelled by stop() and by an exit — an armed 5s shot never probes a stopped watchdog, and no `readiness_recheck` probe fires for a gateway generation that ended", async () => {
+        vi.useFakeTimers();
+        // stop()
+        const { control, fetchImpl } = createGatewayControl();
+        const { watchdog } = createHarness({
+          autoRepair: false,
+          fetchImpl,
+          resolveGatewayReadyzUrl: () => kReadyzUrl,
+        });
+        launchEstablished(watchdog);
+        await tick();
+        await vi.advanceTimersByTimeAsync(kWatchdogCheckIntervalMs);
+        expect(watchdog.getStatus()).toMatchObject({ health: "healthy", readiness: "ready" });
+        control.readyzStatus = "starting";
+        control.ready = false;
+        control.readyzHttpStatus = 503;
+        await watchdog.runHealthCheck({ source: "health_timer" });
+        expect(watchdog.getStatus()).toMatchObject({ readiness: "not_ready", readinessStatus: "starting" });
+        const readyzBefore = readyzProbeCount();
+        const fetchBefore = global.fetch.mock.calls.length;
+        watchdog.stop();
+        await vi.advanceTimersByTimeAsync(10_000);
+        expect(readyzProbeCount()).toBe(readyzBefore);
+        expect(global.fetch.mock.calls.length).toBe(fetchBefore);
+
+        // onGatewayExit (unexpected): the shot armed for the exited
+        // generation never fires; whatever the relaunch probes, nothing runs
+        // under source `readiness_recheck` and /readyz is not read again
+        // while the port is down.
+        const second = createGatewayControl();
+        const exited = createHarness({
+          autoRepair: false,
+          fetchImpl: second.fetchImpl,
+          resolveGatewayReadyzUrl: () => kReadyzUrl,
+        });
+        launchEstablished(exited.watchdog);
+        await tick();
+        await vi.advanceTimersByTimeAsync(kWatchdogCheckIntervalMs);
+        second.control.readyzStatus = "starting";
+        second.control.ready = false;
+        second.control.readyzHttpStatus = 503;
+        await exited.watchdog.runHealthCheck({ source: "health_timer" });
+        expect(exited.watchdog.getStatus()).toMatchObject({ readiness: "not_ready", readinessStatus: "starting" });
+        const rowsBefore = exited.insertWatchdogEvent.mock.calls.length;
+        const secondReadyzBefore = global.fetch.mock.calls.filter(([url]) => String(url).includes("readyz")).length;
+        second.control.healthy = false;
+        exited.watchdog.onGatewayExit({ code: 1, expectedExit: false, pid: 100 });
+        await vi.advanceTimersByTimeAsync(10_000);
+        const later = exited.insertWatchdogEvent.mock.calls.slice(rowsBefore).map(([row]) => row);
+        expect(later.filter((row) => row.source === "readiness_recheck")).toEqual([]);
+        expect(global.fetch.mock.calls.filter(([url]) => String(url).includes("readyz"))).toHaveLength(secondReadyzBefore);
+        expect(exited.watchdog.getStatus()).toMatchObject({ readiness: "unknown", readinessStatus: null });
+        exited.watchdog.stop();
+      });
+
+      it("#87 P1. the telemetry floors survive a liveness flap: one readiness_probe_error {unavailable} and one event_loop_pressure warn across /health failing and recovering inside the floors; a launch (generation change) re-arms both", async () => {
+        vi.useFakeTimers();
+        const { control, fetchImpl } = createGatewayControl();
+        control.eventLoopDegraded = true;
+        const { watchdog, insertWatchdogEvent } = createHarness({
+          autoRepair: false,
+          fetchImpl,
+          resolveGatewayReadyzUrl: () => kReadyzUrl,
+        });
+        const warns = () => rowsOfType(insertWatchdogEvent, "event_loop_pressure", "warn");
+        launchEstablished(watchdog);
+        await tick();
+        expect(watchdog.getStatus()).toMatchObject({ health: "healthy", readiness: "ready", eventLoopDegraded: true });
+        expect(warns()).toHaveLength(1);
+        // /readyz → HTTP 500: one probe-error row.
+        control.readyzHttpStatus = 500;
+        await watchdog.runHealthCheck({ source: "health_timer" });
+        expect(watchdog.getStatus()).toMatchObject({ readiness: "unknown", readinessProbe: "unavailable" });
+        expect(probeErrorRows(insertWatchdogEvent)).toHaveLength(1);
+        // Liveness flap: /health fails (the readiness AXIS resets) …
+        control.healthy = false;
+        await watchdog.runHealthCheck({ source: "health_timer" });
+        expect(watchdog.getStatus()).toMatchObject({ health: "degraded", readiness: "unknown", readinessProbe: null });
+        // … and answers again 60s later with /readyz still HTTP 500: a
+        // null→unavailable transition inside the 5-min floor — no second row.
+        control.healthy = true;
+        vi.setSystemTime(Date.now() + 60_000);
+        await watchdog.runHealthCheck({ source: "health_timer" });
+        expect(watchdog.getStatus()).toMatchObject({ health: "healthy", readinessProbe: "unavailable" });
+        expect(probeErrorRows(insertWatchdogEvent)).toHaveLength(1);
+        // The body comes back with the diagnostic still degraded: the same
+        // pressure episode (10-min floor) — no second warn.
+        control.readyzHttpStatus = null;
+        await watchdog.runHealthCheck({ source: "health_timer" });
+        expect(watchdog.getStatus()).toMatchObject({ readiness: "ready", eventLoopDegraded: true });
+        expect(warns()).toHaveLength(1);
+        // A second flap inside the floors changes nothing either.
+        control.healthy = false;
+        await watchdog.runHealthCheck({ source: "health_timer" });
+        control.healthy = true;
+        control.readyzHttpStatus = 500;
+        vi.setSystemTime(Date.now() + 60_000);
+        await watchdog.runHealthCheck({ source: "health_timer" });
+        control.readyzHttpStatus = null;
+        await watchdog.runHealthCheck({ source: "health_timer" });
+        expect(probeErrorRows(insertWatchdogEvent)).toHaveLength(1);
+        expect(warns()).toHaveLength(1);
+        // A launch is a generation change: both floors start clean.
+        control.readyzHttpStatus = 500;
+        watchdog.onGatewayLaunch({ startedAt: Date.now(), pid: 4242 });
+        await tick();
+        expect(watchdog.getStatus()).toMatchObject({ readinessProbe: "unavailable" });
+        expect(probeErrorRows(insertWatchdogEvent)).toHaveLength(2);
+        control.readyzHttpStatus = null;
+        await watchdog.runHealthCheck({ source: "health_timer" });
+        expect(warns()).toHaveLength(2);
+        watchdog.stop();
+      });
+
+      it("#87 P2. the advisory Doctor has a per-key floor (kAdvisoryDoctorFloorMs): the same failing components degrading again 1 min later spawn NO collector (console `floor`), a different key inside the floor does, and the first key 11 min after its spawn does again", async () => {
+        vi.useFakeTimers();
+        expect(kAdvisoryDoctorFloorMs).toBe(10 * 60_000);
+        const collector = vi.fn(async () => ({
+          stdout: doctorPayload([kRuntimeFinding]),
+          spawnStartedAtMs: Date.now(),
+        }));
+        const { control, fetchImpl } = createGatewayControl();
+        control.readyzFailing = ["secrets"];
+        const { watchdog, insertWatchdogEvent } = createHarness({
+          autoRepair: false,
+          fetchImpl,
+          resolveGatewayReadyzUrl: () => kReadyzUrl,
+          collectAdvisoryDoctorJson: collector,
+        });
+        const openings = () => rowsOfType(insertWatchdogEvent, "readiness_degraded", "failed");
+        const recover = async () => {
+          control.readyzFailing = [];
+          await watchdog.runHealthCheck({ source: "health_timer" });
+          expect(watchdog.getStatus()).toMatchObject({ health: "healthy", readiness: "ready" });
+        };
+        launchEstablished(watchdog);
+        await tick();
+        await tick();
+        expect(collector).toHaveBeenCalledTimes(1);
+        expect(advisoryRows(insertWatchdogEvent)).toHaveLength(1);
+        const firstSpawnAt = Date.now();
+        // Episode 2, same key, 1 min later: the verdict applies (opening row,
+        // degraded) but no spawn — one console line names the floor.
+        await recover();
+        vi.setSystemTime(firstSpawnAt + 60_000);
+        control.readyzFailing = ["secrets"];
+        await watchdog.runHealthCheck({ source: "health_timer" });
+        await tick();
+        expect(openings()).toHaveLength(2);
+        expect(watchdog.getStatus()).toMatchObject({ health: "degraded", readiness: "not_ready" });
+        expect(collector).toHaveBeenCalledTimes(1);
+        expect(consoleLines("readiness advisory dropped (floor)")).toHaveLength(1);
+        expect(advisoryRows(insertWatchdogEvent)).toHaveLength(1);
+        // A different key inside the floor (the degradation widens): spawns.
+        control.readyzFailing = ["secrets", "telegram"];
+        await watchdog.runHealthCheck({ source: "health_timer" });
+        await tick();
+        expect(collector).toHaveBeenCalledTimes(2);
+        // The first key again, 11 min after its spawn: spawns.
+        await recover();
+        vi.setSystemTime(firstSpawnAt + 11 * 60_000);
+        control.readyzFailing = ["secrets"];
+        await watchdog.runHealthCheck({ source: "health_timer" });
+        await tick();
+        expect(collector).toHaveBeenCalledTimes(3);
+        expect(consoleLines("readiness advisory dropped (floor)")).toHaveLength(1);
+        // A launch resets the floor map with the other telemetry floors.
+        await recover();
+        control.readyzFailing = ["secrets"];
+        watchdog.onGatewayLaunch({ startedAt: Date.now(), pid: 4242 });
+        await tick();
+        await tick();
+        expect(watchdog.getStatus()).toMatchObject({ readiness: "not_ready" });
+        expect(collector).toHaveBeenCalledTimes(4);
+        watchdog.stop();
+      });
+
+      it("#87 SEC1 (transport). a valid-JSON /readyz body over kReadyzBodyMaxChars is never parsed: readinessProbe malformed, readiness unknown, one readiness_probe_error {kind: malformed}; getStatus().readyzFailing is capped to the list/entry bounds", async () => {
+        const { control, fetchImpl } = createGatewayControl();
+        control.readyzBody = JSON.stringify({ ready: true, pad: "x".repeat(kReadyzBodyMaxChars) });
+        const { watchdog, insertWatchdogEvent } = createHarness({
+          autoRepair: false,
+          fetchImpl,
+          resolveGatewayReadyzUrl: () => kReadyzUrl,
+        });
+        launchEstablished(watchdog);
+        await settle();
+        expect(watchdog.getStatus()).toMatchObject({
+          health: "healthy",
+          readiness: "unknown",
+          readinessProbe: "malformed",
+        });
+        expect(probeErrorRows(insertWatchdogEvent)).toHaveLength(1);
+        expect(probeErrorRows(insertWatchdogEvent)[0].details).toMatchObject({ kind: "malformed", httpStatus: 200 });
+        control.readyzBody = null;
+        control.readyzFailing = Array.from({ length: 25 }, (_, i) => `component-${i}-${"y".repeat(200)}`);
+        await watchdog.runHealthCheck({ source: "health_timer" });
+        const status = watchdog.getStatus();
+        expect(status.readiness).toBe("not_ready");
+        expect(status.readyzFailing).toHaveLength(kReadyzListMaxEntries);
+        for (const entry of status.readyzFailing) expect(entry.length).toBeLessThanOrEqual(kReadyzEntryMaxChars);
+        expect(status.readinessReason.length).toBeLessThanOrEqual(200);
+        watchdog.stop();
+      });
+
+      // ── A1 pure classifier edges (direct) ───────────────────────────────
+      it("#87 A1 edges. classifyReadinessResponse: 405/501 are unsupported, an unparseable HTTP status is unavailable 'HTTP ?', a non-object/array body is malformed, `ready` absent + failing[] is components (compat), a bare 503 object is explicit, a transitional status wins over failing/ready:false, an unknown status is ignored, and eventLoop/reasons/delayP99Ms/suppressed normalize; the enums are exported", () => {
+        const {
+          classifyReadinessResponse,
+          kReadinessStatuses,
+          kReadinessProbeKinds,
+          kUnreadyReasons,
+        } = require("../../lib/server/watchdog");
+        expect(kReadinessStatuses).toEqual(["started", "starting", "draining"]);
+        expect(kReadinessProbeKinds).toEqual([
+          "ok",
+          "unconfigured",
+          "unsupported",
+          "unavailable",
+          "timeout",
+          "malformed",
+        ]);
+        expect(kUnreadyReasons).toEqual(["starting", "draining", "components", "explicit"]);
+        for (const httpStatus of [404, 405, 501]) {
+          expect(classifyReadinessResponse({ httpStatus, body: { ready: true } })).toEqual({
+            ok: false,
+            kind: "unsupported",
+            httpStatus,
+            reason: `gateway readyz returned HTTP ${httpStatus}`,
+          });
+        }
+        // Unparseable / absent status: unavailable, never a consumed body.
+        expect(classifyReadinessResponse({ httpStatus: undefined, body: { ready: true } })).toEqual({
+          ok: false,
+          kind: "unavailable",
+          httpStatus: null,
+          reason: "gateway readyz returned HTTP ?",
+        });
+        expect(classifyReadinessResponse({})).toMatchObject({ ok: false, kind: "unavailable", httpStatus: null });
+        expect(classifyReadinessResponse({ httpStatus: "502", body: {} })).toMatchObject({
+          kind: "unavailable",
+          httpStatus: 502,
+        });
+        // Non-object bodies (including arrays) are malformed on a 2xx/503.
+        for (const body of [null, undefined, "ready", 7, [{ ready: true }]]) {
+          expect(classifyReadinessResponse({ httpStatus: 200, body })).toMatchObject({
+            ok: false,
+            kind: "malformed",
+            httpStatus: 200,
+          });
+        }
+        expect(classifyReadinessResponse({ httpStatus: 503, body: [] })).toMatchObject({ kind: "malformed" });
+        // Compat: no `ready` field at all, failing[] present → components (coerced strings, blanks dropped).
+        expect(
+          classifyReadinessResponse({ httpStatus: 200, body: { failing: ["telegram", 7, "", null] } }),
+        ).toMatchObject({
+          ok: true,
+          kind: "not_ready",
+          ready: false,
+          unreadyReason: "components",
+          failing: ["telegram", "7"],
+          status: null,
+        });
+        // Bare 503 object → explicit; 503 + failing (no ready) → components.
+        expect(classifyReadinessResponse({ httpStatus: 503, body: {} })).toMatchObject({
+          ok: true,
+          kind: "not_ready",
+          unreadyReason: "explicit",
+          failing: [],
+        });
+        expect(classifyReadinessResponse({ httpStatus: 503, body: { failing: ["x"] } })).toMatchObject({
+          unreadyReason: "components",
+        });
+        // Transitional status takes precedence over failing[] and ready:false.
+        expect(
+          classifyReadinessResponse({
+            httpStatus: 503,
+            body: { ready: false, status: "draining", failing: ["telegram"] },
+          }),
+        ).toMatchObject({ kind: "not_ready", status: "draining", unreadyReason: "draining", failing: ["telegram"] });
+        // An unknown status string is not a phase; ready:true is authoritative even beside a failing[] list.
+        expect(classifyReadinessResponse({ httpStatus: 200, body: { ready: true, status: "booting" } })).toMatchObject({
+          kind: "ready",
+          ready: true,
+          status: null,
+          unreadyReason: null,
+        });
+        expect(classifyReadinessResponse({ httpStatus: 200, body: { ready: true, failing: ["telegram"] } })).toMatchObject(
+          { kind: "ready", failing: ["telegram"], unreadyReason: null },
+        );
+        // eventLoop normalization: non-object → null/false; degraded is coerced; reasons allowlisted; delay must be finite.
+        expect(classifyReadinessResponse({ httpStatus: 200, body: { ready: true, eventLoop: "degraded" } })).toMatchObject({
+          eventLoop: null,
+          eventLoopDegraded: false,
+        });
+        expect(classifyReadinessResponse({ httpStatus: 200, body: { ready: true, eventLoop: [{ degraded: true }] } })).toMatchObject({
+          eventLoop: null,
+          eventLoopDegraded: false,
+        });
+        expect(
+          classifyReadinessResponse({
+            httpStatus: 200,
+            body: { ready: true, eventLoop: { degraded: 1, reasons: "cpu", delayP99Ms: "812" } },
+          }),
+        ).toMatchObject({ eventLoopDegraded: true, eventLoop: { reasons: [], delayP99Ms: null } });
+        expect(
+          classifyReadinessResponse({
+            httpStatus: 200,
+            body: {
+              ready: true,
+              eventLoop: { degraded: false, reasons: ["cpu", "event_loop_delay", "bogus"], delayP99Ms: 12.5 },
+            },
+          }),
+        ).toMatchObject({ eventLoopDegraded: false, eventLoop: { reasons: ["cpu", "event_loop_delay"], delayP99Ms: 12.5 } });
+        // suppressed[] is coerced like failing[]; a non-array is empty.
+        expect(
+          classifyReadinessResponse({ httpStatus: 200, body: { ready: true, suppressed: ["telegram", null, 3] } }),
+        ).toMatchObject({ suppressed: ["telegram", "3"] });
+        expect(classifyReadinessResponse({ httpStatus: 200, body: { ready: true, suppressed: "telegram" } })).toMatchObject({
+          suppressed: [],
+        });
+        // SEC1: gateway-controlled lists and bodies are bounded — 20 entries
+        // per list, 100 chars per entry, and a body over 64 KB is malformed
+        // from its size alone (before any parse); 404 still wins over size.
+        expect([kReadyzListMaxEntries, kReadyzEntryMaxChars, kReadyzBodyMaxChars]).toEqual([20, 100, 64 * 1024]);
+        const many = Array.from({ length: 25 }, (_, i) => `component-${i}`);
+        const capped = classifyReadinessResponse({
+          httpStatus: 200,
+          body: { ready: false, failing: many, suppressed: many },
+        });
+        expect(capped.failing).toEqual(many.slice(0, 20));
+        expect(capped.suppressed).toEqual(many.slice(0, 20));
+        expect(capped).toMatchObject({ kind: "not_ready", unreadyReason: "components" });
+        expect(
+          classifyReadinessResponse({ httpStatus: 200, body: { ready: false, failing: ["x".repeat(500)] } }).failing,
+        ).toEqual(["x".repeat(100)]);
+        // Empty entries do not consume list slots.
+        expect(
+          classifyReadinessResponse({ httpStatus: 200, body: { ready: false, failing: ["", null, ...many] } }).failing,
+        ).toEqual(many.slice(0, 20));
+        expect(
+          classifyReadinessResponse({ httpStatus: 200, body: { ready: true }, rawBodyChars: kReadyzBodyMaxChars + 1 }),
+        ).toMatchObject({ ok: false, kind: "malformed", httpStatus: 200, reason: expect.stringContaining("over") });
+        expect(
+          classifyReadinessResponse({ httpStatus: 503, body: null, rawBodyChars: kReadyzBodyMaxChars + 1 }),
+        ).toMatchObject({ ok: false, kind: "malformed", httpStatus: 503 });
+        expect(
+          classifyReadinessResponse({ httpStatus: 200, body: { ready: true }, rawBodyChars: kReadyzBodyMaxChars }),
+        ).toMatchObject({ ok: true, kind: "ready" });
+        expect(classifyReadinessResponse({ httpStatus: 404, body: null, rawBodyChars: 1e7 }).kind).toBe("unsupported");
+        expect(classifyReadinessResponse({ httpStatus: 500, body: null, rawBodyChars: 1e7 }).kind).toBe("unavailable");
+      });
+
+      // ── 4f. unconfigured readyz URL ─────────────────────────────────────
+      it("#87 4f. `unconfigured`: an empty readyz URL reads readiness unknown with readinessProbe unconfigured — no /readyz fetch, no probe-error row, no held row, no hold; while a readiness episode is open, losing the URL fails open at once with readiness_degraded ok {assumed, kind:'unconfigured'} and recovery", async () => {
+        vi.useFakeTimers();
+        const { control, fetchImpl } = createGatewayControl();
+        let readyzUrl = "";
+        const { watchdog, insertWatchdogEvent, notifier } = createHarness({
+          autoRepair: false,
+          fetchImpl,
+          resolveGatewayReadyzUrl: () => readyzUrl,
+        });
+        launchEstablished(watchdog);
+        await tick();
+        expect(watchdog.getStatus()).toMatchObject({
+          health: "healthy",
+          readiness: "unknown",
+          readinessReason: null,
+          readinessStatus: null,
+          readinessProbe: "unconfigured",
+        });
+        expect(readyzProbeCount()).toBe(0);
+        expect(probeErrorRows(insertWatchdogEvent)).toHaveLength(0);
+        expect(pendingRows(insertWatchdogEvent, "readinessPending")).toHaveLength(0);
+        expect(rowsOfType(insertWatchdogEvent, "readiness_degraded")).toHaveLength(0);
+        // The URL appears and names failing components: a real episode opens.
+        readyzUrl = kReadyzUrl;
+        control.readyzFailing = ["secrets"];
+        await watchdog.runHealthCheck({ source: "health_timer" });
+        expect(watchdog.getStatus()).toMatchObject({
+          health: "degraded",
+          readiness: "not_ready",
+          readinessReason: "secrets",
+          readinessProbe: "ok",
+        });
+        expect(rowsOfType(insertWatchdogEvent, "readiness_degraded", "failed")).toHaveLength(1);
+        expect(noticesIncluding(notifier, "up but not ready")).toHaveLength(1);
+        const pendingBefore = pendingRows(insertWatchdogEvent, "readinessPending").length;
+        // The URL vanishes mid-episode: unconfigured is not a transport kind —
+        // no X1 hold, fail open at once with the assumed-recovery closing row.
+        readyzUrl = "";
+        const probesBefore = readyzProbeCount();
+        await watchdog.runHealthCheck({ source: "health_timer" });
+        expect(readyzProbeCount()).toBe(probesBefore);
+        const closings = rowsOfType(insertWatchdogEvent, "readiness_degraded", "ok");
+        expect(closings).toHaveLength(1);
+        expect(closings[0].details).toEqual({ recovered: true, assumed: true, kind: "unconfigured" });
+        expect(rowsOfType(insertWatchdogEvent, "recovery")).toHaveLength(1);
+        expect(watchdog.getStatus()).toMatchObject({
+          health: "healthy",
+          degradedReason: null,
+          degradedRetry: null,
+          readiness: "unknown",
+          readinessReason: null,
+          readinessProbe: "unconfigured",
+        });
+        expect(probeErrorRows(insertWatchdogEvent)).toHaveLength(0);
+        expect(pendingRows(insertWatchdogEvent, "readinessProbe")).toHaveLength(0);
+        expect(pendingRows(insertWatchdogEvent, "readinessPending")).toHaveLength(pendingBefore);
+        watchdog.stop();
+      });
+
+      // ── R2′. thrown readiness evaluation while an episode is open ───────
+      it("#87 R2′. a THROWING readiness evaluation while a readiness episode is open fails open with its own closing row {recovered, assumed, kind:'error'} plus one readiness_probe_error {error}; recovery proceeds, health/degradedReason clear, and the same failing components afterwards are a NEW episode (second opening row, second notice)", async () => {
+        vi.useFakeTimers();
+        const { control, fetchImpl } = createGatewayControl();
+        control.readyzFailing = ["secrets"];
+        let explode = false;
+        const { watchdog, insertWatchdogEvent, notifier } = createHarness({
+          autoRepair: false,
+          fetchImpl,
+          resolveGatewayReadyzUrl: () => {
+            if (explode) throw new Error("readyz resolver exploded");
+            return kReadyzUrl;
+          },
+        });
+        const openings = () => rowsOfType(insertWatchdogEvent, "readiness_degraded", "failed");
+        const closings = () => rowsOfType(insertWatchdogEvent, "readiness_degraded", "ok");
+        launchEstablished(watchdog);
+        await tick();
+        expect(watchdog.getStatus()).toMatchObject({
+          health: "degraded",
+          degradedReason: "readiness_failing",
+          readiness: "not_ready",
+          readinessReason: "secrets",
+        });
+        expect(openings()).toHaveLength(1);
+        expect(noticesIncluding(notifier, "up but not ready")).toHaveLength(1);
+        explode = true;
+        await watchdog.runHealthCheck({ source: "health_timer" });
+        expect(closings()).toHaveLength(1);
+        expect(closings()[0].details).toEqual({ recovered: true, assumed: true, kind: "error" });
+        const errorRows = probeErrorRows(insertWatchdogEvent);
+        expect(errorRows).toHaveLength(1);
+        expect(errorRows[0].details.error).toContain("readyz resolver exploded");
+        expect(rowsOfType(insertWatchdogEvent, "recovery")).toHaveLength(1);
+        expect(watchdog.getStatus()).toMatchObject({
+          health: "healthy",
+          degradedReason: null,
+          readiness: "unknown",
+          readinessReason: null,
+        });
+        // The same components afterwards: episode 2 with its own opening row and notice — not an early return.
+        explode = false;
+        await watchdog.runHealthCheck({ source: "health_timer" });
+        expect(openings()).toHaveLength(2);
+        expect(openings()[1].details).toMatchObject({ failing: ["secrets"], unreadyReason: "components", reason: "secrets" });
+        expect(noticesIncluding(notifier, "up but not ready")).toHaveLength(2);
+        expect(watchdog.getStatus()).toMatchObject({ health: "degraded", readiness: "not_ready" });
+        watchdog.stop();
+      });
+
+      // ── 5c. X1 hold while the phase is transitional ─────────────────────
+      it("#87 5c. X1 while transitional: 503 starting (outside the bootstrap loop) then /readyz unreadable → the hold keeps health healthy (no degraded write, no retry loop), readiness stays not_ready/starting with readinessProbe unavailable, one deduped held row {readinessProbe}, one probe-error row, and the 5s recheck cadence carries the hold until `started` reads ready — no incident, no recovery row, no notice", async () => {
+        vi.useFakeTimers();
+        const { control, fetchImpl } = createGatewayControl();
+        const { watchdog, insertWatchdogEvent, notifier } = createHarness({
+          autoRepair: false,
+          fetchImpl,
+          resolveGatewayReadyzUrl: () => kReadyzUrl,
+        });
+        launchEstablished(watchdog);
+        await tick();
+        expect(watchdog.getStatus()).toMatchObject({ health: "healthy", readiness: "ready" });
+        control.readyzStatus = "starting";
+        control.ready = false;
+        control.readyzHttpStatus = 503;
+        await watchdog.runHealthCheck({ source: "health_timer" });
+        expect(watchdog.getStatus()).toMatchObject({
+          health: "healthy",
+          readiness: "not_ready",
+          readinessReason: "starting",
+          readinessStatus: "starting",
+          readinessProbe: "ok",
+        });
+        // /readyz becomes unreadable while the phase is still `starting`.
+        control.readyzThrow = new Error("connect ECONNREFUSED");
+        await watchdog.runHealthCheck({ source: "health_timer" });
+        expect(watchdog.getStatus()).toMatchObject({
+          health: "healthy",
+          degradedReason: null,
+          degradedRetry: null,
+          readiness: "not_ready",
+          readinessReason: "starting",
+          readinessStatus: "starting",
+          readinessProbe: "unavailable",
+        });
+        const held = pendingRows(insertWatchdogEvent, "readinessProbe");
+        expect(held).toHaveLength(1);
+        expect(held[0].details).toMatchObject({
+          readinessPending: true,
+          readinessProbe: "unavailable",
+          readinessReason: "readiness probe unavailable",
+        });
+        expect(probeErrorRows(insertWatchdogEvent)).toHaveLength(1);
+        expect(probeErrorRows(insertWatchdogEvent)[0].details).toMatchObject({ kind: "unavailable" });
+        expect(rowsOfType(insertWatchdogEvent, "readiness_degraded")).toHaveLength(0);
+        expect(rowsOfType(insertWatchdogEvent, "recovery")).toHaveLength(0);
+        expect(notifier.notify).not.toHaveBeenCalled();
+        // The recheck cadence carries the hold: exactly one /readyz attempt per 5s.
+        let before = readyzProbeCount();
+        await vi.advanceTimersByTimeAsync(4_999);
+        expect(readyzProbeCount()).toBe(before);
+        await vi.advanceTimersByTimeAsync(1);
+        expect(readyzProbeCount()).toBe(before + 1);
+        expect(watchdog.getStatus()).toMatchObject({
+          health: "healthy",
+          readiness: "not_ready",
+          readinessReason: "starting",
+          readinessProbe: "unavailable",
+        });
+        // Still one held row (deduped), still one probe-error row (same kind).
+        expect(pendingRows(insertWatchdogEvent, "readinessProbe")).toHaveLength(1);
+        expect(probeErrorRows(insertWatchdogEvent)).toHaveLength(1);
+        // `started` answers on the next recheck: ready, cadence over, nothing to recover.
+        control.readyzThrow = null;
+        control.readyzStatus = "started";
+        control.ready = null;
+        control.readyzHttpStatus = 200;
+        await vi.advanceTimersByTimeAsync(5_000);
+        expect(watchdog.getStatus()).toMatchObject({
+          health: "healthy",
+          readiness: "ready",
+          readinessReason: null,
+          readinessStatus: "started",
+          readinessProbe: "ok",
+        });
+        expect(rowsOfType(insertWatchdogEvent, "recovery")).toHaveLength(0);
+        expect(rowsOfType(insertWatchdogEvent, "readiness_degraded")).toHaveLength(0);
+        expect(notifier.notify).not.toHaveBeenCalled();
+        before = readyzProbeCount();
+        await vi.advanceTimersByTimeAsync(30_000);
+        expect(readyzProbeCount()).toBe(before);
+        watchdog.stop();
+      });
+
+      // ── 7c. collector answer shapes ─────────────────────────────────────
+      it("#87 7c. a collector answer without spawnStartedAtMs ({ stdout } only) attaches with doctorStartedAt null (no staleness check); a collector answer that is neither string nor object is dropped as unusable — one console line, no row, verdict untouched", async () => {
+        vi.useFakeTimers();
+        const collector = vi.fn(async () => ({ stdout: doctorPayload([kRuntimeFinding]) }));
+        const { control, fetchImpl } = createGatewayControl();
+        control.readyzFailing = ["secrets"];
+        const { watchdog, insertWatchdogEvent } = createHarness({
+          autoRepair: false,
+          fetchImpl,
+          resolveGatewayReadyzUrl: () => kReadyzUrl,
+          collectAdvisoryDoctorJson: collector,
+        });
+        launchEstablished(watchdog);
+        await tick();
+        await tick();
+        expect(advisoryRows(insertWatchdogEvent)).toHaveLength(1);
+        expect(advisoryRows(insertWatchdogEvent)[0].details).toMatchObject({
+          doctorStartedAt: null,
+          episode: 1,
+          finding: { checkId: "gateway.probe_auth_secretref_unavailable", kind: "runtime" },
+        });
+        // Recover, then re-degrade (past the per-key Doctor floor, P2) with a
+        // collector that hands back a number.
+        control.readyzFailing = [];
+        await watchdog.runHealthCheck({ source: "health_timer" });
+        expect(watchdog.getStatus()).toMatchObject({ health: "healthy", readiness: "ready" });
+        collector.mockImplementation(async () => 42);
+        vi.setSystemTime(Date.now() + kAdvisoryDoctorFloorMs);
+        control.readyzFailing = ["secrets"];
+        await watchdog.runHealthCheck({ source: "health_timer" });
+        await tick();
+        expect(collector).toHaveBeenCalledTimes(2);
+        expect(advisoryRows(insertWatchdogEvent)).toHaveLength(1);
+        expect(consoleLines("readiness advisory dropped (unusable)")).toHaveLength(1);
+        expect(rowsOfType(insertWatchdogEvent, "readiness_degraded", "failed")).toHaveLength(2);
+        expect(watchdog.getStatus()).toMatchObject({ health: "degraded", readiness: "not_ready" });
+        watchdog.stop();
+      });
+
+      // ── B2′. clawCmd fallback through the CLI classifier ────────────────
+      it("#87 B2′. the clawCmd fallback runs `doctor --lint --json` (quiet, 20s) through the CLI classifier: a failing exit with stderr-only output is not usable — dropped (unusable), no readiness_advisory row, while the verdict was already applied (degraded, opening row, notice)", async () => {
+        vi.useFakeTimers();
+        const clawCmdImpl = vi.fn(async (command) =>
+          command.startsWith("doctor --lint --json")
+            ? { ok: false, code: 1, stdout: "", stderr: "Error: doctor exploded\n" }
+            : { ok: true, stdout: "" },
+        );
+        const { control, fetchImpl } = createGatewayControl();
+        control.readyzFailing = ["secrets"];
+        const { watchdog, insertWatchdogEvent, notifier } = createHarness({
+          autoRepair: false,
+          fetchImpl,
+          resolveGatewayReadyzUrl: () => kReadyzUrl,
+          clawCmdImpl,
+        });
+        launchEstablished(watchdog);
+        await tick();
+        await tick();
+        const doctorCalls = clawCmdImpl.mock.calls.filter(([cmd]) => String(cmd).startsWith("doctor"));
+        expect(doctorCalls).toHaveLength(1);
+        expect(doctorCalls[0][0]).toBe("doctor --lint --json");
+        expect(doctorCalls[0][1]).toMatchObject({ quiet: true, timeoutMs: 20000 });
+        expect(advisoryRows(insertWatchdogEvent)).toHaveLength(0);
+        expect(consoleLines("readiness advisory dropped (unusable)")).toHaveLength(1);
+        expect(rowsOfType(insertWatchdogEvent, "readiness_degraded", "failed")).toHaveLength(1);
+        expect(noticesIncluding(notifier, "up but not ready")).toHaveLength(1);
+        expect(watchdog.getStatus()).toMatchObject({ health: "degraded", readiness: "not_ready" });
         watchdog.stop();
       });
     });

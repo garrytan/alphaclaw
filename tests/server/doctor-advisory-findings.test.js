@@ -220,6 +220,37 @@ describe("#87 server/doctor/advisory-findings", () => {
     );
   });
 
+  it("#87 SEC: a token-shaped value inside `detail` is masked by shape (redactSecretShapes) even when no store knows it — after the strip, before the cap", () => {
+    const anthropicShaped = "sk-ant-" + "a1B2c3D4e5".repeat(4);
+    const jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.abcdefghijklmnop";
+    const finding = extractSecretRuntimeFinding(
+      payloadOf({
+        ...secretRefUnavailable,
+        detail: `SecretRef resolved to ${anthropicShaped} (Bearer ${jwt}) but the provider rejected it`,
+      }),
+    );
+    expect(finding.message).not.toContain(anthropicShaped);
+    expect(finding.message).not.toContain(jwt);
+    expect(finding.message).toContain("SecretRef resolved to ***");
+    expect(finding.message).toContain("but the provider rejected it");
+    // A token straddling the cap is masked whole, never leaked as a prefix.
+    // Prefix 23 + 165 + 1 = 189 chars: the token starts inside the 200 cap
+    // and runs past it, so a cap-first pipeline would keep a token prefix.
+    const padded = "SecretRef unavailable: " + "x".repeat(165) + " " + anthropicShaped;
+    const capped = extractSecretRuntimeFinding(
+      payloadOf({ ...secretRefUnavailable, detail: padded }),
+    );
+    expect(capped.message.length).toBeLessThanOrEqual(200);
+    expect(capped.message).not.toContain("sk-ant-a1B2");
+    // The injected sanitizer still runs (value redaction) alongside the shape pass.
+    const { sanitize } = createDoctorTextSanitizer({ env: { GATEWAY_AUTH_TOKEN: "tok-live-abcdef123456" } });
+    const both = classifySecretFindings(
+      payloadOf({ ...secretRefUnavailable, detail: `tok-live-abcdef123456 and ${anthropicShaped}` }),
+      { sanitize },
+    ).finding;
+    expect(both.message).toBe("[redacted] and ***");
+  });
+
   it('#87 a checkId outside the structural pattern is reported as "unknown"', () => {
     // Spaces / markup: secret-related (matches /secretref/) but not structural.
     const markup = extractSecretRuntimeFinding(
@@ -287,5 +318,38 @@ describe("#87 server/doctor/advisory-findings", () => {
         payloadOf({ checkId: "gateway.probe_unavailable", severity: "error", detail: "down" }),
       ),
     ).toBeNull();
+  });
+
+  it("#87 caps the hygiene id list at 10 distinct structural ids (deduped, first-seen order) and skips entries whose checkId is not a string, whose severity is unknown, or that are not objects at all", () => {
+    const hygiene = Array.from({ length: 12 }, (_, i) => ({
+      checkId: `config.secrets.plaintext_${i}`,
+      severity: "warn",
+      title: `Hygiene ${i}`,
+    }));
+    const result = classifySecretFindings(
+      payloadOf(
+        ...hygiene,
+        hygiene[0], // duplicate of an already-listed id
+        { checkId: 42, severity: "critical", detail: "secret unavailable" }, // non-string id: not a secret finding
+        { ...secretRefUnavailable, severity: "weird" }, // unknown severity: never an advisory
+        { ...secretRefUnavailable, severity: "info" }, // info: never an advisory
+        "gateway.probe_auth_secretref_unavailable", // string entry: ignored
+        null,
+        [secretRefUnavailable], // array entry: ignored
+      ),
+    );
+    expect(result.finding).toBeNull();
+    expect(result.reason).toBe("hygiene_only");
+    expect(result.hygieneCheckIds).toHaveLength(10);
+    expect(result.hygieneCheckIds).toEqual(hygiene.slice(0, 10).map((finding) => finding.checkId));
+    expect(extractSecretRuntimeFinding(payloadOf({ checkId: 42, severity: "critical", detail: "secret unavailable" }))).toBeNull();
+    // A findings payload that is not an array of findings is no payload.
+    expect(classifySecretFindings(JSON.stringify({ ok: false, findings: "none" }))).toMatchObject({
+      finding: null,
+      reason: "no_payload",
+      hygieneCheckIds: [],
+    });
+    expect(classifySecretFindings("")).toMatchObject({ finding: null, reason: "no_payload" });
+    expect(classifySecretFindings(null)).toMatchObject({ finding: null, reason: "no_payload" });
   });
 });

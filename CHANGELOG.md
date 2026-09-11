@@ -72,10 +72,15 @@ detection are untouched.
   (`gateway.probe_auth_secretref_unavailable`, or a `core/doctor/gateway-*`
   finding naming a SecretRef) becomes evidence; plaintext-secret hygiene
   findings never do. `checkId` must be structural and the message passes the
-  Doctor text sanitizer (control characters stripped, secret values redacted,
-  200-character cap). The fallback no longer spawns bare `doctor --json`
-  (forbidden by the context contract) — it runs `doctor --lint --json`
-  through the shared CLI classifier and keeps usable output only.
+  Doctor text sanitizer (control characters stripped, secret values redacted)
+  and the shape redactor (token-shaped values masked), then the 200-character
+  cap. The fallback no longer spawns bare `doctor --json` (forbidden by the
+  context contract) — it runs `doctor --lint --json` through the shared CLI
+  classifier and keeps usable output only. One collector run per
+  failing-component key per 10 minutes (`kAdvisoryDoctorFloorMs`): a
+  same-key episode inside the floor applies its verdict as usual but logs
+  `readiness advisory dropped (floor)` instead of spawning; the floor resets
+  with the gateway generation.
 - **Overseer reviews are admitted and classified from incident state, not
   from wording.** A settled incident that recovered with no watchdog action,
   or settled more than 60 minutes ago, is marked `skipped` (reason
@@ -102,7 +107,10 @@ detection are untouched.
   or closes an incident) — and `event_loop_pressure` (`warn {reasons[],
   delayP99Ms}` once per episode with a 10-minute floor, `ok {durationMs}`
   when a logged episode ends; reasons allowlisted to `event_loop_delay` /
-  `event_loop_utilization` / `cpu`). The incident timeline phrases them
+  `event_loop_utilization` / `cpu`). The telemetry floors survive a liveness
+  flap (a failed `/health` resets the readiness axis only) and reset on a
+  gateway generation change (launch, exit, adoption, expected restart, stop).
+  The incident timeline phrases them
   ("doctor: <checkId> (<severity>)", "event loop under pressure: …", "event
   loop recovered") alongside the new liveness phrases "up, still starting",
   "up, draining" and "up, readiness probe <kind>".
@@ -110,7 +118,12 @@ detection are untouched.
   how the last `/readyz` read went (`ok | unconfigured | unsupported |
   unavailable | timeout | malformed`) and what the body said (`started |
   starting | draining`). `readiness_probe_error` rows are written once per
-  kind transition with a 5-minute per-kind floor instead of once per probe.
+  kind transition with a 5-minute per-kind floor that survives liveness
+  flaps and resets with the gateway generation (previously a transport error
+  on `/readyz` wrote no row at all). Gateway-controlled `/readyz` content is
+  bounded before it reaches state or rows: 20 entries × 100 characters per
+  `failing[]` / `suppressed[]` list, and a body over 64 KB reads `malformed`
+  without being parsed.
   The gateway card reads "Up — channels still starting." / "Up — draining."
   while readiness is transitional. Runbook: docs/upgrade-troubleshooting.md
   "Gateway is up but not ready" now distinguishes unknown, starting/draining,
@@ -119,9 +132,11 @@ detection are untouched.
   reason, manual: false, at }`; one write attempt per incident per process),
   the `kAutoReviewMaxAgeMs` (60 min) admission bound, and `notifyDecision`
   (`eligible | incident_changed | ineligible_now | not_steady_state`) /
-  `notifyOutcome` (`sent | suppressed:<reason> | failed | not_attempted`) on
-  every automatic review record — enums, visible through
-  `GET /api/watchdog/incidents/:id`.
+  `notifyOutcome` (`sent | held | suppressed:<reason> | failed |
+  not_attempted`; `sent` means accepted by the notifier — queued to the
+  durable outbox, which owns delivery — `held` is a notice the notifier
+  parked, and a policy suppression is never `failed`) on every automatic
+  review record — enums, visible through `GET /api/watchdog/incidents/:id`.
 ## [0.9.83] - 2026-09-10
 
 ### Fixed

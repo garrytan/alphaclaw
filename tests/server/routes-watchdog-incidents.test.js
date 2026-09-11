@@ -136,7 +136,7 @@ describe("GET /api/watchdog/incidents/:id", () => {
       current.notifyDecision,
     );
     expect(typeof current.notifyOutcome).toBe("string");
-    expect(current.notifyOutcome).toMatch(/^(sent|suppressed:[a-z_]+|failed|not_attempted)$/);
+    expect(current.notifyOutcome).toMatch(/^(sent|held|suppressed:[a-z_]+|failed|not_attempted)$/);
     // A skipped marker (no verdict) is exposed the same way.
     deps.incidentsDb.getIncidentById = vi.fn(() => ({
       id: 7,
