@@ -577,31 +577,70 @@ offline copy refuses to run when the stop was not confirmed.
 ## Gateway is up but not ready
 
 **What it means:** the watchdog reports `readiness: "not_ready"` with a
-`readinessReason` naming the failing components (event
+`readinessReason` naming the failing components (or `ready:false`; event
 `readiness_degraded`, `degradedReason: readiness_failing`, ledger rows
 `health_check/ok {readinessPending: true}` collapsed into one row plus a
 count, notification "🟡 Gateway is up but not ready — <components>" once per
-incident). The port answers and `/health` is green, but OpenClaw's `/readyz`
-says one or more components (secrets, a channel, a plugin) have not come up.
-Since v0.9.75 AlphaClaw treats this as degraded, not recovered: no "Gateway
-running again" notice, the incident stays open (a `gateway_readiness`
-incident opens when none is), the release-channel acceptance hook is NOT
-credited (a green-`/health`, failing-`/readyz` build cannot be promoted to
-last-known-good), and a pending replacement is not verified. Readiness alone
-never triggers `doctor --fix` or a restart — the degraded-repair counter
-counts liveness failures only.
+incident). The port answers and `/health` is green, but OpenClaw's own
+`/readyz` verdict says the gateway is not ready — one or more components
+(secrets, a channel, a plugin) have not come up, or the body says
+`ready: false` outright. Since v0.9.75 AlphaClaw treats this as degraded, not
+recovered: no "Gateway running again" notice, the incident stays open (a
+`gateway_readiness` incident opens when none is), the release-channel
+acceptance hook is NOT credited (a green-`/health`, failing-`/readyz` build
+cannot be promoted to last-known-good), and a pending replacement is not
+verified. Readiness alone never triggers `doctor --fix` or a restart — the
+degraded-repair counter counts liveness failures only.
+
+Since #87 the verdict is OpenClaw's, not AlphaClaw's. The `eventLoop`
+diagnostic in the `/readyz` body ("event loop under pressure" in the
+timeline, `event_loop_pressure` rows, `eventLoopDegraded` on status) is
+telemetry and never opens a readiness incident on its own — upstream
+documents that it "does not change the readiness result by itself"; the
+Watchdog tab's gateway-health card shows pressure under a neutral LOAD label,
+never the DEGRADED badge, unless `/readyz` components are also failing. Only
+the newest COMPLETED probe writes a verdict, so a slow older probe (or a Doctor
+run started for an earlier degradation) can no longer reopen an incident the
+gateway already recovered from; a superseded probe leaves one
+`[watchdog] probe #N (<source>) superseded …` console line and nothing else.
+
+**Read the two status fields first.** `GET /api/watchdog/status` carries
+`readinessProbe` (how the last `/readyz` read went: `ok | unconfigured |
+unsupported | unavailable | timeout | malformed`) and `readinessStatus` (what
+the body said: `started | starting | draining`). With `readiness` they
+separate five situations that used to all read as "not ready" or "unknown":
+
+| `readiness` | `readinessProbe` | `readinessStatus` | Meaning | Timeline / card |
+|---|---|---|---|---|
+| `unknown` | `unconfigured`, `unsupported` (404/405/501) or `null` | — | `/readyz` was not consulted, or this gateway does not serve it. Recovery is decided from `/health` alone; nothing is logged. | plain "up" |
+| `not_ready` | `ok` | `starting` or `draining` | **Transitional** — the gateway itself says it is still coming up (or shutting down). NOT an incident, NOT degraded: no notice, no `degradedReason`, no acceptance credit; the watchdog re-probes every 5 s (the bootstrap loop, or a single-shot `readiness_recheck` probe outside it) and a pending replacement is not certified yet. Bounded by the ready budget (`GATEWAY_RESTART_READY_TIMEOUT`, default 300 s): past it the same body becomes a real not-ready with `readinessReason: "starting did not complete within 300s"`. A liveness flap in the middle of the phase neither restarts that budget nor lets the next `/readyz` probe error announce recovery (the hold below keeps this row's flavour: health stays healthy, the 5 s cadence continues). An explicit `ready: true` beside such a status is not transitional — it is ready, and the status is telemetry only. | "up, still starting" / "up, draining"; card reason "Up — channels still starting." / "Up — draining." |
+| `not_ready` | `ok` | `started` or `null` | **Real not-ready** — `/readyz` names failing components or says `ready: false`. This is the incident described above; `readinessReason` names the components. The detached Doctor may add ONE `readiness_advisory` row ("doctor: <checkId> (<severity>)") when OpenClaw's Doctor reports a runtime secret failure (e.g. `gateway.probe_auth_secretref_unavailable`) — evidence, never a trigger; it runs at most once per failing-component key per 10 min and at most once per 2 min per gateway generation regardless of key, so neither a flapping `/readyz` nor rotating component names can spawn a Doctor on every transition. | "up, not ready"; Running with issues |
+| `not_ready` (or `unknown` right after a liveness flap) | `unavailable`, `timeout` or `malformed` | last value | **Probe error while not ready — recovery held.** The last `/readyz` CONSUMED in this gateway generation said not ready — the open degradation episode, which survives a liveness flap (a failed `/health` in between resets `readiness` to `unknown` but not the episode) and ends only with a ready body, a fail-open or a gateway generation change (a relaunch starts a new episode); or a `starting` / `draining` body still inside its budget, whose clock survives a flap the same way (that hold keeps health healthy and the 5 s cadence instead of degrading) — and this one could not be read (connection refused, 5 s timeout, unparseable body). The watchdog does NOT assume recovery: the incident stays open, health stays degraded and the 5→30 s retry ladder keeps probing; one `readiness_probe_error {kind}` row per kind transition (5-min floor per kind; the floor survives a liveness flap and resets with the gateway generation). Bounded by the same ready budget, after which it fails open with `readiness_probe_error {kind, recoveryAssumed: true, heldMs}`, readiness becomes `unknown` and the degradation episode is closed (`readiness_degraded ok {recovered, assumed, kind}`) — the same components afterwards open a new incident. The recovery notice then reads "🟢 Gateway running again — readiness unverified" (a ready body would have given the plain notice). | "up, readiness probe <kind>" |
+| `unknown` | `unavailable`, `timeout` or `malformed` | — | Probe error with NO open degradation episode in this gateway generation (a fresh or relaunched gateway, or one whose last consumed `/readyz` was ready): fails open as before — one `readiness_probe_error` row, recovery is not blocked. | plain "up" |
 
 **Why it happens:** a channel token that fails auth, a plugin whose
-provider is unreachable, a secrets backend that is slow to answer. Upstream
-keeps serving the rest of the gateway meanwhile, which is why the port and
-`/health` look fine.
+provider is unreachable, a secrets backend that is slow to answer (a beta
+gateway STARTS degraded instead of refusing when a SecretRef cannot be
+resolved — the `readiness_advisory` row names the finding). Upstream keeps
+serving the rest of the gateway meanwhile, which is why the port and
+`/health` look fine. A `starting` body that persists after a relaunch
+usually means a slow plugin or channel init; a `draining` body means
+OpenClaw is shutting the gateway down (a restart it requested, or an
+operator stop) and a relaunch will follow.
 
-**Next steps:** read `readinessReason` on `GET /api/watchdog/status` (or the
-gateway card's reason line) and check the named component in the gateway log.
-The incident closes on its own on the first probe where `/readyz` is green
-again — that tick emits the normal recovery row and notice. An unreachable
-`/readyz` (transport error, thrown evaluation) is `readiness: "unknown"`
-with a `readiness_probe_error` row and does not block recovery.
+**Next steps:** read `readinessReason`, `readinessProbe` and
+`readinessStatus` on `GET /api/watchdog/status` (or the gateway card's reason
+line) and check the named component in the gateway log; a `readiness_advisory`
+row in the incident timeline points at the Doctor finding (`checkId`,
+severity, a sanitized message). The incident closes on its own on the first
+probe where `/readyz` is green again — that tick emits the normal recovery
+row and notice. While the timeline says "up, readiness probe unavailable" or
+"… timeout", check that the gateway's `/readyz` URL is reachable from
+AlphaClaw (auth, port, TLS) — the hold releases the moment one `/readyz` is
+read, whatever it says. Event-loop pressure rows alone ("event loop under
+pressure: event loop delay") are a load signal, not a readiness failure:
+check recent gateway restarts and workspace size (README "Health checks" ops
+note).
 
 ## Control UI shows "Styles failed to load"
 
@@ -1041,10 +1080,14 @@ and the pause never act).
   `handed_over` when a rung fell through), the `repair/structural/*` rows
   with their `plan[]`, and the `repair/<source>/skipped` reasons
   `repair_attempts_exhausted`, `auto_repair_paused` and `version_mismatch`
-  plus `restart/<source>/skipped {version_mismatch}`; `crash` rows carry
+  plus `restart/<source>/skipped {version_mismatch}`; since #87 also
+  `readiness_advisory` (the detached Doctor's structured finding on an open
+  readiness incident, `warn`) and `event_loop_pressure` (`warn | ok`
+  telemetry — never an incident); `crash` rows carry
   `cause` + `fingerprint`).
 - **Watchdog status:** `GET /api/watchdog/status` — `readiness` /
-  `readinessReason`, `servingPid` / `servingRootPid` / `supervisionMode`,
+  `readinessReason` (since #87 also `readinessProbe` / `readinessStatus` —
+  see "Gateway is up but not ready"), `servingPid` / `servingRootPid` / `supervisionMode`,
   `replacementPending`, `lastRepairVerdict`, `degradedRepairThreshold`,
   `incumbentConflict` (kind, holder pid/role) and `incumbentGraceUntil`;
   since v0.9.77 `versionMismatch` (`{ expected, running, source,
