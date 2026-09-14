@@ -20,6 +20,15 @@ detection are untouched.
 
 ### Fixed
 
+- **Update-run ordering no longer depends on directory listing order.** Two
+  ledger runs created inside the same millisecond (an update and a backup, or
+  two back-to-back backups) tied on `startedAt`, and "latest run" — the
+  Upgrade page, the upgrade overseer's picker, both prune rings and
+  `alphaclaw diagnose` all read the first listed run — fell through to the
+  order the filesystem returned. Each run now carries a creation sequence that
+  breaks the tie (legacy records without one sort by id), so the newest run is
+  first every time. Surfaced by the Node 26 CI lane, where the two runs of
+  `tests/server/upgrade-overseer.test.js` land in one millisecond.
 - **Native readiness is authoritative.** A green `/health` degrades readiness
   ONLY when OpenClaw's own `/readyz` says `ready: false` or names failing
   components — and an explicit `ready: true` is ready whatever else the body
