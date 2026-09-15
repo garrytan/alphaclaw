@@ -103,7 +103,7 @@ describe("buildWatchdogNarrative", () => {
     expect(narrative.headline).toBe("Repair cleanup needs attention");
     expect(narrative.detail).toContain("1234");
     expect(narrative.detail).toContain("confirm they have exited before restarting AlphaClaw");
-    expect(narrative.detail).toContain("will not be released automatically");
+    expect(narrative.detail).toContain("remains held until cleanup confirms termination");
     expect(buildWatchdogNarrative(baseStatus, kNow).headline).not.toBe(narrative.headline);
   });
 
