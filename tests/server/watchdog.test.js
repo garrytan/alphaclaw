@@ -5560,15 +5560,16 @@ describe("server/watchdog", () => {
       expect(launchGatewayProcess).toHaveBeenCalledTimes(1);
       expect(restartRows(insertWatchdogEvent, { source: "state_writer_conflict", status: "requested" })).toHaveLength(1);
 
-      // The relaunched contender loses again, twice: the crash-loop cap latches.
-      for (let round = 0; round < 2; round += 1) {
+      // Three real relaunches may run; their next failure reaches the cap.
+      // Admission skips must never masquerade as an attempted launch.
+      for (let round = 0; round < 3; round += 1) {
         conflictExit();
         await settle();
         await watchdog.runHealthCheck({ source: "health_timer" });
         await settle();
       }
-      expect(launchGatewayProcess).toHaveBeenCalledTimes(2);
-      expect(restartRows(insertWatchdogEvent, { source: "state_writer_conflict", status: "backoff" })).toHaveLength(1);
+      expect(launchGatewayProcess).toHaveBeenCalledTimes(3);
+      expect(restartRows(insertWatchdogEvent, { source: "state_writer_conflict", status: "backoff" })).toHaveLength(2);
       expect(watchdog.getStatus()).toMatchObject({ lifecycle: "crash_loop", health: "unhealthy" });
       expect(rowsOfType(insertWatchdogEvent, "crash_loop")).toEqual([
         expect.objectContaining({
