@@ -2499,6 +2499,98 @@ describe("server/openclaw-channel-sync", () => {
       expect(buildStep.updaterStatus).toBe("ok");
     });
 
+    it.each([
+      {
+        name: "migrated state without rollback",
+        report: { reason: "state-migrated-no-rollback",
+          recovery: { serviceRestartSafe: false, reason: "runtime-verification-failed" } },
+        evidence: { updaterReason: "state-migrated-no-rollback",
+          updaterRecovery: { serviceRestartSafe: false, reason: "runtime-verification-failed" } },
+        hint: "state was migrated and the update was not rolled back",
+      },
+      {
+        name: "unverified rollback safety",
+        report: { reason: "rollback-state-unverified", recovery: { serviceRestartSafe: false } },
+        evidence: { updaterReason: "rollback-state-unverified", updaterRecovery: { serviceRestartSafe: false } },
+        hint: "could not verify that state is safe to roll back",
+      },
+      {
+        name: "verified package restoration with unverified runtime",
+        report: { recovery: { packageRollbackVerified: true, serviceRestartSafe: false } },
+        evidence: { updaterRecovery: { packageRollbackVerified: true, serviceRestartSafe: false } },
+        hint: "previous package was restored. The installation has not been verified safe to restart",
+      },
+      {
+        name: "verified package restoration and runnable fallback",
+        report: { recovery: { packageRollbackVerified: true, serviceRestartSafe: true } },
+        evidence: { updaterRecovery: { packageRollbackVerified: true, serviceRestartSafe: true } },
+        hint: "previous package was restored. Inspect the raw update log",
+      },
+      {
+        name: "runnable installation without rollback evidence",
+        report: { recovery: { serviceRestartSafe: true } },
+        evidence: { updaterRecovery: { serviceRestartSafe: true } },
+        hint: "runnable installation remains, but did not confirm a rollback",
+      },
+      {
+        name: "no recovery metadata",
+        report: {}, evidence: {}, hint: "did not confirm recovery of the previous installation",
+      },
+      {
+        name: "malformed recovery fields cannot claim successful restoration",
+        report: { reason: "x".repeat(121), recovery: { serviceRestartSafe: "true",
+          packageRollbackVerified: 1, reason: "invalid reason/path", privateDetail: { token: "not-public" } } },
+        evidence: {}, hint: "did not confirm recovery of the previous installation",
+      },
+      {
+        name: "no-rollback refusal takes precedence over conflicting recovery metadata",
+        report: { reason: "state-migrated-no-rollback",
+          recovery: { packageRollbackVerified: true, serviceRestartSafe: true } },
+        evidence: { updaterReason: "state-migrated-no-rollback",
+          updaterRecovery: { packageRollbackVerified: true, serviceRestartSafe: true } },
+        hint: "state was migrated and the update was not rolled back",
+      },
+    ])("preserves truthful dev failure evidence for $name through response, history and the run ledger", async ({ report, evidence, hint }) => {
+      const operationEvents = { publish: vi.fn(), complete: vi.fn(), fail: vi.fn() };
+      const h = createHarness({
+        extraSyncOptions: { operationEvents },
+        runnerImpl: async (options, fallback) => options.command === "openclaw" && options.args?.[0] === "update"
+          ? { ok: false, code: 1, tail: `build complete\n${JSON.stringify({ status: "error", ...report })}\n`, timedOut: false }
+          : fallback(options),
+      });
+      const failure = await h.sync.applyUpdate({ channel: "dev", devHead: true });
+      expect(failure.status).toBe(409);
+      expect(failure.body).toMatchObject({ ok: false, code: "dev_build_failed", repairApplicable: true,
+        message: "The dev update failed (updater status: error).", ...evidence });
+      expect(failure.body.hint).toContain(hint);
+      expect(failure.body.hint).not.toContain("reverted the checkout");
+      expect(failure.body.updaterReason).toBe(evidence.updaterReason);
+      expect(failure.body.updaterRecovery).toEqual(evidence.updaterRecovery);
+      const state = h.store.readState();
+      expect(state.applied).toBeNull();
+      expect(state.lastUpdateRun.result).toMatchObject({ hint: failure.body.hint, ...evidence });
+      expect(h.sync.runLedger.readRun(state.lastUpdateRun.operationId)).toMatchObject({
+        state: "failed", result: { code: "dev_build_failed", hint: failure.body.hint, ...evidence },
+      });
+      expect(state.lastUpdateRun.steps.findLast((step) => step.name === "build"))
+        .toMatchObject({ status: "failed", updaterStatus: "error", ...evidence });
+      expect(operationEvents.fail).toHaveBeenCalledWith(state.lastUpdateRun.operationId,
+        expect.objectContaining({ hint: failure.body.hint }));
+      expect(h.restartProcess).not.toHaveBeenCalled();
+    });
+
+    it("does not infer rollback from timeout log prose without a structured updater result", async () => {
+      const h = createHarness({ runnerImpl: async (options, fallback) =>
+        options.command === "openclaw" && options.args?.[0] === "update"
+          ? { ok: false, code: null, timedOut: true, tail: "Attempting rollback before timeout..." }
+          : fallback(options) });
+      const failure = await h.sync.applyUpdate({ channel: "dev", devHead: true });
+      expect(failure.body).toMatchObject({ code: "dev_build_failed", message: "The dev update timed out." });
+      expect(failure.body.hint).toContain("did not confirm recovery");
+      expect(failure.body).not.toHaveProperty("updaterRecovery");
+      expect(h.restartProcess).not.toHaveBeenCalled();
+    });
+
     it("builds a pinned dev commit via fetch/checkout/install/build/doctor", async () => {
       const { sync, store, rootDir, runner } = createHarness({
         pin: "1.0.0",
