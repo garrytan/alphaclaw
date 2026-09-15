@@ -447,7 +447,7 @@ Release history lives in [CHANGELOG.md](CHANGELOG.md); contributor setup and
 test tiers are in [CONTRIBUTING.md](CONTRIBUTING.md); open work is tracked in
 [TODOS.md](TODOS.md); design documents (Agent Administration, chat reliability, gateway state
 model, the OpenClaw context contract, Telegram topics discovery, the AlphaClaw
-offline-copy backup format) live in
+offline-copy backup format, and [reliability ownership](docs/designs/reliability-ownership.md)) live in
 [docs/designs/](docs/designs/);
 the operator runbook for upgrade failure states (held gateways, backup
 contention and the offline copy, restoring a backup, consented backup reuse,
@@ -495,6 +495,10 @@ npm run test:ui         # Browser UI smoke of the Upgrade page: real server +
                         # headless Chromium asserting the rendered DOM (opt-in;
                         # needs network for the version catalog; self-skips
                         # unless a browse CLI is present — set BROWSE_BIN)
+npm run test:ui:reliability # Chromium recovery, deployment and Gmail journeys
+                        # against local fixtures; needs build:ui and
+                        # npx playwright install chromium. Reports/screenshots:
+                        # .context/wave-browser/ (WAVE_BROWSER_ARTIFACTS overrides)
 npm run test:ui:time    # Browser smoke of UI time formatting: real server +
                         # headless Chromium asserting rendered timestamps against
                         # expectations the browser itself computes with the same
