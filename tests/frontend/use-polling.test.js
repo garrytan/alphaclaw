@@ -21,6 +21,18 @@ const probe = (id, fetcher, options = {}, interval = 3000) => ({ id, useRead: us
 const advance = (ms) => host.settle(() => vi.advanceTimersByTimeAsync(ms));
 
 describe("frontend/use-polling mounted consumers", () => {
+  it("disabling polling fences an earlier read without cancelling another subscriber", async () => {
+    const work = deferred();
+    const fetcher = vi.fn(() => work.promise);
+    setCached("shared", "before");
+    await host.render([probe("a", fetcher, { cacheKey: "shared" }), probe("b", fetcher, { cacheKey: "shared" })]);
+    await host.render([probe("a", fetcher, { cacheKey: "shared", enabled: false }), probe("b", fetcher, { cacheKey: "shared" })]);
+    await host.settle(() => work.resolve("after"));
+    expect(host.result("a")).toMatchObject({ data: "before", isPolling: false });
+    expect(host.result("b").data).toBe("after");
+    await host.render([probe("a", fetcher, { cacheKey: "shared" }), probe("b", fetcher, { cacheKey: "shared" })]);
+    expect(host.result("a").data).toBe("after");
+  });
   it("waits while mounted hidden, resumes on visibility, pauses and cleans up", async () => {
     host.document.hidden = true;
     const fetcher = vi.fn(async () => "fresh");

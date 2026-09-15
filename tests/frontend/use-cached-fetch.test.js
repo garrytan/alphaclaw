@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useCachedFetch } from "../../lib/public/js/hooks/use-cached-fetch.js";
-import { clearApiCache, getCached, setCached } from "../../lib/public/js/lib/api-cache.js";
+import { clearApiCache, denyCachedKey, getCached, setCached } from "../../lib/public/js/lib/api-cache.js";
 import { createReadHost, deferred } from "./mounted-read-helpers.js";
 
 let host;
@@ -18,6 +18,22 @@ afterEach(async () => {
 const probe = (id, key, fetcher, options = {}) => ({ id, useRead: useCachedFetch, args: [key, fetcher, options] });
 
 describe("frontend/use-cached-fetch mounted consumers", () => {
+  it("disabling a consumer fences late shared results while preserving access revocation", async () => {
+    const work = deferred();
+    let signal;
+    const fetcher = ({ signal: next }) => { signal = next; return work.promise; };
+    const options = { maxAgeMs: 0, acceptsSignal: true };
+    setCached("shared", "before");
+    await host.render([probe("a", "shared", fetcher, options), probe("b", "shared", fetcher, options)]);
+    await host.render([probe("a", "shared", fetcher, { ...options, enabled: false }), probe("b", "shared", fetcher, options)]);
+    expect(signal.aborted).toBe(false);
+    await host.settle(() => work.resolve("after"));
+    expect(host.result("a")).toMatchObject({ data: "before", loading: false, isFetching: false });
+    expect(host.result("b").data).toBe("after");
+    await host.settle(() => denyCachedKey("shared", Object.assign(new Error("Denied"), { status: 403 })));
+    expect(host.result("a").data).toBe(null);
+    expect(host.result("b").data).toBe(null);
+  });
   it("fans one SWR read out to every mounted consumer", async () => {
     const work = deferred();
     const fetcher = vi.fn(() => work.promise);
