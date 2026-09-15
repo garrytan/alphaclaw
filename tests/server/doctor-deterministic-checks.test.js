@@ -1041,6 +1041,13 @@ describe("server/doctor/deterministic-checks det:config-unreadable cards (fix wa
     const cards = build();
     expect(cards.some((card) => String(card.sourceKey).startsWith("det:config-unreadable:"))).toBe(false);
   });
+  it("reports a malformed managed-attempt schema and preserves its provider-check recovery instruction", () => {
+    write(managedRoot, ".alphaclaw/managed-update-attempt.json", '{"schemaVersion":1,"attempt":{}}');
+    const card = findCard(build(), "det:config-unreadable:.alphaclaw/managed-update-attempt.json");
+    expect(card.summary).toContain("invalid managed update attempt schema");
+    expect(card.recommendation).toContain("Check the deployment provider");
+    expect(card.recommendation).toContain("Do not delete");
+  });
 });
 
 describe("server/doctor/deterministic-checks det:plugin-api-mismatch (issue #76 A4 doctor evidence)", () => {
