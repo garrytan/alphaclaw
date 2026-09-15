@@ -1,9 +1,11 @@
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
+const http = require("http");
 const { execFileSync } = require("child_process");
 const { createManagedUpdateAttempts } = require("../../lib/server/managed-update-attempts");
 const { createAlphaclawVersionService } = require("../../lib/server/alphaclaw-version");
+const { createOpenclawUpdateRepair } = require("../../lib/server/openclaw-update-repair");
 
 const kTarget = { repo: "owner/template", ref: "abc123", alphaclawVersion: "0.9.85", openclawVersion: "2026.9.3" };
 const kEnv = { ALPHACLAW_MANAGED_UPDATE_URL: "https://bridge.example/private-update",
@@ -37,6 +39,7 @@ describe("durable managed deployment attempts", () => {
       return pending.promise;
     } });
     const first = service.updateAlphaclaw();
+    expect(service.isDeploymentMutationBlocked()).toBe(true);
     expect((await service.updateAlphaclaw()).status).toBe(409);
     const id = await posted.promise;
     expect(service.resolveManagedUpdate({ attemptId: id, confirmProviderChecked: true, outcome: "deployed" }).body.code).toBe("attempt_in_flight");
@@ -99,8 +102,41 @@ describe("durable managed deployment attempts", () => {
     const { service } = makeService({ post: () => mode === "noop" ? response({ ok: true, noop: true }) : response({ ok: false }, 400) });
     const first = await service.updateAlphaclaw();
     expect(first.body.managedUpdateAttempt.state).toBe(mode);
+    expect(service.isDeploymentMutationBlocked()).toBe(false);
     const second = await service.updateAlphaclaw();
     expect(second.body.managedUpdateAttempt.id).not.toBe(first.body.managedUpdateAttempt.id);
+  });
+
+  it.each([307, 308])("a real HTTP %s never replays the provider POST and leaves a blocking unknown attempt", async (status) => {
+    const requests = [];
+    const server = http.createServer((req, res) => {
+      requests.push({ method: req.method, path: req.url });
+      req.resume();
+      if (req.url === "/update") {
+        res.writeHead(status, { Location: "/redirected-update" });
+        res.end();
+      } else {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: true, noop: false, phase: "queued" }));
+      }
+    });
+    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const { service } = makeService({
+        env: { ...kEnv, ALPHACLAW_MANAGED_UPDATE_URL: `http://127.0.0.1:${server.address().port}/update` },
+        post: (url, init) => fetch(url, init),
+      });
+      const result = await service.updateAlphaclaw();
+      expect(result).toMatchObject({ status: 502, body: {
+        code: "managed_update_unknown", managedUpdateAttempt: { state: "unknown" },
+      } });
+      expect(requests).toEqual([{ method: "POST", path: "/update" }]);
+      expect((await service.updateAlphaclaw()).body.code).toBe("managed_update_pending");
+      expect(requests).toHaveLength(1);
+    } finally {
+      server.closeAllConnections();
+      await new Promise((resolve) => server.close(resolve));
+    }
   });
 
   it("does not write or POST after preflight failure and never exposes bridge URL/token", async () => {
@@ -126,6 +162,57 @@ describe("durable managed deployment attempts", () => {
       .toThrow(/Cannot read managed update attempt/);
     expect(fs.readFileSync(file, "utf8")).toBe(bytes);
     expect(fetchImpl).not.toHaveBeenCalled();
+    expect(service.isDeploymentMutationBlocked()).toBe(true);
+  });
+
+  it.each(["accepted", "unknown"])("blocks the actual repair writer while a %s deployment can still restart AlphaClaw", async (state) => {
+    const original = makeService({ post: state === "unknown"
+      ? async () => { throw new Error("response lost"); }
+      : async () => response({ ok: true, noop: false, phase: "queued" }) });
+    const submission = await original.service.updateAlphaclaw();
+    expect(submission.body.managedUpdateAttempt.state).toBe(state);
+    // A fresh service must preserve the same restriction after a restart.
+    const { service } = makeService();
+    expect(service.isUpdateInProgress()).toBe(false);
+    expect(service.isDeploymentMutationBlocked()).toBe(true);
+    let applying = false;
+    const hold = Object.assign(async () => {}, { isValid: () => true });
+    const runner = { runStreamed: vi.fn(async () => ({ ok: true })) };
+    const ledger = {
+      createRun: vi.fn(), completeRun: vi.fn(),
+      createLogSink: () => ({ writeLine: () => {}, close: async () => {} }),
+    };
+    const repair = createOpenclawUpdateRepair({
+      getChannelInfo: () => ({ releaseChannel: "dev" }), isOnboarded: () => true,
+      isSelfUpdateInProgress: service.isDeploymentMutationBlocked,
+      isApplyInProgress: () => applying, setApplyInProgress: (value) => { applying = value; },
+      getActiveGatewayOperation: () => null, acquireLifecycleLock: async () => hold,
+      mutationPolicy: { assert: () => {} }, ledger, runner, devUpdateEnv: () => ({}),
+      stepRecorder: () => ({ steps: [], emit: () => {} }),
+      makeOutputPublisher: () => Object.assign(() => {}, { flush: () => {} }),
+      setActiveSink: () => {}, channelError: (code, message) => ({ ok: false, code, message }),
+      rootDir: dir, log: () => {},
+    });
+    expect(await repair()).toMatchObject({ status: 409, body: { code: "self_update_in_progress" } });
+    expect(runner.runStreamed).not.toHaveBeenCalled();
+    expect(ledger.createRun).not.toHaveBeenCalled();
+    expect(service.resolveManagedUpdate({ attemptId: submission.body.managedUpdateAttempt.id,
+      confirmProviderChecked: true, outcome: "not_deployed" }).status).toBe(200);
+    expect(service.isDeploymentMutationBlocked()).toBe(false);
+    expect(await repair()).toMatchObject({ status: 200 });
+    expect(runner.runStreamed).toHaveBeenCalledTimes(1);
+  });
+
+  it("refuses an invalid optional resolution on an otherwise valid accepted attempt", () => {
+    const store = createManagedUpdateAttempts({ managedDir: dir });
+    const attempt = store.begin(kTarget);
+    const bytes = JSON.stringify({ schemaVersion: 1, attempt: {
+      ...attempt, state: "accepted", resolution: { outcome: "deployed" },
+    } });
+    fs.writeFileSync(store.filePath, bytes);
+    expect(() => store.read()).toThrow(/invalid attempt schema/);
+    expect(() => store.resolve(attempt.id, "deployed")).toThrow(/invalid attempt schema/);
+    expect(fs.readFileSync(store.filePath, "utf8")).toBe(bytes);
   });
 
   it("late completion cannot reverse resolution; reads and identical resolution do not repeat audit events", () => {
