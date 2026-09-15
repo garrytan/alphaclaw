@@ -3,6 +3,8 @@ const os = require("os");
 const path = require("path");
 const http = require("http");
 const { execFileSync } = require("child_process");
+const { DatabaseSync } = require("node:sqlite");
+const watchdogDb = require("../../lib/server/db/watchdog");
 const { createManagedUpdateAttempts } = require("../../lib/server/managed-update-attempts");
 const { createAlphaclawVersionService } = require("../../lib/server/alphaclaw-version");
 const { createOpenclawUpdateRepair } = require("../../lib/server/openclaw-update-repair");
@@ -16,7 +18,7 @@ const deferred = () => { let resolve; const promise = new Promise((r) => { resol
 describe("durable managed deployment attempts", () => {
   let dir;
   beforeEach(() => { dir = fs.mkdtempSync(path.join(os.tmpdir(), "managed-attempt-")); });
-  afterEach(() => { fs.rmSync(dir, { recursive: true, force: true }); });
+  afterEach(() => { watchdogDb.closeWatchdogDb(); fs.rmSync(dir, { recursive: true, force: true }); });
   const makeService = ({ post = async () => response({ ok: true, phase: "queued", noop: false }), ...options } = {}) => {
     const fetchImpl = vi.fn(async (url, init) => {
       if (init?.method === "POST") return post(url, init);
@@ -226,6 +228,144 @@ describe("durable managed deployment attempts", () => {
     expect(store.transition(id, ["submitting"], "accepted")).toBeNull();
     expect(store.read().state).toBe("resolved");
     expect(audit).toHaveBeenCalledTimes(3);
+  });
+
+  const auditToDatabase = (attempt) => watchdogDb.insertWatchdogEvent({ eventType: "managed_update",
+    source: "alphaclaw_update", status: attempt.state, correlationId: attempt.id,
+    details: { attemptId: attempt.id, state: attempt.state,
+      ...(attempt.resolution ? { resolution: attempt.resolution } : {}) } });
+  const readAudits = () => {
+    const database = new DatabaseSync(path.join(dir, "db", "watchdog.db"));
+    try { return database.prepare("SELECT status, correlation_id, details FROM watchdog_events WHERE event_type = 'managed_update' ORDER BY id").all(); }
+    finally { database.close(); }
+  };
+
+  it("replays every unrecorded state after SQLite recovers, without exposing the durable audit backlog", () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const store = createManagedUpdateAttempts({ managedDir: dir, onTransition: auditToDatabase });
+    // The real sink is unavailable until init, rather than a callback that
+    // merely returns a fake rejection after recording a successful event.
+    const { id } = store.begin({ ...kTarget, token: kEnv.ALPHACLAW_MANAGED_UPDATE_TOKEN });
+    store.transition(id, ["submitting"], "unknown");
+    store.resolve(id, "not_deployed");
+    const doc = JSON.parse(fs.readFileSync(store.filePath, "utf8"));
+    expect(doc.pendingAudit.map((attempt) => attempt.state)).toEqual(["submitting", "unknown", "resolved"]);
+    expect(JSON.stringify(doc)).not.toContain(kEnv.ALPHACLAW_MANAGED_UPDATE_TOKEN);
+    watchdogDb.initWatchdogDb({ rootDir: dir });
+    const restarted = createManagedUpdateAttempts({ managedDir: dir, onTransition: auditToDatabase });
+    expect(restarted.recover()).toMatchObject({ id, state: "resolved" });
+    expect(restarted.read()).not.toHaveProperty("pendingAudit");
+    expect(readAudits().map((row) => row.status)).toEqual(["submitting", "unknown", "resolved"]);
+    expect(readAudits().every((row) => row.correlation_id === id)).toBe(true);
+    expect(JSON.parse(fs.readFileSync(store.filePath, "utf8")).pendingAudit).toEqual([]);
+    restarted.read(); restarted.resolve(id, "not_deployed");
+    expect(readAudits()).toHaveLength(3);
+  });
+
+  it.each(["before_insert", "after_insert"])("real process death %s replays the transition once and never resends", (phase) => {
+    const attemptModule = require.resolve("../../lib/server/managed-update-attempts");
+    const dbModule = require.resolve("../../lib/server/db/watchdog");
+    const script = `const db = require(${JSON.stringify(dbModule)});
+      db.initWatchdogDb({rootDir:process.argv[1]});
+      require(${JSON.stringify(attemptModule)}).createManagedUpdateAttempts({managedDir:process.argv[1],onTransition:attempt=>{
+        if(process.argv[2] === 'after_insert') db.insertWatchdogEvent({eventType:'managed_update',source:'alphaclaw_update',
+          status:attempt.state,correlationId:attempt.id,details:{attemptId:attempt.id,state:attempt.state}});
+        process.exit(0);
+      }}).begin(${JSON.stringify(kTarget)});`;
+    execFileSync(process.execPath, ["-e", script, dir, phase], { timeout: 5000, stdio: "pipe" });
+    const filePath = path.join(dir, "managed-update-attempt.json");
+    expect(JSON.parse(fs.readFileSync(filePath, "utf8")).pendingAudit).toHaveLength(1);
+    // The writer really died holding the lock. Advance only its filesystem
+    // age past the existing stale-lock delay; keep the recorded dead PID.
+    fs.utimesSync(`${filePath}.lock`, new Date(0), new Date(0));
+    watchdogDb.initWatchdogDb({ rootDir: dir });
+    const { service, fetchImpl } = makeService({ insertWatchdogEvent: watchdogDb.insertWatchdogEvent });
+    expect(service.isDeploymentMutationBlocked()).toBe(true);
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(readAudits().map((row) => row.status)).toEqual(["submitting", "unknown"]);
+    expect(JSON.parse(fs.readFileSync(filePath, "utf8")).pendingAudit).toEqual([]);
+  });
+
+  it("replays an INSERT whose acknowledgement write failed without repeating its SQLite audit", () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    watchdogDb.initWatchdogDb({ rootDir: dir });
+    let failAcknowledgement = false;
+    const fsModule = { ...fs, writeFileSync: (file, bytes, ...args) => {
+      if (failAcknowledgement && String(file).endsWith(".tmp")) {
+        throw Object.assign(new Error("ack disk failure"), { code: "EIO" });
+      }
+      return fs.writeFileSync(file, bytes, ...args);
+    } };
+    const store = createManagedUpdateAttempts({ managedDir: dir, fsModule, onTransition: (attempt) => {
+      auditToDatabase(attempt);
+      failAcknowledgement = true;
+    } });
+    const { id } = store.begin(kTarget);
+    expect(readAudits()).toHaveLength(1);
+    expect(JSON.parse(fs.readFileSync(store.filePath, "utf8")).pendingAudit).toHaveLength(1);
+    const restarted = createManagedUpdateAttempts({ managedDir: dir, onTransition: auditToDatabase });
+    expect(restarted.recover()).toMatchObject({ id, state: "unknown" });
+    expect(readAudits().map((row) => row.status)).toEqual(["submitting", "unknown"]);
+    expect(JSON.parse(fs.readFileSync(store.filePath, "utf8")).pendingAudit).toEqual([]);
+  });
+
+  it("bounds failed audit storage while reserving finalization and resolution for the current attempt", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const store = createManagedUpdateAttempts({ managedDir: dir, onTransition: () => { throw new Error("sink down"); } });
+    for (let i = 0; i < 9; i += 1) {
+      const { id } = store.begin(kTarget);
+      store.transition(id, ["submitting"], "unknown");
+      store.resolve(id, "not_deployed");
+    }
+    const noop = store.begin(kTarget);
+    store.transition(noop.id, ["submitting"], "noop");
+    expect(JSON.parse(fs.readFileSync(store.filePath, "utf8")).pendingAudit).toHaveLength(29);
+    const current = store.begin(kTarget);
+    store.transition(current.id, ["submitting"], "accepted");
+    expect(store.resolve(current.id, "deployed").state).toBe("resolved");
+    expect(JSON.parse(fs.readFileSync(store.filePath, "utf8")).pendingAudit).toHaveLength(32);
+    expect(() => store.begin(kTarget)).toThrow(expect.objectContaining({ status: 409, code: "managed_update_audit_pending" }));
+    expect(store.read()).toMatchObject({ id: current.id, state: "resolved" });
+    const { service, fetchImpl } = makeService({ managedAttemptStore: store });
+    expect(await service.updateAlphaclaw()).toMatchObject({ status: 409, body: {
+      code: "managed_update_audit_pending", managedUpdateAttempt: { id: current.id, state: "resolved" },
+    } });
+    expect(fetchImpl.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(0);
+    const sink = vi.fn();
+    const restarted = createManagedUpdateAttempts({ managedDir: dir, onTransition: sink });
+    restarted.recover();
+    expect(sink).toHaveBeenCalledTimes(32);
+    expect(restarted.begin(kTarget).state).toBe("submitting");
+  });
+
+  it.each([null, {}, [{}]])("fails closed on malformed durable audit data: %j", (pendingAudit) => {
+    const store = createManagedUpdateAttempts({ managedDir: dir, onTransition: vi.fn() });
+    const attempt = store.begin(kTarget);
+    const bytes = JSON.stringify({ schemaVersion: 1, attempt, pendingAudit });
+    fs.writeFileSync(store.filePath, bytes);
+    expect(() => store.read()).toThrow(expect.objectContaining({ code: "MANAGED_UPDATE_ATTEMPT_UNREADABLE" }));
+    expect(fs.readFileSync(store.filePath, "utf8")).toBe(bytes);
+  });
+
+  it("deduplicates valid legacy audits while tolerating malformed rows and preserving successors", () => {
+    watchdogDb.initWatchdogDb({ rootDir: dir });
+    const store = createManagedUpdateAttempts({ managedDir: dir });
+    const first = store.begin(kTarget);
+    watchdogDb.insertWatchdogEvent({ eventType: "managed_update", source: "alphaclaw_update",
+      details: "{legacy broken" });
+    // Legacy JSON text went through the old INSERT path. It still counts as
+    // the transition's audit when a durable obligation is replayed later.
+    watchdogDb.insertWatchdogEvent({ eventType: "managed_update", source: "alphaclaw_update",
+      status: first.state, correlationId: first.id,
+      details: JSON.stringify({ attemptId: first.id, state: first.state }) });
+    const restarted = createManagedUpdateAttempts({ managedDir: dir, onTransition: auditToDatabase });
+    restarted.recover();
+    restarted.resolve(first.id, "not_deployed");
+    const second = restarted.begin(kTarget);
+    const valid = readAudits().filter((row) => row.details !== "{legacy broken");
+    expect(valid.map((row) => [row.correlation_id, row.status])).toEqual([
+      [first.id, "submitting"], [first.id, "unknown"], [first.id, "resolved"], [second.id, "submitting"],
+    ]);
   });
 
   it("a metadata timeout releases admission without creating an attempt or dispatching a late POST", async () => {
