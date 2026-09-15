@@ -361,7 +361,11 @@ describeLive("LIVE #54 downgrade: real 2026.9.1-beta.1 → 2026.8.2 through the 
       // The state the beta wrote (schema 12) + the lease-engaging audit log.
       expect(readUserVersion(harness.stateDbPath)).toBe(12);
 
-      const applyRes = await postApply(harness, { channel: "stable", version: stable.version });
+      const applyRes = await postApply(harness, {
+        channel: "stable",
+        version: stable.version,
+        intent: "downgrade",
+      });
       expect(applyRes.status, JSON.stringify(applyRes.body)).toBe(202);
       const { operationId } = applyRes.body;
 
@@ -497,7 +501,11 @@ describeLive("LIVE #54 downgrade: real 2026.9.1-beta.1 → 2026.8.2 through the 
       expect(readUserVersion(harness.stateDbPath)).toBe(15);
       const appliedBefore = harness.store.readState().applied;
 
-      const applyRes = await postApply(harness, { channel: "beta", version: beta.version });
+      const applyRes = await postApply(harness, {
+        channel: "beta",
+        version: beta.version,
+        intent: "update",
+      });
       expect(applyRes.status, JSON.stringify(applyRes.body)).toBe(202);
       const { operationId } = applyRes.body;
       const run = await waitForRunToFinish(harness, `apply of ${beta.version} to be refused`);
