@@ -4,12 +4,24 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 // hook state lives in per-call-index slots so component/hook functions can be
 // invoked directly without a DOM renderer. Effects are collected, not run.
 vi.mock("preact/hooks", () => {
-  const harness = { slots: [], cursor: 0, effects: [] };
+  const harness = { slots: [], cursor: 0, effects: [], cleanups: new Map() };
+  harness.runEffect = (index) => {
+    harness.cleanups.get(index)?.();
+    harness.cleanups.set(index, harness.effects[index]?.());
+  };
+  // Keep committed read subscriptions mounted without starting polling.
+  // Named effects avoid coupling these older fixtures to extraction order.
+  harness.mountReads = () => harness.effects.forEach((effect, index) => {
+    if (String(effect).includes("subscribeCache") || String(effect).includes("followedStale")) harness.runEffect(index);
+  });
+  harness.findEffect = (text) => harness.effects.find((effect) => String(effect).includes(text));
   harness.beginRender = () => {
     harness.cursor = 0;
     harness.effects = [];
   };
   harness.reset = () => {
+    for (const cleanup of harness.cleanups.values()) cleanup?.();
+    harness.cleanups.clear();
     harness.slots = [];
     harness.cursor = 0;
     harness.effects = [];
@@ -50,6 +62,7 @@ vi.mock("../../lib/public/js/lib/api.js", () => ({
   fetchOpenclawChannel: vi.fn(),
   fetchOpenclawRunLogText: vi.fn(),
   fetchOpenclawRuns: vi.fn(),
+  fetchOpenclawRun: vi.fn(),
   fetchStatus: vi.fn(),
   markOpenclawGood: vi.fn(),
   reconcileInstalledOpenclaw: vi.fn(),
@@ -1591,14 +1604,16 @@ describe("frontend/upgrade-tab hook", () => {
 
   const renderHook = (props = {}) => {
     harness.beginRender();
-    return useUpgradeTab(props);
+    const state = useUpgradeTab(props);
+    harness.mountReads();
+    return state;
   };
 
   const hydrate = async (props = {}) => {
     let state = renderHook(props);
     // Run only the mount data-load effect (effect #0); the others start
     // timers/streams that the harness should not leak.
-    harness.effects[0]();
+    harness.findEffect("loadChannel({ fromCache")();
     await flushAsync();
     state = renderHook(props);
     return state;
@@ -1671,9 +1686,7 @@ describe("frontend/upgrade-tab hook", () => {
 
     // The switch triggered a second catalog read (no forced refresh).
     expect(api.fetchOpenclawCatalog).toHaveBeenCalledTimes(2);
-    expect(api.fetchOpenclawCatalog).toHaveBeenLastCalledWith({
-      refresh: false,
-    });
+    expect(api.fetchOpenclawCatalog).toHaveBeenLastCalledWith(expect.objectContaining({ refresh: false, signal: expect.any(AbortSignal) }));
 
     state = renderHook({});
     expect(state.whatsNew).toEqual({
@@ -1766,6 +1779,7 @@ describe("frontend/upgrade-tab hook", () => {
       () => new Promise((resolve) => (resolveCatalog = resolve)),
     );
     state.onCheckNow();
+    await Promise.resolve();
     state = renderHook({});
     expect(state.actionsDisabled).toBe(true);
     resolveCatalog({ ok: true, catalog: makeCatalog() });
@@ -2100,27 +2114,22 @@ describe("frontend/upgrade-tab hook", () => {
     );
   });
 
-  it("rehydrates an in-flight apply from lastUpdateRun on mount (U4/EV10)", async () => {
-    api.fetchOpenclawChannel.mockResolvedValue(
-      makeChannelInfo({
-        lastUpdateRun: {
-          target: { channel: "dev", devHead: true },
-          startedAt: kNow - 60_000,
-          finishedAt: null,
-          ok: null,
-          steps: [
-            { name: "preflight", status: "completed", at: kNow - 55_000 },
-            { name: "build", status: "running", at: kNow - 30_000 },
-          ],
-        },
-      }),
-    );
+  it("rehydrates an in-flight apply from its ledger on mount (U4/EV10)", async () => {
+    api.fetchOpenclawRuns.mockResolvedValue({ runs: [{
+      operationId: "apply-live", state: "running",
+      target: { channel: "dev", devHead: true }, startedAt: kNow - 60_000,
+      finishedAt: null, ok: null,
+      steps: [
+        { name: "preflight", status: "completed", at: kNow - 55_000 },
+        { name: "build", status: "running", at: kNow - 30_000 },
+      ],
+    }] });
     let state = await hydrate({
       statusData: { openclawChannel: { applyInProgress: true } },
     });
 
     // Run the rehydration effect (registered after the data-load effect).
-    harness.effects[1]();
+    harness.findEffect("resumeLedgerOperation")();
     state = renderHook({
       statusData: { openclawChannel: { applyInProgress: true } },
     });
@@ -2276,7 +2285,7 @@ describe("frontend/upgrade-tab hook", () => {
     // The follow-up went straight to the API (refresh: false — not a forced
     // refresh, not the cached-fetch path), once.
     expect(api.fetchOpenclawCatalog).toHaveBeenCalledTimes(2);
-    expect(api.fetchOpenclawCatalog).toHaveBeenLastCalledWith({ refresh: false });
+    expect(api.fetchOpenclawCatalog).toHaveBeenLastCalledWith(expect.objectContaining({ refresh: false, signal: expect.any(AbortSignal) }));
     // Its answer was stale again: no third read is scheduled.
     await new Promise((resolve) => setTimeout(resolve, 15));
     expect(api.fetchOpenclawCatalog).toHaveBeenCalledTimes(2);
@@ -2396,7 +2405,7 @@ describe("frontend/upgrade-tab hook", () => {
     state = renderHook({});
     // One forced reload, and the confirm is back — on the server's version.
     expect(api.fetchOpenclawCatalog.mock.calls.length).toBe(catalogCallsBefore + 1);
-    expect(api.fetchOpenclawCatalog).toHaveBeenLastCalledWith({ refresh: true });
+    expect(api.fetchOpenclawCatalog).toHaveBeenLastCalledWith(expect.objectContaining({ refresh: true, signal: expect.any(AbortSignal) }));
     expect(state.pendingApply).toEqual(
       expect.objectContaining({ payload: { channel: "stable", version: "2026.7.3" }, intent: "update", expectLatest: true, staleRetried: true }),
     );
@@ -2435,7 +2444,7 @@ describe("frontend/upgrade-tab hook", () => {
     expect(state.applyError).toEqual(expect.objectContaining({ code: "intent_mismatch" }));
     expect(showToast).toHaveBeenCalledWith(expect.stringContaining("does not match"), "error");
     expect(api.fetchOpenclawChannel.mock.calls.length).toBeGreaterThan(channelCalls);
-    expect(api.fetchOpenclawCatalog).toHaveBeenLastCalledWith({ refresh: true });
+    expect(api.fetchOpenclawCatalog).toHaveBeenLastCalledWith(expect.objectContaining({ refresh: true, signal: expect.any(AbortSignal) }));
     expect(state.pendingApply).toBeNull();
   });
 
@@ -2604,7 +2613,7 @@ describe("frontend/upgrade-tab hook", () => {
     });
     let state = await hydrate();
     // Effect #1 is the rehydration effect.
-    harness.effects[1]();
+    harness.findEffect("resumeLedgerOperation")();
     state = renderHook({});
     expect(state.operation).toEqual(
       expect.objectContaining({ operationId: "op-r", resumed: true, target: { kind: "backup" }, phase: "running", label: "manual backup" }),
@@ -2635,7 +2644,7 @@ describe("frontend/upgrade-tab hook", () => {
     state.onCheckNow();
     await flushAsync();
 
-    expect(api.fetchOpenclawCatalog).toHaveBeenLastCalledWith({ refresh: true });
+    expect(api.fetchOpenclawCatalog).toHaveBeenLastCalledWith(expect.objectContaining({ refresh: true, signal: expect.any(AbortSignal) }));
   });
 
   it("marks the running version good and reloads channel state (U7)", async () => {
@@ -3022,7 +3031,7 @@ describe("frontend/upgrade-tab hook", () => {
     expect(state.loadingCatalog).toBe(false);
     expect(api.fetchOpenclawCatalog).toHaveBeenCalledTimes(1);
     // Mount revalidation never force-bypasses the server catalog cache.
-    expect(api.fetchOpenclawCatalog).toHaveBeenCalledWith({ refresh: false });
+    expect(api.fetchOpenclawCatalog).toHaveBeenCalledWith(expect.objectContaining({ refresh: false, signal: expect.any(AbortSignal) }));
 
     resolveFreshCatalog({ ok: true, catalog: freshCatalog });
     await flushAsync();
@@ -3039,7 +3048,7 @@ describe("frontend/upgrade-tab hook", () => {
 
     // refresh:true always hits the network, never the SWR cache.
     expect(api.fetchOpenclawCatalog).toHaveBeenCalledTimes(2);
-    expect(api.fetchOpenclawCatalog).toHaveBeenLastCalledWith({ refresh: true });
+    expect(api.fetchOpenclawCatalog).toHaveBeenLastCalledWith(expect.objectContaining({ refresh: true, signal: expect.any(AbortSignal) }));
     // ...and the result re-seeds the cache for the next mount.
     expect(getCached("/api/openclaw/catalog")).toEqual({
       ok: true,
@@ -3135,7 +3144,7 @@ describe("frontend/upgrade-tab hook", () => {
 
       // Effect #3 in hook declaration order is the upgradeRestartActive
       // publish (mount load, rehydration, and the elapsed tick precede it).
-      const cleanup = harness.effects[3]();
+      const cleanup = harness.findEffect("upgradeRestartActive")();
       expect(gatewayShellStore.get().upgradeRestartActive).toBe(true);
 
       // Unmount (or leaving the restarting phase) clears the announcement —
@@ -3155,12 +3164,14 @@ describe("frontend/upgrade-tab repair (2.3)", () => {
 
   const renderHook = (props = {}) => {
     harness.beginRender();
-    return useUpgradeTab(props);
+    const state = useUpgradeTab(props);
+    harness.mountReads();
+    return state;
   };
 
   const hydrate = async (props = {}) => {
     let state = renderHook(props);
-    harness.effects[0]();
+    harness.findEffect("loadChannel({ fromCache")();
     await flushAsync();
     state = renderHook(props);
     return state;
@@ -3279,7 +3290,7 @@ describe("frontend/upgrade-tab repair (2.3)", () => {
     expect(treeText(failed)).toContain("Repair failed");
   });
 
-  it("onRunRepair streams the repair and clears the card on done (no restart poll)", async () => {
+  it("onRunRepair streams the repair and completes the card in place (no restart poll)", async () => {
     let captured = null;
     api.subscribeOpenclawApplyEvents.mockImplementation((options) => {
       captured = options;
@@ -3301,7 +3312,7 @@ describe("frontend/upgrade-tab repair (2.3)", () => {
 
     captured.onMessage({ event: "done", data: {} });
     state = renderHook({});
-    expect(state.operation).toBeNull();
+    expect(state.operation.phase).toBe("completed");
     expect(showToast).toHaveBeenCalledWith("Repair completed", "success");
   });
 
@@ -3445,12 +3456,14 @@ describe("frontend/upgrade-tab gateway-hold recovery", () => {
 
   const renderHook = (props = {}) => {
     harness.beginRender();
-    return useUpgradeTab(props);
+    const state = useUpgradeTab(props);
+    harness.mountReads();
+    return state;
   };
 
   const hydrate = async (props = {}) => {
     let state = renderHook(props);
-    harness.effects[0]();
+    harness.findEffect("loadChannel({ fromCache")();
     await flushAsync();
     state = renderHook(props);
     return state;
@@ -3689,11 +3702,13 @@ describe("frontend/upgrade-tab reconcile-installed action", () => {
   };
   const renderHook = (props = {}) => {
     harness.beginRender();
-    return useUpgradeTab(props);
+    const state = useUpgradeTab(props);
+    harness.mountReads();
+    return state;
   };
   const hydrate = async (props = {}) => {
     let state = renderHook(props);
-    harness.effects[0]();
+    harness.findEffect("loadChannel({ fromCache")();
     await flushAsync();
     state = renderHook(props);
     return state;
