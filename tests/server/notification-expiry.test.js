@@ -44,6 +44,7 @@ describe("fixed notification delivery deadlines", () => {
 
   it.each([
     { createdAt: "100" }, { createdAt: -1 }, { createdAt: NaN },
+    { createdAt: 1e100 }, { expiresAt: 1e100 },
     { expiresAt: null }, { expiresAt: "later" }, { expiresAt: Infinity },
   ])("fails closed on malformed timestamps %j", async (timing) => {
     const h = makeHarness();

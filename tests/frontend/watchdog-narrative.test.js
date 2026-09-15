@@ -79,6 +79,43 @@ describe("phase copy map stays in sync with the server enum", () => {
 });
 
 describe("buildWatchdogNarrative", () => {
+  it("explains retained crash recovery and its age without counting admission checks as launches", async () => {
+    const { buildWatchdogNarrative } = await loadHelpers();
+    const narrative = buildWatchdogNarrative({ ...baseStatus,
+      recoveryPending: { createdAt: new Date(kNow - 120_000).toISOString(),
+        reason: "lifecycle_operation_in_progress", retryCount: 50,
+        nextAttemptAt: new Date(kNow + 10_000).toISOString() },
+    }, kNow);
+    expect(narrative.headline).toBe("Crash recovery is pending");
+    expect(narrative.detail).toContain("holds the gateway lifecycle lock");
+    expect(narrative.detail).toContain("2m");
+    expect(narrative.detail).not.toContain("50");
+    expect(narrative.countdowns).toEqual([expect.objectContaining({ label: "Next recovery check" })]);
+  });
+
+  it("keeps cleanup blockers and tracked writer identities visible above old healthy status", async () => {
+    const { buildWatchdogNarrative } = await loadHelpers();
+    const narrative = buildWatchdogNarrative({ ...baseStatus,
+      lifecycleOperation: { kind: "update_repair", phase: "cleanup_blocked",
+        processes: [{ pid: 1234, phase: "killing" }] },
+      recoveryPending: { reason: "operation_in_progress" },
+    }, kNow);
+    expect(narrative.headline).toBe("Repair cleanup needs attention");
+    expect(narrative.detail).toContain("1234");
+    expect(narrative.detail).toContain("confirm they have exited before restarting AlphaClaw");
+    expect(narrative.detail).toContain("will not be released automatically");
+    expect(buildWatchdogNarrative(baseStatus, kNow).headline).not.toBe(narrative.headline);
+  });
+
+  it("ticks retained recovery age using the existing local clock", async () => {
+    const { WatchdogNarrativeCard } = await loadCard();
+    const { useNowMs } = await loadUseNowMs();
+    WatchdogNarrativeCard({ watchdogStatus: { ...baseStatus,
+      recoveryPending: { createdAt: new Date(kNow).toISOString(), reason: "expected_restart" },
+    } });
+    expect(useNowMs).toHaveBeenLastCalledWith(1000, { enabled: true });
+  });
+
   it("returns null without a status or phase (loading shell renders instead)", async () => {
     const { buildWatchdogNarrative } = await loadHelpers();
     expect(buildWatchdogNarrative(null, kNow)).toBe(null);
