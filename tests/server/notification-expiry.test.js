@@ -72,6 +72,76 @@ describe("fixed notification delivery deadlines", () => {
     expect(h.insertEvent.mock.calls.filter(([event]) => event.eventType === "notification_expired")).toHaveLength(1);
   });
 
+  it.each([false, true])("retries an expiry audit after restart when its sink failed after insert=%s", async (insertBeforeFailure) => {
+    const h = makeHarness();
+    const watchdogDb = require("../../lib/server/db/watchdog");
+    watchdogDb.initWatchdogDb({ rootDir: h.openclawDir });
+    try {
+      h.insertEvent.mockImplementationOnce((event) => {
+        if (insertBeforeFailure) watchdogDb.insertWatchdogEvent(event);
+        throw Object.assign(new Error("temporary audit failure"), { code: "SQLITE_BUSY" });
+      }).mockImplementation((event) => watchdogDb.insertWatchdogEvent(event));
+      h.outbox.enqueue(overseer());
+      h.clock.now += hour;
+      const deliver = vi.fn();
+      await h.outbox.flush({ deliver });
+      expect(h.insertEvent).toHaveBeenCalledOnce();
+      expect(h.outbox.listEvents()[0]).toMatchObject({ suppressedReason: "expired", expiryRecordedAt: null });
+      expect(watchdogDb.getRecentEvents({ includeRoutine: true })).toHaveLength(insertBeforeFailure ? 1 : 0);
+
+      watchdogDb.closeWatchdogDb();
+      watchdogDb.initWatchdogDb({ rootDir: h.openclawDir });
+      const restarted = createNotifyOutbox({ openclawDir: h.openclawDir, nowFn: () => h.clock.now,
+        insertEvent: h.insertEvent, logger });
+      await restarted.flush({ deliver });
+      await restarted.flush({ deliver });
+      expect(deliver).not.toHaveBeenCalled();
+      expect(h.insertEvent).toHaveBeenCalledTimes(2);
+      // A lost post-insert acknowledgement returns 0 on the retry; the
+      // confirmed existing row is enough to persist the outbox audit stamp.
+      expect(h.insertEvent.mock.results[1].value === 0).toBe(insertBeforeFailure);
+      expect(restarted.listEvents()[0]).toMatchObject({ suppressedReason: "expired", expiryRecordedAt: h.clock.now });
+      expect(watchdogDb.getRecentEvents({ includeRoutine: true })).toEqual([
+        expect.objectContaining({ eventType: "notification_expired", details: expect.objectContaining({ id: "review" }) }),
+      ]);
+    } finally {
+      watchdogDb.closeWatchdogDb();
+    }
+  });
+
+  it("attempts a failed expiry audit once per flush even when delivery re-enqueues its ID", async () => {
+    const h = makeHarness();
+    const source = h.outbox.enqueue(overseer());
+    h.outbox.enqueue({ id: "other", message: "still current" });
+    h.clock.now += hour;
+    h.insertEvent.mockImplementation(() => { throw new Error("audit unavailable"); });
+    const deliver = vi.fn(async () => {
+      h.outbox.enqueue({ ...overseer(), createdAt: source.createdAt, expiresAt: source.expiresAt });
+      return { ok: true };
+    });
+    await h.outbox.flush({ deliver });
+    expect(deliver).toHaveBeenCalledOnce();
+    expect(h.insertEvent).toHaveBeenCalledOnce();
+    expect(h.outbox.listEvents()[0]).toMatchObject({ suppressedReason: "expired", expiryRecordedAt: null });
+    await h.outbox.flush({ deliver });
+    expect(deliver).toHaveBeenCalledOnce();
+    expect(h.insertEvent).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not persist an audit stamp without an audit sink", async () => {
+    const h = makeHarness();
+    const sinkless = createNotifyOutbox({ openclawDir: h.openclawDir, nowFn: () => h.clock.now, logger });
+    sinkless.enqueue(overseer());
+    h.clock.now += hour;
+    const deliver = vi.fn();
+    await sinkless.flush({ deliver });
+    expect(sinkless.listEvents()[0]).toMatchObject({ suppressedReason: "expired", expiryRecordedAt: null });
+    await h.outbox.flush({ deliver });
+    expect(deliver).not.toHaveBeenCalled();
+    expect(h.insertEvent).toHaveBeenCalledOnce();
+    expect(h.outbox.listEvents()[0].expiryRecordedAt).toBe(h.clock.now);
+  });
+
   it("does not renew a terminal failure or an expired tombstone on duplicate enqueue", async () => {
     const h = makeHarness();
     const first = h.outbox.enqueue(overseer());
@@ -167,6 +237,31 @@ describe("fixed notification delivery deadlines", () => {
     }));
     await h.notifier.flush();
     expect(h.send).toHaveBeenCalledOnce();
+  });
+
+  it("preserves partial delivery counts when an expiry audit retries after restart", async () => {
+    const targets = [{ channel: "telegram", target: "one" }, { channel: "telegram", target: "two" }];
+    const h = makeHarness({ targets });
+    h.send.mockImplementation(async () => { h.clock.now += hour; return { ok: true }; });
+    h.insertEvent.mockImplementation((event) => {
+      if (event.eventType === "notification_expired") throw new Error("audit unavailable");
+    });
+    await h.notifier.notify("review", overseer());
+    await h.notifier.flush();
+    expect(h.outbox.listEvents()[0]).toMatchObject({ deliveredAt: h.clock.now,
+      suppressedReason: "expired", expiryRecordedAt: null,
+      expiryDelivery: { sent: 1, failed: 0, skippedTargets: 1 } });
+    const recoveredSink = vi.fn();
+    const restarted = createNotifyOutbox({ openclawDir: h.openclawDir, nowFn: () => h.clock.now,
+      insertEvent: recoveredSink, logger });
+    const deliver = vi.fn();
+    await restarted.flush({ deliver });
+    expect(deliver).not.toHaveBeenCalled();
+    expect(h.send).toHaveBeenCalledOnce();
+    expect(recoveredSink).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      eventType: "notification_expired", details: expect.objectContaining({ sent: 1, failed: 0, skipped: 1 }),
+    }));
+    expect(restarted.listEvents()[0].expiryRecordedAt).toBe(h.clock.now);
   });
 
   it("checks the deadline before routing an unsuccessful primary to a fallback", async () => {
