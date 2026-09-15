@@ -364,16 +364,76 @@ describe("server/gmail-watch service", () => {
       await disconnect;
     });
 
-    it("repairs persisted duplicate ports in account-id order at boot", async () => {
+    it("persists every repaired port in account-id order before the first boot spawn", async () => {
       vi.useFakeTimers();
       process.env.WEBHOOK_TOKEN = "test-token";
       const env = createEnv({ state: { version: 2, accounts: [
         baseStateAccount({ id: "z", gmailWatch: { enabled: true, port: 18801, expiration: kFarFuture() } }),
         baseStateAccount({ id: "a", email: "first@corp.com", gmailWatch: { enabled: true, port: 18801, expiration: kFarFuture() } }),
+        baseStateAccount({ id: "m", email: "middle@corp.com", gmailWatch: { enabled: true, expiration: kFarFuture() } }),
       ] } });
+      let firstSpawnState;
+      spawnState.impl = () => {
+        firstSpawnState ||= env.readStateFile();
+        return new FakeChild();
+      };
       env.service.start();
       await vi.advanceTimersByTimeAsync(1);
-      expect(env.readStateFile().accounts.map((account) => [account.id, account.gmailWatch.port])).toEqual([["z", 18802], ["a", 18801]]);
+      const assignments = [["z", 18803], ["a", 18801], ["m", 18802]];
+      expect(firstSpawnState.accounts.map((account) => [account.id, account.gmailWatch.port])).toEqual(assignments);
+      expect(new Set(firstSpawnState.accounts.map((account) => account.gmailWatch.port)).size).toBe(3);
+      expect(env.readStateFile().accounts.map((account) => [account.id, account.gmailWatch.port])).toEqual(assignments);
+      expect(spawnState.calls).toHaveLength(3);
+      await env.service.stop();
+    });
+
+    it("gives a live unknown predecessor port priority and persists a visible retry before boot spawns", async () => {
+      vi.useFakeTimers();
+      process.env.WEBHOOK_TOKEN = "test-token";
+      const env = createEnv({ state: { version: 2, accounts: [
+        baseStateAccount({ id: "a", email: "first@corp.com", gmailWatch: { enabled: true, port: 18801, expiration: kFarFuture() } }),
+        baseStateAccount({ id: "z", gmailWatch: { enabled: true, port: 18801, pid: process.pid, expiration: 1 } }),
+      ] } });
+      let firstSpawnState;
+      spawnState.impl = () => {
+        firstSpawnState ||= env.readStateFile();
+        return new FakeChild();
+      };
+      env.service.start();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(firstSpawnState.accounts[0].gmailWatch.port).toBe(18802);
+      expect(firstSpawnState.accounts[1].gmailWatch).toMatchObject({ enabled: false, port: 18801, pid: process.pid,
+        remoteOperation: { kind: "stop", status: "failed", code: "gmail_serve_stop_unconfirmed" },
+      });
+      expect(spawnState.calls).toHaveLength(1);
+      expect(env.gogCmd).not.toHaveBeenCalled();
+      const reloaded = createEnv({ state: env.readStateFile() });
+      expect(reloaded.service.getConfig({ req: {} }).accounts.find((account) => account.accountId === "z"))
+        .toMatchObject({ enabled: false, port: 18801, pid: process.pid,
+          remoteOperation: { kind: "stop", status: "failed", message: expect.stringContaining("retry stopping") },
+        });
+      await env.service.stop();
+    });
+
+    it("persists a retryable stop error if an unknown live predecessor is discovered during restore", async () => {
+      vi.useFakeTimers();
+      process.env.WEBHOOK_TOKEN = "test-token";
+      const env = createEnv({ state: { version: 2, accounts: [
+        baseStateAccount({ id: "a", email: "first@corp.com", gmailWatch: { enabled: true, port: 18801, expiration: kFarFuture() } }),
+        baseStateAccount({ id: "z", gmailWatch: { enabled: true, port: 18802, expiration: kFarFuture() } }),
+      ] } });
+      spawnState.impl = () => {
+        const state = env.readStateFile();
+        state.accounts[1].gmailWatch.pid = process.pid;
+        fsReal.writeFileSync(env.statePath, JSON.stringify(state));
+        return new FakeChild();
+      };
+      env.service.start();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(env.readStateFile().accounts[1].gmailWatch).toMatchObject({ enabled: false, port: 18802, pid: process.pid,
+        remoteOperation: { kind: "stop", status: "failed", code: "gmail_serve_stop_unconfirmed" },
+      });
+      expect(spawnState.calls).toHaveLength(1);
       await env.service.stop();
     });
 
