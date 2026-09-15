@@ -194,12 +194,30 @@ describe("server/upgrade-overseer", () => {
         verbose: true,
       }),
     );
+    const timing = notify.mock.calls[0][1];
+    expect(timing.expiresAt - timing.createdAt).toBe(60 * 60_000);
+    expect(record.overseer).toMatchObject({ notifyCreatedAt: timing.createdAt, notifyExpiresAt: timing.expiresAt });
     // The main call carried the discovered headless flags with tools disabled.
     const mainCall = runner.calls.find((c) => c.args?.[0] === "-p");
     expect(mainCall.args).toContain("--output-format");
     expect(mainCall.args).toContain("--disallowedTools");
     // The untrusted-log warning made it into the prompt.
     expect(mainCall.input).toContain("UNTRUSTED");
+  });
+
+  it("retains the source notification deadline when an interrupted review is resumed", async () => {
+    const { ledger } = makeLedger();
+    seedFailedRun(ledger);
+    const notifyCreatedAt = Date.now() - 2 * 60 * 60_000;
+    const notifyExpiresAt = notifyCreatedAt + 60 * 60_000;
+    ledger.updateRun(kOpId, (record) => {
+      record.overseer = { state: "pending", at: notifyCreatedAt, notifyCreatedAt, notifyExpiresAt };
+      return record;
+    });
+    const { overseer, notify } = makeOverseer({ ledger, runner: makeRunner() });
+    expect(await overseer.maybeRunForLatest()).toMatchObject({ ran: true });
+    expect(notify.mock.calls[0][1]).toMatchObject({ createdAt: notifyCreatedAt, expiresAt: notifyExpiresAt });
+    expect(ledger.readRun(kOpId).overseer).toMatchObject({ notifyCreatedAt, notifyExpiresAt });
   });
 
   it("includes the numeric machine summary in the prompt's trusted block", async () => {

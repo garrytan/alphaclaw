@@ -416,8 +416,11 @@ describe("createWatchdogOverseer", () => {
     expect(opts).toEqual({
       eventType: "overseer",
       id: "watchdog-overseer-1",
+      createdAt: expect.any(Number), expiresAt: expect.any(Number),
       verbose: true,
     });
+    expect(opts.expiresAt - opts.createdAt).toBe(60 * 60_000);
+    expect(record.current).toMatchObject({ notifyCreatedAt: opts.createdAt, notifyExpiresAt: opts.expiresAt });
   });
 
   it("redacts secrets from the assembled prompt before the spawn", async () => {
@@ -2009,6 +2012,7 @@ describe("#87 overseer admission, quiet class, recheck-before-send", () => {
       expect(notify.mock.calls[0][1]).toEqual({
         eventType: "overseer",
         id: "watchdog-overseer-1",
+        createdAt: expect.any(Number), expiresAt: expect.any(Number),
         verbose: false,
       });
       expect(db.getIncidentById(1).overseer.current).toMatchObject({
@@ -2356,6 +2360,8 @@ describe("#87 overseer admission, quiet class, recheck-before-send", () => {
       expect(record.current).toMatchObject({ manual: true, notifyOutcome: "not_attempted" });
       expect(record.history).toHaveLength(1);
       expect(record.history[0]).toMatchObject({ manual: false, notifyOutcome: "sent" });
+      expect(record.current.notifyExpiresAt).toBe(record.history[0].notifyExpiresAt);
+      expect(record.current.notifyCreatedAt).toBe(record.history[0].notifyCreatedAt);
 
       const staleRunner = createFakeRunner();
       const stale = createHarness({ runner: staleRunner });
