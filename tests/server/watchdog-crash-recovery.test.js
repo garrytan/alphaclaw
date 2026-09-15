@@ -187,7 +187,9 @@ describe("watchdog retained crash recovery", () => {
 
   it.each(["warming successor", "adopted successor", "explicit stop"])(
     "%s cancels a delayed relaunch", async (outcome) => {
-      const { lock, launch } = setup();
+      // These are synthetic process identities. The adopted probe must not
+      // consult whichever real process happens to own PID 200 on this host.
+      const { lock, launch } = setup({ pidAlive: () => true, readProcStartTicks: () => null });
       const release = lock.tryAcquire("env_sync");
       crash();
       await vi.advanceTimersByTimeAsync(0);
@@ -201,6 +203,35 @@ describe("watchdog retained crash recovery", () => {
       expect(watchdog.getStatus().recoveryPending).toBeNull();
     },
   );
+
+  it("a subsequently dead adopted successor creates a new recovery obligation", async () => {
+    let successorAlive = true;
+    const { lock, launch, events } = setup({
+      pidAlive: () => successorAlive,
+      readProcStartTicks: () => null,
+    });
+    const release = lock.tryAcquire("env_sync");
+    crash();
+    await vi.advanceTimersByTimeAsync(0);
+    const previous = watchdog.getStatus().recoveryPending;
+    expect(previous).toMatchObject({ source: "exit_event" });
+    watchdog.onGatewayLaunch({ startedAt: Date.now(), pid: 200, rootPid: 200,
+      generation: null, supervision: "adopted" });
+    expect(watchdog.getStatus().recoveryPending).toBeNull();
+    release();
+
+    successorAlive = false;
+    await vi.advanceTimersByTimeAsync(31_000);
+    const next = watchdog.getStatus().recoveryPending;
+    expect(next).toMatchObject({ source: "probe_death" });
+    expect(next.correlationId).not.toBe(previous.correlationId);
+    expect(launch).not.toHaveBeenCalled();
+    expect(events).toHaveBeenCalledWith(expect.objectContaining({ eventType: "crash",
+      source: "probe_death", details: expect.objectContaining({ pid: 200, reason: "process_gone" }) }));
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(launch).toHaveBeenCalledTimes(1);
+    expect(watchdog.getStatus().recoveryPending).toBeNull();
+  });
 
   it("a successor observed during prelaunch discovery prevents the stale spawn", async () => {
     let finishRead;
