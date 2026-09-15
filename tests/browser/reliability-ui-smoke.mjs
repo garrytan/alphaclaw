@@ -1,5 +1,5 @@
 // Run with supported Node after npm install/build:ui:
-// node tests/browser/reliability-ui-smoke.mjs
+// npm run test:ui:reliability
 // Real Preact + fetch + EventSource + Chromium, deterministic local providers.
 import assert from "node:assert/strict";
 import fs from "node:fs";

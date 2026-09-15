@@ -375,6 +375,11 @@ Exit-1 ownership conflicts (`classifyOwnershipConflict` over `kGatewayOwnershipC
 
 ## 10. Temporal truth
 
+Crash obligations and repair cleanup ownership extend this model without
+changing its readiness or serving-identity rules. See
+[Reliability ownership](reliability-ownership.md#crash-recovery-and-repair-cleanup)
+for the retained recovery record, cancellation barrier and operator status.
+
 - The reducer persists `{state, since, bootId}` **on transition only**; `since` never re-derives on read.
 - Every input source carries its own `observedAt`; the reducer output includes per-source freshness.
 - Initial missing observations remain unknown. When the server marks a snapshot stale or its observation ages past 15s, the UI prefixes the state label with “Last known —” and shows “Status updates unavailable.” Receiving a heartbeat alone cannot refresh that observation.
