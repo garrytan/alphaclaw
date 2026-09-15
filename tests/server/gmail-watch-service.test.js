@@ -3,6 +3,8 @@ const os = require("os");
 const path = require("path");
 const { EventEmitter } = require("events");
 const childProcess = require("child_process");
+const express = require("express");
+const request = require("supertest");
 
 // gmail-watch (via gmail-serve) destructures `spawn` at load time, and
 // gmail-watch captures createGmailServeManager the same way. Install the
@@ -85,6 +87,7 @@ const createEnv = ({
   gogCmd,
   constants: constantOverrides = {},
   restartRequiredState,
+  app = null,
 } = {}) => {
   const root = fsReal.mkdtempSync(path.join(os.tmpdir(), "alphaclaw-gwatch-"));
   tmpDirs.push(root);
@@ -152,7 +155,7 @@ const createEnv = ({
     kGmailWatchRenewalIntervalMs: 60 * 60 * 1000,
     ...constantOverrides,
   };
-  const service = createGmailWatchService({
+  const options = {
     fs,
     constants,
     gogCmd: resolvedGogCmd,
@@ -163,7 +166,10 @@ const createEnv = ({
     reloadEnv,
     restartRequiredState:
       restartRequiredState === undefined ? { markRequired } : restartRequiredState,
-  });
+  };
+  const service = app
+    ? require("../../lib/server/routes/gmail").registerGmailRoutes({ app, ...options })
+    : createGmailWatchService(options);
   return {
     service,
     onServeExit: serveHooks.onServeExit,
@@ -234,6 +240,242 @@ describe("server/gmail-watch service", () => {
     else process.env.WEBHOOK_TOKEN = originalWebhookToken;
     for (const dir of tmpDirs) fsReal.rmSync(dir, { recursive: true, force: true });
     tmpDirs = [];
+  });
+
+  describe("operation races", () => {
+    const deferred = () => {
+      let resolve;
+      const promise = new Promise((done) => { resolve = done; });
+      return { promise, resolve };
+    };
+    const tick = async () => { for (let i = 0; i < 12; i += 1) await Promise.resolve(); };
+    const ok = () => ({ ok: true, stdout: '{"expiration":"1893456000000"}', stderr: "" });
+
+    it("Stop disables immediately and a late Start cannot spawn or re-enable", async () => {
+      const gate = deferred();
+      const env = createEnv({ state: singleAccountState(), gogCmd: vi.fn((cmd) => cmd.includes("watch start") ? gate.promise : Promise.resolve(ok())) });
+      const start = env.service.startWatch({ accountId: "acct-1" });
+      const stop = env.service.stopWatch({ accountId: "acct-1" });
+      expect(env.readStateFile().accounts[0].gmailWatch).toMatchObject({ enabled: false, remoteOperation: { kind: "stop", status: "pending" } });
+      gate.resolve(ok());
+      await expect(start).rejects.toMatchObject({ code: "superseded" });
+      await expect(stop).resolves.toMatchObject({ ok: true });
+      expect(spawnState.calls).toHaveLength(0);
+      expect(env.readStateFile().accounts[0].gmailWatch).toMatchObject({ enabled: false, remoteOperation: { status: "succeeded" } });
+    });
+
+    it("refuses a Stop when existing state is unreadable instead of reporting it absent", async () => {
+      const env = createEnv({ state: singleAccountState() });
+      fsReal.writeFileSync(env.statePath, '{"accounts":');
+      await expect(env.service.stopWatch({ accountId: "acct-1" })).rejects.toMatchObject({ code: "GOOGLE_STATE_UNREADABLE" });
+      expect(fsReal.readFileSync(env.statePath, "utf8")).toBe('{"accounts":');
+      expect(env.gogCmd).not.toHaveBeenCalled();
+    });
+
+    it("reserves distinct ports before two first starts yield", async () => {
+      const gates = [deferred(), deferred()];
+      let calls = 0;
+      const env = createEnv({ state: { version: 2, accounts: [baseStateAccount(), baseStateAccount({ id: "acct-2", email: "two@corp.com" })] },
+        gogCmd: vi.fn(() => gates[calls++].promise) });
+      const starts = [env.service.startWatch({ accountId: "acct-1" }), env.service.startWatch({ accountId: "acct-2" })];
+      expect(calls).toBe(2);
+      gates.forEach((gate) => gate.resolve(ok()));
+      const results = await Promise.all(starts);
+      expect(results.map((result) => result.watch.port)).toEqual([18801, 18802]);
+      expect(env.readStateFile().accounts.map((account) => account.gmailWatch.port)).toEqual([18801, 18802]);
+      await env.service.stop();
+    });
+
+    it("hundreds of toggles settle every caller while running only the active and final intent", async () => {
+      const gate = deferred();
+      const env = createEnv({ state: singleAccountState(), gogCmd: vi.fn((cmd) => cmd.includes("watch start") ? gate.promise : Promise.resolve(ok())) });
+      const requests = [env.service.startWatch({ accountId: "acct-1" })];
+      for (let i = 0; i < 201; i += 1) requests.push(i % 2
+        ? env.service.startWatch({ accountId: "acct-1" }) : env.service.stopWatch({ accountId: "acct-1" }));
+      gate.resolve(ok());
+      const results = await Promise.allSettled(requests);
+      expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+      expect(results.filter((result) => result.status === "rejected").every((result) => result.reason.code === "superseded")).toBe(true);
+      expect(env.gogCmd.mock.calls.filter(([cmd]) => cmd.includes("watch start"))).toHaveLength(1);
+      expect(env.gogCmd.mock.calls.filter(([cmd]) => cmd.includes("watch stop")).length).toBeLessThanOrEqual(2);
+      expect(env.readStateFile().accounts[0].gmailWatch.enabled).toBe(false);
+    });
+
+    it("a newer Start waits for Stop cleanup before launching its successor", async () => {
+      const gate = deferred();
+      let stoppingRemote = false;
+      const env = createEnv({ state: singleAccountState(), gogCmd: vi.fn((cmd) => cmd.includes("watch stop") && stoppingRemote ? gate.promise : Promise.resolve(ok())) });
+      await env.service.startWatch({ accountId: "acct-1" });
+      stoppingRemote = true;
+      const stop = env.service.stopWatch({ accountId: "acct-1" });
+      await tick();
+      const start = env.service.startWatch({ accountId: "acct-1" });
+      expect(spawnState.calls).toHaveLength(1);
+      gate.resolve(ok());
+      await expect(stop).rejects.toMatchObject({ code: "superseded" });
+      await expect(start).resolves.toMatchObject({ ok: true, watch: { enabled: true } });
+      expect(spawnState.calls).toHaveLength(2);
+      await env.service.stop();
+    });
+
+    it("renewal cannot re-enable an account stopped during its remote request", async () => {
+      const gate = deferred();
+      const env = createEnv({ state: singleAccountState({ gmailWatch: { enabled: true, port: 18801 } }),
+        gogCmd: vi.fn((cmd) => cmd.includes("watch start") ? gate.promise : Promise.resolve(ok())) });
+      const renewal = env.service.renewWatch({ force: true });
+      const stop = env.service.stopWatch({ accountId: "acct-1" });
+      gate.resolve(ok());
+      await expect(renewal).resolves.toMatchObject({ results: [{ skipped: true, reason: "superseded" }] });
+      await stop;
+      expect(spawnState.calls).toHaveLength(0);
+      expect(env.readStateFile().accounts[0].gmailWatch.enabled).toBe(false);
+    });
+
+    it("disconnect owns the account through revocation, joins duplicates, and preserves failures", async () => {
+      const gate = deferred();
+      const run = vi.fn(() => gate.promise);
+      const env = createEnv({ state: singleAccountState({ gmailWatch: { enabled: true, port: 18801 } }) });
+      const first = env.service.disconnectAccount({ accountId: "acct-1", run });
+      expect(env.service.disconnectAccount({ accountId: "acct-1", run })).toBe(first);
+      await tick();
+      expect(run).toHaveBeenCalledTimes(1);
+      await expect(env.service.startWatch({ accountId: "acct-1" })).rejects.toMatchObject({ code: "account_disconnecting", statusCode: 409 });
+      await expect(env.service.renewWatch({ accountId: "acct-1", force: true })).rejects.toMatchObject({ code: "account_disconnecting" });
+      gate.resolve({ ok: false, error: "revocation unavailable" });
+      await expect(first).rejects.toMatchObject({ code: "google_disconnect_failed" });
+      const persisted = env.readStateFile();
+      expect(persisted.accounts[0].gmailWatch).toMatchObject({ enabled: false, remoteOperation: { kind: "disconnect", status: "failed" } });
+      const reloaded = createEnv({ state: persisted });
+      expect(reloaded.service.getConfig({ req: {} }).accounts[0]).toMatchObject({ enabled: false, remoteOperation: { kind: "disconnect", status: "failed" } });
+    });
+
+    it("returns 409 account_disconnecting from Start and Renew HTTP requests", async () => {
+      const app = express();
+      app.use(express.json());
+      const env = createEnv({ app, state: singleAccountState({ gmailWatch: { enabled: true, port: 18801 } }) });
+      const gate = deferred();
+      const disconnect = env.service.disconnectAccount({ accountId: "acct-1", run: () => gate.promise });
+      for (const action of ["start", "renew"]) {
+        const response = await request(app).post(`/api/gmail/watch/${action}`).send({ accountId: "acct-1", force: true });
+        expect(response.status).toBe(409);
+        expect(response.body).toMatchObject({ ok: false, code: "account_disconnecting" });
+      }
+      gate.resolve({ ok: true });
+      await disconnect;
+    });
+
+    it("repairs persisted duplicate ports in account-id order at boot", async () => {
+      vi.useFakeTimers();
+      process.env.WEBHOOK_TOKEN = "test-token";
+      const env = createEnv({ state: { version: 2, accounts: [
+        baseStateAccount({ id: "z", gmailWatch: { enabled: true, port: 18801, expiration: kFarFuture() } }),
+        baseStateAccount({ id: "a", email: "first@corp.com", gmailWatch: { enabled: true, port: 18801, expiration: kFarFuture() } }),
+      ] } });
+      env.service.start();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(env.readStateFile().accounts.map((account) => [account.id, account.gmailWatch.port])).toEqual([["z", 18802], ["a", 18801]]);
+      await env.service.stop();
+    });
+
+    it("shutdown cancels the queued bootstrap and any in-flight renewal", async () => {
+      vi.useFakeTimers();
+      process.env.WEBHOOK_TOKEN = "test-token";
+      const env = createEnv({ state: singleAccountState({ gmailWatch: { enabled: true, port: 18801 } }) });
+      env.service.start();
+      await env.service.stop();
+      await vi.advanceTimersByTimeAsync(10);
+      expect(spawnState.calls).toHaveLength(0);
+      expect(env.gogCmd).not.toHaveBeenCalled();
+      const gate = deferred();
+      const during = createEnv({ state: singleAccountState({ gmailWatch: { enabled: true, port: 18801 } }), gogCmd: vi.fn(() => gate.promise) });
+      const renewal = during.service.renewWatch({ force: true });
+      const stop = during.service.stop();
+      gate.resolve(ok());
+      await Promise.all([renewal, stop]);
+      expect(spawnState.calls).toHaveLength(0);
+      expect(during.readStateFile().accounts[0].gmailWatch.enabled).toBe(true);
+    });
+
+    it("a failed first serve spawn cancels the remote watch before releasing its port", async () => {
+      spawnState.impl = () => { throw new Error("spawn unavailable"); };
+      const env = createEnv({ state: singleAccountState() });
+      await expect(env.service.startWatch({ accountId: "acct-1" })).rejects.toThrow("spawn unavailable");
+      expect(env.gogCmd.mock.calls.map(([cmd]) => cmd.includes("watch stop"))).toEqual([false, true]);
+      expect(env.readStateFile().accounts[0].gmailWatch).toMatchObject({ enabled: false, remoteOperation: { kind: "start", status: "failed" } });
+      spawnState.impl = () => new FakeChild();
+      await expect(env.service.startWatch({ accountId: "acct-1" })).resolves.toMatchObject({ watch: { port: 18801 } });
+      await env.service.stop();
+    });
+
+    it("keeps the port reserved when SIGKILL has not confirmed child death", async () => {
+      vi.useFakeTimers();
+      let child;
+      spawnState.impl = () => {
+        child = new FakeChild();
+        child.kill = () => true;
+        return child;
+      };
+      const env = createEnv({ state: singleAccountState(), constants: { kMaxGoogleAccounts: 1 } });
+      await env.service.startWatch({ accountId: "acct-1" });
+      const stopped = env.service.stopWatch({ accountId: "acct-1" });
+      const outcome = expect(stopped).rejects.toMatchObject({ code: "gmail_serve_stop_unconfirmed" });
+      await vi.advanceTimersByTimeAsync(6001);
+      await outcome;
+      expect(env.readStateFile().accounts[0].gmailWatch).toMatchObject({ enabled: false, port: 18801, pid: process.pid, remoteOperation: { kind: "stop", status: "failed" } });
+      await expect(env.service.startWatch({ accountId: "acct-1" })).rejects.toMatchObject({ code: "gmail_serve_stop_unconfirmed", retryable: true });
+      expect(env.gogCmd.mock.calls.filter(([cmd]) => cmd.includes("watch start"))).toHaveLength(1);
+      const state = env.readStateFile();
+      state.accounts.push(baseStateAccount({ id: "acct-2", email: "two@corp.com" }));
+      fsReal.writeFileSync(env.statePath, JSON.stringify(state));
+      await expect(env.service.startWatch({ accountId: "acct-2" })).rejects.toMatchObject({ code: "gmail_ports_exhausted" });
+      child.emit("exit", null, "SIGKILL");
+      await env.service.stopWatch({ accountId: "acct-1" });
+      spawnState.impl = () => new FakeChild();
+      await expect(env.service.startWatch({ accountId: "acct-2" })).resolves.toMatchObject({ watch: { port: 18801 } });
+      await env.service.stop();
+    });
+
+    it("retains an untracked live PID after reload and does not reuse its port at boot", async () => {
+      vi.useFakeTimers();
+      process.env.WEBHOOK_TOKEN = "test-token";
+      const env = createEnv({ state: { version: 2, accounts: [
+        baseStateAccount({ gmailWatch: { enabled: false, port: 18801, pid: process.pid, remoteOperation: { kind: "stop", status: "failed" } } }),
+        baseStateAccount({ id: "acct-2", email: "two@corp.com", gmailWatch: { enabled: true, port: 18801, expiration: kFarFuture() } }),
+      ] } });
+      await expect(env.service.stopWatch({ accountId: "acct-1" })).rejects.toMatchObject({ code: "gmail_serve_stop_unconfirmed" });
+      await expect(env.service.startWatch({ accountId: "acct-1" })).rejects.toMatchObject({ code: "gmail_serve_stop_unconfirmed" });
+      expect(env.readStateFile().accounts[0].gmailWatch).toMatchObject({ enabled: false, pid: process.pid, port: 18801 });
+      env.service.start();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(env.readStateFile().accounts[1].gmailWatch.port).toBe(18802);
+      expect(spawnState.calls).toHaveLength(1);
+      await env.service.stop();
+    });
+
+    it("renewal checks the final persisted enabled intent before committing", async () => {
+      const gate = deferred();
+      const env = createEnv({ state: singleAccountState({ gmailWatch: { enabled: true, port: 18801 } }),
+        gogCmd: vi.fn((cmd) => cmd.includes("watch start") ? gate.promise : Promise.resolve(ok())) });
+      const renewal = env.service.renewWatch({ force: true });
+      const state = env.readStateFile();
+      state.accounts[0].gmailWatch.enabled = false;
+      fsReal.writeFileSync(env.statePath, JSON.stringify(state));
+      gate.resolve(ok());
+      await expect(renewal).resolves.toMatchObject({ results: [{ skipped: true, reason: "superseded" }] });
+      expect(env.readStateFile().accounts[0].gmailWatch.enabled).toBe(false);
+      expect(env.service.getServeStatus("acct-1").running).toBe(false);
+      expect(env.gogCmd.mock.calls.filter(([cmd]) => cmd.includes("watch stop"))).toHaveLength(1);
+    });
+
+    it("marks an interrupted stop failed after restart without re-enabling it", async () => {
+      vi.useFakeTimers();
+      const env = createEnv({ state: singleAccountState({ gmailWatch: { enabled: false, remoteOperation: { kind: "stop", status: "pending", updatedAt: 1 } } }) });
+      env.service.start();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(env.readStateFile().accounts[0].gmailWatch).toMatchObject({ enabled: false, remoteOperation: { kind: "stop", status: "failed", code: "operation_interrupted" } });
+      expect(spawnState.calls).toHaveLength(0);
+      await env.service.stop();
+    });
   });
 
   describe("topic name helpers", () => {
@@ -681,22 +923,23 @@ describe("server/gmail-watch service", () => {
       expect(env.readStateFile().accounts[0].gmailWatch.enabled).toBe(false);
     });
 
-    it("logs a warning when gog fails to stop the watch", async () => {
-      const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    it("keeps a visible retryable failure when gog fails to stop the watch", async () => {
+      const logSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
       const env = createEnv({
         state: singleAccountState(),
         gogCmd: vi.fn(async () => ({ ok: false, stdout: "", stderr: "stop failed" })),
       });
-      await env.service.stopWatch({ accountId: "acct-1" });
+      await expect(env.service.stopWatch({ accountId: "acct-1" })).rejects.toMatchObject({ code: "gmail_remote_stop_failed", retryable: true });
       expect(logSpy).toHaveBeenCalledWith(
-        expect.stringContaining("Gmail watch stop warning (ops@corp.com): stop failed"),
+        expect.stringContaining("Gmail watch stop failed (ops@corp.com): stop failed"),
       );
+      expect(env.readStateFile().accounts[0].gmailWatch).toMatchObject({ enabled: false, remoteOperation: { kind: "stop", status: "failed" } });
 
       const silent = createEnv({
         state: singleAccountState(),
         gogCmd: vi.fn(async () => ({ ok: false, stdout: "", stderr: "" })),
       });
-      await silent.service.stopWatch({ accountId: "acct-1" });
+      await expect(silent.service.stopWatch({ accountId: "acct-1" })).rejects.toMatchObject({ code: "gmail_remote_stop_failed" });
       expect(logSpy).toHaveBeenCalledWith(expect.stringContaining("unknown"));
     });
   });
@@ -813,13 +1056,13 @@ describe("server/gmail-watch service", () => {
       });
       env.service.start();
       await vi.advanceTimersByTimeAsync(1);
-      expect(spawnState.calls).toHaveLength(1);
+      expect(spawnState.calls).toHaveLength(2);
       expect(env.readStateFile().accounts[0].gmailWatch.pid).toBe(process.pid);
 
       // Restarting swaps the renewal timer without spawning a second serve.
       env.service.start();
       await vi.advanceTimersByTimeAsync(1);
-      expect(spawnState.calls).toHaveLength(1);
+      expect(spawnState.calls).toHaveLength(2);
 
       await env.service.stop();
     });
@@ -868,13 +1111,14 @@ describe("server/gmail-watch service", () => {
       });
       env.service.start();
       await vi.advanceTimersByTimeAsync(1);
-      env.flags.failExistsSync = true;
+      const savedState = fsReal.readFileSync(env.statePath, "utf8");
+      fsReal.writeFileSync(env.statePath, '{"accounts":');
       await vi.advanceTimersByTimeAsync(env.constants.kGmailWatchRenewalIntervalMs);
       expect(errorSpy).toHaveBeenCalledWith(
         "[alphaclaw] Gmail watch renewal error:",
         expect.any(Error),
       );
-      env.flags.failExistsSync = false;
+      fsReal.writeFileSync(env.statePath, savedState);
       await env.service.stop();
     });
 
