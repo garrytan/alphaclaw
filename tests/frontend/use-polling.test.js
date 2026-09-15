@@ -21,6 +21,75 @@ const probe = (id, fetcher, options = {}, interval = 3000) => ({ id, useRead: us
 const advance = (ms) => host.settle(() => vi.advanceTimersByTimeAsync(ms));
 
 describe("frontend/use-polling mounted consumers", () => {
+  it("manual refresh of a disabled poll publishes the latest committed snapshot, never its obsolete payload", async () => {
+    const work = deferred();
+    const fetcher = vi.fn(() => work.promise);
+    const options = { cacheKey: "shared", enabled: false };
+    setCached("shared", "before");
+    await host.render([probe("a", fetcher, options)]);
+    const refresh = host.result("a").refresh();
+    // A harmless rerender keeps this manual intent alive.
+    await host.render([probe("a", fetcher, options)]);
+    await host.settle(() => setCached("shared", "saved by a newer mutation"));
+    expect(host.result("a").data).toBe("before");
+    await host.settle(() => work.resolve("obsolete response"));
+    expect(await refresh).toBe("obsolete response");
+    expect(host.result("a")).toMatchObject({ data: "saved by a newer mutation", error: null, isPolling: false });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
+  it("manual disabled refresh retains last good data with an error and recovers on explicit retry", async () => {
+    const error = Object.assign(new Error("temporarily unavailable"), { status: 503 });
+    const fetcher = vi.fn().mockRejectedValueOnce(error).mockResolvedValue("recovered");
+    setCached("shared", "good");
+    await host.render([probe("a", fetcher, { cacheKey: "shared", enabled: false })]);
+    await host.settle(async () => expect(await host.result("a").refresh()).toBe(null));
+    expect(host.result("a")).toMatchObject({ data: "good", error, stale: true, isPolling: false });
+    await advance(9000);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    await host.settle(() => host.result("a").refresh());
+    expect(host.result("a")).toMatchObject({ data: "recovered", error: null, stale: false });
+  });
+
+  it("disabling a poll fences a manual request that started while enabled", async () => {
+    host.document.hidden = true;
+    const work = deferred();
+    const fetcher = () => work.promise;
+    setCached("shared", "before");
+    await host.render([probe("a", fetcher, { cacheKey: "shared" })]);
+    const refresh = host.result("a").refresh();
+    await host.render([probe("a", fetcher, { cacheKey: "shared", enabled: false })]);
+    await host.settle(() => work.resolve("after"));
+    await refresh;
+    expect(getCached("shared")).toBe("after");
+    expect(host.result("a").data).toBe("before");
+  });
+
+  it.each(["key cycle", "enable cycle", "unmount"])("an old disabled refresh cannot publish after %s", async (transition) => {
+    host.document.hidden = true;
+    const work = deferred();
+    const fetcher = () => work.promise;
+    const options = { cacheKey: "shared", enabled: false };
+    setCached("shared", "before");
+    await host.render([probe("a", fetcher, options)]);
+    const refresh = host.result("a").refresh();
+    if (transition === "key cycle") {
+      await host.render([probe("a", fetcher, { ...options, cacheKey: "other" })]);
+      await host.render([probe("a", fetcher, options)]);
+    } else if (transition === "enable cycle") {
+      await host.render([probe("a", fetcher, { ...options, enabled: true })]);
+      await host.render([probe("a", fetcher, options)]);
+    } else {
+      await host.unmount();
+      await host.render([probe("a", fetcher, options)]);
+    }
+    await host.settle(() => setCached("shared", "newer unseen mutation"));
+    await host.settle(() => work.resolve("old request"));
+    await refresh;
+    expect(getCached("shared")).toBe("newer unseen mutation");
+    expect(host.result("a").data).toBe("before");
+  });
+
   it("disabling polling fences an earlier read without cancelling another subscriber", async () => {
     const work = deferred();
     const fetcher = vi.fn(() => work.promise);

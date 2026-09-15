@@ -18,6 +18,22 @@ afterEach(async () => {
 const probe = (id, key, fetcher, options = {}) => ({ id, useRead: useCachedFetch, args: [key, fetcher, options] });
 
 describe("frontend/use-cached-fetch mounted consumers", () => {
+  it("an opted-in disabled refresh waits for SWR work before publishing its committed entry", async () => {
+    const work = deferred();
+    const fetcher = vi.fn(() => work.promise);
+    setCached("shared", "before");
+    await host.render([probe("a", "shared", fetcher, { initialFetch: false, subscribeEnabled: false, maxAgeMs: 0 })]);
+    let settled = false;
+    const refresh = host.result("a").refresh({ publishWhenDisabled: true }).then(() => { settled = true; });
+    await host.settle();
+    expect(settled).toBe(false);
+    expect(host.result("a").data).toBe("before");
+    await host.settle(() => work.resolve("after"));
+    await refresh;
+    expect(host.result("a").data).toBe("after");
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
   it("disabling a consumer fences late shared results while preserving access revocation", async () => {
     const work = deferred();
     let signal;
