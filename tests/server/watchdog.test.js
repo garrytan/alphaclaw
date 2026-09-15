@@ -1579,6 +1579,32 @@ describe("server/watchdog", () => {
     }
   });
 
+  it("shutdown waits for the cancelled repair writer before completing the server drain", async () => {
+    const lock = require("../../lib/server/gateway-lifecycle-lock").createGatewayLifecycleLock({ logger: { warn() {} } });
+    let finishWriter;
+    const writer = new Promise((resolve) => { finishWriter = resolve; });
+    const { watchdog, clawCmd, launchGatewayProcess } = createHarness({
+      gatewayLifecycleLock: lock,
+      clawCmdImpl: async (command) => command === "doctor --fix --yes"
+        ? writer : { ok: true, stdout: "{}" },
+    });
+    const repair = watchdog.triggerRepair();
+    await vi.waitFor(() => expect(clawCmd).toHaveBeenCalledWith(
+      "doctor --fix --yes", expect.any(Object),
+    ));
+    let drained = false;
+    const drain = watchdog.stop().then(() => { drained = true; });
+    await flushMicrotasks();
+    expect(drained).toBe(false);
+    expect(lock.getActiveOperation()).toMatchObject({ kind: "repair", phase: "cleanup" });
+    finishWriter({ ok: true, stdout: "fixed" });
+    await drain;
+    await repair;
+    expect(drained).toBe(true);
+    expect(launchGatewayProcess).not.toHaveBeenCalled();
+    expect(lock.getActiveOperation()).toBe(null);
+  });
+
   it("a structural version_mismatch hold (#76 C2 launch gate) refuses repair for EVERY source — manual included — no doctor run, no launch; the ledger row names the hold class", async () => {
     const clawCalls = [];
     const { watchdog, launchGatewayProcess, insertWatchdogEvent } = createHarness({
@@ -5348,6 +5374,7 @@ describe("server/watchdog", () => {
             intent: "relaunch_if_absent",
           }),
         }),
+        expect.objectContaining({ details: { reason: "child_retained", recoveryPending: true } }),
       ]);
       expect(restartRows(insertWatchdogEvent, { status: "ok" })).toHaveLength(0);
       expect(restartRows(insertWatchdogEvent, { status: "requested" })).toHaveLength(0);
@@ -6272,6 +6299,9 @@ describe("server/watchdog", () => {
       // Work times out but the uncooperative writer has not finished.
       await vi.advanceTimersByTimeAsync(kRepairLeaseMs + 1);
       expect(lock.getActiveOperation()).toMatchObject({ kind: "repair", phase: "cleanup_blocked" });
+      expect(watchdog.getStatus().lifecycleOperation).toMatchObject({
+        kind: "repair", phase: "cleanup_blocked",
+      });
 
       // Doctor finishes late: the repair asks the lock and stands down.
       await vi.advanceTimersByTimeAsync(60_000);
@@ -6344,6 +6374,7 @@ describe("server/watchdog", () => {
         expect.objectContaining({
           details: expect.objectContaining({ reason: "incumbent_unhealthy", pid: 700, intent: "relaunch_if_absent" }),
         }),
+        expect.objectContaining({ details: { reason: "incumbent_unhealthy", recoveryPending: true } }),
       ]);
       expect(watchdog.getStatus()).toMatchObject({
         lifecycle: "running",
@@ -6761,6 +6792,7 @@ describe("server/watchdog", () => {
       await settle();
       expect(restartRows(insertWatchdogEvent, { source: "exit_event", status: "skipped" })).toEqual([
         expect.objectContaining({ details: expect.objectContaining({ reason: "incumbent_unhealthy", pid: 100 }) }),
+        expect.objectContaining({ details: { reason: "incumbent_unhealthy", recoveryPending: true } }),
       ]);
       expect(watchdog.getStatus()).toMatchObject({ health: "degraded", incumbentGraceUntil: null });
       watchdog.stop();

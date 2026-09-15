@@ -19,7 +19,12 @@ describe("repair writer cancellation boundaries", () => {
     expect(result).toMatchObject({ ok: false, cancelled: true });
   });
 
-  it("keeps escalation after the leader closes and finalizes the restore guard after the last writer", async () => {
+  it.each([
+    { reason: "test abort", stdio: "ignore" },
+    { reason: "shutdown", stdio: "ignore" },
+    { reason: "shutdown", stdio: "inherit" },
+    { reason: "deadline then shutdown", stdio: "inherit" },
+  ])("$reason with $stdio stdio reaps grandchildren before the guard finalizes", async ({ reason, stdio }) => {
     const ready = path.join(dir, "ready");
     const output = path.join(dir, "writes");
     const grandchild = [
@@ -29,7 +34,7 @@ describe("repair writer cancellation boundaries", () => {
     ].join("\n");
     const leader = [
       'const {spawn}=require("child_process"); const fs=require("fs");',
-      `spawn(process.execPath,["-e",${JSON.stringify(grandchild)}],{stdio:"ignore"});`,
+      `spawn(process.execPath,["-e",${JSON.stringify(grandchild)}],{stdio:${JSON.stringify(stdio)}});`,
       `const t=setInterval(()=>{ if(fs.existsSync(${JSON.stringify(ready)})){clearInterval(t);console.log("ready");}},5);`,
       'setInterval(()=>{},1000);',
     ].join("\n");
@@ -38,9 +43,15 @@ describe("repair writer cancellation boundaries", () => {
     let groupPid;
     const base = createRunStream();
     const runStream = { runStreamed: (options) => base.runStreamed({
-      ...options, command: process.execPath, args: ["-e", leader], killGraceMs: 150,
+      ...options, command: process.execPath, args: ["-e", leader],
+      ...(reason === "test abort" ? { killGraceMs: 150 } : {}),
       onProcess: (info) => { groupPid ||= info.pid; options.onProcess?.(info); },
-      onOutput: () => operation.cancel("test abort"),
+      onOutput: () => {
+        if (reason === "deadline then shutdown") {
+          operation.cancel("deadline");
+          setTimeout(() => operation.cancel("shutdown"), 50);
+        } else operation.cancel(reason);
+      },
     }) };
     const order = [];
     const doctorGuard = { withDoctorRestoreGuard: async ({ run }) => {
@@ -54,7 +65,9 @@ describe("repair writer cancellation boundaries", () => {
     const run = createDoctorFixRunner({ openclawDir: dir, doctorGuard, runStream,
       gatewayEnv: () => process.env, notifier: { notify: vi.fn() } });
     try {
+      const startedAt = Date.now();
       const result = await run({ operation });
+      expect(Date.now() - startedAt).toBeLessThan(4000);
       expect(result).toMatchObject({ ok: false, cancelled: true });
       expect(fs.readFileSync(ready, "utf8")).toBe("ready");
       expect(order).toEqual(["guard finalized"]);

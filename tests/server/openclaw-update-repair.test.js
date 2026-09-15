@@ -138,6 +138,7 @@ describe("dev repair ownership", () => {
       expect(h.lock.getActiveOperation()).toMatchObject({ kind: "update_repair" });
       expect(options.signal).toBeInstanceOf(AbortSignal);
       expect(options.deadlineAt).toBeGreaterThan(Date.now());
+      expect(options.killGraceMs).toBe(1000);
       expect(options.env.OPENCLAW_SUPERVISOR_MODE).toBe("external");
       return { ok: true };
     });
@@ -149,5 +150,33 @@ describe("dev repair ownership", () => {
       { mirrorLastUpdateRun: false });
     expect(h.ledger.completeRun).toHaveBeenCalledWith(kOperationId,
       expect.objectContaining({ state: "completed", ok: true }));
+  });
+
+  it("shutdown drains an Upgrade repair through the lifecycle cleanup owner", async () => {
+    vi.useFakeTimers();
+    const h = makeHarness();
+    let finishWriter;
+    let signal;
+    h.options.runner.runStreamed.mockImplementation((options) => {
+      signal = options.signal;
+      return new Promise((resolve) => { finishWriter = resolve; });
+    });
+    const running = h.run();
+    await vi.advanceTimersByTimeAsync(0);
+    let drained = false;
+    const drain = h.lock.cancelActiveCleanup("shutdown").then(() => { drained = true; });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(signal.aborted).toBe(true);
+    expect(signal.reason).toBe("shutdown");
+    expect(drained).toBe(false);
+    expect(h.lock.getActiveOperation()).toMatchObject({ kind: "update_repair", phase: "cleanup" });
+    expect(h.lock.tryAcquire("restart")).toBeNull();
+    finishWriter({ ok: true });
+    expect(await running).toMatchObject({ body: { code: "operation_cancelled" } });
+    await drain;
+    expect(h.lock.getActiveOperation()).toBeNull();
+    expect(h.isBusy()).toBe(false);
+    expect(h.ledger.completeRun).toHaveBeenCalledWith(kOperationId,
+      expect.objectContaining({ state: "failed", result: expect.objectContaining({ code: "operation_cancelled" }) }));
   });
 });
