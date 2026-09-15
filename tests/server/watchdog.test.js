@@ -1864,12 +1864,14 @@ describe("server/watchdog", () => {
       });
 
       expect((await watchdog.triggerRepair()).ok).toBe(true);
-      expect(repairRunner).toHaveBeenLastCalledWith({ correlationId: expect.any(String), bin: null });
+      expect(repairRunner).toHaveBeenLastCalledWith(expect.objectContaining({ correlationId: expect.any(String), bin: null,
+        signal: expect.any(AbortSignal), deadlineAt: expect.any(Number), operation: expect.any(Object) }));
       expect(compatibleBinForCurrentDb).not.toHaveBeenCalled();
 
       latchBootMismatch(watchdog);
       expect((await watchdog.triggerRepair()).ok).toBe(true);
-      expect(repairRunner).toHaveBeenLastCalledWith({ correlationId: expect.any(String), bin: kExpectedBin });
+      expect(repairRunner).toHaveBeenLastCalledWith(expect.objectContaining({ correlationId: expect.any(String), bin: kExpectedBin,
+        signal: expect.any(AbortSignal), deadlineAt: expect.any(Number), operation: expect.any(Object) }));
       expect(compatibleBinForCurrentDb).toHaveBeenCalledTimes(1);
       expect(doctorFromPath(clawCmd)).toBe(false);
     });
@@ -6234,7 +6236,7 @@ describe("server/watchdog", () => {
     });
 
     // ── acceptance i (lease) ──────────────────────────────────────────────
-    it("i. a repair whose Doctor run outlives the lock lease launches nothing: skipped {lease_expired}, lifecycle untouched and admitted attempt retained, the queued successor holds the lock", async () => {
+    it("i. a timed-out Doctor retains its cleanup hold until the writer finishes, then admits the queued successor without relaunching", async () => {
       vi.useFakeTimers();
       const createGatewayLifecycleLock = requireLock();
       const lock = createGatewayLifecycleLock({ logger: { warn: () => {} } });
@@ -6267,18 +6269,18 @@ describe("server/watchdog", () => {
 
       // An operator restart queues behind the repair.
       const successor = lock.acquire("restart");
-      // The lease fires while Doctor is still running: force-released.
+      // Work times out but the uncooperative writer has not finished.
       await vi.advanceTimersByTimeAsync(kRepairLeaseMs + 1);
-      const releaseSuccessor = await successor;
-      expect(lock.getActiveOperation()).toMatchObject({ kind: "restart" });
+      expect(lock.getActiveOperation()).toMatchObject({ kind: "repair", phase: "cleanup_blocked" });
 
       // Doctor finishes late: the repair asks the lock and stands down.
       await vi.advanceTimersByTimeAsync(60_000);
-      expect(rowsOfType(insertWatchdogEvent, "repair", "skipped")).toEqual(
+      const releaseSuccessor = await successor;
+      expect(rowsOfType(insertWatchdogEvent, "repair", "failed")).toEqual(
         expect.arrayContaining([
           expect.objectContaining({
             source: "crash_loop",
-            details: { reason: "lease_expired", doctorOk: true },
+            details: { code: "operation_timed_out" },
           }),
         ]),
       );
