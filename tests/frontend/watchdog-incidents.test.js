@@ -4,12 +4,18 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 // slots; effects collected, not run — the poll interval never starts, so
 // refresh() is driven explicitly.
 vi.mock("preact/hooks", () => {
-  const harness = { slots: [], cursor: 0, effects: [] };
+  const harness = { slots: [], cursor: 0, effects: [], cleanups: new Map() };
+  harness.runEffect = (index) => {
+    harness.cleanups.get(index)?.();
+    harness.cleanups.set(index, harness.effects[index]?.());
+  };
   harness.beginRender = () => {
     harness.cursor = 0;
     harness.effects = [];
   };
   harness.reset = () => {
+    for (const cleanup of harness.cleanups.values()) cleanup?.();
+    harness.cleanups.clear();
     harness.slots = [];
     harness.cursor = 0;
     harness.effects = [];
@@ -135,7 +141,12 @@ beforeEach(() => {
 describe("frontend/watchdog incidents hook", () => {
   const renderHook = () => {
     harness.beginRender();
-    return useWatchdogIncidents();
+    const state = useWatchdogIncidents();
+    // The two real polling hooks subscribe to committed entries; keep their
+    // subscriptions mounted while driving refresh explicitly (no intervals).
+    harness.runEffect(0);
+    harness.runEffect(4);
+    return state;
   };
 
   it("starts in the loading shape: not loaded, no error, empty list", () => {

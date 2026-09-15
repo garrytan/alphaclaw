@@ -207,12 +207,12 @@ const assertActivatedThinkingApi = (installDir) => {
   expect(report.levels.map((entry) => entry.id)).toContain(report.modelDefault);
 };
 
-const applyAndActivate = async (harness, { channel, version }) => {
+const applyAndActivate = async (harness, { channel, version, intent }) => {
   const { app, store, buildSync, restartProcess, operationEvents } = harness;
 
   const applyRes = await request(app)
     .post("/api/openclaw/apply")
-    .send({ channel, version });
+    .send({ channel, version, intent });
   expect(applyRes.status, JSON.stringify(applyRes.body)).toBe(202);
   const { operationId } = applyRes.body;
   expect(typeof operationId).toBe("string");
@@ -314,6 +314,7 @@ describeLive("LIVE openclaw package apply (real npm artifacts)", () => {
       const { bootSync } = await applyAndActivate(harness, {
         channel: "stable",
         version,
+        intent: "update",
       });
 
       // The activated tree is the real upstream artifact — run it.
@@ -322,7 +323,7 @@ describeLive("LIVE openclaw package apply (real npm artifacts)", () => {
       assertActivatedThinkingApi(harness.installDir);
 
       // Idempotence against the REAL activated version: re-apply is a noop.
-      const again = await bootSync.applyUpdate({ channel: "stable", version });
+      const again = await bootSync.applyUpdate({ channel: "stable", version, intent: "switch" });
       expect(again.status).toBe(200);
       expect(again.body).toEqual(
         expect.objectContaining({ ok: true, noop: true, version }),
@@ -347,7 +348,7 @@ describeLive("LIVE openclaw package apply (real npm artifacts)", () => {
         "no npm-published beta in the catalog window — likely an upstream publish gap",
       ).toBeTruthy();
 
-      await applyAndActivate(harness, { channel: "beta", version });
+      await applyAndActivate(harness, { channel: "beta", version, intent: "update" });
 
       const output = runActivatedBinary(harness.store, harness.installDir);
       expect(output).toContain(version);

@@ -1493,6 +1493,35 @@ describe("server/openclaw-channel-sync", () => {
   });
 
   describe("applyUpdate", () => {
+    it("never lets old apply steps or completion rewrite a replacement history pointer", async () => {
+      let store;
+      let replacement;
+      const operationEvents = {
+        publish: vi.fn((_id, event) => {
+          if (replacement || event.data?.name !== "preflight") return;
+          store.updateState((state) => {
+            state.lastUpdateRun = {
+              operationId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+              target: { channel: "beta", version: "9.0.0" },
+              startedAt: 5, finishedAt: null, ok: null,
+              steps: [{ name: "prepare", status: "running", at: 5 }],
+            };
+            return state;
+          });
+          replacement = store.readState().lastUpdateRun;
+        }),
+        complete: vi.fn(), fail: vi.fn(),
+      };
+      const h = createHarness({
+        installedVersion: "1.0.0", sentinelVersion: "1.0.0",
+        extraSyncOptions: { operationEvents },
+      });
+      store = h.store;
+      await h.sync.applyUpdate({ channel: "beta", version: "1.1.0" });
+      expect(replacement).toBeTruthy();
+      expect(store.readState().lastUpdateRun).toEqual(replacement);
+    });
+
     it("rejects when not onboarded, without running anything", async () => {
       const { sync, runner, installToTempDir } = createHarness({
         pin: "1.0.0",
@@ -2470,6 +2499,98 @@ describe("server/openclaw-channel-sync", () => {
       expect(buildStep.updaterStatus).toBe("ok");
     });
 
+    it.each([
+      {
+        name: "migrated state without rollback",
+        report: { reason: "state-migrated-no-rollback",
+          recovery: { serviceRestartSafe: false, reason: "runtime-verification-failed" } },
+        evidence: { updaterReason: "state-migrated-no-rollback",
+          updaterRecovery: { serviceRestartSafe: false, reason: "runtime-verification-failed" } },
+        hint: "state was migrated and the update was not rolled back",
+      },
+      {
+        name: "unverified rollback safety",
+        report: { reason: "rollback-state-unverified", recovery: { serviceRestartSafe: false } },
+        evidence: { updaterReason: "rollback-state-unverified", updaterRecovery: { serviceRestartSafe: false } },
+        hint: "could not verify that state is safe to roll back",
+      },
+      {
+        name: "verified package restoration with unverified runtime",
+        report: { recovery: { packageRollbackVerified: true, serviceRestartSafe: false } },
+        evidence: { updaterRecovery: { packageRollbackVerified: true, serviceRestartSafe: false } },
+        hint: "previous package was restored. The installation has not been verified safe to restart",
+      },
+      {
+        name: "verified package restoration and runnable fallback",
+        report: { recovery: { packageRollbackVerified: true, serviceRestartSafe: true } },
+        evidence: { updaterRecovery: { packageRollbackVerified: true, serviceRestartSafe: true } },
+        hint: "previous package was restored. Inspect the raw update log",
+      },
+      {
+        name: "runnable installation without rollback evidence",
+        report: { recovery: { serviceRestartSafe: true } },
+        evidence: { updaterRecovery: { serviceRestartSafe: true } },
+        hint: "runnable installation remains, but did not confirm a rollback",
+      },
+      {
+        name: "no recovery metadata",
+        report: {}, evidence: {}, hint: "did not confirm recovery of the previous installation",
+      },
+      {
+        name: "malformed recovery fields cannot claim successful restoration",
+        report: { reason: "x".repeat(121), recovery: { serviceRestartSafe: "true",
+          packageRollbackVerified: 1, reason: "invalid reason/path", privateDetail: { token: "not-public" } } },
+        evidence: {}, hint: "did not confirm recovery of the previous installation",
+      },
+      {
+        name: "no-rollback refusal takes precedence over conflicting recovery metadata",
+        report: { reason: "state-migrated-no-rollback",
+          recovery: { packageRollbackVerified: true, serviceRestartSafe: true } },
+        evidence: { updaterReason: "state-migrated-no-rollback",
+          updaterRecovery: { packageRollbackVerified: true, serviceRestartSafe: true } },
+        hint: "state was migrated and the update was not rolled back",
+      },
+    ])("preserves truthful dev failure evidence for $name through response, history and the run ledger", async ({ report, evidence, hint }) => {
+      const operationEvents = { publish: vi.fn(), complete: vi.fn(), fail: vi.fn() };
+      const h = createHarness({
+        extraSyncOptions: { operationEvents },
+        runnerImpl: async (options, fallback) => options.command === "openclaw" && options.args?.[0] === "update"
+          ? { ok: false, code: 1, tail: `build complete\n${JSON.stringify({ status: "error", ...report })}\n`, timedOut: false }
+          : fallback(options),
+      });
+      const failure = await h.sync.applyUpdate({ channel: "dev", devHead: true });
+      expect(failure.status).toBe(409);
+      expect(failure.body).toMatchObject({ ok: false, code: "dev_build_failed", repairApplicable: true,
+        message: "The dev update failed (updater status: error).", ...evidence });
+      expect(failure.body.hint).toContain(hint);
+      expect(failure.body.hint).not.toContain("reverted the checkout");
+      expect(failure.body.updaterReason).toBe(evidence.updaterReason);
+      expect(failure.body.updaterRecovery).toEqual(evidence.updaterRecovery);
+      const state = h.store.readState();
+      expect(state.applied).toBeNull();
+      expect(state.lastUpdateRun.result).toMatchObject({ hint: failure.body.hint, ...evidence });
+      expect(h.sync.runLedger.readRun(state.lastUpdateRun.operationId)).toMatchObject({
+        state: "failed", result: { code: "dev_build_failed", hint: failure.body.hint, ...evidence },
+      });
+      expect(state.lastUpdateRun.steps.findLast((step) => step.name === "build"))
+        .toMatchObject({ status: "failed", updaterStatus: "error", ...evidence });
+      expect(operationEvents.fail).toHaveBeenCalledWith(state.lastUpdateRun.operationId,
+        expect.objectContaining({ hint: failure.body.hint }));
+      expect(h.restartProcess).not.toHaveBeenCalled();
+    });
+
+    it("does not infer rollback from timeout log prose without a structured updater result", async () => {
+      const h = createHarness({ runnerImpl: async (options, fallback) =>
+        options.command === "openclaw" && options.args?.[0] === "update"
+          ? { ok: false, code: null, timedOut: true, tail: "Attempting rollback before timeout..." }
+          : fallback(options) });
+      const failure = await h.sync.applyUpdate({ channel: "dev", devHead: true });
+      expect(failure.body).toMatchObject({ code: "dev_build_failed", message: "The dev update timed out." });
+      expect(failure.body.hint).toContain("did not confirm recovery");
+      expect(failure.body).not.toHaveProperty("updaterRecovery");
+      expect(h.restartProcess).not.toHaveBeenCalled();
+    });
+
     it("builds a pinned dev commit via fetch/checkout/install/build/doctor", async () => {
       const { sync, store, rootDir, runner } = createHarness({
         pin: "1.0.0",
@@ -2855,7 +2976,7 @@ describe("server/openclaw-channel-sync", () => {
         sentinelVersion: "1.0.0",
       });
 
-      const result = await sync.runUpdateRepair({ operationId: "op-r" });
+      const result = await sync.runUpdateRepair({ operationId: "11111111-1111-4111-8111-111111111111" });
 
       expect(result.status).toBe(409);
       expect(result.body.code).toBe("repair_not_applicable");
@@ -2873,7 +2994,7 @@ describe("server/openclaw-channel-sync", () => {
         extraSyncOptions: { operationEvents },
       });
 
-      const result = await sync.runUpdateRepair({ operationId: "op-r" });
+      const result = await sync.runUpdateRepair({ operationId: "11111111-1111-4111-8111-111111111111" });
 
       expect(result.status).toBe(200);
       expect(result.body.ok).toBe(true);
@@ -2883,7 +3004,7 @@ describe("server/openclaw-channel-sync", () => {
       expect(repairCall).toBeTruthy();
       expect(repairCall[0].args).toEqual(["update", "repair"]);
       expect(operationEvents.complete).toHaveBeenCalledWith(
-        "op-r",
+        "11111111-1111-4111-8111-111111111111",
         expect.objectContaining({ ok: true }),
       );
       expect(operationEvents.fail).not.toHaveBeenCalled();
@@ -2911,7 +3032,7 @@ describe("server/openclaw-channel-sync", () => {
         extraSyncOptions: { operationEvents },
       });
 
-      const result = await sync.runUpdateRepair({ operationId: "op-r" });
+      const result = await sync.runUpdateRepair({ operationId: "11111111-1111-4111-8111-111111111111" });
 
       expect(result.status).toBe(500);
       expect(result.body.code).toBe("repair_failed");
@@ -2923,9 +3044,28 @@ describe("server/openclaw-channel-sync", () => {
       expect(operationEvents.complete).not.toHaveBeenCalled();
       expect(operationEvents.fail).toHaveBeenCalledTimes(1);
       const [failedId, failedError] = operationEvents.fail.mock.calls[0];
-      expect(failedId).toBe("op-r");
+      expect(failedId).toBe("11111111-1111-4111-8111-111111111111");
       expect(failedError.code).toBe("repair_failed");
       expect(sync.isApplyInProgress()).toBe(false);
+    });
+
+    it("leaves the preceding apply history intact while recording its own repair", async () => {
+      const { sync, store } = createHarness({ channel: "dev" });
+      const previous = {
+        operationId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        target: { channel: "dev", sha: kDevSha },
+        startedAt: 1, finishedAt: 2, ok: false,
+        steps: [{ name: "verify", status: "failed", at: 2 }],
+        result: { ok: false, code: "verify_failed" },
+      };
+      store.updateState((state) => { state.lastUpdateRun = previous; return state; });
+      const before = store.readState().lastUpdateRun;
+      const operationId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+      expect(await sync.runUpdateRepair({ operationId })).toMatchObject({ status: 200 });
+      expect(store.readState().lastUpdateRun).toEqual(before);
+      expect(sync.runLedger.readRun(operationId)).toMatchObject({
+        operationId, state: "completed", target: { channel: "dev", repair: true },
+      });
     });
 
     it("409s while another update operation holds the latch", async () => {
@@ -2947,9 +3087,9 @@ describe("server/openclaw-channel-sync", () => {
         },
       });
 
-      const first = sync.runUpdateRepair({ operationId: "op-a" });
+      const first = sync.runUpdateRepair({ operationId: "22222222-2222-4222-8222-222222222222" });
       // The latch is taken synchronously before the runner is awaited.
-      const second = await sync.runUpdateRepair({ operationId: "op-b" });
+      const second = await sync.runUpdateRepair({ operationId: "33333333-3333-4333-8333-333333333333" });
       expect(second.status).toBe(409);
       expect(second.body.code).toBe("operation_in_progress");
 
@@ -2977,7 +3117,7 @@ describe("server/openclaw-channel-sync", () => {
       };
     };
 
-    it("records the repair in the run ledger and completes it as activated on success", async () => {
+    it("records the repair in the run ledger and completes it in place on success", async () => {
       const { sink, ledger } = makeLedgerSpy();
       const { sync } = createHarness({
         channel: "dev",
@@ -2987,20 +3127,20 @@ describe("server/openclaw-channel-sync", () => {
         extraSyncOptions: { runLedger: ledger },
       });
 
-      const result = await sync.runUpdateRepair({ operationId: "op-r" });
+      const result = await sync.runUpdateRepair({ operationId: "11111111-1111-4111-8111-111111111111" });
 
       expect(result.status).toBe(200);
       expect(ledger.createRun).toHaveBeenCalledWith({
-        operationId: "op-r",
+        operationId: "11111111-1111-4111-8111-111111111111",
         target: { channel: "dev", repair: true },
       });
       expect(ledger.createLogSink).toHaveBeenCalledWith(
-        expect.objectContaining({ operationId: "op-r" }),
+        expect.objectContaining({ operationId: "11111111-1111-4111-8111-111111111111" }),
       );
       expect(ledger.completeRun).toHaveBeenCalledTimes(1);
       expect(ledger.completeRun).toHaveBeenCalledWith(
-        "op-r",
-        expect.objectContaining({ state: "activated", ok: true }),
+        "11111111-1111-4111-8111-111111111111",
+        expect.objectContaining({ state: "completed", ok: true }),
       );
       // The durable sink is detached and closed after the run.
       expect(sink.close).toHaveBeenCalled();
@@ -3022,12 +3162,12 @@ describe("server/openclaw-channel-sync", () => {
         extraSyncOptions: { runLedger: ledger },
       });
 
-      const result = await sync.runUpdateRepair({ operationId: "op-r" });
+      const result = await sync.runUpdateRepair({ operationId: "11111111-1111-4111-8111-111111111111" });
 
       expect(result.status).toBe(500);
       expect(ledger.completeRun).toHaveBeenCalledTimes(1);
       expect(ledger.completeRun).toHaveBeenCalledWith(
-        "op-r",
+        "11111111-1111-4111-8111-111111111111",
         expect.objectContaining({
           state: "failed",
           ok: false,
@@ -3055,7 +3195,7 @@ describe("server/openclaw-channel-sync", () => {
         extraSyncOptions: { runLedger: ledger, operationEvents },
       });
 
-      const result = await sync.runUpdateRepair({ operationId: "op-r" });
+      const result = await sync.runUpdateRepair({ operationId: "11111111-1111-4111-8111-111111111111" });
 
       // The route resolves (does not hang or throw) with a failure envelope.
       expect(result.status).toBe(500);
@@ -3063,7 +3203,7 @@ describe("server/openclaw-channel-sync", () => {
       // The ledger run is completed as failed (not left "running"), the SSE
       // subscriber gets an error (not a hang), the sink closes, latch released.
       expect(ledger.completeRun).toHaveBeenCalledWith(
-        "op-r",
+        "11111111-1111-4111-8111-111111111111",
         expect.objectContaining({ state: "failed", ok: false }),
       );
       expect(operationEvents.fail).toHaveBeenCalledTimes(1);

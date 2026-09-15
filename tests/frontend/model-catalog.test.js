@@ -68,13 +68,9 @@ describe("frontend/model-catalog", () => {
 
   it("forces a real fetch when preloading the onboarding model catalog", async () => {
     vi.resetModules();
-    global.fetch = vi.fn().mockResolvedValue({
-      status: 200,
-      ok: true,
-      json: async () => ({
-        models: [{ key: "openai/gpt-5.4", label: "GPT-5.4" }],
-      }),
-    });
+    global.fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      models: [{ key: "openai/gpt-5.4", label: "GPT-5.4" }],
+    }), { status: 200 }));
 
     const {
       getCached,

@@ -9,12 +9,7 @@ const { scanUiIntervals } = require("./scanners");
 
 // file → number of raw intervals still allowed. PR 11 (polling sweep) drives
 // every count to zero; an ADDED interval changes the key and goes red.
-const kKnownOffenders = {
-  // PR 11 converted every other raw interval onto usePolling / useNowMs /
-  // useVisibleInterval. This file is edited by open PR #64 (restart banner
-  // work) — it follows once #64 lands, to avoid a rival branch on the same file.
-  "lib/public/js/hooks/use-app-shell-controller.js::2": "after PR #64: remaining restart-status and version polls → usePolling (F143); status freshness uses useVisibleInterval",
-};
+const kKnownOffenders = {};
 
 describe("guard: the UI polls through usePolling/useNowMs, never raw setInterval", () => {
   it("counts raw intervals per file incl. window./globalThis. forms and ignores comments (self-test)", () => {

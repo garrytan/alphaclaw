@@ -53,6 +53,7 @@ const helpText = (bin, args) => {
       execFileSync(process.execPath, [bin, ...args], {
         timeout: 120_000,
         stdio: "pipe",
+        env: liveHelpers.scrubTestRunnerEnv(),
       }),
     );
   } catch (error) {
@@ -77,7 +78,9 @@ const packageDistMentions = (openclawPackageDir, needle) => {
         stack.push(full);
         continue;
       }
-      if (!entry.name.endsWith(".js")) continue;
+      // OpenClaw 2026.9.3 packages executable chunks as .mjs; keep checking
+      // code across module formats without accepting source maps or types.
+      if (!/\.(?:c|m)?js$/.test(entry.name)) continue;
       try {
         if (fs.readFileSync(full, "utf8").includes(needle)) return true;
       } catch {}

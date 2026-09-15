@@ -17,6 +17,8 @@ kPort="${UI_SMOKE_PORT:-3799}"
 kPass="ui-smoke-pass"
 B="${BROWSE_BIN:-$HOME/.claude/skills/gstack/browse/dist/browse}"
 kRepoRoot="$(cd "$(dirname "$0")/../.." && pwd)"
+kArtifacts="${UI_SMOKE_ARTIFACTS:-$kRepoRoot/.context/wave-browser/existing-smoke}"
+mkdir -p "$kArtifacts"
 
 if [ ! -x "$B" ]; then
   echo "SKIP: browse CLI not found at $B (set BROWSE_BIN)" >&2
@@ -25,12 +27,17 @@ fi
 
 kScratch="$(mktemp -d /tmp/alphaclaw-ui-smoke-XXXXXX)"
 cleanup() {
+  if [ "${kBrowserOpened:-}" = "1" ]; then "$B" closetab >/dev/null 2>&1 || true; fi
+  [ ! -f "$kScratch/server.log" ] || cp "$kScratch/server.log" "$kArtifacts/server.log"
   pkill -f "alphaclaw.js start.*$kScratch" 2>/dev/null || true
   pkill -f "ALPHACLAW_UI_SMOKE=$kScratch" 2>/dev/null || true
   # Never `kill 0` (fix wave F181): with no server pid recorded the old
   # `${kServerPid:-0}` fallback killed the caller's whole process group.
   if [ -n "${kServerPid:-}" ] && [ "${kServerPid}" != "0" ]; then
     kill "${kServerPid}" 2>/dev/null || true
+    # Let the owned server finish reaping its gateway before deleting the
+    # fixture; otherwise shutdown can recreate files during rm's traversal.
+    wait "${kServerPid}" 2>/dev/null || true
   fi
   rm -rf "$kScratch"
 }
@@ -55,7 +62,7 @@ for i in $(seq 1 30); do
 done
 [ "$code" = "200" ] || { echo "FAIL: server never came up"; tail -20 "$kScratch/server.log"; exit 1; }
 
-fail() { echo "FAIL: $1"; "$B" screenshot /tmp/ui-smoke-failure.png >/dev/null 2>&1 || true; exit 1; }
+fail() { echo "FAIL: $1"; "$B" screenshot "$kArtifacts/failure.png" >/dev/null 2>&1 || true; "$B" console --errors > "$kArtifacts/console-errors.txt" 2>&1 || true; exit 1; }
 assert_page() { # assert_page <js-bool-expr> <label>
   result=$("$B" js "$1" 2>&1 | tail -1)
   [ "$result" = "true" ] || fail "$2 (js returned: $result)"
@@ -63,10 +70,15 @@ assert_page() { # assert_page <js-bool-expr> <label>
 }
 
 echo "== login =="
-"$B" goto "http://127.0.0.1:$kPort/" >/dev/null
-"$B" wait 'input#password' >/dev/null
-"$B" fill 'input#password' "$kPass" >/dev/null
-"$B" js "document.querySelector('button[type=submit], button')?.click(); true" >/dev/null
+"$B" newtab "http://127.0.0.1:$kPort/" >/dev/null
+kBrowserOpened=1
+"$B" viewport 1280x720 >/dev/null
+"$B" console --clear >/dev/null
+"$B" wait 'input#password, .app-shell' >/dev/null || fail "login or dashboard did not become ready"
+if [ "$("$B" js "!!document.querySelector('input#password')" 2>&1 | tail -1)" = "true" ]; then
+  "$B" fill 'input#password' "$kPass" >/dev/null
+  "$B" js "document.querySelector('button[type=submit], button')?.click(); true" >/dev/null
+fi
 sleep 2
 
 echo "== upgrade page renders =="
@@ -79,7 +91,7 @@ assert_page "document.body.textContent.includes('Overseer report')" "overseer ca
 echo "== channel switch persists immediately + mismatch banner =="
 "$B" js "[...document.querySelectorAll('button')].find(b => b.textContent.trim()==='Beta')?.click(); true" >/dev/null
 sleep 3
-assert_page "document.body.textContent.includes('Channel set to beta')" "mismatch banner appeared"
+assert_page "[...document.querySelectorAll('.ac-segmented-control-button.active')].some(b => b.textContent.trim()==='Beta') && document.body.textContent.includes('Back to stable')" "beta selection and return-to-stable banner appeared"
 grep -q '"releaseChannel": "beta"' "$kScratch/.openclaw/alphaclaw.json" \
   || fail "channel not persisted to alphaclaw.json"
 echo "  ok: channel persisted on disk"
@@ -87,12 +99,12 @@ echo "  ok: channel persisted on disk"
 echo "== persistence survives reload =="
 "$B" goto "http://127.0.0.1:$kPort/#/upgrade" >/dev/null
 sleep 3
-assert_page "document.body.textContent.includes('Channel set to beta')" "banner survives reload"
+assert_page "[...document.querySelectorAll('.ac-segmented-control-button.active')].some(b => b.textContent.trim()==='Beta') && document.body.textContent.includes('Back to stable')" "beta selection and banner survive reload"
 
 echo "== back to stable clears the banner =="
 "$B" js "[...document.querySelectorAll('button')].find(b => b.textContent.trim()==='Back to stable')?.click(); true" >/dev/null
 sleep 3
-assert_page "!document.body.textContent.includes('Channel set to beta')" "banner cleared"
+assert_page "!document.body.textContent.includes('Back to stable')" "banner cleared"
 grep -q '"releaseChannel": "stable"' "$kScratch/.openclaw/alphaclaw.json" \
   || fail "channel not restored to stable"
 echo "  ok: restored to stable"
@@ -125,18 +137,20 @@ assert_page "($overseer_input)?.checked === false" "overseer toggle disabled aga
 
 echo "== #54 QA: Backups card renders its honest empty state =="
 assert_page "document.body.textContent.includes('Backups') && document.body.textContent.includes('No backups yet — the next OpenClaw update takes one before installing')" "Backups card empty state (a pre-update backup runs on every apply)"
-"$B" screenshot /tmp/ui-smoke-qa-backups-card.png >/dev/null 2>&1 || true
+"$B" screenshot "$kArtifacts/backups-card.png" >/dev/null 2>&1 || true
 
 echo "== #54 QA: hard-gated confirm shows the reuse consent — unchecked, disabled, with its reason — and cancels without applying =="
 "$B" js "[...document.querySelectorAll('button')].find(b => b.textContent.trim()==='Beta')?.click(); true" >/dev/null
 sleep 3
-"$B" js "[...document.querySelectorAll('button')].find(b => b.textContent.trim().startsWith('Update to '))?.click(); true" >/dev/null
+# The newest beta can be OLDER than the installed stable. Select its actual
+# catalog action so this consent journey tests both release orderings.
+"$B" js "[...[...document.querySelectorAll('h3')].find(h => h.textContent.trim()==='Beta')?.parentElement.querySelectorAll('button') || []].find(b => /^(Upgrade|Downgrade|Switch)$/.test(b.textContent.trim()))?.click(); true" >/dev/null
 sleep 2
 assert_page "document.body.textContent.includes(\"If a fresh backup can't be made, proceed with the most recent verified backup\")" "consent toggle present in the cross-channel confirm"
 assert_page "document.body.textContent.includes('No eligible backup to reuse')" "consent disabled reason: no eligible backup"
 consent_input="[...document.querySelectorAll('label')].find(l => l.textContent.includes('most recent verified backup'))?.querySelector('input')"
 assert_page "(i => !!i && i.checked === false && i.disabled === true)($consent_input)" "consent toggle is unchecked and disabled (never pre-checked)"
-"$B" screenshot /tmp/ui-smoke-qa-consent-dialog.png >/dev/null 2>&1 || true
+"$B" screenshot "$kArtifacts/consent-dialog.png" >/dev/null 2>&1 || true
 "$B" js "[...document.querySelectorAll('button')].find(b => b.textContent.trim()==='Cancel')?.click(); true" >/dev/null
 sleep 1
 assert_page "!document.body.textContent.includes(\"If a fresh backup can't be made\")" "confirm dismissed"
@@ -157,9 +171,10 @@ if [ "$visible" = "true" ]; then
   sleep 3
   assert_page "document.body.textContent.includes('nothing is configured or paired')" "test notification: honest 'nothing is configured or paired'"
   assert_page "!document.body.textContent.includes('Test notification sent')" "test notification: no false success"
-  "$B" screenshot /tmp/ui-smoke-qa-test-notification.png >/dev/null 2>&1 || true
+  "$B" screenshot "$kArtifacts/test-notification.png" >/dev/null 2>&1 || true
 else
   echo "  skipped: notifications are disabled in this fixture (Test button hidden)"
 fi
 
 echo "PASS: upgrade UI smoke"
+"$B" console --errors > "$kArtifacts/console-errors.txt" 2>&1 || true

@@ -5,6 +5,22 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.9.85] - 2026-09-15
+
+### Fixed
+
+- **Shared reads keep the latest result.** Tabs share one active read per URL; slow polls no longer starve, and old requests cannot overwrite a refresh or mutation. Failed reads retain the last successful data with Retry. Ordinary reads time out after thirty seconds, catalogs after two minutes, and expired or denied access clears protected data.
+- **Crash recovery survives maintenance contention.** A crash remains pending through busy ownership, failed admission and failed replacement attempts. The Watchdog card shows its age and blocker; a successor launch or an explicit stop settles the obligation. Relaunch budgets count actual launches.
+- **Cancelled repairs retain ownership until cleanup finishes.** Deadline and cancellation fences prevent late discovery or model responses from writing. Doctor and repair process groups complete termination and any restore guard before another operation proceeds; unconfirmed cleanup stays visible with recovery guidance.
+- **Upgrade follows the exact operation.** Repair has its own durable ledger ID and lifecycle lease. Lost progress streams and reloads resume that operation, and successful in-place repairs complete without waiting for a restart. Long confirmation dialogs remain usable on smaller screens. Failed dev updates report upstream recovery evidence instead of assuming that state was rolled back.
+- **Managed deployment uncertainty survives restart.** A submitted update is recorded before the provider request. Accepted or unknown attempts prevent duplicate submissions and conflicting update work until a human admin verifies the provider's terminal outcome. The UI no longer exposes provider bridge credentials, and correlated transition audits survive temporary database failure.
+- **Gmail respects the latest intent.** Start, Stop, renewal and disconnect share bounded account ownership. Disabled intent persists immediately, replacement work waits for confirmed cleanup, port assignments remain unique, and remote-stop failures survive reload with Retry. Failed disconnect preserves a disabled account for cleanup.
+- **Overseer notices expire everywhere.** The original sixty-minute deadline follows quiet holds, retries, fallback, restart and duplicate revival. Expired notices stay suppressed with accurate partial-delivery history and retryable audit persistence; other notification classes retain their existing 48-hour policy.
+
+### Changed
+
+- Live apply/downgrade fixtures declare their intended action, Doctor contract checks inspect executable `.mjs` bundles, and the dev updater dry-run enforces strict CLI JSON. Added mounted-hook, process-group, durable-state, route and Chromium regression coverage for the combined wave.
+
 ## [0.9.84] - 2026-09-11
 
 Issue #87: the watchdog manufactured `gateway_readiness` incidents while

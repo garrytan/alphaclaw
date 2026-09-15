@@ -1,8 +1,7 @@
 // LIVE TIER 3 — the dev channel against the REAL OpenClaw updater:
 //   1. Updater JSON contract (OPENCLAW_LIVE_E2E): real `openclaw update
-//      --channel dev --dry-run --json` through the pinned CLI — the tolerant
-//      UpdateRunResult parsing in channel-sync exists because upstream owns
-//      this contract; this test screams when it drifts.
+//      --channel dev --dry-run --json` through the pinned CLI — stdout must
+//      remain exactly one JSON document, independently of stderr diagnostics.
 //   2. Full dev-head build (OPENCLAW_LIVE_E2E_DEV=1 additionally): a real
 //      `openclaw update --channel dev` — git clone of openclaw/openclaw main,
 //      pnpm install, from-source build, doctor — driven through the real
@@ -39,9 +38,6 @@ const {
 } = require("../../lib/server/openclaw-release-channel");
 const { createRunStream } = require("../../lib/server/openclaw-run-stream");
 const {
-  parseJsonObjectFromNoisyOutput,
-} = require("../../lib/server/utils/json");
-const {
   assertFreeDiskBytes,
   kLiveEnabled,
   kLiveDevEnabled,
@@ -53,6 +49,7 @@ const {
   createBackupStubRunner,
   scrubTestRunnerEnv,
   repoOpenclawBin,
+  runCliJson,
   waitFor,
 } = liveHelpers;
 
@@ -70,30 +67,22 @@ describeLive("LIVE openclaw updater JSON contract (real pinned CLI)", () => {
     { timeout: 5 * 60 * 1000 },
     async () => {
       const homeDir = mkTemp("openclaw-live-dryrun-home-");
-      const runner = createRunStream({});
-      const result = await runner.runStreamed({
-        command: repoOpenclawBin(),
-        args: ["update", "--channel", "dev", "--dry-run", "--json", "--yes"],
-        env: {
+      const parsed = runCliJson(repoOpenclawBin(),
+        ["update", "--channel", "dev", "--dry-run", "--json", "--yes"], {
+        env: scrubTestRunnerEnv({
           PATH: process.env.PATH,
           HOME: process.env.HOME,
           OPENCLAW_HOME: homeDir,
           OPENCLAW_NO_AUTO_UPDATE: "1",
           GIT_TERMINAL_PROMPT: "0",
-        },
+        }),
         timeoutMs: 4 * 60 * 1000,
       });
       // A --dry-run emits the updater's PLAN object (verified live 2026-08):
       // { dryRun, mode, effectiveChannel, actions, ... }. The run-result
       // `status` contract is asserted by the full build below. What this test
       // pins is the D1 assumption: dev channel still means "switch to a git
-      // source checkout", parseable through the same noisy-output parser
-      // channel-sync uses in production.
-      const parsed = parseJsonObjectFromNoisyOutput(result.tail || "");
-      expect(
-        parsed,
-        `updater --json output was not parseable; tail:\n${(result.tail || "").slice(-2000)}`,
-      ).toBeTruthy();
+      // source checkout", and the CLI's JSON boundary remains strict.
       expect(parsed.dryRun).toBe(true);
       expect(parsed.effectiveChannel).toBe("dev");
       expect(parsed.mode).toBe("git");

@@ -1579,6 +1579,32 @@ describe("server/watchdog", () => {
     }
   });
 
+  it("shutdown waits for the cancelled repair writer before completing the server drain", async () => {
+    const lock = require("../../lib/server/gateway-lifecycle-lock").createGatewayLifecycleLock({ logger: { warn() {} } });
+    let finishWriter;
+    const writer = new Promise((resolve) => { finishWriter = resolve; });
+    const { watchdog, clawCmd, launchGatewayProcess } = createHarness({
+      gatewayLifecycleLock: lock,
+      clawCmdImpl: async (command) => command === "doctor --fix --yes"
+        ? writer : { ok: true, stdout: "{}" },
+    });
+    const repair = watchdog.triggerRepair();
+    await vi.waitFor(() => expect(clawCmd).toHaveBeenCalledWith(
+      "doctor --fix --yes", expect.any(Object),
+    ));
+    let drained = false;
+    const drain = watchdog.stop().then(() => { drained = true; });
+    await flushMicrotasks();
+    expect(drained).toBe(false);
+    expect(lock.getActiveOperation()).toMatchObject({ kind: "repair", phase: "cleanup" });
+    finishWriter({ ok: true, stdout: "fixed" });
+    await drain;
+    await repair;
+    expect(drained).toBe(true);
+    expect(launchGatewayProcess).not.toHaveBeenCalled();
+    expect(lock.getActiveOperation()).toBe(null);
+  });
+
   it("a structural version_mismatch hold (#76 C2 launch gate) refuses repair for EVERY source — manual included — no doctor run, no launch; the ledger row names the hold class", async () => {
     const clawCalls = [];
     const { watchdog, launchGatewayProcess, insertWatchdogEvent } = createHarness({
@@ -1864,12 +1890,14 @@ describe("server/watchdog", () => {
       });
 
       expect((await watchdog.triggerRepair()).ok).toBe(true);
-      expect(repairRunner).toHaveBeenLastCalledWith({ correlationId: expect.any(String), bin: null });
+      expect(repairRunner).toHaveBeenLastCalledWith(expect.objectContaining({ correlationId: expect.any(String), bin: null,
+        signal: expect.any(AbortSignal), deadlineAt: expect.any(Number), operation: expect.any(Object) }));
       expect(compatibleBinForCurrentDb).not.toHaveBeenCalled();
 
       latchBootMismatch(watchdog);
       expect((await watchdog.triggerRepair()).ok).toBe(true);
-      expect(repairRunner).toHaveBeenLastCalledWith({ correlationId: expect.any(String), bin: kExpectedBin });
+      expect(repairRunner).toHaveBeenLastCalledWith(expect.objectContaining({ correlationId: expect.any(String), bin: kExpectedBin,
+        signal: expect.any(AbortSignal), deadlineAt: expect.any(Number), operation: expect.any(Object) }));
       expect(compatibleBinForCurrentDb).toHaveBeenCalledTimes(1);
       expect(doctorFromPath(clawCmd)).toBe(false);
     });
@@ -5346,6 +5374,7 @@ describe("server/watchdog", () => {
             intent: "relaunch_if_absent",
           }),
         }),
+        expect.objectContaining({ details: { reason: "child_retained", recoveryPending: true } }),
       ]);
       expect(restartRows(insertWatchdogEvent, { status: "ok" })).toHaveLength(0);
       expect(restartRows(insertWatchdogEvent, { status: "requested" })).toHaveLength(0);
@@ -5560,15 +5589,16 @@ describe("server/watchdog", () => {
       expect(launchGatewayProcess).toHaveBeenCalledTimes(1);
       expect(restartRows(insertWatchdogEvent, { source: "state_writer_conflict", status: "requested" })).toHaveLength(1);
 
-      // The relaunched contender loses again, twice: the crash-loop cap latches.
-      for (let round = 0; round < 2; round += 1) {
+      // Three real relaunches may run; their next failure reaches the cap.
+      // Admission skips must never masquerade as an attempted launch.
+      for (let round = 0; round < 3; round += 1) {
         conflictExit();
         await settle();
         await watchdog.runHealthCheck({ source: "health_timer" });
         await settle();
       }
-      expect(launchGatewayProcess).toHaveBeenCalledTimes(2);
-      expect(restartRows(insertWatchdogEvent, { source: "state_writer_conflict", status: "backoff" })).toHaveLength(1);
+      expect(launchGatewayProcess).toHaveBeenCalledTimes(3);
+      expect(restartRows(insertWatchdogEvent, { source: "state_writer_conflict", status: "backoff" })).toHaveLength(2);
       expect(watchdog.getStatus()).toMatchObject({ lifecycle: "crash_loop", health: "unhealthy" });
       expect(rowsOfType(insertWatchdogEvent, "crash_loop")).toEqual([
         expect.objectContaining({
@@ -6233,7 +6263,7 @@ describe("server/watchdog", () => {
     });
 
     // ── acceptance i (lease) ──────────────────────────────────────────────
-    it("i. a repair whose Doctor run outlives the lock lease launches nothing: skipped {lease_expired}, lifecycle untouched and admitted attempt retained, the queued successor holds the lock", async () => {
+    it("i. a timed-out Doctor retains its cleanup hold until the writer finishes, then admits the queued successor without relaunching", async () => {
       vi.useFakeTimers();
       const createGatewayLifecycleLock = requireLock();
       const lock = createGatewayLifecycleLock({ logger: { warn: () => {} } });
@@ -6266,18 +6296,21 @@ describe("server/watchdog", () => {
 
       // An operator restart queues behind the repair.
       const successor = lock.acquire("restart");
-      // The lease fires while Doctor is still running: force-released.
+      // Work times out but the uncooperative writer has not finished.
       await vi.advanceTimersByTimeAsync(kRepairLeaseMs + 1);
-      const releaseSuccessor = await successor;
-      expect(lock.getActiveOperation()).toMatchObject({ kind: "restart" });
+      expect(lock.getActiveOperation()).toMatchObject({ kind: "repair", phase: "cleanup_blocked" });
+      expect(watchdog.getStatus().lifecycleOperation).toMatchObject({
+        kind: "repair", phase: "cleanup_blocked",
+      });
 
       // Doctor finishes late: the repair asks the lock and stands down.
       await vi.advanceTimersByTimeAsync(60_000);
-      expect(rowsOfType(insertWatchdogEvent, "repair", "skipped")).toEqual(
+      const releaseSuccessor = await successor;
+      expect(rowsOfType(insertWatchdogEvent, "repair", "failed")).toEqual(
         expect.arrayContaining([
           expect.objectContaining({
             source: "crash_loop",
-            details: { reason: "lease_expired", doctorOk: true },
+            details: { code: "operation_timed_out" },
           }),
         ]),
       );
@@ -6341,6 +6374,7 @@ describe("server/watchdog", () => {
         expect.objectContaining({
           details: expect.objectContaining({ reason: "incumbent_unhealthy", pid: 700, intent: "relaunch_if_absent" }),
         }),
+        expect.objectContaining({ details: { reason: "incumbent_unhealthy", recoveryPending: true } }),
       ]);
       expect(watchdog.getStatus()).toMatchObject({
         lifecycle: "running",
@@ -6758,6 +6792,7 @@ describe("server/watchdog", () => {
       await settle();
       expect(restartRows(insertWatchdogEvent, { source: "exit_event", status: "skipped" })).toEqual([
         expect.objectContaining({ details: expect.objectContaining({ reason: "incumbent_unhealthy", pid: 100 }) }),
+        expect.objectContaining({ details: { reason: "incumbent_unhealthy", recoveryPending: true } }),
       ]);
       expect(watchdog.getStatus()).toMatchObject({ health: "degraded", incumbentGraceUntil: null });
       watchdog.stop();

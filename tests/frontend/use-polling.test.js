@@ -1,328 +1,213 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-
-// Deps-aware hook harness: unlike the collect-only harness in the upgrade-tab
-// tests, usePolling's visibility fix depends on effects re-running when their
-// dependency arrays change (and cleanups firing first), so this harness tracks
-// deps per slot and flushes scheduled effects after each render.
-vi.mock("preact/hooks", () => {
-  const harness = { slots: [], cursor: 0, pendingEffects: [] };
-
-  const depsChanged = (previousDeps, nextDeps) => {
-    if (!previousDeps || !nextDeps) return true;
-    if (previousDeps.length !== nextDeps.length) return true;
-    return nextDeps.some((dep, index) => !Object.is(dep, previousDeps[index]));
-  };
-
-  harness.beginRender = () => {
-    harness.cursor = 0;
-  };
-
-  harness.flushEffects = () => {
-    const pending = harness.pendingEffects;
-    harness.pendingEffects = [];
-    for (const run of pending) run();
-  };
-
-  harness.unmount = () => {
-    harness.pendingEffects = [];
-    for (const slot of [...harness.slots].reverse()) {
-      if (slot?.kind === "effect" && typeof slot.cleanup === "function") {
-        slot.cleanup();
-        slot.cleanup = null;
-      }
-    }
-  };
-
-  harness.reset = () => {
-    harness.unmount();
-    harness.slots = [];
-    harness.cursor = 0;
-    harness.pendingEffects = [];
-  };
-
-  const useState = (initialValue) => {
-    const index = harness.cursor++;
-    if (!(index in harness.slots)) {
-      harness.slots[index] = {
-        kind: "state",
-        value: typeof initialValue === "function" ? initialValue() : initialValue,
-      };
-    }
-    const slot = harness.slots[index];
-    const setState = (next) => {
-      slot.value = typeof next === "function" ? next(slot.value) : next;
-    };
-    return [slot.value, setState];
-  };
-
-  const useRef = (initialValue = null) => {
-    const index = harness.cursor++;
-    if (!(index in harness.slots)) {
-      harness.slots[index] = { kind: "ref", current: initialValue };
-    }
-    return harness.slots[index];
-  };
-
-  const useCallback = (fn, deps) => {
-    const index = harness.cursor++;
-    let slot = harness.slots[index];
-    if (!slot) {
-      slot = harness.slots[index] = {
-        kind: "callback",
-        fn: null,
-        deps: undefined,
-        initialized: false,
-      };
-    }
-    if (!slot.initialized || depsChanged(slot.deps, deps)) {
-      slot.fn = fn;
-      slot.deps = deps;
-      slot.initialized = true;
-    }
-    return slot.fn;
-  };
-
-  const useEffect = (effect, deps) => {
-    const index = harness.cursor++;
-    let slot = harness.slots[index];
-    if (!slot) {
-      slot = harness.slots[index] = {
-        kind: "effect",
-        deps: undefined,
-        cleanup: null,
-        initialized: false,
-      };
-    }
-    const changed = !slot.initialized || depsChanged(slot.deps, deps);
-    slot.deps = deps;
-    slot.initialized = true;
-    if (!changed) return;
-    harness.pendingEffects.push(() => {
-      if (typeof slot.cleanup === "function") slot.cleanup();
-      const cleanup = effect();
-      slot.cleanup = typeof cleanup === "function" ? cleanup : null;
-    });
-  };
-
-  const useMemo = (factory) => factory();
-
-  return { useState, useRef, useCallback, useEffect, useMemo, __harness: harness };
-});
-
-import * as preactHooks from "preact/hooks";
 import { usePolling } from "../../lib/public/js/hooks/usePolling.js";
-import {
-  getCached,
-  setCached,
-  invalidateCache,
-} from "../../lib/public/js/lib/api-cache.js";
+import { useCachedFetch } from "../../lib/public/js/hooks/use-cached-fetch.js";
+import { clearApiCache, getCached, setCached } from "../../lib/public/js/lib/api-cache.js";
+import { createReadHost, deferred } from "./mounted-read-helpers.js";
 
-const harness = preactHooks.__harness;
+let host;
+beforeEach(() => {
+  vi.useFakeTimers();
+  clearApiCache();
+  host = createReadHost();
+  vi.stubGlobal("document", host.document);
+});
+afterEach(async () => {
+  await host.unmount();
+  clearApiCache();
+  vi.unstubAllGlobals();
+  vi.useRealTimers();
+});
+const probe = (id, fetcher, options = {}, interval = 3000) => ({ id, useRead: usePolling, args: [fetcher, interval, options] });
+const advance = (ms) => host.settle(() => vi.advanceTimersByTimeAsync(ms));
 
-const kIntervalMs = 3000;
-
-const flushMicrotasks = async () => {
-  for (let i = 0; i < 5; i += 1) await Promise.resolve();
-};
-
-describe("frontend/use-polling visibility", () => {
-  let fetcher;
-  let visibilityListeners;
-  let hookResult;
-
-  const setDocumentHidden = (hidden) => {
-    Object.defineProperty(globalThis.document, "hidden", {
-      configurable: true,
-      value: hidden,
-    });
-  };
-
-  const dispatchVisibilityChange = () => {
-    for (const listener of [...visibilityListeners]) listener();
-  };
-
-  const renderPolling = (options = {}) => {
-    harness.beginRender();
-    hookResult = usePolling(fetcher, kIntervalMs, options);
-    harness.flushEffects();
-    return hookResult;
-  };
-
-  beforeEach(() => {
-    vi.useFakeTimers();
-    harness.reset();
-    fetcher = vi.fn(async () => ({ ok: true }));
-    visibilityListeners = [];
-    globalThis.document = {
-      addEventListener: (type, listener) => {
-        if (type === "visibilitychange") visibilityListeners.push(listener);
-      },
-      removeEventListener: (type, listener) => {
-        visibilityListeners = visibilityListeners.filter(
-          (entry) => entry !== listener,
-        );
-      },
-    };
-    setDocumentHidden(false);
+describe("frontend/use-polling mounted consumers", () => {
+  it("manual refresh of a disabled poll publishes the latest committed snapshot, never its obsolete payload", async () => {
+    const work = deferred();
+    const fetcher = vi.fn(() => work.promise);
+    const options = { cacheKey: "shared", enabled: false };
+    setCached("shared", "before");
+    await host.render([probe("a", fetcher, options)]);
+    const refresh = host.result("a").refresh();
+    // A harmless rerender keeps this manual intent alive.
+    await host.render([probe("a", fetcher, options)]);
+    await host.settle(() => setCached("shared", "saved by a newer mutation"));
+    expect(host.result("a").data).toBe("before");
+    await host.settle(() => work.resolve("obsolete response"));
+    expect(await refresh).toBe("obsolete response");
+    expect(host.result("a")).toMatchObject({ data: "saved by a newer mutation", error: null, isPolling: false });
+    expect(fetcher).toHaveBeenCalledTimes(1);
   });
 
-  afterEach(() => {
-    harness.reset();
-    vi.useRealTimers();
-    delete globalThis.document;
+  it("manual disabled refresh retains last good data with an error and recovers on explicit retry", async () => {
+    const error = Object.assign(new Error("temporarily unavailable"), { status: 503 });
+    const fetcher = vi.fn().mockRejectedValueOnce(error).mockResolvedValue("recovered");
+    setCached("shared", "good");
+    await host.render([probe("a", fetcher, { cacheKey: "shared", enabled: false })]);
+    await host.settle(async () => expect(await host.result("a").refresh()).toBe(null));
+    expect(host.result("a")).toMatchObject({ data: "good", error, stale: true, isPolling: false });
+    await advance(9000);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    await host.settle(() => host.result("a").refresh());
+    expect(host.result("a")).toMatchObject({ data: "recovered", error: null, stale: false });
   });
 
-  it("mounted hidden: never fetches until the tab becomes visible, then polls", async () => {
-    setDocumentHidden(true);
-    renderPolling({ pauseWhenHidden: true });
+  it("disabling a poll fences a manual request that started while enabled", async () => {
+    host.document.hidden = true;
+    const work = deferred();
+    const fetcher = () => work.promise;
+    setCached("shared", "before");
+    await host.render([probe("a", fetcher, { cacheKey: "shared" })]);
+    const refresh = host.result("a").refresh();
+    await host.render([probe("a", fetcher, { cacheKey: "shared", enabled: false })]);
+    await host.settle(() => work.resolve("after"));
+    await refresh;
+    expect(getCached("shared")).toBe("after");
+    expect(host.result("a").data).toBe("before");
+  });
 
-    // The regression: mounting while hidden must not fetch — and must not
-    // stay dead forever either.
-    await vi.advanceTimersByTimeAsync(kIntervalMs * 4);
+  it.each(["key cycle", "enable cycle", "unmount"])("an old disabled refresh cannot publish after %s", async (transition) => {
+    host.document.hidden = true;
+    const work = deferred();
+    const fetcher = () => work.promise;
+    const options = { cacheKey: "shared", enabled: false };
+    setCached("shared", "before");
+    await host.render([probe("a", fetcher, options)]);
+    const refresh = host.result("a").refresh();
+    if (transition === "key cycle") {
+      await host.render([probe("a", fetcher, { ...options, cacheKey: "other" })]);
+      await host.render([probe("a", fetcher, options)]);
+    } else if (transition === "enable cycle") {
+      await host.render([probe("a", fetcher, { ...options, enabled: true })]);
+      await host.render([probe("a", fetcher, options)]);
+    } else {
+      await host.unmount();
+      await host.render([probe("a", fetcher, options)]);
+    }
+    await host.settle(() => setCached("shared", "newer unseen mutation"));
+    await host.settle(() => work.resolve("old request"));
+    await refresh;
+    expect(getCached("shared")).toBe("newer unseen mutation");
+    expect(host.result("a").data).toBe("before");
+  });
+
+  it("disabling polling fences an earlier read without cancelling another subscriber", async () => {
+    const work = deferred();
+    const fetcher = vi.fn(() => work.promise);
+    setCached("shared", "before");
+    await host.render([probe("a", fetcher, { cacheKey: "shared" }), probe("b", fetcher, { cacheKey: "shared" })]);
+    await host.render([probe("a", fetcher, { cacheKey: "shared", enabled: false }), probe("b", fetcher, { cacheKey: "shared" })]);
+    await host.settle(() => work.resolve("after"));
+    expect(host.result("a")).toMatchObject({ data: "before", isPolling: false });
+    expect(host.result("b").data).toBe("after");
+    await host.render([probe("a", fetcher, { cacheKey: "shared" }), probe("b", fetcher, { cacheKey: "shared" })]);
+    expect(host.result("a").data).toBe("after");
+  });
+  it("waits while mounted hidden, resumes on visibility, pauses and cleans up", async () => {
+    host.document.hidden = true;
+    const fetcher = vi.fn(async () => "fresh");
+    await host.render([probe("a", fetcher)]);
+    await advance(9000);
     expect(fetcher).not.toHaveBeenCalled();
-
-    setDocumentHidden(false);
-    dispatchVisibilityChange();
-    renderPolling({ pauseWhenHidden: true });
-    await flushMicrotasks();
-
-    // Becoming visible starts the interval effect: immediate refresh...
+    await host.hidden(false);
+    await host.settle();
     expect(fetcher).toHaveBeenCalledTimes(1);
-
-    // ...and a real recurring interval (the pre-fix behavior only did a
-    // one-shot refresh from the visibility listener).
-    await vi.advanceTimersByTimeAsync(kIntervalMs);
+    await advance(3000);
     expect(fetcher).toHaveBeenCalledTimes(2);
-    await vi.advanceTimersByTimeAsync(kIntervalMs);
-    expect(fetcher).toHaveBeenCalledTimes(3);
-  });
-
-  it("mounted visible: fetches immediately and keeps polling on the interval", async () => {
-    renderPolling({ pauseWhenHidden: true });
-    await flushMicrotasks();
-
-    expect(fetcher).toHaveBeenCalledTimes(1);
-    await vi.advanceTimersByTimeAsync(kIntervalMs);
+    await host.hidden(true);
+    await advance(6000);
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    await host.unmount();
+    expect(host.listenerCount()).toBe(0);
+    await advance(6000);
     expect(fetcher).toHaveBeenCalledTimes(2);
   });
 
-  it("stops the interval when the tab goes hidden and resumes when visible", async () => {
-    renderPolling({ pauseWhenHidden: true });
-    await flushMicrotasks();
-    expect(fetcher).toHaveBeenCalledTimes(1);
-
-    setDocumentHidden(true);
-    dispatchVisibilityChange();
-    renderPolling({ pauseWhenHidden: true });
-
-    await vi.advanceTimersByTimeAsync(kIntervalMs * 3);
-    expect(fetcher).toHaveBeenCalledTimes(1);
-
-    setDocumentHidden(false);
-    dispatchVisibilityChange();
-    renderPolling({ pauseWhenHidden: true });
-    await flushMicrotasks();
-    expect(fetcher).toHaveBeenCalledTimes(2);
+  it("supports deliberate background polling and disabled polls", async () => {
+    host.document.hidden = true;
+    const active = vi.fn(async () => "fresh");
+    const disabled = vi.fn(async () => "unused");
+    await host.render([probe("a", active, { pauseWhenHidden: false }), probe("b", disabled, { enabled: false })]);
+    await advance(6000);
+    expect(active).toHaveBeenCalledTimes(3);
+    expect(disabled).not.toHaveBeenCalled();
   });
 
-  it("ignores visibility entirely when pauseWhenHidden is false", async () => {
-    setDocumentHidden(true);
-    renderPolling({ pauseWhenHidden: false });
-    await flushMicrotasks();
-
+  it("shares requests with another poller and a cached reader without starving slow completions", async () => {
+    const work = deferred();
+    const fetcher = vi.fn(() => work.promise);
+    const opts = { cacheKey: "shared" };
+    await host.render([
+      probe("a", fetcher, opts),
+      probe("b", fetcher, opts),
+      { id: "c", useRead: useCachedFetch, args: ["shared", fetcher] },
+    ]);
+    await advance(9000);
     expect(fetcher).toHaveBeenCalledTimes(1);
-    expect(visibilityListeners).toHaveLength(0);
-    await vi.advanceTimersByTimeAsync(kIntervalMs);
-    expect(fetcher).toHaveBeenCalledTimes(2);
+    await host.settle(() => work.resolve("first slow result"));
+    for (const id of ["a", "b", "c"]) expect(host.result(id).data).toBe("first slow result");
+    expect(host.result("a").isPolling).toBe(false);
+    await advance(3000);
+    // One immediate resolution can permit a subsequent scheduled poll in the
+    // same tick; every still-pending request is nevertheless shared.
+    expect(fetcher.mock.calls.length).toBeGreaterThan(1);
   });
 
-  it("does not fetch while disabled, even when visible", async () => {
-    renderPolling({ enabled: false, pauseWhenHidden: true });
-    await vi.advanceTimersByTimeAsync(kIntervalMs * 3);
+  it("a forced post-mutation read wins over an unmounted pane's earlier request", async () => {
+    const old = deferred();
+    const fresh = deferred();
+    const fetcher = vi.fn().mockReturnValueOnce(old.promise).mockReturnValueOnce(fresh.promise);
+    await host.render([probe("a", fetcher, { cacheKey: "shared" })]);
+    await host.render([probe("b", fetcher, { cacheKey: "shared" })]);
+    const forced = host.result("b").refresh({ force: true });
+    await host.settle(() => fresh.resolve("new"));
+    await forced;
+    await host.settle(() => old.resolve("old"));
+    expect(host.result("b").data).toBe("new");
+    expect(getCached("shared")).toBe("new");
+  });
+
+  it("switching keys while hidden clears the previous key's data and error", async () => {
+    setCached("one", "old");
+    await host.render([probe("a", async () => "old", { cacheKey: "one" })]);
+    await host.hidden(true);
+    const fetcher = vi.fn(async () => "new");
+    await host.render([probe("a", fetcher, { cacheKey: "two" })]);
+    expect(host.result("a").data).toBe(null);
+    expect(host.result("a").error).toBe(null);
     expect(fetcher).not.toHaveBeenCalled();
+    await host.hidden(false);
+    await host.settle();
+    expect(host.result("a").data).toBe("new");
   });
 
-  it("seeds initial data from the cache when a cacheKey is provided (warm paint)", async () => {
-    const cacheKey = "use-polling-test-warm-paint";
-    setCached(cacheKey, { events: ["cached"] });
-    try {
-      const result = renderPolling({ pauseWhenHidden: true, cacheKey });
-      expect(result.data).toEqual({ events: ["cached"] });
-    } finally {
-      invalidateCache(cacheKey);
-    }
+  it("a timed-out read keeps last good data, frees the slot, and fences noncooperative completion", async () => {
+    const hung = deferred();
+    const fetcher = vi.fn().mockReturnValueOnce(hung.promise).mockResolvedValue("recovered");
+    setCached("slow", "good");
+    await host.render([probe("a", fetcher, { cacheKey: "slow", timeoutMs: 1000 }, 3000)]);
+    await advance(1000);
+    expect(host.result("a")).toMatchObject({ data: "good", stale: true, isPolling: false });
+    expect(host.result("a").error.code).toBe("read_timeout");
+    await advance(2000);
+    expect(host.result("a").data).toBe("recovered");
+    await host.settle(() => hung.resolve("late"));
+    expect(host.result("a").data).toBe("recovered");
+    expect(getCached("slow")).toBe("recovered");
   });
 
-  it("dedupeInFlight shares one in-flight fetch across overlapping refreshes; force bypasses; the freshest write wins the cache", async () => {
-    const cacheKey = "use-polling-test-dedupe";
-    invalidateCache(cacheKey);
-    const resolvers = [];
-    fetcher = vi.fn(
-      () => new Promise((resolve) => resolvers.push(resolve)),
-    );
-    try {
-      renderPolling({ pauseWhenHidden: false, dedupeInFlight: true, cacheKey });
-      await flushMicrotasks();
-      // The mount refresh is in flight...
-      expect(fetcher).toHaveBeenCalledTimes(1);
-
-      // ...so overlapping refreshes piggyback on it instead of stacking
-      // duplicate requests.
-      const shared1 = hookResult.refresh();
-      const shared2 = hookResult.refresh();
-      await flushMicrotasks();
-      expect(fetcher).toHaveBeenCalledTimes(1);
-
-      // force bypasses the dedupe and dispatches its own fetch.
-      const forced = hookResult.refresh({ force: true });
-      await flushMicrotasks();
-      expect(fetcher).toHaveBeenCalledTimes(2);
-
-      resolvers[0]({ seq: "shared" });
-      resolvers[1]({ seq: "forced" });
-      await flushMicrotasks();
-
-      // The deduped callers all resolve with the shared fetch's result.
-      await expect(shared1).resolves.toEqual({ seq: "shared" });
-      await expect(shared2).resolves.toEqual({ seq: "shared" });
-      await expect(forced).resolves.toEqual({ seq: "forced" });
-
-      // The forced refresh is the LATEST — it wins both state and cache; the
-      // older shared result must not clobber it.
-      renderPolling({ pauseWhenHidden: false, dedupeInFlight: true, cacheKey });
-      expect(hookResult.data).toEqual({ seq: "forced" });
-      expect(getCached(cacheKey)).toEqual({ seq: "forced" });
-    } finally {
-      invalidateCache(cacheKey);
-    }
-  });
-
-  it("a successful poll writes through to the api cache (warm paint for the next mount)", async () => {
-    const cacheKey = "use-polling-test-write-through";
-    invalidateCache(cacheKey);
-    fetcher = vi.fn(async () => ({ events: ["fresh"] }));
-    try {
-      expect(getCached(cacheKey)).toBeNull();
-      renderPolling({ pauseWhenHidden: false, cacheKey });
-      await flushMicrotasks();
-
-      expect(getCached(cacheKey)).toEqual({ events: ["fresh"] });
-      renderPolling({ pauseWhenHidden: false, cacheKey });
-      expect(hookResult.data).toEqual({ events: ["fresh"] });
-    } finally {
-      invalidateCache(cacheKey);
-    }
-  });
-
-  it("cleans up its interval and visibility listener on unmount", async () => {
-    renderPolling({ pauseWhenHidden: true });
-    await flushMicrotasks();
+  it("403 purges mounted data, stops automatic retries, and allows an explicit force retry", async () => {
+    const denied = deferred();
+    const fetcher = vi.fn().mockReturnValueOnce(denied.promise).mockResolvedValue("authorized");
+    setCached("protected", "secret");
+    await host.render([probe("a", fetcher, { cacheKey: "protected" }), probe("b", fetcher, { cacheKey: "protected" })]);
+    await host.settle(() => denied.reject(Object.assign(new Error("Forbidden"), { status: 403 })));
+    expect(host.result("a").data).toBe(null);
+    expect(host.result("b").data).toBe(null);
+    expect(getCached("protected")).toBe(null);
+    await advance(9000);
     expect(fetcher).toHaveBeenCalledTimes(1);
-    expect(visibilityListeners).toHaveLength(1);
-
-    harness.unmount();
-    expect(visibilityListeners).toHaveLength(0);
-    await vi.advanceTimersByTimeAsync(kIntervalMs * 3);
-    expect(fetcher).toHaveBeenCalledTimes(1);
+    await host.settle(() => host.result("a").refresh({ force: true }));
+    expect(host.result("a").data).toBe("authorized");
+    expect(host.result("b").error).toBe(null);
   });
 });

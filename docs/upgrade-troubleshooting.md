@@ -6,6 +6,73 @@ surface (Upgrade tab, notifications, watchdog events). Background: issues
 [#20](https://github.com/chrysb/alphaclaw/issues/20) and
 [#54](https://github.com/chrysb/alphaclaw/issues/54).
 
+## Managed deployment accepted or unknown
+
+The AlphaClaw update card retains a provider attempt after reload or restart.
+**Accepted** means the provider acknowledged the request; **Unknown** means the
+request may have been accepted despite a lost, timed-out or invalid response.
+Neither means the deployment finished. AlphaClaw does not resend automatically.
+An unresolved attempt also blocks OpenClaw apply, backup and repair operations;
+normal gateway restart and watchdog recovery remain available.
+
+Open your deployment provider and verify the attempt has **finished or been
+cancelled, with no deployment pending**. Then, as a human admin, use the update
+card's **Provider finished the deployment** or **Provider cancelled or did not
+deploy** action. The confirmation records `deployed` or `not_deployed` and
+unlocks another submission. It does not trigger an update or certify
+gateway health. If the local request is still active, wait for its bounded
+completion before resolving it. Refresh if another operator resolved a different
+attempt or outcome.
+
+Do not delete `managed-update-attempt.json` to clear this state. It is the durable
+record that prevents a duplicate deployment. If Doctor reports it unreadable,
+preserve its bytes and any backup, check the provider first, then recover the
+record with operator assistance. Reverting AlphaClaw does not cancel an already
+submitted deployment; preserve the record through a version-advancing revert.
+
+If a new submission returns `managed_update_audit_pending`, restore watchdog
+database access and retry the status read. AlphaClaw retains unrecorded audit
+transitions in a bounded backlog; it blocks new submissions when that backlog
+fills, while allowing the current attempt to finish or be resolved. Do not
+clear the attempt file to bypass this condition.
+
+## Pending recovery or `cleanup_blocked`
+
+The Watchdog card names the condition delaying crash recovery and shows its age
+and next check. Maintenance and failed restarts do not erase the obligation.
+After the competing operation finishes, recovery retries automatically. An
+explicit stop of the watchdog during AlphaClaw shutdown cancels it; a launched
+or adopted successor takes ownership while
+warming up.
+
+Cancelling a repair invalidates its write authority immediately, but queued
+gateway operations wait until the process group has stopped and the Doctor
+restore guard has finished. After fifteen seconds without confirmation, the
+card shows **Repair cleanup needs attention** with the tracked process identities.
+There is no automatic force-unlock. Use the rescue session to inspect the tracked
+writers, confirm identity before stopping them, and confirm they have exited
+before restarting AlphaClaw. Retain the repair log and watchdog events for diagnosis.
+
+A dev repair that completes in place is shown as complete without waiting for
+an AlphaClaw restart. If progress is interrupted, the Upgrade page looks up that
+exact operation ID; use Retry when the status read fails. A previous update's
+success is not evidence that the interrupted repair finished.
+
+## Dev update failed after changing state
+
+A failed upstream dev update does not prove that its checkout or state was
+rolled back. Check the operation's `updaterReason`, `updaterRecovery` and log.
+`state-migrated-no-rollback` means upstream deliberately retained migrated
+state; `serviceRestartSafe: false` means it did not verify that restarting the
+gateway is safe. Preserve the log and state before attempting recovery.
+
+For `runtime-verification-failed`, inspect `openclaw gateway status --deep`
+and the service owner named there. A free port alone cannot establish that a
+native service is stopped: its manager may restart it. Resolve the reported
+ownership or service-state blocker before retrying. AlphaClaw reports verified
+package restoration only when upstream provides explicit evidence; it does not
+infer a rollback from a failed exit code.
+
 ## `doctor_restored_stale_config`
 
 **What it means:** during a repair pass, the doctor tried to restore a

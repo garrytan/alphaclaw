@@ -52,6 +52,29 @@ describe("server/watchdog-db", () => {
     expect(fs.existsSync(result.path)).toBe(true);
   });
 
+  it("keeps one notification expiry audit after outbox pruning and restart", async () => {
+    const { createNotifyOutbox } = require("../../lib/server/notify-outbox");
+    const { rootDir, path: dbPath, insertWatchdogEvent, initWatchdogDb } = createWatchdogDbContext("watchdog-expiry-dedupe-");
+    let now = 100;
+    const options = { openclawDir: path.join(rootDir, ".openclaw"), keepCount: 1,
+      nowFn: () => now, insertEvent: insertWatchdogEvent, logger: { log() {} } };
+    const first = createNotifyOutbox(options);
+    const sourceNotice = first.enqueue({ id: "overseer-source", eventType: "overseer", message: "review" });
+    now = sourceNotice.expiresAt;
+    await first.flush({ deliver: vi.fn() });
+    first.enqueue({ id: "newer", message: "another event" });
+    expect(first.listEvents().map((entry) => entry.id)).toEqual(["newer"]);
+    initWatchdogDb({ rootDir });
+    const restarted = createNotifyOutbox(options);
+    restarted.enqueue({ id: sourceNotice.id, eventType: "overseer", message: "review",
+      createdAt: sourceNotice.createdAt, expiresAt: sourceNotice.expiresAt });
+    const deliver = vi.fn();
+    await restarted.flush({ deliver });
+    expect(deliver.mock.calls.map(([event]) => event.id)).not.toContain(sourceNotice.id);
+    currentDatabase = new DatabaseSync(dbPath);
+    expect(currentDatabase.prepare("SELECT COUNT(*) AS n FROM watchdog_events WHERE event_type = 'notification_expired'").get().n).toBe(1);
+  });
+
   describe("overseer situation slot (watchdog_meta)", () => {
     it("reads missing as a tagged miss, round-trips an upsert, and overwrites in place", () => {
       const { getOverseerSituation, setOverseerSituation } = createWatchdogDbContext(

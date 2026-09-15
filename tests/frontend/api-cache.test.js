@@ -183,6 +183,34 @@ describe("frontend/api-cache", () => {
     await vi.waitFor(() => expect(getCached("swr-silent-key")).toBe("new"));
   });
 
+  it("fans committed SWR results out to every callback sharing the request", async () => {
+    let resolve;
+    setCached("swr-fanout", "old");
+    const fetcher = vi.fn(() => new Promise((done) => { resolve = done; }));
+    const first = vi.fn();
+    const second = vi.fn();
+    await cachedFetch("swr-fanout", fetcher, { maxAgeMs: 0, onRevalidate: first });
+    await cachedFetch("swr-fanout", fetcher, { maxAgeMs: 0, onRevalidate: second });
+    resolve("new");
+    await vi.waitFor(() => expect(second).toHaveBeenCalledWith("new"));
+    expect(first).toHaveBeenCalledWith("new");
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
+  it("superseded SWR callbacks never deliver pre-mutation data", async () => {
+    let resolve;
+    setCached("swr-superseded-callback", "old");
+    const callback = vi.fn();
+    await cachedFetch("swr-superseded-callback", () => new Promise((done) => { resolve = done; }), {
+      maxAgeMs: 0, onRevalidate: callback,
+    });
+    setCached("swr-superseded-callback", "saved");
+    resolve("obsolete");
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    expect(callback).not.toHaveBeenCalled();
+    expect(getCached("swr-superseded-callback")).toBe("saved");
+  });
+
   it("refetches stale entries when staleWhileRevalidate is off", async () => {
     setCached("no-swr-key", "old");
     const fetcher = vi.fn(async () => "new");

@@ -12,12 +12,24 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 // lives in per-call-index slots so component/hook functions can be invoked
 // directly without a DOM renderer. Effects are collected, not run.
 vi.mock("preact/hooks", () => {
-  const harness = { slots: [], cursor: 0, effects: [] };
+  const harness = { slots: [], cursor: 0, effects: [], cleanups: new Map() };
+  harness.runEffect = (index) => {
+    harness.cleanups.get(index)?.();
+    harness.cleanups.set(index, harness.effects[index]?.());
+  };
+  // Keep committed read subscriptions mounted without starting polling.
+  // Named effects avoid coupling these older fixtures to extraction order.
+  harness.mountReads = () => harness.effects.forEach((effect, index) => {
+    if (String(effect).includes("subscribeCache") || String(effect).includes("followedStale")) harness.runEffect(index);
+  });
+  harness.findEffect = (text) => harness.effects.find((effect) => String(effect).includes(text));
   harness.beginRender = () => {
     harness.cursor = 0;
     harness.effects = [];
   };
   harness.reset = () => {
+    for (const cleanup of harness.cleanups.values()) cleanup?.();
+    harness.cleanups.clear();
     harness.slots = [];
     harness.cursor = 0;
     harness.effects = [];
@@ -58,6 +70,7 @@ vi.mock("../../lib/public/js/lib/api.js", () => ({
   fetchOpenclawChannel: vi.fn(),
   fetchOpenclawRunLogText: vi.fn(),
   fetchOpenclawRuns: vi.fn(),
+  fetchOpenclawRun: vi.fn(),
   fetchStatus: vi.fn(),
   markOpenclawGood: vi.fn(),
   retryOpenclawReconcile: vi.fn(),
@@ -1007,14 +1020,16 @@ describe("frontend/upgrade-tab hook — consent + reuse retry + fence fields", (
 
   const renderHook = (props = {}) => {
     harness.beginRender();
-    return useUpgradeTab(props);
+    const state = useUpgradeTab(props);
+    harness.mountReads();
+    return state;
   };
 
   const hydrate = async (props = {}) => {
     let state = renderHook(props);
     // Run only the mount data-load effect (effect #0); the others start
     // timers/streams that the harness should not leak.
-    harness.effects[0]();
+    harness.findEffect("loadChannel({ fromCache")();
     await flushAsync();
     state = renderHook(props);
     return state;
@@ -1393,8 +1408,9 @@ describe("frontend/upgrade-tab hook — consent + reuse retry + fence fields", (
   it("R5: useBackupsInventory reads cache-friendly on mount and forces the server on refreshBackups", async () => {
     harness.beginRender();
     let state = useBackupsInventory();
-    // The hook declares two effects (key reset, mount read); the harness only
-    // collects them, so run the mount read by hand.
+    // The hook declares subscription + mount read. Mount both, then drive
+    // mutation refreshes against that same subscribed consumer.
+    harness.runEffect(0);
     harness.effects[1]();
     await flushAsync();
     expect(api.fetchOpenclawBackups).toHaveBeenCalledTimes(1);
@@ -1763,18 +1779,17 @@ describe("frontend/upgrade-tab hook — consent + reuse retry + fence fields", (
     // this branch; a reload mid-update is exactly when an operator needs it.
     const persistedRun = {
       operationId: "op-7",
+      state: "running",
       target: kDowngradeTarget,
       startedAt: kNow - 60_000,
       finishedAt: null,
       ok: null,
       steps: [{ name: "backup", status: "running", at: kNow - 50_000 }],
     };
-    api.fetchOpenclawChannel.mockResolvedValue(
-      makeChannelInfo({ lastUpdateRun: persistedRun }),
-    );
+    api.fetchOpenclawRuns.mockResolvedValue({ runs: [persistedRun] });
     let state = await hydrate();
     // Effect #1 in declaration order is the rehydration effect.
-    harness.effects[1]();
+    harness.findEffect("resumeLedgerOperation")();
     state = renderHook({});
     expect(state.operation).toEqual(
       expect.objectContaining({ resumed: true, phase: "running", operationId: "op-7" }),
@@ -1783,10 +1798,10 @@ describe("frontend/upgrade-tab hook — consent + reuse retry + fence fields", (
 
     // The next poll sees the run settled: failed at the backup, with the offer
     // on the persisted result envelope.
-    api.fetchOpenclawChannel.mockResolvedValue(
-      makeChannelInfo({
-        lastUpdateRun: {
+    api.fetchOpenclawRun.mockResolvedValue({
+        run: {
           ...persistedRun,
+          state: "failed",
           finishedAt: kNow,
           ok: false,
           steps: [{ name: "backup", status: "failed", at: kNow, error: "state lease lost" }],
@@ -1798,9 +1813,8 @@ describe("frontend/upgrade-tab hook — consent + reuse retry + fence fields", (
             reusableBackup: kReusableBackup,
           },
         },
-      }),
-    );
-    api.fetchOpenclawChannel.mockClear();
+    });
+    api.fetchOpenclawRun.mockClear();
     expect(api.fetchOpenclawBackups).not.toHaveBeenCalled();
     vi.useFakeTimers();
     // Pin the faked clock to the fixture epoch: fake timers start at the REAL
@@ -1813,16 +1827,18 @@ describe("frontend/upgrade-tab hook — consent + reuse retry + fence fields", (
       // Effect #6 is the resume poll: the four page effects (mount load,
       // rehydration, tick, shell publish) and the inventory hook's two
       // effects precede it. It arms a 3 s timer, then reads the channel.
-      stopPoll = harness.effects[6]();
-      expect(api.fetchOpenclawChannel).not.toHaveBeenCalled();
-      await vi.advanceTimersByTimeAsync(3000);
-      expect(api.fetchOpenclawChannel).toHaveBeenCalledTimes(1);
+      stopPoll = harness.findEffect("read.refresh().catch")();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(api.fetchOpenclawRun).toHaveBeenCalledWith("op-7", expect.any(Object));
     } finally {
       if (typeof stopPoll === "function") stopPoll();
       vi.useRealTimers();
     }
     await flushAsync();
 
+    state = renderHook({});
+    harness.findEffect("terminalKey")();
+    await flushAsync();
     state = renderHook({});
     expect(state.operation).toEqual(
       expect.objectContaining({ resumed: true, phase: "failed", finishedAt: kNow }),
