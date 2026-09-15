@@ -12,12 +12,18 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 // lives in per-call-index slots so component/hook functions can be invoked
 // directly without a DOM renderer. Effects are collected, not run.
 vi.mock("preact/hooks", () => {
-  const harness = { slots: [], cursor: 0, effects: [] };
+  const harness = { slots: [], cursor: 0, effects: [], cleanups: new Map() };
+  harness.runEffect = (index) => {
+    harness.cleanups.get(index)?.();
+    harness.cleanups.set(index, harness.effects[index]?.());
+  };
   harness.beginRender = () => {
     harness.cursor = 0;
     harness.effects = [];
   };
   harness.reset = () => {
+    for (const cleanup of harness.cleanups.values()) cleanup?.();
+    harness.cleanups.clear();
     harness.slots = [];
     harness.cursor = 0;
     harness.effects = [];
@@ -1007,7 +1013,11 @@ describe("frontend/upgrade-tab hook — consent + reuse retry + fence fields", (
 
   const renderHook = (props = {}) => {
     harness.beginRender();
-    return useUpgradeTab(props);
+    const state = useUpgradeTab(props);
+    // Keep the inventory's committed-entry subscription mounted. The four
+    // page effects precede it; its fetch/timers remain explicitly controlled.
+    harness.runEffect(4);
+    return state;
   };
 
   const hydrate = async (props = {}) => {
@@ -1393,8 +1403,9 @@ describe("frontend/upgrade-tab hook — consent + reuse retry + fence fields", (
   it("R5: useBackupsInventory reads cache-friendly on mount and forces the server on refreshBackups", async () => {
     harness.beginRender();
     let state = useBackupsInventory();
-    // The hook declares two effects (key reset, mount read); the harness only
-    // collects them, so run the mount read by hand.
+    // The hook declares subscription + mount read. Mount both, then drive
+    // mutation refreshes against that same subscribed consumer.
+    harness.runEffect(0);
     harness.effects[1]();
     await flushAsync();
     expect(api.fetchOpenclawBackups).toHaveBeenCalledTimes(1);

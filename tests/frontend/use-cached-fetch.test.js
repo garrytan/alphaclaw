@@ -1,165 +1,127 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
-
-// Hook harness (team-tab-component.test.js pattern) — see that file for the
-// slot mechanics. Effects are collected, not run.
-vi.mock("preact/hooks", () => {
-  const harness = { slots: [], cursor: 0, effects: [] };
-  harness.beginRender = () => {
-    harness.cursor = 0;
-    harness.effects = [];
-  };
-  harness.reset = () => {
-    harness.slots = [];
-    harness.cursor = 0;
-    harness.effects = [];
-  };
-  const useState = (initialValue) => {
-    const index = harness.cursor++;
-    if (!(index in harness.slots)) {
-      harness.slots[index] =
-        typeof initialValue === "function" ? initialValue() : initialValue;
-    }
-    const setState = (next) => {
-      harness.slots[index] =
-        typeof next === "function" ? next(harness.slots[index]) : next;
-    };
-    return [harness.slots[index], setState];
-  };
-  const useRef = (initialValue = null) => {
-    const index = harness.cursor++;
-    if (!(index in harness.slots)) {
-      harness.slots[index] = { current: initialValue };
-    }
-    return harness.slots[index];
-  };
-  const useMemo = (factory) => factory();
-  const useCallback = (fn) => fn;
-  const useEffect = (effect) => {
-    harness.effects.push(effect);
-  };
-  return { useState, useRef, useMemo, useCallback, useEffect, __harness: harness };
-});
-
-import * as preactHooks from "preact/hooks";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useCachedFetch } from "../../lib/public/js/hooks/use-cached-fetch.js";
-import { invalidateCache } from "../../lib/public/js/lib/api-cache.js";
+import { clearApiCache, getCached, setCached } from "../../lib/public/js/lib/api-cache.js";
+import { createReadHost, deferred } from "./mounted-read-helpers.js";
 
-const harness = preactHooks.__harness;
-
-const deferred = () => {
-  let resolve;
-  let reject;
-  const promise = new Promise((res, rej) => {
-    resolve = res;
-    reject = rej;
-  });
-  return { promise, resolve, reject };
-};
-
-const renderHook = (key, fetcher, options) => {
-  let currentFetcher = fetcher;
-  let currentKey = key;
-  let latest;
-  const render = (nextFetcher = currentFetcher, nextKey = currentKey) => {
-    currentFetcher = nextFetcher;
-    currentKey = nextKey;
-    harness.beginRender();
-    latest = useCachedFetch(currentKey, currentFetcher, options);
-    return latest;
-  };
-  render();
-  return {
-    result: () => latest,
-    render,
-    setKey: (nextKey) => render(currentFetcher, nextKey),
-    runKeyEffect: () => harness.effects[0](),
-  };
-};
-
+let host;
 beforeEach(() => {
-  harness.reset();
+  clearApiCache();
+  host = createReadHost();
+  vi.stubGlobal("document", host.document);
 });
+afterEach(async () => {
+  await host.unmount();
+  clearApiCache();
+  vi.unstubAllGlobals();
+  vi.useRealTimers();
+});
+const probe = (id, key, fetcher, options = {}) => ({ id, useRead: useCachedFetch, args: [key, fetcher, options] });
 
-describe("frontend/use-cached-fetch", () => {
-  it("refresh always calls the LATEST fetcher (ref), not the render-time closure", async () => {
-    const first = vi.fn(async () => "first");
-    const second = vi.fn(async () => "second");
-    const hook = renderHook("ucf-fetcher-ref-key", first);
-    hook.render(second); // fetcher identity churns between renders
-    const value = await hook.result().refresh({ force: true });
-    expect(value).toBe("second");
-    expect(second).toHaveBeenCalledTimes(1);
-    expect(first).not.toHaveBeenCalled();
-    invalidateCache("ucf-fetcher-ref-key");
+describe("frontend/use-cached-fetch mounted consumers", () => {
+  it("fans one SWR read out to every mounted consumer", async () => {
+    const work = deferred();
+    const fetcher = vi.fn(() => work.promise);
+    setCached("shared", "old");
+    await host.render([probe("a", "shared", fetcher, { maxAgeMs: 0 }), probe("b", "shared", fetcher, { maxAgeMs: 0 })]);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(host.result("a").data).toBe("old");
+    expect(host.result("b").data).toBe("old");
+    await host.settle(() => work.resolve("new"));
+    expect(host.result("a").data).toBe("new");
+    expect(host.result("b").data).toBe("new");
+    expect(host.result("a").loading).toBe(false);
   });
 
-  it("latest-request-wins for local state: an older refresh resolving late cannot overwrite newer data", async () => {
-    const slow = deferred();
-    let call = 0;
-    const fetcher = vi.fn(() => {
-      call += 1;
-      return call === 1 ? slow.promise : Promise.resolve("newer");
-    });
-    const hook = renderHook("ucf-latest-wins-key", fetcher);
-
-    const oldRefresh = hook.result().refresh({ force: true }); // dispatch 1 (slow)
-    const newRefresh = hook.result().refresh({ force: true }); // dispatch 2 (fast)
-    await newRefresh;
-    hook.render();
-    expect(hook.result().data).toBe("newer");
-
-    slow.resolve("older");
-    await oldRefresh;
-    hook.render();
-    // The stale refresh may not overwrite the newer hook-local data.
-    expect(hook.result().data).toBe("newer");
-    invalidateCache("ucf-latest-wins-key");
+  it("mutation commits reach mounted consumers and a pre-mutation promise cannot repaint", async () => {
+    const work = deferred();
+    const fetcher = vi.fn(() => work.promise);
+    await host.render([probe("a", "shared", fetcher), probe("b", "shared", fetcher)]);
+    await host.settle(() => setCached("shared", "saved"));
+    expect(host.result("a").data).toBe("saved");
+    expect(host.result("b").data).toBe("saved");
+    await host.settle(() => work.resolve("old"));
+    expect(host.result("a").data).toBe("saved");
+    expect(host.result("b").data).toBe("saved");
+    expect(getCached("shared")).toBe("saved");
   });
 
-  it("a key change resets error and loading — the previous entity's failure is never attributed to the new one", async () => {
-    const fetcher = vi.fn(async () => "ok");
-    const hook = renderHook("ucf-key-a", fetcher);
-    // Key A failed: error set, loading settled.
-    await hook.result().refresh({ force: true }).catch(() => {});
-    hook.render();
-    const failing = vi.fn(async () => {
-      throw new Error("a failed");
-    });
-    hook.render(failing);
-    await hook.result().refresh({ force: true }).catch(() => {});
-    hook.render();
-    expect(hook.result().error).toBeInstanceOf(Error);
-
-    // Switch to key B (uncached): the [key] effect must clear the stale
-    // error and report loading — never a confident-empty/error frame.
-    hook.setKey("ucf-key-b");
-    hook.runKeyEffect();
-    hook.render(fetcher, "ucf-key-b");
-    expect(hook.result().error).toBe(null);
-    expect(hook.result().loading).toBe(true);
-    invalidateCache("ucf-key-a");
-    invalidateCache("ucf-key-b");
+  it("force supersedes a slow read while all consumers adopt the replacement", async () => {
+    const first = deferred();
+    const second = deferred();
+    const fetcher = vi.fn().mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
+    await host.render([probe("a", "shared", fetcher), probe("b", "shared", fetcher)]);
+    const forced = host.result("a").refresh({ force: true });
+    await host.settle(() => second.resolve("new"));
+    await forced;
+    await host.settle(() => first.resolve("old"));
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(host.result("a").data).toBe("new");
+    expect(host.result("b").data).toBe("new");
   });
 
-  it("a stale refresh error cannot overwrite newer success state", async () => {
-    const slow = deferred();
-    let call = 0;
-    const fetcher = vi.fn(() => {
-      call += 1;
-      return call === 1 ? slow.promise : Promise.resolve("ok");
-    });
-    const hook = renderHook("ucf-stale-error-key", fetcher);
+  it("unmounting one consumer leaves another consumer's shared request alive", async () => {
+    const work = deferred();
+    let signal;
+    const fetcher = vi.fn((options) => { signal = options.signal; return work.promise; });
+    const opts = { acceptsSignal: true };
+    await host.render([probe("a", "shared", fetcher, opts), probe("b", "shared", fetcher, opts)]);
+    await host.render([probe("b", "shared", fetcher, opts)]);
+    expect(signal.aborted).toBe(false);
+    await host.settle(() => work.resolve("done"));
+    expect(host.result("b").data).toBe("done");
+  });
 
-    const failing = hook.result().refresh({ force: true }).catch(() => {});
-    await hook.result().refresh({ force: true });
-    hook.render();
-    expect(hook.result().error).toBe(null);
+  it("switching key while a read is pending never renders the previous entity or its error", async () => {
+    const first = deferred();
+    const second = deferred();
+    await host.render([probe("a", "one", () => first.promise)]);
+    await host.render([probe("a", "two", () => second.promise)]);
+    expect(host.result("a").data).toBe(null);
+    expect(host.result("a").loading).toBe(true);
+    await host.settle(() => first.reject(new Error("wrong entity")));
+    expect(host.result("a").error).toBe(null);
+    await host.settle(() => second.resolve("two"));
+    expect(host.result("a").data).toBe("two");
+  });
 
-    slow.reject(new Error("late failure"));
-    await failing;
-    hook.render();
-    expect(hook.result().error).toBe(null); // stale error suppressed
-    expect(hook.result().data).toBe("ok");
-    invalidateCache("ucf-stale-error-key");
+  it("refresh invokes the latest fetcher without passing legacy positional arguments", async () => {
+    const old = vi.fn(async () => "old");
+    const current = vi.fn(async () => "current");
+    await host.render([probe("a", "one", old)]);
+    await host.render([probe("a", "one", current)]);
+    await host.settle(() => host.result("a").refresh({ force: true }));
+    expect(current).toHaveBeenCalledWith();
+    expect(host.result("a").data).toBe("current");
+  });
+
+  it("a committed null result settles loading", async () => {
+    await host.render([probe("a", "empty", async () => null)]);
+    await host.settle();
+    expect(host.result("a")).toMatchObject({ data: null, loading: false, error: null });
+  });
+
+  it("a key switch before the request microtask cannot fetch the new entity into the old key", async () => {
+    const first = vi.fn(async () => "entity one");
+    const second = vi.fn(async () => "entity two");
+    await host.render([probe("a", "one", first, { initialFetch: false })]);
+    const started = host.result("a").refresh({ force: true });
+    await host.render([probe("a", "two", second, { initialFetch: false })]);
+    await started;
+    expect(first).toHaveBeenCalledTimes(1);
+    expect(second).not.toHaveBeenCalled();
+    expect(getCached("one")).toBe("entity one");
+    expect(host.result("a").data).toBe(null);
+  });
+
+  it("preserves last good data with an error on 5xx and clears the error on retry", async () => {
+    const failure = deferred();
+    const fetcher = vi.fn().mockReturnValueOnce(failure.promise).mockResolvedValue("recovered");
+    setCached("one", "good");
+    await host.render([probe("a", "one", fetcher, { maxAgeMs: 0 })]);
+    await host.settle(() => failure.reject(Object.assign(new Error("down"), { status: 503 })));
+    expect(host.result("a")).toMatchObject({ data: "good", stale: true, loading: false });
+    expect(host.result("a").error.message).toBe("down");
+    await host.settle(() => host.result("a").refresh({ force: true }));
+    expect(host.result("a")).toMatchObject({ data: "recovered", error: null, stale: false });
   });
 });
