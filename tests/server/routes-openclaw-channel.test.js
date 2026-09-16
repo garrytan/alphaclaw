@@ -765,6 +765,7 @@ describe("server/routes/openclaw-channel", () => {
         file: "/data/backups/openclaw/openclaw-backup-5-bbbb.alphaclaw.tar.gz",
         at: 5,
         producer: "alphaclaw-offline-copy",
+        partial: false,
       });
       expect(fenced.body.hint).toMatch(/no longer on disk/);
       expect(fenced.body.hint).toContain("openclaw-backup-5-bbbb.alphaclaw.tar.gz");
@@ -836,6 +837,30 @@ describe("server/routes/openclaw-channel", () => {
       expect(fenced.body.backupPartial).toBe(true);
       expect(fenced.body.hint).toMatch(/it is partial — credentials: symlink not followed/);
       expect(fenced.body.hint).not.toMatch(/workspace files were excluded/);
+    });
+
+    it("names migration-only coverage without rejecting a late snapshot as rewritten content", async () => {
+      const deps = createDeps();
+      const file = writeArchive(deps.OPENCLAW_DIR, "openclaw-backup-minimal.alphaclaw.tar.gz");
+      const coverage = { migration: "complete", core: "partial", workspace: "omitted" };
+      const partialReasons = ["migration-only backup: workspace and other files omitted"];
+      deps.openclawChannelService.runLedger = { listRuns: () => [kMigratedRun({
+        file, verified: true, noBackup: false, partial: true, profile: "migration-minimal",
+        coverage, partialReasons, at: Date.now() - 40 * 60_000,
+        snapshotStartedAt: Date.now() - 60_000, snapshotCompletedAt: Date.now() - 30_000,
+        ...recordedFacts(file),
+      })] };
+      deps.openclawChannelService.listBackupInventory = () => inventoryFor(deps.OPENCLAW_DIR, [
+        inventoryEntry(file, { profile: "migration-minimal", coverage,
+          partial: true, eligible: false, ineligibleReason: "partial" }),
+      ]);
+      const fenced = await request(createApp(deps)).post("/api/openclaw/rollback").send({});
+      expect(fenced.status).toBe(409);
+      expect(fenced.body).toMatchObject({ backupFileExists: true, backupFileCaveat: null,
+        backupPartial: true, backupProfile: "migration-minimal", backupCoverage: coverage,
+        backupPartialReasons: partialReasons });
+      expect(fenced.body.hint).toContain("migration-only backup");
+      expect(fenced.body.hint).toContain("preserve omitted workspace and other files");
     });
 
     it("carries the partial and age-qualified reused caveats", async () => {

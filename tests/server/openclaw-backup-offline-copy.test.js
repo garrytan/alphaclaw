@@ -98,7 +98,7 @@ const addWorkspaceJunk = (stateDir, { junkBytes = 4096 } = {}) => {
   fs.writeFileSync(path.join(ws, "logs", "app", "current.log"), "keep\n");
   fs.mkdirSync(path.join(ws, ".cache"), { recursive: true });
   fs.writeFileSync(path.join(ws, ".cache", "blob"), "c".repeat(40));
-  fs.writeFileSync(path.join(ws, "notes.sqlite"), "not a db, a workspace file\n");
+  writeDb(path.join(ws, "notes.sqlite"));
   return {
     junkBytes: junkBytes + 100 + 300 + 50 + 70,
     junkFiles: 5,
@@ -259,6 +259,7 @@ describe("server/openclaw-backup-offline-copy", () => {
   describe("defaultListFdHolders", () => {
     it("scans /proc/*/fd for the db paths and sidecars, skipping self and unreadable pids", () => {
       const fsModule = {
+        opendirSync(dir) { const iterator = this.readdirSync(dir)[Symbol.iterator](); return { readSync: () => iterator.next().value || null, closeSync() {} }; },
         readdirSync: (p) => {
           if (p === "/proc") return ["1", "42", "77", "self"];
           if (p === "/proc/1/fd") throw new Error("EACCES");
@@ -435,7 +436,7 @@ describe("server/openclaw-backup-offline-copy", () => {
         configPath: path.join(args.stateDir, "openclaw.json"),
         oauthDir: path.join(args.stateDir, "credentials"),
         workspaceDirs: [path.join(args.stateDir, "workspace")],
-        agentRoots: [{ agentId: "main", sourcePath: path.join(args.stateDir, "agents", "main") }],
+        agentRoots: [{ agentId: "main", sourcePath: path.join(args.stateDir, "agents", "main", "agent") }],
       });
       expect(manifest.assets).toEqual(
         expect.arrayContaining([
@@ -848,6 +849,7 @@ describe("server/openclaw-backup-offline-copy", () => {
         isFile: () => type === "file",
       });
       const fsModule = {
+        opendirSync(dir) { const iterator = this.readdirSync(dir)[Symbol.iterator](); return { readSync: () => iterator.next().value || null, closeSync() {} }; },
         readdirSync: (dir) => {
           if (dir === stateDir) return [dirent("workspace", "dir")];
           if (dir === path.join(stateDir, "workspace")) {
@@ -884,7 +886,7 @@ describe("server/openclaw-backup-offline-copy", () => {
       });
       await expect(createOfflineCopy(args)).rejects.toMatchObject({
         stage: "budget",
-        message: expect.stringMatching(/during enumerate/),
+        message: expect.stringMatching(/during inventory|during enumerate/),
       });
     });
 
@@ -946,7 +948,7 @@ describe("server/openclaw-backup-offline-copy", () => {
         // Held for the exclusivity check, gone by the first checkpoint.
         isQuiet: () => {
           calls += 1;
-          return calls <= 1;
+          return calls <= 3;
         },
       });
       await expect(createOfflineCopy(args)).rejects.toMatchObject({
@@ -1018,12 +1020,13 @@ describe("server/openclaw-backup-offline-copy", () => {
       });
     });
 
-    it("names the sqlite_backup stage when a source database cannot be opened", async () => {
+    it("refuses a corrupt source during inventory before starting a copy", async () => {
       const stateDir = makeStateDir();
       fs.writeFileSync(path.join(stateDir, "state", "openclaw.sqlite"), "not a database");
       const args = makeCopyArgs({ stateDir });
       await expect(createOfflineCopy(args)).rejects.toMatchObject({
-        stage: "sqlite_backup",
+        stage: "inventory",
+        sourceCorrupt: true,
         message: expect.stringMatching(/openclaw\.sqlite/),
       });
     });
@@ -1096,7 +1099,7 @@ describe("server/openclaw-backup-offline-copy", () => {
       });
       const result = await createOfflineCopy(args);
       expect(result.method).toBe("tar | gzip -1");
-      expect(spawned).toEqual(["tar", "sh", "gzip", "tar"]);
+      expect(spawned).toEqual(["tar", "sh", "gzip", "tar", "tar"]);
       expect(listArchive(args.outputFile)).toContain("openclaw-backup-1000-abcdef12/manifest.json");
     });
 
@@ -1581,8 +1584,7 @@ describe("server/openclaw-backup-offline-copy", () => {
         const many = resolveExcludes(Array.from({ length: kOfflineCopyExcludeMaxPatterns + 2 }, (_, i) => `junk-${i}`));
         expect(many.applied).toHaveLength(kOfflineCopyExcludeMaxPatterns);
         expect(many.refused).toEqual([
-          { pattern: `junk-${kOfflineCopyExcludeMaxPatterns}`, reason: expect.stringMatching(/more than 64 patterns/) },
-          { pattern: `junk-${kOfflineCopyExcludeMaxPatterns + 1}`, reason: expect.stringMatching(/more than 64 patterns/) },
+          { pattern: "[additional exclusions]", omittedCount: 2, reason: expect.stringMatching(/2 additional exclusions.*64 patterns/) },
         ]);
         const notArray = resolveExcludes("node_modules");
         expect(notArray.applied).toEqual([]);
@@ -1606,9 +1608,8 @@ describe("server/openclaw-backup-offline-copy", () => {
           "workspace/.cache/blob",
           "workspace/logs/app/current.log",
           "workspace/notes.md",
-          "workspace/notes.sqlite",
         ]);
-        expect(ws.bytes).toBe(40 + 5 + 64 + "not a db, a workspace file\n".length);
+        expect(ws.bytes).toBe(40 + 5 + 64);
         expect(ws.excludedBytes).toBe(junk.junkBytes);
         expect(ws.excludedFiles).toBe(junk.junkFiles);
         expect(tree.files.map((f) => f.archivePath)).toEqual(
@@ -1652,7 +1653,7 @@ describe("server/openclaw-backup-offline-copy", () => {
         // node_modules is back in (the operator did not list it); .cache is out;
         // the refused *.sqlite left the workspace's sqlite-named file in place.
         expect(relFiles(custom)).toEqual(
-          expect.arrayContaining(["workspace/node_modules/index.js", "workspace/notes.sqlite", "workspace/scratch.tmp"]),
+          expect.arrayContaining(["workspace/node_modules/index.js", "workspace/scratch.tmp"]),
         );
         expect(relFiles(custom)).not.toContain("workspace/.cache/blob");
         expect(custom.excludes).toEqual([{ pattern: ".cache", files: 1, bytes: 40 }]);
@@ -1678,6 +1679,7 @@ describe("server/openclaw-backup-offline-copy", () => {
         const wsDir = path.join(stateDir, "workspace");
         const nm = path.join(wsDir, "node_modules");
         const fsModule = {
+          opendirSync(dir) { const iterator = this.readdirSync(dir)[Symbol.iterator](); return { readSync: () => iterator.next().value || null, closeSync() {} }; },
           readdirSync: (dir) => {
             if (dir === stateDir) return [dirent("workspace", "dir")];
             if (dir === wsDir) return [dirent("node_modules", "dir"), dirent("keep.txt", "file")];
@@ -1706,19 +1708,19 @@ describe("server/openclaw-backup-offline-copy", () => {
         });
         const ws = tree.workspaces.get(wsDir);
         expect(ws.files.map((f) => f.archivePath)).toEqual(["workspace/keep.txt"]);
-        // 200_499 measurable files × 3 bytes (one stat raced, one subdir
-        // unreadable, one symlink not followed) — reported, never fatal.
-        expect(ws.excludedFiles).toBe(200_499);
-        expect(ws.excludedBytes).toBe(200_499 * 3);
-        expect(tree.excludes[0]).toEqual({ pattern: "node_modules", files: 200_499, bytes: 200_499 * 3 });
-        // Well over the 200k copy-set cap in visited entries, yet no throw —
-        // and the cadence covered the measured tree (≥ 400 yields).
-        expect(checkpoints).toBeGreaterThanOrEqual(400);
+        // The global diagnostic budget samples 10,000 entries; one stat
+        // races. Remaining debris is deliberately not measured.
+        expect(ws.excludedFiles).toBe(9_999);
+        expect(ws.excludedBytes).toBe(9_999 * 3);
+        expect(tree.excludes[0]).toEqual({ pattern: "node_modules", files: 9_999, bytes: 9_999 * 3, partial: true });
+        // Sampling cannot consume the payload entry cap or become unbounded.
+        expect(checkpoints).toBe(20);
+        expect(tree.diagnostics.measurementComplete).toBe(false);
       });
     });
 
     describe("createOfflineCopy with excludes (real tar + gzip)", () => {
-      it("junk excluded, databases present, partial:false, manifest v2 with excludes[] + coverage, inline limit judged on post-exclude bytes", async () => {
+      it("junk excluded, databases present, partial:false, manifest v3 with excludes[] + coverage, inline limit judged on post-exclude bytes", async () => {
         const stateDir = makeStateDir();
         const junk = addWorkspaceJunk(stateDir, { junkBytes: 8192 });
         const logs = [];
@@ -1731,7 +1733,7 @@ describe("server/openclaw-backup-offline-copy", () => {
         expect(result.ok).toBe(true);
         expect(result.partial).toBe(false);
         expect(result.partialReasons).toEqual([]);
-        expect(result.coverage).toEqual({ core: "complete", workspace: "policy_excluded" });
+        expect(result.coverage).toEqual({ migration: "complete", core: "complete", workspace: "policy_excluded" });
         expect(result.excludedBytes).toBe(junk.junkBytes);
         expect(result.refusedExcludes).toEqual([]);
         expect(result.excludes).toEqual([
@@ -1741,8 +1743,8 @@ describe("server/openclaw-backup-offline-copy", () => {
           { pattern: "logs/**/*.gz", files: 1, bytes: 70 },
         ]);
         const { manifest } = result;
-        expect(manifest.alphaclawFormatVersion).toBe(2);
-        expect(kOfflineCopyFormatVersion).toBe(2);
+        expect(manifest.alphaclawFormatVersion).toBe(3);
+        expect(kOfflineCopyFormatVersion).toBe(3);
         expect(manifest.options).toEqual({ includeWorkspace: true, onlyConfig: false });
         expect(manifest.excludes).toEqual(result.excludes);
         expect(manifest.coverage).toEqual(result.coverage);
@@ -1775,19 +1777,19 @@ describe("server/openclaw-backup-offline-copy", () => {
           stateDir,
         });
         expect(verdict.ok).toBe(true);
-        expect(verdict.formatVersion).toBe(2);
-        expect(verdict.manifest.coverage).toEqual({ core: "complete", workspace: "policy_excluded" });
+        expect(verdict.formatVersion).toBe(3);
+        expect(verdict.manifest.coverage).toEqual({ migration: "complete", core: "complete", workspace: "policy_excluded" });
       });
 
       it("coverage is honest in every shape: clean → complete/complete; over the limit → omitted (still partial, reuse unchanged); core symlink → core partial", async () => {
         const clean = await createOfflineCopy(makeCopyArgs());
-        expect(clean.coverage).toEqual({ core: "complete", workspace: "complete" });
+        expect(clean.coverage).toEqual({ migration: "complete", core: "complete", workspace: "complete" });
         expect(clean.manifest.excludes).toEqual([...kOfflineCopyPolicyExcludes].map((pattern) => ({ pattern, files: 0, bytes: 0 })));
 
         const omitted = await createOfflineCopy(
           makeCopyArgs({ stateDir: makeStateDir({ workspaceBytes: 4096 }), workspaceInlineBytes: 1024 }),
         );
-        expect(omitted.coverage).toEqual({ core: "complete", workspace: "omitted" });
+        expect(omitted.coverage).toEqual({ migration: "complete", core: "complete", workspace: "omitted" });
         expect(omitted.partial).toBe(true);
         expect(omitted.manifest.options.includeWorkspace).toBe(false);
 
@@ -1797,7 +1799,10 @@ describe("server/openclaw-backup-offline-copy", () => {
         fs.rmSync(path.join(stateDir, "credentials"), { recursive: true });
         fs.symlinkSync(elsewhere, path.join(stateDir, "credentials"));
         const coreMissing = await createOfflineCopy(makeCopyArgs({ stateDir }));
-        expect(coreMissing.coverage).toEqual({ core: "partial", workspace: "policy_excluded" });
+        expect(coreMissing.coverage).toEqual({ migration: "unknown", core: "partial", workspace: "complete" });
+        expect(coreMissing.refusedExcludes).toEqual(expect.arrayContaining([
+          expect.objectContaining({ pattern: "node_modules", reason: "protected source inventory is unavailable" }),
+        ]));
         expect(coreMissing.partial).toBe(true);
         expect(coreMissing.partialReasons).toEqual(["credentials: core asset is a symlink (not followed)"]);
       });
@@ -1809,7 +1814,7 @@ describe("server/openclaw-backup-offline-copy", () => {
         fs.writeFileSync(path.join(stateDir, "workspace", "node_modules", "a.js"), "aaaa");
         const result = await createOfflineCopy(makeCopyArgs({ stateDir }));
         expect(result.partial).toBe(false);
-        expect(result.coverage).toEqual({ core: "complete", workspace: "policy_excluded" });
+        expect(result.coverage).toEqual({ migration: "complete", core: "complete", workspace: "policy_excluded" });
         expect(result.manifest.options.includeWorkspace).toBe(true);
         expect(result.manifest.skipped.some((entry) => entry.kind === "workspace")).toBe(false);
         expect(listArchive(result.file).some((entry) => entry.includes("workspace/"))).toBe(false);
@@ -1882,17 +1887,17 @@ describe("server/openclaw-backup-offline-copy", () => {
         expect(verdict.manifest.coverage).toBeUndefined();
       });
 
-      it("a v2 fixture verifies and reports formatVersion 2; the readable set is exactly [1, 2]", async () => {
+      it("a v2 fixture verifies and reports formatVersion 2; the readable set includes formats 1, 2, and 3", async () => {
         const v2 = { ...v1Manifest, alphaclawFormatVersion: 2, excludes: [{ pattern: "node_modules", files: 3, bytes: 999 }], coverage: { core: "complete", workspace: "policy_excluded" } };
         const verdict = await verifyArchiveManifest({ file: "/x.alphaclaw.tar.gz", runCommand: scripted(v2), requiredArchivePaths: required });
         expect(verdict).toEqual(expect.objectContaining({ ok: true, formatVersion: 2 }));
-        expect([...kOfflineCopyReadableFormatVersions]).toEqual([1, 2]);
+        expect([...kOfflineCopyReadableFormatVersions]).toEqual([1, 2, 3]);
         expect(kOfflineCopyReadableFormatVersions).toContain(kOfflineCopyFormatVersion);
       });
 
       it("an offline copy in a format this build does not know (newer AlphaClaw, or no version) fails the usable check at stage format — honest, not a throw", async () => {
-        const newer = await verifyArchiveManifest({ file: "/x.alphaclaw.tar.gz", runCommand: scripted({ ...v1Manifest, alphaclawFormatVersion: 3 }), requiredArchivePaths: required });
-        expect(newer).toEqual(expect.objectContaining({ ok: false, stage: "format", reason: "alphaclawFormatVersion 3 is not one this AlphaClaw can read (1, 2)" }));
+        const newer = await verifyArchiveManifest({ file: "/x.alphaclaw.tar.gz", runCommand: scripted({ ...v1Manifest, alphaclawFormatVersion: 4 }), requiredArchivePaths: required });
+        expect(newer).toEqual(expect.objectContaining({ ok: false, stage: "format", reason: "alphaclawFormatVersion 4 is not one this AlphaClaw can read (1, 2, 3)" }));
         const { alphaclawFormatVersion: _dropped, ...unversioned } = v1Manifest;
         const missing = await verifyArchiveManifest({ file: "/x.alphaclaw.tar.gz", runCommand: scripted(unversioned), requiredArchivePaths: required });
         expect(missing).toEqual(expect.objectContaining({ ok: false, stage: "format", reason: expect.stringMatching(/^alphaclawFormatVersion undefined is not one/) }));
@@ -1940,7 +1945,7 @@ describe("server/openclaw-backup-offline-copy", () => {
       growStateDb(stateDir);
       addWorkspaceJunk(stateDir);
       const events = [];
-      const args = makeCopyArgs({ stateDir, sqliteModule: steppingSqlite(), onProgress: (event) => events.push({ ...event }) });
+      const args = makeCopyArgs({ stateDir, sqliteModule: steppingSqlite(), onProgress: (event) => { if (event.stage !== "enumerate") events.push({ ...event }); } });
 
       const result = await createOfflineCopy(args);
 
