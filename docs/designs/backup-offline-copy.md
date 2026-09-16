@@ -179,12 +179,19 @@ separately name scratch subtrees inside the state directory.
   replaces the default workspace list; an absent key restores defaults and `[]`
   disables them. `rootExcludes` defaults to `[]` and matches anchored paths from
   the state root, such as `state/security-planning/stronghold-*`. Use the Backups
-  card's separate workspace/state-root editors or `GET`/`PUT
+  card's separate workspace/state-root editors or `GET`/`PUT`
   `/api/openclaw/backup-policy`; updates are admin-only and agent `dangerous`
   tier. A run snapshots one validated policy for diagnosis and copying. Invalid
   API saves fail; invalid manually configured rules are refused, logged and not
   applied. Absolute paths, traversal and exclusions covering protected assets
   or their parent directories are rejected.
+  GET returns the effective `policy`, `defaults`, and `refusedExcludes` after
+  protected-source discovery. PUT requires both `excludes` and `rootExcludes`
+  arrays, each limited to 64 patterns of at most 256 characters. Invalid saves
+  return `400 invalid_backup_policy`. Both requests return
+  `503 backup_policy_unavailable` when discovery cannot establish protection;
+  unreadable AlphaClaw settings return `503 config_unreadable`, preserving the
+  original file.
 - **Core assets are never excludable, whatever the config says.** A pattern
   that could match a core asset — the config file, `credentials/**`,
   `identity/**`, database locations, `agents/<id>/agent/**` or any `*.sqlite` (so
@@ -329,23 +336,25 @@ An archive from either producer counts as verified only when:
    (`null` for upstream);
 4. that manifest **covers** this box's state databases
    (`state/openclaw.sqlite`, or the per-agent DB set when there is no global
-   DB) — by `archivePath` / `sourcePath` suffix (per-file assets, the offline
-   copy) OR by an asset whose `sourcePath` is the state dir or an ancestor of
-   the database's absolute path, resolved against `manifest.paths.stateDir`
+   DB) — for legacy formats 1 and 2, by `archivePath` / `sourcePath` suffix
+   (per-file assets), OR by an asset whose `sourcePath` is the state dir or an
+   ancestor of the database's absolute path, resolved against `manifest.paths.stateDir`
    (upstream's single `kind: "state"` asset; see §7). Coverage, not listing:
    a per-file-only rule rejected every real upstream archive and failed the
    hard gate closed on a false verdict in the first container-tier run.
-5. A migration-minimal archive covers its complete required asset inventory,
-   including protected non-database files, with the matching profile/coverage
-   markers. Missing or unexpected required assets cannot be waived by `partial`.
+5. Format 3 requires exact normalized source and archive paths, matching asset
+   kinds, and actual regular-file tar members; missing, duplicate, or undeclared
+   required members fail verification. A migration-minimal archive covers its
+   complete required inventory, including protected non-database files, with
+   matching profile/coverage markers. `partial` cannot waive a missing asset.
 
-The run record carries `backup.usableCheck: "manifest_ok"`; a failing check is
-treated as a `verify` failure (terminal, quarantined as `.unverified`). Both
-producers are judged by this one check — the offline copy's own `gzip -t` +
-manifest step after publish is the same function. A policy exclude never
-affects the verdict: the databases are never inside a workspace's exclude
-scope, and `coverage.workspace: "policy_excluded"` is information for the
-inventory and the restore, not a usability defect.
+The run record carries `backup.usableCheck: "manifest_ok"`. A failed upstream
+archive check quarantines the artifact as `.unverified`; an eligible failure
+can still proceed to a fresh fallback. Both producers use this check, and the
+offline copy runs its `gzip -t` and manifest verification before atomic
+publication, discarding failed staging. Protected database locations override
+both workspace and state-root exclusions. `coverage.workspace: "policy_excluded"`
+is information for the inventory and restore, not a usability defect.
 
 ## 5. Restore runbook (manual, selective placement)
 
