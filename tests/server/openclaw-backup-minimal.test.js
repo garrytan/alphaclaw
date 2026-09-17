@@ -249,20 +249,50 @@ describe("bounded walk and protection", () => {
     expect(resolveBackupPolicy(null).refused).toHaveLength(1);
   });
 
-  it("closes every directory on budget expiry and retains unfinished offender statistics", async () => {
+  it.each(["agents", "state"])("closes every directory on budget expiry and retains unfinished offender statistics (%s first)", async (firstDirectory) => {
     const root = fixture();
-    for (let i = 0; i < 25; i++) write(root, `state/security-planning/import/${i}`, "scratch");
+    const scratchRelative = "state/security-planning/import";
+    const scratchDirectory = path.join(root, scratchRelative);
+    for (let i = 0; i < 25; i++) write(root, `${scratchRelative}/${i}`, "scratch");
     let handles = 0;
+    let scratchReads = 0;
+    let openAtDeadline = [];
+    const openDirectories = new Set();
     const fsModule = { ...fs, opendirSync(directory) {
       const dir = fs.opendirSync(directory); handles++;
-      return { readSync: () => dir.readSync(), closeSync() { handles--; dir.closeSync(); } };
+      openDirectories.add(directory);
+      // Filesystem order is unspecified: agents/main/agent can reach four
+      // open handles before scratch. Exercise both orders on this small root.
+      const entries = directory === root ? fs.readdirSync(directory, { withFileTypes: true })
+        .sort((a, b) => Number(b.name === firstDirectory) - Number(a.name === firstDirectory) || a.name.localeCompare(b.name)) : null;
+      return {
+        readSync() {
+          const entry = entries ? entries.shift() ?? null : dir.readSync();
+          if (directory === scratchDirectory && entry) scratchReads++;
+          return entry;
+        },
+        closeSync() { handles--; openDirectories.delete(directory); dir.closeSync(); },
+      };
     } };
+    const deadline = new Error("deadline");
     const error = await walkStateTreeAsync({ stateDir: root, fsModule, checkpointEvery: 1,
-      checkpoint() { if (handles >= 4) throw new Error("deadline"); } }).catch((error) => error);
-    expect(error.message).toBe("deadline");
+      checkpoint() {
+        if (scratchReads === 3) {
+          openAtDeadline = [...openDirectories];
+          throw deadline;
+        }
+      } }).catch((error) => error);
+    expect(error).toBe(deadline);
+    expect(scratchReads).toBe(3);
+    expect(openAtDeadline).toEqual([root, path.join(root, "state"), path.join(root, "state/security-planning"), scratchDirectory]);
     expect(handles).toBe(0);
+    expect(openDirectories.size).toBe(0);
     expect(error.diagnostics.complete).toBe(false);
-    expect(error.diagnostics.topEntries.some((entry) => entry.path.includes("security-planning"))).toBe(true);
+    expect(error.diagnostics.topEntries.length).toBeLessThanOrEqual(5);
+    const offender = error.diagnostics.topEntries.find((entry) => entry.path === scratchRelative);
+    expect(offender).toMatchObject({ complete: false, partial: true });
+    expect(offender.entries).toBeGreaterThan(0);
+    expect(offender.bytes).toBeGreaterThan(0);
   });
 
   it("shares the excluded measurement cap across roots and never treats its bytes as complete", async () => {
