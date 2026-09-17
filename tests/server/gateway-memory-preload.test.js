@@ -7,6 +7,7 @@ const execFileAsync = promisify(execFile);
 const { buildTelemetryBootstrapOption, stripTelemetryNodeOptions, withGatewayTelemetryEnv } =
   require("../../lib/server/gateway-memory/telemetry-bootstrap");
 const { startGatewayTelemetryPreload } = require("../../lib/server/gateway-memory/telemetry-preload");
+const { telemetryDirectory } = require("../../lib/server/gateway-memory/telemetry-protocol");
 const { withOpenclawStartupEnv, ensureOpenclawStartupEnv } = require("../../lib/server/openclaw-runtime-env");
 const { filterGatewayChildEnv } = require("../../lib/server/gateway-env-policy");
 
@@ -91,7 +92,7 @@ describe("gateway memory preload boundary", () => {
     const env = withGatewayTelemetryEnv({ ...process.env, NODE_OPTIONS: "--no-warnings", OPENCLAW_STATE_DIR: temporary });
     const { stdout } = await execFileAsync(process.execPath, [main, "gateway", verb], { env, timeout: 5000 });
     expect(JSON.parse(stdout)).toEqual({ options: "--no-warnings" });
-    expect(fs.existsSync(path.join(temporary, ".alphaclaw", "gateway-memory"))).toBe(false);
+    expect(fs.existsSync(telemetryDirectory(temporary))).toBe(false);
   });
 
   it.each(["run", "--force"])("survives launcher respawn for %s, selects worker heap and isolates descendants", async (verb) => {
@@ -129,6 +130,6 @@ if(!process.env.FIXTURE_WORKER){
     expect(result.options).toBe("--no-warnings");
     expect(result.childOptions).toBe("--no-warnings");
     expect(result.workerOptions).toBe("--no-warnings");
-    expect(fs.readdirSync(path.join(temporary, ".alphaclaw", "gateway-memory"))).toEqual([]);
+    expect(fs.readdirSync(telemetryDirectory(temporary))).toEqual([]);
   });
 });

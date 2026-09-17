@@ -4,7 +4,10 @@
 import fs from "node:fs";
 import http from "node:http";
 import path from "node:path";
+import { createRequire } from "node:module";
 import { build } from "esbuild";
+const require = createRequire(import.meta.url);
+const { resolveBackupPolicy } = require("../../lib/server/openclaw-backup-policy");
 
 const entry = `
 import { h, render } from "preact";
@@ -53,6 +56,9 @@ export async function createReliabilityFixture() {
     catalogError: false, channelError: false, gmailError: false, remoteStopFails: true,
     managedUpdateAttempt: null, currentVersion: "1.0.0",
     gmail: { accountId: "primary", enabled: true, running: true, remoteOperation: null },
+    backupPolicy: { excludes: [...resolveBackupPolicy().excludes], rootExcludes: [] },
+    backupProfile: "full", backupStreamed: false, backupArchives: [],
+    applyFailureCode: "build_failed", applyFailureMessage: "Fixture build failed",
   };
   const requests = [];
   const streams = new Set();
@@ -101,21 +107,55 @@ export async function createReliabilityFixture() {
       const run = makeRun("repair-current", { channel: "dev", repair: true }); state.runs.unshift(run);
       return json({ ok: true, operationId: run.operationId, events: `/api/operations/${run.operationId}/events` }, 202);
     }
+    if (route === "/api/openclaw/backup-policy") {
+      if (req.method === "PUT") {
+        const resolved = resolveBackupPolicy(body);
+        if (resolved.refused.length) return json({ ok: false, code: "invalid_backup_policy",
+          message: "Some exclusions could omit protected data. Nothing was changed.", refusedExcludes: resolved.refused }, 400);
+        state.backupPolicy = { excludes: [...resolved.excludes], rootExcludes: [...resolved.rootExcludes] };
+      }
+      return json({ ok: true, policy: state.backupPolicy,
+        defaults: { excludes: [...resolveBackupPolicy().excludes], rootExcludes: [] }, refusedExcludes: [] });
+    }
+    if (route === "/api/openclaw/backup") {
+      const operationId = `manual-${state.runs.length + 1}`;
+      const run = makeRun(operationId, { kind: "backup" });
+      const minimal = state.backupProfile === "migration-minimal";
+      const archive = { file: `/backups/${operationId}.alphaclaw.tar.gz`, at: run.startedAt,
+        profile: state.backupProfile, verified: true, partial: minimal, producer: "alphaclaw-offline-copy",
+        coverage: minimal ? { migration: "complete", core: "partial", workspace: "omitted" } : { core: "complete", workspace: "complete" },
+        partialReasons: minimal ? ["workspace and other state omitted"] : [],
+        snapshotStartedAt: run.startedAt, snapshotCompletedAt: run.startedAt + 20 };
+      run.result = { ok: true, archive };
+      state.runs.unshift(run);
+      state.backupArchives.unshift({ ...archive, exists: true, eligible: !minimal, ineligibleReason: minimal ? "partial" : null, sizeBytes: 4096 });
+      if (state.backupStreamed) return json({ ok: true, operationId, events: `/api/operations/${operationId}/events` }, 202);
+      Object.assign(run, { state: "completed", ok: true, finishedAt: Date.now() });
+      return json({ ...run.result, operationId });
+    }
     if (/^\/api\/operations\/.+\/events$/.test(route)) {
       res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache" });
       const run = state.runs.find((entry) => entry.operationId === route.split("/")[3]);
       if (!run) return res.end();
+      if (run.target.kind === "backup") {
+        Object.assign(run, { state: "completed", ok: true, finishedAt: Date.now() });
+        run.steps = [{ name: "backup", status: run.result.archive.partial ? "warning" : "completed", at: Date.now(),
+          detail: run.result.archive.partial ? "Verified migration-only backup; workspace and other state omitted" : "Backup verified" }];
+        res.write(`event: step\ndata: ${JSON.stringify(run.steps[0])}\n\n`);
+        res.write(`event: done\ndata: ${JSON.stringify({ ...run.result, operationId: run.operationId })}\n\n`);
+        return res.end();
+      }
       if (run.target.repair) {
         run.steps = [{ name: "repair", status: "running", at: Date.now() }];
         res.write(`event: step\ndata: ${JSON.stringify(run.steps[0])}\n\n`);
         // Real EventSource transport loss, deliberately no terminal frame.
         return setTimeout(() => res.end(), 75);
       }
-      Object.assign(run, { state: "failed", ok: false, finishedAt: Date.now(), result: { message: "Fixture build failed", code: "build_failed" } });
-      res.write('event: error\ndata: {"error":"Fixture build failed","code":"build_failed"}\n\n');
+      Object.assign(run, { state: "failed", ok: false, finishedAt: Date.now(), result: { message: state.applyFailureMessage, code: state.applyFailureCode } });
+      res.write(`event: error\ndata: ${JSON.stringify({ error: state.applyFailureMessage, code: state.applyFailureCode })}\n\n`);
       return res.end();
     }
-    if (route === "/api/openclaw/backups") return json({ ok: true, backups: [] });
+    if (route === "/api/openclaw/backups") return json({ ok: true, entries: state.backupArchives, readable: true });
     if (route === "/api/openclaw/overseer") return json({ ok: true, enabled: false, availability: { available: false, message: "Fixture mode" } });
     if (route === "/api/openclaw/medic") return json({ ok: true, enabled: false });
     if (route === "/api/alphaclaw/version") return json({ currentVersion: state.currentVersion, currentOpenclawVersion: "2026.9.3", latestVersion: "1.1.0", latestOpenclawVersion: "2026.9.4", hasUpdate: state.currentVersion !== "1.1.0", managedUpdateAttempt: state.managedUpdateAttempt,

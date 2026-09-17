@@ -242,6 +242,52 @@ describe("server/openclaw-run-ledger", () => {
   });
 
   describe("pruning", () => {
+    it("keeps migration recovery provenance beyond both run rings until its archive pin expires", () => {
+      const { ledger, nowRef } = makeLedger({ keepRuns: 2, keepBackupRuns: 1 });
+      ledger.createRun({ operationId: kOpA, target: { channel: "stable", version: "2.0.0" } });
+      ledger.updateRun(kOpA, (record) => ({ ...record,
+        dbPreflight: { migrationRequired: true },
+        backup: { verified: true, file: "/backups/openclaw-backup-migration.alphaclaw.tar.gz",
+          profile: "migration-minimal", partial: true,
+          coverage: { migration: "complete", core: "partial", workspace: "omitted" } },
+      }));
+      ledger.completeRun(kOpA, { state: "activated", ok: true });
+      nowRef.now += 1_000;
+      ledger.createRun({ operationId: kOpB, target: { channel: "stable", version: "2.0.1" } });
+      ledger.updateRun(kOpB, (record) => ({ ...record, dbPreflight: { migrationRequired: true },
+        backup: { verified: true, file: "/backups/openclaw-backup-failed-retry.alphaclaw.tar.gz" },
+      }));
+      ledger.completeRun(kOpB, { state: "failed", ok: false });
+      nowRef.now += 1_000;
+      ledger.createRun({ operationId: kOpC, target: { channel: "stable", version: "2.0.1" } });
+      ledger.updateRun(kOpC, (record) => ({ ...record, dbPreflight: { migrationRequired: true } }));
+      ledger.completeRun(kOpC, { state: "failed", ok: false });
+      for (let index = 0; index < 12; index += 1) {
+        nowRef.now += 1_000;
+        const suffix = index.toString(16).padStart(12, "0");
+        const update = `aaaaaaaa-aaaa-4bbb-8ccc-${suffix}`;
+        const manual = `bbbbbbbb-aaaa-4bbb-8ccc-${suffix}`;
+        ledger.createRun({ operationId: update, target: { channel: "stable", version: "2.0.1" } });
+        ledger.completeRun(update, { state: "failed", ok: false });
+        nowRef.now += 1;
+        ledger.createRun({ operationId: manual, target: { kind: "backup" } });
+        ledger.completeRun(manual, { state: "completed", ok: true });
+        ledger.pruneRuns();
+      }
+      expect(ledger.listRuns()).toHaveLength(6);
+      expect(ledger.readRun(kOpB).state).toBe("failed");
+      expect(ledger.readRun(kOpC).state).toBe("failed");
+      expect(ledger.readRun(kOpA).backup).toMatchObject({
+        profile: "migration-minimal", verified: true, coverage: { migration: "complete" },
+      });
+      nowRef.now += require("../../lib/server/constants").kOpenclawBackupPinMaxAgeMs + 1;
+      ledger.pruneRuns();
+      expect(ledger.readRun(kOpA)).toBeNull();
+      expect(ledger.readRun(kOpB)).toBeNull();
+      expect(ledger.readRun(kOpC)).toBeNull();
+      expect(ledger.listRuns()).toHaveLength(3);
+    });
+
     it("keeps the newest N runs and enforces the total log byte cap", async () => {
       const { ledger, nowRef } = makeLedger({
         keepRuns: 2,
