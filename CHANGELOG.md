@@ -5,6 +5,15 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.9.86] - 2026-09-16
+
+### Fixed
+
+- Updates and **Back up now** attempt a fresh migration backup when full backups fail on oversized scratch directories. The fallback captures databases, configuration, credentials, identity, and agent authentication with online SQLite snapshots and explicit workspace omissions.
+- Backup exclusions can be saved separately for workspaces and state subdirectories. Protected sources cannot be excluded; bounded directory diagnostics identify large or crowded trees without traversing scratch indefinitely.
+- Archives carry verified file inventories, coverage, and capture timestamps. Migration recovery records and archives survive retention pruning, and ownership, corruption, disk exhaustion, and publication checks prevent unsafe success or consent.
+- Gateway memory telemetry now lives under the upstream-excluded temporary directory, preventing telemetry churn from breaking OpenClaw backups. Updated selective-restore guidance and added real WAL, DELETE, 200,050-entry, 2 GiB, and pinned migration coverage.
+
 ## [0.9.85] - 2026-09-15
 
 ### Fixed

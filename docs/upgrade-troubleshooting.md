@@ -214,7 +214,7 @@ crossing) now decides only whether a backup failure is fatal — a hard gate
 answers `409 backup_failed`, a soft gate records `noBackup` with a
 `backup: warning` and continues to the migration checkpoint ("Backup:
 continue without a backup (consent)" below). Sessions reconnect when the
-gateway resumes. The pause is one transaction: `runBackupDiagnosis` (before
+gateway resumes. Each pause is one transaction: `runBackupDiagnosis` (before
 the pause) → lifecycle lock (leased for the quiesce **and** offline-copy
 budgets) → watchdog suppressed → gateway stopped and *confirmed* stopped →
 state-database quiet period → AlphaClaw offline copy, then any in-quiesce
@@ -227,6 +227,45 @@ at all: only the backup rung degrades to the live ladder (`backup:
 warning`); the apply's own serialization is unchanged. If the pause exceeds
 the apply's own progress timeline, see the run ledger for which step is
 stuck.
+
+If broader attempts fail, the migration-minimal fallback takes one additional
+pause under a fresh lease. Its eight-minute work budget includes discovery,
+database and file snapshots, integrity, compression and verification. The prior
+25-minute broader deadline cannot consume it. The separate minimal scheduling
+reserve is 25m37s with default settings, including lease margins and up to five
+minutes of advisory publication/hash work after relaunch. This is not a promised
+outage duration or hard wall-clock cap; cleanup can finish later. See the
+[deadline accounting](designs/backup-offline-copy.md#migration-minimal-fallback-99).
+
+## Backup blocked by an oversized scratch tree
+
+The backup log, event and run record identify the five largest visited
+directories by entry count and bytes. A cap, timeout or unreadable directory
+retains these diagnostics with a partial-measurement label; an incomplete scan
+does not pretend that the observed size is the full tree.
+
+Open **Upgrade → Backups → Exclusions** to edit workspace-relative rules and
+state-root rules separately. Save applies to the next operation; Restore defaults
+restores workspace debris exclusions and clears state-root rules. For example,
+`state/security-planning/stronghold-*` excludes named imported scratch trees.
+Database files, config, credentials, identity and agent authentication cannot be
+excluded, including databases discovered beneath otherwise excluded directories.
+The configuration is `updates.openclaw.backup.{excludes,rootExcludes}` in
+`alphaclaw.json`; the API is `GET`/`PUT /api/openclaw/backup-policy`. Missing
+workspace rules use defaults, while `excludes: []` explicitly disables them.
+
+When AlphaClaw observes more than 512 MiB of raw workspace content, upstream
+attempts omit workspace from the outset with `--no-include-workspace`; unknown
+size preserves the existing attempt behavior. AlphaClaw's own policy exclusions
+do not reduce this upstream-size threshold because upstream has no equivalent
+exclude list. The recorded omission reason distinguishes size from broken
+workspace discovery.
+
+After unsuccessful broader attempts, **migration-only backup** means the final
+minimal profile captured the protected migration assets and deliberately omitted
+workspace and other content. An update with this verified backup can proceed;
+Back up now reports the same limited coverage. Read the coverage before relying
+on it for recovery, and use [selective restoration](#restoring-a-backup).
 
 ## Backup blocked by state-database contention
 
@@ -300,9 +339,14 @@ elapsedMs, bytes, kind, ok }` entry and a `backup_rung` event:
    "offline_copy_refused" }` and a `backup_rung: handed_over` event is
    booked), by a copy failure the prediction ruled the paused upstream out
    of, by exhausted in-quiesce retries, by timeouts and by live-file races
-   (`vanished_file`). A soft gate that also fails here ends as `noBackup` +
-   one warning; a hard gate as `409 backup_failed` naming both failures.
-4. **Consented reuse** of a recent verified archive — see
+   (`vanished_file`). Eligible failures proceed to the final minimal producer;
+   unsafe sources, disk exhaustion and unresolved ownership/work remain blockers.
+4. **Migration-minimal copy** — once, after the broader attempts fail, under
+   a fresh lifecycle lease, confirmed stop and quiet barrier. It snapshots the
+   required migration assets without walking oversized scratch trees. Success
+   is explicitly migration-only; if it also fails, a soft gate records
+   `noBackup` and reaches the migration checkpoint, while a hard gate refuses.
+5. **Consented reuse** of a recent verified complete archive — see
    [Reusing a recent backup](#reusing-a-recent-backup-consent).
 
 A hard-gate refusal (`409 backup_failed`) always names the newest surviving
@@ -461,9 +505,12 @@ Verified live (2026-09-02) for pin 2026.7.1-2 / stable 2026.8.2 / beta
 2026.9.1-beta.1 archives restored onto each of those three lines: every
 cell preflighted, passed `integrity_check`, and booted to `/healthz`.
 
-**Which archive:** the newest verified one in `<root>/backups/openclaw/`
-(last 3 kept). `GET /api/openclaw/backups` (or the Upgrade tab's Backups
-card) lists them with producer, age, size and provenance:
+**Which archive:** when undoing a migration, use the verified pre-migration
+archive named by that run's rollback fence; a newer archive may already contain
+the migrated database. `GET /api/openclaw/backups` (or the Upgrade tab's Backups
+card) lists `<root>/backups/openclaw/` archives with profile, coverage, producer,
+age, size and provenance. The last three archives are retained, plus protected
+migration archives and their originating records for seven days:
 
 | Name | Producer | Manifest assets |
 |---|---|---|
@@ -471,8 +518,12 @@ card) lists them with producer, age, size and provenance:
 | `openclaw-backup-<ts>-<opId8>.alphaclaw.tar.gz` | `alphaclaw-offline-copy` | per-file assets: `kind: sqlite | config | file | workspace`, `archivePath` relative to `<archiveRoot>/` |
 
 A `.unverified` suffix is a quarantined failed artifact — never restore it.
-A `partial: true` run record (or `options.includeWorkspace: false` in the
-manifest) means workspace files are **not** in the archive.
+Read `partialReasons` and `coverage` for omissions: `partial: true` can also mean
+missing core assets. A `profile: "migration-minimal"` archive is explicitly a
+**migration-only backup**: its discovered migration databases, configuration,
+credentials, identity and agent authentication are covered; workspace and other
+content are omitted. It can protect its originating update, but cannot be reused
+as a later complete backup. Preserve omitted files during restore.
 
 **How an archive earned `verified`** (`backup.usableCheck: "manifest_ok"` in
 the run record): `gzip -t` passed, and the manifest **covers** this box's
@@ -489,36 +540,48 @@ asset, not assets of their own.
 
 **Steps:**
 
-1. **Stop the gateway** and confirm it is gone. From the Watchdog terminal:
-   `openclaw gateway stop` — on 2026.8.2 and later add `--force` (the CLI
-   refuses non-interactive stops without it; the pin has no such flag).
-   Confirm nothing listens on the gateway port and no `openclaw` process is
-   live (`ss -ltnp | grep 18789`, `pgrep -af openclaw`). AlphaClaw's own
-   restart is recorded *failed* (`incumbent_gateway_still_running`) when a
-   stop did not take — do not proceed against a live gateway.
+1. **Stop all writers from the host/provider maintenance console.** Stop
+   AlphaClaw through its process manager or deployment controls, including the
+   watchdog and background state-database users, then stop the gateway and any
+   other OpenClaw CLI or external database writer. For upstream's stop command,
+   use `openclaw gateway stop --force` on 2026.8.2 and later. Confirm no gateway
+   listener, OpenClaw process or database file holder remains (`ss -ltnp`,
+   `pgrep -af openclaw`, and `lsof` for the target databases where available).
+   Stopping only the gateway from the Watchdog terminal is insufficient: the
+   running watchdog can relaunch it during restoration. Keep all these services
+   stopped through placement, integrity checking and preflight.
 2. **Extract into an isolated directory**, never over the live state dir:
    ```sh
-   mkdir -p /tmp/restore && tar -xzf <archive> -C /tmp/restore
-   cat /tmp/restore/*/manifest.json
+   gzip -t <archive>
+   umask 077
+   restore_dir=$(mktemp -d)
+   tar -xzf <archive> -C "$restore_dir"
+   cat "$restore_dir"/*/manifest.json
    ```
 3. **Read `manifest.json`.** `paths.stateDir` is where the archive came
    from; for each `assets[]` entry, `archivePath` is the file or directory
    inside the extracted tree and `sourcePath` is where it belongs. Check
-   `producer` (absent = upstream), `createdAt`, `options.includeWorkspace`
-   and `skipped[]` so you know what is NOT in the archive.
-4. **Move the current state dir aside** and place assets per the manifest
-   (`<relative>` = `sourcePath` relative to `paths.stateDir`):
+   `producer` (absent = upstream), `profile`, `createdAt`, optional
+   `snapshotStartedAt`/`snapshotCompletedAt`, `coverage`, `partialReasons`,
+   `options.includeWorkspace` and `skipped[]`. Check every archive path and
+   destination against the intended state root before placing files.
+4. **Save existing destination files and replace only captured assets.** Keep
+   the state directory itself and everything the archive omitted. For each
+   manifest asset, preserve the existing destination in a private recovery
+   directory, then copy its captured replacement. For each database, preserve
+   its old `-wal`, `-shm` and `-journal` sidecars too before removing them from the
+   destination. For example, after saving these exact destinations and sidecars:
    ```sh
-   mv /data/.openclaw /data/.openclaw.pre-restore-$(date +%s)
-   mkdir -p /data/.openclaw
-   # upstream: the single state asset is the whole tree
-   cp -a "/tmp/restore/<archiveRoot>/payload/posix/<original stateDir>/." /data/.openclaw/
-   # offline copy: every asset, e.g.
-   cp -a /tmp/restore/<archiveRoot>/openclaw.json            /data/.openclaw/openclaw.json
-   cp -a /tmp/restore/<archiveRoot>/state/openclaw.sqlite    /data/.openclaw/state/openclaw.sqlite
-   cp -a /tmp/restore/<archiveRoot>/agents                   /data/.openclaw/
+   cp -a "$restore_dir/<archiveRoot>/openclaw.json" /data/.openclaw/openclaw.json
+   rm -f /data/.openclaw/state/openclaw.sqlite-wal \
+         /data/.openclaw/state/openclaw.sqlite-shm \
+         /data/.openclaw/state/openclaw.sqlite-journal
+   cp -a "$restore_dir/<archiveRoot>/state/openclaw.sqlite" /data/.openclaw/state/openclaw.sqlite
    ```
-   Do **not** copy any `-wal`/`-shm`/`-journal` sidecar from the aside tree
+   Repeat for **every** captured database and file, including custom locations.
+   Merge upstream directory assets into their destination without removing
+   omitted content. Never replace the whole state or agent directory from a
+   migration-only archive. Do **not** copy any saved `-wal`/`-shm`/`-journal` sidecar
    next to a restored database: both producers write self-contained
    databases (upstream consolidates its snapshot; the offline copy uses the
    online backup API and lists the sidecars under `skipped[]`).
@@ -532,16 +595,19 @@ asset, not assets of their own.
    line's database restored onto an older one — the #54 direction);
    `"indeterminate"` = the file has sidecars; consolidate first
    (`VACUUM INTO` a copy, or remove the empty sidecars you created by
-   opening it). The pin 2026.7.1-2 has no `database` command — on the pin
-   go straight to step 6 and watch for exit 78.
+   opening it). This command checks state databases. Check each agent
+   database's ownership metadata and `PRAGMA user_version` against the target
+   package's declared `openclaw.schemaVersions.agent` too; an agent schema
+   newer than the target is incompatible. Legacy 2026.7 builds have no
+   `database` command; they are not the current pin.
 6. **Integrity check** each restored database (read-only):
    `node -e 'const {DatabaseSync}=require("node:sqlite");const d=new DatabaseSync(process.argv[1],{readOnly:true});console.log(d.prepare("PRAGMA integrity_check").get())' /data/.openclaw/state/openclaw.sqlite`
    — expect `ok`. Remove the empty `-wal`/`-shm` files this open leaves.
-7. **Start the gateway** (Watchdog tab → Restart, or restart AlphaClaw) and
+7. **Start AlphaClaw** through the process manager or deployment controls and
    watch `/healthz` (restart ready budget: 5 min by default — `GATEWAY_RESTART_READY_TIMEOUT`, 30–480 s) plus the Watchdog tab; the boot
    reconciler runs the official migration when the preflight said one is
    required.
-8. Keep the aside tree until the box has been healthy through one full
+8. Keep saved destination files and sidecars until the box has been healthy through one full
    stabilization window (24 h).
 
 **SQLite-only alternative (2026.8.1+):** when only a database — not config

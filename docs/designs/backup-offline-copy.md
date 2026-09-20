@@ -1,11 +1,12 @@
 # AlphaClaw Offline Copy — backup archive format and restore runbook
 
-> **Status (2026-09-07):** shipped with the issue #54 hardening as the
+> **Status (2026-09-16):** shipped with the issue #54 hardening as the
 > fallback behind the upstream CLI; since issue #79 (Stage 4c, decision D1a)
 > the offline copy is the **first rung of every quiesced pre-update backup**
 > — soft and hard gates alike — and the upstream `openclaw backup create`
 > runs only after a failed copy (paused, when `chooseBackupRung` predicts it
-> fits; otherwise live). The format is **AlphaClaw-owned**: it mirrors the
+> fits; otherwise live). Issue #99 adds a final migration-minimal copy after
+> broader attempts fail, under a new pause and independent budget. The format is **AlphaClaw-owned**: it mirrors the
 > core fields of upstream's schemaVersion-1 manifest so the same restore
 > steps apply, and it does not claim compatibility with upstream restore
 > tooling beyond those shared fields. Producer code:
@@ -80,6 +81,48 @@ prepared, verified target. The retry needs both `confirmNoBackup: true` and
 a session-bound, single-use `confirmNoBackupToken`; ownership, compatibility
 and gateway holds remain blockers. See the [consent runbook](../upgrade-troubleshooting.md#backup-continue-without-a-backup-consent).
 
+### Migration-minimal fallback (#99)
+
+Both an apply and **Back up now** attempt `profile: "migration-minimal"` once
+after the broader fresh attempts fail, before reuse or no-backup consent. This
+producer directly discovers the migration database set, configuration,
+credentials, identity and agent authentication files; it avoids enumerating
+scratch, dependency, import-archive and workspace trees. Configured and registered
+databases remain required even when located inside an otherwise skipped tree.
+Unreadable protected sources, orphan sidecars, unsafe locations and disappearing
+required files fail explicitly rather than yielding a falsely complete snapshot.
+
+The final rung reacquires the lifecycle lease, confirms gateway stop, establishes
+a new quiet barrier and proves exclusivity again. Database corruption, actual
+ENOSPC and unresolved SQLite work remain blockers. An invalid upstream archive
+may be quarantined and replaced by a fresh producer; it is distinct from damaged
+source data. Every pause unwinds before publication, pruning or archive reuse.
+
+A verified minimal archive has `partial: true` and
+`coverage: { migration: "complete", core: "partial", workspace: "omitted" }`.
+It protects the current migration, but is not a complete restore or a candidate
+for later complete-backup reuse. The Backups card, history, progress and rollback
+fence identify it as a **migration-only backup**. Its originating migration run
+and archive share the existing seven-day retention pin, even after newer update
+or manual-backup records fill their normal rings.
+A failed later migration attempt cannot unpin that activated recovery: retention
+keeps the newest verified migration archive and the newest activated migration's
+archive when distinct, plus their records and the newest fence record. These
+bounded exceptions expire against each run's own seven-day age.
+
+The broader ladder retains its 25-minute work deadline, stamped after the
+separately budgeted two-minute diagnosis. The minimal producer gets a fresh
+eight-minute work deadline including discovery, snapshots, integrity, tar and
+archive verification. Its conservative scheduling reserve is
+`lock wait + minimal work + quiesce lease reserve + publication/hash`:
+`90s + 8m + 11m7s + 5m = 25m37s` with the default five-minute gateway readiness
+setting. The lease reserve already includes the old verification allowance as
+spare margin; minimal performs no second verification. These are scheduling
+allowances, not a guaranteed wall-clock ceiling: mandatory cancellation and
+filesystem cleanup can overrun. No global 45-minute apply timer is implied.
+`at` keeps its historical operation-start meaning; optional
+`snapshotStartedAt`/`snapshotCompletedAt` describe the actual source-copy interval.
+
 ## 2. Archive layout
 
 ```
@@ -120,8 +163,9 @@ run (`backup.mode`, `backup.modeError`), warned and notified.
 The upstream backup includes workspace dirs wholesale, and until #79 so did
 the offline copy: a workspace's `node_modules` (8 GB in the 2026-09 incident)
 was copied inside the quiesce and blew the budget. Inside a workspace the
-copy now applies a policy exclude list; outside a workspace nothing changes
-(a `.tmp` under `agents/<id>/sessions/` is state and is copied).
+copy now applies a policy exclude list. Workspace rules stay workspace-relative
+(a `.tmp` under `agents/<id>/sessions/` is state and is copied); root rules
+separately name scratch subtrees inside the state directory.
 
 - **Default set** (`kOfflineCopyPolicyExcludes`, unambiguous debris only):
   `node_modules`, `*.heapsnapshot`, `*.tmp`, `logs/**/*.gz`. `tmp`, `.cache`
@@ -131,32 +175,41 @@ copy now applies a policy exclude list; outside a workspace nothing changes
   workspace-relative path anchored at the workspace root (`**` spans
   segments, `*`/`?` never cross `/`); a trailing `/` matches directories
   only. A matched directory is excluded whole.
-- **Override (module-level only, not yet an operator control):**
-  `createOfflineCopy({ excludes })` **replaces** the default list (`[]`
-  turns the policy off); at most 64 patterns, each ≤ 256 characters, no
-  absolute paths, no `.`/`..` segments, no backslashes. **No `alphaclaw.json`
-  key is read today** — the driver (`runOfflineCopy` in
-  `openclaw-channel-sync.js`) passes no `excludes`, so production always
-  runs the default set, and `runBackupDiagnosis`'s sizing walk uses the same
-  defaults. The planned `updates.openclaw.backup.excludes` wiring (config
-  normalizer, `dangerous` agent tier, one list threaded into BOTH
-  `createOfflineCopy` and the diagnosis walk so the two walks cannot
-  disagree) is deferred; until it lands the module-level option is exercised
-  by `tests/server/openclaw-backup-offline-copy.test.js` only.
+- **Operator controls:** `updates.openclaw.backup.excludes` in `alphaclaw.json`
+  replaces the default workspace list; an absent key restores defaults and `[]`
+  disables them. `rootExcludes` defaults to `[]` and matches anchored paths from
+  the state root, such as `state/security-planning/stronghold-*`. Use the Backups
+  card's separate workspace/state-root editors or `GET`/`PUT`
+  `/api/openclaw/backup-policy`; updates are admin-only and agent `dangerous`
+  tier. A run snapshots one validated policy for diagnosis and copying. Invalid
+  API saves fail; invalid manually configured rules are refused, logged and not
+  applied. Absolute paths, traversal and exclusions covering protected assets
+  or their parent directories are rejected.
+  GET returns the effective `policy`, `defaults`, and `refusedExcludes` after
+  protected-source discovery. PUT requires both `excludes` and `rootExcludes`
+  arrays, each limited to 64 patterns of at most 256 characters. Invalid saves
+  return `400 invalid_backup_policy`. Both requests return
+  `503 backup_policy_unavailable` when discovery cannot establish protection;
+  unreadable AlphaClaw settings return `503 config_unreadable`, preserving the
+  original file.
 - **Core assets are never excludable, whatever the config says.** A pattern
   that could match a core asset — the config file, `credentials/**`,
-  `identity/**`, `state/**`, `agents/<id>/agent/**` or any `*.sqlite` (so
+  `identity/**`, database locations, `agents/<id>/agent/**` or any `*.sqlite` (so
   `*`, `**`, `*.json`, `*.sqlite`, `credentials`, `state/`, `agents/*`, …) —
   is **refused**: reported on the result (`refusedExcludes[{ pattern,
   reason }]`) and in the backup log, never applied, never fatal. Excludes
-  apply only inside workspaces in the first place; the refusal is defence in
-  depth so no config can widen them onto the data a restore cannot do
-  without.
+  protect discovered databases before both policy rules and built-in directory
+  skips. Named scratch subtrees under `state/` may be excluded; `state/` itself
+  and paths containing protected databases may not.
 - **Measured, not silent.** Every excluded entry is listed in `skipped[]`
   with its size; excluded directories are walked in a tolerant measuring
   pass (an unreadable corner of a tree we are not copying never fails the
-  backup) that yields to the budget like the rest of the walk but does not
-  count against the 200k copy-set entry cap.
+  backup). Excluded-tree measurement has a shared 10,000-entry/250ms limit;
+  incomplete measurements are labeled partial and never prevent copying. The
+  main walk streams entries under its 200,000-entry cap and retains the top five
+  directories by entries and bytes even when a cap, timeout or read failure
+  interrupts it. Logs, events and records retain relative paths and measurement
+  completeness; partial sizes are never presented as full-size predictions.
 - **Never `partial`.** `partial` / `partialReasons` keep their meaning — a
   missing **core** asset (§2 symlink rule) or the over-limit workspace
   omission — so reuse eligibility (§6) is unchanged. The excludes are
@@ -165,16 +218,16 @@ copy now applies a policy exclude list; outside a workspace nothing changes
 ## 3. `manifest.json`
 
 Upstream core fields (schemaVersion 1) plus AlphaClaw's additions
-(`alphaclawFormatVersion: 2` since issue #79; the reader accepts 1 and 2, §4):
+(`alphaclawFormatVersion: 3` since issue #99; the reader accepts 1, 2 and 3, §4):
 
 ```json
 {
   "schemaVersion": 1,
-  "createdAt": "2026-09-02T18:00:00.000Z",
-  "archiveRoot": "openclaw-backup-1756836000000-2f8c1f2e",
-  "runtimeVersion": "2026.9.1-beta.1",
+  "createdAt": "2026-09-16T18:00:01.000Z",
+  "archiveRoot": "openclaw-backup-1789581600000-2f8c1f2e",
+  "runtimeVersion": "2026.9.3",
   "platform": "linux",
-  "nodeVersion": "v22.23.2",
+  "nodeVersion": "v24.21.0",
   "options": { "includeWorkspace": true, "onlyConfig": false },
   "paths": {
     "stateDir": "/data/.openclaw",
@@ -187,20 +240,28 @@ Upstream core fields (schemaVersion 1) plus AlphaClaw's additions
     { "kind": "sqlite", "sourcePath": "/data/.openclaw/state/openclaw.sqlite", "archivePath": "state/openclaw.sqlite" },
     { "kind": "config", "sourcePath": "/data/.openclaw/openclaw.json", "archivePath": "openclaw.json" }
   ],
+  "requiredAssets": [
+    { "kind": "sqlite", "sourcePath": "/data/.openclaw/state/openclaw.sqlite", "archivePath": "state/openclaw.sqlite" },
+    { "kind": "config", "sourcePath": "/data/.openclaw/openclaw.json", "archivePath": "openclaw.json" }
+  ],
   "skipped": [
     { "kind": "sqlite-sidecar", "sourcePath": "/data/.openclaw/state/openclaw.sqlite-wal", "reason": "covered by the online sqlite copy", "coveredBy": "/data/.openclaw/state/openclaw.sqlite" },
     { "kind": "policy_exclude", "sourcePath": "/data/.openclaw/workspace/node_modules", "reason": "excluded by backup policy (node_modules)", "pattern": "node_modules", "files": 48213, "bytes": 812345678 }
   ],
   "partialReasons": [],
   "producer": "alphaclaw-offline-copy",
-  "alphaclawFormatVersion": 2,
+  "alphaclawFormatVersion": 3,
+  "profile": "full",
+  "snapshotStartedAt": 1789581600000,
+  "snapshotCompletedAt": 1789581600900,
+  "partial": false,
   "excludes": [
     { "pattern": "node_modules", "files": 48213, "bytes": 812345678 },
     { "pattern": "*.heapsnapshot", "files": 0, "bytes": 0 },
     { "pattern": "*.tmp", "files": 0, "bytes": 0 },
     { "pattern": "logs/**/*.gz", "files": 0, "bytes": 0 }
   ],
-  "coverage": { "core": "complete", "workspace": "policy_excluded" },
+  "coverage": { "migration": "complete", "core": "complete", "workspace": "policy_excluded" },
   "exclusivityEvidence": {
     "stopConfirmed": true,
     "stopEvidence": { "...": "gateway stop record when the gateway module provides one" },
@@ -231,11 +292,12 @@ summary a restore or the inventory reads first:
 
 | Field | Values | Meaning |
 |---|---|---|
-| `coverage.core` | `"complete"` / `"partial"` | Every core asset (config, `credentials/**`, `identity/**`, `state/**`, `agents/<id>/agent/**`, every `*.sqlite`) is in the archive / at least one was skipped (symlink rule) — the latter is exactly what `partial: true` + `partialReasons` name. |
-| `coverage.workspace` | `"complete"` / `"policy_excluded"` / `"omitted"` | The workspaces are in whole / in minus the `excludes[]` / left out over the inline limit (`options.includeWorkspace: false`, also `partial: true`). A box with no workspace reads `"complete"`. |
+| `coverage.migration` | `"complete"` / `"unknown"` | The protected migration inventory was established and captured / full-copy migration coverage could not be established. Minimal requires `"complete"`. |
+| `coverage.core` | `"complete"` / `"partial"` | Every core asset (config, `credentials/**`, `identity/**`, `state/**`, `agents/<id>/agent/**`, every `*.sqlite`) is in the archive / at least one was skipped, or minimal deliberately captured a narrower inventory. `partialReasons` describes the omissions. |
+| `coverage.workspace` | `"complete"` / `"policy_excluded"` / `"omitted"` | The workspaces are in whole / in minus the `excludes[]` / left out by minimal or the inline limit (`options.includeWorkspace: false`, also `partial: true`). A full copy with no workspace reads `"complete"`. |
 
-`partial` stays reserved for a missing core asset and the over-limit
-omission; a policy exclude never sets it (reuse eligibility, §6, is
+`partial` describes a missing core asset, the over-limit workspace omission,
+or migration-minimal's deliberate omissions; a policy exclude never sets it (reuse eligibility, §6, is
 unchanged). Refused operator patterns are **not** in the manifest — they
 changed nothing about the archive — but are on the copy result
 (`refusedExcludes`) and in the backup log.
@@ -245,8 +307,11 @@ a way a restore runbook must know about. History: **1** (2026-09-02, issue
 #54) — the shape above without `excludes`/`coverage`; **2** (issue #79) —
 adds `excludes[]`, `coverage{}` and the `policy_exclude` skipped kind. The
 reader (`verifyArchiveManifest`) accepts every version in
-`kOfflineCopyReadableFormatVersions` (`[1, 2]`); both share the restore
-runbook in §5.
+`kOfflineCopyReadableFormatVersions` (`[1, 2, 3]`). **3** (issue #99) adds the
+`full`/`migration-minimal` profile and explicit migration coverage and required
+inventory. All versions share the selective restore runbook in §5. Minimal's
+`partial` flag describes deliberate omissions, even though migration coverage
+is complete.
 
 ## 4. Verification ("usable" definition, WI-6.1)
 
@@ -263,7 +328,7 @@ An archive from either producer counts as verified only when:
    compact JSON), and the parsed object must carry a numeric `schemaVersion`
    and an `assets[]` array (9–14 ms on real archives);
 3. when the producer is `alphaclaw-offline-copy`, its `alphaclawFormatVersion`
-   is one this build can read — `1` or `2` (`kOfflineCopyReadableFormatVersions`).
+   is one this build can read — `1`, `2` or `3` (`kOfflineCopyReadableFormatVersions`).
    An archive written by a **newer** AlphaClaw in a format this one does not
    know fails the check honestly at stage `format` rather than being judged
    "usable" on fields it does not understand. Upstream manifests carry no
@@ -271,22 +336,27 @@ An archive from either producer counts as verified only when:
    (`null` for upstream);
 4. that manifest **covers** this box's state databases
    (`state/openclaw.sqlite`, or the per-agent DB set when there is no global
-   DB) — by `archivePath` / `sourcePath` suffix (per-file assets, the offline
-   copy) OR by an asset whose `sourcePath` is the state dir or an ancestor of
-   the database's absolute path, resolved against `manifest.paths.stateDir`
+   DB) — for legacy formats 1 and 2, by `archivePath` / `sourcePath` suffix
+   (per-file assets), OR by an asset whose `sourcePath` is the state dir or an
+   ancestor of the database's absolute path, resolved against `manifest.paths.stateDir`
    (upstream's single `kind: "state"` asset; see §7). Coverage, not listing:
    a per-file-only rule rejected every real upstream archive and failed the
    hard gate closed on a false verdict in the first container-tier run.
+5. Format 3 requires exact normalized source and archive paths, matching asset
+   kinds, and actual regular-file tar members; missing, duplicate, or undeclared
+   required members fail verification. A migration-minimal archive covers its
+   complete required inventory, including protected non-database files, with
+   matching profile/coverage markers. `partial` cannot waive a missing asset.
 
-The run record carries `backup.usableCheck: "manifest_ok"`; a failing check is
-treated as a `verify` failure (terminal, quarantined as `.unverified`). Both
-producers are judged by this one check — the offline copy's own `gzip -t` +
-manifest step after publish is the same function. A policy exclude never
-affects the verdict: the databases are never inside a workspace's exclude
-scope, and `coverage.workspace: "policy_excluded"` is information for the
-inventory and the restore, not a usability defect.
+The run record carries `backup.usableCheck: "manifest_ok"`. A failed upstream
+archive check quarantines the artifact as `.unverified`; an eligible failure
+can still proceed to a fresh fallback. Both producers use this check, and the
+offline copy runs its `gzip -t` and manifest verification before atomic
+publication, discarding failed staging. Protected database locations override
+both workspace and state-root exclusions. `coverage.workspace: "policy_excluded"`
+is information for the inventory and restore, not a usability defect.
 
-## 5. Restore runbook (manual — the same steps as an upstream archive)
+## 5. Restore runbook (manual, selective placement)
 
 There is no tar-restore CLI upstream; restore is a supervised manual procedure.
 
@@ -294,35 +364,48 @@ The operator-facing version of these steps (with the exact commands, the
 preflight vocabulary and the "restart did not take effect" cross-check) is
 `docs/upgrade-troubleshooting.md` "Restoring a backup"; the UI links there.
 
-1. **Stop the gateway.** From the Watchdog terminal: `openclaw gateway stop`
-   (on 2026.8.x/2026.9.x add `--force` when the shell is non-interactive).
-   Confirm nothing listens on the gateway port and no `openclaw` process is
-   live.
+1. **Stop all writers using the host/provider maintenance console.** Stop
+   AlphaClaw, including its watchdog, cron/notifier and state-database readers;
+   stop the gateway and any other OpenClaw CLI or external process using these
+   databases. Confirm no gateway port listener or database file holder remains.
+   A gateway-only stop while AlphaClaw can relaunch it is insufficient.
 2. **Extract into an isolated directory**, never over the live state dir:
-   `mkdir /tmp/restore && tar -xzf <archive> -C /tmp/restore`.
+   run `gzip -t <archive>`, then `umask 077`, create a fresh extraction directory
+   with `mktemp -d`, and extract there. Never restore a `.unverified` archive.
 3. **Read `manifest.json`.** For each `assets[]` entry, `archivePath` is the
    file (offline copy) or directory (upstream's single `state` asset — the
    whole state dir under `payload/posix<stateDir>`) inside the extracted
    root, and `sourcePath` is where it belongs; place each at `sourcePath`
-   relative to `paths.stateDir`. Check `producer`, `createdAt`,
-   `options.includeWorkspace`, `coverage` and `skipped[]` so you know what is
+   relative to `paths.stateDir`. Check `producer`, `profile`, `createdAt`,
+   `snapshotStartedAt`/`snapshotCompletedAt`, `options.includeWorkspace`,
+   `coverage` and `skipped[]` so you know what is
    NOT in the archive (an omitted workspace, sidecars, and — format 2 — the
    `excludes[]` policy drops such as a workspace's `node_modules`, which a
    restore reinstalls rather than recovers).
-4. **Move the current state dir aside** (`mv /data/.openclaw
-   /data/.openclaw.pre-restore-<ts>`) and **place assets** per the manifest:
-   `openclaw.json`, then every `sqlite` asset, then the remaining files. Do
-   not copy any `-wal`/`-shm` sidecar from the aside tree next to a restored
-   database — the online copy is self-contained.
+4. **Save the existing destination files, then replace only captured assets.**
+   Preserve the state directory and all omitted workspace, scratch, transcript
+   and other content. Save each destination and any database sidecars to a
+   separate private recovery directory before replacing it. Place configuration,
+   every `sqlite` asset, and the remaining captured files using their manifest
+   paths; merge directory assets without deleting omitted files. Remove old
+   `-wal`, `-shm` and `-journal` files beside each replaced database only after
+   saving them and confirming all writers remain stopped. Do not reattach those
+   sidecars: the restored snapshot already contains committed WAL data. A
+   migration-only archive must never trigger whole-state or whole-agent-directory
+   replacement.
 5. **Preflight with the target CLI:** `openclaw database preflight
-   <stateDir>/state/openclaw.sqlite --json` (and each agent DB). A
+   <stateDir>/state/openclaw.sqlite --json`. This public CLI checks state
+   databases. For agent databases, verify their ownership metadata and compare
+   `PRAGMA user_version` with the target's declared `openclaw.schemaVersions.agent`
+   in its package.json. A state preflight
    `migration-required` verdict means the version you are about to run will
    migrate the restored state at its next start; an `incompatible` verdict
    means pick a version that can read it.
-6. **Start the gateway** and watch `/healthz` (restart ready budget: 5 min by default, `GATEWAY_RESTART_READY_TIMEOUT`) plus the Watchdog
+6. **Check integrity for every restored database**, then restart AlphaClaw and
+   watch `/healthz` (restart ready budget: 5 min by default, `GATEWAY_RESTART_READY_TIMEOUT`) plus the Watchdog
    tab; the boot reconciler runs the official migration if the preflight said
    one is required.
-7. Keep the aside tree until the box has been healthy through one full
+7. Keep saved destination files and sidecars until the box has been healthy through one full
    stabilization window.
 
 SQLite-only alternative (2026.8.1+): `openclaw backup sqlite restore` against a
@@ -332,8 +415,8 @@ go back.
 ## 6. Consented reuse of an earlier archive (WI-4.5)
 
 When the fresh ladder (offline copy first → in-quiesce upstream attempts
-when predicted to fit → live ladder; a refused copy hands over to the live
-ladder rather than ending it) is exhausted by a retryable failure on a hard
+when predicted to fit → live ladder → one migration-minimal copy under a fresh
+pause) is exhausted by a retryable failure on a hard
 gate (`kReuseEligibleKinds`: `lock_contention`, `killed`, `timeout`,
 `vanished_file`, `window_exhausted`), the 409 `backup_failed` may
 carry `reusableBackup: { file, at, ageMs, sha256, producer }` — the newest
@@ -344,7 +427,9 @@ operator consents by resending the apply with `allowBackupReuse: { sha256 }`
 full fresh ladder first; only if it fails again is the consented archive used,
 recorded as `backup.reused: true` with `reusedAgeMs` and the fresh failure,
 announced as an important notification, and pinned against pruning while the
-migrating run is fenced.
+migrating run is fenced. Migration-only archives never enter the complete-backup
+reuse candidate set, even though one can satisfy its originating apply's backup
+requirement.
 
 ## 7. Verified against upstream (live tier, 2026-09-02)
 
@@ -420,8 +505,29 @@ on the pin, `migration-required` / found 1 elsewhere), passed
 Calibration: a 526 MB state tree (500 MB of incompressible rows in a second
 DB) offline-copied in **19.2 s** (27 MB/s source throughput; sqlite
 `backup()` + `tar -I 'gzip -1'`) → 525 MB archive, both copies
-`integrity_check ok` — well inside the 8-minute budget, which therefore has
-~25× headroom at this size and covers roughly 12 GB at the same rate.
+`integrity_check ok` — well inside the 8-minute budget. That throughput is
+specific to the fixture and host; it is not a size guarantee for a loaded volume.
+
+### Migration-minimal restore and scale (#99, 2026-09-16)
+
+`tests/live/openclaw-minimal-restore.e2e.test.js` verifies WAL and DELETE
+snapshots from real OpenClaw 2026.9.3 databases. Both restore over newer existing
+databases with real committed WAL frames and SHM sidecars left by stopped fixture
+writers. The runbook saves those destinations and sidecars, replaces only captured
+files, and preserves newer workspace, scratch and transcript sentinels. Restored
+databases retain the captured rows, pass integrity and state preflight, and boot
+the pinned gateway successfully.
+
+The scale cell generates **200,050 scratch files** and **2 GiB of incompressible
+SQLite payload**. The full producer hits its real 200,000-entry cap and names
+`security-planning` in its diagnostics; the minimal producer then completes in
+**92.963 seconds** under the eight-minute work budget. The 2,153,529,344-byte
+agent database produces a 2,151,297,721-byte archive. Real 2026.9.4 preflight
+requires state schema **16 → 17**; Doctor migrates it, the gateway boots, and
+integrity plus all payload rows survive (agent schema remains 19). This cell
+exercises the two real producers directly; the service's timeout/fallback
+dispatcher is covered by its hermetic lifecycle tests. The large fixtures are
+removed in-test, while immutable upstream installs remain in the shared cache.
 
 ## 8. Inventory
 
@@ -432,7 +538,8 @@ newestArchive, reuseWindowStartMs, reuseMaxAgeMs }`. `readable: false` means
 the directory exists but could not be scanned (a missing directory is an
 empty inventory, not an error); `entries` is newest-first and capped at 50
 (`truncated: true` when more exist). Each entry carries `{ file, producer,
-sizeBytes, mtimeMs, at, verified, partial, partialReasons, reused, sha256,
+sizeBytes, mtimeMs, at, verified, profile, coverage, partial, partialReasons,
+snapshotStartedAt, snapshotCompletedAt, reused, sha256,
 exists, eligible, ineligibleReason, name, mode, operationId }` (`mode` is `"0600"`, `"default"` or null; `operationId` links the producing update run) with provenance from the run ledger /
 channel state. Symlinks (`symlink`), files outside the directory
 (`outside_dir`), files nothing recorded (`no_provenance`), unverified

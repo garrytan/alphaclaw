@@ -3412,6 +3412,95 @@ describe("server/gateway restart behavior", () => {
       gateway.setGatewayLaunchHandler(null);
     });
 
+    it.each([false, true])("fences backup relaunch when ownership changes during the port probe (running=%s)", async (running) => {
+      let expired = false;
+      childProcess.spawn = vi.fn(() => createChild());
+      fs.existsSync = vi.fn((targetPath) => targetPath === kOnboardingMarkerPath);
+      net.createConnection = vi.fn(() => {
+        expired = true;
+        return createSocket(running);
+      });
+      delete require.cache[modulePath];
+      const gateway = require(modulePath);
+      const launchHandler = vi.fn();
+      gateway.setGatewayLaunchHandler(launchHandler);
+
+      await gateway.startGateway({ shouldAbort: () => expired });
+
+      expect(childProcess.spawn).not.toHaveBeenCalled();
+      expect(launchHandler).not.toHaveBeenCalled();
+      gateway.setGatewayLaunchHandler(null);
+    });
+
+    it("passes the caller fence through the compatibility launch wrapper", async () => {
+      childProcess.spawn = vi.fn(() => createChild());
+      fs.existsSync = vi.fn(() => false);
+      delete require.cache[modulePath];
+      const gateway = require(modulePath);
+
+      expect(await gateway.launchGatewayProcess({ shouldAbort: () => true })).toBeNull();
+      expect(childProcess.spawn).not.toHaveBeenCalled();
+    });
+
+    it.each(["child drain", "capability probe"])("fences backup CLI stop after ownership changes during %s", async (boundary) => {
+      let expired = false;
+      const child = createChild();
+      child.kill = vi.fn((signal) => {
+        child.killed = true;
+        child.signalCode = signal;
+        if (boundary === "child drain") expired = true;
+        return true;
+      });
+      childProcess.spawn = vi.fn(() => child);
+      childProcess.execFile = vi.fn((file, args, opts, cb) => {
+        if (isStopHelpProbe(args)) {
+          if (boundary === "capability probe") expired = true;
+          return cb(null, kStopHelpWithForce, "");
+        }
+        cb(null, "", "");
+      });
+      fs.existsSync = vi.fn(() => false);
+      net.createConnection = vi.fn(() => createSocket(false));
+      delete require.cache[modulePath];
+      const gateway = require(modulePath);
+      await gateway.launchGatewayProcess();
+
+      const result = await gateway.stopGatewayForBackup({ shouldAbort: () => expired }).catch((error) => error);
+
+      expect(child.kill).toHaveBeenCalledWith("SIGTERM");
+      const commands = childProcess.execFile.mock.calls.filter(([, args]) =>
+        args[0] === "gateway" && args[1] === "stop" && !isStopHelpProbe(args));
+      expect(commands).toHaveLength(0);
+      if (boundary === "child drain") expect(result).toBe(false);
+      else expect(result).toMatchObject({ name: "GatewayRestartError" });
+    });
+
+    it.each(["expired lease", "successor child"])("does not escalate the delayed kill after %s", async (boundary) => {
+      const child = createChild();
+      const successor = createChild();
+      successor.pid = 5678;
+      child.kill = vi.fn(() => { child.killed = true; return true; });
+      childProcess.spawn = vi.fn().mockReturnValueOnce(child).mockReturnValueOnce(successor);
+      fs.existsSync = vi.fn(() => false);
+      delete require.cache[modulePath];
+      const gateway = require(modulePath);
+      await gateway.launchGatewayProcess();
+      vi.useFakeTimers();
+      try {
+        let expired = false;
+        const pending = gateway.stopGatewayChildAndWait({ graceMs: 100, shouldAbort: () => expired });
+        if (boundary === "expired lease") expired = true;
+        else expect(await gateway.launchGatewayProcess()).toBe(successor);
+        await vi.advanceTimersByTimeAsync(1200);
+
+        expect(await pending).toBe(false);
+        expect(child.kill.mock.calls).toEqual([["SIGTERM"]]);
+        expect(successor.kill).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it("skips gateway start when not onboarded", async () => {
       childProcess.spawn = vi.fn();
       fs.existsSync = vi.fn(() => false);
