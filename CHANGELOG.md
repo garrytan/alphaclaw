@@ -5,6 +5,100 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.9.87] - 2026-09-20
+
+Pins OpenClaw **2026.9.5** (npm `latest` and `beta` since 2026-09-19; 2026.9.4
+shipped in between on 2026-09-11). No runtime change: 2026.9.5 declares the same
+`engines.node` (`>=24.16.0 <25 || >=26.1.0`) as 2026.9.3, so the Node 24.16
+floor, the `node:24-slim` image and the CI matrix from v0.9.80 stand. The
+remaining `2026.9.3` mentions in docs and tests are historical evidence stamps,
+as before; `package.json`'s `dependencies.openclaw` is the pin's only source of
+truth.
+
+### Changed
+
+- **Pin: `openclaw` 2026.9.3 → 2026.9.5.** Both skipped-over releases move a
+  database schema: 2026.9.4 publishes `openclaw.schemaVersions
+  { state: 17, agent: 19 }` and 2026.9.5 `{ state: 17, agent: 21 }` (read from
+  the installed tree and the registry manifest; 2026.9.5 no longer emits an
+  `OPENCLAW_STATE_SCHEMA_VERSION` dist constant, so the metadata-first
+  authority from 0.9.79 is what answers for it). The seed table and the live
+  database fixture gain both rows. Upstream says a schema-21 agent database
+  "older builds cannot open": the downgrade stays hard-gated on a verified
+  backup, and going back is restore-that-backup-with-the-older-build, never
+  reinstall-and-boot. The v0.9.72 pin-bump safety net arms the 24 h
+  automatic-rollback watch for the freshly bumped pin as before.
+- **"What's new" re-verified against 2026.9.5** for both 2026.9 entries: the
+  highlights now cover the line (Atomic Updates that rehearse before switching,
+  plugins without a restart, the schema-21 agent database, backups that capture
+  `$include`d files and linked databases and can self-verify, legacy repairs
+  that wait for `doctor --fix` instead of running at startup, conversation
+  archive/share), and a fourth security-default flip is recorded:
+  `tools.message.crossContext.allowAcrossProviders` is on by default since
+  2026.9.5 — and upstream states this changes existing installs that left the
+  key unset — so the Upgrade page warns about it like the other three.
+
+### Fixed
+
+- **The boot-time Codex migration no longer fails on 2026.9.4+.**
+  `migrateLegacyCodexState` (run from `bin/alphaclaw.js` on every boot with a
+  config) loaded the flat-profile auth repairs from upstream's
+  `doctor-auth-flat-profiles-*` chunk. 2026.9.4 dropped that chunk for
+  `auth-profile-repair-*`, whose only public entry is
+  `repairAuthProfileMigration` (collect the profile-id map → migrate JSON
+  stores to SQLite → repair legacy store ids → repair `auth.profiles`; the
+  same sequence the old branch ran by hand), and its other exports are
+  minified. On the new pin every boot would have logged
+  `Codex migration process failed: … migration module not found` and left a
+  legacy `auth-profiles.json` unmigrated. The loader now marks an ABSENT chunk
+  with a stable error code (`kMigrationModuleNotFound`); the migration falls
+  back to the successor chunk on that code alone — a chunk that exists but lost
+  an export is still a contract break and stays loud — and drives
+  `repairAuthProfileMigration` with the same auto-confirm the SQLite step
+  always had. The route half (`codex-route-warnings-*`) is unchanged. Verified
+  against the real 2026.9.5 dist: legacy `openai-codex:codex-cli` routes and
+  OAuth credentials land in canonical SQLite state and the second run is a
+  no-op. Two upstream renames the test now pins: the canonical target of a
+  legacy `openai-codex:<suffix>` id is `openai:chatgpt-<suffix>` (was
+  `openai:codex-cli` on 2026.9.3), and `openai:codex-cli` itself is a
+  deprecated id that 2026.9.4+ rewrites to `openai:default` at boot —
+  AlphaClaw still writes the deprecated id on "Connect Codex" and reads either,
+  tracked as a P2 in TODOS.md.
+- **Thinking levels bound the wrong upstream functions on 2026.9.5.**
+  `resolveThinkingApi` fell back to remembered minified export KEYS
+  (`mod.i`, `mod.s`) from an older build. Upstream re-letters that table
+  per build, and on 2026.9.5 `i` is `listThinkingLevelLabels` (plain strings)
+  and `s` is `resolveSupportedThinkingLevel`, so every level on
+  `GET /api/models/thinking-options` rendered with an empty id and the
+  per-model default came from the wrong resolver — silently, because a guess
+  that binds SOMETHING never throws. Exports are now bound by function NAME
+  (the same rule the Codex migration loader uses) and a missing name fails
+  loudly with `OpenClaw thinking module exports not found`.
+- **A stale gateway-owner lease no longer parks the gateway after an unclean
+  container death (container tier, boot-durability leg).** 2026.9.4+ records
+  the running gateway as a `state_leases` row (scope `gateway-owner`, 300 s
+  TTL, 30 s heartbeat) and a starting gateway reclaims it only when it can
+  PROVE the holder dead — same hostname, pid gone or start time changed.
+  After `docker rm -f` / an OOM kill / a host reboot the next container has a
+  different hostname, so 2026.9.5 refuses with `Another Gateway owner lease is
+  still active for this state directory` until the row lapses. That wording
+  matched neither ownership-conflict family, so the watchdog read three
+  refusals in five seconds as a generic crash loop and stopped relaunching —
+  the boot-durability container leg timed out on `/healthz` with the UI up
+  and the pin verified. The line is now a third ownership-conflict kind,
+  `owner_lease_held`, on the transient ladder that `state_writer_conflict`
+  already uses (degraded + incident + one notice, no crash count, never
+  `doctor --fix` or `gateway stop`), with one difference: the relaunch waits
+  for the lease's recorded `expires_at` — read READ-ONLY from the state DB by
+  the new `lib/server/openclaw-owner-lease.js`, re-read every degraded tick
+  (a renewing lease pushes the wait out; an unreadable DB waits the full TTL)
+  — instead of the crash backoff, and a lease that keeps renewing across the
+  relaunch budget latches as "another gateway is running against this state
+  directory" (a second container on one volume). AlphaClaw never deletes a
+  lease row. The Watchdog tab names the wait (`owner_lease_held` copy) and
+  the latched case; `describeConflict` carries the lease facts (host, pid,
+  expiry — closed tokens, never stderr) onto the ledger rows and status.
+
 ## [0.9.86] - 2026-09-16
 
 ### Fixed

@@ -340,26 +340,29 @@ describe("server/auto-fix notifications — E5 action-vocabulary parity", () => 
       path.join(__dirname, "..", "..", "lib", "server", "watchdog.js"),
       "utf8",
     );
-    // Two paused copies exist: the crash-loop latch (Retry or Repair) and the
-    // state-writer-conflict latch (Retry only — neither Doctor nor a cold
-    // restart can free a state directory another OpenClaw writer holds, so
-    // that copy deliberately does not offer Repair). Both must name the
-    // primary action verbatim.
+    // Three paused copies exist: the crash-loop latch (Retry or Repair) and
+    // the two transient-conflict latches — state-writer conflict and the
+    // 2026.9.4+ owner lease that keeps renewing (Retry only — neither Doctor
+    // nor a cold restart can free a state directory another OpenClaw process
+    // holds, so those copies deliberately do not offer Repair). All must name
+    // the primary action verbatim.
     const pausedCopies = [
       ...watchdogSource.matchAll(
         /Automatic gateway restart paused; manual action required[^"]*/g,
       ),
     ].map((m) => m[0]);
-    expect(pausedCopies).toHaveLength(2);
+    expect(pausedCopies).toHaveLength(3);
     for (const copy of pausedCopies) {
       expect(copy).toContain(`use ${primary.label}`);
     }
     const crashLoopCopy = pausedCopies.find((copy) => copy.includes("(or "));
     expect(crashLoopCopy).toBeTruthy();
     expect(crashLoopCopy).toContain(`use ${primary.label} (or ${repair.label})`);
-    const stateWriterCopy = pausedCopies.find((copy) => copy !== crashLoopCopy);
-    expect(stateWriterCopy).toContain("stop the other OpenClaw process");
-    expect(stateWriterCopy).not.toContain(repair.label);
+    const transientCopies = pausedCopies.filter((copy) => copy !== crashLoopCopy);
+    expect(transientCopies).toHaveLength(2);
+    expect(transientCopies.some((copy) => copy.includes("stop the other OpenClaw process"))).toBe(true);
+    expect(transientCopies.some((copy) => copy.includes("stop the other gateway using this state directory"))).toBe(true);
+    for (const copy of transientCopies) expect(copy).not.toContain(repair.label);
   });
 
   it("the auto-restarting went-down copy stays action-free (no manual CTA while retrying)", () => {
