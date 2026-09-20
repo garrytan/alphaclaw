@@ -58,6 +58,11 @@ export async function createReliabilityFixture() {
     gmail: { accountId: "primary", enabled: true, running: true, remoteOperation: null },
     backupPolicy: { excludes: [...resolveBackupPolicy().excludes], rootExcludes: [] },
     backupProfile: "full", backupStreamed: false, backupArchives: [],
+    backupPreflightError: false,
+    backupPreflight: { ok: true, blocked: false, reason: null, diagnosis: { directories: {
+      complete: true, entries: 12, bytes: 1024, rootSymlink: false, absoluteSymlinkCount: 0, absoluteSymlinks: [],
+      topLevel: [{ path: "workspace", entries: 12, bytes: 1024 }], topEntries: [], topBytes: [],
+    } } },
     applyFailureCode: "build_failed", applyFailureMessage: "Fixture build failed",
   };
   const requests = [];
@@ -106,6 +111,10 @@ export async function createReliabilityFixture() {
     if (route === "/api/openclaw/repair") {
       const run = makeRun("repair-current", { channel: "dev", repair: true }); state.runs.unshift(run);
       return json({ ok: true, operationId: run.operationId, events: `/api/operations/${run.operationId}/events` }, 202);
+    }
+    if (route === "/api/openclaw/backup-preflight") {
+      if (state.backupPreflightError) return error("Fixture backup source scan failed. Retry the preflight.");
+      return json(state.backupPreflight);
     }
     if (route === "/api/openclaw/backup-policy") {
       if (req.method === "PUT") {

@@ -228,31 +228,43 @@ warning`); the apply's own serialization is unchanged. If the pause exceeds
 the apply's own progress timeline, see the run ledger for which step is
 stuck.
 
-If broader attempts fail, the migration-minimal fallback takes one additional
-pause under a fresh lease. Its eight-minute work budget includes discovery,
-database and file snapshots, integrity, compression and verification. The prior
-25-minute broader deadline cannot consume it. The separate minimal scheduling
-reserve is 25m37s with default settings, including lease margins and up to five
-minutes of advisory publication/hash work after relaunch. This is not a promised
-outage duration or hard wall-clock cap; cleanup can finish later. See the
-[deadline accounting](designs/backup-offline-copy.md#migration-minimal-fallback-99).
+If broader paused attempts fail, the migration-minimal fallback runs within the
+same pause and remaining work budget. It proves exclusivity again without
+restarting and stopping the gateway a second time. The gateway must answer after
+relaunch before publication or any safe live fallback; an unanswered relaunch
+aborts the operation rather than starting another backup.
+
+Temporary CLI readers and foreign database handles get up to 35 seconds to
+drain, bounded further by a quarter of the copy budget. A holder that remains is
+still refused; the wait never bypasses the lifecycle lease or quiet barrier.
 
 ## Backup blocked by an oversized scratch tree
 
-The backup log, event and run record identify the five largest visited
-directories by entry count and bytes. A cap, timeout or unreadable directory
-retains these diagnostics with a partial-measurement label; an incomplete scan
-does not pretend that the observed size is the full tree.
+Run **Check backup sources** in the Upgrade tab before an update to inspect the state
+root, complete per-directory entry and byte totals, and absolute-target symlinks.
+The same preflight runs before every backup pause. It keeps counting beyond the
+200,000 selected-entry copy limit; excluded scratch does not consume that limit.
+An over-budget or incomplete scan blocks before the gateway is stopped and names
+the top offenders. Partial diagnostics are explicitly labeled, never presented
+as complete counts.
 
 Open **Upgrade → Backups → Exclusions** to edit workspace-relative rules and
 state-root rules separately. Save applies to the next operation; Restore defaults
-restores workspace debris exclusions and clears state-root rules. For example,
+restores workspace debris and known state-root scratch exclusions. Defaults omit
+`worktrees/`, `workspace/.openclaw/`, `wiki/`, logs, and stale SQLite corrupt or
+migrated copies. `.env` is always omitted, even if exclusions are disabled. For example,
 `state/security-planning/stronghold-*` excludes named imported scratch trees.
 Database files, config, credentials, identity and agent authentication cannot be
 excluded, including databases discovered beneath otherwise excluded directories.
 The configuration is `updates.openclaw.backup.{excludes,rootExcludes}` in
 `alphaclaw.json`; the API is `GET`/`PUT /api/openclaw/backup-policy`. Missing
 workspace rules use defaults, while `excludes: []` explicitly disables them.
+
+The upstream CLI cannot apply AlphaClaw's exclusions. It is skipped if preflight
+finds `.env`, absolute-target symlinks, or an oversized upstream archive set, and
+never retries live after the offline copy exhausted its enumeration or time
+budget. The offline and migration producers resolve a symlinked state root while
+keeping required-source and internal-symlink safety checks.
 
 When AlphaClaw observes more than 512 MiB of raw workspace content, upstream
 attempts omit workspace from the outset with `--no-include-workspace`; unknown
