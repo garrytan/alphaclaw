@@ -12,12 +12,13 @@ const { findOp } = require("../../lib/server/admin-manifest");
 
 const kUrl = "/api/openclaw/backup-policy";
 const kToken = "a".repeat(64);
-const kDefaults = { excludes: ["node_modules", "*.heapsnapshot", "*.tmp", "logs/**/*.gz"], rootExcludes: [] };
+const kDefaults = { excludes: ["node_modules", "*.heapsnapshot", "*.tmp", "logs/**/*.gz"],
+  rootExcludes: ["worktrees/**", "workspace/.openclaw/**", "wiki/**", "logs/**", "**/*.sqlite.corrupt-*", "**/*.sqlite.migrated*"] };
 const empty = { excludes: [], rootExcludes: [] };
 let root;
 let configPath;
 
-const createApp = ({ buildInventory, noEnforcement = false, member = false, confirmService } = {}) => {
+const createApp = ({ buildInventory, getBackupPreflight, noEnforcement = false, member = false, confirmService } = {}) => {
   vi.stubEnv("SETUP_PASSWORD", "secret");
   const authPath = require.resolve("../../lib/server/routes/auth");
   delete require.cache[authPath];
@@ -36,7 +37,7 @@ const createApp = ({ buildInventory, noEnforcement = false, member = false, conf
   if (!noEnforcement) app.use("/api", createAgentAdminEnforcement({ resolveRequestActor, confirmService }));
   if (member) app.use(kUrl, (req, _res, next) => { req.alphaclawIdentity = { role: "member" }; next(); });
   if (noEnforcement) app.use(kUrl, (req, _res, next) => { req.alphaclawGrant = { method: req.method, path: req.path }; next(); });
-  registerOpenclawBackupPolicyRoutes({ app, requireAdmin, OPENCLAW_DIR: root, buildInventory,
+  registerOpenclawBackupPolicyRoutes({ app, requireAdmin, OPENCLAW_DIR: root, buildInventory, getBackupPreflight,
     getSourceContext: () => ({ stateDir: root, spawnEnv: {} }) });
   return app;
 };
@@ -52,6 +53,119 @@ beforeEach(() => {
   configPath = path.join(root, "alphaclaw.json");
   vi.spyOn(console, "warn").mockImplementation(() => {});
   vi.spyOn(console, "error").mockImplementation(() => {});
+});
+
+describe("backup preflight API", () => {
+  const url = "/api/openclaw/backup-preflight";
+  const diagnosis = { directories: { complete: true, entries: 407321, bytes: 12000000000,
+    stateDir: "/private/state", rootSymlink: true, absoluteSymlinkCount: 2,
+    absoluteSymlinks: [{ path: ".env", target: "/private/.env" }, { path: "wiki/index", target: "/private/notes" }],
+    topLevel: [{ path: "worktrees", entries: 152243, bytes: 5800000000 }],
+    topEntries: [{ path: "worktrees", entries: 152243, bytes: 5800000000 }], topBytes: [],
+  }, sources: [{ path: "/private/state/main.sqlite" }] };
+
+  it("returns complete blocked diagnosis without mutating config and disables HTTP caching", async () => {
+    const getBackupPreflight = vi.fn(async () => ({ diagnosis, blocked: true, reason: "Selected tree exceeds budget" }));
+    const app = createApp({ getBackupPreflight }); const cookie = await admin(app);
+    const response = await request(app).get(url).set("Cookie", cookie);
+    expect(response.status).toBe(200);
+    expect(response.headers["cache-control"]).toBe("no-store");
+    expect(response.body).toEqual({ ok: true, diagnosis, blocked: true, reason: "Selected tree exceeds budget" });
+    expect(getBackupPreflight).toHaveBeenCalledOnce();
+    expect(fs.existsSync(configPath)).toBe(false);
+  });
+
+  it("requires authentication and redacts absolute paths and symlink targets for read-tier agents", async () => {
+    const app = createApp({ getBackupPreflight: async () => ({ diagnosis, blocked: false, reason: null }) });
+    expect((await request(app).get(url)).status).toBe(401);
+    expect(findOp("GET", url).tier).toBe("safe");
+    const response = await bearer(request(app).get(url));
+    expect(response.status).toBe(200);
+    expect(response.body.diagnosis.directories).toMatchObject({ entries: 407321, bytes: 12000000000,
+      absoluteSymlinks: [{ path: ".env", target: "[redacted]" }, { path: "wiki/index", target: "[redacted]" }] });
+    expect(JSON.stringify(response.body)).not.toContain("/private");
+  });
+
+  it("never exposes live process command arguments through preflight", async () => {
+    const app = createApp({ getBackupPreflight: async () => ({
+      diagnosis: { ...diagnosis, otherProcesses: [{ pid: 123, cmdline: "openclaw --token fixture-only-secret" }] },
+      blocked: false, reason: null,
+    }) });
+    const cookie = await admin(app);
+    const response = await request(app).get(url).set("Cookie", cookie);
+    expect(response.status).toBe(200);
+    expect(response.body.diagnosis.otherProcesses).toEqual([{ pid: 123 }]);
+    expect(JSON.stringify(response.body)).not.toContain("fixture-only-secret");
+    expect(findOp("GET", url).redactResponse({ diagnosis: { otherProcesses: [{ pid: 123, cmdline: "private argv" }] } })
+      .diagnosis.otherProcesses).toEqual([{ pid: 123, cmdline: "[redacted]" }]);
+  });
+
+  it.each([undefined, async () => { throw new Error("private /path failure"); }, async () => ({ diagnosis: {} })])("fails closed when the preflight cannot complete", async (getBackupPreflight) => {
+    const app = createApp({ getBackupPreflight }); const cookie = await admin(app);
+    const response = await request(app).get(url).set("Cookie", cookie);
+    expect(response.status).toBe(503);
+    expect(response.body).toMatchObject({ ok: false, code: "backup_preflight_unavailable" });
+    expect(response.body.message).toContain("has not been paused");
+    expect(JSON.stringify(response.body)).not.toContain("/path");
+  });
+});
+
+describe("append-only scratch exclusions", () => {
+  const url = `${kUrl}/scratch-excludes`;
+  const scratch = { rootExcludes: ["worktrees/**", "workspace/.openclaw/**"] };
+
+  it("allows write-tier agents to append known patterns without a dangerous confirmation", async () => {
+    updateAlphaclawConfig({ openclawDir: root, mutate: (cfg) => {
+      cfg.updates.openclaw.backup = { excludes: [], rootExcludes: ["state/security-planning/scratch-*"], custom: "preserved" };
+    } });
+    const app = createApp();
+    expect(findOp("POST", url)).toMatchObject({ tier: "write", readOp: "updates.backup-policy.read" });
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const response = await bearer(request(app).post(url).send(scratch));
+      expect(response.status).toBe(200);
+      expect(response.body.policy).toEqual({ excludes: [], rootExcludes: ["state/security-planning/scratch-*", ...scratch.rootExcludes] });
+    }
+    expect(readAlphaclawConfig({ openclawDir: root }).updates.openclaw.backup.custom).toBe("preserved");
+    expect(findOp("PUT", kUrl).tier).toBe("dangerous");
+  });
+
+  it.each([{ rootExcludes: [] }, { rootExcludes: ["state/**"] }, { rootExcludes: ["worktrees/**"], excludes: [] },
+    { rootExcludes: ["worktrees/*"] }, { rootExcludes: ["../worktrees/**"] }, { rootExcludes: "worktrees/**" }])("rejects non-append-safe body %j", async (body) => {
+    const app = createApp();
+    const response = await bearer(request(app).post(url).send(body));
+    expect(response.status).toBe(400);
+    expect(fs.existsSync(configPath)).toBe(false);
+  });
+
+  it("merges against the latest locked policy and refuses configured migration inputs", async () => {
+    const app = createApp({ buildInventory: async () => {
+      updateAlphaclawConfig({ openclawDir: root, mutate: (cfg) => {
+        cfg.updates.openclaw.backup = { excludes: ["*.tmp"], rootExcludes: ["state/new-scratch/**"] };
+      } });
+      return { stateDir: root, protectedPaths: [] };
+    } });
+    const appended = await bearer(request(app).post(url).send(scratch));
+    expect(appended.status).toBe(200);
+    expect(appended.body.policy).toEqual({ excludes: ["*.tmp"], rootExcludes: ["state/new-scratch/**", ...scratch.rootExcludes] });
+    const protectedApp = createApp({ buildInventory: async () => ({ stateDir: root,
+      protectedPaths: [path.join(root, "worktrees", "migration-owner")] }) });
+    const before = fs.readFileSync(configPath, "utf8");
+    const refused = await bearer(request(protectedApp).post(url).send(scratch));
+    expect(refused.status).toBe(400);
+    expect(refused.body.refusedExcludes).toEqual(expect.arrayContaining([expect.objectContaining({ pattern: "worktrees/**" })]));
+    expect(fs.readFileSync(configPath, "utf8")).toBe(before);
+  });
+
+  it("rejects corrupt configuration and missing enforcement without writing", async () => {
+    fs.writeFileSync(configPath, '{"broken":');
+    const app = createApp();
+    const response = await bearer(request(app).post(url).send(scratch));
+    expect(response.status).toBe(503);
+    expect(response.body.code).toBe("config_unreadable");
+    expect(fs.readFileSync(configPath, "utf8")).toBe('{"broken":');
+    const unguarded = createApp({ noEnforcement: true });
+    expect((await bearer(request(unguarded).post(url).send(scratch))).status).toBe(403);
+  });
 });
 afterEach(() => {
   closeAgentAdminDb();

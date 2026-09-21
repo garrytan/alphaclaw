@@ -6474,7 +6474,10 @@ describe("server/watchdog", () => {
       for (let i = 0; i < 3; i += 1) await watchdog.runHealthCheck({ source: "health_timer" });
       await settle();
 
-      expect(doctorFixCalls(clawCmd)).toBe(1);
+      expect(doctorFixCalls(clawCmd)).toBe(0);
+      expect(rowsOfType(insertWatchdogEvent, "repair", "skipped").filter((row) => row.details.reason === "gateway_running")).toEqual([
+        expect.objectContaining({ details: expect.objectContaining({ reason: "gateway_running", pid: 800 }) }),
+      ]);
       expect(restartGatewayColdStart).toHaveBeenCalledTimes(1);
       expect(restartRows(insertWatchdogEvent, { source: "repair", status: "failed" })).toEqual([
         expect.objectContaining({
@@ -6492,7 +6495,7 @@ describe("server/watchdog", () => {
       // Five more failing ticks: no second Doctor, no second `gateway stop`.
       for (let i = 0; i < 5; i += 1) await watchdog.runHealthCheck({ source: "health_timer" });
       await settle();
-      expect(doctorFixCalls(clawCmd)).toBe(1);
+      expect(doctorFixCalls(clawCmd)).toBe(0);
       expect(restartGatewayColdStart).toHaveBeenCalledTimes(1);
 
       // A recovery lifts the latch; the attempt counter waits for a verified
@@ -6564,7 +6567,10 @@ describe("server/watchdog", () => {
         await vi.advanceTimersByTimeAsync(kGatewayRestartReadyTimeoutMs + 1_000);
         await watchdog.runHealthCheck({ source: "health_timer" });
         await vi.advanceTimersByTimeAsync(50);
-        expect(doctorFixCalls(clawCmd)).toBe(1);
+        expect(doctorFixCalls(clawCmd)).toBe(0);
+        expect(rowsOfType(insertWatchdogEvent, "repair", "skipped").filter((row) => row.details.reason === "gateway_running")).toEqual([
+          expect.objectContaining({ details: expect.objectContaining({ pid: 4321 }) }),
+        ]);
         expect(restartGatewayColdStart).toHaveBeenCalledTimes(1);
         expect(graceRows()).toHaveLength(1);
         watchdog.stop();
@@ -6683,7 +6689,10 @@ describe("server/watchdog", () => {
       control.healthy = false;
       const result = await watchdog.triggerRepair();
       await settle();
-      expect(doctorFixCalls(clawCmd)).toBe(1);
+      expect(doctorFixCalls(clawCmd)).toBe(0);
+      expect(rowsOfType(insertWatchdogEvent, "repair", "skipped").filter((row) => row.details.reason === "gateway_running")).toEqual([
+        expect.objectContaining({ details: expect.objectContaining({ reason: "gateway_running", pid: 800 }) }),
+      ]);
       expect(result).toMatchObject({ ok: false, verdict: "replacement_failed", reason: "replacement_failed", launchedGateway: false });
       expect(restartRows(insertWatchdogEvent, { source: "repair", status: "failed" })).toEqual([
         expect.objectContaining({
@@ -6733,7 +6742,7 @@ describe("server/watchdog", () => {
         clawCmdImpl: doctorOk,
         requestGatewayLaunch,
         restartGatewayColdStart,
-        pidAlive: (pid) => (pid === 800 ? holderAlive : true),
+        pidAlive: (pid) => ([800, 801].includes(pid) ? holderAlive : true),
         readProcStartTicks: () => 1,
       });
       watchdog.onGatewayLaunch(adoptedPayload(identity));
@@ -6741,13 +6750,13 @@ describe("server/watchdog", () => {
       control.healthy = false;
       for (let i = 0; i < 3; i += 1) await watchdog.runHealthCheck({ source: "health_timer" });
       await settle();
-      expect(doctorFixCalls(clawCmd)).toBe(1);
+      expect(doctorFixCalls(clawCmd)).toBe(0);
       expect(watchdog.getStatus().awaitingAutoRepairRecovery).toBe(true);
 
       // Still wedged and alive: the latch holds.
       await watchdog.runHealthCheck({ source: "health_timer" });
       await settle();
-      expect(doctorFixCalls(clawCmd)).toBe(1);
+      expect(doctorFixCalls(clawCmd)).toBe(0);
 
       // The operator kills the wedged gateway the notice named: nothing is
       // left to replace, so the latch lifts and the ladder relaunches.
@@ -6769,8 +6778,7 @@ describe("server/watchdog", () => {
       expect(requested[0].details).toMatchObject({ coldRestart: true, incumbentPid: 800 });
       expect(requested[1].details).toMatchObject({ pid: 4242, generation: 7, intent: "replace" });
       expect(watchdog.getStatus().replacementPending).toMatchObject({ pid: 4242 });
-      // Doctor ran once more (the lift is a real repair, not a bare relaunch).
-      expect(doctorFixCalls(clawCmd)).toBe(2);
+      expect(doctorFixCalls(clawCmd)).toBe(1);
       watchdog.stop();
     });
 
@@ -6938,7 +6946,7 @@ describe("server/watchdog", () => {
     });
 
     // ── 1A wedged incumbent → replace ─────────────────────────────────────
-    it("1A. a wedged ADOPTED incumbent (alive, not answering) is replaced through the verified cold-restart path after the sustained gate: Doctor once, the cold restart once under the repair hold with the lease fence, requested {intent: replace} → ok {verified: true}, operation ledger trigger 'repair'; adoption while watched never resets health", async () => {
+    it("1A. a wedged ADOPTED incumbent (alive, not answering) is replaced through the verified cold-restart path after the sustained gate: Doctor skipped, the cold restart once under the repair hold with the lease fence, requested {intent: replace} → ok {verified: true}, operation ledger trigger 'repair'; adoption while watched never resets health", async () => {
       const { control, fetchImpl } = createGatewayControl();
       const requestGatewayLaunch = vi.fn(async () =>
         launchOutcome("incumbent_present", { pid: 800, serving: { rootPid: 800, workerPid: 801, startTicks: 123456, pids: [800, 801] } }),
@@ -6989,7 +6997,10 @@ describe("server/watchdog", () => {
       // Third consecutive failure: repair in-tick, intent replace.
       await watchdog.runHealthCheck({ source: "health_timer" });
       await settle();
-      expect(doctorFixCalls(clawCmd)).toBe(1);
+      expect(doctorFixCalls(clawCmd)).toBe(0);
+      expect(rowsOfType(insertWatchdogEvent, "repair", "skipped").filter((row) => row.details.reason === "gateway_running")).toEqual([
+        expect.objectContaining({ details: expect.objectContaining({ reason: "gateway_running", pid: 800 }) }),
+      ]);
       expect(restartGatewayColdStart).toHaveBeenCalledTimes(1);
       expect(restartGatewayColdStart).toHaveBeenCalledWith({ shouldAbort: expect.any(Function) });
       expect(heldDuringRestart).toBe("repair");

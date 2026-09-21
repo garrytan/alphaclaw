@@ -1228,13 +1228,13 @@ describe("server/gateway restart drills (e2e)", () => {
   // ── Watchdog repair `replace` through the real cold restart (v0.9.75) ─────
   //
   //   boot around incumbent (adopted) ─▶ /health wedges ─▶ probe ✗ ✗ ✗ (sustained gate)
-  //     ─▶ runRepair: doctor --fix ─▶ requestGatewayLaunch → incumbent_present
+  //     ─▶ runRepair: skip live Doctor ─▶ requestGatewayLaunch → incumbent_present
   //     ─▶ replace: `gateway stop` → `gateway --force` → ready → #59 verdict
   //          ├ new tree answers ─▶ requested {replace} … ok {verified: true}   (REPLACE DRILL)
   //          └ incumbent survives ─▶ failed {incumbent_gateway_still_running}  (REPLACE-INCUMBENT)
   //   lock lease expires mid ready-wait ─▶ aborted_by_caller, poll ends       (LEASE-FENCE DRILL)
   describe("watchdog repair `replace` through the real cold restart", () => {
-    it("replaces a wedged incumbent after three failed probes: doctor once, `gateway stop` + `gateway --force` on the fake, restart/repair/requested {intent: replace} then ok {verified: true} once the new supervisor's tree answers (REPLACE DRILL)", async () => {
+    it("replaces a wedged incumbent after three failed probes: Doctor skipped, `gateway stop` + `gateway --force` on the fake, restart/repair/requested {intent: replace} then ok {verified: true} once the new supervisor's tree answers (REPLACE DRILL)", async () => {
       const fake = createFakeGateway({
         portOpen: true,
         supervisorLingers: true,
@@ -1276,7 +1276,10 @@ describe("server/gateway restart drills (e2e)", () => {
           () => restartRows(insertWatchdogEvent, { source: "repair", status: "ok" }).length > 0,
         );
 
-        expect(doctorFixCalls(clawCmd)).toBe(1);
+        expect(doctorFixCalls(clawCmd)).toBe(0);
+        expect(repairSkipReasons(insertWatchdogEvent).filter((details) => details.reason === "gateway_running")).toEqual([
+          expect.objectContaining({ skipped: true, pid: kIncumbentPid }),
+        ]);
         // The pin's CLI has no --force on stop; the relaunch is the cold
         // restart's `gateway --force` — never a `gateway run` alongside.
         expect(fake.stopCalls).toEqual([["gateway", "stop"]]);
@@ -1371,7 +1374,10 @@ describe("server/gateway restart drills (e2e)", () => {
         await third;
         await settleFakeTimers();
 
-        expect(doctorFixCalls(clawCmd)).toBe(1);
+        expect(doctorFixCalls(clawCmd)).toBe(0);
+        expect(repairSkipReasons(insertWatchdogEvent).filter((details) => details.reason === "gateway_running")).toEqual([
+          expect.objectContaining({ skipped: true, pid: kIncumbentPid }),
+        ]);
         expect(fake.stopCalls).toEqual([["gateway", "stop"]]);
         expect(fake.spawnCalls.map((call) => call.args)).toEqual([["gateway", "--force"]]);
         expect(coldRestartHolds).toEqual(["repair"]);

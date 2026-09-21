@@ -62,6 +62,7 @@ vi.mock("preact/hooks", () => {
 });
 
 vi.mock("../../lib/public/js/lib/api.js", () => ({
+  authFetch: vi.fn(async () => new Response(JSON.stringify({ ok: true, blocked: false, reason: null, diagnosis: { directories: { complete: true } } }))),
   applyOpenclawVersion: vi.fn(),
   requestOpenclawBackupRiskConsent: vi.fn(),
   clearOpenclawBlocklist: vi.fn(),
@@ -1105,7 +1106,7 @@ describe("frontend/upgrade-tab hook — consent + reuse retry + fence fields", (
       operationId: "op-1",
       events: "/api/operations/op-1/events",
     });
-    await state.onConfirmApply();
+    await state.onConfirmApply(); await renderHook({}).backupPreflight.confirm();
     expect(api.applyOpenclawVersion).toHaveBeenCalledWith({
       channel: "stable",
       version: "2026.7.0",
@@ -1126,7 +1127,7 @@ describe("frontend/upgrade-tab hook — consent + reuse retry + fence fields", (
     requestDowngrade(state);
     state = renderHook({});
     api.applyOpenclawVersion.mockResolvedValue({ ok: true, operationId: "op-1", events: "/e" });
-    await state.onConfirmApply();
+    await state.onConfirmApply(); await renderHook({}).backupPreflight.confirm();
     expect(api.applyOpenclawVersion).toHaveBeenCalledWith({ ...kDowngradeTarget, intent: "downgrade" });
     expect("allowBackupReuse" in api.applyOpenclawVersion.mock.calls[0][0]).toBe(false);
 
@@ -1140,7 +1141,7 @@ describe("frontend/upgrade-tab hook — consent + reuse retry + fence fields", (
     state = renderHook({});
     state.onToggleBackupReuseConsent(true);
     state = renderHook({});
-    await state.onConfirmApply();
+    await state.onConfirmApply(); await renderHook({}).backupPreflight.confirm();
     expect(api.applyOpenclawVersion).toHaveBeenCalledWith({ ...kDowngradeTarget, intent: "downgrade" });
   });
 
@@ -1155,7 +1156,7 @@ describe("frontend/upgrade-tab hook — consent + reuse retry + fence fields", (
     );
     requestDowngrade(state);
     state = renderHook({});
-    await state.onConfirmApply();
+    await state.onConfirmApply(); await renderHook({}).backupPreflight.confirm();
     state = renderHook({});
 
     expect(state.operation).toBeNull();
@@ -1237,7 +1238,7 @@ describe("frontend/upgrade-tab hook — consent + reuse retry + fence fields", (
     // A routine same-channel confirm: no reuse consent line at all.
     expect(state.pendingApply.confirm.hardGate).toBe(false);
     expect(state.pendingApply.confirm.backupReuse).toBeNull();
-    await state.onConfirmApply();
+    await state.onConfirmApply(); await renderHook({}).backupPreflight.confirm();
     state = renderHook({});
 
     expect(state.operation).toBeNull();
@@ -1308,7 +1309,7 @@ describe("frontend/upgrade-tab hook — consent + reuse retry + fence fields", (
     api.applyOpenclawVersion.mockRejectedValueOnce(Object.assign(new Error(kMigrationError.message), kMigrationError));
     state.onRequestApply({ payload: kSoftTarget, label: "2026.7.2" });
     state = renderHook({});
-    await state.onConfirmApply();
+    await state.onConfirmApply(); await renderHook({}).backupPreflight.confirm();
     state = renderHook({});
     state.onRequestNoBackupConsent();
     state = renderHook({});
@@ -1336,7 +1337,7 @@ describe("frontend/upgrade-tab hook — consent + reuse retry + fence fields", (
     );
     state.onRequestApply({ payload: kSoftTarget, label: "2026.7.2", isDowngrade: false });
     state = renderHook({});
-    await state.onConfirmApply();
+    await state.onConfirmApply(); await renderHook({}).backupPreflight.confirm();
     state = renderHook({});
     state.onRequestNoBackupConsent();
     state = renderHook({});
@@ -1371,7 +1372,7 @@ describe("frontend/upgrade-tab hook — consent + reuse retry + fence fields", (
     );
     requestDowngrade(state);
     state = renderHook({});
-    await state.onConfirmApply();
+    await state.onConfirmApply(); await renderHook({}).backupPreflight.confirm();
     state = renderHook({});
     expect(state.backupReuseOffer).toBeTruthy();
     expect(state.noBackupConsentOffer).toBeNull();
@@ -1387,7 +1388,7 @@ describe("frontend/upgrade-tab hook — consent + reuse retry + fence fields", (
     );
     requestDowngrade(state);
     state = renderHook({});
-    await state.onConfirmApply();
+    await state.onConfirmApply(); await renderHook({}).backupPreflight.confirm();
     state = renderHook({});
     state.onRequestBackupReuseRetry();
     state = renderHook({});
@@ -1444,7 +1445,7 @@ describe("frontend/upgrade-tab hook — consent + reuse retry + fence fields", (
     );
     requestDowngrade(state);
     state = renderHook({});
-    await state.onConfirmApply();
+    await state.onConfirmApply(); await renderHook({}).backupPreflight.confirm();
     await flushAsync();
     // Settled failure: the re-read must bypass the server's 5 s SWR copy too —
     // otherwise the client stores the pre-update directory as fresh for 60 s.
@@ -1497,7 +1498,7 @@ describe("frontend/upgrade-tab hook — consent + reuse retry + fence fields", (
     state.onToggleBackupReuseConsent(true);
     state = renderHook({});
     api.applyOpenclawVersion.mockResolvedValueOnce({ ok: true, operationId: "op-1", events: "/e" });
-    await state.onConfirmApply();
+    await state.onConfirmApply(); await renderHook({}).backupPreflight.confirm();
     expect(api.applyOpenclawVersion).toHaveBeenLastCalledWith({
       ...kDowngradeTarget,
       intent: "downgrade",
@@ -1544,7 +1545,7 @@ describe("frontend/upgrade-tab hook — consent + reuse retry + fence fields", (
 
     // Confirming now sends NO consent — the operator never authorized kSha.
     api.applyOpenclawVersion.mockResolvedValueOnce({ ok: true, operationId: "op-1", events: "/e" });
-    await state.onConfirmApply();
+    await state.onConfirmApply(); await renderHook({}).backupPreflight.confirm();
     expect(api.applyOpenclawVersion).toHaveBeenLastCalledWith({ ...kDowngradeTarget, intent: "downgrade" });
     expect("allowBackupReuse" in api.applyOpenclawVersion.mock.calls[0][0]).toBe(false);
   });
@@ -1569,7 +1570,7 @@ describe("frontend/upgrade-tab hook — consent + reuse retry + fence fields", (
     expect(state.pendingApply.reuseConsent).toBe(true);
     expect(state.pendingApply.reuseConsentReset).toBe(false);
     api.applyOpenclawVersion.mockResolvedValueOnce({ ok: true, operationId: "op-1", events: "/e" });
-    await state.onConfirmApply();
+    await state.onConfirmApply(); await renderHook({}).backupPreflight.confirm();
     expect(api.applyOpenclawVersion).toHaveBeenLastCalledWith({
       ...kDowngradeTarget,
       intent: "downgrade",
@@ -1610,7 +1611,7 @@ describe("frontend/upgrade-tab hook — consent + reuse retry + fence fields", (
     expect(state.pendingApply.reuseConsent).toBe(false);
     expect(state.pendingApply.reuseConsentReset).toBe(true);
     api.applyOpenclawVersion.mockResolvedValueOnce({ ok: true, operationId: "op-1", events: "/e" });
-    await state.onConfirmApply();
+    await state.onConfirmApply(); await renderHook({}).backupPreflight.confirm();
     expect(api.applyOpenclawVersion).toHaveBeenLastCalledWith({ ...kDowngradeTarget, intent: "downgrade" });
   });
 
@@ -1647,7 +1648,7 @@ describe("frontend/upgrade-tab hook — consent + reuse retry + fence fields", (
     state.onToggleBackupReuseConsent(true);
     state = renderHook({});
     api.applyOpenclawVersion.mockResolvedValueOnce({ ok: true, operationId: "op-1", events: "/e" });
-    await state.onConfirmApply();
+    await state.onConfirmApply(); await renderHook({}).backupPreflight.confirm();
     expect(api.applyOpenclawVersion).toHaveBeenCalledWith({ ...kDowngradeTarget, intent: "downgrade" });
     expect("allowBackupReuse" in api.applyOpenclawVersion.mock.calls[0][0]).toBe(false);
   });
@@ -1693,7 +1694,7 @@ describe("frontend/upgrade-tab hook — consent + reuse retry + fence fields", (
     );
     requestDowngrade(state);
     state = renderHook({});
-    await state.onConfirmApply();
+    await state.onConfirmApply(); await renderHook({}).backupPreflight.confirm();
     state = renderHook({});
     expect(state.applyError.message).toBe("disk full");
     expect(state.backupReuseOffer).toBeNull();
@@ -1713,7 +1714,7 @@ describe("frontend/upgrade-tab hook — consent + reuse retry + fence fields", (
     let state = await hydrate();
     requestDowngrade(state);
     state = renderHook({});
-    await state.onConfirmApply();
+    await state.onConfirmApply(); await renderHook({}).backupPreflight.confirm();
     expect(captured).toBeTruthy();
 
     captured.onMessage({
@@ -1904,7 +1905,7 @@ describe("frontend/upgrade-tab hook — consent + reuse retry + fence fields", (
     expect(state.repairAvailable).toBe(true);
     state.onRequestApply({ payload: { channel: "dev", devHead: true }, label: "latest dev" });
     state = renderHook({});
-    await state.onConfirmApply();
+    await state.onConfirmApply(); await renderHook({}).backupPreflight.confirm();
     captured.onMessage({
       event: "error",
       data: { error: "Backup failed", code: "backup_failed", reusableBackup: kReusableBackup },
@@ -2009,7 +2010,7 @@ describe("frontend/upgrade-tab hook — consent + reuse retry + fence fields", (
     state.onToggleBackupReuseConsent(true);
     state = renderHook({});
     api.applyOpenclawVersion.mockResolvedValueOnce({ ok: true, operationId: "op-1", events: "/e" });
-    await state.onConfirmApply();
+    await state.onConfirmApply(); await renderHook({}).backupPreflight.confirm();
     expect(api.applyOpenclawVersion).toHaveBeenCalledWith({ ...kDowngradeTarget, intent: "downgrade" });
     expect("allowBackupReuse" in api.applyOpenclawVersion.mock.calls[0][0]).toBe(false);
   });
@@ -2048,7 +2049,7 @@ describe("frontend/upgrade-tab hook — consent + reuse retry + fence fields", (
     let state = await hydrate();
     requestDowngrade(state);
     state = renderHook({});
-    await state.onConfirmApply();
+    await state.onConfirmApply(); await renderHook({}).backupPreflight.confirm();
     captured.onMessage({
       event: "error",
       data: { error: "Backup failed", code: "backup_failed", reusableBackup: kReusableBackup },

@@ -5,8 +5,9 @@
 > the offline copy is the **first rung of every quiesced pre-update backup**
 > — soft and hard gates alike — and the upstream `openclaw backup create`
 > runs only after a failed copy (paused, when `chooseBackupRung` predicts it
-> fits; otherwise live). Issue #99 adds a final migration-minimal copy after
-> broader attempts fail, under a new pause and independent budget. The format is **AlphaClaw-owned**: it mirrors the
+> fits; otherwise only a safe live fallback). Issue #102 runs preflight before
+> stopping the gateway and tries the migration-minimal copy within the original
+> pause, never a second stop. The format is **AlphaClaw-owned**: it mirrors the
 > core fields of upstream's schemaVersion-1 manifest so the same restore
 > steps apply, and it does not claim compatibility with upstream restore
 > tooling beyond those shared fields. Producer code:
@@ -92,8 +93,8 @@ databases remain required even when located inside an otherwise skipped tree.
 Unreadable protected sources, orphan sidecars, unsafe locations and disappearing
 required files fail explicitly rather than yielding a falsely complete snapshot.
 
-The final rung reacquires the lifecycle lease, confirms gateway stop, establishes
-a new quiet barrier and proves exclusivity again. Database corruption, actual
+The final paused rung uses the original lifecycle lease and quiet barrier and
+proves exclusivity again, without a second gateway stop. Database corruption, actual
 ENOSPC and unresolved SQLite work remain blockers. An invalid upstream archive
 may be quarantined and replaced by a fresh producer; it is distinct from damaged
 source data. Every pause unwinds before publication, pruning or archive reuse.
@@ -110,16 +111,12 @@ keeps the newest verified migration archive and the newest activated migration's
 archive when distinct, plus their records and the newest fence record. These
 bounded exceptions expire against each run's own seven-day age.
 
-The broader ladder retains its 25-minute work deadline, stamped after the
-separately budgeted two-minute diagnosis. The minimal producer gets a fresh
-eight-minute work deadline including discovery, snapshots, integrity, tar and
-archive verification. Its conservative scheduling reserve is
-`lock wait + minimal work + quiesce lease reserve + publication/hash`:
-`90s + 8m + 11m7s + 5m = 25m37s` with the default five-minute gateway readiness
-setting. The lease reserve already includes the old verification allowance as
-spare margin; minimal performs no second verification. These are scheduling
-allowances, not a guaranteed wall-clock ceiling: mandatory cancellation and
-filesystem cleanup can overrun. No global 45-minute apply timer is implied.
+The ladder retains its 25-minute work deadline, stamped after the separately
+budgeted diagnosis. The migration producer gets at most eight minutes, bounded
+by the original pause's remaining budget, including discovery, snapshots,
+integrity, tar and archive verification. It neither extends the lease nor acquires
+a second one. Mandatory cancellation and filesystem cleanup can overrun their
+scheduling allowances; no global 45-minute apply timer is implied.
 `at` keeps its historical operation-start meaning; optional
 `snapshotStartedAt`/`snapshotCompletedAt` describe the actual source-copy interval.
 
@@ -201,7 +198,12 @@ separately name scratch subtrees inside the state directory.
   protect discovered databases before both policy rules and built-in directory
   skips. Named scratch subtrees under `state/` may be excluded; `state/` itself
   and paths containing protected databases may not.
-- **Measured, not silent.** Every excluded entry is listed in `skipped[]`
+- **Measured, not silent.** Preflight counts the entire tree, including excluded
+  scratch, without stopping at the selected-entry cap. It reports all top-level
+  counts and bytes, absolute symlinks and `.env` paths, the resolved state root,
+  and the largest subtrees. Incomplete diagnosis or an over-budget selected set
+  blocks before the gateway pause. The copy's own revalidation retains its
+  bounded walk. Every excluded entry is listed in `skipped[]`
   with its size; excluded directories are walked in a tolerant measuring
   pass (an unreadable corner of a tree we are not copying never fails the
   backup). Excluded-tree measurement has a shared 10,000-entry/250ms limit;
@@ -323,7 +325,7 @@ An archive from either producer counts as verified only when:
    --occurrence=1` — GNU `*` would otherwise span `/` and, with
    `--occurrence=1`, deterministically pick a *workspace's* own
    `manifest.json` when it sorts first; the extraction streams through a
-   16 MB tail (the runStreamed default of 64 KB truncated a real-size
+   32 MB tail (the runStreamed default of 64 KB truncated a real-size
    offline-copy manifest at ≳280 files, which is why the producer writes
    compact JSON), and the parsed object must carry a numeric `schemaVersion`
    and an `assets[]` array (9–14 ms on real archives);
@@ -414,9 +416,9 @@ go back.
 
 ## 6. Consented reuse of an earlier archive (WI-4.5)
 
-When the fresh ladder (offline copy first → in-quiesce upstream attempts
-when predicted to fit → live ladder → one migration-minimal copy under a fresh
-pause) is exhausted by a retryable failure on a hard
+When the fresh ladder (preflight → offline copy → safe in-quiesce upstream
+attempts when predicted to fit → migration-minimal within the same pause →
+safe live fallback, with no second pause) is exhausted by a retryable failure on a hard
 gate (`kReuseEligibleKinds`: `lock_contention`, `killed`, `timeout`,
 `vanished_file`, `window_exhausted`), the 409 `backup_failed` may
 carry `reusableBackup: { file, at, ageMs, sha256, producer }` — the newest
