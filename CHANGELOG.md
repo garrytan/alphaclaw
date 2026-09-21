@@ -94,10 +94,20 @@ truth.
   (a renewing lease pushes the wait out; an unreadable DB waits the full TTL)
   — instead of the crash backoff, and a lease that keeps renewing across the
   relaunch budget latches as "another gateway is running against this state
-  directory" (a second container on one volume). AlphaClaw never deletes a
-  lease row. The Watchdog tab names the wait (`owner_lease_held` copy) and
-  the latched case; `describeConflict` carries the lease facts (host, pid,
-  expiry — closed tokens, never stderr) onto the ledger rows and status.
+  directory" (a second container on one volume). Waiting out the TTL alone
+  was not enough — the PR's first strict container run still timed out on a
+  fast Linux runner, because a 5-min lease cannot lapse inside a 5-min health
+  budget — so while waiting, each tick also tries the ONE write this branch
+  makes on upstream's table: `reclaimStaleForeignGatewayOwnerLease` deletes
+  the row only if its holder is on ANOTHER host (a same-host row is
+  upstream's to judge), has missed ≥ 3 heartbeats (90 s), and the DELETE's
+  owner + last-heartbeat fence still matches inside `BEGIN IMMEDIATE` — a
+  beating holder is never removed — then relaunches at once (`repair/
+  owner_lease_held/ok {stale_owner_lease_reclaimed}`; skips book one row per
+  distinct reason). The Watchdog tab names the wait (`owner_lease_held`
+  copy) and the latched case; `describeConflict` carries the lease facts
+  (host, pid, expiry — closed tokens, never stderr) onto the ledger rows and
+  status.
 
 ## [0.9.87] - 2026-09-20
 

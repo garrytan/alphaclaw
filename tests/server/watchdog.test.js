@@ -67,8 +67,9 @@ const createHarness = ({
   readProcStartTicks = null,
   pidAlive = null,
   classifyOwnershipConflict = null,
-  // 2026.9.4+ owner-lease reader seam (openclaw-owner-lease.readGatewayOwnerLease shape).
+  // 2026.9.4+ owner-lease seams (openclaw-owner-lease read / reclaim shapes).
   readGatewayOwnerLease = null,
+  reclaimGatewayOwnerLease = null,
   degradedRepairThreshold = null,
   restartGatewayColdStart = null,
   restartGatewayForMitigation = null,
@@ -149,6 +150,7 @@ const createHarness = ({
     ...(pidAlive ? { pidAlive } : {}),
     ...(classifyOwnershipConflict ? { classifyOwnershipConflict } : {}),
     ...(readGatewayOwnerLease ? { readGatewayOwnerLease } : {}),
+    ...(reclaimGatewayOwnerLease ? { reclaimGatewayOwnerLease } : {}),
     ...(degradedRepairThreshold != null ? { degradedRepairThreshold } : {}),
     ...(restartGatewayColdStart ? { restartGatewayColdStart } : {}),
     ...(restartGatewayForMitigation ? { restartGatewayForMitigation } : {}),
@@ -5618,7 +5620,7 @@ describe("server/watchdog", () => {
       watchdog.stop();
     });
 
-    it("Codex 8′ (2026.9.4+). a held gateway-owner lease with NO healthy gateway is a transient conflict: degraded owner_lease_held, no crash row, the relaunch WAITS for the lease's recorded expiry (re-read each tick), then relaunches once — never doctor --fix, never gateway stop", async () => {
+    it("Codex 8′ (2026.9.4+). a held gateway-owner lease with NO healthy gateway is a transient conflict: degraded owner_lease_held, no crash row, the relaunch WAITS for the lease's recorded expiry (re-read each tick) while the holder's heartbeat is fresh, RECLAIMS the row once it is provably stale, then relaunches once — never doctor --fix, never gateway stop", async () => {
       const kLeaseLine = "Gateway failed to start: Another Gateway owner lease is still active for this state directory. Run openclaw gateway status --deep for diagnostics.";
       let nowMs = Date.now();
       const lease = {
@@ -5629,10 +5631,13 @@ describe("server/watchdog", () => {
         owner: { pid: 7, host: "a1b2c3d4e5f6", startedAt: 4242, port: 18789, mode: "foreground" },
       };
       const readGatewayOwnerLease = vi.fn(() => ({ ...lease, remainingMs: Math.max(0, lease.expiresAt - Date.now()) }));
+      // The reclaim seam mirrors the module: skipped while the beat is fresh, reclaimed once stale.
+      const reclaimGatewayOwnerLease = vi.fn(() => ({ status: "skipped", reason: "fresh_heartbeat", lease }));
       const { watchdog, insertWatchdogEvent, notifier, launchGatewayProcess, clawCmd } = createHarness({
         autoRepair: true,
         clawCmdImpl: doctorOk,
         readGatewayOwnerLease,
+        reclaimGatewayOwnerLease,
         fetchImpl: async () => {
           throw new Error("nobody listening");
         },
@@ -5670,25 +5675,35 @@ describe("server/watchdog", () => {
       const notices = noticesIncluding(notifier, "owner lease (host a1b2c3d4e5f6, pid 7) is still recorded in the state directory");
       expect(notices).toHaveLength(1);
       // 200 s of lease plus the 2 s post-expiry margin (kOwnerLeaseExpiryMarginMs).
-      expect(notices[0]).toMatch(/relaunched when it lapses \(about 20[0-3]s\)/);
+      expect(notices[0]).toMatch(/relaunched once that lease is provably stale, or when it lapses \(about 20[0-3]s at the latest\)/);
       expect(notices[0]).not.toContain("SECRET_STDERR_LINE");
       expect(noticesIncluding(notifier, "went down")).toHaveLength(0);
 
-      // Sustained failure BEFORE the expiry: the tick re-reads the lease and waits — no launch, no Doctor, no stop.
+      // Sustained failure BEFORE the expiry with a FRESH beat: the tick re-reads, tries the reclaim (skipped),
+      // books ONE skip row and waits — no launch, no Doctor, no stop. A second tick with the same reason adds no row.
       await watchdog.runHealthCheck({ source: "health_timer" });
       await settle();
       expect(readGatewayOwnerLease).toHaveBeenCalledTimes(2);
+      expect(reclaimGatewayOwnerLease).toHaveBeenCalledTimes(1);
       expect(launchGatewayProcess).not.toHaveBeenCalled();
       expect(doctorFixCalls(clawCmd)).toBe(0);
       expect(restartRows(insertWatchdogEvent, { source: "owner_lease_held", status: "requested" })).toHaveLength(0);
+      const skipRows = () => rowsOfType(insertWatchdogEvent, "repair").filter((row) => row.source === "owner_lease_held" && row.status === "skipped");
+      expect(skipRows()).toEqual([expect.objectContaining({ details: expect.objectContaining({ reason: "fresh_heartbeat", lease: expect.objectContaining({ host: "a1b2c3d4e5f6" }) }) })]);
+      await watchdog.runHealthCheck({ source: "health_timer" });
+      await settle();
+      expect(skipRows()).toHaveLength(1);
+      expect(launchGatewayProcess).not.toHaveBeenCalled();
 
-      // The lease lapses (the previous holder never heartbeat again): the next tick relaunches, once.
-      lease.status = "expired";
-      lease.expiresAt = Date.now() - 1;
+      // The holder has now missed three beats: the reclaim deletes the row and the SAME tick relaunches, once.
+      reclaimGatewayOwnerLease.mockImplementation(() => ({ status: "reclaimed", reason: "stale_foreign_host", lease }));
       await watchdog.runHealthCheck({ source: "health_timer" });
       await settle();
       expect(launchGatewayProcess).toHaveBeenCalledTimes(1);
       expect(restartRows(insertWatchdogEvent, { source: "owner_lease_held", status: "requested" })).toHaveLength(1);
+      expect(rowsOfType(insertWatchdogEvent, "repair").filter((row) => row.source === "owner_lease_held" && row.status === "ok")).toEqual([
+        expect.objectContaining({ details: expect.objectContaining({ reason: "stale_owner_lease_reclaimed", lease: expect.objectContaining({ host: "a1b2c3d4e5f6", pid: 7 }) }) }),
+      ]);
       expect(watchdog.getStatus().replacementPending).toMatchObject({ pid: 4242, source: "owner_lease_held" });
       // The relaunched contender stays under the latched conflict across its own launch (transient kinds survive markRelaunchRequested).
       expect(watchdog.getStatus().incumbentConflict).toMatchObject({ kind: "owner_lease_held" });
