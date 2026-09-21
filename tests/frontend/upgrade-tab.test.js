@@ -54,6 +54,7 @@ vi.mock("preact/hooks", () => {
 });
 
 vi.mock("../../lib/public/js/lib/api.js", () => ({
+  authFetch: vi.fn(async () => new Response(JSON.stringify({ ok: true, blocked: false, reason: null, diagnosis: { directories: { complete: true } } }))),
   applyOpenclawVersion: vi.fn(),
   createOpenclawBackup: vi.fn(),
   clearOpenclawBlocklist: vi.fn(),
@@ -1734,7 +1735,7 @@ describe("frontend/upgrade-tab hook", () => {
     let state = await hydrate();
     state.onRequestApply({ payload: { version: "x" }, label: "x" });
     state = renderHook({});
-    await state.onConfirmApply();
+    await state.onConfirmApply(); await renderHook({}).backupPreflight.confirm();
     state = renderHook({});
     expect(state.operation).toBeTruthy();
     expect(state.actionsDisabled).toBe(true);
@@ -1846,7 +1847,7 @@ describe("frontend/upgrade-tab hook", () => {
     state = renderHook({});
     expect(state.pendingApply.confirm.title).toBe("Switch to 2026.7.2?");
 
-    await state.onConfirmApply();
+    await state.onConfirmApply(); await renderHook({}).backupPreflight.confirm();
     // v0.9.81 (D13): the body declares its direction (2026.7.2 > the running
     // 2026.7.1-2 → update); a row click never claims "latest".
     expect(api.applyOpenclawVersion).toHaveBeenCalledWith({
@@ -1981,7 +1982,7 @@ describe("frontend/upgrade-tab hook", () => {
       label: "2026.7.2",
     });
     state = renderHook({});
-    await state.onConfirmApply();
+    await state.onConfirmApply(); await renderHook({}).backupPreflight.confirm();
 
     captured.onMessage({
       event: "step",
@@ -2019,7 +2020,7 @@ describe("frontend/upgrade-tab hook", () => {
       label: "latest dev (main HEAD)",
     });
     state = renderHook({});
-    await state.onConfirmApply();
+    await state.onConfirmApply(); await renderHook({}).backupPreflight.confirm();
 
     captured.onMessage({
       event: "error",
@@ -2056,7 +2057,7 @@ describe("frontend/upgrade-tab hook", () => {
       label: "2026.7.2",
     });
     state = renderHook({});
-    await state.onConfirmApply();
+    await state.onConfirmApply(); await renderHook({}).backupPreflight.confirm();
 
     captured.onMessage({
       event: "error",
@@ -2082,7 +2083,7 @@ describe("frontend/upgrade-tab hook", () => {
     });
     state = renderHook({});
 
-    await state.onConfirmApply();
+    await state.onConfirmApply(); await renderHook({}).backupPreflight.confirm();
 
     state = renderHook({});
     expect(state.operation).toBeNull();
@@ -2102,7 +2103,7 @@ describe("frontend/upgrade-tab hook", () => {
     });
     state = renderHook({});
 
-    await state.onConfirmApply();
+    await state.onConfirmApply(); await renderHook({}).backupPreflight.confirm();
 
     state = renderHook({});
     expect(state.operation).toBeNull();
@@ -2217,7 +2218,7 @@ describe("frontend/upgrade-tab hook", () => {
     expect(state.pendingApply.payload).toEqual({ channel: "dev", devHead: true });
     expect(state.pendingApply.intent).toBeNull();
     expect(state.pendingApply.expectLatest).toBe(false);
-    await state.onConfirmApply();
+    await state.onConfirmApply(); await renderHook({}).backupPreflight.confirm();
     expect(api.applyOpenclawVersion).toHaveBeenCalledWith({ channel: "dev", devHead: true });
   });
 
@@ -2233,7 +2234,7 @@ describe("frontend/upgrade-tab hook", () => {
     // An apply ran first (applyTargetRef now names it) and failed.
     state.onRequestApply({ payload: { channel: "stable", version: "2026.7.2" }, label: "2026.7.2" });
     state = renderHook({});
-    await state.onConfirmApply();
+    await state.onConfirmApply(); await renderHook({}).backupPreflight.confirm();
     captured.onMessage({ event: "error", data: { error: "verify failed", code: "verify_failed" } });
     state = renderHook({});
     state.onDismissOperation();
@@ -2241,7 +2242,7 @@ describe("frontend/upgrade-tab hook", () => {
     // The backup's streamed failure carries a reusableBackup the SERVER would
     // never send for a manual run — but even if it did, no offer may bind it
     // to the stale apply target.
-    await state.onBackupNow();
+    await state.onBackupNow(); await renderHook({}).backupPreflight.confirm();
     state = renderHook({});
     captured.onMessage({
       event: "error",
@@ -2307,7 +2308,7 @@ describe("frontend/upgrade-tab hook", () => {
     expect(state.pendingApply.intent).toBe("update");
     expect(state.pendingApply.expectLatest).toBe(true);
     expect(state.pendingApply.isDowngrade).toBe(false);
-    await state.onConfirmApply();
+    await state.onConfirmApply(); await renderHook({}).backupPreflight.confirm();
     expect(api.applyOpenclawVersion).toHaveBeenCalledWith({
       channel: "stable",
       version: "2026.7.2",
@@ -2387,7 +2388,7 @@ describe("frontend/upgrade-tab hook", () => {
     expect(state.pendingApply.isDowngrade).toBe(true);
     expect(state.pendingApply.intent).toBe("downgrade");
     expect(state.pendingApply.confirm.title).toBe("Downgrade to 2026.7.0?");
-    await state.onConfirmApply();
+    await state.onConfirmApply(); await renderHook({}).backupPreflight.confirm();
     expect(api.applyOpenclawVersion).toHaveBeenCalledWith({ channel: "stable", version: "2026.7.0", intent: "downgrade" });
   });
 
@@ -2401,7 +2402,7 @@ describe("frontend/upgrade-tab hook", () => {
     const catalogCallsBefore = api.fetchOpenclawCatalog.mock.calls.length;
     state.onUpdateToLatest();
     state = renderHook({});
-    await state.onConfirmApply();
+    await state.onConfirmApply(); await renderHook({}).backupPreflight.confirm();
     state = renderHook({});
     // One forced reload, and the confirm is back — on the server's version.
     expect(api.fetchOpenclawCatalog.mock.calls.length).toBe(catalogCallsBefore + 1);
@@ -2415,7 +2416,7 @@ describe("frontend/upgrade-tab hook", () => {
 
     // The operator confirms again and the server STILL says stale.
     showToast.mockClear();
-    await state.onConfirmApply();
+    await state.onConfirmApply(); await renderHook({}).backupPreflight.confirm();
     state = renderHook({});
     expect(api.applyOpenclawVersion).toHaveBeenCalledTimes(2);
     expect(api.applyOpenclawVersion).toHaveBeenLastCalledWith(
@@ -2438,7 +2439,7 @@ describe("frontend/upgrade-tab hook", () => {
     const channelCalls = api.fetchOpenclawChannel.mock.calls.length;
     state.onRequestApply({ payload: { channel: "stable", version: "2026.7.2" }, label: "2026.7.2" });
     state = renderHook({});
-    await state.onConfirmApply();
+    await state.onConfirmApply(); await renderHook({}).backupPreflight.confirm();
     await flushAsync();
     state = renderHook({});
     expect(state.applyError).toEqual(expect.objectContaining({ code: "intent_mismatch" }));
@@ -2462,7 +2463,12 @@ describe("frontend/upgrade-tab hook", () => {
     const backupsCallsBefore = api.fetchOpenclawBackups.mock.calls.length;
     const runsCallsBefore = api.fetchOpenclawRuns.mock.calls.length;
 
-    const pending = state.onBackupNow();
+    await state.onBackupNow();
+    state = renderHook({});
+    expect(state.operation).toBeNull();
+    expect(state.backupPreflight.dialogOpen).toBe(true);
+    expect(api.createOpenclawBackup).not.toHaveBeenCalled();
+    const pending = state.backupPreflight.confirm();
     state = renderHook({});
     expect(state.operation).toEqual(
       expect.objectContaining({ target: { kind: "backup" }, label: "manual backup", phase: "running" }),
@@ -2493,7 +2499,7 @@ describe("frontend/upgrade-tab hook", () => {
   it("Back up now: a quick 200 completes inline; an entry refusal (409 operation_in_progress) is a toast with no card; a quick 409 backup_failed leaves a failed backup card", async () => {
     api.createOpenclawBackup.mockResolvedValueOnce({ ...kBackupDone, operationId: "op-q" });
     let state = await hydrate();
-    await state.onBackupNow();
+    await state.onBackupNow(); await renderHook({}).backupPreflight.confirm();
     state = renderHook({});
     expect(state.operation).toEqual(expect.objectContaining({ phase: "completed", operationId: "op-q" }));
     state.onDismissOperation();
@@ -2502,7 +2508,7 @@ describe("frontend/upgrade-tab hook", () => {
     api.createOpenclawBackup.mockRejectedValueOnce(
       Object.assign(new Error("An OpenClaw update or backup is already running."), { code: "operation_in_progress" }),
     );
-    await state.onBackupNow();
+    await state.onBackupNow(); await renderHook({}).backupPreflight.confirm();
     state = renderHook({});
     expect(state.operation).toBeNull();
     expect(showToast).toHaveBeenCalledWith("An OpenClaw update or backup is already running.", "error");
@@ -2510,7 +2516,7 @@ describe("frontend/upgrade-tab hook", () => {
     api.createOpenclawBackup.mockRejectedValueOnce(
       Object.assign(new Error("The pre-update backup failed — no space left"), { code: "backup_failed", operationId: "op-f", hint: "Fix the cause and retry the backup." }),
     );
-    await state.onBackupNow();
+    await state.onBackupNow(); await renderHook({}).backupPreflight.confirm();
     state = renderHook({});
     expect(state.operation).toEqual(
       expect.objectContaining({ phase: "failed", operationId: "op-f", target: { kind: "backup" } }),
@@ -2521,7 +2527,9 @@ describe("frontend/upgrade-tab hook", () => {
   it("a second click while a backup runs is a no-op — one POST", async () => {
     api.createOpenclawBackup.mockImplementation(() => new Promise(() => {}));
     let state = await hydrate();
-    state.onBackupNow();
+    await state.onBackupNow();
+    state = renderHook({});
+    state.backupPreflight.confirm();
     state = renderHook({});
     state.onBackupNow();
     state.onBackupNow();
@@ -2537,14 +2545,14 @@ describe("frontend/upgrade-tab hook", () => {
     let state = await hydrate();
     state.onRequestApply({ payload: { channel: "stable", version: "2026.7.2" }, label: "2026.7.2" });
     state = renderHook({});
-    await state.onConfirmApply();
+    await state.onConfirmApply(); await renderHook({}).backupPreflight.confirm();
     state = renderHook({});
     // A quick 409 lands as applyError (no operation card) — Retry backup is
     // offered there too and remembers the in-flight target.
     expect(state.operation).toBeNull();
     expect(state.applyError).toEqual(expect.objectContaining({ code: "backup_failed" }));
 
-    await state.onRetryBackup();
+    await state.onRetryBackup(); await renderHook({}).backupPreflight.confirm();
     state = renderHook({});
     expect(api.createOpenclawBackup).toHaveBeenCalledTimes(1);
     expect(state.applyError).toBeNull();
@@ -2563,7 +2571,7 @@ describe("frontend/upgrade-tab hook", () => {
     expect(state.pendingApply).toEqual(
       expect.objectContaining({ payload: { channel: "stable", version: "2026.7.2" }, intent: "update", isDowngrade: false }),
     );
-    await state.onConfirmApply();
+    await state.onConfirmApply(); await renderHook({}).backupPreflight.confirm();
     expect(api.applyOpenclawVersion).toHaveBeenLastCalledWith({ channel: "stable", version: "2026.7.2", intent: "update" });
   });
 
@@ -2578,13 +2586,13 @@ describe("frontend/upgrade-tab hook", () => {
     let state = await hydrate();
     state.onRequestApply({ payload: { channel: "stable", version: "2026.7.0" }, label: "2026.7.0" });
     state = renderHook({});
-    await state.onConfirmApply();
+    await state.onConfirmApply(); await renderHook({}).backupPreflight.confirm();
     captured.onMessage({ event: "error", data: { error: "The pre-update backup failed", code: "backup_failed" } });
     state = renderHook({});
     expect(state.operation.phase).toBe("failed");
     expect(state.operation.intent).toBe("downgrade");
 
-    await state.onRetryBackup();
+    await state.onRetryBackup(); await renderHook({}).backupPreflight.confirm();
     state = renderHook({});
     expect(state.operation.retryUpdate).toEqual({ payload: { channel: "stable", version: "2026.7.0" }, label: "2026.7.0", intent: "downgrade" });
 
@@ -2595,10 +2603,10 @@ describe("frontend/upgrade-tab hook", () => {
     );
     state.onDismissOperation();
     state = renderHook({});
-    await state.onBackupNow();
+    await state.onBackupNow(); await renderHook({}).backupPreflight.confirm();
     state = renderHook({});
     expect(state.operation.phase).toBe("failed");
-    await state.onRetryBackup();
+    await state.onRetryBackup(); await renderHook({}).backupPreflight.confirm();
     state = renderHook({});
     expect(api.createOpenclawBackup).toHaveBeenCalledTimes(3);
     expect(state.operation.phase).toBe("completed");
@@ -2864,7 +2872,7 @@ describe("frontend/upgrade-tab hook", () => {
       label: "latest dev (main HEAD)",
     });
     state = renderHook({});
-    await state.onConfirmApply();
+    await state.onConfirmApply(); await renderHook({}).backupPreflight.confirm();
 
     captured.onMessage({
       event: "error",
@@ -3138,7 +3146,7 @@ describe("frontend/upgrade-tab hook", () => {
         isDowngrade: false,
       });
       state = renderHook({});
-      await state.onConfirmApply();
+      await state.onConfirmApply(); await renderHook({}).backupPreflight.confirm();
       state = renderHook({});
       expect(state.operation?.phase).toBe("restarting");
 
@@ -3376,7 +3384,7 @@ describe("frontend/upgrade-tab repair (2.3)", () => {
       label: "2026.7.3-beta.1",
     });
     state = renderHook({});
-    await state.onConfirmApply();
+    await state.onConfirmApply(); await renderHook({}).backupPreflight.confirm();
     captured.onMessage({
       event: "error",
       data: { error: "activation failed" },
@@ -3385,7 +3393,7 @@ describe("frontend/upgrade-tab repair (2.3)", () => {
     expect(state.operation.phase).toBe("failed");
 
     api.applyOpenclawVersion.mockClear();
-    await state.onRetryApply();
+    await state.onRetryApply(); await renderHook({}).backupPreflight.confirm();
     // The re-stage carries the failed operation's own declared direction.
     expect(api.applyOpenclawVersion).toHaveBeenCalledWith({
       channel: "beta",
@@ -3411,7 +3419,7 @@ describe("frontend/upgrade-tab repair (2.3)", () => {
       label: "2026.7.2",
     });
     state = renderHook({});
-    await state.onConfirmApply();
+    await state.onConfirmApply(); await renderHook({}).backupPreflight.confirm();
 
     // Running: dismiss is a no-op.
     state = renderHook({});

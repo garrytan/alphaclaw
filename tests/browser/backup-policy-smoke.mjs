@@ -63,6 +63,7 @@ try {
   await page.setViewportSize({ width: 1280, height: 960 });
   fixture.state.backupProfile = "migration-minimal";
   await page.getByRole("button", { name: "Back up now", exact: true }).click();
+  await page.getByRole("button", { name: "Continue", exact: true }).click();
   await page.getByRole("heading", { name: "Migration-only backup completed", exact: true }).waitFor();
   await page.getByText("migration-only — workspace and other state omitted; not reusable by a later update", { exact: true }).first().waitFor();
   await page.getByText("Last manual backup:", { exact: false }).filter({ hasText: "migration-only" }).waitFor();
@@ -71,6 +72,7 @@ try {
   await page.getByRole("button", { name: "Dismiss", exact: true }).first().click();
   fixture.state.backupStreamed = true;
   await page.getByRole("button", { name: "Back up now", exact: true }).click();
+  await page.getByRole("button", { name: "Continue", exact: true }).click();
   await page.getByRole("heading", { name: "Migration-only backup completed", exact: true }).waitFor();
   await page.getByText("Verified migration-only backup; workspace and other state omitted", { exact: true }).waitFor();
   await shot("minimal-streamed-result");
@@ -82,8 +84,10 @@ try {
   fixture.state.applyFailureMessage = "Fixture backup failed";
   await page.getByRole("button", { name: "Upgrade", exact: true }).first().click();
   await page.getByRole("button", { name: "Apply", exact: true }).click();
+  await page.getByRole("button", { name: "Continue", exact: true }).click();
   await page.getByText("Fixture backup failed", { exact: true }).waitFor();
   await page.getByRole("button", { name: "Retry backup", exact: true }).click();
+  await page.getByRole("button", { name: "Continue", exact: true }).click();
   await page.getByRole("heading", { name: "Migration-only backup completed", exact: true }).waitFor();
   await page.getByRole("button", { name: "Retry update to 2026.9.4", exact: true }).waitFor();
   await page.getByText("Retrying the update will run a fresh backup", { exact: false }).waitFor();

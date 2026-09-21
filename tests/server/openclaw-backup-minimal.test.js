@@ -53,6 +53,51 @@ const copyArgs = (stateDir) => {
 afterEach(() => { for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true }); });
 
 describe("migration-minimal inventory", () => {
+  it.each(["full", "migration-minimal"])("never archives regular or symlinked env secrets in the %s profile", async (profile) => {
+    const root = fixture();
+    write(root, ".env", "ROOT_SECRET=value");
+    write(root, "credentials/.env", "CREDENTIAL_SECRET=value");
+    write(root, "workspace/.env", "WORKSPACE_SECRET=value");
+    fs.symlinkSync(path.join(root, ".env"), path.join(root, "identity/.env"));
+    const result = await createOfflineCopy({ ...copyArgs(root), profile, excludes: [], rootExcludes: [] });
+    const destination = temporary();
+    execFileSync("tar", ["-xzf", result.file, "-C", destination]);
+    const names = execFileSync("tar", ["-tzf", result.file], { encoding: "utf8" }).trim().split("\n");
+    expect(names.some((name) => name.split("/").includes(".env"))).toBe(false);
+    expect(result.manifest.assets.some((asset) => asset.archivePath.split("/").includes(".env"))).toBe(false);
+    expect(fs.readFileSync(path.join(destination, result.manifest.archiveRoot, "credentials/provider.json"), "utf8")).toBe('{"secret":"credential"}');
+  });
+
+  it("refuses an env file selected as configuration even through a config symlink", async () => {
+    const root = fixture();
+    const secret = write(root, ".env", "{}");
+    await expect(createOfflineCopy({ ...copyArgs(root), profile: "full", spawnEnv: { OPENCLAW_CONFIG_PATH: secret } }))
+      .rejects.toMatchObject({ code: "BACKUP_SECRET_SOURCE" });
+    fs.unlinkSync(path.join(root, "openclaw.json"));
+    fs.symlinkSync(secret, path.join(root, "openclaw.json"));
+    await expect(createOfflineCopy({ ...copyArgs(root), profile: "full" })).rejects.toMatchObject({ code: "BACKUP_SECRET_SOURCE" });
+  });
+
+  it("canonicalizes only the state root and retains aliased config, OAuth, configured and registered owners", async () => {
+    const root = fixture();
+    const alias = path.join(temporary(), "state-link");
+    fs.symlinkSync(root, alias);
+    write(root, "openclaw.json", JSON.stringify({ agents: { list: [{ id: "custom", agentDir: path.join(alias, "state/custom") }] } }));
+    database(root, "state/custom/custom.sqlite");
+    register(root, [["main", path.join(alias, "agents/main/agent/openclaw-agent.sqlite")]]);
+    const spawnEnv = { OPENCLAW_CONFIG_PATH: path.join(alias, "openclaw.json"), OPENCLAW_OAUTH_DIR: path.join(alias, "credentials") };
+    const inventory = await buildMigrationInventory({ stateDir: alias, spawnEnv });
+    expect(inventory.stateDir).toBe(root);
+    expect(inventory.configPath).toBe(path.join(root, "openclaw.json"));
+    expect(inventory.dbs.map((db) => db.archivePath)).toContain("state/custom/custom.sqlite");
+    for (const profile of ["full", "migration-minimal"]) {
+      const result = await createOfflineCopy({ ...copyArgs(alias), profile, spawnEnv });
+      expect(result.coverage.migration).toBe("complete");
+      expect(result.manifest.paths.stateDir).toBe(root);
+      expect(result.manifest.assets.map((asset) => asset.archivePath)).toContain("openclaw.json");
+    }
+  });
+
   it("unions direct, configured, and every registry schema without entering scratch", async () => {
     const root = fixture();
     const custom = path.join(root, "state", "owners", "custom");

@@ -669,6 +669,7 @@ describe("server/openclaw-channel-backup-retry", () => {
         "start",
         "unsuppress",
         "release",
+        "isRunning",
       ]);
       expect(isStateDbQuiet()).toBe(false);
       // The barrier's expiry is derived from the effective budgets + slack —
@@ -743,7 +744,7 @@ describe("server/openclaw-channel-backup-retry", () => {
         .lastUpdateRun.steps.filter((s) => s.name === "backup" && s.status === "running");
       expect(runningSteps).toHaveLength(1);
       expect(runningSteps[0].detail).toBe(
-        "pausing the gateway for a consistent backup (AlphaClaw offline copy first)",
+        "Gateway relaunched — waiting for it to answer before continuing",
       );
       // Never "after 0 upstream attempts".
       expect(lastStepDetail(harness, "backup", "completed").detail).toBe(
@@ -825,21 +826,26 @@ describe("server/openclaw-channel-backup-retry", () => {
         expect.objectContaining({
           ok: false,
           stage: "budget",
-          next: { rung: "live", reason: "predicted_too_slow" },
+          next: { rung: "live", reason: "offline_copy_budget" },
         }),
       );
-      // The reserved migration-minimal attempt owns a fresh pause even after
-      // the broad envelope is spent. Both transactions fully unwind.
       expect(quiesce.calls).toEqual([
-        "acquireLock", "isRunning", "suppress", "stop", "dbQuiet",
-        "dbResume", "start", "unsuppress", "release", "isRunning",
-        "acquireLock", "isRunning", "suppress", "stop", "dbQuiet",
-        "dbResume", "start", "unsuppress", "release",
+        "acquireLock",
+        "isRunning",
+        "suppress",
+        "stop",
+        "dbQuiet",
+        "dbResume",
+        "start",
+        "unsuppress",
+        "release",
+        "isRunning",
       ]);
       expect(isStateDbQuiet()).toBe(false);
       expect(readRunBackupRecord(harness).attemptsDetail.at(-1)).toEqual(
-        expect.objectContaining({ rung: "migration_minimal", quiesced: true, ok: false }),
+        expect.objectContaining({ rung: "offline_copy", quiesced: true, ok: false }),
       );
+      expect(readRunBackupRecord(harness).migrationMinimal).toMatchObject({ ok: false, stage: "budget" });
     });
 
     it("the usable check always gets at least the reserve, even when the succeeding attempt spent the envelope", async () => {
@@ -936,11 +942,9 @@ describe("server/openclaw-channel-backup-retry", () => {
       expect(result.body.message).toMatch(/another gateway operation/i);
       expect(backupCalls).toHaveLength(0);
       expect(quiesce.stop).not.toHaveBeenCalled();
-      // Both the broad and reserved minimal acquires resolve after their
-      // races gave up. Each late release must fire to avoid a leaked lease.
       await sleep(200);
-      expect(quiesce.acquireLock).toHaveBeenCalledTimes(2);
-      expect(quiesce.releaseSpy).toHaveBeenCalledTimes(2);
+      expect(quiesce.acquireLock).toHaveBeenCalledTimes(1);
+      expect(quiesce.releaseSpy).toHaveBeenCalledTimes(1);
       expect(quiesce.dbQuiet).not.toHaveBeenCalled();
     });
 
@@ -985,6 +989,7 @@ describe("server/openclaw-channel-backup-retry", () => {
       expect(backupRecord.attemptsDetail.map((a) => [a.rung, a.reason, a.quiesced, a.ok, a.kind])).toEqual([
         ["offline_copy", "primary", true, false, "offline_copy_failed"],
         ["upstream", "predicted_fits", true, false, "vanished_file"],
+        ["migration_minimal", "broader_backups_failed", true, false, "offline_copy_failed"],
         ["upstream", "live_fallback", false, true, null],
       ]);
     });
@@ -1030,10 +1035,16 @@ describe("server/openclaw-channel-backup-retry", () => {
       // The broad pause and reserved minimal pause each restore the gateway
       // and release the barrier, suppression and lease before finalization.
       expect(quiesce.calls).toEqual([
-        "acquireLock", "isRunning", "suppress", "stop", "dbQuiet",
-        "dbResume", "start", "unsuppress", "release", "isRunning",
-        "acquireLock", "isRunning", "suppress", "stop", "dbQuiet",
-        "dbResume", "start", "unsuppress", "release",
+        "acquireLock",
+        "isRunning",
+        "suppress",
+        "stop",
+        "dbQuiet",
+        "dbResume",
+        "start",
+        "unsuppress",
+        "release",
+        "isRunning",
       ]);
       expect(isStateDbQuiet()).toBe(false);
     });
@@ -1093,6 +1104,7 @@ describe("server/openclaw-channel-backup-retry", () => {
         "dbQuiet",
         "offline-copy(quiet)",
         "backup-cli",
+        "offline-copy(quiet)",
         "dbResume",
         "start",
         "unsuppress",
@@ -1113,6 +1125,7 @@ describe("server/openclaw-channel-backup-retry", () => {
       expect(backupRecord.attemptsDetail.map((a) => a.reason)).toEqual([
         "primary",
         "predicted_fits",
+        "broader_backups_failed",
         "workspace_retry",
       ]);
       expect(
@@ -1152,6 +1165,7 @@ describe("server/openclaw-channel-backup-retry", () => {
         "dbQuiet",
         "offline-copy(quiet)",
         "backup-cli",
+        "offline-copy(quiet)",
         "dbResume",
         "start",
         "unsuppress",
@@ -1160,8 +1174,10 @@ describe("server/openclaw-channel-backup-retry", () => {
         "backup-cli",
       ]);
       expect(eventsOfType(harness.insertEvent, "backup_contention")).toHaveLength(0);
-      // The copy ran exactly once.
+      // Each copy profile ran once within the same pause.
       expect(eventsOfType(harness.insertEvent, "backup_offline_copy").map((e) => e.status)).toEqual([
+        "started",
+        "failed",
         "started",
         "failed",
       ]);
@@ -1186,6 +1202,7 @@ describe("server/openclaw-channel-backup-retry", () => {
       expect(record.attemptsDetail.map((a) => [a.rung, a.reason, a.quiesced, a.kind])).toEqual([
         ["offline_copy", "primary", true, "offline_copy_failed"],
         ["upstream", "predicted_fits", true, "timeout"],
+        ["migration_minimal", "broader_backups_failed", true, "offline_copy_failed"],
         ["upstream", "live_fallback", false, null],
       ]);
       // WI-1.5: the retry detail names the ACTUAL prior kind, not a race.
@@ -1265,7 +1282,7 @@ describe("server/openclaw-channel-backup-retry", () => {
       }
     });
 
-    it("a failed gateway relaunch after the backup warns on its OWN step and notifies instead of failing the apply", async () => {
+    it("a failed gateway relaunch after the backup warns on its own step and aborts the apply", async () => {
       const quiesce = makeQuiesceRecorder({ startThrows: true });
       const { runnerImpl } = makeBackupRunner({});
       const harness = createHarness({ runnerImpl, gatewayQuiesce: quiesce });
@@ -1273,7 +1290,8 @@ describe("server/openclaw-channel-backup-retry", () => {
       const result = await harness.sync.applyUpdate(kHardGateTarget);
       await flushAsync();
 
-      expect(result.status).toBe(202);
+      expect(result.status).toBe(409);
+      expect(harness.installToTempDir).not.toHaveBeenCalled();
       expect(
         notifyMessages(harness.notify).some((m) =>
           /did not relaunch cleanly/i.test(m),
@@ -1282,11 +1300,9 @@ describe("server/openclaw-channel-backup-retry", () => {
       // unsuppress still ran so the watchdog takes recovery over.
       expect(quiesce.unsuppress).toHaveBeenCalledTimes(1);
       expect(quiesce.releaseSpy).toHaveBeenCalledTimes(1);
-      // WI-1.9: the backup step's outcome stays "completed"; the relaunch
-      // failure is its own gateway-relaunch step.
       const steps = harness.store.readState().lastUpdateRun.steps;
       const backupStatuses = steps.filter((s) => s.name === "backup").map((s) => s.status);
-      expect(backupStatuses[backupStatuses.length - 1]).toBe("completed");
+      expect(backupStatuses[backupStatuses.length - 1]).toBe("failed");
       expect(backupStatuses).not.toContain("warning");
       expect(steps).toContainEqual(
         expect.objectContaining({
@@ -1499,6 +1515,7 @@ describe("server/openclaw-channel-backup-retry", () => {
         "start",
         "unsuppress",
         "release",
+        "isRunning",
       ]);
       const record = readRunBackupRecord(harness);
       expect(record).toEqual(
@@ -1539,10 +1556,16 @@ describe("server/openclaw-channel-backup-retry", () => {
       // paused migration-minimal copy failed too before the soft warning.
       expect(backupCalls).toHaveLength(2);
       expect(quiesce.calls).toEqual([
-        "acquireLock", "isRunning", "suppress", "stop", "dbQuiet",
-        "dbResume", "start", "unsuppress", "release", "isRunning",
-        "acquireLock", "isRunning", "suppress", "stop", "dbQuiet",
-        "dbResume", "start", "unsuppress", "release",
+        "acquireLock",
+        "isRunning",
+        "suppress",
+        "stop",
+        "dbQuiet",
+        "dbResume",
+        "start",
+        "unsuppress",
+        "release",
+        "isRunning",
       ]);
       expect(isStateDbQuiet()).toBe(false);
       expect(
@@ -1566,9 +1589,9 @@ describe("server/openclaw-channel-backup-retry", () => {
       );
       expect(record.attemptsDetail.map((a) => [a.rung, a.reason, a.ok])).toEqual([
         ["offline_copy", "primary", false],
+        ["migration_minimal", "broader_backups_failed", false],
         ["upstream", "live_fallback", false],
         ["upstream", "live_retry", false],
-        ["migration_minimal", "broader_backups_failed", false],
       ]);
       expect(lastStepDetail(harness, "backup", "warning")).toBeTruthy();
     });
@@ -1705,6 +1728,7 @@ describe("server/openclaw-channel-backup-retry", () => {
       expect(record.offlineCopy.error).toMatch(/1 live openclaw process\(es\): 4242 \(openclaw gateway run\)/);
       expect(record.attemptsDetail.map((a) => [a.rung, a.reason, a.quiesced, a.ok, a.kind])).toEqual([
         ["offline_copy", "primary", true, false, "offline_copy_refused"],
+        ["migration_minimal", "broader_backups_failed", true, false, "offline_copy_refused"],
         ["upstream", "live_fallback", false, true, null],
       ]);
       expect(
@@ -1712,6 +1736,7 @@ describe("server/openclaw-channel-backup-retry", () => {
       ).toEqual([
         ["chosen", "offline_copy", "primary"],
         ["handed_over", "upstream", "offline_copy_refused"],
+        ["chosen", "migration_minimal", "broader_backups_failed"],
         ["chosen", "upstream", "live_fallback"],
       ]);
       // The first live row names what it follows.
@@ -1773,16 +1798,6 @@ describe("server/openclaw-channel-backup-retry", () => {
         "unsuppress",
         "release",
         "isRunning",
-        "acquireLock",
-        "isRunning",
-        "suppress",
-        "stop",
-        "dbQuiet",
-        "dbResume",
-        "start",
-        "warning:pending",
-        "unsuppress",
-        "release",
       ]);
       expect(isStateDbQuiet()).toBe(false);
       expect(lastStepDetail(harness, "backup", "warning")).toBeUndefined();
@@ -1807,8 +1822,8 @@ describe("server/openclaw-channel-backup-retry", () => {
       );
       expect(readRunBackupRecord(harness).attemptsDetail).toEqual([
         expect.objectContaining({ rung: "offline_copy", kind: "offline_copy_refused" }),
-        expect.objectContaining({ rung: "upstream", kind: "generic" }),
         expect.objectContaining({ rung: "migration_minimal", quiesced: true, kind: "offline_copy_refused" }),
+        expect.objectContaining({ rung: "upstream", kind: "generic" }),
       ]);
       expect(fs.readdirSync(path.join(harness.rootDir, "backups", "openclaw"))).toEqual([]);
     });
@@ -1829,8 +1844,8 @@ describe("server/openclaw-channel-backup-retry", () => {
       expect(backupCalls).toHaveLength(0);
       expect(lastStepDetail(harness, "backup", "failed").error).toMatch(/another gateway operation is in progress/);
       await sleep(200);
-      expect(quiesce.acquireLock).toHaveBeenCalledTimes(2);
-      expect(quiesce.releaseSpy).toHaveBeenCalledTimes(2);
+      expect(quiesce.acquireLock).toHaveBeenCalledTimes(1);
+      expect(quiesce.releaseSpy).toHaveBeenCalledTimes(1);
       expect(quiesce.stop).not.toHaveBeenCalled();
       expect(quiesce.dbQuiet).not.toHaveBeenCalled();
     });
@@ -2643,6 +2658,7 @@ describe("server/openclaw-channel-backup-retry", () => {
       expect(record.attemptsDetail.map((a) => [a.rung, a.quiesced, a.kind ?? "ok"])).toEqual([
         ["offline_copy", true, "offline_copy_failed"],
         ["upstream", true, "stalled"],
+        ["migration_minimal", true, "offline_copy_failed"],
         ["upstream", false, "ok"],
       ]);
     });
@@ -2725,6 +2741,7 @@ describe("server/openclaw-channel-backup-retry", () => {
         "dbResume",
         "start",
         "unsuppress",
+        "isRunning",
       ]);
       expect(lock.getActiveOperation()).toBeNull();
       expect(isStateDbQuiet()).toBe(false);
@@ -3358,6 +3375,7 @@ describe("server/openclaw-channel-backup-retry", () => {
         "start",
         "unsuppress",
         "release",
+        "isRunning",
       ]);
       // Every in-quiesce attempt gets what is LEFT of the fixed deadline,
       // which is sized for both quiesced rungs up front (#79 (c)).
@@ -3417,8 +3435,10 @@ describe("server/openclaw-channel-backup-retry", () => {
       const [event] = eventsOfType(harness.insertEvent, "backup_contention");
       expect(event.status).toBe("exhausted");
       expect(event.details.reason).toBe("insufficient_budget");
-      // Exactly one copy this pause.
+      // Each copy profile ran once within the same pause.
       expect(eventsOfType(harness.insertEvent, "backup_offline_copy").map((e) => e.status)).toEqual([
+        "started",
+        "failed",
         "started",
         "failed",
       ]);
@@ -3459,6 +3479,7 @@ describe("server/openclaw-channel-backup-retry", () => {
         "start",
         "unsuppress",
         "release",
+        "isRunning",
       ]);
       const record = readRunBackupRecord(harness);
       expect(record).toEqual(
@@ -3582,9 +3603,10 @@ describe("server/openclaw-channel-backup-retry", () => {
             walk: "complete",
             excludedBytes: junkBytes,
             copySetBytes: dbBytes + keep.length,
-            tarSetBytes: dbBytes + keep.length + junkBytes,
+            tarSetBytes: record.diagnosis.directories.topLevel.reduce((sum, entry) => sum + entry.bytes, 0),
           }),
         );
+        expect(record.diagnosis.tarSetBytes).toBeGreaterThanOrEqual(dbBytes + keep.length + junkBytes);
         // (b) the archive lists the DB and the kept file, no excluded path.
         const { execFileSync } = require("child_process");
         const listed = execFileSync("tar", ["-tzf", record.file], { encoding: "utf8" });
@@ -3612,6 +3634,7 @@ describe("server/openclaw-channel-backup-retry", () => {
           { pattern: "*.heapsnapshot", files: 1, bytes: junk.heapsnapshot },
           { pattern: "*.tmp", files: 1, bytes: junk.tmp },
           { pattern: "logs/**/*.gz", files: 0, bytes: 0 },
+          ...require("../../lib/server/openclaw-backup-policy").kOfflineCopyRootExcludes.map((pattern) => ({ pattern, scope: "root", files: 0, bytes: 0 })),
         ]);
         expect(manifest.partialReasons).toEqual([]);
       },
@@ -3635,6 +3658,8 @@ describe("server/openclaw-channel-backup-retry", () => {
       expect(backupCalls).toHaveLength(2);
       expect(eventsOfType(harness.insertEvent, "backup_contention")).toHaveLength(0);
       expect(eventsOfType(harness.insertEvent, "backup_offline_copy").map((e) => e.status)).toEqual([
+        "started",
+        "failed",
         "started",
         "failed",
       ]);
@@ -3726,6 +3751,7 @@ describe("server/openclaw-channel-backup-retry", () => {
       ).toEqual([
         ["chosen", "offline_copy", "primary"],
         ["handed_over", "upstream", "rollback_journal_self_deadlock"],
+        ["chosen", "migration_minimal", "broader_backups_failed"],
         ["chosen", "upstream", "live_fallback"],
       ]);
     });
@@ -3775,12 +3801,12 @@ describe("server/openclaw-channel-backup-retry", () => {
       );
       expect(record.attemptsDetail).toEqual([
         expect.objectContaining({ rung: "offline_copy", reason: "primary", quiesced: true, ok: false, kind: "offline_copy_refused" }),
-        expect.objectContaining({ rung: "upstream", reason: "live_fallback", quiesced: false, ok: false, kind: "generic" }),
         expect.objectContaining({ rung: "migration_minimal", reason: "broader_backups_failed", quiesced: true, ok: false, kind: "offline_copy_refused" }),
+        expect.objectContaining({ rung: "upstream", reason: "live_fallback", quiesced: false, ok: false, kind: "generic" }),
       ]);
-      expect(quiesce.start).toHaveBeenCalledTimes(2);
-      expect(quiesce.dbResume).toHaveBeenCalledTimes(2);
-      expect(quiesce.releaseSpy).toHaveBeenCalledTimes(2);
+      expect(quiesce.start).toHaveBeenCalledTimes(1);
+      expect(quiesce.dbResume).toHaveBeenCalledTimes(1);
+      expect(quiesce.releaseSpy).toHaveBeenCalledTimes(1);
       expect(isStateDbQuiet()).toBe(false);
     });
 
@@ -3855,8 +3881,8 @@ describe("server/openclaw-channel-backup-retry", () => {
       expect(result.status).toBe(202);
       expect(samples).toBeGreaterThanOrEqual(5);
       // The fd scan ran once the re-settle had drained the child, so it was clean.
-      expect(listFdHolders).toHaveBeenCalledTimes(1);
-      expect(listFdHolders.mock.results[0].value).toEqual([]);
+      expect(listFdHolders).toHaveBeenCalledTimes(2);
+      expect(listFdHolders.mock.results.map((result) => result.value)).toEqual([[], []]);
       const record = readRunBackupRecord(harness);
       expect(record).toEqual(
         expect.objectContaining({
@@ -4079,6 +4105,8 @@ describe("server/openclaw-channel-backup-retry", () => {
       expect(eventsOfType(harness.insertEvent, "backup_offline_copy").map((e) => e.status)).toEqual([
         "started",
         "failed",
+        "started",
+        "failed",
       ]);
     });
 
@@ -4102,6 +4130,7 @@ describe("server/openclaw-channel-backup-retry", () => {
         "suppress",
         "stop",
         "dbQuiet",
+        "offline-copy(quiet)",
         "offline-copy(quiet)",
         "dbResume",
         "start",
@@ -4129,6 +4158,7 @@ describe("server/openclaw-channel-backup-retry", () => {
       );
       expect(record.attemptsDetail.map((a) => [a.rung, a.reason, a.quiesced, a.ok, a.kind])).toEqual([
         ["offline_copy", "primary", true, false, "offline_copy_failed"],
+        ["migration_minimal", "broader_backups_failed", true, false, "offline_copy_failed"],
         ["upstream", "live_fallback", false, true, null],
       ]);
       expect(
@@ -4136,6 +4166,7 @@ describe("server/openclaw-channel-backup-retry", () => {
       ).toEqual([
         ["chosen", "offline_copy", "primary"],
         ["handed_over", "upstream", "predicted_too_slow"],
+        ["chosen", "migration_minimal", "broader_backups_failed"],
         ["chosen", "upstream", "live_fallback"],
       ]);
       // WI-1.5: the first live row names what it follows — the copy and its
@@ -4202,14 +4233,6 @@ describe("server/openclaw-channel-backup-retry", () => {
       // Neither the broad nor minimal pause resumes a barrier it never got;
       // both still relaunch, unsuppress and release their lifecycle lease.
       expect(quiesce.calls).toEqual([
-        "acquireLock",
-        "isRunning",
-        "suppress",
-        "stop",
-        "dbQuiet",
-        "start",
-        "unsuppress",
-        "release",
         "acquireLock",
         "isRunning",
         "suppress",
@@ -4305,7 +4328,8 @@ describe("server/openclaw-channel-backup-retry", () => {
       const record = readRunBackupRecord(harness);
       const diagnosis = record.diagnosis;
       const copySetBytes = dbBytes + ws.payloadBytes;
-      const tarSetBytes = copySetBytes + ws.excludedBytes;
+      const tarSetBytes = diagnosis.directories.topLevel.reduce((sum, entry) => sum + entry.bytes, 0);
+      expect(tarSetBytes).toBeGreaterThanOrEqual(copySetBytes + ws.excludedBytes);
       expect(diagnosis).toEqual(
         expect.objectContaining({
           walk: "complete",
@@ -4375,7 +4399,7 @@ describe("server/openclaw-channel-backup-retry", () => {
       expect(record.upstreamVeto).toBeNull();
     });
 
-    it("an incomplete diagnosis walk (budget hit) predicts unknown — every size null, both predictions null, the prior run NOT consulted — and the failed copy hands over fail-closed (prediction_unknown), never to the in-quiesce upstream", async () => {
+    it("an incomplete diagnosis walk leaves sizes and predictions unknown and refuses before any gateway pause or CLI", async () => {
       const quiesce = makeQuiesceRecorder({});
       const { runnerImpl, backupCalls } = makeBackupRunner({ onArchiveTool: failCopyArchive });
       let harness;
@@ -4406,7 +4430,7 @@ describe("server/openclaw-channel-backup-retry", () => {
 
       const result = await harness.sync.applyUpdate(kHardGateTarget);
 
-      expect(result.status).toBe(202);
+      expect(result.status).toBe(409);
       const record = readRunBackupRecord(harness);
       expect(record.diagnosis).toEqual(
         expect.objectContaining({
@@ -4429,18 +4453,15 @@ describe("server/openclaw-channel-backup-retry", () => {
       // The DB-level facts still came through: the walk is the only casualty.
       expect(record.diagnosis).toEqual(expect.objectContaining({ journalMode: "wal", dbCount: 1 }));
       expect(record.diagnosis.stateBytes).toBeGreaterThan(0);
-      // Fail-closed: the copy failed (archive) and the upstream ran ONCE, live.
-      expect(backupCalls).toHaveLength(1);
+      expect(backupCalls).toHaveLength(0);
+      expect(quiesce.stop).not.toHaveBeenCalled();
+      expect(quiesce.acquireLock).not.toHaveBeenCalled();
       expect(record).toEqual(
         expect.objectContaining({
-          producer: "openclaw",
-          quiesced: true,
+          backupFailureKind: "preflight_failed",
+          quiesced: false,
           quiescedAttempts: 0,
-          offlineCopy: expect.objectContaining({
-            ok: false,
-            stage: "archive",
-            next: { rung: "live", reason: "prediction_unknown" },
-          }),
+          offlineCopy: null,
         }),
       );
       expect(eventsOfType(harness.insertEvent, "backup_diagnosis")[0].details).toEqual(
@@ -4562,17 +4583,17 @@ describe("server/openclaw-channel-backup-retry", () => {
       );
       expect(record.attemptsDetail.map((a) => [a.rung, a.reason, a.quiesced, a.ok, a.kind])).toEqual([
         ["offline_copy", "primary", true, false, "offline_copy_failed"],
-        ["upstream", "live_fallback", false, false, "lock_contention"],
         ["migration_minimal", "broader_backups_failed", true, false, "offline_copy_failed"],
+        ["upstream", "live_fallback", false, false, "lock_contention"],
       ]);
       expect(
         eventsOfType(harness.insertEvent, "backup_rung").map((e) => [e.status, e.details.rung, e.details.reason]),
       ).toEqual([
         ["chosen", "offline_copy", "primary"],
         ["handed_over", "upstream", "rollback_journal_self_deadlock"],
+        ["chosen", "migration_minimal", "broader_backups_failed"],
         ["chosen", "upstream", "live_fallback"],
         ["skipped", "upstream", "rollback_journal_self_deadlock"],
-        ["chosen", "migration_minimal", "broader_backups_failed"],
       ]);
       // The live row still says why there is no upstream retry; the final
       // running row now belongs to the reserved migration-minimal attempt.
@@ -4693,7 +4714,7 @@ describe("server/openclaw-channel-backup-retry", () => {
         .readState()
         .lastUpdateRun.steps.filter((s) => s.name === "backup" && s.status === "running");
       expect(running).toHaveLength(1);
-      expect(running[0].detail).toBeUndefined();
+      expect(running[0].detail).toBe("Backup preflight complete — preparing a consistent backup");
     });
   });
 
@@ -4758,7 +4779,7 @@ describe("server/openclaw-channel-backup-retry", () => {
         "--occurrence=1",
         "*/manifest.json",
       ]);
-      expect(archiveToolCalls[1].tailBytes).toBe(16 * 1024 * 1024);
+      expect(archiveToolCalls[1].tailBytes).toBe(32 * 1024 * 1024);
     });
   });
 
@@ -5180,9 +5201,9 @@ describe("server/openclaw-channel-backup-retry", () => {
       const record = readRunBackupRecord(harness);
       expect(record.attemptsDetail.map((a) => [a.rung, a.reason, a.quiesced, a.kind])).toEqual([
         ["offline_copy", "primary", true, "offline_copy_refused"],
+        ["migration_minimal", "broader_backups_failed", true, "offline_copy_refused"],
         ["upstream", "live_fallback", false, "lock_contention"],
         ["upstream", "live_retry", false, "lock_contention"],
-        ["migration_minimal", "broader_backups_failed", true, "offline_copy_refused"],
       ]);
       // Both pauses unwind. No gzip or tar candidate verification is allowed
       // through the reuse gate while ownership remains unresolved.
@@ -5199,15 +5220,6 @@ describe("server/openclaw-channel-backup-retry", () => {
         "isRunning",
         "backup-cli(live)",
         "backup-cli(live)",
-        "acquireLock",
-        "isRunning",
-        "suppress",
-        "stop",
-        "dbQuiet",
-        "dbResume",
-        "start",
-        "unsuppress",
-        "release",
       ]);
       expect(isStateDbQuiet()).toBe(false);
     });
@@ -5259,20 +5271,12 @@ describe("server/openclaw-channel-backup-retry", () => {
         "offline-copy:quiet",
         "backup-cli",
         "gzip:quiet",
-        "dbResume",
-        "start",
-        "unsuppress",
-        "release",
-        "acquireLock",
-        "isRunning",
-        "suppress",
-        "stop",
-        "dbQuiet",
         "offline-copy:quiet",
         "dbResume",
         "start",
         "unsuppress",
         "release",
+        "isRunning",
         "gzip:resumed",
         "tar:resumed",
       ]);
@@ -5318,6 +5322,7 @@ describe("server/openclaw-channel-backup-retry", () => {
         "record:pending",
         "unsuppress",
         "release",
+        "isRunning",
       ]);
       const record = readRunBackupRecord(harness);
       expect(record).toEqual(
@@ -5363,6 +5368,28 @@ describe("server/openclaw-channel-backup-retry", () => {
       expect(result.body.reusableBackup).toEqual(
         expect.objectContaining({ file: seeded.file, sha256: seeded.sha256 }),
       );
+    });
+
+    it("does not offer reuse when a holder remains and the single pause expires before minimal coverage can be proven", async () => {
+      const quiesce = makeQuiesceRecorder({});
+      const { runnerImpl, backupCalls } = makeBackupRunner({});
+      let harness;
+      let expired = false;
+      harness = createHarness({ runnerImpl, gatewayQuiesce: quiesce,
+        backupProbes: { ...kQuietProbes, listFdHolders: ({ dbPaths }) => {
+          if (!expired) { expired = true; harness.nowRef.now += 30 * 60_000; }
+          return [{ pid: 4242, path: dbPaths[0] }];
+        } },
+      });
+      seedStateDb(harness);
+      seedReusableArchive(harness, { ageMs: 2 * kHour });
+      const result = await harness.sync.applyUpdate(kHardGateTarget);
+      expect(result.status).toBe(409);
+      expect(result.body.reusableBackup).toBeUndefined();
+      expect(result.body.backupRiskBlocked).toBe(true);
+      expect(result.body.offlineCopy).toMatchObject({ ok: false, stage: "exclusivity" });
+      expect(backupCalls).toHaveLength(0);
+      expect(quiesce.stop).toHaveBeenCalledTimes(1);
     });
 
     it("a usable check that hits OUR timeout is window_exhausted: honest message, the CLI-verified archive stays in place (no .unverified), reuse offered", async () => {
@@ -5976,20 +6003,12 @@ describe("server/openclaw-channel-backup-retry", () => {
         "dbQuiet",
         "offline-copy(quiet)",
         "backup-cli",
-        "dbResume(tmp-present)",
-        "start(tmp-present)",
-        "unsuppress",
-        "release(tmp-present)",
-        "acquireLock",
-        "isRunning",
-        "suppress",
-        "stop",
-        "dbQuiet",
         "offline-copy(quiet)",
         "dbResume(tmp-present)",
         "start(tmp-present)",
         "unsuppress",
         "release(tmp-present)",
+        "isRunning",
       ]);
       expect(isStateDbQuiet()).toBe(false);
       expect(fs.existsSync(staleTmp)).toBe(false);
@@ -6049,7 +6068,7 @@ describe("server/openclaw-channel-backup-retry", () => {
       // IS the newest progress line, the completed row keeps its own wording.
       const steps = harness.store.readState().lastUpdateRun.steps.filter((s) => s.name === "backup");
       expect(steps.map((s) => s.status)).toEqual(["running", "completed"]);
-      expect(steps[0].detail).toBe(progressLines[progressLines.length - 1]);
+      expect(steps[0].detail).toBe("Gateway relaunched — waiting for it to answer before continuing");
       expect(steps[1].detail).toBe("succeeded via AlphaClaw offline copy (gateway paused)");
       expect(readNewestRunRecord(harness).steps.filter((s) => s.name === "backup")).toHaveLength(2);
       // The rewritten row is republished as a `step` with the SAME `at` (the
@@ -6130,7 +6149,7 @@ describe("server/openclaw-channel-backup-retry", () => {
       // And the initial running row (D1a: a soft gate announces the pause too)
       // was not reached over the warning either.
       expect(steps[0].detail).toBe(
-        "pausing the gateway for a consistent backup (AlphaClaw offline copy first)",
+        "Backup preflight complete — preparing a consistent backup",
       );
     });
 
@@ -6392,7 +6411,8 @@ describe("issue #99 migration-minimal dispatcher", () => {
   beforeEach(() => resetStateDbQuietForTests({ listeners: true }));
   afterEach(() => resetStateDbQuietForTests({ listeners: true }));
 
-  const minimalHarness = ({ script, preflight = false, onArchive = null, onBackupCall = null,
+  const minimalHarness = ({ script, preflight = false, onArchive = null, onBackupCall = null, inQuiesceUpstream = false,
+    onFullArchive = null,
     backupTuning = {}, extraSyncOptions = {} } = {}) => {
     const lock = createGatewayLifecycleLock({ logger: kSilentLogger });
     const quiesce = makeQuiesceRecorder({ lock });
@@ -6403,7 +6423,7 @@ describe("issue #99 migration-minimal dispatcher", () => {
       onArchiveTool: (opts) => {
         if (opts.command === "tar" && opts.args[0] === "-I") {
           archiveAttempts += 1;
-          if (archiveAttempts === 1) return failCopyArchive(opts);
+          if (archiveAttempts === 1) return onFullArchive?.(opts) || failCopyArchive(opts);
         }
         return onArchive?.(opts) || null;
       },
@@ -6422,9 +6442,22 @@ describe("issue #99 migration-minimal dispatcher", () => {
       extraSyncOptions: { gatewayMutationPolicy: policy, acquireLifecycleLock: lock.acquire, ...extraSyncOptions },
     });
     seedStateDb(harness, { userVersion: preflight ? 16 : 0 });
-    ruleOutInQuiesceUpstream(harness);
+    if (!inQuiesceUpstream) ruleOutInQuiesceUpstream(harness);
     return { harness, quiesce, lock, runner, archiveAttempts: () => archiveAttempts };
   };
+
+  it("issue #102 keeps full and minimal copies inside one pause without a live CLI detour", async () => {
+    const { harness, quiesce, runner, lock } = minimalHarness({ script: [{ ok: false, timedOut: true }] });
+    const result = await harness.sync.runStandaloneBackup({});
+    expect(result.status, JSON.stringify(result.body)).toBe(200);
+    expect(result.body.archive).toMatchObject({ profile: "migration-minimal", verified: true });
+    expect(quiesce.stop).toHaveBeenCalledTimes(1);
+    expect(quiesce.start).toHaveBeenCalledTimes(1);
+    expect(quiesce.acquireLock).toHaveBeenCalledTimes(1);
+    expect(runner.backupCalls).toHaveLength(0);
+    expect(lock.getActiveOperation()).toBeNull();
+    expect(isStateDbQuiet()).toBe(false);
+  });
 
   it.each([
     ["timeout", [{ ok: false, timedOut: true }]],
@@ -6432,7 +6465,7 @@ describe("issue #99 migration-minimal dispatcher", () => {
     ["missing command", [{ ok: false, tail: "error: unknown command 'backup'" }]],
     ["generic failure", [{ ok: false, tail: "backup failed: unexpected upstream error" }]],
   ])("tries minimal once after %s, before failure/reuse/consent", async (_name, script) => {
-    const { harness, quiesce, lock, archiveAttempts } = minimalHarness({ script });
+    const { harness, quiesce, lock, archiveAttempts } = minimalHarness({ script, inQuiesceUpstream: true });
     const result = await harness.sync.applyUpdate(kHardGateTarget);
     expect(result.status, JSON.stringify(result.body)).toBe(202);
     const record = harness.ledger.readRun(result.body.operationId || harness.store.readState().lastUpdateRun.operationId);
@@ -6444,9 +6477,9 @@ describe("issue #99 migration-minimal dispatcher", () => {
     expect(record.backup.attemptsDetail.filter((attempt) => attempt.rung === "migration_minimal")).toHaveLength(1);
     expect(record.steps.filter((step) => step.name === "backup" && step.status === "failed")).toHaveLength(0);
     expect(archiveAttempts()).toBe(2);
-    expect(quiesce.acquireLock).toHaveBeenCalledTimes(2);
-    // The new apply-commit owner could acquire only after both backup leases
-    // were released; it intentionally remains held until process restart.
+    expect(quiesce.acquireLock).toHaveBeenCalledTimes(1);
+    expect(quiesce.stop).toHaveBeenCalledTimes(1);
+    expect(quiesce.start).toHaveBeenCalledTimes(1);
     expect(lock.getActiveOperation()).toMatchObject({ kind: "apply_commit" });
     expect(isStateDbQuiet()).toBe(false);
     expect(harness.sync.listBackupInventory().entries.find((entry) => entry.file === record.backup.file))
@@ -6470,13 +6503,13 @@ describe("issue #99 migration-minimal dispatcher", () => {
     expect(result.body.archive).toMatchObject({ profile: "migration-minimal", verified: true,
       partial: true, coverage: { migration: "complete", workspace: "omitted" },
       snapshotStartedAt: expect.any(Number), snapshotCompletedAt: expect.any(Number) });
-    expect(quiesce.acquireLock).toHaveBeenCalledTimes(2);
+    expect(quiesce.acquireLock).toHaveBeenCalledTimes(1);
     expect(harness.installToTempDir).not.toHaveBeenCalled();
     expect(harness.restartProcess).not.toHaveBeenCalled();
   });
 
   it("actual ENOSPC terminates the fresh ladder without minimal or risk consent", async () => {
-    const { harness, archiveAttempts } = minimalHarness({ script: [{ ok: false, tail: "ENOSPC: no space left on device" }] });
+    const { harness, archiveAttempts } = minimalHarness({ inQuiesceUpstream: true, script: [{ ok: false, tail: "ENOSPC: no space left on device" }] });
     const result = await harness.sync.applyUpdate(kSoftGateTarget);
     expect(result.status).toBe(409);
     expect(result.body.backupRiskEligible).not.toBe(true);
@@ -6484,25 +6517,24 @@ describe("issue #99 migration-minimal dispatcher", () => {
     expect(harness.ledger.readRun(result.body.operationId || harness.store.readState().lastUpdateRun.operationId).backup.safetyFailure).toBe("disk_full");
   });
 
-  it("starts minimal with its own budget after the broader deadline has been exhausted", async () => {
+  it("does not grant a second pause or live fallback after the shared deadline is exhausted", async () => {
     let harness;
     const cell = minimalHarness({ script: [{ ok: false, timedOut: true }],
-      onBackupCall: () => { harness.nowRef.now += 25 * 60_000; },
+      onFullArchive: (opts) => { harness.nowRef.now += 25 * 60_000; return failCopyArchive(opts); },
     });
     harness = cell.harness;
     const result = await harness.sync.runStandaloneBackup({});
-    expect(result.status, JSON.stringify(result.body)).toBe(200);
-    expect(result.body.archive).toMatchObject({ profile: "migration-minimal", verified: true });
-    expect(cell.archiveAttempts()).toBe(2);
-    const broadLease = cell.quiesce.acquireLock.mock.calls[0][0].leaseMs;
-    const minimalLease = cell.quiesce.acquireLock.mock.calls[1][0].leaseMs;
-    expect(minimalLease).toBeGreaterThan(8 * 60_000);
-    expect(minimalLease).toBeLessThan(broadLease);
+    expect(result.status, JSON.stringify(result.body)).toBe(409);
+    expect(cell.archiveAttempts()).toBe(1);
+    expect(cell.quiesce.acquireLock).toHaveBeenCalledTimes(1);
+    expect(cell.quiesce.stop).toHaveBeenCalledTimes(1);
+    expect(cell.quiesce.start).toHaveBeenCalledTimes(1);
+    expect(cell.runner.backupCalls).toHaveLength(0);
     expect(cell.lock.getActiveOperation()).toBeNull();
   });
 
   it.each(["excluded debris", "protected database"])("uses raw workspace size including %s on the first upstream invocation", async (kind) => {
-    const { harness, archiveAttempts } = minimalHarness({ script: [{ ok: true }] });
+    const { harness, archiveAttempts } = minimalHarness({ script: [{ ok: true }], onArchive: failCopyArchive });
     const debris = path.join(harness.openclawDir, "workspace", "node_modules", kind === "protected database" ? "agent.sqlite" : "large-cache");
     fs.mkdirSync(path.dirname(debris), { recursive: true });
     if (kind === "protected database") {
@@ -6523,11 +6555,11 @@ describe("issue #99 migration-minimal dispatcher", () => {
     expect(cliCalls).toHaveLength(1);
     expect(cliCalls[0].args).toContain("--no-include-workspace");
     expect(result.body.archive).toMatchObject({ partial: true, partialReasons: [expect.stringContaining("512 MiB")] });
-    expect(archiveAttempts()).toBe(1);
+    expect(archiveAttempts()).toBe(2);
   });
 
   it("a thrown missing-CLI spawn error reaches minimal exactly once", async () => {
-    const { harness, archiveAttempts } = minimalHarness({ onBackupCall: () => {
+    const { harness, archiveAttempts } = minimalHarness({ inQuiesceUpstream: true, onBackupCall: () => {
       const error = new Error("spawn openclaw ENOENT");
       error.code = "ENOENT";
       throw error;
@@ -6542,14 +6574,14 @@ describe("issue #99 migration-minimal dispatcher", () => {
     const { harness, quiesce } = minimalHarness({ script: [{ ok: false, timedOut: true }] });
     let starts = 0;
     quiesce.start.mockImplementation(async () => {
-      if (++starts !== 2) return;
+      starts += 1;
       const directory = path.join(harness.rootDir, "backups", "openclaw");
       const name = fs.readdirSync(directory).find((entry) => entry.endsWith(".alphaclaw.tar.gz"));
       expect(name).toBeTruthy();
       fs.writeFileSync(path.join(directory, name), "unchecked replacement after verification\n");
     });
     const result = await harness.sync.applyUpdate(kHardGateTarget);
-    expect(starts).toBe(2);
+    expect(starts).toBe(1);
     expect(result.status, JSON.stringify(result.body)).toBe(409);
     const run = harness.ledger.readRun(result.body.operationId || harness.store.readState().lastUpdateRun.operationId);
     expect(run.backup.verified).not.toBe(true);
@@ -6574,27 +6606,29 @@ describe("issue #99 migration-minimal dispatcher", () => {
   });
 
   it("a minimal transaction that loses its lease never restarts or releases its successor", async () => {
-    const { harness, quiesce, lock, archiveAttempts } = minimalHarness({ script: [{ ok: false, timedOut: true }] });
-    const acquire = quiesce.acquireLock.getMockImplementation();
     let currentLease;
     let successor;
+    const { harness, quiesce, lock, archiveAttempts } = minimalHarness({ script: [{ ok: false, timedOut: true }],
+      onArchive: (opts) => {
+        if (opts.command !== "tar" || opts.args[0] !== "-I") return null;
+        return (async () => {
+          currentLease();
+          successor = await lock.acquire("operator_successor");
+          return failCopyArchive(opts);
+        })();
+      },
+    });
+    const acquire = quiesce.acquireLock.getMockImplementation();
     quiesce.acquireLock.mockImplementation(async (options) => {
       currentLease = await acquire(options);
       return currentLease;
     });
-    quiesce.stop.mockImplementation(async () => {
-      if (quiesce.stop.mock.calls.length === 2) {
-        currentLease();
-        successor = await lock.acquire("operator_successor");
-      }
-      return true;
-    });
     try {
       const result = await harness.sync.runStandaloneBackup({});
       expect(result.status).toBe(409);
-      expect(quiesce.start).toHaveBeenCalledTimes(1);
+      expect(quiesce.start).not.toHaveBeenCalled();
       expect(lock.owns(successor)).toBe(true);
-      expect(archiveAttempts()).toBe(1);
+      expect(archiveAttempts()).toBe(2);
       expect(isStateDbQuiet()).toBe(false);
     } finally { successor?.(); }
   });
@@ -6614,7 +6648,7 @@ describe("issue #99 migration-minimal dispatcher", () => {
     }
     const result = await harness.sync.runStandaloneBackup({});
     expect(result.status, JSON.stringify(result.body)).toBe(200);
-    expect(observations).toEqual(["stop", "start", "stop", "start"].map((method) => ({
+    expect(observations).toEqual(["stop", "start"].map((method) => ({
       method, predicate: expect.any(Function), beforeAwait: false, afterAwait: false,
     })));
     expect(lock.getActiveOperation()).toBeNull();
@@ -6632,7 +6666,6 @@ describe("issue #99 migration-minimal dispatcher", () => {
       return currentLease;
     });
     quiesce[method].mockImplementation(async (options) => {
-      if (quiesce[method].mock.calls.length !== 2) return true;
       observations.push(options?.shouldAbort, options?.shouldAbort?.());
       await Promise.resolve();
       currentLease();
@@ -6648,10 +6681,10 @@ describe("issue #99 migration-minimal dispatcher", () => {
       expect(result.body.backupRiskEligible).not.toBe(true);
       const backup = harness.ledger.readRun(result.body.operationId).backup;
       expect(backup.verified).not.toBe(true);
-      expect(archiveAttempts()).toBe(method === "stop" ? 1 : 2);
-      expect(quiesce.acquireLock).toHaveBeenCalledTimes(2);
-      expect(quiesce.start).toHaveBeenCalledTimes(method === "stop" ? 1 : 2);
-      expect(quiesce.unsuppress).toHaveBeenCalledTimes(1);
+      expect(archiveAttempts()).toBe(method === "stop" ? 0 : 2);
+      expect(quiesce.acquireLock).toHaveBeenCalledTimes(1);
+      expect(quiesce.start).toHaveBeenCalledTimes(method === "stop" ? 0 : 1);
+      expect(quiesce.unsuppress).not.toHaveBeenCalled();
       expect(lock.owns(successor)).toBe(true);
       expect(isStateDbQuiet()).toBe(false);
       expect(harness.sync.listBackupInventory().entries.some((entry) =>
@@ -6660,7 +6693,7 @@ describe("issue #99 migration-minimal dispatcher", () => {
     } finally { successor?.(); }
   });
 
-  it("a hold established after broad cleanup prevents the minimal pause from stopping the gateway", async () => {
+  it("a hold established during the single pause cleanup prevents apply commitment", async () => {
     const { harness, quiesce, lock } = minimalHarness({ script: [{ ok: false, timedOut: true }] });
     quiesce.start.mockImplementation(async () => {
       if (quiesce.start.mock.calls.length === 1) harness.store.updateState((state) => {
@@ -6679,7 +6712,7 @@ describe("issue #99 migration-minimal dispatcher", () => {
     let environment = {};
     const { harness } = minimalHarness({ script: [{ ok: false, timedOut: true }],
       extraSyncOptions: { openclawSpawnEnv: () => ({ ...environment }) },
-      onBackupCall: () => { environment = { OPENCLAW_STATE_DIR: path.join(harness.rootDir, "successor-state"), HOME: harness.rootDir }; },
+      onFullArchive: (opts) => { environment = { OPENCLAW_STATE_DIR: path.join(harness.rootDir, "successor-state"), HOME: harness.rootDir }; return failCopyArchive(opts); },
     });
     environment = { OPENCLAW_STATE_DIR: harness.openclawDir, OPENCLAW_HOME: harness.openclawDir,
       HOME: harness.rootDir, OPENCLAW_OAUTH_DIR: "~/credentials" };

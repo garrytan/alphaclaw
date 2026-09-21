@@ -5,7 +5,7 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
-## [0.9.87] - 2026-09-20
+## [0.9.88] - 2026-09-21
 
 Pins OpenClaw **2026.9.5** (npm `latest` and `beta` since 2026-09-19; 2026.9.4
 shipped in between on 2026-09-11). No runtime change: 2026.9.5 declares the same
@@ -98,6 +98,15 @@ truth.
   lease row. The Watchdog tab names the wait (`owner_lease_held` copy) and
   the latched case; `describeConflict` carries the lease facts (host, pid,
   expiry — closed tokens, never stderr) onto the ledger rows and status.
+
+## [0.9.87] - 2026-09-20
+
+### Fixed
+
+- Backup preflight counts the complete state tree, reports directory sizes and absolute symlinks in Upgrade, and refuses oversized or incomplete inventories before pausing the gateway. Known scratch directories and stale SQLite copies are excluded by default; `.env` is never archived, and safe scratch exclusions can be appended without dangerous-tier confirmation.
+- Backup and CLI paths resolve symlinked state roots. Full and migration-only copies share one gateway pause, with a bounded wait for temporary database holders; unsuitable upstream attempts are skipped, and an unanswered relaunch aborts. The bounded manifest reader now accommodates normal 50,000-file inventories, with oversized membership checked before copying. Activation invalidates cached version metadata even when file size and timestamps do not change.
+- Sustained memory pressure at the restart brake sends one actionable admin alert instead of repeating skip events. Watchdog repair skips Doctor while a gateway holds the lifecycle lock, and Overseer reports backup failures as upgrades that never applied rather than suggesting rollback.
+- Added real filesystem, SQLite, archive/restore, pinned CLI, browser, watchdog and upgrade regression coverage for issue #102. OpenClaw worktree cleanup is tracked upstream in openclaw/openclaw#153952.
 
 ## [0.9.86] - 2026-09-16
 

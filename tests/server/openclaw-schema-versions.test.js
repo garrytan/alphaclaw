@@ -440,7 +440,7 @@ describe("openclaw-schema-versions: schema table", () => {
       // v0.9.80 pin: declared in its package.json (openclaw.schemaVersions)
       // and by its dist constants — state 15 → 16.
       "2026.9.3": { state: 16, agent: 19 },
-      // v0.9.87 pin: 2026.9.4 moved state 16 → 17; 2026.9.5 moved agent 19 → 21.
+      // v0.9.88 pin: 2026.9.4 moved state 16 → 17; 2026.9.5 moved agent 19 → 21.
       "2026.9.4": { state: 17, agent: 19 },
       "2026.9.5": { state: 17, agent: 21 },
     });

@@ -51,6 +51,7 @@ try {
   mark("long consent dialog remains scrollable with reachable controls on desktop and mobile");
   await page.setViewportSize({ width: 1280, height: 960 });
   await page.getByRole("button", { name: "Apply", exact: true }).click();
+  await page.getByRole("button", { name: "Continue", exact: true }).click();
   await hasText("Fixture build failed");
   await page.getByRole("button", { name: "Run repair", exact: true }).click();
   await hasText("Repairing the dev build");

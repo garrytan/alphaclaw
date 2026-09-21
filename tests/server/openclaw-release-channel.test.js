@@ -771,6 +771,20 @@ describe("server/openclaw-release-channel", () => {
   });
 
   describe("activation sentinel", () => {
+    it("invalidates an installed version cached before a same-size, same-timestamp activation", () => {
+      const { store } = createStore({ fsModule: { ...fs, statSync: (file, options) => {
+        const stat = fs.statSync(file, options);
+        if (String(file).endsWith("node_modules/openclaw/package.json")) stat.mtimeMs = 1000;
+        return stat;
+      } } });
+      const installDir = createTempRoot();
+      writeInstallFixture(installDir, { version: "1.0.0" });
+      expect(store.readInstalledVersion({ installDir })).toBe("1.0.0");
+      writeInstallFixture(installDir, { version: "1.0.1" });
+      expect(store.writeSentinel({ installDir, version: "1.0.1" }).ok).toBe(true);
+      expect(store.readInstalledVersion({ installDir })).toBe("1.0.1");
+    });
+
     it("requires activation when the sentinel is missing even if package.json matches", () => {
       const { store } = createStore();
       const installDir = createTempRoot();

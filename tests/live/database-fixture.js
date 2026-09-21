@@ -7,7 +7,7 @@ const { runCliJson, scrubTestRunnerEnv } = require("./live-helpers");
 // Independent observations of immutable releases, not production's schema
 // oracle. Schema ordering is deliberately non-monotonic across these lines.
 const kObservedSchemas = Object.freeze({
-  // 2026.9.5 (the v0.9.87 pin) and 2026.9.4: declared by each package.json
+  // 2026.9.5 (the v0.9.88 pin) and 2026.9.4: declared by each package.json
   // `openclaw.schemaVersions` (2026-09-20); the first live run against a real
   // database of either version turns the row into an observation.
   "2026.9.5": Object.freeze({ state: 17, agent: 21 }),

@@ -3434,17 +3434,24 @@ describe("server/openclaw-channel-sync", () => {
         [
           "a symlink where a directory would be",
           (dir) => fs.symlinkSync("/etc", path.join(dir, "credentials")),
+          "absolute_symlinks",
         ],
       ])(
         "refuses (no_artifact 409) when the tree holds %s and nothing else — no database, no config, no sessions",
-        async (_label, plant) => {
+        async (_label, plant, veto) => {
           const harness = mkFresh();
           fs.mkdirSync(harness.openclawDir, { recursive: true });
           plant(harness.openclawDir);
           const result = await harness.sync.applyUpdate(hardGateTarget);
           expect(result.status).toBe(409);
           expect(result.body.code).toBe("backup_failed");
-          expect(result.body.message).toMatch(/reported success but produced no backup file/);
+          if (veto) {
+            expect(result.body.message).toBe(`The upstream backup was skipped (${veto}): it cannot safely archive the measured state tree.`);
+            expect(harness.runner.runStreamed.mock.calls.filter(([opts]) => opts.command === "openclaw" && opts.args?.[0] === "backup")).toEqual([]);
+          } else {
+            expect(result.body.message).toMatch(/reported success but produced no backup file/);
+            expect(harness.runner.runStreamed.mock.calls.some(([opts]) => opts.command === "openclaw" && opts.args?.[0] === "backup")).toBe(true);
+          }
         },
       );
 
@@ -3463,6 +3470,7 @@ describe("server/openclaw-channel-sync", () => {
         fs.writeFileSync(path.join(dir, "openclaw.json"), "{}\n");
         const result = await harness.sync.applyUpdate(hardGateTarget);
         expect(result.body.code).not.toBe("backup_failed");
+        expect(harness.runner.runStreamed.mock.calls.filter(([opts]) => opts.command === "openclaw" && opts.args?.[0] === "backup")).toEqual([]);
         expect(harness.store.readState().lastUpdateRun.steps).toContainEqual(
           expect.objectContaining({
             name: "backup",
@@ -3477,15 +3485,22 @@ describe("server/openclaw-channel-sync", () => {
       // or a credentials dump renamed `.env` all counted as fresh. The names
       // are accepted only in their expected shape.
       describe("allowlisted names are checked by SHAPE, not name (X3)", () => {
-        const expectNotFresh = async (harness) => {
+        const expectNotFresh = async (harness, veto = null) => {
           const result = await harness.sync.applyUpdate(hardGateTarget);
           expect(result.status).toBe(409);
           expect(result.body.code).toBe("backup_failed");
-          expect(result.body.message).toMatch(/reported success but produced no backup file/);
+          if (veto) {
+            expect(result.body.message).toBe(`The upstream backup was skipped (${veto}): it cannot safely archive the measured state tree.`);
+            expect(harness.runner.runStreamed.mock.calls.filter(([opts]) => opts.command === "openclaw" && opts.args?.[0] === "backup")).toEqual([]);
+          } else {
+            expect(result.body.message).toMatch(/reported success but produced no backup file/);
+            expect(harness.runner.runStreamed.mock.calls.some(([opts]) => opts.command === "openclaw" && opts.args?.[0] === "backup")).toBe(true);
+          }
         };
         const expectFresh = async (harness) => {
           const result = await harness.sync.applyUpdate(hardGateTarget);
           expect(result.body.code).not.toBe("backup_failed");
+          expect(harness.runner.runStreamed.mock.calls.filter(([opts]) => opts.command === "openclaw" && opts.args?.[0] === "backup")).toEqual([]);
           expect(harness.store.readState().lastUpdateRun.steps).toContainEqual(
             expect.objectContaining({
               name: "backup",
@@ -3499,7 +3514,7 @@ describe("server/openclaw-channel-sync", () => {
           const harness = mkFresh();
           fs.mkdirSync(harness.openclawDir, { recursive: true });
           fs.symlinkSync("/etc/passwd", path.join(harness.openclawDir, ".env"));
-          await expectNotFresh(harness);
+          await expectNotFresh(harness, "env_files_excluded");
         });
 
         it("a `.env` symlink to <rootDir>/.env whose target is not a regular file is NOT fresh", async () => {
@@ -3507,7 +3522,7 @@ describe("server/openclaw-channel-sync", () => {
           fs.mkdirSync(harness.openclawDir, { recursive: true });
           fs.mkdirSync(path.join(harness.rootDir, ".env"));
           fs.symlinkSync(path.join(harness.rootDir, ".env"), path.join(harness.openclawDir, ".env"));
-          await expectNotFresh(harness);
+          await expectNotFresh(harness, "env_files_excluded");
         });
 
         it("the onboarding `.env` link to an existing regular <rootDir>/.env stays fresh (secrets in AlphaClaw's own env are not OpenClaw state)", async () => {
@@ -3530,12 +3545,12 @@ describe("server/openclaw-channel-sync", () => {
             path.join(secretful.openclawDir, ".env"),
             "SETUP_PASSWORD=pw\nOPENCLAW_GATEWAY_TOKEN=abc\n",
           );
-          await expectNotFresh(secretful);
+          await expectNotFresh(secretful, "env_files_excluded");
 
           const oversized = mkFresh();
           fs.mkdirSync(oversized.openclawDir, { recursive: true });
           fs.writeFileSync(path.join(oversized.openclawDir, ".env"), `# ${"x".repeat(5000)}\n`);
-          await expectNotFresh(oversized);
+          await expectNotFresh(oversized, "env_files_excluded");
         });
 
         it.each([".alphaclaw", "logs", "backups", "tmp"])(
@@ -3546,7 +3561,7 @@ describe("server/openclaw-channel-sync", () => {
             const elsewhere = path.join(harness.rootDir, "elsewhere");
             fs.mkdirSync(elsewhere, { recursive: true });
             fs.symlinkSync(elsewhere, path.join(harness.openclawDir, name));
-            await expectNotFresh(harness);
+            await expectNotFresh(harness, "absolute_symlinks");
           },
         );
 
