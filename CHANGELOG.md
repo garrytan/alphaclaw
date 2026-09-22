@@ -9,36 +9,50 @@ Versions follow this repository's `package.json` release counter.
 
 The nightly live tier (`live-e2e.yml`, real OpenClaw releases) had failed three
 nights running (2026-09-20/21/22, on v0.9.85/86/87) while the hermetic and
-container tiers stayed green. Four causes, one of them a product regression.
+container tiers stayed green, and the v0.9.88 pin bump would have added one
+more. Five causes, one of them a product regression.
 
 ### Fixed
 
 - **The upstream backup rung was vetoed on every real install (v0.9.87
   regression).** `upstreamBackupVeto` skipped `openclaw backup create` whenever
-  the preflight walk saw an absolute-target symlink. OpenClaw itself plants
+  the preflight walk saw ANY absolute-target symlink. OpenClaw itself plants
   those in every state directory — `plugin-skills/<skill>` → the package's
   `dist/extensions/…/skills` (observed on 2026.9.3 and 2026.9.5) — and its own
   backup neither follows nor archives them (a 2026.9.5 archive of such a tree
-  carries no `plugin-skills` entry and nothing under `dist/extensions`;
-  verified 2026-09-22). So the veto fired everywhere: the no-quiesce ladder
-  (the boot-instance shape) had no rung left and the hard gate failed with
-  `The upstream backup was skipped (absolute_symlinks)`, and the paused
-  ladder lost its upstream fallback after a failed offline copy. Absolute
-  symlinks are still measured and listed in Upgrade → Check backup sources;
-  they no longer skip the upstream CLI. The `.env` rule is unchanged.
+  carries no `plugin-skills` entry; verified 2026-09-22). So the veto fired
+  everywhere: the no-quiesce ladder (the boot-instance shape) had no rung left
+  and the hard gate failed with `The upstream backup was skipped
+  (absolute_symlinks)`, and the paused ladder lost its upstream fallback after
+  a failed offline copy. The rule is NARROWED, not dropped: the same probe
+  showed upstream DOES follow a link that sits at one of its archive roots
+  (`credentials` and `identity` replaced by links to an outside directory →
+  the archive carried the outside files), so a link at `openclaw.json`,
+  `credentials`, `identity`, `state`, `agents` or `workspace` still vetoes
+  (`isUpstreamArchivedPath`); links elsewhere are measured and listed in
+  Upgrade → Check backup sources and no longer skip the upstream CLI. The
+  fresh-install waiver (WI-1.7) still refuses a tree whose only content is a
+  symlinked bookkeeping directory; it just no longer names a veto for it.
 - **Live tier: the thinking-API probe carried the same minified-key guess the
   library had** (`mod.i` / `mod.s`; v0.9.88 fixed the library). Since
   2026.9.5 became `latest` (2026-09-19) the probe bound
   `listThinkingLevelLabels` and every level id read empty. It binds by
   function name now.
-- **Live tier: three assertions left stale by v0.9.86/v0.9.87.** The first
+- **Live tier: assertions left stale by v0.9.86/v0.9.87.** The first
   `backup: running` detail is "Backup preflight complete — preparing a
-  consistent backup" since v0.9.87 (the pause is proven by the completed
-  row's "(gateway paused)" suffix); the offline-copy record and the manifest
-  gained `profile`, `partial`, `requiredAssets`, the snapshot interval and
-  `coverage.migration` (format 3) — the contention and downgrade suites now
-  assert the documented twelve AlphaClaw-only manifest keys and the current
-  wording.
+  consistent backup" since v0.9.87 and the row is rewritten in place by the
+  progress ticker (it ends on the relaunch wait), so the contention and
+  downgrade suites now prove the pause from the completed row's "(gateway
+  paused)" suffix, the contention retry from the run log, and the single
+  running row by count; the offline-copy record and the manifest gained
+  `profile`, `partial`, `requiredAssets`, the snapshot interval and
+  `coverage.migration` (format 3) — the contention suite asserts the
+  documented twelve AlphaClaw-only manifest keys.
+- **Live tier: the migration-minimal restore suite hard-coded 2026.9.3 for
+  databases written by the repo bin**, which v0.9.88 moved to 2026.9.5 (state
+  17 / agent 21) — `createSource` now derives the schema from the release
+  that wrote the files, and both suites stage 2026.9.3 explicitly as their
+  source (the second migrates it to 2026.9.4 by design).
 
 ## [0.9.88] - 2026-09-21
 
