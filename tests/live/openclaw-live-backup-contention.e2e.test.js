@@ -22,12 +22,12 @@
 //      check; `offlineCopy.next` names the hand-over (`predicted_fits`);
 //   2. real beta, lock held for the whole step, copy NOT failed → the copy
 //      stands in on its own with ZERO upstream attempts (producer
-//      alphaclaw-offline-copy, format 2, exclusivity evidence, verified) —
+//      alphaclaw-offline-copy, format 3, exclusivity evidence, verified) —
 //      the incident's fix in its purest form;
 //   3. the current pin under the same held lock also takes the lease:
 //      one classified retry succeeds when the writer releases.
 //   4. the offline-copy manifest's core field set matches upstream's (beta)
-//      plus exactly the documented AlphaClaw keys (format 2).
+//      plus exactly the documented AlphaClaw keys (format 3).
 //
 // Verified upstream facts these tests encode (dist read + live probes,
 // 2026-09-02): the lease engages ONLY when a legacy audit source exists
@@ -64,6 +64,10 @@ const {
   kOfflineCopyProducer,
   kUpstreamProducer,
 } = require("../../lib/server/openclaw-backup-offline-copy");
+const {
+  kOfflineCopyPolicyExcludes,
+  kOfflineCopyRootExcludes,
+} = require("../../lib/server/openclaw-backup-policy");
 const { kLiveEnabled, kOpenclawLines, stageOpenclawVersion } = liveHelpers;
 
 const describeLive = kLiveEnabled ? describe : describe.skip;
@@ -336,12 +340,12 @@ describeLive("LIVE #54 reproduction: runBackup vs real CLIs under SQLite lock co
         expect(manifest.diagnosis.dbCount).toBe(1);
         // Format 3 (#101) added `migration` coverage beside core/workspace.
         expect(manifest.coverage).toEqual({ core: "complete", workspace: "complete", migration: "complete" });
-        expect(manifest.excludes.map((row) => row.pattern)).toEqual([
-          "node_modules",
-          "*.heapsnapshot",
-          "*.tmp",
-          "logs/**/*.gz",
-        ]);
+        // Format 3 lists BOTH default exclude sets (workspace-scoped policy
+        // excludes and the v0.9.86 state-root excludes) — assert the shipped
+        // defaults, never a literal that goes stale when a default is added.
+        const patterns = manifest.excludes.map((row) => row.pattern);
+        expect(patterns).toHaveLength(kOfflineCopyPolicyExcludes.length + kOfflineCopyRootExcludes.length);
+        expect(patterns).toEqual(expect.arrayContaining([...kOfflineCopyPolicyExcludes, ...kOfflineCopyRootExcludes]));
         // No upstream ran: the run log carries no lease text at all.
         const log = readRunLog(harness.openclawDir);
         expect(log).not.toMatch(kLeaseTimeoutLinePattern);
