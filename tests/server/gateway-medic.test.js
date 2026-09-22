@@ -138,6 +138,62 @@ describe("server/gateway-medic", () => {
     expect(listMedicBackups(openclawDir)).toHaveLength(1);
   });
 
+  it("a failed doctor --fix records WHY: exit code and doctor's last lines reach the log and the outcome", async () => {
+    const openclawDir = mkOpenclawDir();
+    // Stale blame (the key is already gone) so no last-resort strip can
+    // recover the box afterwards: the doctor outcome is what the watchdog books.
+    writeConfig(openclawDir, {});
+    const lines = [];
+    const logger = { log: (line) => lines.push(String(line)), warn: (line) => lines.push(String(line)), error: (line) => lines.push(String(line)) };
+    const runDoctorFix = vi.fn(async () => ({
+      ok: false,
+      code: 1,
+      stdout: [
+        "◇ Doctor changes",
+        "Doctor found a noncanonical audit event schema (state/openclaw.sqlite)",
+        "This state cannot be repaired automatically; restore from backup",
+      ].join("\n"),
+      stderr: "",
+    }));
+    const medic = createMedic(openclawDir, { runDoctorFix, logger });
+
+    const outcome = await medic.run({
+      exitCode: 78,
+      stderrTail: ['Unrecognized key: "audit"'],
+      allowDoctorFix: true,
+    });
+
+    expect(outcome).toMatchObject({ fixed: false, tier: "doctor_fix" });
+    expect(outcome.error).toMatch(/^doctor --fix failed: exit 1; doctor said: /);
+    expect(outcome.error).toContain("noncanonical audit event schema");
+    expect(outcome.error).toContain("cannot be repaired automatically");
+    const failedLine = lines.find((line) => /doctor_fix failed/.test(line));
+    expect(failedLine).toMatch(/exit 1; doctor said: .*cannot be repaired automatically/);
+  });
+
+  it("a doctor --fix the runner refused (stale-config restore reverted) names the refusal, not a bare exit", async () => {
+    const openclawDir = mkOpenclawDir();
+    writeConfig(openclawDir, {});
+    const runDoctorFix = vi.fn(async () => ({
+      ok: false,
+      code: "doctor_restored_stale_config",
+      stdout: "",
+      stderr: "doctor --fix attempted a stale last-known-good restore (dropped 3 keys); AlphaClaw reverted it",
+    }));
+    const medic = createMedic(openclawDir, { runDoctorFix });
+
+    const outcome = await medic.run({
+      exitCode: 78,
+      stderrTail: ['Unrecognized key: "audit"'],
+      allowDoctorFix: true,
+    });
+
+    expect(outcome).toMatchObject({ fixed: false, tier: "doctor_fix" });
+    expect(outcome.error).toBe(
+      "doctor --fix failed: doctor_restored_stale_config; doctor said: doctor --fix attempted a stale last-known-good restore (dropped 3 keys); AlphaClaw reverted it",
+    );
+  });
+
   it("suppresses doctor --fix when the caller disallows it (stabilization window)", async () => {
     const openclawDir = mkOpenclawDir();
     writeConfig(openclawDir, { audit: { legacy: true } });
@@ -307,7 +363,7 @@ describe("server/gateway-medic", () => {
       expect(outcome).toMatchObject({
         fixed: false,
         tier: "ai_doctor_fix",
-        error: "doctor --fix failed",
+        error: expect.stringMatching(/^doctor --fix failed: /),
       });
     });
 
