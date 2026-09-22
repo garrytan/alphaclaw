@@ -703,8 +703,20 @@ describeLive("live: Control UI styles render through the /openclaw proxy (real b
     async (ctx) => {
       if (!requireBrowser(ctx)) return;
       // Registration is not control: only a navigation AFTER activation is
-      // served by the worker. Reload and wait for a controller.
-      await page.reload({ waitUntil: "load" });
+      // served by the worker. Reload and wait for a controller. The UI's own
+      // recovery may still be mid-navigation from the previous step (its
+      // post-401 reload sends the tab to login), and a reload issued during
+      // that navigation fails with "Not attached to an active page" — let the
+      // in-flight navigation settle, then reload once more if the first
+      // attempt raced it (ISSUE-002, 2 of 6 CI runs on 2026.9.5).
+      await page.waitForLoadState("load").catch(() => {});
+      try {
+        await page.reload({ waitUntil: "load" });
+      } catch (error) {
+        if (!/Not attached|destroyed|navigation/i.test(String(error?.message || error))) throw error;
+        await page.waitForLoadState("load").catch(() => {});
+        await page.reload({ waitUntil: "load" });
+      }
       await page.waitForFunction(() => navigator.serviceWorker.controller !== null, null, {
         timeout: kWorkerControlTimeoutMs,
       });
@@ -756,8 +768,19 @@ describeLive("live: Control UI styles render through the /openclaw proxy (real b
       await page.waitForLoadState("load").catch(() => {});
 
       // The Cache API is origin-scoped, so this reads correctly whether the
-      // tab is still on the UI or the UI's recovery already sent it to login.
-      const entries = await readResourceCacheEntries(page);
+      // tab is still on the UI or the UI's recovery already sent it to login —
+      // but the read must not straddle that recovery navigation ("Execution
+      // context was destroyed"): retry once after the navigation lands.
+      const readCacheEntriesSettled = async () => {
+        try {
+          return await readResourceCacheEntries(page);
+        } catch (error) {
+          if (!/destroyed|navigation|Not attached/i.test(String(error?.message || error))) throw error;
+          await page.waitForLoadState("load").catch(() => {});
+          return readResourceCacheEntries(page);
+        }
+      };
+      const entries = await readCacheEntriesSettled();
       expect(
         entries.length,
         `no /openclaw/assets|fonts entries in any worker cache — the worker did not serve this page (log tail: ${logTail()})`,
