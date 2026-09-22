@@ -33,6 +33,31 @@ more. Five causes, one of them a product regression.
   Upgrade → Check backup sources and no longer skip the upstream CLI. The
   fresh-install waiver (WI-1.7) still refuses a tree whose only content is a
   symlinked bookkeeping directory; it just no longer names a veto for it.
+- **An upgrade to the pin could boot the new build on the OLD build's
+  settings and skip its Doctor run (container tier, 3 of 5 runs on
+  2026.9.5).** The config gate's round-trip restore fired whenever
+  `configMigration.completedForVersion !== installedVersion` and a
+  `pre-fix-<installedVersion>.bak` existed — inequality, not the "actual
+  version regression" its comment promised. The first boot on an overlay
+  names its snapshot by a fallback chain that ends at the PIN, so a volume
+  that first ran 2026.7.1-2 under a 2026.9.5 pin left a
+  `pre-fix-2026.9.5.bak` holding the OLD config; when the apply to the pin
+  restarted, the gate read that file as a downgrade snapshot for the
+  now-installed 2026.9.5, restored it over the freshly migrated config, marked
+  2026.9.5 migrated, and launched — and 2026.9.5 exited 78 on its pending
+  `audit-events-v2` repair ("run openclaw doctor --fix"), which the medic
+  could not clear. The restore now requires `compareVersionParts(installed,
+  completedForVersion) < 0` (not comparable → not a regression → the forward
+  migration runs Doctor as an upgrade must); the stale snapshot stays inert.
+- **A return-to-pin apply no longer boots as "OpenClaw was changed outside
+  this dashboard".** applyUpdate records `applied = null` for a pin target,
+  so the activation boot found installed ≠ pin with no recorded apply and
+  took the external-drift path: right outcome (the pin came up), wrong story
+  (a tampering alarm to the operator, `action: drift_reverted` in the boot
+  report). The in-flight transition stamp applyUpdate already leaves
+  (`to = pin`, `ok = null`, `source = operator_apply`, ≤ 7 days) now
+  identifies the boot as the recorded selection landing: `action:
+  activated`, no alarm. Without a fresh stamp the mismatch is still drift.
 - **Live tier: the thinking-API probe carried the same minified-key guess the
   library had** (`mod.i` / `mod.s`; v0.9.88 fixed the library). Since
   2026.9.5 became `latest` (2026-09-19) the probe bound

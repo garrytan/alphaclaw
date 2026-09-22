@@ -334,7 +334,8 @@ describeLive("LIVE #54 reproduction: runBackup vs real CLIs under SQLite lock co
         ).toBe(true);
         expect(manifest.exclusivityEvidence.fdScan).toBe("clean");
         expect(manifest.diagnosis.dbCount).toBe(1);
-        expect(manifest.coverage).toEqual({ core: "complete", workspace: "complete" });
+        // Format 3 (#101) added `migration` coverage beside core/workspace.
+        expect(manifest.coverage).toEqual({ core: "complete", workspace: "complete", migration: "complete" });
         expect(manifest.excludes.map((row) => row.pattern)).toEqual([
           "node_modules",
           "*.heapsnapshot",
