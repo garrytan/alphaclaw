@@ -40,7 +40,7 @@ container tiers stayed green. Four causes, one of them a product regression.
   assert the documented twelve AlphaClaw-only manifest keys and the current
   wording.
 
-
+## [0.9.88] - 2026-09-21
 
 Pins OpenClaw **2026.9.5** (npm `latest` and `beta` since 2026-09-19; 2026.9.4
 shipped in between on 2026-09-11). No runtime change: 2026.9.5 declares the same
