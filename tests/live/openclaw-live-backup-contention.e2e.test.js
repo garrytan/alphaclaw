@@ -215,8 +215,11 @@ describeLive("LIVE #54 reproduction: runBackup vs real CLIs under SQLite lock co
         expect(details.join("\n")).toMatch(
           /offline copy failed \(archive\) — upstream backup predicted to fit the pause, gateway still paused/,
         );
-        expect(details.join("\n")).toMatch(
-          /retrying after state-database lock contention \(gateway still paused\)/,
+        // The retry's own running row is rewritten in place by the progress
+        // ticker (v0.9.81) and ends on the relaunch wait, so the retry is
+        // proven from the run log, where the ladder narrates it durably.
+        expect(produced.contentionLog).toMatch(
+          /state-database lock contention on attempt 1 — retrying in \d+s with the gateway still paused/,
         );
         expect(details.join("\n")).toMatch(/succeeded on attempt 2 \(gateway paused briefly\)/);
         // Quiesce transaction: stop before the first CLI, start after, one release.
@@ -308,8 +311,11 @@ describeLive("LIVE #54 reproduction: runBackup vs real CLIs under SQLite lock co
         // preflight verdict; the copy-first pause follows) and a success
         // detail WITHOUT an attempt clause — "after 0 upstream attempts"
         // would misread as "nothing was attempted".
-        const details = backupStepDetails(harness).join("\n");
-        expect(details).toMatch(/running: Backup preflight complete — preparing a consistent backup/);
+        const rows = backupStepDetails(harness);
+        // The one running row is rewritten in place as the ladder progresses
+        // (it ends on the relaunch wait), so count it rather than pin its text.
+        expect(rows.filter((row) => row.startsWith("running:"))).toHaveLength(1);
+        const details = rows.join("\n");
         expect(details).toMatch(/completed: succeeded via AlphaClaw offline copy \(gateway paused\)/);
         expect(details).not.toMatch(/upstream attempts?/);
         // The archive is the documented format 2: manifest with producer +

@@ -9,7 +9,7 @@ const { createGatewayLifecycleLock } = require("../../lib/server/gateway-lifecyc
 const { createRunStream } = require("../../lib/server/openclaw-run-stream");
 const { withOpenclawStartupEnv } = require("../../lib/server/openclaw-runtime-env");
 const { materializeDatabases } = require("./database-fixture");
-const { buildCliEnv } = require("./live-backup-harness");
+const { buildCliEnv, installedVersion } = require("./live-backup-harness");
 const { mkTemp, scrubTestRunnerEnv, waitFor } = require("./live-helpers");
 
 const kCopyBudgetMs = 8 * 60_000;
@@ -21,11 +21,14 @@ const writeFile = (file, text) => {
 const gatewayConfig = () => ({ gateway: { mode: "local", bind: "loopback", auth: { mode: "none" } },
   plugins: { enabled: false } });
 
+// The databases are written by `bin` itself, so their schema is whatever THAT
+// release declares — never a literal (the repo bin moved 2026.9.3 → 2026.9.5
+// in v0.9.88 and a hard-coded "2026.9.3" here failed the tier the next night).
 const createSource = (bin) => {
   const homeDir = mkTemp("alphaclaw-live-minimal-source-");
   const stateDir = path.join(homeDir, ".openclaw");
   writeFile(path.join(stateDir, "openclaw.json"), JSON.stringify(gatewayConfig()));
-  const paths = materializeDatabases({ openclawBin: bin, version: "2026.9.3", stateDir,
+  const paths = materializeDatabases({ openclawBin: bin, version: installedVersion(bin), stateDir,
     cliEnv: buildCliEnv({ homeDir, stateDir }) });
   writeFile(path.join(stateDir, "credentials", "restore-fixture.json"), '{"fixture":"captured"}');
   writeFile(path.join(stateDir, "identity", "restore-fixture.txt"), "captured identity");

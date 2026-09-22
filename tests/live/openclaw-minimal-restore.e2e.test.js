@@ -39,9 +39,14 @@ const assertPreserved = (destination) => {
 };
 
 describeLive("migration-minimal existing-state restore", () => {
+  // Both suites pin the 2026.9.3 schema pair (state 16 / agent 19) and the
+  // second one migrates to 2026.9.4, so the SOURCE release is staged
+  // explicitly rather than borrowed from the repo bin (the pin moves; it is
+  // 2026.9.5 since v0.9.88).
+  const kSourceRelease = "2026.9.3";
   it.each(["wal", "delete"])("restores %s snapshots over newer databases and stale sidecars while preserving omitted files", async (journal) => {
     live.assertFreeDiskBytes();
-    const bin = live.repoOpenclawBin();
+    const bin = (await live.stageOpenclawVersion(kSourceRelease)).bin;
     let source;
     let destination;
     try {
@@ -106,7 +111,7 @@ describeLive("migration-minimal existing-state restore", () => {
     const chunkBytes = 1024 ** 2;
     const scratchEntries = 200_050;
     try {
-      source = createSource(live.repoOpenclawBin());
+      source = createSource((await live.stageOpenclawVersion(kSourceRelease)).bin);
       const db = new DatabaseSync(source.paths.agent);
       try {
         db.exec("PRAGMA journal_mode=DELETE; CREATE TABLE alphaclaw_scale_payload (id INTEGER PRIMARY KEY, body BLOB NOT NULL)");

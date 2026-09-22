@@ -3554,14 +3554,14 @@ describe("server/openclaw-channel-sync", () => {
         });
 
         it.each([".alphaclaw", "logs", "backups", "tmp"])(
-          "a symlink named %s where a bookkeeping directory would be is NOT fresh",
+          "a symlink named %s where a bookkeeping directory would be is NOT fresh — and, not being an upstream archive root, it does not veto the upstream rung (v0.9.89)",
           async (name) => {
             const harness = mkFresh();
             fs.mkdirSync(harness.openclawDir, { recursive: true });
             const elsewhere = path.join(harness.rootDir, "elsewhere");
             fs.mkdirSync(elsewhere, { recursive: true });
             fs.symlinkSync(elsewhere, path.join(harness.openclawDir, name));
-            await expectNotFresh(harness, "absolute_symlinks");
+            await expectNotFresh(harness);
           },
         );
 
