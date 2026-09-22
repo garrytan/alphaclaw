@@ -318,12 +318,14 @@ describeLive("LIVE #54 reproduction: runBackup vs real CLIs under SQLite lock co
         const details = rows.join("\n");
         expect(details).toMatch(/completed: succeeded via AlphaClaw offline copy \(gateway paused\)/);
         expect(details).not.toMatch(/upstream attempts?/);
-        // The archive is the documented format 2: manifest with producer +
-        // format version, the state DB listed as a sqlite asset, the
-        // evidence embedded, the policy and the coverage stated.
+        // The archive is the documented format 3 (#99 — 2 added excludes +
+        // coverage, 3 added profile/partial/requiredAssets + the snapshot
+        // interval): manifest with producer + format version, the state DB
+        // listed as a sqlite asset, the evidence embedded, the policy and
+        // the coverage stated.
         const manifest = readArchiveManifest(record.file);
         expect(manifest.producer).toBe(kOfflineCopyProducer);
-        expect(manifest.alphaclawFormatVersion).toBe(2);
+        expect(manifest.alphaclawFormatVersion).toBe(3);
         expect(manifest.schemaVersion).toBe(1);
         expect(
           manifest.assets.some(
