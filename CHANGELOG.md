@@ -90,6 +90,26 @@ more. Five causes, one of them a product regression.
   17 / agent 21) — `createSource` now derives the schema from the release
   that wrote the files, and both suites stage 2026.9.3 explicitly as their
   source (the second migrates it to 2026.9.4 by design).
+- **A failed medic `doctor --fix` no longer reads as a black box.** The
+  container journeys that crashed on the pending `audit-events-v2` repair
+  logged only `doctor_fix failed (backup …)`; Doctor's refusal lived in an
+  `INCIDENT-*.md` inside the container that no artifact carried. The medic
+  log line and the ledger `error` now end with `exit <code>; doctor said:
+  <Doctor's last three lines>` (or the runner's named refusal, e.g.
+  `doctor_restored_stale_config`), and both container journeys copy the
+  rescue workspace's incident bundles into their failure artifacts. Probed on
+  real releases while at it: a 2026.9.3 state (`onboard` + one gateway run)
+  upgrades to 2026.9.5 cleanly — the new gateway's own startup Doctor migrates
+  state v16→v17 — so the refusal seen in CI needs the round-trip state the
+  config-gate fix above no longer produces (TODOS keeps the P3 repro).
+- **Live tier: the Control UI rollback drill (step 6) asserted against a
+  same-document fragment navigation** (`/openclaw/` → `/openclaw/#token=…`
+  never fetched the document the respawned default-mount server served), so
+  it read the legacy page in 5 of 5 runs on 2026.9.5 while the product
+  round-tripped correctly (verified in a browser under `/qa`). The drill now
+  leaves the origin (`about:blank`) before the final load; step 4 settles the
+  page and retries once when the UI's own post-401 recovery navigation races
+  the reload or the cache read (`Not attached to an active page`, 2 of 6 runs).
 
 ## [0.9.88] - 2026-09-21
 
