@@ -5,7 +5,42 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
-## [0.9.88] - 2026-09-21
+## [0.9.89] - 2026-09-22
+
+The nightly live tier (`live-e2e.yml`, real OpenClaw releases) had failed three
+nights running (2026-09-20/21/22, on v0.9.85/86/87) while the hermetic and
+container tiers stayed green. Four causes, one of them a product regression.
+
+### Fixed
+
+- **The upstream backup rung was vetoed on every real install (v0.9.87
+  regression).** `upstreamBackupVeto` skipped `openclaw backup create` whenever
+  the preflight walk saw an absolute-target symlink. OpenClaw itself plants
+  those in every state directory — `plugin-skills/<skill>` → the package's
+  `dist/extensions/…/skills` (observed on 2026.9.3 and 2026.9.5) — and its own
+  backup neither follows nor archives them (a 2026.9.5 archive of such a tree
+  carries no `plugin-skills` entry and nothing under `dist/extensions`;
+  verified 2026-09-22). So the veto fired everywhere: the no-quiesce ladder
+  (the boot-instance shape) had no rung left and the hard gate failed with
+  `The upstream backup was skipped (absolute_symlinks)`, and the paused
+  ladder lost its upstream fallback after a failed offline copy. Absolute
+  symlinks are still measured and listed in Upgrade → Check backup sources;
+  they no longer skip the upstream CLI. The `.env` rule is unchanged.
+- **Live tier: the thinking-API probe carried the same minified-key guess the
+  library had** (`mod.i` / `mod.s`; v0.9.88 fixed the library). Since
+  2026.9.5 became `latest` (2026-09-19) the probe bound
+  `listThinkingLevelLabels` and every level id read empty. It binds by
+  function name now.
+- **Live tier: three assertions left stale by v0.9.86/v0.9.87.** The first
+  `backup: running` detail is "Backup preflight complete — preparing a
+  consistent backup" since v0.9.87 (the pause is proven by the completed
+  row's "(gateway paused)" suffix); the offline-copy record and the manifest
+  gained `profile`, `partial`, `requiredAssets`, the snapshot interval and
+  `coverage.migration` (format 3) — the contention and downgrade suites now
+  assert the documented twelve AlphaClaw-only manifest keys and the current
+  wording.
+
+
 
 Pins OpenClaw **2026.9.5** (npm `latest` and `beta` since 2026-09-19; 2026.9.4
 shipped in between on 2026-09-11). No runtime change: 2026.9.5 declares the same

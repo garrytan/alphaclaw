@@ -31,12 +31,20 @@ describe("backup preflight admission", () => {
   it.each(["enumerate", "budget"])("never retries upstream after offline %s failure", (stage) => {
     expect(upstreamBackupVeto(diagnosis(), { stage }, kDefaultBackupBudget)).toBe("offline_copy_budget");
   });
-  it.each([["envFiles", [".env"], "env_files_excluded"], ["absoluteSymlinks", [{ path: "wiki/link", target: "/outside" }], "absolute_symlinks"]])(
-    "vetoes upstream when %s would bypass archive policy", (field, value, reason) => {
-      const input = diagnosis();
-      input.directories[field] = value;
-      expect(upstreamBackupVeto(input, null, kDefaultBackupBudget)).toBe(reason);
-    });
+  it("vetoes upstream when a .env file would ride into the upstream archive", () => {
+    const input = diagnosis();
+    input.directories.envFiles = [".env"];
+    expect(upstreamBackupVeto(input, null, kDefaultBackupBudget)).toBe("env_files_excluded");
+  });
+  it("absolute-target symlinks are reported, never a veto — OpenClaw plants them in every state dir (plugin-skills/*) and its backup skips them (v0.9.89 regression, live tier 2026-09-22)", () => {
+    const input = diagnosis();
+    input.directories.absoluteSymlinks = [
+      { path: "plugin-skills/browser-automation", target: "/app/node_modules/openclaw/dist/extensions/browser/skills/browser-automation" },
+      { path: "wiki/link", target: "/outside" },
+    ];
+    expect(upstreamBackupVeto(input, null, kDefaultBackupBudget)).toBeNull();
+    expect(assessBackupPreflight(input, kDefaultBackupBudget).blocked).toBe(false);
+  });
   it("vetoes raw upstream bytes even when the excluded copy fits", () => {
     expect(upstreamBackupVeto(diagnosis({ tarSetBytes: 3 * 1024 ** 3 }), null, kDefaultBackupBudget)).toBe("upstream_byte_budget");
   });

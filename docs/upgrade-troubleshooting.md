@@ -261,9 +261,11 @@ The configuration is `updates.openclaw.backup.{excludes,rootExcludes}` in
 workspace rules use defaults, while `excludes: []` explicitly disables them.
 
 The upstream CLI cannot apply AlphaClaw's exclusions. It is skipped if preflight
-finds `.env`, absolute-target symlinks, or an oversized upstream archive set, and
-never retries live after the offline copy exhausted its enumeration or time
-budget. The offline and migration producers resolve a symlinked state root while
+finds `.env` or an oversized upstream archive set, and never retries live after
+the offline copy exhausted its enumeration or time budget. Absolute-target
+symlinks are reported for review but do not skip the upstream CLI: OpenClaw
+creates them itself (`plugin-skills/<skill>` into its package) and its backup
+neither follows nor archives them. The offline and migration producers resolve a symlinked state root while
 keeping required-source and internal-symlink safety checks.
 
 When AlphaClaw observes more than 512 MiB of raw workspace content, upstream
