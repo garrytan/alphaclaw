@@ -902,6 +902,15 @@ describeLive("live: Control UI styles render through the /openclaw proxy (real b
       expect(restoredDoc.body).toContain(`${kBasePathAttr}="${kMountPath}"`);
 
       await context.addCookies([browserCookie(cookieValueOf(restoredCookie))]);
+      // The tab is still parked on the LEGACY document at ${kMountPath}/ and
+      // launchLocation is ${kMountPath}/#token=… — the same URL plus a
+      // fragment. A hash-only goto is a same-document navigation: no request,
+      // no new document, so the legacy page (base path "") would be "read"
+      // here no matter what the server now serves. (Under 2026.9.3 the
+      // root-mounted UI moved the URL to /chat, which hid this; 2026.9.5 stays
+      // on the mount path.) Leave the document first so the launch URL is a
+      // real load — the thing this round trip is supposed to prove.
+      await page.goto("about:blank");
       await page.goto(`${baseUrl}${launchLocation}`, { waitUntil: "load" });
       await page.waitForFunction(() => window.__acRendered === true, null, {
         timeout: kRenderTimeoutMs,
