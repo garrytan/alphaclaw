@@ -346,9 +346,42 @@ describe("bounded walk and protection", () => {
     const tree = await walkStateTreeAsync({ stateDir: root, excludes: ["first", "second"], measurementMaxEntries: 7, measurementMs: Infinity });
     expect(tree.diagnostics.measuredEntries).toBe(7);
     expect(tree.diagnostics.measurementComplete).toBe(false);
-    expect(tree.diagnostics.topBytes.some((entry) => entry.path === "workspace/first")).toBe(true);
+    // readdir order is filesystem-dependent (Linux CI yielded "second" first),
+    // so the leaderboard names WHICHEVER excluded directory the shared cap
+    // measured — never a specific one.
+    expect(tree.diagnostics.topBytes.some((entry) => ["workspace/first", "workspace/second"].includes(entry.path))).toBe(true);
     expect(tree.excludes.some((entry) => entry.partial)).toBe(true);
     expect(tree.workspaces.get(path.join(root, "workspace")).files.map((file) => file.archivePath)).toEqual(["workspace/keep.md"]);
+  });
+
+  it("a file that vanishes between readdir and stat is recorded and skipped — the diagnosis completes and the copy's enumeration never aborts (v0.9.89; live churn tier 2026-09-22)", async () => {
+    const root = fixture();
+    write(root, "agents/main/sessions/racing.jsonl", "gone soon");
+    write(root, "agents/main/sessions/racing.jsonl.lock", "gone soon");
+    write(root, "workspace/first/racing.tmp", "excluded and gone");
+    write(root, "workspace/keep-me.md", "stays");
+    const racing = new Set([
+      path.join(root, "agents/main/sessions/racing.jsonl"),
+      path.join(root, "agents/main/sessions/racing.jsonl.lock"),
+      path.join(root, "workspace/first/racing.tmp"),
+    ]);
+    const fsModule = { ...fs, statSync(file, ...rest) {
+      if (racing.has(file)) { const error = new Error(`ENOENT: no such file or directory, stat '${file}'`); error.code = "ENOENT"; throw error; }
+      return fs.statSync(file, ...rest);
+    } };
+    for (const mode of ["diagnosis", undefined]) {
+      const tree = await walkStateTreeAsync({ stateDir: root, fsModule, excludes: ["first", "*.tmp"], ...(mode ? { mode } : {}) });
+      expect(tree.diagnostics.vanishedEntries).toBeGreaterThanOrEqual(1);
+      expect(tree.diagnostics.measurementComplete).toBe(true);
+      expect(tree.skipped.filter((entry) => entry.kind === "vanished").map((entry) => path.relative(root, entry.sourcePath)))
+        .toEqual(expect.arrayContaining(["agents/main/sessions/racing.jsonl"]));
+      const kept = tree.workspaces.get(path.join(root, "workspace")).files.map((file) => file.archivePath);
+      expect(kept).toContain("workspace/keep-me.md");
+      expect(kept.some((archivePath) => archivePath.includes("racing"))).toBe(false);
+    }
+    // Any OTHER stat failure still aborts enumeration loudly.
+    const eacces = { ...fs, statSync(file, ...rest) { if (file.endsWith("keep-me.md")) { const e = new Error("EACCES"); e.code = "EACCES"; throw e; } return fs.statSync(file, ...rest); } };
+    await expect(walkStateTreeAsync({ stateDir: root, fsModule: eacces })).rejects.toMatchObject({ stage: "enumerate" });
   });
 
   it("counts individually excluded entries against the walk cap", async () => {

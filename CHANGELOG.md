@@ -58,6 +58,18 @@ more. Five causes, one of them a product regression.
   (`to = pin`, `ok = null`, `source = operator_apply`, ≤ 7 days) now
   identifies the boot as the recorded selection landing: `action:
   activated`, no alarm. Without a fresh stamp the mismatch is still drift.
+- **A file that vanished during the backup walk failed the whole backup
+  (v0.9.87, under a live gateway).** The preflight walk stat'ed every entry
+  it had just listed and turned any failure into `Backup preflight could not
+  finish: cannot stat …` — a hard refusal — while a live gateway keeps
+  writing and removing session transcripts and `.lock` sidecars (the live
+  churn tier caught it: the no-quiesce hard gate returned 409). An entry that
+  is gone by the time it is stat'ed no longer exists: the walk now records it
+  (`skipped[{ kind: "vanished" }]`, `diagnostics.vanishedEntries`) and
+  continues, in the diagnosis and in the copy's own enumeration; any other
+  stat failure still aborts loudly. The `openclaw-backup-minimal` "shares the
+  excluded measurement cap" test also stopped pinning which excluded
+  directory readdir yields first (it flipped on the Linux runner).
 - **Live tier: the thinking-API probe carried the same minified-key guess the
   library had** (`mod.i` / `mod.s`; v0.9.88 fixed the library). Since
   2026.9.5 became `latest` (2026-09-19) the probe bound
