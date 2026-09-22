@@ -840,6 +840,33 @@ describe("drift pins (v0.9.75 ship review): vocabularies the UI mirrors by hand"
     });
   });
 
+  it("a crash_loop phase under a latched owner lease (2026.9.4+) names the renewing lease and its holder, never doctor", async () => {
+    const { buildWatchdogNarrative, kDegradedReasonCopy } = await loadHelpers();
+    const narrative = buildWatchdogNarrative(
+      {
+        ...baseStatus,
+        phase: "crash_loop_repair_ladder",
+        lifecycle: "crash_loop",
+        health: "unhealthy",
+        incumbentConflict: {
+          kind: "owner_lease_held",
+          holderPid: null,
+          holderRole: null,
+          lease: { status: "held", expiresAt: kNow + 120_000, heartbeatAt: kNow - 10_000, host: "a1b2c3d4e5f6", pid: 7 },
+        },
+      },
+      kNow,
+    );
+    expect(narrative.headline).toBe("Blocked by a gateway owner lease that keeps renewing");
+    expect(narrative.detail).toContain("host a1b2c3d4e5f6, pid 7");
+    expect(narrative.detail).toContain("another gateway is running against this state directory");
+    expect(narrative.detail.toLowerCase()).not.toContain("doctor");
+    // The degraded copy names the wait while the lease is held and stays generic without an expiry.
+    const copy = kDegradedReasonCopy.owner_lease_held({ incumbentConflict: { lease: { expiresAt: Date.now() + 90_000 } } });
+    expect(copy).toMatch(/about (89|90|91)s/);
+    expect(kDegradedReasonCopy.owner_lease_held({})).not.toContain("about");
+  });
+
   it("a crash_loop phase under a latched state-writer conflict names the blocker instead of promising doctor repair", async () => {
     const { buildWatchdogNarrative } = await loadHelpers();
     const narrative = buildWatchdogNarrative(

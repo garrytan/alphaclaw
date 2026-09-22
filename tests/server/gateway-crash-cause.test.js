@@ -237,6 +237,18 @@ describe("classifyGatewayCrash — ownership, port, oom, config, unknown, null",
     expect(
       classifyGatewayCrash({ code: 1, stderrTail: ["failed to acquire gateway state ownership"] }),
     ).toMatchObject({ cause: "state_dir_owned", detail: "state_writer_conflict" });
+    // 2026.9.4+: the held gateway-owner lease is an ownership conflict too —
+    // the watchdog's transient ladder (wait for the recorded expiry) owns it.
+    expect(
+      classifyGatewayCrash({
+        code: 1,
+        stderrTail: ["Gateway failed to start: Another Gateway owner lease is still active for this state directory. Run openclaw gateway status --deep for diagnostics."],
+      }),
+    ).toMatchObject({
+      cause: "state_dir_owned",
+      detail: "owner_lease_held",
+      conflict: { kind: "owner_lease_held", holderPid: null, holderRole: null },
+    });
   });
 
   it("EADDRINUSE / 'address already in use' → port_in_use", () => {

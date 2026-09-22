@@ -67,6 +67,9 @@ const createHarness = ({
   readProcStartTicks = null,
   pidAlive = null,
   classifyOwnershipConflict = null,
+  // 2026.9.4+ owner-lease seams (openclaw-owner-lease read / reclaim shapes).
+  readGatewayOwnerLease = null,
+  reclaimGatewayOwnerLease = null,
   degradedRepairThreshold = null,
   restartGatewayColdStart = null,
   restartGatewayForMitigation = null,
@@ -146,6 +149,8 @@ const createHarness = ({
     ...(readProcStartTicks ? { readProcStartTicks } : {}),
     ...(pidAlive ? { pidAlive } : {}),
     ...(classifyOwnershipConflict ? { classifyOwnershipConflict } : {}),
+    ...(readGatewayOwnerLease ? { readGatewayOwnerLease } : {}),
+    ...(reclaimGatewayOwnerLease ? { reclaimGatewayOwnerLease } : {}),
     ...(degradedRepairThreshold != null ? { degradedRepairThreshold } : {}),
     ...(restartGatewayColdStart ? { restartGatewayColdStart } : {}),
     ...(restartGatewayForMitigation ? { restartGatewayForMitigation } : {}),
@@ -5609,6 +5614,142 @@ describe("server/watchdog", () => {
       expect(
         noticesIncluding(notifier, "another OpenClaw process keeps the state directory locked"),
       ).toHaveLength(1);
+      expect(doctorFixCalls(clawCmd)).toBe(0);
+      expect(clawCmd.mock.calls.some(([command]) => String(command).startsWith("gateway stop"))).toBe(false);
+      expect(rowsOfType(insertWatchdogEvent, "crash")).toHaveLength(0);
+      watchdog.stop();
+    });
+
+    it("Codex 8′ (2026.9.4+). a held gateway-owner lease with NO healthy gateway is a transient conflict: degraded owner_lease_held, no crash row, the relaunch WAITS for the lease's recorded expiry (re-read each tick) while the holder's heartbeat is fresh, RECLAIMS the row once it is provably stale, then relaunches once — never doctor --fix, never gateway stop", async () => {
+      const kLeaseLine = "Gateway failed to start: Another Gateway owner lease is still active for this state directory. Run openclaw gateway status --deep for diagnostics.";
+      let nowMs = Date.now();
+      const lease = {
+        status: "held",
+        expiresAt: nowMs + 200_000,
+        heartbeatAt: nowMs - 40_000,
+        remainingMs: 200_000,
+        owner: { pid: 7, host: "a1b2c3d4e5f6", startedAt: 4242, port: 18789, mode: "foreground" },
+      };
+      const readGatewayOwnerLease = vi.fn(() => ({ ...lease, remainingMs: Math.max(0, lease.expiresAt - Date.now()) }));
+      // The reclaim seam mirrors the module: skipped while the beat is fresh, reclaimed once stale.
+      const reclaimGatewayOwnerLease = vi.fn(() => ({ status: "skipped", reason: "fresh_heartbeat", lease }));
+      const { watchdog, insertWatchdogEvent, notifier, launchGatewayProcess, clawCmd } = createHarness({
+        autoRepair: true,
+        clawCmdImpl: doctorOk,
+        readGatewayOwnerLease,
+        reclaimGatewayOwnerLease,
+        fetchImpl: async () => {
+          throw new Error("nobody listening");
+        },
+      });
+      watchdog.onGatewayExit({
+        code: 1,
+        expectedExit: false,
+        stderrTail: [kLeaseLine, "SECRET_STDERR_LINE"],
+        launchedAt: Date.now() - 2_000,
+      });
+      await settle();
+
+      // Degraded under the lease, no crash accounting, the lease facts ride the state (never the stderr).
+      expect(watchdog.getStatus()).toMatchObject({
+        lifecycle: "running",
+        health: "degraded",
+        degradedReason: "owner_lease_held",
+        crashCountInWindow: 0,
+        incumbentConflict: expect.objectContaining({
+          kind: "owner_lease_held",
+          holderPid: null,
+          lease: { status: "held", expiresAt: lease.expiresAt, heartbeatAt: lease.heartbeatAt, host: "a1b2c3d4e5f6", pid: 7 },
+        }),
+      });
+      expect(readGatewayOwnerLease).toHaveBeenCalledTimes(1);
+      expect(rowsOfType(insertWatchdogEvent, "crash")).toHaveLength(0);
+      expect(restartRows(insertWatchdogEvent, { source: "exit_event", status: "skipped" })).toEqual([
+        expect.objectContaining({
+          details: expect.objectContaining({
+            reason: "incumbent_conflict_unhealthy",
+            conflict: { kind: "owner_lease_held", holderPid: null, holderRole: null },
+          }),
+        }),
+      ]);
+      const notices = noticesIncluding(notifier, "owner lease (host a1b2c3d4e5f6, pid 7) is still recorded in the state directory");
+      expect(notices).toHaveLength(1);
+      // 200 s of lease plus the 2 s post-expiry margin (kOwnerLeaseExpiryMarginMs).
+      expect(notices[0]).toMatch(/relaunched once that lease is provably stale, or when it lapses \(about 20[0-3]s at the latest\)/);
+      expect(notices[0]).not.toContain("SECRET_STDERR_LINE");
+      expect(noticesIncluding(notifier, "went down")).toHaveLength(0);
+
+      // Sustained failure BEFORE the expiry with a FRESH beat: the tick re-reads, tries the reclaim (skipped),
+      // books ONE skip row and waits — no launch, no Doctor, no stop. A second tick with the same reason adds no row.
+      await watchdog.runHealthCheck({ source: "health_timer" });
+      await settle();
+      expect(readGatewayOwnerLease).toHaveBeenCalledTimes(2);
+      expect(reclaimGatewayOwnerLease).toHaveBeenCalledTimes(1);
+      expect(launchGatewayProcess).not.toHaveBeenCalled();
+      expect(doctorFixCalls(clawCmd)).toBe(0);
+      expect(restartRows(insertWatchdogEvent, { source: "owner_lease_held", status: "requested" })).toHaveLength(0);
+      const skipRows = () => rowsOfType(insertWatchdogEvent, "repair").filter((row) => row.source === "owner_lease_held" && row.status === "skipped");
+      expect(skipRows()).toEqual([expect.objectContaining({ details: expect.objectContaining({ reason: "fresh_heartbeat", lease: expect.objectContaining({ host: "a1b2c3d4e5f6" }) }) })]);
+      await watchdog.runHealthCheck({ source: "health_timer" });
+      await settle();
+      expect(skipRows()).toHaveLength(1);
+      expect(launchGatewayProcess).not.toHaveBeenCalled();
+
+      // The holder has now missed three beats: the reclaim deletes the row and the SAME tick relaunches, once.
+      reclaimGatewayOwnerLease.mockImplementation(() => ({ status: "reclaimed", reason: "stale_foreign_host", lease }));
+      await watchdog.runHealthCheck({ source: "health_timer" });
+      await settle();
+      expect(launchGatewayProcess).toHaveBeenCalledTimes(1);
+      expect(restartRows(insertWatchdogEvent, { source: "owner_lease_held", status: "requested" })).toHaveLength(1);
+      expect(rowsOfType(insertWatchdogEvent, "repair").filter((row) => row.source === "owner_lease_held" && row.status === "ok")).toEqual([
+        expect.objectContaining({ details: expect.objectContaining({ reason: "stale_owner_lease_reclaimed", lease: expect.objectContaining({ host: "a1b2c3d4e5f6", pid: 7 }) }) }),
+      ]);
+      expect(watchdog.getStatus().replacementPending).toMatchObject({ pid: 4242, source: "owner_lease_held" });
+      // The relaunched contender stays under the latched conflict across its own launch (transient kinds survive markRelaunchRequested).
+      expect(watchdog.getStatus().incumbentConflict).toMatchObject({ kind: "owner_lease_held" });
+      expect(doctorFixCalls(clawCmd)).toBe(0);
+      expect(clawCmd.mock.calls.some(([command]) => String(command).startsWith("gateway stop"))).toBe(false);
+      expect(rowsOfType(insertWatchdogEvent, "crash")).toHaveLength(0);
+      watchdog.stop();
+    });
+
+    it("Codex 8″ (2026.9.4+). a lease that keeps RENEWING across the relaunch budget is another gateway on this state directory: capped like a crash loop into a latched notice naming the lease, never doctor --fix", async () => {
+      const kLeaseLine = "Gateway failed to start: Another Gateway owner lease is still active for this state directory.";
+      // Every read says "expired" so each tick relaunches; every relaunch is refused with the same line.
+      const readGatewayOwnerLease = vi.fn(() => ({ status: "expired", expiresAt: Date.now() - 1, heartbeatAt: Date.now() - 1, remainingMs: 0, owner: { pid: 9, host: "otherhost", startedAt: null, port: 18789, mode: "foreground" } }));
+      const { watchdog, insertWatchdogEvent, notifier, launchGatewayProcess, clawCmd } = createHarness({
+        autoRepair: true,
+        clawCmdImpl: doctorOk,
+        readGatewayOwnerLease,
+        fetchImpl: async () => {
+          throw new Error("nobody listening");
+        },
+      });
+      const conflictExit = () =>
+        watchdog.onGatewayExit({ code: 1, expectedExit: false, stderrTail: [kLeaseLine], launchedAt: Date.now() - 2_000 });
+      conflictExit();
+      await settle();
+      expect(watchdog.getStatus()).toMatchObject({ health: "degraded", degradedReason: "owner_lease_held", crashCountInWindow: 0 });
+      // Every tick relaunches (the read says "expired"), every relaunch is refused:
+      // three real relaunches run, the next failing tick reaches the cap.
+      await watchdog.runHealthCheck({ source: "health_timer" });
+      await settle();
+      for (let round = 0; round < 3; round += 1) {
+        conflictExit();
+        await settle();
+        await watchdog.runHealthCheck({ source: "health_timer" });
+        await settle();
+      }
+      expect(launchGatewayProcess).toHaveBeenCalledTimes(3);
+      expect(watchdog.getStatus()).toMatchObject({ lifecycle: "crash_loop", health: "unhealthy" });
+      expect(rowsOfType(insertWatchdogEvent, "crash_loop")).toEqual([
+        expect.objectContaining({
+          source: "owner_lease_held",
+          details: expect.objectContaining({ relaunchesInWindow: 3, lease: expect.objectContaining({ host: "otherhost", pid: 9 }) }),
+        }),
+      ]);
+      expect(noticesIncluding(notifier, "a gateway owner lease keeps being renewed in the state directory")).toHaveLength(1);
+      expect(noticesIncluding(notifier, "stop the other gateway using this state directory")).toHaveLength(1);
       expect(doctorFixCalls(clawCmd)).toBe(0);
       expect(clawCmd.mock.calls.some(([command]) => String(command).startsWith("gateway stop"))).toBe(false);
       expect(rowsOfType(insertWatchdogEvent, "crash")).toHaveLength(0);

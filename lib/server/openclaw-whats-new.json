@@ -4,46 +4,46 @@
     {
       "minor": "2026.9",
       "channel": "beta",
-      "lastVerifiedVersion": "2026.9.3",
+      "lastVerifiedVersion": "2026.9.5",
       "highlights": [
         {
           "title": "Node 24.16 or newer required",
-          "body": "OpenClaw 2026.9.3 no longer runs on Node 22 or 25 — it needs Node 24.16+ (or 26.1+) because older runtimes can truncate SQLite text. AlphaClaw v0.9.80 moves its image to Node 24.16+; if this AlphaClaw's own Node is older than that, the catalog row says so and the update is refused before anything downloads.",
+          "body": "The 2026.9 line no longer runs on Node 22 or 25 — it needs Node 24.16+ (or 26.1+) because older runtimes can truncate SQLite text. AlphaClaw v0.9.80 moved its image to Node 24.16+; if this AlphaClaw's own Node is older than a release requires, the catalog row says so and the update is refused before anything downloads.",
           "tone": "info"
         },
         {
-          "title": "Safer updates",
-          "body": "Updates rehearse core and plugin changes in an isolated candidate state before activating, migrate eligible 2026.9.2 state, and recover abandoned update records without stopping a healthy gateway.",
+          "title": "Agent database moves to schema 21",
+          "body": "2026.9.5 upgrades every agent database to schema 21 and 2026.9.4 moved the state database to schema 17; older builds cannot open either. AlphaClaw takes and verifies a backup before applying, and going back means restoring that backup with the matching older build — reinstalling the older package alone is not enough.",
           "tone": "info"
         },
         {
-          "title": "Faster chat and dashboards",
-          "body": "Long transcripts, dashboards and session lists stay responsive: conversations load sooner and heavy transcript and disk work no longer blocks the agent.",
+          "title": "Updates rehearse before switching",
+          "body": "Atomic Updates check the next version against a private copy of your setup while the current gateway keeps running, then switch over and verify. Recovery can restore the previous version when your data is still compatible, and updates that fail now report the root cause first and restore the service they stopped.",
           "tone": "info"
         },
         {
-          "title": "Updates that keep your settings",
-          "body": "Automatic updates now preserve your active settings, enabled skills and default-agent ownership, restore gateway restarts after a Git-based update, and report the outcome with recovery guidance.",
+          "title": "Add plugins without a restart",
+          "body": "Supported plugins can be installed, reloaded, enabled or disabled while the gateway stays up, and a running update also checks eligible plugins even when the core is already current.",
+          "tone": "info"
+        },
+        {
+          "title": "Backups capture more, more safely",
+          "body": "Full backups now include the extra settings files your main config refers to, preserve linked and hardlinked databases and Mac metadata files, and can verify the archive as it is written. Archives from 2026.9.5 may not restore on 2026.9.4 or older.",
+          "tone": "info"
+        },
+        {
+          "title": "Legacy repairs wait for Doctor",
+          "body": "Older conversations, workspace metadata, pairing records and file-based message queues are no longer converted during ordinary startup. When OpenClaw reports pending legacy repairs, AlphaClaw's Doctor run (openclaw doctor --fix, gateway stopped) completes them; restarting alone does not.",
+          "tone": "info"
+        },
+        {
+          "title": "Archive and share conversations",
+          "body": "Inactive history can be compressed into cold storage and reopened later (off by default; 30 days when on), and selected conversation groups can be shared read-only with a paired OpenClaw installation.",
           "tone": "info"
         },
         {
           "title": "Replies survive restarts",
-          "body": "Active, queued and delegated replies are recovered after a gateway restart instead of being dropped, and continuation instructions survive retries.",
-          "tone": "info"
-        },
-        {
-          "title": "GPT-6 Astra",
-          "body": "OpenAI's GPT-6 Astra can be selected with an OpenAI API-key profile or an eligible ChatGPT/Codex account, with text and image input and supported reasoning controls.",
-          "tone": "info"
-        },
-        {
-          "title": "Sturdier backups",
-          "body": "Backups keep text containing embedded NUL characters intact, support Nix-managed config and credential links, and reject a corrupt archive header instead of accepting an incomplete backup.",
-          "tone": "info"
-        },
-        {
-          "title": "Change settings without restarting",
-          "body": "More agent, model, tool, channel, browser, node, access and terminal settings apply to the running gateway; the ones that still need a restart stay marked in OpenClaw's configuration reference.",
+          "body": "Active, queued and delegated replies are recovered after a gateway restart instead of being dropped, interrupted memory rebuilds reuse completed work, and healthy agents stay online while another agent's database is checked.",
           "tone": "info"
         }
       ],
@@ -71,52 +71,58 @@
           "from": "off",
           "to": "on",
           "warning": "Since 2026.9.3 the new-session model picker shows supported CLI agents and can create native CLI sessions without a separate opt-in. Set it to false after upgrading if this box should not launch CLI agents."
+        },
+        {
+          "key": "tools.message.crossContext.allowAcrossProviders",
+          "from": "off",
+          "to": "on",
+          "warning": "Since 2026.9.5 agents with the message tool can send to and act across EVERY configured chat service without a separate opt-in — and this also changes existing installs that left the key unset. Set it to false after upgrading (and allowWithinProvider to false to confine replies to the originating conversation) to restore the old isolation."
         }
       ]
     },
     {
       "minor": "2026.9",
       "channel": "stable",
-      "lastVerifiedVersion": "2026.9.3",
+      "lastVerifiedVersion": "2026.9.5",
       "highlights": [
         {
           "title": "Node 24.16 or newer required",
-          "body": "OpenClaw 2026.9.3 no longer runs on Node 22 or 25 — it needs Node 24.16+ (or 26.1+) because older runtimes can truncate SQLite text. AlphaClaw v0.9.80 moves its image to Node 24.16+; if this AlphaClaw's own Node is older than that, the catalog row says so and the update is refused before anything downloads.",
+          "body": "The 2026.9 line no longer runs on Node 22 or 25 — it needs Node 24.16+ (or 26.1+) because older runtimes can truncate SQLite text. AlphaClaw v0.9.80 moved its image to Node 24.16+; if this AlphaClaw's own Node is older than a release requires, the catalog row says so and the update is refused before anything downloads.",
           "tone": "info"
         },
         {
-          "title": "Safer updates",
-          "body": "Updates rehearse core and plugin changes in an isolated candidate state before activating, migrate eligible 2026.9.2 state, and recover abandoned update records without stopping a healthy gateway.",
+          "title": "Agent database moves to schema 21",
+          "body": "2026.9.5 upgrades every agent database to schema 21 and 2026.9.4 moved the state database to schema 17; older builds cannot open either. AlphaClaw takes and verifies a backup before applying, and going back means restoring that backup with the matching older build — reinstalling the older package alone is not enough.",
           "tone": "info"
         },
         {
-          "title": "Faster chat and dashboards",
-          "body": "Long transcripts, dashboards and session lists stay responsive: conversations load sooner and heavy transcript and disk work no longer blocks the agent.",
+          "title": "Updates rehearse before switching",
+          "body": "Atomic Updates check the next version against a private copy of your setup while the current gateway keeps running, then switch over and verify. Recovery can restore the previous version when your data is still compatible, and updates that fail now report the root cause first and restore the service they stopped.",
           "tone": "info"
         },
         {
-          "title": "Updates that keep your settings",
-          "body": "Automatic updates now preserve your active settings, enabled skills and default-agent ownership, restore gateway restarts after a Git-based update, and report the outcome with recovery guidance.",
+          "title": "Add plugins without a restart",
+          "body": "Supported plugins can be installed, reloaded, enabled or disabled while the gateway stays up, and a running update also checks eligible plugins even when the core is already current.",
+          "tone": "info"
+        },
+        {
+          "title": "Backups capture more, more safely",
+          "body": "Full backups now include the extra settings files your main config refers to, preserve linked and hardlinked databases and Mac metadata files, and can verify the archive as it is written. Archives from 2026.9.5 may not restore on 2026.9.4 or older.",
+          "tone": "info"
+        },
+        {
+          "title": "Legacy repairs wait for Doctor",
+          "body": "Older conversations, workspace metadata, pairing records and file-based message queues are no longer converted during ordinary startup. When OpenClaw reports pending legacy repairs, AlphaClaw's Doctor run (openclaw doctor --fix, gateway stopped) completes them; restarting alone does not.",
+          "tone": "info"
+        },
+        {
+          "title": "Archive and share conversations",
+          "body": "Inactive history can be compressed into cold storage and reopened later (off by default; 30 days when on), and selected conversation groups can be shared read-only with a paired OpenClaw installation.",
           "tone": "info"
         },
         {
           "title": "Replies survive restarts",
-          "body": "Active, queued and delegated replies are recovered after a gateway restart instead of being dropped, and continuation instructions survive retries.",
-          "tone": "info"
-        },
-        {
-          "title": "GPT-6 Astra",
-          "body": "OpenAI's GPT-6 Astra can be selected with an OpenAI API-key profile or an eligible ChatGPT/Codex account, with text and image input and supported reasoning controls.",
-          "tone": "info"
-        },
-        {
-          "title": "Sturdier backups",
-          "body": "Backups keep text containing embedded NUL characters intact, support Nix-managed config and credential links, and reject a corrupt archive header instead of accepting an incomplete backup.",
-          "tone": "info"
-        },
-        {
-          "title": "Change settings without restarting",
-          "body": "More agent, model, tool, channel, browser, node, access and terminal settings apply to the running gateway; the ones that still need a restart stay marked in OpenClaw's configuration reference.",
+          "body": "Active, queued and delegated replies are recovered after a gateway restart instead of being dropped, interrupted memory rebuilds reuse completed work, and healthy agents stay online while another agent's database is checked.",
           "tone": "info"
         }
       ],
@@ -144,6 +150,12 @@
           "from": "off",
           "to": "on",
           "warning": "Since 2026.9.3 the new-session model picker shows supported CLI agents and can create native CLI sessions without a separate opt-in. Set it to false after upgrading if this box should not launch CLI agents."
+        },
+        {
+          "key": "tools.message.crossContext.allowAcrossProviders",
+          "from": "off",
+          "to": "on",
+          "warning": "Since 2026.9.5 agents with the message tool can send to and act across EVERY configured chat service without a separate opt-in — and this also changes existing installs that left the key unset. Set it to false after upgrading (and allowWithinProvider to false to confine replies to the originating conversation) to restore the old isolation."
         }
       ]
     },

@@ -350,7 +350,26 @@ describe("classifyOwnershipConflict (exit-1 wording of a losing gateway contende
       holderPid: null,
       holderRole: null,
     },
+    {
+      // 2026.9.4+ (verified against the 2026.9.5 dist): the state_leases
+      // gateway-owner row is inside its TTL and the holder is unverifiable.
+      text: "Gateway failed to start: Another Gateway owner lease is still active for this state directory. Run openclaw gateway status --deep for diagnostics.",
+      kind: "owner_lease_held",
+      holderPid: null,
+      holderRole: null,
+    },
   ];
+
+  it("names the transient kinds the watchdog gives backoff relaunches only (frozen set)", () => {
+    const { kTransientConflictKinds, kOwnerLeaseHeldPattern } = require("../../lib/server/openclaw-lock-contention");
+    expect([...kTransientConflictKinds]).toEqual(["state_writer_conflict", "owner_lease_held"]);
+    expect(Object.isFrozen(kTransientConflictKinds)).toBe(true);
+    expect(kOwnerLeaseHeldPattern.test("another gateway owner lease is still active")).toBe(true);
+    // A state-writer line outranks a lease line in the same tail (the writer is the nearer holder).
+    expect(
+      classifyOwnershipConflict(["Another Gateway owner lease is still active for this state directory", "state directory is locked by agent-embedded (pid 5)"].join("\n")),
+    ).toEqual({ kind: "state_writer_conflict", holderPid: 5, holderRole: "agent-embedded" });
+  });
 
   it.each(rows)("$text → $kind", ({ text, kind, holderPid, holderRole }) => {
     expect(kGatewayOwnershipConflictPattern.test(text)).toBe(true);
