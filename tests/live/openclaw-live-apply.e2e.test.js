@@ -187,8 +187,15 @@ const assertActivatedThinkingApi = (installDir) => {
   const source = `
     const { pathToFileURL } = require('node:url');
     import(pathToFileURL(process.argv[2]).href).then((mod) => {
-      const list = mod.listThinkingLevelOptions || mod.i;
-      const resolveDefault = mod.resolveThinkingDefaultForModel || mod.s;
+      // Bind by function NAME, never by a remembered minified export key:
+      // upstream re-letters its "export { ... as i, ... as s }" table per
+      // build, and on 2026.9.5 "i" is listThinkingLevelLabels (plain strings)
+      // -- the guess that failed this tier from 2026-09-20 (lib fix: v0.9.88).
+      // (This comment lives inside a template literal: no backticks here.)
+      const byName = (name) => (typeof mod[name] === 'function' ? mod[name]
+        : Object.values(mod).find((v) => typeof v === 'function' && v.name === name));
+      const list = byName('listThinkingLevelOptions');
+      const resolveDefault = byName('resolveThinkingDefaultForModel');
       if (typeof list !== 'function' || typeof resolveDefault !== 'function') throw new Error('Thinking API exports are missing');
       const provider = 'anthropic', model = 'claude-opus-4-7';
       const catalog = [{ provider, id: model, reasoning: true }];

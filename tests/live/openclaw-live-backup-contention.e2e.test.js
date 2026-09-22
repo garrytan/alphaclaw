@@ -22,12 +22,12 @@
 //      check; `offlineCopy.next` names the hand-over (`predicted_fits`);
 //   2. real beta, lock held for the whole step, copy NOT failed → the copy
 //      stands in on its own with ZERO upstream attempts (producer
-//      alphaclaw-offline-copy, format 2, exclusivity evidence, verified) —
+//      alphaclaw-offline-copy, format 3, exclusivity evidence, verified) —
 //      the incident's fix in its purest form;
 //   3. the current pin under the same held lock also takes the lease:
 //      one classified retry succeeds when the writer releases.
 //   4. the offline-copy manifest's core field set matches upstream's (beta)
-//      plus exactly the documented AlphaClaw keys (format 2).
+//      plus exactly the documented AlphaClaw keys (format 3).
 //
 // Verified upstream facts these tests encode (dist read + live probes,
 // 2026-09-02): the lease engages ONLY when a legacy audit source exists
@@ -64,6 +64,10 @@ const {
   kOfflineCopyProducer,
   kUpstreamProducer,
 } = require("../../lib/server/openclaw-backup-offline-copy");
+const {
+  kOfflineCopyPolicyExcludes,
+  kOfflineCopyRootExcludes,
+} = require("../../lib/server/openclaw-backup-policy");
 const { kLiveEnabled, kOpenclawLines, stageOpenclawVersion } = liveHelpers;
 
 const describeLive = kLiveEnabled ? describe : describe.skip;
@@ -204,17 +208,22 @@ describeLive("LIVE #54 reproduction: runBackup vs real CLIs under SQLite lock co
         expect(record.diagnosis.journalMode).toBe("wal");
 
         // The step stream told the operator WHY each paused rung ran, in the
-        // wording WI-1.8/1.9 fixed: the first upstream row names the failed
-        // copy, the retry ran with the gateway still paused.
+        // wording WI-1.8/1.9 fixed: since v0.9.87 the ONE running row opens
+        // with the preflight verdict (the pause follows it), the first
+        // upstream row names the failed copy, the retry ran with the gateway
+        // still paused.
         const details = backupStepDetails(harness);
         expect(details.join("\n")).toMatch(
-          /pausing the gateway for a consistent backup \(AlphaClaw offline copy first\)/,
+          /Backup preflight complete — preparing a consistent backup/,
         );
         expect(details.join("\n")).toMatch(
           /offline copy failed \(archive\) — upstream backup predicted to fit the pause, gateway still paused/,
         );
-        expect(details.join("\n")).toMatch(
-          /retrying after state-database lock contention \(gateway still paused\)/,
+        // The retry's own running row is rewritten in place by the progress
+        // ticker (v0.9.81) and ends on the relaunch wait, so the retry is
+        // proven from the run log, where the ladder narrates it durably.
+        expect(produced.contentionLog).toMatch(
+          /state-database lock contention on attempt 1 — retrying in \d+s with the gateway still paused/,
         );
         expect(details.join("\n")).toMatch(/succeeded on attempt 2 \(gateway paused briefly\)/);
         // Quiesce transaction: stop before the first CLI, start after, one release.
@@ -273,7 +282,10 @@ describeLive("LIVE #54 reproduction: runBackup vs real CLIs under SQLite lock co
             ok: true,
             reason: "primary",
             partial: false,
-            coverage: { core: "complete", workspace: "complete" },
+            profile: "full",
+            // v0.9.86 (#101): `migration` coverage rides along; v0.9.87 added
+            // bytes/durationMs/excludedBytes/snapshot* — asserted loosely.
+            coverage: expect.objectContaining({ core: "complete", workspace: "complete" }),
           }),
         );
         expect(record.offlineCopy.next).toBeUndefined();
@@ -299,21 +311,25 @@ describeLive("LIVE #54 reproduction: runBackup vs real CLIs under SQLite lock co
             platform: "linux",
           }),
         );
-        // WI-1.9: ONE initial running row (it names the copy-first path) and
-        // a success detail WITHOUT an attempt clause — "after 0 upstream
-        // attempts" would misread as "nothing was attempted".
-        const details = backupStepDetails(harness).join("\n");
-        expect(details).toMatch(
-          /running: pausing the gateway for a consistent backup \(AlphaClaw offline copy first\)/,
-        );
+        // WI-1.9: ONE initial running row (since v0.9.87 it opens with the
+        // preflight verdict; the copy-first pause follows) and a success
+        // detail WITHOUT an attempt clause — "after 0 upstream attempts"
+        // would misread as "nothing was attempted".
+        const rows = backupStepDetails(harness);
+        // The one running row is rewritten in place as the ladder progresses
+        // (it ends on the relaunch wait), so count it rather than pin its text.
+        expect(rows.filter((row) => row.startsWith("running:"))).toHaveLength(1);
+        const details = rows.join("\n");
         expect(details).toMatch(/completed: succeeded via AlphaClaw offline copy \(gateway paused\)/);
         expect(details).not.toMatch(/upstream attempts?/);
-        // The archive is the documented format 2: manifest with producer +
-        // format version, the state DB listed as a sqlite asset, the
-        // evidence embedded, the policy and the coverage stated.
+        // The archive is the documented format 3 (#99 — 2 added excludes +
+        // coverage, 3 added profile/partial/requiredAssets + the snapshot
+        // interval): manifest with producer + format version, the state DB
+        // listed as a sqlite asset, the evidence embedded, the policy and
+        // the coverage stated.
         const manifest = readArchiveManifest(record.file);
         expect(manifest.producer).toBe(kOfflineCopyProducer);
-        expect(manifest.alphaclawFormatVersion).toBe(2);
+        expect(manifest.alphaclawFormatVersion).toBe(3);
         expect(manifest.schemaVersion).toBe(1);
         expect(
           manifest.assets.some(
@@ -322,13 +338,14 @@ describeLive("LIVE #54 reproduction: runBackup vs real CLIs under SQLite lock co
         ).toBe(true);
         expect(manifest.exclusivityEvidence.fdScan).toBe("clean");
         expect(manifest.diagnosis.dbCount).toBe(1);
-        expect(manifest.coverage).toEqual({ core: "complete", workspace: "complete" });
-        expect(manifest.excludes.map((row) => row.pattern)).toEqual([
-          "node_modules",
-          "*.heapsnapshot",
-          "*.tmp",
-          "logs/**/*.gz",
-        ]);
+        // Format 3 (#101) added `migration` coverage beside core/workspace.
+        expect(manifest.coverage).toEqual({ core: "complete", workspace: "complete", migration: "complete" });
+        // Format 3 lists BOTH default exclude sets (workspace-scoped policy
+        // excludes and the v0.9.86 state-root excludes) — assert the shipped
+        // defaults, never a literal that goes stale when a default is added.
+        const patterns = manifest.excludes.map((row) => row.pattern);
+        expect(patterns).toHaveLength(kOfflineCopyPolicyExcludes.length + kOfflineCopyRootExcludes.length);
+        expect(patterns).toEqual(expect.arrayContaining([...kOfflineCopyPolicyExcludes, ...kOfflineCopyRootExcludes]));
         // No upstream ran: the run log carries no lease text at all.
         const log = readRunLog(harness.openclawDir);
         expect(log).not.toMatch(kLeaseTimeoutLinePattern);
@@ -420,9 +437,10 @@ describeLive("LIVE #54 reproduction: runBackup vs real CLIs under SQLite lock co
       const offline = readArchiveManifest(produced.offlineCopy);
 
       // Upstream (2026.9.1-beta.1) schemaVersion-1 core: every key it writes
-      // is present in ours; ours adds exactly the documented seven — format
-      // 2 added `excludes` and `coverage` (docs/designs/backup-offline-copy.md
-      // §3, §7).
+      // is present in ours; ours adds exactly the documented twelve — format
+      // 2 added `excludes` and `coverage`, format 3 (#99/#101/#103) added
+      // `profile`, `partial`, `requiredAssets` and the snapshot interval
+      // (docs/designs/backup-offline-copy.md §3, §7).
       expect(upstream.schemaVersion).toBe(1);
       expect(offline.schemaVersion).toBe(1);
       const upstreamKeys = Object.keys(upstream).sort();
@@ -437,8 +455,13 @@ describeLive("LIVE #54 reproduction: runBackup vs real CLIs under SQLite lock co
           "diagnosis",
           "excludes",
           "exclusivityEvidence",
+          "partial",
           "partialReasons",
           "producer",
+          "profile",
+          "requiredAssets",
+          "snapshotCompletedAt",
+          "snapshotStartedAt",
         ].sort(),
       );
       // paths.* and options.* core keys.

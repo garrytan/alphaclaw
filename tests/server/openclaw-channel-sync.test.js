@@ -994,6 +994,53 @@ describe("server/openclaw-channel-sync", () => {
       ).toBe(true);
     });
 
+    it("activates a RECORDED return-to-pin apply at boot as 'activated' — no drift alarm (v0.9.89; the container journey's historical→pin activation read as tampering)", async () => {
+      const { sync, store, installDir, notify } = createHarness({
+        pin: "1.0.0",
+        installedVersion: "9.9.9",
+      });
+      store.updateState((s) => {
+        s.pinVersion = "1.0.0";
+        // applyUpdate's record step for a pin target: applied = null plus the
+        // in-flight transition stamp (ok stays null until the run settles).
+        s.applied = null;
+        s.lastTransition = {
+          at: Date.now(),
+          from: "9.9.9",
+          to: "1.0.0",
+          kind: "downgrade",
+          source: "operator_apply",
+          reason: null,
+          operationId: "op-return-to-pin",
+          ok: null,
+          consumedAt: null,
+        };
+        return s;
+      });
+      expect(saveOverlayFixture(store, "1.0.0")).toEqual({ ok: true });
+
+      const result = sync.syncAtBoot();
+      await flushAsync();
+
+      expect(result.ok).toBe(true);
+      expect(result.action).toBe("activated");
+      expect(store.readInstalledVersion({ installDir })).toBe("1.0.0");
+      expect(result.warnings.some((warning) => warning.includes("recorded return to the pin"))).toBe(true);
+      expect(notifyMessages(notify).some((message) => message.includes("changed outside"))).toBe(false);
+
+      // The same mismatch WITHOUT the stamp (or with a stale/settled one) is still drift.
+      const drift = createHarness({ pin: "1.0.0", installedVersion: "9.9.9" });
+      drift.store.updateState((s) => {
+        s.pinVersion = "1.0.0";
+        s.lastTransition = { at: Date.now() - 8 * 24 * 60 * 60 * 1000, from: "9.9.9", to: "1.0.0", kind: "downgrade", source: "operator_apply", reason: null, operationId: "old", ok: null, consumedAt: null };
+        return s;
+      });
+      expect(saveOverlayFixture(drift.store, "1.0.0")).toEqual({ ok: true });
+      const driftResult = drift.sync.syncAtBoot();
+      await flushAsync();
+      expect(driftResult.action).toBe("drift_reverted");
+    });
+
     it("reconciles a changed declared pin without a drift notification", async () => {
       const { sync, store, notify } = createHarness({
         pin: "1.0.1",
@@ -3554,14 +3601,14 @@ describe("server/openclaw-channel-sync", () => {
         });
 
         it.each([".alphaclaw", "logs", "backups", "tmp"])(
-          "a symlink named %s where a bookkeeping directory would be is NOT fresh",
+          "a symlink named %s where a bookkeeping directory would be is NOT fresh — and, not being an upstream archive root, it does not veto the upstream rung (v0.9.89)",
           async (name) => {
             const harness = mkFresh();
             fs.mkdirSync(harness.openclawDir, { recursive: true });
             const elsewhere = path.join(harness.rootDir, "elsewhere");
             fs.mkdirSync(elsewhere, { recursive: true });
             fs.symlinkSync(elsewhere, path.join(harness.openclawDir, name));
-            await expectNotFresh(harness, "absolute_symlinks");
+            await expectNotFresh(harness);
           },
         );
 

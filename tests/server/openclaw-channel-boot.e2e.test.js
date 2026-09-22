@@ -1573,6 +1573,56 @@ describe("server/openclaw-channel boot sync (e2e)", () => {
         .map((call) => call[0])
         .filter((event) => event?.eventType === "config_migration_gate");
 
+    it("never round-trip restores on an UPGRADE: a pre-fix-<installed>.bak named by the first boot's pin fallback stays inert and the forward migration runs doctor (v0.9.89; container tier 2026-09-22)", async () => {
+      // Container journey shape: the volume's first boot ran the 2026.7.1-2
+      // overlay under a 2026.9.5 pin and snapshotted its config as
+      // pre-fix-2026.9.5.bak (fromVersion fell back to the PIN); the apply to
+      // the pin then restarted with a recent update run as intent. Before the
+      // direction check the gate read that as "downgrading to 2026.9.5" and
+      // restored the OLD shape over the migrated config, marking 2026.9.5
+      // migrated — so no doctor ran and the gateway refused on its pending
+      // audit-events-v2 repair.
+      const doctorCalls = [];
+      const harness = createHarness({
+        pin: "2026.9.5",
+        installedVersion: "2026.9.5",
+        sentinelVersion: "2026.9.5",
+        runnerImpl: doctorRunner({ doctorCalls }),
+      });
+      harness.store.updateState((s) => {
+        s.configMigration = {
+          completedForVersion: "2026.7.1-2",
+          lastAttempt: { version: "2026.7.1-2", at: 1, ok: true },
+        };
+        s.lastUpdateRun = {
+          operationId: "op-upgrade",
+          target: { channel: "stable", version: "2026.9.5" },
+          startedAt: harness.nowRef.now - 2 * 60 * 60 * 1000,
+          finishedAt: harness.nowRef.now - 60 * 60 * 1000,
+          ok: true,
+        };
+        return s;
+      });
+      const staleBak = path.join(harness.openclawDir, "openclaw.json.pre-fix-2026.9.5.bak");
+      fs.mkdirSync(harness.openclawDir, { recursive: true });
+      fs.writeFileSync(staleBak, JSON.stringify({ oldShape: true }, null, 2));
+      writeConfig(harness.openclawDir, { migrated: "new-shape" });
+      const configPath = path.join(harness.openclawDir, "openclaw.json");
+
+      harness.sync.syncAtBoot();
+      const outcome = await harness.sync.reconcileBootConfig();
+
+      expect(outcome.reason).not.toBe("round-trip-restore");
+      expect(outcome.reason).not.toBe("version_drift");
+      // The migrated config was never overwritten and the stale snapshot was
+      // neither consumed nor renamed.
+      expect(JSON.parse(fs.readFileSync(configPath, "utf8"))).toMatchObject({ migrated: "new-shape" });
+      expect(fs.existsSync(staleBak)).toBe(true);
+      // The forward migration for 2026.9.5 ran (doctor --fix), as an upgrade must.
+      expect(doctorCalls.length).toBeGreaterThan(0);
+      expect(harness.store.readState().configMigration.lastRestore ?? null).toBeNull();
+    });
+
     it("restores a pre-fix backup on a genuine downgrade, once, consuming the snapshot and the intent stamp", async () => {
       const { harness, bakPath, configPath, doctorCalls, insertEvent } = seedRegression({
         // The operator applied the downgrade (applyUpdate's stamp, landed).
