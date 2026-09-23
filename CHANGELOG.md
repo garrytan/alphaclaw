@@ -5,6 +5,14 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.9.90] - 2026-09-23
+
+### Fixed
+
+- Gateway startup recovery now refuses every mutating medic remedy when release-channel state is unreadable, corrupt, or held. Managed-key removal, AI-selected removal, fallback removal, and Doctor share the same admission policy.
+- Medic admission is rechecked after waiting for the lifecycle lock and at asynchronous writer boundaries, including Doctor's queued writer. A hold that appears during diagnosis cannot authorize a stale repair. Refusals are recorded as skipped with an actionable reason; valid recovery resumes after the state is repaired.
+- Existing cancellation, lease cleanup, rollback-window Doctor restrictions, legacy no-hook behavior, and detailed Doctor failure reporting remain intact. Added actual-service regressions and a torn-state recovery drill that verifies protected files are unchanged.
+
 ## [0.9.89] - 2026-09-22
 
 The nightly live tier (`live-e2e.yml`, real OpenClaw releases) had failed three
