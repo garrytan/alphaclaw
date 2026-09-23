@@ -217,6 +217,30 @@ describe("server/gateway-state reducer", () => {
     });
   }
 
+  it.each([
+    ["active retry", {}, "starting"],
+    ["no retry scheduled", { degradedRetry: null }, "down"],
+    ["watchdog stopped", { lifecycle: "stopped" }, "down"],
+    ["automatic recovery paused", { autoRepairPaused: { reason: "manual intervention" } }, "down"],
+  ])("owner lease wait: %s", (_name, overrides, expected) => {
+    const result = reduceGatewayState(inputs({
+      tcp: { running: false, observedAt: kNow },
+      watchdog: {
+        lifecycle: "running", health: "degraded",
+        incumbentConflict: { kind: "owner_lease_held" },
+        degradedRetry: { inFlight: false, dueAt: new Date(kNow + 5_000).toISOString() },
+        ...overrides,
+      },
+    }));
+    expect(result.state).toBe(expected);
+    if (expected === "starting") {
+      expect(result.reason).toContain("retry automatically");
+      expect(result.actions.find((action) => action.id === "restart").disabledReason).toBeTruthy();
+    } else {
+      expect(result.actions.some((action) => action.id === "retry")).toBe(true);
+    }
+  });
+
   it("every state resolves to a catalog entry with a public label, dot, glossary, and at most one primary action", () => {
     for (const [state, entry] of Object.entries(kGatewayStateCatalog)) {
       expect(entry.label, state).toBeTruthy();
