@@ -38,15 +38,8 @@ const kServerPath = path.join(kRepoRoot, "lib", "server.js");
 const kPassword = "e2e-proxy-pass";
 const kProxyTimeoutMs = 800;
 
-// Streamed-cap leg: kProxiedBodyMaxBytes is 50MB. Phase 1 blasts exactly the
-// cap (does not trip `streamedBytes > maxBytes`), phase 2 trickles small
-// chunks past it — the trip happens with almost nothing in flight, so the
-// flushed 413 reaches the client as data + FIN instead of being clobbered by
-// the RST that req.destroy() emits when unread inbound bytes remain.
 const kProxiedBodyCapBytes = 50 * 1024 * 1024;
 const kChunkBytes = 1024 * 1024;
-const kTrickleChunkBytes = 64 * 1024;
-const kTrickleMaxChunks = 96; // up to ~6MB past the cap
 
 // ── Control UI fixtures served by the fake gateway ──────────────────────────
 //
@@ -261,12 +254,16 @@ const startFakeGateway = () =>
         return;
       }
       // Over-cap sink: count bytes, record whether the body ever completed.
-      if (req.url.endsWith("/big-sink")) {
+      if (req.url.endsWith("/big-sink") || req.url === "/a2a/v1?body-cap") {
+        const sink = gatewayState.sink;
+        sink.request = req;
+        sink.closed = new Promise((resolve) => req.once("close", resolve));
         req.on("data", (chunk) => {
-          gatewayState.sink.bytes += chunk.length;
+          sink.bytes += chunk.length;
+          if (sink.bytes === kProxiedBodyCapBytes) sink.onCapReached?.();
         });
         req.on("end", () => {
-          gatewayState.sink.ended = true;
+          sink.ended = true;
           res.writeHead(200);
           res.end("sunk");
         });
@@ -553,99 +550,137 @@ describe("gateway proxy real-process e2e", () => {
     expect(gatewayState.requests[0].body.equals(big)).toBe(true);
   });
 
-  it("413s a chunked body over the 50MB streamed cap; the gateway never receives the complete payload", async () => {
+  it("keeps late sink data and completion attached to the original request", async () => {
+    const originalSink = gatewayState.sink;
+    const req = http.request({
+      host: "127.0.0.1",
+      port: gatewayPort,
+      path: "/api/proxy-e2e/big-sink",
+      method: "POST",
+    });
+    req.setTimeout(5000, () => req.destroy(new Error("sink response timed out")));
+    const response = new Promise((resolve, reject) => {
+      req.once("error", reject);
+      req.once("response", (res) => {
+        res.resume();
+        res.once("end", resolve);
+        res.once("error", reject);
+      });
+    });
+    try {
+      req.write("a");
+      const deadline = Date.now() + 5000;
+      while (originalSink.bytes < 1 && Date.now() < deadline) await sleep(5);
+      expect(originalSink.bytes).toBe(1);
+      resetGatewayState();
+      req.end("bc");
+      await response;
+      expect(originalSink.bytes).toBe(3);
+      expect(originalSink.ended).toBe(true);
+      expect(gatewayState.sink.bytes).toBe(0);
+      expect(gatewayState.sink.ended).toBe(false);
+    } finally {
+      req.destroy();
+      await response.catch(() => {});
+    }
+  });
+
+  it.each(["/api/proxy-e2e/big-sink", "/a2a/v1?body-cap"])("413s a chunked body over the 50MB streamed cap at %s; the gateway never receives the complete payload", async (requestPath) => {
     const frameChunk = (chunk) =>
       Buffer.concat([
         Buffer.from(`${chunk.length.toString(16)}\r\n`),
         chunk,
         Buffer.from("\r\n"),
       ]);
-    const result = await new Promise((resolve, reject) => {
-      const socket = net.createConnection(serverPort, "127.0.0.1");
-      const guard = setTimeout(
-        () => reject(new Error("no 413 within 20s")),
-        20000,
-      );
-      let response = "";
-      let done = false;
-      let sentBytes = 0;
-      socket.on("data", (data) => {
-        response += data;
-        // enforceProxiedBodyLimit flushes the 413 body BEFORE destroying the
-        // request socket — the client must see the response, not a reset.
-        if (!done && response.includes("Request body too large")) {
+    const sink = gatewayState.sink;
+    const socket = net.createConnection(serverPort, "127.0.0.1");
+    const clientClosed = new Promise((resolve) => socket.once("close", resolve));
+    let guard;
+    let closeGuard;
+    let pendingWrite;
+    let done = false;
+    let sentBytes = 0;
+    let deliveredBeforeOverflow = null;
+    try {
+      const result = await new Promise((resolve, reject) => {
+        let response = "";
+        const finish = (error) => {
+          if (done) return;
           done = true;
           clearTimeout(guard);
-          resolve({ response, sentBytes });
-          socket.destroy();
-        }
-      });
-      socket.on("error", (err) => {
-        if (!done) {
-          clearTimeout(guard);
-          reject(err);
-        }
-      });
-      socket.on("connect", () => {
-        socket.write(
-          `POST /api/proxy-e2e/big-sink HTTP/1.1\r\n` +
-            `Host: 127.0.0.1:${serverPort}\r\n` +
-            `Cookie: ${cookie}\r\n` +
-            `Content-Type: application/octet-stream\r\n` +
-            `Transfer-Encoding: chunked\r\n\r\n`,
-        );
-        // Phase 1: exactly the cap, full speed (no trip: the check is
-        // strictly greater-than).
+          clearImmediate(pendingWrite);
+          delete sink.onCapReached;
+          socket.removeListener("drain", writeNext);
+          if (error) reject(error);
+          else resolve({ response, sentBytes });
+        };
         const framedBig = frameChunk(Buffer.alloc(kChunkBytes, 0x61));
-        const framedSmall = frameChunk(Buffer.alloc(kTrickleChunkBytes, 0x62));
-        const capChunks = kProxiedBodyCapBytes / kChunkBytes;
-        let bigWritten = 0;
-        let trickleWritten = 0;
-        const trickleNext = () => {
-          if (done || socket.destroyed || trickleWritten >= kTrickleMaxChunks) {
-            return;
-          }
-          trickleWritten += 1;
-          sentBytes += kTrickleChunkBytes;
-          try {
-            socket.write(framedSmall);
-          } catch {
-            return;
-          }
-          setTimeout(trickleNext, 15);
-        };
         const writeNext = () => {
-          if (done || socket.destroyed) return;
-          if (bigWritten >= capChunks) {
-            // Phase 2: creep past the cap with tiny paced chunks so the 413
-            // is read from a quiet socket.
-            trickleNext();
-            return;
-          }
-          bigWritten += 1;
+          if (done || sentBytes >= kProxiedBodyCapBytes) return;
           sentBytes += kChunkBytes;
-          let ok = false;
           try {
-            ok = socket.write(framedBig);
-          } catch {
-            return;
+            if (socket.write(framedBig)) pendingWrite = setImmediate(writeNext);
+            else socket.once("drain", writeNext);
+          } catch (error) {
+            finish(error);
           }
-          if (ok) setImmediate(writeNext);
-          else socket.once("drain", writeNext);
         };
-        writeNext();
+        sink.onCapReached = () => {
+          if (done) return;
+          delete sink.onCapReached;
+          deliveredBeforeOverflow = sink.bytes;
+          sentBytes += 1;
+          try {
+            socket.write(frameChunk(Buffer.from("b")));
+          } catch (error) {
+            finish(error);
+          }
+        };
+        guard = setTimeout(() => finish(new Error("no 413 within 20s")), 20000);
+        socket.on("data", (data) => {
+          response += data;
+          if (response.includes("Request body too large")) finish();
+        });
+        socket.on("error", finish);
+        socket.once("close", () => finish(new Error("socket closed before the 413 response")));
+        socket.once("connect", () => {
+          if (done) return;
+          socket.write(
+            `POST ${requestPath} HTTP/1.1\r\n` +
+              `Host: 127.0.0.1:${serverPort}\r\n` +
+              (requestPath.startsWith("/api/") ? `Cookie: ${cookie}\r\n` : "") +
+              `Content-Type: application/octet-stream\r\n` +
+              `Transfer-Encoding: chunked\r\n\r\n`,
+          );
+          writeNext();
+        });
       });
-    });
 
-    expect(result.response).toMatch(/^HTTP\/1\.1 413 /);
-    expect(result.response).toContain("Request body too large");
-    // The client sent past the cap but never the chunked terminator, and the
-    // server destroyed the request: prove the gateway never saw a completed
-    // request body.
-    expect(result.sentBytes).toBeGreaterThan(kProxiedBodyCapBytes);
-    await sleep(400);
-    expect(gatewayState.sink.ended).toBe(false);
-    expect(gatewayState.sink.bytes).toBeLessThanOrEqual(result.sentBytes);
+      expect(result.response).toMatch(/^HTTP\/1\.1 413 /);
+      expect(result.response).toContain("Request body too large");
+      expect(deliveredBeforeOverflow).toBe(kProxiedBodyCapBytes);
+      expect(result.sentBytes).toBeGreaterThan(kProxiedBodyCapBytes);
+      expect(result.sentBytes).toBe(kProxiedBodyCapBytes + 1);
+      await Promise.race([
+        sink.closed,
+        new Promise((_, reject) => {
+          closeGuard = setTimeout(() => reject(new Error("gateway sink did not close after 413")), 5000);
+        }),
+      ]);
+      expect(sink.ended).toBe(false);
+      expect(sink.bytes).toBeGreaterThanOrEqual(kProxiedBodyCapBytes);
+      expect(sink.bytes).toBeLessThanOrEqual(result.sentBytes);
+    } finally {
+      done = true;
+      clearTimeout(guard);
+      clearTimeout(closeGuard);
+      clearImmediate(pendingWrite);
+      delete sink.onCapReached;
+      socket.destroy();
+      sink.request?.destroy();
+      await clientClosed;
+      await sink.closed;
+    }
   });
 
   it("fails fast with 502 when the gateway is down, and the process survives", async () => {
@@ -724,6 +759,82 @@ describe("gateway proxy real-process e2e", () => {
     expect(res.status).toBe(200);
     expect(res.body.toString("utf8")).toBe("first-chunk|second-chunk");
     expect(elapsedMs).toBeGreaterThanOrEqual(kProxyTimeoutMs * 2 - 100);
+  });
+
+  it.each(["/.well-known/agent-card.json", "/.well-known/agent.json"])(
+    "forwards public discovery %s without a setup session",
+    async (requestPath) => {
+      const res = await httpRequest(serverPort, { path: requestPath });
+      expect(res.status).toBe(200);
+      expect(res.headers["x-fake-gateway"]).toBe("yes");
+      expect(gatewayState.requests).toHaveLength(1);
+      expect(gatewayState.requests[0].url).toBe(requestPath);
+    },
+  );
+
+  it.each(["declared", "chunked", "gzip", "invalid-json"])(
+    "bypasses production parsers for a %s A2A body and preserves peer headers",
+    async (encoding) => {
+      const json = '{ "jsonrpc": "2.0", "id": "peer-雪", "method": "GetTask", "params": { "id": "task" } }\n';
+      const payload = encoding === "gzip"
+        ? zlib.gzipSync(json)
+        : Buffer.from(encoding === "invalid-json" ? "{invalid JSON" : json);
+      const headers = {
+        "content-type": "application/json",
+        authorization: "Bearer peer-credential",
+        cookie: `${cookie}; preference=dark`,
+        "x-alphaclaw-user": "forged-owner@example.test",
+        "x-openclaw-scopes": "operator.admin",
+        "x-forwarded-for": "203.0.113.1",
+        "x-forwarded-host": "forged.example.test",
+        "x-forwarded-proto": "https",
+      };
+      if (encoding !== "chunked") headers["content-length"] = String(payload.length);
+      if (encoding === "gzip") headers["content-encoding"] = "gzip";
+      const res = await httpRequest(serverPort, {
+        path: "/a2a/v1?trace=exact%20body",
+        method: "POST",
+        headers,
+      }, payload);
+      expect(res.status).toBe(200);
+      expect(gatewayState.requests).toHaveLength(1);
+      const seen = gatewayState.requests[0];
+      expect(seen.url).toBe("/a2a/v1?trace=exact%20body");
+      expect(seen.body.equals(payload)).toBe(true);
+      expect(seen.headers.authorization).toBe("Bearer peer-credential");
+      expect(seen.headers.cookie).toBe("preference=dark");
+      expect(seen.headers["content-encoding"]).toBe(headers["content-encoding"]);
+      for (const name of ["x-alphaclaw-user", "x-openclaw-scopes", "x-forwarded-for", "x-forwarded-host", "x-forwarded-proto"]) {
+        expect(seen.headers[name], name).toBeUndefined();
+      }
+    },
+  );
+
+  it("rejects an oversized declared A2A body before forwarding", async () => {
+    const res = await rawRequest(serverPort,
+      "POST /a2a/v1 HTTP/1.1\r\n" +
+      `Host: 127.0.0.1:${serverPort}\r\n` +
+      `Content-Length: ${kProxiedBodyCapBytes + 1}\r\n` +
+      "Content-Type: application/json\r\nConnection: close\r\n\r\n",
+    );
+    expect(statusLineOf(res)).toMatch(/^HTTP\/1\.1 413 /);
+    expect(gatewayState.requests).toEqual([]);
+  });
+
+  it.each([
+    "/a2a", "/a2a/v1/", "/a2a/v1/tasks", "/a2a/v2", "/a2away/v1",
+    "/.well-known/openid-configuration", "/.well-known/agent-card.json.bak",
+    "/a2a/v1/../../v1/models", "/a2a/%2e%2e/v1/models",
+    "/a2a/v1/..%5c..%5cv1/models", "/a2a/v1/%", "/a2a/v1/%252e%252e/v1/models",
+    "/.well-known/agent-card.json/../../v1/models",
+  ])("does not forward raw unrelated or unsafe A2A target %s", async (target) => {
+    const res = await rawRequest(serverPort,
+      `POST ${target} HTTP/1.1\r\n` +
+      `Host: 127.0.0.1:${serverPort}\r\n` +
+      "Content-Length: 0\r\nConnection: close\r\n\r\n",
+    );
+    expect(statusLineOf(res)).toMatch(/^HTTP\/1\.1 404 /);
+    expect(gatewayState.requests).toEqual([]);
   });
 
   // ── Control UI transport contract (basepath mount, the default) ─────────

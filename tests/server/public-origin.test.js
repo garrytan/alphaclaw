@@ -12,6 +12,20 @@ const untrustedApp = { get: (key) => (key === "trust proxy fn" ? () => false : u
 const kEmptyEnv = {};
 
 describe("server/public-origin (one resolver for persisted + handed-out URLs, PR 8a)", () => {
+  it.each([
+    ["ALPHACLAW_SETUP_URL", "https://deployment.example"],
+    ["ALPHACLAW_BASE_URL", "https://deployment.example"],
+    ["RENDER_EXTERNAL_URL", "https://deployment.example"],
+    ["URL", "https://deployment.example"],
+    ["RAILWAY_PUBLIC_DOMAIN", "deployment.example"],
+    ["RAILWAY_STATIC_URL", "https://deployment.example"],
+  ])("keeps resolver authority %s deployment-only", (key, value) => {
+    const { kDeploymentOnlyEnvKeys } = require("../../lib/server/deployment-only-env");
+    expect(kDeploymentOnlyEnvKeys).toContain(key);
+    expect(resolvePublicOrigin({ headers: { host: "request.example" } }, { env: { [key]: value } }))
+      .toBe("https://deployment.example");
+  });
+
   it("normalizeOrigin keeps scheme+host(+port) and a base path, drops trailing slashes and non-http schemes", () => {
     expect(normalizeOrigin("https://claw.example.com/")).toBe("https://claw.example.com");
     expect(normalizeOrigin("https://claw.example.com:8443/alphaclaw/")).toBe(

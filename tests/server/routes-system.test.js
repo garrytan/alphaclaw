@@ -258,6 +258,39 @@ describe("server/routes/system", () => {
     expect(deps.restartGateway).not.toHaveBeenCalled();
   });
 
+  it.each([
+    "ALPHACLAW_ALLOW_LEGACY_LOGIN",
+    "ALPHACLAW_SETUP_URL",
+    "ALPHACLAW_BASE_URL",
+    "RENDER_EXTERNAL_URL",
+    "URL",
+    "RAILWAY_PUBLIC_DOMAIN",
+    "RAILWAY_STATIC_URL",
+  ])("hides %s, refuses its normalized edit visibly, and preserves unrelated saves", async (key) => {
+    const deps = createSystemDeps();
+    deps.readEnvFile.mockReturnValue([{ key, value: "old-file-value" }]);
+    const app = createApp(deps);
+    const listed = await request(app).get("/api/env");
+    expect(listed.body.reservedKeys).toContain(key);
+    expect(listed.body.vars.some((entry) => entry.key === key)).toBe(false);
+    for (const inputKey of [key, ` ${key} `]) {
+      const rejected = await request(app).put("/api/env").send({ vars: [{ key: inputKey, value: "untrusted-value" }] });
+      expect(rejected.status).toBe(400);
+      expect(rejected.body.error).toContain(key);
+      expect(rejected.body.error).toContain("deployment environment");
+      expect(JSON.stringify(rejected.body)).not.toContain("untrusted-value");
+    }
+    expect(deps.writeEnvFile).not.toHaveBeenCalled();
+    expect(deps.reloadEnv).not.toHaveBeenCalled();
+    expect(deps.syncChannelConfig).not.toHaveBeenCalled();
+    const saved = await request(app).put("/api/env").send({ vars: [{ key: "CUSTOM_FLAG", value: "yes" }] });
+    expect(saved.status).toBe(200);
+    expect(deps.writeEnvFile).toHaveBeenCalledWith([
+      { key: "CUSTOM_FLAG", value: "yes" },
+      { key, value: "old-file-value" },
+    ]);
+  });
+
   it("rejects malformed env var names on PUT /api/env (tier-bypass boundary)", async () => {
     const deps = createSystemDeps();
     const app = createApp(deps);
@@ -266,6 +299,8 @@ describe("server/routes/system", () => {
     // different (possibly protected) key on write — reject at the boundary.
     for (const key of [
       "CLAUDE_CODE_ROUTINE_URL\nX",
+      "ALPHACLAW_SETUP_URL\0ignored",
+      "ALPHACLAW_ALLOW_LEGACY_LOGIN\0ignored",
       "FOO BAR",
       "has-dash",
       "with.dot",

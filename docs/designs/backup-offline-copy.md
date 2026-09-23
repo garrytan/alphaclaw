@@ -120,6 +120,53 @@ scheduling allowances; no global 45-minute apply timer is implied.
 `at` keeps its historical operation-start meaning; optional
 `snapshotStartedAt`/`snapshotCompletedAt` describe the actual source-copy interval.
 
+### Live progress and relaunch readiness (T5 / E6)
+
+An admitted live upstream attempt can use the remaining phase deadline, less
+the 60-second usable-check reserve and 10-second process-cleanup allowance.
+The ten-minute CLI constant still bounds other callers; it no longer cuts off
+a progressing live backup. Retry attempts share the same deadline, rather than
+receiving a new envelope. The 2-GiB upstream preflight and all migration,
+partial-archive and backup-risk gates remain unchanged.
+
+Each upstream attempt gets a private staging directory under the backup directory,
+also supplied as its temporary root. The progress sampler inspects at most 400
+entries through four directory levels without following symlinks. Only growth
+beyond a file identity's high-water size counts, shared across every observed
+rename and hardlink; each path separately rejects replacement identities.
+Truncation, regrowth below that mark, pathname churn, old staging directories
+and output lines cannot reset the three-minute inactivity window. Publication starts one
+five-minute silent-verification allowance; neither more output nor another phase
+transition renews it, and the phase deadline can still end it earlier.
+
+The streaming runner drains the owned process group before staging cleanup.
+CLI-success archives move atomically to the existing canonical filename; failed
+archives go directly to `.unverified`. AlphaClaw's independent usable check gates
+recording and apply. Its existing timeout contract is unchanged: a CLI-verified
+archive may remain canonically named but unrecorded, with no reuse provenance.
+Usable checks, advisory hashing and pruning receive only remaining phase time.
+In-run stale staging cleanup waits for the phase ceiling plus the existing slack.
+The run ledger records per-attempt progress and limits. A later diagnosis includes
+the prior failure receipt separately from successful-run throughput calibration.
+
+The pause now unwinds in this order: release the state-DB quiet token, relaunch,
+wait for native `/readyz`, confirm readiness again after the existing settlement
+interval, settle the owned expected-restart window, then release the lifecycle
+lease. Readiness uses the normal gateway restart budget (300 seconds by default,
+including its deployment override), with settling still clamped to the remaining
+phase envelope and owned lease. The existing lease and quiet lifetimes are not
+extended; the default quiesced-path envelope pin is 24 minutes 40 seconds out of
+25 minutes. Only explicit unsupported responses
+(404/405/501) use the legacy TCP-liveness compatibility path. Missing, malformed,
+unavailable or not-ready observations cannot authorize continuation. Shutdown
+and lease/admission loss are checked after waits; only the owner can clear its
+suppression, and tokenless legacy cleanup cannot clear an owned successor window.
+The settlement health probe's continuation is fenced on the lifecycle generation,
+so an older unhealthy answer cannot demote a successor restart or launch.
+Unexpected replacement crashes clear that window and retain normal crash accounting.
+Standalone backups use no blanket managed-operation suppression, and applies start
+that suppression only after the backup phase.
+
 ## 2. Archive layout
 
 ```

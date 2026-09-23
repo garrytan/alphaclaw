@@ -184,6 +184,14 @@ describe("server/openclaw-run-stream", () => {
 // prints nor moves the progress probe for `inactivityTimeoutMs` is stopped like
 // a timeout, but the result says `stalled`, not `timedOut`.
 describe("server/openclaw-run-stream inactivity policy", () => {
+  it("does not accept log spam as backup progress", async () => {
+    const result = await runNodeScript("setInterval(() => console.log('waiting'), 30)", {
+      options: { timeoutMs: 900, inactivityTimeoutMs: 200, outputCountsAsProgress: false, progressProbe: () => 0 },
+    });
+    expect(result.stalled).toBe(true);
+    expect(result.timedOut).toBe(false);
+  });
+
   // Keeps the event loop alive without printing; exits on its own after `ms`.
   const silentFor = (ms) => `setTimeout(() => process.exit(0), ${ms});`;
 

@@ -155,6 +155,20 @@ beforeEach(() => {
 });
 
 describe("frontend/models-tab provider auth card codex section", () => {
+  it("warns when credentials were removed but the running gateway still needs a restart", async () => {
+    api.disconnectCodex.mockResolvedValue({ ok: true, changed: true, restartRequired: true, warning: "Credential changes were saved; restart required" });
+    const tree = renderCard();
+    await findActionButtonByLabel(tree, "Disconnect").props.onClick();
+    expect(showToast).toHaveBeenCalledWith("Credential changes were saved; restart required", "warning");
+  });
+
+  it("does not invent a configured or disconnected API-key state when the auth store is unavailable", () => {
+    const text = collectText(renderCard({ provider: "anthropic", authStoreUnavailable: { reason: "AUTH_STORE_UNREADABLE" } })).join(" ");
+    expect(text).toContain("Auth store unavailable");
+    expect(text).not.toContain("Not configured");
+    expect(text).not.toContain("Connected");
+  });
+
   it("disconnect shows a pending label, is single-flight, and surfaces failures inline", async () => {
     const gate = deferred();
     api.disconnectCodex.mockReturnValue(gate.promise);

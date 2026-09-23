@@ -65,6 +65,7 @@ const createFixture = ({ symlinkRoot = false, backupTuning = {}, backupProbes = 
     acquireLock: vi.fn((options) => lock.acquire("backup_quiesce", options)),
     suppress: vi.fn(), unsuppress: vi.fn(),
     isRunning: vi.fn(async () => running),
+    probeReadiness: vi.fn(async () => ({ ok: false, kind: "unsupported" })),
     stop: vi.fn(async () => { running = false; return true; }),
     start: vi.fn(async () => { running = true; }),
   };
@@ -147,6 +148,103 @@ describe("issue #102 real backup fixtures", () => {
     resetStateDbQuietForTests({ listeners: true });
     while (roots.length) fs.rmSync(roots.pop(), { recursive: true, force: true });
   }, 120_000);
+
+  it("finishes an admitted generated slow writer beyond the old attempt cap and restores its real archive", async () => {
+    const fixture = createFixture({ backupTuning: { cliTimeoutMs: 1000, phaseEnvelopeMs: 20_000,
+      upstreamInactivityMs: 1500, upstreamVerificationMs: 3000, usableCheckReserveMs: 5000,
+      upstreamCleanupReserveMs: 1000 } });
+    write(fixture.openclawDir, "credentials/admitted-fixture.bin", require("crypto").randomBytes(8 * 1024 * 1024));
+    const initial = await fixture.sync.runStandaloneBackup({});
+    expect(initial.status, JSON.stringify(initial.body)).toBe(200);
+    const source = initial.body.archive.file;
+    fixture.gatewayQuiesce.acquireLock.mockRejectedValue(new Error("fixture live handover"));
+    const script = write(fixture.rootDir, "slow-writer.cjs", `
+      const fs = require('fs');
+      const [source, output] = process.argv.slice(2);
+      const input = fs.readFileSync(source);
+      const temp = output + '.writer.tmp';
+      let offset = 0;
+      const timer = setInterval(() => {
+        const end = Math.min(input.length, offset + 65536);
+        fs.appendFileSync(temp, input.subarray(offset, end));
+        offset = end;
+        if (offset === input.length) {
+          clearInterval(timer);
+          fs.renameSync(temp, output);
+          setTimeout(() => process.exit(0), 400);
+        }
+      }, 25);
+    `);
+    const run = fixture.runStream.runStreamed.getMockImplementation();
+    let stagingRoot;
+    fixture.runStream.runStreamed.mockImplementation((options) => {
+      if (options.command === "openclaw" && options.args?.[0] === "backup") {
+        const output = options.args[options.args.indexOf("--output") + 1];
+        stagingRoot = path.dirname(output);
+        expect(options.env.TMPDIR).toBe(stagingRoot);
+        expect(options.timeoutMs).toBeGreaterThan(1000);
+        return run({ ...options, command: process.execPath, args: [script, source, output] });
+      }
+      return run(options);
+    });
+    const result = await fixture.sync.runStandaloneBackup({});
+    expect(result.status, JSON.stringify(result.body)).toBe(200);
+    const record = fixture.sync.runLedger.readRun(result.body.operationId).backup;
+    expect(record.diagnosis.tarSetBytes).toBeLessThan(2 * 1024 ** 3);
+    expect(record.attemptMs).toBeGreaterThan(1000);
+    expect(record.attemptsDetail.at(-1).progress.doneBytes).toBeGreaterThan(8 * 1024 * 1024);
+    expect(fs.existsSync(stagingRoot)).toBe(false);
+    expect(path.dirname(record.file)).toBe(path.join(fixture.rootDir, "backups"));
+    expect(JSON.stringify(record)).not.toContain(stagingRoot);
+    assertRestored(fixture, restoreArchive(fixture, record.file));
+    expect(fixture.lock.getActiveOperation()).toBeNull();
+  }, 45_000);
+
+  it("shutdown reaps an owned staging writer before cleanup and never retries or relaunches", async () => {
+    const fixture = createFixture();
+    const controller = new AbortController();
+    fixture.gatewayQuiesce.signal = controller.signal;
+    fixture.gatewayQuiesce.isCancelled = () => controller.signal.aborted;
+    fixture.gatewayQuiesce.acquireLock.mockRejectedValue(new Error("fixture live handover"));
+    const run = fixture.runStream.runStreamed.getMockImplementation();
+    let stagingRoot;
+    let cleaned = false;
+    let pid;
+    let result;
+    fixture.runStream.runStreamed.mockImplementation(async (options) => {
+      if (options.command !== "openclaw" || options.args?.[0] !== "backup") return run(options);
+      const output = options.args[options.args.indexOf("--output") + 1];
+      stagingRoot = path.dirname(output);
+      expect(options.signal).toBe(controller.signal);
+      result = await run({ ...options, command: process.execPath, args: ["-e", `
+        require('fs').writeFileSync(process.argv[1] + '.tmp', 'partial archive');
+        process.on('SIGTERM', () => {});
+        setInterval(() => {}, 1000);
+        console.log('writer ready');
+      `, output], onOutput: (chunk) => {
+        options.onOutput(chunk, "stdout");
+        if (chunk.includes("writer ready")) controller.abort("shutdown");
+      }, onProcess: (event) => {
+        pid = event.pid;
+        if (event.phase === "cleaned") {
+          expect(fs.existsSync(stagingRoot)).toBe(true);
+          cleaned = true;
+        }
+      } });
+      return result;
+    });
+    const response = await fixture.sync.runStandaloneBackup({});
+    expect(response.status, JSON.stringify(response.body)).toBe(409);
+    expect(response.body.backupFailureKind).toBe("cancelled");
+    expect(result).toMatchObject({ cancelled: true, killed: true, signal: "SIGKILL" });
+    expect(cleaned).toBe(true);
+    expect(() => process.kill(pid, 0)).toThrow();
+    expect(fs.existsSync(stagingRoot)).toBe(false);
+    expect(upstreamCalls(fixture)).toHaveLength(1);
+    expect(fixture.gatewayQuiesce.start).not.toHaveBeenCalled();
+    expect(isStateDbQuiet()).toBe(false);
+    expect(fixture.lock.getActiveOperation()).toBeNull();
+  });
 
   it("applies a stub release, activates and accepts it at boot, and restores that run's real archive", async () => {
     const fixture = createFixture({ symlinkRoot: true, releaseFixture: true });

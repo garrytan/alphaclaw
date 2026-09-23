@@ -474,7 +474,9 @@ try {
 
 const {
   kDeploymentOnlyEnvKeys,
+  noteIgnoredDeploymentEnvKey,
 } = require("../lib/server/deployment-only-env");
+const { normalizeEnvKey } = require("../lib/server/utils/env-values");
 
 if (fs.existsSync(envFilePath)) {
   const content = fs.readFileSync(envFilePath, "utf8");
@@ -485,7 +487,7 @@ if (fs.existsSync(envFilePath)) {
     if (eqIdx === -1) continue;
     // Trim the key like lib/server/env.js does (fix wave F006): "FOO =bar"
     // used to load as the key "FOO " here and "FOO" in the server.
-    const key = trimmed.slice(0, eqIdx).trim();
+    const key = normalizeEnvKey(trimmed.slice(0, eqIdx));
     const value = trimmed.slice(eqIdx + 1);
     if (!key) continue;
     // Deployment-only keys must come from the real deployment environment
@@ -494,6 +496,7 @@ if (fs.existsSync(envFilePath)) {
     // inheritance — or steer the restart budget / disarm the stale-lock
     // sweep on the next boot. Shared list: lib/server/deployment-only-env.
     if (kDeploymentOnlyEnvKeys.includes(key)) {
+      if (value) noteIgnoredDeploymentEnvKey(key);
       continue;
     }
     if (value) process.env[key] = value;

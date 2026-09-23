@@ -335,6 +335,8 @@ Failure semantics: a refused check (wrong owner/mode/location, symlink, missing)
 
 ## Environment Variables
 
+**Deployment-only settings:** `ALPHACLAW_ALLOW_LEGACY_LOGIN` and every public-origin alias (`ALPHACLAW_SETUP_URL`, `ALPHACLAW_BASE_URL`, `RENDER_EXTERNAL_URL`, `URL`, `RAILWAY_PUBLIC_DOMAIN`, `RAILWAY_STATIC_URL`) must come from the hosting platform or service's environment, not AlphaClaw's editable `.env`. Envars rejects edits and onboarding imports skip these keys. Boot and reload ignore existing file values without replacing genuine deployment values. If a setting exists only in `.env`, AlphaClaw logs a migration notice once per key per process, without its value. Review and configure the intended value in the deployment environment, then restart AlphaClaw; old file values are never promoted automatically.
+
 | Variable                          | Required | Description                                        |
 | --------------------------------- | -------- | -------------------------------------------------- |
 | `SETUP_PASSWORD`                  | Yes      | Password for the Setup UI                          |
@@ -360,8 +362,12 @@ Failure semantics: a refused check (wrong owner/mode/location, symlink, missing)
 | `ALPHACLAW_NOTIFY_WEBHOOK_URL`    | Optional | Extra out-of-band notification channel: watchdog/upgrade alerts are also POSTed here as `{"text": ...}` JSON — delivered even straight from the boot process when no server is up |
 | `ALPHACLAW_ALLOW_LEGACY_LOGIN`    | Optional | `1` re-admits shared-password login while team lockdown is on or `alphaclaw.json` is unreadable (emergency hatch). Deployment env only |
 | `PORT`                            | Optional | Server port (default `3000`)                       |
-| `ALPHACLAW_BASE_URL`              | Optional | Legacy alias for `ALPHACLAW_SETUP_URL`, consulted only when that is unset or empty (and ahead of the platform-provided `RENDER_EXTERNAL_URL` / `URL` / Railway domain variables). Prefer `ALPHACLAW_SETUP_URL` |
+| `ALPHACLAW_BASE_URL`              | Optional | Legacy alias for `ALPHACLAW_SETUP_URL`, consulted only when that is unset or empty (and ahead of the platform-provided `RENDER_EXTERNAL_URL` / `URL` / Railway domain variables). Prefer `ALPHACLAW_SETUP_URL`. Deployment env only |
 | `ALPHACLAW_SETUP_URL`             | Optional | The canonical public origin of this dashboard (`https://claw.example.com`). When set it is the ONLY source for every URL AlphaClaw persists or hands out — OAuth `redirect_uri`, the Gmail push endpoint, webhook callback URLs, `gateway.controlUi.allowedOrigins`, invite and rescue links. Unset, AlphaClaw tries the lower-precedence alias `ALPHACLAW_BASE_URL`, then the platform-provided `RENDER_EXTERNAL_URL`, `URL` and `RAILWAY_PUBLIC_DOMAIN`/`RAILWAY_STATIC_URL`; only when none of these is set do URLs derive from the request through Express's trust-proxy view (forwarded headers count only from a trusted hop). A set-but-malformed value falls back to `http://localhost:<PORT>` with a logged warning, never to the request. Deployment env only |
+| `RENDER_EXTERNAL_URL`             | Optional | Render-provided HTTP(S) public URL. Checked after `ALPHACLAW_SETUP_URL` and `ALPHACLAW_BASE_URL`, before `URL` and the Railway aliases. Deployment env only: boot/reload ignore `.env` values, Envars rejects edits, and onboarding imports skip it |
+| `URL`                             | Optional | Generic HTTP(S) public URL fallback, checked after `ALPHACLAW_SETUP_URL`, `ALPHACLAW_BASE_URL` and `RENDER_EXTERNAL_URL`, before the Railway aliases. Deployment env only: boot/reload ignore `.env` values, Envars rejects edits, and onboarding imports skip it |
+| `RAILWAY_PUBLIC_DOMAIN`           | Optional | Railway public hostname without a scheme (for example `app.up.railway.app`); AlphaClaw prepends `https://`. Checked after the four explicit URL aliases and ahead of `RAILWAY_STATIC_URL`. Deployment env only: boot/reload ignore `.env` values, Envars rejects edits, and onboarding imports skip it |
+| `RAILWAY_STATIC_URL`              | Optional | Legacy Railway HTTP(S) public URL fallback, used after the four explicit URL aliases when `RAILWAY_PUBLIC_DOMAIN` is empty. Deployment env only: boot/reload ignore `.env` values, Envars rejects edits, and onboarding imports skip it |
 | `ALPHACLAW_ROOT_DIR`              | Optional | Data directory (default `~/.alphaclaw`; the Docker image sets `/data`). A second `alphaclaw start` against a root a live server already owns refuses to start (exit 1) instead of touching its databases |
 | `ALPHACLAW_SKIP_PROFILE_ENV`      | Optional | Set `1` (exactly) to skip installing the operator-shell `openclaw` environment at boot — the `/usr/local/bin/openclaw` wrapper (catches every `openclaw` invocation that resolves via `PATH`, `docker exec` included) and the `/etc/profile.d/alphaclaw-openclaw.sh` login-shell snippet, both of which export the managed `OPENCLAW_STATE_DIR`/`OPENCLAW_CONFIG_PATH`/`OPENCLAW_HOME`/`ALPHACLAW_ROOT_DIR`. Skipped automatically when not running as root |
 | `ALPHACLAW_SKIP_SYSTEM_CRON_INSTALL` | Optional | Skip writes to `/etc/cron.d` while keeping cron config (`true`/`false`); the managed hourly script still exits when sync is disabled |
@@ -399,7 +405,7 @@ Failure semantics: a refused check (wrong owner/mode/location, symlink, missing)
 | `OPENCLAW_RUNTIME_RECONCILE`      | Optional | Kill switch: set `off` to disable the runtime installed-tree reconcile (`POST /api/openclaw/reconcile-installed`, the Upgrade page's "Re-activate recorded build" and the watchdog's structural repair). Boot-time activation is unaffected: the bin-phase boot sync AND the server boot's own re-activation of a diverged tree (the C1 belt and the launch-compatibility gate's re-activation, both under the boot lock) still run, so a diverged box boots the recorded build instead of being held. Read from the process environment on every use (no restart needed); deployment env only — never honored from `.env`. |
 | `OPENCLAW_LAUNCH_COMPAT_GATE`     | Optional | Kill switch: set `off` to disable the boot-time launch compatibility gate — the check, run before the gateway starts and before any settings migration, that the installed OpenClaw can open the state databases on disk (`PRAGMA user_version` vs the build's declared schema). A refusal holds the gateway (`gatewayHold` reason `version_mismatch` or `state_db_unreadable`) instead of launching a binary that cannot read its database. Read from the process environment on every use (no restart needed); deployment env only — never honored from `.env`. |
 | `OPENCLAW_CRASH_CAUSE_LADDER`     | Optional | Kill switch: set `off` to disable the watchdog's cause-keyed structural repair — the ladder that, on a corroborated version-family crash (`state_schema_too_new`, `legacy_exec_approvals`, …), re-activates the recorded build / renames the stray file / picks a local build that can read the database instead of relaunching the crashed binary — and the scoped auto-repair pause it latches when every rung fails. Crash classification and fingerprinting still record; recovery falls back to the pre-0.9.77 relaunch ladder. Read from the process environment on every use (no restart needed); deployment env only — never honored from `.env`. |
-| `ALPHACLAW_PROXY_TIMEOUT_MS`      | Optional | Milliseconds the Setup-UI gateway proxy (`/openclaw`, `/assets`, gateway-bound `/api/*` and WebSocket upgrades) waits for the OpenClaw gateway to start answering a proxied request before returning `504 Gateway timed out` (default `30000`); once response headers arrive the idle bound relaxes to 15 minutes for slow streams. Does not apply to the OpenAI-compatible `/v1` proxy, which has no timeout. Raise it for slow gateways. Read at process start (restart AlphaClaw to change) |
+| `ALPHACLAW_PROXY_TIMEOUT_MS`      | Optional | Milliseconds the Setup-UI gateway proxy (`/openclaw`, `/assets`, gateway-bound `/api/*`, A2A and WebSocket upgrades) waits for the OpenClaw gateway to start answering a proxied request before returning `504 Gateway timed out` (default `30000`); once response headers arrive the idle bound relaxes to 15 minutes for slow streams. Does not apply to the OpenAI-compatible `/v1` proxy, which has no timeout. Raise it for slow gateways. Read at process start (restart AlphaClaw to change) |
 | `ALPHACLAW_CONTROL_UI_MOUNT`      | Optional | Control UI mount mode. Default `basepath`: the OpenClaw gateway serves its Control UI at `/openclaw` (AlphaClaw writes `gateway.controlUi.basePath: "/openclaw"` into `openclaw.json` at boot) and AlphaClaw forwards `/openclaw*` to it verbatim. Set `legacy` to restore the pre-0.9.83 prefix-strip mount — boot removes the managed `gateway.controlUi.basePath` and the gateway restarts. Deployment env only — never honored from `.env`; read at process start (restart AlphaClaw to change) |
 | `TRUST_PROXY_HOPS`                | Optional | Number of reverse-proxy hops in front of AlphaClaw to trust for client IPs and forwarded headers (Express `trust proxy`, also used by the watchdog terminal websocket; default `1`). Read at process start (restart AlphaClaw to change) |
 | `REMOTE_MCP_URL`                  | Optional | Upstream remote MCP server URL. When set together with `REMOTE_MCP_API_TOKEN`, AlphaClaw writes a managed `mcp.servers.<name>` entry to `openclaw.json` on every gateway start. |
@@ -428,13 +434,48 @@ When enabled, the proxy forwards requests to the loopback OpenClaw gateway. Alph
 
 When `REMOTE_MCP_URL` + `REMOTE_MCP_API_TOKEN` are set, AlphaClaw also registers an `mcp.servers.<REMOTE_MCP_NAME>` block (default key `remote`) in `openclaw.json` so the agent can call back into that remote MCP server. Set `REMOTE_MCP_PROXY_URL` to route those callbacks through a same-host scanning proxy (for example a Pipelock MCP reverse proxy running in the same container).
 
+## A2A peers through AlphaClaw
+
+An enabled OpenClaw A2A channel is reachable on AlphaClaw's public port. You do not need to publish the loopback gateway port or enable the OpenAI-compatible API feature.
+
+| Path | Method | Authentication |
+| --- | --- | --- |
+| `/.well-known/agent-card.json` | GET | Public discovery. |
+| `/.well-known/agent.json` | GET | Public compatibility alias for the same card. |
+| `/a2a/v1` | POST | A configured A2A peer's Bearer token, validated by OpenClaw. |
+
+Only these exact paths and methods are forwarded for A2A. A setup cookie or `OPENCLAW_GATEWAY_TOKEN` is not a substitute for a peer credential. AlphaClaw passes the peer's Authorization header and body bytes unchanged, strips setup cookies and client-supplied identity/forwarding headers, and never injects browser/operator identity into these requests. The proxy's 50 MiB streamed-body cap still applies; OpenClaw 2026.9.5 enforces a stricter 1 MiB A2A request limit.
+
+Configure the channel in `openclaw.json`, with a separate high-entropy token for each peer:
+
+```json
+{
+  "channels": {
+    "a2a": {
+      "enabled": true,
+      "advertisedUrl": "https://your-alphaclaw.example.com",
+      "exposeAgents": ["main"],
+      "peers": { "trusted-peer": { "token": "${A2A_PEER_TOKEN}" } }
+    }
+  }
+}
+```
+
+Set `A2A_PEER_TOKEN` in the gateway environment and restart the gateway. Set `advertisedUrl` to the externally reachable HTTPS origin of AlphaClaw, without `/openclaw` or `/a2a/v1`; the card appends `/a2a/v1`. AlphaClaw does not fill or overwrite this operator setting, including from `ALPHACLAW_SETUP_URL`. If omitted, OpenClaw derives the origin from the proxied request and can advertise its internal loopback address instead. Verify the card's `supportedInterfaces[].url` from the peer's network before connecting.
+
+Discovery exposes the instance description and exposed agent IDs without login. Use `exposeAgents` to limit disclosure and HTTPS on untrusted networks. Peer tasks retain the routed agent's tool permissions; approve peers accordingly. See the bundled OpenClaw `docs/channels/a2a.md` for JSON-RPC examples and peer configuration.
+
+For long tasks, use `SendMessage` with `params.configuration.returnImmediately: true` and poll `GetTask`, or size `ALPHACLAW_PROXY_TIMEOUT_MS` for the gateway's blocking reply wait. The proxy defaults to a 30-second wait for response headers; a proxy timeout does not cancel the upstream task.
+
+The real pinned-gateway regression runs with `OPENCLAW_LIVE_E2E=1 npm test -- tests/live/proxy-a2a.e2e.test.js --no-file-parallelism`. It exercises the full AlphaClaw HTTP proxy and real A2A auth/task lifecycle with a local deterministic model endpoint, without external model credentials.
+
 ## Security Notes
 
 AlphaClaw is a convenience wrapper — it intentionally trades some of OpenClaw's default hardening for ease of setup. You should understand what's different:
 
 | Area                    | What AlphaClaw does                                                                                                                   | Trade-off                                                                                              |
 | ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
-| **Setup password**      | All gateway access is gated behind a single `SETUP_PASSWORD`. Brute-force protection is built in (exponential backoff lockout).       | Simpler than OpenClaw's pairing code flow, but the password must be strong.                            |
+| **Setup password**      | Browser gateway access is gated behind setup authentication. Legacy shared-password login uses `SETUP_PASSWORD` with exponential backoff lockout. A2A uses peer credentials instead, with public card discovery. | Simpler than OpenClaw's pairing code flow, but the password must be strong.                            |
 | **One-click pairing**   | Channel pairings (Telegram/Discord/Slack) can be approved from the Setup UI instead of the CLI.                                       | No terminal access required, but anyone with the setup password can approve pairings.                  |
 | **Auto CLI approval**   | The first CLI device pairing is auto-approved so you can connect without a second screen. Subsequent requests appear in the UI.       | Removes the manual pairing step for the initial CLI connection.                                        |
 | **Query-string tokens** | Webhook URLs support `?token=<WEBHOOK_TOKEN>` for providers that don't support `Authorization` headers. Warnings are shown in the UI. | Tokens may appear in server logs and referrer headers. Use header auth when your provider supports it. |

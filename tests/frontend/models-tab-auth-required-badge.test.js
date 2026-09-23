@@ -82,6 +82,13 @@ beforeEach(() => {
 });
 
 describe("frontend/models-tab authentication-required badge", () => {
+  it("does not claim authentication is required when the store has not been readable", () => {
+    useModels.mockReturnValue({ ...kModelsBase, configuredModels: { "anthropic/claude-opus-4-6": {} }, authStoreUnavailable: { reason: "AUTH_STORE_UNREADABLE" } });
+    const tree = Models({ agentId: "main" });
+    expect(collectText(tree).join(" ")).toContain("Credential status unavailable");
+    expect(findAllByType(tree, TooltipBadge).some((chip) => chip.props.label === "Authentication required")).toBe(false);
+  });
+
   it("a configured model whose provider lacks auth gets a self-standing TooltipBadge, not bare 'Needs auth'", () => {
     useModels.mockReturnValue({
       ...kModelsBase,

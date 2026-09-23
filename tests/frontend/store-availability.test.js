@@ -5,7 +5,17 @@ import {
   cancelStoreUnavailableRecheck,
   kStoreUnavailableRecheckMs,
   settleStoreUnavailableRecheck,
+  buildStoreUnavailableLine,
 } from "../../lib/public/js/lib/store-availability.js";
+
+it("gives unreadable auth stores a recovery action without inventing disconnected or last-known status", () => {
+  const payload = { unavailable: true, reason: "AUTH_STORE_UNREADABLE" };
+  const unknown = buildStoreUnavailableLine({ payload });
+  expect(unknown).toContain("credentials have not been checked");
+  expect(unknown).toContain("use Doctor to diagnose the auth store");
+  expect(unknown).not.toMatch(/disconnected|last known|until it finishes|during a backup/i);
+  expect(buildStoreUnavailableLine({ payload, hasLastKnown: true })).toContain("showing the last known credentials");
+});
 
 // While a store read is `unavailable` (state-DB backup barrier) nothing else
 // re-reads it, so every adoption site arms ONE bounded timer per unavailable
