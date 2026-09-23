@@ -3011,6 +3011,196 @@ describe("server/watchdog", () => {
     ]);
   });
 
+  describe("boot launch tracking", () => {
+    const { runOnboardedBootSequence } = require("../../lib/server/startup");
+    const { createBootLaunchSteps } = require("../../lib/server/boot-launch-steps");
+    const { reduceGatewayState } = require("../../lib/server/gateway-state");
+    const { getBootPhase, setBootPhase } = require("../../lib/server/boot-phase");
+    const gatewayState = (watchdog, running = false) => reduceGatewayState({
+      configExists: true,
+      tcp: { running, observedAt: Date.now() },
+      watchdog: watchdog.getStatus(),
+      bootPhase: getBootPhase(),
+    });
+
+    afterEach(() => setBootPhase("ready"));
+
+    it("tracks the boot child through the ledger wrapper and verifies it without a stdout launch notification", async () => {
+      vi.useFakeTimers();
+      let healthy = false;
+      let rootPid = 9000;
+      const child = { pid: 4242, exitCode: null, signalCode: null, killed: false };
+      const { watchdog, launchGatewayProcess, clawCmd } = createHarness({
+        autoRepair: false,
+        getLaunchGeneration: () => 1,
+        discoverServingIdentity: () => ({ rootPid, workerPid: rootPid + 1, startTicks: 99 }),
+        resolveGatewayReadyzUrl: () => "http://127.0.0.1:18789/readyz",
+        fetchImpl: async (url) => {
+          if (!healthy) throw new Error("ECONNREFUSED");
+          return { ok: true, status: 200, text: async () => JSON.stringify(
+            String(url).endsWith("/readyz") ? { ready: true, status: "started" } : { ok: true },
+          ) };
+        },
+      });
+      const steps = createBootLaunchSteps({});
+      const release = vi.fn();
+      try {
+        await runOnboardedBootSequence({
+          acquireLifecycleLock: async () => release,
+          reportLockContentionAtBoot: () => ({}),
+          ensureManagedExecDefaults: () => {},
+          ensureUsageTrackerPluginConfig: () => {},
+          ensureWebhookMappingIds: () => ({}),
+          doSyncPromptFiles: () => {},
+          reloadEnv: () => {},
+          syncChannelConfig: async () => {},
+          readEnvFile: () => [],
+          ensureGatewayProxyConfig: () => {},
+          resolveSetupUrl: () => "http://localhost:3000",
+          startGateway: steps.wrapStartGateway(async () => child),
+          watchdog,
+          gmailWatchService: { start: () => {} },
+        });
+        await vi.advanceTimersByTimeAsync(0);
+        expect(release).toHaveBeenCalledTimes(1);
+        expect(getBootPhase().phase).toBe("ready");
+        expect(watchdog.getStatus().replacementPending).toMatchObject({ pid: 4242, source: "boot" });
+        expect(gatewayState(watchdog)).toMatchObject({ state: "starting" });
+        expect(gatewayState(watchdog).actions.find((action) => action.id === "restart").disabledReason).toBeTruthy();
+        expect(watchdog.getStatus().servingPid).toBeNull();
+
+        healthy = true;
+        await vi.advanceTimersByTimeAsync(5_000);
+        expect(watchdog.getStatus().replacementPending).not.toBeNull();
+        expect(watchdog.getStatus().servingPid).toBeNull();
+
+        rootPid = 4242;
+        await watchdog.runHealthCheck();
+        expect(watchdog.getStatus()).toMatchObject({
+          health: "healthy", gatewayPid: 4242, servingPid: 4243,
+          supervisionMode: "managed", replacementPending: null,
+        });
+        expect(gatewayState(watchdog, true).state).toBe("running");
+        expect(launchGatewayProcess).not.toHaveBeenCalled();
+        expect(clawCmd).not.toHaveBeenCalledWith("doctor --fix --yes");
+      } finally {
+        watchdog.stop();
+      }
+    });
+
+    it("expires an unready boot child so a failed launch still offers Retry", async () => {
+      vi.useFakeTimers();
+      setBootPhase("ready");
+      const { watchdog } = createHarness({
+        autoRepair: false,
+        fetchImpl: async () => { throw new Error("ECONNREFUSED"); },
+      });
+      try {
+        watchdog.start({ child: { pid: 4242, exitCode: null } });
+        await vi.advanceTimersByTimeAsync(0);
+        expect(gatewayState(watchdog).state).toBe("starting");
+        await vi.advanceTimersByTimeAsync(kGatewayRestartReadyTimeoutMs);
+        await watchdog.runHealthCheck();
+        expect(watchdog.getStatus().replacementPending).toBeNull();
+        expect(gatewayState(watchdog).state).toBe("down");
+        expect(gatewayState(watchdog).actions.find((action) => action.id === "retry").disabledReason).toBeUndefined();
+      } finally {
+        watchdog.stop();
+      }
+    });
+
+    it("keeps the automatic owner-lease retry alive when a boot child exits inside startup grace", async () => {
+      vi.useFakeTimers();
+      setBootPhase("ready");
+      const startedAt = Date.now();
+      let reclaimed = false;
+      const lease = {
+        status: "held", heartbeatAt: startedAt, expiresAt: startedAt + 300_000,
+        owner: { host: "previous-container", pid: 123 },
+      };
+      const requestGatewayLaunch = vi.fn(async () => ({
+        outcome: "launch_requested", pid: 4243, generation: 2,
+      }));
+      const { watchdog, clawCmd } = createHarness({
+        autoRepair: false,
+        requestGatewayLaunch,
+        getLaunchGeneration: () => 1,
+        readGatewayOwnerLease: () => reclaimed ? { status: "absent" } : lease,
+        reclaimGatewayOwnerLease: () => {
+          if (Date.now() - startedAt < 90_000) return { status: "skipped", reason: "fresh_heartbeat" };
+          reclaimed = true;
+          return { status: "reclaimed", reason: "stale_foreign_host", lease };
+        },
+        fetchImpl: async () => { throw new Error("ECONNREFUSED"); },
+      });
+      try {
+        watchdog.start({ child: { pid: 4242, exitCode: null } });
+        await vi.advanceTimersByTimeAsync(10_000);
+        watchdog.onGatewayExit({
+          pid: 4242, generation: 1, code: 1, launchedAt: startedAt,
+          stderrTail: ["Another Gateway owner lease is still active for this state directory"],
+        });
+        await vi.advanceTimersByTimeAsync(0);
+        expect(watchdog.getStatus().incumbentConflict?.kind).toBe("owner_lease_held");
+        await vi.advanceTimersByTimeAsync(5_000);
+        expect(watchdog.getStatus().degradedRetry).not.toBeNull();
+        expect(gatewayState(watchdog)).toMatchObject({
+          state: "starting", reason: expect.stringContaining("retry automatically"),
+        });
+        expect(requestGatewayLaunch).not.toHaveBeenCalled();
+        await vi.advanceTimersByTimeAsync(105_000);
+        expect(reclaimed).toBe(true);
+        expect(requestGatewayLaunch).toHaveBeenCalledTimes(1);
+        expect(watchdog.getStatus().replacementPending).toMatchObject({ pid: 4243, source: "owner_lease_held" });
+        expect(clawCmd).not.toHaveBeenCalledWith("doctor --fix --yes");
+      } finally {
+        watchdog.stop();
+      }
+    });
+
+    it.each([
+      null,
+      { pid: 4242, exitCode: 1 },
+      { pid: 4242, signalCode: "SIGTERM" },
+      { pid: 4242, killed: true },
+    ])("does not invent a pending launch for an absent or exited child: %j", async (child) => {
+      vi.useFakeTimers();
+      setBootPhase("ready");
+      const { watchdog } = createHarness({
+        autoRepair: false,
+        fetchImpl: async () => { throw new Error("ECONNREFUSED"); },
+      });
+      try {
+        watchdog.start({ child });
+        await vi.advanceTimersByTimeAsync(0);
+        expect(watchdog.getStatus().replacementPending).toBeNull();
+        expect(gatewayState(watchdog).state).toBe("down");
+      } finally {
+        watchdog.stop();
+      }
+    });
+
+    it("clears the boot obligation immediately when its child exits with invalid configuration", async () => {
+      vi.useFakeTimers();
+      setBootPhase("ready");
+      const { watchdog } = createHarness({
+        autoRepair: false,
+        fetchImpl: async () => { throw new Error("ECONNREFUSED"); },
+      });
+      try {
+        watchdog.start({ child: { pid: 4242, exitCode: null } });
+        await vi.advanceTimersByTimeAsync(0);
+        watchdog.onGatewayExit({ pid: 4242, code: 78, stderrTail: ["Invalid configuration"] });
+        await vi.advanceTimersByTimeAsync(0);
+        expect(watchdog.getStatus().replacementPending).toBeNull();
+        expect(gatewayState(watchdog).state).toBe("config_error");
+        expect(gatewayState(watchdog).actions.find((action) => action.id === "retry").disabledReason).toBeUndefined();
+      } finally {
+        watchdog.stop();
+      }
+    });
+  });
+
   it("guards start and bootstrap scheduling against double-registration", async () => {
     vi.useFakeTimers();
     const gatewayState = { healthy: false };

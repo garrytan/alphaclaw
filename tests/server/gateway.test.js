@@ -184,6 +184,22 @@ describe("server/gateway restart behavior", () => {
     delete require.cache[modulePath];
   });
 
+  it("returns the boot child before it listens so supervision can track startup", async () => {
+    const child = createChild();
+    childProcess.spawn = vi.fn(() => child);
+    childProcess.execSync = vi.fn(() => "");
+    fs.existsSync = vi.fn((targetPath) => targetPath === kOnboardingMarkerPath);
+    net.createConnection = vi.fn(() => createSocket(() => false));
+    delete require.cache[modulePath];
+    const gateway = require(modulePath);
+    const launchHandler = vi.fn();
+    gateway.setGatewayLaunchHandler(launchHandler);
+
+    expect(await gateway.startGateway()).toBe(child);
+    expect(childProcess.spawn).toHaveBeenCalledTimes(1);
+    expect(launchHandler).not.toHaveBeenCalled();
+  });
+
   it("always cold-starts when the gateway port is listening", async () => {
     const managedChild = createChild();
     const restartSupervisor = createChild();

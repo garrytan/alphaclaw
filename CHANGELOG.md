@@ -5,6 +5,13 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.9.91] - 2026-09-23
+
+### Fixed
+
+- **Container gateway startup:** track the initial gateway child through boot and the watchdog's existing bounded readiness verifier. The dashboard now shows Starting instead of a false Down/Retry prompt while the first launch is still coming up. Health and process identity establish managed supervision even when OpenClaw no longer prints the old `listening on` log message. A failed or timed-out launch still exposes its recovery actions.
+- **Recovery after abrupt container replacement:** preserve the automatic retry timer when the first gateway exits because the previous container's ownership lease is still active. Startup grace no longer cancels that recovery, and the dashboard explains that AlphaClaw is waiting and will retry automatically. Existing heartbeat, expiry, and ownership checks remain unchanged.
+
 ## [0.9.90] - 2026-09-23
 
 ### Fixed

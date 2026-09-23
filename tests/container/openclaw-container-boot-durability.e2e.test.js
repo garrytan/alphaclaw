@@ -6,6 +6,7 @@ const {
   repoRoot,
   ensureArtifactsDir,
   assertDockerAvailable,
+  docker,
   buildImage,
   createVolume,
   seedVolume,
@@ -304,6 +305,30 @@ describeContainer("container E2E: boot durability — legacy pidfile TID collisi
     });
   });
 
+  step("container restarts track the first gateway launch without a false Down card or Retry", 6 * kMin, async () => {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      await docker(["restart", kContainerA]);
+      ctx.cookie = null;
+      await waitForUiUp(kContainerA, 2 * kMin);
+      let finalStatus;
+      const states = [];
+      await waitFor(async () => {
+        const status = await readStatus();
+        states.push(status.state?.state);
+        if (status.state?.state !== "running") return false;
+        finalStatus = status;
+        return true;
+      }, { timeoutMs: 2 * kMin, intervalMs: 250, label: "first gateway launch becomes Running without Retry" });
+      expect(states).not.toEqual(expect.arrayContaining(["down"]));
+      expect(states).not.toEqual(expect.arrayContaining(["boot_failed"]));
+      expect(states).not.toEqual(expect.arrayContaining(["config_error"]));
+      expect(finalStatus.state.supervisionMode).toBe("managed");
+      expect(finalStatus.state.servingPid).toBeGreaterThan(0);
+      expect(finalStatus.state.replacementPending).toBeNull();
+      expect(await gatewayHealthzOk(kContainerA)).toBe(true);
+    }
+  });
+
   step("reads a REAL thread id of A's server process from /proc/<pid>/task", 2 * kMin, async () => {
     // A's own format-2 claim names the server pid (writeServerPid at boot).
     const pidfile = await readJsonInContainer(kContainerA, kServerPidPath);
@@ -386,11 +411,26 @@ describeContainer("container E2E: boot durability — legacy pidfile TID collisi
     ctx.cookie = null;
     await waitForUiUp(kContainerB, 5 * kMin);
     await waitForVersion(kContainerB, ctx.stablePin, 10 * kMin);
-    await waitFor(() => gatewayHealthzOk(kContainerB), {
+    const leaseWaits = [];
+    await waitFor(async () => {
+      const status = await readStatus();
+      const wd = status.watchdogStatus;
+      if (wd?.incumbentConflict?.kind === "owner_lease_held" &&
+          !wd.incumbentConflict.lease?.reclaimed && !wd.replacementPending &&
+          wd.health === "degraded" && wd.lifecycle === "running" && !wd.operationInProgress) {
+        leaseWaits.push({ state: status.state.state, retry: wd.degradedRetry });
+      }
+      return gatewayHealthzOk(kContainerB);
+    }, {
       timeoutMs: 5 * kMin,
       intervalMs: 3000,
       label: `gateway /healthz inside ${kContainerB} after the seeded boot`,
     });
+    expect(leaseWaits.length).toBeGreaterThan(0);
+    for (const wait of leaseWaits) {
+      expect(wait.state).toBe("starting");
+      expect(wait.retry).not.toBeNull();
+    }
   });
 
   step("boot-report.json: the pidfile guard judged the legacy claim a THREAD and proceeded", 2 * kMin, async () => {
