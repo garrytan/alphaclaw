@@ -50,6 +50,27 @@ afterEach(() => { fs.rmSync(path.join(root, ".openclaw"), { recursive: true, for
 afterAll(() => { delete process.env.ALPHACLAW_ROOT_DIR; fs.rmSync(root, { recursive: true, force: true }); });
 
 describe.each([12, 13, 16, 17])("auth shared schema %s", (version) => {
+  it.each([["api_key", "key", "keyRef"], ["token", "token", "tokenRef"]])("replaces inherited %s references only for a new nonempty inline source", (type, field, refField) => {
+    seed(version);
+    const id = "referenced:default";
+    const firstRef = { source: "env", provider: "default", id: "SYNTHETIC_OLD_AUTH" };
+    const explicitRef = { source: "env", provider: "default", id: "SYNTHETIC_EXPLICIT_AUTH" };
+    ap.upsertProfile(id, { type, provider: "referenced", [refField]: firstRef, extension: { keep: true } });
+    ap.upsertProfile(id, { type, provider: "referenced", email: "synthetic@example.invalid" });
+    expect(ap.getProfile(id)[refField]).toEqual(firstRef);
+    ap.upsertProfile(id, { type, provider: "referenced", [field]: " \n " });
+    expect(ap.getProfile(id)[refField]).toEqual(firstRef);
+    ap.upsertProfile(id, { type, provider: "referenced", [field]: "synthetic-inline", [refField]: explicitRef });
+    expect(ap.getProfile(id)[refField]).toEqual(explicitRef);
+    ap.upsertProfile(id, { type, provider: "referenced", [field]: " synthetic-edited\n " });
+    const updated = read(version).store.profiles[id];
+    expect(updated[field]).toBe("synthetic-edited");
+    expect(updated).not.toHaveProperty(refField);
+    expect(updated.extension).toEqual({ keep: true });
+    expect(updated.email).toBe("synthetic@example.invalid");
+    expect(read(version).store.profiles["other:oauth"]).toEqual(secrets().profiles["other:oauth"]);
+  });
+
   it("reads connected credentials and all mutation callers preserve unrelated data and unknown fields", () => {
     seed(version);
     expect(ap.getCodexProfile().access).toBe("synthetic-access");

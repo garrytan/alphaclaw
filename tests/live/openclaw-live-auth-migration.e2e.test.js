@@ -201,4 +201,40 @@ describeLive("live: pinned auth connect, runtime read, gateway activation and re
     expect(fs.readFileSync(databasePath)).toEqual(before);
     expect(fs.existsSync(path.join(oldState, "agents/main/agent/auth-profiles.json"))).toBe(false);
   });
+
+  it.each([["api_key", "key", "keyRef"], ["token", "token", "tokenRef"]])("the pinned resolver uses edited inline %s credentials instead of an inherited reference", async (type, field, refField) => {
+    const { resolveCodexMigrationBuild, loadOpenclawMigrationApi } = require("../../lib/server/openclaw-codex-migration-runtime");
+    const build = resolveCodexMigrationBuild({ configPath, env });
+    const resolver = await loadOpenclawMigrationApi({ build, prefix: "runtime-prepare.runtime", functionNames: ["createResolverContext", "collectAuthStoreAssignments", "resolveSecretRefValues", "applyResolvedAssignments"] });
+    const oauth = await loadOpenclawMigrationApi({ build, prefix: "oauth", functionNames: ["resolveApiKeyForProfile"] });
+    const profileId = `auth-probe:ref-${type}`;
+    const oldRef = { source: "env", provider: "default", id: "SYNTHETIC_OLD_AUTH" };
+    const explicitRef = { source: "env", provider: "default", id: "SYNTHETIC_EXPLICIT_AUTH" };
+    const materialize = async () => {
+      const store = ap.loadAuthStore("main", { strict: true });
+      const cfg = JSON.parse(fs.readFileSync(configPath, "utf8"));
+      cfg.secrets = { providers: { default: { source: "env" } } };
+      const resolverEnv = { ...env, SYNTHETIC_OLD_AUTH: "synthetic-old-source", SYNTHETIC_EXPLICIT_AUTH: "synthetic-explicit-source" };
+      const context = resolver.createResolverContext({ sourceConfig: cfg, env: resolverEnv });
+      resolver.collectAuthStoreAssignments({ store, agentDir: path.join(stateDir, "agents/main/agent"), context });
+      const resolved = await resolver.resolveSecretRefValues(context.assignments.map((assignment) => assignment.ref), { config: cfg, env: resolverEnv, cache: context.cache });
+      resolver.applyResolvedAssignments({ assignments: context.assignments, resolved });
+      return { store, cfg, context };
+    };
+    ap.upsertProfile(profileId, { type, provider: "auth-probe", [refField]: oldRef, extension: { keep: true } });
+    expect((await materialize()).store.profiles[profileId][field]).toBe("synthetic-old-source");
+    ap.upsertProfile(profileId, { type, provider: "auth-probe", email: "synthetic@example.invalid" });
+    expect((await materialize()).store.profiles[profileId][field]).toBe("synthetic-old-source");
+    ap.upsertProfile(profileId, { type, provider: "auth-probe", [field]: `synthetic-edited-${type}` });
+    const inline = await materialize();
+    expect(inline.store.profiles[profileId][field]).toBe(`synthetic-edited-${type}`);
+    expect(inline.store.profiles[profileId]).not.toHaveProperty(refField);
+    expect(inline.store.profiles[profileId].extension).toEqual({ keep: true });
+    expect((await oauth.resolveApiKeyForProfile({ cfg: inline.cfg, store: inline.store, profileId })).apiKey).toBe(`synthetic-edited-${type}`);
+    ap.upsertProfile(profileId, { type, provider: "auth-probe", [field]: "synthetic-conflicting-inline", [refField]: explicitRef });
+    const explicit = await materialize();
+    expect(explicit.store.profiles[profileId][refField]).toEqual(explicitRef);
+    expect(explicit.store.profiles[profileId][field]).toBe("synthetic-explicit-source");
+    expect(explicit.context.warnings.some((warning) => warning.code === "SECRETS_REF_OVERRIDES_PLAINTEXT" && warning.path.includes(profileId))).toBe(true);
+  });
 });
