@@ -416,6 +416,7 @@ describeContainer("container E2E: boot durability — legacy pidfile TID collisi
       const status = await readStatus();
       const wd = status.watchdogStatus;
       if (wd?.incumbentConflict?.kind === "owner_lease_held" &&
+          !wd.incumbentConflict.lease?.reclaimed && !wd.replacementPending &&
           wd.health === "degraded" && wd.lifecycle === "running" && !wd.operationInProgress) {
         leaseWaits.push({ state: status.state.state, retry: wd.degradedRetry });
       }
@@ -425,6 +426,7 @@ describeContainer("container E2E: boot durability — legacy pidfile TID collisi
       intervalMs: 3000,
       label: `gateway /healthz inside ${kContainerB} after the seeded boot`,
     });
+    expect(leaseWaits.length).toBeGreaterThan(0);
     for (const wait of leaseWaits) {
       expect(wait.state).toBe("starting");
       expect(wait.retry).not.toBeNull();
