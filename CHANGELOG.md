@@ -5,6 +5,26 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.9.90] - 2026-09-23
+
+### Fixed
+
+- **Cron history follows the running OpenClaw storage generation.** History,
+  duration statistics, trends and bulk run views now read current `task_runs`
+  outcomes, the supported older `cron_run_logs` table, or genuine file-era
+  JSONL. Runtime-directed authority prevents stale legacy tables or files from
+  replacing current outcomes. Reads preserve filtering, pagination, delivery,
+  usage and browser-timezone behavior without changing upstream schemas.
+- **Unavailable cron history is no longer shown as empty or stale history.**
+  Corrupt or unsupported storage and missing modern databases return an
+  explicit retryable error; backups use the existing quiet-period response.
+  Database replacement refreshes cached job identities immediately. Indexed,
+  bounded page queries and batched bulk reads avoid loading entire histories.
+- **Cron detail distinguishes model usage from job outcomes.** The usage
+  count and token/cost averages are labeled as model runs, while duration is
+  labeled as job duration. Failed first loads no longer also display empty
+  history or zero-valued panels; previously loaded results remain visible.
+
 ## [0.9.89] - 2026-09-22
 
 The nightly live tier (`live-e2e.yml`, real OpenClaw releases) had failed three
