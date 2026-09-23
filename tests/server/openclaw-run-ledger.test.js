@@ -242,6 +242,52 @@ describe("server/openclaw-run-ledger", () => {
   });
 
   describe("pruning", () => {
+    it("keeps migration recovery provenance beyond both run rings until its archive pin expires", () => {
+      const { ledger, nowRef } = makeLedger({ keepRuns: 2, keepBackupRuns: 1 });
+      ledger.createRun({ operationId: kOpA, target: { channel: "stable", version: "2.0.0" } });
+      ledger.updateRun(kOpA, (record) => ({ ...record,
+        dbPreflight: { migrationRequired: true },
+        backup: { verified: true, file: "/backups/openclaw-backup-migration.alphaclaw.tar.gz",
+          profile: "migration-minimal", partial: true,
+          coverage: { migration: "complete", core: "partial", workspace: "omitted" } },
+      }));
+      ledger.completeRun(kOpA, { state: "activated", ok: true });
+      nowRef.now += 1_000;
+      ledger.createRun({ operationId: kOpB, target: { channel: "stable", version: "2.0.1" } });
+      ledger.updateRun(kOpB, (record) => ({ ...record, dbPreflight: { migrationRequired: true },
+        backup: { verified: true, file: "/backups/openclaw-backup-failed-retry.alphaclaw.tar.gz" },
+      }));
+      ledger.completeRun(kOpB, { state: "failed", ok: false });
+      nowRef.now += 1_000;
+      ledger.createRun({ operationId: kOpC, target: { channel: "stable", version: "2.0.1" } });
+      ledger.updateRun(kOpC, (record) => ({ ...record, dbPreflight: { migrationRequired: true } }));
+      ledger.completeRun(kOpC, { state: "failed", ok: false });
+      for (let index = 0; index < 12; index += 1) {
+        nowRef.now += 1_000;
+        const suffix = index.toString(16).padStart(12, "0");
+        const update = `aaaaaaaa-aaaa-4bbb-8ccc-${suffix}`;
+        const manual = `bbbbbbbb-aaaa-4bbb-8ccc-${suffix}`;
+        ledger.createRun({ operationId: update, target: { channel: "stable", version: "2.0.1" } });
+        ledger.completeRun(update, { state: "failed", ok: false });
+        nowRef.now += 1;
+        ledger.createRun({ operationId: manual, target: { kind: "backup" } });
+        ledger.completeRun(manual, { state: "completed", ok: true });
+        ledger.pruneRuns();
+      }
+      expect(ledger.listRuns()).toHaveLength(6);
+      expect(ledger.readRun(kOpB).state).toBe("failed");
+      expect(ledger.readRun(kOpC).state).toBe("failed");
+      expect(ledger.readRun(kOpA).backup).toMatchObject({
+        profile: "migration-minimal", verified: true, coverage: { migration: "complete" },
+      });
+      nowRef.now += require("../../lib/server/constants").kOpenclawBackupPinMaxAgeMs + 1;
+      ledger.pruneRuns();
+      expect(ledger.readRun(kOpA)).toBeNull();
+      expect(ledger.readRun(kOpB)).toBeNull();
+      expect(ledger.readRun(kOpC)).toBeNull();
+      expect(ledger.listRuns()).toHaveLength(3);
+    });
+
     it("keeps the newest N runs and enforces the total log byte cap", async () => {
       const { ledger, nowRef } = makeLedger({
         keepRuns: 2,
@@ -356,5 +402,57 @@ describe("server/openclaw-run-ledger", () => {
     expect(closed.state).toBe("interrupted");
     expect(closed.result.message).toBe("AlphaClaw restarted before the backup finished.");
     expect(closed.result.hint).toMatch(/Run Back up now again/);
+  });
+
+  // v0.9.84: two runs created inside the same millisecond (the CI Node 26 lane
+  // hit it through upgrade-overseer.test.js: readdir listed the older run
+  // first) must still list newest-first — the overseer picker, the Upgrade
+  // page, both prune rings and diagnose read listRuns()[0] as "latest".
+  describe("ordering (same-millisecond startedAt)", () => {
+    const runsDir = (openclawDir) => path.join(openclawDir, ".alphaclaw", "runs");
+
+    it("lists the newer run first when runs share a startedAt, in-process, after a completeRun rewrite and after re-opening the ledger", () => {
+      const { ledger, openclawDir } = makeLedger(); // constant clock: 1_000_000
+      ledger.createRun({ operationId: kOpA, target: { channel: "beta", version: "1.0.0" } });
+      ledger.createRun({ operationId: kOpB, target: { kind: "backup" } });
+      ledger.createRun({ operationId: kOpC, target: { channel: "beta", version: "1.1.0" } });
+      expect(ledger.listRuns().map((run) => run.startedAt)).toEqual([1_000_000, 1_000_000, 1_000_000]);
+      expect(ledger.listRuns().map((run) => run.operationId)).toEqual([kOpC, kOpB, kOpA]);
+      // completeRun goes through normalizeRecord: the sequence survives the rewrite.
+      ledger.completeRun(kOpB, { state: "failed", ok: false });
+      ledger.completeRun(kOpC, { state: "failed", ok: false });
+      expect(ledger.listRuns().map((run) => run.operationId)).toEqual([kOpC, kOpB, kOpA]);
+      // A restarted server re-opens the same directory: the persisted sequence still orders.
+      const reopened = createRunLedger({ openclawDir, nowFn: () => 1_000_000, logger: kSilentLogger });
+      expect(reopened.listRuns().map((run) => run.operationId)).toEqual([kOpC, kOpB, kOpA]);
+      // and its own new run (sequence restarts at 1) lands first only because its clock is later.
+      const later = createRunLedger({ openclawDir, nowFn: () => 1_000_001, logger: kSilentLogger });
+      later.createRun({ operationId: "44444444-aaaa-4bbb-8ccc-444444444444", target: { kind: "backup" } });
+      expect(later.listRuns()[0].operationId).toBe("44444444-aaaa-4bbb-8ccc-444444444444");
+    });
+
+    it("a later startedAt beats a higher sequence; legacy records without a sequence sort behind a stamped one and among themselves by operationId", () => {
+      const { ledger, nowRef, openclawDir } = makeLedger();
+      ledger.createRun({ operationId: kOpC, target: { channel: "beta", version: "1.1.0" } }); // seq 1 @ t
+      nowRef.now -= 5;
+      ledger.createRun({ operationId: kOpA, target: { channel: "beta", version: "1.0.0" } }); // seq 2 @ t-5
+      expect(ledger.listRuns().map((run) => run.operationId)).toEqual([kOpC, kOpA]);
+      // Legacy (pre-v0.9.84) records: no seq, same millisecond as kOpC.
+      const legacy = (operationId) =>
+        fs.writeFileSync(
+          path.join(runsDir(openclawDir), operationId + ".json"),
+          JSON.stringify({ operationId, target: { kind: "backup" }, state: "failed", startedAt: 1_000_000, finishedAt: 1_000_000, ok: false }),
+        );
+      legacy(kOpB);
+      legacy("00000000-aaaa-4bbb-8ccc-000000000000");
+      expect(ledger.readRun(kOpB)).not.toHaveProperty("seq");
+      expect(ledger.readRun(kOpC).seq).toBe(1);
+      expect(ledger.listRuns().map((run) => run.operationId)).toEqual([
+        kOpC, // stamped seq wins the tie
+        kOpB, // legacy ties: operationId descending, deterministic
+        "00000000-aaaa-4bbb-8ccc-000000000000",
+        kOpA, // older clock last
+      ]);
+    });
   });
 });

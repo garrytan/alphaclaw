@@ -107,6 +107,57 @@ describe("GET /api/watchdog/incidents/:id", () => {
     expect(res.status).toBe(404);
     expect(res.body.error).toBe("incident_not_found");
   });
+
+  it("#87 returns overseer_json verbatim: notifyDecision / notifyOutcome ride as enum strings when present (E6)", async () => {
+    const deps = createDeps();
+    deps.incidentsDb.getIncidentById = vi.fn(() => ({
+      id: 7,
+      incidentKey: "gateway_readiness",
+      status: "resolved",
+      overseer: {
+        v: 1,
+        current: {
+          state: "done",
+          verdict: "monitoring",
+          action: "none",
+          manual: false,
+          at: 1756468800000,
+          notifyDecision: "not_steady_state",
+          notifyOutcome: "not_attempted",
+        },
+        history: [],
+      },
+    }));
+    const res = await request(createApp(deps)).get("/api/watchdog/incidents/7");
+    expect(res.status).toBe(200);
+    const current = res.body.incident.overseer.current;
+    expect(typeof current.notifyDecision).toBe("string");
+    expect([
+      "manual",
+      "eligible",
+      "incident_changed",
+      "ineligible_now",
+      "not_steady_state",
+    ]).toContain(current.notifyDecision);
+    expect(typeof current.notifyOutcome).toBe("string");
+    expect(current.notifyOutcome).toMatch(/^(sent|held|suppressed:[a-z_]+|failed|not_attempted)$/);
+    // A skipped marker (no verdict) is exposed the same way.
+    deps.incidentsDb.getIncidentById = vi.fn(() => ({
+      id: 7,
+      incidentKey: "gateway_readiness",
+      status: "resolved",
+      overseer: {
+        v: 1,
+        current: { state: "skipped", reason: "recovered_no_action", manual: false, at: 1756468800000 },
+        history: [],
+      },
+    }));
+    const skipped = await request(createApp(deps)).get("/api/watchdog/incidents/7");
+    expect(skipped.body.incident.overseer.current).toMatchObject({
+      state: "skipped",
+      reason: "recovered_no_action",
+    });
+  });
 });
 
 describe("GET /api/watchdog/events byte-compatibility", () => {

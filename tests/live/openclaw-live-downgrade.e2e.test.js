@@ -361,7 +361,11 @@ describeLive("LIVE #54 downgrade: real 2026.9.1-beta.1 → 2026.8.2 through the 
       // The state the beta wrote (schema 12) + the lease-engaging audit log.
       expect(readUserVersion(harness.stateDbPath)).toBe(12);
 
-      const applyRes = await postApply(harness, { channel: "stable", version: stable.version });
+      const applyRes = await postApply(harness, {
+        channel: "stable",
+        version: stable.version,
+        intent: "downgrade",
+      });
       expect(applyRes.status, JSON.stringify(applyRes.body)).toBe(202);
       const { operationId } = applyRes.body;
 
@@ -378,11 +382,16 @@ describeLive("LIVE #54 downgrade: real 2026.9.1-beta.1 → 2026.8.2 through the 
       ]) {
         expect(stepNames, stepNames.join(", ")).toContain(expected);
       }
-      // ONE initial "backup: running" (WI-1.9) and the pause was real.
+      // ONE initial "backup: running" (WI-1.9) and the pause was real. The
+      // running row's detail is rewritten in place as the ladder progresses
+      // (since v0.9.87 it opens with the preflight verdict and ends on the
+      // relaunch wait), so the pause is proven by the completed row's
+      // "(gateway paused)" suffix rather than by the first detail.
       const backupSteps = run.steps.filter((step) => step.name === "backup");
       expect(backupSteps[0].status).toBe("running");
-      expect(backupSteps[0].detail).toMatch(/pausing the gateway for a consistent backup/);
-      expect(backupSteps.filter((step) => step.status === "completed")).toHaveLength(1);
+      const completedBackup = backupSteps.filter((step) => step.status === "completed");
+      expect(completedBackup).toHaveLength(1);
+      expect(completedBackup[0].detail).toMatch(/gateway paused/);
       const preflightStep = run.steps.find(
         (step) => step.name === "db-preflight" && step.status === "completed",
       );
@@ -497,7 +506,11 @@ describeLive("LIVE #54 downgrade: real 2026.9.1-beta.1 → 2026.8.2 through the 
       expect(readUserVersion(harness.stateDbPath)).toBe(15);
       const appliedBefore = harness.store.readState().applied;
 
-      const applyRes = await postApply(harness, { channel: "beta", version: beta.version });
+      const applyRes = await postApply(harness, {
+        channel: "beta",
+        version: beta.version,
+        intent: "update",
+      });
       expect(applyRes.status, JSON.stringify(applyRes.body)).toBe(202);
       const { operationId } = applyRes.body;
       const run = await waitForRunToFinish(harness, `apply of ${beta.version} to be refused`);

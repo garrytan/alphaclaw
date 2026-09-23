@@ -4,12 +4,18 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 // slots; effects collected, not run — the poll interval never starts, so
 // refresh() is driven explicitly.
 vi.mock("preact/hooks", () => {
-  const harness = { slots: [], cursor: 0, effects: [] };
+  const harness = { slots: [], cursor: 0, effects: [], cleanups: new Map() };
+  harness.runEffect = (index) => {
+    harness.cleanups.get(index)?.();
+    harness.cleanups.set(index, harness.effects[index]?.());
+  };
   harness.beginRender = () => {
     harness.cursor = 0;
     harness.effects = [];
   };
   harness.reset = () => {
+    for (const cleanup of harness.cleanups.values()) cleanup?.();
+    harness.cleanups.clear();
     harness.slots = [];
     harness.cursor = 0;
     harness.effects = [];
@@ -61,6 +67,7 @@ import {
   formatLocaleDateTimeWithTodayTime,
 } from "../../lib/public/js/lib/format.js";
 import { ActionButton } from "../../lib/public/js/components/action-button.js";
+import { Badge } from "../../lib/public/js/components/badge.js";
 import { InlineErrorChip } from "../../lib/public/js/components/inline-error-chip.js";
 
 const harness = preactHooks.__harness;
@@ -134,7 +141,12 @@ beforeEach(() => {
 describe("frontend/watchdog incidents hook", () => {
   const renderHook = () => {
     harness.beginRender();
-    return useWatchdogIncidents();
+    const state = useWatchdogIncidents();
+    // The two real polling hooks subscribe to committed entries; keep their
+    // subscriptions mounted while driving refresh explicitly (no intervals).
+    harness.runEffect(0);
+    harness.runEffect(4);
+    return state;
   };
 
   it("starts in the loading shape: not loaded, no error, empty list", () => {
@@ -449,5 +461,43 @@ describe("frontend/watchdog incidents card", () => {
     );
     expect(refreshButton).toBeTruthy();
     expect(refreshButton.props.disabled).toBe(true);
+  });
+
+  it("#87 a skipped overseer record yields no overseer chip on the row (a verdict still does)", () => {
+    // Distinct labels: expandTree walks pass-through children under both the
+    // wrapper's props and its rendered output, so one vnode can be seen twice.
+    const overseerChips = (tree) => [
+      ...new Set(
+        findAllByType(tree, Badge)
+          .map((badge) => String(badge.props.children))
+          .filter((label) => label.startsWith("Overseer:")),
+      ),
+    ];
+    const skipped = {
+      ...kIncident,
+      id: 9,
+      overseer: {
+        v: 1,
+        current: {
+          state: "skipped",
+          reason: "recovered_no_action",
+          manual: false,
+          at: Date.parse("2026-08-28T10:06:00Z"),
+        },
+      },
+    };
+    const reviewed = {
+      ...kIncident,
+      id: 8,
+      overseer: {
+        v: 1,
+        current: { state: "done", verdict: "resolved", at: Date.parse("2026-08-28T10:06:00Z") },
+      },
+    };
+    const onlySkipped = renderCard({ incidents: [skipped], incidentsLoaded: true, incidentsError: null });
+    expect(treeText(onlySkipped)).toContain("Gateway crash");
+    expect(overseerChips(onlySkipped)).toEqual([]);
+    const both = renderCard({ incidents: [skipped, reviewed], incidentsLoaded: true, incidentsError: null });
+    expect(overseerChips(both)).toEqual(["Overseer: Resolved"]);
   });
 });

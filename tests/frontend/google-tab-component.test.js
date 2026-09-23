@@ -229,6 +229,22 @@ describe("frontend/google tab component", () => {
     expect(showToast).toHaveBeenCalledWith("Gmail watch enabled", "success");
   });
 
+  it("keeps a persisted disconnect failure visible on a collapsed, signed-out account", () => {
+    const onDisconnect = vi.fn();
+    const row = GoogleAccountRow({
+      account: { ...kAccount, authenticated: false, gmailWatch: {
+        enabled: false, remoteOperation: { kind: "disconnect", status: "failed", message: "Revocation failed" },
+      } },
+      expanded: false,
+      onDisconnect,
+    });
+    const chip = findChip(row, "Disconnect did not finish. Gmail delivery remains disabled.");
+    expect(chip).toBeTruthy();
+    expect(chip.props.retryLabel).toBe("Retry disconnect");
+    chip.props.onRetry();
+    expect(onDisconnect).toHaveBeenCalledWith("a1");
+  });
+
   it("passes the config load error to rows whose watch status is unknown", () => {
     gmailWatchHook.error = new Error("config boom");
     gmailWatchHook.watchByAccountId = new Map();
@@ -266,6 +282,16 @@ describe("frontend/google tab component", () => {
     expect(addAccountTrigger).toBeTruthy();
   });
 
+  it("keeps retained accounts visible alongside a refresh error and retry", () => {
+    accountsHook.error = new Error("temporary outage");
+    const { tree } = renderGoogle();
+    expect(findRow(tree)).toBeTruthy();
+    const chip = findChip(tree, "Couldn't refresh Google accounts. Showing the last known accounts.");
+    expect(chip).toBeTruthy();
+    chip.props.onRetry();
+    expect(accountsHook.refreshAccounts).toHaveBeenCalledTimes(1);
+  });
+
   it("surfaces disconnect failures and exposes a pending affordance while in flight", async () => {
     api.disconnectGoogle.mockRejectedValue(new Error("net down"));
 
@@ -296,7 +322,7 @@ describe("frontend/google tab component", () => {
     );
     r = renderGoogle();
     expect(findRow(r.tree).props.disconnecting).toBe(false);
-    expect(accountsHook.refreshAccounts).not.toHaveBeenCalled();
+    expect(accountsHook.refreshAccounts).toHaveBeenCalledTimes(1);
   });
 
   it("routes an add-company-account throw into the modal's inline error", async () => {

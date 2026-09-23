@@ -520,8 +520,8 @@ describe("server/notify-outbox", () => {
       expect(insertEvent).toHaveBeenCalledTimes(2);
       expect(logger.error).toHaveBeenCalledTimes(2);
 
-      // Operator unblocks the bot; the next day's enqueue delivers.
-      nowRef.now += 24 * 60 * 60 * 1000;
+      // Operator unblocks the bot within the original 48h delivery lifetime.
+      nowRef.now += 12 * 60 * 60 * 1000;
       outbox.enqueue(stable);
       const ok = vi.fn(async () => ({ ok: true }));
       const result = await outbox.flush({ deliver: ok });
@@ -864,7 +864,7 @@ describe("server/upgrade-notifier routing", () => {
     const { notifier, fanout, sendToTarget } = makeNotifier();
     await notifier.notify("hello", { id: "e1" });
     await notifier.flush();
-    expect(fanout).toHaveBeenCalledWith("hello", { eventType: "info" });
+    expect(fanout).toHaveBeenCalledWith("hello", { eventType: "info", shouldDeliver: expect.any(Function) });
     expect(sendToTarget).not.toHaveBeenCalled();
   });
 
@@ -1316,7 +1316,7 @@ describe("server/upgrade-notifier state-db quiet hold", () => {
     token.release();
     await vi.advanceTimersByTimeAsync(0);
     expect(flushSpy).toHaveBeenCalledTimes(1);
-    expect(fanout).toHaveBeenCalledWith("update applied", { eventType: "info" });
+    expect(fanout).toHaveBeenCalledWith("update applied", { eventType: "info", shouldDeliver: expect.any(Function) });
     expect(outbox.listEvents()[0].deliveredAt).not.toBeNull();
   });
 
@@ -1408,7 +1408,7 @@ describe("server/upgrade-notifier state-db quiet hold", () => {
       token.release();
       await vi.advanceTimersByTimeAsync(0);
       expect(fanout).toHaveBeenCalledTimes(1);
-      expect(fanout).toHaveBeenCalledWith("backup failed", { eventType: "upgrade_failed" });
+      expect(fanout).toHaveBeenCalledWith("backup failed", { eventType: "upgrade_failed", shouldDeliver: expect.any(Function) });
     });
 
     it("held sends are delivered in arrival order, then the outbox flush runs", async () => {
@@ -1430,7 +1430,7 @@ describe("server/upgrade-notifier state-db quiet hold", () => {
       await notifier.notify("held", { id: "e1" });
 
       await vi.advanceTimersByTimeAsync(10_000);
-      expect(fanout).toHaveBeenCalledWith("held", { eventType: "info" });
+      expect(fanout).toHaveBeenCalledWith("held", { eventType: "info", shouldDeliver: expect.any(Function) });
     });
 
     it("a failed held delivery is logged, never retried (there is no durable outbox to retry from)", async () => {

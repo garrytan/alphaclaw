@@ -416,6 +416,7 @@ const holdReservedLock = (dbPath) => {
 
 module.exports = {
   kPin,
+  installedVersion,
   kHardGateTarget,
   buildCliEnv,
   createFixtureDb,

@@ -26,6 +26,26 @@ const {
   allocateServePort,
 } = require("../../lib/server/google-state");
 
+describe("Gmail remote operation state", () => {
+  it("retains unconfirmed local process evidence while disabled and bounds the saved outcome", () => {
+    const watch = getAccountGmailWatch({ gmailWatch: {
+      enabled: false, port: 18801, pid: 123,
+      remoteOperation: { kind: "stop", status: "failed", code: "x".repeat(100), message: `first\n${"x".repeat(500)}`, updatedAt: 1234, arbitrary: "discard" },
+    } });
+    expect(watch).toMatchObject({ enabled: false, port: 18801, pid: 123 });
+    expect(watch.remoteOperation.code).toHaveLength(64);
+    expect(watch.remoteOperation.message).toHaveLength(240);
+    expect(watch.remoteOperation.message).not.toContain("\n");
+    expect(watch.remoteOperation.arbitrary).toBeUndefined();
+    expect(getAccountGmailWatch({ gmailWatch: { ...watch, remoteOperation: { ...watch.remoteOperation, status: "succeeded" } } })).toMatchObject({ enabled: false, port: null, pid: null });
+  });
+
+  it("discards unsupported operation kinds and states", () => {
+    expect(getAccountGmailWatch({ gmailWatch: { remoteOperation: { kind: "exec", status: "failed" } } }).remoteOperation).toBeUndefined();
+    expect(getAccountGmailWatch({ gmailWatch: { remoteOperation: { kind: "stop", status: "unknown" } } }).remoteOperation).toBeUndefined();
+  });
+});
+
 const createRecordingFs = (initialFiles = {}) => {
   const files = new Map(
     Object.entries(initialFiles).map(([filePath, contents]) => [

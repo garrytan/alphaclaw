@@ -278,6 +278,20 @@ describeContainer("container E2E: upgrade journey in the production image (pinâ†
           fs.writeFileSync(path.join(dir, `${name}-logs.txt`), logs);
         } catch {}
       }
+      // The watchdog's incident bundles carry what the container log does
+      // not: the gateway's stderr tail, the medic's `doctor --fix` output
+      // and verdict. 2026-09-22's journeys died in "doctor_fix failed" with
+      // the reason reachable only inside INCIDENT-*.md â€” capture them.
+      for (const name of [kContainerA, kContainerB]) {
+        try {
+          const { stdout } = await execInContainer(name, [
+            "sh",
+            "-c",
+            'for f in /data/claude-code-local/workspace/INCIDENT-*.md; do [ -f "$f" ] || continue; echo "===== $f"; tail -c 60000 "$f"; echo; done',
+          ]);
+          if (stdout.trim()) fs.writeFileSync(path.join(dir, `${name}-incidents.md`), stdout);
+        } catch {}
+      }
     }
     // ALWAYS tear down â€” never leave containers or volumes behind.
     await removeContainer(kContainerA);
@@ -571,6 +585,9 @@ describeContainer("container E2E: upgrade journey in the production image (pinâ†
       await dialog
         .getByRole("button", { name: "Apply", exact: true })
         .click({ timeout: 30_000 });
+      const preflightDialog = page.getByRole("dialog", { name: "Review backup preflight", exact: true });
+      await preflightDialog.getByText("Backup preflight passed", { exact: true }).waitFor({ timeout: 2 * kMin });
+      await preflightDialog.getByRole("button", { name: "Continue", exact: true }).click({ timeout: 30_000 });
 
       // Progress card: heading "Updating to <beta>", then the Backup step,
       // then Restarting. Steps run in order, so "Restarting" appearing means
@@ -733,8 +750,14 @@ describeContainer("container E2E: upgrade journey in the production image (pinâ†
     // actually ran one (a copy refused at exclusivity hands over to it).
     // Until v0.9.80 this step passed only because AlphaClaw's own transient
     // `openclaw sessions` shell-out made the copy refuse, so the CLI always ran.
+    const successfulCopy = backup.profile === "migration-minimal" ? backup.migrationMinimal : backup.offlineCopy;
     if (backup.producer === "alphaclaw-offline-copy") {
-      expect(backup.offlineCopy?.ok, "offline copy record").toBe(true);
+      expect(successfulCopy?.ok, "successful copy profile record").toBe(true);
+      if (backup.profile === "migration-minimal") {
+        expect(backup.coverage).toEqual({ migration: "complete", core: "partial", workspace: "omitted" });
+        expect(backup.partial).toBe(true);
+        expect(backup.attemptsDetail.filter((entry) => entry.rung === "migration_minimal")).toHaveLength(1);
+      }
     } else {
       expect(backup.attempts).toBeGreaterThanOrEqual(1);
     }
@@ -777,9 +800,9 @@ describeContainer("container E2E: upgrade journey in the production image (pinâ†
     // ran with the gateway still paused, or the offline copy stood in â€” and
     // the run still ended with the verified artifact asserted above.
     const contentionHandled =
-      (backup.contentionRetries ?? 0) > 0 || backup.offlineCopy?.ok === true;
+      (backup.contentionRetries ?? 0) > 0 || successfulCopy?.ok === true;
     if (contentionHandled) {
-      if (backup.offlineCopy?.ok) {
+      if (successfulCopy?.ok) {
         // The copy rode through the hold inside the pause (sqlite backup()
         // under its 30 s busy_timeout, the quiet barrier held) â€” no paused
         // CLI attempt is expected or counted.

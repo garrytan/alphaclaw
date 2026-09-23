@@ -7,6 +7,7 @@ const {
   buildCatalogEntry,
   loadThinkingModule,
   normalizeThinkingDefaultValue,
+  pickNamedExport,
   resolveThinkingModulePath,
   resolveThinkingOptionsForModel,
   splitModelKey,
@@ -92,6 +93,30 @@ describe("server/openclaw-thinking coverage", () => {
     } finally {
       fs.rmSync(distDir, { recursive: true, force: true });
     }
+  });
+
+  it("binds upstream exports by function NAME, never by a remembered minified key (2026.9.5 regression)", () => {
+    // 2026.9.5's export table: `i` is listThinkingLevelLabels and `s` is
+    // resolveSupportedThinkingLevel — the two keys the old code guessed for
+    // the options/default functions. Naming must win over the letter.
+    const listThinkingLevelLabels = () => ["low", "ultra"];
+    const resolveSupportedThinkingLevel = () => "medium";
+    const listThinkingLevelOptions = () => [{ id: "ultra", label: "Ultra" }];
+    const resolveThinkingDefaultForModel = () => "high";
+    const mod = {
+      i: listThinkingLevelLabels,
+      s: resolveSupportedThinkingLevel,
+      a: listThinkingLevelOptions,
+      l: resolveThinkingDefaultForModel,
+    };
+    expect(pickNamedExport(mod, "listThinkingLevelOptions")).toBe(listThinkingLevelOptions);
+    expect(pickNamedExport(mod, "resolveThinkingDefaultForModel")).toBe(resolveThinkingDefaultForModel);
+    // A direct named export still wins when upstream publishes one.
+    const direct = () => [];
+    expect(pickNamedExport({ listThinkingLevelOptions: direct, a: listThinkingLevelOptions }, "listThinkingLevelOptions")).toBe(direct);
+    // Absent → null (the caller turns that into a loud "exports not found").
+    expect(pickNamedExport({ i: listThinkingLevelLabels }, "listThinkingLevelOptions")).toBeNull();
+    expect(pickNamedExport(undefined, "listThinkingLevelOptions")).toBeNull();
   });
 
   it("throws when no OpenClaw thinking module can be resolved, then recovers", async () => {

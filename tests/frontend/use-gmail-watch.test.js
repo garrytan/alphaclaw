@@ -52,10 +52,13 @@ vi.mock("../../lib/public/js/lib/api.js", () => ({
 vi.mock("../../lib/public/js/hooks/use-cached-fetch.js", () => ({
   useCachedFetch: vi.fn(),
 }));
+vi.mock("../../lib/public/js/hooks/usePolling.js", () => ({ usePolling: vi.fn() }));
 
 import * as preactHooks from "preact/hooks";
 import { useCachedFetch } from "../../lib/public/js/hooks/use-cached-fetch.js";
 import { useGmailWatch } from "../../lib/public/js/components/google/use-gmail-watch.js";
+import { startGmailWatch, stopGmailWatch } from "../../lib/public/js/lib/api.js";
+import { usePolling } from "../../lib/public/js/hooks/usePolling.js";
 
 const harness = preactHooks.__harness;
 
@@ -108,5 +111,46 @@ describe("frontend/use-gmail-watch", () => {
     cachedState.error = new Error("config boom");
     const hook = render([{ id: "a1" }]);
     expect(hook.error).toBe(cachedState.error);
+  });
+
+  it("loads and reconciles account changes while the gateway is stopped", () => {
+    harness.beginRender();
+    useGmailWatch({ gatewayStatus: "stopped", accounts: [{ id: "a1" }] });
+    runEffects();
+    expect(useCachedFetch.mock.calls.at(-1)[2].enabled).toBe(true);
+    harness.beginRender();
+    useGmailWatch({ gatewayStatus: "stopped", accounts: [{ id: "a1" }, { id: "a2" }] });
+    runEffects();
+    expect(cachedState.refresh).toHaveBeenCalledWith({ force: true });
+  });
+
+  it("refreshes persisted disabled state when a remote stop fails", async () => {
+    stopGmailWatch.mockRejectedValue(new Error("remote stop failed"));
+    const hook = render([{ id: "a1" }]);
+    await expect(hook.stopWatchForAccount("a1")).rejects.toThrow("remote stop failed");
+    expect(cachedState.refresh).toHaveBeenCalledWith({ force: true });
+    expect(render([{ id: "a1" }]).busyByAccountId.a1).toBeUndefined();
+  });
+
+  it("keeps the row busy until overlapping requests settle", async () => {
+    let finishFirst;
+    let finishSecond;
+    startGmailWatch.mockImplementationOnce(() => new Promise((resolve) => { finishFirst = resolve; }))
+      .mockImplementationOnce(() => new Promise((resolve) => { finishSecond = resolve; }));
+    const hook = render([{ id: "a1" }]);
+    const first = hook.startWatchForAccount("a1");
+    const second = hook.startWatchForAccount("a1");
+    finishFirst({ ok: true });
+    await first;
+    expect(render([{ id: "a1" }]).busyByAccountId.a1).toBe(true);
+    finishSecond({ ok: true });
+    await second;
+    expect(render([{ id: "a1" }]).busyByAccountId.a1).toBeUndefined();
+  });
+
+  it("polls pending remote work after reload with the canonical cache key", () => {
+    cachedState.data = { accounts: [{ accountId: "a1", enabled: false, remoteOperation: { kind: "stop", status: "pending" } }] };
+    render([{ id: "a1" }]);
+    expect(usePolling).toHaveBeenCalledWith(expect.any(Function), 5000, { enabled: true, cacheKey: "/api/gmail/config" });
   });
 });

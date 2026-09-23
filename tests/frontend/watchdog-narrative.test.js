@@ -79,6 +79,43 @@ describe("phase copy map stays in sync with the server enum", () => {
 });
 
 describe("buildWatchdogNarrative", () => {
+  it("explains retained crash recovery and its age without counting admission checks as launches", async () => {
+    const { buildWatchdogNarrative } = await loadHelpers();
+    const narrative = buildWatchdogNarrative({ ...baseStatus,
+      recoveryPending: { createdAt: new Date(kNow - 120_000).toISOString(),
+        reason: "lifecycle_operation_in_progress", retryCount: 50,
+        nextAttemptAt: new Date(kNow + 10_000).toISOString() },
+    }, kNow);
+    expect(narrative.headline).toBe("Crash recovery is pending");
+    expect(narrative.detail).toContain("holds the gateway lifecycle lock");
+    expect(narrative.detail).toContain("2m");
+    expect(narrative.detail).not.toContain("50");
+    expect(narrative.countdowns).toEqual([expect.objectContaining({ label: "Next recovery check" })]);
+  });
+
+  it("keeps cleanup blockers and tracked writer identities visible above old healthy status", async () => {
+    const { buildWatchdogNarrative } = await loadHelpers();
+    const narrative = buildWatchdogNarrative({ ...baseStatus,
+      lifecycleOperation: { kind: "update_repair", phase: "cleanup_blocked",
+        processes: [{ pid: 1234, phase: "killing" }] },
+      recoveryPending: { reason: "operation_in_progress" },
+    }, kNow);
+    expect(narrative.headline).toBe("Repair cleanup needs attention");
+    expect(narrative.detail).toContain("1234");
+    expect(narrative.detail).toContain("confirm they have exited before restarting AlphaClaw");
+    expect(narrative.detail).toContain("remains held until cleanup confirms termination");
+    expect(buildWatchdogNarrative(baseStatus, kNow).headline).not.toBe(narrative.headline);
+  });
+
+  it("ticks retained recovery age using the existing local clock", async () => {
+    const { WatchdogNarrativeCard } = await loadCard();
+    const { useNowMs } = await loadUseNowMs();
+    WatchdogNarrativeCard({ watchdogStatus: { ...baseStatus,
+      recoveryPending: { createdAt: new Date(kNow).toISOString(), reason: "expected_restart" },
+    } });
+    expect(useNowMs).toHaveBeenLastCalledWith(1000, { enabled: true });
+  });
+
   it("returns null without a status or phase (loading shell renders instead)", async () => {
     const { buildWatchdogNarrative } = await loadHelpers();
     expect(buildWatchdogNarrative(null, kNow)).toBe(null);
@@ -801,6 +838,33 @@ describe("drift pins (v0.9.75 ship review): vocabularies the UI mirrors by hand"
       info: "bg-cyan-400/90",
       neutral: "bg-gray-500/60",
     });
+  });
+
+  it("a crash_loop phase under a latched owner lease (2026.9.4+) names the renewing lease and its holder, never doctor", async () => {
+    const { buildWatchdogNarrative, kDegradedReasonCopy } = await loadHelpers();
+    const narrative = buildWatchdogNarrative(
+      {
+        ...baseStatus,
+        phase: "crash_loop_repair_ladder",
+        lifecycle: "crash_loop",
+        health: "unhealthy",
+        incumbentConflict: {
+          kind: "owner_lease_held",
+          holderPid: null,
+          holderRole: null,
+          lease: { status: "held", expiresAt: kNow + 120_000, heartbeatAt: kNow - 10_000, host: "a1b2c3d4e5f6", pid: 7 },
+        },
+      },
+      kNow,
+    );
+    expect(narrative.headline).toBe("Blocked by a gateway owner lease that keeps renewing");
+    expect(narrative.detail).toContain("host a1b2c3d4e5f6, pid 7");
+    expect(narrative.detail).toContain("another gateway is running against this state directory");
+    expect(narrative.detail.toLowerCase()).not.toContain("doctor");
+    // The degraded copy names the wait while the lease is held and stays generic without an expiry.
+    const copy = kDegradedReasonCopy.owner_lease_held({ incumbentConflict: { lease: { expiresAt: Date.now() + 90_000 } } });
+    expect(copy).toMatch(/about (89|90|91)s/);
+    expect(kDegradedReasonCopy.owner_lease_held({})).not.toContain("about");
   });
 
   it("a crash_loop phase under a latched state-writer conflict names the blocker instead of promising doctor repair", async () => {

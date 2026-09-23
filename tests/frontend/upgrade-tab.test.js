@@ -4,12 +4,24 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 // hook state lives in per-call-index slots so component/hook functions can be
 // invoked directly without a DOM renderer. Effects are collected, not run.
 vi.mock("preact/hooks", () => {
-  const harness = { slots: [], cursor: 0, effects: [] };
+  const harness = { slots: [], cursor: 0, effects: [], cleanups: new Map() };
+  harness.runEffect = (index) => {
+    harness.cleanups.get(index)?.();
+    harness.cleanups.set(index, harness.effects[index]?.());
+  };
+  // Keep committed read subscriptions mounted without starting polling.
+  // Named effects avoid coupling these older fixtures to extraction order.
+  harness.mountReads = () => harness.effects.forEach((effect, index) => {
+    if (String(effect).includes("subscribeCache") || String(effect).includes("followedStale")) harness.runEffect(index);
+  });
+  harness.findEffect = (text) => harness.effects.find((effect) => String(effect).includes(text));
   harness.beginRender = () => {
     harness.cursor = 0;
     harness.effects = [];
   };
   harness.reset = () => {
+    for (const cleanup of harness.cleanups.values()) cleanup?.();
+    harness.cleanups.clear();
     harness.slots = [];
     harness.cursor = 0;
     harness.effects = [];
@@ -42,6 +54,7 @@ vi.mock("preact/hooks", () => {
 });
 
 vi.mock("../../lib/public/js/lib/api.js", () => ({
+  authFetch: vi.fn(async () => new Response(JSON.stringify({ ok: true, blocked: false, reason: null, diagnosis: { directories: { complete: true } } }))),
   applyOpenclawVersion: vi.fn(),
   createOpenclawBackup: vi.fn(),
   clearOpenclawBlocklist: vi.fn(),
@@ -50,6 +63,7 @@ vi.mock("../../lib/public/js/lib/api.js", () => ({
   fetchOpenclawChannel: vi.fn(),
   fetchOpenclawRunLogText: vi.fn(),
   fetchOpenclawRuns: vi.fn(),
+  fetchOpenclawRun: vi.fn(),
   fetchStatus: vi.fn(),
   markOpenclawGood: vi.fn(),
   reconcileInstalledOpenclaw: vi.fn(),
@@ -1591,14 +1605,16 @@ describe("frontend/upgrade-tab hook", () => {
 
   const renderHook = (props = {}) => {
     harness.beginRender();
-    return useUpgradeTab(props);
+    const state = useUpgradeTab(props);
+    harness.mountReads();
+    return state;
   };
 
   const hydrate = async (props = {}) => {
     let state = renderHook(props);
     // Run only the mount data-load effect (effect #0); the others start
     // timers/streams that the harness should not leak.
-    harness.effects[0]();
+    harness.findEffect("loadChannel({ fromCache")();
     await flushAsync();
     state = renderHook(props);
     return state;
@@ -1671,9 +1687,7 @@ describe("frontend/upgrade-tab hook", () => {
 
     // The switch triggered a second catalog read (no forced refresh).
     expect(api.fetchOpenclawCatalog).toHaveBeenCalledTimes(2);
-    expect(api.fetchOpenclawCatalog).toHaveBeenLastCalledWith({
-      refresh: false,
-    });
+    expect(api.fetchOpenclawCatalog).toHaveBeenLastCalledWith(expect.objectContaining({ refresh: false, signal: expect.any(AbortSignal) }));
 
     state = renderHook({});
     expect(state.whatsNew).toEqual({
@@ -1721,7 +1735,7 @@ describe("frontend/upgrade-tab hook", () => {
     let state = await hydrate();
     state.onRequestApply({ payload: { version: "x" }, label: "x" });
     state = renderHook({});
-    await state.onConfirmApply();
+    await state.onConfirmApply(); await renderHook({}).backupPreflight.confirm();
     state = renderHook({});
     expect(state.operation).toBeTruthy();
     expect(state.actionsDisabled).toBe(true);
@@ -1766,6 +1780,7 @@ describe("frontend/upgrade-tab hook", () => {
       () => new Promise((resolve) => (resolveCatalog = resolve)),
     );
     state.onCheckNow();
+    await Promise.resolve();
     state = renderHook({});
     expect(state.actionsDisabled).toBe(true);
     resolveCatalog({ ok: true, catalog: makeCatalog() });
@@ -1832,7 +1847,7 @@ describe("frontend/upgrade-tab hook", () => {
     state = renderHook({});
     expect(state.pendingApply.confirm.title).toBe("Switch to 2026.7.2?");
 
-    await state.onConfirmApply();
+    await state.onConfirmApply(); await renderHook({}).backupPreflight.confirm();
     // v0.9.81 (D13): the body declares its direction (2026.7.2 > the running
     // 2026.7.1-2 → update); a row click never claims "latest".
     expect(api.applyOpenclawVersion).toHaveBeenCalledWith({
@@ -1967,7 +1982,7 @@ describe("frontend/upgrade-tab hook", () => {
       label: "2026.7.2",
     });
     state = renderHook({});
-    await state.onConfirmApply();
+    await state.onConfirmApply(); await renderHook({}).backupPreflight.confirm();
 
     captured.onMessage({
       event: "step",
@@ -2005,7 +2020,7 @@ describe("frontend/upgrade-tab hook", () => {
       label: "latest dev (main HEAD)",
     });
     state = renderHook({});
-    await state.onConfirmApply();
+    await state.onConfirmApply(); await renderHook({}).backupPreflight.confirm();
 
     captured.onMessage({
       event: "error",
@@ -2042,7 +2057,7 @@ describe("frontend/upgrade-tab hook", () => {
       label: "2026.7.2",
     });
     state = renderHook({});
-    await state.onConfirmApply();
+    await state.onConfirmApply(); await renderHook({}).backupPreflight.confirm();
 
     captured.onMessage({
       event: "error",
@@ -2068,7 +2083,7 @@ describe("frontend/upgrade-tab hook", () => {
     });
     state = renderHook({});
 
-    await state.onConfirmApply();
+    await state.onConfirmApply(); await renderHook({}).backupPreflight.confirm();
 
     state = renderHook({});
     expect(state.operation).toBeNull();
@@ -2088,7 +2103,7 @@ describe("frontend/upgrade-tab hook", () => {
     });
     state = renderHook({});
 
-    await state.onConfirmApply();
+    await state.onConfirmApply(); await renderHook({}).backupPreflight.confirm();
 
     state = renderHook({});
     expect(state.operation).toBeNull();
@@ -2100,27 +2115,22 @@ describe("frontend/upgrade-tab hook", () => {
     );
   });
 
-  it("rehydrates an in-flight apply from lastUpdateRun on mount (U4/EV10)", async () => {
-    api.fetchOpenclawChannel.mockResolvedValue(
-      makeChannelInfo({
-        lastUpdateRun: {
-          target: { channel: "dev", devHead: true },
-          startedAt: kNow - 60_000,
-          finishedAt: null,
-          ok: null,
-          steps: [
-            { name: "preflight", status: "completed", at: kNow - 55_000 },
-            { name: "build", status: "running", at: kNow - 30_000 },
-          ],
-        },
-      }),
-    );
+  it("rehydrates an in-flight apply from its ledger on mount (U4/EV10)", async () => {
+    api.fetchOpenclawRuns.mockResolvedValue({ runs: [{
+      operationId: "apply-live", state: "running",
+      target: { channel: "dev", devHead: true }, startedAt: kNow - 60_000,
+      finishedAt: null, ok: null,
+      steps: [
+        { name: "preflight", status: "completed", at: kNow - 55_000 },
+        { name: "build", status: "running", at: kNow - 30_000 },
+      ],
+    }] });
     let state = await hydrate({
       statusData: { openclawChannel: { applyInProgress: true } },
     });
 
     // Run the rehydration effect (registered after the data-load effect).
-    harness.effects[1]();
+    harness.findEffect("resumeLedgerOperation")();
     state = renderHook({
       statusData: { openclawChannel: { applyInProgress: true } },
     });
@@ -2208,7 +2218,7 @@ describe("frontend/upgrade-tab hook", () => {
     expect(state.pendingApply.payload).toEqual({ channel: "dev", devHead: true });
     expect(state.pendingApply.intent).toBeNull();
     expect(state.pendingApply.expectLatest).toBe(false);
-    await state.onConfirmApply();
+    await state.onConfirmApply(); await renderHook({}).backupPreflight.confirm();
     expect(api.applyOpenclawVersion).toHaveBeenCalledWith({ channel: "dev", devHead: true });
   });
 
@@ -2224,7 +2234,7 @@ describe("frontend/upgrade-tab hook", () => {
     // An apply ran first (applyTargetRef now names it) and failed.
     state.onRequestApply({ payload: { channel: "stable", version: "2026.7.2" }, label: "2026.7.2" });
     state = renderHook({});
-    await state.onConfirmApply();
+    await state.onConfirmApply(); await renderHook({}).backupPreflight.confirm();
     captured.onMessage({ event: "error", data: { error: "verify failed", code: "verify_failed" } });
     state = renderHook({});
     state.onDismissOperation();
@@ -2232,7 +2242,7 @@ describe("frontend/upgrade-tab hook", () => {
     // The backup's streamed failure carries a reusableBackup the SERVER would
     // never send for a manual run — but even if it did, no offer may bind it
     // to the stale apply target.
-    await state.onBackupNow();
+    await state.onBackupNow(); await renderHook({}).backupPreflight.confirm();
     state = renderHook({});
     captured.onMessage({
       event: "error",
@@ -2276,7 +2286,7 @@ describe("frontend/upgrade-tab hook", () => {
     // The follow-up went straight to the API (refresh: false — not a forced
     // refresh, not the cached-fetch path), once.
     expect(api.fetchOpenclawCatalog).toHaveBeenCalledTimes(2);
-    expect(api.fetchOpenclawCatalog).toHaveBeenLastCalledWith({ refresh: false });
+    expect(api.fetchOpenclawCatalog).toHaveBeenLastCalledWith(expect.objectContaining({ refresh: false, signal: expect.any(AbortSignal) }));
     // Its answer was stale again: no third read is scheduled.
     await new Promise((resolve) => setTimeout(resolve, 15));
     expect(api.fetchOpenclawCatalog).toHaveBeenCalledTimes(2);
@@ -2298,7 +2308,7 @@ describe("frontend/upgrade-tab hook", () => {
     expect(state.pendingApply.intent).toBe("update");
     expect(state.pendingApply.expectLatest).toBe(true);
     expect(state.pendingApply.isDowngrade).toBe(false);
-    await state.onConfirmApply();
+    await state.onConfirmApply(); await renderHook({}).backupPreflight.confirm();
     expect(api.applyOpenclawVersion).toHaveBeenCalledWith({
       channel: "stable",
       version: "2026.7.2",
@@ -2378,7 +2388,7 @@ describe("frontend/upgrade-tab hook", () => {
     expect(state.pendingApply.isDowngrade).toBe(true);
     expect(state.pendingApply.intent).toBe("downgrade");
     expect(state.pendingApply.confirm.title).toBe("Downgrade to 2026.7.0?");
-    await state.onConfirmApply();
+    await state.onConfirmApply(); await renderHook({}).backupPreflight.confirm();
     expect(api.applyOpenclawVersion).toHaveBeenCalledWith({ channel: "stable", version: "2026.7.0", intent: "downgrade" });
   });
 
@@ -2392,11 +2402,11 @@ describe("frontend/upgrade-tab hook", () => {
     const catalogCallsBefore = api.fetchOpenclawCatalog.mock.calls.length;
     state.onUpdateToLatest();
     state = renderHook({});
-    await state.onConfirmApply();
+    await state.onConfirmApply(); await renderHook({}).backupPreflight.confirm();
     state = renderHook({});
     // One forced reload, and the confirm is back — on the server's version.
     expect(api.fetchOpenclawCatalog.mock.calls.length).toBe(catalogCallsBefore + 1);
-    expect(api.fetchOpenclawCatalog).toHaveBeenLastCalledWith({ refresh: true });
+    expect(api.fetchOpenclawCatalog).toHaveBeenLastCalledWith(expect.objectContaining({ refresh: true, signal: expect.any(AbortSignal) }));
     expect(state.pendingApply).toEqual(
       expect.objectContaining({ payload: { channel: "stable", version: "2026.7.3" }, intent: "update", expectLatest: true, staleRetried: true }),
     );
@@ -2406,7 +2416,7 @@ describe("frontend/upgrade-tab hook", () => {
 
     // The operator confirms again and the server STILL says stale.
     showToast.mockClear();
-    await state.onConfirmApply();
+    await state.onConfirmApply(); await renderHook({}).backupPreflight.confirm();
     state = renderHook({});
     expect(api.applyOpenclawVersion).toHaveBeenCalledTimes(2);
     expect(api.applyOpenclawVersion).toHaveBeenLastCalledWith(
@@ -2429,13 +2439,13 @@ describe("frontend/upgrade-tab hook", () => {
     const channelCalls = api.fetchOpenclawChannel.mock.calls.length;
     state.onRequestApply({ payload: { channel: "stable", version: "2026.7.2" }, label: "2026.7.2" });
     state = renderHook({});
-    await state.onConfirmApply();
+    await state.onConfirmApply(); await renderHook({}).backupPreflight.confirm();
     await flushAsync();
     state = renderHook({});
     expect(state.applyError).toEqual(expect.objectContaining({ code: "intent_mismatch" }));
     expect(showToast).toHaveBeenCalledWith(expect.stringContaining("does not match"), "error");
     expect(api.fetchOpenclawChannel.mock.calls.length).toBeGreaterThan(channelCalls);
-    expect(api.fetchOpenclawCatalog).toHaveBeenLastCalledWith({ refresh: true });
+    expect(api.fetchOpenclawCatalog).toHaveBeenLastCalledWith(expect.objectContaining({ refresh: true, signal: expect.any(AbortSignal) }));
     expect(state.pendingApply).toBeNull();
   });
 
@@ -2453,7 +2463,12 @@ describe("frontend/upgrade-tab hook", () => {
     const backupsCallsBefore = api.fetchOpenclawBackups.mock.calls.length;
     const runsCallsBefore = api.fetchOpenclawRuns.mock.calls.length;
 
-    const pending = state.onBackupNow();
+    await state.onBackupNow();
+    state = renderHook({});
+    expect(state.operation).toBeNull();
+    expect(state.backupPreflight.dialogOpen).toBe(true);
+    expect(api.createOpenclawBackup).not.toHaveBeenCalled();
+    const pending = state.backupPreflight.confirm();
     state = renderHook({});
     expect(state.operation).toEqual(
       expect.objectContaining({ target: { kind: "backup" }, label: "manual backup", phase: "running" }),
@@ -2484,7 +2499,7 @@ describe("frontend/upgrade-tab hook", () => {
   it("Back up now: a quick 200 completes inline; an entry refusal (409 operation_in_progress) is a toast with no card; a quick 409 backup_failed leaves a failed backup card", async () => {
     api.createOpenclawBackup.mockResolvedValueOnce({ ...kBackupDone, operationId: "op-q" });
     let state = await hydrate();
-    await state.onBackupNow();
+    await state.onBackupNow(); await renderHook({}).backupPreflight.confirm();
     state = renderHook({});
     expect(state.operation).toEqual(expect.objectContaining({ phase: "completed", operationId: "op-q" }));
     state.onDismissOperation();
@@ -2493,7 +2508,7 @@ describe("frontend/upgrade-tab hook", () => {
     api.createOpenclawBackup.mockRejectedValueOnce(
       Object.assign(new Error("An OpenClaw update or backup is already running."), { code: "operation_in_progress" }),
     );
-    await state.onBackupNow();
+    await state.onBackupNow(); await renderHook({}).backupPreflight.confirm();
     state = renderHook({});
     expect(state.operation).toBeNull();
     expect(showToast).toHaveBeenCalledWith("An OpenClaw update or backup is already running.", "error");
@@ -2501,7 +2516,7 @@ describe("frontend/upgrade-tab hook", () => {
     api.createOpenclawBackup.mockRejectedValueOnce(
       Object.assign(new Error("The pre-update backup failed — no space left"), { code: "backup_failed", operationId: "op-f", hint: "Fix the cause and retry the backup." }),
     );
-    await state.onBackupNow();
+    await state.onBackupNow(); await renderHook({}).backupPreflight.confirm();
     state = renderHook({});
     expect(state.operation).toEqual(
       expect.objectContaining({ phase: "failed", operationId: "op-f", target: { kind: "backup" } }),
@@ -2512,7 +2527,9 @@ describe("frontend/upgrade-tab hook", () => {
   it("a second click while a backup runs is a no-op — one POST", async () => {
     api.createOpenclawBackup.mockImplementation(() => new Promise(() => {}));
     let state = await hydrate();
-    state.onBackupNow();
+    await state.onBackupNow();
+    state = renderHook({});
+    state.backupPreflight.confirm();
     state = renderHook({});
     state.onBackupNow();
     state.onBackupNow();
@@ -2528,14 +2545,14 @@ describe("frontend/upgrade-tab hook", () => {
     let state = await hydrate();
     state.onRequestApply({ payload: { channel: "stable", version: "2026.7.2" }, label: "2026.7.2" });
     state = renderHook({});
-    await state.onConfirmApply();
+    await state.onConfirmApply(); await renderHook({}).backupPreflight.confirm();
     state = renderHook({});
     // A quick 409 lands as applyError (no operation card) — Retry backup is
     // offered there too and remembers the in-flight target.
     expect(state.operation).toBeNull();
     expect(state.applyError).toEqual(expect.objectContaining({ code: "backup_failed" }));
 
-    await state.onRetryBackup();
+    await state.onRetryBackup(); await renderHook({}).backupPreflight.confirm();
     state = renderHook({});
     expect(api.createOpenclawBackup).toHaveBeenCalledTimes(1);
     expect(state.applyError).toBeNull();
@@ -2554,7 +2571,7 @@ describe("frontend/upgrade-tab hook", () => {
     expect(state.pendingApply).toEqual(
       expect.objectContaining({ payload: { channel: "stable", version: "2026.7.2" }, intent: "update", isDowngrade: false }),
     );
-    await state.onConfirmApply();
+    await state.onConfirmApply(); await renderHook({}).backupPreflight.confirm();
     expect(api.applyOpenclawVersion).toHaveBeenLastCalledWith({ channel: "stable", version: "2026.7.2", intent: "update" });
   });
 
@@ -2569,13 +2586,13 @@ describe("frontend/upgrade-tab hook", () => {
     let state = await hydrate();
     state.onRequestApply({ payload: { channel: "stable", version: "2026.7.0" }, label: "2026.7.0" });
     state = renderHook({});
-    await state.onConfirmApply();
+    await state.onConfirmApply(); await renderHook({}).backupPreflight.confirm();
     captured.onMessage({ event: "error", data: { error: "The pre-update backup failed", code: "backup_failed" } });
     state = renderHook({});
     expect(state.operation.phase).toBe("failed");
     expect(state.operation.intent).toBe("downgrade");
 
-    await state.onRetryBackup();
+    await state.onRetryBackup(); await renderHook({}).backupPreflight.confirm();
     state = renderHook({});
     expect(state.operation.retryUpdate).toEqual({ payload: { channel: "stable", version: "2026.7.0" }, label: "2026.7.0", intent: "downgrade" });
 
@@ -2586,10 +2603,10 @@ describe("frontend/upgrade-tab hook", () => {
     );
     state.onDismissOperation();
     state = renderHook({});
-    await state.onBackupNow();
+    await state.onBackupNow(); await renderHook({}).backupPreflight.confirm();
     state = renderHook({});
     expect(state.operation.phase).toBe("failed");
-    await state.onRetryBackup();
+    await state.onRetryBackup(); await renderHook({}).backupPreflight.confirm();
     state = renderHook({});
     expect(api.createOpenclawBackup).toHaveBeenCalledTimes(3);
     expect(state.operation.phase).toBe("completed");
@@ -2604,7 +2621,7 @@ describe("frontend/upgrade-tab hook", () => {
     });
     let state = await hydrate();
     // Effect #1 is the rehydration effect.
-    harness.effects[1]();
+    harness.findEffect("resumeLedgerOperation")();
     state = renderHook({});
     expect(state.operation).toEqual(
       expect.objectContaining({ operationId: "op-r", resumed: true, target: { kind: "backup" }, phase: "running", label: "manual backup" }),
@@ -2635,7 +2652,7 @@ describe("frontend/upgrade-tab hook", () => {
     state.onCheckNow();
     await flushAsync();
 
-    expect(api.fetchOpenclawCatalog).toHaveBeenLastCalledWith({ refresh: true });
+    expect(api.fetchOpenclawCatalog).toHaveBeenLastCalledWith(expect.objectContaining({ refresh: true, signal: expect.any(AbortSignal) }));
   });
 
   it("marks the running version good and reloads channel state (U7)", async () => {
@@ -2855,7 +2872,7 @@ describe("frontend/upgrade-tab hook", () => {
       label: "latest dev (main HEAD)",
     });
     state = renderHook({});
-    await state.onConfirmApply();
+    await state.onConfirmApply(); await renderHook({}).backupPreflight.confirm();
 
     captured.onMessage({
       event: "error",
@@ -3022,7 +3039,7 @@ describe("frontend/upgrade-tab hook", () => {
     expect(state.loadingCatalog).toBe(false);
     expect(api.fetchOpenclawCatalog).toHaveBeenCalledTimes(1);
     // Mount revalidation never force-bypasses the server catalog cache.
-    expect(api.fetchOpenclawCatalog).toHaveBeenCalledWith({ refresh: false });
+    expect(api.fetchOpenclawCatalog).toHaveBeenCalledWith(expect.objectContaining({ refresh: false, signal: expect.any(AbortSignal) }));
 
     resolveFreshCatalog({ ok: true, catalog: freshCatalog });
     await flushAsync();
@@ -3039,7 +3056,7 @@ describe("frontend/upgrade-tab hook", () => {
 
     // refresh:true always hits the network, never the SWR cache.
     expect(api.fetchOpenclawCatalog).toHaveBeenCalledTimes(2);
-    expect(api.fetchOpenclawCatalog).toHaveBeenLastCalledWith({ refresh: true });
+    expect(api.fetchOpenclawCatalog).toHaveBeenLastCalledWith(expect.objectContaining({ refresh: true, signal: expect.any(AbortSignal) }));
     // ...and the result re-seeds the cache for the next mount.
     expect(getCached("/api/openclaw/catalog")).toEqual({
       ok: true,
@@ -3129,13 +3146,13 @@ describe("frontend/upgrade-tab hook", () => {
         isDowngrade: false,
       });
       state = renderHook({});
-      await state.onConfirmApply();
+      await state.onConfirmApply(); await renderHook({}).backupPreflight.confirm();
       state = renderHook({});
       expect(state.operation?.phase).toBe("restarting");
 
       // Effect #3 in hook declaration order is the upgradeRestartActive
       // publish (mount load, rehydration, and the elapsed tick precede it).
-      const cleanup = harness.effects[3]();
+      const cleanup = harness.findEffect("upgradeRestartActive")();
       expect(gatewayShellStore.get().upgradeRestartActive).toBe(true);
 
       // Unmount (or leaving the restarting phase) clears the announcement —
@@ -3155,12 +3172,14 @@ describe("frontend/upgrade-tab repair (2.3)", () => {
 
   const renderHook = (props = {}) => {
     harness.beginRender();
-    return useUpgradeTab(props);
+    const state = useUpgradeTab(props);
+    harness.mountReads();
+    return state;
   };
 
   const hydrate = async (props = {}) => {
     let state = renderHook(props);
-    harness.effects[0]();
+    harness.findEffect("loadChannel({ fromCache")();
     await flushAsync();
     state = renderHook(props);
     return state;
@@ -3279,7 +3298,7 @@ describe("frontend/upgrade-tab repair (2.3)", () => {
     expect(treeText(failed)).toContain("Repair failed");
   });
 
-  it("onRunRepair streams the repair and clears the card on done (no restart poll)", async () => {
+  it("onRunRepair streams the repair and completes the card in place (no restart poll)", async () => {
     let captured = null;
     api.subscribeOpenclawApplyEvents.mockImplementation((options) => {
       captured = options;
@@ -3301,7 +3320,7 @@ describe("frontend/upgrade-tab repair (2.3)", () => {
 
     captured.onMessage({ event: "done", data: {} });
     state = renderHook({});
-    expect(state.operation).toBeNull();
+    expect(state.operation.phase).toBe("completed");
     expect(showToast).toHaveBeenCalledWith("Repair completed", "success");
   });
 
@@ -3365,7 +3384,7 @@ describe("frontend/upgrade-tab repair (2.3)", () => {
       label: "2026.7.3-beta.1",
     });
     state = renderHook({});
-    await state.onConfirmApply();
+    await state.onConfirmApply(); await renderHook({}).backupPreflight.confirm();
     captured.onMessage({
       event: "error",
       data: { error: "activation failed" },
@@ -3374,7 +3393,7 @@ describe("frontend/upgrade-tab repair (2.3)", () => {
     expect(state.operation.phase).toBe("failed");
 
     api.applyOpenclawVersion.mockClear();
-    await state.onRetryApply();
+    await state.onRetryApply(); await renderHook({}).backupPreflight.confirm();
     // The re-stage carries the failed operation's own declared direction.
     expect(api.applyOpenclawVersion).toHaveBeenCalledWith({
       channel: "beta",
@@ -3400,7 +3419,7 @@ describe("frontend/upgrade-tab repair (2.3)", () => {
       label: "2026.7.2",
     });
     state = renderHook({});
-    await state.onConfirmApply();
+    await state.onConfirmApply(); await renderHook({}).backupPreflight.confirm();
 
     // Running: dismiss is a no-op.
     state = renderHook({});
@@ -3445,12 +3464,14 @@ describe("frontend/upgrade-tab gateway-hold recovery", () => {
 
   const renderHook = (props = {}) => {
     harness.beginRender();
-    return useUpgradeTab(props);
+    const state = useUpgradeTab(props);
+    harness.mountReads();
+    return state;
   };
 
   const hydrate = async (props = {}) => {
     let state = renderHook(props);
-    harness.effects[0]();
+    harness.findEffect("loadChannel({ fromCache")();
     await flushAsync();
     state = renderHook(props);
     return state;
@@ -3689,11 +3710,13 @@ describe("frontend/upgrade-tab reconcile-installed action", () => {
   };
   const renderHook = (props = {}) => {
     harness.beginRender();
-    return useUpgradeTab(props);
+    const state = useUpgradeTab(props);
+    harness.mountReads();
+    return state;
   };
   const hydrate = async (props = {}) => {
     let state = renderHook(props);
-    harness.effects[0]();
+    harness.findEffect("loadChannel({ fromCache")();
     await flushAsync();
     state = renderHook(props);
     return state;

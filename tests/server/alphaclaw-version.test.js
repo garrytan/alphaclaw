@@ -46,6 +46,9 @@ const createService = ({
     readOpenclawVersion,
     fetchImpl: fetchMock,
     fsImpl,
+    managedAttemptStore: require("../../lib/server/managed-update-attempts").createManagedUpdateAttempts({
+      managedDir: fs.mkdtempSync(path.join(os.tmpdir(), "version-managed-attempt-")),
+    }),
     ...(drain ? { drain } : {}),
     ...(markExiting ? { markExiting } : {}),
   });
@@ -355,7 +358,7 @@ describe("server/alphaclaw-version", () => {
       expect.objectContaining({
         ok: true,
         managedUpdate: true,
-        restarting: true,
+        restarting: false,
         latestVersion: "0.8.7",
         latestOpenclawVersion: "2026.4.10",
       }),
@@ -823,7 +826,7 @@ describe("server/alphaclaw-version", () => {
         expect(options.headers.Authorization).toBe("Bearer gh-token");
         return createFetchResponse({ body: { sha: "abc123" } });
       }
-      return createFetchResponse({ body: { ok: true } });
+      return createFetchResponse({ body: { ok: true, phase: "queued", noop: false } });
     });
     const { service } = createService({
       env: {
@@ -858,7 +861,8 @@ describe("server/alphaclaw-version", () => {
 
     expect(result.status).toBe(502);
     expect(result.body.ok).toBe(false);
-    expect(result.body.error).toBe("bridge unreachable");
+    expect(result.body.code).toBe("managed_update_preflight_failed");
+    expect(result.body.error).toContain("No update was submitted");
     expect(result.body.updateStrategy).toEqual(
       expect.objectContaining({ action: "managed-update" }),
     );

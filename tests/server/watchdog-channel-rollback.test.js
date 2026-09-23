@@ -438,9 +438,9 @@ describe("server/watchdog release-channel rollback hooks", () => {
     // Below the escalation threshold: still no rollback and no doctor run.
     await vi.advanceTimersByTimeAsync(60_000);
     expect(hooks.requestRollback).not.toHaveBeenCalled();
-    expect(clawCmd).not.toHaveBeenCalledWith("doctor --fix --yes", {
+    expect(clawCmd).not.toHaveBeenCalledWith("doctor --fix --yes", expect.objectContaining({
       quiet: true,
-    });
+    }));
 
     await vi.advanceTimersByTimeAsync(kOpenclawDegradedRollbackMs);
     expect(hooks.requestRollback).toHaveBeenCalledWith({
@@ -449,9 +449,9 @@ describe("server/watchdog release-channel rollback hooks", () => {
     });
     // Even with auto-repair enabled, an in-window non-pin build must never get
     // an unattended `doctor --fix`.
-    expect(clawCmd).not.toHaveBeenCalledWith("doctor --fix --yes", {
+    expect(clawCmd).not.toHaveBeenCalledWith("doctor --fix --yes", expect.objectContaining({
       quiet: true,
-    });
+    }));
     watchdog.stop();
   });
 
@@ -671,7 +671,9 @@ describe("server/watchdog release-channel rollback hooks", () => {
     watchdog.onGatewayLaunch({ startedAt: Date.now() - 60_000 });
     await vi.advanceTimersByTimeAsync(10_000);
 
-    expect(clawCmd).toHaveBeenCalledWith("doctor --fix --yes", { quiet: true, timeoutMs: 600000 });
+    expect(clawCmd).toHaveBeenCalledWith("doctor --fix --yes", {
+      quiet: true, timeoutMs: 600000, signal: expect.any(AbortSignal),
+    });
     expect(hooks.requestRollback).not.toHaveBeenCalled();
     watchdog.stop();
   });
@@ -723,7 +725,9 @@ describe("server/watchdog release-channel rollback hooks", () => {
     await flushMicrotasks();
     await flushMicrotasks();
 
-    expect(clawCmd).toHaveBeenCalledWith("doctor --fix --yes", { quiet: true, timeoutMs: 600000 });
+    expect(clawCmd).toHaveBeenCalledWith("doctor --fix --yes", {
+      quiet: true, timeoutMs: 600000, signal: expect.any(AbortSignal),
+    });
   });
 
   it("bypasses the exit-78 step-aside probe once a rollback is already requested", async () => {

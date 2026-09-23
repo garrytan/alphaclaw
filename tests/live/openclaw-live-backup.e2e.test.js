@@ -45,6 +45,7 @@ const {
   readRunBackupRecord,
 } = require("./live-backup-harness");
 const { kLiveEnabled, mkTemp, repoOpenclawBin } = liveHelpers;
+const { telemetryDirectory } = require("../../lib/server/gateway-memory/telemetry-protocol");
 
 const describeLive = kLiveEnabled ? describe : describe.skip;
 
@@ -145,6 +146,57 @@ describeLive("LIVE openclaw backup create --output contract (real pinned CLI)", 
       expect(fs.statSync(outputFile).size).toBe(sizeBefore);
     },
   );
+
+  it("archives successfully while telemetry publishes and its producer processes exit", {
+    timeout: kContractTestTimeoutMs,
+  }, async () => {
+    const stateDir = cliEnv.OPENCLAW_STATE_DIR;
+    const outputFile = path.join(scratchDir, `telemetry-${crypto.randomUUID().slice(0, 8)}.tar.gz`);
+    let running = true;
+    let ready;
+    const firstPublication = new Promise((resolve) => { ready = resolve; });
+    let producers = 0;
+    let sampleCount = 0;
+    const churn = (async () => {
+      do {
+        const output = await new Promise((resolve, reject) => {
+          const child = execFile(process.execPath, [
+            path.join(__dirname, "gateway-telemetry-fixture.js"), stateDir,
+          ], { env: liveHelpers.scrubTestRunnerEnv(), timeout: 5_000, encoding: "utf8" },
+          (error, stdout, stderr) => {
+            if (error) reject(new Error(`telemetry fixture failed: ${error.message}\n${stderr}`));
+            else resolve(stdout);
+          });
+          child.stdout.on("data", (chunk) => { if (String(chunk).includes("ready")) ready(); });
+        });
+        producers += 1;
+        sampleCount += Number(/samples:(\d+)/.exec(output)?.[1] || 0);
+      } while (running);
+    })();
+    // If a publisher fails before ready, fail promptly instead of waiting for
+    // the test timeout. Keep the rejection observed during the CLI await too.
+    const failedChurn = churn.then(() => {}, (error) => { throw error; });
+    failedChurn.catch(() => {});
+    let result;
+    try {
+      await Promise.race([firstPublication, failedChurn]);
+      result = await execCli(["backup", "create", "--output", outputFile, "--verify"], cliEnv);
+    } finally {
+      running = false;
+      await churn;
+    }
+    expect(result.code, result.output).toBe(0);
+    expect(result.output).toMatch(/Archive verification: passed/);
+    expect(producers).toBeGreaterThan(0);
+    expect(sampleCount).toBeGreaterThan(1);
+    expect(fs.readdirSync(telemetryDirectory(stateDir))).toEqual([]);
+    const entries = await new Promise((resolve, reject) => {
+      execFile("tar", ["-tzf", outputFile], { encoding: "utf8", maxBuffer: kExecMaxBuffer },
+        (error, stdout) => error ? reject(error) : resolve(stdout));
+    });
+    expect(entries).toContain("openclaw.json");
+    expect(entries).not.toMatch(/gateway-memory|\/tmp\/alphaclaw\//);
+  });
 
   it(
     "Case C: an existing-directory --output gets a timestamped archive INSIDE it",

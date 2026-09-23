@@ -229,6 +229,7 @@ describe("server/watchdog gateway hardening (e2e)", () => {
     expect(clawCmd).toHaveBeenCalledWith("doctor --fix --yes", {
       quiet: true,
       timeoutMs: 600000,
+      signal: expect.any(AbortSignal),
     });
     expect(launchGatewayProcess).toHaveBeenCalledTimes(1);
 
@@ -1025,6 +1026,8 @@ describe("server/watchdog gateway hardening (e2e)", () => {
         leaseMs: 30,
         logger: { warn: () => {} },
       });
+      const tryAcquire = lock.tryAcquire;
+      lock.tryAcquire = (kind, options) => tryAcquire(kind, { ...options, leaseMs: 30 });
       const configMedic = {
         isEnabled: () => true,
         run: vi.fn(async () => {

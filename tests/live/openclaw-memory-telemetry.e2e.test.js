@@ -6,6 +6,7 @@ const { kLiveEnabled, mkTemp, scrubTestRunnerEnv } = require("./live-helpers");
 const { withOpenclawStartupEnv } = require("../../lib/server/openclaw-runtime-env");
 const { getProcessIdentity } = require("../../lib/server/gateway-memory/process-identity");
 const { readGatewayTelemetry } = require("../../lib/server/gateway-memory/telemetry");
+const { telemetryDirectory } = require("../../lib/server/gateway-memory/telemetry-protocol");
 
 // Uses the installed/pinned package, never a moving dist-tag or network install.
 // Kept in the opt-in tier because it starts a real OpenClaw gateway.
@@ -47,7 +48,7 @@ describeLive("live: pinned gateway memory instrumentation", () => {
       let workerPid;
       const deadline = Date.now() + 45000;
       while (Date.now() < deadline && !exited) {
-        const directory = path.join(stateDir, ".alphaclaw", "gateway-memory");
+        const directory = telemetryDirectory(stateDir);
         const files = fs.existsSync(directory) ? fs.readdirSync(directory) : [];
         for (const filename of files) {
           const match = /^(\d+)-\d+\.json$/.exec(filename);

@@ -65,6 +65,12 @@ describe("getStatus() additive fields", () => {
     expect(status.supervisionMode).toBe("detached");
     expect(status.readiness).toBe("unknown");
     expect(status.readinessReason).toBe(null);
+    // #87: the /readyz phase the last consumed body named and the transport
+    // kind of the last probe — enums, null until a probe ran.
+    expect(status.readinessStatus).toBe(null);
+    expect(status.readinessProbe).toBe(null);
+    expect(status.eventLoopDegraded).toBe(false);
+    expect(status.readyzFailing).toEqual([]);
     expect(status.replacementPending).toBe(null);
     expect(status.lastRepairVerdict).toBe(null);
     expect(status.degradedRepairThreshold).toBe(3);
@@ -247,6 +253,53 @@ describe("getStatus() additive fields", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("#87 exposes readinessStatus/readinessProbe as enums and stop() clears the whole readiness axis (readiness, reason, status, probe, eventLoopDegraded, readyzFailing)", async () => {
+    const fetchImpl = vi.fn(async (url) => {
+      if (String(url).includes("readyz")) {
+        return {
+          ok: false,
+          status: 503,
+          text: async () =>
+            JSON.stringify({
+              ready: false,
+              status: "starting",
+              failing: ["telegram"],
+              eventLoop: { degraded: true, reasons: ["cpu"] },
+            }),
+        };
+      }
+      return { ok: true, status: 200, text: async () => JSON.stringify({ ok: true }) };
+    });
+    const { watchdog } = createHarness({ fetchImpl });
+    watchdog.onGatewayLaunch({ pid: 111, startedAt: Date.now() });
+    await flushMicrotasks();
+    await flushMicrotasks();
+    const observed = watchdog.getStatus();
+    expect(observed).toMatchObject({
+      health: "healthy",
+      readiness: "not_ready",
+      readinessReason: "starting",
+      readinessStatus: "starting",
+      readinessProbe: "ok",
+      eventLoopDegraded: true,
+      readyzFailing: ["telegram"],
+    });
+    // Repeated reads are byte-identical (SSE frame-dedupe safety): enums only.
+    expect(JSON.stringify(watchdog.getStatus().readinessStatus)).toBe(
+      JSON.stringify(observed.readinessStatus),
+    );
+    watchdog.stop();
+    const stopped = watchdog.getStatus();
+    expect(stopped).toMatchObject({
+      readiness: "unknown",
+      readinessReason: null,
+      readinessStatus: null,
+      readinessProbe: null,
+      eventLoopDegraded: false,
+      readyzFailing: [],
+    });
   });
 
   it("derives stabilization/doctor-fix suppression and rollback deadline from the ladder predicate", () => {

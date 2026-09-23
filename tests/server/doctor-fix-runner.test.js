@@ -73,6 +73,7 @@ describe("server/doctor-fix-runner", () => {
       args: ["doctor", "--fix", "--yes"],
       env: kGatewayEnv,
       timeoutMs: 10 * 60 * 1000,
+      killGraceMs: 1000,
     });
   });
 
@@ -89,6 +90,7 @@ describe("server/doctor-fix-runner", () => {
       args: [bin, "doctor", "--fix", "--yes"],
       env: kGatewayEnv,
       timeoutMs: 10 * 60 * 1000,
+      killGraceMs: 1000,
     });
     // Still inside the restore guard, still with the rolling backup.
     expect(doctorGuard.withDoctorRestoreGuard).toHaveBeenCalledTimes(1);

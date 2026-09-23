@@ -252,6 +252,20 @@ describeContainer("container E2E: boot durability — legacy pidfile TID collisi
             fs.writeFileSync(path.join(dir, `${name}-logs.txt`), logs);
           } catch {}
         }
+        // The watchdog's incident bundles carry what the container log does
+        // not: the gateway's stderr tail, the medic's `doctor --fix` output
+        // and verdict. 2026-09-22's journeys died in "doctor_fix failed" with
+        // the reason reachable only inside INCIDENT-*.md — capture them.
+        for (const name of [kContainerA, kContainerB]) {
+          try {
+            const { stdout } = await execInContainer(name, [
+              "sh",
+              "-c",
+              'for f in /data/claude-code-local/workspace/INCIDENT-*.md; do [ -f "$f" ] || continue; echo "===== $f"; tail -c 60000 "$f"; echo; done',
+            ]);
+            if (stdout.trim()) fs.writeFileSync(path.join(dir, `${name}-incidents.md`), stdout);
+          } catch {}
+        }
         try {
           const { stdout } = await execInContainer(kContainerB, ["cat", kBootReportPath]);
           fs.writeFileSync(path.join(dir, `${kContainerB}-boot-report.json`), stdout);

@@ -18,6 +18,7 @@ const {
   kDefaultLogTailLines,
   collectDiagnose,
   resolveStateDir,
+  kWatchdogStatusFields,
 } = require("../../lib/server/diagnose/collect");
 const { renderDiagnoseMarkdown, kDiagnoseSectionTitles, iso } = require("../../lib/server/diagnose/render");
 const { createOpenclawReleaseChannelStore } = require("../../lib/server/openclaw-release-channel");
@@ -703,6 +704,11 @@ describe("diagnose: live seams (server path)", () => {
       versionMismatch: { expected: "2026.9.2", running: "2026.7.1-2", source: "boot", detectedAt: kNow },
       lastExit: { code: 1, signal: null, cause: "state_schema_too_new" },
       repairAttempts: 2,
+      // #87 readiness axis enums ride the bundle beside readiness/readinessReason.
+      readiness: "not_ready",
+      readinessReason: "secrets",
+      readinessStatus: "starting",
+      readinessProbe: "ok",
       // Not for the bundle: history/tails the console renders.
       crashTimestamps: [1, 2, 3],
       recentEvents: [{ huge: true }],
@@ -721,6 +727,13 @@ describe("diagnose: live seams (server path)", () => {
     });
     expect(bundle.mode).toBe("server");
     expect(bundle.sections.watchdog).toMatchObject({ source: "live", data: { lifecycle: "running", health: "degraded", degradedReason: "version_mismatch", repairAttempts: 2 } });
+    expect(bundle.sections.watchdog.data).toMatchObject({
+      readiness: "not_ready",
+      readinessReason: "secrets",
+      readinessStatus: "starting",
+      readinessProbe: "ok",
+    });
+    expect(kWatchdogStatusFields).toEqual(expect.arrayContaining(["readiness", "readinessReason", "readinessStatus", "readinessProbe"]));
     expect(bundle.sections.watchdog.data.crashTimestamps).toBeUndefined();
     expect(bundle.sections.watchdog.data.recentEvents).toBeUndefined();
     expect(bundle.sections.channelState.source).toBe("live");

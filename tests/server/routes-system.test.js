@@ -1088,6 +1088,44 @@ describe("server/routes/system", () => {
     expect(deps.alphaclawVersionService.getVersionStatus).toHaveBeenCalledWith(true);
   });
 
+  it.each(["member", "agent", "admin"])("managed resolution permits only human admins: %s", async (actor) => {
+    const deps = createSystemDeps();
+    deps.alphaclawVersionService.resolveManagedUpdate = vi.fn(() => ({ status: 200, body: { ok: true } }));
+    const app = express();
+    app.use(express.json());
+    app.use((req, res, next) => {
+      req.alphaclawIdentity = { role: actor === "member" ? "member" : "admin" };
+      if (actor === "agent") req.alphaclawActor = { type: "agent" };
+      next();
+    });
+    registerSystemRoutes({ app, ...deps });
+    const result = await request(app).post("/api/alphaclaw/update/attempt-1/resolve")
+      .send({ confirmProviderChecked: true, outcome: "deployed" });
+    expect(result.status).toBe(actor === "admin" ? 200 : 403);
+    expect(deps.alphaclawVersionService.resolveManagedUpdate).toHaveBeenCalledTimes(actor === "admin" ? 1 : 0);
+    expect(deps.alphaclawVersionService.updateAlphaclaw).not.toHaveBeenCalled();
+    expect(deps.alphaclawVersionService.restartProcess).not.toHaveBeenCalled();
+  });
+
+  it("version, update and resolution share the fail-closed managed-record envelope", async () => {
+    const deps = createSystemDeps();
+    const error = Object.assign(new Error("invalid record"), { code: "MANAGED_UPDATE_ATTEMPT_UNREADABLE",
+      filePath: "/private/.alphaclaw/managed-update-attempt.json" });
+    deps.alphaclawVersionService.getVersionStatus.mockRejectedValue(error);
+    deps.alphaclawVersionService.updateAlphaclaw.mockRejectedValue(error);
+    deps.alphaclawVersionService.resolveManagedUpdate = vi.fn(() => { throw error; });
+    const app = express();
+    app.use(express.json());
+    app.use((req, res, next) => { req.alphaclawIdentity = { role: "admin" }; next(); });
+    registerSystemRoutes({ app, ...deps });
+    for (const [method, url] of [["get", "/api/alphaclaw/version"], ["post", "/api/alphaclaw/update"],
+      ["post", "/api/alphaclaw/update/attempt-1/resolve"]]) {
+      const result = await request(app)[method](url).send({ confirmProviderChecked: true, outcome: "not_deployed" });
+      expect(result.status).toBe(503);
+      expect(result.body).toMatchObject({ code: "config_unreadable", file: "managed-update-attempt.json" });
+    }
+  });
+
   it("returns update result and schedules restart on POST /api/alphaclaw/update", async () => {
     vi.useFakeTimers();
     const deps = createSystemDeps();

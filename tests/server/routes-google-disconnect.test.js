@@ -133,9 +133,9 @@ describe("server/routes POST /api/google/disconnect (PR #35 clientArg regression
     expect(stopCalls).toEqual([{ accountId: "acc1" }]);
   });
 
-  it("continues the disconnect when Gmail watch stop throws (best-effort)", async () => {
+  it("keeps the disabled account for retry when Gmail watch stop throws", async () => {
     global.fetch = okFetch;
-    const { app, statePath } = build({
+    const { app, statePath, gogCalls } = build({
       accounts: [baseAccount()],
       stopGmailWatch: async () => {
         throw new Error("watch stop boom");
@@ -144,7 +144,43 @@ describe("server/routes POST /api/google/disconnect (PR #35 clientArg regression
 
     const res = await request(app).post("/api/google/disconnect").send({ accountId: "acc1" });
 
-    expect(res.body.ok).toBe(true);
+    expect(res.body).toMatchObject({ ok: false, retryable: true, accountId: "acc1" });
+    expect(readAccounts(statePath)).toHaveLength(1);
+    expect(readAccounts(statePath)[0].gmailWatch).toMatchObject({ enabled: false, remoteOperation: { kind: "disconnect", status: "failed" } });
+    expect(gogCalls).toHaveLength(0);
+  });
+
+  it("refuses unreadable account state before watch teardown or revocation", async () => {
+    const stopGmailWatch = vi.fn();
+    const { app, statePath, gogCalls } = build({ accounts: [baseAccount()], stopGmailWatch });
+    fs.writeFileSync(statePath, '{"accounts":');
+    const response = await request(app).post("/api/google/disconnect").send({ accountId: "acc1" });
+    expect(response.status).toBe(409);
+    expect(response.body.code).toBe("config_unreadable");
+    expect(fs.readFileSync(statePath, "utf8")).toBe('{"accounts":');
+    expect(stopGmailWatch).not.toHaveBeenCalled();
+    expect(gogCalls).toHaveLength(0);
+  });
+
+  it("joins concurrent disconnect requests through one stop, revoke, and removal", async () => {
+    global.fetch = vi.fn(okFetch);
+    let release;
+    let entered;
+    const began = new Promise((resolve) => { entered = resolve; });
+    const gate = new Promise((resolve) => { release = resolve; });
+    const stopGmailWatch = vi.fn(() => { entered(); return gate; });
+    const { app, statePath, gogCalls } = build({ accounts: [baseAccount()], stopGmailWatch });
+    const first = request(app).post("/api/google/disconnect").send({ accountId: "acc1" }).then((res) => res);
+    await began;
+    const second = request(app).post("/api/google/disconnect").send({ accountId: "acc1" }).then((res) => res);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(readAccounts(statePath)[0].gmailWatch).toMatchObject({ enabled: false, remoteOperation: { kind: "disconnect", status: "pending" } });
+    expect(stopGmailWatch).toHaveBeenCalledTimes(1);
+    release({ ok: true });
+    const responses = await Promise.all([first, second]);
+    expect(responses.map((res) => res.body)).toEqual([{ ok: true }, { ok: true }]);
+    expect(gogCalls.filter((command) => command.includes("tokens export"))).toHaveLength(1);
+    expect(global.fetch).toHaveBeenCalledTimes(1);
     expect(readAccounts(statePath)).toHaveLength(0);
   });
 
@@ -331,15 +367,16 @@ describe("server/routes POST /api/google/disconnect (PR #35 clientArg regression
     expect(remaining[0].id).toBe("acc2");
   });
 
-  it("surfaces a warning when gog auth remove fails but state removal proceeds", async () => {
+  it("retains the disabled account for retry when gog auth remove fails", async () => {
     global.fetch = okFetch;
     const { app, statePath } = build({ accounts: [baseAccount()], removeOk: false });
 
     const res = await request(app).post("/api/google/disconnect").send({ accountId: "acc1" });
 
-    expect(res.body.ok).toBe(true);
-    expect(res.body.warning).toMatch(/credential entry may remain/);
-    expect(readAccounts(statePath)).toHaveLength(0);
+    expect(res.body).toMatchObject({ ok: false, retryable: true, code: "google_disconnect_failed" });
+    expect(res.body.error).toMatch(/gog auth remove failed/);
+    expect(readAccounts(statePath)).toHaveLength(1);
+    expect(readAccounts(statePath)[0].gmailWatch).toMatchObject({ enabled: false, remoteOperation: { kind: "disconnect", status: "failed" } });
   });
 
   it("removes the account without revocation when the staged file has no refresh_token", async () => {
