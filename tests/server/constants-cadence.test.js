@@ -462,9 +462,11 @@ describe("backup envelope relations (issue #79 (f), Codex 16)", () => {
       kOpenclawBackupPostQuiesceReadyTimeoutMs +
       kOpenclawBackupPostQuiesceSettleMs;
     expect(totalMs).toBeLessThanOrEqual(kOpenclawBackupPhaseEnvelopeMs);
-    // Documented values: 2 + 1.5 + 7 + 8 + 1 + 1/3 + 1/6 minutes = 20 ≤ 25.
+    // The normal five-minute readiness budget plus settling still fits.
     expect(kOpenclawBackupDiagnosisBudgetMs).toBe(2 * 60_000);
-    expect(totalMs).toBe(20 * 60_000);
+    expect(kOpenclawBackupPostQuiesceReadyTimeoutMs).toBe(constants.kGatewayRestartReadyTimeoutMs);
+    expect(kOpenclawBackupPostQuiesceReadyTimeoutMs).toBe(5 * 60_000);
+    expect(totalMs).toBe(24 * 60_000 + 40_000);
     expect(kOpenclawBackupPhaseEnvelopeMs).toBe(25 * 60_000);
   });
 
@@ -508,7 +510,7 @@ describe("backup envelope relations (issue #79 (f), Codex 16)", () => {
       expect(pin.relation).toContain("≤ phaseEnvelopeMs");
     }
     const [quiesced, live] = pins;
-    expect(quiesced.totalMs).toBe(20 * 60_000);
+    expect(quiesced.totalMs).toBe(24 * 60_000 + 40_000);
     expect(quiesced.terms).toEqual({
       diagnosisBudgetMs: constants.kOpenclawBackupDiagnosisBudgetMs,
       quiesceLockTimeoutMs: constants.kOpenclawBackupQuiesceLockTimeoutMs,
@@ -518,11 +520,11 @@ describe("backup envelope relations (issue #79 (f), Codex 16)", () => {
       postQuiesceReadyTimeoutMs: constants.kOpenclawBackupPostQuiesceReadyTimeoutMs,
       postQuiesceSettleMs: constants.kOpenclawBackupPostQuiesceSettleMs,
     });
-    expect(live.totalMs).toBe(21 * 60_000);
+    expect(live.totalMs).toBe(25 * 60_000);
     expect(live.terms).toEqual({
-      liveAttempts: 2,
-      cliTimeoutMs: constants.kOpenclawBackupTimeoutMs,
+      phaseEnvelopeMs: constants.kOpenclawBackupPhaseEnvelopeMs,
       usableCheckReserveMs: constants.kOpenclawBackupUsableCheckReserveMs,
+      upstreamCleanupReserveMs: 10_000,
     });
     // The default argument IS the shared default table.
     expect(ladder.backupBudgetPins(ladder.kDefaultBackupBudget)).toEqual(pins);
@@ -530,17 +532,17 @@ describe("backup envelope relations (issue #79 (f), Codex 16)", () => {
 
   it("backupBudgetPins fails closed on a tuning override that breaks a relation or drops a term", () => {
     const base = ladder.kDefaultBackupBudget;
-    const [, liveThree] = ladder.backupBudgetPins({ ...base, liveAttempts: 3 });
+    const [, liveThree] = ladder.backupBudgetPins({ ...base, usableCheckReserveMs: 26 * 60_000 });
     expect(liveThree.ok).toBe(false);
-    expect(liveThree.totalMs).toBe(31 * 60_000);
+    expect(liveThree.totalMs).toBe(26 * 60_000 + base.upstreamCleanupReserveMs);
     const [quiescedFat] = ladder.backupBudgetPins({ ...base, offlineCopyBudgetMs: 14 * 60_000 });
     expect(quiescedFat.ok).toBe(false);
-    expect(quiescedFat.totalMs).toBe(26 * 60_000);
+    expect(quiescedFat.totalMs).toBe(30 * 60_000 + 40_000);
     // A raised envelope makes the same override fit again — the relation is
     // between the terms, not a fixed value.
     const [, liveThreeRoomy] = ladder.backupBudgetPins({
       ...base,
-      liveAttempts: 3,
+      usableCheckReserveMs: 26 * 60_000,
       phaseEnvelopeMs: 31 * 60_000,
     });
     expect(liveThreeRoomy.ok).toBe(true);
@@ -558,7 +560,7 @@ describe("backup envelope relations (issue #79 (f), Codex 16)", () => {
       "postQuiesceSettleMs",
     ]);
     expect(missingLive.ok).toBe(false);
-    expect(missingLive.missing).toEqual(["liveAttempts", "cliTimeoutMs", "usableCheckReserveMs"]);
+    expect(missingLive.missing).toEqual(["usableCheckReserveMs", "upstreamCleanupReserveMs"]);
     const [noEnvelope] = ladder.backupBudgetPins({ ...base, phaseEnvelopeMs: undefined });
     expect(noEnvelope.ok).toBe(false);
     expect(noEnvelope.envelopeMs).toBeNull();

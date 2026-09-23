@@ -5,6 +5,16 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.9.91] - 2026-09-23
+
+### Fixed
+
+- Live upstream backups can use the remaining backup-phase budget instead of being killed at ten minutes while progressing. Verification and process cleanup retain their own reserves; log output alone cannot keep a stalled backup alive, and silent verification has a finite allowance.
+- Each upstream attempt owns a private staging directory. Progress tracks file identity and byte high-water marks, so shrinking, replacing, renaming, or hardlinking unchanged files cannot manufacture progress. Publication keeps the existing canonical archive/provenance contract; failed attempts are unverified and cleanup is restricted to owned staging after writers drain.
+- Backup relaunches wait for native readiness and a settled recheck before releasing their owned restart suppression. They use the normal bounded gateway readiness budget rather than the old twenty-second TCP gate, while respecting the remaining phase and lifecycle lease. Older gateways with unsupported readiness retain their explicit compatibility path.
+- Stale or tokenless cleanup cannot clear a newer owned restart window, and delayed health-check results cannot change a successor's lifecycle. Genuine gateway crashes remain observable during live backups instead of being hidden by a whole-operation suppression flag.
+- Backup diagnostics include a separate prior-failure receipt without treating failed runs as successful throughput calibration. Added virtual-time, real HTTP, generated slow-archive restore, process cleanup, and real pinned/beta backup regressions.
+
 ## [0.9.90] - 2026-09-23
 
 ### Fixed
