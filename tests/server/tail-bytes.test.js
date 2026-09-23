@@ -38,6 +38,15 @@ describe("server/utils/tail-bytes", () => {
     });
   });
 
+  it("lets strict readers distinguish I/O failure from a missing file without changing tolerant callers", () => {
+    const missing = path.join(tmpDir, "missing");
+    expect(tailLines(missing, 1024, { throwOnError: true })).toEqual([]);
+    const unreadable = path.join(tmpDir, "directory");
+    fs.mkdirSync(unreadable);
+    expect(() => tailLines(unreadable, 1024, { throwOnError: true })).toThrow();
+    expect(tailLines(unreadable, 1024)).toEqual([]);
+  });
+
   it("drops the leading partial line when the read starts mid-file", () => {
     // 2000 bytes of one long first line, then complete lines. maxBytes below
     // the file size forces the read to start mid-file, slicing into line one.

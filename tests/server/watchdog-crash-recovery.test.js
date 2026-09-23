@@ -40,6 +40,80 @@ describe("watchdog retained crash recovery", () => {
     code: 1, expectedExit: false, pid: 100, generation: 1,
   });
 
+  it("keeps backup transition suppression through launch and lets only its current owner settle it", async () => {
+    setup({ resolveGatewayReadyzUrl: () => "http://127.0.0.1:18789/readyz" });
+    const first = watchdog.onExpectedRestart({ expiresAt: Date.now() + 60_000, retainUntilReady: true });
+    watchdog.onGatewayLaunch({ pid: 200, generation: 2 });
+    expect(watchdog.getStatus().expectedRestartUntil).not.toBeNull();
+    const probe = vi.fn(async () => ({ status: 200, text: async () => JSON.stringify({ ok: true }) }));
+    vi.stubGlobal("fetch", probe);
+    await watchdog.runHealthCheck();
+    expect(watchdog.getStatus().expectedRestartUntil).not.toBeNull();
+    expect(probe.mock.calls.every(([url]) => !String(url).includes("readyz"))).toBe(true);
+    const successor = watchdog.onExpectedRestart({ expiresAt: Date.now() + 90_000, retainUntilReady: true });
+    const expected = watchdog.getStatus().expectedRestartUntil;
+    watchdog.onExpectedRestartSettled();
+    expect(watchdog.getStatus().expectedRestartUntil).toBe(expected);
+    watchdog.onExpectedRestartSettled(first);
+    expect(watchdog.getStatus().expectedRestartUntil).toBe(expected);
+    watchdog.onExpectedRestartSettled(successor);
+    expect(watchdog.getStatus().expectedRestartUntil).toBeNull();
+  });
+
+  it.each(["owned restart", "legacy restart", "new launch"])("a delayed settlement probe cannot demote a newer %s", async (successor) => {
+    setup();
+    await vi.advanceTimersByTimeAsync(0);
+    const first = watchdog.onExpectedRestart({ expiresAt: Date.now() + 60_000, retainUntilReady: true });
+    await vi.advanceTimersByTimeAsync(0);
+    let rejectHealth;
+    const fetch = vi.fn(() => new Promise((_, reject) => { rejectHealth = reject; }));
+    vi.stubGlobal("fetch", fetch);
+    watchdog.onExpectedRestartSettled(first);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    if (successor === "new launch") watchdog.onGatewayLaunch({ pid: 200, generation: 2 });
+    else watchdog.onExpectedRestart({ expiresAt: Date.now() + 90_000, retainUntilReady: successor === "owned restart" });
+    const before = watchdog.getStatus();
+
+    rejectHealth(new Error("predecessor gateway down"));
+    await vi.advanceTimersByTimeAsync(0);
+
+    const after = watchdog.getStatus();
+    expect(after.lifecycle).toBe(successor === "new launch" ? "running" : "restarting");
+    expect(after.expectedRestartUntil).toBe(before.expectedRestartUntil);
+    if (successor === "new launch") expect(after.health).toBe("unknown");
+  });
+
+  it("a stale settlement result cannot overwrite a newer completed health probe", async () => {
+    setup();
+    await vi.advanceTimersByTimeAsync(0);
+    const owner = watchdog.onExpectedRestart({ expiresAt: Date.now() + 60_000, retainUntilReady: true });
+    await vi.advanceTimersByTimeAsync(0);
+    let rejectHealth;
+    vi.stubGlobal("fetch", vi.fn()
+      .mockImplementationOnce(() => new Promise((_, reject) => { rejectHealth = reject; }))
+      .mockResolvedValue({ ok: true, status: 200, text: async () => JSON.stringify({ ok: true }) }));
+    watchdog.onExpectedRestartSettled(owner);
+    await watchdog.runHealthCheck();
+    rejectHealth(new Error("older health result"));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(watchdog.getStatus()).toMatchObject({ lifecycle: "running", health: "healthy" });
+  });
+
+  it("reports a genuine replacement crash while a backup owns its expected transition", async () => {
+    const { lock, launch } = setup();
+    const hold = lock.tryAcquire("backup_quiesce");
+    watchdog.onExpectedRestart({ expiresAt: Date.now() + 60_000, retainUntilReady: true });
+    watchdog.onGatewayLaunch({ pid: 200, generation: 2 });
+    watchdog.onGatewayExit({ code: 1, expectedExit: false, pid: 200, generation: 2 });
+    expect(watchdog.getStatus().expectedRestartUntil).toBeNull();
+    expect(watchdog.getStatus().crashCountInWindow).toBe(1);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(launch).not.toHaveBeenCalled();
+    hold();
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(launch).toHaveBeenCalledTimes(1);
+  });
+
   it("retains one relaunch through env_sync with Doctor auto-repair disabled", async () => {
     const { lock, launch, events } = setup();
     const release = lock.tryAcquire("env_sync");

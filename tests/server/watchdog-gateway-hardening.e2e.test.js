@@ -1,7 +1,12 @@
 const express = require("express");
 const request = require("supertest");
+const fs = require("fs");
+const os = require("os");
+const path = require("path");
 
 const { createWatchdog } = require("../../lib/server/watchdog");
+const { createGatewayMedic } = require("../../lib/server/gateway-medic");
+const { createGatewayLifecycleLock } = require("../../lib/server/gateway-lifecycle-lock");
 const { registerWatchdogRoutes } = require("../../lib/server/routes/watchdog");
 
 // End-to-end coverage for the OpenClaw 2026.7.1+ gateway-lifecycle contract:
@@ -660,7 +665,7 @@ describe("server/watchdog gateway hardening (e2e)", () => {
 
     it("fails doctor gating CLOSED when the channel state cannot be read", async () => {
       const configMedic = createMedicMock({ fixed: true });
-      const { watchdog } = createStack({
+      const { watchdog, launchGatewayProcess, insertWatchdogEvent } = createStack({
         configMedic,
         releaseChannelHooks: {
           getInfo: vi.fn(() => {
@@ -674,12 +679,156 @@ describe("server/watchdog gateway hardening (e2e)", () => {
       await flushMicrotasks();
       await flushMicrotasks();
 
-      // An unreadable channel state could hide a live stabilization window —
-      // unattended doctor --fix must not be offered (openclaw#107226).
-      expect(configMedic.run).toHaveBeenCalledWith(
-        expect.objectContaining({ allowDoctorFix: false }),
-      );
+      expect(configMedic.run).not.toHaveBeenCalled();
+      expect(launchGatewayProcess).not.toHaveBeenCalled();
+      expect(insertWatchdogEvent).toHaveBeenCalledWith(expect.objectContaining({
+        eventType: "medic", status: "skipped",
+        details: expect.objectContaining({ reason: "gateway_hold_unreadable" }),
+      }));
       watchdog.stop();
+    });
+
+    it.each([
+      ["corruption", () => ({ stateCorrupted: true }), "gateway_hold_unreadable"],
+      ["null", () => null, "gateway_hold_unreadable"],
+      ["read error", () => { throw new Error("private-state-read-secret"); }, "gateway_hold_unreadable"],
+      ["hold", () => ({ gatewayHold: { reason: "migration_pending" } }), "gateway_held"],
+    ])("rechecks %s after lock acquisition, preserves real config, and recovers after repair", async (_name, blockedInfo, reason) => {
+      const openclawDir = fs.mkdtempSync(path.join(os.tmpdir(), "alphaclaw-watchdog-medic-"));
+      const configPath = path.join(openclawDir, "openclaw.json");
+      const original = JSON.stringify({ gateway: { controlUi: { environment: { label: "BETA" } } } });
+      fs.writeFileSync(configPath, original);
+      let readInfo = () => ({});
+      const lock = createGatewayLifecycleLock();
+      const releaseBoot = lock.tryAcquire("boot");
+      const runDoctorFix = vi.fn(async () => ({ ok: true }));
+      const configMedic = createGatewayMedic({
+        openclawDir, runDoctorFix,
+        getChannelInfo: () => readInfo(),
+        logger: { log() {} },
+      });
+      const { watchdog, launchGatewayProcess, insertWatchdogEvent } = createStack({
+        configMedic, gatewayLifecycleLock: lock,
+        releaseChannelHooks: { getInfo: () => readInfo(), requestRollback: vi.fn() },
+      });
+      try {
+        watchdog.onGatewayExit({ code: 78, expectedExit: false, stderrTail: kStripeStderr });
+        await flushMicrotasks();
+        readInfo = blockedInfo;
+        releaseBoot();
+        await flushMicrotasks();
+        await flushMicrotasks();
+        expect(fs.readFileSync(configPath, "utf8")).toBe(original);
+        expect(fs.readdirSync(openclawDir)).toEqual(["openclaw.json"]);
+        expect(runDoctorFix).not.toHaveBeenCalled();
+        expect(launchGatewayProcess).not.toHaveBeenCalled();
+        expect(lock.getActiveOperation()).toBeNull();
+        expect(insertWatchdogEvent).toHaveBeenCalledWith(expect.objectContaining({
+          eventType: "medic", status: "skipped", details: expect.objectContaining({ reason }),
+        }));
+        expect(JSON.stringify(insertWatchdogEvent.mock.calls)).not.toContain("private-state-read-secret");
+        expect(watchdog.getStatus().lifecycle).toBe("configuration_error");
+        readInfo = () => ({});
+        watchdog.onGatewayExit({ code: 78, expectedExit: false, stderrTail: kStripeStderr });
+        await flushMicrotasks();
+        await flushMicrotasks();
+        expect(fs.readFileSync(configPath, "utf8")).not.toBe(original);
+        expect(launchGatewayProcess).toHaveBeenCalledOnce();
+        expect(insertWatchdogEvent).toHaveBeenCalledWith(expect.objectContaining({
+          eventType: "medic", status: "ok", details: expect.objectContaining({ attempt: 1 }),
+        }));
+      } finally {
+        watchdog.stop();
+        releaseBoot();
+        fs.rmSync(openclawDir, { recursive: true, force: true });
+      }
+    });
+
+    it("suppresses real Doctor when a stabilization window opens while queued, without suppressing key repair", async () => {
+      const openclawDir = fs.mkdtempSync(path.join(os.tmpdir(), "alphaclaw-watchdog-medic-"));
+      const configPath = path.join(openclawDir, "openclaw.json");
+      fs.writeFileSync(configPath, JSON.stringify({ audit: { legacy: true } }));
+      let info = {};
+      const lock = createGatewayLifecycleLock();
+      const releaseBoot = lock.tryAcquire("boot");
+      const runDoctorFix = vi.fn(async () => ({ ok: true }));
+      const configMedic = createGatewayMedic({ openclawDir, runDoctorFix, logger: { log() {} } });
+      const { watchdog, launchGatewayProcess } = createStack({
+        configMedic, gatewayLifecycleLock: lock,
+        releaseChannelHooks: { getInfo: () => info, requestRollback: vi.fn() },
+      });
+      try {
+        watchdog.onGatewayExit({ code: 78, expectedExit: false, stderrTail: ['Unrecognized key: "audit"'] });
+        await flushMicrotasks();
+        info = { isPin: true, stabilization: { inWindow: true } };
+        releaseBoot();
+        await flushMicrotasks();
+        await flushMicrotasks();
+        expect(runDoctorFix).not.toHaveBeenCalled();
+        expect(JSON.parse(fs.readFileSync(configPath, "utf8"))).toEqual({});
+        expect(launchGatewayProcess).toHaveBeenCalledOnce();
+      } finally {
+        watchdog.stop();
+        releaseBoot();
+        fs.rmSync(openclawDir, { recursive: true, force: true });
+      }
+    });
+
+    it("passes live watchdog admission to the actual service during an LLM wait", async () => {
+      const openclawDir = fs.mkdtempSync(path.join(os.tmpdir(), "alphaclaw-watchdog-medic-"));
+      const configPath = path.join(openclawDir, "openclaw.json");
+      const original = JSON.stringify({ audit: { legacy: true } });
+      fs.writeFileSync(configPath, original);
+      let info = {};
+      let resolveCompletion;
+      const llmClient = {
+        getAvailability: () => ({ available: true }),
+        complete: vi.fn(() => new Promise((resolve) => { resolveCompletion = resolve; })),
+      };
+      const configMedic = createGatewayMedic({ openclawDir, llmClient, logger: { log() {} }, env: {} });
+      const { watchdog, launchGatewayProcess, insertWatchdogEvent } = createStack({
+        configMedic,
+        releaseChannelHooks: { getInfo: () => info, requestRollback: vi.fn() },
+      });
+      try {
+        watchdog.onGatewayExit({ code: 78, expectedExit: false, stderrTail: ['Unrecognized key: "audit"'] });
+        await flushMicrotasks();
+        expect(llmClient.complete).toHaveBeenCalledOnce();
+        info = { stateCorrupted: true };
+        resolveCompletion({ ok: true, provider: "test", model: "test", text: JSON.stringify({ confidence: "high", remedy: "remove_keys", keys: ["audit"] }) });
+        await flushMicrotasks();
+        await flushMicrotasks();
+        expect(fs.readFileSync(configPath, "utf8")).toBe(original);
+        expect(fs.readdirSync(openclawDir)).toEqual(["openclaw.json"]);
+        expect(launchGatewayProcess).not.toHaveBeenCalled();
+        expect(insertWatchdogEvent).toHaveBeenCalledWith(expect.objectContaining({
+          eventType: "medic", status: "skipped", details: expect.objectContaining({ reason: "gateway_hold_unreadable" }),
+        }));
+      } finally {
+        watchdog.stop();
+        fs.rmSync(openclawDir, { recursive: true, force: true });
+      }
+    });
+
+    it("does not interpret corrupt state as a trustworthy rollback window", async () => {
+      const configMedic = createMedicMock({ fixed: true });
+      const requestRollback = vi.fn();
+      const { watchdog, launchGatewayProcess } = createStack({
+        configMedic,
+        releaseChannelHooks: {
+          getInfo: () => ({ stateCorrupted: true, stabilization: { inWindow: true } }),
+          requestRollback,
+        },
+      });
+      try {
+        watchdog.onGatewayExit({ code: 78, expectedExit: false, stderrTail: kStripeStderr });
+        await flushMicrotasks();
+        expect(requestRollback).not.toHaveBeenCalled();
+        expect(configMedic.run).not.toHaveBeenCalled();
+        expect(launchGatewayProcess).not.toHaveBeenCalled();
+      } finally {
+        watchdog.stop();
+      }
     });
 
     // Load-bearing invariant for the backup quiesce (issues #11/#18): a

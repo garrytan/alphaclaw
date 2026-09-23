@@ -254,6 +254,34 @@ describe("server/routes/auth team mode (4.2/4.6)", () => {
     expect(breakGlass.status).toBe(200);
   });
 
+  it.each([false, true])("cannot reopen legacy login by reloading .env (unreadable policy: %s)", async (configUnreadable) => {
+    teamSettings = { enabled: true, disableLegacyLogin: true, configUnreadable };
+    const { ENV_FILE_PATH } = require("../../lib/server/constants");
+    const { reloadEnv } = require("../../lib/server/env");
+    const readFileSync = fs.readFileSync.bind(fs);
+    const read = vi.spyOn(fs, "readFileSync").mockImplementation((file, ...args) =>
+      file === ENV_FILE_PATH ? "ALPHACLAW_ALLOW_LEGACY_LOGIN=1" : readFileSync(file, ...args),
+    );
+    try {
+      reloadEnv();
+      expect(process.env.ALPHACLAW_ALLOW_LEGACY_LOGIN).toBeUndefined();
+      const blocked = await request(app).post("/api/auth/login").send({ password: "owner-secret" });
+      expect(blocked.status).toBe(configUnreadable ? 503 : 403);
+      expect(blocked.body.code).toBe(configUnreadable ? "config_unreadable" : "legacy_login_disabled");
+
+      process.env.ALPHACLAW_ALLOW_LEGACY_LOGIN = "1";
+      read.mockImplementation((file, ...args) =>
+        file === ENV_FILE_PATH ? "ALPHACLAW_ALLOW_LEGACY_LOGIN=0" : readFileSync(file, ...args),
+      );
+      reloadEnv();
+      expect(process.env.ALPHACLAW_ALLOW_LEGACY_LOGIN).toBe("1");
+      const allowed = await request(app).post("/api/auth/login").send({ password: "owner-secret" });
+      expect(allowed.status).toBe(200);
+    } finally {
+      read.mockRestore();
+    }
+  });
+
   it("kills sessions when a member is disabled or their token secret rotates", async () => {
     createAdmin();
     const member = membersStore.createMember({

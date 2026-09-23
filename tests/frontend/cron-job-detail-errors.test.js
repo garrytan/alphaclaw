@@ -41,6 +41,9 @@ import { CronJobDetail } from "../../lib/public/js/components/cron-tab/cron-job-
 import { CronJobSettingsCard } from "../../lib/public/js/components/cron-tab/cron-job-settings-card.js";
 import { InlineErrorChip } from "../../lib/public/js/components/inline-error-chip.js";
 import { SavedToggle } from "../../lib/public/js/components/saved-toggle.js";
+import { CronJobUsage } from "../../lib/public/js/components/cron-tab/cron-job-usage.js";
+import { CronJobTrendsPanel } from "../../lib/public/js/components/cron-tab/cron-job-trends-panel.js";
+import { CronRunHistoryPanel } from "../../lib/public/js/components/cron-tab/cron-run-history-panel.js";
 
 const expandTree = (node) => {
   if (node == null || typeof node !== "object") return node;
@@ -86,6 +89,15 @@ const kJob = {
 };
 
 describe("frontend/cron-tab job detail load failures", () => {
+  it("does not present failed first loads as zero usage or empty history, but keeps previously loaded results", () => {
+    const failures = { job: kJob, runsError: new Error("unavailable"), usageError: new Error("unavailable"), trendsError: new Error("unavailable") };
+    const empty = expandTree(CronJobDetail(failures));
+    for (const panel of [CronJobUsage, CronJobTrendsPanel, CronRunHistoryPanel]) expect(findAllByType(empty, panel)).toHaveLength(0);
+    expect(findAllByType(empty, InlineErrorChip)).toHaveLength(3);
+    const loaded = expandTree(CronJobDetail({ ...failures, usage: { totals: { runCount: 1 } }, jobTrends: { points: [] }, runEntries: [{ ts: 100, status: "ok" }], runTotal: 1 }));
+    for (const panel of [CronJobUsage, CronJobTrendsPanel, CronRunHistoryPanel]) expect(findAllByType(loaded, panel)).toHaveLength(1);
+  });
+
   it("renders a retry-wired chip per failed panel load and none when clean", () => {
     const onRetryLoads = vi.fn();
     const tree = expandTree(
@@ -130,6 +142,21 @@ const collectText = (node, out = []) => {
 };
 
 const treeText = (tree) => collectText(tree).join(" ");
+
+describe("frontend/cron-tab usage metric labels", () => {
+  it("identifies model-ledger counts separately from cron-history duration without changing metric values", () => {
+    const tree = expandTree(CronJobUsage({ usage: { totals: { runCount: 2, totalTokens: 100, totalCost: 0.04, avgDurationMs: 1200 } } }));
+    const text = treeText(tree);
+    expect(text).toContain("Model runs 2");
+    expect(text).toContain("Avg tokens/model run 50");
+    expect(text).toContain("Avg cost/model run $0.02");
+    expect(text).toContain("Avg job duration");
+    expect(text).not.toContain("Total runs");
+    const systemEvent = treeText(expandTree(CronJobUsage({ usage: { totals: { runCount: 0, avgDurationMs: 10 } } })));
+    expect(systemEvent).toContain("Model runs 0");
+    expect(systemEvent).toContain("10ms");
+  });
+});
 
 // Expected values are computed through the same Intl presets production uses
 // (format.js timeStyle short / dateStyle medium), so assertions stay locale-

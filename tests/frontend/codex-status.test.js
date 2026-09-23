@@ -26,6 +26,12 @@ import {
 const kUnavailable = { connected: false, unavailable: true, reason: "backup_in_progress" };
 
 describe("frontend/codex-status quiet-period reads (store unavailable)", () => {
+  it("does not describe an unreadable auth store as a backup or a disconnected account", () => {
+    const badge = buildCodexStatusBadgeModel({ codexStatus: { connected: false, unavailable: true, reason: "AUTH_STORE_UNREADABLE" } });
+    expect(badge).toEqual({ id: "unreadable", label: "Auth store unavailable", tone: "warning" });
+    expect(buildCodexConnectedMessage({ restartRequired: true })).toBe("Codex credentials saved — restart the gateway to apply the change");
+  });
+
   it("an unavailable read keeps the last-known status under the marker and does not advance `known`", () => {
     const read = applyCodexStatusRead({
       previous: { connected: true, profileId: "openai-codex:default" },

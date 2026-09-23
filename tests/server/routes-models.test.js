@@ -87,6 +87,26 @@ const createApp = (deps) => {
 };
 
 describe("server/routes/models", () => {
+  it.each(["profile", "delete", "config"])("awaits the gateway auth refresh after a %s mutation", async (operation) => {
+    const deps = createModelDeps();
+    let finish;
+    deps.authProfiles.refreshGatewayAuth = vi.fn(() => new Promise((resolve) => { finish = resolve; }));
+    deps.authProfiles.removeProfile.mockReturnValue(true);
+    const app = createApp(deps);
+    const pending = operation === "profile"
+      ? request(app).put("/api/models/auth/openai:default").send({ type: "api_key", provider: "openai", key: "synthetic" })
+      : operation === "delete" ? request(app).delete("/api/models/auth/openai:default")
+      : request(app).put("/api/models/config").send({ configuredModels: {} });
+    let settled = false;
+    const response = pending.then((res) => { settled = true; return res; });
+    await vi.waitFor(() => expect(deps.authProfiles.refreshGatewayAuth).toHaveBeenCalledOnce());
+    expect(settled).toBe(false);
+    finish({ authRuntimeRefreshed: false, restartRequired: true, warning: "Saved; restart required" });
+    const result = await response;
+    expect(result.status).toBe(200);
+    expect(result.body).toMatchObject({ ok: true, authRuntimeRefreshed: false, restartRequired: true });
+  });
+
   it("bootstraps with the bundled catalog, then returns normalized models from openclaw output", async () => {
     const deps = createModelDeps();
     deps.shellCmd.mockResolvedValue("noise");

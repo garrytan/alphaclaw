@@ -5,6 +5,21 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.9.90] - 2026-09-23
+
+### Fixed
+
+- **Credentials and first login:** read and atomically mutate the shared auth store on state schemas 12–17 without losing unrelated profiles or extension fields. Fresh credentials use OpenClaw's native store initialization, and route mutations refresh the running gateway's auth state or explicitly require a restart. Inline credential edits replace inherited secret references without discarding explicitly supplied references. Unreadable credentials display as unavailable, not disconnected. A config write preserves an already-keyed agent roster instead of erasing it during boot.
+- **Deployment authority:** protect legacy-login and every canonical public-origin alias across boot, reload, Envars, agent administration, and onboarding imports. Preserve genuine deployment values and provide value-free migration guidance for ignored file-only settings. Reject entire NUL-containing names before native environment access, closing the truncated-key alias bypass.
+- **Medic safety:** refuse all mutating remedies when recovery state is corrupt, unreadable, or held. Revalidate after lifecycle waits and at asynchronous writer boundaries while retaining cancellation, lease cleanup, rollback-window restrictions, and detailed Doctor failure reporting.
+- **Cron history:** read current task-ledger outcomes and supported older SQLite/JSONL stores according to runtime authority. Restore history, durations, trends, and bounded bulk reads; refuse ambiguous or unavailable storage instead of showing stale or empty data. Clarify model-usage counts and hide contradictory empty panels after failed loads.
+- **Backups and relaunches:** let genuinely progressing live attempts use the remaining bounded phase budget while reserving verification and cleanup time. Private staging and file-identity high-water marks prevent log output, replacement, rename, or hardlink churn from manufacturing progress. Relaunches wait for native readiness and a settled recheck within the normal gateway budget and owned lease. Stale cleanup and health callbacks cannot overwrite a successor, and genuine crashes remain observable during live backups. Prior failure receipts remain separate from successful throughput calibration.
+- **Agent-to-agent proxying:** forward only the supported A2A POST and public discovery GET endpoints, preserve peer-token authentication and raw request bodies, and strip browser/operator identity. Keep streamed caps, traversal guards, and the existing `/openclaw` resource contract. Isolate the proxy cap test's request recorders and wait for actual stream completion without weakening its boundary assertions.
+
+### Verification
+
+- The combined source tree passed 9,987 tests across 544 files in a serial hermetic run, the UI build, and all 24 strict container journeys. Real pinned-runtime auth, A2A, cron, and backup checks plus browser desktop/mobile checks cover the repaired flows. OAuth/model endpoints use synthetic credentials; no paid or production inference is claimed.
+
 ## [0.9.89] - 2026-09-22
 
 The nightly live tier (`live-e2e.yml`, real OpenClaw releases) had failed three

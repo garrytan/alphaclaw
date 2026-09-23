@@ -67,6 +67,14 @@ describe("utils/config-unreadable (fail-closed refusal vocabulary, PR 7)", () =>
     );
   });
 
+  it("describes SQLite auth failures without instructing operators to edit the database as JSON", () => {
+    const body = configUnreadableEnvelope({ code: "AUTH_STORE_UNREADABLE", filePath: "/state/openclaw.sqlite" });
+    expect(body).toMatchObject({ code: "config_unreadable", sourceCode: "AUTH_STORE_UNREADABLE", file: "openclaw.sqlite" });
+    expect(body.error).toContain("unavailable or has an unsupported format");
+    expect(body.hint).toContain("Doctor");
+    expect(body.hint).toContain("do not edit SQLite as JSON");
+  });
+
   it("sendIfConfigUnreadable answers 503 by default, honors a caller status, and ignores other errors", () => {
     const err = Object.assign(new Error("x"), { code: "TOPIC_REGISTRY_UNREADABLE" });
     const res = makeRes();

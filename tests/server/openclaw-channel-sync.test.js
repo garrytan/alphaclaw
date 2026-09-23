@@ -2260,7 +2260,7 @@ describe("server/openclaw-channel-sync", () => {
         });
         const timeoutResult = await timedOut.sync.applyUpdate(hardGateTarget);
         expect(timeoutResult.status).toBe(409);
-        expect(timeoutResult.body.message).toMatch(/timed out after 10 minutes/i);
+        expect(timeoutResult.body.message).toMatch(/timed out after 24 minutes/i);
 
         const diskFull = mkHarness({
           runnerImpl: withTail({
@@ -2899,6 +2899,11 @@ describe("server/openclaw-channel-sync", () => {
       });
       expect(failed.status).toBe(409);
       expect(failed.body.code).toBe("version_blocklisted");
+      expect(failBegin).not.toHaveBeenCalled();
+      expect(failEnd).not.toHaveBeenCalled();
+      failing.installToTempDir.mockRejectedValue(new Error("fixture preparation failed"));
+      const preparedFailure = await failing.sync.applyUpdate({ channel: "beta", version: "1.4.0" });
+      expect(preparedFailure.status).toBeGreaterThanOrEqual(400);
       expect(failBegin).toHaveBeenCalledTimes(1);
       expect(failEnd).toHaveBeenCalledTimes(1);
     });

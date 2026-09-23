@@ -1152,6 +1152,42 @@ describe("server/routes/onboarding", () => {
     }
   });
 
+  it("skips all deployment authority settings from an approved real dotenv import", async () => {
+    const { kDeploymentOnlyEnvKeys } = require("../../lib/server/deployment-only-env");
+    const { detectSecrets } = require("../../lib/server/onboarding/import/secret-detector");
+    const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), "alphaclaw-import-authority-live-"));
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "alphaclaw-import-authority-source-"));
+    const deps = createBaseDeps();
+    const openclawDir = path.join(rootDir, ".openclaw");
+    deps.fs = fs;
+    deps.constants = {
+      ...deps.constants,
+      OPENCLAW_DIR: openclawDir,
+      WORKSPACE_DIR: path.join(openclawDir, "workspace"),
+      kOnboardingMarkerPath: path.join(rootDir, "onboarded.json"),
+    };
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      fs.writeFileSync(path.join(tempDir, "openclaw.json"), "{}");
+      fs.writeFileSync(path.join(tempDir, ".env"), [
+        ...kDeploymentOnlyEnvKeys.map((key) => `${key}=synthetic-untrusted-value`),
+        "CUSTOM_FLAG=allowed",
+      ].join("\n"));
+      const approvedSecrets = detectSecrets({ fs, baseDir: tempDir, envFiles: [".env"] });
+      expect(approvedSecrets).toHaveLength(kDeploymentOnlyEnvKeys.length + 1);
+      const res = await request(createApp(deps)).post("/api/onboard/import/apply").send({ tempDir, approvedSecrets });
+      expect(res.status).toBe(200);
+      expect(res.body.skippedReservedKeys).toEqual(kDeploymentOnlyEnvKeys);
+      expect(deps.writeEnvFile).toHaveBeenCalledExactlyOnceWith([{ key: "CUSTOM_FLAG", value: "allowed" }]);
+      expect(deps.reloadEnv).toHaveBeenCalledTimes(1);
+      expect(JSON.stringify(warn.mock.calls)).not.toContain("synthetic-untrusted-value");
+    } finally {
+      warn.mockRestore();
+      fs.rmSync(rootDir, { recursive: true, force: true });
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it("returns unresolved placeholder review data after import apply", async () => {
     const deps = createBaseDeps();
     const tempDir = path.join(os.tmpdir(), "alphaclaw-import-placeholder-review");

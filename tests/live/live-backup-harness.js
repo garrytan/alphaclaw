@@ -213,6 +213,7 @@ const createQuiesceFake = ({ onStop = null, onStart = null } = {}) => {
       calls.push("acquireLock");
       return () => calls.push("release");
     },
+    probeReadiness: async () => ({ ok: false, kind: "unsupported" }),
     isRunning: async () => {
       calls.push("isRunning");
       return true;
