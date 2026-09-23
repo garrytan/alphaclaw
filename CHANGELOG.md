@@ -5,6 +5,42 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.9.90] - 2026-09-23
+
+### Fixed
+
+- **Shared credentials remain readable and editable on current OpenClaw.**
+  Auth storage supports schema-12 shared tables and schema-13–17
+  `config_machine_state` rows. Every SQLite profile/order mutation reads,
+  changes, and saves under one write transaction, preserving unrelated
+  credentials, external token refreshes, and unknown JSON fields. Missing
+  rows remain empty; malformed, unsupported, or unavailable stores refuse
+  writes rather than falling back to stale credentials. Backup quiet barriers
+  remain authoritative.
+- **Fresh OAuth credentials work without waiting for a restart.** Before a
+  first credential write, OpenClaw's own API initializes the SQLite auth
+  store instead of creating a legacy JSON file that the current runtime
+  refuses. Existing databases that need a schema migration stay behind the
+  protected boot migration path; no additional Doctor trigger is introduced.
+- **Saved auth edits reach the running gateway.** Codex and Models mutation
+  routes await OpenClaw's guarded native auth-refresh operation. If activation
+  cannot be confirmed, the saved change is reported separately from activation
+  and the existing restart-required banner is set. Unreadable auth stores show
+  an unknown/unavailable state and a recovery action for both OAuth and API-key
+  providers, never a false disconnected, unconfigured, or backup-only label.
+- **Boot reconciliation preserves keyed agent rosters.** The config write
+  adapter no longer replaces an already-converted `agents.entries` map with
+  an empty map when the boot migrator has removed its intermediate list.
+
+### Tests
+
+- Added actual-module schema, malformed-cell, rollback, quiet-barrier, route,
+  and independent-connection refresh/update regressions. The pinned OpenClaw 2026.9.5
+  journey covers synthetic OAuth completion, immediate runtime auth, full
+  boot, real gateway requests to a local synthetic provider, live credential
+  edits, restart, and browser unavailable-state rendering. Real OpenAI OAuth
+  and paid inference are not claimed by this synthetic integration coverage.
+
 ## [0.9.89] - 2026-09-22
 
 The nightly live tier (`live-e2e.yml`, real OpenClaw releases) had failed three

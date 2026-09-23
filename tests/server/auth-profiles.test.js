@@ -36,7 +36,7 @@ beforeAll(() => {
   );
 
   const { createAuthProfiles } = require("../../lib/server/auth-profiles");
-  ap = createAuthProfiles();
+  ap = createAuthProfiles({ prepareFreshStore: () => {} });
 });
 
 beforeEach(() => {
@@ -693,6 +693,7 @@ describe("server/auth-profiles shared state-db store", () => {
   const createSharedStateDb = ({ flag = "state-db", withAuthTables = true } = {}) => {
     fs.mkdirSync(path.dirname(stateDbPath()), { recursive: true });
     const db = new DatabaseSync(stateDbPath());
+    db.exec("PRAGMA user_version = 12");
     db.exec(
       "CREATE TABLE config_machine_state (state_key TEXT NOT NULL PRIMARY KEY, value_json TEXT NOT NULL, updated_at_ms INTEGER NOT NULL DEFAULT 0)",
     );
@@ -1017,6 +1018,7 @@ describe("server/auth-profiles state-DB quiet period", () => {
     const stateDbPath = path.join(tmpDir, ".openclaw", "state", "openclaw.sqlite");
     fs.mkdirSync(path.dirname(stateDbPath), { recursive: true });
     const db = new DatabaseSync(stateDbPath);
+    db.exec("PRAGMA user_version = 12");
     db.exec(
       "CREATE TABLE config_machine_state (state_key TEXT NOT NULL PRIMARY KEY, value_json TEXT NOT NULL, updated_at_ms INTEGER NOT NULL DEFAULT 0)",
     );
@@ -1176,7 +1178,7 @@ describe("server/auth-profiles agent sqlite store fail-closed (fix wave F183/F18
       .run("primary", '{"version":1,"profiles":{"anthropic:default":{"type":"api_key","key":"sk-', 1);
     database.close();
 
-    expect(ap.loadAuthStore("main")).toEqual({ version: 1, profiles: {} });
+    expect(ap.loadAuthStore("main")).toEqual({ version: 1, profiles: {}, unavailable: true, reason: "AUTH_STORE_UNREADABLE" });
     expect(() => ap.loadAuthStore("main", { strict: true })).toThrow(
       expect.objectContaining({ code: "AUTH_STORE_UNREADABLE" }),
     );

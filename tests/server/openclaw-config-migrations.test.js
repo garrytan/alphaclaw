@@ -102,6 +102,14 @@ describe("server/openclaw-config-migrations agents shape adapters", () => {
     expect(withAgentsShapeForWrite(input, "none")).toBe(input);
   });
 
+  it("preserves a keyed roster produced by boot reconciliation before the write adapter runs", () => {
+    const input = { agents: { entries: { main: { name: "Main" }, work: { name: "Work" } } } };
+    const normalized = normalizeAgentsShapeForRead(structuredClone(input));
+    normalized.agents.entries = agentsArrayToKeyed(normalized.agents.list);
+    delete normalized.agents.list;
+    expect(withAgentsShapeForWrite(normalized, "entries")).toEqual(input);
+  });
+
   it("resolves the env vars container across the beta rename", () => {
     expect(getEnvVarsContainer({ env: { vars: { A: "1" } } })).toEqual({ A: "1" });
     expect(getEnvVarsContainer({ env: { A: "1" } })).toEqual({ A: "1" });

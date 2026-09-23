@@ -21,6 +21,21 @@ const createApp = ({ changed = true } = {}) => {
 };
 
 describe("server/routes/codex", () => {
+  it("waits for disconnect activation and reports a saved-but-restart-required result", async () => {
+    const app = express();
+    let finish;
+    const refreshGatewayAuth = vi.fn(() => new Promise((resolve) => { finish = resolve; }));
+    const restartRequiredState = { markRequired: vi.fn() };
+    registerCodexRoutes({ app, authProfiles: { removeCodexProfiles: () => true, refreshGatewayAuth }, restartRequiredState });
+    let settled = false;
+    const pending = request(app).post("/api/codex/disconnect").then((res) => { settled = true; return res; });
+    await vi.waitFor(() => expect(refreshGatewayAuth).toHaveBeenCalledWith(undefined, restartRequiredState));
+    expect(settled).toBe(false);
+    finish({ authRuntimeRefreshed: false, restartRequired: true });
+    const res = await pending;
+    expect(res.body).toMatchObject({ ok: true, changed: true, authRuntimeRefreshed: false, restartRequired: true });
+  });
+
   it("invalidates model discovery when Codex auth is disconnected", async () => {
     const { app, onAuthChanged } = createApp();
 
