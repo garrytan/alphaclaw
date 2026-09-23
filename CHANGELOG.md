@@ -5,6 +5,22 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.9.90] - 2026-09-23
+
+### Fixed
+
+- **Enabled A2A peers are reachable through AlphaClaw (#91).** Forward only
+  `POST /a2a/v1` and public `GET /.well-known/agent-card.json` (plus the
+  `agent.json` alias). OpenClaw validates each peer's Bearer token; requests
+  preserve body bytes, strip forged identity headers and setup cookies, and
+  never inherit browser-owner identity. Body caps and traversal guards remain
+  in place, as do `/openclaw` verbatim forwarding and resource 401 responses.
+- **A2A proxy regressions exercise real HTTP and the pinned gateway.** Cover
+  route/method boundaries, identity sanitation, raw bodies and size limits;
+  verify peer-auth rejection and a completed A2A task on OpenClaw 2026.9.5 with
+  a local deterministic model. Document operator-owned `advertisedUrl` and
+  long-task timeout behavior without rewriting configured URLs.
+
 ## [0.9.89] - 2026-09-22
 
 The nightly live tier (`live-e2e.yml`, real OpenClaw releases) had failed three

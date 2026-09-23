@@ -261,7 +261,7 @@ const startFakeGateway = () =>
         return;
       }
       // Over-cap sink: count bytes, record whether the body ever completed.
-      if (req.url.endsWith("/big-sink")) {
+      if (req.url.endsWith("/big-sink") || req.url === "/a2a/v1?body-cap") {
         req.on("data", (chunk) => {
           gatewayState.sink.bytes += chunk.length;
         });
@@ -553,7 +553,7 @@ describe("gateway proxy real-process e2e", () => {
     expect(gatewayState.requests[0].body.equals(big)).toBe(true);
   });
 
-  it("413s a chunked body over the 50MB streamed cap; the gateway never receives the complete payload", async () => {
+  it.each(["/api/proxy-e2e/big-sink", "/a2a/v1?body-cap"])("413s a chunked body over the 50MB streamed cap at %s; the gateway never receives the complete payload", async (requestPath) => {
     const frameChunk = (chunk) =>
       Buffer.concat([
         Buffer.from(`${chunk.length.toString(16)}\r\n`),
@@ -588,9 +588,9 @@ describe("gateway proxy real-process e2e", () => {
       });
       socket.on("connect", () => {
         socket.write(
-          `POST /api/proxy-e2e/big-sink HTTP/1.1\r\n` +
+          `POST ${requestPath} HTTP/1.1\r\n` +
             `Host: 127.0.0.1:${serverPort}\r\n` +
-            `Cookie: ${cookie}\r\n` +
+            (requestPath.startsWith("/api/") ? `Cookie: ${cookie}\r\n` : "") +
             `Content-Type: application/octet-stream\r\n` +
             `Transfer-Encoding: chunked\r\n\r\n`,
         );
@@ -724,6 +724,82 @@ describe("gateway proxy real-process e2e", () => {
     expect(res.status).toBe(200);
     expect(res.body.toString("utf8")).toBe("first-chunk|second-chunk");
     expect(elapsedMs).toBeGreaterThanOrEqual(kProxyTimeoutMs * 2 - 100);
+  });
+
+  it.each(["/.well-known/agent-card.json", "/.well-known/agent.json"])(
+    "forwards public discovery %s without a setup session",
+    async (requestPath) => {
+      const res = await httpRequest(serverPort, { path: requestPath });
+      expect(res.status).toBe(200);
+      expect(res.headers["x-fake-gateway"]).toBe("yes");
+      expect(gatewayState.requests).toHaveLength(1);
+      expect(gatewayState.requests[0].url).toBe(requestPath);
+    },
+  );
+
+  it.each(["declared", "chunked", "gzip", "invalid-json"])(
+    "bypasses production parsers for a %s A2A body and preserves peer headers",
+    async (encoding) => {
+      const json = '{ "jsonrpc": "2.0", "id": "peer-雪", "method": "GetTask", "params": { "id": "task" } }\n';
+      const payload = encoding === "gzip"
+        ? zlib.gzipSync(json)
+        : Buffer.from(encoding === "invalid-json" ? "{invalid JSON" : json);
+      const headers = {
+        "content-type": "application/json",
+        authorization: "Bearer peer-credential",
+        cookie: `${cookie}; preference=dark`,
+        "x-alphaclaw-user": "forged-owner@example.test",
+        "x-openclaw-scopes": "operator.admin",
+        "x-forwarded-for": "203.0.113.1",
+        "x-forwarded-host": "forged.example.test",
+        "x-forwarded-proto": "https",
+      };
+      if (encoding !== "chunked") headers["content-length"] = String(payload.length);
+      if (encoding === "gzip") headers["content-encoding"] = "gzip";
+      const res = await httpRequest(serverPort, {
+        path: "/a2a/v1?trace=exact%20body",
+        method: "POST",
+        headers,
+      }, payload);
+      expect(res.status).toBe(200);
+      expect(gatewayState.requests).toHaveLength(1);
+      const seen = gatewayState.requests[0];
+      expect(seen.url).toBe("/a2a/v1?trace=exact%20body");
+      expect(seen.body.equals(payload)).toBe(true);
+      expect(seen.headers.authorization).toBe("Bearer peer-credential");
+      expect(seen.headers.cookie).toBe("preference=dark");
+      expect(seen.headers["content-encoding"]).toBe(headers["content-encoding"]);
+      for (const name of ["x-alphaclaw-user", "x-openclaw-scopes", "x-forwarded-for", "x-forwarded-host", "x-forwarded-proto"]) {
+        expect(seen.headers[name], name).toBeUndefined();
+      }
+    },
+  );
+
+  it("rejects an oversized declared A2A body before forwarding", async () => {
+    const res = await rawRequest(serverPort,
+      "POST /a2a/v1 HTTP/1.1\r\n" +
+      `Host: 127.0.0.1:${serverPort}\r\n` +
+      `Content-Length: ${kProxiedBodyCapBytes + 1}\r\n` +
+      "Content-Type: application/json\r\nConnection: close\r\n\r\n",
+    );
+    expect(statusLineOf(res)).toMatch(/^HTTP\/1\.1 413 /);
+    expect(gatewayState.requests).toEqual([]);
+  });
+
+  it.each([
+    "/a2a", "/a2a/v1/", "/a2a/v1/tasks", "/a2a/v2", "/a2away/v1",
+    "/.well-known/openid-configuration", "/.well-known/agent-card.json.bak",
+    "/a2a/v1/../../v1/models", "/a2a/%2e%2e/v1/models",
+    "/a2a/v1/..%5c..%5cv1/models", "/a2a/v1/%", "/a2a/v1/%252e%252e/v1/models",
+    "/.well-known/agent-card.json/../../v1/models",
+  ])("does not forward raw unrelated or unsafe A2A target %s", async (target) => {
+    const res = await rawRequest(serverPort,
+      `POST ${target} HTTP/1.1\r\n` +
+      `Host: 127.0.0.1:${serverPort}\r\n` +
+      "Content-Length: 0\r\nConnection: close\r\n\r\n",
+    );
+    expect(statusLineOf(res)).toMatch(/^HTTP\/1\.1 404 /);
+    expect(gatewayState.requests).toEqual([]);
   });
 
   // ── Control UI transport contract (basepath mount, the default) ─────────
