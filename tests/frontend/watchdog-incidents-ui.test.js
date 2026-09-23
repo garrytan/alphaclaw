@@ -170,6 +170,132 @@ describe("describeEvent", () => {
     expect(refused.detail).toBe("incident review refused: cli flags unverifiable");
   });
 
+  // #87 (E5): the detached Doctor's evidence row, the event-loop telemetry
+  // row and the two new health_check/ok markers (transitional readiness, held
+  // recovery) would otherwise render as bare labels in the timeline.
+  it("#87 labels readiness_advisory and event_loop_pressure rows and phrases the new readiness markers", async () => {
+    const { kWatchdogEventLabels, describeEvent, describeEventOutcome } = await loadIncidentHelpers();
+    expect(kWatchdogEventLabels.readiness_advisory).toBe("Doctor advisory");
+    expect(kWatchdogEventLabels.event_loop_pressure).toBe("Event loop pressure");
+    expect(
+      describeEvent({
+        eventType: "readiness_advisory",
+        status: "warn",
+        details: {
+          finding: {
+            checkId: "gateway.probe_auth_secretref_unavailable",
+            severity: "warning",
+            kind: "runtime",
+            component: "secrets",
+            message: "SecretRef could not be resolved",
+          },
+          episode: 3,
+        },
+      }),
+    ).toMatchObject({
+      label: "Doctor advisory",
+      detail: "doctor: gateway.probe_auth_secretref_unavailable (warning)",
+      tone: "warning",
+    });
+    expect(describeEventOutcome({ eventType: "readiness_advisory", status: "warn" })).toEqual({
+      phrase: "doctor: unknown (unknown)",
+      tone: "warning",
+    });
+    expect(
+      describeEvent({
+        eventType: "event_loop_pressure",
+        status: "warn",
+        details: { degraded: true, reasons: ["event_loop_delay", "cpu"], delayP99Ms: 812 },
+      }),
+    ).toMatchObject({
+      label: "Event loop pressure",
+      detail: "event loop under pressure: event loop delay, cpu",
+      tone: "warning",
+    });
+    expect(
+      describeEventOutcome({ eventType: "event_loop_pressure", status: "warn", details: {} }),
+    ).toEqual({ phrase: "event loop under pressure", tone: "warning" });
+    expect(
+      describeEvent({
+        eventType: "event_loop_pressure",
+        status: "ok",
+        details: { degraded: false, durationMs: 60_000 },
+      }),
+    ).toMatchObject({ detail: "event loop recovered", tone: "success" });
+    // Transitional and held-recovery markers come BEFORE the generic
+    // readinessPending phrase.
+    expect(
+      describeEvent({
+        eventType: "health_check",
+        status: "ok",
+        details: { ok: true, readinessPending: true, readinessReason: "starting", readinessStatus: "starting" },
+      }),
+    ).toMatchObject({ detail: "up, still starting · starting", tone: "warning" });
+    expect(
+      describeEventOutcome({
+        eventType: "health_check",
+        status: "ok",
+        details: { readinessPending: true, readinessStatus: "draining" },
+      }),
+    ).toEqual({ phrase: "up, draining", tone: "warning" });
+    expect(
+      describeEventOutcome({
+        eventType: "health_check",
+        status: "ok",
+        details: { readinessPending: true, readinessReason: "readiness probe timeout", readinessProbe: "timeout" },
+      }),
+    ).toEqual({ phrase: "up, readiness probe timeout", tone: "warning" });
+    expect(
+      describeEventOutcome({
+        eventType: "health_check",
+        status: "ok",
+        details: { readinessPending: true, readinessReason: "secrets" },
+      }),
+    ).toEqual({ phrase: "up, not ready", tone: "warning" });
+  });
+
+  it("#87 RT7 renders a fail-open readiness close {recovered, assumed, kind} as an assumed recovery (warning), never as the bare 'recovered' a real recovery renders", async () => {
+    const { describeEvent, describeEventOutcome } = await loadIncidentHelpers();
+    expect(
+      describeEvent({
+        eventType: "readiness_degraded",
+        status: "ok",
+        details: { recovered: true, assumed: true, kind: "unavailable" },
+      }),
+    ).toMatchObject({
+      label: "Readiness degraded",
+      detail: "recovery assumed — readiness unreadable (unavailable)",
+      tone: "warning",
+      toneLabel: "Warning",
+    });
+    expect(
+      describeEventOutcome({
+        eventType: "readiness_degraded",
+        status: "ok",
+        details: { recovered: true, assumed: true, kind: "unsupported" },
+      }),
+    ).toEqual({ phrase: "recovery assumed — readiness unreadable (unsupported)", tone: "warning" });
+    // A kind the server could not name still reads as assumed.
+    expect(
+      describeEventOutcome({
+        eventType: "readiness_degraded",
+        status: "ok",
+        details: { recovered: true, assumed: true, kind: null },
+      }),
+    ).toEqual({ phrase: "recovery assumed — readiness unreadable (unknown)", tone: "warning" });
+    // The plain {recovered} close is unchanged: a real recovery, success tone.
+    expect(
+      describeEvent({
+        eventType: "readiness_degraded",
+        status: "ok",
+        details: { recovered: true },
+      }),
+    ).toMatchObject({ label: "Readiness degraded", detail: "recovered", tone: "success" });
+    expect(
+      describeEventOutcome({ eventType: "readiness_degraded", status: "ok", details: { recovered: true } }),
+    ).toBeNull();
+  });
+
   it("humanizes unknown/foreign event types instead of failing", async () => {
     const { describeEvent } = await loadIncidentHelpers();
     const described = describeEvent({

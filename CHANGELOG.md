@@ -5,6 +5,512 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.9.89] - 2026-09-22
+
+The nightly live tier (`live-e2e.yml`, real OpenClaw releases) had failed three
+nights running (2026-09-20/21/22, on v0.9.85/86/87) while the hermetic and
+container tiers stayed green, and the v0.9.88 pin bump would have added one
+more. Five causes, one of them a product regression.
+
+### Fixed
+
+- **The upstream backup rung was vetoed on every real install (v0.9.87
+  regression).** `upstreamBackupVeto` skipped `openclaw backup create` whenever
+  the preflight walk saw ANY absolute-target symlink. OpenClaw itself plants
+  those in every state directory — `plugin-skills/<skill>` → the package's
+  `dist/extensions/…/skills` (observed on 2026.9.3 and 2026.9.5) — and its own
+  backup neither follows nor archives them (a 2026.9.5 archive of such a tree
+  carries no `plugin-skills` entry; verified 2026-09-22). So the veto fired
+  everywhere: the no-quiesce ladder (the boot-instance shape) had no rung left
+  and the hard gate failed with `The upstream backup was skipped
+  (absolute_symlinks)`, and the paused ladder lost its upstream fallback after
+  a failed offline copy. The rule is NARROWED, not dropped: the same probe
+  showed upstream DOES follow a link that sits at one of its archive roots
+  (`credentials` and `identity` replaced by links to an outside directory →
+  the archive carried the outside files), so a link at `openclaw.json`,
+  `credentials`, `identity`, `state`, `agents` or `workspace` still vetoes
+  (`isUpstreamArchivedPath`); links elsewhere are measured and listed in
+  Upgrade → Check backup sources and no longer skip the upstream CLI. The
+  fresh-install waiver (WI-1.7) still refuses a tree whose only content is a
+  symlinked bookkeeping directory; it just no longer names a veto for it.
+- **An upgrade to the pin could boot the new build on the OLD build's
+  settings and skip its Doctor run (container tier, 3 of 5 runs on
+  2026.9.5).** The config gate's round-trip restore fired whenever
+  `configMigration.completedForVersion !== installedVersion` and a
+  `pre-fix-<installedVersion>.bak` existed — inequality, not the "actual
+  version regression" its comment promised. The first boot on an overlay
+  names its snapshot by a fallback chain that ends at the PIN, so a volume
+  that first ran 2026.7.1-2 under a 2026.9.5 pin left a
+  `pre-fix-2026.9.5.bak` holding the OLD config; when the apply to the pin
+  restarted, the gate read that file as a downgrade snapshot for the
+  now-installed 2026.9.5, restored it over the freshly migrated config, marked
+  2026.9.5 migrated, and launched — and 2026.9.5 exited 78 on its pending
+  `audit-events-v2` repair ("run openclaw doctor --fix"), which the medic
+  could not clear. The restore now requires `compareVersionParts(installed,
+  completedForVersion) < 0` (not comparable → not a regression → the forward
+  migration runs Doctor as an upgrade must); the stale snapshot stays inert.
+- **A return-to-pin apply no longer boots as "OpenClaw was changed outside
+  this dashboard".** applyUpdate records `applied = null` for a pin target,
+  so the activation boot found installed ≠ pin with no recorded apply and
+  took the external-drift path: right outcome (the pin came up), wrong story
+  (a tampering alarm to the operator, `action: drift_reverted` in the boot
+  report). The in-flight transition stamp applyUpdate already leaves
+  (`to = pin`, `ok = null`, `source = operator_apply`, ≤ 7 days) now
+  identifies the boot as the recorded selection landing: `action:
+  activated`, no alarm. Without a fresh stamp the mismatch is still drift.
+- **A file that vanished during the backup walk failed the whole backup
+  (v0.9.87, under a live gateway).** The preflight walk stat'ed every entry
+  it had just listed and turned any failure into `Backup preflight could not
+  finish: cannot stat …` — a hard refusal — while a live gateway keeps
+  writing and removing session transcripts and `.lock` sidecars (the live
+  churn tier caught it: the no-quiesce hard gate returned 409). An entry that
+  is gone by the time it is stat'ed no longer exists: the walk now records it
+  (`skipped[{ kind: "vanished" }]`, `diagnostics.vanishedEntries`) and
+  continues, in the diagnosis and in the copy's own enumeration; any other
+  stat failure still aborts loudly. The `openclaw-backup-minimal` "shares the
+  excluded measurement cap" test also stopped pinning which excluded
+  directory readdir yields first (it flipped on the Linux runner).
+- **Live tier: the thinking-API probe carried the same minified-key guess the
+  library had** (`mod.i` / `mod.s`; v0.9.88 fixed the library). Since
+  2026.9.5 became `latest` (2026-09-19) the probe bound
+  `listThinkingLevelLabels` and every level id read empty. It binds by
+  function name now.
+- **Live tier: assertions left stale by v0.9.86/v0.9.87.** The first
+  `backup: running` detail is "Backup preflight complete — preparing a
+  consistent backup" since v0.9.87 and the row is rewritten in place by the
+  progress ticker (it ends on the relaunch wait), so the contention and
+  downgrade suites now prove the pause from the completed row's "(gateway
+  paused)" suffix, the contention retry from the run log, and the single
+  running row by count; the offline-copy record and the manifest gained
+  `profile`, `partial`, `requiredAssets`, the snapshot interval and
+  `coverage.migration` (format 3) — the contention suite asserts the
+  documented twelve AlphaClaw-only manifest keys.
+- **Live tier: the migration-minimal restore suite hard-coded 2026.9.3 for
+  databases written by the repo bin**, which v0.9.88 moved to 2026.9.5 (state
+  17 / agent 21) — `createSource` now derives the schema from the release
+  that wrote the files, and both suites stage 2026.9.3 explicitly as their
+  source (the second migrates it to 2026.9.4 by design).
+- **A failed medic `doctor --fix` no longer reads as a black box.** The
+  container journeys that crashed on the pending `audit-events-v2` repair
+  logged only `doctor_fix failed (backup …)`; Doctor's refusal lived in an
+  `INCIDENT-*.md` inside the container that no artifact carried. The medic
+  log line and the ledger `error` now end with `exit <code>; doctor said:
+  <Doctor's last three lines>` (or the runner's named refusal, e.g.
+  `doctor_restored_stale_config`), and both container journeys copy the
+  rescue workspace's incident bundles into their failure artifacts. Probed on
+  real releases while at it: a 2026.9.3 state (`onboard` + one gateway run)
+  upgrades to 2026.9.5 cleanly — the new gateway's own startup Doctor migrates
+  state v16→v17 — so the refusal seen in CI needs the round-trip state the
+  config-gate fix above no longer produces (TODOS keeps the P3 repro).
+- **Live tier: the Control UI rollback drill (step 6) asserted against a
+  same-document fragment navigation** (`/openclaw/` → `/openclaw/#token=…`
+  never fetched the document the respawned default-mount server served), so
+  it read the legacy page in 5 of 5 runs on 2026.9.5 while the product
+  round-tripped correctly (verified in a browser under `/qa`). The drill now
+  leaves the origin (`about:blank`) before the final load; step 4 settles the
+  page and retries once when the UI's own post-401 recovery navigation races
+  the reload or the cache read (`Not attached to an active page`, 2 of 6 runs).
+
+## [0.9.88] - 2026-09-21
+
+Pins OpenClaw **2026.9.5** (npm `latest` and `beta` since 2026-09-19; 2026.9.4
+shipped in between on 2026-09-11). No runtime change: 2026.9.5 declares the same
+`engines.node` (`>=24.16.0 <25 || >=26.1.0`) as 2026.9.3, so the Node 24.16
+floor, the `node:24-slim` image and the CI matrix from v0.9.80 stand. The
+remaining `2026.9.3` mentions in docs and tests are historical evidence stamps,
+as before; `package.json`'s `dependencies.openclaw` is the pin's only source of
+truth.
+
+### Changed
+
+- **Pin: `openclaw` 2026.9.3 → 2026.9.5.** Both skipped-over releases move a
+  database schema: 2026.9.4 publishes `openclaw.schemaVersions
+  { state: 17, agent: 19 }` and 2026.9.5 `{ state: 17, agent: 21 }` (read from
+  the installed tree and the registry manifest; 2026.9.5 no longer emits an
+  `OPENCLAW_STATE_SCHEMA_VERSION` dist constant, so the metadata-first
+  authority from 0.9.79 is what answers for it). The seed table and the live
+  database fixture gain both rows. Upstream says a schema-21 agent database
+  "older builds cannot open": the downgrade stays hard-gated on a verified
+  backup, and going back is restore-that-backup-with-the-older-build, never
+  reinstall-and-boot. The v0.9.72 pin-bump safety net arms the 24 h
+  automatic-rollback watch for the freshly bumped pin as before.
+- **"What's new" re-verified against 2026.9.5** for both 2026.9 entries: the
+  highlights now cover the line (Atomic Updates that rehearse before switching,
+  plugins without a restart, the schema-21 agent database, backups that capture
+  `$include`d files and linked databases and can self-verify, legacy repairs
+  that wait for `doctor --fix` instead of running at startup, conversation
+  archive/share), and a fourth security-default flip is recorded:
+  `tools.message.crossContext.allowAcrossProviders` is on by default since
+  2026.9.5 — and upstream states this changes existing installs that left the
+  key unset — so the Upgrade page warns about it like the other three.
+
+### Fixed
+
+- **The boot-time Codex migration no longer fails on 2026.9.4+.**
+  `migrateLegacyCodexState` (run from `bin/alphaclaw.js` on every boot with a
+  config) loaded the flat-profile auth repairs from upstream's
+  `doctor-auth-flat-profiles-*` chunk. 2026.9.4 dropped that chunk for
+  `auth-profile-repair-*`, whose only public entry is
+  `repairAuthProfileMigration` (collect the profile-id map → migrate JSON
+  stores to SQLite → repair legacy store ids → repair `auth.profiles`; the
+  same sequence the old branch ran by hand), and its other exports are
+  minified. On the new pin every boot would have logged
+  `Codex migration process failed: … migration module not found` and left a
+  legacy `auth-profiles.json` unmigrated. The loader now marks an ABSENT chunk
+  with a stable error code (`kMigrationModuleNotFound`); the migration falls
+  back to the successor chunk on that code alone — a chunk that exists but lost
+  an export is still a contract break and stays loud — and drives
+  `repairAuthProfileMigration` with the same auto-confirm the SQLite step
+  always had. The route half (`codex-route-warnings-*`) is unchanged. Verified
+  against the real 2026.9.5 dist: legacy `openai-codex:codex-cli` routes and
+  OAuth credentials land in canonical SQLite state and the second run is a
+  no-op. Two upstream renames the test now pins: the canonical target of a
+  legacy `openai-codex:<suffix>` id is `openai:chatgpt-<suffix>` (was
+  `openai:codex-cli` on 2026.9.3), and `openai:codex-cli` itself is a
+  deprecated id that 2026.9.4+ rewrites to `openai:default` at boot —
+  AlphaClaw still writes the deprecated id on "Connect Codex" and reads either,
+  tracked as a P2 in TODOS.md.
+- **Thinking levels bound the wrong upstream functions on 2026.9.5.**
+  `resolveThinkingApi` fell back to remembered minified export KEYS
+  (`mod.i`, `mod.s`) from an older build. Upstream re-letters that table
+  per build, and on 2026.9.5 `i` is `listThinkingLevelLabels` (plain strings)
+  and `s` is `resolveSupportedThinkingLevel`, so every level on
+  `GET /api/models/thinking-options` rendered with an empty id and the
+  per-model default came from the wrong resolver — silently, because a guess
+  that binds SOMETHING never throws. Exports are now bound by function NAME
+  (the same rule the Codex migration loader uses) and a missing name fails
+  loudly with `OpenClaw thinking module exports not found`.
+- **A stale gateway-owner lease no longer parks the gateway after an unclean
+  container death (container tier, boot-durability leg).** 2026.9.4+ records
+  the running gateway as a `state_leases` row (scope `gateway-owner`, 300 s
+  TTL, 30 s heartbeat) and a starting gateway reclaims it only when it can
+  PROVE the holder dead — same hostname, pid gone or start time changed.
+  After `docker rm -f` / an OOM kill / a host reboot the next container has a
+  different hostname, so 2026.9.5 refuses with `Another Gateway owner lease is
+  still active for this state directory` until the row lapses. That wording
+  matched neither ownership-conflict family, so the watchdog read three
+  refusals in five seconds as a generic crash loop and stopped relaunching —
+  the boot-durability container leg timed out on `/healthz` with the UI up
+  and the pin verified. The line is now a third ownership-conflict kind,
+  `owner_lease_held`, on the transient ladder that `state_writer_conflict`
+  already uses (degraded + incident + one notice, no crash count, never
+  `doctor --fix` or `gateway stop`), with one difference: the relaunch waits
+  for the lease's recorded `expires_at` — read READ-ONLY from the state DB by
+  the new `lib/server/openclaw-owner-lease.js`, re-read every degraded tick
+  (a renewing lease pushes the wait out; an unreadable DB waits the full TTL)
+  — instead of the crash backoff, and a lease that keeps renewing across the
+  relaunch budget latches as "another gateway is running against this state
+  directory" (a second container on one volume). Waiting out the TTL alone
+  was not enough — the PR's first strict container run still timed out on a
+  fast Linux runner, because a 5-min lease cannot lapse inside a 5-min health
+  budget — so while waiting, each tick also tries the ONE write this branch
+  makes on upstream's table: `reclaimStaleForeignGatewayOwnerLease` deletes
+  the row only if its holder is on ANOTHER host (a same-host row is
+  upstream's to judge), has missed ≥ 3 heartbeats (90 s), and the DELETE's
+  owner + last-heartbeat fence still matches inside `BEGIN IMMEDIATE` — a
+  beating holder is never removed — then relaunches at once (`repair/
+  owner_lease_held/ok {stale_owner_lease_reclaimed}`; skips book one row per
+  distinct reason). The Watchdog tab names the wait (`owner_lease_held`
+  copy) and the latched case; `describeConflict` carries the lease facts
+  (host, pid, expiry — closed tokens, never stderr) onto the ledger rows and
+  status.
+
+## [0.9.87] - 2026-09-20
+
+### Fixed
+
+- Backup preflight counts the complete state tree, reports directory sizes and absolute symlinks in Upgrade, and refuses oversized or incomplete inventories before pausing the gateway. Known scratch directories and stale SQLite copies are excluded by default; `.env` is never archived, and safe scratch exclusions can be appended without dangerous-tier confirmation.
+- Backup and CLI paths resolve symlinked state roots. Full and migration-only copies share one gateway pause, with a bounded wait for temporary database holders; unsuitable upstream attempts are skipped, and an unanswered relaunch aborts. The bounded manifest reader now accommodates normal 50,000-file inventories, with oversized membership checked before copying. Activation invalidates cached version metadata even when file size and timestamps do not change.
+- Sustained memory pressure at the restart brake sends one actionable admin alert instead of repeating skip events. Watchdog repair skips Doctor while a gateway holds the lifecycle lock, and Overseer reports backup failures as upgrades that never applied rather than suggesting rollback.
+- Added real filesystem, SQLite, archive/restore, pinned CLI, browser, watchdog and upgrade regression coverage for issue #102. OpenClaw worktree cleanup is tracked upstream in openclaw/openclaw#153952.
+
+## [0.9.86] - 2026-09-16
+
+### Fixed
+
+- Updates and **Back up now** attempt a fresh migration backup when full backups fail on oversized scratch directories. The fallback captures databases, configuration, credentials, identity, and agent authentication with online SQLite snapshots and explicit workspace omissions.
+- Backup exclusions can be saved separately for workspaces and state subdirectories. Protected sources cannot be excluded; bounded directory diagnostics identify large or crowded trees without traversing scratch indefinitely.
+- Archives carry verified file inventories, coverage, and capture timestamps. Migration recovery records and archives survive retention pruning, and ownership, corruption, disk exhaustion, and publication checks prevent unsafe success or consent.
+- Gateway memory telemetry now lives under the upstream-excluded temporary directory, preventing telemetry churn from breaking OpenClaw backups. Updated selective-restore guidance and added real WAL, DELETE, 200,050-entry, 2 GiB, and pinned migration coverage.
+
+## [0.9.85] - 2026-09-15
+
+### Fixed
+
+- **Shared reads keep the latest result.** Tabs share one active read per URL; slow polls no longer starve, and old requests cannot overwrite a refresh or mutation. Failed reads retain the last successful data with Retry. Ordinary reads time out after thirty seconds, catalogs after two minutes, and expired or denied access clears protected data.
+- **Crash recovery survives maintenance contention.** A crash remains pending through busy ownership, failed admission and failed replacement attempts. The Watchdog card shows its age and blocker; a successor launch or an explicit stop settles the obligation. Relaunch budgets count actual launches.
+- **Cancelled repairs retain ownership until cleanup finishes.** Deadline and cancellation fences prevent late discovery or model responses from writing. Doctor and repair process groups complete termination and any restore guard before another operation proceeds; unconfirmed cleanup stays visible with recovery guidance.
+- **Upgrade follows the exact operation.** Repair has its own durable ledger ID and lifecycle lease. Lost progress streams and reloads resume that operation, and successful in-place repairs complete without waiting for a restart. Long confirmation dialogs remain usable on smaller screens. Failed dev updates report upstream recovery evidence instead of assuming that state was rolled back.
+- **Managed deployment uncertainty survives restart.** A submitted update is recorded before the provider request. Accepted or unknown attempts prevent duplicate submissions and conflicting update work until a human admin verifies the provider's terminal outcome. The UI no longer exposes provider bridge credentials, and correlated transition audits survive temporary database failure.
+- **Gmail respects the latest intent.** Start, Stop, renewal and disconnect share bounded account ownership. Disabled intent persists immediately, replacement work waits for confirmed cleanup, port assignments remain unique, and remote-stop failures survive reload with Retry. Failed disconnect preserves a disabled account for cleanup.
+- **Overseer notices expire everywhere.** The original sixty-minute deadline follows quiet holds, retries, fallback, restart and duplicate revival. Expired notices stay suppressed with accurate partial-delivery history and retryable audit persistence; other notification classes retain their existing 48-hour policy.
+
+### Changed
+
+- Live apply/downgrade fixtures declare their intended action, Doctor contract checks inspect executable `.mjs` bundles, and the dev updater dry-run enforces strict CLI JSON. Added mounted-hook, process-group, durable-state, route and Chromium regression coverage for the combined wave.
+
+## [0.9.84] - 2026-09-11
+
+Issue #87: the watchdog manufactured `gateway_readiness` incidents while
+OpenClaw itself reported ready, and the incident overseer paged the operator
+about incidents that had recovered on their own long before. Three interacting
+defects: the `/readyz` body's event-loop diagnostic was read as a readiness
+failure; the advisory Doctor run was awaited INSIDE the readiness evaluation,
+so a stale probe could land its verdict (and a second incident) over a newer
+recovery; and automatic overseer reviews were admitted and classified from the
+verdict's wording alone. No change to restart, repair or rollback policy, no
+blanket alarm delays — liveness, startup, drain, channel, crash and OOM
+detection are untouched.
+
+### Fixed
+
+- **Update-run ordering no longer depends on directory listing order.** Two
+  ledger runs created inside the same millisecond (an update and a backup, or
+  two back-to-back backups) tied on `startedAt`, and "latest run" — the
+  Upgrade page, the upgrade overseer's picker, both prune rings and
+  `alphaclaw diagnose` all read the first listed run — fell through to the
+  order the filesystem returned. Each run now carries a creation sequence that
+  breaks the tie (legacy records without one sort by id), so the newest run is
+  first every time. Surfaced by the Node 26 CI lane, where the two runs of
+  `tests/server/upgrade-overseer.test.js` land in one millisecond.
+- **Native readiness is authoritative.** A green `/health` degrades readiness
+  ONLY when OpenClaw's own `/readyz` says `ready: false` or names failing
+  components — and an explicit `ready: true` is ready whatever else the body
+  says: a `starting` / `draining` `status` beside it is telemetry
+  (`readinessStatus`), never a phase. The `eventLoop.degraded` diagnostic — which upstream documents
+  as "does not change the readiness result by itself" — no longer opens a
+  `gateway_readiness` incident, degrades health, arms the retry ladder or
+  withholds acceptance credit; it is telemetry (see Added). A `503` with a
+  `starting` / `draining` body is no longer discarded as "unknown" (which
+  announced recovery for a gateway still coming up): it is a transitional
+  not-ready — up, no incident, no notice, no acceptance credit — re-probed on
+  a 5 s cadence (the bootstrap loop, or outside it one single-shot
+  `readiness_recheck` probe re-armed by each transitional observation) and
+  bounded by the ready budget
+  (`GATEWAY_RESTART_READY_TIMEOUT`, default 300 s), after which the same
+  observation becomes a real not-ready (`readinessReason: "starting did not
+  complete within 300s"`).
+- **An older probe can no longer overwrite a newer one.** Every health probe
+  carries a token (sequence, gateway generation, repair attempt) and a verdict
+  is applied only if no newer probe has completed ("newest completed wins")
+  and the gateway generation is unchanged — checked after `/health`, after
+  `/readyz`, before the readiness write and after the recovery notice. A
+  superseded probe writes nothing and logs one console line; the newest
+  completed probe owns BOTH axes, so `health: degraded` with
+  `readiness: ready` plus a recovery notice is impossible by construction.
+  The advisory Doctor run that used to defer a probe's verdict by up to 20 s
+  is detached from the tick, and its evidence attaches only while the SAME
+  degradation episode is still open — not to a later same-component episode,
+  not across a relaunch or a repair attempt, and not from a Doctor spawn that
+  started before the probe (`stale_doctor_job`); a liveness flap during the
+  Doctor run does not end the episode, so the evidence still attaches, and a
+  collector answer whose personal budget expired (`budgetExpired`) is
+  `unusable` rather than re-joined. A late Doctor result can no longer open a
+  second incident or flip readiness to `not_ready` under a healthy gateway;
+  every dropped result is one console line with a reason. A
+  pending-but-unobserved replacement whose `/readyz` names failing components
+  writes ONE opening row for its episode, not one per probe.
+- **Recovery is no longer assumed from a readiness probe error while the
+  gateway is not ready.** When the last `/readyz` consumed in this gateway
+  generation said not ready and the next one cannot be read (connection
+  error, 5 s timeout, malformed body), the watchdog holds: no "Gateway
+  running again", the incident stays open, health stays degraded and the
+  5→30 s retry ladder keeps probing — bounded by the ready budget, then one
+  `readiness_probe_error {kind, recoveryAssumed: true, heldMs}` row and the
+  old fail-open behaviour. The hold is keyed on the generation's last
+  consumed readiness (the open degradation episode), not on the live
+  readiness value, so it survives a liveness flap: one failed `/health`
+  between two `/readyz` reads no longer lets the next probe error announce
+  recovery, and the hold's ready-budget clock survives the flap too. So does
+  the transitional phase: a gateway that was `starting` when `/health`
+  flapped keeps its hold on the next `/readyz` transport error (no degrade,
+  the 5 s cadence, the same bound), and the flap never restarts the
+  `starting` budget — the phase still expires at the budget counted from its
+  FIRST observation. A 404 (`/readyz` unsupported) fails open at once. An
+  assumed recovery — the hold bound, a 404, a thrown evaluation — announces
+  itself as "🟢 Gateway running again — readiness unverified" (same notice,
+  same quiet-mode class); a recovery certified by a ready body keeps the
+  plain text. Every fail-open also closes the
+  open degradation episode with a `readiness_degraded ok {recovered, assumed,
+  kind}` row and clears the episode key, so the same failing components
+  afterwards open a NEW episode and incident instead of a silent "up but not
+  ready" notice. A relaunch starts a new readiness episode: every launch,
+  exit (incl. benign step-aside exits and incumbent adoption), expected
+  restart, relaunch request and stop resets the readiness axis AND the
+  episode key, so a fresh gateway never inherits a hold, and a relaunched
+  gateway failing on the same components writes its own
+  `readiness_degraded/failed` row (one opening row per generation). The
+  mid-restart `health_check/ok` row the old process answers inside a planned
+  restart window now carries `skipped: true`, so the incident tracker never
+  closes an incident on it. The advisory Doctor is collected only through the
+  injected collector (server.js's `collectWithMeta`); without one the hint is
+  dropped as `unconfigured` — the watchdog no longer spawns a `doctor --lint
+  --json` fallback of its own.
+- **The advisory Doctor is structured and contract-compliant.** The regex
+  over Doctor prose (`/secret/` + `/fail|degrad/`) is replaced by the
+  structured `findings[]` payload usable Doctor output carries, accepting
+  both upstream shapes (security-audit and doctor-lint, verified read-only
+  against OpenClaw 2026.9.3): only a RUNTIME secret failure
+  (`gateway.probe_auth_secretref_unavailable`, or a `core/doctor/gateway-*`
+  finding whose message names a SecretRef AND says it is unavailable —
+  unresolved / could not / failed / missing …) becomes evidence;
+  plaintext-secret hygiene findings and hygiene advice such as "consider a
+  SecretRef" never do. `checkId` must be structural and the message passes the
+  Doctor text sanitizer (control characters stripped, secret values redacted)
+  and the shape redactor (token-shaped values masked), then the 200-character
+  cap. The watchdog no longer spawns a bare `doctor --json` of its own
+  (forbidden by the context contract): Doctor output arrives only through the
+  injected collector (`collectWithMeta`), which owns the `doctor --lint --json`
+  invocation. One collector run per
+  failing-component key per 10 minutes (`kAdvisoryDoctorFloorMs`), and at
+  most one per 2 minutes per gateway generation regardless of key
+  (`kAdvisoryDoctorGlobalFloorMs` — the key is built from gateway-controlled
+  component names, so a rotating `failing[]` list cannot buy a Doctor per
+  probe): an episode inside a floor applies its verdict as usual but logs
+  `readiness advisory dropped (floor)` (suffixed `(global)` for the
+  generation-wide one) instead of spawning; both floors reset with the
+  gateway generation.
+- **Overseer reviews are admitted and classified from incident state, not
+  from wording.** A settled incident that recovered with no watchdog action,
+  or settled more than 60 minutes ago, is marked `skipped` (reason
+  `recovered_no_action` | `stale` | `invalid_resolved_at`) and never spawns a
+  model call — the overseer card says so, and "Review this incident" still
+  runs a manual review. Before sending, the review re-reads the incident and
+  records why it did or did not page (`notifyDecision`) and what actually
+  happened (`notifyOutcome`, from the notifier's real return — never
+  assumed). The quiet-mode class no longer depends on the verdict label: a
+  notice is informational unless the model asks for action or the incident
+  is critical class (`critical` severity, `crash_loop` / `config_error` /
+  `channel_rollback` / `version_mismatch`, or an OOM cause) — the SAME
+  predicate that admits it, so an incident admitted as critical can never be
+  silenced in quiet mode, a critical or `action_needed` notice is never
+  dropped because a new outage began mid-review, and a `monitoring/none`
+  verdict about a long-recovered incident no longer pages.
+- **Codex review follow-ups (#87 G1–G8).** Fence 4 (after the recovery
+  notice) now also latches on lifecycle: a crash exit that lands while the
+  "running again" notice is in flight leaves the incident the exit kept open
+  untouched — no incident close, no `health_check ok` row, no backoff reset
+  from the superseded green probe (G1). The safe-mode axis (`safeMode`,
+  `suppressedChannels`, the `safe_mode` row) is committed only by the probe
+  that owns state — post-claim, with both notices detached from the probe —
+  so an older probe's unsuppressed `/readyz` can no longer clear safe mode
+  and announce "channels resumed" over channels a newer probe saw suppressed
+  (G2). A Doctor hint turned away by the per-key or global floor is deferred,
+  not dropped: the episode's later same-key probes spawn the collector once
+  the floors allow (one `floor` console line per deferred episode), so a
+  degradation that begins inside a floor still gets its `readiness_advisory`
+  evidence (G3). A transitional `readiness_recheck` shot whose tick was
+  skipped (an operation in progress, a pending exit classification) re-arms
+  itself, so the 5 s cadence no longer drifts to the 120 s timer (G4).
+  Adopting a DIFFERENT gateway root pid while already running resets the
+  readiness generation (axis, episode key, transitional/hold clocks, floors —
+  health, counters and the incident untouched), so the new process is not
+  held against its predecessor's not-ready episode (G6). The Watchdog tab's
+  gateway-health card keys on the readiness verdict instead of the retained
+  `readyzFailing[]`: DEGRADED only for a native `not_ready` (component rows,
+  or one generic "OpenClaw reports the gateway not ready" signal when no
+  component is named); a transitional `starting` / `draining` phase renders
+  no readiness card; `ready` with failing components lists them as a neutral
+  "Reported by /readyz (telemetry)" list; `unknown` lists the stale components
+  as "readiness unverified (<probe>)"; older servers without a `readiness`
+  field keep the previous behaviour (G5). The overseer's `recovered_no_action`
+  skip now requires an EXPLICIT empty `actions` array — a missing or malformed
+  `actions` cannot prove no action and stays eligible (G7) — and the
+  failed-skip-write memory only remembers writes that actually failed,
+  bounded at 500 ids (`kSkipMarkedMaxEntries`, G8).
+
+### Added
+
+- **Readiness telemetry rows.** `readiness_advisory` — the detached Doctor's
+  structured finding for an OPEN readiness incident (`finding: { checkId,
+  severity, kind: "runtime", component: "secrets", message }`, `observedAt`,
+  `doctorStartedAt`, `doctorSettledAt`, `episode`; append-only, never opens
+  or closes an incident) — and `event_loop_pressure` (`warn {reasons[],
+  delayP99Ms}` once per episode with a 10-minute floor, `ok {durationMs}`
+  when a logged episode ends; reasons allowlisted to `event_loop_delay` /
+  `event_loop_utilization` / `cpu`). The telemetry floors survive a liveness
+  flap (a failed `/health` resets the readiness axis only) and reset on a
+  gateway generation change (launch, exit, adoption, expected restart, stop).
+  The incident timeline phrases them
+  ("doctor: <checkId> (<severity>)", "event loop under pressure: …", "event
+  loop recovered") alongside the new liveness phrases "up, still starting",
+  "up, draining" and "up, readiness probe <kind>". The Watchdog tab's
+  gateway-health card shows pressure under a neutral LOAD label — the
+  DEGRADED badge appears only for a native `not_ready` readiness verdict
+  (see Fixed, G5).
+- **`readinessProbe` and `readinessStatus` on `GET /api/watchdog/status`**:
+  how the last `/readyz` read went (`ok | unconfigured | unsupported |
+  unavailable | timeout | malformed`) and what the body said (`started |
+  starting | draining`). `readiness_probe_error` rows are written once per
+  kind transition with a 5-minute per-kind floor that survives liveness
+  flaps and resets with the gateway generation (previously a transport error
+  on `/readyz` wrote no row at all). Gateway-controlled `/readyz` content is
+  bounded before it reaches state or rows: 20 entries × 100 characters per
+  `failing[]` / `suppressed[]` list, and a body over 64 KB reads `malformed`
+  without being parsed.
+  The gateway card reads "Up — channels still starting." / "Up — draining."
+  while readiness is transitional. Runbook: docs/upgrade-troubleshooting.md
+  "Gateway is up but not ready" now distinguishes unknown, starting/draining,
+  not ready and probe-error/hold.
+- **Overseer `skipped` records** on the incident (`{ state: "skipped",
+  reason, manual: false, at }`; one write attempt per incident per process),
+  the `kAutoReviewMaxAgeMs` (60 min) admission bound, and `notifyDecision`
+  (`manual | eligible | incident_changed | ineligible_now | not_steady_state`
+  — `manual` for every manual review, which never notifies) /
+  `notifyOutcome` (`sent | held | suppressed:<reason> | failed |
+  not_attempted`; `sent` means accepted by the notifier — queued to the
+  durable outbox, which owns delivery — `held` is a notice the notifier
+  parked, and a policy suppression is never `failed`) on every automatic
+  review record — enums, visible through `GET /api/watchdog/incidents/:id`.
+## [0.9.83] - 2026-09-10
+
+### Fixed
+
+- **Control UI "Styles failed to load" banner is gone.** The gateway now
+  serves the dashboard under `gateway.controlUi.basePath=/openclaw` — written
+  once by `ensureGatewayProxyConfig`, re-applied and verified after any
+  whole-file config restore — and AlphaClaw forwards `/openclaw*` to it
+  verbatim instead of stripping the prefix. Stripping made the gateway stamp
+  an empty base path into the page, so the UI fetched fonts, themes, `sw.js`,
+  its bootstrap config and avatars from AlphaClaw's root and 404'd; all of
+  them now load through `/openclaw/...`. Under OpenClaw's default `hybrid`
+  reload mode the gateway restarts itself when the key lands; an externally
+  supervised gateway needs one restart.
+- **Unauthenticated Control UI resources answer `401`, not the login page.**
+  Fonts, chunks, themes, `sw.js`, the bootstrap config, avatars and
+  `/assets/*` now get `401 {"error":"Unauthorized"}` on an expired session
+  instead of `302 /login.html`, so the browser never parses HTML as CSS and
+  the Control UI service worker — which caches any `ok` response under the
+  requested URL — can never cache a login page under an asset URL. Documents
+  and `HEAD` probes keep the redirect, so a stale tab still lands on login.
+- **`/openclaw/?query` keeps its query string.** The old exact-match handler
+  dropped it.
+- **Traversal guard on the gateway-UI proxies.** Dot and backslash segments
+  (`/openclaw/../v1/models`, `%2e%2e`, `..\v1`) on `/openclaw*` and
+  `/assets/*` — HTTP and WebSocket upgrades alike — are rejected with `404`
+  before anything is forwarded; the gateway's WHATWG URL parsing would
+  otherwise have collapsed them out of the Control UI namespace.
+
+- **Container tier: a beta gap upgrades the historical stable to the shipped
+  pin.** When no prerelease newer than the pin is published, the production-
+  image journey now runs 2026.7.1-2 → the bundled pin instead of the fixed
+  historical target 2026.9.1-beta.1, which stopped booting when its bundled
+  `@openclaw/voyage-provider@beta` began requiring plugin API >= 2026.9.3
+  (main's 2026-09-10 nightly failed on it). The self-upgrade journey also
+  accepts the managed `gateway.controlUi.basePath` as the one config key the
+  new boot adds.
+
+### Added
+
+- **`ALPHACLAW_CONTROL_UI_MOUNT=legacy` kill switch** (deployment env only,
+  never honored from `.env`, read at process start): restores the pre-0.9.83
+  prefix-strip mount and removes the managed `gateway.controlUi.basePath` at
+  boot so the proxy and the gateway agree again. Use it rather than a code
+  revert: old AlphaClaw strips `/openclaw/x` to `/x`, which a gateway still in
+  base-path mode answers with `404` — a revert alone 404s the dashboard. If
+  you must revert, also delete the key from `openclaw.json` and restart the
+  gateway.
+
 ## [0.9.82] - 2026-09-09
 
 ### Fixed

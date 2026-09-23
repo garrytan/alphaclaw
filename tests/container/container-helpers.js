@@ -308,11 +308,18 @@ const resolveBetaTarget = ({ distTags, versions, stablePin }) => {
   };
 };
 
-// Registry timing must not disable the required browser journey. During a
-// beta gap, seed this published historical stable as a recorded overlay in
-// the unchanged production image. Its schema 1 can migrate to beta's 12/17;
-// 2026.8.x's 15/19 schemas cannot, despite the smaller package version.
-const kHistoricalUpgrade = Object.freeze({ stable: "2026.7.1-2", beta: "2026.9.1-beta.1" });
+// Registry timing must not disable the required browser journey. When a
+// prerelease newer than the shipped pin exists, the journey is pin → beta.
+// During a beta gap it is this published historical stable → the PIN: seed
+// 2026.7.1-2 as a recorded overlay in the unchanged production image and
+// upgrade it to the build we actually ship. Its schema 1 migrates forward to
+// the pin's 15/19, so the real migration spine still runs; and the target is
+// exactly the newest stable, never a stale prerelease. (Until 2026-09-10 the
+// gap journey targeted 2026.9.1-beta.1; that release no longer boots — its
+// bundled `@openclaw/voyage-provider@beta` now requires plugin API
+// >= 2026.9.3 — and failed main's nightly, so the beta gap must never fall
+// back to a fixed historical prerelease again.)
+const kHistoricalStable = "2026.7.1-2";
 const resolveUpgradeJourney = ({ distTags, versions, stablePin }) => {
   const requirePublished = (version) => {
     if (!version || !Object.prototype.hasOwnProperty.call(versions || {}, version)) {
@@ -324,10 +331,24 @@ const resolveUpgradeJourney = ({ distTags, versions, stablePin }) => {
   const resolved = resolveBetaTarget({ distTags, versions, stablePin });
   if (resolved.version) {
     requirePublished(resolved.version);
-    return { stable: stablePin, beta: resolved.version, source: resolved.source, tagged: resolved.tagged };
+    // `beta` is the journey's TARGET version (name kept for the consumers);
+    // `targetChannel` tells the browser step which catalog section lists it.
+    return {
+      stable: stablePin,
+      beta: resolved.version,
+      targetChannel: "beta",
+      source: resolved.source,
+      tagged: resolved.tagged,
+    };
   }
-  for (const version of Object.values(kHistoricalUpgrade)) requirePublished(version);
-  return { ...kHistoricalUpgrade, source: "historical-reference", tagged: resolved.tagged };
+  requirePublished(kHistoricalStable);
+  return {
+    stable: kHistoricalStable,
+    beta: stablePin,
+    targetChannel: "stable",
+    source: "stable-pin",
+    tagged: resolved.tagged,
+  };
 };
 
 // Login against the real server with the shared setup password and return a

@@ -194,6 +194,29 @@ describe("server/llm-client", () => {
     expect(result.attempts[0].error).toMatch(/timed out after 20ms/);
   });
 
+  it.each(["headers", "body"])("cancellation discards an ignored-abort %s response without trying another model", async (phase) => {
+    vi.useFakeTimers();
+    let finishRead;
+    const stalled = new Promise((resolve) => { finishRead = resolve; });
+    const response = jsonResponse(anthropicBody("late diagnosis"));
+    const fetchImpl = vi.fn(() => phase === "headers" ? stalled : { ...response, json: () => stalled });
+    const client = createFrontierLlmClient({ env: { ANTHROPIC_API_KEY: "a" }, fetchImpl });
+    const controller = new AbortController();
+    try {
+      const completion = client.complete({ prompt: "p", signal: controller.signal });
+      await vi.advanceTimersByTimeAsync(0);
+      controller.abort("shutdown");
+      expect(await completion).toMatchObject({ ok: false, cancelled: true });
+      expect(fetchImpl.mock.calls[0][1].signal.aborted).toBe(true);
+      finishRead(phase === "headers" ? response : anthropicBody("late diagnosis"));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(fetchImpl).toHaveBeenCalledTimes(1);
+    } finally {
+      finishRead(null);
+      vi.useRealTimers();
+    }
+  });
+
   it("returns a per-candidate attempt trail when every candidate fails", async () => {
     const fetchImpl = vi.fn(async () => {
       const error = new Error("aborted");

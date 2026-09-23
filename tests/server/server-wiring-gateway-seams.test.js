@@ -160,7 +160,7 @@ describe("lib/server.js composition pins (lane C / lane A hand-offs)", () => {
     // The consumer half of the contract: channel-sync sizes the hold itself.
     const channelSyncSource = readSource("lib", "server", "openclaw-channel-sync.js");
     expect(channelSyncSource).toMatch(
-      /gatewayQuiesce\.acquireLock\(\{[^}]*?leaseMs:\s*quiesceHoldMs\(\),/,
+      /gatewayQuiesce\.acquireLock\(\{[^}]*?leaseMs:\s*holdMs,/,
     );
 
     // Run the EXACT arrow lib/server.js binds against a real lock whose

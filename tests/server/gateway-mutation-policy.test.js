@@ -69,6 +69,34 @@ describe("gateway mutation admission", () => {
     } finally { hold(); }
   });
 
+  it("only an owned repair lease passes its apply latch and never bypasses a hold", async () => {
+    const lock = createGatewayLifecycleLock();
+    let info = {};
+    const policy = createGatewayMutationPolicy({
+      lock, isApplyInProgress: () => true, getChannelInfo: () => info,
+    });
+    const hold = await lock.acquire("update_repair");
+    const options = { hold, intent: kGatewayMutationIntents.repair };
+    try {
+      expect(policy.read(options)).toBeNull();
+      expect(policy.read({ hold, intent: kGatewayMutationIntents.applyRecovery }).code).toBe("apply_in_progress");
+      expect(policy.read({ hold, intent: "repair" }).code).toBe("apply_in_progress");
+      const forged = Object.assign(() => {}, hold);
+      expect(policy.read({ ...options, hold: forged }).code).toBe("lease_expired");
+      info.gatewayHold = { reason: "version_mismatch", at: 1 };
+      expect(policy.read({ ...options, recoveryHold: info.gatewayHold }).code).toBe("gateway_held");
+      info.gatewayHold.reason = "config_migration_failed";
+      expect(policy.read(options).code).toBe("gateway_held");
+      info.stateCorrupted = true;
+      expect(policy.read(options).code).toBe("gateway_hold_unreadable");
+    } finally { await hold(); }
+    expect(policy.read(options).code).toBe("lease_expired");
+    const apply = await lock.acquire("apply_commit");
+    try {
+      expect(policy.read({ hold: apply, intent: kGatewayMutationIntents.repair }).code).toBe("apply_in_progress");
+    } finally { await apply(); }
+  });
+
   it("backed-up apply recovery owns only its original hold under the current apply lease", async () => {
     const lock = createGatewayLifecycleLock();
     const hold = await lock.acquire("apply_commit");

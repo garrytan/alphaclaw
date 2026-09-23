@@ -1,7 +1,7 @@
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const { resolveCodexMigrationBuild, loadOpenclawMigrationApi } = require("../../lib/server/openclaw-codex-migration-runtime");
+const { resolveCodexMigrationBuild, loadOpenclawMigrationApi, kMigrationModuleNotFound } = require("../../lib/server/openclaw-codex-migration-runtime");
 const { createOpenclawReleaseChannelStore } = require("../../lib/server/openclaw-release-channel");
 
 const kShaA = "a".repeat(40);
@@ -52,6 +52,29 @@ describe("Codex migration executing build", () => {
     await expect(loadApi(build)).rejects.toThrow(`OpenClaw ${kShaA} migration module not found`);
     writeApi("fixture", extension);
     await expect(loadOpenclawMigrationApi({ build, prefix: "codex-route-warnings", functionNames: ["maybeRepairCodexRoutes"] })).rejects.toThrow("migration exports not found");
+  });
+
+  it("names an ABSENT chunk with a stable code and an export-less chunk with none (2026.9.4+ successor fallback)", async () => {
+    // 2026.9.4 dropped `doctor-auth-flat-profiles-*` for `auth-profile-repair-*`.
+    // The migration falls back on the code alone: a chunk that exists but
+    // lost an export is a contract break, not a reason to try another chunk.
+    const build = describeBuild();
+    const absent = await loadOpenclawMigrationApi({ build, prefix: "doctor-auth-flat-profiles", functionNames: ["maybeRepairOpenAICodexAuthConfig"] }).catch((error) => error);
+    expect(absent).toBeInstanceOf(Error);
+    expect(absent.code).toBe(kMigrationModuleNotFound);
+    expect(absent.message).toContain("migration module not found: doctor-auth-flat-profiles");
+
+    fs.writeFileSync(path.join(checkoutDir, "dist", "doctor-auth-flat-profiles-fixture.mjs"), "export function unrelated() {}\n");
+    const exportless = await loadOpenclawMigrationApi({ build, prefix: "doctor-auth-flat-profiles", functionNames: ["maybeRepairOpenAICodexAuthConfig"] }).catch((error) => error);
+    expect(exportless).toBeInstanceOf(Error);
+    expect(exportless.code).toBeUndefined();
+    expect(exportless.message).toContain("migration exports not found");
+
+    // The successor chunk is matched by function NAME, not export key: 2026.9.5
+    // publishes `export { repairAuthProfileMigration as t }`.
+    fs.writeFileSync(path.join(checkoutDir, "dist", "auth-profile-repair-fixture.mjs"), "async function repairAuthProfileMigration() { return \"composed\"; }\nexport { repairAuthProfileMigration as t };\n");
+    const api = await loadOpenclawMigrationApi({ build, prefix: "auth-profile-repair", functionNames: ["repairAuthProfileMigration"] });
+    expect(await api.repairAuthProfileMigration()).toBe("composed");
   });
 
   it("uses the installed fallback when the selected checkout cannot execute", () => {

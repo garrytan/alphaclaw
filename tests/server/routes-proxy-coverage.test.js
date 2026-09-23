@@ -21,8 +21,11 @@ const close = (server) =>
     server.close((err) => (err ? reject(err) : resolve()));
   });
 
-const registerDefaults = ({ app, ...overrides }) => {
-  registerProxyRoutes({
+// `register` lets the legacy-mount block wire an app from a re-required copy
+// of routes/proxy (kControlUiMount is fixed at module load) while sharing
+// these defaults with every other test.
+const registerDefaults = ({ app, register = registerProxyRoutes, ...overrides }) => {
+  register({
     app,
     proxy: { web: vi.fn() },
     getGatewayUrl: () => "http://127.0.0.1:1",
@@ -81,22 +84,61 @@ describe("server/routes/proxy coverage", () => {
       return { app, proxy };
     };
 
-    it("rewrites /openclaw to the gateway root", async () => {
+    // Verbatim mount contract (control-ui-mount.js): the gateway serves the
+    // Control UI under gateway.controlUi.basePath=/openclaw and resolves every
+    // resource URL from the base path it stamps, so AlphaClaw must forward the
+    // request-target UNTOUCHED — stripping the prefix (the pre-fix behavior)
+    // is what made fonts/themes/sw.js 404 at AlphaClaw's root.
+    it("forwards /openclaw to the gateway verbatim (no prefix strip)", async () => {
       const { app, proxy } = createProxyApp();
       const res = await request(app).get("/openclaw");
       expect(res.status).toBe(200);
       expect(res.body).toEqual({
-        url: "/",
+        url: "/openclaw",
         target: "http://gateway.internal:18789",
       });
       expect(proxy.web).toHaveBeenCalledTimes(1);
     });
 
-    it("strips the /openclaw prefix from nested paths", async () => {
+    it("preserves the /openclaw prefix and query on nested paths", async () => {
       const { app } = createProxyApp();
       const res = await request(app).get("/openclaw/chat?tab=1");
       expect(res.status).toBe(200);
-      expect(res.body.url).toBe("/chat?tab=1");
+      expect(res.body.url).toBe("/openclaw/chat?tab=1");
+    });
+
+    it("forwards the trailing-slash form /openclaw/ as-is", async () => {
+      const { app } = createProxyApp();
+      const res = await request(app).get("/openclaw/");
+      expect(res.status).toBe(200);
+      expect(res.body.url).toBe("/openclaw/");
+    });
+
+    it("keeps the query on /openclaw/?x=1 (the old exact-match handler dropped it)", async () => {
+      const { app } = createProxyApp();
+      const res = await request(app).get("/openclaw/?x=1");
+      expect(res.status).toBe(200);
+      expect(res.body.url).toBe("/openclaw/?x=1");
+    });
+
+    it("forwards Control UI resource paths with their exact path and query", async () => {
+      // The resources the UI resolves from the stamped base path — the ones
+      // that 404'd under the strip and tripped "Styles failed to load".
+      const { app, proxy } = createProxyApp();
+      const kResourcePaths = [
+        "/openclaw/fonts/jetbrains-mono.css?v=b1",
+        "/openclaw/themes/dash.css?v=b1",
+        "/openclaw/assets/index-abc.css",
+        "/openclaw/sw.js",
+        "/openclaw/__openclaw/control-ui-config.json",
+        "/openclaw/avatar/main",
+      ];
+      for (const path of kResourcePaths) {
+        const res = await request(app).get(path);
+        expect(res.status, path).toBe(200);
+        expect(res.body.url, path).toBe(path);
+      }
+      expect(proxy.web).toHaveBeenCalledTimes(kResourcePaths.length);
     });
 
     it("forwards /assets paths unchanged", async () => {
@@ -104,6 +146,169 @@ describe("server/routes/proxy coverage", () => {
       const res = await request(app).get("/assets/app.js");
       expect(res.status).toBe(200);
       expect(res.body.url).toBe("/assets/app.js");
+    });
+
+    describe("traversal guard", () => {
+      // supertest's client (superagent) parses the target with the WHATWG URL
+      // parser, which collapses BOTH a literal `..` AND `%2e%2e` before the
+      // request leaves the client — Express would see `/v1/models` and the
+      // guard would never run, so a supertest matrix would pass vacuously.
+      // Node's http client sends `path` verbatim, so the matrix goes over a
+      // real listening socket. The e2e file repeats the `..\` form over a
+      // raw net socket against the whole server.
+      const rawGet = (port, path) =>
+        new Promise((resolve, reject) => {
+          const clientReq = http.request(
+            { host: "127.0.0.1", port, path, method: "GET" },
+            (res) => {
+              const chunks = [];
+              res.on("data", (chunk) => chunks.push(chunk));
+              res.on("end", () =>
+                resolve({
+                  status: res.statusCode,
+                  body: Buffer.concat(chunks).toString("utf8"),
+                }),
+              );
+            },
+          );
+          clientReq.on("error", reject);
+          clientReq.end();
+        });
+
+      const withListeningApp = async (app, run) => {
+        const server = http.createServer(app);
+        const port = await listen(server);
+        try {
+          return await run(port);
+        } finally {
+          await close(server);
+        }
+      };
+
+      // Every form the gateway's WHATWG parser would fold back into a root
+      // path: dot segments (literal and percent-encoded) and backslashes
+      // (literal and percent-encoded, since WHATWG treats `\` as `/`), on
+      // BOTH gateway-UI namespaces.
+      const kTraversalPaths = [
+        "/openclaw/../v1/models",
+        "/openclaw/%2e%2e/v1/models",
+        "/openclaw/%5c..%5cv1/models",
+        "/openclaw/..\\v1/models",
+        "/assets/../v1/models",
+        "/assets/%2e%2e/x",
+      ];
+
+      it.each(kTraversalPaths)(
+        "answers 404 for %s without calling proxy.web",
+        async (path) => {
+          const { app, proxy } = createProxyApp();
+          const res = await withListeningApp(app, (port) => rawGet(port, path));
+          expect(res.status).toBe(404);
+          expect(JSON.parse(res.body)).toEqual({ error: "Not found" });
+          expect(proxy.web).not.toHaveBeenCalled();
+        },
+      );
+
+      it("still forwards a dot segment that lives only in the query", async () => {
+        // `?v=..` is a legitimate cache buster; the gateway never normalizes
+        // the query, so the guard must not be over-broad.
+        const { app, proxy } = createProxyApp();
+        const res = await withListeningApp(app, (port) =>
+          rawGet(port, "/openclaw/fonts/x.css?v=.."),
+        );
+        expect(res.status).toBe(200);
+        expect(JSON.parse(res.body).url).toBe("/openclaw/fonts/x.css?v=..");
+        expect(proxy.web).toHaveBeenCalledTimes(1);
+      });
+    });
+
+    describe("legacy mount (ALPHACLAW_CONTROL_UI_MOUNT=legacy)", () => {
+      // kControlUiMount is resolved once at module load, so the rollback mode
+      // needs a fresh copy of control-ui-mount AND routes/proxy required under
+      // the env. The env is restored and both cache entries dropped as soon as
+      // the copy is captured (mirrors loadFresh in control-ui-mount.test.js):
+      // the legacy closure lives on in `legacyRegisterProxyRoutes`, while any
+      // later require in this process sees the default mode again.
+      const kMountModulePath = require.resolve("../../lib/server/control-ui-mount");
+      const kProxyModulePath = require.resolve("../../lib/server/routes/proxy");
+      let legacyRegisterProxyRoutes;
+
+      const dropModeModules = () => {
+        delete require.cache[kMountModulePath];
+        delete require.cache[kProxyModulePath];
+      };
+
+      beforeAll(() => {
+        const saved = process.env.ALPHACLAW_CONTROL_UI_MOUNT;
+        process.env.ALPHACLAW_CONTROL_UI_MOUNT = "legacy";
+        dropModeModules();
+        try {
+          ({ registerProxyRoutes: legacyRegisterProxyRoutes } = require(kProxyModulePath));
+        } finally {
+          if (saved === undefined) delete process.env.ALPHACLAW_CONTROL_UI_MOUNT;
+          else process.env.ALPHACLAW_CONTROL_UI_MOUNT = saved;
+          dropModeModules();
+        }
+      });
+
+      afterAll(() => {
+        legacyRegisterProxyRoutes = undefined;
+        dropModeModules();
+      });
+
+      const createLegacyProxyApp = () => {
+        const app = express();
+        const proxy = {
+          web: vi.fn((req, res) => res.status(200).json({ url: req.url })),
+        };
+        registerDefaults({
+          app,
+          proxy,
+          register: legacyRegisterProxyRoutes,
+          getGatewayUrl: () => "http://gateway.internal:18789",
+        });
+        return { app, proxy };
+      };
+
+      it("strips the /openclaw prefix the way the pre-fix proxy did", async () => {
+        const { app, proxy } = createLegacyProxyApp();
+        const kStripCases = [
+          ["/openclaw", "/"],
+          ["/openclaw/chat?tab=1", "/chat?tab=1"],
+          ["/openclaw/fonts/x.css", "/fonts/x.css"],
+          // The legacy strip keeps the query too (the old exact-match handler
+          // dropped it).
+          ["/openclaw/?x=1", "/?x=1"],
+        ];
+        for (const [requested, forwarded] of kStripCases) {
+          const res = await request(app).get(requested);
+          expect(res.status, requested).toBe(200);
+          expect(res.body.url, requested).toBe(forwarded);
+        }
+        expect(proxy.web).toHaveBeenCalledTimes(kStripCases.length);
+      });
+
+      it("keeps the traversal guard in legacy mode", async () => {
+        // %5c survives superagent's URL normalization, so supertest is enough.
+        const { app, proxy } = createLegacyProxyApp();
+        const res = await request(app).get("/openclaw/%5c..%5cv1/models");
+        expect(res.status).toBe(404);
+        expect(res.body).toEqual({ error: "Not found" });
+        expect(proxy.web).not.toHaveBeenCalled();
+      });
+
+      it("does not leak the legacy mode into the module the rest of this file uses", async () => {
+        const { app } = createProxyApp();
+        const res = await request(app).get("/openclaw/chat?tab=1");
+        expect(res.body.url).toBe("/openclaw/chat?tab=1");
+        // The file-level proxy import can never observe the leak (it was
+        // bound at load). What CAN leak is process.env and require.cache —
+        // a fresh require must resolve to basepath and the env must be clear.
+        expect(process.env.ALPHACLAW_CONTROL_UI_MOUNT).toBeUndefined();
+        delete require.cache[kMountModulePath];
+        expect(require(kMountModulePath).kControlUiMount).toBe("basepath");
+        delete require.cache[kMountModulePath];
+      });
     });
 
     it("proxies /api paths except reserved setup prefixes", async () => {

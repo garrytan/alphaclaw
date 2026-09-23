@@ -994,6 +994,53 @@ describe("server/openclaw-channel-sync", () => {
       ).toBe(true);
     });
 
+    it("activates a RECORDED return-to-pin apply at boot as 'activated' — no drift alarm (v0.9.89; the container journey's historical→pin activation read as tampering)", async () => {
+      const { sync, store, installDir, notify } = createHarness({
+        pin: "1.0.0",
+        installedVersion: "9.9.9",
+      });
+      store.updateState((s) => {
+        s.pinVersion = "1.0.0";
+        // applyUpdate's record step for a pin target: applied = null plus the
+        // in-flight transition stamp (ok stays null until the run settles).
+        s.applied = null;
+        s.lastTransition = {
+          at: Date.now(),
+          from: "9.9.9",
+          to: "1.0.0",
+          kind: "downgrade",
+          source: "operator_apply",
+          reason: null,
+          operationId: "op-return-to-pin",
+          ok: null,
+          consumedAt: null,
+        };
+        return s;
+      });
+      expect(saveOverlayFixture(store, "1.0.0")).toEqual({ ok: true });
+
+      const result = sync.syncAtBoot();
+      await flushAsync();
+
+      expect(result.ok).toBe(true);
+      expect(result.action).toBe("activated");
+      expect(store.readInstalledVersion({ installDir })).toBe("1.0.0");
+      expect(result.warnings.some((warning) => warning.includes("recorded return to the pin"))).toBe(true);
+      expect(notifyMessages(notify).some((message) => message.includes("changed outside"))).toBe(false);
+
+      // The same mismatch WITHOUT the stamp (or with a stale/settled one) is still drift.
+      const drift = createHarness({ pin: "1.0.0", installedVersion: "9.9.9" });
+      drift.store.updateState((s) => {
+        s.pinVersion = "1.0.0";
+        s.lastTransition = { at: Date.now() - 8 * 24 * 60 * 60 * 1000, from: "9.9.9", to: "1.0.0", kind: "downgrade", source: "operator_apply", reason: null, operationId: "old", ok: null, consumedAt: null };
+        return s;
+      });
+      expect(saveOverlayFixture(drift.store, "1.0.0")).toEqual({ ok: true });
+      const driftResult = drift.sync.syncAtBoot();
+      await flushAsync();
+      expect(driftResult.action).toBe("drift_reverted");
+    });
+
     it("reconciles a changed declared pin without a drift notification", async () => {
       const { sync, store, notify } = createHarness({
         pin: "1.0.1",
@@ -1230,7 +1277,298 @@ describe("server/openclaw-channel-sync", () => {
     });
   });
 
+  // ── Control UI mount contract (control-ui-mount.js) ──────────────────────
+  describe("Control UI mount key (gateway.controlUi.basePath)", () => {
+    const configPathOf = (openclawDir) => path.join(openclawDir, "openclaw.json");
+    const writeConfig = (openclawDir, config) => {
+      fs.mkdirSync(openclawDir, { recursive: true });
+      fs.writeFileSync(configPathOf(openclawDir), `${JSON.stringify(config, null, 2)}\n`);
+    };
+    const readConfig = (openclawDir) =>
+      JSON.parse(fs.readFileSync(configPathOf(openclawDir), "utf8"));
+    const kManagedStripe = { label: "BETA · 1.0.0", color: "amber" };
+
+    it("removing the managed environment stripe leaves controlUi.basePath in place", () => {
+      // The stripe remover prunes an EMPTY controlUi parent; with basePath
+      // beside the stripe that delete can never fire, so the mount key
+      // survives the beta → stable transition.
+      const stableHarness = () => {
+        const h = createHarness({
+          pin: "1.0.0",
+          channel: "stable",
+          installedVersion: "1.0.0",
+          sentinelVersion: "1.0.0",
+        });
+        h.store.updateState((s) => {
+          s.pinVersion = "1.0.0";
+          return s;
+        });
+        return h;
+      };
+
+      const withBasePath = stableHarness();
+      writeConfig(withBasePath.openclawDir, {
+        gateway: {
+          controlUi: { basePath: "/openclaw", environment: { ...kManagedStripe } },
+        },
+      });
+      expect(withBasePath.sync.syncAtBoot().ok).toBe(true);
+      const cfg = readConfig(withBasePath.openclawDir);
+      expect(cfg.gateway.controlUi.environment).toBeUndefined();
+      expect(cfg.gateway.controlUi.basePath).toBe("/openclaw");
+
+      // Control: the stripe alone still prunes the parent (existing
+      // behavior) — the two runs differ by exactly the mount key.
+      const stripeOnly = stableHarness();
+      writeConfig(stripeOnly.openclawDir, {
+        gateway: { controlUi: { environment: { ...kManagedStripe } } },
+      });
+      expect(stripeOnly.sync.syncAtBoot().ok).toBe(true);
+      expect(readConfig(stripeOnly.openclawDir).gateway.controlUi).toBeUndefined();
+    });
+
+    // The round-trip restore is the one whole-file restore reachable without
+    // a doctor run or a crash first (the rollback and migration-gate restores
+    // need one); all three go through the same restoreConfigFromBackup, so
+    // this path pins the repair for every restore source.
+    const kRestoredBackup = {
+      gateway: { controlUi: { allowedOrigins: ["https://setup.example.com"] } },
+      restoredMarker: true,
+    };
+    const kLiveNewerShape = {
+      gateway: {
+        controlUi: {
+          allowedOrigins: ["https://setup.example.com"],
+          basePath: "/openclaw",
+        },
+      },
+      migrated: "newer-shape",
+    };
+    const seedRoundTripRestore = ({ ensureGatewayProxyConfig } = {}) => {
+      const logger = { log: vi.fn(), warn: vi.fn(), error: vi.fn() };
+      const harness = createHarness({
+        pin: "1.0.0",
+        installedVersion: "1.0.0",
+        sentinelVersion: "1.0.0",
+        extraSyncOptions: {
+          logger,
+          ...(ensureGatewayProxyConfig ? { ensureGatewayProxyConfig } : {}),
+        },
+      });
+      harness.store.updateState((s) => {
+        s.pinVersion = "1.0.0";
+        // A migration completed for the newer 2.0.0 …
+        s.configMigration = {
+          completedForVersion: "2.0.0",
+          lastAttempt: { version: "2.0.0", at: 1, ok: true },
+        };
+        // … and the operator's landed, unconsumed downgrade stamp authorizes
+        // restoring 1.0.0's pre-fix backup (describeVersionRegressionIntent).
+        s.lastTransition = {
+          at: harness.nowRef.now,
+          from: "2.0.0",
+          to: "1.0.0",
+          kind: "downgrade",
+          source: "operator_apply",
+          reason: null,
+          operationId: "op-downgrade",
+          ok: true,
+          consumedAt: null,
+        };
+        return s;
+      });
+      writeConfig(harness.openclawDir, kLiveNewerShape);
+      const backupBytes = `${JSON.stringify(kRestoredBackup, null, 2)}\n`;
+      fs.writeFileSync(
+        path.join(harness.openclawDir, "openclaw.json.pre-fix-1.0.0.bak"),
+        backupBytes,
+      );
+      return {
+        harness,
+        configPath: configPathOf(harness.openclawDir),
+        backupBytes,
+        logLines: () => logger.log.mock.calls.map((call) => String(call[0])),
+      };
+    };
+    const mountRepairWarnings = (warnings) =>
+      warnings.filter((w) => String(w).includes("control UI mount repair failed"));
+
+    it("re-applies the gateway proxy config after a round-trip restore and verifies the key is back", async () => {
+      // Stands in for gateway.js ensureGatewayProxyConfig: a read-modify-write
+      // that puts the mount key into the live file.
+      const seen = [];
+      const ref = { configPath: null };
+      const ensureGatewayProxyConfig = vi.fn((origin) => {
+        const raw = fs.readFileSync(ref.configPath, "utf8");
+        seen.push({ origin, raw });
+        const cfg = JSON.parse(raw);
+        cfg.gateway.controlUi = { ...(cfg.gateway.controlUi || {}), basePath: "/openclaw" };
+        fs.writeFileSync(ref.configPath, `${JSON.stringify(cfg, null, 2)}\n`);
+        return true;
+      });
+      const seeded = seedRoundTripRestore({ ensureGatewayProxyConfig });
+      ref.configPath = seeded.configPath;
+
+      const outcome = await seeded.harness.sync.reconcileBootConfig();
+
+      expect(outcome).toEqual(
+        expect.objectContaining({ status: "ok", reason: "round-trip-restore" }),
+      );
+      // Called once, origin-less, AFTER the restore committed the backup
+      // bytes (the file lock is not re-entrant — the hook runs outside it).
+      expect(ensureGatewayProxyConfig).toHaveBeenCalledTimes(1);
+      expect(seen).toEqual([{ origin: undefined, raw: seeded.backupBytes }]);
+      const after = readConfig(seeded.harness.openclawDir);
+      expect(after.restoredMarker).toBe(true);
+      expect(after.migrated).toBeUndefined();
+      expect(after.gateway.controlUi.basePath).toBe("/openclaw");
+      expect(after.gateway.controlUi.allowedOrigins).toEqual(["https://setup.example.com"]);
+      // Postcondition satisfied: the success line, no failure code, no warning.
+      expect(mountRepairWarnings(outcome.warnings)).toEqual([]);
+      const lines = seeded.logLines();
+      expect(
+        lines.some((line) =>
+          line.includes(
+            "re-applied the gateway proxy config after the round_trip restore (control_ui_mount=basepath)",
+          ),
+        ),
+      ).toBe(true);
+      expect(lines.some((line) => line.includes("control_ui_mount_repair_failed"))).toBe(false);
+    });
+
+    it.each([
+      [
+        "throws",
+        () => {
+          throw new Error("disk full");
+        },
+        "(disk full)",
+      ],
+      ["is a no-op that leaves the key absent", () => false, null],
+    ])(
+      "reports a loud, non-fatal repair failure when the re-ensure hook %s",
+      async (_label, hookImpl, errorText) => {
+        const ensureGatewayProxyConfig = vi.fn(hookImpl);
+        const seeded = seedRoundTripRestore({ ensureGatewayProxyConfig });
+
+        const outcome = await seeded.harness.sync.reconcileBootConfig();
+
+        // The restore itself still lands and the boot goes on — a failed
+        // repair is a warning, never a throw.
+        expect(outcome).toEqual(
+          expect.objectContaining({ status: "ok", reason: "round-trip-restore" }),
+        );
+        expect(ensureGatewayProxyConfig).toHaveBeenCalledTimes(1);
+        expect(fs.readFileSync(seeded.configPath, "utf8")).toBe(seeded.backupBytes);
+        expect(
+          readConfig(seeded.harness.openclawDir).gateway.controlUi.basePath,
+        ).toBeUndefined();
+        // Postcondition unmet → the fixed, greppable code in the log …
+        const failureLines = seeded
+          .logLines()
+          .filter((line) =>
+            line.includes("control_ui_mount_repair_failed source=round_trip mount=basepath"),
+          );
+        expect(failureLines).toHaveLength(1);
+        expect(failureLines[0]).toContain("Styles failed to load");
+        if (errorText) expect(failureLines[0]).toContain(errorText);
+        else expect(failureLines[0]).not.toContain("disk full");
+        expect(
+          seeded.logLines().some((line) => line.includes("re-applied the gateway proxy config")),
+        ).toBe(false);
+        // … and ONE warning on the restore caller's warnings[] (the boot
+        // report / notification surface).
+        const warnings = mountRepairWarnings(outcome.warnings);
+        expect(warnings).toHaveLength(1);
+        expect(warnings[0]).toContain("after the round_trip config restore");
+        expect(warnings[0]).toContain("Styles failed to load");
+      },
+    );
+
+    it("treats an unparseable openclaw.json after the hook as a FAILED repair (strict verification read)", async () => {
+      // The verification must read the file strictly: the lenient reader's
+      // `fallback: {}` would make an unreadable file look satisfied in legacy
+      // mode ("no key" is exactly what legacy wants) and mask the failure. So
+      // a hook that corrupts the file — or a disk that hands back garbage —
+      // must surface as control_ui_mount_repair_failed, whatever the mode.
+      let configPath = null;
+      const ensureGatewayProxyConfig = vi.fn(() => {
+        fs.writeFileSync(configPath, "{ not json");
+        return true;
+      });
+      const seeded = seedRoundTripRestore({ ensureGatewayProxyConfig });
+      configPath = seeded.configPath;
+
+      const outcome = await seeded.harness.sync.reconcileBootConfig();
+
+      expect(outcome).toEqual(
+        expect.objectContaining({ status: "ok", reason: "round-trip-restore" }),
+      );
+      expect(ensureGatewayProxyConfig).toHaveBeenCalledTimes(1);
+      const failureLines = seeded
+        .logLines()
+        .filter((line) =>
+          line.includes("control_ui_mount_repair_failed source=round_trip mount=basepath"),
+        );
+      expect(failureLines).toHaveLength(1);
+      expect(
+        seeded.logLines().some((line) => line.includes("re-applied the gateway proxy config")),
+      ).toBe(false);
+      expect(mountRepairWarnings(outcome.warnings)).toHaveLength(1);
+    });
+
+    it("skips the repair entirely when no hook is injected (the bin boot-sync instance)", async () => {
+      const seeded = seedRoundTripRestore();
+
+      const outcome = await seeded.harness.sync.reconcileBootConfig();
+
+      expect(outcome).toEqual(
+        expect.objectContaining({ status: "ok", reason: "round-trip-restore" }),
+      );
+      expect(fs.readFileSync(seeded.configPath, "utf8")).toBe(seeded.backupBytes);
+      expect(mountRepairWarnings(outcome.warnings)).toEqual([]);
+      expect(
+        seeded
+          .logLines()
+          .some(
+            (line) =>
+              line.includes("control_ui_mount_repair_failed") ||
+              line.includes("re-applied the gateway proxy config"),
+          ),
+      ).toBe(false);
+    });
+  });
+
   describe("applyUpdate", () => {
+    it("never lets old apply steps or completion rewrite a replacement history pointer", async () => {
+      let store;
+      let replacement;
+      const operationEvents = {
+        publish: vi.fn((_id, event) => {
+          if (replacement || event.data?.name !== "preflight") return;
+          store.updateState((state) => {
+            state.lastUpdateRun = {
+              operationId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+              target: { channel: "beta", version: "9.0.0" },
+              startedAt: 5, finishedAt: null, ok: null,
+              steps: [{ name: "prepare", status: "running", at: 5 }],
+            };
+            return state;
+          });
+          replacement = store.readState().lastUpdateRun;
+        }),
+        complete: vi.fn(), fail: vi.fn(),
+      };
+      const h = createHarness({
+        installedVersion: "1.0.0", sentinelVersion: "1.0.0",
+        extraSyncOptions: { operationEvents },
+      });
+      store = h.store;
+      await h.sync.applyUpdate({ channel: "beta", version: "1.1.0" });
+      expect(replacement).toBeTruthy();
+      expect(store.readState().lastUpdateRun).toEqual(replacement);
+    });
+
     it("rejects when not onboarded, without running anything", async () => {
       const { sync, runner, installToTempDir } = createHarness({
         pin: "1.0.0",
@@ -2208,6 +2546,98 @@ describe("server/openclaw-channel-sync", () => {
       expect(buildStep.updaterStatus).toBe("ok");
     });
 
+    it.each([
+      {
+        name: "migrated state without rollback",
+        report: { reason: "state-migrated-no-rollback",
+          recovery: { serviceRestartSafe: false, reason: "runtime-verification-failed" } },
+        evidence: { updaterReason: "state-migrated-no-rollback",
+          updaterRecovery: { serviceRestartSafe: false, reason: "runtime-verification-failed" } },
+        hint: "state was migrated and the update was not rolled back",
+      },
+      {
+        name: "unverified rollback safety",
+        report: { reason: "rollback-state-unverified", recovery: { serviceRestartSafe: false } },
+        evidence: { updaterReason: "rollback-state-unverified", updaterRecovery: { serviceRestartSafe: false } },
+        hint: "could not verify that state is safe to roll back",
+      },
+      {
+        name: "verified package restoration with unverified runtime",
+        report: { recovery: { packageRollbackVerified: true, serviceRestartSafe: false } },
+        evidence: { updaterRecovery: { packageRollbackVerified: true, serviceRestartSafe: false } },
+        hint: "previous package was restored. The installation has not been verified safe to restart",
+      },
+      {
+        name: "verified package restoration and runnable fallback",
+        report: { recovery: { packageRollbackVerified: true, serviceRestartSafe: true } },
+        evidence: { updaterRecovery: { packageRollbackVerified: true, serviceRestartSafe: true } },
+        hint: "previous package was restored. Inspect the raw update log",
+      },
+      {
+        name: "runnable installation without rollback evidence",
+        report: { recovery: { serviceRestartSafe: true } },
+        evidence: { updaterRecovery: { serviceRestartSafe: true } },
+        hint: "runnable installation remains, but did not confirm a rollback",
+      },
+      {
+        name: "no recovery metadata",
+        report: {}, evidence: {}, hint: "did not confirm recovery of the previous installation",
+      },
+      {
+        name: "malformed recovery fields cannot claim successful restoration",
+        report: { reason: "x".repeat(121), recovery: { serviceRestartSafe: "true",
+          packageRollbackVerified: 1, reason: "invalid reason/path", privateDetail: { token: "not-public" } } },
+        evidence: {}, hint: "did not confirm recovery of the previous installation",
+      },
+      {
+        name: "no-rollback refusal takes precedence over conflicting recovery metadata",
+        report: { reason: "state-migrated-no-rollback",
+          recovery: { packageRollbackVerified: true, serviceRestartSafe: true } },
+        evidence: { updaterReason: "state-migrated-no-rollback",
+          updaterRecovery: { packageRollbackVerified: true, serviceRestartSafe: true } },
+        hint: "state was migrated and the update was not rolled back",
+      },
+    ])("preserves truthful dev failure evidence for $name through response, history and the run ledger", async ({ report, evidence, hint }) => {
+      const operationEvents = { publish: vi.fn(), complete: vi.fn(), fail: vi.fn() };
+      const h = createHarness({
+        extraSyncOptions: { operationEvents },
+        runnerImpl: async (options, fallback) => options.command === "openclaw" && options.args?.[0] === "update"
+          ? { ok: false, code: 1, tail: `build complete\n${JSON.stringify({ status: "error", ...report })}\n`, timedOut: false }
+          : fallback(options),
+      });
+      const failure = await h.sync.applyUpdate({ channel: "dev", devHead: true });
+      expect(failure.status).toBe(409);
+      expect(failure.body).toMatchObject({ ok: false, code: "dev_build_failed", repairApplicable: true,
+        message: "The dev update failed (updater status: error).", ...evidence });
+      expect(failure.body.hint).toContain(hint);
+      expect(failure.body.hint).not.toContain("reverted the checkout");
+      expect(failure.body.updaterReason).toBe(evidence.updaterReason);
+      expect(failure.body.updaterRecovery).toEqual(evidence.updaterRecovery);
+      const state = h.store.readState();
+      expect(state.applied).toBeNull();
+      expect(state.lastUpdateRun.result).toMatchObject({ hint: failure.body.hint, ...evidence });
+      expect(h.sync.runLedger.readRun(state.lastUpdateRun.operationId)).toMatchObject({
+        state: "failed", result: { code: "dev_build_failed", hint: failure.body.hint, ...evidence },
+      });
+      expect(state.lastUpdateRun.steps.findLast((step) => step.name === "build"))
+        .toMatchObject({ status: "failed", updaterStatus: "error", ...evidence });
+      expect(operationEvents.fail).toHaveBeenCalledWith(state.lastUpdateRun.operationId,
+        expect.objectContaining({ hint: failure.body.hint }));
+      expect(h.restartProcess).not.toHaveBeenCalled();
+    });
+
+    it("does not infer rollback from timeout log prose without a structured updater result", async () => {
+      const h = createHarness({ runnerImpl: async (options, fallback) =>
+        options.command === "openclaw" && options.args?.[0] === "update"
+          ? { ok: false, code: null, timedOut: true, tail: "Attempting rollback before timeout..." }
+          : fallback(options) });
+      const failure = await h.sync.applyUpdate({ channel: "dev", devHead: true });
+      expect(failure.body).toMatchObject({ code: "dev_build_failed", message: "The dev update timed out." });
+      expect(failure.body.hint).toContain("did not confirm recovery");
+      expect(failure.body).not.toHaveProperty("updaterRecovery");
+      expect(h.restartProcess).not.toHaveBeenCalled();
+    });
+
     it("builds a pinned dev commit via fetch/checkout/install/build/doctor", async () => {
       const { sync, store, rootDir, runner } = createHarness({
         pin: "1.0.0",
@@ -2593,7 +3023,7 @@ describe("server/openclaw-channel-sync", () => {
         sentinelVersion: "1.0.0",
       });
 
-      const result = await sync.runUpdateRepair({ operationId: "op-r" });
+      const result = await sync.runUpdateRepair({ operationId: "11111111-1111-4111-8111-111111111111" });
 
       expect(result.status).toBe(409);
       expect(result.body.code).toBe("repair_not_applicable");
@@ -2611,7 +3041,7 @@ describe("server/openclaw-channel-sync", () => {
         extraSyncOptions: { operationEvents },
       });
 
-      const result = await sync.runUpdateRepair({ operationId: "op-r" });
+      const result = await sync.runUpdateRepair({ operationId: "11111111-1111-4111-8111-111111111111" });
 
       expect(result.status).toBe(200);
       expect(result.body.ok).toBe(true);
@@ -2621,7 +3051,7 @@ describe("server/openclaw-channel-sync", () => {
       expect(repairCall).toBeTruthy();
       expect(repairCall[0].args).toEqual(["update", "repair"]);
       expect(operationEvents.complete).toHaveBeenCalledWith(
-        "op-r",
+        "11111111-1111-4111-8111-111111111111",
         expect.objectContaining({ ok: true }),
       );
       expect(operationEvents.fail).not.toHaveBeenCalled();
@@ -2649,7 +3079,7 @@ describe("server/openclaw-channel-sync", () => {
         extraSyncOptions: { operationEvents },
       });
 
-      const result = await sync.runUpdateRepair({ operationId: "op-r" });
+      const result = await sync.runUpdateRepair({ operationId: "11111111-1111-4111-8111-111111111111" });
 
       expect(result.status).toBe(500);
       expect(result.body.code).toBe("repair_failed");
@@ -2661,9 +3091,28 @@ describe("server/openclaw-channel-sync", () => {
       expect(operationEvents.complete).not.toHaveBeenCalled();
       expect(operationEvents.fail).toHaveBeenCalledTimes(1);
       const [failedId, failedError] = operationEvents.fail.mock.calls[0];
-      expect(failedId).toBe("op-r");
+      expect(failedId).toBe("11111111-1111-4111-8111-111111111111");
       expect(failedError.code).toBe("repair_failed");
       expect(sync.isApplyInProgress()).toBe(false);
+    });
+
+    it("leaves the preceding apply history intact while recording its own repair", async () => {
+      const { sync, store } = createHarness({ channel: "dev" });
+      const previous = {
+        operationId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        target: { channel: "dev", sha: kDevSha },
+        startedAt: 1, finishedAt: 2, ok: false,
+        steps: [{ name: "verify", status: "failed", at: 2 }],
+        result: { ok: false, code: "verify_failed" },
+      };
+      store.updateState((state) => { state.lastUpdateRun = previous; return state; });
+      const before = store.readState().lastUpdateRun;
+      const operationId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+      expect(await sync.runUpdateRepair({ operationId })).toMatchObject({ status: 200 });
+      expect(store.readState().lastUpdateRun).toEqual(before);
+      expect(sync.runLedger.readRun(operationId)).toMatchObject({
+        operationId, state: "completed", target: { channel: "dev", repair: true },
+      });
     });
 
     it("409s while another update operation holds the latch", async () => {
@@ -2685,9 +3134,9 @@ describe("server/openclaw-channel-sync", () => {
         },
       });
 
-      const first = sync.runUpdateRepair({ operationId: "op-a" });
+      const first = sync.runUpdateRepair({ operationId: "22222222-2222-4222-8222-222222222222" });
       // The latch is taken synchronously before the runner is awaited.
-      const second = await sync.runUpdateRepair({ operationId: "op-b" });
+      const second = await sync.runUpdateRepair({ operationId: "33333333-3333-4333-8333-333333333333" });
       expect(second.status).toBe(409);
       expect(second.body.code).toBe("operation_in_progress");
 
@@ -2715,7 +3164,7 @@ describe("server/openclaw-channel-sync", () => {
       };
     };
 
-    it("records the repair in the run ledger and completes it as activated on success", async () => {
+    it("records the repair in the run ledger and completes it in place on success", async () => {
       const { sink, ledger } = makeLedgerSpy();
       const { sync } = createHarness({
         channel: "dev",
@@ -2725,20 +3174,20 @@ describe("server/openclaw-channel-sync", () => {
         extraSyncOptions: { runLedger: ledger },
       });
 
-      const result = await sync.runUpdateRepair({ operationId: "op-r" });
+      const result = await sync.runUpdateRepair({ operationId: "11111111-1111-4111-8111-111111111111" });
 
       expect(result.status).toBe(200);
       expect(ledger.createRun).toHaveBeenCalledWith({
-        operationId: "op-r",
+        operationId: "11111111-1111-4111-8111-111111111111",
         target: { channel: "dev", repair: true },
       });
       expect(ledger.createLogSink).toHaveBeenCalledWith(
-        expect.objectContaining({ operationId: "op-r" }),
+        expect.objectContaining({ operationId: "11111111-1111-4111-8111-111111111111" }),
       );
       expect(ledger.completeRun).toHaveBeenCalledTimes(1);
       expect(ledger.completeRun).toHaveBeenCalledWith(
-        "op-r",
-        expect.objectContaining({ state: "activated", ok: true }),
+        "11111111-1111-4111-8111-111111111111",
+        expect.objectContaining({ state: "completed", ok: true }),
       );
       // The durable sink is detached and closed after the run.
       expect(sink.close).toHaveBeenCalled();
@@ -2760,12 +3209,12 @@ describe("server/openclaw-channel-sync", () => {
         extraSyncOptions: { runLedger: ledger },
       });
 
-      const result = await sync.runUpdateRepair({ operationId: "op-r" });
+      const result = await sync.runUpdateRepair({ operationId: "11111111-1111-4111-8111-111111111111" });
 
       expect(result.status).toBe(500);
       expect(ledger.completeRun).toHaveBeenCalledTimes(1);
       expect(ledger.completeRun).toHaveBeenCalledWith(
-        "op-r",
+        "11111111-1111-4111-8111-111111111111",
         expect.objectContaining({
           state: "failed",
           ok: false,
@@ -2793,7 +3242,7 @@ describe("server/openclaw-channel-sync", () => {
         extraSyncOptions: { runLedger: ledger, operationEvents },
       });
 
-      const result = await sync.runUpdateRepair({ operationId: "op-r" });
+      const result = await sync.runUpdateRepair({ operationId: "11111111-1111-4111-8111-111111111111" });
 
       // The route resolves (does not hang or throw) with a failure envelope.
       expect(result.status).toBe(500);
@@ -2801,7 +3250,7 @@ describe("server/openclaw-channel-sync", () => {
       // The ledger run is completed as failed (not left "running"), the SSE
       // subscriber gets an error (not a hang), the sink closes, latch released.
       expect(ledger.completeRun).toHaveBeenCalledWith(
-        "op-r",
+        "11111111-1111-4111-8111-111111111111",
         expect.objectContaining({ state: "failed", ok: false }),
       );
       expect(operationEvents.fail).toHaveBeenCalledTimes(1);
@@ -3032,17 +3481,24 @@ describe("server/openclaw-channel-sync", () => {
         [
           "a symlink where a directory would be",
           (dir) => fs.symlinkSync("/etc", path.join(dir, "credentials")),
+          "absolute_symlinks",
         ],
       ])(
         "refuses (no_artifact 409) when the tree holds %s and nothing else — no database, no config, no sessions",
-        async (_label, plant) => {
+        async (_label, plant, veto) => {
           const harness = mkFresh();
           fs.mkdirSync(harness.openclawDir, { recursive: true });
           plant(harness.openclawDir);
           const result = await harness.sync.applyUpdate(hardGateTarget);
           expect(result.status).toBe(409);
           expect(result.body.code).toBe("backup_failed");
-          expect(result.body.message).toMatch(/reported success but produced no backup file/);
+          if (veto) {
+            expect(result.body.message).toBe(`The upstream backup was skipped (${veto}): it cannot safely archive the measured state tree.`);
+            expect(harness.runner.runStreamed.mock.calls.filter(([opts]) => opts.command === "openclaw" && opts.args?.[0] === "backup")).toEqual([]);
+          } else {
+            expect(result.body.message).toMatch(/reported success but produced no backup file/);
+            expect(harness.runner.runStreamed.mock.calls.some(([opts]) => opts.command === "openclaw" && opts.args?.[0] === "backup")).toBe(true);
+          }
         },
       );
 
@@ -3061,6 +3517,7 @@ describe("server/openclaw-channel-sync", () => {
         fs.writeFileSync(path.join(dir, "openclaw.json"), "{}\n");
         const result = await harness.sync.applyUpdate(hardGateTarget);
         expect(result.body.code).not.toBe("backup_failed");
+        expect(harness.runner.runStreamed.mock.calls.filter(([opts]) => opts.command === "openclaw" && opts.args?.[0] === "backup")).toEqual([]);
         expect(harness.store.readState().lastUpdateRun.steps).toContainEqual(
           expect.objectContaining({
             name: "backup",
@@ -3075,15 +3532,22 @@ describe("server/openclaw-channel-sync", () => {
       // or a credentials dump renamed `.env` all counted as fresh. The names
       // are accepted only in their expected shape.
       describe("allowlisted names are checked by SHAPE, not name (X3)", () => {
-        const expectNotFresh = async (harness) => {
+        const expectNotFresh = async (harness, veto = null) => {
           const result = await harness.sync.applyUpdate(hardGateTarget);
           expect(result.status).toBe(409);
           expect(result.body.code).toBe("backup_failed");
-          expect(result.body.message).toMatch(/reported success but produced no backup file/);
+          if (veto) {
+            expect(result.body.message).toBe(`The upstream backup was skipped (${veto}): it cannot safely archive the measured state tree.`);
+            expect(harness.runner.runStreamed.mock.calls.filter(([opts]) => opts.command === "openclaw" && opts.args?.[0] === "backup")).toEqual([]);
+          } else {
+            expect(result.body.message).toMatch(/reported success but produced no backup file/);
+            expect(harness.runner.runStreamed.mock.calls.some(([opts]) => opts.command === "openclaw" && opts.args?.[0] === "backup")).toBe(true);
+          }
         };
         const expectFresh = async (harness) => {
           const result = await harness.sync.applyUpdate(hardGateTarget);
           expect(result.body.code).not.toBe("backup_failed");
+          expect(harness.runner.runStreamed.mock.calls.filter(([opts]) => opts.command === "openclaw" && opts.args?.[0] === "backup")).toEqual([]);
           expect(harness.store.readState().lastUpdateRun.steps).toContainEqual(
             expect.objectContaining({
               name: "backup",
@@ -3097,7 +3561,7 @@ describe("server/openclaw-channel-sync", () => {
           const harness = mkFresh();
           fs.mkdirSync(harness.openclawDir, { recursive: true });
           fs.symlinkSync("/etc/passwd", path.join(harness.openclawDir, ".env"));
-          await expectNotFresh(harness);
+          await expectNotFresh(harness, "env_files_excluded");
         });
 
         it("a `.env` symlink to <rootDir>/.env whose target is not a regular file is NOT fresh", async () => {
@@ -3105,7 +3569,7 @@ describe("server/openclaw-channel-sync", () => {
           fs.mkdirSync(harness.openclawDir, { recursive: true });
           fs.mkdirSync(path.join(harness.rootDir, ".env"));
           fs.symlinkSync(path.join(harness.rootDir, ".env"), path.join(harness.openclawDir, ".env"));
-          await expectNotFresh(harness);
+          await expectNotFresh(harness, "env_files_excluded");
         });
 
         it("the onboarding `.env` link to an existing regular <rootDir>/.env stays fresh (secrets in AlphaClaw's own env are not OpenClaw state)", async () => {
@@ -3128,16 +3592,16 @@ describe("server/openclaw-channel-sync", () => {
             path.join(secretful.openclawDir, ".env"),
             "SETUP_PASSWORD=pw\nOPENCLAW_GATEWAY_TOKEN=abc\n",
           );
-          await expectNotFresh(secretful);
+          await expectNotFresh(secretful, "env_files_excluded");
 
           const oversized = mkFresh();
           fs.mkdirSync(oversized.openclawDir, { recursive: true });
           fs.writeFileSync(path.join(oversized.openclawDir, ".env"), `# ${"x".repeat(5000)}\n`);
-          await expectNotFresh(oversized);
+          await expectNotFresh(oversized, "env_files_excluded");
         });
 
         it.each([".alphaclaw", "logs", "backups", "tmp"])(
-          "a symlink named %s where a bookkeeping directory would be is NOT fresh",
+          "a symlink named %s where a bookkeeping directory would be is NOT fresh — and, not being an upstream archive root, it does not veto the upstream rung (v0.9.89)",
           async (name) => {
             const harness = mkFresh();
             fs.mkdirSync(harness.openclawDir, { recursive: true });

@@ -187,8 +187,15 @@ const assertActivatedThinkingApi = (installDir) => {
   const source = `
     const { pathToFileURL } = require('node:url');
     import(pathToFileURL(process.argv[2]).href).then((mod) => {
-      const list = mod.listThinkingLevelOptions || mod.i;
-      const resolveDefault = mod.resolveThinkingDefaultForModel || mod.s;
+      // Bind by function NAME, never by a remembered minified export key:
+      // upstream re-letters its "export { ... as i, ... as s }" table per
+      // build, and on 2026.9.5 "i" is listThinkingLevelLabels (plain strings)
+      // -- the guess that failed this tier from 2026-09-20 (lib fix: v0.9.88).
+      // (This comment lives inside a template literal: no backticks here.)
+      const byName = (name) => (typeof mod[name] === 'function' ? mod[name]
+        : Object.values(mod).find((v) => typeof v === 'function' && v.name === name));
+      const list = byName('listThinkingLevelOptions');
+      const resolveDefault = byName('resolveThinkingDefaultForModel');
       if (typeof list !== 'function' || typeof resolveDefault !== 'function') throw new Error('Thinking API exports are missing');
       const provider = 'anthropic', model = 'claude-opus-4-7';
       const catalog = [{ provider, id: model, reasoning: true }];
@@ -207,12 +214,12 @@ const assertActivatedThinkingApi = (installDir) => {
   expect(report.levels.map((entry) => entry.id)).toContain(report.modelDefault);
 };
 
-const applyAndActivate = async (harness, { channel, version }) => {
+const applyAndActivate = async (harness, { channel, version, intent }) => {
   const { app, store, buildSync, restartProcess, operationEvents } = harness;
 
   const applyRes = await request(app)
     .post("/api/openclaw/apply")
-    .send({ channel, version });
+    .send({ channel, version, intent });
   expect(applyRes.status, JSON.stringify(applyRes.body)).toBe(202);
   const { operationId } = applyRes.body;
   expect(typeof operationId).toBe("string");
@@ -314,6 +321,7 @@ describeLive("LIVE openclaw package apply (real npm artifacts)", () => {
       const { bootSync } = await applyAndActivate(harness, {
         channel: "stable",
         version,
+        intent: "update",
       });
 
       // The activated tree is the real upstream artifact — run it.
@@ -322,7 +330,7 @@ describeLive("LIVE openclaw package apply (real npm artifacts)", () => {
       assertActivatedThinkingApi(harness.installDir);
 
       // Idempotence against the REAL activated version: re-apply is a noop.
-      const again = await bootSync.applyUpdate({ channel: "stable", version });
+      const again = await bootSync.applyUpdate({ channel: "stable", version, intent: "switch" });
       expect(again.status).toBe(200);
       expect(again.body).toEqual(
         expect.objectContaining({ ok: true, noop: true, version }),
@@ -347,7 +355,7 @@ describeLive("LIVE openclaw package apply (real npm artifacts)", () => {
         "no npm-published beta in the catalog window — likely an upstream publish gap",
       ).toBeTruthy();
 
-      await applyAndActivate(harness, { channel: "beta", version });
+      await applyAndActivate(harness, { channel: "beta", version, intent: "update" });
 
       const output = runActivatedBinary(harness.store, harness.installDir);
       expect(output).toContain(version);

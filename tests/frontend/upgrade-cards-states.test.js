@@ -202,7 +202,8 @@ describe("frontend/upgrade-tab backups-card Back up now (v0.9.81)", () => {
     );
     expect(starting.props.loading).toBe(true);
     const text = collectText(expandTree(UpgradeBackupsCard({ inventory, nowMs: 1_000 }))).join(" ");
-    expect(text).toContain("Pauses the gateway for the copy");
+    expect(text).toContain("May pause and relaunch the gateway while copying");
+    expect(text).toContain("migration-only backup");
     expect(text).toContain("Back up now takes one on demand");
   });
 

@@ -55,6 +55,13 @@ no-follow descriptor, require a regular file, and cap reads on that same handle.
 Publication age over 90 seconds is stale. Confirmed-dead owned files are swept at
 startup/hourly, with 128 inspected entries and 32 deletions per sweep.
 
+Telemetry lives in `<stateDir>/tmp/alphaclaw/gateway-memory/`, using the shared
+directory resolver for publishers, readers and cleanup. Upstream `backup create`
+excludes this temporary tree, so atomic publication and process-exit removal
+cannot race its source walk. Legacy `.alphaclaw/gateway-memory/` files are left
+untouched; a running older producer becomes unavailable to the new reader until
+the next normal gateway launch.
+
 Set `ALPHACLAW_GATEWAY_MEMORY_TELEMETRY=off` to disable instrumentation. Existing
 gateways become instrumented on their next normal launch. No restart is requested
 just to install telemetry. Until then the UI states that heap telemetry is
@@ -111,6 +118,9 @@ episode evidence, API projections and historical Doctor behavior. The integratio
 fixture follows flat worker heap/RSS with accumulating children through the real
 collector, watchdog, Resources projection and post-restart Doctor card.
 `tests/live/openclaw-memory-telemetry.e2e.test.js` exercises the actual pinned
-OpenClaw launch chain. After `npm run build:ui`, run
+OpenClaw launch chain. `tests/live/openclaw-live-backup.e2e.test.js` also runs the
+pinned backup CLI while real sampler processes publish rapidly and exit,
+verifying that the archive succeeds and contains no telemetry files.
+After `npm run build:ui`, run
 `node tests/browser/watchdog-memory-smoke.mjs` for Chromium keyboard, responsive,
 collapsed-warning and measurement-scope checks.

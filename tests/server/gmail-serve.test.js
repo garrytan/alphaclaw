@@ -303,7 +303,7 @@ describe("server/gmail-serve", () => {
       webhookToken: "tok",
     });
     children[0].emit("exit", 1, null);
-    expect(onServeExit).toHaveBeenCalledTimes(1);
+    expect(onServeExit).not.toHaveBeenCalled();
     expect(manager.getServeStatus("acct-1").running).toBe(true);
   });
 
@@ -322,7 +322,7 @@ describe("server/gmail-serve", () => {
     expect(() => child.emit("exit", 0, null)).not.toThrow();
   });
 
-  it("reports killed children as not running", async () => {
+  it("keeps a signalled child running until its exit is confirmed", async () => {
     let child;
     spawnState.impl = () => {
       child = new FakeChild();
@@ -336,7 +336,7 @@ describe("server/gmail-serve", () => {
     });
     child.killed = true;
     expect(manager.getServeStatus("acct-1")).toMatchObject({
-      running: false,
+      running: true,
       pid: process.pid,
     });
   });
@@ -394,9 +394,13 @@ describe("server/gmail-serve", () => {
       port: 18801,
       webhookToken: "tok",
     });
-    const result = await manager.stopServe({ accountId: "acct-1", timeoutMs: 1 });
+    const result = await manager.stopServe({ accountId: "acct-1", timeoutMs: 1, killTimeoutMs: 1 });
     expect(result).toEqual({ stopped: false, forced: true, accountId: "acct-1" });
     expect(child.kills).toEqual(["SIGTERM", "SIGKILL"]);
+    expect(manager.getServeStatus("acct-1")).toMatchObject({ running: true, stopping: true, pid: process.pid, port: 18801 });
+    await expect(manager.startServe({ account: baseAccount, port: 18801, webhookToken: "tok" })).rejects.toMatchObject({ code: "gmail_serve_stop_unconfirmed" });
+    child.emit("exit", null, "SIGKILL");
+    expect(manager.getServeStatus("acct-1").pid).toBeNull();
   });
 
   it("does not double-settle when the child exits during SIGKILL", async () => {
@@ -412,11 +416,11 @@ describe("server/gmail-serve", () => {
       webhookToken: "tok",
     });
     const result = await manager.stopServe({ accountId: "acct-1", timeoutMs: 1 });
-    expect(result).toEqual({ stopped: true, forced: false, accountId: "acct-1" });
+    expect(result).toEqual({ stopped: true, forced: true, accountId: "acct-1" });
     expect(child.kills).toEqual(["SIGTERM", "SIGKILL"]);
   });
 
-  it("finalizes when kill throws synchronously", async () => {
+  it("does not release a live child when signalling throws", async () => {
     let child;
     spawnState.impl = () => {
       child = new FakeChild({ killBehavior: "throw" });
@@ -428,8 +432,9 @@ describe("server/gmail-serve", () => {
       port: 18801,
       webhookToken: "tok",
     });
-    const result = await manager.stopServe({ accountId: "acct-1" });
-    expect(result).toEqual({ stopped: true, forced: false, accountId: "acct-1" });
+    const result = await manager.stopServe({ accountId: "acct-1", timeoutMs: 1, killTimeoutMs: 1 });
+    expect(result).toEqual({ stopped: false, forced: true, accountId: "acct-1" });
+    expect(manager.getServeStatus("acct-1").pid).toBe(process.pid);
   });
 
   it("restarts a serve process", async () => {
@@ -485,7 +490,7 @@ describe("server/gmail-serve", () => {
   it("a spawn 'error' (gog missing) is reported like an exit instead of becoming an uncaughtException (F093)", async () => {
     let child;
     spawnState.impl = () => {
-      child = new FakeChild({ pid: undefined });
+      child = new FakeChild({ pid: null });
       return child;
     };
     const onServeExit = vi.fn();

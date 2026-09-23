@@ -100,10 +100,16 @@ describe.runIf(kRuntimeSupported)("server/openclaw-codex-migration", () => {
     expect(cfg.agents.defaults.models).toEqual({
       "openai/gpt-5.5": { agentRuntime: { id: "codex" } },
     });
-    expect(cfg.auth.profiles["openai:codex-cli"]).toEqual({
+    // Canonical target of the legacy `openai-codex:<suffix>` id on the pinned
+    // build. 2026.9.3 mapped it to `openai:codex-cli`; 2026.9.4+ (the
+    // `auth-profile-repair` chunk) maps it to `openai:chatgpt-codex-cli` and
+    // treats `openai:codex-cli` itself as a deprecated id that becomes
+    // `openai:default` (`legacyAuthProfileTarget`, verified 2026-09-20).
+    expect(cfg.auth.profiles["openai:chatgpt-codex-cli"]).toEqual({
       provider: "openai",
       mode: "oauth",
     });
+    expect(cfg.auth.profiles["openai:codex-cli"]).toBeUndefined();
     expect(cfg.auth.profiles["openai-codex:codex-cli"]).toBeUndefined();
     expect(fs.existsSync(path.join(agentDir, "openclaw-agent.sqlite"))).toBe(true);
     expect(fs.existsSync(path.join(agentDir, "auth-profiles.json"))).toBe(false);

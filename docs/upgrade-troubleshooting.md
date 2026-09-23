@@ -6,6 +6,73 @@ surface (Upgrade tab, notifications, watchdog events). Background: issues
 [#20](https://github.com/chrysb/alphaclaw/issues/20) and
 [#54](https://github.com/chrysb/alphaclaw/issues/54).
 
+## Managed deployment accepted or unknown
+
+The AlphaClaw update card retains a provider attempt after reload or restart.
+**Accepted** means the provider acknowledged the request; **Unknown** means the
+request may have been accepted despite a lost, timed-out or invalid response.
+Neither means the deployment finished. AlphaClaw does not resend automatically.
+An unresolved attempt also blocks OpenClaw apply, backup and repair operations;
+normal gateway restart and watchdog recovery remain available.
+
+Open your deployment provider and verify the attempt has **finished or been
+cancelled, with no deployment pending**. Then, as a human admin, use the update
+card's **Provider finished the deployment** or **Provider cancelled or did not
+deploy** action. The confirmation records `deployed` or `not_deployed` and
+unlocks another submission. It does not trigger an update or certify
+gateway health. If the local request is still active, wait for its bounded
+completion before resolving it. Refresh if another operator resolved a different
+attempt or outcome.
+
+Do not delete `managed-update-attempt.json` to clear this state. It is the durable
+record that prevents a duplicate deployment. If Doctor reports it unreadable,
+preserve its bytes and any backup, check the provider first, then recover the
+record with operator assistance. Reverting AlphaClaw does not cancel an already
+submitted deployment; preserve the record through a version-advancing revert.
+
+If a new submission returns `managed_update_audit_pending`, restore watchdog
+database access and retry the status read. AlphaClaw retains unrecorded audit
+transitions in a bounded backlog; it blocks new submissions when that backlog
+fills, while allowing the current attempt to finish or be resolved. Do not
+clear the attempt file to bypass this condition.
+
+## Pending recovery or `cleanup_blocked`
+
+The Watchdog card names the condition delaying crash recovery and shows its age
+and next check. Maintenance and failed restarts do not erase the obligation.
+After the competing operation finishes, recovery retries automatically. An
+explicit stop of the watchdog during AlphaClaw shutdown cancels it; a launched
+or adopted successor takes ownership while
+warming up.
+
+Cancelling a repair invalidates its write authority immediately, but queued
+gateway operations wait until the process group has stopped and the Doctor
+restore guard has finished. After fifteen seconds without confirmation, the
+card shows **Repair cleanup needs attention** with the tracked process identities.
+There is no automatic force-unlock. Use the rescue session to inspect the tracked
+writers, confirm identity before stopping them, and confirm they have exited
+before restarting AlphaClaw. Retain the repair log and watchdog events for diagnosis.
+
+A dev repair that completes in place is shown as complete without waiting for
+an AlphaClaw restart. If progress is interrupted, the Upgrade page looks up that
+exact operation ID; use Retry when the status read fails. A previous update's
+success is not evidence that the interrupted repair finished.
+
+## Dev update failed after changing state
+
+A failed upstream dev update does not prove that its checkout or state was
+rolled back. Check the operation's `updaterReason`, `updaterRecovery` and log.
+`state-migrated-no-rollback` means upstream deliberately retained migrated
+state; `serviceRestartSafe: false` means it did not verify that restarting the
+gateway is safe. Preserve the log and state before attempting recovery.
+
+For `runtime-verification-failed`, inspect `openclaw gateway status --deep`
+and the service owner named there. A free port alone cannot establish that a
+native service is stopped: its manager may restart it. Resolve the reported
+ownership or service-state blocker before retrying. AlphaClaw reports verified
+package restoration only when upstream provides explicit evidence; it does not
+infer a rollback from a failed exit code.
+
 ## `doctor_restored_stale_config`
 
 **What it means:** during a repair pass, the doctor tried to restore a
@@ -147,7 +214,7 @@ crossing) now decides only whether a backup failure is fatal — a hard gate
 answers `409 backup_failed`, a soft gate records `noBackup` with a
 `backup: warning` and continues to the migration checkpoint ("Backup:
 continue without a backup (consent)" below). Sessions reconnect when the
-gateway resumes. The pause is one transaction: `runBackupDiagnosis` (before
+gateway resumes. Each pause is one transaction: `runBackupDiagnosis` (before
 the pause) → lifecycle lock (leased for the quiesce **and** offline-copy
 budgets) → watchdog suppressed → gateway stopped and *confirmed* stopped →
 state-database quiet period → AlphaClaw offline copy, then any in-quiesce
@@ -160,6 +227,62 @@ at all: only the backup rung degrades to the live ladder (`backup:
 warning`); the apply's own serialization is unchanged. If the pause exceeds
 the apply's own progress timeline, see the run ledger for which step is
 stuck.
+
+If broader paused attempts fail, the migration-minimal fallback runs within the
+same pause and remaining work budget. It proves exclusivity again without
+restarting and stopping the gateway a second time. The gateway must answer after
+relaunch before publication or any safe live fallback; an unanswered relaunch
+aborts the operation rather than starting another backup.
+
+Temporary CLI readers and foreign database handles get up to 35 seconds to
+drain, bounded further by a quarter of the copy budget. A holder that remains is
+still refused; the wait never bypasses the lifecycle lease or quiet barrier.
+
+## Backup blocked by an oversized scratch tree
+
+Run **Check backup sources** in the Upgrade tab before an update to inspect the state
+root, complete per-directory entry and byte totals, and absolute-target symlinks.
+The same preflight runs before every backup pause. It keeps counting beyond the
+200,000 selected-entry copy limit; excluded scratch does not consume that limit.
+An over-budget or incomplete scan blocks before the gateway is stopped and names
+the top offenders. Partial diagnostics are explicitly labeled, never presented
+as complete counts.
+
+Open **Upgrade → Backups → Exclusions** to edit workspace-relative rules and
+state-root rules separately. Save applies to the next operation; Restore defaults
+restores workspace debris and known state-root scratch exclusions. Defaults omit
+`worktrees/`, `workspace/.openclaw/`, `wiki/`, logs, and stale SQLite corrupt or
+migrated copies. `.env` is always omitted, even if exclusions are disabled. For example,
+`state/security-planning/stronghold-*` excludes named imported scratch trees.
+Database files, config, credentials, identity and agent authentication cannot be
+excluded, including databases discovered beneath otherwise excluded directories.
+The configuration is `updates.openclaw.backup.{excludes,rootExcludes}` in
+`alphaclaw.json`; the API is `GET`/`PUT /api/openclaw/backup-policy`. Missing
+workspace rules use defaults, while `excludes: []` explicitly disables them.
+
+The upstream CLI cannot apply AlphaClaw's exclusions. It is skipped if preflight
+finds `.env`, an oversized upstream archive set, or an absolute-target symlink at
+one of the paths the upstream archive includes (`openclaw.json`, `credentials`,
+`identity`, `state`, `agents`, `workspace` — upstream follows a link there and
+would archive whatever it points at), and never retries live after the offline
+copy exhausted its enumeration or time budget. Absolute-target symlinks
+elsewhere are reported for review only: OpenClaw creates them itself
+(`plugin-skills/<skill>` into its package) and its backup neither follows nor
+archives them. The offline and migration producers resolve a symlinked state root while
+keeping required-source and internal-symlink safety checks.
+
+When AlphaClaw observes more than 512 MiB of raw workspace content, upstream
+attempts omit workspace from the outset with `--no-include-workspace`; unknown
+size preserves the existing attempt behavior. AlphaClaw's own policy exclusions
+do not reduce this upstream-size threshold because upstream has no equivalent
+exclude list. The recorded omission reason distinguishes size from broken
+workspace discovery.
+
+After unsuccessful broader attempts, **migration-only backup** means the final
+minimal profile captured the protected migration assets and deliberately omitted
+workspace and other content. An update with this verified backup can proceed;
+Back up now reports the same limited coverage. Read the coverage before relying
+on it for recovery, and use [selective restoration](#restoring-a-backup).
 
 ## Backup blocked by state-database contention
 
@@ -233,9 +356,14 @@ elapsedMs, bytes, kind, ok }` entry and a `backup_rung` event:
    "offline_copy_refused" }` and a `backup_rung: handed_over` event is
    booked), by a copy failure the prediction ruled the paused upstream out
    of, by exhausted in-quiesce retries, by timeouts and by live-file races
-   (`vanished_file`). A soft gate that also fails here ends as `noBackup` +
-   one warning; a hard gate as `409 backup_failed` naming both failures.
-4. **Consented reuse** of a recent verified archive — see
+   (`vanished_file`). Eligible failures proceed to the final minimal producer;
+   unsafe sources, disk exhaustion and unresolved ownership/work remain blockers.
+4. **Migration-minimal copy** — once, after the broader attempts fail, under
+   a fresh lifecycle lease, confirmed stop and quiet barrier. It snapshots the
+   required migration assets without walking oversized scratch trees. Success
+   is explicitly migration-only; if it also fails, a soft gate records
+   `noBackup` and reaches the migration checkpoint, while a hard gate refuses.
+5. **Consented reuse** of a recent verified complete archive — see
    [Reusing a recent backup](#reusing-a-recent-backup-consent).
 
 A hard-gate refusal (`409 backup_failed`) always names the newest surviving
@@ -394,9 +522,12 @@ Verified live (2026-09-02) for pin 2026.7.1-2 / stable 2026.8.2 / beta
 2026.9.1-beta.1 archives restored onto each of those three lines: every
 cell preflighted, passed `integrity_check`, and booted to `/healthz`.
 
-**Which archive:** the newest verified one in `<root>/backups/openclaw/`
-(last 3 kept). `GET /api/openclaw/backups` (or the Upgrade tab's Backups
-card) lists them with producer, age, size and provenance:
+**Which archive:** when undoing a migration, use the verified pre-migration
+archive named by that run's rollback fence; a newer archive may already contain
+the migrated database. `GET /api/openclaw/backups` (or the Upgrade tab's Backups
+card) lists `<root>/backups/openclaw/` archives with profile, coverage, producer,
+age, size and provenance. The last three archives are retained, plus protected
+migration archives and their originating records for seven days:
 
 | Name | Producer | Manifest assets |
 |---|---|---|
@@ -404,8 +535,12 @@ card) lists them with producer, age, size and provenance:
 | `openclaw-backup-<ts>-<opId8>.alphaclaw.tar.gz` | `alphaclaw-offline-copy` | per-file assets: `kind: sqlite | config | file | workspace`, `archivePath` relative to `<archiveRoot>/` |
 
 A `.unverified` suffix is a quarantined failed artifact — never restore it.
-A `partial: true` run record (or `options.includeWorkspace: false` in the
-manifest) means workspace files are **not** in the archive.
+Read `partialReasons` and `coverage` for omissions: `partial: true` can also mean
+missing core assets. A `profile: "migration-minimal"` archive is explicitly a
+**migration-only backup**: its discovered migration databases, configuration,
+credentials, identity and agent authentication are covered; workspace and other
+content are omitted. It can protect its originating update, but cannot be reused
+as a later complete backup. Preserve omitted files during restore.
 
 **How an archive earned `verified`** (`backup.usableCheck: "manifest_ok"` in
 the run record): `gzip -t` passed, and the manifest **covers** this box's
@@ -422,36 +557,48 @@ asset, not assets of their own.
 
 **Steps:**
 
-1. **Stop the gateway** and confirm it is gone. From the Watchdog terminal:
-   `openclaw gateway stop` — on 2026.8.2 and later add `--force` (the CLI
-   refuses non-interactive stops without it; the pin has no such flag).
-   Confirm nothing listens on the gateway port and no `openclaw` process is
-   live (`ss -ltnp | grep 18789`, `pgrep -af openclaw`). AlphaClaw's own
-   restart is recorded *failed* (`incumbent_gateway_still_running`) when a
-   stop did not take — do not proceed against a live gateway.
+1. **Stop all writers from the host/provider maintenance console.** Stop
+   AlphaClaw through its process manager or deployment controls, including the
+   watchdog and background state-database users, then stop the gateway and any
+   other OpenClaw CLI or external database writer. For upstream's stop command,
+   use `openclaw gateway stop --force` on 2026.8.2 and later. Confirm no gateway
+   listener, OpenClaw process or database file holder remains (`ss -ltnp`,
+   `pgrep -af openclaw`, and `lsof` for the target databases where available).
+   Stopping only the gateway from the Watchdog terminal is insufficient: the
+   running watchdog can relaunch it during restoration. Keep all these services
+   stopped through placement, integrity checking and preflight.
 2. **Extract into an isolated directory**, never over the live state dir:
    ```sh
-   mkdir -p /tmp/restore && tar -xzf <archive> -C /tmp/restore
-   cat /tmp/restore/*/manifest.json
+   gzip -t <archive>
+   umask 077
+   restore_dir=$(mktemp -d)
+   tar -xzf <archive> -C "$restore_dir"
+   cat "$restore_dir"/*/manifest.json
    ```
 3. **Read `manifest.json`.** `paths.stateDir` is where the archive came
    from; for each `assets[]` entry, `archivePath` is the file or directory
    inside the extracted tree and `sourcePath` is where it belongs. Check
-   `producer` (absent = upstream), `createdAt`, `options.includeWorkspace`
-   and `skipped[]` so you know what is NOT in the archive.
-4. **Move the current state dir aside** and place assets per the manifest
-   (`<relative>` = `sourcePath` relative to `paths.stateDir`):
+   `producer` (absent = upstream), `profile`, `createdAt`, optional
+   `snapshotStartedAt`/`snapshotCompletedAt`, `coverage`, `partialReasons`,
+   `options.includeWorkspace` and `skipped[]`. Check every archive path and
+   destination against the intended state root before placing files.
+4. **Save existing destination files and replace only captured assets.** Keep
+   the state directory itself and everything the archive omitted. For each
+   manifest asset, preserve the existing destination in a private recovery
+   directory, then copy its captured replacement. For each database, preserve
+   its old `-wal`, `-shm` and `-journal` sidecars too before removing them from the
+   destination. For example, after saving these exact destinations and sidecars:
    ```sh
-   mv /data/.openclaw /data/.openclaw.pre-restore-$(date +%s)
-   mkdir -p /data/.openclaw
-   # upstream: the single state asset is the whole tree
-   cp -a "/tmp/restore/<archiveRoot>/payload/posix/<original stateDir>/." /data/.openclaw/
-   # offline copy: every asset, e.g.
-   cp -a /tmp/restore/<archiveRoot>/openclaw.json            /data/.openclaw/openclaw.json
-   cp -a /tmp/restore/<archiveRoot>/state/openclaw.sqlite    /data/.openclaw/state/openclaw.sqlite
-   cp -a /tmp/restore/<archiveRoot>/agents                   /data/.openclaw/
+   cp -a "$restore_dir/<archiveRoot>/openclaw.json" /data/.openclaw/openclaw.json
+   rm -f /data/.openclaw/state/openclaw.sqlite-wal \
+         /data/.openclaw/state/openclaw.sqlite-shm \
+         /data/.openclaw/state/openclaw.sqlite-journal
+   cp -a "$restore_dir/<archiveRoot>/state/openclaw.sqlite" /data/.openclaw/state/openclaw.sqlite
    ```
-   Do **not** copy any `-wal`/`-shm`/`-journal` sidecar from the aside tree
+   Repeat for **every** captured database and file, including custom locations.
+   Merge upstream directory assets into their destination without removing
+   omitted content. Never replace the whole state or agent directory from a
+   migration-only archive. Do **not** copy any saved `-wal`/`-shm`/`-journal` sidecar
    next to a restored database: both producers write self-contained
    databases (upstream consolidates its snapshot; the offline copy uses the
    online backup API and lists the sidecars under `skipped[]`).
@@ -465,16 +612,19 @@ asset, not assets of their own.
    line's database restored onto an older one — the #54 direction);
    `"indeterminate"` = the file has sidecars; consolidate first
    (`VACUUM INTO` a copy, or remove the empty sidecars you created by
-   opening it). The pin 2026.7.1-2 has no `database` command — on the pin
-   go straight to step 6 and watch for exit 78.
+   opening it). This command checks state databases. Check each agent
+   database's ownership metadata and `PRAGMA user_version` against the target
+   package's declared `openclaw.schemaVersions.agent` too; an agent schema
+   newer than the target is incompatible. Legacy 2026.7 builds have no
+   `database` command; they are not the current pin.
 6. **Integrity check** each restored database (read-only):
    `node -e 'const {DatabaseSync}=require("node:sqlite");const d=new DatabaseSync(process.argv[1],{readOnly:true});console.log(d.prepare("PRAGMA integrity_check").get())' /data/.openclaw/state/openclaw.sqlite`
    — expect `ok`. Remove the empty `-wal`/`-shm` files this open leaves.
-7. **Start the gateway** (Watchdog tab → Restart, or restart AlphaClaw) and
+7. **Start AlphaClaw** through the process manager or deployment controls and
    watch `/healthz` (restart ready budget: 5 min by default — `GATEWAY_RESTART_READY_TIMEOUT`, 30–480 s) plus the Watchdog tab; the boot
    reconciler runs the official migration when the preflight said one is
    required.
-8. Keep the aside tree until the box has been healthy through one full
+8. Keep saved destination files and sidecars until the box has been healthy through one full
    stabilization window (24 h).
 
 **SQLite-only alternative (2026.8.1+):** when only a database — not config
@@ -577,31 +727,139 @@ offline copy refuses to run when the stop was not confirmed.
 ## Gateway is up but not ready
 
 **What it means:** the watchdog reports `readiness: "not_ready"` with a
-`readinessReason` naming the failing components (event
+`readinessReason` naming the failing components (or `ready:false`; event
 `readiness_degraded`, `degradedReason: readiness_failing`, ledger rows
 `health_check/ok {readinessPending: true}` collapsed into one row plus a
 count, notification "🟡 Gateway is up but not ready — <components>" once per
-incident). The port answers and `/health` is green, but OpenClaw's `/readyz`
-says one or more components (secrets, a channel, a plugin) have not come up.
-Since v0.9.75 AlphaClaw treats this as degraded, not recovered: no "Gateway
-running again" notice, the incident stays open (a `gateway_readiness`
-incident opens when none is), the release-channel acceptance hook is NOT
-credited (a green-`/health`, failing-`/readyz` build cannot be promoted to
-last-known-good), and a pending replacement is not verified. Readiness alone
-never triggers `doctor --fix` or a restart — the degraded-repair counter
-counts liveness failures only.
+incident). The port answers and `/health` is green, but OpenClaw's own
+`/readyz` verdict says the gateway is not ready — one or more components
+(secrets, a channel, a plugin) have not come up, or the body says
+`ready: false` outright. Since v0.9.75 AlphaClaw treats this as degraded, not
+recovered: no "Gateway running again" notice, the incident stays open (a
+`gateway_readiness` incident opens when none is), the release-channel
+acceptance hook is NOT credited (a green-`/health`, failing-`/readyz` build
+cannot be promoted to last-known-good), and a pending replacement is not
+verified. Readiness alone never triggers `doctor --fix` or a restart — the
+degraded-repair counter counts liveness failures only.
+
+Since #87 the verdict is OpenClaw's, not AlphaClaw's. The `eventLoop`
+diagnostic in the `/readyz` body ("event loop under pressure" in the
+timeline, `event_loop_pressure` rows, `eventLoopDegraded` on status) is
+telemetry and never opens a readiness incident on its own — upstream
+documents that it "does not change the readiness result by itself"; the
+Watchdog tab's gateway-health card shows pressure under a neutral LOAD label,
+never the DEGRADED badge, unless `/readyz` components are also failing. Only
+the newest COMPLETED probe writes a verdict, so a slow older probe (or a Doctor
+run started for an earlier degradation) can no longer reopen an incident the
+gateway already recovered from; a superseded probe leaves one
+`[watchdog] probe #N (<source>) superseded …` console line and nothing else.
+
+**Read the two status fields first.** `GET /api/watchdog/status` carries
+`readinessProbe` (how the last `/readyz` read went: `ok | unconfigured |
+unsupported | unavailable | timeout | malformed`) and `readinessStatus` (what
+the body said: `started | starting | draining`). With `readiness` they
+separate five situations that used to all read as "not ready" or "unknown":
+
+| `readiness` | `readinessProbe` | `readinessStatus` | Meaning | Timeline / card |
+|---|---|---|---|---|
+| `unknown` | `unconfigured`, `unsupported` (404/405/501) or `null` | — | `/readyz` was not consulted, or this gateway does not serve it. Recovery is decided from `/health` alone; nothing is logged. | plain "up" |
+| `not_ready` | `ok` | `starting` or `draining` | **Transitional** — the gateway itself says it is still coming up (or shutting down). NOT an incident, NOT degraded: no notice, no `degradedReason`, no acceptance credit; the watchdog re-probes every 5 s (the bootstrap loop, or a single-shot `readiness_recheck` probe outside it) and a pending replacement is not certified yet. Bounded by the ready budget (`GATEWAY_RESTART_READY_TIMEOUT`, default 300 s): past it the same body becomes a real not-ready with `readinessReason: "starting did not complete within 300s"`. A liveness flap in the middle of the phase neither restarts that budget nor lets the next `/readyz` probe error announce recovery (the hold below keeps this row's flavour: health stays healthy, the 5 s cadence continues). An explicit `ready: true` beside such a status is not transitional — it is ready, and the status is telemetry only. | "up, still starting" / "up, draining"; card reason "Up — channels still starting." / "Up — draining." |
+| `not_ready` | `ok` | `started` or `null` | **Real not-ready** — `/readyz` names failing components or says `ready: false`. This is the incident described above; `readinessReason` names the components. The detached Doctor may add ONE `readiness_advisory` row ("doctor: <checkId> (<severity>)") when OpenClaw's Doctor reports a runtime secret failure (e.g. `gateway.probe_auth_secretref_unavailable`) — evidence, never a trigger; it runs at most once per failing-component key per 10 min and at most once per 2 min per gateway generation regardless of key, so neither a flapping `/readyz` nor rotating component names can spawn a Doctor on every transition. | "up, not ready"; Running with issues |
+| `not_ready` (or `unknown` right after a liveness flap) | `unavailable`, `timeout` or `malformed` | last value | **Probe error while not ready — recovery held.** The last `/readyz` CONSUMED in this gateway generation said not ready — the open degradation episode, which survives a liveness flap (a failed `/health` in between resets `readiness` to `unknown` but not the episode) and ends only with a ready body, a fail-open or a gateway generation change (a relaunch starts a new episode); or a `starting` / `draining` body still inside its budget, whose clock survives a flap the same way (that hold keeps health healthy and the 5 s cadence instead of degrading) — and this one could not be read (connection refused, 5 s timeout, unparseable body). The watchdog does NOT assume recovery: the incident stays open, health stays degraded and the 5→30 s retry ladder keeps probing; one `readiness_probe_error {kind}` row per kind transition (5-min floor per kind; the floor survives a liveness flap and resets with the gateway generation). Bounded by the same ready budget, after which it fails open with `readiness_probe_error {kind, recoveryAssumed: true, heldMs}`, readiness becomes `unknown` and the degradation episode is closed (`readiness_degraded ok {recovered, assumed, kind}`) — the same components afterwards open a new incident. The recovery notice then reads "🟢 Gateway running again — readiness unverified" (a ready body would have given the plain notice). | "up, readiness probe <kind>" |
+| `unknown` | `unavailable`, `timeout` or `malformed` | — | Probe error with NO open degradation episode in this gateway generation (a fresh or relaunched gateway, or one whose last consumed `/readyz` was ready): fails open as before — one `readiness_probe_error` row, recovery is not blocked. | plain "up" |
 
 **Why it happens:** a channel token that fails auth, a plugin whose
-provider is unreachable, a secrets backend that is slow to answer. Upstream
-keeps serving the rest of the gateway meanwhile, which is why the port and
-`/health` look fine.
+provider is unreachable, a secrets backend that is slow to answer (a beta
+gateway STARTS degraded instead of refusing when a SecretRef cannot be
+resolved — the `readiness_advisory` row names the finding). Upstream keeps
+serving the rest of the gateway meanwhile, which is why the port and
+`/health` look fine. A `starting` body that persists after a relaunch
+usually means a slow plugin or channel init; a `draining` body means
+OpenClaw is shutting the gateway down (a restart it requested, or an
+operator stop) and a relaunch will follow.
 
-**Next steps:** read `readinessReason` on `GET /api/watchdog/status` (or the
-gateway card's reason line) and check the named component in the gateway log.
-The incident closes on its own on the first probe where `/readyz` is green
-again — that tick emits the normal recovery row and notice. An unreachable
-`/readyz` (transport error, thrown evaluation) is `readiness: "unknown"`
-with a `readiness_probe_error` row and does not block recovery.
+**Next steps:** read `readinessReason`, `readinessProbe` and
+`readinessStatus` on `GET /api/watchdog/status` (or the gateway card's reason
+line) and check the named component in the gateway log; a `readiness_advisory`
+row in the incident timeline points at the Doctor finding (`checkId`,
+severity, a sanitized message). The incident closes on its own on the first
+probe where `/readyz` is green again — that tick emits the normal recovery
+row and notice. While the timeline says "up, readiness probe unavailable" or
+"… timeout", check that the gateway's `/readyz` URL is reachable from
+AlphaClaw (auth, port, TLS) — the hold releases the moment one `/readyz` is
+read, whatever it says. Event-loop pressure rows alone ("event loop under
+pressure: event loop delay") are a load signal, not a readiness failure:
+check recent gateway restarts and workspace size (README "Health checks" ops
+note).
+
+## Control UI shows "Styles failed to load"
+
+**What it means:** the OpenClaw Control UI (the dashboard AlphaClaw opens at
+`/openclaw`) shows the banner *"Styles failed to load, so the page may look
+broken"* with a Reload button, and text renders in system fonts. Upstream
+shows it when a `<link rel="stylesheet">` fired an `error` event before the
+page finished loading, or when the entry stylesheet's sentinel
+(`--openclaw-css-ok`) is missing at `load`. It tries one automatic reload per
+build first, which is the flash-reload users see before the banner.
+
+**Why it happens:** before v0.9.83 AlphaClaw mounted the gateway's
+ROOT-served UI under `/openclaw` by stripping the prefix off every proxied
+request. The gateway therefore stamped an empty base path into the page
+(`<html data-openclaw-control-ui-base-path="">`) and the UI — which resolves
+every resource URL from that attribute, not from the page URL — fetched its
+fonts, themes, `sw.js`, bootstrap config and avatars from AlphaClaw's root,
+where they 404'd. The font stylesheet's `error` event is what trips the
+banner. Since v0.9.83 `ensureGatewayProxyConfig` writes
+`gateway.controlUi.basePath: "/openclaw"` into `openclaw.json` at boot, the
+proxy forwards `/openclaw*` verbatim, and the gateway restarts itself when
+the key lands (OpenClaw's default `gateway.reload.mode: "hybrid"`).
+
+**How to check:**
+
+- `curl -I -b 'setup_token=…' https://<alphaclaw>/openclaw/fonts/instrument-sans.css`
+  answers `200` with `content-type: text/css`. A `404` means the gateway is
+  still serving the UI from its root; a `302 /login.html` means the cookie
+  is missing.
+- `GET /openclaw/` (with the cookie) returns HTML whose `<html>` tag carries
+  `data-openclaw-control-ui-base-path="/openclaw"`. The gateway stamps this,
+  not AlphaClaw — an empty value means the gateway has not picked up the key.
+- The boot log has `[alphaclaw] control_ui_mount=basepath basePath=/openclaw`
+  (or `control_ui_mount=legacy basePath=(removed)` under the kill switch).
+- `openclaw.json` has `gateway.controlUi.basePath: "/openclaw"`.
+
+**Next steps:** if the key is in `openclaw.json` but the page is still
+stamped with an empty base path, the gateway has not restarted since the key
+was written — an externally supervised gateway (systemd, a manual `openclaw
+gateway run`) with hot reload off is the usual case. Restart it once; the
+managed child is restarted by AlphaClaw.
+
+An expired AlphaClaw session behaves differently for resources and documents
+on purpose: a Control UI resource (font, chunk, theme, `sw.js`, bootstrap
+config, avatar, `/assets/*`) gets `401 {"error":"Unauthorized"}`, while a
+document navigation (and the UI's `HEAD` recovery probe) still gets the
+`302 /login.html` redirect. The pinned Control UI service worker caches any
+`ok` response under the requested URL — a redirected 200 login page for a
+font would be served for that font forever, even after logging in — and a
+browser refuses HTML as a stylesheet, which is the same banner by another
+route. So a font `401` on an expired session is expected; reload the page
+and log in.
+
+After a whole-file config restore (rollback, round-trip, migration gate) the
+key is re-applied and verified by re-reading `openclaw.json`. A miss is not
+fatal: the boot report / notification carries the warning *"control UI mount
+repair failed after the … config restore"* and the log has the fixed code
+`control_ui_mount_repair_failed source=<source>`; the next AlphaClaw boot
+re-applies it.
+
+**Kill switch:** `ALPHACLAW_CONTROL_UI_MOUNT=legacy` in the deployment
+environment (never `.env`; read at process start) restores the pre-0.9.83
+prefix-strip mount: boot removes the managed `gateway.controlUi.basePath`,
+the gateway restarts in root mode and the proxy strips the prefix again (the
+banner returns — that is the known legacy state). A plain code revert is NOT
+enough: old AlphaClaw strips `/openclaw/x` to `/x`, which a gateway still in
+base-path mode does not recognise as a Control UI path and answers `404` —
+the whole dashboard disappears. Set the switch, or also delete the key from
+`openclaw.json` and restart the gateway.
 
 ## Another process owns the state directory
 
@@ -972,10 +1230,14 @@ and the pause never act).
   `handed_over` when a rung fell through), the `repair/structural/*` rows
   with their `plan[]`, and the `repair/<source>/skipped` reasons
   `repair_attempts_exhausted`, `auto_repair_paused` and `version_mismatch`
-  plus `restart/<source>/skipped {version_mismatch}`; `crash` rows carry
+  plus `restart/<source>/skipped {version_mismatch}`; since #87 also
+  `readiness_advisory` (the detached Doctor's structured finding on an open
+  readiness incident, `warn`) and `event_loop_pressure` (`warn | ok`
+  telemetry — never an incident); `crash` rows carry
   `cause` + `fingerprint`).
 - **Watchdog status:** `GET /api/watchdog/status` — `readiness` /
-  `readinessReason`, `servingPid` / `servingRootPid` / `supervisionMode`,
+  `readinessReason` (since #87 also `readinessProbe` / `readinessStatus` —
+  see "Gateway is up but not ready"), `servingPid` / `servingRootPid` / `supervisionMode`,
   `replacementPending`, `lastRepairVerdict`, `degradedRepairThreshold`,
   `incumbentConflict` (kind, holder pid/role) and `incumbentGraceUntil`;
   since v0.9.77 `versionMismatch` (`{ expected, running, source,

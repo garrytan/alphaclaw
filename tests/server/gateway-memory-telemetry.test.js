@@ -27,6 +27,24 @@ describe("gateway memory telemetry transport", () => {
   afterEach(() => fs.rmSync(stateDir, { recursive: true, force: true }));
   const save = (file, data) => fs.writeFileSync(file, JSON.stringify(data));
 
+  it("uses upstream's excluded tmp tree and leaves legacy telemetry untouched", async () => {
+    expect(directory).toBe(path.join(stateDir, "tmp", "alphaclaw", "gateway-memory"));
+    const legacyDir = path.join(stateDir, ".alphaclaw", "gateway-memory");
+    fs.mkdirSync(legacyDir, { recursive: true });
+    const legacyFile = path.join(legacyDir, telemetryFilename(identity));
+    save(legacyFile, envelope);
+    expect(readGatewayTelemetry({ identity, stateDir, nowMs }).reason).toBe("not_published");
+    const writer = createTelemetryWriter({ stateDir, identity });
+    try {
+      expect(await writer.write(envelope)).toBe(true);
+      expect(readGatewayTelemetry({ identity, stateDir, nowMs }).status).toBe("fresh");
+      expect(fs.readFileSync(legacyFile, "utf8")).toBe(JSON.stringify(envelope));
+    } finally {
+      writer.stop();
+      await writer.flush();
+    }
+  });
+
   it("publishes atomically with private permissions and projects numeric records", async () => {
     fs.chmodSync(directory, 0o755);
     const writer = createTelemetryWriter({ stateDir, identity });

@@ -61,6 +61,31 @@ const render = (props) => expandTree(GmailWatchToggle({ account: kAccount, ...pr
 const badgeText = (tree) => collectText(findAllByType(tree, Badge)[0]).join(" ");
 
 describe("frontend/gmail-watch-toggle", () => {
+  it("distinguishes locally disabled delivery from pending remote cancellation", () => {
+    const tree = render({ watchStatus: { enabled: false, remoteOperation: { kind: "stop", status: "pending" } } });
+    expect(collectText(tree).join(" ")).toContain("Disabled locally");
+    expect(collectText(tree).join(" ")).toContain("Cancellation of the watch at Google is still pending");
+    expect(findAllByType(tree, ToggleSwitch)[0].props.checked).toBe(false);
+  });
+
+  it("shows a persisted stop failure and an explicit stop retry after reload", () => {
+    const retry = vi.fn();
+    const tree = render({ watchStatus: { enabled: false, remoteOperation: { kind: "stop", status: "failed", message: "Remote stop failed" } }, onDisable: retry });
+    expect(badgeText(tree)).toContain("retry needed");
+    const chip = findAllByType(tree, InlineErrorChip)[0];
+    expect(chip.props.headline).toContain("remote stop needs a retry");
+    chip.props.onRetry();
+    expect(retry).toHaveBeenCalledTimes(1);
+  });
+
+  it("blocks enable while account disconnection is still pending", () => {
+    const enable = vi.fn();
+    const tree = render({ watchStatus: { enabled: false, remoteOperation: { kind: "disconnect", status: "pending" } }, onEnable: enable });
+    const toggle = findAllByType(tree, ToggleSwitch)[0];
+    expect(toggle.props.disabled).toBe(true);
+    toggle.props.onChange(true);
+    expect(enable).not.toHaveBeenCalled();
+  });
   it("shows Stopped only when the status genuinely loaded", () => {
     const tree = render({ watchStatus: null, statusError: null });
     expect(badgeText(tree)).toContain("Stopped");

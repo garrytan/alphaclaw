@@ -170,6 +170,7 @@ describe("frontend/app-shell controller (shared status feed)", () => {
     harness.reset();
     gatewayShellStore.reset();
     invalidateCache("/api/status");
+    invalidateCache("/api/alphaclaw/version");
     invalidateCache("/api/watchdog/status");
     invalidateCache("/api/doctor/status");
     globalThis.window = {
@@ -181,6 +182,7 @@ describe("frontend/app-shell controller (shared status feed)", () => {
     };
     api.fetchOnboardStatus.mockResolvedValue({ onboarded: true });
     api.fetchAuthStatus.mockResolvedValue({ authEnabled: false });
+    api.fetchAuthIdentity.mockResolvedValue({ identity: { role: "admin" } });
     api.fetchAlphaclawVersion.mockResolvedValue({
       currentVersion: "0.9.34",
       hasUpdate: false,
@@ -310,43 +312,24 @@ describe("frontend/app-shell controller (shared status feed)", () => {
     expect(state.state.sharedStatus.gateway).toBe("running");
   });
 
-  it("managed update: never reloads against the OLD process — only once the polled process reports the new version", async () => {
-    api.updateAlphaclaw.mockResolvedValue({
-      ok: true,
-      managedUpdate: true,
-      previousVersion: "0.9.34",
-    });
-    // The old process keeps serving /api/status during the external deploy.
-    api.fetchStatus.mockResolvedValue({
-      gateway: "running",
-      alphaclawVersion: "0.9.34",
-    });
-
-    const state = await settle();
+  it("managed update keeps the request pending when status reports a changed version, without a restart banner", async () => {
+    const attempt = { id: "deploy-1", state: "accepted", target: { alphaclawVersion: "0.9.35" } };
+    api.updateAlphaclaw.mockResolvedValue({ ok: true, managedUpdate: true, restarting: false, phase: "queued", managedUpdateAttempt: attempt });
+    let state = await settle();
     await state.actions.handleAcUpdate();
-    await flushMicrotasks();
-
-    // First poll at the +8s grace succeeds against the still-running old
-    // process: NO reload (pre-fix this reloaded deterministically here).
-    await vi.advanceTimersByTimeAsync(8000);
-    expect(globalThis.window.location.reload).not.toHaveBeenCalled();
-    await vi.advanceTimersByTimeAsync(3000);
-    expect(globalThis.window.location.reload).not.toHaveBeenCalled();
-
-    // The platform swaps the deploy in: the next poll reports the new
-    // version and the reload fires exactly once.
-    api.fetchStatus.mockResolvedValue({
-      gateway: "running",
-      alphaclawVersion: "0.9.35",
-    });
-    await vi.advanceTimersByTimeAsync(3000);
-    expect(globalThis.window.location.reload).toHaveBeenCalledTimes(1);
-    await vi.advanceTimersByTimeAsync(30000);
-    expect(globalThis.window.location.reload).toHaveBeenCalledTimes(1);
+    state = await settle();
+    expect(api.updateAlphaclaw).toHaveBeenCalled();
+    expect(state.state.acManagedUpdate.blocked).toBe(true);
+    expect(state.state.connectivityMode).toBe("online");
+    api.fetchStatus.mockResolvedValue({ gateway: "running", alphaclawVersion: "0.9.35" });
+    await vi.advanceTimersByTimeAsync(30_000);
+    state = await settle();
+    expect(window.location.reload).not.toHaveBeenCalled();
+    expect(state.state.acManagedUpdate.blocked).toBe(true);
   });
 
   it("non-managed self-update keeps reload-on-first-successful-poll", async () => {
-    api.updateAlphaclaw.mockResolvedValue({ ok: true, managedUpdate: false });
+    api.updateAlphaclaw.mockResolvedValue({ ok: true, managedUpdate: false, restarting: true });
     api.fetchStatus.mockResolvedValue({ gateway: "running" });
 
     const state = await settle();
@@ -767,43 +750,17 @@ describe("frontend/app-shell controller (shared status feed)", () => {
     expect(state.state.connectivityMode).toBe("alphaclaw_restarting");
   });
 
-  it("Retry after a managed update reuses the SAME isReady discriminator — never reloads against the old process", async () => {
-    api.updateAlphaclaw.mockResolvedValue({
-      ok: true,
-      managedUpdate: true,
-      previousVersion: "0.9.34",
-    });
-    api.fetchStatus.mockResolvedValue({
-      gateway: "running",
-      alphaclawVersion: "0.9.34",
-    });
-
+  it("Retry status after a managed update only reads the saved attempt and never posts or reconnects", async () => {
+    const attempt = { id: "deploy-2", state: "unknown", target: { alphaclawVersion: "0.9.35" } };
+    api.fetchAlphaclawVersion.mockResolvedValue({ currentVersion: "0.9.35", hasUpdate: false, managedUpdateAttempt: attempt });
     let state = await settle();
-    await state.actions.handleAcUpdate();
-    await flushMicrotasks();
-    state = renderController({});
-    expect(state.state.connectivityMode).toBe("alphaclaw_restarting");
-
-    // Manual Retry while the deploy is still swapping: the remembered poller
-    // options (minus the grace) restart the poll.
-    state.actions.handleRetryConnect();
-
-    // The old process keeps answering with the OLD version: reachable but
-    // NOT ready — the retry must not reload against it.
-    await vi.advanceTimersByTimeAsync(3000);
-    expect(globalThis.window.location.reload).not.toHaveBeenCalled();
-    await vi.advanceTimersByTimeAsync(3000);
-    expect(globalThis.window.location.reload).not.toHaveBeenCalled();
-
-    // The platform swaps the deploy in: the next poll reports the new
-    // version and the reload fires exactly once.
-    api.fetchStatus.mockResolvedValue({
-      gateway: "running",
-      alphaclawVersion: "0.9.35",
-    });
-    await vi.advanceTimersByTimeAsync(3000);
-    expect(globalThis.window.location.reload).toHaveBeenCalledTimes(1);
-    await vi.advanceTimersByTimeAsync(30000);
-    expect(globalThis.window.location.reload).toHaveBeenCalledTimes(1);
+    const before = api.updateAlphaclaw.mock.calls.length;
+    await state.state.acManagedUpdate.retry();
+    state = await settle();
+    expect(state.state.acManagedUpdate.attempt.id).toBe("deploy-2");
+    expect(state.state.acManagedUpdate.blocked).toBe(true);
+    expect(state.state.connectivityMode).toBe("online");
+    expect(api.updateAlphaclaw.mock.calls.length).toBe(before);
+    expect(window.location.reload).not.toHaveBeenCalled();
   });
 });
