@@ -358,6 +358,19 @@ describe("admin-manifest env.update body-aware tierResolver (A1)", () => {
     expect(resolveEnvUpdate({ vars: [] })).toBe("restart");
   });
 
+  it("classifies the full deployment-only registry as uneditable after normalization", () => {
+    const { kDeploymentOnlyEnvKeys } = require("../../lib/server/deployment-only-env");
+    const { isAgentEditableEnvKey, isReservedUserEnvVar } = require("../../lib/server/utils/env-keys");
+    for (const key of kDeploymentOnlyEnvKeys) {
+      for (const inputKey of [key, ` ${key} `, `${key.slice(0, 2)}\r\n${key.slice(2)}`, [key]]) {
+        expect(isAgentEditableEnvKey(inputKey), key).toBe(false);
+        expect(isReservedUserEnvVar(inputKey), key).toBe(true);
+      }
+    }
+    mockEnvFile(kDeploymentOnlyEnvKeys.map((key) => ({ key, value: "existing" })));
+    expect(resolveEnvUpdate({ vars: [{ key: "CUSTOM_FLAG", value: "yes" }] })).toBe("restart");
+  });
+
   it("does NOT escalate when a HIDDEN known var is omitted (B3)", () => {
     // kHiddenKnownVarKeys is non-empty (ANTHROPIC_TOKEN, visibleInEnvars:false).
     const { kHiddenKnownVarKeys } = require("../../lib/server/utils/env-keys");

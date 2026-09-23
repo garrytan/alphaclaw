@@ -32,4 +32,35 @@ describe("onboarding/reserved-env partitionReservedEnvVars", () => {
     const { accepted } = partitionReservedEnvVars([{ key: "GATEWAY_RESTART_READY_TIMEOUT", value: "5" }], null);
     expect(accepted).toEqual([]);
   });
+
+  it("drops NUL-containing imports without creating a canonical alias or logging the malformed name", () => {
+    expect(partitionReservedEnvVars([
+      ...kDeploymentOnlyEnvKeys.map((key) => ({ key: `${key}\0ignored`, value: "private-value" })),
+      { key: "CUSTOM\0_FLAG", value: "private-value" },
+      { key: "CUSTOM_FLAG", value: "allowed" },
+    ], kSystemVars)).toEqual({
+      accepted: [{ key: "CUSTOM_FLAG", value: "allowed" }],
+      skippedReservedKeys: [],
+    });
+  });
+
+  it.each([
+    "ALPHACLAW_ALLOW_LEGACY_LOGIN",
+    "ALPHACLAW_SETUP_URL",
+    "ALPHACLAW_BASE_URL",
+    "RENDER_EXTERNAL_URL",
+    "URL",
+    "RAILWAY_PUBLIC_DOMAIN",
+    "RAILWAY_STATIC_URL",
+  ])("skips every normalized authority key %s while accepting ordinary imports", (key) => {
+    for (const inputKey of [key, ` ${key} `, `${key.slice(0, 2)}\r\n${key.slice(2)}`, [key]]) {
+      expect(partitionReservedEnvVars([
+        { key: inputKey, value: "untrusted" },
+        { key: "CUSTOM_FLAG", value: "yes" },
+      ], kSystemVars)).toEqual({
+        accepted: [{ key: "CUSTOM_FLAG", value: "yes" }],
+        skippedReservedKeys: [key],
+      });
+    }
+  });
 });

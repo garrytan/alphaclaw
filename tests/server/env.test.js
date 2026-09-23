@@ -195,6 +195,22 @@ describe("server/env", () => {
     ).toEqual([{ key: "GOOD", value: "1" }]);
   });
 
+  it("drops NUL-containing names rather than aliasing them in readers, normalizers, and writers", () => {
+    const env = loadEnvModule(tmpDir);
+    const invalidKeys = ["ALPHACLAW_SETUP_URL\0ignored", "\0OPENAI_API_KEY", "CUSTOM\0_FLAG", ["URL\0ignored"]];
+    const good = { key: "CUSTOM_FLAG", value: "kept" };
+    for (const key of invalidKeys) expect(env.normalizeEnvKey(key)).toBe("");
+    const entries = [...invalidKeys.map((key) => ({ key, value: "private-value" })), good];
+    expect(env.normalizeEnvVars(entries)).toEqual([good]);
+    fs.writeFileSync(path.join(tmpDir, ".env"), entries.map(({ key, value }) => `${key}=${value}`).join("\n"));
+    expect(env.readEnvFile()).toEqual([good]);
+    expect(env.readEnvFileStrict()).toEqual([good]);
+    env.writeEnvFile(entries);
+    expect(fs.readFileSync(path.join(tmpDir, ".env"), "utf8")).toBe("CUSTOM_FLAG=kept");
+    env.updateEnvFile((current) => [...current, { key: "URL\0ignored", value: "private-value" }]);
+    expect(fs.readFileSync(path.join(tmpDir, ".env"), "utf8")).toBe("CUSTOM_FLAG=kept");
+  });
+
   it("clears process env vars whose file value became empty", () => {
     fs.writeFileSync(path.join(tmpDir, ".env"), "OPENAI_API_KEY=");
     const env = loadEnvModule(tmpDir);

@@ -5,6 +5,30 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.9.90] - 2026-09-23
+
+### Fixed
+
+- **Editable environment files could reopen shared-password login or replace
+  the dashboard's deployment URL.** `ALPHACLAW_ALLOW_LEGACY_LOGIN` and every
+  public-origin authority key (`ALPHACLAW_SETUP_URL`, `ALPHACLAW_BASE_URL`,
+  `RENDER_EXTERNAL_URL`, `URL`, `RAILWAY_PUBLIC_DOMAIN`, `RAILWAY_STATIC_URL`)
+  now belong to the shared deployment-only registry. Boot and runtime reload
+  ignore their `.env` values and preserve genuine deployment settings,
+  including empty values. The Envars API and agent-admin classification use
+  the same registry and key normalization: protected edits are rejected with
+  deployment-environment guidance, while unrelated edits still save.
+  NUL-containing key names are dropped entirely by the shared file/loader
+  normalizer, preventing Node's native environment-key truncation from
+  aliasing a malformed name onto a protected setting at boot or reload.
+  Onboarding imports skip deployment-only settings and report the skipped keys.
+- **File-only deployment settings now have an explicit migration warning.**
+  Boot and reload warn once per key per process when a nonempty setting
+  exists only in `.env`, naming the key but never its value. Old file values
+  are not promoted automatically. Operators must review the intended value,
+  configure it in the hosting platform or service's environment, and restart
+  AlphaClaw.
+
 ## [0.9.89] - 2026-09-22
 
 The nightly live tier (`live-e2e.yml`, real OpenClaw releases) had failed three
