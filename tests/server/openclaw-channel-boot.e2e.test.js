@@ -431,6 +431,7 @@ describe("server/openclaw-channel boot sync (e2e)", () => {
         },
         pidfile: expect.objectContaining({ decision: "proceed", reason: "absent" }),
         openclaw: {
+          stateDir: harness.openclawDir,
           declaredPin: "1.0.0",
           channelApplied: "beta:1.1.0",
           lastKnownGood: { package: null, dev: null },

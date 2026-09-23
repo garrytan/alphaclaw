@@ -5,6 +5,13 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.9.92] - 2026-09-23
+
+### Fixed
+
+- **Cron jobs on symlinked state directories (#117):** preserve the configured OpenClaw state, config and XDG paths for gateway, CLI, doctor and backup/update subprocesses. Resolving those paths since v0.9.87 selected a different SQLite cron partition, hiding existing jobs and run history. Backup containment checks continue to resolve paths locally; no database rows are rewritten or merged.
+- **State-path diagnostics:** record the configured state path in boot reports and warn in `alphaclaw diagnose` when it differs from the previous recorded boot, including symlink-equivalent paths. Older reports without this field remain readable without inventing a change.
+
 ## [0.9.91] - 2026-09-23
 
 ### Fixed

@@ -236,6 +236,58 @@ const collect = (ctx, overrides = {}) =>
     ...overrides,
   });
 
+describe("diagnose: boot-to-boot state path identity", () => {
+  let ctx;
+  beforeEach(() => { ctx = createRoot(); });
+  afterEach(() => { fs.rmSync(ctx.rootDir, { recursive: true, force: true }); });
+
+  it("warns in JSON and Markdown when symlink-equivalent boot paths differ", async () => {
+    const alias = path.join(ctx.rootDir, "state-alias");
+    fs.symlinkSync(ctx.openclawDir, alias);
+    const bundle = await collect(ctx, {
+      bootReports: {
+        current: { bootId: "new", openclaw: { stateDir: ctx.openclawDir } },
+        previous: [{ bootId: "old", openclaw: { stateDir: alias } }],
+      },
+    });
+    expect(fs.realpathSync(alias)).toBe(fs.realpathSync(ctx.openclawDir));
+    const warnings = bundle.sections.bootReports.warnings;
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain(`${alias} → ${ctx.openclawDir}`);
+    expect(warnings[0]).toContain("Cron jobs and run history");
+    expect(renderDiagnoseMarkdown(bundle)).toContain(warnings[0]);
+    expect(bundle.sections.bootReports.data.verdict).toBeNull();
+  });
+
+  it.each([
+    ["/state", "/state"],
+    ["/state", undefined],
+    [undefined, "/state"],
+    ["/state", ""],
+    ["/state", 123],
+  ])("does not invent a change for unchanged or legacy paths (%s, %s)", async (current, previous) => {
+    const bundle = await collect(ctx, {
+      bootReports: {
+        current: { openclaw: { stateDir: current } },
+        previous: [{ openclaw: { stateDir: previous } }],
+      },
+    });
+    expect(bundle.sections.bootReports.warnings).toEqual([]);
+  });
+
+  it("does not compare an initial boot against an incident or refused start", async () => {
+    const bundle = await collect(ctx, {
+      bootReports: {
+        current: { openclaw: { stateDir: "/state" } },
+        previous: [],
+        incident: { openclaw: { stateDir: "/old" } },
+        refused: { openclaw: { stateDir: "/refused" } },
+      },
+    });
+    expect(bundle.sections.bootReports.warnings).toEqual([]);
+  });
+});
+
 describe("diagnose: collectDiagnose over a populated root (disk path)", () => {
   let ctx;
   let bundle;

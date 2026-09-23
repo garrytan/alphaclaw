@@ -5361,7 +5361,7 @@ describe("syncAtBoot bin-phase boot report (#76 A1)", () => {
   };
 
   it("a normal pin boot writes the report: stamp facts, pin/expected/installed/resolved, sentinel, pending server phase", () => {
-    const { sync, store, runner, installToTempDir, packageRoot } = createReportingHarness(
+    const { sync, store, runner, installToTempDir, packageRoot, openclawDir } = createReportingHarness(
       { pin: "1.0.0", installedVersion: "1.0.0", sentinelVersion: "1.0.0" },
       {
         selfVersion: {
@@ -5388,6 +5388,7 @@ describe("syncAtBoot bin-phase boot report (#76 A1)", () => {
       },
       pidfile: expect.objectContaining({ decision: "proceed", reason: "absent" }),
       openclaw: {
+        stateDir: openclawDir,
         declaredPin: "1.0.0",
         channelApplied: null,
         lastKnownGood: { package: null, dev: null },
@@ -5417,8 +5418,21 @@ describe("syncAtBoot bin-phase boot report (#76 A1)", () => {
     expect(installToTempDir).not.toHaveBeenCalled();
   });
 
+  it("records the configured symlink spelling in the boot report", () => {
+    const env = {};
+    const { sync, store, openclawDir } = createReportingHarness({
+      pin: "1.0.0", installedVersion: "1.0.0", sentinelVersion: "1.0.0",
+      extraSyncOptions: { openclawSpawnEnv: () => env },
+    });
+    const alias = path.join(path.dirname(openclawDir), "state-alias");
+    fs.symlinkSync(openclawDir, alias);
+    env.OPENCLAW_STATE_DIR = alias;
+    expect(sync.syncAtBoot().ok).toBe(true);
+    expect(readReport(store).openclaw.stateDir).toBe(alias);
+  });
+
   it("an applied build activated at boot records installedAtBoot (before) and resolvedForLaunch (after) as different versions", () => {
-    const { sync, store, installDir, runner } = createReportingHarness({
+    const { sync, store, installDir, runner, openclawDir } = createReportingHarness({
       pin: "1.0.0",
       channel: "beta",
       installedVersion: "1.0.0",
@@ -5437,6 +5451,7 @@ describe("syncAtBoot bin-phase boot report (#76 A1)", () => {
     expect(store.readInstalledVersion({ installDir })).toBe("1.1.0");
     const report = readReport(store);
     expect(report.openclaw).toEqual({
+      stateDir: openclawDir,
       declaredPin: "1.0.0",
       channelApplied: "beta:1.1.0",
       lastKnownGood: { package: "1.0.0", dev: null },
