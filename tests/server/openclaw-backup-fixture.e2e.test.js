@@ -277,7 +277,7 @@ describe("issue #102 real backup fixtures", () => {
     expect(isStateDbQuiet()).toBe(false);
   });
 
-  it("uses the resolved root through all three rungs and restores the minimal archive within one pause", async () => {
+  it("resolves backup sources locally while preserving the upstream CLI state path through all three rungs", async () => {
     const fixture = createFixture({ symlinkRoot: true });
     const run = fixture.runStream.runStreamed.getMockImplementation();
     let fullArchiveFailed = false;
@@ -287,8 +287,9 @@ describe("issue #102 real backup fixtures", () => {
         return Promise.resolve({ ok: false, code: 2, tail: "tar: fixture write error", timedOut: false });
       }
       if (options.command === "openclaw" && options.args[0] === "backup") {
-        expect(options.env.OPENCLAW_STATE_DIR).toBe(fixture.actualStateDir);
-        expect(options.env.OPENCLAW_CONFIG_PATH).toBe(path.join(fixture.actualStateDir, "openclaw.json"));
+        expect(options.env.OPENCLAW_STATE_DIR).toBe(fixture.openclawDir);
+        expect(options.env.OPENCLAW_CONFIG_PATH).toBe(path.join(fixture.openclawDir, "openclaw.json"));
+        expect(options.env.XDG_CONFIG_HOME).toBe(fixture.openclawDir);
         return Promise.resolve({ ok: false, code: 1, tail: "fixture upstream backup failure", timedOut: false });
       }
       return run(options);
@@ -311,12 +312,12 @@ describe("issue #102 real backup fixtures", () => {
     expect(fixture.gatewayQuiesce.start).toHaveBeenCalledTimes(1);
   });
 
-  it("the pinned CLI writes config through a symlinked state root using canonical runtime paths", async () => {
+  it("the pinned CLI writes config without changing the configured state path", async () => {
     const fixture = createFixture({ symlinkRoot: true });
     const runtimeEnv = withOpenclawStartupEnv(fixture.env);
-    expect(runtimeEnv.OPENCLAW_STATE_DIR).toBe(fixture.actualStateDir);
-    expect(runtimeEnv.OPENCLAW_CONFIG_PATH).toBe(path.join(fixture.actualStateDir, "openclaw.json"));
-    expect(runtimeEnv.XDG_CONFIG_HOME).toBe(fixture.actualStateDir);
+    expect(runtimeEnv.OPENCLAW_STATE_DIR).toBe(fixture.openclawDir);
+    expect(runtimeEnv.OPENCLAW_CONFIG_PATH).toBe(path.join(fixture.openclawDir, "openclaw.json"));
+    expect(runtimeEnv.XDG_CONFIG_HOME).toBe(fixture.openclawDir);
     expect(fixture.env.OPENCLAW_STATE_DIR).toBe(fixture.openclawDir);
     const commands = createCommands({ gatewayEnv: () => fixture.env });
     const result = await commands.clawCmdWithBin(path.resolve("node_modules/openclaw/openclaw.mjs"),

@@ -72,6 +72,7 @@ describe("boot-report: buildBinPhaseReport", () => {
       container: { pid1StartTicks: null, startMs: null },
       pidfile: pidDecision,
       openclaw: {
+        stateDir: null,
         declaredPin: null,
         channelApplied: null,
         lastKnownGood: null,

@@ -271,6 +271,21 @@ elsewhere are reported for review only: OpenClaw creates them itself
 archives them. The offline and migration producers resolve a symlinked state root while
 keeping required-source and internal-symlink safety checks.
 
+The gateway and OpenClaw CLI keep `OPENCLAW_STATE_DIR`, `OPENCLAW_CONFIG_PATH`
+and `XDG_CONFIG_HOME` exactly as configured. Only backup filesystem checks resolve
+the state-root symlink: OpenClaw keys cron jobs and run history by the state-path
+string, so replacing an alias with its real path selects a different partition
+even when both paths reach the same SQLite file. `alphaclaw diagnose` warns when
+the current and previous boot reports record different state paths. Older reports
+without a recorded state path cannot establish a change.
+
+Versions 0.9.87–0.9.91 resolved these runtime paths before spawning OpenClaw.
+After upgrading to the fix, restart to serve the original cron partition again;
+the fix does not rewrite or merge database rows. Before restarting an affected
+box, consider setting `cron.skipMissedJobs: true` to avoid a burst of missed jobs.
+Jobs created under the resolved path remain in that separate partition; do not
+manually re-key SQLite rows as the recovery path.
+
 When AlphaClaw observes more than 512 MiB of raw workspace content, upstream
 attempts omit workspace from the outset with `--no-include-workspace`; unknown
 size preserves the existing attempt behavior. AlphaClaw's own policy exclusions
