@@ -7,7 +7,9 @@ const { createCommands } = require("../../lib/server/commands");
 const { processGroupHasWriters } = require("../../lib/server/process-group");
 const { runOnboardedBootSequence } = require("../../lib/server/startup");
 const { createGatewayLifecycleLock } = require("../../lib/server/gateway-lifecycle-lock");
-const { setBootPhase } = require("../../lib/server/boot-phase");
+const { setBootPhase, getBootPhase } = require("../../lib/server/boot-phase");
+const { normalizeBootConfig } = require("../../lib/server/boot-config-normalization");
+const { kUsageTrackerPluginPath } = require("../../lib/server/usage-tracker-config");
 
 describe("admitted boot native maintenance", () => {
   let root;
@@ -232,6 +234,60 @@ describe("startup native maintenance admission", () => {
     await runOnboardedBootSequence(deps);
     expect(deps.normalizeBootConfig).toHaveBeenCalledWith({ hold });
     expect(deps.normalizeBootConfig.mock.invocationCallOrder[0]).toBeLessThan(execFileCmd.mock.invocationCallOrder[0]);
+  });
+
+  it("normalizes an existing pre-onboarding config only through admission without starting onboarded services", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "alphaclaw-pre-onboarding-"));
+    const configPath = path.join(root, "openclaw.json");
+    const stalePath = "/app/node_modules/@chrysb/alphaclaw/lib/plugin/usage-tracker";
+    fs.writeFileSync(configPath, JSON.stringify({ plugins: { load: { paths: [stalePath, "/custom/plugin"] } } }));
+    const env = { OPENCLAW_CONFIG_PATH: configPath, OPENCLAW_STATE_DIR: root };
+    deps.onboarded = false;
+    deps.normalizeBootConfig.mockImplementation((options) => normalizeBootConfig({ ...options, env }));
+    deps.reconcileBootConfig.mockImplementation(async ({ normalizeBootConfig: normalize, operation }) => {
+      expect(fs.readFileSync(configPath, "utf8")).toContain(stalePath);
+      await normalize({ assertLease: operation.assertActive });
+      return { status: "ok" };
+    });
+    try {
+      await runOnboardedBootSequence(deps);
+      expect(JSON.parse(fs.readFileSync(configPath, "utf8")).plugins.load.paths).toEqual(["/custom/plugin", kUsageTrackerPluginPath]);
+      expect(deps.normalizeBootConfig).toHaveBeenCalledWith({ hold, assertLease: expect.any(Function) });
+      expect(deps.assessLaunchCompatibilityAtBoot.mock.invocationCallOrder[0]).toBeLessThan(deps.normalizeBootConfig.mock.invocationCallOrder[0]);
+      expect(deps.normalizeBootConfig.mock.invocationCallOrder[0]).toBeLessThan(hold.mock.invocationCallOrder[0]);
+      for (const step of [deps.runBootNativeMaintenance, deps.ensureManagedExecDefaults, deps.ensureUsageTrackerPluginConfig,
+        deps.ensureWebhookMappingIds, deps.doSyncPromptFiles, deps.reloadEnv, deps.syncChannelConfig,
+        deps.ensureGatewayProxyConfig, deps.startGateway, deps.watchdog.start, deps.gmailWatchService.start]) {
+        expect(step).not.toHaveBeenCalled();
+      }
+      expect(deps.finalizeBootReport).toHaveBeenCalledWith(expect.objectContaining({ reconcile: { status: "ok" } }));
+      expect(hold).toHaveBeenCalledOnce();
+      expect(getBootPhase().phase).toBe("ready");
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it.each(["compatibility", "recovery", "expired lease", "shutdown"])("keeps pre-onboarding normalization fenced by %s", async (blocker) => {
+    deps.onboarded = false;
+    const controller = new AbortController();
+    deps.signal = controller.signal;
+    if (blocker === "compatibility") deps.assessLaunchCompatibilityAtBoot.mockResolvedValue({ compatible: false });
+    deps.reconcileBootConfig.mockImplementation(async ({ normalizeBootConfig: normalize, operation }) => {
+      if (blocker === "recovery") return { status: "held", hold: { reason: "recovery_review" } };
+      if (blocker === "expired lease") hold.isValid.mockReturnValue(false);
+      if (blocker === "shutdown") controller.abort("shutdown");
+      operation.assertActive();
+      await normalize({ assertLease: operation.assertActive });
+      return { status: "ok" };
+    });
+    await runOnboardedBootSequence(deps);
+    expect(deps.normalizeBootConfig).not.toHaveBeenCalled();
+    expect(deps.runBootNativeMaintenance).not.toHaveBeenCalled();
+    expect(deps.startGateway).not.toHaveBeenCalled();
+    expect(deps.watchdog.start).not.toHaveBeenCalled();
+    expect(deps.gmailWatchService.start).not.toHaveBeenCalled();
+    expect(hold).toHaveBeenCalledOnce();
   });
 
   it.each([
