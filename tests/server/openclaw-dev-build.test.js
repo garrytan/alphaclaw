@@ -25,8 +25,12 @@ describe("isolated source builds without native updater activation", () => {
     fs.writeFileSync(path.join(upstream, "openclaw.mjs"), 'import fs from "node:fs"; if(process.argv.includes("doctor")) fs.writeFileSync(process.env.OPENCLAW_CONFIG_PATH,"{\\"isolatedDoctor\\":true}"); console.log("2026.9.2");');
     execFileSync("git", ["init", "--initial-branch=main", upstream], { stdio: "ignore" });
     execFileSync("git", ["-C", upstream, "add", "."], { stdio: "ignore" });
-    execFileSync("git", ["-C", upstream, "commit", "-m", "Source build fixture"], { stdio: "ignore" });
-    const sha = execFileSync("git", ["-C", upstream, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+    const tree = execFileSync("git", ["-C", upstream, "write-tree"], { encoding: "utf8" }).trim();
+    const sha = execFileSync("git", ["-C", upstream, "hash-object", "-t", "commit", "-w", "--stdin"], {
+      encoding: "utf8",
+      input: `tree ${tree}\nauthor Test fixture <fixture@alphaclaw.invalid> 1 +0000\ncommitter Test fixture <fixture@alphaclaw.invalid> 1 +0000\n\nSource build fixture\n`,
+    }).trim();
+    execFileSync("git", ["-C", upstream, "update-ref", "refs/heads/main", sha], { stdio: "ignore" });
     fs.writeFileSync(path.join(active, "openclaw.json"), "unchanged active state");
     fs.writeFileSync(path.join(binDir, "openclaw"), `#!/usr/bin/env node\nrequire("fs").writeFileSync(${JSON.stringify(path.join(active, "native-update-ran"))}, process.argv[1]);process.exit(91);\n`, { mode: 0o700 });
     const candidate = createDevCandidate({ checkoutDir: active });

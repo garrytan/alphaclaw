@@ -55,4 +55,6 @@ jobs:
 
       - run: npm run build:ui
 
+      - run: npm install --global pnpm@11.15.1
+
       - run: npm test
