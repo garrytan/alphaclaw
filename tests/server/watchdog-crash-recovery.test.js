@@ -328,6 +328,7 @@ describe("watchdog retained crash recovery", () => {
         .mockImplementationOnce(() => new Promise((resolve) => { finishRead = resolve; }))
         .mockResolvedValue(null);
       const { launch } = setup({ [seam]: read });
+      const expectedLaunches = seam === "assessLaunchCompatibility" ? 0 : 1;
       crash();
       await vi.advanceTimersByTimeAsync(0);
       expect(read).toHaveBeenCalledTimes(1);
@@ -335,14 +336,17 @@ describe("watchdog retained crash recovery", () => {
         // A local discovery read is bounded independently of the much longer
         // restart lease; its ignored abort must release dispatch admission.
         await vi.advanceTimersByTimeAsync(61_000);
-        expect(launch).toHaveBeenCalledTimes(1);
+        expect(launch).toHaveBeenCalledTimes(expectedLaunches);
         expect(watchdog.getStatus().recoveryPending).toBeNull();
         expect(watchdog.getStatus().operationInProgress).toBe(false);
+        if (seam === "assessLaunchCompatibility") {
+          expect(watchdog.getStatus().autoRepairPaused).toMatchObject({ reason: "state_db_unverified" });
+        }
       } finally {
         finishRead(null);
         await vi.advanceTimersByTimeAsync(0);
       }
-      expect(launch).toHaveBeenCalledTimes(1);
+      expect(launch).toHaveBeenCalledTimes(expectedLaunches);
     },
   );
 

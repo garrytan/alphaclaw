@@ -1850,7 +1850,7 @@ describe("frontend/upgrade-tab hook", () => {
     await state.onConfirmApply(); await renderHook({}).backupPreflight.confirm();
     // v0.9.81 (D13): the body declares its direction (2026.7.2 > the running
     // 2026.7.1-2 → update); a row click never claims "latest".
-    expect(api.applyOpenclawVersion).toHaveBeenCalledWith({
+    expect(api.applyOpenclawVersion).toHaveBeenCalledWith({ recoveryMode: "config_only",
       channel: "stable",
       version: "2026.7.2",
       intent: "update",
@@ -2219,7 +2219,7 @@ describe("frontend/upgrade-tab hook", () => {
     expect(state.pendingApply.intent).toBeNull();
     expect(state.pendingApply.expectLatest).toBe(false);
     await state.onConfirmApply(); await renderHook({}).backupPreflight.confirm();
-    expect(api.applyOpenclawVersion).toHaveBeenCalledWith({ channel: "dev", devHead: true });
+    expect(api.applyOpenclawVersion).toHaveBeenCalledWith({ recoveryMode: "config_only", channel: "dev", devHead: true });
   });
 
   it("a STREAMED standalone-backup failure never inherits the last apply's reuse or no-backup offers (v0.9.81 review)", async () => {
@@ -2256,7 +2256,7 @@ describe("frontend/upgrade-tab hook", () => {
     });
     state = renderHook({});
     expect(state.operation).toEqual(expect.objectContaining({ phase: "failed", target: { kind: "backup" } }));
-    expect(state.backupReuseOffer).toBeNull();
+    expect(state.backupReuseOffer).toBeUndefined();
     expect(state.noBackupConsentOffer).toBeNull();
   });
 
@@ -2309,7 +2309,7 @@ describe("frontend/upgrade-tab hook", () => {
     expect(state.pendingApply.expectLatest).toBe(true);
     expect(state.pendingApply.isDowngrade).toBe(false);
     await state.onConfirmApply(); await renderHook({}).backupPreflight.confirm();
-    expect(api.applyOpenclawVersion).toHaveBeenCalledWith({
+    expect(api.applyOpenclawVersion).toHaveBeenCalledWith({ recoveryMode: "config_only",
       channel: "stable",
       version: "2026.7.2",
       intent: "update",
@@ -2389,7 +2389,7 @@ describe("frontend/upgrade-tab hook", () => {
     expect(state.pendingApply.intent).toBe("downgrade");
     expect(state.pendingApply.confirm.title).toBe("Downgrade to 2026.7.0?");
     await state.onConfirmApply(); await renderHook({}).backupPreflight.confirm();
-    expect(api.applyOpenclawVersion).toHaveBeenCalledWith({ channel: "stable", version: "2026.7.0", intent: "downgrade" });
+    expect(api.applyOpenclawVersion).toHaveBeenCalledWith({ recoveryMode: "config_only", channel: "stable", version: "2026.7.0", intent: "downgrade" });
   });
 
   it("409 catalog_stale: the catalog is reloaded (forced) ONCE and the confirm re-opens on the server's `latest`; a second stale verdict is an error toast, never a third POST (D2)", async () => {
@@ -2451,6 +2451,36 @@ describe("frontend/upgrade-tab hook", () => {
 
   // ── v0.9.81 (C3/C4): Back up now, Retry backup, Retry update ──
   const kBackupDone = { ok: true, archive: { file: "/data/backups/openclaw/openclaw-2026-09-09.alphaclaw.tar.gz", verified: true } };
+
+  it("manual database snapshots require confirmation, preserve database_set on retry, and never start an upgrade", async () => {
+    const preflight = () => new Response(JSON.stringify({ ok: true, blocked: false, profile: "config_only", checkpoint: { fileCount: 3, bytes: 4096, maxBytes: 16777216 }, databaseCount: 2, databaseBytes: 6 * 1024 ** 3 }));
+    api.authFetch.mockImplementationOnce(async () => preflight());
+    let state = await hydrate();
+    await state.onDatabaseSnapshot();
+    state = renderHook({});
+    expect(state.backupPreflight).toMatchObject({ dialogOpen: true, recoveryMode: "database_set" });
+    expect(api.createOpenclawBackup).not.toHaveBeenCalled();
+    state.backupPreflight.cancel();
+    expect(api.createOpenclawBackup).not.toHaveBeenCalled();
+    api.authFetch.mockImplementationOnce(async () => preflight());
+    state = renderHook({});
+    await state.onDatabaseSnapshot();
+    api.createOpenclawBackup.mockRejectedValueOnce(Object.assign(new Error("Snapshot failed"), { code: "backup_failed" }));
+    await renderHook({}).backupPreflight.confirm();
+    state = renderHook({});
+    expect(api.createOpenclawBackup).toHaveBeenCalledWith({ recoveryMode: "database_set" });
+    expect(state.operation).toMatchObject({ phase: "failed", recoveryMode: "database_set" });
+    api.authFetch.mockImplementationOnce(async () => preflight());
+    await state.onRetryBackup();
+    state = renderHook({});
+    expect(state.backupPreflight.recoveryMode).toBe("database_set");
+    expect(api.createOpenclawBackup).toHaveBeenCalledOnce();
+    api.createOpenclawBackup.mockResolvedValueOnce({ ok: true, operationId: "db-snapshot", events: "/events" });
+    await state.backupPreflight.confirm();
+    expect(api.createOpenclawBackup).toHaveBeenLastCalledWith({ recoveryMode: "database_set" });
+    expect(renderHook({}).operation).toMatchObject({ phase: "running", operationId: "db-snapshot", recoveryMode: "database_set" });
+    expect(api.applyOpenclawVersion).not.toHaveBeenCalled();
+  });
 
   it("Back up now: POSTs /api/openclaw/backup, shows a running backup card, and a 202 stream's `done` turns it into the completed card (inventory + runs re-read)", async () => {
     let captured = null;
@@ -2572,7 +2602,7 @@ describe("frontend/upgrade-tab hook", () => {
       expect.objectContaining({ payload: { channel: "stable", version: "2026.7.2" }, intent: "update", isDowngrade: false }),
     );
     await state.onConfirmApply(); await renderHook({}).backupPreflight.confirm();
-    expect(api.applyOpenclawVersion).toHaveBeenLastCalledWith({ channel: "stable", version: "2026.7.2", intent: "update" });
+    expect(api.applyOpenclawVersion).toHaveBeenLastCalledWith({ recoveryMode: "config_only", channel: "stable", version: "2026.7.2", intent: "update" });
   });
 
   it("Retry backup on a STREAMED backup failure of an apply carries the operation's declared intent into the retry-update offer; a failed standalone backup simply retries itself", async () => {
@@ -3395,7 +3425,7 @@ describe("frontend/upgrade-tab repair (2.3)", () => {
     api.applyOpenclawVersion.mockClear();
     await state.onRetryApply(); await renderHook({}).backupPreflight.confirm();
     // The re-stage carries the failed operation's own declared direction.
-    expect(api.applyOpenclawVersion).toHaveBeenCalledWith({
+    expect(api.applyOpenclawVersion).toHaveBeenCalledWith({ recoveryMode: "config_only",
       channel: "beta",
       version: "2026.7.3-beta.1",
       intent: "update",

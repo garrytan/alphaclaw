@@ -67,10 +67,8 @@ const kContentionHoldMaxMs = 30_000;
 
 const kMin = 60 * 1000;
 
-// The seeded stable-accepted config (plan constraint C12). Verified against
-// openclaw@2026.7.1-2 during the baseline smoke: the stable gateway boots
-// healthy with ALL of these keys present. `meta.lastTouchedAt` is the
-// retired-looking #20 seed; `mcp.servers.nessie` carries a ${NESSIE_TOKEN}
+// The seeded stable-accepted config (plan constraint C12).
+// `mcp.servers.nessie` carries a ${NESSIE_TOKEN}
 // env reference that MUST survive the upgrade byte-for-byte (issue #20's
 // incident was a migration mangling exactly this shape).
 const buildSeedConfig = () => ({
@@ -80,7 +78,6 @@ const buildSeedConfig = () => ({
     port: kGatewayPort,
     auth: { token: kGatewayToken },
   },
-  meta: { lastTouchedAt: "2026-07-01T00:00:00Z" },
   mcp: {
     servers: {
       nessie: {
@@ -120,6 +117,7 @@ const ctx = {
   bootStartedAt: null,
   placeholderObserved: null,
   contentionOutcome: null,
+  recoveryMode: "config_only",
   metaKeyAfterUpgrade: undefined,
   activeContainer: kContainerA,
 };
@@ -277,6 +275,20 @@ describeContainer("container E2E: upgrade journey in the production image (pinâ†
           const logs = await containerLogs(name, { tail: 5000 });
           fs.writeFileSync(path.join(dir, `${name}-logs.txt`), logs);
         } catch {}
+        try {
+          const script = `
+            const fs = require('node:fs'), path = require('node:path');
+            const managed = '/data/.openclaw/.alphaclaw';
+            const read = (file) => { try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch (error) { return { unreadable: error.code || 'invalid_json' }; } };
+            const reports = Object.fromEntries(['boot-report.json', 'boot-report-incident.json', 'openclaw-channel-state.json'].map((name) => [name, read(path.join(managed, name))]));
+            const runsDir = path.join(managed, 'runs');
+            const runs = (fs.existsSync(runsDir) ? fs.readdirSync(runsDir) : []).filter((name) => /^[a-f0-9-]+\\.json$/i.test(name)).map((name) => read(path.join(runsDir, name)));
+            const checkpoints = runs.filter((run) => /^\\/data\\/backups\\/openclaw\\/recovery-[a-f0-9-]{36}$/.test(run.recovery?.checkpoint?.file || '')).map((run) => ({ operationId: run.operationId, manifest: read(path.join(run.recovery.checkpoint.file, 'manifest.json')), ready: read(path.join(run.recovery.checkpoint.file, 'ready.json')) }));
+            console.log(JSON.stringify({ reports, runs, checkpoints }, null, 2));
+          `;
+          const { stdout } = await execInContainer(name, ["node", "-e", script]);
+          fs.writeFileSync(path.join(dir, `${name}-recovery-state.json`), stdout, { mode: 0o600 });
+        } catch {}
       }
       // The watchdog's incident bundles carry what the container log does
       // not: the gateway's stderr tail, the medic's `doctor --fix` output
@@ -331,7 +343,7 @@ describeContainer("container E2E: upgrade journey in the production image (pinâ†
     expect(claudeOut).toContain(pin);
   });
 
-  step("image carries tar + gzip (the offline copy and the usable check need them)", 2 * kMin, async () => {
+  step("image carries tar + gzip for retained historical archive recovery", 2 * kMin, async () => {
     // The #54 offline copy archives with `tar -I 'gzip -1'` and every
     // verified artifact passes `gzip -t` + `tar -xzOf â€¦ manifest.json`
     // (WI-6.1). node:24-slim ships both, but a slimmer base or a stripped
@@ -417,14 +429,42 @@ describeContainer("container E2E: upgrade journey in the production image (pinâ†
     // The gateway must author this database. An empty SQLite file with a
     // synthetic table would bypass the ownership/schema migration contract.
     await execInContainer(kContainerA, ["test", "-f", kStateDbPath]);
-    const probe = `const { DatabaseSync } = require('node:sqlite'); const db = new DatabaseSync(${JSON.stringify(kStateDbPath)}, { readOnly: true }); console.log(JSON.stringify({ schema: db.prepare('PRAGMA user_version').get().user_version, integrity: db.prepare('PRAGMA integrity_check').get().integrity_check })); db.close();`;
+    const probe = `const { DatabaseSync } = require('node:sqlite'); const db = new DatabaseSync(${JSON.stringify(kStateDbPath)}, { readOnly: true }); console.log(JSON.stringify({ schema: db.prepare('PRAGMA user_version').get().user_version, integrity: db.prepare('PRAGMA integrity_check').get().integrity_check, owner: db.prepare("SELECT role, schema_version FROM schema_meta WHERE meta_key='primary'").get() })); db.close();`;
     const { stdout } = await execInContainer(kContainerA, ["node", "-e", probe]);
     const observed = JSON.parse(stdout);
     expect(observed.integrity).toBe("ok");
     expect(observed.schema).toBeGreaterThan(0);
-    if (ctx.sourceStable === "2026.7.1-2") expect(observed.schema).toBe(1);
+    expect(observed.owner).toEqual({ role: "global", schema_version: observed.schema });
+    if (ctx.sourceStable === "2026.8.2") expect(observed.schema).toBe(15);
     console.log(`[container-e2e] real ${ctx.sourceStable} state DB: schema ${observed.schema}, integrity ${observed.integrity}`);
 
+  });
+
+  step("browser creates a configuration-only checkpoint without claiming database recovery", 5 * kMin, async () => {
+    const { chromium } = require("playwright");
+    const browser = await chromium.launch();
+    const page = await browser.newContext().then((context) => context.newPage());
+    try {
+      await loginThroughBrowser(page);
+      await page.goto(`${baseUrl()}/#/upgrade`, { waitUntil: "domcontentloaded" });
+      await page.getByRole("button", { name: "Create configuration checkpoint", exact: true }).click({ timeout: 2 * kMin });
+      const review = page.getByRole("dialog", { name: "Review configuration checkpoint", exact: true });
+      await review.getByText("Configuration checkpoint preflight passed", { exact: true }).waitFor({ timeout: 2 * kMin });
+      expect(await review.innerText()).toContain("database data not backed up");
+      await review.getByRole("button", { name: "Continue", exact: true }).click();
+      await page.getByText("Configuration checkpoint completed", { exact: true }).waitFor({ timeout: 3 * kMin });
+      const runs = await fetchJsonWithCookie(`${baseUrl()}/api/openclaw/runs`, ctx.cookie);
+      const run = runs.runs.find((entry) => entry.target?.kind === "backup" && entry.state === "completed");
+      expect(run).toBeTruthy();
+      const detail = await fetchJsonWithCookie(`${baseUrl()}/api/openclaw/runs/${run.operationId}`, ctx.cookie);
+      expect(detail.run.recovery).toMatchObject({ kind: "config_only", checkpoint: { verified: true }, databases: { complete: false, verified: false, entries: [] }, restore: { configAvailable: true, databaseSetAvailable: false } });
+      expect(detail.run.recovery.checkpoint.file).toMatch(/\/recovery-[a-f0-9-]{36}$/);
+      await waitFor(() => gatewayHealthzOk(kContainerA), { timeoutMs: 2 * kMin, intervalMs: 1000, label: "gateway resumed after the configuration checkpoint" });
+      expect(await restartCount(kContainerA)).toBe(0);
+    } catch (error) {
+      await screenshotOnFailure(page, "configuration-checkpoint-failed");
+      throw error;
+    } finally { await browser.close(); }
   });
 
   step("starts the gateway-liveness-aware churner", 2 * kMin, async () => {
@@ -576,54 +616,58 @@ describeContainer("container E2E: upgrade journey in the production image (pinâ†
       await targetVersionText.waitFor({ timeout: 2 * kMin });
       const row = targetVersionText.locator('xpath=ancestor::div[contains(@class,"py-2.5")][1]');
       const applyButton = row.getByRole("button", { name: /^(Upgrade|Switch|Try again)$/ });
-      await applyButton.first().click({ timeout: 60_000 });
+      const startApply = async () => {
+        await applyButton.first().click({ timeout: 60_000 });
+        const dialog = page.locator("div.fixed.inset-0");
+        await dialog.waitFor({ timeout: 30_000 });
+        await dialog.getByRole("button", { name: "Apply", exact: true }).click({ timeout: 30_000 });
+        const preflightDialog = page.getByRole("dialog", { name: "Review configuration checkpoint", exact: true });
+        await preflightDialog.getByText("Configuration checkpoint preflight passed", { exact: true }).waitFor({ timeout: 2 * kMin });
+        expect(await preflightDialog.innerText()).toContain("database data not backed up");
+        await preflightDialog.getByRole("button", { name: "Continue", exact: true }).click({ timeout: 30_000 });
+      };
+      await startApply();
+      const recoveryChoice = page.getByRole("region", { name: "Database recovery choice", exact: true });
+      const next = await waitFor(async () => {
+        if (await recoveryChoice.isVisible()) return "choice";
+        const text = await pageBodyText(page);
+        if (await page.getByRole("heading", { name: `Update to ${ctx.beta} failed`, exact: true }).isVisible()) throw Object.assign(new Error(`Update failed before recovery choice: ${text.slice(0, 4000)}`), { terminal: true });
+        if (text.includes("Restarting") || await restartCount(kContainerA) > 0) return "restarting";
+        return false;
+      }, { timeoutMs: 12 * kMin, intervalMs: 2000, label: "explicit migration recovery choice or compatible config-only apply" });
+      if (ctx.sourceStable === "2026.8.2") expect(next).toBe("choice");
+      if (next === "choice") {
+        expect(await recoveryChoice.innerText()).toContain("The gateway stays up while you choose");
+        expect(await gatewayHealthzOk(kContainerA)).toBe(true);
+        expect(await restartCount(kContainerA)).toBe(0);
+        await recoveryChoice.getByRole("button", { name: "Cancel", exact: true }).click();
+        await recoveryChoice.waitFor({ state: "hidden" });
+        expect(await gatewayHealthzOk(kContainerA)).toBe(true);
+        expect(await restartCount(kContainerA)).toBe(0);
+        await startApply();
+        await recoveryChoice.waitFor({ timeout: 12 * kMin });
+        const snapshotRequest = page.waitForRequest((request) => request.method() === "POST" && request.url().endsWith("/api/openclaw/apply") && request.postDataJSON()?.recoveryMode === "database_set");
+        await recoveryChoice.getByRole("button", { name: "Create database snapshot and upgrade", exact: true }).click();
+        const body = (await snapshotRequest).postDataJSON();
+        expect(body.recoveryMode).toBe("database_set");
+        expect(body.version).toBe(ctx.beta);
+        expect(body.confirmNoBackupToken).toBeUndefined();
+        ctx.recoveryMode = "database_set";
+      }
 
-      // U3 confirm dialog â†’ the primary "Apply" button, scoped to the modal
-      // overlay so it can never collide with catalog-row buttons.
-      const dialog = page.locator("div.fixed.inset-0");
-      await dialog.waitFor({ timeout: 30_000 });
-      await dialog
-        .getByRole("button", { name: "Apply", exact: true })
-        .click({ timeout: 30_000 });
-      const preflightDialog = page.getByRole("dialog", { name: "Review backup preflight", exact: true });
-      await preflightDialog.getByText("Backup preflight passed", { exact: true }).waitFor({ timeout: 2 * kMin });
-      await preflightDialog.getByRole("button", { name: "Continue", exact: true }).click({ timeout: 30_000 });
-
-      // Progress card: heading "Updating to <beta>", then the Backup step,
-      // then Restarting. Steps run in order, so "Restarting" appearing means
-      // Backup completed; the green step dot is checked when reachable.
-      await waitFor(
-        async () => (await pageBodyText(page)).includes(`Updating to ${ctx.beta}`),
-        { timeoutMs: 2 * kMin, intervalMs: 2000, label: "progress card heading" },
-      );
-      await waitFor(async () => (await pageBodyText(page)).includes("Backup"), {
-        timeoutMs: 5 * kMin,
-        intervalMs: 2000,
-        label: "Backup step visible",
-      });
       await waitFor(
         async () => {
           const text = await pageBodyText(page);
-          if (text.includes("Restarting")) return true;
-          // Belt-and-suspenders: the Backup row's status dot turning green.
-          try {
-            const backupRow = page
-              .getByText("Backup", { exact: true })
-              .locator("xpath=parent::*");
-            const greenDots = await backupRow
-              .locator('span[class*="bg-green-500"]')
-              .count();
-            if (greenDots > 0) return true;
-          } catch {}
-          if (text.includes("failed") && text.includes(`Update to ${ctx.beta}`)) {
-            throw new Error(`UI reports the update FAILED:\n${text.slice(0, 4000)}`);
+          if (text.includes("Restarting") || await restartCount(kContainerA) > 0) return true;
+          if (await page.getByRole("heading", { name: `Update to ${ctx.beta} failed`, exact: true }).isVisible()) {
+            throw Object.assign(new Error(`UI reports the update FAILED:\n${text.slice(0, 4000)}`), { terminal: true });
           }
           return false;
         },
         {
           timeoutMs: 14 * kMin,
           intervalMs: 3000,
-          label: "Backup completed / Restarting step visible",
+          label: "selected recovery completed and activation restart observed",
         },
       );
     } catch (err) {
@@ -717,112 +761,60 @@ describeContainer("container E2E: upgrade journey in the production image (pinâ†
     }
   });
 
-  step("run record: the backup rode through the contention window and is verified", 3 * kMin, async () => {
-    // (g2) The durable authority for what the backup step did survives the
-    // activation restart: runs/<opId>.json via GET /api/openclaw/runs. The
-    // assertions are honest about WHO ran the backup: the stable pin's CLI
-    // (2026.7.1-2) does not take a state lease and finishes under a held
-    // RESERVED lock (verified live: exit 0, "Config health-state write
-    // failed: database is locked" as a warning), so contention RETRIES are
-    // expected only when the classifier saw a lease/lock failure. What must
-    // ALWAYS hold: the holder's lock overlapped the backup window, the ladder
-    // still produced a VERIFIED, usable archive, and any contention that was
-    // classified was handled (retries with the gateway paused, or the
-    // offline copy) instead of ending the run.
+  step("run record: the selected recovery checkpoint survived contention and is verified", 3 * kMin, async () => {
     const runsDoc = await fetchJsonWithCookie(`${baseUrl()}/api/openclaw/runs`, ctx.cookie);
     const run = (runsDoc.runs || []).find(
-      (entry) => entry?.target?.version === ctx.beta && entry?.backup,
+      (entry) => entry?.target?.version === ctx.beta && entry?.recovery && entry.target?.kind !== "backup",
     );
-    expect(run, `no run record for the ${ctx.beta} apply: ${JSON.stringify(runsDoc).slice(0, 800)}`).toBeTruthy();
-    const detail = await fetchJsonWithCookie(
-      `${baseUrl()}/api/openclaw/runs/${encodeURIComponent(run.operationId)}`,
-      ctx.cookie,
-    );
-    const backup = detail?.run?.backup ?? detail?.backup ?? run.backup;
-    expect(backup.noBackup).toBe(false);
-    expect(backup.verified).toBe(true);
-    expect(backup.usableCheck).toBe("manifest_ok");
-    expect(["openclaw", "alphaclaw-offline-copy"]).toContain(backup.producer);
-    expect(backup.quiesced).toBe(true);
-    // Copy-first ladder (v0.9.77+, D1a): the AlphaClaw offline copy is the
-    // first rung of the pause and its success records `attempts: 0` â€” never a
-    // fabricated 1. An upstream CLI attempt is counted only when the ladder
-    // actually ran one (a copy refused at exclusivity hands over to it).
-    // Until v0.9.80 this step passed only because AlphaClaw's own transient
-    // `openclaw sessions` shell-out made the copy refuse, so the CLI always ran.
-    const successfulCopy = backup.profile === "migration-minimal" ? backup.migrationMinimal : backup.offlineCopy;
-    if (backup.producer === "alphaclaw-offline-copy") {
-      expect(successfulCopy?.ok, "successful copy profile record").toBe(true);
-      if (backup.profile === "migration-minimal") {
-        expect(backup.coverage).toEqual({ migration: "complete", core: "partial", workspace: "omitted" });
-        expect(backup.partial).toBe(true);
-        expect(backup.attemptsDetail.filter((entry) => entry.rung === "migration_minimal")).toHaveLength(1);
-      }
-    } else {
-      expect(backup.attempts).toBeGreaterThanOrEqual(1);
-    }
-
-    // The holder's log proves a hold overlapped the backup step (both sides
-    // are wall-clock ISO/epoch stamps from the same container clock).
-    const { stdout: holderLog } = await execInContainer(ctx.activeContainer, [
-      "cat",
-      kContentionLogPath,
-    ]).catch(() => ({ stdout: "" }));
-    const holds = holderLog
-      .split("\n")
-      .filter(Boolean)
-      .map((line) => {
-        try {
-          return JSON.parse(line);
-        } catch {
-          return null;
-        }
-      })
-      .filter((entry) => entry && entry.event === "hold");
-    // record.backup.at is the step's START (backupStartedAt in runBackup);
-    // durationMs spans the whole ladder.
-    const backupStartedAt = Number(backup.at);
-    const backupFinishedAt = backupStartedAt + Number(backup.durationMs || 0);
+    expect(run, `no recovery run for the ${ctx.beta} apply`).toBeTruthy();
+    const detail = await fetchJsonWithCookie(`${baseUrl()}/api/openclaw/runs/${encodeURIComponent(run.operationId)}`, ctx.cookie);
+    const record = detail.run;
+    const recovery = record.recovery;
+    expect(recovery.kind).toBe(ctx.recoveryMode);
+    expect(recovery.checkpoint.verified).toBe(true);
+    expect(recovery.checkpoint.operationId).toBe(run.operationId);
+    expect(recovery.checkpoint.file).toMatch(/\/recovery-[a-f0-9-]{36}$/);
+    expect(recovery.restore.configAvailable).toBe(true);
+    expect(recovery.restore.databaseSetAvailable).toBe(ctx.recoveryMode === "database_set");
+    expect(recovery.databases.complete).toBe(ctx.recoveryMode === "database_set");
+    expect(recovery.databases.verified).toBe(ctx.recoveryMode === "database_set");
+    expect(record.recoveryIntent.approved).toBe(true);
+    if (ctx.recoveryMode === "database_set") {
+      expect(recovery.databases.requiredPaths.length).toBeGreaterThan(0);
+      expect(recovery.databases.entries.map((entry) => entry.path).sort()).toEqual([...recovery.databases.requiredPaths].sort());
+      expect(recovery.databases.entries.every((entry) => entry.verified && entry.integrity === "ok")).toBe(true);
+    } else expect(recovery.databases.entries).toEqual([]);
+    const verifyScript = `
+      const fs = require('node:fs'), path = require('node:path');
+      const root = path.dirname(require.resolve('alphaclaw/package.json'));
+      const { readRecoveryCheckpoint } = require(path.join(root, 'lib/server/openclaw-recovery-checkpoint'));
+      const record = JSON.parse(fs.readFileSync('/data/.openclaw/.alphaclaw/runs/' + process.argv[1] + '.json', 'utf8'));
+      (async () => {
+        const checkpoint = record.recovery.checkpoint;
+        const verified = await readRecoveryCheckpoint(checkpoint.file, { operationId: record.operationId, sourceBuild: checkpoint.sourceBuild, targetBuild: checkpoint.targetBuild });
+        const names = fs.readdirSync('/data/backups/openclaw');
+        console.log(JSON.stringify({ kind: verified.kind, restore: verified.restore, manifestSha256: verified.checkpoint.manifestSha256, entries: verified.databases.entries.length, archives: names.filter((name) => /\\.(?:tgz|tar\\.gz)$/.test(name)) }));
+      })().catch((error) => { console.error(error); process.exitCode = 1; });
+    `;
+    const verified = JSON.parse((await execInContainer(ctx.activeContainer, ["node", "-e", verifyScript, run.operationId], { timeoutMs: 2 * kMin })).stdout);
+    expect(verified.kind).toBe(ctx.recoveryMode);
+    expect(verified.manifestSha256).toBe(recovery.checkpoint.manifestSha256);
+    expect(verified.archives).toEqual([]);
+    expect(verified.entries).toBe(recovery.databases.entries.length);
+    const { stdout: holderLog } = await execInContainer(ctx.activeContainer, ["cat", kContentionLogPath]);
+    const holds = holderLog.split("\n").filter(Boolean).map((line) => JSON.parse(line)).filter((entry) => entry.event === "hold");
+    const backupStartedAt = record.steps.find((step) => step.name === "backup" && step.status === "running")?.at;
+    const backupFinishedAt = record.steps.find((step) => step.name === "backup" && step.status === "completed")?.at;
+    expect(Number.isFinite(backupStartedAt)).toBe(true);
+    expect(backupFinishedAt).toBeGreaterThanOrEqual(backupStartedAt);
     const overlapping = holds.filter((hold) => {
       const start = Date.parse(hold.at);
-      const end = start + Number(hold.holdMs || 0);
-      return start <= backupFinishedAt && end >= backupStartedAt;
+      return start <= backupFinishedAt && start + Number(hold.holdMs || 0) >= backupStartedAt;
     });
-    console.log(
-      `[container-e2e] contention holder: ${holds.length} hold(s), ${overlapping.length} overlapping the backup window; ` +
-        `backup attempts=${backup.attempts} quiescedAttempts=${backup.quiescedAttempts} contentionRetries=${backup.contentionRetries} ` +
-        `producer=${backup.producer} offlineCopy=${JSON.stringify(backup.offlineCopy)} durationMs=${backup.durationMs}`,
-    );
     expect(holds.length, `holder never took a lock:\n${holderLog.slice(-1500)}`).toBeGreaterThanOrEqual(1);
-    expect(overlapping.length, "no hold overlapped the backup window").toBeGreaterThanOrEqual(1);
-
-    // Contention handling, when contention was classified at all: retries
-    // ran with the gateway still paused, or the offline copy stood in â€” and
-    // the run still ended with the verified artifact asserted above.
-    const contentionHandled =
-      (backup.contentionRetries ?? 0) > 0 || successfulCopy?.ok === true;
-    if (contentionHandled) {
-      if (successfulCopy?.ok) {
-        // The copy rode through the hold inside the pause (sqlite backup()
-        // under its 30 s busy_timeout, the quiet barrier held) â€” no paused
-        // CLI attempt is expected or counted.
-        expect(backup.producer).toBe("alphaclaw-offline-copy");
-        expect(backup.file).toMatch(/\.alphaclaw\.tar\.gz$/);
-      } else {
-        // Retries are in-quiesce upstream attempts by definition.
-        expect(backup.quiescedAttempts).toBeGreaterThanOrEqual(1);
-      }
-    } else {
-      // The pin's CLI finished under the lock: no lease, no retry needed.
-      expect(backup.producer).toBe("openclaw");
-      expect(backup.contentionRetries ?? 0).toBe(0);
-    }
-    ctx.contentionOutcome = {
-      holds: holds.length,
-      overlapping: overlapping.length,
-      contentionRetries: backup.contentionRetries ?? 0,
-      producer: backup.producer,
-    };
+    expect(overlapping.length, "no hold overlapped the checkpoint window").toBeGreaterThanOrEqual(1);
+    ctx.contentionOutcome = { holds: holds.length, overlapping: overlapping.length, kind: recovery.kind, databases: recovery.databases.entries.length };
+    console.log(`[container-e2e] recovery under contention: ${JSON.stringify(ctx.contentionOutcome)}`);
   });
 
   step("live instance runs the target and the #20 config seeds survived", 5 * kMin, async () => {
@@ -851,13 +843,9 @@ describeContainer("container E2E: upgrade journey in the production image (pinâ†
     // survive the upgrade byte-for-byte (never resolved, never stripped).
     expect(config.mcp?.servers?.nessie?.url).toBe("https://example.com/mcp");
     expect(config.mcp?.servers?.nessie?.headers?.Authorization).toBe("${NESSIE_TOKEN}");
-    // The retired-looking `meta` key is the settings reconciler's call (that
-    // slice ships in parallel) â€” record what happened, never hard-fail on it.
-    // The incident-defining outcome is "gateway healthy with the config as
-    // reconciled", asserted above.
     ctx.metaKeyAfterUpgrade = config.meta;
     console.log(
-      `[container-e2e] retired seed key meta after upgrade: ${JSON.stringify(config.meta) ?? "(removed)"}`,
+      `[container-e2e] metadata after upgrade: ${JSON.stringify(config.meta) ?? "(absent)"}`,
     );
   });
 

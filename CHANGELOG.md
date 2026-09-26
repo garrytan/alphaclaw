@@ -5,6 +5,20 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.9.93] - 2026-09-25
+
+### Changed
+
+- **Config-first upgrade recovery:** updates and manual checkpoints capture a bounded set of configuration and legacy-auth files instead of creating new whole-state archives. Database inventory and WAL-aware schema checks do not traverse workspace scratch data or copy database contents. Existing archives remain readable and retain their recovery protections.
+- **Explicit migration protection:** migrations require a complete database-set snapshot or fresh, human-only, exact-build forward-only approval. Unknown ownership, corrupt databases and unsupported metadata cannot be waived. The Upgrade tab distinguishes config recovery from database recovery and keeps a stopped gateway held while changed facts are reviewed; Cancel resumes only the verified original source.
+- **Selective offline recovery:** directory checkpoints carry verified coverage and build identity. The operator runbook restores only captured files with the matching source build, preserving omitted workspace and credential files and saved sidecars. Config-only checkpoints never qualify as database rollback coverage.
+
+### Fixed
+
+- **Dev preparation isolation:** prepare candidate builds separately from the executing checkout and live state; switch the managed shim only at boot. Keep active, previous, last-known-good and pending-review candidates protected during bounded cleanup, and direct explicit repair to the actual active checkout.
+- **Recovery lifecycle ownership:** preserve a single stop-to-handoff window, bound lock acquisition, release late leases, reject stale consent after genuine WAL changes, and retain the original failure when cleanup also fails. Boot and operator retries retain cleanup ownership until Doctor and its restore guard finish. Relaunch, runtime reconciliation and failed-migration fallbacks refuse unverified databases and unprotected migrations.
+- **Pre-admission writers:** defer native Codex maintenance and configuration normalization until recovery admission. Background topic synchronization and native notification delivery cannot alter the protected state while boot, a recovery hold or an update owns it; HTTP notification channels remain available.
+
 ## [0.9.92] - 2026-09-23
 
 ### Fixed

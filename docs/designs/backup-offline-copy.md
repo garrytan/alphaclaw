@@ -1,5 +1,51 @@
 # AlphaClaw Offline Copy — backup archive format and restore runbook
 
+> **Historical archive format; not the current update backup design.** The
+> shipped upgrade contract is config-first: ordinary updates prepare the
+> target, inspect bounded read-only database metadata, then capture a bounded
+> `config_only` directory checkpoint. No new full-tree tar archive, upstream
+> archive attempt, or fallback is created. The default checkpoint includes
+> root `openclaw.json`, exact optional legacy identity/auth files when present,
+> and a manifest; limits are 1 MiB per file, 16 MiB total, 256 files, and 10
+> seconds. It never recursively walks workspace, credentials, `.alphaclaw`,
+> or `.env`. It does not protect modern database-backed auth, chat history, or
+> other SQLite state.
+>
+> An explicit `database_set` option snapshots the complete discovered SQLite
+> set (which can be gigabytes) under the same single quiet gateway pause. For
+> a migration requiring protection, the operator chooses that snapshot,
+> explicitly accepts human-only forward-only risk, or cancels before stop.
+> Unknown/incompatible schemas and corrupt sources are not waivable. There is
+> no automatic database restore. Retain actual database backups through
+> rollback/schema-risk windows; a config checkpoint is never database
+> recovery evidence. The older tar-format sections below remain useful only
+> for reading/verifying/restoring archives that already exist.
+
+## Current directory checkpoint guidance
+
+Checkpoint verification is not archive verification: verify the directory
+manifest and the exact captured files, their bounds, and the recorded build
+identity. Do not apply the legacy gzip/tar checks below to directory
+checkpoints or call a config-only checkpoint a complete backup. Ordinary
+updates do not run automatic `VACUUM` or copy databases. A requested database
+snapshot covers the complete discovered set, not only the database whose
+schema number changed, until cross-database independence has been proven.
+
+The directory contains `manifest.json`, `ready.json`, and
+`payload/<archivePath>`; `files[]` and `databases[]` separately identify captured
+assets. `readRecoveryCheckpoint(file, { operationId, sourceBuild, targetBuild })`
+verifies the checkpoint against its producing run; see the exact module
+invocation in the [directory restore runbook](../upgrade-troubleshooting.md#restoring-a-config-checkpoint-or-database-set).
+There is no restore API. Before manual placement, stop all writers, verify
+the intended runtime matches the captured source build (not the update target),
+and refuse a mismatch until compatibility is established. Save existing
+destinations and sidecars first, restore only captured files and the complete
+database set, preserve omissions, and never replay legacy auth JSON into modern
+database-backed auth. Directory verification is not permission to overwrite a
+whole state tree.
+
+## Legacy tar archive format and restore runbook
+
 > **Status (2026-09-16):** shipped with the issue #54 hardening as the
 > fallback behind the upstream CLI; since issue #79 (Stage 4c, decision D1a)
 > the offline copy is the **first rung of every quiesced pre-update backup**

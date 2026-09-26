@@ -3,9 +3,7 @@ const os = require("os");
 const path = require("path");
 const express = require("express");
 const request = require("supertest");
-const { DatabaseSync } = require("node:sqlite");
 const { registerOpenclawBackupPolicyRoutes } = require("../../lib/server/routes/openclaw-backup-policy");
-const { readAlphaclawConfig, updateAlphaclawConfig } = require("../../lib/server/alphaclaw-config");
 const { initAgentAdminDb, closeAgentAdminDb } = require("../../lib/server/db/agent-admin");
 const { createConfirmService } = require("../../lib/server/agent-admin/confirm-service");
 const { findOp } = require("../../lib/server/admin-manifest");
@@ -14,11 +12,11 @@ const kUrl = "/api/openclaw/backup-policy";
 const kToken = "a".repeat(64);
 const kDefaults = { excludes: ["node_modules", "*.heapsnapshot", "*.tmp", "logs/**/*.gz"],
   rootExcludes: ["worktrees/**", "workspace/.openclaw/**", "wiki/**", "logs/**", "**/*.sqlite.corrupt-*", "**/*.sqlite.migrated*"] };
-const empty = { excludes: [], rootExcludes: [] };
 let root;
 let configPath;
 
-const createApp = ({ buildInventory, getBackupPreflight, noEnforcement = false, member = false, confirmService } = {}) => {
+const createApp = ({ getBackupPreflight, buildInventory, getSourceContext, fsModule = fs,
+  noEnforcement = false, member = false, confirmService } = {}) => {
   vi.stubEnv("SETUP_PASSWORD", "secret");
   const authPath = require.resolve("../../lib/server/routes/auth");
   delete require.cache[authPath];
@@ -37,8 +35,8 @@ const createApp = ({ buildInventory, getBackupPreflight, noEnforcement = false, 
   if (!noEnforcement) app.use("/api", createAgentAdminEnforcement({ resolveRequestActor, confirmService }));
   if (member) app.use(kUrl, (req, _res, next) => { req.alphaclawIdentity = { role: "member" }; next(); });
   if (noEnforcement) app.use(kUrl, (req, _res, next) => { req.alphaclawGrant = { method: req.method, path: req.path }; next(); });
-  registerOpenclawBackupPolicyRoutes({ app, requireAdmin, OPENCLAW_DIR: root, buildInventory, getBackupPreflight,
-    getSourceContext: () => ({ stateDir: root, spawnEnv: {} }) });
+  registerOpenclawBackupPolicyRoutes({ app, requireAdmin, OPENCLAW_DIR: root,
+    getBackupPreflight, buildInventory, getSourceContext, fsModule });
   return app;
 };
 const admin = async (app) => {
@@ -64,18 +62,52 @@ describe("backup preflight API", () => {
     topEntries: [{ path: "worktrees", entries: 152243, bytes: 5800000000 }], topBytes: [],
   }, sources: [{ path: "/private/state/main.sqlite" }] };
 
-  it("returns complete blocked diagnosis without mutating config and disables HTTP caching", async () => {
+  it("returns config checkpoint measurements without private paths and disables HTTP caching", async () => {
+    const getBackupPreflight = vi.fn(async () => ({ profile: "config_only", blocked: false,
+      checkpoint: { bytes: 1234, fileCount: 7, files: [{ path: "/private/openclaw.json" }] },
+      databaseCount: 3, databaseBytes: 9000, stateDir: "/private/state" }));
+    const app = createApp({ getBackupPreflight }); const cookie = await admin(app);
+    const response = await request(app).get(url).set("Cookie", cookie);
+    expect(response.status).toBe(200);
+    expect(response.headers["cache-control"]).toBe("no-store");
+    expect(response.body).toEqual({ ok: true, profile: "config_only", blocked: false, reason: null,
+      checkpoint: { bytes: 1234, fileCount: 7, maxBytes: 16 * 1024 * 1024 }, databaseCount: 3,
+      databaseBytes: 9000, coverage: { config: "complete", databases: "omitted", workspace: "omitted" } });
+    expect(JSON.stringify(response.body)).not.toContain("/private");
+    expect(getBackupPreflight).toHaveBeenCalledOnce();
+  });
+
+  it("never claims complete configuration coverage for a blocked checkpoint measurement", async () => {
+    const app = createApp({ getBackupPreflight: async () => ({ profile: "config_only", blocked: true,
+      reason: "checkpoint_limit", checkpoint: { bytes: 99, fileCount: 1 },
+      coverage: { config: "complete", databases: "complete", workspace: "complete" } }) });
+    const response = await bearer(request(app).get(url));
+    expect(response.status).toBe(200);
+    expect(response.headers["cache-control"]).toBe("no-store");
+    expect(response.body.coverage).toEqual({ config: "unknown", databases: "omitted", workspace: "omitted" });
+  });
+
+  it.each([null, { bytes: -1, fileCount: 1 }, { bytes: 1, fileCount: -1 },
+    { bytes: "123", fileCount: 1 }, { bytes: 1, fileCount: 0.5 }])("fails closed on malformed checkpoint measurements %j", async (checkpoint) => {
+    const app = createApp({ getBackupPreflight: async () => ({ profile: "config_only", blocked: false, checkpoint }) });
+    const response = await request(app).get(url).set("Cookie", await admin(app));
+    expect(response.status).toBe(503);
+    expect(response.body.code).toBe("backup_preflight_unavailable");
+    expect(response.headers["cache-control"]).toBe("no-store");
+    expect(response.body.coverage).toBeUndefined();
+  });
+
+  it("keeps compatibility with the old diagnostic shape without mutating config", async () => {
     const getBackupPreflight = vi.fn(async () => ({ diagnosis, blocked: true, reason: "Selected tree exceeds budget" }));
     const app = createApp({ getBackupPreflight }); const cookie = await admin(app);
     const response = await request(app).get(url).set("Cookie", cookie);
     expect(response.status).toBe(200);
     expect(response.headers["cache-control"]).toBe("no-store");
     expect(response.body).toEqual({ ok: true, diagnosis, blocked: true, reason: "Selected tree exceeds budget" });
-    expect(getBackupPreflight).toHaveBeenCalledOnce();
     expect(fs.existsSync(configPath)).toBe(false);
   });
 
-  it("requires authentication and redacts absolute paths and symlink targets for read-tier agents", async () => {
+  it("requires authentication and redacts absolute paths for read-tier agents", async () => {
     const app = createApp({ getBackupPreflight: async () => ({ diagnosis, blocked: false, reason: null }) });
     expect((await request(app).get(url)).status).toBe(401);
     expect(findOp("GET", url).tier).toBe("safe");
@@ -88,11 +120,9 @@ describe("backup preflight API", () => {
 
   it("never exposes live process command arguments through preflight", async () => {
     const app = createApp({ getBackupPreflight: async () => ({
-      diagnosis: { ...diagnosis, otherProcesses: [{ pid: 123, cmdline: "openclaw --token fixture-only-secret" }] },
-      blocked: false, reason: null,
+      diagnosis: { ...diagnosis, otherProcesses: [{ pid: 123, cmdline: "openclaw --token fixture-only-secret" }] }, blocked: false,
     }) });
-    const cookie = await admin(app);
-    const response = await request(app).get(url).set("Cookie", cookie);
+    const response = await request(app).get(url).set("Cookie", await admin(app));
     expect(response.status).toBe(200);
     expect(response.body.diagnosis.otherProcesses).toEqual([{ pid: 123 }]);
     expect(JSON.stringify(response.body)).not.toContain("fixture-only-secret");
@@ -100,226 +130,183 @@ describe("backup preflight API", () => {
       .diagnosis.otherProcesses).toEqual([{ pid: 123, cmdline: "[redacted]" }]);
   });
 
-  it.each([undefined, async () => { throw new Error("private /path failure"); }, async () => ({ diagnosis: {} })])("fails closed when the preflight cannot complete", async (getBackupPreflight) => {
-    const app = createApp({ getBackupPreflight }); const cookie = await admin(app);
-    const response = await request(app).get(url).set("Cookie", cookie);
-    expect(response.status).toBe(503);
-    expect(response.body).toMatchObject({ ok: false, code: "backup_preflight_unavailable" });
-    expect(response.body.message).toContain("has not been paused");
-    expect(JSON.stringify(response.body)).not.toContain("/path");
-  });
+  it.each([undefined, async () => { throw new Error("private /path failure"); }, async () => ({ diagnosis: {} })])(
+    "fails closed when the preflight cannot complete", async (getBackupPreflight) => {
+      const app = createApp({ getBackupPreflight }); const cookie = await admin(app);
+      const response = await request(app).get(url).set("Cookie", cookie);
+      expect(response.status).toBe(503);
+      expect(response.body).toMatchObject({ ok: false, code: "backup_preflight_unavailable" });
+      expect(response.body.message).toContain("has not been paused");
+      expect(JSON.stringify(response.body)).not.toContain("/path");
+    },
+  );
 });
 
-describe("append-only scratch exclusions", () => {
-  const url = `${kUrl}/scratch-excludes`;
-  const scratch = { rootExcludes: ["worktrees/**", "workspace/.openclaw/**"] };
-
-  it("allows write-tier agents to append known patterns without a dangerous confirmation", async () => {
-    updateAlphaclawConfig({ openclawDir: root, mutate: (cfg) => {
-      cfg.updates.openclaw.backup = { excludes: [], rootExcludes: ["state/security-planning/scratch-*"], custom: "preserved" };
-    } });
+describe("retired backup policy mutations", () => {
+  it("admits the write-tier agent only far enough to report retired scratch policy without mutation", async () => {
+    const raw = '{"updates":{"openclaw":{"backup":{"excludes":[],"rootExcludes":[],"custom":"preserved"}}}}';
+    fs.writeFileSync(configPath, raw);
     const app = createApp();
+    const url = `${kUrl}/scratch-excludes`;
     expect(findOp("POST", url)).toMatchObject({ tier: "write", readOp: "updates.backup-policy.read" });
-    for (let attempt = 0; attempt < 2; attempt++) {
-      const response = await bearer(request(app).post(url).send(scratch));
-      expect(response.status).toBe(200);
-      expect(response.body.policy).toEqual({ excludes: [], rootExcludes: ["state/security-planning/scratch-*", ...scratch.rootExcludes] });
-    }
-    expect(readAlphaclawConfig({ openclawDir: root }).updates.openclaw.backup.custom).toBe("preserved");
-    expect(findOp("PUT", kUrl).tier).toBe("dangerous");
+    const response = await bearer(request(app).post(url).send({ rootExcludes: ["worktrees/**", "workspace/.openclaw/**"] }));
+    expect(response.status).toBe(410);
+    expect(response.body.code).toBe("backup_policy_retired");
+    expect(fs.readFileSync(configPath, "utf8")).toBe(raw);
   });
 
-  it.each([{ rootExcludes: [] }, { rootExcludes: ["state/**"] }, { rootExcludes: ["worktrees/**"], excludes: [] },
-    { rootExcludes: ["worktrees/*"] }, { rootExcludes: ["../worktrees/**"] }, { rootExcludes: "worktrees/**" }])("rejects non-append-safe body %j", async (body) => {
-    const app = createApp();
-    const response = await bearer(request(app).post(url).send(body));
-    expect(response.status).toBe(400);
+  it("returns retired defaults without creating a missing settings file", async () => {
+    const buildInventory = vi.fn(() => { throw new Error("owner discovery must not run"); });
+    const app = createApp({ buildInventory });
+    const response = await request(app).get(kUrl).set("Cookie", await admin(app));
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({ ok: true, retired: true, policy: kDefaults, defaults: kDefaults, refusedExcludes: [] });
     expect(fs.existsSync(configPath)).toBe(false);
+    expect(buildInventory).not.toHaveBeenCalled();
   });
 
-  it("merges against the latest locked policy and refuses configured migration inputs", async () => {
-    const app = createApp({ buildInventory: async () => {
-      updateAlphaclawConfig({ openclawDir: root, mutate: (cfg) => {
-        cfg.updates.openclaw.backup = { excludes: ["*.tmp"], rootExcludes: ["state/new-scratch/**"] };
-      } });
-      return { stateDir: root, protectedPaths: [] };
-    } });
-    const appended = await bearer(request(app).post(url).send(scratch));
-    expect(appended.status).toBe(200);
-    expect(appended.body.policy).toEqual({ excludes: ["*.tmp"], rootExcludes: ["state/new-scratch/**", ...scratch.rootExcludes] });
-    const protectedApp = createApp({ buildInventory: async () => ({ stateDir: root,
-      protectedPaths: [path.join(root, "worktrees", "migration-owner")] }) });
-    const before = fs.readFileSync(configPath, "utf8");
-    const refused = await bearer(request(protectedApp).post(url).send(scratch));
-    expect(refused.status).toBe(400);
-    expect(refused.body.refusedExcludes).toEqual(expect.arrayContaining([expect.objectContaining({ pattern: "worktrees/**" })]));
-    expect(fs.readFileSync(configPath, "utf8")).toBe(before);
+  it.each([
+    { rootExcludes: [] }, { rootExcludes: ["state/**"] }, { rootExcludes: ["worktrees/**"], excludes: [] },
+    { rootExcludes: ["worktrees/*"] }, { rootExcludes: ["../worktrees/**"] }, { rootExcludes: "worktrees/**" },
+  ])("returns retirement for old scratch mutation body %j without rewriting historical bytes", async (body) => {
+    const raw = '{ "updates": { "openclaw": { "backup": { "excludes": [], "rootExcludes": ["state/scratch-*"], "custom": "preserved" } } } }\n';
+    fs.writeFileSync(configPath, raw);
+    const buildInventory = vi.fn();
+    const getSourceContext = vi.fn();
+    const app = createApp({ buildInventory, getSourceContext });
+    const response = await bearer(request(app).post(`${kUrl}/scratch-excludes`).send(body));
+    expect(response.status).toBe(410);
+    expect(response.body.code).toBe("backup_policy_retired");
+    expect(fs.readFileSync(configPath, "utf8")).toBe(raw);
+    expect(buildInventory).not.toHaveBeenCalled();
+    expect(getSourceContext).not.toHaveBeenCalled();
   });
 
-  it("rejects corrupt configuration and missing enforcement without writing", async () => {
-    fs.writeFileSync(configPath, '{"broken":');
-    const app = createApp();
-    const response = await bearer(request(app).post(url).send(scratch));
-    expect(response.status).toBe(503);
-    expect(response.body.code).toBe("config_unreadable");
-    expect(fs.readFileSync(configPath, "utf8")).toBe('{"broken":');
-    const unguarded = createApp({ noEnforcement: true });
-    expect((await bearer(request(unguarded).post(url).send(scratch))).status).toBe(403);
-  });
-});
-afterEach(() => {
-  closeAgentAdminDb();
-  fs.rmSync(root, { recursive: true, force: true });
-  vi.unstubAllEnvs();
-  vi.restoreAllMocks();
-});
-
-describe("backup exclusion policy API", () => {
-  it("returns defaults without writing, persists empty arrays, and restores defaults explicitly", async () => {
-    const app = createApp(); const cookie = await admin(app);
-    const initial = await request(app).get(kUrl).set("Cookie", cookie);
-    expect(initial.status).toBe(200);
-    expect(initial.body).toEqual({ ok: true, policy: kDefaults, defaults: kDefaults, refusedExcludes: [] });
-    expect(fs.existsSync(configPath)).toBe(false);
-    expect((await request(app).put(kUrl).set("Cookie", cookie).send(empty)).status).toBe(200);
-    expect(readAlphaclawConfig({ openclawDir: root }).updates.openclaw.backup).toEqual(empty);
-    expect((await request(app).get(kUrl).set("Cookie", cookie)).body.policy).toEqual(empty);
-    const restored = await request(app).put(kUrl).set("Cookie", cookie).send(kDefaults);
-    expect(restored.status).toBe(200);
-    expect(restored.body.policy).toEqual(kDefaults);
-  });
-
-  it("rejects malformed bodies and unsafe rules atomically", async () => {
-    fs.writeFileSync(configPath, '{"untouched":true}');
-    const app = createApp(); const cookie = await admin(app);
+  it("rejects all retired PUT bodies without reading, validating or rewriting the settings", async () => {
+    const raw = '{"untouched":true}\n'; fs.writeFileSync(configPath, raw);
+    const readFileSync = vi.fn(() => { throw new Error("retired mutation read config"); });
+    const writeFileSync = vi.fn(() => { throw new Error("retired mutation wrote config"); });
+    const buildInventory = vi.fn();
+    const app = createApp({ fsModule: { ...fs, readFileSync, writeFileSync }, buildInventory });
+    const cookie = await admin(app);
     for (const body of [{}, { excludes: [] }, { excludes: "node_modules", rootExcludes: [] },
       { excludes: ["safe", "../state"], rootExcludes: [] }, { excludes: [], rootExcludes: ["state"] },
       { excludes: [], rootExcludes: ["credentials"] }, { excludes: [], rootExcludes: ["/outside"] },
-      { excludes: Array.from({ length: 65 }, (_, index) => `scratch-${index}`), rootExcludes: [] }]) {
+      { excludes: Array.from({ length: 65 }, (_, i) => `scratch-${i}`), rootExcludes: [] }]) {
       const response = await request(app).put(kUrl).set("Cookie", cookie).send(body);
-      expect(response.status, JSON.stringify(body)).toBe(400);
-      expect(response.body.code).toBe("invalid_backup_policy");
-      expect(fs.readFileSync(configPath, "utf8")).toBe('{"untouched":true}');
+      expect(response.status).toBe(410);
+      expect(response.body.code).toBe("backup_policy_retired");
+      expect(fs.readFileSync(configPath, "utf8")).toBe(raw);
     }
+    expect(readFileSync).not.toHaveBeenCalled();
+    expect(writeFileSync).not.toHaveBeenCalled();
+    expect(buildInventory).not.toHaveBeenCalled();
   });
 
-  it("protects configured custom database ancestors during saves", async () => {
-    const agentDir = path.join(root, "state", "security-planning", "stronghold-state");
-    fs.mkdirSync(agentDir, { recursive: true });
-    const db = new DatabaseSync(path.join(agentDir, "openclaw-agent.sqlite")); db.close();
-    fs.writeFileSync(path.join(root, "openclaw.json"), JSON.stringify({ agents: { list: [{ id: "custom", agentDir }] } }));
-    const app = createApp(); const cookie = await admin(app);
-    const rejected = await request(app).put(kUrl).set("Cookie", cookie).send({ ...empty, rootExcludes: ["state/security-planning/stronghold-*"] });
-    expect(rejected.status).toBe(400);
-    expect(rejected.body.refusedExcludes[0]).toMatchObject({ scope: "root", pattern: "state/security-planning/stronghold-*", reason: expect.stringContaining("protected") });
-    expect(fs.existsSync(configPath)).toBe(false);
-    const allowed = await request(app).put(kUrl).set("Cookie", cookie).send({ ...empty, rootExcludes: ["state/security-planning/scratch-*"] });
-    expect(allowed.status).toBe(200);
+  it("preserves historical custom database exclusions without traversing configured owners", async () => {
+    const raw = JSON.stringify({ updates: { openclaw: { backup: { excludes: [],
+      rootExcludes: ["state/security-planning/stronghold-*", "state/security-planning/scratch-*"] } } } });
+    fs.writeFileSync(configPath, raw);
+    fs.writeFileSync(path.join(root, "openclaw.json"), JSON.stringify({ agents: { list: [{ id: "custom", agentDir: "/private/unreachable" }] } }));
+    const buildInventory = vi.fn(() => { throw new Error("must not discover owners"); });
+    const app = createApp({ buildInventory }); const cookie = await admin(app);
+    const response = await request(app).get(kUrl).set("Cookie", cookie);
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({ retired: true, policy: { excludes: [],
+      rootExcludes: ["state/security-planning/stronghold-*", "state/security-planning/scratch-*"] } });
+    expect((await request(app).put(kUrl).set("Cookie", cookie).send({ excludes: [], rootExcludes: [] })).status).toBe(410);
+    expect(buildInventory).not.toHaveBeenCalled();
+    expect(fs.readFileSync(configPath, "utf8")).toBe(raw);
   });
 
-  it("reports refused hand-edited rules without rewriting them", async () => {
+  it("reports syntactically refused historical rules without rewriting them", async () => {
     const raw = JSON.stringify({ updates: { openclaw: { backup: { excludes: ["node_modules", "*.sqlite"], rootExcludes: ["state"] } } } });
     fs.writeFileSync(configPath, raw);
-    const app = createApp(); const cookie = await admin(app);
-    const response = await request(app).get(kUrl).set("Cookie", cookie);
+    const app = createApp();
+    const response = await request(app).get(kUrl).set("Cookie", await admin(app));
     expect(response.status).toBe(200);
     expect(response.body.policy).toEqual({ excludes: ["node_modules"], rootExcludes: [] });
     expect(response.body.refusedExcludes).toHaveLength(2);
+    expect(response.body.retired).toBe(true);
     expect(fs.readFileSync(configPath, "utf8")).toBe(raw);
   });
 
-  it("reports the effective policy when a hand-edited rule covers a configured database ancestor", async () => {
-    const agentDir = path.join(root, "state", "security-planning", "stronghold-state");
-    fs.mkdirSync(agentDir, { recursive: true });
-    const db = new DatabaseSync(path.join(agentDir, "openclaw-agent.sqlite")); db.close();
-    fs.writeFileSync(path.join(root, "openclaw.json"), JSON.stringify({ agents: { list: [{ id: "custom", agentDir }] } }));
-    const unsafe = "state/security-planning/stronghold-*";
-    const safe = "state/security-planning/scratch-*";
-    const raw = JSON.stringify({ updates: { openclaw: { backup: { excludes: [], rootExcludes: [unsafe, safe] } } } });
+  it("returns historical settings without inventory discovery", async () => {
+    const raw = JSON.stringify({ updates: { openclaw: { backup: { excludes: ["*.tmp"], rootExcludes: ["worktrees/**"] } } } });
     fs.writeFileSync(configPath, raw);
-    const app = createApp(); const cookie = await admin(app);
-
+    const getBackupPreflight = vi.fn(async () => { throw new Error("must not be called"); });
+    const app = createApp({ getBackupPreflight }); const cookie = await admin(app);
     const response = await request(app).get(kUrl).set("Cookie", cookie);
-
     expect(response.status).toBe(200);
-    expect(response.body.policy).toEqual({ excludes: [], rootExcludes: [safe] });
-    expect(response.body.defaults).toEqual(kDefaults);
-    expect(response.body.refusedExcludes).toEqual([
-      { scope: "root", pattern: unsafe, reason: 'covers the protected asset or ancestor "state/security-planning/stronghold-state"' },
-    ]);
+    expect(response.body).toMatchObject({ ok: true, retired: true,
+      policy: { excludes: ["*.tmp"], rootExcludes: ["worktrees/**"] } });
+    expect(fs.readFileSync(configPath, "utf8")).toBe(raw);
+    expect(getBackupPreflight).not.toHaveBeenCalled();
+  });
+
+  it.each(['{"broken":', '[]', 'null'])("keeps GET fail-closed on corrupt configuration %s while mutations return410", async (raw) => {
+    fs.writeFileSync(configPath, raw);
+    const app = createApp();
+    const cookie = await admin(app);
+    const response = await request(app).get(kUrl).set("Cookie", cookie);
+    expect(response.status).toBe(503);
+    expect(response.body.code).toBe("config_unreadable");
+    expect((await request(app).put(kUrl).set("Cookie", cookie).send({})).status).toBe(410);
+    expect((await request(app).post(`${kUrl}/scratch-excludes`).set("Cookie", cookie).send({})).status).toBe(410);
     expect(fs.readFileSync(configPath, "utf8")).toBe(raw);
   });
 
-  it.each(['{"broken":', '[]', 'null'])("refuses corrupt settings %s before GET or PUT and preserves bytes", async (raw) => {
-    fs.writeFileSync(configPath, raw);
-    const app = createApp(); const cookie = await admin(app);
-    for (const method of ["get", "put"]) {
-      const call = request(app)[method](kUrl).set("Cookie", cookie);
-      const response = await (method === "put" ? call.send(empty) : call);
-      expect(response.status).toBe(503);
-      expect(response.body).toMatchObject({ ok: false, code: "config_unreadable", file: "alphaclaw.json" });
-      expect(fs.readFileSync(configPath, "utf8")).toBe(raw);
-    }
-  });
-
-  it("rechecks damaged settings under the write lock after inventory discovery", async () => {
-    fs.writeFileSync(configPath, "{}");
-    const app = createApp({ buildInventory: async () => {
-      fs.writeFileSync(configPath, '{"torn":');
-      return { stateDir: root, protectedPaths: [] };
-    } });
-    const cookie = await admin(app);
-    const response = await request(app).put(kUrl).set("Cookie", cookie).send(empty);
-    expect(response.status).toBe(503);
-    expect(response.body.code).toBe("config_unreadable");
-    expect(fs.readFileSync(configPath, "utf8")).toBe('{"torn":');
-  });
-
-  it("does not replace a dangling settings symlink with default configuration", async () => {
-    fs.symlinkSync(path.join(root, "missing-settings.json"), configPath);
-    const app = createApp(); const cookie = await admin(app);
-    const response = await request(app).put(kUrl).set("Cookie", cookie).send(empty);
-    expect(response.status).toBe(503);
-    expect(response.body.code).toBe("config_unreadable");
+  it("does not replace a dangling settings symlink or inspect its missing target", async () => {
+    fs.symlinkSync(path.join(root, "missing.json"), configPath);
+    const buildInventory = vi.fn();
+    const app = createApp({ buildInventory }); const cookie = await admin(app);
+    expect((await request(app).put(kUrl).set("Cookie", cookie).send({})).status).toBe(410);
+    expect((await request(app).post(`${kUrl}/scratch-excludes`).set("Cookie", cookie).send({})).status).toBe(410);
     expect(fs.lstatSync(configPath).isSymbolicLink()).toBe(true);
+    expect(fs.readlinkSync(configPath)).toBe(path.join(root, "missing.json"));
+    expect(buildInventory).not.toHaveBeenCalled();
   });
 
-  it("merges into the current locked document after another settings writer", async () => {
-    const app = createApp({ buildInventory: async () => {
-      updateAlphaclawConfig({ openclawDir: root, mutate: (cfg) => { cfg.keep = { otherWriter: true }; } });
-      return { stateDir: root, protectedPaths: [] };
-    } });
-    const cookie = await admin(app);
-    expect((await request(app).put(kUrl).set("Cookie", cookie).send(empty)).status).toBe(200);
-    expect(JSON.parse(fs.readFileSync(configPath, "utf8"))).toMatchObject({ keep: { otherWriter: true }, updates: { openclaw: { backup: empty } } });
+  it("never executes former discovery callbacks that would mutate or tear the settings under a lock", async () => {
+    const raw = '{"operator":"saved elsewhere","updates":{"openclaw":{"backup":{"excludes":[],"rootExcludes":[]}}}}';
+    fs.writeFileSync(configPath, raw);
+    const buildInventory = vi.fn(async () => { fs.writeFileSync(configPath, '{"torn":'); return { stateDir: root, protectedPaths: [] }; });
+    const app = createApp({ buildInventory }); const cookie = await admin(app);
+    expect((await request(app).put(kUrl).set("Cookie", cookie).send(kDefaults)).status).toBe(410);
+    expect((await request(app).post(`${kUrl}/scratch-excludes`).set("Cookie", cookie).send({ rootExcludes: ["worktrees/**"] })).status).toBe(410);
+    expect((await request(app).get(kUrl).set("Cookie", cookie)).status).toBe(200);
+    expect(buildInventory).not.toHaveBeenCalled();
+    expect(fs.readFileSync(configPath, "utf8")).toBe(raw);
   });
 
-  it("fails closed on GET and PUT if protected source discovery fails", async () => {
-    const app = createApp({ buildInventory: async () => { throw new Error("unreadable registry"); } });
-    const cookie = await admin(app);
-    for (const method of ["get", "put"]) {
-      const call = request(app)[method](kUrl).set("Cookie", cookie);
-      const response = await (method === "put" ? call.send(empty) : call);
-      expect(response.status).toBe(503);
-      expect(response.body.code).toBe("backup_policy_unavailable");
-      expect(response.body.policy).toBeUndefined();
-    }
-    expect(fs.existsSync(configPath)).toBe(false);
+  it.each([
+    ["PUT", kUrl, { excludes: [], rootExcludes: [] }],
+    ["POST", `${kUrl}/scratch-excludes`, { rootExcludes: ["worktrees/**"] }],
+  ])("returns 410 for %s even with corrupt historical settings, without inventory or file changes", async (method, url, body) => {
+    const raw = '{"torn":'; fs.writeFileSync(configPath, raw);
+    const buildInventory = vi.fn(async () => { throw new Error("must not be called"); });
+    const app = createApp({ buildInventory, getBackupPreflight: buildInventory }); const cookie = await admin(app);
+    const response = await request(app)[method.toLowerCase()](url).set("Cookie", cookie).send(body);
+    expect(response.status).toBe(410);
+    expect(response.body.code).toBe("backup_policy_retired");
+    expect(fs.readFileSync(configPath, "utf8")).toBe(raw);
+    expect(buildInventory).not.toHaveBeenCalled();
   });
 });
 
 describe("backup policy authorization", () => {
-  it("requires authentication for reads and adds an admin gate only on writes", async () => {
+  it("requires authentication for reads and enforces admin access before retired mutation responses", async () => {
     const app = createApp({ member: true });
     expect((await request(app).get(kUrl)).status).toBe(401);
+    expect((await request(app).put(kUrl).send({})).status).toBe(401);
+    expect((await request(app).post(`${kUrl}/scratch-excludes`).send({})).status).toBe(401);
     const cookie = await admin(app);
-    // This identity is injected after the global member-scope middleware.
-    // Production members remain default-denied by that middleware; the local
-    // read route does not add a second role gate.
     expect((await request(app).get(kUrl).set("Cookie", cookie)).status).toBe(200);
-    expect((await request(app).put(kUrl).set("Cookie", cookie).send(empty)).status).toBe(403);
+    expect((await request(app).put(kUrl).set("Cookie", cookie).send({})).status).toBe(403);
+    expect((await request(app).post(`${kUrl}/scratch-excludes`).set("Cookie", cookie).send({})).status).toBe(403);
   });
-  it("allows safe agent reads, requires dangerous confirmation, then admits the granted PUT", async () => {
+
+  it("preserves safe agent reads, dangerous confirmation, and denies the confirmed retired mutation", async () => {
     initAgentAdminDb({ rootDir: root });
     let code;
     const confirmService = createConfirmService({ hasAdminTargets: () => true, deliver: (delivery) => { code = delivery.code; } });
@@ -327,14 +314,26 @@ describe("backup policy authorization", () => {
     expect(findOp("GET", kUrl).tier).toBe("safe");
     expect(findOp("PUT", kUrl)).toMatchObject({ tier: "dangerous", readOp: "updates.backup-policy.read" });
     expect((await bearer(request(app).get(kUrl))).status).toBe(200);
-    expect((await bearer(request(app).put(kUrl).send(empty))).status).toBe(428);
+    expect((await bearer(request(app).put(kUrl).send({ excludes: [], rootExcludes: [] }))).status).toBe(428);
     expect(fs.existsSync(configPath)).toBe(false);
-    expect((await bearer(request(app).put(kUrl).set("X-AlphaClaw-Confirm", code).send(empty))).status).toBe(200);
+    const confirmed = await bearer(request(app).put(kUrl).set("X-AlphaClaw-Confirm", code).send({ excludes: [], rootExcludes: [] }));
+    expect(confirmed.status).toBe(410);
+    expect(confirmed.body.code).toBe("backup_policy_retired");
+    expect(fs.existsSync(configPath)).toBe(false);
   });
+
   it("does not accept a forged grant without the enforcement layer", async () => {
     const app = createApp({ noEnforcement: true });
     expect((await bearer(request(app).get(kUrl))).status).toBe(200);
-    expect((await bearer(request(app).put(kUrl).send(empty))).status).toBe(403);
+    expect((await bearer(request(app).put(kUrl).send({}))).status).toBe(403);
+    expect((await bearer(request(app).post(`${kUrl}/scratch-excludes`).send({}))).status).toBe(403);
     expect(fs.existsSync(configPath)).toBe(false);
   });
+});
+
+afterEach(() => {
+  closeAgentAdminDb();
+  fs.rmSync(root, { recursive: true, force: true });
+  vi.unstubAllEnvs();
+  vi.restoreAllMocks();
 });

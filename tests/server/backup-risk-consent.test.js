@@ -1,4 +1,57 @@
-const { createBackupRiskConsentStore, kConsentTtlMs } = require("../../lib/server/backup-risk-consent");
+const { createBackupRiskConsentStore, fingerprintDatabase, kConsentTtlMs } = require("../../lib/server/backup-risk-consent");
+
+describe("bounded database consent fingerprints", () => {
+  const harness = () => {
+    const files = Object.fromEntries(["", "-wal", "-journal"].map((suffix, index) => [`/state/db${suffix}`, {
+      bytes: Buffer.alloc(128, index),
+      stat: { dev: 1, ino: index + 1, size: 128, mtimeMs: 10, ctimeMs: 20, mode: 0o100600, nlink: 1 },
+    }]));
+    let afterRead = () => {};
+    const stat = (file) => ({ ...files[file].stat, isFile: () => true });
+    const fsModule = { promises: {
+      stat: async (file) => stat(file),
+      open: async (file) => ({ stat: async () => stat(file), close: async () => {},
+        read: async (buffer, offset, length, position) => {
+          const bytesRead = files[file].bytes.copy(buffer, offset, position, position + length);
+          afterRead(file);
+          return { bytesRead };
+        },
+      }),
+    } };
+    return { files, fingerprint: () => fingerprintDatabase("/state/db", { fsModule }),
+      onRead: (callback) => { afterRead = callback; } };
+  };
+
+  it("ignores only WAL ctime changes made by a read-only SQLite open", async () => {
+    const h = harness();
+    const before = await h.fingerprint();
+    h.onRead((file) => { if (file.endsWith("-wal")) h.files[file].stat.ctimeMs += 1; });
+    expect(await h.fingerprint()).toEqual(before);
+  });
+
+  it.each(["dev", "ino", "size", "mtimeMs", "mode", "nlink"])("still binds WAL %s changes", async (field) => {
+    const h = harness();
+    const before = await h.fingerprint();
+    h.files["/state/db-wal"].stat[field] += 1;
+    expect(await h.fingerprint()).not.toEqual(before);
+    h.onRead((file) => { if (file.endsWith("-wal")) h.files[file].stat[field] += 1; });
+    await expect(h.fingerprint()).rejects.toMatchObject({ code: "state_db_changed" });
+  });
+
+  it.each(["", "-journal"])("still binds ctime for database or rollback journal %s", async (suffix) => {
+    const h = harness();
+    const before = await h.fingerprint();
+    h.files[`/state/db${suffix}`].stat.ctimeMs += 1;
+    expect(await h.fingerprint()).not.toEqual(before);
+  });
+
+  it("binds the bounded WAL header bytes independently of metadata", async () => {
+    const h = harness();
+    const before = await h.fingerprint();
+    h.files["/state/db-wal"].bytes[0] += 1;
+    expect(await h.fingerprint()).not.toEqual(before);
+  });
+});
 
 describe("backup risk consent tokens", () => {
   const facts = { source: { buildId: "a".repeat(40) }, target: { buildId: "b".repeat(40), schemas: { state: 15, agent: 19 } } };

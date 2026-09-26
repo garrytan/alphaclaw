@@ -136,24 +136,36 @@ sleep 2
 assert_page "($overseer_input)?.checked === false" "overseer toggle disabled again"
 
 echo "== #54 QA: Backups card renders its honest empty state =="
-assert_page "document.body.textContent.includes('Backups') && document.body.textContent.includes('No backups yet — the next OpenClaw update takes one before installing')" "Backups card empty state (a pre-update backup runs on every apply)"
+assert_page "document.body.textContent.includes('Backups') && document.body.textContent.includes('No recovery artifacts yet — the next OpenClaw update creates a configuration checkpoint')" "Recovery inventory has an honest empty state"
+assert_page "document.body.textContent.includes('Configuration checkpoint; database data not backed up') && document.body.textContent.includes('16 MiB')" "Default checkpoint states its coverage and hard cap"
+assert_page "![...document.querySelectorAll('button')].some(b => /full backup|exclusions/i.test(b.textContent))" "No full-backup or exclusion controls"
 "$B" screenshot "$kArtifacts/backups-card.png" >/dev/null 2>&1 || true
 
-echo "== #54 QA: hard-gated confirm shows the reuse consent — unchecked, disabled, with its reason — and cancels without applying =="
+echo "== recovery QA: standalone database snapshot requires size review and cancels without copying =="
+"$B" js "[...document.querySelectorAll('button')].find(b => b.textContent.trim()==='Create database snapshot')?.click(); true" >/dev/null
+sleep 2
+assert_page "document.querySelector('[role=dialog]')?.textContent.includes('Create database snapshot?')" "Manual database snapshot opens an explicit confirmation"
+assert_page "document.querySelector('[role=dialog]')?.textContent.includes('Database snapshot selected:')" "Manual snapshot confirmation shows the database count and size estimate"
+assert_page "document.querySelector('[role=dialog]')?.textContent.includes('No upgrade will be installed')" "Standalone snapshot does not imply an upgrade"
+"$B" screenshot "$kArtifacts/manual-database-snapshot.png" >/dev/null 2>&1 || true
+"$B" js "[...document.querySelectorAll('[role=dialog] button')].find(b => b.textContent.trim()==='Cancel')?.click(); true" >/dev/null
+assert_page "!document.querySelector('[role=dialog]')" "Manual snapshot cancelled before copying"
+assert_page "fetch('/api/openclaw/runs').then(r => r.json()).then(d => !(d.runs || []).some(r => r.target?.kind === 'backup'))" "Cancelling snapshot review did not create a backup run"
+
+echo "== recovery QA: cross-channel confirm names config-only coverage and cancels without applying =="
 "$B" js "[...document.querySelectorAll('button')].find(b => b.textContent.trim()==='Beta')?.click(); true" >/dev/null
 sleep 3
 # The newest beta can be OLDER than the installed stable. Select its actual
 # catalog action so this consent journey tests both release orderings.
 "$B" js "[...[...document.querySelectorAll('h3')].find(h => h.textContent.trim()==='Beta')?.parentElement.querySelectorAll('button') || []].find(b => /^(Upgrade|Downgrade|Switch)$/.test(b.textContent.trim()))?.click(); true" >/dev/null
 sleep 2
-assert_page "document.body.textContent.includes(\"If a fresh backup can't be made, proceed with the most recent verified backup\")" "consent toggle present in the cross-channel confirm"
-assert_page "document.body.textContent.includes('No eligible backup to reuse')" "consent disabled reason: no eligible backup"
-consent_input="[...document.querySelectorAll('label')].find(l => l.textContent.includes('most recent verified backup'))?.querySelector('input')"
-assert_page "(i => !!i && i.checked === false && i.disabled === true)($consent_input)" "consent toggle is unchecked and disabled (never pre-checked)"
+assert_page "!!document.querySelector('[role=dialog]') && document.querySelector('[role=dialog]').textContent.includes('Configuration checkpoint; database data not backed up')" "Cross-channel confirmation states database omission"
+assert_page "!document.body.textContent.includes(\"If a fresh backup can't be made\")" "Retired archive-reuse consent is absent"
+assert_page "!document.querySelector('[role=dialog] input:checked')" "No recovery risk decision is preselected"
 "$B" screenshot "$kArtifacts/consent-dialog.png" >/dev/null 2>&1 || true
 "$B" js "[...document.querySelectorAll('button')].find(b => b.textContent.trim()==='Cancel')?.click(); true" >/dev/null
 sleep 1
-assert_page "!document.body.textContent.includes(\"If a fresh backup can't be made\")" "confirm dismissed"
+assert_page "!document.querySelector('[role=dialog]')" "confirm dismissed"
 grep -q '"lastUpdateRun"' "$kScratch/.openclaw/.alphaclaw/openclaw-channel.json" 2>/dev/null && fail "cancelling the confirm must not start an apply"
 echo "  ok: no apply started"
 "$B" js "[...document.querySelectorAll('button')].find(b => b.textContent.trim()==='Back to stable')?.click(); true" >/dev/null

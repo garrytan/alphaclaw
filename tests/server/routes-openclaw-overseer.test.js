@@ -20,6 +20,10 @@ const createDeps = (overrides = {}) => ({
     applyUpdate: vi.fn(),
     requestChannelRollback: vi.fn(),
     markGoodNow: vi.fn(),
+    runStandaloneBackup: vi.fn(async () => ({
+      status: 200,
+      body: { ok: true, snapshotPath: "/data/backups/openclaw-sqlite/snap-1", tail: "verified ok" },
+    })),
     runLedger: null,
     store: { clearBlocklist: vi.fn(), readState: vi.fn(() => ({ blocklist: [] })) },
   },
@@ -44,11 +48,6 @@ const createDeps = (overrides = {}) => ({
     })),
   },
   openclawFeatureGates: { supportsFeature: vi.fn(() => false) },
-  runBackupSqlite: vi.fn(async () => ({
-    ok: true,
-    snapshotPath: "/data/backups/openclaw-sqlite/snap-1",
-    tail: "verified ok",
-  })),
   ...overrides,
 });
 
@@ -116,43 +115,60 @@ describe("server/routes/openclaw-channel overseer + sqlite backup", () => {
     expect(res.body.availability.reason).toBe("no_anthropic_credential");
   });
 
-  it("POST /api/openclaw/backup-sqlite is 503 (feature_unsupported) when the gate is closed", async () => {
+  it("POST /api/openclaw/backup-sqlite requests a coordinated database_set snapshot without an upstream feature gate", async () => {
     const deps = createDeps();
-    const res = await request(createApp(deps)).post("/api/openclaw/backup-sqlite");
-
-    expect(res.status).toBe(503);
-    expect(res.body.code).toBe("feature_unsupported");
-    expect(res.body.hint).toContain("2026.8.1-beta.1");
-    expect(deps.runBackupSqlite).not.toHaveBeenCalled();
-  });
-
-  it("POST /api/openclaw/backup-sqlite runs the verified backup when the gate is open", async () => {
-    const deps = createDeps({
-      openclawFeatureGates: {
-        supportsFeature: vi.fn((name) => name === "sqliteBackup"),
-      },
-    });
     const res = await request(createApp(deps)).post("/api/openclaw/backup-sqlite");
 
     expect(res.status).toBe(200);
     expect(res.body).toEqual({
       ok: true,
+      operationId: "op-1",
       snapshotPath: "/data/backups/openclaw-sqlite/snap-1",
       tail: "verified ok",
     });
-    expect(deps.runBackupSqlite).toHaveBeenCalledTimes(1);
+    expect(deps.openclawChannelService.runStandaloneBackup).toHaveBeenCalledWith({ operationId: "op-1", recoveryMode: "database_set" });
+    expect(deps.operationEvents.createOperation).toHaveBeenCalledWith({ type: "openclaw-backup" });
+    expect(deps.openclawFeatureGates.supportsFeature).not.toHaveBeenCalled();
   });
 
   it("POST /api/openclaw/backup-sqlite reports a failed backup with its tail", async () => {
     const deps = createDeps({
-      openclawFeatureGates: { supportsFeature: () => true },
-      runBackupSqlite: vi.fn(async () => ({ ok: false, tail: "disk full" })),
+      openclawChannelService: {
+        ...createDeps().openclawChannelService,
+        runStandaloneBackup: vi.fn(async () => ({ status: 500, body: { ok: false, code: "backup_failed", tail: "disk full" } })),
+      },
     });
     const res = await request(createApp(deps)).post("/api/openclaw/backup-sqlite");
 
     expect(res.status).toBe(500);
     expect(res.body.code).toBe("backup_failed");
     expect(res.body.tail).toBe("disk full");
+  });
+
+  it.each([{ recoveryMode: "config_only" }, { recoveryMode: "full" }, { recoveryMode: null }, { recoveryMode: [] }])(
+    "requires the explicit database_set mode, rejecting %j before creating an operation", async (body) => {
+      const deps = createDeps();
+      const res = await request(createApp(deps)).post("/api/openclaw/backup-sqlite").send(body);
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe("invalid_body");
+      expect(deps.operationEvents.createOperation).not.toHaveBeenCalled();
+      expect(deps.openclawChannelService.runStandaloneBackup).not.toHaveBeenCalled();
+    },
+  );
+
+  it("defaults the dedicated SQLite endpoint to database_set", async () => {
+    const deps = createDeps();
+    const res = await request(createApp(deps)).post("/api/openclaw/backup-sqlite").send({});
+    expect(res.status).toBe(200);
+    expect(deps.openclawChannelService.runStandaloneBackup).toHaveBeenCalledWith({ operationId: "op-1", recoveryMode: "database_set" });
+  });
+
+  it("returns backup_unavailable when no coordinated service is mounted", async () => {
+    const deps = createDeps({ openclawChannelService: { runStandaloneBackup: undefined } });
+    const res = await request(createApp(deps)).post("/api/openclaw/backup-sqlite").send({ recoveryMode: "database_set" });
+    expect(res.status).toBe(503);
+    expect(res.body.code).toBe("backup_unavailable");
+    expect(deps.operationEvents.createOperation).not.toHaveBeenCalled();
   });
 
   it("GET /api/openclaw/medic returns the (default on) setting and AI availability", async () => {
@@ -686,8 +702,16 @@ describe("server/routes/openclaw-channel createSqliteBackupRunner", () => {
       ],
     });
     const deps = createDeps({
-      openclawFeatureGates: { supportsFeature: () => true },
-      runBackupSqlite: runner.run,
+      openclawChannelService: {
+        ...createDeps().openclawChannelService,
+        runStandaloneBackup: vi.fn(async ({ recoveryMode }) => {
+          expect(recoveryMode).toBe("database_set");
+          const result = await runner.run();
+          return { status: result.ok ? 200 : 500, body: result.ok
+            ? { ok: true, ...result }
+            : { ok: false, code: "backup_failed", tail: result.tail } };
+        }),
+      },
     });
     const res = await request(createApp(deps)).post("/api/openclaw/backup-sqlite");
 

@@ -71,6 +71,26 @@ describe("backup preflight review gate", () => {
     await host.settle(() => model().confirm()); expect(action).toHaveBeenCalledOnce();
   });
 
+  it("manual database snapshots require a fresh count and size plus an explicit confirmation", async () => {
+    await mount();
+    const action = vi.fn();
+    await host.settle(() => model().request(action, { recoveryMode: "database_set" }));
+    await model().confirm();
+    expect(action).not.toHaveBeenCalled();
+    expect(BackupPreflightDialog({ model: model() }).props.confirmDisabled).toBe(true);
+    authFetch.mockResolvedValueOnce(response({ ok: true, blocked: false, profile: "config_only", checkpoint: { bytes: 2048, fileCount: 4, maxBytes: 16777216 }, databaseCount: 3, databaseBytes: 8 * 1024 ** 3 }));
+    await host.settle(() => model().refresh());
+    const dialog = BackupPreflightDialog({ model: model() });
+    expect(dialog.props.title).toBe("Create database snapshot?");
+    expect(dialog.props.confirmDisabled).toBe(false);
+    expect(text(dialog.props.details).replace(/\s+/g, " ")).toContain("3 databases");
+    expect(text(dialog.props.details)).toContain("8.00 GB");
+    expect(action).not.toHaveBeenCalled();
+    await host.settle(() => model().confirm());
+    expect(action).toHaveBeenCalledOnce();
+    expect(model().recoveryMode).toBe("config_only");
+  });
+
   it("cancel and invalidation fence the pending action even after a successful scan", async () => {
     await mount(); const action = vi.fn();
     await host.settle(() => model().request(action));
@@ -107,6 +127,20 @@ describe("backup preflight review gate", () => {
 });
 
 describe("backup preflight presentation and API", () => {
+  it("accepts bounded configuration without a broad diagnostic and shows omitted database data", async () => {
+    const data = { ok: true, profile: "config_only", blocked: false, checkpoint: { bytes: 2048, fileCount: 3, maxBytes: 16777216 }, databaseCount: 2, databaseBytes: 20 * 1024 ** 3, coverage: { config: "complete", databases: "omitted" } };
+    authFetch.mockResolvedValueOnce(response(data));
+    expect(await fetchBackupPreflight()).toEqual(data);
+    const output = text(BackupPreflightDetails({ model: { data } }));
+    expect(output).toContain("Configuration checkpoint; database data not backed up");
+    expect(output).toContain("16 MiB");
+    expect(output).toContain("Database data omitted");
+    expect(output).not.toContain("Every top-level path");
+    for (const checkpoint of [{ ...data.checkpoint, bytes: 16777217 }, { ...data.checkpoint, maxBytes: 1024 ** 3 }, { ...data.checkpoint, fileCount: -1 }]) {
+      authFetch.mockResolvedValueOnce(response({ ...data, checkpoint }));
+      await expect(fetchBackupPreflight()).rejects.toThrow("invalid backup preflight");
+    }
+  });
   it("renders full counts, top-level paths, both rankings, symlink list and blocked reason", () => {
     const output = text(BackupPreflightDetails({ model: { data: result({ blocked: true, reason: "Selected state exceeds the backup budget." }) } }));
     for (const fragment of ["407,321", "152,243", "210,000", "12.0 GB", "Every top-level path", "Most entries", "Most bytes", "workspace/.openclaw", "a symlink", "before gateway pause", "exceeds the backup budget"]) expect(output).toContain(fragment);

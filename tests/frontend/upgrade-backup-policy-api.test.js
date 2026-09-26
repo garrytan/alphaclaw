@@ -3,6 +3,11 @@ import { fetchOpenclawBackupPolicy, updateOpenclawBackupPolicy, rollbackOpenclaw
 
 afterEach(() => vi.unstubAllGlobals());
 describe("backup policy and coverage API contracts", () => {
+  it("carries the server's on-disk rollback recovery verdict without promoting recorded verification", async () => {
+    const recovery = { kind: "database_set", checkpoint: { file: "/backups/recovery-op", verified: true }, databases: { complete: true, verified: true }, restore: { configAvailable: false, databaseSetAvailable: false } };
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ ok: false, code: "rollback_requires_confirmation", message: "Restore first", backupFile: recovery.checkpoint.file, backupFileExists: false, backupFileCaveat: "content_changed", recovery }), { status: 409 })));
+    await expect(rollbackOpenclaw()).rejects.toMatchObject({ recovery, backupFileExists: false, backupFileCaveat: "content_changed" });
+  });
   it("GET returns canonical policy/defaults and PUT sends both explicit lists", async () => {
     const policy = { excludes: [], rootExcludes: ["state/security-planning/stronghold-*"] };
     const response = { ok: true, policy, defaults: { excludes: ["node_modules"], rootExcludes: [] }, refusedExcludes: [] };

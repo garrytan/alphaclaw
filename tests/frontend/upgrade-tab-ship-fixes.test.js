@@ -223,6 +223,25 @@ const makeCatalog = (overrides = {}) => ({
 });
 
 describe("frontend/upgrade-tab ship fixes", () => {
+  it("stale recovery approvals offer reapply review for the same installed build instead of retry migration", () => {
+    const onRequestApply = vi.fn();
+    const tree = renderView({ channelInfo: makeChannelInfo({ installedVersion: "2026.9.6", gatewayHold: { reason: "recovery_intent_stale" } }), onRequestApply });
+    expect(treeText(tree)).toContain("Database recovery approval is stale");
+    expect(treeText(tree)).toContain("old approval cannot be reused");
+    expect(findActionButtonByLabel(tree, "Retry migration")).toBeUndefined();
+    findActionButtonByLabel(tree, "Review database recovery choices").props.onClick();
+    expect(onRequestApply).toHaveBeenCalledWith({ payload: { channel: "stable", version: "2026.9.6" }, label: "2026.9.6", isDowngrade: false });
+  });
+  it("shows recovery review instead of blindly retrying a held database migration", () => {
+    const onRequestApply = vi.fn();
+    const tree = renderView({ channelInfo: makeChannelInfo({ installedVersion: "2026.9.6", expectedVersion: "2026.9.6", gatewayHold: { reason: "recovery_choice_required" } }), onRequestApply });
+    expect(treeText(tree)).toContain("Database recovery choice required");
+    expect(treeText(tree)).toContain("gateway is stopped");
+    expect(findActionButtonByLabel(tree, "Retry migration")).toBeUndefined();
+    expect(findActionButtonByLabel(tree, "Strip blamed keys and retry")).toBeUndefined();
+    findActionButtonByLabel(tree, "Review database recovery choices").props.onClick();
+    expect(onRequestApply).toHaveBeenCalledWith({ payload: { channel: "stable", version: "2026.9.6" }, label: "2026.9.6", isDowngrade: false });
+  });
   beforeEach(() => {
     harness.reset();
   });

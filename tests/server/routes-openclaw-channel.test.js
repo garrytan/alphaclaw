@@ -3,6 +3,7 @@ const os = require("os");
 const path = require("path");
 const express = require("express");
 const request = require("supertest");
+const { DatabaseSync } = require("node:sqlite");
 
 const {
   registerOpenclawChannelRoutes,
@@ -10,6 +11,36 @@ const {
 const { registerAuthRoutes } = require("../../lib/server/routes/auth");
 
 const kDevSha = "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0";
+const recoveryFixtureRoots = [];
+
+const createDatabaseRecovery = async ({ kind = "database_set" } = {}) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "alphaclaw-route-recovery-"));
+  recoveryFixtureRoots.push(root);
+  const stateDir = path.join(root, "state");
+  const backupsDir = path.join(root, "backups");
+  fs.mkdirSync(stateDir);
+  const configPath = path.join(stateDir, "openclaw.json");
+  fs.writeFileSync(configPath, "{}");
+  const configStat = fs.statSync(configPath);
+  const databasePath = path.join(stateDir, "state", "openclaw.sqlite");
+  fs.mkdirSync(path.dirname(databasePath));
+  const database = new DatabaseSync(databasePath);
+  database.exec("CREATE TABLE items(value TEXT); INSERT INTO items VALUES ('before migration'); PRAGMA user_version=7;");
+  database.close();
+  const databaseStat = fs.statSync(databasePath);
+  const inventory = {
+    stateDir, requestedStateDir: stateDir, configPath,
+    files: [{ sourcePath: configPath, archivePath: "openclaw.json", kind: "config",
+      bytes: configStat.size, sourceIdentity: { dev: configStat.dev, ino: configStat.ino, size: configStat.size, mtimeMs: configStat.mtimeMs } }],
+    dbs: [{ sourcePath: databasePath, archivePath: "state/openclaw.sqlite", dbKind: "state", agentId: null,
+      bytes: databaseStat.size, sourceIdentity: { dev: databaseStat.dev, ino: databaseStat.ino } }],
+  };
+  const { createRecoveryCheckpoint } = require("../../lib/server/openclaw-recovery-checkpoint");
+  const recovery = await createRecoveryCheckpoint({ inventory, backupsDir, operationId: "op-1",
+    sourceBuild: { version: "1.0.0", channel: "stable" }, targetBuild: { version: "1.1.0", channel: "beta" },
+    includeDatabases: kind === "database_set" });
+  return { root, backupsDir, recovery };
+};
 
 const createChannelInfo = (overrides = {}) => ({
   releaseChannel: "stable",
@@ -112,13 +143,17 @@ const kRoutes = [
   { method: "post", path: "/api/openclaw/rollback", body: {} },
   { method: "post", path: "/api/openclaw/mark-good", body: {} },
   { method: "post", path: "/api/openclaw/blocklist/clear", body: {} },
+  { method: "post", path: "/api/openclaw/backup", body: {} },
+  { method: "post", path: "/api/openclaw/backup-sqlite", body: {} },
   { method: "post", path: "/api/openclaw/reconcile-installed", body: {} },
+  { method: "post", path: "/api/openclaw/recovery/cancel", body: { operationId: "2f8c1f2e-0d2a-4b1e-9a11-6f2f8c1f2e0d" } },
   { method: "post", path: "/api/openclaw/runs/2f8c1f2e-0d2a-4b1e-9a11-6f2f8c1f2e0d/backup-risk-consent", body: {} },
 ];
 
 describe("server/routes/openclaw-channel", () => {
   afterEach(() => {
     delete process.env.SETUP_PASSWORD;
+    for (const root of recoveryFixtureRoots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
   });
 
   it("rejects every channel route without a session cookie, and allows them after login", async () => {
@@ -249,8 +284,7 @@ describe("server/routes/openclaw-channel", () => {
       operationId: "op-1",
       // v0.9.81 (D13): the declared direction rides to the service.
       intent: "update",
-      // No consent carried → the service sees null (never undefined/true).
-      allowBackupReuse: null,
+      recoveryMode: "config_only",
       // #79 (b): the no-backup consent defaults to an explicit false.
       confirmNoBackup: false,
     });
@@ -553,6 +587,72 @@ describe("server/routes/openclaw-channel", () => {
     expect(fenced.body.code).toBe("rollback_requires_confirmation");
     expect(fenced.body.backupFile).toBeNull();
     expect(fenced.body.hint).toContain("No verified pre-update backup");
+  });
+
+  it("recognizes a real database_set checkpoint as rollback recovery", async () => {
+    const { recovery, backupsDir } = await createDatabaseRecovery();
+    const deps = createDeps();
+    deps.openclawChannelService.runLedger = { listRuns: vi.fn(() => [{
+      operationId: "op-1", state: "activated",
+      dbPreflight: { migrationRequired: true, foundVersion: 7, targetVersion: 12 }, recovery,
+    }]) };
+    deps.openclawChannelService.listBackupInventory = vi.fn(() => ({ backupsDir, entries: [] }));
+    const app = createApp(deps);
+
+    const fenced = await request(app).post("/api/openclaw/rollback").send({});
+    expect(fenced.status).toBe(409);
+    expect(fenced.body.backupFile).toBe(recovery.checkpoint.file);
+    expect(fenced.body.backupFileExists).toBe(true);
+    expect(fenced.body.recovery).toMatchObject({ kind: "database_set", restore: { configAvailable: true, databaseSetAvailable: true } });
+    expect(fenced.body.hint).toContain("database recovery set");
+    expect(deps.openclawChannelService.requestChannelRollback).not.toHaveBeenCalled();
+
+    const confirmed = await request(app).post("/api/openclaw/rollback").send({ confirmDataRisk: true });
+    expect(confirmed.status).toBe(200);
+    expect(deps.openclawChannelService.requestChannelRollback).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["tampered", "missing"])("does not claim database recovery after checkpoint is %s", async (failure) => {
+    const { recovery, backupsDir } = await createDatabaseRecovery();
+    if (failure === "tampered") {
+      fs.writeFileSync(path.join(recovery.file, "payload/openclaw.json"), "changed");
+    } else {
+      fs.rmSync(recovery.file, { recursive: true, force: true });
+    }
+    const deps = createDeps();
+    deps.openclawChannelService.runLedger = { listRuns: vi.fn(() => [{
+      operationId: "op-1", state: "activated",
+      dbPreflight: { migrationRequired: true, foundVersion: 7, targetVersion: 12 }, recovery,
+    }]) };
+    deps.openclawChannelService.listBackupInventory = vi.fn(() => ({ backupsDir, entries: [] }));
+
+    const response = await request(createApp(deps)).post("/api/openclaw/rollback").send({});
+    expect(response.status).toBe(409);
+    expect(response.body.backupFile).toBe(recovery.checkpoint.file);
+    expect(response.body.backupFileExists).toBe(false);
+    expect(response.body.recovery.restore).toEqual({ configAvailable: false, databaseSetAvailable: false });
+    expect(response.body.recovery.checkpoint.verified).toBe(false);
+    expect(response.body.recovery.databases).toMatchObject({ complete: false, verified: false });
+    expect(deps.openclawChannelService.requestChannelRollback).not.toHaveBeenCalled();
+  });
+
+  it("does not treat config_only recovery or a forged legacy archive record as database recovery", async () => {
+    const { recovery, backupsDir } = await createDatabaseRecovery({ kind: "config_only" });
+    const deps = createDeps();
+    deps.openclawChannelService.runLedger = { listRuns: vi.fn(() => [{
+      operationId: "op-1", state: "activated",
+      dbPreflight: { migrationRequired: true, foundVersion: 7, targetVersion: 12 }, recovery,
+      backup: { file: "/tmp/forged-legacy-backup.tar.gz", verified: true },
+    }]) };
+    deps.openclawChannelService.listBackupInventory = vi.fn(() => ({ backupsDir, entries: [] }));
+
+    const response = await request(createApp(deps)).post("/api/openclaw/rollback").send({});
+    expect(response.status).toBe(409);
+    expect(response.body.backupFile).toBeNull();
+    expect(response.body.backupFileExists).toBe(false);
+    expect(response.body.recovery).toMatchObject({ kind: "config_only", restore: { configAvailable: true, databaseSetAvailable: false } });
+    expect(response.body.hint).toContain("No verified pre-update backup");
+    expect(deps.openclawChannelService.requestChannelRollback).not.toHaveBeenCalled();
   });
 
   // WI-4.1: the fence re-stats the recorded archive and says what is in it.
@@ -1063,39 +1163,64 @@ describe("server/routes/openclaw-channel", () => {
     });
   });
 
-  // WI-4.5 consent contract: strict object, humans only.
-  describe("POST /api/openclaw/apply allowBackupReuse consent", () => {
+  describe("POST /api/openclaw/apply recovery policy", () => {
     const kSha = "a".repeat(64);
 
-    it("passes a well-formed consent through to the service (lowercased digest)", async () => {
+    it("defaults to config_only and forwards an explicit database_set choice", async () => {
       const deps = createDeps();
       const app = createApp(deps);
-      const res = await request(app)
+      const defaultMode = await request(app)
         .post("/api/openclaw/apply")
-        .send({ channel: "beta", version: "1.1.0", intent: "update", allowBackupReuse: { sha256: kSha.toUpperCase() } });
-      expect(res.status).toBe(200);
+        .send({ channel: "beta", version: "1.1.0", intent: "update" });
+      expect(defaultMode.status).toBe(200);
       expect(deps.openclawChannelService.applyUpdate).toHaveBeenCalledWith(
-        expect.objectContaining({ allowBackupReuse: { sha256: kSha } }),
+        expect.objectContaining({ recoveryMode: "config_only" }),
+      );
+
+      const databaseSet = await request(app).post("/api/openclaw/apply")
+        .send({ channel: "beta", version: "1.1.0", intent: "update", recoveryMode: "database_set" });
+      expect(databaseSet.status).toBe(200);
+      expect(deps.openclawChannelService.applyUpdate).toHaveBeenLastCalledWith(
+        expect.objectContaining({ recoveryMode: "database_set" }),
       );
     });
 
-    it.each([
-      ["bare true", true],
-      ['string "true"', "true"],
-      ["a digest string", kSha],
-      ["an array", [kSha]],
-      ["a short digest", { sha256: "abc" }],
-      ["a non-hex digest", { sha256: "g".repeat(64) }],
-      ["a missing digest", {}],
-    ])("400s invalid_body for %s and never calls the service", async (_label, allowBackupReuse) => {
+    it.each(["full", "migration_minimal", "", 0, false, {}, [], null].map((value) => [value]))(
+      "rejects unsupported recoveryMode %j before dispatch", async (recoveryMode) => {
       const deps = createDeps();
       const app = createApp(deps);
       const res = await request(app)
         .post("/api/openclaw/apply")
-        .send({ channel: "beta", version: "1.1.0", intent: "update", allowBackupReuse });
+        .send({ channel: "beta", version: "1.1.0", intent: "update", recoveryMode });
       expect(res.status).toBe(400);
       expect(res.body.code).toBe("invalid_body");
       expect(deps.openclawChannelService.applyUpdate).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ["profile", { profile: "migration-minimal" }],
+      ["includeWorkspace", { includeWorkspace: false }],
+      ["allowBackupReuse", { allowBackupReuse: { sha256: kSha } }],
+    ])("rejects retired %s input even when its value was previously valid", async (_field, retiredField) => {
+      const deps = createDeps();
+      const res = await request(createApp(deps)).post("/api/openclaw/apply")
+        .send({ channel: "beta", version: "1.1.0", intent: "update", ...retiredField });
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe("invalid_body");
+      expect(deps.openclawChannelService.applyUpdate).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      [true], ["true"], [kSha], [[kSha]], [{ sha256: "abc" }],
+      [{ sha256: "g".repeat(64) }], [{}], [null], [false],
+    ])("rejects malformed or empty retired reuse consent %j without dispatch", async (allowBackupReuse) => {
+      const deps = createDeps();
+      const response = await request(createApp(deps)).post("/api/openclaw/apply")
+        .send({ channel: "beta", version: "1.1.0", intent: "update", allowBackupReuse });
+      expect(response.status).toBe(400);
+      expect(response.body.code).toBe("invalid_body");
+      expect(deps.openclawChannelService.applyUpdate).not.toHaveBeenCalled();
+      expect(deps.operationEvents.createOperation).not.toHaveBeenCalled();
     });
 
     it("403s an agent actor carrying the consent (even a malformed one) before validation", async () => {
@@ -1116,7 +1241,6 @@ describe("server/routes/openclaw-channel", () => {
         expect(res.body.code).toBe("humans_only");
       }
       expect(deps.openclawChannelService.applyUpdate).not.toHaveBeenCalled();
-      // Without the consent field the agent's apply proceeds normally.
       const plain = await request(app)
         .post("/api/openclaw/apply")
         .send({ channel: "beta", version: "1.1.0", intent: "update" });
@@ -1218,14 +1342,14 @@ describe("server/routes/openclaw-channel", () => {
         .send({ channel: "stable", version: "1.1.0", intent: "update", confirmNoBackup: true, confirmNoBackupToken: "t".repeat(43) });
       expect(res.status).toBe(200);
       expect(deps.openclawChannelService.applyUpdate).toHaveBeenCalledWith(
-        expect.objectContaining({ confirmNoBackup: true, allowBackupReuse: null }),
+        expect.objectContaining({ confirmNoBackup: true, recoveryMode: "config_only" }),
       );
       const explicitFalse = await request(app)
         .post("/api/openclaw/apply")
         .send({ channel: "stable", version: "1.1.0", intent: "update", confirmNoBackup: false });
       expect(explicitFalse.status).toBe(200);
       expect(deps.openclawChannelService.applyUpdate).toHaveBeenLastCalledWith(
-        expect.objectContaining({ confirmNoBackup: false }),
+        expect.objectContaining({ confirmNoBackup: false, recoveryMode: "config_only" }),
       );
     });
 
@@ -1430,6 +1554,8 @@ describe("server/routes/openclaw-channel", () => {
       expect(deps.openclawChannelService.reconcileBootConfig).toHaveBeenCalledWith({
         force: true,
         stripBlamedKeys: false,
+        hold: expect.any(Function),
+        operation: expect.objectContaining({ signal: expect.any(AbortSignal), runWriter: expect.any(Function) }),
       });
       expect(deps.gatewayHoldActions.clearLatch).toHaveBeenCalledTimes(1);
       expect(deps.gatewayHoldActions.startGateway).toHaveBeenCalledTimes(1);
@@ -1446,7 +1572,7 @@ describe("server/routes/openclaw-channel", () => {
 
       expect(deps.gatewayHoldActions.acquireLock).toHaveBeenCalledWith(
         "reconcile_retry",
-        { leaseMs: kReconcileLease },
+        { leaseMs: kReconcileLease, cleanup: expect.objectContaining({ cancel: expect.any(Function), wait: expect.any(Function) }) },
       );
     });
 
@@ -1533,14 +1659,16 @@ describe("server/routes/openclaw-channel", () => {
         .post("/api/openclaw/reconcile/retry")
         .send({ stripBlamedKeys: true });
       expect(deps.openclawChannelService.reconcileBootConfig).toHaveBeenLastCalledWith(
-        { force: true, stripBlamedKeys: true },
+        { force: true, stripBlamedKeys: true, hold: expect.any(Function),
+          operation: expect.objectContaining({ signal: expect.any(AbortSignal), runWriter: expect.any(Function) }) },
       );
 
       await request(app)
         .post("/api/openclaw/reconcile/retry")
         .send({ stripBlamedKeys: "true" });
       expect(deps.openclawChannelService.reconcileBootConfig).toHaveBeenLastCalledWith(
-        { force: true, stripBlamedKeys: false },
+        { force: true, stripBlamedKeys: false, hold: expect.any(Function),
+          operation: expect.objectContaining({ signal: expect.any(AbortSignal), runWriter: expect.any(Function) }) },
       );
     });
 
@@ -1802,6 +1930,42 @@ describe("server/routes/openclaw-channel", () => {
   });
 
   describe("POST /api/openclaw/backup (Back up now, v0.9.81)", () => {
+    it.each(["full", "invalid", [], null].map((value) => [value]))("rejects recoveryMode %j before creating an operation", async (recoveryMode) => {
+      const deps = createDeps();
+      deps.openclawChannelService.runStandaloneBackup = vi.fn();
+      const response = await request(createApp(deps)).post("/api/openclaw/backup").send({ recoveryMode });
+      expect(response.status).toBe(400);
+      expect(response.body.code).toBe("invalid_body");
+      expect(deps.operationEvents.createOperation).not.toHaveBeenCalled();
+      expect(deps.openclawChannelService.runStandaloneBackup).not.toHaveBeenCalled();
+    });
+
+    it.each(["/api/openclaw/backup", "/api/openclaw/backup-sqlite"])("rejects all retired fields at %s without invoking the old CLI", async (url) => {
+      const deps = createDeps({ runBackupSqlite: vi.fn() });
+      deps.openclawChannelService.runStandaloneBackup = vi.fn();
+      const app = createApp(deps);
+      for (const body of [{ profile: "full" }, { profile: "migration-minimal" }, { includeWorkspace: false },
+        { includeWorkspace: null }, { allowBackupReuse: { sha256: "a".repeat(64) } }, { allowBackupReuse: null }]) {
+        const response = await request(app).post(url).send(body);
+        expect(response.status).toBe(400);
+        expect(response.body.code).toBe("invalid_body");
+      }
+      expect(deps.operationEvents.createOperation).not.toHaveBeenCalled();
+      expect(deps.openclawChannelService.runStandaloneBackup).not.toHaveBeenCalled();
+      expect(deps.runBackupSqlite).not.toHaveBeenCalled();
+    });
+
+    it("passes explicit database_set without upgrading the service's recovery claims", async () => {
+      const deps = createDeps();
+      const recovery = { kind: "database_set", checkpoint: { verified: true },
+        databases: { complete: false, verified: false }, restore: { databaseSetAvailable: false } };
+      deps.openclawChannelService.runStandaloneBackup = vi.fn(async () => ({ status: 200, body: { ok: true, recovery } }));
+      const response = await request(createApp(deps)).post("/api/openclaw/backup").send({ recoveryMode: "database_set" });
+      expect(response.status).toBe(200);
+      expect(response.body).toEqual({ ok: true, recovery, operationId: "op-1" });
+      expect(deps.openclawChannelService.runStandaloneBackup).toHaveBeenCalledWith({ operationId: "op-1", recoveryMode: "database_set" });
+    });
+
     it("a fast outcome answers inline with the operationId; a slow run hands off to the operation stream (202 + events)", async () => {
       const deps = createDeps();
       deps.openclawChannelService.runStandaloneBackup = vi.fn(async () => ({
@@ -1814,7 +1978,7 @@ describe("server/routes/openclaw-channel", () => {
       expect(quick.body).toEqual(
         expect.objectContaining({ ok: true, operationId: "op-1", archive: expect.objectContaining({ verified: true }) }),
       );
-      expect(deps.openclawChannelService.runStandaloneBackup).toHaveBeenCalledWith({ operationId: "op-1" });
+      expect(deps.openclawChannelService.runStandaloneBackup).toHaveBeenCalledWith({ operationId: "op-1", recoveryMode: "config_only" });
       expect(deps.operationEvents.createOperation).toHaveBeenCalledWith({ type: "openclaw-backup" });
 
       deps.openclawChannelService.runStandaloneBackup = vi.fn(() => new Promise(() => {}));

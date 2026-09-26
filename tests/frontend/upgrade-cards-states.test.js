@@ -183,28 +183,38 @@ describe("frontend/upgrade-tab backups-card Back up now (v0.9.81)", () => {
   const findButton = (tree, label) =>
     collectNodes(tree).find((vnode) => vnode?.props?.idleLabel === label);
   const inventory = { readable: true, entries: [], truncated: false };
+  it("offers a separate explicit database snapshot action without selecting it", () => {
+    const onDatabaseSnapshot = vi.fn();
+    const tree = expandTree(UpgradeBackupsCard({ inventory, onDatabaseSnapshot }));
+    expect(onDatabaseSnapshot).not.toHaveBeenCalled();
+    const action = findButton(tree, "Create database snapshot");
+    expect(action.props.disabled).toBe(false);
+    action.props.onClick();
+    expect(onDatabaseSnapshot).toHaveBeenCalledOnce();
+    expect(findButton(expandTree(UpgradeBackupsCard({ inventory, backupNowDisabled: true })), "Create database snapshot").props.disabled).toBe(true);
+  });
 
   it("renders the button wired to onBackupNow, disabled by the page-wide flag, loading while the request starts", () => {
     const onBackupNow = vi.fn();
-    const live = findButton(expandTree(UpgradeBackupsCard({ inventory, onBackupNow, nowMs: 1_000 })), "Back up now");
+    const live = findButton(expandTree(UpgradeBackupsCard({ inventory, onBackupNow, nowMs: 1_000 })), "Create configuration checkpoint");
     expect(live).toBeTruthy();
     expect(live.props.disabled).toBe(false);
     live.props.onClick();
     expect(onBackupNow).toHaveBeenCalledTimes(1);
     const disabled = findButton(
       expandTree(UpgradeBackupsCard({ inventory, onBackupNow, backupNowDisabled: true, nowMs: 1_000 })),
-      "Back up now",
+      "Create configuration checkpoint",
     );
     expect(disabled.props.disabled).toBe(true);
     const starting = findButton(
       expandTree(UpgradeBackupsCard({ inventory, onBackupNow, backupNowStarting: true, nowMs: 1_000 })),
-      "Back up now",
+      "Create configuration checkpoint",
     );
     expect(starting.props.loading).toBe(true);
     const text = collectText(expandTree(UpgradeBackupsCard({ inventory, nowMs: 1_000 }))).join(" ");
-    expect(text).toContain("May pause and relaunch the gateway while copying");
-    expect(text).toContain("migration-only backup");
-    expect(text).toContain("Back up now takes one on demand");
+    expect(text).toContain("May briefly pause and relaunch the gateway");
+    expect(text).toContain("Historical archives remain available");
+    expect(text).toContain("Configuration checkpoint; database data not backed up");
   });
 
   it("shows the ledger-derived 'Last manual backup' line in its tone, and nothing when no manual backup ever ran", () => {

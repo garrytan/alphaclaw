@@ -71,6 +71,23 @@ describe("server/topic-discovery", () => {
   });
 
   describe("sweep", () => {
+    it.each([false, null, undefined, "throw"])("refuses all sweep work and watermark changes when admission is %s", async (verdict) => {
+      const usageDb = createFakeUsageDb([{ id: 1, sessionKey: "agent:main:telegram:group:-100:topic:7" }]);
+      const canSweep = vi.fn(() => { if (verdict === "throw") throw new Error("unknown state"); return verdict; });
+      const { service, deps } = createService({ usageDb, canSweep });
+      expect(await service.sweep()).toEqual({ skipped: true, reason: "mutation_blocked" });
+      expect(usageDb.getTelegramSessionKeysAfterId).not.toHaveBeenCalled();
+      expect(deps.readConfig).not.toHaveBeenCalled();
+      expect(deps.readNameCache).not.toHaveBeenCalled();
+      expect(deps.syncPromptFiles).not.toHaveBeenCalled();
+      expect(deps.notify).not.toHaveBeenCalled();
+      expect(topicRegistry.getSweepWatermark()).toBe(0);
+      expect(fs.existsSync(kRegistryPath)).toBe(false);
+      canSweep.mockReturnValue(true);
+      expect(await service.sweep()).toMatchObject({ discovered: 1, scannedTo: 1 });
+      expect(topicRegistry.getSweepWatermark()).toBe(1);
+      expect(deps.syncPromptFiles).toHaveBeenCalledTimes(1);
+    });
     it("is a clean no-op on an empty usage db: no writes, watermark unchanged", async () => {
       const usageDb = createFakeUsageDb([]);
       const { service, deps } = createService({ usageDb });
@@ -286,6 +303,22 @@ describe("server/topic-discovery", () => {
   });
 
   describe("noteSessionSeen (label-path bonus)", () => {
+    it("rechecks admission when queued label writes run without consuming the debounce on refusal", async () => {
+      const canSweep = vi.fn(() => true);
+      const { service } = createService({ usageDb: createFakeUsageDb([]), canSweep });
+      const key = "agent:main:telegram:group:-300:topic:12";
+      service.noteSessionSeen(key);
+      canSweep.mockReturnValue(false);
+      await flushImmediates();
+      expect(fs.existsSync(kRegistryPath)).toBe(false);
+      service.noteSessionSeen(key);
+      await flushImmediates();
+      expect(fs.existsSync(kRegistryPath)).toBe(false);
+      canSweep.mockReturnValue(true);
+      service.noteSessionSeen(key);
+      await flushImmediates();
+      expect(topicRegistry.listTopics()).toHaveLength(1);
+    });
     it("upserts fire-and-forget after the immediate-queue flush", async () => {
       const { service, deps } = createService({ usageDb: createFakeUsageDb([]) });
 
@@ -329,6 +362,24 @@ describe("server/topic-discovery", () => {
   });
 
   describe("start/stop", () => {
+    it("keeps the polling schedule alive while blocked and consumes the same rows on the next admitted sweep", async () => {
+      vi.useFakeTimers();
+      const usageDb = createFakeUsageDb([{ id: 1, sessionKey: "agent:main:telegram:group:-100:topic:7" }]);
+      const canSweep = vi.fn(() => false);
+      const { service } = createService({ usageDb, canSweep, intervalMs: 60_000 });
+      try {
+        service.start();
+        await vi.advanceTimersByTimeAsync(20_000);
+        expect(topicRegistry.getSweepWatermark()).toBe(0);
+        expect(usageDb.getTelegramSessionKeysAfterId).not.toHaveBeenCalled();
+        canSweep.mockReturnValue(true);
+        await vi.advanceTimersByTimeAsync(40_000);
+        expect(topicRegistry.getSweepWatermark()).toBe(1);
+      } finally {
+        service.stop();
+        vi.useRealTimers();
+      }
+    });
     it("starts idempotently and stops cleanly", () => {
       const { service } = createService({ usageDb: createFakeUsageDb([]) });
       service.start();
@@ -338,5 +389,45 @@ describe("server/topic-discovery", () => {
       expect(service.getStatus().running).toBe(false);
       service.stop();
     });
+  });
+});
+
+describe("production topic sweep admission", () => {
+  it("requires a ready, unheld, non-mutating server and fails closed for corrupt state", () => {
+    const source = fs.readFileSync(path.resolve(__dirname, "../../lib/server.js"), "utf8");
+    const start = source.indexOf("const topicDiscovery = createTopicDiscoveryService({");
+    const block = source.slice(start, source.indexOf("openclawDir:", start));
+    const match = block.match(/canSweep: (\(\) => \{[\s\S]*\n  \}),/);
+    expect(match).not.toBeNull();
+    let phase = "ready";
+    let quiet = false;
+    let applying = false;
+    let info = {};
+    const abort = new AbortController();
+    const admission = new Function("openclawChannelService", "gatewayQuiesceAbort", "require", `return ${match[1]}`)(
+      { isApplyInProgress: () => applying, getChannelInfo: () => info },
+      abort,
+      (name) => name.includes("boot-phase") ? { getBootPhase: () => ({ phase }) } : { isStateDbQuiet: () => quiet },
+    );
+    expect(admission()).toBe(true);
+    phase = "starting_gateway";
+    expect(admission()).toBe(false);
+    phase = "failed";
+    expect(admission()).toBe(false);
+    phase = "ready";
+    for (const held of [{ gatewayHold: { reason: "recovery_review" } }, { stateCorrupted: true }, { noBootableVersion: {} }, null]) {
+      info = held;
+      expect(admission()).toBe(false);
+    }
+    info = {};
+    applying = true;
+    expect(admission()).toBe(false);
+    applying = false;
+    quiet = true;
+    expect(admission()).toBe(false);
+    quiet = false;
+    expect(admission()).toBe(true);
+    abort.abort("shutdown");
+    expect(admission()).toBe(false);
   });
 });

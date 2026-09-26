@@ -25,7 +25,7 @@ alphaclaw admin manifest [--domain <name>] [--op <id>]
 | `dangerous_op_requires_confirmation` (HTTP 403) | Confirm flow unavailable on this install | Dashboard-only here; hand it to the operator. |
 | `config_unreadable` (HTTP 503/409) | AlphaClaw refused to rewrite a config file it cannot parse (openclaw.json / alphaclaw.json — JSON5 or a torn write) | Do NOT retry in a loop; tell the operator which file, they fix or restore it, then retry. |
 | `no_admin_targets` | No admin channel configured | Ask the operator to set one (Setup UI → Watchdog → Settings → Update notifications) before dangerous ops. |
-| `backup_in_progress` (HTTP 409 + `Retry-After`) | A pre-update backup is pausing the gateway and holding AlphaClaw's own state-database writes quiet | Nothing was changed. Wait the `Retry-After` seconds (120), then retry the same call. |
+| `backup_in_progress` (HTTP 409 + `Retry-After`) | Recovery capture holds state-DB writes quiet during the gateway pause | Nothing changed. Wait `Retry-After` seconds, then retry. |
 | `restart_required` in a response | Change applied, not yet live | Tell the user a gateway restart is needed. |
 | `server_unreachable` / `timeout` | Server not responding | The gateway may be mid-restart; check the Watchdog tab and retry shortly. |
 

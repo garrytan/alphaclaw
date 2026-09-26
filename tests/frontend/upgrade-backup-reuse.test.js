@@ -65,6 +65,7 @@ vi.mock("../../lib/public/js/lib/api.js", () => ({
   authFetch: vi.fn(async () => new Response(JSON.stringify({ ok: true, blocked: false, reason: null, diagnosis: { directories: { complete: true } } }))),
   applyOpenclawVersion: vi.fn(),
   requestOpenclawBackupRiskConsent: vi.fn(),
+  cancelOpenclawRecoveryReview: vi.fn(),
   clearOpenclawBlocklist: vi.fn(),
   fetchOpenclawBackups: vi.fn(),
   fetchOpenclawCatalog: vi.fn(),
@@ -300,80 +301,34 @@ describe("frontend/upgrade-tab apply confirm — backup reuse consent (WI-4.4)",
     harness.reset();
   });
 
-  it("renders the consent toggle LAST, default OFF, with the newest eligible backup's loss window", () => {
-    const onToggleBackupReuseConsent = vi.fn();
-    const tree = renderView({
-      channelInfo: makeChannelInfo(),
-      pendingApply: makePendingDowngrade(),
-      onToggleBackupReuseConsent,
-    });
-
-    const text = treeText(tree);
-    expect(text).toContain("Downgrade to 2026.7.0?");
-    expect(text).toContain("If the backup fails, nothing is installed.");
-    expect(text).toContain("The gateway pauses briefly during the pre-update backup.");
-    expect(text).toContain(kBackupReuseConsentLabel);
-    expect(text).toContain("Taken 3 hours ago — state written since would not be in it.");
-    expect(text).toContain("openclaw-backup-2026-09-02T09-00-00.tar.gz");
-    // The consent line is the last thing before the dialog's buttons.
-    expect(text.lastIndexOf(kBackupReuseConsentLabel)).toBeGreaterThan(
-      text.lastIndexOf("The gateway pauses briefly"),
-    );
-
-    const toggle = findConsentToggle(tree);
-    expect(toggle).toBeTruthy();
-    expect(toggle.props.checked).toBe(false);
-    expect(toggle.props.disabled).toBe(false);
-    // The switch is a real checkbox underneath; flipping it reports true.
-    const input = findAllByType(toggle, "input")[0];
-    expect(input.props.checked).toBe(false);
-    input.props.onchange({ target: { checked: true } });
-    expect(onToggleBackupReuseConsent).toHaveBeenCalledWith(true);
+  it("shows bounded config recovery instead of a historical archive fallback", () => {
+    for (const pendingApply of [makePendingDowngrade(), makePendingDowngrade({ reuseConsent: true }), makePendingDowngrade({ inventory: makeInventory([]) }), { ...makePendingDowngrade(), reuseConsentReset: true }]) {
+      const tree = renderView({ channelInfo: makeChannelInfo(), pendingApply });
+      expect(treeText(tree)).toContain("Configuration checkpoint; database data not backed up");
+      expect(treeText(tree)).toContain("16 MiB");
+      expect(findConsentToggle(tree)).toBeUndefined();
+      expect(treeText(tree)).not.toContain(kBackupReuseConsentLabel);
+    }
   });
 
-  it("reflects a checked consent and stays disabled with the reason when nothing is eligible", () => {
-    const checked = renderView({
-      channelInfo: makeChannelInfo(),
-      pendingApply: makePendingDowngrade({ reuseConsent: true }),
-    });
-    expect(findConsentToggle(checked).props.checked).toBe(true);
-
-    const none = renderView({
-      channelInfo: makeChannelInfo(),
-      pendingApply: makePendingDowngrade({ inventory: makeInventory([]) }),
-    });
-    const toggle = findConsentToggle(none);
-    expect(toggle.props.disabled).toBe(true);
-    expect(toggle.props.checked).toBe(false);
-    expect(treeText(none)).toContain("No eligible backup to reuse");
-
-    // Eligible but without a recorded digest: disabled, honest reason.
-    const noDigest = renderView({
-      channelInfo: makeChannelInfo(),
-      pendingApply: makePendingDowngrade({
-        inventory: makeInventory([makeEntry({ sha256: null })]),
-      }),
-    });
-    expect(findConsentToggle(noDigest).props.disabled).toBe(true);
-    expect(treeText(noDigest)).toContain("has no recorded digest");
+  it("does not expose archive reuse even for checked or empty legacy inventory", () => {
+    for (const pendingApply of [makePendingDowngrade(), makePendingDowngrade({ reuseConsent: true }), makePendingDowngrade({ inventory: makeInventory([]) }), { ...makePendingDowngrade(), reuseConsentReset: true }]) {
+      const tree = renderView({ channelInfo: makeChannelInfo(), pendingApply });
+      expect(treeText(tree)).toContain("Configuration checkpoint; database data not backed up");
+      expect(treeText(tree)).toContain("16 MiB");
+      expect(findConsentToggle(tree)).toBeUndefined();
+      expect(treeText(tree)).not.toContain(kBackupReuseConsentLabel);
+    }
   });
 
-  it("X6: a revoked consent renders the one-line 'newest backup changed' notice, unchecked; absent otherwise", () => {
-    const revoked = renderView({
-      channelInfo: makeChannelInfo(),
-      pendingApply: { ...makePendingDowngrade(), reuseConsentReset: true },
-    });
-    expect(treeText(revoked)).toContain(kBackupReuseCandidateChangedNotice);
-    expect(kBackupReuseCandidateChangedNotice).toBe(
-      "The newest backup changed — re-check to proceed with it.",
-    );
-    expect(findConsentToggle(revoked).props.checked).toBe(false);
-
-    const plain = renderView({
-      channelInfo: makeChannelInfo(),
-      pendingApply: makePendingDowngrade({ reuseConsent: true }),
-    });
-    expect(treeText(plain)).not.toContain(kBackupReuseCandidateChangedNotice);
+  it("does not revive retired archive consent from stale dialog state", () => {
+    for (const pendingApply of [makePendingDowngrade(), makePendingDowngrade({ reuseConsent: true }), makePendingDowngrade({ inventory: makeInventory([]) }), { ...makePendingDowngrade(), reuseConsentReset: true }]) {
+      const tree = renderView({ channelInfo: makeChannelInfo(), pendingApply });
+      expect(treeText(tree)).toContain("Configuration checkpoint; database data not backed up");
+      expect(treeText(tree)).toContain("16 MiB");
+      expect(findConsentToggle(tree)).toBeUndefined();
+      expect(treeText(tree)).not.toContain(kBackupReuseConsentLabel);
+    }
   });
 
   it("routine same-channel upgrades carry no consent line at all", () => {
@@ -436,14 +391,14 @@ describe("frontend/upgrade-tab 409 backup_required_for_migration → no-backup c
     const text = treeText(tree).replace(/\s+/g, " ");
     expect(findActionButtonByLabel(tree, kNoBackupConsentCtaLabel)).toBeTruthy();
     expect(text).toContain(
-      "No verified backup could be taken — continuing may leave no safe rollback path.",
+      "Database data will not be backed up. Continuing is forward-only and may leave no safe rollback path.",
     );
-    expect(text).toContain("Continue without a backup?");
+    expect(text).toContain("Upgrade without database snapshot?");
     expect(text).toContain(kMigrationError.message);
-    expect(text).toContain("there is no verified backup from this attempt to restore");
+    expect(text).toContain("this attempt has no database snapshot to restore");
     // The consent copy the plan pins.
     expect(kNoBackupConsentLabel).toBe(
-      "I understand: no verified backup exists; changes may leave no safe rollback path",
+      "I understand: database data is not backed up; this is forward-only and may leave no safe rollback path",
     );
     const toggle = findNoBackupToggle(tree);
     expect(toggle).toBeTruthy();
@@ -517,7 +472,7 @@ describe("frontend/upgrade-tab 409 backup_required_for_migration → no-backup c
       noBackupConsentOffer: makeNoBackupOffer(),
     });
     expect(findActionButtonByLabel(tree, kNoBackupConsentCtaLabel)).toBeTruthy();
-    expect(treeText(tree)).toContain("continuing may leave no safe rollback path");
+    expect(treeText(tree)).toContain("may leave no safe rollback path");
   });
 
   it("the apply confirm's hard-gate copy comes from the SHARED server predicate (#79 (a)): beta→stable and a same-channel prerelease→base both carry the backup hard gate; stable→stable base→base carries neither gate nor consent line", () => {
@@ -542,7 +497,7 @@ describe("frontend/upgrade-tab 409 backup_required_for_migration → no-backup c
     expect(betaToStable.isBreaking).toBe(true);
     expect(betaToStable.hardGate).toBe(true);
     expect(betaToStable.lines).toContain(kBackupHardGateNote);
-    expect(betaToStable.backupReuse).toEqual(expect.objectContaining({ available: true }));
+    expect(betaToStable.backupReuse).toBeNull();
     // prerelease → base on the beta channel: the version arm alone.
     const betaBase = buildApplyConfirmModel({
       payload: { channel: "beta", version: "2026.9.2" },
@@ -1074,51 +1029,198 @@ describe("frontend/upgrade-tab hook — consent + reuse retry + fence fields", (
       isDowngrade: true,
     });
 
-  it("consent defaults OFF on every open, toggles locally, and rides the apply body as {sha256} only", async () => {
-    // The inventory is a cache-backed read; seed the cache like a warm mount.
-    setCached(kBackupsCacheKey, makeInventory());
+  const choiceError = () => Object.assign(new Error("Database migration required"), {
+    code: "recovery_choice_required", operationId: "choice-run", backupRiskEligible: true,
+    databaseCount: 3, databaseBytes: 8 * 1024 ** 3, preflight: { migrationRequired: true, state: { from: 12, to: 15 } },
+  });
+  const requestChoice = async (error = choiceError()) => {
     let state = await hydrate();
-    expect(state.backupsInventory).toEqual(makeInventory());
+    api.applyOpenclawVersion.mockRejectedValueOnce(error);
+    state.onRequestApply({ payload: kSoftTarget, label: "2026.7.2", intent: "update", expectLatest: true });
+    state = renderHook({});
+    await state.onConfirmApply();
+    await renderHook({}).backupPreflight.confirm();
+    return renderHook({});
+  };
 
+  it("offers three explicit migration choices without sending a default risk decision", async () => {
+    const state = await requestChoice();
+    expect(api.applyOpenclawVersion).toHaveBeenCalledExactlyOnceWith({ ...kSoftTarget, intent: "update", expectLatest: true, recoveryMode: "config_only" });
+    expect(state.recoveryChoice).toMatchObject({ operationId: "choice-run", databaseBytes: 8 * 1024 ** 3 });
+    expect(state.noBackupConsentPrompt).toBe(false);
+    expect(state.noBackupConsentChecked).toBe(false);
+    expect(state.actionsDisabled).toBe(true);
+    const tree = renderView(state);
+    for (const label of ["Create database snapshot and upgrade", "Upgrade without database snapshot", "Cancel"]) expect(findActionButtonByLabel(tree, label)).toBeTruthy();
+    expect(treeText(tree)).toContain("The gateway stays up while you choose");
+    expect(treeText(tree)).toContain("8.00 GB");
+    expect(treeText(tree)).not.toContain("Full backup");
+  });
+
+  it("snapshot choice retries the exact target, intent and latest claim and never silently proceeds after failure", async () => {
+    let state = await requestChoice();
+    api.applyOpenclawVersion.mockRejectedValueOnce(Object.assign(new Error("Snapshot disk full"), { code: "backup_failed" }));
+    await state.onChooseDatabaseSnapshot();
+    expect(api.applyOpenclawVersion).toHaveBeenLastCalledWith({ ...kSoftTarget, intent: "update", expectLatest: true, recoveryMode: "database_set" });
+    state = renderHook({});
+    expect(state.recoveryChoice).toBeNull();
+    expect(state.applyError.message).toBe("Snapshot disk full");
+    expect(state.noBackupConsentOffer).toBeNull();
+    expect(api.applyOpenclawVersion).toHaveBeenCalledTimes(2);
+    expect(api.requestOpenclawBackupRiskConsent).not.toHaveBeenCalled();
+    api.applyOpenclawVersion.mockResolvedValueOnce({ ok: true, noop: true });
+    await state.onRetryBackup();
+    expect(api.applyOpenclawVersion).toHaveBeenLastCalledWith({ ...kSoftTarget, intent: "update", expectLatest: true, recoveryMode: "database_set" });
+  });
+
+  it("forward-only choice requires the unchecked confirmation and preserves intent and latest claim with its single-use token", async () => {
+    let state = await requestChoice();
+    state.onRequestNoBackupConsent();
+    state = renderHook({});
+    await state.onConfirmNoBackupConsent();
+    expect(api.requestOpenclawBackupRiskConsent).not.toHaveBeenCalled();
+    state.onToggleNoBackupConsent(true);
+    state = renderHook({});
+    api.requestOpenclawBackupRiskConsent.mockResolvedValueOnce({ operationId: "choice-run", target: kSoftTarget, confirmNoBackupToken: "a".repeat(43) });
+    api.applyOpenclawVersion.mockResolvedValueOnce({ ok: true, noop: true });
+    await state.onConfirmNoBackupConsent();
+    expect(api.applyOpenclawVersion).toHaveBeenLastCalledWith({ ...kSoftTarget, intent: "update", expectLatest: true, recoveryMode: "config_only", confirmNoBackup: true, confirmNoBackupToken: "a".repeat(43) });
+    expect(JSON.stringify(renderHook({}).operation)).not.toContain("a".repeat(43));
+  });
+
+  it("cancelling the migration choice starts no snapshot or apply", async () => {
+    const state = await requestChoice();
+    state.onCancelRecoveryChoice();
+    expect(renderHook({}).recoveryChoice).toBeNull();
+    expect(renderHook({}).actionsDisabled).toBe(false);
+    expect(api.applyOpenclawVersion).toHaveBeenCalledTimes(1);
+    expect(api.requestOpenclawBackupRiskConsent).not.toHaveBeenCalled();
+    expect(api.cancelOpenclawRecoveryReview).not.toHaveBeenCalled();
+  });
+
+  it("held review cancellation waits for server success and blocks other choices while pending", async () => {
+    let state = await requestChoice(Object.assign(choiceError(), { gatewayHeld: true }));
+    let resolve;
+    api.cancelOpenclawRecoveryReview.mockReturnValueOnce(new Promise((done) => { resolve = done; }));
+    const pending = state.onCancelRecoveryChoice();
+    state = renderHook({});
+    expect(state.cancellingRecoveryChoice).toBe(true);
+    expect(state.recoveryChoice).toMatchObject({ operationId: "choice-run", gatewayHeld: true, requiresServerCancel: true });
+    expect(api.cancelOpenclawRecoveryReview).toHaveBeenCalledExactlyOnceWith("choice-run");
+    await state.onChooseDatabaseSnapshot();
+    await state.onCancelRecoveryChoice();
+    expect(api.applyOpenclawVersion).toHaveBeenCalledOnce();
+    expect(api.cancelOpenclawRecoveryReview).toHaveBeenCalledOnce();
+    resolve({ ok: true, operationId: "choice-run", resumed: true });
+    await pending;
+    state = renderHook({});
+    expect(state.recoveryChoice).toBeNull();
+    expect(state.cancellingRecoveryChoice).toBe(false);
+  });
+
+  it("failed cancellation leaves the gateway-held review actionable and retries only cancellation", async () => {
+    let state = await requestChoice(Object.assign(choiceError(), { gatewayHeld: true }));
+    api.cancelOpenclawRecoveryReview.mockRejectedValueOnce(Object.assign(new Error("Prior gateway could not resume"), { code: "gateway_relaunch_failed", hint: "The gateway remains held. Retry cancellation." }));
+    await state.onCancelRecoveryChoice();
+    state = renderHook({});
+    expect(state.recoveryChoice.requiresServerCancel).toBe(true);
+    expect(state.recoveryCancelError).toMatchObject({ code: "gateway_relaunch_failed" });
+    const tree = renderView(state);
+    expect(treeText(tree)).toContain("The gateway remains held");
+    expect(findActionButtonByLabel(tree, "Retry cancellation")).toBeTruthy();
+    api.cancelOpenclawRecoveryReview.mockResolvedValueOnce({ ok: true, operationId: "choice-run" });
+    await state.onCancelRecoveryChoice();
+    expect(renderHook({}).recoveryChoice).toBeNull();
+    expect(api.applyOpenclawVersion).toHaveBeenCalledOnce();
+  });
+
+  it("reload resumes a durable stopped review from its matching run rather than the installed target", async () => {
+    const run = { operationId: "choice-run", state: "failed", target: kSoftTarget, intent: "update", expectLatest: true, result: { ...choiceError(), gatewayHeld: true } };
+    api.fetchOpenclawChannel.mockResolvedValue(makeChannelInfo({ gatewayHold: { reason: "recovery_review", operationId: "choice-run" }, lastUpdateRun: { operationId: "other", target: kDowngradeTarget } }));
+    api.fetchOpenclawRuns.mockResolvedValue({ runs: [run] });
+    await hydrate();
+    harness.findEffect("restoredRecoveryReview.current")();
+    const state = renderHook({});
+    expect(state.recoveryChoice).toMatchObject({ operationId: "choice-run", requiresServerCancel: true, request: { payload: kSoftTarget, intent: "update", expectLatest: true } });
+    expect(state.noBackupConsentOffer.target).toEqual(kSoftTarget);
+    expect(state.noBackupConsentPrompt).toBe(false);
+    expect(api.applyOpenclawVersion).not.toHaveBeenCalled();
+    api.cancelOpenclawRecoveryReview.mockResolvedValueOnce({ ok: true, operationId: "choice-run" });
+    await state.onCancelRecoveryChoice();
+    expect(api.cancelOpenclawRecoveryReview).toHaveBeenCalledExactlyOnceWith("choice-run");
+    renderHook({});
+    harness.findEffect("restoredRecoveryReview.current")();
+    expect(renderHook({}).recoveryChoice).toBeNull();
+  });
+
+  it("unknown compatibility never offers a generic waiver even with a stray eligibility flag", async () => {
+    let state = await hydrate();
+    api.applyOpenclawVersion.mockRejectedValueOnce(Object.assign(new Error("Target schema is unknown"), { code: "db_preflight_failed", backupRiskEligible: true, operationId: "unknown", hint: "Choose a supported version" }));
+    state.onRequestApply({ payload: kSoftTarget, label: "2026.7.2" });
+    state = renderHook({});
+    await state.onConfirmApply();
+    await renderHook({}).backupPreflight.confirm();
+    state = renderHook({});
+    expect(state.recoveryChoice).toBeNull();
+    expect(state.noBackupConsentOffer).toBeNull();
+    expect(state.applyError.hint).toBe("Choose a supported version");
+  });
+
+  it("streamed migration choices preserve the original exact request", async () => {
+    let state = await hydrate();
+    api.applyOpenclawVersion.mockResolvedValueOnce({ ok: true, operationId: "choice-run", events: "/events" });
+    state.onRequestApply({ payload: kSoftTarget, label: "2026.7.2", intent: "update", expectLatest: true });
+    state = renderHook({});
+    await state.onConfirmApply();
+    await renderHook({}).backupPreflight.confirm();
+    api.subscribeOpenclawApplyEvents.mock.calls.at(-1)[0].onMessage({ event: "error", data: { ...choiceError(), error: "Database migration required" } });
+    state = renderHook({});
+    expect(state.recoveryChoice.request).toMatchObject({ payload: kSoftTarget, intent: "update", expectLatest: true });
+    expect(state.noBackupConsentOffer).toMatchObject({ operationId: "choice-run", intent: "update", expectLatest: true });
+  });
+
+  it("resumed migration choices retain the persisted exact intent and latest claim", async () => {
+    const run = { operationId: "choice-run", state: "running", target: kSoftTarget, intent: "update", expectLatest: true, startedAt: kNow - 60000, steps: [] };
+    api.fetchOpenclawRuns.mockResolvedValue({ runs: [run] });
+    await hydrate();
+    harness.findEffect("resumeLedgerOperation")();
+    renderHook({});
+    api.fetchOpenclawRun.mockResolvedValue({ run: { ...run, state: "failed", finishedAt: kNow, ok: false, result: { ...choiceError(), message: "Migration required" } } });
+    vi.useFakeTimers();
+    vi.setSystemTime(kNow);
+    let stopPoll;
+    try {
+      stopPoll = harness.findEffect("read.refresh().catch")();
+      await vi.advanceTimersByTimeAsync(0);
+    } finally {
+      stopPoll?.();
+      vi.useRealTimers();
+    }
+    await flushAsync();
+    renderHook({});
+    harness.findEffect("terminalKey")();
+    await flushAsync();
+    const state = renderHook({});
+    expect(state.recoveryChoice.request).toMatchObject({ payload: kSoftTarget, intent: "update", expectLatest: true });
+    api.applyOpenclawVersion.mockResolvedValueOnce({ ok: true, noop: true });
+    await state.onChooseDatabaseSnapshot();
+    expect(api.applyOpenclawVersion).toHaveBeenCalledWith({ ...kSoftTarget, intent: "update", expectLatest: true, recoveryMode: "database_set" });
+  });
+
+  it("fresh configuration checkpoints never inherit legacy archive consent", async () => {
+    setCached(kBackupsCacheKey, makeInventory());
+
+    let state = await hydrate();
     requestDowngrade(state);
     state = renderHook({});
-    expect(state.pendingApply.reuseConsent).toBe(false);
-    expect(state.pendingApply.confirm.backupReuse).toEqual(
-      expect.objectContaining({ available: true, sha256: kSha }),
-    );
-
-    state.onToggleBackupReuseConsent(true);
+    expect(state.pendingApply.confirm.backupReuse).toBeNull();
+    expect(state.onToggleBackupReuseConsent).toBeUndefined();
     state = renderHook({});
-    expect(state.pendingApply.reuseConsent).toBe(true);
-
-    // Cancel + reopen: never remembered.
-    state.onCancelApply();
-    state = renderHook({});
-    expect(state.pendingApply).toBeNull();
-    requestDowngrade(state);
-    state = renderHook({});
-    expect(state.pendingApply.reuseConsent).toBe(false);
-
-    state.onToggleBackupReuseConsent(true);
-    state = renderHook({});
-    api.applyOpenclawVersion.mockResolvedValue({
-      ok: true,
-      operationId: "op-1",
-      events: "/api/operations/op-1/events",
-    });
-    await state.onConfirmApply(); await renderHook({}).backupPreflight.confirm();
-    expect(api.applyOpenclawVersion).toHaveBeenCalledWith({
-      channel: "stable",
-      version: "2026.7.0",
-      intent: "downgrade",
-      allowBackupReuse: { sha256: kSha },
-    });
-    const sentBody = api.applyOpenclawVersion.mock.calls[0][0];
-    expect(JSON.stringify(sentBody)).not.toContain("/root/backups");
-    state = renderHook({});
-    // The recorded operation target stays the BARE payload — a later
-    // "Re-stage version" never inherits this attempt's consent.
-    expect(state.operation.target).toEqual(kDowngradeTarget);
+    api.applyOpenclawVersion.mockResolvedValue({ ok: true, noop: true });
+    await state.onConfirmApply();
+    await renderHook({}).backupPreflight.confirm();
+    expect(api.applyOpenclawVersion).toHaveBeenCalledWith({ ...kDowngradeTarget, intent: "downgrade", recoveryMode: "config_only" });
+    expect(api.applyOpenclawVersion.mock.calls.at(-1)[0]).not.toHaveProperty("allowBackupReuse");
   });
 
   it("an unchecked consent (or no eligible archive) sends no allowBackupReuse at all", async () => {
@@ -1128,7 +1230,7 @@ describe("frontend/upgrade-tab hook — consent + reuse retry + fence fields", (
     state = renderHook({});
     api.applyOpenclawVersion.mockResolvedValue({ ok: true, operationId: "op-1", events: "/e" });
     await state.onConfirmApply(); await renderHook({}).backupPreflight.confirm();
-    expect(api.applyOpenclawVersion).toHaveBeenCalledWith({ ...kDowngradeTarget, intent: "downgrade" });
+    expect(api.applyOpenclawVersion).toHaveBeenCalledWith({ recoveryMode: "config_only", ...kDowngradeTarget, intent: "downgrade" });
     expect("allowBackupReuse" in api.applyOpenclawVersion.mock.calls[0][0]).toBe(false);
 
     // Checked but nothing eligible: still no consent field.
@@ -1139,93 +1241,26 @@ describe("frontend/upgrade-tab hook — consent + reuse retry + fence fields", (
     state = await hydrate();
     requestDowngrade(state);
     state = renderHook({});
-    state.onToggleBackupReuseConsent(true);
+    expect(state.onToggleBackupReuseConsent).toBeUndefined();
     state = renderHook({});
     await state.onConfirmApply(); await renderHook({}).backupPreflight.confirm();
-    expect(api.applyOpenclawVersion).toHaveBeenCalledWith({ ...kDowngradeTarget, intent: "downgrade" });
+    expect(api.applyOpenclawVersion).toHaveBeenCalledWith({ recoveryMode: "config_only", ...kDowngradeTarget, intent: "downgrade" });
   });
 
-  it("a quick 409 backup_failed with reusableBackup offers the retry; confirming resends with that sha256", async () => {
+  it("a legacy quick failure never offers retired archive reuse", async () => {
     let state = await hydrate();
-    api.applyOpenclawVersion.mockRejectedValueOnce(
-      Object.assign(new Error("Backup failed: state lease lost (after 3 attempts, 2 with the gateway paused)"), {
-        code: "backup_failed",
-        hint: "Newest surviving archive: …",
-        reusableBackup: kReusableBackup,
-      }),
-    );
+    api.applyOpenclawVersion.mockRejectedValueOnce(Object.assign(new Error("Legacy backup failed"), { code: "backup_failed", reusableBackup: kReusableBackup }));
     requestDowngrade(state);
     state = renderHook({});
-    await state.onConfirmApply(); await renderHook({}).backupPreflight.confirm();
-    state = renderHook({});
+    await state.onConfirmApply();
+    await renderHook({}).backupPreflight.confirm();
 
-    expect(state.operation).toBeNull();
-    expect(state.applyError).toEqual(
-      expect.objectContaining({ code: "backup_failed" }),
-    );
-    // The model keeps the ABSOLUTE timestamp; the age strings are derived at
-    // render time against the page clock (below), never frozen at the 409.
-    expect(state.backupReuseOffer).toEqual(
-      expect.objectContaining({
-        sha256: kSha,
-        target: kDowngradeTarget,
-        label: "2026.7.0",
-        at: kReusableBackup.at,
-      }),
-    );
-    const atArrival = renderView({
-      channelInfo: state.channelInfo,
-      applyError: state.applyError,
-      backupReuseOffer: state.backupReuseOffer,
-      nowMs: kNow,
-    });
-    expect(findActionButtonByLabel(atArrival, "Retry using the backup taken 2 hours ago")).toBeTruthy();
-    // An hour later, with the failed card still on screen, the disclosed loss
-    // window has grown with the clock — on the CTA, the caption and the dialog.
-    const later = renderView({
-      channelInfo: state.channelInfo,
-      applyError: state.applyError,
-      backupReuseOffer: state.backupReuseOffer,
-      backupReuseRetryPrompt: true,
-      nowMs: kNow + 3_600_000,
-    });
-    expect(findActionButtonByLabel(later, "Retry using the backup taken 3 hours ago")).toBeTruthy();
-    expect(findActionButtonByLabel(later, "Retry using the backup taken 2 hours ago")).toBeFalsy();
-    const laterText = treeText(later).replace(/\s+/g, " ");
-    expect(laterText).toContain(
-      "A fresh backup could not be made. That backup was taken 3 hours ago — state written since would not be in it.",
-    );
-    expect(laterText).not.toContain("taken 2 hours ago");
-    expect(state.backupReuseRetryPrompt).toBe(false);
-    // The inventory is re-read once the apply settles.
-    expect(api.fetchOpenclawBackups).toHaveBeenCalled();
-
-    // The CTA only opens the second-stage dialog.
-    state.onRequestBackupReuseRetry();
     state = renderHook({});
-    expect(state.backupReuseRetryPrompt).toBe(true);
+    expect(state.backupReuseOffer).toBeUndefined();
+    expect(state.onRequestBackupReuseRetry).toBeUndefined();
+    expect(findActionButtonByLabel(renderView(state), "Retry using the backup taken 2 hours ago")).toBeUndefined();
+    expect(state.applyError.message).toBe("Legacy backup failed"); state.onDismissApplyError(); expect(renderHook({}).applyError).toBeNull();
     expect(api.applyOpenclawVersion).toHaveBeenCalledTimes(1);
-
-    api.applyOpenclawVersion.mockResolvedValueOnce({
-      ok: true,
-      operationId: "op-2",
-      events: "/api/operations/op-2/events",
-    });
-    await state.onConfirmBackupReuseRetry();
-    expect(api.applyOpenclawVersion).toHaveBeenCalledTimes(2);
-    expect(api.applyOpenclawVersion).toHaveBeenLastCalledWith({
-      channel: "stable",
-      version: "2026.7.0",
-      intent: "downgrade",
-      allowBackupReuse: { sha256: kSha },
-    });
-    state = renderHook({});
-    expect(state.backupReuseRetryPrompt).toBe(false);
-    expect(state.backupReuseOffer).toBeNull();
-    expect(state.applyError).toBeNull();
-    expect(state.operation).toEqual(
-      expect.objectContaining({ phase: "running", operationId: "op-2", target: kDowngradeTarget }),
-    );
   });
 
   it("a quick 409 backup_required_for_migration offers the no-backup consent; the confirm is inert until checked, then resends the bare target with confirmNoBackup: true only (#79 (b))", async () => {
@@ -1246,7 +1281,7 @@ describe("frontend/upgrade-tab hook — consent + reuse retry + fence fields", (
       expect.objectContaining({ code: "backup_required_for_migration", hint: kMigrationError.hint }),
     );
     // The overridable code offers the no-backup consent, never the reuse offer.
-    expect(state.backupReuseOffer).toBeNull();
+    expect(state.backupReuseOffer).toBeUndefined();
     expect(state.noBackupConsentOffer).toEqual(
       expect.objectContaining({
         code: "backup_required_for_migration",
@@ -1284,7 +1319,7 @@ describe("frontend/upgrade-tab hook — consent + reuse retry + fence fields", (
     await state.onConfirmNoBackupConsent();
     expect(api.requestOpenclawBackupRiskConsent).toHaveBeenCalledWith(kMigrationError.operationId);
     expect(api.applyOpenclawVersion).toHaveBeenCalledTimes(2);
-    expect(api.applyOpenclawVersion).toHaveBeenLastCalledWith({
+    expect(api.applyOpenclawVersion).toHaveBeenLastCalledWith({ recoveryMode: "config_only",
       channel: "stable",
       version: "2026.7.2",
       intent: "update",
@@ -1374,35 +1409,23 @@ describe("frontend/upgrade-tab hook — consent + reuse retry + fence fields", (
     state = renderHook({});
     await state.onConfirmApply(); await renderHook({}).backupPreflight.confirm();
     state = renderHook({});
-    expect(state.backupReuseOffer).toBeTruthy();
+    expect(state.backupReuseOffer).toBeUndefined();
     expect(state.noBackupConsentOffer).toBeNull();
   });
 
-  it("cancelling the second-stage dialog or dismissing the error clears without calling the API", async () => {
+  it("dismissing a legacy quick failure clears it without retrying retired archive reuse", async () => {
     let state = await hydrate();
-    api.applyOpenclawVersion.mockRejectedValueOnce(
-      Object.assign(new Error("Backup failed"), {
-        code: "backup_failed",
-        reusableBackup: kReusableBackup,
-      }),
-    );
+    api.applyOpenclawVersion.mockRejectedValueOnce(Object.assign(new Error("Legacy backup failed"), { code: "backup_failed", reusableBackup: kReusableBackup }));
     requestDowngrade(state);
     state = renderHook({});
-    await state.onConfirmApply(); await renderHook({}).backupPreflight.confirm();
-    state = renderHook({});
-    state.onRequestBackupReuseRetry();
-    state = renderHook({});
-    expect(state.backupReuseRetryPrompt).toBe(true);
+    await state.onConfirmApply();
+    await renderHook({}).backupPreflight.confirm();
 
-    state.onCancelBackupReuseRetry();
     state = renderHook({});
-    expect(state.backupReuseRetryPrompt).toBe(false);
-    expect(state.backupReuseOffer).not.toBeNull();
-
-    state.onDismissApplyError();
-    state = renderHook({});
-    expect(state.applyError).toBeNull();
-    expect(state.backupReuseOffer).toBeNull();
+    expect(state.backupReuseOffer).toBeUndefined();
+    expect(state.onRequestBackupReuseRetry).toBeUndefined();
+    expect(findActionButtonByLabel(renderView(state), "Retry using the backup taken 2 hours ago")).toBeUndefined();
+    expect(state.applyError.message).toBe("Legacy backup failed"); state.onDismissApplyError(); expect(renderHook({}).applyError).toBeNull();
     expect(api.applyOpenclawVersion).toHaveBeenCalledTimes(1);
   });
 
@@ -1458,233 +1481,100 @@ describe("frontend/upgrade-tab hook — consent + reuse retry + fence fields", (
     expect(api.fetchOpenclawBackups).toHaveBeenLastCalledWith({ force: true });
   });
 
-  it("R5: an open confirm re-binds its consent candidate when the forced re-read lands", async () => {
-    // Warm cache from BEFORE the failed apply: an older archive is "newest".
-    const oldSha = "b".repeat(64);
-    const stale = makeInventory([
-      makeEntry({
-        name: "openclaw-backup-2026-09-02T07-00-00.tar.gz",
-        at: kNow - 5 * 3_600_000,
-        sha256: oldSha,
-      }),
-    ]);
-    setCached(kBackupsCacheKey, stale);
-    let state = await hydrate();
-    requestDowngrade(state);
-    state = renderHook({});
-    expect(state.pendingApply.confirm.backupReuse).toEqual(
-      expect.objectContaining({ available: true, sha256: oldSha }),
-    );
-
-    // The forced re-read resolves with the real newest archive.
-    api.fetchOpenclawBackups.mockResolvedValue(makeInventory());
-    await state.onRetryBackups();
-    expect(api.fetchOpenclawBackups).toHaveBeenLastCalledWith({ force: true });
-    state = renderHook({});
-    expect(state.backupsInventory).toEqual(makeInventory());
-    // The rebind effect is the LAST declared effect in the hook.
-    harness.effects[harness.effects.length - 1]();
-    state = renderHook({});
-    expect(state.pendingApply.confirm.backupReuse).toEqual(
-      expect.objectContaining({ available: true, sha256: kSha }),
-    );
-
-    // Same inventory again: the pending object is left untouched (no churn).
-    const before = state.pendingApply;
-    harness.effects[harness.effects.length - 1]();
-    state = renderHook({});
-    expect(state.pendingApply).toBe(before);
-
-    state.onToggleBackupReuseConsent(true);
-    state = renderHook({});
-    api.applyOpenclawVersion.mockResolvedValueOnce({ ok: true, operationId: "op-1", events: "/e" });
-    await state.onConfirmApply(); await renderHook({}).backupPreflight.confirm();
-    expect(api.applyOpenclawVersion).toHaveBeenLastCalledWith({
-      ...kDowngradeTarget,
-      intent: "downgrade",
-      allowBackupReuse: { sha256: kSha },
-    });
-  });
-
-  it("X6: a CHECKED consent is revoked (with the notice) when the re-read changes the candidate's digest — the new digest is never sent", async () => {
-    const oldSha = "b".repeat(64);
-    setCached(
-      kBackupsCacheKey,
-      makeInventory([
-        makeEntry({
-          name: "openclaw-backup-2026-09-02T07-00-00.tar.gz",
-          at: kNow - 5 * 3_600_000,
-          sha256: oldSha,
-        }),
-      ]),
-    );
-    let state = await hydrate();
-    requestDowngrade(state);
-    state = renderHook({});
-    state.onToggleBackupReuseConsent(true);
-    state = renderHook({});
-    expect(state.pendingApply.reuseConsent).toBe(true);
-    expect(state.pendingApply.confirm.backupReuse.sha256).toBe(oldSha);
-
-    // The forced re-read lands with a DIFFERENT newest archive while the
-    // operator's checkmark is still on screen.
-    api.fetchOpenclawBackups.mockResolvedValue(makeInventory());
-    await state.onRetryBackups();
-    state = renderHook({});
-    harness.effects[harness.effects.length - 1]();
-    state = renderHook({});
-    expect(state.pendingApply.confirm.backupReuse.sha256).toBe(kSha);
-    expect(state.pendingApply.reuseConsent).toBe(false);
-    expect(state.pendingApply.reuseConsentReset).toBe(true);
-    const tree = renderView({
-      channelInfo: state.channelInfo,
-      pendingApply: state.pendingApply,
-    });
-    expect(treeText(tree)).toContain(kBackupReuseCandidateChangedNotice);
-    expect(findConsentToggle(tree).props.checked).toBe(false);
-
-    // Confirming now sends NO consent — the operator never authorized kSha.
-    api.applyOpenclawVersion.mockResolvedValueOnce({ ok: true, operationId: "op-1", events: "/e" });
-    await state.onConfirmApply(); await renderHook({}).backupPreflight.confirm();
-    expect(api.applyOpenclawVersion).toHaveBeenLastCalledWith({ ...kDowngradeTarget, intent: "downgrade" });
-    expect("allowBackupReuse" in api.applyOpenclawVersion.mock.calls[0][0]).toBe(false);
-  });
-
-  it("X6: re-checking after a revocation retires the notice and binds to the archive now shown", async () => {
-    const oldSha = "b".repeat(64);
-    setCached(kBackupsCacheKey, makeInventory([makeEntry({ sha256: oldSha })]));
-    let state = await hydrate();
-    requestDowngrade(state);
-    state = renderHook({});
-    state.onToggleBackupReuseConsent(true);
-    state = renderHook({});
-    api.fetchOpenclawBackups.mockResolvedValue(makeInventory());
-    await state.onRetryBackups();
-    state = renderHook({});
-    harness.effects[harness.effects.length - 1]();
-    state = renderHook({});
-    expect(state.pendingApply.reuseConsentReset).toBe(true);
-
-    state.onToggleBackupReuseConsent(true);
-    state = renderHook({});
-    expect(state.pendingApply.reuseConsent).toBe(true);
-    expect(state.pendingApply.reuseConsentReset).toBe(false);
-    api.applyOpenclawVersion.mockResolvedValueOnce({ ok: true, operationId: "op-1", events: "/e" });
-    await state.onConfirmApply(); await renderHook({}).backupPreflight.confirm();
-    expect(api.applyOpenclawVersion).toHaveBeenLastCalledWith({
-      ...kDowngradeTarget,
-      intent: "downgrade",
-      allowBackupReuse: { sha256: kSha },
-    });
-  });
-
-  it("X6: a CHECKED consent is revoked when the candidate DISAPPEARS; kept when the digest is unchanged", async () => {
+  it("a refreshed historical inventory does not add archive consent to the open checkpoint confirm", async () => {
     setCached(kBackupsCacheKey, makeInventory());
+
     let state = await hydrate();
     requestDowngrade(state);
     state = renderHook({});
-    state.onToggleBackupReuseConsent(true);
+    expect(state.pendingApply.confirm.backupReuse).toBeNull();
+    expect(state.onToggleBackupReuseConsent).toBeUndefined();
     state = renderHook({});
-
-    // Same digest, different inventory object (metadata churn): the consent
-    // still names the archive the operator saw — kept, no notice.
-    api.fetchOpenclawBackups.mockResolvedValue(
-      makeInventory([makeEntry({ sizeBytes: 99 })], { truncated: true }),
-    );
-    await state.onRetryBackups();
-    state = renderHook({});
-    harness.effects[harness.effects.length - 1]();
-    state = renderHook({});
-    expect(state.pendingApply.confirm.backupReuse.sha256).toBe(kSha);
-    expect(state.pendingApply.reuseConsent).toBe(true);
-    expect(state.pendingApply.reuseConsentReset).not.toBe(true);
-
-    // The archive is gone from the re-read: nothing to bind to → revoked.
-    api.fetchOpenclawBackups.mockResolvedValue(makeInventory([]));
-    await state.onRetryBackups();
-    state = renderHook({});
-    harness.effects[harness.effects.length - 1]();
-    state = renderHook({});
-    expect(state.pendingApply.confirm.backupReuse).toEqual(
-      expect.objectContaining({ available: false, sha256: null, reason: kBackupReuseNoneReason }),
-    );
-    expect(state.pendingApply.reuseConsent).toBe(false);
-    expect(state.pendingApply.reuseConsentReset).toBe(true);
-    api.applyOpenclawVersion.mockResolvedValueOnce({ ok: true, operationId: "op-1", events: "/e" });
-    await state.onConfirmApply(); await renderHook({}).backupPreflight.confirm();
-    expect(api.applyOpenclawVersion).toHaveBeenLastCalledWith({ ...kDowngradeTarget, intent: "downgrade" });
+    api.applyOpenclawVersion.mockResolvedValue({ ok: true, noop: true });
+    await state.onConfirmApply();
+    await renderHook({}).backupPreflight.confirm();
+    expect(api.applyOpenclawVersion).toHaveBeenCalledWith({ ...kDowngradeTarget, intent: "downgrade", recoveryMode: "config_only" });
+    expect(api.applyOpenclawVersion.mock.calls.at(-1)[0]).not.toHaveProperty("allowBackupReuse");
   });
 
-  it("R7: a verified archive that predates the last apply is not offered — toggle disabled, no consent sent", async () => {
-    // The only archive (3 h old) was taken BEFORE the currently applied build
-    // activated (1 h ago): the server's reuse gate would refuse it.
-    api.fetchOpenclawChannel.mockResolvedValue(
-      makeChannelInfo({
-        applied: { channel: "stable", version: "2026.8.2", at: kNow - 3_600_000, acceptedAt: null },
-        appliedId: "2026.8.2",
-        isPin: false,
-      }),
-    );
+  it("stale checked archive consent is never sent when the historical digest changes", async () => {
+    setCached(kBackupsCacheKey, makeInventory([makeEntry({ sha256: "b".repeat(64) })]));
+
+    let state = await hydrate();
+    requestDowngrade(state);
+    state = renderHook({});
+    expect(state.pendingApply.confirm.backupReuse).toBeNull();
+    expect(state.onToggleBackupReuseConsent).toBeUndefined();
+    state = renderHook({});
+    api.applyOpenclawVersion.mockResolvedValue({ ok: true, noop: true });
+    await state.onConfirmApply();
+    await renderHook({}).backupPreflight.confirm();
+    expect(api.applyOpenclawVersion).toHaveBeenCalledWith({ ...kDowngradeTarget, intent: "downgrade", recoveryMode: "config_only" });
+    expect(api.applyOpenclawVersion.mock.calls.at(-1)[0]).not.toHaveProperty("allowBackupReuse");
+  });
+
+  it("toggling a retired archive consent callback cannot authorize reuse", async () => {
     setCached(kBackupsCacheKey, makeInventory());
+
     let state = await hydrate();
     requestDowngrade(state);
     state = renderHook({});
-    expect(state.pendingApply.confirm.backupReuse).toEqual(
-      expect.objectContaining({
-        available: false,
-        sha256: null,
-        reason: kBackupReuseStaleReason,
-      }),
-    );
-    const tree = renderView({
-      channelInfo: state.channelInfo,
-      pendingApply: state.pendingApply,
-    });
-    const toggle = findConsentToggle(tree);
-    expect(toggle.props.disabled).toBe(true);
-    expect(treeText(tree)).toContain(kBackupReuseStaleReason);
-
-    // Even a checked toggle (impossible in the UI, defended anyway) sends nothing.
-    state.onToggleBackupReuseConsent(true);
+    expect(state.pendingApply.confirm.backupReuse).toBeNull();
+    expect(state.onToggleBackupReuseConsent).toBeUndefined();
     state = renderHook({});
-    api.applyOpenclawVersion.mockResolvedValueOnce({ ok: true, operationId: "op-1", events: "/e" });
-    await state.onConfirmApply(); await renderHook({}).backupPreflight.confirm();
-    expect(api.applyOpenclawVersion).toHaveBeenCalledWith({ ...kDowngradeTarget, intent: "downgrade" });
-    expect("allowBackupReuse" in api.applyOpenclawVersion.mock.calls[0][0]).toBe(false);
+    api.applyOpenclawVersion.mockResolvedValue({ ok: true, noop: true });
+    await state.onConfirmApply();
+    await renderHook({}).backupPreflight.confirm();
+    expect(api.applyOpenclawVersion).toHaveBeenCalledWith({ ...kDowngradeTarget, intent: "downgrade", recoveryMode: "config_only" });
+    expect(api.applyOpenclawVersion.mock.calls.at(-1)[0]).not.toHaveProperty("allowBackupReuse");
   });
 
-  it("F2: the inventory's server-published reuse window fences an archive the channel payload alone would offer", async () => {
-    // channelInfo carries no apply/run/migration record (nothing to mirror),
-    // but the server's ledger saw an activation after this archive was taken.
-    const entry = makeEntry();
-    setCached(
-      kBackupsCacheKey,
-      makeInventory([entry], {
-        reuseWindowStartMs: Number(entry.at) + 60_000,
-        reuseMaxAgeMs: 24 * 3_600_000,
-      }),
-    );
+  it("a missing historical archive cannot become a fallback for the config checkpoint", async () => {
+    setCached(kBackupsCacheKey, makeInventory([]));
+
     let state = await hydrate();
     requestDowngrade(state);
     state = renderHook({});
-    expect(state.pendingApply.confirm.backupReuse).toEqual(
-      expect.objectContaining({ available: false, sha256: null, reason: kBackupReuseStaleReason }),
-    );
-    const tree = renderView({
-      channelInfo: state.channelInfo,
-      pendingApply: state.pendingApply,
-    });
-    expect(findConsentToggle(tree).props.disabled).toBe(true);
-    expect(treeText(tree)).toContain(kBackupReuseStaleReason);
+    expect(state.pendingApply.confirm.backupReuse).toBeNull();
+    expect(state.onToggleBackupReuseConsent).toBeUndefined();
+    state = renderHook({});
+    api.applyOpenclawVersion.mockResolvedValue({ ok: true, noop: true });
+    await state.onConfirmApply();
+    await renderHook({}).backupPreflight.confirm();
+    expect(api.applyOpenclawVersion).toHaveBeenCalledWith({ ...kDowngradeTarget, intent: "downgrade", recoveryMode: "config_only" });
+    expect(api.applyOpenclawVersion.mock.calls.at(-1)[0]).not.toHaveProperty("allowBackupReuse");
+  });
 
-    // Same inventory without the server window (old server) → offered.
-    harness.reset();
-    invalidateCache(kBackupsCacheKey);
-    setCached(kBackupsCacheKey, makeInventory([entry]));
-    state = await hydrate();
+  it("old historical archives do not alter checkpoint requests", async () => {
+    setCached(kBackupsCacheKey, makeInventory([makeEntry({ at: kNow - 48 * 3_600_000 })]));
+
+    let state = await hydrate();
     requestDowngrade(state);
     state = renderHook({});
-    expect(state.pendingApply.confirm.backupReuse.available).toBe(true);
+    expect(state.pendingApply.confirm.backupReuse).toBeNull();
+    expect(state.onToggleBackupReuseConsent).toBeUndefined();
+    state = renderHook({});
+    api.applyOpenclawVersion.mockResolvedValue({ ok: true, noop: true });
+    await state.onConfirmApply();
+    await renderHook({}).backupPreflight.confirm();
+    expect(api.applyOpenclawVersion).toHaveBeenCalledWith({ ...kDowngradeTarget, intent: "downgrade", recoveryMode: "config_only" });
+    expect(api.applyOpenclawVersion.mock.calls.at(-1)[0]).not.toHaveProperty("allowBackupReuse");
+  });
+
+  it("legacy reuse windows do not alter checkpoint requests", async () => {
+    setCached(kBackupsCacheKey, makeInventory(undefined, { reuseAfter: kNow }));
+
+    let state = await hydrate();
+    requestDowngrade(state);
+    state = renderHook({});
+    expect(state.pendingApply.confirm.backupReuse).toBeNull();
+    expect(state.onToggleBackupReuseConsent).toBeUndefined();
+    state = renderHook({});
+    api.applyOpenclawVersion.mockResolvedValue({ ok: true, noop: true });
+    await state.onConfirmApply();
+    await renderHook({}).backupPreflight.confirm();
+    expect(api.applyOpenclawVersion).toHaveBeenCalledWith({ ...kDowngradeTarget, intent: "downgrade", recoveryMode: "config_only" });
+    expect(api.applyOpenclawVersion.mock.calls.at(-1)[0]).not.toHaveProperty("allowBackupReuse");
   });
 
   it("a backup_failed WITHOUT an offer, or a different code, yields no offer", async () => {
@@ -1697,81 +1587,26 @@ describe("frontend/upgrade-tab hook — consent + reuse retry + fence fields", (
     await state.onConfirmApply(); await renderHook({}).backupPreflight.confirm();
     state = renderHook({});
     expect(state.applyError.message).toBe("disk full");
-    expect(state.backupReuseOffer).toBeNull();
+    expect(state.backupReuseOffer).toBeUndefined();
   });
 
-  it("a STREAMED terminal backup_failed carrying reusableBackup offers the retry against the in-flight target", async () => {
-    let captured = null;
-    api.subscribeOpenclawApplyEvents.mockImplementation((options) => {
-      captured = options;
-      return () => {};
-    });
-    api.applyOpenclawVersion.mockResolvedValue({
-      ok: true,
-      operationId: "op-1",
-      events: "/api/operations/op-1/events",
-    });
+  it("a legacy streamed failure never offers retired archive reuse", async () => {
     let state = await hydrate();
+    api.applyOpenclawVersion.mockResolvedValueOnce({ ok: true, operationId: "legacy-run", events: "/events" });
     requestDowngrade(state);
     state = renderHook({});
-    await state.onConfirmApply(); await renderHook({}).backupPreflight.confirm();
-    expect(captured).toBeTruthy();
-
-    captured.onMessage({
-      event: "step",
-      data: { name: "backup", status: "failed", at: kNow, error: "state lease lost" },
-    });
-    captured.onMessage({
-      event: "error",
-      data: {
-        error: "Backup failed: state lease lost (after 3 attempts, 2 with the gateway paused)",
-        code: "backup_failed",
-        hint: "Newest surviving archive: …",
-        finishedAt: kNow,
-        reusableBackup: kReusableBackup,
-      },
-    });
+    await state.onConfirmApply();
+    await renderHook({}).backupPreflight.confirm();
+    api.subscribeOpenclawApplyEvents.mock.calls.at(-1)[0].onMessage({ event: "error", data: { code: "backup_failed", error: "Legacy backup failed", reusableBackup: kReusableBackup } });
     state = renderHook({});
-    expect(state.operation).toEqual(
-      expect.objectContaining({ phase: "failed", finishedAt: kNow }),
-    );
-    expect(state.operation.error.code).toBe("backup_failed");
-    expect(state.backupReuseOffer).toEqual(
-      expect.objectContaining({
-        sha256: kSha,
-        target: kDowngradeTarget,
-        label: "2026.7.0",
-      }),
-    );
-
-    // Confirming from the failed card: the failed operation is replaced by
-    // the new attempt, sent with consent.
-    state.onRequestBackupReuseRetry();
-    state = renderHook({});
-    api.applyOpenclawVersion.mockResolvedValueOnce({ ok: true, operationId: "op-2", events: "/e" });
-    await state.onConfirmBackupReuseRetry();
-    expect(api.applyOpenclawVersion).toHaveBeenLastCalledWith({
-      ...kDowngradeTarget,
-      intent: "downgrade",
-      allowBackupReuse: { sha256: kSha },
-    });
-    state = renderHook({});
-    expect(state.operation).toEqual(
-      expect.objectContaining({ phase: "running", operationId: "op-2" }),
-    );
-    expect(state.backupReuseOffer).toBeNull();
-
-    // A streamed failure with a different code never offers.
-    captured.onMessage({
-      event: "error",
-      data: { error: "npm exploded", code: "download_failed", finishedAt: kNow },
-    });
-    state = renderHook({});
-    expect(state.operation.phase).toBe("failed");
-    expect(state.backupReuseOffer).toBeNull();
+    expect(state.backupReuseOffer).toBeUndefined();
+    expect(state.onRequestBackupReuseRetry).toBeUndefined();
+    expect(findActionButtonByLabel(renderView(state), "Retry using the backup taken 2 hours ago")).toBeUndefined();
+    expect(state.operation.error.message).toBe("Legacy backup failed"); state.onDismissOperation(); expect(renderHook({}).operation).toBeNull();
+    expect(api.applyOpenclawVersion).toHaveBeenCalledTimes(1);
   });
 
-  it("a RESUMED run (page reload mid-run) that settles as backup_failed with reusableBackup offers the retry from the persisted result", async () => {
+  it("a resumed legacy failed run retains its error but never offers archive reuse", async () => {
     // Mount with an unfinished persisted run: the rehydration effect resumes
     // it with NO SSE stream, so the outcome can only arrive through the resume
     // poll's lastUpdateRun.result — which the server stamps with the same
@@ -1850,47 +1685,10 @@ describe("frontend/upgrade-tab hook — consent + reuse retry + fence fields", (
         hint: "Newest surviving archive: …",
       }),
     );
-    // After a reload there is no in-flight apply target to bind to — the offer
-    // is built from the PERSISTED run's target and labelled from it.
-    expect(state.backupReuseOffer).toEqual(
-      expect.objectContaining({
-        sha256: kSha,
-        target: kDowngradeTarget,
-        label: "2026.7.0",
-        at: kReusableBackup.at,
-      }),
-    );
-    // The settled run re-reads the inventory, forcing the server rescan.
+    expect(state.backupReuseOffer).toBeUndefined();
+    expect(state.onRequestBackupReuseRetry).toBeUndefined();
     expect(api.fetchOpenclawBackups).toHaveBeenCalledWith({ force: true });
-
-    // The resumed failure card offers the same CTA as the streamed path.
-    const tree = renderView({
-      channelInfo: state.channelInfo,
-      operation: state.operation,
-      backupReuseOffer: state.backupReuseOffer,
-    });
-    expect(
-      findActionButtonByLabel(tree, "Retry using the backup taken 2 hours ago"),
-    ).toBeTruthy();
-
-    // Confirming resends the persisted target with consent bound to the offer,
-    // replacing the resumed failure with a fresh (streamed) attempt.
-    state.onRequestBackupReuseRetry();
-    state = renderHook({});
-    expect(state.backupReuseRetryPrompt).toBe(true);
-    api.applyOpenclawVersion.mockResolvedValueOnce({ ok: true, operationId: "op-8", events: "/e" });
-    await state.onConfirmBackupReuseRetry();
-    expect(api.applyOpenclawVersion).toHaveBeenCalledWith({
-      ...kDowngradeTarget,
-      intent: "downgrade",
-      allowBackupReuse: { sha256: kSha },
-    });
-    state = renderHook({});
-    expect(state.operation).toEqual(
-      expect.objectContaining({ resumed: false, phase: "running", operationId: "op-8" }),
-    );
-    expect(state.backupReuseOffer).toBeNull();
-    expect(state.backupReuseRetryPrompt).toBe(false);
+    expect(findActionButtonByLabel(renderView(state), "Retry using the backup taken 2 hours ago")).toBeUndefined();
   });
 
   it("running a repair clears a leftover reuse offer — a quick-failing repair never shows the earlier apply's CTA", async () => {
@@ -1921,21 +1719,21 @@ describe("frontend/upgrade-tab hook — consent + reuse retry + fence fields", (
       repairAvailable: true,
     });
     expect(findActionButtonByLabel(failedCard, "Run repair")).toBeTruthy();
-    expect(findActionButtonByLabel(failedCard, "Retry using the backup taken 2 hours ago")).toBeTruthy();
+    expect(findActionButtonByLabel(failedCard, "Retry using the backup taken 2 hours ago")).toBeUndefined();
 
     // Run repair is rejected before an operationId exists (busy / 5xx).
     api.runOpenclawRepair.mockRejectedValueOnce(
       Object.assign(new Error("Another operation is in progress"), { code: "busy", status: 409 }),
     );
-    state.onRequestBackupReuseRetry();
+    expect(state.onRequestBackupReuseRetry).toBeUndefined();
     state = renderHook({});
-    expect(state.backupReuseRetryPrompt).toBe(true);
+    expect(state.backupReuseRetryPrompt).toBeUndefined();
     await state.onRunRepair();
     state = renderHook({});
     expect(state.operation).toBeNull();
     expect(state.applyError.message).toBe("Another operation is in progress");
-    expect(state.backupReuseOffer).toBeNull();
-    expect(state.backupReuseRetryPrompt).toBe(false);
+    expect(state.backupReuseOffer).toBeUndefined();
+    expect(state.backupReuseRetryPrompt).toBeUndefined();
     const repairError = renderView({
       channelInfo: state.channelInfo,
       applyError: state.applyError,
@@ -1950,121 +1748,52 @@ describe("frontend/upgrade-tab hook — consent + reuse retry + fence fields", (
     expect(api.applyOpenclawVersion).toHaveBeenCalledTimes(1);
   });
 
-  it("a hard-gated confirm opened while the inventory read FAILED says so (not 'No eligible backup') and re-binds after a retry", async () => {
-    // The harness collects effects without running them, so the inventory's
-    // mount read is driven by hand through the same forced-refresh path.
-    api.fetchOpenclawBackups.mockRejectedValueOnce(
-      Object.assign(new Error("Could not read the backup inventory"), { code: "backups_unavailable" }),
-    );
+  it("historical inventory errors do not authorize a checkpoint fallback", async () => {
+    setCached(kBackupsCacheKey, makeInventory());
+    api.fetchOpenclawBackups.mockRejectedValue(new Error("inventory offline"));
     let state = await hydrate();
-    await state.onRetryBackups();
-    state = renderHook({});
-    expect(state.backupsInventory).toBeNull();
-    expect(state.backupsError).toBeTruthy();
     requestDowngrade(state);
     state = renderHook({});
-    expect(state.pendingApply.confirm.backupReuse).toEqual(
-      expect.objectContaining({
-        available: false,
-        sha256: null,
-        reason: kBackupReuseInventoryErrorReason,
-        retryable: true,
-      }),
-    );
-    expect(state.pendingApply.confirm.backupReuse.reason).not.toBe(kBackupReuseNoneReason);
-    const tree = renderView({
-      channelInfo: state.channelInfo,
-      pendingApply: state.pendingApply,
-      onRetryBackups: state.onRetryBackups,
-    });
-    expect(findConsentToggle(tree).props.disabled).toBe(true);
-    const text = treeText(tree);
-    expect(text).toContain(kBackupReuseInventoryErrorReason);
-    expect(text).not.toContain(kBackupReuseNoneReason);
-    // The dialog offers the same re-read as the card; it forces the server.
-    const retry = findAllByType(tree, "button").find(
-      (v) => collectText(v).join("") === kBackupReuseRetryInventoryLabel,
-    );
-    expect(retry).toBeTruthy();
-    api.fetchOpenclawBackups.mockResolvedValue(makeInventory());
-    await retry.props.onclick();
-    expect(api.fetchOpenclawBackups).toHaveBeenLastCalledWith({ force: true });
+    expect(state.pendingApply.confirm.backupReuse).toBeNull();
+    expect(state.onToggleBackupReuseConsent).toBeUndefined();
     state = renderHook({});
-    expect(state.backupsInventory).toEqual(makeInventory());
-    // The re-bind effect (last declared) binds the consent to the real newest archive.
-    harness.effects[harness.effects.length - 1]();
-    state = renderHook({});
-    expect(state.pendingApply.confirm.backupReuse).toEqual(
-      expect.objectContaining({ available: true, sha256: kSha }),
-    );
-    // Checked-while-unreadable never sent consent; fail-closed all the way.
-    harness.reset();
-    invalidateCache(kBackupsCacheKey);
-    api.fetchOpenclawBackups.mockRejectedValueOnce(new Error("offline"));
-    api.applyOpenclawVersion.mockClear();
-    state = await hydrate();
-    await state.onRetryBackups();
-    state = renderHook({});
-    requestDowngrade(state);
-    state = renderHook({});
-    state.onToggleBackupReuseConsent(true);
-    state = renderHook({});
-    api.applyOpenclawVersion.mockResolvedValueOnce({ ok: true, operationId: "op-1", events: "/e" });
-    await state.onConfirmApply(); await renderHook({}).backupPreflight.confirm();
-    expect(api.applyOpenclawVersion).toHaveBeenCalledWith({ ...kDowngradeTarget, intent: "downgrade" });
-    expect("allowBackupReuse" in api.applyOpenclawVersion.mock.calls[0][0]).toBe(false);
+    api.applyOpenclawVersion.mockResolvedValue({ ok: true, noop: true });
+    await state.onConfirmApply();
+    await renderHook({}).backupPreflight.confirm();
+    expect(api.applyOpenclawVersion).toHaveBeenCalledWith({ ...kDowngradeTarget, intent: "downgrade", recoveryMode: "config_only" });
+    expect(api.applyOpenclawVersion.mock.calls.at(-1)[0]).not.toHaveProperty("allowBackupReuse");
   });
 
-  it("a 200 with readable:false disables the consent with the unreadable reason (+ retry), never 'No eligible backup'", async () => {
+  it("unreadable historical inventories do not authorize a checkpoint fallback", async () => {
     setCached(kBackupsCacheKey, makeInventory([], { readable: false }));
+
     let state = await hydrate();
     requestDowngrade(state);
     state = renderHook({});
-    expect(state.pendingApply.confirm.backupReuse).toEqual(
-      expect.objectContaining({
-        available: false,
-        sha256: null,
-        reason: kBackupReuseInventoryUnreadableReason,
-        retryable: true,
-      }),
-    );
-    const tree = renderView({ channelInfo: state.channelInfo, pendingApply: state.pendingApply });
-    expect(findConsentToggle(tree).props.disabled).toBe(true);
-    expect(treeText(tree)).toContain(kBackupReuseInventoryUnreadableReason);
-    expect(treeText(tree)).not.toContain(kBackupReuseNoneReason);
-    expect(
-      findAllByType(tree, "button").some(
-        (v) => collectText(v).join("") === kBackupReuseRetryInventoryLabel,
-      ),
-    ).toBe(true);
+    expect(state.pendingApply.confirm.backupReuse).toBeNull();
+    expect(state.onToggleBackupReuseConsent).toBeUndefined();
+    state = renderHook({});
+    api.applyOpenclawVersion.mockResolvedValue({ ok: true, noop: true });
+    await state.onConfirmApply();
+    await renderHook({}).backupPreflight.confirm();
+    expect(api.applyOpenclawVersion).toHaveBeenCalledWith({ ...kDowngradeTarget, intent: "downgrade", recoveryMode: "config_only" });
+    expect(api.applyOpenclawVersion.mock.calls.at(-1)[0]).not.toHaveProperty("allowBackupReuse");
   });
 
-  it("dismissing a failed operation clears the offer and the prompt", async () => {
-    let captured = null;
-    api.subscribeOpenclawApplyEvents.mockImplementation((options) => {
-      captured = options;
-      return () => {};
-    });
-    api.applyOpenclawVersion.mockResolvedValue({ ok: true, operationId: "op-1", events: "/e" });
+  it("dismissing a legacy streamed failure clears it without retrying retired archive reuse", async () => {
     let state = await hydrate();
+    api.applyOpenclawVersion.mockResolvedValueOnce({ ok: true, operationId: "legacy-run", events: "/events" });
     requestDowngrade(state);
     state = renderHook({});
-    await state.onConfirmApply(); await renderHook({}).backupPreflight.confirm();
-    captured.onMessage({
-      event: "error",
-      data: { error: "Backup failed", code: "backup_failed", reusableBackup: kReusableBackup },
-    });
+    await state.onConfirmApply();
+    await renderHook({}).backupPreflight.confirm();
+    api.subscribeOpenclawApplyEvents.mock.calls.at(-1)[0].onMessage({ event: "error", data: { code: "backup_failed", error: "Legacy backup failed", reusableBackup: kReusableBackup } });
     state = renderHook({});
-    state.onRequestBackupReuseRetry();
-    state = renderHook({});
-    expect(state.backupReuseOffer).not.toBeNull();
-    expect(state.backupReuseRetryPrompt).toBe(true);
-
-    state.onDismissOperation();
-    state = renderHook({});
-    expect(state.operation).toBeNull();
-    expect(state.backupReuseOffer).toBeNull();
-    expect(state.backupReuseRetryPrompt).toBe(false);
+    expect(state.backupReuseOffer).toBeUndefined();
+    expect(state.onRequestBackupReuseRetry).toBeUndefined();
+    expect(findActionButtonByLabel(renderView(state), "Retry using the backup taken 2 hours ago")).toBeUndefined();
+    expect(state.operation.error.message).toBe("Legacy backup failed"); state.onDismissOperation(); expect(renderHook({}).operation).toBeNull();
+    expect(api.applyOpenclawVersion).toHaveBeenCalledTimes(1);
   });
 
   it("the 409 rollback fence carries the WI-4.1 re-stat fields into the data-risk model", async () => {
@@ -2129,5 +1858,17 @@ describe("frontend/upgrade-tab hook — consent + reuse retry + fence fields", (
       reusedAgeMs: null,
       newestSurvivingBackup: null,
     });
+  });
+
+  it("the rollback fence retains verified recovery coverage for the confirmation dialog", async () => {
+    const recovery = { kind: "database_set", checkpoint: { file: "/backups/recovery-op", verified: true }, databases: { complete: true, verified: true }, restore: { configAvailable: true, databaseSetAvailable: true } };
+    api.rollbackOpenclaw.mockRejectedValueOnce(Object.assign(new Error("migrated"), { code: "rollback_requires_confirmation", backupFile: recovery.checkpoint.file, backupFileExists: true, recovery }));
+    let state = await hydrate();
+    state.onRequestRollback();
+    await renderHook({}).onRollback();
+    state = renderHook({});
+    expect(state.rollbackDataRisk).toMatchObject({ recovery, backupFile: recovery.checkpoint.file, backupFileExists: true });
+    expect(treeText(renderView(state))).toContain("matching source build");
+    expect(treeText(renderView(state))).toContain("does not restore database data automatically");
   });
 });

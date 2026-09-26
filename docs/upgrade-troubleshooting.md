@@ -58,7 +58,20 @@ an AlphaClaw restart. If progress is interrupted, the Upgrade page looks up that
 exact operation ID; use Retry when the status read fails. A previous update's
 success is not evidence that the interrupted repair finished.
 
-## Dev update failed after changing state
+## Legacy dev update failed after changing state
+
+The diagnostics below describe failures from older update paths. New dev
+preparation explicitly clones upstream into a separate managed candidate,
+checks out the selected commit, and runs `pnpm install --frozen-lockfile`,
+`pnpm build`, `pnpm ui:build`, and Doctor with disposable state/configuration.
+It never calls `openclaw update --channel dev`: that command can mutate an
+active checkout or global package even with an isolated environment. The
+running checkout stays unchanged during preparation; only boot selects the
+verified candidate through the executable shim.
+
+Explicit **in-place repair** is different: it still uses native
+`openclaw update repair` against the actual active checkout/candidate, with
+disposable state/configuration. It does not prepare or activate a new candidate.
 
 A failed upstream dev update does not prove that its checkout or state was
 rolled back. Check the operation's `updaterReason`, `updaterRecovery` and log.
@@ -91,11 +104,18 @@ Two hold classes share `state.gatewayHold`. This section is the
 **migration-class** hold (`reason` such as `config_migration_failed`): the
 settings migration failed and **Retry migration** / **Strip blamed keys** are
 the levers. A **structural** hold — `reason` `version_mismatch`,
-`state_db_unreadable` or `activation_failed` — means the installed build
+`state_db_unreadable`, `state_db_unverified` or `activation_failed` — means the installed build
 must not launch against the databases on disk; Retry migration refuses it
 (`409 reconcile_still_held`), so use the "Version mismatch — running ≠
 expected" section below instead (Re-activate recorded build, or apply a
 version that can read the databases).
+
+An unknown, corrupt, missing or thrown boot compatibility verdict also holds
+the gateway. Startup skips settings reconciliation, Doctor and the config
+mutation steps instead of attempting repair before compatibility is known;
+the Setup UI remains available. `OPENCLAW_LAUNCH_COMPAT_GATE=off` does not
+bypass this boundary. A migration that needs recovery approval must go through
+the Upgrade choices; a runtime restart or re-activation cannot supply it.
 
 **What it means:** the new version installed, but its settings migration
 failed and AlphaClaw failed **closed**: the gateway is deliberately held
@@ -201,75 +221,164 @@ callers of `updates.apply` must send `intent` too — a body without it is a
 `400 invalid_body` naming the three values. The run record's `intentCheck`
 says what was verified and what was skipped.
 
+## Config-first upgrade recovery
+
+Ordinary OpenClaw updates prepare and verify the target first, then perform a
+bounded, read-only inventory of database metadata before any checkpoint. They
+do not make a hidden SQLite copy or run `VACUUM` automatically. The default
+`config_only` checkpoint is a private directory containing the root
+`openclaw.json`, exact optional legacy identity/auth files when present, and
+its manifest. The optional paths are `identity/device.json`,
+`identity/device-auth.json`, and `auth-profiles.json`, `auth-state.json`, or
+`auth.json` directly inside each discovered agent directory. No other files
+from those directories are implied. Capture is capped at 1 MiB per file, 16 MiB total, 256 files,
+and 10 seconds. It does not recurse through the workspace, credentials,
+`.alphaclaw`, or `.env`; it is not a backup of modern database-backed auth,
+chat history, or other SQLite data.
+
+If the prepared target requires a database migration and data protection is
+available, the human chooses one of three outcomes before AlphaClaw stops the
+gateway: take an explicit `database_set` snapshot of the complete discovered
+SQLite set, accept the forward-only migration risk without a database
+snapshot, or cancel. The complete set can be very large, including gigabytes.
+An opted-in snapshot shares one quiet gateway pause; there is no second stop
+and no automatic database restore. Unknown or incompatible target schemas,
+corrupt/unreadable sources, ownership conflicts, and gateway holds are hard
+refusals, not consent prompts. Config-only evidence never satisfies the
+database recovery requirement. Pin/rollback decisions must continue to use
+the actual database set and declared target schemas; retention protects
+actual database snapshots rather than treating a config checkpoint as one.
+
+Recovery orchestration requires the selected config to be `openclaw.json`
+inside the same physical state directory AlphaClaw's config writers manage.
+Custom filenames and conflicting state roots are refused before live mutation,
+so AlphaClaw cannot capture one config and later restore or normalize another.
+Symlink-equivalent roots remain supported without rewriting the gateway's
+logical path selectors. Correct conflicting deployment settings while preserving
+the original logical state path; do not move state files to bypass the refusal.
+
+Forward-only approval binds the exact build and recovery facts. A normal
+gateway shutdown can checkpoint its WAL and change those facts. In that case,
+AlphaClaw revokes the old approval and leaves the gateway stopped in an explicit
+recovery review. Choose protection again, or use **Cancel** to verify the prior
+build and databases and resume it safely. Cancellation clears the review only
+after the prior gateway is ready; a changed build, incompatible data, lost
+ownership, or failed start keeps recovery unresolved and shows an actionable
+error. Reloading or restarting AlphaClaw does not grant approval or discard the
+review. A stale boot approval similarly requires **Review database recovery
+choices**, not repeated migration retries.
+
+`POST /api/openclaw/backup` defaults to the config checkpoint; `/backup-sqlite`
+is the explicit database-set operation. Backup-policy mutation endpoints are
+retired (`410`), as is the old archive-reuse option. These names describe the
+shipped product contract; consult the live API manifest/UI for exact request
+fields and response shapes.
+
+New checkpoints retain the newest three configuration checkpoints and three
+database sets, plus protected migration and active-operation artifacts. Existing
+published legacy archives are preserved rather than automatically pruned; their
+pin can expire without deleting the archive or erasing the rollback warning.
+
+### Restoring a config checkpoint or database set
+
+Neither checkpoint type is restored automatically. For a config checkpoint,
+use the manifest to identify the exact captured files and restore only to the
+matching compatible build. Do not infer that omitted config keys or database
+state were captured. For an explicit database-set snapshot, stop AlphaClaw,
+the gateway, and every other database writer through the host/provider
+maintenance controls. Verify the checkpoint manifest and paths, save each
+current destination database and its `-wal`, `-shm`, and `-journal` sidecars
+to a separate private recovery location, and replace only database files
+listed in the snapshot. Preserve omitted files and directories; do not replace
+the state or agent directory wholesale. Validate integrity and target-schema
+compatibility before restarting. Keep the saved destinations and sidecars
+until the service is healthy. A config-only checkpoint cannot restore modern
+database-backed auth or history, and legacy auth JSON must not be replayed
+into modern SQLite authentication storage.
+
+The checkpoint directory contains `manifest.json`, `ready.json`, and
+`payload/<archivePath>`. Its manifest has separate `files[]` and `databases[]`
+entries with exact `sourcePath` destinations and `archivePath` payload paths.
+There is no restore API or automatic placement command. From a private host
+maintenance shell, verify the artifact against its producing run before
+copying anything (replace the three example paths with this installation's
+actual package, run record, and checkpoint):
+
+```sh
+ALPHACLAW_PACKAGE=/path/to/installed/alphaclaw \
+RUN_RECORD=/data/.openclaw/.alphaclaw/runs/OPERATION_ID.json \
+CHECKPOINT=/data/backups/openclaw/recovery-UUID \
+node <<'NODE'
+const fs = require("node:fs");
+const path = require("node:path");
+const { inspectRecoveryCheckpoint, readRecoveryCheckpoint } = require(path.join(
+  process.env.ALPHACLAW_PACKAGE, "lib/server/openclaw-recovery-checkpoint.js",
+));
+(async () => {
+  const run = JSON.parse(fs.readFileSync(process.env.RUN_RECORD, "utf8"));
+  const recorded = run.recovery?.checkpoint;
+  if (!recorded?.verified || recorded.file !== process.env.CHECKPOINT) {
+    throw new Error("Checkpoint does not match the producing run");
+  }
+  const inspection = inspectRecoveryCheckpoint(recorded.file, {
+    record: run.recovery, backupsDir: path.dirname(recorded.file),
+  });
+  if (!inspection.ok) throw new Error("Checkpoint no longer matches its recorded manifest and payload identities");
+  await readRecoveryCheckpoint(recorded.file, {
+    operationId: run.operationId,
+    sourceBuild: recorded.sourceBuild,
+    targetBuild: recorded.targetBuild,
+  });
+  console.log("Checkpoint verified against its producing run; no files restored.");
+})().catch((error) => { console.error(error.message); process.exitCode = 1; });
+NODE
+```
+
+Do not proceed on a verification or build-binding failure. Verify the build
+you intend to run matches the captured **source** build/version (and full
+commit for dev); the manifest's target is the update destination, not the
+version that wrote the snapshot. A mismatched build requires a separate
+compatibility assessment, not overriding the binding. After saving each
+current destination and sidecar, copy only the verified
+`payload/<archivePath>` to its checked `sourcePath`. For each restored SQLite
+file, remove its old `-wal`, `-shm`, and `-journal` at the destination only
+after preserving them; never reattach those sidecars to the snapshot. Check
+integrity for every restored database and compatibility with the intended
+build before restarting. Restore the complete captured database set together,
+not an assumed independent subset. Preserve all omitted workspace, transcripts,
+credentials and other files. Keep saved destinations through a full healthy
+stabilization window.
+
 ## Brief gateway pause during backup (quiesce)
 
-**Expected behavior**, not a failure: since issue #79 (Stage 4c, decision
-D1a) **every** apply that can pause the gateway does — a same-channel
-stable upgrade as much as a cross-channel apply, downgrade or dev switch —
-while the pre-update backup captures a consistent state DB. The pause is no
-longer gate-scoped: `runBackup` (`openclaw-channel-sync.js`) sets
-`willQuiesce = Boolean(gatewayQuiesce)` with no hard-gate term, and
-`hardGate` (downgrade, dev switch, prerelease target, channel-boundary
-crossing) now decides only whether a backup failure is fatal — a hard gate
-answers `409 backup_failed`, a soft gate records `noBackup` with a
-`backup: warning` and continues to the migration checkpoint ("Backup:
-continue without a backup (consent)" below). Sessions reconnect when the
-gateway resumes. Each pause is one transaction: `runBackupDiagnosis` (before
-the pause) → lifecycle lock (leased for the quiesce **and** offline-copy
-budgets) → watchdog suppressed → gateway stopped and *confirmed* stopped →
-state-database quiet period → AlphaClaw offline copy, then any in-quiesce
-upstream attempt (the ladder in the next section) → quiet period released →
-gateway relaunched → lock released. The Watchdog event log shows it as
-`backup_quiesce: engaged`; the step row reads "pausing the gateway for a
-consistent backup (AlphaClaw offline copy first)". A soft gate whose
-lifecycle lock is busy or whose quiet barrier cannot be held does not pause
-at all: only the backup rung degrades to the live ladder (`backup:
-warning`); the apply's own serialization is unchanged. If the pause exceeds
-the apply's own progress timeline, see the run ledger for which step is
-stuck.
+The update prepares its immutable target and checks bounded database metadata
+while the current gateway serves. Recovery capture then takes one owned
+lifecycle lease, suppresses watchdog relaunch, confirms the gateway is stopped,
+and awaits the state-database quiet barrier. Config capture is bounded; only
+an explicit `database_set` choice starts SQLite online snapshots. There is
+no full-tree or upstream archive fallback and no intermediate relaunch of the
+old gateway between capture and activation.
 
-If broader paused attempts fail, the migration-minimal fallback runs within the
-same pause and remaining work budget. It proves exclusivity again without
-restarting and stopping the gateway a second time. The gateway must answer after
-relaunch before publication or any safe live fallback; an unanswered relaunch
-aborts the operation rather than starting another backup.
-
-Temporary CLI readers and foreign database handles get up to 35 seconds to
-drain, bounded further by a quarter of the copy budget. A holder that remains is
-still refused; the wait never bypasses the lifecycle lease or quiet barrier.
+During the quiet period, state-database mutations may answer
+`409 backup_in_progress` with `Retry-After`; retry after that interval. Lease
+or quiet-barrier loss aborts capture rather than publishing unprotected data.
+A manual backup or an aborted operation releases quiet before relaunching,
+verifies the relaunch, then releases the lifecycle lease. A successful update
+hands ownership through the restart/activation path. The 10-second config
+capture ceiling is not an end-to-end update deadline; build preparation,
+explicit database snapshots, migration and startup have separate budgets.
 
 ## Backup blocked by an oversized scratch tree
 
-Run **Check backup sources** in the Upgrade tab before an update to inspect the state
-root, complete per-directory entry and byte totals, and absolute-target symlinks.
-The same preflight runs before every backup pause. It keeps counting beyond the
-200,000 selected-entry copy limit; excluded scratch does not consume that limit.
-An over-budget or incomplete scan blocks before the gateway is stopped and names
-the top offenders. Partial diagnostics are explicitly labeled, never presented
-as complete counts.
-
-Open **Upgrade → Backups → Exclusions** to edit workspace-relative rules and
-state-root rules separately. Save applies to the next operation; Restore defaults
-restores workspace debris and known state-root scratch exclusions. Defaults omit
-`worktrees/`, `workspace/.openclaw/`, `wiki/`, logs, and stale SQLite corrupt or
-migrated copies. `.env` is always omitted, even if exclusions are disabled. For example,
-`state/security-planning/stronghold-*` excludes named imported scratch trees.
-Database files, config, credentials, identity and agent authentication cannot be
-excluded, including databases discovered beneath otherwise excluded directories.
-The configuration is `updates.openclaw.backup.{excludes,rootExcludes}` in
-`alphaclaw.json`; the API is `GET`/`PUT /api/openclaw/backup-policy`. Missing
-workspace rules use defaults, while `excludes: []` explicitly disables them.
-
-The upstream CLI cannot apply AlphaClaw's exclusions. It is skipped if preflight
-finds `.env`, an oversized upstream archive set, or an absolute-target symlink at
-one of the paths the upstream archive includes (`openclaw.json`, `credentials`,
-`identity`, `state`, `agents`, `workspace` — upstream follows a link there and
-would archive whatever it points at), and never retries live after the offline
-copy exhausted its enumeration or time budget. Absolute-target symlinks
-elsewhere are reported for review only: OpenClaw creates them itself
-(`plugin-skills/<skill>` into its package) and its backup neither follows nor
-archives them. The offline and migration producers resolve a symlinked state root while
-keeping required-source and internal-symlink safety checks.
+This is a historical archive failure, not a reason to edit exclusions for a
+current update. Config-first recovery never enumerates a recursive workspace,
+credentials or `.alphaclaw` tree, and `.env` is excluded. Known config and
+database-owner discovery is bounded and refuses unsupported storage or an
+incomplete inventory. A configured or registered database remains part of
+the complete discovered set even when other content beside it is omitted.
+The old exclusion editor and backup-policy mutations are retired (`410`).
+Resolve a named required-source or ownership failure rather than trying to
+exclude that database or re-enable an archive fallback.
 
 The gateway and OpenClaw CLI keep `OPENCLAW_STATE_DIR`, `OPENCLAW_CONFIG_PATH`
 and `XDG_CONFIG_HOME` exactly as configured. Only backup filesystem checks resolve
@@ -286,202 +395,28 @@ box, consider setting `cron.skipMissedJobs: true` to avoid a burst of missed job
 Jobs created under the resolved path remain in that separate partition; do not
 manually re-key SQLite rows as the recovery path.
 
-When AlphaClaw observes more than 512 MiB of raw workspace content, upstream
-attempts omit workspace from the outset with `--no-include-workspace`; unknown
-size preserves the existing attempt behavior. AlphaClaw's own policy exclusions
-do not reduce this upstream-size threshold because upstream has no equivalent
-exclude list. The recorded omission reason distinguishes size from broken
-workspace discovery.
-
-After unsuccessful broader attempts, **migration-only backup** means the final
-minimal profile captured the protected migration assets and deliberately omitted
-workspace and other content. An update with this verified backup can proceed;
-Back up now reports the same limited coverage. Read the coverage before relying
-on it for recovery, and use [selective restoration](#restoring-a-backup).
-
 ## Backup blocked by state-database contention
 
-**What it means:** the upstream `openclaw backup create --verify` rung of
-the pre-update backup (since #79 it runs only after the AlphaClaw offline
-copy failed — paused, or live against the relaunched gateway) died because
-*something else* held or wrote the SQLite state database while it ran. Issue #54 is the
-canonical case: on 2026.8.2 and 2026.9.1-beta.1 the backup takes a
-"legacy-audit migration lease" on `state/openclaw.sqlite` whenever a legacy
-audit log exists (`logs/config-audit.jsonl`, `audit/system-agent.jsonl` or
-`audit/crestodian.jsonl`); its lease writes use `busy_timeout 0`, so a
-concurrent writer's RESERVED lock makes them fail at once:
+Metadata observation and explicit database snapshots are bounded. A conflicting
+owner, unconfirmed gateway stop, or lost quiet barrier refuses recovery; it does
+not trigger a live archive attempt or a second stop. Inspect the operation's
+code and evidence, stop the conflicting owner through its supervisor when
+appropriate, then retry. Do not override source corruption or schema
+incompatibility with forward-only consent.
 
-```
-[sqlite/transaction] SQLite transaction lock wait failed
-Warning: the backup outcome could not be recorded: database is locked
-timed out waiting for legacy audit migration lease migration.legacy-audit/filesystem-sqlite-boundary
-```
-or, mid-run, `… lease migration.legacy-audit/filesystem-sqlite-boundary was lost`.
+Older run records may show `lock_contention`, a lost
+`migration.legacy-audit/filesystem-sqlite-boundary` lease, `backup_rung`, or
+`backup_offline_copy`. Those belong to the retired archive ladder. Its
+historical journal-mode investigation, formats and dated live evidence remain
+in [the archive design](designs/backup-offline-copy.md); they are not commands
+to rerun automatically on a config-first update.
 
-The pinned 2026.7.1-2 has no lease: it finishes under the same lock and only
-logs `Config health-state write failed: database is locked`.
-
-**What AlphaClaw does (the #54 ladder, v0.9.71+; copy-first since v0.9.77,
-#79 (c)):** an upstream failure is classified `lock_contention` (a
-*retryable* kind, alongside `killed`; `spawn_error` is terminal) from the
-last 20 lines of CLI output. The rungs, in the order they run — each one is
-a `run.backup.attemptsDetail[] { rung, reason, quiesced, startedAt,
-elapsedMs, bytes, kind, ok }` entry and a `backup_rung` event:
-
-1. **AlphaClaw offline copy — first, unconditionally** — inside the pause
-   (gateway stopped and confirmed, quiet period held), soft and hard gates
-   alike (`runQuiescedAttemptLoop` → `runOfflineCopy`). It proves
-   exclusivity first (stop confirmed, quiet barrier held, zero live openclaw
-   processes, zero in-process handles, Linux `/proc/*/fd` scan clean),
-   copies every `*.sqlite` with SQLite's online backup API, verifies each
-   copy with `PRAGMA integrity_check`, skips the policy excludes inside
-   workspaces (`node_modules`, `*.heapsnapshot`, `*.tmp`, `logs/**/*.gz` —
-   measured and listed in the manifest's `excludes[]`), archives with
-   `tar -I 'gzip -1'` into `openclaw-backup-<ts>-<opId8>.alphaclaw.tar.gz`,
-   and runs the same gzip + manifest check every artifact gets. Bounded by
-   `min(offlineCopyBudgetMs, quiesceRemaining())`; the copy never runs twice
-   in one pause. Format:
-   [docs/designs/backup-offline-copy.md](designs/backup-offline-copy.md).
-   Events: `backup_offline_copy: started | completed | failed`.
-2. **In-quiesce upstream `backup create`** — only after a copy that failed
-   at a stage other than exclusivity, and only when the pre-pause
-   **diagnosis** (`backup_diagnosis` event: journal mode, filesystem type,
-   state bytes, copy / tar / excluded bytes, other live openclaw processes,
-   predicted copy and upstream durations) says it fits what is left of the
-   pause: `describeUpstreamVeto` rules it out for a rollback-journal state
-   DB over 256 MB (`backup.upstreamVeto: rollback_journal_self_deadlock`),
-   then `chooseBackupRung` (`openclaw-backup-ladder.js`, fail-closed)
-   requires the predicted upstream time × 1.5 to fit the remaining pause
-   and the tar set to be under 2 GiB (`predicted_fits`; otherwise
-   `predicted_too_slow`, `copy_set_too_large`, `copy_set_unknown` or
-   `prediction_unknown` — any unknown hands over to rung 3). Here
-   `lock_contention` retries up to 2 times, backing off 15 s then 30 s, only
-   while the quiesce deadline (sized `quiesceTimeoutMs +
-   offlineCopyBudgetMs` = 15 min up front, bounded by the remaining phase
-   envelope and shared with the copy) still fits
-   the retry (`backup_contention: retrying | exhausted` events name the
-   reason: `retries_exhausted`, `attempt_too_long`, `insufficient_budget`);
-   a `killed` or `timeout` attempt hands over at once — the copy that used
-   to be "next" already ran this pause.
-3. **Relaunch + live ladder** — at most `kOpenclawBackupLiveAttempts` = 2
-   upstream attempts against the running gateway. Reached by a **refused**
-   copy (`offline_copy_refused`: another holder on a state DB — the paused
-   rungs need exclusivity the live upstream does not, so the pause ends,
-   the record carries `offlineCopy.next: { rung: "live", reason:
-   "offline_copy_refused" }` and a `backup_rung: handed_over` event is
-   booked), by a copy failure the prediction ruled the paused upstream out
-   of, by exhausted in-quiesce retries, by timeouts and by live-file races
-   (`vanished_file`). Eligible failures proceed to the final minimal producer;
-   unsafe sources, disk exhaustion and unresolved ownership/work remain blockers.
-4. **Migration-minimal copy** — once, after the broader attempts fail, under
-   a fresh lifecycle lease, confirmed stop and quiet barrier. It snapshots the
-   required migration assets without walking oversized scratch trees. Success
-   is explicitly migration-only; if it also fails, a soft gate records
-   `noBackup` and reaches the migration checkpoint, while a hard gate refuses.
-5. **Consented reuse** of a recent verified complete archive — see
-   [Reusing a recent backup](#reusing-a-recent-backup-consent).
-
-A hard-gate refusal (`409 backup_failed`) always names the newest surviving
-archive (age and producer) in its hint, and the run record carries
-`backup.attempts`, `attemptsDetail`, `quiescedAttempts`,
-`contentionRetries`, `offlineCopy` (with `next`), `upstreamVeto`,
-`diagnosis` and `exclusivityEvidence` so the ladder is reconstructible.
-
-**`409 backup_in_progress` on writes:** while the quiet period is held,
-AlphaClaw's own state-database writers answer `409 { code:
-"backup_in_progress" }` with `Retry-After: 120` **before** anything is
-mutated. The contract covers every pairing write (`POST
-/api/pairings/:id/approve` and `/reject`, `POST /api/devices/:id/approve`
-and `/reject` — a pairing write during the pause would put a live
-`openclaw` process on the state DB, exactly the traffic the barrier
-suppresses), channel-account adds (`POST /api/channels/accounts` clears the
-id's stale pairing rows first, so the 409 lands before any env or config
-change) and deletes, model-config and auth-profile saves (`PUT
-/api/models/config`, `PUT`/`DELETE /api/models/auth/:profileId`), cron job
-writes (run now, enable/disable, prompt and routing edits), the Codex
-disconnect, and the watchdog test notification (`POST
-/api/watchdog/test-notification` — a raw send during the pause would read
-an empty pairing fallback and falsely report that nothing is paired).
-Readers that would shell out to the CLI hold back too: `GET
-/api/agent/sessions` serves the last-known list (even past its TTL) or
-answers the same 409 instead of spawning `openclaw sessions`, whose open
-state-DB handle would make the offline copy refuse the paused box. The
-agent-admin CLI (`alphaclaw admin …`) sees the same 409 + `Retry-After`.
-Status readers serve last-known data, the cron store falls back to
-`jobs.json`, and notification flushes are held (never dropped) until the
-barrier releases. Two writers finish instead of refusing when the barrier
-begins *mid-flight* (config already changed): a channel delete clears the
-account's pairing rows after release and reports
-`pairingRowsCleanupDeferred: true`; the Codex OAuth exchange keeps the
-redeemed tokens and answers `202 { deferred: true }` (the browser callback
-checks the barrier before consuming its one-use state, so it renders a
-"backup in progress" page and the login attempt stays valid to reopen).
-`GET /api/models/config`, `/api/models/auth` and
-`/api/codex/status` carry `unavailable: true, reason: "backup_in_progress"`
-so configured credentials render as unavailable, not deleted. Retry after
-the pause. Kill switch: `OPENCLAW_STATE_DB_QUIET=off` (deployment env only)
-— the barrier then no-ops and the offline copy records `quiet: "disabled"`
-in its evidence.
-
-**Still failing?** `offline_copy_refused` on the run record
-(`backup.offlineCopy.stage: "exclusivity"`, `attemptsDetail[0].kind`) means
-another process held a state database open while the gateway was paused —
-the record and the failure message name its `pid (argv)`, followed since
-v0.9.81 by "argv names an OpenClaw executable or entry script". Before
-v0.9.81 the matcher also fired on any path ARGUMENT under an `/openclaw/`
-directory, so a log follower (`tail -c +1 -F
-/tmp/openclaw/openclaw-2026-09-08.log`) or a pager on a file there refused
-every copy in production; the matcher now judges the program position only
-(the CLI/gateway binary, a JS runtime's OpenClaw entry script, a shell
-wrapper named `openclaw`). If a refusal still names a process, it is a real
-OpenClaw process — stop it and retry. Since the copy-first ladder (#79) a
-refusal is never terminal on its own: the ladder fell through to the live
-upstream attempt, so the 409 you see names THAT failure first and the refusal
-after it. A `stalled` kind (v0.9.81) means the upstream `backup create`
-printed nothing and wrote nothing for 3 minutes and was stopped — the
-message quotes its last output lines and the run record keeps them
-(`backup.lastOutput`); a `timeout` is the same after the full 10-minute
-ceiling with bytes still moving. "Written so far" on the progress row is
-read from wherever the pinned CLI stages: `<output>.<uuid>.tmp`
-(2026.7.x/8.x), the `.openclaw-backup-publish-*` dot-dir and
-`<tmpdir>/openclaw-backup-*` assembly dir (2026.9.x); once the archive is at
-its final path the CLI is verifying it (silent by design) and the stall
-policy stands down. A `spawn_error` means the backup CLI never
-ran (PATH/permissions). Repeated `lock_contention` with nothing else on the
-box points at the hypothesis below.
-
-**Prove the backup works before the next update:** the Backups card's
-**Back up now** runs the same ladder on its own (`POST /api/openclaw/backup`;
-agent-admin `updates.backup`). It pauses the gateway like an update's backup
-step, writes the archive, relaunches, and records a `kind: "backup"` run the
-card summarizes as "Last manual backup: … — verified" (or the failure). A
-failed update's card offers **Retry backup** for exactly this; when the
-backup completes it offers **Retry update to X** with the original target.
-
-### Rollback-journal / network-volume hypothesis
-
-OpenClaw forces SQLite into rollback-journal mode (`journal_mode=delete`)
-on `cifs`, `smb*`, `virtiofs`, `9p` and `nfs` mounts. In that mode a
-reader's SHARED lock blocks the writer's COMMIT, and with the lease's
-`busy_timeout 0` the upstream backup can block **itself** once the snapshot
-read overlaps a lease renewal — deterministically for large databases. In
-WAL mode it cannot. How to check on your box:
-
-```sh
-# 1. filesystem type under the state dir
-findmnt -T /data/.openclaw -o TARGET,FSTYPE          # or: grep ' /data ' /proc/self/mountinfo
-# 2. journal mode of the state DBs (read-only; harmless while the gateway runs)
-node -e 'const {DatabaseSync}=require("node:sqlite");for(const p of process.argv.slice(1)){const d=new DatabaseSync(p,{readOnly:true});console.log(p,d.prepare("PRAGMA journal_mode").get());d.close()}' \
-  /data/.openclaw/state/openclaw.sqlite /data/.openclaw/agents/*/agent/openclaw-agent.sqlite
-```
-
-The run record's `backup.diagnosis.{fsType,journalMode,stateBytes}` shows
-what AlphaClaw saw. `journalMode: "delete"` with a state DB over 256 MB is
-why, after a failed copy, the paused upstream attempt is vetoed
-(`backup.upstreamVeto: rollback_journal_self_deadlock`) and the ladder hands
-over to the live rung; the copy — which runs first regardless — is
-unaffected (SQLite's online backup API is consistent in either journal
-mode).
+To exercise recovery before the next update, `POST /api/openclaw/backup`
+creates a config checkpoint as a standalone ledger run; explicitly choose
+`POST /api/openclaw/backup-sqlite` for the complete discovered database set.
+Both use the same coordinated service, install nothing, and restore no files.
+A successful config checkpoint does not prove that a multi-GB database
+snapshot will fit the available disk or time budget.
 
 ### Update refused: "needs Node …" (engines gate)
 
@@ -500,35 +435,21 @@ for an `npx alphaclaw` install; the row unlocks on the next catalog load. An
 enforced — npm's warn-only posture — so an exotic upstream spec cannot block
 an install.
 
-### Platform requirement: GNU tar and gzip
+### Legacy archive verification: GNU tar and gzip
 
-The "usable" check every archive must pass (`backup.usableCheck:
-"manifest_ok"`) extracts the depth-1 manifest with
-`tar -xzOf … --wildcards --no-wildcards-match-slash --occurrence=1
-'*/manifest.json'`. Those are **GNU tar** long options; busybox tar and
-BSD `bsdtar` (Alpine, macOS) reject them, and the check has no fallback.
-The production image (`node:24-slim`, Debian) ships GNU tar and gzip, and
-the container tier asserts it (`tar --version` must report `GNU tar`) so
-the image is checked rather than assumed. Only the offline copy's *write*
-step has a portable `tar | gzip -1` pipe — that path is dead-ended on a
-non-GNU host because the verify that follows it fails anyway.
-
-**Symptom on a self-built image without GNU tar:** every hard-gated update
-(downgrade, dev switch, cross-channel apply) fails terminally at the
-`verify` stage — the run record's `backup.attempts[].kind` is `verify` with
-a `manifest.json not extractable: … unrecognized option` reason — and the
-archive the upstream CLI had already verified is quarantined as
-`<name>.unverified` (renamed, never deleted; keep-3 pruning spares the
-newest). Consented reuse refuses every candidate for the same reason. Fix
-the image (`apt-get install tar gzip` on Debian, `apk add tar gzip` on
-Alpine — the `tar` package, not busybox's applet) rather than working
-around the gate; a quarantined `.unverified` archive can be inspected by
-hand with `tar -xzf`. A bsdtar-compatible extraction is a tracked
-follow-up (TODOS "bsdtar-compatible manifest extraction").
+Existing upstream and AlphaClaw tar archives retain their archive-specific
+verification path: `gzip -t` plus extraction of the depth-1 manifest with
+GNU tar (`--wildcards --no-wildcards-match-slash --occurrence=1`). Busybox tar
+and BSD tar do not support that extraction contract. Keep GNU tar and gzip
+available to inspect those archives; fix a missing tool rather than treating
+an unverified archive as safe. This requirement does not describe the new
+directory-checkpoint verifier. No current backup action creates a new tar
+archive, and archive reuse is retired.
 
 ## Restoring a backup
 
-Restore is a **supervised manual procedure** — upstream ships no tar-restore
+This section is for **existing legacy tar archives**; use the directory-checkpoint
+steps above for new recovery artifacts. Restore is a **supervised manual procedure** — upstream ships no tar-restore
 CLI (`backup sqlite restore` and `backup git restore` only), and AlphaClaw
 deliberately does not auto-restore (a multi-GB extract at boot would need 2×
 disk and would silently discard state written since the backup). The same
@@ -650,67 +571,36 @@ accepts).
 
 ## Reusing a recent backup (consent)
 
-**What it means:** the fresh backup ladder (offline copy first → in-quiesce
-upstream attempts when predicted to fit → live ladder) failed with a
-*retryable-class* cause (`lock_contention`, `killed`, `timeout`, `stalled`,
-`vanished_file`, `window_exhausted`; a refused copy hands over to the live
-ladder rather than ending it, so `offline_copy_refused` is never the cause
-an offer follows) on a hard gate, but a verified, non-partial archive from
-the last 24 h exists and nothing has been applied, activated or migrated
-since it was taken. The `409 backup_failed` then carries
-`reusableBackup: { file, at, ageMs, sha256, producer }` and the Upgrade tab
-offers "Retry using that backup".
-
-**What consent does:** resending the apply with
-`allowBackupReuse: { sha256 }` (the offered digest — a bare `true` or a
-string is `400`) authorizes AlphaClaw to proceed with THAT archive if — and
-only if — the full fresh ladder fails again. The archive is re-verified on
-an open descriptor (`gzip -t`, manifest lists the state DBs, sha256 over
-the fd, size/inode unchanged) within 5 min; a mismatch makes it ineligible.
-The run then records `backup.reused: true` with `reusedAgeMs`,
-`freshAttemptFailure` and the original `at`; the step reads "fresh backup
-failed (<kind>) — proceeding with the verified backup from <age> ago; state
-written since is not in it"; an important notification says the same; the
-event log gets `backup_reused`; the archive is pinned against keep-3
-pruning while the migrating run is fenced. Humans only: the agent actor's
-`updates.apply` is `denied` for any body carrying `allowBackupReuse` and
-the route 403s it. Never offered for `no_command`, `refuse_overwrite`,
-`enospc`, `verify`, `no_artifact` or `spawn_error` — those are box problems
-an old archive would paper over.
+Archive reuse is retired. A stale client sending `allowBackupReuse` is refused;
+refresh the page and choose the current recovery mode. Existing archive files,
+provenance and retention still support supervised manual recovery, but an old
+archive is not silently substituted for the current operation's checkpoint.
 
 ## Backup: continue without a backup (consent)
 
-A failed apply can offer **Continue without a backup** when its target is
-already prepared and verified, and only backup availability failed. This
-includes eligible cross-channel changes, downgrades and migrating stable
-updates. A new or moving dev build still needs a verified backup before
-preparation; a waiver can reuse only an already built checkout at an exact
-verified commit.
+A migration that lacks database recovery protection presents three choices
+before gateway stop: a complete discovered `database_set` snapshot,
+human-only forward-only consent, or cancel. The target must already be
+prepared and verified, including the exact commit for dev; the default config
+checkpoint remains, but it cannot undo database changes. Forward-only consent
+means a migration may leave no safe rollback to the old build.
 
-Fixing the backup remains an option. To accept its absence, open the failed
-run's confirmation, review the target and check **I understand: no verified
-backup exists; changes may leave no safe rollback path**. The dashboard obtains
-a ten-minute, single-use confirmation bound to that failed run, your current
-sign-in session, the executing build, the prepared target and the database
-facts. It reuses that verified preparation instead of repeating the exhausted
-backup ladder. A changed build or database, an expired confirmation, or an
-AlphaClaw restart requires a fresh review; the UI never treats that refusal
-as a successful update.
-
+The dashboard obtains an expiring, session-bound, single-use approval bound to
+the operation, executing build, exact prepared target and database facts.
 The human-only endpoint is
-`POST /api/openclaw/runs/:operationId/backup-risk-consent`. The next apply must
-carry both `confirmNoBackup: true` and the returned `confirmNoBackupToken`.
-A bare boolean does not authorize a waiver. Tokens never appear in run logs,
+`POST /api/openclaw/runs/:operationId/backup-risk-consent`; an apply using that
+approval carries both `confirmNoBackup: true` and its `confirmNoBackupToken`.
+A bare boolean never authorizes data risk. Tokens do not appear in run logs,
 event streams or agent responses, and agent requests cannot issue or use them.
+Changed facts, an expired approval, or an AlphaClaw restart require a fresh
+review rather than repeating an old archive ladder.
 
-Consent waives missing recovery protection only. Another database owner,
-insufficient disk, incompatible or unverified schemas/builds, corrupt state,
-blocklists and gateway holds remain blockers. Lifecycle ownership and all
-bound facts are checked again before consuming the confirmation and recording
-the update. The run stores `backup.noBackupConfirmed: true` and its originating
-failed operation; the existing warning, notification and audit event record
-that the update proceeded without a verified backup. A migration may then
-leave no compatible build to roll back to.
+Consent waives missing database recovery protection only. Unknown or
+incompatible schemas/builds, corrupt sources, another owner, insufficient
+disk, blocklists and gateway holds remain blockers. The operation revalidates
+its owned lease and bound facts before consuming approval and recording the
+intent. Recovery is labeled `forward_only`, never a verified database backup;
+no database restore happens automatically.
 
 ## Restart did not take effect (incumbent gateway)
 
@@ -999,18 +889,22 @@ README "Gateway prelaunch hook".
 
 ## Rollback fencing after a DB migration
 
-Rolling back to an older version after the newer one migrated the state DB
-is fenced: the older binary cannot verify state written by the newer one.
-The first rollback attempt answers `409 rollback_requires_confirmation`,
-and its `backupFile` field names the verified pre-update backup to
-**restore first** (see [Restoring a backup](#restoring-a-backup)). The
-response also says whether that file still exists (`backupFileExists`),
-whether it was a partial archive (`backupPartial`, workspace files
-excluded) and whether it was a consented reuse (`backupReused` with
-`reusedAgeMs` — state written since is not in it). The UI then shows a
-second-stage confirm dialog naming that backup with those caveats;
-confirming (`confirmDataRisk: true`) proceeds with the rollback anyway —
-data written by the newer version may be unreadable.
+Rolling back after a database migration is fenced against the schemas on disk,
+including pin rollbacks. A config-only checkpoint cannot satisfy the database
+recovery fence, and human forward-only consent cannot make an old build read
+a newer or unknown schema. AlphaClaw does not restore databases automatically.
+
+When recovery needs earlier data, use the actual pre-migration database set
+associated with that run, not the newest artifact by date. A newer checkpoint
+may contain no databases or already-migrated data. Verify its provenance,
+captured source build, database coverage and on-disk contents, then follow the
+[directory-checkpoint procedure](#restoring-a-config-checkpoint-or-database-set)
+or the [legacy archive procedure](#restoring-a-backup). Preserve current
+destinations and sidecars first. Historical fields such as `backupPartial`,
+`backupReused` and `reusedAgeMs` remain useful when reading old runs; they do
+not re-enable archive reuse or weaken the current schema gate. Protected
+database recovery artifacts and their originating records retain their
+migration-retention protection; config checkpoints do not displace them.
 
 ## `alphaclaw diagnose`
 
@@ -1071,9 +965,11 @@ mismatch (`state.pinLag`, bounded to 3 boots / 24 h).
   anything can run from the wrong binary (no `doctor --fix`, no launch), then
   the launch-compatibility gate checks that the installed build can open every
   state database (`PRAGMA user_version` vs the build's declared schema). A
-  build that cannot is HELD — `gatewayHold.reason: version_mismatch` or
-  `state_db_unreadable`, with the operator prose in `gatewayHold.detail` —
-  instead of launched. The boot log line is `launch gate: …`; the event row
+  build that cannot, or whose compatibility is unknown, is HELD —
+  `gatewayHold.reason: version_mismatch`, `state_db_unreadable` or
+  `state_db_unverified`, with the operator prose in `gatewayHold.detail` —
+  instead of launched. A missing/thrown verdict also skips config reconciliation
+  and Doctor; the Setup UI stays up. The boot log line is `launch gate: …`; the event row
   is `launch_compat_gate/held`; the notification and `alphaclaw diagnose`
   name the hold. The gateway card and restart/repair refusals use reason-aware
   advice: migration holds point to **Retry migration**; structural holds point
@@ -1086,11 +982,13 @@ mismatch (`state.pinLag`, bounded to 3 boots / 24 h).
   actual `user_version`, the diverged tree, the file) never relaunches the
   same binary: the structural repair re-activates the recorded build (or the
   newest local build that can read the databases), relaunches and proves
-  health. The relaunch step itself refuses a binary that cannot open the DB
-  (`restart/<source>/skipped {reason: version_mismatch}`).
-- `doctor --fix` (repair and the startup medic) and the pre-update backup run
-  from a build that can read the CURRENT databases, or are skipped
-  `version_mismatch` — never from the `openclaw` on PATH.
+  health. The relaunch step refuses an incompatible binary, unknown/corrupt
+  metadata, or a migration that lacks operator recovery approval. These
+  refusals do not turn into a fallback launch or Doctor run, even with
+  `OPENCLAW_LAUNCH_COMPAT_GATE=off`.
+- `doctor --fix` (repair and the startup medic) requires a build that can read
+  the current databases and the appropriate lifecycle/recovery admission.
+  Config-first checkpoints do not invoke a backup CLI from any build.
 
 **Next steps:**
 
@@ -1108,17 +1006,21 @@ mismatch (`state.pinLag`, bounded to 3 boots / 24 h).
    never removed from under a live gateway); `target_incompatible` (the
    recorded build itself cannot read the databases — the chooser then picks a
    local build that can, recorded as `applied.reason: "schema_recovery"`, or
-   answers `no_bootable_version`); `insufficient_disk` (needs 1.2 × the
+   answers `no_bootable_version`); `db_preflight_failed` (unknown/unreadable
+   compatibility); `recovery_choice_required` (the runtime target would migrate
+   databases — use Upgrade and choose database-set protection or explicit
+   forward-only consent before applying); `insufficient_disk` (needs 1.2 × the
    overlay's bytes); `activation_failed` / `verify_failed` (the swap failed
    after the old tree was removed — a hold is set and the notification and
    `boot-report.json` name it; re-run, or apply a version); `overlay_missing` (no complete local copy of the recorded build — apply the version again so the overlay is re-downloaded); `state_db_quiet` (a backup holds the quiet barrier — retry in about two minutes); `state_corrupted` (the channel-state file is unreadable — `alphaclaw diagnose` reports it); `lease_expired` (the lifecycle lease lapsed mid-reconcile — nothing was swapped; re-run).
 3. Or apply a version whose schema can read the databases from the Upgrade
    page — the apply preflight probes the TARGET build, so it keeps working
    during a mismatch.
-4. Kill switches (deployment env only, README env table):
-   `OPENCLAW_RUNTIME_RECONCILE=off`, `OPENCLAW_LAUNCH_COMPAT_GATE=off`,
-   `OPENCLAW_CRASH_CAUSE_LADDER=off`. Each keeps recording and stops acting;
-   the boot-time re-activation of a diverged tree is not switchable.
+4. Deployment settings can disable runtime reconciliation
+   (`OPENCLAW_RUNTIME_RECONCILE=off`) or the structural crash-repair ladder
+   (`OPENCLAW_CRASH_CAUSE_LADDER=off`). They do not waive compatibility or
+   migration protection. The legacy `OPENCLAW_LAUNCH_COMPAT_GATE=off` setting
+   no longer disables database safety checks; do not use it to force a launch.
 
 ## Auto-repair paused
 
@@ -1129,7 +1031,10 @@ re-activate the recorded build → undo a stray config restore → pick a local
 build that can read the databases / rename a legacy `exec-approvals.json` →
 relaunch — was refused or failed (`reason: structural_repair_failed`), or
 (b) the replacement child the ladder launched died inside its 60 s launch
-window twice with the same crash fingerprint (`replacement_exited_twice`).
+window twice with the same crash fingerprint (`replacement_exited_twice`), or
+(c) runtime launch checks found unknown/corrupt database state or a migration
+requiring an operator recovery choice (`state_db_unverified`,
+`state_db_unreadable`, `recovery_choice_required`).
 It is NOT the crash-loop pause (3 exits in 5 min — `restartAfterCrash`'s
 backoff relaunches continue) and NOT the repair budget
 (`repair/<source>/skipped {repair_attempts_exhausted}` — Doctor stops,
@@ -1144,6 +1049,12 @@ reads the same cause.
 
 **Remediation by cause:**
 
+- `state_db_unverified` / `state_db_unreadable` — establish compatible,
+  readable state before retrying. Neither forced repair nor a kill switch
+  waives an unknown or corrupt source.
+- `recovery_choice_required` — use Upgrade to choose complete database-set
+  protection or explicitly approve forward-only recovery. Runtime restart and
+  re-activation cannot perform an unprotected migration.
 - `state_schema_too_new` / `agent_schema_too_new` — the running build is
   older than the schema on disk. Re-activate the recorded (newer) build
   (Upgrade → Re-activate recorded build) or apply the version that wrote the
@@ -1166,11 +1077,12 @@ reads the same cause.
 **Resuming:** the pause clears by itself when the installed version changes
 (a reconcile or an apply) or when a gateway passes the 120 s acceptance hold
 (consecutive healthy, identity-clear probes — one green probe is not enough).
-To retry once with nothing changed: `POST /api/watchdog/repair
-{ "force": true }` — one attempt; the same fingerprint re-latches. A manual
-restart or a blocklist Clear does not clear it. Kill switch:
-`OPENCLAW_CRASH_CAUSE_LADDER=off` (classification still records; the ladder
-and the pause never act).
+For an ordinary structural pause, `POST /api/watchdog/repair
+{ "force": true }` allows one attempt; the same fingerprint re-latches.
+It does not clear a recovery-choice, unreadable-state or unverified-state
+pause. A manual restart or a blocklist Clear does not clear those requirements.
+`OPENCLAW_CRASH_CAUSE_LADDER=off` disables that structural ladder, not the
+fail-closed database-recovery pauses; classification still records.
 
 ## Where the evidence lives
 

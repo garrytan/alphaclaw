@@ -95,6 +95,8 @@ const kInterruptedRestartId = "0f76b007-e2e0-4c0d-9a1e-000000000079";
 // archive it would have become (openclaw-backup-offline-copy.js).
 const kTmpArchiveName =
   "openclaw-backup-2026-09-06T15-00-00.alphaclaw.tar.gz.0f76b007-e2e0-4c0d-9a1e-000000000054.tmp";
+const kCheckpointStagingName = ".recovery-0f76b007-e2e0-4c0d-9a1e-000000000055.staging";
+const kHistoricalArchiveName = "historical-retained.alphaclaw.tar.gz";
 // A legacy claim older than any plausible container start: two days.
 const kLegacyClaimAgeMs = 2 * 24 * 60 * 60 * 1000;
 // Stage 4(g) lands the boot `.tmp` sweep; until it is in the tree the seeded
@@ -347,7 +349,7 @@ describeContainer("container E2E: boot durability — legacy pidfile TID collisi
     console.log(`[container-boot-e2e] A: server pid ${ctx.serverPidA}, threads ${tids.join(",")} → old claim tid ${ctx.threadIdA}`);
   });
 
-  step("removes A and seeds the incident shape: legacy {pid: <tid>, at: <old>} + running run + interrupted restart op + .tmp archive", 3 * kMin, async () => {
+  step("removes A and seeds the incident shape: stale ownership, interrupted operations and checkpoint staging", 3 * kMin, async () => {
     await removeContainer(kContainerA);
     const now = Date.now();
     await seedVolume(kVolume, {
@@ -399,6 +401,9 @@ describeContainer("container E2E: boot durability — legacy pidfile TID collisi
       // #79: crash debris of a pre-apply backup (the incident's 8 GB file was
       // this shape; a few bytes prove the sweep just as well).
       [`${kBackupsDir}/${kTmpArchiveName}`]: "not-a-real-archive\n",
+      [`${kBackupsDir}/${kCheckpointStagingName}/payload/openclaw.json`]: '{"interrupted":true}\n',
+      [`${kBackupsDir}/${kCheckpointStagingName}/manifest.json`]: '{"incomplete":true}\n',
+      [`${kBackupsDir}/${kHistoricalArchiveName}`]: "retained historical archive sentinel\n",
     });
   });
 
@@ -516,6 +521,9 @@ describeContainer("container E2E: boot durability — legacy pidfile TID collisi
         `[container-boot-e2e] .tmp archive ${tmpStillThere ? "still present" : "gone"} — the boot sweep (Stage 4) is not in this tree; not asserted`,
       );
     }
+    await execInContainer(kContainerB, ["test", "!", "-e", `${kBackupsDir}/${kCheckpointStagingName}`]);
+    const { stdout: retained } = await execInContainer(kContainerB, ["cat", `${kBackupsDir}/${kHistoricalArchiveName}`]);
+    expect(retained).toBe("retained historical archive sentinel\n");
   });
 
   step("the gateway is healthy and /api/status agrees with the report", 3 * kMin, async () => {

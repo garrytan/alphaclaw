@@ -511,7 +511,7 @@ describe("server/startup", () => {
     });
   };
 
-  it("runs the #76/#79 boot steps in the fixed order: closers → backup-debris sweep → report → reconcileInstalled → compat gate → ensure steps → reconcileBootConfig → finalizeBootReport → startGateway", async () => {
+  it("runs the #76/#79 boot steps in the fixed order: closers → backup-debris sweep → report → reconcileInstalled → compat gate → reconcileBootConfig → ensure steps → finalizeBootReport → startGateway", async () => {
     const callOrder = [];
     const deps = mkOrderedDeps(callOrder);
 
@@ -530,6 +530,7 @@ describe("server/startup", () => {
       "recordBootReportServerPhase",
       "reconcileInstalledAtBoot",
       "assessLaunchCompatibilityAtBoot",
+      "reconcileBootConfig",
       "ensureManagedExecDefaults",
       "ensureUsageTrackerPluginConfig",
       "ensureWebhookMappingIds",
@@ -539,7 +540,6 @@ describe("server/startup", () => {
       "syncChannelConfig",
       "resolveSetupUrl",
       "ensureGatewayProxyConfig",
-      "reconcileBootConfig",
       "finalizeBootReport",
       "startGateway",
       "watchdog.start",
@@ -639,7 +639,7 @@ describe("server/startup", () => {
     );
   });
 
-  it("a throw in ANY new step (closers, report, reconcileInstalled, compat gate, finalize) is logged and still launches the gateway (F008)", async () => {
+  it("non-recovery boot step failures are logged and still launch a compatibility-verified gateway (F008)", async () => {
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     const boom = (label) =>
       vi.fn(async () => {
@@ -651,8 +651,6 @@ describe("server/startup", () => {
       sweepBackupDebrisAtBoot: boom("sweep"),
       recordBootReportServerPhase: boom("report"),
       reconcileInstalledAtBoot: boom("reconcileInstalled"),
-      // The compat gate THROWING is not a verdict: fail open.
-      assessLaunchCompatibilityAtBoot: boom("compat"),
       finalizeBootReport: boom("finalize"),
     });
 
@@ -668,7 +666,6 @@ describe("server/startup", () => {
       "Boot backup-debris sweep failed: sweep exploded",
       "Boot report server phase failed: report exploded",
       "Boot installed-tree reconcile failed: reconcileInstalled exploded",
-      "Boot launch compatibility gate failed: compat exploded",
       "Boot report finalize failed: finalize exploded",
     ]) {
       expect(errorSpy).toHaveBeenCalledWith(`[alphaclaw] ${label}`);
@@ -686,10 +683,8 @@ describe("server/startup", () => {
     });
     await runOnboardedBootSequence(withHold);
     expect(withHold.startGateway).not.toHaveBeenCalled();
-    // The config ensure steps and the reconciler still run: the admin UI
-    // (retry actions) needs them, and Stage 3's reconciler returns `held`
-    // before any doctor when the hold reason is structural.
-    expect(withHold.reconcileBootConfig).toHaveBeenCalledTimes(1);
+    expect(withHold.reconcileBootConfig).not.toHaveBeenCalled();
+    expect(withHold.ensureManagedExecDefaults).not.toHaveBeenCalled();
     expect(withHold.finalizeBootReport).toHaveBeenCalledWith(
       expect.objectContaining({ gatewayHeld: true }),
     );
@@ -706,14 +701,33 @@ describe("server/startup", () => {
       "[alphaclaw] Gateway held: launch compatibility gate refused",
     );
 
-    // null / undefined / compatible:null (no oracle) is NOT a hold: fail open.
-    for (const verdict of [null, undefined, { compatible: null, hold: null }, { compatible: true }]) {
-      const open = mkOrderedDeps([], {
-        assessLaunchCompatibilityAtBoot: vi.fn(async () => verdict),
-      });
-      await runOnboardedBootSequence(open);
-      expect(open.startGateway).toHaveBeenCalledTimes(1);
-    }
+    const verified = mkOrderedDeps([], {
+      assessLaunchCompatibilityAtBoot: vi.fn(async () => ({ compatible: true })),
+    });
+    await runOnboardedBootSequence(verified);
+    expect(verified.startGateway).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["throw", null, undefined, { compatible: null, hold: null }])("holds on an unavailable boot verdict (%s) without running config migration", async (verdict) => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const deps = mkOrderedDeps([], {
+      assessLaunchCompatibilityAtBoot: vi.fn(async () => {
+        if (verdict === "throw") throw new Error("compat exploded");
+        return verdict;
+      }),
+    });
+    await runOnboardedBootSequence(deps);
+    expect(deps.startGateway).not.toHaveBeenCalled();
+    expect(deps.reconcileBootConfig).not.toHaveBeenCalled();
+    expect(deps.ensureManagedExecDefaults).not.toHaveBeenCalled();
+    expect(deps.finalizeBootReport).toHaveBeenCalledWith(expect.objectContaining({
+      gatewayHeld: true, reconcile: expect.objectContaining({ status: "held", reason: "state_db_unverified" }),
+    }));
+    expect(deps.watchdog.start).toHaveBeenCalledOnce();
+    expect(deps.gmailWatchService.start).toHaveBeenCalledOnce();
+    expect(getBootPhase()).toEqual({ phase: "ready", error: null });
+    if (verdict === "throw") expect(errorSpy).toHaveBeenCalledWith("[alphaclaw] Boot launch compatibility gate failed: compat exploded");
   });
 
   it("hands the boot lifecycle lease to reconcileInstalledAtBoot and the compat gate as { hold } — the lock is not re-entrant, so neither step may acquire its own", async () => {
@@ -758,6 +772,7 @@ describe("server/startup", () => {
 
     expect(callOrder).toEqual([
       "reportLockContentionAtBoot",
+      "reconcileBootConfig",
       "ensureManagedExecDefaults",
       "ensureUsageTrackerPluginConfig",
       "ensureWebhookMappingIds",
@@ -767,7 +782,6 @@ describe("server/startup", () => {
       "syncChannelConfig",
       "resolveSetupUrl",
       "ensureGatewayProxyConfig",
-      "reconcileBootConfig",
       "startGateway",
       "watchdog.start",
       "gmailWatchService.start",

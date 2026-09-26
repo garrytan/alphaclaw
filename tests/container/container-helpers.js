@@ -3,6 +3,7 @@ const { promisify } = require("node:util");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const { createHash } = require("node:crypto");
 // Same prerelease classifier the Upgrade page's catalog uses, so the journey
 // targets exactly what the Beta section offers.
 const { classifyPrerelease } = require("../../lib/server/openclaw-releases");
@@ -99,9 +100,37 @@ const buildImage = async ({ tag, sourceRoot = repoRoot }) => {
   if (!fs.existsSync(tarballPath)) {
     throw new Error(`npm pack reported ${tarballName} but it is not in ${context}`);
   }
+  const fingerprint = {
+    tag,
+    version: JSON.parse(fs.readFileSync(path.join(sourceRoot, "package.json"), "utf8")).version,
+    packedAt: new Date().toISOString(),
+    tarballSha256: createHash("sha256").update(fs.readFileSync(tarballPath)).digest("hex"),
+    dockerfileSha256: createHash("sha256").update(fs.readFileSync(path.join(sourceRoot, "Dockerfile"))).digest("hex"),
+  };
+  const unpacked = path.join(context, "fingerprint");
+  fs.mkdirSync(unpacked);
+  await execFileAsync("tar", ["-xzf", tarballPath, "-C", unpacked]);
+  const packedFiles = {};
+  const hashPackedFiles = (relative = "") => {
+    for (const entry of fs.readdirSync(path.join(unpacked, "package", relative), { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+      const file = path.join(relative, entry.name);
+      if (entry.isDirectory()) hashPackedFiles(file);
+      else if (entry.isFile()) packedFiles[file] = createHash("sha256").update(fs.readFileSync(path.join(unpacked, "package", file))).digest("hex");
+    }
+  };
+  hashPackedFiles();
+  fingerprint.packedFiles = packedFiles;
+  fingerprint.packedFilesSha256 = createHash("sha256").update(JSON.stringify(packedFiles)).digest("hex");
+  fs.rmSync(unpacked, { recursive: true, force: true });
+  const fingerprintPath = path.join(ensureArtifactsDir(), `${tag.replace(/[^a-zA-Z0-9_.-]/g, "-")}-build.json`);
+  fs.writeFileSync(fingerprintPath, `${JSON.stringify(fingerprint, null, 2)}\n`);
+  const { packedFiles: omittedPackedFiles, ...summary } = fingerprint;
+  console.log(`[container-build] ${JSON.stringify({ ...summary, packedFileCount: Object.keys(omittedPackedFiles).length })}`);
   fs.renameSync(tarballPath, path.join(context, "alphaclaw.tgz"));
   fs.copyFileSync(path.join(sourceRoot, "Dockerfile"), path.join(context, "Dockerfile"));
   await docker(["build", "-t", tag, context], { timeoutMs: 15 * 60 * 1000 });
+  fingerprint.imageId = (await docker(["image", "inspect", "--format", "{{.Id}}", tag])).stdout.trim();
+  fs.writeFileSync(fingerprintPath, `${JSON.stringify(fingerprint, null, 2)}\n`);
   return { tag };
 };
 
@@ -237,6 +266,7 @@ const waitFor = async (fn, { timeoutMs, intervalMs = 1000, label = "condition" }
       if (value) return value;
       lastError = null;
     } catch (err) {
+      if (err?.terminal === true) throw err;
       lastError = err;
     }
     if (Date.now() - startedAt > timeoutMs) {
@@ -311,15 +341,15 @@ const resolveBetaTarget = ({ distTags, versions, stablePin }) => {
 // Registry timing must not disable the required browser journey. When a
 // prerelease newer than the shipped pin exists, the journey is pin → beta.
 // During a beta gap it is this published historical stable → the PIN: seed
-// 2026.7.1-2 as a recorded overlay in the unchanged production image and
-// upgrade it to the build we actually ship. Its schema 1 migrates forward to
-// the pin's 15/19, so the real migration spine still runs; and the target is
+// 2026.8.2 as a recorded overlay in the unchanged production image and
+// upgrade it to the build we actually ship. Its schema 15 has explicit
+// ownership metadata, so the bounded migration screen can verify it; the target is
 // exactly the newest stable, never a stale prerelease. (Until 2026-09-10 the
 // gap journey targeted 2026.9.1-beta.1; that release no longer boots — its
 // bundled `@openclaw/voyage-provider@beta` now requires plugin API
 // >= 2026.9.3 — and failed main's nightly, so the beta gap must never fall
 // back to a fixed historical prerelease again.)
-const kHistoricalStable = "2026.7.1-2";
+const kHistoricalStable = "2026.8.2";
 const resolveUpgradeJourney = ({ distTags, versions, stablePin }) => {
   const requirePublished = (version) => {
     if (!version || !Object.prototype.hasOwnProperty.call(versions || {}, version)) {

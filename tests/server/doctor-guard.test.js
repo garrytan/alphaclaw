@@ -143,6 +143,27 @@ describe("server/doctor-guard", () => {
     ).toEqual([]);
   });
 
+  it("bounds startup enumeration and leaves every quarantine untouched when the root exceeds the limit", () => {
+    let reads = 0;
+    const closeSync = vi.fn();
+    const renameSync = vi.fn();
+    const unlinkSync = vi.fn();
+    const readdirSync = vi.fn(() => { throw new Error("unbounded read"); });
+    const guard = createDoctorGuard({ openclawDir: "/fixture", logger: kSilentLogger, fsModule: {
+      ...fs, renameSync, unlinkSync, readdirSync,
+      opendirSync: () => ({
+        readSync: () => ({ name: ++reads === 1 ? "openclaw.json.last-good.quarantined-deadbeef" : `scratch-${reads}` }),
+        closeSync,
+      }),
+    } });
+    expect(guard.recoverQuarantinedLastGood()).toEqual({ recovered: 0 });
+    expect(reads).toBe(4097);
+    expect(closeSync).toHaveBeenCalledTimes(1);
+    expect(readdirSync).not.toHaveBeenCalled();
+    expect(renameSync).not.toHaveBeenCalled();
+    expect(unlinkSync).not.toHaveBeenCalled();
+  });
+
   describe("tripwires (restore sources the quarantine cannot reach)", () => {
     const runStaleSwap = async ({ tail = "Doctor complete\n" } = {}) => {
       const openclawDir = mkOpenclawDir();
