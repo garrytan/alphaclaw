@@ -3,6 +3,7 @@ import { buildBackupInventoryRows, buildLastManualBackupLine, buildFailureCtaMod
   buildRollbackDataRiskLine, buildBackupReuseConsentModel, buildBackupReuseOfferModel } from "../../lib/public/js/components/upgrade-tab/helpers.js";
 import { buildBackupResultMessage } from "../../lib/public/js/components/upgrade-tab/backup-presentation.js";
 import { UpgradeProgressCard } from "../../lib/public/js/components/upgrade-tab/progress-card.js";
+import { buildRecoveryChoice, resolveRecoveryRequest } from "../../lib/public/js/components/upgrade-tab/recovery-choice.js";
 
 const at = Date.parse("2026-09-16T12:00:00Z");
 const minimal = { file: "/backups/one.alphaclaw.tar.gz", at, verified: true,
@@ -17,6 +18,69 @@ const text = (node) => {
 };
 
 describe("migration-only backup presentation", () => {
+  it("guides verified database-directory rollback through matching-build offline restore rather than tar extraction", () => {
+    const file = "/backups/recovery-op";
+    const recovery = { kind: "database_set", checkpoint: { file, verified: true }, databases: { complete: true, verified: true, count: 2 }, restore: { configAvailable: true, databaseSetAvailable: true } };
+    const model = { backupFile: file, backupFileExists: true, recovery };
+    const line = buildRollbackDataRiskLine(model);
+    for (const phrase of ["database recovery directory", "not a tar archive", "verify the manifest and database integrity", "complete captured database set", "matching source build", "preserve omitted files", "does not restore database data automatically"]) expect(line).toContain(phrase);
+    expect(line).not.toContain("gzip");
+    for (const invalid of [
+      { ...model, backupFileExists: undefined },
+      { ...model, recovery: { ...recovery, restore: { databaseSetAvailable: false } } },
+      { ...model, recovery: { ...recovery, databases: { complete: false, verified: true } } },
+      { ...model, recovery: { ...recovery, checkpoint: { file, verified: false } } },
+      { ...model, backupFile: "/backups/different-op" },
+    ]) expect(buildRollbackDataRiskLine(invalid)).toContain("do not restore it");
+    const missing = buildRollbackDataRiskLine({ ...model, backupFileExists: false, backupFileCaveat: "missing" });
+    expect(missing).toContain("database recovery directory");
+    expect(missing).toContain("no longer on disk");
+    const tampered = buildRollbackDataRiskLine({ ...model, backupFileExists: false, backupFileCaveat: "content_changed", newestSurvivingBackup: minimal });
+    expect(tampered).toContain("do not restore it");
+    expect(tampered).toContain("It is migration-only");
+    expect(tampered).not.toContain("complete captured database set with its matching source build");
+  });
+  it("never treats configuration-only or forward-only recovery as database rollback protection", () => {
+    for (const kind of ["config_only", "forward_only"]) {
+      const recovery = { kind, checkpoint: { file: "/backups/config-op", verified: true }, restore: { configAvailable: true, databaseSetAvailable: false } };
+      const line = buildRollbackDataRiskLine({ backupFile: null, recovery });
+      expect(line).toContain("configuration checkpoint is available");
+      expect(line).toContain("cannot restore database data or make database rollback safe");
+      expect(line).toContain("No database snapshot");
+      expect(line).toContain("does not restore database data automatically");
+      if (kind === "forward_only") expect(line).toContain("approved as forward-only");
+      const unverifiable = buildRollbackDataRiskLine({ backupFile: null, recovery: { ...recovery, restore: { configAvailable: false, databaseSetAvailable: false } } });
+      expect(unverifiable).toContain("No verified configuration checkpoint");
+      expect(unverifiable).not.toContain("checkpoint is available");
+    }
+  });
+  it("binds a prepared dev HEAD choice to its immutable commit without changing other requests", () => {
+    const sha = "a".repeat(40);
+    const request = { payload: { channel: "dev", devHead: true }, label: "latest dev" };
+    expect(resolveRecoveryRequest({ target: { channel: "dev", sha } }, request)).toMatchObject({ payload: { channel: "dev", sha }, label: "dev aaaaaaaa" });
+    expect(resolveRecoveryRequest({ target: { channel: "dev", sha: "short" } }, request)).toBe(request);
+    const fixed = { payload: { channel: "dev", sha: "b".repeat(40) } };
+    expect(resolveRecoveryRequest({ target: { channel: "dev", sha } }, fixed)).toBe(fixed);
+  });
+  it("derives migration size/count from the server preflight when top-level estimates are absent", () => {
+    const request = { payload: { channel: "stable", version: "2026.9.6" } };
+    const error = { code: "recovery_choice_required", operationId: "choice", preflight: { dbSizesBytes: { "/state.db": 2 * 1024 ** 3, "/agent.db": 6 * 1024 ** 3 } } };
+    expect(buildRecoveryChoice(error, request)).toMatchObject({ databaseBytes: 8 * 1024 ** 3, databaseCount: 2 });
+    expect(buildRecoveryChoice({ ...error, preflight: { dbSizesBytes: { "/state.db": null } } }, request).databaseBytes).toBeNull();
+  });
+  it("distinguishes verified configuration recovery from verified database-set recovery", () => {
+    const recovery = { kind: "config_only", checkpoint: { verified: true, bytes: 2048 }, databases: { complete: false, verified: false, entries: [] }, restore: { configAvailable: true, databaseSetAvailable: false } };
+    expect(buildBackupResultMessage({ recovery })).toBe("Configuration checkpoint available; database data not backed up");
+    const [row] = buildBackupInventoryRows({ entries: [{ file: "/backups/checkpoint", profile: "config_only", verified: true, recovery, eligible: false }] });
+    expect(row.badges.map((badge) => badge.label).join(" ")).toContain("database data not backed up");
+    expect(row.badges.some((badge) => badge.id === "verified")).toBe(false);
+    const databaseSet = { ...recovery, kind: "database_set", databases: { complete: true, verified: true, entries: [{ file: "state.db" }] }, restore: { configAvailable: true, databaseSetAvailable: true } };
+    expect(buildBackupResultMessage({ recovery: databaseSet })).toContain("verified database snapshot available");
+    expect(buildBackupResultMessage({ recovery: { ...databaseSet, databases: { complete: false, verified: true } } })).not.toContain("verified database snapshot available");
+    const run = { operationId: "checkpoint", target: { kind: "backup" }, state: "completed", finishedAt: at, result: { ok: true, recovery } };
+    expect(buildLastManualBackupLine([run], at + 1).text).toContain("database data not backed up");
+    expect(text(UpgradeProgressCard({ operation: { ...run, phase: "completed", steps: [] } }))).toContain("Configuration checkpoint completed");
+  });
   it("labels quick and streamed manual results, inventory, and last manual backup honestly", () => {
     expect(buildBackupResultMessage({ archive: minimal }, { toast: true })).toContain("Migration-only backup");
     expect(buildBackupResultMessage({ archive: minimal })).toContain("workspace and other state omitted");

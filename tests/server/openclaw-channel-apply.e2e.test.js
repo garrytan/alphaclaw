@@ -66,7 +66,7 @@ const writePackageFixture = (
   fs.mkdirSync(path.join(packageDir, "dist"), { recursive: true });
   fs.writeFileSync(
     path.join(packageDir, "package.json"),
-    `${JSON.stringify({ name: "openclaw", version, ...(bin ? { bin } : {}) }, null, 2)}\n`,
+    `${JSON.stringify({ name: "openclaw", version, openclaw: { schemaVersions: { state: 16, agent: 19 } }, ...(bin ? { bin } : {}) }, null, 2)}\n`,
   );
   if (bin) {
     const relative = typeof bin === "string" ? bin : Object.values(bin)[0];
@@ -94,8 +94,7 @@ const writeInstallFixture = (installDir, options) =>
     options,
   );
 
-const writeCheckoutFixture = (rootDir, { sha, bin = true } = {}) => {
-  const checkoutDir = path.join(rootDir, "openclaw");
+const writeCheckoutFixture = (rootDir, { sha, bin = true, checkoutDir = path.join(rootDir, "openclaw") } = {}) => {
   fs.mkdirSync(path.join(checkoutDir, ".git"), { recursive: true });
   fs.writeFileSync(path.join(checkoutDir, ".git", "HEAD"), `${sha}\n`);
   fs.writeFileSync(
@@ -201,6 +200,8 @@ const createHarness = ({
   delete process.env.OPENCLAW_GIT_DIR;
   const rootDir = mkTemp("alphaclaw-apply-e2e-root-");
   const openclawDir = path.join(rootDir, ".openclaw");
+  fs.mkdirSync(openclawDir, { recursive: true });
+  fs.writeFileSync(path.join(openclawDir, "openclaw.json"), "{}");
   const packageRoot = mkTemp("alphaclaw-apply-e2e-pkgroot-");
   fs.writeFileSync(
     path.join(packageRoot, "package.json"),
@@ -224,11 +225,27 @@ const createHarness = ({
   }
 
   const runner = {
-    runStreamed: vi.fn(
-      runnerImpl
-        ? (opts) => runnerImpl(opts, defaultRunnerImpl)
-        : defaultRunnerImpl,
-    ),
+    runStreamed: vi.fn(async (opts) => {
+      if (opts.args?.includes("update")) {
+        throw new Error("Dev preparation must not execute the native updater");
+      }
+      const result = await (runnerImpl ? runnerImpl(opts, defaultRunnerImpl) : defaultRunnerImpl(opts));
+      if (result.ok && opts.command === "git" && opts.args?.[0] === "clone") {
+        const candidate = opts.args.at(-1);
+        expect(opts.env.OPENCLAW_GIT_DIR).toBe(candidate);
+        expect(opts.cwd).toBe(candidate);
+        writeCheckoutFixture(rootDir, { sha: kDevSha, checkoutDir: candidate });
+      }
+      if (result.ok && opts.command === "git" && opts.args?.[0] === "checkout") {
+        const candidate = opts.env.OPENCLAW_GIT_DIR;
+        expect(opts.cwd).toBe(candidate);
+        const requested = opts.args.at(-1);
+        const sha = requested === "origin/main" || kDevSha.startsWith(requested) ? kDevSha : requested;
+        expect(sha).toMatch(/^[a-f0-9]{40}$/);
+        fs.writeFileSync(path.join(candidate, ".git", "HEAD"), `${sha}\n`);
+      }
+      return result;
+    }),
   };
   const installToTempDir = vi.fn(async ({ versionSpec }) => {
     const tmpDir = mkTemp("openclaw-fake-prepare-");
@@ -275,6 +292,15 @@ const createHarness = ({
     nowFn,
     logger: kSilentLogger,
     backupsDir: path.join(rootDir, "backups", "openclaw"),
+    openclawSpawnEnv: () => ({ OPENCLAW_STATE_DIR: openclawDir }),
+    gatewayQuiesce: {
+      isRunning: async () => false,
+      suppress: () => "test-owner",
+      unsuppress: vi.fn(),
+      stop: vi.fn(async () => true),
+      start: vi.fn(async () => {}),
+    },
+    dbQuiet: async () => ({ release() {} }),
   });
 
   const app = express();
@@ -420,11 +446,7 @@ describe("server/openclaw-channel apply flow (e2e)", { retry: 1 }, () => {
       installedVersion: "1.0.0",
       sentinelVersion: "1.0.0",
       runnerImpl: async (opts, fallback) => {
-        if (opts.command === "openclaw" && opts.args?.[0] === "backup") {
-          // Hold the step until the SSE collector is attached, then let the
-          // faithful stub WRITE the archive: stable→beta crosses a channel
-          // boundary (#79 (a)), so the backup is hard-gated and an exit 0
-          // with no artifact is a phantom backup the gate refuses.
+        if (opts.command === "node" && opts.args?.includes("--version")) {
           await backupGate.promise;
           return fallback(opts);
         }
@@ -455,9 +477,6 @@ describe("server/openclaw-channel apply flow (e2e)", { retry: 1 }, () => {
     );
     expect(sync.isApplyInProgress()).toBe(true);
 
-    // Subscribe over a real socket, then unblock the backup step. Fake ONLY
-    // setTimeout so the 1.5s restart timer becomes controllable while socket
-    // I/O keeps flowing.
     const collector = await openSseCollector({
       port,
       eventsPath: applyRes.body.events,
@@ -477,9 +496,9 @@ describe("server/openclaw-channel apply flow (e2e)", { retry: 1 }, () => {
     );
     const stepOrder = [
       "preflight",
-      "backup",
       "download",
       "verify",
+      "backup",
       "record",
       "restarting",
     ].map((name) => firstIndexOfStep(events, name));
@@ -541,7 +560,7 @@ describe("server/openclaw-channel apply flow (e2e)", { retry: 1 }, () => {
       expect(run.intentCheck).toBeUndefined();
     });
 
-    it("the same body declared `downgrade` proceeds to the hard-gated backup step and records the verified direction", async () => {
+    it("the same body declared `downgrade` proceeds to the required configuration checkpoint and records the verified direction", async () => {
       const harness = createHarness({
         pin: "1.2.0",
         installedVersion: "1.2.0",
@@ -553,9 +572,10 @@ describe("server/openclaw-channel apply flow (e2e)", { retry: 1 }, () => {
           return fallback(opts);
         },
       });
+      fs.linkSync(path.join(harness.openclawDir, "openclaw.json"), path.join(harness.rootDir, "config-alias.json"));
       const result = await harness.sync.applyUpdate({ channel: "stable", version: "1.1.0", intent: "downgrade" });
       expect(result.status).toBe(409);
-      expect(result.body.code).toBe("backup_failed");
+      expect(result.body.code).toBe("CHECKPOINT_SOURCE_CHANGED");
       const [run] = readRuns(harness);
       expect(run.target.intent).toBe("downgrade");
       expect(run.intentCheck).toEqual({ direction: "verified", installedVersion: "1.2.0", latest: "not_applicable" });
@@ -607,7 +627,46 @@ describe("server/openclaw-channel apply flow (e2e)", { retry: 1 }, () => {
     });
   });
 
-  it("blocks a downgrade when the backup fails, with the full error envelope", async () => {
+  it("streams the prepared migration choice after HTTP handoff and binds consent to that operation", async () => {
+    const prepared = deferred();
+    const harness = createHarness({ runnerImpl: async (opts, fallback) => {
+      if (opts.command === "node" && opts.args?.includes("--version")) await prepared.promise;
+      return fallback(opts);
+    } });
+    const directory = path.join(harness.openclawDir, "state");
+    fs.mkdirSync(directory);
+    const db = new DatabaseSync(path.join(directory, "openclaw.sqlite"));
+    db.exec("PRAGMA user_version=15; CREATE TABLE schema_meta(meta_key TEXT, role TEXT, schema_version INTEGER, agent_id TEXT); INSERT INTO schema_meta VALUES('primary','global',15,NULL)");
+    db.close();
+    const { port } = await listenApp(harness.app);
+    const response = await request(harness.app).post("/api/openclaw/apply")
+      .set("Cookie", "setup_token=integration-human-session")
+      .send({ channel: "beta", version: "1.1.0", intent: "update" });
+    expect(response.status).toBe(202);
+    const collector = await openSseCollector({ port, eventsPath: response.body.events });
+    prepared.resolve();
+    const events = await collector.done;
+    const terminal = events.at(-1);
+    expect(terminal.event).toBe("error");
+    expect(terminal.data).toMatchObject({
+      code: "recovery_choice_required", operationId: response.body.operationId,
+      target: { channel: "beta", version: "1.1.0" }, intent: "update",
+      choices: ["database_set", "forward_only", "cancel"], backupRiskEligible: true,
+      recoveryMode: "config_only", gatewayHeld: false, preflight: { migrationRequired: true },
+    });
+    expect(terminal.data.confirmNoBackupToken).toBeUndefined();
+    const approval = await request(harness.app)
+      .post(`/api/openclaw/runs/${response.body.operationId}/backup-risk-consent`)
+      .set("Cookie", "setup_token=integration-human-session").send({});
+    expect(approval.status).toBe(200);
+    expect(approval.body).toMatchObject({ operationId: response.body.operationId, target: { channel: "beta", version: "1.1.0" } });
+    expect(typeof approval.body.confirmNoBackupToken).toBe("string");
+    expect(harness.store.readState().applied).toBeNull();
+    expect(harness.restartProcess).not.toHaveBeenCalled();
+    expect(fs.existsSync(path.join(harness.rootDir, "backups", "openclaw"))).toBe(false);
+  });
+
+  it("blocks a downgrade when the configuration checkpoint fails, with the full error envelope", async () => {
     const harness = createHarness({
       pin: "1.2.0",
       installedVersion: "1.2.0",
@@ -619,6 +678,7 @@ describe("server/openclaw-channel apply flow (e2e)", { retry: 1 }, () => {
         return fallback(opts);
       },
     });
+    fs.linkSync(path.join(harness.openclawDir, "openclaw.json"), path.join(harness.rootDir, "config-alias.json"));
 
     const res = await request(harness.app)
       .post("/api/openclaw/apply")
@@ -627,15 +687,21 @@ describe("server/openclaw-channel apply flow (e2e)", { retry: 1 }, () => {
       // backup step ever runs; see the intent cases below).
       .send({ channel: "stable", version: "1.1.0", intent: "downgrade" });
 
-    expect(res.status).toBe(409);
-    expect(res.body.ok).toBe(false);
-    expect(res.body.code).toBe("backup_failed");
-    expect(res.body.message).toMatch(/backup/i);
-    expect(typeof res.body.hint).toBe("string");
-    expect(res.body.hint.length).toBeGreaterThan(0);
+    expect([409, 202]).toContain(res.status);
+    await waitFor(() => harness.operationEvents.getOperation(res.body.operationId)?.status === "failed");
+    const operation = harness.operationEvents.getOperation(res.body.operationId);
+    const failure = operation.events.find((entry) => entry.event === "error").data;
+    expect(failure.code).toBe("CHECKPOINT_SOURCE_CHANGED");
+    expect(failure.error).toMatch(/Recovery/i);
+    expect(typeof failure.hint).toBe("string");
+    expect(failure.hint.length).toBeGreaterThan(0);
+    const run = harness.sync.runLedger.readRun(res.body.operationId);
+    expect(run).toMatchObject({ state: "failed", ok: false, result: { code: "CHECKPOINT_SOURCE_CHANGED" } });
+    if (res.status === 409) expect(res.body).toMatchObject({ ok: false, code: failure.code, message: failure.error, hint: failure.hint });
     expect(harness.store.readState().applied).toBeNull();
-    expect(harness.store.hasOverlay("1.1.0")).toBe(false);
-    expect(harness.installToTempDir).not.toHaveBeenCalled();
+    expect(harness.store.hasOverlay("1.1.0")).toBe(true);
+    expect(harness.installToTempDir).toHaveBeenCalledTimes(1);
+    expect(harness.runner.runStreamed.mock.calls.some(([call]) => call.command === "openclaw" && call.args?.[0] === "backup")).toBe(false);
   });
 
   it("rejects artifacts that fail verification and records the failed operation", async () => {
@@ -692,11 +758,10 @@ describe("server/openclaw-channel apply flow (e2e)", { retry: 1 }, () => {
     const { app, sync, store, openclawDir } = harness;
     expect(sync.syncAtBoot().ok).toBe(true);
 
-    // Seed a real state DB so the preflight step has something to snapshot.
     const stateDir = path.join(openclawDir, "state");
     fs.mkdirSync(stateDir, { recursive: true });
     const db = new DatabaseSync(path.join(stateDir, "openclaw.sqlite"));
-    db.exec("CREATE TABLE meta(k TEXT)");
+    db.exec("PRAGMA user_version=17; CREATE TABLE schema_meta(meta_key TEXT, role TEXT, schema_version INTEGER, agent_id TEXT); INSERT INTO schema_meta VALUES('primary','global',17,NULL)");
     db.close();
 
     await request(app)
@@ -725,6 +790,7 @@ describe("server/openclaw-channel apply flow (e2e)", { retry: 1 }, () => {
 
     // The incompatible version is NEVER recorded as the applied build.
     expect(store.readState().applied).toBeNull();
+    expect(harness.runner.runStreamed.mock.calls.some(([call]) => call.args?.includes("preflight"))).toBe(false);
   });
 
   it("rejects concurrent applies and gates the legacy self-update route", async () => {
@@ -791,7 +857,7 @@ describe("server/openclaw-channel apply flow (e2e)", { retry: 1 }, () => {
     expect(releasedRes.status).toBe(409);
   });
 
-  it("reads the updater's UpdateRunResult out of a build log whose EARLIER lines also parse as JSON (build:completed, never a false warning)", async () => {
+  it("uses candidate build exit status when build output contains JSON noise (build:completed, never a false warning)", async () => {
     // Live-verified 2026-09-02: a real from-source dev build logs brace/bracket
     // noise before the updater's final report, and a first-JSON-value parse
     // read `status` as unknown → build:warning on every real dev build.
@@ -800,7 +866,7 @@ describe("server/openclaw-channel apply flow (e2e)", { retry: 1 }, () => {
       installedVersion: "1.0.0",
       sentinelVersion: "1.0.0",
       runnerImpl: async (opts, fallback) => {
-        if (opts.command === "openclaw" && opts.args?.[0] === "update") {
+        if (opts.command === "pnpm" && opts.args?.[0] === "build") {
           return {
             ok: true,
             code: 0,
@@ -837,10 +903,16 @@ describe("server/openclaw-channel apply flow (e2e)", { retry: 1 }, () => {
     expect(stepNames, stepNames.join(", ")).toContain("build:completed");
     expect(stepNames).not.toContain("build:warning");
     const build = run.steps.find((step) => step.name === "build" && step.status === "completed");
-    expect(JSON.stringify(build)).toContain('"updaterStatus":"ok"');
+    expect(build).not.toHaveProperty("updaterStatus");
+    expect(stepNames).toContain("checkout:completed");
+    expect(stepNames).toContain("install:completed");
+    expect(stepNames).toContain("doctor:completed");
+    expect(harness.runner.runStreamed.mock.calls.some(([opts]) => opts.command === "openclaw" && opts.args?.[0] === "update")).toBe(false);
     expect(harness.store.readState().applied).toEqual(
       expect.objectContaining({ channel: "dev", sha: kDevSha }),
     );
+    expect(harness.store.readState().applied.checkoutDir).not.toBe(path.join(harness.rootDir, "openclaw"));
+    expect(fs.readFileSync(path.join(harness.rootDir, "openclaw", ".git", "HEAD"), "utf8").trim()).toBe(kDevSha);
   });
 
   it("streams multi-MB dev-build output over SSE and records the checkout sha", async () => {
@@ -852,7 +924,7 @@ describe("server/openclaw-channel apply flow (e2e)", { retry: 1 }, () => {
       installedVersion: "1.0.0",
       sentinelVersion: "1.0.0",
       runnerImpl: async (opts, fallback) => {
-        if (opts.command === "openclaw" && opts.args?.[0] === "update") {
+        if (opts.command === "pnpm" && opts.args?.[0] === "build") {
           await updateGate.promise;
           for (let i = 0; i < chunkCount; i += 1) {
             opts.onOutput?.(bigChunk, "stdout");
@@ -898,14 +970,13 @@ describe("server/openclaw-channel apply flow (e2e)", { retry: 1 }, () => {
       expect.objectContaining({ channel: "dev", sha: kDevSha }),
     );
 
-    // Updater-reported failure: 409, nothing recorded, no restart.
     const failing = createHarness({
       pin: "1.0.0",
       installedVersion: "1.0.0",
       sentinelVersion: "1.0.0",
       runnerImpl: async (opts, fallback) => {
-        if (opts.command === "openclaw" && opts.args?.[0] === "update") {
-          return { ok: true, code: 0, tail: '{"status":"error"}', timedOut: false };
+        if (opts.command === "pnpm" && opts.args?.[0] === "build") {
+          return { ok: false, code: 1, tail: '{"status":"error"}', timedOut: false };
         }
         return fallback(opts);
       },

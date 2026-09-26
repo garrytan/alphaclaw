@@ -5538,6 +5538,7 @@ describe("server/watchdog", () => {
         LAUNCH_FAILED: "launch_failed",
         LEASE_EXPIRED: "lease_expired",
         VERSION_MISMATCH: "version_mismatch",
+        RECOVERY_REQUIRED: "recovery_required",
       });
     });
 
@@ -12730,12 +12731,12 @@ describe("server/watchdog", () => {
       watchdog.stop();
     });
 
-    it("runtime compat step (C2): a relaunch against a binary that cannot read the databases books restart/<source>/skipped {version_mismatch, expected, running, intent}, clears the pending replacement, latches the mismatch and hands the cause to the structural ladder; OPENCLAW_LAUNCH_COMPAT_GATE=off launches as before", async () => {
+    it("runtime compat step (C2): incompatible relaunches latch the mismatch and hand the cause to structural repair, even when the retired compatibility kill switch is off", async () => {
       const hooks = makeHooks();
       let installedCompatible = false;
       const assessLaunchCompatibility = vi.fn(async () =>
         installedCompatible
-          ? { compatible: true, reasons: [], installedVersion: hooks.info.installedVersion, holdReason: null }
+          ? { compatible: true, migrationRequired: false, reasons: [], installedVersion: hooks.info.installedVersion, holdReason: null }
           : {
               compatible: false,
               reasons: ["state_schema_too_new"],
@@ -12791,7 +12792,6 @@ describe("server/watchdog", () => {
       });
       watchdog.stop();
 
-      // Kill switch: the seam is never consulted, the launch proceeds.
       process.env[kLaunchCompatGateEnvKey] = "off";
       const compat = vi.fn(async () => ({ compatible: false, reasons: ["state_schema_too_new"] }));
       const off = createHarness({
@@ -12802,18 +12802,21 @@ describe("server/watchdog", () => {
       });
       off.watchdog.onGatewayExit({ code: 1, expectedExit: false, stderrTail: [] });
       await flushAll();
-      expect(compat).not.toHaveBeenCalled();
-      expect(off.launchGatewayProcess).toHaveBeenCalledTimes(1);
-      expect(rowsOf(off.insertWatchdogEvent, "restart", "requested")[0].source).toBe("exit_event");
+      expect(compat).toHaveBeenCalled();
+      expect(off.launchGatewayProcess).not.toHaveBeenCalled();
+      expect(rowsOf(off.insertWatchdogEvent, "restart", "requested")).toHaveLength(0);
+      expect(rowsOf(off.insertWatchdogEvent, "restart", "skipped")[0]).toMatchObject({
+        source: "exit_event", details: { reason: "version_mismatch" },
+      });
       off.watchdog.stop();
     });
 
     it("compat step inside runRepair: Doctor ran, the relaunch was refused → skipped {version_mismatch}, admitted Doctor attempt counted, no 'Auto-repair failed' notice", async () => {
-      const assessLaunchCompatibility = vi.fn(async () => ({
+      const assessLaunchCompatibility = vi.fn().mockResolvedValueOnce({ compatible: true, migrationRequired: false }).mockResolvedValue({
         compatible: false,
         reasons: ["agent_schema_too_new"],
         installedVersion: "2026.7.1-2",
-      }));
+      });
       const { watchdog, clawCmd, notifier, insertWatchdogEvent } = createHarness({
         autoRepair: true,
         fetchImpl: failingFetch,
@@ -12822,6 +12825,7 @@ describe("server/watchdog", () => {
       });
       const result = await watchdog.triggerRepair();
       expect(doctorCalls(clawCmd)).toBe(1);
+      expect(assessLaunchCompatibility).toHaveBeenCalledTimes(2);
       expect(result).toMatchObject({
         ok: false,
         skipped: true,

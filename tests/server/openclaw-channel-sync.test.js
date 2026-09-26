@@ -89,20 +89,23 @@ const writePackageFixture = (
 
 // A real SQLite file with an explicit PRAGMA user_version — the schema line
 // the #78 agent arm reads (same shape as openclaw-schema-versions.test.js).
-const writeSqliteDb = (file, { userVersion = 0 } = {}) => {
+const writeSqliteDb = (file, { userVersion = 0, dbKind = "state", agentId = null } = {}) => {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const db = new DatabaseSync(file);
   db.exec("CREATE TABLE t(x INTEGER)");
+  db.exec("CREATE TABLE schema_meta(meta_key TEXT PRIMARY KEY, role TEXT NOT NULL, schema_version INTEGER NOT NULL, agent_id TEXT)");
   db.exec(`PRAGMA user_version = ${userVersion}`);
+  db.prepare("INSERT INTO schema_meta(meta_key, role, schema_version, agent_id) VALUES ('primary', ?, ?, ?)")
+    .run(dbKind === "state" ? "global" : "agent", userVersion, agentId);
   db.close();
   return file;
 };
 const writeStateDb = (stateRoot, options) =>
-  writeSqliteDb(path.join(stateRoot, "state", "openclaw.sqlite"), options);
+  writeSqliteDb(path.join(stateRoot, "state", "openclaw.sqlite"), { dbKind: "state", ...options });
 const writeAgentDb = (stateRoot, agentId, options) =>
   writeSqliteDb(
     path.join(stateRoot, "agents", agentId, "agent", "openclaw-agent.sqlite"),
-    options,
+    { dbKind: "agent", agentId, ...options },
   );
 const readRunRecords = (openclawDir) => {
   const runsDir = path.join(openclawDir, ".alphaclaw", "runs");
@@ -117,8 +120,7 @@ const writeInstallFixture = (installDir, options) =>
     options,
   );
 
-const writeCheckoutFixture = (rootDir, { sha, bin = true } = {}) => {
-  const checkoutDir = path.join(rootDir, "openclaw");
+const writeCheckoutFixture = (rootDir, { sha, bin = true, checkoutDir = path.join(rootDir, "openclaw") } = {}) => {
   fs.mkdirSync(path.join(checkoutDir, ".git"), { recursive: true });
   fs.writeFileSync(path.join(checkoutDir, ".git", "HEAD"), `${sha}\n`);
   fs.writeFileSync(
@@ -224,6 +226,7 @@ const defaultRunnerImpl = async (opts) => {
 
 const createHarness = ({
   pin = "1.0.0",
+  openclawDir: selectedOpenclawDir = null,
   channel = "stable",
   installedVersion = null,
   sentinelVersion = null,
@@ -240,7 +243,9 @@ const createHarness = ({
 } = {}) => {
   delete process.env.OPENCLAW_GIT_DIR;
   const rootDir = mkTemp("alphaclaw-channel-sync-root-");
-  const openclawDir = path.join(rootDir, ".openclaw");
+  const openclawDir = selectedOpenclawDir || path.join(rootDir, ".openclaw");
+  fs.mkdirSync(openclawDir, { recursive: true });
+  fs.writeFileSync(path.join(openclawDir, "openclaw.json"), "{}\n");
   const packageRoot = mkTemp("alphaclaw-channel-sync-pkgroot-");
   fs.writeFileSync(
     path.join(packageRoot, "package.json"),
@@ -264,16 +269,39 @@ const createHarness = ({
   }
 
   const runner = {
-    runStreamed: vi.fn(
-      runnerImpl ? (opts) => runnerImpl(opts, defaultRunnerImpl) : defaultRunnerImpl,
-    ),
+    runStreamed: vi.fn(async (opts) => {
+      if (opts.args?.includes("update") && !opts.args.includes("repair")) {
+        throw new Error("Dev preparation must not execute the native updater");
+      }
+      const result = await (runnerImpl ? runnerImpl(opts, defaultRunnerImpl) : defaultRunnerImpl(opts));
+      const candidate = opts.env?.OPENCLAW_GIT_DIR;
+      const fixture = path.join(rootDir, "openclaw");
+      if (result.ok && candidate && path.dirname(candidate) === `${fixture}-candidates`) {
+        if (opts.command === "git" && opts.args?.[0] === "clone") {
+          expect(opts.args.at(-1)).toBe(candidate);
+          expect(opts.cwd).toBe(candidate);
+          if (fs.existsSync(fixture)) fs.cpSync(fixture, candidate, { recursive: true });
+          else writeCheckoutFixture(rootDir, { sha: kDevSha, checkoutDir: candidate });
+        }
+        if (opts.command === "git" && opts.args?.[0] === "checkout") {
+          expect(opts.cwd).toBe(candidate);
+          const requested = opts.args.at(-1);
+          const sha = requested === "origin/main"
+            ? fs.readFileSync(path.join(candidate, ".git", "HEAD"), "utf8").trim()
+            : [kDevSha, kOtherSha].find((commit) => commit.startsWith(requested)) || requested;
+          expect(sha).toMatch(/^[a-f0-9]{40}$/);
+          fs.writeFileSync(path.join(candidate, ".git", "HEAD"), `${sha}\n`);
+        }
+      }
+      return result;
+    }),
   };
   const installResults = [];
   const installToTempDir = vi.fn(async ({ versionSpec }) => {
     const tmpDir = mkTemp("openclaw-fake-prepare-");
     const openclawPackageDir = writePackageFixture(
       path.join(tmpDir, "node_modules", "openclaw"),
-      { version: versionSpec, ...installFixture },
+      { version: versionSpec, schema: { state: 17, agent: 21 }, ...installFixture },
     );
     const cleanup = vi.fn(() => {
       try {
@@ -286,6 +314,14 @@ const createHarness = ({
   });
 
   const notify = vi.fn(async () => {});
+  const gatewayQuiesce = {
+    isRunning: vi.fn(async () => false),
+    suppress: vi.fn(() => ({ id: "test-suppression" })),
+    unsuppress: vi.fn(),
+    stop: vi.fn(async () => true),
+    start: vi.fn(async () => {}),
+  };
+  const dbQuiet = vi.fn(async () => ({ token: { disabled: false }, isValid: () => true, release: vi.fn() }));
   const restartProcess = vi.fn();
   const clearVersionCache = vi.fn();
   const watchdogLatch = vi.fn();
@@ -306,6 +342,8 @@ const createHarness = ({
     clearVersionCache,
     notify,
     watchdogLatch,
+    gatewayQuiesce,
+    dbQuiet,
     nowFn,
     logger: kSilentLogger,
     backupsDir: path.join(rootDir, "backups", "openclaw"),
@@ -326,6 +364,8 @@ const createHarness = ({
     installResults,
     notify,
     restartProcess,
+    gatewayQuiesce,
+    dbQuiet,
     clearVersionCache,
     watchdogLatch,
     nowRef,
@@ -1656,7 +1696,7 @@ describe("server/openclaw-channel-sync", () => {
     });
 
     it("applies stable→beta: overlay + pin snapshot + record + restart", async () => {
-      vi.useFakeTimers();
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
       const harness = createHarness({
         pin: "1.0.0",
         installedVersion: "1.0.0",
@@ -1703,158 +1743,52 @@ describe("server/openclaw-channel-sync", () => {
       expect(sync.isApplyInProgress()).toBe(true);
     });
 
-    it("persists the structured db-preflight verdict into the run record (issue #20 boot hint)", async () => {
-      const { DatabaseSync } = require("node:sqlite");
-      const preflightRunner = async (opts, fallback) => {
-        if (Array.isArray(opts.args) && opts.args.includes("preflight")) {
-          return {
-            ok: true,
-            code: 0,
-            tail: '{"status":"migration-required","foundVersion":1,"targetVersion":12}\n',
-            timedOut: false,
-          };
-        }
-        return fallback(opts);
-      };
-      const harness = createHarness({
-        pin: "1.0.0",
-        installedVersion: "1.0.0",
-        sentinelVersion: "1.0.0",
-        runnerImpl: preflightRunner,
-      });
-      // A real state DB: the preflight snapshots it with VACUUM INTO before
-      // probing, and dbSizesBytes must reflect it.
-      const stateDir = path.join(harness.openclawDir, "state");
-      fs.mkdirSync(stateDir, { recursive: true });
-      const db = new DatabaseSync(path.join(stateDir, "openclaw.sqlite"));
-      db.exec("CREATE TABLE t(x INTEGER)");
-      db.close();
-
-      const result = await harness.sync.applyUpdate({
-        channel: "beta",
-        version: "1.1.0",
-      });
-
+    it("persists read-only state metadata and explicit database recovery coverage in the run record", async () => {
+      const harness = createHarness({ pin: "1.0.0", installedVersion: "1.0.0", sentinelVersion: "1.0.0", installFixture: { schema: { state: 17, agent: 21 } } });
+      const file = writeStateDb(harness.openclawDir, { userVersion: 15 });
+      const result = await harness.sync.applyUpdate({ channel: "beta", version: "1.1.0", recoveryMode: "database_set" });
       expect(result.status).toBe(202);
-      const runsDir = path.join(harness.openclawDir, ".alphaclaw", "runs");
-      const records = fs
-        .readdirSync(runsDir)
-        .map((name) => JSON.parse(fs.readFileSync(path.join(runsDir, name), "utf8")));
-      expect(records).toHaveLength(1);
-      const [record] = records;
-      // The verdict survives the restart: boot sizes its migration budget
-      // from it and runs doctor without re-probing the live DBs.
+      const [record] = readRunRecords(harness.openclawDir);
       expect(record.state).toBe("restart_expected");
-      expect(record.dbPreflight).toEqual(
-        expect.objectContaining({
-          migrationRequired: true,
-          foundVersion: 1,
-          targetVersion: 12,
-        }),
-      );
-      expect(record.dbPreflight.dbSizesBytes).toBeGreaterThan(0);
-      // Per-kind breakdown (#78): the state line carries the CLI's numbers;
-      // no agent DB exists here, so the agent tally is empty and inert.
-      expect(record.dbPreflight.byKind.state).toEqual(
-        expect.objectContaining({
-          dbCount: 1,
-          foundVersion: 1,
-          targetVersion: 12,
-          migrationRequired: true,
-          unsupported: false,
-        }),
-      );
-      expect(record.dbPreflight.byKind.state.bytes).toBeGreaterThan(0);
-      expect(record.dbPreflight.byKind.agent).toEqual(
-        expect.objectContaining({
-          dbCount: 0,
-          bytes: 0,
-          foundVersion: null,
-          migrationRequired: false,
-        }),
-      );
-      // Two oracles on one snapshot: the fixture DB is at user_version 0 but
-      // the fake CLI reported foundVersion 1 — the CLI stays authoritative
-      // (the verdict above is its numbers) and the disagreement is ONE
-      // warning step, never a block.
-      expect(record.steps).toContainEqual(
-        expect.objectContaining({
-          name: "db-preflight",
-          status: "warning",
-          detail: expect.stringMatching(
-            /state\/openclaw\.sqlite: PRAGMA user_version is 0 but the target's preflight reported foundVersion 1/,
-          ),
-        }),
-      );
-      // The step timeline names the consequence for the operator.
-      expect(record.steps).toContainEqual(
-        expect.objectContaining({
-          name: "db-preflight",
-          status: "completed",
-          detail: "schema migration will run at the next start",
-        }),
-      );
+      expect(record.dbPreflight).toMatchObject({ migrationRequired: true, byKind: {
+        state: { count: 1, foundVersion: 15, targetVersion: 17, migrationRequired: true },
+        agent: { count: 0, foundVersion: null, migrationRequired: false },
+      } });
+      expect(record.dbPreflight.dbSizesBytes[file]).toBe(fs.statSync(file).size);
+      expect(record.recovery).toMatchObject({ kind: "database_set", databases: { complete: true, verified: true, requiredPaths: ["state/openclaw.sqlite"] } });
+      expect(record.recoveryIntent).toMatchObject({ approved: true, migrationRequired: true });
+      expect(harness.runner.runStreamed.mock.calls.some(([opts]) => opts.args?.includes("preflight") || opts.args?.includes("backup"))).toBe(false);
+      expect(record.steps).toContainEqual(expect.objectContaining({ name: "db-preflight", status: "completed" }));
+
+      const disagreement = createHarness({ pin: "1.0.0", installedVersion: "1.0.0", sentinelVersion: "1.0.0" });
+      const mismatchedFile = writeStateDb(disagreement.openclawDir, { userVersion: 15 });
+      const mismatchedDb = new DatabaseSync(mismatchedFile);
+      mismatchedDb.prepare("UPDATE schema_meta SET schema_version = ? WHERE meta_key = 'primary'").run(16);
+      mismatchedDb.close();
+      const mismatchedBytes = fs.readFileSync(mismatchedFile);
+      const refused = await disagreement.sync.applyUpdate({ channel: "beta", version: "1.1.0" });
+      expect(refused.status).toBe(409);
+      expect(refused.body.code).toBe("db_preflight_failed");
+      expect(refused.body.preflight.reasons).toContain("database_owner_or_schema_metadata_mismatch");
+      expect(disagreement.gatewayQuiesce.stop).not.toHaveBeenCalled();
+      expect(disagreement.restartProcess).not.toHaveBeenCalled();
+      expect(fs.readFileSync(mismatchedFile)).toEqual(mismatchedBytes);
     });
 
-    it("blocks downgrades when the backup fails, but only warns on upgrades", async () => {
-      const failBackupRunner = async (opts, fallback) => {
-        if (opts.command === "openclaw" && opts.args?.[0] === "backup") {
-          return { ok: false, code: 1, tail: "boom", timedOut: false };
-        }
-        return fallback(opts);
-      };
-
-      // Downgrade: hard gate.
-      const downgrade = createHarness({
-        pin: "1.2.0",
-        installedVersion: "1.2.0",
-        sentinelVersion: "1.2.0",
-        runnerImpl: failBackupRunner,
-      });
-      const downgradeResult = await downgrade.sync.applyUpdate({
-        channel: "stable",
-        version: "1.1.0",
-      });
-      expect(downgradeResult.status).toBe(409);
-      expect(downgradeResult.body.code).toBe("backup_failed");
-      // A failed apply never authorizes a settings restore (#76 Codex D10):
-      // the stamp is written up front and settled to ok:false by finish().
-      expect(downgrade.store.readState().lastTransition).toEqual(
-        expect.objectContaining({
-          from: "1.2.0",
-          to: "1.1.0",
-          kind: "downgrade",
-          source: "operator_apply",
-          ok: false,
-          consumedAt: null,
-        }),
-      );
-      // The CLI's actual last output line reaches the user-facing message —
-      // the old catch-all claimed every failure "failed to verify" (#7).
-      expect(downgradeResult.body.message).toMatch(/boom/);
-      expect(downgradeResult.body.message).not.toMatch(/failed to verify/i);
-      expect(downgrade.store.readState().applied).toBeNull();
-      expect(downgrade.store.hasOverlay("1.1.0")).toBe(false);
-      expect(downgrade.installToTempDir).not.toHaveBeenCalled();
-
-      // Upgrade: proceeds with a warning notification.
-      const upgrade = createHarness({
-        pin: "1.0.0",
-        installedVersion: "1.0.0",
-        sentinelVersion: "1.0.0",
-        runnerImpl: failBackupRunner,
-      });
-      const upgradeResult = await upgrade.sync.applyUpdate({
-        channel: "stable", // stable pin → stable: a stable→beta move is a channel-boundary HARD gate since #79 (a)
-        version: "1.1.0",
-      });
-      await flushAsync();
-      expect(upgradeResult.status).toBe(202);
-      expect(
-        notifyMessages(upgrade.notify).some((message) =>
-          /backup failed/i.test(message),
-        ),
-      ).toBe(true);
+    it("refuses both downgrade and upgrade when the owned config checkpoint cannot be captured", async () => {
+      for (const [pin, kind] of [["1.2.0", "downgrade"], ["1.0.0", "upgrade"]]) {
+        const harness = createHarness({ pin, installedVersion: pin, sentinelVersion: pin, extraSyncOptions: {
+          dbQuiet: async () => { throw Object.assign(new Error("barrier unavailable"), { code: "state_db_quiet_unavailable" }); },
+        } });
+        const result = await harness.sync.applyUpdate({ channel: "stable", version: "1.1.0" });
+        expect(result.status).toBe(409);
+        expect(result.body.code).toBe("state_db_quiet_unavailable");
+        expect(harness.store.readState().lastTransition).toMatchObject({ from: pin, to: "1.1.0", kind, source: "operator_apply", ok: false, consumedAt: null });
+        expect(harness.store.readState().applied).toBeNull();
+        expect(harness.installToTempDir).toHaveBeenCalledTimes(1);
+        expect(harness.restartProcess).not.toHaveBeenCalled();
+        expect(harness.runner.runStreamed.mock.calls.some(([opts]) => opts.args?.includes("backup"))).toBe(false);
+      }
     });
 
     // Issues #7/#9: the backup step passed a fixed path as --output without
@@ -1862,537 +1796,235 @@ describe("server/openclaw-channel-sync", () => {
     // false "no backup artifact produced"), then refused to overwrite it on
     // every later run (#7's permanent backup_failed).
     describe("backup step (issues #7/#9)", () => {
-      const kArchiveClass = /openclaw-backup.*\.tar\.gz$/;
-      const backupsDirOf = (harness) =>
-        path.join(harness.rootDir, "backups", "openclaw");
-      const archiveNames = (dir) =>
-        fs.readdirSync(dir).filter((name) => kArchiveClass.test(name));
+      const backupsDirOf = (harness) => path.join(harness.rootDir, "backups", "openclaw");
       const hardGateTarget = { channel: "beta", version: "1.1.0-beta.1" };
-      const mkHarness = (options = {}) =>
-        createHarness({
-          pin: "1.0.0",
-          installedVersion: "1.0.0",
-          sentinelVersion: "1.0.0",
-          ...options,
-        });
-
-      // X5: the 0600 chmod is best-effort (network filesystems may refuse
-      // modes) but was silent — a 0644 archive recorded as verified with no
-      // trace. The record now carries mode/modeError, the step warns, and the
-      // operator is notified; the normal path records mode "0600" + mtime.
-      it("records mode '0600' and the archive's mtime on a normal publish (the fence's record-vs-disk facts)", async () => {
-        const harness = mkHarness();
-        const result = await harness.sync.applyUpdate(hardGateTarget);
-        expect(result.status).toBe(202);
-        const recorded = harness.store.readState().backups[0];
-        expect(recorded.mode).toBe("0600");
-        expect(recorded.modeError).toBeUndefined();
-        expect(recorded.mtimeMs).toBe(fs.statSync(recorded.file).mtimeMs);
-        expect(recorded.bytes).toBe(fs.statSync(recorded.file).size);
-        expect(harness.store.readState().lastUpdateRun.steps).not.toContainEqual(
-          expect.objectContaining({
-            name: "backup",
-            detail: expect.stringMatching(/default mode/),
-          }),
-        );
-        // The inventory projects the mode.
-        const entry = harness.sync
-          .listBackupInventory()
-          .entries.find((candidate) => candidate.file === recorded.file);
-        expect(entry.mode).toBe("0600");
+      const mkHarness = (options = {}) => createHarness({
+        pin: "1.0.0", installedVersion: "1.0.0", sentinelVersion: "1.0.0", ...options,
       });
-
-      it("a refused chmod 0600 still records the verified backup, but as mode 'default' with modeError, a backup warning step and a notification", async () => {
-        const failingFs = {
-          ...fs,
-          promises: fs.promises,
-          chmodSync: (target, mode) => {
-            if (String(target).endsWith(".tar.gz")) {
-              throw new Error("EPERM: operation not permitted, chmod");
-            }
-            return fs.chmodSync(target, mode);
-          },
-        };
-        const harness = mkHarness({ extraSyncOptions: { fsModule: failingFs } });
-        const result = await harness.sync.applyUpdate(hardGateTarget);
+      const backupInvocations = (harness) => harness.runner.runStreamed.mock.calls
+        .map(([opts]) => opts).filter((opts) => opts.args?.includes("backup") || ["tar", "gzip"].includes(opts.command));
+      const assertCheckpoint = (harness, result) => {
         expect(result.status).toBe(202);
-        const recorded = harness.store.readState().backups[0];
-        expect(recorded.verified).toBe(true);
-        expect(recorded.mode).toBe("default");
-        expect(recorded.modeError).toMatch(/EPERM/);
-        expect(harness.store.readState().lastUpdateRun.steps).toContainEqual(
-          expect.objectContaining({
-            name: "backup",
-            status: "warning",
-            detail: expect.stringMatching(/archive left at the filesystem's default mode — chmod 0600 failed \(EPERM/),
-          }),
-        );
-        expect(
-          notifyMessages(harness.notify).some((message) =>
-            /permissions could not be tightened: archive left at the filesystem's default mode/.test(message),
-          ),
-        ).toBe(true);
-        const entry = harness.sync
-          .listBackupInventory()
-          .entries.find((candidate) => candidate.file === recorded.file);
-        expect(entry.mode).toBe("default");
-      });
-
-      it("#9: first hard-gated apply writes a unique archive and records it", async () => {
-        const harness = mkHarness();
-        const backupsDir = backupsDirOf(harness);
-
-        const result = await harness.sync.applyUpdate(hardGateTarget);
-
-        expect(result.status).toBe(202);
-        expect(result.body.restarting).toBe(true);
-        const dirStat = fs.statSync(backupsDir);
-        expect(dirStat.isDirectory()).toBe(true);
-        // Archives carry credentials — the directory is owner-only.
-        expect(dirStat.mode & 0o777).toBe(0o700);
-        const archives = archiveNames(backupsDir);
-        expect(archives).toHaveLength(1);
-        const recorded = harness.store.readState().backups[0];
-        expect(recorded).toEqual(
-          expect.objectContaining({ dir: backupsDir, verified: true }),
-        );
-        expect(recorded.file).toBe(path.join(backupsDir, archives[0]));
-        expect(fs.statSync(recorded.file).size).toBeGreaterThan(0);
-      });
-
-      // Issue #21 bug 6: a config-broken box cannot discover workspaces, so
-      // `backup create` fails and the one action that could move the box to a
-      // build that understands the migrated config was blocked. The CLI names
-      // the escape hatch — pass it.
-      const kWorkspaceFailTail =
-        "Error: Config invalid at $OPENCLAW_HOME/.openclaw/openclaw.json.\n" +
-        "OpenClaw cannot reliably discover custom workspaces for backup.\n" +
-        "Fix the config or rerun with --no-include-workspace for a partial backup.\n";
-      const workspaceFailRunner = async (opts, fallback) => {
-        if (
-          opts.command === "openclaw" &&
-          opts.args?.[0] === "backup" &&
-          !opts.args.includes("--no-include-workspace")
-        ) {
-          return { ok: false, code: 1, tail: kWorkspaceFailTail, timedOut: false };
+        expect(backupInvocations(harness)).toEqual([]);
+        const record = readRunRecords(harness.openclawDir).find((run) => run.operationId === result.body.operationId);
+        expect(record.recovery).toMatchObject({ kind: "config_only", checkpoint: { verified: true }, databases: { complete: false, verified: false } });
+        const root = record.recovery.checkpoint.file;
+        expect(fs.statSync(root).isDirectory()).toBe(true);
+        expect(fs.statSync(root).mode & 0o777).toBe(0o700);
+        for (const relative of ["manifest.json", "ready.json", "payload/openclaw.json"]) {
+          expect(fs.statSync(path.join(root, relative)).mode & 0o777).toBe(0o600);
         }
-        return fallback(opts);
+        const manifest = JSON.parse(fs.readFileSync(path.join(root, "manifest.json"), "utf8"));
+        expect(manifest.files.map((entry) => entry.archivePath)).toEqual(["openclaw.json"]);
+        expect(manifest.databases).toEqual([]);
+        expect(harness.sync.listBackupInventory().entries).toContainEqual(expect.objectContaining({ file: root, eligible: false }));
+        return root;
       };
-      const backupInvocations = (harness) =>
-        harness.runner.runStreamed.mock.calls
-          .map((call) => call[0])
-          .filter((opts) => opts.command === "openclaw" && opts.args?.[0] === "backup");
-
-      it("retries a workspace-discovery backup failure with --no-include-workspace and records backup.partial", async () => {
-        const harness = mkHarness({ runnerImpl: workspaceFailRunner });
-
-        const result = await harness.sync.applyUpdate(hardGateTarget);
-        await flushAsync();
-
-        expect(result.status).toBe(202);
-        const backups = backupInvocations(harness);
-        expect(backups).toHaveLength(2);
-        expect(backups[0].args).not.toContain("--no-include-workspace");
-        expect(backups[1].args).toContain("--no-include-workspace");
-        // Fresh output filename on the retry — the CLI refuses to overwrite.
-        const outOf = (opts) => opts.args[opts.args.indexOf("--output") + 1];
-        expect(outOf(backups[1])).not.toBe(outOf(backups[0]));
-        const recorded = harness.store.readState().backups[0];
-        expect(recorded).toEqual(
-          expect.objectContaining({ partial: true, verified: true }),
-        );
-        expect(fs.statSync(recorded.file).size).toBeGreaterThan(0);
-        expect(
-          harness.notify.mock.calls.some(
-            (call) =>
-              String(call[1]?.id || "").startsWith("backup-partial-") &&
-              /WITHOUT workspace files/.test(String(call[0])),
-          ),
-        ).toBe(true);
-      });
-
-      it("hard-gates still pass on a partial backup for downgrades (honestly marked)", async () => {
-        const harness = createHarness({
-          pin: "1.2.0",
-          installedVersion: "1.2.0",
-          sentinelVersion: "1.2.0",
-          runnerImpl: workspaceFailRunner,
-        });
-        const result = await harness.sync.applyUpdate({
-          channel: "stable",
-          version: "1.1.0",
-        });
-        expect(result.status).toBe(202);
-        expect(harness.store.readState().backups[0].partial).toBe(true);
-      });
-
-      it("does not retry when the backup failure is unrelated (ENOSPC)", async () => {
-        const enospcRunner = async (opts, fallback) => {
-          if (opts.command === "openclaw" && opts.args?.[0] === "backup") {
-            return {
-              ok: false,
-              code: 1,
-              tail: "Error: ENOSPC: no space left on device\n",
-              timedOut: false,
-            };
+      const failCapture = (code = "CHECKPOINT_PERMISSIONS", enabled = () => true) => ({
+        ...fs,
+        openSync(file, flags, mode) {
+          if (enabled() && flags === "wx" && String(file).includes(".staging")) {
+            throw Object.assign(new Error(code), { code });
           }
-          return fallback(opts);
-        };
-        const harness = createHarness({
-          pin: "1.2.0",
-          installedVersion: "1.2.0",
-          sentinelVersion: "1.2.0",
-          runnerImpl: enospcRunner,
-        });
-        const result = await harness.sync.applyUpdate({
-          channel: "stable",
-          version: "1.1.0",
-        });
-        expect(result.status).toBe(409);
-        expect(result.body.code).toBe("backup_failed");
-        expect(backupInvocations(harness)).toHaveLength(1);
+          return fs.openSync(file, flags, mode);
+        },
       });
 
-      it("#7: a legacy archive FILE at the backups path is migrated in and the update succeeds", async () => {
+      it("records private checkpoint permissions and verifies the published file manifest", async () => {
         const harness = mkHarness();
-        const backupsDir = backupsDirOf(harness);
-        fs.mkdirSync(path.dirname(backupsDir), { recursive: true });
-        fs.writeFileSync(backupsDir, "legacy 7GiB archive (stand-in)\n");
-
-        const result = await harness.sync.applyUpdate(hardGateTarget);
-
-        expect(result.status).toBe(202);
-        expect(fs.statSync(backupsDir).isDirectory()).toBe(true);
-        const names = archiveNames(backupsDir);
-        const legacy = names.find((name) =>
-          name.startsWith("openclaw-backup-legacy-"),
-        );
-        expect(legacy).toBeTruthy();
-        expect(names).toHaveLength(2); // migrated legacy + this run's archive
-        // The archive's contents survived the move byte-for-byte.
-        expect(
-          fs.readFileSync(path.join(backupsDir, legacy), "utf8"),
-        ).toContain("legacy 7GiB");
+        const root = assertCheckpoint(harness, await harness.sync.applyUpdate(hardGateTarget));
+        const manifest = JSON.parse(fs.readFileSync(path.join(root, "manifest.json"), "utf8"));
+        const payload = fs.readFileSync(path.join(root, "payload/openclaw.json"));
+        expect(manifest.files[0]).toMatchObject({ bytes: payload.length, sha256: crypto.createHash("sha256").update(payload).digest("hex") });
       });
 
-      it("keeps the legacy archive and fails honestly when migration cannot run", async () => {
-        const failingFs = {
-          ...fs,
-          promises: fs.promises,
-          renameSync: (src, dest) => {
-            if (String(src).endsWith(path.join("backups", "openclaw"))) {
-              throw new Error("EACCES: permission denied");
-            }
-            return fs.renameSync(src, dest);
-          },
-        };
+      it("refuses a checkpoint when private file creation fails instead of recording weaker permissions", async () => {
+        const harness = mkHarness({ extraSyncOptions: { fsModule: failCapture() } });
+        const result = await harness.sync.applyUpdate(hardGateTarget);
+        expect(result.status).toBe(409);
+        expect(result.body.code).toBe("CHECKPOINT_PERMISSIONS");
+        expect(harness.store.readState().applied).toBeNull();
+        expect(harness.restartProcess).not.toHaveBeenCalled();
+        expect(fs.readdirSync(backupsDirOf(harness))).toEqual([]);
+        expect(backupInvocations(harness)).toEqual([]);
+
+        const failingChmod = { ...fs, chmodSync(file, mode) {
+          if (String(file).includes(".staging") && String(file).endsWith(".sqlite")) {
+            throw Object.assign(new Error("EPERM: chmod refused"), { code: "EPERM" });
+          }
+          return fs.chmodSync(file, mode);
+        } };
+        const databaseHarness = mkHarness({ extraSyncOptions: { fsModule: failingChmod } });
+        writeStateDb(databaseHarness.openclawDir, { userVersion: 17 });
+        const refused = await databaseHarness.sync.applyUpdate({ ...hardGateTarget, recoveryMode: "database_set" });
+        expect(refused.status).toBeGreaterThanOrEqual(400);
+        expect(databaseHarness.store.readState().applied).toBeNull();
+        expect(databaseHarness.restartProcess).not.toHaveBeenCalled();
+        expect(fs.readdirSync(backupsDirOf(databaseHarness))).toEqual([]);
+        expect(backupInvocations(databaseHarness)).toEqual([]);
+      });
+
+      it("#9: the first cross-channel apply writes a unique directory checkpoint and records it", async () => {
+        const harness = mkHarness();
+        const result = await harness.sync.applyUpdate(hardGateTarget);
+        const root = assertCheckpoint(harness, result);
+        expect(path.basename(root)).toMatch(/^recovery-[0-9a-f-]{36}$/);
+        expect(fs.readdirSync(backupsDirOf(harness))).toEqual([path.basename(root)]);
+        expect(result.body.restarting).toBe(true);
+      });
+
+      it("does not invoke the retired workspace-discovery retry or include workspace files", async () => {
+        const harness = mkHarness({ runnerImpl: async (opts, fallback) => {
+          if (opts.args?.includes("backup")) throw new Error("workspace discovery must never run");
+          return fallback(opts);
+        } });
+        fs.mkdirSync(path.join(harness.openclawDir, "workspace"));
+        fs.writeFileSync(path.join(harness.openclawDir, "workspace", "important.md"), "preserve workspace");
+        const root = assertCheckpoint(harness, await harness.sync.applyUpdate(hardGateTarget));
+        expect(fs.existsSync(path.join(root, "payload/workspace"))).toBe(false);
+        expect(fs.readFileSync(path.join(harness.openclawDir, "workspace/important.md"), "utf8")).toBe("preserve workspace");
+      });
+
+      it("a compatible downgrade captures config with explicit database omissions rather than a partial archive", async () => {
+        const harness = mkHarness({ pin: "1.2.0", installedVersion: "1.2.0", sentinelVersion: "1.2.0" });
+        assertCheckpoint(harness, await harness.sync.applyUpdate({ channel: "stable", version: "1.1.0" }));
+        expect(harness.store.readState().lastTransition).toMatchObject({ kind: "downgrade", ok: true });
+      });
+
+      it("does not retry or pause when checkpoint disk space is insufficient", async () => {
+        const harness = mkHarness({ extraSyncOptions: { diskSpace: () => ({ ok: false, free: 0 }) } });
+        const result = await harness.sync.applyUpdate(hardGateTarget);
+        expect(result.status).toBe(507);
+        expect(result.body.code).toBe("insufficient_disk");
+        expect(harness.gatewayQuiesce.stop).not.toHaveBeenCalled();
+        expect(harness.restartProcess).not.toHaveBeenCalled();
+        expect(backupInvocations(harness)).toEqual([]);
+      });
+
+      it("#7: a legacy archive FILE at the checkpoint directory is preserved and refuses capture", async () => {
+        const harness = mkHarness();
+        const dir = backupsDirOf(harness);
+        fs.mkdirSync(path.dirname(dir), { recursive: true });
+        fs.writeFileSync(dir, "legacy archive\n");
+        const result = await harness.sync.applyUpdate(hardGateTarget);
+        expect(result.status).toBeGreaterThanOrEqual(400);
+        expect(fs.readFileSync(dir, "utf8")).toBe("legacy archive\n");
+        expect(harness.restartProcess).not.toHaveBeenCalled();
+        expect(backupInvocations(harness)).toEqual([]);
+      });
+
+      it("keeps the legacy archive when an attempted destination repair cannot run", async () => {
+        const failingFs = { ...fs, renameSync: vi.fn(() => { throw Object.assign(new Error("EACCES"), { code: "EACCES" }); }) };
         const harness = mkHarness({ extraSyncOptions: { fsModule: failingFs } });
-        const backupsDir = backupsDirOf(harness);
-        fs.mkdirSync(path.dirname(backupsDir), { recursive: true });
-        fs.writeFileSync(backupsDir, "legacy archive\n");
-
-        const result = await harness.sync.applyUpdate(hardGateTarget);
-
-        expect(result.status).toBe(409);
-        expect(result.body.code).toBe("backup_failed");
-        // The CLI's own error (parent path blocked by the file) surfaces
-        // verbatim instead of a misleading "failed to verify".
-        expect(result.body.message).toMatch(/EEXIST|ENOTDIR|not a directory/i);
-        expect(result.body.message).not.toMatch(/failed to verify/i);
-        // A failed migration never deletes the user's only backup.
-        expect(fs.statSync(backupsDir).isFile()).toBe(true);
-        expect(fs.readFileSync(backupsDir, "utf8")).toContain("legacy archive");
+        const dir = backupsDirOf(harness);
+        fs.mkdirSync(path.dirname(dir), { recursive: true });
+        fs.writeFileSync(dir, "legacy archive\n");
+        expect((await harness.sync.applyUpdate(hardGateTarget)).status).toBeGreaterThanOrEqual(400);
+        expect(fs.statSync(dir).isFile()).toBe(true);
+        expect(fs.readFileSync(dir, "utf8")).toBe("legacy archive\n");
+        expect(harness.store.readState().applied).toBeNull();
       });
 
-      it("recovers an interrupted legacy migration on the next run", async () => {
+      it("preserves an interrupted legacy migration artifact while creating a fresh checkpoint", async () => {
         const harness = mkHarness();
-        const backupsDir = backupsDirOf(harness);
-        fs.mkdirSync(backupsDir, { recursive: true });
-        const stranded = `${backupsDir}.migrating-999-abcdef`;
+        const dir = backupsDirOf(harness);
+        fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+        const stranded = `${dir}.migrating-999-abcdef`;
         fs.writeFileSync(stranded, "stranded legacy archive\n");
-
-        const result = await harness.sync.applyUpdate(hardGateTarget);
-
-        expect(result.status).toBe(202);
-        expect(fs.existsSync(stranded)).toBe(false);
-        const legacy = archiveNames(backupsDir).find((name) =>
-          name.startsWith("openclaw-backup-legacy-"),
-        );
-        expect(legacy).toBeTruthy();
-        expect(
-          fs.readFileSync(path.join(backupsDir, legacy), "utf8"),
-        ).toContain("stranded");
+        assertCheckpoint(harness, await harness.sync.applyUpdate(hardGateTarget));
+        expect(fs.readFileSync(stranded, "utf8")).toBe("stranded legacy archive\n");
       });
 
-      it("refuses to write backups through a symlink", async () => {
+      it("refuses to write checkpoints through a symlink", async () => {
         const harness = mkHarness();
-        const backupsDir = backupsDirOf(harness);
+        const dir = backupsDirOf(harness);
         const realTarget = mkTemp("alphaclaw-symlink-target-");
-        fs.mkdirSync(path.dirname(backupsDir), { recursive: true });
-        fs.symlinkSync(realTarget, backupsDir);
-
+        fs.mkdirSync(path.dirname(dir), { recursive: true });
+        fs.symlinkSync(realTarget, dir);
         const result = await harness.sync.applyUpdate(hardGateTarget);
-
         expect(result.status).toBe(409);
-        expect(result.body.code).toBe("backup_failed");
-        expect(result.body.message).toMatch(/symlink/i);
-        // Nothing was written through the redirect, and no backup CLI ran.
-        expect(fs.readdirSync(realTarget)).toHaveLength(0);
-        const backupCalls = harness.runner.runStreamed.mock.calls.filter(
-          (call) => call?.[0]?.args?.[0] === "backup",
-        );
-        expect(backupCalls).toHaveLength(0);
+        expect(fs.readdirSync(realTarget)).toEqual([]);
+        expect(harness.restartProcess).not.toHaveBeenCalled();
+        expect(backupInvocations(harness)).toEqual([]);
       });
 
-      it("quarantines a published-but-unverified archive on verify failure (hard gate)", async () => {
-        const publishThenFailVerify = async (opts, fallback) => {
-          if (opts.command === "openclaw" && opts.args?.[0] === "backup") {
-            // The real CLI publishes the archive at the final path BEFORE
-            // --verify runs, so a verify failure leaves the file behind.
-            const out = opts.args[opts.args.indexOf("--output") + 1];
-            fs.mkdirSync(path.dirname(out), { recursive: true });
-            fs.writeFileSync(out, "published archive, checksum bad\n");
-            return {
-              ok: false,
-              code: 1,
-              tail: "Archive verification failed: checksum mismatch\n",
-              timedOut: false,
-            };
-          }
-          return fallback(opts);
-        };
-        const harness = mkHarness({ runnerImpl: publishThenFailVerify });
-        const backupsDir = backupsDirOf(harness);
-        fs.mkdirSync(backupsDir, { recursive: true, mode: 0o700 });
-        fs.writeFileSync(
-          path.join(backupsDir, "openclaw-backup-old.tar.gz"),
-          "good old backup\n",
-        );
-
+      it("removes an unverified checkpoint on validation failure and preserves existing archives", async () => {
+        const harness = mkHarness({ extraSyncOptions: { fsModule: failCapture("CHECKPOINT_PAYLOAD_INVALID") } });
+        const dir = backupsDirOf(harness);
+        fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+        fs.writeFileSync(path.join(dir, "openclaw-backup-old.tar.gz"), "good old backup\n");
         const result = await harness.sync.applyUpdate(hardGateTarget);
-
         expect(result.status).toBe(409);
-        expect(result.body.message).toMatch(/failed to verify/i);
-        const names = fs.readdirSync(backupsDir);
-        // The unproven archive can't pose as the newest restore candidate —
-        // and the pre-existing verified backup survives untouched.
-        expect(names).toContain("openclaw-backup-old.tar.gz");
-        expect(names.some((name) => name.endsWith(".unverified"))).toBe(true);
-        expect(names.filter((name) => kArchiveClass.test(name))).toEqual([
-          "openclaw-backup-old.tar.gz",
-        ]);
+        expect(result.body.code).toBe("CHECKPOINT_PAYLOAD_INVALID");
+        expect(fs.readdirSync(dir)).toEqual(["openclaw-backup-old.tar.gz"]);
+        expect(fs.readFileSync(path.join(dir, "openclaw-backup-old.tar.gz"), "utf8")).toBe("good old backup\n");
       });
 
-      it("quarantines on the soft gate too and continues with a warning", async () => {
-        const publishThenFailVerify = async (opts, fallback) => {
-          if (opts.command === "openclaw" && opts.args?.[0] === "backup") {
-            const out = opts.args[opts.args.indexOf("--output") + 1];
-            fs.mkdirSync(path.dirname(out), { recursive: true });
-            fs.writeFileSync(out, "published archive, checksum bad\n");
-            return {
-              ok: false,
-              code: 1,
-              tail: "Archive verification failed: checksum mismatch\n",
-              timedOut: false,
-            };
-          }
-          return fallback(opts);
-        };
-        const harness = mkHarness({ runnerImpl: publishThenFailVerify });
-        const backupsDir = backupsDirOf(harness);
-
-        // Non-prerelease upgrade → soft gate: warn and continue.
-        const result = await harness.sync.applyUpdate({
-          channel: "stable", // stable pin → stable: a stable→beta move is a channel-boundary HARD gate since #79 (a)
-          version: "1.1.0",
-        });
-        await flushAsync();
-
-        expect(result.status).toBe(202);
-        expect(
-          notifyMessages(harness.notify).some((message) =>
-            /failed to verify/i.test(message),
-          ),
-        ).toBe(true);
-        expect(
-          fs.readdirSync(backupsDir).some((name) => name.endsWith(".unverified")),
-        ).toBe(true);
-      });
-
-      it("removes an empty partial archive after a failed backup and spares older backups", async () => {
-        const emptyThenFail = async (opts, fallback) => {
-          if (opts.command === "openclaw" && opts.args?.[0] === "backup") {
-            const out = opts.args[opts.args.indexOf("--output") + 1];
-            fs.mkdirSync(path.dirname(out), { recursive: true });
-            fs.writeFileSync(out, "");
-            return { ok: false, code: 1, tail: "boom", timedOut: false };
-          }
-          return fallback(opts);
-        };
-        const harness = mkHarness({ runnerImpl: emptyThenFail });
-        const backupsDir = backupsDirOf(harness);
-        fs.mkdirSync(backupsDir, { recursive: true, mode: 0o700 });
-        fs.writeFileSync(
-          path.join(backupsDir, "openclaw-backup-old.tar.gz"),
-          "good old backup\n",
-        );
-
-        const result = await harness.sync.applyUpdate(hardGateTarget);
-
+      it("a same-channel stable upgrade also refuses an invalid checkpoint rather than warning and continuing", async () => {
+        const harness = mkHarness({ extraSyncOptions: { fsModule: failCapture("CHECKPOINT_PAYLOAD_INVALID") } });
+        const result = await harness.sync.applyUpdate({ channel: "stable", version: "1.1.0" });
         expect(result.status).toBe(409);
-        // Own empty stub removed; nothing else touched (no global prune on
-        // failure — it could evict the last verified backup).
-        expect(fs.readdirSync(backupsDir)).toEqual([
-          "openclaw-backup-old.tar.gz",
-        ]);
+        expect(result.body.code).toBe("CHECKPOINT_PAYLOAD_INVALID");
+        expect(harness.store.readState().applied).toBeNull();
+        expect(harness.restartProcess).not.toHaveBeenCalled();
+        expect(fs.readdirSync(backupsDirOf(harness))).toEqual([]);
       });
 
-      it("maps timeout, disk-full, and refusal to honest messages", async () => {
-        const withTail = (response) => async (opts, fallback) => {
-          if (opts.command === "openclaw" && opts.args?.[0] === "backup") {
-            return response;
-          }
-          return fallback(opts);
-        };
-
-        const timedOut = mkHarness({
-          runnerImpl: withTail({ ok: false, code: null, tail: "", timedOut: true }),
-        });
-        const timeoutResult = await timedOut.sync.applyUpdate(hardGateTarget);
-        expect(timeoutResult.status).toBe(409);
-        expect(timeoutResult.body.message).toMatch(/timed out after 24 minutes/i);
-
-        const diskFull = mkHarness({
-          runnerImpl: withTail({
-            ok: false,
-            code: 1,
-            tail: "Error: ENOSPC: no space left on device, write\n",
-            timedOut: false,
-          }),
-        });
-        const diskResult = await diskFull.sync.applyUpdate(hardGateTarget);
-        expect(diskResult.status).toBe(409);
-        expect(diskResult.body.message).toMatch(/disk space/i);
-        expect(diskResult.body.hint).toMatch(/free up space/i);
-
-        const refused = mkHarness({
-          runnerImpl: withTail({
-            ok: false,
-            code: 1,
-            tail: "Error: Refusing to overwrite existing backup archive: /data/backups/openclaw\n",
-            timedOut: false,
-          }),
-        });
-        const refusedResult = await refused.sync.applyUpdate(hardGateTarget);
-        expect(refusedResult.status).toBe(409);
-        expect(refusedResult.body.message).toMatch(/already exists at/i);
-        expect(refusedResult.body.message).not.toMatch(/failed to verify/i);
-        expect(refusedResult.body.hint).toMatch(/remove or relocate/i);
+      it("removes failed checkpoint staging and spares older backups", async () => {
+        const failingFs = { ...fs, writeFileSync(file, ...args) {
+          if (typeof file === "number") throw Object.assign(new Error("ENOSPC"), { code: "ENOSPC" });
+          return fs.writeFileSync(file, ...args);
+        } };
+        const harness = mkHarness({ extraSyncOptions: { fsModule: failingFs } });
+        const dir = backupsDirOf(harness);
+        fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+        fs.writeFileSync(path.join(dir, "openclaw-backup-old.tar.gz"), "good old backup\n");
+        expect((await harness.sync.applyUpdate(hardGateTarget)).status).toBeGreaterThanOrEqual(400);
+        expect(fs.readdirSync(dir)).toEqual(["openclaw-backup-old.tar.gz"]);
+        expect(harness.restartProcess).not.toHaveBeenCalled();
       });
 
-      it("releases the apply latch after a backup failure so a retry succeeds", async () => {
-        let failFirst = true;
-        const failOnce = async (opts, fallback) => {
-          if (
-            opts.command === "openclaw" &&
-            opts.args?.[0] === "backup" &&
-            failFirst
-          ) {
-            failFirst = false;
-            return { ok: false, code: 1, tail: "boom", timedOut: false };
-          }
-          return fallback(opts);
-        };
-        const harness = mkHarness({ runnerImpl: failOnce });
-        const backupsDir = backupsDirOf(harness);
+      it("reports checkpoint timeout, disk-full, and unsafe-path refusal without a broader fallback", async () => {
+        for (const code of ["CHECKPOINT_BUDGET", "CHECKPOINT_DISK_SPACE", "CHECKPOINT_SOURCE_ALIAS"]) {
+          const harness = mkHarness({ extraSyncOptions: { fsModule: failCapture(code) } });
+          const result = await harness.sync.applyUpdate(hardGateTarget);
+          expect(result.status).toBe(409);
+          expect(result.body.code).toBe(code);
+          expect(result.body.hint).toContain("no broader backup");
+          expect(harness.restartProcess).not.toHaveBeenCalled();
+          expect(backupInvocations(harness)).toEqual([]);
+        }
+      });
 
-        const first = await harness.sync.applyUpdate(hardGateTarget);
-        expect(first.status).toBe(409);
+      it("releases the apply latch after a checkpoint failure so a retry succeeds", async () => {
+        let fail = true;
+        const harness = mkHarness({ extraSyncOptions: { fsModule: failCapture("CHECKPOINT_PERMISSIONS", () => fail) } });
+        expect((await harness.sync.applyUpdate(hardGateTarget)).status).toBe(409);
         expect(harness.sync.isApplyInProgress()).toBe(false);
-
-        const second = await harness.sync.applyUpdate(hardGateTarget);
-        expect(second.status).toBe(202);
-        expect(archiveNames(backupsDir)).toHaveLength(1);
+        fail = false;
+        assertCheckpoint(harness, await harness.sync.applyUpdate(hardGateTarget));
+        expect(fs.readdirSync(backupsDirOf(harness))).toHaveLength(1);
       });
 
-      it("prunes only archive-class files: keep-3, drop debris, spare operator files", async () => {
+      it("a config checkpoint cannot prune actual database archives, debris or operator files as if it replaced them", async () => {
         const harness = mkHarness();
-        const backupsDir = backupsDirOf(harness);
-        fs.mkdirSync(backupsDir, { recursive: true, mode: 0o700 });
-        const seed = (name, mtimeSec) => {
-          const full = path.join(backupsDir, name);
-          fs.writeFileSync(full, `seed ${name}\n`);
-          fs.utimesSync(full, mtimeSec, mtimeSec);
-        };
-        seed("openclaw-backup-a.tar.gz", 1000);
-        seed("openclaw-backup-b.tar.gz", 2000);
-        seed("openclaw-backup-c.tar.gz", 3000);
-        seed("openclaw-backup-d.tar.gz", 4000);
-        seed("openclaw-backup-x.tar.gz.unverified", 1500);
-        seed("openclaw-backup-y.tar.gz.unverified", 2500);
-        seed("openclaw-backup-z.tar.gz.old.tmp", 500);
-        seed("unrelated.txt", 100);
-        seed("openclaw-backup-notes.txt", 100);
-
-        const result = await harness.sync.applyUpdate(hardGateTarget);
-        expect(result.status).toBe(202);
-
-        const names = fs.readdirSync(backupsDir).sort();
-        const archives = names.filter((name) => kArchiveClass.test(name));
-        // keep-3 by mtime: this run's fresh archive + the two newest seeds.
-        expect(archives).toHaveLength(3);
-        expect(archives).toContain("openclaw-backup-c.tar.gz");
-        expect(archives).toContain("openclaw-backup-d.tar.gz");
-        // Debris: temps always go; only the newest quarantined archive stays.
-        expect(names.filter((name) => name.endsWith(".tmp"))).toHaveLength(0);
-        expect(names.filter((name) => name.endsWith(".unverified"))).toEqual([
-          "openclaw-backup-y.tar.gz.unverified",
-        ]);
-        // Operator files are never retention's business.
-        expect(names).toContain("unrelated.txt");
-        expect(names).toContain("openclaw-backup-notes.txt");
+        const dir = backupsDirOf(harness);
+        fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+        const names = ["openclaw-backup-a.tar.gz", "openclaw-backup-b.tar.gz", "openclaw-backup-c.tar.gz", "openclaw-backup-d.tar.gz", "openclaw-backup-x.tar.gz.unverified", "openclaw-backup-z.tar.gz.old.tmp", "unrelated.txt", "openclaw-backup-notes.txt"];
+        for (const name of names) fs.writeFileSync(path.join(dir, name), name);
+        assertCheckpoint(harness, await harness.sync.applyUpdate(hardGateTarget));
+        for (const name of names) expect(fs.readFileSync(path.join(dir, name), "utf8")).toBe(name);
       });
 
-      // Regression pin for the archive-class predicate (isBackupArchiveName):
-      // the pre-#54 pattern was unanchored (/openclaw-backup.*\.tar\.gz$/), so
-      // an operator's own "copy-of-openclaw-backup-….tar.gz" in the directory
-      // counted as an archive and keep-3 could DELETE it. The anchored
-      // predicate spares it, while the AlphaClaw offline-copy suffix
-      // (.alphaclaw.tar.gz) stays inside retention.
-      it("retention classifies by the anchored archive name: an operator's copy-of-… file is spared, an .alphaclaw.tar.gz counts toward keep-3", async () => {
+      it("checkpoint creation preserves operator copy-of files and legacy alphaclaw archives independently of directory checkpoints", async () => {
         const harness = mkHarness();
-        const backupsDir = backupsDirOf(harness);
-        fs.mkdirSync(backupsDir, { recursive: true, mode: 0o700 });
-        const seed = (name, mtimeSec) => {
-          const full = path.join(backupsDir, name);
-          fs.writeFileSync(full, `seed ${name}\n`);
-          fs.utimesSync(full, mtimeSec, mtimeSec);
-        };
-        // Oldest of everything: the unanchored pattern would evict it first.
-        seed("copy-of-openclaw-backup-a.tar.gz", 900);
-        seed("openclaw-backup-a.tar.gz", 1000);
-        seed("openclaw-backup-b.tar.gz", 2000);
-        seed("openclaw-backup-c.tar.gz", 3000);
-        seed("openclaw-backup-e.alphaclaw.tar.gz", 3500);
-        seed("openclaw-backup-d.tar.gz", 4000);
-
-        const result = await harness.sync.applyUpdate(hardGateTarget);
-        expect(result.status).toBe(202);
-
-        const names = fs.readdirSync(backupsDir).sort();
-        // Never retention's business — it does not start with the producer prefix.
-        expect(names).toContain("copy-of-openclaw-backup-a.tar.gz");
-        // keep-3 by mtime among archive-class files: this run's fresh archive,
-        // d, and the offline-copy-suffixed e; a, b, c are evicted.
-        expect(names).toContain("openclaw-backup-d.tar.gz");
-        expect(names).toContain("openclaw-backup-e.alphaclaw.tar.gz");
-        expect(names).not.toContain("openclaw-backup-a.tar.gz");
-        expect(names).not.toContain("openclaw-backup-b.tar.gz");
-        expect(names).not.toContain("openclaw-backup-c.tar.gz");
-        const archiveClass = names.filter((name) =>
-          /^openclaw-backup-[^/]*\.(alphaclaw\.)?tar\.gz$/.test(name),
-        );
-        expect(archiveClass).toHaveLength(3);
+        const dir = backupsDirOf(harness);
+        fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+        const names = ["copy-of-openclaw-backup-a.tar.gz", "openclaw-backup-a.tar.gz", "openclaw-backup-b.tar.gz", "openclaw-backup-c.tar.gz", "openclaw-backup-e.alphaclaw.tar.gz", "openclaw-backup-d.tar.gz"];
+        for (const name of names) fs.writeFileSync(path.join(dir, name), name);
+        assertCheckpoint(harness, await harness.sync.applyUpdate(hardGateTarget));
+        for (const name of names) expect(fs.readFileSync(path.join(dir, name), "utf8")).toBe(name);
+        expect(fs.readdirSync(dir)).toHaveLength(names.length + 1);
       });
     });
 
@@ -2415,16 +2047,16 @@ describe("server/openclaw-channel-sync", () => {
       expect(fs.existsSync(installResults[0].tmpDir)).toBe(false);
     });
 
-    it("runs dev-head via the native updater with a stripped git env", async () => {
+    it("builds dev-head in an isolated candidate with a stripped git env and never runs the native updater", async () => {
       process.env.GIT_ASKPASS = "/tmp/fake-askpass";
-      const updateCalls = [];
-      const { sync, store, rootDir } = createHarness({
+      const buildCalls = [];
+      const { sync, store, rootDir, runner } = createHarness({
         pin: "1.0.0",
         installedVersion: "1.0.0",
         sentinelVersion: "1.0.0",
         runnerImpl: async (opts, fallback) => {
-          if (opts.command === "openclaw" && opts.args?.[0] === "update") {
-            updateCalls.push(opts);
+          if (opts.command === "pnpm" && opts.args?.[0] === "build") {
+            buildCalls.push(opts);
             return {
               ok: true,
               code: 0,
@@ -2440,20 +2072,34 @@ describe("server/openclaw-channel-sync", () => {
       const result = await sync.applyUpdate({ channel: "dev", devHead: true });
 
       expect(result.status).toBe(202);
-      expect(updateCalls).toHaveLength(1);
-      expect(updateCalls[0].args).toEqual([
-        "update",
-        "--channel",
-        "dev",
-        "--json",
-        "--yes",
-        "--no-restart",
-      ]);
-      expect(updateCalls[0].env).not.toHaveProperty("GIT_ASKPASS");
-      expect(updateCalls[0].env.GIT_TERMINAL_PROMPT).toBe("0");
+      expect(buildCalls).toHaveLength(1);
+      expect(buildCalls[0].args).toEqual(["build"]);
+      expect(buildCalls[0].env).not.toHaveProperty("GIT_ASKPASS");
+      expect(buildCalls[0].env.GIT_TERMINAL_PROMPT).toBe("0");
+      expect(runner.runStreamed.mock.calls.some(([opts]) => opts.command === "openclaw" && opts.args?.[0] === "update")).toBe(false);
       expect(store.readState().applied).toEqual(
         expect.objectContaining({ channel: "dev", sha: kDevSha }),
       );
+      const candidate = buildCalls[0].env.OPENCLAW_GIT_DIR;
+      expect(path.dirname(candidate)).toBe(path.join(rootDir, "openclaw-candidates"));
+      expect(store.readState().applied.checkoutDir).toBe(candidate);
+      expect(fs.readFileSync(path.join(rootDir, "openclaw", ".git", "HEAD"), "utf8")).toBe(`${kDevSha}\n`);
+      const preparationCalls = runner.runStreamed.mock.calls.map(([opts]) => opts).filter((opts) => opts.cwd === candidate);
+      expect(preparationCalls.map((opts) => [opts.command, opts.args])).toEqual([
+        ["git", ["clone", "--filter=blob:none", "--no-checkout", "--single-branch", "--branch", "main", "https://github.com/openclaw/openclaw.git", candidate]],
+        ["git", ["checkout", "--detach", "origin/main"]],
+        ["pnpm", ["install", "--frozen-lockfile"]],
+        ["pnpm", ["build"]],
+        ["pnpm", ["ui:build"]],
+        [process.execPath, [path.join(candidate, "bin", "entry.js"), "doctor"]],
+      ]);
+      for (const call of preparationCalls) {
+        expect(call.env.OPENCLAW_GIT_DIR).toBe(candidate);
+        expect(call.env.OPENCLAW_STATE_DIR).toBe(path.join(call.env.HOME, "state"));
+        expect(call.env.OPENCLAW_STATE_DIR).not.toBe(path.join(rootDir, ".openclaw"));
+        expect(call.env.OPENCLAW_CONFIG_PATH).toBe(path.join(call.env.OPENCLAW_STATE_DIR, "openclaw.json"));
+      }
+      expect(fs.existsSync(preparationCalls[0].env.HOME)).toBe(false);
       // Intent stamp (#76 RC3): a dev apply has no version order — kind
       // "dev", so it can never read as a "downgrade" that authorizes a
       // settings restore. A HEAD apply stamps before the sha is known.
@@ -2469,16 +2115,15 @@ describe("server/openclaw-channel-sync", () => {
         consumedAt: null,
       });
 
-      // Updater-reported failure: nothing recorded.
       const failing = createHarness({
         pin: "1.0.0",
         installedVersion: "1.0.0",
         sentinelVersion: "1.0.0",
         runnerImpl: async (opts, fallback) => {
-          if (opts.command === "openclaw" && opts.args?.[0] === "update") {
+          if (opts.command === "pnpm" && opts.args?.[0] === "build") {
             return {
-              ok: true,
-              code: 0,
+              ok: false,
+              code: 1,
               tail: '{"status":"error"}',
               timedOut: false,
             };
@@ -2494,22 +2139,18 @@ describe("server/openclaw-channel-sync", () => {
       expect(failure.status).toBe(409);
       expect(failure.body.code).toBe("dev_build_failed");
       expect(failing.store.readState().applied).toBeNull();
-      // The step keeps ITS OWN status; the updater's status rides alongside.
-      // (Live-verified clobber: a detail {status} key used to overwrite the
-      // step status, recording a failed build as "unknown".)
-      // Steps are append-only (running → terminal): inspect the LAST entry.
       const buildStep = failing.store
         .readState()
         .lastUpdateRun.steps.findLast((step) => step.name === "build");
       expect(buildStep.status).toBe("failed");
-      expect(buildStep.updaterStatus).toBe("error");
+      expect(buildStep).not.toHaveProperty("updaterStatus");
+      expect(failing.restartProcess).not.toHaveBeenCalled();
+      expect(fs.readFileSync(path.join(failing.rootDir, "openclaw", ".git", "HEAD"), "utf8").trim()).toBe(kDevSha);
     });
 
-    it("parses updater status from a report larger than the default 64KB tail", async () => {
-      // The real updater's final JSON report exceeds 64KB (live-verified);
-      // the dev run must request a tail budget that keeps it intact.
+    it("retains candidate build output larger than the default 64KB tail without treating embedded JSON as updater authority", async () => {
       const bigReport = `${JSON.stringify({
-        status: "ok",
+        status: "error",
         padding: "x".repeat(80 * 1024),
       })}\n`;
       const seen = { tailBytes: null };
@@ -2518,7 +2159,7 @@ describe("server/openclaw-channel-sync", () => {
         installedVersion: "1.0.0",
         sentinelVersion: "1.0.0",
         runnerImpl: async (opts, fallback) => {
-          if (opts.command === "openclaw" && opts.args?.[0] === "update") {
+          if (opts.command === "pnpm" && opts.args?.[0] === "build") {
             seen.tailBytes = opts.tailBytes;
             // Simulate the runner honoring the requested tail budget.
             const budget = opts.tailBytes || 64 * 1024;
@@ -2543,7 +2184,7 @@ describe("server/openclaw-channel-sync", () => {
         .readState()
         .lastUpdateRun.steps.findLast((step) => step.name === "build");
       expect(buildStep.status).toBe("completed");
-      expect(buildStep.updaterStatus).toBe("ok");
+      expect(buildStep).not.toHaveProperty("updaterStatus");
     });
 
     it.each([
@@ -2597,30 +2238,38 @@ describe("server/openclaw-channel-sync", () => {
           updaterRecovery: { packageRollbackVerified: true, serviceRestartSafe: true } },
         hint: "state was migrated and the update was not rolled back",
       },
-    ])("preserves truthful dev failure evidence for $name through response, history and the run ledger", async ({ report, evidence, hint }) => {
+    ])("keeps the active installation untouched when candidate build output claims $name", async ({ report, evidence, hint }) => {
       const operationEvents = { publish: vi.fn(), complete: vi.fn(), fail: vi.fn() };
       const h = createHarness({
         extraSyncOptions: { operationEvents },
-        runnerImpl: async (options, fallback) => options.command === "openclaw" && options.args?.[0] === "update"
+        runnerImpl: async (options, fallback) => options.command === "pnpm" && options.args?.[0] === "build"
           ? { ok: false, code: 1, tail: `build complete\n${JSON.stringify({ status: "error", ...report })}\n`, timedOut: false }
           : fallback(options),
       });
+      const checkoutDir = writeCheckoutFixture(h.rootDir, { sha: kOtherSha });
+      const activeHead = fs.readFileSync(path.join(checkoutDir, ".git", "HEAD"));
+      const activeConfig = fs.readFileSync(path.join(h.openclawDir, "openclaw.json"));
       const failure = await h.sync.applyUpdate({ channel: "dev", devHead: true });
       expect(failure.status).toBe(409);
-      expect(failure.body).toMatchObject({ ok: false, code: "dev_build_failed", repairApplicable: true,
-        message: "The dev update failed (updater status: error).", ...evidence });
-      expect(failure.body.hint).toContain(hint);
+      expect(failure.body).toMatchObject({ ok: false, code: "dev_build_failed",
+        message: "The isolated OpenClaw source build failed." });
+      expect(failure.body.hint).toContain("Review the build output");
+      expect(failure.body.hint).not.toContain(hint);
+      for (const key of Object.keys(evidence)) expect(failure.body).not.toHaveProperty(key);
+      expect(fs.readFileSync(path.join(checkoutDir, ".git", "HEAD"))).toEqual(activeHead);
+      expect(fs.readFileSync(path.join(h.openclawDir, "openclaw.json"))).toEqual(activeConfig);
+      expect(h.runner.runStreamed.mock.calls.some(([opts]) => opts.command === "openclaw" && opts.args?.[0] === "update")).toBe(false);
       expect(failure.body.hint).not.toContain("reverted the checkout");
-      expect(failure.body.updaterReason).toBe(evidence.updaterReason);
-      expect(failure.body.updaterRecovery).toEqual(evidence.updaterRecovery);
+      expect(failure.body).not.toHaveProperty("updaterReason");
+      expect(failure.body).not.toHaveProperty("updaterRecovery");
       const state = h.store.readState();
       expect(state.applied).toBeNull();
-      expect(state.lastUpdateRun.result).toMatchObject({ hint: failure.body.hint, ...evidence });
+      expect(state.lastUpdateRun.result).toMatchObject({ hint: failure.body.hint });
       expect(h.sync.runLedger.readRun(state.lastUpdateRun.operationId)).toMatchObject({
-        state: "failed", result: { code: "dev_build_failed", hint: failure.body.hint, ...evidence },
+        state: "failed", result: { code: "dev_build_failed", hint: failure.body.hint },
       });
       expect(state.lastUpdateRun.steps.findLast((step) => step.name === "build"))
-        .toMatchObject({ status: "failed", updaterStatus: "error", ...evidence });
+        .toMatchObject({ status: "failed", tail: expect.stringContaining("build complete") });
       expect(operationEvents.fail).toHaveBeenCalledWith(state.lastUpdateRun.operationId,
         expect.objectContaining({ hint: failure.body.hint }));
       expect(h.restartProcess).not.toHaveBeenCalled();
@@ -2628,23 +2277,24 @@ describe("server/openclaw-channel-sync", () => {
 
     it("does not infer rollback from timeout log prose without a structured updater result", async () => {
       const h = createHarness({ runnerImpl: async (options, fallback) =>
-        options.command === "openclaw" && options.args?.[0] === "update"
+        options.command === "pnpm" && options.args?.[0] === "build"
           ? { ok: false, code: null, timedOut: true, tail: "Attempting rollback before timeout..." }
           : fallback(options) });
       const failure = await h.sync.applyUpdate({ channel: "dev", devHead: true });
-      expect(failure.body).toMatchObject({ code: "dev_build_failed", message: "The dev update timed out." });
-      expect(failure.body.hint).toContain("did not confirm recovery");
+      expect(failure.body).toMatchObject({ code: "dev_build_failed", message: "The isolated OpenClaw source build failed." });
+      expect(failure.body.hint).toContain("Review the build output");
+      expect(failure.body.hint).not.toMatch(/restored|reverted|safe to restart/i);
       expect(failure.body).not.toHaveProperty("updaterRecovery");
       expect(h.restartProcess).not.toHaveBeenCalled();
     });
 
-    it("builds a pinned dev commit via fetch/checkout/install/build/doctor", async () => {
+    it("builds a pinned dev commit via clone/fetch/checkout/install/build/ui-build/isolated doctor", async () => {
       const { sync, store, rootDir, runner } = createHarness({
         pin: "1.0.0",
         installedVersion: "1.0.0",
         sentinelVersion: "1.0.0",
       });
-      const checkoutDir = writeCheckoutFixture(rootDir, { sha: kDevSha });
+      const checkoutDir = writeCheckoutFixture(rootDir, { sha: kOtherSha });
 
       const result = await sync.applyUpdate({ channel: "dev", sha: kDevSha });
 
@@ -2656,17 +2306,23 @@ describe("server/openclaw-channel-sync", () => {
       expect(store.readState().lastTransition).toEqual(
         expect.objectContaining({ from: "1.0.0", to: kDevSha, kind: "dev", source: "operator_apply", ok: true }),
       );
-      const checkoutBin = path.join(checkoutDir, "bin", "entry.js");
+      const candidate = store.readState().applied.checkoutDir;
+      expect(path.dirname(candidate)).toBe(`${checkoutDir}-candidates`);
+      expect(fs.readFileSync(path.join(checkoutDir, ".git", "HEAD"), "utf8")).toBe(`${kOtherSha}\n`);
+      expect(fs.readFileSync(path.join(candidate, ".git", "HEAD"), "utf8")).toBe(`${kDevSha}\n`);
+      const checkoutBin = path.join(candidate, "bin", "entry.js");
       const checkoutCalls = runner.runStreamed.mock.calls
         .map((call) => call[0])
-        .filter((opts) => opts.cwd === checkoutDir)
+        .filter((opts) => opts.cwd === candidate)
         .map((opts) => [opts.command, opts.args]);
       expect(checkoutCalls).toEqual([
+        ["git", ["clone", "--filter=blob:none", "--no-checkout", "--single-branch", "--branch", "main", "https://github.com/openclaw/openclaw.git", candidate]],
         ["git", ["fetch", "--all", "--tags"]],
         ["git", ["checkout", "--detach", kDevSha]],
-        ["pnpm", ["install"]],
+        ["pnpm", ["install", "--frozen-lockfile"]],
         ["pnpm", ["build"]],
-        ["node", [checkoutBin, "doctor"]],
+        ["pnpm", ["ui:build"]],
+        [process.execPath, [checkoutBin, "doctor"]],
       ]);
 
       // pnpm build failure: nothing recorded.
@@ -2908,7 +2564,7 @@ describe("server/openclaw-channel-sync", () => {
       expect(failEnd).toHaveBeenCalledTimes(1);
     });
 
-    it("self-update gate: blocks with a hint, fails open on probe errors, defaults open", async () => {
+    it("self-update gate: blocks with a hint, fails closed on probe errors, defaults open", async () => {
       // Gate closed: full actionable envelope, no side effects, no latch.
       const gated = createHarness({
         pin: "1.0.0",
@@ -2931,8 +2587,6 @@ describe("server/openclaw-channel-sync", () => {
       expect(gated.installToTempDir).not.toHaveBeenCalled();
       expect(gated.store.readState().lastUpdateRun).toBeNull();
 
-      // A THROWING probe fails open: a broken self-update service must not
-      // permanently lock OpenClaw version changes.
       const throwing = createHarness({
         pin: "1.0.0",
         installedVersion: "1.0.0",
@@ -2947,8 +2601,11 @@ describe("server/openclaw-channel-sync", () => {
         channel: "beta",
         version: "1.1.0",
       });
-      expect(throwingResult.status).toBe(202);
-      expect(throwingResult.body.restarting).toBe(true);
+      expect(throwingResult.status).toBe(409);
+      expect(throwingResult.body.code).toBe("self_update_unverified");
+      expect(throwing.gatewayQuiesce.stop).not.toHaveBeenCalled();
+      expect(throwing.restartProcess).not.toHaveBeenCalled();
+      expect(throwing.store.readState().applied).toBeNull();
 
       // Default wiring (option omitted): applies proceed normally.
       const defaulted = createHarness({
@@ -3282,8 +2939,8 @@ describe("server/openclaw-channel-sync", () => {
       expect(store.readState().applied).toBeNull();
     });
 
-    it("hard-gates dev applies on a verified backup like downgrades", async () => {
-      const { sync, rootDir, store } = createHarness({
+    it("dev applies require a verified config checkpoint without invoking a full archive producer", async () => {
+      const { sync, rootDir, store, runner } = createHarness({
         pin: "1.0.0",
         installedVersion: "1.0.0",
         sentinelVersion: "1.0.0",
@@ -3296,13 +2953,14 @@ describe("server/openclaw-channel-sync", () => {
       });
       writeCheckoutFixture(rootDir, { sha: kDevSha });
       const result = await sync.applyUpdate({ channel: "dev", devHead: true });
-      expect(result.status).toBe(409);
-      expect(result.body.code).toBe("backup_failed");
-      expect(store.readState().applied).toBeNull();
+      expect(result.status).toBe(202);
+      expect(result.body.recovery).toMatchObject({ kind: "config_only", checkpoint: { verified: true }, databases: { complete: false } });
+      expect(store.readState().applied).toMatchObject({ channel: "dev" });
+      expect(runner.runStreamed.mock.calls.some(([opts]) => opts.args?.includes("backup"))).toBe(false);
     });
 
-    it("fails a hard-gated apply with backup_failed when backup exits ok but writes no artifact", async () => {
-      const { sync, rootDir, store, openclawDir, installToTempDir } = createHarness({
+    it("a corrupt state database refuses dev preparation commit regardless of a phantom archive success", async () => {
+      const { sync, rootDir, store, openclawDir, gatewayQuiesce, restartProcess, runner } = createHarness({
         pin: "1.0.0",
         installedVersion: "1.0.0",
         sentinelVersion: "1.0.0",
@@ -3316,32 +2974,29 @@ describe("server/openclaw-channel-sync", () => {
         },
       });
       writeCheckoutFixture(rootDir, { sha: kDevSha });
-      // State exists → a silent no-op backup is a real integrity failure.
       fs.mkdirSync(path.join(openclawDir, "state"), { recursive: true });
       fs.writeFileSync(path.join(openclawDir, "state", "openclaw.sqlite"), "db");
 
       const result = await sync.applyUpdate({ channel: "dev", devHead: true });
 
-      expect(result.status).toBe(409);
-      expect(result.body.code).toBe("backup_failed");
-      expect(result.body.message).toMatch(/produced no backup file/i);
-      // The message names the exact path alphaclaw probed (#9 asked for
-      // "artifact missing at expected path <X>", not "subsystem untrustworthy").
-      expect(result.body.message).toMatch(/openclaw-backup-.*\.tar\.gz/);
-      expect(result.body.expectedFile).toMatch(/openclaw-backup-.*\.tar\.gz$/);
-      expect(result.body.hint).not.toMatch(/not trustworthy/i);
+      expect(result.status, JSON.stringify(result.body)).toBe(409);
+      expect(result.body.code).toBe("db_preflight_failed");
+      expect(result.body.backupRiskEligible).toBe(false);
+      expect(result.body.repairApplicable).toBeUndefined();
+      expect(result.body.preflight.perDb).toContainEqual(expect.objectContaining({
+        status: "corrupt",
+        sourcePath: path.join(openclawDir, "state", "openclaw.sqlite"),
+      }));
       expect(store.readState().applied).toBeNull();
-      // The apply stopped at the gate — nothing was downloaded or built.
-      expect(installToTempDir).not.toHaveBeenCalled();
-      // The phantom backup was never recorded as a usable artifact.
       expect(store.readState().backups || []).toHaveLength(0);
+      expect(fs.readFileSync(path.join(openclawDir, "state", "openclaw.sqlite"), "utf8")).toBe("db");
+      expect(gatewayQuiesce.stop).not.toHaveBeenCalled();
+      expect(restartProcess).not.toHaveBeenCalled();
+      expect(runner.runStreamed.mock.calls.some(([opts]) => opts.args?.includes("backup"))).toBe(false);
     });
 
-    it("soft-passes the artifact check on a fresh install with no state to back up", async () => {
-      // Live-verified: the real stable binary exits 0 without writing a file
-      // when there is nothing to back up — a fresh install's first channel
-      // switch must not be bricked by the phantom-backup guard.
-      const { sync, rootDir, store } = createHarness({
+    it("creates a real config checkpoint on a fresh install instead of accepting a phantom archive", async () => {
+      const { sync, rootDir, store, runner } = createHarness({
         pin: "1.0.0",
         installedVersion: "1.0.0",
         sentinelVersion: "1.0.0",
@@ -3356,17 +3011,14 @@ describe("server/openclaw-channel-sync", () => {
 
       const result = await sync.applyUpdate({ channel: "dev", devHead: true });
 
-      // The gate let the apply proceed (dev build continues past backup).
-      expect(result.body.code).not.toBe("backup_failed");
-      // No phantom artifact was recorded.
+      expect(result.status).toBe(202);
+      expect(result.body.recovery).toMatchObject({ kind: "config_only", checkpoint: { verified: true } });
+      expect(fs.statSync(result.body.recovery.checkpoint.file).isDirectory()).toBe(true);
+      expect(runner.runStreamed.mock.calls.some(([opts]) => opts.args?.includes("backup"))).toBe(false);
       expect(store.readState().backups || []).toHaveLength(0);
     });
 
-    // WI-1.7: the fresh-install waiver fails CLOSED — only a literally empty
-    // state tree waives the hard gate; a box with sessions, a populated
-    // config, or an applied/LKG history that gets exit 0 + no artifact is a
-    // phantom backup, not a fresh install.
-    describe("fresh-install waiver fails closed (WI-1.7)", () => {
+    describe("config-only coverage replaces fresh-install waivers (WI-1.7)", () => {
       const noArtifactRunner = async (opts, fallback) => {
         if (opts.command === "openclaw" && opts.args?.[0] === "backup") {
           return { ok: true, code: 0, tail: "nothing to back up\n", timedOut: false };
@@ -3382,40 +3034,49 @@ describe("server/openclaw-channel-sync", () => {
         });
       const hardGateTarget = { channel: "beta", version: "1.1.0-beta.1" };
 
-      it("refuses (no_artifact 409) when openclaw.json has content", async () => {
+      const assertConfigOnly = (harness, result, expectedPaths = ["openclaw.json"]) => {
+        expect(result.status).toBe(202);
+        expect(result.body.recovery).toMatchObject({ kind: "config_only", checkpoint: { verified: true }, databases: { complete: false, verified: false } });
+        const manifest = result.body.recovery.manifest;
+        expect(manifest.files.map((entry) => entry.archivePath).sort()).toEqual([...expectedPaths].sort());
+        expect(manifest.databases).toEqual([]);
+        expect(harness.runner.runStreamed.mock.calls.filter(([opts]) => opts.args?.includes("backup") || ["gzip", "tar"].includes(opts.command))).toEqual([]);
+        for (const entry of manifest.files) {
+          const captured = fs.readFileSync(path.join(result.body.recovery.checkpoint.file, "payload", entry.archivePath));
+          expect(crypto.createHash("sha256").update(captured).digest("hex")).toBe(entry.sha256);
+        }
+      };
+
+
+      it("captures a populated openclaw.json without invoking a legacy archive producer", async () => {
         const harness = mkFresh();
         fs.mkdirSync(harness.openclawDir, { recursive: true });
         fs.writeFileSync(path.join(harness.openclawDir, "openclaw.json"), '{"agents":{"list":[]}}\n');
         const result = await harness.sync.applyUpdate(hardGateTarget);
-        expect(result.status).toBe(409);
-        expect(result.body.code).toBe("backup_failed");
-        expect(result.body.message).toMatch(/reported success but produced no backup file/);
-        expect(result.body.hint).toMatch(/No earlier backup archive exists/);
+        assertConfigOnly(harness, result);
       });
 
-      it("refuses when a session transcript exists, even with no database and an empty config", async () => {
+      it("omits a session transcript without discarding it or claiming database recovery", async () => {
         const harness = mkFresh();
         const sessions = path.join(harness.openclawDir, "agents", "main", "sessions");
         fs.mkdirSync(sessions, { recursive: true });
         fs.writeFileSync(path.join(sessions, "abc.jsonl"), "{}\n");
         fs.writeFileSync(path.join(harness.openclawDir, "openclaw.json"), "{}\n");
         const result = await harness.sync.applyUpdate(hardGateTarget);
-        expect(result.status).toBe(409);
-        expect(result.body.code).toBe("backup_failed");
+        assertConfigOnly(harness, result);
       });
 
-      it("refuses when the channel state carries an applied/last-known-good history", async () => {
+      it("does not let earlier build history replace a fresh config checkpoint", async () => {
         const harness = mkFresh();
         harness.store.updateState((s) => {
           s.lastKnownGood.package = "0.9.9";
           return s;
         });
         const result = await harness.sync.applyUpdate(hardGateTarget);
-        expect(result.status).toBe(409);
-        expect(result.body.code).toBe("backup_failed");
+        assertConfigOnly(harness, result);
       });
 
-      it("still waives for a literally empty tree — an empty `{}` config and the pin's own LKG self-promotion are not history", async () => {
+      it("checkpoints even an empty config rather than applying a fresh-install waiver", async () => {
         const harness = mkFresh();
         fs.mkdirSync(harness.openclawDir, { recursive: true });
         fs.writeFileSync(path.join(harness.openclawDir, "openclaw.json"), "{}\n");
@@ -3425,23 +3086,18 @@ describe("server/openclaw-channel-sync", () => {
           return s;
         });
         const result = await harness.sync.applyUpdate(hardGateTarget);
-        expect(result.body.code).not.toBe("backup_failed");
-        const steps = harness.store.readState().lastUpdateRun.steps;
-        expect(steps).toContainEqual(
-          expect.objectContaining({
-            name: "backup",
-            status: "warning",
-            detail: "no state to back up yet — nothing a migration could lose",
-          }),
-        );
+        assertConfigOnly(harness, result);
       });
 
-      it("treats an unreadable config as NOT fresh (fs error fails closed)", async () => {
+      it("refuses unreadable config before pause or checkpoint creation", async () => {
         const harness = mkFresh();
+        fs.unlinkSync(path.join(harness.openclawDir, "openclaw.json"));
         fs.mkdirSync(path.join(harness.openclawDir, "openclaw.json"), { recursive: true });
         const result = await harness.sync.applyUpdate(hardGateTarget);
         expect(result.status).toBe(409);
-        expect(result.body.code).toBe("backup_failed");
+        expect(result.body.code).toBe("RECOVERY_INVENTORY_UNSUPPORTED");
+        expect(harness.gatewayQuiesce.stop).not.toHaveBeenCalled();
+        expect(harness.restartProcess).not.toHaveBeenCalled();
       });
 
       // "Fresh" is an allowlist: anything outside AlphaClaw's own bookkeeping
@@ -3489,25 +3145,18 @@ describe("server/openclaw-channel-sync", () => {
           "absolute_symlinks",
         ],
       ])(
-        "refuses (no_artifact 409) when the tree holds %s and nothing else — no database, no config, no sessions",
+        "captures only exact config and optional auth/identity paths when the tree holds %s",
         async (_label, plant, veto) => {
           const harness = mkFresh();
           fs.mkdirSync(harness.openclawDir, { recursive: true });
           plant(harness.openclawDir);
           const result = await harness.sync.applyUpdate(hardGateTarget);
-          expect(result.status).toBe(409);
-          expect(result.body.code).toBe("backup_failed");
-          if (veto) {
-            expect(result.body.message).toBe(`The upstream backup was skipped (${veto}): it cannot safely archive the measured state tree.`);
-            expect(harness.runner.runStreamed.mock.calls.filter(([opts]) => opts.command === "openclaw" && opts.args?.[0] === "backup")).toEqual([]);
-          } else {
-            expect(result.body.message).toMatch(/reported success but produced no backup file/);
-            expect(harness.runner.runStreamed.mock.calls.some(([opts]) => opts.command === "openclaw" && opts.args?.[0] === "backup")).toBe(true);
-          }
+          const optionalPath = _label === "a legacy auth-profiles.json" ? "agents/main/agent/auth-profiles.json" : _label === "an identity dir" ? "identity/device.json" : null;
+          assertConfigOnly(harness, result, ["openclaw.json", ...(optionalPath ? [optionalPath] : [])]);
         },
       );
 
-      it("still waives with AlphaClaw's own bookkeeping and empty directories around an empty config (.alphaclaw, logs, backups, tmp, the .env link, empty state/ and agents/main/sessions/)", async () => {
+      it("omits AlphaClaw bookkeeping, logs, backups, tmp, env and empty session directories from the checkpoint", async () => {
         const harness = mkFresh();
         const dir = harness.openclawDir;
         fs.mkdirSync(path.join(dir, ".alphaclaw", "runs"), { recursive: true });
@@ -3521,75 +3170,48 @@ describe("server/openclaw-channel-sync", () => {
         fs.mkdirSync(path.join(dir, "agents", "main", "sessions"), { recursive: true });
         fs.writeFileSync(path.join(dir, "openclaw.json"), "{}\n");
         const result = await harness.sync.applyUpdate(hardGateTarget);
-        expect(result.body.code).not.toBe("backup_failed");
-        expect(harness.runner.runStreamed.mock.calls.filter(([opts]) => opts.command === "openclaw" && opts.args?.[0] === "backup")).toEqual([]);
-        expect(harness.store.readState().lastUpdateRun.steps).toContainEqual(
-          expect.objectContaining({
-            name: "backup",
-            status: "warning",
-            detail: "no state to back up yet — nothing a migration could lose",
-          }),
-        );
+        assertConfigOnly(harness, result);
       });
 
       // X3: the allowlist used to `continue` on the NAME before looking at
       // the entry — a symlink named `.env`/`logs`, a special file named `tmp`
       // or a credentials dump renamed `.env` all counted as fresh. The names
       // are accepted only in their expected shape.
-      describe("allowlisted names are checked by SHAPE, not name (X3)", () => {
-        const expectNotFresh = async (harness, veto = null) => {
+      describe("excluded content is never captured or followed (X3)", () => {
+        const expectOmitted = async (harness, veto = null) => {
           const result = await harness.sync.applyUpdate(hardGateTarget);
-          expect(result.status).toBe(409);
-          expect(result.body.code).toBe("backup_failed");
-          if (veto) {
-            expect(result.body.message).toBe(`The upstream backup was skipped (${veto}): it cannot safely archive the measured state tree.`);
-            expect(harness.runner.runStreamed.mock.calls.filter(([opts]) => opts.command === "openclaw" && opts.args?.[0] === "backup")).toEqual([]);
-          } else {
-            expect(result.body.message).toMatch(/reported success but produced no backup file/);
-            expect(harness.runner.runStreamed.mock.calls.some(([opts]) => opts.command === "openclaw" && opts.args?.[0] === "backup")).toBe(true);
-          }
-        };
-        const expectFresh = async (harness) => {
-          const result = await harness.sync.applyUpdate(hardGateTarget);
-          expect(result.body.code).not.toBe("backup_failed");
-          expect(harness.runner.runStreamed.mock.calls.filter(([opts]) => opts.command === "openclaw" && opts.args?.[0] === "backup")).toEqual([]);
-          expect(harness.store.readState().lastUpdateRun.steps).toContainEqual(
-            expect.objectContaining({
-              name: "backup",
-              status: "warning",
-              detail: "no state to back up yet — nothing a migration could lose",
-            }),
-          );
+          assertConfigOnly(harness, result);
         };
 
-        it("a `.env` symlink that points anywhere but <rootDir>/.env is NOT fresh", async () => {
+
+        it("never follows a .env symlink outside the state root", async () => {
           const harness = mkFresh();
           fs.mkdirSync(harness.openclawDir, { recursive: true });
           fs.symlinkSync("/etc/passwd", path.join(harness.openclawDir, ".env"));
-          await expectNotFresh(harness, "env_files_excluded");
+          await expectOmitted(harness, "env_files_excluded");
         });
 
-        it("a `.env` symlink to <rootDir>/.env whose target is not a regular file is NOT fresh", async () => {
+        it("never follows a .env symlink targeting a directory", async () => {
           const harness = mkFresh();
           fs.mkdirSync(harness.openclawDir, { recursive: true });
           fs.mkdirSync(path.join(harness.rootDir, ".env"));
           fs.symlinkSync(path.join(harness.rootDir, ".env"), path.join(harness.openclawDir, ".env"));
-          await expectNotFresh(harness, "env_files_excluded");
+          await expectOmitted(harness, "env_files_excluded");
         });
 
-        it("the onboarding `.env` link to an existing regular <rootDir>/.env stays fresh (secrets in AlphaClaw's own env are not OpenClaw state)", async () => {
+        it("omits the onboarding .env link and its secret-bearing target", async () => {
           const harness = mkFresh();
           fs.mkdirSync(harness.openclawDir, { recursive: true });
           fs.writeFileSync(path.join(harness.rootDir, ".env"), "SETUP_PASSWORD=pw\nTELEGRAM_BOT_TOKEN=1:a\n");
           fs.symlinkSync(path.join(harness.rootDir, ".env"), path.join(harness.openclawDir, ".env"));
-          await expectFresh(harness);
+          await expectOmitted(harness);
         });
 
-        it("a small regular `.env` with only bookkeeping keys is fresh; one carrying OPENCLAW_*/TOKEN-shaped keys is NOT", async () => {
+        it("omits regular env files regardless of bookkeeping keys, secret keys, or size", async () => {
           const bookkeeping = mkFresh();
           fs.mkdirSync(bookkeeping.openclawDir, { recursive: true });
           fs.writeFileSync(path.join(bookkeeping.openclawDir, ".env"), "# planted by setup\nSETUP_PASSWORD=pw\n");
-          await expectFresh(bookkeeping);
+          await expectOmitted(bookkeeping);
 
           const secretful = mkFresh();
           fs.mkdirSync(secretful.openclawDir, { recursive: true });
@@ -3597,36 +3219,36 @@ describe("server/openclaw-channel-sync", () => {
             path.join(secretful.openclawDir, ".env"),
             "SETUP_PASSWORD=pw\nOPENCLAW_GATEWAY_TOKEN=abc\n",
           );
-          await expectNotFresh(secretful, "env_files_excluded");
+          await expectOmitted(secretful, "env_files_excluded");
 
           const oversized = mkFresh();
           fs.mkdirSync(oversized.openclawDir, { recursive: true });
           fs.writeFileSync(path.join(oversized.openclawDir, ".env"), `# ${"x".repeat(5000)}\n`);
-          await expectNotFresh(oversized, "env_files_excluded");
+          await expectOmitted(oversized, "env_files_excluded");
         });
 
         it.each([".alphaclaw", "logs", "backups", "tmp"])(
-          "a symlink named %s where a bookkeeping directory would be is NOT fresh — and, not being an upstream archive root, it does not veto the upstream rung (v0.9.89)",
+          "does not capture or recurse into a bookkeeping symlink named %s",
           async (name) => {
             const harness = mkFresh();
             fs.mkdirSync(harness.openclawDir, { recursive: true });
             const elsewhere = path.join(harness.rootDir, "elsewhere");
             fs.mkdirSync(elsewhere, { recursive: true });
             fs.symlinkSync(elsewhere, path.join(harness.openclawDir, name));
-            await expectNotFresh(harness);
+            await expectOmitted(harness);
           },
         );
 
-        it("a regular file named `logs` is NOT fresh", async () => {
+        it("omits a regular file named logs from the checkpoint", async () => {
           const harness = mkFresh();
           fs.mkdirSync(harness.openclawDir, { recursive: true });
           fs.writeFileSync(path.join(harness.openclawDir, "logs"), "not a dir\n");
-          await expectNotFresh(harness);
+          await expectOmitted(harness);
         });
       });
     });
 
-    it("db-preflight: no database + a credentials store alone → warning step (same allowlist predicate), never a silent 'no state database' pass", async () => {
+    it("db-preflight: no database + a credentials store alone records an empty database set without claiming data backup", async () => {
       const harness = createHarness({
         pin: "1.0.0",
         installedVersion: "1.0.0",
@@ -3636,23 +3258,17 @@ describe("server/openclaw-channel-sync", () => {
       fs.writeFileSync(path.join(harness.openclawDir, "credentials", "telegram.json"), "{}\n");
       const result = await harness.sync.applyUpdate({ channel: "beta", version: "1.1.0" });
       expect(result.status).toBe(202);
-      const steps = harness.store.readState().lastUpdateRun.steps;
-      expect(steps).toContainEqual(
-        expect.objectContaining({
-          name: "db-preflight",
-          status: "warning",
-          detail: expect.stringMatching(/no state database to probe — the state tree is not empty/),
-        }),
-      );
-      expect(steps).not.toContainEqual(
-        expect.objectContaining({ name: "db-preflight", detail: "no state database" }),
-      );
+      const [record] = readRunRecords(harness.openclawDir);
+      expect(record.dbPreflight).toMatchObject({ ok: true, migrationRequired: false, perDb: [], byKind: { state: { count: 0 }, agent: { count: 0 } } });
+      expect(record.recovery).toMatchObject({ kind: "config_only", databases: { complete: false, verified: false } });
+      expect(record.recovery.manifest.files.map((entry) => entry.archivePath)).toEqual(["openclaw.json"]);
+      expect(record.steps).toContainEqual(expect.objectContaining({ name: "db-preflight", status: "completed" }));
     });
 
     // Same predicate at the db-preflight blind spot: no database to probe is
     // "compatible" only for a fresh tree; otherwise the step says it could
     // not check, instead of claiming a pass.
-    it("db-preflight: no database + non-empty state tree → warning step, never a silent pass", async () => {
+    it("db-preflight: no database + non-empty state tree records an empty database set without claiming data backup", async () => {
       const harness = createHarness({
         pin: "1.0.0",
         installedVersion: "1.0.0",
@@ -3662,20 +3278,14 @@ describe("server/openclaw-channel-sync", () => {
       fs.writeFileSync(path.join(harness.openclawDir, "openclaw.json"), '{"agents":{}}\n');
       const result = await harness.sync.applyUpdate({ channel: "beta", version: "1.1.0" });
       expect(result.status).toBe(202);
-      const steps = harness.store.readState().lastUpdateRun.steps;
-      expect(steps).toContainEqual(
-        expect.objectContaining({
-          name: "db-preflight",
-          status: "warning",
-          detail: expect.stringMatching(/no state database to probe — the state tree is not empty/),
-        }),
-      );
-      expect(steps).not.toContainEqual(
-        expect.objectContaining({ name: "db-preflight", detail: "no state database" }),
-      );
+      const [record] = readRunRecords(harness.openclawDir);
+      expect(record.dbPreflight).toMatchObject({ ok: true, migrationRequired: false, perDb: [], byKind: { state: { count: 0 }, agent: { count: 0 } } });
+      expect(record.recovery).toMatchObject({ kind: "config_only", databases: { complete: false, verified: false } });
+      expect(record.recovery.manifest.files.map((entry) => entry.archivePath)).toEqual(["openclaw.json"]);
+      expect(record.steps).toContainEqual(expect.objectContaining({ name: "db-preflight", status: "completed" }));
     });
 
-    it("db-preflight: no database on a fresh tree still completes as 'no state database'", async () => {
+    it("db-preflight: no database on a fresh tree records an empty database set without claiming data backup", async () => {
       const harness = createHarness({
         pin: "1.0.0",
         installedVersion: "1.0.0",
@@ -3683,23 +3293,21 @@ describe("server/openclaw-channel-sync", () => {
       });
       const result = await harness.sync.applyUpdate({ channel: "beta", version: "1.1.0" });
       expect(result.status).toBe(202);
-      expect(harness.store.readState().lastUpdateRun.steps).toContainEqual(
-        expect.objectContaining({ name: "db-preflight", status: "completed", detail: "no state database" }),
-      );
+      const [record] = readRunRecords(harness.openclawDir);
+      expect(record.dbPreflight).toMatchObject({ ok: true, migrationRequired: false, perDb: [], byKind: { state: { count: 0 }, agent: { count: 0 } } });
+      expect(record.recovery).toMatchObject({ kind: "config_only", databases: { complete: false, verified: false } });
+      expect(record.recovery.manifest.files.map((entry) => entry.archivePath)).toEqual(["openclaw.json"]);
+      expect(record.steps).toContainEqual(expect.objectContaining({ name: "db-preflight", status: "completed" }));
     });
 
     it("enumerateStateDbs honors OPENCLAW_STATE_DIR from the installed CLI's spawn env", async () => {
-      const { DatabaseSync } = require("node:sqlite");
       const stateDir = mkTemp("alphaclaw-alt-state-dir-");
-      fs.mkdirSync(path.join(stateDir, "state"), { recursive: true });
-      const db = new DatabaseSync(path.join(stateDir, "state", "openclaw.sqlite"));
-      db.exec("CREATE TABLE t(x INTEGER)");
-      db.close();
-      // An agent DB under the same state dir: enumerated (it counts toward
-      // dbSizesBytes) but NEVER handed to the state-schema verb (#78).
-      writeAgentDb(stateDir, "main", { userVersion: 17 });
+      fs.writeFileSync(path.join(stateDir, "openclaw.json"), "{}\n");
+      const stateFile = writeStateDb(stateDir, { userVersion: 17 });
+      const agentFile = writeAgentDb(stateDir, "main", { userVersion: 21 });
       const preflightCalls = [];
       const harness = createHarness({
+        openclawDir: stateDir,
         pin: "1.0.0",
         installedVersion: "1.0.0",
         sentinelVersion: "1.0.0",
@@ -3719,17 +3327,14 @@ describe("server/openclaw-channel-sync", () => {
       const result = await harness.sync.applyUpdate({ channel: "stable", version: "1.1.0" });
 
       expect(result.status).toBe(202);
-      // The preflight snapshotted the DB found under OPENCLAW_STATE_DIR, not
-      // under the harness openclawDir (which has none) — and only the STATE
-      // DB reached the CLI: the agent DB's snapshot never did.
-      expect(preflightCalls).toHaveLength(1);
-      expect(preflightCalls[0].some((arg) => /openclaw\.sqlite$/.test(String(arg)))).toBe(true);
-      expect(
-        preflightCalls[0].some((arg) => /openclaw-agent\.sqlite/.test(String(arg))),
-      ).toBe(false);
+      expect(preflightCalls).toEqual([]);
       const [record] = readRunRecords(harness.openclawDir);
-      expect(record.dbPreflight.byKind.agent.dbCount).toBe(1);
-      expect(record.dbPreflight.byKind.state.dbCount).toBe(1);
+      expect(record.dbPreflight.byKind.agent.count).toBe(1);
+      expect(record.dbPreflight.byKind.state.count).toBe(1);
+      expect(Object.keys(record.dbPreflight.dbSizesBytes).sort()).toEqual([stateFile, agentFile].sort());
+      expect(record.recovery.manifest.stateDir).toBe(stateDir);
+      expect(record.recovery.manifest.databases).toEqual([]);
+      expect(record.recovery.manifest.files.map((entry) => entry.sourcePath)).toEqual([path.join(stateDir, "openclaw.json")]);
     });
 
     it("aborts the apply when the pin rollback floor cannot be persisted", async () => {
@@ -3789,7 +3394,7 @@ describe("server/openclaw-channel-sync", () => {
           }),
         },
         runnerImpl: async (opts, fallback) => {
-          if (opts.command === "openclaw" && opts.args?.[0] === "update") {
+          if (opts.command === "git" && opts.args?.[0] === "clone") {
             seen.push(opts.env);
             return {
               ok: true,
@@ -3805,7 +3410,9 @@ describe("server/openclaw-channel-sync", () => {
       const result = await sync.applyUpdate({ channel: "dev", devHead: true });
       expect(result.status).toBe(202);
       expect(seen).toHaveLength(1);
-      expect(seen[0].OPENCLAW_HOME).toBe("/data");
+      expect(seen[0].OPENCLAW_HOME).not.toBe("/data");
+      expect(path.basename(seen[0].OPENCLAW_HOME)).toMatch(/^alphaclaw-dev-preparation-/);
+      expect(seen[0].OPENCLAW_STATE_DIR).toBe(path.join(seen[0].OPENCLAW_HOME, "state"));
       expect(seen[0].OPENCLAW_GATEWAY_TOKEN).toBeUndefined();
       expect(seen[0].OPENCLAW_TWITCH_ACCESS_TOKEN).toBeUndefined();
     });
@@ -3830,92 +3437,29 @@ describe("server/openclaw-channel-sync", () => {
         args.some((arg) => /openclaw-agent\.sqlite/.test(String(arg))),
       );
 
-    it("a lagging agent schema is a migration, not a block: the agent DB never reaches the CLI and byKind carries both lines", async () => {
+    it("a lagging agent schema requires a pre-stop recovery choice and carries both read-only metadata verdicts", async () => {
       const preflightCalls = [];
-      const harness = createHarness({
-        pin: "1.0.0",
-        installedVersion: "1.0.0",
-        sentinelVersion: "1.0.0",
-        // The target (2026.9.1 shape) declares {state 15, agent 19}.
-        installFixture: { schema: { state: 15, agent: 19 } },
-        runnerImpl: stateVerbRunner(
-          { status: "migration-required", foundVersion: 12, targetVersion: 15 },
-          preflightCalls,
-        ),
-      });
-      // The box (2026.9.1-beta.1 shape) sits at {state 12, agent 17}.
-      writeStateDb(harness.openclawDir, { userVersion: 12 });
-      writeAgentDb(harness.openclawDir, "main", { userVersion: 17 });
-
-      // A routine same-channel apply (stable pin → stable: a stable→beta move is a channel-boundary HARD gate since #79 (a)).
-      // This harness takes no usable backup. The checkpoint refuses the
-      // migration, but must retain the independently computed agent verdict.
-      const result = await harness.sync.applyUpdate({
-        channel: "stable",
-        version: "1.1.0",
-      });
-
+      const harness = createHarness({ pin: "1.0.0", installedVersion: "1.0.0", sentinelVersion: "1.0.0", installFixture: { schema: { state: 17, agent: 19 } }, runnerImpl: stateVerbRunner({}, preflightCalls) });
+      const stateFile = writeStateDb(harness.openclawDir, { userVersion: 15 });
+      const agentFile = writeAgentDb(harness.openclawDir, "main", { userVersion: 17 });
+      const before = [stateFile, agentFile].map((file) => fs.readFileSync(file));
+      const result = await harness.sync.applyUpdate({ channel: "stable", version: "1.1.0" });
       expect(result.status).toBe(409);
-      expect(result.body.code).toBe("backup_required_for_migration");
-      // ONE CLI invocation — the state DB. The agent DB was judged in-process.
-      expect(preflightCalls).toHaveLength(1);
-      expect(sawAgentSnapshot(preflightCalls)).toBe(false);
+      expect(result.body.code).toBe("recovery_choice_required");
+      expect(result.body.choices).toContain("database_set");
+      expect(result.body.choices).toContain("cancel");
+      expect(preflightCalls).toEqual([]);
+      expect(harness.gatewayQuiesce.stop).not.toHaveBeenCalled();
+      expect(harness.dbQuiet).not.toHaveBeenCalled();
       const [record] = readRunRecords(harness.openclawDir);
-      expect(record.dbPreflight).toEqual(
-        expect.objectContaining({
-          migrationRequired: true,
-          // Top-level numbers stay the STATE line's (issue #20 consumers).
-          foundVersion: 12,
-          targetVersion: 15,
-        }),
-      );
-      expect(record.dbPreflight.byKind.agent).toEqual(
-        expect.objectContaining({
-          dbCount: 1,
-          foundVersion: 17,
-          targetVersion: 19,
-          migrationRequired: true,
-          unknownTarget: false,
-        }),
-      );
-      expect(record.dbPreflight.byKind.state).toEqual(
-        expect.objectContaining({
-          dbCount: 1,
-          foundVersion: 12,
-          userVersion: 12,
-          targetVersion: 15,
-          migrationRequired: true,
-        }),
-      );
-      // dbSizesBytes sums BOTH kinds (the boot migration budget scales on it).
-      expect(record.dbPreflight.dbSizesBytes).toBe(
-        record.dbPreflight.byKind.state.bytes + record.dbPreflight.byKind.agent.bytes,
-      );
-      // No warning step at all: the oracles agree (user_version 12 = foundVersion 12)
-      // and the target's agent schema was declared.
-      const preflightSteps = record.steps.filter((step) => step.name === "db-preflight");
-      expect(preflightSteps.some((step) => step.status === "warning")).toBe(false);
-      expect(preflightSteps.some((step) => step.status === "failed")).toBe(false);
-      expect(preflightSteps.at(-1)).toEqual(
-        expect.objectContaining({
-          status: "completed",
-          detail: "schema migration will run at the next start",
-        }),
-      );
-      // The apply learned the target's declared schema into the table the
-      // moment its overlay was durable.
-      const table = JSON.parse(
-        fs.readFileSync(
-          path.join(harness.openclawDir, ".alphaclaw", "openclaw-schema-versions.json"),
-          "utf8",
-        ),
-      );
-      expect(table.byVersion["1.1.0"]).toEqual(
-        expect.objectContaining({ state: 15, agent: 19, source: "declared" }),
-      );
+      expect(record.dbPreflight).toMatchObject({ migrationRequired: true, byKind: { state: { count: 1, foundVersion: 15, targetVersion: 17, migrationRequired: true }, agent: { count: 1, foundVersion: 17, targetVersion: 19, migrationRequired: true } } });
+      expect(record.dbPreflight.dbSizesBytes[stateFile]).toBe(fs.statSync(stateFile).size);
+      expect(record.dbPreflight.dbSizesBytes[agentFile]).toBe(fs.statSync(agentFile).size);
+      for (const [i,file] of [stateFile,agentFile].entries()) expect(fs.readFileSync(file)).toEqual(before[i]);
+      expect(harness.store.readState().applied).toBeNull();
     });
 
-    it("an agent DB NEWER than the target supports hard-blocks the apply, naming the kind and both numbers", async () => {
+    it("an agent DB newer than the declared target fails closed before checkpoint or pause", async () => {
       const preflightCalls = [];
       const harness = createHarness({
         pin: "1.0.0",
@@ -3936,38 +3480,24 @@ describe("server/openclaw-channel-sync", () => {
 
       expect(result.status).toBe(409);
       expect(result.body.code).toBe("db_preflight_failed");
-      expect(result.body.message).toBe(
-        "OpenClaw 1.1.0 cannot read your agent database agents/main/agent/openclaw-agent.sqlite: it is at agent schema 21 and this build supports up to 19.",
-      );
-      expect(result.body).toEqual(
-        expect.objectContaining({
-          dbKind: "agent",
-          agentId: "main",
-          foundVersion: 21,
-          targetVersion: 19,
-        }),
-      );
-      expect(result.body.hint).toMatch(/stopped before anything changed/);
-      expect(sawAgentSnapshot(preflightCalls)).toBe(false);
-      // Blocked BEFORE record: nothing to activate at the next boot.
+      expect(result.body.preflight.byKind.agent).toMatchObject({ count: 1, foundVersion: 21, targetVersion: 19, compatible: false });
+      expect(result.body.preflight.perDb).toContainEqual(expect.objectContaining({ dbKind: "agent", agentId: "main", userVersion: 21, supported: 19, reasons: ["database_schema_newer_than_target"] }));
+      expect(preflightCalls).toEqual([]);
+      expect(harness.gatewayQuiesce.stop).not.toHaveBeenCalled();
+      expect(harness.dbQuiet).not.toHaveBeenCalled();
       expect(harness.store.readState().applied).toBeNull();
-      const [record] = readRunRecords(harness.openclawDir);
-      expect(record.steps).toContainEqual(
-        expect.objectContaining({
-          name: "db-preflight",
-          status: "failed",
-          detail: expect.stringMatching(/agent schema 21 is newer than the 19/),
-        }),
-      );
+      expect(harness.restartProcess).not.toHaveBeenCalled();
+      expect(readRunRecords(harness.openclawDir)[0].steps).toContainEqual(expect.objectContaining({ name: "db-preflight", status: "failed" }));
     });
 
-    it("a target that declares no agent schema fails open with one warning step (never a guess)", async () => {
+    it("a target with unknown agent schema fails closed without a database copy or consent offer", async () => {
       const preflightCalls = [];
       const harness = createHarness({
         pin: "1.0.0",
         installedVersion: "1.0.0",
         sentinelVersion: "1.0.0",
         // No contract chunks in the target's dist; "1.1.0" is not seeded either.
+        installFixture: { schema: { state: 15 } },
         runnerImpl: stateVerbRunner(
           { status: "exact", foundVersion: 15, targetVersion: 15 },
           preflightCalls,
@@ -3979,36 +3509,18 @@ describe("server/openclaw-channel-sync", () => {
       // A routine same-channel apply (stable pin → stable: a stable→beta move is a channel-boundary HARD gate since #79 (a)).
       const result = await harness.sync.applyUpdate({ channel: "stable", version: "1.1.0" });
 
-      expect(result.status).toBe(202);
-      expect(sawAgentSnapshot(preflightCalls)).toBe(false);
-      const [record] = readRunRecords(harness.openclawDir);
-      const warnings = record.steps.filter(
-        (step) => step.name === "db-preflight" && step.status === "warning",
-      );
-      expect(warnings).toHaveLength(1);
-      expect(warnings[0].detail).toBe(
-        "agent database compatibility not checked — the target build's agent schema version could not be determined",
-      );
-      expect(record.dbPreflight.byKind.agent).toEqual(
-        expect.objectContaining({
-          dbCount: 1,
-          foundVersion: 17,
-          targetVersion: null,
-          migrationRequired: false,
-          unknownTarget: true,
-        }),
-      );
-      // The state line still delivered a verdict, so the hint is a real false.
-      expect(record.dbPreflight.migrationRequired).toBe(false);
-      // Nothing to learn: a null declaration never shadows the seeds.
-      expect(
-        fs.existsSync(
-          path.join(harness.openclawDir, ".alphaclaw", "openclaw-schema-versions.json"),
-        ),
-      ).toBe(false);
+      expect(result.status).toBe(409);
+      expect(result.body.code).toBe("db_preflight_failed");
+      expect(result.body.preflight.reasons).toContain("unsupported_target_schema_contract");
+      expect(result.body.preflight.byKind.agent).toMatchObject({ count: 1, targetVersion: null, compatible: null });
+      expect(result.body.backupRiskEligible).not.toBe(true);
+      expect(preflightCalls).toEqual([]);
+      expect(harness.gatewayQuiesce.stop).not.toHaveBeenCalled();
+      expect(harness.store.readState().applied).toBeNull();
+      expect(harness.restartProcess).not.toHaveBeenCalled();
     });
 
-    it("an agent DB whose bytes are not a database fails open: 202 with ONE warning step naming it, never a 409 (#78)", async () => {
+    it("a corrupt agent database refuses apply and is never copied, migrated, or consent-waived", async () => {
       const preflightCalls = [];
       const harness = createHarness({
         pin: "1.0.0",
@@ -4035,52 +3547,24 @@ describe("server/openclaw-channel-sync", () => {
       // A routine same-channel apply (stable pin → stable: a stable→beta move is a channel-boundary HARD gate since #79 (a)).
       const result = await harness.sync.applyUpdate({ channel: "stable", version: "1.1.0" });
 
-      // Fail OPEN: an unreadable agent DB is our snapshot's problem, not the
-      // target's incompatibility — the apply proceeds and says so once.
-      expect(result.status).toBe(202);
-      expect(harness.store.readState().applied).toEqual(
-        expect.objectContaining({ version: "1.1.0" }),
-      );
-      // The state line alone reached the CLI; garbage never did.
-      expect(preflightCalls).toHaveLength(1);
-      expect(sawAgentSnapshot(preflightCalls)).toBe(false);
-      const [record] = readRunRecords(harness.openclawDir);
-      const preflightSteps = record.steps.filter((step) => step.name === "db-preflight");
-      expect(preflightSteps.some((step) => step.status === "failed")).toBe(false);
-      const warnings = preflightSteps.filter((step) => step.status === "warning");
-      expect(warnings).toHaveLength(1);
-      // The read-only snapshot (VACUUM INTO) is the first thing that touches
-      // the bytes, so it is the step that names the file and SQLite's verdict.
-      expect(warnings[0].detail).toMatch(
-        /^snapshot of openclaw-agent\.sqlite failed: .*not a database/,
-      );
-      expect(preflightSteps.at(-1)).toEqual(expect.objectContaining({ status: "completed" }));
-      // The agent line recorded the DB it could not judge; the state line's
-      // verdict still stands, so the boot hint is a real false.
-      expect(record.dbPreflight.byKind.agent).toEqual(
-        expect.objectContaining({
-          dbCount: 1,
-          foundVersion: null,
-          targetVersion: 19,
-          migrationRequired: false,
-          unknownTarget: false,
-        }),
-      );
-      expect(record.dbPreflight.migrationRequired).toBe(false);
-      // Read-only throughout: the bytes are exactly what the operator had.
+      expect(result.status).toBe(409);
+      expect(result.body.code).toBe("db_preflight_failed");
+      expect(result.body.preflight.byKind.agent).toMatchObject({ count: 1, compatible: null });
+      expect(result.body.backupRiskEligible).not.toBe(true);
+      expect(preflightCalls).toEqual([]);
+      expect(harness.gatewayQuiesce.stop).not.toHaveBeenCalled();
+      expect(harness.restartProcess).not.toHaveBeenCalled();
+      expect(harness.store.readState().applied).toBeNull();
       expect(fs.readFileSync(agentDb, "utf8")).toBe(garbage);
     });
 
-    it("dev applies probe the checkout's declared schema and persist the verdict as the boot hint", async () => {
+    it("dev applies use the exact checkout metadata and explicit complete database-set recovery", async () => {
       const preflightCalls = [];
       const harness = createHarness({
         pin: "1.0.0",
         installedVersion: "1.0.0",
         sentinelVersion: "1.0.0",
         runnerImpl: async (opts, fallback) => {
-          if (opts.command === "openclaw" && opts.args?.[0] === "update") {
-            return { ok: true, code: 0, tail: '{"status":"ok"}\n', timedOut: false };
-          }
           // Dev applies hard-gate on a usable backup (WI-6.1): the archive
           // manifest must list EVERY state DB, agent DBs included.
           if (opts.command === "tar" && opts.args?.[0] === "-xzOf") {
@@ -4110,19 +3594,16 @@ describe("server/openclaw-channel-sync", () => {
       writeStateDb(harness.openclawDir, { userVersion: 15 });
       writeAgentDb(harness.openclawDir, "main", { userVersion: 17 });
 
-      const result = await harness.sync.applyUpdate({ channel: "dev", devHead: true });
+      const result = await harness.sync.applyUpdate({ channel: "dev", devHead: true, recoveryMode: "database_set" });
 
       expect(result.status).toBe(202);
-      expect(preflightCalls).toHaveLength(1);
-      expect(sawAgentSnapshot(preflightCalls)).toBe(false);
+      expect(preflightCalls).toEqual([]);
       const [record] = readRunRecords(harness.openclawDir);
-      // The dev branch persists the verdict exactly like the package branch.
-      expect(record.dbPreflight).toEqual(
-        expect.objectContaining({ migrationRequired: true, foundVersion: 15, targetVersion: 15 }),
-      );
-      expect(record.dbPreflight.byKind.agent).toEqual(
-        expect.objectContaining({ foundVersion: 17, targetVersion: 19, migrationRequired: true }),
-      );
+      expect(record.dbPreflight).toMatchObject({ migrationRequired: true, byKind: { state: { foundVersion: 15, targetVersion: 15, migrationRequired: false }, agent: { foundVersion: 17, targetVersion: 19, migrationRequired: true } } });
+      expect(record.recovery).toMatchObject({ kind: "database_set", databases: { complete: true, verified: true } });
+      expect(record.recovery.databases.entries).toHaveLength(2);
+      expect(record.recovery.checkpoint.targetBuild.buildId).toBe(kDevSha);
+      expect(harness.runner.runStreamed.mock.calls.some(([opts]) => ["gzip", "tar"].includes(opts.command) || opts.args?.includes("backup"))).toBe(false);
     });
   });
 
@@ -4163,7 +3644,7 @@ describe("server/openclaw-channel-sync", () => {
     });
 
     it("rolls dev back to the pin and packages back to last-known-good", async () => {
-      vi.useFakeTimers();
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
       const dev = createHarness({
         pin: "1.0.0",
         installedVersion: "1.0.0",
@@ -4217,7 +3698,7 @@ describe("server/openclaw-channel-sync", () => {
     });
 
     it("rescues a rollback to last-known-good when the pin tree is unrecoverable", () => {
-      vi.useFakeTimers();
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
       // VPS case: the pin was bumped by a self-update while a dev build was
       // active — no pin overlay exists and the installed tree is not the pin.
       // A pin rollback could never materialize; prefer the usable LKG overlay.
@@ -4279,7 +3760,7 @@ describe("server/openclaw-channel-sync", () => {
     });
 
     it("defers the rollback restart until an in-flight apply settles", async () => {
-      vi.useFakeTimers();
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
       let releaseBackup;
       const backupGate = new Promise((resolve) => {
         releaseBackup = resolve;
@@ -4335,23 +3816,20 @@ describe("server/openclaw-channel-sync", () => {
     });
 
     it("runs the deferred rollback restart when the in-flight apply FAILS", async () => {
-      vi.useFakeTimers();
-      let failBackup;
-      const backupGate = new Promise((resolve) => {
-        failBackup = resolve;
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+      let failCheckpoint;
+      const checkpointGate = new Promise((resolve) => {
+        failCheckpoint = resolve;
       });
-      // installedVersion 1.2.0 -> target 1.1.0 is a DOWNGRADE, so the failed
-      // backup hard-aborts the apply.
       const { sync, store, restartProcess } = createHarness({
         pin: "1.0.0",
         installedVersion: "1.2.0",
         sentinelVersion: "1.2.0",
-        runnerImpl: async (opts, fallback) => {
-          if (opts.command === "openclaw" && opts.args?.[0] === "backup") {
-            await backupGate;
-            return { ok: false, code: 1, tail: "backup failed", timedOut: false };
-          }
-          return fallback(opts);
+        extraSyncOptions: {
+          dbQuiet: async () => {
+            await checkpointGate;
+            throw Object.assign(new Error("checkpoint barrier failed"), { code: "state_db_quiet_unavailable" });
+          },
         },
       });
       store.updateState((s) => {
@@ -4368,9 +3846,10 @@ describe("server/openclaw-channel-sync", () => {
       ).toBe(true);
       expect(restartProcess).not.toHaveBeenCalled();
 
-      failBackup();
+      failCheckpoint();
       const applied = await applyPromise;
       expect(applied.status).toBe(409);
+      expect(applied.body.code).toBe("state_db_quiet_unavailable");
       // The apply failed, so the rollback still owns recovery: marker stays,
       // deferred restart fires 1s after the apply settles.
       expect(store.readMarker()).toBeTruthy();
@@ -4690,7 +4169,7 @@ describe("server/openclaw-channel-sync", () => {
     });
 
     it("rolls a failing new pin back to the previous pin's overlay and blocklists the pin", async () => {
-      vi.useFakeTimers();
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
       const { sync, store, restartProcess, notify } = bumpedPinHarness();
       expect(sync.syncAtBoot().action).toBe("pin_reconciled");
       await flushAsync();
@@ -4739,7 +4218,7 @@ describe("server/openclaw-channel-sync", () => {
     });
 
     it("refuses a pin rollback when no earlier version exists locally — never targets the blocked pin", async () => {
-      vi.useFakeTimers();
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
       const { sync, store, restartProcess, watchdogLatch, notify } =
         bumpedPinHarness();
       expect(sync.syncAtBoot().action).toBe("pin_reconciled");
@@ -4801,7 +4280,7 @@ describe("server/openclaw-channel-sync", () => {
     });
 
     it("falls back to a usable last-known-good overlay when the previous pin has none", async () => {
-      vi.useFakeTimers();
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
       const { sync, store } = bumpedPinHarness();
       expect(sync.syncAtBoot().action).toBe("pin_reconciled");
       await flushAsync();
@@ -4864,7 +4343,7 @@ describe("server/openclaw-channel-sync", () => {
     });
 
     it("a channel rollback never lands on a blocklisted pin", async () => {
-      vi.useFakeTimers();
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
       const withFloor = createHarness({
         pin: "1.0.1",
         installedVersion: "1.2.0",
@@ -5023,7 +4502,7 @@ describe("server/openclaw-channel-sync", () => {
       const result = sync.syncAtBoot();
       await sync.flushBootNotifications();
 
-      expect(execFileSyncImpl).toHaveBeenCalled();
+      expect(execFileSyncImpl).not.toHaveBeenCalled();
       expect(result.action).toBe("rollback_refused");
       expect(installedTreeVersion(installDir)).toBe("1.0.1");
       expect(store.readState().applied).toBeNull();
@@ -5034,7 +4513,7 @@ describe("server/openclaw-channel-sync", () => {
       ).toBe(true);
     });
 
-    it("outside a pin window the same unsupported preflight still warns and proceeds", async () => {
+    it("outside a pin window an unknown target also refuses rollback without copying the database", async () => {
       const { execFileSyncImpl, seed } = seedStateDbAndUnsupportedPreflight();
       const { sync, store, openclawDir, installDir } = pinRollbackMarkerHarness({
         markerSource: null,
@@ -5057,11 +4536,12 @@ describe("server/openclaw-channel-sync", () => {
       const result = sync.syncAtBoot();
       await sync.flushBootNotifications();
 
-      expect(result.action).toBe("rollback");
-      expect(installedTreeVersion(installDir)).toBe("1.0.0");
+      expect(result.action).toBe("rollback_refused");
+      expect(installedTreeVersion(installDir)).toBe("1.0.1");
+      expect(execFileSyncImpl).not.toHaveBeenCalled();
       expect(
         result.warnings.some((warning) =>
-          warning.includes("cannot verify state written by the newer version"),
+          warning.includes("cannot safely read the current database"),
         ),
       ).toBe(true);
     });
@@ -6045,7 +5525,7 @@ describe("getChannelInfo installed-tree predicates (#76 RC4 / Stage 1d)", () => 
     });
 
     it("a dev apply still rolls back (its pin tree is the dormant fallback, not divergence)", async () => {
-      vi.useFakeTimers();
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
       const { sync, store } = createHarness({
         pin: "1.0.0",
         installedVersion: "1.0.0",
@@ -6108,7 +5588,7 @@ describe("getChannelInfo installed-tree predicates (#76 RC4 / Stage 1d)", () => 
     };
 
     it("moves forward when the pin is installed even though a recorded apply never activated", () => {
-      vi.useFakeTimers();
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
       const insertEvent = vi.fn();
       const { sync, store } = withCandidate({
         installedVersion: "1.0.0",
@@ -6146,7 +5626,7 @@ describe("getChannelInfo installed-tree predicates (#76 RC4 / Stage 1d)", () => 
     });
 
     it("records the caller's stale view beside the authoritative read, and gates on the read (#76 RC4)", () => {
-      vi.useFakeTimers();
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
       const insertEvent = vi.fn();
       const { sync, store } = withCandidate({
         installedVersion: "1.0.0",
@@ -6578,11 +6058,11 @@ describe("reconcileInstalled (#76 B1.2)", () => {
   });
 
   it("target compatibility FIRST: an expected build whose declared schema is below the live user_version is skipped for the newest compatible overlay (schema_recovery)", async () => {
-    const h = divergedHarness({ schema: { state: 12, agent: 19 } });
-    writeStateDb(h.openclawDir, { userVersion: 15 });
-    expect(saveOverlayWithSchema(h.store, "3.0.0", { state: 15, agent: 19 })).toEqual({ ok: true });
+    const h = divergedHarness({ schema: { state: 15, agent: 19 } });
+    writeStateDb(h.openclawDir, { userVersion: 17 });
+    expect(saveOverlayWithSchema(h.store, "3.0.0", { state: 17, agent: 19 })).toEqual({ ok: true });
     // Blocklisted overlays are never candidates.
-    expect(saveOverlayWithSchema(h.store, "4.0.0", { state: 16, agent: 19 })).toEqual({ ok: true });
+    expect(saveOverlayWithSchema(h.store, "4.0.0", { state: 17, agent: 19 })).toEqual({ ok: true });
     h.store.addBlocklist({ id: "4.0.0", reason: "crash_loop", exitCode: 1 });
 
     const result = await h.sync.reconcileInstalled({ source: "structural_repair" });
@@ -6599,7 +6079,7 @@ describe("reconcileInstalled (#76 B1.2)", () => {
       "target_incompatible",
       "activated",
     ]);
-    expect(eventsOf(h.insertEvent, "reconcile_installed")[0].details.reasons).toEqual(["state_schema_too_new"]);
+    expect(eventsOf(h.insertEvent, "reconcile_installed")[0].details.reasons).toEqual(["database_schema_newer_than_target"]);
     const run = h.sync.runLedger.listRuns().find((r) => r.operationId === result.runId);
     expect(run.target).toEqual(
       expect.objectContaining({ kind: "reconcile", version: "3.0.0", expected: "2.0.0", schemaRecovery: true }),
@@ -6607,11 +6087,11 @@ describe("reconcileInstalled (#76 B1.2)", () => {
   });
 
   it("target incompatible and nothing else bootable → no_bootable_version, tree untouched", async () => {
-    const h = divergedHarness({ schema: { state: 12, agent: 19 } });
-    writeStateDb(h.openclawDir, { userVersion: 15 });
+    const h = divergedHarness({ schema: { state: 15, agent: 19 } });
+    writeStateDb(h.openclawDir, { userVersion: 17 });
     const result = await h.sync.reconcileInstalled();
     expect(result).toEqual(
-      expect.objectContaining({ ok: false, code: "no_bootable_version", reasons: ["state_schema_too_new"] }),
+      expect.objectContaining({ ok: false, code: "no_bootable_version", reasons: ["database_schema_newer_than_target"] }),
     );
     expect(installedVersionOf(h.installDir)).toBe("1.0.0");
     expect(h.sync.runLedger.listRuns()[0]).toEqual(
@@ -6621,7 +6101,7 @@ describe("reconcileInstalled (#76 B1.2)", () => {
 
   // Stage 3 I3 (#76 B1.1 rung 3): `recover: true` — the watchdog's structural
   // repair on a NON-diverged tree that cannot read the databases.
-  const recoverHarness = ({ installedSchema = { state: 12, agent: 19 }, userVersion = 15 } = {}) => {
+  const recoverHarness = ({ installedSchema = { state: 15, agent: 19 }, userVersion = 15 } = {}) => {
     const lock = makeLock();
     const insertEvent = vi.fn();
     const harness = createHarness({
@@ -6647,8 +6127,8 @@ describe("reconcileInstalled (#76 B1.2)", () => {
     return { ...harness, lock, insertEvent };
   };
 
-  it("recover: a non-diverged tree that is compatible (or unknown) is `none` with a reason — the operator's build is never swapped on a guess; without `recover` it is plain `none`", async () => {
-    const h = recoverHarness({ installedSchema: { state: 15, agent: 19 }, userVersion: 15 });
+  it("recover: a compatible non-diverged tree is left alone and unknown compatibility refuses without activation; without recover it is plain none", async () => {
+    const h = recoverHarness({ installedSchema: { state: 17, agent: 19 }, userVersion: 17 });
     expect(h.sync.getChannelInfo().installedDiverged).toBe(false);
     expect(await h.sync.reconcileInstalled({ source: "structural_repair" })).toEqual(
       expect.objectContaining({ ok: true, action: "none", from: "1.0.0", to: "1.0.0", runId: null }),
@@ -6662,16 +6142,20 @@ describe("reconcileInstalled (#76 B1.2)", () => {
     expect(eventsOf(h.insertEvent, "reconcile_installed").at(-1)).toEqual(
       expect.objectContaining({ status: "skipped", details: expect.objectContaining({ code: "target_compatible", recover: true }) }),
     );
-    // Unknown line (no declared schema, no table entry): still `none`.
-    const unknown = recoverHarness({ installedSchema: {}, userVersion: 15 });
+    const unknown = recoverHarness({ installedSchema: {}, userVersion: 17 });
     expect(await unknown.sync.reconcileInstalled({ recover: true })).toEqual(
-      expect.objectContaining({ ok: true, action: "none", reason: "compatibility_unknown" }),
+      expect.objectContaining({ ok: false, action: "none", code: "db_preflight_failed" }),
     );
+    expect(installedVersionOf(unknown.installDir)).toBe("1.0.0");
+    expect(unknown.store.readState().applied).toBeNull();
+    expect(unknown.runner.runStreamed).not.toHaveBeenCalled();
+    expect(unknown.installToTempDir).not.toHaveBeenCalled();
+    expect(unknown.lock.acquireLifecycleLock).not.toHaveBeenCalled();
   });
 
   it("recover: a non-diverged pin whose declared schema is below the live user_version activates the newest compatible overlay as schema_recovery under the caller's hold (no own acquire), records applied.reason and completes the run's stop → activate → verify", async () => {
-    const h = recoverHarness({ installedSchema: { state: 12, agent: 19 }, userVersion: 15 });
-    expect(saveOverlayWithSchema(h.store, "3.0.0", { state: 15, agent: 19 })).toEqual({ ok: true });
+    const h = recoverHarness({ installedSchema: { state: 15, agent: 19 }, userVersion: 17 });
+    expect(saveOverlayWithSchema(h.store, "3.0.0", { state: 17, agent: 19 })).toEqual({ ok: true });
     const hold = makeHold();
     const result = await h.sync.reconcileInstalled({ hold, source: "structural_repair", relaunch: true, recover: true });
     expect(result).toEqual(
@@ -6705,7 +6189,7 @@ describe("reconcileInstalled (#76 B1.2)", () => {
       "verify:completed",
     ]);
     // Nothing else bootable: the refusal names it and the tree is untouched.
-    const stuck = recoverHarness({ installedSchema: { state: 12, agent: 19 }, userVersion: 15 });
+    const stuck = recoverHarness({ installedSchema: { state: 15, agent: 19 }, userVersion: 17 });
     expect(await stuck.sync.reconcileInstalled({ recover: true })).toEqual(
       expect.objectContaining({ ok: false, code: "no_bootable_version" }),
     );
@@ -6835,16 +6319,20 @@ describe("reconcileInstalled (#76 B1.2)", () => {
       return fallback(opts);
     };
 
-    it("the pre-update backup runs the recorded build's bin under node while the tree diverges (the operator's re-apply keeps working)", async () => {
+    it("a diverged tree checkpoints the executing build identity without invoking either backup CLI", async () => {
       const seen = [];
-      const lock = makeLock();
+      const lock = require("../../lib/server/gateway-lifecycle-lock").createGatewayLifecycleLock({ logger: kSilentLogger });
       const h = createHarness({
         pin: "1.0.0",
         installedVersion: "1.0.0",
         sentinelVersion: "1.0.0",
+        installFixture: { schema: { state: 15, agent: 19 } },
         runnerImpl: binAwareRunner(seen),
         extraSyncOptions: {
-          acquireLifecycleLock: lock.acquireLifecycleLock,
+          acquireLifecycleLock: lock.acquire,
+          gatewayMutationPolicy: require("../../lib/server/gateway-mutation-policy").createGatewayMutationPolicy({
+            lock, getChannelInfo: () => h.sync.getChannelInfo(), isApplyInProgress: () => h.sync.isApplyInProgress(),
+          }),
           backupProbes: { listProcesses: () => [] },
           backupTuning: { exclusivitySettleMs: 0 },
         },
@@ -6860,28 +6348,28 @@ describe("reconcileInstalled (#76 B1.2)", () => {
       const expectedBin = h.store.resolvePackageBin(h.store.overlayPackageDir("2.0.0"));
       expect(expectedBin).toBeTruthy();
       expect(h.sync.resolveExpectedBin()).toBe(expectedBin);
-      // Cross-channel target → hard-gated backup.
       const result = await h.sync.applyUpdate({ channel: "beta", version: "1.1.0-beta.1" });
-      const backupSpawn = seen.find((opts) => opts.command === process.execPath);
-      expect(backupSpawn).toBeTruthy();
-      expect(backupSpawn.args.slice(0, 3)).toEqual([expectedBin, "backup", "create"]);
-      expect(seen.some((opts) => opts.command === "openclaw")).toBe(false);
-      expect(result.body?.code).not.toBe("version_mismatch");
+      expect(seen).toEqual([]);
+      expect(result.status, JSON.stringify(result.body)).toBe(202);
+      expect(result.body.recovery).toMatchObject({ kind: "config_only", checkpoint: { verified: true }, databases: { complete: false } });
+      expect(result.body.recovery.checkpoint.sourceBuild.buildId).toBe("1.0.0");
+      expect(result.body.recovery.checkpoint.targetBuild.buildId).toBe("1.1.0-beta.1");
     });
 
-    it("the backup refuses version_mismatch on a hard gate only when NO local bin can read the databases; the same-channel soft gate warns and continues", async () => {
+    it("both cross-channel and same-channel applies refuse a target older than the live schemas without a backup fallback", async () => {
       const seen = [];
       const mk = (extra = {}) => {
         const h = createHarness({
           pin: "1.0.0",
           installedVersion: "1.0.0",
           sentinelVersion: "1.0.0",
+          installFixture: { schema: { state: 15, agent: 19 } },
           runnerImpl: binAwareRunner(seen),
           extraSyncOptions: extra,
         });
         // Both trees declare a schema below the live user_version.
         writeSchemaContractFixture(path.join(h.installDir, "node_modules", "openclaw"), {
-          state: 10,
+          state: 15,
           agent: 19,
         });
         h.store.updateState((s) => {
@@ -6889,28 +6377,35 @@ describe("reconcileInstalled (#76 B1.2)", () => {
           s.applied = { channel: "beta", version: "2.0.0", at: 1, acceptedAt: null };
           return s;
         });
-        expect(saveOverlayWithSchema(h.store, "2.0.0", { state: 12, agent: 19 })).toEqual({ ok: true });
-        writeStateDb(h.openclawDir, { userVersion: 15 });
+        expect(saveOverlayWithSchema(h.store, "2.0.0", { state: 15, agent: 19 })).toEqual({ ok: true });
+        writeStateDb(h.openclawDir, { userVersion: 17 });
         return h;
       };
       const hard = mk();
       const refused = await hard.sync.applyUpdate({ channel: "beta", version: "1.1.0-beta.1" });
       expect(refused.status).toBeGreaterThanOrEqual(400);
-      expect(refused.body).toEqual(expect.objectContaining({ ok: false, code: "version_mismatch" }));
-      expect(refused.body.hint).toContain("Re-activate recorded build");
+      expect(refused.body).toEqual(expect.objectContaining({ ok: false, code: "db_preflight_failed" }));
+      expect(refused.body.preflight.reasons).toContain("database_schema_newer_than_target");
       expect(seen.length).toBe(0);
       expect(hard.store.readState().lastUpdateRun.steps).toContainEqual(
-        expect.objectContaining({ name: "backup", status: "failed", error: "version_mismatch" }),
+        expect.objectContaining({ name: "db-preflight", status: "failed" }),
       );
 
       const soft = mk();
       // Same channel as the applied beta record — beta→stable would cross the boundary (#79 (a)).
       const warned = await soft.sync.applyUpdate({ channel: "beta", version: "2.0.1" });
-      expect(warned.body?.code).not.toBe("version_mismatch");
+      expect(warned.status).toBe(409);
+      expect(warned.body.code).toBe("db_preflight_failed");
+      expect(warned.body.preflight.reasons).toContain("database_schema_newer_than_target");
       expect(soft.store.readState().lastUpdateRun.steps).toContainEqual(
-        expect.objectContaining({ name: "backup", status: "warning", error: "version_mismatch" }),
+        expect.objectContaining({ name: "db-preflight", status: "failed" }),
       );
       expect(seen.length).toBe(0);
+      for (const harness of [hard, soft]) {
+        expect(harness.gatewayQuiesce.stop).not.toHaveBeenCalled();
+        expect(harness.restartProcess).not.toHaveBeenCalled();
+        expect(harness.store.readState().applied.version).toBe("2.0.0");
+      }
     });
 
     it("resolveExpectedBin names the recorded build's overlay bin while the tree diverges, null for dev or no overlay", () => {
@@ -6934,17 +6429,17 @@ describe("reconcileInstalled (#76 B1.2)", () => {
     });
 
     it("compatibleBinForCurrentDb prefers the expected bin, falls back to the installed tree when the expected build cannot read the DBs, and is null when neither can", async () => {
-      const preferred = divergedHarness({ schema: { state: 15, agent: 19 } });
-      writeStateDb(preferred.openclawDir, { userVersion: 15 });
+      const preferred = divergedHarness({ schema: { state: 17, agent: 19 } });
+      writeStateDb(preferred.openclawDir, { userVersion: 17 });
       expect(await preferred.sync.compatibleBinForCurrentDb()).toEqual(
         expect.objectContaining({ version: "2.0.0", source: "overlay", compatible: true }),
       );
 
-      const fallback = divergedHarness({ schema: { state: 12, agent: 19 } });
-      writeStateDb(fallback.openclawDir, { userVersion: 15 });
-      // The installed tree declares nothing → unknown → fail-open pick.
+      const fallback = divergedHarness({ schema: { state: 15, agent: 19 } });
+      writeStateDb(fallback.openclawDir, { userVersion: 17 });
+      writeSchemaContractFixture(path.join(fallback.installDir, "node_modules", "openclaw"), { state: 17, agent: 19 });
       expect(await fallback.sync.compatibleBinForCurrentDb()).toEqual(
-        expect.objectContaining({ version: "1.0.0", source: "installed", compatible: null }),
+        expect.objectContaining({ version: "1.0.0", source: "installed", compatible: true }),
       );
 
       const neither = createHarness({
@@ -6954,7 +6449,7 @@ describe("reconcileInstalled (#76 B1.2)", () => {
       });
       // The INSTALLED tree declares a schema too old for the DB as well.
       writeSchemaContractFixture(path.join(neither.installDir, "node_modules", "openclaw"), {
-        state: 10,
+        state: 15,
         agent: 19,
       });
       neither.store.updateState((s) => {
@@ -6962,8 +6457,8 @@ describe("reconcileInstalled (#76 B1.2)", () => {
         s.applied = { channel: "beta", version: "2.0.0", at: 1, acceptedAt: null };
         return s;
       });
-      expect(saveOverlayWithSchema(neither.store, "2.0.0", { state: 12, agent: 19 })).toEqual({ ok: true });
-      writeStateDb(neither.openclawDir, { userVersion: 15 });
+      expect(saveOverlayWithSchema(neither.store, "2.0.0", { state: 15, agent: 19 })).toEqual({ ok: true });
+      writeStateDb(neither.openclawDir, { userVersion: 17 });
       expect(await neither.sync.compatibleBinForCurrentDb()).toBeNull();
     });
   });
@@ -7080,7 +6575,7 @@ describe("reconcileInstalled (#76 B1.2)", () => {
     };
 
     it("moves forward to the newest complete overlay whose declared schema can read the migrated state, without a blocklist entry", async () => {
-      vi.useFakeTimers();
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
       const h = pinHarness();
       writeStateDb(h.openclawDir, { userVersion: 15 });
       expect(saveOverlayWithSchema(h.store, "2.0.0", { state: 12, agent: 19 })).toEqual({ ok: true });
@@ -7107,7 +6602,7 @@ describe("reconcileInstalled (#76 B1.2)", () => {
     });
 
     it("prefers the blocklist path when it qualifies, and reports no_forward_candidate when no overlay can read the state", async () => {
-      vi.useFakeTimers();
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
       const blocklisted = pinHarness();
       expect(saveOverlayFixture(blocklisted.store, "2.5.0")).toEqual({ ok: true });
       blocklisted.store.addBlocklist({ id: "2.5.0", reason: "config_error", exitCode: 78 });

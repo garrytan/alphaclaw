@@ -102,6 +102,8 @@ const writeAgentDb = (openclawDir, agentId, { userVersion }) => {
   const db = new DatabaseSync(file);
   db.exec("CREATE TABLE t(x INTEGER)");
   db.exec(`PRAGMA user_version = ${userVersion}`);
+  db.exec("CREATE TABLE schema_meta(meta_key TEXT PRIMARY KEY, role TEXT, schema_version INTEGER, agent_id TEXT)");
+  db.prepare("INSERT INTO schema_meta VALUES ('primary', 'agent', ?, ?)").run(userVersion, agentId);
   db.close();
   return file;
 };
@@ -114,6 +116,8 @@ const writeStateDb = (openclawDir, { userVersion }) => {
   const db = new DatabaseSync(file);
   db.exec("CREATE TABLE t(x INTEGER)");
   db.exec(`PRAGMA user_version = ${userVersion}`);
+  db.exec("CREATE TABLE schema_meta(meta_key TEXT PRIMARY KEY, role TEXT, schema_version INTEGER, agent_id TEXT)");
+  db.prepare("INSERT INTO schema_meta VALUES ('primary', 'global', ?, NULL)").run(userVersion);
   db.close();
   return file;
 };
@@ -247,6 +251,41 @@ const createHarness = ({
     restartProcess,
     nowRef,
   };
+};
+
+const approveBootMigration = async (harness, operationId = "aaaabbbb-cccc-dddd-eeee-ffff00001111") => {
+  const { buildRecoveryInventory } = require("../../lib/server/openclaw-recovery-plan");
+  const { createRecoveryCheckpoint } = require("../../lib/server/openclaw-recovery-checkpoint");
+  const { fingerprintBuild, fingerprintDatabase } = require("../../lib/server/backup-risk-consent");
+  const build = await harness.sync.getExecutingBuild();
+  const inventory = await buildRecoveryInventory({ stateDir: harness.openclawDir });
+  const target = build.source === "dev"
+    ? { channel: "dev", sha: build.buildId }
+    : { channel: "beta", version: build.version };
+  const recovery = await createRecoveryCheckpoint({
+    inventory,
+    backupsDir: path.join(harness.rootDir, "backups", "openclaw"),
+    operationId,
+    sourceBuild: build,
+    targetBuild: build,
+  });
+  recovery.kind = "forward_only";
+  recovery.consent = { required: true, recorded: true };
+  const databases = await Promise.all(inventory.dbs.map(async (db) => ({
+    path: db.sourcePath,
+    files: await fingerprintDatabase(db.sourcePath),
+  })));
+  const targetFingerprint = await fingerprintBuild(build);
+  const targetContentFingerprint = await fingerprintBuild(build, { contentOnly: true });
+  const ledger = createRunLedger({ openclawDir: harness.openclawDir, nowFn: () => harness.nowRef.now, logger: kSilentLogger });
+  if (!ledger.readRun(operationId)) ledger.createRun({ operationId, target });
+  ledger.updateRun(operationId, (record) => ({
+    ...record,
+    state: "restart_expected",
+    recovery,
+    recoveryIntent: { approved: true, target, targetFingerprint, targetContentFingerprint, databases, migrationRequired: true, operationId },
+  }));
+  return recovery;
 };
 
 const installedPackageJsonVersion = (installDir) =>
@@ -622,11 +661,8 @@ describe("server/openclaw-channel boot sync (e2e)", () => {
     assertOffline(harness);
   });
 
-  it("boot rollback warns (never blocks) when the target cannot verify current state (C1)", async () => {
+  it("boot rollback refuses activation when the target cannot verify current state (C1)", async () => {
     const { DatabaseSync } = require("node:sqlite");
-    // The rollback target's `database preflight` rejects the snapshot with an
-    // unknown-command error — the stable-target case. Boot must activate
-    // anyway and surface the honest warning naming the backup as recovery.
     const execFileSyncImpl = vi.fn((cmd, args) => {
       if (Array.isArray(args) && args.includes("preflight")) {
         const err = new Error("exit 1");
@@ -641,7 +677,6 @@ describe("server/openclaw-channel boot sync (e2e)", () => {
       installedVersion: "1.2.0",
       execFileSyncImpl,
     });
-    // A real state DB so enumerateStateDbs has something to snapshot.
     const stateDir = path.join(harness.openclawDir, "state");
     fs.mkdirSync(stateDir, { recursive: true });
     const db = new DatabaseSync(path.join(stateDir, "openclaw.sqlite"));
@@ -661,26 +696,12 @@ describe("server/openclaw-channel boot sync (e2e)", () => {
 
     const result = harness.sync.syncAtBoot();
 
-    expect(result.ok).toBe(true);
-    expect(result.action).toBe("rollback");
-    // Warned, not blocked: the rollback still activated.
-    expect(installedPackageJsonVersion(harness.installDir)).toBe("1.1.0");
-    const lastBoot = harness.store.readState().lastBoot;
-    expect(
-      lastBoot.warnings.some((warning) =>
-        /cannot verify state written by the newer version/.test(warning),
-      ),
-    ).toBe(true);
-    expect(
-      lastBoot.warnings.some((warning) =>
-        /backup taken before the update/.test(warning),
-      ),
-    ).toBe(true);
-    // The warning notification carries its stable outbox id.
-    await flushAsync();
-    expect(notifyIds(harness.notify)).toContain(
-      "boot-rollback-preflight-1.1.0",
-    );
+    expect(result.action).toBe("rollback_refused");
+    expect(installedPackageJsonVersion(harness.installDir)).toBe("1.2.0");
+    expect(harness.store.readMarker()).toBe(null);
+    expect(result.warnings.some((warning) => warning.includes("cannot safely read the current database"))).toBe(true);
+    expect(execFileSyncImpl).not.toHaveBeenCalled();
+    assertOffline(harness);
   });
 
   it("consumes rollback markers: container pin reset and VPS package rollback", async () => {
@@ -1048,11 +1069,11 @@ describe("server/openclaw-channel boot sync (e2e)", () => {
         sentinelVersion: "2026.8.1",
         // The installed dist declares its schema line (#78): the supported
         // schema the report records resolves from it, not from a guess.
-        installFixture: { schema: { state: 14, agent: 18 } },
+        installFixture: { schema: { state: 15, agent: 18 } },
         runnerImpl: doctorRunner({ doctorCalls }),
       });
       writeConfig(harness.openclawDir, { audit: { enabled: true } });
-      writeStateDb(harness.openclawDir, { userVersion: 14 });
+      writeStateDb(harness.openclawDir, { userVersion: 15 });
       writeAgentDb(harness.openclawDir, "main", { userVersion: 18 });
       writeAgentDb(harness.openclawDir, "second", { userVersion: 17 });
       harness.sync.syncAtBoot();
@@ -1062,6 +1083,7 @@ describe("server/openclaw-channel boot sync (e2e)", () => {
       });
       expect(table.read().byVersion["2026.8.1"]?.observed ?? null).toBeNull();
 
+      await approveBootMigration(harness);
       const outcome = await harness.sync.reconcileBootConfig();
       expect(outcome.status).toBe("ok");
       expect(doctorCalls).toHaveLength(1);
@@ -1069,7 +1091,7 @@ describe("server/openclaw-channel boot sync (e2e)", () => {
       // Highest agent version wins (agent DBs share one line); observed is
       // evidence, so supportedFor still answers from declared/seeded only.
       const entry = table.read().byVersion["2026.8.1"];
-      expect(entry.observed).toEqual({ state: 14, agent: 18, at: harness.nowRef.now });
+      expect(entry.observed).toEqual({ state: 15, agent: 18, at: harness.nowRef.now });
       expect(table.supportedFor("2026.8.1")).toEqual(
         expect.objectContaining({ source: expect.not.stringMatching(/observed/) }),
       );
@@ -1079,19 +1101,19 @@ describe("server/openclaw-channel boot sync (e2e)", () => {
       // shape every relaunch / restart-op record persists (#76 A2).
       const versions = await harness.sync.readStateDbVersions();
       expect(versions).toEqual(
-        expect.objectContaining({ userVersion: 14, agentUserVersions: expect.arrayContaining([18, 17]) }),
+        expect.objectContaining({ userVersion: 15, agentUserVersions: expect.arrayContaining([18, 17]) }),
       );
       const schema = await harness.sync.describeStateDbSchema();
       expect(schema.installedVersion).toBe("2026.8.1");
       expect(schema.stateDb).toEqual(
         expect.arrayContaining([
-          expect.objectContaining({ kind: "state", userVersion: 14, status: "ok" }),
+          expect.objectContaining({ kind: "state", userVersion: 15, status: "ok" }),
           expect.objectContaining({ kind: "agent", agentId: "main", userVersion: 18, status: "ok" }),
           expect.objectContaining({ kind: "agent", agentId: "second", userVersion: 17, status: "ok" }),
         ]),
       );
       expect(schema.supportedSchema).toEqual({
-        state: 14,
+        state: 15,
         agent: 18,
         source: { state: "declared", agent: "declared" },
       });
@@ -1102,10 +1124,11 @@ describe("server/openclaw-channel boot sync (e2e)", () => {
       const harness = createHarness({
         installedVersion: "2026.8.1",
         sentinelVersion: "2026.8.1",
+        installFixture: { schema: { state: 15 } },
         runnerImpl: doctorRunner({ doctorOk: false }),
       });
       writeConfig(harness.openclawDir, { audit: { enabled: true } });
-      writeStateDb(harness.openclawDir, { userVersion: 14 });
+      writeStateDb(harness.openclawDir, { userVersion: 15 });
       harness.sync.syncAtBoot();
 
       const outcome = await harness.sync.reconcileBootConfig();
@@ -2540,6 +2563,7 @@ describe("server/openclaw-channel boot sync (e2e)", () => {
       harness = createHarness({
         installedVersion: "2026.9.1-beta.1",
         sentinelVersion: "2026.9.1-beta.1",
+        installFixture: { schema: { state: 15, agent: 19 } },
         runnerImpl: validateAwareRunner({
           openclawDirRef: () => harness.openclawDir,
           doctorCalls,
@@ -2547,13 +2571,7 @@ describe("server/openclaw-channel boot sync (e2e)", () => {
         }),
       });
       writeConfig(harness.openclawDir, { clean: true });
-      // A state DB exists, so the db probe actually runs (and reports clean).
-      fs.mkdirSync(path.join(harness.openclawDir, "state"), { recursive: true });
-      fs.writeFileSync(
-        path.join(harness.openclawDir, "state", "openclaw.sqlite"),
-        "not-really-sqlite-but-present",
-      );
-
+      writeStateDb(harness.openclawDir, { userVersion: 15 });
       harness.sync.syncAtBoot();
       const outcome = await harness.sync.reconcileBootConfig();
 
@@ -2752,22 +2770,18 @@ describe("server/openclaw-channel boot sync (e2e)", () => {
     });
 
     it("closes the db-migrate probe step when the probe says no migration is needed", async () => {
-      const { DatabaseSync } = require("node:sqlite");
       let harness;
       harness = createHarness({
         installedVersion: "2026.9.1-beta.1",
         sentinelVersion: "2026.9.1-beta.1",
+        installFixture: { schema: { state: 15, agent: 19 } },
         runnerImpl: validateAwareRunner({
           openclawDirRef: () => harness.openclawDir,
           dbPreflight: { ok: true, compatible: true },
         }),
       });
       writeConfig(harness.openclawDir, { clean: true });
-      const stateDir = path.join(harness.openclawDir, "state");
-      fs.mkdirSync(stateDir, { recursive: true });
-      const db = new DatabaseSync(path.join(stateDir, "openclaw.sqlite"));
-      db.exec("CREATE TABLE t(x INTEGER)");
-      db.close();
+      writeStateDb(harness.openclawDir, { userVersion: 15 });
       seedRestartExpectedRun(harness);
       harness.sync.syncAtBoot();
 
@@ -2794,6 +2808,7 @@ describe("server/openclaw-channel boot sync (e2e)", () => {
         harness = createHarness({
           installedVersion: "2026.9.1-beta.1",
           sentinelVersion: "2026.9.1-beta.1",
+          installFixture: { schema: { state: 16, agent: 19 } },
           runnerImpl: validateAwareRunner({
             openclawDirRef: () => harness.openclawDir,
             doctorImpl,
@@ -2803,7 +2818,9 @@ describe("server/openclaw-channel boot sync (e2e)", () => {
         seedRestartExpectedRun(harness, {
           dbPreflight: { migrationRequired: true },
         });
+        writeStateDb(harness.openclawDir, { userVersion: 15 });
         harness.sync.syncAtBoot();
+        await approveBootMigration(harness);
         const outcome = await harness.sync.reconcileBootConfig();
         expect(outcome.status).toBe("held");
         return readRunRecord(harness);
@@ -2843,13 +2860,13 @@ describe("server/openclaw-channel boot sync (e2e)", () => {
       );
     });
 
-    it("runs doctor from the apply-time dbPreflight hint without invoking the live probe", async () => {
-      const { DatabaseSync } = require("node:sqlite");
+    it("does not let an apply-time dbPreflight hint authorize migration without the exact recovery handoff", async () => {
       const doctorCalls = [];
       let harness;
       harness = createHarness({
         installedVersion: "2026.9.1-beta.1",
         sentinelVersion: "2026.9.1-beta.1",
+        installFixture: { schema: { state: 16, agent: 19 } },
         runnerImpl: validateAwareRunner({
           openclawDirRef: () => harness.openclawDir,
           doctorCalls,
@@ -2857,13 +2874,7 @@ describe("server/openclaw-channel boot sync (e2e)", () => {
         }),
       });
       writeConfig(harness.openclawDir, { clean: true });
-      // A live DB exists — a probe WOULD find it, so zero preflight
-      // invocations proves the hint was authoritative.
-      const stateDir = path.join(harness.openclawDir, "state");
-      fs.mkdirSync(stateDir, { recursive: true });
-      const db = new DatabaseSync(path.join(stateDir, "openclaw.sqlite"));
-      db.exec("CREATE TABLE t(x INTEGER)");
-      db.close();
+      writeStateDb(harness.openclawDir, { userVersion: 15 });
       seedRestartExpectedRun(harness, {
         dbPreflight: {
           migrationRequired: true,
@@ -2873,18 +2884,60 @@ describe("server/openclaw-channel boot sync (e2e)", () => {
       });
       harness.sync.syncAtBoot();
 
+      const configPath = path.join(harness.openclawDir, "openclaw.json");
+      const configBefore = fs.readFileSync(configPath);
       const outcome = await harness.sync.reconcileBootConfig();
 
-      expect(outcome.status).toBe("ok");
-      // The config validated clean — ONLY the hint drove the doctor run.
-      expect(doctorCalls).toHaveLength(1);
+      expect(outcome.status).toBe("held");
+      expect(outcome.hold.reason).toBe("recovery_choice_required");
+      expect(doctorCalls).toHaveLength(0);
+      expect(fs.readFileSync(configPath)).toEqual(configBefore);
+      expect(fs.readdirSync(harness.openclawDir).filter((name) => name.endsWith(".bak"))).toEqual([]);
+      expect(fs.existsSync(path.join(harness.rootDir, "backups", "openclaw"))).toBe(false);
+      expect((await harness.sync.reconcileBootConfig({ force: true })).hold.reason).toBe("recovery_choice_required");
+      expect(doctorCalls).toHaveLength(0);
       const preflightCalls = harness.runner.runStreamed.mock.calls.filter(
         (call) => (call[0]?.args || []).includes("preflight"),
       );
       expect(preflightCalls).toHaveLength(0);
       expect(lastStepNamed(readRunRecord(harness), "db-migrate")).toEqual(
-        expect.objectContaining({ status: "completed" }),
+        expect.objectContaining({ status: "failed", detail: "recovery_choice_required" }),
       );
+    });
+
+    it.each(["config", "database", "target"])("refuses a changed %s after an exact migration handoff without doctor or a boot-time database snapshot", async (changed) => {
+      const doctorCalls = [];
+      let harness;
+      harness = createHarness({
+        installedVersion: "2026.9.1-beta.1",
+        sentinelVersion: "2026.9.1-beta.1",
+        installFixture: { schema: { state: 16 } },
+        runnerImpl: validateAwareRunner({ openclawDirRef: () => harness.openclawDir, doctorCalls }),
+      });
+      writeConfig(harness.openclawDir, { clean: true });
+      const dbPath = writeStateDb(harness.openclawDir, { userVersion: 15 });
+      seedRestartExpectedRun(harness);
+      harness.sync.syncAtBoot();
+      const recovery = await approveBootMigration(harness);
+      if (changed === "config") writeConfig(harness.openclawDir, { clean: true, operatorEdit: true });
+      if (changed === "database") {
+        const { DatabaseSync } = require("node:sqlite");
+        const db = new DatabaseSync(dbPath);
+        db.exec("INSERT INTO t VALUES (1)");
+        db.close();
+      }
+      if (changed === "target") fs.appendFileSync(installedBinPath(harness.installDir), "\nconsole.log('changed');\n");
+      const configBefore = fs.readFileSync(path.join(harness.openclawDir, "openclaw.json"));
+      const dbBefore = fs.readFileSync(dbPath);
+      const outcome = await harness.sync.reconcileBootConfig();
+      expect(outcome).toMatchObject({ status: "held", hold: { reason: "recovery_intent_stale" } });
+      expect(doctorCalls).toHaveLength(0);
+      expect(harness.runner.runStreamed).not.toHaveBeenCalled();
+      expect(fs.readFileSync(dbPath)).toEqual(dbBefore);
+      expect(fs.readFileSync(path.join(harness.openclawDir, "openclaw.json"))).toEqual(configBefore);
+      expect(fs.existsSync(path.join(recovery.checkpoint.file, "payload", "state", "openclaw.sqlite"))).toBe(false);
+      expect(fs.readdirSync(path.join(harness.rootDir, "backups", "openclaw"))).toEqual([recovery.checkpoint.id]);
+      expect(lastStepNamed(readRunRecord(harness), "db-migrate")).toMatchObject({ status: "failed", detail: "recovery_intent_stale" });
     });
 
     // Issue #78 at the boot probe: agent DBs are judged against the INSTALLED
@@ -2969,7 +3022,7 @@ describe("server/openclaw-channel boot sync (e2e)", () => {
       harness = createHarness({
         installedVersion: "2026.9.1-beta.1",
         sentinelVersion: "2026.9.1-beta.1",
-        installFixture: { schema: { state: 12, agent: 17 } },
+        installFixture: { schema: { state: 15, agent: 19 } },
         runnerImpl: validateAwareRunner({
           openclawDirRef: () => harness.openclawDir,
           doctorCalls,
@@ -2977,10 +3030,11 @@ describe("server/openclaw-channel boot sync (e2e)", () => {
         }),
       });
       writeConfig(harness.openclawDir, { clean: true });
-      writeAgentDb(harness.openclawDir, "main", { userVersion: 12 });
+      writeAgentDb(harness.openclawDir, "main", { userVersion: 17 });
       seedRestartExpectedRun(harness);
       harness.sync.syncAtBoot();
 
+      await approveBootMigration(harness);
       const outcome = await harness.sync.reconcileBootConfig();
 
       expect(outcome.status).toBe("ok");
@@ -2997,14 +3051,14 @@ describe("server/openclaw-channel boot sync (e2e)", () => {
       );
     });
 
-    it("an agent DB whose bytes are not a database leaves the probe inconclusive: doctor runs, nothing is held, one log line names the DB and SQLITE_NOTADB (#78 fail-open)", async () => {
+    it("an agent DB whose bytes are not a database fails closed without doctor or database copies", async () => {
       const doctorCalls = [];
       const logs = [];
       let harness;
       harness = createHarness({
         installedVersion: "2026.9.1-beta.1",
         sentinelVersion: "2026.9.1-beta.1",
-        installFixture: { schema: { state: 12, agent: 17 } },
+        installFixture: { schema: { state: 15, agent: 17 } },
         runnerImpl: validateAwareRunner({
           openclawDirRef: () => harness.openclawDir,
           doctorCalls,
@@ -3030,12 +3084,10 @@ describe("server/openclaw-channel boot sync (e2e)", () => {
 
       const outcome = await harness.sync.reconcileBootConfig();
 
-      // Inconclusive, not incompatible: the agent arm could not read a schema
-      // line, so it delivers no verdict; with no state DB either the probe
-      // is inconclusive and the conservative path runs doctor.
-      expect(outcome.status).toBe("ok");
-      expect(harness.store.readState().gatewayHold).toBe(null);
-      expect(doctorCalls).toHaveLength(1);
+      expect(outcome.status).toBe("held");
+      expect(outcome.hold.reason).toBe("state_db_unreadable");
+      expect(harness.store.readState().gatewayHold.reason).toBe("state_db_unreadable");
+      expect(doctorCalls).toHaveLength(0);
       // The garbage never reached the state-schema verb.
       const preflightCalls = harness.runner.runStreamed.mock.calls.filter(
         (call) => (call[0]?.args || []).includes("preflight"),
@@ -3044,20 +3096,18 @@ describe("server/openclaw-channel boot sync (e2e)", () => {
       // ONE log line names the file and SQLite's primary code.
       expect(
         logs.filter((line) =>
-          line.includes(
-            "boot db probe: could not read the schema version of agents/main/agent/openclaw-agent.sqlite (SQLITE_NOTADB)",
-          ),
+          line.includes("agents/main/agent/openclaw-agent.sqlite") &&
+          /SQLITE_NOTADB|not a database/.test(line),
         ),
       ).toHaveLength(1);
       expect(lastStepNamed(readRunRecord(harness), "db-migrate")).toEqual(
-        expect.objectContaining({ status: "completed" }),
+        expect.objectContaining({ status: "failed", detail: expect.stringMatching(/SQLITE_NOTADB|not a database/) }),
       );
       // The probe is read-only: the bytes are exactly what the operator had.
       expect(fs.readFileSync(agentDb, "utf8")).toBe(garbage);
     });
 
     it("holds on a doctor timeout with the sized-budget warning and an honest post-kill db verdict", async () => {
-      const { DatabaseSync } = require("node:sqlite");
       const timeoutDoctor = async () => ({
         ok: false,
         code: null,
@@ -3070,6 +3120,7 @@ describe("server/openclaw-channel boot sync (e2e)", () => {
       consistent = createHarness({
         installedVersion: "2026.9.1-beta.1",
         sentinelVersion: "2026.9.1-beta.1",
+        installFixture: { schema: { state: 16 } },
         runnerImpl: validateAwareRunner({
           openclawDirRef: () => consistent.openclawDir,
           doctorImpl: timeoutDoctor,
@@ -3100,24 +3151,26 @@ describe("server/openclaw-channel boot sync (e2e)", () => {
       unverified = createHarness({
         installedVersion: "2026.9.1-beta.1",
         sentinelVersion: "2026.9.1-beta.1",
+        installFixture: { schema: { state: 16 } },
         runnerImpl: validateAwareRunner({
           openclawDirRef: () => unverified.openclawDir,
-          doctorImpl: timeoutDoctor,
+          doctorImpl: async () => {
+            fs.writeFileSync(path.join(unverified.openclawDir, "state", "openclaw.sqlite"), Buffer.alloc(4096, 0x78));
+            return timeoutDoctor();
+          },
           dbPreflight: "unsupported",
         }),
       });
       writeConfig(unverified.openclawDir, { mystery: { operatorData: true } });
-      const stateDir = path.join(unverified.openclawDir, "state");
-      fs.mkdirSync(stateDir, { recursive: true });
-      const db = new DatabaseSync(path.join(stateDir, "openclaw.sqlite"));
-      db.exec("CREATE TABLE t(x INTEGER)");
-      db.close();
+      writeStateDb(unverified.openclawDir, { userVersion: 15 });
       seedRestartExpectedRun(unverified, {
         dbPreflight: { migrationRequired: true },
       });
       unverified.sync.syncAtBoot();
+      await approveBootMigration(unverified);
       const unverifiedOutcome = await unverified.sync.reconcileBootConfig();
       expect(unverifiedOutcome.status).toBe("held");
+      expect(unverifiedOutcome.hold.reason).toContain("doctor timed out");
       expect(lastStepNamed(readRunRecord(unverified), "db-migrate")).toEqual(
         expect.objectContaining({
           status: "warning",
@@ -3478,6 +3531,7 @@ describe("server/openclaw-channel boot sync (e2e)", () => {
       const harness = createHarness({
         installedVersion: "2026.8.1",
         sentinelVersion: "2026.8.1",
+        installFixture: { schema: { state: 15 } },
         runnerImpl,
         ...(fsModule ? { fsModule } : {}),
         ...(doctorMigrationTimeoutMs !== undefined
@@ -3486,13 +3540,7 @@ describe("server/openclaw-channel boot sync (e2e)", () => {
       });
       writeConfig(harness.openclawDir, { audit: {} });
       if (fakeDbBytes != null) {
-        fs.mkdirSync(path.join(harness.openclawDir, "state"), {
-          recursive: true,
-        });
-        fs.writeFileSync(
-          path.join(harness.openclawDir, "state", "openclaw.sqlite"),
-          "not-a-real-db",
-        );
+        writeStateDb(harness.openclawDir, { userVersion: 15 });
       }
       harness.sync.syncAtBoot();
       // The bin phase never spawns the doctor anymore.
@@ -3842,15 +3890,6 @@ describe("server/openclaw-channel boot sync (e2e)", () => {
     // the boot context; reconcileBootConfig snapshots the pre-fix backup,
     // runs validate/doctor, and calls the gate before falling back to the
     // fail-closed hold.
-    const writeStateDb = (openclawDir) => {
-      const { DatabaseSync } = require("node:sqlite");
-      fs.mkdirSync(path.join(openclawDir, "state"), { recursive: true });
-      const db = new DatabaseSync(
-        path.join(openclawDir, "state", "openclaw.sqlite"),
-      );
-      db.exec("CREATE TABLE t (x INTEGER)");
-      db.close();
-    };
 
     // Reconciler-phase failure: `config validate` keeps blaming a key the
     // beta rejects, doctor fails, and the live `database preflight` probe
@@ -3879,9 +3918,6 @@ describe("server/openclaw-channel boot sync (e2e)", () => {
     // The #21 box, in miniature: healthy pin, beta freshly applied, the
     // beta's migration fails. The gate must stop the beta BEFORE it ever
     // launches (its first gateway run would one-way migrate the state DB).
-    // probeExecFileSyncImpl scripts the gate's preflight prober spawns
-    // (execFileSync `database preflight` against snapshot copies of the real
-    // state DB — VACUUM INTO, same mechanics as the apply-time preflight).
     const seedIncident = ({ probeExecFileSyncImpl, runnerImpl } = {}) => {
       const impl = probeExecFileSyncImpl || vi.fn(() => "");
       const harness = createHarness({
@@ -3892,13 +3928,13 @@ describe("server/openclaw-channel boot sync (e2e)", () => {
         execFileSyncImpl: impl,
         runnerImpl: runnerImpl || failingMigrationRunner(),
       });
-      saveOverlayFixture(harness.store, "2026.9.1-beta.1");
-      saveOverlayFixture(harness.store, "2026.7.1-2");
+      saveOverlayFixture(harness.store, "2026.9.1-beta.1", { schema: { state: 15 } });
+      saveOverlayFixture(harness.store, "2026.7.1-2", { schema: { state: 15 } });
       writeConfig(harness.openclawDir, {
         audit: { enabled: true },
         legacyBridge: { enabled: true },
       });
-      writeStateDb(harness.openclawDir);
+      writeStateDb(harness.openclawDir, { userVersion: 15 });
       harness.store.updateState((s) => {
         s.pinVersion = "2026.7.1-2";
         s.applied = {
@@ -4005,10 +4041,6 @@ describe("server/openclaw-channel boot sync (e2e)", () => {
       // top).
       expect(cfg.audit).toEqual({ enabled: true });
       expect(cfg.legacyBridge).toEqual({ enabled: true });
-      // The revert target was preflight-proven against a snapshot copy of
-      // the real state DB — via the STREAMED prober (the sync execFileSync
-      // variant froze the event loop for the whole gate budget, so the gate
-      // must never use it; scripted here as "unsupported" → proceed).
       expect(
         harness.runner.runStreamed.mock.calls.some(
           (call) =>
@@ -4017,7 +4049,7 @@ describe("server/openclaw-channel boot sync (e2e)", () => {
               String(arg).includes(".probe-"),
             ),
         ),
-      ).toBe(true);
+      ).toBe(false);
       expect(
         probeExec.mock.calls.some((call) =>
           (call[1] || []).includes("preflight"),
@@ -4098,6 +4130,11 @@ describe("server/openclaw-channel boot sync (e2e)", () => {
       };
       const harness = seedIncident({ runnerImpl: blockedProbeRunner });
       harness.sync.syncAtBoot();
+      const { DatabaseSync } = require("node:sqlite");
+      const db = new DatabaseSync(path.join(harness.openclawDir, "state", "openclaw.sqlite"));
+      db.exec("PRAGMA user_version = 16; UPDATE schema_meta SET schema_version = 16");
+      db.close();
+      writeSchemaContractFixture(path.join(harness.installDir, "node_modules", "openclaw"), { state: 16 });
 
       const outcome = await harness.sync.reconcileBootConfig();
 
@@ -4208,15 +4245,6 @@ describe("server/openclaw-channel boot sync (e2e)", () => {
       delete process.env.ALPHACLAW_NOTIFY_WEBHOOK_URL;
     });
 
-    const writeStateDb = (openclawDir) => {
-      const { DatabaseSync } = require("node:sqlite");
-      fs.mkdirSync(path.join(openclawDir, "state"), { recursive: true });
-      const db = new DatabaseSync(
-        path.join(openclawDir, "state", "openclaw.sqlite"),
-      );
-      db.exec("CREATE TABLE t (x INTEGER)");
-      db.close();
-    };
 
     it("reroutes a blocked package target to a passing pin", async () => {
       const impl = vi.fn((cmd, args) => {
@@ -4235,10 +4263,14 @@ describe("server/openclaw-channel boot sync (e2e)", () => {
         sentinelVersion: "3.0.0",
         execFileSyncImpl: impl,
       });
-      saveOverlayFixture(harness.store, "2.0.0");
-      saveOverlayFixture(harness.store, "1.0.0");
+      saveOverlayFixture(harness.store, "2.0.0", { schema: { state: 15 } });
+      saveOverlayFixture(harness.store, "1.0.0", { schema: { state: 16 } });
       writeConfig(harness.openclawDir, { audit: {} });
-      writeStateDb(harness.openclawDir);
+      writeStateDb(harness.openclawDir, { userVersion: 15 });
+      const { DatabaseSync } = require("node:sqlite");
+      const db = new DatabaseSync(path.join(harness.openclawDir, "state", "openclaw.sqlite"));
+      db.exec("PRAGMA user_version = 16; UPDATE schema_meta SET schema_version = 16");
+      db.close();
       harness.store.updateState((s) => {
         s.pinVersion = "1.0.0";
         s.configMigration = {
@@ -4290,7 +4322,7 @@ describe("server/openclaw-channel boot sync (e2e)", () => {
       saveOverlayFixture(harness.store, "2.0.0", { schema: { state: 15, agent: 19 } });
       saveOverlayFixture(harness.store, "1.0.0", { schema: { state: 15, agent: 19 } });
       writeConfig(harness.openclawDir, { audit: {} });
-      writeStateDb(harness.openclawDir);
+      writeStateDb(harness.openclawDir, { userVersion: 15 });
       writeAgentDb(harness.openclawDir, "main", { userVersion: 17 });
       harness.store.updateState((s) => {
         s.pinVersion = "1.0.0";
@@ -4313,12 +4345,11 @@ describe("server/openclaw-channel boot sync (e2e)", () => {
       expect(result.action).toBe("rollback");
       expect(installedPackageJsonVersion(harness.installDir)).toBe("2.0.0");
       expect(result.warnings.some((w) => /rollback target 2\.0\.0/.test(w))).toBe(false);
-      // Only the STATE snapshot copy was handed to the candidate's CLI.
-      expect(impl.mock.calls.some(([, args]) => args.includes("preflight"))).toBe(true);
+      expect(impl).not.toHaveBeenCalled();
       expect(agentSnapshotReachedCli(impl)).toBe(false);
     });
 
-    it("prober (#78): an agent DB at schema 17 blocks a candidate declaring agent 15 and reroutes to the pin", async () => {
+    it("prober (#78): an agent DB at schema 19 blocks a candidate declaring agent 17 and reroutes to the pin", async () => {
       const impl = vi.fn(() => "");
       const harness = createHarness({
         pin: "1.0.0",
@@ -4326,13 +4357,11 @@ describe("server/openclaw-channel boot sync (e2e)", () => {
         sentinelVersion: "3.0.0",
         execFileSyncImpl: impl,
       });
-      // The target's agent schema (15) is OLDER than the DB (17): blocked.
-      // The pin declares 19: eligible.
-      saveOverlayFixture(harness.store, "2.0.0", { schema: { state: 12, agent: 15 } });
+      saveOverlayFixture(harness.store, "2.0.0", { schema: { state: 15, agent: 17 } });
       saveOverlayFixture(harness.store, "1.0.0", { schema: { state: 15, agent: 19 } });
       writeConfig(harness.openclawDir, { audit: {} });
-      writeStateDb(harness.openclawDir);
-      writeAgentDb(harness.openclawDir, "main", { userVersion: 17 });
+      writeStateDb(harness.openclawDir, { userVersion: 15 });
+      writeAgentDb(harness.openclawDir, "main", { userVersion: 19 });
       harness.store.updateState((s) => {
         s.pinVersion = "1.0.0";
         s.configMigration = {
@@ -4365,7 +4394,7 @@ describe("server/openclaw-channel boot sync (e2e)", () => {
       expect(notifyIds(harness.notify)).toContain("boot-rollback-preflight-2.0.0");
     });
 
-    it("prober (#78): a candidate declaring no agent schema keeps the existing unverified-rollback warning", async () => {
+    it("prober (#78): a candidate declaring no agent schema is refused without launching a probe", async () => {
       const impl = vi.fn(() => "");
       const harness = createHarness({
         pin: "1.0.0",
@@ -4377,7 +4406,7 @@ describe("server/openclaw-channel boot sync (e2e)", () => {
       saveOverlayFixture(harness.store, "2.0.0");
       saveOverlayFixture(harness.store, "1.0.0");
       writeConfig(harness.openclawDir, { audit: {} });
-      writeStateDb(harness.openclawDir);
+      writeStateDb(harness.openclawDir, { userVersion: 15 });
       writeAgentDb(harness.openclawDir, "main", { userVersion: 17 });
       harness.store.updateState((s) => {
         s.pinVersion = "1.0.0";
@@ -4397,13 +4426,13 @@ describe("server/openclaw-channel boot sync (e2e)", () => {
 
       const result = harness.sync.syncAtBoot();
 
-      // Unknown fails open onto the target, with the verbatim C1 wording.
-      expect(result.action).toBe("rollback");
-      expect(installedPackageJsonVersion(harness.installDir)).toBe("2.0.0");
+      expect(result.action).toBe("rollback_refused");
+      expect(installedPackageJsonVersion(harness.installDir)).toBe("3.0.0");
       expect(result.warnings).toContain(
-        "rollback target 2.0.0 cannot verify state written by the newer version — " +
-          "the backup taken before the update is the recovery path if anything looks wrong",
+        "rollback target 2.0.0 reports it cannot safely read the current database — " +
+          "state written by the newer version may be lost; the backup taken before the update is the recovery path",
       );
+      expect(impl).not.toHaveBeenCalled();
       expect(agentSnapshotReachedCli(impl)).toBe(false);
     });
 
@@ -4425,7 +4454,7 @@ describe("server/openclaw-channel boot sync (e2e)", () => {
       });
       saveOverlayFixture(harness.store, "1.0.0");
       writeConfig(harness.openclawDir, { audit: {} });
-      writeStateDb(harness.openclawDir);
+      writeStateDb(harness.openclawDir, { userVersion: 15 });
       harness.store.updateState((s) => {
         s.pinVersion = "1.0.0";
         s.applied = {
@@ -4916,8 +4945,8 @@ describe("server/openclaw-channel launch compatibility gate at boot (e2e, real s
   });
 
   it("found > supported on the recorded build itself: held with reason version_mismatch, NO doctor, no launch — the incident opens through the wrapped sink and the operator is told; Retry cannot bypass it, fixing the DB clears it", async () => {
-    const h = createGateHarness({ installFixture: { schema: { state: 1 } } });
-    writeStateDb(h.openclawDir, { userVersion: 15 });
+    const h = createGateHarness({ installFixture: { schema: { state: 15 } } });
+    writeStateDb(h.openclawDir, { userVersion: 16 });
     writeConfig(h.openclawDir, { audit: { enabled: true } });
     expect(h.sync.getChannelInfo().installedDiverged).toBe(false);
 
@@ -4930,7 +4959,7 @@ describe("server/openclaw-channel launch compatibility gate at boot (e2e, real s
         installed: "1.0.0",
         expected: "1.0.0",
         bootId: getProcessBootId(),
-        detail: expect.stringContaining("state/openclaw.sqlite is at state schema 15, newer than the 1 this build supports"),
+        detail: expect.stringContaining("state/openclaw.sqlite is at state schema 16, newer than the 15 this build supports"),
       }),
     );
     expect(h.startGateway).not.toHaveBeenCalled();
@@ -4940,7 +4969,7 @@ describe("server/openclaw-channel launch compatibility gate at boot (e2e, real s
     expect(h.finalizeOutcomes).toEqual([
       expect.objectContaining({
         gatewayHeld: true,
-        compat: expect.objectContaining({ compatible: false, hold: expect.objectContaining({ reason: "version_mismatch" }), reasons: ["state_schema_too_new"] }),
+        compat: expect.objectContaining({ compatible: false, hold: expect.objectContaining({ reason: "version_mismatch" }), reasons: ["database_schema_newer_than_target"] }),
         // The config gate saw the structural hold and returned `held` before any snapshot or doctor.
         reconcile: expect.objectContaining({ status: "held", hold: expect.objectContaining({ reason: "version_mismatch" }) }),
       }),
@@ -4952,7 +4981,7 @@ describe("server/openclaw-channel launch compatibility gate at boot (e2e, real s
         eventType: "version_mismatch",
         source: "launch_compat_gate",
         status: "failed",
-        details: expect.objectContaining({ running: "1.0.0", expected: "1.0.0", reason: "version_mismatch", reasons: ["state_schema_too_new"] }),
+        details: expect.objectContaining({ running: "1.0.0", expected: "1.0.0", reason: "version_mismatch", reasons: ["database_schema_newer_than_target"] }),
       }),
     );
     // The gate's own ledger rows: the held verdict with per-DB evidence, and the hold row.
@@ -4961,8 +4990,8 @@ describe("server/openclaw-channel launch compatibility gate at boot (e2e, real s
         status: "held",
         details: expect.objectContaining({
           reason: "version_mismatch",
-          supported: { state: 1, agent: null },
-          stateDb: [expect.objectContaining({ path: "state/openclaw.sqlite", kind: "state", userVersion: 15, verdict: "incompatible" })],
+          supported: { state: 15, agent: null },
+          stateDb: [expect.objectContaining({ path: "state/openclaw.sqlite", kind: "state", userVersion: 16, verdict: "incompatible" })],
         }),
       }),
     ]);
@@ -4983,7 +5012,7 @@ describe("server/openclaw-channel launch compatibility gate at boot (e2e, real s
     // The operator restores a database this build can read → the config gate
     // clears the hold and migrates normally.
     fs.rmSync(path.join(h.openclawDir, "state", "openclaw.sqlite"));
-    writeStateDb(h.openclawDir, { userVersion: 1 });
+    writeStateDb(h.openclawDir, { userVersion: 15 });
     const healed = await h.sync.reconcileBootConfig();
     expect(healed.status).toBe("ok");
     expect(healed.warnings).toContain("cleared the version_mismatch hold: 1.0.0 is the recorded build again");
@@ -5002,7 +5031,7 @@ describe("server/openclaw-channel launch compatibility gate at boot (e2e, real s
     expect(result).toEqual(
       expect.objectContaining({
         compatible: false,
-        reasons: ["agent_schema_too_new"],
+        reasons: ["database_schema_newer_than_target"],
         hold: expect.objectContaining({
           reason: "version_mismatch",
           detail: expect.stringContaining("agents/main/agent/openclaw-agent.sqlite is at agent schema 21, newer than the 19 this build supports"),
@@ -5049,29 +5078,32 @@ describe("server/openclaw-channel launch compatibility gate at boot (e2e, real s
     assertOffline(h);
   });
 
-  it("every oracle null (no declared constants, version absent from the table, no preflight verb): a LOUD warning and the gateway launches — fail open, no hold", async () => {
-    // 1.0.0 predates `database preflight` and declares nothing; the DB exists
-    // and is readable, so nothing blocks and nothing resolves.
+  it("every oracle null (no declared constants, version absent from the table, no preflight verb): a LOUD warning and a held gateway — unknown never launches", async () => {
     const h = createGateHarness();
     writeStateDb(h.openclawDir, { userVersion: 15 });
 
     await h.boot();
 
-    expect(h.store.readState().gatewayHold).toBe(null);
-    expect(h.startGateway).toHaveBeenCalledTimes(1);
-    expect(h.finalizeOutcomes[0]).toEqual(
-      expect.objectContaining({
-        gatewayHeld: false,
-        compat: expect.objectContaining({ compatible: null, hold: null, reasons: ["supported_schema_unknown"] }),
-      }),
-    );
-    expect(h.logger.warn).toHaveBeenCalledWith(expect.stringContaining("UNKNOWN"));
-    expect(h.logger.warn).toHaveBeenCalledWith(expect.stringContaining("launching anyway (fail-open)"));
+    expect(h.store.readState().gatewayHold).toMatchObject({ reason: "state_db_unverified" });
+    expect(h.startGateway).not.toHaveBeenCalled();
+    expect(h.doctorCalls).toHaveLength(0);
+    expect(h.finalizeOutcomes[0]).toMatchObject({
+      gatewayHeld: true,
+      compat: { compatible: false, reasons: ["unsupported_target_schema_contract"], hold: { reason: "state_db_unverified" } },
+      reconcile: { status: "held", hold: { reason: "state_db_unverified" } },
+    });
+    expect(h.logger.warn).toHaveBeenCalledWith(expect.stringContaining("HELD"));
     expect(eventsOf(h.insertEvent, "launch_compat_gate")).toEqual([
-      expect.objectContaining({ status: "unknown", details: expect.objectContaining({ reasons: ["supported_schema_unknown"], installed: "1.0.0" }) }),
+      expect.objectContaining({ status: "held", details: expect.objectContaining({ reasons: ["unsupported_target_schema_contract"], installed: "1.0.0" }) }),
     ]);
-    expect(h.insertWatchdogEvent).not.toHaveBeenCalled();
-    expect(h.notify).not.toHaveBeenCalled();
+    expect(h.insertWatchdogEvent).toHaveBeenCalledTimes(1);
+    expect(notifyIds(h.notify)).toContain(`launch-compat-held-state_db_unverified-1.0.0-${utcDayBucket(h.nowRef.now)}`);
+    const packagePath = path.join(h.installDir, "node_modules", "openclaw", "package.json");
+    const pkg = JSON.parse(fs.readFileSync(packagePath, "utf8"));
+    fs.writeFileSync(packagePath, JSON.stringify({ ...pkg, openclaw: { schemaVersions: { state: 15, agent: 19 } } }));
+    expect(await h.sync.assessLaunchCompatibilityAtBoot()).toMatchObject({ compatible: true, hold: null });
+    expect(h.store.readState().gatewayHold).toBe(null);
+    expect(eventsOf(h.insertEvent, "launch_compat_gate").map((event) => event.status)).toEqual(["held", "hold_cleared"]);
     assertOffline(h);
   });
 
@@ -5083,23 +5115,27 @@ describe("server/openclaw-channel launch compatibility gate at boot (e2e, real s
     expect(h.store.readState().gatewayHold).toBe(null);
   });
 
-  it("kill switch: OPENCLAW_LAUNCH_COMPAT_GATE=off skips the gate — found > supported launches (pre-0.9.77 behaviour) with one skipped row and no hold", async () => {
+  it("OPENCLAW_LAUNCH_COMPAT_GATE=off cannot bypass incompatible database protection", async () => {
     process.env.OPENCLAW_LAUNCH_COMPAT_GATE = "off";
-    const h = createGateHarness({ installFixture: { schema: { state: 1 } } });
-    writeStateDb(h.openclawDir, { userVersion: 15 });
+    const h = createGateHarness({ installFixture: { schema: { state: 15 } } });
+    writeStateDb(h.openclawDir, { userVersion: 16 });
 
     await h.boot();
 
-    expect(h.finalizeOutcomes[0].compat).toEqual(
-      expect.objectContaining({ compatible: null, hold: null, skipped: "disabled" }),
-    );
-    expect(h.store.readState().gatewayHold).toBe(null);
-    expect(h.startGateway).toHaveBeenCalledTimes(1);
+    expect(h.finalizeOutcomes[0].compat).toMatchObject({
+      compatible: false,
+      hold: { reason: "version_mismatch" },
+      reasons: ["database_schema_newer_than_target"],
+    });
+    expect(h.store.readState().gatewayHold).toMatchObject({ reason: "version_mismatch" });
+    expect(h.startGateway).not.toHaveBeenCalled();
+    expect(h.doctorCalls).toHaveLength(0);
     expect(eventsOf(h.insertEvent, "launch_compat_gate")).toEqual([
-      expect.objectContaining({ status: "skipped", details: { reason: "disabled" } }),
+      expect.objectContaining({ status: "held", details: expect.objectContaining({ reason: "version_mismatch" }) }),
     ]);
-    expect(h.insertWatchdogEvent).not.toHaveBeenCalled();
-    expect(h.logger.warn).toHaveBeenCalledWith(expect.stringContaining("OPENCLAW_LAUNCH_COMPAT_GATE=off"));
+    expect(h.insertWatchdogEvent).toHaveBeenCalledTimes(1);
+    expect(h.logger.warn).toHaveBeenCalledWith(expect.stringContaining("HELD"));
+    assertOffline(h);
   });
 
   it("unknown verdict on a diverged tree whose recorded build has a complete overlay: the gate prefers reconciliation — ONE reconcileInstalled under the boot hold, then the NEW tree is judged (memoized declared schema follows the version)", async () => {
@@ -5154,13 +5190,10 @@ describe("server/openclaw-channel launch compatibility gate at boot (e2e, real s
     await h.boot();
 
     expect(installedPackageJsonVersion(h.installDir)).toBe("1.0.0");
-    // The gate's own hold names the refused re-activation; the config gate's
-    // first guard (same reason, same boot) then re-stamps the persisted prose
-    // with its divergence wording — one reason, two writers, no doctor.
     expect(h.finalizeOutcomes[0].compat).toEqual(
       expect.objectContaining({
         compatible: false,
-        reasons: ["supported_schema_unknown"],
+        reasons: ["unsupported_target_schema_contract"],
         reconcile: expect.objectContaining({ ok: false, code: "incumbent_running" }),
         hold: expect.objectContaining({
           reason: "version_mismatch",
@@ -5179,9 +5212,9 @@ describe("server/openclaw-channel launch compatibility gate at boot (e2e, real s
     );
     expect(h.startGateway).not.toHaveBeenCalled();
     expect(h.doctorCalls).toHaveLength(0);
-    // Deduped with the config gate's first-guard notice: same id.
     const ids = notifyIds(h.notify);
-    expect(ids.filter((id) => id === "version-mismatch-held-1.0.0-2.0.0")).toHaveLength(2);
+    expect(ids.filter((id) => id === "version-mismatch-held-1.0.0-2.0.0")).toHaveLength(1);
+    expect(h.finalizeOutcomes[0].reconcile.hold).toEqual(h.finalizeOutcomes[0].compat.hold);
     expect(ids.some((id) => id.startsWith("launch-compat-held-"))).toBe(false);
     expect(h.insertWatchdogEvent).toHaveBeenCalledWith(
       expect.objectContaining({ eventType: "version_mismatch", details: expect.objectContaining({ running: "1.0.0", expected: "2.0.0" }) }),

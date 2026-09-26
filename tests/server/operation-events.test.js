@@ -270,6 +270,27 @@ describe("server/operation-events", () => {
     expect(service.getOperation(operationId).events.at(-1).data).toEqual({ error: "no offer" });
   });
 
+  it.each([true, false])("streams the exact recovery choice and held-cancellation state with eligibility %s", (eligible) => {
+    const service = createOperationEventsService();
+    const { operationId } = service.createOperation({ type: "apply" });
+    const fields = {
+      code: "recovery_choice_required", gatewayHeld: true, backupRiskEligible: eligible,
+      choices: ["database_set", ...(eligible ? ["forward_only"] : []), "cancel"],
+      target: { channel: "dev", sha: "a".repeat(40) },
+      preflight: { migrationRequired: true, dbSizesBytes: { "state/openclaw.sqlite": 1234 } },
+      coverage: { config: "complete", databases: "omitted" },
+      intent: "switch", expectLatest: false, recoveryMode: "config_only",
+    };
+    service.fail(operationId, Object.assign(new Error("Choose recovery protection"), fields, {
+      operationId: "forged", confirmNoBackupToken: "must-not-be-streamed", consentSessionId: "private-session",
+    }));
+    const data = service.getOperation(operationId).events.at(-1).data;
+    expect(data).toEqual({ error: "Choose recovery protection", ...fields, operationId });
+    fields.target.sha = "b".repeat(40);
+    expect(data.target.sha).toBe("a".repeat(40));
+    expect(service.getOperation(operationId).status).toBe("failed");
+  });
+
   it("forwards a digest-bearing reusableBackup offer into the error event, and nothing else shaped like one", () => {
     const sha256 = "a".repeat(64);
     const offer = { file: "/data/backups/openclaw/x.tar.gz", at: 1, ageMs: 5, sha256, producer: "openclaw" };

@@ -2,7 +2,7 @@ const { resolveUpgradeJourney } = require('../container/container-helpers');
 
 const registry = (extra = {}) => ({
   distTags: { latest: '2026.9.3', beta: '2026.9.1' },
-  versions: Object.fromEntries(['2026.7.1-2', '2026.9.1-beta.1', '2026.9.1', '2026.9.2', '2026.9.3'].map(v => [v, {}])),
+  versions: Object.fromEntries(['2026.8.2', '2026.9.1-beta.1', '2026.9.1', '2026.9.2', '2026.9.3'].map(v => [v, {}])),
   stablePin: '2026.9.2',
   ...extra,
 });
@@ -12,9 +12,9 @@ describe('container upgrade journey admission', () => {
     // A beta gap must never fall back to a fixed historical prerelease: the
     // old target 2026.9.1-beta.1 stopped booting when its bundled plugin
     // started requiring plugin API >= 2026.9.3. The pin is the newest build
-    // we ship, and 2026.7.1-2's schema 1 still exercises the migration spine.
+    // we ship, and 2026.8.2's owned schema 15 exercises the migration spine.
     expect(resolveUpgradeJourney(registry())).toMatchObject({
-      stable: '2026.7.1-2', beta: '2026.9.2', targetChannel: 'stable', source: 'stable-pin',
+      stable: '2026.8.2', beta: '2026.9.2', targetChannel: 'stable', source: 'stable-pin',
     });
   });
 
@@ -39,7 +39,7 @@ describe('container upgrade journey admission', () => {
     expect(resolveUpgradeJourney(input).source).toBe('stable-pin');
   });
 
-  it.each(['2026.7.1-2', '2026.9.2', '2026.9.3', '2026.9.1'])(
+  it.each(['2026.8.2', '2026.9.2', '2026.9.3', '2026.9.1'])(
     'refuses missing required published package %s instead of silently skipping', (version) => {
       const input = registry();
       delete input.versions[version];
@@ -49,7 +49,7 @@ describe('container upgrade journey admission', () => {
 
   it('refuses a deprecated historical stable fixture', () => {
     const input = registry();
-    input.versions['2026.7.1-2'].deprecated = 'broken release';
+    input.versions['2026.8.2'].deprecated = 'broken release';
     expect(() => resolveUpgradeJourney(input)).toThrow(/deprecated/);
   });
 

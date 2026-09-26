@@ -888,7 +888,7 @@ describe("frontend/upgrade-helpers confirm models (U1/U3/U9)", () => {
       "Impact: ~2 min, your agent will be briefly offline.",
     );
     expect(model.lines[1]).toContain(
-      "Backup includes OpenClaw's config, sessions and pairings; your workspace repo is already safe in git.",
+      "Configuration checkpoint; database data not backed up. Configuration is capped at 16 MiB total.",
     );
     expect(model.tone).toBe("primary");
   });
@@ -939,16 +939,16 @@ describe("frontend/upgrade-helpers confirm models (U1/U3/U9)", () => {
       "Release notes for 2026.8.1-beta.3 are on its catalog row.",
     );
     // The safety net, in plain words.
-    expect(joined).toContain("Verified backup required and taken first");
+    expect(joined).toContain("A configuration checkpoint cannot undo database changes");
     expect(joined).toContain("120s health check");
     expect(joined).toContain("auto-rollback stays armed for 24h");
     expect(joined).toContain("a failing version gets blocklisted");
     // The backend HARD-blocks cross-channel/prerelease applies on backup
     // failure — say so.
-    expect(joined).toContain("If the backup fails, nothing is installed.");
+    expect(joined).toContain("If configuration cannot be checkpointed or compatibility is unknown, nothing is installed.");
     // The what-happens-next step list.
     expect(model.steps).toEqual(kApplyStepPreview);
-    expect(model.steps.join(" → ")).toContain("Backup → Download → Verify");
+    expect(model.steps.join(" → ")).toContain("Prepare target → Check compatibility and choose database protection if required → Configuration checkpoint");
   });
 
   it("states the gateway backup pause on every apply — after the hard-gate note when there is one (#79 D1a)", async () => {
@@ -964,10 +964,10 @@ describe("frontend/upgrade-helpers confirm models (U1/U3/U9)", () => {
       notesAvailable: true,
     });
     expect(kBackupPauseNote).toBe(
-      "The gateway pauses briefly during the pre-update backup.",
+      "The target is prepared while the gateway stays up. The gateway pauses briefly for the configuration checkpoint before activation.",
     );
     const gateIndex = breaking.lines.indexOf(
-      "If the backup fails, nothing is installed.",
+      "If configuration cannot be checkpointed or compatibility is unknown, nothing is installed. A required database migration asks you to choose recovery protection first.",
     );
     expect(gateIndex).toBeGreaterThan(-1);
     expect(breaking.lines[gateIndex + 1]).toBe(kBackupPauseNote);
@@ -1480,6 +1480,7 @@ describe("frontend/upgrade-helpers run ledger models", () => {
       {
         operationId: "0b1c2d3e-0000-4000-8000-000000000001",
         stateLabel: "activated",
+        recoveryLabel: null,
         tone: "success",
         targetLabel: "2026.7.2",
         when: "1 hour ago",
@@ -1488,6 +1489,7 @@ describe("frontend/upgrade-helpers run ledger models", () => {
       {
         operationId: "0b1c2d3e-0000-4000-8000-000000000002",
         stateLabel: "interrupted",
+        recoveryLabel: null,
         tone: "danger",
         targetLabel: "latest dev (main HEAD)",
         when: "1 day ago",
@@ -1849,6 +1851,30 @@ describe("frontend/upgrade-helpers misc models", () => {
 });
 
 describe("frontend/upgrade-helpers gateway hold model", () => {
+  it("reapplies the installed target for stale approval and resumes only the matching durable review target", async () => {
+    const { buildGatewayHoldModel } = await loadUpgradeHelpers();
+    const stale = buildGatewayHoldModel({ installedVersion: "2026.9.6", expectedVersion: "2026.9.5", gatewayHold: { reason: "recovery_intent_stale" } });
+    expect(stale).toMatchObject({ requiresRecoveryChoice: true, canStrip: false, title: "Database recovery approval is stale", recoveryTarget: { channel: "stable", version: "2026.9.6" } });
+    expect(stale.reason).toContain("old approval cannot be reused");
+    const info = { installedVersion: "2026.9.5", gatewayHold: { reason: "recovery_review", operationId: "review-one" }, lastUpdateRun: { operationId: "other", target: { channel: "stable", version: "2026.9.7" } } };
+    expect(buildGatewayHoldModel(info).recoveryTarget).toBeNull();
+    const target = { channel: "beta", version: "2026.9.6-beta.1" };
+    expect(buildGatewayHoldModel(info, [{ operationId: "review-one", target }]).recoveryTarget).toEqual(target);
+    expect(buildGatewayHoldModel({ ...info, lastUpdateRun: { operationId: "review-one", target } }).recoveryTarget).toEqual(target);
+  });
+  it("routes unattended migration holds to recovery review for the recorded build", async () => {
+    const { buildGatewayHoldModel, buildApplyConfirmModel } = await loadUpgradeHelpers();
+    const info = { pinVersion: "2026.9.6", installedVersion: "2026.9.6", expectedVersion: "2026.9.6", gatewayHold: { reason: "recovery_choice_required" } };
+    const model = buildGatewayHoldModel(info);
+    expect(model).toMatchObject({ title: "Database recovery choice required", requiresRecoveryChoice: true, recoveryTarget: { channel: "stable", version: "2026.9.6" }, canStrip: false });
+    expect(model.reason).toContain("gateway is stopped");
+    expect(model.reason).toContain("forward-only");
+    const confirm = buildApplyConfirmModel({ payload: model.recoveryTarget, channelInfo: info });
+    expect(confirm.lines.join(" ")).toContain("gateway is already held");
+    expect(confirm.lines.join(" ")).not.toContain("gateway stays up");
+    expect(buildGatewayHoldModel({ gatewayHold: info.gatewayHold }).recoveryTarget).toBeNull();
+    expect(buildGatewayHoldModel({ ...info, applied: { channel: "dev", sha: "a".repeat(40) } }).recoveryTarget).toEqual({ channel: "dev", sha: "a".repeat(40) });
+  });
   it("returns null when there is no hold", async () => {
     const { buildGatewayHoldModel } = await loadUpgradeHelpers();
     expect(buildGatewayHoldModel(null)).toBeNull();
@@ -2091,9 +2117,7 @@ describe("frontend/upgrade-helpers backup reuse consent (WI-4.4/4.5)", () => {
     expect(model.lines[gateIndex + 1]).toBe(kBackupPauseNote);
     // The two notes are the last TEXT lines; the consent checkbox follows.
     expect(model.lines[model.lines.length - 1]).toBe(kBackupPauseNote);
-    expect(model.backupReuse).toEqual(
-      expect.objectContaining({ available: false, reason: "No eligible backup to reuse" }),
-    );
+    expect(model.backupReuse).toBeNull();
   });
 
   it("dev switches are hard-gated too; routine same-channel upgrades carry no consent line", async () => {
@@ -2104,7 +2128,7 @@ describe("frontend/upgrade-helpers backup reuse consent (WI-4.4/4.5)", () => {
       currentChannel: "dev",
     });
     expect(dev.hardGate).toBe(true);
-    expect(dev.backupReuse).not.toBeNull();
+    expect(dev.backupReuse).toBeNull();
 
     const routine = buildApplyConfirmModel({
       payload: { channel: "stable", version: "2026.7.2" },
@@ -2237,7 +2261,7 @@ describe("frontend/upgrade-helpers backup reuse consent (WI-4.4/4.5)", () => {
       backupInventoryError: new Error("offline"),
       nowMs: kNow,
     });
-    expect(confirm.backupReuse.reason).toBe(kBackupReuseInventoryErrorReason);
+    expect(confirm.backupReuse).toBeNull();
     expect(
       buildApplyConfirmModel({
         payload: { channel: "stable", version: "2026.7.0" },
@@ -2247,8 +2271,8 @@ describe("frontend/upgrade-helpers backup reuse consent (WI-4.4/4.5)", () => {
         backupInventory: null,
         backupInventoryLoading: true,
         nowMs: kNow,
-      }).backupReuse.reason,
-    ).toBe(kBackupReuseInventoryLoadingReason);
+      }).backupReuse,
+    ).toBeNull();
   });
 
   it("R7: an archive older than 24 h is never offered for consent — disabled with the stale reason", async () => {
@@ -2434,7 +2458,7 @@ describe("frontend/upgrade-helpers backup reuse consent (WI-4.4/4.5)", () => {
       backupInventory: inventory,
       nowMs: kNow,
     });
-    expect(without.backupReuse.available).toBe(true);
+    expect(without.backupReuse).toBeNull();
     const gated = buildApplyConfirmModel({
       payload: { channel: "stable", version: "2026.8.2" },
       label: "2026.8.2",
@@ -2444,9 +2468,7 @@ describe("frontend/upgrade-helpers backup reuse consent (WI-4.4/4.5)", () => {
       channelInfo: { applied: { channel: "stable", version: "2026.9.1", at: kNow - 3_600_000 } },
       nowMs: kNow,
     });
-    expect(gated.backupReuse).toEqual(
-      expect.objectContaining({ available: false, reason: kBackupReuseStaleReason }),
-    );
+    expect(gated.backupReuse).toBeNull();
   });
 
   it("an eligible archive without a recorded digest cannot bind consent — says so, never sends", async () => {

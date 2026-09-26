@@ -320,6 +320,7 @@ describe("server/openclaw-channel-sync ONE hold model (#76 Codex 6)", () => {
     expect([...kStructuralHoldReasons].sort()).toEqual([
       "activation_failed",
       "state_db_unreadable",
+      "state_db_unverified",
       "version_mismatch",
     ]);
     for (const reason of [

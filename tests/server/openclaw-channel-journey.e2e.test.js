@@ -1,7 +1,9 @@
-const crypto = require("crypto");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
+const { DatabaseSync } = require("node:sqlite");
+const { createGatewayLifecycleLock } = require("../../lib/server/gateway-lifecycle-lock");
+const { createGatewayMutationPolicy } = require("../../lib/server/gateway-mutation-policy");
 
 const express = require("express");
 const request = require("supertest");
@@ -39,7 +41,12 @@ const {
 const kSilentLogger = { log() {}, warn() {}, error() {} };
 const kBetaVersion = "1.1.0-beta.1";
 
-const mkTemp = (prefix) => fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+const roots = [];
+const mkTemp = (prefix) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  roots.push(directory);
+  return directory;
+};
 
 const waitFor = async (predicate, timeoutMs = 10_000) => {
   const startedAt = Date.now();
@@ -56,7 +63,7 @@ const writePackageFixture = (
   fs.mkdirSync(path.join(packageDir, "dist"), { recursive: true });
   fs.writeFileSync(
     path.join(packageDir, "package.json"),
-    `${JSON.stringify({ name: "openclaw", version, bin: { openclaw: "bin/entry.js" } }, null, 2)}\n`,
+    `${JSON.stringify({ name: "openclaw", version, bin: { openclaw: "bin/entry.js" }, openclaw: { schemaVersions: { state: 17, agent: 21 } } }, null, 2)}\n`,
   );
   const binPath = path.join(packageDir, "bin", "entry.js");
   fs.mkdirSync(path.dirname(binPath), { recursive: true });
@@ -73,65 +80,8 @@ const writePackageFixture = (
   return packageDir;
 };
 
-// The usable-backup check (issue #54, WI-6.1) runs `gzip -t` + manifest
-// extraction through the same runner seam; answer like a real archive does.
-const kStubManifestTail = `${JSON.stringify({
-  schemaVersion: 1,
-  assets: [{ kind: "sqlite", sourcePath: "/data/.openclaw/state/openclaw.sqlite", archivePath: "state/openclaw.sqlite" }],
-})}\n`;
-
 const defaultRunnerImpl = async (opts) => {
-  if (opts.command === "gzip" && opts.args?.[0] === "-t") {
-    return { ok: true, code: 0, tail: "", timedOut: false };
-  }
-  if (opts.command === "tar" && opts.args?.[0] === "-xzOf") {
-    return { ok: true, code: 0, tail: kStubManifestTail, timedOut: false };
-  }
-  // Faithful model of the real CLI's --output contract (verified against the
-  // pinned openclaw 2026.7.1-2 source, dist/backup-create resolveOutputPath):
-  // an existing directory (or trailing separator) gets a timestamped archive
-  // INSIDE it; any other path IS the archive file, refused if it already
-  // exists; the parent is mkdir -p'd. The old stub only modeled the
-  // directory branch — which is exactly why issues #7/#9 were invisible.
-  if (opts.command === "openclaw" && opts.args?.[0] === "backup") {
-    const outIdx = opts.args.indexOf("--output");
-    const out = outIdx >= 0 ? opts.args[outIdx + 1] : null;
-    if (out) {
-      try {
-        const isDirTarget =
-          out.endsWith(path.sep) ||
-          (fs.existsSync(out) && fs.statSync(out).isDirectory());
-        const outFile = isDirTarget
-          ? path.join(out, `${crypto.randomUUID()}-openclaw-backup.tar.gz`)
-          : out;
-        if (fs.existsSync(outFile)) {
-          return {
-            ok: false,
-            code: 1,
-            tail: `Error: Refusing to overwrite existing backup archive: ${outFile}\n`,
-            timedOut: false,
-          };
-        }
-        fs.mkdirSync(path.dirname(outFile), { recursive: true });
-        fs.writeFileSync(outFile, "stub backup archive\n");
-        return {
-          ok: true,
-          code: 0,
-          tail: `Backup archive: ${outFile}\nCreated ${outFile}\nArchive verification: passed\n`,
-          timedOut: false,
-        };
-      } catch (error) {
-        // e.g. ENOTDIR when a legacy archive file blocks the parent path.
-        return {
-          ok: false,
-          code: 1,
-          tail: `Error: ${error.message}\n`,
-          timedOut: false,
-        };
-      }
-    }
-    return { ok: true, code: 0, tail: "backup verified\n", timedOut: false };
-  }
+  if (["gzip", "tar"].includes(opts.command) || opts.args?.includes("backup") || opts.args?.includes("preflight")) throw new Error("Unexpected archive producer or copying CLI probe");
   if (opts.command === "node" && opts.args?.[1] === "--version") {
     let version = "";
     try {
@@ -144,13 +94,18 @@ const defaultRunnerImpl = async (opts) => {
     } catch {}
     return { ok: true, code: 0, tail: `${version}\n`, timedOut: false };
   }
-  return { ok: true, code: 0, tail: "backup ok\n", timedOut: false };
+  return { ok: true, code: 0, tail: "{}\n", timedOut: false };
 };
 
 const createJourney = ({ runnerImpl = null, installFixture = {} } = {}) => {
   delete process.env.OPENCLAW_GIT_DIR;
   const rootDir = mkTemp("alphaclaw-journey-root-");
   const openclawDir = path.join(rootDir, ".openclaw");
+  fs.mkdirSync(path.join(openclawDir, "state"), { recursive: true });
+  fs.writeFileSync(path.join(openclawDir, "openclaw.json"), "{}");
+  const db = new DatabaseSync(path.join(openclawDir, "state", "openclaw.sqlite"));
+  db.exec("PRAGMA user_version=17; CREATE TABLE schema_meta(meta_key TEXT PRIMARY KEY, role TEXT, schema_version INTEGER, agent_id TEXT); INSERT INTO schema_meta VALUES('primary','global',17,NULL)");
+  db.close();
   const packageRoot = mkTemp("alphaclaw-journey-pkgroot-");
   fs.writeFileSync(
     path.join(packageRoot, "package.json"),
@@ -167,7 +122,6 @@ const createJourney = ({ runnerImpl = null, installFixture = {} } = {}) => {
     notifications.push({ message, opts });
     return { ok: true };
   });
-  const restartProcess = vi.fn();
 
   // Each "process instance" gets a fresh store + sync over the SAME disk —
   // exactly what a container restart does.
@@ -203,7 +157,16 @@ const createJourney = ({ runnerImpl = null, installFixture = {} } = {}) => {
       getCatalog: async () => ({ ok: true, stable: [], beta: [] }),
       annotateCatalog: (catalog) => catalog,
     };
-    const sync = createOpenclawChannelSync({
+    const lock = createGatewayLifecycleLock();
+    let sync;
+    let running = true;
+    const gatewayQuiesce = {
+      isRunning: vi.fn(async () => running), suppress: vi.fn(), unsuppress: vi.fn(),
+      stop: vi.fn(async () => { running = false; return true; }),
+      start: vi.fn(async () => { running = true; }),
+    };
+    const policy = createGatewayMutationPolicy({ lock, getChannelInfo: () => sync.getChannelInfo(), isApplyInProgress: () => sync.isApplyInProgress() });
+    sync = createOpenclawChannelSync({
       rootDir,
       openclawDir,
       packageRoot,
@@ -214,7 +177,13 @@ const createJourney = ({ runnerImpl = null, installFixture = {} } = {}) => {
       readReleaseChannel: () => readOpenclawReleaseChannel({ openclawDir }),
       releases,
       isOnboarded: () => true,
-      restartProcess,
+      gatewayQuiesce,
+      acquireLifecycleLock: lock.acquire,
+      gatewayMutationPolicy: policy,
+      dbQuiet: async () => ({ release() {} }),
+      dbResume: (quiet) => quiet.release(),
+      openclawSpawnEnv: () => ({ OPENCLAW_STATE_DIR: openclawDir }),
+      diskSpace: () => ({ ok: true, free: 100e9 }),
       clearVersionCache: () => {},
       notify,
       operationEvents,
@@ -237,7 +206,7 @@ const createJourney = ({ runnerImpl = null, installFixture = {} } = {}) => {
         restartRequiredState: { markRequired: vi.fn(), getSnapshot: async () => ({}) },
       });
     }
-    return { sync, store, app, installToTempDir, runner };
+    return { sync, store, app, installToTempDir, runner, gatewayQuiesce, lock };
   };
 
   const readLedger = () =>
@@ -254,7 +223,6 @@ const createJourney = ({ runnerImpl = null, installFixture = {} } = {}) => {
     nowRef,
     notify,
     notifications,
-    restartProcess,
     bootInstance,
     readLedger,
   };
@@ -269,6 +237,9 @@ const installedVersionAt = (installDir) =>
   ).version;
 
 describe("FULL JOURNEY: stable → beta → restart → stays beta", () => {
+  afterEach(() => {
+    while (roots.length) fs.rmSync(roots.pop(), { recursive: true, force: true });
+  });
   it("switches, applies, logs durably, re-activates at boot, and survives a second restart", async () => {
     const journey = createJourney();
 
@@ -297,18 +268,14 @@ describe("FULL JOURNEY: stable → beta → restart → stays beta", () => {
     const { operationId } = p1.sync.getChannelInfo().lastUpdateRun;
     expect(operationId).toBeTruthy();
 
-    // Durable run record: restart_expected, with the backup artifact noted.
     const recordAfterApply = journey.readLedger().readRun(operationId);
     expect(recordAfterApply.state).toBe("restart_expected");
-    expect(recordAfterApply.backup).toEqual(
-      expect.objectContaining({
-        verified: true,
-        noBackup: false,
-        // The exact per-run archive path is recorded (#7/#9 fix).
-        file: expect.stringMatching(/openclaw-backup.*\.tar\.gz$/),
-      }),
-    );
-    expect(fs.statSync(recordAfterApply.backup.file).size).toBeGreaterThan(0);
+    expect(recordAfterApply.backup).toBeNull();
+    expect(recordAfterApply.recovery).toMatchObject({ kind: "config_only", checkpoint: { verified: true }, restore: { configAvailable: true, databaseSetAvailable: false } });
+    expect(fs.statSync(recordAfterApply.recovery.checkpoint.file).isDirectory()).toBe(true);
+    expect(fs.existsSync(path.join(recordAfterApply.recovery.checkpoint.file, "payload", "state", "openclaw.sqlite"))).toBe(false);
+    expect(p1.gatewayQuiesce.stop).toHaveBeenCalledTimes(1);
+    expect(p1.gatewayQuiesce.start).not.toHaveBeenCalled();
 
     // Durable log: step transitions AND the streamed npm output, readable
     // over HTTP by validated operationId.
@@ -381,15 +348,14 @@ describe("FULL JOURNEY: stable → beta → restart → stays beta", () => {
     ).toBe(true);
   });
 
-  it("two consecutive hard-gated applies leave two distinct archives (issue #7 regression)", async () => {
+  it("two consecutive applies leave two distinct verified checkpoints (issue #7 regression)", async () => {
     const journey = createJourney();
     const backupsDir = path.join(journey.rootDir, "backups", "openclaw");
-    const archiveNames = () =>
+    const checkpointNames = () =>
       fs
         .readdirSync(backupsDir)
-        .filter((name) => /openclaw-backup.*\.tar\.gz$/.test(name));
+        .filter((name) => /^recovery-/.test(name));
 
-    // ── Process 1: first prerelease apply (hard backup gate). ───────────────
     const p1 = journey.bootInstance({ withHttp: true });
     expect(p1.sync.syncAtBoot().ok).toBe(true);
     const first = await request(p1.app)
@@ -400,15 +366,12 @@ describe("FULL JOURNEY: stable → beta → restart → stays beta", () => {
       const run = p1.sync.getChannelInfo().lastUpdateRun;
       return run && run.finishedAt != null && run.ok === true;
     });
-    expect(archiveNames()).toHaveLength(1);
+    expect(checkpointNames()).toHaveLength(1);
 
-    // ── Process 2: activation restart, then a SECOND prerelease apply over
-    // the same disk. The pre-fix code reused one fixed archive path, so this
-    // apply failed forever with "Refusing to overwrite existing backup
-    // archive" (#7). Unique per-run paths make it just work. ─────────────────
     journey.nowRef.now += 5_000;
     const p2 = journey.bootInstance({ withHttp: true });
     expect(p2.sync.syncAtBoot().action).toBe("activated");
+    expect(["ok", "skipped"]).toContain((await p2.sync.reconcileBootConfig()).status);
     const second = await request(p2.app)
       .post("/api/openclaw/apply")
       .send({ channel: "beta", version: "1.1.0-beta.2", intent: "update" });
@@ -417,7 +380,12 @@ describe("FULL JOURNEY: stable → beta → restart → stays beta", () => {
       const run = p2.sync.getChannelInfo().lastUpdateRun;
       return run && run.finishedAt != null && run.ok === true;
     });
-    expect(archiveNames()).toHaveLength(2);
+    expect(checkpointNames()).toHaveLength(2);
+    for (const name of checkpointNames()) {
+      const manifest = JSON.parse(fs.readFileSync(path.join(backupsDir, name, "manifest.json")));
+      expect(manifest.kind).toBe("config_only");
+      expect(manifest.databases).toEqual([]);
+    }
   });
 
   it("failure variant: a failed verify records a failed run, notifies, and keeps the log", async () => {
@@ -533,17 +501,11 @@ describe("FULL JOURNEY: stable → beta → restart → stays beta", () => {
     expect(installedVersionAt(journey.installDir)).toBe("1.0.0");
   });
 
-  it("hard backup gate: a prerelease apply with a failing backup installs nothing", async () => {
-    const journey = createJourney({
-      runnerImpl: async (opts, fallback) => {
-        if (opts.command === "openclaw" && opts.args?.[0] === "backup") {
-          return { ok: false, code: 1, tail: "backup exploded", timedOut: false };
-        }
-        return fallback(opts);
-      },
-    });
+  it("checkpoint safety gate: a prerelease apply with an unsupported config activates nothing", async () => {
+    const journey = createJourney();
     const p1 = journey.bootInstance({ withHttp: true });
     expect(p1.sync.syncAtBoot().ok).toBe(true);
+    fs.writeFileSync(path.join(journey.openclawDir, "openclaw.json"), '{"$include":"outside.json"}');
 
     const applied = await request(p1.app)
       .post("/api/openclaw/apply")
@@ -557,9 +519,10 @@ describe("FULL JOURNEY: stable → beta → restart → stays beta", () => {
     const { operationId } = p1.sync.getChannelInfo().lastUpdateRun;
     const record = journey.readLedger().readRun(operationId);
     expect(record.state).toBe("failed");
-    expect(record.result.code).toBe("backup_failed");
-    // The download never ran: the gate fires before install.
-    expect(p1.installToTempDir).not.toHaveBeenCalled();
+    expect(record.result.code).toBe("RECOVERY_INVENTORY_UNSUPPORTED");
+    expect(record.recovery).toBeUndefined();
+    expect(p1.gatewayQuiesce.stop).not.toHaveBeenCalled();
+    expect(p1.store.readState().applied).toBeNull();
     expect(installedVersionAt(journey.installDir)).toBe("1.0.0");
   });
 });

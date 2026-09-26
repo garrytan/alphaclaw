@@ -29,6 +29,7 @@ const {
 } = require("../../lib/server/watchdog");
 const { assessExclusivity } = require("../../lib/server/openclaw-backup-offline-copy");
 const { createGatewayLifecycleLock } = require("../../lib/server/gateway-lifecycle-lock");
+const { beginRecoveryOperation } = require("../../lib/server/openclaw-recovery-operation");
 
 const originalSpawn = childProcess.spawn;
 const originalExecFile = childProcess.execFile;
@@ -160,8 +161,9 @@ describe("lib/server.js composition pins (lane C / lane A hand-offs)", () => {
     // The consumer half of the contract: channel-sync sizes the hold itself.
     const channelSyncSource = readSource("lib", "server", "openclaw-channel-sync.js");
     expect(channelSyncSource).toMatch(
-      /gatewayQuiesce\.acquireLock\(\{[^}]*?leaseMs:\s*holdMs,/,
+      /acquire:\s*\(\{ leaseMs \}\)\s*=>[\s\S]*?\{ leaseMs \}/,
     );
+    expect(serverSource).toContain("acquireLifecycleLock: (kind, options) => gatewayLifecycleLock.acquire(kind, options)");
 
     // Run the EXACT arrow lib/server.js binds against a real lock whose
     // default lease is tiny: the driver's override must outlive it.
@@ -170,13 +172,20 @@ describe("lib/server.js composition pins (lane C / lane A hand-offs)", () => {
       const warn = vi.fn();
       const lock = createGatewayLifecycleLock({ leaseMs: 50, logger: { warn } });
       const acquireLock = new Function("gatewayLifecycleLock", `return ${match[1]};`)(lock);
-      const release = await acquireLock({ leaseMs: 5_000 });
-      expect(typeof release).toBe("function");
+      const recovery = await beginRecoveryOperation({
+        acquire: acquireLock,
+        leaseMs: 5_000,
+        gateway: { isRunning: async () => false },
+        quiet: async () => ({}),
+        resume: () => {},
+        assertPolicy: () => {},
+      });
+      expect(typeof recovery.hold).toBe("function");
       await vi.advanceTimersByTimeAsync(51);
       // Past the default lease and still held — no force-release, no warning.
       expect(lock.getActiveOperation()).toMatchObject({ kind: "backup_quiesce" });
       expect(warn).not.toHaveBeenCalled();
-      release();
+      await recovery.close();
       expect(lock.getActiveOperation()).toBeNull();
     } finally {
       vi.useRealTimers();

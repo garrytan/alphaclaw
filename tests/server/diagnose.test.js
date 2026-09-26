@@ -183,6 +183,10 @@ const populate = ({ rootDir, openclawDir, installDir, managedDir, store }) => {
   ledger.completeRun(ids[2], { state: "noop", ok: true });
   ledger.createRun({ operationId: ids[3], target: { kind: "apply", channel: "stable", version: "2026.9.2" } });
   ledger.completeRun(ids[3], { state: "activated", ok: true });
+  ledger.updateRun(ids[3], (run) => ({ ...run, recovery: {
+    kind: "config_only", checkpoint: { id: "config-fixture", file: path.join(rootDir, "backups", "config-fixture"), verified: true, bytes: 2, fileCount: 1 },
+    databases: { complete: false, verified: false, entries: [] },
+  } }));
 
   writeJson(path.join(openclawDir, "alphaclaw-restart-operation.json"), {
     operationId: "op-restart-1",
@@ -427,6 +431,8 @@ describe("diagnose: collectDiagnose over a populated root (disk path)", () => {
     expect(data.total).toBe(4);
     expect(data.recent.map((r) => r.state)).toEqual(["activated", "noop", "failed"]);
     expect(data.recent[2].result.code).toBe("db_preflight_failed");
+    expect(data.recent[0].recovery).toMatchObject({ kind: "config_only", restore: { configAvailable: true, databaseSetAvailable: false } });
+    expect(renderDiagnoseMarkdown(bundle)).toContain("recorded recovery config_only: verified configuration checkpoint; database data not backed up");
     expect(data.running.map((r) => r.operationId)).toEqual(["11111111-1111-4111-8111-111111111111"]);
     expect(data.running[0].state).toBe("running");
   });

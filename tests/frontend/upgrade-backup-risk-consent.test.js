@@ -8,11 +8,20 @@ const offer = (target = { channel: "beta", version: "2026.9.2-beta.1" }) => ({ o
 const issued = (target, overrides = {}) => ({ operationId, target, confirmNoBackupToken: token, ...overrides });
 
 describe("backup-risk apply preparation", () => {
+  it("freezes the reviewed intent and latest claim before consent issuance", async () => {
+    const reviewed = { ...offer(), intent: "update", expectLatest: true };
+    let resolve;
+    const request = prepareBackupRiskApply(reviewed, () => new Promise((done) => { resolve = done; }));
+    reviewed.intent = "downgrade";
+    reviewed.expectLatest = false;
+    resolve(issued(reviewed.target));
+    expect(await request).toMatchObject({ intent: "update", expectLatest: true, recoveryMode: "config_only" });
+  });
   it("uses the reviewed run and sends only its exact package target and ephemeral consent", async () => {
     const reviewed = offer();
     const request = vi.fn(async () => issued(reviewed.target));
     expect(await prepareBackupRiskApply(reviewed, request)).toEqual({
-      payload: reviewed.target, label: reviewed.label, confirmNoBackup: true, confirmNoBackupToken: token,
+      payload: reviewed.target, label: reviewed.label, confirmNoBackup: true, confirmNoBackupToken: token, recoveryMode: "config_only",
     });
     expect(request).toHaveBeenCalledExactlyOnceWith(operationId);
     expect(JSON.stringify(reviewed)).not.toContain(token);

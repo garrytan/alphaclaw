@@ -73,26 +73,14 @@ const {
   writeGitAskpassScript,
   kGitAskpassScript,
 } = require("../lib/git-askpass-script");
-const { buildSecretReplacements, kGithubRepoSlugPattern } = require("../lib/server/helpers");
-const { writeFileAtomic } = require("../lib/server/utils/safe-file");
+const { kGithubRepoSlugPattern } = require("../lib/server/helpers");
 const { performGitSync } = require("../lib/cli/git-sync");
 const { resolveSelfDependency } = require("../lib/server/self-dependency");
-const {
-  migrateLegacyTelegramStreamingConfig,
-} = require("../lib/server/openclaw-config-migrations");
 const {
   migrateManagedInternalFiles,
 } = require("../lib/server/internal-files-migration");
 const { assertSupportedNodeVersion } = require("../lib/node-runtime");
 const { isEarlyExitCliCommand } = require("../lib/boot-cli-verbs");
-
-const kUsageTrackerPluginPath = path.resolve(
-  __dirname,
-  "..",
-  "lib",
-  "plugin",
-  "usage-tracker",
-);
 
 // ---------------------------------------------------------------------------
 // Parse CLI flags
@@ -1595,11 +1583,19 @@ if (fs.existsSync(path.join(openclawDir, ".git"))) {
     }
   } catch {}
 
-  restoreMissingOpenclawConfigFromRemote({
-    openclawDir,
-    configPath,
-    env: process.env,
-  });
+  const { assessBootConfigRestore } = require("../lib/server/boot-config-restore-guard");
+  const restoreAdmission = fs.existsSync(configPath)
+    ? { allowed: true }
+    : assessBootConfigRestore({ openclawDir });
+  if (restoreAdmission.allowed) {
+    restoreMissingOpenclawConfigFromRemote({
+      openclawDir,
+      configPath,
+      env: process.env,
+    });
+  } else {
+    console.warn(`[alphaclaw] Remote config restore deferred: ${restoreAdmission.reason}`);
+  }
   if (
     ensureMainUpstream({
       openclawDir,
@@ -1608,152 +1604,6 @@ if (fs.existsSync(path.join(openclawDir, ".git"))) {
   ) {
     console.log("[alphaclaw] Set main upstream to origin/main");
   }
-}
-
-// Persist config-shape migrations before any OpenClaw import or CLI command.
-// Newer OpenClaw releases validate config eagerly and cannot repair a shape
-// that prevents the CLI from starting.
-if (fs.existsSync(configPath)) {
-  try {
-    const cfg = JSON.parse(fs.readFileSync(configPath, "utf8"));
-    if (migrateLegacyTelegramStreamingConfig(cfg)) {
-      let content = `${JSON.stringify(cfg, null, 2)}\n`;
-      for (const [secret, envRef] of buildSecretReplacements(process.env)) {
-        if (!secret) continue;
-        content = content
-          .split(JSON.stringify(secret))
-          .join(JSON.stringify(envRef));
-      }
-      writeFileAtomic(configPath, content);
-      console.log("[alphaclaw] Migrated legacy Telegram streaming config");
-    }
-  } catch (error) {
-    console.error(
-      `[alphaclaw] Preflight config migration failed: ${error.message}`,
-    );
-  }
-}
-
-if (fs.existsSync(configPath)) {
-  try {
-    execFileSync(process.execPath, [
-      path.join(__dirname, "..", "lib", "scripts", "migrate-openclaw-codex.js"),
-    ], {
-      env: process.env,
-      stdio: "inherit",
-      timeout: 60_000,
-    });
-  } catch (error) {
-    console.error(`[alphaclaw] Codex migration process failed: ${error.message}`);
-  }
-}
-
-if (fs.existsSync(configPath)) {
-  try {
-    execFileSync(process.execPath, [
-      path.join(__dirname, "..", "lib", "scripts", "reconcile-codex-plugin.js"),
-    ], {
-      env: process.env,
-      stdio: "inherit",
-      timeout: 150_000,
-    });
-  } catch (error) {
-    console.error(
-      `[alphaclaw] Codex plugin reconciliation process failed: ${error.message}`,
-    );
-  }
-}
-
-if (fs.existsSync(configPath)) {
-  console.log("[alphaclaw] Config exists, reconciling channels...");
-
-  try {
-    const cfg = JSON.parse(fs.readFileSync(configPath, "utf8"));
-    if (!cfg.channels) cfg.channels = {};
-    if (!cfg.plugins) cfg.plugins = {};
-    if (!cfg.plugins.load) cfg.plugins.load = {};
-    if (!Array.isArray(cfg.plugins.load.paths)) cfg.plugins.load.paths = [];
-    if (!cfg.plugins.entries) cfg.plugins.entries = {};
-    let changed = migrateLegacyTelegramStreamingConfig(cfg);
-    if (changed) {
-      console.log("[alphaclaw] Migrated legacy Telegram streaming config");
-    }
-
-    if (process.env.TELEGRAM_BOT_TOKEN && !cfg.channels.telegram) {
-      cfg.channels.telegram = {
-        enabled: true,
-        botToken: process.env.TELEGRAM_BOT_TOKEN,
-        dmPolicy: "pairing",
-        groupPolicy: "allowlist",
-      };
-      cfg.plugins.entries.telegram = { enabled: true };
-      console.log("[alphaclaw] Telegram added");
-      changed = true;
-    }
-
-    if (process.env.DISCORD_BOT_TOKEN && !cfg.channels.discord) {
-      cfg.channels.discord = {
-        enabled: true,
-        token: process.env.DISCORD_BOT_TOKEN,
-        dmPolicy: "pairing",
-        groupPolicy: "allowlist",
-      };
-      cfg.plugins.entries.discord = { enabled: true };
-      console.log("[alphaclaw] Discord added");
-      changed = true;
-    }
-    // Drop usage-tracker plugin paths left by a previous install location (e.g. a
-    // prior @chrysb/alphaclaw npm install at /app/node_modules/@chrysb/alphaclaw/...
-    // after switching to a git dependency at /app/node_modules/alphaclaw/...). The
-    // dead path makes OpenClaw reject the whole config. This block runs on every
-    // boot whenever a config exists — onboarded or not — so it is the migration's
-    // load-bearing prune; the onboarded reconcile prune is a backstop.
-    const usageTrackerPathPattern = /[\\/]plugin[\\/]usage-tracker[\\/]?$/;
-    const prunedPaths = cfg.plugins.load.paths.filter(
-      (entry) =>
-        entry === kUsageTrackerPluginPath ||
-        !usageTrackerPathPattern.test(String(entry || "")),
-    );
-    if (prunedPaths.length !== cfg.plugins.load.paths.length) {
-      cfg.plugins.load.paths = prunedPaths;
-      changed = true;
-    }
-    if (!cfg.plugins.load.paths.includes(kUsageTrackerPluginPath)) {
-      cfg.plugins.load.paths.push(kUsageTrackerPluginPath);
-      changed = true;
-    }
-    if (cfg.plugins.entries["usage-tracker"]?.enabled !== true) {
-      cfg.plugins.entries["usage-tracker"] = { enabled: true };
-      changed = true;
-    }
-
-    if (changed) {
-      let content = JSON.stringify(cfg, null, 2);
-      const replacements = buildSecretReplacements(process.env);
-      for (const [secret, envRef] of replacements) {
-        if (secret) {
-          // Only replace the secret if it is an exact match for a JSON string value
-          // This ensures we do not replace substrings inside other strings
-          const secretJson = JSON.stringify(secret);
-          content = content.replace(
-            new RegExp(
-              secretJson.replace(/[-\/\\^$*+?.()|[\]{}]/g, "\\$&"),
-              "g",
-            ),
-            JSON.stringify(envRef),
-          );
-        }
-      }
-      writeFileAtomic(configPath, content);
-      console.log("[alphaclaw] Config updated and sanitized");
-    }
-  } catch (e) {
-    console.error(`[alphaclaw] Channel reconciliation error: ${e.message}`);
-  }
-} else {
-  console.log(
-    "[alphaclaw] No config yet -- onboarding will run from the Setup UI",
-  );
 }
 
 // ---------------------------------------------------------------------------

@@ -463,7 +463,7 @@ describe("server/openclaw-release-channel", () => {
 
       it("kMigrationHoldReasons / kStructuralHoldReasons partition isMigrationClassHold; garbage is never a hold", () => {
         expect(kMigrationHoldReasons).toEqual(["config_migration_failed", "migration_gate_error", "doctor_failed"]);
-        expect(kStructuralHoldReasons).toEqual(["version_mismatch", "state_db_unreadable", "activation_failed"]);
+        expect(kStructuralHoldReasons).toEqual(["version_mismatch", "state_db_unreadable", "state_db_unverified", "activation_failed"]);
         expect(Object.isFrozen(kMigrationHoldReasons)).toBe(true);
         expect(Object.isFrozen(kStructuralHoldReasons)).toBe(true);
         for (const reason of kMigrationHoldReasons) {
