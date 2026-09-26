@@ -5,6 +5,12 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.9.94] - 2026-09-26
+
+### Fixed
+
+- **Pre-onboarding config normalization:** boot now reconciles existing configuration before onboarding through the same lifecycle lease, build compatibility and recovery admission checks used on onboarded installs. This restores stale usage-tracker plugin-path cleanup without running native maintenance, onboarding setup steps, the gateway, watchdog or Gmail watcher. Recovery holds, expired leases and shutdown still prevent unadmitted normalization.
+
 ## [0.9.93] - 2026-09-25
 
 ### Changed
