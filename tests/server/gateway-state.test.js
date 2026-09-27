@@ -235,9 +235,9 @@ describe("server/gateway-state reducer", () => {
     expect(result.state).toBe(expected);
     if (expected === "starting") {
       expect(result.reason).toContain("retry automatically");
-      expect(result.actions.find((action) => action.id === "restart").disabledReason).toBeTruthy();
+      expect(result.actions.find((action) => action.id === "restart").disposition).toBe("attach");
     } else {
-      expect(result.actions.some((action) => action.id === "retry")).toBe(true);
+      expect(result.actions.some((action) => action.id === "restart")).toBe(true);
     }
   });
 
@@ -295,38 +295,19 @@ describe("server/gateway-state reducer", () => {
     expect(result.operation).toEqual(operation);
   });
 
-  it("offers a restart-class action (Restart or Retry) in every onboarded state except booting", () => {
-    // Repair / Resume channels / Refresh are the recommended move in their
-    // states, never the only one: an operator must be able to relaunch the
-    // gateway from the card without running doctor first. Two exemptions,
-    // both deliberate: not_onboarded has no gateway (the route 400s), and
-    // booting IS the launch — a restart queued behind the boot hold would
-    // only recycle a gateway that just came up (boot_failed carries Retry).
+  it("offers usable Repair and Restart inspection in every state", () => {
     for (const state of Object.keys(kGatewayStateCatalog)) {
-      const actions = actionsForState(state, {
-        operationActive: false,
-        inStabilizationWindow: false,
-        gatewayHeld: false,
-      });
-      const restartClass = actions.filter(
-        (a) => a.id === "restart" || a.id === "retry",
-      );
-      if (state === "not_onboarded") {
-        expect(restartClass, state).toHaveLength(0);
-        continue;
-      }
-      if (state === "booting") {
-        expect(actions, state).toEqual([]);
-        continue;
-      }
-      expect(restartClass.length, state).toBeGreaterThanOrEqual(1);
-      for (const a of restartClass) {
-        expect(a.disabledReason, state).toBeUndefined();
+      const actions = actionsForState(state, { operationActive: false });
+      for (const id of ["repair", "restart"]) {
+        const entry = actions.find((a) => a.id === id);
+        expect(entry.label).toBe(id === "repair" ? "Repair" : "Restart");
+        expect(entry.disabledReason).toBeUndefined();
+        expect(entry.disposition).toBe(state === "booting" ? "attach" : ["unknown", "not_onboarded"].includes(state) ? "inspect" : "execute");
       }
     }
   });
 
-  it("a reconciler gateway hold disables Restart/Retry AND Repair with the Upgrade-page reason, leaving the rest enabled", () => {
+  it("a reconciler hold routes both controls to safe inspection, never execution", () => {
     for (const state of ["running", "config_error", "down", "flapping", "boot_failed", "degraded", "safe_mode", "unknown", "starting"]) {
       const actions = actionsForState(state, {
         operationActive: false,
@@ -335,9 +316,9 @@ describe("server/gateway-state reducer", () => {
       });
       for (const a of actions) {
         if (["restart", "retry", "repair"].includes(a.id)) {
-          expect(a.disabledReason, `${state}/${a.id}`).toBe(
-            kLifecycleActionBlockReasons.gatewayHeld,
-          );
+          expect(a.disabledReason).toBeUndefined();
+          expect(a.disposition).toBe("inspect");
+          expect(a.resolution).toBe(state === "unknown" ? "diagnose" : "upgrade");
         } else {
           expect(a.disabledReason, `${state}/${a.id}`).toBeUndefined();
         }
@@ -358,9 +339,7 @@ describe("server/gateway-state reducer", () => {
     expect(rollBack).toBeTruthy();
     expect(rollBack.kind).toBe("danger");
     expect(rollBack.disabledReason).toBeUndefined();
-    expect(actions.find((a) => a.id === "repair").disabledReason).toBe(
-      kLifecycleActionBlockReasons.gatewayHeld,
-    );
+    expect(actions.find((a) => a.id === "repair").resolution).toBe("upgrade");
   });
 
   it("unknown (Status unavailable): Refresh stays primary, Restart is offered and enabled", () => {
@@ -377,20 +356,16 @@ describe("server/gateway-state reducer", () => {
     expect(kGatewayStateCatalog.flapping.glossary).toContain("relaunches without diagnosis");
   });
 
-  it("precedence: a live operation outranks a hold in the disabled reason", () => {
+  it("precedence: a live operation outranks hold inspection", () => {
     const held = reduceGatewayState(
       inputs({
         gatewayHeld: true,
         operation: { kind: "repair", label: "Repairing", startedAt: kNow },
       }),
     );
-    expect(held.actions.find((a) => a.id === "restart").disabledReason).toBe(
-      kLifecycleActionBlockReasons.operation,
-    );
+    expect(held.actions.find((a) => a.id === "restart").disposition).toBe("attach");
     const heldIdle = reduceGatewayState(inputs({ gatewayHeld: true }));
-    expect(heldIdle.actions.find((a) => a.id === "restart").disabledReason).toBe(
-      kLifecycleActionBlockReasons.gatewayHeld,
-    );
+    expect(heldIdle.actions.find((a) => a.id === "restart").resolution).toBe("upgrade");
     const clear = reduceGatewayState(inputs({}));
     expect(clear.actions.find((a) => a.id === "restart").disabledReason).toBeUndefined();
   });
@@ -441,7 +416,7 @@ describe("server/gateway-state reducer", () => {
     expect(result.actions.some((a) => a.id === "restart")).toBe(true);
   });
 
-  it("starting: Restart is disabled under a leased operation AND during a watchdog-owned relaunch, enabled once the launch is just waiting on health", () => {
+  it("starting: Restart observes leased operations and relaunches, execution returns while waiting on health", () => {
     const leased = reduceGatewayState(
       inputs({
         tcp: { running: false, observedAt: kNow },
@@ -449,9 +424,7 @@ describe("server/gateway-state reducer", () => {
       }),
     );
     expect(leased.state).toBe("starting");
-    expect(leased.actions.find((a) => a.id === "restart")?.disabledReason).toBe(
-      kLifecycleActionBlockReasons.operation,
-    );
+    expect(leased.actions.find((a) => a.id === "restart")?.disposition).toBe("attach");
 
     // Crash relaunch / exit-78 auto-retry release the lifecycle lock right
     // after spawn (or never take it): only the lifecycle says a relaunch is in
@@ -464,9 +437,7 @@ describe("server/gateway-state reducer", () => {
         inputs({ tcp: { running: false, observedAt: kNow }, watchdog }),
       );
       expect(relaunch.state, watchdog.lifecycle).toBe("starting");
-      expect(relaunch.actions.find((a) => a.id === "restart")?.disabledReason, watchdog.lifecycle).toBe(
-        kLifecycleActionBlockReasons.relaunch,
-      );
+      expect(relaunch.actions.find((a) => a.id === "restart")?.disposition, watchdog.lifecycle).toBe("attach");
     }
     // A bare "crashed" with no backoff and no operation means the relaunch
     // was SKIPPED (lock held by a non-relaunching op, or stop requested):
@@ -486,9 +457,7 @@ describe("server/gateway-state reducer", () => {
         watchdog: { lifecycle: "running", health: "unknown", safeMode: false, crashCountInWindow: 0, operationInProgress: true },
       }),
     );
-    expect(opInProgress.actions.find((a) => a.id === "restart")?.disabledReason).toBe(
-      kLifecycleActionBlockReasons.relaunch,
-    );
+    expect(opInProgress.actions.find((a) => a.id === "restart")?.disposition).toBe("attach");
 
     // Launched, healthy-unknown, nothing else in flight: Restart is live.
     const waitingOnHealth = reduceGatewayState(
@@ -521,20 +490,16 @@ describe("server/gateway-state reducer", () => {
     expect(flapping.actions.find((a) => a.id === "repair").disabledReason).toBeUndefined();
   });
 
-  it("an unreadable/corrupted hold state fails closed: Restart, Retry and Repair are disabled with the unreadable reason", () => {
+  it("an unreadable hold remains inspect-only while both controls are usable", () => {
     const result = reduceGatewayState(inputs({ gatewayHoldUnreadable: true }));
-    expect(result.actions.find((a) => a.id === "restart").disabledReason).toBe(
-      kLifecycleActionBlockReasons.gatewayHoldUnreadable,
-    );
+    expect(result.actions.find((a) => a.id === "restart").reasonCode).toBe("gateway_hold_unreadable");
     const down = actionsForState("down", {
       operationActive: false,
       inStabilizationWindow: false,
       gatewayHoldUnreadable: true,
     });
-    for (const id of ["retry", "repair"]) {
-      expect(down.find((a) => a.id === id).disabledReason).toBe(
-        kLifecycleActionBlockReasons.gatewayHoldUnreadable,
-      );
+    for (const id of ["restart", "repair"]) {
+      expect(down.find((a) => a.id === id).reasonCode).toBe("gateway_hold_unreadable");
     }
     // Precedence: operation > relaunch > unreadable > held.
     const both = actionsForState("running", {
@@ -543,24 +508,25 @@ describe("server/gateway-state reducer", () => {
       gatewayHeld: true,
       gatewayHoldUnreadable: true,
     });
-    expect(both[0].disabledReason).toBe(kLifecycleActionBlockReasons.gatewayHoldUnreadable);
+    expect(both[0].reasonCode).toBe("gateway_hold_unreadable");
     const relaunchWins = actionsForState("running", {
       operationActive: false,
       inStabilizationWindow: false,
       gatewayHeld: true,
       relaunchActive: true,
     });
-    expect(relaunchWins[0].disabledReason).toBe(kLifecycleActionBlockReasons.relaunch);
+    expect(relaunchWins[0].disposition).toBe("attach");
   });
 
-  it("disables the restart action with a reason while an operation is active", () => {
+  it("projects observation with a reason while an operation is active", () => {
     const result = reduceGatewayState(
       inputs({
         operation: { kind: "channel_apply", label: "Applying update", startedAt: kNow },
       }),
     );
     const restart = result.actions.find((a) => a.id === "restart");
-    expect(restart?.disabledReason).toBeTruthy();
+    expect(restart?.disposition).toBe("attach");
+    expect(restart?.reason).toContain("No new repair or restart was queued");
   });
 
   it("includes crash evidence in the flapping reason", () => {
@@ -1184,7 +1150,7 @@ describe("Stage 3 (#76 B1.3 / F015): the `down` reason names a latched auto-repa
     expect(paused.reason).toBe(kAutoRepairPauseCopy.downReason(pause));
     expect(paused.reason).toContain("Automatic repair is paused — cause state_schema_too_new on OpenClaw 2026.7.1-2");
     expect(paused.reason).toContain("forced Repair");
-    expect(paused.actions.map((a) => a.id)).toEqual(["retry", "repair", "view_logs"]);
+    expect(paused.actions.map((a) => a.id)).toEqual(["repair", "restart", "view_logs"]);
     const suspected = reduce(downInputs({ autoRepairPaused: { ...pause, corroborated: false } }));
     expect(suspected.reason).toContain("suspected cause state_schema_too_new");
     // The route copy never renders an enum bare.

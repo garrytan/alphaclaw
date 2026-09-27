@@ -1,1 +1,5 @@
-Core status and lifecycle for AlphaClaw itself: read the gateway/version/channel rollup, check whether a restart is pending, restart the gateway, and self-update AlphaClaw (distinct from the OpenClaw upgrades under updates). Reads here are your first move — `GET /api/status` (or `--summary`) is the fastest picture of gateway state, channels, versions, and restart-pending. Gotcha: both `POST /api/gateway/restart` and `POST /api/alphaclaw/update` cycle the process and **end your own session**, so treat them as dangerous, final actions — restart only on explicit request, as your last step, after warning the user their session will drop. The agent-message endpoints (talking to the running agent) are denied on this surface; when you need to reach the user, address them directly in chat rather than routing through the API.
+Read `GET /api/status` first. AlphaClaw self-update is not an OpenClaw upgrade.
+
+Restart/self-update **end your session**: warn the user, require an explicit request, and act last. Restart/repair require dangerous confirmation. Agent-message endpoints are denied; reply directly in chat.
+
+**Verify and start** requires a human in the dashboard. Never send `verifyDatabaseRecovery`/`recoveryConfirmation`, even with dangerous confirmation or after failed launch.

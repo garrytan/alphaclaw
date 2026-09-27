@@ -323,15 +323,16 @@ describe("frontend/gateway card (server-state matrix)", () => {
     publishShell({ statusState: state });
     const tree = renderGateway({});
     expect(treeText(tree)).toContain("Repairing");
-    // Restart action is proactively disabled with the server's reason.
+
     const restartButton = findAllByType(tree, ActionButton).find(
       (vnode) => vnode.props.idleLabel === "Restart",
     );
-    expect(restartButton.props.disabled).toBe(true);
-    expect(restartButton.props.title).toBe("Another operation is in progress");
+    expect(restartButton.props.disabled).toBeFalsy();
+    restartButton.props.onClick();
+    expect(treeText(renderGateway({}))).toContain("No new repair or restart was queued");
   });
 
-  it("restart action dispatches to the shell restart pipeline", () => {
+  it("restart inspection requires fresh deliberate confirmation before dispatch", async () => {
     const restart = vi.fn();
     publishShell({ statusState: makeServerState({}) });
     gatewayShellStore.publish({
@@ -342,10 +343,15 @@ describe("frontend/gateway card (server-state matrix)", () => {
       (vnode) => vnode.props.idleLabel === "Restart",
     );
     restartButton.props.onClick();
+    expect(restart).not.toHaveBeenCalled();
+    let options = renderGateway({});
+    findAllByType(options, ActionButton).find((node) => node.props.idleLabel === "Restart gateway").props.onClick();
+    options = renderGateway({});
+    await findAllByType(options, ActionButton).find((node) => node.props.idleLabel === "Confirm restart gateway").props.onClick();
     expect(restart).toHaveBeenCalledTimes(1);
   });
 
-  it("flapping (Unstable) offers Restart next to Repair and dispatches it to the shell pipeline", () => {
+  it("flapping offers Restart next to Repair and confirms before dispatch", async () => {
     // Regression: the Unstable card used to be repair-only, leaving no way
     // to relaunch the gateway from the admin UI in that state.
     const restart = vi.fn();
@@ -363,8 +369,13 @@ describe("frontend/gateway card (server-state matrix)", () => {
     expect(repairButton.props.tone).toBe("primary");
     const restartButton = buttons.find((vnode) => vnode.props.idleLabel === "Restart");
     expect(restartButton).toBeTruthy();
-    expect(restartButton.props.disabled).toBe(false);
+    expect(restartButton.props.disabled).toBeFalsy();
     restartButton.props.onClick();
+    expect(restart).not.toHaveBeenCalled();
+    let options = renderGateway({});
+    findAllByType(options, ActionButton).find((node) => node.props.idleLabel === "Restart gateway").props.onClick();
+    options = renderGateway({});
+    await findAllByType(options, ActionButton).find((node) => node.props.idleLabel === "Confirm restart gateway").props.onClick();
     expect(restart).toHaveBeenCalledTimes(1);
   });
 
@@ -426,7 +437,7 @@ describe("frontend/gateway card (server-state matrix)", () => {
     expect(text).not.toContain("Webhook mappings changed");
   });
 
-  it("replaces the card body with the progress card during an operation", () => {
+  it("retains current state and both inspection controls during an operation", () => {
     publishShell({
       statusState: makeServerState({}),
       restartOperation: {
@@ -445,11 +456,12 @@ describe("frontend/gateway card (server-state matrix)", () => {
     expect(text).toContain("Restarting gateway");
     expect(text).toContain("Stopping gateway");
     expect(text).toContain("Starting gateway");
-    // Steady-state actions are replaced by the operation region.
+
     const restartButton = findAllByType(tree, ActionButton).find(
       (vnode) => vnode.props.idleLabel === "Restart",
     );
-    expect(restartButton).toBeUndefined();
+    expect(restartButton).toBeTruthy();
+    expect(restartButton.props.disabled).toBeFalsy();
   });
 
   it("freezes with an 'as of Xs ago' stamp when connectivity is lost", () => {
@@ -482,7 +494,7 @@ describe("frontend/gateway card (server-state matrix)", () => {
     expect(treeText(tree)).not.toMatch(/as of/);
   });
 
-  it("pre-first-frame renders the client-owned connecting card with Restart disabled", () => {
+  it("pre-first-frame renders usable inspection controls without mutation", () => {
     // Store still at defaults: no status frame has arrived.
     const tree = renderGateway({ status: null });
     const text = treeText(tree);
@@ -490,7 +502,9 @@ describe("frontend/gateway card (server-state matrix)", () => {
     const restartButton = findAllByType(tree, ActionButton).find(
       (vnode) => vnode.props.idleLabel === "Restart",
     );
-    expect(restartButton.props.disabled).toBe(true);
+    expect(restartButton.props.disabled).toBeFalsy();
+    restartButton.props.onClick();
+    expect(treeText(renderGateway({}))).toContain("Status is not current");
     const dotSpan = findDotSpan(tree);
     expect(String(dotSpan.props.class || "")).toContain("ac-gateway-dot--gray");
   });
@@ -503,12 +517,11 @@ describe("frontend/gateway card (server-state matrix)", () => {
       onRestart: () => {},
     });
     const text = treeText(tree);
-    expect(text).toContain("Gateway:");
+    expect(text).toContain("OpenClaw Gateway");
     expect(text).toContain("running");
-    expect(text).toContain("Watchdog:");
-    expect(text).toContain("healthy");
-    // The unified card never renders in skew mode.
-    expect(text).not.toContain("OpenClaw Gateway");
+    expect(text).toContain("Repair");
+    expect(text).toContain("Restart");
+    expect(text).toContain("Refresh status");
   });
 
   it("dotClassFor never renders undefined for malformed dots", () => {

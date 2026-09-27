@@ -1,6 +1,10 @@
-Read gateway health, events and logs through this domain; `GET /api/watchdog/resources` reports memory, CPU, disk, process and event-loop measurements. Machine capacity and tuning live in autotune.
+Read health, events and logs here; `GET /api/watchdog/resources` reports resource usage. Use autotune for machine tuning.
 
-`POST /api/watchdog/repair` interrupts work: use only for a down/stuck gateway. Healthy gateways are never cold-restarted. Unknown/corrupt DB state or unapproved migration blocks repair/relaunch; force cannot waive it. `ok:false` without `result.skipped` means relaunch failed; read `verdict`. For `ok:true,pending:true`, poll until `replacementPending` clears.
+Repair/Restart open options, not mutation permission. Diagnose cannot clear holds, override Stop or grant migration consent. Follow the hold's next action; settings-migration retry is not universal. Busy requests never queue: inspect and ask before retrying.
+
+**Verify and start** is human-only, even after hold clear while recovery is pending. Never send `verifyDatabaseRecovery`/`recoveryConfirmation`, even with dangerous-tier confirmation.
+
+Repair interrupts work; use only for down/stuck gateways, never cold-restart a healthy one. Force cannot waive unknown/corrupt DBs or unapproved migration. On `ok:false`, Doctor or relaunch did not complete: inspect `message`/`verdict`/`result`. Skipped/409 alone cannot prove no config changes. On `ok:true,pending:true`, await cleared `replacementPending` and verified readiness before reporting recovery.
 
 Settings touching `notificationsEnabled` or `notificationsVerbose` require dangerous-tier confirmation; `autoRepair` alone is a plain write. Overseer review without `incidentId` reviews live logs and requires confirmation; reviewing an existing incident is a plain write. Terminal endpoints are denied to agents.
 

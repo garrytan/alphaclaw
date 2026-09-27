@@ -16,6 +16,8 @@ const { runOnboardedBootSequence } = require("../../lib/server/startup");
 const { setBootPhase } = require("../../lib/server/boot-phase");
 const { createBootLaunchSteps } = require("../../lib/server/boot-launch-steps");
 const { utcDayBucket } = require("../../lib/server/notification-policy");
+const { createGatewayLifecycleLock } = require("../../lib/server/gateway-lifecycle-lock");
+const { createGatewayMutationPolicy } = require("../../lib/server/gateway-mutation-policy");
 
 // End-to-end coverage for syncAtBoot: the real channel-sync service + real
 // store recovering real on-disk trees, with the environment poisoned so any
@@ -4842,13 +4844,20 @@ describe("server/openclaw-channel launch compatibility gate at boot (e2e, real s
     const insertEvent = vi.fn();
     const logger = { log: vi.fn(), warn: vi.fn(), error: vi.fn() };
     const doctorCalls = [];
+    const lifecycleLock = createGatewayLifecycleLock({ logger });
+    const mutationPolicy = createGatewayMutationPolicy({ lock: lifecycleLock,
+      getChannelInfo: () => harness.sync.getChannelInfo(),
+      isApplyInProgress: () => harness.sync.isApplyInProgress() });
     const harness = createHarness({
       pin: "1.0.0",
       installedVersion: "1.0.0",
       sentinelVersion: "1.0.0",
       runnerImpl: doctorRunner({ doctorCalls }),
       ...options,
-      extraSyncOptions: { ...kHermetic, insertEvent, logger, ...(options.extraSyncOptions || {}) },
+      extraSyncOptions: { ...kHermetic, insertEvent, logger,
+        acquireLifecycleLock: lifecycleLock.acquire, tryAcquireLifecycleLock: lifecycleLock.tryAcquire,
+        getActiveGatewayOperation: lifecycleLock.getActiveOperation, gatewayMutationPolicy: mutationPolicy,
+        ...(options.extraSyncOptions || {}) },
     });
     harness.store.updateState((s) => {
       s.pinVersion = "1.0.0";
@@ -4878,7 +4887,8 @@ describe("server/openclaw-channel launch compatibility gate at boot (e2e, real s
         resolveSetupUrl: () => "https://setup.example.com",
         reconcileInstalledAtBoot: (args) => steps.reconcileInstalledAtBoot(args),
         assessLaunchCompatibilityAtBoot: (args) => steps.assessLaunchCompatibilityAtBoot(args),
-        reconcileBootConfig: () => harness.sync.reconcileBootConfig(),
+        reconcileBootConfig: (args) => harness.sync.reconcileBootConfig(args),
+        acquireLifecycleLock: lifecycleLock.acquire,
         finalizeBootReport: async (outcome) => {
           steps.onBootReportFinalize(outcome);
           finalizeOutcomes.push(outcome);
@@ -4889,6 +4899,7 @@ describe("server/openclaw-channel launch compatibility gate at boot (e2e, real s
       });
     return {
       ...harness,
+      lifecycleLock,
       insertEvent,
       insertWatchdogEvent,
       logger,
@@ -4990,7 +5001,9 @@ describe("server/openclaw-channel launch compatibility gate at boot (e2e, real s
         status: "held",
         details: expect.objectContaining({
           reason: "version_mismatch",
-          supported: { state: 15, agent: null },
+          supported: expect.objectContaining({ state: 15, agent: null,
+            source: { state: "declared", agent: null },
+            table: expect.objectContaining({ origin: "missing", byVersion: expect.any(Object) }) }),
           stateDb: [expect.objectContaining({ path: "state/openclaw.sqlite", kind: "state", userVersion: 16, verdict: "incompatible" })],
         }),
       }),
@@ -5062,7 +5075,8 @@ describe("server/openclaw-channel launch compatibility gate at boot (e2e, real s
     // The config gate keeps a structural hold it does not own — no doctor.
     expect(h.finalizeOutcomes[0].reconcile).toEqual(expect.objectContaining({ status: "held", hold: expect.objectContaining({ reason: "state_db_unreadable" }) }));
     expect(h.insertWatchdogEvent).toHaveBeenCalledWith(
-      expect.objectContaining({ eventType: "version_mismatch", details: expect.objectContaining({ reason: "state_db_unreadable", reasons: ["state_db_unreadable"] }) }),
+      expect.objectContaining({ eventType: "config_error", details: expect.objectContaining({ reason: "state_db_unreadable", reasons: ["SQLITE_NOTADB"],
+        perDb: [expect.objectContaining({ status: "corrupt", error: expect.objectContaining({ code: "SQLITE_NOTADB" }) })] }) }),
     );
     expect(notifyIds(h.notify)).toContain(`launch-compat-held-state_db_unreadable-1.0.0-${utcDayBucket(h.nowRef.now)}`);
     expect(notifyMessages(h.notify).some((m) => m.includes("Restore the newest verified backup"))).toBe(true);
@@ -5071,7 +5085,9 @@ describe("server/openclaw-channel launch compatibility gate at boot (e2e, real s
     // clears the one hold class it owns outright.
     fs.rmSync(path.join(h.openclawDir, "state", "openclaw.sqlite"));
     writeStateDb(h.openclawDir, { userVersion: 15 });
-    const again = await h.sync.assessLaunchCompatibilityAtBoot();
+    const lease = h.lifecycleLock.tryAcquire("boot");
+    const again = await h.sync.assessLaunchCompatibilityAtBoot({ hold: lease });
+    lease();
     expect(again).toEqual(expect.objectContaining({ compatible: true, hold: null }));
     expect(h.store.readState().gatewayHold).toBe(null);
     expect(eventsOf(h.insertEvent, "launch_compat_gate").map((e) => e.status)).toEqual(["held", "hold_cleared"]);
@@ -5101,9 +5117,12 @@ describe("server/openclaw-channel launch compatibility gate at boot (e2e, real s
     const packagePath = path.join(h.installDir, "node_modules", "openclaw", "package.json");
     const pkg = JSON.parse(fs.readFileSync(packagePath, "utf8"));
     fs.writeFileSync(packagePath, JSON.stringify({ ...pkg, openclaw: { schemaVersions: { state: 15, agent: 19 } } }));
-    expect(await h.sync.assessLaunchCompatibilityAtBoot()).toMatchObject({ compatible: true, hold: null });
-    expect(h.store.readState().gatewayHold).toBe(null);
-    expect(eventsOf(h.insertEvent, "launch_compat_gate").map((event) => event.status)).toEqual(["held", "hold_cleared"]);
+    expect(await h.sync.assessLaunchCompatibilityAtBoot()).toMatchObject({ compatible: false,
+      reasons: ["recovery_source_changed"], hold: { reason: "state_db_unverified" } });
+    expect(h.store.readState().gatewayHold?.reason).toBe("state_db_unverified");
+    expect(eventsOf(h.insertEvent, "launch_compat_gate").map((event) => event.status)).toEqual(["held", "held"]);
+    expect(h.startGateway).not.toHaveBeenCalled();
+    expect(h.doctorCalls).toHaveLength(0);
     assertOffline(h);
   });
 

@@ -49,7 +49,7 @@ const fixture = ({ corrupt = false, sourceSchema = 17, owner = true, lifecycleLo
 };
 
 const harness = ({ sync = null, checker, noChecker = false,
-  gatewayLifecycleLock = createGatewayLifecycleLock({ logger }), holdRecoveryChoice = null } = {}) => {
+  gatewayLifecycleLock = createGatewayLifecycleLock({ logger }), holdRecoveryChoice = null, databaseRecoveryHooks = false } = {}) => {
   const launchGatewayProcess = vi.fn(() => ({ pid: 4242 }));
   const events = [];
   const notifier = { notify: vi.fn(async () => ({ ok: true })) };
@@ -65,6 +65,12 @@ const harness = ({ sync = null, checker, noChecker = false,
     resolveGatewayReadyzUrl: () => "", sleepImpl: () => Promise.resolve(), supervisorModeActive: () => false,
     ...((sync || holdRecoveryChoice) ? { releaseChannelHooks: {
       ...(sync ? { getInfo: () => sync.getChannelInfo() } : {}),
+      ...(databaseRecoveryHooks ? {
+        holdDatabaseVerification: (options) => sync.holdDatabaseVerification(options),
+        verifyDatabaseRecovery: (options) => sync.verifyDatabaseRecovery(options),
+        isDatabaseRecoveryCurrent: (options) => sync.isDatabaseRecoveryCurrent(options),
+        completeDatabaseRecovery: (options) => sync.completeDatabaseRecovery(options),
+      } : {}),
       ...(holdRecoveryChoice ? { holdRecoveryChoice } : {}),
     } } : {}),
     ...(!noChecker ? { assessLaunchCompatibility } : {}),
@@ -94,6 +100,83 @@ afterEach(() => {
 });
 
 describe("watchdog runtime recovery compatibility", () => {
+  it("a failed verified restart cannot bypass its persisted database baseline through a later ordinary restart or Doctor", async () => {
+    const express = require("express");
+    const request = require("supertest");
+    const { registerSystemRoutes } = require("../../lib/server/routes/system");
+    const lock = createGatewayLifecycleLock({ logger });
+    const { sync, databasePath, state } = fixture({ lifecycleLock: lock });
+    sync.holdDatabaseVerification({ verdict: await sync.assessInstalledLaunchCompatibility() });
+    const cell = harness({ sync, gatewayLifecycleLock: lock, databaseRecoveryHooks: true });
+    cell.watchdog.latchManualIntervention();
+    const restartGateway = vi.fn(async () => { throw new Error("replacement failed to start"); });
+    const app = express();
+    app.use(express.json());
+    registerSystemRoutes({ app, fs, OPENCLAW_DIR: state, isOnboarded: () => true,
+      readEnvFile: () => [], clawCmd: cell.clawCmd, openclawChannelService: sync,
+      watchdog: cell.watchdog, gatewayLifecycleLock: lock, restartGateway,
+      restartRequiredState: { markRestartInProgress() {}, beginRestart: () => ({ operationId: "verify-first" }),
+        completeRestart() {}, markRestartComplete() {}, getSnapshot: async () => ({ restartRequired: true }) },
+    });
+    const confirm = () => ({ verifyDatabaseRecovery: true,
+      recoveryConfirmation: sync.getDatabaseRecoveryConfirmation({ context: cell.watchdog.captureDatabaseRecoveryContext() }) });
+    const first = await request(app).post("/api/gateway/restart").send(confirm());
+    expect(first.status).toBe(500);
+    expect(restartGateway).toHaveBeenCalledTimes(1);
+    expect(sync.getChannelInfo().gatewayHold).toBeNull();
+    const pending = sync.getChannelInfo().databaseRecoveryPending;
+    expect(pending).toBeTruthy();
+    fs.unlinkSync(databasePath);
+    const ordinary = await request(app).post("/api/gateway/restart").send({});
+    expect(ordinary.status).toBe(409);
+    expect(ordinary.body.code).toBe("database_recovery_pending");
+    expect(ordinary.body.nextActions).toContain("verify_database_recovery");
+    expect(await cell.watchdog.triggerRepair({ force: true })).toMatchObject({ skipped: true, reason: "database_recovery_pending" });
+    expect(cell.clawCmd.mock.calls.filter(([command]) => command.startsWith("doctor"))).toEqual([]);
+    const explicit = await request(app).post("/api/gateway/restart").send(confirm());
+    expect(explicit.status).toBe(409);
+    expect(explicit.body.code).toBe("required_database_missing");
+    expect(restartGateway).toHaveBeenCalledTimes(1);
+    expect(sync.getChannelInfo().databaseRecoveryPending).toEqual(pending);
+  });
+
+  it("rechecks a database hold before the configuration-error early return and keeps recovery pending until readiness", async () => {
+    vi.stubEnv("WATCHDOG_AUTO_REPAIR", "true");
+    const lock = createGatewayLifecycleLock({ logger });
+    const { sync, databasePath } = fixture({ corrupt: true, lifecycleLock: lock });
+    const verdict = await sync.assessInstalledLaunchCompatibility();
+    const recorded = sync.holdDatabaseVerification({ verdict });
+    expect(recorded.ok).toBe(true);
+    const cell = harness({ sync, gatewayLifecycleLock: lock, databaseRecoveryHooks: true });
+    cell.watchdog.latchManualIntervention();
+    expect(cell.watchdog.getStatus().lifecycle).toBe("configuration_error");
+    expect(cell.events.filter((event) => event.eventType === "version_mismatch")).toEqual([]);
+    fs.unlinkSync(databasePath);
+    const database = new DatabaseSync(databasePath);
+    database.exec("PRAGMA user_version=17; CREATE TABLE schema_meta(meta_key TEXT PRIMARY KEY, role TEXT, schema_version INTEGER, agent_id TEXT); INSERT INTO schema_meta VALUES('primary','global',17,NULL)");
+    database.close();
+    await cell.watchdog.runHealthCheck();
+    expect(sync.getChannelInfo().gatewayHold).toBeNull();
+    expect(cell.launchGatewayProcess).toHaveBeenCalledTimes(1);
+    expect(sync.getChannelInfo().databaseRecoveryPending).toBeTruthy();
+    expect(cell.watchdog.getStatus().awaitingAutoRepairRecovery).toBe(true);
+  });
+
+  it("never rechecks a held database after an intentional stop", async () => {
+    vi.stubEnv("WATCHDOG_AUTO_REPAIR", "true");
+    const lock = createGatewayLifecycleLock({ logger });
+    const { sync } = fixture({ lifecycleLock: lock });
+    sync.holdDatabaseVerification({ verdict: await sync.assessInstalledLaunchCompatibility() });
+    const verify = vi.spyOn(sync, "verifyDatabaseRecovery");
+    const cell = harness({ sync, gatewayLifecycleLock: lock, databaseRecoveryHooks: true });
+    cell.watchdog.latchManualIntervention();
+    cell.watchdog.stop();
+    await cell.watchdog.runHealthCheck();
+    expect(verify).not.toHaveBeenCalled();
+    expect(cell.launchGatewayProcess).not.toHaveBeenCalled();
+    expect(sync.getChannelInfo().gatewayHold).toBeTruthy();
+  });
+
   it("wires the production watchdog migration refusal to the channel service's durable hold hook", () => {
     const source = fs.readFileSync(path.join(__dirname, "../../lib/server.js"), "utf8");
     const start = source.indexOf("const watchdog = createWatchdog({");
@@ -101,6 +184,8 @@ describe("watchdog runtime recovery compatibility", () => {
     const composition = source.slice(start, source.indexOf("\n});", start));
     expect(composition).toContain("holdRecoveryChoice: (payload) => openclawChannelService.holdRecoveryChoice(payload)");
     expect(composition).toContain("gatewayLifecycleLock,");
+    expect(source).toContain("assertDatabaseVerification: (options) => gatewayMutationPolicy.assertDatabaseVerification(options)");
+    expect(source).toContain("authorizeDatabaseRecovery: (options) => gatewayMutationPolicy.authorizeDatabaseRecovery(options)");
   });
 
   it("publishes an explicit recovery-required verdict rather than an undefined launch outcome", () => {

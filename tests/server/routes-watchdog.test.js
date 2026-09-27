@@ -65,6 +65,16 @@ const createApp = (deps) => {
 };
 
 describe("server/routes/watchdog", () => {
+  it("keeps pending database recovery inspectable without letting force run Doctor", async () => {
+    const deps = createDeps();
+    deps.watchdog.triggerRepair.mockResolvedValue({ ok: false, skipped: true, reason: "database_recovery_pending" });
+    const res = await request(createApp(deps)).post("/api/watchdog/repair").send({ force: true });
+    expect(res.status).toBe(409);
+    expect(res.body).toMatchObject({ ok: false, code: "database_recovery_pending",
+      nextActions: ["diagnose", "verify_database_recovery"] });
+    expect(res.body.error).toContain("cannot run Doctor");
+  });
+
   it("returns watchdog status on GET /api/watchdog/status", async () => {
     const deps = createDeps();
     const app = createApp(deps);

@@ -77,8 +77,10 @@ describe("Codex migration executing build", () => {
     expect(await api.repairAuthProfileMigration()).toBe("composed");
   });
 
-  it("uses the installed fallback when the selected checkout cannot execute", () => {
+  it("refuses a broken active shim and uses the installed fallback only after the shim is removed", () => {
     fs.rmSync(path.join(checkoutDir, "openclaw.mjs"));
+    expect(describeBuild()).toBeNull();
+    store.removeBinShim();
     const build = describeBuild();
     expect(build.source).toBe("installed");
     expect(build.packageDir).not.toBe(checkoutDir);

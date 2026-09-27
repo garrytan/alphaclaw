@@ -67,6 +67,7 @@ const kImageTag = `alphaclaw-container-boot-e2e:${kRunId}`;
 const kVolume = `alphaclaw-boot-e2e-data-${kRunId}`;
 const kContainerA = `alphaclaw-boot-e2e-${kRunId}`;
 const kContainerB = `alphaclaw-boot-e2e-${kRunId}-fresh`;
+const kContainerC = `alphaclaw-boot-e2e-${kRunId}-recovery`;
 const kSetupPassword = "container-boot-e2e-pass";
 const kGatewayToken = "container-boot-e2e-token";
 const kGatewayPort = 18789;
@@ -78,6 +79,9 @@ const kMin = 60 * 1000;
 // (restart-required-state.js); backups under <root>/backups/openclaw
 // (constants.kOpenclawBackupsDir).
 const kOpenclawDir = "/data/.openclaw";
+const kTransientLocks = ["generation-lock", "generation-writer", "reindex-lock"].map(
+  (family) => `agents/main/agent/openclaw-agent.sqlite.${family}.sqlite`,
+);
 const kManagedDir = `${kOpenclawDir}/.alphaclaw`;
 const kServerPidPath = `${kManagedDir}/alphaclaw-server.pid`;
 const kBootReportPath = `${kManagedDir}/boot-report.json`;
@@ -140,6 +144,7 @@ const ctx = {
   threadWitnessB: null,
   activeContainer: kContainerA,
   bootReportB: null,
+  stateDatabase: null,
 };
 
 // A broken step poisons every later step (they cannot mean anything); the
@@ -249,7 +254,7 @@ describeContainer("container E2E: boot durability — legacy pidfile TID collisi
     try {
       if (journeyBroken) {
         const dir = ensureArtifactsDir();
-        for (const name of [kContainerA, kContainerB]) {
+        for (const name of [kContainerA, kContainerB, kContainerC]) {
           try {
             const logs = await containerLogs(name, { tail: 5000 });
             fs.writeFileSync(path.join(dir, `${name}-logs.txt`), logs);
@@ -259,7 +264,7 @@ describeContainer("container E2E: boot durability — legacy pidfile TID collisi
         // not: the gateway's stderr tail, the medic's `doctor --fix` output
         // and verdict. 2026-09-22's journeys died in "doctor_fix failed" with
         // the reason reachable only inside INCIDENT-*.md — capture them.
-        for (const name of [kContainerA, kContainerB]) {
+        for (const name of [kContainerA, kContainerB, kContainerC]) {
           try {
             const { stdout } = await execInContainer(name, [
               "sh",
@@ -282,6 +287,7 @@ describeContainer("container E2E: boot durability — legacy pidfile TID collisi
       // ALWAYS tear down — never leave containers or volumes behind.
       await removeContainer(kContainerA);
       await removeContainer(kContainerB);
+      await removeContainer(kContainerC);
       await removeVolume(kVolume);
     }
   }, 5 * kMin);
@@ -296,7 +302,16 @@ describeContainer("container E2E: boot durability — legacy pidfile TID collisi
       "/data/onboarded.json": JSON.stringify({ onboardedAt: new Date().toISOString() }),
       [`${kOpenclawDir}/openclaw.json`]: JSON.stringify(buildSeedConfig(), null, 2),
     });
-    await runContainer({ name: kContainerA, image: kImageTag, volume: kVolume, env: containerEnv() });
+    const { stdout: indexed } = await docker(["run", "--rm", "--memory=1g", "--memory-swap=1g",
+      "--entrypoint", "openclaw", "-v", `${kVolume}:/data`, "-e", `OPENCLAW_STATE_DIR=${kOpenclawDir}`,
+      kImageTag, "memory", "index", "--agent", "main",
+    ]);
+    expect(indexed).toContain("No memory files found");
+    await runContainer({ name: kContainerA, image: kImageTag, volume: kVolume, env: containerEnv(), memory: "4g" });
+    const { stdout: limits } = await execInContainer(kContainerA, ["node", "-e",
+      "const fs = require('node:fs'); process.stdout.write(JSON.stringify(['memory.max', 'memory.swap.max'].map(name => fs.readFileSync('/sys/fs/cgroup/' + name, 'utf8').trim())))",
+    ]);
+    expect(JSON.parse(limits)).toEqual(["4294967296", "0"]);
     await waitForUiUp(kContainerA, 3 * kMin);
     ctx.cookie = await loginForCookie(baseUrl(), kSetupPassword);
     await waitForVersion(kContainerA, ctx.stablePin, 5 * kMin);
@@ -353,6 +368,7 @@ describeContainer("container E2E: boot durability — legacy pidfile TID collisi
     await removeContainer(kContainerA);
     const now = Date.now();
     await seedVolume(kVolume, {
+      ...Object.fromEntries(kTransientLocks.map((file) => [`${kOpenclawDir}/${file}`, ""])),
       // RC1: the legacy claim naming a thread id, stamped two days ago.
       [kServerPidPath]: JSON.stringify({ pid: ctx.threadIdA, at: now - kLegacyClaimAgeMs }),
       // Inject B's own observed TID before its real pidfile guard. The armed
@@ -410,6 +426,7 @@ describeContainer("container E2E: boot durability — legacy pidfile TID collisi
   step("container B boots on the seeded volume: UI + pin + gateway healthz", 12 * kMin, async () => {
     await runContainer({
       name: kContainerB, image: kImageTag, volume: kVolume,
+      memory: "4g",
       env: { ...containerEnv(), NODE_OPTIONS: `--require=${kThreadPreloadPath}` },
     });
     ctx.activeContainer = kContainerB;
@@ -436,6 +453,28 @@ describeContainer("container E2E: boot durability — legacy pidfile TID collisi
       expect(wait.state).toBe("starting");
       expect(wait.retry).not.toBeNull();
     }
+  });
+
+  step("diagnose excludes proven transient locks without hiding real database coverage", 2 * kMin, async () => {
+    const { bundle: diagnosis } = await fetchJsonWithCookie(`${baseUrl()}/api/diagnose`, ctx.cookie);
+    expect(diagnosis.summary.recovery.assessment).toBe("complete");
+    expect(diagnosis.summary.recovery.databaseVerdict).toBe("compatible");
+    const evidence = diagnosis.sections.stateDb.data;
+    expect(evidence.discoveryComplete).toBe(true);
+    expect(evidence.entries.some((row) => row.kind === "state")).toBe(true);
+    ctx.stateDatabase = evidence.entries.find((row) => row.kind === "state").path;
+    expect(evidence.entries.some((row) => row.kind === "agent")).toBe(true);
+    for (const file of kTransientLocks) {
+      expect(evidence.excludedArtifacts).toEqual(expect.arrayContaining([
+        expect.objectContaining({ path: file, reason: "verified_openclaw_2026_9_5_producer" }),
+      ]));
+      expect(evidence.entries.some((row) => row.path.endsWith(file))).toBe(false);
+      const { stdout } = await execInContainer(kContainerB, ["node", "-e",
+        `process.stdout.write(String(require('node:fs').existsSync(${JSON.stringify(`${kOpenclawDir}/${file}`)})))`,
+      ]);
+      expect(stdout).toBe("true");
+    }
+    expect(await gatewayHealthzOk(kContainerB)).toBe(true);
   });
 
   step("boot-report.json: the pidfile guard judged the legacy claim a THREAD and proceeded", 2 * kMin, async () => {
@@ -534,5 +573,75 @@ describeContainer("container E2E: boot durability — legacy pidfile TID collisi
     });
     const status = await readStatus();
     expect(versionMatches(status.openclawVersion, ctx.stablePin)).toBe(true);
+  });
+
+  step("real recovery controls observe a corrupt database and require a new confirmed start after repair", 12 * kMin, async () => {
+    const settings = await fetch(`${baseUrl()}/api/watchdog/settings`, {
+      method: "PUT", headers: { Cookie: ctx.cookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ autoRepair: false }),
+    });
+    expect(settings.ok).toBe(true);
+    await docker(["stop", "--time", "30", kContainerB]);
+    const database = JSON.stringify(ctx.stateDatabase);
+    await docker(["run", "--rm", "--memory=512m", "--memory-swap=512m", "--entrypoint", "node",
+      "-v", `${kVolume}:/data`, kImageTag, "-e",
+      `const fs = require('node:fs'); const file = ${database}; fs.renameSync(file, file + '.issue123-fixture'); fs.writeFileSync(file, 'not a database');`,
+    ]);
+    await runContainer({ name: kContainerC, image: kImageTag, volume: kVolume, memory: "4g",
+      env: { ...containerEnv(), WATCHDOG_AUTO_REPAIR: "false" } });
+    ctx.activeContainer = kContainerC;
+    ctx.cookie = null;
+    await waitForUiUp(kContainerC, 3 * kMin);
+    await waitFor(async () => (await readStatus()).state?.state === "config_error", {
+      timeoutMs: 3 * kMin, intervalMs: 1000, label: "corrupt real database holds the gateway",
+    });
+    expect(await gatewayHealthzOk(kContainerC)).toBe(false);
+    const { chromium } = require("playwright");
+    const browser = await chromium.launch();
+    const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+    const mutations = [];
+    page.on("request", (req) => {
+      if (req.method() === "POST" && /\/api\/(gateway\/restart|watchdog\/repair)/.test(req.url())) mutations.push(req);
+    });
+    try {
+      await page.goto(`${baseUrl()}/login.html`, { waitUntil: "domcontentloaded" });
+      await page.fill("#password", kSetupPassword);
+      await page.click("#submit-btn");
+      await page.waitForURL((url) => !url.pathname.includes("login"), { timeout: 60_000 });
+      const controls = page.locator(".ac-gateway-recovery-actions");
+      await controls.getByRole("button", { name: "Repair", exact: true }).click();
+      const options = page.getByRole("region", { name: "Repair options" });
+      await options.getByRole("button", { name: "Check again", exact: true }).click();
+      await options.getByText(/databases blocked/).waitFor({ timeout: 30_000 });
+      expect(mutations).toHaveLength(0);
+      expect(await controls.getByRole("button", { name: "Restart", exact: true }).isEnabled()).toBe(true);
+      await page.screenshot({ path: path.join(ensureArtifactsDir(), "issue123-real-held-desktop.png"), fullPage: true });
+      await page.setViewportSize({ width: 390, height: 900 });
+      await page.screenshot({ path: path.join(ensureArtifactsDir(), "issue123-real-held-mobile.png"), fullPage: true });
+      await execInContainer(kContainerC, ["node", "-e",
+        `const fs = require('node:fs'); const file = ${database}; fs.rmSync(file); fs.renameSync(file + '.issue123-fixture', file);`,
+      ]);
+      const correctedAt = Date.now();
+      await options.getByRole("button", { name: "Check again", exact: true }).click();
+      await options.getByText(/databases compatible/).waitFor({ timeout: 30_000 });
+      const assessedAt = Date.now();
+      expect(mutations).toHaveLength(0);
+      expect(await gatewayHealthzOk(kContainerC)).toBe(false);
+      await options.getByRole("button", { name: "Verify and start", exact: true }).click();
+      const confirmedAt = Date.now();
+      await options.getByRole("button", { name: "Confirm verify and start", exact: true }).click();
+      await waitFor(async () => {
+        const status = await readStatus();
+        return status.state?.state === "running" && status.watchdogStatus?.readiness === "ready";
+      }, { timeoutMs: 5 * kMin, intervalMs: 1000, label: "confirmed recovery reaches real readiness" });
+      expect(mutations).toHaveLength(1);
+      expect(mutations[0].postDataJSON()).toEqual({ verifyDatabaseRecovery: true, recoveryConfirmation: expect.any(String) });
+      expect(await gatewayHealthzOk(kContainerC)).toBe(true);
+      expect((await readStatus()).watchdogStatus.autoRepair).toBe(false);
+      console.log(`[container-recovery-timing] ${JSON.stringify({ correctionToAssessmentMs: assessedAt - correctedAt,
+        confirmationToReadyMs: Date.now() - confirmedAt, correctionToReadyMs: Date.now() - correctedAt })}`);
+    } finally {
+      await browser.close();
+    }
   });
 });

@@ -1,0 +1,16 @@
+{
+  "version": "2026.9.5",
+  "sourceCommit": "ec9c1a13db8938e5a3eaa51fca2e981cde2395a9",
+  "integrity": "sha512-TCO/ImVLh5HkF4tdfo7iriIa7kT6iYkIr/jR5ZOkePGFGhUx5Oe7DE716Y1DzzG2teRAVDdCjgJDu1A24Yta7w==",
+  "files": {
+    "dist/manager-vector-warning-Cqtw5AdB.mjs": "2221bc901be38886e0ff43440a72cfb0cf5f9caa55229b1b6c940461a5fc1455",
+    "dist/extensions/memory-core/manager-runtime.js": "1cf9dd954b0ec80192e74a025927394bf6d829c73d517f7033ea5407d8f01d05"
+  },
+  "sourceEvidence": {
+    "generation-writer": "manager-index-generation-lease.ts:62; manager-sqlite-lease.ts:65-135 — SQLite coordination lease, BEGIN IMMEDIATE and user_version=0",
+    "generation-lock": "manager-index-generation-lease.ts:75; manager-sqlite-lease.ts:65-135 — shared/exclusive SQLite coordination lease",
+    "reindex-lock": "manager-reindex-lock.ts:22 — SQLite reindex coordination lease",
+    "memory-reindex": "manager-sync-ops.ts:561-706 — const tempDbPath = `${dbPath}.memory-reindex-${randomUUID()}`; shadow rebuilt before transactional publication; manager-db.ts:35-50,148+ crash cleanup under reindex lease"
+  },
+  "unprovenFamilies": ["backup", "tmp"]
+}

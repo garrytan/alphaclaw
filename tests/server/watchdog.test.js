@@ -3066,7 +3066,7 @@ describe("server/watchdog", () => {
         expect(getBootPhase().phase).toBe("ready");
         expect(watchdog.getStatus().replacementPending).toMatchObject({ pid: 4242, source: "boot" });
         expect(gatewayState(watchdog)).toMatchObject({ state: "starting" });
-        expect(gatewayState(watchdog).actions.find((action) => action.id === "restart").disabledReason).toBeTruthy();
+        expect(gatewayState(watchdog).actions.find((action) => action.id === "restart")).toMatchObject({ disposition: "attach", resolution: "operation" });
         expect(watchdog.getStatus().servingPid).toBeNull();
 
         healthy = true;
@@ -3103,7 +3103,7 @@ describe("server/watchdog", () => {
         await watchdog.runHealthCheck();
         expect(watchdog.getStatus().replacementPending).toBeNull();
         expect(gatewayState(watchdog).state).toBe("down");
-        expect(gatewayState(watchdog).actions.find((action) => action.id === "retry").disabledReason).toBeUndefined();
+        expect(gatewayState(watchdog).actions.find((action) => action.id === "restart")).toMatchObject({ disposition: "execute", resolution: null });
       } finally {
         watchdog.stop();
       }
@@ -3194,7 +3194,7 @@ describe("server/watchdog", () => {
         await vi.advanceTimersByTimeAsync(0);
         expect(watchdog.getStatus().replacementPending).toBeNull();
         expect(gatewayState(watchdog).state).toBe("config_error");
-        expect(gatewayState(watchdog).actions.find((action) => action.id === "retry").disabledReason).toBeUndefined();
+        expect(gatewayState(watchdog).actions.find((action) => action.id === "restart")).toMatchObject({ disposition: "execute", resolution: null });
       } finally {
         watchdog.stop();
       }
@@ -12601,7 +12601,7 @@ describe("server/watchdog", () => {
       expect(lines[5]).toBe("DB schema: state 15 (running build supports 12) · agent 17 (—)");
       expect(lines[6]).toBe("Last plan: recover_bootable → no bootable version");
       expect(lines[7]).toBe(
-        "Next: Retry · Repair · View logs from the Watchdog tab — a Repair sent with force resumes automatic repair once.",
+        "Next: Repair · Restart · View logs from the Watchdog tab — a Repair sent with force resumes automatic repair once.",
       );
       expect(lines[8]).toBe("Details: `alphaclaw diagnose`");
       expect(notice[1]).toEqual(

@@ -3,6 +3,161 @@ const { createGatewayMutationPolicy, kGatewayMutationIntents, GatewayMutationBlo
   restartDeferredFields } = require("../../lib/server/gateway-mutation-policy");
 
 describe("gateway mutation admission", () => {
+  it("keeps pending database recovery blocked without a fresh lease-bound authorization", async () => {
+    const lock = createGatewayLifecycleLock();
+    const pending = { recoveryId: "recovery-1", baseline: { databases: [{ path: "state/openclaw.sqlite" }] } };
+    let info = { gatewayHold: null, databaseRecoveryPending: pending };
+    const policy = createGatewayMutationPolicy({ lock, getChannelInfo: () => info });
+    const otherPolicy = createGatewayMutationPolicy({ lock, getChannelInfo: () => info });
+    expect(policy.read({ preLock: true }).code).toBe("database_recovery_pending");
+    const hold = lock.tryAcquire("restart");
+    expect(policy.read({ hold }).code).toBe("database_recovery_pending");
+    expect(() => policy.assertDatabaseVerification({ hold, recoveryPending: pending })).not.toThrow();
+    expect(policy.read({ hold }).code).toBe("database_recovery_pending");
+    policy.authorizeDatabaseRecovery({ hold, pending, isCurrent: () => true });
+    expect(otherPolicy.read({ hold })).toBeNull();
+    expect(policy.read()).toMatchObject({ code: "database_recovery_pending" });
+    info = { ...info, databaseRecoveryPending: { ...pending, recoveryId: "replacement" } };
+    expect(policy.read({ hold }).code).toBe("database_recovery_pending");
+    info.databaseRecoveryPending = pending;
+    expect(policy.read({ hold }).code).toBe("database_recovery_pending");
+    hold();
+    const next = lock.tryAcquire("restart");
+    expect(policy.read({ hold }).code).toBe("lease_expired");
+    expect(policy.read({ hold: next }).code).toBe("database_recovery_pending");
+    next();
+    const repair = lock.tryAcquire("repair");
+    expect(policy.read({ hold: repair }).code).toBe("database_recovery_pending");
+    expect(() => policy.authorizeDatabaseRecovery({ hold: repair, pending })).toThrow();
+    repair();
+  });
+
+  it("cannot authorize a changed pending record, unrelated hold, corrupted state, or forged lease", () => {
+    const lock = createGatewayLifecycleLock();
+    const pending = { recoveryId: "recovery-1" };
+    const info = { databaseRecoveryPending: pending };
+    const policy = createGatewayMutationPolicy({ lock, getChannelInfo: () => info });
+    const hold = lock.tryAcquire("database_verification");
+    try {
+      expect(() => policy.authorizeDatabaseRecovery({ hold, pending: { recoveryId: "old" } })).toThrow();
+      expect(() => policy.authorizeDatabaseRecovery({ hold: Object.assign(() => {}, hold), pending })).toThrow();
+      info.gatewayHold = { reason: "config_migration_failed" };
+      expect(() => policy.authorizeDatabaseRecovery({ hold, pending })).toThrow();
+      info.gatewayHold = null;
+      info.stateCorrupted = true;
+      expect(() => policy.authorizeDatabaseRecovery({ hold, pending })).toThrow();
+    } finally { hold(); }
+  });
+
+  it("revokes an authorized restart when its pending marker disappears instead of falling through to ordinary restart", async () => {
+    const lock = createGatewayLifecycleLock();
+    const pending = { recoveryId: "verified" };
+    const info = { databaseRecoveryPending: pending };
+    const policy = createGatewayMutationPolicy({ lock, getChannelInfo: () => info });
+    const hold = lock.tryAcquire("restart");
+    try {
+      policy.authorizeDatabaseRecovery({ hold, pending, isCurrent: () => true });
+      await expect(policy.restart({ hold, restartGateway: async ({ shouldAbort }) => {
+        info.databaseRecoveryPending = null;
+        expect(shouldAbort()).toBe(true);
+        throw new Error("launch aborted");
+      } })).rejects.toMatchObject({ code: "recovery_source_changed" });
+      info.databaseRecoveryPending = pending;
+      expect(policy.read({ hold }).code).toBe("database_recovery_pending");
+    } finally { hold(); }
+  });
+
+  it("accepts a cleared marker only while the same lease's completed observation remains current", () => {
+    const lock = createGatewayLifecycleLock();
+    const pending = { recoveryId: "verified" };
+    const info = { databaseRecoveryPending: pending };
+    const policy = createGatewayMutationPolicy({ lock, getChannelInfo: () => info });
+    const hold = lock.tryAcquire("restart");
+    let current = true;
+    let completed = false;
+    try {
+      policy.authorizeDatabaseRecovery({ hold, pending, isCurrent: () => current, isCompleted: () => completed });
+      info.databaseRecoveryPending = null;
+      completed = true;
+      expect(policy.read({ hold })).toBeNull();
+      current = false;
+      expect(policy.read({ hold }).code).toBe("recovery_source_changed");
+      current = true;
+      info.databaseRecoveryPending = pending;
+      expect(policy.read({ hold }).code).toBe("database_recovery_pending");
+    } finally { hold(); }
+  });
+
+  it("revokes live recovery authority when the observed database or build identity changes during launch", async () => {
+    const lock = createGatewayLifecycleLock();
+    const pending = { recoveryId: "verified" };
+    let current = true;
+    const policy = createGatewayMutationPolicy({ lock, getChannelInfo: () => ({ databaseRecoveryPending: pending }) });
+    const hold = lock.tryAcquire("restart");
+    try {
+      policy.authorizeDatabaseRecovery({ hold, pending, isCurrent: () => current });
+      await expect(policy.restart({ hold, restartGateway: async ({ shouldAbort }) => {
+        current = false;
+        expect(shouldAbort()).toBe(true);
+        throw new Error("launch aborted");
+      } })).rejects.toMatchObject({ code: "database_recovery_pending" });
+      current = true;
+      expect(policy.read({ hold }).code).toBe("database_recovery_pending");
+    } finally { hold(); }
+  });
+
+  it.each([
+    ["apply_commit", kGatewayMutationIntents.applyRecovery],
+    ["backup_quiesce", kGatewayMutationIntents.applyBackup],
+  ])("admits protected pending recovery only through its exact captured record and owned %s intent", (kind, intent) => {
+    const lock = createGatewayLifecycleLock();
+    const pending = { recoveryId: "original", baseline: { identity: "original-db-set" } };
+    const info = { databaseRecoveryPending: pending };
+    const policy = createGatewayMutationPolicy({ lock, getChannelInfo: () => info, isApplyInProgress: () => true });
+    const hold = lock.tryAcquire(kind);
+    try {
+      expect(policy.read({ hold, intent, recoveryPending: pending })).toBeNull();
+      expect(policy.read({ hold, intent }).code).toBe("database_recovery_pending");
+      expect(policy.read({ hold, intent: kGatewayMutationIntents.apply, recoveryPending: pending })).not.toBeNull();
+      expect(policy.read({ hold, intent: kGatewayMutationIntents.backup, recoveryPending: pending })).not.toBeNull();
+      info.databaseRecoveryPending = { ...pending, recoveryId: "newer" };
+      expect(policy.read({ hold, intent, recoveryPending: pending }).code).toBe("database_recovery_pending");
+      info.databaseRecoveryPending = null;
+      expect(policy.read({ hold, intent, recoveryPending: pending }).code).toBe("recovery_source_changed");
+      info.databaseRecoveryPending = pending;
+      info.stateCorrupted = true;
+      expect(policy.read({ hold, intent, recoveryPending: pending }).code).toBe("gateway_hold_unreadable");
+    } finally { hold(); }
+    expect(policy.read({ hold, intent, recoveryPending: pending }).code).toBe("lease_expired");
+  });
+
+  it("owns only exact database verification without authorizing a held restart", () => {
+    const lock = createGatewayLifecycleLock();
+    const hold = lock.tryAcquire("database_verification");
+    const recoveryHold = { reason: "state_db_unverified", at: 1, bootId: "first" };
+    let info = { gatewayHold: { ...recoveryHold } };
+    let applying = false;
+    const policy = createGatewayMutationPolicy({ lock, getChannelInfo: () => info,
+      isApplyInProgress: () => applying });
+    try {
+      expect(() => policy.assertDatabaseVerification({ hold, recoveryHold })).not.toThrow();
+      expect(() => policy.assert({ hold })).toThrow(GatewayMutationBlockedError);
+      expect(() => policy.assertDatabaseVerification({ hold: Object.assign(() => {}, hold), recoveryHold }))
+        .toThrow(GatewayMutationBlockedError);
+      applying = true;
+      expect(() => policy.assertDatabaseVerification({ hold, recoveryHold })).toThrow(GatewayMutationBlockedError);
+      applying = false;
+      for (const gatewayHold of [{ ...recoveryHold, at: 2 }, { reason: "recovery_choice_required" }, null]) {
+        info = { gatewayHold };
+        expect(() => policy.assertDatabaseVerification({ hold, recoveryHold })).toThrow(GatewayMutationBlockedError);
+      }
+      info = { stateCorrupted: true, gatewayHold: recoveryHold };
+      expect(() => policy.assertDatabaseVerification({ hold, recoveryHold })).toThrow(GatewayMutationBlockedError);
+    } finally { hold(); }
+    info = { gatewayHold: recoveryHold };
+    expect(() => policy.assertDatabaseVerification({ hold, recoveryHold })).toThrow(GatewayMutationBlockedError);
+  });
+
   it("rechecks a queued operation after a migration hold appears", async () => {
     const lock = createGatewayLifecycleLock();
     let info = {};

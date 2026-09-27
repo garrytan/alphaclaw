@@ -487,6 +487,34 @@ describe("frontend/app-shell controller (shared status feed)", () => {
     expect(showToast).toHaveBeenCalledWith("Gateway restarted", "success");
   });
 
+  it("a lost accepted response reconciles the existing operation without replaying the mutation", async () => {
+    let controller = await settle();
+    api.restartGatewayAsync.mockClear();
+    api.restartGatewayAsync.mockRejectedValue(new Error("response lost"));
+    api.fetchRestartStatus.mockResolvedValue({
+      restartRequired: false, restartInProgress: true, reasons: [],
+      activeOperation: { operationId: "accepted-before-disconnect", status: "running", startedAt: Date.now() },
+    });
+    const result = await controller.actions.handleGatewayRestart();
+    expect(result).toEqual({ ok: true, attached: true, operationId: "accepted-before-disconnect" });
+    controller = await settle();
+    expect(controller.state.restartOperation.operationId).toBe("accepted-before-disconnect");
+    await controller.actions.handleGatewayRestart();
+    expect(api.restartGatewayAsync).toHaveBeenCalledTimes(1);
+  });
+
+  it("a lost response without an observable operation remains unknown and never replays on refresh", async () => {
+    let controller = await settle();
+    api.restartGatewayAsync.mockClear();
+    api.restartGatewayAsync.mockRejectedValue(new Error("response lost"));
+    expect(await controller.actions.handleGatewayRestart()).toBeNull();
+    controller = await settle();
+    expect(controller.state.restartOperation.error.message).toContain("result unknown");
+    await gatewayShellStore.get().actions.refresh();
+    await settle();
+    expect(api.restartGatewayAsync).toHaveBeenCalledTimes(1);
+  });
+
   it("SSE drop mid-operation resolves from the server: still-running re-attaches, a terminal record lands the outcome", async () => {
     let restartHandlers = null;
     api.subscribeGatewayRestartEvents.mockImplementation((options) => {

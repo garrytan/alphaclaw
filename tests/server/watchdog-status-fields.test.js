@@ -9,7 +9,7 @@ const {
 // phase, serverNow). The escalation ladder itself is covered by watchdog.test.js
 // and must be unaffected by these additions.
 
-const createHarness = ({ releaseChannelHooks = null, fetchImpl } = {}) => {
+const createHarness = ({ releaseChannelHooks = null, fetchImpl, gatewayLifecycleLock = null } = {}) => {
   const insertWatchdogEvent = vi.fn();
   const launchGatewayProcess = vi.fn(async () => null);
   const watchdog = createWatchdog({
@@ -24,6 +24,7 @@ const createHarness = ({ releaseChannelHooks = null, fetchImpl } = {}) => {
     resolveGatewayHealthUrl: () => "http://gateway/health",
     resolveGatewayReadyzUrl: () => "http://gateway/readyz",
     releaseChannelHooks,
+    gatewayLifecycleLock,
     sleepImpl: () => Promise.resolve(),
   });
   if (fetchImpl) vi.stubGlobal("fetch", fetchImpl);
@@ -37,6 +38,70 @@ beforeEach(() => {
 });
 
 describe("getStatus() additive fields", () => {
+  it("rechecks a held database only on existing health ticks after sixty seconds of eligibility", async () => {
+    vi.useFakeTimers();
+    vi.stubEnv("WATCHDOG_AUTO_REPAIR", "true");
+    const hold = { reason: "state_db_unverified", at: 1 };
+    const verifyDatabaseRecovery = vi.fn(async () => ({ ok: false, code: "database_verification_failed" }));
+    const { watchdog } = createHarness({
+      gatewayLifecycleLock: require("../../lib/server/gateway-lifecycle-lock").createGatewayLifecycleLock(),
+      releaseChannelHooks: { getInfo: () => ({ gatewayHold: hold }), verifyDatabaseRecovery },
+    });
+    try {
+      watchdog.latchDatabaseVerification({ hold });
+      await watchdog.runHealthCheck();
+      expect(verifyDatabaseRecovery).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(59_999);
+      expect(verifyDatabaseRecovery).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(verifyDatabaseRecovery).toHaveBeenCalledTimes(1);
+      await watchdog.runHealthCheck();
+      expect(verifyDatabaseRecovery).toHaveBeenCalledTimes(2);
+      watchdog.stop();
+      await vi.advanceTimersByTimeAsync(120_000);
+      expect(verifyDatabaseRecovery).toHaveBeenCalledTimes(2);
+    } finally { watchdog.stop(); vi.unstubAllEnvs(); vi.useRealTimers(); }
+  });
+
+  it("keeps verified database recovery pending while readiness is unsupported, then completes on actual ready health", async () => {
+    vi.useFakeTimers();
+    let ready = false;
+    let current = true;
+    let pending = { recoveryId: "db-recovery" };
+    const completeDatabaseRecovery = vi.fn(() => { pending = null; return { ok: true }; });
+    const onHealthy = vi.fn();
+    const { watchdog, insertWatchdogEvent } = createHarness({
+      releaseChannelHooks: { getInfo: () => ({ databaseRecoveryPending: pending }),
+        isDatabaseRecoveryCurrent: () => current, completeDatabaseRecovery, onHealthy },
+      fetchImpl: vi.fn(async (url) => String(url).includes("readyz")
+        ? { ok: ready, status: ready ? 200 : 404,
+          text: async () => JSON.stringify(ready ? { ready: true, suppressed: [] } : {}) }
+        : { ok: true, status: 200, text: async () => JSON.stringify({ ok: true }) }),
+    });
+    try {
+      watchdog.onDatabaseVerificationCleared(watchdog.captureDatabaseRecoveryContext());
+      watchdog.onGatewayLaunch({ pid: 111, startedAt: Date.now() - 60_000 });
+      await vi.advanceTimersByTimeAsync(10);
+      expect(watchdog.getStatus().readiness).toBe("unknown");
+      expect(completeDatabaseRecovery).not.toHaveBeenCalled();
+      expect(onHealthy).not.toHaveBeenCalled();
+      expect(await watchdog.waitForDatabaseRecoveryReadiness({ recoveryId: "db-recovery",
+        isCurrent: () => true, deadlineAt: Date.now() })).toEqual({ ok: false, code: "database_recovery_readiness_pending" });
+      ready = true;
+      current = false;
+      await watchdog.runHealthCheck();
+      expect(completeDatabaseRecovery).not.toHaveBeenCalled();
+      expect(onHealthy).not.toHaveBeenCalled();
+      expect(insertWatchdogEvent.mock.calls.filter(([event]) => event.eventType === "recovery")).toEqual([]);
+      current = true;
+      expect(await watchdog.waitForDatabaseRecoveryReadiness({ recoveryId: "db-recovery",
+        isCurrent: () => true })).toEqual({ ok: true });
+      expect(watchdog.getStatus().readiness).toBe("ready");
+      expect(completeDatabaseRecovery).toHaveBeenCalledWith({ recoveryId: "db-recovery" });
+      expect(onHealthy).toHaveBeenCalled();
+    } finally { watchdog.stop(); vi.useRealTimers(); }
+  });
+
   it("exposes safe defaults on a fresh instance", () => {
     const { watchdog } = createHarness();
     const status = watchdog.getStatus();

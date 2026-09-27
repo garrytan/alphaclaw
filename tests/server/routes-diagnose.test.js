@@ -13,6 +13,7 @@ const os = require("os");
 const path = require("path");
 const express = require("express");
 const request = require("supertest");
+const { once } = require("node:events");
 
 const {
   registerDiagnoseRoutes,
@@ -204,6 +205,50 @@ describe("server/routes/diagnose", () => {
     expect(bundle.sections.watchdog.data.degradedReason).not.toContain(kEnvSecret);
   });
 
+  it("detaches an observational assessment when the HTTP client disconnects", async () => {
+    const deps = createDeps(newRoot());
+    let started;
+    let detached;
+    const assessing = new Promise((resolve) => { started = resolve; });
+    const aborted = new Promise((resolve) => { detached = resolve; });
+    deps.assessRecovery = vi.fn(({ signal }) => new Promise((resolve) => {
+      started();
+      signal.addEventListener("abort", () => {
+        detached();
+        resolve({ complete: false, reasons: ["RECOVERY_ASSESSMENT_ABORTED"] });
+      }, { once: true });
+    }));
+    const server = createApp(deps).listen(0, "127.0.0.1");
+    const controller = new AbortController();
+    try {
+      await once(server, "listening");
+      const response = fetch(`http://127.0.0.1:${server.address().port}/api/diagnose`, {
+        headers: { [kAuthHeader]: "ok" }, signal: controller.signal,
+      }).catch((error) => error);
+      await assessing;
+      controller.abort();
+      expect((await response).name).toBe("AbortError");
+      await aborted;
+      expect(deps.assessRecovery).toHaveBeenCalledTimes(1);
+    } finally {
+      controller.abort();
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+
+  it("does not cancel an observation after a normal response completes", async () => {
+    const deps = createDeps(newRoot());
+    let captured;
+    deps.assessRecovery = vi.fn(({ signal }) => {
+      captured = signal;
+      return { complete: false, reasons: ["RECOVERY_ASSESSMENT_BUSY"] };
+    });
+    const response = await authed(createApp(deps), "/api/diagnose");
+    expect(response.status).toBe(200);
+    expect(captured.aborted).toBe(false);
+    expect(deps.assessRecovery).toHaveBeenCalledTimes(1);
+  });
+
   it("a throwing live seam degrades only its own section and the request stays 200", async () => {
     const root = newRoot();
     const deps = createDeps(root);
@@ -304,8 +349,8 @@ describe("server/routes/diagnose", () => {
     const collect = vi.fn(async () => ({ schema: kDiagnoseSchema, sections: {} }));
     const bootReports = { readBootReports: () => ({ current: null, previous: [], incident: null, unreadable: [] }) };
     const selfVersion = () => ({ version: "0.9.77" });
-    const schemaTable = { read: () => ({ byVersion: {} }), supportedFor: () => null, filePath: "x" };
-    const deps = { ...createDeps(root), rootDir: "/explicit/root", collect, bootReports, selfVersion, schemaTable };
+    const assessRecovery = vi.fn();
+    const deps = { ...createDeps(root), rootDir: "/explicit/root", collect, bootReports, selfVersion, assessRecovery };
     const res = await authed(createApp(deps), "/api/diagnose");
 
     expect(res.status).toBe(200);
@@ -322,7 +367,7 @@ describe("server/routes/diagnose", () => {
     expect(options.getChannelInfo).toBe(deps.getChannelInfo);
     expect(options.bootReports).toBe(bootReports);
     expect(options.selfVersion).toBe(selfVersion);
-    expect(options.schemaTable).toBe(schemaTable);
+    expect(options.assessRecovery).toBe(assessRecovery);
     expect(options.fsModule).toBe(fs);
     expect(options.env).toEqual({});
     expect(typeof options.nowFn).toBe("function");

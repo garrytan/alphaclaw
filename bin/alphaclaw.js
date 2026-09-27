@@ -38,7 +38,12 @@ const resolveRootDirFromArgv = (argv) => {
     path.join(os.homedir(), ".alphaclaw")
   );
 };
-process.env.ALPHACLAW_ROOT_DIR = resolveRootDirFromArgv(process.argv.slice(2));
+const kRootArgs = process.argv.slice(2);
+const kRootFlagIndex = kRootArgs.indexOf("--root-dir");
+const kRootDirSource = kRootFlagIndex !== -1 && kRootArgs[kRootFlagIndex + 1]
+  ? "cli"
+  : process.env.ALPHACLAW_ROOT_DIR ? "environment" : "default_home";
+process.env.ALPHACLAW_ROOT_DIR = resolveRootDirFromArgv(kRootArgs);
 // constants.js snapshots PORT at first require too, so `--port` must land in
 // the env BEFORE the ../lib requires below (fix wave F193: the flag used to
 // be applied only in section 1, after the requires — the placeholder, the
@@ -190,6 +195,8 @@ doctor finding complete options:
 
 diagnose options:
   --json              One JSON line instead of markdown (the bundle is redacted either way)
+  --root-dir <path>    Deployment data root; overrides ALPHACLAW_ROOT_DIR, then ~/.alphaclaw
+                      Exit 0 means evidence was collected, not that the gateway is healthy.
 
 Examples:
   alphaclaw git-sync --message "sync workspace"
@@ -201,6 +208,9 @@ Examples:
   alphaclaw telegram topics list --group -1001234567890 --json
   alphaclaw diagnose
   alphaclaw diagnose --json > diagnose.json
+  # /data is an example; select your deployment's actual data directory.
+  alphaclaw diagnose --root-dir /data
+  alphaclaw diagnose --root-dir /data --json > diagnose.json
 `);
   process.exit(0);
 }
@@ -271,13 +281,12 @@ if (kPort === "18789") {
 // Listed in lib/boot-cli-verbs.js so no placeholder binds the port for it.
 if (command === "diagnose") {
   const asJson = commandArgs.includes("--json");
-  const { readEnvFile } = require("../lib/server/env");
   const { collectDiagnose } = require("../lib/server/diagnose/collect");
   const { renderDiagnoseMarkdown } = require("../lib/server/diagnose/render");
   collectDiagnose({
     rootDir,
+    rootSource: kRootDirSource,
     openclawDir: path.join(rootDir, ".openclaw"),
-    envFileVars: readEnvFile(),
   })
     .then((bundle) => {
       process.stdout.write(

@@ -182,6 +182,175 @@ describe("server/routes/system", () => {
     require("../../lib/server/boot-phase").setBootPhase("ready");
   });
 
+  describe("confirmed database recovery restart", () => {
+    const confirmed = { verifyDatabaseRecovery: true, recoveryConfirmation: "current-observation" };
+    const recovery = () => {
+      const deps = createSystemDeps();
+      const info = { gatewayHold: { reason: "state_db_unverified", at: 123 } };
+      deps.gatewayLifecycleLock = require("../../lib/server/gateway-lifecycle-lock").createGatewayLifecycleLock();
+      deps.watchdog = {
+        captureDatabaseRecoveryContext: vi.fn(() => ({ epoch: 1 })),
+        isDatabaseRecoveryContextCurrent: vi.fn(() => true),
+        onDatabaseVerificationCleared: vi.fn(() => true),
+        waitForDatabaseRecoveryReadiness: vi.fn(async () => ({ ok: true })),
+      };
+      deps.openclawChannelService = {
+        getChannelInfo: () => info,
+        getDatabaseRecoveryConfirmation: vi.fn(() => "current-observation"),
+        verifyDatabaseRecovery: vi.fn(async ({ hold, expectedHold, manual, isCurrent }) => {
+          expect(deps.gatewayLifecycleLock.owns(hold)).toBe(true);
+          expect(expectedHold).toEqual(info.gatewayHold);
+          expect(manual).toBe(true);
+          expect(isCurrent()).toBe(true);
+          info.gatewayHold = null;
+          return { ok: true, recoveryId: "recovery-one" };
+        }),
+        isDatabaseRecoveryCurrent: vi.fn(() => true),
+        completeDatabaseRecovery: vi.fn(() => ({ ok: true })),
+      };
+      deps.restartGateway.mockImplementation(async ({ shouldAbort }) => {
+        expect(info.gatewayHold).toBeNull();
+        expect(shouldAbort()).toBe(false);
+        expect(deps.openclawChannelService.completeDatabaseRecovery).not.toHaveBeenCalled();
+        return { ok: true };
+      });
+      return { deps, info, app: createApp(deps) };
+    };
+
+    it("requires explicit confirmation and keeps ordinary restart held", async () => {
+      const { deps, app } = recovery();
+      const res = await request(app).post("/api/gateway/restart").send({});
+      expect(res.status).toBe(409);
+      expect(res.body.nextActions).toContain("verify_database_recovery");
+      expect(deps.openclawChannelService.verifyDatabaseRecovery).not.toHaveBeenCalled();
+      expect(deps.restartGateway).not.toHaveBeenCalled();
+    });
+
+    it.each([undefined, "old-observation", "x".repeat(129)])("refuses a missing or stale observation digest before recording verification (%s)", async (recoveryConfirmation) => {
+      const { deps, app } = recovery();
+      const res = await request(app).post("/api/gateway/restart").send({ verifyDatabaseRecovery: true, recoveryConfirmation });
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe("recovery_confirmation_stale");
+      expect(deps.restartRequiredState.markRestartInProgress).not.toHaveBeenCalled();
+      expect(deps.openclawChannelService.verifyDatabaseRecovery).not.toHaveBeenCalled();
+      expect(deps.restartGateway).not.toHaveBeenCalled();
+    });
+
+    it("does not turn a stale verification click into ordinary restart after the recovery state disappears", async () => {
+      const { deps, info, app } = recovery();
+      info.gatewayHold = null;
+      const res = await request(app).post("/api/gateway/restart").send(confirmed);
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe("recovery_confirmation_stale");
+      expect(deps.restartGateway).not.toHaveBeenCalled();
+    });
+
+    it("projects a pending baseline as inspect-only verification with the server observation digest", async () => {
+      const { info, app } = recovery();
+      info.gatewayHold = null;
+      info.databaseRecoveryPending = { recoveryId: "pending-original", baseline: { identity: "original" } };
+      const res = await request(app).get("/api/status");
+      expect(res.status).toBe(200);
+      expect(res.body.openclawChannel.databaseRecoveryPending).toEqual(info.databaseRecoveryPending);
+      expect(res.body.state.actions.find((action) => action.id === "restart")).toMatchObject({
+        disposition: "inspect", resolution: "verify_start", recoveryConfirmation: "current-observation",
+      });
+    });
+
+    it("verifies under the lease and awaits watchdog readiness after the new gateway starts", async () => {
+      const { deps, app } = recovery();
+      const res = await request(app).post("/api/gateway/restart").send(confirmed);
+      expect(res.status).toBe(200);
+      expect(deps.openclawChannelService.verifyDatabaseRecovery).toHaveBeenCalledTimes(1);
+      expect(deps.restartGateway).toHaveBeenCalledTimes(1);
+      expect(deps.watchdog.waitForDatabaseRecoveryReadiness).toHaveBeenCalledWith(expect.objectContaining({ recoveryId: "recovery-one" }));
+      expect(deps.openclawChannelService.completeDatabaseRecovery).not.toHaveBeenCalled();
+      expect(deps.gatewayLifecycleLock.getActiveOperation()).toBeNull();
+    });
+
+    it("does not launch when fresh database verification refuses", async () => {
+      const { deps, app } = recovery();
+      deps.openclawChannelService.verifyDatabaseRecovery.mockResolvedValue({ ok: false, code: "database_baseline_missing", hint: "Restore missing databases." });
+      const res = await request(app).post("/api/gateway/restart").send(confirmed);
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe("database_baseline_missing");
+      expect(deps.restartGateway).not.toHaveBeenCalled();
+      expect(deps.openclawChannelService.completeDatabaseRecovery).not.toHaveBeenCalled();
+    });
+
+    it("never queues a confirmation behind another lifecycle operation", async () => {
+      const { deps, app } = recovery();
+      const release = deps.gatewayLifecycleLock.tryAcquire("repair");
+      try {
+        const res = await request(app).post("/api/gateway/restart").send(confirmed);
+        expect(res.status).toBe(409);
+        expect(res.body.code).toBe("operation_in_progress");
+        expect(deps.openclawChannelService.verifyDatabaseRecovery).not.toHaveBeenCalled();
+      } finally { release(); }
+    });
+
+    it("preserves recovery pending after a failed launch", async () => {
+      const { deps, app } = recovery();
+      deps.restartGateway.mockRejectedValue(new Error("gateway readiness failed"));
+      const res = await request(app).post("/api/gateway/restart").send(confirmed);
+      expect(res.status).toBe(500);
+      expect(deps.openclawChannelService.completeDatabaseRecovery).not.toHaveBeenCalled();
+    });
+
+    it("does not report recovery success for a running gateway whose readiness is still unverified", async () => {
+      const { deps, app } = recovery();
+      deps.watchdog.waitForDatabaseRecoveryReadiness.mockResolvedValue({ ok: false, code: "database_recovery_readiness_pending" });
+      const res = await request(app).post("/api/gateway/restart").send(confirmed);
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe("database_recovery_readiness_pending");
+      expect(deps.restartGateway).toHaveBeenCalledTimes(1);
+      expect(deps.openclawChannelService.completeDatabaseRecovery).not.toHaveBeenCalled();
+    });
+
+    it("aborts the restart when the verification context changes", async () => {
+      const { deps, app } = recovery();
+      deps.restartGateway.mockImplementation(async ({ shouldAbort }) => {
+        deps.watchdog.isDatabaseRecoveryContextCurrent.mockReturnValue(false);
+        expect(shouldAbort()).toBe(true);
+        throw new Error("launch aborted");
+      });
+      expect((await request(app).post("/api/gateway/restart").send(confirmed)).status).toBe(500);
+      expect(deps.openclawChannelService.completeDatabaseRecovery).not.toHaveBeenCalled();
+    });
+
+    it("attaches repeated clicks to the in-flight verification without duplicate effects", async () => {
+      const { deps, app } = recovery();
+      const verify = deps.openclawChannelService.verifyDatabaseRecovery.getMockImplementation();
+      let resume;
+      deps.openclawChannelService.verifyDatabaseRecovery.mockImplementation(async (options) => {
+        await new Promise((resolve) => { resume = resolve; });
+        return verify(options);
+      });
+      const first = await request(app).post("/api/gateway/restart?async=1").send(confirmed);
+      expect(first.status).toBe(202);
+      const second = await request(app).post("/api/gateway/restart?async=1").send(confirmed);
+      expect(second.status).toBe(202);
+      expect(second.body.attached).toBe(true);
+      expect(deps.openclawChannelService.verifyDatabaseRecovery).toHaveBeenCalledTimes(1);
+      resume();
+      await vi.waitFor(() => expect(deps.restartGateway).toHaveBeenCalledTimes(1));
+      await vi.waitFor(() => expect(deps.gatewayLifecycleLock.getActiveOperation()).toBeNull());
+    });
+
+    it("rejects an agent even when it sends the human-confirmation flag", async () => {
+      const { deps } = recovery();
+      const app = express();
+      app.use(express.json());
+      app.use((req, res, next) => { req.alphaclawActor = { type: "agent" }; next(); });
+      registerSystemRoutes({ app, ...deps });
+      const res = await request(app).post("/api/gateway/restart").send(confirmed);
+      expect(res.status).toBe(403);
+      expect(res.body.code).toBe("human_required");
+      expect(deps.openclawChannelService.verifyDatabaseRecovery).not.toHaveBeenCalled();
+      expect(deps.restartGateway).not.toHaveBeenCalled();
+    });
+  });
+
   it("merges known vars and custom vars on GET /api/env", async () => {
     const deps = createSystemDeps();
     deps.readEnvFile.mockReturnValue([
@@ -1333,6 +1502,7 @@ describe("server/routes/system", () => {
       // Issue #20: the restart-handoff verdict banner reads this to avoid a
       // green "activation verified" while the reconciler holds the gateway.
       gatewayHold: null,
+      databaseRecoveryPending: null,
       // Read-time corruption flag from getChannelInfo (fail-closed hold gates).
       stateCorrupted: false,
     });
@@ -2739,7 +2909,7 @@ describe("server/routes/system", () => {
     };
     let releaseCalled = false;
     deps.gatewayLifecycleLock = {
-      acquire: vi.fn(async () => () => {
+      tryAcquire: vi.fn(() => () => {
         releaseCalled = true;
       }),
       getActiveOperation: vi.fn(() => null),
@@ -2843,9 +3013,6 @@ describe("server/routes/system", () => {
     expect(deps.restartGateway).not.toHaveBeenCalled();
   });
 
-  // Post-lock re-validation: these run against the REAL lifecycle lock with a
-  // deferred holder — flipping state inside an acquire mock would only test
-  // call order, not the queue.
   const createQueuedRestartHarness = ({ hold = null, applyInProgress = false } = {}) => {
     const { createGatewayLifecycleLock } = require("../../lib/server/gateway-lifecycle-lock");
     const deps = createSystemDeps();
@@ -2877,42 +3044,24 @@ describe("server/routes/system", () => {
       deps.operationEvents.publish.mock.calls
         .filter(([, evt]) => evt?.event === "step")
         .map(([, evt]) => `${evt.data.name}:${evt.data.status}`);
-    const waitUntil = async (pred, label) => {
-      for (let i = 0; i < 400; i += 1) {
-        if (pred()) return;
-        await new Promise((resolve) => setTimeout(resolve, 5));
-      }
-      throw new Error(`timed out waiting for ${label}`);
-    };
     const send = (path) =>
       new Promise((resolve, reject) => {
         request(app)
           .post(path)
           .end((err, res) => (err ? reject(err) : resolve(res)));
       });
-    return { deps, app, world, stepEvents, waitUntil, send };
+    return { deps, app, world, stepEvents, send };
   };
 
-  it("re-validates the reconciler hold AFTER acquiring the lifecycle lock — a hold set while queued blocks the launch (sync 409, ledger 'skipped')", async () => {
+  it("re-validates the reconciler hold AFTER acquiring the lifecycle lock (sync 409, ledger 'skipped')", async () => {
     const h = createQueuedRestartHarness();
-    // A reconcile retry holds the lock (boot itself is refused up front now).
-    const releaseBoot = await h.deps.gatewayLifecycleLock.acquire("reconcile_retry");
-
-    const pending = h.send("/api/gateway/restart");
-    // The request queued behind boot: the lock-owned onQueued fired and the
-    // waiting step is visible to the UI.
-    await h.waitUntil(
-      () => h.stepEvents().includes("waiting_for_lock:running"),
-      "waiting_for_lock step",
-    );
-    expect(h.deps.restartGateway).not.toHaveBeenCalled();
-
-    // The reconcile retry now HOLDS the gateway (config failed migration) and
-    // releases the lock. The queued restart must not launch on that config.
-    h.world.hold = { reason: "settings migration failed", blamedKeys: ["mystery"] };
-    releaseBoot();
-
-    const res = await pending;
+    const acquire = h.deps.gatewayLifecycleLock.tryAcquire;
+    vi.spyOn(h.deps.gatewayLifecycleLock, "tryAcquire").mockImplementationOnce((...args) => {
+      const release = acquire(...args);
+      h.world.hold = { reason: "settings migration failed", blamedKeys: ["mystery"] };
+      return release;
+    });
+    const res = await h.send("/api/gateway/restart");
     expect(res.status).toBe(409);
     expect(res.body.code).toBe("gateway_held");
     expect(res.body.error).toContain("Upgrade page");
@@ -2940,7 +3089,7 @@ describe("server/routes/system", () => {
     expect(h.deps.watchdog.recordOperationEvent).not.toHaveBeenCalledWith(
       expect.objectContaining({ status: "failed" }),
     );
-    expect(h.stepEvents()).toEqual(["waiting_for_lock:running", "waiting_for_lock:done"]);
+    expect(h.stepEvents()).toEqual([]);
     // The lock was released: a later restart proceeds normally.
     h.world.hold = null;
     const next = await h.send("/api/gateway/restart");
@@ -2948,17 +3097,15 @@ describe("server/routes/system", () => {
     expect(h.deps.restartGateway).toHaveBeenCalledTimes(1);
   });
 
-  it("an apply that began while the restart was queued wins — the queued restart is refused with apply_in_progress", async () => {
+  it("an apply that begins during admission wins and the restart is refused with apply_in_progress", async () => {
     const h = createQueuedRestartHarness();
-    const releaseHolder = await h.deps.gatewayLifecycleLock.acquire("repair");
-    const pending = h.send("/api/gateway/restart");
-    await h.waitUntil(
-      () => h.stepEvents().includes("waiting_for_lock:running"),
-      "waiting_for_lock step",
-    );
-    h.world.applyInProgress = true;
-    releaseHolder();
-    const res = await pending;
+    const acquire = h.deps.gatewayLifecycleLock.tryAcquire;
+    vi.spyOn(h.deps.gatewayLifecycleLock, "tryAcquire").mockImplementationOnce((...args) => {
+      const release = acquire(...args);
+      h.world.applyInProgress = true;
+      return release;
+    });
+    const res = await h.send("/api/gateway/restart");
     expect(res.status).toBe(409);
     expect(res.body.code).toBe("apply_in_progress");
     expect(h.deps.restartGateway).not.toHaveBeenCalled();
@@ -2968,28 +3115,23 @@ describe("server/routes/system", () => {
     );
   });
 
-  it("async callers get 202 immediately and the blocker surfaces as the operation's terminal fail event", async () => {
+  it("async callers receive immediate busy refusal without recording or queuing a restart", async () => {
     const h = createQueuedRestartHarness();
     // A reconcile retry holds the lock (boot itself is refused up front now).
     const releaseBoot = await h.deps.gatewayLifecycleLock.acquire("reconcile_retry");
     const res = await h.send("/api/gateway/restart?async=1");
-    expect(res.status).toBe(202);
-    expect(res.body).toEqual({ ok: true, operationId: "op-queued" });
-    await h.waitUntil(
-      () => h.stepEvents().includes("waiting_for_lock:running"),
-      "waiting_for_lock step",
-    );
+    expect(res.status).toBe(409);
+    expect(res.body).toMatchObject({ ok: false, code: "operation_in_progress" });
+    expect(h.deps.restartRequiredState.beginRestart).not.toHaveBeenCalled();
+    expect(h.stepEvents()).toEqual([]);
     h.world.hold = { reason: "settings migration failed", blamedKeys: [] };
     releaseBoot();
-    await h.waitUntil(
-      () => h.deps.operationEvents.fail.mock.calls.length > 0,
-      "operation fail event",
-    );
-    expect(h.deps.operationEvents.fail).toHaveBeenCalledWith(
-      "op-queued",
-      expect.objectContaining({ code: "gateway_held" }),
-    );
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(h.deps.operationEvents.fail).not.toHaveBeenCalled();
     expect(h.deps.restartGateway).not.toHaveBeenCalled();
+    expect((await h.send("/api/gateway/restart")).body.code).toBe("gateway_held");
+    h.world.hold = null;
+    expect((await h.send("/api/gateway/restart")).status).toBe(200);
   });
 
   it("an uncontended restart emits no waiting_for_lock step and runs straight through", async () => {
@@ -3004,38 +3146,34 @@ describe("server/routes/system", () => {
     );
   });
 
-  it("a joiner attached to a queued restart that is then blocked gets the same 409 + code as the initiator", async () => {
+  it.each(["replacementPending", "recoveryPending", "operationInProgress"])(
+    "refuses another restart while %s owns relaunch progress even without a lock holder", async (field) => {
+      const h = createQueuedRestartHarness();
+      h.deps.watchdog.getStatus.mockReturnValue({ lifecycle: "restarting", [field]: field === "operationInProgress" ? true : { id: "current" } });
+      const res = await h.send("/api/gateway/restart?async=1");
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe("operation_in_progress");
+      expect(h.deps.restartGateway).not.toHaveBeenCalled();
+      expect(h.deps.restartRequiredState.beginRestart).not.toHaveBeenCalled();
+      h.deps.watchdog.getStatus.mockReturnValue({ lifecycle: "running" });
+      expect((await h.send("/api/gateway/restart")).status).toBe(200);
+    });
+
+  it("repeated requests while another operation owns the gateway are independently refused without stale queue authority", async () => {
     const h = createQueuedRestartHarness();
     // A reconcile retry holds the lock (boot itself is refused up front now).
     const releaseBoot = await h.deps.gatewayLifecycleLock.acquire("reconcile_retry");
-    const first = h.send("/api/gateway/restart");
-    await h.waitUntil(
-      () => h.stepEvents().includes("waiting_for_lock:running"),
-      "waiting_for_lock step",
-    );
-    const onboardedCallsBefore = h.deps.isOnboarded.mock.calls.length;
-    const second = h.send("/api/gateway/restart");
-    // isOnboarded() is the handler's first statement: once it has run for the
-    // second request, that request is past the fast gate and in the attach
-    // branch (deterministic — no wall-clock sleep).
-    await h.waitUntil(
-      () => h.deps.isOnboarded.mock.calls.length > onboardedCallsBefore,
-      "second request to enter the handler",
-    );
+    const [r1, r2] = await Promise.all([h.send("/api/gateway/restart"), h.send("/api/gateway/restart")]);
     h.world.hold = { reason: "settings migration failed", blamedKeys: [] };
     releaseBoot();
-    const [r1, r2] = await Promise.all([first, second]);
     expect(r1.status).toBe(409);
-    expect(r1.body.code).toBe("gateway_held");
+    expect(r1.body.code).toBe("operation_in_progress");
     expect(r2.status).toBe(409);
-    expect(r2.body).toMatchObject({ ok: false, attached: true, code: "gateway_held" });
-    expect(r2.body.hint).toContain("Upgrade page");
+    expect(r2.body).toMatchObject({ ok: false, code: "operation_in_progress" });
+    expect(r2.body.attached).toBeUndefined();
     expect(h.deps.restartGateway).not.toHaveBeenCalled();
-    // The waiting step carries its human label, not the raw id.
-    const waiting = h.deps.operationEvents.publish.mock.calls.find(
-      ([, evt]) => evt?.event === "step" && evt.data.name === "waiting_for_lock",
-    );
-    expect(waiting[1].data.label).toBe("Waiting for the current operation to finish");
+    expect(h.deps.restartRequiredState.beginRestart).not.toHaveBeenCalled();
+    expect(h.stepEvents()).toEqual([]);
   });
 
   it("a hold state that cannot be READ fails closed: 409 gateway_hold_unreadable and the card disables Restart with the unreadable reason", async () => {
@@ -3046,7 +3184,7 @@ describe("server/routes/system", () => {
       }),
       isApplyInProgress: vi.fn(() => false),
     };
-    deps.gatewayLifecycleLock = { acquire: vi.fn(async () => () => {}), getActiveOperation: vi.fn(() => null) };
+    deps.gatewayLifecycleLock = { tryAcquire: vi.fn(() => () => {}), getActiveOperation: vi.fn(() => null) };
     deps.restartGateway = vi.fn(async () => ({ durationMs: 1, downtimeMs: 1 }));
     const app = createApp(deps);
     // The card agrees with the route: a read that THROWS disables Restart
@@ -3055,7 +3193,8 @@ describe("server/routes/system", () => {
     expect(status.status).toBe(200);
     expect(status.body.openclawChannel).toBeNull();
     const restart = status.body.state.actions.find((a) => a.id === "restart" || a.id === "retry");
-    expect(restart.disabledReason).toContain("could not be read");
+    expect(restart.disabledReason).toBeUndefined();
+    expect(restart).toMatchObject({ disposition: "inspect", resolution: "diagnose", reasonCode: "gateway_hold_unreadable" });
     const res = await request(app).post("/api/gateway/restart");
     expect(res.status).toBe(409);
     expect(res.body.code).toBe("gateway_hold_unreadable");
@@ -3071,14 +3210,15 @@ describe("server/routes/system", () => {
       getChannelInfo: vi.fn(() => ({ gatewayHold: null, stateCorrupted: true })),
       isApplyInProgress: vi.fn(() => false),
     };
-    deps.gatewayLifecycleLock = { acquire: vi.fn(async () => () => {}), getActiveOperation: vi.fn(() => null) };
+    deps.gatewayLifecycleLock = { tryAcquire: vi.fn(() => () => {}), getActiveOperation: vi.fn(() => null) };
     deps.restartGateway = vi.fn(async () => ({ durationMs: 1, downtimeMs: 1 }));
     const app = createApp(deps);
     const status = await request(app).get("/api/status");
     expect(status.status).toBe(200);
     expect(status.body.openclawChannel.stateCorrupted).toBe(true);
     const restart = status.body.state.actions.find((a) => a.id === "restart" || a.id === "retry");
-    expect(restart.disabledReason).toContain("could not be read");
+    expect(restart.disabledReason).toBeUndefined();
+    expect(restart).toMatchObject({ disposition: "inspect", resolution: "diagnose", reasonCode: "gateway_hold_unreadable" });
     const res = await request(app).post("/api/gateway/restart");
     expect(res.status).toBe(409);
     expect(res.body.code).toBe("gateway_hold_unreadable");
@@ -3113,12 +3253,12 @@ describe("server/routes/system", () => {
       }),
       isApplyInProgress: vi.fn(() => false),
     };
-    deps.gatewayLifecycleLock = { acquire: vi.fn(async () => () => {}), getActiveOperation: vi.fn(() => null) };
+    deps.gatewayLifecycleLock = { tryAcquire: vi.fn(() => () => {}), getActiveOperation: vi.fn(() => null) };
     deps.restartGateway = vi.fn(async () => ({ durationMs: 1, downtimeMs: 1 }));
     const app = createApp(deps);
     const findRestart = (body) => body.state.actions.find((a) => a.id === "restart" || a.id === "retry");
     const first = await request(app).get("/api/status");
-    expect(findRestart(first.body).disabledReason).toContain("could not be read");
+    expect(findRestart(first.body)).toMatchObject({ disposition: "inspect", resolution: "diagnose", reasonCode: "gateway_hold_unreadable" });
     fail = false;
     // The status snapshot stays fresh for kStatusSnapshotFreshnessMs (2.5s);
     // the next compute after that window re-reads channel info and must
@@ -3126,6 +3266,7 @@ describe("server/routes/system", () => {
     await new Promise((resolve) => setTimeout(resolve, 2700));
     const second = await request(app).get("/api/status");
     expect(findRestart(second.body).disabledReason).toBeUndefined();
+    expect(findRestart(second.body).disposition).toBe("execute");
     const res = await request(app).post("/api/gateway/restart");
     expect(res.status).toBe(200);
   }, 10_000);
@@ -3196,7 +3337,8 @@ describe("server/routes/system", () => {
     expect(res.status).toBe(200);
     const restart = res.body.state.actions.find((a) => a.id === "restart" || a.id === "retry");
     expect(restart, JSON.stringify(res.body.state)).toBeTruthy();
-    expect(restart.disabledReason).toContain("Upgrade page");
+    expect(restart.disabledReason).toBeUndefined();
+    expect(restart).toMatchObject({ disposition: "inspect", resolution: "upgrade" });
   });
 
   it("rejects a restart while the reconciler holds the gateway (issue #20)", async () => {
@@ -4001,7 +4143,7 @@ describe("server/routes/system", () => {
     };
     const release = vi.fn();
     deps.gatewayLifecycleLock = {
-      acquire: vi.fn(async () => release),
+      tryAcquire: vi.fn(() => release),
       getActiveOperation: vi.fn(() => null),
     };
     let settleNotify = null;
@@ -4040,7 +4182,7 @@ describe("server/routes/system", () => {
     expect(second.status).toBe(500);
     expect(second.body.attached).toBeUndefined();
     expect(deps.restartRequiredState.beginRestart).toHaveBeenCalledTimes(2);
-    expect(deps.gatewayLifecycleLock.acquire).toHaveBeenCalledTimes(2);
+    expect(deps.gatewayLifecycleLock.tryAcquire).toHaveBeenCalledTimes(2);
     expect(release).toHaveBeenCalledTimes(2);
     settleNotify?.({ ok: true });
   });

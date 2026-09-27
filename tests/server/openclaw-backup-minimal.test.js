@@ -10,6 +10,7 @@ const { createOfflineCopy, verifyArchiveManifest } = require("../../lib/server/o
 const { verifyFormat3Payload } = require("../../lib/server/openclaw-backup-verification");
 const { createRunStream } = require("../../lib/server/openclaw-run-stream");
 const { updateOpenclawConfig } = require("../../lib/server/openclaw-config");
+const { pinnedBuild } = require("../fixtures/sqlite-artifact-build");
 const roots = [];
 const temporary = () => { const root = fs.mkdtempSync(path.join(os.tmpdir(), "alphaclaw-minimal-")); roots.push(root); return root; };
 const write = (root, name, bytes = "{}") => { const file = path.join(root, name); fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, bytes); return file; };
@@ -53,6 +54,56 @@ const copyArgs = (stateDir) => {
 afterEach(() => { for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true }); });
 
 describe("migration-minimal inventory", () => {
+  it("excludes qualified artifacts in direct and recursive stores without dropping ownership", async () => {
+    const root = fixture();
+    for (const directory of ["state", "agents/main/agent", "credentials/nested", "identity/nested"]) {
+      write(root, `${directory}/main.sqlite.generation-lock.sqlite`, "scratch");
+      write(root, `${directory}/main.sqlite.generation-lock.sqlite-wal`, "scratch wal");
+      write(root, `${directory}/main.sqlite.memory-reindex-11111111-2222-3333-4444-555555555555`, "shadow");
+    }
+    database(root, "registered/main.sqlite.generation-writer.sqlite");
+    register(root, [["registered", "registered/main.sqlite.generation-writer.sqlite"]]);
+    const inventory = await buildMigrationInventory({ stateDir: root, spawnEnv: {}, executingBuild: pinnedBuild });
+    expect(inventory.excludedArtifacts).toHaveLength(12);
+    expect(inventory.dbs.map((entry) => entry.archivePath)).toContain("registered/main.sqlite.generation-writer.sqlite");
+    for (const entry of inventory.excludedArtifacts) expect(fs.existsSync(entry.sourcePath)).toBe(true);
+  });
+
+  it.each(["", "-shm", "-wal", "-journal"])("rejects recursive transient hardlink aliases (%s)", async (suffix) => {
+    const root = fixture();
+    const source = suffix ? write(root, `state/openclaw.sqlite${suffix}`, "coordination") : path.join(root, "state/openclaw.sqlite");
+    fs.linkSync(source, path.join(root, `credentials/main.sqlite.generation-lock.sqlite${suffix}`));
+    await expect(buildMigrationInventory({ stateDir: root, spawnEnv: {}, executingBuild: pinnedBuild })).rejects.toThrow(/alias|sidecar/);
+  });
+
+  it("preserves unproved UUID families and version-only artifacts as database coverage", async () => {
+    const root = fixture();
+    write(root, "credentials/main.sqlite.tmp-11111111-2222-3333-4444-555555555555", "");
+    write(root, "credentials/main.sqlite.backup-11111111-2222-3333-4444-555555555555", "");
+    write(root, "credentials/main.sqlite.generation-lock.sqlite", "");
+    const result = await buildMigrationInventory({ stateDir: root, spawnEnv: {}, executingBuild: { version: "2026.9.5" } });
+    expect(result.excludedArtifacts).toEqual([]);
+    expect(result.dbs.filter((entry) => entry.archivePath.startsWith("credentials/"))).toHaveLength(3);
+  });
+
+  it("rejects wrong registry owners even when the filename looks disposable", async () => {
+    const root = fixture();
+    write(root, "agents/main/agent/main.sqlite.generation-lock.sqlite", "");
+    register(root, [["other", "agents/main/agent/main.sqlite.generation-lock.sqlite"]]);
+    await expect(buildMigrationInventory({ stateDir: root, spawnEnv: {}, executingBuild: pinnedBuild })).rejects.toThrow(/ambiguous agent/);
+  });
+
+  it("refuses a logical root retargeted during backup discovery", async () => {
+    const root = fixture();
+    const alias = path.join(temporary(), "alias");
+    const replacement = temporary();
+    fs.symlinkSync(root, alias);
+    let checkpoints = 0;
+    await expect(buildMigrationInventory({ stateDir: alias, spawnEnv: {}, checkpoint: () => {
+      if (++checkpoints === 2) { fs.unlinkSync(alias); fs.symlinkSync(replacement, alias); }
+    } })).rejects.toThrow(/state root identity changed/);
+  });
+
   it.each(["full", "migration-minimal"])("never archives regular or symlinked env secrets in the %s profile", async (profile) => {
     const root = fixture();
     write(root, ".env", "ROOT_SECRET=value");

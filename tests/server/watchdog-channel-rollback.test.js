@@ -220,7 +220,7 @@ describe("server/watchdog release-channel rollback hooks", () => {
     const notices = crashLoopNotices(notifier);
     expect(notices).toHaveLength(1);
     expect(String(notices[0][0])).toContain(
-      "Automatic gateway restart paused; manual action required — use Retry (or Repair) from the Watchdog tab.",
+      "Automatic gateway restart paused; manual action required — use Restart (or Repair) from the Watchdog tab.",
     );
   });
 
@@ -583,7 +583,7 @@ describe("server/watchdog release-channel rollback hooks", () => {
     const notices = crashLoopNotices(fellThrough.notifier);
     expect(notices).toHaveLength(1);
     expect(String(notices[0][0])).toContain(
-      "Automatic gateway restart paused; manual action required — use Retry (or Repair) from the Watchdog tab.",
+      "Automatic gateway restart paused; manual action required — use Restart (or Repair) from the Watchdog tab.",
     );
   });
 

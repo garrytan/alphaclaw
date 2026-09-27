@@ -183,7 +183,7 @@ const seedVolume = async (volume, files) => {
 // docker run with the production shape: --restart=always (restartProcess()
 // exits inside a container and relies on this policy), a dynamic loopback
 // port mapping, and the /data volume. Returns the mapped host port.
-const runContainer = async ({ name, image, volume, env = {} }) => {
+const runContainer = async ({ name, image, volume, env = {}, memory = null }) => {
   const args = [
     "run",
     "-d",
@@ -195,6 +195,7 @@ const runContainer = async ({ name, image, volume, env = {} }) => {
     "-v",
     `${volume}:/data`,
   ];
+  if (memory) args.push("--memory", memory, "--memory-swap", memory);
   for (const [key, value] of Object.entries(env)) {
     if (value === undefined || value === null) continue;
     args.push("-e", `${key}=${value}`);

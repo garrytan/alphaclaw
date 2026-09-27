@@ -62,12 +62,13 @@ describe("bin/alphaclaw diagnose", () => {
   let scratchDir;
   let preloadPath;
 
-  const runCli = (cliArgs, { env = {} } = {}) => {
+  const runCli = (cliArgs, { env = {}, timeout } = {}) => {
     const result = spawnSync(
       process.execPath,
       ["--require", preloadPath, binPath, "--root-dir", rootDir, ...cliArgs],
       {
         encoding: "utf8",
+        timeout,
         env: {
           ...process.env,
           ALPHACLAW_ROOT_DIR: rootDir,
@@ -141,6 +142,7 @@ describe("bin/alphaclaw diagnose", () => {
     expect(bundle.redacted).toBe(true);
     expect(bundle.paths).toMatchObject({
       rootDir,
+      rootSource: "cli",
       openclawDir: path.join(rootDir, ".openclaw"),
       managedDir: path.join(rootDir, ".openclaw", ".alphaclaw"),
     });
@@ -231,6 +233,68 @@ describe("bin/alphaclaw diagnose", () => {
     });
     expect(viaEnv.status).toBe(0);
     expect(JSON.parse(viaEnv.stdout.trim()).paths.rootDir).toBe(rootDir);
+    expect(JSON.parse(viaEnv.stdout.trim()).paths.rootSource).toBe("environment");
     expect(listTree(rootDir)).toEqual([]);
+  });
+
+  it("captures flag provenance before replacing a conflicting environment root", () => {
+    const result = runCli(["diagnose", "--json"], { env: { ALPHACLAW_ROOT_DIR: scratchDir } });
+    expect(result.status).toBe(0);
+    expect(JSON.parse(result.stdout).paths).toMatchObject({ rootDir, rootSource: "cli" });
+    expect(listTree(rootDir)).toEqual([]);
+    expect(listTree(scratchDir)).toEqual(["preload.js"]);
+  });
+
+  it("reports the default home root without creating it or inferring an environment override", () => {
+    const env = { ...process.env, ALPHACLAW_TEST_HOME: tmpHome, HOME: tmpHome };
+    delete env.ALPHACLAW_ROOT_DIR;
+    const result = spawnSync(process.execPath, ["--require", preloadPath, binPath, "diagnose", "--json"], {
+      encoding: "utf8", env,
+    });
+    expect(result.status).toBe(0);
+    expect(result.stdout.trim().split("\n")).toHaveLength(1);
+    expect(JSON.parse(result.stdout).paths).toMatchObject({
+      rootDir: path.join(tmpHome, ".alphaclaw"), rootSource: "default_home",
+    });
+    expect(listTree(tmpHome)).toEqual([]);
+  });
+
+  it("reports no evidence despite the CLI being installed elsewhere", () => {
+    const result = runCli(["diagnose", "--json"]);
+    expect(result.status).toBe(0);
+    const bundle = JSON.parse(result.stdout);
+    expect(bundle.summary.recovery).toMatchObject({ installationEvidence: "absent", assessment: "complete", databaseVerdict: "not_assessed", gatewayReadiness: "unknown" });
+    expect(bundle.summary.recovery.nextActions.some((action) => action.id === "choose_explicit_root")).toBe(true);
+    expect(listTree(rootDir)).toEqual([]);
+  });
+
+  it("does not block before collection when its redaction source is a FIFO", () => {
+    const envPath = path.join(rootDir, ".env");
+    expect(spawnSync("mkfifo", [envPath]).status).toBe(0);
+    const result = runCli(["diagnose", "--json"], { timeout: 3000 });
+    expect(result.status).toBe(0);
+    expect(JSON.parse(result.stdout).schema).toBe(kDiagnoseSchema);
+    expect(fs.lstatSync(envPath).isFIFO()).toBe(true);
+    expect(listTree(rootDir)).toEqual([".env"]);
+  });
+
+  it("distinguishes a config-only installation from a broken config without changing either", () => {
+    const configPath = path.join(rootDir, ".openclaw", "openclaw.json");
+    fs.mkdirSync(path.dirname(configPath));
+    fs.writeFileSync(configPath, "{}");
+    const first = runCli(["diagnose", "--json"]);
+    expect(first.status).toBe(0);
+    expect(JSON.parse(first.stdout).summary.recovery).toMatchObject({ installationEvidence: "present", assessment: "complete", databaseVerdict: "not_assessed" });
+    fs.writeFileSync(configPath, "{broken");
+    const before = listTree(rootDir);
+    const second = runCli(["diagnose", "--json"]);
+    expect(second.status).toBe(0);
+    expect(second.stdout.trim().split("\n")).toHaveLength(1);
+    const summary = JSON.parse(second.stdout).summary.recovery;
+    expect(summary.installationEvidence).toBe("present");
+    expect(summary.assessment).not.toBe("complete");
+    expect(summary.databaseVerdict).not.toBe("compatible");
+    expect(fs.readFileSync(configPath, "utf8")).toBe("{broken");
+    expect(listTree(rootDir)).toEqual(before);
   });
 });

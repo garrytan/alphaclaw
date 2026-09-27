@@ -329,20 +329,20 @@ describe("server/auto-fix notifications — E5 action-vocabulary parity", () => 
     // TODOS.md "Notification remediation-action parity": alert copy naming a manual
     // remediation must use the SAME labels as the gateway card's actions[].
     // A crash-looping gateway with restarts paused is port-down → state
-    // `down`: Retry primary, Repair secondary.
+    // `down`: Restart primary, Repair secondary.
     const actions = actionsForState("down", {});
     const primary = actions.find((a) => a.kind === "primary");
     const repair = actions.find((a) => a.id === "repair");
-    expect(primary.label).toBe("Retry");
+    expect(primary.label).toBe("Restart");
     expect(repair.label).toBe("Repair");
 
     const watchdogSource = fs.readFileSync(
       path.join(__dirname, "..", "..", "lib", "server", "watchdog.js"),
       "utf8",
     );
-    // Three paused copies exist: the crash-loop latch (Retry or Repair) and
+    // Three paused copies exist: the crash-loop latch (Restart or Repair) and
     // the two transient-conflict latches — state-writer conflict and the
-    // 2026.9.4+ owner lease that keeps renewing (Retry only — neither Doctor
+    // 2026.9.4+ owner lease that keeps renewing (Restart only — neither Doctor
     // nor a cold restart can free a state directory another OpenClaw process
     // holds, so those copies deliberately do not offer Repair). All must name
     // the primary action verbatim.

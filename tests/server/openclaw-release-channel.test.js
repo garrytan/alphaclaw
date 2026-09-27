@@ -54,6 +54,26 @@ const writeInstallFixture = (installDir, { version } = {}) =>
 
 describe("server/openclaw-release-channel", () => {
   describe("state", () => {
+    it("round-trips bounded database recovery evidence and retains malformed pending blockers", () => {
+      const { store, openclawDir } = createStore();
+      const baseline = { version: 1, identity: "a".repeat(64), stateDir: openclawDir, requestedStateDir: openclawDir,
+        configPath: path.join(openclawDir, "openclaw.json"), configDigest: null,
+        databases: [{ path: "state/openclaw.sqlite", dbKind: "state", agentId: null }] };
+      store.writeState({ gatewayHold: { reason: "state_db_unverified", databaseVerification: baseline },
+        databaseRecoveryPending: { recoveryId: "attempt", baseline, at: 3 } });
+      expect(store.readState().gatewayHold.databaseVerification).toEqual(baseline);
+      expect(store.readState().databaseRecoveryPending).toEqual({ recoveryId: "attempt", baseline, at: 3 });
+      store.updateState((s) => { s.databaseRecoveryPending = { recoveryId: "broken", baseline: {} }; return s; });
+      expect(store.readState().databaseRecoveryPending).toEqual({ recoveryId: null, baseline: null, invalid: true });
+    });
+
+    it("treats an existing unreadable state file as corrupt rather than an absent hold", () => {
+      const { store } = createStore({ fsModule: { ...fs,
+        statSync: (file) => { if (String(file).endsWith("openclaw-channel-state.json")) throw Object.assign(new Error("denied"), { code: "EACCES" }); return fs.statSync(file); },
+      } });
+      expect(store.readState().corrupted).toBe(true);
+    });
+
     it("round-trips state and preserves unknown top-level keys through write", () => {
       const { store } = createStore();
 
@@ -144,6 +164,7 @@ describe("server/openclaw-release-channel", () => {
         lastTransition: null,
         pinLag: null,
         gatewayHold: null,
+        databaseRecoveryPending: null,
         backups: [],
         rollbackRefused: null,
         forwardRecovery: null,

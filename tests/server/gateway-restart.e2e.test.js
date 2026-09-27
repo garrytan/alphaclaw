@@ -1129,7 +1129,7 @@ describe("server/gateway restart drills (e2e)", () => {
     }
   });
 
-  it("queued behind a long lifecycle hold: the queue keepalive keeps the record alive and the restart completes with its real outcome (never interrupted)", async () => {
+  it("refuses a long lifecycle hold without queueing and gives a deliberate retry the full restart budget", async () => {
     const fake = createFakeGateway({ portOpen: true });
     const harness = createDrillHarness({ fake });
     const app = createApp(harness.deps);
@@ -1138,35 +1138,29 @@ describe("server/gateway restart drills (e2e)", () => {
     } = require("../../lib/server/constants");
     vi.useFakeTimers();
     try {
-      const acquireSpy = vi.spyOn(harness.gatewayLifecycleLock, "acquire");
-      // An alien long hold (a channel apply) parks the restart in the queue
-      // for LONGER than the record's initial lifetime.
+      const acquireSpy = vi.spyOn(harness.gatewayLifecycleLock, "tryAcquire");
       const releaseHold = await harness.gatewayLifecycleLock.acquire("apply", {
         leaseMs: 60 * 60_000,
       });
       const res = await request(app).post("/api/gateway/restart?async=1");
-      expect(res.status).toBe(202);
-      const { operationId } = res.body;
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe("operation_in_progress");
+      expect(harness.restartRequiredState.getActiveRestartOperation()).toBeNull();
 
-      // Past the initial budget while still queued: without the 60s queue
-      // keepalive every /api/restart-status poll would reap the record as
-      // "interrupted" and the eventual outcome + evidence would be dropped.
       await vi.advanceTimersByTimeAsync(kGatewayRestartOperationBudgetMs + 61_000);
-      expect(
-        harness.restartRequiredState.getActiveRestartOperation(),
-      ).toMatchObject({ operationId, status: "running" });
+      expect(harness.restartRequiredState.getActiveRestartOperation()).toBeNull();
 
-      // Release the hold: the restart acquires with the restart-class BUDGET
-      // lease (not the fixed default) and completes with its real outcome.
       releaseHold();
       await vi.advanceTimersByTimeAsync(30_000);
-      // v0.9.73: the acquire also carries the lock-owned queue callback that
-      // drives the waiting_for_lock step — the lease is what this drill pins.
+      expect(harness.restartRequiredState.getLastRestartOperation()).toBeNull();
+      const retry = await request(app).post("/api/gateway/restart?async=1");
+      expect(retry.status).toBe(202);
+      const { operationId } = retry.body;
+      await vi.advanceTimersByTimeAsync(30_000);
       expect(acquireSpy).toHaveBeenCalledWith(
         "restart",
         expect.objectContaining({
           leaseMs: kGatewayRestartOperationBudgetMs,
-          onQueued: expect.any(Function),
         }),
       );
       expect(

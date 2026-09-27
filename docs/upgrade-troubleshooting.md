@@ -6,6 +6,125 @@ surface (Upgrade tab, notifications, watchdog events). Background: issues
 [#20](https://github.com/chrysb/alphaclaw/issues/20) and
 [#54](https://github.com/chrysb/alphaclaw/issues/54).
 
+## Database verification held
+
+AlphaClaw holds a launch when it cannot prove that the executing OpenClaw build
+can read the real databases. The Gateway card's **Repair** and **Restart**
+controls remain available to inspect the blocker and its recovery options.
+Opening those options does not run Doctor or grant permission to start.
+**Check again** collects fresh, bounded, read-only evidence. Findings name the
+files; excluded temporary artifacts are shown separately and are not backup
+coverage. A database-verification failure is not proof of a version mismatch.
+
+For shell diagnosis, select the actual deployment data root first. `/data` below
+is an example, not automatic discovery:
+
+```bash
+export ALPHACLAW_ROOT_DIR=/data
+alphaclaw diagnose --root-dir "$ALPHACLAW_ROOT_DIR"
+# Optional: save the redacted bundle in a private working directory.
+umask 077
+alphaclaw diagnose --root-dir "$ALPHACLAW_ROOT_DIR" --json > diagnose.json
+```
+
+Check the printed root and its source (`cli`, `environment`, `default_home`, or
+`server_configuration`). No installation evidence may mean the wrong root;
+incomplete evidence means required reads failed. Neither means healthy. The
+executable's installation location does not prove that the selected data root
+contains an installation. Exit 0 and API `ok: true` mean the diagnostic bundle
+was collected, not that the gateway recovered. JSON remains one document.
+
+Follow the finding's specific instruction below, then run the same diagnosis
+again. Diagnosis never clears a hold, writes configuration, runs Doctor,
+restarts the gateway, or approves migration. Eligible automatic recovery checks
+at a 60-second cadence, subject to the watchdog tick and other active work;
+the subsequent startup has its own readiness budget. Intentional Stop or
+disabled automatic recovery is not overridden. A new, confirmed **Verify and
+start** request can reverify corrected databases and start without running
+Doctor. A real database disappearing does not count as correction. Older holds
+without a trustworthy original database inventory require explicit manual
+verification, not automatic clearance.
+
+If verification succeeds but startup fails, recovery stays pending. A later
+attempt must reverify the original database set; missing databases do not become
+a fresh installation. Refresh status before making a new confirmation, since a
+changed hold, Stop, configuration or executing build invalidates the old one.
+
+If the build requires migration, use the existing Upgrade protection choice.
+If another operation is running, inspect its progress and make a new deliberate
+attempt after it settles; a blocked click does not queue permission to run later.
+A repeated request for the same active restart attaches to that operation.
+Confirm success from current readiness, usable service and the matching
+incident's closure, not a historical disk status or a successful diagnosis.
+
+If AlphaClaw itself is unreachable, use deployment/provider logs and the existing
+host maintenance or rescue procedure to restore admin access. Do not launch a
+second AlphaClaw against live database writers or invent a force/CLI repair
+command to bypass the hold. Agent-admin diagnosis is safe; agent restart and
+repair remain dangerous confirmation-gated operations. Human migration choices
+are not available through the agent-admin CLI.
+
+## Database access unreadable
+
+A permissions or access finding means the runtime could not read the named
+database or its required sidecars; it does not establish corruption. Preserve
+the files and inspect the actual runtime user, ownership, mount state and
+permissions. Correct only the demonstrated access problem with your host
+administrator, then use **Check again**. Do not apply blanket `chmod`/`chown`
+or delete WAL/SHM/journal files. A successful read permits verification, not
+automatic approval of an incompatible schema.
+
+## Recovery state unreadable
+
+An unreadable release-channel hold record cannot safely be treated as no hold.
+Preserve the record, its backups and the diagnostic evidence. Use supported
+human inspection or restoration from verified evidence, or seek operator
+support. Do not delete the record or edit it to manufacture launch permission.
+After the record is readable, recheck the current blocker; this step alone does
+not prove the databases or build are compatible.
+
+## Database schema or owner unknown
+
+An unknown schema, wrong agent owner, or empty real database remains held.
+Zero tables and schema version zero can also mean a real database was truncated.
+Inspect the named destination, expected owner and executing build. Preserve
+sources and sidecars and obtain operator support when ownership cannot be
+established. Choose another build only when compatibility is demonstrated, not
+because its version number looks newer. For corruption, use the
+[selective offline recovery procedure](#restoring-a-config-checkpoint-or-database-set)
+with verified backups and all writers stopped. Without a usable backup, request
+support rather than deleting the file. Reverification can establish compatibility;
+it cannot reconstruct lost data or waive human migration protection.
+
+## Unsupported transient artifact contract
+
+Temporary-file exclusions require evidence about the executing OpenClaw build,
+not merely a matching name or an empty file. The qualified 2026.9.5 distribution
+has verified generation-lock, generation-writer, reindex-lock and memory-reindex
+producers. Changed bundles, development builds and future releases need separate
+qualification; `backup`/`tmp` UUID families remain unqualified without producer
+and recovery-lifecycle evidence. Keep these findings visible and held rather than
+silently ignoring potentially authoritative data.
+
+Maintainers expanding qualification must inspect the exact published/source
+producer and recovery consumers, establish that the family is disposable rather
+than the only authoritative copy, verify distribution integrity, and update the
+bounded content fingerprints and positive/negative fixtures. Canonical/registry
+ownership and inode-alias protection still win over a filename match. Operators
+should preserve the files and ask for a supported-build assessment; renaming or
+deleting them is not the repair procedure.
+
+## Configuration rejected
+
+A genuine configuration rejection names what OpenClaw rejected. Use **Repair**
+to inspect the current findings and, when admitted, run the existing Doctor
+configuration repair and verified relaunch. **Restart** does not run Doctor.
+Database verification, incompatible builds and migration protection are separate
+blockers: Doctor cannot waive them. A refused or skipped request is not a
+successful repair, and a pending replacement is not recovered until current
+readiness is verified. Retain the failure details and follow the matching recovery
+instruction when configuration repair cannot resolve the cause.
+
 ## Managed deployment accepted or unknown
 
 The AlphaClaw update card retains a provider attempt after reload or restart.
@@ -129,32 +248,32 @@ name the exact config keys the migration blamed. From the banner choose:
 - **Strip blamed keys and retry** — AlphaClaw removes the named keys
   (backing up the original config first) and re-runs the migration.
 
-While the hold is set, every manual relaunch path fails closed (v0.9.73):
+While a settings-migration hold is set, mutation paths remain fail-closed:
 
-- The gateway card in the Setup UI still *offers* Restart, Retry and Repair
-  but renders them disabled with "Gateway held after a failed settings
-  migration — resolve it on the Upgrade page." Repair is blocked too:
-  `doctor --fix` would rewrite the held config. If another lifecycle
-  operation is running, its "Another operation is in progress" reason is
-  shown instead of the hold reason.
+- The gateway card's Repair and Restart controls open recovery options with
+  the current cause and a direct path to the appropriate Upgrade recovery.
+  They remain usable during another operation, whose progress is shown without
+  hiding the other blockers. Opening options does not run `doctor --fix` on
+  held configuration.
 - A manual **restart is refused** (`409 gateway_held` from
   `POST /api/gateway/restart`, with a `hint`): restarting would launch the
   gateway on the exact config the reconciler just rejected. The same check
   runs again once the restart holds the lifecycle lock, so a hold that
-  appeared while the restart was queued behind another operation fails it
+  appeared after the initial check refuses the attempt
   with the same code — the operation's terminal event carries
   `code: gateway_held`, and the Watchdog event log books the row as
   `skipped`, never as a failed restart. This route's other refusal codes
   are `409 apply_in_progress` (a channel update is running), `409 booting`
   (AlphaClaw itself is still starting the gateway — refused up front, never
-  queued) and `409 gateway_hold_unreadable` (below).
+  queued) and `409 gateway_hold_unreadable` (below). Another active operation
+  requires a new deliberate attempt after it settles, not a queued restart.
 - A manual **repair is refused** the same way (`409 gateway_held` from
   `POST /api/watchdog/repair`); automatic repairs skip with one event-log
   row per distinct refusal.
 - An **unreadable or corrupted** release-channel state file
   (`<root>/.openclaw/.alphaclaw/openclaw-channel-state.json`) is treated as
-  held: restart and repair answer `409 gateway_hold_unreadable`, the card
-  disables the same actions with "Gateway hold state could not be read…",
+  held: restart and repair execution answer `409 gateway_hold_unreadable`, while
+  the card opens [recovery-state guidance](#recovery-state-unreadable),
   and the exit-78 config-change auto-retry and the memory-pressure restart
   stop relaunching. Check the file and the server log.
 

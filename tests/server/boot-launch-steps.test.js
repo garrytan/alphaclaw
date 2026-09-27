@@ -167,7 +167,7 @@ describe("server/boot-launch-steps", () => {
       expect(insertWatchdogEvent).not.toHaveBeenCalled();
     });
 
-    it("without a watchdog latch the version_mismatch event goes straight through the wrapped sink", async () => {
+    it("without a watchdog latch a database verification failure is a configuration event", async () => {
       const service = mkService({
         assessLaunchCompatibilityAtBoot: vi.fn(async () => ({
           compatible: false,
@@ -187,7 +187,7 @@ describe("server/boot-launch-steps", () => {
       await steps.assessLaunchCompatibilityAtBoot({ hold: null });
       expect(insertWatchdogEvent).toHaveBeenCalledTimes(1);
       expect(insertWatchdogEvent).toHaveBeenCalledWith({
-        eventType: "version_mismatch",
+        eventType: "config_error",
         source: kLaunchCompatGateEventSource,
         status: "failed",
         details: expect.objectContaining({
@@ -198,6 +198,24 @@ describe("server/boot-launch-steps", () => {
         }),
         correlationId: "",
       });
+    });
+
+    it("uses the exact database hold and findings without setting a version mismatch", async () => {
+      const hold = { reason: "state_db_unverified", bootId: "boot-db", at: 12 };
+      const perDb = [{ path: "memory/unknown.sqlite", verdict: "unknown", reason: "owner_missing" }];
+      const service = mkService({ assessLaunchCompatibilityAtBoot: vi.fn(async () => ({
+        compatible: false, hold, perDb, installed: "2026.9.5", expected: "2026.9.5",
+      })) });
+      const latchDatabaseVerification = vi.fn();
+      const latchVersionMismatch = vi.fn();
+      const insertWatchdogEvent = vi.fn();
+      const steps = createBootLaunchSteps({ openclawChannelService: service, insertWatchdogEvent,
+        getWatchdog: () => ({ latchDatabaseVerification, latchVersionMismatch }), logger: kSilentLogger });
+      await steps.assessLaunchCompatibilityAtBoot();
+      expect(latchDatabaseVerification).toHaveBeenCalledWith({ hold, source: kLaunchCompatGateEventSource,
+        details: expect.objectContaining({ reason: hold.reason, perDb }) });
+      expect(latchVersionMismatch).not.toHaveBeenCalled();
+      expect(insertWatchdogEvent).not.toHaveBeenCalled();
     });
 
     it("a reconcile the gate ran itself (null && diverged && overlay) is booked like step 3's", async () => {

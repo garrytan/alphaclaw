@@ -43,6 +43,9 @@ const writeDb = (file, userVersion) => {
   const db = new DatabaseSync(file);
   db.exec("CREATE TABLE t(x INTEGER)");
   db.exec(`PRAGMA user_version = ${userVersion}`);
+  db.exec("CREATE TABLE schema_meta(meta_key TEXT PRIMARY KEY, role TEXT, schema_version INTEGER, agent_id TEXT)");
+  const agentId = file.includes(`${path.sep}agents${path.sep}`) ? path.basename(path.dirname(path.dirname(file))) : null;
+  db.prepare("INSERT INTO schema_meta VALUES ('primary', ?, ?, ?)").run(agentId ? "agent" : "global", userVersion, agentId);
   db.close();
 };
 
@@ -148,7 +151,8 @@ const populate = ({ rootDir, openclawDir, installDir, managedDir, store }) => {
   fs.writeFileSync(brokenDb, Buffer.alloc(4096, 0x41));
 
   const packageDir = path.join(installDir, "node_modules", "openclaw");
-  writeJson(path.join(packageDir, "package.json"), { name: "openclaw", version: "2026.9.2" });
+  writeJson(path.join(packageDir, "package.json"), { name: "openclaw", version: "2026.9.2", bin: "openclaw.mjs" });
+  fs.writeFileSync(path.join(packageDir, "openclaw.mjs"), "");
   fs.mkdirSync(path.join(packageDir, "dist"), { recursive: true });
   fs.writeFileSync(path.join(packageDir, "dist", "openclaw-state-db-contract-AAAA.js"), "const OPENCLAW_STATE_SCHEMA_VERSION=15;export{OPENCLAW_STATE_SCHEMA_VERSION};\n");
   fs.writeFileSync(path.join(packageDir, "dist", "openclaw-agent-db-contract-BBBB.js"), "const OPENCLAW_AGENT_SCHEMA_VERSION = 19;\n");
@@ -311,6 +315,7 @@ describe("diagnose: collectDiagnose over a populated root (disk path)", () => {
     expect(Object.keys(bundle.sections)).toEqual([...kDiagnoseSectionNames]);
     expect(bundle.paths).toEqual({
       rootDir: ctx.rootDir,
+      rootSource: "server_configuration",
       openclawDir: ctx.openclawDir,
       managedDir: ctx.managedDir,
       stateDir: ctx.openclawDir,
@@ -690,8 +695,7 @@ describe("diagnose: a throwing reader degrades its own section only", () => {
     const bundle = await collect(ctx, {
       getWatchdogStatus: boom("watchdog"),
       getChannelInfo: boom("channel info"),
-      resolveDeclared: boom("declared scan"),
-      readSqliteUserVersion: boom("user_version"),
+      assessRecovery: boom("recovery assessment"),
       bootReports: boom("boot reports"),
       selfVersion: boom("self version"),
       readLogTail: boom("log tail"),
@@ -699,8 +703,8 @@ describe("diagnose: a throwing reader degrades its own section only", () => {
     });
     expect(bundle.sections.watchdog).toMatchObject({ source: "unavailable", reason: "watchdog failed: watchdog exploded", data: null });
     expect(bundle.sections.channelState).toMatchObject({ source: "unavailable", reason: "channelState failed: channel info exploded" });
-    expect(bundle.sections.supportedSchema).toMatchObject({ source: "unavailable", reason: "supportedSchema failed: declared scan exploded" });
-    expect(bundle.sections.stateDb).toMatchObject({ source: "unavailable", reason: "stateDb failed: user_version exploded" });
+    expect(bundle.sections.supportedSchema).toMatchObject({ source: "unavailable", reason: "supportedSchema failed: recovery assessment exploded" });
+    expect(bundle.sections.stateDb).toMatchObject({ source: "unavailable", reason: "stateDb failed: recovery assessment exploded" });
     expect(bundle.sections.bootReports).toMatchObject({ source: "unavailable", reason: "bootReports failed: boot reports exploded" });
     expect(bundle.sections.selfVersion).toMatchObject({ source: "unavailable", reason: "selfVersion failed: self version exploded" });
     expect(bundle.sections.logTail).toMatchObject({ source: "unavailable", reason: "logTail failed: log tail exploded" });

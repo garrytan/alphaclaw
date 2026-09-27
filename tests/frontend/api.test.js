@@ -907,6 +907,37 @@ describe("frontend/api", () => {
     expect(result).toEqual({ ok: true, operationId: "op-1", events: true });
   });
 
+  it("sends manual verification only on the explicit request and preserves skipped/refusal recovery", async () => {
+    const api = await loadApiModule();
+    global.fetch.mockResolvedValue(mockJsonResponse(202, { ok: true, operationId: "verify-1" }));
+    await api.restartGatewayAsync({ verifyDatabaseRecovery: true });
+    expect(JSON.parse(global.fetch.mock.calls.at(-1)[1].body)).toEqual({ verifyDatabaseRecovery: true });
+    const recovery = { disposition: "inspect", resolution: "upgrade" };
+    global.fetch.mockResolvedValue(mockJsonResponse(200, { ok: false, skipped: true, code: "gateway_held", recovery }));
+    await expect(api.restartGatewayAsync()).rejects.toMatchObject({ notStarted: true, code: "gateway_held", recovery });
+    global.fetch.mockResolvedValue(mockJsonResponse(200, { ok: true, skipped: true, reason: "busy", recovery }));
+    await expect(api.triggerWatchdogRepair()).rejects.toMatchObject({ notStarted: false, responseReceived: true, recovery });
+  });
+
+  it("does not infer that Doctor never ran from a repair 409 or a skipped result", async () => {
+    const api = await loadApiModule();
+    for (const status of [200, 409]) {
+      global.fetch.mockResolvedValue(mockJsonResponse(status, { ok: false, code: "gateway_held", message: "Doctor completed, but the relaunch was refused", result: { skipped: true, reason: "gateway_held" } }));
+      await expect(api.triggerWatchdogRepair()).rejects.toMatchObject({ notStarted: false, responseReceived: true, message: "Doctor completed, but the relaunch was refused" });
+    }
+    global.fetch.mockResolvedValue(mockJsonResponse(409, { ok: false, notStarted: true, error: "Admission refused before Doctor" }));
+    await expect(api.triggerWatchdogRepair()).rejects.toMatchObject({ notStarted: true });
+  });
+
+  it("does not turn an unusable successful restart response into success or safe refusal", async () => {
+    const api = await loadApiModule();
+    global.fetch.mockResolvedValue(mockJsonResponse(200, {}));
+    const error = await api.restartGatewayAsync().catch((error) => error);
+    expect(error.message).toContain("result unknown");
+    expect(error.notStarted).toBeUndefined();
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+  });
+
   it("restartGatewayAsync rejects 409 apply_in_progress with code+status, and unparseable bodies with the fallback message", async () => {
     // 409 envelope: the controller branches on err.code, so the code and
     // HTTP status must ride on the rejection.

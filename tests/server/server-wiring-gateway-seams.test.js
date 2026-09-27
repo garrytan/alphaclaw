@@ -85,6 +85,13 @@ const createWatchdogHarness = () => {
 
 describe("init/register-server-routes.js hands the notifier and the configured URL to the Codex and system routes", () => {
   const routesSource = readSource("lib", "server", "init", "register-server-routes.js");
+  it("diagnosis uses the collector's bounded redaction reads rather than pre-reading .env", () => {
+    const start = routesSource.indexOf("registerDiagnoseRoutes({");
+    expect(start).toBeGreaterThan(-1);
+    const block = routesSource.slice(start, routesSource.indexOf("});", start));
+    expect(block).toContain("rootDir: constants.kRootDir");
+    expect(block).not.toContain("readEnvFile");
+  });
   it("registerCodexRoutes gets notify (deferred-write failures reach the operator)", () => {
     const start = routesSource.indexOf("registerCodexRoutes({");
     const block = routesSource.slice(start, routesSource.indexOf("});", start));
@@ -161,7 +168,7 @@ describe("lib/server.js composition pins (lane C / lane A hand-offs)", () => {
     // The consumer half of the contract: channel-sync sizes the hold itself.
     const channelSyncSource = readSource("lib", "server", "openclaw-channel-sync.js");
     expect(channelSyncSource).toMatch(
-      /acquire:\s*\(\{ leaseMs \}\)\s*=>[\s\S]*?\{ leaseMs \}/,
+      /acquire:\s*async\s*\(\{ leaseMs \}\)\s*=>[\s\S]*?\{ leaseMs \}/,
     );
     expect(serverSource).toContain("acquireLifecycleLock: (kind, options) => gatewayLifecycleLock.acquire(kind, options)");
 

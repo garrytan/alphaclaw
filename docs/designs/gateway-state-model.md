@@ -2,9 +2,8 @@
 
 > **Status (2026-08-29):** M2/M3 shipped in v0.9.37. The normative sections
 > (§3–§10) describe what now runs; §2's "as-implemented, pre-M2" survey is
-> historical. Known deviation from the §5 repair-lock matrix: manual repairs
-> currently skip with HTTP 200 `{skipped:true}` instead of queueing — tracked
-> in TODOS.md ("Manual repair should queue on the lifecycle lock, not skip").
+> historical. Issue #123 updates the user recovery contract: Repair and Restart
+> always open inspection; busy work never queues a later user intent.
 > The plan file referenced below was a working artifact and does not ship in
 > this repo.
 >
@@ -166,7 +165,9 @@ The reducer evaluates rows in order; the first true predicate wins. Every input 
 | 9 | `safe_mode` | `tcp.up === true` AND health ok AND `/readyz` reports suppressed channels. Reason = suppressed channel names. |
 | 10 | `running` | `tcp.up === true` AND health ∈ {healthy, unknown-within-startup-grace} AND none of the above. |
 
-Binding rules: at most one primary action per state (§6); `restart-required.reasons[]` renders as banner regardless of headline; the headline never renders a raw enum name (§5 labels only). **Restart always offered (v0.9.73):** every onboarded state except `booting` carries a restart-class action (Restart or Retry). Repair, Resume channels and Refresh are the *recommended* move in their states, never the *only* one — a repair-only Unstable card had left operators with no way to relaunch the gateway from the admin UI without running doctor first. `booting` is exempt because boot IS the launch. "Offered" is not "always runnable": the action is disabled with a `disabledReason` while another leased operation holds the lifecycle lock (precedence 1), while a watchdog-owned relaunch is in flight (2), while the release-channel state is unreadable/corrupted (3, fail-closed), or while a reconciler gateway hold is set after a failed settings migration (4; Repair is blocked too, since `doctor --fix` would rewrite the held config). The route refuses with an actionable 409 (`booting` while boot holds the lock, `apply_in_progress`, `gateway_hold_unreadable`, `gateway_held`); every refusal carries a `hint`, and the copy lives in one place (`kGatewayHoldCopy`, `gateway-state.js`). `POST /api/gateway/restart` queues on the lock (§7) and **re-validates both blockers once it holds it** — a hold set while the restart was queued fails the operation (terminal event with `code: gateway_held`, ledger entry `skipped`, never a "failed restart"), and a queued acquire surfaces a `waiting_for_lock` step via the lock's own `onQueued` callback so a wait is never silent.
+Binding rules: at most one primary action per state (§6); `restart-required.reasons[]` renders as a banner regardless of headline. **Repair and Restart are always usable inspection entry points**, including setup, booting, loading, stale status and operation rendering. They open one inline options region; they never directly authorize mutation or queue an intent. Freshness wins over active operation/relaunch, then setup, unreadable/semantic hold, intentional Stop/pause, and base-state execution. Historical holds remain visible beneath progress. The server's `projectGatewayRecovery` projects this disposition; every execution is independently admitted under the lifecycle lease.
+
+An existing restart may be observed/attached to its operation id. Unrelated work returns not-started with its actual operation rather than promising a later restart or Doctor run. A hold cannot be waived by inspecting it, by `force:true`, or by Check again (`GET /api/diagnose`, observation only). A database hold offers a new explicit **Verify and start** confirmation; only the backend's fresh matching database/build/root/epoch assessment can release it and enter ordinary start admission. The persisted `databaseRecoveryPending` baseline keeps the same verify-first resolution after a hold clears if the replacement has not reached verified readiness; it is not the unrelated overlay cleanup/crash-recovery marker. Stop remains sticky during observation and invalidates earlier confirmations. Migration-required outcomes lead to Upgrade's existing human protection choice, never a generic override. Unknown/corrupt evidence remains held.
 
 ---
 
@@ -176,21 +177,21 @@ Binding rules: at most one primary action per state (§6); `restart-required.rea
 
 | enum | UI label | dot | reason copy template | actions (primary first) |
 |---|---|---|---|---|
-| (no data yet) | "Connecting to AlphaClaw…" | gray | client-owned, only pre-first-frame | none; Restart disabled |
-| not_onboarded | Not set up yet | gray | — | Set up |
-| booting | AlphaClaw starting | cyan pulse | current phase | — (deliberate: boot IS the launch; a restart queued behind the boot hold would recycle a gateway that just came up — `boot_failed` carries Retry) |
-| booting(failed) | Startup failed | red | error summary | **Retry** · View logs |
-| starting | Starting | cyan pulse | "usually under 30s (0:34 / 2:00 max)"; past typical: "taking longer than usual" — no fake progress | View logs · Restart (disabled with reason under a leased operation AND while a watchdog relaunch is in flight — `lifecycle` restarting, `crashed` with an active backoff, or `operationInProgress`, since crash relaunches release the lock at spawn and the exit-78 auto-retry never takes it; the relaunch guard applies only to this TCP-down state; enabled once the launch is only waiting on its first health check) |
-| running | Running | green steady | "up 3h 12m" | Restart |
-| degraded | Running with issues | yellow steady | last probe error + observedAt | View logs · Restart |
-| degraded (readiness) | Running with issues | yellow steady | "The port answers and /health is green, but readiness checks are failing (<components>)." — `readiness: "not_ready"`, `readinessReason` = failing component names (or `ready:false`, or `"<status> did not complete within Ns"` once a transitional phase outlived the ready budget), `degradedReason: "readiness_failing"`; one verbose "🟡 Gateway is up but not ready — <components>" notice per incident (`gateway_readiness` incident when none is open); no recovery notice, no incident close, no `onHealthy` acceptance credit until `/readyz` is green again. **#87:** only OpenClaw's NATIVE verdict (`ready: false` / failing components) takes this row — `eventLoop.degraded` never does; `readinessProbe: "ok"` and `readinessStatus` say how the last `/readyz` read went and what the body said; while a later `/readyz` cannot be read (`readinessProbe: unavailable \| timeout \| malformed`) the row is HELD — no recovery, deduped `health_check/ok {readinessPending, readinessProbe}` rows, the retry ladder keeps probing — until the ready budget fails it open (`readiness_probe_error {recoveryAssumed: true}`); the detached Doctor's structured finding, when one exists, rides as ONE `readiness_advisory` row ("doctor: <checkId> (<severity>)"), evidence never trigger. The Watchdog tab's gateway-health card keys on this verdict (`classifyReadinessCard`, #87 G5): DEGRADED only for `readiness: not_ready` (component rows, or one generic signal from `readinessReason`) or a legacy status without the field; `ready` / `unknown` render a retained `readyzFailing[]` as a neutral "Reported by /readyz (telemetry)" list ("OpenClaw reports it ready" / "readiness unverified (<probe>)"); the transitional row below renders no readiness card. A dedicated `alive_not_ready` phase/label is a TODOS follow-up | View logs · Restart |
-| running (transitional readiness, #87) | Running | green steady | "Up — channels still starting." / "Up — draining." — `/readyz` consumed a `starting` / `draining` body inside the ready budget: `readiness: "not_ready"`, `readinessStatus: starting \| draining`, `readinessReason` = the status; NOT an incident, NOT degraded (no `degradedReason`, no notice, no `onUnhealthy`/`onHealthy`, no acceptance credit, a pending replacement is not certified); deduped `health_check/ok {readinessPending, readinessStatus}` rows ("up, still starting" / "up, draining"); a 5 s cadence keeps probing (the bootstrap loop's tick, or outside it one single-shot `readiness_recheck` probe re-armed by every transitional observation). Past `kGatewayRestartReadyTimeoutMs` (`readinessTransitionalExpired`) the same observation becomes the `degraded (readiness)` row above. The clock is generation-local: a liveness flap resets the axis (`readiness: unknown`) but never restarts the budget, and a `/readyz` transport error right after the flap still holds with this row's flavour (#87 F1). An explicit `ready: true` beside a `starting` / `draining` status is NOT this row — it is ready, the status is telemetry (#87 F5) | Restart |
+| (no data yet) | "Connecting to AlphaClaw…" | gray | client-owned, only pre-first-frame | Repair · Restart → connection/setup guidance; inspect only |
+| not_onboarded | Not set up yet | gray | — | Repair · Restart → existing setup; **Set up** |
+| booting | AlphaClaw starting | cyan pulse | current phase | Repair · Restart → current boot progress; no queued intent |
+| booting(failed) | Startup failed | red | error summary | Repair · Restart · View logs |
+| starting | Starting | cyan pulse | "usually under 30s (0:34 / 2:00 max)"; past typical: "taking longer than usual" — no fake progress | Repair · Restart → observe active relaunch; otherwise fresh confirmation · View logs |
+| running | Running | green steady | "up 3h 12m" | Repair · **Restart** |
+| degraded | Running with issues | yellow steady | last probe error + observedAt | Repair · Restart · View logs |
+| degraded (readiness) | Running with issues | yellow steady | "The port answers and /health is green, but readiness checks are failing (<components>)." — `readiness: "not_ready"`, `readinessReason` = failing component names (or `ready:false`, or `"<status> did not complete within Ns"` once a transitional phase outlived the ready budget), `degradedReason: "readiness_failing"`; one verbose "🟡 Gateway is up but not ready — <components>" notice per incident (`gateway_readiness` incident when none is open); no recovery notice, no incident close, no `onHealthy` acceptance credit until `/readyz` is green again. **#87:** only OpenClaw's NATIVE verdict (`ready: false` / failing components) takes this row — `eventLoop.degraded` never does; `readinessProbe: "ok"` and `readinessStatus` say how the last `/readyz` read went and what the body said; while a later `/readyz` cannot be read (`readinessProbe: unavailable \| timeout \| malformed`) the row is HELD — no recovery, deduped `health_check/ok {readinessPending, readinessProbe}` rows, the retry ladder keeps probing — until the ready budget fails it open (`readiness_probe_error {recoveryAssumed: true}`); the detached Doctor's structured finding, when one exists, rides as ONE `readiness_advisory` row ("doctor: <checkId> (<severity>)"), evidence never trigger. The Watchdog tab's gateway-health card keys on this verdict (`classifyReadinessCard`, #87 G5): DEGRADED only for `readiness: not_ready` (component rows, or one generic signal from `readinessReason`) or a legacy status without the field; `ready` / `unknown` render a retained `readyzFailing[]` as a neutral "Reported by /readyz (telemetry)" list ("OpenClaw reports it ready" / "readiness unverified (<probe>)"); the transitional row below renders no readiness card. A dedicated `alive_not_ready` phase/label is a TODOS follow-up | Repair · Restart · View logs |
+| running (transitional readiness, #87) | Running | green steady | "Up — channels still starting." / "Up — draining." — `/readyz` consumed a `starting` / `draining` body inside the ready budget: `readiness: "not_ready"`, `readinessStatus: starting \| draining`, `readinessReason` = the status; NOT an incident, NOT degraded (no `degradedReason`, no notice, no `onUnhealthy`/`onHealthy`, no acceptance credit, a pending replacement is not certified); deduped `health_check/ok {readinessPending, readinessStatus}` rows ("up, still starting" / "up, draining"); a 5 s cadence keeps probing (the bootstrap loop's tick, or outside it one single-shot `readiness_recheck` probe re-armed by every transitional observation). Past `kGatewayRestartReadyTimeoutMs` (`readinessTransitionalExpired`) the same observation becomes the `degraded (readiness)` row above. The clock is generation-local: a liveness flap resets the axis (`readiness: unknown`) but never restarts the budget, and a `/readyz` transport error right after the flap still holds with this row's flavour (#87 F1). An explicit `ready: true` beside a `starting` / `draining` status is NOT this row — it is ready, the status is telemetry (#87 F5) | Repair · **Restart** |
 | flapping | Unstable | red steady | "3 restarts detected in 5 min — up 40s" (+detail: "estimated — gateway runs outside AlphaClaw's supervision" when probe-inferred) | **Repair** · Restart · View logs · Roll back (confirm via `confirm-dialog.js`; only in stabilization window) |
-| safe_mode | Channels paused | yellow steady | suppressed channel names | **Resume channels** · Restart |
-| config_error | Configuration error | red steady | first redacted stderr lines | **View config error** · Retry · View logs |
-| down | Down | red steady | reason + last evidence + since | **Retry** · Repair · View logs |
-| unknown | Status unavailable | gray hollow | current state cannot be confirmed | Refresh · Restart · View logs |
-| stale snapshot or observation older than 15s | Last known — (last state label) | gray | “Status updates unavailable.” plus “as of” observation stamp; elapsed state time freezes at that observation | unchanged, Restart disabled |
+| safe_mode | Channels paused | yellow steady | suppressed channel names | Repair · Restart · **Resume channels** |
+| config_error | Configuration error | red steady | first redacted stderr lines | **Repair** · Restart · View logs; database hold cause supersedes config-only advice |
+| down | Down | red steady | reason + last evidence + since | Repair · **Restart** · View logs |
+| unknown | Status unavailable | gray hollow | current state cannot be confirmed | Repair · Restart · **Refresh** · View logs |
+| stale snapshot or observation older than 15s | Last known — (last state label) | gray | “Status updates unavailable.” plus “as of” observation stamp; elapsed state time freezes at that observation | Repair · Restart → last-known evidence and connection guidance; no cached mutation |
 
 ### Dot / motion
 
@@ -222,17 +223,22 @@ One shared status-icon treatment (icon + text + color); error states carry an ic
 
 ## 6. `actions[]` API contract
 
-Each status frame's `state.actions[]` entry:
+Each status frame's `state.actions[]` entry retains `id`, `label`, `kind`, and `description`. Repair and Restart additionally carry:
 
 ```
-{ id, label, kind: "primary" | "secondary" | "danger", needsConfirm?, disabledReason?, description? }
+{ disposition: "execute" | "inspect" | "attach" | "blocked",
+  resolution: "setup" | "operation" | "diagnose" | "upgrade" | "verify_start" | null,
+  reasonCode, reason, nextAction: { id, label, description, helpRef } | null,
+  operationId, stopped, paused, originalHold, pendingRecovery, additionalReasons,
+  recoveryConfirmation }
 ```
 
-- **At most one `kind:"primary"` per state**, bound in §4/§5 (bold entries); `booting` and `starting` have none.
-- **Every onboarded state except `booting` carries a restart-class action** (`restart` or `retry`) — see the "Restart always offered" rule under §4. `disabledReason` copy lives in `kLifecycleActionBlockReasons` (`gateway-state.js`): operation-in-progress outranks gateway-held.
-- `description` = "what this does + expected duration"; rendered as the tooltip and as the confirm-dialog body when `needsConfirm` is set.
-- `disabledReason` renders the action disabled with a tooltip (e.g. Restart while an operation badge shows).
-- **The client renders, never derives.** The client-side label derivation in `components/gateway.js:31-68` is deleted in M2.2; the sole exception is the version-skew adapter rendering the legacy presentation when `state` is absent (old server).
+- At most one `kind:"primary"` per state. Both outer controls stay enabled; loading/disabled flags belong only to a separate execution confirmation.
+- `execute` means an execution confirmation can be offered, not that the server must accept it. `inspect` and `attach` expose explanation, safe destinations or existing progress without mutation. These presentation fields grant no authority.
+- `recoveryConfirmation` is an opaque observation fence for manual database verification, not authorization. The UI requires it before offering a Verify-and-start confirmation, includes it in the confirmation identity, and sends it with `verifyDatabaseRecovery:true`; missing/changed evidence stays inspect-only. The backend must compare its current hold/pending baseline and recovery epoch before admitting the request, then revalidate under its lifecycle lease.
+- `getGatewayRecoveryAction(reason)` shares instructions and runbook anchors between status projection and diagnose. Direct restart/repair refusals retain their route-specific `code`, `hint` and string `nextActions`; they do not currently return this complete recovery descriptor. The UI shows the refusal and refreshes status to obtain the current projection. Original hold evidence is historical and separately timestamped; current diagnose findings never imply service readiness.
+- Opening options focuses their heading; Escape/Close returns to the initiating control. Stream updates preserve reading focus and invalidate a stale confirmation without replay. Initial and old-server frames retain both controls but allow observation only.
+- Explicit admission refusal means not started. Restart's fast 409 and HTTP 200 `ok:false`/`skipped` are surfaced as refusals; Repair's HTTP status alone cannot prove Doctor did not run before a relaunch refusal, so without explicit `notStarted:true` it says repair did not complete and preserves the possibility of configuration changes. A lost/unusable response means outcome unknown until existing operation/status reconciliation, never automatic POST replay. An accepted operation is not recovery until readiness succeeds.
 
 ---
 
@@ -242,8 +248,8 @@ One mutex serializes every gateway-mutating path. Lease deadline = operation-rec
 
 | requester | when idle | when another op active |
 |---|---|---|
-| User restart button | acquire-queue (new restart op) | active restart → **attach-to-existing** (return existing operationId); active repair/boot → **attach** (their relaunch is the outcome the user wants); active apply/rollback → **409-with-operationId** (mirrors `system.js` apply latch) |
-| User repair button | acquire-queue | active repair → **attach**; active restart/boot → **acquire-queue** (repair does more than relaunch — runs after); active apply/rollback → **409-with-operationId** |
+| User restart confirmation | fresh admission + try-acquire (new restart op) | active restart → **attach-to-existing** (existing operationId); all unrelated work → **not started**, observe actual operation; no queued restart |
+| User repair confirmation | fresh admission + try-acquire | **not started**, observe current repair/restart/boot/apply; no queued Doctor run |
 | Channel apply's restart step | runs under the apply's own lease (acquire-queue at apply start) | active restart/repair → **attach-to-existing** relaunch; conflicting apply → **409-with-operationId** |
 | WhatsApp login restart | acquire-queue | active restart/repair/boot → **attach-to-existing**; active apply/rollback → **409-with-operationId** |
 | Watchdog auto-restart timer | try-acquire (succeeds) | **try-acquire-skip** — logs an "operation in progress" watchdog event; a background loop never parks on a lock |
@@ -251,7 +257,7 @@ One mutex serializes every gateway-mutating path. Lease deadline = operation-rec
 | Boot sequence | acquires and **holds the lock for the whole boot** (no boot-vs-API races) | n/a — boot runs first; it reconciles/closes any stale lease from a previous process |
 | Rollback (channel hooks) | acquire-queue | active apply → **attach** (rollback is the apply's own failure path, same lease); active restart/repair → **acquire-queue** (runs after; supersedes further auto-restarts); conflicting rollback → **attach-to-existing** |
 
-Conflict UX: Restart proactively disabled with `disabledReason` while any operation badge shows; a late 409 toasts "Another operation is running — attached to its progress" and attaches to the returned operationId's stream.
+Conflict UX: Repair and Restart remain usable inspection controls while progress is shown. Only a confirmed attachment says attached; unrelated-operation refusal says not started and names a safe next step. Completing an operation never executes an earlier click.
 
 ---
 

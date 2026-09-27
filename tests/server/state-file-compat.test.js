@@ -768,6 +768,7 @@ describe("persisted-format fixtures: openclaw-channel-state.json (v0.9.76 → v0
         completedForBuild: null, lastAttempt: { ...fixture.configMigration.lastAttempt, buildId: null } },
       lastTransition: null,
       pinLag: null,
+      databaseRecoveryPending: null,
     });
   });
 
@@ -794,12 +795,13 @@ describe("persisted-format fixtures: openclaw-channel-state.json (v0.9.76 → v0
 
     store.writeState(state);
     const rewritten = readJsonFile(store.statePath);
-    expect(rewritten).toEqual({ ...fixture, configMigration: { ...fixture.configMigration,
+    expect(rewritten).toEqual({ ...fixture, databaseRecoveryPending: null, configMigration: { ...fixture.configMigration,
       completedForBuild: null, lastAttempt: { ...fixture.configMigration.lastAttempt, buildId: null } } });
-    // The only forward-format change is those two explicitly unknown slots.
+    // The only forward-format changes are the explicitly unknown slots.
     // Removing them must reproduce the historical fixture's exact bytes.
     delete rewritten.configMigration.completedForBuild;
     delete rewritten.configMigration.lastAttempt.buildId;
+    delete rewritten.databaseRecoveryPending;
     expect(`${JSON.stringify(rewritten, null, 2)}\n`).toBe(fixtureText(kFile, "v0.9.77"));
   });
 });

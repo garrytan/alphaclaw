@@ -3,6 +3,7 @@ const fs = require("fs");
 const { DatabaseSync } = require("node:sqlite");
 const os = require("os");
 const path = require("path");
+const { execFileSync, spawnSync } = require("child_process");
 
 const {
   createOpenclawChannelSync,
@@ -384,6 +385,548 @@ const saveOverlayFixture = (store, version) =>
 
 const notifyMessages = (notify) =>
   notify.mock.calls.map((call) => String(call?.[0] || ""));
+
+describe("database verification lifecycle", () => {
+  const setup = async ({ symlinkRoot = false, policyFacade = false, onApplyAcquire = null } = {}) => {
+    const { createGatewayLifecycleLock } = require("../../lib/server/gateway-lifecycle-lock");
+    const { createGatewayMutationPolicy } = require("../../lib/server/gateway-mutation-policy");
+    const lock = createGatewayLifecycleLock({ logger: kSilentLogger });
+    let h;
+    const spawnEnv = {};
+    const policy = createGatewayMutationPolicy({ lock, getChannelInfo: () => h.sync.getChannelInfo() });
+    const gatewayMutationPolicy = policyFacade ? {
+      assert: (options) => policy.assert(options),
+      assertDatabaseVerification: (options) => policy.assertDatabaseVerification(options),
+      authorizeDatabaseRecovery: (options) => policy.authorizeDatabaseRecovery(options),
+    } : policy;
+    h = createHarness({ installedVersion: "1.0.0", extraSyncOptions: { gatewayMutationPolicy, acquireLifecycleLock: async (kind, options) => {
+      const lease = await lock.acquire(kind, options);
+      if (kind === "apply_commit") onApplyAcquire?.(h);
+      return lease;
+    },
+      openclawSpawnEnv: () => spawnEnv } });
+    if (symlinkRoot) {
+      spawnEnv.OPENCLAW_STATE_DIR = path.join(h.rootDir, "selected-state");
+      fs.symlinkSync(h.openclawDir, spawnEnv.OPENCLAW_STATE_DIR, "dir");
+    }
+    writeSchemaContractFixture(path.join(h.installDir, "node_modules", "openclaw"), { state: 17, agent: 21 });
+    const dbPath = path.join(h.openclawDir, "state", "openclaw.sqlite");
+    writeSqliteDb(dbPath, { userVersion: 17 });
+    const verdict = await h.sync.assessInstalledLaunchCompatibility();
+    expect(verdict).toMatchObject({ compatible: true, migrationRequired: false, complete: true });
+    const saved = h.sync.holdDatabaseVerification({ verdict });
+    expect(saved.ok).toBe(true);
+    expect(saved.hold.databaseVerification.databases).toEqual([{ path: "state/openclaw.sqlite", dbKind: "state", agentId: null }]);
+    return { ...h, lock, policy, dbPath, spawnEnv, expectedHold: saved.hold };
+  };
+
+  it("keeps original coverage through compare-clear, process restart, and readiness", async () => {
+    const h = await setup();
+    const hold = await h.lock.acquire("database_verification");
+    const result = await h.sync.verifyDatabaseRecovery({ hold, expectedHold: h.expectedHold });
+    expect(result.ok).toBe(true);
+    expect(h.store.readState().gatewayHold).toBeNull();
+    expect(h.sync.isDatabaseRecoveryCurrent({ recoveryId: result.recoveryId })).toBe(true);
+    expect(h.sync.getChannelInfo().databaseRecoveryPending.baseline.databases).toHaveLength(1);
+    expect(h.sync.completeDatabaseRecovery({ recoveryId: "older-attempt" }).ok).toBe(false);
+    hold();
+    fs.rmSync(h.dbPath);
+    const rebooted = createOpenclawChannelSync({ rootDir: h.rootDir, openclawDir: h.openclawDir, packageRoot: h.packageRoot,
+      resolveInstallDir: () => h.installDir, logger: kSilentLogger, readReleaseChannel: () => "stable", isOnboarded: () => true,
+      gatewayMutationPolicy: h.policy });
+    const bootHold = await h.lock.acquire("boot");
+    const refused = await rebooted.assessLaunchCompatibilityAtBoot({ hold: bootHold });
+    expect(refused.compatible).toBe(false);
+    expect(refused.reasons).toContain("required_database_missing");
+    expect(rebooted.getChannelInfo().gatewayHold.databaseVerification.databases).toHaveLength(1);
+    writeSqliteDb(h.dbPath, { userVersion: 17 });
+    expect((await rebooted.assessLaunchCompatibilityAtBoot({ hold: bootHold })).compatible).toBe(true);
+    const pending = rebooted.getChannelInfo().databaseRecoveryPending;
+    expect(pending.recoveryId).not.toBe(result.recoveryId);
+    expect(rebooted.completeDatabaseRecovery({ recoveryId: result.recoveryId }).ok).toBe(false);
+    expect(rebooted.completeDatabaseRecovery({ recoveryId: pending.recoveryId }).ok).toBe(true);
+    expect(rebooted.getChannelInfo().databaseRecoveryPending).toBeNull();
+    bootHold();
+    expect(h.gatewayQuiesce.start).not.toHaveBeenCalled();
+    expect(h.runner.runStreamed).not.toHaveBeenCalled();
+  });
+
+  it("does not clear a hold when the sole original database disappears", async () => {
+    const h = await setup();
+    fs.rmSync(h.dbPath);
+    const hold = await h.lock.acquire("restart");
+    expect(await h.sync.verifyDatabaseRecovery({ hold, expectedHold: h.expectedHold })).toMatchObject({ ok: false, code: "required_database_missing" });
+    expect(h.store.readState().gatewayHold).toEqual(h.expectedHold);
+    hold();
+  });
+
+  it("preserves logical symlinked state selection and refuses a changed selector", async () => {
+    const h = await setup({ symlinkRoot: true });
+    expect(h.expectedHold.databaseVerification.requestedStateDir).toBe(h.spawnEnv.OPENCLAW_STATE_DIR);
+    expect(h.expectedHold.databaseVerification.stateDir).toBe(h.openclawDir);
+    const hold = await h.lock.acquire("database_verification");
+    const result = await h.sync.verifyDatabaseRecovery({ hold, expectedHold: h.expectedHold });
+    expect(result.ok).toBe(true);
+    h.spawnEnv.OPENCLAW_STATE_DIR = h.openclawDir;
+    expect(h.sync.isDatabaseRecoveryCurrent({ recoveryId: result.recoveryId })).toBe(false);
+    hold();
+  });
+
+  it("resolves diagnostic build metadata in the observer without changing recovery authority", async () => {
+    const h = await setup();
+    const before = h.store.readState();
+    const diagnostic = await h.sync.assessRecoveryForDiagnostics();
+    expect(diagnostic).toMatchObject({ compatible: true, complete: true, executingBuild: { version: "1.0.0" } });
+    expect(diagnostic.inventory.dbs).toHaveLength(1);
+    expect(h.store.readState()).toEqual(before);
+  });
+
+  it("binds confirmation to displayed recovery, watchdog context, and current configuration identity", async () => {
+    const h = await setup();
+    const context = { epoch: 1, configurationGeneration: 2, pause: null };
+    const options = { context, expectedHold: h.expectedHold, expectedPending: null };
+    const digest = h.sync.getDatabaseRecoveryConfirmation(options);
+    expect(digest).toMatch(/^[a-f0-9]{64}$/);
+    expect(h.sync.getDatabaseRecoveryConfirmation(options)).toBe(digest);
+    expect(h.sync.getDatabaseRecoveryConfirmation({ ...options, context: { ...context, epoch: 2 } })).not.toBe(digest);
+    expect(h.sync.getDatabaseRecoveryConfirmation({ ...options, expectedPending: { recoveryId: "stale" } })).toBeNull();
+    h.store.updateState((s) => { s.gatewayHold.operationId = "newer"; return s; });
+    expect(h.sync.getDatabaseRecoveryConfirmation(options)).toBeNull();
+    const newer = h.sync.getDatabaseRecoveryConfirmation({ context });
+    expect(newer).toMatch(/^[a-f0-9]{64}$/);
+    expect(newer).not.toBe(digest);
+    fs.writeFileSync(path.join(h.openclawDir, "openclaw.json"), '{"changed":true}');
+    expect(h.sync.getDatabaseRecoveryConfirmation({ context })).not.toBe(newer);
+    fs.rmSync(path.join(h.installDir, "node_modules", "openclaw", "bin", "entry.js"));
+    expect(h.sync.getDatabaseRecoveryConfirmation({ context })).toBeNull();
+  });
+
+  it("does not reuse recovery confirmation across process boots with identical retained state and watchdog counters", async () => {
+    const h = await setup();
+    const before = h.store.readState();
+    const modulePath = require.resolve("../../lib/server/openclaw-channel-sync");
+    const bootModulePath = require.resolve("../../lib/server/boot-id");
+    const input = JSON.stringify({ rootDir: h.rootDir, openclawDir: h.openclawDir, packageRoot: h.packageRoot, installDir: h.installDir });
+    const readInNewProcess = () => {
+      const child = spawnSync(process.execPath, ["-e", `
+        const {createOpenclawChannelSync} = require(${JSON.stringify(modulePath)});
+        const {getProcessBootId} = require(${JSON.stringify(bootModulePath)});
+        const options = JSON.parse(process.argv[1]);
+        const sync = createOpenclawChannelSync({...options, resolveInstallDir:()=>options.installDir,
+          readReleaseChannel:()=>"stable", logger:{log(){},warn(){},error(){}}});
+        const confirmation = sync.getDatabaseRecoveryConfirmation({context:{epoch:1,configurationGeneration:1,pause:null}});
+        process.stdout.write(JSON.stringify({bootId:getProcessBootId(),confirmation}));
+      `, input], { encoding: "utf8", timeout: 3000 });
+      expect(child.error).toBeUndefined();
+      expect(child.status).toBe(0);
+      return JSON.parse(child.stdout);
+    };
+    const first = readInNewProcess();
+    const second = readInNewProcess();
+    expect(first.bootId).not.toBe(second.bootId);
+    expect(first.confirmation).toMatch(/^[a-f0-9]{64}$/);
+    expect(second.confirmation).toMatch(/^[a-f0-9]{64}$/);
+    expect(first.confirmation).not.toBe(second.confirmation);
+    expect(h.store.readState()).toEqual(before);
+  });
+
+  it.each(["config", "state", "package", "shim", "bin"])("refuses %s FIFOs through actual status and confirmation APIs without blocking", async (kind) => {
+    const h = await setup();
+    const file = { config: path.join(h.openclawDir, "openclaw.json"), state: h.store.statePath,
+      package: path.join(h.installDir, "node_modules", "openclaw", "package.json"), shim: h.store.shimPath,
+      bin: path.join(h.installDir, "node_modules", "openclaw", "bin", "entry.js") }[kind];
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.rmSync(file, { force: true });
+    execFileSync("mkfifo", [file]);
+    const modulePath = require.resolve("../../lib/server/openclaw-channel-sync");
+    const input = JSON.stringify({ rootDir: h.rootDir, openclawDir: h.openclawDir, packageRoot: h.packageRoot, installDir: h.installDir });
+    const child = spawnSync(process.execPath, ["-e", `
+      const {createOpenclawChannelSync} = require(${JSON.stringify(modulePath)});
+      const options = JSON.parse(process.argv[1]);
+      const sync = createOpenclawChannelSync({...options, resolveInstallDir:()=>options.installDir,
+        readReleaseChannel:()=>"stable", logger:{log(){},warn(){},error(){}}});
+      const info = sync.getChannelInfo();
+      const confirmation = sync.getDatabaseRecoveryConfirmation({context:{epoch:1,configurationGeneration:1,pause:null}});
+      process.stdout.write(JSON.stringify({stateCorrupted:info.stateCorrupted,confirmation}));
+    `, input], { encoding: "utf8", timeout: 3000 });
+    expect(child.error).toBeUndefined();
+    expect(child.status).toBe(0);
+    const result = JSON.parse(child.stdout);
+    expect(result.confirmation).toBeNull();
+    if (kind === "state") expect(result.stateCorrupted).toBe(true);
+  });
+
+  it("captures a corrupt file before the registry failure and recovers only at the same destination", async () => {
+    const h = await setup();
+    h.store.updateState((s) => { s.gatewayHold = null; return s; });
+    fs.writeFileSync(h.dbPath, "not sqlite");
+    const refused = await h.sync.assessLaunchCompatibilityAtBoot();
+    expect(refused.compatible).toBe(false);
+    expect(h.store.readState().gatewayHold.databaseVerification.databases).toHaveLength(1);
+    fs.rmSync(h.dbPath);
+    expect((await h.sync.assessLaunchCompatibilityAtBoot()).compatible).toBe(false);
+    writeSqliteDb(h.dbPath, { userVersion: 17 });
+    const bootHold = await h.lock.acquire("boot");
+    expect((await h.sync.assessLaunchCompatibilityAtBoot({ hold: bootHold })).compatible).toBe(true);
+    bootHold();
+    expect(h.runner.runStreamed).not.toHaveBeenCalled();
+  });
+
+  it("describes unknown ownership by relative path without inventing a version mismatch", async () => {
+    const h = await setup();
+    h.store.updateState((s) => { s.gatewayHold = null; return s; });
+    const db = new DatabaseSync(h.dbPath);
+    db.exec("UPDATE schema_meta SET role='agent'");
+    db.close();
+    const result = await h.sync.assessLaunchCompatibilityAtBoot();
+    expect(result.hold.reason).toBe("state_db_unverified");
+    expect(result.hold.detail).toContain("state/openclaw.sqlite could not be verified (database_owner_or_schema_metadata_mismatch)");
+    expect(result.hold.detail).not.toContain("not the recorded build");
+  });
+
+  it("fences database replacement during launch and never treats pending evidence as admission credit", async () => {
+    const h = await setup();
+    const hold = await h.lock.acquire("database_verification");
+    const result = await h.sync.verifyDatabaseRecovery({ hold, expectedHold: h.expectedHold });
+    expect(result.ok).toBe(true);
+    fs.renameSync(h.dbPath, `${h.dbPath}.old`);
+    writeSqliteDb(h.dbPath, { userVersion: 17 });
+    expect(h.sync.isDatabaseRecoveryCurrent({ recoveryId: result.recoveryId })).toBe(false);
+    expect(h.sync.completeDatabaseRecovery({ recoveryId: result.recoveryId }).ok).toBe(false);
+    hold();
+  });
+
+  it("allows live SQLite writes during readiness and idempotent same-attempt completion", async () => {
+    const h = await setup();
+    const hold = await h.lock.acquire("database_verification");
+    const result = await h.sync.verifyDatabaseRecovery({ hold, expectedHold: h.expectedHold });
+    const db = new DatabaseSync(h.dbPath);
+    db.exec("PRAGMA journal_mode=WAL; INSERT INTO t VALUES (7)");
+    expect(h.sync.isDatabaseRecoveryCurrent({ recoveryId: result.recoveryId })).toBe(true);
+    expect(h.sync.completeDatabaseRecovery({ recoveryId: result.recoveryId })).toEqual({ ok: true });
+    expect(h.sync.isDatabaseRecoveryCurrent({ recoveryId: result.recoveryId })).toBe(true);
+    expect(h.policy.read({ hold })).toBeNull();
+    expect(h.sync.completeDatabaseRecovery({ recoveryId: result.recoveryId })).toEqual({ ok: true });
+    db.close();
+    const newerHold = h.sync.holdDatabaseVerification({ verdict: result.verdict }).hold;
+    expect(h.sync.completeDatabaseRecovery({ recoveryId: result.recoveryId }).ok).toBe(false);
+    const newer = await h.sync.verifyDatabaseRecovery({ hold, expectedHold: newerHold });
+    expect(newer.ok).toBe(true);
+    expect(h.sync.completeDatabaseRecovery({ recoveryId: newer.recoveryId }).ok).toBe(true);
+    expect(h.sync.completeDatabaseRecovery({ recoveryId: result.recoveryId }).ok).toBe(false);
+    fs.truncateSync(h.dbPath, 0);
+    expect(h.sync.isDatabaseRecoveryCurrent({ recoveryId: newer.recoveryId })).toBe(false);
+    expect(h.sync.completeDatabaseRecovery({ recoveryId: newer.recoveryId }).ok).toBe(false);
+    hold();
+  });
+
+  it.each(["before completion", "inside the atomic completion update"])("refuses a same-ID narrowed baseline %s and revokes the original observation", async (phase) => {
+    const h = await setup();
+    writeAgentDb(h.openclawDir, "main", { userVersion: 21 });
+    h.store.updateState((state) => { state.gatewayHold = null; return state; });
+    const verdict = await h.sync.assessInstalledLaunchCompatibility();
+    const expectedHold = h.sync.holdDatabaseVerification({ verdict }).hold;
+    const hold = await h.lock.acquire("database_verification");
+    try {
+      const result = await h.sync.verifyDatabaseRecovery({ hold, expectedHold });
+      expect(result.ok).toBe(true);
+      const original = h.store.readState().databaseRecoveryPending;
+      expect(original.baseline.databases).toHaveLength(2);
+      const narrowed = structuredClone(original);
+      narrowed.baseline.databases = narrowed.baseline.databases.filter((entry) => entry.dbKind === "state");
+      expect(narrowed.baseline.databases).toHaveLength(1);
+      expect(narrowed.baseline.identity).toBe(original.baseline.identity);
+      if (phase === "before completion") {
+        h.store.updateState((state) => { state.databaseRecoveryPending = narrowed; return state; });
+        expect(h.sync.isDatabaseRecoveryCurrent({ recoveryId: result.recoveryId })).toBe(false);
+      } else {
+        const updateState = h.store.updateState;
+        vi.spyOn(h.store, "updateState").mockImplementationOnce((mutate) => updateState((state) => {
+          state.databaseRecoveryPending = narrowed;
+          return mutate(state);
+        }));
+      }
+      expect(h.sync.completeDatabaseRecovery({ recoveryId: result.recoveryId })).toMatchObject({ ok: false, code: "recovery_source_changed" });
+      expect(h.store.readState().databaseRecoveryPending).toEqual(narrowed);
+      expect(h.sync.isDatabaseRecoveryCurrent({ recoveryId: result.recoveryId })).toBe(false);
+      expect(h.policy.read({ hold })).toMatchObject({ code: "database_recovery_pending" });
+      h.store.updateState((state) => { state.databaseRecoveryPending = original; return state; });
+      expect(h.sync.completeDatabaseRecovery({ recoveryId: result.recoveryId }).ok).toBe(false);
+      expect(h.policy.read({ hold })).toMatchObject({ code: "database_recovery_pending" });
+    } finally { hold(); }
+  });
+
+  it("lets an explicitly approved apply supersede the exact old verification baseline", async () => {
+    const h = await setup();
+    const applied = await h.sync.applyUpdate({ channel: "beta", version: "1.1.0", recoveryMode: "database_set" });
+    expect(applied).toMatchObject({ status: 202, body: { ok: true, restarting: true } });
+    expect(h.store.readState().gatewayHold).toBeNull();
+    expect(h.store.readState().databaseRecoveryPending).toBeNull();
+  });
+
+  it("preserves the protected update escape after a verified start remains pending", async () => {
+    const h = await setup();
+    const hold = await h.lock.acquire("database_verification");
+    expect((await h.sync.verifyDatabaseRecovery({ hold, expectedHold: h.expectedHold })).ok).toBe(true);
+    hold();
+    const refused = await h.sync.applyUpdate({ channel: "beta", version: "1.1.0" });
+    expect(refused).toMatchObject({ status: 409, body: { code: "recovery_choice_required", operationId: expect.any(String),
+      target: { channel: "beta", version: "1.1.0" }, choices: ["database_set", "cancel"], gatewayHeld: true } });
+    const pending = h.store.readState().databaseRecoveryPending;
+    const applied = await h.sync.applyUpdate({ channel: "beta", version: "1.1.0", recoveryMode: "database_set" });
+    expect(applied).toMatchObject({ status: 202, body: { ok: true, recovery: { databases: { complete: true, verified: true } } } });
+    expect(pending.baseline.databases).toHaveLength(1);
+    expect(h.store.readState().databaseRecoveryPending).toBeNull();
+  });
+
+  it("refuses protected pending updates when an original database is missing", async () => {
+    const h = await setup();
+    const hold = await h.lock.acquire("database_verification");
+    expect((await h.sync.verifyDatabaseRecovery({ hold, expectedHold: h.expectedHold })).ok).toBe(true);
+    hold();
+    const pending = h.store.readState().databaseRecoveryPending;
+    fs.rmSync(h.dbPath);
+    expect(await h.sync.applyUpdate({ channel: "beta", version: "1.1.0", recoveryMode: "database_set" })).toMatchObject({
+      status: 409, body: { code: "required_database_missing" },
+    });
+    expect(h.store.readState().databaseRecoveryPending).toEqual(pending);
+    expect(h.dbQuiet).not.toHaveBeenCalled();
+    expect(h.restartProcess).not.toHaveBeenCalled();
+  });
+
+  it("rechecks pending coverage under the apply lease before stopping or copying", async () => {
+    const h = await setup({ onApplyAcquire: (harness) => fs.rmSync(path.join(harness.openclawDir, "state", "openclaw.sqlite")) });
+    const hold = await h.lock.acquire("database_verification");
+    expect((await h.sync.verifyDatabaseRecovery({ hold, expectedHold: h.expectedHold })).ok).toBe(true);
+    hold();
+    const pending = h.store.readState().databaseRecoveryPending;
+    h.gatewayQuiesce.isRunning.mockResolvedValue(true);
+    const applied = await h.sync.applyUpdate({ channel: "beta", version: "1.1.0", recoveryMode: "database_set" });
+    expect(applied).toMatchObject({ status: 409, body: { code: "required_database_missing" } });
+    expect(h.store.readState().databaseRecoveryPending).toEqual(pending);
+    expect(h.gatewayQuiesce.stop).not.toHaveBeenCalled();
+    expect(h.dbQuiet).not.toHaveBeenCalled();
+    expect(h.restartProcess).not.toHaveBeenCalled();
+  });
+
+  it("offers and consumes the existing human forward-only choice for a compatible pending update", async () => {
+    const h = await setup();
+    const hold = await h.lock.acquire("database_verification");
+    expect((await h.sync.verifyDatabaseRecovery({ hold, expectedHold: h.expectedHold })).ok).toBe(true);
+    hold();
+    const target = { channel: "beta", version: "1.1.0", consentSessionId: "confirmed-human" };
+    const offered = await h.sync.applyUpdate(target);
+    expect(offered).toMatchObject({ status: 409, body: { code: "recovery_choice_required", backupRiskEligible: true,
+      choices: ["database_set", "forward_only", "cancel"] } });
+    const consent = await h.sync.requestBackupRiskConsent({ operationId: offered.body.operationId, consentSessionId: target.consentSessionId });
+    expect(consent).toMatchObject({ status: 200, body: { ok: true } });
+    const applied = await h.sync.applyUpdate({ ...target, confirmNoBackup: true, confirmNoBackupToken: consent.body.confirmNoBackupToken });
+    expect(applied).toMatchObject({ status: 202, body: { ok: true, recovery: { kind: "forward_only", consent: { recorded: true } } } });
+    expect(h.store.readState().databaseRecoveryPending).toBeNull();
+  });
+
+  it("preserves a changed pending record instead of committing an older protected update", async () => {
+    const h = await setup();
+    const hold = await h.lock.acquire("database_verification");
+    expect((await h.sync.verifyDatabaseRecovery({ hold, expectedHold: h.expectedHold })).ok).toBe(true);
+    hold();
+    const run = h.runner.runStreamed.getMockImplementation();
+    let changed = false;
+    h.runner.runStreamed.mockImplementation(async (options) => {
+      if (!changed && options.args?.includes("--version")) {
+        changed = true;
+        h.store.updateState((s) => { s.databaseRecoveryPending.recoveryId = "newer-pending"; return s; });
+      }
+      return run(options);
+    });
+    const applied = await h.sync.applyUpdate({ channel: "beta", version: "1.1.0", recoveryMode: "database_set" });
+    expect(applied).toMatchObject({ status: 409, body: { code: "recovery_source_changed" } });
+    expect(h.store.readState().databaseRecoveryPending.recoveryId).toBe("newer-pending");
+    expect(h.dbQuiet).not.toHaveBeenCalled();
+    expect(h.restartProcess).not.toHaveBeenCalled();
+  });
+
+  it("does not resurrect a removed pending record during a protected update", async () => {
+    const h = await setup();
+    const hold = await h.lock.acquire("database_verification");
+    expect((await h.sync.verifyDatabaseRecovery({ hold, expectedHold: h.expectedHold })).ok).toBe(true);
+    hold();
+    h.gatewayQuiesce.isRunning.mockResolvedValue(true);
+    const run = h.runner.runStreamed.getMockImplementation();
+    let removed = false;
+    h.runner.runStreamed.mockImplementation(async (options) => {
+      if (!removed && options.args?.includes("--version")) {
+        removed = true;
+        h.store.updateState((state) => { state.databaseRecoveryPending = null; return state; });
+      }
+      return run(options);
+    });
+    const applied = await h.sync.applyUpdate({ channel: "beta", version: "1.1.0", recoveryMode: "database_set" });
+    expect(removed).toBe(true);
+    expect(applied).toMatchObject({ status: 409, body: { code: "recovery_source_changed" } });
+    expect(h.store.readState().databaseRecoveryPending).toBeNull();
+    expect(h.gatewayQuiesce.stop).not.toHaveBeenCalled();
+    expect(h.dbQuiet).not.toHaveBeenCalled();
+    expect(h.restartProcess).not.toHaveBeenCalled();
+  });
+
+  it("allows same-path database replacement but fences a Stop during assessment", async () => {
+    const h = await setup();
+    fs.rmSync(h.dbPath);
+    writeSqliteDb(h.dbPath, { userVersion: 17 });
+    const hold = await h.lock.acquire("database_verification");
+    let current = true;
+    const pending = h.sync.verifyDatabaseRecovery({ hold, expectedHold: h.expectedHold, isCurrent: () => current });
+    current = false;
+    expect(await pending).toMatchObject({ ok: false, code: "recovery_source_changed" });
+    expect(h.store.readState().gatewayHold).toEqual(h.expectedHold);
+    expect((await h.sync.verifyDatabaseRecovery({ hold, expectedHold: h.expectedHold })).ok).toBe(true);
+    hold();
+  });
+
+  it("requires explicit manual verification for legacy holds", async () => {
+    const h = await setup();
+    h.store.updateState((s) => { delete s.gatewayHold.databaseVerification; return s; });
+    const expectedHold = h.store.readState().gatewayHold;
+    const hold = await h.lock.acquire("restart");
+    expect(await h.sync.verifyDatabaseRecovery({ hold, expectedHold })).toMatchObject({ ok: false, code: "recovery_baseline_unavailable" });
+    expect((await h.sync.verifyDatabaseRecovery({ hold, expectedHold, manual: true })).ok).toBe(true);
+    hold();
+  });
+
+  it("binds launch authority to the live verified lease and freshly rechecks a failed pending attempt", async () => {
+    const h = await setup();
+    const hold = await h.lock.acquire("database_verification");
+    const first = await h.sync.verifyDatabaseRecovery({ hold, expectedHold: h.expectedHold });
+    expect(first.ok).toBe(true);
+    expect(h.policy.read({ hold })).toBeNull();
+    expect(h.policy.read({ hold: { isValid: () => true } })).not.toBeNull();
+    const pending = h.store.readState().databaseRecoveryPending;
+    hold();
+    expect(h.policy.read({ hold })).not.toBeNull();
+    expect(h.sync.isDatabaseRecoveryCurrent({ recoveryId: first.recoveryId })).toBe(true);
+    expect(h.policy.read()).not.toBeNull();
+    const nextHold = await h.lock.acquire("restart");
+    expect(h.policy.read({ hold: nextHold })).not.toBeNull();
+    fs.rmSync(h.dbPath);
+    expect(await h.sync.verifyDatabaseRecovery({ hold: nextHold, expectedPending: pending })).toMatchObject({ ok: false, code: "required_database_missing" });
+    expect(h.store.readState().databaseRecoveryPending).toEqual(pending);
+    writeSqliteDb(h.dbPath, { userVersion: 17 });
+    const next = await h.sync.verifyDatabaseRecovery({ hold: nextHold, expectedPending: pending });
+    expect(next.ok).toBe(true);
+    expect(next.recoveryId).not.toBe(first.recoveryId);
+    expect(h.policy.read({ hold: nextHold })).toBeNull();
+    expect(h.sync.isDatabaseRecoveryCurrent({ recoveryId: first.recoveryId })).toBe(false);
+    expect(h.sync.completeDatabaseRecovery({ recoveryId: next.recoveryId })).toEqual({ ok: true });
+    nextHold();
+  });
+
+  it("retains pending state when its fresh verification lease expires", async () => {
+    const h = await setup();
+    const hold = await h.lock.acquire("database_verification");
+    expect((await h.sync.verifyDatabaseRecovery({ hold, expectedHold: h.expectedHold })).ok).toBe(true);
+    const pending = h.store.readState().databaseRecoveryPending;
+    hold();
+    const nextHold = await h.lock.acquire("restart");
+    const verifying = h.sync.verifyDatabaseRecovery({ hold: nextHold, expectedPending: pending });
+    nextHold();
+    expect((await verifying).ok).toBe(false);
+    expect(h.store.readState().databaseRecoveryPending).toEqual(pending);
+    expect(h.policy.read({ hold: nextHold })).not.toBeNull();
+  });
+
+  it("revokes common mutation admission when its observed database disappears", async () => {
+    const h = await setup();
+    const hold = await h.lock.acquire("database_verification");
+    expect((await h.sync.verifyDatabaseRecovery({ hold, expectedHold: h.expectedHold })).ok).toBe(true);
+    const pending = h.store.readState().databaseRecoveryPending;
+    expect(h.policy.read({ hold })).toBeNull();
+    fs.renameSync(h.dbPath, `${h.dbPath}.held`);
+    expect(h.policy.read({ hold })).toMatchObject({ code: "database_recovery_pending" });
+    fs.renameSync(`${h.dbPath}.held`, h.dbPath);
+    expect(h.policy.read({ hold })).toMatchObject({ code: "database_recovery_pending" });
+    expect((await h.sync.verifyDatabaseRecovery({ hold, expectedPending: pending })).ok).toBe(true);
+    expect(h.policy.read({ hold })).toBeNull();
+    hold();
+  });
+
+  it("revokes common mutation admission when pending disappears without completion", async () => {
+    const h = await setup();
+    const hold = await h.lock.acquire("database_verification");
+    const result = await h.sync.verifyDatabaseRecovery({ hold, expectedHold: h.expectedHold });
+    expect(result.ok).toBe(true);
+    const pending = h.store.readState().databaseRecoveryPending;
+    expect(h.policy.read({ hold })).toBeNull();
+    h.store.updateState((state) => { state.databaseRecoveryPending = null; return state; });
+    expect(h.policy.read({ hold })).toMatchObject({ code: "recovery_source_changed" });
+    expect(h.sync.completeDatabaseRecovery({ recoveryId: result.recoveryId }).ok).toBe(false);
+    h.store.updateState((state) => { state.databaseRecoveryPending = pending; return state; });
+    expect(h.policy.read({ hold })).toMatchObject({ code: "database_recovery_pending" });
+    hold();
+  });
+
+  it("retains readiness evidence after lease release without retaining mutation authority", async () => {
+    const h = await setup({ policyFacade: true });
+    const hold = await h.lock.acquire("database_verification");
+    const result = await h.sync.verifyDatabaseRecovery({ hold, expectedHold: h.expectedHold });
+    expect(result.ok).toBe(true);
+    expect(h.policy.read({ hold })).toBeNull();
+    hold();
+    expect(h.sync.isDatabaseRecoveryCurrent({ recoveryId: result.recoveryId })).toBe(true);
+    expect(h.policy.read({ hold })).not.toBeNull();
+    expect(h.policy.read()).not.toBeNull();
+    expect(h.sync.completeDatabaseRecovery({ recoveryId: result.recoveryId })).toEqual({ ok: true });
+    expect(h.policy.read()).toBeNull();
+  });
+
+  it("refuses manual legacy verification when only a noncanonical database survives", async () => {
+    const h = await setup();
+    h.store.updateState((s) => { delete s.gatewayHold.databaseVerification; return s; });
+    fs.renameSync(h.dbPath, path.join(path.dirname(h.dbPath), "aux.sqlite"));
+    const hold = await h.lock.acquire("restart");
+    const result = await h.sync.verifyDatabaseRecovery({ hold, expectedHold: h.store.readState().gatewayHold, manual: true });
+    expect(result).toMatchObject({ ok: false, code: "required_database_missing" });
+    expect(h.store.readState().gatewayHold).not.toBeNull();
+    hold();
+  });
+
+  it("does not let boot consume pending recovery over an unrelated newer hold", async () => {
+    const h = await setup();
+    const hold = await h.lock.acquire("database_verification");
+    expect((await h.sync.verifyDatabaseRecovery({ hold, expectedHold: h.expectedHold })).ok).toBe(true);
+    hold();
+    h.store.updateState((s) => { s.gatewayHold = { reason: "config_migration_failed", operationId: "newer" }; return s; });
+    expect((await h.sync.assessLaunchCompatibilityAtBoot()).compatible).toBe(false);
+    expect(h.store.readState().gatewayHold).toMatchObject({ reason: "config_migration_failed", operationId: "newer" });
+    expect(h.store.readState().databaseRecoveryPending).not.toBeNull();
+  });
+
+  it("never upgrades malformed pending evidence into automatic recovery authority", async () => {
+    const h = await setup();
+    h.store.updateState((s) => { s.gatewayHold = null; s.databaseRecoveryPending = { recoveryId: "broken" }; return s; });
+    expect((await h.sync.assessLaunchCompatibilityAtBoot()).compatible).toBe(false);
+    expect(h.store.readState().gatewayHold.databaseVerification).toBeFalsy();
+    expect((await h.sync.assessLaunchCompatibilityAtBoot()).compatible).toBe(false);
+    expect(h.store.readState().gatewayHold.databaseVerification).toBeFalsy();
+  });
+
+  it("never clears or completes over a newer hold or changed configuration", async () => {
+    const h = await setup();
+    const hold = await h.lock.acquire("database_verification");
+    const pending = h.sync.verifyDatabaseRecovery({ hold, expectedHold: h.expectedHold });
+    h.store.updateState((s) => { s.gatewayHold.operationId = "newer"; return s; });
+    expect((await pending).ok).toBe(false);
+    expect(h.store.readState().gatewayHold.operationId).toBe("newer");
+    const expectedHold = h.store.readState().gatewayHold;
+    const result = await h.sync.verifyDatabaseRecovery({ hold, expectedHold });
+    expect(result.ok).toBe(true);
+    fs.writeFileSync(path.join(h.openclawDir, "openclaw.json"), '{"changed":true}');
+    expect(h.sync.isDatabaseRecoveryCurrent({ recoveryId: result.recoveryId })).toBe(false);
+    expect(h.sync.completeDatabaseRecovery({ recoveryId: result.recoveryId }).ok).toBe(false);
+    expect(h.store.readState().databaseRecoveryPending.recoveryId).toBe(result.recoveryId);
+    hold();
+  });
+});
 
 describe("server/openclaw-channel-sync", () => {
   afterEach(() => {

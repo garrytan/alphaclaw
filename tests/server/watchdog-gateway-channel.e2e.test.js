@@ -416,7 +416,7 @@ describe("server/watchdog gateway + release channel (e2e)", { retry: 1 }, () => 
     expect(channel.notify).not.toHaveBeenCalled();
     const notices = crashLoopNotices(stack.notifier);
     expect(notices).toHaveLength(1);
-    expect(notices[0]).toContain("Automatic gateway restart paused; manual action required — use Retry (or Repair) from the Watchdog tab.");
+    expect(notices[0]).toContain("Automatic gateway restart paused; manual action required — use Restart (or Repair) from the Watchdog tab.");
     expect(stack.watchdog.getStatus().lifecycle).toBe("crash_loop");
   });
 
@@ -566,7 +566,7 @@ describe("server/watchdog gateway + release channel (e2e)", { retry: 1 }, () => 
     });
     const notices = crashLoopNotices(loopStack.notifier);
     expect(notices).toHaveLength(1);
-    expect(notices[0]).toContain("Automatic gateway restart paused; manual action required — use Retry (or Repair) from the Watchdog tab.");
+    expect(notices[0]).toContain("Automatic gateway restart paused; manual action required — use Restart (or Repair) from the Watchdog tab.");
   });
 
   it("forward-recovers a pin exit 78 to a blocklisted newer overlay exactly once (issue #21 bug 10)", async () => {
