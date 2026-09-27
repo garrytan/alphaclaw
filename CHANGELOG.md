@@ -5,6 +5,14 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.9.95] - 2026-09-27
+
+### Fixed
+
+- **Database recovery with transient SQLite files (#123):** recognize the pinned OpenClaw distribution's proven coordination and reindex artifacts without treating them as application databases or deleting them. Canonical and registered ownership, aliases, unknown producers and corrupt real databases still fail closed. Recovery retains the original database set across attempts and process restarts instead of accepting missing data as a repair.
+- **Usable Repair and Restart controls in every gateway state:** keep both recovery entry points available during startup, holds and active operations, with inline explanations and safe next steps. Check again is observational; a new human-confirmed Verify and start performs fresh, lease-owned verification before launch. Busy requests refuse immediately instead of replaying later, and automatic recovery respects intentional Stop, disabled repair and newer lifecycle state.
+- **Consistent bounded diagnostics:** share database discovery and compatibility assessment across boot, recovery and CLI/API diagnosis. Report selected-root evidence, exclusions, incomplete observations and pending readiness distinctly, bound worker concurrency and file reads, and preserve secret redaction and existing migration-consent requirements.
+
 ## [0.9.94] - 2026-09-26
 
 ### Fixed
