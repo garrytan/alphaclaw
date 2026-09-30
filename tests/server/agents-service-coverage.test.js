@@ -1143,6 +1143,138 @@ describe("server/agents/service coverage", () => {
       expect(promoted.agents.list[1].default).toBeFalsy();
     });
 
+    it("keeps an explicit-ownership roster free of default markers (#126)", () => {
+      const normalized = withNormalizedAgentsConfig({
+        OPENCLAW_DIR,
+        cfg: {
+          agents: {
+            ownership: "explicit",
+            defaults: { systemAgent: { agentId: "ops" } },
+            list: [
+              { id: "ops" },
+              { id: "stray", default: true },
+              { id: "side", default: false },
+            ],
+          },
+        },
+      });
+
+      expect(normalized.agents.ownership).toBe("explicit");
+      expect(normalized.agents.defaults).toEqual({
+        systemAgent: { agentId: "ops" },
+      });
+      expect(normalized.agents.list).toEqual([
+        { id: "ops" },
+        { id: "stray" },
+        { id: "side", default: false },
+      ]);
+    });
+
+    it("saves an explicit-ownership entries roster without stamping default (#126)", async () => {
+      const { fsMock, service } = buildService({
+        initialConfig: {
+          agents: {
+            ownership: "explicit",
+            defaults: { systemAgent: { agentId: "main" } },
+            entries: {
+              main: { workspace: "/tmp/openclaw/workspace" },
+              second: { workspace: "/tmp/openclaw/workspace-second" },
+            },
+          },
+        },
+      });
+
+      await service.updateAgent("second", { name: "Second" });
+
+      const saved = fsMock.readConfig().agents;
+      expect(saved.ownership).toBe("explicit");
+      expect(saved).not.toHaveProperty("list");
+      expect(Object.keys(saved.entries)).toEqual(["main", "second"]);
+      for (const entry of Object.values(saved.entries)) {
+        expect(entry).not.toHaveProperty("default");
+      }
+      expect(fsMock.writeFileSync).toHaveBeenCalled();
+    });
+
+    it("records the default as systemAgent on an explicit-ownership fleet (#126)", () => {
+      const { fsMock, service } = buildService({
+        initialConfig: {
+          agents: {
+            ownership: "explicit",
+            defaults: { systemAgent: { agentId: "main" } },
+            entries: {
+              main: { workspace: "/tmp/openclaw/workspace" },
+              second: { workspace: "/tmp/openclaw/workspace-second" },
+            },
+          },
+        },
+      });
+
+      expect(
+        service.listAgents().map((agent) => [agent.id, agent.default]),
+      ).toEqual([
+        ["main", true],
+        ["second", false],
+      ]);
+
+      const updated = service.setDefaultAgent("second");
+      expect(updated.default).toBe(true);
+
+      const saved = fsMock.readConfig().agents;
+      expect(saved.ownership).toBe("explicit");
+      expect(saved.defaults.systemAgent).toEqual({ agentId: "second" });
+      for (const entry of Object.values(saved.entries)) {
+        expect(entry).not.toHaveProperty("default");
+      }
+      expect(() => service.deleteAgent("second")).toThrow(
+        "Default agent cannot be deleted",
+      );
+    });
+
+    it("keeps the last agent of an explicit fleet (#126)", () => {
+      const { fsMock, service } = buildService({
+        initialConfig: {
+          agents: {
+            ownership: "explicit",
+            entries: { solo: { workspace: "/tmp/openclaw/workspace-solo" } },
+          },
+        },
+      });
+
+      expect(() => service.deleteAgent("solo")).toThrow(
+        "The only configured agent cannot be deleted",
+      );
+      expect(Object.keys(fsMock.readConfig().agents.entries)).toEqual(["solo"]);
+    });
+
+    it("refuses to delete an explicit fleet's ownership targets (#126)", () => {
+      const { fsMock, service } = buildService({
+        initialConfig: {
+          agents: {
+            ownership: "explicit",
+            defaults: {
+              systemAgent: { agentId: "main" },
+              authInheritance: { agentId: "creds" },
+            },
+            entries: {
+              main: { workspace: "/tmp/openclaw/workspace" },
+              creds: { workspace: "/tmp/openclaw/workspace-creds" },
+              spare: { workspace: "/tmp/openclaw/workspace-spare" },
+            },
+          },
+        },
+      });
+
+      expect(() => service.deleteAgent("creds")).toThrow(
+        'Agent "creds" owns agents.defaults.authInheritance.agentId and cannot be deleted',
+      );
+      expect(service.deleteAgent("spare")).toEqual({ ok: true });
+      expect(Object.keys(fsMock.readConfig().agents.entries)).toEqual([
+        "main",
+        "creds",
+      ]);
+    });
+
     it("rejects invalid workspace folder names", () => {
       expect(() =>
         resolveRequestedWorkspacePath({

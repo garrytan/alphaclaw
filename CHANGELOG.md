@@ -5,6 +5,12 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.9.96] - 2026-09-30
+
+### Fixed
+
+- **Explicit agent ownership survives agents-domain writes (#126):** on an `agents.ownership: "explicit"` fleet (what `openclaw doctor --fix` writes), roster saves no longer stamp `default: true` or add an implicit `main` entry, and a stray `default: true` is dropped. OpenClaw rejects that marker next to explicit ownership, so any agent, binding, channel-account or model save after `doctor --fix` used to leave a config the gateway would not start on (exit 78) and doctor could not repair. On such fleets "Set as default" now records `agents.defaults.systemAgent.agentId`, the agent list derives its default badge from it, and deleting refuses the last agent or any agent named by `agents.defaults.{systemAgent,heartbeat,authInheritance,sessionStore}.agentId`. Rosters without `ownership` behave as before.
+
 ## [0.9.95] - 2026-09-27
 
 ### Fixed
