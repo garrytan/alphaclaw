@@ -5,6 +5,17 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.9.97] - 2026-09-30
+
+### Fixed
+
+- **Timed-out OpenClaw CLIs no longer survive as orphans:** `clawCmd` ran `openclaw` through `exec` with its `timeout` option, which signals only the `/bin/sh -c` wrapper. dash does not exec the last command, so the `openclaw` process kept running under PID 1 and held OpenClaw's state lifecycle while AlphaClaw had already reported failure and started a rollback. Timed-out `pairing list` CLIs piled up behind the `/api/pairings` single-flight for the same reason.
+  - `clawCmd` now spawns the wrapper in its own process group. On timeout it signals the whole group, sends SIGKILL after a 5 s grace, and settles only once no group member can write.
+  - The WhatsApp QR login keeps the old leader-only kill (`killScope: "leader"`), because its CLI must finish linking after the call returns.
+  - Output is capped at 16 MiB (`exec` capped it at 1 MiB). An overflow still fails as `ERR_CHILD_PROCESS_STDIO_MAXBUFFER`.
+- **Channel account creation survives slow OpenClaw CLIs:** `channels add`, `agents bind` and `channels remove` now use a 180 s timeout instead of a hardcoded 30 s. `ALPHACLAW_CHANNEL_CMD_TIMEOUT_MS` overrides it.
+- **The channel token stays out of argv:** `channels add` now receives the `${…}` env reference for Telegram, Discord and Slack tokens instead of the secret itself.
+
 ## [0.9.95] - 2026-09-27
 
 ### Fixed

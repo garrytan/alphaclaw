@@ -967,6 +967,76 @@ describe("server/agents/service", () => {
     ).toThrow('Binding already assigned to agent "main"');
   });
 
+  it("never puts the channel secret in the CLI argv (env reference instead)", async () => {
+    const fsMock = buildFsMock({
+      initialConfig: { agents: { list: [{ id: "main", default: true }] } },
+    });
+    const clawCmd = vi.fn(async () => ({ ok: true, stdout: "", stderr: "" }));
+    const service = createAgentsService({
+      fs: fsMock,
+      OPENCLAW_DIR: "/tmp/openclaw",
+      readEnvFile: vi.fn(() => []),
+      writeEnvFile: vi.fn(),
+      reloadEnv: vi.fn(),
+      clawCmd,
+    });
+
+    await service.createChannelAccount({
+      provider: "telegram",
+      name: "Clients",
+      accountId: "clients",
+      token: "123456:secret-bot-token",
+      agentId: "main",
+    });
+
+    const argv = clawCmd.mock.calls.map((call) => call[0]).join("\n");
+    expect(argv).not.toContain("secret-bot-token");
+    expect(clawCmd.mock.calls[0][0]).toBe(
+      "channels add --channel 'telegram' --account 'clients' --name 'Clients' --token '${TELEGRAM_BOT_TOKEN_CLIENTS}'",
+    );
+    // The saved account carries the same reference, never the secret.
+    const saved = JSON.stringify(fsMock.readConfig());
+    expect(saved).not.toContain("secret-bot-token");
+    expect(fsMock.readConfig().channels.telegram.accounts.clients.botToken).toBe(
+      "${TELEGRAM_BOT_TOKEN_CLIENTS}",
+    );
+  });
+
+  it("uses ALPHACLAW_CHANNEL_CMD_TIMEOUT_MS for channel add/bind CLIs", async () => {
+    const previous = process.env.ALPHACLAW_CHANNEL_CMD_TIMEOUT_MS;
+    process.env.ALPHACLAW_CHANNEL_CMD_TIMEOUT_MS = "240000";
+    try {
+      const fsMock = buildFsMock({
+        initialConfig: { agents: { list: [{ id: "main", default: true }] } },
+      });
+      const clawCmd = vi.fn(async () => ({ ok: true, stdout: "", stderr: "" }));
+      const service = createAgentsService({
+        fs: fsMock,
+        OPENCLAW_DIR: "/tmp/openclaw",
+        readEnvFile: vi.fn(() => []),
+        writeEnvFile: vi.fn(),
+        reloadEnv: vi.fn(),
+        clawCmd,
+      });
+
+      await service.createChannelAccount({
+        provider: "telegram",
+        name: "Telegram",
+        accountId: "default",
+        token: "123:abc",
+        agentId: "main",
+      });
+
+      expect(clawCmd.mock.calls.map((call) => call[1])).toEqual([
+        { quiet: true, timeoutMs: 240000 },
+        { quiet: true, timeoutMs: 240000 },
+      ]);
+    } finally {
+      if (previous === undefined) delete process.env.ALPHACLAW_CHANNEL_CMD_TIMEOUT_MS;
+      else process.env.ALPHACLAW_CHANNEL_CMD_TIMEOUT_MS = previous;
+    }
+  });
+
   it("creates a first channel account with the base env key and binding", async () => {
     const fsMock = buildFsMock({
       initialConfig: {
@@ -1017,13 +1087,13 @@ describe("server/agents/service", () => {
     expect(reloadEnv).toHaveBeenCalled();
     expect(clawCmd).toHaveBeenNthCalledWith(
       1,
-      "channels add --channel 'telegram' --name 'Telegram' --token '123:abc'",
-      { quiet: true, timeoutMs: 30000 },
+      "channels add --channel 'telegram' --name 'Telegram' --token '${TELEGRAM_BOT_TOKEN}'",
+      { quiet: true, timeoutMs: 180000 },
     );
     expect(clawCmd).toHaveBeenNthCalledWith(
       2,
       "agents bind --agent 'main' --bind 'telegram:default'",
-      { quiet: true, timeoutMs: 30000 },
+      { quiet: true, timeoutMs: 180000 },
     );
     expect(fsMock.readConfig()).toEqual(
       expect.objectContaining({
@@ -1093,18 +1163,18 @@ describe("server/agents/service", () => {
       );
       expect(clawCmd).toHaveBeenNthCalledWith(
         1,
-        "channels add --channel 'telegram' --name 'Telegram' --token '123:abc'",
-        { quiet: true, timeoutMs: 30000 },
+        "channels add --channel 'telegram' --name 'Telegram' --token '${TELEGRAM_BOT_TOKEN}'",
+        { quiet: true, timeoutMs: 180000 },
       );
       expect(clawCmd).toHaveBeenNthCalledWith(
         2,
-        "channels add --channel 'telegram' --name 'Telegram' --token '123:abc'",
-        { quiet: true, timeoutMs: 30000 },
+        "channels add --channel 'telegram' --name 'Telegram' --token '${TELEGRAM_BOT_TOKEN}'",
+        { quiet: true, timeoutMs: 180000 },
       );
       expect(clawCmd).toHaveBeenNthCalledWith(
         3,
         "agents bind --agent 'main' --bind 'telegram:default'",
-        { quiet: true, timeoutMs: 30000 },
+        { quiet: true, timeoutMs: 180000 },
       );
       expect(fsMock.readConfig().channels.telegram.accounts.default).toEqual(
         expect.objectContaining({
@@ -1165,13 +1235,13 @@ describe("server/agents/service", () => {
     ]);
     expect(clawCmd).toHaveBeenNthCalledWith(
       1,
-      "channels add --channel 'telegram' --account 'alerts' --name 'Alerts' --token '456:def'",
-      { quiet: true, timeoutMs: 30000 },
+      "channels add --channel 'telegram' --account 'alerts' --name 'Alerts' --token '${TELEGRAM_BOT_TOKEN_ALERTS}'",
+      { quiet: true, timeoutMs: 180000 },
     );
     expect(clawCmd).toHaveBeenNthCalledWith(
       2,
       "agents bind --agent 'ops' --bind 'telegram:alerts'",
-      { quiet: true, timeoutMs: 30000 },
+      { quiet: true, timeoutMs: 180000 },
     );
     expect(fsMock.readConfig()).toEqual(
       expect.objectContaining({
@@ -1355,8 +1425,8 @@ describe("server/agents/service", () => {
     );
     expect(clawCmd).toHaveBeenNthCalledWith(
       1,
-      "channels add --channel 'telegram' --name 'Telegram' --token '123:abc'",
-      { quiet: true, timeoutMs: 30000 },
+      "channels add --channel 'telegram' --name 'Telegram' --token '${TELEGRAM_BOT_TOKEN}'",
+      { quiet: true, timeoutMs: 180000 },
     );
     expect(restartGateway).toHaveBeenCalledTimes(1);
   });
@@ -1411,13 +1481,13 @@ describe("server/agents/service", () => {
     expect(reloadEnv).toHaveBeenCalled();
     expect(clawCmd).toHaveBeenNthCalledWith(
       1,
-      "channels add --channel 'discord' --name 'Discord' --token 'discord-token'",
-      { quiet: true, timeoutMs: 30000 },
+      "channels add --channel 'discord' --name 'Discord' --token '${DISCORD_BOT_TOKEN}'",
+      { quiet: true, timeoutMs: 180000 },
     );
     expect(clawCmd).toHaveBeenNthCalledWith(
       2,
       "agents bind --agent 'main' --bind 'discord:default'",
-      { quiet: true, timeoutMs: 30000 },
+      { quiet: true, timeoutMs: 180000 },
     );
     expect(fsMock.readConfig()).toEqual(
       expect.objectContaining({
@@ -1495,8 +1565,8 @@ describe("server/agents/service", () => {
     ]);
     expect(clawCmd).toHaveBeenNthCalledWith(
       1,
-      "channels add --channel 'slack' --name 'Slack' --bot-token 'xoxb-bot-token' --app-token 'xapp-app-token'",
-      { quiet: true, timeoutMs: 30000 },
+      "channels add --channel 'slack' --name 'Slack' --bot-token '${SLACK_BOT_TOKEN}' --app-token '${SLACK_APP_TOKEN}'",
+      { quiet: true, timeoutMs: 180000 },
     );
     expect(fsMock.readConfig()).toEqual(
       expect.objectContaining({
@@ -1753,13 +1823,13 @@ describe("server/agents/service", () => {
     ]);
     expect(clawCmd).toHaveBeenNthCalledWith(
       1,
-      "channels add --channel 'slack' --account 'alerts' --name 'Slack Alerts' --bot-token 'xoxb-bot-token-2' --app-token 'xapp-app-token-2'",
-      { quiet: true, timeoutMs: 30000 },
+      "channels add --channel 'slack' --account 'alerts' --name 'Slack Alerts' --bot-token '${SLACK_BOT_TOKEN_ALERTS}' --app-token '${SLACK_APP_TOKEN_ALERTS}'",
+      { quiet: true, timeoutMs: 180000 },
     );
     expect(clawCmd).toHaveBeenNthCalledWith(
       2,
       "agents bind --agent 'main' --bind 'slack:alerts'",
-      { quiet: true, timeoutMs: 30000 },
+      { quiet: true, timeoutMs: 180000 },
     );
     expect(fsMock.readConfig()).toEqual(
       expect.objectContaining({
@@ -2674,7 +2744,7 @@ describe("server/agents/service", () => {
     expect(result).toEqual({ ok: true });
     expect(clawCmd).toHaveBeenCalledWith(
       "channels remove --channel 'telegram' --account 'alerts' --delete",
-      { quiet: true, timeoutMs: 30000 },
+      { quiet: true, timeoutMs: 180000 },
     );
     expect(writeEnvFile).toHaveBeenCalledWith([
       { key: "TELEGRAM_BOT_TOKEN", value: "123:abc" },
@@ -2740,7 +2810,7 @@ describe("server/agents/service", () => {
     expect(result).toEqual({ ok: true });
     expect(clawCmd).toHaveBeenCalledWith(
       "channels remove --channel 'telegram' --account 'default' --delete",
-      { quiet: true, timeoutMs: 30000 },
+      { quiet: true, timeoutMs: 180000 },
     );
     expect(writeEnvFile).toHaveBeenCalledWith([]);
     expect(reloadEnv).toHaveBeenCalled();
@@ -2886,7 +2956,7 @@ describe("server/agents/service", () => {
     expect(result).toEqual({ ok: true });
     expect(clawCmd).toHaveBeenCalledWith(
       "channels remove --channel 'whatsapp' --account 'default' --delete",
-      { quiet: true, timeoutMs: 30000 },
+      { quiet: true, timeoutMs: 180000 },
     );
     expect(writeEnvFile).toHaveBeenCalledWith([]);
     expect(reloadEnv).toHaveBeenCalled();

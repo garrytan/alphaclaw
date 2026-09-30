@@ -877,10 +877,12 @@ describe("server/agents/service coverage", () => {
         stderr: "",
         completed: true,
       });
+      // Leader-only kill: the login CLI must keep linking after the QR call.
       expect(clawCmd).toHaveBeenCalledWith("channels login --channel 'whatsapp'", {
         quiet: true,
         timeoutMs: 12000,
         killSignal: "SIGKILL",
+        killScope: "leader",
       });
 
       const status = service.getChannelAccountLoginStatus({
