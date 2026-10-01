@@ -5,6 +5,12 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [Unreleased]
+
+### Fixed
+
+- **Container memory critical no longer fires on page cache (#125):** container pressure (the `container_critical` latch and the container side of the gateway growth predicate) now uses the cgroup working set, `memory.current` minus `inactive_file` from the same cgroup's `memory.stat` (`total_inactive_file` on cgroup v1), as `docker stats` reports it. Raw usage stays in `usedBytes` for Resources, and stands in when `memory.stat` is unreadable or inactive file pages are not below usage. The alert, Doctor card and Watchdog row name the working set.
+
 ## [0.9.95] - 2026-09-27
 
 ### Fixed

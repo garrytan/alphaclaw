@@ -643,7 +643,7 @@ describe("server/doctor/deterministic-checks", () => {
       const cards = build({ memoryTrend: leakTrend(state, { container: containerTrend() }) });
       const card = memCard(cards, "det:container-memory-critical:");
       expect(card).toMatchObject({ priority: "P0", sourceKey: "det:container-memory-critical:container-1700000000000" });
-      expect(card.summary).toContain("Latest measured container usage: 950 MiB / 1000 MiB limit");
+      expect(card.summary).toContain("Latest measured container working set: 950 MiB / 1000 MiB limit");
       expect(card.recommendation).toContain("Container pressure alone does not authorize a gateway restart");
       expect(card.fixPrompt).toContain("without subtracting summed RSS from container usage");
       if (state === "critical") expect(memCard(cards, "det:gateway-memory-leak-critical:")).toBeTruthy();
@@ -657,7 +657,7 @@ describe("server/doctor/deterministic-checks", () => {
     ])("keeps a latched container warning with explicit unavailable freshness (%j)", (extra) => {
       const cards = build({ memoryTrend: leakTrend("no_gateway", { container: containerTrend(extra) }) });
       const card = memCard(cards, "det:container-memory-critical:");
-      expect(card.summary).toContain("Last known container usage");
+      expect(card.summary).toContain("Last known container working set");
       expect(card.summary).toContain("Fresh evidence unavailable");
       expect(JSON.stringify(card)).not.toContain("/private/path");
     });

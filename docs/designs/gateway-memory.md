@@ -20,8 +20,11 @@ is partial evidence and cannot confirm a restart. Static process roles do not
 identify MCP sessions, activity, or orphaned children.
 
 RSS counts shared pages in every process. It is not an additive decomposition of
-cgroup usage. The container bar therefore shows only measured usage/limit;
-process RSS is displayed separately. Linux `smaps_rollup` provides a paired RSS,
+cgroup usage. Container pressure therefore uses only the cgroup's own working
+set over its limit: usage minus `inactive_file` from the same cgroup's
+`memory.stat` (`total_inactive_file` on v1), as `docker stats` reports it
+(#125). Raw usage stands in when `memory.stat` is unreadable, and when inactive
+file pages are not below usage. Process RSS is displayed separately. Linux `smaps_rollup` provides a paired RSS,
 PSS, and private-page sample on the first opportunity and then every five minutes.
 At most 128 processes and 16 KiB per file are read, including every short read.
 A file that fills the buffer is rejected without reading an extra byte to check
