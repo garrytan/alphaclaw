@@ -362,6 +362,14 @@ describe("classifyOwnershipConflict (exit-1 wording of a losing gateway contende
       holderPid: null,
       holderRole: null,
     },
+    {
+      // 2026.9.8 (captured from the container tier): the lease refusal is
+      // wrapped in the generic ownership failure on the same line.
+      text: "[gateway] Gateway failed to start: failed to acquire gateway state ownership | Another Gateway owner lease is still active for this state directory",
+      kind: "owner_lease_held",
+      holderPid: null,
+      holderRole: null,
+    },
   ];
 
   it("names the transient kinds the watchdog gives backoff relaunches only (frozen set)", () => {

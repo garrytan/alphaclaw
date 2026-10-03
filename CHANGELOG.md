@@ -58,6 +58,15 @@ the pin's only source of truth.
   both 2026.9.5 and 2026.9.8) with its two tables. A newer version is reported
   as incompatible, and any other shape stays unverified. The file is still
   inventoried and backed up with the state directory.
+- **A stale gateway-owner lease is recognized again after an unclean
+  container death.** 2026.9.8 prints the v0.9.88 lease refusal inside the
+  generic ownership failure, on one line: "failed to acquire gateway state
+  ownership | Another Gateway owner lease is still active …". The generic half
+  matched the state-writer family first, so the watchdog put a fresh container
+  on the state-writer backoff ladder. That ladder never waits out or reclaims
+  the foreign lease, and the gateway parked. A line that carries the lease
+  wording is now classified `owner_lease_held`. A separate state-writer line in
+  the same tail still outranks it.
 - **Transient SQLite artifacts stay recognized on the new pin.** The #123
   producer contract trusted only 2026.9.5's exact memory-core bytes, so on
   2026.9.8 every generation/reindex lease file would have failed recovery and
