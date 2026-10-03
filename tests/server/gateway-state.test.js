@@ -727,6 +727,13 @@ describe("server/gateway-state reducer", () => {
     );
   });
 
+  it("stays Starting while a green /health comes from an unverified replacement, Running once it is proven", () => {
+    const pending = { pid: 4242, source: "boot", intent: "relaunch_if_absent", since: "2027-01-15T00:00:00.000Z", deadline: "2027-01-15T00:05:00.000Z" };
+    const base = { lifecycle: "running", health: "healthy", safeMode: false };
+    expect(reduceGatewayState(inputs({ watchdog: { ...base, replacementPending: pending } })).state).toBe("starting");
+    expect(reduceGatewayState(inputs({ watchdog: { ...base, gatewayPid: 4242, replacementPending: null } })).state).toBe("running");
+  });
+
   it("passes replacementPending through verbatim (stable values for the SSE dedupe) and drops non-objects", () => {
     const pending = {
       pid: 4242,

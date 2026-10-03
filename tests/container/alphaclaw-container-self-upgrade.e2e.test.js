@@ -217,9 +217,12 @@ describeContainer("container E2E: immutable v0.9.76 → candidate self-upgrade r
         mode: before.gateway.mode,
         bind: before.gateway.bind,
         port: before.gateway.port,
-        auth: { token: kGatewayToken },
         controlUi: { basePath: "/openclaw" },
       });
+      // AlphaClaw keeps the gateway token in the environment: a literal
+      // token in openclaw.json becomes the ${OPENCLAW_GATEWAY_TOKEN} reference
+      // (the container env carries the same value).
+      expect([kGatewayToken, "${OPENCLAW_GATEWAY_TOKEN}"]).toContain(configAfter.gateway.auth?.token);
       const claim = await readJson(kContainers[1], `${kManaged}/alphaclaw-server.pid`);
       expect(claim.format).toBe(2);
       expect(claim.startTicks).toBeGreaterThan(0);
