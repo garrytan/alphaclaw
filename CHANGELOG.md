@@ -47,6 +47,17 @@ the pin's only source of truth.
 
 ### Fixed
 
+- **The gateway no longer holds on OpenClaw's quarantine registry.** 2026.9.8
+  records agent integrity checks in `state/openclaw-quarantine.sqlite` on
+  every run, so this file now exists on every box. Recovery inventory treated
+  every `state/*.sqlite` as the shared-state database. It required
+  `schema_meta` ownership from this file, which the quarantine store does not
+  have, and then held boot with `state_db_unverified`. The container tier
+  caught this on fresh and seeded volumes. The probe now applies upstream's own
+  quarantine contract: `user_version` 2 (`OPENCLAW_QUARANTINE_SCHEMA_VERSION` in
+  both 2026.9.5 and 2026.9.8) with its two tables. A newer version is reported
+  as incompatible, and any other shape stays unverified. The file is still
+  inventoried and backed up with the state directory.
 - **Transient SQLite artifacts stay recognized on the new pin.** The #123
   producer contract trusted only 2026.9.5's exact memory-core bytes, so on
   2026.9.8 every generation/reindex lease file would have failed recovery and

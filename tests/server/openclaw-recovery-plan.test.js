@@ -123,6 +123,21 @@ describe("bounded config-first recovery planner", () => {
     expect(future.perDb.every((entry) => entry.reasons.includes("unsupported_target_schema_contract"))).toBe(true);
   });
 
+  it("judges OpenClaw's quarantine registry by its own contract, not the state schema", async () => {
+    database("state/openclaw.sqlite", 19);
+    const quarantine = new DatabaseSync(path.join(root, "state/openclaw-quarantine.sqlite"));
+    handles.push(quarantine);
+    quarantine.exec("PRAGMA user_version = 2; CREATE TABLE quarantined_databases (path TEXT PRIMARY KEY); CREATE TABLE agent_integrity_verifications (path TEXT PRIMARY KEY)");
+    const result = await inspect({ state: 19, agent: 24 });
+    expect(result).toMatchObject({ compatible: true, migrationRequired: false, byKind: { state: { count: 2, foundVersion: 19 } } });
+    quarantine.exec("PRAGMA user_version = 3");
+    const newer = await inspect({ state: 19, agent: 24 });
+    expect(newer.compatible).toBe(false);
+    expect(newer.perDb.find((entry) => entry.archivePath === "state/openclaw-quarantine.sqlite").reasons).toEqual(["database_schema_newer_than_target"]);
+    quarantine.exec("PRAGMA user_version = 2; DROP TABLE agent_integrity_verifications");
+    expect((await inspect({ state: 19, agent: 24 })).reasons).toContain("unsupported_source_schema_contract");
+  });
+
   it("reports observed versions even when the executing schema contract is unknown", async () => {
     database("state/openclaw.sqlite", 12);
     expect(await inspect({ state: null, agent: null })).toMatchObject({ compatible: null, perDb: [expect.objectContaining({ userVersion: 12, contentVersion: 12, hasApplicationTables: true, reasons: ["unsupported_target_schema_contract"] })] });
