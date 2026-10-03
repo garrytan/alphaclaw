@@ -21,7 +21,7 @@ describe("bounded recovery assessment", () => {
   const database = (file = "state/openclaw.sqlite") => {
     fs.mkdirSync(path.dirname(path.join(root, file)), { recursive: true });
     const db = new DatabaseSync(path.join(root, file));
-    db.exec("PRAGMA user_version=17; CREATE TABLE schema_meta(meta_key TEXT,role TEXT,schema_version INTEGER,agent_id TEXT); INSERT INTO schema_meta VALUES('primary','global',17,NULL)");
+    db.exec("PRAGMA user_version=19; CREATE TABLE schema_meta(meta_key TEXT,role TEXT,schema_version INTEGER,agent_id TEXT); INSERT INTO schema_meta VALUES('primary','global',19,NULL)");
     db.close();
   };
 
@@ -30,7 +30,7 @@ describe("bounded recovery assessment", () => {
     fs.writeFileSync(path.join(root, "state/main.sqlite.generation-lock.sqlite"), "scratch");
     const result = await assessRecoveryState(options());
     expect(result).toMatchObject({ compatible: true, migrationRequired: false, assessment: "complete", complete: true, installationEvidence: "present",
-      supported: { state: 17, agent: 21, source: { state: "declared", agent: "declared" }, declared: { metadata: "valid" }, table: { installedEntry: { state: 17, agent: 21 } } } });
+      supported: { state: 19, agent: 24, source: { state: "declared", agent: "declared" }, declared: { metadata: "valid" }, table: { installedEntry: { state: 19, agent: 24 } } } });
     expect(result.excludedArtifacts).toHaveLength(1);
     expect(result.inventory).toMatchObject({ rootIdentity: { ino: expect.any(Number) }, dbs: [expect.objectContaining({ archivePath: "state/openclaw.sqlite", sourceIdentity: { dev: expect.any(Number), ino: expect.any(Number) } })] });
     expect(Date.parse(result.observedAt)).not.toBeNaN();
@@ -56,7 +56,7 @@ describe("bounded recovery assessment", () => {
     expect(result.executingBuild).toEqual(executingBuild);
     expect(result.targetBuild).toEqual(targetBuild);
     expect(result.inventory.executingBuild).toEqual(executingBuild);
-    expect(result.supported).toMatchObject({ state: 17, agent: 21 });
+    expect(result.supported).toMatchObject({ state: 19, agent: 24 });
     expect(result.compatible).toBe(qualifiedProducer ? true : null);
     expect(result.excludedArtifacts).toHaveLength(qualifiedProducer ? 1 : 0);
     if (!qualifiedProducer) expect(result.reasons).toContain("unsupported_transient_artifact_contract");
@@ -68,7 +68,7 @@ describe("bounded recovery assessment", () => {
     fs.writeFileSync(path.join(root, "state/main.sqlite.generation-lock.sqlite"), "scratch");
     const targetBuild = copyPinnedBuild(path.join(root, "target"), "dev");
     fs.writeFileSync(path.join(targetBuild.packageDir, "package.json"), JSON.stringify({ version: targetBuild.version, openclaw: { schemaVersions: { state: 16, agent: 21 } } }));
-    const result = await assessRecoveryState({ ...options(), executingBuild: { ...pinnedBuild, schemas: { state: 17, agent: 21 } }, targetBuild });
+    const result = await assessRecoveryState({ ...options(), executingBuild: { ...pinnedBuild, schemas: { state: 19, agent: 24 } }, targetBuild });
     expect(result.excludedArtifacts).toHaveLength(1);
     expect(result.supported.state).toBe(16);
     expect(result).toMatchObject({ compatible: false, reasons: ["database_schema_newer_than_target"] });
@@ -177,12 +177,12 @@ describe("bounded recovery assessment", () => {
   });
 
   it("resolves CLI overlay execution inside the worker instead of choosing the dormant install", async () => {
-    const overlay = copyPinnedBuild(path.join(root, "openclaw-overlay/2026.9.5/node_modules/openclaw"), "overlay");
+    const overlay = copyPinnedBuild(path.join(root, `openclaw-overlay/${pinnedBuild.version}/node_modules/openclaw`), "overlay");
     fs.writeFileSync(path.join(overlay.packageDir, "openclaw.mjs"), "");
     const stateDir = path.join(root, ".openclaw");
     fs.mkdirSync(path.join(stateDir, ".alphaclaw/bin"), { recursive: true });
     fs.writeFileSync(path.join(stateDir, ".alphaclaw/bin/openclaw"), `#!/bin/sh\nexec node "${overlay.packageDir}/openclaw.mjs" "$@"\n`);
     const result = await runAssessmentInProcess({ stateDir, rootDir: root, openclawDir: stateDir, installDir: root, spawnEnv: {} });
-    expect(result.executingBuild).toMatchObject({ packageDir: overlay.packageDir, source: "overlay", version: "2026.9.5" });
+    expect(result.executingBuild).toMatchObject({ packageDir: overlay.packageDir, source: "overlay", version: pinnedBuild.version });
   });
 });

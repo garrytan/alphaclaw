@@ -3,7 +3,7 @@ const os = require("os");
 const path = require("path");
 const { createHash } = require("crypto");
 const { execFileSync } = require("child_process");
-const { matchSqliteArtifact, qualifySqliteArtifacts, kProducerContract } = require("../../lib/server/openclaw-sqlite-artifacts");
+const { matchSqliteArtifact, qualifySqliteArtifacts, kProducerContracts } = require("../../lib/server/openclaw-sqlite-artifacts");
 const { pinnedBuild, copyPinnedBuild, evidence } = require("../fixtures/sqlite-artifact-build");
 
 describe("producer-qualified SQLite artifacts", () => {
@@ -20,13 +20,13 @@ describe("producer-qualified SQLite artifacts", () => {
   });
   it.each(["lock.sqlite", "main.lock.sqlite", "generation-lock.sqlite", "main.generation-lock.sqlite", "main.sqlite.generation-lock.sqlite.bak", "main.sqlite.tmp-invalid", "main.sqlite.memory-reindex-11111111-2222-3333-4444-55555555555z", `main.sqlite.tmp-${uuid}.sqlite`, "main.sqlite", ".sqlite.reindex-lock.sqlite"])("retains nonmatching %s", (name) => expect(matchSqliteArtifact(name)).toBeNull());
   it("pins actual installed distribution bytes, not a mutable version claim", () => {
-    expect(kProducerContract.files).toEqual(evidence.files);
+    expect(kProducerContracts[evidence.version].files).toEqual(evidence.files);
     for (const [relative, hash] of Object.entries(evidence.files)) expect(createHash("sha256").update(fs.readFileSync(path.join(pinnedBuild.packageDir, relative))).digest("hex")).toBe(hash);
     expect(qualifySqliteArtifacts({ executingBuild: pinnedBuild })).toMatchObject({ qualified: true, families: ["generation-lock", "generation-writer", "reindex-lock", "memory-reindex"] });
     for (const source of ["installed", "overlay"]) expect(qualifySqliteArtifacts({ executingBuild: copyPinnedBuild(path.join(root, source), source) }).qualified).toBe(true);
   });
   it("never trusts missing, future, dev, changed, symlinked or oversized producer content", () => {
-    for (const executingBuild of [null, { version: evidence.version }, { ...pinnedBuild, source: "dev" }, { ...pinnedBuild, version: "2026.9.6" }]) expect(qualifySqliteArtifacts({ executingBuild }).qualified).toBe(false);
+    for (const executingBuild of [null, { version: evidence.version }, { ...pinnedBuild, source: "dev" }, { ...pinnedBuild, version: "2026.9.9" }]) expect(qualifySqliteArtifacts({ executingBuild }).qualified).toBe(false);
     const build = copyPinnedBuild(path.join(root, "copy"));
     const relative = Object.keys(evidence.files)[0];
     const file = path.join(build.packageDir, relative);
@@ -38,6 +38,10 @@ describe("producer-qualified SQLite artifacts", () => {
     fs.unlinkSync(file);
     fs.writeFileSync(file, Buffer.alloc(1024 * 1024 + 1));
     expect(qualifySqliteArtifacts({ executingBuild: build }).qualified).toBe(false);
+    const relabeled = copyPinnedBuild(path.join(root, "relabeled"));
+    const manifest = JSON.parse(fs.readFileSync(path.join(relabeled.packageDir, "package.json"), "utf8"));
+    fs.writeFileSync(path.join(relabeled.packageDir, "package.json"), JSON.stringify({ ...manifest, version: "2026.9.5" }));
+    expect(qualifySqliteArtifacts({ executingBuild: { ...relabeled, version: "2026.9.5" } }).qualified).toBe(false);
   });
 
   it.each(["package.json", ...Object.keys(evidence.files)])("refuses a real producer FIFO without waiting for a writer: %s", (relative) => {

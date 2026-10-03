@@ -114,6 +114,15 @@ describe("bounded config-first recovery planner", () => {
     expect(fs.readFileSync(path.join(root, "alias-target"), "utf8")).toBe("do not mutate");
   });
 
+  it("accepts the 2026.9.8 schema contracts (state 19, agent 24) and refuses the next unknown ones", async () => {
+    database("state/openclaw.sqlite", 19);
+    database("agents/main/agent/openclaw-agent.sqlite", 24, "agent", "main");
+    expect(await inspect({ state: 19, agent: 24 })).toMatchObject({ compatible: true, migrationRequired: false });
+    const future = await inspect({ state: 20, agent: 25 });
+    expect(future.compatible).toBeNull();
+    expect(future.perDb.every((entry) => entry.reasons.includes("unsupported_target_schema_contract"))).toBe(true);
+  });
+
   it("reports observed versions even when the executing schema contract is unknown", async () => {
     database("state/openclaw.sqlite", 12);
     expect(await inspect({ state: null, agent: null })).toMatchObject({ compatible: null, perDb: [expect.objectContaining({ userVersion: 12, contentVersion: 12, hasApplicationTables: true, reasons: ["unsupported_target_schema_contract"] })] });
@@ -350,7 +359,7 @@ describe("bounded config-first recovery planner", () => {
 
   it("refuses unsupported target generations and physical state-16 markers", async () => {
     const db = database("state/openclaw.sqlite", 16);
-    expect((await inspect({ state: 18, agent: 21 })).compatible).toBe(null);
+    expect((await inspect({ state: 20, agent: 21 })).compatible).toBe(null);
     db.exec("CREATE TABLE skill_workshop_proposals (workspace_dir TEXT)");
     expect((await inspect()).reasons).toContain("state_schema_16_requires_physical_shape_validation");
   });

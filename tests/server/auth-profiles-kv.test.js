@@ -49,7 +49,7 @@ const read = (version = 17) => {
 afterEach(() => { fs.rmSync(path.join(root, ".openclaw"), { recursive: true, force: true }); });
 afterAll(() => { delete process.env.ALPHACLAW_ROOT_DIR; fs.rmSync(root, { recursive: true, force: true }); });
 
-describe.each([12, 13, 16, 17])("auth shared schema %s", (version) => {
+describe.each([12, 13, 16, 17, 18, 19])("auth shared schema %s", (version) => {
   it.each([["api_key", "key", "keyRef"], ["token", "token", "tokenRef"]])("replaces inherited %s references only for a new nonempty inline source", (type, field, refField) => {
     seed(version);
     const id = "referenced:default";

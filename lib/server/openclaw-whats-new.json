@@ -4,7 +4,7 @@
     {
       "minor": "2026.9",
       "channel": "beta",
-      "lastVerifiedVersion": "2026.9.5",
+      "lastVerifiedVersion": "2026.9.8",
       "highlights": [
         {
           "title": "Node 24.16 or newer required",
@@ -12,8 +12,8 @@
           "tone": "info"
         },
         {
-          "title": "Agent database moves to schema 21",
-          "body": "2026.9.5 upgrades every agent database to schema 21 and 2026.9.4 moved the state database to schema 17; older builds cannot open either. AlphaClaw takes and verifies a backup before applying, and going back means restoring that backup with the matching older build — reinstalling the older package alone is not enough.",
+          "title": "Databases move to state 19 and agent 24",
+          "body": "2026.9.6 and 2026.9.7 upgrade the state database to schema 19 and every agent database to schema 24 (2026.9.8 changes neither); older builds cannot open them. AlphaClaw takes and verifies a backup before applying, and going back means restoring that backup with the matching older build — reinstalling the older package alone is not enough.",
           "tone": "info"
         },
         {
@@ -44,6 +44,31 @@
         {
           "title": "Replies survive restarts",
           "body": "Active, queued and delegated replies are recovered after a gateway restart instead of being dropped, interrupted memory rebuilds reuse completed work, and healthy agents stay online while another agent's database is checked.",
+          "tone": "info"
+        },
+        {
+          "title": "Group requests get an answer",
+          "body": "Since 2026.9.6 accepted group and channel requests require a reply by default, including unmentioned messages in groups set to accept them, so always-on groups may hear from the agent more often. Set agents.defaults.silentReply.group to \"allow\" to keep replies optional for unaddressed requests.",
+          "tone": "info"
+        },
+        {
+          "title": "Tasks and TaskFlow are gone",
+          "body": "2026.9.7 removes the Tasks and TaskFlow panels, commands and APIs; existing Task and Flow records are preserved. Use subagents, cron history or background processes instead.",
+          "tone": "info"
+        },
+        {
+          "title": "Channel webhooks on the gateway port",
+          "body": "Since 2026.9.7 Telegram, Feishu, Teams and Nextcloud Talk can receive webhooks on the gateway's own HTTP port. If you run a channel in webhook mode, follow Doctor's migration guidance and update the external callback URL before relying on it.",
+          "tone": "info"
+        },
+        {
+          "title": "Internal sessions always return results",
+          "body": "2026.9.8 retires silent completion for subagents and other internal sessions, along with automatic agent-to-agent back-and-forth. Custom workflows that relied on NO_REPLY, REPLY_SKIP or ANNOUNCE_SKIP must now handle the returned result and send follow-ups explicitly.",
+          "tone": "info"
+        },
+        {
+          "title": "More unauthenticated connections per IP",
+          "body": "2026.9.7 raises the gateway's allowance of pending, unauthenticated connections per IP from 32 to 128 so shared networks connect more reliably. Set OPENCLAW_MAX_PREAUTH_CONNECTIONS_PER_IP=32 and restart to restore the old limit.",
           "tone": "info"
         }
       ],
@@ -83,7 +108,7 @@
     {
       "minor": "2026.9",
       "channel": "stable",
-      "lastVerifiedVersion": "2026.9.5",
+      "lastVerifiedVersion": "2026.9.8",
       "highlights": [
         {
           "title": "Node 24.16 or newer required",
@@ -91,8 +116,8 @@
           "tone": "info"
         },
         {
-          "title": "Agent database moves to schema 21",
-          "body": "2026.9.5 upgrades every agent database to schema 21 and 2026.9.4 moved the state database to schema 17; older builds cannot open either. AlphaClaw takes and verifies a backup before applying, and going back means restoring that backup with the matching older build — reinstalling the older package alone is not enough.",
+          "title": "Databases move to state 19 and agent 24",
+          "body": "2026.9.6 and 2026.9.7 upgrade the state database to schema 19 and every agent database to schema 24 (2026.9.8 changes neither); older builds cannot open them. AlphaClaw takes and verifies a backup before applying, and going back means restoring that backup with the matching older build — reinstalling the older package alone is not enough.",
           "tone": "info"
         },
         {
@@ -123,6 +148,31 @@
         {
           "title": "Replies survive restarts",
           "body": "Active, queued and delegated replies are recovered after a gateway restart instead of being dropped, interrupted memory rebuilds reuse completed work, and healthy agents stay online while another agent's database is checked.",
+          "tone": "info"
+        },
+        {
+          "title": "Group requests get an answer",
+          "body": "Since 2026.9.6 accepted group and channel requests require a reply by default, including unmentioned messages in groups set to accept them, so always-on groups may hear from the agent more often. Set agents.defaults.silentReply.group to \"allow\" to keep replies optional for unaddressed requests.",
+          "tone": "info"
+        },
+        {
+          "title": "Tasks and TaskFlow are gone",
+          "body": "2026.9.7 removes the Tasks and TaskFlow panels, commands and APIs; existing Task and Flow records are preserved. Use subagents, cron history or background processes instead.",
+          "tone": "info"
+        },
+        {
+          "title": "Channel webhooks on the gateway port",
+          "body": "Since 2026.9.7 Telegram, Feishu, Teams and Nextcloud Talk can receive webhooks on the gateway's own HTTP port. If you run a channel in webhook mode, follow Doctor's migration guidance and update the external callback URL before relying on it.",
+          "tone": "info"
+        },
+        {
+          "title": "Internal sessions always return results",
+          "body": "2026.9.8 retires silent completion for subagents and other internal sessions, along with automatic agent-to-agent back-and-forth. Custom workflows that relied on NO_REPLY, REPLY_SKIP or ANNOUNCE_SKIP must now handle the returned result and send follow-ups explicitly.",
+          "tone": "info"
+        },
+        {
+          "title": "More unauthenticated connections per IP",
+          "body": "2026.9.7 raises the gateway's allowance of pending, unauthenticated connections per IP from 32 to 128 so shared networks connect more reliably. Set OPENCLAW_MAX_PREAUTH_CONNECTIONS_PER_IP=32 and restart to restore the old limit.",
           "tone": "info"
         }
       ],

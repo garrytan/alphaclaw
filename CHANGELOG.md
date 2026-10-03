@@ -5,6 +5,64 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.9.98] - 2026-10-03
+
+Pins OpenClaw **2026.9.8** (npm `latest` and `beta` since 2026-10-03; 2026.9.6
+and 2026.9.7 shipped in between). Engines are unchanged
+(`>=24.16.0 <25 || >=26.1.0`), so the Node 24.16 floor, the `node:24-slim`
+image and the CI matrix stand. `package.json`'s `dependencies.openclaw` stays
+the pin's only source of truth.
+
+### Changed
+
+- **Pin: `openclaw` 2026.9.5 → 2026.9.8.** Both skipped-over releases move a
+  database schema: 2026.9.6 publishes `openclaw.schemaVersions
+  { state: 18, agent: 23 }`, 2026.9.7 `{ state: 19, agent: 24 }`, and 2026.9.8
+  keeps `{ state: 19, agent: 24 }`. The seed table and the live database
+  fixture gain all three rows. Upstream documents that older builds cannot
+  open either new format, so going back to 2026.9.5 means restoring a verified
+  pre-upgrade backup with that build, never reinstall-and-boot.
+- **Recovery probe and shared auth store accept the new schemas.** The
+  recovery probe's supported-contract lists (state 15-17, agent 17-21) would
+  have reported every 2026.9.8 database as `unsupported_target_schema_contract`,
+  so recovery assessment could never call the pinned build compatible. The
+  shared auth store refused state schemas above 17. Both now cover state 18-19
+  and agent 22-24. That change follows a check against real databases created
+  by 2026.9.8: the `schema_meta` owner rows, `config_machine_state`
+  `state.schema.contentVersion` and `authProfiles.*` cells, and the
+  `update_runs.before_json` and `auth_profile_*` tables are unchanged.
+  Unknown future schemas still fail closed.
+- **"What's new" re-verified against 2026.9.8** for both 2026.9 entries. The
+  schema highlight now names state 19 and agent 24, and new highlights cover
+  group requests requiring an answer by default
+  (`agents.defaults.silentReply.group` `allow` → `disallow` since 2026.9.6), the
+  removal of Tasks/TaskFlow (2026.9.7), channel webhooks on the gateway port
+  (2026.9.7), internal sessions always returning results (2026.9.8) and the
+  higher per-IP pre-auth connection allowance (32 → 128, 2026.9.7).
+- **Ultra thinking now appears for every Codex model with a native effort**,
+  GPT-5.6 Luna included. Since 2026.9.7 upstream treats Ultra as a harness mode
+  separate from the model's reasoning controls and maps it down to the model's
+  highest effort at the provider boundary. AlphaClaw passes upstream's options
+  through unchanged.
+
+### Fixed
+
+- **Transient SQLite artifacts stay recognized on the new pin.** The #123
+  producer contract trusted only 2026.9.5's exact memory-core bytes, so on
+  2026.9.8 every generation/reindex lease file would have failed recovery and
+  backup inventory with `unsupported_transient_artifact_contract`. The contract
+  is now keyed by version. 2026.9.8's producers (`manager-vector-warning-*`,
+  memory-core `manager-runtime.js`, source `fc23bc86`) are re-hashed after
+  checking that the lease and shadow naming is identical upstream. 2026.9.8's
+  own backup now excludes the same families. 2026.9.5 stays qualified because
+  it is the pin-window rollback target.
+- **Backup lease contention on 2026.9.8.** Upstream retired
+  `OPENCLAW_STATE_LEASE_TIMEOUT`: an acquire that exhausts its wait now throws
+  `OPENCLAW_STATE_LEASE_HELD` ("<label> <scope>/<key> is held by <owner> (lease
+  epoch N)"). The #54 contention pattern matches both the code and that wording,
+  so a busy lease still takes the in-quiesce retry instead of failing the
+  backup outright.
+
 ## [0.9.95] - 2026-09-27
 
 ### Fixed

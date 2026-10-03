@@ -232,6 +232,9 @@ describe("looksLikeLockContention", () => {
       "timed out waiting for legacy audit migration lease migration.legacy-audit/filesystem-sqlite-boundary",
       "failed to acquire legacy audit migration lease migration.legacy-audit/filesystem-sqlite-boundary",
       "legacy audit migration lease migration.legacy-audit/filesystem-sqlite-boundary was lost",
+      // 2026.9.8 replaced the acquire timeout with OPENCLAW_STATE_LEASE_HELD.
+      "OPENCLAW_STATE_LEASE_HELD",
+      "legacy audit migration lease migration.legacy-audit/filesystem-sqlite-boundary is held by 4242:5f0c (lease epoch 7)",
     ];
     for (const text of fixtures) {
       expect(looksLikeLockContention(text), text).toBe(true);
@@ -251,6 +254,7 @@ describe("looksLikeLockContention", () => {
       "timed out waiting for https://registry.npmjs.org/openclaw",
       "failed to acquire artifact /tmp/openclaw-prepare-x/pkg.tgz",
       "download of /data/backups/openclaw/x.tar.gz was lost",
+      "/data/backups/openclaw/x.tar.gz is held by another process",
     ]) {
       expect(looksLikeLockContention(text), text).toBe(false);
     }

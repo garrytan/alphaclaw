@@ -443,6 +443,11 @@ describe("openclaw-schema-versions: schema table", () => {
       // v0.9.88 pin: 2026.9.4 moved state 16 → 17; 2026.9.5 moved agent 19 → 21.
       "2026.9.4": { state: 17, agent: 19 },
       "2026.9.5": { state: 17, agent: 21 },
+      // v0.9.98 pin: 2026.9.6 moved state 17 → 18 and agent 21 → 23; 2026.9.7
+      // moved state 18 → 19 and agent 23 → 24; 2026.9.8 changes neither.
+      "2026.9.6": { state: 18, agent: 23 },
+      "2026.9.7": { state: 19, agent: 24 },
+      "2026.9.8": { state: 19, agent: 24 },
     });
     expect(Object.isFrozen(kSeededSchemaVersions)).toBe(true);
     expect(Object.isFrozen(kSeededSchemaVersions["2026.9.2"])).toBe(true);

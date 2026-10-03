@@ -13,12 +13,19 @@ const loadExport = async (prefix, symbol) => {
 };
 
 const CronService = await loadExport("service-", "CronService");
-const readHistory = await loadExport("jobs-", "readCronTaskRunHistoryPage");
+// 2026.9.7+ CronService requires the gateway's scheduler as a dependency.
+const GatewayScheduler = await loadExport("gateway-scheduler-", "GatewayScheduler");
+// 2026.9.7 retired the Tasks-era readCronTaskRunHistoryPage; the gateway's
+// cron.runs handler now reads records and projects the page in two steps.
+const readCronRunRecords = await loadExport("read-only-", "readCronRunRecords");
+const projectCronRunHistoryPage = await loadExport("jobs-", "projectCronRunHistoryPage");
 const root = process.env.OPENCLAW_STATE_DIR;
 const storePath = path.join(root, "cron", "jobs.json");
 const events = [];
 let queued = 0;
+const scheduler = new GatewayScheduler();
 const cron = new CronService({
+  scheduler,
   storePath,
   cronEnabled: true,
   defaultAgentId: "main",
@@ -35,7 +42,7 @@ try {
     payload: { kind: "systemEvent", text: "Pinned runtime cron outcome" },
   });
   const result = await cron.run(job.id, "force");
-  const history = readHistory({ storeKey: storePath, jobId: job.id });
+  const history = projectCronRunHistoryPage(await readCronRunRecords(storePath, job.id), { storeKey: storePath, jobId: job.id });
   const version = JSON.parse(fs.readFileSync("node_modules/openclaw/package.json", "utf8")).version;
   fs.writeFileSync(process.argv[2], JSON.stringify({ version, jobId: job.id, result, queued, history, events }));
 } finally {

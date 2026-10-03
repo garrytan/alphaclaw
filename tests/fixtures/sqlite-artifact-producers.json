@@ -1,16 +1,16 @@
 {
-  "version": "2026.9.5",
-  "sourceCommit": "ec9c1a13db8938e5a3eaa51fca2e981cde2395a9",
-  "integrity": "sha512-TCO/ImVLh5HkF4tdfo7iriIa7kT6iYkIr/jR5ZOkePGFGhUx5Oe7DE716Y1DzzG2teRAVDdCjgJDu1A24Yta7w==",
+  "version": "2026.9.8",
+  "sourceCommit": "fc23bc864e4553c2d215e479eeec47b67a0bf943",
+  "integrity": "sha512-G+JkNUhtpDE3cXR4AEi2NyyG9fqI/T2WUSl8ZnR8AATH8Dh1kC3qYFL7wwPoZtgHiP/cszA86PEiE0PDysxb9Q==",
   "files": {
-    "dist/manager-vector-warning-Cqtw5AdB.mjs": "2221bc901be38886e0ff43440a72cfb0cf5f9caa55229b1b6c940461a5fc1455",
-    "dist/extensions/memory-core/manager-runtime.js": "1cf9dd954b0ec80192e74a025927394bf6d829c73d517f7033ea5407d8f01d05"
+    "dist/manager-vector-warning-DvM2vgA0.mjs": "6dd8c89d7521a7e62041939d72b54d8fb7d1465e1e78d99ded109ef2519cc8be",
+    "dist/extensions/memory-core/manager-runtime.js": "fb2e8de2a830f7f8ac5c41d620133a0e4df3c4366c6d58528cbab051eef903e4"
   },
   "sourceEvidence": {
-    "generation-writer": "manager-index-generation-lease.ts:62; manager-sqlite-lease.ts:65-135 — SQLite coordination lease, BEGIN IMMEDIATE and user_version=0",
-    "generation-lock": "manager-index-generation-lease.ts:75; manager-sqlite-lease.ts:65-135 — shared/exclusive SQLite coordination lease",
+    "generation-writer": "manager-index-generation-lease.ts:62; manager-sqlite-lease.ts:59-124 — SQLite coordination lease, BEGIN IMMEDIATE and user_version=0",
+    "generation-lock": "manager-index-generation-lease.ts:75; manager-sqlite-lease.ts:59-124 — shared/exclusive SQLite coordination lease",
     "reindex-lock": "manager-reindex-lock.ts:22 — SQLite reindex coordination lease",
-    "memory-reindex": "manager-sync-ops.ts:561-706 — const tempDbPath = `${dbPath}.memory-reindex-${randomUUID()}`; shadow rebuilt before transactional publication; manager-db.ts:35-50,148+ crash cleanup under reindex lease"
+    "memory-reindex": "manager-sync-ops.ts:504-639 — const tempDbPath = `${dbPath}.memory-reindex-${randomUUID()}`; shadow rebuilt before transactional publication; manager-db.ts:34-50,154+ crash cleanup under reindex lease"
   },
   "unprovenFamilies": ["backup", "tmp"]
 }

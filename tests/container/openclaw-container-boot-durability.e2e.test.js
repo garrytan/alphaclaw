@@ -466,7 +466,7 @@ describeContainer("container E2E: boot durability — legacy pidfile TID collisi
     expect(evidence.entries.some((row) => row.kind === "agent")).toBe(true);
     for (const file of kTransientLocks) {
       expect(evidence.excludedArtifacts).toEqual(expect.arrayContaining([
-        expect.objectContaining({ path: file, reason: "verified_openclaw_2026_9_5_producer" }),
+        expect.objectContaining({ path: file, reason: "verified_openclaw_2026_9_8_producer" }),
       ]));
       expect(evidence.entries.some((row) => row.path.endsWith(file))).toBe(false);
       const { stdout } = await execInContainer(kContainerB, ["node", "-e",
