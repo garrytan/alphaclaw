@@ -124,6 +124,8 @@ const gatewayConnect = ({ wsUrl, token, timeoutMs = 30_000 }) =>
         } else {
           finish({
             ok: false,
+            retryable: payload?.error?.retryable === true,
+            retryAfterMs: payload?.error?.retryAfterMs,
             error:
               payload?.error?.message || payload?.error?.code || "connect rejected",
           });
@@ -135,6 +137,20 @@ const gatewayConnect = ({ wsUrl, token, timeoutMs = 30_000 }) =>
       finish({ ok: false, error: "socket closed before connect result" }),
     );
   });
+
+// /health turns "running" as soon as the gateway serves HTTP, but connect
+// admission can still answer UNAVAILABLE "gateway starting; retry shortly"
+// with retryable: true (src/gateway/server/ws-connection/connect-admission.ts;
+// on 2026.9.8 the window outlasts the first connect). The Control UI honors
+// retryAfterMs; so does this probe, for a bounded time, and only for that.
+const gatewayConnectWhenAdmitted = async (params, deadlineMs = 60_000) => {
+  const deadline = Date.now() + deadlineMs;
+  for (;;) {
+    const result = await gatewayConnect(params);
+    if (!result.retryable || Date.now() >= deadline) return result;
+    await new Promise((resolve) => setTimeout(resolve, Math.max(250, Math.min(result.retryAfterMs || 500, 5_000))));
+  }
+};
 
 describeLive("live: dashboard launcher credential chain", () => {
   const cliUsable = openclawCliUsable();
@@ -323,7 +339,7 @@ describeLive("live: dashboard launcher credential chain", () => {
 
       // The Control UI's actual WS path: the ALPHACLAW origin, root path,
       // proxied by the catch-all upgrade to the loopback gateway.
-      const result = await gatewayConnect({
+      const result = await gatewayConnectWhenAdmitted({
         wsUrl: `ws://127.0.0.1:${port}/`,
         token,
       });
