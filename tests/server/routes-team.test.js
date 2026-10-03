@@ -201,7 +201,7 @@ describe("server/routes/team (4.5)", () => {
     const res = await enableTeam(cookie);
     expect(res.status).toBe(409);
     expect(res.body.code).toBe("capability_missing");
-    expect(res.body.error).toContain("beta channel");
+    expect(res.body.error).toContain("OpenClaw 2026.8 or newer");
   });
 
   it("enable creates the owner admin, writes trusted-proxy auth, restarts + probes inline", async () => {

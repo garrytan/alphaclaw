@@ -307,40 +307,7 @@ describe("server/gateway-state reducer", () => {
     }
   });
 
-  it("a reconciler hold routes both controls to safe inspection, never execution", () => {
-    for (const state of ["running", "config_error", "down", "flapping", "boot_failed", "degraded", "safe_mode", "unknown", "starting"]) {
-      const actions = actionsForState(state, {
-        operationActive: false,
-        inStabilizationWindow: false,
-        gatewayHeld: true,
-      });
-      for (const a of actions) {
-        if (["restart", "retry", "repair"].includes(a.id)) {
-          expect(a.disabledReason).toBeUndefined();
-          expect(a.disposition).toBe("inspect");
-          expect(a.resolution).toBe(state === "unknown" ? "diagnose" : "upgrade");
-        } else {
-          expect(a.disabledReason, `${state}/${a.id}`).toBeUndefined();
-        }
-      }
-    }
-    // Copy is generic on purpose: the Upgrade page picks the remedy.
-    expect(kLifecycleActionBlockReasons.gatewayHeld).toContain("Upgrade page");
-    expect(kLifecycleActionBlockReasons.gatewayHeld).not.toContain("Retry migration");
-  });
 
-  it("a hold never blocks Roll back: flapping inside the stabilization window keeps the danger action enabled", () => {
-    const actions = actionsForState("flapping", {
-      operationActive: false,
-      inStabilizationWindow: true,
-      gatewayHeld: true,
-    });
-    const rollBack = actions.find((a) => a.id === "roll_back");
-    expect(rollBack).toBeTruthy();
-    expect(rollBack.kind).toBe("danger");
-    expect(rollBack.disabledReason).toBeUndefined();
-    expect(actions.find((a) => a.id === "repair").resolution).toBe("upgrade");
-  });
 
   it("unknown (Status unavailable): Refresh stays primary, Restart is offered and enabled", () => {
     const result = reduceGatewayState(
@@ -356,18 +323,18 @@ describe("server/gateway-state reducer", () => {
     expect(kGatewayStateCatalog.flapping.glossary).toContain("relaunches without diagnosis");
   });
 
-  it("precedence: a live operation outranks hold inspection", () => {
-    const held = reduceGatewayState(
+  it("precedence: a live operation outranks execution", () => {
+    const busy = reduceGatewayState(
       inputs({
-        gatewayHeld: true,
         operation: { kind: "repair", label: "Repairing", startedAt: kNow },
       }),
     );
-    expect(held.actions.find((a) => a.id === "restart").disposition).toBe("attach");
-    const heldIdle = reduceGatewayState(inputs({ gatewayHeld: true }));
-    expect(heldIdle.actions.find((a) => a.id === "restart").resolution).toBe("upgrade");
+    expect(busy.actions.find((a) => a.id === "restart").disposition).toBe("attach");
+    expect(busy.actions.find((a) => a.id === "restart").resolution).toBe("operation");
     const clear = reduceGatewayState(inputs({}));
+    expect(clear.actions.find((a) => a.id === "restart").disposition).toBe("execute");
     expect(clear.actions.find((a) => a.id === "restart").disabledReason).toBeUndefined();
+    expect(Object.keys(kLifecycleActionBlockReasons).sort()).toEqual(["operation", "relaunch"]);
   });
 
   it("safe_mode glossary tells the truth: Restart does not resume paused channels", () => {
@@ -490,33 +457,6 @@ describe("server/gateway-state reducer", () => {
     expect(flapping.actions.find((a) => a.id === "repair").disabledReason).toBeUndefined();
   });
 
-  it("an unreadable hold remains inspect-only while both controls are usable", () => {
-    const result = reduceGatewayState(inputs({ gatewayHoldUnreadable: true }));
-    expect(result.actions.find((a) => a.id === "restart").reasonCode).toBe("gateway_hold_unreadable");
-    const down = actionsForState("down", {
-      operationActive: false,
-      inStabilizationWindow: false,
-      gatewayHoldUnreadable: true,
-    });
-    for (const id of ["restart", "repair"]) {
-      expect(down.find((a) => a.id === id).reasonCode).toBe("gateway_hold_unreadable");
-    }
-    // Precedence: operation > relaunch > unreadable > held.
-    const both = actionsForState("running", {
-      operationActive: false,
-      inStabilizationWindow: false,
-      gatewayHeld: true,
-      gatewayHoldUnreadable: true,
-    });
-    expect(both[0].reasonCode).toBe("gateway_hold_unreadable");
-    const relaunchWins = actionsForState("running", {
-      operationActive: false,
-      inStabilizationWindow: false,
-      gatewayHeld: true,
-      relaunchActive: true,
-    });
-    expect(relaunchWins[0].disposition).toBe("attach");
-  });
 
   it("projects observation with a reason while an operation is active", () => {
     const result = reduceGatewayState(
@@ -561,32 +501,21 @@ describe("server/gateway-state reducer", () => {
     expect(result.detail).toContain("estimated");
   });
 
-  it("offers roll_back only while flapping inside the stabilization window", () => {
-    const flapping = {
-      watchdog: {
-        lifecycle: "running",
-        health: "healthy",
-        safeMode: false,
-        crashCountInWindow: 2,
-        gatewayPid: 123,
-      },
-    };
-    const inWindow = reduceGatewayState(
-      inputs({ ...flapping, inStabilizationWindow: true }),
-    );
-    expect(inWindow.state).toBe("flapping");
-    expect(inWindow.actions).toContainEqual(
-      expect.objectContaining({
-        id: "roll_back",
-        label: "Roll back",
-        kind: "danger",
-        needsConfirm: true,
+  it("never offers roll_back, even while flapping", () => {
+    const flapping = reduceGatewayState(
+      inputs({
+        watchdog: {
+          lifecycle: "running",
+          health: "healthy",
+          safeMode: false,
+          crashCountInWindow: 2,
+          gatewayPid: 123,
+        },
+        inStabilizationWindow: true,
       }),
     );
-
-    const outsideWindow = reduceGatewayState(inputs(flapping));
-    expect(outsideWindow.state).toBe("flapping");
-    expect(outsideWindow.actions.some((a) => a.id === "roll_back")).toBe(false);
+    expect(flapping.state).toBe("flapping");
+    expect(flapping.actions.some((a) => a.id === "roll_back")).toBe(false);
   });
 
   it("keeps evidence honest: no estimate under managed supervision, estimate when detached and down", () => {

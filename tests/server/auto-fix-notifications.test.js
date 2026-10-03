@@ -271,59 +271,6 @@ describe("server/auto-fix notifications — autotune composition", () => {
   });
 });
 
-describe("server/auto-fix notifications — reconciler notice contracts", () => {
-  // Source-shape drift-guards for the boot-reconciler notices: the reconciler
-  // itself is exercised end-to-end by the channel journey/boot e2e suites
-  // (heavyweight fixtures); these pin the notification contracts — the
-  // condition, the id shape, and the stable-id rule — so a refactor can't
-  // silently drop or timestamp them.
-  const channelSyncSource = fs.readFileSync(
-    path.join(
-      __dirname,
-      "..",
-      "..",
-      "lib",
-      "server",
-      "openclaw-channel-sync.js",
-    ),
-    "utf8",
-  );
-
-  it("the successful automatic doctor migration notifies once per from→to episode", () => {
-    // Fires ONLY when the doctor actually ran and succeeded — never on plain
-    // no-migration boots.
-    expect(channelSyncSource).toContain(
-      "if (doctorRan && doctorOutcome?.ok === true) {",
-    );
-    expect(channelSyncSource).toContain(
-      "OpenClaw automatic repair completed for ${installedVersion}",
-    );
-    expect(channelSyncSource).toContain(
-      "id: `db-migrated-${fromVersion}-${installedVersion}`",
-    );
-  });
-
-  it("the machinery-error gateway hold notifies with a failure-signature id", () => {
-    expect(channelSyncSource).toContain(
-      "The gateway is HELD to protect your data",
-    );
-    expect(channelSyncSource).toContain(
-      "id: `reconcile-machinery-hold-${installedVersion}-${notifyReasonHash(reason)}`",
-    );
-  });
-
-  it("quarantine recovery notifies with a day-bucketed id", () => {
-    expect(channelSyncSource).toContain(
-      "stranded openclaw.json.last-good file(s) from an interrupted repair",
-    );
-    expect(channelSyncSource).toContain(
-      "id: `quarantine-recovered-${notifyDayBucket()}`",
-    );
-    // Guarded on an actual recovery — a clean boot stays silent.
-    expect(channelSyncSource).toContain("if (quarantine?.recovered > 0) {");
-  });
-});
-
 describe("server/auto-fix notifications — E5 action-vocabulary parity", () => {
   it("the crash-loop paused copy names the down state's catalog actions verbatim", () => {
     // TODOS.md "Notification remediation-action parity": alert copy naming a manual

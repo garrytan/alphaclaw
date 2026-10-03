@@ -1,14 +1,12 @@
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const { DatabaseSync } = require("node:sqlite");
 const { createNativeNotificationDelivery } = require("../../lib/server/native-notification-delivery");
 const { createWatchdogNotifier } = require("../../lib/server/watchdog-notify");
 const { createGatewayLifecycleLock } = require("../../lib/server/gateway-lifecycle-lock");
 const { createNotifyOutbox } = require("../../lib/server/notify-outbox");
 const { createUpgradeNotifier } = require("../../lib/server/upgrade-notifier");
-const { createOpenclawChannelSync } = require("../../lib/server/openclaw-channel-sync");
-const { createOpenclawReleaseChannelStore } = require("../../lib/server/openclaw-release-channel");
+const { createOpenclawRuntime } = require("../../lib/server/openclaw-runtime");
 const { createRunStream } = require("../../lib/server/openclaw-run-stream");
 
 const logger = { log() {}, warn() {}, error() {} };
@@ -22,26 +20,21 @@ const temp = () => {
 const kBuild = { buildId: "2026.9.5", version: "2026.9.5", packageDir: "/fixture/openclaw", bin: "/fixture/openclaw/openclaw.mjs" };
 const kMessage = { target: "+15550001111", message: "Gateway needs recovery" };
 const createCell = (overrides = {}) => {
-  const state = { admitted: true, quiet: false, applying: false, info: { gatewayHold: null, stateCorrupted: false, installedDiverged: false } };
+  const state = { admitted: true };
   const lock = createGatewayLifecycleLock({ logger });
   const runStreamed = vi.fn(async () => ({ ok: true }));
-  const assessCompatibility = vi.fn(async () => ({ compatible: true, migrationRequired: false, executingBuild: kBuild }));
   const getExecutingBuild = vi.fn(async () => kBuild);
   const tryAcquire = vi.fn((options) => lock.tryAcquire("native_notification", options));
   const getEnv = vi.fn(() => ({ PATH: process.env.PATH }));
   const deliver = createNativeNotificationDelivery({
     isBootAdmitted: () => state.admitted,
     tryAcquire,
-    getChannelInfo: () => state.info,
-    isApplyInProgress: () => state.applying,
-    isQuiet: () => state.quiet,
-    assessCompatibility,
     getExecutingBuild,
     getEnv,
     runStreamed,
     ...overrides,
   });
-  return { state, lock, runStreamed, assessCompatibility, getExecutingBuild, getEnv, tryAcquire, deliver };
+  return { state, lock, runStreamed, getExecutingBuild, getEnv, tryAcquire, deliver };
 };
 const notifierFor = (cell, options = {}) => createWatchdogNotifier({
   nativeDelivery: cell.deliver,
@@ -64,38 +57,35 @@ afterEach(() => {
 });
 
 describe("native notification admission", () => {
-  it("wires production WhatsApp delivery to late-bound boot, channel, lease and compatibility admission", () => {
+  it("wires production WhatsApp delivery to late-bound boot, lease and executing-build admission", () => {
     const source = fs.readFileSync(path.join(__dirname, "../../lib/server.js"), "utf8");
     const start = source.indexOf("const watchdogNotifier = createWatchdogNotifier({");
     const block = source.slice(start, source.indexOf("\n});", start));
-    expect(block).toContain('createNativeNotificationDelivery({');
+    expect(block).toContain("createNativeNotificationDelivery({");
     expect(block).toContain('getBootPhase().phase === "ready"');
-    expect(block).toContain("!gatewayQuiesceAbort.signal.aborted");
+    expect(block).toContain("!shutdownAbort.signal.aborted");
     expect(block).toContain('gatewayLifecycleLock.tryAcquire("native_notification", options)');
-    expect(block).toContain("openclawChannelService.assessInstalledLaunchCompatibility");
-    expect(block).toContain("openclawChannelService.isApplyInProgress()");
-    expect(block).toContain("openclawChannelService.getExecutingBuild()");
+    expect(block).toContain("openclawRuntime.getExecutingBuild()");
+    expect(block).not.toContain("openclawChannelService");
   });
 
-  it.each([
-    ["boot", "native_delivery_boot_unadmitted"], ["quiet", "native_delivery_state_db_quiet"],
-    ["apply", "native_delivery_apply_in_progress"], ["held", "native_delivery_gateway_held"],
-    ["corrupt", "native_delivery_state_unreadable"], ["diverged", "native_delivery_build_diverged"],
-  ])("refuses %s state before any native process or compatibility read", async (kind, reason) => {
+  it("refuses an unadmitted boot before any native process or build read", async () => {
     const cell = createCell();
-    if (kind === "boot") cell.state.admitted = false;
-    if (kind === "quiet") cell.state.quiet = true;
-    if (kind === "apply") cell.state.applying = true;
-    if (kind === "held") cell.state.info.gatewayHold = { reason: "recovery_choice_required" };
-    if (kind === "corrupt") cell.state.info.stateCorrupted = true;
-    if (kind === "diverged") cell.state.info.installedDiverged = true;
-    expect(await cell.deliver(kMessage)).toMatchObject({ ok: false, deterministic: false, reason });
+    cell.state.admitted = false;
+    expect(await cell.deliver(kMessage)).toMatchObject({ ok: false, deterministic: false, reason: "native_delivery_boot_unadmitted" });
     expect(cell.runStreamed).not.toHaveBeenCalled();
-    expect(cell.assessCompatibility).not.toHaveBeenCalled();
+    expect(cell.getExecutingBuild).not.toHaveBeenCalled();
     expect(cell.tryAcquire).not.toHaveBeenCalled();
   });
 
-  it.each(["boot", "apply_commit", "repair"])("never queues behind an existing %s lease", async (kind) => {
+  it.each(["tryAcquire", "getExecutingBuild", "getEnv"])("refuses when the %s seam is not configured", async (seam) => {
+    const cell = createCell({ [seam]: undefined });
+    expect(await cell.deliver(kMessage)).toMatchObject({ ok: false, reason: "native_delivery_unconfigured", deterministic: false });
+    expect(cell.runStreamed).not.toHaveBeenCalled();
+    expect(cell.lock.getActiveOperation()).toBeNull();
+  });
+
+  it.each(["boot", "manual_restart", "repair"])("never queues behind an existing %s lease", async (kind) => {
     const cell = createCell();
     const owner = cell.lock.tryAcquire(kind);
     const acquire = vi.spyOn(cell.lock, "acquire");
@@ -103,16 +93,16 @@ describe("native notification admission", () => {
       expect(await cell.deliver(kMessage)).toMatchObject({ ok: false, reason: "native_delivery_lifecycle_busy", deterministic: false });
       expect(acquire).not.toHaveBeenCalled();
       expect(cell.lock.owns(owner)).toBe(true);
-      expect(cell.assessCompatibility).not.toHaveBeenCalled();
+      expect(cell.getExecutingBuild).not.toHaveBeenCalled();
       expect(cell.runStreamed).not.toHaveBeenCalled();
     } finally { await owner(); }
   });
 
-  it("refuses boot-time outbox drain before touching late-bound channel dependencies", async () => {
-    const getChannelInfo = vi.fn(() => { throw new ReferenceError("channel service is not initialized"); });
-    const cell = createCell({ getChannelInfo }); cell.state.admitted = false;
+  it("refuses boot-time outbox drain before touching late-bound runtime dependencies", async () => {
+    const getExecutingBuild = vi.fn(() => { throw new ReferenceError("runtime is not initialized"); });
+    const cell = createCell({ getExecutingBuild }); cell.state.admitted = false;
     expect(await cell.deliver(kMessage)).toMatchObject({ ok: false, reason: "native_delivery_boot_unadmitted", deterministic: false });
-    expect(getChannelInfo).not.toHaveBeenCalled();
+    expect(getExecutingBuild).not.toHaveBeenCalled();
     expect(cell.tryAcquire).not.toHaveBeenCalled();
     expect(cell.runStreamed).not.toHaveBeenCalled();
   });
@@ -123,17 +113,17 @@ describe("native notification admission", () => {
     const cell = createCell({ isBootAdmitted: () => !shutdown.signal.aborted });
     expect(await cell.deliver(kMessage)).toMatchObject({ ok: false, reason: "native_delivery_boot_unadmitted", deterministic: false });
     expect(cell.tryAcquire).not.toHaveBeenCalled();
-    expect(cell.assessCompatibility).not.toHaveBeenCalled();
+    expect(cell.getExecutingBuild).not.toHaveBeenCalled();
     expect(cell.runStreamed).not.toHaveBeenCalled();
   });
 
-  it("does not launch if shutdown begins while compatibility verification is awaiting a result", async () => {
+  it("does not launch if shutdown begins while the executing build is being read", async () => {
     const shutdown = new AbortController();
     const cell = createCell({ isBootAdmitted: () => !shutdown.signal.aborted });
-    cell.assessCompatibility.mockImplementation(async () => {
+    cell.getExecutingBuild.mockImplementation(async () => {
       await Promise.resolve();
       shutdown.abort("shutdown");
-      return { compatible: true, migrationRequired: false, executingBuild: kBuild };
+      return kBuild;
     });
     expect(await cell.deliver(kMessage)).toMatchObject({ ok: false, reason: "native_delivery_boot_unadmitted", deterministic: false });
     expect(cell.tryAcquire).toHaveBeenCalledOnce();
@@ -141,15 +131,14 @@ describe("native notification admission", () => {
     expect(cell.lock.getActiveOperation()).toBeNull();
   });
 
-  it.each([null, {}, { compatible: null, migrationRequired: false }, { compatible: false, migrationRequired: false },
-    { compatible: true, migrationRequired: true }, { compatible: true, migrationRequired: null }])("refuses unproved native compatibility %j", async (verdict) => {
-    const cell = createCell({ assessCompatibility: async () => verdict });
-    expect(await cell.deliver(kMessage)).toMatchObject({ ok: false, reason: "native_delivery_compatibility_unverified", deterministic: false });
+  it.each([null, {}, { bin: 42 }, { bin: "" }, { bin: "relative/openclaw.mjs" }])("refuses an unverified executing build %j", async (build) => {
+    const cell = createCell({ getExecutingBuild: async () => build });
+    expect(await cell.deliver(kMessage)).toMatchObject({ ok: false, reason: "native_delivery_build_unverified", deterministic: false });
     expect(cell.runStreamed).not.toHaveBeenCalled();
     expect(cell.lock.getActiveOperation()).toBeNull();
   });
 
-  it("runs the exact verified build with argv isolation, an owned lease, and a cancellable process-group runner", async () => {
+  it("runs the executing build with argv isolation, an owned lease, and a cancellable process-group runner", async () => {
     const cell = createCell();
     cell.runStreamed.mockImplementation(async (options) => {
       expect(cell.lock.getActiveOperation()).toMatchObject({ kind: "native_notification" });
@@ -162,63 +151,51 @@ describe("native notification admission", () => {
     expect(cell.runStreamed).toHaveBeenCalledWith(expect.objectContaining({ command: process.execPath,
       args: [kBuild.bin, "message", "send", "--channel", "whatsapp", "--target", kMessage.target, "--message", message],
       killGraceMs: 1000, signal: expect.any(AbortSignal), onProcess: expect.any(Function) }));
-    expect(cell.assessCompatibility).toHaveBeenCalledOnce();
     expect(cell.getExecutingBuild).toHaveBeenCalledOnce();
     expect(cell.lock.getActiveOperation()).toBeNull();
   });
 
-  it("rechecks a hold established during the fresh compatibility read", async () => {
+  it("reports a failed send as a non-deterministic refusal", async () => {
     const cell = createCell();
-    cell.assessCompatibility.mockImplementation(async () => {
-      cell.state.info.gatewayHold = { reason: "recovery_choice_required" };
-      return { compatible: true, migrationRequired: false, executingBuild: kBuild };
-    });
-    expect(await cell.deliver(kMessage)).toMatchObject({ ok: false, reason: "native_delivery_gateway_held" });
+    cell.runStreamed.mockResolvedValue({ ok: false });
+    expect(await cell.deliver(kMessage)).toEqual({ ok: false, reason: "native_whatsapp_send_failed", errorCode: null, deterministic: false });
+  });
+
+  it("rechecks admission that is lost during the executing-build read", async () => {
+    const cell = createCell();
+    cell.getExecutingBuild.mockImplementation(async () => { cell.state.admitted = false; return kBuild; });
+    expect(await cell.deliver(kMessage)).toMatchObject({ ok: false, reason: "native_delivery_boot_unadmitted" });
+    expect(cell.runStreamed).not.toHaveBeenCalled();
+  });
+
+  it("checks admission again immediately before spawning, after environment resolution", async () => {
+    const cell = createCell();
+    cell.getEnv.mockImplementation(() => { cell.state.admitted = false; return {}; });
+    expect(await cell.deliver(kMessage)).toMatchObject({ ok: false, reason: "native_delivery_boot_unadmitted" });
     expect(cell.runStreamed).not.toHaveBeenCalled();
     expect(cell.lock.getActiveOperation()).toBeNull();
   });
 
-  it("rechecks an apply that starts during the executing-build read", async () => {
-    const cell = createCell();
-    cell.getExecutingBuild.mockImplementation(async () => { cell.state.applying = true; return kBuild; });
-    expect(await cell.deliver(kMessage)).toMatchObject({ ok: false, reason: "native_delivery_apply_in_progress" });
-    expect(cell.runStreamed).not.toHaveBeenCalled();
-  });
-
-  it("checks quiet admission again immediately before spawning, after environment resolution", async () => {
-    const cell = createCell();
-    cell.getEnv.mockImplementation(() => { cell.state.quiet = true; return {}; });
-    expect(await cell.deliver(kMessage)).toMatchObject({ ok: false, reason: "native_delivery_state_db_quiet" });
-    expect(cell.runStreamed).not.toHaveBeenCalled();
-    expect(cell.lock.getActiveOperation()).toBeNull();
-  });
-
-  it("refuses a different executing build instead of using a previously verified PATH binary", async () => {
-    const cell = createCell({ getExecutingBuild: async () => ({ ...kBuild, buildId: "2026.9.6" }) });
-    expect(await cell.deliver(kMessage)).toMatchObject({ ok: false, reason: "native_delivery_build_changed" });
-    expect(cell.runStreamed).not.toHaveBeenCalled();
-  });
-
-  it("does not launch after its lease is revoked while compatibility is being read", async () => {
+  it("does not launch after its lease is revoked while the executing build is being read", async () => {
     const cell = createCell();
     let hold;
     const acquire = cell.tryAcquire.getMockImplementation();
     cell.tryAcquire.mockImplementation((options) => { hold = acquire(options); return hold; });
-    cell.assessCompatibility.mockImplementation(async () => {
+    cell.getExecutingBuild.mockImplementation(async () => {
       await hold();
-      return { compatible: true, migrationRequired: false, executingBuild: kBuild };
+      return kBuild;
     });
     expect(await cell.deliver(kMessage)).toMatchObject({ ok: false, deterministic: false });
     expect(cell.runStreamed).not.toHaveBeenCalled();
     expect(cell.lock.getActiveOperation()).toBeNull();
   });
 
-  it("bounds an unresponsive compatibility read and ignores its eventual safe verdict", async () => {
-    let resolveCompatibility;
-    const cell = createCell({ compatibilityTimeoutMs: 10,
-      assessCompatibility: () => new Promise((resolve) => { resolveCompatibility = resolve; }) });
+  it("bounds an unresponsive executing-build read and ignores its eventual result", async () => {
+    let resolveBuild;
+    const cell = createCell({ buildReadTimeoutMs: 10,
+      getExecutingBuild: () => new Promise((resolve) => { resolveBuild = resolve; }) });
     expect(await cell.deliver(kMessage)).toMatchObject({ ok: false, deterministic: false });
-    resolveCompatibility({ compatible: true, migrationRequired: false, executingBuild: kBuild });
+    resolveBuild(kBuild);
     await new Promise((resolve) => setImmediate(resolve));
     expect(cell.runStreamed).not.toHaveBeenCalled();
     expect(cell.lock.getActiveOperation()).toBeNull();
@@ -242,7 +219,7 @@ describe("native notification admission", () => {
     expect(signal.aborted).toBe(true);
     expect(settled).toBe(false);
     expect(cell.lock.getActiveOperation()).toMatchObject({ kind: "native_notification", phase: "cleanup" });
-    expect(cell.lock.tryAcquire("apply_commit")).toBeNull();
+    expect(cell.lock.tryAcquire("manual_restart")).toBeNull();
     finishProcess();
     expect(await delivery).toMatchObject({ ok: false, deterministic: false });
     expect(cell.lock.getActiveOperation()).toBeNull();
@@ -265,7 +242,6 @@ describe("native notification admission", () => {
     let cell;
     let observedCleanup = false;
     cell = createCell({ timeoutMs: 400,
-      assessCompatibility: async () => ({ compatible: true, migrationRequired: false, executingBuild: build }),
       getExecutingBuild: async () => build,
       runStreamed: (options) => realRunner.runStreamed({ ...options, onProcess: (event) => {
         if (event.phase === "cleaned") {
@@ -284,11 +260,9 @@ describe("native notification admission", () => {
     expect(cell.lock.getActiveOperation()).toBeNull();
   });
 
-  it("does not send a notification which expires during compatibility discovery", async () => {
+  it("does not send a notification which expires during the executing-build read", async () => {
     let current = true;
-    const cell = createCell({ assessCompatibility: async () => {
-      current = false; return { compatible: true, migrationRequired: false, executingBuild: kBuild };
-    } });
+    const cell = createCell({ getExecutingBuild: async () => { current = false; return kBuild; } });
     expect(await cell.deliver({ ...kMessage, shouldDeliver: () => current })).toMatchObject({ expired: true, ok: false });
     expect(cell.runStreamed).not.toHaveBeenCalled();
   });
@@ -346,7 +320,7 @@ describe("native notification routing and durable retries", () => {
   });
 
   it("falls back from blocked preferred WhatsApp to an HTTP target without making the native refusal terminal", async () => {
-    const cell = createCell(); cell.state.info.gatewayHold = { reason: "recovery_choice_required" };
+    const cell = createCell(); cell.state.admitted = false;
     const telegramApi = { sendMessage: vi.fn(async () => ({ ok: true })) };
     const notifier = notifierFor(cell, { telegramApi, getTelegramToken: () => "test-token" });
     const routed = createUpgradeNotifier({ notifier, logger, shouldSend: () => ({ ok: true }),
@@ -355,7 +329,7 @@ describe("native notification routing and durable retries", () => {
         { channel: "whatsapp", target: kMessage.target }, { channel: "telegram", target: "123" },
       ] } }) } });
     notifiers.push(routed);
-    const result = await routed.deliverEvent({ id: "held", message: kMessage.message, eventType: "health", createdAt: Date.now() });
+    const result = await routed.deliverEvent({ id: "blocked", message: kMessage.message, eventType: "health", createdAt: Date.now() });
     expect(result).toMatchObject({ ok: true, fallback: true, sent: 1, failed: 1,
       failures: [{ channel: "whatsapp", deterministic: false }] });
     expect(cell.runStreamed).not.toHaveBeenCalled();
@@ -384,39 +358,27 @@ describe("native notification routing and durable retries", () => {
   });
 });
 
-describe("native notification real compatibility adapter", () => {
-  it.each(["corrupt", "migration", "same-schema"])("checks %s SQLite without invoking a real WhatsApp send", async (kind) => {
+describe("native notification real executing-build adapter", () => {
+  it.each(["installed", "missing"])("resolves the %s pinned package without invoking a real WhatsApp send", async (kind) => {
     const root = temp();
-    const state = path.join(root, ".openclaw");
     const packageDir = path.join(root, "node_modules/openclaw");
-    fs.mkdirSync(path.join(state, "state"), { recursive: true });
-    fs.mkdirSync(path.join(packageDir, "dist/extensions"), { recursive: true });
     fs.writeFileSync(path.join(root, "package.json"), JSON.stringify({ dependencies: { openclaw: "2026.9.5" } }));
-    fs.writeFileSync(path.join(packageDir, "package.json"), JSON.stringify({ name: "openclaw", version: "2026.9.5", bin: "openclaw.mjs",
-      openclaw: { schemaVersions: { state: 17, agent: 21 } } }));
-    fs.writeFileSync(path.join(packageDir, "openclaw.mjs"), 'throw new Error("must never execute in this test");');
-    fs.writeFileSync(path.join(packageDir, "dist/thinking-levels.js"), "exports.listThinkingLevelOptions = () => [];\n");
-    fs.writeFileSync(path.join(state, "openclaw.json"), "{}");
-    const databasePath = path.join(state, "state/openclaw.sqlite");
-    if (kind === "corrupt") fs.writeFileSync(databasePath, "not a database");
-    else {
-      const version = kind === "migration" ? 16 : 17;
-      const database = new DatabaseSync(databasePath);
-      database.exec(`PRAGMA user_version=${version}; CREATE TABLE schema_meta(meta_key TEXT PRIMARY KEY, role TEXT, schema_version INTEGER, agent_id TEXT); INSERT INTO schema_meta VALUES('primary','global',${version},NULL);`);
-      database.close();
+    if (kind === "installed") {
+      fs.mkdirSync(packageDir, { recursive: true });
+      fs.writeFileSync(path.join(packageDir, "package.json"), JSON.stringify({ name: "openclaw", version: "2026.9.5", bin: "openclaw.mjs" }));
+      fs.writeFileSync(path.join(packageDir, "openclaw.mjs"), 'throw new Error("must never execute in this test");');
     }
-    const before = fs.readFileSync(databasePath);
-    const store = createOpenclawReleaseChannelStore({ rootDir: root, openclawDir: state, logger });
-    store.writeSentinel({ installDir: root, version: "2026.9.5" });
-    const sync = createOpenclawChannelSync({ rootDir: root, openclawDir: state, packageRoot: root,
-      store, resolveInstallDir: () => root, isOnboarded: () => true,
-      openclawSpawnEnv: () => ({ OPENCLAW_STATE_DIR: state }), logger });
-    const cell = createCell({ getChannelInfo: () => sync.getChannelInfo(), isApplyInProgress: () => sync.isApplyInProgress(),
-      assessCompatibility: () => sync.assessInstalledLaunchCompatibility(), getExecutingBuild: () => sync.getExecutingBuild() });
+    const runtime = createOpenclawRuntime({ packageRoot: root, resolveInstallDir: () => root, openclawDir: path.join(root, ".openclaw"),
+      openclawSpawnEnv: () => ({ OPENCLAW_STATE_DIR: path.join(root, ".openclaw") }), logger });
+    const cell = createCell({ getExecutingBuild: () => runtime.getExecutingBuild() });
     const result = await cell.deliver(kMessage);
-    expect(result.ok).toBe(kind === "same-schema");
-    expect(cell.runStreamed).toHaveBeenCalledTimes(kind === "same-schema" ? 1 : 0);
-    expect(fs.readFileSync(databasePath)).toEqual(before);
+    if (kind === "installed") {
+      expect(result).toEqual({ ok: true });
+      expect(cell.runStreamed.mock.calls[0][0].args[0]).toBe(path.join(packageDir, "openclaw.mjs"));
+    } else {
+      expect(result).toMatchObject({ ok: false, reason: "native_delivery_build_unverified" });
+      expect(cell.runStreamed).not.toHaveBeenCalled();
+    }
     expect(cell.lock.getActiveOperation()).toBeNull();
   });
 });

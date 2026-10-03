@@ -165,16 +165,16 @@ describe("frontend/models-tab pane shell states", () => {
     );
   });
 
-  it("says the credential store is unavailable during a backup (last-known vs nothing) instead of an empty profile list", () => {
+  it("says the credential store is unavailable (last-known vs not checked) instead of an empty profile list", () => {
     useModels.mockReturnValue({
       ...kModelsBase,
       loading: false,
       ready: true,
-      authStoreUnavailable: { reason: "backup_in_progress" },
+      authStoreUnavailable: { reason: "AUTH_STORE_UNREADABLE" },
     });
     let text = collectText(renderModels()).join(" ").replace(/\s+/g, " ");
     expect(text).toContain(
-      "Credential store unavailable during a backup — nothing to show until it finishes.",
+      "Credential store unavailable — credentials have not been checked.",
     );
 
     useModels.mockReturnValue({
@@ -182,11 +182,11 @@ describe("frontend/models-tab pane shell states", () => {
       loading: false,
       ready: true,
       authProfiles: [{ id: "anthropic:default", type: "api_key", provider: "anthropic", key: "k" }],
-      authStoreUnavailable: { reason: "backup_in_progress" },
+      authStoreUnavailable: { reason: "AUTH_STORE_UNREADABLE" },
     });
     text = collectText(renderModels()).join(" ").replace(/\s+/g, " ");
     expect(text).toContain(
-      "Credential store unavailable during a backup — showing the last known credentials.",
+      "Credential store unavailable — showing the last known credentials.",
     );
 
     useModels.mockReturnValue({ ...kModelsBase, loading: false, ready: true, authStoreUnavailable: null });

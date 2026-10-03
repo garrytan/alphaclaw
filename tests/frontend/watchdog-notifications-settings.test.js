@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-// Minimal hook harness (same pattern as upgrade-tab.test.js): hook state
+// Minimal hook harness: hook state
 // lives in per-call-index slots so component functions can be invoked
 // directly without a DOM renderer. Effects are collected, not run.
 vi.mock("preact/hooks", () => {
@@ -165,7 +165,7 @@ describe("frontend/watchdog update-notification settings", () => {
     const tree = await hydrateSection();
 
     const text = treeText(tree);
-    expect(text).toContain("Update notifications");
+    expect(text).toContain("Notification routing");
     expect(text).toContain(kDefaultRoutingNote);
     expect(kDefaultRoutingNote).toContain(
       "notify every paired user on every channel (default)",
@@ -251,7 +251,7 @@ describe("frontend/watchdog update-notification settings", () => {
       adminTargets: [{ channel: "telegram", target: "12345", accountId: null }],
     });
     expect(showToast).toHaveBeenCalledWith(
-      "Update notification settings saved",
+      "Notification routing saved",
       "success",
     );
   });
@@ -316,7 +316,7 @@ describe("frontend/watchdog update-notification settings", () => {
       }),
     );
 
-    // The Test button now renders inside the Update notifications section
+    // The Test button now renders inside the Notification routing section
     // (passed through as testButton), not in the kill-switch row.
     const section = findAllByType(tree, UpdateNotificationsSection)[0];
     expect(section).toBeTruthy();

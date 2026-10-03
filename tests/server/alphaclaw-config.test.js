@@ -12,7 +12,6 @@ const {
   updateDoctorScanConfig,
   updateDoctorSettingsConfig,
   readOpenclawMedicEnabled,
-  readOpenclawReleaseChannel,
   readWatchdogOverseerEnabled,
   readWatchdogMemorySettings,
   updateWatchdogMemorySettings,
@@ -20,7 +19,6 @@ const {
   updateDoctorAutoRunEnabled,
   updateOpenAiCompatApiFeature,
   updateOpenclawMedicEnabled,
-  updateOpenclawReleaseChannel,
   updateWatchdogOverseerEnabled,
   writeAlphaclawConfig,
 } = require("../../lib/server/alphaclaw-config");
@@ -86,8 +84,6 @@ describe("server/alphaclaw-config", () => {
       },
       updates: {
         openclaw: {
-          releaseChannel: "stable",
-          overseer: { enabled: false },
           medic: { enabled: true },
         },
       },
@@ -141,8 +137,6 @@ describe("server/alphaclaw-config", () => {
       },
       updates: {
         openclaw: {
-          releaseChannel: "stable",
-          overseer: { enabled: false },
           medic: { enabled: true },
         },
       },
@@ -170,47 +164,21 @@ describe("server/alphaclaw-config", () => {
     });
   });
 
-  it("defaults the OpenClaw release channel to stable", () => {
-    const openclawDir = createTempOpenclawDir();
-
-    expect(readOpenclawReleaseChannel({ openclawDir })).toBe("stable");
-  });
-
-  it("normalizes an invalid release channel back to stable", () => {
+  it("passes the retired updates.openclaw.releaseChannel/overseer keys through untouched", () => {
     const openclawDir = createTempOpenclawDir();
     fs.writeFileSync(
       path.join(openclawDir, "alphaclaw.json"),
-      JSON.stringify({ updates: { openclaw: { releaseChannel: "nightly" } } }),
+      JSON.stringify({ updates: { openclaw: { releaseChannel: "beta", overseer: { enabled: true } } } }),
       "utf8",
     );
 
-    expect(readOpenclawReleaseChannel({ openclawDir })).toBe("stable");
+    const { openclaw } = readAlphaclawConfig({ openclawDir }).updates;
+    expect(openclaw.releaseChannel).toBe("beta");
+    expect(openclaw.overseer).toEqual({ enabled: true });
+    expect(openclaw.medic).toEqual({ enabled: true });
   });
 
-  it("persists a release-channel change and reports changed", () => {
-    const openclawDir = createTempOpenclawDir();
-
-    const first = updateOpenclawReleaseChannel({
-      openclawDir,
-      releaseChannel: "dev",
-    });
-    expect(first.changed).toBe(true);
-    expect(readOpenclawReleaseChannel({ openclawDir })).toBe("dev");
-
-    const second = updateOpenclawReleaseChannel({
-      openclawDir,
-      releaseChannel: "dev",
-    });
-    expect(second.changed).toBe(false);
-
-    const invalid = updateOpenclawReleaseChannel({
-      openclawDir,
-      releaseChannel: "nightly",
-    });
-    expect(invalid.config.updates.openclaw.releaseChannel).toBe("stable");
-  });
-
-  it("defaults the startup medic to ENABLED (opt-out, unlike the overseer)", () => {
+  it("defaults the startup medic to ENABLED (opt-out)", () => {
     const openclawDir = createTempOpenclawDir();
     // Missing config, missing updates block, and junk all normalize to on.
     expect(readOpenclawMedicEnabled({ openclawDir })).toBe(true);

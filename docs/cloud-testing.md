@@ -13,22 +13,24 @@ AlphaClaw's `engines.node` is
 `>=24.16.0 <25 || >=26.1.0` (the OpenClaw 2026.9.3 pin dropped Node 22 and 25),
 so Node 22 no longer runs the server or the pinned CLI, and the default system
 Node 24.14.1 does not satisfy the range either. Put the supported runtime first
-on `PATH` so child processes and real upstream installs use it too. A fresh
+on `PATH` so child processes and the pinned OpenClaw CLI use it too. A fresh
 workspace has no `.context/node24`: download the newest 24.x tarball from
 nodejs.org into it (the previous sessions' `.context/` directories are not
 shared between workspaces).
 
 ```bash
 cd /home/vercel-sandbox/alphaclaw
-export PATH="$PWD/.context/node24/bin:/opt/alphaclaw-node/bin:$PWD/.context/dev-build-toolchain/bin:$PATH"
+export PATH="$PWD/.context/node24/bin:/opt/alphaclaw-node/bin:$PATH"
 export DOCKER_HOST="unix://$PWD/.context/docker/docker.sock"
 node --version
 docker info --format '{{.ServerVersion}} {{.Driver}} cgroup={{.CgroupVersion}}'
 ```
 
-For a fresh checkout, install dependencies with `npm install`, then install the
-browser matching the repository's installed Playwright with
-`npx playwright install chromium`. A fresh VM also needs a supported Node
+For a fresh checkout, install dependencies with `npm install`. The browser
+smokes (`test:ui:reliability`) and the live Control UI test need the browser
+matching the repository's installed Playwright:
+`npx playwright install chromium`; the container tier no longer drives a
+browser. A fresh VM also needs a supported Node
 runtime and Docker (`sudo dnf install -y docker` on Amazon Linux). In the
 September 9 checkout, Playwright 1.55 required Chromium revision 1187; the VM's
 existing revision 1234 did not satisfy that installation.
@@ -153,7 +155,7 @@ From the test terminal, after the socket appears, grant the workspace user
 access with `sudo chown "$(id -u):$(id -g)" .context/docker/docker.sock`, export
 `DOCKER_HOST="unix://$PWD/.context/docker/docker.sock"`, and repeat the enforcement
 probe. Keep Docker's bridge and iptables support enabled: `--bridge=none` or
-`--iptables=false` prevents the full suite's published ports and outbound
+`--iptables=false` prevents the container suites' published ports and outbound
 container networking from working. Tests run as the workspace user. The daemon has
 no TCP listener. Its state is confined to `.context/docker/data` and
 `.context/docker/run`; preserve those directories while it is running.
@@ -161,8 +163,7 @@ no TCP listener. Its state is confined to `.context/docker/data` and
 ## Run every unbilled tier
 
 Use the environment above. Keep the heavy tiers serial unless disk and memory
-headroom have been checked; a dev build alone requires at least 8 GiB free.
-`pipefail` preserves test failures when saving logs.
+headroom have been checked. `pipefail` preserves test failures when saving logs.
 
 ```bash
 set -o pipefail
@@ -170,65 +171,21 @@ npm test 2>&1 | tee .context/docker/hermetic-rerun.log
 npm run build:ui 2>&1 | tee .context/docker/build-ui-rerun.log
 npm run test:ui:reliability 2>&1 | tee .context/docker/browser-reliability-rerun.log
 npm run test:live 2>&1 | tee .context/docker/live-rerun.log
-OPENCLAW_CONTAINER_E2E_STRICT=1 npm run test:container 2>&1 | tee .context/docker/container-rerun.log
-npm run test:live:dev 2>&1 | tee .context/docker/live-dev-rerun.log
+npm run test:container 2>&1 | tee .context/docker/container-rerun.log
 ```
 
-`npm test` is the hermetic suite. `test:live` adds real npm/GitHub/CLI/gateway
-checks and, with this daemon available, the two resource-limited autotune
-tests. It does not enable the full dev source build. `test:live:dev` separately
-exercises OpenClaw's real clone/install/build/activation path from a disposable
-global npm installation and needs Git, pnpm, network access, and build-grade
-resources. It does not prove the shipped nested-dependency bootstrap: current
-upstream refuses that invocation with “package manager owner is unknown.” The container tier packs the
-checkout into production images, exercises persistent-volume boot recovery
-and the immutable old-image self-upgrade, and includes the browser-driven
-stable-to-beta journey. Paid Claude live-fire tests remain explicitly opt-in
+`npm test` is the hermetic suite. `test:live` drives the real pinned OpenClaw
+installed in `node_modules` (no registry installs): gateway boot and stop
+contracts, the CLI contracts AlphaClaw encodes, the Doctor "Ask agent to fix"
+dispatch contract, **Back up now** through `openclaw backup create`, the
+memory-leak terminal stage, the Control UI behind the `/openclaw` proxy, and,
+with this daemon available, the two resource-limited autotune tests. The
+container tier packs the checkout into a production image and proves boot
+durability (a fresh boot, `docker restart`, a legacy pidfile TID collision and
+a dangling restart operation) and the immutable AlphaClaw v0.9.76 → candidate
+self-upgrade on one volume, whose first boot retires the old version-switch
+overlay and runs the pin. Paid Claude live-fire tests remain explicitly opt-in
 through `test:live:claude-code`; they are excluded from these commands.
-
-### Dev-source publication needs verifiable service ownership
-
-Upstream commit `abe046f5be78335741db16893566166289bb2af4` added a runtime
-publication guard that requires proof that the affected native gateway service
-is absent or stopped. This VM has `/run/systemd` but no working user bus:
-`openclaw gateway status --deep --json` reports runtime `unknown` even with a
-free gateway port. The source build completed, but the guard correctly refused
-publication. Preserve that failure; do not bypass the guard or mistake a free
-port for proof that a service manager cannot restart the gateway.
-
-Use a clean container with no installed service manager or inherited service
-claims for this isolated updater test. The September 15 probe reported runtime
-`stopped`, `missingUnit: true`, no loaded service and a free port. The same test
-then runs against the real upstream updater; its disposable global prefix and
-temporary HOME remain inside the container. The production environment builder
-already removes DBUS and test-runner markers, so no special guard override is
-needed.
-
-```bash
-docker build -t alphaclaw-live-dev - <<'DOCKERFILE'
-FROM node:24-slim
-RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates python3 make g++ procps && rm -rf /var/lib/apt/lists/*
-RUN npm install -g pnpm@12.3.4
-WORKDIR /workspace
-DOCKERFILE
-docker run --rm --init --memory=8g --memory-swap=8g \
-  -v "$PWD:/workspace" alphaclaw-live-dev \
-  npm run test:live:dev 2>&1 | tee .context/docker/live-dev-container.log
-```
-
-Verify `memory.max=8589934592` and `memory.swap.max=0` in the image before the
-build, using the enforcement probe above with the corresponding limits. The
-checkout must already have dependencies installed under supported Node. Keep
-at least 8 GiB of disk free; RAM limits do not replace the disk check. A future
-upstream may change its toolchain or admission contract: inspect the captured
-updater result rather than weakening the test.
-
-Both `procps` and `--init` matter. Upstream's build runner uses `ps` to distinguish
-live process groups from zombies, and an init process reaps orphaned children.
-The first slim-container run omitted both and failed with
-`EPROCESSGROUP_CLEANUP_FAILED` during plugin asset compilation, including at a
-commit that compiled successfully on the host. Supply process inspection and
-reaping; do not disable the build runner's cleanup verification.
 
 For focused Docker reruns:
 
@@ -238,6 +195,11 @@ OPENCLAW_CONTAINER_E2E=1 npx vitest run tests/container/openclaw-container-boot-
 ```
 
 ## Evidence and remaining coverage
+
+The evidence below predates v0.9.99. The release-channel apply, downgrade,
+restore-drill, dev-source and browser-upgrade tiers it mentions were removed
+with the in-app version switch, and `OPENCLAW_CONTAINER_E2E_STRICT` no longer
+exists; the counts are historical.
 
 Verified for the September 15, 2026 reliability wave:
 
@@ -343,28 +305,10 @@ retries. The corrected fixture passed its focused run on the first test attempt
 in 300.81 seconds, retaining the 256 MiB heap cap and original RSS/pressure
 assertions ([live-memory-node24-final.log](../.context/docker/live-memory-node24-final.log)).
 
-The first strict run failed before browser execution: `latest=2026.9.3`,
-the bundled pin `2026.9.2`, and `beta=2026.9.1` offered no newer prerelease.
-The browser journey now selects an explicit historical upgrade during this
-registry gap: `2026.7.1-2 → 2026.9.1-beta.1`. It prepares the old stable as a
-recorded overlay before any gateway opens the fresh volume, keeping the
-production image and bundled pin unchanged. The old build's schema can migrate
-forward to that beta; using `2026.8.x` would be incompatible despite its lower
-package version. When a newer beta exists, the journey uses the shipped pin.
-All 14 steps remain required, including the exact catalog selection, verified
-backup under contention, orchestrator restart, live binary, readiness and both
-durability legs. Missing/deprecated packages or registry failures still fail.
-The restored journey also exposed an apply-admission defect: ordinary WAL
-writes invalidated a verified-backup upgrade. Normal apply admission now checks
-build and schema facts without requiring unchanged database bytes; human
-no-backup consent retains its stricter database identity checks.
-
 Failure captures go to [tests/container/artifacts](../tests/container/artifacts/);
 daemon output is in [daemon.log](../.context/docker/daemon.log). Test helpers
 remove their containers, named volumes, and staging directories. The immutable
-and browser journeys also remove their image tags; the boot suite retains its
-tags for explicit test-owned cleanup.
+journey also removes its image tags; the boot suite retains its tags for
+explicit test-owned cleanup.
 Inspect resources left by an interrupted run before removing only those
-owned by the test. Do not use a host-wide Docker prune. Real OpenClaw installs
-are intentionally retained in `~/.cache/alphaclaw-openclaw-cache` (or
-`ALPHACLAW_LIVE_OPENCLAW_CACHE`); Vitest scratch directories are separate.
+owned by the test. Do not use a host-wide Docker prune.

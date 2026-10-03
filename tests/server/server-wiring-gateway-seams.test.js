@@ -6,8 +6,7 @@
 // pinned at the SOURCE level here (the same idiom notification-policy.test.js
 // uses for the audit-flag wiring), while the behaviour behind each seam runs
 // for real: the REAL gateway module drives the REAL watchdog through the
-// handler lib/server.js installs, and the REAL quiesce stop produces the
-// evidence the offline copy records. e2e-server-lifecycle.test.js proves the
+// handler lib/server.js installs. e2e-server-lifecycle.test.js proves the
 // composed module still boots.
 process.env.GATEWAY_RESTART_READY_TIMEOUT = "120";
 
@@ -27,9 +26,6 @@ const {
   createWatchdog,
   createGatewayPrelaunchHookHandler,
 } = require("../../lib/server/watchdog");
-const { assessExclusivity } = require("../../lib/server/openclaw-backup-offline-copy");
-const { createGatewayLifecycleLock } = require("../../lib/server/gateway-lifecycle-lock");
-const { beginRecoveryOperation } = require("../../lib/server/openclaw-recovery-operation");
 
 const originalSpawn = childProcess.spawn;
 const originalExecFile = childProcess.execFile;
@@ -59,10 +55,6 @@ const createSocket = (running) => ({
     return this;
   },
 });
-const kStopHelpWithoutForce =
-  "Usage: openclaw gateway stop [options]\n\nOptions:\n  -h, --help  display help for command\n";
-const isStopHelpProbe = (args) =>
-  Array.isArray(args) && args[0] === "gateway" && args.includes("--help");
 
 const createWatchdogHarness = () => {
   const insertWatchdogEvent = vi.fn();
@@ -92,11 +84,6 @@ describe("init/register-server-routes.js hands the notifier and the configured U
     expect(block).toContain("rootDir: constants.kRootDir");
     expect(block).not.toContain("readEnvFile");
   });
-  it("registerCodexRoutes gets notify (deferred-write failures reach the operator)", () => {
-    const start = routesSource.indexOf("registerCodexRoutes({");
-    const block = routesSource.slice(start, routesSource.indexOf("});", start));
-    expect(block).toContain("notify: (message, opts) => upgradeNotifier?.notify?.(message, opts),");
-  });
   it("registerSystemRoutes gets resolveSetupUrl (notification links prefer the configured public URL)", () => {
     const start = routesSource.indexOf("registerSystemRoutes({");
     const block = routesSource.slice(start, routesSource.indexOf("getChannelStatus,", start));
@@ -107,14 +94,13 @@ describe("init/register-server-routes.js hands the notifier and the configured U
 describe("lib/server.js composition pins (lane C / lane A hand-offs)", () => {
   const serverSource = readSource("lib", "server.js");
 
-  it("imports the three gateway seams and the handler factory", () => {
+  it("imports the gateway seams and the handler factory", () => {
     const gatewayImport = serverSource.slice(
       serverSource.indexOf("const {\n  gatewayEnv,"),
       serverSource.indexOf('} = require("./server/gateway")'),
     );
     expect(gatewayImport).toContain("setGatewayPrelaunchHookHandler,");
     expect(gatewayImport).toContain("setGatewayCapabilities,");
-    expect(gatewayImport).toContain("getLastGatewayStopEvidence,");
     expect(serverSource).toMatch(
       /const \{\s*createWatchdog,\s*createGatewayPrelaunchHookHandler,\s*\} = require\("\.\/server\/watchdog"\)/,
     );
@@ -150,53 +136,10 @@ describe("lib/server.js composition pins (lane C / lane A hand-offs)", () => {
     );
   });
 
-  it("the backup quiesce seam's getStopEvidence reaches gateway.getLastGatewayStopEvidence", () => {
-    const start = serverSource.indexOf("gatewayQuiesce: {");
-    expect(start).toBeGreaterThan(-1);
-    const block = serverSource.slice(start, serverSource.indexOf("},", start));
-    expect(block).toContain("getStopEvidence: () => getLastGatewayStopEvidence?.() ?? null");
-    expect(block).toContain("stopGatewayForBackup({");
-  });
-
-  it("the backup quiesce seam's acquireLock forwards the driver's {leaseMs} to the lifecycle lock (main dropped it — the hold leased at the default and force-released mid-copy)", async () => {
-    const start = serverSource.indexOf("gatewayQuiesce: {");
-    const block = serverSource.slice(start, serverSource.indexOf("},", start));
-    const match = block.match(
-      /acquireLock:\s*(\(options\)\s*=>\s*gatewayLifecycleLock\.acquire\("backup_quiesce",\s*options\))/,
-    );
-    expect(match).not.toBeNull();
-    // The consumer half of the contract: channel-sync sizes the hold itself.
-    const channelSyncSource = readSource("lib", "server", "openclaw-channel-sync.js");
-    expect(channelSyncSource).toMatch(
-      /acquire:\s*async\s*\(\{ leaseMs \}\)\s*=>[\s\S]*?\{ leaseMs \}/,
-    );
-    expect(serverSource).toContain("acquireLifecycleLock: (kind, options) => gatewayLifecycleLock.acquire(kind, options)");
-
-    // Run the EXACT arrow lib/server.js binds against a real lock whose
-    // default lease is tiny: the driver's override must outlive it.
-    vi.useFakeTimers();
-    try {
-      const warn = vi.fn();
-      const lock = createGatewayLifecycleLock({ leaseMs: 50, logger: { warn } });
-      const acquireLock = new Function("gatewayLifecycleLock", `return ${match[1]};`)(lock);
-      const recovery = await beginRecoveryOperation({
-        acquire: acquireLock,
-        leaseMs: 5_000,
-        gateway: { isRunning: async () => false },
-        quiet: async () => ({}),
-        resume: () => {},
-        assertPolicy: () => {},
-      });
-      expect(typeof recovery.hold).toBe("function");
-      await vi.advanceTimersByTimeAsync(51);
-      // Past the default lease and still held — no force-release, no warning.
-      expect(lock.getActiveOperation()).toMatchObject({ kind: "backup_quiesce" });
-      expect(warn).not.toHaveBeenCalled();
-      await recovery.close();
-      expect(lock.getActiveOperation()).toBeNull();
-    } finally {
-      vi.useRealTimers();
-    }
+  it("no longer wires the retired backup-quiesce seam", () => {
+    expect(serverSource).not.toContain("gatewayQuiesce");
+    expect(serverSource).not.toContain("backup_quiesce");
+    expect(serverSource).not.toContain("getLastGatewayStopEvidence");
   });
 
   it("createWatchdog receives the v0.9.75 relaunch/identity seams (requestGatewayLaunch, discoverServingIdentity, readProcStartTicks, classifyOwnershipConflict, getLaunchGeneration) and a cold-restart dep that forwards its options (the lease fence)", () => {
@@ -243,13 +186,13 @@ describe("lib/server.js composition pins (lane C / lane A hand-offs)", () => {
     expect(serverSource).toContain(
       'const { classifyGatewayCrash } = require("./server/gateway-crash-cause");',
     );
-    // The corroboration facts come from the channel service's tracked
-    // read-only DB reader + the installed tree's schema, never from stderr.
+    // The corroboration facts come from the runtime's tracked read-only DB
+    // reader + the installed tree's schema, never from stderr.
     const factsStart = serverSource.indexOf("const readCrashFacts = async () => {");
     expect(factsStart).toBeGreaterThan(-1);
     const facts = serverSource.slice(factsStart, serverSource.indexOf("\n};", factsStart));
-    expect(facts).toContain("openclawChannelService.describeStateDbSchema()");
-    expect(facts).toContain("installedDiverged");
+    expect(facts).toContain("openclawRuntime.describeStateDbSchema()");
+    expect(facts).toContain("installedDiverged: openclawRuntime.getInfo().installedDiverged === true");
     expect(facts).toContain("resolveExecApprovalsConfigPath");
     const rrsStart = serverSource.indexOf("const restartRequiredState = createRestartRequiredState({");
     const rrs = serverSource.slice(rrsStart, serverSource.indexOf("\n});", rrsStart));
@@ -263,22 +206,14 @@ describe("lib/server.js composition pins (lane C / lane A hand-offs)", () => {
     );
   });
 
-  it("createWatchdog receives the #76 C6 doctor-binary seams: clawCmdWithBin from commands.js and releaseChannelHooks.compatibleBinForCurrentDb from the channel service (runRepair never runs doctor from PATH under a latched mismatch)", () => {
+  it("createWatchdog no longer receives the retired #76 C6 doctor-binary seams (runRepair runs the pinned doctor)", () => {
     const start = serverSource.indexOf("const watchdog = createWatchdog({");
     expect(start).toBeGreaterThan(-1);
     const block = serverSource.slice(start, serverSource.indexOf("\n});", start));
-    expect(block).toContain("clawCmdWithBin,");
-    expect(block).toContain(
-      "compatibleBinForCurrentDb: () => openclawChannelService.compatibleBinForCurrentDb(),",
-    );
-    // The same execFileCmd-backed primitive the capability probes use, from
-    // the one createCommands() instance lib/server.js builds.
-    expect(serverSource).toMatch(
-      /const \{[^}]*clawCmdWithBin,[^}]*\} =\s*createCommands\(/s,
-    );
-    const commandsSource = readSource("lib", "server", "commands.js");
-    expect(commandsSource).toContain("const clawCmdWithBin = async (");
-    expect(commandsSource).toMatch(/return \{[^}]*clawCmdWithBin,[^}]*\}/s);
+    expect(block).not.toContain("clawCmdWithBin");
+    expect(block).not.toContain("compatibleBinForCurrentDb");
+    expect(block).not.toContain("releaseChannelHooks");
+    expect(serverSource).not.toContain("openclawChannelService");
   });
 
   it("register-server-routes passes the outbox-backed notify into registerSystemRoutes (the incumbent-restart notification's carrier)", () => {
@@ -386,7 +321,7 @@ describe("gateway seam contracts + behaviour through the installed handler", () 
     vi.restoreAllMocks();
   });
 
-  it("the gateway module exports every seam lib/server.js wires, and the evidence seam starts null", () => {
+  it("the gateway module exports every seam lib/server.js wires", () => {
     delete process.env.ALPHACLAW_GATEWAY_PRELAUNCH_HOOK;
     delete require.cache[gatewayModulePath];
     const gateway = require(gatewayModulePath);
@@ -394,14 +329,9 @@ describe("gateway seam contracts + behaviour through the installed handler", () 
       "setGatewayCapabilities",
       "setGatewayPrelaunchHookHandler",
       "getLastGatewayPrelaunchHookOutcome",
-      "getLastGatewayStopEvidence",
-      "stopGatewayForBackup",
     ]) {
       expect(typeof gateway[name]).toBe("function");
     }
-    // Mirrors lib/server.js: gatewayQuiesce.getStopEvidence.
-    const seam = () => gateway.getLastGatewayStopEvidence?.() ?? null;
-    expect(seam()).toBeNull();
     // A capabilities object without get() is rejected (falls back to lazy).
     expect(() => gateway.setGatewayCapabilities({ get: () => null })).not.toThrow();
     expect(() => gateway.setGatewayCapabilities(null)).not.toThrow();
@@ -576,67 +506,5 @@ describe("gateway seam contracts + behaviour through the installed handler", () 
       if (originalFetch == null) delete global.fetch;
       else global.fetch = originalFetch;
     }
-  });
-
-  it("the quiesce stop's evidence reaches the seam in lane C's shape and rides into the offline copy's exclusivity evidence", async () => {
-    delete process.env.ALPHACLAW_GATEWAY_PRELAUNCH_HOOK;
-    const child = createChild();
-    child.kill = vi.fn((sig) => {
-      child.killed = true;
-      child.signalCode = sig;
-      return true;
-    });
-    childProcess.spawn = vi.fn(() => child);
-    childProcess.execFile = vi.fn((file, args, opts, cb) => {
-      if (isStopHelpProbe(args)) return cb(null, kStopHelpWithoutForce, "");
-      if (args?.[0] === "gateway" && args?.[1] === "stop") {
-        return cb(Object.assign(new Error("stop timed out"), { code: 1 }), "", "");
-      }
-      return cb(null, "", "");
-    });
-    fs.existsSync = vi.fn(() => false);
-    net.createConnection = vi.fn(() => createSocket(false));
-    delete require.cache[gatewayModulePath];
-    const gateway = require(gatewayModulePath);
-    gateway.setGatewayExitHandler(vi.fn());
-
-    // The seam exactly as lib/server.js binds it into gatewayQuiesce.
-    const gatewayQuiesce = {
-      stop: () => gateway.stopGatewayForBackup({ timeoutMs: 50 }),
-      getStopEvidence: () => gateway.getLastGatewayStopEvidence?.() ?? null,
-    };
-
-    await gateway.launchGatewayProcess();
-    expect(gatewayQuiesce.getStopEvidence()).toBeNull();
-    const stopped = Boolean(await gatewayQuiesce.stop());
-    expect(stopped).toBe(true);
-
-    const evidence = gatewayQuiesce.getStopEvidence();
-    expect(evidence).toEqual({
-      at: expect.any(String),
-      method: "managed_child",
-      childExited: true,
-      portReleased: true,
-      cliRefused: false,
-      cliExitCode: 1,
-    });
-    expect(Date.parse(evidence.at)).not.toBeNaN();
-
-    // channel-sync hands `stopEvidence` + `stopConfirmed` to the offline copy
-    // untouched; the manifest records it verbatim.
-    const report = assessExclusivity({
-      stopConfirmed: stopped,
-      stopEvidence: evidence,
-      quietToken: { id: "quiet-1", owner: "quiesced-backup", disabled: false },
-      isQuiet: () => true,
-      liveProcesses: [],
-      handleCount: 0,
-      dbPaths: [],
-      platform: "linux",
-      listFdHolders: () => [],
-    });
-    expect(report.ok).toBe(true);
-    expect(report.evidence.stopEvidence).toEqual(evidence);
-    gateway.setGatewayExitHandler(null);
   });
 });

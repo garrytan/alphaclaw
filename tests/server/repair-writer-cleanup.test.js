@@ -4,7 +4,6 @@ const path = require("path");
 const { createRunStream } = require("../../lib/server/openclaw-run-stream");
 const { createDoctorFixRunner } = require("../../lib/server/doctor-fix-runner");
 const { createRepairOperation } = require("../../lib/server/repair-operation");
-const { createGatewayMedic } = require("../../lib/server/gateway-medic");
 const { createDoctorGuard } = require("../../lib/server/doctor-guard");
 const { createGatewayLifecycleLock } = require("../../lib/server/gateway-lifecycle-lock");
 const { processGroupHasWriters } = require("../../lib/server/process-group");
@@ -155,22 +154,5 @@ describe("repair writer cancellation boundaries", () => {
       await queued;
       await successor?.();
     }
-  });
-
-  it("late binary discovery cannot make a backup or start Doctor after the budget", async () => {
-    vi.useFakeTimers();
-    fs.writeFileSync(path.join(dir, "openclaw.json"), "{}\n");
-    let resolve;
-    const resolveDoctorBin = vi.fn(() => new Promise((r) => { resolve = r; }));
-    const runDoctorFix = vi.fn();
-    const medic = createGatewayMedic({ openclawDir: dir, env: {}, logger: { log() {} },
-      getChannelInfo: () => ({ installedDiverged: true }), resolveDoctorBin, runDoctorFix });
-    const result = medic.run({ budgetMs: 120_000 });
-    await vi.advanceTimersByTimeAsync(120_001);
-    expect((await result).fixed).toBe(false);
-    resolve({ bin: "/late/openclaw.mjs" });
-    await vi.advanceTimersByTimeAsync(1);
-    expect(runDoctorFix).not.toHaveBeenCalled();
-    expect(fs.readdirSync(dir)).toEqual(["openclaw.json"]);
   });
 });

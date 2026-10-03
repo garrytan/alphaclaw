@@ -55,8 +55,10 @@ describe("ci/merge-gate workflow contract", () => {
       "lib/server/doctor",
       "lib/server/routes/",
       "lib/server\\.js",
-      // Browser-driven journey surfaces (fix wave F173).
-      "lib/public/js/components/upgrade-tab/",
+      // The bin-phase boot spine the durability journey seeds against.
+      "lib/server/boot-",
+      "lib/server/server-pidfile\\.js",
+      // The journey waits on login.html (fix wave F173).
       "lib/public/login\\.html",
     ]) {
       expect(c).toContain(p);

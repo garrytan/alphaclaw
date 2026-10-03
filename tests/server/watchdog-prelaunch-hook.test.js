@@ -109,10 +109,10 @@ describe("watchdog.onPrelaunchHook", () => {
       at: expect.any(String),
     });
     expect(Date.parse(status.prelaunchHook.at)).not.toBeNaN();
-    // The phase enum is untouched (15 values) and the phase is whatever the
+    // The phase enum is untouched (12 values) and the phase is whatever the
     // existing latches derive — here the never-started "stopped" — with the
     // new reason narrating it.
-    expect(kWatchdogPhases).toHaveLength(15);
+    expect(kWatchdogPhases).toHaveLength(12);
     expect(status.phase).toBe(before.phase);
     expect(status.lifecycle).toBe(before.lifecycle);
     expect(status.health).toBe(before.health);

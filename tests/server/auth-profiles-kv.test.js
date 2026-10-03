@@ -11,7 +11,6 @@ process.env.ALPHACLAW_ROOT_DIR = root;
 const { createAuthProfiles } = require("../../lib/server/auth-profiles");
 const { registerCodexRoutes } = require("../../lib/server/routes/codex");
 const { registerModelRoutes } = require("../../lib/server/routes/models");
-const { beginStateDbQuiet, getStateDbHandleCount } = require("../../lib/server/state-db-quiet");
 const ap = createAuthProfiles();
 const databasePath = path.join(root, ".openclaw", "state", "openclaw.sqlite");
 const secrets = () => ({ version: 1, future: { keep: [1, 2] }, profiles: {
@@ -135,7 +134,6 @@ it("rolls back both documents when the second write fails", () => {
   db.close();
   expect(() => ap.upsertProfile("new", { type: "api_key", provider: "openai", key: "synthetic" })).toThrow(expect.objectContaining({ code: "AUTH_STORE_UNREADABLE" }));
   expect(read()).toEqual({ store: secrets(), runtime: state() });
-  expect(getStateDbHandleCount()).toBe(0);
 });
 
 it("does not report malformed ownership or denied reads as disconnected", () => {
@@ -174,20 +172,6 @@ it("refuses a malformed file-era store instead of erasing its bytes", () => {
   expect(error).toMatchObject({ code: "AUTH_STORE_UNREADABLE" });
   expect(require("node:util").inspect(error)).not.toContain("synthetic-secret");
   expect(fs.readFileSync(file, "utf8")).toBe(raw);
-});
-
-it("preserves the quiet barrier for reads, every mutation, and initialization", async () => {
-  seed();
-  const { token } = await beginStateDbQuiet({ owner: "auth-test", maxMs: 60_000 });
-  const restartRequiredState = { markRequired: vi.fn() };
-  try {
-    expect(ap.getAuthStoreAvailability()).toEqual({ unavailable: true, reason: "backup_in_progress" });
-    expect(await ap.refreshGatewayAuth(undefined, restartRequiredState)).toMatchObject({ authRuntimeRefreshed: false, restartRequired: true });
-    expect(restartRequiredState.markRequired).not.toHaveBeenCalled();
-    expect(() => ap.removeApiKeyProfileForEnvVar("anthropic")).toThrow(expect.objectContaining({ code: "backup_in_progress" }));
-    expect(read()).toEqual({ store: secrets(), runtime: state() });
-  } finally { token.release(); }
-  await vi.waitFor(() => expect(restartRequiredState.markRequired).toHaveBeenCalledWith("config_changed"));
 });
 
 it("distinguishes persisted credentials from failed gateway activation and preserves the saved store", async () => {

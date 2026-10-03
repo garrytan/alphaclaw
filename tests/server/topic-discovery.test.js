@@ -393,21 +393,17 @@ describe("server/topic-discovery", () => {
 });
 
 describe("production topic sweep admission", () => {
-  it("requires a ready, unheld, non-mutating server and fails closed for corrupt state", () => {
+  it("requires a ready, non-shutting-down server", () => {
     const source = fs.readFileSync(path.resolve(__dirname, "../../lib/server.js"), "utf8");
     const start = source.indexOf("const topicDiscovery = createTopicDiscoveryService({");
     const block = source.slice(start, source.indexOf("openclawDir:", start));
     const match = block.match(/canSweep: (\(\) => \{[\s\S]*\n  \}),/);
     expect(match).not.toBeNull();
     let phase = "ready";
-    let quiet = false;
-    let applying = false;
-    let info = {};
     const abort = new AbortController();
-    const admission = new Function("openclawChannelService", "gatewayQuiesceAbort", "require", `return ${match[1]}`)(
-      { isApplyInProgress: () => applying, getChannelInfo: () => info },
+    const admission = new Function("shutdownAbort", "require", `return ${match[1]}`)(
       abort,
-      (name) => name.includes("boot-phase") ? { getBootPhase: () => ({ phase }) } : { isStateDbQuiet: () => quiet },
+      (name) => name.includes("boot-phase") ? { getBootPhase: () => ({ phase }) } : {},
     );
     expect(admission()).toBe(true);
     phase = "starting_gateway";
@@ -415,17 +411,6 @@ describe("production topic sweep admission", () => {
     phase = "failed";
     expect(admission()).toBe(false);
     phase = "ready";
-    for (const held of [{ gatewayHold: { reason: "recovery_review" } }, { stateCorrupted: true }, { noBootableVersion: {} }, null]) {
-      info = held;
-      expect(admission()).toBe(false);
-    }
-    info = {};
-    applying = true;
-    expect(admission()).toBe(false);
-    applying = false;
-    quiet = true;
-    expect(admission()).toBe(false);
-    quiet = false;
     expect(admission()).toBe(true);
     abort.abort("shutdown");
     expect(admission()).toBe(false);

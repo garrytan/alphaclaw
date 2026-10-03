@@ -1,15 +1,9 @@
-// Revert-safety of the on-disk state files touched by #54 (lanes A/B/I), both
-// ways:
+// Revert-safety of the on-disk state files, both ways:
 //   forward  — files written by PRE-change code (none of the new fields) load
 //              under the current normalizers with defaults, never a throw;
-//   backward — files written WITH the new fields (backup.reused / diagnosis /
-//              usableCheck / offlineCopy, applied.operationId, outbox
-//              abandonedAt-terminal / partialAt / errorCode) load under the
-//              current normalizers with every field intact, and — because the
-//              new fields live either in additive normalized slots or inside
-//              opaque pass-through objects (lastUpdateRun, backups[], run
-//              record `backup`) — an older normalizer would drop at most
-//              applied.operationId (which has a documented fallback id).
+//   backward — files written WITH the new fields (outbox abandonedAt-terminal /
+//              partialAt / errorCode) load under the current normalizers with
+//              every field intact.
 // Fixtures are literal JSON on real temp dirs: exactly what a box has.
 //
 // Issue #76 C5 extends this to the boot spine's persisted formats: the
@@ -20,12 +14,13 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 
+const { createServerPidfile, formatServerPidDecision } = require("../../lib/server/server-pidfile");
 const {
-  createOpenclawReleaseChannelStore,
-  formatServerPidDecision,
-  normalizeState,
-} = require("../../lib/server/openclaw-release-channel");
-const { createRunLedger } = require("../../lib/server/openclaw-run-ledger");
+  kRetirementFileName,
+  retireReleaseChannelAtBoot,
+  deliverRetirementNotice,
+} = require("../../lib/server/openclaw-channel-retirement");
+const { kBootMigrationFileName, readCompletedForVersion } = require("../../lib/server/openclaw-boot-migration");
 const { createNotifyOutbox } = require("../../lib/server/notify-outbox");
 const { createRestartRequiredState } = require("../../lib/server/restart-required-state");
 const { kRestartOperationRetentionMs } = require("../../lib/server/constants");
@@ -43,272 +38,14 @@ const {
   readSelfVersionStamp,
   stampSelfVersionAtBoot,
 } = require("../../lib/server/alphaclaw-self-version");
-const {
-  kSchemaVersionsFileName,
-  kSeededSchemaVersions,
-  createSchemaVersionTable,
-} = require("../../lib/server/openclaw-schema-versions");
 
 const kSilentLogger = { log() {}, warn() {}, error() {} };
+const kOperationId = "2f8c1f2e-0d2a-4b1e-9a11-6f2f8c1f2e0d";
 const mkTemp = (prefix) => fs.mkdtempSync(path.join(os.tmpdir(), prefix));
 const writeJson = (file, value) => {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, `${JSON.stringify(value, null, 2)}\n`);
 };
-
-const kOperationId = "2f8c1f2e-0d2a-4b1e-9a11-6f2f8c1f2e0d";
-
-// A lane-A backup record as channel-sync persists it on the run + channel state.
-const kNewBackupRecord = {
-  ok: true,
-  file: "/data/.openclaw/backups/openclaw-backup-1000-2f8c1f2e.alphaclaw.tar.gz",
-  sha256: "a".repeat(64),
-  bytes: 4096,
-  reused: true,
-  attempts: 2,
-  quiesced: true,
-  diagnosis: {
-    journalMode: "wal",
-    fsType: "ext4",
-    stateBytes: 40_960,
-    dbCount: 2,
-    otherProcesses: [],
-    predictedUpstreamMs: 1800,
-  },
-  usableCheck: { ok: true, gzip: "ok", manifest: "ok", checkedAt: 1_700_000_000_000 },
-  offlineCopy: {
-    ok: true,
-    reason: "lock_contention",
-    durationMs: 1200,
-    bytes: 4096,
-    partial: false,
-  },
-};
-
-describe("state-file compat: openclaw-channel-state.json", () => {
-  const createStore = () => {
-    const rootDir = mkTemp("alphaclaw-compat-channel-");
-    const openclawDir = path.join(rootDir, ".openclaw");
-    const store = createOpenclawReleaseChannelStore({
-      rootDir,
-      openclawDir,
-      logger: kSilentLogger,
-    });
-    return { store };
-  };
-
-  it("loads a file written WITH the new fields: applied.operationId survives, lastUpdateRun/backups carry the lane-A backup fields verbatim", () => {
-    const { store } = createStore();
-    writeJson(store.statePath, {
-      applied: {
-        channel: "beta",
-        version: "2026.9.1-beta.1",
-        sha: null,
-        at: 1_700_000_000_000,
-        acceptedAt: null,
-        acceptedSource: null,
-        operationId: kOperationId,
-      },
-      pinVersion: "2026.7.1-2",
-      lastKnownGood: { package: "2026.7.1-2", dev: null },
-      blocklist: [],
-      lastUpdateRun: {
-        operationId: kOperationId,
-        startedAt: 1_700_000_000_000,
-        finishedAt: 1_700_000_090_000,
-        ok: true,
-        backup: kNewBackupRecord,
-      },
-      lastBoot: null,
-      configMigration: null,
-      gatewayHold: null,
-      backups: [
-        {
-          file: kNewBackupRecord.file,
-          sha256: kNewBackupRecord.sha256,
-          bytes: 4096,
-          at: 1_700_000_000_000,
-          operationId: kOperationId,
-          reused: false,
-          producer: "alphaclaw-offline-copy",
-          usableCheck: kNewBackupRecord.usableCheck,
-        },
-      ],
-    });
-
-    const state = store.readState();
-    expect(state.corrupted).toBeUndefined();
-    expect(state.applied.operationId).toBe(kOperationId);
-    expect(state.lastUpdateRun.backup).toEqual(kNewBackupRecord);
-    expect(state.backups[0]).toMatchObject({
-      reused: false,
-      producer: "alphaclaw-offline-copy",
-      usableCheck: kNewBackupRecord.usableCheck,
-    });
-    // Round trip keeps every new field on disk.
-    store.writeState(state);
-    const onDisk = JSON.parse(fs.readFileSync(store.statePath, "utf8"));
-    expect(onDisk.applied.operationId).toBe(kOperationId);
-    expect(onDisk.lastUpdateRun.backup.offlineCopy).toEqual(kNewBackupRecord.offlineCopy);
-    expect(onDisk.backups[0].usableCheck).toEqual(kNewBackupRecord.usableCheck);
-  });
-
-  it("loads a PRE-change file (no operationId, no backup diagnosis/usableCheck/offlineCopy/reused) with defaults", () => {
-    const { store } = createStore();
-    writeJson(store.statePath, {
-      applied: {
-        channel: "beta",
-        version: "2026.8.2",
-        sha: null,
-        at: 1_690_000_000_000,
-        acceptedAt: 1_690_000_120_000,
-        acceptedSource: "acceptance",
-      },
-      pinVersion: "2026.7.1-2",
-      lastKnownGood: { package: "2026.8.2", dev: null },
-      blocklist: [],
-      lastUpdateRun: {
-        operationId: "11111111-2222-4333-8444-555555555555",
-        startedAt: 1_690_000_000_000,
-        finishedAt: 1_690_000_060_000,
-        ok: true,
-        backup: { ok: true, file: "/data/.openclaw/backups/openclaw-backup-1-abcdef12.tar.gz", bytes: 10 },
-      },
-      lastBoot: null,
-      backups: [
-        { file: "/data/.openclaw/backups/openclaw-backup-1-abcdef12.tar.gz", bytes: 10, at: 1 },
-      ],
-    });
-
-    const state = store.readState();
-    expect(state.applied).toEqual({
-      channel: "beta",
-      version: "2026.8.2",
-      sha: null,
-      at: 1_690_000_000_000,
-      acceptedAt: 1_690_000_120_000,
-      acceptedSource: "acceptance",
-      operationId: null,
-      // Pin-window fields (PR #57) default the same way for a pre-change file.
-      reason: null,
-    });
-    expect(state.previousPin).toBeNull();
-    expect(state.pinWindow).toBeNull();
-    // The consumer-side defaults channel-sync applies to an old backup record.
-    const backup = state.lastUpdateRun.backup;
-    expect(backup.reused === true).toBe(false);
-    expect(backup.diagnosis ?? null).toBeNull();
-    expect(backup.usableCheck || null).toBeNull();
-    expect(backup.offlineCopy ?? null).toBeNull();
-    expect(state.backups[0].usableCheck || null).toBeNull();
-  });
-
-  it("the very oldest shape ({applied, pinVersion} only) and an empty object both normalize without throwing", () => {
-    expect(() =>
-      normalizeState({ applied: { channel: "beta", version: "1.0.0" }, pinVersion: "0.9.0" }),
-    ).not.toThrow();
-    const oldest = normalizeState({ applied: { channel: "beta", version: "1.0.0" }, pinVersion: "0.9.0" });
-    expect(oldest.applied.operationId).toBe(null);
-    expect(oldest.lastUpdateRun).toBe(null);
-    expect(oldest.backups).toEqual([]);
-    expect(normalizeState({}).applied).toBe(null);
-  });
-});
-
-describe("state-file compat: run records (.alphaclaw/runs/<operationId>.json)", () => {
-  const createLedger = () => {
-    const openclawDir = mkTemp("alphaclaw-compat-runs-");
-    const ledger = createRunLedger({ openclawDir, logger: kSilentLogger });
-    return { ledger, openclawDir };
-  };
-
-  it("loads a record written WITH the lane-A backup fields (reused/diagnosis/usableCheck/offlineCopy) intact and round-trips them through updateRun", () => {
-    const { ledger } = createLedger();
-    writeJson(path.join(ledger.runsDir, `${kOperationId}.json`), {
-      operationId: kOperationId,
-      target: { channel: "beta", version: "2026.9.1-beta.1" },
-      state: "activated",
-      startedAt: 1_700_000_000_000,
-      finishedAt: 1_700_000_090_000,
-      ok: true,
-      result: { status: 202 },
-      steps: [{ name: "backup", status: "done", detail: "reused a verified backup" }],
-      backup: kNewBackupRecord,
-      dbPreflight: { migrationRequired: false },
-      overseer: null,
-      hasLog: true,
-    });
-
-    const record = ledger.readRun(kOperationId);
-    expect(record).not.toBeNull();
-    expect(record.backup).toEqual(kNewBackupRecord);
-    expect(record.backup.reused).toBe(true);
-    expect(record.backup.diagnosis.journalMode).toBe("wal");
-    expect(record.backup.usableCheck.ok).toBe(true);
-    expect(record.backup.offlineCopy.reason).toBe("lock_contention");
-
-    const updated = ledger.updateRun(kOperationId, (r) => {
-      r.steps.push({ name: "restart", status: "done" });
-      return r;
-    });
-    expect(updated.backup).toEqual(kNewBackupRecord);
-    expect(ledger.listRuns()).toHaveLength(1);
-  });
-
-  it("loads a PRE-change record (no backup sub-fields, no dbPreflight/overseer) with defaults; unknown future top-level keys are dropped, not fatal", () => {
-    const { ledger } = createLedger();
-    const oldId = "11111111-2222-4333-8444-555555555555";
-    writeJson(path.join(ledger.runsDir, `${oldId}.json`), {
-      operationId: oldId,
-      target: { channel: "beta", version: "2026.8.2" },
-      state: "activated",
-      startedAt: 1_690_000_000_000,
-      finishedAt: 1_690_000_060_000,
-      ok: true,
-      steps: [],
-      backup: { ok: true, file: "/data/.openclaw/backups/openclaw-backup-1-abcdef12.tar.gz" },
-      someFutureField: { from: "a-later-version" },
-    });
-    const record = ledger.readRun(oldId);
-    expect(record).toMatchObject({
-      operationId: oldId,
-      state: "activated",
-      dbPreflight: null,
-      overseer: null,
-      hasLog: false,
-    });
-    expect(record.someFutureField).toBeUndefined();
-    expect(record.backup.reused === true).toBe(false);
-    expect(record.backup.diagnosis ?? null).toBeNull();
-    expect(record.backup.usableCheck || null).toBeNull();
-    expect(record.backup.offlineCopy ?? null).toBeNull();
-
-    // A record with no backup at all (a noop run) still loads.
-    const noopId = "22222222-2222-4333-8444-555555555555";
-    writeJson(path.join(ledger.runsDir, `${noopId}.json`), {
-      operationId: noopId,
-      state: "noop",
-      startedAt: 1,
-    });
-    expect(ledger.readRun(noopId)).toMatchObject({ state: "noop", backup: null, steps: [] });
-    expect(ledger.listRuns().map((r) => r.operationId)).toEqual([oldId, noopId]);
-  });
-
-  it("garbage or unknown state values load defensively (unknown state → running, non-object → null)", () => {
-    const { ledger } = createLedger();
-    const weirdId = "33333333-2222-4333-8444-555555555555";
-    writeJson(path.join(ledger.runsDir, `${weirdId}.json`), {
-      operationId: weirdId,
-      state: "state_from_the_future",
-      backup: "not-an-object",
-      steps: "nope",
-    });
-    expect(ledger.readRun(weirdId)).toMatchObject({ state: "running", backup: null, steps: [] });
-    fs.writeFileSync(path.join(ledger.runsDir, "44444444-2222-4333-8444-555555555555.json"), "{not json");
-    expect(ledger.readRun("44444444-2222-4333-8444-555555555555")).toBeNull();
-    expect(() => ledger.listRuns()).not.toThrow();
-  });
-});
 
 describe("state-file compat: notify-outbox.json", () => {
   const createOutbox = () => {
@@ -567,10 +304,9 @@ describe.skipIf(process.pid === kFixturePid)(
       } = {},
     ) => {
       const rootDir = mkTemp("alphaclaw-compat-pid-");
-      const store = createOpenclawReleaseChannelStore({
+      const store = createServerPidfile({
         fsModule: fakeProcFs({ procs, pid1Ticks }),
-        rootDir,
-        openclawDir: path.join(rootDir, ".openclaw"),
+        managedDir: path.join(rootDir, ".openclaw", ".alphaclaw"),
         nowFn: () => now,
         logger: kSilentLogger,
         hostnameFn: () => hostname,
@@ -723,151 +459,54 @@ describe.skipIf(process.pid === kFixturePid)(
   },
 );
 
-describe("persisted-format fixtures: openclaw-channel-state.json (v0.9.76 → v0.9.77)", () => {
+// The in-app version switch is retired (openclaw-channel-retirement.js): a
+// box carrying either era of the old state file must come out of its first
+// boot with the file set aside verbatim, the doctor record carried over, and a
+// notice only when the box was not on the pinned stable build.
+describe("persisted-format fixtures: openclaw-channel-state.json (v0.9.76, v0.9.77) → retired at boot", () => {
   const kFile = "openclaw-channel-state.json";
-  const createStore = () => {
-    const rootDir = mkTemp("alphaclaw-compat-channel-fx-");
-    return createOpenclawReleaseChannelStore({
-      rootDir,
-      openclawDir: path.join(rootDir, ".openclaw"),
-      logger: kSilentLogger,
-    });
+  const kRetiredAt = kFixtureAt + 120_000;
+  const plantBox = (era) => {
+    const rootDir = mkTemp("alphaclaw-compat-channel-retire-");
+    const managedDir = path.join(rootDir, ".openclaw", ".alphaclaw");
+    const statePath = plantFixture(kFile, era, path.join(managedDir, kFile));
+    return { rootDir, managedDir, statePath, fixture: fixtureJson(kFile, era) };
   };
+  const retire = (box, pinVersion) =>
+    retireReleaseChannelAtBoot({ managedDir: box.managedDir, rootDir: box.rootDir, pinVersion, nowFn: () => kRetiredAt, logger: kSilentLogger });
 
-  it("v0.9.76 (no lastTransition / pinLag / configMigration.lastRestore): loads with those null, every 0.9.76 field intact, and a rewrite only ADDS the null slots", () => {
-    const store = createStore();
-    plantFixture(kFile, "v0.9.76", store.statePath);
-    const fixture = fixtureJson(kFile, "v0.9.76");
-    expect(fixture).not.toHaveProperty("lastTransition");
-    expect(fixture).not.toHaveProperty("pinLag");
+  it.each(["v0.9.76", "v0.9.77"])("%s: the state file moves aside byte-for-byte, configMigration.completedForVersion carries over, the pinned stable box needs no notice", async (era) => {
+    const box = plantBox(era);
+    const record = retire(box, "2026.9.2");
 
-    const state = store.readState();
-    expect(state.corrupted).toBeUndefined();
-    expect(state.lastTransition).toBeNull();
-    expect(state.pinLag).toBeNull();
-    expect(state.configMigration).toEqual({ ...fixture.configMigration, lastRestore: null,
-      completedForBuild: null, lastAttempt: { ...fixture.configMigration.lastAttempt, buildId: null } });
-    expect(state).toMatchObject({
-      applied: fixture.applied,
+    expect(record).toEqual({
+      retiredAt: kRetiredAt,
+      previous: { channel: "stable", version: "2026.9.2", sha: null },
       pinVersion: "2026.9.2",
-      lastKnownGood: fixture.lastKnownGood,
-      blocklist: fixture.blocklist,
-      lastUpdateRun: fixture.lastUpdateRun,
-      lastBoot: fixture.lastBoot,
-      gatewayHold: null,
-      backups: fixture.backups,
-      previousPin: fixture.previousPin,
-      pinWindow: fixture.pinWindow,
+      overlayDir: null,
+      needsNotice: false,
+      notifiedAt: null,
     });
-    expect(normalizeState(fixture)).toEqual(state);
+    expect(fs.existsSync(box.statePath)).toBe(false);
+    expect(fs.readFileSync(`${box.statePath}.retired-${kRetiredAt}`, "utf8")).toBe(fixtureText(kFile, era));
+    expect(readCompletedForVersion({ managedDir: box.managedDir })).toBe(box.fixture.configMigration.completedForVersion);
+    expect(readJsonFile(path.join(box.managedDir, kBootMigrationFileName))).toEqual({ completedForVersion: "2026.9.2", at: kRetiredAt });
+    expect(readJsonFile(path.join(box.managedDir, kRetirementFileName))).toEqual(record);
 
-    store.writeState(state);
-    expect(readJsonFile(store.statePath)).toEqual({
-      ...fixture,
-      configMigration: { ...fixture.configMigration, lastRestore: null,
-        completedForBuild: null, lastAttempt: { ...fixture.configMigration.lastAttempt, buildId: null } },
-      lastTransition: null,
-      pinLag: null,
-      databaseRecoveryPending: null,
-    });
+    const notify = vi.fn();
+    expect(await deliverRetirementNotice({ managedDir: box.managedDir, notify, nowFn: () => kRetiredAt + 1, logger: kSilentLogger })).toEqual({ delivered: false });
+    expect(notify).not.toHaveBeenCalled();
+    // A second boot finds nothing left to retire.
+    expect(retire(box, "2026.9.2")).toBeNull();
   });
 
-  it("v0.9.77: adds null build identity slots and round-trips every historical field byte-for-byte", () => {
-    const store = createStore();
-    plantFixture(kFile, "v0.9.77", store.statePath);
-    const fixture = fixtureJson(kFile, "v0.9.77");
-
-    const state = store.readState();
-    expect(state.corrupted).toBeUndefined();
-    expect(state.lastTransition).toEqual(fixture.lastTransition);
-    expect(state.lastTransition).toMatchObject({
-      from: "2026.8.2",
-      to: "2026.9.2",
-      kind: "upgrade",
-      source: "operator_apply",
-      ok: true,
-      consumedAt: null,
-    });
-    expect(state.pinLag).toEqual(fixture.pinLag);
-    expect(state.pinLag).toMatchObject({ pin: "2026.9.2", installed: "2026.8.2", bootId: kFixtureBootId, bootsSeen: 1 });
-    expect(state.configMigration.lastRestore).toEqual(fixture.configMigration.lastRestore);
-    expect(state.configMigration.lastRestore).toMatchObject({ source: "round_trip", bootId: kFixtureBootId });
-
-    store.writeState(state);
-    const rewritten = readJsonFile(store.statePath);
-    expect(rewritten).toEqual({ ...fixture, databaseRecoveryPending: null, configMigration: { ...fixture.configMigration,
-      completedForBuild: null, lastAttempt: { ...fixture.configMigration.lastAttempt, buildId: null } } });
-    // The only forward-format changes are the explicitly unknown slots.
-    // Removing them must reproduce the historical fixture's exact bytes.
-    delete rewritten.configMigration.completedForBuild;
-    delete rewritten.configMigration.lastAttempt.buildId;
-    delete rewritten.databaseRecoveryPending;
-    expect(`${JSON.stringify(rewritten, null, 2)}\n`).toBe(fixtureText(kFile, "v0.9.77"));
-  });
-});
-
-describe("persisted-format fixtures: runs/<operationId>.json (v0.9.76 apply, v0.9.77 reconcile)", () => {
-  const kFile = "runs";
-  const kBootNow = kFixtureAt + 60_000;
-  const createLedger = () =>
-    createRunLedger({
-      openclawDir: mkTemp("alphaclaw-compat-runs-fx-"),
-      logger: kSilentLogger,
-      nowFn: () => kBootNow,
-    });
-  const plantRun = (ledger, era) => {
-    const fixture = fixtureJson(kFile, era);
-    const target = plantFixture(kFile, era, path.join(ledger.runsDir, `${fixture.operationId}.json`));
-    return { fixture, target };
-  };
-  const kInterruptedResult = {
-    ok: false,
-    code: "interrupted",
-    message: "AlphaClaw restarted before the update finished.",
-    hint: "Nothing was activated. Start the update again from the Upgrade page.",
-    docsUrl: null,
-  };
-
-  it("v0.9.76: a run left `running` by a process that died mid-apply loads whole and is closed as interrupted at boot with steps/backup/dbPreflight intact", () => {
-    const ledger = createLedger();
-    const { fixture, target } = plantRun(ledger, "v0.9.76");
-    expect(fixture).toMatchObject({ state: "running", target: { channel: "stable", version: "2026.9.2" } });
-    expect(ledger.readRun(fixture.operationId)).toEqual(fixture);
-
-    const closed = ledger.closeInterruptedRuns();
-    expect(closed).toEqual([
-      {
-        ...fixture,
-        state: "interrupted",
-        ok: false,
-        finishedAt: kBootNow,
-        result: kInterruptedResult,
-      },
-    ]);
-    expect(readJsonFile(target)).toEqual(closed[0]);
-    // Idempotent: nothing is left running for the next boot to close.
-    expect(ledger.closeInterruptedRuns()).toEqual([]);
-  });
-
-  it("v0.9.77: a reconcile ledger run (target.kind reconcile, steps stop → activate) that died mid-copy is closed the same way (Codex 7)", () => {
-    const ledger = createLedger();
-    const { fixture, target } = plantRun(ledger, "v0.9.77");
-    expect(fixture).toMatchObject({
-      state: "running",
-      target: { kind: "reconcile", version: "2026.9.2" },
-      steps: [
-        { name: "stop", status: "done" },
-        { name: "activate", status: "running" },
-      ],
-    });
-    expect(ledger.readRun(fixture.operationId)).toEqual(fixture);
-
-    const closed = ledger.closeInterruptedRuns();
-    expect(closed).toEqual([
-      { ...fixture, state: "interrupted", ok: false, finishedAt: kBootNow, result: kInterruptedResult },
-    ]);
-    expect(readJsonFile(target).steps).toEqual(fixture.steps);
-    expect(ledger.listRuns().map((run) => run.state)).toEqual(["interrupted"]);
+  it("v0.9.77 under a newer pin: a stable box on the old pin is retired silently (it only moves forward)", async () => {
+    const box = plantBox("v0.9.77");
+    const record = retire(box, "2026.9.8");
+    expect(record).toMatchObject({ previous: { channel: "stable", version: "2026.9.2" }, pinVersion: "2026.9.8", needsNotice: false });
+    const notify = vi.fn(async () => {});
+    expect(await deliverRetirementNotice({ managedDir: box.managedDir, notify, nowFn: () => kRetiredAt + 1, logger: kSilentLogger })).toEqual({ delivered: false });
+    expect(notify).not.toHaveBeenCalled();
   });
 });
 
@@ -1184,65 +823,6 @@ describe("persisted-format fixtures: alphaclaw-version.json (missing, v0.9.77, t
   });
 });
 
-describe("persisted-format fixtures: openclaw-schema-versions.json (v0.9.77, torn write)", () => {
-  const kFile = "openclaw-schema-versions.json";
-  const createTable = () => {
-    const managedDir = path.join(mkTemp("alphaclaw-compat-schema-fx-"), ".alphaclaw");
-    const logger = { warn: vi.fn(), log: vi.fn(), error: vi.fn() };
-    return {
-      table: createSchemaVersionTable({ managedDir, nowFn: () => kFixtureAt, logger }),
-      logger,
-      filePath: path.join(managedDir, kSchemaVersionsFileName),
-    };
-  };
-  const seededView = () =>
-    Object.fromEntries(
-      Object.entries(kSeededSchemaVersions).map(([version, seed]) => [
-        version,
-        { state: seed.state, agent: seed.agent, source: "seeded", at: null, observed: null },
-      ]),
-    );
-
-  it("corrupt (torn write): the seeded table answers with exactly one warning and never a throw; the next declaration rewrites the file whole (CEO 1.1)", () => {
-    const { table, logger, filePath } = createTable();
-    plantFixture(kFile, "corrupt", filePath);
-    expect(() => JSON.parse(fixtureText(kFile, "corrupt"))).toThrow();
-
-    expect(table.read()).toEqual({ byVersion: seededView(), origin: "unreadable" });
-    expect(table.supportedFor("2026.9.2")).toEqual({ state: 15, agent: 19, source: "seeded" });
-    // 2026.9.9 is not seeded (2026.9.3 has been since v0.9.80): an unknown version answers nulls.
-    expect(table.supportedFor("2026.9.9")).toEqual({ state: null, agent: null, source: null });
-    expect(logger.warn).toHaveBeenCalledTimes(1);
-    expect(logger.warn.mock.calls[0][0]).toContain("seeded");
-
-    expect(table.recordDeclared("2026.9.2", { state: 15, agent: 19 })).toEqual({ state: 15, agent: 19, source: "declared" });
-    expect(table.read().origin).toBe("file");
-    expect(readJsonFile(filePath)).toEqual({
-      byVersion: { "2026.9.2": { state: 15, agent: 19, source: "declared", at: kFixtureAt } },
-    });
-    expect(logger.warn).toHaveBeenCalledTimes(1);
-  });
-
-  it("v0.9.77: learned declared entries override the seeds, observed evidence rides along and never becomes supported, and reading never writes", () => {
-    const { table, logger, filePath } = createTable();
-    plantFixture(kFile, "v0.9.77", filePath);
-    const fixture = fixtureJson(kFile, "v0.9.77");
-
-    const view = table.read();
-    expect(view.origin).toBe("file");
-    expect(view.byVersion["2026.9.2"]).toEqual(fixture.byVersion["2026.9.2"]);
-    expect(view.byVersion["2026.9.2"]).toMatchObject({ source: "declared", observed: { state: 15, agent: 19 } });
-    expect(view.byVersion["2026.9.3"]).toEqual({ ...fixture.byVersion["2026.9.3"], observed: null });
-    // Seeds the file does not mention are still there.
-    expect(view.byVersion["2026.7.1-2"]).toEqual({ state: 1, agent: null, source: "seeded", at: null, observed: null });
-    expect(table.supportedFor("2026.9.2")).toEqual({ state: 15, agent: 19, source: "declared" });
-    expect(table.supportedFor("2026.9.3")).toEqual({ state: 16, agent: 20, source: "declared" });
-
-    expect(fs.readFileSync(filePath, "utf8")).toBe(fixtureText(kFile, "v0.9.77"));
-    expect(logger.warn).not.toHaveBeenCalled();
-  });
-});
-
 describe("persisted-format fixtures: auto-repair-pause.json (reader lands in Stage 3 I3)", () => {
   const kFile = "auto-repair-pause.json";
 
@@ -1286,9 +866,7 @@ describe("persisted-format fixtures: auto-repair-pause.json (reader lands in Sta
       resolveSetupUrl: () => "http://localhost",
       resolveGatewayHealthUrl: () => "http://gateway/health",
       resolveGatewayReadyzUrl: () => "http://gateway/readyz",
-      releaseChannelHooks: {
-        getInfo: () => ({ installedVersion, expectedVersion: "2026.9.2", installedDiverged: installedVersion !== "2026.9.2" }),
-      },
+      getOpenclawInfo: () => ({ installedVersion, pinnedVersion: "2026.9.2", installedDiverged: installedVersion !== "2026.9.2" }),
       readPersistedPause: () => store.read(),
       writePersistedPause: (pause) => store.write(pause),
     });

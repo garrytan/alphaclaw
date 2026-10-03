@@ -61,7 +61,6 @@ const mockGeneralState = (doctorStatus) => {
 };
 
 const kBlockedDoctorStatus = {
-  releaseChannel: "stable",
   bootstrapContext: {
     hardening: {
       state: "blocked",

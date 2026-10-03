@@ -19,8 +19,7 @@ Do not deflect actionable requests to the Setup UI. If a command or tool is avai
 | Envars   | `{{SETUP_UI_URL}}#envars`   | View/edit/add environment variables (saved to `{{ENV_FILE}}`), gateway restart prompt to apply changes |
 | Webhooks | `{{SETUP_UI_URL}}#webhooks` | Webhook endpoints — create flow, transform modules, request history and payload inspection, OAuth callback aliases, Gmail watch delivery |
 | Nodes    | `{{SETUP_UI_URL}}#nodes`    | Worker nodes — Node Setup Wizard and pairing approval, connected-node list, browser attach, exec policy (host, security, ask) and the command allowlist |
-| Team     | `{{SETUP_UI_URL}}#team`     | Team access (needs OpenClaw 2026.8+, beta channel) — member accounts, invites, roles, who's online; the enable wizard switches gateway auth to trusted-proxy |
-| Upgrade  | `{{SETUP_UI_URL}}#upgrade`  | OpenClaw versions & release channels (stable/beta/dev) — catalog, release notes, apply with backup + auto-rollback, backups inventory, medic and overseer settings |
+| Team     | `{{SETUP_UI_URL}}#team`     | Team access (needs OpenClaw 2026.8+) — member accounts, invites, roles, who's online; the enable wizard switches gateway auth to trusted-proxy |
 | Browse   | `{{SETUP_UI_URL}}#browse`   | File browser and editor rooted at `.openclaw` (opened from the sidebar file tree), markdown preview/edit, diff review and git-aware save/sync |
 
 ### Environment variables

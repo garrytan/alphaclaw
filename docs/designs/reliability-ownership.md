@@ -38,8 +38,8 @@ dispatch. Object identity and the captured `servingSeq` fence every continuation
 Maintenance's exit-probe token is not a serving identity. Failed admission or
 dispatch without a successor leaves the record pending. Accepted launch/adoption
 supersedes it, including during warmup; stopping the watchdog cancels it
-synchronously. A failed restart reporting `stopped` is not that Stop intent. Structural
-holds and rollback transfer responsibility to their existing recovery paths.
+synchronously. A failed restart reporting `stopped` is not that Stop intent. A
+latched auto-repair pause transfers responsibility to its own resume rules.
 Managed-operation crashes retain the ten-second delay without crash accounting.
 Only a real `LAUNCH_REQUESTED` consumes a conflict-relaunch attempt.
 
@@ -58,26 +58,13 @@ working → cancellation/deadline → cleanup → writers and guard confirmed �
 
 The streamed runner owns the spawned process group. TERM→KILL escalation survives
 leader exit, closed stdio and post-spawn errors until remaining writers are gone.
-Repair and Doctor cancellation use a one-second TERM grace; ordinary update
-runs retain their existing grace. Server shutdown joins both watchdog and
-Upgrade repair cleanup.
+Repair and Doctor cancellation use a one-second TERM grace. Server shutdown
+joins the watchdog's repair cleanup.
 The watchdog status exposes `recoveryPending` (creation time, next check, blocker)
 and `lifecycleOperation` (cleanup phase and tracked processes). The dashboard
 renders these before old healthy status. There is no cleanup force-unlock.
 
-## Upgrade identity and deployment uncertainty
-
-`openclaw-update-repair.js` saves a ledger run before dispatch, owns an
-`update_repair` cleanup lease and uses the repair mutation intent. It checks
-onboarding, active/self-update operations and recovery/config holds before
-admission and again under ownership. A repair is an in-place operation:
-`completed` is its success state; old repair records using `activated` remain
-readable. It never mirrors into `lastUpdateRun`.
-
-`use-operation-monitor.js` resumes the exact ledger ID through
-`/api/openclaw/runs/:operationId`, including after lost SSE or reload. Another
-run's success cannot settle it. Only a command that restarts AlphaClaw enters
-restart waiting; a repair or provider acknowledgement does not.
+## AlphaClaw deployment uncertainty
 
 `managed-update-attempts.js` atomically stores schema version 1 in
 `<managedDir>/managed-update-attempt.json` before the provider POST. It contains
@@ -97,8 +84,8 @@ explicit rejection / recognized no-op → submission unlocked
 
 Accepted and unknown survive restart and version changes. Neither proves
 deployment completion. While unresolved, the attempt blocks another deployment
-submission and competing OpenClaw apply, backup or repair mutations. Watchdog
-recovery and manual gateway restart remain available. No automatic resend
+submission. Watchdog recovery, repair, Back up now and manual gateway restart
+remain available. No automatic resend
 follows ambiguity, including a
 redirect, malformed acknowledgement or lost response. Exact-ID transitions
 cannot overwrite a newer attempt or an operator resolution. Each transition
@@ -147,7 +134,7 @@ stored as `notifyExpiresAt` on its source record. Legacy queue entries use their
 original creation time; invalid timing cannot create an immortal message.
 
 ```text
-first handling + deadline → quiet hold / outbox / retry / fallback / restart
+first handling + deadline → admission / outbox / retry / fallback / restart
                                       |
                            fresh clock before each recipient
                                       |

@@ -1,8 +1,9 @@
 // LIVE TIER — the delivery contract the Doctor "Ask Agent to Fix" dispatch
-// (and POST /api/agent/message) encode, probed against REAL upstream builds:
+// (and POST /api/agent/message) encode, probed against the REAL pinned
+// OpenClaw (package.json dependencies.openclaw, installed in node_modules):
 //   1. `agent --help` names --deliver / --reply-channel / --reply-to /
-//      --reply-account on the pin AND the newest beta (the CLI-flag send
-//      path in routes/system.js composes exactly these).
+//      --reply-account (the CLI-flag send path in routes/system.js composes
+//      exactly these).
 //   2. The packaged gateway code carries `replyAccountId` (the JSON-params
 //      send path in doctor/service.js includes it for account-scoped DMs).
 // The hermetic suites assert the COMMANDS AlphaClaw composes; this tier
@@ -13,38 +14,14 @@
 
 const fs = require("fs");
 const path = require("path");
-// live-helpers only touches fs/os/path — safe to load BEFORE the env below.
 const liveHelpers = require("./live-helpers");
-process.env.ALPHACLAW_ROOT_DIR = liveHelpers.mkTemp(
-  "alphaclaw-live-fix-dispatch-root-",
-);
-delete process.env.OPENCLAW_GIT_DIR;
-
 const { execFileSync } = require("child_process");
-
-// Real installs go through the tracked wrapper (tests/live/live-helpers.js
-// stageTempInstall): the prepare dir is swept even when the run is killed
-// before the finally blocks below reach cleanup().
-const installOpenclawVersionToTempDir = liveHelpers.stageTempInstall;
-const {
-  createOpenclawReleasesService,
-} = require("../../lib/server/openclaw-releases");
-const { readDeclaredPin } = require("../../lib/server/openclaw-channel-sync");
-const { kLiveEnabled, kSilentLogger, mkTemp } = liveHelpers;
+const { describeExecutingBuild } = require("../../lib/server/openclaw-build");
+const { kLiveEnabled } = liveHelpers;
 
 const describeLive = kLiveEnabled ? describe : describe.skip;
 
-const kInstallTimeoutMs = 8 * 60 * 1000;
 const kTestTimeoutMs = 12 * 60 * 1000;
-
-const resolveBin = (openclawPackageDir) => {
-  const pkg = JSON.parse(
-    fs.readFileSync(path.join(openclawPackageDir, "package.json"), "utf8"),
-  );
-  const rel =
-    typeof pkg.bin === "string" ? pkg.bin : Object.values(pkg.bin || {})[0];
-  return path.join(openclawPackageDir, rel);
-};
 
 // Help probes exit nonzero on some builds — the TEXT is the contract.
 const helpText = (bin, args) => {
@@ -94,8 +71,7 @@ const packageDistMentions = (openclawPackageDir, needle) => {
 // live tiers run a real gateway today. These static contracts (CLI flag
 // names + packaged param identifiers) are the drift tripwires the hermetic
 // suite's composed commands depend on.
-const assertDeliveryContract = (openclawPackageDir, label) => {
-  const bin = resolveBin(openclawPackageDir);
+const assertDeliveryContract = ({ bin, packageDir: openclawPackageDir }, label) => {
   const agentHelp = helpText(bin, ["agent", "--help"]);
   for (const flag of ["--deliver", "--reply-channel", "--reply-to", "--reply-account"]) {
     expect(agentHelp, `${label}: agent --help must name ${flag}`).toContain(flag);
@@ -113,42 +89,13 @@ describeLive(
   { retry: 1 },
   () => {
     it(
-      "the pin and the newest beta both support the deliver/reply-* contract",
+      "the pin supports the deliver/reply-* contract",
       { timeout: kTestTimeoutMs },
-      async () => {
-        const pin = readDeclaredPin();
-        expect(pin).toBeTruthy();
-        const pinInstall = await installOpenclawVersionToTempDir({
-          versionSpec: pin,
-          timeoutMs: kInstallTimeoutMs,
-          logger: kSilentLogger,
-        });
-        try {
-          assertDeliveryContract(pinInstall.openclawPackageDir, `pin ${pin}`);
-        } finally {
-          pinInstall.cleanup?.();
-        }
-
-        const releases = createOpenclawReleasesService({
-          fetchImpl: (...args) => global.fetch(...args),
-          cacheDir: mkTemp("openclaw-live-fix-dispatch-cache-"),
-          getGithubToken: () => process.env.GITHUB_TOKEN || null,
-          logger: kSilentLogger,
-        });
-        const catalog = await releases.getCatalog({});
-        expect(catalog.ok).toBe(true);
-        const newestBeta = catalog.beta?.[0]?.version;
-        expect(newestBeta).toBeTruthy();
-        const betaInstall = await installOpenclawVersionToTempDir({
-          versionSpec: newestBeta,
-          timeoutMs: kInstallTimeoutMs,
-          logger: kSilentLogger,
-        });
-        try {
-          assertDeliveryContract(betaInstall.openclawPackageDir, `beta ${newestBeta}`);
-        } finally {
-          betaInstall.cleanup?.();
-        }
+      () => {
+        const pin = require("../../package.json").dependencies.openclaw;
+        const build = describeExecutingBuild({ installDir: path.resolve(__dirname, "../..") });
+        expect(build?.version).toBe(pin);
+        assertDeliveryContract(build, `pin ${pin}`);
       },
     );
   },

@@ -36,8 +36,8 @@ const {
 //   container A boots once ─▶ verify its real server/thread identity
 //        ▼
 //   remove A; seed the volume with the old legacy claim and arm a test preload
-//        + a `running` ledger run + a `running` restart operation from a
-//        foreign bootId + a `.tmp` archive in the backups dir
+//        + a `running` restart operation from a foreign bootId + an operator
+//        archive in the backups dir
 //        ▼
 //   container B's test-only preload plants a legacy claim naming B's own
 //   REAL nonleader TID immediately before the unchanged boot spine runs.
@@ -45,14 +45,12 @@ const {
 //   boot-report.json must say:
 //     - pidfile decision `proceed`, reason `own_thread` | `thread` — the Tgid
 //       rule fired (the mechanism, not just "boot succeeded")
-//     - the installed tree is the recorded build (no installed_not_expected)
+//     - the installed tree is the declared pin (no installed_not_expected)
 //       and the verdict is empty (consistent)
-//     - the dangling run was closed (`danglingRecords.closedRuns`)
 //   and on the volume:
 //     - alphaclaw-server.pid is B's own format-2 claim
 //     - the restart operation is `interrupted`
-//     - the `.tmp` archive is gone (Stage 4's boot sweep; asserted only when
-//       the sweep has landed — see kSweepLanded)
+//     - the operator's archive in the backups dir is untouched
 //   and the gateway is healthy.
 //
 // Opt-in via OPENCLAW_CONTAINER_E2E=1 (npm run test:container). Requires a
@@ -67,15 +65,14 @@ const kImageTag = `alphaclaw-container-boot-e2e:${kRunId}`;
 const kVolume = `alphaclaw-boot-e2e-data-${kRunId}`;
 const kContainerA = `alphaclaw-boot-e2e-${kRunId}`;
 const kContainerB = `alphaclaw-boot-e2e-${kRunId}-fresh`;
-const kContainerC = `alphaclaw-boot-e2e-${kRunId}-recovery`;
 const kSetupPassword = "container-boot-e2e-pass";
 const kGatewayToken = "container-boot-e2e-token";
 const kGatewayPort = 18789;
 const kMin = 60 * 1000;
 
 // On-volume paths (ALPHACLAW_ROOT_DIR=/data in the image): the managed dir is
-// <openclawDir>/.alphaclaw (openclaw-release-channel.js kManagedDirName); the
-// restart operation lives beside the flag file in the state dir
+// <openclawDir>/.alphaclaw (constants.kOpenclawManagedDir); the restart
+// operation lives beside the flag file in the state dir
 // (restart-required-state.js); backups under <root>/backups/openclaw
 // (constants.kOpenclawBackupsDir).
 const kOpenclawDir = "/data/.openclaw";
@@ -85,35 +82,23 @@ const kTransientLocks = ["generation-lock", "generation-writer", "reindex-lock"]
 const kManagedDir = `${kOpenclawDir}/.alphaclaw`;
 const kServerPidPath = `${kManagedDir}/alphaclaw-server.pid`;
 const kBootReportPath = `${kManagedDir}/boot-report.json`;
-const kRunsDir = `${kManagedDir}/runs`;
 const kRestartOperationPath = `${kOpenclawDir}/alphaclaw-restart-operation.json`;
 const kBackupsDir = "/data/backups/openclaw";
 const kThreadFixtureDir = "/data/boot-tid-fixture";
 const kThreadPreloadPath = `${kThreadFixtureDir}/preload.cjs`;
 const kThreadArmedPath = `${kThreadFixtureDir}/armed.json`;
 const kThreadWitnessPath = `${kThreadFixtureDir}/witness.json`;
-// A crypto.randomUUID()-shaped operationId (the ledger refuses anything else).
-const kDanglingRunId = "0f76b007-e2e0-4c0d-9a1e-000000000076";
+// A crypto.randomUUID()-shaped operationId.
 const kInterruptedRestartId = "0f76b007-e2e0-4c0d-9a1e-000000000079";
-// The pre-apply backup's temp naming: `<archive>.<uuid>.tmp` beside the
-// archive it would have become (openclaw-backup-offline-copy.js).
-const kTmpArchiveName =
-  "openclaw-backup-2026-09-06T15-00-00.alphaclaw.tar.gz.0f76b007-e2e0-4c0d-9a1e-000000000054.tmp";
-const kCheckpointStagingName = ".recovery-0f76b007-e2e0-4c0d-9a1e-000000000055.staging";
-const kHistoricalArchiveName = "historical-retained.alphaclaw.tar.gz";
+// An operator's archive ("Back up now" output or a manual copy): boot owns
+// nothing in the backups dir and must never delete it.
+const kOperatorArchiveName = "2026-09-06T15-00-00.000+00-00-openclaw-backup.tar.gz";
 // A legacy claim older than any plausible container start: two days.
 const kLegacyClaimAgeMs = 2 * 24 * 60 * 60 * 1000;
-// Stage 4(g) lands the boot `.tmp` sweep; until it is in the tree the seeded
-// temp survives the boot and this leg records that instead of failing.
-// Detected from the source so the assertion turns on by itself.
-const kSweepLanded = /sweepBackupDebris/.test(
-  fs.readFileSync(path.join(repoRoot, "lib", "server", "openclaw-channel-sync.js"), "utf8"),
-);
 const kServerPidFormat = 2;
 const kThreadReasons = ["own_thread", "thread"];
 
-// The seeded stable-accepted config — the same shape the upgrade journey
-// verified against the pinned stable gateway (loopback, fixed port, token).
+// The seeded config the pinned gateway accepts (loopback, fixed port, token).
 const buildSeedConfig = () => ({
   gateway: {
     mode: "local",
@@ -144,7 +129,6 @@ const ctx = {
   threadWitnessB: null,
   activeContainer: kContainerA,
   bootReportB: null,
-  stateDatabase: null,
 };
 
 // A broken step poisons every later step (they cannot mean anything); the
@@ -238,13 +222,13 @@ const readThreadIds = async (container, pid) => {
     .sort((a, b) => a - b);
 };
 
-describeContainer("container E2E: boot durability — legacy pidfile TID collision, dangling records, .tmp debris", () => {
+describeContainer("container E2E: boot durability — fresh and restarted containers, legacy pidfile TID collision, dangling restart operation", () => {
   beforeAll(async () => {
     await assertDockerAvailable();
     const pkg = JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf8"));
     ctx.stablePin = pkg.dependencies.openclaw;
     expect(ctx.stablePin).toBeTruthy();
-    console.log(`[container-boot-e2e] stable pin ${ctx.stablePin}; .tmp sweep ${kSweepLanded ? "landed — asserted" : "not in tree — recorded only"}`);
+    console.log(`[container-boot-e2e] pin ${ctx.stablePin}`);
   }, 2 * kMin);
 
   afterAll(async () => {
@@ -254,7 +238,7 @@ describeContainer("container E2E: boot durability — legacy pidfile TID collisi
     try {
       if (journeyBroken) {
         const dir = ensureArtifactsDir();
-        for (const name of [kContainerA, kContainerB, kContainerC]) {
+        for (const name of [kContainerA, kContainerB]) {
           try {
             const logs = await containerLogs(name, { tail: 5000 });
             fs.writeFileSync(path.join(dir, `${name}-logs.txt`), logs);
@@ -264,7 +248,7 @@ describeContainer("container E2E: boot durability — legacy pidfile TID collisi
         // not: the gateway's stderr tail, the medic's `doctor --fix` output
         // and verdict. 2026-09-22's journeys died in "doctor_fix failed" with
         // the reason reachable only inside INCIDENT-*.md — capture them.
-        for (const name of [kContainerA, kContainerB, kContainerC]) {
+        for (const name of [kContainerA, kContainerB]) {
           try {
             const { stdout } = await execInContainer(name, [
               "sh",
@@ -287,7 +271,6 @@ describeContainer("container E2E: boot durability — legacy pidfile TID collisi
       // ALWAYS tear down — never leave containers or volumes behind.
       await removeContainer(kContainerA);
       await removeContainer(kContainerB);
-      await removeContainer(kContainerC);
       await removeVolume(kVolume);
     }
   }, 5 * kMin);
@@ -296,7 +279,7 @@ describeContainer("container E2E: boot durability — legacy pidfile TID collisi
     await buildImage({ tag: kImageTag });
   });
 
-  step("container A boots the pinned stable against a seeded volume: UI + pin + gateway healthz", 12 * kMin, async () => {
+  step("fresh container A boots the pinned OpenClaw against a seeded volume: UI + pin + gateway healthz", 12 * kMin, async () => {
     await createVolume(kVolume);
     await seedVolume(kVolume, {
       "/data/onboarded.json": JSON.stringify({ onboardedAt: new Date().toISOString() }),
@@ -318,11 +301,11 @@ describeContainer("container E2E: boot durability — legacy pidfile TID collisi
     await waitFor(() => gatewayHealthzOk(kContainerA), {
       timeoutMs: 5 * kMin,
       intervalMs: 3000,
-      label: `stable gateway /healthz inside ${kContainerA} (seeded config accepted?)`,
+      label: `pinned gateway /healthz inside ${kContainerA} (seeded config accepted?)`,
     });
   });
 
-  step("container restarts track the first gateway launch without a false Down card or Retry", 6 * kMin, async () => {
+  step("docker restart boots the pinned OpenClaw again without a false Down card or Retry", 6 * kMin, async () => {
     for (let attempt = 0; attempt < 2; attempt += 1) {
       await docker(["restart", kContainerA]);
       ctx.cookie = null;
@@ -342,6 +325,7 @@ describeContainer("container E2E: boot durability — legacy pidfile TID collisi
       expect(finalStatus.state.supervisionMode).toBe("managed");
       expect(finalStatus.state.servingPid).toBeGreaterThan(0);
       expect(finalStatus.state.replacementPending).toBeNull();
+      expect(versionMatches(finalStatus.openclawVersion, ctx.stablePin)).toBe(true);
       expect(await gatewayHealthzOk(kContainerA)).toBe(true);
     }
   });
@@ -364,7 +348,7 @@ describeContainer("container E2E: boot durability — legacy pidfile TID collisi
     console.log(`[container-boot-e2e] A: server pid ${ctx.serverPidA}, threads ${tids.join(",")} → old claim tid ${ctx.threadIdA}`);
   });
 
-  step("removes A and seeds the incident shape: stale ownership, interrupted operations and checkpoint staging", 3 * kMin, async () => {
+  step("removes A and seeds the incident shape: stale ownership, an interrupted restart operation and an operator archive", 3 * kMin, async () => {
     await removeContainer(kContainerA);
     const now = Date.now();
     await seedVolume(kVolume, {
@@ -375,26 +359,6 @@ describeContainer("container E2E: boot durability — legacy pidfile TID collisi
       // marker is consumed once; inherited child CLIs/restarts cannot reseed.
       [kThreadPreloadPath]: fs.readFileSync(path.join(__dirname, "fixtures", "seed-own-thread-claim.cjs"), "utf8"),
       [kThreadArmedPath]: JSON.stringify({ claimAt: now - kLegacyClaimAgeMs }),
-      // A7: a ledger run its process never finished (openclaw-run-ledger.js
-      // record shape — `running`, no finishedAt).
-      [`${kRunsDir}/${kDanglingRunId}.json`]: JSON.stringify(
-        {
-          operationId: kDanglingRunId,
-          target: { version: ctx.stablePin, channel: "stable", kind: "apply" },
-          state: "running",
-          startedAt: now - 10 * kMin,
-          finishedAt: null,
-          ok: null,
-          result: null,
-          steps: [{ name: "download", status: "running", at: now - 10 * kMin }],
-          backup: null,
-          dbPreflight: null,
-          overseer: null,
-          hasLog: false,
-        },
-        null,
-        2,
-      ),
       // A7: a gateway_restart operation left `running` by a foreign bootId
       // (restart-required-state.js reconcileOnBoot closes it as interrupted).
       [kRestartOperationPath]: JSON.stringify(
@@ -414,12 +378,7 @@ describeContainer("container E2E: boot durability — legacy pidfile TID collisi
         null,
         2,
       ),
-      // #79: crash debris of a pre-apply backup (the incident's 8 GB file was
-      // this shape; a few bytes prove the sweep just as well).
-      [`${kBackupsDir}/${kTmpArchiveName}`]: "not-a-real-archive\n",
-      [`${kBackupsDir}/${kCheckpointStagingName}/payload/openclaw.json`]: '{"interrupted":true}\n',
-      [`${kBackupsDir}/${kCheckpointStagingName}/manifest.json`]: '{"incomplete":true}\n',
-      [`${kBackupsDir}/${kHistoricalArchiveName}`]: "retained historical archive sentinel\n",
+      [`${kBackupsDir}/${kOperatorArchiveName}`]: "operator archive sentinel\n",
     });
   });
 
@@ -455,19 +414,14 @@ describeContainer("container E2E: boot durability — legacy pidfile TID collisi
     }
   });
 
-  step("diagnose excludes proven transient locks without hiding real database coverage", 2 * kMin, async () => {
+  step("diagnose reports the real state and agent databases and never counts transient lock files", 2 * kMin, async () => {
     const { bundle: diagnosis } = await fetchJsonWithCookie(`${baseUrl()}/api/diagnose`, ctx.cookie);
-    expect(diagnosis.summary.recovery.assessment).toBe("complete");
-    expect(diagnosis.summary.recovery.databaseVerdict).toBe("compatible");
     const evidence = diagnosis.sections.stateDb.data;
-    expect(evidence.discoveryComplete).toBe(true);
-    expect(evidence.entries.some((row) => row.kind === "state")).toBe(true);
-    ctx.stateDatabase = evidence.entries.find((row) => row.kind === "state").path;
-    expect(evidence.entries.some((row) => row.kind === "agent")).toBe(true);
+    expect(evidence.stateDir).toBe(kOpenclawDir);
+    for (const kind of ["state", "agent"]) {
+      expect(evidence.entries).toEqual(expect.arrayContaining([expect.objectContaining({ kind, status: "ok" })]));
+    }
     for (const file of kTransientLocks) {
-      expect(evidence.excludedArtifacts).toEqual(expect.arrayContaining([
-        expect.objectContaining({ path: file, reason: "verified_openclaw_2026_9_8_producer" }),
-      ]));
       expect(evidence.entries.some((row) => row.path.endsWith(file))).toBe(false);
       const { stdout } = await execInContainer(kContainerB, ["node", "-e",
         `process.stdout.write(String(require('node:fs').existsSync(${JSON.stringify(`${kOpenclawDir}/${file}`)})))`,
@@ -516,28 +470,19 @@ describeContainer("container E2E: boot durability — legacy pidfile TID collisi
     expect(report.serverPhase?.reason).not.toBe("pidfile_skip");
   });
 
-  step("boot-report.json: the recorded build is the launched tree, the verdict is consistent, the dangling run was closed", 2 * kMin, async () => {
+  step("boot-report.json: the declared pin is the launched tree and the verdict is consistent", 2 * kMin, async () => {
     const report = ctx.bootReportB;
-    // installed === expected: the recorded build launched (a fresh container
-    // on the same image needs no activation, so bootSync action is `none`;
-    // an activation boot would say `activated` — both are the recorded build).
-    const expected = report.openclaw?.expected ?? report.serverPhase?.channelInfo?.expectedVersion;
-    const running = report.openclaw?.resolvedForLaunch ?? report.serverPhase?.installedVersion;
-    expect(expected).toBe(ctx.stablePin);
-    expect(running).toBe(ctx.stablePin);
-    expect(["none", "activated"]).toContain(report.openclaw?.bootSync?.action);
-    expect(report.openclaw?.installedDiverged).not.toBe(true);
+    expect(report.openclaw?.declaredPin).toBe(ctx.stablePin);
+    expect(report.openclaw?.installedAtBoot).toBe(ctx.stablePin);
+    expect(report.openclaw?.installedDiverged).toBe(false);
+    expect(report.openclaw?.retiredChannel).toBeNull();
+    expect(report.openclaw?.bootSync?.action).toBe("none");
+    expect(report.serverPhase?.installedVersion).toBe(ctx.stablePin);
     const verdict = Array.isArray(report.serverPhase?.verdict) ? report.serverPhase.verdict : null;
     expect(verdict).toEqual([]);
-    // A7: the run left `running` is closed at boot and the report names it.
-    expect(report.serverPhase?.danglingRecords?.closedRuns).toContain(kDanglingRunId);
-    const run = await readJsonInContainer(kContainerB, `${kRunsDir}/${kDanglingRunId}.json`);
-    expect(run.state).toBe("interrupted");
-    expect(run.ok).toBe(false);
-    expect(run.result?.code).toBe("interrupted");
   });
 
-  step("volume after boot: B's own format-2 pidfile, the restart operation interrupted, the .tmp archive swept", 2 * kMin, async () => {
+  step("volume after boot: B's own format-2 pidfile, the restart operation interrupted, the operator archive untouched", 2 * kMin, async () => {
     const pidfile = await readJsonInContainer(kContainerB, kServerPidPath);
     expect(pidfile.format).toBe(kServerPidFormat);
     expect(pidfile.pid).toBe(ctx.threadWitnessB.serverPid);
@@ -552,17 +497,8 @@ describeContainer("container E2E: boot durability — legacy pidfile TID collisi
     expect(operation.operationId).toBe(kInterruptedRestartId);
     expect(operation.status).toBe("interrupted");
     expect(operation.errorSummary).toBe("AlphaClaw restarted before the operation finished");
-    const tmpStillThere = await fileExistsInContainer(kContainerB, `${kBackupsDir}/${kTmpArchiveName}`);
-    if (kSweepLanded) {
-      expect(tmpStillThere, `${kTmpArchiveName} should have been swept at boot`).toBe(false);
-    } else {
-      console.warn(
-        `[container-boot-e2e] .tmp archive ${tmpStillThere ? "still present" : "gone"} — the boot sweep (Stage 4) is not in this tree; not asserted`,
-      );
-    }
-    await execInContainer(kContainerB, ["test", "!", "-e", `${kBackupsDir}/${kCheckpointStagingName}`]);
-    const { stdout: retained } = await execInContainer(kContainerB, ["cat", `${kBackupsDir}/${kHistoricalArchiveName}`]);
-    expect(retained).toBe("retained historical archive sentinel\n");
+    const { stdout: retained } = await execInContainer(kContainerB, ["cat", `${kBackupsDir}/${kOperatorArchiveName}`]);
+    expect(retained).toBe("operator archive sentinel\n");
   });
 
   step("the gateway is healthy and /api/status agrees with the report", 3 * kMin, async () => {
@@ -573,75 +509,5 @@ describeContainer("container E2E: boot durability — legacy pidfile TID collisi
     });
     const status = await readStatus();
     expect(versionMatches(status.openclawVersion, ctx.stablePin)).toBe(true);
-  });
-
-  step("real recovery controls observe a corrupt database and require a new confirmed start after repair", 12 * kMin, async () => {
-    const settings = await fetch(`${baseUrl()}/api/watchdog/settings`, {
-      method: "PUT", headers: { Cookie: ctx.cookie, "Content-Type": "application/json" },
-      body: JSON.stringify({ autoRepair: false }),
-    });
-    expect(settings.ok).toBe(true);
-    await docker(["stop", "--time", "30", kContainerB]);
-    const database = JSON.stringify(ctx.stateDatabase);
-    await docker(["run", "--rm", "--memory=512m", "--memory-swap=512m", "--entrypoint", "node",
-      "-v", `${kVolume}:/data`, kImageTag, "-e",
-      `const fs = require('node:fs'); const file = ${database}; fs.renameSync(file, file + '.issue123-fixture'); fs.writeFileSync(file, 'not a database');`,
-    ]);
-    await runContainer({ name: kContainerC, image: kImageTag, volume: kVolume, memory: "4g",
-      env: { ...containerEnv(), WATCHDOG_AUTO_REPAIR: "false" } });
-    ctx.activeContainer = kContainerC;
-    ctx.cookie = null;
-    await waitForUiUp(kContainerC, 3 * kMin);
-    await waitFor(async () => (await readStatus()).state?.state === "config_error", {
-      timeoutMs: 3 * kMin, intervalMs: 1000, label: "corrupt real database holds the gateway",
-    });
-    expect(await gatewayHealthzOk(kContainerC)).toBe(false);
-    const { chromium } = require("playwright");
-    const browser = await chromium.launch();
-    const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
-    const mutations = [];
-    page.on("request", (req) => {
-      if (req.method() === "POST" && /\/api\/(gateway\/restart|watchdog\/repair)/.test(req.url())) mutations.push(req);
-    });
-    try {
-      await page.goto(`${baseUrl()}/login.html`, { waitUntil: "domcontentloaded" });
-      await page.fill("#password", kSetupPassword);
-      await page.click("#submit-btn");
-      await page.waitForURL((url) => !url.pathname.includes("login"), { timeout: 60_000 });
-      const controls = page.locator(".ac-gateway-recovery-actions");
-      await controls.getByRole("button", { name: "Repair", exact: true }).click();
-      const options = page.getByRole("region", { name: "Repair options" });
-      await options.getByRole("button", { name: "Check again", exact: true }).click();
-      await options.getByText(/databases blocked/).waitFor({ timeout: 30_000 });
-      expect(mutations).toHaveLength(0);
-      expect(await controls.getByRole("button", { name: "Restart", exact: true }).isEnabled()).toBe(true);
-      await page.screenshot({ path: path.join(ensureArtifactsDir(), "issue123-real-held-desktop.png"), fullPage: true });
-      await page.setViewportSize({ width: 390, height: 900 });
-      await page.screenshot({ path: path.join(ensureArtifactsDir(), "issue123-real-held-mobile.png"), fullPage: true });
-      await execInContainer(kContainerC, ["node", "-e",
-        `const fs = require('node:fs'); const file = ${database}; fs.rmSync(file); fs.renameSync(file + '.issue123-fixture', file);`,
-      ]);
-      const correctedAt = Date.now();
-      await options.getByRole("button", { name: "Check again", exact: true }).click();
-      await options.getByText(/databases compatible/).waitFor({ timeout: 30_000 });
-      const assessedAt = Date.now();
-      expect(mutations).toHaveLength(0);
-      expect(await gatewayHealthzOk(kContainerC)).toBe(false);
-      await options.getByRole("button", { name: "Verify and start", exact: true }).click();
-      const confirmedAt = Date.now();
-      await options.getByRole("button", { name: "Confirm verify and start", exact: true }).click();
-      await waitFor(async () => {
-        const status = await readStatus();
-        return status.state?.state === "running" && status.watchdogStatus?.readiness === "ready";
-      }, { timeoutMs: 5 * kMin, intervalMs: 1000, label: "confirmed recovery reaches real readiness" });
-      expect(mutations).toHaveLength(1);
-      expect(mutations[0].postDataJSON()).toEqual({ verifyDatabaseRecovery: true, recoveryConfirmation: expect.any(String) });
-      expect(await gatewayHealthzOk(kContainerC)).toBe(true);
-      expect((await readStatus()).watchdogStatus.autoRepair).toBe(false);
-      console.log(`[container-recovery-timing] ${JSON.stringify({ correctionToAssessmentMs: assessedAt - correctedAt,
-        confirmationToReadyMs: Date.now() - confirmedAt, correctionToReadyMs: Date.now() - correctedAt })}`);
-    } finally {
-      await browser.close();
-    }
   });
 });

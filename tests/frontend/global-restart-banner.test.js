@@ -226,13 +226,8 @@ describe("frontend/global-restart-banner (demoted)", () => {
     expect(retryConnect).toHaveBeenCalledTimes(1);
   });
 
-  it("AlphaClaw self-restart (controller or upgrade tab) shows the restarting banner", () => {
+  it("AlphaClaw self-restart shows the restarting banner", () => {
     gatewayShellStore.publish({ connectivityMode: "alphaclaw_restarting" });
-    expect(treeText(renderBanner({}))).toContain(kAlphaclawRestartingBannerText);
-
-    harness.reset();
-    gatewayShellStore.reset();
-    gatewayShellStore.publish({ upgradeRestartActive: true });
     expect(treeText(renderBanner({}))).toContain(kAlphaclawRestartingBannerText);
   });
 

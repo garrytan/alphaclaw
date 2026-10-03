@@ -33,13 +33,13 @@ const createTracker = (overrides = {}) => {
 };
 
 describe("watchdog-incidents rescue hook", () => {
-  it("classifies channel_rollback as OPEN and crash_loop as append (comment-vs-code pin)", () => {
-    expect(classifyEvent({ eventType: "channel_rollback" })).toBe("open");
+  it("classifies version_mismatch as OPEN and crash_loop as append (comment-vs-code pin)", () => {
+    expect(classifyEvent({ eventType: "version_mismatch" })).toBe("open");
     expect(classifyEvent({ eventType: "crash_loop" })).toBe("append");
   });
 
   it("fires kind=open on every open trigger, outside the transaction", () => {
-    for (const eventType of ["crash", "config_error", "safe_mode", "channel_rollback"]) {
+    for (const eventType of ["crash", "config_error", "safe_mode", "version_mismatch"]) {
       const { onIncidentActivity, sink } = createTracker();
       sink({ eventType, status: "failed", details: {} });
       expect(onIncidentActivity).toHaveBeenCalledTimes(1);

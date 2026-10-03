@@ -99,12 +99,6 @@ describe("classifyEvent transition table", () => {
         details: { recovered: true },
       }),
     ).toBe("close_safe_mode");
-    // channel_rollback OPENS (EX_CONFIG in-window goes straight to rollback
-    // with no crash/config_error event); when an incident is already open the
-    // open decision appends via the active branch, preserving old behavior.
-    expect(classifyEvent({ eventType: "channel_rollback", status: "requested" })).toBe(
-      "open",
-    );
     for (const eventType of [
       "notification",
       "restart",
@@ -385,21 +379,15 @@ describe("incident lifecycle through the wrapped sink", () => {
     expect(events.every((event) => event.createdAt)).toBe(true);
   });
 
-  it("escalates severity to critical on crash_loop/channel_rollback", () => {
+  it("escalates severity to critical on crash_loop", () => {
     initContext();
     const tracker = createTracker();
     const insert = wrapped(tracker);
     insert(crashEvent());
     insert({ eventType: "crash_loop", source: "exit_event", status: "failed" });
-    insert({
-      eventType: "channel_rollback",
-      source: "crash_loop",
-      status: "requested",
-    });
     insert(recoveryEvent());
     const [incident] = db.listIncidents();
     expect(incident.summary.severity).toBe("critical");
-    expect(incident.summary.actions).toContain("channel_rollback");
   });
 
   it("safe_mode recovered closes a safe-mode incident but not a crash incident", () => {
@@ -439,8 +427,8 @@ describe("incident lifecycle through the wrapped sink", () => {
     insert({ eventType: "notification", source: "watchdog", status: "ok" });
     // Foreign writer path (unwrapped module function).
     db.insertWatchdogEvent({
-      eventType: "channel_rollback",
-      source: "release_channel",
+      eventType: "restart",
+      source: "foreign",
       status: "requested",
     });
     expect(db.listIncidents()).toEqual([]);
@@ -568,24 +556,6 @@ describe("resilience fixes (adversarial-review regressions)", () => {
     });
     expect(tracker.getActiveIncidentId()).toBe(null);
     expect(db.getIncidentById(incidentId).status).toBe("resolved");
-  });
-
-  it("a channel_rollback with no open incident opens a critical one (EX_CONFIG in-window path)", () => {
-    initContext();
-    const tracker = createTracker();
-    const insert = wrapped(tracker);
-    insert({
-      eventType: "channel_rollback",
-      source: "exit_event",
-      status: "requested",
-      details: { reason: "config_error", exitCode: 78 },
-    });
-    const incidentId = tracker.getActiveIncidentId();
-    expect(incidentId).toBeGreaterThan(0);
-    insert(recoveryEvent());
-    const incident = db.getIncidentById(incidentId);
-    expect(incident.incidentKey).toBe("channel_rollback");
-    expect(incident.summary.severity).toBe("critical");
   });
 
   it("a failed stamped insert retries unstamped exactly once and keeps the incident active", () => {

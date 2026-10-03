@@ -52,7 +52,6 @@ import * as preactHooks from "preact/hooks";
 import { WatchdogTab } from "../../lib/public/js/components/watchdog-tab/index.js";
 import { useWatchdogTab } from "../../lib/public/js/components/watchdog-tab/use-watchdog-tab.js";
 import { WatchdogSafeModeBanner } from "../../lib/public/js/components/watchdog-tab/safe-mode-banner.js";
-import { WatchdogSqliteBackupCard } from "../../lib/public/js/components/watchdog-tab/backup-card.js";
 import { WatchdogOverseerCard } from "../../lib/public/js/components/watchdog-tab/overseer-card.js";
 import { WatchdogIncidentsCard } from "../../lib/public/js/components/watchdog-tab/incidents/index.js";
 import { ActionButton } from "../../lib/public/js/components/action-button.js";
@@ -148,7 +147,7 @@ describe("frontend/watchdog tab (safe-mode ownership + upstream-merge seams)", (
     }));
   });
 
-  it("with the unified server state present, the Gateway card owns safe mode: NO standalone banner, and the sqlite backup card renders", () => {
+  it("with the unified server state present, the Gateway card owns safe mode: NO standalone banner", () => {
     gatewayShellStore.publish({
       hasStatus: true,
       statusState: { state: "safe_mode", label: "Channels paused" },
@@ -160,9 +159,6 @@ describe("frontend/watchdog tab (safe-mode ownership + upstream-merge seams)", (
     // server-driven Gateway card presents safe_mode itself.
     expect(findAllByType(tree, WatchdogSafeModeBanner)).toHaveLength(0);
     expect(findAllByType(tree, Gateway)).toHaveLength(1);
-    // The upstream-merge seam: the sqlite backup card stays mounted on the
-    // page regardless of which card owns safe-mode presentation.
-    expect(findAllByType(tree, WatchdogSqliteBackupCard)).toHaveLength(1);
   });
 
   it("version skew (no statusState): the standalone banner survives and renders the safe-mode copy", () => {

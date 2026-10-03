@@ -4,14 +4,13 @@ const path = require("path");
 
 const {
   kCrashCauseLadderEnvKey,
-  kLaunchCompatGateEnvKey,
   kAutoRepairPauseFileName,
   kStructuralRepairSource,
   kStructuralRelaunchSource,
   kStructuralRepairRungs,
   kAutoRepairPauseReasons,
+  kAutoRepairPauseHealthHoldMs,
   crashCauseLadderDisabled,
-  launchCompatGateDisabled,
   isVersionFamilyCause,
   normalizeAutoRepairPause,
   serializeAutoRepairPause,
@@ -34,15 +33,6 @@ const makeHold = ({ valid = true } = {}) => {
     { kind: "structural_repair", isValid: () => live, isExpired: () => !live, invalidate: () => { live = false; } },
   );
 };
-const activated = (to, extra = {}) => ({
-  ok: true,
-  action: "activated",
-  from: "1.0.0",
-  to,
-  runId: "run-1",
-  ...extra,
-});
-const refused = (code) => ({ ok: false, code, action: "none", message: code });
 const relaunchOk = vi.fn(async () => ({ verdict: "replacement_pending", pid: 4242 }));
 
 const rowsOf = (logEvent) => logEvent.mock.calls.map((call) => ({
@@ -56,21 +46,16 @@ const rowsOf = (logEvent) => logEvent.mock.calls.map((call) => ({
 describe("watchdog-structural-repair: constants + kill switches", () => {
   afterEach(() => {
     delete process.env[kCrashCauseLadderEnvKey];
-    delete process.env[kLaunchCompatGateEnvKey];
   });
 
-  it("the kill switch is deployment-only and follows the OPENCLAW_*=off naming; the compat-gate key mirrors channel-sync's export", () => {
+  it("the kill switch is deployment-only and follows the OPENCLAW_*=off naming", () => {
     expect(kCrashCauseLadderEnvKey).toBe("OPENCLAW_CRASH_CAUSE_LADDER");
     expect(kDeploymentOnlyEnvKeys).toContain(kCrashCauseLadderEnvKey);
-    const channelSync = require("../../lib/server/openclaw-channel-sync");
-    expect(kLaunchCompatGateEnvKey).toBe(channelSync.kLaunchCompatGateEnvKey);
     expect(crashCauseLadderDisabled()).toBe(false);
     process.env[kCrashCauseLadderEnvKey] = "OFF ";
     expect(crashCauseLadderDisabled()).toBe(true);
     process.env[kCrashCauseLadderEnvKey] = "false";
     expect(crashCauseLadderDisabled()).toBe(false);
-    process.env[kLaunchCompatGateEnvKey] = "off";
-    expect(launchCompatGateDisabled()).toBe(true);
   });
 
   it("version-family predicate follows the classifier's list; the file name matches the C5 fixture directory", () => {
@@ -91,6 +76,7 @@ describe("watchdog-structural-repair: constants + kill switches", () => {
     expect(fs.existsSync(path.join(__dirname, "fixtures", "persisted-formats", kAutoRepairPauseFileName))).toBe(true);
     expect(kStructuralRepairSource).toBe("structural");
     expect(kStructuralRelaunchSource).toBe("repair/structural");
+    expect(kAutoRepairPauseHealthHoldMs).toBe(120 * 1000);
   });
 });
 
@@ -183,172 +169,94 @@ describe("watchdog-structural-repair: runStructuralRepair rungs", () => {
 
   const build = (overrides = {}) => {
     const seams = {
-      reconcileInstalled: vi.fn(async () => activated("2.0.0")),
-      recoverBootable: vi.fn(async () => activated("1.5.0", { schemaRecovery: true })),
       renameStrayExecApprovals: vi.fn(() => ({ reaped: true, strayPath: "/x/exec-approvals.json.stray-1" })),
-      undoLastConfigRestore: vi.fn(() => ({ ok: false, code: "no_restore" })),
-      completeReconcileRun: vi.fn(),
-      getChannelInfo: vi.fn(() => ({ installedDiverged: true, installedVersion: "1.0.0", expectedVersion: "2.0.0" })),
       logger: kSilentLogger,
       ...overrides,
     };
     return { seams, repair: createStructuralRepair(seams), logEvent: vi.fn() };
   };
 
-  it("requires reconcileInstalled; refuses a run without a relaunch primitive", async () => {
-    expect(() => createStructuralRepair({})).toThrow(TypeError);
+  it("refuses a run without a relaunch primitive", async () => {
     const { repair } = build();
     await expect(
-      repair.runStructuralRepair({ cause: "state_schema_too_new", hold: makeHold() }),
+      repair.runStructuralRepair({ cause: "legacy_exec_approvals", hold: makeHold() }),
     ).rejects.toThrow(TypeError);
   });
 
-  it("(1) installedDiverged → reconcileInstalled under the CALLER's hold → undoLastConfigRestore → relaunch replace → completeReconcileRun books the relaunch; ONE repair/structural/ok row carries the plan", async () => {
+  it.each(["state_schema_too_new", "agent_schema_too_new", "plugin_api_too_old", "cli_startup_crash"])(
+    "%s has no remedy under the pin: paused structural_repair_failed, no rename, no relaunch, ONE failed row",
+    async (cause) => {
+      const { seams, repair, logEvent } = build();
+      const hold = makeHold();
+      const result = await repair.runStructuralRepair({
+        cause,
+        fingerprint: "fp1",
+        corroboration: kCorroborated,
+        hold,
+        correlationId: "c1",
+        relaunch: relaunchOk,
+        logEvent,
+      });
+      expect(seams.renameStrayExecApprovals).not.toHaveBeenCalled();
+      expect(relaunchOk).not.toHaveBeenCalled();
+      expect(result).toEqual({
+        ok: false,
+        paused: kAutoRepairPauseReasons.STRUCTURAL_REPAIR_FAILED,
+        verdict: null,
+        activated: false,
+        plan: [{ step: "ladder", outcome: "no_remedy", detail: cause }],
+      });
+      const rows = rowsOf(logEvent);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({
+        eventType: "repair",
+        source: kStructuralRepairSource,
+        status: "failed",
+        correlationId: "c1",
+        details: { cause, fingerprint: "fp1", corroborated: true, by: "user_version", paused: "structural_repair_failed" },
+      });
+      // The hold is the caller's: never released here.
+      expect(hold).not.toHaveBeenCalled();
+    },
+  );
+
+  it("legacy_exec_approvals → rename → relaunch replace under the CALLER's hold; a missing file, a failed or throwing rename, or no seam pauses", async () => {
     const { seams, repair, logEvent } = build();
     const hold = makeHold();
-    const result = await repair.runStructuralRepair({
-      cause: "state_schema_too_new",
-      fingerprint: "fp1",
-      corroboration: kCorroborated,
+    const ok = await repair.runStructuralRepair({
+      cause: "legacy_exec_approvals",
+      fingerprint: "fp2",
+      corroboration: { corroborated: true, by: "legacy_exec_approvals_file" },
       hold,
-      correlationId: "c1",
+      correlationId: "c2",
       relaunch: relaunchOk,
       logEvent,
     });
-    expect(seams.reconcileInstalled).toHaveBeenCalledWith({ hold, source: "structural_repair", relaunch: true });
-    expect(seams.recoverBootable).not.toHaveBeenCalled();
-    expect(seams.renameStrayExecApprovals).not.toHaveBeenCalled();
-    expect(seams.undoLastConfigRestore).toHaveBeenCalledTimes(1);
+    expect(seams.renameStrayExecApprovals).toHaveBeenCalledTimes(1);
     expect(relaunchOk).toHaveBeenCalledWith({
       source: kStructuralRelaunchSource,
       intent: "replace",
       hold,
-      correlationId: "c1",
+      correlationId: "c2",
     });
-    expect(seams.completeReconcileRun).toHaveBeenCalledWith({
-      runId: "run-1",
-      relaunch: { ok: true, verdict: "replacement_pending" },
-    });
-    expect(result).toEqual({
+    expect(ok).toEqual({
       ok: true,
       paused: null,
       verdict: "replacement_pending",
-      runId: "run-1",
       activated: true,
       plan: [
-        { step: kStructuralRepairRungs.RECONCILE_INSTALLED, outcome: "activated", detail: "1.0.0 → 2.0.0" },
-        { step: kStructuralRepairRungs.UNDO_CONFIG_RESTORE, outcome: "no_restore" },
-        { step: kStructuralRepairRungs.RELAUNCH, outcome: "replacement_pending", detail: "on 2.0.0" },
+        {
+          step: kStructuralRepairRungs.RENAME_EXEC_APPROVALS,
+          outcome: "renamed",
+          detail: "/x/exec-approvals.json.stray-1",
+        },
+        { step: kStructuralRepairRungs.RELAUNCH, outcome: "replacement_pending" },
       ],
     });
-    const rows = rowsOf(logEvent);
-    expect(rows).toHaveLength(1);
-    expect(rows[0]).toMatchObject({
-      eventType: "repair",
-      source: kStructuralRepairSource,
-      status: "ok",
-      correlationId: "c1",
-      details: {
-        cause: "state_schema_too_new",
-        fingerprint: "fp1",
-        corroborated: true,
-        by: "user_version",
-        paused: null,
-        verdict: "replacement_pending",
-        runId: "run-1",
-      },
-    });
-    expect(rows[0].details.plan).toHaveLength(3);
-    // The hold is the caller's: never released here.
+    expect(rowsOf(logEvent)).toEqual([
+      expect.objectContaining({ status: "ok", details: expect.objectContaining({ verdict: "replacement_pending" }) }),
+    ]);
     expect(hold).not.toHaveBeenCalled();
-  });
-
-  it("(1) refused (overlay_missing) → (3) recoverBootable in schema-recovery mode → relaunch; the undo rung runs only after an activation", async () => {
-    const { seams, repair, logEvent } = build({
-      reconcileInstalled: vi.fn(async () => refused("overlay_missing")),
-    });
-    const hold = makeHold();
-    const result = await repair.runStructuralRepair({
-      cause: "agent_schema_too_new",
-      fingerprint: "fp2",
-      corroboration: kCorroborated,
-      hold,
-      relaunch: relaunchOk,
-      logEvent,
-    });
-    expect(seams.recoverBootable).toHaveBeenCalledWith({ hold, source: "structural_repair", relaunch: true });
-    expect(seams.undoLastConfigRestore).not.toHaveBeenCalled();
-    expect(result.ok).toBe(true);
-    expect(result.plan).toEqual([
-      { step: kStructuralRepairRungs.RECONCILE_INSTALLED, outcome: "overlay_missing" },
-      { step: kStructuralRepairRungs.RECOVER_BOOTABLE, outcome: "activated", detail: "1.0.0 → 1.5.0" },
-      { step: kStructuralRepairRungs.RELAUNCH, outcome: "replacement_pending", detail: "on 1.5.0" },
-    ]);
-  });
-
-  it("not diverged → (3) directly; nothing bootable → paused structural_repair_failed with the last plan naming the refusal, no relaunch", async () => {
-    const { seams, repair, logEvent } = build({
-      getChannelInfo: () => ({ installedDiverged: false, installedVersion: "2.0.0", expectedVersion: "2.0.0" }),
-      recoverBootable: vi.fn(async () => refused("no_bootable_version")),
-    });
-    const result = await repair.runStructuralRepair({
-      cause: "state_schema_too_new",
-      fingerprint: "fp3",
-      corroboration: kCorroborated,
-      hold: makeHold(),
-      relaunch: relaunchOk,
-      logEvent,
-    });
-    expect(seams.reconcileInstalled).not.toHaveBeenCalled();
-    expect(relaunchOk).not.toHaveBeenCalled();
-    expect(result).toMatchObject({
-      ok: false,
-      paused: kAutoRepairPauseReasons.STRUCTURAL_REPAIR_FAILED,
-      verdict: null,
-      plan: [
-        { step: kStructuralRepairRungs.RECONCILE_INSTALLED, outcome: "not_diverged" },
-        { step: kStructuralRepairRungs.RECOVER_BOOTABLE, outcome: "no_bootable_version" },
-      ],
-    });
-    expect(rowsOf(logEvent)[0]).toMatchObject({ status: "failed", details: { paused: "structural_repair_failed" } });
-  });
-
-  it("(3) `none` (target compatible after a recovery preflight) is not an activation: the plan records the reason and the ladder pauses rather than relaunching a guess", async () => {
-    const { repair } = build({
-      getChannelInfo: () => ({ installedDiverged: false }),
-      recoverBootable: vi.fn(async () => ({ ok: true, action: "none", reason: "target_compatible", runId: null })),
-    });
-    const result = await repair.runStructuralRepair({
-      cause: "state_schema_too_new",
-      corroboration: kCorroborated,
-      hold: makeHold(),
-      relaunch: relaunchOk,
-    });
-    expect(relaunchOk).not.toHaveBeenCalled();
-    expect(result.paused).toBe(kAutoRepairPauseReasons.STRUCTURAL_REPAIR_FAILED);
-    expect(result.plan[1]).toEqual({ step: kStructuralRepairRungs.RECOVER_BOOTABLE, outcome: "target_compatible" });
-  });
-
-  it("(2) legacy_exec_approvals → rename → relaunch, never the reconcile rungs; a missing file or a failed rename pauses", async () => {
-    const { seams, repair } = build();
-    const ok = await repair.runStructuralRepair({
-      cause: "legacy_exec_approvals",
-      corroboration: { corroborated: true, by: "legacy_exec_approvals_file" },
-      hold: makeHold(),
-      relaunch: relaunchOk,
-    });
-    expect(seams.renameStrayExecApprovals).toHaveBeenCalledTimes(1);
-    expect(seams.reconcileInstalled).not.toHaveBeenCalled();
-    expect(seams.recoverBootable).not.toHaveBeenCalled();
-    expect(ok.ok).toBe(true);
-    expect(ok.plan).toEqual([
-      {
-        step: kStructuralRepairRungs.RENAME_EXEC_APPROVALS,
-        outcome: "renamed",
-        detail: "/x/exec-approvals.json.stray-1",
-      },
-      { step: kStructuralRepairRungs.RELAUNCH, outcome: "replacement_pending" },
-    ]);
 
     const gone = build({ renameStrayExecApprovals: vi.fn(() => ({ reaped: false })) });
     const missing = await gone.repair.runStructuralRepair({
@@ -370,6 +278,25 @@ describe("watchdog-structural-repair: runStructuralRepair rungs", () => {
       outcome: "failed",
       detail: "EACCES",
     });
+    expect(failed.paused).toBe(kAutoRepairPauseReasons.STRUCTURAL_REPAIR_FAILED);
+
+    const throwing = build({
+      renameStrayExecApprovals: vi.fn(() => {
+        throw new Error("disk on fire");
+      }),
+    });
+    const threw = await throwing.repair.runStructuralRepair({
+      cause: "legacy_exec_approvals",
+      hold: makeHold(),
+      relaunch: relaunchOk,
+    });
+    expect(threw.plan[0]).toEqual({
+      step: kStructuralRepairRungs.RENAME_EXEC_APPROVALS,
+      outcome: "failed",
+      detail: "disk on fire",
+    });
+    expect(threw.paused).toBe(kAutoRepairPauseReasons.STRUCTURAL_REPAIR_FAILED);
+
     const unavailable = build({ renameStrayExecApprovals: null });
     const none = await unavailable.repair.runStructuralRepair({
       cause: "legacy_exec_approvals",
@@ -378,31 +305,20 @@ describe("watchdog-structural-repair: runStructuralRepair rungs", () => {
     });
     expect(none.plan[0]).toEqual({ step: kStructuralRepairRungs.RENAME_EXEC_APPROVALS, outcome: "unavailable" });
     expect(none.paused).toBe(kAutoRepairPauseReasons.STRUCTURAL_REPAIR_FAILED);
+    expect(relaunchOk).toHaveBeenCalledTimes(1);
   });
 
-  it("a relaunch that fails after an activation is ok:false but NOT a pause (the legacy ladder escalates); a version_mismatch verdict from the relaunch's compat step IS a failed structural repair", async () => {
-    const { seams, repair } = build();
+  it("a relaunch that fails after the rename is ok:false but NOT a pause (the legacy ladder escalates); a throwing relaunch is launch_failed", async () => {
+    const { repair } = build();
     const failed = await repair.runStructuralRepair({
-      cause: "state_schema_too_new",
+      cause: "legacy_exec_approvals",
       corroboration: kCorroborated,
       hold: makeHold(),
       relaunch: vi.fn(async () => ({ verdict: "launch_failed", error: new Error("no exec") })),
     });
-    expect(failed).toMatchObject({ ok: false, paused: null, verdict: "launch_failed", activated: true, runId: "run-1" });
-    expect(seams.completeReconcileRun).toHaveBeenCalledWith({
-      runId: "run-1",
-      relaunch: { ok: false, verdict: "launch_failed", error: "no exec" },
-    });
-    const mismatch = await repair.runStructuralRepair({
-      cause: "state_schema_too_new",
-      corroboration: kCorroborated,
-      hold: makeHold(),
-      relaunch: vi.fn(async () => ({ verdict: "version_mismatch" })),
-    });
-    expect(mismatch).toMatchObject({ ok: false, paused: kAutoRepairPauseReasons.STRUCTURAL_REPAIR_FAILED, verdict: "version_mismatch" });
-    // A throwing relaunch is a launch_failed, never an exception into the watchdog.
+    expect(failed).toMatchObject({ ok: false, paused: null, verdict: "launch_failed", activated: true });
     const threw = await repair.runStructuralRepair({
-      cause: "state_schema_too_new",
+      cause: "legacy_exec_approvals",
       corroboration: kCorroborated,
       hold: makeHold(),
       relaunch: vi.fn(async () => {
@@ -412,29 +328,17 @@ describe("watchdog-structural-repair: runStructuralRepair rungs", () => {
     expect(threw).toMatchObject({ ok: false, verdict: "launch_failed", paused: null });
   });
 
-  it("lock re-entrancy fence: a hold that lapses after a rung ends the plan with lease_expired and never relaunches", async () => {
-    const hold = makeHold();
-    const { repair } = build({
-      reconcileInstalled: vi.fn(async () => {
-        hold.invalidate();
-        return activated("2.0.0");
-      }),
-    });
-    const result = await repair.runStructuralRepair({
-      cause: "state_schema_too_new",
-      corroboration: kCorroborated,
-      hold,
-      relaunch: relaunchOk,
-    });
-    expect(relaunchOk).not.toHaveBeenCalled();
-    expect(result).toMatchObject({ ok: false, skipped: "lease_expired", paused: null });
-    expect(result.plan).toEqual([{ step: kStructuralRepairRungs.RECONCILE_INSTALLED, outcome: "lease_expired" }]);
+  it("lock fence: a lapsed hold ends the plan with lease_expired before any rung runs", async () => {
+    const { seams, repair } = build();
     const dead = await repair.runStructuralRepair({
-      cause: "state_schema_too_new",
+      cause: "legacy_exec_approvals",
       hold: makeHold({ valid: false }),
       relaunch: relaunchOk,
     });
-    expect(dead.skipped).toBe("lease_expired");
+    expect(dead).toMatchObject({ ok: false, skipped: "lease_expired", paused: null });
+    expect(dead.plan).toEqual([{ step: "ladder", outcome: "lease_expired" }]);
+    expect(seams.renameStrayExecApprovals).not.toHaveBeenCalled();
+    expect(relaunchOk).not.toHaveBeenCalled();
   });
 
   it("kill switch OPENCLAW_CRASH_CAUSE_LADDER=off: skipped {disabled}, no rung runs, no relaunch; a non-structural cause is skipped {not_structural}", async () => {
@@ -442,13 +346,13 @@ describe("watchdog-structural-repair: runStructuralRepair rungs", () => {
     const { seams, repair, logEvent } = build();
     expect(repair.isEnabled()).toBe(false);
     const off = await repair.runStructuralRepair({
-      cause: "state_schema_too_new",
+      cause: "legacy_exec_approvals",
       hold: makeHold(),
       relaunch: relaunchOk,
       logEvent,
     });
     expect(off).toMatchObject({ ok: false, skipped: "disabled", paused: null });
-    expect(seams.reconcileInstalled).not.toHaveBeenCalled();
+    expect(seams.renameStrayExecApprovals).not.toHaveBeenCalled();
     expect(relaunchOk).not.toHaveBeenCalled();
     expect(rowsOf(logEvent)[0]).toMatchObject({ status: "skipped", details: { reason: "disabled" } });
     delete process.env[kCrashCauseLadderEnvKey];
@@ -456,27 +360,5 @@ describe("watchdog-structural-repair: runStructuralRepair rungs", () => {
     const oom = await repair.runStructuralRepair({ cause: "oom", hold: makeHold(), relaunch: relaunchOk });
     expect(oom).toMatchObject({ ok: false, skipped: "not_structural" });
     expect(relaunchOk).not.toHaveBeenCalled();
-  });
-
-  it("a throwing seam is a refusal, not an exception: reconcile_threw falls through to (3), a throwing recover pauses", async () => {
-    const { repair } = build({
-      reconcileInstalled: vi.fn(async () => {
-        throw new Error("disk on fire");
-      }),
-      recoverBootable: vi.fn(async () => {
-        throw new Error("also on fire");
-      }),
-    });
-    const result = await repair.runStructuralRepair({
-      cause: "plugin_api_too_old",
-      corroboration: { corroborated: true, by: "installed_diverged" },
-      hold: makeHold(),
-      relaunch: relaunchOk,
-    });
-    expect(result.plan).toEqual([
-      { step: kStructuralRepairRungs.RECONCILE_INSTALLED, outcome: "reconcile_threw" },
-      { step: kStructuralRepairRungs.RECOVER_BOOTABLE, outcome: "recover_threw" },
-    ]);
-    expect(result.paused).toBe(kAutoRepairPauseReasons.STRUCTURAL_REPAIR_FAILED);
   });
 });

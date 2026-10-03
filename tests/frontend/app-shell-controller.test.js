@@ -123,7 +123,6 @@ vi.mock("../../lib/public/js/lib/api.js", () => ({
   restartGatewayAsync: vi.fn(),
   subscribeGatewayRestartEvents: vi.fn(() => () => {}),
   resumeWatchdogChannels: vi.fn(),
-  rollbackOpenclaw: vi.fn(),
   fetchWatchdogStatus: vi.fn(),
   fetchDoctorStatus: vi.fn(),
   subscribeStatusEvents: vi.fn(() => () => {}),
@@ -431,11 +430,11 @@ describe("frontend/app-shell controller (shared status feed)", () => {
     expect(state.state.restartOperation).toBeNull();
   });
 
-  it("gateway_held rejection clears the operation and toasts the Upgrade-page remedy (same shape as apply_in_progress)", async () => {
+  it("booting rejection clears the operation and toasts the server copy", async () => {
     api.restartGatewayAsync.mockRejectedValue(
       Object.assign(
-        new Error("The gateway is held after a failed settings migration — use Retry migration on the Upgrade page instead of restarting."),
-        { code: "gateway_held", status: 409 },
+        new Error("AlphaClaw is still starting the gateway — wait for boot to finish before restarting."),
+        { code: "booting", status: 409 },
       ),
     );
 
@@ -447,28 +446,7 @@ describe("frontend/app-shell controller (shared status feed)", () => {
     expect(gatewayShellStore.get().restartOperation).toBeNull();
     expect(api.subscribeGatewayRestartEvents).not.toHaveBeenCalled();
     expect(showToast).toHaveBeenCalledWith(
-      expect.stringContaining("Upgrade page"),
-      "error",
-    );
-  });
-
-  it("apply_in_progress rejection clears the operation (no permanently spinning card) and toasts", async () => {
-    api.restartGatewayAsync.mockRejectedValue(
-      Object.assign(new Error("A channel update is in progress"), {
-        code: "apply_in_progress",
-        status: 409,
-      }),
-    );
-
-    let state = await settle();
-    await state.actions.handleGatewayRestart();
-    state = renderController({});
-
-    expect(state.state.restartOperation).toBeNull();
-    expect(gatewayShellStore.get().restartOperation).toBeNull();
-    expect(api.subscribeGatewayRestartEvents).not.toHaveBeenCalled();
-    expect(showToast).toHaveBeenCalledWith(
-      "A channel update is in progress",
+      expect.stringContaining("still starting"),
       "error",
     );
   });
@@ -609,15 +587,15 @@ describe("frontend/app-shell controller (shared status feed)", () => {
     handlers.onMessage({
       event: "error",
       data: {
-        error: "The gateway is held after a failed settings migration — use Retry migration on the Upgrade page instead of restarting.",
-        hint: "Resolve the settings migration on the Upgrade page.",
-        code: "gateway_held",
+        error: "AlphaClaw is still starting the gateway — wait for boot to finish before restarting.",
+        hint: "Boot normally finishes within a minute; the card shows Retry if it fails.",
+        code: "booting",
       },
     });
     state = renderController({});
     expect(state.state.restartOperation).toBeNull();
     expect(gatewayShellStore.get().restartOperation).toBeNull();
-    expect(showToast).toHaveBeenCalledWith(expect.stringContaining("Upgrade page"), "error");
+    expect(showToast).toHaveBeenCalledWith(expect.stringContaining("still starting"), "error");
   });
 
   it("SSE drop → resolve from the server: a terminal record carrying a policy code clears the card and toasts the fallback copy", async () => {
@@ -640,9 +618,9 @@ describe("frontend/app-shell controller (shared status feed)", () => {
       lastOperation: {
         operationId: "op-3",
         status: "failed",
-        code: "gateway_held",
+        code: "booting",
         // The server persists the refusal message as the record's summary.
-        errorSummary: "The gateway is held after a failed settings migration — use Retry migration on the Upgrade page instead of restarting.",
+        errorSummary: "AlphaClaw is still starting the gateway — wait for boot to finish before restarting.",
         startedAt: 1000,
       },
     });
@@ -650,7 +628,7 @@ describe("frontend/app-shell controller (shared status feed)", () => {
     await flushMicrotasks();
     state = renderController({});
     expect(state.state.restartOperation).toBeNull();
-    expect(showToast).toHaveBeenCalledWith(expect.stringContaining("Upgrade page"), "error");
+    expect(showToast).toHaveBeenCalledWith(expect.stringContaining("still starting"), "error");
   });
 
   it("a persisted lastOperation that was a policy refusal (code stamped) is not resurrected as a failed card on reload", async () => {
@@ -661,7 +639,7 @@ describe("frontend/app-shell controller (shared status feed)", () => {
       lastOperation: {
         operationId: "op-refused",
         status: "failed",
-        code: "gateway_held",
+        code: "booting",
         errorSummary: "The gateway is held after a failed settings migration",
         startedAt: 1000,
       },
@@ -698,84 +676,6 @@ describe("frontend/app-shell controller (shared status feed)", () => {
     await state.actions.dismissRestartBanner();
     state = await settle();
     expect(state.state.restartOperation).toBeNull();
-  });
-
-  it("rollback: a rejected rollback only toasts; a successful one begins the reconnect with its grace window", async () => {
-    let state = await settle();
-    const rollBack = gatewayShellStore.get().actions.rollBack;
-
-    api.rollbackOpenclaw.mockRejectedValue(new Error("no known-good build"));
-    await rollBack();
-    state = renderController({});
-    expect(showToast).toHaveBeenCalledWith("no known-good build", "error");
-    expect(state.state.connectivityMode).toBe("online");
-    expect(globalThis.window.location.reload).not.toHaveBeenCalled();
-
-    api.rollbackOpenclaw.mockResolvedValue({ ok: true });
-    await rollBack();
-    state = renderController({});
-    expect(state.state.connectivityMode).toBe("alphaclaw_restarting");
-
-    // Grace window: no probe (and no reload) before the 3s grace elapses;
-    // the first successful poll after it reloads exactly once.
-    await vi.advanceTimersByTimeAsync(2999);
-    expect(globalThis.window.location.reload).not.toHaveBeenCalled();
-    await vi.advanceTimersByTimeAsync(1);
-    expect(globalThis.window.location.reload).toHaveBeenCalledTimes(1);
-  });
-
-  it("rollback fence (#20): the 409 raises the data-risk confirm on the shell store; confirm re-sends with consent, cancel clears", async () => {
-    let state = await settle();
-    const rollBack = gatewayShellStore.get().actions.rollBack;
-
-    api.rollbackOpenclaw.mockRejectedValue(
-      Object.assign(
-        new Error(
-          "This update migrated your state databases — the rollback target may not be able to read them.",
-        ),
-        {
-          code: "rollback_requires_confirmation",
-          status: 409,
-          backupFile: "backup-2026-08-29.tar.gz",
-        },
-      ),
-    );
-    await rollBack();
-    state = renderController({});
-    // A consent gate, not a failure: no toast, no reconnect handoff — the
-    // Gateway card renders the second-stage confirm off this slice.
-    expect(showToast).not.toHaveBeenCalled();
-    expect(state.state.connectivityMode).toBe("online");
-    expect(gatewayShellStore.get().rollbackDataRisk).toEqual({
-      message:
-        "This update migrated your state databases — the rollback target may not be able to read them.",
-      backupFile: "backup-2026-08-29.tar.gz",
-    });
-
-    // Cancel clears the slice without another API call.
-    gatewayShellStore.get().actions.cancelRollbackDataRisk();
-    state = renderController({});
-    expect(gatewayShellStore.get().rollbackDataRisk).toBeNull();
-    expect(api.rollbackOpenclaw).toHaveBeenCalledTimes(1);
-    expect(api.rollbackOpenclaw).toHaveBeenLastCalledWith({});
-
-    // Re-raise the fence, then confirm: the rollback re-sends WITH consent
-    // and the success path (toast + reconnect) runs as usual.
-    await rollBack();
-    state = renderController({});
-    expect(gatewayShellStore.get().rollbackDataRisk).not.toBeNull();
-    api.rollbackOpenclaw.mockResolvedValue({ ok: true });
-    await gatewayShellStore.get().actions.confirmRollbackDataRisk();
-    state = renderController({});
-    expect(api.rollbackOpenclaw).toHaveBeenLastCalledWith({
-      confirmDataRisk: true,
-    });
-    expect(gatewayShellStore.get().rollbackDataRisk).toBeNull();
-    expect(showToast).toHaveBeenCalledWith(
-      "Rolling back to the last known-good build — AlphaClaw is restarting",
-      "info",
-    );
-    expect(state.state.connectivityMode).toBe("alphaclaw_restarting");
   });
 
   it("Retry status after a managed update only reads the saved attempt and never posts or reconnects", async () => {

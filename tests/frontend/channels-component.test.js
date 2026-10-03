@@ -210,8 +210,8 @@ describe("frontend/channels component", () => {
     ).toBeUndefined();
   });
 
-  // D3/D5/D7: DELETE /api/channels/accounts rides `pairingRowsCleanupFailed`,
-  // `pairingRowsCleanupDeferred` and `gatewayRestartFailed` beside ok:true.
+  // D3/D5/D7: DELETE /api/channels/accounts rides `pairingRowsCleanupFailed`
+  // and `gatewayRestartFailed` beside ok:true.
   // AGENTS.md: a failed pairing-row clear is reported, never a clean delete.
   const confirmDelete = async () => {
     renderChannels();
@@ -246,16 +246,6 @@ describe("frontend/channels component", () => {
     expect(showToast).not.toHaveBeenCalledWith("Channel deleted", "success");
     // The delete itself succeeded: the dialog closes and the list reloads.
     expect(harness.slots[kDeletingAccountSlot]).toBeNull();
-  });
-
-  it("a delete whose pairing-row clear was DEFERRED past a backup barrier toasts a warning (authorized until the backup finishes)", async () => {
-    api.deleteChannelAccount.mockResolvedValue({ ok: true, pairingRowsCleanupDeferred: true });
-    await confirmDelete();
-
-    expect(showToast).toHaveBeenCalledTimes(1);
-    const [message, level] = showToast.mock.calls[0];
-    expect(level).toBe("warning");
-    expect(message).toContain("stay authorized until the running backup finishes");
   });
 
   it("gatewayRestartFailed on a delete raises the restart-required banner and says so in the toast", async () => {

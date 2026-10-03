@@ -4,8 +4,7 @@ import {
   buildHardeningCardModel,
 } from "../../lib/public/js/components/general/hardening-card.js";
 
-const status = (state, { reason = "", files = [], channel = "stable" } = {}) => ({
-  releaseChannel: channel,
+const status = (state, { reason = "", files = [] } = {}) => ({
   bootstrapContext: {
     hardening: { state, reason, files },
   },
@@ -22,16 +21,12 @@ const hardeningFile = (overrides = {}) => ({
 });
 
 describe("frontend/general hardening card", () => {
-  it("renders nothing for healthy, unknown, dev-channel, and old payloads", () => {
+  it("renders nothing for healthy, unknown, and old payloads", () => {
     expect(buildHardeningCardModel(null)).toBe(null);
     expect(buildHardeningCardModel({})).toBe(null);
     expect(buildHardeningCardModel({ bootstrapContext: {} })).toBe(null);
     expect(buildHardeningCardModel(status("injected"))).toBe(null);
     expect(buildHardeningCardModel(status("unknown"))).toBe(null);
-    // Dev-channel builds are owned by the badge's "unverified" copy.
-    expect(
-      buildHardeningCardModel(status("blocked", { channel: "dev" })),
-    ).toBe(null);
     expect(GeneralHardeningCard({ doctorStatus: null })).toBe(null);
   });
 

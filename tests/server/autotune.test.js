@@ -12,7 +12,6 @@ const {
   getAgentConcurrencyCap,
   deriveBodyLimits,
   getSqliteCacheMb,
-  getBackupMaxTotalBytes,
   stampGatewayEnvApplied,
   revertGatewayEnvStamp,
   stampOpenclawConfigConsumed,
@@ -241,7 +240,6 @@ describe("server/autotune", () => {
     expect(getAgentConcurrencyCap(options)).toBe(8);
     expect(deriveBodyLimits(options)).toEqual({ openAiCompat: "20mb", local: "5mb" });
     expect(getSqliteCacheMb(options)).toBe(16);
-    expect(getBackupMaxTotalBytes(options)).toBe(8 * kGb); // 20% of 40GB disk... via statfs
 
     // Kill-switch wins over config.
     const killed = { openclawDir, env: { ALPHACLAW_AUTOTUNE_DISABLED: "1" } };
@@ -254,7 +252,6 @@ describe("server/autotune", () => {
     // Config disable.
     updateAutotuneSettings({ openclawDir, enabled: false });
     expect(getGatewayNodeOptionsSuffix(options)).toBeNull();
-    expect(getBackupMaxTotalBytes(options)).toBeNull();
   });
 
   it("adopts an absent concurrency key with intent-first ownership and stamps env rows", async () => {
@@ -780,19 +777,16 @@ describe("server/autotune", () => {
         overrides: {
           sqliteCacheMb: 64,
           agentConcurrencyCap: 500,
-          backupMaxTotalGb: 60,
           uvThreadpoolSize: 64,
         },
       },
     );
     expect(derivation.values.sqliteCacheMb).toBe(32); // M/32
     expect(derivation.values.agentConcurrencyCap).toBe(8); // min(C*16, M/32) floor 8
-    expect(derivation.values.backupMaxTotalGb).toBe(10); // the disk itself
     expect(derivation.values.uvThreadpoolSize).toBe(8); // ceil(C)*8 floor 8
     for (const knob of [
       "sqliteCacheMb",
       "agentConcurrencyCap",
-      "backupMaxTotalGb",
       "uvThreadpoolSize",
     ]) {
       expect(derivation.notes[knob]?.clamped).toBe(true);

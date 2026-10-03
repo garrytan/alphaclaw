@@ -1,16 +1,15 @@
 import os from "node:os";
 import { configDefaults, defineConfig } from "vitest/config";
 
-// tests/live/** hit the real npm registry, the real GitHub API, and (in the
-// dev tier) run a real from-source OpenClaw build. They are opt-in:
-//   OPENCLAW_LIVE_E2E=1          → catalog + package-apply tiers (network, ~5 min)
-//   OPENCLAW_LIVE_E2E_DEV=1 too  → full dev source build (20-35 min, ~5 GB)
-// `npm test` stays hermetic and offline; use `npm run test:live[:dev]`.
+// tests/live/** drive the REAL pinned OpenClaw CLI and gateway (plus a real
+// Chromium and docker for a few suites). They are opt-in:
+//   OPENCLAW_LIVE_E2E=1 → `npm run test:live`
+// `npm test` stays hermetic and offline.
 const kLiveE2eEnabled = process.env.OPENCLAW_LIVE_E2E === "1";
 
 // tests/container/** additionally need a running docker daemon: they build
-// the production image from the local checkout and drive a real stable→beta
-// upgrade through headless Chromium. Opt-in the same way:
+// the production image from the local checkout and boot the pinned OpenClaw
+// in fresh, restarted and self-upgraded containers. Opt-in the same way:
 //   OPENCLAW_CONTAINER_E2E=1 → `npm run test:container` (~20-35 min)
 const kContainerE2eEnabled = process.env.OPENCLAW_CONTAINER_E2E === "1";
 

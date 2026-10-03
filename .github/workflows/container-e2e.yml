@@ -1,10 +1,10 @@
 name: Container E2E
 
-# The full production-container journey: build the image from this checkout,
-# boot a REAL stable OpenClaw gateway, drive a stable→beta upgrade through
-# headless Chromium under live file churn (using an explicit published
-# historical pair during beta gaps), and prove restart durability
-# and an immutable v0.9.76 → candidate upgrade on one persistent volume
+# The production-container journey: build the image from this checkout, boot
+# the REAL pinned OpenClaw gateway in a fresh container and again after
+# `docker restart`, prove the boot spine survives a legacy pidfile TID
+# collision and a dangling restart operation, and upgrade an immutable
+# v0.9.76 image to the candidate on one persistent volume
 # (tests/container/**). Heavy (110-minute job budget), so PR runs are gated by
 # a cheap path filter job — but the workflow itself ALWAYS triggers on PRs
 # (no `paths:` filter: a path-filtered required check pends forever on
@@ -26,7 +26,7 @@ permissions:
   contents: read
 
 jobs:
-  # Cheap decider: PRs only pay the heavy job when they touch the upgrade /
+  # Cheap decider: PRs only pay the heavy job when they touch the boot /
   # gateway / container surface. Schedule + dispatch always run it.
   filter:
     runs-on: ubuntu-latest
@@ -53,17 +53,15 @@ jobs:
           echo "changed files:"
           echo "$changed"
           # The heavy job boots the FULL server on the container journey:
-          # watchdog, boot-time doctor/config reconcile, startup, and every
-          # routes/* module load. The original filter covered only the
-          # upgrade/gateway surface, so PRs changing watchdog/doctor/routes/
-          # server-core (which the boot journey exercises) skipped it.
-          # The journey is browser-driven: it logs in through login.html and
-          # applies the beta from the Upgrade tab, so those UI surfaces are
-          # part of the filter too (fix wave F173).
-          pattern='^(lib/server/openclaw-|lib/server/backup-risk-consent\.js|lib/engines-range\.js|lib/node-runtime\.js|lib/server/gateway|lib/server/watchdog|lib/server/doctor|lib/server/routes/|lib/server/startup\.js|lib/server/boot-phase\.js|lib/server\.js|lib/server/gateway-env-policy\.js|bin/alphaclaw\.js|Dockerfile|tests/container/|lib/boot-placeholder|lib/public/js/components/upgrade-tab/|lib/public/login\.html)'
+          # the bin-phase pidfile guard and channel retirement, the boot
+          # report, the once-per-pin doctor --fix, watchdog, startup, and
+          # every routes/* module load, so PRs changing any of them run it.
+          # The journey waits on login.html and signs in through the auth
+          # API, so login.html is part of the filter too (fix wave F173).
+          pattern='^(lib/server/openclaw-|lib/server/boot-|lib/server/server-pidfile\.js|lib/engines-range\.js|lib/node-runtime\.js|lib/server/gateway|lib/server/watchdog|lib/server/doctor|lib/server/routes/|lib/server/startup\.js|lib/server/diagnose/|lib/server\.js|bin/alphaclaw\.js|Dockerfile|tests/container/|lib/boot-placeholder|lib/public/login\.html)'
           if echo "$changed" | grep -qE "$pattern"; then
             echo "run_heavy=true" >> "$GITHUB_OUTPUT"
-            echo "upgrade/gateway/container surface touched → heavy job runs"
+            echo "boot/gateway/container surface touched → heavy job runs"
           # A pin bump is a CONTENT change inside package.json (fix wave
           # F173): match the `"openclaw":` dependency line in the diff, never
           # the bare file name (every version bump touches package.json).
@@ -79,11 +77,11 @@ jobs:
     needs: filter
     if: needs.filter.outputs.run_heavy == 'true'
     runs-on: ubuntu-latest
-    # Budget: image build (~5 min) + stable boot + browser-driven beta apply
-    # (up to 15 min) + restart + two durability legs; the job limit must
-    # exceed the tests' own worst case so vitest reports a timeout instead of
-    # the runner killing the process.
-    # Includes the immutable old-image → candidate shared-volume journey.
+    # Budget: image build (~5 min) + the boot-durability journey (fresh boot,
+    # two docker restarts, the seeded-volume boot) + the immutable old-image
+    # → candidate shared-volume journey (two image builds, up to 60 min); the
+    # job limit must exceed the tests' own worst case so vitest reports a
+    # timeout instead of the runner killing the process.
     timeout-minutes: 110
     steps:
       - uses: actions/checkout@v4
@@ -97,28 +95,11 @@ jobs:
 
       - run: npm ci
 
-      - id: playwright-version
-        name: Resolve pinned Playwright version
-        run: |
-          echo "version=$(node -p "require('./package-lock.json').packages['node_modules/playwright'].version")" >> "$GITHUB_OUTPUT"
-
-      - uses: actions/cache@v4
-        with:
-          path: ~/.cache/ms-playwright
-          key: playwright-${{ runner.os }}-${{ steps.playwright-version.outputs.version }}
-
-      - run: npx playwright install --with-deps chromium
-
       - run: npm run test:container
         env:
-          # Authenticated GitHub API calls (release notes) — the anonymous
-          # quota is shared per runner IP and flakes.
+          # Authenticated GitHub API calls (AlphaClaw release notes) — the
+          # anonymous quota is shared per runner IP and flakes.
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # All browser-journey steps must execute. During beta gaps the
-          # unchanged image boots a published historical stable overlay and
-          # upgrades to its compatible beta. Missing/deprecated reference
-          # packages and registry errors still fail, never silently skip.
-          OPENCLAW_CONTAINER_E2E_STRICT: ${{ github.event_name == 'pull_request' && '1' || '0' }}
 
       - uses: actions/upload-artifact@v4
         if: failure()

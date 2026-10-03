@@ -5,7 +5,6 @@ const { createNotifyOutbox } = require("../../lib/server/notify-outbox");
 const { createUpgradeNotifier } = require("../../lib/server/upgrade-notifier");
 const { createWatchdogNotifier, sendTelegramRendered } = require("../../lib/server/watchdog-notify");
 const { notificationTiming, overseerNotificationTiming, kOverseerNotificationMaxAgeMs: hour } = require("../../lib/server/notification-expiry");
-const { beginStateDbQuiet, resetStateDbQuietForTests } = require("../../lib/server/state-db-quiet");
 
 const cleanups = [];
 const logger = { log: vi.fn(), warn: vi.fn(), error: vi.fn() };
@@ -26,10 +25,8 @@ const makeHarness = ({ keepCount = 100, unavailable = false, targets = [], sendT
 };
 const overseer = (id = "review") => ({ id, eventType: "overseer", message: "review outcome" });
 
-beforeEach(() => resetStateDbQuietForTests({ listeners: true }));
 afterEach(() => {
   for (const cleanup of cleanups.splice(0)) cleanup();
-  resetStateDbQuietForTests({ listeners: true });
 });
 
 describe("fixed notification delivery deadlines", () => {
@@ -180,19 +177,6 @@ describe("fixed notification delivery deadlines", () => {
       return { ok: false };
     } });
     expect(h.outbox.listEvents()[0].expiresAt).toBe(shorter);
-  });
-
-  it.each([false, true])("expires behind a quiet hold, including unavailable outbox=%s", async (unavailable) => {
-    const h = makeHarness({ unavailable });
-    const quiet = await beginStateDbQuiet({ owner: "expiry-test", maxMs: 10_000 });
-    await h.notifier.notify("review outcome", { id: "review", eventType: "overseer" });
-    h.clock.now += hour / 2;
-    await h.notifier.notify("review outcome", { id: "review", eventType: "overseer" });
-    h.clock.now += hour / 2;
-    quiet.release();
-    await vi.waitFor(() => expect(h.insertEvent).toHaveBeenCalledWith(expect.objectContaining({ eventType: "notification_expired" })));
-    expect(h.fanout).not.toHaveBeenCalled();
-    expect(h.insertEvent.mock.calls.filter(([event]) => event.eventType === "notification_expired")).toHaveLength(1);
   });
 
   it.each(["held", "suppressed"])("a policy %s and re-enable cannot create another hour", async (mode) => {

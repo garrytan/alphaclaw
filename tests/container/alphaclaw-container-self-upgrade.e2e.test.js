@@ -8,12 +8,15 @@ const {
   ensureArtifactsDir, waitFor, loginForCookie, fetchJsonWithCookie,
 } = require("./container-helpers");
 
+// An immutable v0.9.76 image — from the era of the in-app OpenClaw version
+// switch — upgraded in place to the candidate image on one persistent volume.
+// The baseline records a 2026.8.2 overlay through its Upgrade-tab store, so
+// the candidate's first boot must: retire that switch exactly once (record
+// the old version, remove the shim, move the state file aside), run its
+// pinned OpenClaw instead, migrate the 15/19-schema databases with the
+// once-per-pin `doctor --fix`, keep the operator's config intent and converge
+// the legacy pidfile claim.
 const kBaselineCommit = "01d3b66bf1caf00488b38d468590359de04b98fd";
-// This release has state 15 / agent 19 (the schema every pin up to 2026.9.2
-// shared) while being a DISTINCT immutable package, so activation of the
-// candidate can never be a no-op. Since v0.9.80 the candidate pin (2026.9.3)
-// declares state 16, so this journey also exercises the boot-time state
-// migration from a 15-schema volume — the real self-upgrade path.
 const kRecordedVersion = "2026.8.2";
 const kId = crypto.randomUUID().slice(0, 8);
 const kImages = [`alphaclaw-self-upgrade-old:${kId}`, `alphaclaw-self-upgrade-new:${kId}`];
@@ -41,7 +44,7 @@ const waitReady = async (container, version) => {
   }, { timeoutMs: 10 * kMin, intervalMs: 3000, label: `${container} actually serving OpenClaw ${version}` });
 };
 
-describeContainer("container E2E: immutable v0.9.76 → candidate self-upgrade preserves the recorded overlay", () => {
+describeContainer("container E2E: immutable v0.9.76 → candidate self-upgrade retires the recorded overlay and runs the pin", () => {
   let broken = false;
   const baselineArtifacts = new Map();
   afterAll(async () => {
@@ -51,7 +54,7 @@ describeContainer("container E2E: immutable v0.9.76 → candidate self-upgrade p
         for (const [file, contents] of baselineArtifacts) fs.writeFileSync(path.join(dir, file), contents);
         for (const container of kContainers) {
           try { fs.writeFileSync(path.join(dir, `${container}.log`), await containerLogs(container, { tail: 5000 })); } catch {}
-          for (const file of ["boot-report.json", "boot-report-incident.json", "openclaw-channel-state.json"]) {
+          for (const file of ["boot-report.json", "boot-report-incident.json", "openclaw-channel-state.json", "openclaw-channel-retired.json", "openclaw-boot-migration.json"]) {
             try {
               const { stdout } = await execInContainer(container, ["cat", `${kManaged}/${file}`]);
               fs.writeFileSync(path.join(dir, `${container}-${file}`), stdout);
@@ -66,11 +69,13 @@ describeContainer("container E2E: immutable v0.9.76 → candidate self-upgrade p
     }
   }, 5 * kMin);
 
-  test("boots both images on one volume and proves real activation, preserved intent, and pidfile convergence", { timeout: 60 * kMin, retry: 0 }, async () => {
+  test("boots both images on one volume and proves channel retirement, the pinned build, preserved intent, and pidfile convergence", { timeout: 60 * kMin, retry: 0 }, async () => {
     try {
       await assertDockerAvailable();
       const candidate = JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf8"));
-      expect(candidate.dependencies.openclaw).not.toBe(kRecordedVersion);
+      const pin = candidate.dependencies.openclaw;
+      expect(pin).not.toBe(kRecordedVersion);
+      const pinSchemas = JSON.parse(fs.readFileSync(path.join(repoRoot, "node_modules", "openclaw", "package.json"), "utf8")).openclaw.schemaVersions;
       const sourceRoot = await sourceAtCommit(kBaselineCommit);
       expect(JSON.parse(fs.readFileSync(path.join(sourceRoot, "package.json"), "utf8")).version).toBe("0.9.76");
       await buildImage({ tag: kImages[0], sourceRoot });
@@ -115,11 +120,8 @@ describeContainer("container E2E: immutable v0.9.76 → candidate self-upgrade p
               }
               db.close();
             }
-            // The baseline image must see ITS OWN declared pin (v0.9.80 moved
-            // the candidate's pin to 2026.9.3, so seeding the candidate's pin
-            // here would make the OLD release read a backwards pin change on
-            // its first boot). The candidate's pin is written onto the volume
-            // right before the candidate boots, below.
+            // The baseline image must see ITS OWN declared pin, or the OLD
+            // release would read a pin change on its first boot.
             store.updateState((state) => ({ ...state, pinVersion: require(path.join(root, 'package.json')).dependencies.openclaw, applied: { channel: 'stable', version: ${JSON.stringify(kRecordedVersion)}, at: Date.now(), acceptedAt: Date.now(), reason: 'self_upgrade_fixture' } }));
           } finally { staged.cleanup(); }
         })().catch((error) => { console.error(error); process.exitCode = 1; });
@@ -131,16 +133,13 @@ describeContainer("container E2E: immutable v0.9.76 → candidate self-upgrade p
       await waitReady(kContainers[0], kRecordedVersion);
       expect((await readJson(kContainers[0], `${kManaged}/openclaw-channel-state.json`)).applied.version).toBe(kRecordedVersion);
 
-      // Fresh operator intent differs from any pre-fix backup. Preserve its
-      // bytes over the AlphaClaw upgrade, not merely one version field.
-      // Seed the documented channel/auto-update mirror too: boot is required
-      // to reconcile it, and that expected write is not a config restoration.
+      // Fresh operator intent written after the baseline booted: it must
+      // survive the AlphaClaw upgrade and the candidate's doctor --fix.
       const edit = `
         const fs = require('node:fs');
         const p = ${JSON.stringify(kConfig)};
         const c = JSON.parse(fs.readFileSync(p));
         c.messages = { ...c.messages, ackReaction: '🧪' };
-        c.update = { ...c.update, channel: 'stable', auto: { ...c.update?.auto, enabled: false } };
         fs.writeFileSync(p, JSON.stringify(c, null, 2) + '\\n');
       `;
       await execInContainer(kContainers[0], ["node", "-e", edit]);
@@ -159,46 +158,68 @@ describeContainer("container E2E: immutable v0.9.76 → candidate self-upgrade p
       // Keep a legacy format claim to exercise convergence across the real
       // image replacement. The deterministic TID collision remains a
       // separate same-image test, where PID allocation is controlled.
-      // The channel state carries the CANDIDATE's declared pin from here on,
-      // so neither image reads a pin change: this journey proves recorded-
-      // build activation across an AlphaClaw upgrade, not pin-bump handling
-      // (the pin moved 2026.9.2 → 2026.9.3 in v0.9.80).
-      const stateForCandidate = JSON.parse(baselineArtifacts.get(`${kContainers[0]}-openclaw-channel-state.json`));
-      stateForCandidate.pinVersion = candidate.dependencies.openclaw;
       await seedVolume(kVolume, {
         [`${kManaged}/alphaclaw-server.pid`]: JSON.stringify({ pid: baselineClaim.pid, at: Date.now() - 2 * 86400_000 }),
-        [`${kManaged}/openclaw-channel-state.json`]: JSON.stringify(stateForCandidate),
       });
       await runContainer({ name: kContainers[1], image: kImages[1], volume: kVolume, env });
-      await waitReady(kContainers[1], kRecordedVersion);
+      await waitReady(kContainers[1], pin);
       const report = await waitFor(async () => {
         const value = await readJson(kContainers[1], `${kManaged}/boot-report.json`);
-        return value.serverPhase?.status === "recorded" ? value : null;
+        return value.serverPhase?.status === "recorded" && value.serverPhase?.migration ? value : null;
       }, { timeoutMs: 2 * kMin, intervalMs: 2000, label: "candidate boot report" });
       expect(report.pidfile.decision).toBe("proceed");
-      expect(report.openclaw.bootSync.action).toBe("activated");
-      expect(report.openclaw.expected).toBe(kRecordedVersion);
-      expect(report.openclaw.resolvedForLaunch).toBe(kRecordedVersion);
-      expect(report.openclaw.installedDiverged).not.toBe(true);
+      expect(report.openclaw.bootSync.action).toBe("none");
+      expect(report.openclaw.declaredPin).toBe(pin);
+      expect(report.openclaw.installedAtBoot).toBe(pin);
+      expect(report.openclaw.installedDiverged).toBe(false);
+      expect(report.openclaw.retiredChannel).toEqual({ channel: "stable", version: kRecordedVersion, sha: null });
+      expect(report.serverPhase.migration).toEqual({ status: "ok", reason: null, ran: true });
       expect(report.serverPhase.verdict).toEqual([]);
-      expect(report.serverPhase.config.restoredFrom).toBeNull();
-      // The candidate boot may add exactly ONE managed key on top of what
-      // v0.9.76 left behind: gateway.controlUi.basePath=/openclaw (the v0.9.83
-      // Control UI mount, written by ensureGatewayProxyConfig at boot). Every
-      // other byte of the config — and the absence of any config restore,
-      // asserted above via restoredFrom — must survive the image swap intact.
-      const configAfter = JSON.parse(
-        (await execInContainer(kContainers[1], ["cat", kConfig])).stdout,
+
+      // The old version switch is retired exactly once: shim gone, state file
+      // moved aside, one record naming what was running for the boot notice.
+      const retired = await readJson(kContainers[1], `${kManaged}/openclaw-channel-retired.json`);
+      expect(retired).toMatchObject({
+        previous: { channel: "stable", version: kRecordedVersion, sha: null },
+        pinVersion: pin,
+        overlayDir: "/data/openclaw-overlay",
+        // An older stable build than the pin only moves forward: no notice.
+        needsNotice: false,
+      });
+      const { stdout: managedEntries } = await execInContainer(kContainers[1], ["ls", "-A", kManaged]);
+      const managed = managedEntries.split(/\s+/).filter(Boolean);
+      expect(managed).not.toContain("bin");
+      expect(managed).not.toContain("openclaw-channel-state.json");
+      expect(managed.filter((name) => name.startsWith("openclaw-channel-state.json.retired-"))).toHaveLength(1);
+      expect(await containerLogs(kContainers[1], { tail: 5000 })).toContain(
+        `retired the in-app OpenClaw version switch (was stable ${kRecordedVersion}); running the pinned ${pin}`,
       );
-      expect(configAfter.gateway?.controlUi?.basePath).toBe("/openclaw");
-      const { basePath: _mountKey, ...controlUiWithoutMount } = configAfter.gateway.controlUi;
-      expect({
-        ...configAfter,
-        gateway: { ...configAfter.gateway, controlUi: controlUiWithoutMount },
-      }).toEqual(JSON.parse(configBefore));
-      const state = await readJson(kContainers[1], `${kManaged}/openclaw-channel-state.json`);
-      expect(state.applied.version).toBe(kRecordedVersion);
-      expect(state.gatewayHold).toBeNull();
+      expect((await readJson(kContainers[1], `${kManaged}/openclaw-boot-migration.json`)).completedForVersion).toBe(pin);
+
+      // The pin's doctor --fix migrated the 15/19 databases the old build wrote.
+      const schemas = JSON.parse((await execInContainer(kContainers[1], ["node", "-e", `
+        const { DatabaseSync } = require('node:sqlite');
+        const read = (file) => { const db = new DatabaseSync('/data/.openclaw/' + file, { readOnly: true });
+          try { return { version: db.prepare('PRAGMA user_version').get().user_version, integrity: db.prepare('PRAGMA integrity_check').get().integrity_check }; } finally { db.close(); } };
+        console.log(JSON.stringify({ state: read('state/openclaw.sqlite'), agent: read('agents/main/agent/openclaw-agent.sqlite') }));
+      `])).stdout);
+      expect(schemas.state).toEqual({ version: pinSchemas.state, integrity: "ok" });
+      expect(schemas.agent.integrity).toBe("ok");
+      expect(schemas.agent.version).toBeGreaterThanOrEqual(19);
+
+      // Operator intent survives the image swap and the pin's doctor --fix;
+      // the candidate adds gateway.controlUi.basePath=/openclaw (the v0.9.83
+      // Control UI mount, written by ensureGatewayProxyConfig at boot).
+      const before = JSON.parse(configBefore);
+      const configAfter = JSON.parse((await execInContainer(kContainers[1], ["cat", kConfig])).stdout);
+      expect(configAfter.messages?.ackReaction).toBe("🧪");
+      expect(configAfter.gateway).toMatchObject({
+        mode: before.gateway.mode,
+        bind: before.gateway.bind,
+        port: before.gateway.port,
+        auth: { token: kGatewayToken },
+        controlUi: { basePath: "/openclaw" },
+      });
       const claim = await readJson(kContainers[1], `${kManaged}/alphaclaw-server.pid`);
       expect(claim.format).toBe(2);
       expect(claim.startTicks).toBeGreaterThan(0);

@@ -30,7 +30,7 @@ const readJson = (file) => JSON.parse(fs.readFileSync(file, "utf8"));
 const kBootId = "40:1700000000000";
 const kOtherBootId = "7:1699999000000";
 
-// A bin-phase report the way bin/alphaclaw.js would shape it after syncAtBoot.
+// A bin-phase report the way the boot instance guard shapes it.
 const binReport = (overrides = {}) =>
   buildBinPhaseReport({
     bootId: kBootId,
@@ -40,14 +40,8 @@ const binReport = (overrides = {}) =>
     pidDecision: { evidence: null, decision: "proceed", reason: "absent", record: { raw: null, format: null, legacyClaim: false } },
     openclaw: {
       declaredPin: "2026.9.2",
-      channelApplied: null,
-      lastKnownGood: null,
-      expected: "2026.9.2",
       installedAtBoot: "2026.9.2",
-      resolvedForLaunch: "2026.9.2",
-      overlayPresent: false,
-      overlayComplete: false,
-      sentinelMatches: true,
+      installedDiverged: false,
     },
     bootSync: { action: "none", reason: null, warnings: [] },
     ...overrides,
@@ -61,7 +55,7 @@ describe("boot-report: buildBinPhaseReport", () => {
       at: 1_700_000_000_000,
       alphaclaw: { version: "0.9.77" },
       pidDecision,
-      openclaw: { expected: "2026.9.2" },
+      openclaw: { declaredPin: "2026.9.2", retiredChannel: { channel: "beta", version: "2026.9.3-beta.1", sha: null } },
       bootSync: { action: "skipped_concurrent", reason: "pid_live", warnings: ["w1", 42] },
     });
     expect(report).toEqual({
@@ -73,21 +67,14 @@ describe("boot-report: buildBinPhaseReport", () => {
       pidfile: pidDecision,
       openclaw: {
         stateDir: null,
-        declaredPin: null,
-        channelApplied: null,
-        lastKnownGood: null,
-        expected: "2026.9.2",
+        declaredPin: "2026.9.2",
         installedAtBoot: null,
-        resolvedForLaunch: null,
         installedDiverged: null,
-        overlayPresent: null,
-        overlayComplete: null,
-        sentinelMatches: null,
+        retiredChannel: { channel: "beta", version: "2026.9.3-beta.1", sha: null },
         bootSync: {
           action: "skipped_concurrent",
           reason: "pid_live",
           warnings: ["w1", "42"],
-          danglingRecords: null,
         },
       },
       binPhase: { status: kBinPhaseStatuses.ok },
@@ -102,7 +89,8 @@ describe("boot-report: buildBinPhaseReport", () => {
     expect(report.bootId).toBeNull();
     expect(report.at).toBeNull();
     expect(report.pidfile).toBeNull();
-    expect(report.openclaw.bootSync).toEqual({ action: null, reason: null, warnings: [], danglingRecords: null });
+    expect(report.openclaw.bootSync).toEqual({ action: null, reason: null, warnings: [] });
+    expect(report.openclaw.retiredChannel).toBeNull();
     expect(buildBinPhaseReport({ alphaclaw: "garbage", openclaw: [] }).alphaclaw.version).toBeNull();
   });
 });
@@ -370,7 +358,7 @@ describe("boot-report: writeRefusedBinPhase (a refused second instance never evi
       binReport({
         pidDecision: skipDecision,
         // The #76 shape behind a live claim: the applied build never activated.
-        openclaw: { expected: "2026.9.2", installedAtBoot: "2026.7.1-2", resolvedForLaunch: "2026.7.1-2", installedDiverged: true },
+        openclaw: { declaredPin: "2026.9.2", installedAtBoot: "2026.7.1-2", installedDiverged: true },
         bootSync: { action: "skipped_concurrent", reason: "live_server_corroborated", warnings: [] },
       }),
       kPidfileSkipReason,
@@ -467,7 +455,7 @@ describe("boot-report: markServerPhaseNotReached", () => {
     const writer = writerFor();
     writer.writeBinPhase(
       binReport({
-        openclaw: { expected: "2026.9.2", installedAtBoot: "2026.7.1-2", resolvedForLaunch: "2026.7.1-2" },
+        openclaw: { declaredPin: "2026.9.2", installedAtBoot: "2026.7.1-2" },
         pidDecision: { evidence: { pid: 21, corroborated: true }, decision: "skip", reason: "corroborated" },
       }),
     );
@@ -487,7 +475,7 @@ describe("boot-report: markServerPhaseNotReached", () => {
 describe("boot-report: computeVerdict", () => {
   const inconsistent = (report) => computeVerdict(report);
   const withServer = (serverPhase, openclaw = {}) => ({
-    ...binReport({ openclaw: { expected: "2026.9.2", installedAtBoot: "2026.9.2", ...openclaw } }),
+    ...binReport({ openclaw: { declaredPin: "2026.9.2", installedAtBoot: "2026.9.2", ...openclaw } }),
     serverPhase: { status: "recorded", ...serverPhase },
   });
   const kSupported = { state: 15, agent: 19, source: "declared" };
@@ -511,105 +499,55 @@ describe("boot-report: computeVerdict", () => {
     expect(inconsistent(binReport())).toEqual([]);
   });
 
-  it("installed_not_expected judges the tree the gateway will RUN (resolvedForLaunch), never the pre-sync installedAtBoot", () => {
-    // The applied build never activated: what runs is not what was expected.
-    expect(inconsistent(withServer({}, { installedAtBoot: "2026.7.1-2", resolvedForLaunch: "2026.7.1-2" }))).toEqual([
-      "installed_not_expected",
-    ]);
-    // An ACTIVATION boot: the container woke up on the old tree and the sync
-    // activated the expected build — installedAtBoot differs, the launch does
-    // not. This is a HEALTHY boot (the e2e's activated-boot shape), not a
-    // latched version mismatch.
-    expect(inconsistent(withServer({}, { installedAtBoot: "2026.7.1-2", resolvedForLaunch: "2026.9.2" }))).toEqual([]);
-    // installedAtBoot alone (no post-sync read) is evidence, never a finding.
-    expect(inconsistent(withServer({}, { installedAtBoot: "2026.7.1-2", resolvedForLaunch: null }))).toEqual([]);
+  it("installed_not_expected: the installed OpenClaw is not the declared pin", () => {
+    expect(inconsistent(withServer({}, { installedAtBoot: "2026.7.1-2" }))).toEqual(["installed_not_expected"]);
+    expect(inconsistent(withServer({}, { installedAtBoot: "2026.9.2" }))).toEqual([]);
     // An unknown side is silence.
-    expect(inconsistent(withServer({}, { installedAtBoot: null, resolvedForLaunch: null }))).toEqual([]);
-    expect(inconsistent(withServer({}, { expected: null, resolvedForLaunch: "2026.7.1-2" }))).toEqual([]);
-    expect(inconsistent(withServer({}, { expected: "", resolvedForLaunch: "x" }))).toEqual([]);
+    expect(inconsistent(withServer({}, { installedAtBoot: null }))).toEqual([]);
+    expect(inconsistent(withServer({}, { declaredPin: null, installedAtBoot: "2026.7.1-2" }))).toEqual([]);
+    expect(inconsistent(withServer({}, { declaredPin: "", installedAtBoot: "x" }))).toEqual([]);
   });
 
-  it("installed_not_expected: the e2e activated-boot report with a recorded server phase is consistent", () => {
-    // Exactly the bin-phase report tests/server/openclaw-channel-boot.e2e.test.js
-    // pins for a healthy activation, plus the server phase's own post-sync read.
-    const activated = {
-      ...binReport({
-        openclaw: {
-          declaredPin: "1.0.0",
-          channelApplied: "beta:1.1.0",
-          lastKnownGood: { package: null, dev: null },
-          expected: "1.1.0",
-          installedAtBoot: "1.0.0",
-          resolvedForLaunch: "1.1.0",
-          installedDiverged: false,
-          overlayPresent: true,
-          overlayComplete: true,
-          sentinelMatches: true,
-        },
-        bootSync: { action: "activated", reason: null, warnings: [] },
-      }),
-      serverPhase: { status: "recorded", installedVersion: "1.1.0", legacyExecApprovalsPresent: false },
-    };
-    expect(inconsistent(activated)).toEqual([]);
-    expect(describeReportVersions(activated)).toEqual({ expected: "1.1.0", running: "1.1.0", diverged: false });
+  it("installed_not_expected honours the bin phase's recorded installedDiverged over the plain comparison", () => {
+    const pair = { declaredPin: "2026.9.2", installedAtBoot: "2026.9.1" };
+    expect(inconsistent(withServer({}, { ...pair, installedDiverged: false }))).toEqual([]);
+    expect(inconsistent(withServer({}, { ...pair, installedDiverged: true }))).toEqual(["installed_not_expected"]);
+    // No answer recorded: the plain comparison decides.
+    expect(inconsistent(withServer({}, { ...pair, installedDiverged: null }))).toEqual(["installed_not_expected"]);
   });
 
-  it("installed_not_expected honours the bin phase's canonical installedDiverged (a live pinLag excuses the lagging pair), the way computeInstalledDiverged does", () => {
-    // AlphaClaw self-update: the pin moved to 2026.9.2, npm has not reinstalled
-    // yet, the sync recorded state.pinLag — the predicate says "not diverged".
-    const lagging = { expected: "2026.9.2", installedAtBoot: "2026.9.1", resolvedForLaunch: "2026.9.1" };
-    expect(inconsistent(withServer({}, { ...lagging, installedDiverged: false }))).toEqual([]);
-    expect(inconsistent(withServer({}, { ...lagging, installedDiverged: true }))).toEqual(["installed_not_expected"]);
-    // No predicate recorded (an older report): the plain comparison decides.
-    expect(inconsistent(withServer({}, { ...lagging, installedDiverged: null }))).toEqual(["installed_not_expected"]);
-  });
-
-  it("installed_not_expected with NO bin phase falls back to the server phase's channelInfo snapshot", () => {
-    const noBin = (channelInfo, serverExtra = {}) => ({
+  it("installed_not_expected with NO bin phase falls back to the server phase's own versions", () => {
+    const noBin = (serverPhase) => ({
       ...binReport(),
       openclaw: null,
       binPhase: { status: "missing" },
-      serverPhase: { status: "recorded", channelInfo, ...serverExtra },
+      serverPhase: { status: "recorded", ...serverPhase },
     });
-    expect(
-      inconsistent(noBin({ installedVersion: "2026.9.1", expectedVersion: "2026.9.2", installedDiverged: null })),
-    ).toEqual(["installed_not_expected"]);
-    expect(
-      inconsistent(noBin({ installedVersion: "2026.9.1", expectedVersion: "2026.9.2", installedDiverged: true })),
-    ).toEqual(["installed_not_expected"]);
-    // The live predicate excused it (pinLag): silence.
-    expect(
-      inconsistent(noBin({ installedVersion: "2026.9.1", expectedVersion: "2026.9.2", installedDiverged: false })),
-    ).toEqual([]);
-    // The server phase's own read outranks the snapshot's installedVersion.
-    expect(
-      inconsistent(
-        noBin({ installedVersion: "2026.9.1", expectedVersion: "2026.9.2", installedDiverged: null }, { installedVersion: "2026.9.2" }),
-      ),
-    ).toEqual([]);
-    expect(inconsistent(noBin(null))).toEqual([]);
-    expect(inconsistent(noBin({ installedVersion: null, expectedVersion: "2026.9.2", installedDiverged: null }))).toEqual([]);
+    expect(inconsistent(noBin({ installedVersion: "2026.9.1", expectedVersion: "2026.9.2" }))).toEqual(["installed_not_expected"]);
+    expect(inconsistent(noBin({ installedVersion: "2026.9.2", expectedVersion: "2026.9.2" }))).toEqual([]);
+    expect(inconsistent(noBin({}))).toEqual([]);
+    expect(inconsistent(noBin({ installedVersion: null, expectedVersion: "2026.9.2" }))).toEqual([]);
   });
 
-  it("describeReportVersions: precedence bin resolvedForLaunch → serverPhase.installedVersion → channelInfo; null-null when nothing is known", () => {
+  it("describeReportVersions: bin declaredPin/installedAtBoot win over the server phase; null-null when nothing is known", () => {
     expect(
       describeReportVersions({
-        openclaw: { expected: "b", resolvedForLaunch: "a", installedAtBoot: "z" },
-        serverPhase: { installedVersion: "c", channelInfo: { installedVersion: "d", expectedVersion: "e" } },
+        openclaw: { declaredPin: "b", installedAtBoot: "a" },
+        serverPhase: { installedVersion: "c", expectedVersion: "e" },
       }),
     ).toEqual({ expected: "b", running: "a", diverged: true });
     expect(
       describeReportVersions({
-        openclaw: { expected: null, resolvedForLaunch: null, installedAtBoot: "z" },
-        serverPhase: { installedVersion: "c", channelInfo: { installedVersion: "d", expectedVersion: "c" } },
+        openclaw: { declaredPin: null, installedAtBoot: null },
+        serverPhase: { installedVersion: "c", expectedVersion: "c" },
       }),
     ).toEqual({ expected: "c", running: "c", diverged: false });
-    expect(describeReportVersions({ openclaw: null, serverPhase: { channelInfo: { installedVersion: "d", expectedVersion: "e" } } })).toEqual({
-      expected: "e",
-      running: "d",
-      diverged: true,
+    expect(describeReportVersions({ openclaw: { declaredPin: "a", installedAtBoot: "b", installedDiverged: false } })).toEqual({
+      expected: "a",
+      running: "b",
+      diverged: false,
     });
-    expect(describeReportVersions({ openclaw: { installedAtBoot: "z" } })).toEqual({ expected: null, running: null, diverged: null });
+    expect(describeReportVersions({ openclaw: { installedAtBoot: "z" } })).toEqual({ expected: null, running: "z", diverged: null });
     expect(describeReportVersions(null)).toEqual({ expected: null, running: null, diverged: null });
   });
 
@@ -681,7 +619,7 @@ describe("boot-report: computeVerdict", () => {
           supportedSchema: kSupported,
           legacyExecApprovalsPresent: true,
         },
-        { installedAtBoot: "2026.7.1-2", resolvedForLaunch: "2026.7.1-2" },
+        { installedAtBoot: "2026.7.1-2" },
       ),
       pidfile: { decision: "skip", reason: "legacy_no_argv", evidence: { pid: 5, corroborated: false } },
     });
@@ -708,7 +646,7 @@ describe("boot-report: pinIncidentReport", () => {
   let clock;
   const writerFor = () => createBootReportWriter({ managedDir, bootId: kBootId, nowFn: () => clock, logger });
   const inconsistentReport = (verdict, installedAtBoot = "2026.7.1-2") => ({
-    ...binReport({ openclaw: { expected: "2026.9.2", installedAtBoot } }),
+    ...binReport({ openclaw: { declaredPin: "2026.9.2", installedAtBoot } }),
     serverPhase: { status: "recorded", verdict },
   });
 
@@ -819,7 +757,7 @@ describe("boot-report: readBootReports", () => {
     }
     const writer = createBootReportWriter({ managedDir, bootId: "3:3", nowFn: () => 5, logger });
     writer.pinIncidentReport({
-      ...binReport({ bootId: "3:3", openclaw: { expected: "a", installedAtBoot: "b" } }),
+      ...binReport({ bootId: "3:3", openclaw: { declaredPin: "a", installedAtBoot: "b" } }),
       serverPhase: { status: "recorded", verdict: ["installed_not_expected"] },
     });
     const reports = writer.readBootReports();
@@ -945,31 +883,9 @@ describe("boot-report: never throws into the boot", () => {
   });
 });
 
-describe("boot-report: bootSync.danglingRecords + readOwnReport (#76 A7 — the bin phase's closures reach the server phase)", () => {
+describe("boot-report: readOwnReport (the bin phase's facts reach the server phase)", () => {
   const mkManaged = () => path.join(mkTemp(), ".alphaclaw");
   const silentLogger = () => ({ log() {}, warn() {}, error() {} });
-
-  it("buildBinPhaseReport carries danglingRecords normalized: ids as strings, flag as boolean, garbage → null", () => {
-    const shaped = buildBinPhaseReport({
-      bootId: "1:1",
-      bootSync: {
-        action: "none",
-        danglingRecords: { closedRuns: ["run-a", 42, "", null, "run-b"], closedLastUpdateRun: "yes" },
-      },
-    });
-    expect(shaped.openclaw.bootSync.danglingRecords).toEqual({
-      closedRuns: ["run-a", "run-b"],
-      closedLastUpdateRun: false,
-    });
-    expect(buildBinPhaseReport({ bootSync: { action: "none" } }).openclaw.bootSync.danglingRecords).toBeNull();
-    expect(
-      buildBinPhaseReport({ bootSync: { action: "none", danglingRecords: "nope" } }).openclaw.bootSync.danglingRecords,
-    ).toBeNull();
-    expect(
-      buildBinPhaseReport({ bootSync: { action: "none", danglingRecords: { closedLastUpdateRun: true } } }).openclaw
-        .bootSync.danglingRecords,
-    ).toEqual({ closedRuns: [], closedLastUpdateRun: true });
-  });
 
   it("readOwnReport returns the report THIS boot wrote, and null for a missing, unreadable or foreign-boot file", () => {
     const managedDir = mkManaged();
@@ -978,13 +894,11 @@ describe("boot-report: bootSync.danglingRecords + readOwnReport (#76 A7 — the 
     writer.writeBinPhase(
       buildBinPhaseReport({
         bootId: "77:1",
-        bootSync: { action: "none", danglingRecords: { closedRuns: ["run-a"], closedLastUpdateRun: false } },
+        openclaw: { retiredChannel: { channel: "dev", version: null, sha: "abc123" } },
+        bootSync: { action: "none" },
       }),
     );
-    expect(writer.readOwnReport()?.openclaw?.bootSync?.danglingRecords).toEqual({
-      closedRuns: ["run-a"],
-      closedLastUpdateRun: false,
-    });
+    expect(writer.readOwnReport()?.openclaw?.retiredChannel).toEqual({ channel: "dev", version: null, sha: "abc123" });
     // Another boot's file is never returned as our own.
     const other = createBootReportWriter({ managedDir, bootId: "78:1", nowFn: () => 2000, logger: silentLogger() });
     expect(other.readOwnReport()).toBeNull();

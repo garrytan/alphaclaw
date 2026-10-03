@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-// Same DOM-less harness pattern as upgrade-tab.test.js: stub hooks + portal so the
+// DOM-less harness: stub hooks + portal so the
 // component renders to a walkable vnode tree.
 vi.mock("preact/hooks", () => ({
   useState: (v) => [typeof v === "function" ? v() : v, () => {}],

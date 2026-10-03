@@ -65,16 +65,6 @@ const createApp = (deps) => {
 };
 
 describe("server/routes/watchdog", () => {
-  it("keeps pending database recovery inspectable without letting force run Doctor", async () => {
-    const deps = createDeps();
-    deps.watchdog.triggerRepair.mockResolvedValue({ ok: false, skipped: true, reason: "database_recovery_pending" });
-    const res = await request(createApp(deps)).post("/api/watchdog/repair").send({ force: true });
-    expect(res.status).toBe(409);
-    expect(res.body).toMatchObject({ ok: false, code: "database_recovery_pending",
-      nextActions: ["diagnose", "verify_database_recovery"] });
-    expect(res.body.error).toContain("cannot run Doctor");
-  });
-
   it("returns watchdog status on GET /api/watchdog/status", async () => {
     const deps = createDeps();
     const app = createApp(deps);
@@ -134,39 +124,6 @@ describe("server/routes/watchdog", () => {
     expect(deps.readLogTail).toHaveBeenCalledWith(1024);
     expect(res.text).toBe("watchdog log line");
     expect(res.headers["content-type"]).toContain("text/plain");
-  });
-
-  it("maps a gateway_held repair refusal to 409 (fail-closed like the restart route)", async () => {
-    const deps = createDeps();
-    deps.watchdog.triggerRepair.mockResolvedValue({
-      ok: false,
-      skipped: true,
-      reason: "gateway_held",
-    });
-    const app = createApp(deps);
-
-    const res = await request(app).post("/api/watchdog/repair");
-
-    expect(res.status).toBe(409);
-    expect(res.body.ok).toBe(false);
-    expect(res.body.code).toBe("gateway_held");
-    expect(res.body.error).toContain("Upgrade page");
-    expect(res.body.result.reason).toBe("gateway_held");
-  });
-
-  it("maps a gateway_hold_unreadable repair refusal to 409 with the fail-closed hint", async () => {
-    const deps = createDeps();
-    deps.watchdog.triggerRepair.mockResolvedValue({
-      ok: false,
-      skipped: true,
-      reason: "gateway_hold_unreadable",
-    });
-    const app = createApp(deps);
-    const res = await request(app).post("/api/watchdog/repair");
-    expect(res.status).toBe(409);
-    expect(res.body.code).toBe("gateway_hold_unreadable");
-    expect(res.body.error).toContain("could not read the gateway hold state");
-    expect(res.body.hint).toContain("release-channel state file");
   });
 
   it("Stage 3: `force: true` in the body is the one-shot pause resume passed to triggerRepair; a body without it repairs normally; a non-boolean force is a 400", async () => {

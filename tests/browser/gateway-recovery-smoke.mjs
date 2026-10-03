@@ -7,7 +7,7 @@ import { build } from "esbuild";
 import { chromium } from "playwright";
 
 const require = createRequire(import.meta.url);
-const { reduceGatewayState, kGatewayStateCatalog, getGatewayRecoveryAction } = require("../../lib/server/gateway-state");
+const { reduceGatewayState, kGatewayStateCatalog, actionsForState } = require("../../lib/server/gateway-state");
 const artifacts = path.resolve(process.env.GATEWAY_BROWSER_ARTIFACTS || ".gstack/qa/gateway-recovery");
 fs.mkdirSync(artifacts, { recursive: true });
 for (const file of ["failure.png", "failure.txt", "checks.json", "requests.json", "contrast.json"]) fs.rmSync(path.join(artifacts, file), { force: true });
@@ -32,12 +32,11 @@ if (location.pathname !== '/controller') refresh();
 `;
 const bundle = await build({ bundle: true, write: false, format: "esm", stdin: { contents: entry, resolveDir: process.cwd() } });
 const css = ["theme.css", "tailwind.generated.css", "shell.css"].map((file) => fs.readFileSync(`lib/public/css/${file}`, "utf8")).join("\n");
-const base = () => ({ configExists: true, tcp: { running: false, observedAt: Date.now() }, watchdog: { lifecycle: "configuration_error", health: "unhealthy" }, gatewayHeld: { reason: "state_db_unverified", at: Date.parse("2026-09-26T10:00:00Z") }, recoveryConfirmation: "fixture-observation-token" });
+const base = () => ({ configExists: true, tcp: { running: false, observedAt: Date.now() }, watchdog: { lifecycle: "configuration_error", health: "unhealthy" } });
 let state = { hasStatus: true, connectivityMode: "online", statusState: reduceGatewayState(base()), restartOperation: null };
 let responseMode = "accepted";
 const requests = [];
 const checks = [];
-let evidenceMode = "blocked";
 let controllerMode = false;
 let activeOperation = null;
 let lastOperation = null;
@@ -49,7 +48,6 @@ const statusStreams = new Set();
 let fullApp = false;
 let onboarding = null;
 const onboardingResponses = [];
-const findings = [{ path: `agents/main/${"long-directory/".repeat(8)}state.sqlite`, code: "unknown_owner", problem: "Ownership is not verified", cause: "Unexpected owner metadata" }];
 const controllerStatus = () => ({ gateway: "running", snapshotEpoch: "controller-fixture", snapshotRevision: ++statusRevision, timestamp: Date.now(),
   state: reduceGatewayState({ configExists: true, tcp: { running: true, observedAt: Date.now() }, watchdog: { lifecycle: "running", health: "healthy" }, operation: activeOperation ? { kind: "restart", label: "Restarting gateway", operationId: activeOperation.operationId } : null }) });
 const server = http.createServer(async (req, res) => {
@@ -101,22 +99,20 @@ const server = http.createServer(async (req, res) => {
     const data = url.pathname === "/api/onboard/status" ? { onboarded: onboarding }
       : url.pathname === "/api/auth/status" ? { authEnabled: false }
         : url.pathname === "/api/auth/identity" ? { ok: true, identity: { role: "admin" } }
-          : url.pathname === "/api/status" ? { gateway: "stopped", state: reduceGatewayState({ ...base(), configExists: false, gatewayHeld: false }) }
+          : url.pathname === "/api/status" ? { gateway: "stopped", state: reduceGatewayState({ ...base(), configExists: false }) }
             : url.pathname === "/api/models" ? { models: [], providers: [] }
               : { ok: true };
     return res.end(JSON.stringify(data));
   }
   if (url.pathname === "/fixture/status") return res.end(JSON.stringify(state));
   if (url.pathname === "/api/diagnose") {
-    const rows = evidenceMode === "none" ? [] : evidenceMode === "many" ? Array.from({ length: 24 }, (_, i) => ({ ...findings[0], path: `agents/agent-${i}/same-basename.sqlite`, nextAction: getGatewayRecoveryAction("unknown_owner") }))
-      : evidenceMode === "partial" ? [{ path: "agents/unreadable", code: "recovery_inventory_unavailable", problem: "Discovery incomplete", cause: "Access could not be established", nextAction: getGatewayRecoveryAction("recovery_inventory_unavailable") }] : findings;
-    return res.end(JSON.stringify({ ok: true, bundle: { summary: { recovery: { observedAt: new Date().toISOString(), assessment: evidenceMode === "partial" ? "partial" : "complete", databaseVerdict: ["none", "partial"].includes(evidenceMode) ? "not_assessed" : "blocked", gatewayReadiness: "not_ready" } }, sections: { stateDb: { data: { findings: rows, excludedArtifacts: evidenceMode === "blocked" ? [{ path: "agents/main/generation-lock.sqlite", reason: "verified_transient_contract" }] : [] } } } } }));
+    return res.end(JSON.stringify({ ok: true, bundle: { summary: {}, sections: { stateDb: { data: { stateDir: "/data/.openclaw", entries: [] } } } } }));
   }
   if (req.method === "POST") {
     if (responseMode === "lost") { res.writeHead(202); res.flushHeaders(); res.write('{"ok":'); return res.destroy(); }
-    if (responseMode === "refused") { res.statusCode = 409; return res.end(JSON.stringify({ ok: false, code: "gateway_held", error: "Database hold changed; inspect current evidence" })); }
+    if (responseMode === "refused") { res.statusCode = 409; return res.end(JSON.stringify({ ok: false, code: "operation_in_progress", error: "Another operation changed the gateway; inspect current status" })); }
     if (responseMode === "skipped") return res.end(JSON.stringify({ ok: false, skipped: true, reason: "Another operation is in progress" }));
-    if (responseMode === "repair_after_doctor") { res.statusCode = 409; return res.end(JSON.stringify({ ok: false, code: "gateway_held", message: "Doctor completed but relaunch was refused", result: { skipped: true } })); }
+    if (responseMode === "repair_after_doctor") { res.statusCode = 409; return res.end(JSON.stringify({ ok: false, code: "relaunch_refused", message: "Doctor completed but relaunch was refused", result: { skipped: true } })); }
     return res.end(JSON.stringify({ ok: true, operationId: "restart-fixture-1" }));
   }
   res.statusCode = 404; res.end(JSON.stringify({ ok: false }));
@@ -128,16 +124,6 @@ const page = await context.newPage();
 const errors = [];
 const contrasts = [];
 let checkRetainedFocus = null;
-const runbook = fs.readFileSync("docs/upgrade-troubleshooting.md", "utf8");
-const headings = [...runbook.matchAll(/^#{1,6} (.+)$/gm)];
-const escapeHtml = (text) => text.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
-const helpHtml = headings.map((heading, index) => {
-  const anchor = heading[1].toLowerCase().replace(/[^\p{L}\p{N}\s_-]/gu, "").replace(/\s/g, "-");
-  return `<section id="${anchor}"><h1>${escapeHtml(heading[1])}</h1><pre>${escapeHtml(runbook.slice(heading.index + heading[0].length, headings[index + 1]?.index))}</pre></section>`;
-}).join("\n");
-let helpUnavailable = false;
-await page.context().route("https://github.com/garrytan/alphaclaw/blob/main/docs/upgrade-troubleshooting.md**", (route) => helpUnavailable
-  ? route.abort("internetdisconnected") : route.fulfill({ contentType: "text/html", body: `<!doctype html><html><body>${helpHtml}</body></html>` }));
 page.on("pageerror", (error) => errors.push(error.message));
 const posts = () => requests.filter((request) => request.method === "POST");
 const refresh = () => page.evaluate(() => window.refreshFixture());
@@ -145,14 +131,12 @@ const button = (name) => page.getByRole("button", { name, exact: true });
 const open = async (name) => { await button(name).click(); await page.getByRole("heading", { name: `${name} options` }).waitFor(); };
 try {
   await page.goto(`http://127.0.0.1:${server.address().port}`);
-  await page.getByText(/Gateway held for database verification/).waitFor();
+  await page.getByText("Configuration error", { exact: true }).first().waitFor();
   await open("Repair");
-  assert.equal((await page.locator("body").innerText()).includes(String(base().gatewayHeld.at)), false);
   assert.equal(posts().length, 0);
   await button("Check again").click();
-  await page.getByRole("heading", { name: "Current assessment" }).waitFor();
+  await page.getByText(/Check again only observes; it does not start the gateway/).waitFor();
   assert.equal(posts().length, 0);
-  await page.getByText("Database findings (1)", { exact: true }).click();
   for (const theme of ["dark", "light"]) {
     await page.evaluate((value) => document.documentElement.dataset.theme = value, theme);
     const contrast = await page.evaluate(() => {
@@ -175,40 +159,20 @@ try {
         assert(bounds.height >= 44 && bounds.width >= 44 && bounds.x >= 0 && bounds.x + bounds.width <= width);
       }
       assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), `${theme}/${width} overflow`);
-      await page.screenshot({ path: path.join(artifacts, `held-${theme}-${width}.png`), fullPage: true });
+      await page.screenshot({ path: path.join(artifacts, `config-error-${theme}-${width}.png`), fullPage: true });
     }
     await page.setViewportSize({ width: 768, height: 900 });
     await page.evaluate(() => { document.documentElement.style.zoom = "2"; });
     assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), `${theme}/200% zoom overflow`);
-    await page.screenshot({ path: path.join(artifacts, `held-${theme}-zoom200.png`), fullPage: true });
+    await page.screenshot({ path: path.join(artifacts, `config-error-${theme}-zoom200.png`), fullPage: true });
     await page.evaluate(() => { document.documentElement.style.zoom = ""; });
   }
   checks.push("8 theme/viewport cells and 2 CSS-zoom cells; reduced motion, target sizes and contrast");
-  for (const mode of ["many", "none", "partial"]) {
-    evidenceMode = mode;
-    await button("Check again").click();
-    await button("Check again").waitFor();
-    if (mode === "many") {
-      const summary = page.getByText("Database findings (24)", { exact: true });
-      await summary.waitFor();
-      if (!await summary.evaluate((node) => node.parentElement.open)) await summary.click();
-      await page.getByText("agents/agent-0/same-basename.sqlite", { exact: true }).waitFor();
-      await page.getByText("agents/agent-23/same-basename.sqlite", { exact: true }).waitFor();
-    } else {
-      await page.getByText(mode === "partial" ? /partial; databases not_assessed/ : /complete; databases not_assessed/).waitFor();
-      if (mode === "none") assert.equal(await page.locator("summary").filter({ hasText: "Database findings" }).count(), 0);
-    }
-    await page.setViewportSize({ width: 390, height: 900 });
-    assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), `${mode} evidence overflow`);
-    await page.screenshot({ path: path.join(artifacts, `evidence-${mode}-390.png`), fullPage: true });
-  }
-  evidenceMode = "blocked";
   await button("Check again").click();
   await button("Check again").waitFor();
-  await page.getByText("Database findings (1)", { exact: true }).waitFor();
   checkRetainedFocus = await button("Check again").evaluate((node) => document.activeElement === node);
   assert.equal(checkRetainedFocus, true, "Check again retains keyboard focus throughout observation");
-  checks.push("24 same-basename findings, no findings, and partial evidence render without overflow or mutations");
+  checks.push("Check again observes current status without mutations");
   await page.keyboard.press("Escape");
   assert.equal(await button("Repair").evaluate((node) => document.activeElement === node), true);
   await page.keyboard.press("Tab"); await page.keyboard.press("Enter");
@@ -219,63 +183,30 @@ try {
   await page.keyboard.press("Space");
   await page.waitForFunction(() => document.activeElement?.textContent === "Repair options");
   checks.push("Check again retains focus; Tab, Shift-Tab, Enter, Space and Escape activate and return focus");
-  await button("Open Upgrade / protection").click();
-  assert.equal(new URL(page.url()).hash, "#/upgrade");
+  await button("Open human recovery tools").click();
+  assert.equal(new URL(page.url()).hash, "#/watchdog");
   await button("Close options").click();
-  const helpReasons = ["state_db_unverified", "database_recovery_pending", "no_installation_evidence", "EACCES", "gateway_hold_unreadable", "unknown_owner", "SQLITE_CORRUPT", "unsupported_transient_artifact_contract", "database_schema_newer_than_target", "recovery_choice_required", "configuration_error", "operation_in_progress", "auto_repair_paused"];
-  for (const reason of helpReasons) {
-    const nextAction = getGatewayRecoveryAction(reason);
-    state.statusState = reduceGatewayState(base());
-    for (const action of state.statusState.actions.filter((action) => ["repair", "restart"].includes(action.id))) {
-      action.nextAction = nextAction; action.reason = nextAction.description;
-    }
-    await refresh(); await open("Repair");
-    const popupPromise = page.waitForEvent("popup");
-    await page.getByRole("link", { name: "Recovery instructions", exact: true }).click();
-    const popup = await popupPromise;
-    await popup.waitForLoadState("domcontentloaded");
-    const anchor = nextAction.helpRef.split("#")[1];
-    assert.equal(new URL(popup.url()).hash, `#${anchor}`);
-    await popup.locator(`section[id="${anchor}"]`).waitFor();
-    assert((await popup.locator(`section[id="${anchor}"]`).innerText()).length > 100);
-    await popup.close();
-    await button("Open Upgrade / protection").click();
-    assert.equal(new URL(page.url()).hash, "#/upgrade");
-    await button("Open human recovery tools").click();
-    assert.equal(new URL(page.url()).hash, "#/watchdog");
-    await button("Close options").click();
-  }
-  helpUnavailable = true;
-  await open("Repair");
-  const unavailablePopup = page.waitForEvent("popup");
-  await page.getByRole("link", { name: "Recovery instructions", exact: true }).click();
-  const unavailable = await unavailablePopup;
-  await unavailable.waitForLoadState("domcontentloaded").catch(() => {});
-  assert((await page.locator(".ac-recovery-options").innerText()).includes(getGatewayRecoveryAction("auto_repair_paused").description));
-  await unavailable.close(); await button("Close options").click(); helpUnavailable = false;
-  checks.push(`${helpReasons.length} hold/help mappings open matching repository runbook anchors; Upgrade/human-tool hashes and offline inline guidance remain available`);
+  checks.push("human recovery tools navigate to the Watchdog tab");
   for (const mode of ["stale", "operation", "legacy"]) {
     state.statusState = mode === "legacy" ? null : reduceGatewayState(base());
     state.statusFreshness = mode === "stale" ? { mode: "stale", observedAtMs: Date.now() - 60_000 } : null;
-    state.restartOperation = mode === "operation" ? { operationId: "existing-1", phase: "running", startedAt: Date.now(), steps: [{ name: "verify", label: "Verifying databases", status: "running" }] } : null;
+    state.restartOperation = mode === "operation" ? { operationId: "existing-1", phase: "running", startedAt: Date.now(), steps: [{ name: "stopping", label: "Stopping gateway", status: "running" }] } : null;
     const before = posts().length;
     await refresh();
     for (const control of ["Repair", "Restart"]) {
       await open(control);
-      assert.equal(await button("Verify and start").count(), 0);
       await button("Close options").click();
     }
     assert.equal(posts().length, before);
   }
   state.statusFreshness = null; state.restartOperation = null;
   for (const name of Object.keys(kGatewayStateCatalog)) {
-    state.statusState = { ...reduceGatewayState({ ...base(), gatewayHeld: false }), state: name, ...kGatewayStateCatalog[name] };
-    const { actionsForState } = require("../../lib/server/gateway-state");
+    state.statusState = { ...reduceGatewayState(base()), state: name, ...kGatewayStateCatalog[name] };
     state.statusState.actions = actionsForState(name, {});
     await refresh();
     for (const control of ["Repair", "Restart"]) { await open(control); await button("Close options").click(); }
   }
-  state.statusState = reduceGatewayState({ ...base(), gatewayHeld: false, watchdog: { lifecycle: "stopped" } });
+  state.statusState = reduceGatewayState({ ...base(), watchdog: { lifecycle: "stopped" } });
   await refresh(); await open("Restart");
   await button("Start gateway").click();
   state.statusState = reduceGatewayState(base()); await refresh();
@@ -284,7 +215,7 @@ try {
   for (const mode of ["refused", "skipped", "lost", "accepted"]) {
     responseMode = mode;
     await page.reload(); await button("Restart").waitFor();
-    state.statusState = reduceGatewayState({ ...base(), gatewayHeld: false, watchdog: { lifecycle: "stopped" } });
+    state.statusState = reduceGatewayState({ ...base(), watchdog: { lifecycle: "stopped" } });
     await refresh(); await open("Restart"); await button("Start gateway").click();
     const before = posts().length;
     await button("Confirm start gateway").dblclick();
@@ -308,22 +239,6 @@ try {
   await open("Repair"); await page.getByText(/Status is not current/).waitFor();
   state.hasStatus = true; state.statusState = reduceGatewayState(base()); await refresh();
   await page.getByRole("heading", { name: "Repair options" }).waitFor();
-  state.statusState = reduceGatewayState({ ...base(), gatewayHeld: null, databaseRecoveryPending: { recoveryId: "prior-recovery", baseline: { identity: "original-databases" } } });
-  await refresh(); await open("Restart");
-  await page.getByText(/original databases still require fresh verification/).waitFor();
-  await button("Verify and start").click();
-  const beforeTokenChange = posts().length;
-  for (const action of state.statusState.actions) {
-    if (["repair", "restart"].includes(action.id)) action.recoveryConfirmation = "new-observation-token";
-  }
-  await refresh();
-  await page.getByRole("alert").filter({ hasText: "Status changed" }).waitFor();
-  assert.equal(posts().length, beforeTokenChange);
-  await button("Verify and start").click();
-  await button("Confirm verify and start").click();
-  await page.getByText(/Request accepted/).waitFor();
-  assert.equal(posts().at(-1).body.verifyDatabaseRecovery, true);
-  assert.equal(posts().at(-1).body.recoveryConfirmation, "new-observation-token");
   controllerMode = true;
   const beforeTwoTabs = posts().length;
   const secondTab = await page.context().newPage();
@@ -384,7 +299,7 @@ try {
   assert.equal(errors.length, 0, errors.join("\n"));
   fs.writeFileSync(path.join(artifacts, "requests.json"), JSON.stringify(requests, null, 2));
   fs.writeFileSync(path.join(artifacts, "contrast.json"), JSON.stringify(contrasts, null, 2));
-  fs.writeFileSync(path.join(artifacts, "checks.json"), JSON.stringify({ checks, postCount: posts().length, sharedOperationLaunchCount: launchCount, checkRetainedFocus, limitations: ["HTTP admission/operation state is deterministic fixture data, not real gateway processes", "Runbook popups serve repository content through a browser route adapter, not live GitHub", "Upgrade/protection navigation is verified; target-bound consent submission is not exercised", "No novice, screen-reader, loaded-font or browser/text-only zoom claim"] }, null, 2));
+  fs.writeFileSync(path.join(artifacts, "checks.json"), JSON.stringify({ checks, postCount: posts().length, sharedOperationLaunchCount: launchCount, checkRetainedFocus, limitations: ["HTTP admission/operation state is deterministic fixture data, not real gateway processes", "No novice, screen-reader, loaded-font or browser/text-only zoom claim"] }, null, 2));
   console.log(`PASS: recovery clicks, ${posts().length} deliberate POSTs, both themes and four widths; ${artifacts}`);
 } catch (error) {
   fs.writeFileSync(path.join(artifacts, "failure.txt"), await page.locator("body").innerText());

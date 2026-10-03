@@ -36,55 +36,6 @@ const countPost = (endpoint) => fixture.requests.filter((r) => r.method === "POS
 const mark = (name) => { checks.push(name); console.log(`PASS: ${name}`); };
 let failure = null;
 try {
-  // Start a real streamed apply from the shipped dialog, then choose the
-  // shipped repair action. The repair stream closes without a terminal event.
-  await page.goto(`${fixture.url}/upgrade`);
-  await page.getByRole("button", { name: "Upgrade", exact: true }).first().click();
-  for (const width of [1280, 390]) {
-    await page.setViewportSize({ width, height: 720 });
-    const box = await page.locator(".bg-modal").last().boundingBox();
-    assert.ok(box && box.y >= 0 && box.y + box.height <= 720, `long consent dialog must stay within ${width}x720 viewport`);
-    await page.getByRole("button", { name: "Apply", exact: true }).scrollIntoViewIfNeeded();
-    assert.equal(await page.getByRole("button", { name: "Apply", exact: true }).isVisible(), true);
-  }
-  await shot("upgrade-long-consent-mobile");
-  mark("long consent dialog remains scrollable with reachable controls on desktop and mobile");
-  await page.setViewportSize({ width: 1280, height: 960 });
-  await page.getByRole("button", { name: "Apply", exact: true }).click();
-  await page.getByRole("button", { name: "Continue", exact: true }).click();
-  await hasText("Fixture build failed");
-  await page.getByRole("button", { name: "Run repair", exact: true }).click();
-  await hasText("Repairing the dev build");
-  await page.waitForResponse((response) => response.url().endsWith("/api/openclaw/runs/repair-current"));
-  const repair = fixture.state.runs.find((run) => run.operationId === "repair-current");
-  assert.ok(repair);
-  assert.equal(countPost("/api/openclaw/repair"), 1);
-  await shot("repair-lost-sse");
-  mark("lost repair SSE follows the exact repair ledger ID");
-
-  // Newer history and the former apply's success cannot complete this repair.
-  fixture.state.lastUpdateRun = { ...fixture.state.lastUpdateRun, ok: true, state: "activated" };
-  fixture.state.runs.unshift({ operationId: "newer-unrelated-failure", target: { channel: "stable", version: "2026.9.4" }, state: "failed", ok: false, finishedAt: Date.now(), startedAt: Date.now(), result: { message: "Unrelated historical failure" } });
-  await page.reload();
-  await hasText("Repairing the dev build");
-  assert.equal(await page.getByRole("heading", { name: "Repair completed", exact: true }).count(), 0);
-  const statusCallsBefore = fixture.requests.filter((r) => r.path === "/api/status").length;
-  Object.assign(repair, { state: "completed", ok: true, finishedAt: Date.now(), result: { ok: true }, steps: [{ name: "repair", status: "completed", at: Date.now() }] });
-  await page.getByRole("heading", { name: "Repair completed", exact: true }).waitFor();
-  assert.equal(fixture.requests.filter((r) => r.path === "/api/status").length, statusCallsBefore, "repair must finish without probing an AlphaClaw restart");
-  await shot("repair-completed-after-reload");
-  mark("reload recovers repair and completes in place despite unrelated apply outcomes");
-
-  fixture.state.catalogError = true;
-  await page.getByRole("button", { name: "Check now", exact: true }).click();
-  await hasText("Could not refresh the catalog");
-  await page.getByText("2026.9.4", { exact: true }).first().waitFor();
-  await shot("catalog-stale-error");
-  fixture.state.catalogError = false;
-  await page.getByRole("button", { name: "Check now", exact: true }).click();
-  await page.getByText("Could not refresh the catalog", { exact: false }).waitFor({ state: "hidden" });
-  mark("failed catalog GET retains rows and Check now recovers");
-
   await page.goto(`${fixture.url}/managed`);
   await page.getByRole("button", { name: "Update now", exact: true }).click();
   await hasText("Deployment request pending");
@@ -173,7 +124,7 @@ try {
   }
   await shot("gmail-mobile-recovered");
   assert.deepEqual(pageErrors, []);
-  const expectedFailures = new Set(["/api/openclaw/catalog", "/api/gmail/config", "/api/gmail/watch/stop"]);
+  const expectedFailures = new Set(["/api/gmail/config", "/api/gmail/watch/stop"]);
   assert.deepEqual(failures.filter((entry) => entry.status !== 503 || !expectedFailures.has(new URL(entry.url).pathname)), [], "unexpected failed browser requests");
   assert.deepEqual(consoleEvents.filter((entry) => entry.type === "error" && !entry.text.includes("503 (Service Unavailable)")), [], "unexpected browser console errors");
 } catch (error) {

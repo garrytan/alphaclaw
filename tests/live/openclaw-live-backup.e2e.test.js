@@ -1,157 +1,112 @@
-// LIVE TIER — the REAL pinned OpenClaw CLI's `backup create --output` contract
-// and runBackup (lib/server/openclaw-channel-sync.js) driving that real CLI
-// under live file churn. Closes the TODOS.md:198-203 debt: every hermetic
-// backup stub encoded an unvalidated assumption about the CLI's --output
-// contract; this tier records what the current pinned binary actually does. Offline by design: no registry, no GitHub — the pinned
-// package in node_modules is the entire upstream surface.
+// LIVE TIER — "Back up now" (lib/server/openclaw-runtime.js startBackup /
+// getBackupStatus) driving the REAL pinned OpenClaw CLI. AlphaClaw no longer
+// owns a backup ladder: the button runs upstream's own
+//   openclaw backup create --output <backupsDir> --verify --json
+// and trusts its JSON report ({ archivePath, verified: true, ... }). The
+// hermetic route/runtime suites stub that report; this tier records what the
+// pinned binary actually prints. Offline by design: no registry, no GitHub —
+// the pinned package in node_modules is the entire upstream surface.
 //
-// Contract first observed on 2026.7.1-2, revalidated on the 2026.9.2 pin:
-//   exact nonexistent path → exit 0, archive at EXACTLY that path, stdout:
-//     "Created /tmp/.../exact-name.tar.gz"
-//     "Archive verification: passed"
-//     "Backup skipped 1 volatile file (live sessions, cron logs, queues, sockets, pid/tmp)."
-//       (agents/<id>/sessions/*.jsonl are volatile-skipped WITHOUT lstat, but
-//        *.jsonl.lock — extname ".lock" — and plugin catalog.json are walked
-//        and lstat'd: exactly issues #11/#18's race surface)
-//   same path again → exit 1, stderr:
-//     "Error: Refusing to overwrite existing backup archive: /tmp/.../exact-name.tar.gz"
-//   existing dir (trailing slash) → exit 0, timestamped archive INSIDE it:
-//     "Backup archive: /tmp/.../outdir/2026-08-29T18-13-52.011+00-00-openclaw-backup.tar.gz"
-//
-// Runtime note: the runtime-gate preload this file once injected (faking the
-// Node/SQLite version labels on a Node 24.14.1 box) is gone — the tier runs
-// on Node 22.23.2 / SQLite 3.51.3, which both upstream gates accept. The
-// harness lives in live-backup-harness.js and is shared with the #54
-// contention tier, which runs the same shape against the real beta.
+// Contract observed on the 2026.9.8 pin (2026-10-03): an existing --output
+// directory gets ONE timestamped archive inside it
+// ("<iso>-openclaw-backup.tar.gz"), stdout is exactly one JSON document with
+// `archivePath` naming that file and `verified: true`.
 
 // Isolate module-level kRootDir BEFORE any lib/ module loads constants
-// (constants captures kRootDir at load — same pattern as the live-apply tier).
+// (constants captures kRootDir at load).
 const fs = require("fs");
 const path = require("path");
 const liveHelpers = require("./live-helpers");
-process.env.ALPHACLAW_ROOT_DIR = liveHelpers.mkTemp(
-  "alphaclaw-live-backup-root-",
-);
+process.env.ALPHACLAW_ROOT_DIR = liveHelpers.mkTemp("alphaclaw-live-backup-root-");
 delete process.env.OPENCLAW_GIT_DIR;
 
-const crypto = require("crypto");
 const { execFile } = require("child_process");
-const {
-  kHardGateTarget,
-  buildCliEnv,
-  writeStateFixture,
-  createQuiesceFake,
-  createLiveBackupHarness,
-  readRunBackupRecord,
-} = require("./live-backup-harness");
-const { kLiveEnabled, mkTemp, repoOpenclawBin } = liveHelpers;
+const { kLiveEnabled, kSilentLogger, mkTemp, repoOpenclawBin, scrubTestRunnerEnv, waitFor } = liveHelpers;
+const { materializeDatabases } = require("./database-fixture");
+const { createOpenclawRuntime } = require("../../lib/server/openclaw-runtime");
 const { telemetryDirectory } = require("../../lib/server/gateway-memory/telemetry-protocol");
 
 const describeLive = kLiveEnabled ? describe : describe.skip;
 
-const kContractTestTimeoutMs = 120_000;
-// A real tar over ~2k files is seconds, but the CLI retries internal tar EOF
-// races with 10s/20s backoffs and the ladder allows 3 attempts — headroom.
-const kChurnTestTimeoutMs = 300_000;
+const kRepoRoot = path.resolve(__dirname, "../..");
+const kTestTimeoutMs = 180_000;
 const kExecMaxBuffer = 16 * 1024 * 1024;
 
-const execCli = (args, env, timeoutMs = 90_000) =>
-  new Promise((resolve) => {
-    execFile(
-      process.execPath,
-      [repoOpenclawBin(), ...args],
-      { env, timeout: timeoutMs, maxBuffer: kExecMaxBuffer, encoding: "utf8" },
-      (error, stdout, stderr) => {
-        resolve({
-          code: error ? (typeof error.code === "number" ? error.code : 1) : 0,
-          stdout: String(stdout || ""),
-          stderr: String(stderr || ""),
-          output: `${stdout || ""}${stderr || ""}`,
-        });
-      },
-    );
+// Env for real-CLI invocations, mirroring lib/server/gateway.js gatewayEnv's
+// shape (HOME/OPENCLAW_HOME at the data root, state dir + config pinned,
+// XDG_CONFIG_HOME, no auto-update) against an isolated fixture root.
+const buildCliEnv = ({ homeDir, stateDir }) => ({
+  ...scrubTestRunnerEnv(),
+  HOME: homeDir,
+  OPENCLAW_HOME: homeDir,
+  OPENCLAW_STATE_DIR: stateDir,
+  OPENCLAW_CONFIG_PATH: path.join(stateDir, "openclaw.json"),
+  XDG_CONFIG_HOME: stateDir,
+  OPENCLAW_NO_AUTO_UPDATE: "1",
+});
+
+// A box shaped like production: real state + agent databases authored by the
+// pinned CLI, the backups dir a SIBLING of the state dir (<root>/backups/openclaw
+// beside <root>/.openclaw), and the runtime wired the way lib/server.js wires it.
+const createBox = () => {
+  const homeDir = mkTemp("openclaw-live-backup-home-");
+  const stateDir = path.join(homeDir, ".openclaw");
+  fs.mkdirSync(stateDir, { recursive: true });
+  fs.writeFileSync(path.join(stateDir, "openclaw.json"), "{}\n");
+  const cliEnv = buildCliEnv({ homeDir, stateDir });
+  const pin = JSON.parse(fs.readFileSync(path.join(kRepoRoot, "package.json"), "utf8")).dependencies.openclaw;
+  const databases = materializeDatabases({ openclawBin: repoOpenclawBin(), cliEnv, stateDir, version: pin });
+  const backupsDir = path.join(homeDir, "backups", "openclaw");
+  const runtime = createOpenclawRuntime({
+    openclawDir: stateDir,
+    packageRoot: kRepoRoot,
+    backupsDir,
+    resolveInstallDir: () => kRepoRoot,
+    openclawSpawnEnv: () => cliEnv,
+    logger: kSilentLogger,
+  });
+  return { stateDir, backupsDir, databases, runtime };
+};
+
+const listArchive = (archivePath) =>
+  new Promise((resolve, reject) => {
+    execFile("tar", ["-tzf", archivePath], { encoding: "utf8", maxBuffer: kExecMaxBuffer },
+      (error, stdout) => (error ? reject(error) : resolve(stdout)));
   });
 
-// ---------------------------------------------------------------------------
-// Suite 1 — the real CLI's --output contract (the assumption every hermetic
-// backup stub encoded, now validated against the pinned binary).
-// ---------------------------------------------------------------------------
+const waitForBackupFinished = async (runtime) => {
+  await waitFor(async () => runtime.getBackupStatus().running === false, kTestTimeoutMs - 30_000, "openclaw backup create finished");
+  return runtime.getBackupStatus().last;
+};
 
-describeLive("LIVE openclaw backup create --output contract (real pinned CLI)", () => {
-  let cliEnv;
-  let scratchDir;
+describeLive("LIVE Back up now against the real pinned OpenClaw CLI", () => {
+  it("writes one verified archive into the backups dir and reports its path and size", { timeout: kTestTimeoutMs }, async () => {
+    const { stateDir, backupsDir, databases, runtime } = createBox();
+    expect(runtime.getBackupStatus()).toEqual({ running: false, last: null });
 
-  beforeAll(() => {
-    const homeDir = mkTemp("openclaw-live-backup-contract-home-");
-    const { stateDir } = writeStateFixture(homeDir);
-    cliEnv = buildCliEnv({ homeDir, stateDir });
-    scratchDir = mkTemp("openclaw-live-backup-contract-out-");
-  }, kContractTestTimeoutMs);
+    expect(runtime.startBackup()).toEqual({ ok: true, started: true });
+    // One at a time: the route answers 409 backup_in_progress from this.
+    expect(runtime.startBackup()).toMatchObject({ ok: false, code: "backup_in_progress" });
+    expect(runtime.getBackupStatus().running).toBe(true);
 
-  it(
-    "Case A: a nonexistent --output path IS the archive file (exit 0, verified, non-empty)",
-    { timeout: kContractTestTimeoutMs },
-    async () => {
-      // Unique per invocation so the config-level `retry: 1` can never trip
-      // over this test's own prior artifact.
-      const outputFile = path.join(
-        scratchDir,
-        `exact-${crypto.randomUUID().slice(0, 8)}.tar.gz`,
-      );
-      const result = await execCli(
-        ["backup", "create", "--output", outputFile, "--verify"],
-        cliEnv,
-      );
-      expect(result.code, result.output).toBe(0);
-      const st = fs.statSync(outputFile);
-      expect(st.isFile()).toBe(true);
-      expect(st.size).toBeGreaterThan(0);
-      // Observed: "Created <path>" then "Archive verification: passed".
-      expect(result.output).toContain(`Created ${outputFile}`);
-      expect(result.output).toMatch(/Archive verification: passed/);
-      // Nothing else appeared next to the archive (no dir-of-archives surprise).
-      const siblings = fs
-        .readdirSync(scratchDir)
-        .filter((name) => name.startsWith(path.basename(outputFile)));
-      expect(siblings).toEqual([path.basename(outputFile)]);
-    },
-  );
+    const last = await waitForBackupFinished(runtime);
+    expect(last, JSON.stringify(last)).toMatchObject({ ok: true, error: null });
+    expect(last.finishedAt).toBeGreaterThanOrEqual(last.startedAt);
+    expect(path.dirname(last.archivePath)).toBe(backupsDir);
+    expect(path.basename(last.archivePath)).toMatch(/^\d{4}-\d{2}-\d{2}T.+-openclaw-backup\.tar\.gz$/);
+    expect(fs.readdirSync(backupsDir)).toEqual([path.basename(last.archivePath)]);
+    expect(last.bytes).toBe(fs.statSync(last.archivePath).size);
+    expect(last.bytes).toBeGreaterThan(0);
 
-  it(
-    "Case B: reusing an existing --output path is refused with a nonzero exit",
-    { timeout: kContractTestTimeoutMs },
-    async () => {
-      // Self-contained collision: create this invocation's own archive first.
-      const outputFile = path.join(
-        scratchDir,
-        `collide-${crypto.randomUUID().slice(0, 8)}.tar.gz`,
-      );
-      const first = await execCli(
-        ["backup", "create", "--output", outputFile, "--verify"],
-        cliEnv,
-      );
-      expect(first.code, first.output).toBe(0);
-      const sizeBefore = fs.statSync(outputFile).size;
+    const entries = await listArchive(last.archivePath);
+    expect(entries).toContain(`${stateDir}/openclaw.json`.replace(/^\//, ""));
+    for (const file of Object.values(databases)) expect(entries).toContain(file.replace(/^\//, ""));
+  });
 
-      const second = await execCli(
-        ["backup", "create", "--output", outputFile, "--verify"],
-        cliEnv,
-      );
-      expect(second.code).not.toBe(0);
-      // Observed verbatim: "Error: Refusing to overwrite existing backup
-      // archive: <path>" — the exact text classifyBackupFailure keys on.
-      expect(second.output).toMatch(/refus\w*\s+to\s+overwrite/i);
-      expect(second.output).toContain(outputFile);
-      // The refusal left the existing archive untouched.
-      expect(fs.statSync(outputFile).size).toBe(sizeBefore);
-    },
-  );
-
-  it("archives successfully while telemetry publishes and its producer processes exit", {
-    timeout: kContractTestTimeoutMs,
+  it("archives successfully while AlphaClaw's telemetry publishes and its producer processes exit", {
+    timeout: kTestTimeoutMs,
   }, async () => {
-    const stateDir = cliEnv.OPENCLAW_STATE_DIR;
-    const outputFile = path.join(scratchDir, `telemetry-${crypto.randomUUID().slice(0, 8)}.tar.gz`);
+    const { stateDir, runtime } = createBox();
     let running = true;
     let ready;
     const firstPublication = new Promise((resolve) => { ready = resolve; });
@@ -162,7 +117,7 @@ describeLive("LIVE openclaw backup create --output contract (real pinned CLI)", 
         const output = await new Promise((resolve, reject) => {
           const child = execFile(process.execPath, [
             path.join(__dirname, "gateway-telemetry-fixture.js"), stateDir,
-          ], { env: liveHelpers.scrubTestRunnerEnv(), timeout: 5_000, encoding: "utf8" },
+          ], { env: scrubTestRunnerEnv(), timeout: 5_000, encoding: "utf8" },
           (error, stdout, stderr) => {
             if (error) reject(new Error(`telemetry fixture failed: ${error.message}\n${stderr}`));
             else resolve(stdout);
@@ -174,218 +129,24 @@ describeLive("LIVE openclaw backup create --output contract (real pinned CLI)", 
       } while (running);
     })();
     // If a publisher fails before ready, fail promptly instead of waiting for
-    // the test timeout. Keep the rejection observed during the CLI await too.
+    // the test timeout. Keep the rejection observed during the backup too.
     const failedChurn = churn.then(() => {}, (error) => { throw error; });
     failedChurn.catch(() => {});
-    let result;
+    let last;
     try {
       await Promise.race([firstPublication, failedChurn]);
-      result = await execCli(["backup", "create", "--output", outputFile, "--verify"], cliEnv);
+      expect(runtime.startBackup()).toEqual({ ok: true, started: true });
+      last = await waitForBackupFinished(runtime);
     } finally {
       running = false;
       await churn;
     }
-    expect(result.code, result.output).toBe(0);
-    expect(result.output).toMatch(/Archive verification: passed/);
+    expect(last, JSON.stringify(last)).toMatchObject({ ok: true, error: null });
     expect(producers).toBeGreaterThan(0);
     expect(sampleCount).toBeGreaterThan(1);
     expect(fs.readdirSync(telemetryDirectory(stateDir))).toEqual([]);
-    const entries = await new Promise((resolve, reject) => {
-      execFile("tar", ["-tzf", outputFile], { encoding: "utf8", maxBuffer: kExecMaxBuffer },
-        (error, stdout) => error ? reject(error) : resolve(stdout));
-    });
+    const entries = await listArchive(last.archivePath);
     expect(entries).toContain("openclaw.json");
     expect(entries).not.toMatch(/gateway-memory|\/tmp\/alphaclaw\//);
   });
-
-  it(
-    "Case C: an existing-directory --output gets a timestamped archive INSIDE it",
-    { timeout: kContractTestTimeoutMs },
-    async () => {
-      const outDir = mkTemp("openclaw-live-backup-contract-dir-");
-      const result = await execCli(
-        // Trailing separator: the CLI treats it as a directory target either
-        // way (it also stat-probes bare existing dirs), but the slash form is
-        // the unambiguous one.
-        ["backup", "create", "--output", `${outDir}${path.sep}`, "--verify"],
-        cliEnv,
-      );
-      expect(result.code, result.output).toBe(0);
-      const entries = fs.readdirSync(outDir);
-      expect(entries).toHaveLength(1);
-      // Observed basename shape: "2026-08-29T18-13-52.011+00-00-openclaw-backup.tar.gz".
-      expect(entries[0]).toMatch(/^\d{4}-\d{2}-\d{2}T.+-openclaw-backup\.tar\.gz$/);
-      // ... which stays inside the repo's retention pattern
-      // (kBackupArchivePattern in openclaw-channel-sync.js): keep-N pruning
-      // would still own an archive the CLI named itself.
-      expect(entries[0]).toMatch(/openclaw-backup.*\.tar\.gz$/);
-      expect(fs.statSync(path.join(outDir, entries[0])).size).toBeGreaterThan(0);
-      expect(result.output).toMatch(/Archive verification: passed/);
-    },
-  );
-});
-
-// ---------------------------------------------------------------------------
-// Suite 2 — runBackup vs the real CLI under live churn (issues #11/#18).
-// ---------------------------------------------------------------------------
-
-// Live churner modeling the running gateway: every ~5ms it rotates session
-// *.jsonl.lock files (create one, delete a recent one) and cycles the plugin
-// catalog through an unlink -> rewrite gap — the two volatile shapes from
-// issues #18 and #11. The tar walk readdir/lstat window this races is
-// microseconds wide, so whether it fires per run is nondeterministic by
-// design; the hermetic tier owns determinism.
-const startChurner = ({ sessionsDir, catalogPath }) => {
-  let seq = 0;
-  let timer = null;
-  const lockName = (n) => path.join(sessionsDir, `churn-${n % 31}.jsonl.lock`);
-  const tick = () => {
-    seq += 1;
-    try {
-      fs.writeFileSync(lockName(seq), `${seq}\n`);
-    } catch {}
-    try {
-      fs.unlinkSync(lockName(seq + 29)); // the lock created two ticks ago
-    } catch {}
-    if (seq % 2 === 0) {
-      try {
-        fs.unlinkSync(catalogPath);
-      } catch {}
-    } else {
-      try {
-        fs.writeFileSync(catalogPath, `${JSON.stringify({ seq })}\n`);
-      } catch {}
-    }
-  };
-  const churner = {
-    pause: () => {
-      if (timer) clearInterval(timer);
-      timer = null;
-    },
-    resume: () => {
-      if (!timer) timer = setInterval(tick, 5);
-    },
-    stop: () => churner.pause(),
-    isRunning: () => timer !== null,
-  };
-  churner.resume();
-  return churner;
-};
-
-const logRaceOutcome = (label, backupRecord) => {
-  const raceFired =
-    (backupRecord?.attempts ?? 1) > 1 ||
-    (backupRecord?.vanishedPaths?.length ?? 0) > 0;
-  // Always logged, never asserted: the readdir->lstat race is nondeterministic.
-  console.log(
-    `[live-backup ${label}] race fired: ${raceFired ? "yes" : "no"}, attempts: ${backupRecord?.attempts ?? "?"}`,
-  );
-  return raceFired;
-};
-
-const assertVanishedClassificationIfRaced = (backupRecord) => {
-  if ((backupRecord?.attempts ?? 1) > 1) {
-    // The retry only fires on kind="vanished_file", so a multi-attempt run
-    // proves classification parsed the REAL CLI's error text — and the path
-    // must be one of the churned volatile files.
-    expect(backupRecord.vanishedPaths.length).toBeGreaterThan(0);
-    expect(backupRecord.vanishedPaths[0]).toMatch(
-      /\.jsonl\.lock$|catalog\.json$/,
-    );
-  }
-};
-
-describeLive("LIVE runBackup vs real CLI under churn (issues #11/#18)", () => {
-  it(
-    "hard-gated apply quiesces the gateway (the churner goes quiet) and lands a verified backup",
-    { timeout: kChurnTestTimeoutMs },
-    async () => {
-      let churner = null;
-      // The real writer goes quiet when the gateway stops: stop() pauses the
-      // churner, start() resumes it.
-      const gatewayQuiesce = createQuiesceFake({
-        onStop: () => churner?.pause(),
-        onStart: () => churner?.resume(),
-      });
-      const quiesceCalls = gatewayQuiesce.calls;
-      const harness = createLiveBackupHarness({
-        gatewayQuiesce,
-        onBackupSpawn: () => quiesceCalls.push("backup-cli"),
-      });
-      churner = startChurner(harness.fixture);
-      try {
-        // Let the churn establish a live-mutation steady state first.
-        await new Promise((resolve) => setTimeout(resolve, 100));
-        const result = await harness.sync.applyUpdate(kHardGateTarget);
-
-        expect(result.status, JSON.stringify(result.body)).toBe(202);
-        expect(result.body.restarting).toBe(true);
-
-        // Copy-first: a successful quiesced copy never invokes upstream.
-        // The churner stops before copying and resumes after the artifact
-        // is verified; lock release must still happen exactly once.
-        expect(quiesceCalls.indexOf("stop")).toBeGreaterThanOrEqual(0);
-        expect(quiesceCalls.indexOf("start")).toBeGreaterThan(quiesceCalls.indexOf("stop"));
-        expect(quiesceCalls.filter((c) => c === "release")).toHaveLength(1);
-        expect(quiesceCalls).not.toContain("backup-cli");
-        expect(harness.backupSpawns).toHaveLength(0);
-
-        const backupRecord = readRunBackupRecord(harness.openclawDir);
-        expect(backupRecord.noBackup).toBe(false);
-        expect(backupRecord.quiesced).toBe(true);
-        expect(backupRecord.attempts).toBe(0);
-        expect(backupRecord.verified).toBe(true);
-        expect(backupRecord.usableCheck).toBe("manifest_ok");
-        expect(backupRecord.producer).toBe("alphaclaw-offline-copy");
-        expect(backupRecord.attemptsDetail).toEqual([
-          expect.objectContaining({ rung: "offline_copy", reason: "primary", quiesced: true, ok: true }),
-        ]);
-        expect(backupRecord.file).toMatch(/openclaw-backup-.*\.alphaclaw\.tar\.gz$/);
-        expect(fs.statSync(backupRecord.file).size).toBeGreaterThan(0);
-
-        logRaceOutcome("quiesced", backupRecord);
-        assertVanishedClassificationIfRaced(backupRecord);
-      } finally {
-        churner.stop();
-      }
-    },
-  );
-
-  it(
-    "hard-gated apply with NO quiesce (boot-instance shape) rides the live ladder through sustained churn",
-    { timeout: kChurnTestTimeoutMs },
-    async () => {
-      // No gatewayQuiesce: runBackup goes straight to the live ladder while
-      // the churner keeps mutating the state dir — the closest live analogue
-      // of issues #11/#18. The churner stops the moment a RETRY spawns so a
-      // fired race converges on attempt 2 instead of gambling on three
-      // consecutive misses (the hermetic tier owns exhaustion determinism).
-      let churner = null;
-      const harness = createLiveBackupHarness({
-        onBackupSpawn: (count) => {
-          if (count >= 2) churner?.pause();
-        },
-      });
-      churner = startChurner(harness.fixture);
-      try {
-        await new Promise((resolve) => setTimeout(resolve, 100));
-        const result = await harness.sync.applyUpdate(kHardGateTarget);
-
-        expect(result.status, JSON.stringify(result.body)).toBe(202);
-        const backupRecord = readRunBackupRecord(harness.openclawDir);
-        expect(backupRecord.noBackup).toBe(false);
-        expect(backupRecord.quiesced).toBe(false);
-        expect(backupRecord.attempts).toBeGreaterThanOrEqual(1);
-        expect(backupRecord.attempts).toBe(harness.backupSpawns.length);
-        expect(backupRecord.verified).toBe(true);
-        expect(backupRecord.usableCheck).toBe("manifest_ok");
-        expect(fs.statSync(backupRecord.file).size).toBeGreaterThan(0);
-
-        logRaceOutcome("live-ladder", backupRecord);
-        assertVanishedClassificationIfRaced(backupRecord);
-      } finally {
-        churner.stop();
-      }
-    },
-  );
 });

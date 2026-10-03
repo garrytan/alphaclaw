@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createRequire } from "node:module";
 
-// Minimal hook harness (same pattern as upgrade-tab tests): hook state lives
+// Minimal hook harness: hook state lives
 // in per-call-index slots so component functions can be invoked directly
 // without a DOM renderer. Effects are collected, not run.
 vi.mock("preact/hooks", () => {
@@ -233,7 +233,6 @@ const publishShell = (partial = {}) => {
       restart: vi.fn(),
       refresh: vi.fn(),
       resumeChannels: vi.fn(),
-      rollBack: vi.fn(),
       dismissOutcome: vi.fn(),
       loadEvidence: vi.fn(),
       retryConnect: vi.fn(),
@@ -529,21 +528,21 @@ describe("frontend/gateway card (server-state matrix)", () => {
     expect(dotClassFor({})).toContain("ac-gateway-dot--gray");
   });
 
-  it("flapping in the stabilization window: Roll back is a danger action behind a confirm — confirm dispatches, cancel does not", () => {
-    const state = makeServerState({
-      watchdog: { ...kHealthyWatchdog, crashCountInWindow: 2 },
-      inStabilizationWindow: true,
-    });
-    expect(state.state).toBe("flapping");
-    const rollBackAction = state.actions.find((action) => action.id === "roll_back");
-    expect(rollBackAction).toMatchObject({ kind: "danger", needsConfirm: true });
-
-    publishShell({ statusState: state });
-    const rollBack = gatewayShellStore.get().actions.rollBack;
+  it("a needsConfirm danger action opens a confirm — confirm dispatches, cancel does not", () => {
+    const confirmAction = {
+      id: "resume_channels",
+      label: "Resume channels",
+      kind: "danger",
+      needsConfirm: true,
+      description: "Resume suppressed channels now?",
+    };
+    const base = makeServerState({});
+    publishShell({ statusState: { ...base, actions: [...base.actions, confirmAction] } });
+    const resumeChannels = gatewayShellStore.get().actions.resumeChannels;
 
     let tree = renderGateway({});
     const button = findAllByType(tree, ActionButton).find(
-      (vnode) => vnode.props.idleLabel === "Roll back",
+      (vnode) => vnode.props.idleLabel === "Resume channels",
     );
     expect(button).toBeTruthy();
     expect(button.props.tone).toBe("danger");
@@ -552,23 +551,22 @@ describe("frontend/gateway card (server-state matrix)", () => {
 
     // needsConfirm: the click opens the dialog and dispatches NOTHING yet.
     button.props.onClick();
-    expect(rollBack).not.toHaveBeenCalled();
+    expect(resumeChannels).not.toHaveBeenCalled();
     tree = renderGateway({});
     dialog = findAllByType(tree, ConfirmDialog)[0];
     expect(dialog.props.visible).toBe(true);
-    expect(dialog.props.title).toBe("Roll back?");
-    expect(dialog.props.message).toBe(rollBackAction.description);
+    expect(dialog.props.title).toBe("Resume channels?");
+    expect(dialog.props.message).toBe(confirmAction.description);
     expect(dialog.props.confirmTone).toBe("warning");
 
-    // Confirming dispatches the shell rollBack action and closes the dialog.
     dialog.props.onConfirm();
-    expect(rollBack).toHaveBeenCalledTimes(1);
+    expect(resumeChannels).toHaveBeenCalledTimes(1);
     tree = renderGateway({});
     expect(findAllByType(tree, ConfirmDialog)[0].props.visible).toBe(false);
 
     // Canceling a fresh confirm never dispatches.
     findAllByType(tree, ActionButton)
-      .find((vnode) => vnode.props.idleLabel === "Roll back")
+      .find((vnode) => vnode.props.idleLabel === "Resume channels")
       .props.onClick();
     tree = renderGateway({});
     dialog = findAllByType(tree, ConfirmDialog)[0];
@@ -576,58 +574,7 @@ describe("frontend/gateway card (server-state matrix)", () => {
     dialog.props.onCancel();
     tree = renderGateway({});
     expect(findAllByType(tree, ConfirmDialog)[0].props.visible).toBe(false);
-    expect(rollBack).toHaveBeenCalledTimes(1);
-  });
-
-  it("rollback fence (#20): the shell's rollbackDataRisk slice renders the second-stage danger confirm naming the backup", () => {
-    const confirmRollbackDataRisk = vi.fn();
-    const cancelRollbackDataRisk = vi.fn();
-    publishShell({
-      statusState: makeServerState({}),
-      rollbackDataRisk: {
-        message:
-          "This update migrated your state databases — the rollback target may not be able to read them.",
-        backupFile: "backup-2026-08-29.tar.gz",
-      },
-    });
-    gatewayShellStore.publish({
-      actions: {
-        ...gatewayShellStore.get().actions,
-        confirmRollbackDataRisk,
-        cancelRollbackDataRisk,
-      },
-    });
-
-    const tree = renderGateway({});
-    // Two ConfirmDialogs render: [0] is the action confirm (hidden), the
-    // data-risk confirm is the visible one carrying the server's message.
-    const dialog = findAllByType(tree, ConfirmDialog).find(
-      (vnode) => vnode.props.title === "Roll back despite migrated data?",
-    );
-    expect(dialog).toBeTruthy();
-    expect(dialog.props.visible).toBe(true);
-    expect(dialog.props.confirmTone).toBe("danger");
-    expect(dialog.props.message).toBe(
-      "This update migrated your state databases — the rollback target may not be able to read them.",
-    );
-    expect(collectText(dialog).join(" ")).toContain(
-      "Restore the verified pre-update backup first (backup-2026-08-29.tar.gz), or roll back anyway — data written by the newer version may be unreadable.",
-    );
-
-    dialog.props.onConfirm();
-    expect(confirmRollbackDataRisk).toHaveBeenCalledTimes(1);
-    dialog.props.onCancel();
-    expect(cancelRollbackDataRisk).toHaveBeenCalledTimes(1);
-  });
-
-  it("no rollbackDataRisk slice: the data-risk confirm does not render", () => {
-    publishShell({ statusState: makeServerState({}) });
-    const tree = renderGateway({});
-    expect(
-      findAllByType(tree, ConfirmDialog).find(
-        (vnode) => vnode.props.title === "Roll back despite migrated data?",
-      ),
-    ).toBeUndefined();
+    expect(resumeChannels).toHaveBeenCalledTimes(1);
   });
 
   // The Details disclosure is closed by default; toggling it through its own

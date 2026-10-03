@@ -92,7 +92,7 @@ describe("server/restart-required-state (reasons)", () => {
       stateDir,
     });
     storeA.markRequired("env_vars_changed");
-    storeA.markRequired("openclaw_release_channel_changed");
+    storeA.markRequired("config_file_edited");
 
     const storeB = createRestartRequiredState({
       isGatewayRunning: async () => true,
@@ -102,8 +102,8 @@ describe("server/restart-required-state (reasons)", () => {
     const snapshot = await storeB.getSnapshot();
     expect(snapshot.restartRequired).toBe(true);
     expect(snapshot.reasons.map((r) => r.code).sort()).toEqual([
+      "config_file_edited",
       "env_vars_changed",
-      "openclaw_release_channel_changed",
     ]);
     expect(snapshot.reasons.every((r) => r.label && r.addedAt > 0)).toBe(true);
   });

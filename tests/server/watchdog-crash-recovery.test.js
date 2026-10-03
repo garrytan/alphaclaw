@@ -131,31 +131,6 @@ describe("watchdog retained crash recovery", () => {
     expect(watchdog.getStatus().recoveryPending).toBeNull();
   });
 
-  it("maintenance begin/end without a launch does not supersede a crash", async () => {
-    const { lock, launch } = setup();
-    const release = lock.tryAcquire("env_sync");
-    crash();
-    await vi.advanceTimersByTimeAsync(0);
-    watchdog.beginManagedOperation();
-    watchdog.endManagedOperation();
-    release();
-    await vi.advanceTimersByTimeAsync(1000);
-    expect(launch).toHaveBeenCalledTimes(1);
-  });
-
-  it("managed crashes retain the ten-second relaunch when maintenance ends early", async () => {
-    const { launch } = setup();
-    watchdog.beginManagedOperation();
-    crash();
-    watchdog.endManagedOperation();
-    await vi.advanceTimersByTimeAsync(9999);
-    expect(launch).not.toHaveBeenCalled();
-    expect(watchdog.getStatus().crashCountInWindow).toBe(0);
-    await vi.advanceTimersByTimeAsync(1);
-    expect(launch).toHaveBeenCalledTimes(1);
-    expect(watchdog.getStatus().crashCountInWindow).toBe(0);
-  });
-
   it("a concurrent repair that fails without launching leaves crash recovery armed", async () => {
     let finishRepair;
     const repairRunner = vi.fn(() => new Promise((resolve) => { finishRepair = resolve; }));
@@ -321,34 +296,28 @@ describe("watchdog retained crash recovery", () => {
     expect(watchdog.getStatus().recoveryPending).toBeNull();
   });
 
-  it.each(["readStateDbVersions", "assessLaunchCompatibility"])(
-    "a hung %s read cannot pin crash admission forever", async (seam) => {
-      let finishRead;
-      const read = vi.fn()
-        .mockImplementationOnce(() => new Promise((resolve) => { finishRead = resolve; }))
-        .mockResolvedValue(null);
-      const { launch } = setup({ [seam]: read });
-      const expectedLaunches = seam === "assessLaunchCompatibility" ? 0 : 1;
-      crash();
+  it("a hung readStateDbVersions read cannot pin crash admission forever", async () => {
+    let finishRead;
+    const read = vi.fn()
+      .mockImplementationOnce(() => new Promise((resolve) => { finishRead = resolve; }))
+      .mockResolvedValue(null);
+    const { launch } = setup({ readStateDbVersions: read });
+    crash();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(read).toHaveBeenCalledTimes(1);
+    try {
+      // A local discovery read is bounded independently of the much longer
+      // restart lease; its ignored abort must release dispatch admission.
+      await vi.advanceTimersByTimeAsync(61_000);
+      expect(launch).toHaveBeenCalledTimes(1);
+      expect(watchdog.getStatus().recoveryPending).toBeNull();
+      expect(watchdog.getStatus().operationInProgress).toBe(false);
+    } finally {
+      finishRead(null);
       await vi.advanceTimersByTimeAsync(0);
-      expect(read).toHaveBeenCalledTimes(1);
-      try {
-        // A local discovery read is bounded independently of the much longer
-        // restart lease; its ignored abort must release dispatch admission.
-        await vi.advanceTimersByTimeAsync(61_000);
-        expect(launch).toHaveBeenCalledTimes(expectedLaunches);
-        expect(watchdog.getStatus().recoveryPending).toBeNull();
-        expect(watchdog.getStatus().operationInProgress).toBe(false);
-        if (seam === "assessLaunchCompatibility") {
-          expect(watchdog.getStatus().autoRepairPaused).toMatchObject({ reason: "state_db_unverified" });
-        }
-      } finally {
-        finishRead(null);
-        await vi.advanceTimersByTimeAsync(0);
-      }
-      expect(launch).toHaveBeenCalledTimes(expectedLaunches);
-    },
-  );
+    }
+    expect(launch).toHaveBeenCalledTimes(1);
+  });
 
   it("a discovery read cannot outlive a shorter lifecycle lease", async () => {
     let finishRead;

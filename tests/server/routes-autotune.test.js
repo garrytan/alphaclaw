@@ -206,8 +206,8 @@ describe("server/routes/autotune", () => {
 
   it("validateOverrides accepts in-range values and null clears", () => {
     expect(
-      validateOverrides({ gatewayHeapMb: 1024, backupMaxTotalGb: null }),
-    ).toEqual({ ok: true, value: { gatewayHeapMb: 1024, backupMaxTotalGb: null } });
+      validateOverrides({ gatewayHeapMb: 1024, sqliteCacheMb: null }),
+    ).toEqual({ ok: true, value: { gatewayHeapMb: 1024, sqliteCacheMb: null } });
     expect(validateOverrides(undefined)).toEqual({ ok: true, value: undefined });
     expect(validateOverrides([1]).ok).toBe(false);
     // Floor 8: consumers assume the pre-feature floor (F8 ship review).

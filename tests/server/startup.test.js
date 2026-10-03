@@ -1,8 +1,6 @@
 const { runOnboardedBootSequence } = require("../../lib/server/startup");
 const { setBootPhase, getBootPhase } = require("../../lib/server/boot-phase");
-const {
-  kOpenclawReconcileLifecycleLeaseMs,
-} = require("../../lib/server/constants");
+const { kOpenclawBootMigrationLeaseMs } = require("../../lib/server/constants");
 
 describe("server/startup", () => {
   // runOnboardedBootSequence mutates the boot-phase module singleton; leave
@@ -37,7 +35,7 @@ describe("server/startup", () => {
       readEnvFile: mkStep("readEnvFile", []),
       ensureGatewayProxyConfig: mkStep("ensureGatewayProxyConfig"),
       resolveSetupUrl: mkStep("resolveSetupUrl", "https://setup.example.com"),
-      reconcileBootConfig: mkStep("reconcileBootConfig", { status: "ok" }),
+      runBootMigration: mkStep("runBootMigration", { status: "ok", ran: false }),
       startGateway: mkStep("startGateway"),
       watchdog: { start: mkStep("watchdog.start") },
       gmailWatchService: { start: mkStep("gmailWatchService.start") },
@@ -55,9 +53,9 @@ describe("server/startup", () => {
       callOrder.indexOf("syncChannelConfig"),
     );
     expect(callOrder.indexOf("reportLockContentionAtBoot")).toBeLessThan(
-      callOrder.indexOf("reconcileBootConfig"),
+      callOrder.indexOf("runBootMigration"),
     );
-    expect(callOrder.indexOf("reconcileBootConfig")).toBeLessThan(
+    expect(callOrder.indexOf("runBootMigration")).toBeLessThan(
       callOrder.indexOf("startGateway"),
     );
   });
@@ -278,12 +276,13 @@ describe("server/startup", () => {
 
     await runOnboardedBootSequence(deps);
 
-    // The reconcile step can run a sized doctor migration (up to 30 min):
+    // The migration step can run doctor --fix (up to 30 min):
     // the boot hold must carry the sized lease, not the default 10-min one
     // whose force-release would hand the gateway to a queued operation
     // mid-migration.
     expect(acquireLifecycleLock).toHaveBeenCalledWith("boot", {
-      leaseMs: kOpenclawReconcileLifecycleLeaseMs,
+      leaseMs: kOpenclawBootMigrationLeaseMs,
+      cleanup: expect.objectContaining({ wait: expect.any(Function) }),
     });
     expect(getBootPhase()).toEqual({ phase: "ready", error: null });
     expect(release).toHaveBeenCalledTimes(1);
@@ -308,7 +307,8 @@ describe("server/startup", () => {
     // Boot is parked on acquire("boot"): nothing that mutates gateway or
     // channel state may run while another operation holds the lock.
     expect(acquireLifecycleLock).toHaveBeenCalledWith("boot", {
-      leaseMs: kOpenclawReconcileLifecycleLeaseMs,
+      leaseMs: kOpenclawBootMigrationLeaseMs,
+      cleanup: expect.objectContaining({ wait: expect.any(Function) }),
     });
     expect(deps.ensureManagedExecDefaults).not.toHaveBeenCalled();
     expect(deps.syncChannelConfig).not.toHaveBeenCalled();
@@ -384,53 +384,12 @@ describe("server/startup", () => {
     expect(deps.gmailWatchService.start).toHaveBeenCalled();
   });
 
-  it("skips the gateway launch but still starts supervision when the reconcile holds", async () => {
-    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const deps = createBootDeps({
-      reconcileBootConfig: vi.fn(async () => ({
-        status: "held",
-        hold: { reason: "settings migration failed" },
-      })),
-    });
-
-    await runOnboardedBootSequence(deps);
-
-    // Fail CLOSED: the gateway must not start on the rejected config, but
-    // the full admin UI (watchdog, gmail, caches, ready phase) stays up so
-    // the operator can reach the retry actions.
-    expect(deps.startGateway).not.toHaveBeenCalled();
-    expect(deps.watchdog.start).toHaveBeenCalledTimes(1);
-    expect(deps.gmailWatchService.start).toHaveBeenCalled();
-    expect(getBootPhase()).toEqual({ phase: "ready", error: null });
-    expect(warnSpy).toHaveBeenCalledWith(
-      "[alphaclaw] Gateway held: settings migration failed",
-    );
-  });
-
-  it("holds the gateway when reconcileBootConfig itself rejects", async () => {
-    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    const deps = createBootDeps({
-      reconcileBootConfig: vi.fn(async () => {
-        throw new Error("reconcile machinery exploded");
-      }),
-    });
-
-    await runOnboardedBootSequence(deps);
-
-    // A reconcile machinery error must never start the gateway blind.
-    expect(deps.startGateway).not.toHaveBeenCalled();
-    expect(deps.watchdog.start).toHaveBeenCalledTimes(1);
-    expect(errorSpy).toHaveBeenCalledWith(
-      "[alphaclaw] Boot config reconciliation failed (gateway held): reconcile machinery exploded",
-    );
-  });
-
-  it("starts the gateway strictly after a clean reconcile", async () => {
+  it("starts the gateway strictly after the doctor migration and only when onboarded", async () => {
     const callOrder = [];
     const deps = createBootDeps({
-      reconcileBootConfig: vi.fn(async () => {
-        callOrder.push("reconcileBootConfig");
-        return { status: "ok" };
+      runBootMigration: vi.fn(async () => {
+        callOrder.push("runBootMigration");
+        return { status: "ok", ran: true };
       }),
       startGateway: vi.fn(async () => {
         callOrder.push("startGateway");
@@ -439,11 +398,69 @@ describe("server/startup", () => {
 
     await runOnboardedBootSequence(deps);
 
-    expect(callOrder).toEqual(["reconcileBootConfig", "startGateway"]);
+    expect(callOrder).toEqual(["runBootMigration", "startGateway"]);
+    expect(deps.runBootMigration).toHaveBeenCalledWith({ operation: expect.objectContaining({ signal: expect.anything() }) });
     expect(getBootPhase()).toEqual({ phase: "ready", error: null });
   });
 
-  it("keeps the legacy start path when no reconcileBootConfig dep is provided", async () => {
+  it("a failed doctor migration is reported and the gateway starts anyway", async () => {
+    const deps = createBootDeps({
+      runBootMigration: vi.fn(async () => ({ status: "failed", ran: true, reason: "timed out" })),
+      finalizeBootReport: vi.fn(),
+    });
+
+    await runOnboardedBootSequence(deps);
+
+    expect(deps.startGateway).toHaveBeenCalledTimes(1);
+    expect(deps.finalizeBootReport).toHaveBeenCalledWith({
+      migration: { status: "failed", ran: true, reason: "timed out" },
+      gatewayHeld: false,
+    });
+    expect(getBootPhase()).toEqual({ phase: "ready", error: null });
+  });
+
+  it("a throwing doctor migration is logged, recorded as an error, and never holds the gateway", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const deps = createBootDeps({
+      runBootMigration: vi.fn(async () => {
+        throw new Error("doctor exploded");
+      }),
+      finalizeBootReport: vi.fn(),
+    });
+
+    await runOnboardedBootSequence(deps);
+
+    expect(errorSpy).toHaveBeenCalledWith("[alphaclaw] Boot doctor migration failed: doctor exploded");
+    expect(deps.finalizeBootReport).toHaveBeenCalledWith({
+      migration: { status: "error", reason: "doctor exploded" },
+      gatewayHeld: false,
+    });
+    expect(deps.startGateway).toHaveBeenCalledTimes(1);
+    expect(deps.watchdog.start).toHaveBeenCalledTimes(1);
+  });
+
+  it("holds the gateway when the boot lease is lost — another owner now runs the lifecycle", async () => {
+    let valid = true;
+    const release = Object.assign(vi.fn(), { isValid: () => valid });
+    const deps = createBootDeps({
+      acquireLifecycleLock: vi.fn(async () => release),
+      runBootMigration: vi.fn(async () => {
+        valid = false;
+        return { status: "ok", ran: true };
+      }),
+      finalizeBootReport: vi.fn(),
+    });
+
+    await runOnboardedBootSequence(deps);
+
+    expect(deps.startGateway).not.toHaveBeenCalled();
+    expect(deps.ensureManagedExecDefaults).not.toHaveBeenCalled();
+    expect(deps.finalizeBootReport).toHaveBeenCalledWith(expect.objectContaining({ gatewayHeld: true }));
+    expect(deps.watchdog.start).toHaveBeenCalledTimes(1);
+    expect(release).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the plain start path when no runBootMigration dep is provided", async () => {
     const deps = createBootDeps();
 
     await runOnboardedBootSequence(deps);
@@ -452,9 +469,8 @@ describe("server/startup", () => {
     expect(getBootPhase()).toEqual({ phase: "ready", error: null });
   });
 
-  // ── #76 boot order: closers → backup-debris sweep (#79 (g)) → report →
-  // reconcileInstalled → compat gate → ensure steps → reconcileBootConfig →
-  // finalizeBootReport → startGateway ──
+  // ── boot order: restart-op closer → report → normalization → doctor
+  // migration → ensure steps → finalizeBootReport → startGateway ──
   const mkOrderedDeps = (callOrder, overrides = {}) => {
     const step = (name, ret) =>
       vi.fn(async () => {
@@ -466,24 +482,10 @@ describe("server/startup", () => {
         callOrder.push("reportLockContentionAtBoot");
         return { live: [], lockDirs: [], lines: [] };
       }),
-      closeDanglingRecordsAtBoot: step("closeDanglingRecordsAtBoot", {
-        closedRuns: [],
-        closedLastUpdateRun: false,
-      }),
       reconcileRestartOperationAtBoot: step("reconcileRestartOperationAtBoot"),
-      sweepBackupDebrisAtBoot: step("sweepBackupDebrisAtBoot", {
-        mode: "boot",
-        removed: [],
-        removedBytes: 0,
-        kept: [],
-        errors: [],
-      }),
       recordBootReportServerPhase: step("recordBootReportServerPhase", { serverPhase: {} }),
-      reconcileInstalledAtBoot: step("reconcileInstalledAtBoot", { ok: true }),
-      assessLaunchCompatibilityAtBoot: step("assessLaunchCompatibilityAtBoot", {
-        compatible: true,
-        hold: null,
-      }),
+      normalizeBootConfig: step("normalizeBootConfig", { changed: false }),
+      runBootMigration: step("runBootMigration", { status: "ok", ran: false }),
       ensureManagedExecDefaults: step("ensureManagedExecDefaults"),
       ensureUsageTrackerPluginConfig: vi.fn(() => callOrder.push("ensureUsageTrackerPluginConfig")),
       ensureWebhookMappingIds: vi.fn(() => {
@@ -502,7 +504,6 @@ describe("server/startup", () => {
         return "https://setup.example.com";
       }),
       ensureGatewayProxyConfig: vi.fn(() => callOrder.push("ensureGatewayProxyConfig")),
-      reconcileBootConfig: step("reconcileBootConfig", { status: "ok", reason: "already-completed" }),
       finalizeBootReport: step("finalizeBootReport", null),
       startGateway: step("startGateway"),
       watchdog: { start: vi.fn(() => callOrder.push("watchdog.start")) },
@@ -511,26 +512,18 @@ describe("server/startup", () => {
     });
   };
 
-  it("runs the #76/#79 boot steps in the fixed order: closers → backup-debris sweep → report → reconcileInstalled → compat gate → reconcileBootConfig → ensure steps → finalizeBootReport → startGateway", async () => {
+  it("runs the boot steps in the fixed order: restart-op closer → report → normalization → doctor migration → ensure steps → finalizeBootReport → startGateway", async () => {
     const callOrder = [];
     const deps = mkOrderedDeps(callOrder);
 
     await runOnboardedBootSequence(deps);
 
-    // Strict: Stage 3 fills reconcileInstalled / the compat gate in; the
-    // ORDER is the contract (no doctor --fix from a wrong binary, no launch
-    // before the verdict, the report finalized on every reconcile outcome).
-    // The debris sweep (#79 (g), Codex 18) sits right after the closers:
-    // under the boot lock, before anything that could spawn a backup.
     expect(callOrder).toEqual([
       "reportLockContentionAtBoot",
-      "closeDanglingRecordsAtBoot",
       "reconcileRestartOperationAtBoot",
-      "sweepBackupDebrisAtBoot",
       "recordBootReportServerPhase",
-      "reconcileInstalledAtBoot",
-      "assessLaunchCompatibilityAtBoot",
-      "reconcileBootConfig",
+      "normalizeBootConfig",
+      "runBootMigration",
       "ensureManagedExecDefaults",
       "ensureUsageTrackerPluginConfig",
       "ensureWebhookMappingIds",
@@ -548,124 +541,81 @@ describe("server/startup", () => {
     expect(getBootPhase()).toEqual({ phase: "ready", error: null });
   });
 
-  it("runs the backup-debris sweep SYNCHRONOUSLY under the boot lifecycle lock, after both closers and before startGateway — never in a post-boot timer (#79 (g), Codex 18)", async () => {
+  it("runs normalization and the doctor migration under the boot lease, before startGateway", async () => {
     const callOrder = [];
-    const release = vi.fn(() => callOrder.push("release"));
-    const acquireLifecycleLock = vi.fn(async () => {
-      callOrder.push("acquireLock");
-      return release;
-    });
-    const observed = {};
+    const release = Object.assign(vi.fn(() => callOrder.push("release")), { isValid: () => true });
     const deps = mkOrderedDeps(callOrder, {
-      acquireLifecycleLock,
-      sweepBackupDebrisAtBoot: vi.fn(async () => {
-        callOrder.push("sweepBackupDebrisAtBoot");
-        // Snapshot the world at sweep time: the lock is held (acquired, not
-        // released), the gateway has not been launched, both closers ran.
-        observed.lockHeld = acquireLifecycleLock.mock.calls.length === 1 && release.mock.calls.length === 0;
-        observed.gatewayStarted = deps.startGateway.mock.calls.length;
-        observed.closersDone = [
-          deps.closeDanglingRecordsAtBoot.mock.calls.length,
-          deps.reconcileRestartOperationAtBoot.mock.calls.length,
-        ];
-        return { mode: "boot", removed: [{ name: "x.tmp", bytes: 1, why: "boot" }] };
+      acquireLifecycleLock: vi.fn(async () => {
+        callOrder.push("acquireLock");
+        return release;
       }),
     });
 
     await runOnboardedBootSequence(deps);
 
-    expect(observed).toEqual({ lockHeld: true, gatewayStarted: 0, closersDone: [1, 1] });
-    expect(callOrder.indexOf("acquireLock")).toBeLessThan(callOrder.indexOf("sweepBackupDebrisAtBoot"));
-    expect(callOrder.indexOf("sweepBackupDebrisAtBoot")).toBeLessThan(
-      callOrder.indexOf("recordBootReportServerPhase"),
-    );
-    expect(callOrder.indexOf("sweepBackupDebrisAtBoot")).toBeLessThan(callOrder.indexOf("startGateway"));
+    expect(deps.normalizeBootConfig).toHaveBeenCalledWith({ hold: release, assertLease: expect.any(Function) });
+    expect(callOrder.indexOf("acquireLock")).toBeLessThan(callOrder.indexOf("normalizeBootConfig"));
+    expect(callOrder.indexOf("runBootMigration")).toBeLessThan(callOrder.indexOf("startGateway"));
     expect(callOrder.indexOf("startGateway")).toBeLessThan(callOrder.indexOf("release"));
-    // Awaited, not fire-and-forget: the sweep resolved before the next step ran.
-    expect(deps.sweepBackupDebrisAtBoot).toHaveBeenCalledTimes(1);
+    expect(release).toHaveBeenCalledTimes(1);
+  });
+
+  it("pre-onboarding: normalizes the config, never runs the doctor migration, finalizes and never launches", async () => {
+    const callOrder = [];
+    const deps = mkOrderedDeps(callOrder, { onboarded: false });
+
+    await runOnboardedBootSequence(deps);
+
+    expect(callOrder).toEqual([
+      "reportLockContentionAtBoot",
+      "reconcileRestartOperationAtBoot",
+      "recordBootReportServerPhase",
+      "normalizeBootConfig",
+      "finalizeBootReport",
+    ]);
+    expect(deps.runBootMigration).not.toHaveBeenCalled();
+    expect(deps.finalizeBootReport).toHaveBeenCalledWith({ migration: null, gatewayHeld: false });
+    expect(deps.startGateway).not.toHaveBeenCalled();
+    expect(deps.watchdog.start).not.toHaveBeenCalled();
     expect(getBootPhase()).toEqual({ phase: "ready", error: null });
   });
 
-  it("threads the reconcile outcome (status + reason) and the compat verdict into finalizeBootReport", async () => {
-    const callOrder = [];
-    const deps = mkOrderedDeps(callOrder, {
-      reconcileBootConfig: vi.fn(async () => ({
-        status: "ok",
-        reason: "round-trip-restore",
-        warnings: ["w1"],
-      })),
+  it("a throwing normalization is logged and the boot continues", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const deps = mkOrderedDeps([], {
+      normalizeBootConfig: vi.fn(async () => {
+        throw new Error("normalize exploded");
+      }),
     });
 
     await runOnboardedBootSequence(deps);
 
-    expect(deps.finalizeBootReport).toHaveBeenCalledTimes(1);
-    expect(deps.finalizeBootReport).toHaveBeenCalledWith({
-      reconcile: { status: "ok", reason: "round-trip-restore", warnings: ["w1"] },
-      compat: { compatible: true, hold: null },
-      gatewayHeld: false,
-    });
+    expect(errorSpy).toHaveBeenCalledWith("[alphaclaw] Boot config normalization failed: normalize exploded");
+    expect(deps.runBootMigration).toHaveBeenCalledTimes(1);
+    expect(deps.startGateway).toHaveBeenCalledTimes(1);
   });
 
-  it("finalizes the boot report on a held reconcile AND on a throwing reconcile (the verdict must name what held the gateway)", async () => {
-    vi.spyOn(console, "warn").mockImplementation(() => {});
-    vi.spyOn(console, "error").mockImplementation(() => {});
-    const held = mkOrderedDeps([], {
-      reconcileBootConfig: vi.fn(async () => ({
-        status: "held",
-        hold: { reason: "settings migration for 2026.9.2 failed" },
-      })),
-    });
-    await runOnboardedBootSequence(held);
-    expect(held.startGateway).not.toHaveBeenCalled();
-    expect(held.finalizeBootReport).toHaveBeenCalledWith(
-      expect.objectContaining({
-        reconcile: expect.objectContaining({ status: "held" }),
-        gatewayHeld: true,
-      }),
-    );
-
-    const threw = mkOrderedDeps([], {
-      reconcileBootConfig: vi.fn(async () => {
-        throw new Error("reconcile machinery exploded");
-      }),
-    });
-    await runOnboardedBootSequence(threw);
-    expect(threw.startGateway).not.toHaveBeenCalled();
-    expect(threw.finalizeBootReport).toHaveBeenCalledWith(
-      expect.objectContaining({
-        reconcile: { status: "error", reason: "reconcile machinery exploded" },
-        gatewayHeld: true,
-      }),
-    );
-  });
-
-  it("non-recovery boot step failures are logged and still launch a compatibility-verified gateway (F008)", async () => {
+  it("boot step failures are logged and still launch the gateway (F008)", async () => {
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     const boom = (label) =>
       vi.fn(async () => {
         throw new Error(`${label} exploded`);
       });
     const deps = mkOrderedDeps([], {
-      closeDanglingRecordsAtBoot: boom("closers"),
       reconcileRestartOperationAtBoot: boom("restart-op"),
-      sweepBackupDebrisAtBoot: boom("sweep"),
       recordBootReportServerPhase: boom("report"),
-      reconcileInstalledAtBoot: boom("reconcileInstalled"),
       finalizeBootReport: boom("finalize"),
     });
 
     await runOnboardedBootSequence(deps);
 
-    expect(deps.reconcileBootConfig).toHaveBeenCalledTimes(1);
+    expect(deps.runBootMigration).toHaveBeenCalledTimes(1);
     expect(deps.startGateway).toHaveBeenCalledTimes(1);
     expect(deps.watchdog.start).toHaveBeenCalledTimes(1);
     expect(getBootPhase()).toEqual({ phase: "ready", error: null });
     for (const label of [
-      "Boot dangling-record close failed: closers exploded",
       "Boot restart-operation reconcile failed: restart-op exploded",
-      "Boot backup-debris sweep failed: sweep exploded",
       "Boot report server phase failed: report exploded",
-      "Boot installed-tree reconcile failed: reconcileInstalled exploded",
       "Boot report finalize failed: finalize exploded",
     ]) {
       expect(errorSpy).toHaveBeenCalledWith(`[alphaclaw] ${label}`);
@@ -673,98 +623,13 @@ describe("server/startup", () => {
     expect(errorSpy).not.toHaveBeenCalledWith(expect.stringContaining("Boot sequence failed"));
   });
 
-  it("an explicit compat-gate verdict holds the gateway ({ hold }) or ({ compatible: false }) — supervision and the ready phase still come up", async () => {
-    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const withHold = mkOrderedDeps([], {
-      assessLaunchCompatibilityAtBoot: vi.fn(async () => ({
-        compatible: false,
-        hold: { reason: "version_mismatch", installed: "2026.8.1", expected: "2026.9.2" },
-      })),
-    });
-    await runOnboardedBootSequence(withHold);
-    expect(withHold.startGateway).not.toHaveBeenCalled();
-    expect(withHold.reconcileBootConfig).not.toHaveBeenCalled();
-    expect(withHold.ensureManagedExecDefaults).not.toHaveBeenCalled();
-    expect(withHold.finalizeBootReport).toHaveBeenCalledWith(
-      expect.objectContaining({ gatewayHeld: true }),
-    );
-    expect(withHold.watchdog.start).toHaveBeenCalledTimes(1);
-    expect(getBootPhase()).toEqual({ phase: "ready", error: null });
-    expect(warnSpy).toHaveBeenCalledWith("[alphaclaw] Gateway held: version_mismatch");
-
-    const incompatibleNoHold = mkOrderedDeps([], {
-      assessLaunchCompatibilityAtBoot: vi.fn(async () => ({ compatible: false, hold: null })),
-    });
-    await runOnboardedBootSequence(incompatibleNoHold);
-    expect(incompatibleNoHold.startGateway).not.toHaveBeenCalled();
-    expect(warnSpy).toHaveBeenCalledWith(
-      "[alphaclaw] Gateway held: launch compatibility gate refused",
-    );
-
-    const verified = mkOrderedDeps([], {
-      assessLaunchCompatibilityAtBoot: vi.fn(async () => ({ compatible: true })),
-    });
-    await runOnboardedBootSequence(verified);
-    expect(verified.startGateway).toHaveBeenCalledTimes(1);
-  });
-
-  it.each(["throw", null, undefined, { compatible: null, hold: null }])("holds on an unavailable boot verdict (%s) without running config migration", async (verdict) => {
-    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    vi.spyOn(console, "warn").mockImplementation(() => {});
-    const deps = mkOrderedDeps([], {
-      assessLaunchCompatibilityAtBoot: vi.fn(async () => {
-        if (verdict === "throw") throw new Error("compat exploded");
-        return verdict;
-      }),
-    });
-    await runOnboardedBootSequence(deps);
-    expect(deps.startGateway).not.toHaveBeenCalled();
-    expect(deps.reconcileBootConfig).not.toHaveBeenCalled();
-    expect(deps.ensureManagedExecDefaults).not.toHaveBeenCalled();
-    expect(deps.finalizeBootReport).toHaveBeenCalledWith(expect.objectContaining({
-      gatewayHeld: true, reconcile: expect.objectContaining({ status: "held", reason: "state_db_unverified" }),
-    }));
-    expect(deps.watchdog.start).toHaveBeenCalledOnce();
-    expect(deps.gmailWatchService.start).toHaveBeenCalledOnce();
-    expect(getBootPhase()).toEqual({ phase: "ready", error: null });
-    if (verdict === "throw") expect(errorSpy).toHaveBeenCalledWith("[alphaclaw] Boot launch compatibility gate failed: compat exploded");
-  });
-
-  it("hands the boot lifecycle lease to reconcileInstalledAtBoot and the compat gate as { hold } — the lock is not re-entrant, so neither step may acquire its own", async () => {
-    const release = Object.assign(vi.fn(), { isValid: () => true });
-    const acquireLifecycleLock = vi.fn(async () => release);
-    const deps = mkOrderedDeps([], { acquireLifecycleLock });
-
-    await runOnboardedBootSequence(deps);
-
-    expect(deps.reconcileInstalledAtBoot).toHaveBeenCalledTimes(1);
-    expect(deps.reconcileInstalledAtBoot).toHaveBeenCalledWith({ hold: release });
-    expect(deps.assessLaunchCompatibilityAtBoot).toHaveBeenCalledTimes(1);
-    expect(deps.assessLaunchCompatibilityAtBoot).toHaveBeenCalledWith({ hold: release });
-    // Both ran INSIDE the lease: the boot's release comes after them.
-    expect(release).toHaveBeenCalledTimes(1);
-    expect(deps.reconcileInstalledAtBoot.mock.invocationCallOrder[0]).toBeLessThan(
-      release.mock.invocationCallOrder[0],
-    );
-    expect(deps.assessLaunchCompatibilityAtBoot.mock.invocationCallOrder[0]).toBeLessThan(
-      release.mock.invocationCallOrder[0],
-    );
-    // No lock wired (tests, legacy) → { hold: null }, never undefined args.
-    const unlocked = mkOrderedDeps([]);
-    await runOnboardedBootSequence(unlocked);
-    expect(unlocked.reconcileInstalledAtBoot).toHaveBeenCalledWith({ hold: null });
-    expect(unlocked.assessLaunchCompatibilityAtBoot).toHaveBeenCalledWith({ hold: null });
-  });
-
-  it("without the new steps injected, the legacy boot is byte-for-byte unchanged (null defaults)", async () => {
+  it("without the optional steps injected, the boot runs only the ensure steps and the launch (null defaults)", async () => {
     const callOrder = [];
     const deps = mkOrderedDeps(callOrder, {
-      closeDanglingRecordsAtBoot: null,
       reconcileRestartOperationAtBoot: null,
-      sweepBackupDebrisAtBoot: null,
       recordBootReportServerPhase: null,
-      reconcileInstalledAtBoot: null,
-      assessLaunchCompatibilityAtBoot: null,
+      normalizeBootConfig: null,
+      runBootMigration: null,
       finalizeBootReport: null,
     });
 
@@ -772,7 +637,6 @@ describe("server/startup", () => {
 
     expect(callOrder).toEqual([
       "reportLockContentionAtBoot",
-      "reconcileBootConfig",
       "ensureManagedExecDefaults",
       "ensureUsageTrackerPluginConfig",
       "ensureWebhookMappingIds",

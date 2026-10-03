@@ -224,41 +224,6 @@ describe("server/team-service", () => {
 });
 
 
-it("a team disable queued behind another operation refuses before changing auth or team state", async () => {
-  const { createGatewayLifecycleLock } = require("../../lib/server/gateway-lifecycle-lock");
-  const { createGatewayMutationPolicy } = require("../../lib/server/gateway-mutation-policy");
-  const openclawDir = createTempOpenclawDir();
-  updateTeamConfig({ openclawDir, enabled: true });
-  updateOpenclawConfig({ openclawDir, mutate: (config) => {
-    config.gateway = { auth: { mode: "trusted-proxy" } };
-  } });
-  const original = fs.readFileSync(path.join(openclawDir, "openclaw.json"), "utf8");
-  const lock = createGatewayLifecycleLock();
-  const prior = lock.tryAcquire("repair");
-  let info = {};
-  const policy = createGatewayMutationPolicy({ lock, getChannelInfo: () => info });
-  const restartGateway = vi.fn();
-  const service = createTeamService({ openclawDir, restartGateway,
-    getGatewayUrl: () => kGatewayUrl,
-    withGatewayTransition: async (run) => {
-      const hold = await lock.acquire("team_transition");
-      try {
-        policy.assert({ hold });
-        return await run({ restartGateway, assertCanMutate: () => policy.assert({ hold }) });
-      } finally { hold(); }
-    },
-  });
-  const pending = service.setEnabled(false);
-  info = { gatewayHold: { reason: "config_migration_failed" } };
-  prior();
-  expect(await pending).toMatchObject({ ok: false, blocked: true, code: "gateway_held",
-    changed: false, enabled: true });
-  expect(service.isTeamEnabled()).toBe(true);
-  expect(fs.readFileSync(path.join(openclawDir, "openclaw.json"), "utf8")).toBe(original);
-  expect(restartGateway).not.toHaveBeenCalled();
-  expect(lock.getActiveOperation()).toBeNull();
-});
-
 describe("team transition ownership at the actual auth write", () => {
   const makeAuthority = () => {
     const { GatewayMutationBlockedError } = require("../../lib/server/gateway-mutation-policy");

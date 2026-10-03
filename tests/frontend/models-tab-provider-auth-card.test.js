@@ -63,7 +63,6 @@ import { Badge } from "../../lib/public/js/components/badge.js";
 import { ActionButton } from "../../lib/public/js/components/action-button.js";
 import { InlineErrorChip } from "../../lib/public/js/components/inline-error-chip.js";
 import { ProviderAuthCard } from "../../lib/public/js/components/models-tab/provider-auth-card.js";
-import { kCodexDeferredSaveRecheckMs } from "../../lib/public/js/lib/codex-status.js";
 
 const harness = preactHooks.__harness;
 
@@ -241,172 +240,48 @@ describe("frontend/models-tab provider auth card codex section", () => {
     );
   });
 
-  it("a quiet-period status renders 'Unavailable during backup' with the last-known line — never 'Not connected'", () => {
+  it("an unavailable status renders 'Auth store unavailable' with the last-known line — never 'Not connected'", () => {
     const tree = renderCard({
-      codexStatus: { connected: true, unavailable: true, reason: "backup_in_progress" },
+      codexStatus: { connected: true, unavailable: true, reason: "AUTH_STORE_UNREADABLE" },
       codexStatusKnown: true,
     });
     const badge = findAllByType(tree, Badge).find((vnode) =>
-      collectText(vnode).join(" ").includes("Unavailable during backup"),
+      collectText(vnode).join(" ").includes("Auth store unavailable"),
     );
     expect(badge).toBeTruthy();
     expect(badge.props.tone).toBe("warning");
     const text = collectText(tree).join(" ");
     expect(text).toContain(
-      "Credential store unavailable during a backup — showing the last known Codex status (connected).",
+      "Credential store unavailable — showing the last known Codex status (connected).",
     );
     expect(text).not.toContain("Not connected");
 
-    // Never checked + unavailable: says unknown-until-it-finishes, not "not connected".
+    // Never checked + unavailable: says not checked, not "not connected".
     const cold = collectText(
       renderCard({
-        codexStatus: { connected: false, unavailable: true, reason: "backup_in_progress" },
+        codexStatus: { connected: false, unavailable: true, reason: "AUTH_STORE_UNREADABLE" },
         codexStatusKnown: false,
       }),
     ).join(" ");
-    expect(cold).toContain("Codex status unknown until it finishes");
+    expect(cold).toContain("credentials have not been checked");
     expect(cold).not.toContain("Not connected");
   });
 
-  it("a deferred exchange (202 deferred:true) toasts the honest message and shows 'Connected — saved after the backup finishes' until the store confirms", async () => {
-    api.exchangeCodexOAuth.mockResolvedValue({
-      ok: true,
-      deferred: true,
-      reason: "backup_in_progress",
-    });
-    let tree = renderCard({
-      codexStatus: { connected: false, unavailable: true, reason: "backup_in_progress" },
-      codexStatusKnown: false,
-    });
+  it("a manual exchange toasts 'Codex connected' and refreshes the status", async () => {
+    api.exchangeCodexOAuth.mockResolvedValue({ ok: true });
+    let tree = renderCard({ codexStatus: { connected: false }, codexStatusKnown: true });
     // Start the flow (popup blocked → manual paste path), paste, complete.
     findAllByType(tree, "button")
       .find((vnode) => collectText(vnode).join(" ").includes("Connect Codex OAuth"))
       .props.onclick();
-    tree = renderCard({
-      codexStatus: { connected: false, unavailable: true, reason: "backup_in_progress" },
-      codexStatusKnown: false,
-    });
+    tree = renderCard({ codexStatus: { connected: false }, codexStatusKnown: true });
     findAllByType(tree, "input")[0].props.onInput({
       target: { value: "http://localhost:1455/auth/callback?code=abc&state=def" },
     });
-    tree = renderCard({
-      codexStatus: { connected: false, unavailable: true, reason: "backup_in_progress" },
-      codexStatusKnown: false,
-    });
+    tree = renderCard({ codexStatus: { connected: false }, codexStatusKnown: true });
     await findActionButtonByLabel(tree, "Complete Codex OAuth").props.onClick();
 
-    expect(showToast).toHaveBeenCalledWith(
-      "Codex connected — saved after the backup finishes",
-      "success",
-    );
+    expect(showToast).toHaveBeenCalledWith("Codex connected", "success");
     expect(kBaseProps.onRefreshCodex).toHaveBeenCalledTimes(1);
-    tree = renderCard({
-      codexStatus: { connected: false, unavailable: true, reason: "backup_in_progress" },
-      codexStatusKnown: false,
-    });
-    const badge = findAllByType(tree, Badge).find((vnode) =>
-      collectText(vnode).join(" ").includes("saved after the backup finishes"),
-    );
-    expect(badge).toBeTruthy();
-    expect(badge.props.tone).toBe("info");
-    expect(collectText(tree).join(" ")).not.toContain("Not connected");
-
-    // The store confirms the saved connection: the ordinary badge is back.
-    // (Running the collected effects includes the window message listener —
-    // stub a window for it; node has none.)
-    const originalWindow = globalThis.window;
-    globalThis.window = { addEventListener: vi.fn(), removeEventListener: vi.fn() };
-    try {
-      tree = renderCard({ codexStatus: { connected: true }, codexStatusKnown: true });
-      for (const effect of harness.effects) effect();
-    } finally {
-      globalThis.window = originalWindow;
-    }
-    tree = renderCard({ codexStatus: { connected: true }, codexStatusKnown: true });
-    // (The harness walks props.children AND rendered, so a badge's text
-    // collects twice — match by inclusion, not equality.)
-    const labels = findAllByType(tree, Badge).map((vnode) => collectText(vnode).join(" "));
-    expect(labels.some((label) => label.includes("Connected"))).toBe(true);
-    expect(labels.join(" ")).not.toContain("saved after");
-    expect(labels.join(" ")).not.toContain("Unavailable");
-  });
-
-  const kUnavailableStatus = { connected: false, unavailable: true, reason: "backup_in_progress" };
-
-  // Runs the deferred manual exchange (popup blocked → paste → complete) so
-  // the card holds the pending claim; returns nothing — callers re-render.
-  const completeDeferredExchange = async () => {
-    api.exchangeCodexOAuth.mockResolvedValue({ ok: true, deferred: true, reason: "backup_in_progress" });
-    let tree = renderCard({ codexStatus: kUnavailableStatus, codexStatusKnown: false });
-    findAllByType(tree, "button")
-      .find((vnode) => collectText(vnode).join(" ").includes("Connect Codex OAuth"))
-      .props.onclick();
-    tree = renderCard({ codexStatus: kUnavailableStatus, codexStatusKnown: false });
-    findAllByType(tree, "input")[0].props.onInput({
-      target: { value: "http://localhost:1455/auth/callback?code=abc&state=def" },
-    });
-    tree = renderCard({ codexStatus: kUnavailableStatus, codexStatusKnown: false });
-    await findActionButtonByLabel(tree, "Complete Codex OAuth").props.onClick();
-  };
-
-  // The harness collects effects instead of running them; run the status
-  // effects for ONE status object, with a window for the message listener.
-  const renderWithStatusRead = (codexStatus) => {
-    const originalWindow = globalThis.window;
-    globalThis.window = { addEventListener: vi.fn(), removeEventListener: vi.fn() };
-    try {
-      renderCard({ codexStatus, codexStatusKnown: true });
-      for (const effect of harness.effects) effect();
-    } finally {
-      globalThis.window = originalWindow;
-    }
-    return renderCard({ codexStatus, codexStatusKnown: true });
-  };
-
-  it("X7: the server's deferredWrite:failed verdict ends the pending badge and says the connection was not saved", async () => {
-    await completeDeferredExchange();
-    let tree = renderCard({ codexStatus: kUnavailableStatus, codexStatusKnown: false });
-    expect(collectText(tree).join(" ")).toContain("saved after the backup finishes");
-
-    tree = renderWithStatusRead({
-      connected: false,
-      deferredWrite: { state: "failed", reason: "store closed for a second backup" },
-    });
-    const text = collectText(tree).join(" ");
-    expect(text).toContain(
-      "Codex connection was not saved (store closed for a second backup) — reconnect",
-    );
-    expect(text).not.toContain("saved after the backup finishes");
-    const labels = findAllByType(tree, Badge).map((vnode) => collectText(vnode).join(" "));
-    expect(labels.join(" ")).toContain("Not connected");
-  });
-
-  it("X7: without a server verdict, a readable connected:false status schedules ONE recheck via onRefreshCodex; the second ends the claim", async () => {
-    vi.useFakeTimers();
-    try {
-      await completeDeferredExchange();
-      const refreshesAfterExchange = kBaseProps.onRefreshCodex.mock.calls.length;
-
-      // Strike one: badge still pending, recheck armed.
-      let tree = renderWithStatusRead({ connected: false });
-      let text = collectText(tree).join(" ");
-      expect(text).toContain("saved after the backup finishes");
-      expect(text).not.toContain("was not saved");
-      expect(kBaseProps.onRefreshCodex.mock.calls.length).toBe(refreshesAfterExchange);
-      await vi.advanceTimersByTimeAsync(kCodexDeferredSaveRecheckMs);
-      expect(kBaseProps.onRefreshCodex.mock.calls.length).toBe(refreshesAfterExchange + 1);
-
-      // Strike two (the recheck's read, a NEW status object): claim failed.
-      tree = renderWithStatusRead({ connected: false });
-      text = collectText(tree).join(" ");
-      expect(text).toContain(
-        "Codex connection was not saved (the saved connection did not appear after the backup) — reconnect",
-      );
-      expect(text).not.toContain("saved after the backup finishes");
-      await vi.advanceTimersByTimeAsync(kCodexDeferredSaveRecheckMs * 3);
-      expect(kBaseProps.onRefreshCodex.mock.calls.length).toBe(refreshesAfterExchange + 1);
-    } finally {
-      vi.useRealTimers();
-    }
   });
 });

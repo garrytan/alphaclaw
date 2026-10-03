@@ -407,7 +407,7 @@ describe("frontend/models-tab use-models", () => {
     expect(hook.result().codexStatusError).toBe("cold boot failure");
   });
 
-  it("a quiet-period config read (unavailable: true) keeps the last-known profiles/order and flags the store — never adopts the empty placeholders", async () => {
+  it("an unavailable config read (unavailable: true) keeps the last-known profiles/order and flags the store — never adopts the empty placeholders", async () => {
     const hook = renderHook();
     const { catalog, config, codex } = fetchStates();
     catalog.refresh.mockResolvedValue(kCatalog);
@@ -428,7 +428,7 @@ describe("frontend/models-tab use-models", () => {
         authProfiles: [],
         authOrder: {},
         unavailable: true,
-        reason: "backup_in_progress",
+        reason: "AUTH_STORE_UNREADABLE",
       }),
     );
     await hook.result().refresh();
@@ -439,12 +439,12 @@ describe("frontend/models-tab use-models", () => {
       anthropic: ["anthropic:default", "anthropic:manual"],
     });
     expect(hook.result().getProfileValue("anthropic:default")).toEqual({ key: "draft-key" });
-    expect(hook.result().authStoreUnavailable).toEqual({ reason: "backup_in_progress" });
+    expect(hook.result().authStoreUnavailable).toEqual({ reason: "AUTH_STORE_UNREADABLE" });
     // primary/configuredModels come from openclaw.json, not the store — still adopted.
     expect(hook.result().primary).toBe("anthropic/claude-opus-4-8");
     expect(hook.result().error).toBe("");
 
-    // The barrier lifts: the next readable payload clears the flag and adopts.
+    // The store recovers: the next readable payload clears the flag and adopts.
     config.refresh.mockResolvedValue(configPayload({ authProfiles: [] }));
     await hook.result().refresh();
     hook.render();
@@ -452,21 +452,21 @@ describe("frontend/models-tab use-models", () => {
     expect(hook.result().authProfiles).toEqual([]);
   });
 
-  it("a quiet-period codex status keeps the last-known connection under the unavailable marker (refresh and refreshCodexStatus)", async () => {
+  it("an unavailable codex status keeps the last-known connection under the unavailable marker (refresh and refreshCodexStatus)", async () => {
     const hook = renderHook();
     const { catalog, config, codex } = fetchStates();
     catalog.refresh.mockResolvedValue(kCatalog);
     config.refresh.mockResolvedValue(configPayload());
 
     // A FIRST read that is unavailable is not a checked status.
-    codex.refresh.mockResolvedValue({ connected: false, unavailable: true, reason: "backup_in_progress" });
+    codex.refresh.mockResolvedValue({ connected: false, unavailable: true, reason: "AUTH_STORE_UNREADABLE" });
     hook.runRefreshEffect();
     await flushAsync();
     hook.render();
     expect(hook.result().codexStatus).toEqual({
       connected: false,
       unavailable: true,
-      reason: "backup_in_progress",
+      reason: "AUTH_STORE_UNREADABLE",
     });
     expect(hook.result().codexStatusKnown).toBe(false);
 
@@ -476,21 +476,21 @@ describe("frontend/models-tab use-models", () => {
     expect(hook.result().codexStatus).toEqual({ connected: true });
     expect(hook.result().codexStatusKnown).toBe(true);
 
-    codex.refresh.mockResolvedValue({ connected: false, unavailable: true, reason: "backup_in_progress" });
+    codex.refresh.mockResolvedValue({ connected: false, unavailable: true, reason: "AUTH_STORE_UNREADABLE" });
     await hook.result().refreshCodexStatus();
     hook.render();
     // Still connected as far as anyone knows — only the marker is new.
     expect(hook.result().codexStatus).toEqual({
       connected: true,
       unavailable: true,
-      reason: "backup_in_progress",
+      reason: "AUTH_STORE_UNREADABLE",
     });
     expect(hook.result().codexStatusKnown).toBe(true);
     expect(hook.result().codexStatusError).toBe("");
   });
 
   // D14: the "Credential store unavailable" line and the codex badge must
-  // clear on their own once the barrier lifts — ONE bounded full re-read per
+  // clear on their own once the store recovers — ONE bounded full re-read per
   // unavailable read (config OR codex), dropped once both are readable.
   it("D14: an unavailable config read arms ONE bounded recheck that re-reads the store; readable reads stop it", async () => {
     vi.useFakeTimers();
@@ -500,11 +500,11 @@ describe("frontend/models-tab use-models", () => {
       catalog.refresh.mockResolvedValue(kCatalog);
       codex.refresh.mockResolvedValue({ connected: true });
       config.refresh.mockResolvedValue(
-        configPayload({ authProfiles: [], authOrder: {}, unavailable: true, reason: "backup_in_progress" }),
+        configPayload({ authProfiles: [], authOrder: {}, unavailable: true, reason: "AUTH_STORE_UNREADABLE" }),
       );
       await hook.runRefreshEffect();
       hook.render();
-      expect(hook.result().authStoreUnavailable).toEqual({ reason: "backup_in_progress" });
+      expect(hook.result().authStoreUnavailable).toEqual({ reason: "AUTH_STORE_UNREADABLE" });
       expect(config.refresh).toHaveBeenCalledTimes(1);
 
       await vi.advanceTimersByTimeAsync(kStoreUnavailableRecheckMs - 1);
@@ -512,9 +512,9 @@ describe("frontend/models-tab use-models", () => {
       await vi.advanceTimersByTimeAsync(1);
       expect(config.refresh).toHaveBeenCalledTimes(2);
       hook.render();
-      expect(hook.result().authStoreUnavailable).toEqual({ reason: "backup_in_progress" });
+      expect(hook.result().authStoreUnavailable).toEqual({ reason: "AUTH_STORE_UNREADABLE" });
 
-      // Still unavailable → re-armed exactly once; then the barrier lifts.
+      // Still unavailable → re-armed exactly once; then the store recovers.
       config.refresh.mockResolvedValue(configPayload());
       await vi.advanceTimersByTimeAsync(kStoreUnavailableRecheckMs);
       expect(config.refresh).toHaveBeenCalledTimes(3);
@@ -540,7 +540,7 @@ describe("frontend/models-tab use-models", () => {
       await hook.runRefreshEffect();
       hook.render();
 
-      codex.refresh.mockResolvedValue({ connected: true, unavailable: true, reason: "backup_in_progress" });
+      codex.refresh.mockResolvedValue({ connected: true, unavailable: true, reason: "AUTH_STORE_UNREADABLE" });
       await hook.result().refreshCodexStatus();
       hook.render();
       expect(hook.result().codexStatus.unavailable).toBe(true);
@@ -559,7 +559,7 @@ describe("frontend/models-tab use-models", () => {
 
       // Armed by an unavailable read, then a readable manual refresh lands
       // before it fires: the pending timer is dropped, not fired later.
-      codex.refresh.mockResolvedValue({ connected: true, unavailable: true, reason: "backup_in_progress" });
+      codex.refresh.mockResolvedValue({ connected: true, unavailable: true, reason: "AUTH_STORE_UNREADABLE" });
       await hook.result().refreshCodexStatus();
       expect(vi.getTimerCount()).toBe(1);
       codex.refresh.mockResolvedValue({ connected: true });
@@ -572,7 +572,7 @@ describe("frontend/models-tab use-models", () => {
 
   // Kept last: the only UNSCOPED test — it is the one mode that writes the
   // module-level tab cache, and it leaves that cache populated.
-  it("the tab cache never seeds a quiet-period placeholder as a checked status or as the profile list; a checked read does seed", async () => {
+  it("the tab cache never seeds an unavailable placeholder as a checked status or as the profile list; a checked read does seed", async () => {
     const mount = () => renderHook("");
     const hook = mount();
     const catalog = __cachedFetchRegistry.get(kModelCatalogCacheKey);
@@ -583,7 +583,7 @@ describe("frontend/models-tab use-models", () => {
     codex.refresh.mockResolvedValue({
       connected: false,
       unavailable: true,
-      reason: "backup_in_progress",
+      reason: "AUTH_STORE_UNREADABLE",
     });
     hook.runRefreshEffect();
     await flushAsync();
@@ -604,11 +604,11 @@ describe("frontend/models-tab use-models", () => {
     // replace the cached profiles/order with the empty placeholders.
     codex.refresh.mockResolvedValue({ connected: true });
     config.refresh.mockResolvedValue(
-      configPayload({ authProfiles: [], authOrder: {}, unavailable: true, reason: "backup_in_progress" }),
+      configPayload({ authProfiles: [], authOrder: {}, unavailable: true, reason: "AUTH_STORE_UNREADABLE" }),
     );
     await second.result().refresh();
     second.render();
-    expect(second.result().authStoreUnavailable).toEqual({ reason: "backup_in_progress" });
+    expect(second.result().authStoreUnavailable).toEqual({ reason: "AUTH_STORE_UNREADABLE" });
 
     harness.reset();
     const third = mount();

@@ -307,10 +307,9 @@ if (command === "diagnose") {
 // The heavy pre-listen work below (pending-update npm install up to 3min,
 // gog CLI download, git fetches, migrations) used to leave the port silently
 // closed — users saw connection-refused and platform health checks failed.
-// Spawned HERE, right after ALPHACLAW_ROOT_DIR (which it inherits for live
-// update-progress rendering) and PORT are resolved, so it also covers the
-// pending self-update npm install below — previously a ~3-minute blind
-// window before the old spawn point.
+// Spawned HERE, right after ALPHACLAW_ROOT_DIR and PORT are resolved, so it
+// also covers the pending self-update npm install below — previously a
+// ~3-minute blind window before the old spawn point.
 // The placeholder runs as a CHILD PROCESS (lib/boot-placeholder-child.js):
 // the boot work below blocks THIS process's event loop for minutes (execSync
 // npm install, gog download), so an in-process server would accept TCP but
@@ -995,8 +994,8 @@ if (
 }
 
 // `alphaclaw admin ...` — an out-of-process HTTP client for the running
-// server's /api surface. Early-exit BEFORE the release-channel boot sync so it
-// can never race an activation (same contract as the telegram/doctor verbs).
+// server's /api surface. Early-exit BEFORE the boot instance guard (same
+// contract as the telegram/doctor verbs).
 if (command === "admin") {
   const { runAdminCommand } = require("../lib/cli/admin");
   runAdminCommand({ argv: commandArgs.slice(1), rootDir })
@@ -1072,7 +1071,7 @@ try {
 // the stamp is evidence, never a gate.
 let selfVersionStamp = null;
 try {
-  const { kManagedDirName } = require("../lib/server/openclaw-release-channel");
+  const { kOpenclawManagedDir } = require("../lib/server/constants");
   const {
     stampSelfVersionAtBoot,
     formatBootBanner,
@@ -1080,7 +1079,7 @@ try {
   selfVersionStamp = stampSelfVersionAtBoot({
     version: pkg.version,
     spec: resolveSelfDependency({ fsImpl: fs }).spec,
-    managedDir: path.join(openclawDir, kManagedDirName),
+    managedDir: kOpenclawManagedDir,
     logger: console,
   });
   console.log(formatBootBanner(selfVersionStamp.record, { rootDir }));
@@ -1089,57 +1088,43 @@ try {
 }
 
 // ---------------------------------------------------------------------------
-// 7b. OpenClaw release-channel boot sync (offline, synchronous, fail-open)
+// 7b. Single-instance guard + bin-phase boot report (synchronous, fail-open)
 // ---------------------------------------------------------------------------
-// Re-applies the explicitly selected OpenClaw version (overlay store / dev
-// checkout shim) BEFORE anything below shells `openclaw`. Runs only in the
-// `start` path — CLI subcommands (diagnose, git-sync, doctor, telegram, admin)
-// exited earlier, so hourly cron processes can never race an activation. Any
-// failure must fall back to the image's pinned install; startup itself is
-// never blocked. Every return path also leaves the bin-phase boot-report.json
-// behind (plan A1; the writer is built inside runOpenclawChannelBootSync).
+// Runs only in the `start` path — CLI subcommands (diagnose, git-sync, doctor,
+// telegram, admin) exited earlier. Judges the server pidfile, claims it,
+// retires the old in-app OpenClaw version switch once (the pinned install is
+// the only build AlphaClaw runs) and writes the bin half of boot-report.json.
 try {
-  const { kOpenclawBinShimDir } = require("../lib/server/constants");
-  const shimPathPrefix = `${kOpenclawBinShimDir}${path.delimiter}`;
-  if (!String(process.env.PATH || "").startsWith(shimPathPrefix)) {
-    process.env.PATH = `${shimPathPrefix}${process.env.PATH || ""}`;
-  }
-  const {
-    runOpenclawChannelBootSync,
-  } = require("../lib/server/openclaw-channel-sync");
-  // The stamp rides along so the bin-phase boot-report.json (plan A1) names
-  // this AlphaClaw version without re-reading the file it just wrote.
-  const bootSyncResult = runOpenclawChannelBootSync({ selfVersion: selfVersionStamp });
-  if (bootSyncResult?.action === "skipped_concurrent" && bootSyncResult.corroborated) {
+  const { runBootInstanceGuard } = require("../lib/server/boot-instance-guard");
+  const guard = runBootInstanceGuard({ selfVersion: selfVersionStamp });
+  if (guard?.action === "skipped_concurrent" && guard.corroborated) {
     // A live AlphaClaw server provably owns this state directory: its pidfile
     // names a live pid whose kernel start time matches the record. Loading
     // lib/server.js next would run its module-init side effects against the
     // live databases before dying on EADDRINUSE (fix wave F004) — refuse
     // here instead. The placeholder child self-exits on the ppid check; kill
-    // it eagerly anyway. The sync already wrote this attempt's boot report
-    // to boot-report-refused.json with serverPhase not_reached (plan A1,
-    // "bin-exit paths") WITHOUT rotating the ring, so the live server's
-    // completed boot-report.json stays current — nothing to mark here.
+    // it eagerly anyway. The guard wrote this attempt to
+    // boot-report-refused.json WITHOUT rotating the ring, so the live
+    // server's completed boot-report.json stays current.
     console.error(
-      `[alphaclaw] Another AlphaClaw server (pid ${bootSyncResult.livePid}) already owns ${rootDir}. Refusing to start a second instance against its live databases — stop it first, or pass a different --root-dir.`,
+      `[alphaclaw] Another AlphaClaw server (pid ${guard.livePid}) already owns ${rootDir}. Refusing to start a second instance against its live databases — stop it first, or pass a different --root-dir.`,
     );
     try {
       bootPlaceholder?.kill();
     } catch {}
     process.exit(1);
-  } else if (bootSyncResult?.action === "skipped_concurrent") {
+  } else if (guard?.action === "skipped_concurrent") {
     // Alive pid but unverifiable (legacy pidfile without a start time, no
     // /proc, or a hard-killed predecessor whose pid number a fresh container
     // reused). Refusing here would wedge a `--restart=always` container in a
-    // crash loop on a stale file, so keep the pre-F004 posture: the
-    // destructive sync was skipped, boot continues, EADDRINUSE still stops a
+    // crash loop on a stale file: boot continues and EADDRINUSE still stops a
     // true duplicate.
     console.warn(
-      `[alphaclaw] pidfile names live pid ${bootSyncResult.livePid} but its identity could not be verified — boot sync skipped, continuing (a stale pidfile from a hard-killed predecessor looks like this).`,
+      `[alphaclaw] pidfile names live pid ${guard.livePid} but its identity could not be verified — continuing (a stale pidfile from a hard-killed predecessor looks like this).`,
     );
   }
 } catch (e) {
-  console.log(`[openclaw-channel] boot sync failed (fail-open): ${e.message}`);
+  console.log(`[alphaclaw] boot instance guard failed (fail-open): ${e.message}`);
 }
 
 const ensureGogCliCompatConfigPath = () => {
@@ -1424,23 +1409,17 @@ if (String(process.env.ALPHACLAW_SKIP_PROFILE_ENV || "") === "1") {
     } catch {}
   };
   const wrapperPath = kWrapperPathOverride || "/usr/local/bin/openclaw";
-  const { kOpenclawBinShimDir } = require("../lib/server/constants");
-  const managedShimPath = path.join(kOpenclawBinShimDir, "openclaw");
-  // The pinned install's real bin, resolved at generation time — the wrapper
-  // execs this when no release-channel shim exists (pin/beta channels).
+  // The pinned install's real bin, resolved at generation time.
+  // (openclaw's package.json is not in its `exports`, so require.resolve
+  // cannot reach it — read the install directly.)
   let installedOpenclawBinPath = "/nonexistent/openclaw";
   try {
-    const openclawPkgDir = path.dirname(
-      require.resolve("openclaw/package.json"),
-    );
-    const openclawPkg = JSON.parse(
-      fs.readFileSync(path.join(openclawPkgDir, "package.json"), "utf8"),
-    );
-    const binRel =
-      typeof openclawPkg.bin === "string"
-        ? openclawPkg.bin
-        : Object.values(openclawPkg.bin || {})[0];
-    if (binRel) installedOpenclawBinPath = path.join(openclawPkgDir, binRel);
+    const { describeExecutingBuild } = require("../lib/server/openclaw-build");
+    const build = describeExecutingBuild({
+      installDir: resolveSelfDependency({ fsImpl: fs }).installDir,
+      fsModule: fs,
+    });
+    if (build?.bin) installedOpenclawBinPath = build.bin;
   } catch {}
   const wrapperContent = [
     "#!/bin/sh",
@@ -1449,14 +1428,11 @@ if (String(process.env.ALPHACLAW_SKIP_PROFILE_ENV || "") === "1") {
     `export OPENCLAW_HOME=${shQuote(rootDir)}`,
     `export OPENCLAW_STATE_DIR=${shQuote(openclawDir)}`,
     `export OPENCLAW_CONFIG_PATH=${shQuote(path.join(openclawDir, "openclaw.json"))}`,
-    // Prefer the release-channel shim (the version alphaclaw manages — it
-    // only exists on the dev channel; pin/beta activation removes it), then
-    // the alphaclaw install's own openclaw bin, then a portable PATH walk
-    // that skips this wrapper itself. NOTE: `command -v -a` is NOT the
+    // The alphaclaw install's own (pinned) openclaw bin, then a portable PATH
+    // walk that skips this wrapper itself. NOTE: `command -v -a` is NOT the
     // fallback here — POSIX sh (dash, bash-as-sh) rejects the -a flag, which
     // would leave the wrapper exiting 127 in front of a perfectly good
-    // openclaw on every non-dev box.
-    `if [ -x ${shQuote(managedShimPath)} ]; then exec ${shQuote(managedShimPath)} "$@"; fi`,
+    // openclaw.
     `if [ -x ${shQuote(installedOpenclawBinPath)} ]; then exec ${shQuote(installedOpenclawBinPath)} "$@"; fi`,
     '_ifs="$IFS"; IFS=:',
     "for _dir in $PATH; do",
@@ -1465,7 +1441,7 @@ if (String(process.env.ALPHACLAW_SKIP_PROFILE_ENV || "") === "1") {
     '  if [ -x "$_dir/openclaw" ]; then IFS="$_ifs"; exec "$_dir/openclaw" "$@"; fi',
     "done",
     'IFS="$_ifs"',
-    `echo "openclaw: no managed openclaw found (expected ${managedShimPath})" >&2`,
+    `echo "openclaw: no openclaw found (expected ${installedOpenclawBinPath})" >&2`,
     "exit 127",
     "",
   ].join("\n");
@@ -1592,19 +1568,11 @@ if (fs.existsSync(path.join(openclawDir, ".git"))) {
     }
   } catch {}
 
-  const { assessBootConfigRestore } = require("../lib/server/boot-config-restore-guard");
-  const restoreAdmission = fs.existsSync(configPath)
-    ? { allowed: true }
-    : assessBootConfigRestore({ openclawDir });
-  if (restoreAdmission.allowed) {
-    restoreMissingOpenclawConfigFromRemote({
-      openclawDir,
-      configPath,
-      env: process.env,
-    });
-  } else {
-    console.warn(`[alphaclaw] Remote config restore deferred: ${restoreAdmission.reason}`);
-  }
+  restoreMissingOpenclawConfigFromRemote({
+    openclawDir,
+    configPath,
+    env: process.env,
+  });
   if (
     ensureMainUpstream({
       openclawDir,

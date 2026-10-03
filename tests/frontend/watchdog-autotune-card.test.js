@@ -221,7 +221,6 @@ describe("frontend/watchdog autotune card — view models", () => {
   it("humanizes values per knob unit (never raw MB counts)", () => {
     expect(formatAutotuneValue("gatewayHeapMb", 4096)).toBe("4.0 GB");
     expect(formatAutotuneValue("sqliteCacheMb", 64)).toBe("64 MB");
-    expect(formatAutotuneValue("backupMaxTotalGb", 20)).toBe("20.0 GB");
     expect(formatAutotuneValue("agentConcurrencyCap", 32)).toBe("32 agents");
     expect(formatAutotuneValue("uvThreadpoolSize", 8)).toBe("8 threads");
     expect(formatAutotuneValue("gatewayHeapMb", null)).toBe("—");

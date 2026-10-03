@@ -5,7 +5,6 @@ import {
 } from "../../lib/public/js/components/general/hardening-badge.js";
 
 const statusWithHardening = (state, extra = {}, hardeningExtra = {}) => ({
-  releaseChannel: "stable",
   bootstrapContext: {
     hardening: { state, files: [], ...hardeningExtra },
   },
@@ -27,7 +26,7 @@ describe("frontend/general hardening badge", () => {
       label: "Hardening: injected",
     });
     // Problem states are owned by GeneralHardeningCard (file, cause, fix,
-    // action) — the badge yields entirely on non-dev channels.
+    // action) — the badge yields entirely.
     expect(getHardeningBadgeModel(statusWithHardening("starved"))).toBe(null);
     expect(getHardeningBadgeModel(statusWithHardening("blocked"))).toBe(null);
     expect(getHardeningBadgeModel(statusWithHardening("unknown"))).toMatchObject({
@@ -53,19 +52,6 @@ describe("frontend/general hardening badge", () => {
     expect(getHardeningBadgeModel(statusWithHardening("unknown")).title).toBe(
       "Prompt hardening state could not be determined. Run /context on the agent to check.",
     );
-  });
-
-  it("shows unverified on the dev channel regardless of state", () => {
-    expect(
-      getHardeningBadgeModel(
-        statusWithHardening("injected", { releaseChannel: "dev" }),
-      ),
-    ).toMatchObject({ tone: "warning", label: "Hardening: unverified" });
-    expect(
-      getHardeningBadgeModel(
-        statusWithHardening("blocked", { releaseChannel: "dev" }),
-      ),
-    ).toMatchObject({ tone: "warning", label: "Hardening: unverified" });
   });
 
   it("renders a vnode when a model exists", () => {

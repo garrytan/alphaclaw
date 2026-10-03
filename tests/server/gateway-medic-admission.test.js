@@ -5,15 +5,19 @@ const { createGatewayMedic } = require("../../lib/server/gateway-medic");
 const { createRepairOperation } = require("../../lib/server/repair-operation");
 const { createGatewayLifecycleLock } = require("../../lib/server/gateway-lifecycle-lock");
 const { createDoctorFixRunner } = require("../../lib/server/doctor-fix-runner");
-const { createOpenclawReleaseChannelStore } = require("../../lib/server/openclaw-release-channel");
-const { createOpenclawChannelSync } = require("../../lib/server/openclaw-channel-sync");
+const { GatewayMutationBlockedError } = require("../../lib/server/gateway-mutation-policy");
+const { createMedicAdmission } = require("../../lib/server/medic-admission");
 
+// The caller's live admission (the watchdog's assertMutationAllowed) refusing
+// with the shared gateway-mutation vocabulary.
+const blocker = (code) => () => {
+  throw new GatewayMutationBlockedError({ code, statusCode: 409, error: `blocked: ${code}` });
+};
 const kBlockedStates = [
-  ["corrupted", () => ({ stateCorrupted: true }), "gateway_hold_unreadable"],
-  ["null", () => null, "gateway_hold_unreadable"],
-  ["throwing", () => { throw new Error("private-state-read-secret"); }, "gateway_hold_unreadable"],
-  ["held", () => ({ gatewayHold: { reason: "migration_pending" } }), "gateway_held"],
+  ["lease_expired", blocker("lease_expired"), "lease_expired"],
+  ["booting", blocker("booting"), "booting"],
 ];
+const allow = () => {};
 const kRemedies = ["managed", "ai_remove_keys", "fallback", "doctor", "ai_doctor"];
 const deferred = () => {
   let resolve;
@@ -33,7 +37,9 @@ describe("gateway medic live mutation admission", () => {
   });
   afterEach(() => fs.rmSync(openclawDir, { recursive: true, force: true }));
 
+  // `admit` is the caller's live admission, re-read at every mutation point.
   const setup = (remedy, overrides = {}) => {
+    let admit = allow;
     const runDoctorFix = vi.fn(async () => ({ ok: true }));
     const llmClient = {
       getAvailability: () => ({ available: true }),
@@ -58,9 +64,10 @@ describe("gateway medic live mutation admission", () => {
       stderrTail: remedy === "managed"
         ? ['gateway.controlUi: Unrecognized key: "environment"']
         : ['Unrecognized key: "audit"'],
+      assertMutationAllowed: (args) => admit(args),
       ...options,
     });
-    return { medic, run, runDoctorFix, llmClient, logs };
+    return { medic, run, runDoctorFix, llmClient, logs, setAdmission: (next) => { admit = next; } };
   };
 
   const expectUntouched = () => {
@@ -69,19 +76,19 @@ describe("gateway medic live mutation admission", () => {
   };
 
   for (const remedy of kRemedies) {
-    it.each(kBlockedStates)(`${remedy} refuses %s channel state before any writer or paid AI`, async (_name, getChannelInfo, reason) => {
-      const { run, runDoctorFix, llmClient, logs } = setup(remedy, { getChannelInfo });
+    it.each(kBlockedStates)(`${remedy} refuses a %s admission before any writer or paid AI`, async (_name, refuse, reason) => {
+      const { run, runDoctorFix, llmClient, setAdmission } = setup(remedy);
+      setAdmission(refuse);
       const outcome = await run();
       expectUntouched();
       expect(runDoctorFix).not.toHaveBeenCalled();
       expect(llmClient.complete).not.toHaveBeenCalled();
-      expect(outcome).toMatchObject({ fixed: false, skipped: true, reason });
-      expect(JSON.stringify({ outcome, logs })).not.toContain("private-state-read-secret");
+      expect(outcome).toMatchObject({ fixed: false, tier: "blocked", skipped: true, reason });
     });
 
-    it.each(["clean", "legacy"])(`${remedy} retains the %s mutation route`, async (mode) => {
-      const { run, runDoctorFix } = setup(remedy, mode === "clean" ? { getChannelInfo: () => ({}) } : {});
-      expect(await run()).toMatchObject({ fixed: true });
+    it.each(["admitted", "no caller admission"])(`${remedy} retains the mutation route when %s`, async (mode) => {
+      const { run, runDoctorFix } = setup(remedy);
+      expect(await run(mode === "admitted" ? {} : { assertMutationAllowed: null })).toMatchObject({ fixed: true });
       expect(fs.readdirSync(openclawDir).filter((name) => name.includes(".medic-"))).toHaveLength(1);
       if (remedy.includes("doctor")) expect(runDoctorFix).toHaveBeenCalledOnce();
       else expect(fs.readFileSync(configPath, "utf8")).not.toBe(original);
@@ -89,18 +96,17 @@ describe("gateway medic live mutation admission", () => {
   }
 
   for (const remedy of ["ai_remove_keys", "ai_doctor", "fallback"]) {
-    it.each(kBlockedStates)(`${remedy} rechecks %s state after the LLM await`, async (_name, blockedInfo, reason) => {
-      let getInfo = () => ({});
+    it.each(kBlockedStates)(`${remedy} rechecks a %s admission after the LLM await`, async (_name, refuse, reason) => {
       const response = deferred();
       const entered = deferred();
       const llmClient = {
         getAvailability: () => ({ available: true }),
         complete: vi.fn(() => { entered.resolve(); return response.promise; }),
       };
-      const { run, runDoctorFix } = setup(remedy, { llmClient, getChannelInfo: () => getInfo() });
+      const { run, runDoctorFix, setAdmission } = setup(remedy, { llmClient });
       const running = run();
       await entered.promise;
-      getInfo = blockedInfo;
+      setAdmission(refuse);
       response.resolve({ ok: true, provider: "test", model: "test", text: JSON.stringify({ confidence: "high", remedy: remedy === "fallback" ? "none" : remedy === "ai_doctor" ? "doctor_fix" : "remove_keys", keys: ["audit"] }) });
       expect(await running).toMatchObject({ fixed: false, skipped: true, reason });
       expectUntouched();
@@ -108,30 +114,14 @@ describe("gateway medic live mutation admission", () => {
     });
   }
 
-  it.each(kBlockedStates)("Doctor rechecks %s state after resolving its binary", async (_name, blockedInfo, reason) => {
-    let getInfo = () => ({ installedDiverged: true });
-    const response = deferred();
-    const entered = deferred();
-    const { run, runDoctorFix } = setup("doctor", {
-      getChannelInfo: () => getInfo(),
-      resolveDoctorBin: () => { entered.resolve(); return response.promise; },
-    });
-    const running = run();
-    await entered.promise;
-    getInfo = blockedInfo;
-    response.resolve({ bin: "/compatible/openclaw", version: "2026.9.5" });
-    expect(await running).toMatchObject({ fixed: false, skipped: true, reason });
-    expectUntouched();
-    expect(runDoctorFix).not.toHaveBeenCalled();
-  });
-
-  it.each(kBlockedStates)("keeps diagnostic collection read-only and avoids paid AI after %s state appears", async (_name, blockedInfo, reason) => {
-    let getInfo = () => ({});
+  it.each(kBlockedStates)("keeps diagnostic collection read-only and avoids paid AI after a %s admission appears", async (_name, refuse, reason) => {
+    let flip = null;
     const collectDoctorJson = vi.fn(async () => {
-      getInfo = blockedInfo;
+      flip(refuse);
       return '{"ok":true}';
     });
-    const { medic, run, llmClient } = setup("ai_remove_keys", { getChannelInfo: () => getInfo(), collectDoctorJson });
+    const { medic, run, llmClient, setAdmission } = setup("ai_remove_keys", { collectDoctorJson });
+    flip = setAdmission;
     expect(await run()).toMatchObject({ fixed: false, skipped: true, reason });
     expect(collectDoctorJson).toHaveBeenCalledOnce();
     expect(llmClient.complete).not.toHaveBeenCalled();
@@ -139,18 +129,18 @@ describe("gateway medic live mutation admission", () => {
     expectUntouched();
   });
 
-  it("refuses a managed write when policy changes during the locked config read", async () => {
-    let blocked = false;
+  it("refuses a managed write when admission changes during the locked config read", async () => {
     let reads = 0;
-    const { run } = setup("managed", {
-      getChannelInfo: () => ({ stateCorrupted: blocked }),
+    let flip = null;
+    const { run, setAdmission } = setup("managed", {
       fsModule: { ...fs, readFileSync: (...args) => {
         const value = fs.readFileSync(...args);
-        if (args[0] === configPath && ++reads === 2) blocked = true;
+        if (args[0] === configPath && ++reads === 2) flip(blocker("lease_expired"));
         return value;
       } },
     });
-    expect(await run()).toMatchObject({ fixed: false, skipped: true, reason: "gateway_hold_unreadable" });
+    flip = setAdmission;
+    expect(await run()).toMatchObject({ fixed: false, skipped: true, reason: "lease_expired" });
     expectUntouched();
   });
 
@@ -161,7 +151,6 @@ describe("gateway medic live mutation admission", () => {
     const response = deferred();
     const entered = deferred();
     const { run } = setup("ai_remove_keys", {
-      getChannelInfo: () => ({}),
       llmClient: { getAvailability: () => ({ available: true }), complete: () => { entered.resolve(); return response.promise; } },
     });
     const running = run({ operation });
@@ -174,86 +163,48 @@ describe("gateway medic live mutation admission", () => {
     expectUntouched();
   });
 
-  it("recovers on a later run after the release state is repaired", async () => {
-    let info = { stateCorrupted: true };
-    const { run } = setup("managed", { getChannelInfo: () => info });
+  it("recovers on a later run after the admission clears", async () => {
+    const { run, setAdmission } = setup("managed");
+    setAdmission(blocker("booting"));
     expect(await run()).toMatchObject({ fixed: false, skipped: true });
     expectUntouched();
-    info = {};
+    setAdmission(allow);
     expect(await run()).toMatchObject({ fixed: true, tier: "managed_key" });
     expect(fs.readFileSync(configPath, "utf8")).not.toBe(original);
   });
 
-  it("refuses a torn on-disk channel store and recovers through the real channel-info projection", async () => {
-    const logger = { log() {}, warn() {}, error() {} };
-    const store = createOpenclawReleaseChannelStore({ rootDir: openclawDir, openclawDir, logger });
-    store.writeState({});
-    const channel = createOpenclawChannelSync({
-      rootDir: openclawDir, openclawDir, store, logger,
-      resolveInstallDir: () => null, readReleaseChannel: () => "stable",
-    });
-    const statePath = store.statePath;
-    const torn = '{"gatewayHold":';
-    fs.writeFileSync(statePath, torn);
-    const protectedPath = path.join(openclawDir, "exec-approvals.json");
-    const protectedBytes = '{"version":1,"defaults":{"security":"deny"}}\n';
-    fs.writeFileSync(protectedPath, protectedBytes);
-    const { run, runDoctorFix } = setup("managed", {
-      getChannelInfo: channel.getChannelInfo,
-    });
-    expect(channel.getChannelInfo()).toMatchObject({ stateCorrupted: true, gatewayHold: null });
-    expect(await run()).toMatchObject({ fixed: false, skipped: true, reason: "gateway_hold_unreadable" });
-    expect(fs.readFileSync(configPath, "utf8")).toBe(original);
-    expect(fs.readFileSync(statePath, "utf8")).toBe(torn);
-    expect(fs.readFileSync(protectedPath, "utf8")).toBe(protectedBytes);
+  it("withholds Doctor when the caller forbids it while still permitting blamed-key repair", async () => {
+    const { run, runDoctorFix } = setup("doctor");
+    expect(await run({ allowDoctorFix: false })).toMatchObject({ fixed: true, tier: "blamed_key_strip" });
     expect(runDoctorFix).not.toHaveBeenCalled();
-    expect(fs.readdirSync(openclawDir).filter((name) => name.includes(".medic-"))).toEqual([]);
-    store.writeState({});
-    expect(channel.getChannelInfo()).toMatchObject({ stateCorrupted: false, gatewayHold: null });
-    expect(await run()).toMatchObject({ fixed: true, tier: "managed_key" });
-    expect(fs.readFileSync(protectedPath, "utf8")).toBe(protectedBytes);
+    expect(await run()).toMatchObject({ fixed: true, tier: "doctor_fix" });
+    expect(runDoctorFix).toHaveBeenCalledOnce();
   });
 
-  it.each([
-    ["legacy non-pin window", { isPin: false, inStabilizationWindow: true }, false],
-    ["legacy pin", { isPin: true, inStabilizationWindow: true }, true],
-    ["pin window", { isPin: true, stabilization: { inWindow: true } }, false],
-    ["channel window", { isPin: false, stabilization: { inWindow: true } }, false],
-    ["accepted build", { isPin: false, inStabilizationWindow: true, stabilization: { inWindow: false } }, true],
-  ])("preserves the Doctor policy for a %s while still permitting blamed-key repair", async (_name, info, allowed) => {
-    const { run, runDoctorFix } = setup("doctor", { getChannelInfo: () => info });
-    expect(await run()).toMatchObject({ fixed: true, tier: allowed ? "doctor_fix" : "blamed_key_strip" });
-    expect(runDoctorFix).toHaveBeenCalledTimes(allowed ? 1 : 0);
+  it("names the Doctor prohibition in the medic admission vocabulary", () => {
+    const admission = createMedicAdmission();
+    expect(admission.read()).toBeNull();
+    expect(admission.read({ doctor: true })).toBeNull();
+    expect(admission.read({ allowDoctorFix: false })).toBeNull();
+    expect(admission.read({ doctor: true, allowDoctorFix: false })).toMatchObject({ code: "medic_doctor_prohibited" });
+    expect(() => admission.assert({ doctor: true, allowDoctorFix: false })).toThrow(GatewayMutationBlockedError);
   });
 
-  it("rechecks a stabilization window opened during Doctor binary resolution", async () => {
-    let info = { installedDiverged: true };
-    const { run, runDoctorFix } = setup("doctor", {
-      getChannelInfo: () => info,
-      resolveDoctorBin: async () => {
-        info = { ...info, stabilization: { inWindow: true } };
-        return { bin: "/compatible/openclaw" };
-      },
-    });
-    expect(await run()).toMatchObject({ fixed: true, tier: "blamed_key_strip" });
-    expect(runDoctorFix).not.toHaveBeenCalled();
-  });
-
-  it.each(kBlockedStates)("passes live %s admission into the real queued Doctor writer", async (_name, blockedInfo, reason) => {
-    let getInfo = () => ({});
+  it.each(kBlockedStates)("passes a live %s admission into the real queued Doctor writer", async (_name, refuse, reason) => {
     const runStreamed = vi.fn(async () => ({ ok: true, tail: "fixed" }));
     const withDoctorRestoreGuard = vi.fn(async ({ run }) => run());
     const runner = createDoctorFixRunner({
       openclawDir, doctorGuard: { withDoctorRestoreGuard },
       runStream: { runStreamed }, gatewayEnv: () => ({}), notifier: { notify: vi.fn() },
     });
-    const { run } = setup("doctor", {
-      getChannelInfo: () => getInfo(),
+    let flip = null;
+    const { run, setAdmission } = setup("doctor", {
       runDoctorFix: (options) => {
-        queueMicrotask(() => { getInfo = blockedInfo; });
+        queueMicrotask(() => { flip(refuse); });
         return runner(options);
       },
     });
+    flip = setAdmission;
     expect(await run()).toMatchObject({ fixed: false, skipped: true, reason });
     expect(fs.readFileSync(configPath, "utf8")).toBe(original);
     expect(fs.existsSync(path.join(openclawDir, "openclaw.json.pre-doctor.bak"))).toBe(false);
@@ -261,7 +212,7 @@ describe("gateway medic live mutation admission", () => {
     expect(runStreamed).not.toHaveBeenCalled();
   });
 
-  it.each(["LLM", "Doctor resolver"])("drains an expired real lifecycle lease before a late %s result can write", async (phase) => {
+  it("drains an expired real lifecycle lease before a late LLM result can write", async () => {
     vi.useFakeTimers();
     const response = deferred();
     const entered = deferred();
@@ -270,11 +221,8 @@ describe("gateway medic live mutation admission", () => {
     const operation = createRepairOperation({ isCurrent: () => hold.isValid() });
     hold = lock.tryAcquire("medic", { leaseMs: 100, cleanup: operation.cleanup });
     operation.start(60_000);
-    const { run, runDoctorFix } = setup(phase === "LLM" ? "ai_remove_keys" : "doctor", {
-      getChannelInfo: () => ({ installedDiverged: true }),
-      ...(phase === "LLM" ? {
-        llmClient: { getAvailability: () => ({ available: true }), complete: () => { entered.resolve(); return response.promise; } },
-      } : { resolveDoctorBin: () => { entered.resolve(); return response.promise; } }),
+    const { run, runDoctorFix } = setup("ai_remove_keys", {
+      llmClient: { getAvailability: () => ({ available: true }), complete: () => { entered.resolve(); return response.promise; } },
     });
     try {
       const running = run({ operation });
@@ -283,9 +231,7 @@ describe("gateway medic live mutation admission", () => {
       expect(await running).toMatchObject({ fixed: false, tier: "cancelled" });
       expect(hold.isExpired()).toBe(true);
       expect(lock.getActiveOperation()).toBeNull();
-      response.resolve(phase === "LLM"
-        ? { ok: true, provider: "test", model: "test", text: JSON.stringify({ confidence: "high", remedy: "remove_keys", keys: ["audit"] }) }
-        : { bin: "/compatible/openclaw" });
+      response.resolve({ ok: true, provider: "test", model: "test", text: JSON.stringify({ confidence: "high", remedy: "remove_keys", keys: ["audit"] }) });
       await Promise.resolve();
       await Promise.resolve();
       expectUntouched();

@@ -2751,91 +2751,6 @@ describe("server/gateway restart behavior", () => {
       }
     });
 
-    it("stopGatewayForBackup marks the exit expected, swallows CLI stop failures, and reports the stop verdict", async () => {
-      const child = createChild();
-      child.kill = vi.fn((sig) => {
-        child.killed = true;
-        // Signal deaths set signalCode and leave exitCode null (real Node
-        // semantics) so the reap wait settles without polling its budget.
-        child.signalCode = sig;
-        return true;
-      });
-      childProcess.spawn = vi.fn(() => child);
-      let stopCalls = 0;
-      childProcess.execFile = vi.fn((file, args, opts, cb) => {
-        if (isStopHelpProbe(args)) return cb(null, kStopHelpWithoutForce, "");
-        if (args?.[0] === "gateway" && args?.[1] === "stop") {
-          stopCalls += 1;
-          // The external best-effort stop fails — quiesce must proceed on
-          // the port verdict, never throw.
-          cb(Object.assign(new Error("stop timed out"), { code: 1 }), "", "");
-          return;
-        }
-        cb(null, "", "");
-      });
-      fs.existsSync = vi.fn(() => false);
-      net.createConnection = vi.fn(() => createSocket(false));
-      delete require.cache[modulePath];
-      const gateway = require(modulePath);
-      vi.spyOn(console, "log").mockImplementation(() => {});
-      const exitHandler = vi.fn();
-      gateway.setGatewayExitHandler(exitHandler);
-
-      await gateway.launchGatewayProcess();
-      expect(gateway.getLastGatewayStopEvidence()).toBeNull();
-      const verdict = await gateway.stopGatewayForBackup();
-
-      // The port released → waitForGatewayStopped's verdict rides through.
-      expect(verdict).toBe(true);
-      // The CLI stop ran once and its failure was swallowed (best-effort)...
-      expect(stopCalls).toBe(1);
-      // ...but no longer silently: the quiesce evidence records the managed
-      // child as the stop method, the reaped child, the released port, and
-      // the CLI's (non-refusal) failure exit code.
-      expect(gateway.getLastGatewayStopEvidence()).toEqual({
-        at: expect.any(String),
-        method: "managed_child",
-        childExited: true,
-        portReleased: true,
-        cliRefused: false,
-        cliExitCode: 1,
-      });
-
-      // The managed exit was marked expected BEFORE the kill: the watchdog
-      // must not count the quiesce as a crash. The exit report finalizes on
-      // 'close' (the bounded exit-vs-close stderr drain) — emit both, as real
-      // Node does.
-      const onExit = child.on.mock.calls.find((call) => call[0] === "exit")[1];
-      const onClose = child.on.mock.calls.find(
-        (call) => call[0] === "close",
-      )[1];
-      onExit(null, "SIGTERM");
-      onClose(null, "SIGTERM");
-      expect(exitHandler).toHaveBeenCalledWith(
-        expect.objectContaining({ expectedExit: true }),
-      );
-
-      // Unlike stopGatewayForShutdown, the one-way abortGatewayWaits latch
-      // did NOT flip: the relaunch that follows the backup still spawns.
-      const relaunched = await gateway.launchGatewayProcess();
-      expect(relaunched).toBeTruthy();
-      expect(childProcess.spawn).toHaveBeenCalledTimes(2);
-    });
-
-    it("stopGatewayForBackup reports false when the port never releases", async () => {
-      childProcess.execFile = execFileOk("");
-      fs.existsSync = vi.fn(() => false);
-      // The old gateway keeps the port for the whole (tiny) settle window.
-      net.createConnection = vi.fn(() => createSocket(true));
-      delete require.cache[modulePath];
-      const gateway = require(modulePath);
-      vi.spyOn(console, "log").mockImplementation(() => {});
-
-      const verdict = await gateway.stopGatewayForBackup({ timeoutMs: 1 });
-
-      expect(verdict).toBe(false);
-    });
-
     it("escalates to SIGKILL when the gateway child ignores SIGTERM", async () => {
       // Node sets child.killed=true the moment a signal is SENT — the
       // escalation must not be gated on it, or a SIGTERM-ignoring gateway
@@ -3456,39 +3371,6 @@ describe("server/gateway restart behavior", () => {
 
       expect(await gateway.launchGatewayProcess({ shouldAbort: () => true })).toBeNull();
       expect(childProcess.spawn).not.toHaveBeenCalled();
-    });
-
-    it.each(["child drain", "capability probe"])("fences backup CLI stop after ownership changes during %s", async (boundary) => {
-      let expired = false;
-      const child = createChild();
-      child.kill = vi.fn((signal) => {
-        child.killed = true;
-        child.signalCode = signal;
-        if (boundary === "child drain") expired = true;
-        return true;
-      });
-      childProcess.spawn = vi.fn(() => child);
-      childProcess.execFile = vi.fn((file, args, opts, cb) => {
-        if (isStopHelpProbe(args)) {
-          if (boundary === "capability probe") expired = true;
-          return cb(null, kStopHelpWithForce, "");
-        }
-        cb(null, "", "");
-      });
-      fs.existsSync = vi.fn(() => false);
-      net.createConnection = vi.fn(() => createSocket(false));
-      delete require.cache[modulePath];
-      const gateway = require(modulePath);
-      await gateway.launchGatewayProcess();
-
-      const result = await gateway.stopGatewayForBackup({ shouldAbort: () => expired }).catch((error) => error);
-
-      expect(child.kill).toHaveBeenCalledWith("SIGTERM");
-      const commands = childProcess.execFile.mock.calls.filter(([, args]) =>
-        args[0] === "gateway" && args[1] === "stop" && !isStopHelpProbe(args));
-      expect(commands).toHaveLength(0);
-      if (boundary === "child drain") expect(result).toBe(false);
-      else expect(result).toMatchObject({ name: "GatewayRestartError" });
     });
 
     it.each(["expired lease", "successor child"])("does not escalate the delayed kill after %s", async (boundary) => {
@@ -4230,7 +4112,7 @@ describe("server/gateway restart behavior", () => {
       );
     });
 
-    it("classifies the CLI's non-interactive refusal as refused (not swallowed) and records it in the backup stop evidence", async () => {
+    it("classifies the CLI's non-interactive refusal as refused (not swallowed)", async () => {
       childProcess.execFile = vi.fn((file, args, opts, cb) => {
         if (isStopHelpProbe(args)) return cb(null, kStopHelpWithoutForce, "");
         if (args?.[0] === "gateway" && args?.[1] === "stop") {
@@ -4245,71 +4127,11 @@ describe("server/gateway restart behavior", () => {
       vi.spyOn(console, "log").mockImplementation(() => {});
       const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
 
-      // No managed child: the CLI was the only stop method, and it refused.
-      const verdict = await gateway.stopGatewayForBackup({ timeoutMs: 1 });
+      await gateway.stopGatewayForShutdown();
 
-      // Boolean contract intact — the port IS down, so the quiesce proceeds.
-      expect(verdict).toBe(true);
-      expect(gateway.getLastGatewayStopEvidence()).toEqual({
-        at: expect.any(String),
-        method: "none",
-        childExited: false,
-        portReleased: true,
-        cliRefused: true,
-        cliExitCode: 1,
-      });
       expect(warnSpy).toHaveBeenCalledWith(
         expect.stringContaining("REFUSED by the OpenClaw CLI"),
       );
-      expect(warnSpy).toHaveBeenCalledWith(
-        expect.stringContaining("backup quiesce: the OpenClaw CLI refused"),
-      );
-    });
-
-    it("records method \"cli\" when no managed child existed and the CLI stop succeeded", async () => {
-      childProcess.execFile = vi.fn((file, args, opts, cb) => {
-        if (isStopHelpProbe(args)) return cb(null, kStopHelpWithForce, "");
-        return cb(null, "stopped\n", "");
-      });
-      fs.existsSync = vi.fn(() => false);
-      net.createConnection = vi.fn(() => createSocket(false));
-      delete require.cache[modulePath];
-      const gateway = require(modulePath);
-      vi.spyOn(console, "log").mockImplementation(() => {});
-
-      expect(await gateway.stopGatewayForBackup({ timeoutMs: 1 })).toBe(true);
-
-      expect(gateway.getLastGatewayStopEvidence()).toMatchObject({
-        method: "cli",
-        childExited: false,
-        portReleased: true,
-        cliRefused: false,
-        cliExitCode: 0,
-      });
-      expect(childProcess.execFile).toHaveBeenCalledWith(
-        "openclaw",
-        ["gateway", "stop", "--force"],
-        expect.anything(),
-        expect.any(Function),
-      );
-    });
-
-    it("stopGatewayForBackup reports false with portReleased:false evidence when the port never releases", async () => {
-      childProcess.execFile = vi.fn((file, args, opts, cb) => {
-        if (isStopHelpProbe(args)) return cb(null, kStopHelpWithoutForce, "");
-        return cb(null, "", "");
-      });
-      fs.existsSync = vi.fn(() => false);
-      net.createConnection = vi.fn(() => createSocket(true));
-      delete require.cache[modulePath];
-      const gateway = require(modulePath);
-      vi.spyOn(console, "log").mockImplementation(() => {});
-
-      expect(await gateway.stopGatewayForBackup({ timeoutMs: 1 })).toBe(false);
-      expect(gateway.getLastGatewayStopEvidence()).toMatchObject({
-        portReleased: false,
-        cliRefused: false,
-      });
     });
   });
 

@@ -128,8 +128,8 @@ describe("frontend/hooks use-hash-location (fix wave F138/F140)", () => {
     harness.beginRender();
     const [, setLocation] = useHashLocation();
 
-    setLocation("/upgrade");
-    expect(win.location.hash).toBe("#/upgrade");
+    setLocation("/watchdog");
+    expect(win.location.hash).toBe("#/watchdog");
     expect(win.location.replace).not.toHaveBeenCalled();
 
     setLocation("/agents/alpha", { replace: true });

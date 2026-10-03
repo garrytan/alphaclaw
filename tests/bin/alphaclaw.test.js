@@ -68,16 +68,15 @@ describe("bin/alphaclaw port check", () => {
     expect(output).not.toContain("Node.js 22.22.2 is not supported");
   });
 
-  it("generates an operator-shell openclaw wrapper that works under POSIX sh without the dev shim", () => {
+  it("generates an operator-shell openclaw wrapper that works under POSIX sh", () => {
     // The wrapper is #!/bin/sh; its PATH fallback must be POSIX (an earlier
-    // revision used `command -v -a`, which dash/bash-as-sh reject — every
-    // non-dev-channel box got a wrapper that exits 127 in front of a
-    // perfectly good openclaw).
+    // revision used `command -v -a`, which dash/bash-as-sh reject — boxes got
+    // a wrapper that exits 127 in front of a perfectly good openclaw).
     const wrapperPath = path.join(tmpDir, "wrapper", "openclaw");
     const profilePath = path.join(tmpDir, "profile.d", "alphaclaw-openclaw.sh");
     fs.mkdirSync(path.dirname(wrapperPath), { recursive: true });
     fs.mkdirSync(path.dirname(profilePath), { recursive: true });
-    // A "real" openclaw further down PATH (the pin install; no dev shim).
+    // A "real" openclaw further down PATH (the pin install).
     const realBinDir = path.join(tmpDir, "realbin");
     fs.mkdirSync(realBinDir, { recursive: true });
     fs.writeFileSync(
@@ -129,10 +128,18 @@ Module._load = function (request, parent, isMain) {
     expect(fs.existsSync(wrapperPath)).toBe(true);
     const wrapperText = fs.readFileSync(wrapperPath, "utf8");
     expect(wrapperText).not.toContain("command -v -a");
+    // The retired release-channel shim (<managedDir>/bin/openclaw) is never consulted.
+    expect(wrapperText).not.toContain(path.join(".alphaclaw", "bin", "openclaw"));
 
-    // Execute the generated wrapper under sh: no shim exists, so the PATH
-    // walk must find the real openclaw (skipping the wrapper itself) and the
+    // The pinned install's own bin comes first (openclaw's package.json is
+    // not exported, so it must be read from the install, not require.resolve).
+    const pinnedBin = path.join(path.dirname(binPath), "..", "node_modules", "openclaw", "openclaw.mjs");
+    expect(wrapperText).toContain(`if [ -x '${path.resolve(pinnedBin)}' ]`);
+
+    // With the pinned bin gone, execute the wrapper under sh: the PATH walk
+    // must find the real openclaw (skipping the wrapper itself) and the
     // managed env must be exported.
+    fs.writeFileSync(wrapperPath, wrapperText.split(path.resolve(pinnedBin)).join("/nonexistent/openclaw"));
     const output = execSync(`sh "${wrapperPath}" status --json`, {
       encoding: "utf8",
       timeout: 15000,
@@ -497,7 +504,7 @@ Module._load = function patchedLoad(request, parent, isMain) {
     // v0.9.38 regression: bin's top-level helpers/self-dependency requires
     // load constants.js, which snapshots ALPHACLAW_ROOT_DIR at first require.
     // The env used to be set only AFTER those requires, so a `--root-dir` run
-    // split state across two roots (banner on the flag's root, boot sync/env
+    // split state across two roots (banner on the flag's root, boot guard/env
     // watcher on ~/.alphaclaw). Assert the constants snapshot the server will
     // actually use (the require cache is shared) points at the flag's root,
     // not the fake home's ~/.alphaclaw.
@@ -1027,7 +1034,7 @@ Module._load = function patchedLoad(request, parent, isMain) {
 
   // Issue #76 A8/A1: a `start` boot names WHICH AlphaClaw booted — on the
   // console (the banner, first line of the boot spine) and on the volume
-  // (alphaclaw-version.json) — and the boot sync leaves the bin-phase
+  // (alphaclaw-version.json) — and the boot instance guard leaves the bin-phase
   // boot-report.json behind with serverPhase pending for the server to merge.
   it("prints the self-version banner and writes alphaclaw-version.json + boot-report.json on a start boot", () => {
     const pkg = JSON.parse(fs.readFileSync(path.resolve(__dirname, "../../package.json"), "utf8"));
@@ -1041,10 +1048,10 @@ Module._load = function patchedLoad(request, parent, isMain) {
     expect(bannerLine).toMatch(
       new RegExp(`^\\[alphaclaw\\] AlphaClaw ${pkg.version.replace(/\./g, "\\.")} \\(commit [^;]+; previous none\\) root=${rootDir} node=v\\d+`),
     );
-    // The banner precedes the release-channel boot sync — first line of the spine.
+    // The banner precedes the boot instance guard — first line of the spine.
     const bannerAt = first.output.indexOf(bannerLine);
-    const syncAt = first.output.indexOf("[openclaw-channel] pidfile:");
-    expect(syncAt).toBeGreaterThan(bannerAt);
+    const guardAt = first.output.indexOf("[alphaclaw] pidfile:");
+    expect(guardAt).toBeGreaterThan(bannerAt);
 
     const stamp = JSON.parse(fs.readFileSync(path.join(managedDir, "alphaclaw-version.json"), "utf8"));
     // commit is the '#<ref>' of a git dependency spec, null for a checkout/npm install.
@@ -1144,7 +1151,7 @@ Module._load = function patchedLoad(request, parent, isMain) {
   it("boots on (with a warning) when a LEGACY pidfile names a live process that looks like an alphaclaw server (F004 follow-up)", () => {
     // A {pid, at} claim (pre-v0.9.73) carries no identity. The store trusts it
     // only when the live process's argv names the alphaclaw entry (#64), and
-    // even then it is UNverified — the sync is skipped but boot continues.
+    // even then it is UNverified — boot continues with a warning.
     const rootDir = fs.mkdtempSync(path.join(tmpDir, "stale-pid-root-"));
     // The lookalike carries the `start` verb: the argv test is verb-scoped
     // since #76 (an `alphaclaw diagnose` is live, alphaclaw-ish and no server).
@@ -1154,7 +1161,7 @@ Module._load = function patchedLoad(request, parent, isMain) {
       const result = spawnBootSpine({ rootDir });
       expect(result.status, result.stderr).toBe(0);
       expect(`${result.stdout}\n${result.stderr}`).toMatch(
-        /could not be verified — boot sync skipped, continuing/,
+        /could not be verified — continuing/,
       );
     } finally {
       child.kill("SIGKILL");
@@ -1168,7 +1175,7 @@ Module._load = function patchedLoad(request, parent, isMain) {
       writeServerPidRecord(rootDir, { pid: child.pid, at: 1 });
       const result = spawnBootSpine({ rootDir });
       expect(result.status, result.stderr).toBe(0);
-      expect(`${result.stdout}\n${result.stderr}`).not.toMatch(/boot sync skipped: another/);
+      expect(`${result.stdout}\n${result.stderr}`).not.toMatch(/could not be verified|Refusing to start/);
     } finally {
       child.kill("SIGKILL");
     }
@@ -1214,8 +1221,8 @@ Module._load = function patchedLoad(request, parent, isMain) {
 
   // Issue #76 RC1: the incident's stale legacy claim collided with a THREAD id
   // of the new alphaclaw process — kill(tid, 0) succeeds and the tid's cmdline
-  // is the leader's argv, so the boot sync was skipped and the applied
-  // overlay never activated. The Tgid check settles it before argv.
+  // is the leader's argv, so the boot treated a thread as a live server. The
+  // Tgid check settles it before argv.
   it.skipIf(!hasProc)("boots on with NO pidfile warning when a legacy claim names a THREAD of a live lookalike, and re-claims the file as format 2 (#76 RC1)", async () => {
     const rootDir = fs.mkdtempSync(path.join(tmpDir, "thread-pid-root-"));
     const child = spawnSleeper(["--", "alphaclaw.js", "start"]);
@@ -1234,7 +1241,6 @@ Module._load = function patchedLoad(request, parent, isMain) {
       const output = `${result.stdout}\n${result.stderr}`;
       expect(result.status, result.stderr).toBe(0);
       expect(output).not.toMatch(/could not be verified/);
-      expect(output).not.toMatch(/boot sync skipped: another/);
       expect(output).toMatch(/pidfile: format=legacy pid=\d+ kill=ok tgid=\d+ .*→ thread \(proceed\)/);
       const claim = JSON.parse(
         fs.readFileSync(path.join(rootDir, ".openclaw", ".alphaclaw", "alphaclaw-server.pid"), "utf8"),
@@ -1266,7 +1272,7 @@ Module._load = function patchedLoad(request, parent, isMain) {
       expect(result.status, result.stderr).toBe(0);
       expect(result.stderr).not.toMatch(/Refusing to start a second instance/);
       expect(`${result.stdout}\n${result.stderr}`).toMatch(
-        /could not be verified — boot sync skipped, continuing/,
+        /could not be verified — continuing/,
       );
       // Identity stays: no re-claim, no second convergence.
       expect(
@@ -1289,7 +1295,7 @@ Module._load = function patchedLoad(request, parent, isMain) {
       });
       const result = spawnBootSpine({ rootDir });
       expect(result.status, result.stderr).toBe(0);
-      expect(`${result.stdout}\n${result.stderr}`).not.toMatch(/boot sync skipped: another/);
+      expect(`${result.stdout}\n${result.stderr}`).not.toMatch(/could not be verified|Refusing to start/);
     } finally {
       child.kill("SIGKILL");
     }

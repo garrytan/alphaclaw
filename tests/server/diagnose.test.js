@@ -21,8 +21,9 @@ const {
   kWatchdogStatusFields,
 } = require("../../lib/server/diagnose/collect");
 const { renderDiagnoseMarkdown, kDiagnoseSectionTitles, iso } = require("../../lib/server/diagnose/render");
-const { createOpenclawReleaseChannelStore } = require("../../lib/server/openclaw-release-channel");
-const { createRunLedger } = require("../../lib/server/openclaw-run-ledger");
+const { createServerPidfile } = require("../../lib/server/server-pidfile");
+const { kBootMigrationFileName } = require("../../lib/server/openclaw-boot-migration");
+const { kRetirementFileName } = require("../../lib/server/openclaw-channel-retirement");
 const { createSchema } = require("../../lib/server/db/watchdog/schema");
 
 const kNow = 1_700_000_000_000; // 2023-11-14T22:13:20.000Z
@@ -30,6 +31,9 @@ const kIsoPattern = /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z/;
 const kEnvSecret = "tg-secret-value-7788";
 const kConfigSecret = "cfg-secret-token-9911";
 const kProcessEnvSecret = "env-secret-value-5566";
+// The installed OpenClaw matches AlphaClaw's real pin: the CLI path's runtime
+// reads the pin from AlphaClaw's own package.json.
+const kPin = require("../../package.json").dependencies.openclaw;
 
 const writeJson = (file, value) => {
   fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -53,19 +57,15 @@ const createRoot = () => {
   const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), "alphaclaw-diagnose-"));
   const openclawDir = path.join(rootDir, ".openclaw");
   const installDir = path.join(rootDir, "install");
-  const store = createOpenclawReleaseChannelStore({
-    rootDir,
-    openclawDir,
-    nowFn: () => kNow,
-    logger: { warn() {}, log() {}, error() {} },
-  });
-  fs.mkdirSync(store.managedDir, { recursive: true });
-  return { rootDir, openclawDir, installDir, managedDir: store.managedDir, store };
+  const managedDir = path.join(openclawDir, ".alphaclaw");
+  fs.mkdirSync(managedDir, { recursive: true });
+  const pidfile = createServerPidfile({ managedDir, logger: { warn() {}, log() {}, error() {} } });
+  return { rootDir, openclawDir, installDir, managedDir, pidfile };
 };
 
 // Every persisted artifact the collector reads, in the shape its writer
 // leaves on the volume. Secrets are planted where evidence can echo them.
-const populate = ({ rootDir, openclawDir, installDir, managedDir, store }) => {
+const populate = ({ rootDir, openclawDir, installDir, managedDir, pidfile }) => {
   fs.writeFileSync(path.join(rootDir, ".env"), `# comment\nTELEGRAM_BOT_TOKEN=${kEnvSecret}\nPLAIN=notsecret\n`);
   writeJson(path.join(openclawDir, "openclaw.json"), { gateway: { auth: { token: kConfigSecret } } });
 
@@ -87,27 +87,33 @@ const populate = ({ rootDir, openclawDir, installDir, managedDir, store }) => {
     pidfile: { decision: "proceed", reason: "absent", record: { raw: null, format: null, legacyClaim: false } },
     openclaw: {
       declaredPin: "2026.9.2",
-      channelApplied: null,
-      lastKnownGood: null,
-      expected: "2026.9.2",
       installedAtBoot: "2026.9.2",
-      resolvedForLaunch: "2026.9.2",
-      overlayPresent: false,
-      overlayComplete: false,
-      sentinelMatches: true,
+      installedDiverged: false,
+      retiredChannel: null,
       bootSync: { action: "none", reason: null, warnings: [] },
     },
     binPhase: { status: "ok" },
     serverPhase: { status: "recorded", at: kNow, verdict: [], stateDb: [{ path: "x", kind: "state", userVersion: 15, status: "ok" }] },
     ...extra,
   });
-  writeJson(path.join(managedDir, "boot-report.json"), bootReport("40:1"));
+  writeJson(
+    path.join(managedDir, "boot-report.json"),
+    bootReport("40:1", {
+      openclaw: {
+        declaredPin: "2026.9.2",
+        installedAtBoot: "2026.9.2",
+        installedDiverged: false,
+        retiredChannel: { channel: "beta", version: "2026.9.3-beta.1", sha: null },
+        bootSync: { action: "none", reason: null, warnings: [`boot guard warning echoing ${kEnvSecret}`] },
+      },
+    }),
+  );
   writeJson(path.join(managedDir, "boot-report.1.json"), bootReport("39:1"));
   writeJson(
     path.join(managedDir, "boot-report-incident.json"),
     bootReport("38:1", {
       pinnedAt: kNow - 5000,
-      openclaw: { expected: "2026.9.2", installedAtBoot: "2026.7.1-2", bootSync: { action: "skipped_concurrent", reason: "pid_live", warnings: [] } },
+      openclaw: { declaredPin: "2026.9.2", installedAtBoot: "2026.7.1-2", bootSync: { action: "skipped_concurrent", reason: "pid_live", warnings: [] } },
       serverPhase: { status: "recorded", verdict: ["installed_not_expected", "pidfile_contradiction"] },
     }),
   );
@@ -124,9 +130,8 @@ const populate = ({ rootDir, openclawDir, installDir, managedDir, store }) => {
         record: { raw: { pid: 21, at: 1, startTicks: 5 }, format: 2, legacyClaim: false },
       },
       openclaw: {
-        expected: "2026.9.2",
+        declaredPin: "2026.9.2",
         installedAtBoot: "2026.7.1-2",
-        resolvedForLaunch: "2026.7.1-2",
         installedDiverged: true,
         bootSync: { action: "skipped_concurrent", reason: "live_server_corroborated", warnings: [] },
       },
@@ -134,15 +139,16 @@ const populate = ({ rootDir, openclawDir, installDir, managedDir, store }) => {
     }),
   );
 
-  store.writeState({
-    pinVersion: "2026.9.2",
-    applied: null,
-    lastKnownGood: { package: "2026.9.1", dev: null },
-    gatewayHold: { reason: "config_migration_failed", at: kNow - 10_000, installed: "2026.9.2" },
-    lastBoot: { action: "none", reason: null, at: kNow - 1000, warnings: [`boot warning echoing ${kEnvSecret}`] },
-    blocklist: [{ id: "beta:2026.9.1-beta.1", reason: "crash_loop", at: kNow - 50_000 }],
+  writeJson(path.join(managedDir, kBootMigrationFileName), { completedForVersion: kPin, at: kNow - 10_000 });
+  writeJson(path.join(managedDir, kRetirementFileName), {
+    retiredAt: kNow - 20_000,
+    previous: { channel: "beta", version: "2026.9.3-beta.1", sha: null },
+    pinVersion: kPin,
+    overlayDir: null,
+    needsNotice: true,
+    notifiedAt: kNow - 15_000,
   });
-  store.writeServerPid();
+  pidfile.writeServerPid();
 
   writeDb(path.join(openclawDir, "state", "openclaw.sqlite"), 15);
   writeDb(path.join(openclawDir, "agents", "main", "agent", "openclaw-agent.sqlite"), 19);
@@ -151,7 +157,7 @@ const populate = ({ rootDir, openclawDir, installDir, managedDir, store }) => {
   fs.writeFileSync(brokenDb, Buffer.alloc(4096, 0x41));
 
   const packageDir = path.join(installDir, "node_modules", "openclaw");
-  writeJson(path.join(packageDir, "package.json"), { name: "openclaw", version: "2026.9.2", bin: "openclaw.mjs" });
+  writeJson(path.join(packageDir, "package.json"), { name: "openclaw", version: kPin, bin: "openclaw.mjs" });
   fs.writeFileSync(path.join(packageDir, "openclaw.mjs"), "");
   fs.mkdirSync(path.join(packageDir, "dist"), { recursive: true });
   fs.writeFileSync(path.join(packageDir, "dist", "openclaw-state-db-contract-AAAA.js"), "const OPENCLAW_STATE_SCHEMA_VERSION=15;export{OPENCLAW_STATE_SCHEMA_VERSION};\n");
@@ -171,26 +177,6 @@ const populate = ({ rootDir, openclawDir, installDir, managedDir, store }) => {
   insert.run({ $key: "crash_loop", $status: "abandoned", $opened: "2026-09-06T12:00:00.000Z", $resolved: "2026-09-06T12:30:00.000Z", $summary: "{not json", $cause: null });
   insert.run({ $key: "version_mismatch", $status: "open", $opened: "2026-09-06T13:00:00.000Z", $resolved: null, $summary: JSON.stringify({ trigger: "version_mismatch", severity: "critical" }), $cause: JSON.stringify({ cause: "state_schema_too_new", detail: `found 17 supports 15 ${kConfigSecret}`, fingerprint: "abcd1234" }) });
   watchdogDb.close();
-
-  let tick = kNow - 100_000;
-  const ledger = createRunLedger({ openclawDir, nowFn: () => (tick += 1000), logger: { log() {} } });
-  const ids = [
-    "11111111-1111-4111-8111-111111111111",
-    "22222222-2222-4222-8222-222222222222",
-    "33333333-3333-4333-8333-333333333333",
-    "44444444-4444-4444-8444-444444444444",
-  ];
-  ledger.createRun({ operationId: ids[0], target: { kind: "apply", channel: "beta", version: "2026.9.1" } }); // oldest, left running
-  ledger.createRun({ operationId: ids[1], target: { kind: "apply", channel: "stable", version: "2026.9.2" } });
-  ledger.completeRun(ids[1], { state: "failed", ok: false, result: { code: "db_preflight_failed", error: `refused; token ${kEnvSecret}` } });
-  ledger.createRun({ operationId: ids[2], target: { kind: "rollback", version: "2026.8.2" } });
-  ledger.completeRun(ids[2], { state: "noop", ok: true });
-  ledger.createRun({ operationId: ids[3], target: { kind: "apply", channel: "stable", version: "2026.9.2" } });
-  ledger.completeRun(ids[3], { state: "activated", ok: true });
-  ledger.updateRun(ids[3], (run) => ({ ...run, recovery: {
-    kind: "config_only", checkpoint: { id: "config-fixture", file: path.join(rootDir, "backups", "config-fixture"), verified: true, bytes: 2, fileCount: 1 },
-    databases: { complete: false, verified: false, entries: [] },
-  } }));
 
   writeJson(path.join(openclawDir, "alphaclaw-restart-operation.json"), {
     operationId: "op-restart-1",
@@ -214,13 +200,13 @@ const populate = ({ rootDir, openclawDir, installDir, managedDir, store }) => {
   });
 
   const backupsDir = path.join(rootDir, "backups", "openclaw");
-  fs.mkdirSync(path.join(backupsDir, ".offline-copy-12-abc"), { recursive: true });
-  const writeBytes = (name, n) => fs.writeFileSync(path.join(backupsDir, name), Buffer.alloc(n, 0x42));
-  writeBytes("openclaw-backup-20260906-abcdef12.tar.gz", 100);
-  writeBytes("openclaw-backup-20260905-abcdef11.alphaclaw.tar.gz", 50);
-  writeBytes("openclaw-backup-20260904-abcdef10.tar.gz.9f3a.tmp", 30);
-  writeBytes("openclaw-backup-20260903-abcdef09.tar.gz.unverified", 20);
-  writeBytes("notes.txt", 5);
+  fs.mkdirSync(path.join(backupsDir, "leftover-dir"), { recursive: true });
+  const writeBytes = (name, n, mtimeMs) => {
+    fs.writeFileSync(path.join(backupsDir, name), Buffer.alloc(n, 0x42));
+    fs.utimesSync(path.join(backupsDir, name), mtimeMs / 1000, mtimeMs / 1000);
+  };
+  writeBytes("2026-09-06T08-00-00.000Z-openclaw-backup.tar.gz", 100, kNow - 1000);
+  writeBytes("2026-09-05T08-00-00.000Z-openclaw-backup.tar.gz", 50, kNow - 90_000);
 
   const logLines = [];
   for (let i = 0; i < 250; i += 1) logLines.push(`[alphaclaw] boot line ${i}`);
@@ -238,7 +224,6 @@ const collect = (ctx, overrides = {}) =>
     rootDir: ctx.rootDir,
     openclawDir: ctx.openclawDir,
     installDir: ctx.installDir,
-    channelStore: ctx.store,
     nowFn: () => kNow,
     env: { MY_API_KEY: kProcessEnvSecret, HOME: "/home/x" },
     ...overrides,
@@ -321,9 +306,10 @@ describe("diagnose: collectDiagnose over a populated root (disk path)", () => {
       stateDir: ctx.openclawDir,
       installDir: ctx.installDir,
     });
-    // Only the pidfile decision is computed live on the CLI path.
+    // The CLI path computes the OpenClaw runtime facts, the pidfile decision
+    // and the state-DB reads live; everything else is read from disk.
     expect(bundle.mode).toBe("cli");
-    expect(bundle.summary.sources).toEqual({ live: 1, disk: 11, unavailable: 1 });
+    expect(bundle.summary.sources).toEqual({ live: 3, disk: 8, unavailable: 1 });
     expect(bundle.summary.unavailable).toEqual(["watchdog"]);
     for (const name of kDiagnoseSectionNames) {
       const section = bundle.sections[name];
@@ -363,24 +349,23 @@ describe("diagnose: collectDiagnose over a populated root (disk path)", () => {
     expect(bundle.summary.bootVerdict).toEqual([]);
   });
 
-  it("channelState: the normalized state summary with stateCorrupted false and the installed version", () => {
-    const { source, data, warnings } = bundle.sections.channelState;
-    expect(source).toBe("disk");
-    expect(data.stateCorrupted).toBe(false);
+  it("openclaw: the pinned and installed versions, the doctor migration record and the retired version switch", () => {
+    const { source, data, warnings } = bundle.sections.openclaw;
+    expect(source).toBe("live");
     expect(warnings).toEqual([]);
-    expect(data.pinVersion).toBe("2026.9.2");
-    expect(data.installedVersion).toBe("2026.9.2");
-    expect(data.gatewayHold).toMatchObject({ reason: "config_migration_failed", installed: "2026.9.2" });
-    expect(data.lastBoot.action).toBe("none");
-    expect(data.blocklist).toHaveLength(1);
-    expect(data.info).toBeNull();
-    expect(bundle.summary.stateCorrupted).toBe(false);
+    expect(data).toEqual({
+      installedVersion: kPin,
+      pinnedVersion: kPin,
+      installedDiverged: false,
+      bootMigration: { completedForVersion: kPin, at: kNow - 10_000 },
+      retiredChannel: expect.objectContaining({ previous: { channel: "beta", version: "2026.9.3-beta.1", sha: null }, notifiedAt: kNow - 15_000 }),
+    });
   });
 
   it("pidfile: a fresh describeServerPidDecision record plus its one audit line, stamped live", () => {
     const { source, data } = bundle.sections.pidfile;
     expect(source).toBe("live");
-    expect(data.path).toBe(ctx.store.serverPidPath);
+    expect(data.path).toBe(ctx.pidfile.serverPidPath);
     expect(["proceed", "skip"]).toContain(data.decision.decision);
     expect(typeof data.decision.reason).toBe("string");
     expect(data.line).toContain("→");
@@ -389,7 +374,7 @@ describe("diagnose: collectDiagnose over a populated root (disk path)", () => {
 
   it("stateDb: state + agent DBs under the state dir with their user_version; a corrupt DB is named, not skipped", () => {
     const { source, data, warnings } = bundle.sections.stateDb;
-    expect(source).toBe("disk");
+    expect(source).toBe("live");
     expect(data.stateDir).toBe(ctx.openclawDir);
     expect(data.stateDirFromEnv).toBe(false);
     const byKind = Object.fromEntries(data.entries.map((e) => [`${e.kind}:${e.agentId ?? ""}`, e]));
@@ -400,17 +385,12 @@ describe("diagnose: collectDiagnose over a populated root (disk path)", () => {
     expect(warnings.some((w) => w.includes("broken") && w.includes("unreadable"))).toBe(true);
   });
 
-  it("supportedSchema: declared dist constants win, the table is reported alongside", () => {
+  it("supportedSchema: the installed build's declared dist constants win over the seeds", () => {
     const { source, data, warnings } = bundle.sections.supportedSchema;
     expect(source).toBe("disk");
-    expect(data.installedVersion).toBe("2026.9.2");
+    expect(data.installedVersion).toBe(kPin);
     expect(data.packageDir).toBe(path.join(ctx.installDir, "node_modules", "openclaw"));
-    expect(data.declared).toMatchObject({ state: 15, agent: 19 });
-    expect(data.declared.files.sort()).toEqual(["openclaw-agent-db-contract-BBBB.js", "openclaw-state-db-contract-AAAA.js"]);
     expect(data.supported).toEqual({ state: 15, agent: 19, source: { state: "declared", agent: "declared" } });
-    expect(data.table.origin).toBe("missing");
-    expect(data.table.path).toBe(path.join(ctx.managedDir, "openclaw-schema-versions.json"));
-    expect(Object.keys(data.table.byVersion).length).toBeGreaterThan(0);
     expect(warnings).toEqual([]);
   });
 
@@ -430,18 +410,6 @@ describe("diagnose: collectDiagnose over a populated root (disk path)", () => {
     expect(fs.existsSync(path.join(ctx.rootDir, "db", "watchdog.db-wal"))).toBe(false);
   });
 
-  it("runs: the 3 most recent plus any older run still running", () => {
-    const { source, data } = bundle.sections.runs;
-    expect(source).toBe("disk");
-    expect(data.total).toBe(4);
-    expect(data.recent.map((r) => r.state)).toEqual(["activated", "noop", "failed"]);
-    expect(data.recent[2].result.code).toBe("db_preflight_failed");
-    expect(data.recent[0].recovery).toMatchObject({ kind: "config_only", restore: { configAvailable: true, databaseSetAvailable: false } });
-    expect(renderDiagnoseMarkdown(bundle)).toContain("recorded recovery config_only: verified configuration checkpoint; database data not backed up");
-    expect(data.running.map((r) => r.operationId)).toEqual(["11111111-1111-4111-8111-111111111111"]);
-    expect(data.running[0].state).toBe("running");
-  });
-
   it("restartOperation and gatewayState: the persisted records read leniently", () => {
     const restart = bundle.sections.restartOperation;
     expect(restart.source).toBe("disk");
@@ -454,26 +422,19 @@ describe("diagnose: collectDiagnose over a populated root (disk path)", () => {
     expect(gateway.data.record).toMatchObject({ state: "degraded", since: kNow - 60_000, cause: { cause: "legacy_exec_approvals" } });
   });
 
-  it("backups: archives vs .tmp vs .unverified vs other, with byte totals", () => {
+  it("backups: every entry of the backups dir, newest first, with a byte total", () => {
     const { source, data, warnings } = bundle.sections.backups;
     expect(source).toBe("disk");
+    expect(warnings).toEqual([]);
+    expect(data.dir).toBe(path.join(ctx.rootDir, "backups", "openclaw"));
     expect(data.present).toBe(true);
-    expect(data.archives.map((e) => e.name).sort()).toEqual([
-      "openclaw-backup-20260905-abcdef11.alphaclaw.tar.gz",
-      "openclaw-backup-20260906-abcdef12.tar.gz",
+    const files = data.entries.filter((e) => !e.directory);
+    expect(files).toEqual([
+      { name: "2026-09-06T08-00-00.000Z-openclaw-backup.tar.gz", sizeBytes: 100, mtimeMs: kNow - 1000 },
+      { name: "2026-09-05T08-00-00.000Z-openclaw-backup.tar.gz", sizeBytes: 50, mtimeMs: kNow - 90_000 },
     ]);
-    expect(data.tmp.map((e) => e.name).sort()).toEqual([".offline-copy-12-abc", "openclaw-backup-20260904-abcdef10.tar.gz.9f3a.tmp"]);
-    expect(data.tmp.find((e) => e.directory)).toMatchObject({ name: ".offline-copy-12-abc", sizeBytes: null });
-    expect(data.unverified.map((e) => e.name)).toEqual(["openclaw-backup-20260903-abcdef09.tar.gz.unverified"]);
-    expect(data.other.map((e) => e.name)).toEqual(["notes.txt"]);
-    expect(data.totals).toEqual({
-      archives: { count: 2, bytes: 150 },
-      tmp: { count: 2, bytes: 30 },
-      unverified: { count: 1, bytes: 20 },
-      other: { count: 1, bytes: 5 },
-    });
-    expect(warnings.some((w) => w.includes("temp") && w.includes("30 bytes"))).toBe(true);
-    expect(warnings.some((w) => w.includes(".unverified"))).toBe(true);
+    expect(data.entries.find((e) => e.directory)).toMatchObject({ name: "leftover-dir", sizeBytes: null, directory: true });
+    expect(data.totalBytes).toBe(150);
   });
 
   it("watchdog: unavailable on the CLI path with a reason naming the route", () => {
@@ -505,15 +466,14 @@ describe("diagnose: collectDiagnose over a populated root (disk path)", () => {
     expect(json).not.toContain(kProcessEnvSecret);
     expect(json).toContain("***");
     // Planted in four different sections — each one was scrubbed in place.
-    expect(bundle.sections.channelState.data.lastBoot.warnings[0]).toBe("boot warning echoing ***");
-    expect(bundle.sections.runs.data.recent[2].result.error).toBe("refused; token ***");
+    expect(bundle.sections.bootReports.data.current.openclaw.bootSync.warnings[0]).toBe("boot guard warning echoing ***");
     expect(bundle.sections.restartOperation.data.record.evidenceTail).toContain("***");
     expect(bundle.sections.incidents.data.incidents[0].cause.detail).toBe("found 17 supports 15 ***");
     expect(bundle.sections.logTail.data.lines.some((l) => l.includes("[gateway] exit code 1 token=*** key ***"))).toBe(true);
     // Structure survives redaction: keys, paths and non-secret values are
     // untouched (only secret-NAMED process.env keys are collected, so HOME's
     // value is never a mask candidate).
-    expect(bundle.sections.channelState.data.pinVersion).toBe("2026.9.2");
+    expect(bundle.sections.openclaw.data.pinnedVersion).toBe(kPin);
     expect(bundle.paths.rootDir).toBe(ctx.rootDir);
   });
 
@@ -537,28 +497,21 @@ describe("diagnose: collectDiagnose over a populated root (disk path)", () => {
     expect(md).toContain("corrupt (SQLITE_NOTADB)");
     expect(md).toContain("cause: `state_schema_too_new`");
     expect(md).toContain("INCONSISTENT — `installed_not_expected`, `pidfile_contradiction`");
-    // "installed" is the tree the gateway RUNS (resolvedForLaunch, the
-    // report's one reader); the pinned incident's bin half only knows the
-    // pre-sync read and is labelled so instead of passing it off as the
-    // launch tree. The old "installed at boot … resolved for launch …" pair
-    // is gone.
-    expect(md).toContain("expected 2026.9.2, installed 2026.9.2, diverged false");
-    expect(md).toContain("openclaw expected 2026.9.2 / installed 2026.9.2; sync none; pidfile proceed/absent");
-    expect(md).toContain("expected 2026.9.2, installed 2026.7.1-2 (at boot), diverged n/a");
-    expect(md).not.toContain("installed at boot");
-    expect(md).not.toContain("resolved for launch");
+    // Versions come from the report's one reader (describeReportVersions).
+    expect(md).toContain("- openclaw: pin 2026.9.2, installed 2026.9.2, diverged false, retired version switch (was beta 2026.9.3-beta.1)");
+    expect(md).toContain("openclaw pin 2026.9.2 / installed 2026.9.2; guard none; pidfile proceed/absent");
+    expect(md).toContain("- openclaw: pin 2026.9.2, installed 2026.7.1-2, diverged true");
     // The refused start renders under its own heading, outside the ring,
     // with the bin-half verdict and the not_reached server phase.
     expect(md).toContain("### Last refused start");
     expect(md).toContain("boot-report-refused.json — a second instance");
     expect(md).toContain("boot `41:1` at 2023-11-14T22:13:19.000Z — INCONSISTENT — `installed_not_expected`");
-    expect(md).toContain("expected 2026.9.2, installed 2026.7.1-2, diverged true");
     expect(md).toContain("- server phase: not_reached (pidfile_skip) at 2023-11-14T22:13:19.500Z");
     expect(md).toContain("- pidfile: skip (corroborated)");
-    expect(md).toContain("- boot sync: skipped_concurrent (live_server_corroborated)");
-    expect(md).toContain("gateway hold: config_migration_failed since 2023-11-14T22:13:10.000Z");
-    expect(md).toContain("- blocklist: `beta:2026.9.1-beta.1 (crash_loop)`");
-    expect(md).toContain("- last known good: package 2026.9.1, dev none");
+    expect(md).toContain("- boot guard: skipped_concurrent (live_server_corroborated)");
+    expect(md).toContain(`- pinned: ${kPin}`);
+    expect(md).toContain(`- doctor --fix completed for: ${kPin} at 2023-11-14T22:13:10.000Z`);
+    expect(md).toContain("- retired version switch: was beta 2026.9.3-beta.1 at 2023-11-14T22:13:00.000Z; notice sent 2023-11-14T22:13:05.000Z");
     expect(md).not.toContain(kEnvSecret);
     expect(md).not.toContain(kConfigSecret);
     expect(md).not.toContain(kProcessEnvSecret);
@@ -583,16 +536,15 @@ describe("diagnose: a fresh root (nothing written yet)", () => {
     expect(bundle.sections.incidents.reason).toContain("not found");
     expect(bundle.sections.selfVersion.data).toEqual({ path: path.join(ctx.managedDir, "alphaclaw-version.json"), present: false, record: null });
     expect(bundle.sections.bootReports.data).toMatchObject({ current: null, previous: [], incident: null, refused: null, unreadable: [], verdict: null });
-    expect(bundle.sections.channelState.data).toMatchObject({ stateCorrupted: false, pinVersion: null, applied: null, gatewayHold: null, installedVersion: null });
+    expect(bundle.sections.openclaw.data).toMatchObject({ installedVersion: null, pinnedVersion: kPin, installedDiverged: false, bootMigration: null, retiredChannel: null });
     expect(bundle.sections.pidfile.data.decision).toMatchObject({ decision: "proceed", reason: "absent" });
     expect(bundle.sections.stateDb.data.entries).toEqual([]);
     expect(bundle.sections.stateDb.warnings[0]).toContain("no state databases");
     expect(bundle.sections.supportedSchema.data.supported.state).toBe(null);
     expect(bundle.sections.supportedSchema.warnings.length).toBeGreaterThan(0);
-    expect(bundle.sections.runs.data).toEqual({ total: 0, recent: [], running: [] });
     expect(bundle.sections.restartOperation.data).toMatchObject({ present: false, record: null });
     expect(bundle.sections.gatewayState.data).toMatchObject({ present: false, record: null });
-    expect(bundle.sections.backups.data).toMatchObject({ present: false, archives: [], totals: null });
+    expect(bundle.sections.backups.data).toMatchObject({ present: false, entries: [], totalBytes: 0 });
     expect(bundle.sections.logTail.data).toMatchObject({ scannedLines: 0, matchedLines: 0, lines: [], truncated: false });
     expect(bundle.sections.logTail.warnings[0]).toContain("process.log not found");
     expect(bundle.summary.bootVerdict).toBeNull();
@@ -607,7 +559,7 @@ describe("diagnose: a fresh root (nothing written yet)", () => {
     expect(md).toContain("- none (no start has been refused for a corroborated live owner)");
     expect(md).toContain("- no databases found");
     expect(md).toContain("- no backups directory at");
-    expect(md).toContain("- last known good: none");
+    expect(md).toContain("- doctor --fix completed for: none recorded");
     expect(md).toContain("(no matching lines)");
     expect(md).toContain("- current boot verdict: unknown");
   });
@@ -619,7 +571,6 @@ describe("diagnose: corrupt artifacts are reported explicitly", () => {
   beforeAll(async () => {
     ctx = createRoot();
     populate(ctx);
-    fs.writeFileSync(ctx.store.statePath, "{ this is not json");
     fs.writeFileSync(path.join(ctx.managedDir, "boot-report.json"), "garbage");
     fs.writeFileSync(path.join(ctx.managedDir, "boot-report-incident.json"), "[1,2]");
     fs.writeFileSync(path.join(ctx.managedDir, "boot-report-refused.json"), '{"bootId":');
@@ -631,20 +582,6 @@ describe("diagnose: corrupt artifacts are reported explicitly", () => {
   });
   afterAll(() => {
     fs.rmSync(ctx.rootDir, { recursive: true, force: true });
-  });
-
-  it("a corrupt channel state is stateCorrupted, never rendered as 'no hold'", () => {
-    const { source, data, warnings } = bundle.sections.channelState;
-    expect(source).toBe("disk");
-    expect(data.stateCorrupted).toBe(true);
-    expect(data.gatewayHold).toBeNull();
-    expect(warnings.some((w) => w.includes("unparseable") && w.includes("gatewayHold"))).toBe(true);
-    expect(bundle.summary.stateCorrupted).toBe(true);
-    const md = renderDiagnoseMarkdown(bundle);
-    expect(md).toContain("**state file CORRUPTED**");
-    expect(md).toContain("- gateway hold: UNKNOWN (state unreadable)");
-    expect(md).not.toContain("- gateway hold: none");
-    expect(md).toContain("- channel state: **CORRUPTED**");
   });
 
   it("corrupt boot reports are listed by name; the readable ring slot survives", () => {
@@ -674,8 +611,8 @@ describe("diagnose: corrupt artifacts are reported explicitly", () => {
     const { source, reason } = bundle.sections.incidents;
     expect(source).toBe("unavailable");
     expect(reason).toMatch(/incidents failed: .*(not a database|malformed|SQLITE)/i);
-    expect(bundle.sections.runs.source).toBe("disk");
-    expect(bundle.sections.stateDb.source).toBe("disk");
+    expect(bundle.sections.backups.source).toBe("disk");
+    expect(bundle.sections.stateDb.source).toBe("live");
   });
 });
 
@@ -694,58 +631,39 @@ describe("diagnose: a throwing reader degrades its own section only", () => {
     };
     const bundle = await collect(ctx, {
       getWatchdogStatus: boom("watchdog"),
-      getChannelInfo: boom("channel info"),
-      assessRecovery: boom("recovery assessment"),
+      openclawRuntime: {
+        getInfo: boom("runtime info"),
+        readStateDbVersions: boom("state db read"),
+        getExecutingBuild: boom("build read"),
+      },
       bootReports: boom("boot reports"),
       selfVersion: boom("self version"),
       readLogTail: boom("log tail"),
       incidentsDb: { listIncidents: boom("incidents") },
     });
     expect(bundle.sections.watchdog).toMatchObject({ source: "unavailable", reason: "watchdog failed: watchdog exploded", data: null });
-    expect(bundle.sections.channelState).toMatchObject({ source: "unavailable", reason: "channelState failed: channel info exploded" });
-    expect(bundle.sections.supportedSchema).toMatchObject({ source: "unavailable", reason: "supportedSchema failed: recovery assessment exploded" });
-    expect(bundle.sections.stateDb).toMatchObject({ source: "unavailable", reason: "stateDb failed: recovery assessment exploded" });
+    expect(bundle.sections.openclaw).toMatchObject({ source: "unavailable", reason: "openclaw failed: runtime info exploded" });
+    expect(bundle.sections.supportedSchema).toMatchObject({ source: "unavailable", reason: "supportedSchema failed: build read exploded" });
+    expect(bundle.sections.stateDb).toMatchObject({ source: "unavailable", reason: "stateDb failed: state db read exploded" });
     expect(bundle.sections.bootReports).toMatchObject({ source: "unavailable", reason: "bootReports failed: boot reports exploded" });
     expect(bundle.sections.selfVersion).toMatchObject({ source: "unavailable", reason: "selfVersion failed: self version exploded" });
     expect(bundle.sections.logTail).toMatchObject({ source: "unavailable", reason: "logTail failed: log tail exploded" });
     expect(bundle.sections.incidents).toMatchObject({ source: "unavailable", reason: "incidents failed: incidents exploded" });
     // Untouched sections still read the disk.
     expect(bundle.sections.pidfile.source).toBe("live");
-    expect(bundle.sections.runs.source).toBe("disk");
     expect(bundle.sections.backups.source).toBe("disk");
     expect(bundle.sections.gatewayState.source).toBe("disk");
     expect(bundle.sections.restartOperation.source).toBe("disk");
     expect(bundle.summary.sources.unavailable).toBe(8);
     expect(bundle.summary.bootVerdict).toBeNull();
-    expect(bundle.summary.stateCorrupted).toBeNull();
 
     const md = renderDiagnoseMarkdown(bundle);
     expect(md.split("\n").filter((l) => l.startsWith("## "))).toHaveLength(kDiagnoseSectionNames.length);
-    expect(md).toContain("## Channel state (unavailable)\n_Unavailable: channelState failed: channel info exploded_");
+    expect(md).toContain("## OpenClaw (unavailable)\n_Unavailable: openclaw failed: runtime info exploded_");
     expect(md).toContain("## Boot reports (unavailable)");
-    expect(md).toContain("- sections: 13 — live 1, disk 4, unavailable 8 (");
+    expect(md).toContain("- sections: 12 — live 1, disk 3, unavailable 8 (");
   });
 
-  it("a store that cannot be built makes the store-backed sections unavailable and records the reason on the bundle", async () => {
-    ctx = createRoot();
-    const bundle = await collect(ctx, {
-      channelStore: {
-        managedDir: ctx.managedDir,
-        statePath: ctx.store.statePath,
-        serverPidPath: ctx.store.serverPidPath,
-        readState: () => {
-          throw new Error("EIO state");
-        },
-        describeServerPidDecision: () => {
-          throw new Error("EIO pid");
-        },
-        readInstalledVersion: () => null,
-      },
-    });
-    expect(bundle.sections.channelState.reason).toBe("channelState failed: EIO state");
-    expect(bundle.sections.pidfile.reason).toBe("pidfile failed: EIO pid");
-    expect(bundle.sections.runs.source).toBe("disk");
-  });
 });
 
 describe("diagnose: live seams (server path)", () => {
@@ -755,7 +673,7 @@ describe("diagnose: live seams (server path)", () => {
     ctx = null;
   });
 
-  it("stamps watchdog / channel info / incidents as live, picks the stable status fields and flips the mode to server", async () => {
+  it("stamps watchdog / OpenClaw runtime / incidents as live, picks the stable status fields and flips the mode to server", async () => {
     ctx = createRoot();
     populate(ctx);
     const status = {
@@ -781,7 +699,6 @@ describe("diagnose: live seams (server path)", () => {
     ]);
     const bundle = await collect(ctx, {
       getWatchdogStatus: () => status,
-      getChannelInfo: () => ({ releaseChannel: "stable", installedVersion: "2026.9.2", expectedVersion: "2026.9.2", expectedKind: "pin", installedIsPin: true, installedDiverged: false, pinDiverged: false, stateCorrupted: false, blocklist: [1, 2], lastBoot: {} }),
       incidentsDb: { listIncidents },
       bootReports: { readBootReports: () => ({ current: { bootId: "live:1", serverPhase: { verdict: ["state_schema_too_new"] } }, previous: [], incident: null, unreadable: [] }) },
       selfVersion: () => ({ version: "0.9.77", commit: null, bootCount: 1, firstBootAt: kNow, lastBootAt: kNow, previous: null }),
@@ -798,8 +715,8 @@ describe("diagnose: live seams (server path)", () => {
     expect(kWatchdogStatusFields).toEqual(expect.arrayContaining(["readiness", "readinessReason", "readinessStatus", "readinessProbe"]));
     expect(bundle.sections.watchdog.data.crashTimestamps).toBeUndefined();
     expect(bundle.sections.watchdog.data.recentEvents).toBeUndefined();
-    expect(bundle.sections.channelState.source).toBe("live");
-    expect(bundle.sections.channelState.data.info).toEqual({ releaseChannel: "stable", installedVersion: "2026.9.2", expectedVersion: "2026.9.2", expectedKind: "pin", installedIsPin: true, installedDiverged: false, pinDiverged: false, stateCorrupted: false });
+    expect(bundle.sections.openclaw.source).toBe("live");
+    expect(bundle.sections.openclaw.data).toMatchObject({ installedVersion: kPin, pinnedVersion: kPin, installedDiverged: false });
     expect(listIncidents).toHaveBeenCalledWith({ limit: 3 });
     expect(bundle.sections.incidents.source).toBe("live");
     expect(bundle.sections.incidents.data.dbPath).toBeNull();
@@ -829,7 +746,7 @@ describe("diagnose: state dir, log bounds and env-file seams", () => {
     ctx = null;
   });
 
-  it("honours OPENCLAW_STATE_DIR from the injected env the way channel-sync's stateDir() does", async () => {
+  it("honours OPENCLAW_STATE_DIR from the injected env", async () => {
     ctx = createRoot();
     const otherDir = path.join(ctx.rootDir, "elsewhere");
     writeDb(path.join(otherDir, "state", "openclaw.sqlite"), 12);
@@ -902,7 +819,7 @@ describe("diagnose: render helpers", () => {
     expect(md).toContain("- generated: 2023-11-14T22:13:20.000Z");
   });
 
-  it("boot-report 'installed' follows describeReportVersions: the launch tree with the pre-sync read beside it when they differ, the server phase's read when the bin half is missing, and '(at boot)' only when nothing but the pre-sync read is known", () => {
+  it("boot-report versions follow describeReportVersions: the bin phase's pin/installed, else the server phase's own read, n/a when nothing is known", () => {
     const report = (bootId, openclaw, serverPhase = { status: "recorded", verdict: [] }) => ({ bootId, at: kNow, openclaw, serverPhase });
     const md = renderDiagnoseMarkdown({
       sections: {
@@ -910,13 +827,11 @@ describe("diagnose: render helpers", () => {
           source: "disk",
           warnings: [],
           data: {
-            // An activation boot: the sync moved the tree from 2026.7.1-2 to 2026.9.2.
-            current: report("50:1", { expected: "2026.9.2", installedAtBoot: "2026.7.1-2", resolvedForLaunch: "2026.9.2", installedDiverged: false }),
+            current: report("50:1", { declaredPin: "2026.9.2", installedAtBoot: "2026.9.2", installedDiverged: false }),
             previous: [
               // No bin phase (the server phase created the report): its own read counts.
-              report("49:1", null, { status: "recorded", verdict: [], installedVersion: "2026.9.1", channelInfo: { expectedVersion: "2026.9.2", installedDiverged: true } }),
-              // Only the pre-sync read is known.
-              report("48:1", { expected: "2026.9.2", installedAtBoot: "2026.8.2" }),
+              report("49:1", null, { status: "recorded", verdict: [], installedVersion: "2026.9.1", expectedVersion: "2026.9.2" }),
+              report("48:1", { declaredPin: "2026.9.2", installedAtBoot: "2026.8.2" }),
               // Nothing known at all.
               report("47:1", {}),
             ],
@@ -928,10 +843,10 @@ describe("diagnose: render helpers", () => {
         },
       },
     });
-    expect(md).toContain("expected 2026.9.2, installed 2026.9.2 (at boot 2026.7.1-2), diverged false");
-    expect(md).toContain("openclaw expected 2026.9.2 / installed 2026.9.1; sync n/a");
-    expect(md).toContain("openclaw expected 2026.9.2 / installed 2026.8.2 (at boot); sync n/a");
-    expect(md).toContain("openclaw expected n/a / installed n/a; sync n/a");
+    expect(md).toContain("- openclaw: pin 2026.9.2, installed 2026.9.2, diverged false");
+    expect(md).toContain("openclaw pin 2026.9.2 / installed 2026.9.1; guard n/a");
+    expect(md).toContain("openclaw pin 2026.9.2 / installed 2026.8.2; guard n/a");
+    expect(md).toContain("openclaw pin n/a / installed n/a; guard n/a");
     expect(md).toContain("- none (no start has been refused for a corroborated live owner)");
   });
 });

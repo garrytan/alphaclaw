@@ -16,7 +16,6 @@ const deferred = () => {
 
 const bootDeps = (overrides) => ({
   reportLockContentionAtBoot: vi.fn(),
-  assessLaunchCompatibilityAtBoot: vi.fn(async () => ({ compatible: true })),
   ensureManagedExecDefaults: vi.fn(),
   ensureUsageTrackerPluginConfig: vi.fn(),
   ensureWebhookMappingIds: vi.fn(),
@@ -32,7 +31,7 @@ const bootDeps = (overrides) => ({
   ...overrides,
 });
 
-describe("boot reconciliation cleanup ownership", () => {
+describe("boot doctor-migration cleanup ownership", () => {
   afterEach(() => {
     vi.restoreAllMocks();
     setBootPhase("ready");
@@ -62,11 +61,13 @@ describe("boot reconciliation cleanup ownership", () => {
     let successorSawRestored = false;
     const deps = bootDeps({
       signal: shutdown.signal,
-      acquireLifecycleLock: (kind, options) => lock.acquire(kind, { ...options, leaseMs: cause === "lease expiry" ? 1500 : 10_000 }),
+      acquireLifecycleLock: async (kind, options) => {
+        observedHold = await lock.acquire(kind, { ...options, leaseMs: cause === "lease expiry" ? 1500 : 10_000 });
+        return observedHold;
+      },
       runBootNativeMaintenance: nativeConfigured ? vi.fn(async () => {}) : null,
-      reconcileBootConfig: async ({ hold, operation }) => {
+      runBootMigration: async ({ operation }) => {
         observedOperation = operation;
-        observedHold = hold;
         await guard.withDoctorRestoreGuard({
           operationId: "boot-cleanup-test",
           run: async () => {
@@ -85,7 +86,7 @@ describe("boot reconciliation cleanup ownership", () => {
             return result;
           },
         });
-        return { status: "ok" };
+        return { status: "ok", ran: true };
       },
     });
     const boot = runOnboardedBootSequence(deps);
@@ -135,19 +136,23 @@ describe("boot reconciliation cleanup ownership", () => {
     }
   });
 
-  it("shares the operation and finite boot deadline across reconciliation and native maintenance", async () => {
+  it("shares the operation and finite boot deadline across the doctor migration and native maintenance", async () => {
     const lock = createGatewayLifecycleLock();
-    let reconciliationOperation;
+    let migrationOperation;
+    let bootHold;
     const deps = bootDeps({
-      acquireLifecycleLock: lock.acquire,
-      reconcileBootConfig: async ({ operation, hold }) => {
-        reconciliationOperation = operation;
-        expect(operation.deadlineAt).toBe(hold.expiresAt);
-        return { status: "ok" };
+      acquireLifecycleLock: async (kind, options) => {
+        bootHold = await lock.acquire(kind, options);
+        return bootHold;
+      },
+      runBootMigration: async ({ operation }) => {
+        migrationOperation = operation;
+        expect(operation.deadlineAt).toBe(bootHold.expiresAt);
+        return { status: "ok", ran: true };
       },
       runBootNativeMaintenance: vi.fn(async ({ signal }) => {
-        expect(signal).toBe(reconciliationOperation.signal);
-        expect(Number.isFinite(reconciliationOperation.deadlineAt)).toBe(true);
+        expect(signal).toBe(migrationOperation.signal);
+        expect(Number.isFinite(migrationOperation.deadlineAt)).toBe(true);
       }),
     });
     await runOnboardedBootSequence(deps);

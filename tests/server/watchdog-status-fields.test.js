@@ -1,15 +1,10 @@
 const { createWatchdog } = require("../../lib/server/watchdog");
-const {
-  kOpenclawDegradedRollbackMs,
-  kOpenclawStabilizationWindowMs,
-} = require("../../lib/server/constants");
 
 // U2 regression surface: the additive getStatus() fields (degradedReason,
-// lastExit, window timestamps, backoff, stabilization/doctor-fix suppression,
-// phase, serverNow). The escalation ladder itself is covered by watchdog.test.js
+// lastExit, window timestamps, backoff, phase, serverNow). The escalation ladder itself is covered by watchdog.test.js
 // and must be unaffected by these additions.
 
-const createHarness = ({ releaseChannelHooks = null, fetchImpl, gatewayLifecycleLock = null } = {}) => {
+const createHarness = ({ fetchImpl, gatewayLifecycleLock = null } = {}) => {
   const insertWatchdogEvent = vi.fn();
   const launchGatewayProcess = vi.fn(async () => null);
   const watchdog = createWatchdog({
@@ -23,7 +18,6 @@ const createHarness = ({ releaseChannelHooks = null, fetchImpl, gatewayLifecycle
     resolveSetupUrl: () => "http://localhost",
     resolveGatewayHealthUrl: () => "http://gateway/health",
     resolveGatewayReadyzUrl: () => "http://gateway/readyz",
-    releaseChannelHooks,
     gatewayLifecycleLock,
     sleepImpl: () => Promise.resolve(),
   });
@@ -38,70 +32,6 @@ beforeEach(() => {
 });
 
 describe("getStatus() additive fields", () => {
-  it("rechecks a held database only on existing health ticks after sixty seconds of eligibility", async () => {
-    vi.useFakeTimers();
-    vi.stubEnv("WATCHDOG_AUTO_REPAIR", "true");
-    const hold = { reason: "state_db_unverified", at: 1 };
-    const verifyDatabaseRecovery = vi.fn(async () => ({ ok: false, code: "database_verification_failed" }));
-    const { watchdog } = createHarness({
-      gatewayLifecycleLock: require("../../lib/server/gateway-lifecycle-lock").createGatewayLifecycleLock(),
-      releaseChannelHooks: { getInfo: () => ({ gatewayHold: hold }), verifyDatabaseRecovery },
-    });
-    try {
-      watchdog.latchDatabaseVerification({ hold });
-      await watchdog.runHealthCheck();
-      expect(verifyDatabaseRecovery).toHaveBeenCalledTimes(1);
-      await vi.advanceTimersByTimeAsync(59_999);
-      expect(verifyDatabaseRecovery).toHaveBeenCalledTimes(1);
-      await vi.advanceTimersByTimeAsync(1);
-      expect(verifyDatabaseRecovery).toHaveBeenCalledTimes(1);
-      await watchdog.runHealthCheck();
-      expect(verifyDatabaseRecovery).toHaveBeenCalledTimes(2);
-      watchdog.stop();
-      await vi.advanceTimersByTimeAsync(120_000);
-      expect(verifyDatabaseRecovery).toHaveBeenCalledTimes(2);
-    } finally { watchdog.stop(); vi.unstubAllEnvs(); vi.useRealTimers(); }
-  });
-
-  it("keeps verified database recovery pending while readiness is unsupported, then completes on actual ready health", async () => {
-    vi.useFakeTimers();
-    let ready = false;
-    let current = true;
-    let pending = { recoveryId: "db-recovery" };
-    const completeDatabaseRecovery = vi.fn(() => { pending = null; return { ok: true }; });
-    const onHealthy = vi.fn();
-    const { watchdog, insertWatchdogEvent } = createHarness({
-      releaseChannelHooks: { getInfo: () => ({ databaseRecoveryPending: pending }),
-        isDatabaseRecoveryCurrent: () => current, completeDatabaseRecovery, onHealthy },
-      fetchImpl: vi.fn(async (url) => String(url).includes("readyz")
-        ? { ok: ready, status: ready ? 200 : 404,
-          text: async () => JSON.stringify(ready ? { ready: true, suppressed: [] } : {}) }
-        : { ok: true, status: 200, text: async () => JSON.stringify({ ok: true }) }),
-    });
-    try {
-      watchdog.onDatabaseVerificationCleared(watchdog.captureDatabaseRecoveryContext());
-      watchdog.onGatewayLaunch({ pid: 111, startedAt: Date.now() - 60_000 });
-      await vi.advanceTimersByTimeAsync(10);
-      expect(watchdog.getStatus().readiness).toBe("unknown");
-      expect(completeDatabaseRecovery).not.toHaveBeenCalled();
-      expect(onHealthy).not.toHaveBeenCalled();
-      expect(await watchdog.waitForDatabaseRecoveryReadiness({ recoveryId: "db-recovery",
-        isCurrent: () => true, deadlineAt: Date.now() })).toEqual({ ok: false, code: "database_recovery_readiness_pending" });
-      ready = true;
-      current = false;
-      await watchdog.runHealthCheck();
-      expect(completeDatabaseRecovery).not.toHaveBeenCalled();
-      expect(onHealthy).not.toHaveBeenCalled();
-      expect(insertWatchdogEvent.mock.calls.filter(([event]) => event.eventType === "recovery")).toEqual([]);
-      current = true;
-      expect(await watchdog.waitForDatabaseRecoveryReadiness({ recoveryId: "db-recovery",
-        isCurrent: () => true })).toEqual({ ok: true });
-      expect(watchdog.getStatus().readiness).toBe("ready");
-      expect(completeDatabaseRecovery).toHaveBeenCalledWith({ recoveryId: "db-recovery" });
-      expect(onHealthy).toHaveBeenCalled();
-    } finally { watchdog.stop(); vi.useRealTimers(); }
-  });
-
   it("exposes safe defaults on a fresh instance", () => {
     const { watchdog } = createHarness();
     const status = watchdog.getStatus();
@@ -113,10 +43,9 @@ describe("getStatus() additive fields", () => {
     // Stage 3 (#76 B1.3): the scoped auto-repair pause, null while armed.
     expect(status.autoRepairPaused).toBe(null);
     expect(status.backoff).toEqual({ active: false, untilMs: null, attempt: 0 });
-    expect(status.rollbackDeadlineAt).toBe(null);
-    expect(status.stabilization).toEqual({ active: false, until: null });
-    expect(status.doctorFixSuppressed).toBe(false);
-    expect(status.doctorFixSuppressedReason).toBe(null);
+    for (const removed of ["rollbackDeadlineAt", "stabilization", "doctorFixSuppressed", "doctorFixSuppressedReason", "databaseVerification"]) {
+      expect(status).not.toHaveProperty(removed);
+    }
     expect(status.expectedRestartUntil).toBe(null);
     expect(status.startupGraceUntil).toBe(null);
     expect(status.awaitingAutoRepairRecovery).toBe(false);
@@ -305,7 +234,6 @@ describe("getStatus() additive fields", () => {
       expect(degraded.health).toBe("degraded");
       expect(degraded.degradedReason).toBe("queue backlog");
       expect(degraded.phase).toBe("degraded_retrying");
-      expect(degraded.rollbackDeadlineAt).toBe(null);
 
       mode = "healthy";
       // Degraded retry cadence is 5s.
@@ -365,107 +293,5 @@ describe("getStatus() additive fields", () => {
       eventLoopDegraded: false,
       readyzFailing: [],
     });
-  });
-
-  it("derives stabilization/doctor-fix suppression and rollback deadline from the ladder predicate", () => {
-    const acceptedAt = Date.now() - 60 * 60 * 1000;
-    const { watchdog } = createHarness({
-      releaseChannelHooks: {
-        getInfo: () => ({
-          isPin: false,
-          inStabilizationWindow: true,
-          acceptedAt,
-          applied: { acceptedSource: "auto" },
-        }),
-        requestRollback: () => null,
-        onHealthy: () => {},
-        onUnhealthy: () => {},
-      },
-    });
-    watchdog.start();
-    const status = watchdog.getStatus();
-    expect(status.doctorFixSuppressed).toBe(true);
-    expect(status.doctorFixSuppressedReason).toBe("stabilization_window");
-    expect(status.stabilization.active).toBe(true);
-    expect(Date.parse(status.stabilization.until)).toBe(
-      acceptedAt + kOpenclawStabilizationWindowMs,
-    );
-    // Not degraded yet → no rollback deadline.
-    expect(status.rollbackDeadlineAt).toBe(null);
-  });
-
-  it("suppression stays false for pinned builds", () => {
-    const { watchdog } = createHarness({
-      releaseChannelHooks: {
-        getInfo: () => ({ isPin: true, inStabilizationWindow: false }),
-        requestRollback: () => null,
-      },
-    });
-    watchdog.start();
-    const status = watchdog.getStatus();
-    expect(status.doctorFixSuppressed).toBe(false);
-    expect(status.stabilization).toEqual({ active: false, until: null });
-  });
-
-  it("reads the stabilization deadline from stabilization.endsAt for a pin window", () => {
-    const acceptedAt = Date.now() - 60 * 60 * 1000;
-    const endsAt = acceptedAt + kOpenclawStabilizationWindowMs;
-    const { watchdog } = createHarness({
-      releaseChannelHooks: {
-        getInfo: () => ({
-          isPin: true,
-          applied: null,
-          inStabilizationWindow: true,
-          acceptedAt,
-          stabilization: {
-            source: "pin",
-            inWindow: true,
-            acceptedAt,
-            acceptedSource: "acceptance",
-            endsAt,
-            blockedId: "2026.9.1",
-            target: { kind: "package", channel: "stable", version: "2026.8.1" },
-          },
-        }),
-        requestRollback: () => null,
-        onHealthy: () => {},
-        onUnhealthy: () => {},
-      },
-    });
-    watchdog.start();
-    const status = watchdog.getStatus();
-    expect(status.doctorFixSuppressed).toBe(true);
-    expect(status.doctorFixSuppressedReason).toBe("stabilization_window");
-    expect(status.stabilization.active).toBe(true);
-    expect(Date.parse(status.stabilization.until)).toBe(endsAt);
-  });
-
-  it("leaves the deadline null while a window is open but not yet armed", () => {
-    const acceptedAt = Date.now() - 60 * 60 * 1000;
-    const { watchdog } = createHarness({
-      releaseChannelHooks: {
-        getInfo: () => ({
-          isPin: false,
-          inStabilizationWindow: true,
-          acceptedAt,
-          applied: { acceptedSource: "manual" },
-          stabilization: {
-            source: "channel",
-            inWindow: true,
-            acceptedAt,
-            acceptedSource: "manual",
-            endsAt: null,
-            blockedId: "beta:2026.9.1-beta.2",
-            target: { kind: "pin" },
-          },
-        }),
-        requestRollback: () => null,
-        onHealthy: () => {},
-        onUnhealthy: () => {},
-      },
-    });
-    watchdog.start();
-    const status = watchdog.getStatus();
-    expect(status.stabilization).toEqual({ active: true, until: null });
   });
 });

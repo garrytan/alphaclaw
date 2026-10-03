@@ -40,7 +40,7 @@ describe("frontend/api", () => {
   });
 
   it("preserves typed partial-transition facts on failures without copying tokens or arbitrary fields", async () => {
-    const payload = { ok: false, error: "Gateway not verified", code: "gateway_held", hint: "Review the hold",
+    const payload = { ok: false, error: "Gateway not verified", code: "lease_expired", hint: "Retry the operation",
       disabled: true, enabled: false, configSaved: true, configRestored: true, gatewayRestored: false,
       restartDeferred: true, gatewayConfigDeferred: true, memberSaved: true, ownerCreated: false,
       changed: "true", restored: 1, gatewayApplied: null, confirmNoBackupToken: "private-consent-token",
@@ -49,7 +49,7 @@ describe("frontend/api", () => {
     const api = await loadApiModule();
     const error = await api.disableTeam().catch((value) => value);
     expect(error).toBeInstanceOf(Error);
-    expect(error).toMatchObject({ code: "gateway_held", hint: "Review the hold", disabled: true, enabled: false,
+    expect(error).toMatchObject({ code: "lease_expired", hint: "Retry the operation", disabled: true, enabled: false,
       configSaved: true, configRestored: true, gatewayRestored: false, restartDeferred: true,
       gatewayConfigDeferred: true, memberSaved: true, ownerCreated: false });
     for (const field of ["changed", "restored", "gatewayApplied", "confirmNoBackupToken", "sessionToken", "unknownField"]) {
@@ -907,14 +907,14 @@ describe("frontend/api", () => {
     expect(result).toEqual({ ok: true, operationId: "op-1", events: true });
   });
 
-  it("sends manual verification only on the explicit request and preserves skipped/refusal recovery", async () => {
+  it("sends an empty restart body by default and preserves skipped/refusal recovery", async () => {
     const api = await loadApiModule();
-    global.fetch.mockResolvedValue(mockJsonResponse(202, { ok: true, operationId: "verify-1" }));
-    await api.restartGatewayAsync({ verifyDatabaseRecovery: true });
-    expect(JSON.parse(global.fetch.mock.calls.at(-1)[1].body)).toEqual({ verifyDatabaseRecovery: true });
-    const recovery = { disposition: "inspect", resolution: "upgrade" };
-    global.fetch.mockResolvedValue(mockJsonResponse(200, { ok: false, skipped: true, code: "gateway_held", recovery }));
-    await expect(api.restartGatewayAsync()).rejects.toMatchObject({ notStarted: true, code: "gateway_held", recovery });
+    global.fetch.mockResolvedValue(mockJsonResponse(202, { ok: true, operationId: "restart-1" }));
+    await api.restartGatewayAsync();
+    expect(JSON.parse(global.fetch.mock.calls.at(-1)[1].body)).toEqual({});
+    const recovery = { disposition: "inspect", resolution: "diagnose" };
+    global.fetch.mockResolvedValue(mockJsonResponse(200, { ok: false, skipped: true, code: "restart_refused", recovery }));
+    await expect(api.restartGatewayAsync()).rejects.toMatchObject({ notStarted: true, code: "restart_refused", recovery });
     global.fetch.mockResolvedValue(mockJsonResponse(200, { ok: true, skipped: true, reason: "busy", recovery }));
     await expect(api.triggerWatchdogRepair()).rejects.toMatchObject({ notStarted: false, responseReceived: true, recovery });
   });
@@ -922,7 +922,7 @@ describe("frontend/api", () => {
   it("does not infer that Doctor never ran from a repair 409 or a skipped result", async () => {
     const api = await loadApiModule();
     for (const status of [200, 409]) {
-      global.fetch.mockResolvedValue(mockJsonResponse(status, { ok: false, code: "gateway_held", message: "Doctor completed, but the relaunch was refused", result: { skipped: true, reason: "gateway_held" } }));
+      global.fetch.mockResolvedValue(mockJsonResponse(status, { ok: false, code: "relaunch_refused", message: "Doctor completed, but the relaunch was refused", result: { skipped: true, reason: "relaunch_refused" } }));
       await expect(api.triggerWatchdogRepair()).rejects.toMatchObject({ notStarted: false, responseReceived: true, message: "Doctor completed, but the relaunch was refused" });
     }
     global.fetch.mockResolvedValue(mockJsonResponse(409, { ok: false, notStarted: true, error: "Admission refused before Doctor" }));
@@ -938,20 +938,20 @@ describe("frontend/api", () => {
     expect(global.fetch).toHaveBeenCalledTimes(1);
   });
 
-  it("restartGatewayAsync rejects 409 apply_in_progress with code+status, and unparseable bodies with the fallback message", async () => {
+  it("restartGatewayAsync rejects 409 operation_in_progress with code+status, and unparseable bodies with the fallback message", async () => {
     // 409 envelope: the controller branches on err.code, so the code and
     // HTTP status must ride on the rejection.
     global.fetch.mockResolvedValue(
       mockJsonResponse(409, {
         ok: false,
-        error: "A channel update is in progress",
-        code: "apply_in_progress",
+        error: "Another gateway operation is in progress",
+        code: "operation_in_progress",
       }),
     );
     const api = await loadApiModule();
     await expect(api.restartGatewayAsync()).rejects.toMatchObject({
-      message: "A channel update is in progress",
-      code: "apply_in_progress",
+      message: "Another gateway operation is in progress",
+      code: "operation_in_progress",
       status: 409,
     });
 
@@ -1747,7 +1747,7 @@ describe("frontend/api behaviors", () => {
   });
 });
 
-describe("frontend/api openclaw channel endpoints", () => {
+describe("frontend/api openclaw endpoints", () => {
   beforeEach(() => {
     global.fetch = vi.fn();
     global.window = { location: { href: "http://localhost/" } };
@@ -1757,403 +1757,6 @@ describe("frontend/api openclaw channel endpoints", () => {
   afterEach(() => {
     delete global.fetch;
     delete global.window;
-  });
-
-  it("fetchOpenclawChannel gets the channel state", async () => {
-    const payload = {
-      ok: true,
-      releaseChannel: "beta",
-      installedVersion: "2026.7.3-beta.1",
-      pinVersion: "2026.7.1-2",
-      blocklist: [],
-    };
-    global.fetch.mockResolvedValue(mockJsonResponse(200, payload));
-    const api = await loadApiModule();
-
-    const result = await api.fetchOpenclawChannel();
-
-    expect(global.fetch).toHaveBeenCalledWith(
-      "/api/openclaw/channel",
-      expect.objectContaining({ headers: expect.any(Headers) }),
-    );
-    expect(result).toEqual(payload);
-  });
-
-  it("fetchOpenclawCatalog omits the refresh flag by default", async () => {
-    global.fetch.mockResolvedValue(
-      mockJsonResponse(200, { ok: true, catalog: { stable: [] }, channel: {} }),
-    );
-    const api = await loadApiModule();
-
-    const result = await api.fetchOpenclawCatalog();
-
-    expect(global.fetch.mock.calls[0][0]).toBe("/api/openclaw/catalog");
-    expect(result).toEqual({ ok: true, catalog: { stable: [] }, channel: {} });
-  });
-
-  it("fetchOpenclawCatalog passes refresh=1 for Check now", async () => {
-    global.fetch.mockResolvedValue(
-      mockJsonResponse(200, { ok: true, catalog: {}, channel: {} }),
-    );
-    const api = await loadApiModule();
-
-    await api.fetchOpenclawCatalog({ refresh: true });
-
-    expect(global.fetch.mock.calls[0][0]).toBe("/api/openclaw/catalog?refresh=1");
-  });
-
-  it("fetchOpenclawCatalog surfaces the 503 catalog_unavailable envelope", async () => {
-    global.fetch.mockResolvedValue(
-      mockJsonResponse(503, {
-        ok: false,
-        code: "catalog_unavailable",
-        message: "Could not load the OpenClaw release catalog from GitHub or npm.",
-        hint: "Check the server's network access, then refresh the catalog.",
-      }),
-    );
-    const api = await loadApiModule();
-
-    const error = await api.fetchOpenclawCatalog().catch((err) => err);
-
-    expect(error.message).toBe(
-      "Could not load the OpenClaw release catalog from GitHub or npm.",
-    );
-    expect(error.code).toBe("catalog_unavailable");
-    expect(error.hint).toBe(
-      "Check the server's network access, then refresh the catalog.",
-    );
-  });
-
-  it("updateOpenclawReleaseChannel puts the release channel", async () => {
-    global.fetch.mockResolvedValue(
-      mockJsonResponse(200, {
-        ok: true,
-        changed: true,
-        config: {},
-        restartRequired: true,
-      }),
-    );
-    const api = await loadApiModule();
-
-    const result = await api.updateOpenclawReleaseChannel("beta");
-
-    expect(global.fetch).toHaveBeenCalledWith(
-      "/api/alphaclaw/config/updates/openclaw-release-channel",
-      expect.objectContaining({
-        method: "PUT",
-        body: JSON.stringify({ releaseChannel: "beta" }),
-        headers: expect.any(Headers),
-      }),
-    );
-    expect(result).toEqual({
-      ok: true,
-      changed: true,
-      config: {},
-      restartRequired: true,
-    });
-  });
-
-  it("applyOpenclawVersion posts the payload and returns operation info", async () => {
-    global.fetch.mockResolvedValue(
-      mockJsonResponse(202, {
-        ok: true,
-        operationId: "op-1",
-        events: "/api/operations/op-1/events",
-      }),
-    );
-    const api = await loadApiModule();
-
-    const result = await api.applyOpenclawVersion({
-      channel: "stable",
-      version: "2026.7.2",
-    });
-
-    expect(global.fetch).toHaveBeenCalledWith(
-      "/api/openclaw/apply",
-      expect.objectContaining({
-        method: "POST",
-        body: JSON.stringify({ channel: "stable", version: "2026.7.2" }),
-        headers: expect.any(Headers),
-      }),
-    );
-    expect(result).toEqual({
-      ok: true,
-      operationId: "op-1",
-      events: "/api/operations/op-1/events",
-    });
-  });
-
-  it("applyOpenclawVersion returns quick noop outcomes", async () => {
-    global.fetch.mockResolvedValue(
-      mockJsonResponse(200, { ok: true, noop: true, operationId: "op-2" }),
-    );
-    const api = await loadApiModule();
-
-    const result = await api.applyOpenclawVersion({
-      channel: "dev",
-      devHead: true,
-    });
-
-    expect(result).toEqual({ ok: true, noop: true, operationId: "op-2" });
-  });
-
-  it("applyOpenclawVersion preserves the error envelope (message, hint, code)", async () => {
-    global.fetch.mockResolvedValue(
-      mockJsonResponse(400, {
-        ok: false,
-        code: "unknown_version",
-        message: "2020.1.0 is not a published OpenClaw version in the catalog.",
-        hint: 'Refresh the catalog ("Check now") and pick a listed version.',
-        docsUrl: null,
-      }),
-    );
-    const api = await loadApiModule();
-
-    const error = await api
-      .applyOpenclawVersion({ channel: "stable", version: "2020.1.0" })
-      .catch((err) => err);
-
-    expect(error.message).toBe(
-      "2020.1.0 is not a published OpenClaw version in the catalog.",
-    );
-    expect(error.code).toBe("unknown_version");
-    expect(error.hint).toBe(
-      'Refresh the catalog ("Check now") and pick a listed version.',
-    );
-  });
-
-  it("rollbackOpenclaw posts to the rollback endpoint with an empty body by default", async () => {
-    global.fetch.mockResolvedValue(
-      mockJsonResponse(200, { ok: true, target: { kind: "pin" }, blockedId: "x" }),
-    );
-    const api = await loadApiModule();
-
-    const result = await api.rollbackOpenclaw();
-
-    const [url, options] = global.fetch.mock.calls.at(-1);
-    expect(url).toBe("/api/openclaw/rollback");
-    expect(options.method).toBe("POST");
-    expect(options.body).toBe(JSON.stringify({}));
-    expect(result).toEqual({ ok: true, target: { kind: "pin" }, blockedId: "x" });
-  });
-
-  it("rollbackOpenclaw sends the confirmDataRisk consent body", async () => {
-    global.fetch.mockResolvedValue(
-      mockJsonResponse(200, { ok: true, target: { kind: "pin" } }),
-    );
-    const api = await loadApiModule();
-
-    await api.rollbackOpenclaw({ confirmDataRisk: true });
-
-    const [url, options] = global.fetch.mock.calls.at(-1);
-    expect(url).toBe("/api/openclaw/rollback");
-    expect(options.body).toBe(JSON.stringify({ confirmDataRisk: true }));
-  });
-
-  it("rollbackOpenclaw surfaces 409 envelopes", async () => {
-    global.fetch.mockResolvedValue(
-      mockJsonResponse(409, {
-        ok: false,
-        code: "nothing_to_rollback",
-        message: "You're already on the built-in pin.",
-        hint: null,
-      }),
-    );
-    const api = await loadApiModule();
-
-    await expect(api.rollbackOpenclaw()).rejects.toThrow(
-      "You're already on the built-in pin.",
-    );
-  });
-
-  it("rollbackOpenclaw rejects the 409 rollback fence with code/hint/backupFile/status attached, and unparseable bodies with the fallback", async () => {
-    // The hook branches on err.code and the second-stage dialog names
-    // err.backupFile — both must ride on the rejection.
-    global.fetch.mockResolvedValue(
-      mockJsonResponse(409, {
-        ok: false,
-        code: "rollback_requires_confirmation",
-        message:
-          "This update migrated your state databases — the rollback target may not be able to read them.",
-        hint: "Restore the verified pre-update backup first (backup-1.tar.gz), or resend with confirmDataRisk: true to roll back anyway.",
-        backupFile: "backup-1.tar.gz",
-      }),
-    );
-    const api = await loadApiModule();
-
-    await expect(api.rollbackOpenclaw()).rejects.toMatchObject({
-      message:
-        "This update migrated your state databases — the rollback target may not be able to read them.",
-      code: "rollback_requires_confirmation",
-      hint: "Restore the verified pre-update backup first (backup-1.tar.gz), or resend with confirmDataRisk: true to roll back anyway.",
-      backupFile: "backup-1.tar.gz",
-      status: 409,
-    });
-
-    // Unparseable body on a failed response: fallback message, status kept,
-    // no code invented.
-    global.fetch.mockResolvedValue({
-      status: 500,
-      ok: false,
-      json: async () => {
-        throw new Error("bad json");
-      },
-    });
-    const rejection = await api.rollbackOpenclaw().catch((err) => err);
-    expect(rejection).toBeInstanceOf(Error);
-    expect(rejection.message).toBe("Could not roll back OpenClaw");
-    expect(rejection.status).toBe(500);
-    expect(rejection.code).toBeUndefined();
-    expect(rejection.backupFile).toBeUndefined();
-  });
-
-  it("rollbackOpenclaw carries the WI-4.1 fence re-stat fields (exists/partial/reused/age/survivor)", async () => {
-    global.fetch.mockResolvedValue(
-      mockJsonResponse(409, {
-        ok: false,
-        code: "rollback_requires_confirmation",
-        message: "migrated",
-        hint: "…",
-        backupFile: "/backups/openclaw-backup-old.tar.gz",
-        backupFileExists: false,
-        backupPartial: true,
-        backupReused: true,
-        backupFileCaveat: "content_changed",
-        reusedAgeMs: 7_200_000,
-        newestSurvivingBackup: {
-          file: "/backups/openclaw-backup-new.tar.gz",
-          at: 1_700_000_000_000,
-          producer: "openclaw",
-        },
-      }),
-    );
-    const api = await loadApiModule();
-
-    await expect(api.rollbackOpenclaw()).rejects.toMatchObject({
-      code: "rollback_requires_confirmation",
-      backupFile: "/backups/openclaw-backup-old.tar.gz",
-      backupFileExists: false,
-      backupPartial: true,
-      backupReused: true,
-      backupFileCaveat: "content_changed",
-      reusedAgeMs: 7_200_000,
-      newestSurvivingBackup: {
-        file: "/backups/openclaw-backup-new.tar.gz",
-        at: 1_700_000_000_000,
-        producer: "openclaw",
-      },
-    });
-
-    // Non-boolean / non-object shapes are dropped, never coerced.
-    global.fetch.mockResolvedValue(
-      mockJsonResponse(409, {
-        ok: false,
-        code: "rollback_requires_confirmation",
-        backupFile: "b.tar.gz",
-        backupFileExists: "yes",
-        newestSurvivingBackup: "b.tar.gz",
-        reusedAgeMs: "soon",
-      }),
-    );
-    const loose = await api.rollbackOpenclaw().catch((err) => err);
-    expect(loose.backupFileExists).toBeUndefined();
-    expect(loose.newestSurvivingBackup).toBeUndefined();
-    expect(loose.reusedAgeMs).toBeUndefined();
-  });
-
-  it("applyOpenclawVersion carries the 409 backup_failed reusableBackup offer (object only) and sends the consent body verbatim", async () => {
-    const kSha = "c".repeat(64);
-    global.fetch.mockResolvedValue(
-      mockJsonResponse(409, {
-        ok: false,
-        code: "backup_failed",
-        message: "Backup failed: state lease lost (after 3 attempts, 2 with the gateway paused)",
-        hint: "Newest surviving archive: …",
-        reusableBackup: {
-          file: "/backups/openclaw-backup-x.tar.gz",
-          at: 1_700_000_000_000,
-          ageMs: 3_600_000,
-          sha256: kSha,
-          producer: "openclaw",
-        },
-      }),
-    );
-    const api = await loadApiModule();
-
-    await expect(
-      api.applyOpenclawVersion({ channel: "stable", version: "2026.8.2" }),
-    ).rejects.toMatchObject({
-      code: "backup_failed",
-      reusableBackup: {
-        file: "/backups/openclaw-backup-x.tar.gz",
-        at: 1_700_000_000_000,
-        ageMs: 3_600_000,
-        sha256: kSha,
-        producer: "openclaw",
-      },
-    });
-
-    // The consent object rides the body exactly as given — {sha256}, no path.
-    global.fetch.mockResolvedValue(
-      mockJsonResponse(202, { ok: true, operationId: "op-3", events: "/e" }),
-    );
-    await api.applyOpenclawVersion({
-      channel: "stable",
-      version: "2026.8.2",
-      allowBackupReuse: { sha256: kSha },
-    });
-    const [, options] = global.fetch.mock.calls.at(-1);
-    expect(JSON.parse(options.body)).toEqual({
-      channel: "stable",
-      version: "2026.8.2",
-      allowBackupReuse: { sha256: kSha },
-    });
-
-    // A non-object reusableBackup is never attached.
-    global.fetch.mockResolvedValue(
-      mockJsonResponse(409, { ok: false, code: "backup_failed", reusableBackup: "x" }),
-    );
-    const loose = await api
-      .applyOpenclawVersion({ channel: "stable", version: "2026.8.2" })
-      .catch((err) => err);
-    expect(loose.code).toBe("backup_failed");
-    expect(loose.reusableBackup).toBeUndefined();
-  });
-
-  it("fetchOpenclawBackups reads the inventory envelope and surfaces its error envelope", async () => {
-    const inventory = {
-      ok: true,
-      backupsDir: "/root/backups/openclaw",
-      readable: true,
-      entries: [{ file: "/root/backups/openclaw/a.tar.gz", eligible: true }],
-      truncated: false,
-      newestArchive: { name: "a.tar.gz" },
-    };
-    global.fetch.mockResolvedValue(mockJsonResponse(200, inventory));
-    const api = await loadApiModule();
-
-    const result = await api.fetchOpenclawBackups();
-    expect(global.fetch.mock.calls.at(-1)[0]).toBe("/api/openclaw/backups");
-    expect(result).toEqual(inventory);
-
-    // R5: a forced read asks the SERVER to rescan (its 5 s SWR copy can still
-    // describe the pre-update directory); the default read stays cache-friendly.
-    await api.fetchOpenclawBackups({ force: true });
-    expect(global.fetch.mock.calls.at(-1)[0]).toBe("/api/openclaw/backups?force=1");
-    await api.fetchOpenclawBackups({ force: false });
-    expect(global.fetch.mock.calls.at(-1)[0]).toBe("/api/openclaw/backups");
-
-    global.fetch.mockResolvedValue(
-      mockJsonResponse(500, {
-        ok: false,
-        code: "backups_unavailable",
-        message: "Could not read the backup inventory",
-      }),
-    );
-    await expect(api.fetchOpenclawBackups()).rejects.toMatchObject({
-      code: "backups_unavailable",
-      message: "Could not read the backup inventory",
-    });
   });
 
   it("triggerWatchdogTestNotification preserves the 502 body — per-channel failures ride the rejection", async () => {
@@ -2211,218 +1814,6 @@ describe("frontend/api openclaw channel endpoints", () => {
     expect(rejection.result).toBeUndefined();
   });
 
-  it("retryOpenclawReconcile passes a 200 envelope through and sends the strip consent body", async () => {
-    global.fetch.mockResolvedValue(
-      mockJsonResponse(200, {
-        ok: true,
-        outcome: { status: "ok" },
-        gatewayStart: { ok: true },
-      }),
-    );
-    const api = await loadApiModule();
-
-    const result = await api.retryOpenclawReconcile();
-    let [url, options] = global.fetch.mock.calls.at(-1);
-    expect(url).toBe("/api/openclaw/reconcile/retry");
-    expect(options.method).toBe("POST");
-    expect(options.body).toBe(JSON.stringify({}));
-    expect(result).toEqual({
-      ok: true,
-      outcome: { status: "ok" },
-      gatewayStart: { ok: true },
-    });
-
-    await api.retryOpenclawReconcile({ stripBlamedKeys: true });
-    [url, options] = global.fetch.mock.calls.at(-1);
-    expect(options.body).toBe(JSON.stringify({ stripBlamedKeys: true }));
-  });
-
-  it("retryOpenclawReconcile rejects 409 still-held with code+outcome+status so the UI can name the fresh hold", async () => {
-    global.fetch.mockResolvedValue(
-      mockJsonResponse(409, {
-        ok: false,
-        code: "reconcile_still_held",
-        hint: "Fix the blamed keys, then retry.",
-        outcome: {
-          status: "held",
-          hold: { reason: "doctor exited 1 again", blamedKeys: ["gateway.oldKey"] },
-        },
-      }),
-    );
-    const api = await loadApiModule();
-
-    await expect(api.retryOpenclawReconcile()).rejects.toMatchObject({
-      code: "reconcile_still_held",
-      hint: "Fix the blamed keys, then retry.",
-      outcome: {
-        status: "held",
-        hold: { reason: "doctor exited 1 again", blamedKeys: ["gateway.oldKey"] },
-      },
-      status: 409,
-    });
-  });
-
-  it("retryOpenclawReconcile attaches message/hint generically for the other 409 codes", async () => {
-    // The route also answers reconcile_skipped and reconcile_not_needed —
-    // their server-set message must become the rejection's message so the
-    // hook's inline chip renders it instead of a generic string.
-    global.fetch.mockResolvedValue(
-      mockJsonResponse(409, {
-        ok: false,
-        code: "reconcile_not_needed",
-        message: "The gateway is running and no hold is set.",
-        hint: "Nothing to retry — the doctor never touches live databases.",
-      }),
-    );
-    const api = await loadApiModule();
-    await expect(api.retryOpenclawReconcile()).rejects.toMatchObject({
-      message: "The gateway is running and no hold is set.",
-      code: "reconcile_not_needed",
-      hint: "Nothing to retry — the doctor never touches live databases.",
-      status: 409,
-    });
-
-    global.fetch.mockResolvedValue(
-      mockJsonResponse(409, {
-        ok: false,
-        code: "reconcile_skipped",
-        message: "Reconcile skipped: no pending migration.",
-        hint: null,
-        outcome: { status: "skipped", reason: "no pending migration" },
-      }),
-    );
-    await expect(api.retryOpenclawReconcile()).rejects.toMatchObject({
-      message: "Reconcile skipped: no pending migration.",
-      code: "reconcile_skipped",
-      outcome: { status: "skipped", reason: "no pending migration" },
-      status: 409,
-    });
-  });
-
-  it("retryOpenclawReconcile falls back to the generic message on an unparseable body", async () => {
-    global.fetch.mockResolvedValue({
-      status: 500,
-      ok: false,
-      json: async () => {
-        throw new Error("bad json");
-      },
-    });
-    const api = await loadApiModule();
-
-    const rejection = await api.retryOpenclawReconcile().catch((err) => err);
-    expect(rejection).toBeInstanceOf(Error);
-    expect(rejection.message).toBe("Could not retry the settings migration");
-    expect(rejection.status).toBe(500);
-    expect(rejection.code).toBeUndefined();
-    expect(rejection.outcome).toBeUndefined();
-  });
-
-  it("markOpenclawGood posts to the mark-good endpoint", async () => {
-    global.fetch.mockResolvedValue(
-      mockJsonResponse(200, { ok: true, acceptedAt: 1770000000000 }),
-    );
-    const api = await loadApiModule();
-
-    const result = await api.markOpenclawGood();
-
-    const [url, options] = global.fetch.mock.calls.at(-1);
-    expect(url).toBe("/api/openclaw/mark-good");
-    expect(options.method).toBe("POST");
-    expect(result).toEqual({ ok: true, acceptedAt: 1770000000000 });
-  });
-
-  it("clearOpenclawBlocklist posts the id when given", async () => {
-    global.fetch.mockResolvedValue(
-      mockJsonResponse(200, { ok: true, blocklist: [] }),
-    );
-    const api = await loadApiModule();
-
-    const result = await api.clearOpenclawBlocklist("2026.7.3");
-
-    expect(global.fetch).toHaveBeenCalledWith(
-      "/api/openclaw/blocklist/clear",
-      expect.objectContaining({
-        method: "POST",
-        body: JSON.stringify({ id: "2026.7.3" }),
-        headers: expect.any(Headers),
-      }),
-    );
-    expect(result).toEqual({ ok: true, blocklist: [] });
-  });
-
-  it("clearOpenclawBlocklist posts an empty body without an id", async () => {
-    global.fetch.mockResolvedValue(
-      mockJsonResponse(200, { ok: true, blocklist: [] }),
-    );
-    const api = await loadApiModule();
-
-    await api.clearOpenclawBlocklist();
-
-    const [, options] = global.fetch.mock.calls.at(-1);
-    expect(options.body).toBe(JSON.stringify({}));
-  });
-
-  it("fetchOpenclawRuns lists the run ledger", async () => {
-    const payload = {
-      ok: true,
-      runs: [
-        {
-          operationId: "0b1c2d3e-0000-4000-8000-000000000001",
-          state: "activated",
-          stepCount: 6,
-          hasLog: true,
-        },
-      ],
-    };
-    global.fetch.mockResolvedValue(mockJsonResponse(200, payload));
-    const api = await loadApiModule();
-
-    const result = await api.fetchOpenclawRuns();
-
-    expect(global.fetch).toHaveBeenCalledWith(
-      "/api/openclaw/runs",
-      expect.objectContaining({ headers: expect.any(Headers) }),
-    );
-    expect(result).toEqual(payload);
-  });
-
-
-  it("fetchOpenclawRunLogText returns the plain-text log body", async () => {
-    global.fetch.mockResolvedValue(
-      mockTextResponse(200, "npm install openclaw@2026.7.2\nverified\n"),
-    );
-    const api = await loadApiModule();
-
-    const text = await api.fetchOpenclawRunLogText("op-1");
-
-    // Defaults to a 256KB tail so a 10MB dev log never lands in one string.
-    expect(global.fetch.mock.calls[0][0]).toBe(
-      "/api/openclaw/runs/op-1/log?tail=262144",
-    );
-    expect(text).toBe("npm install openclaw@2026.7.2\nverified\n");
-
-    // Full-file mode for download flows.
-    const full = await api.fetchOpenclawRunLogText("op-1", { tailBytes: null });
-    expect(full).toBe("npm install openclaw@2026.7.2\nverified\n");
-    expect(global.fetch.mock.calls[1][0]).toBe("/api/openclaw/runs/op-1/log");
-  });
-
-  it("fetchOpenclawRunLogText surfaces the 404 log_not_found envelope", async () => {
-    global.fetch.mockResolvedValue(
-      mockJsonResponse(404, {
-        ok: false,
-        code: "log_not_found",
-        message: "No log recorded for this run.",
-      }),
-    );
-    const api = await loadApiModule();
-
-    const error = await api.fetchOpenclawRunLogText("op-1").catch((err) => err);
-
-    expect(error.message).toBe("No log recorded for this run.");
-    expect(error.code).toBe("log_not_found");
-  });
-
   it("fetchOpenclawFeatures gets the fail-closed feature map", async () => {
     const payload = {
       ok: true,
@@ -2436,6 +1827,40 @@ describe("frontend/api openclaw channel endpoints", () => {
 
     expect(global.fetch.mock.calls[0][0]).toBe("/api/openclaw/features");
     expect(result).toEqual(payload);
+  });
+
+  it("createOpenclawBackup POSTs /api/openclaw/backup with no body and keeps the 409 code", async () => {
+    global.fetch.mockResolvedValue(mockJsonResponse(202, { ok: true, started: true }));
+    const api = await loadApiModule();
+
+    await expect(api.createOpenclawBackup()).resolves.toEqual({ ok: true, started: true });
+    const [url, options] = global.fetch.mock.calls[0];
+    expect(url).toBe("/api/openclaw/backup");
+    expect(options.method).toBe("POST");
+    expect(options.body).toBeUndefined();
+
+    global.fetch.mockResolvedValue(
+      mockJsonResponse(409, { ok: false, code: "backup_in_progress", error: "A backup is already running" }),
+    );
+    await expect(api.createOpenclawBackup()).rejects.toMatchObject({
+      status: 409,
+      code: "backup_in_progress",
+      message: "A backup is already running",
+    });
+  });
+
+  it("fetchOpenclawBackupStatus GETs the running flag and last result", async () => {
+    const payload = {
+      ok: true,
+      running: false,
+      last: { ok: true, startedAt: 1, finishedAt: 2, archivePath: "/backups/a.tar.gz", bytes: 10, error: null },
+    };
+    global.fetch.mockResolvedValue(mockJsonResponse(200, payload));
+    const api = await loadApiModule();
+
+    await expect(api.fetchOpenclawBackupStatus()).resolves.toEqual(payload);
+    expect(global.fetch.mock.calls[0][0]).toBe("/api/openclaw/backup");
+    expect(global.fetch.mock.calls[0][1]?.method).toBeUndefined();
   });
 
   it("fetchOpenclawNotifications gets the routing preferences", async () => {
@@ -2500,13 +1925,13 @@ describe("frontend/api openclaw channel endpoints", () => {
     expect(error.code).toBe("notifications_unavailable");
   });
 
-  it("subscribeOpenclawApplyEvents streams step/output/done and routes drops to onError", async () => {
+  it("subscribeGatewayRestartEvents streams step/output/done and routes drops to onError", async () => {
     global.window.EventSource = FakeEventSource;
     const api = await loadApiModule();
     const messages = [];
     const errors = [];
 
-    const unsubscribe = api.subscribeOpenclawApplyEvents({
+    const unsubscribe = api.subscribeGatewayRestartEvents({
       operationId: "op 1",
       onMessage: (message) => messages.push(message),
       onError: (event) => errors.push(event),
@@ -2539,10 +1964,10 @@ describe("frontend/api openclaw channel endpoints", () => {
     expect(messages).toHaveLength(4);
   });
 
-  it("subscribeOpenclawApplyEvents throws when EventSource is unavailable", async () => {
+  it("subscribeGatewayRestartEvents throws when EventSource is unavailable", async () => {
     const api = await loadApiModule();
 
-    expect(() => api.subscribeOpenclawApplyEvents({ operationId: "op" })).toThrow(
+    expect(() => api.subscribeGatewayRestartEvents({ operationId: "op" })).toThrow(
       "Server events are not supported in this browser",
     );
   });

@@ -3,7 +3,6 @@ import { describe, expect, it } from "vitest";
 import {
   buildChannelDeletePairingRowsFailedMessage,
   describeChannelDeleteOutcome,
-  kChannelDeletePairingRowsDeferredMessage,
   kChannelDeleteRestartFailedSentence,
   kChannelDeletedMessage,
 } from "../../lib/public/js/lib/channel-delete-outcome.js";
@@ -53,19 +52,6 @@ describe("frontend/channel-delete-outcome", () => {
     ).toContain("(unknown error)");
   });
 
-  it("pairingRowsCleanupDeferred is a WARNING saying the paired users stay authorized until the backup finishes", () => {
-    const outcome = describeChannelDeleteOutcome({
-      ok: true,
-      pairingRowsCleanupDeferred: true,
-    });
-    expect(outcome).toEqual({
-      message: kChannelDeletePairingRowsDeferredMessage,
-      level: "warning",
-      restartRequired: false,
-    });
-    expect(outcome.message).toContain("stay authorized until the running backup finishes");
-  });
-
   it("gatewayRestartFailed raises the restart banner and is appended to whichever pairing verdict applies", () => {
     const restartOnly = describeChannelDeleteOutcome({ ok: true, gatewayRestartFailed: true });
     expect(restartOnly.restartRequired).toBe(true);
@@ -86,15 +72,6 @@ describe("frontend/channel-delete-outcome", () => {
     expect(both.restartRequired).toBe(true);
     expect(both.message).toContain("disk I/O error");
     expect(both.message).toContain(kChannelDeleteRestartFailedSentence);
-
-    const deferredAndRestart = describeChannelDeleteOutcome({
-      ok: true,
-      gatewayRestartFailed: true,
-      pairingRowsCleanupDeferred: true,
-    });
-    expect(deferredAndRestart.level).toBe("warning");
-    expect(deferredAndRestart.message).toContain("until the running backup finishes");
-    expect(deferredAndRestart.message).toContain(kChannelDeleteRestartFailedSentence);
   });
 
   it("only literal `true` flags count — a truthy string or the pairing error alone never changes the verdict", () => {

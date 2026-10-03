@@ -7,7 +7,6 @@ const { DatabaseSync } = require("node:sqlite");
 const watchdogDb = require("../../lib/server/db/watchdog");
 const { createManagedUpdateAttempts } = require("../../lib/server/managed-update-attempts");
 const { createAlphaclawVersionService } = require("../../lib/server/alphaclaw-version");
-const { createOpenclawUpdateRepair } = require("../../lib/server/openclaw-update-repair");
 
 const kTarget = { repo: "owner/template", ref: "abc123", alphaclawVersion: "0.9.85", openclawVersion: "2026.9.3" };
 const kEnv = { ALPHACLAW_MANAGED_UPDATE_URL: "https://bridge.example/private-update",
@@ -167,7 +166,7 @@ describe("durable managed deployment attempts", () => {
     expect(service.isDeploymentMutationBlocked()).toBe(true);
   });
 
-  it.each(["accepted", "unknown"])("blocks the actual repair writer while a %s deployment can still restart AlphaClaw", async (state) => {
+  it.each(["accepted", "unknown"])("keeps deployment mutations blocked across a restart while a %s deployment can still restart AlphaClaw", async (state) => {
     const original = makeService({ post: state === "unknown"
       ? async () => { throw new Error("response lost"); }
       : async () => response({ ok: true, noop: false, phase: "queued" }) });
@@ -177,32 +176,10 @@ describe("durable managed deployment attempts", () => {
     const { service } = makeService();
     expect(service.isUpdateInProgress()).toBe(false);
     expect(service.isDeploymentMutationBlocked()).toBe(true);
-    let applying = false;
-    const hold = Object.assign(async () => {}, { isValid: () => true });
-    const runner = { runStreamed: vi.fn(async () => ({ ok: true })) };
-    const ledger = {
-      createRun: vi.fn(), completeRun: vi.fn(),
-      createLogSink: () => ({ writeLine: () => {}, close: async () => {} }),
-    };
-    const repair = createOpenclawUpdateRepair({
-      getChannelInfo: () => ({ releaseChannel: "dev" }), isOnboarded: () => true,
-      isSelfUpdateInProgress: service.isDeploymentMutationBlocked,
-      isApplyInProgress: () => applying, setApplyInProgress: (value) => { applying = value; },
-      getActiveGatewayOperation: () => null, acquireLifecycleLock: async () => hold,
-      mutationPolicy: { assert: () => {} }, ledger, runner, devUpdateEnv: () => ({}),
-      stepRecorder: () => ({ steps: [], emit: () => {} }),
-      makeOutputPublisher: () => Object.assign(() => {}, { flush: () => {} }),
-      setActiveSink: () => {}, channelError: (code, message) => ({ ok: false, code, message }),
-      rootDir: dir, log: () => {},
-    });
-    expect(await repair()).toMatchObject({ status: 409, body: { code: "self_update_in_progress" } });
-    expect(runner.runStreamed).not.toHaveBeenCalled();
-    expect(ledger.createRun).not.toHaveBeenCalled();
     expect(service.resolveManagedUpdate({ attemptId: submission.body.managedUpdateAttempt.id,
       confirmProviderChecked: true, outcome: "not_deployed" }).status).toBe(200);
     expect(service.isDeploymentMutationBlocked()).toBe(false);
-    expect(await repair()).toMatchObject({ status: 200 });
-    expect(runner.runStreamed).toHaveBeenCalledTimes(1);
+    expect(makeService().service.isDeploymentMutationBlocked()).toBe(false);
   });
 
   it("refuses an invalid optional resolution on an otherwise valid accepted attempt", () => {

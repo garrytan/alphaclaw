@@ -2,7 +2,7 @@
 // steps merge the state-DB / schema / config facts into the report the bin
 // phase wrote (fixture), compute the verdict, pin the incident report, notify
 // on INCONSISTENT and replay ONE `boot` watchdog event through the wrapped
-// sink. Hermetic: real writer over a temp managed dir, fake channel service.
+// sink. Hermetic: real writer over a temp managed dir, fake OpenClaw runtime.
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
@@ -29,12 +29,11 @@ const mkTemp = () => fs.mkdtempSync(path.join(os.tmpdir(), "alphaclaw-boot-steps
 const readJson = (file) => JSON.parse(fs.readFileSync(file, "utf8"));
 const silent = () => ({ log: vi.fn(), warn: vi.fn(), error: vi.fn() });
 
-// The bin-phase report the way bin/alphaclaw.js leaves it after syncAtBoot.
-// Like the sync, the fixture records the canonical installedDiverged predicate
-// over resolvedForLaunch whenever both sides are known (no pinLag here); an
-// explicit `installedDiverged` in `openclaw` overrides it.
+// The bin-phase report the way the boot instance guard leaves it. Like the
+// guard, the fixture records installedDiverged whenever both sides are known;
+// an explicit `installedDiverged` in `openclaw` overrides it.
 const binReport = (openclaw = {}, extra = {}) => {
-  const versions = { expected: "2026.9.2", installedAtBoot: "2026.9.2", resolvedForLaunch: "2026.9.2", ...openclaw };
+  const versions = { declaredPin: "2026.9.2", installedAtBoot: "2026.9.2", ...openclaw };
   return buildBinPhaseReport({
     bootId: kBootId,
     at: kNow - 10_000,
@@ -47,14 +46,9 @@ const binReport = (openclaw = {}, extra = {}) => {
       record: { raw: null, format: null, legacyClaim: false },
     },
     openclaw: {
-      declaredPin: "2026.9.2",
-      channelApplied: null,
-      lastKnownGood: null,
       installedDiverged:
-        versions.expected && versions.resolvedForLaunch ? versions.resolvedForLaunch !== versions.expected : null,
-      overlayPresent: false,
-      overlayComplete: false,
-      sentinelMatches: true,
+        versions.declaredPin && versions.installedAtBoot ? versions.installedAtBoot !== versions.declaredPin : null,
+      retiredChannel: null,
       ...versions,
     },
     bootSync: { action: "none", reason: null, warnings: [] },
@@ -77,8 +71,7 @@ const createFixture = ({
   openclaw = {},
   binExtra = {},
   schema = kSchema,
-  channelInfo = { installedVersion: "2026.9.2", expectedVersion: "2026.9.2", installedDiverged: false },
-  lastRestore = null,
+  runtimeInfo = { installedVersion: "2026.9.2", pinnedVersion: "2026.9.2", installedDiverged: false },
   config = { agents: { list: [] }, meta: { lastTouchedVersion: "2026.9.2" } },
   legacyApprovalsFile = false,
   eraHint = kSqliteEra,
@@ -101,65 +94,47 @@ const createFixture = ({
     ? createBootReportWriter({ managedDir, bootId: kBootId, nowFn: () => kNow, logger })
     : null;
   if (withBinPhase && bootReport) bootReport.writeBinPhase(binReport(openclaw, binExtra));
-  const service = {
-    closeDanglingRecordsAtBoot: vi.fn(() => ({
-      closedRuns: ["11111111-2222-4333-8444-555555555555"],
-      closedLastUpdateRun: true,
-      warnings: ["closed an update run interrupted by a restart"],
-    })),
+  const runtime = {
     describeStateDbSchema: vi.fn(async () => schema),
-    postBootWebhook: vi.fn(),
-    getChannelInfo: vi.fn(() => channelInfo),
-    store: { readState: () => ({ configMigration: { lastRestore } }) },
+    getInfo: vi.fn(() => runtimeInfo),
   };
+  const postBootWebhook = vi.fn();
   const restartRequiredState = { reconcileOnBoot: vi.fn() };
   const insertWatchdogEvent = vi.fn();
   const watchdog = withWatchdogVerdict ? { setBootVerdict: vi.fn() } : {};
   const steps = createBootReportSteps({
     bootReport,
-    openclawChannelService: service,
+    openclawRuntime: runtime,
     restartRequiredState,
     insertWatchdogEvent,
     getWatchdog: () => watchdog,
     notify,
+    postBootWebhook,
     openclawDir,
     readOpenclawConfig: require("../../lib/server/openclaw-config").readOpenclawConfig,
     resolveEraHint: vi.fn(async () => ({ hint: eraHint, signal: "gate" })),
     nowFn: () => kNow,
     logger,
   });
-  return { steps, bootReport, service, restartRequiredState, insertWatchdogEvent, watchdog, notify, logger, openclawDir, managedDir };
+  return { steps, bootReport, runtime, postBootWebhook, restartRequiredState, insertWatchdogEvent, watchdog, notify, logger, openclawDir, managedDir };
 };
 
 const bootEvents = (insertWatchdogEvent) =>
   insertWatchdogEvent.mock.calls.map((call) => call[0]).filter((event) => event.eventType === kBootWatchdogEventType);
 
-describe("boot-report-steps: closers", () => {
-  it("closeDanglingRecordsAtBoot delegates to the channel service and logs what it closed; reconcileRestartOperationAtBoot calls reconcileOnBoot", () => {
-    const { steps, service, restartRequiredState, logger } = createFixture();
-    const result = steps.closeDanglingRecordsAtBoot();
-    expect(service.closeDanglingRecordsAtBoot).toHaveBeenCalledTimes(1);
-    expect(result.closedLastUpdateRun).toBe(true);
-    expect(logger.log).toHaveBeenCalledWith(
-      "[boot-report] closed dangling records at boot: runs [11111111-2222-4333-8444-555555555555] + lastUpdateRun",
-    );
+describe("boot-report-steps: restart-operation closer", () => {
+  it("reconcileRestartOperationAtBoot calls reconcileOnBoot; a bare composition is a no-op, never a throw", () => {
+    const { steps, restartRequiredState } = createFixture();
     steps.reconcileRestartOperationAtBoot();
     expect(restartRequiredState.reconcileOnBoot).toHaveBeenCalledTimes(1);
-  });
-
-  it("a service without the closer (older wiring) is a no-op, never a throw", () => {
-    const { steps } = createFixture();
-    const bare = createBootReportSteps({ openclawChannelService: {}, logger: silent() });
-    expect(bare.closeDanglingRecordsAtBoot()).toBeNull();
+    const bare = createBootReportSteps({ logger: silent() });
     expect(() => bare.reconcileRestartOperationAtBoot()).not.toThrow();
-    expect(steps.closeDanglingRecordsAtBoot()).not.toBeNull();
   });
 });
 
 describe("boot-report-steps: recordBootReportServerPhase", () => {
-  it("merges stateDb, supportedSchema, config { sha256, lastTouchedVersion }, the channelInfo snapshot, legacyExecApprovalsPresent and the closer summary into the bin phase's report", async () => {
+  it("merges stateDb, supportedSchema, config { sha256, lastTouchedVersion }, the installed/pinned versions and legacyExecApprovalsPresent into the bin phase's report", async () => {
     const { steps, bootReport, openclawDir } = createFixture();
-    steps.closeDanglingRecordsAtBoot();
 
     const merged = await steps.recordBootReportServerPhase();
 
@@ -176,70 +151,32 @@ describe("boot-report-steps: recordBootReportServerPhase", () => {
       status: kServerPhaseStatuses.recorded,
       at: kNow,
       installedVersion: "2026.9.2",
+      expectedVersion: "2026.9.2",
       stateDb: kSchema.stateDb,
       supportedSchema: kSchema.supportedSchema,
       config: { sha256: expectedSha, lastTouchedVersion: "2026.9.2" },
-      channelInfo: { installedVersion: "2026.9.2", expectedVersion: "2026.9.2", installedDiverged: false },
       legacyExecApprovalsPresent: false,
-      danglingRecords: { closedRuns: ["11111111-2222-4333-8444-555555555555"], closedLastUpdateRun: true },
       verdict: [],
     });
   });
 
-  it("serverPhase.danglingRecords is the UNION of the bin phase's closures and the server phase's (#76 A7: the bin-phase syncAtBoot closes first, so the server closer normally finds nothing)", async () => {
-    const binClosed = "0f76b007-e2e0-4c0d-9a1e-000000000076";
-    const { steps, service, bootReport } = createFixture({
-      binExtra: {
-        bootSync: {
-          action: "none",
-          reason: null,
-          warnings: [],
-          danglingRecords: { closedRuns: [binClosed], closedLastUpdateRun: false },
-        },
-      },
+  it("the version snapshot degrades to null fields when the runtime has no info (never a throw); the schema read outranks it", async () => {
+    const { steps, runtime } = createFixture({ runtimeInfo: null, schema: { ...kSchema, installedVersion: null } });
+    let phase = (await steps.recordBootReportServerPhase()).serverPhase;
+    expect(phase.installedVersion).toBeNull();
+    expect(phase.expectedVersion).toBeUndefined();
+    runtime.getInfo.mockImplementation(() => {
+      throw new Error("package.json unreadable");
     });
-    // The server-phase closer finds nothing left (the incident shape).
-    service.closeDanglingRecordsAtBoot.mockImplementation(() => ({ closedRuns: [], closedLastUpdateRun: false, warnings: [] }));
-    steps.closeDanglingRecordsAtBoot();
-    const report = await steps.recordBootReportServerPhase();
-    expect(report.serverPhase.danglingRecords).toEqual({ closedRuns: [binClosed], closedLastUpdateRun: false });
-    expect(bootReport.readOwnReport().serverPhase.danglingRecords.closedRuns).toEqual([binClosed]);
-
-    // Both phases closed something: ids are unioned (bin first, de-duplicated) and the flag ORed.
-    service.closeDanglingRecordsAtBoot.mockImplementation(() => ({
-      closedRuns: [binClosed, "11111111-2222-4333-8444-555555555555"],
-      closedLastUpdateRun: true,
-      warnings: [],
-    }));
-    steps.closeDanglingRecordsAtBoot();
-    expect((await steps.recordBootReportServerPhase()).serverPhase.danglingRecords).toEqual({
-      closedRuns: [binClosed, "11111111-2222-4333-8444-555555555555"],
-      closedLastUpdateRun: true,
-    });
-  });
-
-  it("with no bin-phase file the server phase's own closures are reported alone; a null-shaped bin bootSync never throws", async () => {
-    const { steps } = createFixture({ withBinPhase: false });
-    steps.closeDanglingRecordsAtBoot();
-    expect((await steps.recordBootReportServerPhase()).serverPhase.danglingRecords).toEqual({
-      closedRuns: ["11111111-2222-4333-8444-555555555555"],
-      closedLastUpdateRun: true,
-    });
-  });
-
-  it("the channelInfo snapshot is null-shaped when the service has no channel info (never a throw)", async () => {
-    const { steps, service } = createFixture({ channelInfo: null });
-    expect((await steps.recordBootReportServerPhase()).serverPhase.channelInfo).toBeNull();
-    service.getChannelInfo.mockImplementation(() => {
-      throw new Error("store unreadable");
-    });
-    expect((await steps.recordBootReportServerPhase()).serverPhase.channelInfo).toBeNull();
-    service.getChannelInfo.mockImplementation(() => ({ installedVersion: "", expectedVersion: "2026.9.2", installedDiverged: "yes" }));
-    expect((await steps.recordBootReportServerPhase()).serverPhase.channelInfo).toEqual({
-      installedVersion: null,
-      expectedVersion: "2026.9.2",
-      installedDiverged: null,
-    });
+    phase = (await steps.recordBootReportServerPhase()).serverPhase;
+    expect(phase.installedVersion).toBeNull();
+    runtime.getInfo.mockImplementation(() => ({ installedVersion: "", pinnedVersion: "2026.9.2" }));
+    phase = (await steps.recordBootReportServerPhase()).serverPhase;
+    expect(phase).toEqual(expect.objectContaining({ installedVersion: null, expectedVersion: "2026.9.2" }));
+    runtime.getInfo.mockImplementation(() => ({ installedVersion: "2026.9.1", pinnedVersion: "2026.9.2" }));
+    expect((await steps.recordBootReportServerPhase()).serverPhase.installedVersion).toBe("2026.9.1");
+    const schemaWins = createFixture({ runtimeInfo: { installedVersion: "2026.9.1", pinnedVersion: "2026.9.2" } });
+    expect((await schemaWins.steps.recordBootReportServerPhase()).serverPhase.installedVersion).toBe("2026.9.2");
   });
 
   it("legacyExecApprovalsPresent: true on a sqlite-era box with the file, false on a file-era box, null when the era is indeterminate, false with no file", async () => {
@@ -282,24 +219,23 @@ describe("boot-report-steps: recordBootReportServerPhase", () => {
     expect(merged.serverPhase.reason).toBe(kNotOnboardedReason);
   });
 
-  it("with no writer every report step is a null no-op (the closers still run)", async () => {
-    const { steps, service, insertWatchdogEvent } = createFixture({ withWriter: false });
+  it("with no writer every report step is a null no-op (the closer still runs)", async () => {
+    const { steps, restartRequiredState, insertWatchdogEvent } = createFixture({ withWriter: false });
     expect(await steps.recordBootReportServerPhase()).toBeNull();
-    expect(await steps.finalizeBootReport({ reconcile: { status: "ok" } })).toBeNull();
+    expect(await steps.finalizeBootReport({ migration: { status: "ok", ran: false } })).toBeNull();
     expect(steps.onListeningNotOnboarded()).toBeNull();
-    expect(service.closeDanglingRecordsAtBoot).toHaveBeenCalledTimes(1);
+    expect(restartRequiredState.reconcileOnBoot).toHaveBeenCalledTimes(1);
     expect(insertWatchdogEvent).not.toHaveBeenCalled();
   });
 });
 
 describe("boot-report-steps: finalizeBootReport", () => {
-  it("a consistent boot: logs `[boot-report] consistent`, threads the reconcile outcome + config gate facts, pins nothing, notifies nobody, replays exactly ONE ok `boot` event with the documented details, hands the report to watchdog.setBootVerdict", async () => {
-    const { steps, bootReport, service, insertWatchdogEvent, watchdog, notify, logger } = createFixture();
+  it("a consistent boot: logs `[boot-report] consistent`, threads the migration outcome + config facts, pins nothing, notifies nobody, replays exactly ONE ok `boot` event with the documented details, hands the report to watchdog.setBootVerdict", async () => {
+    const { steps, bootReport, postBootWebhook, insertWatchdogEvent, watchdog, notify, logger } = createFixture();
     await steps.recordBootReportServerPhase();
 
     const outcome = await steps.finalizeBootReport({
-      reconcile: { status: "ok", reason: "already-completed", warnings: [] },
-      compat: null,
+      migration: { status: "ok", ran: true },
       gatewayHeld: false,
     });
 
@@ -310,16 +246,13 @@ describe("boot-report-steps: finalizeBootReport", () => {
     expect(report.serverPhase).toEqual(
       expect.objectContaining({
         status: kServerPhaseStatuses.recorded,
-        reconcile: { status: "ok", reason: "already-completed", hold: null },
-        compat: null,
+        migration: { status: "ok", reason: null, ran: true },
         gatewayHeld: false,
-        config: expect.objectContaining({
+        config: {
           sha256: expect.stringMatching(/^[0-9a-f]{64}$/),
-          sha256AfterReconcile: expect.stringMatching(/^[0-9a-f]{64}$/),
+          sha256AfterMigration: expect.stringMatching(/^[0-9a-f]{64}$/),
           lastTouchedVersion: "2026.9.2",
-          migrationGate: { status: "ok", reason: "already-completed", hold: null },
-          restoredFrom: null,
-        }),
+        },
         // The record step's facts survive the finalize merge.
         stateDb: kSchema.stateDb,
         verdict: [],
@@ -328,7 +261,7 @@ describe("boot-report-steps: finalizeBootReport", () => {
     expect(logger.log).toHaveBeenCalledWith("[boot-report] consistent");
     expect(logger.error).not.toHaveBeenCalled();
     expect(fs.existsSync(bootReport.incidentPath)).toBe(false);
-    expect(service.postBootWebhook).not.toHaveBeenCalled();
+    expect(postBootWebhook).not.toHaveBeenCalled();
     expect(notify).not.toHaveBeenCalled();
     expect(bootEvents(insertWatchdogEvent)).toEqual([
       {
@@ -349,23 +282,14 @@ describe("boot-report-steps: finalizeBootReport", () => {
     expect(watchdog.setBootVerdict).toHaveBeenCalledWith(report);
   });
 
-  it("an INCONSISTENT boot (installed ≠ expected, legacy approvals): 🔴 error line, pinned incident report, pre-outbox webhook + ONE day-bucketed notification, ONE failed `boot` event naming the verdict", async () => {
-    const { steps, bootReport, service, insertWatchdogEvent, notify, logger } = createFixture({
-      openclaw: { installedAtBoot: "2026.7.1-2", expected: "2026.8.1", resolvedForLaunch: "2026.7.1-2" },
+  it("an INCONSISTENT boot (installed ≠ pin, legacy approvals): 🔴 error line, pinned incident report, pre-outbox webhook + ONE day-bucketed notification, ONE failed `boot` event naming the verdict", async () => {
+    const { steps, bootReport, postBootWebhook, insertWatchdogEvent, notify, logger } = createFixture({
+      openclaw: { installedAtBoot: "2026.7.1-2", declaredPin: "2026.8.1" },
       legacyApprovalsFile: true,
-      lastRestore: {
-        at: kNow - 1000,
-        from: "2026.8.1",
-        source: "lastTransition",
-        preRestorePath: "/data/.openclaw/openclaw.json.pre-restore-1.bak",
-        bootId: kBootId,
-      },
     });
     await steps.recordBootReportServerPhase();
 
-    const outcome = await steps.finalizeBootReport({
-      reconcile: { status: "ok", reason: "round-trip-restore", intent: "lastTransition" },
-    });
+    const outcome = await steps.finalizeBootReport({ migration: { status: "ok", ran: true } });
 
     const verdict = [kBootVerdicts.installedNotExpected, kBootVerdicts.legacyExecApprovalsPresent];
     expect(outcome).toEqual(expect.objectContaining({ verdict, inconsistent: true, pinned: true }));
@@ -379,14 +303,9 @@ describe("boot-report-steps: finalizeBootReport", () => {
     expect(pinned.serverPhase).toEqual(
       expect.objectContaining({ legacyExecApprovalsPresent: true, legacyExecApprovalsReaped: false }),
     );
-    expect(pinned.serverPhase.config.restoredFrom).toEqual({
-      from: "2026.8.1",
-      source: "lastTransition",
-      preRestorePath: "/data/.openclaw/openclaw.json.pre-restore-1.bak",
-    });
     const message =
-      "🔴 AlphaClaw boot report INCONSISTENT — `installed_not_expected`, `legacy_exec_approvals_present`. OpenClaw installed 2026.7.1-2, expected 2026.8.1. Run `alphaclaw diagnose` or open the Upgrade page.";
-    expect(service.postBootWebhook).toHaveBeenCalledWith(message);
+      "🔴 AlphaClaw boot report INCONSISTENT — `installed_not_expected`, `legacy_exec_approvals_present`. OpenClaw installed 2026.7.1-2, pinned 2026.8.1. Run `alphaclaw diagnose` for details.";
+    expect(postBootWebhook).toHaveBeenCalledWith(message);
     expect(notify).toHaveBeenCalledTimes(1);
     expect(notify).toHaveBeenCalledWith(message, {
       eventType: "health",
@@ -408,43 +327,8 @@ describe("boot-report-steps: finalizeBootReport", () => {
     ]);
   });
 
-  it("an ACTIVATION boot (installedAtBoot ≠ expected, resolvedForLaunch = expected) is consistent: no verdict, no notification, the `boot` event names the running tree", async () => {
-    // The e2e's activated-boot shape: the container woke up on the pin, the
-    // sync activated the applied build. installedAtBoot stays in the report as
-    // evidence; the verdict and the event judge what the gateway runs.
-    const { steps, insertWatchdogEvent, watchdog, notify, service, logger } = createFixture({
-      openclaw: {
-        declaredPin: "2026.9.1",
-        channelApplied: "beta:2026.9.2",
-        expected: "2026.9.2",
-        installedAtBoot: "2026.9.1",
-        resolvedForLaunch: "2026.9.2",
-        installedDiverged: false,
-        overlayPresent: true,
-        overlayComplete: true,
-      },
-    });
-    await steps.recordBootReportServerPhase();
-    const outcome = await steps.finalizeBootReport({ reconcile: { status: "ok" } });
-    expect(outcome).toEqual(expect.objectContaining({ verdict: [], inconsistent: false, pinned: false }));
-    expect(logger.log).toHaveBeenCalledWith("[boot-report] consistent");
-    expect(logger.error).not.toHaveBeenCalled();
-    expect(notify).not.toHaveBeenCalled();
-    expect(service.postBootWebhook).not.toHaveBeenCalled();
-    expect(bootEvents(insertWatchdogEvent)).toEqual([
-      expect.objectContaining({
-        status: "ok",
-        details: expect.objectContaining({ verdict: [], installed: "2026.9.2", expected: "2026.9.2" }),
-      }),
-    ]);
-    // What the watchdog latches on is this verdict — empty, so no
-    // version_mismatch for a healthy activation.
-    expect(watchdog.setBootVerdict.mock.calls[0][0].serverPhase.verdict).toEqual([]);
-    expect(watchdog.setBootVerdict.mock.calls[0][0].openclaw.installedAtBoot).toBe("2026.9.1");
-  });
-
   it("a legacy exec-approvals.json reaped between the record step and finalize (ensureManagedExecDefaults) is a self-healed boot: consistent, `legacyExecApprovalsReaped: true`", async () => {
-    const { steps, bootReport, openclawDir, insertWatchdogEvent, notify, service } = createFixture({
+    const { steps, bootReport, openclawDir, insertWatchdogEvent, notify, postBootWebhook } = createFixture({
       legacyApprovalsFile: true,
       eraHint: kSqliteEra,
     });
@@ -455,7 +339,7 @@ describe("boot-report-steps: finalizeBootReport", () => {
     // …then the reaper renamed the file (exec-defaults-config reapStrayLegacyExecApprovals).
     fs.renameSync(path.join(openclawDir, "exec-approvals.json"), path.join(openclawDir, `exec-approvals.json.stray-${kNow}`));
 
-    const outcome = await steps.finalizeBootReport({ reconcile: { status: "ok" } });
+    const outcome = await steps.finalizeBootReport({ migration: { status: "ok", ran: false } });
 
     expect(outcome).toEqual(expect.objectContaining({ verdict: [], inconsistent: false, pinned: false }));
     expect(readJson(bootReport.reportPath).serverPhase).toEqual(
@@ -463,7 +347,7 @@ describe("boot-report-steps: finalizeBootReport", () => {
     );
     expect(fs.existsSync(bootReport.incidentPath)).toBe(false);
     expect(notify).not.toHaveBeenCalled();
-    expect(service.postBootWebhook).not.toHaveBeenCalled();
+    expect(postBootWebhook).not.toHaveBeenCalled();
     expect(bootEvents(insertWatchdogEvent)).toEqual([expect.objectContaining({ status: "ok", details: expect.objectContaining({ verdict: [] }) })]);
   });
 
@@ -471,19 +355,10 @@ describe("boot-report-steps: finalizeBootReport", () => {
     const { steps, bootReport, openclawDir } = createFixture({ legacyApprovalsFile: true, eraHint: kIndeterminate });
     expect((await steps.recordBootReportServerPhase()).serverPhase.legacyExecApprovalsPresent).toBeNull();
     fs.rmSync(path.join(openclawDir, "exec-approvals.json"));
-    await steps.finalizeBootReport({ reconcile: { status: "ok" } });
+    await steps.finalizeBootReport({ migration: { status: "ok", ran: false } });
     expect(readJson(bootReport.reportPath).serverPhase).toEqual(
       expect.objectContaining({ legacyExecApprovalsPresent: false, legacyExecApprovalsReaped: false }),
     );
-  });
-
-  it("a restore recorded by ANOTHER boot is not this boot's restoredFrom", async () => {
-    const { steps, bootReport } = createFixture({
-      lastRestore: { at: 1, from: "2026.8.1", source: "lastTransition", bootId: "7:1699999000000" },
-    });
-    await steps.recordBootReportServerPhase();
-    await steps.finalizeBootReport({ reconcile: { status: "ok" } });
-    expect(readJson(bootReport.reportPath).serverPhase.config.restoredFrom).toBeNull();
   });
 
   it("pidfile_contradiction: a bin phase that SKIPPED for a live owner yet reached the server phase is INCONSISTENT; the event carries the pidfile decision", async () => {
@@ -502,7 +377,7 @@ describe("boot-report-steps: finalizeBootReport", () => {
       }),
     );
     await steps.recordBootReportServerPhase();
-    const outcome = await steps.finalizeBootReport({ reconcile: { status: "ok" } });
+    const outcome = await steps.finalizeBootReport({ migration: { status: "ok", ran: false } });
     expect(outcome.verdict).toEqual([kBootVerdicts.pidfileContradiction]);
     expect(bootEvents(insertWatchdogEvent)[0].details.pidfile).toEqual({
       decision: "skip",
@@ -510,43 +385,35 @@ describe("boot-report-steps: finalizeBootReport", () => {
     });
   });
 
-  it("a held or erroring reconcile is recorded verbatim ({ status, reason, hold }) and the compat verdict rides along", async () => {
+  it("a failed or erroring doctor migration is recorded verbatim ({ status, reason, ran }) with the gateway-held flag", async () => {
     const { steps, bootReport } = createFixture();
     await steps.recordBootReportServerPhase();
-    await steps.finalizeBootReport({
-      reconcile: { status: "held", hold: { reason: "settings migration for 2026.9.2 failed: doctor exit 1" } },
-      compat: { compatible: false, hold: { reason: "version_mismatch" } },
-      gatewayHeld: true,
-    });
-    const server = readJson(bootReport.reportPath).serverPhase;
-    expect(server.reconcile).toEqual({
-      status: "held",
-      reason: null,
-      hold: "settings migration for 2026.9.2 failed: doctor exit 1",
-    });
-    expect(server.compat).toEqual({ compatible: false, hold: "version_mismatch" });
+    await steps.finalizeBootReport({ migration: { status: "failed", ran: true, reason: "timed out" }, gatewayHeld: false });
+    let server = readJson(bootReport.reportPath).serverPhase;
+    expect(server.migration).toEqual({ status: "failed", reason: "timed out", ran: true });
+    expect(server.gatewayHeld).toBe(false);
+
+    await steps.finalizeBootReport({ migration: { status: "error", reason: "doctor exploded" }, gatewayHeld: true });
+    server = readJson(bootReport.reportPath).serverPhase;
+    expect(server.migration).toEqual({ status: "error", reason: "doctor exploded", ran: false });
     expect(server.gatewayHeld).toBe(true);
 
-    await steps.finalizeBootReport({ reconcile: { status: "error", reason: "reconcile machinery exploded" } });
-    expect(readJson(bootReport.reportPath).serverPhase.reconcile).toEqual({
-      status: "error",
-      reason: "reconcile machinery exploded",
-      hold: null,
-    });
+    await steps.finalizeBootReport({ migration: null });
+    expect(readJson(bootReport.reportPath).serverPhase.migration).toBeNull();
   });
 
-  it("with no bin phase, a genuinely mismatched box is still INCONSISTENT: the channelInfo snapshot feeds the verdict, the failed `boot` event and the watchdog latch", async () => {
+  it("with no bin phase, a genuinely mismatched box is still INCONSISTENT: the runtime's version snapshot feeds the verdict, the failed `boot` event and the watchdog latch", async () => {
     const { steps, bootReport, insertWatchdogEvent, watchdog, notify } = createFixture({
       withBinPhase: false,
       schema: { ...kSchema, installedVersion: "2026.9.1" },
-      channelInfo: { installedVersion: "2026.9.1", expectedVersion: "2026.9.2", installedDiverged: true },
+      runtimeInfo: { installedVersion: "2026.9.1", pinnedVersion: "2026.9.2", installedDiverged: true },
     });
     await steps.recordBootReportServerPhase();
-    const outcome = await steps.finalizeBootReport({ reconcile: null });
+    const outcome = await steps.finalizeBootReport({ migration: null });
     expect(outcome).toEqual(expect.objectContaining({ verdict: [kBootVerdicts.installedNotExpected], inconsistent: true }));
     const report = readJson(bootReport.reportPath);
     expect(report.openclaw).toBeNull();
-    expect(report.serverPhase.channelInfo).toEqual({ installedVersion: "2026.9.1", expectedVersion: "2026.9.2", installedDiverged: true });
+    expect(report.serverPhase).toEqual(expect.objectContaining({ installedVersion: "2026.9.1", expectedVersion: "2026.9.2" }));
     expect(bootEvents(insertWatchdogEvent)).toEqual([
       expect.objectContaining({
         status: "failed",
@@ -562,45 +429,34 @@ describe("boot-report-steps: finalizeBootReport", () => {
     expect(watchdog.setBootVerdict).toHaveBeenCalledWith(report);
   });
 
-  it("with no bin phase, a snapshot without the predicate compares versions; the live predicate excusing the pair (pinLag) keeps the boot consistent", async () => {
-    const compared = createFixture({
-      withBinPhase: false,
-      schema: { ...kSchema, installedVersion: "2026.9.1" },
-      channelInfo: { installedVersion: "2026.9.1", expectedVersion: "2026.9.2" },
-    });
-    await compared.steps.recordBootReportServerPhase();
-    expect((await compared.steps.finalizeBootReport({ reconcile: null })).verdict).toEqual([kBootVerdicts.installedNotExpected]);
-
-    const excused = createFixture({
-      withBinPhase: false,
-      schema: { ...kSchema, installedVersion: "2026.9.1" },
-      channelInfo: { installedVersion: "2026.9.1", expectedVersion: "2026.9.2", installedDiverged: false },
-    });
-    await excused.steps.recordBootReportServerPhase();
-    const outcome = await excused.steps.finalizeBootReport({ reconcile: null });
+  it("with no bin phase, a box running its pin is consistent", async () => {
+    const { steps, insertWatchdogEvent } = createFixture({ withBinPhase: false });
+    await steps.recordBootReportServerPhase();
+    const outcome = await steps.finalizeBootReport({ migration: null });
     expect(outcome).toEqual(expect.objectContaining({ verdict: [], inconsistent: false }));
-    expect(bootEvents(excused.insertWatchdogEvent)[0]).toEqual(
-      expect.objectContaining({ status: "ok", details: expect.objectContaining({ installed: "2026.9.1", expected: "2026.9.2" }) }),
+    expect(bootEvents(insertWatchdogEvent)[0]).toEqual(
+      expect.objectContaining({ status: "ok", details: expect.objectContaining({ installed: "2026.9.2", expected: "2026.9.2" }) }),
     );
   });
 
   it("a watchdog without setBootVerdict (before the A4 leaf lands), a throwing notifier, a throwing webhook and a throwing sink each cost one warning and never the finalize", async () => {
-    const { steps, service, insertWatchdogEvent, notify, logger } = createFixture({
-      openclaw: { installedAtBoot: "2026.7.1-2", expected: "2026.8.1", resolvedForLaunch: "2026.7.1-2" },
+    const { steps, postBootWebhook, insertWatchdogEvent, notify, logger } = createFixture({
+      openclaw: { installedAtBoot: "2026.7.1-2", declaredPin: "2026.8.1" },
       withWatchdogVerdict: false,
       notify: vi.fn(async () => {
         throw new Error("notifier down");
       }),
     });
-    service.postBootWebhook.mockImplementation(() => {
+    postBootWebhook.mockImplementation(() => {
       throw new Error("webhook down");
     });
     insertWatchdogEvent.mockImplementation(() => {
       throw new Error("db locked");
     });
     await steps.recordBootReportServerPhase();
-    const outcome = await steps.finalizeBootReport({ reconcile: { status: "ok" } });
+    const outcome = await steps.finalizeBootReport({ migration: { status: "ok", ran: false } });
     expect(outcome.inconsistent).toBe(true);
+    expect(postBootWebhook).toHaveBeenCalledTimes(1);
     expect(notify).toHaveBeenCalledTimes(1);
     expect(logger.warn).toHaveBeenCalledWith("[boot-report] INCONSISTENT notification failed (notifier down)");
     expect(logger.warn).toHaveBeenCalledWith("[boot-report] boot event not recorded (db locked)");
@@ -608,23 +464,22 @@ describe("boot-report-steps: finalizeBootReport", () => {
 
   it("finalize is per-boot idempotent on the pin: a restart loop keeps the first pinned report", async () => {
     const first = createFixture({
-      openclaw: { installedAtBoot: "2026.7.1-2", expected: "2026.8.1", resolvedForLaunch: "2026.7.1-2" },
+      openclaw: { installedAtBoot: "2026.7.1-2", declaredPin: "2026.8.1" },
     });
     await first.steps.recordBootReportServerPhase();
-    const a = await first.steps.finalizeBootReport({ reconcile: { status: "ok" } });
+    const a = await first.steps.finalizeBootReport({ migration: { status: "ok", ran: false } });
     expect(a.pinned).toBe(true);
     const pinnedAt = readJson(first.bootReport.incidentPath).pinnedAt;
-    const b = await first.steps.finalizeBootReport({ reconcile: { status: "ok" } });
+    const b = await first.steps.finalizeBootReport({ migration: { status: "ok", ran: false } });
     expect(b.pinned).toBe(false);
     expect(readJson(first.bootReport.incidentPath).pinnedAt).toBe(pinnedAt);
   });
 });
 
 describe("boot-report-steps: onListeningNotOnboarded", () => {
-  it("runs both closers and marks the server phase { status: not_reached, reason: not_onboarded }; a throwing closer is logged, the marker still lands", () => {
-    const { steps, bootReport, service, restartRequiredState, logger } = createFixture();
+  it("runs the closer and marks the server phase { status: not_reached, reason: not_onboarded }; a throwing closer is logged, the marker still lands", () => {
+    const { steps, bootReport, restartRequiredState, logger } = createFixture();
     const report = steps.onListeningNotOnboarded();
-    expect(service.closeDanglingRecordsAtBoot).toHaveBeenCalledTimes(1);
     expect(restartRequiredState.reconcileOnBoot).toHaveBeenCalledTimes(1);
     expect(report.serverPhase).toEqual({
       status: kServerPhaseStatuses.notReached,
@@ -634,14 +489,10 @@ describe("boot-report-steps: onListeningNotOnboarded", () => {
     });
     expect(readJson(bootReport.reportPath).serverPhase.status).toBe(kServerPhaseStatuses.notReached);
 
-    service.closeDanglingRecordsAtBoot.mockImplementation(() => {
-      throw new Error("ledger unreadable");
-    });
     restartRequiredState.reconcileOnBoot.mockImplementation(() => {
       throw new Error("record unreadable");
     });
     expect(steps.onListeningNotOnboarded().serverPhase.status).toBe(kServerPhaseStatuses.notReached);
-    expect(logger.warn).toHaveBeenCalledWith("[boot-report] dangling-record close failed (ledger unreadable)");
     expect(logger.warn).toHaveBeenCalledWith("[boot-report] restart-operation reconcile failed (record unreadable)");
   });
 });

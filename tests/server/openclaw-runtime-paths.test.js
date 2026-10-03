@@ -48,20 +48,6 @@ describe("configured OpenClaw runtime paths", () => {
     expect(fs.lstatSync(path.join(real, "openclaw.json")).isSymbolicLink()).toBe(true);
   });
 
-  it.each([false, true])("preserves identity paths in explicit-bin CLI and doctor runs (env override: %s)", async (override) => {
-    const real = path.join(root, "agent");
-    const alias = path.join(root, ".openclaw");
-    fs.mkdirSync(real);
-    fs.symlinkSync(real, alias);
-    const input = { OPENCLAW_STATE_DIR: alias, OPENCLAW_CONFIG_PATH: path.join(alias, "openclaw.json"), XDG_CONFIG_HOME: alias };
-    const bin = path.join(root, "env.cjs");
-    fs.writeFileSync(bin, `console.log(JSON.stringify(Object.fromEntries(${JSON.stringify(Object.keys(input))}.map(key => [key, process.env[key]]))))`);
-    const commands = createCommands({ gatewayEnv: () => override ? {} : input });
-    const result = await commands.clawCmdWithBin(bin, ["doctor"], { quiet: true, ...(override ? { env: input } : {}) });
-    expect(result.ok, result.stderr).toBe(true);
-    expect(JSON.parse(result.stdout)).toEqual(input);
-  });
-
   it("preserves identity paths in the shell-form CLI", async () => {
     const real = path.join(root, "agent");
     const alias = path.join(root, ".openclaw");

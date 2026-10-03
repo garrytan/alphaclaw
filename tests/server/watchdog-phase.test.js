@@ -9,7 +9,6 @@ const base = {
   lifecycle: "running",
   health: "healthy",
   configurationErrorActive: false,
-  managedOperationActive: false,
   expectedRestartInProgress: false,
   expectedRestartUntilMs: 0,
   safeMode: false,
@@ -19,7 +18,6 @@ const base = {
   startupGraceMs: 30_000,
   awaitingAutoRepairRecovery: false,
   operationInProgress: false,
-  rollbackEligible: false,
 };
 
 describe("deriveWatchdogPhase precedence table", () => {
@@ -28,9 +26,8 @@ describe("deriveWatchdogPhase precedence table", () => {
   const rows = [
     [
       "config_error_latched",
-      { configurationErrorActive: true, managedOperationActive: true },
+      { configurationErrorActive: true, lifecycle: "stopped" },
     ],
-    ["managed_operation", { managedOperationActive: true, lifecycle: "stopped" }],
     [
       "stopped",
       {
@@ -48,10 +45,6 @@ describe("deriveWatchdogPhase precedence table", () => {
       },
     ],
     ["safe_mode", { safeMode: true, lifecycle: "crash_loop" }],
-    [
-      "crash_loop_rollback",
-      { lifecycle: "crash_loop", health: "unhealthy", channelRollbackRequested: true },
-    ],
     [
       "crash_loop_repair_ladder",
       { lifecycle: "crash_loop", health: "unhealthy" },
@@ -71,9 +64,8 @@ describe("deriveWatchdogPhase precedence table", () => {
     ],
     [
       "degraded_repairing",
-      { health: "degraded", operationInProgress: true, rollbackEligible: true },
+      { health: "degraded", operationInProgress: true },
     ],
-    ["degraded_pre_rollback", { health: "degraded", rollbackEligible: true }],
     ["degraded_retrying", { health: "degraded" }],
     ["healthy", {}],
     ["unknown_bootstrap", { health: "unknown", gatewayStartedAt: kNow - 120_000 }],
@@ -109,7 +101,7 @@ describe("deriveWatchdogPhase totality", () => {
         for (const safeMode of bools) {
           for (const awaitingAutoRepairRecovery of bools) {
             for (const operationInProgress of bools) {
-              for (const rollbackEligible of bools) {
+              {
                 const phase = deriveWatchdogPhase(
                   {
                     ...base,
@@ -118,7 +110,6 @@ describe("deriveWatchdogPhase totality", () => {
                     safeMode,
                     awaitingAutoRepairRecovery,
                     operationInProgress,
-                    rollbackEligible,
                   },
                   kNow,
                 );

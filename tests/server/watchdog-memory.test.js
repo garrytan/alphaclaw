@@ -40,9 +40,7 @@ const createHarness = ({
   settings = { enabled: true, autoRestart: false, effectiveAutoRestart: false },
   readMemorySettings,
   gatewayLifecycleLock = null,
-  releaseChannelHooks = null,
   restartGatewayForMitigation = null,
-  isMitigationRestartBlocked = null,
   mitigationStatePath,
   // v0.9.75 identity seams (pid-reuse guard for the serving root).
   readProcStartTicks = null,
@@ -58,7 +56,6 @@ const createHarness = ({
     launchGatewayProcess: vi.fn(() => ({ pid: 4242 })),
     probeGatewayTcp: async () => ({ running: true }),
     gatewayLifecycleLock,
-    releaseChannelHooks,
     insertWatchdogEvent,
     notifier,
     readEnvFile: vi.fn(() => []),
@@ -70,7 +67,6 @@ const createHarness = ({
     readMemorySettings: readMemorySettings || (() => settings),
     memoryMonitorConfig: kMonitorConfig,
     restartGatewayForMitigation,
-    isMitigationRestartBlocked,
     ...(readProcStartTicks ? { readProcStartTicks } : {}),
     ...(discoverServingIdentity ? { discoverServingIdentity } : {}),
     memoryMitigationStatePath:
@@ -686,24 +682,6 @@ describe("server/watchdog memory monitor", () => {
       );
     });
 
-    it("is suppressed inside a build stabilization window (rollback owns recovery)", async () => {
-      const restart = vi.fn(async () => ({ ok: true }));
-      const harness = createHarness({
-        settings: { enabled: true, autoRestart: true, effectiveAutoRestart: true },
-        restartGatewayForMitigation: restart,
-        releaseChannelHooks: {
-          getInfo: () => ({
-            isPin: false,
-            inStabilizationWindow: true,
-            acceptedAt: kStartMs - 60_000,
-          }),
-        },
-      });
-      launchGateway(harness);
-      await criticalScenario(harness);
-      expect(restart).not.toHaveBeenCalled();
-    });
-
     it("a FAILED restart settles the expected-restart window and reports loudly", async () => {
       const restart = vi.fn(async () => {
         throw new Error("spawn failed");
@@ -727,21 +705,6 @@ describe("server/watchdog memory monitor", () => {
       ).toBe(true);
       // The window settled: the failure is never hidden as "expected".
       expect(harness.watchdog.getStatus().expectedRestartUntil).toBeNull();
-    });
-
-    it("is suppressed during a managed operation and resumes after it ends", async () => {
-      const restart = vi.fn(async () => ({ ok: true }));
-      const harness = createHarness({
-        settings: { enabled: true, autoRestart: true, effectiveAutoRestart: true },
-        restartGatewayForMitigation: restart,
-      });
-      launchGateway(harness);
-      harness.watchdog.beginManagedOperation();
-      await criticalScenario(harness);
-      expect(restart).not.toHaveBeenCalled();
-      harness.watchdog.endManagedOperation();
-      await criticalScenario(harness, 2);
-      expect(restart).toHaveBeenCalledTimes(1);
     });
 
     it("is suppressed while an expected restart is already in progress", async () => {
@@ -1060,22 +1023,6 @@ describe("server/watchdog memory monitor", () => {
       });
       expect(harness.watchdog.getStatus().memory.trendState).toBe("critical");
       expect(restart).not.toHaveBeenCalled();
-    });
-
-    it("server-level interlocks (channel apply, gateway hold) veto the restart", async () => {
-      const restart = vi.fn(async () => ({ ok: true }));
-      let blocked = "channel_apply_in_progress";
-      const harness = createHarness({
-        settings: { enabled: true, autoRestart: true, effectiveAutoRestart: true },
-        restartGatewayForMitigation: restart,
-        isMitigationRestartBlocked: () => blocked,
-      });
-      launchGateway(harness);
-      await criticalScenario(harness);
-      expect(restart).not.toHaveBeenCalled();
-      blocked = null;
-      await criticalScenario(harness, 2);
-      expect(restart).toHaveBeenCalledTimes(1);
     });
 
     it("releases the lifecycle lock even when the mitigation notifier throws", async () => {

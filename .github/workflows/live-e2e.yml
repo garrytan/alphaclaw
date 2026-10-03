@@ -1,10 +1,13 @@
-name: Live E2E (real OpenClaw releases)
+name: Live E2E (real pinned OpenClaw)
 
-# Opt-in live tiers: these hit the real npm registry and the real GitHub API,
-# and (in the dev job) run a real from-source OpenClaw build. Their job is to
-# catch UPSTREAM drift — dist-tag/classification changes, engines, updater
-# JSON contract, dist layout — that the hermetic `npm test` suites cannot see.
-# A failure here usually means "upstream changed", not "this repo regressed".
+# Opt-in live tier: these suites drive the REAL pinned OpenClaw (package.json
+# dependencies.openclaw) — its CLI flags and JSON contracts, a real gateway
+# boot, "Back up now" through `openclaw backup create`, the memory-leak
+# terminal stage, the Control UI behind the /openclaw proxy in a real
+# Chromium, and the autotune container smoke. Their job is to catch the dist-
+# coupled contracts a pin bump can break, which the hermetic `npm test`
+# suites only mock. A failure here usually means "the pinned upstream behaves
+# differently than encoded", not "this repo regressed".
 
 # NOTE: GitHub disables `schedule` triggers in repos with no activity for 60
 # days — if this repo goes quiet, re-enable the workflow or run it via
@@ -12,37 +15,28 @@ name: Live E2E (real OpenClaw releases)
 
 on:
   schedule:
-    # Nightly: full live catalog/apply, memory, restore and downgrade tier (~18 min).
+    # Nightly.
     - cron: "17 9 * * *"
-    # Weekly (Sunday): additionally the full dev source build (20-35 min).
-    # NOTE: this exact string is byte-matched by live-dev-build's `if:` gate
-    # below — change BOTH together or the dev tier silently never runs.
-    - cron: "47 9 * * 0"
   workflow_dispatch:
-    inputs:
-      run_dev_build:
-        description: "Also run the full dev-channel source build (20-35 min)"
-        type: boolean
-        default: false
 
 # Read-only token: these jobs execute third-party code (npm lifecycle
-# scripts, a from-source build) with GITHUB_TOKEN in the step env.
+# scripts, the pinned OpenClaw CLI) with GITHUB_TOKEN in the step env.
 permissions:
   contents: read
 
 jobs:
-  live-catalog-and-apply:
+  live:
     runs-on: ubuntu-latest
-    # Full live coverage includes catalog/apply, memory, restore, downgrade,
-    # backup contention and gateway tests (~18 min measured). Leave room for
-    # their own timeouts to report failures before the runner kills the job.
+    # The memory-leak and gateway suites each allow up to 12 minutes; leave
+    # room for their own timeouts to report failures before the runner kills
+    # the job.
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
         with:
-          # Moving latest is 2026.9.3+, requiring Node >=24.16 (the runtime floor since v0.9.80; hermetic CI runs 24 and 26).
+          # The pinned OpenClaw requires Node >=24.16 (the runtime floor since v0.9.80; hermetic CI runs 24 and 26).
           node-version: 24
           cache: npm
 
@@ -51,8 +45,7 @@ jobs:
       # tests/live/control-ui-styles.e2e.test.js drives a REAL Chromium through
       # the /openclaw proxy (the "Styles failed to load" banner check). With
       # CI set, that suite FAILS when no browser launches — never skips — so
-      # install one here. Cache keyed on the pinned Playwright version, same
-      # as container-e2e.yml.
+      # install one here. Cache keyed on the pinned Playwright version.
       - id: playwright-version
         name: Resolve pinned Playwright version
         run: |
@@ -66,10 +59,6 @@ jobs:
       - run: npx playwright install --with-deps chromium
 
       - run: npm run test:live
-        env:
-          # Authenticated GitHub API calls — the anonymous quota (60/hr) is
-          # shared per runner IP and flakes.
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       # Preserve the exact cold-start convergence refusal and any later failure.
       - uses: actions/upload-artifact@v4
@@ -78,42 +67,3 @@ jobs:
           name: live-release-artifacts
           path: tests/live/artifacts/
           if-no-files-found: ignore
-
-  live-dev-build:
-    # Weekly schedule or explicit dispatch opt-in only: a real git clone +
-    # pnpm install + from-source build of openclaw main (~5 GB, build RAM).
-    # The cron literal must byte-match the weekly entry in on.schedule above.
-    if: >-
-      (github.event_name == 'schedule' && github.event.schedule == '47 9 * * 0') ||
-      (github.event_name == 'workflow_dispatch' && inputs.run_dev_build)
-    runs-on: ubuntu-latest
-    # Dry-run contract (5 min) + global bootstrap (10 min) + source build
-    # (35 min) + verification and setup. The stateful build never auto-retries.
-    # This script runs ONLY the dev file — the same weekly cron already triggers
-    # the nightly job for catalog/apply, and stacking their ~3 GB of temp
-    # trees under the dev build's 5 GB disk preflight would starve it.
-    timeout-minutes: 75
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          # Current upstream main requires Node >=24.16, beyond the bundled pin's minimum.
-          node-version: 24
-          cache: npm
-
-      - run: npm ci
-
-      # The dev pipeline's own toolchain preflight can install pnpm via
-      # corepack, but doing it here keeps the test log about the build.
-      - run: corepack enable pnpm || npm install -g pnpm
-
-      - run: npm run test:live:dev
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - uses: actions/upload-artifact@v4
-        if: failure()
-        with:
-          name: live-dev-build-artifacts
-          path: tests/live/artifacts/

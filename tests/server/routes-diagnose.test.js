@@ -7,13 +7,12 @@
 // unknown format is a 400; the auth gate runs before any collection; a
 // collector that fails as a whole is one 500 like the neighbouring routes.
 // Hermetic: express + supertest, real collector over a mkdtemp root with an
-// injected store / installDir / env, no server, no network.
+// injected OpenClaw runtime / installDir / env, no server, no network.
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
 const express = require("express");
 const request = require("supertest");
-const { once } = require("node:events");
 
 const {
   registerDiagnoseRoutes,
@@ -25,7 +24,7 @@ const {
   kDiagnoseSectionNames,
 } = require("../../lib/server/diagnose/collect");
 const { kDiagnoseSectionTitles } = require("../../lib/server/diagnose/render");
-const { createOpenclawReleaseChannelStore } = require("../../lib/server/openclaw-release-channel");
+const { createOpenclawRuntime } = require("../../lib/server/openclaw-runtime");
 
 const kNow = 1_700_000_000_000; // 2023-11-14T22:13:20.000Z
 const kEnvSecret = "tg-secret-value-7788";
@@ -47,19 +46,17 @@ const createRoot = () => {
   const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), "alphaclaw-diagnose-route-"));
   const openclawDir = path.join(rootDir, ".openclaw");
   const installDir = path.join(rootDir, "install");
-  const store = createOpenclawReleaseChannelStore({
-    rootDir,
-    openclawDir,
-    nowFn: () => kNow,
-    logger: { warn() {}, log() {}, error() {} },
-  });
-  fs.mkdirSync(store.managedDir, { recursive: true });
-  store.writeState({ pinVersion: "2026.9.2", applied: null });
+  const managedDir = path.join(openclawDir, ".alphaclaw");
+  // AlphaClaw's own package.json: the pin the runtime reports.
+  const packageRoot = path.join(rootDir, "alphaclaw");
+  writeJson(path.join(packageRoot, "package.json"), { name: "@chrysb/alphaclaw", dependencies: { openclaw: "2026.9.2" } });
   writeJson(path.join(installDir, "node_modules", "openclaw", "package.json"), {
     name: "openclaw",
     version: "2026.9.2",
+    bin: "openclaw.mjs",
   });
-  writeJson(path.join(store.managedDir, "alphaclaw-version.json"), {
+  fs.writeFileSync(path.join(installDir, "node_modules", "openclaw", "openclaw.mjs"), "");
+  writeJson(path.join(managedDir, "alphaclaw-version.json"), {
     version: "0.9.77",
     commit: null,
     firstBootAt: kNow - 60_000,
@@ -67,7 +64,7 @@ const createRoot = () => {
     bootCount: 2,
     previous: { version: "0.9.76", commit: null, lastBootAt: kNow - 120_000 },
   });
-  return { rootDir, openclawDir, installDir, store };
+  return { rootDir, openclawDir, installDir, managedDir, packageRoot };
 };
 
 const createDeps = (root) => {
@@ -94,13 +91,14 @@ const createDeps = (root) => {
       },
     ]),
   };
-  const getChannelInfo = vi.fn(() => ({
-    releaseChannel: "stable",
-    installedVersion: "2026.9.2",
-    expectedVersion: "2026.9.2",
-    installedDiverged: false,
-    stateCorrupted: false,
-  }));
+  const openclawRuntime = createOpenclawRuntime({
+    openclawDir: root.openclawDir,
+    packageRoot: root.packageRoot,
+    resolveInstallDir: () => root.installDir,
+    openclawSpawnEnv: () => ({}),
+    logger: { warn() {}, log() {}, error() {} },
+  });
+  vi.spyOn(openclawRuntime, "getInfo");
   const readLogTail = vi.fn(() => "[watchdog] gateway exited code=1\nunrelated line\n[alphaclaw] AlphaClaw 0.9.77\n");
   const readEnvFile = vi.fn(() => [{ key: "TELEGRAM_BOT_TOKEN", value: kEnvSecret }]);
   return {
@@ -111,12 +109,11 @@ const createDeps = (root) => {
     installDir: root.installDir,
     env: {},
     nowFn: () => kNow,
-    channelStore: root.store,
     readEnvFile,
     readLogTail,
     incidentsDb,
     getWatchdogStatus,
-    getChannelInfo,
+    openclawRuntime,
     logger: { warn: vi.fn(), log() {}, error() {} },
   };
 };
@@ -154,10 +151,10 @@ describe("server/routes/diagnose", () => {
     expect(bundle.redacted).toBe(true);
     expect(bundle.mode).toBe("server");
     expect(bundle.generatedAtMs).toBe(kNow);
-    // rootDir derived from the openclaw dir; the store's managed dir is used.
+    // rootDir derived from the openclaw dir; the managed dir sits beneath it.
     expect(bundle.paths.rootDir).toBe(root.rootDir);
     expect(bundle.paths.openclawDir).toBe(root.openclawDir);
-    expect(bundle.paths.managedDir).toBe(root.store.managedDir);
+    expect(bundle.paths.managedDir).toBe(root.managedDir);
     expect(bundle.paths.installDir).toBe(root.installDir);
     expect(Object.keys(bundle.sections)).toEqual([...kDiagnoseSectionNames]);
 
@@ -176,15 +173,16 @@ describe("server/routes/diagnose", () => {
       corroborated: true,
     });
 
-    expect(deps.getChannelInfo).toHaveBeenCalledTimes(1);
-    expect(bundle.sections.channelState.source).toBe("live");
-    expect(bundle.sections.channelState.data.info.installedVersion).toBe("2026.9.2");
-    expect(bundle.sections.channelState.data.pinVersion).toBe("2026.9.2");
+    // The server's own OpenClaw runtime is the live seam for the version facts.
+    expect(deps.openclawRuntime.getInfo).toHaveBeenCalledTimes(1);
+    expect(bundle.sections.openclaw.source).toBe("live");
+    expect(bundle.sections.openclaw.data).toMatchObject({ installedVersion: "2026.9.2", pinnedVersion: "2026.9.2", installedDiverged: false });
+    expect(bundle.sections.supportedSchema.data.installedVersion).toBe("2026.9.2");
 
     expect(bundle.sections.pidfile.source).toBe("live");
 
-    // Disk sections read the store's managed dir (the same files the boot
-    // spine writes) — the self-version stamp planted there is visible.
+    // Disk sections read the managed dir (the same files the boot spine
+    // writes) — the self-version stamp planted there is visible.
     expect(bundle.sections.selfVersion.source).toBe("disk");
     expect(bundle.sections.selfVersion.data.record.version).toBe("0.9.77");
 
@@ -205,50 +203,6 @@ describe("server/routes/diagnose", () => {
     expect(bundle.sections.watchdog.data.degradedReason).not.toContain(kEnvSecret);
   });
 
-  it("detaches an observational assessment when the HTTP client disconnects", async () => {
-    const deps = createDeps(newRoot());
-    let started;
-    let detached;
-    const assessing = new Promise((resolve) => { started = resolve; });
-    const aborted = new Promise((resolve) => { detached = resolve; });
-    deps.assessRecovery = vi.fn(({ signal }) => new Promise((resolve) => {
-      started();
-      signal.addEventListener("abort", () => {
-        detached();
-        resolve({ complete: false, reasons: ["RECOVERY_ASSESSMENT_ABORTED"] });
-      }, { once: true });
-    }));
-    const server = createApp(deps).listen(0, "127.0.0.1");
-    const controller = new AbortController();
-    try {
-      await once(server, "listening");
-      const response = fetch(`http://127.0.0.1:${server.address().port}/api/diagnose`, {
-        headers: { [kAuthHeader]: "ok" }, signal: controller.signal,
-      }).catch((error) => error);
-      await assessing;
-      controller.abort();
-      expect((await response).name).toBe("AbortError");
-      await aborted;
-      expect(deps.assessRecovery).toHaveBeenCalledTimes(1);
-    } finally {
-      controller.abort();
-      await new Promise((resolve) => server.close(resolve));
-    }
-  });
-
-  it("does not cancel an observation after a normal response completes", async () => {
-    const deps = createDeps(newRoot());
-    let captured;
-    deps.assessRecovery = vi.fn(({ signal }) => {
-      captured = signal;
-      return { complete: false, reasons: ["RECOVERY_ASSESSMENT_BUSY"] };
-    });
-    const response = await authed(createApp(deps), "/api/diagnose");
-    expect(response.status).toBe(200);
-    expect(captured.aborted).toBe(false);
-    expect(deps.assessRecovery).toHaveBeenCalledTimes(1);
-  });
-
   it("a throwing live seam degrades only its own section and the request stays 200", async () => {
     const root = newRoot();
     const deps = createDeps(root);
@@ -267,7 +221,7 @@ describe("server/routes/diagnose", () => {
     expect(bundle.summary.unavailable).toEqual(["incidents"]);
     // Nothing else moved.
     expect(bundle.sections.watchdog.source).toBe("live");
-    expect(bundle.sections.channelState.source).toBe("live");
+    expect(bundle.sections.openclaw.source).toBe("live");
     expect(bundle.mode).toBe("server");
     // Calls per request, not per registration: a second request re-reads.
     expect(deps.getWatchdogStatus).toHaveBeenCalledTimes(1);
@@ -332,15 +286,15 @@ describe("server/routes/diagnose", () => {
     const deps = {
       ...createDeps(root),
       collect: vi.fn(async () => {
-        throw new Error("release-channel store unavailable");
+        throw new Error("collector exploded");
       }),
     };
     const res = await authed(createApp(deps), "/api/diagnose");
 
     expect(res.status).toBe(500);
-    expect(res.body).toEqual({ ok: false, error: "release-channel store unavailable" });
+    expect(res.body).toEqual({ ok: false, error: "collector exploded" });
     expect(deps.logger.warn).toHaveBeenCalledWith(
-      "[diagnose] bundle failed: release-channel store unavailable",
+      "[diagnose] bundle failed: collector exploded",
     );
   });
 
@@ -349,8 +303,7 @@ describe("server/routes/diagnose", () => {
     const collect = vi.fn(async () => ({ schema: kDiagnoseSchema, sections: {} }));
     const bootReports = { readBootReports: () => ({ current: null, previous: [], incident: null, unreadable: [] }) };
     const selfVersion = () => ({ version: "0.9.77" });
-    const assessRecovery = vi.fn();
-    const deps = { ...createDeps(root), rootDir: "/explicit/root", collect, bootReports, selfVersion, assessRecovery };
+    const deps = { ...createDeps(root), rootDir: "/explicit/root", collect, bootReports, selfVersion };
     const res = await authed(createApp(deps), "/api/diagnose");
 
     expect(res.status).toBe(200);
@@ -359,15 +312,13 @@ describe("server/routes/diagnose", () => {
     expect(options.rootDir).toBe("/explicit/root"); // explicit rootDir wins over the derived one
     expect(options.openclawDir).toBe(root.openclawDir);
     expect(options.installDir).toBe(root.installDir);
-    expect(options.channelStore).toBe(root.store);
     expect(options.envFileVars).toEqual([{ key: "TELEGRAM_BOT_TOKEN", value: kEnvSecret }]);
     expect(options.readLogTail).toBe(deps.readLogTail);
     expect(options.incidentsDb).toBe(deps.incidentsDb);
     expect(options.getWatchdogStatus).toBe(deps.getWatchdogStatus);
-    expect(options.getChannelInfo).toBe(deps.getChannelInfo);
+    expect(options.openclawRuntime).toBe(deps.openclawRuntime);
     expect(options.bootReports).toBe(bootReports);
     expect(options.selfVersion).toBe(selfVersion);
-    expect(options.assessRecovery).toBe(assessRecovery);
     expect(options.fsModule).toBe(fs);
     expect(options.env).toEqual({});
     expect(typeof options.nowFn).toBe("function");
@@ -389,5 +340,6 @@ describe("server/routes/diagnose", () => {
     expect(options.envFileVars).toBeNull();
     expect(options.incidentsDb).toBeNull();
     expect(options.getWatchdogStatus).toBeNull();
+    expect(options.openclawRuntime).toBeUndefined();
   });
 });

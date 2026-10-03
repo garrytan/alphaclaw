@@ -91,7 +91,7 @@ describe("server/openclaw-feature-gates", () => {
   it("gates beta features on the 2026.8.1 prerelease line", () => {
     expect(gatesFor("2026.7.1-2").supportsFeature("multiUser")).toBe(false);
     expect(gatesFor("2026.8.1-beta.1").supportsFeature("multiUser")).toBe(true);
-    expect(gatesFor("2026.8.1-beta.3").supportsFeature("sqliteBackup")).toBe(
+    expect(gatesFor("2026.8.1-beta.3").supportsFeature("sessionDashboards")).toBe(
       true,
     );
     expect(gatesFor("2026.8.1").supportsFeature("supervisorMode")).toBe(true);

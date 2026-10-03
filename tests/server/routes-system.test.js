@@ -63,8 +63,6 @@ const createSystemDeps = () => {
     getChannelStatus: vi.fn(() => ({ telegram: "ready" })),
     openclawVersionService: {
       readOpenclawVersion: vi.fn(() => "1.2.3"),
-      getVersionStatus: vi.fn(async () => ({ ok: true, current: "1.2.3" })),
-      updateOpenclaw: vi.fn(async () => ({ status: 200, body: { ok: true } })),
     },
     alphaclawVersionService: {
       readAlphaclawVersion: vi.fn(() => "0.1.5"),
@@ -180,175 +178,6 @@ describe("server/routes/system", () => {
   // need a failed boot set it explicitly and this reset un-leaks it.
   beforeEach(() => {
     require("../../lib/server/boot-phase").setBootPhase("ready");
-  });
-
-  describe("confirmed database recovery restart", () => {
-    const confirmed = { verifyDatabaseRecovery: true, recoveryConfirmation: "current-observation" };
-    const recovery = () => {
-      const deps = createSystemDeps();
-      const info = { gatewayHold: { reason: "state_db_unverified", at: 123 } };
-      deps.gatewayLifecycleLock = require("../../lib/server/gateway-lifecycle-lock").createGatewayLifecycleLock();
-      deps.watchdog = {
-        captureDatabaseRecoveryContext: vi.fn(() => ({ epoch: 1 })),
-        isDatabaseRecoveryContextCurrent: vi.fn(() => true),
-        onDatabaseVerificationCleared: vi.fn(() => true),
-        waitForDatabaseRecoveryReadiness: vi.fn(async () => ({ ok: true })),
-      };
-      deps.openclawChannelService = {
-        getChannelInfo: () => info,
-        getDatabaseRecoveryConfirmation: vi.fn(() => "current-observation"),
-        verifyDatabaseRecovery: vi.fn(async ({ hold, expectedHold, manual, isCurrent }) => {
-          expect(deps.gatewayLifecycleLock.owns(hold)).toBe(true);
-          expect(expectedHold).toEqual(info.gatewayHold);
-          expect(manual).toBe(true);
-          expect(isCurrent()).toBe(true);
-          info.gatewayHold = null;
-          return { ok: true, recoveryId: "recovery-one" };
-        }),
-        isDatabaseRecoveryCurrent: vi.fn(() => true),
-        completeDatabaseRecovery: vi.fn(() => ({ ok: true })),
-      };
-      deps.restartGateway.mockImplementation(async ({ shouldAbort }) => {
-        expect(info.gatewayHold).toBeNull();
-        expect(shouldAbort()).toBe(false);
-        expect(deps.openclawChannelService.completeDatabaseRecovery).not.toHaveBeenCalled();
-        return { ok: true };
-      });
-      return { deps, info, app: createApp(deps) };
-    };
-
-    it("requires explicit confirmation and keeps ordinary restart held", async () => {
-      const { deps, app } = recovery();
-      const res = await request(app).post("/api/gateway/restart").send({});
-      expect(res.status).toBe(409);
-      expect(res.body.nextActions).toContain("verify_database_recovery");
-      expect(deps.openclawChannelService.verifyDatabaseRecovery).not.toHaveBeenCalled();
-      expect(deps.restartGateway).not.toHaveBeenCalled();
-    });
-
-    it.each([undefined, "old-observation", "x".repeat(129)])("refuses a missing or stale observation digest before recording verification (%s)", async (recoveryConfirmation) => {
-      const { deps, app } = recovery();
-      const res = await request(app).post("/api/gateway/restart").send({ verifyDatabaseRecovery: true, recoveryConfirmation });
-      expect(res.status).toBe(409);
-      expect(res.body.code).toBe("recovery_confirmation_stale");
-      expect(deps.restartRequiredState.markRestartInProgress).not.toHaveBeenCalled();
-      expect(deps.openclawChannelService.verifyDatabaseRecovery).not.toHaveBeenCalled();
-      expect(deps.restartGateway).not.toHaveBeenCalled();
-    });
-
-    it("does not turn a stale verification click into ordinary restart after the recovery state disappears", async () => {
-      const { deps, info, app } = recovery();
-      info.gatewayHold = null;
-      const res = await request(app).post("/api/gateway/restart").send(confirmed);
-      expect(res.status).toBe(409);
-      expect(res.body.code).toBe("recovery_confirmation_stale");
-      expect(deps.restartGateway).not.toHaveBeenCalled();
-    });
-
-    it("projects a pending baseline as inspect-only verification with the server observation digest", async () => {
-      const { info, app } = recovery();
-      info.gatewayHold = null;
-      info.databaseRecoveryPending = { recoveryId: "pending-original", baseline: { identity: "original" } };
-      const res = await request(app).get("/api/status");
-      expect(res.status).toBe(200);
-      expect(res.body.openclawChannel.databaseRecoveryPending).toEqual(info.databaseRecoveryPending);
-      expect(res.body.state.actions.find((action) => action.id === "restart")).toMatchObject({
-        disposition: "inspect", resolution: "verify_start", recoveryConfirmation: "current-observation",
-      });
-    });
-
-    it("verifies under the lease and awaits watchdog readiness after the new gateway starts", async () => {
-      const { deps, app } = recovery();
-      const res = await request(app).post("/api/gateway/restart").send(confirmed);
-      expect(res.status).toBe(200);
-      expect(deps.openclawChannelService.verifyDatabaseRecovery).toHaveBeenCalledTimes(1);
-      expect(deps.restartGateway).toHaveBeenCalledTimes(1);
-      expect(deps.watchdog.waitForDatabaseRecoveryReadiness).toHaveBeenCalledWith(expect.objectContaining({ recoveryId: "recovery-one" }));
-      expect(deps.openclawChannelService.completeDatabaseRecovery).not.toHaveBeenCalled();
-      expect(deps.gatewayLifecycleLock.getActiveOperation()).toBeNull();
-    });
-
-    it("does not launch when fresh database verification refuses", async () => {
-      const { deps, app } = recovery();
-      deps.openclawChannelService.verifyDatabaseRecovery.mockResolvedValue({ ok: false, code: "database_baseline_missing", hint: "Restore missing databases." });
-      const res = await request(app).post("/api/gateway/restart").send(confirmed);
-      expect(res.status).toBe(409);
-      expect(res.body.code).toBe("database_baseline_missing");
-      expect(deps.restartGateway).not.toHaveBeenCalled();
-      expect(deps.openclawChannelService.completeDatabaseRecovery).not.toHaveBeenCalled();
-    });
-
-    it("never queues a confirmation behind another lifecycle operation", async () => {
-      const { deps, app } = recovery();
-      const release = deps.gatewayLifecycleLock.tryAcquire("repair");
-      try {
-        const res = await request(app).post("/api/gateway/restart").send(confirmed);
-        expect(res.status).toBe(409);
-        expect(res.body.code).toBe("operation_in_progress");
-        expect(deps.openclawChannelService.verifyDatabaseRecovery).not.toHaveBeenCalled();
-      } finally { release(); }
-    });
-
-    it("preserves recovery pending after a failed launch", async () => {
-      const { deps, app } = recovery();
-      deps.restartGateway.mockRejectedValue(new Error("gateway readiness failed"));
-      const res = await request(app).post("/api/gateway/restart").send(confirmed);
-      expect(res.status).toBe(500);
-      expect(deps.openclawChannelService.completeDatabaseRecovery).not.toHaveBeenCalled();
-    });
-
-    it("does not report recovery success for a running gateway whose readiness is still unverified", async () => {
-      const { deps, app } = recovery();
-      deps.watchdog.waitForDatabaseRecoveryReadiness.mockResolvedValue({ ok: false, code: "database_recovery_readiness_pending" });
-      const res = await request(app).post("/api/gateway/restart").send(confirmed);
-      expect(res.status).toBe(409);
-      expect(res.body.code).toBe("database_recovery_readiness_pending");
-      expect(deps.restartGateway).toHaveBeenCalledTimes(1);
-      expect(deps.openclawChannelService.completeDatabaseRecovery).not.toHaveBeenCalled();
-    });
-
-    it("aborts the restart when the verification context changes", async () => {
-      const { deps, app } = recovery();
-      deps.restartGateway.mockImplementation(async ({ shouldAbort }) => {
-        deps.watchdog.isDatabaseRecoveryContextCurrent.mockReturnValue(false);
-        expect(shouldAbort()).toBe(true);
-        throw new Error("launch aborted");
-      });
-      expect((await request(app).post("/api/gateway/restart").send(confirmed)).status).toBe(500);
-      expect(deps.openclawChannelService.completeDatabaseRecovery).not.toHaveBeenCalled();
-    });
-
-    it("attaches repeated clicks to the in-flight verification without duplicate effects", async () => {
-      const { deps, app } = recovery();
-      const verify = deps.openclawChannelService.verifyDatabaseRecovery.getMockImplementation();
-      let resume;
-      deps.openclawChannelService.verifyDatabaseRecovery.mockImplementation(async (options) => {
-        await new Promise((resolve) => { resume = resolve; });
-        return verify(options);
-      });
-      const first = await request(app).post("/api/gateway/restart?async=1").send(confirmed);
-      expect(first.status).toBe(202);
-      const second = await request(app).post("/api/gateway/restart?async=1").send(confirmed);
-      expect(second.status).toBe(202);
-      expect(second.body.attached).toBe(true);
-      expect(deps.openclawChannelService.verifyDatabaseRecovery).toHaveBeenCalledTimes(1);
-      resume();
-      await vi.waitFor(() => expect(deps.restartGateway).toHaveBeenCalledTimes(1));
-      await vi.waitFor(() => expect(deps.gatewayLifecycleLock.getActiveOperation()).toBeNull());
-    });
-
-    it("rejects an agent even when it sends the human-confirmation flag", async () => {
-      const { deps } = recovery();
-      const app = express();
-      app.use(express.json());
-      app.use((req, res, next) => { req.alphaclawActor = { type: "agent" }; next(); });
-      registerSystemRoutes({ app, ...deps });
-      const res = await request(app).post("/api/gateway/restart").send(confirmed);
-      expect(res.status).toBe(403);
-      expect(res.body.code).toBe("human_required");
-      expect(deps.openclawChannelService.verifyDatabaseRecovery).not.toHaveBeenCalled();
-      expect(deps.restartGateway).not.toHaveBeenCalled();
-    });
   });
 
   it("merges known vars and custom vars on GET /api/env", async () => {
@@ -720,8 +549,6 @@ describe("server/routes/system", () => {
           },
           updates: {
             openclaw: {
-              releaseChannel: "stable",
-              overseer: { enabled: false },
               medic: { enabled: true },
             },
           },
@@ -747,7 +574,6 @@ describe("server/routes/system", () => {
             overrides: {},
           },
         },
-        openclawChannel: null,
         syncCron: expect.objectContaining({
           enabled: true,
           schedule: "0 * * * *",
@@ -1122,8 +948,6 @@ describe("server/routes/system", () => {
         },
         updates: {
           openclaw: {
-            releaseChannel: "stable",
-            overseer: { enabled: false },
             medic: { enabled: true },
           },
         },
@@ -1177,8 +1001,6 @@ describe("server/routes/system", () => {
           },
           updates: {
             openclaw: {
-              releaseChannel: "stable",
-              overseer: { enabled: false },
               medic: { enabled: true },
             },
           },
@@ -1404,33 +1226,10 @@ describe("server/routes/system", () => {
     });
   });
 
-  it("returns 409 on POST /api/alphaclaw/update while an OpenClaw channel apply is in flight", async () => {
-    const deps = createSystemDeps();
-    deps.openclawChannelService = {
-      isApplyInProgress: vi.fn(() => true),
-      getChannelInfo: vi.fn(() => null),
-    };
-    const app = createApp(deps);
-
-    const res = await request(app).post("/api/alphaclaw/update");
-
-    expect(res.status).toBe(409);
-    expect(res.body.ok).toBe(false);
-    expect(res.body.error).toContain("OpenClaw version change or backup is in progress");
-    // A restartProcess() mid-overlay-write would corrupt the channel store:
-    // the update must not even start.
-    expect(deps.alphaclawVersionService.updateAlphaclaw).not.toHaveBeenCalled();
-    expect(deps.alphaclawVersionService.restartProcess).not.toHaveBeenCalled();
-  });
-
-  it("runs the alphaclaw update normally when no OpenClaw channel apply is in flight", async () => {
+  it("runs the alphaclaw update and schedules the process restart", async () => {
     vi.useFakeTimers();
     try {
       const deps = createSystemDeps();
-      deps.openclawChannelService = {
-        isApplyInProgress: vi.fn(() => false),
-        getChannelInfo: vi.fn(() => null),
-      };
       const app = createApp(deps);
 
       const res = await request(app).post("/api/alphaclaw/update");
@@ -1441,7 +1240,6 @@ describe("server/routes/system", () => {
         previousVersion: "0.1.5",
         restarting: true,
       });
-      expect(deps.openclawChannelService.isApplyInProgress).toHaveBeenCalled();
       expect(deps.alphaclawVersionService.updateAlphaclaw).toHaveBeenCalledTimes(1);
       await vi.advanceTimersByTimeAsync(1000);
       expect(deps.alphaclawVersionService.restartProcess).toHaveBeenCalledTimes(1);
@@ -1450,82 +1248,15 @@ describe("server/routes/system", () => {
     }
   });
 
-  it("includes a populated openclawChannel summary on GET /api/status", async () => {
+  it("no longer publishes an openclawChannel summary on GET /api/status", async () => {
     const deps = createSystemDeps();
-    deps.openclawChannelService = {
-      getChannelInfo: vi.fn(() => ({
-        releaseChannel: "beta",
-        installedVersion: "2026.8.1",
-        pinVersion: "2026.7.1-2",
-        applied: {
-          channel: "beta",
-          version: "2026.8.1",
-          sha: null,
-          at: 1,
-          acceptedAt: null,
-          acceptedSource: null,
-        },
-        appliedId: "2026.8.1",
-        appliedVersion: "2026.8.1",
-        isPin: false,
-        // Expected divergence: the applied beta is what runs, over the pin.
-        pinDiverged: true,
-        acceptedAt: null,
-        inStabilizationWindow: true,
-        lastKnownGood: { package: null, dev: null },
-        blocklist: [],
-        lastUpdateRun: null,
-        lastBoot: null,
-      })),
-      isApplyInProgress: vi.fn(() => true),
-    };
     const app = createApp(deps);
 
     const res = await request(app).get("/api/status");
 
     expect(res.status).toBe(200);
-    // The summary is a fixed projection of getChannelInfo() plus the live
-    // apply flag — exact equality locks the shape.
-    expect(res.body.openclawChannel).toEqual({
-      releaseChannel: "beta",
-      installedVersion: "2026.8.1",
-      pinVersion: "2026.7.1-2",
-      appliedId: "2026.8.1",
-      appliedVersion: "2026.8.1",
-      isPin: false,
-      // "running the applied build over the declared pin — expected" (the
-      // 2026-09-01 incident's npm-ls red herring, made legible).
-      pinDiverged: true,
-      acceptedAt: null,
-      inStabilizationWindow: true,
-      applyInProgress: true,
-      // Issue #20: the restart-handoff verdict banner reads this to avoid a
-      // green "activation verified" while the reconciler holds the gateway.
-      gatewayHold: null,
-      databaseRecoveryPending: null,
-      // Read-time corruption flag from getChannelInfo (fail-closed hold gates).
-      stateCorrupted: false,
-    });
-  });
-
-  it("degrades openclawChannel to null on GET /api/status when getChannelInfo throws", async () => {
-    // The status endpoint feeds the whole dashboard shell (and its 2s SSE
-    // mirror): a broken channel store must degrade the summary, never take
-    // down /api/status with it.
-    const deps = createSystemDeps();
-    deps.openclawChannelService = {
-      getChannelInfo: vi.fn(() => {
-        throw new Error("channel state unreadable");
-      }),
-      isApplyInProgress: vi.fn(() => false),
-    };
-    const app = createApp(deps);
-
-    const res = await request(app).get("/api/status");
-
-    expect(res.status).toBe(200);
-    expect(res.body.openclawChannel).toBeNull();
-    expect(deps.openclawChannelService.getChannelInfo).toHaveBeenCalled();
+    expect(res.body).not.toHaveProperty("openclawChannel");
+    expect(JSON.stringify(res.body.state)).not.toMatch(/gatewayHeld|gatewayHoldUnreadable|databaseRecoveryPending|recoveryConfirmation|roll_back/);
   });
 
   it("returns raw session metadata on GET /api/agent/sessions", async () => {
@@ -2999,28 +2730,9 @@ describe("server/routes/system", () => {
     resolveRestart();
   });
 
-  it("rejects a restart while a channel apply is in progress", async () => {
-    const deps = createSystemDeps();
-    deps.openclawChannelService = {
-      getChannelInfo: vi.fn(() => null),
-      isApplyInProgress: vi.fn(() => true),
-    };
-    const app = createApp(deps);
-
-    const res = await request(app).post("/api/gateway/restart");
-    expect(res.status).toBe(409);
-    expect(res.body.code).toBe("apply_in_progress");
-    expect(deps.restartGateway).not.toHaveBeenCalled();
-  });
-
-  const createQueuedRestartHarness = ({ hold = null, applyInProgress = false } = {}) => {
+  const createQueuedRestartHarness = () => {
     const { createGatewayLifecycleLock } = require("../../lib/server/gateway-lifecycle-lock");
     const deps = createSystemDeps();
-    const world = { hold, applyInProgress };
-    deps.openclawChannelService = {
-      getChannelInfo: vi.fn(() => ({ gatewayHold: world.hold })),
-      isApplyInProgress: vi.fn(() => world.applyInProgress),
-    };
     deps.gatewayLifecycleLock = createGatewayLifecycleLock({ leaseMs: 60_000 });
     deps.operationEvents = {
       createOperation: vi.fn(),
@@ -3050,22 +2762,21 @@ describe("server/routes/system", () => {
           .post(path)
           .end((err, res) => (err ? reject(err) : resolve(res)));
       });
-    return { deps, app, world, stepEvents, send };
+    return { deps, app, stepEvents, send };
   };
 
-  it("re-validates the reconciler hold AFTER acquiring the lifecycle lock (sync 409, ledger 'skipped')", async () => {
+  it("re-validates lease ownership AFTER acquiring the lifecycle lock (sync 409, ledger 'skipped')", async () => {
     const h = createQueuedRestartHarness();
     const acquire = h.deps.gatewayLifecycleLock.tryAcquire;
     vi.spyOn(h.deps.gatewayLifecycleLock, "tryAcquire").mockImplementationOnce((...args) => {
       const release = acquire(...args);
-      h.world.hold = { reason: "settings migration failed", blamedKeys: ["mystery"] };
+      release();
       return release;
     });
     const res = await h.send("/api/gateway/restart");
     expect(res.status).toBe(409);
-    expect(res.body.code).toBe("gateway_held");
-    expect(res.body.error).toContain("Upgrade page");
-    expect(res.body.hint).toContain("Upgrade page");
+    expect(res.body.code).toBe("lease_expired");
+    expect(res.body.hint).toBeTruthy();
     expect(h.deps.restartGateway).not.toHaveBeenCalled();
     expect(h.deps.watchdog.onExpectedRestart).not.toHaveBeenCalled();
     // A refusal never opened the expected-restart window, so it must not
@@ -3074,63 +2785,41 @@ describe("server/routes/system", () => {
     // UI: terminal event carrying the blocker code + hint.
     expect(h.deps.operationEvents.fail).toHaveBeenCalledWith(
       "op-queued",
-      expect.objectContaining({ code: "gateway_held", hint: expect.stringContaining("Upgrade page") }),
+      expect.objectContaining({ code: "lease_expired", hint: expect.any(String) }),
     );
     // Record closes not-ok; ledger books a SKIP, never a failed restart.
     expect(h.deps.restartRequiredState.completeRestart).toHaveBeenCalledWith(
-      expect.objectContaining({ operationId: "op-queued", ok: false, code: "gateway_held" }),
+      expect.objectContaining({ operationId: "op-queued", ok: false, code: "lease_expired" }),
     );
     expect(h.deps.restartRequiredState.markRestartComplete).toHaveBeenCalled();
     expect(h.deps.watchdog.recordOperationEvent).toHaveBeenCalledWith({
       kind: "gateway_restart",
       status: "skipped",
-      details: { operationId: "op-queued", trigger: "manual", reason: "gateway_held" },
+      details: { operationId: "op-queued", trigger: "manual", reason: "lease_expired" },
     });
     expect(h.deps.watchdog.recordOperationEvent).not.toHaveBeenCalledWith(
       expect.objectContaining({ status: "failed" }),
     );
     expect(h.stepEvents()).toEqual([]);
     // The lock was released: a later restart proceeds normally.
-    h.world.hold = null;
     const next = await h.send("/api/gateway/restart");
     expect(next.status).toBe(200);
     expect(h.deps.restartGateway).toHaveBeenCalledTimes(1);
   });
 
-  it("an apply that begins during admission wins and the restart is refused with apply_in_progress", async () => {
-    const h = createQueuedRestartHarness();
-    const acquire = h.deps.gatewayLifecycleLock.tryAcquire;
-    vi.spyOn(h.deps.gatewayLifecycleLock, "tryAcquire").mockImplementationOnce((...args) => {
-      const release = acquire(...args);
-      h.world.applyInProgress = true;
-      return release;
-    });
-    const res = await h.send("/api/gateway/restart");
-    expect(res.status).toBe(409);
-    expect(res.body.code).toBe("apply_in_progress");
-    expect(h.deps.restartGateway).not.toHaveBeenCalled();
-    expect(h.deps.operationEvents.fail).toHaveBeenCalledWith(
-      "op-queued",
-      expect.objectContaining({ code: "apply_in_progress" }),
-    );
-  });
-
   it("async callers receive immediate busy refusal without recording or queuing a restart", async () => {
     const h = createQueuedRestartHarness();
-    // A reconcile retry holds the lock (boot itself is refused up front now).
-    const releaseBoot = await h.deps.gatewayLifecycleLock.acquire("reconcile_retry");
+    // A repair holds the lock (boot itself is refused up front now).
+    const releaseBoot = await h.deps.gatewayLifecycleLock.acquire("repair");
     const res = await h.send("/api/gateway/restart?async=1");
     expect(res.status).toBe(409);
     expect(res.body).toMatchObject({ ok: false, code: "operation_in_progress" });
     expect(h.deps.restartRequiredState.beginRestart).not.toHaveBeenCalled();
     expect(h.stepEvents()).toEqual([]);
-    h.world.hold = { reason: "settings migration failed", blamedKeys: [] };
     releaseBoot();
     await new Promise((resolve) => setImmediate(resolve));
     expect(h.deps.operationEvents.fail).not.toHaveBeenCalled();
     expect(h.deps.restartGateway).not.toHaveBeenCalled();
-    expect((await h.send("/api/gateway/restart")).body.code).toBe("gateway_held");
-    h.world.hold = null;
     expect((await h.send("/api/gateway/restart")).status).toBe(200);
   });
 
@@ -3161,10 +2850,9 @@ describe("server/routes/system", () => {
 
   it("repeated requests while another operation owns the gateway are independently refused without stale queue authority", async () => {
     const h = createQueuedRestartHarness();
-    // A reconcile retry holds the lock (boot itself is refused up front now).
-    const releaseBoot = await h.deps.gatewayLifecycleLock.acquire("reconcile_retry");
+    // A repair holds the lock (boot itself is refused up front now).
+    const releaseBoot = await h.deps.gatewayLifecycleLock.acquire("repair");
     const [r1, r2] = await Promise.all([h.send("/api/gateway/restart"), h.send("/api/gateway/restart")]);
-    h.world.hold = { reason: "settings migration failed", blamedKeys: [] };
     releaseBoot();
     expect(r1.status).toBe(409);
     expect(r1.body.code).toBe("operation_in_progress");
@@ -3174,55 +2862,6 @@ describe("server/routes/system", () => {
     expect(h.deps.restartGateway).not.toHaveBeenCalled();
     expect(h.deps.restartRequiredState.beginRestart).not.toHaveBeenCalled();
     expect(h.stepEvents()).toEqual([]);
-  });
-
-  it("a hold state that cannot be READ fails closed: 409 gateway_hold_unreadable and the card disables Restart with the unreadable reason", async () => {
-    const deps = createSystemDeps();
-    deps.openclawChannelService = {
-      getChannelInfo: vi.fn(() => {
-        throw new Error("state file unreadable");
-      }),
-      isApplyInProgress: vi.fn(() => false),
-    };
-    deps.gatewayLifecycleLock = { tryAcquire: vi.fn(() => () => {}), getActiveOperation: vi.fn(() => null) };
-    deps.restartGateway = vi.fn(async () => ({ durationMs: 1, downtimeMs: 1 }));
-    const app = createApp(deps);
-    // The card agrees with the route: a read that THROWS disables Restart
-    // with the unreadable reason (no channel summary is available at all).
-    const status = await request(app).get("/api/status");
-    expect(status.status).toBe(200);
-    expect(status.body.openclawChannel).toBeNull();
-    const restart = status.body.state.actions.find((a) => a.id === "restart" || a.id === "retry");
-    expect(restart.disabledReason).toBeUndefined();
-    expect(restart).toMatchObject({ disposition: "inspect", resolution: "diagnose", reasonCode: "gateway_hold_unreadable" });
-    const res = await request(app).post("/api/gateway/restart");
-    expect(res.status).toBe(409);
-    expect(res.body.code).toBe("gateway_hold_unreadable");
-    expect(res.body.error).toContain("state file unreadable");
-    expect(res.body.hint).toContain("release-channel state file");
-    expect(deps.restartGateway).not.toHaveBeenCalled();
-    expect(deps.restartRequiredState.markRestartInProgress).not.toHaveBeenCalled();
-  });
-
-  it("a corrupted release-channel state file fails closed for restarts and disables the card's lifecycle actions", async () => {
-    const deps = createSystemDeps();
-    deps.openclawChannelService = {
-      getChannelInfo: vi.fn(() => ({ gatewayHold: null, stateCorrupted: true })),
-      isApplyInProgress: vi.fn(() => false),
-    };
-    deps.gatewayLifecycleLock = { tryAcquire: vi.fn(() => () => {}), getActiveOperation: vi.fn(() => null) };
-    deps.restartGateway = vi.fn(async () => ({ durationMs: 1, downtimeMs: 1 }));
-    const app = createApp(deps);
-    const status = await request(app).get("/api/status");
-    expect(status.status).toBe(200);
-    expect(status.body.openclawChannel.stateCorrupted).toBe(true);
-    const restart = status.body.state.actions.find((a) => a.id === "restart" || a.id === "retry");
-    expect(restart.disabledReason).toBeUndefined();
-    expect(restart).toMatchObject({ disposition: "inspect", resolution: "diagnose", reasonCode: "gateway_hold_unreadable" });
-    const res = await request(app).post("/api/gateway/restart");
-    expect(res.status).toBe(409);
-    expect(res.body.code).toBe("gateway_hold_unreadable");
-    expect(deps.restartGateway).not.toHaveBeenCalled();
   });
 
   it("while boot holds the lifecycle lock a manual restart is refused up front (409 booting) instead of queued", async () => {
@@ -3242,34 +2881,6 @@ describe("server/routes/system", () => {
     expect(next.status).toBe(200);
     expect(h.deps.restartGateway).toHaveBeenCalledTimes(1);
   });
-
-  it("a transient channel-info read failure clears on the next good read: the card re-enables Restart", async () => {
-    const deps = createSystemDeps();
-    let fail = true;
-    deps.openclawChannelService = {
-      getChannelInfo: vi.fn(() => {
-        if (fail) throw new Error("EIO");
-        return { gatewayHold: null };
-      }),
-      isApplyInProgress: vi.fn(() => false),
-    };
-    deps.gatewayLifecycleLock = { tryAcquire: vi.fn(() => () => {}), getActiveOperation: vi.fn(() => null) };
-    deps.restartGateway = vi.fn(async () => ({ durationMs: 1, downtimeMs: 1 }));
-    const app = createApp(deps);
-    const findRestart = (body) => body.state.actions.find((a) => a.id === "restart" || a.id === "retry");
-    const first = await request(app).get("/api/status");
-    expect(findRestart(first.body)).toMatchObject({ disposition: "inspect", resolution: "diagnose", reasonCode: "gateway_hold_unreadable" });
-    fail = false;
-    // The status snapshot stays fresh for kStatusSnapshotFreshnessMs (2.5s);
-    // the next compute after that window re-reads channel info and must
-    // clear the sticky read-failure flag.
-    await new Promise((resolve) => setTimeout(resolve, 2700));
-    const second = await request(app).get("/api/status");
-    expect(findRestart(second.body).disabledReason).toBeUndefined();
-    expect(findRestart(second.body).disposition).toBe("execute");
-    const res = await request(app).post("/api/gateway/restart");
-    expect(res.status).toBe(200);
-  }, 10_000);
 
   it("every lifecycle-lock kind acquired anywhere in lib/server has a badge label (never the 'Working…' fallback)", async () => {
     const fs = require("fs");
@@ -3295,7 +2906,7 @@ describe("server/routes/system", () => {
     walk(path.join(libDir, "server"));
     kinds.delete("boot"); // expressed through bootPhase, never the badge
     // The enumeration itself is pinned: these kinds must all be discovered.
-    for (const expected of ["restart", "repair", "crash_restart", "medic", "memory_mitigation", "autotune_resize", "env_sync", "backup_quiesce", "autotune_settings", "autotune_reapply", "reconcile_retry", "config_retry"]) {
+    for (const expected of ["restart", "repair", "crash_restart", "medic", "memory_mitigation", "autotune_resize", "env_sync", "autotune_settings", "autotune_reapply", "config_retry", "native_notification", "team_transition", "structural_repair"]) {
       expect(kinds.has(expected), expected).toBe(true);
     }
     for (const kind of kinds) {
@@ -3311,63 +2922,8 @@ describe("server/routes/system", () => {
     }
   });
 
-  it("the fast-gate refusal carries the same hint as the post-lock refusal", async () => {
+  it("restarts normally with no lifecycle operation in flight", async () => {
     const deps = createSystemDeps();
-    deps.openclawChannelService = {
-      getChannelInfo: vi.fn(() => ({ gatewayHold: { reason: "settings migration failed", blamedKeys: [] } })),
-      isApplyInProgress: vi.fn(() => false),
-    };
-    const app = createApp(deps);
-    const res = await request(app).post("/api/gateway/restart");
-    expect(res.status).toBe(409);
-    expect(res.body.hint).toContain("Upgrade page");
-  });
-
-  it("status frames mark Restart/Retry/Repair disabled with the hold reason while the reconciler holds the gateway", async () => {
-    const deps = createSystemDeps();
-    deps.openclawChannelService = {
-      getChannelInfo: vi.fn(() => ({
-        gatewayHold: { reason: "settings migration failed", blamedKeys: ["mystery"] },
-      })),
-      isApplyInProgress: vi.fn(() => false),
-    };
-    deps.gatewayLifecycleLock = { acquire: vi.fn(), getActiveOperation: vi.fn(() => null) };
-    const app = createApp(deps);
-    const res = await request(app).get("/api/status");
-    expect(res.status).toBe(200);
-    const restart = res.body.state.actions.find((a) => a.id === "restart" || a.id === "retry");
-    expect(restart, JSON.stringify(res.body.state)).toBeTruthy();
-    expect(restart.disabledReason).toBeUndefined();
-    expect(restart).toMatchObject({ disposition: "inspect", resolution: "upgrade" });
-  });
-
-  it("rejects a restart while the reconciler holds the gateway (issue #20)", async () => {
-    // A manual restart during a hold would launch the gateway on the exact
-    // config the reconciler just rejected — and dissolve the watchdog latch
-    // while state.gatewayHold stays set.
-    const deps = createSystemDeps();
-    deps.openclawChannelService = {
-      getChannelInfo: vi.fn(() => ({
-        gatewayHold: { reason: "settings migration failed", blamedKeys: ["mystery"] },
-      })),
-      isApplyInProgress: vi.fn(() => false),
-    };
-    const app = createApp(deps);
-
-    const res = await request(app).post("/api/gateway/restart");
-    expect(res.status).toBe(409);
-    expect(res.body.code).toBe("gateway_held");
-    expect(res.body.error).toContain("Retry migration");
-    expect(deps.restartGateway).not.toHaveBeenCalled();
-    expect(deps.restartRequiredState.markRestartInProgress).not.toHaveBeenCalled();
-  });
-
-  it("restarts normally when the channel state carries no gateway hold", async () => {
-    const deps = createSystemDeps();
-    deps.openclawChannelService = {
-      getChannelInfo: vi.fn(() => ({ gatewayHold: null })),
-      isApplyInProgress: vi.fn(() => false),
-    };
     deps.restartRequiredState.beginRestart = vi.fn(() => ({
       operationId: "op-hold-free",
       reasonsSnapshot: [],
@@ -4546,7 +4102,7 @@ describe("server/routes/system agent-sessions micro-cache", () => {
   });
 });
 
-describe("server/routes/system createSwrCache shouldRefresh", () => {
+describe("server/utils/swr-cache createSwrCache", () => {
   const { createSwrCache } = require("../../lib/server/utils/swr-cache");
   const kTtlMs = 5000;
 
@@ -4558,55 +4114,22 @@ describe("server/routes/system createSwrCache shouldRefresh", () => {
     vi.useRealTimers();
   });
 
-  it("seeds on the first read even when shouldRefresh says no", () => {
-    const compute = vi.fn(() => "v1");
-    const read = createSwrCache(compute, kTtlMs, { shouldRefresh: () => false });
-    expect(read()).toBe("v1");
-    expect(compute).toHaveBeenCalledTimes(1);
-  });
-
-  it("serves the stale value and skips the background compute while shouldRefresh is false, then resumes", async () => {
-    let value = "v1";
-    let allowed = true;
-    const compute = vi.fn(() => value);
-    const read = createSwrCache(compute, kTtlMs, { shouldRefresh: () => allowed });
-    expect(read()).toBe("v1");
-
-    value = "v2";
-    allowed = false;
-    vi.advanceTimersByTime(kTtlMs + 1);
-    expect(read()).toBe("v1");
-    await vi.runAllTimersAsync();
-    expect(compute).toHaveBeenCalledTimes(1);
-    expect(read()).toBe("v1");
-
-    allowed = true;
-    expect(read()).toBe("v1");
-    await vi.runAllTimersAsync();
-    expect(compute).toHaveBeenCalledTimes(2);
-    expect(read()).toBe("v2");
-  });
-
-  it("without the option (and with a non-function) it behaves exactly as before", async () => {
+  it("seeds synchronously, then serves stale and refreshes off the request tick", async () => {
     let value = "a";
     const compute = vi.fn(() => value);
     const plain = createSwrCache(compute, kTtlMs);
-    const junk = createSwrCache(compute, kTtlMs, { shouldRefresh: "nope" });
     expect(plain()).toBe("a");
-    expect(junk()).toBe("a");
     value = "b";
     vi.advanceTimersByTime(kTtlMs);
     expect(plain()).toBe("a");
-    expect(junk()).toBe("a");
     await vi.runAllTimersAsync();
     expect(plain()).toBe("b");
-    expect(junk()).toBe("b");
   });
 
-  it("invalidate() forces a synchronous reseed regardless of shouldRefresh", () => {
+  it("invalidate() forces a synchronous reseed", () => {
     let value = "v1";
     const compute = vi.fn(() => value);
-    const read = createSwrCache(compute, kTtlMs, { shouldRefresh: () => false });
+    const read = createSwrCache(compute, kTtlMs);
     expect(read()).toBe("v1");
     value = "v2";
     read.invalidate();
@@ -4628,119 +4151,5 @@ describe("server/routes/system createSwrCache shouldRefresh", () => {
     await vi.runAllTimersAsync();
     expect(read()).toBe("ok");
     expect(compute).toHaveBeenCalledTimes(2);
-  });
-});
-
-describe("server/routes/system channel status during the state-DB quiet period", () => {
-  const {
-    beginStateDbQuiet,
-    resetStateDbQuietForTests,
-  } = require("../../lib/server/state-db-quiet");
-
-  beforeEach(() => {
-    require("../../lib/server/boot-phase").setBootPhase("ready");
-    resetStateDbQuietForTests();
-  });
-
-  afterEach(() => {
-    resetStateDbQuietForTests();
-  });
-
-  it("GET /api/status keeps serving the last-known channel status while quiet, and refreshes after release", async () => {
-    const deps = createSystemDeps();
-    const app = createApp(deps);
-
-    const first = await request(app).get("/api/status");
-    expect(first.status).toBe(200);
-    expect(first.body.channels).toEqual({ telegram: "ready" });
-    expect(deps.getChannelStatus).toHaveBeenCalledTimes(1);
-
-    // Hold the barrier BEFORE freezing the clock (the handle drain polls
-    // against Date.now), then age every status cache past its TTL.
-    const { token } = await beginStateDbQuiet({ owner: "backup", maxMs: 60_000 });
-    const realNow = Date.now();
-    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(realNow + 6_000);
-    try {
-      deps.getChannelStatus.mockReturnValue({ telegram: "not_ready" });
-      const held = await request(app).get("/api/status");
-      await new Promise((resolve) => setImmediate(resolve));
-      expect(held.body.channels).toEqual({ telegram: "ready" });
-      expect(deps.getChannelStatus).toHaveBeenCalledTimes(1);
-    } finally {
-      token.release();
-    }
-
-    nowSpy.mockReturnValue(realNow + 12_000);
-    const afterRelease = await request(app).get("/api/status");
-    // Stale-while-revalidate: this read serves the old value and schedules
-    // the refresh off the request tick.
-    expect(afterRelease.body.channels).toEqual({ telegram: "ready" });
-    await new Promise((resolve) => setImmediate(resolve));
-    expect(deps.getChannelStatus).toHaveBeenCalledTimes(2);
-
-    nowSpy.mockReturnValue(realNow + 18_000);
-    const fresh = await request(app).get("/api/status");
-    expect(fresh.body.channels).toEqual({ telegram: "not_ready" });
-  });
-
-  // D13: `sessions --json` is a CLI child that opens the state DB — the very
-  // traffic the barrier suppresses, and the offline copy's exclusivity scan
-  // would refuse the paused box over OUR OWN poll. Never spawn while quiet.
-  describe("GET /api/agent/sessions never spawns the sessions CLI while quiet", () => {
-    const { kBackupInProgressCode, kStateDbQuietRetryAfterSec } = require(
-      "../../lib/server/state-db-quiet",
-    );
-    const oneSessionStdout = JSON.stringify({
-      items: [{ key: "agent:main:main", id: "row-id", lastActivityAt: 7 }],
-    });
-
-    it("answers 409 backup_in_progress + Retry-After before spawning when nothing is cached, and spawns again once released", async () => {
-      const deps = createSystemDeps();
-      deps.clawCmd.mockResolvedValue({ ok: true, stdout: oneSessionStdout });
-      const app = createApp(deps);
-
-      const { token } = await beginStateDbQuiet({ owner: "backup", maxMs: 60_000 });
-      try {
-        const held = await request(app).get("/api/agent/sessions");
-        expect(held.status).toBe(409);
-        expect(held.body).toEqual(
-          expect.objectContaining({ ok: false, code: kBackupInProgressCode }),
-        );
-        expect(held.headers["retry-after"]).toBe(String(kStateDbQuietRetryAfterSec));
-        expect(deps.clawCmd).not.toHaveBeenCalled();
-      } finally {
-        token.release();
-      }
-
-      const released = await request(app).get("/api/agent/sessions");
-      expect(released.status).toBe(200);
-      expect(released.body.sessions).toEqual([
-        expect.objectContaining({ key: "agent:main:main", sessionId: "row-id" }),
-      ]);
-      expect(deps.clawCmd).toHaveBeenCalledTimes(1);
-    });
-
-    it("serves the last-known session list while quiet — even past the cache TTL — without spawning", async () => {
-      const deps = createSystemDeps();
-      deps.clawCmd.mockResolvedValue({ ok: true, stdout: oneSessionStdout });
-      // TTL 0 here: the list is cached but never served on the hot path, so
-      // a 200 while quiet can only be the last-known projection.
-      const app = createApp(deps);
-
-      const warm = await request(app).get("/api/agent/sessions");
-      expect(warm.status).toBe(200);
-      expect(deps.clawCmd).toHaveBeenCalledTimes(1);
-
-      const { token } = await beginStateDbQuiet({ owner: "backup", maxMs: 60_000 });
-      try {
-        deps.clawCmd.mockResolvedValue({ ok: false, stderr: "must not be spawned" });
-        const held = await request(app).get("/api/agent/sessions");
-        expect(held.status).toBe(200);
-        expect(held.body.sessions).toEqual(warm.body.sessions);
-        expect(deps.clawCmd).toHaveBeenCalledTimes(1);
-      } finally {
-        token.release();
-      }
-    });
   });
 });

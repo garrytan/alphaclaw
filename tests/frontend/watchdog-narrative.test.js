@@ -122,36 +122,23 @@ describe("buildWatchdogNarrative", () => {
     expect(buildWatchdogNarrative({}, kNow)).toBe(null);
   });
 
-  it("narrates a degraded pre-rollback state with reason, duration, and deadline", async () => {
+  it("narrates a degraded state with reason and duration", async () => {
     const { buildWatchdogNarrative } = await loadHelpers();
     const narrative = buildWatchdogNarrative(
       {
         ...baseStatus,
-        phase: "degraded_pre_rollback",
+        phase: "degraded_retrying",
         health: "degraded",
         degradedSince: new Date(kNow - 6 * 60_000).toISOString(),
         degradedReason: "gateway health returned HTTP 503",
-        rollbackDeadlineAt: new Date(kNow + 4 * 60_000).toISOString(),
-        doctorFixSuppressed: true,
-        stabilization: {
-          active: true,
-          until: new Date(kNow + 14 * 3_600_000).toISOString(),
-        },
       },
       kNow,
     );
     expect(narrative.tone).toBe("warning");
     expect(narrative.detail).toContain("Degraded for 6m 0s.");
     expect(narrative.detail).toContain("gateway health returned HTTP 503");
-    expect(narrative.countdowns).toEqual([
-      {
-        key: "rollback",
-        label: "Auto-rollback if still degraded",
-        endsAt: new Date(kNow + 4 * 60_000).toISOString(),
-      },
-    ]);
-    expect(narrative.chips[0].label).toContain("Unattended repair paused");
-    expect(narrative.chips[0].label).toContain("14h 0m 0s");
+    expect(narrative.countdowns).toEqual([]);
+    expect(narrative.chips).toEqual([]);
   });
 
   it("narrates crash backoff with exit detail, attempt, and relaunch countdown", async () => {
@@ -272,24 +259,6 @@ describe("buildWatchdogNarrative", () => {
       expect(narrative.chips).toHaveLength(0);
     });
 
-    it("also counts down in degraded_pre_rollback, ahead of the rollback deadline", async () => {
-      const { buildWatchdogNarrative } = await loadHelpers();
-      const rollbackDeadlineAt = new Date(kNow + 300_000).toISOString();
-      const narrative = buildWatchdogNarrative(
-        {
-          ...degradedRetrying,
-          phase: "degraded_pre_rollback",
-          rollbackDeadlineAt,
-          degradedRetry: armedRetry,
-        },
-        kNow,
-      );
-      expect(narrative.countdowns.map((countdown) => countdown.key)).toEqual([
-        "degraded_retry",
-        "rollback",
-      ]);
-    });
-
     it("ignores degradedRetry outside the degraded phases (no countdown, no chip)", async () => {
       const { buildWatchdogNarrative } = await loadHelpers();
       for (const phase of ["healthy", "crash_backoff"]) {
@@ -352,19 +321,6 @@ describe("buildWatchdogNarrative", () => {
       key: "repairs",
       label: "1/2 repairs",
     });
-  });
-
-  it("suppression chip only renders when auto-repair is configured on", async () => {
-    const { buildWatchdogNarrative } = await loadHelpers();
-    const suppressed = {
-      ...baseStatus,
-      doctorFixSuppressed: true,
-      stabilization: { active: true, until: null },
-    };
-    expect(buildWatchdogNarrative(suppressed, kNow).chips).toHaveLength(1);
-    expect(
-      buildWatchdogNarrative({ ...suppressed, autoRepair: false }, kNow).chips,
-    ).toHaveLength(0);
   });
 
   it("lists suppressed channels in safe mode", async () => {
@@ -803,7 +759,8 @@ describe("drift pins (v0.9.75 ship review): vocabularies the UI mirrors by hand"
       versionMismatch: { expected: "2026.9.2", running: "2026.7.1-2", source: "crash", detectedAt: null },
     });
     expect(withVersions).toContain("running 2026.7.1-2, expected 2026.9.2");
-    expect(withVersions).toContain("Upgrade page");
+    expect(withVersions).toContain("version AlphaClaw pins");
+    expect(withVersions).not.toContain("Upgrade page");
     const bare = describeDegradedReason({ degradedReason: "version_mismatch" });
     expect(bare).not.toContain("version_mismatch");
     expect(bare).not.toContain("unknown");

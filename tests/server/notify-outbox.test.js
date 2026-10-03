@@ -905,33 +905,6 @@ describe("server/upgrade-notifier routing", () => {
     expect(sendToTarget.mock.calls[1][1]).toBe("(fallback) upgrade failed");
   });
 
-  it("upgrade-lifecycle messages deep-link to the hash route (the SPA 404s on /upgrade)", async () => {
-    const { outbox } = makeOutbox();
-    const sendToTarget = vi.fn(async () => ({ ok: true }));
-    const notifier = createUpgradeNotifier({
-      notifier: { notify: vi.fn(async () => ({ ok: true })), sendToTarget },
-      outbox,
-      operatorsStore: {
-        read: () => ({
-          notifications: {
-            preferredChannel: null,
-            adminTargets: [{ channel: "telegram", target: "111" }],
-          },
-        }),
-      },
-      getBaseUrl: () => "https://claw.example.com/",
-      logger: kSilentLogger,
-    });
-    await notifier.notify("update finished", {
-      id: "e1",
-      operationId: "op-1",
-    });
-    await notifier.flush();
-    expect(sendToTarget.mock.calls[0][1]).toBe(
-      "update finished\n🔗 https://claw.example.com/#/upgrade",
-    );
-  });
-
   it("degrades to a single direct delivery when the outbox is unavailable", async () => {
     // enqueue() returning null (e.g. disk full) must not drop the message —
     // and must not pretend it was queued either.
@@ -1267,13 +1240,8 @@ describe("server/upgrade-notifier routing", () => {
   });
 });
 
-describe("server/upgrade-notifier state-db quiet hold", () => {
-  const {
-    beginStateDbQuiet,
-    resetStateDbQuietForTests,
-  } = require("../../lib/server/state-db-quiet");
-
-  const makeHeldNotifier = () => {
+describe("server/upgrade-notifier flush scheduling", () => {
+  const makeNotifier = () => {
     const { outbox } = makeOutbox();
     const fanout = vi.fn(async () => ({ ok: true, sent: 1 }));
     const flushSpy = vi.spyOn(outbox, "flush");
@@ -1289,205 +1257,52 @@ describe("server/upgrade-notifier state-db quiet hold", () => {
   };
 
   beforeEach(() => {
-    // Notifiers built by earlier tests in this file never called stop(); drop
-    // their listeners so only the one under test observes the barrier.
-    resetStateDbQuietForTests({ listeners: true });
     vi.useFakeTimers();
   });
 
   afterEach(() => {
     vi.useRealTimers();
-    resetStateDbQuietForTests({ listeners: true });
   });
 
-  it("enqueue is never gated: events queue durably while quiet and flush the moment the barrier lifts", async () => {
-    const { notifier, outbox, fanout, flushSpy } = makeHeldNotifier();
-    const { token } = await beginStateDbQuiet({ owner: "backup", maxMs: 60_000 });
-
-    const result = await notifier.notify("update applied", { id: "e1" });
+  it("notify() queues durably and debounces a flush", async () => {
+    const { notifier, outbox, flushSpy, fanout } = makeNotifier();
+    const result = await notifier.notify("plain", { id: "e1" });
     expect(result).toEqual({ ok: true, queued: true, id: "e1" });
     expect(outbox.listEvents()).toHaveLength(1);
-    // The debounce would fire at 250ms — held, so nothing is delivered.
-    await vi.advanceTimersByTimeAsync(2_000);
-    expect(flushSpy).not.toHaveBeenCalled();
-    expect(fanout).not.toHaveBeenCalled();
-    expect(outbox.listEvents()[0].deliveredAt).toBeNull();
-
-    token.release();
-    await vi.advanceTimersByTimeAsync(0);
-    expect(flushSpy).toHaveBeenCalledTimes(1);
-    expect(fanout).toHaveBeenCalledWith("update applied", { eventType: "info", shouldDeliver: expect.any(Function) });
-    expect(outbox.listEvents()[0].deliveredAt).not.toBeNull();
-  });
-
-  it("begin cancels a pending debounce and the periodic heartbeat; end re-arms the heartbeat", async () => {
-    const { notifier, flushSpy } = makeHeldNotifier();
-    notifier.start();
-    expect(flushSpy).toHaveBeenCalledTimes(1);
-    await notifier.notify("queued before quiet", { id: "e1" });
-    flushSpy.mockClear();
-
-    const { token } = await beginStateDbQuiet({ owner: "backup", maxMs: 600_000 });
-    await vi.advanceTimersByTimeAsync(130_000);
-    expect(flushSpy).not.toHaveBeenCalled();
-
-    token.release();
-    await vi.advanceTimersByTimeAsync(0);
-    expect(flushSpy).toHaveBeenCalledTimes(1);
-    await vi.advanceTimersByTimeAsync(60_000);
-    expect(flushSpy).toHaveBeenCalledTimes(2);
-    notifier.stop();
-  });
-
-  it("start() during a hold defers the boot re-drain and heartbeat until the barrier lifts", async () => {
-    const { notifier, flushSpy } = makeHeldNotifier();
-    const { token } = await beginStateDbQuiet({ owner: "backup", maxMs: 600_000 });
-    notifier.start();
-    await vi.advanceTimersByTimeAsync(61_000);
-    expect(flushSpy).not.toHaveBeenCalled();
-
-    token.release();
-    await vi.advanceTimersByTimeAsync(0);
-    expect(flushSpy).toHaveBeenCalledTimes(1);
-    await vi.advanceTimersByTimeAsync(60_000);
-    expect(flushSpy).toHaveBeenCalledTimes(2);
-    notifier.stop();
-  });
-
-  it("stop() unsubscribes from the barrier: a later release no longer flushes a stopped notifier", async () => {
-    const { notifier, flushSpy } = makeHeldNotifier();
-    notifier.start();
-    notifier.stop();
-    flushSpy.mockClear();
-    const { token } = await beginStateDbQuiet({ owner: "backup", maxMs: 60_000 });
-    token.release();
-    await vi.advanceTimersByTimeAsync(0);
-    expect(flushSpy).not.toHaveBeenCalled();
-  });
-
-  it("without a hold, notify() still debounces a flush as before", async () => {
-    const { notifier, flushSpy, fanout } = makeHeldNotifier();
-    await notifier.notify("plain", { id: "e1" });
     await vi.advanceTimersByTimeAsync(250);
     expect(flushSpy).toHaveBeenCalledTimes(1);
     expect(fanout).toHaveBeenCalledTimes(1);
   });
 
-  // Adversarial review (g): with the outbox unavailable the direct send used
-  // to run straight into the quiet period, where target resolution serves the
-  // readers' "unavailable" fallback — the message was silently lost.
-  describe("outbox unavailable while quiet", () => {
-    const makeBrokenOutboxNotifier = ({ logger = kSilentLogger } = {}) => {
-      const outboxStub = {
-        enqueue: vi.fn(() => null),
-        flush: vi.fn(async () => ({ delivered: 0, failed: 0, pending: 0 })),
-        listEvents: () => [],
-      };
-      const fanout = vi.fn(async () => ({ ok: true, sent: 1, failed: 0, failures: [] }));
-      const notifier = createUpgradeNotifier({
-        notifier: { notify: fanout, sendToTarget: vi.fn(async () => ({ ok: true })) },
-        outbox: outboxStub,
-        operatorsStore: {
-          read: () => ({ notifications: { preferredChannel: null, adminTargets: [] } }),
-        },
-        logger,
-      });
-      return { notifier, fanout, outboxStub };
+  it("start() re-drains at boot and arms the periodic heartbeat; stop() cancels it", async () => {
+    const { notifier, flushSpy } = makeNotifier();
+    notifier.start();
+    expect(flushSpy).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(flushSpy).toHaveBeenCalledTimes(2);
+    notifier.stop();
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(flushSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it("with the outbox unavailable the direct send is immediate", async () => {
+    const outboxStub = {
+      enqueue: vi.fn(() => null),
+      flush: vi.fn(async () => ({ delivered: 0, failed: 0, pending: 0 })),
+      listEvents: () => [],
     };
-
-    it("holds the direct send and delivers it when the barrier lifts — never into the quiet period", async () => {
-      const { notifier, fanout } = makeBrokenOutboxNotifier();
-      const { token } = await beginStateDbQuiet({ owner: "backup", maxMs: 60_000 });
-
-      const result = await notifier.notify("backup failed", { id: "e1", eventType: "upgrade_failed" });
-
-      expect(result).toEqual({ ok: true, held: true, reason: "state_db_quiet" });
-      await vi.advanceTimersByTimeAsync(5_000);
-      expect(fanout).not.toHaveBeenCalled();
-
-      token.release();
-      await vi.advanceTimersByTimeAsync(0);
-      expect(fanout).toHaveBeenCalledTimes(1);
-      expect(fanout).toHaveBeenCalledWith("backup failed", { eventType: "upgrade_failed", shouldDeliver: expect.any(Function) });
+    const fanout = vi.fn(async () => ({ ok: true, sent: 1, failed: 0, failures: [] }));
+    const notifier = createUpgradeNotifier({
+      notifier: { notify: fanout, sendToTarget: vi.fn(async () => ({ ok: true })) },
+      outbox: outboxStub,
+      operatorsStore: {
+        read: () => ({ notifications: { preferredChannel: null, adminTargets: [] } }),
+      },
+      logger: kSilentLogger,
     });
-
-    it("held sends are delivered in arrival order, then the outbox flush runs", async () => {
-      const { notifier, fanout, outboxStub } = makeBrokenOutboxNotifier();
-      const { token } = await beginStateDbQuiet({ owner: "backup", maxMs: 60_000 });
-      await notifier.notify("first", { id: "e1" });
-      await notifier.notify("second", { id: "e2" });
-      expect(fanout).not.toHaveBeenCalled();
-
-      token.release();
-      await vi.advanceTimersByTimeAsync(0);
-      expect(fanout.mock.calls.map((call) => call[0])).toEqual(["first", "second"]);
-      expect(outboxStub.flush).toHaveBeenCalledTimes(1);
-    });
-
-    it("the barrier EXPIRING (not released) also delivers the held send", async () => {
-      const { notifier, fanout } = makeBrokenOutboxNotifier();
-      await beginStateDbQuiet({ owner: "backup", maxMs: 10_000 });
-      await notifier.notify("held", { id: "e1" });
-
-      await vi.advanceTimersByTimeAsync(10_000);
-      expect(fanout).toHaveBeenCalledWith("held", { eventType: "info", shouldDeliver: expect.any(Function) });
-    });
-
-    it("a failed held delivery is logged, never retried (there is no durable outbox to retry from)", async () => {
-      const logger = { log: vi.fn(), warn: vi.fn(), error: vi.fn() };
-      const { notifier, fanout } = makeBrokenOutboxNotifier({ logger });
-      fanout.mockResolvedValue({ ok: false, reason: "no_channels_delivered", failures: [] });
-      const { token } = await beginStateDbQuiet({ owner: "backup", maxMs: 60_000 });
-      await notifier.notify("held", { id: "e1" });
-
-      token.release();
-      await vi.advanceTimersByTimeAsync(60_000);
-      expect(fanout).toHaveBeenCalledTimes(1);
-      expect(logger.log).toHaveBeenCalledWith(
-        "[upgrade-notifier] held direct send failed (info): no_channels_delivered",
-      );
-    });
-
-    it("the hold buffer is bounded at 50: the oldest is dropped with a log line", async () => {
-      const logger = { log: vi.fn(), warn: vi.fn(), error: vi.fn() };
-      const { notifier, fanout } = makeBrokenOutboxNotifier({ logger });
-      const { token } = await beginStateDbQuiet({ owner: "backup", maxMs: 60_000 });
-      for (let i = 0; i < 51; i += 1) {
-        await notifier.notify(`m${i}`, { id: `e${i}` });
-      }
-      expect(logger.log).toHaveBeenCalledWith(
-        expect.stringContaining("held direct-send buffer full (50) — dropping oldest"),
-      );
-
-      token.release();
-      await vi.advanceTimersByTimeAsync(0);
-      expect(fanout).toHaveBeenCalledTimes(50);
-      expect(fanout.mock.calls[0][0]).toBe("m1");
-      expect(fanout.mock.calls[49][0]).toBe("m50");
-    });
-
-    it("stop() during a hold drops the buffer loudly instead of sending into the quiet period", async () => {
-      const logger = { log: vi.fn(), warn: vi.fn(), error: vi.fn() };
-      const { notifier, fanout } = makeBrokenOutboxNotifier({ logger });
-      const { token } = await beginStateDbQuiet({ owner: "backup", maxMs: 60_000 });
-      await notifier.notify("held", { id: "e1" });
-
-      notifier.stop();
-      expect(logger.log).toHaveBeenCalledWith(
-        "[upgrade-notifier] stopping with 1 held direct send(s) undelivered",
-      );
-      token.release();
-      await vi.advanceTimersByTimeAsync(0);
-      expect(fanout).not.toHaveBeenCalled();
-    });
-
-    it("outside a quiet period the direct send is still immediate (unchanged degrade path)", async () => {
-      const { notifier, fanout, outboxStub } = makeBrokenOutboxNotifier();
-      const result = await notifier.notify("disk is full", { id: "e1" });
-      expect(fanout).toHaveBeenCalledTimes(1);
-      expect(result.ok).toBe(true);
-      expect(result.held).toBeUndefined();
-      expect(outboxStub.flush).not.toHaveBeenCalled();
-    });
+    const result = await notifier.notify("disk is full", { id: "e1" });
+    expect(fanout).toHaveBeenCalledTimes(1);
+    expect(result.ok).toBe(true);
+    expect(outboxStub.flush).not.toHaveBeenCalled();
   });
 });

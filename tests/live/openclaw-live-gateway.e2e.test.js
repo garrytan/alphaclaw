@@ -2,49 +2,31 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 const { spawnSync, spawn } = require("child_process");
-const { DatabaseSync } = require("node:sqlite");
 
 const {
-  assertFreeDiskBytes,
   kLiveEnabled,
-  kSilentLogger,
   mkTemp,
   scrubTestRunnerEnv,
-  stageTempInstall,
   waitFor,
 } = require("./live-helpers");
-const {
-  createOpenclawReleaseChannelStore,
-} = require("../../lib/server/openclaw-release-channel");
+const { describeExecutingBuild } = require("../../lib/server/openclaw-build");
 const { withOpenclawStartupEnv } = require("../../lib/server/openclaw-runtime-env");
 
-// LIVE tier: prove the CONTRACTS AlphaClaw's beta support depends on, against a real
-// newest-beta OpenClaw install. Excluded from `npm test`; run with:
+// LIVE tier: prove the gateway CONTRACTS AlphaClaw depends on, against the
+// REAL pinned OpenClaw (package.json dependencies.openclaw, installed in
+// node_modules — the build production runs). Excluded from `npm test`; run with:
 //   OPENCLAW_LIVE_E2E=1 npx vitest run tests/live/openclaw-live-gateway.e2e.test.js
-// It screams if OpenClaw drifts from: the install guard/lifecycle contract, the
-// restart-handoff capabilities protocol, `database preflight`, and the agents.list ->
-// agents.entries doctor migration.
+// It screams if the pin drifts from: the restart-handoff capabilities protocol,
+// the agents.list -> agents.entries doctor migration, a loopback gateway boot,
+// the trusted-proxy team auth subtree, and the channels-add enum.
 const describeLive = kLiveEnabled ? describe : describe.skip;
 
-const kInstallTimeoutMs = 8 * 60 * 1000;
 const kTestTimeoutMs = 12 * 60 * 1000;
 
-// Resolve the newest published beta so the assertions track the moving dist-tag.
-const resolveNewestBeta = async () => {
-  const res = await fetch("https://registry.npmjs.org/openclaw", {
-    headers: { Accept: "application/vnd.npm.install-v1+json" },
-  });
-  const doc = await res.json();
-  return doc["dist-tags"]?.beta || "beta";
-};
-
-describeLive("live: OpenClaw beta gateway contracts", () => {
+describeLive("live: pinned OpenClaw gateway contracts", () => {
   let rootDir;
   let openclawDir;
-  let installDir;
-  let store;
-  let betaVersion;
-  let overlayBin;
+  let pinBin;
 
   const gatewayEnv = () => {
     return withOpenclawStartupEnv({
@@ -58,58 +40,19 @@ describeLive("live: OpenClaw beta gateway contracts", () => {
     });
   };
 
-  beforeAll(async () => {
-    // Real install + overlay + activated copy (~2 GB): fail fast with the
-    // sweep instruction rather than mid-run with ENOSPC.
-    assertFreeDiskBytes(undefined, { label: "the live gateway-contract suite" });
+  beforeAll(() => {
     rootDir = mkTemp("alphaclaw-live-gw-root-");
     openclawDir = path.join(rootDir, ".openclaw");
-    installDir = mkTemp("alphaclaw-live-gw-install-");
-    fs.mkdirSync(path.join(installDir, "node_modules"), { recursive: true });
     fs.mkdirSync(path.join(openclawDir, "state"), { recursive: true });
-
-    betaVersion = await resolveNewestBeta();
-
-    // Stage the beta (tracked prepare dir) and verify its lifecycle
-    // completed (guard gone).
-    const staged = await stageTempInstall({
-      versionSpec: betaVersion,
-      timeoutMs: kInstallTimeoutMs,
-    });
-    store = createOpenclawReleaseChannelStore({
-      rootDir,
-      openclawDir,
-      logger: kSilentLogger,
-    });
-    try {
-      expect(staged.lifecycleVerified).toBe(true);
-      expect(
-        fs.existsSync(
-          path.join(staged.openclawPackageDir, "dist", "openclaw-install-guard"),
-        ),
-      ).toBe(false);
-      const saved = store.saveOverlayFromTempInstall({
-        openclawPackageDir: staged.openclawPackageDir,
-        version: betaVersion,
-      });
-      expect(saved.ok).toBe(true);
-    } finally {
-      // ~0.7 GB staged tree: removed on every path, not only the happy one.
-      staged.cleanup();
-    }
-
-    const activated = store.activateOverlay({ installDir, version: betaVersion });
-    expect(activated.ok).toBe(true);
-    overlayBin = store.resolvePackageBin(
-      path.join(installDir, "node_modules", "openclaw"),
-    );
-    expect(overlayBin).toBeTruthy();
-  }, kTestTimeoutMs);
+    const build = describeExecutingBuild({ installDir: path.resolve(__dirname, "../..") });
+    expect(build?.version).toBe(require("../../package.json").dependencies.openclaw);
+    pinBin = build.bin;
+  });
 
   const runCli = (args, { allowFail = false } = {}) => {
     // spawnSync captures stdout AND stderr reliably (execFileSync only surfaces
     // stderr on throw), which matters for --json commands that log to stderr.
-    const res = spawnSync(process.execPath, [overlayBin, ...args], {
+    const res = spawnSync(process.execPath, [pinBin, ...args], {
       env: gatewayEnv(),
       timeout: 120000,
       encoding: "utf8",
@@ -145,7 +88,7 @@ describeLive("live: OpenClaw beta gateway contracts", () => {
       // state-touching call also emits a schema-integrity pass to stderr), so a file
       // sink is the robust path.
       const outFile = path.join(os.tmpdir(), `handoff-caps-${Date.now()}.json`);
-      const sh = `${JSON.stringify(process.execPath)} ${JSON.stringify(overlayBin)} gateway restart-handoff capabilities --json > ${JSON.stringify(outFile)} 2>/dev/null`;
+      const sh = `${JSON.stringify(process.execPath)} ${JSON.stringify(pinBin)} gateway restart-handoff capabilities --json > ${JSON.stringify(outFile)} 2>/dev/null`;
       spawnSync("sh", ["-c", sh], { env: gatewayEnv(), timeout: 120000 });
       const raw = fs.existsSync(outFile) ? fs.readFileSync(outFile, "utf8") : "";
       fs.rmSync(outFile, { force: true });
@@ -156,36 +99,6 @@ describeLive("live: OpenClaw beta gateway contracts", () => {
       // Protocol 1 supports the consume operation.
       const ops = Array.isArray(doc.operations) ? doc.operations : [];
       expect(doc.consume === true || ops.includes("consume")).toBe(true);
-    },
-    kTestTimeoutMs,
-  );
-
-  it(
-    "accepts a VACUUM INTO snapshot via `database preflight --json`",
-    () => {
-      // Build the source DB in an ISOLATED temp path so it can never collide with a
-      // real state DB the gateway created (schema_meta shape differs across builds).
-      const dbPath = path.join(os.tmpdir(), `live-src-${Date.now()}.sqlite`);
-      const seed = new DatabaseSync(dbPath);
-      seed.exec("CREATE TABLE meta (k TEXT PRIMARY KEY, v TEXT)");
-      seed.exec("INSERT INTO meta (k, v) VALUES ('probe', '1')");
-      seed.close();
-
-      const snapshot = path.join(os.tmpdir(), `live-preflight-${Date.now()}.sqlite`);
-      const ro = new DatabaseSync(dbPath, { readOnly: true });
-      ro.exec(`VACUUM INTO '${snapshot.replace(/'/g, "''")}'`);
-      ro.close();
-      expect(fs.existsSync(snapshot)).toBe(true);
-
-      const result = runCli(["database", "preflight", snapshot, "--json"], {
-        allowFail: true,
-      });
-      // The command must EXIST (not unknown-command); it may pass or report an
-      // incompatibility, but it must run.
-      const combined = `${result.stdout}\n${result.stderr}`;
-      expect(/unknown command|unrecognized/i.test(combined)).toBe(false);
-      fs.rmSync(dbPath, { force: true });
-      fs.rmSync(snapshot, { force: true });
     },
     kTestTimeoutMs,
   );
@@ -244,7 +157,7 @@ describeLive("live: OpenClaw beta gateway contracts", () => {
       );
       const child = spawn(
         process.execPath,
-        [overlayBin, "gateway", "run", "--port", String(port)],
+        [pinBin, "gateway", "run", "--port", String(port)],
         {
           env: { ...gatewayEnv(), OPENCLAW_GATEWAY_PORT: String(port) },
           stdio: "pipe",
@@ -255,7 +168,7 @@ describeLive("live: OpenClaw beta gateway contracts", () => {
       child.stderr.on("data", (c) => (output += c.toString()));
       const healthUrl = `http://127.0.0.1:${port}/healthz`;
       try {
-        // Poll /healthz directly (more robust than stdout wording); the beta
+        // Poll /healthz directly (more robust than stdout wording); the gateway
         // cold-starts plugin sidecars, so allow a generous budget.
         await waitFor(
           async () => {
@@ -286,7 +199,7 @@ describeLive("live: OpenClaw beta gateway contracts", () => {
   it(
     "accepts AlphaClaw's trusted-proxy team auth config (no EX_CONFIG)",
     async () => {
-      // Phase 4 writes this exact subtree — the strict beta root config must
+      // Phase 4 writes this exact subtree — the strict pinned root config must
       // accept every key (mode/trustedProxy/userHeader/allowLoopback/
       // deviceAutoApprove/allowUsers/identityScopes and the scope names), or
       // enabling team access would put the gateway into exit-78 churn.
@@ -322,7 +235,7 @@ describeLive("live: OpenClaw beta gateway contracts", () => {
       );
       const child = spawn(
         process.execPath,
-        [overlayBin, "gateway", "run", "--port", String(port)],
+        [pinBin, "gateway", "run", "--port", String(port)],
         {
           env: { ...gatewayEnv(), OPENCLAW_GATEWAY_PORT: String(port) },
           stdio: "pipe",
@@ -347,7 +260,7 @@ describeLive("live: OpenClaw beta gateway contracts", () => {
           150000,
           `trusted-proxy gateway start (last output: ${output.slice(-200)})`,
         );
-        // EX_CONFIG (78) means the beta rejected a key we write — the exact
+        // EX_CONFIG (78) means the pin rejected a key we write — the exact
         // failure mode this test exists to catch.
         expect(exited).not.toBe(78);
         expect(exited).toBeNull();

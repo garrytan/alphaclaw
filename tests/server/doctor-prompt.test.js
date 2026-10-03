@@ -22,10 +22,9 @@ describe("server/doctor-prompt", () => {
       managedRoot: "/tmp/managed",
       profile: kStableProfile,
       installedVersion: "2026.7.1-2",
-      releaseChannel: "stable",
     });
 
-    expect(prompt).toContain("Installed OpenClaw: 2026.7.1-2 (channel: stable; context profile: stable-2026.7)");
+    expect(prompt).toContain("Installed OpenClaw: 2026.7.1-2 (context profile: stable-2026.7)");
     expect(prompt).toContain("20000 chars per file and 60000 chars total");
     expect(prompt).toContain("spent in injection order");
     expect(prompt).toContain("skipped entirely");

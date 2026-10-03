@@ -20,15 +20,7 @@ const versionResult = (raw) => (cmd, args, opts, cb) => cb(null, raw, "");
 const versionFailure = (message) => (cmd, args, opts, cb) =>
   cb(new Error(message), "", "");
 
-// Helper to program the async `openclaw update status --json` probe
-// (exec-based; the service's injectable execImpl defaults to it).
-const updateStatusResult = (raw) => (cmd, opts, cb) => cb(null, raw, "");
-const updateStatusFailure = (message) => (cmd, opts, cb) =>
-  cb(new Error(message), "", "");
-
 const flushAsync = () => new Promise((resolve) => setImmediate(resolve));
-
-const kUpdateStatusCommand = "openclaw update status --json";
 
 describe("server/openclaw-version verifyStagedLifecycle", () => {
   const { verifyStagedLifecycle } = require("../../lib/server/openclaw-version");
@@ -267,136 +259,6 @@ describe("server/openclaw-version", () => {
     expect(await service.fetchOpenclawVersion()).toBe("3.0.0");
   });
 
-  it("returns update availability when latest version is newer", async () => {
-    const { service, gatewayEnv, execMock, execSyncMock, execFileMock } =
-      createService();
-    execFileMock.mockImplementation(versionResult("openclaw 1.2.3"));
-    execMock.mockImplementationOnce(
-      updateStatusResult(
-        JSON.stringify({
-          availability: { available: true, latestVersion: "1.3.0" },
-        }),
-      ),
-    );
-
-    const status = await service.getVersionStatus(false);
-
-    expect(status).toEqual({
-      ok: true,
-      currentVersion: "1.2.3",
-      latestVersion: "1.3.0",
-      hasUpdate: true,
-    });
-    // The update-status probe is async exec with an 8s timeout — never a
-    // synchronous spawn on the request path.
-    expect(execMock).toHaveBeenCalledWith(
-      kUpdateStatusCommand,
-      { env: gatewayEnv(), timeout: 8000, encoding: "utf8" },
-      expect.any(Function),
-    );
-    expect(execSyncMock).not.toHaveBeenCalled();
-  });
-
-  it("uses the cached current version for status without spawning --version again", async () => {
-    const { service, execMock, execFileMock } = createService();
-    execFileMock.mockImplementation(versionResult("openclaw 1.2.3"));
-    execMock.mockImplementation(
-      updateStatusResult(
-        JSON.stringify({
-          availability: { available: false, latestVersion: "1.2.3" },
-        }),
-      ),
-    );
-
-    await service.refreshOpenclawVersion();
-    const status = await service.getVersionStatus(false);
-
-    expect(status.currentVersion).toBe("1.2.3");
-    expect(execFileMock).toHaveBeenCalledTimes(1);
-  });
-
-  it("parses update status json from noisy CLI output", async () => {
-    const { service, execMock, execFileMock } = createService();
-    execFileMock.mockImplementation(versionResult("openclaw 1.2.3"));
-    execMock.mockImplementationOnce(
-      updateStatusResult(
-        `[plugins] [auth]\n${JSON.stringify({
-          availability: { available: true, latestVersion: "1.3.0" },
-        })}`,
-      ),
-    );
-
-    const status = await service.getVersionStatus(false);
-
-    expect(status).toEqual({
-      ok: true,
-      currentVersion: "1.2.3",
-      latestVersion: "1.3.0",
-      hasUpdate: true,
-    });
-  });
-
-  it("returns error status when update status command fails", async () => {
-    vi.spyOn(console, "error").mockImplementation(() => {});
-    const { service, execMock, execFileMock } = createService();
-    execFileMock.mockImplementation(versionResult("openclaw 1.2.3"));
-    execMock.mockImplementationOnce(updateStatusFailure("status check failed"));
-
-    const status = await service.getVersionStatus(false);
-
-    expect(status.ok).toBe(false);
-    expect(status.currentVersion).toBe("1.2.3");
-    expect(status.latestVersion).toBe(null);
-    expect(status.hasUpdate).toBe(false);
-    expect(status.error).toContain("status check failed");
-  });
-
-  it("keeps the last cached update fields when a later status refresh fails", async () => {
-    vi.spyOn(console, "error").mockImplementation(() => {});
-    const { service, execMock, execFileMock } = createService();
-    execFileMock.mockImplementation(versionResult("openclaw 1.2.3"));
-    execMock
-      .mockImplementationOnce(
-        updateStatusResult(
-          JSON.stringify({
-            availability: { available: true, latestVersion: "1.3.0" },
-          }),
-        ),
-      )
-      .mockImplementationOnce(updateStatusFailure("status check failed"));
-
-    const seeded = await service.getVersionStatus(false);
-    expect(seeded.ok).toBe(true);
-
-    const status = await service.getVersionStatus(true);
-
-    expect(status.ok).toBe(false);
-    expect(status.currentVersion).toBe("1.2.3");
-    // The last successfully cached update fields survive the failure.
-    expect(status.latestVersion).toBe("1.3.0");
-    expect(status.hasUpdate).toBe(true);
-    expect(status.error).toContain("status check failed");
-  });
-
-  it("repoints the legacy updater at the release-channel system", async () => {
-    const { service, execMock, restartGateway } = createService({
-      isOnboarded: true,
-    });
-
-    const result = await service.updateOpenclaw();
-
-    expect(result.status).toBe(410);
-    expect(result.body).toEqual(
-      expect.objectContaining({
-        ok: false,
-        code: "use_release_channel",
-      }),
-    );
-    // No second installer may mutate node_modules or bounce the gateway.
-    expect(execMock).not.toHaveBeenCalled();
-    expect(restartGateway).not.toHaveBeenCalled();
-  });
-
   it("clears the version cache on demand", async () => {
     const { service, execFileMock } = createService();
     execFileMock.mockImplementationOnce(versionResult("openclaw 1.2.3\n"));
@@ -452,44 +314,6 @@ describe("server/openclaw-version", () => {
     expect(execFileMock).toHaveBeenCalledTimes(1);
     releaseProbe();
     expect(await service.readOpenclawVersionAsync()).toBe("2.0.0");
-  });
-
-  it("serves the update status from cache within the TTL", async () => {
-    const { service, execMock, execFileMock } = createService();
-    execFileMock.mockImplementation(versionResult("openclaw 1.2.3"));
-    execMock.mockImplementationOnce(
-      updateStatusResult(
-        JSON.stringify({
-          availability: { available: false, latestVersion: "1.2.3" },
-        }),
-      ),
-    );
-
-    const first = await service.getVersionStatus(false);
-    const second = await service.getVersionStatus(false);
-
-    expect(first).toEqual({
-      ok: true,
-      currentVersion: "1.2.3",
-      latestVersion: "1.2.3",
-      hasUpdate: false,
-    });
-    expect(second).toEqual(first);
-    expect(execMock).toHaveBeenCalledTimes(1);
-  });
-
-  it("reports an error when update status output has no JSON", async () => {
-    vi.spyOn(console, "error").mockImplementation(() => {});
-    const { service, execMock, execFileMock } = createService();
-    execFileMock.mockImplementation(versionResult("openclaw 1.2.3"));
-    execMock.mockImplementationOnce(updateStatusResult("no json in this output"));
-
-    const status = await service.getVersionStatus(false);
-
-    expect(status.ok).toBe(false);
-    expect(status.error).toContain(
-      "openclaw update status returned invalid JSON payload",
-    );
   });
 
   it("installs an exact version into a temp dir with the nested strategy", async () => {

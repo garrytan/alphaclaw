@@ -1704,7 +1704,7 @@ describe("#87 overseer admission, quiet class, recheck-before-send", () => {
     it("#87 severity critical (column or summary-only fixture), the critical incident keys, and an OOM cause", () => {
       expect(isCriticalClassIncident({ severity: "critical" })).toBe(true);
       expect(isCriticalClassIncident({ summary: { severity: "critical" } })).toBe(true);
-      for (const incidentKey of ["crash_loop", "config_error", "channel_rollback", "version_mismatch"]) {
+      for (const incidentKey of ["crash_loop", "config_error", "version_mismatch"]) {
         expect(
           isCriticalClassIncident({ incidentKey, summary: { severity: "warning" } }),
           incidentKey,

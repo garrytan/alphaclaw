@@ -409,12 +409,12 @@ describe("server/routes/agents", () => {
     });
   });
 
-  it("DELETE /api/channels/accounts forwards the service's outcome flags (gatewayRestartFailed, pairingRowsCleanupDeferred) with ok:true authoritative", async () => {
+  it("DELETE /api/channels/accounts forwards the service's outcome flags (gatewayRestartFailed, pairingRowsCleanupFailed) with ok:true authoritative", async () => {
     const agentsService = createAgentsServiceMock();
     agentsService.deleteChannelAccount.mockResolvedValue({
       ok: true,
       gatewayRestartFailed: true,
-      pairingRowsCleanupDeferred: true,
+      pairingRowsCleanupFailed: true,
     });
     const app = createApp(agentsService);
 
@@ -427,7 +427,7 @@ describe("server/routes/agents", () => {
     expect(response.body).toEqual({
       ok: true,
       gatewayRestartFailed: true,
-      pairingRowsCleanupDeferred: true,
+      pairingRowsCleanupFailed: true,
     });
 
     // A service result without flags (or none at all) is still a plain ok.
@@ -668,22 +668,4 @@ describe("server/routes/agents", () => {
     });
   });
 
-  it("DELETE /api/channels/accounts maps a state-DB quiet-period refusal to 409 backup_in_progress", async () => {
-    const { StateDbQuietError } = require("../../lib/server/state-db-quiet");
-    const agentsService = createAgentsServiceMock();
-    agentsService.deleteChannelAccount.mockRejectedValue(new StateDbQuietError());
-    const app = createApp(agentsService);
-
-    const res = await request(app)
-      .delete("/api/channels/accounts")
-      .send({ provider: "telegram", accountId: "work" });
-
-    expect(res.status).toBe(409);
-    expect(res.headers["retry-after"]).toBe("120");
-    expect(res.body).toEqual({
-      ok: false,
-      code: "backup_in_progress",
-      error: "A backup is in progress; retry in about two minutes.",
-    });
-  });
 });

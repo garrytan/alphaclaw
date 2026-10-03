@@ -1,321 +1,103 @@
 const { createGatewayLifecycleLock } = require("../../lib/server/gateway-lifecycle-lock");
-const { createGatewayMutationPolicy, kGatewayMutationIntents, GatewayMutationBlockedError,
+const { createGatewayMutationPolicy, GatewayMutationBlockedError,
   restartDeferredFields } = require("../../lib/server/gateway-mutation-policy");
 
 describe("gateway mutation admission", () => {
-  it("keeps pending database recovery blocked without a fresh lease-bound authorization", async () => {
+  it("admits an owned lease and refuses a released, superseded or forged one", async () => {
     const lock = createGatewayLifecycleLock();
-    const pending = { recoveryId: "recovery-1", baseline: { databases: [{ path: "state/openclaw.sqlite" }] } };
-    let info = { gatewayHold: null, databaseRecoveryPending: pending };
-    const policy = createGatewayMutationPolicy({ lock, getChannelInfo: () => info });
-    const otherPolicy = createGatewayMutationPolicy({ lock, getChannelInfo: () => info });
-    expect(policy.read({ preLock: true }).code).toBe("database_recovery_pending");
-    const hold = lock.tryAcquire("restart");
-    expect(policy.read({ hold }).code).toBe("database_recovery_pending");
-    expect(() => policy.assertDatabaseVerification({ hold, recoveryPending: pending })).not.toThrow();
-    expect(policy.read({ hold }).code).toBe("database_recovery_pending");
-    policy.authorizeDatabaseRecovery({ hold, pending, isCurrent: () => true });
-    expect(otherPolicy.read({ hold })).toBeNull();
-    expect(policy.read()).toMatchObject({ code: "database_recovery_pending" });
-    info = { ...info, databaseRecoveryPending: { ...pending, recoveryId: "replacement" } };
-    expect(policy.read({ hold }).code).toBe("database_recovery_pending");
-    info.databaseRecoveryPending = pending;
-    expect(policy.read({ hold }).code).toBe("database_recovery_pending");
-    hold();
-    const next = lock.tryAcquire("restart");
-    expect(policy.read({ hold }).code).toBe("lease_expired");
-    expect(policy.read({ hold: next }).code).toBe("database_recovery_pending");
-    next();
-    const repair = lock.tryAcquire("repair");
-    expect(policy.read({ hold: repair }).code).toBe("database_recovery_pending");
-    expect(() => policy.authorizeDatabaseRecovery({ hold: repair, pending })).toThrow();
-    repair();
-  });
-
-  it("cannot authorize a changed pending record, unrelated hold, corrupted state, or forged lease", () => {
-    const lock = createGatewayLifecycleLock();
-    const pending = { recoveryId: "recovery-1" };
-    const info = { databaseRecoveryPending: pending };
-    const policy = createGatewayMutationPolicy({ lock, getChannelInfo: () => info });
-    const hold = lock.tryAcquire("database_verification");
-    try {
-      expect(() => policy.authorizeDatabaseRecovery({ hold, pending: { recoveryId: "old" } })).toThrow();
-      expect(() => policy.authorizeDatabaseRecovery({ hold: Object.assign(() => {}, hold), pending })).toThrow();
-      info.gatewayHold = { reason: "config_migration_failed" };
-      expect(() => policy.authorizeDatabaseRecovery({ hold, pending })).toThrow();
-      info.gatewayHold = null;
-      info.stateCorrupted = true;
-      expect(() => policy.authorizeDatabaseRecovery({ hold, pending })).toThrow();
-    } finally { hold(); }
-  });
-
-  it("revokes an authorized restart when its pending marker disappears instead of falling through to ordinary restart", async () => {
-    const lock = createGatewayLifecycleLock();
-    const pending = { recoveryId: "verified" };
-    const info = { databaseRecoveryPending: pending };
-    const policy = createGatewayMutationPolicy({ lock, getChannelInfo: () => info });
-    const hold = lock.tryAcquire("restart");
-    try {
-      policy.authorizeDatabaseRecovery({ hold, pending, isCurrent: () => true });
-      await expect(policy.restart({ hold, restartGateway: async ({ shouldAbort }) => {
-        info.databaseRecoveryPending = null;
-        expect(shouldAbort()).toBe(true);
-        throw new Error("launch aborted");
-      } })).rejects.toMatchObject({ code: "recovery_source_changed" });
-      info.databaseRecoveryPending = pending;
-      expect(policy.read({ hold }).code).toBe("database_recovery_pending");
-    } finally { hold(); }
-  });
-
-  it("accepts a cleared marker only while the same lease's completed observation remains current", () => {
-    const lock = createGatewayLifecycleLock();
-    const pending = { recoveryId: "verified" };
-    const info = { databaseRecoveryPending: pending };
-    const policy = createGatewayMutationPolicy({ lock, getChannelInfo: () => info });
-    const hold = lock.tryAcquire("restart");
-    let current = true;
-    let completed = false;
-    try {
-      policy.authorizeDatabaseRecovery({ hold, pending, isCurrent: () => current, isCompleted: () => completed });
-      info.databaseRecoveryPending = null;
-      completed = true;
-      expect(policy.read({ hold })).toBeNull();
-      current = false;
-      expect(policy.read({ hold }).code).toBe("recovery_source_changed");
-      current = true;
-      info.databaseRecoveryPending = pending;
-      expect(policy.read({ hold }).code).toBe("database_recovery_pending");
-    } finally { hold(); }
-  });
-
-  it("revokes live recovery authority when the observed database or build identity changes during launch", async () => {
-    const lock = createGatewayLifecycleLock();
-    const pending = { recoveryId: "verified" };
-    let current = true;
-    const policy = createGatewayMutationPolicy({ lock, getChannelInfo: () => ({ databaseRecoveryPending: pending }) });
-    const hold = lock.tryAcquire("restart");
-    try {
-      policy.authorizeDatabaseRecovery({ hold, pending, isCurrent: () => current });
-      await expect(policy.restart({ hold, restartGateway: async ({ shouldAbort }) => {
-        current = false;
-        expect(shouldAbort()).toBe(true);
-        throw new Error("launch aborted");
-      } })).rejects.toMatchObject({ code: "database_recovery_pending" });
-      current = true;
-      expect(policy.read({ hold }).code).toBe("database_recovery_pending");
-    } finally { hold(); }
-  });
-
-  it.each([
-    ["apply_commit", kGatewayMutationIntents.applyRecovery],
-    ["backup_quiesce", kGatewayMutationIntents.applyBackup],
-  ])("admits protected pending recovery only through its exact captured record and owned %s intent", (kind, intent) => {
-    const lock = createGatewayLifecycleLock();
-    const pending = { recoveryId: "original", baseline: { identity: "original-db-set" } };
-    const info = { databaseRecoveryPending: pending };
-    const policy = createGatewayMutationPolicy({ lock, getChannelInfo: () => info, isApplyInProgress: () => true });
-    const hold = lock.tryAcquire(kind);
-    try {
-      expect(policy.read({ hold, intent, recoveryPending: pending })).toBeNull();
-      expect(policy.read({ hold, intent }).code).toBe("database_recovery_pending");
-      expect(policy.read({ hold, intent: kGatewayMutationIntents.apply, recoveryPending: pending })).not.toBeNull();
-      expect(policy.read({ hold, intent: kGatewayMutationIntents.backup, recoveryPending: pending })).not.toBeNull();
-      info.databaseRecoveryPending = { ...pending, recoveryId: "newer" };
-      expect(policy.read({ hold, intent, recoveryPending: pending }).code).toBe("database_recovery_pending");
-      info.databaseRecoveryPending = null;
-      expect(policy.read({ hold, intent, recoveryPending: pending }).code).toBe("recovery_source_changed");
-      info.databaseRecoveryPending = pending;
-      info.stateCorrupted = true;
-      expect(policy.read({ hold, intent, recoveryPending: pending }).code).toBe("gateway_hold_unreadable");
-    } finally { hold(); }
-    expect(policy.read({ hold, intent, recoveryPending: pending }).code).toBe("lease_expired");
-  });
-
-  it("owns only exact database verification without authorizing a held restart", () => {
-    const lock = createGatewayLifecycleLock();
-    const hold = lock.tryAcquire("database_verification");
-    const recoveryHold = { reason: "state_db_unverified", at: 1, bootId: "first" };
-    let info = { gatewayHold: { ...recoveryHold } };
-    let applying = false;
-    const policy = createGatewayMutationPolicy({ lock, getChannelInfo: () => info,
-      isApplyInProgress: () => applying });
-    try {
-      expect(() => policy.assertDatabaseVerification({ hold, recoveryHold })).not.toThrow();
-      expect(() => policy.assert({ hold })).toThrow(GatewayMutationBlockedError);
-      expect(() => policy.assertDatabaseVerification({ hold: Object.assign(() => {}, hold), recoveryHold }))
-        .toThrow(GatewayMutationBlockedError);
-      applying = true;
-      expect(() => policy.assertDatabaseVerification({ hold, recoveryHold })).toThrow(GatewayMutationBlockedError);
-      applying = false;
-      for (const gatewayHold of [{ ...recoveryHold, at: 2 }, { reason: "recovery_choice_required" }, null]) {
-        info = { gatewayHold };
-        expect(() => policy.assertDatabaseVerification({ hold, recoveryHold })).toThrow(GatewayMutationBlockedError);
-      }
-      info = { stateCorrupted: true, gatewayHold: recoveryHold };
-      expect(() => policy.assertDatabaseVerification({ hold, recoveryHold })).toThrow(GatewayMutationBlockedError);
-    } finally { hold(); }
-    info = { gatewayHold: recoveryHold };
-    expect(() => policy.assertDatabaseVerification({ hold, recoveryHold })).toThrow(GatewayMutationBlockedError);
-  });
-
-  it("rechecks a queued operation after a migration hold appears", async () => {
-    const lock = createGatewayLifecycleLock();
-    let info = {};
-    const policy = createGatewayMutationPolicy({ lock, getChannelInfo: () => info });
-    expect(policy.read({ preLock: true })).toBeNull();
-    const prior = lock.tryAcquire("repair");
-    const waiting = lock.acquire("restart");
-    info = { gatewayHold: { reason: "config_migration_failed" } };
-    prior();
-    const hold = await waiting;
-    try {
-      expect(() => policy.assert({ hold })).toThrow(GatewayMutationBlockedError);
-      expect(policy.read({ hold }).code).toBe("gateway_held");
-    } finally { hold(); }
-  });
-
-  it("fences the actual restart after asynchronous preparation changes the hold", async () => {
-    const lock = createGatewayLifecycleLock();
+    const policy = createGatewayMutationPolicy({ lock });
     const hold = await lock.acquire("restart");
-    let info = {};
-    const policy = createGatewayMutationPolicy({ lock, getChannelInfo: () => info });
-    const spawn = vi.fn();
+    expect(policy.read({ hold })).toBeNull();
+    const forged = Object.assign(() => {}, hold);
+    expect(policy.read({ hold: forged })).toMatchObject({ code: "lease_expired", statusCode: 409 });
+    hold();
+    expect(policy.read({ hold }).code).toBe("lease_expired");
+    const successor = await lock.acquire("restart");
     try {
-      await expect(policy.restart({ hold, restartGateway: async ({ shouldAbort }) => {
-        await Promise.resolve();
-        info = { gatewayHold: { reason: "version_mismatch" } };
-        if (shouldAbort()) throw new Error("aborted_by_caller");
-        spawn();
-      } })).rejects.toMatchObject({ code: "gateway_held", restartDeferred: true });
-      expect(spawn).not.toHaveBeenCalled();
-    } finally { hold(); }
-  });
-
-  it("only a real current apply lease can pass its own apply latch", async () => {
-    const lock = createGatewayLifecycleLock();
-    const policy = createGatewayMutationPolicy({ lock, isApplyInProgress: () => true });
-    const hold = await lock.acquire("apply_commit");
-    try {
-      expect(policy.read({ hold }).code).toBe("apply_in_progress");
-      expect(policy.read({ hold, intent: "apply" }).code).toBe("apply_in_progress");
-      expect(policy.read({ hold, intent: kGatewayMutationIntents.apply })).toBeNull();
-      const forged = Object.assign(() => {}, hold);
-      expect(policy.read({ hold: forged, intent: kGatewayMutationIntents.apply }).code).toBe("lease_expired");
-    } finally { hold(); }
-    const successor = await lock.acquire("apply_commit");
-    try {
-      expect(policy.read({ hold, intent: kGatewayMutationIntents.apply }).code).toBe("lease_expired");
-      expect(lock.owns(successor)).toBe(true);
+      expect(policy.read({ hold }).code).toBe("lease_expired");
+      expect(policy.read({ hold: successor })).toBeNull();
     } finally { successor(); }
   });
 
-  it("reconciliation can own a structural hold but never a migration or corrupt state", async () => {
+  it("checks lease validity even without a lock", () => {
+    const policy = createGatewayMutationPolicy();
+    expect(policy.read()).toBeNull();
+    expect(policy.read({ hold: { isValid: () => true } })).toBeNull();
+    expect(policy.read({ hold: { isValid: () => false } }).code).toBe("lease_expired");
+  });
+
+  it("refuses a pre-lock mutation while boot owns the gateway, and only pre-lock", async () => {
     const lock = createGatewayLifecycleLock();
-    const hold = await lock.acquire("reconcile_installed");
-    let info = { gatewayHold: { reason: "version_mismatch" } };
-    const policy = createGatewayMutationPolicy({ lock, getChannelInfo: () => info });
-    const options = { hold, intent: kGatewayMutationIntents.reconcile };
+    const policy = createGatewayMutationPolicy({ lock });
+    expect(policy.read({ preLock: true })).toBeNull();
+    const boot = await lock.acquire("boot");
     try {
-      expect(policy.read(options)).toBeNull();
-      info.gatewayHold.reason = "config_migration_failed";
-      expect(policy.read(options).code).toBe("gateway_held");
-      info = { stateCorrupted: true };
-      expect(policy.read(options).code).toBe("gateway_hold_unreadable");
+      expect(policy.read({ preLock: true })).toMatchObject({ code: "booting", statusCode: 409 });
+      expect(policy.read()).toBeNull();
+      expect(() => policy.assert({ preLock: true })).toThrow(GatewayMutationBlockedError);
+    } finally { boot(); }
+    const repair = await lock.acquire("repair");
+    try {
+      expect(policy.read({ preLock: true })).toBeNull();
+    } finally { repair(); }
+  });
+
+  it("fences the actual restart when the lease is lost during asynchronous preparation", async () => {
+    const lock = createGatewayLifecycleLock();
+    const hold = await lock.acquire("restart");
+    const policy = createGatewayMutationPolicy({ lock });
+    const spawn = vi.fn();
+    await expect(policy.restart({ hold, restartGateway: async ({ shouldAbort }) => {
+      expect(shouldAbort()).toBe(false);
+      await Promise.resolve();
+      hold();
+      if (shouldAbort()) throw new Error("aborted_by_caller");
+      spawn();
+    } })).rejects.toMatchObject({ code: "lease_expired", blocked: true, restartDeferred: true });
+    expect(spawn).not.toHaveBeenCalled();
+  });
+
+  it("refuses to start a restart without an owned lease and re-checks after it returns", async () => {
+    const lock = createGatewayLifecycleLock();
+    const policy = createGatewayMutationPolicy({ lock });
+    const stale = await lock.acquire("restart");
+    stale();
+    const restartGateway = vi.fn();
+    await expect(policy.restart({ hold: stale, restartGateway })).rejects.toBeInstanceOf(GatewayMutationBlockedError);
+    expect(restartGateway).not.toHaveBeenCalled();
+
+    const hold = await lock.acquire("restart");
+    await expect(policy.restart({ hold, restartGateway: async () => { hold(); return { ok: true }; } }))
+      .rejects.toMatchObject({ code: "lease_expired" });
+  });
+
+  it("passes through the caller's own shouldAbort, options and result, and rethrows unrelated failures", async () => {
+    const lock = createGatewayLifecycleLock();
+    const policy = createGatewayMutationPolicy({ lock });
+    const hold = await lock.acquire("restart");
+    try {
+      let callerAbort = false;
+      const result = await policy.restart({ hold, options: { reason: "manual", shouldAbort: () => callerAbort },
+        restartGateway: async ({ reason, shouldAbort }) => {
+          expect(reason).toBe("manual");
+          expect(shouldAbort()).toBe(false);
+          callerAbort = true;
+          expect(shouldAbort()).toBe(true);
+          return { ok: true };
+        } });
+      expect(result).toEqual({ ok: true });
+      const failure = new Error("launch failed");
+      await expect(policy.restart({ hold, restartGateway: async () => { throw failure; } })).rejects.toBe(failure);
     } finally { hold(); }
   });
 
-  it("only an owned repair lease passes its apply latch and never bypasses a hold", async () => {
-    const lock = createGatewayLifecycleLock();
-    let info = {};
-    const policy = createGatewayMutationPolicy({
-      lock, isApplyInProgress: () => true, getChannelInfo: () => info,
-    });
-    const hold = await lock.acquire("update_repair");
-    const options = { hold, intent: kGatewayMutationIntents.repair };
-    try {
-      expect(policy.read(options)).toBeNull();
-      expect(policy.read({ hold, intent: kGatewayMutationIntents.applyRecovery }).code).toBe("apply_in_progress");
-      expect(policy.read({ hold, intent: "repair" }).code).toBe("apply_in_progress");
-      const forged = Object.assign(() => {}, hold);
-      expect(policy.read({ ...options, hold: forged }).code).toBe("lease_expired");
-      info.gatewayHold = { reason: "version_mismatch", at: 1 };
-      expect(policy.read({ ...options, recoveryHold: info.gatewayHold }).code).toBe("gateway_held");
-      info.gatewayHold.reason = "config_migration_failed";
-      expect(policy.read(options).code).toBe("gateway_held");
-      info.stateCorrupted = true;
-      expect(policy.read(options).code).toBe("gateway_hold_unreadable");
-    } finally { await hold(); }
-    expect(policy.read(options).code).toBe("lease_expired");
-    const apply = await lock.acquire("apply_commit");
-    try {
-      expect(policy.read({ hold: apply, intent: kGatewayMutationIntents.repair }).code).toBe("apply_in_progress");
-    } finally { await apply(); }
-  });
-
-  it("backed-up apply recovery owns only its original hold under the current apply lease", async () => {
-    const lock = createGatewayLifecycleLock();
-    const hold = await lock.acquire("apply_commit");
-    const recoveryHold = { reason: "version_mismatch", at: 1, bootId: "first" };
-    let info = { gatewayHold: { ...recoveryHold } };
-    const policy = createGatewayMutationPolicy({ lock, getChannelInfo: () => info, isApplyInProgress: () => true });
-    const options = { hold, recoveryHold, intent: kGatewayMutationIntents.applyRecovery };
-    try {
-      expect(policy.read(options)).toBeNull();
-      expect(policy.read({ ...options, intent: "applyRecovery" }).code).toBe("apply_in_progress");
-      expect(policy.read({ ...options, intent: kGatewayMutationIntents.apply }).code).toBe("gateway_held");
-      info = { gatewayHold: { ...recoveryHold, at: 2 } };
-      expect(policy.read(options).code).toBe("gateway_held");
-      info = { stateCorrupted: true, gatewayHold: recoveryHold };
-      expect(policy.read(options).code).toBe("gateway_hold_unreadable");
-    } finally { hold(); }
-    expect(policy.read(options).code).toBe("lease_expired");
-  });
-
-  it("reports structural remedies and accurate partial-save outcomes", () => {
-    const policy = createGatewayMutationPolicy({ getChannelInfo: () => ({
-      gatewayHold: { reason: "state_db_unreadable" },
-    }) });
-    const blocker = policy.read();
-    expect(blocker.hint).toContain("alphaclaw diagnose");
-    expect(blocker.error).not.toContain("Retry migration");
-    expect(restartDeferredFields(new GatewayMutationBlockedError(blocker))).toMatchObject({
-      configSaved: true, restartDeferred: true, restartRequired: true, code: "gateway_held",
+  it("reports accurate partial-save outcomes", () => {
+    const policy = createGatewayMutationPolicy({ lock: createGatewayLifecycleLock() });
+    const blocker = policy.read({ hold: { isValid: () => false } });
+    expect(blocker.hint).toContain("Wait for the current operation");
+    expect(restartDeferredFields(new GatewayMutationBlockedError(blocker))).toEqual({
+      configSaved: true, restartDeferred: true, restartRequired: true, code: "lease_expired", hint: blocker.hint,
     });
     expect(restartDeferredFields(new Error("launch failed"))).toEqual({});
-  });
-
-
-  // v0.9.81 (C3): the standalone backup's admission — its own intent, its own
-  // hold kind, and the shared "update or backup" latch copy.
-  it("the backup intent passes its own backup_quiesce lease through the apply latch; nothing else does", async () => {
-    const lock = createGatewayLifecycleLock();
-    const policy = createGatewayMutationPolicy({ lock, isApplyInProgress: () => true });
-    const hold = await lock.acquire("backup_quiesce");
-    try {
-      // The lease alone (a restart-shaped read) is refused with the new copy.
-      const blocker = policy.read({ hold });
-      expect(blocker.code).toBe("apply_in_progress");
-      expect(blocker.error).toBe("A channel update or backup is in progress — wait for it to finish before restarting.");
-      // The apply intent does not own a backup lease; the backup intent does.
-      expect(policy.read({ hold, intent: kGatewayMutationIntents.apply }).code).toBe("apply_in_progress");
-      expect(policy.read({ hold, intent: kGatewayMutationIntents.backup })).toBeNull();
-      // A backup intent under an APPLY lease is not an owner either.
-    } finally { hold(); }
-    const applyHold = await lock.acquire("apply_commit");
-    try {
-      expect(policy.read({ hold: applyHold, intent: kGatewayMutationIntents.backup }).code).toBe("apply_in_progress");
-    } finally { applyHold(); }
-    // Pre-latch (no hold, latch clear): admitted; a gateway hold refuses.
-    let info = {};
-    const idle = createGatewayMutationPolicy({ lock, getChannelInfo: () => info });
-    expect(idle.read({ intent: kGatewayMutationIntents.backup })).toBeNull();
-    info = { gatewayHold: { reason: "config_migration_failed" } };
-    expect(idle.read({ intent: kGatewayMutationIntents.backup }).code).toBe("gateway_held");
-    expect(() => idle.assert({ intent: kGatewayMutationIntents.backup })).toThrow(GatewayMutationBlockedError);
-    // A manual restart while a backup runs is refused with the shared copy.
-    const busy = createGatewayMutationPolicy({ lock, isApplyInProgress: () => true });
-    expect(busy.read({ preLock: true, intent: kGatewayMutationIntents.restart })).toEqual(
-      expect.objectContaining({ code: "apply_in_progress", statusCode: 409 }),
-    );
   });
 });

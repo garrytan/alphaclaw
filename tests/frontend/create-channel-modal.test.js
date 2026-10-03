@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-// Same per-slot hook harness as upgrade-tab.test.js: state survives across
+// Per-slot hook harness: state survives across
 // renders; effects are collected and run manually.
 vi.mock("preact/hooks", () => {
   const harness = { slots: [], cursor: 0, effects: [] };

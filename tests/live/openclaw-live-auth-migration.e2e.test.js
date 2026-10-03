@@ -96,7 +96,7 @@ describeLive("live: pinned auth connect, runtime read, gateway activation and re
     const { createAuthProfiles } = require("../../lib/server/auth-profiles");
     ap = createAuthProfiles();
     const { resolveCodexMigrationBuild, loadOpenclawMigrationApi } = require("../../lib/server/openclaw-codex-migration-runtime");
-    const build = resolveCodexMigrationBuild({ configPath, env });
+    const build = resolveCodexMigrationBuild();
     expect(build.version).toBe(require("../../package.json").dependencies.openclaw);
     runtime = await loadOpenclawMigrationApi({ build, prefix: "store-runtime", functionNames: ["loadAuthProfileStoreForRuntime", "createAuthProfileStoreReadScope"] });
   }, 120_000);
@@ -134,14 +134,7 @@ describeLive("live: pinned auth connect, runtime read, gateway activation and re
     const edit = await request(app).put("/api/models/auth/auth-probe:default").send({ type: "api_key", provider: "auth-probe", key: "synthetic-key-two" });
     expect(edit.status).toBe(200);
     expect(edit.body.authRuntimeRefreshed).toBe(true);
-    const { beginStateDbQuiet, getStateDbHandleCount } = require("../../lib/server/state-db-quiet");
-    const refreshing = ap.refreshGatewayAuth();
-    expect(getStateDbHandleCount()).toBe(1);
-    const quiet = beginStateDbQuiet({ owner: "live-auth-refresh", maxMs: 30_000 });
-    expect((await refreshing).authRuntimeRefreshed).toBe(true);
-    const { token } = await quiet;
-    expect(getStateDbHandleCount()).toBe(0);
-    token.release();
+    expect((await ap.refreshGatewayAuth()).authRuntimeRefreshed).toBe(true);
     const second = await run(process.execPath, agentArgs, { env, timeout: 90_000 });
     expect(second.stdout).toContain("Synthetic auth proof");
     expect(requests.at(-1).authorization).toBe("Bearer synthetic-key-two");
@@ -204,7 +197,7 @@ describeLive("live: pinned auth connect, runtime read, gateway activation and re
 
   it.each([["api_key", "key", "keyRef"], ["token", "token", "tokenRef"]])("the pinned resolver uses edited inline %s credentials instead of an inherited reference", async (type, field, refField) => {
     const { resolveCodexMigrationBuild, loadOpenclawMigrationApi } = require("../../lib/server/openclaw-codex-migration-runtime");
-    const build = resolveCodexMigrationBuild({ configPath, env });
+    const build = resolveCodexMigrationBuild();
     const resolver = await loadOpenclawMigrationApi({ build, prefix: "runtime-prepare.runtime", functionNames: ["createResolverContext", "collectAuthStoreAssignments", "resolveSecretRefValues", "applyResolvedAssignments"] });
     const oauth = await loadOpenclawMigrationApi({ build, prefix: "oauth", functionNames: ["resolveApiKeyForProfile"] });
     const profileId = `auth-probe:ref-${type}`;

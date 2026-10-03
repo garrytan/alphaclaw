@@ -5,7 +5,7 @@ import { InlineErrorChip } from "../../lib/public/js/components/inline-error-chi
 import { ToggleSwitch } from "../../lib/public/js/components/toggle-switch.js";
 
 // Stateless components: invoke them directly and walk the vnode tree
-// (upgrade-tab.test.js pattern) — no DOM renderer needed.
+// — no DOM renderer needed.
 const expandTree = (node) => {
   if (node == null || typeof node !== "object") return node;
   if (Array.isArray(node)) return node.map(expandTree);

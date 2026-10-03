@@ -99,11 +99,11 @@ exists to (a) keep secrets out of chat transcripts, (b) attribute actions
   target or dangerous ops return `no_admin_targets`.
 - **Skill** (`agent-admin/skill.js` + `lib/setup/skills/alphaclaw-admin/`):
   generated from the manifest + slow-changing live state (masked admins,
-  capability availability, release channel); regenerated at boot + on
+  capability availability); regenerated at boot + on
   flag/token change; installed only when flag on AND token exists; last-good
   kept on transient build error; git-sync-excluded (renders masked PII).
 - **CLI** (`lib/cli/admin.js`): out-of-process HTTP client, early-exit before
-  the release-channel boot sync. `--data-stdin` keeps secrets out of argv;
+  the server boot path. `--data-stdin` keeps secrets out of argv;
   `--summary`; `--confirm`/`--context` headers; one-JSON-doc-on-stdout;
   `manifest` with live→static fallback.
 - **UI** (`components/agent-admin-panel.js`): General-tab toggle, token rotate,

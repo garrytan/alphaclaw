@@ -7,17 +7,12 @@ const {
 } = require("./memory-gateway");
 
 const {
-  assertFreeDiskBytes,
   kLiveEnabled,
-  kSilentLogger,
   mkTemp,
   scrubTestRunnerEnv,
-  stageTempInstall,
   waitFor,
 } = require("./live-helpers");
-const {
-  createOpenclawReleaseChannelStore,
-} = require("../../lib/server/openclaw-release-channel");
+const { describeExecutingBuild } = require("../../lib/server/openclaw-build");
 const { withOpenclawStartupEnv } = require("../../lib/server/openclaw-runtime-env");
 const {
   ensurePluginsShell,
@@ -26,7 +21,8 @@ const {
 const { getProcessTreeUsage } = require("../../lib/server/system-resources");
 
 // LIVE tier: prove the memory-leak feature's real-world assumptions against a
-// real newest-beta OpenClaw:
+// the REAL pinned OpenClaw (package.json dependencies.openclaw, installed in
+// node_modules — the build production runs):
 //   1. The leak-injection vector works — a plugin on plugins.load.paths runs
 //      INSIDE the gateway process (usage-tracker's own mechanism) and can
 //      grow the gateway's V8 heap.
@@ -59,16 +55,7 @@ const { getProcessTreeUsage } = require("../../lib/server/system-resources");
 // V8 abort.
 const describeLive = kLiveEnabled ? describe : describe.skip;
 
-const kInstallTimeoutMs = 8 * 60 * 1000;
 const kTestTimeoutMs = 12 * 60 * 1000;
-
-const resolveNewestBeta = async () => {
-  const res = await fetch("https://registry.npmjs.org/openclaw", {
-    headers: { Accept: "application/vnd.npm.install-v1+json" },
-  });
-  const doc = await res.json();
-  return doc["dist-tags"]?.beta || "beta";
-};
 
 // activation.onStartup:true is REQUIRED on 2026.9.1-beta.1: without it a
 // load-path plugin is discovered/enabled but its register() never runs at
@@ -103,9 +90,8 @@ module.exports.default = plugin;
 describeLive("live: gateway memory leak via a real plugin", () => {
   let rootDir;
   let openclawDir;
-  let installDir;
-  let overlayBin;
-  let betaVersion;
+  let pinBin;
+  let openclawVersion;
 
   const gatewayEnv = () => {
     return withOpenclawStartupEnv({
@@ -116,7 +102,7 @@ describeLive("live: gateway memory leak via a real plugin", () => {
       OPENCLAW_STATE_DIR: openclawDir,
       XDG_CONFIG_HOME: openclawDir,
       OPENCLAW_NO_AUTO_UPDATE: "1",
-      // The heap cap must reach the process that ACTUALLY leaks. On this beta
+      // The heap cap must reach the process that ACTUALLY leaks. On current builds
       // `gateway run` can fork a worker child (the one holding the plugin's
       // heap); a launcher-only argv cap does NOT propagate to it, but
       // NODE_OPTIONS DOES — which is exactly how production caps the gateway
@@ -126,45 +112,15 @@ describeLive("live: gateway memory leak via a real plugin", () => {
     });
   };
 
-  beforeAll(async () => {
-    // Real install + overlay + activated copy (~2 GB): fail fast with the
-    // sweep instruction rather than mid-run with ENOSPC.
-    assertFreeDiskBytes(undefined, { label: "the live memory-leak suite" });
+  beforeAll(() => {
     rootDir = mkTemp("alphaclaw-live-mem-root-");
     openclawDir = path.join(rootDir, ".openclaw");
-    installDir = mkTemp("alphaclaw-live-mem-install-");
-    fs.mkdirSync(path.join(installDir, "node_modules"), { recursive: true });
     fs.mkdirSync(path.join(openclawDir, "state"), { recursive: true });
-
-    betaVersion = await resolveNewestBeta();
-    const staged = await stageTempInstall({
-      versionSpec: betaVersion,
-      timeoutMs: kInstallTimeoutMs,
-    });
-    const store = createOpenclawReleaseChannelStore({
-      rootDir,
-      openclawDir,
-      logger: kSilentLogger,
-    });
-    try {
-      expect(staged.lifecycleVerified).toBe(true);
-      const saved = store.saveOverlayFromTempInstall({
-        openclawPackageDir: staged.openclawPackageDir,
-        version: betaVersion,
-      });
-      expect(saved.ok).toBe(true);
-    } finally {
-      // The staged tree is ~0.7 GB; drop it on every path (a failed overlay
-      // save used to leak it until the process exit that never came).
-      staged.cleanup();
-    }
-    const activated = store.activateOverlay({ installDir, version: betaVersion });
-    expect(activated.ok).toBe(true);
-    overlayBin = store.resolvePackageBin(
-      path.join(installDir, "node_modules", "openclaw"),
-    );
-    expect(overlayBin).toBeTruthy();
-  }, kTestTimeoutMs);
+    const build = describeExecutingBuild({ installDir: path.resolve(__dirname, "../..") });
+    expect(build?.version).toBe(require("../../package.json").dependencies.openclaw);
+    pinBin = build.bin;
+    openclawVersion = build.version;
+  });
 
   it(
     "a real leak-probe plugin grows gateway RSS, then reaches critical pressure or an abnormal exit",
@@ -203,7 +159,7 @@ describeLive("live: gateway memory leak via a real plugin", () => {
       // 3. Boot. The heap cap rides NODE_OPTIONS (gatewayEnv above), which the
       //    forked gateway worker inherits — an argv-only cap would not reach
       //    it, so the leaking worker would never hit the V8 abort.
-      let gateway = startGatewayCapture({ bin: overlayBin, port, env: gatewayEnv() });
+      let gateway = startGatewayCapture({ bin: pinBin, port, env: gatewayEnv() });
       let stage = "startup";
       const samples = [];
 
@@ -219,12 +175,12 @@ describeLive("live: gateway memory leak via a real plugin", () => {
           } catch (error) {
             if (boot !== 0 || !isStartupConvergenceRefusal(gateway, error)) throw error;
             const artifactsDir = saveGatewayEvidence({
-              rootDir, betaVersion, capture: gateway,
+              rootDir, openclawVersion, capture: gateway,
               stage: "startup-convergence", samples, error,
             });
             console.warn(`[live-memory] ${kStartupConvergenceRefusal}\nCompleting the fixture with one startup restart. Evidence: ${artifactsDir}`);
             await stopGatewayCapture(gateway);
-            gateway = startGatewayCapture({ bin: overlayBin, port, env: gatewayEnv() });
+            gateway = startGatewayCapture({ bin: pinBin, port, env: gatewayEnv() });
           }
         }
 
@@ -289,10 +245,10 @@ describeLive("live: gateway memory leak via a real plugin", () => {
           }
         }
       } catch (error) {
-        const artifactsDir = saveGatewayEvidence({ rootDir, betaVersion, capture: gateway, stage, samples, error });
+        const artifactsDir = saveGatewayEvidence({ rootDir, openclawVersion, capture: gateway, stage, samples, error });
         error.message += `\nFailure artifacts: ${artifactsDir}`;
         console.warn(
-          `[live-memory] failed during ${stage} (Node ${process.version}, OpenClaw ${betaVersion}, code ${gateway.exitCode}, signal ${gateway.exitSignal})\n${error.message.slice(-2000)}\nGateway output tail:\n${gateway.output.slice(-4000)}\nFailure artifacts: ${artifactsDir}`,
+          `[live-memory] failed during ${stage} (Node ${process.version}, OpenClaw ${openclawVersion}, code ${gateway.exitCode}, signal ${gateway.exitSignal})\n${error.message.slice(-2000)}\nGateway output tail:\n${gateway.output.slice(-4000)}\nFailure artifacts: ${artifactsDir}`,
         );
         throw error;
       } finally {

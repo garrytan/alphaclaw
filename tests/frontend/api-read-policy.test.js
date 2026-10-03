@@ -48,14 +48,10 @@ describe("frontend/API ordinary read policy", () => {
     await expect(cachedFetch("/api/google/accounts", api.fetchGoogleAccounts, { force: true })).resolves.toMatchObject({ accounts: [{ id: "b" }] });
   });
 
-  it("401 purges every mounted/shared/persisted read before redirecting, without waiting for the body", async () => {
-    const stored = new Map();
-    vi.stubGlobal("sessionStorage", {
-      setItem: (key, value) => stored.set(key, value), removeItem: (key) => stored.delete(key),
-    });
+  it("401 purges every mounted/shared read before redirecting, without waiting for the body", async () => {
     setCached("/api/env", { secret: true });
-    setCached("/api/openclaw/catalog", { catalog: true });
-    await host.render(["/api/env", "/api/openclaw/catalog"].map((key) => ({
+    setCached("/api/watchdog/settings", { settings: true });
+    await host.render(["/api/env", "/api/watchdog/settings"].map((key) => ({
       id: key, useRead: useCachedFetch, args: [key, () => {}, { initialFetch: false }],
     })));
     const text = vi.fn(() => new Promise(() => {}));
@@ -63,8 +59,7 @@ describe("frontend/API ordinary read policy", () => {
     await host.settle(async () => { await expect(api.fetchStatus()).rejects.toMatchObject({ status: 401 }); });
     expect(text).not.toHaveBeenCalled();
     expect(host.result("/api/env").data).toBe(null);
-    expect(host.result("/api/openclaw/catalog").data).toBe(null);
-    expect(stored.size).toBe(0);
+    expect(host.result("/api/watchdog/settings").data).toBe(null);
     expect(window.location.href).toBe("/setup");
   });
 
@@ -102,17 +97,6 @@ describe("frontend/API ordinary read policy", () => {
     fetch.mockResolvedValue({ status: 200, text: () => new Promise(() => {}) });
     const outcome = api.fetchStatus().catch((error) => error);
     await vi.advanceTimersByTimeAsync(30_000);
-    expect(await outcome).toMatchObject({ code: "read_timeout" });
-    expect(fetch.mock.calls[0][1].signal.aborted).toBe(true);
-  });
-
-  it("catalog reads have an explicit 120s deadline through cache and transport", async () => {
-    vi.useFakeTimers();
-    fetch.mockImplementation(() => new Promise(() => {}));
-    const outcome = cachedFetch("/api/openclaw/catalog", api.fetchOpenclawCatalog).catch((error) => error);
-    await vi.advanceTimersByTimeAsync(30_001);
-    expect(fetch.mock.calls[0][1].signal.aborted).toBe(false);
-    await vi.advanceTimersByTimeAsync(90_000);
     expect(await outcome).toMatchObject({ code: "read_timeout" });
     expect(fetch.mock.calls[0][1].signal.aborted).toBe(true);
   });

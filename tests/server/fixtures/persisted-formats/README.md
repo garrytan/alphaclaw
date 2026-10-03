@@ -41,22 +41,18 @@ lenient about files older code or a hand edit left behind).
     47 alive as its own leader, argv `node /app/bin/alphaclaw.js start
     --root-dir /data`, start ticks 15532, `upgradedAt` = at + 45 s). The test
     re-derives it byte-for-byte from legacy.json.
-- openclaw-channel-state.json/
+- openclaw-channel-state.json/ — the retired in-app version switch's state.
+  Nothing writes it anymore; `retireReleaseChannelAtBoot`
+  (openclaw-channel-retirement.js) must set either era aside verbatim on the
+  first boot and carry `configMigration.completedForVersion` over to the boot
+  migration record.
   - v0.9.76.json — the v0.9.76 store's `writeState()` (the full normalized
     key set of that release: applied with operationId/reason, pin window,
     previous pin, configMigration WITHOUT lastRestore, a blocklisted beta, a
     lane-A backup record). No `lastTransition`, no `pinLag`.
-  - v0.9.77.json — the current store's `writeState()` over the same body plus
+  - v0.9.77.json — the v0.9.77 store's `writeState()` over the same body plus
     `lastTransition` (operator_apply upgrade, ok, unconsumed), `pinLag`
     (bootId + bootsSeen) and `configMigration.lastRestore` (round_trip).
-- runs/ (`<managedDir>/runs/<operationId>.json`)
-  - v0.9.76.json — the v0.9.76 ledger: `createRun` + a stepRecorder-style
-    `updateRun` mid-apply (`install` running, backup + dbPreflight recorded).
-    The process died here; boot must close it.
-  - v0.9.77.json — the current ledger: the Stage 3 reconcile run shape (target
-    `{ kind: "reconcile", version }`, `appendStep` stop → activate) left
-    `running` mid-copy. Written through the ledger's generic API ahead of the
-    B1.2 writer; regenerate from `reconcileInstalled` once it lands.
 - alphaclaw-restart-operation.json/
   - v0.9.76.json — the v0.9.76 store: `beginRestart` (uuid pinned) +
     `updateRestartOperation(lastStep)` for the 0.9.76 boot, still `running`.
@@ -78,11 +74,6 @@ lenient about files older code or a hand edit left behind).
   - v0.9.77.json — `stampSelfVersionAtBoot`: three boots of 0.9.76 then two of
     0.9.77 (`previous` carries the 0.9.76 stamp; `bootCount` 2).
   - corrupt.json — the first 61 bytes.
-- openclaw-schema-versions.json/
-  - v0.9.77.json — `createSchemaVersionTable`: `recordDeclared("2026.9.2")` +
-    `recordObserved("2026.9.2")` + `recordDeclared("2026.9.3")`. 2026.9.3 is
-    synthetic — a stand-in for "a version the seeds do not know".
-  - corrupt.json — the first 97 bytes.
 - auto-repair-pause.json/
   - v0.9.77.json — the current writer (`serializeAutoRepairPause`,
     lib/server/watchdog-structural-repair.js) over the incident record:

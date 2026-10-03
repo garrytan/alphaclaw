@@ -65,93 +65,30 @@ describe("admin-manifest engine", () => {
     ).toBe("dangerous");
   });
 
-  // v0.9.81 (C3): Back up now is a dangerous async op with the ledger as its
-  // status source.
-  it("updates.backup is a dangerous async op whose terminal states are the backup run's", () => {
+  // Back up now runs OpenClaw's own `backup create` in the background without
+  // pausing the gateway: a plain write whose status is the GET twin.
+  it("updates.backup is a write op whose status read is GET /api/openclaw/backup", () => {
     const op = manifest.findOp("POST", "/api/openclaw/backup");
     expect(op?.id).toBe("updates.backup");
-    expect(op.tier).toBe("dangerous");
-    expect(op.async).toEqual({
-      statusOp: "updates.run-detail",
-      idField: "operationId",
-      terminalStates: ["completed", "failed", "interrupted"],
-    });
-    expect(op.readOp).toBe("updates.backups");
-    expect(op.notes).toMatch(/operation_in_progress/);
+    expect(op.tier).toBe("write");
+    expect(op.async).toBeUndefined();
+    expect(op.readOp).toBe("updates.backup.status");
+    expect(op.notes).toMatch(/backup_in_progress/);
+    const status = manifest.findOp("GET", "/api/openclaw/backup");
+    expect(status?.id).toBe("updates.backup.status");
+    expect(status.tier).toBe("safe");
   });
 
-  // v0.9.81 (D13): the declared direction is a REQUIRED body field for the
-  // agent too — a body without it is a 400 whose hint names the three values.
-  it("updates.apply requires `intent` and documents the optional `expectLatest` claim", () => {
-    const op = manifest.findOp("POST", "/api/openclaw/apply");
-    const intent = op.params.fields.find((field) => field.name === "intent");
-    // Channel-conditional like `version`: required for stable/beta, refused
-    // on dev — so the schema flag is false and the description carries the
-    // rule (an agent that marks it required would break its dev applies).
-    expect(intent).toEqual(
-      expect.objectContaining({ location: "body", type: "string", required: false }),
-    );
-    expect(intent.description).toMatch(/REQUIRED for stable\/beta/);
-    expect(intent.description).toMatch(/OMITTED for dev/);
-    expect(intent.description).toMatch(/update/);
-    expect(intent.description).toMatch(/downgrade/);
-    expect(intent.description).toMatch(/switch/);
-    expect(intent.description).toMatch(/intent_mismatch/);
-    const expectLatest = op.params.fields.find((field) => field.name === "expectLatest");
-    expect(expectLatest).toEqual(
-      expect.objectContaining({ location: "body", type: "boolean", required: false }),
-    );
-    expect(expectLatest.description).toMatch(/catalog_stale/);
-    expect(op.params.example).toContain('"intent"');
-    expect(op.notes).toMatch(/intent/);
-  });
-
-  // WI-4.5 / #79 (b): both backup consents are humans-only — the agent is
-  // DENIED (not merely escalated) for any body carrying either field, valid
-  // or not.
-  it("denies the agent's updates.apply whenever the body carries allowBackupReuse or confirmNoBackup", () => {
-    const op = manifest.findOp("POST", "/api/openclaw/apply");
-    expect(op?.id).toBe("updates.apply");
-    expect(manifest.resolveTier(op, { body: { channel: "beta", version: "1.0.0" } })).toBe(
-      "dangerous",
-    );
-    for (const allowBackupReuse of [{ sha256: "a".repeat(64) }, true, "true", null, {}]) {
-      expect(
-        manifest.resolveTier(op, { body: { channel: "beta", version: "1.0.0", allowBackupReuse } }),
-      ).toBe("denied");
+  it("no longer classifies the removed OpenClaw version-switch and recovery routes", () => {
+    for (const [method, route] of [
+      ["POST", "/api/openclaw/apply"],
+      ["GET", "/api/openclaw/catalog"],
+      ["GET", "/api/openclaw/backups"],
+      ["POST", "/api/openclaw/rollback"],
+      ["GET", "/api/openclaw/runs"],
+    ]) {
+      expect(manifest.findOp(method, route)).toBeNull();
     }
-    for (const confirmNoBackup of [true, false, "true", null, {}]) {
-      expect(
-        manifest.resolveTier(op, { body: { channel: "stable", version: "1.0.0", confirmNoBackup } }),
-      ).toBe("denied");
-    }
-    for (const confirmNoBackupToken of ["a".repeat(64), "", null, false, {}]) {
-      expect(
-        manifest.resolveTier(op, { body: { channel: "stable", version: "1.0.0", confirmNoBackupToken } }),
-      ).toBe("denied");
-    }
-    expect(op.secretFields).toContain("confirmNoBackupToken");
-    const issuance = manifest.findOp("POST", "/api/openclaw/runs/2f8c1f2e-0d2a-4b1e-9a11-6f2f8c1f2e0d/backup-risk-consent");
-    expect(issuance.id).toBe("updates.backup-risk-consent");
-    expect(issuance.tier).toBe("denied");
-    // The manifest documents the param as a strict humans-only boolean.
-    const field = op.params.fields.find((entry) => entry.name === "confirmNoBackup");
-    expect(field).toEqual(
-      expect.objectContaining({ location: "body", type: "boolean", required: false }),
-    );
-    expect(field.description).toMatch(/HUMANS ONLY/);
-    expect(field.description).toMatch(/single-use confirmNoBackupToken/);
-    expect(field.description).toMatch(/never compatibility, ownership or lifecycle safety/);
-    // Primitive/array bodies never throw and stay at the base tier.
-    for (const body of [true, 1, "x", null, undefined, ["allowBackupReuse"]]) {
-      expect(manifest.resolveTier(op, { body })).toBe("dangerous");
-    }
-  });
-
-  it("classifies the backup inventory as a safe read", () => {
-    const op = manifest.findOp("GET", "/api/openclaw/backups");
-    expect(op?.id).toBe("updates.backups");
-    expect(op.tier).toBe("safe");
   });
 
   it("classifies GET /api/diagnose as the safe watchdog.diagnose read (#76 A9)", () => {

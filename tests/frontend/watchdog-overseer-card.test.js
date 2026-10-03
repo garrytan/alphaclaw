@@ -896,7 +896,7 @@ describe("WatchdogOverseerCard rendering", () => {
     expect(findAllByType(failedTree, InlineErrorChip)[0].props.headline).toBe("spawn failed");
   });
 
-  it("ReportAction renders every action variant (restart needs a handler; rollback links; fix_config hints)", () => {
+  it("ReportAction renders every action variant (restart needs a handler; no rollback link; fix_config hints)", () => {
     const withAction = (action, extra = {}) =>
       renderCard({
         situation: payload({
@@ -919,7 +919,7 @@ describe("WatchdogOverseerCard rendering", () => {
       (node) => node.props.idleLabel === "Resume channels",
     );
     expect(resume.props.onClick).toBe(onResumeChannels);
-    expect(textOf(withAction("rollback"))).toContain("Review rollback on the Upgrade page");
+    expect(textOf(withAction("rollback"))).not.toContain("Upgrade page");
     expect(textOf(withAction("fix_config"))).toContain("Fix openclaw.json");
   });
 

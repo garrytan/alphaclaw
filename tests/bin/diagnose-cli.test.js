@@ -15,7 +15,6 @@ const {
   kDiagnoseSectionNames,
 } = require("../../lib/server/diagnose/collect");
 const { kDiagnoseSectionTitles } = require("../../lib/server/diagnose/render");
-const { createOpenclawReleaseChannelStore } = require("../../lib/server/openclaw-release-channel");
 
 const binPath = path.resolve(__dirname, "../../bin/alphaclaw.js");
 
@@ -154,38 +153,28 @@ describe("bin/alphaclaw diagnose", () => {
 
   it("reads what a booted box left behind and redacts the .env secrets it finds in them", () => {
     // A box that has booted once: the self-version stamp, a boot report and
-    // a channel state, written the way their owners write them, plus a
-    // secret in .env that a boot warning happens to echo.
+    // the doctor migration record, written the way their owners write them,
+    // plus a secret in .env that a boot warning happens to echo.
     const kSecret = "tg-bot-token-4242-secret";
-    const openclawDir = path.join(rootDir, ".openclaw");
-    const store = createOpenclawReleaseChannelStore({
-      rootDir,
-      openclawDir,
-      nowFn: () => 1_700_000_000_000,
-      logger: { log() {}, warn() {}, error() {} },
-    });
+    const managedDir = path.join(rootDir, ".openclaw", ".alphaclaw");
+    fs.mkdirSync(managedDir, { recursive: true });
     fs.writeFileSync(path.join(rootDir, ".env"), `TELEGRAM_BOT_TOKEN=${kSecret}\n`);
-    store.writeState({
-      pinVersion: "2026.9.2",
-      applied: null,
-      lastBoot: {
-        at: 1_700_000_000_000,
-        action: "none",
-        warnings: [`boot warning echoing ${kSecret}`],
-      },
-    });
     fs.writeFileSync(
-      path.join(store.managedDir, "alphaclaw-version.json"),
+      path.join(managedDir, "openclaw-boot-migration.json"),
+      `${JSON.stringify({ completedForVersion: "2026.9.2", at: 1_700_000_000_000 })}\n`,
+    );
+    fs.writeFileSync(
+      path.join(managedDir, "alphaclaw-version.json"),
       `${JSON.stringify({ version: "0.9.77", commit: "abc123", firstBootAt: 1, lastBootAt: 2, bootCount: 3, previous: { version: "0.9.76", commit: null, lastBootAt: 0 } })}\n`,
     );
     fs.writeFileSync(
-      path.join(store.managedDir, "boot-report.json"),
+      path.join(managedDir, "boot-report.json"),
       `${JSON.stringify({
         schema: "alphaclaw.boot-report.v1",
         bootId: "40:1",
         at: 1_700_000_000_000,
         alphaclaw: { version: "0.9.77", commit: "abc123", previousVersion: "0.9.76", firstBootOfVersion: true },
-        openclaw: { declaredPin: "2026.9.2", expected: "2026.9.2", installedAtBoot: "2026.9.2", bootSync: { action: "none", reason: null, warnings: [] } },
+        openclaw: { declaredPin: "2026.9.2", installedAtBoot: "2026.9.2", bootSync: { action: "none", reason: null, warnings: [`boot warning echoing ${kSecret}`] } },
         pidfile: { decision: "proceed", reason: "absent" },
         binPhase: { status: "ok" },
         serverPhase: { status: "recorded", verdict: [] },
@@ -198,7 +187,8 @@ describe("bin/alphaclaw diagnose", () => {
     expect(markdown.stdout).toContain("0.9.77");
     expect(markdown.stdout).toContain("commit abc123");
     expect(markdown.stdout).toContain("previous 0.9.76");
-    expect(markdown.stdout).toContain("- pin: 2026.9.2");
+    expect(markdown.stdout).toContain("- openclaw: pin 2026.9.2, installed 2026.9.2, diverged false");
+    expect(markdown.stdout).toContain("- doctor --fix completed for: 2026.9.2 at 2023-11-14T22:13:20.000Z");
     expect(markdown.stdout).toContain("boot `40:1`");
     expect(markdown.stdout).toContain("- current boot verdict: consistent");
     expect(markdown.stdout).not.toContain(kSecret);
@@ -209,7 +199,8 @@ describe("bin/alphaclaw diagnose", () => {
     const bundle = JSON.parse(json.stdout.trim());
     expect(bundle.sections.selfVersion.data.record.version).toBe("0.9.77");
     expect(bundle.sections.bootReports.data.current.bootId).toBe("40:1");
-    expect(bundle.sections.channelState.data.pinVersion).toBe("2026.9.2");
+    expect(bundle.sections.openclaw.data.bootMigration).toEqual({ completedForVersion: "2026.9.2", at: 1_700_000_000_000 });
+    expect(bundle.sections.bootReports.data.current.openclaw.bootSync.warnings).toEqual(["boot warning echoing ***"]);
     expect(bundle.sections.pidfile.data.decision).toMatchObject({ decision: "proceed", reason: "absent" });
 
     // Still read-only: two runs later the tree is byte-for-byte the same set
@@ -259,15 +250,6 @@ describe("bin/alphaclaw diagnose", () => {
     expect(listTree(tmpHome)).toEqual([]);
   });
 
-  it("reports no evidence despite the CLI being installed elsewhere", () => {
-    const result = runCli(["diagnose", "--json"]);
-    expect(result.status).toBe(0);
-    const bundle = JSON.parse(result.stdout);
-    expect(bundle.summary.recovery).toMatchObject({ installationEvidence: "absent", assessment: "complete", databaseVerdict: "not_assessed", gatewayReadiness: "unknown" });
-    expect(bundle.summary.recovery.nextActions.some((action) => action.id === "choose_explicit_root")).toBe(true);
-    expect(listTree(rootDir)).toEqual([]);
-  });
-
   it("does not block before collection when its redaction source is a FIFO", () => {
     const envPath = path.join(rootDir, ".env");
     expect(spawnSync("mkfifo", [envPath]).status).toBe(0);
@@ -278,22 +260,19 @@ describe("bin/alphaclaw diagnose", () => {
     expect(listTree(rootDir)).toEqual([".env"]);
   });
 
-  it("distinguishes a config-only installation from a broken config without changing either", () => {
+  it("reads a valid and a broken openclaw.json without changing either", () => {
     const configPath = path.join(rootDir, ".openclaw", "openclaw.json");
     fs.mkdirSync(path.dirname(configPath));
     fs.writeFileSync(configPath, "{}");
     const first = runCli(["diagnose", "--json"]);
     expect(first.status).toBe(0);
-    expect(JSON.parse(first.stdout).summary.recovery).toMatchObject({ installationEvidence: "present", assessment: "complete", databaseVerdict: "not_assessed" });
+    expect(JSON.parse(first.stdout).schema).toBe(kDiagnoseSchema);
     fs.writeFileSync(configPath, "{broken");
     const before = listTree(rootDir);
     const second = runCli(["diagnose", "--json"]);
     expect(second.status).toBe(0);
     expect(second.stdout.trim().split("\n")).toHaveLength(1);
-    const summary = JSON.parse(second.stdout).summary.recovery;
-    expect(summary.installationEvidence).toBe("present");
-    expect(summary.assessment).not.toBe("complete");
-    expect(summary.databaseVerdict).not.toBe("compatible");
+    expect(Object.keys(JSON.parse(second.stdout).sections)).toEqual([...kDiagnoseSectionNames]);
     expect(fs.readFileSync(configPath, "utf8")).toBe("{broken");
     expect(listTree(rootDir)).toEqual(before);
   });

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-// Minimal hook harness (upgrade-tab.test.js pattern): these components only
+// Minimal hook harness: these components only
 // need useMemo/useState to be callable outside a DOM renderer.
 vi.mock("preact/hooks", () => {
   const slots = [];

@@ -4,23 +4,15 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { createHash } = require("node:crypto");
-// Same prerelease classifier the Upgrade page's catalog uses, so the journey
-// targets exactly what the Beta section offers.
-const { classifyPrerelease } = require("../../lib/server/openclaw-releases");
 
 // Shared plumbing for the CONTAINER e2e tier (tests/container/**). This tier
 // builds a real image from the local checkout (npm pack → docker build),
-// boots real gateways across an immutable AlphaClaw self-upgrade, exercises
-// deterministic pidfile recovery, and drives the browser through a
-// stable→beta OpenClaw upgrade. It needs a running docker daemon and
+// boots the pinned OpenClaw in fresh and restarted containers, exercises
+// deterministic pidfile recovery, and boots real gateways across an
+// immutable AlphaClaw self-upgrade. It needs a running docker daemon and
 // outbound network, so it is excluded from `npm test` via vitest.config.js
 // and runs through `npm run test:container`.
 const enabled = process.env.OPENCLAW_CONTAINER_E2E === "1";
-
-// Kept for existing container callers. The browser journey now requires a
-// published, executable pair in every mode: missing packages fail, and beta
-// release gaps select an explicit historical upgrade instead of a skip.
-const strict = process.env.OPENCLAW_CONTAINER_E2E_STRICT === "1";
 
 // `describe` comes from vitest's globals (vitest.config.js `globals: true`),
 // resolved lazily off globalThis so this module also loads under plain node
@@ -221,24 +213,9 @@ const getMappedPort = async (name) => {
 const execInContainer = async (name, cmd, { timeoutMs = 120000 } = {}) =>
   docker(["exec", name, ...cmd], { timeoutMs });
 
-// Detached exec: the process dies with the container (execs are not part of
-// the restart policy) — callers that need to survive a restart must re-arm.
-const execDetachedInContainer = async (name, cmd) =>
-  docker(["exec", "-d", name, ...cmd]);
-
 const containerLogs = async (name, { tail = 400 } = {}) => {
   const { stdout, stderr } = await docker(["logs", "--tail", String(tail), name]);
   return `${stdout}${stderr}`;
-};
-
-const restartCount = async (name) => {
-  const { stdout } = await docker(["inspect", "--format", "{{.RestartCount}}", name]);
-  return Number(stdout.trim());
-};
-
-const containerStartedAt = async (name) => {
-  const { stdout } = await docker(["inspect", "--format", "{{.State.StartedAt}}", name]);
-  return stdout.trim();
 };
 
 // Teardown helpers: force, never throw — afterAll must always finish.
@@ -278,110 +255,6 @@ const waitFor = async (fn, { timeoutMs, intervalMs = 1000, label = "condition" }
   }
 };
 
-// Loose semver-ish comparison (split on [.-], numeric fields compare
-// numerically): enough to decide "beta is newer than the stable pin" for
-// shapes like 2026.7.1-2 vs 2026.8.1-beta.3. NOT a full semver — prerelease
-// precedence subtleties don't matter for the cross-minor sanity check here.
-const compareLooseVersions = (a, b) => {
-  const split = (v) => String(v).split(/[.-]/);
-  const fa = split(a);
-  const fb = split(b);
-  const len = Math.max(fa.length, fb.length);
-  for (let i = 0; i < len; i++) {
-    const sa = fa[i];
-    const sb = fb[i];
-    if (sa === undefined) return -1;
-    if (sb === undefined) return 1;
-    const na = Number(sa);
-    const nb = Number(sb);
-    const bothNumeric = Number.isFinite(na) && Number.isFinite(nb) && /^\d+$/.test(sa) && /^\d+$/.test(sb);
-    if (bothNumeric) {
-      if (na !== nb) return na < nb ? -1 : 1;
-    } else if (sa !== sb) {
-      return sa < sb ? -1 : 1;
-    }
-  }
-  return 0;
-};
-
-// The "beta" the stable→beta journey drives toward is what AlphaClaw's Beta
-// catalog section offers: the newest PRERELEASE whose core version is above
-// the stable pin's. It is deliberately NOT the raw `beta` dist-tag — upstream
-// re-points that tag at the promoted stable release when a beta line ships
-// (2026-09-03: beta = latest = 2026.9.1), a stable version is never listed
-// under Beta, and the journey then applied 2026.9.1-beta.1 while every
-// assertion waited for "2026.9.1" (PR #57, run 33897935310). When the tag is
-// the newest eligible prerelease the result is unchanged (source "dist-tag").
-// A prerelease of the pin's own core (2026.7.1-beta.6 vs the 2026.7.1-2
-// hotfix) is older than the pin, not an upgrade, so cores are compared.
-const kVersionCorePattern = /^[^-]+/;
-const coreVersion = (version) =>
-  (String(version || "").match(kVersionCorePattern) || [""])[0];
-
-const resolveBetaTarget = ({ distTags, versions, stablePin }) => {
-  const tagged =
-    distTags && distTags.beta != null ? String(distTags.beta) : null;
-  const pool = new Set(Object.keys(versions || {}));
-  if (tagged) pool.add(tagged);
-  const pinCore = coreVersion(stablePin);
-  const eligible = [...pool].filter(
-    (version) =>
-      classifyPrerelease(version) &&
-      compareLooseVersions(coreVersion(version), pinCore) > 0,
-  );
-  if (eligible.length === 0) return { version: null, source: "none", tagged };
-  eligible.sort(compareLooseVersions);
-  const version = eligible[eligible.length - 1];
-  return {
-    version,
-    source: version === tagged ? "dist-tag" : "newest-prerelease",
-    tagged,
-  };
-};
-
-// Registry timing must not disable the required browser journey. When a
-// prerelease newer than the shipped pin exists, the journey is pin → beta.
-// During a beta gap it is this published historical stable → the PIN: seed
-// 2026.8.2 as a recorded overlay in the unchanged production image and
-// upgrade it to the build we actually ship. Its schema 15 has explicit
-// ownership metadata, so the bounded migration screen can verify it; the target is
-// exactly the newest stable, never a stale prerelease. (Until 2026-09-10 the
-// gap journey targeted 2026.9.1-beta.1; that release no longer boots — its
-// bundled `@openclaw/voyage-provider@beta` now requires plugin API
-// >= 2026.9.3 — and failed main's nightly, so the beta gap must never fall
-// back to a fixed historical prerelease again.)
-const kHistoricalStable = "2026.8.2";
-const resolveUpgradeJourney = ({ distTags, versions, stablePin }) => {
-  const requirePublished = (version) => {
-    if (!version || !Object.prototype.hasOwnProperty.call(versions || {}, version)) {
-      throw new Error(`Container upgrade requires a published package: ${version || "missing dist-tag"}`);
-    }
-    if (versions[version]?.deprecated) throw new Error(`Container upgrade refuses deprecated package ${version}`);
-  };
-  for (const version of [stablePin, distTags?.latest, distTags?.beta]) requirePublished(version);
-  const resolved = resolveBetaTarget({ distTags, versions, stablePin });
-  if (resolved.version) {
-    requirePublished(resolved.version);
-    // `beta` is the journey's TARGET version (name kept for the consumers);
-    // `targetChannel` tells the browser step which catalog section lists it.
-    return {
-      stable: stablePin,
-      beta: resolved.version,
-      targetChannel: "beta",
-      source: resolved.source,
-      tagged: resolved.tagged,
-    };
-  }
-  requirePublished(kHistoricalStable);
-  return {
-    stable: kHistoricalStable,
-    beta: stablePin,
-    targetChannel: "stable",
-    source: "stable-pin",
-    tagged: resolved.tagged,
-  };
-};
-
 // Login against the real server with the shared setup password and return a
 // Cookie header value for subsequent authenticated fetches.
 const loginForCookie = async (baseUrl, password) => {
@@ -415,7 +288,6 @@ const ensureArtifactsDir = () => {
 
 module.exports = {
   enabled,
-  strict,
   describeContainer,
   repoRoot,
   artifactsDir,
@@ -431,17 +303,11 @@ module.exports = {
   runContainer,
   getMappedPort,
   execInContainer,
-  execDetachedInContainer,
   containerLogs,
-  restartCount,
-  containerStartedAt,
   removeContainer,
   removeVolume,
   sleep,
   waitFor,
-  compareLooseVersions,
-  resolveBetaTarget,
-  resolveUpgradeJourney,
   loginForCookie,
   fetchJsonWithCookie,
 };

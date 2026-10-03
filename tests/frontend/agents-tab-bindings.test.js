@@ -242,19 +242,9 @@ describe("frontend/agents-tab bindings hook", () => {
     ).not.toContain("alphaclaw:restart-required");
   });
 
-  it("a DEFERRED pairing-row clear toasts a warning; gatewayRestartFailed raises the restart banner", async () => {
-    await deleteFromBindings({ ok: true, pairingRowsCleanupDeferred: true });
-    let [message, level] = showToast.mock.calls.at(-1);
-    expect(level).toBe("warning");
-    expect(message).toContain("stay authorized until the running backup finishes");
-    expect(
-      global.window.dispatchEvent.mock.calls.map((call) => call[0].type),
-    ).not.toContain("alphaclaw:restart-required");
-
-    harness.reset();
-    global.window.dispatchEvent.mockClear();
+  it("gatewayRestartFailed toasts a warning and raises the restart banner; a clean delete stays a clean success", async () => {
     await deleteFromBindings({ ok: true, gatewayRestartFailed: true });
-    [message, level] = showToast.mock.calls.at(-1);
+    const [message, level] = showToast.mock.calls.at(-1);
     expect(level).toBe("warning");
     expect(message).toContain("gateway restart also failed");
     expect(

@@ -66,7 +66,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# Minimal onboarded fixture (same shape as upgrade-ui-smoke.sh). The launcher
+# Minimal onboarded fixture (same shape as time-format-smoke.sh). The launcher
 # vars are deliberately ABSENT at boot: phase 2 appends them to test the
 # live .env reload.
 mkdir -p "$kScratch/.openclaw"

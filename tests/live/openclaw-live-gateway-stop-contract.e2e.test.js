@@ -1,14 +1,12 @@
 // LIVE TIER — the `gateway stop --help` contract the capability-gated
 // `--force` (WI-5.1, lib/server/openclaw-capabilities.js gatewayStopForce)
-// depends on, pinned against the REAL binaries of the three lines AlphaClaw
-// supports today:
-//   pin    2026.9.3         → --force present (pin moved in v0.9.80; re-record on the next live run)
-//   stable 2026.8.2         → --force present ("Allow stop from a non-interactive shell")
-//   beta   2026.9.1-beta.1  → --force present
-// Recorded 2026-09-02 in this sandbox; when this tier fails but the hermetic
-// suite is green, suspect upstream drift first (AGENTS.md "test:live" note).
+// depends on, pinned against the REAL binary AlphaClaw runs: the OpenClaw pin
+// in package.json, installed in node_modules. The pin is the only version
+// AlphaClaw runs; the probe stays for a broken or stale install. When this
+// tier fails but the hermetic suite is green, suspect upstream drift first
+// (AGENTS.md "test:live" note).
 //
-// Requires: network (two real installs, cached across live files). ~1-3 min.
+// Requires: offline (no install). Seconds.
 
 const path = require("path");
 const liveHelpers = require("./live-helpers");
@@ -20,16 +18,14 @@ delete process.env.OPENCLAW_GIT_DIR;
 const { execFileSync } = require("child_process");
 const {
   kLiveEnabled,
-  kOpenclawLines,
   mkTemp,
+  readDeclaredPin,
   repoOpenclawBin,
   scrubTestRunnerEnv,
-  stageOpenclawVersion,
 } = liveHelpers;
 
 const describeLive = kLiveEnabled ? describe : describe.skip;
 
-const kInstallTimeoutMs = 8 * 60 * 1000;
 const kTestTimeoutMs = 12 * 60 * 1000;
 
 // The EXACT predicate the capability probe applies to the help text — one
@@ -63,34 +59,16 @@ const helpText = (bin, args) => {
 
 describeLive("LIVE `gateway stop --help` contract (capability-gated --force, WI-5.1)", () => {
   it(
-    `the pin ${kOpenclawLines.pin} advertises gateway stop --force`,
+    `the pin ${readDeclaredPin()} advertises gateway stop --force`,
     { timeout: kTestTimeoutMs },
     () => {
       const text = helpText(repoOpenclawBin(), ["gateway", "stop", "--help"]);
       expect(text).not.toMatch(kUnknownCommandPattern);
       expect(text).toMatch(/Usage: openclaw gateway stop/);
-      // Capability probing remains required for older installed builds.
-      // The current pin (kOpenclawLines.pin = the declared package.json pin) supports non-interactive forced stop.
       expect(text).toMatch(kForceFlagPattern);
+      // Recorded wording — the guard this flag bypasses is the
+      // non-interactive stop refusal the incumbent-restart path reports.
+      expect(text).toMatch(/--force\s+Allow stop from a non-interactive shell/);
     },
   );
-
-  for (const line of ["stable", "beta"]) {
-    it(
-      `${line} ${kOpenclawLines[line]} advertises --force for non-interactive stops`,
-      { timeout: kTestTimeoutMs },
-      async () => {
-        const staged = await stageOpenclawVersion(kOpenclawLines[line], {
-          timeoutMs: kInstallTimeoutMs,
-        });
-        const text = helpText(staged.bin, ["gateway", "stop", "--help"]);
-        expect(text).not.toMatch(kUnknownCommandPattern);
-        expect(text).toMatch(/Usage: openclaw gateway stop/);
-        expect(text).toMatch(kForceFlagPattern);
-        // Recorded wording — the guard this flag bypasses is the
-        // non-interactive stop refusal the incumbent-restart path reports.
-        expect(text).toMatch(/--force\s+Allow stop from a non-interactive shell/);
-      },
-    );
-  }
 });

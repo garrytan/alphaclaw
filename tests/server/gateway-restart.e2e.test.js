@@ -279,7 +279,6 @@ const createDrillHarness = ({
     logger: kSilentLogger,
   });
   const reloadEnv = vi.fn(() => true);
-  let applyInProgress = false;
 
   const deps = {
     fs: {
@@ -303,8 +302,6 @@ const createDrillHarness = ({
     getChannelStatus: vi.fn(() => ({})),
     openclawVersionService: {
       readOpenclawVersion: vi.fn(() => "1.2.3"),
-      getVersionStatus: vi.fn(async () => ({ ok: true, current: "1.2.3" })),
-      updateOpenclaw: vi.fn(async () => ({ status: 200, body: { ok: true } })),
     },
     alphaclawVersionService: {},
     clawCmd: vi.fn(async () => ({ ok: true, stdout: "" })),
@@ -331,10 +328,6 @@ const createDrillHarness = ({
       onExpectedRestart: vi.fn(),
       recordOperationEvent: vi.fn(),
     },
-    openclawChannelService: {
-      getChannelInfo: vi.fn(() => null),
-      isApplyInProgress: vi.fn(() => applyInProgress),
-    },
     gatewayLifecycleLock,
     operationEvents,
   };
@@ -344,9 +337,6 @@ const createDrillHarness = ({
     operationEvents,
     gatewayLifecycleLock,
     restartRequiredState: store,
-    setApplyInProgress: (value) => {
-      applyInProgress = value;
-    },
   };
 };
 
@@ -952,7 +942,7 @@ describe("server/gateway restart drills (e2e)", () => {
     }
   });
 
-  it("attaches concurrent restarts, 409s during a channel apply, and skips watchdog tryAcquire (MUTEX DRILL)", async () => {
+  it("attaches concurrent restarts, 409s behind another lifecycle operation, and skips watchdog tryAcquire (MUTEX DRILL)", async () => {
     const fake = createFakeGateway({ portOpen: true });
     fake.holdStop = true;
     const harness = createDrillHarness({ fake });
@@ -979,19 +969,10 @@ describe("server/gateway restart drills (e2e)", () => {
     });
     expect(harness.gatewayLifecycleLock.tryAcquire("repair")).toBeNull();
 
-    // A channel apply starting mid-restart must not shadow attach semantics:
-    // joining the already-running restart stays coherent.
-    harness.setApplyInProgress(true);
-    const attachedDuringApply = await request(app).post(
-      "/api/gateway/restart?async=1",
-    );
-    expect(attachedDuringApply.status).toBe(202);
-    expect(attachedDuringApply.body).toEqual({
-      ok: true,
-      attached: true,
-      operationId,
-    });
-    harness.setApplyInProgress(false);
+    // A third POST joins the same running restart too.
+    const third = await request(app).post("/api/gateway/restart?async=1");
+    expect(third.status).toBe(202);
+    expect(third.body).toEqual({ ok: true, attached: true, operationId });
 
     // Mid-restart status shows the single active operation.
     const midStatus = await request(app).get("/api/restart-status");
@@ -1017,16 +998,15 @@ describe("server/gateway restart drills (e2e)", () => {
     // The lock is free again once the operation completes.
     const release = harness.gatewayLifecycleLock.tryAcquire("repair");
     expect(typeof release).toBe("function");
-    release();
 
-    // With no restart to attach to, a channel apply in progress gates a NEW
-    // restart with a typed 409.
-    harness.setApplyInProgress(true);
+    // With no restart to attach to, another lifecycle operation gates a NEW
+    // restart with a typed 409 instead of queueing it.
     const blocked = await request(app).post("/api/gateway/restart?async=1");
     expect(blocked.status).toBe(409);
     expect(blocked.body.ok).toBe(false);
-    expect(blocked.body.code).toBe("apply_in_progress");
-    harness.setApplyInProgress(false);
+    expect(blocked.body.code).toBe("operation_in_progress");
+    release();
+    expect(fake.spawnCalls).toHaveLength(1);
   });
 
   it("reconciles a restart interrupted by an AlphaClaw death into a terminal answer on boot (KILL-MID-RESTART DRILL)", async () => {

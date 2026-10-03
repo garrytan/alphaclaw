@@ -594,15 +594,6 @@ describe("server/doctor/deterministic-checks", () => {
     expect(() => build({})).not.toThrow();
   });
 
-  it("emits the dev-channel contract card only on the dev channel", () => {
-    expect(
-      findCard(build({ releaseChannel: "dev" }), "det:dev-contract-unverified"),
-    ).toMatchObject({ priority: "P2" });
-    expect(
-      findCard(build({ releaseChannel: "beta" }), "det:dev-contract-unverified"),
-    ).toBeUndefined();
-  });
-
   describe("gateway memory-leak cards (runtime trend input)", () => {
     const kEpisodeId = "4242-1700000000000";
     const leakTrend = (state, extra = {}) => ({
@@ -1098,8 +1089,8 @@ describe("server/doctor/deterministic-checks det:plugin-api-mismatch (issue #76 
     });
     expect(card.summary).toContain(">=2026.9.0");
     expect(card.summary).toContain("2026.7.1-2");
-    expect(card.summary).toMatch(/version mismatch/);
-    expect(card.recommendation).toMatch(/Upgrade page/);
+    expect(card.summary).toMatch(/newer OpenClaw build than the one AlphaClaw pins/);
+    expect(card.recommendation).toMatch(/AlphaClaw release that pins/);
     expect(card.evidence.map((e) => e.text)).toEqual([
       expect.stringContaining("plugin requires plugin API >=2026.9.0, but this host is 2026.7.1-2"),
       "source: doctor run #17",

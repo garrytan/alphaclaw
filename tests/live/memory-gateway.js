@@ -77,12 +77,12 @@ const stopGatewayCapture = async (capture) => {
   await Promise.race([capture.exited, new Promise((resolve) => setTimeout(resolve, 1000))]);
 };
 
-const saveGatewayEvidence = ({ rootDir, betaVersion, capture, stage, samples, error }) => {
+const saveGatewayEvidence = ({ rootDir, openclawVersion, capture, stage, samples, error }) => {
   const artifactsDir = path.join(__dirname, "artifacts", path.basename(rootDir), stage);
   fs.mkdirSync(artifactsDir, { recursive: true });
   fs.writeFileSync(path.join(artifactsDir, "gateway.log"), capture.output);
   fs.writeFileSync(path.join(artifactsDir, "memory-run.json"), JSON.stringify({
-    nodeVersion: process.version, betaVersion, stage,
+    nodeVersion: process.version, openclawVersion, stage,
     exitCode: capture.exitCode, exitSignal: capture.exitSignal,
     spawnError: capture.spawnError?.message || null,
     criticalPressureLine: capture.criticalPressureLine, samples,

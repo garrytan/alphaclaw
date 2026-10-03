@@ -10,13 +10,11 @@ describe("server/openclaw-feature-gates", () => {
   it("opens the 2026.8.1 beta-line gates on a beta install and keeps stable closed", () => {
     const beta = gatesFor("2026.8.1-beta.1");
     expect(beta.supportsFeature("supervisorMode")).toBe(true);
-    expect(beta.supportsFeature("sqliteBackup")).toBe(true);
     expect(beta.supportsFeature("sessionDashboards")).toBe(true);
     expect(beta.supportsFeature("secretEgressBinding")).toBe(true);
 
     const stable = gatesFor("2026.7.1-2");
     expect(stable.supportsFeature("supervisorMode")).toBe(false);
-    expect(stable.supportsFeature("sqliteBackup")).toBe(false);
     expect(stable.supportsFeature("sessionDashboards")).toBe(false);
     // trustedProxyAuth already ships on the pinned stable.
     expect(stable.supportsFeature("trustedProxyAuth")).toBe(true);

@@ -3,13 +3,10 @@ const os = require("os");
 const path = require("path");
 const { createWatchdog } = require("../../lib/server/watchdog");
 const { createGatewayLifecycleLock } = require("../../lib/server/gateway-lifecycle-lock");
-const { createUpgradeOverseer } = require("../../lib/server/upgrade-overseer");
-const { createRunLedger } = require("../../lib/server/openclaw-run-ledger");
 
 const kStartMs = 1_700_000_000_000;
 const kMinute = 60_000;
 const kMb = 1024 * 1024;
-const kOperationId = "aaaaaaaa-0000-4000-8000-000000000102";
 
 describe("issue #102 runtime safety (e2e)", () => {
   let root;
@@ -173,34 +170,5 @@ describe("issue #102 runtime safety (e2e)", () => {
     expect(stack.events.filter((event) => event.details?.reason === "gateway_running")).toEqual([
       expect.objectContaining({ details: expect.objectContaining({ pid: 400000002 }) }),
     ]);
-  });
-
-  it.each(["2026.9.3", "2026.9.5"])("backup_failed never applied the upgrade or offers rollback, even with %s already applied", async (appliedId) => {
-    const ledger = createRunLedger({ openclawDir: root, logger: { log() {} } });
-    ledger.createRun({ operationId: kOperationId, target: { channel: "stable", version: "2026.9.5" } });
-    ledger.completeRun(kOperationId, { state: "failed", ok: false, result: { ok: false, code: "backup_failed" } });
-    const notify = vi.fn(async () => ({ ok: true }));
-    const runStreamed = vi.fn(async ({ args }) => ({ ok: true, tail: args[0] === "-p"
-      ? JSON.stringify({ verdict: "broken", summary: "The build looks broken. Roll back now.", recommendation: "Consider Roll back." })
-      : "--output-format --disallowedTools" }));
-    const overseer = createUpgradeOverseer({
-      ledger,
-      runStream: { runStreamed },
-      env: { PATH: "/usr/bin", ANTHROPIC_API_KEY: "test-placeholder" },
-      isEnabled: () => true,
-      getChannelInfo: () => ({ appliedId, installedVersion: appliedId }),
-      getDoctorJson: async () => '{"ok":true}',
-      notify,
-      logger: { log() {} },
-    });
-    expect(await overseer.maybeRunForLatest()).toMatchObject({ ran: true });
-    const record = ledger.readRun(kOperationId).overseer;
-    expect(record.appliesToCurrent).toBe(false);
-    expect(record.summary).toMatch(/upgrade (?:was )?never applied/i);
-    expect(`${record.summary} ${record.recommendation}`).not.toMatch(/roll\s*back|mark as good/i);
-    expect(notify).toHaveBeenCalledTimes(1);
-    expect(notify.mock.calls[0][0]).toMatch(/upgrade (?:was )?never applied/i);
-    expect(notify.mock.calls[0][0]).not.toMatch(/roll\s*back|looks broken/i);
-    expect(runStreamed.mock.calls.find(([opts]) => opts.args[0] === "-p")[0].input).toMatch(/upgrade (?:was )?never applied/i);
   });
 });

@@ -17,7 +17,7 @@ it("gives unreadable auth stores a recovery action without inventing disconnecte
   expect(buildStoreUnavailableLine({ payload, hasLastKnown: true })).toContain("showing the last known credentials");
 });
 
-// While a store read is `unavailable` (state-DB backup barrier) nothing else
+// While a store read is `unavailable` nothing else
 // re-reads it, so every adoption site arms ONE bounded timer per unavailable
 // read (D14). Bounded means: never two timers, re-armed only by the next
 // unavailable read, dropped by a readable one, cleared on unmount.
@@ -30,7 +30,7 @@ describe("frontend/store-availability recheck timer", () => {
     vi.useRealTimers();
   });
 
-  it("is a ~30 s bound: short enough to clear a ~120 s barrier on its own, long enough never to look like polling", () => {
+  it("is a ~30 s bound: short enough to clear a transient failure on its own, long enough never to look like polling", () => {
     expect(kStoreUnavailableRecheckMs).toBe(30000);
   });
 

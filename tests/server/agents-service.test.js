@@ -3,11 +3,6 @@ const os = require("os");
 const path = require("path");
 const { DatabaseSync } = require("node:sqlite");
 const { createAgentsService } = require("../../lib/server/agents/service");
-const {
-  beginStateDbQuiet,
-  StateDbQuietError,
-  resetStateDbQuietForTests,
-} = require("../../lib/server/state-db-quiet");
 
 const buildFsMock = ({ initialConfig = {}, fileContents = {} } = {}) => {
   let currentConfig = JSON.parse(JSON.stringify(initialConfig));
@@ -3154,16 +3149,10 @@ describe("server/agents/service", () => {
   });
 
   // ── deleteChannelAccount: the state-db pairing rows are the LAST mutation ──
-  // The rows are the one write the quiet barrier gates (StateDbQuietError →
-  // 409 backup_in_progress). A held barrier is refused at ENTRY, before any
-  // mutation; the rows are cleared only after the CLI/env/config writes
-  // succeeded, so a CLI timeout or config-write failure can never leave the
-  // account intact with its authorized users deleted. A barrier that begins
-  // mid-delete (after the account is gone from openclaw.json) is never
-  // re-thrown — the retry would 404 — the clear is deferred to the barrier's
-  // release and the caller sees `pairingRowsCleanupDeferred: true`.
+  // The rows are cleared only after the CLI/env/config writes succeeded, so a
+  // CLI timeout or config-write failure can never leave the account intact
+  // with its authorized users deleted.
   describe("deleteChannelAccount: state-db pairing rows last", () => {
-    const flushMacrotask = () => new Promise((resolve) => setImmediate(resolve));
     const seedStateDbWithPairingRows = () => {
       const openclawDir = fs.mkdtempSync(path.join(os.tmpdir(), "alphaclaw-agents-delete-"));
       const databasePath = path.join(openclawDir, "state", "openclaw.sqlite");
@@ -3212,19 +3201,8 @@ describe("server/agents/service", () => {
       },
       bindings: [],
     });
-    let token = null;
 
-    beforeEach(() => {
-      resetStateDbQuietForTests();
-    });
-
-    afterEach(() => {
-      token?.release();
-      token = null;
-      resetStateDbQuietForTests();
-    });
-
-    it("clears the rows AFTER the CLI/env/config writes; a barrier that begins mid-CLI defers the clear (no 409 after mutation) and it lands when the barrier lifts", async () => {
+    it("clears the rows AFTER the CLI/env/config writes, sibling account untouched", async () => {
       const { openclawDir, databasePath } = seedStateDbWithPairingRows();
       const fsMock = buildFsMock({ initialConfig: twoAccountConfig() });
       const readEnvFile = vi.fn(() => [
@@ -3233,13 +3211,10 @@ describe("server/agents/service", () => {
       ]);
       const writeEnvFile = vi.fn();
       const reloadEnv = vi.fn();
-      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
       const seenInsideCli = {};
       const clawCmd = vi.fn(async () => {
         seenInsideCli.alerts = allowEntriesFor(databasePath, "alerts");
         seenInsideCli.default = allowEntriesFor(databasePath, "default");
-        // A backup's quiet barrier forms while the CLI is still running.
-        ({ token } = await beginStateDbQuiet({ owner: "backup", maxMs: 60_000 }));
         return { ok: true, stdout: "", stderr: "" };
       });
       const service = createAgentsService({
@@ -3256,8 +3231,7 @@ describe("server/agents/service", () => {
         accountId: "alerts",
       });
 
-      // Never a 409 once openclaw.json/.env are mutated — an honest deferral.
-      expect(result).toEqual({ ok: true, pairingRowsCleanupDeferred: true });
+      expect(result).toEqual({ ok: true });
       // The rows were still intact while the CLI ran (nothing destroyed
       // before the irreversible half succeeded).
       expect(seenInsideCli).toEqual({ alerts: ["111"], default: ["222"] });
@@ -3265,19 +3239,8 @@ describe("server/agents/service", () => {
       expect(writeEnvFile).toHaveBeenCalledWith([{ key: "TELEGRAM_BOT_TOKEN", value: "123:abc" }]);
       expect(reloadEnv).toHaveBeenCalled();
       expect(Object.keys(fsMock.readConfig().channels.telegram.accounts)).toEqual(["default"]);
-      // Loud: the security-relevant gap is logged, not swallowed.
-      expect(errorSpy).toHaveBeenCalledWith(
-        expect.stringMatching(/SECURITY: telegram\/alerts .*pairing rows are still authorized/),
-      );
-      // Still authorized while the barrier holds…
-      expect(allowEntriesFor(databasePath, "alerts")).toEqual(["111"]);
-      // …and cleared when it lifts, sibling untouched.
-      token.release();
-      token = null;
-      await flushMacrotask();
       expect(allowEntriesFor(databasePath, "alerts")).toEqual([]);
       expect(allowEntriesFor(databasePath, "default")).toEqual(["222"]);
-      errorSpy.mockRestore();
     });
 
     // X4: an `ok: false` from the row clear (schema mismatch, DB failure) was
@@ -3321,7 +3284,6 @@ describe("server/agents/service", () => {
         pairingRowsCleanupFailed: true,
         pairingRowsCleanupError: expect.stringMatching(/schema is unsupported/),
       });
-      expect(result.pairingRowsCleanupDeferred).toBeUndefined();
       // The delete itself happened…
       expect(Object.keys(fsMock.readConfig().channels.telegram.accounts)).toEqual(["default"]);
       // …and the gap is LOUD.
@@ -3364,42 +3326,10 @@ describe("server/agents/service", () => {
       expect(allowEntriesFor(databasePath, "default")).toEqual(["222"]);
     });
 
-    it("a barrier already held refuses with StateDbQuietError before ANY mutation (rows, CLI, env, config untouched)", async () => {
-      const { openclawDir, databasePath } = seedStateDbWithPairingRows();
-      const fsMock = buildFsMock({ initialConfig: twoAccountConfig() });
-      const writeEnvFile = vi.fn();
-      const clawCmd = vi.fn(async () => ({ ok: true, stdout: "", stderr: "" }));
-      const service = createAgentsService({
-        fs: fsMock,
-        OPENCLAW_DIR: openclawDir,
-        readEnvFile: () => [{ key: "TELEGRAM_BOT_TOKEN_ALERTS", value: "456:def" }],
-        writeEnvFile,
-        reloadEnv: vi.fn(),
-        clawCmd,
-      });
-      ({ token } = await beginStateDbQuiet({ owner: "backup", maxMs: 60_000 }));
-
-      await expect(
-        service.deleteChannelAccount({ provider: "telegram", accountId: "alerts" }),
-      ).rejects.toThrow(StateDbQuietError);
-
-      expect(clawCmd).not.toHaveBeenCalled();
-      expect(writeEnvFile).not.toHaveBeenCalled();
-      expect(Object.keys(fsMock.readConfig().channels.telegram.accounts).sort()).toEqual([
-        "alerts",
-        "default",
-      ]);
-      expect(allowEntriesFor(databasePath, "alerts")).toEqual(["111"]);
-    });
-
-    // The clear's own NON-barrier failures kept their pre-deferral contract
-    // across the move into the deferral helper: loud, but never failing a
-    // delete whose CLI/config half already ran, and never dressed up as
-    // `pairingRowsCleanupDeferred` (nothing will retry it — the operator's
-    // cue is the log line, not a flag that promises a later clear). Driven
-    // through the reachable branch: a schema-drifted pairing table answers
-    // { ok: false } from deleteChannelPairingRows.
-    it("a non-barrier failure of the pairing-row clear (schema drift) is loud, never fails the delete, is reported as FAILED (never as deferred)", async () => {
+    // A failed clear is loud, but never fails a delete whose CLI/config half
+    // already ran. Driven through the reachable branch: a schema-drifted
+    // pairing table answers { ok: false } from deleteChannelPairingRows.
+    it("a failure of the pairing-row clear (schema drift) is loud, never fails the delete, and is reported as FAILED", async () => {
       const openclawDir = fs.mkdtempSync(
         path.join(os.tmpdir(), "alphaclaw-agents-delete-drift-"),
       );
@@ -3433,16 +3363,13 @@ describe("server/agents/service", () => {
           accountId: "alerts",
         });
 
-        // The delete completed and is reported as a plain success — no
-        // deferral flag for a failure nothing will retry.
         // The delete completed (config already mutated) and the failed clear is
-        // REPORTED, never hidden behind a plain success or a "deferred" claim.
+        // REPORTED, never hidden behind a plain success.
         expect(result).toEqual({
           ok: true,
           pairingRowsCleanupFailed: true,
           pairingRowsCleanupError: expect.stringContaining("schema is unsupported"),
         });
-        expect(result.pairingRowsCleanupDeferred).toBeUndefined();
         expect(clawCmd).toHaveBeenCalledTimes(1);
         expect(writeEnvFile).toHaveBeenCalledWith([
           { key: "TELEGRAM_BOT_TOKEN", value: "123:abc" },
@@ -3450,7 +3377,7 @@ describe("server/agents/service", () => {
         expect(Object.keys(fsMock.readConfig().channels.telegram.accounts)).toEqual([
           "default",
         ]);
-        // Loud (SECURITY class — allow entries stay authorized), with the retry guidance. NOT the barrier's deferrITY line.
+        // Loud (SECURITY class — allow entries stay authorized), with the retry guidance.
         expect(errorSpy).toHaveBeenCalledWith(
           expect.stringMatching(
             // The remedy must be one that WORKS: "re-run the delete" 404s at
@@ -3470,9 +3397,8 @@ describe("server/agents/service", () => {
   });
 
   // Re-adding an id must never inherit the pairing rows a deleted account
-  // left behind (a deferred clear lost to a process death mid-hold, or the
-  // failed clear above): the add clears that provider/account's rows FIRST,
-  // as its one quiet-gated write, before the env/config writes.
+  // left behind (the failed clear above): the add clears that
+  // provider/account's rows FIRST, before the env/config writes.
   describe("createChannelAccount: stale pairing rows cleared before the add", () => {
     const seedStateDbWithPairingRows = () => {
       const openclawDir = fs.mkdtempSync(path.join(os.tmpdir(), "alphaclaw-agents-readd-"));
@@ -3545,18 +3471,6 @@ describe("server/agents/service", () => {
         token: "456:def",
         agentId: "main",
       });
-    let token = null;
-
-    beforeEach(() => {
-      resetStateDbQuietForTests();
-    });
-
-    afterEach(() => {
-      token?.release();
-      token = null;
-      resetStateDbQuietForTests();
-    });
-
     it("re-adding a deleted account's id clears its stale allow entries and pending requests (the SECURITY log's remedy works), sibling untouched", async () => {
       const { openclawDir, databasePath } = seedStateDbWithPairingRows();
       const fsMock = buildFsMock({ initialConfig: oneAccountConfig() });
@@ -3583,33 +3497,6 @@ describe("server/agents/service", () => {
           "alerts",
           "default",
         ]);
-      } finally {
-        fs.rmSync(openclawDir, { recursive: true, force: true });
-      }
-    });
-
-    it("a held backup barrier refuses the add BEFORE any mutation (StateDbQuietError → 409 upstream): no env write, no CLI, rows intact", async () => {
-      const { openclawDir, databasePath } = seedStateDbWithPairingRows();
-      const fsMock = buildFsMock({ initialConfig: oneAccountConfig() });
-      const writeEnvFile = vi.fn();
-      const clawCmd = vi.fn(async () => ({ ok: true, stdout: "", stderr: "" }));
-      const service = createAgentsService({
-        fs: fsMock,
-        OPENCLAW_DIR: openclawDir,
-        readEnvFile: () => [{ key: "TELEGRAM_BOT_TOKEN", value: "123:abc" }],
-        writeEnvFile,
-        reloadEnv: vi.fn(),
-        clawCmd,
-      });
-      ({ token } = await beginStateDbQuiet({ owner: "backup", maxMs: 60_000 }));
-      try {
-        const error = await addAlerts(service).catch((caught) => caught);
-
-        expect(error).toBeInstanceOf(StateDbQuietError);
-        expect(writeEnvFile).not.toHaveBeenCalled();
-        expect(clawCmd).not.toHaveBeenCalled();
-        expect(Object.keys(fsMock.readConfig().channels.telegram.accounts)).toEqual(["default"]);
-        expect(allowEntriesFor(databasePath, "alerts")).toEqual(["111"]);
       } finally {
         fs.rmSync(openclawDir, { recursive: true, force: true });
       }

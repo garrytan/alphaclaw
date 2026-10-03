@@ -38,7 +38,6 @@ describe("frontend/whats-next-card (E4/D14)", () => {
     const text = renderText({ channels: {} });
     expect(text).toContain("What's next");
     expect(text).toContain("Add a chat channel");
-    expect(text).toContain("Review your update channel");
     expect(text).toContain("Connect Google Workspace");
     expect(text).toContain("Hide for now");
   });
@@ -46,12 +45,12 @@ describe("frontend/whats-next-card (E4/D14)", () => {
   it("auto-hides the channel row once a channel exists", () => {
     const text = renderText({ channels: { telegram: { status: "ok" } } });
     expect(text).not.toContain("Add a chat channel");
-    expect(text).toContain("Review your update channel");
+    expect(text).toContain("Connect Google Workspace");
   });
 
-  it("uses the D14 wording: Review, not pick", () => {
+  it("no longer offers an update-channel row (OpenClaw is pinned in code)", () => {
     const text = renderText({ channels: {} });
-    expect(text).not.toContain("pick a release channel");
-    expect(text).toContain("Review your update channel");
+    expect(text).not.toContain("update channel");
+    expect(text).not.toContain("Open Upgrade");
   });
 });

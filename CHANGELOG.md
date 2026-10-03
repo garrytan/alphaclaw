@@ -5,6 +5,71 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.9.99] - 2026-10-03
+
+AlphaClaw now runs exactly the OpenClaw pinned in `package.json`, and nothing
+else. The in-app version switching and the backup/recovery machinery built
+around it are removed: AlphaClaw is tested against one OpenClaw build per
+release, so the pin in code is the version control. A newer OpenClaw ships as
+a pin bump.
+
+### Removed
+
+- **The Upgrade tab and its API.** Release channels (stable/beta/dev), the
+  version catalog and "What's new", apply/rollback/mark-good/blocklist,
+  reconcile-installed, dev source builds, the overlay store and PATH shim,
+  the run ledger, and the upgrade overseer. The `/api/openclaw/channel`,
+  `catalog`, `apply`, `rollback`, `repair`, `reconcile*`, `mark-good`,
+  `blocklist/clear`, `runs*`, `backups`, `backup-sqlite`, `backup-preflight`,
+  `backup-policy`, `recovery/cancel` and `overseer` routes are gone, and so
+  are their agent-admin operations.
+- **AlphaClaw's backup and recovery layer.** Config/database checkpoints,
+  the archive ladder, retention, restore, backup-risk consent, the state-DB
+  quiet period, gateway holds, the database-verification gate and the
+  launch-compatibility gate.
+- **Watchdog rollback paths.** Stabilization windows, acceptance holds,
+  degraded/crash-loop/exit-78 rollback, forward recovery and the
+  `degraded_pre_rollback` / `crash_loop_rollback` / `managed_operation`
+  phases. A corroborated schema, plugin or CLI crash now pauses auto-repair
+  with a notice (there is no other build to move to); a stray legacy
+  `exec-approvals.json` is still renamed and the gateway relaunched.
+- Environment variables `OPENCLAW_DOCTOR_MIGRATION_TIMEOUT`,
+  `OPENCLAW_MIGRATION_GATE`, `OPENCLAW_CATALOG_CACHE_TTL`,
+  `OPENCLAW_DEGRADED_ROLLBACK_MINUTES`, `OPENCLAW_STABILIZATION_WINDOW_HOURS`,
+  `OPENCLAW_ACCEPTANCE_HOLD`, `OPENCLAW_FORWARD_RECOVERY`,
+  `OPENCLAW_RUNTIME_RECONCILE`, `OPENCLAW_LAUNCH_COMPAT_GATE` and
+  `OPENCLAW_STATE_DB_QUIET`.
+
+### Added
+
+- **Back up now.** A Backups card on the General tab runs OpenClaw's own
+  `openclaw backup create --verify` into `<root>/backups/openclaw` and shows
+  the archive path and size (`POST`/`GET /api/openclaw/backup`). The gateway
+  keeps running.
+- **Boot migration once per pin.** The first boot of a new pin runs
+  `openclaw doctor --fix` before the gateway starts and records the version
+  in `.alphaclaw/openclaw-boot-migration.json`. A failure is reported and the
+  gateway starts anyway.
+- **One-time notice for boxes that ran ahead of the pin.** The first boot
+  retires the old channel state on every box (removes the shim, moves
+  `openclaw-channel-state.json` aside, writes `openclaw-channel-retired.json`).
+  A box that ran a beta/dev build or a stable newer than the pin gets one
+  notice naming that version and how to recover if it migrated the
+  databases; a box on an older stable just moves forward silently.
+
+### Changed
+
+- `boot-report.json` and `alphaclaw diagnose` report the declared pin, the
+  installed version and whether they diverge, the boot migration record and
+  the retired channel, instead of channel state, runs and recovery.
+- The medic and notification-routing settings live in the Watchdog tab's
+  settings.
+- The boot placeholder shows a static "updating" page; it no longer reads
+  update-run progress.
+- The operator-shell `openclaw` wrapper resolves the pinned bin from the
+  install (it was falling through to the PATH walk because `openclaw`'s
+  `package.json` is not exported).
+
 ## [0.9.98] - 2026-10-03
 
 Pins OpenClaw **2026.9.8** (npm `latest` and `beta` since 2026-10-03; 2026.9.6

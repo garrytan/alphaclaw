@@ -6,7 +6,6 @@ const { createCronService } = require("../../lib/server/cron-service");
 const express = require("express");
 const request = require("supertest");
 const { registerCronRoutes } = require("../../lib/server/routes/cron");
-const { beginStateDbQuiet, getStateDbHandleCount } = require("../../lib/server/state-db-quiet");
 
 const roots = [];
 const makeFixture = ({ version = "2026.9.5" } = {}) => {
@@ -224,7 +223,6 @@ describe("authoritative cron outcomes", () => {
     db.exec("BEGIN EXCLUSIVE");
     try {
       expect(() => service.getJobRuns({ jobId: "job-a" })).toThrow(/unavailable/);
-      expect(getStateDbHandleCount()).toBe(0);
     } finally {
       db.exec("ROLLBACK");
       db.close();
@@ -250,34 +248,6 @@ describe("authoritative cron outcomes", () => {
       expect(response.body.error).not.toContain(root);
     }
     require("../../lib/server/cron-store").closeCronStoreDb();
-    expect(getStateDbHandleCount()).toBe(0);
-  });
-
-  it("closes tracked handles before quiet, refuses all reads, and resumes on the replaced database", async () => {
-    const first = makeFixture();
-    first.insert("before", { summary: "before" });
-    first.db.close();
-    expect(first.service.getJobRuns({ jobId: "job-a" }).entries[0].summary).toBe("before");
-    expect(getStateDbHandleCount()).toBe(0);
-    const quiet = await beginStateDbQuiet({ owner: "cron-test", maxMs: 10000 });
-    try {
-      for (const url of historyUrls) {
-        const response = await request(appFor(first.service)).get(url);
-        expect(response.status).toBe(409);
-        expect(response.body.code).toBe("backup_in_progress");
-        expect(response.headers["retry-after"]).toBe("120");
-      }
-      expect(getStateDbHandleCount()).toBe(0);
-      const second = makeFixture();
-      second.insert("after", { summary: "after", storeKey: path.join(first.root, "cron", "jobs.json") });
-      second.db.close();
-      fs.renameSync(path.join(second.root, "state", "openclaw.sqlite"), path.join(first.root, "state", "openclaw.sqlite"));
-    } finally {
-      quiet.release();
-    }
-    expect(first.service.getJobRuns({ jobId: "job-a" }).entries[0].summary).toBe("after");
-    fs.unlinkSync(path.join(first.root, "state", "openclaw.sqlite"));
-    expect(() => first.service.getJobRuns({ jobId: "job-a" })).toThrow(/unavailable/);
   });
 
   it("refreshes the cached job list as well as outcomes immediately after a database swap without quiet", () => {
@@ -387,6 +357,5 @@ describe("authoritative cron outcomes", () => {
     expect(queries.every((query) => query.plan.some((line) => line.includes("idx_task_runs_runtime_source_ended")))).toBe(true);
     expect(queries.flatMap((query) => query.plan).some((line) => /^SCAN task_runs/.test(line))).toBe(false);
     expect(queries.filter((query) => !query.sql.includes("SUM(")).every((query) => query.sql.includes("LIMIT ? OFFSET ?"))).toBe(true);
-    expect(getStateDbHandleCount()).toBe(1);
   });
 });

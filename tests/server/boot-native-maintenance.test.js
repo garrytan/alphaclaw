@@ -141,9 +141,8 @@ describe("native boot maintenance composition", () => {
     expect(source).toContain('require("../boot-native-maintenance")');
     expect(source).toMatch(/runBootNativeMaintenance: \(options\) => runBootNativeMaintenance\(\{\s*\.\.\.options,\s*execFileCmd,\s*gatewayEnv,\s*\}\)/);
     expect(source).toContain("signal: bootSignal,");
-    expect(source).toMatch(/gatewayHoldActions: \{\s*signal: bootSignal,/);
     const server = fs.readFileSync(path.resolve(__dirname, "../../lib/server.js"), "utf8");
-    expect(server.slice(server.indexOf("} = registerServerRoutes({"))).toContain("bootSignal: gatewayQuiesceAbort.signal,");
+    expect(server.slice(server.indexOf("} = registerServerRoutes({"))).toContain("bootSignal: shutdownAbort.signal,");
   });
 });
 
@@ -176,8 +175,7 @@ describe("startup native maintenance admission", () => {
     deps = {
       acquireLifecycleLock: vi.fn(async () => hold),
       reportLockContentionAtBoot: vi.fn(),
-      assessLaunchCompatibilityAtBoot: vi.fn(async () => ({ compatible: true })),
-      reconcileBootConfig: vi.fn(async () => ({ status: "ok" })),
+      runBootMigration: vi.fn(async () => ({ status: "ok", ran: false })),
       normalizeBootConfig: vi.fn(),
       runBootNativeMaintenance: vi.fn((options) => runBootNativeMaintenance({
         ...options,
@@ -208,35 +206,30 @@ describe("startup native maintenance admission", () => {
     vi.useRealTimers();
   });
 
-  it("runs helpers only after admission and completed reconciliation, before gateway launch under the same lease", async () => {
+  it("runs helpers only after the doctor migration, before gateway launch under the same lease", async () => {
     let admit;
-    deps.reconcileBootConfig.mockImplementation(() => new Promise((resolve) => { admit = resolve; }));
+    deps.runBootMigration.mockImplementation(() => new Promise((resolve) => { admit = resolve; }));
     const boot = runOnboardedBootSequence(deps);
     await new Promise((resolve) => setImmediate(resolve));
     expect(execFileCmd).not.toHaveBeenCalled();
     expect(deps.startGateway).not.toHaveBeenCalled();
-    admit({ status: "ok" });
+    admit({ status: "ok", ran: true });
     await boot;
     expect(execFileCmd).toHaveBeenCalledTimes(2);
     expect(deps.runBootNativeMaintenance).toHaveBeenCalledWith({ hold, signal: expect.any(AbortSignal) });
-    expect(deps.reconcileBootConfig.mock.invocationCallOrder[0]).toBeLessThan(execFileCmd.mock.invocationCallOrder[0]);
+    expect(deps.runBootMigration.mock.invocationCallOrder[0]).toBeLessThan(execFileCmd.mock.invocationCallOrder[0]);
     expect(execFileCmd.mock.invocationCallOrder[1]).toBeLessThan(deps.startGateway.mock.invocationCallOrder[0]);
     expect(deps.startGateway.mock.invocationCallOrder[0]).toBeLessThan(hold.mock.invocationCallOrder[0]);
   });
 
-  it("only hands normalization to the reconciler so it can validate fingerprints before any config writer", async () => {
-    deps.reconcileBootConfig.mockImplementation(async ({ hold: current, normalizeBootConfig }) => {
-      expect(current).toBe(hold);
-      expect(deps.normalizeBootConfig).not.toHaveBeenCalled();
-      normalizeBootConfig();
-      return { status: "ok" };
-    });
+  it("normalizes the config under the boot lease before the doctor migration and any native helper", async () => {
     await runOnboardedBootSequence(deps);
-    expect(deps.normalizeBootConfig).toHaveBeenCalledWith({ hold });
+    expect(deps.normalizeBootConfig).toHaveBeenCalledWith({ hold, assertLease: expect.any(Function) });
+    expect(deps.normalizeBootConfig.mock.invocationCallOrder[0]).toBeLessThan(deps.runBootMigration.mock.invocationCallOrder[0]);
     expect(deps.normalizeBootConfig.mock.invocationCallOrder[0]).toBeLessThan(execFileCmd.mock.invocationCallOrder[0]);
   });
 
-  it("normalizes an existing pre-onboarding config only through admission without starting onboarded services", async () => {
+  it("normalizes an existing pre-onboarding config under the lease without starting onboarded services", async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "alphaclaw-pre-onboarding-"));
     const configPath = path.join(root, "openclaw.json");
     const stalePath = "/app/node_modules/@chrysb/alphaclaw/lib/plugin/usage-tracker";
@@ -244,23 +237,17 @@ describe("startup native maintenance admission", () => {
     const env = { OPENCLAW_CONFIG_PATH: configPath, OPENCLAW_STATE_DIR: root };
     deps.onboarded = false;
     deps.normalizeBootConfig.mockImplementation((options) => normalizeBootConfig({ ...options, env }));
-    deps.reconcileBootConfig.mockImplementation(async ({ normalizeBootConfig: normalize, operation }) => {
-      expect(fs.readFileSync(configPath, "utf8")).toContain(stalePath);
-      await normalize({ assertLease: operation.assertActive });
-      return { status: "ok" };
-    });
     try {
       await runOnboardedBootSequence(deps);
       expect(JSON.parse(fs.readFileSync(configPath, "utf8")).plugins.load.paths).toEqual(["/custom/plugin", kUsageTrackerPluginPath]);
       expect(deps.normalizeBootConfig).toHaveBeenCalledWith({ hold, assertLease: expect.any(Function) });
-      expect(deps.assessLaunchCompatibilityAtBoot.mock.invocationCallOrder[0]).toBeLessThan(deps.normalizeBootConfig.mock.invocationCallOrder[0]);
       expect(deps.normalizeBootConfig.mock.invocationCallOrder[0]).toBeLessThan(hold.mock.invocationCallOrder[0]);
-      for (const step of [deps.runBootNativeMaintenance, deps.ensureManagedExecDefaults, deps.ensureUsageTrackerPluginConfig,
+      for (const step of [deps.runBootMigration, deps.runBootNativeMaintenance, deps.ensureManagedExecDefaults, deps.ensureUsageTrackerPluginConfig,
         deps.ensureWebhookMappingIds, deps.doSyncPromptFiles, deps.reloadEnv, deps.syncChannelConfig,
         deps.ensureGatewayProxyConfig, deps.startGateway, deps.watchdog.start, deps.gmailWatchService.start]) {
         expect(step).not.toHaveBeenCalled();
       }
-      expect(deps.finalizeBootReport).toHaveBeenCalledWith(expect.objectContaining({ reconcile: { status: "ok" } }));
+      expect(deps.finalizeBootReport).toHaveBeenCalledWith({ migration: null, gatewayHeld: false });
       expect(hold).toHaveBeenCalledOnce();
       expect(getBootPhase().phase).toBe("ready");
     } finally {
@@ -268,21 +255,15 @@ describe("startup native maintenance admission", () => {
     }
   });
 
-  it.each(["compatibility", "recovery", "expired lease", "shutdown"])("keeps pre-onboarding normalization fenced by %s", async (blocker) => {
+  it.each(["expired lease", "shutdown"])("keeps pre-onboarding normalization fenced by %s", async (blocker) => {
     deps.onboarded = false;
     const controller = new AbortController();
     deps.signal = controller.signal;
-    if (blocker === "compatibility") deps.assessLaunchCompatibilityAtBoot.mockResolvedValue({ compatible: false });
-    deps.reconcileBootConfig.mockImplementation(async ({ normalizeBootConfig: normalize, operation }) => {
-      if (blocker === "recovery") return { status: "held", hold: { reason: "recovery_review" } };
-      if (blocker === "expired lease") hold.isValid.mockReturnValue(false);
-      if (blocker === "shutdown") controller.abort("shutdown");
-      operation.assertActive();
-      await normalize({ assertLease: operation.assertActive });
-      return { status: "ok" };
-    });
+    if (blocker === "expired lease") hold.isValid.mockReturnValue(false);
+    if (blocker === "shutdown") controller.abort("shutdown");
     await runOnboardedBootSequence(deps);
     expect(deps.normalizeBootConfig).not.toHaveBeenCalled();
+    expect(deps.runBootMigration).not.toHaveBeenCalled();
     expect(deps.runBootNativeMaintenance).not.toHaveBeenCalled();
     expect(deps.startGateway).not.toHaveBeenCalled();
     expect(deps.watchdog.start).not.toHaveBeenCalled();
@@ -291,53 +272,31 @@ describe("startup native maintenance admission", () => {
   });
 
   it.each([
-    ["held compatibility", { compatible: true, hold: { reason: "state_db_unverified" } }],
-    ["incompatible", { compatible: false }],
-    ["unknown compatibility", { compatible: null }],
-    ["empty compatibility", null],
-    ["missing compatible flag", {}],
-    ["throwing compatibility", "throw"],
-  ])("spawns zero helpers for %s and skips config reconciliation", async (_label, verdict) => {
-    deps.assessLaunchCompatibilityAtBoot.mockImplementation(async () => {
-      if (verdict === "throw") throw new Error("probe failed");
-      return verdict;
+    ["failed doctor migration", { status: "failed", ran: true, reason: "timed out" }],
+    ["skipped doctor migration", { status: "skipped", reason: "no_config" }],
+    ["empty doctor migration", null],
+    ["throwing doctor migration", "throw"],
+  ])("still runs the native helpers and launches the gateway after a %s", async (_label, outcome) => {
+    deps.runBootMigration.mockImplementation(async () => {
+      if (outcome === "throw") throw new Error("doctor exploded");
+      return outcome;
     });
     await runOnboardedBootSequence(deps);
-    expect(deps.reconcileBootConfig).not.toHaveBeenCalled();
-    expect(deps.normalizeBootConfig).not.toHaveBeenCalled();
-    expect(deps.ensureManagedExecDefaults).not.toHaveBeenCalled();
-    expect(execFileCmd).not.toHaveBeenCalled();
-    expect(deps.startGateway).not.toHaveBeenCalled();
+    expect(execFileCmd).toHaveBeenCalledTimes(2);
+    expect(deps.startGateway).toHaveBeenCalledTimes(1);
+    expect(deps.finalizeBootReport).toHaveBeenCalledWith(expect.objectContaining({ gatewayHeld: false }));
   });
 
-  it.each([
-    ["held reconciliation", { status: "held", hold: { reason: "migration_required" } }],
-    ["stale recovery intent", { status: "held", hold: { reason: "recovery_intent_stale" } }],
-    ["empty reconciliation", null],
-    ["skipped reconciliation", { status: "skipped", reason: "binary-unresolved" }],
-    ["failed reconciliation", { status: "error" }],
-    ["throwing reconciliation", "throw"],
-  ])("spawns zero helpers for %s", async (_label, verdict) => {
-    deps.reconcileBootConfig.mockImplementation(async () => {
-      if (verdict === "throw") throw new Error("reconcile failed");
-      return verdict;
-    });
-    await runOnboardedBootSequence(deps);
-    expect(execFileCmd).not.toHaveBeenCalled();
-    expect(deps.startGateway).not.toHaveBeenCalled();
-    expect(deps.ensureManagedExecDefaults).not.toHaveBeenCalled();
-    expect(deps.normalizeBootConfig).not.toHaveBeenCalled();
-    expect(deps.finalizeBootReport).toHaveBeenCalledWith(expect.objectContaining({ gatewayHeld: true }));
-  });
-
-  it("spawns zero helpers when reconciliation outlives the boot lease", async () => {
-    deps.reconcileBootConfig.mockImplementation(async () => {
+  it("spawns zero helpers when the doctor migration outlives the boot lease", async () => {
+    deps.runBootMigration.mockImplementation(async () => {
       hold.isValid.mockReturnValue(false);
-      return { status: "ok" };
+      return { status: "ok", ran: true };
     });
     await runOnboardedBootSequence(deps);
     expect(execFileCmd).not.toHaveBeenCalled();
+    expect(deps.ensureManagedExecDefaults).not.toHaveBeenCalled();
     expect(deps.startGateway).not.toHaveBeenCalled();
+    expect(deps.finalizeBootReport).toHaveBeenCalledWith(expect.objectContaining({ gatewayHeld: true }));
   });
 
   it("the real lifecycle expiry cancels the active helper and forbids the second helper and gateway launch", async () => {
