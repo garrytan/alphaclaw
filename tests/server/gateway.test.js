@@ -59,6 +59,11 @@ const kAtomicMockFd = 987654321;
 const mockAtomicConfigWrites = (onWrite = () => {}) => {
   const pending = new Map();
   const configWrite = vi.fn(onWrite);
+  // The real shared file lock opens `<OPENCLAW_DIR>/openclaw.json.lock` on
+  // disk, and mkdirSync is a no-op below — so the directory must exist
+  // before the mock (it used to be created as a side effect of earlier
+  // restart tests; a fresh checkout without ~/.alphaclaw failed here).
+  originalMkdirSync(OPENCLAW_DIR, { recursive: true });
   fs.mkdirSync = vi.fn();
   fs.writeFileSync = vi.fn((targetPath, contents) => {
     pending.set(String(targetPath), contents);
